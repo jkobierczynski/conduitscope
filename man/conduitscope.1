@@ -1,6 +1,6 @@
 .TH CONDUITSCOPE 1 "2026" "conduitscope 0.1.0" "User Commands"
 .SH NAME
-conduitscope \- decode Modbus/TCP, DNP3, IEC 60870-5-104, and S7comm/COTP traffic from offline pcap/pcapng captures
+conduitscope \- decode Modbus/TCP, DNP3, IEC 60870-5-104, S7comm/COTP, and EtherNet/IP (CIP explicit messaging) traffic from offline pcap/pcapng captures
 .SH SYNOPSIS
 .B conduitscope
 [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-color\fR|\fB\-\-color\fR] [\fB\-\-log\-file\fR \fIFILE\fR] \fICOMMAND\fR [\fIOPTIONS\fR]
@@ -8,8 +8,9 @@ conduitscope \- decode Modbus/TCP, DNP3, IEC 60870-5-104, and S7comm/COTP traffi
 .B conduitscope
 reads a pcap or pcapng capture file, or optionally a live network
 interface (see \fBLIVE CAPTURE\fR below), and decodes Modbus/TCP, DNP3,
-IEC 60870-5-104 (TCP port 2404), and S7comm (Siemens S7 PLC protocol, over
-TPKT/COTP, TCP port 102) traffic found inside its TCP streams, and checks
+IEC 60870-5-104 (TCP port 2404), S7comm (Siemens S7 PLC protocol, over
+TPKT/COTP, TCP port 102), and EtherNet/IP (CIP explicit messaging, TCP port
+44818) traffic found inside its TCP streams, and checks
 decoded traffic against a
 zone-and-conduit segmentation policy (IEC 62443 / NIS2 style work) via
 \fBpolicy validate\fR.
@@ -74,12 +75,13 @@ Write output here instead of stdout.
 .BR \-f ", " \-\-format " " {text,json,csv}
 Output format. Default: text.
 .TP
-.B \-\-protocol {auto,modbus,dnp3,iec104,s7comm}
-Restrict decoding to one protocol. Default: auto (tries all four,
-independent of port number; IEC 104 is tried before Modbus, since an
-IEC 104 I-format APDU with sequence numbers 0/0 -- universal at session
-start -- coincidentally also matches Modbus's MBAP-header detection; see
-\fBdocs/MANUAL.md\fR's PROTOCOL DETECTION section).
+.B \-\-protocol {auto,modbus,dnp3,iec104,s7comm,enip}
+Restrict decoding to one protocol. Default: auto (tries all five,
+independent of port number; EtherNet/IP is tried first, then IEC 104 before
+Modbus, since an IEC 104 I-format APDU with sequence numbers 0/0 --
+universal at session start -- coincidentally also matches Modbus's
+MBAP-header detection; see \fBdocs/MANUAL.md\fR's PROTOCOL DETECTION
+section).
 .TP
 .B \-\-modbus\-port \fIPORT\fR
 Additional TCP port to treat as expected for Modbus. Repeatable. Does not
@@ -93,6 +95,9 @@ Same as \fB\-\-modbus\-port\fR, for IEC 60870-5-104. Repeatable.
 .TP
 .B \-\-s7comm\-port \fIPORT\fR
 Same as \fB\-\-modbus\-port\fR, for COTP/S7comm. Repeatable.
+.TP
+.B \-\-enip\-port \fIPORT\fR
+Same as \fB\-\-modbus\-port\fR, for EtherNet/IP. Repeatable.
 .TP
 .B \-\-max\-packets \fIN\fR
 Stop after decoding this many packets. Default: 0 (unlimited). With
@@ -191,7 +196,7 @@ Applies to \fBdecode\fR's \fBtext\fR format only (not \fBjson\fR/\fBcsv\fR,
 and not \fBpolicy validate\fR's report, which stays plain text by design --
 it's meant to be diffed/archived/piped as an audit artifact). The
 \fB[protocol]\fR tag is colored per protocol: cyan for Modbus, magenta for
-DNP3, green for IEC 104, blue for S7comm/COTP, dim for everything else
+DNP3, green for IEC 104, blue for S7comm/COTP, yellow for EtherNet/IP, dim for everything else
 recognized but not OT\-specific. A Modbus exception response's summary, and a
 \fBparse\-error\fR packet's whole line, are bold red. Notes are dim.
 .PP
@@ -223,7 +228,8 @@ Blocks, and custom/vendor block types) are skipped rather than decoded --
 no mainstream capture tool writes these, so this essentially never matters
 in practice; general TCP stream reassembly is implemented but
 narrowly scoped: a Modbus PDU, a single DNP3 data-link frame's own
-header/blocks, or a TPKT/COTP frame split across TCP segments IS
+header/blocks, an IEC 104 APDU, an EtherNet/IP encapsulation message, or a
+TPKT/COTP frame split across TCP segments IS
 reassembled (per directional TCP flow, using each protocol's own declared
 length); authoritative (transaction-ID + TCP-session, non-heuristic) Modbus
 request/response pairing is layered on top of the always-on payload-shape
@@ -246,7 +252,14 @@ cross-frame reassembly (one I-format APDU always carries exactly one ASDU)
 but its ASDU type-ID decode table, like DNP3's, covers only a "first pass"
 set of common monitoring/command/setpoint type IDs -- an ASDU outside that
 set is still identified by type name and structurally located, just not
-value-decoded; Modbus request/response
+value-decoded; EtherNet/IP's CIP explicit-message value decoding covers a
+"first pass" set of generic common/Connection-Manager services plus,
+specifically when the request path addresses a Rockwell Logix5000 named
+tag (not a class/instance path), the Symbol-object tag services -- a
+class/instance-addressed request reusing one of those same service codes
+is shown structurally instead, and NOP (command 0x0000) is deliberately
+not recognized as a command at all (see \fBdocs/MANUAL.md\fR's LIMITATIONS
+and PROTOCOL COVERAGE); Modbus request/response
 classification falls back to a payload-shape heuristic only when
 authoritative pairing can't be done (no matching request on this session);
 S7comm item-level addressing (inside Read Var / Write Var) is fully
@@ -298,6 +311,14 @@ Summarize IEC 104 ASDUs (type and cause of transmission) from a JSON decode:
 .EX
 conduitscope decode \-r capture.pcap \-\-protocol iec104 \-f json \e
   | jq \-r '.[] | select(.iec104_asdu_type) | "\e(.src_ip) \-> \e(.dst_ip): \e(.iec104_asdu_type) (\e(.iec104_cot))"'
+.EE
+.RE
+.PP
+Fingerprint EtherNet/IP devices that answered a ListIdentity request:
+.RS
+.EX
+conduitscope decode \-r capture.pcap \-\-protocol enip \-f json \e
+  | jq \-r '.[] | select((.enip_command == "ListIdentity") and (.summary | contains("identity:"))) | .src_ip'
 .EE
 .RE
 .PP

@@ -1,7 +1,7 @@
 # conduitscope
 
-`conduitscope` decodes Modbus/TCP, DNP3, IEC 60870-5-104, and S7comm/COTP (Siemens S7 PLC
-protocol) traffic from offline pcap/pcapng captures, and checks it against a zone/conduit segmentation
+`conduitscope` decodes Modbus/TCP, DNP3, IEC 60870-5-104, S7comm/COTP (Siemens S7 PLC
+protocol), and EtherNet/IP (CIP explicit messaging) traffic from offline pcap/pcapng captures, and checks it against a zone/conduit segmentation
 policy. It's an OT/ICS conduit-auditing tool: `decode`/`info` give you reliable
 protocol decoding and a stats view, and `policy validate` maps that decoded traffic
 against an IEC 62443-style zone/conduit model (for NIS2-flavored compliance work) --
@@ -31,8 +31,8 @@ Groundwork / v0.1.0. What works right now:
 
 - Classic pcap and pcapng file reading, auto-detected (Ethernet and raw-IP
   link types; IPv4; TCP, with PDU/frame-level reassembly across TCP segments
-  for Modbus, DNP3 data-link frames, IEC 104 APDUs, and TPKT/COTP -- see below and
-  docs/MANUAL.md)
+  for Modbus, DNP3 data-link frames, IEC 104 APDUs, EtherNet/IP encapsulation
+  messages, and TPKT/COTP -- see below and docs/MANUAL.md)
 - Full Modbus/TCP decoding for the read (1-4), write-single (5-6), and
   write-multiple (15-16) function code families, plus exception responses.
   Every response also gets authoritative (MBAP transaction-ID + TCP-session,
@@ -120,12 +120,42 @@ Groundwork / v0.1.0. What works right now:
   encodings, including the public Industroyer2 capture (real, attributed
   nation-state ICS malware traffic against a live RTU) -- see
   tests/real_captures/iec104/ATTRIBUTION.md.
+- EtherNet/IP (TCP port 44818) + CIP explicit messaging: the 24-byte
+  encapsulation header (all nine standard commands except NOP -- deliberately
+  excluded, see below), a ListIdentity response's device-fingerprinting
+  fields (vendor/device type/product code/revision/serial/product name),
+  Common Packet Format item parsing for SendRRData/SendUnitData, and a
+  "first pass" CIP explicit-message decode covering the generic common
+  services (Get/Set_Attribute(_Single/List/All), Reset, Multiple_Service_
+  Packet -- fully recursive), Connection Manager's Unconnected_Send (also
+  recursive, decoding its embedded message and route path) and Forward_
+  Open/Close, and, specifically when the request path addresses a Rockwell
+  Logix5000 named tag (an ANSI Extended Symbol segment, `0x91`) rather than
+  a class/instance path, full type+value decoding of Read_Tag/Write_Tag(
+  _Fragmented) and Read_Modify_Write_Tag. That symbolic-path gating is a
+  real-world-motivated scoping decision, not a simplification for its own
+  sake: a real capture used to validate this decoder shows the exact same
+  service code (0x4C) meaning "Read_Tag" against a named tag and something
+  else entirely against a vendor-specific object class -- see
+  tests/real_captures/enip/ATTRIBUTION.md. NOP (command `0x0000`) is
+  deliberately not recognized as a command at all: its all-zero-bytes shape
+  was found, via real-capture regression testing, to false-positive against
+  unrelated malformed/padded traffic -- the same reasoning already applied
+  once before for Modbus's own function-code-0 exclusion. EtherNet/IP
+  detection runs *first* in Auto-mode dispatch (its own dedicated port plus
+  three independent structural checks make it a strong signal, and trying it
+  first costs nothing). Validated against two real captures -- a real
+  Rockwell 1756-ENBT/A ControlLogix bridge module's ListIdentity exchange,
+  and a larger real industrial-control-system capture dominated by
+  Multiple_Service_Packet/Unconnected_Send/Read_Modify_Write_Tag traffic --
+  see tests/real_captures/enip/ATTRIBUTION.md.
 - IPv4 payload is clamped to the header's own `total_length` field, so
   Ethernet's minimum-frame-size padding on short packets (bare ACKs, mostly)
   never gets misreported as phantom TCP payload -- found and fixed against a
   real capture, not just synthetic traffic
 - General TCP stream reassembly at the PDU/frame level: a Modbus MBAP
-  message, a DNP3 data-link frame, an IEC 104 APDU, or a TPKT/COTP frame
+  message, a DNP3 data-link frame, an IEC 104 APDU, an EtherNet/IP
+  encapsulation message, or a TPKT/COTP frame
   split across two or more TCP segments is buffered per directional flow and decoded once
   complete, using each protocol's own declared-length field to know how many
   bytes to wait for. Resyncs rather than reorders on capture gaps, and trims
@@ -226,12 +256,13 @@ that runs it -- the SDK used at build time only supplies headers/import librarie
 ## Quick start
 
 ```sh
-# Generate synthetic Modbus/TCP, DNP3, IEC 104, and S7comm/COTP captures and decode them
-# (no live traffic needed):
+# Generate synthetic Modbus/TCP, DNP3, IEC 104, S7comm/COTP, and EtherNet/IP captures and
+# decode them (no live traffic needed):
 python3 tools/make_sample_pcap.py
 build/conduitscope decode -r tests/sample_modbus.pcap
 build/conduitscope decode -r tests/sample_s7comm.pcap --stats
 build/conduitscope decode -r tests/sample_iec104.pcap
+build/conduitscope decode -r tests/sample_enip.pcap
 build/conduitscope decode -r tests/sample_modbus.pcap --format json
 build/conduitscope info -r tests/sample_modbus.pcap
 
@@ -245,7 +276,7 @@ To decode traffic you've actually captured, e.g. from a Modbus simulator such as
 [4SICS ICS pcaps](https://www.netresec.com/?page=PCAP4SICS):
 
 ```sh
-tcpdump -i <iface> -w capture.pcap port 502 or port 20000 or port 2404 or port 102
+tcpdump -i <iface> -w capture.pcap port 502 or port 20000 or port 2404 or port 102 or port 44818
 build/conduitscope decode -r capture.pcap
 ```
 
@@ -254,7 +285,7 @@ intermediate file and check traffic in real time:
 
 ```sh
 build/conduitscope interfaces                                    # list capturable interfaces
-build/conduitscope decode -i eth0 --filter "port 502 or port 2404 or port 102" --duration 60
+build/conduitscope decode -i eth0 --filter "port 502 or port 2404 or port 102 or port 44818" --duration 60
 build/conduitscope policy validate -i eth0 --policy tests/policies/compliant.yaml --duration 60
 # or just Ctrl+C to stop either one early -- both still print whatever was captured so far
 ```

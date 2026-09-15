@@ -29,6 +29,7 @@ add_library(conduitscope_core STATIC
   src/modbus.cpp
   src/dnp3.cpp
   src/iec104.cpp
+  src/enip.cpp
   src/cotp.cpp
   src/s7comm.cpp
   src/decoder.cpp
@@ -567,6 +568,86 @@ add_test(NAME real_iec104_industroyer2_double_command_decoded
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/iec104/industroyer2_station1.pcap" --format text)
 set_tests_properties(real_iec104_industroyer2_double_command_decoded PROPERTIES
   PASS_REGULAR_EXPRESSION "C_DC_NA_1 \\(Double command\\) COT=activation confirmation \\[NEG\\] CASDU=1 objects=1")
+
+# --------------------------------------------------------------------------
+# EtherNet/IP + CIP explicit messaging (synthetic, tests/sample_enip.pcap): a RegisterSession/
+# UnRegisterSession handshake, a ListIdentity request/response (device-fingerprinting fields), and
+# a symbolic (ANSI Extended Symbol segment 0x91) Read_Tag/Write_Tag round trip -- see
+# tools/make_sample_pcap.py's build_enip_sample for the exact byte layout each assertion below is
+# checking.
+# --------------------------------------------------------------------------
+add_test(NAME enip_register_session_handshake_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enip.pcap" --format text)
+set_tests_properties(enip_register_session_handshake_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[enip\\]  RegisterSession; protocol version 1, options flags 0x0000[^\n]*\n.*\\[enip\\]  RegisterSession; protocol version 1, options flags 0x0000")
+
+add_test(NAME enip_list_identity_response_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enip.pcap" --format text)
+set_tests_properties(enip_list_identity_response_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "ListIdentity; identity: vendor=1 device_type=12 product_code=54 rev=2\\.1 serial=0x1337ab name=\"Conduit-ENIP-Sample\"")
+
+add_test(NAME enip_symbolic_read_tag_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enip.pcap")
+set_tests_properties(enip_symbolic_read_tag_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"enip_cip_path\": \"Pump1_Speed\",\n    \"enip_cip_values\": \\[\"element_count=1\"\\]")
+
+add_test(NAME enip_symbolic_read_tag_response_value_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enip.pcap")
+set_tests_properties(enip_symbolic_read_tag_response_value_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"enip_cip_values\": \\[\"type=DINT\", \"42\"\\]")
+
+add_test(NAME enip_symbolic_write_tag_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enip.pcap" --format text)
+set_tests_properties(enip_symbolic_write_tag_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[enip\\]  SendRRData; Write_Tag request path=Pump1_Speed[^\n]*\n.*\\[enip\\]  SendRRData; Write_Tag response: Success")
+
+add_test(NAME enip_unregister_session_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enip.pcap" --format text)
+set_tests_properties(enip_unregister_session_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[enip\\]  UnRegisterSession")
+
+# Regression fixture for the NOP-exclusion fix (see enip_command_name's comment in enip.cpp and
+# tests/real_captures/enip/ATTRIBUTION.md): an all-zero 24-byte buffer -- exactly what a NOP
+# encapsulation message looks like on the wire -- sent on EtherNet/IP's own port must NOT be
+# classified as enip.
+add_test(NAME enip_nop_not_detected
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enip_nop_precedence.pcap" --format text)
+set_tests_properties(enip_nop_not_detected PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[tcp\\]  TCP payload of 24 byte\\(s\\) on port 52001->44818 did not match EtherNet/IP, IEC 104, Modbus, DNP3, or COTP/S7comm")
+
+# --------------------------------------------------------------------------
+# Real-world EtherNet/IP captures -- see tests/real_captures/enip/ATTRIBUTION.md for provenance.
+# Both sourced from the ITI/ICS-Security-Tools public pcap collection: a real Rockwell 1756-ENBT/A
+# ControlLogix bridge module's ListIdentity exchange, and a larger real industrial control system
+# capture (trimmed for fixture size) dominated by Multiple_Service_Packet/Unconnected_Send/
+# Read_Modify_Write_Tag traffic polling a vendor-specific object.
+# --------------------------------------------------------------------------
+set(ENIP_REAL_CAPTURES
+  enip_list_identity
+  ethernetip_cip_explicit_messaging
+)
+# Same baseline regression guard as the other protocols' real-capture loops above: must never
+# crash the parser or exit non-zero, independent of what it does or doesn't manage to decode.
+foreach(capture ${ENIP_REAL_CAPTURES})
+  add_test(NAME real_enip_${capture}_does_not_crash
+    COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/enip/${capture}.pcap" --format json)
+endforeach()
+
+# The ListIdentity capture: a real ControlLogix bridge module's identity response -- confirms the
+# decoder against an independent device's actual wire encoding, not just the synthetic fixture's
+# hand-constructed bytes.
+add_test(NAME real_enip_list_identity_response_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/enip/enip_list_identity.pcap" --format text)
+set_tests_properties(real_enip_list_identity_response_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[enip\\]  ListIdentity; identity: vendor=")
+
+# The larger CIP explicit-messaging capture: real Multiple_Service_Packet / Unconnected_Send /
+# Read_Modify_Write_Tag traffic -- confirms the recursive envelope decoding against real-world
+# nesting, not just the synthetic fixture's single-level messages.
+add_test(NAME real_enip_multiple_service_packet_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/enip/ethernetip_cip_explicit_messaging.pcap" --format text)
+set_tests_properties(real_enip_multiple_service_packet_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "Multiple_Service_Packet")
 
 # --------------------------------------------------------------------------
 # Real-world S7comm/COTP captures -- see tests/real_captures/s7comm/ATTRIBUTION.md

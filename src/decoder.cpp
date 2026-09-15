@@ -7,6 +7,7 @@
 #include "conduitscope/byteio.hpp"
 #include "conduitscope/cotp.hpp"
 #include "conduitscope/dnp3.hpp"
+#include "conduitscope/enip.hpp"
 #include "conduitscope/iec104.hpp"
 #include "conduitscope/ipv4.hpp"
 #include "conduitscope/link_layer.hpp"
@@ -250,6 +251,8 @@ bool Decoder::reassemble_tcp_payload(const TcpSegment& tcp, const std::string& f
 
     bool want_iec104 = options_.protocol_filter == ProtocolFilter::Auto ||
                         options_.protocol_filter == ProtocolFilter::Iec104Only;
+    bool want_enip = options_.protocol_filter == ProtocolFilter::Auto ||
+                      options_.protocol_filter == ProtocolFilter::EnipOnly;
     bool want_modbus = options_.protocol_filter == ProtocolFilter::Auto ||
                         options_.protocol_filter == ProtocolFilter::ModbusOnly;
     bool want_dnp3 = options_.protocol_filter == ProtocolFilter::Auto ||
@@ -257,7 +260,13 @@ bool Decoder::reassemble_tcp_payload(const TcpSegment& tcp, const std::string& f
     bool want_s7comm = options_.protocol_filter == ProtocolFilter::Auto ||
                         options_.protocol_filter == ProtocolFilter::S7commOnly;
 
-    // IEC104 is checked first, ahead of Modbus, even though Modbus has been in this dispatch
+    // EtherNet/IP is checked first: its own dedicated TCP port (44818, no overlap with the other
+    // four protocols) plus three independent structural checks (a 9-value command enum, a
+    // 7-value status enum, and a reserved-must-be-0 options field -- see try_parse_enip's header
+    // comment in enip.hpp) make it, if anything, a stronger signal than IEC104's own -- so it
+    // costs nothing to try first and is the safest place for it.
+    //
+    // IEC104 is checked next, ahead of Modbus, even though Modbus has been in this dispatch
     // chain the longest -- see try_parse_iec104_apci's header comment for the collision this
     // avoids: an I-format APDU with N(S)=N(R)=0 (common very early in a session) can otherwise
     // read as a plausible Modbus/TCP MBAP header (protocol-id==0, mbap_length==0) by coincidence.
@@ -268,7 +277,13 @@ bool Decoder::reassemble_tcp_payload(const TcpSegment& tcp, const std::string& f
     // (see modbus.cpp's function-code-0 check).
     std::optional<size_t> declared;
     std::string which;
-    if (want_iec104) {
+    if (want_enip) {
+        if (auto d = enip_declared_length(candidate)) {
+            declared = d;
+            which = "EtherNet/IP encapsulation message";
+        }
+    }
+    if (!declared && want_iec104) {
         if (auto d = iec104_apdu_declared_length(candidate)) {
             declared = d;
             which = "IEC 104 APDU";
@@ -529,6 +544,8 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
 
         bool want_iec104 = options_.protocol_filter == ProtocolFilter::Auto ||
                             options_.protocol_filter == ProtocolFilter::Iec104Only;
+        bool want_enip = options_.protocol_filter == ProtocolFilter::Auto ||
+                          options_.protocol_filter == ProtocolFilter::EnipOnly;
         bool want_modbus = options_.protocol_filter == ProtocolFilter::Auto ||
                             options_.protocol_filter == ProtocolFilter::ModbusOnly;
         bool want_dnp3 = options_.protocol_filter == ProtocolFilter::Auto ||
@@ -536,8 +553,68 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
         bool want_s7comm = options_.protocol_filter == ProtocolFilter::Auto ||
                             options_.protocol_filter == ProtocolFilter::S7commOnly;
 
-        // Tried first, ahead of Modbus -- see the matching comment in reassemble_tcp_payload
-        // above for the collision this dispatch ordering avoids.
+        // Tried first -- see the matching comment in reassemble_tcp_payload above for why
+        // EtherNet/IP's own structural checks are strong enough that dispatch order doesn't
+        // matter for it the way it does for IEC104-vs-Modbus, but trying it first costs nothing.
+        if (want_enip) {
+            if (auto frame = try_parse_enip(effective_payload)) {
+                out.protocol = "enip";
+                out.summary = frame->summary;
+                out.enip_command_name = frame->header.command_name;
+                for (const auto& n : frame->notes) out.notes.push_back(n);
+
+                constexpr size_t kMaxCipValues = 50;
+                auto merge_cip = [&](const EnipFrame& f, bool is_first_message) {
+                    if (!f.has_cip) return;
+                    if (is_first_message) {
+                        out.enip_has_cip = true;
+                        out.enip_cip_is_response = f.cip.is_response;
+                        out.enip_cip_service_name = f.cip.service_name;
+                        out.enip_cip_path = f.cip.path.summary;
+                        out.enip_cip_status_name = f.cip.status_name;
+                    }
+                    for (const auto& n : f.cip.notes) out.notes.push_back(n);
+                    for (const auto& v : f.cip.values) {
+                        if (out.enip_cip_values.size() >= kMaxCipValues) break;
+                        out.enip_cip_values.push_back(v);
+                    }
+                };
+                merge_cip(*frame, /*is_first_message=*/true);
+
+                // Like IEC104/DNP3, one encapsulation message is small and it's normal for a
+                // sender or the OS to coalesce several into one TCP segment before flushing.
+                constexpr size_t kMaxEnipMessagesPerPayload = 50;
+                size_t offset = frame->wire_length;
+                size_t message_count = 1;
+                while (offset < effective_payload.size() && message_count < kMaxEnipMessagesPerPayload) {
+                    ByteSpan rest = effective_payload.from(offset);
+                    auto next = try_parse_enip(rest);
+                    if (!next) break;  // remaining bytes aren't another EtherNet/IP message -- stop, don't guess
+                    ++message_count;
+                    std::string note = "additional EtherNet/IP message " + std::to_string(message_count) +
+                                        " found in the same TCP payload at byte offset " + std::to_string(offset) +
+                                        " (coalesced by the sender/OS): " + next->summary;
+                    out.notes.push_back(note);
+                    merge_cip(*next, /*is_first_message=*/false);
+                    offset += next->wire_length;
+                }
+                if (message_count >= kMaxEnipMessagesPerPayload) {
+                    out.notes.push_back("stopped after " + std::to_string(kMaxEnipMessagesPerPayload) +
+                                         " EtherNet/IP message(s) in this one TCP payload, more may remain "
+                                         "(safety cap)");
+                }
+
+                bool expected_port = port_in(tcp.src_port, ENIP_TCP_PORT, options_.extra_enip_ports) ||
+                                      port_in(tcp.dst_port, ENIP_TCP_PORT, options_.extra_enip_ports);
+                if (!expected_port) {
+                    out.notes.push_back("seen on TCP port " + std::to_string(tcp.src_port) + "->" +
+                                         std::to_string(tcp.dst_port) +
+                                         ", which is not a configured/standard EtherNet/IP port (44818)");
+                }
+                return out;
+            }
+        }
+
         if (want_iec104) {
             if (auto apci = try_parse_iec104_apci(effective_payload)) {
                 out.protocol = "iec104";
@@ -835,7 +912,7 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
         out.protocol = "tcp";
         std::ostringstream s;
         s << "TCP payload of " << effective_payload.size() << " byte(s) on port " << tcp.src_port << "->"
-          << tcp.dst_port << " did not match IEC 104, Modbus, DNP3, or COTP/S7comm";
+          << tcp.dst_port << " did not match EtherNet/IP, IEC 104, Modbus, DNP3, or COTP/S7comm";
         out.summary = s.str();
         return out;
 

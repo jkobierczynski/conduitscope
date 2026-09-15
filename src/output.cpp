@@ -58,6 +58,7 @@ constexpr const char* kCyan = "\033[36m";
 constexpr const char* kMagenta = "\033[35m";
 constexpr const char* kBlue = "\033[34m";
 constexpr const char* kGreen = "\033[32m";
+constexpr const char* kYellow = "\033[33m";
 
 // Color for a packet's "[protocol]" tag -- picked so a mixed-protocol capture scans quickly by
 // eye, not for any deeper meaning. parse-error is the one exception: it gets the same "something
@@ -69,6 +70,7 @@ const char* protocol_tag_color(const std::string& protocol) {
     if (protocol == "s7comm") return kBlue;
     if (protocol == "cotp") return kBlue;  // recognized TPKT/COTP framing, no S7comm inside yet
     if (protocol == "iec104") return kGreen;
+    if (protocol == "enip") return kYellow;
     if (protocol == "parse-error") return kBoldRed;
     return kDim;  // tcp / non-tcp / non-ip / unsupported-link: recognized, nothing OT-specific
 }
@@ -171,6 +173,27 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
         }
         out_ << "],\n";
     }
+    if (p.protocol == "enip") {
+        out_ << "    \"enip_command\": \"" << json_escape(p.enip_command_name) << "\",\n";
+    }
+    if (p.enip_has_cip) {
+        out_ << "    \"enip_cip_is_response\": " << (p.enip_cip_is_response ? "true" : "false") << ",\n";
+        out_ << "    \"enip_cip_service\": \"" << json_escape(p.enip_cip_service_name) << "\",\n";
+        if (!p.enip_cip_path.empty()) {
+            out_ << "    \"enip_cip_path\": \"" << json_escape(p.enip_cip_path) << "\",\n";
+        }
+        if (!p.enip_cip_status_name.empty()) {
+            out_ << "    \"enip_cip_status\": \"" << json_escape(p.enip_cip_status_name) << "\",\n";
+        }
+    }
+    if (!p.enip_cip_values.empty()) {
+        out_ << "    \"enip_cip_values\": [";
+        for (size_t i = 0; i < p.enip_cip_values.size(); ++i) {
+            if (i != 0) out_ << ", ";
+            out_ << "\"" << json_escape(p.enip_cip_values[i]) << "\"";
+        }
+        out_ << "],\n";
+    }
     out_ << "    \"notes\": [";
     for (size_t i = 0; i < p.notes.size(); ++i) {
         if (i != 0) out_ << ", ";
@@ -216,6 +239,10 @@ void StatsWriter::write_packet(const DecodedPacket& p) {
     if (p.protocol == "iec104" && p.iec104_has_asdu) {
         iec104_asdu_type_counts_[p.iec104_asdu_type_name]++;
     }
+    if (p.protocol == "enip") {
+        enip_command_counts_[p.enip_command_name]++;
+        if (p.enip_has_cip) enip_cip_service_counts_[p.enip_cip_service_name]++;
+    }
     if (!has_ts_) {
         first_ts_ = last_ts_ = p.timestamp;
         has_ts_ = true;
@@ -259,6 +286,18 @@ void StatsWriter::print_summary(std::ostream& out) const {
     if (!iec104_asdu_type_counts_.empty()) {
         out << "iec104 asdu types:\n";
         for (const auto& [name, count] : iec104_asdu_type_counts_) {
+            out << "  " << std::left << std::setw(60) << name << count << "\n";
+        }
+    }
+    if (!enip_command_counts_.empty()) {
+        out << "enip encapsulation commands:\n";
+        for (const auto& [name, count] : enip_command_counts_) {
+            out << "  " << std::left << std::setw(40) << name << count << "\n";
+        }
+    }
+    if (!enip_cip_service_counts_.empty()) {
+        out << "enip cip services:\n";
+        for (const auto& [name, count] : enip_cip_service_counts_) {
             out << "  " << std::left << std::setw(60) << name << count << "\n";
         }
     }

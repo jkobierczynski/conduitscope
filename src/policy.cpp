@@ -260,10 +260,11 @@ Policy parse_policy_text(const std::string& text, const std::string& source_name
         }
         for (const auto& p : proto_list) {
             std::string lower = to_lower(p.text);
-            if (lower != "modbus" && lower != "dnp3" && lower != "s7comm" && lower != "iec104" && lower != "any") {
+            if (lower != "modbus" && lower != "dnp3" && lower != "s7comm" && lower != "iec104" &&
+                lower != "enip" && lower != "any") {
                 fail(source_name, p.line,
                      "conduit '" + c.name + "': unknown protocol '" + p.text +
-                         "' (expected one of: modbus, dnp3, s7comm, iec104, any)");
+                         "' (expected one of: modbus, dnp3, s7comm, iec104, enip, any)");
             }
             c.protocols.push_back(lower);
         }

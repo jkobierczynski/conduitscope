@@ -13,6 +13,7 @@
 #include "conduitscope/byteio.hpp"
 #include "conduitscope/cotp.hpp"
 #include "conduitscope/dnp3.hpp"
+#include "conduitscope/enip.hpp"
 #include "conduitscope/iec104.hpp"
 #include "conduitscope/modbus.hpp"
 #include "conduitscope/pcap_reader.hpp"
@@ -21,25 +22,28 @@
 namespace conduitscope {
 
 enum class ProtocolFilter {
-    Auto,         // opportunistically detect IEC104/Modbus/DNP3/S7comm regardless of port
+    Auto,         // opportunistically detect IEC104/Modbus/DNP3/S7comm/EtherNet-IP regardless of port
     ModbusOnly,   // only attempt Modbus decoding
     Dnp3Only,     // only attempt DNP3 decoding
     S7commOnly,   // only attempt TPKT/COTP/S7comm decoding
     Iec104Only,   // only attempt IEC 60870-5-104 decoding
+    EnipOnly,     // only attempt EtherNet/IP (CIP explicit messaging) decoding
 };
 
 struct DecodeOptions {
     ProtocolFilter protocol_filter = ProtocolFilter::Auto;
     // Additional ports to treat as "expected" for each protocol, beyond the
     // IANA-registered defaults (502 for Modbus, 20000 for DNP3, 2404 for
-    // IEC 104). This does NOT gate detection in Auto mode (detection is
-    // payload-shape based) -- it only changes whether the decoded output
-    // calls a port "standard" or flags it as unexpected, which is itself a
-    // useful signal when auditing a conduit against a zone policy.
+    // IEC 104, 44818 for EtherNet/IP). This does NOT gate detection in Auto
+    // mode (detection is payload-shape based) -- it only changes whether the
+    // decoded output calls a port "standard" or flags it as unexpected,
+    // which is itself a useful signal when auditing a conduit against a
+    // zone policy.
     std::vector<uint16_t> extra_modbus_ports;
     std::vector<uint16_t> extra_dnp3_ports;
     std::vector<uint16_t> extra_s7comm_ports;
     std::vector<uint16_t> extra_iec104_ports;
+    std::vector<uint16_t> extra_enip_ports;
     // If true, a parse failure at the Ethernet/IPv4/TCP layer is rethrown to
     // the caller instead of being recorded as a per-packet "parse-error"
     // result. Off by default so one malformed packet doesn't abort decoding
@@ -67,7 +71,7 @@ struct DecodedPacket {
     uint16_t src_port = 0, dst_port = 0;
     std::string tcp_flags;
 
-    // "iec104", "modbus", "dnp3", "s7comm", "cotp" (recognized TPKT/COTP framing but not
+    // "iec104", "modbus", "dnp3", "s7comm", "enip", "cotp" (recognized TPKT/COTP framing but not
     // S7comm inside it -- e.g. a connection setup frame), "tcp" (recognized
     // transport, no app-layer match), "non-tcp", "non-ip", "unsupported-link",
     // or "parse-error".
@@ -125,6 +129,22 @@ struct DecodedPacket {
     // One entry per decoded information object across every ASDU found in this TCP payload (e.g.
     // "ioa=1001: ON [SB]"), capped at 50 entries for the same reason as dnp3_point_values.
     std::vector<std::string> iec104_object_values;
+
+    // Only set when protocol == "enip". Reflects the first EtherNet/IP encapsulation message
+    // found in this TCP payload (see the coalescing loop in decoder.cpp for how additional
+    // messages coalesced into the same payload are still fully decoded, same pattern as IEC 104/
+    // DNP3's multi-frame-per-payload handling -- their detail is folded into enip_cip_values/notes
+    // but not reflected in these headline fields).
+    std::string enip_command_name;  // always set when protocol == "enip" (NOP/ListIdentity/SendRRData/...)
+    bool enip_has_cip = false;      // true once a CIP explicit message (request or response) was located
+    bool enip_cip_is_response = false;
+    std::string enip_cip_service_name;
+    std::string enip_cip_path;         // request path summary (request only, e.g. "MyTag" or "Class=0x01 (Identity) Instance=1")
+    std::string enip_cip_status_name;  // general status name (response only)
+    // One entry per decoded request/response data item (element values, Multiple_Service_Packet
+    // members, Unconnected_Send's embedded message, ...) -- capped at 50 entries for the same
+    // reason as dnp3_point_values/iec104_object_values.
+    std::vector<std::string> enip_cip_values;
 };
 
 // Cross-packet DNP3 fragment-reassembly state for one directional TCP flow (src ip:port -> dst

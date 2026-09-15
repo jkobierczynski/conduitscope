@@ -43,7 +43,7 @@ struct FlowReport {
     std::string client_ip, server_ip;
     uint16_t server_port = 0;
     std::string client_zone, server_zone;  // "unclassified" when Policy::zone_for found nothing
-    std::vector<std::string> protocols;    // distinct app protocols observed: "modbus"/"dnp3"/"s7comm"
+    std::vector<std::string> protocols;    // distinct app protocols observed: "modbus"/"dnp3"/"s7comm"/"iec104"/"enip"
     size_t packet_count = 0;
     FlowVerdict verdict = FlowVerdict::Unclassified;
     std::string matched_conduit;  // set (non-empty) only when verdict == Allowed
@@ -87,8 +87,8 @@ public:
     //   2. A SYN-ACK packet (tcp_flags starts with "SYN,ACK") authoritatively marks its
     //      DESTINATION as the client (it's the server's reply to a SYN this engine may not have
     //      seen, e.g. a capture that starts mid-handshake).
-    //   3. Otherwise, whichever endpoint's port is one of the four IANA-registered OT protocol
-    //      ports (502/20000/2404/102) is assumed to be the server; if neither or both are, the endpoint
+    //   3. Otherwise, whichever endpoint's port is one of the five IANA-registered OT protocol
+    //      ports (502/20000/2404/102/44818) is assumed to be the server; if neither or both are, the endpoint
     //      with the lower port number is assumed to be the server (a common networking convention:
     //      ephemeral client ports are almost always higher).
     // If the first packet seen for a flow can't be decided by (1) or (2) and falls back to (3), a

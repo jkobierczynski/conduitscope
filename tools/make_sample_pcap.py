@@ -584,6 +584,164 @@ def build_iec104_modbus_precedence_sample():
     (TESTS_DIR / "sample_iec104_modbus_precedence.pcap").write_bytes(data)
 
 
+ENIP_PORT = 44818
+
+
+def enip_header(command: int, data_len: int, session_handle: int = 0, status: int = 0,
+                 sender_context: bytes = b"\x00" * 8, options: int = 0) -> bytes:
+    """The fixed 24-byte EtherNet/IP encapsulation header -- see enip.hpp's file header comment.
+    Everything here is little-endian."""
+    assert len(sender_context) == 8
+    return (struct.pack("<HHII", command, data_len, session_handle, status) + sender_context +
+            struct.pack("<I", options))
+
+
+def enip_message(command: int, data: bytes = b"", session_handle: int = 0, status: int = 0,
+                  sender_context: bytes = b"\x00" * 8, options: int = 0) -> bytes:
+    return enip_header(command, len(data), session_handle, status, sender_context, options) + data
+
+
+def enip_cpf_unconnected(cip_bytes: bytes, timeout: int = 10) -> bytes:
+    """SendRRData's encapsulated data: Interface Handle(4, always 0) + Timeout(2) + Item Count(2)=2,
+    then a Null Address Item (type 0x0000, empty) and an Unconnected Data Item (type 0x00B2)
+    carrying `cip_bytes` -- the common shape real unconnected explicit-messaging clients use."""
+    return (struct.pack("<IH", 0, timeout) + struct.pack("<H", 2) +
+            struct.pack("<HH", 0x0000, 0) +
+            struct.pack("<HH", 0x00B2, len(cip_bytes)) + cip_bytes)
+
+
+def cip_symbolic_path(tag: str) -> bytes:
+    """The ANSI Extended Symbol segment (0x91) Logix5000 uses for named-tag addressing: segment
+    byte + 1-byte ASCII length + the ASCII tag name + a pad byte if that length is odd (EPATH
+    segments are always word-aligned)."""
+    name = tag.encode("ascii")
+    body = bytes([0x91, len(name)]) + name
+    if len(name) % 2 != 0:
+        body += b"\x00"
+    assert len(body) % 2 == 0
+    return body
+
+
+def cip_read_tag_request(tag: str, element_count: int = 1) -> bytes:
+    path = cip_symbolic_path(tag)
+    return bytes([0x4C, len(path) // 2]) + path + struct.pack("<H", element_count)
+
+
+def cip_read_tag_response(type_code: int, value_bytes: bytes, status: int = 0x00) -> bytes:
+    # service|0x80, reserved=0, general_status, additional_status_size=0, then type_code + value(s).
+    return bytes([0x4C | 0x80, 0x00, status, 0x00]) + struct.pack("<H", type_code) + value_bytes
+
+
+def cip_write_tag_request(tag: str, type_code: int, value_bytes: bytes, element_count: int = 1) -> bytes:
+    path = cip_symbolic_path(tag)
+    return (bytes([0x4D, len(path) // 2]) + path + struct.pack("<HH", type_code, element_count) +
+             value_bytes)
+
+
+def cip_write_tag_response(status: int = 0x00) -> bytes:
+    return bytes([0x4D | 0x80, 0x00, status, 0x00])
+
+
+def build_enip_sample():
+    """A hand-built EtherNet/IP session exercising RegisterSession/UnRegisterSession (real captures
+    obtained for this feature happened not to include one -- see tests/real_captures/enip/
+    ATTRIBUTION.md), a ListIdentity request/response (device-fingerprinting fields: vendor/device
+    type/product code/revision/serial/product name), and a symbolic (ANSI Extended Symbol segment
+    0x91) Read_Tag/Write_Tag round trip against a named tag -- also not present in the real
+    captures, which only ever used class/instance addressing -- so the full type+value decode path
+    is exercised with hand-verifiable expected values, same rationale as build_iec104_sample above."""
+    packets = []
+    client_seq = [8000]
+    server_seq = [9000]
+
+    def add(from_client: bool, payload: bytes):
+        if from_client:
+            src_port, dst_port = 52000, ENIP_PORT
+            src_ip, dst_ip = HMI_IP, PLC_IP
+            src_mac, dst_mac = HMI_MAC, PLC_MAC
+            seq, ack = client_seq[0], server_seq[0]
+            client_seq[0] += len(payload)
+        else:
+            src_port, dst_port = ENIP_PORT, 52000
+            src_ip, dst_ip = PLC_IP, HMI_IP
+            src_mac, dst_mac = PLC_MAC, HMI_MAC
+            seq, ack = server_seq[0], client_seq[0]
+            server_seq[0] += len(payload)
+        tcp = tcp_header(src_port, dst_port, seq, ack, TCP_PSH | TCP_ACK, len(payload)) + payload
+        ip = ipv4_header(src_ip, dst_ip, 6, len(tcp), 0x5000 + len(packets)) + tcp
+        packets.append(eth_header(dst_mac, src_mac, 0x0800) + ip)
+
+    session_handle = 0x11223344
+    ctx = b"CS-ENIP1"
+
+    # 1) & 2) RegisterSession request/response -- the handshake that begins every real EtherNet/IP
+    #    explicit-messaging session (protocol version 1, options flags 0).
+    add(True, enip_message(0x0065, data=struct.pack("<HH", 1, 0), session_handle=0, sender_context=ctx))
+    add(False, enip_message(0x0065, data=struct.pack("<HH", 1, 0), session_handle=session_handle,
+                             sender_context=ctx))
+
+    # 3) & 4) ListIdentity request/response -- device fingerprinting fields. List commands don't
+    #    require a registered session, so session_handle stays 0 here (as real clients do).
+    add(True, enip_message(0x0063, data=b"", session_handle=0, sender_context=ctx))
+    name = b"Conduit-ENIP-Sample"
+    identity_item = (
+        struct.pack("<H", 1) +                                           # protocol version
+        struct.pack("!H", 2) +                                           # sin_family AF_INET (big-endian)
+        struct.pack("!H", ENIP_PORT) +                                   # sin_port (big-endian)
+        bytes(int(o) for o in PLC_IP.split(".")) +                       # sin_addr (network/big-endian octets)
+        b"\x00" * 8 +                                                    # sin_zero
+        struct.pack("<HHH", 1, 0x0C, 54) +                               # vendor=1 (Rockwell Automation),
+                                                                          # device_type=0x0C (Comms Adapter),
+                                                                          # product_code=54
+        bytes([2, 1]) +                                                  # revision 2.1
+        struct.pack("<H", 0x0030) +                                      # status
+        struct.pack("<I", 0x001337AB) +                                  # serial number
+        bytes([len(name)]) + name
+    )
+    li_item = struct.pack("<H", 1) + struct.pack("<HH", 0x000C, len(identity_item)) + identity_item
+    add(False, enip_message(0x0063, data=li_item, session_handle=0, sender_context=ctx))
+
+    # 5) & 6) SendRRData: symbolic Read_Tag request/response for tag "Pump1_Speed" -- a DINT (type
+    #    0xC4) value of 42.
+    add(True, enip_message(0x006F, data=enip_cpf_unconnected(cip_read_tag_request("Pump1_Speed", 1)),
+                            session_handle=session_handle, sender_context=ctx))
+    add(False, enip_message(0x006F,
+                             data=enip_cpf_unconnected(cip_read_tag_response(0xC4, struct.pack("<i", 42))),
+                             session_handle=session_handle, sender_context=ctx))
+
+    # 7) & 8) SendRRData: symbolic Write_Tag request/response, writing 100 to the same tag.
+    add(True, enip_message(
+        0x006F, data=enip_cpf_unconnected(cip_write_tag_request("Pump1_Speed", 0xC4, struct.pack("<i", 100), 1)),
+        session_handle=session_handle, sender_context=ctx))
+    add(False, enip_message(0x006F, data=enip_cpf_unconnected(cip_write_tag_response(0x00)),
+                             session_handle=session_handle, sender_context=ctx))
+
+    # 9) UnRegisterSession -- no response by spec; the client just closes its connection afterward.
+    add(True, enip_message(0x0066, data=b"", session_handle=session_handle, sender_context=ctx))
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_002_000 + i, i * 1000)
+    (TESTS_DIR / "sample_enip.pcap").write_bytes(data)
+
+
+def build_enip_nop_precedence_sample():
+    """Regression fixture for the NOP-exclusion fix (see enip_command_name's comment in enip.cpp
+    and tests/real_captures/enip/ATTRIBUTION.md): a 24-byte all-zero buffer -- exactly what a NOP
+    encapsulation message (command 0x0000, length 0, session handle 0, status 0, sender context all
+    zero, options 0) looks like on the wire -- sent on EtherNet/IP's own port must NOT be classified
+    as enip, since NOP is deliberately not a recognized command. It should fall through to the
+    generic "did not match any known protocol" TCP summary instead."""
+    payload = bytes(24)
+    tcp = tcp_header(52001, ENIP_PORT, 100, 200, TCP_PSH | TCP_ACK, len(payload)) + payload
+    ip = ipv4_header(HMI_IP, PLC_IP, 6, len(tcp), 0x5100) + tcp
+    eth = eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip
+
+    data = pcap_global_header()
+    data += pcap_record(eth, 1_700_002_500, 0)
+    (TESTS_DIR / "sample_enip_nop_precedence.pcap").write_bytes(data)
+
+
 def tpkt_frame(cotp_header: bytes, user_data: bytes = b"") -> bytes:
     """Wraps a COTP header in its length-indicator byte and the 4-byte TPKT
     header, then appends `user_data` (e.g. an S7comm payload) AFTER the
@@ -1154,6 +1312,8 @@ if __name__ == "__main__":
     build_dnp3_sample()
     build_iec104_sample()
     build_iec104_modbus_precedence_sample()
+    build_enip_sample()
+    build_enip_nop_precedence_sample()
     build_s7comm_sample()
     build_s7comm_items_sample()
     build_s7comm_1200sym_sample()

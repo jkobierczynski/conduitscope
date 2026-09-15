@@ -2,15 +2,16 @@
 
 ## NAME
 
-conduitscope -- decode Modbus/TCP, DNP3, IEC 60870-5-104, and S7comm/COTP traffic from offline pcap captures
+conduitscope -- decode Modbus/TCP, DNP3, IEC 60870-5-104, S7comm/COTP, and EtherNet/IP (CIP explicit messaging) traffic from offline pcap captures
 
 ## SYNOPSIS
 
 ```
 conduitscope [-q|--quiet] [--no-color|--color] [--log-file FILE] [--version] [-h|--help] <command> [command options]
 
-conduitscope decode (-r FILE | -i INTERFACE) [-o FILE] [-f text|json|csv] [--protocol auto|modbus|dnp3|s7comm|iec104]
+conduitscope decode (-r FILE | -i INTERFACE) [-o FILE] [-f text|json|csv] [--protocol auto|modbus|dnp3|s7comm|iec104|enip]
                      [--modbus-port PORT]... [--dnp3-port PORT]... [--s7comm-port PORT]... [--iec104-port PORT]...
+                     [--enip-port PORT]...
                      [--max-packets N] [--stats] [--strict]
                      [--filter BPF] [--duration SECONDS] [--snaplen BYTES] [--no-promiscuous]
 
@@ -35,8 +36,8 @@ exception to conduitscope's otherwise zero-dependency design (see BUILDING).
 conduitscope reads a pcap or pcapng capture file -- or, optionally, a
 live network interface (see LIVE CAPTURE below) -- walks each packet's
 Ethernet/IPv4/TCP headers, and attempts to recognize and decode Modbus/TCP,
-DNP3, IEC 60870-5-104, or S7comm (Siemens S7 PLC protocol, riding on
-TPKT/COTP) payloads inside the TCP stream. It is designed as groundwork for auditing
+DNP3, IEC 60870-5-104, S7comm (Siemens S7 PLC protocol, riding on
+TPKT/COTP), or EtherNet/IP (CIP explicit messaging) payloads inside the TCP stream. It is designed as groundwork for auditing
 OT/ICS network traffic against a zone-and-conduit segmentation model (the kind
 IEC 62443-3-2 and, by extension, NIS2 risk-assessment work call for): the
 protocol-decoding layer (`decode`/`info`) and, now, the zone/conduit
@@ -136,11 +137,12 @@ conduitscope decode (-r FILE | -i INTERFACE) [options]
 | `--no-promiscuous` | off (i.e. promiscuous by default) | With `-i`, don't put the interface into promiscuous mode. Promiscuous is the default because the main live-capture use case -- watching a mirrored/SPAN switch port for zone/conduit traffic -- needs to see traffic that isn't addressed to the capturing host at all. |
 | `-o, --output FILE` | stdout | Write decoded output here instead of stdout. |
 | `-f, --format {text,json,csv}` | `text` | Output format. See OUTPUT FORMATS below. |
-| `--protocol {auto,modbus,dnp3,s7comm,iec104}` | `auto` | Restrict decoding to one protocol. `auto` opportunistically tries IEC 104, Modbus, DNP3, and S7comm/COTP detection on every TCP payload, regardless of port (see PROTOCOL DETECTION below). |
+| `--protocol {auto,modbus,dnp3,s7comm,iec104,enip}` | `auto` | Restrict decoding to one protocol. `auto` opportunistically tries EtherNet/IP, IEC 104, Modbus, DNP3, and S7comm/COTP detection on every TCP payload, regardless of port (see PROTOCOL DETECTION below). |
 | `--modbus-port PORT` | *(502 built in)* | Additional TCP port to treat as "expected" for Modbus. Repeatable. Does **not** gate detection -- it only changes whether a decoded Modbus frame is annotated as appearing on an unexpected port, which is itself a useful signal when auditing a conduit. |
 | `--dnp3-port PORT` | *(20000 built in)* | Same as `--modbus-port`, for DNP3. Repeatable. |
 | `--s7comm-port PORT` | *(102 built in)* | Same as `--modbus-port`, for COTP/S7comm. Repeatable. |
 | `--iec104-port PORT` | *(2404 built in)* | Same as `--modbus-port`, for IEC 104. Repeatable. |
+| `--enip-port PORT` | *(44818 built in)* | Same as `--modbus-port`, for EtherNet/IP. Repeatable. |
 | `--max-packets N` | `0` (unlimited) | Stop after decoding this many packets. With `-i`, this also bounds a live capture (in addition to `--duration` and Ctrl+C). |
 | `--stats` | off | Print an aggregate summary (protocol counts, Modbus function-code histogram, exception count, capture time span) instead of one line per packet. Ignores `--format`. |
 | `--strict` | off | Abort with a nonzero exit status on the first packet that fails to parse at the Ethernet/IPv4/TCP layer, instead of reporting a per-packet warning and continuing. Does not affect Modbus/DNP3-level ambiguity, which is always handled by heuristic + note rather than error. |
@@ -392,7 +394,7 @@ conduits:
     description: "<optional free text>"
     from: <zone name>
     to: <zone name>
-    protocols: [<modbus | dnp3 | s7comm | iec104 | any>, <...>]
+    protocols: [<modbus | dnp3 | s7comm | iec104 | enip | any>, <...>]
     ports: [<port>, <...>]                  # omit entirely to mean "any port"
     bidirectional: <true | false>           # default: false
 ```
@@ -414,7 +416,7 @@ not what a first policy file intended, so it's rejected outright rather than
 silently accepted as an implicit deny-all.
 
 `protocols` uses the same protocol names conduitscope's own decoded output
-uses: `modbus`, `dnp3`, `s7comm`, `iec104`, plus the wildcard `any`. A COTP session
+uses: `modbus`, `dnp3`, `s7comm`, `iec104`, `enip`, plus the wildcard `any`. A COTP session
 that never carries a full S7comm message (e.g. only a connection
 request/confirm was captured) still counts as `s7comm` traffic for matching
 purposes -- see PROTOCOL COVERAGE's S7comm/COTP section for why a "cotp"-
@@ -457,7 +459,7 @@ error (see EXIT STATUS):
   without a YAML parser objecting)
 - a conduit missing `name`/`from`/`to`/`protocols`, or whose `from`/`to`
   names a zone that isn't declared in `zones`
-- a conduit protocol outside `{modbus, dnp3, s7comm, iec104, any}`
+- a conduit protocol outside `{modbus, dnp3, s7comm, iec104, enip, any}`
 - a conduit port outside `[1, 65535]`
 - a conduit's `bidirectional` value that isn't a recognizable boolean
   (`true`/`false`/`yes`/`no`)
@@ -509,10 +511,33 @@ text the `text` report shows).
 ## PROTOCOL DETECTION
 
 In `--protocol auto` (the default), every non-empty TCP payload is tested
-against all four protocols, independent of port number. **IEC 104 is tried
-first**, before Modbus/TCP -- see the note at the end of this section for why
-that specific ordering matters, not just which protocols are tried:
+against all five protocols, independent of port number. **EtherNet/IP is
+tried first, then IEC 104**, before Modbus/TCP -- see the notes at the end of
+this section for why that specific ordering matters, not just which
+protocols are tried:
 
+- **EtherNet/IP**: recognized by its 24-byte encapsulation header -- the
+  command field must be one of the nine standard encapsulation commands
+  (`ListServices`, `ListIdentity`, `ListInterfaces`, `RegisterSession`,
+  `UnRegisterSession`, `SendRRData`, `SendUnitData`, `IndicateStatus`,
+  `Cancel` -- NOP, `0x0000`, is deliberately excluded, see below), the status
+  field must be `0` or one of the seven documented encapsulation error codes,
+  and the reserved `options` field must be exactly `0`. Three independent
+  structural checks, on top of this protocol's own dedicated TCP port
+  (44818, which none of the other four protocols here use) -- collectively a
+  stronger signal than IEC 104's own checks (below), so it's tried first,
+  though with its own dedicated port a collision with any of the others is
+  not a realistic concern the way IEC-104-vs-Modbus was. NOP is excluded
+  because its command value is all-zero bytes -- real-capture testing found
+  this made a short run of zero-padded/malformed bytes on unrelated traffic
+  (reassembled Modbus test fixture data, in that instance) misdetect as
+  EtherNet/IP; see `tests/real_captures/enip/ATTRIBUTION.md` and
+  `enip_command_name`'s comment in `src/enip.cpp`. For SendRRData/
+  SendUnitData, the encapsulated Common Packet Format items are located and
+  the CIP explicit message within is further decoded -- service code,
+  request path, and, for the "first pass" set of services this groundwork
+  release covers, the request/response data itself; see PROTOCOL COVERAGE
+  below for exactly which services get full value decoding.
 - **IEC 60870-5-104**: recognized by its APCI structure -- the start byte
   `0x68`, a length field in the plausible range `[4, 253]`, and the 4-byte
   control field matching one of the three frame formats' fixed bit patterns:
@@ -588,9 +613,9 @@ Modbus collision. `tests/sample_iec104_modbus_precedence.pcap` (see
 `tools/make_sample_pcap.py`) is a minimal regression fixture pinning this
 down.
 
-`--protocol modbus`, `--protocol dnp3`, `--protocol s7comm`, or `--protocol
-iec104` restrict decoding to only that protocol (useful for large mixed
-captures, or for scripting a two-pass analysis).
+`--protocol modbus`, `--protocol dnp3`, `--protocol s7comm`, `--protocol
+iec104`, or `--protocol enip` restrict decoding to only that protocol (useful
+for large mixed captures, or for scripting a two-pass analysis).
 
 ## OUTPUT FORMATS
 
@@ -610,7 +635,7 @@ the packet line.
 
 The `[protocol]` tag is colored per protocol (so a mixed-protocol capture
 scans quickly by eye): cyan for Modbus, magenta for DNP3, blue for S7comm and
-COTP-without-S7comm, green for IEC 104, dim for everything else recognized but not
+COTP-without-S7comm, green for IEC 104, yellow for EtherNet/IP, dim for everything else recognized but not
 OT-specific (`tcp`/`non-tcp`/`non-ip`/`unsupported-link`). A Modbus
 exception response's summary, and a `parse-error` packet's entire line, are
 bold red -- both mean "look at this one" over everything else in a long
@@ -634,8 +659,8 @@ that don't apply to a given packet (e.g. `src_ip` for a non-IP frame) are
 `null`. Intended to be piped into `jq` or read by a future policy-evaluation
 layer.
 
-Nine fields are only present (omitted entirely, not `null`) on packets where
-they apply:
+Seventeen fields are only present (omitted entirely, not `null`) on packets
+where they apply:
 
 - `modbus_paired_request_index`: the `index` of the specific earlier request
   packet this response was authoritatively paired to (by MBAP transaction ID
@@ -680,6 +705,29 @@ they apply:
   `"ioa=100: ON"` or `"ioa=200: 16384 (0.5000) @ 2024-03-15
   10:30:00.500"` for a time-tagged measured value. Empty for an ASDU type
   outside the decoded-type table (see PROTOCOL COVERAGE).
+- `enip_command`: the EtherNet/IP encapsulation command name (e.g.
+  `"RegisterSession"`, `"SendRRData"`), when protocol is `enip`. Reflects
+  only the *first* EtherNet/IP message found in this TCP payload -- see
+  `notes` for any additional coalesced messages (PROTOCOL COVERAGE).
+- `enip_cip_is_response`: `true`/`false`, when a CIP explicit message was
+  located inside that first EtherNet/IP message (a `SendRRData`/
+  `SendUnitData` carrying one).
+- `enip_cip_service`: the CIP service name (e.g. `"Read_Tag"`,
+  `"Multiple_Service_Packet"`, `"Unknown (0x4C)"` when the service code
+  isn't recognized in this request's context), alongside
+  `enip_cip_is_response`.
+- `enip_cip_path`: the CIP request path summary (e.g. `"Pump1_Speed"` for a
+  symbolically-addressed tag, or `"Class=0x01 (Identity) Instance=1"`),
+  present on a *request* whose path was decoded and non-empty. Absent on a
+  response (a CIP response never repeats the request's path on the wire).
+- `enip_cip_status`: the CIP general status name (e.g. `"Success"`,
+  `"Object does not exist"`), present on a decoded response.
+- `enip_cip_values`: an array of one entry per decoded request/response
+  value or Multiple_Service_Packet/Unconnected_Send member summary, e.g.
+  `["type=DINT", "42"]` for a Read_Tag response, or `["member 0: Read_Tag
+  response: Success"]` for one member of a Multiple_Service_Packet reply.
+  See PROTOCOL COVERAGE for exactly which services get full value decoding
+  versus a structural-only summary.
 
 All array fields are capped at 50 entries for a single heavily-batched
 request/response; see PROTOCOL COVERAGE for where the full list still shows
@@ -1067,6 +1115,91 @@ negative activation confirmation. See
 these captures happened to split an APDU across a TCP segment boundary, so
 that path (see LIMITATIONS) remains untested against real traffic.
 
+### EtherNet/IP (CIP explicit messaging, TCP port 44818)
+
+Every EtherNet/IP message is wrapped in a fixed 24-byte encapsulation header
+(command, length, session handle, status, an opaque 8-byte sender context
+echoed verbatim by the target, and a reserved options field) -- fully
+decoded and named for all nine standard commands this groundwork release
+recognizes (see PROTOCOL DETECTION for why NOP is deliberately excluded).
+Like DNP3/IEC 104's small frames, it's normal for several encapsulation
+messages to be coalesced into one TCP segment; conduitscope finds and
+decodes every complete one present, not just the first, the same way it
+does for those two protocols.
+
+**ListIdentity** responses get their identity item decoded into
+device-fingerprinting fields: vendor ID, device type, product code,
+revision, status, serial number, and product name -- genuinely useful for
+passive OT asset inventory, since a ListIdentity exchange is often the very
+first thing an EtherNet/IP scanning tool (or a legitimate engineering
+workstation) does on a new connection.
+
+**SendRRData** (unconnected explicit messaging) and **SendUnitData**
+(connected explicit messaging) carry their payload in a Common Packet
+Format (CPF) item list; conduitscope walks it to locate the Unconnected
+Data Item (`0x00B2`) or Connected Data Item (`0x00B1`) that holds the
+actual CIP message (a Connected Address Item's 4-byte connection ID is also
+recorded; other CPF item types are named but not further decoded).
+
+**The CIP explicit message itself** -- service code, request path (EPATH:
+class/instance/attribute logical segments, and the ANSI Extended Symbol
+segment `0x91` Rockwell Logix5000 controllers use for named-tag addressing,
+e.g. `Pump1_Speed` or `Program:Main.Timer1.ACC`) -- is decoded generically
+for every recognized service, with request/response *data* also
+value-decoded for a "first pass" set:
+
+- **Generic CIP common services**: `Get_Attribute_List` (request: the
+  requested attribute IDs), `Multiple_Service_Packet` (fully recursive --
+  each bundled member is decoded with this same logic), and the rest of the
+  common-services range (`Get/Set_Attributes_All`, `Reset`, `Start`/`Stop`,
+  `Create`/`Delete`, ...) named but not further value-decoded.
+- **Connection Manager services** (request path addressing Class `0x06`):
+  `Unconnected_Send` -- fully recursive, decoding its embedded CIP message
+  and route path -- plus `Forward_Open`/`Forward_Close`/`Large_Forward_Open`,
+  named but not further value-decoded.
+- **Rockwell Symbol-object tag services** -- but **only** when the request
+  path's first segment is that ANSI Extended Symbol segment (i.e. a named
+  tag, not a class/instance address): `Read_Tag`/`Read_Tag_Fragmented`
+  (element count, and full type+value decoding of the response for the
+  common fixed-size numeric elementary types -- BOOL/SINT/INT/DINT/LINT/
+  USINT/UINT/UDINT/ULINT/REAL/LREAL/BYTE/WORD/DWORD/LWORD), `Write_Tag`/
+  `Write_Tag_Fragmented` (type, element count, and the values being
+  written), and `Read_Modify_Write_Tag` (the OR/AND bit masks; its success
+  response carries no data, confirmed against a real capture -- see
+  `tests/real_captures/enip/ATTRIBUTION.md`).
+
+That symbolic-path gating is the key scoping decision of this groundwork
+release, and it's not a simplification for its own sake: several of these
+service codes (`0x4C`/`0x4D`/`0x4E`/`0x52`/`0x53`) are only unambiguous in
+the Symbol object's context. A real capture used to validate this decoder
+shows the *exact same* service code (`0x4C`) meaning `Read_Tag` against one
+object and something entirely different against a vendor-specific object
+class addressed by `Class`/`Instance` -- see `tests/real_captures/enip/
+ATTRIBUTION.md` for the full real-world numbers. A response carries no
+request path at all, so the Read_Tag(_Fragmented) reply's disambiguation
+uses a payload-shape heuristic instead (does the response data start with a
+byte pair that's a plausible CIP elementary type code?), the same kind of
+heuristic `modbus_tcp`'s own request/response classification uses.
+
+A request/response whose service is recognized by name but falls outside
+this "first pass" value-decoded set (including every STRING/structured/
+UDT/array CIP data type, and every service this decoder doesn't have a
+table entry for at all) is still shown structurally -- service name and
+request path, response status -- with its data shown as raw hex and an
+explicit note that this groundwork release doesn't decode it further,
+never guessed at.
+
+Validated against two real captures: a real Rockwell 1756-ENBT/A
+ControlLogix EtherNet/IP bridge module's ListIdentity exchange, and a
+larger real industrial-control-system capture dominated by
+`Multiple_Service_Packet`/`Unconnected_Send`/`Read_Modify_Write_Tag`
+traffic polling a mix of Symbol-object tags and a vendor-specific object
+class -- see `tests/real_captures/enip/ATTRIBUTION.md` for exact
+provenance, including the real numbers behind the symbolic-path-gating
+decision above. Neither capture happened to split an encapsulation message
+across a TCP segment boundary, so that path (see LIMITATIONS) remains
+untested against real traffic, same as IEC 104's own APDU reassembly.
+
 ## CAPTURED FRAME PADDING
 
 Ethernet requires a minimum frame size (60 bytes, excluding the trailing
@@ -1106,16 +1239,18 @@ These are current, not aspirational -- each has a corresponding ROADMAP item.
   tool's for that specific file. See "pcap vs. pcapng" above.
 - **General TCP stream reassembly is implemented, but narrowly scoped.**
   `Decoder::reassemble_tcp_payload` (`decoder.hpp`/`decoder.cpp`) buffers a
-  single Modbus MBAP message, DNP3 data-link frame, IEC 104 APDU, or
-  TPKT/COTP frame's own bytes, per directional TCP flow, when it is split
-  across two or more TCP segments -- so a Modbus PDU that straddles a
-  segment boundary, a DNP3 data-link frame split mid-header, an IEC 104 APDU
-  split mid-APCI/ASDU, or an S7comm request/response TPKT frame split across
-  segments all now get fully reassembled and decoded, not just the first
-  segment's worth of bytes. Each protocol's own declared length field (the
-  MBAP length, the DNP3 data-link length byte, the IEC 104 APCI length
-  byte, the TPKT length field) is what tells the reassembler how many bytes
-  to wait for; a segment
+  single Modbus MBAP message, DNP3 data-link frame, IEC 104 APDU, EtherNet/IP
+  encapsulation message, or TPKT/COTP frame's own bytes, per directional TCP
+  flow, when it is split across two or more TCP segments -- so a Modbus PDU
+  that straddles a segment boundary, a DNP3 data-link frame split
+  mid-header, an IEC 104 APDU split mid-APCI/ASDU, an EtherNet/IP
+  encapsulation message split mid-header or mid-CIP-message, or an S7comm
+  request/response TPKT frame split across segments all now get fully
+  reassembled and decoded, not just the first segment's worth of bytes.
+  Each protocol's own declared length field (the MBAP length, the DNP3
+  data-link length byte, the IEC 104 APCI length byte, the EtherNet/IP
+  encapsulation header's length field, the TPKT length field) is what tells
+  the reassembler how many bytes to wait for; a segment
   whose sequence number doesn't extend the buffered bytes contiguously is
   either trimmed (an overlapping retransmission) or, if it's genuinely ahead
   of where expected (a gap -- a segment very likely wasn't captured), causes
@@ -1148,7 +1283,9 @@ These are current, not aspirational -- each has a corresponding ROADMAP item.
   The general TCP-segment-level reassembly described above is unvalidated
   against real traffic for the same reason (every real capture checked kept
   every PDU/frame within one TCP segment, including all six real IEC 104
-  captures -- see tests/real_captures/iec104/ATTRIBUTION.md) -- it was verified by diffing this
+  captures and both real EtherNet/IP captures -- see
+  tests/real_captures/iec104/ATTRIBUTION.md and
+  tests/real_captures/enip/ATTRIBUTION.md) -- it was verified by diffing this
   tool's full output against every real fixture before and after adding it
   (byte-for-byte identical), confirming it changes nothing for traffic that
   doesn't need it, and by synthetic fixtures (tests/sample_tcp_reassembly.pcap)
@@ -1231,6 +1368,28 @@ These are current, not aspirational -- each has a corresponding ROADMAP item.
   whose byte alignment needs preserving. A batch of more than 200
   information objects in one ASDU only gets the first 200 individually
   decoded; a note says so when it happens.
+- **EtherNet/IP's CIP explicit-message value decoding is scoped narrowly and
+  deliberately.** Full type+value decoding only applies to (a) a "first
+  pass" set of generic common services and Connection-Manager services, and
+  (b) the Rockwell Symbol-object tag services (Read/Write Tag(
+  Fragmented)/Read_Modify_Write_Tag), and only for (b) when the request
+  path's first segment is an ANSI Extended Symbol segment -- a
+  class/instance-addressed request using one of those same service codes
+  (a real, confirmed collision -- see tests/real_captures/enip/
+  ATTRIBUTION.md and PROTOCOL COVERAGE) is shown structurally (service name
+  + path + raw hex) instead. Within the decoded element types, only the
+  fixed-size numeric elementary types (BOOL/SINT/INT/DINT/LINT/USINT/UINT/
+  UDINT/ULINT/REAL/LREAL/BYTE/WORD/DWORD/LWORD) are value-decoded --
+  STRING/SHORT_STRING and every structured/UDT/array type are recognized by
+  code but shown as raw hex with an explicit note, not guessed at (Logix5000's
+  exact bit-level convention for distinguishing a structured-type response
+  from an elementary one could not be confirmed against authoritative
+  documentation during this feature's research, so no special-casing was
+  attempted for it -- see the ROADMAP). A bare CIP response's Read_Tag(
+  Fragmented) disambiguation from a same-service-code non-tag reply relies
+  on a payload-shape heuristic (a plausible CIP elementary type code at the
+  start of the response data), same category of heuristic as Modbus's own
+  request/response shape classification -- not authoritative tracking.
 - **S7comm item-level addressing is fully confident only for the classic
   S7ANY syntax.** `0xB2` (S7-1200/1500 "symbolic" addressing) also gets a
   tag, but it's an EXPERIMENTAL reconstruction from public sources rather
@@ -1304,7 +1463,7 @@ These are current, not aspirational -- each has a corresponding ROADMAP item.
 - **`policy validate`'s client/server (initiator) determination falls back
   to a port-number heuristic when no SYN/SYN-ACK is captured for a flow**
   (e.g. a capture that starts mid-session): whichever endpoint's port is one
-  of the four IANA-registered OT ports (502/20000/2404/102) is assumed to be the
+  of the five IANA-registered OT ports (502/20000/2404/102/44818) is assumed to be the
   server, and if neither or both are, the lower port number is. A real
   SYN/SYN-ACK seen on ANY packet in the flow -- not just the first one --
   always overrides this guess once seen (see `PolicyEngine::observe`'s doc
@@ -1431,6 +1590,24 @@ conduitscope decode -r capture.pcap --protocol iec104 -f json \
            (.iec104_objects[]) | "\($s) -> \($d): \(.)"'
 ```
 
+Fingerprint every EtherNet/IP device that answered a ListIdentity request in
+a capture -- useful for passive OT asset inventory:
+
+```sh
+conduitscope decode -r capture.pcap --protocol enip -f json \
+  | jq -r '.[] | select((.enip_command == "ListIdentity") and (.summary | contains("identity:"))) |
+           "\(.src_ip): \(.summary | capture("identity: (?<id>.*)").id)"'
+```
+
+Find every Rockwell tag write (Write_Tag) in a capture -- who wrote what, to
+which named tag:
+
+```sh
+conduitscope decode -r capture.pcap --protocol enip -f json \
+  | jq -r '.[] | select((.enip_cip_service == "Write_Tag") and (.enip_cip_is_response == false)) |
+           "\(.src_ip) -> \(.dst_ip): \(.enip_cip_path) = \(.enip_cip_values | join(" "))"'
+```
+
 Find every Modbus write whose response was never authoritatively paired --
 either the response wasn't captured, or it used a different session/
 transaction ID than expected (worth a closer look on a conduit that should
@@ -1503,6 +1680,19 @@ Rough order, each building on the groundwork this release establishes:
    `tests/real_captures/iec104/ATTRIBUTION.md`), so real-traffic validation
    for at least step position and bitstring is already sitting there,
    waiting on the decode table catching up.
+8. **Extend EtherNet/IP's CIP value decoding to STRING/SHORT_STRING and
+   structured (UDT/array) elementary types** -- currently shown as raw hex
+   with an explicit note (see PROTOCOL COVERAGE and LIMITATIONS). The
+   structured-type case specifically needs confirming Logix5000's exact
+   bit-level convention for telling a structured-type Read_Tag response
+   apart from an elementary one against authoritative documentation (not
+   confirmed during this feature's research -- see LIMITATIONS); STRING/
+   SHORT_STRING's wire format is better-documented and could reasonably come
+   first. Also worth revisiting once real-world evidence exists: whether the
+   symbolic-path-gating gate itself (see PROTOCOL COVERAGE) is ever too
+   narrow in practice -- e.g. a real device addressing a Symbol-object tag
+   by numeric instance ID rather than by name, which this release's gating
+   would currently show structurally rather than as a tag read.
 
 **pcapng support** is also now done: both classic pcap and pcapng are read
 transparently (auto-detected, no flag needed) -- see "pcap vs. pcapng"
@@ -1520,6 +1710,18 @@ runs before Modbus/TCP's in Auto-mode dispatch specifically to resolve a
 detection collision found while scoping this feature -- see PROTOCOL
 DETECTION.
 
+**EtherNet/IP (CIP explicit messaging) support** is also now done: the
+24-byte encapsulation header, ListIdentity device-fingerprinting fields,
+Common Packet Format item parsing, and a "first pass" CIP explicit-message
+decode (generic common services, Connection Manager's Unconnected_Send/
+Forward_Open/Forward_Close, and, symbolic-path-gated, the Rockwell
+Symbol-object tag services) -- see PROTOCOL COVERAGE's EtherNet/IP section
+and item 8 above for what's still out of scope (STRING/structured/UDT/array
+value decoding). EtherNet/IP detection runs first in Auto-mode dispatch,
+ahead of even IEC 104, since its own dedicated port plus three independent
+structural checks make it, if anything, a stronger signal -- see PROTOCOL
+DETECTION.
+
 **Colorized text output** is also now done: see OUTPUT FORMATS' "Color"
 subsection for the scheme and the `--color`/`--no-color`/auto-detection
 rules. `policy validate`'s text report stays deliberately plain (an audit
@@ -1529,8 +1731,8 @@ coloring it turns up.
 
 All of what was originally tracked here as "general TCP stream reassembly"
 is now done: PDU/frame-level reassembly across TCP segments
-(`Decoder::reassemble_tcp_payload`, covering Modbus, DNP3, IEC 104, and
-TPKT/COTP alike), authoritative Modbus request/response
+(`Decoder::reassemble_tcp_payload`, covering Modbus, DNP3, IEC 104,
+EtherNet/IP, and TPKT/COTP alike), authoritative Modbus request/response
 pairing by transaction ID (`Decoder::pair_modbus_transaction`), and chaining
 an S7comm message across multiple complete TPKT/COTP frames
 (`Decoder::reassemble_cotp_data_frame`) -- see LIMITATIONS for each one's

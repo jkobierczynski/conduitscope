@@ -8,6 +8,7 @@
 
 #include "conduitscope/cotp.hpp"
 #include "conduitscope/dnp3.hpp"
+#include "conduitscope/enip.hpp"
 #include "conduitscope/iec104.hpp"
 #include "conduitscope/ipv4.hpp"
 #include "conduitscope/modbus.hpp"
@@ -24,7 +25,7 @@ std::string session_key(const std::string& ip_a, uint16_t port_a, const std::str
 
 bool is_known_service_port(uint16_t port) {
     return port == MODBUS_TCP_PORT || port == DNP3_TCP_PORT || port == COTP_TCP_PORT ||
-           port == IEC104_TCP_PORT;
+           port == IEC104_TCP_PORT || port == ENIP_TCP_PORT;
 }
 
 // Guesses which side of a brand-new flow is the server, when no SYN/SYN-ACK is available to
@@ -133,6 +134,8 @@ void PolicyEngine::observe(const DecodedPacket& dp) {
         fs.protocols.insert("s7comm");
     } else if (dp.protocol == "iec104") {
         fs.protocols.insert("iec104");
+    } else if (dp.protocol == "enip") {
+        fs.protocols.insert("enip");
     }
 }
 
