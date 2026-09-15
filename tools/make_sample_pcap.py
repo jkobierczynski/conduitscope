@@ -594,9 +594,9 @@ def udp_header(src_port: int, dst_port: int, payload: bytes) -> bytes:
 def build_link_and_transport_layer_sample():
     """Exercises the link/IP-layer "plumbing" this tool recognizes but does not further decode:
     non-IPv4 Ethernet frames (protocol "non-ip") and non-TCP IPv4 payloads (protocol "non-tcp"/
-    "udp"), each named when the ethertype/IP-protocol-number/UDP-port is one this tool knows, and
-    left as a bare number when it isn't -- see link_layer.hpp's ethertype_name, ipv4.hpp's
-    ip_protocol_name, and decoder.cpp's well_known_udp_port_name. Every frame here is a standalone
+    "udp"), each named when the ethertype/IP-protocol-number is one this tool knows, and left as a
+    bare number when it isn't -- see link_layer.hpp's ethertype_name and ipv4.hpp's
+    ip_protocol_name. Every frame here is a standalone
     packet (no TCP-style flow/session needed at this layer), so this is one flat list rather than
     a multi-packet session like build_modbus_sample."""
     packets = []
@@ -622,8 +622,10 @@ def build_link_and_transport_layer_sample():
     icmp = struct.pack("!BBH", 8, 0, 0) + bytes([0x01, 0x02, 0x03, 0x04])
     add_ip(1, icmp)
 
-    # UDP on a named OT port (2222, EtherNet/IP implicit/I-O messaging) -- content arbitrary, not
-    # parsed (this groundwork release only opens the UDP header itself, see udp.hpp).
+    # UDP on EtherNet/IP's own CIP I/O port (2222) -- but only 4 bytes of arbitrary content, far
+    # too short to be a genuine Sequenced Address Item (see enip.hpp), so try_parse_cip_io
+    # correctly declines this and it falls through to the generic "udp" tag rather than being
+    # misdetected -- see tests/sample_enip_cip_io.pcap for actual CIP I/O decoding coverage.
     add_ip(17, udp_header(2222, 55000, bytes([0xDE, 0xAD, 0xBE, 0xEF])))
 
     # UDP on an arbitrary, unnamed port, and with an empty payload -- exercises both the "no
@@ -792,6 +794,94 @@ def build_enip_nop_precedence_sample():
     data = pcap_global_header()
     data += pcap_record(eth, 1_700_002_500, 0)
     (TESTS_DIR / "sample_enip_nop_precedence.pcap").write_bytes(data)
+
+
+ENIP_IO_PORT = 2222
+
+
+def cip_sequenced_address_item(connection_id: int, sequence_number: int) -> bytes:
+    """CPF item 0x8002 (Sequenced Address Item): type+length header, then a 4-byte connection ID
+    and 4-byte sequence number, both little-endian -- the fixed 8-byte shape try_parse_cip_io
+    (enip.cpp) uses as its structural detection anchor (exact type AND exact length -- see that
+    function's header comment in enip.hpp)."""
+    return struct.pack("<HH", 0x8002, 8) + struct.pack("<II", connection_id, sequence_number)
+
+
+def cip_connected_data_item(data: bytes) -> bytes:
+    """CPF item 0x00B1 (Connected Data Item) carrying `data` -- for CIP I/O this is the raw
+    I/O/assembly data (or, for a Class 1/2/3 connection, a leading 16-bit CIP sequence count
+    followed by that data -- conduitscope does not distinguish the two on the wire alone; see
+    enip.hpp's file header comment's CIP implicit messaging section for why)."""
+    return struct.pack("<HH", 0x00B1, len(data)) + data
+
+
+def cip_io_datagram(connection_id: int, sequence_number: int, io_data: bytes = None,
+                     extra_items: bytes = b"", extra_item_count: int = 0) -> bytes:
+    """One complete CIP I/O (implicit messaging) UDP payload: Item Count(2) + a Sequenced Address
+    Item, optionally followed by a Connected Data Item carrying `io_data` and/or already-encoded
+    raw `extra_items` bytes (for exercising CPF item types this decoder names but doesn't further
+    decode). There is no 24-byte encapsulation header here at all, unlike explicit messaging --
+    see enip.hpp's file header comment's CIP implicit messaging section."""
+    items = cip_sequenced_address_item(connection_id, sequence_number)
+    item_count = 1
+    if io_data is not None:
+        items += cip_connected_data_item(io_data)
+        item_count += 1
+    items += extra_items
+    item_count += extra_item_count
+    return struct.pack("<H", item_count) + items
+
+
+def build_enip_cip_io_sample():
+    """CIP I/O (implicit messaging) UDP/2222 datagrams -- the real-time, cyclic I/O data exchange a
+    prior Forward_Open (explicit messaging, see build_enip_sample) establishes between an
+    originator and a target. See enip.hpp's file header comment's CIP implicit messaging section
+    and try_parse_cip_io's own comment (enip.hpp) for the exact wire format this exercises.
+
+    No real-world CIP I/O capture was found for this feature (see tests/real_captures/enip/
+    ATTRIBUTION.md) -- these datagrams are built from ODVA's documented Common Packet Format item
+    shapes (Sequenced Address Item 0x8002, Connected Data Item 0x00B1), independently cross-checked
+    against Wireshark's own packet-enip.c dissector source rather than reverse-engineered from a
+    single example."""
+    packets = []
+
+    def add(payload: bytes, ts_offset: int):
+        udp = udp_header(ENIP_IO_PORT, ENIP_IO_PORT, payload)
+        ip = ipv4_header(PLC_IP, HMI_IP, 17, len(udp), 0x7000 + ts_offset) + udp
+        packets.append(eth_header(HMI_MAC, PLC_MAC, 0x0800) + ip)
+
+    # 1) First cyclic I/O update on a connection: connection ID 0xABCD1234, sequence 1, 4 bytes of
+    #    I/O data -- shown only as raw hex (see enip.hpp).
+    add(cip_io_datagram(0xABCD1234, 1, io_data=bytes([0xDE, 0xAD, 0xBE, 0xEF])), 0)
+
+    # 2) Same connection's next update: sequence rolls to 2, the data changes -- confirms each
+    #    datagram is decoded independently (no cross-packet state needed for this).
+    add(cip_io_datagram(0xABCD1234, 2, io_data=bytes([0x01, 0x02, 0x03, 0x04])), 1)
+
+    # 3) A datagram with a Sequenced Address Item but no Connected Data Item at all -- a legitimate
+    #    shape (e.g. a heartbeat with no data segment); exercises the "(no Connected Data Item
+    #    present)" summary wording.
+    add(cip_io_datagram(0xABCD1234, 3), 2)
+
+    # 4) A different connection whose item list also carries a Sockaddr Info item (0x8002's
+    #    neighbor, 0x8001 -- present but not decoded) ahead of its Connected Data Item -- exercises
+    #    the generic "CPF item ... not decoded" note path alongside a real data item in the same
+    #    datagram.
+    sockaddr_info_item = struct.pack("<HH", 0x8001, 4) + bytes([0x00, 0x01, 0x02, 0x03])
+    add(cip_io_datagram(0x11112222, 10, io_data=bytes([0xFF]),
+                         extra_items=sockaddr_info_item, extra_item_count=1), 3)
+
+    # 5) A UDP/2222 payload that does NOT start with a Sequenced Address Item (item type 0x0000, a
+    #    Null Address Item, instead) -- must NOT be misdetected as CIP I/O; falls through to the
+    #    generic "udp" tag. Regression fixture for try_parse_cip_io's structural gate (exact item
+    #    type AND exact length -- see its header comment in enip.hpp).
+    not_cip_io = struct.pack("<H", 1) + struct.pack("<HH", 0x0000, 8) + bytes(8)
+    add(not_cip_io, 4)
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_002_600 + i, i * 1000)
+    (TESTS_DIR / "sample_enip_cip_io.pcap").write_bytes(data)
 
 
 def tpkt_frame(cotp_header: bytes, user_data: bytes = b"") -> bytes:
@@ -1367,6 +1457,7 @@ if __name__ == "__main__":
     build_iec104_modbus_precedence_sample()
     build_enip_sample()
     build_enip_nop_precedence_sample()
+    build_enip_cip_io_sample()
     build_s7comm_sample()
     build_s7comm_items_sample()
     build_s7comm_1200sym_sample()

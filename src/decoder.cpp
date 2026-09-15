@@ -25,15 +25,16 @@ bool port_in(uint16_t port, uint16_t default_port, const std::vector<uint16_t>& 
     return std::find(extra.begin(), extra.end(), port) != extra.end();
 }
 
-// A UDP port worth calling out by name in a "udp" packet's summary -- deliberately not a decode
-// hook (this groundwork release doesn't parse any of these protocols' own UDP payloads, see
-// udp.hpp's file header comment and docs/MANUAL.md's ROADMAP), just an informational note in the
-// same spirit as the "not a configured/standard <protocol> port" notes the TCP-based protocols
-// already get. 2222 is EtherNet/IP's own registered port for CIP implicit (real-time I/O)
-// messaging, the natural next EtherNet/IP-related gap now that explicit messaging (TCP 44818) is
-// covered -- see enip.hpp.
-std::string well_known_udp_port_name(uint16_t port) {
-    if (port == 2222) return "EtherNet/IP implicit (I/O) messaging";
+// A UDP port worth calling out by name in a "udp" packet's summary, for a port this groundwork
+// release still doesn't decode the payload of -- an informational note only, in the same spirit
+// as the "not a configured/standard <protocol> port" notes the TCP-based protocols already get.
+// This is NOT how CIP I/O (UDP port 2222) is recognized any more: try_parse_cip_io is tried first
+// (see decode()'s UDP branch below), so port 2222 traffic reaches this function at all only when
+// that structural check didn't match (e.g. non-CIP-I/O traffic incidentally sharing the port, or a
+// malformed/truncated datagram) -- this table currently has nothing left in it as a result, kept
+// (rather than deleted outright) as the natural place a future UDP-riding protocol's port name
+// would go once named-but-not-yet-decoded, the same role it played for 2222 before this feature.
+std::string well_known_udp_port_name(uint16_t /*port*/) {
     return "";
 }
 
@@ -521,15 +522,47 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
         }
 
         if (ip.protocol == IPPROTO_UDP_VALUE) {
-            // Groundwork plumbing only: the UDP header/payload split is recognized and reported
-            // (src/dst port, byte count), but no application-layer protocol riding on UDP is
-            // decoded yet -- see udp.hpp's file header comment and docs/MANUAL.md's ROADMAP.
             // Unlike TCP, a UDP datagram is already a complete, self-delimited unit, so none of
             // the TCP-segment reassembly machinery below applies here at all.
             UdpDatagram udp = parse_udp(ip.payload);
             out.has_udp = true;
             out.src_port = udp.src_port;
             out.dst_port = udp.dst_port;
+
+            // Tried first, port-independently, same rationale as EtherNet/IP explicit messaging's
+            // own TCP dispatch below: try_parse_cip_io's structural check (an exact CPF item
+            // type + exact length) is strong enough to run unconditionally in Auto mode -- see its
+            // header comment in enip.hpp.
+            bool want_enip_io = options_.protocol_filter == ProtocolFilter::Auto ||
+                                 options_.protocol_filter == ProtocolFilter::EnipOnly;
+            if (want_enip_io) {
+                if (auto io = try_parse_cip_io(udp.payload)) {
+                    out.protocol = "enip";
+                    out.summary = io->summary;
+                    out.enip_has_io = true;
+                    out.enip_io_connection_id = io->connection_id;
+                    out.enip_io_sequence_number = io->sequence_number;
+                    out.enip_io_has_data = io->has_io_data;
+                    out.enip_io_data_hex = io->io_data_hex;
+                    out.enip_io_data_length = io->io_data_length;
+                    for (const auto& n : io->notes) out.notes.push_back(n);
+
+                    bool expected_port = port_in(udp.src_port, ENIP_IO_UDP_PORT, options_.extra_enip_io_ports) ||
+                                          port_in(udp.dst_port, ENIP_IO_UDP_PORT, options_.extra_enip_io_ports);
+                    if (!expected_port) {
+                        out.notes.push_back("seen on UDP port " + std::to_string(udp.src_port) + "->" +
+                                             std::to_string(udp.dst_port) +
+                                             ", which is not a configured/standard EtherNet/IP CIP I/O port "
+                                             "(2222)");
+                    }
+                    return out;
+                }
+            }
+
+            // Groundwork plumbing beyond this point: the UDP header/payload split is recognized
+            // and reported (src/dst port, byte count), but no other application-layer protocol
+            // riding on UDP is decoded -- see udp.hpp's file header comment and docs/MANUAL.md's
+            // ROADMAP.
             out.protocol = "udp";
             std::ostringstream s;
             if (udp.payload.empty()) {

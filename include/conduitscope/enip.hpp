@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // enip.hpp - EtherNet/IP encapsulation protocol + CIP (Common Industrial
-// Protocol) explicit messaging decoding, TCP port 44818.
+// Protocol) explicit messaging decoding (TCP port 44818), plus CIP implicit
+// (real-time I/O) messaging decoding (UDP port 2222).
 //
 // EtherNet/IP wraps every message (session management, and CIP itself) in a
 // fixed 24-byte encapsulation header: Command (u16), Length (u16, byte count
@@ -67,6 +68,28 @@
 // encapsulation messages coalesced by the sender/OS into one TCP payload
 // are handled the same way Decoder already handles that for IEC 104/DNP3 --
 // see decoder.cpp's coalescing loop.
+//
+// CIP implicit (I/O) messaging, UDP port 2222: the real-time, cyclic I/O
+// data exchange a prior Forward_Open (explicit messaging, above) established
+// between an originator and a target -- e.g. a PLC scanning an I/O module's
+// input/output assembly every few milliseconds. Unlike explicit messaging,
+// there is NO 24-byte encapsulation header on this wire: a UDP/2222 payload
+// IS a Common Packet Format item list directly (see try_parse_cip_io below).
+// This groundwork release decodes the Sequenced Address Item (CPF item
+// 0x8002 -- connection ID + rolling sequence number) fully, and locates the
+// Connected Data Item (CPF item 0x00B1) that carries the actual I/O/assembly
+// data -- but shows that data only as raw hex, never value-decoded: unlike
+// explicit messaging's typed tag reads, assembly data has no generic
+// self-describing wire-level type, AND this decoder does not track a
+// connection's negotiated transport class (Class 0 vs 1/2/3, set by the
+// Forward_Open that established it, generally not captured in the same
+// pass as the I/O traffic it configures) -- which is specifically what
+// would be needed to know whether a leading 16-bit CIP sequence count is
+// present inside that data or not. See try_parse_cip_io's own header
+// comment, and the CipIoFrame struct comment, for the full reasoning; this
+// mirrors the "decode confidently only where the wire format is
+// unambiguous" philosophy applied throughout this file (see the symbolic-
+// path-gating scoping note above) and the rest of this codebase.
 #pragma once
 
 #include <cstdint>
@@ -79,6 +102,7 @@
 namespace conduitscope {
 
 constexpr uint16_t ENIP_TCP_PORT = 44818;
+constexpr uint16_t ENIP_IO_UDP_PORT = 2222;  // CIP implicit (real-time I/O) messaging
 
 // One CIP explicit-message request path, decoded generically into a
 // human-readable summary plus the class/instance/attribute logical-segment
@@ -182,5 +206,44 @@ std::optional<size_t> enip_declared_length(ByteSpan payload);
 // astronomically unlikely -- no evidence of one has been found in any real or synthetic capture
 // used to build or test this decoder.
 std::optional<EnipFrame> try_parse_enip(ByteSpan tcp_payload);
+
+// One decoded CIP I/O (implicit messaging) UDP datagram -- see this file's header comment's CIP
+// implicit messaging section for the wire format. There is no 24-byte encapsulation header here;
+// this is the Common Packet Format item list directly.
+struct CipIoFrame {
+    // Sequenced Address Item (CPF item 0x8002) -- always present and decoded when
+    // try_parse_cip_io returns a value at all, since it's this decoder's structural detection
+    // anchor (see try_parse_cip_io's header comment).
+    uint32_t connection_id = 0;    // this datagram's O->T or T->O connection ID -- matches the
+                                    // corresponding Forward_Open's connection ID if that exchange
+                                    // was also captured (not cross-referenced by this decoder)
+    uint32_t sequence_number = 0;  // rolls over; a receiver uses this to detect lost, reordered,
+                                    // or duplicate I/O updates
+    // Connected Data Item (CPF item 0x00B1), when present -- the actual I/O/assembly data, shown
+    // only as raw hex. See this file's header comment's CIP implicit messaging section for why a
+    // possible leading 16-bit CIP sequence count (present for Class 1/2/3, absent for Class 0
+    // connections -- indistinguishable here without cross-packet Forward_Open correlation this
+    // decoder does not do) is deliberately NOT stripped from these bytes.
+    bool has_io_data = false;
+    std::string io_data_hex;
+    size_t io_data_length = 0;
+
+    std::string summary;
+    std::vector<std::string> notes;
+};
+
+// Attempts to interpret `udp_payload` as one CIP I/O (implicit messaging) datagram. Returns
+// std::nullopt (never throws) unless the very first Common Packet Format item is a Sequenced
+// Address Item: type code exactly 0x8002 AND declared length exactly 8 bytes (the fixed size
+// ODVA mandates for this item -- 4-byte connection ID + 4-byte sequence number). Two
+// independently-fixed 16-bit fields is the same "several independently-fixed fields" structural-
+// confidence philosophy try_parse_enip/try_parse_iec104_apci already use (see their own header
+// comments) -- strong enough that, like every other protocol decoder in this codebase, this can
+// run port-independently in Auto mode without meaningfully risking a false-positive match against
+// unrelated UDP traffic. Any further CPF item is then walked generically: a Connected Data Item
+// (0x00B1) is decoded into io_data_hex; any other item type present (Sockaddr Info, ...) is named
+// in `notes` but not decoded further, the same "named but not further decoded" treatment
+// decode_cpf_and_cip already gives those item types on the TCP side.
+std::optional<CipIoFrame> try_parse_cip_io(ByteSpan udp_payload);
 
 }  // namespace conduitscope

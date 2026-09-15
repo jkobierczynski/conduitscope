@@ -1,7 +1,7 @@
 # conduitscope
 
 `conduitscope` decodes Modbus/TCP, DNP3, IEC 60870-5-104, S7comm/COTP (Siemens S7 PLC
-protocol), and EtherNet/IP (CIP explicit messaging) traffic from offline pcap/pcapng captures, and checks it against a zone/conduit segmentation
+protocol), and EtherNet/IP (CIP explicit and implicit messaging) traffic from offline pcap/pcapng captures, and checks it against a zone/conduit segmentation
 policy. It's an OT/ICS conduit-auditing tool: `decode`/`info` give you reliable
 protocol decoding and a stats view, and `policy validate` maps that decoded traffic
 against an IEC 62443-style zone/conduit model (for NIS2-flavored compliance work) --
@@ -149,21 +149,39 @@ Groundwork / v0.1.0. What works right now:
   and a larger real industrial-control-system capture dominated by
   Multiple_Service_Packet/Unconnected_Send/Read_Modify_Write_Tag traffic --
   see tests/real_captures/enip/ATTRIBUTION.md.
+- EtherNet/IP CIP I/O (implicit messaging, UDP port 2222): the real-time,
+  cyclic I/O data exchange a prior Forward_Open (above) establishes. Unlike
+  explicit messaging, there's no 24-byte encapsulation header on this wire at
+  all -- a UDP/2222 payload *is* the Common Packet Format item list directly
+  (confirmed against Wireshark's own `packet-enip.c` dissector source). The
+  Sequenced Address Item (connection ID + rolling sequence number) is fully
+  decoded; the Connected Data Item (the actual I/O/assembly data) is located
+  and shown as raw hex, deliberately never value-decoded, since it has no
+  generic self-describing wire-level type and this decoder doesn't track a
+  connection's negotiated transport class (which would be needed to know
+  whether a leading 16-bit CIP sequence count is present in it or not) --
+  see docs/MANUAL.md. This is the first protocol conduitscope decodes over
+  UDP; `--protocol enip` covers both explicit and implicit messaging. No real
+  CIP I/O capture was found while building this decoder (searched across
+  several public pcap collections, including the ones that supplied the two
+  real EtherNet/IP captures above) -- validated by construction against the
+  wire format as cross-checked against Wireshark's dissector source and the
+  CISA `icsnpp-enip` Zeek parser; see tests/real_captures/enip/ATTRIBUTION.md.
 - Non-IPv4 Ethernet frames and non-TCP IPv4 payloads (including UDP) are now
   recognized and named, not just reported as a bare hex/number and dropped:
   ARP, PROFINET RT, IEC 61850 GOOSE/Sampled Values, EtherCAT, LLDP, PTP, MPLS,
   and stacked-VLAN (802.1ad/QinQ) EtherTypes; ICMP, IGMP, GRE, ESP, AH, OSPF,
   and SCTP IP protocol numbers; and the UDP header itself (source/destination
-  port, byte count), with EtherNet/IP's own UDP port (2222, implicit/I-O
-  messaging) called out by name. This is groundwork plumbing, not a new
-  protocol decoder -- none of these protocols' own framing is parsed any
-  further yet (no GOOSE/PROFINET/EtherNet/IP-I/O decode), and `policy
-  validate` does not yet evaluate this traffic against any conduit (still
-  counted as `skipped_non_tcp`, same as before) -- but it's a real, confirmed
-  visibility gap this closes: re-running conduitscope's own real-capture test
-  set after adding this surfaced genuine ARP and UDP (DNS, NetBIOS) traffic
-  that was previously invisible. See docs/MANUAL.md's PROTOCOL COVERAGE and
-  ROADMAP.
+  port, byte count) -- EtherNet/IP's own UDP port (2222) is decoded, not just
+  named, when the traffic on it actually looks like CIP I/O (see above). This
+  is otherwise groundwork plumbing, not a new protocol decoder -- none of the
+  remaining protocols' own framing is parsed any further yet (no GOOSE/
+  PROFINET decode), and `policy validate` does not yet evaluate any non-TCP
+  traffic against any conduit (still counted as `skipped_non_tcp`, same as
+  before) -- but it's a real, confirmed visibility gap this closes:
+  re-running conduitscope's own real-capture test set after adding this
+  surfaced genuine ARP and UDP (DNS, NetBIOS) traffic that was previously
+  invisible. See docs/MANUAL.md's PROTOCOL COVERAGE and ROADMAP.
 - IPv4 payload is clamped to the header's own `total_length` field, so
   Ethernet's minimum-frame-size padding on short packets (bare ACKs, mostly)
   never gets misreported as phantom TCP payload -- found and fixed against a
@@ -278,6 +296,7 @@ build/conduitscope decode -r tests/sample_modbus.pcap
 build/conduitscope decode -r tests/sample_s7comm.pcap --stats
 build/conduitscope decode -r tests/sample_iec104.pcap
 build/conduitscope decode -r tests/sample_enip.pcap
+build/conduitscope decode -r tests/sample_enip_cip_io.pcap
 build/conduitscope decode -r tests/sample_modbus.pcap --format json
 build/conduitscope info -r tests/sample_modbus.pcap
 
@@ -291,7 +310,7 @@ To decode traffic you've actually captured, e.g. from a Modbus simulator such as
 [4SICS ICS pcaps](https://www.netresec.com/?page=PCAP4SICS):
 
 ```sh
-tcpdump -i <iface> -w capture.pcap port 502 or port 20000 or port 2404 or port 102 or port 44818
+tcpdump -i <iface> -w capture.pcap port 502 or port 20000 or port 2404 or port 102 or port 44818 or port 2222
 build/conduitscope decode -r capture.pcap
 ```
 
@@ -300,7 +319,7 @@ intermediate file and check traffic in real time:
 
 ```sh
 build/conduitscope interfaces                                    # list capturable interfaces
-build/conduitscope decode -i eth0 --filter "port 502 or port 2404 or port 102 or port 44818" --duration 60
+build/conduitscope decode -i eth0 --filter "port 502 or port 2404 or port 102 or port 44818 or port 2222" --duration 60
 build/conduitscope policy validate -i eth0 --policy tests/policies/compliant.yaml --duration 60
 # or just Ctrl+C to stop either one early -- both still print whatever was captured so far
 ```

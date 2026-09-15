@@ -174,7 +174,9 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
         }
         out_ << "],\n";
     }
-    if (p.protocol == "enip") {
+    if (p.protocol == "enip" && !p.enip_command_name.empty()) {
+        // Empty for a CIP I/O (implicit messaging) UDP datagram -- there is no encapsulation
+        // command on the wire for that (see enip_has_io below and enip.hpp's file header comment).
         out_ << "    \"enip_command\": \"" << json_escape(p.enip_command_name) << "\",\n";
     }
     if (p.enip_has_cip) {
@@ -194,6 +196,16 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
             out_ << "\"" << json_escape(p.enip_cip_values[i]) << "\"";
         }
         out_ << "],\n";
+    }
+    if (p.enip_has_io) {
+        std::ostringstream connid;
+        connid << "0x" << std::hex << std::uppercase << p.enip_io_connection_id;
+        out_ << "    \"enip_io_connection_id\": \"" << connid.str() << "\",\n";
+        out_ << "    \"enip_io_sequence_number\": " << p.enip_io_sequence_number << ",\n";
+        if (p.enip_io_has_data) {
+            out_ << "    \"enip_io_data_length\": " << p.enip_io_data_length << ",\n";
+            out_ << "    \"enip_io_data_hex\": \"" << json_escape(p.enip_io_data_hex) << "\",\n";
+        }
     }
     out_ << "    \"notes\": [";
     for (size_t i = 0; i < p.notes.size(); ++i) {
@@ -242,8 +254,9 @@ void StatsWriter::write_packet(const DecodedPacket& p) {
         iec104_asdu_type_counts_[p.iec104_asdu_type_name]++;
     }
     if (p.protocol == "enip") {
-        enip_command_counts_[p.enip_command_name]++;
+        if (!p.enip_command_name.empty()) enip_command_counts_[p.enip_command_name]++;
         if (p.enip_has_cip) enip_cip_service_counts_[p.enip_cip_service_name]++;
+        if (p.enip_has_io) enip_io_datagram_count_++;
     }
     if (!has_ts_) {
         first_ts_ = last_ts_ = p.timestamp;
@@ -302,6 +315,9 @@ void StatsWriter::print_summary(std::ostream& out) const {
         for (const auto& [name, count] : enip_cip_service_counts_) {
             out << "  " << std::left << std::setw(60) << name << count << "\n";
         }
+    }
+    if (enip_io_datagram_count_ > 0) {
+        out << "enip cip i/o (implicit messaging) datagrams: " << enip_io_datagram_count_ << "\n";
     }
 }
 

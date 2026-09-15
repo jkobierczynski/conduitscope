@@ -34,7 +34,8 @@ struct DecodeOptions {
     ProtocolFilter protocol_filter = ProtocolFilter::Auto;
     // Additional ports to treat as "expected" for each protocol, beyond the
     // IANA-registered defaults (502 for Modbus, 20000 for DNP3, 2404 for
-    // IEC 104, 44818 for EtherNet/IP). This does NOT gate detection in Auto
+    // IEC 104, 44818 for EtherNet/IP explicit messaging, 2222 for EtherNet/IP
+    // CIP I/O implicit messaging). This does NOT gate detection in Auto
     // mode (detection is payload-shape based) -- it only changes whether the
     // decoded output calls a port "standard" or flags it as unexpected,
     // which is itself a useful signal when auditing a conduit against a
@@ -44,6 +45,7 @@ struct DecodeOptions {
     std::vector<uint16_t> extra_s7comm_ports;
     std::vector<uint16_t> extra_iec104_ports;
     std::vector<uint16_t> extra_enip_ports;
+    std::vector<uint16_t> extra_enip_io_ports;  // UDP, unlike extra_enip_ports (TCP) -- see ENIP_IO_UDP_PORT
     // If true, a parse failure at the Ethernet/IPv4/TCP layer is rethrown to
     // the caller instead of being recorded as a per-packet "parse-error"
     // result. Off by default so one malformed packet doesn't abort decoding
@@ -77,9 +79,11 @@ struct DecodedPacket {
     // "iec104", "modbus", "dnp3", "s7comm", "enip", "cotp" (recognized TPKT/COTP framing but not
     // S7comm inside it -- e.g. a connection setup frame), "tcp" (recognized transport, no
     // app-layer match), "udp" (recognized transport, no app-layer protocol decoded -- see
-    // udp.hpp), "non-tcp" (a non-TCP, non-UDP IPv4 payload, e.g. ICMP), "non-ip" (a non-IPv4
-    // Ethernet frame, e.g. ARP or a raw-Ethernet OT protocol like PROFINET/GOOSE -- see
-    // link_layer.hpp's ethertype_name), "unsupported-link", or "parse-error".
+    // udp.hpp; UDP/2222 CIP I/O traffic that try_parse_cip_io actually recognizes is promoted to
+    // "enip" instead -- see enip_has_io below), "non-tcp" (a non-TCP, non-UDP IPv4 payload, e.g.
+    // ICMP), "non-ip" (a non-IPv4 Ethernet frame, e.g. ARP or a raw-Ethernet OT protocol like
+    // PROFINET/GOOSE -- see link_layer.hpp's ethertype_name), "unsupported-link", or
+    // "parse-error".
     std::string protocol;
     std::string summary;
     std::vector<std::string> notes;
@@ -150,6 +154,17 @@ struct DecodedPacket {
     // members, Unconnected_Send's embedded message, ...) -- capped at 50 entries for the same
     // reason as dnp3_point_values/iec104_object_values.
     std::vector<std::string> enip_cip_values;
+
+    // Only set when protocol == "enip" AND this packet is a CIP I/O (implicit messaging) UDP
+    // datagram, not an explicit-messaging TCP encapsulation message -- see try_parse_cip_io in
+    // enip.hpp. enip_command_name is left empty in that case (there is no encapsulation command on
+    // the wire for implicit messaging at all -- see enip.hpp's file header comment).
+    bool enip_has_io = false;
+    uint32_t enip_io_connection_id = 0;
+    uint32_t enip_io_sequence_number = 0;
+    bool enip_io_has_data = false;   // true once a Connected Data Item (0x00B1) was located
+    std::string enip_io_data_hex;    // raw hex, deliberately not value-decoded -- see enip.hpp
+    size_t enip_io_data_length = 0;
 };
 
 // Cross-packet DNP3 fragment-reassembly state for one directional TCP flow (src ip:port -> dst

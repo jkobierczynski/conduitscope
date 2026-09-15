@@ -2,7 +2,7 @@
 
 ## NAME
 
-conduitscope -- decode Modbus/TCP, DNP3, IEC 60870-5-104, S7comm/COTP, and EtherNet/IP (CIP explicit messaging) traffic from offline pcap captures
+conduitscope -- decode Modbus/TCP, DNP3, IEC 60870-5-104, S7comm/COTP, and EtherNet/IP (CIP explicit and implicit messaging) traffic from offline pcap captures
 
 ## SYNOPSIS
 
@@ -11,7 +11,7 @@ conduitscope [-q|--quiet] [--no-color|--color] [--log-file FILE] [--version] [-h
 
 conduitscope decode (-r FILE | -i INTERFACE) [-o FILE] [-f text|json|csv] [--protocol auto|modbus|dnp3|s7comm|iec104|enip]
                      [--modbus-port PORT]... [--dnp3-port PORT]... [--s7comm-port PORT]... [--iec104-port PORT]...
-                     [--enip-port PORT]...
+                     [--enip-port PORT]... [--enip-io-port PORT]...
                      [--max-packets N] [--stats] [--strict]
                      [--filter BPF] [--duration SECONDS] [--snaplen BYTES] [--no-promiscuous]
 
@@ -35,9 +35,11 @@ exception to conduitscope's otherwise zero-dependency design (see BUILDING).
 
 conduitscope reads a pcap or pcapng capture file -- or, optionally, a
 live network interface (see LIVE CAPTURE below) -- walks each packet's
-Ethernet/IPv4/TCP headers, and attempts to recognize and decode Modbus/TCP,
-DNP3, IEC 60870-5-104, S7comm (Siemens S7 PLC protocol, riding on
-TPKT/COTP), or EtherNet/IP (CIP explicit messaging) payloads inside the TCP stream. It is designed as groundwork for auditing
+Ethernet/IPv4/TCP or Ethernet/IPv4/UDP headers, and attempts to recognize
+and decode Modbus/TCP, DNP3, IEC 60870-5-104, S7comm (Siemens S7 PLC
+protocol, riding on TPKT/COTP), or EtherNet/IP (CIP explicit messaging)
+payloads inside the TCP stream, and EtherNet/IP CIP I/O (implicit
+messaging) payloads inside the UDP stream. It is designed as groundwork for auditing
 OT/ICS network traffic against a zone-and-conduit segmentation model (the kind
 IEC 62443-3-2 and, by extension, NIS2 risk-assessment work call for): the
 protocol-decoding layer (`decode`/`info`) and, now, the zone/conduit
@@ -137,12 +139,13 @@ conduitscope decode (-r FILE | -i INTERFACE) [options]
 | `--no-promiscuous` | off (i.e. promiscuous by default) | With `-i`, don't put the interface into promiscuous mode. Promiscuous is the default because the main live-capture use case -- watching a mirrored/SPAN switch port for zone/conduit traffic -- needs to see traffic that isn't addressed to the capturing host at all. |
 | `-o, --output FILE` | stdout | Write decoded output here instead of stdout. |
 | `-f, --format {text,json,csv}` | `text` | Output format. See OUTPUT FORMATS below. |
-| `--protocol {auto,modbus,dnp3,s7comm,iec104,enip}` | `auto` | Restrict decoding to one protocol. `auto` opportunistically tries EtherNet/IP, IEC 104, Modbus, DNP3, and S7comm/COTP detection on every TCP payload, regardless of port (see PROTOCOL DETECTION below). |
+| `--protocol {auto,modbus,dnp3,s7comm,iec104,enip}` | `auto` | Restrict decoding to one protocol. `auto` opportunistically tries EtherNet/IP, IEC 104, Modbus, DNP3, and S7comm/COTP detection on every TCP payload, and CIP I/O detection on every UDP payload, regardless of port (see PROTOCOL DETECTION below). `enip` covers both EtherNet/IP explicit messaging (TCP) and CIP I/O implicit messaging (UDP). |
 | `--modbus-port PORT` | *(502 built in)* | Additional TCP port to treat as "expected" for Modbus. Repeatable. Does **not** gate detection -- it only changes whether a decoded Modbus frame is annotated as appearing on an unexpected port, which is itself a useful signal when auditing a conduit. |
 | `--dnp3-port PORT` | *(20000 built in)* | Same as `--modbus-port`, for DNP3. Repeatable. |
 | `--s7comm-port PORT` | *(102 built in)* | Same as `--modbus-port`, for COTP/S7comm. Repeatable. |
 | `--iec104-port PORT` | *(2404 built in)* | Same as `--modbus-port`, for IEC 104. Repeatable. |
-| `--enip-port PORT` | *(44818 built in)* | Same as `--modbus-port`, for EtherNet/IP. Repeatable. |
+| `--enip-port PORT` | *(44818 built in)* | Same as `--modbus-port`, for EtherNet/IP explicit messaging (TCP). Repeatable. |
+| `--enip-io-port PORT` | *(2222 built in)* | Same as `--modbus-port`, for EtherNet/IP CIP I/O implicit messaging (UDP). Repeatable. |
 | `--max-packets N` | `0` (unlimited) | Stop after decoding this many packets. With `-i`, this also bounds a live capture (in addition to `--duration` and Ctrl+C). |
 | `--stats` | off | Print an aggregate summary (protocol counts, Modbus function-code histogram, exception count, capture time span) instead of one line per packet. Ignores `--format`. |
 | `--strict` | off | Abort with a nonzero exit status on the first packet that fails to parse at the Ethernet/IPv4/TCP layer, instead of reporting a per-packet warning and continuing. Does not affect Modbus/DNP3-level ambiguity, which is always handled by heuristic + note rather than error. |
@@ -421,6 +424,10 @@ that never carries a full S7comm message (e.g. only a connection
 request/confirm was captured) still counts as `s7comm` traffic for matching
 purposes -- see PROTOCOL COVERAGE's S7comm/COTP section for why a "cotp"-
 tagged packet and an "s7comm"-tagged one are the same conduit on the wire.
+`enip` here only ever means EtherNet/IP explicit messaging (TCP 44818):
+conduits are TCP-only (see LIMITATIONS), so there is currently no way to
+write a conduit matching CIP I/O (implicit messaging, UDP 2222) traffic,
+even though `decode` now decodes it -- see ROADMAP.
 
 `from`/`to` describe a **direction**: which zone initiates the TCP
 connection (`from`) and which zone answers it (`to`) -- not which zone sends
@@ -615,7 +622,21 @@ down.
 
 `--protocol modbus`, `--protocol dnp3`, `--protocol s7comm`, `--protocol
 iec104`, or `--protocol enip` restrict decoding to only that protocol (useful
-for large mixed captures, or for scripting a two-pass analysis).
+for large mixed captures, or for scripting a two-pass analysis). `--protocol
+enip` covers both EtherNet/IP explicit messaging (TCP, above) and CIP I/O
+implicit messaging (UDP, below) -- they're the same overall protocol family.
+
+**CIP I/O (implicit messaging), UDP port 2222** is tried, port-independently,
+against every non-empty UDP payload, the same "opportunistic, payload-shape"
+philosophy as the five TCP protocols above: the very first Common Packet
+Format item must be a Sequenced Address Item -- type code exactly `0x8002`
+*and* declared length exactly `8` bytes (the fixed size ODVA mandates: a
+4-byte connection ID plus a 4-byte sequence number). Two independently-fixed
+16-bit fields is the same structural-confidence philosophy EtherNet/IP's own
+TCP detection and IEC 104's APCI checks already use -- strong enough that a
+false-positive match against unrelated UDP traffic is not a realistic
+concern, even without a dedicated-port requirement. See PROTOCOL COVERAGE's
+EtherNet/IP section for what is and isn't decoded once that anchor matches.
 
 ## OUTPUT FORMATS
 
@@ -659,7 +680,7 @@ that don't apply to a given packet (e.g. `src_ip` for a non-IP frame) are
 `null`. Intended to be piped into `jq` or read by a future policy-evaluation
 layer.
 
-Seventeen fields are only present (omitted entirely, not `null`) on packets
+Twenty-one fields are only present (omitted entirely, not `null`) on packets
 where they apply:
 
 - `modbus_paired_request_index`: the `index` of the specific earlier request
@@ -706,9 +727,12 @@ where they apply:
   10:30:00.500"` for a time-tagged measured value. Empty for an ASDU type
   outside the decoded-type table (see PROTOCOL COVERAGE).
 - `enip_command`: the EtherNet/IP encapsulation command name (e.g.
-  `"RegisterSession"`, `"SendRRData"`), when protocol is `enip`. Reflects
-  only the *first* EtherNet/IP message found in this TCP payload -- see
-  `notes` for any additional coalesced messages (PROTOCOL COVERAGE).
+  `"RegisterSession"`, `"SendRRData"`), when protocol is `enip` AND this is
+  an explicit-messaging (TCP) packet. Reflects only the *first* EtherNet/IP
+  message found in this TCP payload -- see `notes` for any additional
+  coalesced messages (PROTOCOL COVERAGE). Absent for a CIP I/O (implicit
+  messaging, UDP) packet -- there is no encapsulation command on that wire
+  at all; see `enip_io_connection_id` below instead.
 - `enip_cip_is_response`: `true`/`false`, when a CIP explicit message was
   located inside that first EtherNet/IP message (a `SendRRData`/
   `SendUnitData` carrying one).
@@ -728,6 +752,18 @@ where they apply:
   response: Success"]` for one member of a Multiple_Service_Packet reply.
   See PROTOCOL COVERAGE for exactly which services get full value decoding
   versus a structural-only summary.
+- `enip_io_connection_id`: the CIP I/O (implicit messaging) datagram's
+  connection ID, as a hex string (e.g. `"0xABCD1234"`), when protocol is
+  `enip` and this is a UDP/2222 implicit-messaging packet (see PROTOCOL
+  COVERAGE's CIP I/O subsection).
+- `enip_io_sequence_number`: the same datagram's rolling sequence number, as
+  a plain integer, alongside `enip_io_connection_id`.
+- `enip_io_data_length`: the Connected Data Item's byte length, when one was
+  present in the datagram (a CIP I/O datagram carrying only a Sequenced
+  Address Item and no data segment has neither this nor `enip_io_data_hex`).
+- `enip_io_data_hex`: the Connected Data Item's contents as lowercase hex,
+  with no separator (e.g. `"deadbeef"`) -- **never value-decoded**, see
+  PROTOCOL COVERAGE and LIMITATIONS for why.
 
 All array fields are capped at 50 entries for a single heavily-batched
 request/response; see PROTOCOL COVERAGE for where the full list still shows
@@ -1115,7 +1151,7 @@ negative activation confirmation. See
 these captures happened to split an APDU across a TCP segment boundary, so
 that path (see LIMITATIONS) remains untested against real traffic.
 
-### EtherNet/IP (CIP explicit messaging, TCP port 44818)
+### EtherNet/IP (CIP explicit messaging, TCP port 44818; CIP I/O implicit messaging, UDP port 2222)
 
 Every EtherNet/IP message is wrapped in a fixed 24-byte encapsulation header
 (command, length, session handle, status, an opaque 8-byte sender context
@@ -1200,6 +1236,60 @@ decision above. Neither capture happened to split an encapsulation message
 across a TCP segment boundary, so that path (see LIMITATIONS) remains
 untested against real traffic, same as IEC 104's own APDU reassembly.
 
+#### CIP I/O (implicit messaging), UDP port 2222
+
+The real-time, cyclic I/O data exchange a prior Forward_Open (explicit
+messaging, above) establishes between an originator and a target -- e.g. a
+PLC scanning an I/O module's input/output assembly every few milliseconds.
+Unlike explicit messaging, there is **no 24-byte encapsulation header** on
+this wire at all: a UDP/2222 payload *is* a Common Packet Format item list
+directly (confirmed against Wireshark's own `packet-enip.c` dissector
+source -- `dissect_enipio` hands off straight to `dissect_cpf` at offset 0 --
+not assumed from ODVA documentation alone; see `tests/real_captures/enip/
+ATTRIBUTION.md`).
+
+conduitscope decodes:
+
+- **The Sequenced Address Item** (CPF item `0x8002`) fully: a 4-byte
+  connection ID and a 4-byte rolling sequence number, both little-endian.
+  This item is also the decoder's structural detection anchor -- see
+  PROTOCOL DETECTION.
+- **The Connected Data Item** (CPF item `0x00B1`), when present, is
+  *located* and its length reported, but its contents are shown only as
+  **raw hex, never value-decoded**. Two reasons, both deliberate: assembly/
+  I/O data has no generic self-describing wire-level type at all (unlike
+  explicit messaging's typed tag reads), and this decoder does not track a
+  connection's negotiated transport class (Class 0 vs Class 1/2/3, set by
+  the Forward_Open that established it, and not necessarily captured in the
+  same pass as the I/O traffic it configures) -- which is specifically what
+  would be needed to know whether a leading 16-bit CIP sequence count is
+  present inside this data or not. See LIMITATIONS, and `enip.hpp`'s file
+  header comment's CIP implicit messaging section, for the full reasoning.
+  The CISA `icsnpp-enip` Zeek parser's own `cip_io.log` makes the same call
+  (its `io_data` field is the Connected Data Item's contents unsplit) --
+  see `tests/real_captures/enip/ATTRIBUTION.md`.
+- **Any other CPF item type present** (most commonly Sockaddr Info,
+  `0x8000`/`0x8001`) is named in a note but not further decoded -- the same
+  "named but not decoded" treatment the TCP-side CPF item walk already gives
+  those types.
+
+A datagram whose first item isn't a Sequenced Address Item of exactly this
+shape is left as a generic `udp` packet, not guessed at -- see PROTOCOL
+DETECTION. Each datagram is decoded entirely independently: there is no
+cross-datagram state (e.g. correlating a connection ID back to the
+Forward_Open that established it, or tracking expected sequence-number
+continuity) in this groundwork release -- see LIMITATIONS and ROADMAP.
+
+No real capture containing genuine CIP I/O traffic was found while building
+this decoder (searched across the same public pcap collections that
+supplied the two real captures above, plus a couple more -- see
+`tests/real_captures/enip/ATTRIBUTION.md` for exactly what was checked);
+validated only by construction (`tests/sample_enip_cip_io.pcap`, see
+`tools/make_sample_pcap.py`'s `build_enip_cip_io_sample`) against the wire
+format as cross-checked against Wireshark's dissector source and the CISA
+`icsnpp-enip` Zeek parser, not against an independent real capture the way
+explicit messaging is above.
+
 ### Link/IP-layer plumbing: non-IPv4 Ethernet, and non-TCP IPv4 (including UDP)
 
 Every protocol above rides on Ethernet + IPv4 + TCP. Traffic outside that --
@@ -1227,17 +1317,19 @@ protocol number registry (not reverse-engineered from a single capture):
   `total_length` -- see that function's comment) is now opened and reported,
   with source/destination port surfaced the same way TCP's are (`endpoint()`
   in `output.cpp`, and `src_port`/`dst_port` in JSON/CSV). EtherNet/IP's own
-  UDP port (2222, CIP implicit/real-time I/O messaging -- distinct from the
-  TCP 44818 explicit messaging this tool decodes) is called out by name in
-  the summary when seen.
+  CIP I/O port (2222) is no longer just named here: a UDP payload actually
+  shaped like CIP I/O traffic is now decoded and reported as `enip`, not
+  `udp` -- see PROTOCOL COVERAGE's EtherNet/IP section. A UDP/2222 payload
+  that *doesn't* match that shape still falls through to this plain `udp`
+  handling, same as before.
 
-**This is groundwork plumbing, explicitly not a new protocol decoder.**
-None of PROFINET/GOOSE/Sampled Values/EtherCAT/EtherNet-IP-implicit's own
-framing is parsed -- these EtherTypes/ports are *named*, not *decoded*, and
-the summary says so for UDP ("not decoded in this groundwork release"). A
-value outside every table above still shows only as a bare hex ethertype or
-decimal protocol number, exactly as before -- nothing is guessed at for an
-EtherType/protocol/port this tool doesn't recognize.
+**This is groundwork plumbing, explicitly not a new protocol decoder --**
+**except for CIP I/O, which now is one** (see PROTOCOL COVERAGE's EtherNet/IP
+section). None of PROFINET/GOOSE/Sampled Values/EtherCAT's own framing is
+parsed -- these EtherTypes are *named*, not *decoded*. A value outside every
+table above still shows only as a bare hex ethertype or decimal protocol
+number, exactly as before -- nothing is guessed at for an EtherType/protocol/
+port this tool doesn't recognize.
 
 `policy validate` does not yet evaluate any of this traffic against a
 conduit: it's still counted only in `PolicyReport::skipped_non_tcp`, exactly
@@ -1356,14 +1448,31 @@ These are current, not aspirational -- each has a corresponding ROADMAP item.
   header will very likely fail to parse and be reported as a parse-error on
   the fragments after the first.
 - **Non-IPv4 Ethernet frames and non-TCP IPv4 payloads (including UDP) are
-  named but not decoded.** A deliberately small, OT-relevant set of
-  EtherTypes/IP-protocol-numbers/UDP-ports is recognized by name (ARP,
-  PROFINET RT, IEC 61850 GOOSE/Sampled Values, ICMP, EtherNet/IP's own UDP
-  port for implicit/I-O messaging, and the rest -- see PROTOCOL COVERAGE);
-  nothing outside that set gets more than a bare hex/decimal number, and
-  even a *named* one gets no further parsing of its own framing. `policy
-  validate` does not yet evaluate any of this traffic against a conduit --
-  see that section and ROADMAP.
+  named but not decoded, with one exception (CIP I/O).** A deliberately
+  small, OT-relevant set of EtherTypes/IP-protocol-numbers is recognized by
+  name (ARP, PROFINET RT, IEC 61850 GOOSE/Sampled Values, ICMP, and the rest
+  -- see PROTOCOL COVERAGE); nothing outside that set gets more than a bare
+  hex/decimal number, and even a *named* one gets no further parsing of its
+  own framing. The one exception is EtherNet/IP's CIP I/O traffic on UDP
+  port 2222, which is now decoded, not just named -- see PROTOCOL COVERAGE's
+  EtherNet/IP section. `policy validate` does not yet evaluate ANY UDP
+  traffic against a conduit, decoded or not (it only ever looks at TCP
+  flows) -- see that section and ROADMAP.
+- **CIP I/O (implicit messaging) decoding does not value-decode the actual
+  I/O data, and has no cross-datagram state.** The Connected Data Item's
+  contents are shown only as raw hex -- see PROTOCOL COVERAGE's CIP I/O
+  subsection for the two reasons (no generic self-describing type, and not
+  tracking a connection's negotiated transport class), and specifically why
+  a possible leading 16-bit CIP sequence count is never stripped from that
+  hex. Each datagram is also decoded entirely independently: a connection ID
+  is not cross-referenced against the Forward_Open that established it (even
+  if that exchange is in the same capture), and sequence-number continuity
+  across datagrams on the same connection is not tracked or flagged if
+  broken. No real capture containing genuine CIP I/O traffic was found to
+  validate this decoder against -- see `tests/real_captures/enip/
+  ATTRIBUTION.md` for exactly what was searched and what corroborating
+  sources (Wireshark's dissector source, the CISA `icsnpp-enip` Zeek parser)
+  were used instead.
 - **DNP3 CRCs are not validated** -- neither the data-link header CRC nor the
   per-block CRCs within the user data. A corrupted DNP3 frame that still
   starts with the right magic bytes will be "decoded" without any indication
@@ -1522,10 +1631,12 @@ These are current, not aspirational -- each has a corresponding ROADMAP item.
   responsiveness is bounded by that poll interval (200ms), not instant.
 - **QinQ (stacked 802.1Q) VLAN tags are not unwrapped**, only a single tag.
 - **`policy validate`'s zones are IPv4 CIDR-only** (matching every other
-  IPv4-only limitation in this document) and, like everything else this tool
-  decodes, TCP-only -- a policy can't reference a UDP service, a MAC address,
-  or a hostname, and non-TCP/non-IP packets are counted (`skipped_non_tcp` in
-  the JSON report) but never evaluated against any conduit.
+  IPv4-only limitation in this document) and its conduits are TCP-only --
+  unlike `decode`, which now also decodes one UDP-based protocol (CIP I/O,
+  see PROTOCOL COVERAGE). A policy can't reference a UDP service, a MAC
+  address, or a hostname, and non-TCP/non-IP packets -- including CIP I/O
+  traffic -- are counted (`skipped_non_tcp` in the JSON report) but never
+  evaluated against any conduit.
 - **`policy validate`'s client/server (initiator) determination falls back
   to a port-number heuristic when no SYN/SYN-ACK is captured for a flow**
   (e.g. a capture that starts mid-session): whichever endpoint's port is one
@@ -1674,6 +1785,17 @@ conduitscope decode -r capture.pcap --protocol enip -f json \
            "\(.src_ip) -> \(.dst_ip): \(.enip_cip_path) = \(.enip_cip_values | join(" "))"'
 ```
 
+Summarize CIP I/O (implicit messaging) traffic by connection -- how many
+datagrams and how many bytes of I/O data each connection ID carried, useful
+for spotting an active real-time I/O scan a capture wasn't expected to
+contain:
+
+```sh
+conduitscope decode -r capture.pcap --protocol enip -f json \
+  | jq -r '[.[] | select(.enip_io_connection_id != null)] | group_by(.enip_io_connection_id) |
+           .[] | "\(.[0].enip_io_connection_id): \(length) datagram(s), \([.[].enip_io_data_length // 0] | add) byte(s) of I/O data"'
+```
+
 Find every Modbus write whose response was never authoritatively paired --
 either the response wasn't captured, or it used a different session/
 transaction ID than expected (worth a closer look on a conduit that should
@@ -1759,18 +1881,21 @@ Rough order, each building on the groundwork this release establishes:
    narrow in practice -- e.g. a real device addressing a Symbol-object tag
    by numeric instance ID rather than by name, which this release's gating
    would currently show structurally rather than as a tag read.
-9. **Decode a real protocol over UDP or raw Ethernet**, now that the
-   link/IP-layer plumbing to see that traffic at all exists (see PROTOCOL
-   COVERAGE's link/IP-layer plumbing section and the "now done" paragraph
-   below) -- most likely EtherNet/IP's own implicit (I/O) messaging on UDP
-   port 2222, a direct extension of the CIP explicit-messaging work already
-   done, or one of the named-but-undecoded raw-Ethernet protocols
-   (PROFINET RT, IEC 61850 GOOSE) if real capture availability favors one of
-   those first. Each is its own research-and-validate cycle, same as every
-   protocol added so far -- naming an EtherType/port is not the same
-   groundwork as decoding what rides on it. Also the natural point to widen
-   `policy validate` beyond TCP-only conduits, once there's an actual
-   decoded non-TCP protocol worth checking a conduit against.
+9. **Decode a real protocol over raw Ethernet**, now that EtherNet/IP's own
+   UDP-based protocol is done (CIP I/O -- see PROTOCOL COVERAGE's CIP I/O
+   subsection and the "now done" paragraph below) -- one of the named-but-
+   undecoded raw-Ethernet protocols (PROFINET RT, IEC 61850 GOOSE/Sampled
+   Values), whichever real capture availability favors first. Its own
+   research-and-validate cycle, same as every protocol added so far --
+   naming an EtherType is not the same groundwork as decoding what rides on
+   it. Also, separately: validate CIP I/O decoding against a real capture
+   (none was found while building it -- see `tests/real_captures/enip/
+   ATTRIBUTION.md`) if one ever turns up, and consider cross-datagram CIP
+   I/O correlation (connection ID back to its Forward_Open, sequence-number
+   continuity/gap detection) -- see LIMITATIONS for exactly what's missing
+   there now. And widen `policy validate` beyond TCP-only conduits, now that
+   there's an actual decoded non-TCP protocol (CIP I/O) worth checking a
+   conduit against.
 
 **pcapng support** is also now done: both classic pcap and pcapng are read
 transparently (auto-detected, no flag needed) -- see "pcap vs. pcapng"
@@ -1803,13 +1928,22 @@ DETECTION.
 **Link/IP-layer plumbing for non-IPv4/non-TCP traffic** is also now done:
 non-IPv4 Ethernet frames and non-TCP IPv4 payloads (including UDP) are
 recognized and named for a deliberately small, OT-relevant set of
-EtherTypes/IP-protocol-numbers/UDP-ports (ARP, PROFINET RT, IEC 61850
-GOOSE/Sampled Values, ICMP, EtherNet/IP's own UDP implicit-messaging port,
-and the rest), rather than just a bare hex/decimal number and nothing else
--- see PROTOCOL COVERAGE's link/IP-layer plumbing section and item 9 above
-for what's still out of scope: this is naming, not decoding, of any new
-protocol, and `policy validate` doesn't yet evaluate any of it against a
-conduit.
+EtherTypes/IP-protocol-numbers (ARP, PROFINET RT, IEC 61850 GOOSE/Sampled
+Values, ICMP, and the rest), rather than just a bare hex/decimal number and
+nothing else -- see PROTOCOL COVERAGE's link/IP-layer plumbing section and
+item 9 above for what's still out of scope: this is naming, not decoding,
+of a raw-Ethernet OT protocol, and `policy validate` doesn't yet evaluate
+any non-TCP traffic against a conduit.
+
+**EtherNet/IP CIP I/O (implicit messaging) decoding** is also now done: the
+first protocol this tool decodes over UDP, and the direct extension of the
+CIP explicit-messaging work above that item 9 originally called out as the
+most likely next candidate. The Sequenced Address Item (connection ID +
+sequence number) is fully decoded; the Connected Data Item (the actual I/O
+data) is located and shown as raw hex, deliberately never value-decoded --
+see PROTOCOL COVERAGE's CIP I/O subsection and LIMITATIONS for exactly why,
+and item 9 above for what's still open (real-capture validation,
+cross-datagram correlation, and widening `policy validate` to cover it).
 
 **Colorized text output** is also now done: see OUTPUT FORMATS' "Color"
 subsection for the scheme and the `--color`/`--no-color`/auto-detection

@@ -68,3 +68,29 @@ segment boundary -- consistent with explicit-messaging PDUs typically being smal
 one segment. `enip_declared_length`'s cross-segment reassembly therefore remains exercised only by
 the synthetic `tests/sample_tcp_reassembly.pcap`-style coverage used for the other protocols, not
 by a captured real fragmentation event; see the ROADMAP in `docs/MANUAL.md`.
+
+## CIP I/O (implicit messaging, UDP port 2222): no real capture found
+
+Both real captures above are TCP/44818 explicit-messaging traffic only -- neither contains any
+UDP/2222 CIP I/O traffic. A real capture containing genuine CIP I/O (implicit messaging) was
+searched for specifically while building that decoder (`try_parse_cip_io` in `enip.cpp`) -- the
+same public collections that yielded the two captures above (`ITI/ICS-Security-Tools`,
+`automayt/ICS-pcap`, the CISA `icsnpp-enip` Zeek parser's own test traces, and the 4SICS 2015
+GeekLounge captures) were checked, none turned one up (unsurprising: capturing the cyclic I/O
+scan itself, rather than just the Forward_Open that sets it up, requires being on the segment
+during active PLC-to-I/O-module operation, a narrower window than an explicit-messaging
+engineering session). `tests/sample_enip_cip_io.pcap` (hand-built, see `tools/make_sample_pcap.py`'s
+`build_enip_cip_io_sample`) is therefore this feature's only test coverage.
+
+This does not mean the wire format itself is unconfirmed, only that it isn't validated against an
+independent real capture the way explicit messaging is above. The wire format
+(`try_parse_cip_io`'s structural anchor -- the Sequenced Address Item, CPF type `0x8002`, always
+exactly 8 bytes: 4-byte connection ID + 4-byte sequence number -- and the Connected Data Item, CPF
+type `0x00B1`, carrying the I/O data) was cross-checked against two independent authoritative
+sources before implementation: Wireshark's own `packet-enip.c` dissector source
+(`dissect_enipio`/`dissect_cpf`, confirming no 24-byte encapsulation header precedes the CPF item
+list on this port, unlike TCP explicit messaging), and the CISA `icsnpp-enip` Zeek parser's
+`cip_io.log` record definition (`connection_id`/`sequence_number`/`io_data` fields, corroborating
+that a possible leading 16-bit CIP sequence count inside the Connected Data Item is not split out
+by that parser either -- the same scope decision this decoder makes, see `enip.hpp`'s file header
+comment's CIP implicit messaging section for why).

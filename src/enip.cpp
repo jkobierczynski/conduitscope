@@ -892,6 +892,82 @@ void decode_cpf_and_cip(ByteSpan encap_data, EnipFrame& frame) {
     }
 }
 
+// --- CIP I/O (implicit messaging) decoding, UDP port 2222 -------------------
+
+constexpr size_t kMaxCipIoCpfItems = 20;  // same cap as decode_cpf_and_cip's kMaxCpfItems
+
+std::optional<CipIoFrame> try_parse_cip_io_impl(ByteSpan udp_payload) {
+    // Item count (2) + first item's type (2) + length (2) + the Sequenced Address Item's own
+    // 8-byte body -- the minimum for this function's structural detection anchor to even be
+    // checkable at all (see try_parse_cip_io's header comment in enip.hpp).
+    if (udp_payload.size() < 14) {
+        return std::nullopt;
+    }
+    Cursor c(udp_payload);
+    uint16_t item_count = c.u16le();
+    if (item_count == 0) {
+        return std::nullopt;
+    }
+    uint16_t first_type = c.u16le();
+    uint16_t first_len = c.u16le();
+    if (first_type != 0x8002 || first_len != 8) {
+        // Not a Sequenced Address Item of the exact fixed size ODVA mandates -- either not CIP I/O
+        // at all, or a shape this "first pass" doesn't recognize (see enip.hpp's file header
+        // comment's CIP implicit messaging section). Deliberately declines to guess.
+        return std::nullopt;
+    }
+
+    CipIoFrame frame;
+    frame.connection_id = c.u32le();
+    frame.sequence_number = c.u32le();
+
+    for (uint16_t i = 1; i < item_count && i < kMaxCipIoCpfItems; ++i) {
+        if (c.remaining() < 4) break;
+        uint16_t type = c.u16le();
+        uint16_t len = c.u16le();
+        if (len > c.remaining()) {
+            frame.notes.push_back("CPF item type " + hex4(type) + " declares " + std::to_string(len) +
+                                   " byte(s) but only " + std::to_string(c.remaining()) + " remain -- stopping");
+            break;
+        }
+        ByteSpan item = c.bytes(len);
+        switch (type) {
+            case 0x00B1:  // Connected Data Item -- the I/O/assembly data itself
+                frame.has_io_data = true;
+                frame.io_data_hex = to_hex(item, "");
+                frame.io_data_length = item.size();
+                break;
+            case 0x8000:
+            case 0x8001:
+                frame.notes.push_back("CPF item " + hex4(type) + " (Sockaddr Info) present, not decoded");
+                break;
+            case 0x00B2:  // Unconnected Data Item -- not expected on connected I/O traffic, but
+                           // handled the same generic way rather than mis-parsed as I/O data
+                frame.notes.push_back("CPF item 0x00B2 (Unconnected Data) present, not expected for "
+                                       "connected I/O traffic -- not decoded");
+                break;
+            default:
+                frame.notes.push_back("CPF item type " + hex4(type) + " (" + std::to_string(len) +
+                                       " byte(s)) not decoded");
+                break;
+        }
+    }
+    if (item_count > kMaxCipIoCpfItems) {
+        frame.notes.push_back("stopped after " + std::to_string(kMaxCipIoCpfItems) + " CPF item(s) (safety cap)");
+    }
+
+    std::ostringstream s;
+    s << "CIP I/O (implicit messaging): connection_id=0x" << std::hex << std::uppercase << frame.connection_id
+      << std::dec << " sequence=" << frame.sequence_number;
+    if (frame.has_io_data) {
+        s << " data=" << frame.io_data_length << " byte(s)";
+    } else {
+        s << " (no Connected Data Item present)";
+    }
+    frame.summary = s.str();
+    return frame;
+}
+
 }  // namespace
 
 std::optional<size_t> enip_declared_length(ByteSpan payload) {
@@ -972,6 +1048,17 @@ std::optional<EnipFrame> try_parse_enip(ByteSpan tcp_payload) {
     }
 
     return frame;
+}
+
+std::optional<CipIoFrame> try_parse_cip_io(ByteSpan udp_payload) {
+    try {
+        return try_parse_cip_io_impl(udp_payload);
+    } catch (const ParseError&) {
+        // Every read above is preceded by an explicit bounds check, so this should be
+        // unreachable -- caught defensively anyway, the same belt-and-suspenders posture
+        // try_parse_enip's own dispatch takes around decode_cpf_and_cip/decode_list_identity_response.
+        return std::nullopt;
+    }
 }
 
 }  // namespace conduitscope

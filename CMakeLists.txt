@@ -488,10 +488,15 @@ add_test(NAME ip_layer_icmp_protocol_number_named
 set_tests_properties(ip_layer_icmp_protocol_number_named PROPERTIES
   PASS_REGULAR_EXPRESSION "\\[non-tcp\\]  IPv4 protocol number 1 \\(ICMP\\) \\(not TCP\\)")
 
-add_test(NAME udp_named_ot_port_decoded
+# Arbitrary, too-short bytes on EtherNet/IP's own CIP I/O port (2222) must NOT be misdetected as
+# CIP I/O -- try_parse_cip_io's structural gate (see its header comment in enip.hpp) correctly
+# declines and this falls through to the generic "udp" tag, same as any other unrecognized UDP
+# traffic. See tests/sample_enip_cip_io.pcap (build_enip_cip_io_sample) for genuine CIP I/O
+# decoding coverage.
+add_test(NAME udp_port_2222_garbage_not_misdetected_as_cip_io
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_link_transport_layers.pcap" --format text)
-set_tests_properties(udp_named_ot_port_decoded PROPERTIES
-  PASS_REGULAR_EXPRESSION "\\[udp\\]  UDP payload of 4 byte\\(s\\) on port 2222->55000 \\(EtherNet/IP implicit \\(I/O\\) messaging, not decoded in this groundwork release\\)")
+set_tests_properties(udp_port_2222_garbage_not_misdetected_as_cip_io PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[udp\\]  UDP payload of 4 byte\\(s\\) on port 2222->55000\n")
 
 add_test(NAME udp_unnamed_port_and_empty_payload_decoded
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_link_transport_layers.pcap" --format text)
@@ -667,6 +672,47 @@ add_test(NAME enip_nop_not_detected
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enip_nop_precedence.pcap" --format text)
 set_tests_properties(enip_nop_not_detected PROPERTIES
   PASS_REGULAR_EXPRESSION "\\[tcp\\]  TCP payload of 24 byte\\(s\\) on port 52001->44818 did not match EtherNet/IP, IEC 104, Modbus, DNP3, or COTP/S7comm")
+
+# --------------------------------------------------------------------------
+# EtherNet/IP CIP I/O (implicit messaging), synthetic (tests/sample_enip_cip_io.pcap): UDP/2222
+# datagrams -- see tools/make_sample_pcap.py's build_enip_cip_io_sample for the exact byte layout
+# each assertion below is checking, and enip.hpp's file header comment's CIP implicit messaging
+# section for the decoder itself.
+# --------------------------------------------------------------------------
+add_test(NAME enip_cip_io_sequenced_address_and_data_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enip_cip_io.pcap" --format text)
+set_tests_properties(enip_cip_io_sequenced_address_and_data_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[enip\\]  CIP I/O \\(implicit messaging\\): connection_id=0xABCD1234 sequence=1 data=4 byte\\(s\\)")
+
+add_test(NAME enip_cip_io_sequence_rolls_between_datagrams
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enip_cip_io.pcap" --format text)
+set_tests_properties(enip_cip_io_sequence_rolls_between_datagrams PROPERTIES
+  PASS_REGULAR_EXPRESSION "connection_id=0xABCD1234 sequence=1[^\n]*\n.*connection_id=0xABCD1234 sequence=2")
+
+add_test(NAME enip_cip_io_no_connected_data_item_worded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enip_cip_io.pcap" --format text)
+set_tests_properties(enip_cip_io_no_connected_data_item_worded PROPERTIES
+  PASS_REGULAR_EXPRESSION "connection_id=0xABCD1234 sequence=3 \\(no Connected Data Item present\\)")
+
+add_test(NAME enip_cip_io_sockaddr_info_item_named_not_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enip_cip_io.pcap" --format text)
+set_tests_properties(enip_cip_io_sockaddr_info_item_named_not_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "connection_id=0x11112222 sequence=10 data=1 byte\\(s\\)\n *note: CPF item 0x8001 \\(Sockaddr Info\\) present, not decoded")
+
+add_test(NAME enip_cip_io_non_sequenced_address_first_item_not_misdetected
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enip_cip_io.pcap" --format text)
+set_tests_properties(enip_cip_io_non_sequenced_address_first_item_not_misdetected PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[udp\\]  UDP payload of 14 byte\\(s\\) on port 2222->2222")
+
+add_test(NAME enip_cip_io_json_fields_populated
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enip_cip_io.pcap")
+set_tests_properties(enip_cip_io_json_fields_populated PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"protocol\": \"enip\",\n    \"summary\": \"CIP I/O \\(implicit messaging\\): connection_id=0xABCD1234 sequence=1 data=4 byte\\(s\\)\",\n    \"enip_io_connection_id\": \"0xABCD1234\",\n    \"enip_io_sequence_number\": 1,\n    \"enip_io_data_length\": 4,\n    \"enip_io_data_hex\": \"deadbeef\"")
+
+add_test(NAME enip_cip_io_stats_counted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enip_cip_io.pcap" --stats)
+set_tests_properties(enip_cip_io_stats_counted PROPERTIES
+  PASS_REGULAR_EXPRESSION "enip cip i/o \\(implicit messaging\\) datagrams: 4")
 
 # --------------------------------------------------------------------------
 # Real-world EtherNet/IP captures -- see tests/real_captures/enip/ATTRIBUTION.md for provenance.
