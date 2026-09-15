@@ -192,6 +192,24 @@ that don't apply to a given packet (e.g. `src_ip` for a non-IP frame) are
 `null`. Intended to be piped into `jq` or read by a future policy-evaluation
 layer.
 
+Three fields are only present (omitted entirely, not `null`) on packets where
+they apply:
+
+- `s7comm_function`: the S7comm function name (`"Read Var"`, `"Write Var"`,
+  `"Setup Communication"`, ...), when protocol is `s7comm` and a function
+  code was decoded.
+- `s7comm_items`: an array of Step 7-style item tags (`"DB10.DBW100"`,
+  `"I0.0"`, ...), on Read Var / Write Var *request* packets whose item
+  addressing was decoded (see PROTOCOL COVERAGE).
+- `s7comm_values`: an array of short value renderings (a hex string, `"0"`/
+  `"1"` for a decoded bit, or a return-code name like `"Object does not
+  exist"`), on Read Var / Write Var *response* packets, and alongside
+  `s7comm_items` on Write Var request packets (the values being written).
+
+Both array fields are capped at 50 entries for a single heavily-batched
+request/response; see PROTOCOL COVERAGE for where the full list still shows
+up when a packet has more items than that.
+
 ### csv
 
 Header row followed by one row per packet:
@@ -246,11 +264,32 @@ The function code (Read Var, Write Var, PLC Control/Stop, Request/Download
 Block, Start/End Upload, CPU services, and others, all listed in the source)
 is always identified by name. **Setup Communication** (the handshake every S7
 session opens with, negotiating the max parallel jobs and PDU size) is fully
-decoded, since it's simple, fixed-size, and universal. Everything else's
-parameter/data payload -- most notably the item-address details inside Read
-Var / Write Var requests, and the entire Userdata parameter block used for
-vendor-specific diagnostics/CPU functions -- is recognized by function name
-but not decoded further in this release.
+decoded, since it's simple, fixed-size, and universal.
+
+**Read Var / Write Var** -- the two function codes that make up the
+overwhelming majority of real S7comm traffic (see the traffic mix in the
+worked example under EXAMPLES) -- get full item-level address decoding using
+the classic S7ANY addressing syntax (syntax id `0x10`): which memory area
+(inputs, outputs, merkers/flags, a numbered data block, an instance data
+block, local data, counters, or timers), DB number where applicable, byte and
+bit address, and transport size (BIT/BYTE/WORD/DWORD/INT/DINT/REAL/...) each
+item addresses. This is rendered in familiar Step 7 notation -- `DB10.DBW100`
+(word 100 of DB10), `DB10.DBX100.0` (a single bit), `I0.0`, `QB2`, `MW10`,
+`T5`, `C3` -- alongside the returned values (Read Var responses) or written
+values (Write Var requests) themselves. A request can batch many items in one
+PDU (real PLCs commonly do); the summary line shows the first few and the
+full list is always in the decoded packet's notes. Other addressing syntaxes
+are recognized as items (by syntax id) but not decoded -- shown as raw hex,
+same as every other function code's parameter/data payload. The one you're
+most likely to actually see is `0xB2`, S7-1200/1500 "symbolic" addressing --
+confirmed present in real capture traffic during this feature's development,
+and cross-checked against Wireshark's own `S7COMM_SYNTAXID_1200SYM` constant.
+Its item format references a compiled symbol-table entry (an opaque CRC-like
+value plus one or more "LID" fields) rather than a plain byte/bit address,
+and reconstructing that format with real confidence from public sources
+wasn't achievable in the time available -- see LIMITATIONS and ROADMAP. So is
+the entire Userdata parameter block used for vendor-specific diagnostics/CPU
+functions.
 
 **S7comm-Plus** (protocol id `0x72`, the newer, largely undocumented protocol
 TIA Portal uses to talk to S7-1200/1500 CPUs) is detected and labeled but not
@@ -304,12 +343,22 @@ These are current, not aspirational -- each has a corresponding ROADMAP item.
   (see PROTOCOL DETECTION), not on tracking the TCP stream's actual
   request/response pairing. It is reliable in practice for the read/write
   function families this release decodes, but it is not authoritative.
-- **S7comm item-level addressing is not decoded.** Read Var / Write Var
-  requests are identified by function name, but the item list describing
-  which DB/input/output/memory area and address is being touched is shown
-  only as part of the raw parameter block, not parsed. The Userdata ROSCTR
-  (vendor-specific diagnostics/CPU functions) is entirely unparsed beyond
-  being labeled.
+- **S7comm item-level addressing only covers the classic S7ANY syntax.**
+  Read Var / Write Var items using other addressing syntaxes -- most
+  notably `0xB2` (S7-1200/1500 "symbolic" addressing, which real captures
+  during development showed is common) -- are recognized by syntax id but
+  shown as raw hex, not decoded into an area/address/transport size. That
+  syntax's item format resolves a compiled symbol-table entry (a CRC-like
+  value plus "LID" fields) rather than a plain byte/bit address, and doing
+  it justice needs firmer sourcing than was available in the time spent on
+  it here; see ROADMAP. The Userdata ROSCTR (vendor-specific diagnostics/
+  CPU functions) is entirely unparsed beyond being labeled.
+- **A few S7comm data-item transport sizes use a best-effort length
+  interpretation.** The two overwhelmingly common cases (BIT, and
+  BYTE/WORD/DWORD-family reads/writes) are decoded with high confidence
+  against the documented wire format; the rarer transport sizes (DINT,
+  REAL, OCTET STRING, and a few others) fall back to treating the length
+  field as a byte count directly, flagged with a note when it's used.
 - **S7comm-Plus (protocol id 0x72) is detected but never decoded.**
 - **No live capture.** Offline pcap files only; see the top of this document
   for why, and ROADMAP for the plan to add it.
@@ -371,6 +420,14 @@ them, on a capture that mixes S7comm with other traffic:
 conduitscope decode -i capture.pcap --protocol s7comm --stats
 ```
 
+See exactly which PLC memory addresses are being read and written -- the
+item tags conduitscope decoded, one line per Read Var / Write Var packet:
+
+```sh
+conduitscope decode -i capture.pcap --protocol s7comm -f json \
+  | jq -r 'select(.s7comm_items) | "\(.src_ip) -> \(.dst_ip): \(.s7comm_items | join(", "))"'
+```
+
 ## ROADMAP
 
 Rough order, each building on the groundwork this release establishes:
@@ -379,26 +436,27 @@ Rough order, each building on the groundwork this release establishes:
    codes once there's been hands-on time with real DNP3 traffic (see the
    reading list this project's groundwork discussion produced -- the DNP3
    Primer and Wireshark walkthroughs are the natural next reference material).
-2. **S7comm item-level addressing.** Decode the Read Var / Write Var item
-   list (area, DB number, address, transport size) -- this is the S7
-   equivalent of Modbus's address+quantity decoding, and the highest-value
-   next step for S7comm given how much real ICS traffic (the 4SICS capture
-   this feature was validated against, for one) turns out to be exactly this.
-3. **TCP stream reassembly**, needed for split PDUs, authoritative
+2. **TCP stream reassembly**, needed for split PDUs, authoritative
    (non-heuristic) Modbus request/response pairing, and multi-segment S7comm
    frames larger than one negotiated PDU length.
-4. **Zone/conduit policy engine** behind `policy validate`: a YAML schema
+3. **Zone/conduit policy engine** behind `policy validate`: a YAML schema
    describing zones (IP/port ranges, expected protocols) and conduits (allowed
    flows between zones), evaluated against decoded traffic, producing a
-   pass/fail report suitable for a NIS2/62443 audit trail.
-5. **Live capture**, via libpcap on Linux and Npcap on Windows, as an
+   pass/fail report suitable for a NIS2/62443 audit trail. S7comm item tags
+   and Modbus address+quantity decoding both now give this something concrete
+   to match a policy's address ranges against.
+4. **Live capture**, via libpcap on Linux and Npcap on Windows, as an
    additional input mode alongside (not replacing) pcap file input.
-6. **pcapng support**, once live capture or another concrete need makes it
+5. **pcapng support**, once live capture or another concrete need makes it
    worth the added parsing complexity.
-7. Colorized text output (the `--no-color` flag is already reserved for this).
-8. S7comm-Plus decoding, and PLC Control/Stop parameter decoding (these send
-   commands that change PLC run state -- high security relevance, but a
-   smaller, more self-contained lift than item-level addressing).
+6. Colorized text output (the `--no-color` flag is already reserved for this).
+7. S7comm-Plus decoding, PLC Control/Stop parameter decoding (these send
+   commands that change PLC run state -- high security relevance), and the
+   S7-1200/1500 "symbolic" addressing syntax (`0xB2`) that item-level
+   decoding currently recognizes but doesn't decode -- worth revisiting
+   with more time to pin down its CRC/LID item format from a source firmer
+   than public reverse-engineering writeups, since real captures show it's
+   common on S7-1200/1500 traffic specifically (i.e. newer PLCs).
 
 ## BUILDING
 

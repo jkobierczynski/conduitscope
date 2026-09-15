@@ -73,6 +73,17 @@ struct DecodedPacket {
     // Only set when protocol == "s7comm" and a function code was decoded.
     bool s7comm_has_function = false;
     std::string s7comm_function_name;
+
+    // Only populated for Read Var / Write Var packets whose item addressing was decoded
+    // (see S7Item::tag in s7comm.hpp) -- Step7-style tags like "DB10.DBW100", "I0.0", "MB50".
+    // Request packets: the addresses being read/written. Response packets: empty (a response's
+    // parameter block doesn't repeat the addresses; see s7comm_value_summaries below for what it
+    // returned instead). Capped at 50 entries so a heavily batched request can't blow up JSON output.
+    std::vector<std::string> s7comm_item_tags;
+    // Only populated for Read Var / Write Var response packets: one short rendering per returned
+    // value or return code (e.g. "0004" for a 2-byte value, "Success", "Object does not exist").
+    // Same 50-entry cap as s7comm_item_tags.
+    std::vector<std::string> s7comm_value_summaries;
 };
 
 class Decoder {

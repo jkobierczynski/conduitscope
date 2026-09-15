@@ -81,6 +81,22 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
     if (p.protocol == "s7comm" && p.s7comm_has_function) {
         out_ << "    \"s7comm_function\": \"" << json_escape(p.s7comm_function_name) << "\",\n";
     }
+    if (!p.s7comm_item_tags.empty()) {
+        out_ << "    \"s7comm_items\": [";
+        for (size_t i = 0; i < p.s7comm_item_tags.size(); ++i) {
+            if (i != 0) out_ << ", ";
+            out_ << "\"" << json_escape(p.s7comm_item_tags[i]) << "\"";
+        }
+        out_ << "],\n";
+    }
+    if (!p.s7comm_value_summaries.empty()) {
+        out_ << "    \"s7comm_values\": [";
+        for (size_t i = 0; i < p.s7comm_value_summaries.size(); ++i) {
+            if (i != 0) out_ << ", ";
+            out_ << "\"" << json_escape(p.s7comm_value_summaries[i]) << "\"";
+        }
+        out_ << "],\n";
+    }
     out_ << "    \"notes\": [";
     for (size_t i = 0; i < p.notes.size(); ++i) {
         if (i != 0) out_ << ", ";

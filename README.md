@@ -26,10 +26,17 @@ Groundwork / v0.1.0. What works right now:
 - DNP3 detection and data-link-layer header decoding (source/destination
   addresses, frame length); transport/application layers are a documented stub
 - S7comm/COTP: full TPKT+COTP framing decode (incl. connection-setup TSAP
-  parameters), full S7comm header + function-code decoding, and a full
-  Setup Communication decode; item-level Read Var/Write Var addressing and
-  S7comm-Plus are documented stubs. Validated against a real 4SICS ICS-lab
-  capture, not just synthetic traffic.
+  parameters), full S7comm header + function-code decoding, a full
+  Setup Communication decode, and full item-level Read Var/Write Var
+  addressing -- which memory area (input/output/merker/DB/instance-DB/
+  counter/timer), DB number, byte/bit address, and transport size each
+  item addresses, rendered in familiar Step 7 notation (`DB10.DBW100`,
+  `I0.0`, `MB50`, `T5`), plus the returned/written values. S7comm-Plus and
+  the newer S7-1200/1500 symbolic addressing syntax are documented stubs.
+  Validated against real 4SICS ICS-lab captures -- including two much
+  larger ones (1.25M and 2.27M packets) that turned out to be
+  overwhelmingly S7comm traffic, which is exactly the case item-level
+  addressing was built for.
 - IPv4 payload is clamped to the header's own `total_length` field, so
   Ethernet's minimum-frame-size padding on short packets (bare ACKs, mostly)
   never gets misreported as phantom TCP payload -- found and fixed against a

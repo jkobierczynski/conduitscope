@@ -153,6 +153,28 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                         for (const auto& n : s7->notes) out.notes.push_back(n);
                         out.s7comm_has_function = s7->has_function;
                         out.s7comm_function_name = s7->function_name;
+                        constexpr size_t kMaxTags = 50;
+                        for (size_t i = 0; i < s7->items.size() && i < kMaxTags; ++i) {
+                            const auto& it = s7->items[i];
+                            out.s7comm_item_tags.push_back(!it.tag.empty() ? it.tag : it.area_name);
+                        }
+                        for (size_t i = 0; i < s7->data_items.size() && i < kMaxTags; ++i) {
+                            const auto& di = s7->data_items[i];
+                            // return_code_name is only set for items that carry a return code on
+                            // the wire (Read Var / Write Var responses); a Write Var request's
+                            // value item has none, so this falls straight through to the value.
+                            if (!di.return_code_name.empty() && di.return_code != 0xFF) {
+                                out.s7comm_value_summaries.push_back(di.return_code_name);
+                            } else if (di.has_value_fields && di.transport_size == 0x03 && di.data.size() == 1) {
+                                out.s7comm_value_summaries.push_back(di.data.at(0) != 0 ? "1" : "0");
+                            } else if (di.has_value_fields && !di.data.empty()) {
+                                out.s7comm_value_summaries.push_back(to_hex(di.data, ""));
+                            } else if (!di.return_code_name.empty()) {
+                                out.s7comm_value_summaries.push_back("ok");
+                            } else {
+                                out.s7comm_value_summaries.push_back("");
+                            }
+                        }
                         for (const auto& n : cotp->notes) out.notes.push_back(n);
                         annotate_port();
                         return out;

@@ -89,6 +89,56 @@ add_test(NAME decode_cotp_connection_request_sample
 set_tests_properties(decode_cotp_connection_request_sample PROPERTIES
   PASS_REGULAR_EXPRESSION "Connection Request \\(CR\\) calling-TSAP")
 
+add_test(NAME s7comm_read_var_item_address
+  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm.pcap" --format text)
+set_tests_properties(s7comm_read_var_item_address PROPERTIES
+  PASS_REGULAR_EXPRESSION "DB10\\.DBW100")
+
+add_test(NAME s7comm_read_var_returned_value
+  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm.pcap" --format text)
+set_tests_properties(s7comm_read_var_returned_value PROPERTIES
+  PASS_REGULAR_EXPRESSION "value 0: Success = 00 01 00 02 00 03 00 04 00 05")
+
+add_test(NAME s7comm_write_var_item_address
+  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm.pcap" --format text)
+set_tests_properties(s7comm_write_var_item_address PROPERTIES
+  PASS_REGULAR_EXPRESSION "M0\\.0")
+
+# Regression guard: a Write Var request's per-item "reserved" byte (always 0x00 on the
+# wire) must never be rendered as if it were the return-code table's entry for 0x00
+# ("Reserved") -- it isn't a return code at all on a request, and doing so masked the
+# actual written value the first time this was implemented.
+add_test(NAME s7comm_write_var_value_not_mislabeled
+  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm.pcap" --format text)
+set_tests_properties(s7comm_write_var_value_not_mislabeled PROPERTIES
+  PASS_REGULAR_EXPRESSION "value 0: 01"
+  FAIL_REGULAR_EXPRESSION "Write Var.*Reserved")
+
+add_test(NAME s7comm_area_codes_and_transport_sizes
+  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_items.pcap" --format text)
+set_tests_properties(s7comm_area_codes_and_transport_sizes PROPERTIES
+  PASS_REGULAR_EXPRESSION "item 3: DB5\\.DBD20")
+
+add_test(NAME s7comm_timer_area
+  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_items.pcap" --format text)
+set_tests_properties(s7comm_timer_area PROPERTIES
+  PASS_REGULAR_EXPRESSION "item 5: T5")
+
+add_test(NAME s7comm_counter_area
+  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_items.pcap" --format text)
+set_tests_properties(s7comm_counter_area PROPERTIES
+  PASS_REGULAR_EXPRESSION "item 6: C3")
+
+add_test(NAME s7comm_unsupported_syntax_id_noted
+  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_items.pcap" --format text)
+set_tests_properties(s7comm_unsupported_syntax_id_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "syntax id 0xb0.*not decoded")
+
+add_test(NAME s7comm_item_tags_in_json
+  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm.pcap" --format json)
+set_tests_properties(s7comm_item_tags_in_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"s7comm_items\": \\[\"DB10\\.DBW100\"\\]")
+
 add_test(NAME info_modbus_sample
   COMMAND conduitscope info --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap")
 set_tests_properties(info_modbus_sample PROPERTIES

@@ -98,7 +98,8 @@ performed no real work.
 No pcapng support; no TCP stream reassembly; IPv4 only; no IPv4 fragment
 reassembly; DNP3 CRCs are not validated; DNP3 transport/application layers
 are not decoded; Modbus request/response classification is heuristic;
-S7comm item-level addressing (inside Read Var / Write Var) is not decoded;
+S7comm item-level addressing (inside Read Var / Write Var) only covers the
+classic S7ANY syntax, not the newer S7-1200/1500 symbolic addressing;
 S7comm-Plus is detected but never decoded; no live capture. See the
 "LIMITATIONS" and "ROADMAP" sections of
 \fBdocs/MANUAL.md\fR in the source tree for the full, current detail and

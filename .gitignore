@@ -12,3 +12,5 @@ CMakeFiles/
 CMakeCache.txt
 cmake_install.cmake
 Makefile
+__pycache__/
+*.pyc
