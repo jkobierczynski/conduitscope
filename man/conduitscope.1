@@ -1,0 +1,133 @@
+.TH CONDUITSCOPE 1 "2026" "conduitscope 0.1.0" "User Commands"
+.SH NAME
+conduitscope \- decode Modbus/TCP, DNP3, and S7comm/COTP traffic from offline pcap captures
+.SH SYNOPSIS
+.B conduitscope
+[\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-color\fR] [\fB\-\-log\-file\fR \fIFILE\fR] \fICOMMAND\fR [\fIOPTIONS\fR]
+.SH DESCRIPTION
+.B conduitscope
+reads a classic-format pcap capture file and decodes Modbus/TCP, DNP3, and
+S7comm (Siemens S7 PLC protocol, over TPKT/COTP, TCP port 102) traffic found
+inside its TCP streams. It is groundwork for auditing OT/ICS
+network traffic against a zone-and-conduit segmentation model (IEC 62443 /
+NIS2 style work); the protocol-decoding layer is implemented now, a
+zone/conduit policy engine is scaffolded but not yet implemented.
+.PP
+Only classic pcap files are read (what tcpdump writes by default). pcapng is
+not yet supported and is reported with a conversion hint
+(\fBtshark \-F pcap\fR) rather than a generic error.
+.SH COMMANDS
+.TP
+.B decode \fB\-i\fR \fIFILE\fR [\fIOPTIONS\fR]
+Decode a capture and print each recognized packet. See \fBOPTIONS\fR below.
+.TP
+.B info \fB\-i\fR \fIFILE\fR
+Print pcap file metadata and a protocol histogram.
+.TP
+.B policy validate \fB\-i\fR \fIFILE\fR \fB\-\-policy\fR \fIFILE\fR
+Zone/conduit policy check. Not yet implemented in this release; prints a
+placeholder message and exits with status 2. Scaffolded now so scripts
+written against its arguments won't need to change later.
+.TP
+.B version
+Print version and build information.
+.SH OPTIONS (decode)
+.TP
+.BR \-i ", " \-\-input " " \fIFILE\fR
+Input pcap file. Required.
+.TP
+.BR \-o ", " \-\-output " " \fIFILE\fR
+Write output here instead of stdout.
+.TP
+.BR \-f ", " \-\-format " " {text,json,csv}
+Output format. Default: text.
+.TP
+.B \-\-protocol {auto,modbus,dnp3,s7comm}
+Restrict decoding to one protocol. Default: auto (tries all three,
+independent of port number).
+.TP
+.B \-\-modbus\-port \fIPORT\fR
+Additional TCP port to treat as expected for Modbus. Repeatable. Does not
+gate detection, only whether the port is flagged as unexpected in the output.
+.TP
+.B \-\-dnp3\-port \fIPORT\fR
+Same as \fB\-\-modbus\-port\fR, for DNP3. Repeatable.
+.TP
+.B \-\-s7comm\-port \fIPORT\fR
+Same as \fB\-\-modbus\-port\fR, for COTP/S7comm. Repeatable.
+.TP
+.B \-\-max\-packets \fIN\fR
+Stop after decoding this many packets. Default: 0 (unlimited).
+.TP
+.B \-\-stats
+Print an aggregate summary instead of one line per packet. Ignores
+\fB\-\-format\fR.
+.TP
+.B \-\-strict
+Abort on the first malformed packet instead of warning and continuing.
+.SH GLOBAL OPTIONS
+.TP
+.BR \-q ", " \-\-quiet
+Suppress non-essential diagnostic/warning output.
+.TP
+.B \-\-no\-color
+Disable ANSI color in text output. Reserved for a future colorized-output
+feature; currently has no visible effect.
+.TP
+.B \-\-log\-file \fIFILE\fR
+Write diagnostic/warning messages to \fIFILE\fR instead of stderr.
+.TP
+.BR \-h ", " \-\-help
+Print help and exit. Available at every command level.
+.TP
+.B \-\-version
+Print version, compiler, platform, and build type, then exit.
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+.TP
+.B 1
+Fatal error (bad arguments, unreadable/unrecognized input file, or a
+\fB\-\-strict\fR parse failure).
+.TP
+.B 2
+The command is a documented stub (\fBpolicy validate\fR) that ran but
+performed no real work.
+.SH LIMITATIONS
+No pcapng support; no TCP stream reassembly; IPv4 only; no IPv4 fragment
+reassembly; DNP3 CRCs are not validated; DNP3 transport/application layers
+are not decoded; Modbus request/response classification is heuristic;
+S7comm item-level addressing (inside Read Var / Write Var) is not decoded;
+S7comm-Plus is detected but never decoded; no live capture. See the
+"LIMITATIONS" and "ROADMAP" sections of
+\fBdocs/MANUAL.md\fR in the source tree for the full, current detail and
+what's planned next.
+.SH EXAMPLES
+.PP
+Decode a capture as text:
+.RS
+.EX
+conduitscope decode \-i capture.pcap
+.EE
+.RE
+.PP
+Get file metadata and a protocol histogram:
+.RS
+.EX
+conduitscope info \-i capture.pcap
+.EE
+.RE
+.PP
+Decode as JSON and filter with jq:
+.RS
+.EX
+conduitscope decode \-i capture.pcap \-f json | jq '.[] | select(.protocol=="modbus")'
+.EE
+.RE
+.SH SEE ALSO
+Full reference: \fBdocs/MANUAL.md\fR in the conduitscope source tree.
+.SH AUTHOR
+Jurgen Kobierczynski
+.SH LICENSE
+MIT
