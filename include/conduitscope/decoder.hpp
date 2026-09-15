@@ -84,6 +84,15 @@ struct DecodedPacket {
     // value or return code (e.g. "0004" for a 2-byte value, "Success", "Object does not exist").
     // Same 50-entry cap as s7comm_item_tags.
     std::vector<std::string> s7comm_value_summaries;
+
+    // Only set when protocol == "dnp3" and this fragment's application layer was decoded (see
+    // Dnp3ApplicationFragment::application_decoded in dnp3.hpp -- false for a fragment that spans
+    // multiple data-link frames, which only gets its transport header decoded).
+    bool dnp3_has_function = false;
+    std::string dnp3_function_name;
+    // One entry per object header decoded in this fragment (e.g. "g1v2 (Binary Input)"), capped
+    // at 50 entries for the same reason as s7comm_item_tags.
+    std::vector<std::string> dnp3_object_headers;
 };
 
 class Decoder {

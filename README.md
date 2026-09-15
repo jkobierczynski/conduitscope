@@ -23,8 +23,15 @@ Groundwork / v0.1.0. What works right now:
   segment, no reassembly)
 - Full Modbus/TCP decoding for the read (1-4), write-single (5-6), and
   write-multiple (15-16) function code families, plus exception responses
-- DNP3 detection and data-link-layer header decoding (source/destination
-  addresses, frame length); transport/application layers are a documented stub
+- Full DNP3 decoding through the application layer for a single-data-link-frame
+  fragment (the large majority of real traffic): data-link header
+  (source/destination addresses, frame length), transport header (FIR/FIN/SEQ,
+  with correct per-16-byte-block CRC reassembly of the user data), function
+  code, Internal Indications on responses, and every object header
+  (group/variation/qualifier/range) -- object data is skipped by computed
+  length rather than decoded value-by-value. A fragment spanning more than one
+  data-link frame gets its transport header decoded and nothing more (needs
+  cross-packet reassembly this tool doesn't do -- see docs/MANUAL.md).
 - S7comm/COTP: full TPKT+COTP framing decode (incl. connection-setup TSAP
   parameters), full S7comm header + function-code decoding, a full
   Setup Communication decode, and full item-level Read Var/Write Var

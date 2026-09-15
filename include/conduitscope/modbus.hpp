@@ -44,10 +44,13 @@ struct ModbusFrame {
 };
 
 // Attempts to interpret `tcp_payload` as a Modbus/TCP MBAP frame. Returns
-// std::nullopt (never throws) if the payload is too short or its protocol-id
-// field is not zero, which is the standard signal that this isn't Modbus/TCP
-// at all -- callers use that to fall back to "unrecognized" rather than
-// aborting the whole packet.
+// std::nullopt (never throws) if the payload is too short, its protocol-id
+// field is not zero (the standard signal that this isn't Modbus/TCP at all),
+// or its function code is 0 (reserved/never assigned by the spec -- a
+// stronger signal than protocol-id alone, added after real DNP3 traffic was
+// seen coincidentally satisfying protocol-id==0 and getting mislabeled as
+// Modbus) -- callers use any of these to fall back to "unrecognized" rather
+// than aborting the whole packet.
 std::optional<ModbusFrame> try_parse_modbus_tcp(ByteSpan tcp_payload);
 
 std::string modbus_exception_name(uint8_t exception_code);

@@ -116,18 +116,109 @@ def build_modbus_sample():
     (TESTS_DIR / "sample_modbus.pcap").write_bytes(data)
 
 
-def build_dnp3_sample():
-    # Minimal DNP3 data link frame: no application-layer payload, so
-    # user_data_bytes decodes to 0. That's enough to exercise detection and
-    # header-field decoding without needing a valid CRC (which conduitscope
-    # does not validate in this groundwork release).
-    dnp3_frame = bytes([0x05, 0x64, 0x05, 0xC4]) + struct.pack("<HH", 1024, 1) + b"\x00\x00"
-    tcp_seg = tcp_header(51500, 20000, 5000, 6000, TCP_PSH | TCP_ACK, len(dnp3_frame)) + dnp3_frame
-    ip_seg = ipv4_header(HMI_IP, PLC_IP, 6, len(tcp_seg), 0x2000) + tcp_seg
+def build_modbus_false_positive_sample():
+    """Regression fixture for a real false-positive: non-Modbus traffic (here, a DNP3-shaped
+    payload chosen so its own bytes are irrelevant to the point) whose first four bytes happen
+    to look like a valid Modbus MBAP transaction_id + protocol_id==0, and whose function-code
+    byte happens to be 0x00. Function code 0 is reserved and never assigned in the Modbus spec,
+    so this must NOT be classified as Modbus (found via a real capture: DNP3 traffic on port
+    20000 was landing on this coincidence and getting mislabeled)."""
+    # transaction_id=0x0564 (arbitrary, chosen to look DNP3-ish), protocol_id=0x0000,
+    # mbap_length/unit_id/function_code chosen so function_code == 0x00.
+    bogus = struct.pack("!HHHBB", 0x0564, 0x0000, 2, 0x01, 0x00) + bytes([0xAA, 0xBB, 0xCC])
+    tcp_seg = tcp_header(57125, 20000, 9000, 9100, TCP_PSH | TCP_ACK, len(bogus)) + bogus
+    ip_seg = ipv4_header(HMI_IP, PLC_IP, 6, len(tcp_seg), 0x5000) + tcp_seg
     eth_seg = eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip_seg
 
     data = pcap_global_header()
-    data += pcap_record(eth_seg, 1_700_000_100, 0)
+    data += pcap_record(eth_seg, 1_700_000_500, 0)
+    (TESTS_DIR / "sample_modbus_false_positive.pcap").write_bytes(data)
+
+
+def dnp3_block_crc_encode(payload: bytes) -> bytes:
+    """Splits `payload` (the logical transport+application bytes) into <=16-byte blocks, each
+    followed by its own 2-byte CRC -- the real DNP3 data-link user-data wire format. The CRC
+    bytes are placeholders (conduitscope does not validate them, same as the header CRC), but
+    their *placement* -- every 16 bytes, including a short final block -- must be real, since
+    that's exactly the reassembly logic being exercised."""
+    out = b""
+    for i in range(0, len(payload), 16):
+        chunk = payload[i:i + 16]
+        out += chunk + b"\xAB\xCD"  # placeholder block CRC, not validated by conduitscope
+    return out
+
+
+def dnp3_link_frame(source: int, destination: int, user_data: bytes, control: int = 0xC4) -> bytes:
+    """A full DNP3 data-link frame: 10-byte header (start+length+control+dest+src+header-CRC,
+    header CRC a placeholder like the block CRCs) followed by `user_data`'s block-CRC-encoded
+    wire bytes."""
+    length_field = 5 + len(user_data)
+    assert length_field <= 255, "single data-link frame can't carry this much user data"
+    header = (bytes([0x05, 0x64, length_field, control]) + struct.pack("<HH", destination, source) +
+              b"\xEF\xBE")  # placeholder header CRC, not validated by conduitscope
+    return header + dnp3_block_crc_encode(user_data)
+
+
+def build_dnp3_sample():
+    packets = []
+
+    # 1) A bare data-link frame with no user data at all (e.g. a link-layer control frame) --
+    #    user_data_bytes decodes to 0 and there is nothing above the data link layer to decode.
+    #    Kept as the very first packet so a regression here reproduces the original, simplest case.
+    bare_frame = dnp3_link_frame(source=1, destination=1024, user_data=b"")
+    tcp1 = tcp_header(51500, 20000, 5000, 6000, TCP_PSH | TCP_ACK, len(bare_frame)) + bare_frame
+    ip1 = ipv4_header(HMI_IP, PLC_IP, 6, len(tcp1), 0x2000) + tcp1
+    packets.append(eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip1)
+
+    # 2) A real single-fragment Read request: Class 0 poll (group=60 var=1 qualifier=0x06 "all",
+    #    which by definition carries zero object data) -- the most common real DNP3 request shape.
+    #    Transport byte: FIR=1 FIN=1 SEQ=0 -> 0xC0. Application control: FIR=1 FIN=1 CON=0 UNS=0
+    #    SEQ=0 -> 0xC0. Function code 0x01 (Read).
+    read_class0 = bytes([0xC0, 0xC0, 0x01, 60, 1, 0x06])
+    read_frame = dnp3_link_frame(source=1, destination=1024, user_data=read_class0)
+    tcp2 = tcp_header(51500, 20000, 5001, 6000, TCP_PSH | TCP_ACK, len(read_frame)) + read_frame
+    ip2 = ipv4_header(HMI_IP, PLC_IP, 6, len(tcp2), 0x2001) + tcp2
+    packets.append(eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip2)
+
+    # 3) The matching response: function 0x81 (Response), IIN1=0x80 (DEVICE_RESTART) / IIN2=0x00,
+    #    then two object headers -- g1v2 (Binary Input w/ flags, byte-oriented) start-stop 0-2 (3
+    #    points, 3 bytes of data) and g30v1 (Analog Input 32-bit w/ flag, 5 bytes/point) start-stop
+    #    0-0 (1 point, 5 bytes of data). Logical payload is 23 bytes -- over the 16-byte block
+    #    size, so this is also the fixture that exercises multi-block CRC reassembly.
+    resp_payload = (
+        bytes([0xC0, 0xC0, 0x81, 0x80, 0x00]) +           # transport, app control, fc, IIN1, IIN2
+        bytes([1, 2, 0x00, 0, 2]) + bytes([0x81, 0x01, 0x00]) +   # g1v2 start-stop 0-2, 3 data bytes
+        bytes([30, 1, 0x00, 0, 0]) + bytes([0x01, 0x00, 0x00, 0x00, 0x00])  # g30v1 start-stop 0-0, 5 data bytes
+    )
+    assert len(resp_payload) == 23
+    resp_frame = dnp3_link_frame(source=1024, destination=1, user_data=resp_payload)
+    tcp3 = tcp_header(20000, 51500, 6000, 5001 + len(read_frame), TCP_PSH | TCP_ACK, len(resp_frame)) + resp_frame
+    ip3 = ipv4_header(PLC_IP, HMI_IP, 6, len(tcp3), 0x2002) + tcp3
+    packets.append(eth_header(HMI_MAC, PLC_MAC, 0x0800) + ip3)
+
+    # 4) A fragment that spans multiple data-link frames (transport FIR=1, FIN=0 -- "more to
+    #    come"): only the transport header should be decoded, application layer left alone.
+    #    The bytes after the transport byte are arbitrary/unparseable on purpose -- they must
+    #    never be touched.
+    multi_frame_payload = bytes([0x80, 0xDE, 0xAD, 0xBE, 0xEF])  # FIR=1 FIN=0 SEQ=0, then junk
+    multi_frame = dnp3_link_frame(source=1, destination=1024, user_data=multi_frame_payload)
+    tcp4 = tcp_header(51500, 20000, 5002, 6000 + len(resp_frame), TCP_PSH | TCP_ACK,
+                       len(multi_frame)) + multi_frame
+    ip4 = ipv4_header(HMI_IP, PLC_IP, 6, len(tcp4), 0x2003) + tcp4
+    packets.append(eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip4)
+
+    # 5) An object header this release deliberately does not decode further: qualifier 0x46 ==
+    #    prefix code 4 (object-size-prefixed), which is out of scope -- exercises the bailout
+    #    path rather than guessing at a length.
+    unsupported_prefix_payload = bytes([0xC0, 0xC0, 0x01, 1, 2, 0x46])
+    unsupported_frame = dnp3_link_frame(source=1, destination=1024, user_data=unsupported_prefix_payload)
+    tcp5 = tcp_header(51500, 20000, 5003, 6000, TCP_PSH | TCP_ACK, len(unsupported_frame)) + unsupported_frame
+    ip5 = ipv4_header(HMI_IP, PLC_IP, 6, len(tcp5), 0x2004) + tcp5
+    packets.append(eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip5)
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_000_100 + i, i * 1000)
     (TESTS_DIR / "sample_dnp3.pcap").write_bytes(data)
 
 
@@ -391,6 +482,7 @@ def build_not_a_pcap():
 if __name__ == "__main__":
     TESTS_DIR.mkdir(exist_ok=True)
     build_modbus_sample()
+    build_modbus_false_positive_sample()
     build_dnp3_sample()
     build_s7comm_sample()
     build_s7comm_items_sample()

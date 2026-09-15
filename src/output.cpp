@@ -97,6 +97,17 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
         }
         out_ << "],\n";
     }
+    if (p.protocol == "dnp3" && p.dnp3_has_function) {
+        out_ << "    \"dnp3_function\": \"" << json_escape(p.dnp3_function_name) << "\",\n";
+    }
+    if (!p.dnp3_object_headers.empty()) {
+        out_ << "    \"dnp3_objects\": [";
+        for (size_t i = 0; i < p.dnp3_object_headers.size(); ++i) {
+            if (i != 0) out_ << ", ";
+            out_ << "\"" << json_escape(p.dnp3_object_headers[i]) << "\"";
+        }
+        out_ << "],\n";
+    }
     out_ << "    \"notes\": [";
     for (size_t i = 0; i < p.notes.size(); ++i) {
         if (i != 0) out_ << ", ";
@@ -135,6 +146,9 @@ void StatsWriter::write_packet(const DecodedPacket& p) {
     if (p.protocol == "s7comm" && p.s7comm_has_function) {
         s7comm_function_counts_[p.s7comm_function_name]++;
     }
+    if (p.protocol == "dnp3" && p.dnp3_has_function) {
+        dnp3_function_counts_[p.dnp3_function_name]++;
+    }
     if (!has_ts_) {
         first_ts_ = last_ts_ = p.timestamp;
         has_ts_ = true;
@@ -164,6 +178,12 @@ void StatsWriter::print_summary(std::ostream& out) const {
     if (!s7comm_function_counts_.empty()) {
         out << "s7comm function codes:\n";
         for (const auto& [name, count] : s7comm_function_counts_) {
+            out << "  " << std::left << std::setw(40) << name << count << "\n";
+        }
+    }
+    if (!dnp3_function_counts_.empty()) {
+        out << "dnp3 function codes:\n";
+        for (const auto& [name, count] : dnp3_function_counts_) {
             out << "  " << std::left << std::setw(40) << name << count << "\n";
         }
     }

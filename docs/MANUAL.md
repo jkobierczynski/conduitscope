@@ -2,7 +2,7 @@
 
 ## NAME
 
-conduitscope -- decode Modbus/TCP and DNP3 traffic from offline pcap captures
+conduitscope -- decode Modbus/TCP, DNP3, and S7comm/COTP traffic from offline pcap captures
 
 ## SYNOPSIS
 
@@ -138,14 +138,19 @@ for scripts that prefer `conduitscope version` over a flag.
 In `--protocol auto` (the default), every non-empty TCP payload is tested
 against all three protocols, independent of port number:
 
-- **Modbus/TCP**: recognized by its MBAP header shape -- specifically, the
-  protocol-id field at byte offset 2-3 must be `0x0000`, which is mandated by
-  the Modbus spec and essentially never appears by coincidence in other
-  traffic. If matched, request-vs-response is then further disambiguated by
-  PDU shape (a bare 4-byte address+quantity looks like a request; a
-  byte-count-prefixed blob looks like a response). This is documented in the
-  decoded output as a heuristic -- it is not based on tracking the TCP stream's
-  request/response state, since this release does not do stream reassembly.
+- **Modbus/TCP**: recognized by its MBAP header shape -- the protocol-id
+  field at byte offset 2-3 must be `0x0000` (mandated by the Modbus spec),
+  *and* the function-code byte must be non-zero (function code `0x00` is
+  reserved and never assigned by the spec). Unlike DNP3 or S7comm, Modbus/TCP
+  has no magic bytes of its own, so protocol-id alone is a weaker signal than
+  it looks -- a real capture surfaced non-Modbus traffic on port 20000 whose
+  bytes coincidentally satisfied protocol-id==0, which the function-code
+  check now catches (see LIMITATIONS). If matched, request-vs-response is
+  then further disambiguated by PDU shape (a bare 4-byte address+quantity
+  looks like a request; a byte-count-prefixed blob looks like a response).
+  This is documented in the decoded output as a heuristic -- it is not based
+  on tracking the TCP stream's request/response state, since this release
+  does not do stream reassembly.
 - **DNP3**: recognized by the data-link-layer start bytes `0x05 0x64`, which
   DNP3 always begins with.
 - **S7comm/COTP**: recognized by the TPKT signature (`0x03 0x00` followed by
@@ -192,7 +197,7 @@ that don't apply to a given packet (e.g. `src_ip` for a non-IP frame) are
 `null`. Intended to be piped into `jq` or read by a future policy-evaluation
 layer.
 
-Three fields are only present (omitted entirely, not `null`) on packets where
+Five fields are only present (omitted entirely, not `null`) on packets where
 they apply:
 
 - `s7comm_function`: the S7comm function name (`"Read Var"`, `"Write Var"`,
@@ -208,8 +213,14 @@ they apply:
   `"1"` for a decoded bit, or a return-code name like `"Object does not
   exist"`), on Read Var / Write Var *response* packets, and alongside
   `s7comm_items` on Write Var request packets (the values being written).
+- `dnp3_function`: the DNP3 function name (`"Read"`, `"Response"`, ...), when
+  protocol is `dnp3` and this fragment's application layer was decoded (see
+  PROTOCOL COVERAGE for when that is -- a fragment split across multiple
+  data-link frames only gets its transport header decoded, not this).
+- `dnp3_objects`: an array of one entry per object header decoded in the
+  fragment, e.g. `"g1v2 (Binary Input)"`.
 
-Both array fields are capped at 50 entries for a single heavily-batched
+All array fields are capped at 50 entries for a single heavily-batched
 request/response; see PROTOCOL COVERAGE for where the full list still shows
 up when a packet has more items than that.
 
@@ -244,11 +255,48 @@ Detected reliably (via the 0x05 0x64 start bytes) and its data-link-layer
 header is decoded: source and destination DNP3 addresses, the raw control
 byte, and the frame length field (broken down into the resulting
 transport/application-layer byte count). The header CRC is present in the
-frame but **not validated** in this release. Everything past the data link
-layer -- transport-layer segmentation, and the application layer's
-object-group/variation/function-code structure that carries the actual
-point values -- is explicitly not decoded; the output says so rather than
-guessing.
+frame but **not validated** in this release, same as every other CRC/checksum
+in this release.
+
+On top of the data link layer, conduitscope reassembles the user data (data
+link frames split it into <=16-byte blocks, each with its own CRC -- also not
+validated, but correctly located and skipped so the bytes above them line up)
+and decodes the **transport header** (1 byte: FIR/FIN fragment-boundary flags
+and a 6-bit sequence number) for every data-link frame that carries any user
+data at all.
+
+The **application layer** -- function code, Internal Indications (IIN) on
+responses, and every object header's group/variation/qualifier/range -- is
+then decoded, but only for a fragment that is complete within a single
+data-link frame (transport FIR=1 and FIN=1, which covers the large majority
+of real traffic, especially requests). A fragment that continues across
+multiple data-link frames (FIR=1, FIN=0) gets its transport header decoded
+and nothing more -- reassembling application data across several TCP-carried
+data-link frames would need the same kind of cross-packet state tracking as
+TCP stream reassembly (see LIMITATIONS), which this tool does not do.
+
+Function codes are identified by name across the whole DNP3 function code
+table (Confirm, Read, Write, Select/Operate/Direct Operate, the Cold/Warm
+Restart and application-control functions, file functions, authentication
+functions, and the three response codes 0x81/0x82/0x83). For a response
+function code, the 16-bit IIN field is decoded into its individual flag names
+(e.g. `DEVICE_RESTART`, `NEED_TIME`, `PARAMETER_ERROR`) rather than shown as
+a bare hex value.
+
+Object headers are decoded structurally: group and variation (with a name for
+the common object groups -- Binary/Double-bit Binary/Analog/Counter Input and
+Output, Class Objects, Internal Indications, and others), the qualifier's
+index-prefix and range codes, the resulting range or explicit count, and how
+many bytes of object data that implies -- computed from a bits-per-point
+lookup table for the object types common in real traffic, then **skipped
+structurally** rather than decoded value-by-value (the point values
+themselves are not interpreted in this release). An object header shape this
+release doesn't recognize -- an object-size-prefixed or reserved qualifier
+prefix code, a group/variation combination outside the lookup table, a
+bit-packed format paired with a non-zero index prefix, or a declared object
+data length that doesn't fit in what's left of the fragment -- stops object
+parsing for that fragment with an explanatory note, rather than guessing at
+where the next header would start.
 
 ### S7comm / COTP (Siemens S7 PLCs, TCP port 102)
 
@@ -345,21 +393,45 @@ These are current, not aspirational -- each has a corresponding ROADMAP item.
 - **pcapng is not supported.** Convert with `tshark -F pcap -r in.pcapng -w out.pcap`.
 - **No TCP stream reassembly.** A Modbus or DNP3 PDU split across two TCP
   segments will not be reassembled; each TCP segment is decoded independently.
-  In practice this is rare for Modbus (PDUs are small) and more of a concern
-  for DNP3 (multi-block application-layer fragments), which is one more reason
-  the DNP3 application layer isn't decoded yet.
+  In practice this is rare for Modbus (PDUs are small); for DNP3, the same
+  limitation shows up as an application fragment that spans more than one
+  data-link frame (transport FIR=1, FIN=0) getting only its transport header
+  decoded, not its application layer -- see PROTOCOL COVERAGE.
 - **No IPv6.** Only IPv4 is parsed; IPv6 packets are reported as
   `unsupported-link`/`non-ip` depending on where they're detected.
 - **IPv4 fragmentation is not reassembled.** A fragmented IPv4 packet's TCP
   header will very likely fail to parse and be reported as a parse-error on
   the fragments after the first.
-- **DNP3 CRCs are not validated.** A corrupted DNP3 frame that still starts
-  with the right magic bytes will be "decoded" without any indication the CRC
-  was wrong.
+- **DNP3 CRCs are not validated** -- neither the data-link header CRC nor the
+  per-block CRCs within the user data. A corrupted DNP3 frame that still
+  starts with the right magic bytes will be "decoded" without any indication
+  a CRC was wrong; the block CRCs are correctly *located and skipped* (so
+  reassembly lines up) but their contents are never checked.
+- **DNP3 object data is skipped structurally, not decoded value-by-value.**
+  conduitscope computes how many bytes each object header's point values
+  occupy and reports the group/variation/range, but does not interpret the
+  point values themselves (online/offline flags, analog readings, counter
+  values, timestamps, ...). A group/variation combination outside the
+  built-in point-size table, or a qualifier this release doesn't support (an
+  object-size-prefixed qualifier, or a bit-packed format combined with an
+  index-prefixed qualifier), stops object-header parsing for that fragment
+  rather than guessing.
+- **A DNP3 fragment spanning multiple data-link frames only gets its
+  transport header decoded**, not its application layer -- see the note
+  under "No TCP stream reassembly" above.
 - **Modbus request/response classification is heuristic**, based on PDU shape
   (see PROTOCOL DETECTION), not on tracking the TCP stream's actual
   request/response pairing. It is reliable in practice for the read/write
   function families this release decodes, but it is not authoritative.
+- **Modbus/TCP detection itself is a heuristic, and can still false-positive
+  in principle.** Modbus/TCP has no magic bytes; detection requires
+  protocol-id==0 and a non-zero function code, which rules out the false
+  positive actually observed in a real capture (non-Modbus traffic on port
+  20000) but cannot rule out every possible coincidence -- a payload from
+  some other protocol could still, in principle, satisfy both checks. Treat
+  an isolated, otherwise-implausible Modbus packet (especially on a
+  non-standard port, which is flagged in the output) with appropriate
+  skepticism.
 - **S7comm item-level addressing is fully confident only for the classic
   S7ANY syntax.** `0xB2` (S7-1200/1500 "symbolic" addressing) also gets a
   tag, but it's an EXPERIMENTAL reconstruction from public sources rather
@@ -447,23 +519,37 @@ conduitscope decode -i capture.pcap --protocol s7comm -f json \
   | jq -r 'select(.s7comm_items) | "\(.src_ip) -> \(.dst_ip): \(.s7comm_items | join(", "))"'
 ```
 
+See which DNP3 function codes and object groups/variations flow over a
+capture, e.g. to spot an unsolicited response or a write/operate/direct
+operate you weren't expecting on a conduit:
+
+```sh
+conduitscope decode -i capture.pcap --protocol dnp3 -f json \
+  | jq -r 'select(.dnp3_function) | "\(.src_ip) -> \(.dst_ip): \(.dnp3_function) \(.dnp3_objects // [] | join(", "))"'
+```
+
 ## ROADMAP
 
 Rough order, each building on the groundwork this release establishes:
 
-1. **DNP3 application layer.** Decode object groups/variations and function
-   codes once there's been hands-on time with real DNP3 traffic (see the
-   reading list this project's groundwork discussion produced -- the DNP3
-   Primer and Wireshark walkthroughs are the natural next reference material).
+1. **DNP3 object *values*.** The application layer now decodes function
+   codes, IIN, and every object header's group/variation/qualifier/range, and
+   skips object data structurally by computed length -- the natural next step
+   is interpreting the point values themselves (binary/analog point states,
+   counter values, CROB command details, absolute timestamps) for the object
+   types already in the point-size table, rather than only reporting their
+   byte length.
 2. **TCP stream reassembly**, needed for split PDUs, authoritative
-   (non-heuristic) Modbus request/response pairing, and multi-segment S7comm
-   frames larger than one negotiated PDU length.
+   (non-heuristic) Modbus request/response pairing, multi-segment S7comm
+   frames larger than one negotiated PDU length, and DNP3 application
+   fragments that span more than one data-link frame (currently left with
+   only their transport header decoded -- see LIMITATIONS).
 3. **Zone/conduit policy engine** behind `policy validate`: a YAML schema
    describing zones (IP/port ranges, expected protocols) and conduits (allowed
    flows between zones), evaluated against decoded traffic, producing a
-   pass/fail report suitable for a NIS2/62443 audit trail. S7comm item tags
-   and Modbus address+quantity decoding both now give this something concrete
-   to match a policy's address ranges against.
+   pass/fail report suitable for a NIS2/62443 audit trail. S7comm item tags,
+   DNP3 object headers, and Modbus address+quantity decoding all now give this
+   something concrete to match a policy's address ranges against.
 4. **Live capture**, via libpcap on Linux and Npcap on Windows, as an
    additional input mode alongside (not replacing) pcap file input.
 5. **pcapng support**, once live capture or another concrete need makes it
@@ -478,6 +564,9 @@ Rough order, each building on the groundwork this release establishes:
    [EXPERIMENTAL] once confirmed.
 8. S7comm-Plus decoding, and PLC Control/Stop parameter decoding (these
    send commands that change PLC run state -- high security relevance).
+9. **DNP3 CRC validation** (both the header CRC and the per-block CRCs), so a
+   corrupted frame that still starts with the right magic bytes is flagged
+   rather than silently "decoded".
 
 ## BUILDING
 

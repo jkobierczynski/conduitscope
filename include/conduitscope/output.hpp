@@ -69,6 +69,7 @@ private:
     std::map<std::string, size_t> modbus_function_counts_;
     size_t modbus_exceptions_ = 0;
     std::map<std::string, size_t> s7comm_function_counts_;
+    std::map<std::string, size_t> dnp3_function_counts_;
     bool has_ts_ = false;
     double first_ts_ = 0.0, last_ts_ = 0.0;
 };

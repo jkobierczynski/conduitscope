@@ -123,6 +123,19 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
             if (auto d = try_parse_dnp3_link_layer(tcp.payload)) {
                 out.protocol = "dnp3";
                 out.summary = d->summary;
+                if (auto app = try_parse_dnp3_transport_and_application(*d, tcp.payload)) {
+                    out.summary += "; " + app->summary;
+                    for (const auto& n : app->notes) out.notes.push_back(n);
+                    out.dnp3_has_function = app->has_function;
+                    out.dnp3_function_name = app->function_name;
+                    constexpr size_t kMaxObjHeaders = 50;
+                    for (size_t i = 0; i < app->objects.size() && i < kMaxObjHeaders; ++i) {
+                        const auto& oh = app->objects[i];
+                        out.dnp3_object_headers.push_back("g" + std::to_string(oh.group) + "v" +
+                                                           std::to_string(oh.variation) + " (" +
+                                                           oh.group_name + ")");
+                    }
+                }
                 bool expected_port = port_in(tcp.src_port, DNP3_TCP_PORT, options_.extra_dnp3_ports) ||
                                       port_in(tcp.dst_port, DNP3_TCP_PORT, options_.extra_dnp3_ports);
                 if (!expected_port) {

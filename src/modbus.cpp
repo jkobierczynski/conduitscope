@@ -185,8 +185,20 @@ std::optional<ModbusFrame> try_parse_modbus_tcp(ByteSpan tcp_payload) {
 
     frame.function_code = c.u8();
     uint8_t raw_fc = frame.function_code;
-    frame.is_exception = (raw_fc & 0x80) != 0;
     uint8_t base_fc = raw_fc & 0x7F;
+    if (base_fc == 0) {
+        // Function code 0 is reserved and never assigned in the Modbus Application Protocol
+        // spec -- no real master or slave ever sends it. Unlike DNP3 (0x05 0x64) or S7comm
+        // (0x32/0x72), Modbus/TCP has no magic bytes of its own; protocol_id==0 is its only
+        // wire-level tell, and that alone is weak enough that other protocols' bytes can land
+        // on it by coincidence (seen in practice: DNP3 traffic on port 20000 misclassified as
+        // Modbus this way). A payload that decodes to function code 0 essentially never is
+        // Modbus, so bail out here -- the same signal that would otherwise produce a bogus
+        // "Unknown (0x0)" result -- and let the caller fall through to try DNP3/S7comm
+        // detection instead.
+        return std::nullopt;
+    }
+    frame.is_exception = (raw_fc & 0x80) != 0;
     frame.function_name = function_name(base_fc);
     frame.raw_pdu_data = c.rest();
 

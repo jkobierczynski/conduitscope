@@ -74,6 +74,63 @@ add_test(NAME decode_dnp3_sample
 set_tests_properties(decode_dnp3_sample PROPERTIES
   PASS_REGULAR_EXPRESSION "DNP3 data link frame")
 
+add_test(NAME dnp3_no_user_data_stays_link_only
+  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text)
+set_tests_properties(dnp3_no_user_data_stays_link_only PROPERTIES
+  PASS_REGULAR_EXPRESSION "user_data=0 byte\\(s\\)"
+  FAIL_REGULAR_EXPRESSION "user_data=0 byte\\(s\\)\\; transport")
+
+add_test(NAME dnp3_transport_and_read_class0_decoded
+  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text)
+set_tests_properties(dnp3_transport_and_read_class0_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "transport: FIR=1 FIN=1 SEQ=0 \\| application:.*function=Read \\(0x01\\) objects: \\[g60v1\\]")
+
+# The response packet's logical payload is 23 bytes -- over the 16-byte data-link block size --
+# so this is also the regression guard for the multi-block CRC reassembly logic: if it mis-skips
+# a block CRC, the object headers below would decode to garbage or fail to decode at all.
+add_test(NAME dnp3_response_multiblock_object_headers
+  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text)
+set_tests_properties(dnp3_response_multiblock_object_headers PROPERTIES
+  PASS_REGULAR_EXPRESSION "object 0: g1v2 \\(Binary Input\\) qualifier=0x00 range=0-2 -- 3 point\\(s\\), 3 byte\\(s\\) of object data")
+
+add_test(NAME dnp3_response_second_object_after_block_boundary
+  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text)
+set_tests_properties(dnp3_response_second_object_after_block_boundary PROPERTIES
+  PASS_REGULAR_EXPRESSION "object 1: g30v1 \\(Analog Input\\) qualifier=0x00 range=0-0 -- 1 point\\(s\\), 5 byte\\(s\\) of object data")
+
+add_test(NAME dnp3_response_iin_flags_decoded
+  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text)
+set_tests_properties(dnp3_response_iin_flags_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "function=Response \\(0x81\\) IIN=0x0080 \\[DEVICE_RESTART\\]")
+
+# Multi-data-link-frame fragment (transport FIN=0): application layer must be left undecoded,
+# not guessed at from the arbitrary trailing bytes in this fixture.
+add_test(NAME dnp3_multiframe_fragment_application_not_decoded
+  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text)
+set_tests_properties(dnp3_multiframe_fragment_application_not_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "transport: FIR=1 FIN=0 SEQ=0"
+  FAIL_REGULAR_EXPRESSION "transport: FIR=1 FIN=0 SEQ=0 \\| application")
+
+add_test(NAME dnp3_unsupported_prefix_code_falls_back
+  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text)
+set_tests_properties(dnp3_unsupported_prefix_code_falls_back PROPERTIES
+  PASS_REGULAR_EXPRESSION "prefix code 0x04 \\(object-size-prefixed or reserved\\), which this groundwork release does not decode")
+
+add_test(NAME dnp3_function_in_json
+  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format json)
+set_tests_properties(dnp3_function_in_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"dnp3_function\": \"Response\"")
+
+add_test(NAME dnp3_objects_in_json
+  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format json)
+set_tests_properties(dnp3_objects_in_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"dnp3_objects\": \\[\"g1v2 \\(Binary Input\\)\", \"g30v1 \\(Analog Input\\)\"\\]")
+
+add_test(NAME stats_mode_dnp3
+  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --stats)
+set_tests_properties(stats_mode_dnp3 PROPERTIES
+  PASS_REGULAR_EXPRESSION "dnp3 function codes:")
+
 add_test(NAME decode_s7comm_sample
   COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm.pcap" --format text)
 set_tests_properties(decode_s7comm_sample PROPERTIES
@@ -164,6 +221,17 @@ add_test(NAME s7comm_item_tags_in_json
   COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm.pcap" --format json)
 set_tests_properties(s7comm_item_tags_in_json PROPERTIES
   PASS_REGULAR_EXPRESSION "\"s7comm_items\": \\[\"DB10\\.DBW100\"\\]")
+
+# Regression guard for a real false positive: non-Modbus traffic (here, bytes that also happen
+# to satisfy DNP3's 0x05 0x64 start) whose first four bytes look like transaction_id + a valid
+# protocol_id==0, and whose function-code byte is 0x00 -- reserved/never assigned in the Modbus
+# spec. Found via a real capture (DNP3 traffic on port 20000 mislabeled as Modbus); must now fall
+# through to DNP3 detection instead.
+add_test(NAME modbus_function_code_zero_is_not_modbus
+  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus_false_positive.pcap" --format text)
+set_tests_properties(modbus_function_code_zero_is_not_modbus PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[dnp3\\]"
+  FAIL_REGULAR_EXPRESSION "\\[modbus\\]")
 
 add_test(NAME info_modbus_sample
   COMMAND conduitscope info --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap")
