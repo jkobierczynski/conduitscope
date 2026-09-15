@@ -31,9 +31,11 @@ Groundwork / v0.1.0. What works right now:
   addressing -- which memory area (input/output/merker/DB/instance-DB/
   counter/timer), DB number, byte/bit address, and transport size each
   item addresses, rendered in familiar Step 7 notation (`DB10.DBW100`,
-  `I0.0`, `MB50`, `T5`), plus the returned/written values. S7comm-Plus and
-  the newer S7-1200/1500 symbolic addressing syntax are documented stubs.
-  Validated against real 4SICS ICS-lab captures -- including two much
+  `I0.0`, `MB50`, `T5`), plus the returned/written values. S7-1200/1500
+  "symbolic" addressing (`0xB2`) -- confirmed to be common in real traffic --
+  also gets a tag, but via an **experimental, unverified** reconstruction
+  clearly marked as such everywhere it appears; S7comm-Plus is a documented
+  stub. Validated against real 4SICS ICS-lab captures -- including two much
   larger ones (1.25M and 2.27M packets) that turned out to be
   overwhelmingly S7comm traffic, which is exactly the case item-level
   addressing was built for.

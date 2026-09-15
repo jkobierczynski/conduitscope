@@ -13,20 +13,25 @@
 // (input/output/merker/DB/counter/timer), DB number, byte/bit address, and
 // transport size (BIT/BYTE/WORD/DWORD/...) each item addresses, rendered in
 // familiar Step 7 notation (e.g. "DB10.DBW100", "I0.0", "MB50", "T5"), plus
-// the returned/written values where present. Only the classic S7ANY
-// addressing syntax (syntax id 0x10) is decoded this way -- other syntax
-// ids are recognized (by id) but shown as raw hex, same as every other
-// function code's parameter/data payload. The most common of these in
-// practice is 0xB2, S7-1200/1500 "symbolic" addressing (confirmed against
-// real traffic and against Wireshark's own S7COMM_SYNTAXID_1200SYM
-// constant) -- its item format uses an opaque CRC-like value plus one or
-// more "LID" fields to reference a compiled symbol table entry rather than
-// a plain byte/bit address, and reconstructing that format with confidence
-// from public sources wasn't possible in the time available; it's left as
-// a documented stub rather than shipping a guessed decode that could
-// silently show a wrong address in a security-auditing tool. See ROADMAP.
-// S7comm-Plus (TIA Portal's newer, largely undocumented protocol, protocol
-// id 0x72) is detected but not decoded at all.
+// the returned/written values where present. The classic S7ANY addressing
+// syntax (syntax id 0x10) is decoded this way with high confidence -- it's
+// well-documented and cross-checked against multiple independent open-source
+// implementations. 0xB2, S7-1200/1500 "symbolic" addressing -- confirmed to
+// be the single most common non-S7ANY syntax in real traffic -- also gets a
+// tag (e.g. "M2.0"), but via an EXPERIMENTAL, unverified reconstruction: its
+// wire format references a compiled symbol-table entry (an opaque CRC-like
+// value plus a "LID" field) rather than a plain address, and no authoritative
+// byte-layout documentation was available to confirm it against, only
+// public reverse-engineering notes plus internal consistency in real capture
+// samples (see the EXPERIMENTAL block in s7comm.cpp for exactly what that
+// evidence is and isn't). Every 0xB2 tag is marked EXPERIMENTAL everywhere
+// it's shown -- text, notes, and JSON -- specifically so it's never mistaken
+// for the S7ANY decode's confidence level; a shape this reconstruction
+// doesn't cover (an unrecognized area code, more than one LID entry) falls
+// back to raw hex rather than guessing further. Every other syntax id is
+// shown as raw hex, same as every other function code's parameter/data
+// payload. S7comm-Plus (TIA Portal's newer, largely undocumented protocol,
+// protocol id 0x72) is detected but not decoded at all.
 //
 // Reference behavior cross-checked against the Wireshark packet-s7comm.c
 // dissector and the Arkime s7comm.c parser (both open source); this is an
@@ -50,21 +55,29 @@ constexpr uint8_t S7COMM_PLUS_PROTOCOL_ID = 0x72;
 // in the data block, see S7DataItem below).
 struct S7Item {
     uint8_t syntax_id = 0;
-    // False if syntax_id isn't 0x10 (S7ANY) -- most commonly seen in
-    // practice as 0xB2 (S7-1200/1500 "symbolic" addressing, confirmed
-    // against real traffic -- see s7comm.hpp's file comment for why it
-    // isn't decoded). When false, every field below except syntax_id is
-    // meaningless and `tag` is empty; the item was recognized but not
-    // decoded.
+    // True when `tag` was successfully produced, whether from the well-established S7ANY
+    // decode (syntax_id 0x10, is_experimental false) or the EXPERIMENTAL 0xB2 reconstruction
+    // (is_experimental true -- see the file comment above and the tia1200_* fields below).
+    // False for every other syntax id, or a 0xB2 item whose shape the experimental decode
+    // doesn't cover -- in both cases `tag` is empty and the item was recognized but not decoded.
     bool syntax_supported = false;
 
+    // transport_size/transport_size_name/count are S7ANY-only fields (0 / empty for a 0xB2 item,
+    // which has no equivalent on the wire -- see the file comment above for why).
     uint8_t transport_size = 0;       // wire "type" byte: 1=BIT, 2=BYTE, 4=WORD, 6=DWORD, 8=REAL, ...
     std::string transport_size_name;  // e.g. "WORD", or "Unknown (0xNN)"
-    uint16_t count = 0;                // number of elements of transport_size requested
-    uint16_t db_number = 0;            // only meaningful when area is DB or DI
-    uint8_t area = 0;                  // 0x81=I, 0x82=Q, 0x83=M, 0x84=DB, 0x85=DI, 0x86=L, 0x87=V, 0x1C=C, 0x1D=T
+    uint16_t count = 0;                // number of elements of transport_size requested (0xB2: unset -- see above)
+    uint16_t db_number = 0;            // meaningful when area is DB/DI (S7ANY) or for a DB-area 0xB2 item
+    // S7ANY only: 0x81=I, 0x82=Q, 0x83=M, 0x84=DB, 0x85=DI, 0x86=L, 0x87=V, 0x1C=C, 0x1D=T.
+    // Left at 0 for a 0xB2 item -- its own area codes are a different, non-overlapping byte
+    // value space (see s7comm.cpp), so this field intentionally doesn't try to unify them;
+    // area_name is set correctly for both cases and is what to display/compare instead.
+    uint8_t area = 0;
     std::string area_name;             // e.g. "Data Block (DB)"
 
+    // byte_address/bit_offset/bit_address ARE populated for a successfully-decoded 0xB2 item
+    // (same byte<<3|bit reconstruction as S7ANY's bit-addressable areas), even though they come
+    // from a different, EXPERIMENTAL part of the wire format -- see is_experimental.
     uint32_t bit_address = 0;   // raw 24-bit address field off the wire (byte_address*8 + bit_offset)
     uint32_t byte_address = 0;  // for counter/timer areas, this is the counter/timer number instead
     uint8_t bit_offset = 0;     // meaningless for counter/timer areas
@@ -73,6 +86,18 @@ struct S7Item {
     // "MB50", "T5". Empty when syntax_supported is false or the area code
     // isn't recognized.
     std::string tag;
+
+    // True for a tag produced by the experimental 0xB2 (S7-1200/1500
+    // "symbolic" addressing) decode rather than the well-established S7ANY
+    // one -- see the EXPERIMENTAL note in s7comm.cpp for exactly what is and
+    // isn't verified about it. Every caller that displays `tag` must check
+    // this and mark it, since a wrong address that looks confidently decoded
+    // is worse than an honest "not decoded" in a security-auditing tool.
+    // The three tia1200_* fields are only set when is_experimental is true.
+    bool is_experimental = false;
+    uint16_t tia1200_reserved = 0;   // the two bytes between the syntax id and the area field; meaning unconfirmed
+    uint32_t tia1200_crc = 0;        // opaque, TIA Portal-computed; not resolvable to a symbol name from the wire
+    uint8_t tia1200_lid_flags = 0;   // meaning unconfirmed
 };
 
 // One data item from a Read Var response's data block, or a Write Var

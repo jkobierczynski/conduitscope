@@ -200,7 +200,10 @@ they apply:
   code was decoded.
 - `s7comm_items`: an array of Step 7-style item tags (`"DB10.DBW100"`,
   `"I0.0"`, ...), on Read Var / Write Var *request* packets whose item
-  addressing was decoded (see PROTOCOL COVERAGE).
+  addressing was decoded (see PROTOCOL COVERAGE). A tag from the
+  EXPERIMENTAL `0xB2` decode has `" [EXPERIMENTAL]"` appended to it (e.g.
+  `"M2.0 [EXPERIMENTAL]"`) -- check for that suffix before treating an
+  entry as a confirmed address.
 - `s7comm_values`: an array of short value renderings (a hex string, `"0"`/
   `"1"` for a decoded bit, or a return-code name like `"Object does not
   exist"`), on Read Var / Write Var *response* packets, and alongside
@@ -278,18 +281,32 @@ item addresses. This is rendered in familiar Step 7 notation -- `DB10.DBW100`
 `T5`, `C3` -- alongside the returned values (Read Var responses) or written
 values (Write Var requests) themselves. A request can batch many items in one
 PDU (real PLCs commonly do); the summary line shows the first few and the
-full list is always in the decoded packet's notes. Other addressing syntaxes
-are recognized as items (by syntax id) but not decoded -- shown as raw hex,
-same as every other function code's parameter/data payload. The one you're
-most likely to actually see is `0xB2`, S7-1200/1500 "symbolic" addressing --
-confirmed present in real capture traffic during this feature's development,
-and cross-checked against Wireshark's own `S7COMM_SYNTAXID_1200SYM` constant.
-Its item format references a compiled symbol-table entry (an opaque CRC-like
-value plus one or more "LID" fields) rather than a plain byte/bit address,
-and reconstructing that format with real confidence from public sources
-wasn't achievable in the time available -- see LIMITATIONS and ROADMAP. So is
-the entire Userdata parameter block used for vendor-specific diagnostics/CPU
-functions.
+full list is always in the decoded packet's notes.
+
+**`0xB2`, S7-1200/1500 "symbolic" addressing**, also gets a tag -- confirmed
+to be the addressing syntax you're actually most likely to see in real
+S7-1200/1500 traffic -- but via an **EXPERIMENTAL, unverified** decode,
+clearly labeled `[EXPERIMENTAL]` everywhere it appears (the summary line, the
+per-item note, and the JSON `s7comm_items` array). Unlike
+S7ANY, this syntax doesn't carry a plain byte/bit address on the wire: TIA
+Portal compiles each symbolic tag reference down to an opaque CRC-like value
+(not recoverable to the original symbol name from the capture alone) plus a
+"LID" (local id) field. No authoritative byte-layout documentation was found
+for this syntax -- what's implemented is a reconstruction from Wireshark's
+`S7COMM_SYNTAXID_1200SYM` field/area-code constants, cross-checked against
+an independent parser's minimum item length, and validated against real
+capture traffic for exactly one shape: a single LID entry addressing the
+Merker (M) area, where five sequential real requests decoded to `M2.0`
+through `M2.4` -- consistent both internally (fixed fields identical across
+items, only the address-carrying bytes varying) and with how a real PLC
+program would batch a run of related status bits. It has *not* been
+confirmed against real DB-area traffic or an item with more than one LID
+entry; both of those recognized-but-unconfirmed shapes fall back to raw hex
+rather than guessing further. Treat every `[EXPERIMENTAL]` tag as a
+plausible reconstruction, not a certainty -- see LIMITATIONS. Every other
+syntax id is recognized (by id) but not decoded at all, same as every other
+function code's parameter/data payload -- so is the entire Userdata
+parameter block used for vendor-specific diagnostics/CPU functions.
 
 **S7comm-Plus** (protocol id `0x72`, the newer, largely undocumented protocol
 TIA Portal uses to talk to S7-1200/1500 CPUs) is detected and labeled but not
@@ -343,16 +360,18 @@ These are current, not aspirational -- each has a corresponding ROADMAP item.
   (see PROTOCOL DETECTION), not on tracking the TCP stream's actual
   request/response pairing. It is reliable in practice for the read/write
   function families this release decodes, but it is not authoritative.
-- **S7comm item-level addressing only covers the classic S7ANY syntax.**
-  Read Var / Write Var items using other addressing syntaxes -- most
-  notably `0xB2` (S7-1200/1500 "symbolic" addressing, which real captures
-  during development showed is common) -- are recognized by syntax id but
-  shown as raw hex, not decoded into an area/address/transport size. That
-  syntax's item format resolves a compiled symbol-table entry (a CRC-like
-  value plus "LID" fields) rather than a plain byte/bit address, and doing
-  it justice needs firmer sourcing than was available in the time spent on
-  it here; see ROADMAP. The Userdata ROSCTR (vendor-specific diagnostics/
-  CPU functions) is entirely unparsed beyond being labeled.
+- **S7comm item-level addressing is fully confident only for the classic
+  S7ANY syntax.** `0xB2` (S7-1200/1500 "symbolic" addressing) also gets a
+  tag, but it's an EXPERIMENTAL reconstruction from public sources rather
+  than confirmed documentation -- see PROTOCOL COVERAGE for exactly what
+  evidence backs it and what it doesn't cover (DB-area items, more than one
+  LID entry per item). Every `0xB2` tag is marked `[EXPERIMENTAL]`
+  everywhere it's shown; treat it as a strong hypothesis, not ground truth,
+  until it's cross-checked against a source with real authority (a PLC or
+  TIA Portal project you control, ideally). Every syntax id besides `0x10`
+  and `0xB2` is recognized but shown as raw hex, not decoded at all. The
+  Userdata ROSCTR (vendor-specific diagnostics/CPU functions) is entirely
+  unparsed beyond being labeled.
 - **A few S7comm data-item transport sizes use a best-effort length
   interpretation.** The two overwhelmingly common cases (BIT, and
   BYTE/WORD/DWORD-family reads/writes) are decoded with high confidence
@@ -450,13 +469,15 @@ Rough order, each building on the groundwork this release establishes:
 5. **pcapng support**, once live capture or another concrete need makes it
    worth the added parsing complexity.
 6. Colorized text output (the `--no-color` flag is already reserved for this).
-7. S7comm-Plus decoding, PLC Control/Stop parameter decoding (these send
-   commands that change PLC run state -- high security relevance), and the
-   S7-1200/1500 "symbolic" addressing syntax (`0xB2`) that item-level
-   decoding currently recognizes but doesn't decode -- worth revisiting
-   with more time to pin down its CRC/LID item format from a source firmer
-   than public reverse-engineering writeups, since real captures show it's
-   common on S7-1200/1500 traffic specifically (i.e. newer PLCs).
+7. **Confirm or replace the EXPERIMENTAL `0xB2` (S7-1200/1500 "symbolic"
+   addressing) decode** against a source with real authority -- a PLC or
+   TIA Portal project under your own control, ideally, rather than more
+   public reverse-engineering writeups -- and extend it to the shapes it
+   currently falls back to raw hex on: DB-area items, and items with more
+   than one LID entry (structured/nested symbol access). Promote it out of
+   [EXPERIMENTAL] once confirmed.
+8. S7comm-Plus decoding, and PLC Control/Stop parameter decoding (these
+   send commands that change PLC run state -- high security relevance).
 
 ## BUILDING
 

@@ -76,6 +76,18 @@ std::string hex8(uint8_t v) {
     return out.str();
 }
 
+std::string hex16(uint16_t v) {
+    std::ostringstream out;
+    out << "0x" << std::hex << static_cast<unsigned>(v);
+    return out.str();
+}
+
+std::string hex32(uint32_t v) {
+    std::ostringstream out;
+    out << "0x" << std::hex << v;
+    return out.str();
+}
+
 std::string s7_area_name(uint8_t area, std::string& letter) {
     switch (area) {
         case 0x81: letter = "I"; return "Inputs (I)";
@@ -149,6 +161,106 @@ std::string s7_build_tag(const S7Item& item, const std::string& area_letter, cha
     return tag.str();
 }
 
+// --- 0xB2 (S7-1200/1500 "symbolic" addressing) -- EXPERIMENTAL -----------
+//
+// Unlike S7ANY, this addressing mode doesn't carry a plain byte/bit address
+// at all: TIA Portal compiles each symbolic tag reference down to an opaque
+// CRC-like value (not independently recoverable to a name from the wire)
+// plus one or more "LID" (local id) fields. The layout below is a
+// best-effort reconstruction from public sources -- Wireshark's
+// S7COMM_SYNTAXID_1200SYM field list and its documented TIA1200 area-code
+// constants (S7COMM_TIA1200_VAR_ITEM_AREA1_DB=0x8a0e,
+// AREA1_IQMCT=0x0000, AREA2_I/Q/M/C/T=0x50-0x54), cross-checked against an
+// independent third-party parser's 14-byte minimum item length -- and it
+// has been validated against real capture traffic for exactly one shape:
+// a single LID entry addressing the Merker (M) area. It has NOT been
+// confirmed against real DB-area 1200SYM traffic, nor against an item with
+// more than one LID entry (structured/nested symbol access presumably
+// produces one, but the chaining format is unverified). Every tag this
+// produces is marked is_experimental so callers show it as a reconstruction,
+// not a certainty; anything that doesn't match the single-LID shape falls
+// back to the generic "not decoded" path rather than guessing further.
+//
+// `body` is everything in the item's address spec after the syntax id byte.
+// Returns false (leaving `item` untouched) when the shape doesn't match what
+// this experimental decode covers, so the caller falls back gracefully.
+bool try_decode_tia1200_sym(ByteSpan body, S7Item& item, std::vector<std::string>& notes, size_t item_index) {
+    Cursor bc(body);
+    if (bc.remaining() < 9) {  // reserved(2) + area1(2) + at least area2(1) + crc(4)
+        return false;
+    }
+    uint16_t reserved1 = bc.u16be();
+    uint16_t area1 = bc.u16be();
+
+    std::string area_letter;
+    uint16_t db_number = 0;
+    bool is_db = false;
+
+    if (area1 == 0x0000) {  // AREA1_IQMCT: a 1-byte area2 code follows
+        uint8_t area2 = bc.u8();
+        switch (area2) {
+            case 0x50: area_letter = "I"; item.area_name = "Inputs (I)"; break;
+            case 0x51: area_letter = "Q"; item.area_name = "Outputs (Q)"; break;
+            case 0x52: area_letter = "M"; item.area_name = "Merkers/Flags (M)"; break;
+            case 0x53: area_letter = "C"; item.area_name = "Counters (C)"; break;
+            case 0x54: area_letter = "T"; item.area_name = "Timers (T)"; break;
+            default:
+                notes.push_back("item " + std::to_string(item_index) +
+                                 " is a 1200SYM (0xB2) item with an unrecognized area2 byte " + hex8(area2) +
+                                 "; the experimental decode doesn't cover this, showing raw hex instead");
+                return false;
+        }
+    } else if (area1 == 0x8A0E) {  // AREA1_DB: a 2-byte DB number follows
+        if (bc.remaining() < 6) return false;  // dbnumber(2) + crc(4)
+        is_db = true;
+        db_number = bc.u16be();
+        area_letter = "DB";
+        item.area_name = "Data Block (DB)";
+    } else {
+        notes.push_back("item " + std::to_string(item_index) +
+                         " is a 1200SYM (0xB2) item with an unrecognized area1 value " + hex16(area1) +
+                         "; the experimental decode doesn't cover this, showing raw hex instead");
+        return false;
+    }
+
+    if (bc.remaining() < 4) return false;
+    uint32_t crc = bc.u32be();
+
+    if (bc.remaining() != 4) {
+        // Not the single-LID (flags(1) + 3-byte value) shape this experimental decode covers --
+        // most likely more than one LID entry (nested/structured symbol access), whose chaining
+        // format isn't verified. Bail out rather than guess at it.
+        notes.push_back("item " + std::to_string(item_index) + " is a 1200SYM (0xB2) item with " +
+                         std::to_string(bc.remaining()) +
+                         " byte(s) left after its CRC (the experimental decode only covers exactly 4, "
+                         "one LID entry) -- crc=" + hex32(crc) + "; showing raw hex instead");
+        return false;
+    }
+
+    uint8_t lid_flags = bc.u8();
+    uint32_t lid_raw = (static_cast<uint32_t>(bc.u8()) << 16) | (static_cast<uint32_t>(bc.u8()) << 8) | bc.u8();
+    uint32_t byte_addr = lid_raw >> 3;
+    uint8_t bit_off = static_cast<uint8_t>(lid_raw & 0x7);
+
+    std::ostringstream tag;
+    if (is_db) {
+        item.db_number = db_number;
+        tag << "DB" << db_number << ".DBX" << byte_addr << "." << static_cast<unsigned>(bit_off);
+    } else {
+        tag << area_letter << byte_addr << "." << static_cast<unsigned>(bit_off);
+    }
+    item.tag = tag.str();
+    item.bit_address = lid_raw;
+    item.byte_address = byte_addr;
+    item.bit_offset = bit_off;
+    item.is_experimental = true;
+    item.syntax_supported = true;
+    item.tia1200_reserved = reserved1;
+    item.tia1200_crc = crc;
+    item.tia1200_lid_flags = lid_flags;
+    return true;
+}
+
 // Parses one S7ANY (or unsupported-syntax) item out of a Read Var / Write
 // Var request's parameter block. Advances `c` past the item's declared
 // length regardless of whether the syntax was understood, so the caller can
@@ -183,6 +295,13 @@ S7Item parse_s7_item(Cursor& c, std::vector<std::string>& notes, size_t item_ind
         return item;
     }
     item.syntax_id = ic.u8();
+    if (item.syntax_id == 0xB2) {
+        if (try_decode_tia1200_sym(ic.rest(), item, notes, item_index)) {
+            return item;  // tag + is_experimental set; detail note already pushed
+        }
+        // Recognized shape didn't match what the experimental decode covers -- fall through
+        // to the generic "not decoded" path below (try_decode_tia1200_sym already noted why).
+    }
     if (item.syntax_id != 0x10) {
         item.syntax_supported = false;
         std::string syntax_label = (item.syntax_id == 0xB2) ? " (S7-1200/1500 symbolic addressing)" : "";
@@ -319,7 +438,7 @@ std::string brief_item_list(const std::vector<S7Item>& items) {
         if (i) out << ", ";
         const auto& it = items[i];
         if (!it.tag.empty()) {
-            out << it.tag;
+            out << it.tag << (it.is_experimental ? " [EXPERIMENTAL]" : "");
         } else if (it.syntax_supported) {
             out << it.area_name;
         } else {
@@ -366,7 +485,12 @@ void append_item_notes(const std::vector<S7Item>& items, std::vector<std::string
         const auto& it = items[i];
         std::ostringstream line;
         line << "item " << i << ": ";
-        if (!it.tag.empty()) {
+        if (it.is_experimental) {
+            line << it.tag << " [EXPERIMENTAL 1200SYM (0xB2) decode, unverified -- reserved="
+                 << hex16(it.tia1200_reserved) << " crc=" << hex32(it.tia1200_crc)
+                 << " lid_flags=" << hex8(it.tia1200_lid_flags)
+                 << "; crc is an opaque TIA Portal-computed value, not resolvable to a symbol name]";
+        } else if (!it.tag.empty()) {
             line << it.tag << " [" << it.transport_size_name << " x" << it.count << "]";
         } else if (it.syntax_supported) {
             line << it.area_name << " (address not decoded)";

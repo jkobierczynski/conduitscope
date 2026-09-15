@@ -320,6 +320,46 @@ def build_s7comm_items_sample():
     (TESTS_DIR / "sample_s7comm_items.pcap").write_bytes(data)
 
 
+def build_s7comm_1200sym_sample():
+    """The experimental 0xB2 (S7-1200/1500 "symbolic" addressing) decode, exercised with
+    the *exact* item bytes pulled from a real 4SICS capture (packet #94 of one of the
+    larger GeekLounge pcaps) during this feature's development -- not a synthetic
+    approximation. Five items in one Read Var request, all addressing the Merker (M)
+    area with sequential LID values that decode to M2.0 through M2.4: a strong
+    internal-consistency signal for the reconstructed byte layout (real PLC programs
+    commonly batch-read a run of related status bits like this), even though the
+    layout remains unverified against authoritative documentation -- see s7comm.cpp."""
+    ENG_IP, ENG_PORT = HMI_IP, 49156
+
+    real_items_hex = [
+        "b2ff00000052ea2db0d940000010",  # -> M2.0
+        "b2ff0000005278041f0f40000011",  # -> M2.1
+        "b2ff000000526b1223fc40000012",  # -> M2.2
+        "b2ff00000052f93b8c2a40000013",  # -> M2.3
+        "b2ff000000524d3e5a1a40000014",  # -> M2.4
+    ]
+    # Two synthetic (not from a real capture) items appended to exercise the experimental
+    # decode's fallback paths: an area1 value it doesn't recognize, and a CRC followed by
+    # more than 4 bytes (more than one LID entry -- an unverified shape it deliberately
+    # bails out of rather than guessing at).
+    synthetic_edge_cases_hex = [
+        "b2ff0000ffffea2db0d940000010",              # unrecognized area1 (0xffff)
+        "b2ff00000052ea2db0d94000001012345678",       # 8 bytes after CRC instead of 4
+    ]
+    all_items_hex = real_items_hex + synthetic_edge_cases_hex
+    items = b"".join(bytes([0x12, len(bytes.fromhex(h))]) + bytes.fromhex(h) for h in all_items_hex)
+    read_param = bytes([0x04, len(all_items_hex)]) + items
+    read_req = s7_header(0x01, 50, len(read_param), 0) + read_param
+    cotp_req = tpkt_frame(COTP_DT_HEADER, read_req)
+    tcp_seg = tcp_header(ENG_PORT, 102, 2000, 2100, TCP_PSH | TCP_ACK, len(cotp_req)) + cotp_req
+    ip_seg = ipv4_header(ENG_IP, PLC_IP, 6, len(tcp_seg), 0x3400) + tcp_seg
+    eth_seg = eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip_seg
+
+    data = pcap_global_header()
+    data += pcap_record(eth_seg, 1_445_465_444, 995098)  # same timestamp as the real packet
+    (TESTS_DIR / "sample_s7comm_1200sym.pcap").write_bytes(data)
+
+
 def build_padded_ack_sample():
     # A bare ACK: 0 bytes of real TCP payload. Real Ethernet links pad frames
     # shorter than 60 bytes with trailing zeros, so the *captured* frame is
@@ -354,6 +394,7 @@ if __name__ == "__main__":
     build_dnp3_sample()
     build_s7comm_sample()
     build_s7comm_items_sample()
+    build_s7comm_1200sym_sample()
     build_padded_ack_sample()
     build_not_a_pcap()
     print("wrote sample fixtures to", TESTS_DIR)

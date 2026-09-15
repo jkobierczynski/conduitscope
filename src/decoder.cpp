@@ -156,7 +156,11 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                         constexpr size_t kMaxTags = 50;
                         for (size_t i = 0; i < s7->items.size() && i < kMaxTags; ++i) {
                             const auto& it = s7->items[i];
-                            out.s7comm_item_tags.push_back(!it.tag.empty() ? it.tag : it.area_name);
+                            std::string display_tag = !it.tag.empty() ? it.tag : it.area_name;
+                            // A consumer parsing this array as trusted addresses must not mistake an
+                            // unverified reconstruction for the well-established S7ANY decode.
+                            if (it.is_experimental) display_tag += " [EXPERIMENTAL]";
+                            out.s7comm_item_tags.push_back(display_tag);
                         }
                         for (size_t i = 0; i < s7->data_items.size() && i < kMaxTags; ++i) {
                             const auto& di = s7->data_items[i];

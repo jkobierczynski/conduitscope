@@ -134,6 +134,32 @@ add_test(NAME s7comm_unsupported_syntax_id_noted
 set_tests_properties(s7comm_unsupported_syntax_id_noted PROPERTIES
   PASS_REGULAR_EXPRESSION "syntax id 0xb0.*not decoded")
 
+add_test(NAME s7comm_1200sym_experimental_decode
+  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_1200sym.pcap" --format text)
+set_tests_properties(s7comm_1200sym_experimental_decode PROPERTIES
+  PASS_REGULAR_EXPRESSION "item 4: M2\\.4 \\[EXPERIMENTAL 1200SYM")
+
+add_test(NAME s7comm_1200sym_marked_in_summary
+  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_1200sym.pcap" --format text)
+set_tests_properties(s7comm_1200sym_marked_in_summary PROPERTIES
+  PASS_REGULAR_EXPRESSION "M2\\.0 \\[EXPERIMENTAL\\]")
+
+add_test(NAME s7comm_1200sym_marked_in_json
+  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_1200sym.pcap" --format json)
+set_tests_properties(s7comm_1200sym_marked_in_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"M2\\.0 \\[EXPERIMENTAL\\]\"")
+
+# Fallback paths: shapes the experimental decode deliberately does not guess at.
+add_test(NAME s7comm_1200sym_unrecognized_area1_falls_back
+  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_1200sym.pcap" --format text)
+set_tests_properties(s7comm_1200sym_unrecognized_area1_falls_back PROPERTIES
+  PASS_REGULAR_EXPRESSION "item 5 is a 1200SYM \\(0xB2\\) item with an unrecognized area1 value")
+
+add_test(NAME s7comm_1200sym_multi_lid_falls_back
+  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_1200sym.pcap" --format text)
+set_tests_properties(s7comm_1200sym_multi_lid_falls_back PROPERTIES
+  PASS_REGULAR_EXPRESSION "item 6 is a 1200SYM \\(0xB2\\) item with 8 byte\\(s\\) left after its CRC")
+
 add_test(NAME s7comm_item_tags_in_json
   COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm.pcap" --format json)
 set_tests_properties(s7comm_item_tags_in_json PROPERTIES
