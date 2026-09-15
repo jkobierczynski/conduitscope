@@ -1,12 +1,14 @@
 # conduitscope
 
 `conduitscope` decodes Modbus/TCP, DNP3, and S7comm/COTP (Siemens S7 PLC protocol)
-traffic from offline pcap captures. It's
-groundwork for an OT/ICS conduit-auditing tool: today it gives you reliable protocol
-decoding and a stats view; a zone/conduit policy engine (mapping observed traffic
-against an IEC 62443-style zone/conduit model, for NIS2-flavored compliance work) is
-the next phase, and its command is already scaffolded (`policy validate`) so the
-option surface won't change out from under later automation.
+traffic from offline pcap captures, and checks it against a zone/conduit segmentation
+policy. It's an OT/ICS conduit-auditing tool: `decode`/`info` give you reliable
+protocol decoding and a stats view, and `policy validate` maps that decoded traffic
+against an IEC 62443-style zone/conduit model (for NIS2-flavored compliance work) --
+you write a policy file naming your zones (IP/CIDR ranges) and the conduits allowed
+between them, and get back a compliant/non-compliant report naming every flow that
+wasn't explicitly permitted. See [docs/MANUAL.md](docs/MANUAL.md)'s POLICY FILE FORMAT
+section for the schema.
 
 Why offline pcap files rather than live capture: it keeps the tool dependency-free.
 No libpcap on Linux, no Npcap SDK on Windows, no elevated privileges to build or run
@@ -108,6 +110,24 @@ Groundwork / v0.1.0. What works right now:
   above, not part of this one
 - Text, JSON, and CSV output; a `--stats` summary mode; an `info` command for
   quick file metadata
+- `policy validate`: a zone/conduit policy engine. A policy file (a
+  deliberately restricted, dependency-free YAML subset -- no vendored YAML
+  library, same zero-dependency approach as everything else here) declares
+  zones (IPv4 CIDR blocks) and conduits (an allowed protocol+port
+  relationship, in a given direction, between two zones). Every decoded TCP
+  flow in the capture is classified into a zone pair, checked against the
+  policy's conduits, and reported as allowed, a violation, or unclassified
+  (an endpoint matching no declared zone, or a flow with no recognized
+  protocol at all) -- text or JSON output, a distinct exit status for
+  "found problems" vs. "couldn't run" vs. "clean", and a report that also
+  lists any conduit the capture never exercised. Built entirely on top of
+  the decoding layer above (S7comm item tags, decoded DNP3 point values,
+  Modbus address+quantity decoding, and authoritative Modbus request/
+  response pairing are exactly the concrete facts this checks policy
+  against) rather than duplicating any of its parsing. See
+  docs/MANUAL.md's POLICY FILE FORMAT section for the full schema and
+  LIMITATIONS for exactly what it does and doesn't check (e.g. the
+  SYN-based flow-direction heuristic's fallback case).
 - A `decode`/`info`/`policy validate`/`version` command surface with full
   `--help` at every level
 
@@ -159,6 +179,10 @@ build/conduitscope decode -i tests/sample_modbus.pcap
 build/conduitscope decode -i tests/sample_s7comm.pcap --stats
 build/conduitscope decode -i tests/sample_modbus.pcap --format json
 build/conduitscope info -i tests/sample_modbus.pcap
+
+# Check a capture against a zone/conduit policy (see tests/policies/*.yaml for more examples,
+# and docs/MANUAL.md's POLICY FILE FORMAT section for the schema):
+build/conduitscope policy validate -i tests/sample_modbus.pcap --policy tests/policies/compliant.yaml
 ```
 
 To decode traffic you've actually captured, e.g. from a Modbus simulator such as

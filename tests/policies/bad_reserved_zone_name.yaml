@@ -1,0 +1,11 @@
+# Regression fixture: a zone literally named "unclassified" -- reserved for traffic PolicyEngine
+# finds matches no declared zone (see Policy::zone_for/PolicyReport), so declaring it as a real
+# zone name must be rejected rather than silently creating reporting ambiguity.
+zones:
+  unclassified:
+    networks: [10.0.0.0/8]
+conduits:
+  - name: c1
+    from: unclassified
+    to: unclassified
+    protocols: [modbus]

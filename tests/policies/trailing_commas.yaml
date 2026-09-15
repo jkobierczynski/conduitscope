@@ -1,0 +1,18 @@
+# Regression fixture for a real bug found in code review: yaml_mini.cpp's split_flow_items used to
+# push a phantom empty final element for a flow sequence with a trailing comma ("[a, b,]"),
+# because its "keep the last item if items is already non-empty" condition kept it even when it
+# was empty. Every flow-sequence field here (networks/protocols/ports) has a trailing comma; this
+# must parse exactly as if the commas weren't there, not fail with a confusing "'' is not a valid
+# ..." error pointing at nothing the author actually wrote.
+zones:
+  hmi_zone:
+    networks: [192.168.1.50/32,]
+  plc_zone:
+    networks: [192.168.1.10/32,]
+
+conduits:
+  - name: "trailing commas everywhere"
+    from: hmi_zone
+    to: plc_zone
+    protocols: [modbus,]
+    ports: [502,]

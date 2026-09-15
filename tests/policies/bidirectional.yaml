@@ -1,0 +1,18 @@
+# Regression fixture for Conduit::bidirectional (see PolicyEngine::finish in policy_engine.cpp).
+# The one conduit is declared plc_zone -> hmi_zone (the REVERSE of the actual traffic direction in
+# tests/sample_modbus.pcap, where the HMI is the client), with bidirectional: true. Validating
+# sample_modbus.pcap against this must still report ALLOWED, matched to this conduit via its
+# reverse direction -- proving bidirectional actually widens matching rather than being ignored.
+zones:
+  hmi_zone:
+    networks: [192.168.1.50/32]
+  plc_zone:
+    networks: [192.168.1.10/32]
+
+conduits:
+  - name: "PLC pushes to HMI (bidirectional, so HMI-initiated traffic is also allowed)"
+    from: plc_zone
+    to: hmi_zone
+    protocols: [modbus]
+    ports: [502]
+    bidirectional: true

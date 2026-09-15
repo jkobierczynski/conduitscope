@@ -1,0 +1,17 @@
+# Regression fixture: the same two zones as compliant.yaml, but the one conduit permits Modbus on
+# port 503 instead of 502 -- so validating tests/sample_modbus.pcap (real traffic on port 502)
+# against this must report exactly one VIOLATION, with the "a conduit exists between these zones,
+# but none permits this protocol/port" wording (not the "no conduit at all" wording -- there IS a
+# conduit for this zone pair, just not for this port).
+zones:
+  hmi_zone:
+    networks: [192.168.1.50/32]
+  plc_zone:
+    networks: [192.168.1.10/32]
+
+conduits:
+  - name: "HMI to PLC on the wrong port"
+    from: hmi_zone
+    to: plc_zone
+    protocols: [modbus]
+    ports: [503]

@@ -1,0 +1,2 @@
+# Regression fixture: no top-level 'zones' key at all.
+conduits: []

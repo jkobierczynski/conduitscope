@@ -1,0 +1,9 @@
+# Regression fixture: a conduit's 'to' names a zone ('z2') that was never declared in 'zones'.
+zones:
+  z1:
+    networks: [10.0.0.0/8]
+conduits:
+  - name: c1
+    from: z1
+    to: z2
+    protocols: [modbus]

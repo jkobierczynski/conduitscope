@@ -1,0 +1,10 @@
+# Regression fixture: an octet out of range (999) in a zone's network -- must be rejected with a
+# clear, line-numbered PolicyError rather than silently accepted or crashing.
+zones:
+  z1:
+    networks: [999.1.1.1/24]
+conduits:
+  - name: c1
+    from: z1
+    to: z1
+    protocols: [modbus]

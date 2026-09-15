@@ -2,6 +2,7 @@
 #include "conduitscope/ipv4.hpp"
 
 #include <sstream>
+#include <vector>
 
 namespace conduitscope {
 
@@ -64,6 +65,46 @@ std::string format_ipv4(uint32_t addr) {
     out << ((addr >> 24) & 0xFF) << '.' << ((addr >> 16) & 0xFF) << '.' << ((addr >> 8) & 0xFF) << '.'
         << (addr & 0xFF);
     return out.str();
+}
+
+std::optional<uint32_t> parse_ipv4_string(const std::string& text) {
+    std::vector<std::string> parts;
+    size_t start = 0;
+    while (true) {
+        size_t dot = text.find('.', start);
+        if (dot == std::string::npos) {
+            parts.push_back(text.substr(start));
+            break;
+        }
+        parts.push_back(text.substr(start, dot - start));
+        start = dot + 1;
+    }
+    if (parts.size() != 4) {
+        return std::nullopt;
+    }
+    uint32_t result = 0;
+    for (const auto& part : parts) {
+        if (part.empty() || part.size() > 3) {
+            return std::nullopt;
+        }
+        for (char c : part) {
+            if (c < '0' || c > '9') {
+                return std::nullopt;
+            }
+        }
+        if (part.size() > 1 && part[0] == '0') {
+            // Reject leading zeros ("010") rather than silently guessing whether the author
+            // meant decimal or (as some parsers historically treated it) octal -- ambiguous
+            // enough in real-world IP tooling that flatly rejecting it is the safer default.
+            return std::nullopt;
+        }
+        int value = std::stoi(part);
+        if (value < 0 || value > 255) {
+            return std::nullopt;
+        }
+        result = (result << 8) | static_cast<uint32_t>(value);
+    }
+    return result;
 }
 
 }  // namespace conduitscope

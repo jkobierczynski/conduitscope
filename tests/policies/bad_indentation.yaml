@@ -1,0 +1,8 @@
+# Regression fixture: 'networks' is indented less than its parent zone's other keys expect,
+# landing on an indentation level nothing currently open can consume -- must be a clear YamlError,
+# not a confusing schema-validation error or a crash.
+zones:
+  z1:
+    description: "bad indent below"
+      networks: [10.0.0.0/8]
+conduits: []

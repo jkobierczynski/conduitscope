@@ -1,0 +1,30 @@
+# A zone/conduit policy that permits everything conduitscope's own synthetic sample captures
+# (tests/sample_modbus.pcap, sample_dnp3.pcap, sample_s7comm.pcap, sample_policy_engine.pcap) do,
+# so `policy validate` against any of them reports COMPLIANT. Zones are deliberately host-sized
+# (/32) since every synthetic fixture's HMI_IP/PLC_IP constants (see tools/make_sample_pcap.py)
+# share one /24 -- a real policy would normally use wider subnets per zone.
+zones:
+  hmi_zone:
+    description: "HMI / engineering workstation (synthetic fixtures' HMI_IP)"
+    networks:
+      - 192.168.1.50/32
+  plc_zone:
+    description: "PLC (synthetic fixtures' PLC_IP)"
+    networks: [192.168.1.10/32]
+
+conduits:
+  - name: "HMI polls PLC via Modbus"
+    from: hmi_zone
+    to: plc_zone
+    protocols: [modbus]
+    ports: [502]
+  - name: "HMI polls PLC via DNP3"
+    from: hmi_zone
+    to: plc_zone
+    protocols: [dnp3]
+    ports: [20000]
+  - name: "Engineering station S7comm"
+    from: hmi_zone
+    to: plc_zone
+    protocols: [s7comm]
+    ports: [102]

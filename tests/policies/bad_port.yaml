@@ -1,0 +1,10 @@
+# Regression fixture: a port number (99999) outside the valid TCP range [1, 65535].
+zones:
+  z1:
+    networks: [10.0.0.0/8]
+conduits:
+  - name: c1
+    from: z1
+    to: z1
+    protocols: [modbus]
+    ports: [99999]

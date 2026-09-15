@@ -1,0 +1,17 @@
+# Regression fixture: only the HMI side of tests/sample_modbus.pcap's traffic falls inside a
+# declared zone -- 192.168.1.10 (the PLC) matches nothing. Validating that capture against this
+# must report exactly one UNCLASSIFIED flow (not a VIOLATION -- there's nothing to check against a
+# conduit when one endpoint isn't even zone-classified), with server_zone "unclassified" and a
+# reason naming the unclassified address.
+zones:
+  hmi_zone:
+    networks: [192.168.1.50/32]
+  unrelated_zone:
+    description: "deliberately does not cover the PLC's real address (192.168.1.10)"
+    networks: [10.0.0.0/8]
+
+conduits:
+  - name: "placeholder (never matched by these fixtures)"
+    from: hmi_zone
+    to: unrelated_zone
+    protocols: [any]

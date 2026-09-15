@@ -1,0 +1,6 @@
+# Regression fixture: zones are declared, but 'conduits' is an empty list -- rejected outright
+# (see parse_policy_text's comment on why) rather than silently accepted as an implicit deny-all.
+zones:
+  z1:
+    networks: [10.0.0.0/8]
+conduits: []

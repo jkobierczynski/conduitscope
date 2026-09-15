@@ -1,0 +1,17 @@
+# Regression fixture: both zones from compliant.yaml exist, so every address in
+# tests/sample_modbus.pcap IS zone-classified, but there is no conduit at all between hmi_zone and
+# plc_zone (only a same-zone conduit is declared, which no observed flow will ever match here).
+# Validating sample_modbus.pcap against this must report exactly one VIOLATION with the "no
+# conduit permits any traffic from zone X to zone Y" wording (not the "a conduit exists but wrong
+# protocol/port" wording -- see wrong_port.yaml for that case).
+zones:
+  hmi_zone:
+    networks: [192.168.1.50/32]
+  plc_zone:
+    networks: [192.168.1.10/32]
+
+conduits:
+  - name: "placeholder same-zone conduit (never matched by these fixtures)"
+    from: plc_zone
+    to: plc_zone
+    protocols: [any]

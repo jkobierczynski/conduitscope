@@ -7,6 +7,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <string>
 
 #include "conduitscope/byteio.hpp"
@@ -48,5 +49,13 @@ struct Ipv4Header {
 Ipv4Header parse_ipv4(ByteSpan packet);
 
 std::string format_ipv4(uint32_t addr);
+
+// The inverse of format_ipv4: parses a strict dotted-quad string ("a.b.c.d",
+// each octet 0-255, no leading zeros, no surrounding whitespace, exactly 4
+// parts) into a host-order uint32_t. Returns std::nullopt (never throws) for
+// anything else -- used by policy.cpp/policy_engine.cpp (see policy.hpp) to
+// compare a decoded packet's src_ip/dst_ip strings and a policy file's CIDR
+// text against each other as addresses, not strings.
+std::optional<uint32_t> parse_ipv4_string(const std::string& text);
 
 }  // namespace conduitscope

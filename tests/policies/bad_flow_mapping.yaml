@@ -1,0 +1,7 @@
+# Regression fixture: a flow mapping ("{a: b}") -- explicitly unsupported by yaml_mini (see its
+# class-level doc comment) and must be rejected with a clear error, not silently misparsed as a
+# scalar string.
+zones:
+  z1:
+    networks: {a: b}
+conduits: []

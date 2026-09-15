@@ -32,6 +32,9 @@ add_library(conduitscope_core STATIC
   src/s7comm.cpp
   src/decoder.cpp
   src/output.cpp
+  src/yaml_mini.cpp
+  src/policy.cpp
+  src/policy_engine.cpp
 )
 target_include_directories(conduitscope_core PUBLIC
   "${CMAKE_CURRENT_SOURCE_DIR}/include"
@@ -705,7 +708,162 @@ add_test(NAME rejects_pcapng
 set_tests_properties(rejects_pcapng PROPERTIES
   PASS_REGULAR_EXPRESSION "pcapng")
 
-add_test(NAME policy_validate_is_a_documented_stub
-  COMMAND conduitscope policy validate --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap")
-set_tests_properties(policy_validate_is_a_documented_stub PROPERTIES
-  PASS_REGULAR_EXPRESSION "not implemented")
+
+# ---------------------------------------------------------------------------------------------
+# `policy validate` -- zone/conduit policy engine (policy.hpp/policy_engine.hpp). Fixtures live
+# under tests/policies/ (hand-authored YAML-subset policy files; see each file's own header
+# comment for what it's for) and tests/sample_policy_engine.pcap (synthetic, see
+# tools/make_sample_pcap.py's build_policy_engine_sample).
+# ---------------------------------------------------------------------------------------------
+
+set(POLICY_DIR "${CMAKE_CURRENT_SOURCE_DIR}/tests/policies")
+
+add_test(NAME policy_modbus_sample_compliant
+  COMMAND conduitscope policy validate --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/compliant.yaml")
+set_tests_properties(policy_modbus_sample_compliant PROPERTIES
+  PASS_REGULAR_EXPRESSION "Result: COMPLIANT.*matched conduit \"HMI polls PLC via Modbus\"")
+
+add_test(NAME policy_dnp3_sample_compliant
+  COMMAND conduitscope policy validate --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --policy "${POLICY_DIR}/compliant.yaml")
+set_tests_properties(policy_dnp3_sample_compliant PROPERTIES
+  PASS_REGULAR_EXPRESSION "Result: COMPLIANT")
+
+add_test(NAME policy_s7comm_sample_compliant
+  COMMAND conduitscope policy validate --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm.pcap" --policy "${POLICY_DIR}/compliant.yaml")
+set_tests_properties(policy_s7comm_sample_compliant PROPERTIES
+  PASS_REGULAR_EXPRESSION "Result: COMPLIANT.*matched conduit \"Engineering station S7comm\"")
+
+add_test(NAME policy_json_format
+  COMMAND conduitscope policy validate --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/compliant.yaml" --format json)
+set_tests_properties(policy_json_format PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"compliant\": true[^}]*\"verdict\": \"allowed\"")
+
+add_test(NAME policy_wrong_port_is_a_violation
+  COMMAND conduitscope policy validate --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/wrong_port.yaml")
+set_tests_properties(policy_wrong_port_is_a_violation PROPERTIES
+  PASS_REGULAR_EXPRESSION "Result: NON-COMPLIANT \\(1 violation\\(s\\), 0 unclassified flow\\(s\\)\\).*a conduit exists between zone 'hmi_zone' and zone 'plc_zone', but none permits modbus traffic on port 502")
+
+add_test(NAME policy_no_conduit_for_zone_pair_is_a_violation
+  COMMAND conduitscope policy validate --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/no_conduit_for_zone_pair.yaml")
+set_tests_properties(policy_no_conduit_for_zone_pair_is_a_violation PROPERTIES
+  PASS_REGULAR_EXPRESSION "no conduit permits any traffic from zone 'hmi_zone' to zone 'plc_zone'")
+
+add_test(NAME policy_unclassified_endpoint_reported
+  COMMAND conduitscope policy validate --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/unclassified_zone.yaml")
+set_tests_properties(policy_unclassified_endpoint_reported PROPERTIES
+  PASS_REGULAR_EXPRESSION "Result: NON-COMPLIANT \\(0 violation\\(s\\), 1 unclassified flow\\(s\\)\\).*no declared zone contains 192.168.1.10")
+
+add_test(NAME policy_bidirectional_conduit_matches_reverse_direction
+  COMMAND conduitscope policy validate --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bidirectional.yaml")
+set_tests_properties(policy_bidirectional_conduit_matches_reverse_direction PROPERTIES
+  PASS_REGULAR_EXPRESSION "Result: COMPLIANT.*matched conduit \"PLC pushes to HMI")
+
+add_test(NAME policy_unexercised_conduits_listed
+  COMMAND conduitscope policy validate --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/compliant.yaml")
+set_tests_properties(policy_unexercised_conduits_listed PROPERTIES
+  PASS_REGULAR_EXPRESSION "Conduits never exercised by this capture \\(2\\):.*HMI polls PLC via DNP3.*Engineering station S7comm")
+
+# sample_policy_engine.pcap: client/server (initiator) determination and cotp->s7comm folding.
+add_test(NAME policy_engine_syn_handshake_gives_correct_direction
+  COMMAND conduitscope policy validate --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_policy_engine.pcap" --policy "${POLICY_DIR}/policy_engine_sample.yaml" --format json)
+set_tests_properties(policy_engine_syn_handshake_gives_correct_direction PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"client_ip\": \"192.168.1.50\",[^}]*\"server_ip\": \"192.168.1.10\",[^}]*\"server_port\": 502")
+
+add_test(NAME policy_engine_late_syn_overrides_port_guess
+  COMMAND conduitscope policy validate --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_policy_engine.pcap" --policy "${POLICY_DIR}/policy_engine_sample.yaml" --format json)
+set_tests_properties(policy_engine_late_syn_overrides_port_guess PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"client_ip\": \"192.168.1.50\",[^}]*\"server_ip\": \"192.168.1.10\",[^}]*\"server_port\": 55000")
+
+add_test(NAME policy_engine_no_protocol_recognized_is_unclassified
+  COMMAND conduitscope policy validate --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_policy_engine.pcap" --policy "${POLICY_DIR}/policy_engine_sample.yaml")
+set_tests_properties(policy_engine_no_protocol_recognized_is_unclassified PROPERTIES
+  PASS_REGULAR_EXPRESSION "no Modbus/DNP3/S7comm traffic was recognized on this flow \\(2 unrecognized/handshake packet\\(s\\) only\\)")
+
+add_test(NAME policy_engine_cotp_only_session_counts_as_s7comm
+  COMMAND conduitscope policy validate --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_policy_engine.pcap" --policy "${POLICY_DIR}/policy_engine_sample.yaml" --format json)
+set_tests_properties(policy_engine_cotp_only_session_counts_as_s7comm PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"server_port\": 102,[^}]*\"client_zone\": \"hmi_zone\",[^}]*\"server_zone\": \"plc_zone\",[^}]*\"protocols\": \\[\"s7comm\"\\][^}]*\"verdict\": \"allowed\"")
+
+# Policy file validation errors -- each tests/policies/bad_*.yaml fixture exercises one specific
+# rejection (see that file's own header comment for exactly what it's testing).
+add_test(NAME policy_error_missing_zones
+  COMMAND conduitscope policy validate --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_missing_zones.yaml")
+set_tests_properties(policy_error_missing_zones PROPERTIES
+  PASS_REGULAR_EXPRESSION "missing required top-level 'zones' key")
+
+add_test(NAME policy_error_bad_cidr
+  COMMAND conduitscope policy validate --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_cidr.yaml")
+set_tests_properties(policy_error_bad_cidr PROPERTIES
+  PASS_REGULAR_EXPRESSION "is not a valid IPv4 address or CIDR block")
+
+add_test(NAME policy_error_unknown_zone_reference
+  COMMAND conduitscope policy validate --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_unknown_zone.yaml")
+set_tests_properties(policy_error_unknown_zone_reference PROPERTIES
+  PASS_REGULAR_EXPRESSION "'to' zone 'z2' is not declared in 'zones'")
+
+add_test(NAME policy_error_overlapping_zones
+  COMMAND conduitscope policy validate --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_overlap.yaml")
+set_tests_properties(policy_error_overlapping_zones PROPERTIES
+  PASS_REGULAR_EXPRESSION "overlap -- each address must belong to at most one zone")
+
+add_test(NAME policy_error_bad_port
+  COMMAND conduitscope policy validate --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_port.yaml")
+set_tests_properties(policy_error_bad_port PROPERTIES
+  PASS_REGULAR_EXPRESSION "is not a valid TCP port")
+
+add_test(NAME policy_error_reserved_zone_name
+  COMMAND conduitscope policy validate --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_reserved_zone_name.yaml")
+set_tests_properties(policy_error_reserved_zone_name PROPERTIES
+  PASS_REGULAR_EXPRESSION "'unclassified' is a reserved zone name")
+
+add_test(NAME policy_error_duplicate_zone_name
+  COMMAND conduitscope policy validate --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_duplicate_zone.yaml")
+set_tests_properties(policy_error_duplicate_zone_name PROPERTIES
+  PASS_REGULAR_EXPRESSION "duplicate key 'z1'")
+
+add_test(NAME policy_error_duplicate_conduit_name
+  COMMAND conduitscope policy validate --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_duplicate_conduit.yaml")
+set_tests_properties(policy_error_duplicate_conduit_name PROPERTIES
+  PASS_REGULAR_EXPRESSION "duplicate conduit name 'c1'")
+
+add_test(NAME policy_error_empty_conduits
+  COMMAND conduitscope policy validate --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_empty_conduits.yaml")
+set_tests_properties(policy_error_empty_conduits PROPERTIES
+  PASS_REGULAR_EXPRESSION "'conduits' must declare at least one conduit")
+
+add_test(NAME policy_error_tab_indentation
+  COMMAND conduitscope policy validate --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_tab_indent.yaml")
+set_tests_properties(policy_error_tab_indentation PROPERTIES
+  PASS_REGULAR_EXPRESSION "tab characters are not supported for indentation")
+
+add_test(NAME policy_error_bad_indentation
+  COMMAND conduitscope policy validate --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_indentation.yaml")
+set_tests_properties(policy_error_bad_indentation PROPERTIES
+  PASS_REGULAR_EXPRESSION "indentation does not match any enclosing block")
+
+add_test(NAME policy_error_flow_mapping_unsupported
+  COMMAND conduitscope policy validate --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_flow_mapping.yaml")
+set_tests_properties(policy_error_flow_mapping_unsupported PROPERTIES
+  PASS_REGULAR_EXPRESSION "flow mappings \\('\\{\\.\\.\\.\\}'\\) are not supported")
+
+add_test(NAME policy_error_missing_policy_file
+  COMMAND conduitscope policy validate --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${CMAKE_CURRENT_SOURCE_DIR}/tests/policies/does_not_exist.yaml")
+set_tests_properties(policy_error_missing_policy_file PROPERTIES
+  WILL_FAIL TRUE)
+
+add_test(NAME policy_output_to_file
+  COMMAND conduitscope policy validate --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/compliant.yaml" --output "${CMAKE_CURRENT_BINARY_DIR}/policy_report.txt")
+set_tests_properties(policy_output_to_file PROPERTIES
+  FAIL_REGULAR_EXPRESSION "COMPLIANT")
+
+# Regression tests for two real bugs found in code review before this feature was first committed
+# (see each fixture's own header comment for the full story).
+add_test(NAME policy_trailing_comma_in_flow_sequence
+  COMMAND conduitscope policy validate --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/trailing_commas.yaml")
+set_tests_properties(policy_trailing_comma_in_flow_sequence PROPERTIES
+  PASS_REGULAR_EXPRESSION "Result: COMPLIANT.*matched conduit \"trailing commas everywhere\"")
+
+add_test(NAME policy_error_line_number_is_the_zones_own_line
+  COMMAND conduitscope policy validate --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_overlap_after_description.yaml")
+set_tests_properties(policy_error_line_number_is_the_zones_own_line PROPERTIES
+  PASS_REGULAR_EXPRESSION "bad_overlap_after_description.yaml:11: zone 'z1' .* and zone 'z2' .* overlap")

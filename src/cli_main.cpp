@@ -19,6 +19,8 @@
 #include "conduitscope/decoder.hpp"
 #include "conduitscope/output.hpp"
 #include "conduitscope/pcap_reader.hpp"
+#include "conduitscope/policy.hpp"
+#include "conduitscope/policy_engine.hpp"
 #include "conduitscope/version.hpp"
 
 namespace {
@@ -133,15 +135,75 @@ int run_info(const std::string& input, std::ostream& out) {
     return 0;
 }
 
-int run_policy_validate_stub(const std::string& input, const std::string& policy) {
-    std::cout << "conduitscope: 'policy validate' is not implemented yet in this groundwork release.\n"
-                 "This subcommand is scaffolded now so its option surface (--input/--policy) is\n"
-                 "stable for scripting against; the zone/conduit evaluation engine itself is the\n"
-                 "next phase of this project -- see the Roadmap section of docs/MANUAL.md.\n\n"
-                 "inputs given:\n"
-                 "  capture: " << input << "\n"
-                 "  policy:  " << policy << "\n";
-    return 2;
+// Exit codes specific to `policy validate` (see man/conduitscope.1's EXIT STATUS and
+// docs/MANUAL.md): 0 = compliant (every observed flow was explicitly allowed by a conduit), 1 =
+// fatal error (bad arguments, an unreadable/malformed policy or capture file, or a --strict parse
+// failure -- same meaning as run_decode's exit 1), 3 = the capture is readable and the policy is
+// valid, but PolicyReport::compliant() is false (at least one violation and/or unclassified flow
+// was found). 3, not 2, specifically so a script can tell "ran fine, found problems" (3) apart from
+// "couldn't even run" (1) without also colliding with 2, which every other exit-status-checking
+// caller of this tool has so far only ever seen mean "no fatal error, but nothing to do" (the
+// now-retired `policy validate` stub was the only user of 2; nothing currently returns it, but the
+// value is left unclaimed rather than reused, in case a future documented-stub command needs it
+// again).
+constexpr int kExitPolicyNonCompliant = 3;
+
+int run_policy_validate(const std::string& input, const std::string& policy_path, const std::string& output,
+                         const std::string& format, bool strict, bool quiet, std::ostream& diag) {
+    std::ofstream file_out;
+    std::ostream* out = &std::cout;
+    if (!output.empty()) {
+        file_out.open(output, std::ios::binary);
+        if (!file_out) {
+            std::cerr << "error: cannot open output file '" << output << "'\n";
+            return 1;
+        }
+        out = &file_out;
+    }
+
+    try {
+        Policy policy = parse_policy_file(policy_path);
+
+        DecodeOptions options;
+        options.strict = strict;
+        PcapReader reader(input);
+        Decoder decoder(options);
+        PolicyEngine engine(policy);
+
+        PcapPacket pkt;
+        size_t index = 0, warnings = 0;
+        while (reader.next(pkt)) {
+            ++index;
+            DecodedPacket dp = decoder.decode(pkt, reader.info().linktype, index);
+            if (dp.protocol == "parse-error") {
+                ++warnings;
+                if (!quiet) diag << "warning: packet " << index << ": " << dp.summary << "\n";
+            }
+            engine.observe(dp);
+        }
+
+        PolicyReport report = engine.finish();
+        if (format == "json") {
+            write_policy_report_json(*out, report, policy, input, policy_path);
+        } else {
+            write_policy_report_text(*out, report, policy, input, policy_path);
+        }
+
+        if (warnings > 0 && !quiet) {
+            diag << warnings
+                 << " packet(s) had parse warnings (shown above); rerun with --strict to stop at "
+                    "the first one, or -q to silence this message\n";
+        }
+        return report.compliant() ? 0 : kExitPolicyNonCompliant;
+    } catch (const PolicyError& e) {
+        // e.what() is already "<policy_path>:<line>: <message>" (see policy.cpp's fail()) --
+        // no need to prefix the path again here.
+        std::cerr << "error: " << e.what() << "\n";
+        return 1;
+    } catch (const ParseError& e) {
+        std::cerr << "error: " << e.what() << "\n";
+        return 1;
+    }
 }
 
 }  // namespace
@@ -212,17 +274,29 @@ int main(int argc, char** argv) {
     std::string info_input;
     info_cmd->add_option("-i,--input", info_input, "Input pcap file")->required()->check(CLI::ExistingFile);
 
-    // --- policy validate (documented stub; see docs/MANUAL.md Roadmap) ----
-    auto* policy_cmd = app.add_subcommand(
-        "policy", "Zone/conduit compliance checking against a policy file [phase 2, see Roadmap]");
+    // --- policy validate ----------------------------------------------------
+    auto* policy_cmd =
+        app.add_subcommand("policy", "Zone/conduit compliance checking against a policy file");
     auto* policy_validate_cmd = policy_cmd->add_subcommand(
-        "validate",
-        "Check decoded traffic against a zone/conduit policy file [not yet implemented -- this "
-        "command exists now so its option surface is stable to script against]");
-    std::string policy_input, policy_file;
-    policy_validate_cmd->add_option("-i,--input", policy_input, "Input pcap file")->required();
-    policy_validate_cmd->add_option("--policy", policy_file, "Zone/conduit policy file (YAML)")
-        ->required();
+        "validate", "Check decoded traffic against a zone/conduit policy file");
+    std::string policy_input, policy_file, policy_output;
+    std::string policy_format = "text";
+    bool policy_strict = false;
+    policy_validate_cmd->add_option("-i,--input", policy_input, "Input pcap file (classic pcap)")
+        ->required()
+        ->check(CLI::ExistingFile);
+    policy_validate_cmd
+        ->add_option("--policy", policy_file,
+                      "Zone/conduit policy file (a restricted YAML subset -- see docs/MANUAL.md's "
+                      "POLICY FILE FORMAT section)")
+        ->required()
+        ->check(CLI::ExistingFile);
+    policy_validate_cmd->add_option("-o,--output", policy_output, "Write the report here instead of stdout");
+    policy_validate_cmd->add_option("-f,--format", policy_format, "Report format: text or json")
+        ->transform(CLI::IsMember({"text", "json"}))
+        ->capture_default_str();
+    policy_validate_cmd->add_flag("--strict", policy_strict,
+                                   "Abort on the first malformed packet instead of reporting it and continuing");
 
     // --- version ------------------------------------------------------------
     app.add_subcommand("version", "Print version and build information");
@@ -249,7 +323,8 @@ int main(int argc, char** argv) {
         return run_info(info_input, std::cout);
     }
     if (policy_validate_cmd->parsed()) {
-        return run_policy_validate_stub(policy_input, policy_file);
+        return run_policy_validate(policy_input, policy_file, policy_output, policy_format, policy_strict, quiet,
+                                    *diag);
     }
     if (policy_cmd->parsed()) {
         std::cerr << "error: 'policy' needs a subcommand (currently only 'validate' exists)\n";

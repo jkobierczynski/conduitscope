@@ -649,6 +649,81 @@ def build_s7comm_chaining_sample():
     (TESTS_DIR / "sample_s7comm_chaining.pcap").write_bytes(data)
 
 
+def build_policy_engine_sample():
+    """Exercises PolicyEngine's client/server (initiator) determination and its cross-protocol
+    "cotp counts as s7comm" folding (see policy_engine.cpp) -- none of which the other sample
+    fixtures cover, since they don't carry real SYN/SYN-ACK handshakes at all (every other builder
+    goes straight to PSH|ACK data, which is fine for protocol decoding but says nothing about
+    PolicyEngine's flow-direction logic)."""
+    packets = []
+
+    def full_packet(src_ip, dst_ip, tcp_bytes, ident, from_plc):
+        ip = ipv4_header(src_ip, dst_ip, 6, len(tcp_bytes), ident) + tcp_bytes
+        eth_src, eth_dst = (PLC_MAC, HMI_MAC) if from_plc else (HMI_MAC, PLC_MAC)
+        return eth_header(eth_dst, eth_src, 0x0800) + ip
+
+    # Scenario A: a normal 3-way handshake (SYN, SYN-ACK, ACK) followed by a real Modbus
+    # request/response, client port 51900 -> server port 502. The handshake's SYN and the
+    # known-service-port fallback agree here -- this is the ordinary case PolicyEngine's client/
+    # server logic should get right without needing to fall back to anything unusual.
+    syn = tcp_header(51900, 502, 100, 0, TCP_SYN, 0)
+    packets.append(full_packet(HMI_IP, PLC_IP, syn, 0x7000, from_plc=False))
+    synack = tcp_header(502, 51900, 200, 101, TCP_SYN | TCP_ACK, 0)
+    packets.append(full_packet(PLC_IP, HMI_IP, synack, 0x7001, from_plc=True))
+    ack = tcp_header(51900, 502, 101, 201, TCP_ACK, 0)
+    packets.append(full_packet(HMI_IP, PLC_IP, ack, 0x7002, from_plc=False))
+    mb_req = struct.pack("!HHHBB HH", 10, 0, 6, 1, 3, 0, 1)
+    tcp_req = tcp_header(51900, 502, 101, 201, TCP_PSH | TCP_ACK, len(mb_req)) + mb_req
+    packets.append(full_packet(HMI_IP, PLC_IP, tcp_req, 0x7003, from_plc=False))
+    mb_resp = struct.pack("!HHHBBB", 10, 0, 5, 1, 3, 2) + bytes([0x00, 0x2A])
+    tcp_resp = tcp_header(502, 51900, 201, 101 + len(mb_req), TCP_PSH | TCP_ACK, len(mb_resp)) + mb_resp
+    packets.append(full_packet(PLC_IP, HMI_IP, tcp_resp, 0x7004, from_plc=True))
+
+    # Scenario B: a bare handshake on a port pair that isn't any recognized OT protocol port and
+    # carries no payload at all -- PolicyEngine must still record the flow (for
+    # PolicyReport::skipped_non_tcp/total_packets accounting and so the flow shows up as
+    # Unclassified with "no ... traffic was recognized", not silently dropped), but with zero
+    # protocols observed.
+    syn_b = tcp_header(51901, 9999, 300, 0, TCP_SYN, 0)
+    packets.append(full_packet(HMI_IP, PLC_IP, syn_b, 0x7010, from_plc=False))
+    synack_b = tcp_header(9999, 51901, 400, 301, TCP_SYN | TCP_ACK, 0)
+    packets.append(full_packet(PLC_IP, HMI_IP, synack_b, 0x7011, from_plc=True))
+
+    # Scenario C: tests that a later SYN can still correct an earlier, wrong port-based guess.
+    # Client port 80 <-> "server" port 55000 -- deliberately the opposite of the usual
+    # low-port-is-the-server convention PolicyEngine falls back to when neither port is a
+    # recognized OT protocol port. The capture (unusually, but validly for this test) shows a data
+    # packet from port 55000 BEFORE the SYN from port 80 arrives: PolicyEngine's first-packet
+    # fallback for this flow guesses port 55000 (the numerically lower port) is the server --
+    # exactly backwards. The SYN that arrives next, from port 80, must override that guess: real
+    # SYN/SYN-ACK evidence always wins over the port-number fallback once it's seen, on any packet
+    # in the flow, not just the first one (see PolicyEngine::observe's doc comment).
+    early_data = tcp_header(55000, 80, 500, 0, TCP_PSH | TCP_ACK, 1) + b"\x00"
+    packets.append(full_packet(PLC_IP, HMI_IP, early_data, 0x7020, from_plc=True))
+    late_syn = tcp_header(80, 55000, 600, 0, TCP_SYN, 0)
+    packets.append(full_packet(HMI_IP, PLC_IP, late_syn, 0x7021, from_plc=False))
+
+    # Scenario D: a COTP Connection Request/Confirm with no S7comm payload ever following (unlike
+    # sample_s7comm.pcap, which always continues into a full S7comm session) -- both packets decode
+    # as protocol "cotp", never "s7comm". A policy conduit that only lists "s7comm" in its
+    # 'protocols' must still match this flow, proving PolicyEngine::observe folds "cotp" into the
+    # same protocol bucket as "s7comm" rather than treating a connection-setup-only session as
+    # unrecognized traffic.
+    cr = cotp_connection_pdu(0xE0, 0x0000, 0x0002, bytes([0x01, 0x00]), bytes([0x03, 0x02]))
+    cotp_cr = tpkt_frame(cr)
+    tcp_cr = tcp_header(49300, 102, 700, 800, TCP_PSH | TCP_ACK, len(cotp_cr)) + cotp_cr
+    packets.append(full_packet(HMI_IP, PLC_IP, tcp_cr, 0x7030, from_plc=False))
+    cc = cotp_connection_pdu(0xD0, 0x0002, 0x5002, bytes([0x01, 0x00]), bytes([0x03, 0x02]))
+    cotp_cc = tpkt_frame(cc)
+    tcp_cc = tcp_header(102, 49300, 800, 700 + len(cotp_cr), TCP_PSH | TCP_ACK, len(cotp_cc)) + cotp_cc
+    packets.append(full_packet(PLC_IP, HMI_IP, tcp_cc, 0x7031, from_plc=True))
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_000_700 + i, i * 1000)
+    (TESTS_DIR / "sample_policy_engine.pcap").write_bytes(data)
+
+
 def build_tcp_reassembly_sample():
     """Exercises Decoder::reassemble_tcp_payload -- general, per-TCP-flow reassembly of a single
     PDU/frame's own bytes split across TCP segments -- directly. This is a different layer from
@@ -770,6 +845,7 @@ if __name__ == "__main__":
     build_s7comm_items_sample()
     build_s7comm_1200sym_sample()
     build_s7comm_chaining_sample()
+    build_policy_engine_sample()
     build_tcp_reassembly_sample()
     build_padded_ack_sample()
     build_not_a_pcap()

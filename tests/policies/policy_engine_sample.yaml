@@ -1,0 +1,22 @@
+# Matches tests/sample_policy_engine.pcap (see tools/make_sample_pcap.py's
+# build_policy_engine_sample for what each of its four scenarios is for). Used to check
+# PolicyEngine's client/server (initiator) determination -- including a real 3-way handshake, a
+# bare handshake with no recognized protocol, and a later SYN correcting an earlier wrong
+# port-based guess -- and its "a COTP-only session still counts as s7comm traffic" folding.
+zones:
+  hmi_zone:
+    networks: [192.168.1.50/32]
+  plc_zone:
+    networks: [192.168.1.10/32]
+
+conduits:
+  - name: "modbus"
+    from: hmi_zone
+    to: plc_zone
+    protocols: [modbus]
+    ports: [502]
+  - name: "s7comm"
+    from: hmi_zone
+    to: plc_zone
+    protocols: [s7comm]
+    ports: [102]

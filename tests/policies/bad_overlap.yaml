@@ -1,0 +1,13 @@
+# Regression fixture: z2's network (10.10.0.0/16) is entirely inside z1's (10.0.0.0/8) -- an
+# address in that range would belong to both zones, which parse_policy_text must reject rather
+# than silently picking whichever zone happens to be declared first.
+zones:
+  z1:
+    networks: [10.0.0.0/8]
+  z2:
+    networks: [10.10.0.0/16]
+conduits:
+  - name: c1
+    from: z1
+    to: z2
+    protocols: [modbus]

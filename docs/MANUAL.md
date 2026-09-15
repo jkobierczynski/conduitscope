@@ -15,7 +15,7 @@ conduitscope decode -i FILE [-o FILE] [-f text|json|csv] [--protocol auto|modbus
 
 conduitscope info -i FILE
 
-conduitscope policy validate -i FILE --policy FILE
+conduitscope policy validate -i FILE --policy FILE [-o FILE] [-f text|json] [--strict]
 
 conduitscope version
 ```
@@ -27,10 +27,14 @@ Ethernet/IPv4/TCP headers, and attempts to recognize and decode Modbus/TCP,
 DNP3, or S7comm (Siemens S7 PLC protocol, riding on TPKT/COTP) payloads
 inside the TCP stream. It is designed as groundwork for auditing
 OT/ICS network traffic against a zone-and-conduit segmentation model (the kind
-IEC 62443-3-2 and, by extension, NIS2 risk-assessment work call for) -- today
-it gives you the protocol-decoding layer that such an audit needs; the policy
-evaluation layer itself is scaffolded (`policy validate`) but not yet
-implemented (see ROADMAP below).
+IEC 62443-3-2 and, by extension, NIS2 risk-assessment work call for): the
+protocol-decoding layer (`decode`/`info`) and, now, the zone/conduit
+evaluation layer (`policy validate`) both exist -- you write a policy file
+describing zones (IP/CIDR ranges) and conduits (the protocol/port traffic
+allowed between two zones), point `policy validate` at a capture and that
+policy, and get a compliant/non-compliant report naming every flow that
+wasn't explicitly permitted. See POLICY FILE FORMAT below for the schema and
+LIMITATIONS for exactly what this does and doesn't check.
 
 This is explicitly a groundwork/v0.1.0 release. It favors an honest, narrow
 feature set with clearly documented limitations over silently guessing at
@@ -110,28 +114,228 @@ then the same protocol/function-code histogram as `decode --stats`, without
 requiring you to also specify `--stats` explicitly. Useful as a first look at
 an unfamiliar capture before deciding whether/how to filter it with `decode`.
 
-### `policy validate` -- zone/conduit policy check [not yet implemented]
+### `policy validate` -- zone/conduit policy check
 
 ```
-conduitscope policy validate -i FILE --policy POLICY_FILE
+conduitscope policy validate -i FILE --policy POLICY_FILE [options]
 ```
 
 | Option | Default | Description |
 |---|---|---|
-| `-i, --input FILE` | *(required)* | Input pcap file. |
-| `--policy FILE` | *(required)* | Zone/conduit policy file (YAML; format not yet defined). |
+| `-i, --input FILE` | *(required)* | Input pcap file. Must exist; must be classic pcap format. |
+| `--policy FILE` | *(required)* | Zone/conduit policy file. Must exist. A restricted YAML subset -- see POLICY FILE FORMAT below. |
+| `-o, --output FILE` | stdout | Write the report here instead of stdout. |
+| `-f, --format {text,json}` | `text` | Report format. `text` is the human-readable report shown throughout this section; `json` is meant for scripting an audit pipeline -- see POLICY FILE FORMAT's "JSON report schema" below. |
+| `--strict` | off | Same meaning as `decode --strict`: abort on the first packet that fails to parse at the Ethernet/IPv4/TCP layer, instead of reporting a warning and continuing to evaluate the rest of the capture. |
 
-This command is intentionally scaffolded now, with its final option names
-already in place, even though the evaluation engine behind it does not exist
-yet. Running it prints a clear "not implemented" message (and the arguments it
-was given, for sanity-checking) and exits with status `2`. The intent is that
-anything you script against `policy validate` today (argument names, exit
-code semantics) stays stable once phase 2 lands. See ROADMAP.
+`policy validate` decodes the capture exactly as `decode` would (the same
+Modbus/DNP3/S7comm detection, TCP reassembly, and authoritative Modbus
+pairing all run underneath), then groups the decoded packets into TCP flows
+and checks each flow against the policy's conduits. It does not change or
+duplicate any decoding logic -- see `PolicyEngine` (`policy_engine.hpp`),
+which is built entirely on top of `Decoder`'s already-public
+`DecodedPacket` output.
+
+For each observed TCP flow, `policy validate` determines which side
+initiated the connection (the "client") and which answered (the "server"),
+classifies each side's IP address into a zone via the policy's CIDR blocks,
+and looks for a conduit permitting that flow's protocol(s) at the server's
+port, in that direction. A flow lands in exactly one of three buckets:
+
+- **Allowed** -- some conduit permits it. The report names which one.
+- **Violation** -- both endpoints are zone-classified, but no conduit
+  permits this specific protocol/port/direction combination between them.
+- **Unclassified** -- at least one endpoint's address matches no declared
+  zone at all, or the flow never carried any Modbus/DNP3/S7comm traffic
+  conduitscope recognized (only a handshake, or payloads that didn't
+  decode). There's nothing to check against a conduit in either case, so
+  this is reported separately from an outright violation, but it still
+  makes the capture non-compliant -- see EXIT STATUS. In practice this is
+  usually the more actionable finding for a first pass: it's telling you
+  either your zone list is incomplete, or there's traffic on the wire your
+  protocol coverage doesn't recognize.
+
+The report additionally lists every conduit the policy declares that no
+observed flow ever matched ("unexercised") -- purely informational (it
+doesn't affect compliance), but useful for noticing a conduit you expected
+this capture to exercise and didn't, or one worth pruning from the policy.
+
+Example, against the committed sample fixtures:
+
+```sh
+$ conduitscope policy validate -i tests/sample_modbus.pcap --policy tests/policies/compliant.yaml
+Zone/conduit policy validation
+  capture: tests/sample_modbus.pcap
+  policy:  tests/policies/compliant.yaml (2 zone(s), 3 conduit(s))
+
+Result: COMPLIANT
+
+Flows evaluated: 1 (1 allowed, 0 violation(s), 0 unclassified)
+  3 total packet(s) in capture, 0 skipped (non-TCP/non-IP)
+
+VIOLATIONS (0):
+  (none)
+
+UNCLASSIFIED TRAFFIC (0):
+  (none)
+
+ALLOWED (1):
+  [1] 192.168.1.50 -> 192.168.1.10:502  (modbus, 3 packet(s))
+      zones: hmi_zone -> plc_zone, matched conduit "HMI polls PLC via Modbus"
+
+Conduits never exercised by this capture (2):
+  - HMI polls PLC via DNP3
+  - Engineering station S7comm
+```
 
 ### `version` -- print version and build information
 
 Equivalent to the global `--version` flag; provided as a subcommand as well
 for scripts that prefer `conduitscope version` over a flag.
+
+## POLICY FILE FORMAT
+
+A policy file is YAML-*compatible* but not general YAML: it's parsed by a
+small, purpose-built parser (`yaml_mini.hpp`/`.cpp`) that reads exactly the
+"block-style YAML" subset a hand-written config file like this actually
+needs, rather than vendoring a full YAML library (this project has zero
+external dependencies by design -- see the README). Any file staying within
+that subset is also valid YAML any editor/linter understands; going outside
+it (see "Unsupported YAML constructs" below) is a clear, line-numbered error,
+never a silent misparse.
+
+### Schema
+
+Two required top-level keys:
+
+```yaml
+zones:
+  <zone name>:
+    description: "<optional free text>"
+    networks:
+      - <IPv4 address or CIDR block>
+      - <...>
+  <zone name>:
+    networks: [<address or CIDR>, <...>]   # a flow-style list works too
+
+conduits:
+  - name: "<conduit name>"
+    description: "<optional free text>"
+    from: <zone name>
+    to: <zone name>
+    protocols: [<modbus | dnp3 | s7comm | any>, <...>]
+    ports: [<port>, <...>]                  # omit entirely to mean "any port"
+    bidirectional: <true | false>           # default: false
+```
+
+**Zones.** Each zone name maps to one or more IPv4 CIDR blocks (`10.10.10.0/24`)
+or bare addresses (`10.10.10.5`, treated as `/32`). At least one zone is
+required. **No two zones may claim the same address** -- `policy validate`
+needs to say definitively which single zone a packet's source/destination
+belongs to, so overlapping networks across zones are rejected at load time,
+not silently resolved by declaration order. An address matching no declared
+zone is reported as the reserved zone name `unclassified` (which you
+therefore can't declare yourself -- see "Validation errors" below).
+
+**Conduits.** Each conduit permits one or more protocols, on one or more
+ports (or any port, if `ports` is omitted), from one zone to another. At
+least one conduit is required -- a policy with zones but zero conduits would
+flag every zone-classified flow as a violation, which is almost certainly
+not what a first policy file intended, so it's rejected outright rather than
+silently accepted as an implicit deny-all.
+
+`protocols` uses the same protocol names conduitscope's own decoded output
+uses: `modbus`, `dnp3`, `s7comm`, plus the wildcard `any`. A COTP session
+that never carries a full S7comm message (e.g. only a connection
+request/confirm was captured) still counts as `s7comm` traffic for matching
+purposes -- see PROTOCOL COVERAGE's S7comm/COTP section for why a "cotp"-
+tagged packet and an "s7comm"-tagged one are the same conduit on the wire.
+
+`from`/`to` describe a **direction**: which zone initiates the TCP
+connection (`from`) and which zone answers it (`to`) -- not which zone sends
+which bytes once the connection is up (a Modbus response, for instance,
+flows from the server back to the client, but the conduit is still written
+`from: <client zone> to: <server zone>`, matching who dialed whom). Most
+real OT conduits are one-directional this way (an HMI/engineering zone
+reaching into a control-network zone). Set `bidirectional: true` on a
+conduit that should also permit the same protocol/port set initiated the
+opposite way.
+
+`ports` restricts which TCP port on the **responding** (server) side of the
+connection this conduit covers; omit it to allow any port. A `protocol`
+singular alias is also accepted for a conduit that only lists one protocol
+(`protocol: modbus` instead of `protocols: [modbus]`), and every list-typed
+field (`networks`, `protocols`, `ports`) also accepts a single bare value in
+place of a one-element list, for readability on a short policy file.
+
+### Validation errors
+
+Every rule below is checked when the policy file is loaded, before any
+capture is decoded, and reported as `error: <file>:<line>: <message>` (the
+line number is omitted when the problem isn't tied to one specific line,
+such as a missing top-level key). None of these can be bypassed with
+`--strict` or any other flag -- an invalid policy file is always a fatal
+error (see EXIT STATUS):
+
+- a missing top-level `zones` or `conduits` key, or either being empty
+- a zone with no `networks`, or a network that isn't a valid IPv4
+  address/CIDR block
+- two zones whose networks overlap
+- a zone literally named `unclassified` (reserved -- see "Zones" above)
+- a duplicate zone name (a YAML-level error: mapping keys are inherently
+  unique) or duplicate conduit name (a policy.cpp-level check: a conduit's
+  `name` is a value, not a key, so two conduits genuinely could share one
+  without a YAML parser objecting)
+- a conduit missing `name`/`from`/`to`/`protocols`, or whose `from`/`to`
+  names a zone that isn't declared in `zones`
+- a conduit protocol outside `{modbus, dnp3, s7comm, any}`
+- a conduit port outside `[1, 65535]`
+- a conduit's `bidirectional` value that isn't a recognizable boolean
+  (`true`/`false`/`yes`/`no`)
+
+### Unsupported YAML constructs
+
+Rejected with a clear error rather than silently misparsed, if encountered:
+anchors and aliases (`&x`, `*x`), tags (`!!str`), multi-document streams
+(`---`, `...`), block scalars (`|`, `>`), flow mappings (`{a: b}`), and tab
+characters used for indentation.
+
+### JSON report schema (`-f json`)
+
+```json
+{
+  "capture": "capture.pcap",
+  "policy": "policy.yaml",
+  "zone_count": 2,
+  "conduit_count": 3,
+  "compliant": true,
+  "total_packets": 3,
+  "skipped_non_tcp": 0,
+  "allowed_count": 1,
+  "violation_count": 0,
+  "unclassified_count": 0,
+  "flows": [
+    {
+      "client_ip": "192.168.1.50",
+      "server_ip": "192.168.1.10",
+      "server_port": 502,
+      "client_zone": "hmi_zone",
+      "server_zone": "plc_zone",
+      "protocols": ["modbus"],
+      "packet_count": 3,
+      "verdict": "allowed",
+      "matched_conduit": "HMI polls PLC via Modbus",
+      "reason": null
+    }
+  ],
+  "unexercised_conduits": []
+}
+```
+
+`verdict` is one of `"allowed"`, `"violation"`, `"unclassified"`.
+`matched_conduit` is only non-`null` when `verdict` is `"allowed"`; `reason`
+is only non-`null` otherwise (a short, human-readable explanation, the same
+text the `text` report shows).
 
 ## PROTOCOL DETECTION
 
@@ -719,21 +923,53 @@ These are current, not aspirational -- each has a corresponding ROADMAP item.
 - **S7comm-Plus (protocol id 0x72) is detected but never decoded.**
 - **No live capture.** Offline pcap files only; see the top of this document
   for why, and ROADMAP for the plan to add it.
-- **`policy validate` does nothing yet** beyond validating its own arguments
-  and printing a placeholder message. See ROADMAP.
 - **QinQ (stacked 802.1Q) VLAN tags are not unwrapped**, only a single tag.
+- **`policy validate`'s zones are IPv4 CIDR-only** (matching every other
+  IPv4-only limitation in this document) and, like everything else this tool
+  decodes, TCP-only -- a policy can't reference a UDP service, a MAC address,
+  or a hostname, and non-TCP/non-IP packets are counted (`skipped_non_tcp` in
+  the JSON report) but never evaluated against any conduit.
+- **`policy validate`'s client/server (initiator) determination falls back
+  to a port-number heuristic when no SYN/SYN-ACK is captured for a flow**
+  (e.g. a capture that starts mid-session): whichever endpoint's port is one
+  of the three IANA-registered OT ports (502/20000/102) is assumed to be the
+  server, and if neither or both are, the lower port number is. A real
+  SYN/SYN-ACK seen on ANY packet in the flow -- not just the first one --
+  always overrides this guess once seen (see `PolicyEngine::observe`'s doc
+  comment in `policy_engine.hpp`), but a flow whose handshake was never
+  captured, on ports neither is a recognized OT port, can still be
+  attributed backwards if the true server happens to use the higher port
+  number. This heuristic layer is separate from, and doesn't affect, Modbus
+  protocol decoding's own request/response classification (see above).
+- **A conduit's direction is TCP-connection-initiator-based, not
+  per-packet-flow-based** -- see POLICY FILE FORMAT's "Conduits" section for
+  exactly what `from`/`to`/`bidirectional` mean. There's no way to permit,
+  say, only the request direction of a protocol and flag an unsolicited
+  response separately; a conduit either covers the whole
+  client-initiates-to-server session or it doesn't.
+- **A flow with more than one recognized protocol is treated as needing a
+  conduit that covers all of them** -- this would only happen on a capture
+  where the same TCP 4-tuple somehow carried, say, both Modbus and DNP3
+  traffic (protocol confusion, or two different real sessions coincidentally
+  reusing the same ports after one closed, which this tool has no way to
+  tell apart from one continuous session -- see the general TCP-reassembly
+  limitation above for the same underlying reason). Ordinary real traffic
+  never exercises this.
 
 ## EXIT STATUS
 
 | Code | Meaning |
 |---|---|
-| 0 | Success. |
-| 1 | A fatal error occurred -- bad arguments, the input file could not be opened, the file is not a recognized pcap (including the pcapng case), or (with `--strict`) a packet failed to parse. |
-| 2 | The command is a documented stub (`policy validate`) that ran successfully but performed no real work. |
+| 0 | Success. For `policy validate`: the capture is COMPLIANT (every observed flow was explicitly allowed by a conduit). |
+| 1 | A fatal error occurred -- bad arguments, the input file could not be opened, the file is not a recognized pcap (including the pcapng case), (with `--strict`) a packet failed to parse, or (for `policy validate`) the policy file couldn't be opened or failed validation (see POLICY FILE FORMAT's "Validation errors"). |
+| 2 | *(currently unused)* Reserved rather than reused: an earlier groundwork release used this for `policy validate` while it was still a documented stub with no evaluation engine behind it. Nothing returns it now that `policy validate` is fully implemented, but the value is left unclaimed in case a future documented-stub command needs it again. |
+| 3 | `policy validate` only: the capture and policy file were both readable and valid, but the capture is NON-COMPLIANT -- `PolicyReport::compliant()` is false (at least one violation and/or unclassified flow was found). Distinct from 1 specifically so a script can tell "ran fine, found problems" apart from "couldn't even run". |
 
 Non-fatal per-packet parse issues (without `--strict`) do not affect the exit
 status; they are reported as warnings (to stderr, or `--log-file`) and as
-`"protocol": "parse-error"` entries in the decoded output itself.
+`"protocol": "parse-error"` entries in the decoded output itself (`decode`)
+or folded into `policy validate`'s flow evaluation the same way any other
+unrecognized packet is.
 
 ## EXAMPLES
 
@@ -814,40 +1050,59 @@ conduitscope decode -i capture.pcap --protocol modbus -f json \
            "\(.index): \(.src_ip):\(.src_port) -> \(.dst_ip):\(.dst_port) \(.summary)"'
 ```
 
+Check a capture against a zone/conduit policy, human-readable:
+
+```sh
+conduitscope policy validate -i capture.pcap --policy policy.yaml
+```
+
+Same check, but fail a CI pipeline step on any violation or unclassified
+traffic (exit status `3`) while still capturing the full report for later
+inspection:
+
+```sh
+conduitscope policy validate -i capture.pcap --policy policy.yaml -o report.txt
+```
+
+List just the violations, as JSON, for a script that only cares about what's
+wrong:
+
+```sh
+conduitscope policy validate -i capture.pcap --policy policy.yaml -f json \
+  | jq -r '.flows[] | select(.verdict == "violation") |
+           "\(.client_ip) -> \(.server_ip):\(.server_port) (\(.protocols | join("+"))): \(.reason)"'
+```
+
 ## ROADMAP
 
 Rough order, each building on the groundwork this release establishes:
 
-1. **Zone/conduit policy engine** behind `policy validate`: a YAML schema
-   describing zones (IP/port ranges, expected protocols) and conduits (allowed
-   flows between zones), evaluated against decoded traffic, producing a
-   pass/fail report suitable for a NIS2/62443 audit trail. S7comm item tags,
-   decoded DNP3 point values (especially CROB commands), Modbus
-   address+quantity decoding, and now authoritative Modbus request/response
-   pairing all give this something concrete to match a policy's address
-   ranges and expected-value rules against.
-2. **Live capture**, via libpcap on Linux and Npcap on Windows, as an
+1. **Live capture**, via libpcap on Linux and Npcap on Windows, as an
    additional input mode alongside (not replacing) pcap file input.
-3. **pcapng support**, once live capture or another concrete need makes it
+2. **pcapng support**, once live capture or another concrete need makes it
    worth the added parsing complexity.
-4. Colorized text output (the `--no-color` flag is already reserved for this).
-5. **Confirm or replace the EXPERIMENTAL `0xB2` (S7-1200/1500 "symbolic"
+3. Colorized text output (the `--no-color` flag is already reserved for this).
+4. **Confirm or replace the EXPERIMENTAL `0xB2` (S7-1200/1500 "symbolic"
    addressing) decode** against a source with real authority -- a PLC or
    TIA Portal project under your own control, ideally, rather than more
    public reverse-engineering writeups -- and extend it to the shapes it
    currently falls back to raw hex on: DB-area items, and items with more
    than one LID entry (structured/nested symbol access). Promote it out of
    [EXPERIMENTAL] once confirmed.
-6. S7comm-Plus decoding, and PLC Control/Stop parameter decoding (these
+5. S7comm-Plus decoding, and PLC Control/Stop parameter decoding (these
    send commands that change PLC run state -- high security relevance).
-7. **DNP3 CRC validation** (both the header CRC and the per-block CRCs), so a
+6. **DNP3 CRC validation** (both the header CRC and the per-block CRCs), so a
    corrupted frame that still starts with the right magic bytes is flagged
    rather than silently "decoded".
-8. **DNP3 absolute-time rendering as a calendar date** (currently a raw
+7. **DNP3 absolute-time rendering as a calendar date** (currently a raw
    milliseconds-since-epoch count -- see LIMITATIONS), and value decoding for
    the group/variation combinations still outside the point-format table
    (double-precision Analog Input Event variants, Octet String, File
    Control, Analog Input Reporting Deadband).
+8. **A policy `from`/`to` zone list wider than two endpoints per conduit**
+   (e.g. "any of these three zones may reach this one"), if real policy
+   files turn out to want that instead of one conduit per zone pair -- kept
+   off the schema for now rather than guessed at ahead of a real use case.
 
 All of what was originally tracked here as "general TCP stream reassembly"
 is now done: PDU/frame-level reassembly across TCP segments
@@ -860,6 +1115,18 @@ across complete data-link frames is a related, already-done special case --
 conduitscope reassembles it per TCP flow via its own mechanism -- but it
 still awaits validation against a real capture that actually exercises it
 (none found so far; see LIMITATIONS).
+
+The **zone/conduit policy engine** behind `policy validate` (`policy.hpp`/
+`policy_engine.hpp`) is also now done: a policy file (a restricted YAML
+subset -- see POLICY FILE FORMAT) declares zones and conduits, and every
+decoded TCP flow is checked against them, producing a compliant/non-compliant
+report (text or JSON) suitable for a NIS2/62443 audit trail. S7comm item
+tags, decoded DNP3 point values (especially CROB commands), Modbus
+address+quantity decoding, and authoritative Modbus request/response pairing
+were exactly the concrete decoded facts this was building toward being able
+to match a policy against -- see LIMITATIONS for the engine's own remaining
+caveats (the SYN-based initiator heuristic's fallback case, IPv4/TCP-only
+zones, one-conduit-per-zone-pair direction model).
 
 ## BUILDING
 

@@ -1,0 +1,19 @@
+# Regression fixture: two conduits sharing the same 'name' ("c1"). Unlike a duplicate zone name
+# (see bad_duplicate_zone.yaml), this is NOT caught by yaml_mini's own duplicate-key check -- a
+# conduit's name is a value inside a sequence item's mapping, not a YAML mapping key shared with
+# anything else, so two conduits really can (syntactically) share one. policy.cpp's own
+# conduit_names uniqueness check is what has to catch this.
+zones:
+  z1:
+    networks: [10.0.0.0/8]
+conduits:
+  - name: c1
+    from: z1
+    to: z1
+    protocols: [modbus]
+    ports: [502]
+  - name: c1
+    from: z1
+    to: z1
+    protocols: [dnp3]
+    ports: [20000]

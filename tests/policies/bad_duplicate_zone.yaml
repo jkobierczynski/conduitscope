@@ -1,0 +1,16 @@
+# Regression fixture: the same zone name ('z1') declared twice as a YAML mapping key. This is
+# actually caught at the YAML-subset-parsing layer (yaml_mini.cpp's "duplicate key" check, since a
+# mapping key is inherently unique) before policy.cpp's own zone-name uniqueness check would even
+# run -- see bad_duplicate_conduit.yaml for the case that DOES need policy.cpp's own check (a
+# conduit's 'name' is a VALUE, not a YAML key, so two conduits can share one without any YAML-level
+# conflict).
+zones:
+  z1:
+    networks: [10.0.0.0/8]
+  z1:
+    networks: [172.16.0.0/12]
+conduits:
+  - name: c1
+    from: z1
+    to: z1
+    protocols: [modbus]

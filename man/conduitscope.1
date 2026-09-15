@@ -8,10 +8,9 @@ conduitscope \- decode Modbus/TCP, DNP3, and S7comm/COTP traffic from offline pc
 .B conduitscope
 reads a classic-format pcap capture file and decodes Modbus/TCP, DNP3, and
 S7comm (Siemens S7 PLC protocol, over TPKT/COTP, TCP port 102) traffic found
-inside its TCP streams. It is groundwork for auditing OT/ICS
-network traffic against a zone-and-conduit segmentation model (IEC 62443 /
-NIS2 style work); the protocol-decoding layer is implemented now, a
-zone/conduit policy engine is scaffolded but not yet implemented.
+inside its TCP streams, and checks decoded traffic against a
+zone-and-conduit segmentation policy (IEC 62443 / NIS2 style work) via
+\fBpolicy validate\fR.
 .PP
 Only classic pcap files are read (what tcpdump writes by default). pcapng is
 not yet supported and is reported with a conversion hint
@@ -24,10 +23,13 @@ Decode a capture and print each recognized packet. See \fBOPTIONS\fR below.
 .B info \fB\-i\fR \fIFILE\fR
 Print pcap file metadata and a protocol histogram.
 .TP
-.B policy validate \fB\-i\fR \fIFILE\fR \fB\-\-policy\fR \fIFILE\fR
-Zone/conduit policy check. Not yet implemented in this release; prints a
-placeholder message and exits with status 2. Scaffolded now so scripts
-written against its arguments won't need to change later.
+.B policy validate \fB\-i\fR \fIFILE\fR \fB\-\-policy\fR \fIFILE\fR [\fIOPTIONS\fR]
+Zone/conduit policy check: decodes \fIFILE\fR exactly as \fBdecode\fR would,
+groups it into TCP flows, and checks each against the zones/conduits
+declared in the policy file (a restricted, dependency-free YAML subset --
+see \fBdocs/MANUAL.md\fR's POLICY FILE FORMAT section). Prints a
+compliant/non-compliant report; see \fBOPTIONS (policy validate)\fR and
+\fBEXIT STATUS\fR below.
 .TP
 .B version
 Print version and build information.
@@ -65,6 +67,23 @@ Print an aggregate summary instead of one line per packet. Ignores
 .TP
 .B \-\-strict
 Abort on the first malformed packet instead of warning and continuing.
+.SH OPTIONS (policy validate)
+.TP
+.BR \-i ", " \-\-input " " \fIFILE\fR
+Input pcap file. Required.
+.TP
+.B \-\-policy \fIFILE\fR
+Zone/conduit policy file. Required. See \fBdocs/MANUAL.md\fR's POLICY FILE
+FORMAT section for the schema.
+.TP
+.BR \-o ", " \-\-output " " \fIFILE\fR
+Write the report here instead of stdout.
+.TP
+.BR \-f ", " \-\-format " " {text,json}
+Report format. Default: text.
+.TP
+.B \-\-strict
+Abort on the first malformed packet instead of warning and continuing.
 .SH GLOBAL OPTIONS
 .TP
 .BR \-q ", " \-\-quiet
@@ -85,15 +104,20 @@ Print version, compiler, platform, and build type, then exit.
 .SH EXIT STATUS
 .TP
 .B 0
-Success.
+Success. For \fBpolicy validate\fR: the capture is COMPLIANT.
 .TP
 .B 1
-Fatal error (bad arguments, unreadable/unrecognized input file, or a
-\fB\-\-strict\fR parse failure).
+Fatal error (bad arguments, unreadable/unrecognized input file, a
+\fB\-\-strict\fR parse failure, or, for \fBpolicy validate\fR, a policy file
+that couldn't be opened or failed validation).
 .TP
 .B 2
-The command is a documented stub (\fBpolicy validate\fR) that ran but
-performed no real work.
+Currently unused. Reserved rather than reused: an earlier release used this
+for \fBpolicy validate\fR while it was still a documented stub.
+.TP
+.B 3
+\fBpolicy validate\fR only: the capture and policy were both valid, but the
+capture is NON-COMPLIANT (at least one violation and/or unclassified flow).
 .SH LIMITATIONS
 No pcapng support; general TCP stream reassembly is implemented but
 narrowly scoped: a Modbus PDU, a single DNP3 data-link frame's own
@@ -122,7 +146,10 @@ S7comm item-level addressing (inside Read Var / Write Var) is fully
 confident only for the classic S7ANY syntax; the S7-1200/1500 "symbolic"
 syntax (0xB2) gets an EXPERIMENTAL, unverified decode, marked
 [EXPERIMENTAL] everywhere it appears;
-S7comm-Plus is detected but never decoded; no live capture. See the
+S7comm-Plus is detected but never decoded; no live capture;
+\fBpolicy validate\fR's zones are IPv4 CIDR-only and its client/server
+(initiator) determination falls back to a port-number heuristic when no
+SYN/SYN-ACK was captured for a flow. See the
 "LIMITATIONS" and "ROADMAP" sections of
 \fBdocs/MANUAL.md\fR in the source tree for the full, current detail and
 what's planned next.
@@ -146,6 +173,13 @@ Decode as JSON and filter with jq:
 .RS
 .EX
 conduitscope decode \-i capture.pcap \-f json | jq '.[] | select(.protocol=="modbus")'
+.EE
+.RE
+.PP
+Check a capture against a zone/conduit policy:
+.RS
+.EX
+conduitscope policy validate \-i capture.pcap \-\-policy policy.yaml
 .EE
 .RE
 .SH SEE ALSO

@@ -1,0 +1,18 @@
+# Regression fixture for a real bug found in code review: a zone whose first field is
+# 'description' (not 'networks') used to have its Zone::line stamped from that FIRST CHILD line
+# instead of the zone's own declaration line (yaml_mini.cpp's consume_mapping_pairs originally
+# returned a nested block's .line as wherever its own first line was, not the key's). z2 is
+# declared on line 11 here, but its first child ('description') is on line 12 -- the overlap error
+# below must cite line 11 (z2's own declaration), not line 12.
+zones:
+  z1:
+    description: "first zone"
+    networks: [10.0.0.0/8]
+  z2:
+    description: "second zone, overlaps z1"
+    networks: [10.10.0.0/16]
+conduits:
+  - name: c1
+    from: z1
+    to: z2
+    protocols: [modbus]
