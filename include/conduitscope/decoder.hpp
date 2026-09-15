@@ -68,13 +68,18 @@ struct DecodedPacket {
     uint8_t ttl = 0;
 
     bool has_tcp = false;
+    bool has_udp = false;  // exactly one of has_tcp/has_udp is ever true for a given IPv4 packet
+    // Shared between TCP and UDP -- populated whichever of has_tcp/has_udp is set. tcp_flags is
+    // TCP-only (UDP has no equivalent) and stays empty for a UDP packet.
     uint16_t src_port = 0, dst_port = 0;
     std::string tcp_flags;
 
     // "iec104", "modbus", "dnp3", "s7comm", "enip", "cotp" (recognized TPKT/COTP framing but not
-    // S7comm inside it -- e.g. a connection setup frame), "tcp" (recognized
-    // transport, no app-layer match), "non-tcp", "non-ip", "unsupported-link",
-    // or "parse-error".
+    // S7comm inside it -- e.g. a connection setup frame), "tcp" (recognized transport, no
+    // app-layer match), "udp" (recognized transport, no app-layer protocol decoded -- see
+    // udp.hpp), "non-tcp" (a non-TCP, non-UDP IPv4 payload, e.g. ICMP), "non-ip" (a non-IPv4
+    // Ethernet frame, e.g. ARP or a raw-Ethernet OT protocol like PROFINET/GOOSE -- see
+    // link_layer.hpp's ethertype_name), "unsupported-link", or "parse-error".
     std::string protocol;
     std::string summary;
     std::vector<std::string> notes;

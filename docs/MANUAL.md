@@ -1200,6 +1200,60 @@ decision above. Neither capture happened to split an encapsulation message
 across a TCP segment boundary, so that path (see LIMITATIONS) remains
 untested against real traffic, same as IEC 104's own APDU reassembly.
 
+### Link/IP-layer plumbing: non-IPv4 Ethernet, and non-TCP IPv4 (including UDP)
+
+Every protocol above rides on Ethernet + IPv4 + TCP. Traffic outside that --
+a non-IPv4 Ethernet frame, or a non-TCP IPv4 payload -- was previously
+reported only as a bare hex ethertype or protocol number (`non-ip`/
+`non-tcp`) and otherwise dropped. It's now additionally **named**, for a
+deliberately small, OT-relevant set of values, cross-checked against
+Wireshark's own `epan/etypes.h` (EtherTypes) and the long-stable IANA IP
+protocol number registry (not reverse-engineered from a single capture):
+
+- **EtherTypes** (`link_layer.hpp`'s `ethertype_name`): ARP, IPv6, three
+  raw-Ethernet (no IP layer at all) OT protocols -- PROFINET RT, EtherCAT,
+  IEC 61850-8-1 GOOSE, IEC 61850-9-2 Sampled Values -- plus LLDP, PTP
+  (IEEE 1588), MPLS unicast, and 802.1ad/stacked-VLAN (the QinQ case
+  `parse_ethernet`'s own comment already documented as "will simply fail to
+  recognize the inner ethertype" -- it's now named as such instead of a bare
+  `0x8100`).
+- **IPv4 protocol numbers** (`ipv4.hpp`'s `ip_protocol_name`): ICMP, IGMP,
+  IPv6-in-IPv4, GRE, ESP, AH, ICMPv6, OSPF, SCTP -- alongside TCP and UDP,
+  which get their own dedicated handling (below and elsewhere in this
+  document) rather than just a name.
+- **UDP** (`udp.hpp`, protocol `udp`): the 8-byte UDP header itself
+  (source/destination port, declared length, clamped to what was actually
+  captured the same way `parse_ipv4` already clamps to IPv4's own
+  `total_length` -- see that function's comment) is now opened and reported,
+  with source/destination port surfaced the same way TCP's are (`endpoint()`
+  in `output.cpp`, and `src_port`/`dst_port` in JSON/CSV). EtherNet/IP's own
+  UDP port (2222, CIP implicit/real-time I/O messaging -- distinct from the
+  TCP 44818 explicit messaging this tool decodes) is called out by name in
+  the summary when seen.
+
+**This is groundwork plumbing, explicitly not a new protocol decoder.**
+None of PROFINET/GOOSE/Sampled Values/EtherCAT/EtherNet-IP-implicit's own
+framing is parsed -- these EtherTypes/ports are *named*, not *decoded*, and
+the summary says so for UDP ("not decoded in this groundwork release"). A
+value outside every table above still shows only as a bare hex ethertype or
+decimal protocol number, exactly as before -- nothing is guessed at for an
+EtherType/protocol/port this tool doesn't recognize.
+
+`policy validate` does not yet evaluate any of this traffic against a
+conduit: it's still counted only in `PolicyReport::skipped_non_tcp`, exactly
+as an unrecognized non-TCP packet was counted before this plumbing existed
+(see `PolicyEngine::observe`'s doc comment). Opening the policy engine up to
+non-TCP/non-IP conduits is real follow-on work, not part of this pass -- see
+ROADMAP.
+
+Validated by construction (`tests/sample_link_transport_layers.pcap`, see
+`tools/make_sample_pcap.py`'s `build_link_and_transport_layer_sample`) and,
+organically, against every existing real capture in this project's test
+set: re-running the full real-capture corpus after adding this surfaced
+several previously-invisible ARP frames and real UDP traffic (DNS on port
+53, NetBIOS on port 138) that used to disappear into an undifferentiated
+`non-ip`/`non-tcp` bucket.
+
 ## CAPTURED FRAME PADDING
 
 Ethernet requires a minimum frame size (60 bytes, excluding the trailing
@@ -1293,11 +1347,23 @@ These are current, not aspirational -- each has a corresponding ROADMAP item.
   DNP3 data-link frames landing in one TCP segment (common, since DNP3
   frames are small), which conduitscope handles separately -- see PROTOCOL
   COVERAGE's DNP3 section.
-- **No IPv6.** Only IPv4 is parsed; IPv6 packets are reported as
-  `unsupported-link`/`non-ip` depending on where they're detected.
+- **No IPv6.** Only IPv4 is parsed; an IPv6 packet over Ethernet is reported
+  as `non-ip` (named "IPv6" -- see PROTOCOL COVERAGE's link/IP-layer
+  plumbing section -- but its own header is not opened), and over a raw-IP
+  link type falls through to `parse-error` instead (there is no Ethernet
+  ethertype field to name it by in that case).
 - **IPv4 fragmentation is not reassembled.** A fragmented IPv4 packet's TCP
   header will very likely fail to parse and be reported as a parse-error on
   the fragments after the first.
+- **Non-IPv4 Ethernet frames and non-TCP IPv4 payloads (including UDP) are
+  named but not decoded.** A deliberately small, OT-relevant set of
+  EtherTypes/IP-protocol-numbers/UDP-ports is recognized by name (ARP,
+  PROFINET RT, IEC 61850 GOOSE/Sampled Values, ICMP, EtherNet/IP's own UDP
+  port for implicit/I-O messaging, and the rest -- see PROTOCOL COVERAGE);
+  nothing outside that set gets more than a bare hex/decimal number, and
+  even a *named* one gets no further parsing of its own framing. `policy
+  validate` does not yet evaluate any of this traffic against a conduit --
+  see that section and ROADMAP.
 - **DNP3 CRCs are not validated** -- neither the data-link header CRC nor the
   per-block CRCs within the user data. A corrupted DNP3 frame that still
   starts with the right magic bytes will be "decoded" without any indication
@@ -1693,6 +1759,18 @@ Rough order, each building on the groundwork this release establishes:
    narrow in practice -- e.g. a real device addressing a Symbol-object tag
    by numeric instance ID rather than by name, which this release's gating
    would currently show structurally rather than as a tag read.
+9. **Decode a real protocol over UDP or raw Ethernet**, now that the
+   link/IP-layer plumbing to see that traffic at all exists (see PROTOCOL
+   COVERAGE's link/IP-layer plumbing section and the "now done" paragraph
+   below) -- most likely EtherNet/IP's own implicit (I/O) messaging on UDP
+   port 2222, a direct extension of the CIP explicit-messaging work already
+   done, or one of the named-but-undecoded raw-Ethernet protocols
+   (PROFINET RT, IEC 61850 GOOSE) if real capture availability favors one of
+   those first. Each is its own research-and-validate cycle, same as every
+   protocol added so far -- naming an EtherType/port is not the same
+   groundwork as decoding what rides on it. Also the natural point to widen
+   `policy validate` beyond TCP-only conduits, once there's an actual
+   decoded non-TCP protocol worth checking a conduit against.
 
 **pcapng support** is also now done: both classic pcap and pcapng are read
 transparently (auto-detected, no flag needed) -- see "pcap vs. pcapng"
@@ -1721,6 +1799,17 @@ value decoding). EtherNet/IP detection runs first in Auto-mode dispatch,
 ahead of even IEC 104, since its own dedicated port plus three independent
 structural checks make it, if anything, a stronger signal -- see PROTOCOL
 DETECTION.
+
+**Link/IP-layer plumbing for non-IPv4/non-TCP traffic** is also now done:
+non-IPv4 Ethernet frames and non-TCP IPv4 payloads (including UDP) are
+recognized and named for a deliberately small, OT-relevant set of
+EtherTypes/IP-protocol-numbers/UDP-ports (ARP, PROFINET RT, IEC 61850
+GOOSE/Sampled Values, ICMP, EtherNet/IP's own UDP implicit-messaging port,
+and the rest), rather than just a bare hex/decimal number and nothing else
+-- see PROTOCOL COVERAGE's link/IP-layer plumbing section and item 9 above
+for what's still out of scope: this is naming, not decoding, of any new
+protocol, and `policy validate` doesn't yet evaluate any of it against a
+conduit.
 
 **Colorized text output** is also now done: see OUTPUT FORMATS' "Color"
 subsection for the scheme and the `--color`/`--no-color`/auto-detection

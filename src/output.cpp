@@ -44,7 +44,7 @@ namespace {
 std::string endpoint(const DecodedPacket& p, bool src) {
     if (!p.has_ip) return "-";
     std::string ip = src ? p.src_ip : p.dst_ip;
-    if (!p.has_tcp) return ip;
+    if (!p.has_tcp && !p.has_udp) return ip;
     uint16_t port = src ? p.src_port : p.dst_port;
     return ip + ":" + std::to_string(port);
 }
@@ -72,7 +72,7 @@ const char* protocol_tag_color(const std::string& protocol) {
     if (protocol == "iec104") return kGreen;
     if (protocol == "enip") return kYellow;
     if (protocol == "parse-error") return kBoldRed;
-    return kDim;  // tcp / non-tcp / non-ip / unsupported-link: recognized, nothing OT-specific
+    return kDim;  // tcp / udp / non-tcp / non-ip / unsupported-link: recognized, nothing OT-specific
 }
 }  // namespace
 
@@ -114,8 +114,9 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
     out_ << "    \"original_len\": " << p.original_len << ",\n";
     out_ << "    \"src_ip\": " << (p.has_ip ? ("\"" + json_escape(p.src_ip) + "\"") : "null") << ",\n";
     out_ << "    \"dst_ip\": " << (p.has_ip ? ("\"" + json_escape(p.dst_ip) + "\"") : "null") << ",\n";
-    out_ << "    \"src_port\": " << (p.has_tcp ? std::to_string(p.src_port) : "null") << ",\n";
-    out_ << "    \"dst_port\": " << (p.has_tcp ? std::to_string(p.dst_port) : "null") << ",\n";
+    bool has_port = p.has_tcp || p.has_udp;
+    out_ << "    \"src_port\": " << (has_port ? std::to_string(p.src_port) : "null") << ",\n";
+    out_ << "    \"dst_port\": " << (has_port ? std::to_string(p.dst_port) : "null") << ",\n";
     out_ << "    \"tcp_flags\": " << (p.has_tcp ? ("\"" + json_escape(p.tcp_flags) + "\"") : "null") << ",\n";
     out_ << "    \"protocol\": \"" << json_escape(p.protocol) << "\",\n";
     out_ << "    \"summary\": \"" << json_escape(p.summary) << "\",\n";
@@ -215,10 +216,11 @@ void CsvWriter::write_packet(const DecodedPacket& p) {
         if (i != 0) notes << " | ";
         notes << p.notes[i];
     }
+    bool has_port = p.has_tcp || p.has_udp;
     out_ << p.index << ',' << std::fixed << std::setprecision(6) << p.timestamp << ','
-         << (p.has_ip ? csv_escape(p.src_ip) : "") << ',' << (p.has_tcp ? std::to_string(p.src_port) : "")
+         << (p.has_ip ? csv_escape(p.src_ip) : "") << ',' << (has_port ? std::to_string(p.src_port) : "")
          << ',' << (p.has_ip ? csv_escape(p.dst_ip) : "") << ','
-         << (p.has_tcp ? std::to_string(p.dst_port) : "") << ',' << csv_escape(p.protocol) << ','
+         << (has_port ? std::to_string(p.dst_port) : "") << ',' << csv_escape(p.protocol) << ','
          << csv_escape(p.summary) << ',' << csv_escape(notes.str()) << "\n";
 }
 

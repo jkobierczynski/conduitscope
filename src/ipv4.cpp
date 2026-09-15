@@ -60,6 +60,23 @@ Ipv4Header parse_ipv4(ByteSpan packet) {
     return hdr;
 }
 
+std::string ip_protocol_name(uint8_t protocol) {
+    switch (protocol) {
+        case 1: return "ICMP";
+        case 2: return "IGMP";
+        case 6: return "TCP";
+        case 17: return "UDP";
+        case 41: return "IPv6-in-IPv4 (6in4)";
+        case 47: return "GRE";
+        case 50: return "ESP";
+        case 51: return "AH";
+        case 58: return "ICMPv6";
+        case 89: return "OSPF";
+        case 132: return "SCTP";
+        default: return "";
+    }
+}
+
 std::string format_ipv4(uint32_t addr) {
     std::ostringstream out;
     out << ((addr >> 24) & 0xFF) << '.' << ((addr >> 16) & 0xFF) << '.' << ((addr >> 8) & 0xFF) << '.'

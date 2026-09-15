@@ -584,6 +584,58 @@ def build_iec104_modbus_precedence_sample():
     (TESTS_DIR / "sample_iec104_modbus_precedence.pcap").write_bytes(data)
 
 
+def udp_header(src_port: int, dst_port: int, payload: bytes) -> bytes:
+    """The fixed 8-byte UDP header (src port, dst port, length = header+payload, checksum -- left
+    as 0, same as every other checksum field in this file: conduitscope doesn't validate any of
+    them) followed by `payload`."""
+    return struct.pack("!HHHH", src_port, dst_port, 8 + len(payload), 0) + payload
+
+
+def build_link_and_transport_layer_sample():
+    """Exercises the link/IP-layer "plumbing" this tool recognizes but does not further decode:
+    non-IPv4 Ethernet frames (protocol "non-ip") and non-TCP IPv4 payloads (protocol "non-tcp"/
+    "udp"), each named when the ethertype/IP-protocol-number/UDP-port is one this tool knows, and
+    left as a bare number when it isn't -- see link_layer.hpp's ethertype_name, ipv4.hpp's
+    ip_protocol_name, and decoder.cpp's well_known_udp_port_name. Every frame here is a standalone
+    packet (no TCP-style flow/session needed at this layer), so this is one flat list rather than
+    a multi-packet session like build_modbus_sample."""
+    packets = []
+
+    def add_eth(ethertype: int, payload: bytes):
+        eth = eth_header(PLC_MAC, HMI_MAC, ethertype) + payload
+        packets.append(eth)
+
+    def add_ip(ip_protocol: int, payload: bytes):
+        ip = ipv4_header(HMI_IP, PLC_IP, ip_protocol, len(payload), 0x6000 + len(packets)) + payload
+        packets.append(eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip)
+
+    # Non-IPv4 Ethernet frames -- named ethertypes (ARP, PROFINET RT, IEC 61850 GOOSE) and one
+    # deliberately unrecognized ethertype (0x9999, not a real IANA/IEEE assignment) to pin down
+    # that an unknown ethertype still shows the bare hex number and nothing else, never a guess.
+    add_eth(0x0806, bytes(28))                    # ARP (28-byte body, arbitrary content -- not parsed)
+    add_eth(0x8892, bytes([0xAA] * 20))            # PROFINET RT -- content arbitrary, not parsed
+    add_eth(0x88B8, bytes([0xBB] * 20))            # IEC 61850-8-1 GOOSE -- content arbitrary, not parsed
+    add_eth(0x9999, bytes([0xCC] * 10))            # unrecognized ethertype -- must stay unnamed
+
+    # A non-TCP, non-UDP IPv4 payload -- ICMP echo request (type=8, code=0, checksum=0, arbitrary
+    # rest), named via ip_protocol_name.
+    icmp = struct.pack("!BBH", 8, 0, 0) + bytes([0x01, 0x02, 0x03, 0x04])
+    add_ip(1, icmp)
+
+    # UDP on a named OT port (2222, EtherNet/IP implicit/I-O messaging) -- content arbitrary, not
+    # parsed (this groundwork release only opens the UDP header itself, see udp.hpp).
+    add_ip(17, udp_header(2222, 55000, bytes([0xDE, 0xAD, 0xBE, 0xEF])))
+
+    # UDP on an arbitrary, unnamed port, and with an empty payload -- exercises both the "no
+    # payload" summary wording and the "port not named" case in the same packet.
+    add_ip(17, udp_header(51999, 51998, b""))
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_002_900 + i, i * 1000)
+    (TESTS_DIR / "sample_link_transport_layers.pcap").write_bytes(data)
+
+
 ENIP_PORT = 44818
 
 
@@ -1310,6 +1362,7 @@ if __name__ == "__main__":
     build_modbus_false_positive_sample()
     build_modbus_pairing_sample()
     build_dnp3_sample()
+    build_link_and_transport_layer_sample()
     build_iec104_sample()
     build_iec104_modbus_precedence_sample()
     build_enip_sample()

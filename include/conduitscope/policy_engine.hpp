@@ -56,7 +56,8 @@ struct PolicyReport {
     // (doesn't affect compliant()); useful for pruning a policy file or noticing a conduit that
     // was supposed to be exercised by this capture but wasn't.
     std::vector<std::string> unexercised_conduits;
-    size_t skipped_non_tcp = 0;  // packets with has_ip==false or has_tcp==false: not part of any flow
+    size_t skipped_non_tcp = 0;  // packets with has_ip==false or has_tcp==false (including UDP):
+                                  // not part of any evaluated flow -- see PolicyEngine::observe
     size_t total_packets = 0;
 
     size_t allowed_count() const;
@@ -76,10 +77,12 @@ public:
     // Folds one already-decoded packet into this engine's per-flow state. Call once per packet, in
     // capture order (same discipline as Decoder::decode).
     //
-    // Packets with has_ip==false or has_tcp==false (non-IP, non-TCP, or a parse-error packet)
-    // aren't part of any TCP flow and are only counted toward PolicyReport::skipped_non_tcp --
-    // this tool only ever decodes TCP-based OT protocols, so there's nothing further to evaluate
-    // for them.
+    // Packets with has_ip==false or has_tcp==false (non-IP, non-TCP -- including UDP, which
+    // `decode` now recognizes and reports on but this engine does not yet evaluate against any
+    // conduit, see docs/MANUAL.md's ROADMAP -- or a parse-error packet) aren't part of any TCP
+    // flow and are only counted toward PolicyReport::skipped_non_tcp -- this tool only ever
+    // checks TCP-based OT protocols against a policy's conduits, so there's nothing further to
+    // evaluate for them yet.
     //
     // Client (initiator) vs. server is decided, per flow, the first time that flow is seen able to
     // decide it:

@@ -15,6 +15,14 @@
 namespace conduitscope {
 
 constexpr uint8_t IPPROTO_TCP_VALUE = 6;
+constexpr uint8_t IPPROTO_UDP_VALUE = 17;
+
+// A small set of other IANA IP protocol numbers worth naming when reporting a non-TCP/non-UDP
+// IPv4 payload (protocol "non-tcp") -- these numbers have been stable IANA assignments for
+// decades, not something that needed cross-checking against a live source the way a less
+// universally fixed value (an EtherType, a CIP service code) would. Returns an empty string for
+// anything else.
+std::string ip_protocol_name(uint8_t protocol);
 
 struct Ipv4Header {
     uint8_t version = 0;

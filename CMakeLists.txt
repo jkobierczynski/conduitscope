@@ -26,6 +26,7 @@ add_library(conduitscope_core STATIC
   src/link_layer.cpp
   src/ipv4.cpp
   src/tcp.cpp
+  src/udp.cpp
   src/modbus.cpp
   src/dnp3.cpp
   src/iec104.cpp
@@ -459,6 +460,58 @@ add_test(NAME real_dnp3_malformed_bails_out_with_a_note
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/dnp3/dnp3_malformed.pcap" --format text)
 set_tests_properties(real_dnp3_malformed_bails_out_with_a_note PROPERTIES
   PASS_REGULAR_EXPRESSION "is not in the known point-format table -- stopping object parsing")
+
+# --------------------------------------------------------------------------
+# Link/IP-layer plumbing (synthetic, tests/sample_link_transport_layers.pcap): non-IPv4
+# Ethernet frames and non-TCP IPv4 payloads (including UDP), named when the ethertype/IP-
+# protocol-number/UDP-port is a recognized one and left as a bare number otherwise -- see
+# tools/make_sample_pcap.py's build_link_and_transport_layer_sample for the exact byte layout,
+# and link_layer.hpp/ipv4.hpp/decoder.cpp for the naming tables themselves.
+# --------------------------------------------------------------------------
+add_test(NAME link_layer_arp_ethertype_named
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_link_transport_layers.pcap" --format text)
+set_tests_properties(link_layer_arp_ethertype_named PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[non-ip\\]  Ethernet frame with ethertype 0x806 \\(ARP\\) \\(not IPv4\\)")
+
+add_test(NAME link_layer_raw_ethernet_ot_protocols_named
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_link_transport_layers.pcap" --format text)
+set_tests_properties(link_layer_raw_ethernet_ot_protocols_named PROPERTIES
+  PASS_REGULAR_EXPRESSION "ethertype 0x8892 \\(PROFINET RT\\)[^\n]*\n.*ethertype 0x88b8 \\(IEC 61850-8-1 GOOSE\\)")
+
+add_test(NAME link_layer_unrecognized_ethertype_stays_unnamed
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_link_transport_layers.pcap" --format text)
+set_tests_properties(link_layer_unrecognized_ethertype_stays_unnamed PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[non-ip\\]  Ethernet frame with ethertype 0x9999 \\(not IPv4\\)")
+
+add_test(NAME ip_layer_icmp_protocol_number_named
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_link_transport_layers.pcap" --format text)
+set_tests_properties(ip_layer_icmp_protocol_number_named PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[non-tcp\\]  IPv4 protocol number 1 \\(ICMP\\) \\(not TCP\\)")
+
+add_test(NAME udp_named_ot_port_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_link_transport_layers.pcap" --format text)
+set_tests_properties(udp_named_ot_port_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[udp\\]  UDP payload of 4 byte\\(s\\) on port 2222->55000 \\(EtherNet/IP implicit \\(I/O\\) messaging, not decoded in this groundwork release\\)")
+
+add_test(NAME udp_unnamed_port_and_empty_payload_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_link_transport_layers.pcap" --format text)
+set_tests_properties(udp_unnamed_port_and_empty_payload_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[udp\\]  UDP datagram with no payload on port 51999->51998")
+
+add_test(NAME udp_ports_populate_json_and_csv
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_link_transport_layers.pcap")
+set_tests_properties(udp_ports_populate_json_and_csv PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"protocol\": \"udp\",\n    \"summary\": \"UDP payload of 4 byte\\(s\\) on port 2222->55000")
+
+# policy validate must not crash and must correctly count every one of these as skipped_non_tcp
+# (this groundwork release's plumbing makes UDP/non-IP traffic visible in `decode`, but the
+# policy engine does not yet evaluate it against any conduit -- see PolicyEngine::observe's
+# doc comment and docs/MANUAL.md's ROADMAP).
+add_test(NAME link_transport_layers_all_skipped_by_policy_engine
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_link_transport_layers.pcap"
+          --policy "${CMAKE_CURRENT_SOURCE_DIR}/tests/policies/compliant.yaml" --format json)
+set_tests_properties(link_transport_layers_all_skipped_by_policy_engine PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"total_packets\": 7,\n  \"skipped_non_tcp\": 7")
 
 # --------------------------------------------------------------------------
 # IEC 60870-5-104 (synthetic, tests/sample_iec104.pcap): U-format handshakes, a general

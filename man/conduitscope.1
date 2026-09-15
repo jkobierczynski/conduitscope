@@ -259,7 +259,12 @@ tag (not a class/instance path), the Symbol-object tag services -- a
 class/instance-addressed request reusing one of those same service codes
 is shown structurally instead, and NOP (command 0x0000) is deliberately
 not recognized as a command at all (see \fBdocs/MANUAL.md\fR's LIMITATIONS
-and PROTOCOL COVERAGE); Modbus request/response
+and PROTOCOL COVERAGE); non-IPv4 Ethernet frames and non-TCP IPv4 payloads
+(including UDP) are now recognized and NAMED for a small OT-relevant set
+(ARP, PROFINET RT, IEC 61850 GOOSE/Sampled Values, ICMP, EtherNet/IP's own
+UDP implicit-messaging port, and the rest) but not further decoded, and
+\fBpolicy validate\fR does not yet evaluate any of it against a conduit;
+Modbus request/response
 classification falls back to a payload-shape heuristic only when
 authoritative pairing can't be done (no matching request on this session);
 S7comm item-level addressing (inside Read Var / Write Var) is fully

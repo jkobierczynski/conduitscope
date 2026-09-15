@@ -14,6 +14,7 @@
 #include "conduitscope/modbus.hpp"
 #include "conduitscope/s7comm.hpp"
 #include "conduitscope/tcp.hpp"
+#include "conduitscope/udp.hpp"
 
 namespace conduitscope {
 
@@ -22,6 +23,18 @@ namespace {
 bool port_in(uint16_t port, uint16_t default_port, const std::vector<uint16_t>& extra) {
     if (port == default_port) return true;
     return std::find(extra.begin(), extra.end(), port) != extra.end();
+}
+
+// A UDP port worth calling out by name in a "udp" packet's summary -- deliberately not a decode
+// hook (this groundwork release doesn't parse any of these protocols' own UDP payloads, see
+// udp.hpp's file header comment and docs/MANUAL.md's ROADMAP), just an informational note in the
+// same spirit as the "not a configured/standard <protocol> port" notes the TCP-based protocols
+// already get. 2222 is EtherNet/IP's own registered port for CIP implicit (real-time I/O)
+// messaging, the natural next EtherNet/IP-related gap now that explicit messaging (TCP 44818) is
+// covered -- see enip.hpp.
+std::string well_known_udp_port_name(uint16_t port) {
+    if (port == 2222) return "EtherNet/IP implicit (I/O) messaging";
+    return "";
 }
 
 // Canonicalizes both directions of one TCP 4-tuple into a single, direction-independent session
@@ -477,7 +490,10 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
             if (eth.ethertype != ETHERTYPE_IPV4) {
                 out.protocol = "non-ip";
                 std::ostringstream s;
-                s << "Ethernet frame with ethertype 0x" << std::hex << eth.ethertype << " (not IPv4)";
+                s << "Ethernet frame with ethertype 0x" << std::hex << eth.ethertype << std::dec;
+                std::string name = ethertype_name(eth.ethertype);
+                if (!name.empty()) s << " (" << name << ")";
+                s << " (not IPv4)";
                 out.summary = s.str();
                 return out;
             }
@@ -504,9 +520,41 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                                  "payload)");
         }
 
+        if (ip.protocol == IPPROTO_UDP_VALUE) {
+            // Groundwork plumbing only: the UDP header/payload split is recognized and reported
+            // (src/dst port, byte count), but no application-layer protocol riding on UDP is
+            // decoded yet -- see udp.hpp's file header comment and docs/MANUAL.md's ROADMAP.
+            // Unlike TCP, a UDP datagram is already a complete, self-delimited unit, so none of
+            // the TCP-segment reassembly machinery below applies here at all.
+            UdpDatagram udp = parse_udp(ip.payload);
+            out.has_udp = true;
+            out.src_port = udp.src_port;
+            out.dst_port = udp.dst_port;
+            out.protocol = "udp";
+            std::ostringstream s;
+            if (udp.payload.empty()) {
+                s << "UDP datagram with no payload";
+            } else {
+                s << "UDP payload of " << udp.payload.size() << " byte(s)";
+            }
+            s << " on port " << udp.src_port << "->" << udp.dst_port;
+            std::string port_name = well_known_udp_port_name(udp.dst_port);
+            if (port_name.empty()) port_name = well_known_udp_port_name(udp.src_port);
+            if (!port_name.empty()) {
+                s << " (" << port_name << ", not decoded in this groundwork release)";
+            }
+            out.summary = s.str();
+            return out;
+        }
+
         if (ip.protocol != IPPROTO_TCP_VALUE) {
             out.protocol = "non-tcp";
-            out.summary = "IPv4 protocol number " + std::to_string(ip.protocol) + " (not TCP)";
+            std::ostringstream s;
+            s << "IPv4 protocol number " << static_cast<unsigned>(ip.protocol);
+            std::string name = ip_protocol_name(ip.protocol);
+            if (!name.empty()) s << " (" << name << ")";
+            s << " (not TCP)";
+            out.summary = s.str();
             return out;
         }
 

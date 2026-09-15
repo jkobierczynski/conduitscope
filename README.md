@@ -149,6 +149,21 @@ Groundwork / v0.1.0. What works right now:
   and a larger real industrial-control-system capture dominated by
   Multiple_Service_Packet/Unconnected_Send/Read_Modify_Write_Tag traffic --
   see tests/real_captures/enip/ATTRIBUTION.md.
+- Non-IPv4 Ethernet frames and non-TCP IPv4 payloads (including UDP) are now
+  recognized and named, not just reported as a bare hex/number and dropped:
+  ARP, PROFINET RT, IEC 61850 GOOSE/Sampled Values, EtherCAT, LLDP, PTP, MPLS,
+  and stacked-VLAN (802.1ad/QinQ) EtherTypes; ICMP, IGMP, GRE, ESP, AH, OSPF,
+  and SCTP IP protocol numbers; and the UDP header itself (source/destination
+  port, byte count), with EtherNet/IP's own UDP port (2222, implicit/I-O
+  messaging) called out by name. This is groundwork plumbing, not a new
+  protocol decoder -- none of these protocols' own framing is parsed any
+  further yet (no GOOSE/PROFINET/EtherNet/IP-I/O decode), and `policy
+  validate` does not yet evaluate this traffic against any conduit (still
+  counted as `skipped_non_tcp`, same as before) -- but it's a real, confirmed
+  visibility gap this closes: re-running conduitscope's own real-capture test
+  set after adding this surfaced genuine ARP and UDP (DNS, NetBIOS) traffic
+  that was previously invisible. See docs/MANUAL.md's PROTOCOL COVERAGE and
+  ROADMAP.
 - IPv4 payload is clamped to the header's own `total_length` field, so
   Ethernet's minimum-frame-size padding on short packets (bare ACKs, mostly)
   never gets misreported as phantom TCP payload -- found and fixed against a
