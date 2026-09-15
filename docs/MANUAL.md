@@ -9,7 +9,7 @@ conduitscope -- decode Modbus/TCP, DNP3, and S7comm/COTP traffic from offline pc
 ```
 conduitscope [-q|--quiet] [--no-color] [--log-file FILE] [--version] [-h|--help] <command> [command options]
 
-conduitscope decode (-i FILE | -I INTERFACE) [-o FILE] [-f text|json|csv] [--protocol auto|modbus|dnp3|s7comm]
+conduitscope decode (-r FILE | -i INTERFACE) [-o FILE] [-f text|json|csv] [--protocol auto|modbus|dnp3|s7comm]
                      [--modbus-port PORT]... [--dnp3-port PORT]... [--s7comm-port PORT]...
                      [--max-packets N] [--stats] [--strict]
                      [--filter BPF] [--duration SECONDS] [--snaplen BYTES] [--no-promiscuous]
@@ -18,13 +18,13 @@ conduitscope info -i FILE
 
 conduitscope interfaces
 
-conduitscope policy validate (-i FILE | -I INTERFACE) --policy FILE [-o FILE] [-f text|json] [--strict]
+conduitscope policy validate (-r FILE | -i INTERFACE) --policy FILE [-o FILE] [-f text|json] [--strict]
                               [--filter BPF] [--duration SECONDS] [--snaplen BYTES] [--no-promiscuous]
 
 conduitscope version
 ```
 
-`-I/--interface`, `conduitscope interfaces`, and the `--filter`/`--duration`/
+`-i/--interface`, `conduitscope interfaces`, and the `--filter`/`--duration`/
 `--snaplen`/`--no-promiscuous` options are live capture: see LIVE CAPTURE below.
 They require this build to have been compiled with libpcap (Linux) / the Npcap
 SDK (Windows) found -- an optional, build-time-detected dependency, the one
@@ -64,9 +64,12 @@ built without live-capture support, and is often still the right choice even
 when it wasn't (offline files are easy to archive, diff, and share; a live
 capture is not).
 
-Live capture (`-I/--interface`) is also available: an *optional*,
+Live capture (`-i/--interface`) is also available: an *optional*,
 build-time-detected dependency on libpcap (Linux) / the Npcap SDK (Windows).
-When CMake finds one at configure time, `-I` and `conduitscope interfaces` work;
+`-i` for the interface and `-r` for an offline file deliberately mirror
+`tcpdump`'s own `-i`/`-r` flags rather than the `-i`/`-I` pairing an earlier
+version of this tool used, which read too easily as a typo of itself.
+When CMake finds one at configure time, `-i` and `conduitscope interfaces` work;
 when it doesn't (or `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF` was passed), the
 rest of conduitscope is completely unaffected -- it builds exactly as
 dependency-free as before, and those two report the missing support clearly at
@@ -103,24 +106,24 @@ subcommand name on the command line (standard CLI11 behavior).
 ### `decode` -- decode a capture and print each recognized packet
 
 ```
-conduitscope decode (-i FILE | -I INTERFACE) [options]
+conduitscope decode (-r FILE | -i INTERFACE) [options]
 ```
 
 | Option | Default | Description |
 |---|---|---|
-| `-i, --input FILE` | *(required unless `-I` given)* | Input pcap file. Must exist; must be classic pcap format. Mutually exclusive with `-I`. |
-| `-I, --interface NAME` | *(required unless `-i` given)* | Capture live from this network interface instead of reading a file -- see LIVE CAPTURE below and `conduitscope interfaces`. Requires libpcap/Npcap support to have been built in. Mutually exclusive with `-i`. |
-| `--filter BPF` | *(none)* | BPF capture filter (tcpdump syntax, e.g. `"port 502 or port 102"`). Only meaningful with `-I`. |
-| `--duration SECONDS` | `0` (unlimited) | Stop a live capture (`-I`) after this many seconds. `0` means rely on `--max-packets` and/or Ctrl+C instead. |
-| `--snaplen BYTES` | `65535` | Maximum bytes captured per packet with `-I`. |
-| `--no-promiscuous` | off (i.e. promiscuous by default) | With `-I`, don't put the interface into promiscuous mode. Promiscuous is the default because the main live-capture use case -- watching a mirrored/SPAN switch port for zone/conduit traffic -- needs to see traffic that isn't addressed to the capturing host at all. |
+| `-r, --input FILE` | *(required unless `-i` given)* | Input pcap file. Must exist; must be classic pcap format. Mutually exclusive with `-i`. |
+| `-i, --interface NAME` | *(required unless `-r` given)* | Capture live from this network interface instead of reading a file -- see LIVE CAPTURE below and `conduitscope interfaces`. Requires libpcap/Npcap support to have been built in. Mutually exclusive with `-r`. |
+| `--filter BPF` | *(none)* | BPF capture filter (tcpdump syntax, e.g. `"port 502 or port 102"`). Only meaningful with `-i`. |
+| `--duration SECONDS` | `0` (unlimited) | Stop a live capture (`-i`) after this many seconds. `0` means rely on `--max-packets` and/or Ctrl+C instead. |
+| `--snaplen BYTES` | `65535` | Maximum bytes captured per packet with `-i`. |
+| `--no-promiscuous` | off (i.e. promiscuous by default) | With `-i`, don't put the interface into promiscuous mode. Promiscuous is the default because the main live-capture use case -- watching a mirrored/SPAN switch port for zone/conduit traffic -- needs to see traffic that isn't addressed to the capturing host at all. |
 | `-o, --output FILE` | stdout | Write decoded output here instead of stdout. |
 | `-f, --format {text,json,csv}` | `text` | Output format. See OUTPUT FORMATS below. |
 | `--protocol {auto,modbus,dnp3,s7comm}` | `auto` | Restrict decoding to one protocol. `auto` opportunistically tries Modbus, DNP3, and S7comm/COTP detection on every TCP payload, regardless of port (see PROTOCOL DETECTION below). |
 | `--modbus-port PORT` | *(502 built in)* | Additional TCP port to treat as "expected" for Modbus. Repeatable. Does **not** gate detection -- it only changes whether a decoded Modbus frame is annotated as appearing on an unexpected port, which is itself a useful signal when auditing a conduit. |
 | `--dnp3-port PORT` | *(20000 built in)* | Same as `--modbus-port`, for DNP3. Repeatable. |
 | `--s7comm-port PORT` | *(102 built in)* | Same as `--modbus-port`, for COTP/S7comm. Repeatable. |
-| `--max-packets N` | `0` (unlimited) | Stop after decoding this many packets. With `-I`, this also bounds a live capture (in addition to `--duration` and Ctrl+C). |
+| `--max-packets N` | `0` (unlimited) | Stop after decoding this many packets. With `-i`, this also bounds a live capture (in addition to `--duration` and Ctrl+C). |
 | `--stats` | off | Print an aggregate summary (protocol counts, Modbus function-code histogram, exception count, capture time span) instead of one line per packet. Ignores `--format`. |
 | `--strict` | off | Abort with a nonzero exit status on the first packet that fails to parse at the Ethernet/IPv4/TCP layer, instead of reporting a per-packet warning and continuing. Does not affect Modbus/DNP3-level ambiguity, which is always handled by heuristic + note rather than error. |
 
@@ -140,7 +143,7 @@ requiring you to also specify `--stats` explicitly. Useful as a first look at
 an unfamiliar capture before deciding whether/how to filter it with `decode`.
 `info` currently only works against offline files; there's no live equivalent
 (a live capture never ends on its own the way a file does, so "metadata about
-the whole thing" doesn't have a natural moment to print) -- use `decode -I
+the whole thing" doesn't have a natural moment to print) -- use `decode -i
 --stats` instead for a live summary, bounded by `--duration`/`--max-packets`/Ctrl+C.
 
 ### `interfaces` -- list network interfaces available for live capture
@@ -158,26 +161,26 @@ does not require elevated privilege. See LIVE CAPTURE below.
 ### `policy validate` -- zone/conduit policy check
 
 ```
-conduitscope policy validate (-i FILE | -I INTERFACE) --policy POLICY_FILE [options]
+conduitscope policy validate (-r FILE | -i INTERFACE) --policy POLICY_FILE [options]
 ```
 
 | Option | Default | Description |
 |---|---|---|
-| `-i, --input FILE` | *(required unless `-I` given)* | Input pcap file. Must exist; must be classic pcap format. Mutually exclusive with `-I`. |
-| `-I, --interface NAME` | *(required unless `-i` given)* | Check live traffic from this network interface instead of reading a file -- see LIVE CAPTURE below. Requires libpcap/Npcap support to have been built in. Mutually exclusive with `-i`. There's no `--max-packets` here (matching this command's offline-file surface, which never had one either); a live run relies on `--duration` and/or Ctrl+C to stop. |
-| `--filter BPF` | *(none)* | BPF capture filter (tcpdump syntax). Only meaningful with `-I`. |
-| `--duration SECONDS` | `0` (unlimited) | Stop a live capture (`-I`) after this many seconds; `0` means rely on Ctrl+C instead. |
-| `--snaplen BYTES` | `65535` | Maximum bytes captured per packet with `-I`. |
+| `-r, --input FILE` | *(required unless `-i` given)* | Input pcap file. Must exist; must be classic pcap format. Mutually exclusive with `-i`. |
+| `-i, --interface NAME` | *(required unless `-r` given)* | Check live traffic from this network interface instead of reading a file -- see LIVE CAPTURE below. Requires libpcap/Npcap support to have been built in. Mutually exclusive with `-r`. There's no `--max-packets` here (matching this command's offline-file surface, which never had one either); a live run relies on `--duration` and/or Ctrl+C to stop. |
+| `--filter BPF` | *(none)* | BPF capture filter (tcpdump syntax). Only meaningful with `-i`. |
+| `--duration SECONDS` | `0` (unlimited) | Stop a live capture (`-i`) after this many seconds; `0` means rely on Ctrl+C instead. |
+| `--snaplen BYTES` | `65535` | Maximum bytes captured per packet with `-i`. |
 | `--no-promiscuous` | off (i.e. promiscuous by default) | Same meaning as `decode --no-promiscuous`. |
 | `--policy FILE` | *(required)* | Zone/conduit policy file. Must exist. A restricted YAML subset -- see POLICY FILE FORMAT below. |
 | `-o, --output FILE` | stdout | Write the report here instead of stdout. |
 | `-f, --format {text,json}` | `text` | Report format. `text` is the human-readable report shown throughout this section; `json` is meant for scripting an audit pipeline -- see POLICY FILE FORMAT's "JSON report schema" below. |
 | `--strict` | off | Same meaning as `decode --strict`: abort on the first packet that fails to parse at the Ethernet/IPv4/TCP layer, instead of reporting a warning and continuing to evaluate the rest of the capture. |
 
-With `-I`, the report's `capture:` line shows `live:<interface>` in place of a
+With `-i`, the report's `capture:` line shows `live:<interface>` in place of a
 file path, and Ctrl+C (or `--duration` elapsing) stops the capture and still
 evaluates/reports on whatever flows were observed up to that point -- the same
-as running `policy validate -i` against a capture file that happens to end at
+as running `policy validate -r` against a capture file that happens to end at
 that moment.
 
 `policy validate` decodes the capture exactly as `decode` would (the same
@@ -215,7 +218,7 @@ this capture to exercise and didn't, or one worth pruning from the policy.
 Example, against the committed sample fixtures:
 
 ```sh
-$ conduitscope policy validate -i tests/sample_modbus.pcap --policy tests/policies/compliant.yaml
+$ conduitscope policy validate -r tests/sample_modbus.pcap --policy tests/policies/compliant.yaml
 Zone/conduit policy validation
   capture: tests/sample_modbus.pcap
   policy:  tests/policies/compliant.yaml (2 zone(s), 3 conduit(s))
@@ -245,11 +248,11 @@ Conduits never exercised by this capture (2):
 Equivalent to the global `--version` flag; provided as a subcommand as well
 for scripts that prefer `conduitscope version` over a flag. Its output includes
 `live capture: libpcap/Npcap` or `live capture: not built in`, so a script can
-check support without needing to parse an error from `-I`/`interfaces`.
+check support without needing to parse an error from `-i`/`interfaces`.
 
 ## LIVE CAPTURE
 
-`-I/--interface` (on `decode` and `policy validate`) and `conduitscope
+`-i/--interface` (on `decode` and `policy validate`) and `conduitscope
 interfaces` capture traffic directly from a network interface instead of
 reading an offline pcap file, using libpcap (Linux) / the Npcap SDK (Windows).
 This is an *optional*, build-time-detected dependency -- see BUILDING for how
@@ -264,10 +267,10 @@ binary has it.
 conduitscope interfaces
 
 # Decode live traffic from eth0, limited to Modbus/S7comm ports, for 60 seconds:
-conduitscope decode -I eth0 --filter "port 502 or port 102" --duration 60
+conduitscope decode -i eth0 --filter "port 502 or port 102" --duration 60
 
 # Check live traffic against a zone/conduit policy until Ctrl+C:
-conduitscope policy validate -I eth0 --policy policy.yaml
+conduitscope policy validate -i eth0 --policy policy.yaml
 ```
 
 ### Stopping a live capture
@@ -280,7 +283,7 @@ decoded/reported, on any of:
   packet-count option -- see its own option table above).
 - **Ctrl+C** (SIGINT). This is caught and used to stop the capture cleanly
   (finishing whatever output/report was in progress), not to kill the process
-  outright -- so `decode -I eth0` with no `--duration`/`--max-packets` at all is
+  outright -- so `decode -i eth0` with no `--duration`/`--max-packets` at all is
   a reasonable way to capture "until I say stop", the same way `tcpdump` with no
   `-c`/duration option is.
 
@@ -325,17 +328,17 @@ installation. Two things worth knowing going in:
   actually *runs* a conduitscope binary built with live-capture support, even
   if that's the same machine it was built on. A binary built with live-capture
   support still runs fine on a machine with no Npcap runtime installed at
-  all -- `-I`/`interfaces` will just fail to open/enumerate anything, the same
+  all -- `-i`/`interfaces` will just fail to open/enumerate anything, the same
   as any other capture-permission failure.
 - **Interface names** on Windows (via Npcap) are not simple names like `eth0`
   -- `conduitscope interfaces` is the way to get the exact string to pass to
-  `-I` rather than guessing one.
+  `-i` rather than guessing one.
 
 ### Enumerating interfaces without capturing
 
 `conduitscope interfaces` (via `pcap_findalldevs`) generally does **not**
 require elevated privilege, even though actually opening one for capture
-(`-I`) usually does (root/administrator, or an equivalent capability/group
+(`-i`) usually does (root/administrator, or an equivalent capability/group
 grant -- e.g. Linux's `CAP_NET_RAW`, or membership in the `npcap`/
 `wireshark` group on a suitably configured Windows/Npcap install). If
 `interfaces` lists nothing at all, that's more likely a privilege issue than
@@ -1069,9 +1072,9 @@ These are current, not aspirational -- each has a corresponding ROADMAP item.
   sequence signal worth trusting for that. Buffering is capped at 1 MiB /
   2000 frames per flow against a pathological/malformed capture.
 - **S7comm-Plus (protocol id 0x72) is detected but never decoded.**
-- **Live capture (`-I`) is an optional, build-time-detected feature, not
+- **Live capture (`-i`) is an optional, build-time-detected feature, not
   always present.** A binary built without libpcap/Npcap found still runs
-  everything else identically; `-I`/`interfaces` just report that clearly.
+  everything else identically; `-i`/`interfaces` just report that clearly.
   See LIVE CAPTURE above.
 - **Live capture's Windows/Npcap path has not been run on a real Windows
   machine yet** -- implemented against the same documented API used on
@@ -1145,7 +1148,7 @@ unrecognized packet is.
 Decode a capture as human-readable text:
 
 ```sh
-conduitscope decode -i capture.pcap
+conduitscope decode -r capture.pcap
 ```
 
 Get just the aggregate picture of what's in a large capture before deciding
@@ -1158,35 +1161,35 @@ conduitscope info -i capture.pcap
 Pull out only the Modbus exception responses, as JSON, using `jq`:
 
 ```sh
-conduitscope decode -i capture.pcap --protocol modbus -f json \
+conduitscope decode -r capture.pcap --protocol modbus -f json \
   | jq '.[] | select(.summary | test("^Read|^Write") | not)'
 ```
 
 Note ports that carry Modbus traffic your zone policy doesn't expect on 502:
 
 ```sh
-conduitscope decode -i capture.pcap --protocol modbus --modbus-port 502 -f text \
+conduitscope decode -r capture.pcap --protocol modbus --modbus-port 502 -f text \
   | grep -A1 "not a configured/standard Modbus port"
 ```
 
 Stop early on a very large capture while you're iterating on a filter:
 
 ```sh
-conduitscope decode -i capture.pcap --max-packets 500
+conduitscope decode -r capture.pcap --max-packets 500
 ```
 
 See which S7 sessions get established and what function codes flow over
 them, on a capture that mixes S7comm with other traffic:
 
 ```sh
-conduitscope decode -i capture.pcap --protocol s7comm --stats
+conduitscope decode -r capture.pcap --protocol s7comm --stats
 ```
 
 See exactly which PLC memory addresses are being read and written -- the
 item tags conduitscope decoded, one line per Read Var / Write Var packet:
 
 ```sh
-conduitscope decode -i capture.pcap --protocol s7comm -f json \
+conduitscope decode -r capture.pcap --protocol s7comm -f json \
   | jq -r '.[] | select(.s7comm_items) | "\(.src_ip) -> \(.dst_ip): \(.s7comm_items | join(", "))"'
 ```
 
@@ -1195,7 +1198,7 @@ capture, e.g. to spot an unsolicited response or a write/operate/direct
 operate you weren't expecting on a conduit:
 
 ```sh
-conduitscope decode -i capture.pcap --protocol dnp3 -f json \
+conduitscope decode -r capture.pcap --protocol dnp3 -f json \
   | jq -r '.[] | select(.dnp3_function) | "\(.src_ip) -> \(.dst_ip): \(.dnp3_function) \(.dnp3_objects // [] | join(", "))"'
 ```
 
@@ -1203,7 +1206,7 @@ Find every CROB output command in a capture -- who issued it, and exactly
 what it commanded:
 
 ```sh
-conduitscope decode -i capture.pcap --protocol dnp3 -f json \
+conduitscope decode -r capture.pcap --protocol dnp3 -f json \
   | jq -r '.[] | select(.dnp3_values) | .src_ip as $s | .dst_ip as $d |
            (.dnp3_values[] | select(startswith("g12v1"))) | "\($s) -> \($d): \(.)"'
 ```
@@ -1214,7 +1217,7 @@ transaction ID than expected (worth a closer look on a conduit that should
 be a simple, complete request/response session):
 
 ```sh
-conduitscope decode -i capture.pcap --protocol modbus -f json \
+conduitscope decode -r capture.pcap --protocol modbus -f json \
   | jq -r '.[] | select(.summary | test("^Write")) | select(.modbus_paired_request_index | not) |
            "\(.index): \(.src_ip):\(.src_port) -> \(.dst_ip):\(.dst_port) \(.summary)"'
 ```
@@ -1222,7 +1225,7 @@ conduitscope decode -i capture.pcap --protocol modbus -f json \
 Check a capture against a zone/conduit policy, human-readable:
 
 ```sh
-conduitscope policy validate -i capture.pcap --policy policy.yaml
+conduitscope policy validate -r capture.pcap --policy policy.yaml
 ```
 
 Same check, but fail a CI pipeline step on any violation or unclassified
@@ -1230,14 +1233,14 @@ traffic (exit status `3`) while still capturing the full report for later
 inspection:
 
 ```sh
-conduitscope policy validate -i capture.pcap --policy policy.yaml -o report.txt
+conduitscope policy validate -r capture.pcap --policy policy.yaml -o report.txt
 ```
 
 List just the violations, as JSON, for a script that only cares about what's
 wrong:
 
 ```sh
-conduitscope policy validate -i capture.pcap --policy policy.yaml -f json \
+conduitscope policy validate -r capture.pcap --policy policy.yaml -f json \
   | jq -r '.flows[] | select(.verdict == "violation") |
            "\(.client_ip) -> \(.server_ip):\(.server_port) (\(.protocols | join("+"))): \(.reason)"'
 ```
@@ -1301,10 +1304,10 @@ to match a policy against -- see LIMITATIONS for the engine's own remaining
 caveats (the SYN-based initiator heuristic's fallback case, IPv4/TCP-only
 zones, one-conduit-per-zone-pair direction model).
 
-**Live capture** (`-I/--interface`, `conduitscope interfaces`) is also now
+**Live capture** (`-i/--interface`, `conduitscope interfaces`) is also now
 done, as an optional, build-time-detected libpcap (Linux) / Npcap (Windows)
 dependency layered on top of everything above without changing any of it --
-`decode -I`/`policy validate -I` feed the exact same `PcapPacket` shape into
+`decode -i`/`policy validate -i` feed the exact same `PcapPacket` shape into
 the same `Decoder`/`PolicyEngine` that offline files do (see
 `live_capture.hpp`'s `LiveCapture` and `cli_main.cpp`'s `PacketSource`), so
 every protocol-decoding and policy-checking behavior documented throughout

@@ -18,7 +18,7 @@ not yet supported and is reported with a conversion hint
 (\fBtshark \-F pcap\fR) rather than a generic error.
 .SH COMMANDS
 .TP
-.B decode (\fB\-i\fR \fIFILE\fR | \fB\-I\fR \fIINTERFACE\fR) [\fIOPTIONS\fR]
+.B decode (\fB\-r\fR \fIFILE\fR | \fB\-i\fR \fIINTERFACE\fR) [\fIOPTIONS\fR]
 Decode a capture (or live interface) and print each recognized packet. See
 \fBOPTIONS (decode)\fR below.
 .TP
@@ -30,7 +30,7 @@ Print pcap file metadata and a protocol histogram. Offline files only; see
 List network interfaces available for live capture. See \fBLIVE CAPTURE\fR
 below.
 .TP
-.B policy validate (\fB\-i\fR \fIFILE\fR | \fB\-I\fR \fIINTERFACE\fR) \fB\-\-policy\fR \fIFILE\fR [\fIOPTIONS\fR]
+.B policy validate (\fB\-r\fR \fIFILE\fR | \fB\-i\fR \fIINTERFACE\fR) \fB\-\-policy\fR \fIFILE\fR [\fIOPTIONS\fR]
 Zone/conduit policy check: decodes the capture (or live interface) exactly
 as \fBdecode\fR would, groups it into TCP flows, and checks each against the
 zones/conduits declared in the policy file (a restricted, dependency-free
@@ -43,26 +43,26 @@ Print version and build information, including whether this build has live
 capture support.
 .SH OPTIONS (decode)
 .TP
-.BR \-i ", " \-\-input " " \fIFILE\fR
-Input pcap file. Required unless \fB\-I\fR is given; mutually exclusive with it.
+.BR \-r ", " \-\-input " " \fIFILE\fR
+Input pcap file. Required unless \fB\-i\fR is given; mutually exclusive with it.
 .TP
-.BR \-I ", " \-\-interface " " \fINAME\fR
+.BR \-i ", " \-\-interface " " \fINAME\fR
 Capture live from this network interface instead of reading a file. Required
-unless \fB\-i\fR is given; mutually exclusive with it. Requires this build to
+unless \fB\-r\fR is given; mutually exclusive with it. Requires this build to
 have libpcap/Npcap support -- see \fBLIVE CAPTURE\fR.
 .TP
 .B \-\-filter \fIBPF\fR
-BPF capture filter (tcpdump syntax). Only meaningful with \fB\-I\fR.
+BPF capture filter (tcpdump syntax). Only meaningful with \fB\-i\fR.
 .TP
 .B \-\-duration \fISECONDS\fR
-Stop a live capture (\fB\-I\fR) after this many seconds. Default: 0
+Stop a live capture (\fB\-i\fR) after this many seconds. Default: 0
 (unlimited -- rely on \fB\-\-max\-packets\fR and/or Ctrl+C instead).
 .TP
 .B \-\-snaplen \fIBYTES\fR
-Maximum bytes captured per packet with \fB\-I\fR. Default: 65535.
+Maximum bytes captured per packet with \fB\-i\fR. Default: 65535.
 .TP
 .B \-\-no\-promiscuous
-With \fB\-I\fR, don't put the interface into promiscuous mode. Promiscuous
+With \fB\-i\fR, don't put the interface into promiscuous mode. Promiscuous
 is the default (see \fBLIVE CAPTURE\fR for why).
 .TP
 .BR \-o ", " \-\-output " " \fIFILE\fR
@@ -87,7 +87,7 @@ Same as \fB\-\-modbus\-port\fR, for COTP/S7comm. Repeatable.
 .TP
 .B \-\-max\-packets \fIN\fR
 Stop after decoding this many packets. Default: 0 (unlimited). With
-\fB\-I\fR, also bounds a live capture.
+\fB\-i\fR, also bounds a live capture.
 .TP
 .B \-\-stats
 Print an aggregate summary instead of one line per packet. Ignores
@@ -97,23 +97,23 @@ Print an aggregate summary instead of one line per packet. Ignores
 Abort on the first malformed packet instead of warning and continuing.
 .SH OPTIONS (policy validate)
 .TP
-.BR \-i ", " \-\-input " " \fIFILE\fR
-Input pcap file. Required unless \fB\-I\fR is given; mutually exclusive with it.
+.BR \-r ", " \-\-input " " \fIFILE\fR
+Input pcap file. Required unless \fB\-i\fR is given; mutually exclusive with it.
 .TP
-.BR \-I ", " \-\-interface " " \fINAME\fR
+.BR \-i ", " \-\-interface " " \fINAME\fR
 Check live traffic from this network interface instead of reading a file.
-Required unless \fB\-i\fR is given; mutually exclusive with it. No
+Required unless \fB\-r\fR is given; mutually exclusive with it. No
 \fB\-\-max\-packets\fR equivalent here -- use \fB\-\-duration\fR and/or Ctrl+C.
 .TP
 .B \-\-filter \fIBPF\fR
-BPF capture filter (tcpdump syntax). Only meaningful with \fB\-I\fR.
+BPF capture filter (tcpdump syntax). Only meaningful with \fB\-i\fR.
 .TP
 .B \-\-duration \fISECONDS\fR
-Stop a live capture (\fB\-I\fR) after this many seconds. Default: 0
+Stop a live capture (\fB\-i\fR) after this many seconds. Default: 0
 (unlimited -- rely on Ctrl+C instead).
 .TP
 .B \-\-snaplen \fIBYTES\fR
-Maximum bytes captured per packet with \fB\-I\fR. Default: 65535.
+Maximum bytes captured per packet with \fB\-i\fR. Default: 65535.
 .TP
 .B \-\-no\-promiscuous
 Same meaning as \fBdecode\fR's \fB\-\-no\-promiscuous\fR.
@@ -131,11 +131,11 @@ Report format. Default: text.
 .B \-\-strict
 Abort on the first malformed packet instead of warning and continuing.
 .SH LIVE CAPTURE
-\fB\-I/\-\-interface\fR and \fBinterfaces\fR require this build to have been
+\fB\-i/\-\-interface\fR and \fBinterfaces\fR require this build to have been
 compiled with libpcap (Linux) or the Npcap SDK (Windows) found by CMake --
 an optional, build-time-detected dependency, the one exception to
 conduitscope's otherwise zero-dependency design. A build without it is
-otherwise unaffected; \fB\-I\fR/\fBinterfaces\fR just report that clearly at
+otherwise unaffected; \fB\-i\fR/\fBinterfaces\fR just report that clearly at
 runtime instead of not existing.
 .PP
 A live capture stops -- decoding/reporting whatever was captured so far,
@@ -231,7 +231,7 @@ what's planned next.
 Decode a capture as text:
 .RS
 .EX
-conduitscope decode \-i capture.pcap
+conduitscope decode \-r capture.pcap
 .EE
 .RE
 .PP
@@ -245,14 +245,14 @@ conduitscope info \-i capture.pcap
 Decode as JSON and filter with jq:
 .RS
 .EX
-conduitscope decode \-i capture.pcap \-f json | jq '.[] | select(.protocol=="modbus")'
+conduitscope decode \-r capture.pcap \-f json | jq '.[] | select(.protocol=="modbus")'
 .EE
 .RE
 .PP
 Check a capture against a zone/conduit policy:
 .RS
 .EX
-conduitscope policy validate \-i capture.pcap \-\-policy policy.yaml
+conduitscope policy validate \-r capture.pcap \-\-policy policy.yaml
 .EE
 .RE
 .PP
@@ -266,14 +266,14 @@ conduitscope interfaces
 Decode live traffic from eth0 for 60 seconds:
 .RS
 .EX
-conduitscope decode \-I eth0 \-\-filter "port 502 or port 102" \-\-duration 60
+conduitscope decode \-i eth0 \-\-filter "port 502 or port 102" \-\-duration 60
 .EE
 .RE
 .PP
 Check live traffic against a policy until Ctrl+C:
 .RS
 .EX
-conduitscope policy validate \-I eth0 \-\-policy policy.yaml
+conduitscope policy validate \-i eth0 \-\-policy policy.yaml
 .EE
 .RE
 .SH SEE ALSO

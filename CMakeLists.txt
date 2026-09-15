@@ -53,7 +53,7 @@ endif()
 # exception to the project's otherwise zero-external-dependency design (see README.md's "Why
 # offline pcap files" section) -- and it stays optional even where it's found: when neither is
 # present, conduitscope_core still builds exactly as it always has, and live_capture.cpp's stub
-# implementation (see its own comment) makes `-I/--interface` and `conduitscope interfaces` fail
+# implementation (see its own comment) makes `-i/--interface` and `conduitscope interfaces` fail
 # with a clear message instead of not existing at all.
 #
 # CONDUITSCOPE_ENABLE_LIVE_CAPTURE lets a builder opt out of even searching (e.g. a packager who
@@ -100,7 +100,7 @@ if(CONDUITSCOPE_ENABLE_LIVE_CAPTURE)
     message(STATUS "conduitscope: live capture ENABLED (found ${PCAP_LIBRARY})")
   else()
     message(STATUS "conduitscope: live capture DISABLED (libpcap/Npcap SDK not found -- "
-                    "'-I/--interface' and 'interfaces' will report this clearly at runtime; "
+                    "'-i/--interface' and 'interfaces' will report this clearly at runtime; "
                     "everything else is unaffected)")
   endif()
 else()
@@ -931,7 +931,7 @@ set_tests_properties(policy_error_line_number_is_the_zones_own_line PROPERTIES
 # ---------------------------------------------------------------------------------------------
 # Live capture (live_capture.hpp/cpp) -- an optional, build-time-detected libpcap (Linux) / Npcap
 # (Windows) dependency; see CMakeLists.txt's CONDUITSCOPE_HAVE_PCAP detection above. The CLI
-# surface (-I/--interface, --filter, --duration, --snaplen, --no-promiscuous, `interfaces`) exists
+# surface (-i/--interface, --filter, --duration, --snaplen, --no-promiscuous, `interfaces`) exists
 # unconditionally -- only the runtime behavior behind it depends on CONDUITSCOPE_HAVE_PCAP -- so
 # argument-validation tests below run regardless. Tests that actually open an interface are gated
 # on CONDUITSCOPE_HAVE_PCAP (nothing to open otherwise) and, since this project has no CI configured
@@ -945,7 +945,7 @@ set_tests_properties(policy_error_line_number_is_the_zones_own_line PROPERTIES
 add_test(NAME live_capture_requires_exactly_one_source_decode
   COMMAND conduitscope decode)
 set_tests_properties(live_capture_requires_exactly_one_source_decode PROPERTIES
-  PASS_REGULAR_EXPRESSION "needs exactly one of -i/--input.*or -I/--interface")
+  PASS_REGULAR_EXPRESSION "needs exactly one of -r/--input.*or -i/--interface")
 
 add_test(NAME live_capture_input_and_interface_are_mutually_exclusive_decode
   COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --interface lo)
@@ -955,7 +955,7 @@ set_tests_properties(live_capture_input_and_interface_are_mutually_exclusive_dec
 add_test(NAME live_capture_requires_exactly_one_source_policy_validate
   COMMAND conduitscope policy validate --policy "${POLICY_DIR}/compliant.yaml")
 set_tests_properties(live_capture_requires_exactly_one_source_policy_validate PROPERTIES
-  PASS_REGULAR_EXPRESSION "needs exactly one of -i/--input.*or -I/--interface")
+  PASS_REGULAR_EXPRESSION "needs exactly one of -r/--input.*or -i/--interface")
 
 add_test(NAME live_capture_input_and_interface_are_mutually_exclusive_policy_validate
   COMMAND conduitscope policy validate --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --interface lo --policy "${POLICY_DIR}/compliant.yaml")

@@ -32,7 +32,7 @@ namespace {
 using namespace conduitscope;
 
 // --------------------------------------------------------------------------------------------
-// Live capture plumbing shared by `decode -I` and `policy validate -I`. See live_capture.hpp for
+// Live capture plumbing shared by `decode -i` and `policy validate -i`. See live_capture.hpp for
 // LiveCapture itself; everything below is CLI-layer glue that lets run_decode/run_policy_validate
 // treat an offline pcap file and a live interface as the same kind of packet source, and lets
 // Ctrl+C stop a live capture cleanly (finishing the report/summary with whatever was captured so
@@ -286,7 +286,7 @@ int run_policy_validate(const std::string& input, const std::string& interface_n
         options.strict = strict;
         // No --max-packets equivalent for policy validate (matching its existing offline-file
         // CLI surface, which never had one either): a live run here relies on --duration and/or
-        // Ctrl+C to stop, same as `decode -I` does when --max-packets is left at its default of 0.
+        // Ctrl+C to stop, same as `decode -i` does when --max-packets is left at its default of 0.
         PacketSource source =
             open_packet_source(input, interface_name, snaplen, promiscuous, filter, duration_seconds, 0);
         SigintGuard sigint_guard(source.live_ptr());
@@ -306,7 +306,7 @@ int run_policy_validate(const std::string& input, const std::string& interface_n
         }
 
         // The report's "capture:" line identifies what was checked -- for a live run that's the
-        // interface (input is empty in that case, having been mutually exclusive with -I), not a
+        // interface (input is empty in that case, having been mutually exclusive with -i), not a
         // file path.
         std::string capture_label = interface_name.empty() ? input : "live:" + interface_name;
         PolicyReport report = engine.finish();
@@ -397,27 +397,27 @@ int main(int argc, char** argv) {
     bool decode_stats = false, decode_strict = false;
 
     auto* decode_input_opt =
-        decode_cmd->add_option("-i,--input", decode_input,
+        decode_cmd->add_option("-r,--input", decode_input,
                                 "Input pcap file (classic pcap; pcapng is not yet supported)")
             ->check(CLI::ExistingFile);
     auto* decode_interface_opt = decode_cmd->add_option(
-        "-I,--interface", decode_interface,
+        "-i,--interface", decode_interface,
         "Capture live from this network interface instead of reading a file (see "
         "'conduitscope interfaces'); requires this build to have been compiled with libpcap/Npcap "
-        "support -- exactly one of -i/-I is required");
+        "support -- exactly one of -r/-i is required");
     decode_input_opt->excludes(decode_interface_opt);
     decode_interface_opt->excludes(decode_input_opt);
     decode_cmd->add_option("--filter", decode_filter,
-                            "BPF capture filter (tcpdump syntax), only meaningful with -I");
+                            "BPF capture filter (tcpdump syntax), only meaningful with -i");
     decode_cmd->add_option("--duration", decode_duration,
-                            "Stop a live capture (-I) after this many seconds (0 = unlimited; stop "
+                            "Stop a live capture (-i) after this many seconds (0 = unlimited; stop "
                             "with Ctrl+C or --max-packets instead)")
         ->capture_default_str();
     decode_cmd->add_option("--snaplen", decode_snaplen,
-                            "Maximum bytes captured per packet with -I")
+                            "Maximum bytes captured per packet with -i")
         ->capture_default_str();
     decode_cmd->add_flag("!--no-promiscuous", decode_promiscuous,
-                          "With -I, don't put the interface into promiscuous mode (by default it "
+                          "With -i, don't put the interface into promiscuous mode (by default it "
                           "is, since the main use case -- watching a mirrored/SPAN switch port -- "
                           "needs traffic not addressed to this host)");
     decode_cmd->add_option("-o,--output", decode_output, "Write output here instead of stdout");
@@ -455,7 +455,7 @@ int main(int argc, char** argv) {
 
     // --- interfaces -----------------------------------------------------------
     auto* interfaces_cmd = app.add_subcommand(
-        "interfaces", "List network interfaces available for live capture (-I); requires this "
+        "interfaces", "List network interfaces available for live capture (-i); requires this "
                        "build to have been compiled with libpcap/Npcap support");
 
     // --- policy validate ----------------------------------------------------
@@ -470,27 +470,27 @@ int main(int argc, char** argv) {
     std::string policy_format = "text";
     bool policy_strict = false;
     auto* policy_input_opt =
-        policy_validate_cmd->add_option("-i,--input", policy_input, "Input pcap file (classic pcap)")
+        policy_validate_cmd->add_option("-r,--input", policy_input, "Input pcap file (classic pcap)")
             ->check(CLI::ExistingFile);
     auto* policy_interface_opt = policy_validate_cmd->add_option(
-        "-I,--interface", policy_interface,
+        "-i,--interface", policy_interface,
         "Check live traffic from this network interface instead of reading a file (see "
         "'conduitscope interfaces'); requires this build to have been compiled with libpcap/Npcap "
-        "support -- exactly one of -i/-I is required");
+        "support -- exactly one of -r/-i is required");
     policy_input_opt->excludes(policy_interface_opt);
     policy_interface_opt->excludes(policy_input_opt);
     policy_validate_cmd->add_option("--filter", policy_filter,
-                                     "BPF capture filter (tcpdump syntax), only meaningful with -I");
+                                     "BPF capture filter (tcpdump syntax), only meaningful with -i");
     policy_validate_cmd
         ->add_option("--duration", policy_duration,
-                      "Stop a live capture (-I) after this many seconds (0 = unlimited; stop with "
+                      "Stop a live capture (-i) after this many seconds (0 = unlimited; stop with "
                       "Ctrl+C instead)")
         ->capture_default_str();
-    policy_validate_cmd->add_option("--snaplen", policy_snaplen, "Maximum bytes captured per packet with -I")
+    policy_validate_cmd->add_option("--snaplen", policy_snaplen, "Maximum bytes captured per packet with -i")
         ->capture_default_str();
     policy_validate_cmd->add_flag(
         "!--no-promiscuous", policy_promiscuous,
-        "With -I, don't put the interface into promiscuous mode (by default it is, since the main "
+        "With -i, don't put the interface into promiscuous mode (by default it is, since the main "
         "use case -- watching a mirrored/SPAN switch port -- needs traffic not addressed to this host)");
     policy_validate_cmd
         ->add_option("--policy", policy_file,
@@ -510,18 +510,18 @@ int main(int argc, char** argv) {
 
     CLI11_PARSE(app, argc, argv);
 
-    // -i/-I are mutually exclusive (enforced above via ->excludes()) but neither is individually
+    // -r/-i are mutually exclusive (enforced above via ->excludes()) but neither is individually
     // ->required(), since exactly which one is required depends on the other -- CLI11 has no
     // built-in "exactly one of these two plain options" validator, so it's checked by hand here,
     // once parsing has otherwise succeeded, with a message that names both flags.
     if (decode_cmd->parsed() && decode_input.empty() == decode_interface.empty()) {
-        std::cerr << "error: 'decode' needs exactly one of -i/--input (an offline pcap file) or "
-                     "-I/--interface (a live capture interface)\n";
+        std::cerr << "error: 'decode' needs exactly one of -r/--input (an offline pcap file) or "
+                     "-i/--interface (a live capture interface)\n";
         return 1;
     }
     if (policy_validate_cmd->parsed() && policy_input.empty() == policy_interface.empty()) {
-        std::cerr << "error: 'policy validate' needs exactly one of -i/--input (an offline pcap "
-                     "file) or -I/--interface (a live capture interface)\n";
+        std::cerr << "error: 'policy validate' needs exactly one of -r/--input (an offline pcap "
+                     "file) or -i/--interface (a live capture interface)\n";
         return 1;
     }
 
