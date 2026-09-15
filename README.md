@@ -28,10 +28,16 @@ Groundwork / v0.1.0. What works right now:
   (source/destination addresses, frame length), transport header (FIR/FIN/SEQ,
   with correct per-16-byte-block CRC reassembly of the user data), function
   code, Internal Indications on responses, and every object header
-  (group/variation/qualifier/range) -- object data is skipped by computed
-  length rather than decoded value-by-value. A fragment spanning more than one
-  data-link frame gets its transport header decoded and nothing more (needs
-  cross-packet reassembly this tool doesn't do -- see docs/MANUAL.md).
+  (group/variation/qualifier/range) -- with **point values decoded**, not just
+  skipped, for the object types common in real traffic: Binary/Double-bit
+  Binary/Analog/Counter Input and Output states and readings (with quality
+  flags), CROB output-command fields (control code, trip/close, on/off time,
+  status -- this is literally how DNP3 issues commands), and absolute
+  timestamps. A group/variation outside that table still gets its object data
+  located and skipped by computed length, just not value-decoded. A fragment
+  spanning more than one data-link frame gets its transport header decoded and
+  nothing more (needs cross-packet reassembly this tool doesn't do -- see
+  docs/MANUAL.md).
 - S7comm/COTP: full TPKT+COTP framing decode (incl. connection-setup TSAP
   parameters), full S7comm header + function-code decoding, a full
   Setup Communication decode, and full item-level Read Var/Write Var

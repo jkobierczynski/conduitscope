@@ -135,6 +135,24 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                                                            std::to_string(oh.variation) + " (" +
                                                            oh.group_name + ")");
                     }
+                    constexpr size_t kMaxPointValues = 50;
+                    for (const auto& oh : app->objects) {
+                        if (out.dnp3_point_values.size() >= kMaxPointValues) break;
+                        std::string tag = "g" + std::to_string(oh.group) + "v" + std::to_string(oh.variation);
+                        for (const auto& pv : oh.values) {
+                            if (out.dnp3_point_values.size() >= kMaxPointValues) break;
+                            std::string entry = tag + " idx=" + std::to_string(pv.index) + ": " + pv.value;
+                            if (!pv.flags.empty()) {
+                                entry += " [";
+                                for (size_t f = 0; f < pv.flags.size(); ++f) {
+                                    if (f != 0) entry += ",";
+                                    entry += pv.flags[f];
+                                }
+                                entry += "]";
+                            }
+                            out.dnp3_point_values.push_back(entry);
+                        }
+                    }
                 }
                 bool expected_port = port_in(tcp.src_port, DNP3_TCP_PORT, options_.extra_dnp3_ports) ||
                                       port_in(tcp.dst_port, DNP3_TCP_PORT, options_.extra_dnp3_ports);

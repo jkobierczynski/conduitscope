@@ -98,8 +98,11 @@ performed no real work.
 No pcapng support; no TCP stream reassembly; IPv4 only; no IPv4 fragment
 reassembly; DNP3 header and per-block CRCs are not validated; a DNP3
 fragment spanning more than one data-link frame gets only its transport
-header decoded, not its application layer; DNP3 object data is skipped by
-computed length, not decoded value-by-value; Modbus request/response
+header decoded, not its application layer; DNP3 point values are decoded
+only for the group/variation combinations in the built-in point-format
+table (an object header outside it is still located and skipped by
+computed length); DNP3 absolute timestamps are shown as a raw
+milliseconds-since-epoch count, not a calendar date; Modbus request/response
 classification is heuristic;
 S7comm item-level addressing (inside Read Var / Write Var) is fully
 confident only for the classic S7ANY syntax; the S7-1200/1500 "symbolic"

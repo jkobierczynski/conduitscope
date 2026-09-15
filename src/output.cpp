@@ -108,6 +108,14 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
         }
         out_ << "],\n";
     }
+    if (!p.dnp3_point_values.empty()) {
+        out_ << "    \"dnp3_values\": [";
+        for (size_t i = 0; i < p.dnp3_point_values.size(); ++i) {
+            if (i != 0) out_ << ", ";
+            out_ << "\"" << json_escape(p.dnp3_point_values[i]) << "\"";
+        }
+        out_ << "],\n";
+    }
     out_ << "    \"notes\": [";
     for (size_t i = 0; i < p.notes.size(); ++i) {
         if (i != 0) out_ << ", ";

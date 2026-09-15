@@ -2,6 +2,7 @@
 #include "conduitscope/dnp3.hpp"
 
 #include <algorithm>
+#include <cstring>
 #include <iomanip>
 #include <sstream>
 #include <utility>
@@ -100,70 +101,105 @@ std::string dnp3_group_name(uint8_t group) {
     }
 }
 
-// Bits-per-point for the group/variation combinations common enough in real traffic to skip
-// structurally with confidence. A combination not listed here is genuinely out of scope, not a
-// bug -- see the "unknown group/variation" bailout in the object-header loop below. Values < 8
-// are bit-packed (see is_packed below); everything else is a whole number of bytes.
-bool point_size_bits(uint8_t group, uint8_t variation, uint16_t& bits_out) {
+// What a group/variation's point data looks like, beyond just its length: which standard
+// DNP3 quality-flags-byte family it uses (if any), what the value itself is, and whether a
+// 6-byte absolute-time trailer follows it (the standard "with time" event variant shape).
+// bits_per_point matches exactly what the structural-skip logic used before per-point value
+// decoding existed, so object_data_bytes is unchanged; PointFormat only adds how to interpret
+// those same bytes.
+enum class Dnp3ValueKind {
+    None,            // no interpretable value (e.g. an unrecognized shape -- shown as raw hex)
+    PackedBit,       // 1 bit/point: 0 or 1 (or, for group 80, an IIN flag name -- see decode below)
+    PackedDoubleBit,       // 2 bits/point: the standard 4-state double-bit-binary enum
+    BinaryState,            // state bit embedded in a flags byte (Binary Input/Output w/ flags)
+    DoubleBitStateInFlags,  // 2-bit state embedded in a flags byte (Double-bit Binary w/ flags)
+    Int16,
+    Int32,
+    Float32,
+    Float64,
+    Crob,             // Control Relay Output Block (group 12 var 1)
+    AbsoluteTime48,   // 48-bit, little-endian, milliseconds-since-epoch
+};
+
+enum class Dnp3FlagFamily { None, BinaryInput, BinaryOutput, Counter, Analog };
+
+struct Dnp3PointFormat {
+    uint16_t bits_per_point = 0;
+    Dnp3FlagFamily flags = Dnp3FlagFamily::None;
+    Dnp3ValueKind value_kind = Dnp3ValueKind::None;
+    bool has_time_trailer = false;  // a 6-byte absolute time follows the value (event "w/ time" variants)
+};
+
+// Point format for the group/variation combinations common enough in real traffic to decode with
+// confidence. A combination not listed here is genuinely out of scope, not a bug -- see the
+// "unknown group/variation" bailout in the object-header loop below. bits_per_point < 8 means
+// bit-packed (see is_packed below); everything else is a whole number of bytes. Flags-byte bit
+// layout and the CROB field layout are cross-checked against the Wireshark packet-dnp.c
+// dissector's AL_OBJ_BI_FLAG*/AL_OBJ_CTR_FLAG*/AL_OBJ_AI_FLAG*/AL_OBJCTLC_* constants, not
+// reverse-engineered from a single capture -- unlike the S7comm 0xB2 EXPERIMENTAL decode, these
+// are the documented, standard DNP3 wire formats.
+bool point_format(uint8_t group, uint8_t variation, Dnp3PointFormat& fmt) {
+    using VK = Dnp3ValueKind;
+    using FF = Dnp3FlagFamily;
     switch ((static_cast<uint16_t>(group) << 8) | variation) {
-        case (1u << 8) | 1: bits_out = 1; return true;    // Binary Input, packed
-        case (1u << 8) | 2: bits_out = 8; return true;    // Binary Input w/ flags
-        case (3u << 8) | 1: bits_out = 2; return true;    // Double-bit Binary Input, packed
-        case (3u << 8) | 2: bits_out = 8; return true;    // Double-bit Binary Input w/ flags
-        case (10u << 8) | 1: bits_out = 1; return true;   // Binary Output, packed
-        case (10u << 8) | 2: bits_out = 8; return true;   // Binary Output w/ flags
-        case (12u << 8) | 1: bits_out = 88; return true;  // CROB (11 bytes)
-        case (20u << 8) | 1: bits_out = 40; return true;  // Counter, 32-bit w/ flag
-        case (20u << 8) | 2: bits_out = 24; return true;  // Counter, 16-bit w/ flag
-        case (20u << 8) | 5: bits_out = 32; return true;  // Counter, 32-bit no flag
-        case (20u << 8) | 6: bits_out = 16; return true;  // Counter, 16-bit no flag
-        case (21u << 8) | 1: bits_out = 40; return true;
-        case (21u << 8) | 2: bits_out = 24; return true;
-        case (21u << 8) | 5: bits_out = 32; return true;
-        case (21u << 8) | 6: bits_out = 16; return true;
-        case (22u << 8) | 1: bits_out = 40; return true;  // Counter Event, 32-bit w/ flag+time
-        case (22u << 8) | 2: bits_out = 24; return true;  // Counter Event, 16-bit w/ flag+time
-        case (22u << 8) | 5: bits_out = 88; return true;
-        case (22u << 8) | 6: bits_out = 72; return true;
-        case (23u << 8) | 1: bits_out = 40; return true;
-        case (23u << 8) | 2: bits_out = 24; return true;
-        case (23u << 8) | 5: bits_out = 88; return true;
-        case (23u << 8) | 6: bits_out = 72; return true;
-        case (30u << 8) | 1: bits_out = 40; return true;  // Analog Input, 32-bit w/ flag
-        case (30u << 8) | 2: bits_out = 24; return true;  // Analog Input, 16-bit w/ flag
-        case (30u << 8) | 3: bits_out = 32; return true;  // Analog Input, 32-bit no flag
-        case (30u << 8) | 4: bits_out = 16; return true;  // Analog Input, 16-bit no flag
-        case (30u << 8) | 5: bits_out = 40; return true;  // Analog Input, single-precision float w/ flag
-        case (30u << 8) | 6: bits_out = 72; return true;  // Analog Input, double-precision float w/ flag
-        case (31u << 8) | 1: bits_out = 40; return true;
-        case (31u << 8) | 2: bits_out = 24; return true;
-        case (31u << 8) | 3: bits_out = 32; return true;
-        case (31u << 8) | 4: bits_out = 16; return true;
-        case (31u << 8) | 5: bits_out = 40; return true;
-        case (31u << 8) | 6: bits_out = 72; return true;
-        case (32u << 8) | 1: bits_out = 40; return true;  // Analog Input Event
-        case (32u << 8) | 2: bits_out = 24; return true;
-        case (32u << 8) | 3: bits_out = 88; return true;
-        case (32u << 8) | 4: bits_out = 72; return true;
-        case (32u << 8) | 5: bits_out = 40; return true;
-        case (32u << 8) | 7: bits_out = 88; return true;
-        case (33u << 8) | 1: bits_out = 40; return true;
-        case (33u << 8) | 2: bits_out = 24; return true;
-        case (33u << 8) | 3: bits_out = 88; return true;
-        case (33u << 8) | 4: bits_out = 72; return true;
-        case (33u << 8) | 5: bits_out = 40; return true;
-        case (33u << 8) | 7: bits_out = 88; return true;
-        case (40u << 8) | 1: bits_out = 40; return true;  // Analog Output Status, 32-bit w/ flag
-        case (40u << 8) | 2: bits_out = 24; return true;  // Analog Output Status, 16-bit w/ flag
-        case (40u << 8) | 3: bits_out = 40; return true;  // Analog Output Status, single float w/ flag
-        case (41u << 8) | 1: bits_out = 40; return true;  // Analog Output (command)
-        case (41u << 8) | 2: bits_out = 24; return true;
-        case (41u << 8) | 3: bits_out = 40; return true;
-        case (42u << 8) | 1: bits_out = 40; return true;  // Analog Output Event
-        case (42u << 8) | 2: bits_out = 24; return true;
-        case (42u << 8) | 3: bits_out = 40; return true;
-        case (50u << 8) | 1: bits_out = 48; return true;  // Time and Date, 6-byte absolute time
-        case (80u << 8) | 1: bits_out = 1; return true;   // Internal Indications, packed
+        case (1u << 8) | 1: fmt = {1, FF::None, VK::PackedBit, false}; return true;
+        case (1u << 8) | 2: fmt = {8, FF::BinaryInput, VK::BinaryState, false}; return true;
+        case (3u << 8) | 1: fmt = {2, FF::None, VK::PackedDoubleBit, false}; return true;
+        case (3u << 8) | 2: fmt = {8, FF::BinaryInput, VK::DoubleBitStateInFlags, false}; return true;
+        case (10u << 8) | 1: fmt = {1, FF::None, VK::PackedBit, false}; return true;
+        case (10u << 8) | 2: fmt = {8, FF::BinaryOutput, VK::BinaryState, false}; return true;
+        case (12u << 8) | 1: fmt = {88, FF::None, VK::Crob, false}; return true;
+        case (20u << 8) | 1: fmt = {40, FF::Counter, VK::Int32, false}; return true;
+        case (20u << 8) | 2: fmt = {24, FF::Counter, VK::Int16, false}; return true;
+        case (20u << 8) | 5: fmt = {32, FF::None, VK::Int32, false}; return true;
+        case (20u << 8) | 6: fmt = {16, FF::None, VK::Int16, false}; return true;
+        case (21u << 8) | 1: fmt = {40, FF::Counter, VK::Int32, false}; return true;
+        case (21u << 8) | 2: fmt = {24, FF::Counter, VK::Int16, false}; return true;
+        case (21u << 8) | 5: fmt = {32, FF::None, VK::Int32, false}; return true;
+        case (21u << 8) | 6: fmt = {16, FF::None, VK::Int16, false}; return true;
+        case (22u << 8) | 1: fmt = {40, FF::Counter, VK::Int32, false}; return true;
+        case (22u << 8) | 2: fmt = {24, FF::Counter, VK::Int16, false}; return true;
+        case (22u << 8) | 5: fmt = {88, FF::Counter, VK::Int32, true}; return true;
+        case (22u << 8) | 6: fmt = {72, FF::Counter, VK::Int16, true}; return true;
+        case (23u << 8) | 1: fmt = {40, FF::Counter, VK::Int32, false}; return true;
+        case (23u << 8) | 2: fmt = {24, FF::Counter, VK::Int16, false}; return true;
+        case (23u << 8) | 5: fmt = {88, FF::Counter, VK::Int32, true}; return true;
+        case (23u << 8) | 6: fmt = {72, FF::Counter, VK::Int16, true}; return true;
+        case (30u << 8) | 1: fmt = {40, FF::Analog, VK::Int32, false}; return true;
+        case (30u << 8) | 2: fmt = {24, FF::Analog, VK::Int16, false}; return true;
+        case (30u << 8) | 3: fmt = {32, FF::None, VK::Int32, false}; return true;
+        case (30u << 8) | 4: fmt = {16, FF::None, VK::Int16, false}; return true;
+        case (30u << 8) | 5: fmt = {40, FF::Analog, VK::Float32, false}; return true;
+        case (30u << 8) | 6: fmt = {72, FF::Analog, VK::Float64, false}; return true;
+        case (31u << 8) | 1: fmt = {40, FF::Analog, VK::Int32, false}; return true;
+        case (31u << 8) | 2: fmt = {24, FF::Analog, VK::Int16, false}; return true;
+        case (31u << 8) | 3: fmt = {32, FF::None, VK::Int32, false}; return true;
+        case (31u << 8) | 4: fmt = {16, FF::None, VK::Int16, false}; return true;
+        case (31u << 8) | 5: fmt = {40, FF::Analog, VK::Float32, false}; return true;
+        case (31u << 8) | 6: fmt = {72, FF::Analog, VK::Float64, false}; return true;
+        case (32u << 8) | 1: fmt = {40, FF::Analog, VK::Int32, false}; return true;
+        case (32u << 8) | 2: fmt = {24, FF::Analog, VK::Int16, false}; return true;
+        case (32u << 8) | 3: fmt = {88, FF::Analog, VK::Int32, true}; return true;
+        case (32u << 8) | 4: fmt = {72, FF::Analog, VK::Int16, true}; return true;
+        case (32u << 8) | 5: fmt = {40, FF::Analog, VK::Float32, false}; return true;
+        case (32u << 8) | 7: fmt = {88, FF::Analog, VK::Float32, true}; return true;
+        case (33u << 8) | 1: fmt = {40, FF::Analog, VK::Int32, false}; return true;
+        case (33u << 8) | 2: fmt = {24, FF::Analog, VK::Int16, false}; return true;
+        case (33u << 8) | 3: fmt = {88, FF::Analog, VK::Int32, true}; return true;
+        case (33u << 8) | 4: fmt = {72, FF::Analog, VK::Int16, true}; return true;
+        case (33u << 8) | 5: fmt = {40, FF::Analog, VK::Float32, false}; return true;
+        case (33u << 8) | 7: fmt = {88, FF::Analog, VK::Float32, true}; return true;
+        case (40u << 8) | 1: fmt = {40, FF::Analog, VK::Int32, false}; return true;
+        case (40u << 8) | 2: fmt = {24, FF::Analog, VK::Int16, false}; return true;
+        case (40u << 8) | 3: fmt = {40, FF::Analog, VK::Float32, false}; return true;
+        case (41u << 8) | 1: fmt = {40, FF::Analog, VK::Int32, false}; return true;
+        case (41u << 8) | 2: fmt = {24, FF::Analog, VK::Int16, false}; return true;
+        case (41u << 8) | 3: fmt = {40, FF::Analog, VK::Float32, false}; return true;
+        case (42u << 8) | 1: fmt = {40, FF::Analog, VK::Int32, false}; return true;
+        case (42u << 8) | 2: fmt = {24, FF::Analog, VK::Int16, false}; return true;
+        case (42u << 8) | 3: fmt = {40, FF::Analog, VK::Float32, false}; return true;
+        case (50u << 8) | 1: fmt = {48, FF::None, VK::AbsoluteTime48, false}; return true;
+        case (80u << 8) | 1: fmt = {1, FF::None, VK::PackedBit, false}; return true;
         default: return false;
     }
     // Group 60 (Class Objects) intentionally has no entries: every real-world use pairs it with
@@ -172,6 +208,187 @@ bool point_size_bits(uint8_t group, uint8_t variation, uint16_t& bits_out) {
 }
 
 bool is_packed(uint16_t bits_per_point) { return bits_per_point < 8; }
+
+// Standard DNP3 quality-flags byte, bits 0-4 shared across every object family that has one;
+// bits 5-6 differ by family (see Dnp3FlagFamily); bit 7 is reserved except for the Binary
+// Input/Output families, where it (and, for Double-bit Binary, bit 6 too) carries the point's
+// value instead of a flag -- see decode_binary_state/decode_double_bit_state, which read those
+// bits directly rather than through this table.
+std::vector<std::string> flag_names(uint8_t flags, Dnp3FlagFamily family) {
+    std::vector<std::string> names;
+    if (flags & 0x01) names.push_back("ONLINE");
+    if (flags & 0x02) names.push_back("RESTART");
+    if (flags & 0x04) names.push_back("COMM_LOST");
+    if (flags & 0x08) names.push_back("REMOTE_FORCED");
+    if (flags & 0x10) names.push_back("LOCAL_FORCED");
+    switch (family) {
+        case Dnp3FlagFamily::BinaryInput:
+            if (flags & 0x20) names.push_back("CHATTER_FILTER");
+            break;
+        case Dnp3FlagFamily::Counter:
+            if (flags & 0x20) names.push_back("ROLLOVER");
+            if (flags & 0x40) names.push_back("DISCONTINUITY");
+            break;
+        case Dnp3FlagFamily::Analog:
+            if (flags & 0x20) names.push_back("OVER_RANGE");
+            if (flags & 0x40) names.push_back("REFERENCE_ERR");
+            break;
+        default:
+            break;
+    }
+    return names;
+}
+
+std::string double_bit_state_name(uint8_t v) {
+    switch (v & 0x3) {
+        case 0: return "Intermediate";
+        case 1: return "DeterminedOff";
+        case 2: return "DeterminedOn";
+        default: return "Indeterminate";
+    }
+}
+
+int32_t sign_extend(uint32_t v, unsigned bits) {
+    uint32_t m = 1u << (bits - 1);
+    return static_cast<int32_t>((v ^ m) - m);
+}
+
+// 6-byte, little-endian, milliseconds-since-epoch -- the standard DNP3 absolute time format.
+// Rendered as the raw millisecond count rather than a calendar date: converting correctly needs
+// UTC-safe 64-bit time handling this tool doesn't otherwise depend on, and the raw count is
+// still directly useful (diffable, sortable) without risking a subtly wrong date rendering.
+std::string decode_absolute_time48(Cursor& c) {
+    uint64_t ms = 0;
+    for (int i = 0; i < 6; ++i) ms |= static_cast<uint64_t>(c.u8()) << (8 * i);
+    return std::to_string(ms) + "ms-since-epoch";
+}
+
+std::string crob_control_code_name(uint8_t code) {
+    switch (code) {
+        case 0x00: return "NUL";
+        case 0x01: return "Pulse On";
+        case 0x02: return "Pulse Off";
+        case 0x03: return "Latch On";
+        case 0x04: return "Latch Off";
+        default: return "Unknown (" + hex8(code) + ")";
+    }
+}
+
+std::string crob_trip_close_name(uint8_t tc) {
+    switch (tc) {
+        case 0x00: return "NUL";
+        case 0x01: return "Close";
+        case 0x02: return "Trip";
+        default: return "Reserved";
+    }
+}
+
+// IEEE 1815 Table "Control Status Codes" (cross-checked against Wireshark's packet-dnp.c status
+// value strings). Codes not listed are shown as raw hex rather than guessed at.
+std::string crob_status_name(uint8_t status) {
+    switch (status) {
+        case 0x00: return "Success";
+        case 0x01: return "Timeout";
+        case 0x02: return "No Select";
+        case 0x03: return "Format Error";
+        case 0x04: return "Not Supported";
+        case 0x05: return "Already Active";
+        case 0x06: return "Hardware Error";
+        case 0x07: return "Local";
+        case 0x08: return "Too Many Ops";
+        case 0x09: return "Not Authorized";
+        case 0x0A: return "Automation Inhibit";
+        case 0x0B: return "Processing Limited";
+        case 0x0C: return "Out Of Range";
+        case 0x7E: return "Non-Participating";
+        case 0x7F: return "Undefined Error";
+        default: return "Unknown (" + hex8(status) + ")";
+    }
+}
+
+// Decodes one point's value/flags from `point_bytes` (already sliced to exactly this point's
+// value -- no index prefix, no other points). Only called for a `fmt.value_kind` that isn't
+// PackedBit/PackedDoubleBit (those are bit-level across the whole object, decoded separately in
+// the caller) or None (nothing to decode).
+Dnp3PointValue decode_point_value(const Dnp3PointFormat& fmt, ByteSpan point_bytes) {
+    Dnp3PointValue pv;
+    Cursor c(point_bytes);
+    std::ostringstream val;
+
+    if (fmt.flags != Dnp3FlagFamily::None && fmt.value_kind != Dnp3ValueKind::BinaryState &&
+        fmt.value_kind != Dnp3ValueKind::DoubleBitStateInFlags) {
+        pv.flags = flag_names(c.u8(), fmt.flags);
+    }
+
+    switch (fmt.value_kind) {
+        case Dnp3ValueKind::BinaryState: {
+            uint8_t b = c.u8();
+            pv.flags = flag_names(b, fmt.flags);
+            val << ((b & 0x80) ? 1 : 0);
+            break;
+        }
+        case Dnp3ValueKind::DoubleBitStateInFlags: {
+            uint8_t b = c.u8();
+            pv.flags = flag_names(b, fmt.flags);
+            val << double_bit_state_name((b >> 6) & 0x3);
+            break;
+        }
+        case Dnp3ValueKind::Int16: {
+            val << sign_extend(c.u16le(), 16);
+            break;
+        }
+        case Dnp3ValueKind::Int32: {
+            val << sign_extend(c.u32le(), 32);
+            break;
+        }
+        case Dnp3ValueKind::Float32: {
+            uint32_t bits = c.u32le();
+            float f;
+            std::memcpy(&f, &bits, sizeof(f));
+            val << f;
+            break;
+        }
+        case Dnp3ValueKind::Float64: {
+            uint64_t bits = 0;
+            for (int i = 0; i < 8; ++i) bits |= static_cast<uint64_t>(c.u8()) << (8 * i);
+            double d;
+            std::memcpy(&d, &bits, sizeof(d));
+            val << d;
+            break;
+        }
+        case Dnp3ValueKind::AbsoluteTime48: {
+            val << decode_absolute_time48(c);
+            break;
+        }
+        case Dnp3ValueKind::Crob: {
+            uint8_t control = c.u8();
+            uint8_t code = control & 0x0F;
+            uint8_t misc = (control >> 4) & 0x03;
+            uint8_t tc = (control >> 6) & 0x03;
+            uint8_t count = c.u8();
+            uint32_t on_time = c.u32le();
+            uint32_t off_time = c.u32le();
+            uint8_t status = c.u8();
+            val << "code=" << crob_control_code_name(code) << " tc=" << crob_trip_close_name(tc)
+                << " queue/clear=" << hex8(misc) << " count=" << static_cast<unsigned>(count)
+                << " on_time=" << on_time << "ms off_time=" << off_time
+                << "ms status=" << crob_status_name(status);
+            break;
+        }
+        case Dnp3ValueKind::PackedBit:
+        case Dnp3ValueKind::PackedDoubleBit:
+        case Dnp3ValueKind::None:
+        default:
+            break;
+    }
+
+    if (fmt.has_time_trailer && c.remaining() >= 6) {
+        val << " @ " << decode_absolute_time48(c);
+    }
+
+    pv.value = val.str();
+    return pv;
+}
 
 struct IinFlag {
     uint16_t mask;
@@ -460,17 +677,18 @@ std::optional<Dnp3ApplicationFragment> try_parse_dnp3_transport_and_application(
         if (oh.range_code == 0x06 || oh.point_count == 0) {
             oh.object_data_bytes = 0;
         } else {
-            uint16_t bits_per_point = 0;
-            if (!point_size_bits(oh.group, oh.variation, bits_per_point)) {
+            Dnp3PointFormat fmt;
+            if (!point_format(oh.group, oh.variation, fmt)) {
                 oh.decoded = false;
                 oh.note = "group " + std::to_string(oh.group) + " variation " + std::to_string(oh.variation) +
                            " (" + oh.group_name +
-                           ") is not in the known point-size table -- stopping object parsing for this "
+                           ") is not in the known point-format table -- stopping object parsing for this "
                            "fragment (unknown object length)";
                 frag.objects.push_back(oh);
                 frag.notes.push_back("object header " + std::to_string(header_index) + ": " + oh.note);
                 break;
             }
+            uint16_t bits_per_point = fmt.bits_per_point;
             size_t index_size = (oh.prefix_code == 0) ? 0 : (oh.prefix_code == 1) ? 1
                                  : (oh.prefix_code == 2)                          ? 2
                                                                                    : 4;
@@ -498,8 +716,62 @@ std::optional<Dnp3ApplicationFragment> try_parse_dnp3_transport_and_application(
                 frag.notes.push_back("object header " + std::to_string(header_index) + ": " + oh.note);
                 break;
             }
-            ac.skip(data_bytes);
+            ByteSpan block = ac.bytes(data_bytes);
             oh.object_data_bytes = data_bytes;
+
+            constexpr uint32_t kMaxDecodedPointsPerHeader = 200;
+            uint32_t points_to_decode = std::min(oh.point_count, kMaxDecodedPointsPerHeader);
+            if (is_packed(bits_per_point)) {
+                uint8_t mask = static_cast<uint8_t>((1u << bits_per_point) - 1);
+                for (uint32_t p = 0; p < points_to_decode; ++p) {
+                    size_t bit_offset = static_cast<size_t>(p) * bits_per_point;
+                    uint8_t byte_val = block.at(bit_offset / 8);
+                    uint8_t raw = (byte_val >> (bit_offset % 8)) & mask;
+                    Dnp3PointValue pv;
+                    pv.index = oh.has_range ? oh.range_start + p : p;
+                    pv.index_is_explicit = false;
+                    if (bits_per_point == 2) {
+                        pv.value = double_bit_state_name(raw);
+                    } else if (oh.group == 80) {
+                        // Internal Indications object: point index p is IIN bit p, same bit
+                        // ordering as the app-layer IIN field decoded above.
+                        pv.value = raw ? "1" : "0";
+                        if (raw && p < (sizeof(kIinFlags) / sizeof(kIinFlags[0]))) {
+                            pv.flags.push_back(kIinFlags[p].name);
+                        }
+                    } else {
+                        pv.value = raw ? "1" : "0";
+                    }
+                    oh.values.push_back(pv);
+                }
+            } else {
+                Cursor bc(block);
+                size_t bytes_per_value = bits_per_point / 8;
+                for (uint32_t p = 0; p < oh.point_count; ++p) {
+                    Dnp3PointValue pv;
+                    if (index_size > 0) {
+                        uint32_t idx = 0;
+                        for (size_t b = 0; b < index_size; ++b) idx |= static_cast<uint32_t>(bc.u8()) << (8 * b);
+                        pv.index = idx;
+                        pv.index_is_explicit = true;
+                    } else {
+                        pv.index = oh.has_range ? oh.range_start + p : p;
+                        pv.index_is_explicit = false;
+                    }
+                    ByteSpan point_bytes = bc.bytes(bytes_per_value);
+                    if (p < points_to_decode) {
+                        Dnp3PointValue decoded = decode_point_value(fmt, point_bytes);
+                        pv.value = decoded.value;
+                        pv.flags = decoded.flags;
+                        oh.values.push_back(pv);
+                    }
+                }
+            }
+            if (oh.point_count > kMaxDecodedPointsPerHeader) {
+                frag.notes.push_back("object header " + std::to_string(header_index) + ": only the first " +
+                                      std::to_string(kMaxDecodedPointsPerHeader) + " of " +
+                                      std::to_string(oh.point_count) + " point value(s) were decoded (safety cap)");
+            }
         }
 
         oh.decoded = true;
@@ -527,6 +799,27 @@ std::optional<Dnp3ApplicationFragment> try_parse_dnp3_transport_and_application(
         }
         if (oh.decoded) {
             n << " -- " << oh.point_count << " point(s), " << oh.object_data_bytes << " byte(s) of object data";
+            if (!oh.values.empty()) {
+                constexpr size_t kMaxBriefValues = 5;
+                n << "; values: [";
+                for (size_t v = 0; v < oh.values.size() && v < kMaxBriefValues; ++v) {
+                    const auto& pv = oh.values[v];
+                    if (v != 0) n << ", ";
+                    n << "idx=" << pv.index << ": " << pv.value;
+                    if (!pv.flags.empty()) {
+                        n << " [";
+                        for (size_t f = 0; f < pv.flags.size(); ++f) {
+                            if (f != 0) n << ",";
+                            n << pv.flags[f];
+                        }
+                        n << "]";
+                    }
+                }
+                if (oh.values.size() > kMaxBriefValues) {
+                    n << ", +" << (oh.values.size() - kMaxBriefValues) << " more";
+                }
+                n << "]";
+            }
         } else {
             n << " -- not fully decoded: " << oh.note;
         }

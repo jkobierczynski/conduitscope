@@ -93,6 +93,11 @@ struct DecodedPacket {
     // One entry per object header decoded in this fragment (e.g. "g1v2 (Binary Input)"), capped
     // at 50 entries for the same reason as s7comm_item_tags.
     std::vector<std::string> dnp3_object_headers;
+    // One entry per decoded point value across every object header in this fragment (e.g.
+    // "g1v2 idx=0: 1 [ONLINE]"), for the group/variation combinations in the point-format table
+    // (see dnp3.hpp) -- empty for an object header outside that table, or when no object headers
+    // had any points (e.g. a Class 0 poll). Capped at 50 entries, same reason as s7comm_items.
+    std::vector<std::string> dnp3_point_values;
 };
 
 class Decoder {

@@ -216,6 +216,26 @@ def build_dnp3_sample():
     ip5 = ipv4_header(HMI_IP, PLC_IP, 6, len(tcp5), 0x2004) + tcp5
     packets.append(eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip5)
 
+    # 6) Direct Operate request commanding a single CROB (Control Relay Output Block, group 12
+    #    var 1) point: qualifier 0x17 (prefix code 1 = 1-byte index, range code 7 = 1-byte count),
+    #    count=1, index=7, then the 11-byte CROB itself: control byte 0x43 (trip/close=Close(1),
+    #    queue/clear=0, control code=Latch On(3)), count=1, on_time=1000ms, off_time=0ms, status=0
+    #    (ignored on a request). This is also >16 logical bytes, so it doubles as another
+    #    multi-block CRC reassembly regression case. High security relevance: CROB is literally
+    #    how DNP3 issues output commands.
+    crob_payload = (
+        bytes([0xC0, 0xC0, 0x05]) +               # transport, app control, fc=Direct Operate
+        bytes([12, 1, 0x17]) +                     # group=12 var=1 qualifier=0x17
+        bytes([0x01]) +                             # count=1
+        bytes([0x07]) +                             # 1-byte index=7
+        bytes([0x43, 0x01]) + (1000).to_bytes(4, "little") + (0).to_bytes(4, "little") + bytes([0x00])
+    )
+    assert len(crob_payload) == 19
+    crob_frame = dnp3_link_frame(source=1, destination=1024, user_data=crob_payload)
+    tcp6 = tcp_header(51500, 20000, 5004, 6000, TCP_PSH | TCP_ACK, len(crob_frame)) + crob_frame
+    ip6 = ipv4_header(HMI_IP, PLC_IP, 6, len(tcp6), 0x2005) + tcp6
+    packets.append(eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip6)
+
     data = pcap_global_header()
     for i, pkt in enumerate(packets):
         data += pcap_record(pkt, 1_700_000_100 + i, i * 1000)

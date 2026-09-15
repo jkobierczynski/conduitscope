@@ -13,8 +13,16 @@
 // frame that is itself a complete fragment (FIR=1,FIN=1 -- the large
 // majority of real traffic, especially requests) gets full application-layer
 // decoding: function code, IIN (for responses), and every object header
-// (group/variation/qualifier/range), with object data structurally skipped
-// via a point-size lookup table rather than interpreted value-by-value.
+// (group/variation/qualifier/range). For the group/variation combinations in
+// the point-format table (dnp3.cpp) -- covering the object types common in
+// real traffic: Binary/Double-bit Binary/Analog/Counter Input and Output,
+// CROB commands, absolute time, and Internal Indications -- each point's
+// value is decoded too (state, integer, float, or CROB command fields, per
+// the standard DNP3 quality-flags-byte layout, cross-checked against the
+// Wireshark packet-dnp.c dissector's AL_OBJ_*_FLAG* constants). A
+// group/variation outside that table still gets its object data length
+// computed and skipped structurally (so later object headers in the same
+// fragment stay correctly aligned), just without per-point value decoding.
 //
 // Data link "user data" (the transport+application bytes) is NOT contiguous
 // on the wire: it is split into blocks of up to 16 bytes, each followed by
@@ -63,10 +71,22 @@ struct Dnp3LinkFrame {
 // than silently skipping the check.
 std::optional<Dnp3LinkFrame> try_parse_dnp3_link_layer(ByteSpan tcp_payload);
 
+// One decoded point value within an object header's object data.
+struct Dnp3PointValue {
+    uint32_t index = 0;         // the point/object index this value belongs to
+    // True when `index` was read from an explicit index-prefix byte on the wire (qualifier
+    // prefix code 1/2/3). False when it's inferred instead -- from range_start+position for a
+    // start-stop range (still reliable), or just a 0-based position for a bare explicit-count
+    // qualifier with no index prefix (rare on the wire; genuinely not knowable in that case).
+    bool index_is_explicit = false;
+    std::string value;              // short human-readable rendering, e.g. "1", "23.5", "Close"
+    std::vector<std::string> flags;  // decoded quality-flags names, empty if this format has none
+};
+
 // One object header from the application layer's object list: group,
-// variation, qualifier, the range/count it decodes to, and how much object
-// data (indices + values, structurally skipped rather than value-decoded)
-// that implies.
+// variation, qualifier, the range/count it decodes to, how much object data
+// that implies, and -- for a recognized group/variation -- every point's
+// decoded value.
 struct Dnp3ObjectHeader {
     uint8_t group = 0;
     uint8_t variation = 0;
@@ -99,6 +119,13 @@ struct Dnp3ObjectHeader {
     // fragment are parsed (the byte offset of anything past this point can no longer be trusted).
     bool decoded = true;
     std::string note;
+
+    // One entry per point once `decoded` is true and point_count > 0, capped (very large batched
+    // requests, e.g. thousands of analog points, keep their object_data_bytes fully accounted for
+    // but only the first entries get an individual Dnp3PointValue -- see kMaxDecodedPointsPerHeader
+    // in dnp3.cpp). Empty when the group/variation isn't in the point-format table -- the object
+    // data was still located and skipped by computed length, just not interpreted value-by-value.
+    std::vector<Dnp3PointValue> values;
 };
 
 struct Dnp3ApplicationFragment {

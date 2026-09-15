@@ -219,6 +219,11 @@ they apply:
   data-link frames only gets its transport header decoded, not this).
 - `dnp3_objects`: an array of one entry per object header decoded in the
   fragment, e.g. `"g1v2 (Binary Input)"`.
+- `dnp3_values`: an array of one entry per decoded point value across every
+  object header in the fragment, e.g. `"g1v2 idx=0: 1 [ONLINE]"` or
+  `"g12v1 idx=7: code=Latch On tc=Close queue/clear=0x00 count=1
+  on_time=1000ms off_time=0ms status=Success"` for a CROB command. Empty for
+  an object header outside the point-format table (see PROTOCOL COVERAGE).
 
 All array fields are capped at 50 entries for a single heavily-batched
 request/response; see PROTOCOL COVERAGE for where the full list still shows
@@ -286,17 +291,58 @@ a bare hex value.
 Object headers are decoded structurally: group and variation (with a name for
 the common object groups -- Binary/Double-bit Binary/Analog/Counter Input and
 Output, Class Objects, Internal Indications, and others), the qualifier's
-index-prefix and range codes, the resulting range or explicit count, and how
-many bytes of object data that implies -- computed from a bits-per-point
-lookup table for the object types common in real traffic, then **skipped
-structurally** rather than decoded value-by-value (the point values
-themselves are not interpreted in this release). An object header shape this
-release doesn't recognize -- an object-size-prefixed or reserved qualifier
-prefix code, a group/variation combination outside the lookup table, a
-bit-packed format paired with a non-zero index prefix, or a declared object
-data length that doesn't fit in what's left of the fragment -- stops object
-parsing for that fragment with an explanatory note, rather than guessing at
-where the next header would start.
+index-prefix and range codes, and the resulting range or explicit count.
+
+For the group/variation combinations in the built-in point-format table --
+covering the object types common in real traffic -- every point's **value is
+also decoded**, not just its byte length:
+
+- **Binary/Double-bit Binary Input and Output** (groups 1, 3, 10): the point
+  state (on/off, or the double-bit Intermediate/DeterminedOff/DeterminedOn/
+  Indeterminate enum), plus the standard quality flags (`ONLINE`, `RESTART`,
+  `COMM_LOST`, `REMOTE_FORCED`, `LOCAL_FORCED`, `CHATTER_FILTER`) for the
+  variations that carry them.
+- **Counter and Frozen Counter** (groups 20-23, including their Event
+  variants): the 16- or 32-bit value, quality flags (adding `ROLLOVER` and
+  `DISCONTINUITY`), and an absolute timestamp for the Event variants that
+  carry one.
+- **Analog Input, Frozen Analog Input, Analog Output, and their Event
+  variants** (groups 30-34, 40-42): the 16-/32-bit integer or 32-/64-bit
+  floating-point value, quality flags (adding `OVER_RANGE` and
+  `REFERENCE_ERR`), and a timestamp where the variant carries one.
+- **CROB, the Control Relay Output Block** (group 12 variation 1) -- the
+  object used to issue output commands, so getting this one right matters
+  more than most: control code (Pulse On/Off, Latch On/Off), trip/close,
+  queue/clear bits, operation count, on-time and off-time in milliseconds,
+  and the status code (`Success`, `Timeout`, `Not Authorized`, and the rest
+  of the standard IEEE 1815 control-status table).
+- **Time and Date** (group 50 variation 1): the 48-bit absolute timestamp, as
+  a raw milliseconds-since-epoch count (not converted to a calendar date --
+  see LIMITATIONS).
+- **Internal Indications as an object** (group 80 variation 1): each point
+  decoded against the same IIN flag-name table used for the application
+  layer's own IIN field.
+
+The quality-flags byte layout and the CROB field layout are cross-checked
+against the Wireshark `packet-dnp.c` dissector's `AL_OBJ_BI_FLAG*`/
+`AL_OBJ_CTR_FLAG*`/`AL_OBJ_AI_FLAG*`/`AL_OBJCTLC_*` constants, not
+reverse-engineered from a single capture -- these are the documented,
+standard DNP3 wire formats, not an EXPERIMENTAL reconstruction like the
+S7comm `0xB2` decode.
+
+An object header outside the point-format table still gets its object data
+length computed (from a bits-per-point table covering a superset of the
+value-decoded groups) and **skipped structurally** rather than value-decoded,
+so later object headers in the same fragment stay correctly aligned. Either
+way, an object header shape this release doesn't recognize at all -- an
+object-size-prefixed or reserved qualifier prefix code, a group/variation
+combination outside the lookup table, a bit-packed format paired with a
+non-zero index prefix, or a declared object data length that doesn't fit in
+what's left of the fragment -- stops object parsing for that fragment with an
+explanatory note, rather than guessing at where the next header would start.
+A batch of more than 200 points in one object header only gets the first 200
+individually decoded (the object's byte length is still fully accounted for
+either way); a note says so when it happens.
 
 ### S7comm / COTP (Siemens S7 PLCs, TCP port 102)
 
@@ -407,15 +453,26 @@ These are current, not aspirational -- each has a corresponding ROADMAP item.
   starts with the right magic bytes will be "decoded" without any indication
   a CRC was wrong; the block CRCs are correctly *located and skipped* (so
   reassembly lines up) but their contents are never checked.
-- **DNP3 object data is skipped structurally, not decoded value-by-value.**
-  conduitscope computes how many bytes each object header's point values
-  occupy and reports the group/variation/range, but does not interpret the
-  point values themselves (online/offline flags, analog readings, counter
-  values, timestamps, ...). A group/variation combination outside the
-  built-in point-size table, or a qualifier this release doesn't support (an
+- **DNP3 point values are decoded only for the group/variation combinations
+  in the built-in point-format table** (see PROTOCOL COVERAGE for the full
+  list -- it covers the object types common in real traffic). Outside that
+  table, an object header's data is still located and skipped by a computed
+  byte length (so later headers in the fragment stay aligned), just not
+  interpreted value-by-value. A qualifier this release doesn't support (an
   object-size-prefixed qualifier, or a bit-packed format combined with an
-  index-prefixed qualifier), stops object-header parsing for that fragment
-  rather than guessing.
+  index-prefixed qualifier) stops object-header parsing for that fragment
+  entirely, rather than guessing. Only the first 200 points in a single
+  object header are individually decoded; a larger batch's object data is
+  still fully accounted for byte-wise, with a note that decoding was capped.
+- **DNP3 absolute timestamps (Time and Date objects, and event "with time"
+  variants) are shown as a raw milliseconds-since-epoch count, not a
+  calendar date.** Converting correctly needs UTC-safe 64-bit time handling
+  this tool doesn't otherwise depend on, and a subtly wrong date would be
+  worse than an honest millisecond count in a security-auditing tool.
+- **DNP3 32-bit floating-point values decode through a `float`, and 64-bit
+  through a `double`** -- correct on any platform where those are IEEE 754
+  binary32/binary64 (true of every mainstream compiler this project targets,
+  but not guaranteed by the C++ standard itself).
 - **A DNP3 fragment spanning multiple data-link frames only gets its
   transport header decoded**, not its application layer -- see the note
   under "No TCP stream reassembly" above.
@@ -516,7 +573,7 @@ item tags conduitscope decoded, one line per Read Var / Write Var packet:
 
 ```sh
 conduitscope decode -i capture.pcap --protocol s7comm -f json \
-  | jq -r 'select(.s7comm_items) | "\(.src_ip) -> \(.dst_ip): \(.s7comm_items | join(", "))"'
+  | jq -r '.[] | select(.s7comm_items) | "\(.src_ip) -> \(.dst_ip): \(.s7comm_items | join(", "))"'
 ```
 
 See which DNP3 function codes and object groups/variations flow over a
@@ -525,48 +582,56 @@ operate you weren't expecting on a conduit:
 
 ```sh
 conduitscope decode -i capture.pcap --protocol dnp3 -f json \
-  | jq -r 'select(.dnp3_function) | "\(.src_ip) -> \(.dst_ip): \(.dnp3_function) \(.dnp3_objects // [] | join(", "))"'
+  | jq -r '.[] | select(.dnp3_function) | "\(.src_ip) -> \(.dst_ip): \(.dnp3_function) \(.dnp3_objects // [] | join(", "))"'
+```
+
+Find every CROB output command in a capture -- who issued it, and exactly
+what it commanded:
+
+```sh
+conduitscope decode -i capture.pcap --protocol dnp3 -f json \
+  | jq -r '.[] | select(.dnp3_values) | .src_ip as $s | .dst_ip as $d |
+           (.dnp3_values[] | select(startswith("g12v1"))) | "\($s) -> \($d): \(.)"'
 ```
 
 ## ROADMAP
 
 Rough order, each building on the groundwork this release establishes:
 
-1. **DNP3 object *values*.** The application layer now decodes function
-   codes, IIN, and every object header's group/variation/qualifier/range, and
-   skips object data structurally by computed length -- the natural next step
-   is interpreting the point values themselves (binary/analog point states,
-   counter values, CROB command details, absolute timestamps) for the object
-   types already in the point-size table, rather than only reporting their
-   byte length.
-2. **TCP stream reassembly**, needed for split PDUs, authoritative
+1. **TCP stream reassembly**, needed for split PDUs, authoritative
    (non-heuristic) Modbus request/response pairing, multi-segment S7comm
    frames larger than one negotiated PDU length, and DNP3 application
    fragments that span more than one data-link frame (currently left with
    only their transport header decoded -- see LIMITATIONS).
-3. **Zone/conduit policy engine** behind `policy validate`: a YAML schema
+2. **Zone/conduit policy engine** behind `policy validate`: a YAML schema
    describing zones (IP/port ranges, expected protocols) and conduits (allowed
    flows between zones), evaluated against decoded traffic, producing a
    pass/fail report suitable for a NIS2/62443 audit trail. S7comm item tags,
-   DNP3 object headers, and Modbus address+quantity decoding all now give this
-   something concrete to match a policy's address ranges against.
-4. **Live capture**, via libpcap on Linux and Npcap on Windows, as an
+   decoded DNP3 point values (especially CROB commands), and Modbus
+   address+quantity decoding all now give this something concrete to match a
+   policy's address ranges and expected-value rules against.
+3. **Live capture**, via libpcap on Linux and Npcap on Windows, as an
    additional input mode alongside (not replacing) pcap file input.
-5. **pcapng support**, once live capture or another concrete need makes it
+4. **pcapng support**, once live capture or another concrete need makes it
    worth the added parsing complexity.
-6. Colorized text output (the `--no-color` flag is already reserved for this).
-7. **Confirm or replace the EXPERIMENTAL `0xB2` (S7-1200/1500 "symbolic"
+5. Colorized text output (the `--no-color` flag is already reserved for this).
+6. **Confirm or replace the EXPERIMENTAL `0xB2` (S7-1200/1500 "symbolic"
    addressing) decode** against a source with real authority -- a PLC or
    TIA Portal project under your own control, ideally, rather than more
    public reverse-engineering writeups -- and extend it to the shapes it
    currently falls back to raw hex on: DB-area items, and items with more
    than one LID entry (structured/nested symbol access). Promote it out of
    [EXPERIMENTAL] once confirmed.
-8. S7comm-Plus decoding, and PLC Control/Stop parameter decoding (these
+7. S7comm-Plus decoding, and PLC Control/Stop parameter decoding (these
    send commands that change PLC run state -- high security relevance).
-9. **DNP3 CRC validation** (both the header CRC and the per-block CRCs), so a
+8. **DNP3 CRC validation** (both the header CRC and the per-block CRCs), so a
    corrupted frame that still starts with the right magic bytes is flagged
    rather than silently "decoded".
+9. **DNP3 absolute-time rendering as a calendar date** (currently a raw
+   milliseconds-since-epoch count -- see LIMITATIONS), and value decoding for
+   the group/variation combinations still outside the point-format table
+   (double-precision Analog Input Event variants, Octet String, File
+   Control, Analog Input Reporting Deadband).
 
 ## BUILDING
 

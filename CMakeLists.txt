@@ -126,6 +126,31 @@ add_test(NAME dnp3_objects_in_json
 set_tests_properties(dnp3_objects_in_json PROPERTIES
   PASS_REGULAR_EXPRESSION "\"dnp3_objects\": \\[\"g1v2 \\(Binary Input\\)\", \"g30v1 \\(Analog Input\\)\"\\]")
 
+# Point-value decoding: byte 0 of the g1v2 object data is 0x81 (ONLINE flag + STATE bit set) --
+# must decode to value "1" with the ONLINE flag, not just the raw byte length.
+add_test(NAME dnp3_binary_input_value_decoded
+  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text)
+set_tests_properties(dnp3_binary_input_value_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "idx=0: 1 \\[ONLINE\\]")
+
+add_test(NAME dnp3_analog_input_value_decoded
+  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text)
+set_tests_properties(dnp3_analog_input_value_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "g30v1.*idx=0: 0 \\[ONLINE\\]")
+
+# CROB command decode: control byte 0x43 = trip/close Close(1), control code Latch On(3);
+# on_time=1000ms, off_time=0ms, status=0 (Success). High security relevance -- this is literally
+# how DNP3 issues output commands, so getting every field named correctly matters.
+add_test(NAME dnp3_crob_value_decoded
+  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text)
+set_tests_properties(dnp3_crob_value_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "idx=7: code=Latch On tc=Close queue/clear=0x00 count=1 on_time=1000ms off_time=0ms status=Success")
+
+add_test(NAME dnp3_values_in_json
+  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format json)
+set_tests_properties(dnp3_values_in_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"dnp3_values\": \\[\"g1v2 idx=0: 1 \\[ONLINE\\]\"")
+
 add_test(NAME stats_mode_dnp3
   COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --stats)
 set_tests_properties(stats_mode_dnp3 PROPERTIES
