@@ -150,7 +150,8 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
                 int duration_seconds, int snaplen, bool promiscuous, const std::string& output,
                 const std::string& format, const std::string& protocol, const std::vector<int>& modbus_ports,
                 const std::vector<int>& dnp3_ports, const std::vector<int>& s7comm_ports,
-                size_t max_packets, bool stats, bool strict, bool quiet, bool color, std::ostream& diag) {
+                size_t max_packets, bool stats, bool strict, bool quiet, bool no_color, bool force_color,
+                std::ostream& diag) {
     std::ofstream file_out;
     std::ostream* out = &std::cout;
     if (!output.empty()) {
@@ -364,9 +365,9 @@ int run_interfaces(std::ostream& out) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    CLI::App app{"conduitscope decodes Modbus/TCP, DNP3, and S7comm/COTP traffic from offline pcap "
-                  "captures, as a building block for OT/ICS conduit and zone auditing (IEC 62443 / NIS2 "
-                  "workflows).",
+    CLI::App app{"conduitscope decodes Modbus/TCP, DNP3, and S7comm/COTP traffic from offline pcap/"
+                  "pcapng captures, as a building block for OT/ICS conduit and zone auditing (IEC 62443 / "
+                  "NIS2 workflows).",
                   "conduitscope"};
     app.set_version_flag("--version", version_string());
     app.require_subcommand(1);
@@ -385,7 +386,6 @@ int main(int argc, char** argv) {
 
     // --- decode ---------------------------------------------------------
     auto* decode_cmd =
-        app.add_subcommand("decode", "Decode a pcap capture and print each recognized packet");
     std::string decode_input, decode_interface, decode_filter, decode_output;
     int decode_duration = 0;
     int decode_snaplen = 65535;
