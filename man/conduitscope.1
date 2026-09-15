@@ -1,15 +1,16 @@
 .TH CONDUITSCOPE 1 "2026" "conduitscope 0.1.0" "User Commands"
 .SH NAME
-conduitscope \- decode Modbus/TCP, DNP3, and S7comm/COTP traffic from offline pcap/pcapng captures
+conduitscope \- decode Modbus/TCP, DNP3, IEC 60870-5-104, and S7comm/COTP traffic from offline pcap/pcapng captures
 .SH SYNOPSIS
 .B conduitscope
 [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-color\fR|\fB\-\-color\fR] [\fB\-\-log\-file\fR \fIFILE\fR] \fICOMMAND\fR [\fIOPTIONS\fR]
 .SH DESCRIPTION
 .B conduitscope
 reads a pcap or pcapng capture file, or optionally a live network
-interface (see \fBLIVE CAPTURE\fR below), and decodes Modbus/TCP, DNP3, and
-S7comm (Siemens S7 PLC protocol, over TPKT/COTP, TCP port 102) traffic found
-inside its TCP streams, and checks decoded traffic against a
+interface (see \fBLIVE CAPTURE\fR below), and decodes Modbus/TCP, DNP3,
+IEC 60870-5-104 (TCP port 2404), and S7comm (Siemens S7 PLC protocol, over
+TPKT/COTP, TCP port 102) traffic found inside its TCP streams, and checks
+decoded traffic against a
 zone-and-conduit segmentation policy (IEC 62443 / NIS2 style work) via
 \fBpolicy validate\fR.
 .PP
@@ -73,9 +74,12 @@ Write output here instead of stdout.
 .BR \-f ", " \-\-format " " {text,json,csv}
 Output format. Default: text.
 .TP
-.B \-\-protocol {auto,modbus,dnp3,s7comm}
-Restrict decoding to one protocol. Default: auto (tries all three,
-independent of port number).
+.B \-\-protocol {auto,modbus,dnp3,iec104,s7comm}
+Restrict decoding to one protocol. Default: auto (tries all four,
+independent of port number; IEC 104 is tried before Modbus, since an
+IEC 104 I-format APDU with sequence numbers 0/0 -- universal at session
+start -- coincidentally also matches Modbus's MBAP-header detection; see
+\fBdocs/MANUAL.md\fR's PROTOCOL DETECTION section).
 .TP
 .B \-\-modbus\-port \fIPORT\fR
 Additional TCP port to treat as expected for Modbus. Repeatable. Does not
@@ -83,6 +87,9 @@ gate detection, only whether the port is flagged as unexpected in the output.
 .TP
 .B \-\-dnp3\-port \fIPORT\fR
 Same as \fB\-\-modbus\-port\fR, for DNP3. Repeatable.
+.TP
+.B \-\-iec104\-port \fIPORT\fR
+Same as \fB\-\-modbus\-port\fR, for IEC 60870-5-104. Repeatable.
 .TP
 .B \-\-s7comm\-port \fIPORT\fR
 Same as \fB\-\-modbus\-port\fR, for COTP/S7comm. Repeatable.
@@ -184,8 +191,8 @@ Applies to \fBdecode\fR's \fBtext\fR format only (not \fBjson\fR/\fBcsv\fR,
 and not \fBpolicy validate\fR's report, which stays plain text by design --
 it's meant to be diffed/archived/piped as an audit artifact). The
 \fB[protocol]\fR tag is colored per protocol: cyan for Modbus, magenta for
-DNP3, blue for S7comm/COTP, dim for everything else recognized but not
-OT\-specific. A Modbus exception response's summary, and a
+DNP3, green for IEC 104, blue for S7comm/COTP, dim for everything else
+recognized but not OT\-specific. A Modbus exception response's summary, and a
 \fBparse\-error\fR packet's whole line, are bold red. Notes are dim.
 .PP
 Color is used only when writing directly to an interactive terminal by
@@ -234,7 +241,12 @@ yet; DNP3 point values are decoded
 only for the group/variation combinations in the built-in point-format
 table (an object header outside it is still located and skipped by
 computed length); DNP3 absolute timestamps are shown as a raw
-milliseconds-since-epoch count, not a calendar date; Modbus request/response
+milliseconds-since-epoch count, not a calendar date; IEC 104 needs no
+cross-frame reassembly (one I-format APDU always carries exactly one ASDU)
+but its ASDU type-ID decode table, like DNP3's, covers only a "first pass"
+set of common monitoring/command/setpoint type IDs -- an ASDU outside that
+set is still identified by type name and structurally located, just not
+value-decoded; Modbus request/response
 classification falls back to a payload-shape heuristic only when
 authoritative pairing can't be done (no matching request on this session);
 S7comm item-level addressing (inside Read Var / Write Var) is fully
@@ -278,6 +290,14 @@ Decode as JSON and filter with jq:
 .RS
 .EX
 conduitscope decode \-r capture.pcap \-f json | jq '.[] | select(.protocol=="modbus")'
+.EE
+.RE
+.PP
+Summarize IEC 104 ASDUs (type and cause of transmission) from a JSON decode:
+.RS
+.EX
+conduitscope decode \-r capture.pcap \-\-protocol iec104 \-f json \e
+  | jq \-r '.[] | select(.iec104_asdu_type) | "\e(.src_ip) \-> \e(.dst_ip): \e(.iec104_asdu_type) (\e(.iec104_cot))"'
 .EE
 .RE
 .PP

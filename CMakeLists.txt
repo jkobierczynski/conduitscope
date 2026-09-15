@@ -28,6 +28,7 @@ add_library(conduitscope_core STATIC
   src/tcp.cpp
   src/modbus.cpp
   src/dnp3.cpp
+  src/iec104.cpp
   src/cotp.cpp
   src/s7comm.cpp
   src/decoder.cpp
@@ -457,6 +458,115 @@ add_test(NAME real_dnp3_malformed_bails_out_with_a_note
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/dnp3/dnp3_malformed.pcap" --format text)
 set_tests_properties(real_dnp3_malformed_bails_out_with_a_note PROPERTIES
   PASS_REGULAR_EXPRESSION "is not in the known point-format table -- stopping object parsing")
+
+# --------------------------------------------------------------------------
+# IEC 60870-5-104 (synthetic, tests/sample_iec104.pcap): U-format handshakes, a general
+# interrogation activation/confirmation, a sequential-IOA (SQ=1) monitoring report, a
+# time-tagged measured value, a double command with a negative activation confirmation, and an
+# S-format supervisory ack -- see tools/make_sample_pcap.py's build_iec104_sample for the exact
+# byte layout each assertion below is checking.
+# --------------------------------------------------------------------------
+add_test(NAME iec104_startdt_handshake_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_iec104.pcap" --format text)
+set_tests_properties(iec104_startdt_handshake_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "U-format STARTDT act[^\n]*\n.*U-format STARTDT con")
+
+add_test(NAME iec104_testfr_keepalive_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_iec104.pcap" --format text)
+set_tests_properties(iec104_testfr_keepalive_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "U-format TESTFR act[^\n]*\n.*U-format TESTFR con")
+
+add_test(NAME iec104_general_interrogation_activation_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_iec104.pcap" --format text)
+set_tests_properties(iec104_general_interrogation_activation_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "C_IC_NA_1 \\(Interrogation command\\) COT=activation CASDU=1 objects=1")
+
+add_test(NAME iec104_sequential_single_point_report_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_iec104.pcap")
+set_tests_properties(iec104_sequential_single_point_report_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"iec104_objects\": \\[\"ioa=100: ON\", \"ioa=101: OFF \\[IV\\]\", \"ioa=102: ON \\[BL\\]\"\\]")
+
+add_test(NAME iec104_time_tagged_measured_value_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_iec104.pcap")
+set_tests_properties(iec104_time_tagged_measured_value_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "ioa=200: 16384 \\(0\\.5000\\) @ 2024-03-15 10:30:00\\.500")
+
+add_test(NAME iec104_double_command_negative_confirmation_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_iec104.pcap" --format text)
+set_tests_properties(iec104_double_command_negative_confirmation_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "C_DC_NA_1 \\(Double command\\) COT=activation confirmation \\[NEG\\] CASDU=1 objects=1")
+
+add_test(NAME iec104_s_format_supervisory_ack_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_iec104.pcap" --format text)
+set_tests_properties(iec104_s_format_supervisory_ack_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "S-format \\(supervisory\\) N\\(R\\)=4")
+
+# Regression fixture for the IEC104-vs-Modbus detection collision found while scoping this
+# feature (see try_parse_iec104_apci's header comment in iec104.hpp and the dispatch-order
+# comment in decoder.cpp): an I-format APDU with N(S)=N(R)=0 whose APCI bytes also read as a
+# plausible Modbus/TCP MBAP header (protocol-id==0, mbap_length==0, a non-zero "function code")
+# must be classified as iec104, not modbus.
+add_test(NAME iec104_wins_modbus_detection_collision
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_iec104_modbus_precedence.pcap" --format text)
+set_tests_properties(iec104_wins_modbus_detection_collision PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[iec104\\]  I-format N\\(S\\)=0 N\\(R\\)=0; C_IC_NA_1")
+
+# --------------------------------------------------------------------------
+# Real-world IEC 60870-5-104 captures -- see tests/real_captures/iec104/ATTRIBUTION.md for
+# provenance. Three sourced from public Wireshark/ICS-pcap test-capture collections (the
+# Wireshark wiki's own iec104.pcap sample, a diverse 2010 simulated hydro-plant capture, and a
+# 2008 dissector test file), plus the three station-address captures from Netresec's public
+# Industroyer2 release -- real, attributed nation-state ICS malware traffic against a live
+# IEC 104 RTU, not a synthetic or generic test vector.
+# --------------------------------------------------------------------------
+set(IEC104_REAL_CAPTURES
+  iec104_wireshark_wiki
+  iec104_090813_diverse
+  iec104_test_dissect
+  industroyer2_station1
+  industroyer2_station2
+  industroyer2_station3
+)
+# Same baseline regression guard as the DNP3/Modbus real-capture loops above: must never crash
+# the parser or exit non-zero, independent of what it does or doesn't manage to decode.
+foreach(capture ${IEC104_REAL_CAPTURES})
+  add_test(NAME real_iec104_${capture}_does_not_crash
+    COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/iec104/${capture}.pcap" --format json)
+endforeach()
+
+# The Wireshark wiki sample: a clean TESTFR/STARTDT handshake followed by a general
+# interrogation that returns (among others) a real M_SP_NA_1 report -- confirms the decoder
+# against an independent IEC 104 stack's actual wire encoding, not just the synthetic fixture's
+# hand-constructed bytes.
+add_test(NAME real_iec104_wireshark_wiki_general_interrogation_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/iec104/iec104_wireshark_wiki.pcap" --format text)
+set_tests_properties(real_iec104_wireshark_wiki_general_interrogation_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "C_IC_NA_1 \\(Interrogation command\\) COT=activation CASDU=10 objects=1")
+
+# 090813_diverse.pcap: a simulated hydro-plant floodgate-manipulation scenario (subject of
+# Netresec's 2012 "SCADA Network Forensics with IEC-104" post) -- real command/setpoint traffic,
+# not just monitoring, including the short-floating-point setpoint command (type 50) this
+# decoder table covers.
+add_test(NAME real_iec104_090813_diverse_setpoint_command_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/iec104/iec104_090813_diverse.pcap" --format text)
+set_tests_properties(real_iec104_090813_diverse_setpoint_command_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "C_SE_NC_1 \\(Set point command, short floating point\\)")
+
+# TestDissectIec104.pcap: a 2008 Wireshark dissector test file specifically exercising clock
+# synchronization (type 103) and end-of-initialization (type 70) -- type IDs the other two real
+# captures don't happen to carry.
+add_test(NAME real_iec104_test_dissect_clock_sync_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/iec104/iec104_test_dissect.pcap" --format text)
+set_tests_properties(real_iec104_test_dissect_clock_sync_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "C_CS_NA_1 \\(Clock synchronization command\\)")
+
+# Industroyer2: real double-command (C_DC_NA_1) breaker-manipulation traffic against a live RTU,
+# most of which the RTU refused (negative activation confirmation) -- documented, attributed
+# nation-state ICS malware behavior, not a hypothetical.
+add_test(NAME real_iec104_industroyer2_double_command_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/iec104/industroyer2_station1.pcap" --format text)
+set_tests_properties(real_iec104_industroyer2_double_command_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "C_DC_NA_1 \\(Double command\\) COT=activation confirmation \\[NEG\\] CASDU=1 objects=1")
 
 # --------------------------------------------------------------------------
 # Real-world S7comm/COTP captures -- see tests/real_captures/s7comm/ATTRIBUTION.md

@@ -1,0 +1,152 @@
+// SPDX-License-Identifier: MIT
+// iec104.hpp - IEC 60870-5-104 (APCI + ASDU) decoding.
+//
+// Unlike DNP3, IEC 104 needs no cross-frame application-fragment reassembly: an I-format APDU
+// (the only frame type that carries an ASDU) is always exactly one complete ASDU on the wire --
+// there is nothing analogous to DNP3's transport FIR/FIN chaining an application fragment across
+// several data-link frames. So this file is purely stateless, and Decoder (decoder.hpp/.cpp) only
+// needs it for two things: try_parse_iec104_apci (the fixed 6-byte APCI -- start byte, length,
+// 4-byte control field identifying I/S/U-format and, for I/S, the 15-bit send/receive sequence
+// numbers) and decode_iec104_asdu (the ASDU that follows an I-format APCI: type ID, variable
+// structure qualifier, cause of transmission, common address, and one information object per
+// address/point). iec104_apdu_declared_length mirrors modbus_tcp_declared_length/
+// dnp3_link_frame_declared_length -- used by Decoder::reassemble_tcp_payload to detect an APDU
+// split across a TCP segment boundary before attempting to parse it.
+//
+// Every multi-byte field on the wire is little-endian (unlike DNP3's link-layer fields, which are
+// also little-endian, but unlike Modbus/S7comm's big-endian MBAP/S7 headers) -- this includes the
+// 15-bit send/receive sequence numbers (whose low bit is always fixed 0 by the spec), the 3-byte
+// Information Object Address (IOA), the 2-byte Common ASDU Address (CASDU), and every numeric
+// information-element value (normalized/scaled integers, IEEE-754 short floats, CP24Time2a/
+// CP56Time2a time tags).
+//
+// Decoded ASDU types cover the type IDs that dominate real IEC 104 traffic -- monitoring
+// (single/double-point, measured values normalized/scaled/short-float, integrated totals, each
+// with and without a CP24Time2a/CP56Time2a time tag), commands (single/double/regulating-step,
+// set-point normalized/scaled/short-float, with and without time tag), end-of-initialization,
+// general interrogation, clock sync, and reset process -- cross-checked against lib60870-C and
+// Wireshark's packet-iec104.c dissector for the exact information-element bit layouts. A type ID
+// outside that table still gets its ASDU header (type/VSQ/COT/CASDU) decoded, just not its
+// information objects -- same "structurally located, not value-decoded" fallback DNP3 applies to
+// an unrecognized group/variation.
+#pragma once
+
+#include <cstdint>
+#include <optional>
+#include <string>
+#include <vector>
+
+#include "conduitscope/byteio.hpp"
+
+namespace conduitscope {
+
+constexpr uint16_t IEC104_TCP_PORT = 2404;
+
+enum class Iec104FrameType {
+    I,  // information transfer -- numbered, carries exactly one ASDU
+    S,  // supervisory -- numbered acknowledgement, no payload
+    U,  // unnumbered control -- STARTDT/STOPDT/TESTFR act/con
+};
+
+struct Iec104Apci {
+    Iec104FrameType frame_type = Iec104FrameType::I;
+
+    // Total on-the-wire byte count of this APDU: the 2-byte start+length prefix plus the length
+    // field's own value (4-byte control field, plus the ASDU for an I-format APDU). Used by
+    // Decoder's same-TCP-payload coalescing loop to find where the next APDU (if any) starts.
+    size_t wire_length = 0;
+
+    // I-format only: bytes of ASDU following the 6-byte APCI (wire_length - 6).
+    size_t asdu_length = 0;
+
+    // I-format only: N(S)/N(R), the 15-bit send/receive sequence numbers (low bit always 0 on the
+    // wire per spec, stripped out of these values). S-format: recv_seq only (send_seq unused).
+    uint16_t send_seq = 0;
+    uint16_t recv_seq = 0;
+
+    // U-format only: e.g. "STARTDT act", "TESTFR con", or "Unknown (0xNN)" for a control-field byte
+    // that has the U-format bit pattern (bits1-2 = 11) but doesn't match one of the six functions
+    // the spec defines.
+    std::string u_function_name;
+
+    std::string summary;
+};
+
+// Returns std::nullopt (never throws) if `tcp_payload` does not look like a well-formed IEC 104
+// APCI: fewer than 6 bytes, wrong start byte (0x68), an implausible length field, or a control
+// field that doesn't match one of the three frame formats' fixed bit patterns (I-format's N(R)
+// low bit, S-format's fixed 0x01/0x00 first two control bytes, U-format's fixed all-zero last
+// three control bytes) -- these structural checks make a coincidental match far less likely than
+// Modbus/TCP's single protocol-id==0 tell, which matters because IEC 104 detection runs before
+// Modbus in Decoder's Auto-mode dispatch specifically to avoid a real collision risk: an I-format
+// APDU with N(S)=N(R)=0 (common very early in a session) makes its first four APCI-window bytes
+// read as Modbus's protocol-id==0 with mbap_length==0, and the ASDU's type-ID/VSQ bytes can then
+// land exactly where Modbus expects unit-id/function-code. For an I-format APDU, does NOT require
+// that `tcp_payload` actually contain the full declared ASDU yet -- see iec104_apdu_declared_length
+// for the truncation-detection helper Decoder::reassemble_tcp_payload uses to ensure it does before
+// this is ever called.
+std::optional<Iec104Apci> try_parse_iec104_apci(ByteSpan tcp_payload);
+
+// Returns the total on-the-wire byte count one IEC 104 APDU declares (2-byte start+length prefix
+// plus the length field's own value) once there are enough bytes to read that declaration
+// (payload.size() >= 2) and the start byte and length field are individually plausible (0x68, and
+// length in [4, 253] -- an APDU's control field is always 4 bytes, and the spec caps a whole APDU
+// at 255 bytes) -- regardless of whether `payload` actually holds that many bytes yet; that's the
+// point, so a caller can tell a truncated-but-recognized APDU from one that's actually complete.
+// Returns std::nullopt if there aren't yet enough bytes to tell (< 2), the start byte doesn't
+// match, or the length field is out of the plausible range. try_parse_iec104_apci itself is
+// unchanged and still requires all 6 APCI bytes (plus, for I-format, the full declared ASDU) to be
+// present; this is used only for detecting truncation across a TCP segment boundary -- see
+// Decoder::reassemble_tcp_payload in decoder.cpp.
+std::optional<size_t> iec104_apdu_declared_length(ByteSpan payload);
+
+// One decoded information object: the point (Information Object Address) it belongs to, a short
+// human-readable rendering of its value, and any decoded quality-flag names (empty if this
+// element's format carries none of its own, e.g. a command's Select/Execute-only SCO/DCO/RCO).
+struct Iec104InformationObject {
+    uint32_t ioa = 0;
+    std::string value;
+    std::vector<std::string> flags;
+};
+
+struct Iec104Asdu {
+    uint8_t type_id = 0;
+    std::string type_name;  // e.g. "M_SP_NA_1 (Single-point information)", or "Unknown (type NN)"
+
+    bool sq = false;           // VSQ bit8: true = sequential IOAs (one explicit IOA, then +1 each), false = one
+                                // explicit IOA per object (discontinuous)
+    uint8_t object_count = 0;  // VSQ bits7-1
+
+    uint8_t cot_code = 0;  // Cause of Transmission, bits0-5 of the COT field's first byte
+    std::string cot_name;  // e.g. "spontaneous", "activation", "interrogated by group 1 interrogation"
+    bool test = false;     // COT field bit8 (Test flag)
+    bool negative = false;  // COT field bit7 (P/N: true = negative confirmation)
+    uint8_t originator_address = 0;  // COT field's second byte (0 when originator addressing is unused)
+
+    uint16_t common_address = 0;  // Common ASDU Address (station address), 2 bytes, little-endian
+
+    // False when type_id isn't in the decoded-type table (see the file header comment) or the ASDU
+    // was too short/malformed to decode its information objects -- `note` explains why, and
+    // `objects` is empty in that case (the object data couldn't be reliably located/interpreted, so
+    // it is not skipped-and-shown either, unlike DNP3's object-header fallback -- an ASDU has only
+    // one type ID for its entire object list, so there is no "later header" to keep aligned for).
+    bool decoded = true;
+    std::string note;
+
+    // One entry per information object, capped (very large interrogation responses keep object_count
+    // accurate but only the first entries get an individual Iec104InformationObject -- see
+    // kMaxDecodedObjects in iec104.cpp).
+    std::vector<Iec104InformationObject> objects;
+
+    std::string summary;
+    std::vector<std::string> notes;
+};
+
+// Decodes one ASDU -- type ID, VSQ, COT, common address, and (for a recognized type ID) every
+// information object's address and value -- from `asdu_bytes`, which must be exactly the ASDU
+// portion of one I-format APDU (i.e. Iec104Apci::asdu_length bytes, right after the 6-byte APCI).
+// Never throws: anything it cannot make sense of is recorded in the returned Iec104Asdu's
+// notes/note fields rather than propagated as a ParseError, mirroring decode_dnp3_application_layer.
+Iec104Asdu decode_iec104_asdu(ByteSpan asdu_bytes);
+
+}  // namespace conduitscope

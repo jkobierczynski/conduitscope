@@ -1,7 +1,7 @@
 # conduitscope
 
-`conduitscope` decodes Modbus/TCP, DNP3, and S7comm/COTP (Siemens S7 PLC protocol)
-traffic from offline pcap/pcapng captures, and checks it against a zone/conduit segmentation
+`conduitscope` decodes Modbus/TCP, DNP3, IEC 60870-5-104, and S7comm/COTP (Siemens S7 PLC
+protocol) traffic from offline pcap/pcapng captures, and checks it against a zone/conduit segmentation
 policy. It's an OT/ICS conduit-auditing tool: `decode`/`info` give you reliable
 protocol decoding and a stats view, and `policy validate` maps that decoded traffic
 against an IEC 62443-style zone/conduit model (for NIS2-flavored compliance work) --
@@ -31,7 +31,7 @@ Groundwork / v0.1.0. What works right now:
 
 - Classic pcap and pcapng file reading, auto-detected (Ethernet and raw-IP
   link types; IPv4; TCP, with PDU/frame-level reassembly across TCP segments
-  for Modbus, DNP3 data-link frames, and TPKT/COTP -- see below and
+  for Modbus, DNP3 data-link frames, IEC 104 APDUs, and TPKT/COTP -- see below and
   docs/MANUAL.md)
 - Full Modbus/TCP decoding for the read (1-4), write-single (5-6), and
   write-multiple (15-16) function code families, plus exception responses.
@@ -100,13 +100,33 @@ Groundwork / v0.1.0. What works right now:
   validated against 14 further real S7comm captures from independent
   sources (up to ~9,000 real items in one) and 3 real Modbus captures --
   see tests/real_captures/{s7comm,modbus}/ATTRIBUTION.md.
+- Full IEC 60870-5-104 decoding: APCI framing (I/S/U-format, sequence
+  numbers, STARTDT/STOPDT/TESTFR act/con), and, for I-format APDUs, the
+  ASDU -- type ID, cause of transmission, common/station address, and every
+  information object's address and value, for the type IDs that dominate
+  real traffic: single/double-point, measured values (normalized/scaled/
+  short-float, each with and without a CP24Time2a/CP56Time2a time tag),
+  integrated totals, single/double/regulating-step commands and set-point
+  commands, end-of-initialization, general interrogation, clock sync, and
+  reset process. Unlike DNP3, one I-format APDU always carries exactly one
+  complete ASDU, so no cross-frame application-fragment reassembly is
+  needed -- only the same TCP-segment-level PDU reassembly every protocol
+  here gets (see below). IEC 104 detection runs *before* Modbus in
+  Auto-mode dispatch: an I-format APDU with N(S)=N(R)=0 (the very first
+  data frame of any session) would otherwise coincidentally satisfy
+  Modbus/TCP's own protocol-id==0 tell, a real collision risk found while
+  scoping this feature (see docs/MANUAL.md's PROTOCOL DETECTION section).
+  Validated against three independent real IEC 104 stacks' actual wire
+  encodings, including the public Industroyer2 capture (real, attributed
+  nation-state ICS malware traffic against a live RTU) -- see
+  tests/real_captures/iec104/ATTRIBUTION.md.
 - IPv4 payload is clamped to the header's own `total_length` field, so
   Ethernet's minimum-frame-size padding on short packets (bare ACKs, mostly)
   never gets misreported as phantom TCP payload -- found and fixed against a
   real capture, not just synthetic traffic
 - General TCP stream reassembly at the PDU/frame level: a Modbus MBAP
-  message, a DNP3 data-link frame, or a TPKT/COTP frame split across two or
-  more TCP segments is buffered per directional flow and decoded once
+  message, a DNP3 data-link frame, an IEC 104 APDU, or a TPKT/COTP frame
+  split across two or more TCP segments is buffered per directional flow and decoded once
   complete, using each protocol's own declared-length field to know how many
   bytes to wait for. Resyncs rather than reorders on capture gaps, and trims
   overlapping retransmissions rather than duplicating bytes. Verified
@@ -206,11 +226,12 @@ that runs it -- the SDK used at build time only supplies headers/import librarie
 ## Quick start
 
 ```sh
-# Generate synthetic Modbus/TCP, DNP3, and S7comm/COTP captures and decode them
+# Generate synthetic Modbus/TCP, DNP3, IEC 104, and S7comm/COTP captures and decode them
 # (no live traffic needed):
 python3 tools/make_sample_pcap.py
 build/conduitscope decode -r tests/sample_modbus.pcap
 build/conduitscope decode -r tests/sample_s7comm.pcap --stats
+build/conduitscope decode -r tests/sample_iec104.pcap
 build/conduitscope decode -r tests/sample_modbus.pcap --format json
 build/conduitscope info -r tests/sample_modbus.pcap
 
@@ -224,7 +245,7 @@ To decode traffic you've actually captured, e.g. from a Modbus simulator such as
 [4SICS ICS pcaps](https://www.netresec.com/?page=PCAP4SICS):
 
 ```sh
-tcpdump -i <iface> -w capture.pcap port 502 or port 20000 or port 102
+tcpdump -i <iface> -w capture.pcap port 502 or port 20000 or port 2404 or port 102
 build/conduitscope decode -r capture.pcap
 ```
 
@@ -233,7 +254,7 @@ intermediate file and check traffic in real time:
 
 ```sh
 build/conduitscope interfaces                                    # list capturable interfaces
-build/conduitscope decode -i eth0 --filter "port 502 or port 102" --duration 60
+build/conduitscope decode -i eth0 --filter "port 502 or port 2404 or port 102" --duration 60
 build/conduitscope policy validate -i eth0 --policy tests/policies/compliant.yaml --duration 60
 # or just Ctrl+C to stop either one early -- both still print whatever was captured so far
 ```

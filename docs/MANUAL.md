@@ -2,15 +2,15 @@
 
 ## NAME
 
-conduitscope -- decode Modbus/TCP, DNP3, and S7comm/COTP traffic from offline pcap captures
+conduitscope -- decode Modbus/TCP, DNP3, IEC 60870-5-104, and S7comm/COTP traffic from offline pcap captures
 
 ## SYNOPSIS
 
 ```
 conduitscope [-q|--quiet] [--no-color|--color] [--log-file FILE] [--version] [-h|--help] <command> [command options]
 
-conduitscope decode (-r FILE | -i INTERFACE) [-o FILE] [-f text|json|csv] [--protocol auto|modbus|dnp3|s7comm]
-                     [--modbus-port PORT]... [--dnp3-port PORT]... [--s7comm-port PORT]...
+conduitscope decode (-r FILE | -i INTERFACE) [-o FILE] [-f text|json|csv] [--protocol auto|modbus|dnp3|s7comm|iec104]
+                     [--modbus-port PORT]... [--dnp3-port PORT]... [--s7comm-port PORT]... [--iec104-port PORT]...
                      [--max-packets N] [--stats] [--strict]
                      [--filter BPF] [--duration SECONDS] [--snaplen BYTES] [--no-promiscuous]
 
@@ -35,8 +35,8 @@ exception to conduitscope's otherwise zero-dependency design (see BUILDING).
 conduitscope reads a pcap or pcapng capture file -- or, optionally, a
 live network interface (see LIVE CAPTURE below) -- walks each packet's
 Ethernet/IPv4/TCP headers, and attempts to recognize and decode Modbus/TCP,
-DNP3, or S7comm (Siemens S7 PLC protocol, riding on TPKT/COTP) payloads
-inside the TCP stream. It is designed as groundwork for auditing
+DNP3, IEC 60870-5-104, or S7comm (Siemens S7 PLC protocol, riding on
+TPKT/COTP) payloads inside the TCP stream. It is designed as groundwork for auditing
 OT/ICS network traffic against a zone-and-conduit segmentation model (the kind
 IEC 62443-3-2 and, by extension, NIS2 risk-assessment work call for): the
 protocol-decoding layer (`decode`/`info`) and, now, the zone/conduit
@@ -136,10 +136,11 @@ conduitscope decode (-r FILE | -i INTERFACE) [options]
 | `--no-promiscuous` | off (i.e. promiscuous by default) | With `-i`, don't put the interface into promiscuous mode. Promiscuous is the default because the main live-capture use case -- watching a mirrored/SPAN switch port for zone/conduit traffic -- needs to see traffic that isn't addressed to the capturing host at all. |
 | `-o, --output FILE` | stdout | Write decoded output here instead of stdout. |
 | `-f, --format {text,json,csv}` | `text` | Output format. See OUTPUT FORMATS below. |
-| `--protocol {auto,modbus,dnp3,s7comm}` | `auto` | Restrict decoding to one protocol. `auto` opportunistically tries Modbus, DNP3, and S7comm/COTP detection on every TCP payload, regardless of port (see PROTOCOL DETECTION below). |
+| `--protocol {auto,modbus,dnp3,s7comm,iec104}` | `auto` | Restrict decoding to one protocol. `auto` opportunistically tries IEC 104, Modbus, DNP3, and S7comm/COTP detection on every TCP payload, regardless of port (see PROTOCOL DETECTION below). |
 | `--modbus-port PORT` | *(502 built in)* | Additional TCP port to treat as "expected" for Modbus. Repeatable. Does **not** gate detection -- it only changes whether a decoded Modbus frame is annotated as appearing on an unexpected port, which is itself a useful signal when auditing a conduit. |
 | `--dnp3-port PORT` | *(20000 built in)* | Same as `--modbus-port`, for DNP3. Repeatable. |
 | `--s7comm-port PORT` | *(102 built in)* | Same as `--modbus-port`, for COTP/S7comm. Repeatable. |
+| `--iec104-port PORT` | *(2404 built in)* | Same as `--modbus-port`, for IEC 104. Repeatable. |
 | `--max-packets N` | `0` (unlimited) | Stop after decoding this many packets. With `-i`, this also bounds a live capture (in addition to `--duration` and Ctrl+C). |
 | `--stats` | off | Print an aggregate summary (protocol counts, Modbus function-code histogram, exception count, capture time span) instead of one line per packet. Ignores `--format`. |
 | `--strict` | off | Abort with a nonzero exit status on the first packet that fails to parse at the Ethernet/IPv4/TCP layer, instead of reporting a per-packet warning and continuing. Does not affect Modbus/DNP3-level ambiguity, which is always handled by heuristic + note rather than error. |
@@ -201,7 +202,7 @@ as running `policy validate -r` against a capture file that happens to end at
 that moment.
 
 `policy validate` decodes the capture exactly as `decode` would (the same
-Modbus/DNP3/S7comm detection, TCP reassembly, and authoritative Modbus
+Modbus/DNP3/IEC104/S7comm detection, TCP reassembly, and authoritative Modbus
 pairing all run underneath), then groups the decoded packets into TCP flows
 and checks each flow against the policy's conduits. It does not change or
 duplicate any decoding logic -- see `PolicyEngine` (`policy_engine.hpp`),
@@ -218,7 +219,7 @@ port, in that direction. A flow lands in exactly one of three buckets:
 - **Violation** -- both endpoints are zone-classified, but no conduit
   permits this specific protocol/port/direction combination between them.
 - **Unclassified** -- at least one endpoint's address matches no declared
-  zone at all, or the flow never carried any Modbus/DNP3/S7comm traffic
+  zone at all, or the flow never carried any Modbus/DNP3/IEC104/S7comm traffic
   conduitscope recognized (only a handshake, or payloads that didn't
   decode). There's nothing to check against a conduit in either case, so
   this is reported separately from an outright violation, but it still
@@ -283,8 +284,8 @@ binary has it.
 # See what's capturable:
 conduitscope interfaces
 
-# Decode live traffic from eth0, limited to Modbus/S7comm ports, for 60 seconds:
-conduitscope decode -i eth0 --filter "port 502 or port 102" --duration 60
+# Decode live traffic from eth0, limited to Modbus/IEC104/S7comm ports, for 60 seconds:
+conduitscope decode -i eth0 --filter "port 502 or port 2404 or port 102" --duration 60
 
 # Check live traffic against a zone/conduit policy until Ctrl+C:
 conduitscope policy validate -i eth0 --policy policy.yaml
@@ -324,7 +325,7 @@ rather than requiring an opt-in.
 502"`). It's applied by libpcap/Npcap itself, before a packet ever reaches
 conduitscope's own decoding, so it's a performance/focus tool (capture only
 what you care about) rather than a substitute for `--protocol` or the
-`--modbus-port`/`--dnp3-port`/`--s7comm-port` options, which operate on
+`--modbus-port`/`--dnp3-port`/`--s7comm-port`/`--iec104-port` options, which operate on
 already-captured traffic instead. An invalid filter expression is reported
 clearly (`error: invalid capture filter '...'`) and the process exits without
 opening the interface.
@@ -391,7 +392,7 @@ conduits:
     description: "<optional free text>"
     from: <zone name>
     to: <zone name>
-    protocols: [<modbus | dnp3 | s7comm | any>, <...>]
+    protocols: [<modbus | dnp3 | s7comm | iec104 | any>, <...>]
     ports: [<port>, <...>]                  # omit entirely to mean "any port"
     bidirectional: <true | false>           # default: false
 ```
@@ -413,7 +414,7 @@ not what a first policy file intended, so it's rejected outright rather than
 silently accepted as an implicit deny-all.
 
 `protocols` uses the same protocol names conduitscope's own decoded output
-uses: `modbus`, `dnp3`, `s7comm`, plus the wildcard `any`. A COTP session
+uses: `modbus`, `dnp3`, `s7comm`, `iec104`, plus the wildcard `any`. A COTP session
 that never carries a full S7comm message (e.g. only a connection
 request/confirm was captured) still counts as `s7comm` traffic for matching
 purposes -- see PROTOCOL COVERAGE's S7comm/COTP section for why a "cotp"-
@@ -456,7 +457,7 @@ error (see EXIT STATUS):
   without a YAML parser objecting)
 - a conduit missing `name`/`from`/`to`/`protocols`, or whose `from`/`to`
   names a zone that isn't declared in `zones`
-- a conduit protocol outside `{modbus, dnp3, s7comm, any}`
+- a conduit protocol outside `{modbus, dnp3, s7comm, iec104, any}`
 - a conduit port outside `[1, 65535]`
 - a conduit's `bidirectional` value that isn't a recognizable boolean
   (`true`/`false`/`yes`/`no`)
@@ -508,8 +509,21 @@ text the `text` report shows).
 ## PROTOCOL DETECTION
 
 In `--protocol auto` (the default), every non-empty TCP payload is tested
-against all three protocols, independent of port number:
+against all four protocols, independent of port number. **IEC 104 is tried
+first**, before Modbus/TCP -- see the note at the end of this section for why
+that specific ordering matters, not just which protocols are tried:
 
+- **IEC 60870-5-104**: recognized by its APCI structure -- the start byte
+  `0x68`, a length field in the plausible range `[4, 253]`, and the 4-byte
+  control field matching one of the three frame formats' fixed bit patterns:
+  I-format's N(R) low bit fixed 0, S-format's first two control bytes fixed
+  `0x01 0x00` (with N(R)'s low bit fixed 0 too), or U-format's last three
+  control bytes fixed all-zero (with the first byte matching one of the six
+  STARTDT/STOPDT/TESTFR act/con function values, or noted as an unrecognized
+  U-format function otherwise). Unlike DNP3 or S7comm, this isn't a single
+  fixed magic-byte sequence, but the combination of the start byte with the
+  control field's several independently-fixed bits is still a considerably
+  stronger signal than Modbus/TCP's single protocol-id==0 tell -- see below.
 - **Modbus/TCP**: recognized by its MBAP header shape -- the protocol-id
   field at byte offset 2-3 must be `0x0000` (mandated by the Modbus spec),
   *and* the function-code byte must be non-zero (function code `0x00` is
@@ -557,9 +571,26 @@ worry about; for conduit auditing it's arguably the *most* interesting signal
 conduitscope can currently surface (an ICS protocol appearing somewhere your
 segmentation policy didn't expect it).
 
-`--protocol modbus`, `--protocol dnp3`, or `--protocol s7comm` restrict
-decoding to only that protocol (useful for large mixed captures, or for
-scripting a two-pass analysis).
+**Why IEC 104 is tried before Modbus.** This was found while scoping IEC 104
+support, before any real capture surfaced it in practice (unlike the DNP3
+false-positive noted above, which a real capture did surface): an I-format
+APDU with N(S)=N(R)=0 -- the very first data frame of essentially every real
+IEC 104 session, since sequence numbers start at zero -- makes its APCI bytes
+read as a plausible Modbus/TCP MBAP header purely by coincidence (protocol-id
+byte-offset 2-3 reads as `0x0000`, and mbap_length reads as `0`), and the
+ASDU's type-ID/VSQ bytes that follow can land exactly where Modbus expects
+unit-id/function-code -- often with a non-zero "function code", so Modbus's
+own reserved-function-code-0 guard (above) doesn't catch it either. Trying
+IEC 104 first resolves this in IEC 104's favor, since its own structural
+checks are a stronger signal, without needing to make Modbus's own detection
+any stricter -- the same fix already applied once before for the DNP3-vs-
+Modbus collision. `tests/sample_iec104_modbus_precedence.pcap` (see
+`tools/make_sample_pcap.py`) is a minimal regression fixture pinning this
+down.
+
+`--protocol modbus`, `--protocol dnp3`, `--protocol s7comm`, or `--protocol
+iec104` restrict decoding to only that protocol (useful for large mixed
+captures, or for scripting a two-pass analysis).
 
 ## OUTPUT FORMATS
 
@@ -579,7 +610,7 @@ the packet line.
 
 The `[protocol]` tag is colored per protocol (so a mixed-protocol capture
 scans quickly by eye): cyan for Modbus, magenta for DNP3, blue for S7comm and
-COTP-without-S7comm, dim for everything else recognized but not
+COTP-without-S7comm, green for IEC 104, dim for everything else recognized but not
 OT-specific (`tcp`/`non-tcp`/`non-ip`/`unsupported-link`). A Modbus
 exception response's summary, and a `parse-error` packet's entire line, are
 bold red -- both mean "look at this one" over everything else in a long
@@ -603,7 +634,7 @@ that don't apply to a given packet (e.g. `src_ip` for a non-IP frame) are
 `null`. Intended to be piped into `jq` or read by a future policy-evaluation
 layer.
 
-Six fields are only present (omitted entirely, not `null`) on packets where
+Nine fields are only present (omitted entirely, not `null`) on packets where
 they apply:
 
 - `modbus_paired_request_index`: the `index` of the specific earlier request
@@ -634,6 +665,21 @@ they apply:
   `"g12v1 idx=7: code=Latch On tc=Close queue/clear=0x00 count=1
   on_time=1000ms off_time=0ms status=Success"` for a CROB command. Empty for
   an object header outside the point-format table (see PROTOCOL COVERAGE).
+- `iec104_asdu_type`: the ASDU type name (e.g. `"C_IC_NA_1 (Interrogation
+  command)"`), when protocol is `iec104` and the first APDU found in this
+  TCP payload was an I-format APDU with a decoded ASDU (see PROTOCOL
+  COVERAGE).
+- `iec104_cot`: the cause-of-transmission name (e.g. `"activation"`,
+  `"spontaneous"`, `"interrogated by group 1 interrogation"`), alongside
+  `iec104_asdu_type`.
+- `iec104_common_address`: the ASDU's Common (station) Address, alongside
+  `iec104_asdu_type`.
+- `iec104_objects`: an array of one entry per decoded information object
+  across every ASDU found in the TCP payload (an APDU is small, so several
+  commonly coalesce into one TCP segment -- see PROTOCOL COVERAGE), e.g.
+  `"ioa=100: ON"` or `"ioa=200: 16384 (0.5000) @ 2024-03-15
+  10:30:00.500"` for a time-tagged measured value. Empty for an ASDU type
+  outside the decoded-type table (see PROTOCOL COVERAGE).
 
 All array fields are capped at 50 entries for a single heavily-batched
 request/response; see PROTOCOL COVERAGE for where the full list still shows
@@ -924,6 +970,103 @@ degrade to a "not decoded" note rather than be misparsed. See
 authoritative transaction-ID pairing (see PROTOCOL DETECTION) against a real
 request/response session, not just the synthetic fixtures.
 
+### IEC 60870-5-104 (TCP port 2404)
+
+IEC 104's own layering is APCI (Application Protocol Control Information --
+the fixed 6-byte frame envelope) plus, for an I-format frame only, an ASDU
+(Application Service Data Unit -- the actual telecontrol data). Unlike DNP3,
+an I-format APDU always carries exactly one *complete* ASDU: there is nothing
+analogous to DNP3's transport FIR/FIN chaining an application fragment across
+several data-link frames, so this decoder needs no cross-frame reassembly
+state at all -- only the same TCP-segment-level PDU reassembly every protocol
+here gets (see LIMITATIONS).
+
+**APCI** is fully decoded for all three frame formats: **I-format**
+(numbered information transfer -- the 15-bit send/receive sequence numbers
+N(S)/N(R)), **S-format** (numbered supervisory acknowledgement -- N(R) only,
+no payload), and **U-format** (unnumbered control -- STARTDT/STOPDT/TESTFR,
+each with an `act` (activate) and `con` (confirm) variant, the six-value
+handshake/keepalive vocabulary every real session uses). See PROTOCOL
+DETECTION for exactly how each format's fixed control-field bit pattern is
+recognized, and why IEC 104 detection specifically runs before Modbus/TCP's.
+
+Like DNP3's small data-link frames, an IEC 104 APDU is small and it's normal
+for a sender or the OS to coalesce several into one TCP segment before
+flushing (an S-format ack and a U-format TESTFR often arrive alongside an
+I-format APDU this way in real traffic). conduitscope looks for every
+complete APDU present in a TCP payload, not just the first -- each gets
+fully decoded, and if more than one is found, a note says so and identifies
+each additional one; the packet's one-line summary and its
+`iec104_asdu_type_name`/`iec104_cot_name`/JSON fields still reflect only the
+*first* I-format APDU's ASDU, with every APDU's own information objects
+merged into `iec104_objects`.
+
+**ASDU decoding**, for an I-format APDU: type ID, the Variable Structure
+Qualifier (object count, and whether Information Object Addresses are
+sequential -- one explicit address then +1 per object -- or individually
+addressed per object), Cause of Transmission (with a name for the standard
+COT table -- periodic/cyclic, spontaneous, activation and its confirmation,
+interrogated-by-station/group-N-interrogation, and the rest -- plus the Test
+and P/N (negative confirmation) flags and the originator address), and the
+Common (station) Address.
+
+For the type IDs in the built-in decode table -- covering the type IDs that
+dominate real traffic (see the type-ID coverage that shaped this table in
+`tests/real_captures/iec104/ATTRIBUTION.md`) -- every information object's
+**value is also decoded**, not just its address:
+
+- **Single- and double-point information** (types 1/2/30, 3/4/31): the point
+  state (ON/OFF, or the double-point Indeterminate/OFF/ON/Indeterminate
+  enum), plus quality flags (`BL` blocked, `SB` substituted, `NT` not
+  topical, `IV` invalid) shared with the state byte, and a CP24Time2a or
+  CP56Time2a time tag for the `_TA_`/`_TB_` variants that carry one.
+- **Measured values -- normalized, scaled, and short-floating-point** (types
+  9/34, 11/35, 13/36): the decoded value (normalized values also show the
+  `-1..+1`-range fraction alongside the raw 16-bit integer), quality flags
+  (adding `OV` overflow, measured-values-only), and a time tag for the
+  `_T_` variants.
+- **Integrated totals** (types 15/37): the 32-bit counter value, its 5-bit
+  sequence number, and the `CY`(carry)/`CA`(adjusted)/`IV`(invalid) quality
+  bits, plus a time tag for the `_TB_` variant.
+- **Single, double, and regulating-step commands** (types 45/58, 46/59, 47),
+  and **set-point commands -- normalized, scaled, and short-floating-point**
+  (types 48/61, 49, 50/63) -- the object used to issue control actions, so
+  getting this one right matters more than most: the command state
+  (ON/OFF, step up/down, or the set-point value), the 5-bit qualifier
+  (no additional definition / short pulse / long pulse / persistent
+  output), the Select/Execute bit, and a time tag for the `_T_` variants.
+- **End of initialization** (type 70): the cause (local power switch on,
+  local manual reset, remote reset) and whether parameters changed.
+- **General interrogation** (type 100): station (general) interrogation vs.
+  group 1-16 interrogation.
+- **Clock synchronization** (type 103): the CP56Time2a timestamp being set.
+- **Reset process** (type 105): general reset vs. reset of pending
+  time-tagged information.
+
+The SIQ/DIQ/QDS quality-bit layout, the SCO/DCO/RCO command-byte layout, and
+the CP24Time2a/CP56Time2a time-tag layout are cross-checked against
+lib60870-C's own source and Wireshark's `packet-iec104.c` dissector, not
+reverse-engineered from a single capture. A type ID outside the decode table
+still gets its ASDU header (type/VSQ/COT/common-address) decoded -- just not
+its information objects, which aren't skipped-and-shown the way an
+unrecognized DNP3 group/variation is (an ASDU has only one type ID for its
+whole object list, so there's no "later header" whose alignment needs
+preserving the way DNP3's per-header skip does).
+
+Validated against three independent real IEC 104 stacks' actual wire
+encodings: the Wireshark wiki's own sample capture (a clean TESTFR/STARTDT
+handshake and general interrogation cycling through a wide range of type
+IDs), a simulated hydro-plant floodgate-manipulation scenario (real
+command/setpoint traffic, not just monitoring), and -- most significantly for
+this tool's purpose -- the public Industroyer2 capture: real, attributed
+nation-state ICS malware traffic (used against a Ukrainian energy provider in
+April 2022) repeatedly issuing double-command (type 46) breaker-manipulation
+commands against a live RTU, almost all of which the RTU refused with a
+negative activation confirmation. See
+`tests/real_captures/iec104/ATTRIBUTION.md` for exact provenance. None of
+these captures happened to split an APDU across a TCP segment boundary, so
+that path (see LIMITATIONS) remains untested against real traffic.
+
 ## CAPTURED FRAME PADDING
 
 Ethernet requires a minimum frame size (60 bytes, excluding the trailing
@@ -963,14 +1106,16 @@ These are current, not aspirational -- each has a corresponding ROADMAP item.
   tool's for that specific file. See "pcap vs. pcapng" above.
 - **General TCP stream reassembly is implemented, but narrowly scoped.**
   `Decoder::reassemble_tcp_payload` (`decoder.hpp`/`decoder.cpp`) buffers a
-  single Modbus MBAP message, DNP3 data-link frame, or TPKT/COTP frame's own
-  bytes, per directional TCP flow, when it is split across two or more TCP
-  segments -- so a Modbus PDU that straddles a segment boundary, a DNP3
-  data-link frame split mid-header, or an S7comm request/response TPKT frame
-  split across segments all now get fully reassembled and decoded, not just
-  the first segment's worth of bytes. Each protocol's own declared length
-  field (the MBAP length, the DNP3 data-link length byte, the TPKT length
-  field) is what tells the reassembler how many bytes to wait for; a segment
+  single Modbus MBAP message, DNP3 data-link frame, IEC 104 APDU, or
+  TPKT/COTP frame's own bytes, per directional TCP flow, when it is split
+  across two or more TCP segments -- so a Modbus PDU that straddles a
+  segment boundary, a DNP3 data-link frame split mid-header, an IEC 104 APDU
+  split mid-APCI/ASDU, or an S7comm request/response TPKT frame split across
+  segments all now get fully reassembled and decoded, not just the first
+  segment's worth of bytes. Each protocol's own declared length field (the
+  MBAP length, the DNP3 data-link length byte, the IEC 104 APCI length
+  byte, the TPKT length field) is what tells the reassembler how many bytes
+  to wait for; a segment
   whose sequence number doesn't extend the buffered bytes contiguously is
   either trimmed (an overlapping retransmission) or, if it's genuinely ahead
   of where expected (a gap -- a segment very likely wasn't captured), causes
@@ -1002,7 +1147,8 @@ These are current, not aspirational -- each has a corresponding ROADMAP item.
   confirm against, only the synthetic fixtures in tests/sample_dnp3.pcap.
   The general TCP-segment-level reassembly described above is unvalidated
   against real traffic for the same reason (every real capture checked kept
-  every PDU/frame within one TCP segment) -- it was verified by diffing this
+  every PDU/frame within one TCP segment, including all six real IEC 104
+  captures -- see tests/real_captures/iec104/ATTRIBUTION.md) -- it was verified by diffing this
   tool's full output against every real fixture before and after adding it
   (byte-for-byte identical), confirming it changes nothing for traffic that
   doesn't need it, and by synthetic fixtures (tests/sample_tcp_reassembly.pcap)
@@ -1075,6 +1221,16 @@ These are current, not aspirational -- each has a corresponding ROADMAP item.
   an isolated, otherwise-implausible Modbus packet (especially on a
   non-standard port, which is flagged in the output) with appropriate
   skepticism.
+- **IEC 104 information objects are decoded only for the type IDs in the
+  built-in decode table** (see PROTOCOL COVERAGE for the full list -- it
+  covers the type IDs that dominate real traffic). Outside that table, the
+  ASDU header (type ID/VSQ/COT/common address) is still decoded, but its
+  information objects are not -- there is no structural skip-and-show
+  fallback the way DNP3's unrecognized group/variation gets, since an ASDU
+  has only one type ID for its whole object list and no "later header"
+  whose byte alignment needs preserving. A batch of more than 200
+  information objects in one ASDU only gets the first 200 individually
+  decoded; a note says so when it happens.
 - **S7comm item-level addressing is fully confident only for the classic
   S7ANY syntax.** `0xB2` (S7-1200/1500 "symbolic" addressing) also gets a
   tag, but it's an EXPERIMENTAL reconstruction from public sources rather
@@ -1148,7 +1304,7 @@ These are current, not aspirational -- each has a corresponding ROADMAP item.
 - **`policy validate`'s client/server (initiator) determination falls back
   to a port-number heuristic when no SYN/SYN-ACK is captured for a flow**
   (e.g. a capture that starts mid-session): whichever endpoint's port is one
-  of the three IANA-registered OT ports (502/20000/102) is assumed to be the
+  of the four IANA-registered OT ports (502/20000/2404/102) is assumed to be the
   server, and if neither or both are, the lower port number is. A real
   SYN/SYN-ACK seen on ANY packet in the flow -- not just the first one --
   always overrides this guess once seen (see `PolicyEngine::observe`'s doc
@@ -1255,6 +1411,26 @@ conduitscope decode -r capture.pcap --protocol dnp3 -f json \
            (.dnp3_values[] | select(startswith("g12v1"))) | "\($s) -> \($d): \(.)"'
 ```
 
+See which IEC 104 ASDU types and causes of transmission flow over a
+capture, e.g. to spot an unexpected command or an interrogation response
+you weren't expecting on a conduit:
+
+```sh
+conduitscope decode -r capture.pcap --protocol iec104 -f json \
+  | jq -r '.[] | select(.iec104_asdu_type) | "\(.src_ip) -> \(.dst_ip): \(.iec104_asdu_type) (\(.iec104_cot))"'
+```
+
+Find every IEC 104 single/double command issued -- who issued it, to which
+Information Object Address, and what it commanded (the kind of query that
+matters most for an Industroyer2-style breaker-manipulation investigation):
+
+```sh
+conduitscope decode -r capture.pcap --protocol iec104 -f json \
+  | jq -r '.[] | select(.iec104_asdu_type | test("^C_SC_NA_1|^C_DC_NA_1")?) |
+           .src_ip as $s | .dst_ip as $d |
+           (.iec104_objects[]) | "\($s) -> \($d): \(.)"'
+```
+
 Find every Modbus write whose response was never authoritatively paired --
 either the response wasn't captured, or it used a different session/
 transaction ID than expected (worth a closer look on a conduit that should
@@ -1317,11 +1493,32 @@ Rough order, each building on the groundwork this release establishes:
    (e.g. "any of these three zones may reach this one"), if real policy
    files turn out to want that instead of one conduit per zone pair -- kept
    off the schema for now rather than guessed at ahead of a real use case.
+7. **Extend IEC 104's information-element decode table** to the type IDs it
+   currently only structurally recognizes (ASDU header decoded, objects
+   not) -- step position (types 5/32), bitstring (types 7/33), packed
+   single-point-with-status-change-detection, parameter-setting commands,
+   file transfer, and full counter-interrogation (type 101)/read (102)
+   command decoding. The Wireshark wiki sample capture's general
+   interrogation response happens to cycle through several of these (see
+   `tests/real_captures/iec104/ATTRIBUTION.md`), so real-traffic validation
+   for at least step position and bitstring is already sitting there,
+   waiting on the decode table catching up.
 
 **pcapng support** is also now done: both classic pcap and pcapng are read
 transparently (auto-detected, no flag needed) -- see "pcap vs. pcapng"
 above and LIMITATIONS for the small set of rare/obsolete pcapng block types
 that are skipped rather than decoded.
+
+**IEC 60870-5-104 support** is also now done: APCI framing (I/S/U-format),
+and, for I-format APDUs, full ASDU decoding for the type IDs that dominate
+real traffic -- see PROTOCOL COVERAGE's IEC 60870-5-104 section and item 7
+above for the type IDs still outside the decode table. Because one I-format
+APDU always carries exactly one complete ASDU, no cross-frame application-
+fragment reassembly analogous to DNP3's was needed -- only the same
+TCP-segment-level PDU reassembly every protocol here gets. IEC 104 detection
+runs before Modbus/TCP's in Auto-mode dispatch specifically to resolve a
+detection collision found while scoping this feature -- see PROTOCOL
+DETECTION.
 
 **Colorized text output** is also now done: see OUTPUT FORMATS' "Color"
 subsection for the scheme and the `--color`/`--no-color`/auto-detection
@@ -1332,7 +1529,8 @@ coloring it turns up.
 
 All of what was originally tracked here as "general TCP stream reassembly"
 is now done: PDU/frame-level reassembly across TCP segments
-(`Decoder::reassemble_tcp_payload`), authoritative Modbus request/response
+(`Decoder::reassemble_tcp_payload`, covering Modbus, DNP3, IEC 104, and
+TPKT/COTP alike), authoritative Modbus request/response
 pairing by transaction ID (`Decoder::pair_modbus_transaction`), and chaining
 an S7comm message across multiple complete TPKT/COTP frames
 (`Decoder::reassemble_cotp_data_frame`) -- see LIMITATIONS for each one's

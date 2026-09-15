@@ -57,6 +57,7 @@ constexpr const char* kBoldRed = "\033[1;31m";
 constexpr const char* kCyan = "\033[36m";
 constexpr const char* kMagenta = "\033[35m";
 constexpr const char* kBlue = "\033[34m";
+constexpr const char* kGreen = "\033[32m";
 
 // Color for a packet's "[protocol]" tag -- picked so a mixed-protocol capture scans quickly by
 // eye, not for any deeper meaning. parse-error is the one exception: it gets the same "something
@@ -67,6 +68,7 @@ const char* protocol_tag_color(const std::string& protocol) {
     if (protocol == "dnp3") return kMagenta;
     if (protocol == "s7comm") return kBlue;
     if (protocol == "cotp") return kBlue;  // recognized TPKT/COTP framing, no S7comm inside yet
+    if (protocol == "iec104") return kGreen;
     if (protocol == "parse-error") return kBoldRed;
     return kDim;  // tcp / non-tcp / non-ip / unsupported-link: recognized, nothing OT-specific
 }
@@ -156,6 +158,19 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
         }
         out_ << "],\n";
     }
+    if (p.protocol == "iec104" && p.iec104_has_asdu) {
+        out_ << "    \"iec104_asdu_type\": \"" << json_escape(p.iec104_asdu_type_name) << "\",\n";
+        out_ << "    \"iec104_cot\": \"" << json_escape(p.iec104_cot_name) << "\",\n";
+        out_ << "    \"iec104_common_address\": " << p.iec104_common_address << ",\n";
+    }
+    if (!p.iec104_object_values.empty()) {
+        out_ << "    \"iec104_objects\": [";
+        for (size_t i = 0; i < p.iec104_object_values.size(); ++i) {
+            if (i != 0) out_ << ", ";
+            out_ << "\"" << json_escape(p.iec104_object_values[i]) << "\"";
+        }
+        out_ << "],\n";
+    }
     out_ << "    \"notes\": [";
     for (size_t i = 0; i < p.notes.size(); ++i) {
         if (i != 0) out_ << ", ";
@@ -198,6 +213,9 @@ void StatsWriter::write_packet(const DecodedPacket& p) {
     if (p.protocol == "dnp3" && p.dnp3_has_function) {
         dnp3_function_counts_[p.dnp3_function_name]++;
     }
+    if (p.protocol == "iec104" && p.iec104_has_asdu) {
+        iec104_asdu_type_counts_[p.iec104_asdu_type_name]++;
+    }
     if (!has_ts_) {
         first_ts_ = last_ts_ = p.timestamp;
         has_ts_ = true;
@@ -236,6 +254,12 @@ void StatsWriter::print_summary(std::ostream& out) const {
         out << "dnp3 function codes:\n";
         for (const auto& [name, count] : dnp3_function_counts_) {
             out << "  " << std::left << std::setw(40) << name << count << "\n";
+        }
+    }
+    if (!iec104_asdu_type_counts_.empty()) {
+        out << "iec104 asdu types:\n";
+        for (const auto& [name, count] : iec104_asdu_type_counts_) {
+            out << "  " << std::left << std::setw(60) << name << count << "\n";
         }
     }
 }

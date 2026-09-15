@@ -422,6 +422,168 @@ def build_dnp3_sample():
     (TESTS_DIR / "sample_dnp3.pcap").write_bytes(data)
 
 
+IEC104_PORT = 2404
+
+# U-format function-byte constants (bytes 1 of the 4-byte control field; bytes 2-4 are always
+# zero) -- see iec104.hpp/try_parse_iec104_apci.
+IEC104_STARTDT_ACT, IEC104_STARTDT_CON = 0x07, 0x0B
+IEC104_STOPDT_ACT, IEC104_STOPDT_CON = 0x13, 0x23
+IEC104_TESTFR_ACT, IEC104_TESTFR_CON = 0x43, 0x83
+
+
+def iec104_i_control(ns: int, nr: int) -> bytes:
+    """4-byte I-format control field: N(S) in the first two bytes (low bit of byte 1 fixed 0),
+    N(R) in the last two (same shape)."""
+    return bytes([(ns & 0x7F) << 1, (ns >> 7) & 0xFF, (nr & 0x7F) << 1, (nr >> 7) & 0xFF])
+
+
+def iec104_s_control(nr: int) -> bytes:
+    return bytes([0x01, 0x00, (nr & 0x7F) << 1, (nr >> 7) & 0xFF])
+
+
+def iec104_u_control(function_byte: int) -> bytes:
+    return bytes([function_byte, 0x00, 0x00, 0x00])
+
+
+def iec104_apdu(control: bytes, asdu: bytes = b"") -> bytes:
+    """Wraps a 4-byte control field (+ optional ASDU, I-format only) in the 2-byte start+length
+    APCI prefix (0x68, then the byte count of everything after it)."""
+    assert len(control) == 4
+    body = control + asdu
+    assert len(body) <= 253
+    return bytes([0x68, len(body)]) + body
+
+
+def iec104_cot_byte(cot_code: int, test: bool = False, negative: bool = False) -> int:
+    return (0x80 if test else 0) | (0x40 if negative else 0) | (cot_code & 0x3F)
+
+
+def cp56time2a(year: int, month: int, day: int, hour: int, minute: int, ms: int,
+               iv: bool = False, su: bool = False, dow: int = 0) -> bytes:
+    return struct.pack(
+        "<HBBBBB",
+        ms,
+        (minute & 0x3F) | (0x80 if iv else 0),
+        (hour & 0x1F) | (0x80 if su else 0),
+        (day & 0x1F) | ((dow & 0x07) << 5),
+        month & 0x0F,
+        (year - 2000) & 0x7F,
+    )
+
+
+def iec104_asdu(type_id: int, vsq: int, cot_code: int, casdu: int, object_bytes: bytes,
+                 test: bool = False, negative: bool = False, originator: int = 0) -> bytes:
+    return (bytes([type_id, vsq, iec104_cot_byte(cot_code, test, negative), originator]) +
+            struct.pack("<H", casdu) + object_bytes)
+
+
+def ioa(value: int) -> bytes:
+    """3-byte little-endian Information Object Address."""
+    return struct.pack("<I", value)[:3]
+
+
+def build_iec104_sample():
+    """Exercises U/I/S-format APCI framing, discontinuous and sequential (SQ=1) information
+    objects, a time-tagged measured value, a double command activation with a negative
+    confirmation, and the S-format supervisory ack -- the APDU shapes real traffic (see
+    tests/real_captures/iec104/ATTRIBUTION.md) is dominated by, built by hand so the exact
+    expected bytes/values are known rather than inferred from a real capture."""
+    packets = []
+    client_seq = [3000]
+    server_seq = [4000]
+
+    def add(from_client: bool, payload: bytes):
+        if from_client:
+            src_port, dst_port = 51800, IEC104_PORT
+            src_ip, dst_ip = HMI_IP, PLC_IP
+            src_mac, dst_mac = HMI_MAC, PLC_MAC
+            seq, ack = client_seq[0], server_seq[0]
+            client_seq[0] += len(payload)
+        else:
+            src_port, dst_port = IEC104_PORT, 51800
+            src_ip, dst_ip = PLC_IP, HMI_IP
+            src_mac, dst_mac = PLC_MAC, HMI_MAC
+            seq, ack = server_seq[0], client_seq[0]
+            server_seq[0] += len(payload)
+        tcp = tcp_header(src_port, dst_port, seq, ack, TCP_PSH | TCP_ACK, len(payload)) + payload
+        ip = ipv4_header(src_ip, dst_ip, 6, len(tcp), 0x3000 + len(packets)) + tcp
+        packets.append(eth_header(dst_mac, src_mac, 0x0800) + ip)
+
+    # 1) & 2) STARTDT act/con -- the handshake that begins every real IEC 104 session.
+    add(True, iec104_apdu(iec104_u_control(IEC104_STARTDT_ACT)))
+    add(False, iec104_apdu(iec104_u_control(IEC104_STARTDT_CON)))
+
+    # 3) General interrogation activation (C_IC_NA_1, QOI=20 "station interrogation general"),
+    #    N(S)=0 N(R)=0 -- deliberately the very first I-frame on the session, since N(S)=N(R)=0
+    #    is exactly the shape that collides with a Modbus/TCP MBAP header read (see
+    #    build_iec104_modbus_precedence_sample below for a minimal fixture pinning that down).
+    gi_req = iec104_asdu(100, 0x01, 6, 1, ioa(0) + bytes([20]))
+    add(True, iec104_apdu(iec104_i_control(0, 0), gi_req))
+
+    # 4) Activation confirmation, N(S)=0 N(R)=1.
+    gi_conf = iec104_asdu(100, 0x01, 7, 1, ioa(0) + bytes([20]))
+    add(False, iec104_apdu(iec104_i_control(0, 1), gi_conf))
+
+    # 5) GI data: M_SP_NA_1 (type 1), SQ=1 (sequential IOAs), 3 points starting at IOA 100 --
+    #    ON, OFF+IV, ON+BL -- N(S)=1 N(R)=1.
+    sp_objects = ioa(100) + bytes([0x01, 0x80, 0x11])
+    sp_report = iec104_asdu(1, 0x83, 20, 1, sp_objects)  # vsq: SQ=1 (0x80) | count=3
+    add(False, iec104_apdu(iec104_i_control(1, 1), sp_report))
+
+    # 6) A time-tagged measured value (M_ME_TD_1, type 34): IOA 200, normalized value 16384
+    #    (fraction 0.5), quality good, CP56Time2a 2024-03-15 10:30:00.500 -- N(S)=2 N(R)=1.
+    me_value = struct.pack("<h", 16384) + bytes([0x00]) + cp56time2a(2024, 3, 15, 10, 30, 500)
+    me_report = iec104_asdu(34, 0x01, 3, 1, ioa(200) + me_value)  # COT=3 spontaneous
+    add(False, iec104_apdu(iec104_i_control(2, 1), me_report))
+
+    # 7) Double command activation (C_DC_NA_1, type 46): IOA 300, DCS=ON(2), QU=short pulse(1),
+    #    Execute (S/E=0) -> byte = 2 | (1<<2) = 0x06 -- N(S)=1 N(R)=3.
+    dc_req = iec104_asdu(46, 0x01, 6, 1, ioa(300) + bytes([0x06]))
+    add(True, iec104_apdu(iec104_i_control(1, 3), dc_req))
+
+    # 8) Negative activation confirmation (COT test/P-N bit set): the RTU refuses the command --
+    #    N(S)=3 N(R)=2. Echoes the same DCO byte, as real devices do.
+    dc_conf = iec104_asdu(46, 0x01, 7, 1, ioa(300) + bytes([0x06]), negative=True)
+    add(False, iec104_apdu(iec104_i_control(3, 2), dc_conf))
+
+    # 9) S-format supervisory ack from the client, N(R)=4 -- no ASDU, nothing to decode above
+    #    the APCI itself.
+    add(True, iec104_apdu(iec104_s_control(4)))
+
+    # 10) & 11) TESTFR act/con -- the periodic keepalive real sessions send throughout their
+    #     lifetime, not just at the start.
+    add(True, iec104_apdu(iec104_u_control(IEC104_TESTFR_ACT)))
+    add(False, iec104_apdu(iec104_u_control(IEC104_TESTFR_CON)))
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_001_000 + i, i * 1000)
+    (TESTS_DIR / "sample_iec104.pcap").write_bytes(data)
+
+
+def build_iec104_modbus_precedence_sample():
+    """Regression fixture for the IEC104-vs-Modbus detection collision found while scoping this
+    feature (see the comment on try_parse_iec104_apci in iec104.hpp and the dispatch-order
+    comment in decoder.cpp's reassemble_tcp_payload/decode): an I-format APDU with N(S)=N(R)=0
+    (the very first data frame of any session) makes its APCI bytes read as a Modbus/TCP MBAP
+    header with protocol-id==0 and mbap_length==0, and the ASDU's type-ID/VSQ bytes can land
+    exactly where Modbus expects unit-id/function-code (here, VSQ=0x01 reads as Modbus function
+    code 1, "Read Coils" -- a plausible, non-zero function code, so Modbus's own reserved-
+    function-code-0 guard does not save it). This must be classified as iec104, not modbus --
+    IEC104 detection is tried first in Decoder's Auto-mode dispatch specifically because its own
+    structural checks (start byte + fixed control-field bit patterns) are a much stronger signal
+    than Modbus/TCP's single protocol-id==0 tell."""
+    gi_req = iec104_asdu(100, 0x01, 6, 1, ioa(0) + bytes([20]))
+    payload = iec104_apdu(iec104_i_control(0, 0), gi_req)
+    tcp = tcp_header(51801, IEC104_PORT, 12000, 13000, TCP_PSH | TCP_ACK, len(payload)) + payload
+    ip = ipv4_header(HMI_IP, PLC_IP, 6, len(tcp), 0x4000) + tcp
+    eth = eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip
+
+    data = pcap_global_header()
+    data += pcap_record(eth, 1_700_001_500, 0)
+    (TESTS_DIR / "sample_iec104_modbus_precedence.pcap").write_bytes(data)
+
+
 def tpkt_frame(cotp_header: bytes, user_data: bytes = b"") -> bytes:
     """Wraps a COTP header in its length-indicator byte and the 4-byte TPKT
     header, then appends `user_data` (e.g. an S7comm payload) AFTER the
@@ -990,6 +1152,8 @@ if __name__ == "__main__":
     build_modbus_false_positive_sample()
     build_modbus_pairing_sample()
     build_dnp3_sample()
+    build_iec104_sample()
+    build_iec104_modbus_precedence_sample()
     build_s7comm_sample()
     build_s7comm_items_sample()
     build_s7comm_1200sym_sample()

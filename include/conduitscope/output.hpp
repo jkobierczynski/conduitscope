@@ -73,6 +73,7 @@ private:
     size_t modbus_paired_responses_ = 0;
     std::map<std::string, size_t> s7comm_function_counts_;
     std::map<std::string, size_t> dnp3_function_counts_;
+    std::map<std::string, size_t> iec104_asdu_type_counts_;
     bool has_ts_ = false;
     double first_ts_ = 0.0, last_ts_ = 0.0;
 };

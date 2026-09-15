@@ -13,6 +13,7 @@
 #include "conduitscope/byteio.hpp"
 #include "conduitscope/cotp.hpp"
 #include "conduitscope/dnp3.hpp"
+#include "conduitscope/iec104.hpp"
 #include "conduitscope/modbus.hpp"
 #include "conduitscope/pcap_reader.hpp"
 #include "conduitscope/tcp.hpp"
@@ -20,23 +21,25 @@
 namespace conduitscope {
 
 enum class ProtocolFilter {
-    Auto,         // opportunistically detect Modbus/DNP3/S7comm regardless of port
+    Auto,         // opportunistically detect IEC104/Modbus/DNP3/S7comm regardless of port
     ModbusOnly,   // only attempt Modbus decoding
     Dnp3Only,     // only attempt DNP3 decoding
     S7commOnly,   // only attempt TPKT/COTP/S7comm decoding
+    Iec104Only,   // only attempt IEC 60870-5-104 decoding
 };
 
 struct DecodeOptions {
     ProtocolFilter protocol_filter = ProtocolFilter::Auto;
     // Additional ports to treat as "expected" for each protocol, beyond the
-    // IANA-registered defaults (502 for Modbus, 20000 for DNP3). This does
-    // NOT gate detection in Auto mode (detection is payload-shape based) --
-    // it only changes whether the decoded output calls a port "standard" or
-    // flags it as unexpected, which is itself a useful signal when auditing
-    // a conduit against a zone policy.
+    // IANA-registered defaults (502 for Modbus, 20000 for DNP3, 2404 for
+    // IEC 104). This does NOT gate detection in Auto mode (detection is
+    // payload-shape based) -- it only changes whether the decoded output
+    // calls a port "standard" or flags it as unexpected, which is itself a
+    // useful signal when auditing a conduit against a zone policy.
     std::vector<uint16_t> extra_modbus_ports;
     std::vector<uint16_t> extra_dnp3_ports;
     std::vector<uint16_t> extra_s7comm_ports;
+    std::vector<uint16_t> extra_iec104_ports;
     // If true, a parse failure at the Ethernet/IPv4/TCP layer is rethrown to
     // the caller instead of being recorded as a per-packet "parse-error"
     // result. Off by default so one malformed packet doesn't abort decoding
@@ -64,7 +67,7 @@ struct DecodedPacket {
     uint16_t src_port = 0, dst_port = 0;
     std::string tcp_flags;
 
-    // "modbus", "dnp3", "s7comm", "cotp" (recognized TPKT/COTP framing but not
+    // "iec104", "modbus", "dnp3", "s7comm", "cotp" (recognized TPKT/COTP framing but not
     // S7comm inside it -- e.g. a connection setup frame), "tcp" (recognized
     // transport, no app-layer match), "non-tcp", "non-ip", "unsupported-link",
     // or "parse-error".
@@ -110,6 +113,18 @@ struct DecodedPacket {
     // (see dnp3.hpp) -- empty for an object header outside that table, or when no object headers
     // had any points (e.g. a Class 0 poll). Capped at 50 entries, same reason as s7comm_items.
     std::vector<std::string> dnp3_point_values;
+
+    // Only set when protocol == "iec104". Reflects the first APDU found in this TCP payload (an
+    // I-format APDU with a decoded ASDU) -- see the coalescing loop in decoder.cpp for how
+    // additional APDUs coalesced into the same payload are still fully decoded and folded in here,
+    // same pattern as DNP3's multi-frame-per-payload handling.
+    bool iec104_has_asdu = false;
+    std::string iec104_asdu_type_name;
+    std::string iec104_cot_name;
+    uint16_t iec104_common_address = 0;
+    // One entry per decoded information object across every ASDU found in this TCP payload (e.g.
+    // "ioa=1001: ON [SB]"), capped at 50 entries for the same reason as dnp3_point_values.
+    std::vector<std::string> iec104_object_values;
 };
 
 // Cross-packet DNP3 fragment-reassembly state for one directional TCP flow (src ip:port -> dst

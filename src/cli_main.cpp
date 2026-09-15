@@ -169,8 +169,8 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
                 int duration_seconds, int snaplen, bool promiscuous, const std::string& output,
                 const std::string& format, const std::string& protocol, const std::vector<int>& modbus_ports,
                 const std::vector<int>& dnp3_ports, const std::vector<int>& s7comm_ports,
-                size_t max_packets, bool stats, bool strict, bool quiet, bool no_color, bool force_color,
-                std::ostream& diag) {
+                const std::vector<int>& iec104_ports, size_t max_packets, bool stats, bool strict, bool quiet,
+                bool no_color, bool force_color, std::ostream& diag) {
     std::ofstream file_out;
     std::ostream* out = &std::cout;
     bool writing_to_stdout = output.empty();
@@ -195,10 +195,12 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
     options.protocol_filter = (protocol == "modbus")  ? ProtocolFilter::ModbusOnly
                                : (protocol == "dnp3")  ? ProtocolFilter::Dnp3Only
                                : (protocol == "s7comm") ? ProtocolFilter::S7commOnly
+                               : (protocol == "iec104") ? ProtocolFilter::Iec104Only
                                                         : ProtocolFilter::Auto;
     for (int p : modbus_ports) options.extra_modbus_ports.push_back(static_cast<uint16_t>(p));
     for (int p : dnp3_ports) options.extra_dnp3_ports.push_back(static_cast<uint16_t>(p));
     for (int p : s7comm_ports) options.extra_s7comm_ports.push_back(static_cast<uint16_t>(p));
+    for (int p : iec104_ports) options.extra_iec104_ports.push_back(static_cast<uint16_t>(p));
 
     try {
         PacketSource source = open_packet_source(input, interface_name, snaplen, promiscuous, filter,
@@ -429,7 +431,7 @@ int main(int argc, char** argv) {
     bool decode_promiscuous = true;
     std::string decode_format = "text";
     std::string decode_protocol = "auto";
-    std::vector<int> decode_modbus_ports, decode_dnp3_ports, decode_s7comm_ports;
+    std::vector<int> decode_modbus_ports, decode_dnp3_ports, decode_s7comm_ports, decode_iec104_ports;
     size_t decode_max_packets = 0;
     bool decode_stats = false, decode_strict = false;
 
@@ -464,7 +466,7 @@ int main(int argc, char** argv) {
     decode_cmd
         ->add_option("--protocol", decode_protocol,
                       "Restrict decoding to one protocol instead of auto-detecting all of them")
-        ->transform(CLI::IsMember({"auto", "modbus", "dnp3", "s7comm"}))
+        ->transform(CLI::IsMember({"auto", "modbus", "dnp3", "s7comm", "iec104"}))
         ->capture_default_str();
     decode_cmd->add_option("--modbus-port", decode_modbus_ports,
                             "Additional TCP port to treat as expected for Modbus (repeatable); "
@@ -474,6 +476,9 @@ int main(int argc, char** argv) {
                             "does not change detection, only whether the port is flagged as unexpected");
     decode_cmd->add_option("--s7comm-port", decode_s7comm_ports,
                             "Additional TCP port to treat as expected for COTP/S7comm (repeatable); "
+                            "does not change detection, only whether the port is flagged as unexpected");
+    decode_cmd->add_option("--iec104-port", decode_iec104_ports,
+                            "Additional TCP port to treat as expected for IEC 104 (repeatable); "
                             "does not change detection, only whether the port is flagged as unexpected");
     decode_cmd->add_option("--max-packets", decode_max_packets,
                             "Stop after decoding this many packets (0 = unlimited)")
@@ -579,8 +584,8 @@ int main(int argc, char** argv) {
     if (decode_cmd->parsed()) {
         return run_decode(decode_input, decode_interface, decode_filter, decode_duration, decode_snaplen,
                            decode_promiscuous, decode_output, decode_format, decode_protocol,
-                           decode_modbus_ports, decode_dnp3_ports, decode_s7comm_ports, decode_max_packets,
-                           decode_stats, decode_strict, quiet, no_color, force_color, *diag);
+                           decode_modbus_ports, decode_dnp3_ports, decode_s7comm_ports, decode_iec104_ports,
+                           decode_max_packets, decode_stats, decode_strict, quiet, no_color, force_color, *diag);
     }
     if (info_cmd->parsed()) {
         return run_info(info_input, std::cout);

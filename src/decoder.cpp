@@ -7,6 +7,7 @@
 #include "conduitscope/byteio.hpp"
 #include "conduitscope/cotp.hpp"
 #include "conduitscope/dnp3.hpp"
+#include "conduitscope/iec104.hpp"
 #include "conduitscope/ipv4.hpp"
 #include "conduitscope/link_layer.hpp"
 #include "conduitscope/modbus.hpp"
@@ -247,6 +248,8 @@ bool Decoder::reassemble_tcp_payload(const TcpSegment& tcp, const std::string& f
         }
     }
 
+    bool want_iec104 = options_.protocol_filter == ProtocolFilter::Auto ||
+                        options_.protocol_filter == ProtocolFilter::Iec104Only;
     bool want_modbus = options_.protocol_filter == ProtocolFilter::Auto ||
                         options_.protocol_filter == ProtocolFilter::ModbusOnly;
     bool want_dnp3 = options_.protocol_filter == ProtocolFilter::Auto ||
@@ -254,9 +257,24 @@ bool Decoder::reassemble_tcp_payload(const TcpSegment& tcp, const std::string& f
     bool want_s7comm = options_.protocol_filter == ProtocolFilter::Auto ||
                         options_.protocol_filter == ProtocolFilter::S7commOnly;
 
+    // IEC104 is checked first, ahead of Modbus, even though Modbus has been in this dispatch
+    // chain the longest -- see try_parse_iec104_apci's header comment for the collision this
+    // avoids: an I-format APDU with N(S)=N(R)=0 (common very early in a session) can otherwise
+    // read as a plausible Modbus/TCP MBAP header (protocol-id==0, mbap_length==0) by coincidence.
+    // IEC104's own structural checks (start byte + fixed control-field bit patterns) are a much
+    // stronger signal than Modbus/TCP's single protocol-id==0 tell, so trying it first resolves
+    // the collision in IEC104's favor without needing to make Modbus's own check any stricter --
+    // the same fix already applied once before for a real-capture-found DNP3-vs-Modbus collision
+    // (see modbus.cpp's function-code-0 check).
     std::optional<size_t> declared;
     std::string which;
-    if (want_modbus) {
+    if (want_iec104) {
+        if (auto d = iec104_apdu_declared_length(candidate)) {
+            declared = d;
+            which = "IEC 104 APDU";
+        }
+    }
+    if (!declared && want_modbus) {
         if (auto d = modbus_tcp_declared_length(candidate)) {
             declared = d;
             which = "Modbus/TCP";
@@ -509,12 +527,103 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
             return out;
         }
 
+        bool want_iec104 = options_.protocol_filter == ProtocolFilter::Auto ||
+                            options_.protocol_filter == ProtocolFilter::Iec104Only;
         bool want_modbus = options_.protocol_filter == ProtocolFilter::Auto ||
                             options_.protocol_filter == ProtocolFilter::ModbusOnly;
         bool want_dnp3 = options_.protocol_filter == ProtocolFilter::Auto ||
                           options_.protocol_filter == ProtocolFilter::Dnp3Only;
         bool want_s7comm = options_.protocol_filter == ProtocolFilter::Auto ||
                             options_.protocol_filter == ProtocolFilter::S7commOnly;
+
+        // Tried first, ahead of Modbus -- see the matching comment in reassemble_tcp_payload
+        // above for the collision this dispatch ordering avoids.
+        if (want_iec104) {
+            if (auto apci = try_parse_iec104_apci(effective_payload)) {
+                out.protocol = "iec104";
+                out.summary = apci->summary;
+
+                constexpr size_t kMaxObjectValues = 50;
+                auto merge_asdu = [&](const Iec104Asdu& asdu, bool is_first_apdu) {
+                    if (is_first_apdu) {
+                        out.summary += "; " + asdu.summary;
+                        out.iec104_has_asdu = true;
+                        out.iec104_asdu_type_name = asdu.type_name;
+                        out.iec104_cot_name = asdu.cot_name;
+                        out.iec104_common_address = asdu.common_address;
+                    }
+                    for (const auto& n : asdu.notes) out.notes.push_back(n);
+                    for (const auto& obj : asdu.objects) {
+                        if (out.iec104_object_values.size() >= kMaxObjectValues) break;
+                        std::string entry = "ioa=" + std::to_string(obj.ioa) + ": " + obj.value;
+                        if (!obj.flags.empty()) {
+                            entry += " [";
+                            for (size_t f = 0; f < obj.flags.size(); ++f) {
+                                if (f != 0) entry += ",";
+                                entry += obj.flags[f];
+                            }
+                            entry += "]";
+                        }
+                        out.iec104_object_values.push_back(entry);
+                    }
+                };
+
+                if (apci->frame_type == Iec104FrameType::I) {
+                    ByteSpan asdu_bytes = effective_payload.subspan(6, apci->asdu_length);
+                    Iec104Asdu asdu = decode_iec104_asdu(asdu_bytes);
+                    merge_asdu(asdu, /*is_first_apdu=*/true);
+                }
+
+                // Like DNP3, an APDU is small and it's normal for a sender or the OS to coalesce
+                // several into one TCP segment before flushing (S-format acks and U-format
+                // STARTDT/TESTFR handshakes are especially likely to arrive alongside an I-format
+                // APDU). Keep looking for more, immediately after the first APDU's own wire
+                // bytes, rather than silently stopping at the first one.
+                constexpr size_t kMaxApdusPerPayload = 50;
+                size_t offset = apci->wire_length;
+                size_t apdu_count = 1;
+                while (offset < effective_payload.size() && apdu_count < kMaxApdusPerPayload) {
+                    ByteSpan rest = effective_payload.from(offset);
+                    auto next = try_parse_iec104_apci(rest);
+                    if (!next) break;  // remaining bytes aren't another APDU -- stop, don't guess
+                    ++apdu_count;
+                    std::string note = "additional IEC 104 APDU " + std::to_string(apdu_count) +
+                                        " found in the same TCP payload at byte offset " +
+                                        std::to_string(offset) + " (coalesced by the sender/OS): " +
+                                        next->summary;
+                    if (next->frame_type == Iec104FrameType::I) {
+                        ByteSpan next_asdu_bytes = rest.subspan(6, next->asdu_length);
+                        Iec104Asdu next_asdu = decode_iec104_asdu(next_asdu_bytes);
+                        note += " | " + next_asdu.summary;
+                        if (apdu_count == 2) {
+                            note += " -- only the first I-format APDU's ASDU is reflected in the "
+                                    "summary line above and the iec104_asdu_type_name/iec104_cot_name "
+                                    "fields; every APDU's own ASDU is still fully decoded and included "
+                                    "here and in iec104_object_values";
+                        }
+                        out.notes.push_back(note);
+                        merge_asdu(next_asdu, /*is_first_apdu=*/false);
+                    } else {
+                        out.notes.push_back(note);
+                    }
+                    offset += next->wire_length;
+                }
+                if (apdu_count >= kMaxApdusPerPayload) {
+                    out.notes.push_back("stopped after " + std::to_string(kMaxApdusPerPayload) +
+                                         " IEC 104 APDU(s) in this one TCP payload, more may remain "
+                                         "(safety cap)");
+                }
+
+                bool expected_port = port_in(tcp.src_port, IEC104_TCP_PORT, options_.extra_iec104_ports) ||
+                                      port_in(tcp.dst_port, IEC104_TCP_PORT, options_.extra_iec104_ports);
+                if (!expected_port) {
+                    out.notes.push_back("seen on TCP port " + std::to_string(tcp.src_port) + "->" +
+                                         std::to_string(tcp.dst_port) +
+                                         ", which is not a configured/standard IEC 104 port (2404)");
+                }
+                return out;
+            }
+        }
 
         if (want_modbus) {
             if (auto mb = try_parse_modbus_tcp(effective_payload)) {
@@ -726,7 +835,7 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
         out.protocol = "tcp";
         std::ostringstream s;
         s << "TCP payload of " << effective_payload.size() << " byte(s) on port " << tcp.src_port << "->"
-          << tcp.dst_port << " did not match Modbus, DNP3, or COTP/S7comm";
+          << tcp.dst_port << " did not match IEC 104, Modbus, DNP3, or COTP/S7comm";
         out.summary = s.str();
         return out;
 
