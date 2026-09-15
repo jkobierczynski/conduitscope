@@ -8,15 +8,19 @@
 // the protocol-detection heuristics, which --help intentionally keeps brief.
 #include <CLI11.hpp>
 
+#include <atomic>
+#include <csignal>
 #include <cstdint>
 #include <fstream>
 #include <iostream>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "conduitscope/byteio.hpp"
 #include "conduitscope/decoder.hpp"
+#include "conduitscope/live_capture.hpp"
 #include "conduitscope/output.hpp"
 #include "conduitscope/pcap_reader.hpp"
 #include "conduitscope/policy.hpp"
@@ -26,6 +30,108 @@
 namespace {
 
 using namespace conduitscope;
+
+// --------------------------------------------------------------------------------------------
+// Live capture plumbing shared by `decode -I` and `policy validate -I`. See live_capture.hpp for
+// LiveCapture itself; everything below is CLI-layer glue that lets run_decode/run_policy_validate
+// treat an offline pcap file and a live interface as the same kind of packet source, and lets
+// Ctrl+C stop a live capture cleanly (finishing the report/summary with whatever was captured so
+// far) instead of the process just dying mid-capture.
+// --------------------------------------------------------------------------------------------
+
+// Owns exactly one of a PcapReader (offline file) or a LiveCapture (live interface) and forwards
+// the small bit of interface run_decode/run_policy_validate actually need from either.
+class PacketSource {
+public:
+    explicit PacketSource(std::unique_ptr<PcapReader> reader) : reader_(std::move(reader)) {}
+    explicit PacketSource(std::unique_ptr<LiveCapture> capture) : capture_(std::move(capture)) {}
+
+    PacketSource(const PacketSource&) = delete;
+    PacketSource& operator=(const PacketSource&) = delete;
+    PacketSource(PacketSource&&) = default;
+    PacketSource& operator=(PacketSource&&) = default;
+
+    bool next(PcapPacket& out) { return reader_ ? reader_->next(out) : capture_->next(out); }
+    uint32_t linktype() const { return reader_ ? reader_->info().linktype : capture_->info().linktype; }
+    // Non-null only when this source is a live capture; used by SigintGuard below. Never call
+    // anything on it except stop() from a signal handler.
+    LiveCapture* live_ptr() const { return capture_.get(); }
+
+private:
+    std::unique_ptr<PcapReader> reader_;
+    std::unique_ptr<LiveCapture> capture_;
+};
+
+std::atomic<LiveCapture*> g_active_capture{nullptr};
+// Counts SIGINT handler invocations currently in progress (0 or 1 on POSIX, since a signal only
+// ever interrupts the thread it was delivered to and can't re-enter while already running there;
+// see below for why it can briefly be more on Windows). SigintGuard's destructor spin-waits on
+// this before letting the guarded LiveCapture be destroyed -- see its own comment for why that
+// matters.
+std::atomic<int> g_handler_in_flight{0};
+
+extern "C" void handle_sigint(int) {
+    g_handler_in_flight.fetch_add(1, std::memory_order_acquire);
+    LiveCapture* capture = g_active_capture.load();
+    if (capture != nullptr) capture->stop();
+    g_handler_in_flight.fetch_sub(1, std::memory_order_release);
+}
+
+// RAII guard: while alive, redirects SIGINT (Ctrl+C) to LiveCapture::stop() on `capture` instead
+// of the platform default (immediate process termination), so a live capture stops cleanly and
+// still prints whatever report/summary it had. A no-op when `capture` is null (offline-file mode
+// doesn't need this -- EOF already stops the loop on its own).
+//
+// Safety note (why this is more than just std::signal() + a flag): on POSIX, a signal handler
+// only ever interrupts the same thread that was running when it was delivered -- it can't run
+// concurrently with anything else in the process, so restoring the old handler and clearing
+// g_active_capture before this guard's LiveCapture is destroyed is enough on its own. Windows'
+// console Ctrl+C handling does NOT give that guarantee: per Microsoft's own documentation, a
+// CTRL+C interrupt is delivered by spinning up a *new thread* to run the handler, which can
+// therefore execute genuinely concurrently with the main thread -- including with this
+// destructor tearing down the very LiveCapture the handler is about to call stop() on, which
+// would be a real use-after-free race without the g_handler_in_flight wait below. The wait is
+// harmless on POSIX (it can only ever see 0, since nothing there can be "in flight" concurrently
+// with this destructor) and closes the real race on Windows.
+class SigintGuard {
+public:
+    explicit SigintGuard(LiveCapture* capture) : active_(capture != nullptr) {
+        if (active_) {
+            g_active_capture.store(capture);
+            previous_handler_ = std::signal(SIGINT, handle_sigint);
+        }
+    }
+    ~SigintGuard() {
+        if (active_) {
+            std::signal(SIGINT, previous_handler_);
+            g_active_capture.store(nullptr);
+            while (g_handler_in_flight.load(std::memory_order_acquire) > 0) {
+                std::this_thread::yield();
+            }
+        }
+    }
+    SigintGuard(const SigintGuard&) = delete;
+    SigintGuard& operator=(const SigintGuard&) = delete;
+
+private:
+    bool active_;
+    void (*previous_handler_)(int) = SIG_DFL;
+};
+
+// Shared by run_decode/run_policy_validate: exactly one of `input` (offline pcap file, already
+// validated to exist by CLI11's ->check(CLI::ExistingFile)) or `interface_name` (live capture) is
+// expected to be non-empty -- enforced in main() before either run_* function is called, via
+// ->excludes() plus the post-parse "exactly one" check. Throws whatever PcapReader's constructor /
+// LiveCapture's constructor throws (ParseError / CaptureError respectively) on failure.
+PacketSource open_packet_source(const std::string& input, const std::string& interface_name,
+                                 int snaplen, bool promiscuous, const std::string& filter,
+                                 int duration_seconds, size_t max_packets) {
+    if (!interface_name.empty()) {
+        return PacketSource(std::make_unique<LiveCapture>(interface_name, snaplen, promiscuous,
+                                                            filter, duration_seconds, max_packets));
+    }
+    return PacketSource(std::make_unique<PcapReader>(input));
+}
 
 std::string link_type_name(uint32_t linktype) {
     switch (linktype) {
@@ -37,11 +143,12 @@ std::string link_type_name(uint32_t linktype) {
 
 std::string version_string() {
     return std::string(kVersion) + "  [" + kCompilerId + ", " + kSystemName + ", " + kBuildType +
-           " build]";
+           " build, live capture: " + (live_capture_available() ? "libpcap/Npcap" : "not built in") + "]";
 }
 
-int run_decode(const std::string& input, const std::string& output, const std::string& format,
-                const std::string& protocol, const std::vector<int>& modbus_ports,
+int run_decode(const std::string& input, const std::string& interface_name, const std::string& filter,
+                int duration_seconds, int snaplen, bool promiscuous, const std::string& output,
+                const std::string& format, const std::string& protocol, const std::vector<int>& modbus_ports,
                 const std::vector<int>& dnp3_ports, const std::vector<int>& s7comm_ports,
                 size_t max_packets, bool stats, bool strict, bool quiet, bool color, std::ostream& diag) {
     std::ofstream file_out;
@@ -66,7 +173,9 @@ int run_decode(const std::string& input, const std::string& output, const std::s
     for (int p : s7comm_ports) options.extra_s7comm_ports.push_back(static_cast<uint16_t>(p));
 
     try {
-        PcapReader reader(input);
+        PacketSource source = open_packet_source(input, interface_name, snaplen, promiscuous, filter,
+                                                   duration_seconds, max_packets);
+        SigintGuard sigint_guard(source.live_ptr());
         Decoder decoder(options);
 
         std::unique_ptr<OutputWriter> writer;
@@ -80,9 +189,9 @@ int run_decode(const std::string& input, const std::string& output, const std::s
 
         PcapPacket pkt;
         size_t index = 0, decoded_count = 0, warnings = 0;
-        while (reader.next(pkt)) {
+        while (source.next(pkt)) {
             ++index;
-            DecodedPacket dp = decoder.decode(pkt, reader.info().linktype, index);
+            DecodedPacket dp = decoder.decode(pkt, source.linktype(), index);
             if (dp.protocol == "parse-error") {
                 ++warnings;
                 if (!quiet) diag << "warning: packet " << index << ": " << dp.summary << "\n";
@@ -96,12 +205,19 @@ int run_decode(const std::string& input, const std::string& output, const std::s
         if (stats) stats_writer.print_summary(*out);
         else writer->end();
 
+        if (!interface_name.empty() && !quiet) {
+            diag << "capture on '" << interface_name << "' stopped (" << decoded_count
+                 << " packet(s) captured)\n";
+        }
         if (warnings > 0 && !quiet) {
             diag << warnings
                  << " packet(s) had parse warnings (shown above); rerun with --strict to stop at "
                     "the first one, or -q to silence this message\n";
         }
     } catch (const ParseError& e) {
+        std::cerr << "error: " << e.what() << "\n";
+        return 1;
+    } catch (const CaptureError& e) {
         std::cerr << "error: " << e.what() << "\n";
         return 1;
     }
@@ -148,8 +264,10 @@ int run_info(const std::string& input, std::ostream& out) {
 // again).
 constexpr int kExitPolicyNonCompliant = 3;
 
-int run_policy_validate(const std::string& input, const std::string& policy_path, const std::string& output,
-                         const std::string& format, bool strict, bool quiet, std::ostream& diag) {
+int run_policy_validate(const std::string& input, const std::string& interface_name,
+                         const std::string& filter, int duration_seconds, int snaplen, bool promiscuous,
+                         const std::string& policy_path, const std::string& output, const std::string& format,
+                         bool strict, bool quiet, std::ostream& diag) {
     std::ofstream file_out;
     std::ostream* out = &std::cout;
     if (!output.empty()) {
@@ -166,15 +284,20 @@ int run_policy_validate(const std::string& input, const std::string& policy_path
 
         DecodeOptions options;
         options.strict = strict;
-        PcapReader reader(input);
+        // No --max-packets equivalent for policy validate (matching its existing offline-file
+        // CLI surface, which never had one either): a live run here relies on --duration and/or
+        // Ctrl+C to stop, same as `decode -I` does when --max-packets is left at its default of 0.
+        PacketSource source =
+            open_packet_source(input, interface_name, snaplen, promiscuous, filter, duration_seconds, 0);
+        SigintGuard sigint_guard(source.live_ptr());
         Decoder decoder(options);
         PolicyEngine engine(policy);
 
         PcapPacket pkt;
         size_t index = 0, warnings = 0;
-        while (reader.next(pkt)) {
+        while (source.next(pkt)) {
             ++index;
-            DecodedPacket dp = decoder.decode(pkt, reader.info().linktype, index);
+            DecodedPacket dp = decoder.decode(pkt, source.linktype(), index);
             if (dp.protocol == "parse-error") {
                 ++warnings;
                 if (!quiet) diag << "warning: packet " << index << ": " << dp.summary << "\n";
@@ -182,13 +305,20 @@ int run_policy_validate(const std::string& input, const std::string& policy_path
             engine.observe(dp);
         }
 
+        // The report's "capture:" line identifies what was checked -- for a live run that's the
+        // interface (input is empty in that case, having been mutually exclusive with -I), not a
+        // file path.
+        std::string capture_label = interface_name.empty() ? input : "live:" + interface_name;
         PolicyReport report = engine.finish();
         if (format == "json") {
-            write_policy_report_json(*out, report, policy, input, policy_path);
+            write_policy_report_json(*out, report, policy, capture_label, policy_path);
         } else {
-            write_policy_report_text(*out, report, policy, input, policy_path);
+            write_policy_report_text(*out, report, policy, capture_label, policy_path);
         }
 
+        if (!interface_name.empty() && !quiet) {
+            diag << "capture on '" << interface_name << "' stopped (" << index << " packet(s) captured)\n";
+        }
         if (warnings > 0 && !quiet) {
             diag << warnings
                  << " packet(s) had parse warnings (shown above); rerun with --strict to stop at "
@@ -201,6 +331,31 @@ int run_policy_validate(const std::string& input, const std::string& policy_path
         std::cerr << "error: " << e.what() << "\n";
         return 1;
     } catch (const ParseError& e) {
+        std::cerr << "error: " << e.what() << "\n";
+        return 1;
+    } catch (const CaptureError& e) {
+        std::cerr << "error: " << e.what() << "\n";
+        return 1;
+    }
+}
+
+int run_interfaces(std::ostream& out) {
+    try {
+        std::vector<InterfaceInfo> interfaces = list_interfaces();
+        if (interfaces.empty()) {
+            out << "(no interfaces found -- this can mean there genuinely are none, or that "
+                   "listing them needs more privilege than this process has; try running as "
+                   "root/Administrator)\n";
+            return 0;
+        }
+        for (const auto& iface : interfaces) {
+            out << iface.name;
+            if (iface.loopback) out << "  [loopback]";
+            if (!iface.description.empty()) out << "  -- " << iface.description;
+            out << "\n";
+        }
+        return 0;
+    } catch (const CaptureError& e) {
         std::cerr << "error: " << e.what() << "\n";
         return 1;
     }
@@ -231,16 +386,40 @@ int main(int argc, char** argv) {
     // --- decode ---------------------------------------------------------
     auto* decode_cmd =
         app.add_subcommand("decode", "Decode a pcap capture and print each recognized packet");
-    std::string decode_input, decode_output;
+    std::string decode_input, decode_interface, decode_filter, decode_output;
+    int decode_duration = 0;
+    int decode_snaplen = 65535;
+    bool decode_promiscuous = true;
     std::string decode_format = "text";
     std::string decode_protocol = "auto";
     std::vector<int> decode_modbus_ports, decode_dnp3_ports, decode_s7comm_ports;
     size_t decode_max_packets = 0;
     bool decode_stats = false, decode_strict = false;
 
-    decode_cmd->add_option("-i,--input", decode_input, "Input pcap file (classic pcap; pcapng is not yet supported)")
-        ->required()
-        ->check(CLI::ExistingFile);
+    auto* decode_input_opt =
+        decode_cmd->add_option("-i,--input", decode_input,
+                                "Input pcap file (classic pcap; pcapng is not yet supported)")
+            ->check(CLI::ExistingFile);
+    auto* decode_interface_opt = decode_cmd->add_option(
+        "-I,--interface", decode_interface,
+        "Capture live from this network interface instead of reading a file (see "
+        "'conduitscope interfaces'); requires this build to have been compiled with libpcap/Npcap "
+        "support -- exactly one of -i/-I is required");
+    decode_input_opt->excludes(decode_interface_opt);
+    decode_interface_opt->excludes(decode_input_opt);
+    decode_cmd->add_option("--filter", decode_filter,
+                            "BPF capture filter (tcpdump syntax), only meaningful with -I");
+    decode_cmd->add_option("--duration", decode_duration,
+                            "Stop a live capture (-I) after this many seconds (0 = unlimited; stop "
+                            "with Ctrl+C or --max-packets instead)")
+        ->capture_default_str();
+    decode_cmd->add_option("--snaplen", decode_snaplen,
+                            "Maximum bytes captured per packet with -I")
+        ->capture_default_str();
+    decode_cmd->add_flag("!--no-promiscuous", decode_promiscuous,
+                          "With -I, don't put the interface into promiscuous mode (by default it "
+                          "is, since the main use case -- watching a mirrored/SPAN switch port -- "
+                          "needs traffic not addressed to this host)");
     decode_cmd->add_option("-o,--output", decode_output, "Write output here instead of stdout");
     decode_cmd->add_option("-f,--format", decode_format, "Output format: text, json, or csv")
         ->transform(CLI::IsMember({"text", "json", "csv"}))
@@ -274,17 +453,45 @@ int main(int argc, char** argv) {
     std::string info_input;
     info_cmd->add_option("-i,--input", info_input, "Input pcap file")->required()->check(CLI::ExistingFile);
 
+    // --- interfaces -----------------------------------------------------------
+    auto* interfaces_cmd = app.add_subcommand(
+        "interfaces", "List network interfaces available for live capture (-I); requires this "
+                       "build to have been compiled with libpcap/Npcap support");
+
     // --- policy validate ----------------------------------------------------
     auto* policy_cmd =
         app.add_subcommand("policy", "Zone/conduit compliance checking against a policy file");
     auto* policy_validate_cmd = policy_cmd->add_subcommand(
         "validate", "Check decoded traffic against a zone/conduit policy file");
-    std::string policy_input, policy_file, policy_output;
+    std::string policy_input, policy_interface, policy_filter, policy_file, policy_output;
+    int policy_duration = 0;
+    int policy_snaplen = 65535;
+    bool policy_promiscuous = true;
     std::string policy_format = "text";
     bool policy_strict = false;
-    policy_validate_cmd->add_option("-i,--input", policy_input, "Input pcap file (classic pcap)")
-        ->required()
-        ->check(CLI::ExistingFile);
+    auto* policy_input_opt =
+        policy_validate_cmd->add_option("-i,--input", policy_input, "Input pcap file (classic pcap)")
+            ->check(CLI::ExistingFile);
+    auto* policy_interface_opt = policy_validate_cmd->add_option(
+        "-I,--interface", policy_interface,
+        "Check live traffic from this network interface instead of reading a file (see "
+        "'conduitscope interfaces'); requires this build to have been compiled with libpcap/Npcap "
+        "support -- exactly one of -i/-I is required");
+    policy_input_opt->excludes(policy_interface_opt);
+    policy_interface_opt->excludes(policy_input_opt);
+    policy_validate_cmd->add_option("--filter", policy_filter,
+                                     "BPF capture filter (tcpdump syntax), only meaningful with -I");
+    policy_validate_cmd
+        ->add_option("--duration", policy_duration,
+                      "Stop a live capture (-I) after this many seconds (0 = unlimited; stop with "
+                      "Ctrl+C instead)")
+        ->capture_default_str();
+    policy_validate_cmd->add_option("--snaplen", policy_snaplen, "Maximum bytes captured per packet with -I")
+        ->capture_default_str();
+    policy_validate_cmd->add_flag(
+        "!--no-promiscuous", policy_promiscuous,
+        "With -I, don't put the interface into promiscuous mode (by default it is, since the main "
+        "use case -- watching a mirrored/SPAN switch port -- needs traffic not addressed to this host)");
     policy_validate_cmd
         ->add_option("--policy", policy_file,
                       "Zone/conduit policy file (a restricted YAML subset -- see docs/MANUAL.md's "
@@ -303,6 +510,21 @@ int main(int argc, char** argv) {
 
     CLI11_PARSE(app, argc, argv);
 
+    // -i/-I are mutually exclusive (enforced above via ->excludes()) but neither is individually
+    // ->required(), since exactly which one is required depends on the other -- CLI11 has no
+    // built-in "exactly one of these two plain options" validator, so it's checked by hand here,
+    // once parsing has otherwise succeeded, with a message that names both flags.
+    if (decode_cmd->parsed() && decode_input.empty() == decode_interface.empty()) {
+        std::cerr << "error: 'decode' needs exactly one of -i/--input (an offline pcap file) or "
+                     "-I/--interface (a live capture interface)\n";
+        return 1;
+    }
+    if (policy_validate_cmd->parsed() && policy_input.empty() == policy_interface.empty()) {
+        std::cerr << "error: 'policy validate' needs exactly one of -i/--input (an offline pcap "
+                     "file) or -I/--interface (a live capture interface)\n";
+        return 1;
+    }
+
     std::ofstream log_stream;
     std::ostream* diag = &std::cerr;
     if (!log_file.empty()) {
@@ -315,16 +537,21 @@ int main(int argc, char** argv) {
     }
 
     if (decode_cmd->parsed()) {
-        return run_decode(decode_input, decode_output, decode_format, decode_protocol,
+        return run_decode(decode_input, decode_interface, decode_filter, decode_duration, decode_snaplen,
+                           decode_promiscuous, decode_output, decode_format, decode_protocol,
                            decode_modbus_ports, decode_dnp3_ports, decode_s7comm_ports, decode_max_packets,
                            decode_stats, decode_strict, quiet, !no_color, *diag);
     }
     if (info_cmd->parsed()) {
         return run_info(info_input, std::cout);
     }
+    if (interfaces_cmd->parsed()) {
+        return run_interfaces(std::cout);
+    }
     if (policy_validate_cmd->parsed()) {
-        return run_policy_validate(policy_input, policy_file, policy_output, policy_format, policy_strict, quiet,
-                                    *diag);
+        return run_policy_validate(policy_input, policy_interface, policy_filter, policy_duration, policy_snaplen,
+                                    policy_promiscuous, policy_file, policy_output, policy_format, policy_strict,
+                                    quiet, *diag);
     }
     if (policy_cmd->parsed()) {
         std::cerr << "error: 'policy' needs a subcommand (currently only 'validate' exists)\n";

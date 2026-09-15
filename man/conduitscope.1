@@ -6,7 +6,8 @@ conduitscope \- decode Modbus/TCP, DNP3, and S7comm/COTP traffic from offline pc
 [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-color\fR] [\fB\-\-log\-file\fR \fIFILE\fR] \fICOMMAND\fR [\fIOPTIONS\fR]
 .SH DESCRIPTION
 .B conduitscope
-reads a classic-format pcap capture file and decodes Modbus/TCP, DNP3, and
+reads a classic-format pcap capture file, or optionally a live network
+interface (see \fBLIVE CAPTURE\fR below), and decodes Modbus/TCP, DNP3, and
 S7comm (Siemens S7 PLC protocol, over TPKT/COTP, TCP port 102) traffic found
 inside its TCP streams, and checks decoded traffic against a
 zone-and-conduit segmentation policy (IEC 62443 / NIS2 style work) via
@@ -17,26 +18,52 @@ not yet supported and is reported with a conversion hint
 (\fBtshark \-F pcap\fR) rather than a generic error.
 .SH COMMANDS
 .TP
-.B decode \fB\-i\fR \fIFILE\fR [\fIOPTIONS\fR]
-Decode a capture and print each recognized packet. See \fBOPTIONS\fR below.
+.B decode (\fB\-i\fR \fIFILE\fR | \fB\-I\fR \fIINTERFACE\fR) [\fIOPTIONS\fR]
+Decode a capture (or live interface) and print each recognized packet. See
+\fBOPTIONS (decode)\fR below.
 .TP
 .B info \fB\-i\fR \fIFILE\fR
-Print pcap file metadata and a protocol histogram.
+Print pcap file metadata and a protocol histogram. Offline files only; see
+\fBLIVE CAPTURE\fR for the live equivalent.
 .TP
-.B policy validate \fB\-i\fR \fIFILE\fR \fB\-\-policy\fR \fIFILE\fR [\fIOPTIONS\fR]
-Zone/conduit policy check: decodes \fIFILE\fR exactly as \fBdecode\fR would,
-groups it into TCP flows, and checks each against the zones/conduits
-declared in the policy file (a restricted, dependency-free YAML subset --
-see \fBdocs/MANUAL.md\fR's POLICY FILE FORMAT section). Prints a
-compliant/non-compliant report; see \fBOPTIONS (policy validate)\fR and
-\fBEXIT STATUS\fR below.
+.B interfaces
+List network interfaces available for live capture. See \fBLIVE CAPTURE\fR
+below.
+.TP
+.B policy validate (\fB\-i\fR \fIFILE\fR | \fB\-I\fR \fIINTERFACE\fR) \fB\-\-policy\fR \fIFILE\fR [\fIOPTIONS\fR]
+Zone/conduit policy check: decodes the capture (or live interface) exactly
+as \fBdecode\fR would, groups it into TCP flows, and checks each against the
+zones/conduits declared in the policy file (a restricted, dependency-free
+YAML subset -- see \fBdocs/MANUAL.md\fR's POLICY FILE FORMAT section).
+Prints a compliant/non-compliant report; see \fBOPTIONS (policy validate)\fR
+and \fBEXIT STATUS\fR below.
 .TP
 .B version
-Print version and build information.
+Print version and build information, including whether this build has live
+capture support.
 .SH OPTIONS (decode)
 .TP
 .BR \-i ", " \-\-input " " \fIFILE\fR
-Input pcap file. Required.
+Input pcap file. Required unless \fB\-I\fR is given; mutually exclusive with it.
+.TP
+.BR \-I ", " \-\-interface " " \fINAME\fR
+Capture live from this network interface instead of reading a file. Required
+unless \fB\-i\fR is given; mutually exclusive with it. Requires this build to
+have libpcap/Npcap support -- see \fBLIVE CAPTURE\fR.
+.TP
+.B \-\-filter \fIBPF\fR
+BPF capture filter (tcpdump syntax). Only meaningful with \fB\-I\fR.
+.TP
+.B \-\-duration \fISECONDS\fR
+Stop a live capture (\fB\-I\fR) after this many seconds. Default: 0
+(unlimited -- rely on \fB\-\-max\-packets\fR and/or Ctrl+C instead).
+.TP
+.B \-\-snaplen \fIBYTES\fR
+Maximum bytes captured per packet with \fB\-I\fR. Default: 65535.
+.TP
+.B \-\-no\-promiscuous
+With \fB\-I\fR, don't put the interface into promiscuous mode. Promiscuous
+is the default (see \fBLIVE CAPTURE\fR for why).
 .TP
 .BR \-o ", " \-\-output " " \fIFILE\fR
 Write output here instead of stdout.
@@ -59,7 +86,8 @@ Same as \fB\-\-modbus\-port\fR, for DNP3. Repeatable.
 Same as \fB\-\-modbus\-port\fR, for COTP/S7comm. Repeatable.
 .TP
 .B \-\-max\-packets \fIN\fR
-Stop after decoding this many packets. Default: 0 (unlimited).
+Stop after decoding this many packets. Default: 0 (unlimited). With
+\fB\-I\fR, also bounds a live capture.
 .TP
 .B \-\-stats
 Print an aggregate summary instead of one line per packet. Ignores
@@ -70,7 +98,25 @@ Abort on the first malformed packet instead of warning and continuing.
 .SH OPTIONS (policy validate)
 .TP
 .BR \-i ", " \-\-input " " \fIFILE\fR
-Input pcap file. Required.
+Input pcap file. Required unless \fB\-I\fR is given; mutually exclusive with it.
+.TP
+.BR \-I ", " \-\-interface " " \fINAME\fR
+Check live traffic from this network interface instead of reading a file.
+Required unless \fB\-i\fR is given; mutually exclusive with it. No
+\fB\-\-max\-packets\fR equivalent here -- use \fB\-\-duration\fR and/or Ctrl+C.
+.TP
+.B \-\-filter \fIBPF\fR
+BPF capture filter (tcpdump syntax). Only meaningful with \fB\-I\fR.
+.TP
+.B \-\-duration \fISECONDS\fR
+Stop a live capture (\fB\-I\fR) after this many seconds. Default: 0
+(unlimited -- rely on Ctrl+C instead).
+.TP
+.B \-\-snaplen \fIBYTES\fR
+Maximum bytes captured per packet with \fB\-I\fR. Default: 65535.
+.TP
+.B \-\-no\-promiscuous
+Same meaning as \fBdecode\fR's \fB\-\-no\-promiscuous\fR.
 .TP
 .B \-\-policy \fIFILE\fR
 Zone/conduit policy file. Required. See \fBdocs/MANUAL.md\fR's POLICY FILE
@@ -84,6 +130,30 @@ Report format. Default: text.
 .TP
 .B \-\-strict
 Abort on the first malformed packet instead of warning and continuing.
+.SH LIVE CAPTURE
+\fB\-I/\-\-interface\fR and \fBinterfaces\fR require this build to have been
+compiled with libpcap (Linux) or the Npcap SDK (Windows) found by CMake --
+an optional, build-time-detected dependency, the one exception to
+conduitscope's otherwise zero-dependency design. A build without it is
+otherwise unaffected; \fB\-I\fR/\fBinterfaces\fR just report that clearly at
+runtime instead of not existing.
+.PP
+A live capture stops -- decoding/reporting whatever was captured so far,
+same as reaching the end of an offline file -- on \fB\-\-duration\fR
+elapsing, \fB\-\-max\-packets\fR being reached (\fBdecode\fR only), or
+Ctrl+C (SIGINT), which is caught and used to stop cleanly rather than
+killing the process outright.
+.PP
+Promiscuous mode is on by default (\fB\-\-no\-promiscuous\fR turns it off)
+because the primary use case -- watching a mirrored/SPAN switch port for
+zone/conduit traffic between two other devices -- needs to see traffic not
+addressed to the capturing host at all.
+.PP
+On Windows, install the Npcap SDK to build with live-capture support, and
+the separate Npcap runtime/driver on whatever machine actually runs a
+conduitscope binary built with it -- these are two different installs. See
+\fBdocs/MANUAL.md\fR's LIVE CAPTURE section for the full reference,
+including why this has only been validated on Linux so far.
 .SH GLOBAL OPTIONS
 .TP
 .BR \-q ", " \-\-quiet
@@ -146,7 +216,10 @@ S7comm item-level addressing (inside Read Var / Write Var) is fully
 confident only for the classic S7ANY syntax; the S7-1200/1500 "symbolic"
 syntax (0xB2) gets an EXPERIMENTAL, unverified decode, marked
 [EXPERIMENTAL] everywhere it appears;
-S7comm-Plus is detected but never decoded; no live capture;
+S7comm-Plus is detected but never decoded; live capture is an optional,
+build-time-detected feature (see LIVE CAPTURE) whose Windows/Npcap path has
+not yet been run on a real Windows machine, validated on Linux so far only
+against loopback traffic;
 \fBpolicy validate\fR's zones are IPv4 CIDR-only and its client/server
 (initiator) determination falls back to a port-number heuristic when no
 SYN/SYN-ACK was captured for a flow. See the
@@ -180,6 +253,27 @@ Check a capture against a zone/conduit policy:
 .RS
 .EX
 conduitscope policy validate \-i capture.pcap \-\-policy policy.yaml
+.EE
+.RE
+.PP
+List capturable interfaces (requires live\-capture support):
+.RS
+.EX
+conduitscope interfaces
+.EE
+.RE
+.PP
+Decode live traffic from eth0 for 60 seconds:
+.RS
+.EX
+conduitscope decode \-I eth0 \-\-filter "port 502 or port 102" \-\-duration 60
+.EE
+.RE
+.PP
+Check live traffic against a policy until Ctrl+C:
+.RS
+.EX
+conduitscope policy validate \-I eth0 \-\-policy policy.yaml
 .EE
 .RE
 .SH SEE ALSO

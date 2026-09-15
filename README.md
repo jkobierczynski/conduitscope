@@ -10,12 +10,19 @@ between them, and get back a compliant/non-compliant report naming every flow th
 wasn't explicitly permitted. See [docs/MANUAL.md](docs/MANUAL.md)'s POLICY FILE FORMAT
 section for the schema.
 
-Why offline pcap files rather than live capture: it keeps the tool dependency-free.
-No libpcap on Linux, no Npcap SDK on Windows, no elevated privileges to build or run
--- just a C++17 compiler and CMake. Capture traffic with whatever's already on your
+Offline pcap files are still the primary, always-available way in: no libpcap on
+Linux, no Npcap SDK on Windows, no elevated privileges needed to build or run --
+just a C++17 compiler and CMake. Capture traffic with whatever's already on your
 system (`tcpdump -w capture.pcap ...`, Wireshark's "save as pcap"), then decode it
-here. Live capture is a natural later addition; see the Roadmap in
-[docs/MANUAL.md](docs/MANUAL.md).
+here.
+
+Live capture (`-I/--interface`) is also available now, as the one deliberate
+exception to that zero-dependency design: it's an *optional*, build-time-detected
+dependency on libpcap (Linux) / the Npcap SDK (Windows) -- if CMake finds it, `-I`
+and `conduitscope interfaces` work; if it doesn't, the build is exactly as
+dependency-free as before, and those two just report that clearly at runtime
+instead of not existing. See [docs/MANUAL.md](docs/MANUAL.md)'s LIVE CAPTURE
+section.
 
 ## Status
 
@@ -128,8 +135,16 @@ Groundwork / v0.1.0. What works right now:
   docs/MANUAL.md's POLICY FILE FORMAT section for the full schema and
   LIMITATIONS for exactly what it does and doesn't check (e.g. the
   SYN-based flow-direction heuristic's fallback case).
-- A `decode`/`info`/`policy validate`/`version` command surface with full
-  `--help` at every level
+- Live capture (`decode -I`/`policy validate -I`, plus `conduitscope interfaces`
+  to list interfaces): an optional, build-time-detected libpcap (Linux) / Npcap
+  (Windows) dependency -- see above and docs/MANUAL.md's LIVE CAPTURE section.
+  `--duration`, `--filter` (BPF syntax), `--snaplen`, and Ctrl+C all stop a
+  capture cleanly, still producing whatever decode output or policy report was
+  captured so far. Validated end-to-end against real loopback traffic on Linux;
+  the Windows/Npcap path is implemented against the same documented API but not
+  yet run on a real Windows machine -- see docs/MANUAL.md's LIMITATIONS.
+- A `decode`/`info`/`interfaces`/`policy validate`/`version` command surface
+  with full `--help` at every level
 
 See [docs/MANUAL.md](docs/MANUAL.md) for the complete option reference,
 output-format examples, exit codes, and the honest list of current limitations
@@ -137,12 +152,21 @@ and what's planned next.
 
 ## Building
 
-Requires a C++17 compiler and CMake >= 3.16. No other dependencies -- CLI11 is
-vendored as a single header under `third_party/`.
+Requires a C++17 compiler and CMake >= 3.16. No other dependencies are *required*
+-- CLI11 is vendored as a single header under `third_party/`. If `libpcap-dev`
+(Linux) or the Npcap SDK (Windows) happens to be installed and discoverable,
+CMake picks it up automatically and live capture (`-I/--interface`) is built in;
+if not, the build is unaffected except that `-I` reports it isn't available. Pass
+`-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF` to skip that search entirely and
+guarantee a dependency-free build regardless of what's installed. See
+docs/MANUAL.md's LIVE CAPTURE section for the runtime-vs-build-time distinction
+on Windows (the Npcap *SDK* is build-time only; running a live capture also needs
+the separate Npcap *driver/service* installed).
 
 ### Linux
 
 ```sh
+sudo apt install libpcap-dev   # optional, only needed for live capture (-I)
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 ctest --test-dir build --output-on-failure   # optional, runs the fixture-based smoke tests
@@ -152,7 +176,11 @@ The binary is `build/conduitscope`.
 
 ### Windows
 
-Either Visual Studio 2022 (MSVC) or MinGW-w64 work, via the same CMake project:
+Either Visual Studio 2022 (MSVC) or MinGW-w64 work, via the same CMake project.
+For live capture (`-I`), install the [Npcap SDK](https://npcap.com/#download) and
+either set it as the `NPCAP_SDK_DIR` environment variable or pass
+`-DNPCAP_SDK_DIR=<path>` to CMake; skip this entirely for a build without live
+capture.
 
 ```powershell
 cmake -S . -B build -G "Visual Studio 17 2022" -A x64
@@ -167,7 +195,9 @@ cmake --build build -j
 ```
 
 The binary is `build\Release\conduitscope.exe` (MSVC) or `build\conduitscope.exe`
-(MinGW).
+(MinGW). Running a live capture (not just building with support for one) also
+needs the [Npcap runtime](https://npcap.com/#download) installed on the machine
+that runs it -- the SDK used at build time only supplies headers/import libraries.
 
 ## Quick start
 
@@ -192,6 +222,16 @@ To decode traffic you've actually captured, e.g. from a Modbus simulator such as
 ```sh
 tcpdump -i <iface> -w capture.pcap port 502 or port 20000 or port 102
 build/conduitscope decode -i capture.pcap
+```
+
+Or, if this build has live-capture support (see Building above), skip the
+intermediate file and check traffic in real time:
+
+```sh
+build/conduitscope interfaces                                    # list capturable interfaces
+build/conduitscope decode -I eth0 --filter "port 502 or port 102" --duration 60
+build/conduitscope policy validate -I eth0 --policy tests/policies/compliant.yaml --duration 60
+# or just Ctrl+C to stop either one early -- both still print whatever was captured so far
 ```
 
 ## License

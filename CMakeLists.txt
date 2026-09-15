@@ -35,6 +35,7 @@ add_library(conduitscope_core STATIC
   src/yaml_mini.cpp
   src/policy.cpp
   src/policy_engine.cpp
+  src/live_capture.cpp
 )
 target_include_directories(conduitscope_core PUBLIC
   "${CMAKE_CURRENT_SOURCE_DIR}/include"
@@ -45,6 +46,65 @@ if(MSVC)
   target_compile_options(conduitscope_core PRIVATE /W4 /permissive-)
 else()
   target_compile_options(conduitscope_core PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+# --------------------------------------------------------------------------------------------
+# Optional live-capture support (libpcap on Linux, the Npcap SDK on Windows). This is the ONE
+# exception to the project's otherwise zero-external-dependency design (see README.md's "Why
+# offline pcap files" section) -- and it stays optional even where it's found: when neither is
+# present, conduitscope_core still builds exactly as it always has, and live_capture.cpp's stub
+# implementation (see its own comment) makes `-I/--interface` and `conduitscope interfaces` fail
+# with a clear message instead of not existing at all.
+#
+# CONDUITSCOPE_ENABLE_LIVE_CAPTURE lets a builder opt out of even searching (e.g. a packager who
+# wants a guaranteed-dependency-free build regardless of what happens to be installed on the build
+# machine); it defaults on since the search itself is harmless when nothing is found.
+# --------------------------------------------------------------------------------------------
+option(CONDUITSCOPE_ENABLE_LIVE_CAPTURE
+  "Search for libpcap (Linux) / the Npcap SDK (Windows) and build live-capture support if found"
+  ON)
+
+set(CONDUITSCOPE_HAVE_PCAP FALSE)
+if(CONDUITSCOPE_ENABLE_LIVE_CAPTURE)
+  if(WIN32)
+    # The Npcap SDK (distinct from the Npcap runtime installer -- see docs/MANUAL.md's LIVE
+    # CAPTURE section) ships pcap.h under Include/ and import libraries under Lib/ (32-bit) or
+    # Lib/x64/ (64-bit); it has no standard install location, so NPCAP_SDK_DIR (an environment or
+    # CMake variable) is how a builder points at it, alongside the common default install path.
+    set(_conduitscope_npcap_sdk_dir "$ENV{NPCAP_SDK_DIR}")
+    if(NOT _conduitscope_npcap_sdk_dir AND DEFINED NPCAP_SDK_DIR)
+      set(_conduitscope_npcap_sdk_dir "${NPCAP_SDK_DIR}")
+    endif()
+    find_path(PCAP_INCLUDE_DIR pcap.h
+      HINTS "${_conduitscope_npcap_sdk_dir}/Include" "C:/Npcap-SDK/Include")
+    if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+      set(_conduitscope_npcap_lib_subdir "Lib/x64")
+    else()
+      set(_conduitscope_npcap_lib_subdir "Lib")
+    endif()
+    find_library(PCAP_LIBRARY NAMES wpcap
+      HINTS "${_conduitscope_npcap_sdk_dir}/${_conduitscope_npcap_lib_subdir}"
+            "C:/Npcap-SDK/${_conduitscope_npcap_lib_subdir}")
+    unset(_conduitscope_npcap_sdk_dir)
+    unset(_conduitscope_npcap_lib_subdir)
+  else()
+    find_path(PCAP_INCLUDE_DIR pcap.h)
+    find_library(PCAP_LIBRARY NAMES pcap)
+  endif()
+
+  if(PCAP_INCLUDE_DIR AND PCAP_LIBRARY)
+    set(CONDUITSCOPE_HAVE_PCAP TRUE)
+    target_compile_definitions(conduitscope_core PUBLIC CONDUITSCOPE_HAVE_PCAP=1)
+    target_include_directories(conduitscope_core PRIVATE "${PCAP_INCLUDE_DIR}")
+    target_link_libraries(conduitscope_core PUBLIC "${PCAP_LIBRARY}")
+    message(STATUS "conduitscope: live capture ENABLED (found ${PCAP_LIBRARY})")
+  else()
+    message(STATUS "conduitscope: live capture DISABLED (libpcap/Npcap SDK not found -- "
+                    "'-I/--interface' and 'interfaces' will report this clearly at runtime; "
+                    "everything else is unaffected)")
+  endif()
+else()
+  message(STATUS "conduitscope: live capture DISABLED (CONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF)")
 endif()
 
 # CLI11 is vendored as a single header under third_party/ specifically so this
@@ -867,3 +927,112 @@ add_test(NAME policy_error_line_number_is_the_zones_own_line
   COMMAND conduitscope policy validate --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_overlap_after_description.yaml")
 set_tests_properties(policy_error_line_number_is_the_zones_own_line PROPERTIES
   PASS_REGULAR_EXPRESSION "bad_overlap_after_description.yaml:11: zone 'z1' .* and zone 'z2' .* overlap")
+
+# ---------------------------------------------------------------------------------------------
+# Live capture (live_capture.hpp/cpp) -- an optional, build-time-detected libpcap (Linux) / Npcap
+# (Windows) dependency; see CMakeLists.txt's CONDUITSCOPE_HAVE_PCAP detection above. The CLI
+# surface (-I/--interface, --filter, --duration, --snaplen, --no-promiscuous, `interfaces`) exists
+# unconditionally -- only the runtime behavior behind it depends on CONDUITSCOPE_HAVE_PCAP -- so
+# argument-validation tests below run regardless. Tests that actually open an interface are gated
+# on CONDUITSCOPE_HAVE_PCAP (nothing to open otherwise) and, since this project has no CI configured
+# yet and has only been exercised in a Linux dev sandbox so far, further gated on UNIX and scoped to
+# loopback ("lo"), which every Linux/macOS host has; a Windows loopback interface has a different,
+# non-portable name (see docs/MANUAL.md's LIVE CAPTURE section), so the Windows path is currently
+# validated only by the argument-parsing tests, same honesty-about-scope convention as this
+# project's other platform-specific caveats (e.g. the S7comm-Plus/DNP3 real-capture notes above).
+# ---------------------------------------------------------------------------------------------
+
+add_test(NAME live_capture_requires_exactly_one_source_decode
+  COMMAND conduitscope decode)
+set_tests_properties(live_capture_requires_exactly_one_source_decode PROPERTIES
+  PASS_REGULAR_EXPRESSION "needs exactly one of -i/--input.*or -I/--interface")
+
+add_test(NAME live_capture_input_and_interface_are_mutually_exclusive_decode
+  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --interface lo)
+set_tests_properties(live_capture_input_and_interface_are_mutually_exclusive_decode PROPERTIES
+  WILL_FAIL TRUE)
+
+add_test(NAME live_capture_requires_exactly_one_source_policy_validate
+  COMMAND conduitscope policy validate --policy "${POLICY_DIR}/compliant.yaml")
+set_tests_properties(live_capture_requires_exactly_one_source_policy_validate PROPERTIES
+  PASS_REGULAR_EXPRESSION "needs exactly one of -i/--input.*or -I/--interface")
+
+add_test(NAME live_capture_input_and_interface_are_mutually_exclusive_policy_validate
+  COMMAND conduitscope policy validate --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --interface lo --policy "${POLICY_DIR}/compliant.yaml")
+set_tests_properties(live_capture_input_and_interface_are_mutually_exclusive_policy_validate PROPERTIES
+  WILL_FAIL TRUE)
+
+add_test(NAME live_capture_version_reports_support
+  COMMAND conduitscope version)
+if(CONDUITSCOPE_HAVE_PCAP)
+  set_tests_properties(live_capture_version_reports_support PROPERTIES
+    PASS_REGULAR_EXPRESSION "live capture: libpcap/Npcap")
+else()
+  set_tests_properties(live_capture_version_reports_support PROPERTIES
+    PASS_REGULAR_EXPRESSION "live capture: not built in")
+endif()
+
+if(NOT CONDUITSCOPE_HAVE_PCAP)
+  # This build was configured with CONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF, or simply didn't find
+  # libpcap/Npcap -- confirm the stub path (live_capture.cpp's #else branch) gives a clear,
+  # actionable error rather than a crash or a silent no-op, for both entry points.
+  add_test(NAME live_capture_unavailable_interfaces_command
+    COMMAND conduitscope interfaces)
+  set_tests_properties(live_capture_unavailable_interfaces_command PROPERTIES
+    PASS_REGULAR_EXPRESSION "live capture is not available.*libpcap.*Npcap")
+
+  add_test(NAME live_capture_unavailable_decode_interface
+    COMMAND conduitscope decode --interface lo --duration 1)
+  set_tests_properties(live_capture_unavailable_decode_interface PROPERTIES
+    PASS_REGULAR_EXPRESSION "live capture is not available.*libpcap.*Npcap")
+else()
+  # This build actually found libpcap/Npcap. A bad/nonexistent interface name is portable (no real
+  # interface needs to exist on either platform for this to fail the way it's supposed to), so it
+  # runs regardless of OS; everything else here opens "lo" specifically, which only exists (under
+  # that name) on Linux/macOS -- Windows' loopback interface has a different, non-portable name
+  # (see docs/MANUAL.md's LIVE CAPTURE section) -- so those are further gated on UNIX. This project
+  # has no CI configured yet and has only actually been run on Linux so far; the Windows path is
+  # validated only by the argument-parsing and bad-interface-name tests until that changes.
+  add_test(NAME live_capture_bad_interface_name_reports_clearly
+    COMMAND conduitscope decode --interface this_interface_does_not_exist --duration 1)
+  set_tests_properties(live_capture_bad_interface_name_reports_clearly PROPERTIES
+    PASS_REGULAR_EXPRESSION "cannot (open|activate) .*this_interface_does_not_exist")
+
+  if(UNIX)
+    # None of these depend on any traffic actually existing on "lo" during the run (--duration
+    # alone must be enough to stop cleanly), so they don't need a traffic generator and stay
+    # fast/deterministic.
+    add_test(NAME live_capture_interfaces_command_lists_loopback
+      COMMAND conduitscope interfaces)
+    set_tests_properties(live_capture_interfaces_command_lists_loopback PROPERTIES
+      PASS_REGULAR_EXPRESSION "lo  \\[loopback\\]")
+
+    add_test(NAME live_capture_invalid_filter_reports_clearly
+      COMMAND conduitscope decode --interface lo --filter "this is not valid bpf syntax {{{" --duration 1)
+    set_tests_properties(live_capture_invalid_filter_reports_clearly PROPERTIES
+      PASS_REGULAR_EXPRESSION "invalid capture filter")
+
+    add_test(NAME live_capture_duration_stops_cleanly_with_no_traffic
+      COMMAND conduitscope decode --interface lo --duration 1 --format text)
+    set_tests_properties(live_capture_duration_stops_cleanly_with_no_traffic PROPERTIES
+      TIMEOUT 10
+      FAIL_REGULAR_EXPRESSION "error:")
+
+    add_test(NAME live_capture_policy_validate_duration_stops_cleanly
+      COMMAND conduitscope policy validate --interface lo --duration 1 --policy "${POLICY_DIR}/compliant.yaml")
+    set_tests_properties(live_capture_policy_validate_duration_stops_cleanly PROPERTIES
+      TIMEOUT 10
+      PASS_REGULAR_EXPRESSION "capture: live:lo")
+
+    # Every test above deliberately relies on "lo" carrying NO traffic, for determinism -- which
+    # means none of them prove --max-packets actually bounds a live capture, or that live capture
+    # decodes something real rather than just opening/closing cleanly. This one does: it generates
+    # one real loopback TCP handshake attempt concurrently with a --max-packets=2 capture. See the
+    # script's own header comment for exactly how, and why a bug here would hang (TIMEOUT) rather
+    # than silently pass.
+    add_test(NAME live_capture_max_packets_stops_capture_early_with_real_traffic
+      COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/live_capture_max_packets_smoke.sh" "$<TARGET_FILE:conduitscope>")
+    set_tests_properties(live_capture_max_packets_stops_capture_early_with_real_traffic PROPERTIES
+      TIMEOUT 20)
+  endif()
+endif()
