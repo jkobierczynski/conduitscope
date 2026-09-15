@@ -492,6 +492,15 @@ std::optional<Dnp3LinkFrame> try_parse_dnp3_link_layer(ByteSpan tcp_payload) {
     return frame;
 }
 
+std::vector<uint8_t> reassemble_dnp3_user_data(const Dnp3LinkFrame& link, ByteSpan tcp_payload,
+                                                std::vector<std::string>& notes) {
+    if (link.user_data_bytes == 0) {
+        return {};
+    }
+    ByteSpan after_header = tcp_payload.size() > 10 ? tcp_payload.from(10) : ByteSpan();
+    return reassemble_user_data(after_header, link.user_data_bytes, notes);
+}
+
 std::optional<Dnp3ApplicationFragment> try_parse_dnp3_transport_and_application(const Dnp3LinkFrame& link,
                                                                                  ByteSpan tcp_payload) {
     if (link.user_data_bytes == 0) {
@@ -499,8 +508,7 @@ std::optional<Dnp3ApplicationFragment> try_parse_dnp3_transport_and_application(
     }
 
     Dnp3ApplicationFragment frag;
-    ByteSpan after_header = tcp_payload.size() > 10 ? tcp_payload.from(10) : ByteSpan();
-    std::vector<uint8_t> logical = reassemble_user_data(after_header, link.user_data_bytes, frag.notes);
+    std::vector<uint8_t> logical = reassemble_dnp3_user_data(link, tcp_payload, frag.notes);
 
     if (logical.empty()) {
         frag.notes.push_back("no transport-layer byte could be recovered for this fragment");
@@ -525,24 +533,35 @@ std::optional<Dnp3ApplicationFragment> try_parse_dnp3_transport_and_application(
         frag.notes.push_back(
             "this fragment's transport header has FIR=" + std::to_string(frag.transport_fir ? 1 : 0) +
             " FIN=" + std::to_string(frag.transport_fin ? 1 : 0) +
-            " -- it is not a complete single-data-link-frame fragment, so the application layer is "
-            "not decoded in this groundwork release (no multi-data-link-frame reassembly, matching "
-            "this tool's no-TCP-stream-reassembly scope; see dnp3.hpp)");
+            " -- it is not a complete single-data-link-frame fragment, and this single-frame "
+            "convenience function does not itself buffer bytes across packets, so the application "
+            "layer is not decoded here; Decoder does perform that cross-packet reassembly (see "
+            "Decoder::process_dnp3_frame in decoder.hpp) and is what the CLI actually uses");
         frag.summary = summary.str();
         return frag;
     }
 
-    if (logical.size() < 2) {
+    ByteSpan app_span = logical.size() > 1 ? ByteSpan(logical.data() + 1, logical.size() - 1) : ByteSpan();
+    decode_dnp3_application_layer(app_span, frag);
+    if (!frag.summary.empty()) {
+        summary << " | " << frag.summary;
+    }
+    frag.summary = summary.str();
+    return frag;
+}
+
+void decode_dnp3_application_layer(ByteSpan app_bytes, Dnp3ApplicationFragment& frag) {
+    std::ostringstream summary;
+
+    if (app_bytes.empty()) {
         frag.notes.push_back(
             "transport header present but no application control/function-code byte followed it "
             "(truncated fragment)");
-        frag.summary = summary.str();
-        return frag;
+        frag.summary.clear();
+        return;
     }
 
-    // --- Application layer. ---
-    ByteSpan app_span(logical.data() + 1, logical.size() - 1);
-    Cursor ac(app_span);
+    Cursor ac(app_bytes);
 
     frag.app_control = ac.u8();
     frag.app_fir = (frag.app_control & 0x80) != 0;
@@ -555,14 +574,14 @@ std::optional<Dnp3ApplicationFragment> try_parse_dnp3_transport_and_application(
         frag.notes.push_back("application control byte present but no function code followed it "
                               "(truncated fragment)");
         frag.summary = summary.str();
-        return frag;
+        return;
     }
     frag.function_code = ac.u8();
     frag.has_function = true;
     frag.function_name = dnp3_function_name(frag.function_code);
     frag.application_decoded = true;
 
-    summary << " | application: FIR=" << (frag.app_fir ? 1 : 0) << " FIN=" << (frag.app_fin ? 1 : 0)
+    summary << "application: FIR=" << (frag.app_fir ? 1 : 0) << " FIN=" << (frag.app_fin ? 1 : 0)
             << " CON=" << (frag.app_con ? 1 : 0) << " UNS=" << (frag.app_uns ? 1 : 0)
             << " SEQ=" << static_cast<unsigned>(frag.app_seq) << " function=" << frag.function_name << " ("
             << hex8(frag.function_code) << ")";
@@ -575,7 +594,7 @@ std::optional<Dnp3ApplicationFragment> try_parse_dnp3_transport_and_application(
                 ") is a response function but fewer than 2 bytes remain for its IIN field "
                 "(truncated fragment) -- object headers were not parsed");
             frag.summary = summary.str();
-            return frag;
+            return;
         }
         frag.iin = ac.u16le();
         frag.has_iin = true;
@@ -842,7 +861,6 @@ std::optional<Dnp3ApplicationFragment> try_parse_dnp3_transport_and_application(
     }
 
     frag.summary = summary.str();
-    return frag;
 }
 
 }  // namespace conduitscope

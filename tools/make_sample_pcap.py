@@ -249,6 +249,61 @@ def build_dnp3_sample():
     ip7 = ipv4_header(HMI_IP, PLC_IP, 6, len(tcp7), 0x2006) + tcp7
     packets.append(eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip7)
 
+    # 8) & 9) A genuine cross-packet fragment: the SAME Direct Operate/CROB application-layer
+    #    bytes as packet 6's crob_payload (minus its own transport byte), split across TWO
+    #    data-link frames delivered in two SEPARATE TCP segments/pcap packets -- exercising
+    #    Decoder's per-flow reassembly (dnp3_reassembly_/process_dnp3_frame), not the single-TCP-
+    #    payload coalescing packet 7 exercises. This is a contrived split for test purposes (a
+    #    real 19-byte CROB command would never need to span frames); what's being tested is the
+    #    reassembly mechanism itself, which is agnostic to which function code or how the bytes
+    #    happen to be divided -- only to FIR/FIN/SEQ continuity. On a fresh flow (new source port)
+    #    so it can't interact with packet 4's already-abandoned, never-completed reassembly above.
+    #    First frame: transport FIR=1 FIN=0 SEQ=5 (0x85), then app_control+fc+group/var/qualifier+
+    #    count+index (7 bytes) -- everything up to but not including the CROB fields themselves.
+    crob_app_bytes = crob_payload[1:]  # drop crob_payload's own transport byte (see packet 6 above)
+    crob_first_part, crob_second_part = crob_app_bytes[:7], crob_app_bytes[7:]
+    assert len(crob_first_part) == 7 and len(crob_second_part) == 11
+    frame8_payload = bytes([0x85]) + crob_first_part
+    frame8 = dnp3_link_frame(source=1, destination=1024, user_data=frame8_payload)
+    tcp8 = tcp_header(51501, 20000, 7000, 8000, TCP_PSH | TCP_ACK, len(frame8)) + frame8
+    ip8 = ipv4_header(HMI_IP, PLC_IP, 6, len(tcp8), 0x2007) + tcp8
+    packets.append(eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip8)
+
+    # Second frame, in its own pcap packet: transport FIR=0 FIN=1 SEQ=6 (0x46), then the
+    # remaining 11 bytes (the CROB fields) -- completes the fragment on receipt.
+    frame9_payload = bytes([0x46]) + crob_second_part
+    frame9 = dnp3_link_frame(source=1, destination=1024, user_data=frame9_payload)
+    tcp9 = tcp_header(51501, 20000, 7000 + len(frame8), 8000, TCP_PSH | TCP_ACK, len(frame9)) + frame9
+    ip9 = ipv4_header(HMI_IP, PLC_IP, 6, len(tcp9), 0x2008) + tcp9
+    packets.append(eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip9)
+
+    # 10) An orphan continuation: a FIR=0 data-link frame on a flow with no reassembly in
+    #     progress at all (no FIR=1 start was ever seen on this flow) -- must be left with only
+    #     its transport header decoded, and must say so, not silently guess or crash.
+    orphan_payload = bytes([0x41]) + bytes([0xDE, 0xAD])  # FIR=0 FIN=1 SEQ=1, then unparsed junk
+    orphan_frame = dnp3_link_frame(source=1, destination=1024, user_data=orphan_payload)
+    tcp10 = tcp_header(51502, 20000, 9000, 9100, TCP_PSH | TCP_ACK, len(orphan_frame)) + orphan_frame
+    ip10 = ipv4_header(HMI_IP, PLC_IP, 6, len(tcp10), 0x2009) + tcp10
+    packets.append(eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip10)
+
+    # 11) & 12) A sequence-number mismatch: frame 11 begins a fragment (FIR=1 FIN=0 SEQ=10), but
+    #     frame 12's SEQ jumps to 35 instead of continuing at 11 (SEQ is only 6 bits wide, 0-63) --
+    #     the in-progress reassembly must be discarded (not silently concatenated out of order),
+    #     with a note explaining why, and frame 12 itself must not be misread as an orphan
+    #     continuation either.
+    mismatch_first_payload = bytes([0x8A]) + bytes([0xC0, 0x01, 60, 1, 0x06])  # FIR=1 FIN=0 SEQ=10
+    mismatch_first = dnp3_link_frame(source=1, destination=1024, user_data=mismatch_first_payload)
+    tcp11 = tcp_header(51503, 20000, 10000, 11000, TCP_PSH | TCP_ACK, len(mismatch_first)) + mismatch_first
+    ip11 = ipv4_header(HMI_IP, PLC_IP, 6, len(tcp11), 0x200A) + tcp11
+    packets.append(eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip11)
+
+    mismatch_second_payload = bytes([0x63]) + bytes([0xAA, 0xBB])  # FIR=0 FIN=1 SEQ=35, then junk
+    mismatch_second = dnp3_link_frame(source=1, destination=1024, user_data=mismatch_second_payload)
+    tcp12 = tcp_header(51503, 20000, 10000 + len(mismatch_first), 11000, TCP_PSH | TCP_ACK,
+                        len(mismatch_second)) + mismatch_second
+    ip12 = ipv4_header(HMI_IP, PLC_IP, 6, len(tcp12), 0x200B) + tcp12
+    packets.append(eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip12)
+
     data = pcap_global_header()
     for i, pkt in enumerate(packets):
         data += pcap_record(pkt, 1_700_000_100 + i, i * 1000)

@@ -7,8 +7,11 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
+#include "conduitscope/byteio.hpp"
+#include "conduitscope/dnp3.hpp"
 #include "conduitscope/pcap_reader.hpp"
 
 namespace conduitscope {
@@ -100,6 +103,20 @@ struct DecodedPacket {
     std::vector<std::string> dnp3_point_values;
 };
 
+// Cross-packet DNP3 fragment-reassembly state for one directional TCP flow (src ip:port -> dst
+// ip:port) -- see Decoder::dnp3_reassembly_ and Decoder::process_dnp3_frame. A DNP3 fragment can
+// span more than one data-link frame (transport FIR=1 on the first, FIN=1 on the last), and each
+// of those frames can arrive in its own separate TCP segment/packet -- reassembling that requires
+// remembering, per flow, the application-layer bytes buffered so far and the next sequence number
+// expected, across however many Decoder::decode() calls it takes for the rest to show up. Not
+// meant for use outside Decoder; exposed here only because it's a plain-data member type.
+struct Dnp3FragmentReassembly {
+    bool in_progress = false;
+    std::vector<uint8_t> buffered_app_bytes;  // concatenated post-transport-byte bytes so far
+    uint8_t last_seq = 0;                     // transport SEQ of the most recently buffered frame
+    size_t frame_count = 0;                   // data-link frames contributed so far
+};
+
 class Decoder {
 public:
     explicit Decoder(DecodeOptions options) : options_(std::move(options)) {}
@@ -107,10 +124,36 @@ public:
     // May throw ParseError only when options.strict is true and an
     // Ethernet/IPv4/TCP-layer parse fails; otherwise failures are captured
     // in the returned DecodedPacket's protocol/summary/notes fields.
+    //
+    // NOTE ON STATEFULNESS: this method is `const` in the sense that every DecodedPacket it
+    // returns is still produced deterministically from (a) the packet passed in and (b) whatever
+    // DNP3 fragment-reassembly state (dnp3_reassembly_) earlier calls on THIS Decoder instance
+    // left behind -- it is not const/pure in the stronger sense of depending only on its
+    // arguments. That only means anything if packets are decoded through one Decoder instance, in
+    // strict capture-file order, one at a time -- which is exactly what cli_main.cpp does (a
+    // single Decoder per file-decode pass, one sequential while-loop, no concurrency). Decoding
+    // the same packet twice on a fresh Decoder, or out of order, will not reproduce reassembly
+    // that depended on packets decoded earlier in the file.
     DecodedPacket decode(const PcapPacket& packet, uint32_t link_type, size_t index) const;
 
 private:
     DecodeOptions options_;
+
+    // See Dnp3FragmentReassembly above. Keyed by "src_ip:src_port->dst_ip:dst_port" (one entry
+    // per directional TCP flow that has ever carried an in-progress DNP3 fragment). `mutable`
+    // because it is cross-packet state accumulated across decode() calls, not a function of the
+    // current packet alone -- see the NOTE ON STATEFULNESS above for why that is safe here.
+    mutable std::unordered_map<std::string, Dnp3FragmentReassembly> dnp3_reassembly_;
+
+    // Decodes one DNP3 data-link frame's transport header and, once its fragment is complete,
+    // application layer -- buffering across packets via dnp3_reassembly_[flow_key] when the
+    // fragment spans more than one data-link frame (transport FIR=1,FIN=0 on an earlier frame).
+    // `link`/`tcp_payload` are the same as try_parse_dnp3_transport_and_application's, which this
+    // supersedes as decoder.cpp's call site precisely because that function has no flow to buffer
+    // against. Same nullopt contract: only when link.user_data_bytes == 0. See dnp3.hpp for the
+    // reassemble_dnp3_user_data/decode_dnp3_application_layer primitives this is built from.
+    std::optional<Dnp3ApplicationFragment> process_dnp3_frame(const Dnp3LinkFrame& link, ByteSpan tcp_payload,
+                                                                const std::string& flow_key) const;
 };
 
 }  // namespace conduitscope

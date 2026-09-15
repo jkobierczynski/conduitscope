@@ -283,13 +283,32 @@ fix and doesn't require any cross-packet state.
 
 The **application layer** -- function code, Internal Indications (IIN) on
 responses, and every object header's group/variation/qualifier/range -- is
-then decoded, but only for a fragment that is complete within a single
-data-link frame (transport FIR=1 and FIN=1, which covers the large majority
-of real traffic, especially requests). A fragment that continues across
-multiple data-link frames (FIR=1, FIN=0) gets its transport header decoded
-and nothing more -- reassembling application data across several TCP-carried
-data-link frames would need the same kind of cross-packet state tracking as
-TCP stream reassembly (see LIMITATIONS), which this tool does not do.
+then decoded. For a fragment that is complete within a single data-link
+frame (transport FIR=1 and FIN=1, which covers the large majority of real
+traffic, especially requests), this happens immediately. For a fragment that
+continues across multiple data-link frames (FIR=1 on the first, FIN=0 until
+the last), conduitscope buffers each frame's application-layer bytes,
+per TCP flow (source and destination IP:port), across however many packets
+it takes for the rest to arrive -- including when later frames land in
+*separate* TCP segments, not just later in the same one -- and decodes the
+full application layer once a frame with FIN=1 completes it. This is real
+cross-packet state (unlike the coalescing above): it depends on every
+packet in the flow being decoded, in capture order, through the same
+`Decoder` instance, which is exactly what the CLI does (see
+`Decoder::process_dnp3_frame` in `decoder.hpp`/`decoder.cpp` for the state
+machine, and its per-flow buffer caps against a pathological/malformed
+capture). It is deliberately narrow, and says so in its notes rather than
+guessing, in every case where it can't proceed with confidence: a
+continuation frame's sequence number that doesn't follow the previous
+frame's discards the in-progress buffer instead of concatenating bytes out
+of order; a continuation frame with no matching start (capture begins
+mid-fragment, or a start frame was lost) is left transport-header-only; and
+a new FIR=1 frame arriving on a flow with an already-in-progress,
+never-completed reassembly abandons the stale one rather than merging into
+it. This is distinct from -- and independent of -- whole TCP stream
+reassembly for the *link layer itself* (a data-link frame's own header and
+CRC-delimited blocks split across TCP segments), which conduitscope still
+does not do; see LIMITATIONS.
 
 Function codes are identified by name across the whole DNP3 function code
 table (Confirm, Read, Write, Select/Operate/Direct Operate, the Cold/Warm
@@ -484,15 +503,28 @@ clamp to in that case.)
 These are current, not aspirational -- each has a corresponding ROADMAP item.
 
 - **pcapng is not supported.** Convert with `tshark -F pcap -r in.pcapng -w out.pcap`.
-- **No TCP stream reassembly.** A Modbus or DNP3 PDU split across two TCP
-  segments will not be reassembled; each TCP segment is decoded independently.
-  In practice this is rare for Modbus (PDUs are small); for DNP3, the same
-  limitation shows up as an application fragment that spans more than one
-  data-link frame (transport FIR=1, FIN=0) getting only its transport header
-  decoded, not its application layer -- see PROTOCOL COVERAGE. This is
-  distinct from multiple *complete* DNP3 data-link frames landing in one TCP
-  segment (common, since DNP3 frames are small), which conduitscope does
-  handle -- see PROTOCOL COVERAGE's DNP3 section.
+- **No general TCP stream reassembly.** A Modbus PDU split across two TCP
+  segments will not be reassembled; each TCP segment is decoded
+  independently. In practice this is rare for Modbus (PDUs are small). The
+  same is true at the DNP3 *data-link* layer: a single data-link frame's own
+  10-byte header or CRC-delimited user-data blocks split across two TCP
+  segments will not be reassembled either -- `try_parse_dnp3_link_layer`
+  needs a whole frame in one TCP payload to even recognize it as DNP3.
+  DNP3's *application*-layer fragmentation is the one exception:
+  conduitscope does reassemble an application fragment that spans multiple
+  complete data-link frames (transport FIR=1 on the first, FIN=0 until the
+  last), buffering each frame's bytes per TCP flow across however many
+  packets it takes -- including separate TCP segments -- and decoding the
+  full application layer once FIN=1 arrives; see PROTOCOL COVERAGE and
+  `Decoder::process_dnp3_frame`. This is unvalidated against real traffic:
+  every real DNP3 capture checked so far (see
+  tests/real_captures/dnp3/ATTRIBUTION.md) used only complete,
+  single-data-link-frame fragments, so this path has no real-world example
+  to confirm against, only the synthetic fixtures in
+  tests/sample_dnp3.pcap. It's also distinct from multiple *complete* DNP3
+  data-link frames landing in one TCP segment (common, since DNP3 frames are
+  small), which conduitscope handles separately -- see PROTOCOL COVERAGE's
+  DNP3 section.
 - **No IPv6.** Only IPv4 is parsed; IPv6 packets are reported as
   `unsupported-link`/`non-ip` depending on where they're detected.
 - **IPv4 fragmentation is not reassembled.** A fragmented IPv4 packet's TCP
@@ -648,11 +680,15 @@ conduitscope decode -i capture.pcap --protocol dnp3 -f json \
 
 Rough order, each building on the groundwork this release establishes:
 
-1. **TCP stream reassembly**, needed for split PDUs, authoritative
+1. **General TCP stream reassembly**, needed for split PDUs, authoritative
    (non-heuristic) Modbus request/response pairing, multi-segment S7comm
-   frames larger than one negotiated PDU length, and DNP3 application
-   fragments that span more than one data-link frame (currently left with
-   only their transport header decoded -- see LIMITATIONS).
+   frames larger than one negotiated PDU length, and a DNP3 data-link
+   frame's own header/CRC blocks split across TCP segments (see
+   LIMITATIONS). DNP3 *application*-layer fragmentation across complete
+   data-link frames is a narrower, already-done special case of this --
+   conduitscope reassembles it per TCP flow without needing general stream
+   reassembly -- but it still awaits validation against a real capture that
+   actually exercises it (none found so far; see LIMITATIONS).
 2. **Zone/conduit policy engine** behind `policy validate`: a YAML schema
    describing zones (IP/port ranges, expected protocols) and conduits (allowed
    flows between zones), evaluated against decoded traffic, producing a

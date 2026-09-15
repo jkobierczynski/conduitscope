@@ -175,6 +175,60 @@ add_test(NAME dnp3_coalesced_frames_merged_in_json
 set_tests_properties(dnp3_coalesced_frames_merged_in_json PROPERTIES
   PASS_REGULAR_EXPRESSION "\"dnp3_objects\": \\[\"g60v1 \\(Class Objects\\)\", \"g12v1 \\(Binary Output Command \\(CROB\\)\\)\"\\]")
 
+# --------------------------------------------------------------------------
+# Cross-packet DNP3 fragment reassembly (packets 8-12 of sample_dnp3.pcap): a fragment split
+# across multiple data-link frames arriving in SEPARATE TCP segments/pcap packets, requiring the
+# per-TCP-flow state Decoder::process_dnp3_frame maintains across decode() calls -- distinct from
+# the same-TCP-payload frame coalescing (Problem A) tested above.
+# --------------------------------------------------------------------------
+
+# The FIR=1,FIN=0 starting frame (packet 8) must show only its own transport header -- nothing
+# decoded yet -- plus a note that reassembly has begun and is buffering.
+add_test(NAME dnp3_reassembly_start_frame_not_decoded
+  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text)
+set_tests_properties(dnp3_reassembly_start_frame_not_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "beginning a DNP3 fragment that spans multiple data-link frames \\(FIR=1, FIN=0, SEQ=5\\)"
+  FAIL_REGULAR_EXPRESSION "transport: FIR=1 FIN=0 SEQ=5 \\| application")
+
+# The FIN=1 completing frame (packet 9, a separate pcap packet from packet 8) must decode the
+# full, concatenated application layer -- same CROB command as the single-frame packet 6, but
+# reconstructed from two frames delivered a packet apart.
+add_test(NAME dnp3_reassembly_completes_across_packets
+  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text)
+set_tests_properties(dnp3_reassembly_completes_across_packets PROPERTIES
+  PASS_REGULAR_EXPRESSION "completed a 2-data-link-frame DNP3 fragment reassembled across separate TCP segments \\(18 application-layer byte\\(s\\) total\\)")
+
+add_test(NAME dnp3_reassembly_completed_object_decoded
+  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text)
+set_tests_properties(dnp3_reassembly_completed_object_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "function=Direct Operate \\(0x05\\) objects: \\[g12v1\\].*idx=7: code=Latch On tc=Close")
+
+add_test(NAME dnp3_reassembly_completed_function_in_json
+  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format json)
+set_tests_properties(dnp3_reassembly_completed_function_in_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"index\": 9,[^}]*\"dnp3_function\": \"Direct Operate\"")
+
+# packet 5 (FIR=1,FIN=1, same TCP flow as packet 4's never-completed start) must abandon packet
+# 4's stale in-progress reassembly rather than silently merging into it.
+add_test(NAME dnp3_reassembly_abandoned_by_new_complete_fragment
+  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text)
+set_tests_properties(dnp3_reassembly_abandoned_by_new_complete_fragment PROPERTIES
+  PASS_REGULAR_EXPRESSION "a complete single-frame DNP3 fragment \\(FIR=1, FIN=1\\) arrived on this TCP flow while a previous multi-frame fragment reassembly was still in progress")
+
+# packet 10: a FIR=0 continuation with no reassembly in progress on its flow at all (orphan) --
+# must be left transport-only, with an explanatory note, never guessed at.
+add_test(NAME dnp3_reassembly_orphan_continuation_noted
+  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text)
+set_tests_properties(dnp3_reassembly_orphan_continuation_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "continuation DNP3 data-link frame \\(FIR=0, SEQ=1\\) with no fragment reassembly in progress on this TCP flow")
+
+# packets 11-12: a sequence-number mismatch must discard the in-progress reassembly rather than
+# concatenating bytes out of order.
+add_test(NAME dnp3_reassembly_sequence_mismatch_discarded
+  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text)
+set_tests_properties(dnp3_reassembly_sequence_mismatch_discarded PROPERTIES
+  PASS_REGULAR_EXPRESSION "continuation DNP3 data-link frame's sequence number \\(35\\) does not follow the previous frame's \\(expected 11\\)")
+
 add_test(NAME stats_mode_dnp3
   COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --stats)
 set_tests_properties(stats_mode_dnp3 PROPERTIES

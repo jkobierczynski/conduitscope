@@ -37,9 +37,15 @@ Groundwork / v0.1.0. What works right now:
   located and skipped by computed length, just not value-decoded. Multiple
   complete DNP3 data-link frames coalesced into one TCP segment (common,
   since DNP3 frames are small) are all found and decoded, not just the first.
-  A fragment genuinely spanning more than one TCP segment gets its transport
-  header decoded and nothing more (needs cross-packet reassembly this tool
-  doesn't do yet -- see docs/MANUAL.md). Validated against a large real 4SICS ICS-lab capture and a
+  A fragment that spans more than one data-link frame (FIR=1 on the first,
+  FIN=0 until the last) is reassembled across however many separate TCP
+  segments/packets it takes, per TCP flow, and its application layer decoded
+  once complete -- this path has no real-capture validation yet (every real
+  DNP3 capture checked so far used only complete single-frame fragments),
+  only the synthetic fixture in tests/sample_dnp3.pcap; see docs/MANUAL.md.
+  A single data-link frame's own header/blocks split across TCP segments is
+  still not reassembled (needs general TCP stream reassembly this tool
+  doesn't do -- see docs/MANUAL.md). Validated against a large real 4SICS ICS-lab capture and a
   set of real (not synthetic) DNP3 captures from independent DNP3 stacks --
   real CROB Select/Operate sequences (including a rejected operate), a real
   polling session, and a deliberately corrupted/fuzzed capture that must

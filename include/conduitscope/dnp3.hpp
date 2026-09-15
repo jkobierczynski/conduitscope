@@ -3,17 +3,30 @@
 //
 // DNP3 is layered (data link -> transport -> application, with per-16-byte-
 // block CRCs and object-group/variation-based application data). This file
-// decodes all three layers with one real scope limit: a fragment that spans
-// more than one data-link frame (transport FIR=1,FIN=0 continuing across
-// frames) only gets its transport header decoded, not its application layer
-// -- reassembling an application fragment across multiple TCP-carried
-// data-link frames is out of scope for the same reason whole-stream TCP
-// reassembly is (see decoder.hpp): it would require tracking state across
-// packets, which this tool deliberately does not do. A single data-link
-// frame that is itself a complete fragment (FIR=1,FIN=1 -- the large
-// majority of real traffic, especially requests) gets full application-layer
-// decoding: function code, IIN (for responses), and every object header
-// (group/variation/qualifier/range). For the group/variation combinations in
+// decodes the data link and transport layers, and the application layer for
+// a single, already-complete set of application-layer bytes, in a purely
+// stateless way -- nothing in this file remembers anything about a
+// previously seen packet. A fragment that spans more than one data-link
+// frame (transport FIR=1,FIN=0 continuing across frames, each frame
+// potentially arriving in its own separate TCP segment/packet) genuinely
+// needs state that outlives a single frame -- which flow it belongs to, the
+// bytes buffered so far, the next expected sequence number -- and that
+// state lives in Decoder (decoder.hpp/.cpp), not here: see
+// Decoder::process_dnp3_frame and its dnp3_reassembly_ member. This file
+// exposes the two pieces that state machine is built from:
+// try_parse_dnp3_link_layer (data link header), reassemble_dnp3_user_data
+// (per-frame block-CRC reassembly), and decode_dnp3_application_layer
+// (decodes already-assembled application-layer bytes, from one frame or
+// concatenated across several -- it has no idea which). The single-frame
+// convenience wrapper try_parse_dnp3_transport_and_application below uses
+// all three for the common case (a complete fragment in one data-link
+// frame) and, for the multi-frame case, only decodes the transport header
+// and stops -- it has no flow to buffer against, by design; only Decoder
+// does the cross-packet buffering. A single data-link frame that is itself
+// a complete fragment (FIR=1,FIN=1 -- the large majority of real traffic,
+// especially requests) gets full application-layer decoding: function code,
+// IIN (for responses), and every object header (group/variation/qualifier/
+// range). For the group/variation combinations in
 // the point-format table (dnp3.cpp) -- covering the object types common in
 // real traffic: Binary/Double-bit Binary/Analog/Counter Input and Output,
 // CROB commands, absolute time, and Internal Indications -- each point's
@@ -70,6 +83,17 @@ struct Dnp3LinkFrame {
 // this groundwork release, and the summary/notes say so explicitly rather
 // than silently skipping the check.
 std::optional<Dnp3LinkFrame> try_parse_dnp3_link_layer(ByteSpan tcp_payload);
+
+// Reassembles one data-link frame's user data -- transport header byte plus whatever application-
+// layer bytes follow it -- stripping (not validating) the per-16-byte-block CRCs described in the
+// file header comment. `link` must be the result of a preceding successful try_parse_dnp3_link_layer
+// call on the same `tcp_payload`. Returns an empty vector if link.user_data_bytes == 0 (a data-link
+// frame with no user data at all). Exposed (rather than kept internal to
+// try_parse_dnp3_transport_and_application) so Decoder can get at one frame's transport byte and
+// application-layer bytes on their own, to buffer them across packets when a fragment spans more
+// than one data-link frame -- see the file header comment. Appends to `notes` on truncation.
+std::vector<uint8_t> reassemble_dnp3_user_data(const Dnp3LinkFrame& link, ByteSpan tcp_payload,
+                                                std::vector<std::string>& notes);
 
 // One decoded point value within an object header's object data.
 struct Dnp3PointValue {
@@ -136,10 +160,11 @@ struct Dnp3ApplicationFragment {
     bool transport_fin = false;
     uint8_t transport_seq = 0;
 
-    // True only when transport_fir && transport_fin (a complete, single-frame fragment) and the
-    // application-layer bytes were present and well-formed enough to decode at least the control
-    // byte and function code. False for a multi-frame-spanning fragment (transport_fin false) --
-    // see the file header comment -- or a malformed/truncated one; `notes` explains which.
+    // True once the application-layer bytes -- whether from a single complete data-link frame
+    // (transport_fir && transport_fin) or reassembled by Decoder across several (see the file
+    // header comment) -- were present and well-formed enough to decode at least the control byte
+    // and function code. False while a multi-frame fragment is still incomplete, or for a
+    // malformed/truncated one; `notes` explains which.
     bool application_decoded = false;
     uint8_t app_control = 0;
     bool app_fir = false, app_fin = false, app_con = false, app_uns = false;
@@ -164,14 +189,34 @@ struct Dnp3ApplicationFragment {
 
 // Reassembles the data-link frame's user data (stripping, not validating, the per-16-byte-block
 // CRCs -- see the file header comment), then decodes the transport header and, for a complete
-// single-frame fragment, the application layer on top of it. `link` must be the result of a
-// preceding successful try_parse_dnp3_link_layer call on the same `tcp_payload`. Returns
-// std::nullopt only when link.user_data_bytes == 0 (a data-link frame with no user data at all,
-// e.g. a link-layer-only control frame) -- there is nothing above the data link layer to decode
-// in that case. Never throws: a reassembly or application-layer shape it cannot make sense of is
-// recorded in `notes` on the returned fragment rather than propagated as a ParseError, since the
-// data link layer itself was already valid.
+// single-frame fragment, the application layer on top of it via decode_dnp3_application_layer.
+// `link` must be the result of a preceding successful try_parse_dnp3_link_layer call on the same
+// `tcp_payload`. Returns std::nullopt only when link.user_data_bytes == 0 (a data-link frame with
+// no user data at all, e.g. a link-layer-only control frame) -- there is nothing above the data
+// link layer to decode in that case. Never throws: a reassembly or application-layer shape it
+// cannot make sense of is recorded in `notes` on the returned fragment rather than propagated as a
+// ParseError, since the data link layer itself was already valid.
+//
+// This is the single-frame convenience path: for a fragment spanning more than one data-link
+// frame (transport_fir && !transport_fin), it decodes only the transport header and stops, same
+// as always -- it has no per-flow state to buffer the rest against. Decoder uses the two functions
+// above/below directly, with its own per-TCP-flow buffering, to reassemble and decode that case
+// (see decoder.hpp's Decoder::process_dnp3_frame) -- that is the only thing that actually performs
+// cross-packet reassembly in this codebase.
 std::optional<Dnp3ApplicationFragment> try_parse_dnp3_transport_and_application(const Dnp3LinkFrame& link,
                                                                                  ByteSpan tcp_payload);
+
+// Decodes the application layer -- control byte, function code, IIN (for responses), and every
+// object header/point value -- from `app_bytes`, which must already be fully assembled: either one
+// data-link frame's own bytes after its transport header (the single-frame case), or several
+// frames' such bytes concatenated in sequence-number order (a fragment reassembled across multiple
+// data-link frames -- see the file header comment; only Decoder builds this concatenation). Writes
+// into `frag`'s application-layer fields (app_control, has_function, iin, objects, ...) and appends
+// to `frag.notes`; does NOT touch `frag`'s transport_*/has_transport fields, which the caller must
+// already have set -- `frag.summary` is set to a summary of only the application layer, which
+// callers combine with their own transport-layer summary. Handles `app_bytes.empty()` (a
+// transport header with nothing after it) by recording that in `frag.notes` and leaving
+// application_decoded false, same as every other malformed-application-layer case. Never throws.
+void decode_dnp3_application_layer(ByteSpan app_bytes, Dnp3ApplicationFragment& frag);
 
 }  // namespace conduitscope
