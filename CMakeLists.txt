@@ -151,6 +151,30 @@ add_test(NAME dnp3_values_in_json
 set_tests_properties(dnp3_values_in_json PROPERTIES
   PASS_REGULAR_EXPRESSION "\"dnp3_values\": \\[\"g1v2 idx=0: 1 \\[ONLINE\\]\"")
 
+# Two complete DNP3 data-link frames coalesced into one TCP payload (packet 7 of
+# sample_dnp3.pcap): the first frame's own function/summary must still be the headline, and the
+# second frame -- previously silently dropped, since try_parse_dnp3_link_layer only ever looked
+# at the start of the payload -- must now be fully decoded and surfaced via a note, not lost.
+add_test(NAME dnp3_coalesced_frames_first_summary_unaffected
+  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text)
+set_tests_properties(dnp3_coalesced_frames_first_summary_unaffected PROPERTIES
+  PASS_REGULAR_EXPRESSION "function=Read \\(0x01\\) objects: \\[g60v1\\]")
+
+add_test(NAME dnp3_coalesced_second_frame_noted
+  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text)
+set_tests_properties(dnp3_coalesced_second_frame_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "additional DNP3 data link frame 2 found in the same TCP payload at byte offset 18")
+
+add_test(NAME dnp3_coalesced_second_frame_objects_decoded
+  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text)
+set_tests_properties(dnp3_coalesced_second_frame_objects_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "g12v1 \\(Binary Output Command \\(CROB\\)\\).*idx=7: code=Latch On")
+
+add_test(NAME dnp3_coalesced_frames_merged_in_json
+  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format json)
+set_tests_properties(dnp3_coalesced_frames_merged_in_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"dnp3_objects\": \\[\"g60v1 \\(Class Objects\\)\", \"g12v1 \\(Binary Output Command \\(CROB\\)\\)\"\\]")
+
 add_test(NAME stats_mode_dnp3
   COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --stats)
 set_tests_properties(stats_mode_dnp3 PROPERTIES

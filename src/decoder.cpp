@@ -22,6 +22,16 @@ bool port_in(uint16_t port, uint16_t default_port, const std::vector<uint16_t>& 
     return std::find(extra.begin(), extra.end(), port) != extra.end();
 }
 
+// Total on-the-wire size of one DNP3 data link frame: the fixed 10-byte header, plus its
+// user data broken into <=16-byte blocks, each followed by its own 2-byte block CRC. Used to
+// find where the *next* data link frame (if any) starts within the same TCP payload -- DNP3
+// frames are small (<=255 bytes) and it's normal for several to be coalesced into one TCP
+// segment, which try_parse_dnp3_link_layer alone has no way to see past the first of.
+size_t dnp3_frame_wire_length(const Dnp3LinkFrame& link) {
+    size_t blocks = (link.user_data_bytes + 15) / 16;
+    return 10 + link.user_data_bytes + 2 * blocks;
+}
+
 }  // namespace
 
 DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size_t index) const {
@@ -123,20 +133,27 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
             if (auto d = try_parse_dnp3_link_layer(tcp.payload)) {
                 out.protocol = "dnp3";
                 out.summary = d->summary;
-                if (auto app = try_parse_dnp3_transport_and_application(*d, tcp.payload)) {
-                    out.summary += "; " + app->summary;
-                    for (const auto& n : app->notes) out.notes.push_back(n);
-                    out.dnp3_has_function = app->has_function;
-                    out.dnp3_function_name = app->function_name;
-                    constexpr size_t kMaxObjHeaders = 50;
-                    for (size_t i = 0; i < app->objects.size() && i < kMaxObjHeaders; ++i) {
-                        const auto& oh = app->objects[i];
+
+                // Object headers/point values are capped cumulatively across every data link
+                // frame found in this TCP payload, not per frame -- same caps as before, just
+                // now shared across however many frames turned up.
+                constexpr size_t kMaxObjHeaders = 50;
+                constexpr size_t kMaxPointValues = 50;
+                auto merge_application_layer = [&](const Dnp3ApplicationFragment& app, bool is_first_frame) {
+                    if (is_first_frame) {
+                        out.summary += "; " + app.summary;
+                        out.dnp3_has_function = app.has_function;
+                        out.dnp3_function_name = app.function_name;
+                    }
+                    for (const auto& n : app.notes) out.notes.push_back(n);
+                    for (size_t i = 0; i < app.objects.size() && out.dnp3_object_headers.size() < kMaxObjHeaders;
+                         ++i) {
+                        const auto& oh = app.objects[i];
                         out.dnp3_object_headers.push_back("g" + std::to_string(oh.group) + "v" +
                                                            std::to_string(oh.variation) + " (" +
                                                            oh.group_name + ")");
                     }
-                    constexpr size_t kMaxPointValues = 50;
-                    for (const auto& oh : app->objects) {
+                    for (const auto& oh : app.objects) {
                         if (out.dnp3_point_values.size() >= kMaxPointValues) break;
                         std::string tag = "g" + std::to_string(oh.group) + "v" + std::to_string(oh.variation);
                         for (const auto& pv : oh.values) {
@@ -153,7 +170,47 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                             out.dnp3_point_values.push_back(entry);
                         }
                     }
+                };
+
+                if (auto app = try_parse_dnp3_transport_and_application(*d, tcp.payload)) {
+                    merge_application_layer(*app, /*is_first_frame=*/true);
                 }
+
+                // DNP3 frames are small (<=255 bytes on the wire) and it's normal for a sender
+                // or the OS to coalesce several into one TCP segment before flushing. Keep
+                // looking for more, immediately after the first frame's own wire bytes, rather
+                // than silently stopping at the first one -- previously anything past it in the
+                // same payload was dropped with no warning at all.
+                constexpr size_t kMaxDnp3FramesPerPayload = 50;
+                size_t offset = dnp3_frame_wire_length(*d);
+                size_t frame_count = 1;
+                while (offset < tcp.payload.size() && frame_count < kMaxDnp3FramesPerPayload) {
+                    ByteSpan rest = tcp.payload.from(offset);
+                    auto next = try_parse_dnp3_link_layer(rest);
+                    if (!next) break;  // remaining bytes aren't another DNP3 frame -- stop, don't guess
+                    ++frame_count;
+                    std::string note = "additional DNP3 data link frame " + std::to_string(frame_count) +
+                                        " found in the same TCP payload at byte offset " +
+                                        std::to_string(offset) + " (coalesced by the sender/OS): " +
+                                        next->summary;
+                    if (frame_count == 2) {
+                        note +=
+                            " -- only the first frame's function code is reflected in the summary line "
+                            "above and the dnp3_function field; every frame's own function/objects/values "
+                            "are still fully decoded and included here and in dnp3_objects/dnp3_values";
+                    }
+                    out.notes.push_back(note);
+                    if (auto next_app = try_parse_dnp3_transport_and_application(*next, rest)) {
+                        merge_application_layer(*next_app, /*is_first_frame=*/false);
+                    }
+                    offset += dnp3_frame_wire_length(*next);
+                }
+                if (frame_count >= kMaxDnp3FramesPerPayload) {
+                    out.notes.push_back("stopped after " + std::to_string(kMaxDnp3FramesPerPayload) +
+                                         " DNP3 data link frame(s) in this one TCP payload, more may remain "
+                                         "(safety cap)");
+                }
+
                 bool expected_port = port_in(tcp.src_port, DNP3_TCP_PORT, options_.extra_dnp3_ports) ||
                                       port_in(tcp.dst_port, DNP3_TCP_PORT, options_.extra_dnp3_ports);
                 if (!expected_port) {

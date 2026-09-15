@@ -236,6 +236,19 @@ def build_dnp3_sample():
     ip6 = ipv4_header(HMI_IP, PLC_IP, 6, len(tcp6), 0x2005) + tcp6
     packets.append(eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip6)
 
+    # 7) Two complete data-link frames coalesced into ONE TCP payload (one pcap packet) -- a
+    #    real Read Class 0 request immediately followed by a real Direct Operate/CROB request,
+    #    reusing the exact same payload bytes as packets 2 and 6 above so this is a pure framing
+    #    regression test, not a new decode path. try_parse_dnp3_link_layer alone only ever looks
+    #    at the first 10+ bytes of a TCP payload; this exercises the loop in decoder.cpp that
+    #    keeps looking for more frames after the first one's own wire bytes are consumed, so the
+    #    second frame isn't silently dropped.
+    coalesced = dnp3_link_frame(source=1, destination=1024, user_data=read_class0) + \
+        dnp3_link_frame(source=1, destination=1024, user_data=crob_payload)
+    tcp7 = tcp_header(51500, 20000, 5005, 6000, TCP_PSH | TCP_ACK, len(coalesced)) + coalesced
+    ip7 = ipv4_header(HMI_IP, PLC_IP, 6, len(tcp7), 0x2006) + tcp7
+    packets.append(eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip7)
+
     data = pcap_global_header()
     for i, pkt in enumerate(packets):
         data += pcap_record(pkt, 1_700_000_100 + i, i * 1000)

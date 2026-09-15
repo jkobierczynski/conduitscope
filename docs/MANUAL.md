@@ -270,6 +270,17 @@ and decodes the **transport header** (1 byte: FIR/FIN fragment-boundary flags
 and a 6-bit sequence number) for every data-link frame that carries any user
 data at all.
 
+DNP3 frames are small (<=255 bytes on the wire), so it's normal for a sender
+or the OS to coalesce two or more complete data-link frames into a single TCP
+segment before flushing. conduitscope looks for every complete data-link
+frame present in a TCP payload, not just the first -- each gets fully
+decoded (data link through point values), and if more than one is found, a
+note says so and identifies each additional frame; the packet's one-line
+summary and its `dnp3_function`/JSON fields still reflect only the *first*
+frame's function code, with every frame's objects and values merged into
+`dnp3_objects`/`dnp3_values`. This is purely a within-one-TCP-payload framing
+fix and doesn't require any cross-packet state.
+
 The **application layer** -- function code, Internal Indications (IIN) on
 responses, and every object header's group/variation/qualifier/range -- is
 then decoded, but only for a fragment that is complete within a single
@@ -478,7 +489,10 @@ These are current, not aspirational -- each has a corresponding ROADMAP item.
   In practice this is rare for Modbus (PDUs are small); for DNP3, the same
   limitation shows up as an application fragment that spans more than one
   data-link frame (transport FIR=1, FIN=0) getting only its transport header
-  decoded, not its application layer -- see PROTOCOL COVERAGE.
+  decoded, not its application layer -- see PROTOCOL COVERAGE. This is
+  distinct from multiple *complete* DNP3 data-link frames landing in one TCP
+  segment (common, since DNP3 frames are small), which conduitscope does
+  handle -- see PROTOCOL COVERAGE's DNP3 section.
 - **No IPv6.** Only IPv4 is parsed; IPv6 packets are reported as
   `unsupported-link`/`non-ip` depending on where they're detected.
 - **IPv4 fragmentation is not reassembled.** A fragmented IPv4 packet's TCP

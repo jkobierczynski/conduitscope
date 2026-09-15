@@ -34,10 +34,12 @@ Groundwork / v0.1.0. What works right now:
   flags), CROB output-command fields (control code, trip/close, on/off time,
   status -- this is literally how DNP3 issues commands), and absolute
   timestamps. A group/variation outside that table still gets its object data
-  located and skipped by computed length, just not value-decoded. A fragment
-  spanning more than one data-link frame gets its transport header decoded and
-  nothing more (needs cross-packet reassembly this tool doesn't do -- see
-  docs/MANUAL.md). Validated against a large real 4SICS ICS-lab capture and a
+  located and skipped by computed length, just not value-decoded. Multiple
+  complete DNP3 data-link frames coalesced into one TCP segment (common,
+  since DNP3 frames are small) are all found and decoded, not just the first.
+  A fragment genuinely spanning more than one TCP segment gets its transport
+  header decoded and nothing more (needs cross-packet reassembly this tool
+  doesn't do yet -- see docs/MANUAL.md). Validated against a large real 4SICS ICS-lab capture and a
   set of real (not synthetic) DNP3 captures from independent DNP3 stacks --
   real CROB Select/Operate sequences (including a rejected operate), a real
   polling session, and a deliberately corrupted/fuzzed capture that must
