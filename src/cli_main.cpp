@@ -11,12 +11,19 @@
 #include <atomic>
 #include <csignal>
 #include <cstdint>
+#include <cstdio>
 #include <fstream>
 #include <iostream>
 #include <memory>
 #include <string>
 #include <thread>
 #include <vector>
+
+#ifdef _WIN32
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
 
 #include "conduitscope/byteio.hpp"
 #include "conduitscope/decoder.hpp"
@@ -30,6 +37,18 @@
 namespace {
 
 using namespace conduitscope;
+
+// True when stdout is connected to an interactive terminal rather than a file or a pipe --
+// decides whether "auto" colorization (the default, absent --color/--no-color) turns color on.
+// POSIX isatty()/fileno() and Windows' underscore-prefixed equivalents do the same thing; which
+// one to call is the only platform difference here.
+bool stdout_is_terminal() {
+#ifdef _WIN32
+    return _isatty(_fileno(stdout)) != 0;
+#else
+    return isatty(fileno(stdout)) != 0;
+#endif
+}
 
 // --------------------------------------------------------------------------------------------
 // Live capture plumbing shared by `decode -i` and `policy validate -i`. See live_capture.hpp for
@@ -154,6 +173,7 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
                 std::ostream& diag) {
     std::ofstream file_out;
     std::ostream* out = &std::cout;
+    bool writing_to_stdout = output.empty();
     if (!output.empty()) {
         file_out.open(output, std::ios::binary);
         if (!file_out) {
@@ -162,6 +182,13 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
         }
         out = &file_out;
     }
+
+    // Three-way resolution, same convention as grep/git/ripgrep: --color always wins (even
+    // redirected to a file -- e.g. piping through `less -R`, or deliberately saving colored
+    // output, are the user's explicit choice), --no-color always disables, and absent either,
+    // color is used only when actually writing to an interactive terminal -- never into a file
+    // (-o) or a pipe, so ANSI escapes don't end up littering saved/piped output by default.
+    bool color = force_color || (!no_color && writing_to_stdout && stdout_is_terminal());
 
     DecodeOptions options;
     options.strict = strict;
@@ -378,14 +405,24 @@ int main(int argc, char** argv) {
 
     bool quiet = false;
     bool no_color = false;
+    bool force_color = false;
     std::string log_file;
     app.add_flag("-q,--quiet", quiet, "Suppress non-essential diagnostic/warning output");
-    app.add_flag("--no-color", no_color, "Disable ANSI color in text-format output");
+    auto* no_color_opt =
+        app.add_flag("--no-color", no_color, "Disable ANSI color in decode's text-format output");
+    auto* force_color_opt = app.add_flag(
+        "--color", force_color,
+        "Force ANSI color in decode's text-format output, even when not writing to a terminal "
+        "(e.g. piping to a pager that supports it). Without either flag, color is used only when "
+        "writing directly to an interactive terminal.");
+    no_color_opt->excludes(force_color_opt);
+    force_color_opt->excludes(no_color_opt);
     app.add_option("--log-file", log_file,
                     "Write diagnostic/warning messages to this file instead of stderr");
 
     // --- decode ---------------------------------------------------------
     auto* decode_cmd =
+        app.add_subcommand("decode", "Decode a pcap/pcapng capture and print each recognized packet");
     std::string decode_input, decode_interface, decode_filter, decode_output;
     int decode_duration = 0;
     int decode_snaplen = 65535;
@@ -543,7 +580,7 @@ int main(int argc, char** argv) {
         return run_decode(decode_input, decode_interface, decode_filter, decode_duration, decode_snaplen,
                            decode_promiscuous, decode_output, decode_format, decode_protocol,
                            decode_modbus_ports, decode_dnp3_ports, decode_s7comm_ports, decode_max_packets,
-                           decode_stats, decode_strict, quiet, !no_color, *diag);
+                           decode_stats, decode_strict, quiet, no_color, force_color, *diag);
     }
     if (info_cmd->parsed()) {
         return run_info(info_input, std::cout);

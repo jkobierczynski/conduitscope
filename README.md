@@ -118,7 +118,9 @@ Groundwork / v0.1.0. What works right now:
   pairing and multi-frame S7comm chaining are separate mechanisms, described
   above, not part of this one
 - Text, JSON, and CSV output; a `--stats` summary mode; an `info` command for
-  quick file metadata
+  quick file metadata. Text output is colorized (per-protocol tags, red for
+  exceptions/parse-errors) when writing to an interactive terminal, or
+  forced on/off with `--color`/`--no-color`
 - `policy validate`: a zone/conduit policy engine. A policy file (a
   deliberately restricted, dependency-free YAML subset -- no vendored YAML
   library, same zero-dependency approach as everything else here) declares

@@ -804,6 +804,39 @@ set_tests_properties(pcapng_simple_packet_block_decodes PROPERTIES
 
 
 # ---------------------------------------------------------------------------------------------
+# Colorized text output (output.cpp's TextWriter color_ path; --color/--no-color in cli_main.cpp).
+# CTest's COMMAND always runs with stdout piped (never a real terminal), so the "auto" default
+# (absent both flags) is exercised here as "no color, same as always being piped/redirected" --
+# --color is what forces color on so these tests can actually see the ANSI codes.
+# ---------------------------------------------------------------------------------------------
+
+add_test(NAME color_auto_is_off_when_not_a_terminal
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap")
+set_tests_properties(color_auto_is_off_when_not_a_terminal PROPERTIES
+  FAIL_REGULAR_EXPRESSION "\\[36m")
+
+add_test(NAME color_forced_on_with_color_flag
+  COMMAND conduitscope --color decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap")
+set_tests_properties(color_forced_on_with_color_flag PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[36m\\[modbus\\]")
+
+add_test(NAME color_modbus_exception_highlighted_red
+  COMMAND conduitscope --color decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap")
+set_tests_properties(color_modbus_exception_highlighted_red PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[1;31mRead Holding Registers: exception response")
+
+add_test(NAME color_no_color_flag_forces_off
+  COMMAND conduitscope --no-color decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap")
+set_tests_properties(color_no_color_flag_forces_off PROPERTIES
+  FAIL_REGULAR_EXPRESSION "\\[36m")
+
+add_test(NAME color_and_no_color_are_mutually_exclusive
+  COMMAND conduitscope --color --no-color decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap")
+set_tests_properties(color_and_no_color_are_mutually_exclusive PROPERTIES
+  PASS_REGULAR_EXPRESSION "excludes")
+
+
+# ---------------------------------------------------------------------------------------------
 # `policy validate` -- zone/conduit policy engine (policy.hpp/policy_engine.hpp). Fixtures live
 # under tests/policies/ (hand-authored YAML-subset policy files; see each file's own header
 # comment for what it's for) and tests/sample_policy_engine.pcap (synthetic, see

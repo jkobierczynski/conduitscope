@@ -48,17 +48,54 @@ std::string endpoint(const DecodedPacket& p, bool src) {
     uint16_t port = src ? p.src_port : p.dst_port;
     return ip + ":" + std::to_string(port);
 }
+
+// ANSI SGR (Select Graphic Rendition) escape sequences. Only ever emitted when TextWriter::color_
+// is true -- see cli_main.cpp's stdout_is_terminal()/--color/--no-color for how that's decided.
+constexpr const char* kReset = "\033[0m";
+constexpr const char* kDim = "\033[2m";
+constexpr const char* kBoldRed = "\033[1;31m";
+constexpr const char* kCyan = "\033[36m";
+constexpr const char* kMagenta = "\033[35m";
+constexpr const char* kBlue = "\033[34m";
+
+// Color for a packet's "[protocol]" tag -- picked so a mixed-protocol capture scans quickly by
+// eye, not for any deeper meaning. parse-error is the one exception: it gets the same "something
+// is wrong here" red as a Modbus exception response, rather than a plain identification color,
+// since it's a problem rather than a protocol match.
+const char* protocol_tag_color(const std::string& protocol) {
+    if (protocol == "modbus") return kCyan;
+    if (protocol == "dnp3") return kMagenta;
+    if (protocol == "s7comm") return kBlue;
+    if (protocol == "cotp") return kBlue;  // recognized TPKT/COTP framing, no S7comm inside yet
+    if (protocol == "parse-error") return kBoldRed;
+    return kDim;  // tcp / non-tcp / non-ip / unsupported-link: recognized, nothing OT-specific
+}
 }  // namespace
 
 void TextWriter::write_packet(const DecodedPacket& p) {
+    // A parse failure, or a Modbus exception response, is the one piece of a packet line worth
+    // drawing the eye to over everything else in a long decode -- both mean "look at this one".
+    bool severe = p.protocol == "parse-error" || (p.protocol == "modbus" && p.modbus_is_exception);
+
     std::ostringstream head;
     head << "#" << p.index << "  " << std::fixed << std::setprecision(6) << p.timestamp << "  "
-         << endpoint(p, true) << " -> " << endpoint(p, false) << "  [" << p.protocol << "]  " << p.summary;
+         << endpoint(p, true) << " -> " << endpoint(p, false) << "  ";
+    if (color_) head << protocol_tag_color(p.protocol);
+    head << "[" << p.protocol << "]";
+    if (color_) head << kReset;
+    head << "  ";
+    if (color_ && severe) head << kBoldRed;
+    head << p.summary;
+    if (color_ && severe) head << kReset;
     out_ << head.str() << "\n";
+
     for (const auto& note : p.notes) {
-        out_ << "        note: " << note << "\n";
+        out_ << "        ";
+        if (color_) out_ << kDim;
+        out_ << "note: " << note;
+        if (color_) out_ << kReset;
+        out_ << "\n";
     }
-    (void)color_;  // reserved: colorized severity highlighting is a documented Roadmap item
 }
 
 void JsonWriter::begin() { out_ << "[\n"; }

@@ -3,7 +3,7 @@
 conduitscope \- decode Modbus/TCP, DNP3, and S7comm/COTP traffic from offline pcap/pcapng captures
 .SH SYNOPSIS
 .B conduitscope
-[\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-color\fR] [\fB\-\-log\-file\fR \fIFILE\fR] \fICOMMAND\fR [\fIOPTIONS\fR]
+[\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-color\fR|\fB\-\-color\fR] [\fB\-\-log\-file\fR \fIFILE\fR] \fICOMMAND\fR [\fIOPTIONS\fR]
 .SH DESCRIPTION
 .B conduitscope
 reads a pcap or pcapng capture file, or optionally a live network
@@ -162,8 +162,14 @@ including why this has only been validated on Linux so far.
 Suppress non-essential diagnostic/warning output.
 .TP
 .B \-\-no\-color
-Disable ANSI color in text output. Reserved for a future colorized-output
-feature; currently has no visible effect.
+Disable ANSI color in \fBdecode\fR's text\-format output. Mutually exclusive
+with \fB\-\-color\fR. See \fBCOLORIZED OUTPUT\fR below.
+.TP
+.B \-\-color
+Force ANSI color in \fBdecode\fR's text\-format output, even when not
+writing directly to a terminal (e.g. piping to a pager that understands
+color, like \fBless \-R\fR). Mutually exclusive with \fB\-\-no\-color\fR.
+See \fBCOLORIZED OUTPUT\fR below.
 .TP
 .B \-\-log\-file \fIFILE\fR
 Write diagnostic/warning messages to \fIFILE\fR instead of stderr.
@@ -173,6 +179,19 @@ Print help and exit. Available at every command level.
 .TP
 .B \-\-version
 Print version, compiler, platform, and build type, then exit.
+.SH COLORIZED OUTPUT
+Applies to \fBdecode\fR's \fBtext\fR format only (not \fBjson\fR/\fBcsv\fR,
+and not \fBpolicy validate\fR's report, which stays plain text by design --
+it's meant to be diffed/archived/piped as an audit artifact). The
+\fB[protocol]\fR tag is colored per protocol: cyan for Modbus, magenta for
+DNP3, blue for S7comm/COTP, dim for everything else recognized but not
+OT\-specific. A Modbus exception response's summary, and a
+\fBparse\-error\fR packet's whole line, are bold red. Notes are dim.
+.PP
+Color is used only when writing directly to an interactive terminal by
+default \-\- never into a file via \fB\-o\fR, and never when piped. Force it
+on with \fB\-\-color\fR (e.g. to pipe into \fBless \-R\fR) or off with
+\fB\-\-no\-color\fR; the two are mutually exclusive.
 .SH EXIT STATUS
 .TP
 .B 0
@@ -238,6 +257,13 @@ Decode a capture as text:
 .RS
 .EX
 conduitscope decode \-r capture.pcap
+.EE
+.RE
+.PP
+Force color into a pager (color is off by default once piped):
+.RS
+.EX
+conduitscope \-\-color decode \-r capture.pcap | less \-R
 .EE
 .RE
 .PP

@@ -7,7 +7,7 @@ conduitscope -- decode Modbus/TCP, DNP3, and S7comm/COTP traffic from offline pc
 ## SYNOPSIS
 
 ```
-conduitscope [-q|--quiet] [--no-color] [--log-file FILE] [--version] [-h|--help] <command> [command options]
+conduitscope [-q|--quiet] [--no-color|--color] [--log-file FILE] [--version] [-h|--help] <command> [command options]
 
 conduitscope decode (-r FILE | -i INTERFACE) [-o FILE] [-f text|json|csv] [--protocol auto|modbus|dnp3|s7comm]
                      [--modbus-port PORT]... [--dnp3-port PORT]... [--s7comm-port PORT]...
@@ -114,7 +114,8 @@ subcommand name on the command line (standard CLI11 behavior).
 | `-h, --help` | Print help and exit. |
 | `--version` | Print version, compiler, platform, and build type, then exit. |
 | `-q, --quiet` | Suppress non-essential diagnostic/warning output (e.g. per-packet parse warnings). Decoded output itself is unaffected. |
-| `--no-color` | Disable ANSI color in `text`-format output. (Reserved: color highlighting itself is not yet implemented -- see ROADMAP -- so this currently has no visible effect, but the flag exists now so scripts that set it won't need updating later.) |
+| `--no-color` | Disable ANSI color in `decode`'s `text`-format output. See COLORIZED OUTPUT below. Mutually exclusive with `--color`. |
+| `--color` | Force ANSI color in `decode`'s `text`-format output, even when not writing directly to a terminal (e.g. piping to a pager that understands color, like `less -R`). See COLORIZED OUTPUT below. Mutually exclusive with `--no-color`. |
 | `--log-file FILE` | Write diagnostic/warning messages to `FILE` (append mode) instead of stderr. Decoded output (stdout, or `-o`) is unaffected. |
 
 ## COMMANDS
@@ -573,6 +574,25 @@ the packet line.
 #1  1700000000.000000  192.168.1.50:51000 -> 192.168.1.10:502  [modbus]  Read Holding Registers: request: read 10 holding register(s) starting at address 0
         note: classified as a request because the PDU is exactly 4 bytes (address+quantity); this is a heuristic, not stream tracking
 ```
+
+#### Color
+
+The `[protocol]` tag is colored per protocol (so a mixed-protocol capture
+scans quickly by eye): cyan for Modbus, magenta for DNP3, blue for S7comm and
+COTP-without-S7comm, dim for everything else recognized but not
+OT-specific (`tcp`/`non-tcp`/`non-ip`/`unsupported-link`). A Modbus
+exception response's summary, and a `parse-error` packet's entire line, are
+bold red -- both mean "look at this one" over everything else in a long
+decode. Notes are printed dim.
+
+Color is used only when actually writing to an interactive terminal by
+default (never into a file via `-o`, and never when piped, e.g. into `less`
+or `jq` -- so ANSI escapes don't end up littering saved or scripted output
+unasked). `--color` forces it on regardless of the destination (e.g. to
+pipe into a pager that understands color, like `less -R`); `--no-color`
+forces it off. The two are mutually exclusive. None of this applies to
+`json`/`csv` output, or to `policy validate`'s text report, which stays
+plain text.
 
 ### json
 
@@ -1276,25 +1296,24 @@ Rough order, each building on the groundwork this release establishes:
 1. **Validate live capture against a real Windows/Npcap install and a real
    OT/mirrored-switch-port network**, not just Linux loopback -- see LIVE
    CAPTURE's "Windows / Npcap notes" and LIMITATIONS.
-2. Colorized text output (the `--no-color` flag is already reserved for this).
-3. **Confirm or replace the EXPERIMENTAL `0xB2` (S7-1200/1500 "symbolic"
+2. **Confirm or replace the EXPERIMENTAL `0xB2` (S7-1200/1500 "symbolic"
    addressing) decode** against a source with real authority -- a PLC or
    TIA Portal project under your own control, ideally, rather than more
    public reverse-engineering writeups -- and extend it to the shapes it
    currently falls back to raw hex on: DB-area items, and items with more
    than one LID entry (structured/nested symbol access). Promote it out of
    [EXPERIMENTAL] once confirmed.
-4. S7comm-Plus decoding, and PLC Control/Stop parameter decoding (these
+3. S7comm-Plus decoding, and PLC Control/Stop parameter decoding (these
    send commands that change PLC run state -- high security relevance).
-5. **DNP3 CRC validation** (both the header CRC and the per-block CRCs), so a
+4. **DNP3 CRC validation** (both the header CRC and the per-block CRCs), so a
    corrupted frame that still starts with the right magic bytes is flagged
    rather than silently "decoded".
-6. **DNP3 absolute-time rendering as a calendar date** (currently a raw
+5. **DNP3 absolute-time rendering as a calendar date** (currently a raw
    milliseconds-since-epoch count -- see LIMITATIONS), and value decoding for
    the group/variation combinations still outside the point-format table
    (double-precision Analog Input Event variants, Octet String, File
    Control, Analog Input Reporting Deadband).
-7. **A policy `from`/`to` zone list wider than two endpoints per conduit**
+6. **A policy `from`/`to` zone list wider than two endpoints per conduit**
    (e.g. "any of these three zones may reach this one"), if real policy
    files turn out to want that instead of one conduit per zone pair -- kept
    off the schema for now rather than guessed at ahead of a real use case.
@@ -1303,6 +1322,13 @@ Rough order, each building on the groundwork this release establishes:
 transparently (auto-detected, no flag needed) -- see "pcap vs. pcapng"
 above and LIMITATIONS for the small set of rare/obsolete pcapng block types
 that are skipped rather than decoded.
+
+**Colorized text output** is also now done: see OUTPUT FORMATS' "Color"
+subsection for the scheme and the `--color`/`--no-color`/auto-detection
+rules. `policy validate`'s text report stays deliberately plain (an audit
+artifact, meant to be diffed/archived/piped without ANSI noise) -- that
+remains a considered choice, not an oversight, unless a real use case for
+coloring it turns up.
 
 All of what was originally tracked here as "general TCP stream reassembly"
 is now done: PDU/frame-level reassembly across TCP segments
