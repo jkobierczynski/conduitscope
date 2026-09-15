@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: MIT
 // tcp.hpp - minimal TCP header parsing.
 //
-// Groundwork scope: this reads one TCP segment's header and payload as they
-// appear in a single packet. There is deliberately no stream reassembly here
-// -- a Modbus or DNP3 PDU that is split across two TCP segments (rare, but
-// possible on constrained links) will not be reassembled in this release.
-// That is a documented limitation, tracked in docs/MANUAL.md's Roadmap.
+// This file itself just reads one TCP segment's header and payload as they
+// appear in a single packet -- it has no notion of a flow or session. Every
+// layer built on top of that single-segment view (a PDU/frame's own bytes
+// split across TCP segments, Modbus request/response pairing, DNP3
+// application-fragment reassembly, S7comm message chaining across TPKT/COTP
+// frames) lives entirely in decoder.cpp, not here -- see docs/MANUAL.md's
+// PROTOCOL DETECTION/PROTOCOL COVERAGE/LIMITATIONS sections for what each of
+// those does and doesn't cover.
 #pragma once
 
 #include <cstdint>

@@ -135,6 +135,55 @@ def build_modbus_false_positive_sample():
     (TESTS_DIR / "sample_modbus_false_positive.pcap").write_bytes(data)
 
 
+def build_modbus_pairing_sample():
+    """Exercises Decoder::pair_modbus_transaction -- authoritative (MBAP transaction-ID + TCP-
+    session, non-heuristic) Modbus request/response pairing, layered on top of (never replacing)
+    modbus.cpp's own payload-shape heuristic. sample_modbus.pcap already incidentally exercises the
+    common "read family" pairing case and one orphan response (see its packets 1-3); this fixture
+    is specifically for the cases that need their own scenario:
+
+    A) Write Single Register: request and response share the IDENTICAL 4-byte wire shape per spec
+       (modbus.cpp's own heuristic note literally says so) -- payload shape alone cannot tell them
+       apart. Transaction ID + which direction it was first seen on can, and must here, since this
+       is the strongest real-world motivation for this feature existing at all.
+    B) A transaction ID reused (by a misbehaving/retrying client) before its first request was ever
+       paired with a response -- the reassembly must not silently overwrite this without a trace, and
+       the eventual response must pair to the SECOND (most recent) outstanding request, not the first."""
+    packets = []
+
+    def add(src_port, dst_port, seq, ack, payload, ident, from_plc):
+        tcp = tcp_header(src_port, dst_port, seq, ack, TCP_PSH | TCP_ACK, len(payload)) + payload
+        src_ip, dst_ip = (PLC_IP, HMI_IP) if from_plc else (HMI_IP, PLC_IP)
+        src_mac, dst_mac = (PLC_MAC, HMI_MAC) if from_plc else (HMI_MAC, PLC_MAC)
+        ip = ipv4_header(src_ip, dst_ip, 6, len(tcp), ident) + tcp
+        packets.append(eth_header(dst_mac, src_mac, 0x0800) + ip)
+
+    # A) Write Single Register: address=10, value=0x1234, transaction id 500. Request and response
+    #    are byte-for-byte identical apart from the MBAP transaction ID being echoed (that's the
+    #    whole point -- see modbus.cpp's decode_write_single).
+    ws_pdu = struct.pack("!BHH", 0x06, 10, 0x1234)
+    ws_req = struct.pack("!HHHB", 500, 0, 1 + len(ws_pdu), 1) + ws_pdu
+    add(51700, 502, 100, 200, ws_req, 0x7000, from_plc=False)
+    ws_resp = struct.pack("!HHHB", 500, 0, 1 + len(ws_pdu), 1) + ws_pdu  # identical shape, echoed tx id
+    add(502, 51700, 200, 100 + len(ws_req), ws_resp, 0x7001, from_plc=True)
+
+    # B) Transaction id 600 reused on the same flow before its first request is ever answered
+    #    (e.g. a client that times out and retries without waiting), then a real response arrives
+    #    for that reused id -- must pair to the SECOND (most recently outstanding) request.
+    first_req = struct.pack("!HHHBB HH", 600, 0, 6, 1, 3, 0, 5)  # read 5 holding registers @ 0
+    add(51701, 502, 300, 400, first_req, 0x7002, from_plc=False)
+    second_req = struct.pack("!HHHBB HH", 600, 0, 6, 1, 3, 100, 5)  # read 5 holding registers @ 100 (retry)
+    add(51701, 502, 300 + len(first_req), 400, second_req, 0x7003, from_plc=False)
+    reg_vals = b"".join(struct.pack("!H", v) for v in (9001, 9002, 9003, 9004, 9005))
+    resp = struct.pack("!HHHBB", 600, 0, 2 + 1 + len(reg_vals), 1, 3) + bytes([len(reg_vals)]) + reg_vals
+    add(502, 51701, 400, 300 + len(first_req) + len(second_req), resp, 0x7004, from_plc=True)
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_000_700 + i, i * 1000)
+    (TESTS_DIR / "sample_modbus_pairing.pcap").write_bytes(data)
+
+
 def dnp3_block_crc_encode(payload: bytes) -> bytes:
     """Splits `payload` (the logical transport+application bytes) into <=16-byte blocks, each
     followed by its own 2-byte CRC -- the real DNP3 data-link user-data wire format. The CRC
@@ -539,6 +588,67 @@ def build_s7comm_1200sym_sample():
     (TESTS_DIR / "sample_s7comm_1200sym.pcap").write_bytes(data)
 
 
+def build_s7comm_chaining_sample():
+    """Exercises Decoder::reassemble_cotp_data_frame -- chaining a single S7comm message's bytes
+    across multiple COMPLETE TPKT/COTP Data (DT) frames via the EOT bit (ISO 8073's own TSDU-
+    fragmentation signal). This is a different layer from sample_tcp_reassembly.pcap's scenario C,
+    which splits ONE TPKT frame's own bytes across TCP segments; here, every individual TPKT frame
+    is itself complete and independently well-formed -- it's the logical S7comm message inside them
+    that only decodes correctly once several such frames are chained together.
+
+    Real S7comm captures checked for this project (see tests/real_captures/s7comm/ATTRIBUTION.md)
+    do exercise this EOT-chaining path, but only in a content-free shape: a zero-byte EOT=0 "priming"
+    DT frame immediately followed by a normal EOT=1 frame carrying the entire real message --
+    concatenating zero bytes with the real ones is indistinguishable from not chaining at all.
+    Scenario A below is what real traffic doesn't (yet) give this project a real-world example of:
+    a message whose *actual content* -- specifically, a Read Var response's returned register
+    values -- is itself split mid-data-block across two chained frames, so it only decodes correctly
+    if both are genuinely concatenated, not just if the reassembly machinery politely does nothing."""
+    ENG_IP, ENG_PORT = HMI_IP, 49300
+    COTP_DT_HEADER_FRAGMENT = bytes([0xF0, 0x00])  # PDU type 0xF0, TPDU-NR=0, EOT bit CLEAR (not last)
+
+    packets = []
+
+    # A) Read Var Ack_Data response for 5 words (real, distinctive values so the CTest regex can't
+    #    be accidentally satisfied by some other fixture's text -- see the CMake regex lesson in
+    #    CMakeLists.txt's tcp_reassembly_* tests), split mid-data-block across two chained DT frames.
+    read_values = b"".join(struct.pack("!H", v) for v in (5100, 5101, 5102, 5103, 5104))
+    resp_param = bytes([0x04, 0x01])
+    resp_data = bytes([0xFF, 0x04, 0x00, 0x50]) + read_values  # return_code=Success, WORD, 80 bits, 10 bytes
+    resp = s7_header(0x03, 88, len(resp_param), len(resp_data)) + struct.pack("!BB", 0, 0) + resp_param + resp_data
+    # resp_data's own 4-byte prefix (return_code/transport_size/length) ends at offset 18, so the
+    # register values themselves span offsets 18-27 (5 x 2 bytes). split=21 lands mid-byte inside
+    # the second register's (5101) own 2-byte encoding -- proof this reconstructs real register
+    # values correctly, not just whole records or byte-aligned chunks.
+    split = 21
+    assert 18 < split < len(resp) - 2, "split must land inside the register value bytes themselves"
+    frame_a1 = tpkt_frame(COTP_DT_HEADER_FRAGMENT, resp[:split])
+    frame_a2 = tpkt_frame(COTP_DT_HEADER, resp[split:])  # EOT=1 -- COTP_DT_HEADER's TPDU-NR/EOT byte is 0x80
+    tcp_a1 = tcp_header(102, ENG_PORT, 9000, 9100, TCP_PSH | TCP_ACK, len(frame_a1)) + frame_a1
+    ip_a1 = ipv4_header(PLC_IP, ENG_IP, 6, len(tcp_a1), 0x6000) + tcp_a1
+    packets.append(eth_header(HMI_MAC, PLC_MAC, 0x0800) + ip_a1)
+    tcp_a2 = tcp_header(102, ENG_PORT, 9000 + len(frame_a1), 9100, TCP_PSH | TCP_ACK, len(frame_a2)) + frame_a2
+    ip_a2 = ipv4_header(PLC_IP, ENG_IP, 6, len(tcp_a2), 0x6001) + tcp_a2
+    packets.append(eth_header(HMI_MAC, PLC_MAC, 0x0800) + ip_a2)
+
+    # B) A COTP Disconnect Request arriving mid-reassembly must abandon it with a note, not silently
+    #    drop it or try to splice the Disconnect frame's own (irrelevant) bytes in.
+    partial = tpkt_frame(COTP_DT_HEADER_FRAGMENT, resp[:split])  # begins a reassembly, never completed
+    tcp_b1 = tcp_header(102, ENG_PORT + 1, 9200, 9300, TCP_PSH | TCP_ACK, len(partial)) + partial
+    ip_b1 = ipv4_header(PLC_IP, ENG_IP, 6, len(tcp_b1), 0x6002) + tcp_b1
+    packets.append(eth_header(HMI_MAC, PLC_MAC, 0x0800) + ip_b1)
+    dr = bytes([0x80, 0x00, 0x01, 0x00, 0x02, 0x00])  # DR: dst-ref, src-ref, reason -- minimal, no TSAP params
+    frame_dr = tpkt_frame(dr)
+    tcp_b2 = tcp_header(102, ENG_PORT + 1, 9200 + len(partial), 9300, TCP_PSH | TCP_ACK, len(frame_dr)) + frame_dr
+    ip_b2 = ipv4_header(PLC_IP, ENG_IP, 6, len(tcp_b2), 0x6003) + tcp_b2
+    packets.append(eth_header(HMI_MAC, PLC_MAC, 0x0800) + ip_b2)
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_000_600 + i, i * 1000)
+    (TESTS_DIR / "sample_s7comm_chaining.pcap").write_bytes(data)
+
+
 def build_tcp_reassembly_sample():
     """Exercises Decoder::reassemble_tcp_payload -- general, per-TCP-flow reassembly of a single
     PDU/frame's own bytes split across TCP segments -- directly. This is a different layer from
@@ -654,10 +764,12 @@ if __name__ == "__main__":
     TESTS_DIR.mkdir(exist_ok=True)
     build_modbus_sample()
     build_modbus_false_positive_sample()
+    build_modbus_pairing_sample()
     build_dnp3_sample()
     build_s7comm_sample()
     build_s7comm_items_sample()
     build_s7comm_1200sym_sample()
+    build_s7comm_chaining_sample()
     build_tcp_reassembly_sample()
     build_padded_ack_sample()
     build_not_a_pcap()

@@ -78,6 +78,9 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
     out_ << "    \"tcp_flags\": " << (p.has_tcp ? ("\"" + json_escape(p.tcp_flags) + "\"") : "null") << ",\n";
     out_ << "    \"protocol\": \"" << json_escape(p.protocol) << "\",\n";
     out_ << "    \"summary\": \"" << json_escape(p.summary) << "\",\n";
+    if (p.protocol == "modbus" && p.modbus_is_paired_response) {
+        out_ << "    \"modbus_paired_request_index\": " << p.modbus_paired_request_index << ",\n";
+    }
     if (p.protocol == "s7comm" && p.s7comm_has_function) {
         out_ << "    \"s7comm_function\": \"" << json_escape(p.s7comm_function_name) << "\",\n";
     }
@@ -150,6 +153,7 @@ void StatsWriter::write_packet(const DecodedPacket& p) {
     if (p.protocol == "modbus") {
         modbus_function_counts_[p.modbus_function_name]++;
         if (p.modbus_is_exception) modbus_exceptions_++;
+        if (p.modbus_is_paired_response) modbus_paired_responses_++;
     }
     if (p.protocol == "s7comm" && p.s7comm_has_function) {
         s7comm_function_counts_[p.s7comm_function_name]++;
@@ -182,6 +186,8 @@ void StatsWriter::print_summary(std::ostream& out) const {
             out << "  " << std::left << std::setw(40) << name << count << "\n";
         }
         out << "modbus exception responses: " << modbus_exceptions_ << "\n";
+        out << "modbus responses authoritatively paired (transaction ID, not heuristic): "
+            << modbus_paired_responses_ << "\n";
     }
     if (!s7comm_function_counts_.empty()) {
         out << "s7comm function codes:\n";

@@ -99,9 +99,15 @@ No pcapng support; general TCP stream reassembly is implemented but
 narrowly scoped: a Modbus PDU, a single DNP3 data-link frame's own
 header/blocks, or a TPKT/COTP frame split across TCP segments IS
 reassembled (per directional TCP flow, using each protocol's own declared
-length), but authoritative (non-heuristic) Modbus request/response pairing
-by transaction ID and chaining multiple complete TPKT/COTP frames into one
-S7comm message are not; IPv4 only; no IPv4 fragment reassembly; DNP3
+length); authoritative (transaction-ID + TCP-session, non-heuristic) Modbus
+request/response pairing is layered on top of the always-on payload-shape
+heuristic, but only pairs a response when its request is actually present
+on the same TCP session in this capture; a genuine S7comm message chained
+across multiple complete TPKT/COTP frames via COTP's own EOT bit is also
+reassembled, though real-capture validation of that path so far only
+confirms it is transparent on content-free "priming" fragments, not genuine
+multi-frame content splitting (synthetic-fixture-validated only); IPv4
+only; no IPv4 fragment reassembly; DNP3
 header and per-block CRCs are not validated; a DNP3 application fragment
 spanning more than one data-link frame IS reassembled across separate TCP
 segments (per TCP flow), though this path has no real-capture validation
@@ -110,7 +116,8 @@ only for the group/variation combinations in the built-in point-format
 table (an object header outside it is still located and skipped by
 computed length); DNP3 absolute timestamps are shown as a raw
 milliseconds-since-epoch count, not a calendar date; Modbus request/response
-classification is heuristic;
+classification falls back to a payload-shape heuristic only when
+authoritative pairing can't be done (no matching request on this session);
 S7comm item-level addressing (inside Read Var / Write Var) is fully
 confident only for the classic S7ANY syntax; the S7-1200/1500 "symbolic"
 syntax (0xB2) gets an EXPERIMENTAL, unverified decode, marked

@@ -22,6 +22,19 @@ bool port_in(uint16_t port, uint16_t default_port, const std::vector<uint16_t>& 
     return std::find(extra.begin(), extra.end(), port) != extra.end();
 }
 
+// Canonicalizes both directions of one TCP 4-tuple into a single, direction-independent session
+// key, so Decoder::modbus_pending_ can track outstanding requests per SESSION (request and
+// response travel in opposite directions) rather than per directional flow -- unlike flow_key
+// (used by dnp3_reassembly_/tcp_reassembly_/cotp_reassembly_, which genuinely are per-direction).
+// "<->" is used as the join delimiter specifically so this can never collide with a directional
+// flow_key string (which always uses "->"), even though the two happen to key different maps.
+std::string modbus_session_key(const std::string& ip_a, uint16_t port_a, const std::string& ip_b,
+                                uint16_t port_b) {
+    std::string ea = ip_a + ":" + std::to_string(port_a);
+    std::string eb = ip_b + ":" + std::to_string(port_b);
+    return (ea < eb) ? (ea + "<->" + eb) : (eb + "<->" + ea);
+}
+
 }  // namespace
 
 std::optional<Dnp3ApplicationFragment> Decoder::process_dnp3_frame(const Dnp3LinkFrame& link, ByteSpan tcp_payload,
@@ -288,6 +301,125 @@ bool Decoder::reassemble_tcp_payload(const TcpSegment& tcp, const std::string& f
     return true;
 }
 
+void Decoder::pair_modbus_transaction(const ModbusFrame& mb, const std::string& flow_key,
+                                       const std::string& session_key, size_t packet_index,
+                                       DecodedPacket& out) const {
+    auto& pending_for_session = modbus_pending_[session_key];
+    auto it = pending_for_session.find(mb.transaction_id);
+
+    if (it != pending_for_session.end()) {
+        ModbusPendingRequest& pending = it->second;
+        if (pending.flow_key != flow_key) {
+            // Opposite direction: authoritatively the response to that specific request.
+            out.modbus_is_paired_response = true;
+            out.modbus_paired_request_index = pending.packet_index;
+            std::ostringstream s;
+            s << "authoritative pairing: response to transaction id " << mb.transaction_id << " (unit "
+              << static_cast<unsigned>(mb.unit_id) << ") -- matches the request seen in packet #"
+              << pending.packet_index << " (" << pending.function_name << ": " << pending.request_summary
+              << "), paired by TCP session + transaction ID, not the payload-shape heuristic above";
+            if (pending.unit_id != mb.unit_id) {
+                s << " [unit id mismatch: request was unit " << static_cast<unsigned>(pending.unit_id) << "]";
+            }
+            out.notes.push_back(s.str());
+            pending_for_session.erase(it);
+            return;
+        }
+        // Same direction: transaction ID reused before its previous request was ever paired.
+        out.notes.push_back("transaction id " + std::to_string(mb.transaction_id) +
+                             " reused on this TCP flow before its previous outstanding request (packet #" +
+                             std::to_string(pending.packet_index) +
+                             ") was matched with a response -- possibly a retry, an orphaned request, or "
+                             "out-of-order capture; treating this as a new outstanding request");
+        pending = ModbusPendingRequest{packet_index, flow_key, mb.function_name, mb.summary, mb.unit_id};
+        return;
+    }
+
+    // No outstanding request found for this transaction ID on this session. If the payload-shape
+    // heuristic already called this packet a response, it's an orphan -- nothing to pair it
+    // against, most likely because its request was sent before this capture began (or used a
+    // different transaction ID/session). Otherwise, record it as newly outstanding so a later
+    // opposite-direction packet with the same transaction ID can pair against it.
+    bool looks_like_response = mb.is_exception || mb.summary.rfind("response:", 0) == 0;
+    if (looks_like_response) {
+        out.notes.push_back("no outstanding request found on this TCP session for transaction id " +
+                             std::to_string(mb.transaction_id) +
+                             " -- the payload-shape heuristic above classified this packet as a response, "
+                             "but its request was never seen on this session (capture may have started "
+                             "after it was sent, or it used a different transaction ID/session)");
+        return;
+    }
+
+    // Capacity guard against a pathological/malformed capture leaking memory -- a real session
+    // realistically never has anywhere near this many transactions outstanding at once, so hitting
+    // this just means new requests stop being recorded until earlier ones are paired off.
+    constexpr size_t kMaxTrackedTransactionsPerSession = 2000;
+    if (pending_for_session.size() >= kMaxTrackedTransactionsPerSession) {
+        return;
+    }
+    pending_for_session[mb.transaction_id] =
+        ModbusPendingRequest{packet_index, flow_key, mb.function_name, mb.summary, mb.unit_id};
+}
+
+bool Decoder::reassemble_cotp_data_frame(const CotpFrame& cotp, const std::string& flow_key, DecodedPacket& out,
+                                          std::vector<uint8_t>& storage, ByteSpan& s7_candidate) const {
+    CotpFragmentReassembly& state = cotp_reassembly_[flow_key];
+
+    if (!cotp.eot) {
+        // Begins or continues a TSDU fragmented across multiple complete TPKT/COTP frames -- buffer
+        // this frame's user data and wait for the final (EOT=1) frame. COTP has no FIR-equivalent
+        // bit, so "nothing in progress yet on this flow" is what distinguishes a fresh start from a
+        // continuation, not any field on this frame itself.
+        bool starting = !state.in_progress;
+        state.in_progress = true;
+        state.buffered_user_data.insert(state.buffered_user_data.end(), cotp.user_data.data(),
+                                         cotp.user_data.data() + cotp.user_data.size());
+        ++state.frame_count;
+
+        // Safety caps against a pathological/malformed capture stalling a fragment open forever --
+        // sized generously above real S7 block-transfer scenarios (large DB/program-block
+        // uploads/downloads), which is what genuine multi-frame chaining is for.
+        constexpr size_t kMaxBufferedBytes = 1 << 20;  // 1 MiB
+        constexpr size_t kMaxFramesPerFragment = 2000;
+        if (state.buffered_user_data.size() > kMaxBufferedBytes || state.frame_count > kMaxFramesPerFragment) {
+            out.protocol = "cotp";
+            out.summary = "COTP/S7comm fragment reassembly on this TCP flow exceeded its safety cap (" +
+                           std::to_string(state.buffered_user_data.size()) + " byte(s) across " +
+                           std::to_string(state.frame_count) + " frame(s)) -- abandoning it";
+            state = CotpFragmentReassembly{};
+            return false;
+        }
+
+        out.protocol = "cotp";
+        std::ostringstream s;
+        s << (starting ? "beginning" : "continuing")
+          << " a COTP/S7comm message fragmented across multiple complete TPKT/COTP frames on this TCP "
+             "flow (EOT=0): "
+          << state.buffered_user_data.size() << " user-data byte(s) buffered across " << state.frame_count
+          << " frame(s) so far, waiting for the final (EOT=1) frame";
+        out.summary = s.str();
+        return false;
+    }
+
+    // cotp.eot: this frame completes a TSDU -- either the common case (nothing was in progress, so
+    // this frame's own user data IS the whole message, exactly as before this feature existed) or
+    // the final fragment of a reassembly that began on an earlier frame on this flow.
+    if (!state.in_progress) {
+        s7_candidate = cotp.user_data;
+        return true;
+    }
+
+    storage = state.buffered_user_data;
+    storage.insert(storage.end(), cotp.user_data.data(), cotp.user_data.data() + cotp.user_data.size());
+    s7_candidate = ByteSpan(storage.data(), storage.size());
+    size_t total_frames = state.frame_count + 1;
+    out.notes.push_back("reassembled a COTP/S7comm message from " + std::to_string(s7_candidate.size()) +
+                         " user-data byte(s) chained across " + std::to_string(total_frames) +
+                         " complete TPKT/COTP frames on this TCP flow (EOT=0 on all but the last)");
+    state = CotpFragmentReassembly{};
+    return true;
+}
+
 DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size_t index) const {
     DecodedPacket out;
     out.index = index;
@@ -391,6 +523,10 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                 out.modbus_function_name = mb->function_name;
                 out.summary = mb->function_name + ": " + mb->summary;
                 for (const auto& n : mb->notes) out.notes.push_back(n);
+
+                std::string session = modbus_session_key(out.src_ip, tcp.src_port, out.dst_ip, tcp.dst_port);
+                pair_modbus_transaction(*mb, flow_key, session, index, out);
+
                 bool expected_port = port_in(tcp.src_port, MODBUS_TCP_PORT, options_.extra_modbus_ports) ||
                                       port_in(tcp.dst_port, MODBUS_TCP_PORT, options_.extra_modbus_ports);
                 if (!expected_port) {
@@ -507,8 +643,41 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                     }
                 };
 
-                if (cotp->kind == CotpPduKind::Data && !cotp->user_data.empty()) {
-                    if (auto s7 = try_parse_s7comm(cotp->user_data)) {
+                if (cotp->kind != CotpPduKind::Data) {
+                    // A non-Data COTP frame (connection setup/teardown) on this flow means any
+                    // COTP/S7comm fragment reassembly still in progress here is stale -- the
+                    // continuation it was waiting for will never come from this frame, and a new
+                    // session/teardown starting means whatever was buffered no longer applies.
+                    auto it = cotp_reassembly_.find(flow_key);
+                    if (it != cotp_reassembly_.end() && it->second.in_progress) {
+                        out.notes.push_back(
+                            "a " + cotp->pdu_type_name + " frame arrived on this TCP flow while a "
+                            "COTP/S7comm fragment reassembly was still in progress (" +
+                            std::to_string(it->second.buffered_user_data.size()) + " byte(s) buffered across " +
+                            std::to_string(it->second.frame_count) +
+                            " frame(s)) -- the earlier, incomplete fragment is abandoned");
+                        cotp_reassembly_.erase(it);
+                    }
+                }
+
+                if (cotp->kind == CotpPduKind::Data) {
+                    std::vector<uint8_t> cotp_storage;
+                    ByteSpan s7_candidate;
+                    if (!reassemble_cotp_data_frame(*cotp, flow_key, out, cotp_storage, s7_candidate)) {
+                        // Still buffering (EOT=0, waiting for the final fragment) or the flow's
+                        // safety cap was hit -- reassemble_cotp_data_frame has already filled in
+                        // `out`'s protocol/summary.
+                        for (const auto& n : cotp->notes) out.notes.push_back(n);
+                        annotate_port();
+                        return out;
+                    }
+
+                    // try_parse_s7comm already returns std::nullopt (never throws) for an empty
+                    // payload, so no separate emptiness check is needed here -- s7_candidate can
+                    // legitimately be empty (e.g. every buffered fragment plus the final one all
+                    // carried zero bytes of user data, seen in real captures -- see
+                    // tests/real_captures/s7comm/ATTRIBUTION.md).
+                    if (auto s7 = try_parse_s7comm(s7_candidate)) {
                         out.protocol = "s7comm";
                         out.summary = s7->summary;
                         for (const auto& n : s7->notes) out.notes.push_back(n);

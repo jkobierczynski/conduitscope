@@ -148,12 +148,24 @@ against all three protocols, independent of port number:
   check now catches (see LIMITATIONS). If matched, request-vs-response is
   then further disambiguated by PDU shape (a bare 4-byte address+quantity
   looks like a request; a byte-count-prefixed blob looks like a response).
-  This is documented in the decoded output as a heuristic -- it is not based
-  on tracking the TCP conversation's request/response state (matching a
-  response back to the specific request that produced it via transaction ID),
-  which conduitscope does not do. This is a separate thing from PDU/frame
-  reassembly across TCP segments, which conduitscope does do -- see
-  LIMITATIONS' "General TCP stream reassembly" entry.
+  This shape-based classification is documented in the decoded output as a
+  heuristic, and it always runs, unconditionally -- but it is no longer the
+  last word: `Decoder::pair_modbus_transaction` (`decoder.cpp`) additionally
+  tracks each MBAP transaction ID as an outstanding request per TCP session
+  (both directions of one TCP 4-tuple), and when a later packet on that same
+  session carries the same transaction ID from the *opposite* direction, it
+  is authoritatively that request's response -- regardless of what the shape
+  heuristic guessed. This is what resolves Write Single Coil/Register's
+  inherent shape ambiguity (request and response are byte-for-byte identical
+  per spec): transaction ID + direction doesn't need the shape to differ. A
+  paired response gets an extra note naming the exact request packet it
+  matches, plus `modbus_paired_request_index` in JSON output; an unpaired
+  response (its request never seen on this session -- capture started
+  mid-session, or a different session/transaction ID) is noted as an orphan
+  instead of silently trusting the heuristic. See LIMITATIONS for exactly
+  what this does and doesn't cover. This pairing is a separate thing from
+  PDU/frame reassembly across TCP segments, which conduitscope also does --
+  see LIMITATIONS' "General TCP stream reassembly" entry.
 - **DNP3**: recognized by the data-link-layer start bytes `0x05 0x64`, which
   DNP3 always begins with.
 - **S7comm/COTP**: recognized by the TPKT signature (`0x03 0x00` followed by
@@ -200,9 +212,13 @@ that don't apply to a given packet (e.g. `src_ip` for a non-IP frame) are
 `null`. Intended to be piped into `jq` or read by a future policy-evaluation
 layer.
 
-Five fields are only present (omitted entirely, not `null`) on packets where
+Six fields are only present (omitted entirely, not `null`) on packets where
 they apply:
 
+- `modbus_paired_request_index`: the `index` of the specific earlier request
+  packet this response was authoritatively paired to (by MBAP transaction ID
+  + TCP session, not the payload-shape heuristic), when protocol is `modbus`
+  and that pairing succeeded -- see PROTOCOL DETECTION.
 - `s7comm_function`: the S7comm function name (`"Read Var"`, `"Write Var"`,
   `"Setup Communication"`, ...), when protocol is `s7comm` and a function
   code was decoded.
@@ -256,6 +272,12 @@ Exception Status (0x07), Diagnostics (0x08), Report Server ID (0x11), Mask
 Write Register (0x16), Read/Write Multiple Registers (0x17), Read FIFO Queue
 (0x18), Encapsulated Interface Transport (0x2B, which covers Read Device
 Identification among other sub-functions).
+
+Every decoded packet also gets authoritative (transaction-ID + TCP-session,
+non-heuristic) request/response pairing where its counterpart is present in
+the capture, layered on top of the always-on payload-shape heuristic -- see
+PROTOCOL DETECTION for exactly how, and LIMITATIONS for what it doesn't
+cover.
 
 ### DNP3
 
@@ -399,6 +421,22 @@ TSAP session-setup parameters rather than S7comm itself -- the calling and
 called TSAP values. A packet that parses at this level but doesn't turn out
 to carry S7comm is reported as protocol `cotp` rather than `s7comm`.
 
+A COTP Data (DT) frame's own EOT (end-of-TSDU) bit is also tracked per TCP
+flow (`Decoder::reassemble_cotp_data_frame`, `decoder.cpp`): a single S7comm
+message that doesn't fit one negotiated PDU length gets chained across
+several *complete* TPKT/COTP frames -- every frame but the last has EOT=0,
+the last has EOT=1 -- and this decoder concatenates their user data into one
+buffer before attempting the S7comm decode, rather than only ever seeing the
+first frame's own bytes. This is a different, higher layer than the general
+TCP-segment reassembly described under LIMITATIONS: there, one TPKT frame's
+own bytes are split across TCP segments; here, every individual TPKT frame
+is itself complete, and it's the *logical S7comm message* inside them that
+spans more than one. While a fragment is incomplete, the packet is reported
+as protocol `cotp` with a "buffering"/"beginning"/"continuing" note; the
+completing packet gets a "reassembled..." note naming how many frames and
+bytes were chained. See LIMITATIONS for exactly what this does and doesn't
+cover, and for what real-traffic validation this has (and hasn't) had.
+
 Within S7comm itself (protocol id `0x32`): the fixed header is always fully
 decoded -- ROSCTR (Job/Ack/Ack_Data/Userdata), PDU reference, parameter and
 data lengths, and the error class/code carried by Ack and Ack_Data frames.
@@ -469,14 +507,31 @@ items in one capture, and confirmation the S7comm-Plus stub correctly fires
 on real S7-1200/1500 HMI traffic that turned out to use that protocol rather
 than classic S7comm despite its naming. See
 `tests/real_captures/s7comm/ATTRIBUTION.md` for exact provenance and for the
-`0xB2` finding described above.
+`0xB2` finding described above -- also where the COTP EOT-chaining finding
+described below is documented.
+
+The EOT-chaining reassembly described above turned out to have real-traffic
+evidence too, though in a narrower shape than originally expected: several of
+these real captures precede almost every Read Var response with a zero-byte,
+EOT=0 "priming" COTP Data frame immediately before the real EOT=1 frame
+carrying the actual message -- confirmed present across multiple independent
+devices, not an artifact of one capture. Concatenating zero buffered bytes
+with the real frame's own bytes is indistinguishable from not chaining at
+all, so this exercises the *reassembly machinery* (buffer-then-complete,
+correctly, transparently, without a decode change) but not genuine
+multi-frame *content* splitting -- no real capture checked for this project
+splits an actual S7comm message's content across the chain. That case is
+covered only by the synthetic `tests/sample_s7comm_chaining.pcap` (scenario
+A splits real register values mid-byte across the join). See LIMITATIONS.
 
 **Modbus/TCP** is likewise validated against real (not synthetic) captures
 now, not just the hand-built fixtures -- a clean Read Holding Registers
 session, and traffic exercising several function codes outside current scope
 (Diagnostics, Report Server ID, Read Exception Status, and others) that must
 degrade to a "not decoded" note rather than be misparsed. See
-`tests/real_captures/modbus/ATTRIBUTION.md`.
+`tests/real_captures/modbus/ATTRIBUTION.md`. The same capture also confirms
+authoritative transaction-ID pairing (see PROTOCOL DETECTION) against a real
+request/response session, not just the synthetic fixtures.
 
 ## CAPTURED FRAME PADDING
 
@@ -526,14 +581,16 @@ These are current, not aspirational -- each has a corresponding ROADMAP item.
   gap, not buffered for eventual reordering (matching how this tool
   processes packets generally -- one single, strict capture-file-order pass,
   with no out-of-order buffering anywhere else in the codebase either).
-  What this does NOT cover: authoritative (non-heuristic) Modbus
-  request/response pairing by transaction ID -- see PROTOCOL DETECTION,
-  above, for why that's a separate thing; a genuine S7comm message spanning
-  more than one TPKT/COTP frame (as opposed to one TPKT frame split across
-  TCP segments, which IS handled) -- this would need chaining multiple
-  complete TPKT frames together the way DNP3's own multi-data-link-frame
-  application fragments are, which nothing currently does for S7comm; and
-  true out-of-order reordering, per the resync-not-reorder paragraph above.
+  What this does NOT cover: true out-of-order reordering, per the
+  resync-not-reorder paragraph above -- an out-of-order segment is treated
+  as a gap (abandon and resync), never held and spliced in later. Two
+  related but separate things now ARE covered, by their own mechanisms, not
+  this one: authoritative (non-heuristic) Modbus request/response pairing by
+  transaction ID (`Decoder::pair_modbus_transaction` -- see PROTOCOL
+  DETECTION) and chaining a genuine S7comm message across multiple complete
+  TPKT/COTP frames via COTP's own EOT bit
+  (`Decoder::reassemble_cotp_data_frame` -- see PROTOCOL COVERAGE's S7comm/
+  COTP section, and further down in this list).
 
   DNP3 additionally has its own separate, higher-layer reassembly: an
   *application* fragment that spans multiple complete data-link frames
@@ -588,10 +645,28 @@ These are current, not aspirational -- each has a corresponding ROADMAP item.
   transport header decoded**, not its application layer, until the final
   (FIN=1) frame arrives -- see the note under "General TCP stream
   reassembly is implemented, but narrowly scoped" above.
-- **Modbus request/response classification is heuristic**, based on PDU shape
-  (see PROTOCOL DETECTION), not on tracking the TCP stream's actual
-  request/response pairing. It is reliable in practice for the read/write
-  function families this release decodes, but it is not authoritative.
+- **Modbus request/response classification is heuristic by default, but
+  authoritatively paired where the transaction ID allows it.** The
+  payload-shape heuristic (see PROTOCOL DETECTION) always runs and always
+  produces a classification, even for a capture with only one direction of
+  traffic or no session context at all. `Decoder::pair_modbus_transaction`
+  layers authoritative, transaction-ID + TCP-session-based pairing on top,
+  but only when both the request and its response are actually present, on
+  the same TCP session, in this capture -- a response packet still gets the
+  heuristic's classification (and, if the heuristic itself called it a
+  response, an "orphan" note) when its request wasn't captured, was on a
+  different session, or reused a transaction ID a prior, still-outstanding
+  request already claimed. Pairing state is tracked per TCP session with a
+  2000-outstanding-transaction cap per session against a pathological/
+  malformed capture; past the cap, new requests simply stop being recorded
+  (silently -- a capacity guard, not a correctness concern for any
+  realistic capture). A write-single request whose own first sighting is
+  itself an orphaned response (capture starts mid-session) is misrecorded as
+  an outstanding request rather than flagged as an orphan, because
+  write-single's ambiguous shape gives the heuristic nothing to go on for
+  that specific case -- harmless (it will simply never pair, and eventually
+  ages out via the cap), just not caught and reported the way an orphan
+  read/write-multiple response is.
 - **Modbus/TCP detection itself is a heuristic, and can still false-positive
   in principle.** Modbus/TCP has no magic bytes; detection requires
   protocol-id==0 and a non-zero function code, which rules out the false
@@ -619,6 +694,28 @@ These are current, not aspirational -- each has a corresponding ROADMAP item.
   against the documented wire format; the rarer transport sizes (DINT,
   REAL, OCTET STRING, and a few others) fall back to treating the length
   field as a byte count directly, flagged with a note when it's used.
+- **S7comm message chaining across multiple TPKT/COTP frames is implemented,
+  via COTP's own EOT bit, but only content-validated by a synthetic
+  fixture.** `Decoder::reassemble_cotp_data_frame` concatenates a message
+  split across several complete DT frames correctly (verified byte-for-byte
+  against `tests/sample_s7comm_chaining.pcap`, which splits real register
+  values mid-byte across the join) -- but no real S7comm capture checked for
+  this project actually splits a message's *content* this way; the real
+  captures that do exercise EOT=0 chaining (see PROTOCOL COVERAGE) all use a
+  content-free, zero-byte "priming" frame, so real-world evidence only
+  confirms the reassembly is transparent when nothing needs concatenating,
+  not that genuine multi-frame content splicing has been seen on the wire.
+  The COTP TPDU-NR field is deliberately NOT used to validate fragment
+  continuity (unlike DNP3's transport SEQ, which real DNP3 stacks do
+  increment reliably) -- every real capture checked shows it staying 0 on
+  every DT frame, fragmented or not, so trusting it as a gate would risk
+  false "gap" aborts on exactly the real traffic this feature targets; EOT
+  alone is what's trusted. A non-Data COTP frame (connection setup/teardown)
+  arriving mid-reassembly abandons it with a note rather than merging in
+  irrelevant bytes; there is no gap/resync equivalent to TCP-segment
+  reassembly's sequence-number check here, since COTP gives no per-fragment
+  sequence signal worth trusting for that. Buffering is capped at 1 MiB /
+  2000 frames per flow against a pathological/malformed capture.
 - **S7comm-Plus (protocol id 0x72) is detected but never decoded.**
 - **No live capture.** Offline pcap files only; see the top of this document
   for why, and ROADMAP for the plan to add it.
@@ -706,51 +803,63 @@ conduitscope decode -i capture.pcap --protocol dnp3 -f json \
            (.dnp3_values[] | select(startswith("g12v1"))) | "\($s) -> \($d): \(.)"'
 ```
 
+Find every Modbus write whose response was never authoritatively paired --
+either the response wasn't captured, or it used a different session/
+transaction ID than expected (worth a closer look on a conduit that should
+be a simple, complete request/response session):
+
+```sh
+conduitscope decode -i capture.pcap --protocol modbus -f json \
+  | jq -r '.[] | select(.summary | test("^Write")) | select(.modbus_paired_request_index | not) |
+           "\(.index): \(.src_ip):\(.src_port) -> \(.dst_ip):\(.dst_port) \(.summary)"'
+```
+
 ## ROADMAP
 
 Rough order, each building on the groundwork this release establishes:
 
-1. **Authoritative (non-heuristic) Modbus request/response pairing** by
-   transaction ID, and **chaining multiple complete TPKT/COTP frames** into
-   one S7comm message that spans more than one negotiated PDU length. Both
-   are what remains of the original "general TCP stream reassembly" item --
-   PDU/frame-level reassembly across TCP segments (a split Modbus MBAP
-   message, DNP3 data-link frame, or TPKT/COTP frame) is now done, via
-   `Decoder::reassemble_tcp_payload` (see LIMITATIONS). DNP3
-   *application*-layer fragmentation across complete data-link frames is a
-   related, already-done special case -- conduitscope reassembles it per TCP
-   flow via its own mechanism -- but it still awaits validation against a
-   real capture that actually exercises it (none found so far; see
-   LIMITATIONS).
-2. **Zone/conduit policy engine** behind `policy validate`: a YAML schema
+1. **Zone/conduit policy engine** behind `policy validate`: a YAML schema
    describing zones (IP/port ranges, expected protocols) and conduits (allowed
    flows between zones), evaluated against decoded traffic, producing a
    pass/fail report suitable for a NIS2/62443 audit trail. S7comm item tags,
-   decoded DNP3 point values (especially CROB commands), and Modbus
-   address+quantity decoding all now give this something concrete to match a
-   policy's address ranges and expected-value rules against.
-3. **Live capture**, via libpcap on Linux and Npcap on Windows, as an
+   decoded DNP3 point values (especially CROB commands), Modbus
+   address+quantity decoding, and now authoritative Modbus request/response
+   pairing all give this something concrete to match a policy's address
+   ranges and expected-value rules against.
+2. **Live capture**, via libpcap on Linux and Npcap on Windows, as an
    additional input mode alongside (not replacing) pcap file input.
-4. **pcapng support**, once live capture or another concrete need makes it
+3. **pcapng support**, once live capture or another concrete need makes it
    worth the added parsing complexity.
-5. Colorized text output (the `--no-color` flag is already reserved for this).
-6. **Confirm or replace the EXPERIMENTAL `0xB2` (S7-1200/1500 "symbolic"
+4. Colorized text output (the `--no-color` flag is already reserved for this).
+5. **Confirm or replace the EXPERIMENTAL `0xB2` (S7-1200/1500 "symbolic"
    addressing) decode** against a source with real authority -- a PLC or
    TIA Portal project under your own control, ideally, rather than more
    public reverse-engineering writeups -- and extend it to the shapes it
    currently falls back to raw hex on: DB-area items, and items with more
    than one LID entry (structured/nested symbol access). Promote it out of
    [EXPERIMENTAL] once confirmed.
-7. S7comm-Plus decoding, and PLC Control/Stop parameter decoding (these
+6. S7comm-Plus decoding, and PLC Control/Stop parameter decoding (these
    send commands that change PLC run state -- high security relevance).
-8. **DNP3 CRC validation** (both the header CRC and the per-block CRCs), so a
+7. **DNP3 CRC validation** (both the header CRC and the per-block CRCs), so a
    corrupted frame that still starts with the right magic bytes is flagged
    rather than silently "decoded".
-9. **DNP3 absolute-time rendering as a calendar date** (currently a raw
+8. **DNP3 absolute-time rendering as a calendar date** (currently a raw
    milliseconds-since-epoch count -- see LIMITATIONS), and value decoding for
    the group/variation combinations still outside the point-format table
    (double-precision Analog Input Event variants, Octet String, File
    Control, Analog Input Reporting Deadband).
+
+All of what was originally tracked here as "general TCP stream reassembly"
+is now done: PDU/frame-level reassembly across TCP segments
+(`Decoder::reassemble_tcp_payload`), authoritative Modbus request/response
+pairing by transaction ID (`Decoder::pair_modbus_transaction`), and chaining
+an S7comm message across multiple complete TPKT/COTP frames
+(`Decoder::reassemble_cotp_data_frame`) -- see LIMITATIONS for each one's
+exact scope and remaining caveats. DNP3 *application*-layer fragmentation
+across complete data-link frames is a related, already-done special case --
+conduitscope reassembles it per TCP flow via its own mechanism -- but it
+still awaits validation against a real capture that actually exercises it
+(none found so far; see LIMITATIONS).
 
 ## BUILDING
 

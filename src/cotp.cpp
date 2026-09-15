@@ -89,6 +89,7 @@ std::optional<CotpFrame> try_parse_tpkt_cotp(ByteSpan tcp_payload) {
         if (li >= 2) {
             uint8_t tpdu_nr_eot = c.u8();
             frame.eot = (tpdu_nr_eot & 0x80) != 0;
+            frame.tpdu_nr = tpdu_nr_eot & 0x7F;
         }
         if (header_end_pos > c.position()) c.skip(header_end_pos - c.position());
         frame.user_data = c.rest();

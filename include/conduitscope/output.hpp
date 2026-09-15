@@ -68,6 +68,9 @@ private:
     std::map<std::string, size_t> protocol_counts_;
     std::map<std::string, size_t> modbus_function_counts_;
     size_t modbus_exceptions_ = 0;
+    // Count of responses authoritatively paired (by MBAP transaction ID + TCP session, not the
+    // payload-shape heuristic) to a specific earlier request -- see Decoder::pair_modbus_transaction.
+    size_t modbus_paired_responses_ = 0;
     std::map<std::string, size_t> s7comm_function_counts_;
     std::map<std::string, size_t> dnp3_function_counts_;
     bool has_ts_ = false;

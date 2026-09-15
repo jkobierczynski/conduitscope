@@ -23,7 +23,14 @@ Groundwork / v0.1.0. What works right now:
   PDU/frame-level reassembly across TCP segments for Modbus, DNP3 data-link
   frames, and TPKT/COTP -- see below and docs/MANUAL.md)
 - Full Modbus/TCP decoding for the read (1-4), write-single (5-6), and
-  write-multiple (15-16) function code families, plus exception responses
+  write-multiple (15-16) function code families, plus exception responses.
+  Every response also gets authoritative (MBAP transaction-ID + TCP-session,
+  non-heuristic) pairing to the specific request it answers, layered on top
+  of the always-on payload-shape heuristic -- this is what resolves
+  write-single's inherent shape ambiguity (request and response are
+  byte-for-byte identical per spec). Validated against both synthetic
+  fixtures and a real Modbus capture's request/response session; see
+  docs/MANUAL.md.
 - Full DNP3 decoding through the application layer for a single-data-link-frame
   fragment (the large majority of real traffic): data-link header
   (source/destination addresses, frame length), transport header (FIR/FIN/SEQ,
@@ -63,7 +70,14 @@ Groundwork / v0.1.0. What works right now:
   "symbolic" addressing (`0xB2`) -- confirmed to be common in real traffic --
   also gets a tag, but via an **experimental, unverified** reconstruction
   clearly marked as such everywhere it appears; S7comm-Plus is a documented
-  stub. Validated against real 4SICS ICS-lab captures -- including two much
+  stub. A single S7comm message that doesn't fit one negotiated PDU length
+  and gets chained across multiple complete TPKT/COTP frames (via COTP's own
+  EOT bit) is reassembled into one logical message before decoding, not just
+  the first frame's bytes -- real captures confirm the reassembly itself is
+  transparent (several independent devices precede real responses with a
+  content-free "priming" fragment), though genuine multi-frame *content*
+  splitting is validated only by a synthetic fixture so far; see
+  docs/MANUAL.md. Validated against real 4SICS ICS-lab captures -- including two much
   larger ones (1.25M and 2.27M packets) that turned out to be
   overwhelmingly S7comm traffic, which is exactly the case item-level
   addressing was built for. The `0xB2` reconstruction's single validated
@@ -89,8 +103,9 @@ Groundwork / v0.1.0. What works right now:
   project's test set (none of which happen to split a PDU across segments)
   and against 6 synthetic scenarios covering the happy path plus gaps,
   full-duplicate retransmits, and partial-overlap retransmits; see
-  docs/MANUAL.md's LIMITATIONS for exact scope (Modbus request/response
-  pairing and multi-frame S7comm chaining are explicitly out of scope)
+  docs/MANUAL.md's LIMITATIONS for exact scope. Modbus request/response
+  pairing and multi-frame S7comm chaining are separate mechanisms, described
+  above, not part of this one
 - Text, JSON, and CSV output; a `--stats` summary mode; an `info` command for
   quick file metadata
 - A `decode`/`info`/`policy validate`/`version` command surface with full

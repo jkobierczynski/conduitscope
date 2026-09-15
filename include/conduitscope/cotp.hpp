@@ -42,6 +42,14 @@ struct CotpFrame {
     std::string pdu_type_name;      // e.g. "Data (DT)", "Connection Request (CR)"
 
     bool eot = false;  // Data frames only: end-of-TSDU bit (this is the last fragment)
+    // Data frames only: the 7-bit TPDU-NR (send sequence number) sharing the EOT byte with it.
+    // Exposed for forensic/JSON purposes only -- NOT used to gate Decoder::reassemble_cotp_data_frame's
+    // EOT-based chaining (see decoder.cpp). Real captures checked for this project (see
+    // tests/real_captures/s7comm/ATTRIBUTION.md) show it staying 0 across every DT frame seen,
+    // fragmented or not, on every device sampled -- not a reliable per-fragment increment in
+    // practice, unlike DNP3's transport SEQ (which real DNP3 stacks do increment). Trusting it as a
+    // correctness gate would risk false "gap" aborts on exactly the real traffic this tool targets.
+    uint8_t tpdu_nr = 0;
 
     // Connection Request/Confirm only: raw TSAP parameter bytes, if present
     // (0xC1 = calling TSAP, 0xC2 = called TSAP, per ISO 8073). Shown as hex

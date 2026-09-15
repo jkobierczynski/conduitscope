@@ -436,6 +436,19 @@ add_test(NAME real_s7comm_read_db1dbd0_item_decoded
 set_tests_properties(real_s7comm_read_db1dbd0_item_decoded PROPERTIES
   PASS_REGULAR_EXPRESSION "item 0: DB1\\.DBB0")
 
+# Real EOT-chaining evidence: this capture's PLC precedes almost every real Read Var response with
+# a zero-byte EOT=0 "priming" COTP Data frame before the real EOT=1 frame -- see
+# tests/real_captures/s7comm/ATTRIBUTION.md for how this shape was confirmed across every real
+# S7comm capture checked for this project (content-free in all of them; a genuinely
+# content-split real-world chain has yet to be seen -- see sample_s7comm_chaining.pcap for a
+# synthetic one that does split real content). Decoder::reassemble_cotp_data_frame must
+# transparently chain across it (0 buffered bytes + the real frame's own bytes = unchanged
+# decoded content) rather than mishandling or crashing on it.
+add_test(NAME real_s7comm_read_db1dbd0_eot_chaining_note
+  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/s7comm/s7comm_varservice_read_db1dbd0.pcap" --format text)
+set_tests_properties(real_s7comm_read_db1dbd0_eot_chaining_note PROPERTIES
+  PASS_REGULAR_EXPRESSION "reassembled a COTP/S7comm message from 24 user-data byte\\(s\\) chained across 2 complete TPKT/COTP frames")
+
 # A capture named after S7-1500 HMI traffic that turns out to be S7comm-Plus,
 # not classic S7comm -- regression guard that the S7comm-Plus detection stub
 # fires correctly on real traffic, not just the one it was written against.
@@ -480,6 +493,13 @@ add_test(NAME real_modbus_read_holding_registers_decoded
   COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/modbus/modbus_read_holding_registers.pcap" --format text)
 set_tests_properties(real_modbus_read_holding_registers_decoded PROPERTIES
   PASS_REGULAR_EXPRESSION "Read Holding Registers: request: read 1 holding register\\(s\\) starting at address 1")
+
+# Real authoritative pairing evidence: this capture's request/response pairs share one TCP session,
+# so Decoder::pair_modbus_transaction must pair the first real response back to its real request.
+add_test(NAME real_modbus_read_holding_registers_authoritative_pairing
+  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/modbus/modbus_read_holding_registers.pcap" --format text)
+set_tests_properties(real_modbus_read_holding_registers_authoritative_pairing PROPERTIES
+  PASS_REGULAR_EXPRESSION "authoritative pairing: response to transaction id 209 \\(unit 1\\) -- matches the request seen in packet #1")
 
 # Real traffic exercising a function code outside current scope must degrade
 # to a "not decoded" note, not be misparsed.
@@ -579,6 +599,35 @@ add_test(NAME s7comm_item_tags_in_json
 set_tests_properties(s7comm_item_tags_in_json PROPERTIES
   PASS_REGULAR_EXPRESSION "\"s7comm_items\": \\[\"DB10\\.DBW100\"\\]")
 
+# --------------------------------------------------------------------------
+# Chaining a single S7comm message across multiple COMPLETE TPKT/COTP frames via the EOT bit
+# (Decoder::reassemble_cotp_data_frame / cotp_reassembly_) -- a different, higher layer from
+# General TCP stream reassembly above: every individual TPKT frame here is itself well-formed and
+# complete, but the logical S7comm message inside only decodes correctly once several are chained
+# together. tests/sample_s7comm_chaining.pcap, scenarios A-B.
+# --------------------------------------------------------------------------
+
+# A) The first (EOT=0) frame alone must show only "beginning...", never an s7comm decode; the
+# second (EOT=1) frame must complete it and decode the CONCATENATED bytes correctly -- the split
+# lands mid-byte inside a register value itself (see the fixture's own comment), so a wrong decode
+# here would mean the reassembly corrupted content, not just failed to buffer.
+add_test(NAME s7comm_chaining_first_frame_buffers
+  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_chaining.pcap" --format text)
+set_tests_properties(s7comm_chaining_first_frame_buffers PROPERTIES
+  PASS_REGULAR_EXPRESSION "#1  [^#]*\\[cotp\\]  beginning a COTP/S7comm message fragmented across multiple complete TPKT/COTP frames on this TCP flow \\(EOT=0\\): 21 user-data byte\\(s\\) buffered across 1 frame\\(s\\)")
+
+add_test(NAME s7comm_chaining_completes_with_correct_values
+  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_chaining.pcap" --format text)
+set_tests_properties(s7comm_chaining_completes_with_correct_values PROPERTIES
+  PASS_REGULAR_EXPRESSION "Ack_Data: Read Var \\(1 value\\(s\\): 13 ec 13 ed 13 ee 13 ef 13 f0\\)[^#]*reassembled a COTP/S7comm message from 28 user-data byte\\(s\\) chained across 2 complete TPKT/COTP frames")
+
+# B) A Disconnect Request mid-reassembly abandons the in-progress fragment with a note rather than
+# silently dropping it or splicing the Disconnect frame's own (irrelevant) bytes in.
+add_test(NAME s7comm_chaining_disconnect_abandons_reassembly
+  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_chaining.pcap" --format text)
+set_tests_properties(s7comm_chaining_disconnect_abandons_reassembly PROPERTIES
+  PASS_REGULAR_EXPRESSION "a Disconnect Request \\(DR\\) frame arrived on this TCP flow while a COTP/S7comm fragment reassembly was still in progress \\(21 byte\\(s\\) buffered across 1 frame\\(s\\)\\) -- the earlier, incomplete fragment is abandoned")
+
 # Regression guard for a real false positive: non-Modbus traffic (here, bytes that also happen
 # to satisfy DNP3's 0x05 0x64 start) whose first four bytes look like transaction_id + a valid
 # protocol_id==0, and whose function-code byte is 0x00 -- reserved/never assigned in the Modbus
@@ -589,6 +638,41 @@ add_test(NAME modbus_function_code_zero_is_not_modbus
 set_tests_properties(modbus_function_code_zero_is_not_modbus PROPERTIES
   PASS_REGULAR_EXPRESSION "\\[dnp3\\]"
   FAIL_REGULAR_EXPRESSION "\\[modbus\\]")
+
+# --------------------------------------------------------------------------
+# Authoritative (MBAP transaction-ID + TCP-session, non-heuristic) Modbus request/response pairing
+# (Decoder::pair_modbus_transaction / modbus_pending_), layered on top of -- never replacing --
+# modbus.cpp's own payload-shape heuristic. sample_modbus.pcap already incidentally exercises the
+# common read-family pairing case and one orphan response; sample_modbus_pairing.pcap covers the
+# cases that need their own scenario -- see its own file comment for why.
+# --------------------------------------------------------------------------
+
+# A) Write Single Register: request and response share the IDENTICAL 4-byte shape per spec -- the
+# heuristic alone cannot tell them apart (its own note says so), so this is the strongest
+# real-world case for this feature. The response must still be authoritatively paired to packet #1.
+add_test(NAME modbus_pairing_write_single_paired_despite_ambiguous_shape
+  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus_pairing.pcap" --format text)
+set_tests_properties(modbus_pairing_write_single_paired_despite_ambiguous_shape PROPERTIES
+  PASS_REGULAR_EXPRESSION "authoritative pairing: response to transaction id 500 \\(unit 1\\) -- matches the request seen in packet #1")
+
+# B) A reused transaction ID before its first request is ever answered must be noted, and the
+# eventual response must pair to the SECOND (most recently outstanding) request, not the first.
+add_test(NAME modbus_pairing_reused_transaction_id_noted
+  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus_pairing.pcap" --format text)
+set_tests_properties(modbus_pairing_reused_transaction_id_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "transaction id 600 reused on this TCP flow before its previous outstanding request \\(packet #3\\) was matched with a response")
+
+add_test(NAME modbus_pairing_reused_transaction_id_pairs_to_latest_request
+  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus_pairing.pcap" --format text)
+set_tests_properties(modbus_pairing_reused_transaction_id_pairs_to_latest_request PROPERTIES
+  PASS_REGULAR_EXPRESSION "authoritative pairing: response to transaction id 600 \\(unit 1\\) -- matches the request seen in packet #4 \\(Read Holding Registers: request: read 5 holding register\\(s\\) starting at address 100\\)")
+
+# C) An orphan response (its request never seen on this session) -- already exercised incidentally
+# by sample_modbus.pcap's exception-response packet (transaction id 2, no matching request).
+add_test(NAME modbus_pairing_orphan_response_noted
+  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --format text)
+set_tests_properties(modbus_pairing_orphan_response_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "no outstanding request found on this TCP session for transaction id 2")
 
 add_test(NAME info_modbus_sample
   COMMAND conduitscope info --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap")

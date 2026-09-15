@@ -9,11 +9,17 @@
 // read/write multiple) are recognized by name but their payload is shown as
 // hex rather than fully decoded -- see docs/MANUAL.md Roadmap.
 //
-// Request vs. response is not tracked via TCP stream state in this groundwork
-// release (that needs the stream reassembly this tool doesn't do yet). Reads
-// are disambiguated by payload shape instead (a 4-byte address+quantity looks
-// like a request; a byte-count-prefixed blob looks like a response) -- this is
-// a heuristic, and it is called out as such in the decoded output.
+// Request vs. response is always disambiguated by payload shape first (a
+// 4-byte address+quantity looks like a request; a byte-count-prefixed blob
+// looks like a response) -- this is a heuristic, and it is called out as such
+// in the decoded output. Decoder::pair_modbus_transaction (decoder.cpp)
+// additionally tracks each MBAP transaction ID as an outstanding request per
+// TCP session, and authoritatively confirms/overrides that heuristic once a
+// matching opposite-direction packet with the same transaction ID is seen on
+// the same session -- see docs/MANUAL.md's PROTOCOL DETECTION section. This
+// file's own parsing has no notion of TCP session state; that layer lives
+// entirely in decoder.cpp, same as PDU/frame-level TCP segment reassembly
+// (see modbus_tcp_declared_length below).
 #pragma once
 
 #include <cstdint>
