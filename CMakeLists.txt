@@ -235,6 +235,79 @@ set_tests_properties(stats_mode_dnp3 PROPERTIES
   PASS_REGULAR_EXPRESSION "dnp3 function codes:")
 
 # --------------------------------------------------------------------------
+# General TCP stream reassembly (Decoder::reassemble_tcp_payload / tcp_reassembly_) -- a single
+# PDU/frame's own bytes split across TCP segments, one flow-level layer below DNP3's own
+# application-fragment reassembly tested above. tests/sample_tcp_reassembly.pcap, scenarios A-F.
+# --------------------------------------------------------------------------
+
+# A) Modbus response ADU split across two TCP segments: the first segment alone must show only
+# "buffering", never a modbus decode; the second must complete it correctly.
+add_test(NAME tcp_reassembly_modbus_first_segment_buffers
+  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tcp_reassembly.pcap" --format text)
+set_tests_properties(tcp_reassembly_modbus_first_segment_buffers PROPERTIES
+  PASS_REGULAR_EXPRESSION "buffering a Modbus/TCP PDU/frame split across TCP segments 502->51600: 15 of 29 declared byte\\(s\\)")
+
+# [^#] rather than a bare .* binds the match to one packet's own block of output (every packet's
+# block starts with a line beginning "#<index>", and nothing inside a block contains '#') -- .*
+# alone would span the WHOLE command output across every packet, so a later, unrelated packet's
+# text (several other scenarios below decode to this same "response: 20 data byte(s) = 00 00 00
+# 01..." text, being built from the same register values) could satisfy it just as well, proving
+# nothing about which packet actually produced it. Same technique already used for the JSON
+# per-object checks above (there bounded by '}' instead of '#').
+add_test(NAME tcp_reassembly_modbus_completes
+  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tcp_reassembly.pcap" --format text)
+set_tests_properties(tcp_reassembly_modbus_completes PROPERTIES
+  PASS_REGULAR_EXPRESSION "response: 20 data byte\\(s\\) = 00 00 00 01 00 02 00 03 00 04 00 05 00 06 00 07 00 08 00 09[^#]*reassembled a Modbus/TCP PDU/frame from 29 byte\\(s\\) spanning 2 TCP segments")
+
+# B) A complete single-data-link-frame DNP3 fragment split mid-*header* across two TCP segments.
+add_test(NAME tcp_reassembly_dnp3_link_layer_completes
+  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tcp_reassembly.pcap" --format text)
+set_tests_properties(tcp_reassembly_dnp3_link_layer_completes PROPERTIES
+  PASS_REGULAR_EXPRESSION "function=Read \\(0x01\\) objects: \\[g60v1\\][^#]*reassembled a DNP3 data-link PDU/frame from 18 byte\\(s\\) spanning 2 TCP segments")
+
+# C) A TPKT/S7comm Setup Communication request split across two TCP segments.
+add_test(NAME tcp_reassembly_tpkt_s7comm_completes
+  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tcp_reassembly.pcap" --format text)
+set_tests_properties(tcp_reassembly_tpkt_s7comm_completes PROPERTIES
+  PASS_REGULAR_EXPRESSION "Setup Communication \\(negotiated PDU length=240[^#]*reassembled a TPKT/COTP PDU/frame from 25 byte\\(s\\) spanning 2 TCP segments")
+
+# D) A TCP sequence gap abandons the in-progress reassembly, and a later, ordinary request on the
+# same flow still decodes normally afterward (the abandoned state doesn't wedge the flow).
+add_test(NAME tcp_reassembly_gap_abandons_reassembly
+  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tcp_reassembly.pcap" --format text)
+set_tests_properties(tcp_reassembly_gap_abandons_reassembly PROPERTIES
+  PASS_REGULAR_EXPRESSION "TCP sequence gap on this flow \\(expected seq 30009, got 30509, 500 byte\\(s\\) apparently missing\\) -- abandoning an in-progress 9-byte PDU/frame reassembly")
+
+add_test(NAME tcp_reassembly_flow_recovers_after_gap
+  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tcp_reassembly.pcap" --format text)
+set_tests_properties(tcp_reassembly_flow_recovers_after_gap PROPERTIES
+  PASS_REGULAR_EXPRESSION "request: read 10 holding register\\(s\\) starting at address 0")
+
+# E) A fully-duplicate retransmission mid-reassembly is ignored, not misapplied; the real
+# completing segment afterward still finishes the PDU correctly.
+add_test(NAME tcp_reassembly_duplicate_retransmit_ignored
+  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tcp_reassembly.pcap" --format text)
+set_tests_properties(tcp_reassembly_duplicate_retransmit_ignored PROPERTIES
+  PASS_REGULAR_EXPRESSION "retransmitted/duplicate TCP segment 502->51604 \\(fully overlaps bytes already buffered for an in-progress 20-byte PDU/frame reassembly")
+
+add_test(NAME tcp_reassembly_completes_despite_duplicate
+  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tcp_reassembly.pcap" --format text)
+set_tests_properties(tcp_reassembly_completes_despite_duplicate PROPERTIES
+  PASS_REGULAR_EXPRESSION "response: 20 data byte\\(s\\) = 00 00 00 01 00 02 00 03 00 04 00 05 00 06 00 07 00 08 00 09[^#]*reassembled a Modbus/TCP PDU/frame from 29 byte\\(s\\) spanning 3 TCP segments")
+
+# F) A partial-overlap retransmission (repeats a few already-buffered bytes, then extends past
+# them with new ones) is trimmed to just its new bytes, not misaligned or duplicated.
+add_test(NAME tcp_reassembly_partial_overlap_trimmed
+  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tcp_reassembly.pcap" --format text)
+set_tests_properties(tcp_reassembly_partial_overlap_trimmed PROPERTIES
+  PASS_REGULAR_EXPRESSION "TCP segment on this flow overlaps 3 already-buffered byte\\(s\\) \\(likely a retransmission\\) -- trimmed and only the new byte\\(s\\) appended")
+
+add_test(NAME tcp_reassembly_partial_overlap_completes_correctly
+  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tcp_reassembly.pcap" --format text)
+set_tests_properties(tcp_reassembly_partial_overlap_completes_correctly PROPERTIES
+  PASS_REGULAR_EXPRESSION "response: 20 data byte\\(s\\) = 00 00 00 01 00 02 00 03 00 04 00 05 00 06 00 07 00 08 00 09[^#]*reassembled a Modbus/TCP PDU/frame from 29 byte\\(s\\) spanning 3 TCP segments")
+
+# --------------------------------------------------------------------------
 # Real-world DNP3 captures (not synthetic, unlike tests/sample_dnp3.pcap above),
 # sourced from github.com/automayt/ICS-pcap -- see
 # tests/real_captures/dnp3/ATTRIBUTION.md for exact provenance, why these

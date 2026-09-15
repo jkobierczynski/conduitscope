@@ -13,6 +13,26 @@ constexpr size_t kTpktHeaderSize = 4;
 
 }  // namespace
 
+std::optional<size_t> tpkt_declared_length(ByteSpan payload) {
+    if (payload.size() < 4) {
+        return std::nullopt;
+    }
+    if (payload.at(0) != 0x03 || payload.at(1) != 0x00) {
+        return std::nullopt;
+    }
+    Cursor c(payload);
+    c.u8();  // version
+    c.u8();  // reserved
+    uint16_t tpkt_length = c.u16be();
+    if (tpkt_length < kTpktHeaderSize + 2) {
+        // Same lower-bound sanity check try_parse_tpkt_cotp applies -- an implausibly short
+        // declared length (can't even hold LI+PDU-type) means this isn't really TPKT, not that
+        // it's a truncated one waiting for more bytes.
+        return std::nullopt;
+    }
+    return tpkt_length;
+}
+
 std::optional<CotpFrame> try_parse_tpkt_cotp(ByteSpan tcp_payload) {
     // TPKT(4) + COTP length-indicator(1) + COTP PDU-type(1) + at least one more
     // header/data byte is the smallest plausible frame worth trusting as TPKT/COTP.

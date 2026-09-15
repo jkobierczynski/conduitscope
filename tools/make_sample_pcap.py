@@ -539,6 +539,89 @@ def build_s7comm_1200sym_sample():
     (TESTS_DIR / "sample_s7comm_1200sym.pcap").write_bytes(data)
 
 
+def build_tcp_reassembly_sample():
+    """Exercises Decoder::reassemble_tcp_payload -- general, per-TCP-flow reassembly of a single
+    PDU/frame's own bytes split across TCP segments -- directly. This is a different layer from
+    sample_dnp3.pcap's packets 8-12, which exercise DNP3's separate *application*-fragment
+    reassembly across several already-COMPLETE data-link frames; here, a single Modbus ADU, DNP3
+    data-link frame, or TPKT frame is itself cut apart mid-frame and delivered as two or more TCP
+    segments (separate pcap packets, real sequence numbers). Each scenario below uses its own port
+    pair so flows can't interact with each other or with any other sample file's fixtures."""
+    packets = []
+
+    def add_segment(src_port, dst_port, seq, ack, payload, ident, from_plc):
+        tcp = tcp_header(src_port, dst_port, seq, ack, TCP_PSH | TCP_ACK, len(payload)) + payload
+        src_ip, dst_ip = (PLC_IP, HMI_IP) if from_plc else (HMI_IP, PLC_IP)
+        src_mac, dst_mac = (PLC_MAC, HMI_MAC) if from_plc else (HMI_MAC, PLC_MAC)
+        ip = ipv4_header(src_ip, dst_ip, 6, len(tcp), ident) + tcp
+        packets.append(eth_header(dst_mac, src_mac, 0x0800) + ip)
+
+    # A) A real Modbus/TCP response ADU (Read Holding Registers, 10 registers) split across two
+    #    TCP segments mid-PDU.
+    reg_data = b"".join(struct.pack("!H", v) for v in range(10))
+    adu_a = struct.pack("!HHHBBB", 0xAAAA, 0, 1 + 2 + len(reg_data), 1, 0x03, len(reg_data)) + reg_data
+    assert len(adu_a) == 29
+    split_a = 15
+    add_segment(502, 51600, 20000, 100, adu_a[:split_a], 0x5000, from_plc=True)
+    add_segment(502, 51600, 20000 + split_a, 100, adu_a[split_a:], 0x5001, from_plc=True)
+
+    # B) A complete single-data-link-frame DNP3 fragment (Read Class 0) split mid-*header* -- the
+    #    link layer's own bytes, not the application-fragment-across-frames case.
+    read_class0 = bytes([0xC0, 0xC0, 0x01, 60, 1, 0x06])
+    frame_b = dnp3_link_frame(source=1, destination=1024, user_data=read_class0)
+    assert len(frame_b) == 18  # 10-byte header + 6 bytes of user data + 2-byte block CRC
+    split_b = 6  # inside the 10-byte data-link header itself
+    add_segment(51601, 20000, 21000, 200, frame_b[:split_b], 0x5002, from_plc=False)
+    add_segment(51601, 20000, 21000 + split_b, 200, frame_b[split_b:], 0x5003, from_plc=False)
+
+    # C) A TPKT/S7comm Setup Communication request split across two TCP segments.
+    setup_param = struct.pack("!BBHHH", 0xF0, 0x00, 1, 1, 240)
+    setup_req = s7_header(0x01, 77, len(setup_param), 0) + setup_param
+    frame_c = tpkt_frame(COTP_DT_HEADER, setup_req)
+    split_c = 10
+    add_segment(51602, 102, 22000, 300, frame_c[:split_c], 0x5004, from_plc=False)
+    add_segment(51602, 102, 22000 + split_c, 300, frame_c[split_c:], 0x5005, from_plc=False)
+
+    # D) Sequence gap: a Modbus PDU begins, but the next segment on this flow arrives at a
+    #    sequence number far past where the in-progress PDU expected -- as if an intervening
+    #    segment was simply never captured. The in-progress reassembly must be abandoned (not
+    #    spliced together wrong), and a later, ordinary, self-contained request on the SAME flow
+    #    afterward must still decode normally, proving the abandoned state doesn't wedge the flow.
+    gap_first = struct.pack("!HHHBBB", 0xBBBB, 0, 1 + 1 + 40, 1, 0x03, 40)  # declares 40 more bytes
+    add_segment(502, 51603, 30000, 400, gap_first, 0x5006, from_plc=True)
+    bogus_gap_segment = bytes(10)
+    add_segment(502, 51603, 30000 + len(gap_first) + 500, 400, bogus_gap_segment, 0x5007, from_plc=True)
+    fresh_req = struct.pack("!HHHBB HH", 2, 0, 6, 1, 3, 0, 10)  # ordinary, complete, 12-byte request ADU
+    add_segment(502, 51603, 30000 + len(gap_first) + 1000, 400, fresh_req, 0x5008, from_plc=True)
+
+    # E) A fully-duplicate retransmission (identical bytes, identical sequence number) arriving
+    #    mid-reassembly must be ignored -- ignored, not appended a second time and not mistaken
+    #    for a gap -- and the real completing segment afterward must still complete it correctly.
+    adu_e = struct.pack("!HHHBBB", 0xCCCC, 0, 1 + 2 + len(reg_data), 1, 0x03, len(reg_data)) + reg_data
+    part1_e, part2_e, part3_e = adu_e[:10], adu_e[10:20], adu_e[20:]
+    add_segment(502, 51604, 40000, 500, part1_e, 0x5009, from_plc=True)
+    add_segment(502, 51604, 40000 + len(part1_e), 500, part2_e, 0x500A, from_plc=True)
+    add_segment(502, 51604, 40000 + len(part1_e), 500, part2_e, 0x500B, from_plc=True)  # exact duplicate
+    add_segment(502, 51604, 40000 + len(part1_e) + len(part2_e), 500, part3_e, 0x500C, from_plc=True)
+
+    # F) A partial-overlap retransmission -- a segment that repeats a few already-buffered bytes
+    #    and then extends past them with new ones (a common real TCP retransmit shape when the
+    #    sender's own retransmit buffer starts slightly behind the last acknowledged byte) -- must
+    #    be trimmed to just its new bytes and appended, not misaligned or duplicated.
+    adu_f = struct.pack("!HHHBBB", 0xDDDD, 0, 1 + 2 + len(reg_data), 1, 0x03, len(reg_data)) + reg_data
+    part1_f = adu_f[:10]
+    part2_f = adu_f[7:20]  # starts 3 bytes into part1_f's already-sent territory, extends to byte 20
+    part3_f = adu_f[20:]
+    add_segment(502, 51605, 50000, 600, part1_f, 0x500D, from_plc=True)
+    add_segment(502, 51605, 50000 + 7, 600, part2_f, 0x500E, from_plc=True)
+    add_segment(502, 51605, 50000 + len(part1_f) + (len(part2_f) - 3), 600, part3_f, 0x500F, from_plc=True)
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_000_500 + i, i * 1000)
+    (TESTS_DIR / "sample_tcp_reassembly.pcap").write_bytes(data)
+
+
 def build_padded_ack_sample():
     # A bare ACK: 0 bytes of real TCP payload. Real Ethernet links pad frames
     # shorter than 60 bytes with trailing zeros, so the *captured* frame is
@@ -575,6 +658,7 @@ if __name__ == "__main__":
     build_s7comm_sample()
     build_s7comm_items_sample()
     build_s7comm_1200sym_sample()
+    build_tcp_reassembly_sample()
     build_padded_ack_sample()
     build_not_a_pcap()
     print("wrote sample fixtures to", TESTS_DIR)

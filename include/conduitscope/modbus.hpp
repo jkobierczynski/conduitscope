@@ -53,6 +53,27 @@ struct ModbusFrame {
 // than aborting the whole packet.
 std::optional<ModbusFrame> try_parse_modbus_tcp(ByteSpan tcp_payload);
 
+// Returns the total on-the-wire byte count a Modbus/TCP MBAP message declares -- its 6-byte
+// transaction-id+protocol-id+length prefix, plus `length` more bytes (unit id + PDU) -- once
+// there are enough bytes to read that declaration (payload.size() >= 6) and protocol-id reads as
+// 0 (the standard Modbus/TCP tell -- see try_parse_modbus_tcp). When the function-code byte is
+// also available (payload.size() >= 8), the same extra safety check try_parse_modbus_tcp applies
+// is applied here too: function code 0 is reserved and never assigned, so protocol-id==0 with
+// function-code==0 is almost certainly a coincidence, not real Modbus/TCP (this is the DNP3-on-
+// port-20000 collision documented on try_parse_modbus_tcp) -- returns std::nullopt in that case
+// even though protocol-id alone looked like a match. Also returns std::nullopt if the declared
+// length is wildly implausible for a real Modbus PDU (over 300 bytes -- the spec caps a PDU at
+// 253, so mbap_length can never legitimately exceed 254): found via a real capture where
+// non-Modbus traffic on port 502 coincidentally satisfied protocol-id==0 with a "length" field of
+// several thousand, which without this cap would be mistaken for a genuine PDU split across TCP
+// segments and buffered forever. Returns std::nullopt if there aren't yet enough bytes to tell
+// (< 6) or protocol-id is nonzero. The returned length may exceed payload.size() -- that's the
+// point: it tells a caller how many more bytes to wait for. try_parse_modbus_tcp itself is
+// unchanged and still decodes from whatever bytes are actually present; this is used only to
+// detect a PDU truncated across a TCP segment boundary -- see Decoder::reassemble_tcp_payload in
+// decoder.cpp.
+std::optional<size_t> modbus_tcp_declared_length(ByteSpan payload);
+
 std::string modbus_exception_name(uint8_t exception_code);
 
 }  // namespace conduitscope

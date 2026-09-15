@@ -13,6 +13,7 @@
 #include "conduitscope/byteio.hpp"
 #include "conduitscope/dnp3.hpp"
 #include "conduitscope/pcap_reader.hpp"
+#include "conduitscope/tcp.hpp"
 
 namespace conduitscope {
 
@@ -117,6 +118,23 @@ struct Dnp3FragmentReassembly {
     size_t frame_count = 0;                   // data-link frames contributed so far
 };
 
+// Generic per-directional-TCP-flow byte buffer for a Modbus MBAP message, a DNP3 data-link
+// frame, or a TPKT/COTP frame whose OWN declared length exceeds what has arrived in the TCP
+// segments seen so far for that flow -- see Decoder::tcp_reassembly_ and
+// Decoder::reassemble_tcp_payload. This is a different (and lower) layer than
+// Dnp3FragmentReassembly above: that one reassembles a DNP3 *application* fragment across several
+// already-complete data-link frames; this one reassembles a single PDU/frame's own bytes when one
+// TCP segment doesn't contain all of them. The two compose without conflict -- a data-link frame
+// can be completed here, across TCP segments, and then Decoder's existing frame-coalescing loop
+// and Dnp3FragmentReassembly both still operate on it exactly as before, since by the time they
+// run they're just looking at a complete (however it got assembled) buffer.
+struct TcpFlowBuffer {
+    bool active = false;
+    std::vector<uint8_t> bytes;  // bytes buffered so far for the in-progress PDU/frame
+    uint32_t next_seq = 0;       // TCP sequence number expected to begin the next segment
+    size_t segment_count = 0;    // TCP segments contributed to `bytes` so far
+};
+
 class Decoder {
 public:
     explicit Decoder(DecodeOptions options) : options_(std::move(options)) {}
@@ -145,6 +163,11 @@ private:
     // current packet alone -- see the NOTE ON STATEFULNESS above for why that is safe here.
     mutable std::unordered_map<std::string, Dnp3FragmentReassembly> dnp3_reassembly_;
 
+    // See TcpFlowBuffer above. Keyed the same way as dnp3_reassembly_ (same flow_key string, same
+    // map-per-flow shape; a separate map because the two track different layers and there's no
+    // reason to conflate them). `mutable` for the same reason as dnp3_reassembly_.
+    mutable std::unordered_map<std::string, TcpFlowBuffer> tcp_reassembly_;
+
     // Decodes one DNP3 data-link frame's transport header and, once its fragment is complete,
     // application layer -- buffering across packets via dnp3_reassembly_[flow_key] when the
     // fragment spans more than one data-link frame (transport FIR=1,FIN=0 on an earlier frame).
@@ -154,6 +177,34 @@ private:
     // reassemble_dnp3_user_data/decode_dnp3_application_layer primitives this is built from.
     std::optional<Dnp3ApplicationFragment> process_dnp3_frame(const Dnp3LinkFrame& link, ByteSpan tcp_payload,
                                                                 const std::string& flow_key) const;
+
+    // Determines the bytes protocol detection (Modbus/DNP3-link-layer/TPKT) should run against
+    // for this packet: either `tcp.payload` unchanged, or a buffer combining it with bytes carried
+    // over from earlier packets on the same flow (see TcpFlowBuffer/tcp_reassembly_).
+    //
+    // Handles TCP segment gaps and overlaps using sequence numbers alone: a segment whose seq
+    // doesn't extend the buffered bytes contiguously is either a retransmission (seq is behind
+    // where expected -- the overlapping prefix is trimmed and only new bytes, if any, are
+    // appended) or evidence of a gap (seq is ahead of where expected, meaning an earlier segment
+    // was very likely not captured) -- a gap abandons whatever was buffered, since it can never be
+    // completed correctly, and starts fresh from this packet's own payload. This resyncs rather
+    // than buffering out-of-order segments for later reordering, matching how this tool already
+    // processes packets: one single, strict capture-file-order pass (see decode()'s NOTE ON
+    // STATEFULNESS above) with no out-of-order buffering anywhere else either.
+    //
+    // If, after combining, the result is still short of what a recognized protocol's own length
+    // field declares (see modbus_tcp_declared_length/dnp3_link_frame_declared_length/
+    // tpkt_declared_length), this buffers the combined bytes back into tcp_reassembly_[flow_key],
+    // fills in `out`'s protocol/summary/notes to say so, and returns false -- decode() must return
+    // immediately in that case without attempting protocol detection on a known-incomplete buffer.
+    // Also returns false (with `out` filled in) for a fully-duplicate retransmission that adds no
+    // new bytes -- there's nothing new to decode and the existing buffered state is left as-is.
+    //
+    // On true, `effective_payload` is set to the bytes to actually run detection against.
+    // `storage` backs it when combining was needed (an empty vector otherwise) and must outlive
+    // `effective_payload`'s use -- the caller keeps it alive as a same-scope local in decode().
+    bool reassemble_tcp_payload(const TcpSegment& tcp, const std::string& flow_key, DecodedPacket& out,
+                                 std::vector<uint8_t>& storage, ByteSpan& effective_payload) const;
 };
 
 }  // namespace conduitscope

@@ -492,6 +492,24 @@ std::optional<Dnp3LinkFrame> try_parse_dnp3_link_layer(ByteSpan tcp_payload) {
     return frame;
 }
 
+size_t dnp3_frame_wire_length(const Dnp3LinkFrame& link) {
+    size_t blocks = (link.user_data_bytes + 15) / 16;
+    return 10 + link.user_data_bytes + 2 * blocks;
+}
+
+std::optional<size_t> dnp3_link_frame_declared_length(ByteSpan payload) {
+    if (payload.size() < 3) {
+        return std::nullopt;
+    }
+    if (payload.at(0) != 0x05 || payload.at(1) != 0x64) {
+        return std::nullopt;
+    }
+    uint8_t length_field = payload.at(2);
+    size_t user_data_bytes = (length_field >= 5) ? static_cast<size_t>(length_field - 5) : 0;
+    size_t blocks = (user_data_bytes + 15) / 16;
+    return 10 + user_data_bytes + 2 * blocks;
+}
+
 std::vector<uint8_t> reassemble_dnp3_user_data(const Dnp3LinkFrame& link, ByteSpan tcp_payload,
                                                 std::vector<std::string>& notes) {
     if (link.user_data_bytes == 0) {

@@ -19,8 +19,9 @@ here. Live capture is a natural later addition; see the Roadmap in
 
 Groundwork / v0.1.0. What works right now:
 
-- Classic pcap file reading (Ethernet and raw-IP link types; IPv4; TCP, single
-  segment, no reassembly)
+- Classic pcap file reading (Ethernet and raw-IP link types; IPv4; TCP, with
+  PDU/frame-level reassembly across TCP segments for Modbus, DNP3 data-link
+  frames, and TPKT/COTP -- see below and docs/MANUAL.md)
 - Full Modbus/TCP decoding for the read (1-4), write-single (5-6), and
   write-multiple (15-16) function code families, plus exception responses
 - Full DNP3 decoding through the application layer for a single-data-link-frame
@@ -43,9 +44,10 @@ Groundwork / v0.1.0. What works right now:
   once complete -- this path has no real-capture validation yet (every real
   DNP3 capture checked so far used only complete single-frame fragments),
   only the synthetic fixture in tests/sample_dnp3.pcap; see docs/MANUAL.md.
-  A single data-link frame's own header/blocks split across TCP segments is
-  still not reassembled (needs general TCP stream reassembly this tool
-  doesn't do -- see docs/MANUAL.md). Validated against a large real 4SICS ICS-lab capture and a
+  A single data-link frame's own header/blocks split across TCP segments IS
+  now reassembled too, via a separate, lower-level TCP-segment reassembler
+  that also covers Modbus and TPKT/COTP (see below and docs/MANUAL.md).
+  Validated against a large real 4SICS ICS-lab capture and a
   set of real (not synthetic) DNP3 captures from independent DNP3 stacks --
   real CROB Select/Operate sequences (including a rejected operate), a real
   polling session, and a deliberately corrupted/fuzzed capture that must
@@ -77,6 +79,18 @@ Groundwork / v0.1.0. What works right now:
   Ethernet's minimum-frame-size padding on short packets (bare ACKs, mostly)
   never gets misreported as phantom TCP payload -- found and fixed against a
   real capture, not just synthetic traffic
+- General TCP stream reassembly at the PDU/frame level: a Modbus MBAP
+  message, a DNP3 data-link frame, or a TPKT/COTP frame split across two or
+  more TCP segments is buffered per directional flow and decoded once
+  complete, using each protocol's own declared-length field to know how many
+  bytes to wait for. Resyncs rather than reorders on capture gaps, and trims
+  overlapping retransmissions rather than duplicating bytes. Verified
+  byte-for-byte behavior-identical against every real capture in this
+  project's test set (none of which happen to split a PDU across segments)
+  and against 6 synthetic scenarios covering the happy path plus gaps,
+  full-duplicate retransmits, and partial-overlap retransmits; see
+  docs/MANUAL.md's LIMITATIONS for exact scope (Modbus request/response
+  pairing and multi-frame S7comm chaining are explicitly out of scope)
 - Text, JSON, and CSV output; a `--stats` summary mode; an `info` command for
   quick file metadata
 - A `decode`/`info`/`policy validate`/`version` command surface with full

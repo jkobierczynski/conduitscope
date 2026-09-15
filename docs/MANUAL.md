@@ -149,8 +149,11 @@ against all three protocols, independent of port number:
   then further disambiguated by PDU shape (a bare 4-byte address+quantity
   looks like a request; a byte-count-prefixed blob looks like a response).
   This is documented in the decoded output as a heuristic -- it is not based
-  on tracking the TCP stream's request/response state, since this release
-  does not do stream reassembly.
+  on tracking the TCP conversation's request/response state (matching a
+  response back to the specific request that produced it via transaction ID),
+  which conduitscope does not do. This is a separate thing from PDU/frame
+  reassembly across TCP segments, which conduitscope does do -- see
+  LIMITATIONS' "General TCP stream reassembly" entry.
 - **DNP3**: recognized by the data-link-layer start bytes `0x05 0x64`, which
   DNP3 always begins with.
 - **S7comm/COTP**: recognized by the TPKT signature (`0x03 0x00` followed by
@@ -305,10 +308,11 @@ of order; a continuation frame with no matching start (capture begins
 mid-fragment, or a start frame was lost) is left transport-header-only; and
 a new FIR=1 frame arriving on a flow with an already-in-progress,
 never-completed reassembly abandons the stale one rather than merging into
-it. This is distinct from -- and independent of -- whole TCP stream
-reassembly for the *link layer itself* (a data-link frame's own header and
-CRC-delimited blocks split across TCP segments), which conduitscope still
-does not do; see LIMITATIONS.
+it. This is distinct from -- and independent of -- TCP stream reassembly
+for the *link layer itself* (a data-link frame's own header and
+CRC-delimited blocks split across TCP segments), which conduitscope does
+now also do, via a separate, lower-level mechanism (`Decoder::reassemble_tcp_payload`);
+see LIMITATIONS.
 
 Function codes are identified by name across the whole DNP3 function code
 table (Confirm, Read, Write, Select/Operate/Direct Operate, the Cold/Warm
@@ -503,28 +507,53 @@ clamp to in that case.)
 These are current, not aspirational -- each has a corresponding ROADMAP item.
 
 - **pcapng is not supported.** Convert with `tshark -F pcap -r in.pcapng -w out.pcap`.
-- **No general TCP stream reassembly.** A Modbus PDU split across two TCP
-  segments will not be reassembled; each TCP segment is decoded
-  independently. In practice this is rare for Modbus (PDUs are small). The
-  same is true at the DNP3 *data-link* layer: a single data-link frame's own
-  10-byte header or CRC-delimited user-data blocks split across two TCP
-  segments will not be reassembled either -- `try_parse_dnp3_link_layer`
-  needs a whole frame in one TCP payload to even recognize it as DNP3.
-  DNP3's *application*-layer fragmentation is the one exception:
-  conduitscope does reassemble an application fragment that spans multiple
-  complete data-link frames (transport FIR=1 on the first, FIN=0 until the
-  last), buffering each frame's bytes per TCP flow across however many
-  packets it takes -- including separate TCP segments -- and decoding the
-  full application layer once FIN=1 arrives; see PROTOCOL COVERAGE and
-  `Decoder::process_dnp3_frame`. This is unvalidated against real traffic:
-  every real DNP3 capture checked so far (see
-  tests/real_captures/dnp3/ATTRIBUTION.md) used only complete,
-  single-data-link-frame fragments, so this path has no real-world example
-  to confirm against, only the synthetic fixtures in
-  tests/sample_dnp3.pcap. It's also distinct from multiple *complete* DNP3
-  data-link frames landing in one TCP segment (common, since DNP3 frames are
-  small), which conduitscope handles separately -- see PROTOCOL COVERAGE's
-  DNP3 section.
+- **General TCP stream reassembly is implemented, but narrowly scoped.**
+  `Decoder::reassemble_tcp_payload` (`decoder.hpp`/`decoder.cpp`) buffers a
+  single Modbus MBAP message, DNP3 data-link frame, or TPKT/COTP frame's own
+  bytes, per directional TCP flow, when it is split across two or more TCP
+  segments -- so a Modbus PDU that straddles a segment boundary, a DNP3
+  data-link frame split mid-header, or an S7comm request/response TPKT frame
+  split across segments all now get fully reassembled and decoded, not just
+  the first segment's worth of bytes. Each protocol's own declared length
+  field (the MBAP length, the DNP3 data-link length byte, the TPKT length
+  field) is what tells the reassembler how many bytes to wait for; a segment
+  whose sequence number doesn't extend the buffered bytes contiguously is
+  either trimmed (an overlapping retransmission) or, if it's genuinely ahead
+  of where expected (a gap -- a segment very likely wasn't captured), causes
+  the in-progress reassembly to be abandoned with a note rather than spliced
+  together wrong. This resyncs rather than reorders: an out-of-order segment
+  that would need to be held and inserted later is treated the same as a
+  gap, not buffered for eventual reordering (matching how this tool
+  processes packets generally -- one single, strict capture-file-order pass,
+  with no out-of-order buffering anywhere else in the codebase either).
+  What this does NOT cover: authoritative (non-heuristic) Modbus
+  request/response pairing by transaction ID -- see PROTOCOL DETECTION,
+  above, for why that's a separate thing; a genuine S7comm message spanning
+  more than one TPKT/COTP frame (as opposed to one TPKT frame split across
+  TCP segments, which IS handled) -- this would need chaining multiple
+  complete TPKT frames together the way DNP3's own multi-data-link-frame
+  application fragments are, which nothing currently does for S7comm; and
+  true out-of-order reordering, per the resync-not-reorder paragraph above.
+
+  DNP3 additionally has its own separate, higher-layer reassembly: an
+  *application* fragment that spans multiple complete data-link frames
+  (transport FIR=1 on the first, FIN=0 until the last) is buffered per TCP
+  flow across however many packets it takes and decoded once FIN=1 arrives;
+  see PROTOCOL COVERAGE and `Decoder::process_dnp3_frame`. This layer is
+  unvalidated against real traffic: every real DNP3 capture checked so far
+  (see tests/real_captures/dnp3/ATTRIBUTION.md) used only complete,
+  single-data-link-frame fragments, so it has no real-world example to
+  confirm against, only the synthetic fixtures in tests/sample_dnp3.pcap.
+  The general TCP-segment-level reassembly described above is unvalidated
+  against real traffic for the same reason (every real capture checked kept
+  every PDU/frame within one TCP segment) -- it was verified by diffing this
+  tool's full output against every real fixture before and after adding it
+  (byte-for-byte identical), confirming it changes nothing for traffic that
+  doesn't need it, and by synthetic fixtures (tests/sample_tcp_reassembly.pcap)
+  for the reassembly itself. It's also distinct from multiple *complete*
+  DNP3 data-link frames landing in one TCP segment (common, since DNP3
+  frames are small), which conduitscope handles separately -- see PROTOCOL
+  COVERAGE's DNP3 section.
 - **No IPv6.** Only IPv4 is parsed; IPv6 packets are reported as
   `unsupported-link`/`non-ip` depending on where they're detected.
 - **IPv4 fragmentation is not reassembled.** A fragmented IPv4 packet's TCP
@@ -556,8 +585,9 @@ These are current, not aspirational -- each has a corresponding ROADMAP item.
   binary32/binary64 (true of every mainstream compiler this project targets,
   but not guaranteed by the C++ standard itself).
 - **A DNP3 fragment spanning multiple data-link frames only gets its
-  transport header decoded**, not its application layer -- see the note
-  under "No TCP stream reassembly" above.
+  transport header decoded**, not its application layer, until the final
+  (FIN=1) frame arrives -- see the note under "General TCP stream
+  reassembly is implemented, but narrowly scoped" above.
 - **Modbus request/response classification is heuristic**, based on PDU shape
   (see PROTOCOL DETECTION), not on tracking the TCP stream's actual
   request/response pairing. It is reliable in practice for the read/write
@@ -680,15 +710,18 @@ conduitscope decode -i capture.pcap --protocol dnp3 -f json \
 
 Rough order, each building on the groundwork this release establishes:
 
-1. **General TCP stream reassembly**, needed for split PDUs, authoritative
-   (non-heuristic) Modbus request/response pairing, multi-segment S7comm
-   frames larger than one negotiated PDU length, and a DNP3 data-link
-   frame's own header/CRC blocks split across TCP segments (see
-   LIMITATIONS). DNP3 *application*-layer fragmentation across complete
-   data-link frames is a narrower, already-done special case of this --
-   conduitscope reassembles it per TCP flow without needing general stream
-   reassembly -- but it still awaits validation against a real capture that
-   actually exercises it (none found so far; see LIMITATIONS).
+1. **Authoritative (non-heuristic) Modbus request/response pairing** by
+   transaction ID, and **chaining multiple complete TPKT/COTP frames** into
+   one S7comm message that spans more than one negotiated PDU length. Both
+   are what remains of the original "general TCP stream reassembly" item --
+   PDU/frame-level reassembly across TCP segments (a split Modbus MBAP
+   message, DNP3 data-link frame, or TPKT/COTP frame) is now done, via
+   `Decoder::reassemble_tcp_payload` (see LIMITATIONS). DNP3
+   *application*-layer fragmentation across complete data-link frames is a
+   related, already-done special case -- conduitscope reassembles it per TCP
+   flow via its own mechanism -- but it still awaits validation against a
+   real capture that actually exercises it (none found so far; see
+   LIMITATIONS).
 2. **Zone/conduit policy engine** behind `policy validate`: a YAML schema
    describing zones (IP/port ranges, expected protocols) and conduits (allowed
    flows between zones), evaluated against decoded traffic, producing a

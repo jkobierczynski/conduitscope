@@ -66,4 +66,18 @@ struct CotpFrame {
 // warning rather than silently returning something misleading.
 std::optional<CotpFrame> try_parse_tpkt_cotp(ByteSpan tcp_payload);
 
+// Returns the TPKT length a frame declares -- the wire's own length field, which already counts
+// the 4-byte TPKT header itself -- once there are enough bytes to read it (payload.size() >= 4)
+// and the payload starts with the TPKT signature (version=3, reserved=0), and that declared
+// length is at least plausible (holds a length indicator and PDU-type byte, same lower bound
+// try_parse_tpkt_cotp itself applies). Returns std::nullopt if there aren't yet enough bytes to
+// tell (< 4), the signature doesn't match, or the declared length is implausibly small --
+// definitely not TPKT in any of those cases. The returned length may exceed payload.size() --
+// that's the point, distinguishing a truncated-but-recognized frame from a complete one.
+// try_parse_tpkt_cotp itself is unchanged (and still treats "declared length exceeds what's
+// present" as "not TPKT" for its own single-packet-only parsing); this is used only to detect a
+// frame truncated across a TCP segment boundary -- see Decoder::reassemble_tcp_payload in
+// decoder.cpp.
+std::optional<size_t> tpkt_declared_length(ByteSpan payload);
+
 }  // namespace conduitscope

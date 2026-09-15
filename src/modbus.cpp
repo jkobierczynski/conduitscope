@@ -150,6 +150,40 @@ std::string modbus_exception_name(uint8_t code) {
     }
 }
 
+std::optional<size_t> modbus_tcp_declared_length(ByteSpan payload) {
+    if (payload.size() < 6) {
+        return std::nullopt;
+    }
+    Cursor c(payload);
+    c.u16be();  // transaction_id
+    uint16_t protocol_id = c.u16be();
+    if (protocol_id != 0) {
+        return std::nullopt;
+    }
+    uint16_t mbap_length = c.u16be();
+    if (payload.size() >= 8 && payload.at(7) == 0) {
+        // Function code 0 is reserved/never assigned -- protocol_id==0 with function_code==0 is
+        // almost certainly the same coincidence try_parse_modbus_tcp already guards against, not
+        // real Modbus/TCP. Better to say "not recognized" here than to buffer forever waiting for
+        // bytes that a non-Modbus flow will never deliver in the shape we'd expect.
+        return std::nullopt;
+    }
+    // The Modbus Application Protocol spec caps a PDU at 253 bytes, so mbap_length (unit_id + PDU)
+    // can never legitimately exceed 254 -- found via a real capture: non-Modbus traffic on port
+    // 502 (digitalbond's MODBUS-TestDataPart1, deliberately exercising traffic outside this
+    // decoder's scope) had two bytes that coincidentally read as protocol_id==0, with a "length"
+    // field of several thousand. Without this cap, that flow would be mistaken for a genuine
+    // Modbus PDU split across TCP segments and buffered indefinitely waiting for bytes that would
+    // never complete it as Modbus. A little slack above the strict 254 theoretical max is kept
+    // in case of a nonstandard/extended real device; 300 is still two orders of magnitude below
+    // the false positive this guards against.
+    constexpr uint16_t kMaxPlausibleMbapLength = 300;
+    if (mbap_length > kMaxPlausibleMbapLength) {
+        return std::nullopt;
+    }
+    return 6 + static_cast<size_t>(mbap_length);
+}
+
 std::optional<ModbusFrame> try_parse_modbus_tcp(ByteSpan tcp_payload) {
     // MBAP header is 7 bytes; a Modbus/TCP frame needs at least that plus one
     // function-code byte to be worth looking at.

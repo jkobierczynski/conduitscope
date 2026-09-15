@@ -22,16 +22,6 @@ bool port_in(uint16_t port, uint16_t default_port, const std::vector<uint16_t>& 
     return std::find(extra.begin(), extra.end(), port) != extra.end();
 }
 
-// Total on-the-wire size of one DNP3 data link frame: the fixed 10-byte header, plus its
-// user data broken into <=16-byte blocks, each followed by its own 2-byte block CRC. Used to
-// find where the *next* data link frame (if any) starts within the same TCP payload -- DNP3
-// frames are small (<=255 bytes) and it's normal for several to be coalesced into one TCP
-// segment, which try_parse_dnp3_link_layer alone has no way to see past the first of.
-size_t dnp3_frame_wire_length(const Dnp3LinkFrame& link) {
-    size_t blocks = (link.user_data_bytes + 15) / 16;
-    return 10 + link.user_data_bytes + 2 * blocks;
-}
-
 }  // namespace
 
 std::optional<Dnp3ApplicationFragment> Decoder::process_dnp3_frame(const Dnp3LinkFrame& link, ByteSpan tcp_payload,
@@ -194,6 +184,110 @@ std::optional<Dnp3ApplicationFragment> Decoder::process_dnp3_frame(const Dnp3Lin
     return frag;
 }
 
+bool Decoder::reassemble_tcp_payload(const TcpSegment& tcp, const std::string& flow_key, DecodedPacket& out,
+                                      std::vector<uint8_t>& storage, ByteSpan& effective_payload) const {
+    TcpFlowBuffer& fb = tcp_reassembly_[flow_key];
+
+    ByteSpan candidate = tcp.payload;
+    bool combined = false;
+
+    if (fb.active) {
+        // int32_t of the mod-2^32 difference is the standard wraparound-safe way to compare TCP
+        // sequence numbers: negative means `tcp.seq` is "behind" what's expected (overlap/
+        // retransmission), positive means it's "ahead" (a gap -- something wasn't captured).
+        int32_t delta = static_cast<int32_t>(tcp.seq - fb.next_seq);
+        if (delta == 0) {
+            storage = fb.bytes;
+            storage.insert(storage.end(), tcp.payload.data(), tcp.payload.data() + tcp.payload.size());
+            candidate = ByteSpan(storage.data(), storage.size());
+            combined = true;
+        } else if (delta < 0) {
+            size_t overlap = static_cast<size_t>(-delta);
+            if (overlap >= tcp.payload.size()) {
+                // Entirely already-seen bytes (a full retransmission) -- nothing new to add, and
+                // nothing wrong with what's already buffered either. Ignore it and keep waiting.
+                out.protocol = "tcp";
+                out.summary = "retransmitted/duplicate TCP segment " + std::to_string(tcp.src_port) + "->" +
+                               std::to_string(tcp.dst_port) + " (fully overlaps bytes already buffered for "
+                               "an in-progress " + std::to_string(fb.bytes.size()) +
+                               "-byte PDU/frame reassembly on this flow) -- ignored, still waiting for more";
+                return false;
+            }
+            storage = fb.bytes;
+            ByteSpan new_part = tcp.payload.from(overlap);
+            storage.insert(storage.end(), new_part.data(), new_part.data() + new_part.size());
+            candidate = ByteSpan(storage.data(), storage.size());
+            combined = true;
+            out.notes.push_back("TCP segment on this flow overlaps " + std::to_string(overlap) +
+                                 " already-buffered byte(s) (likely a retransmission) -- trimmed and only "
+                                 "the new byte(s) appended");
+        } else {
+            out.notes.push_back(
+                "TCP sequence gap on this flow (expected seq " + std::to_string(fb.next_seq) + ", got " +
+                std::to_string(tcp.seq) + ", " + std::to_string(delta) +
+                " byte(s) apparently missing) -- abandoning an in-progress " +
+                std::to_string(fb.bytes.size()) +
+                "-byte PDU/frame reassembly on this flow (a TCP segment was very likely not captured)");
+            fb = TcpFlowBuffer{};
+            candidate = tcp.payload;
+            combined = false;
+        }
+    }
+
+    bool want_modbus = options_.protocol_filter == ProtocolFilter::Auto ||
+                        options_.protocol_filter == ProtocolFilter::ModbusOnly;
+    bool want_dnp3 = options_.protocol_filter == ProtocolFilter::Auto ||
+                      options_.protocol_filter == ProtocolFilter::Dnp3Only;
+    bool want_s7comm = options_.protocol_filter == ProtocolFilter::Auto ||
+                        options_.protocol_filter == ProtocolFilter::S7commOnly;
+
+    std::optional<size_t> declared;
+    std::string which;
+    if (want_modbus) {
+        if (auto d = modbus_tcp_declared_length(candidate)) {
+            declared = d;
+            which = "Modbus/TCP";
+        }
+    }
+    if (!declared && want_dnp3) {
+        if (auto d = dnp3_link_frame_declared_length(candidate)) {
+            declared = d;
+            which = "DNP3 data-link";
+        }
+    }
+    if (!declared && want_s7comm) {
+        if (auto d = tpkt_declared_length(candidate)) {
+            declared = d;
+            which = "TPKT/COTP";
+        }
+    }
+
+    if (declared && *declared > candidate.size()) {
+        fb.active = true;
+        fb.bytes.assign(candidate.data(), candidate.data() + candidate.size());
+        fb.next_seq = tcp.seq + static_cast<uint32_t>(tcp.payload.size());
+        fb.segment_count = combined ? fb.segment_count + 1 : 1;
+        out.protocol = "tcp";
+        std::ostringstream s;
+        s << "buffering a " << which << " PDU/frame split across TCP segments " << tcp.src_port << "->"
+          << tcp.dst_port << ": " << candidate.size() << " of " << *declared
+          << " declared byte(s) seen so far across " << fb.segment_count
+          << " segment(s) on this flow, waiting for more";
+        out.summary = s.str();
+        return false;
+    }
+
+    size_t completed_segment_count = fb.segment_count + (combined ? 1 : 0);
+    fb = TcpFlowBuffer{};
+    effective_payload = candidate;
+    if (combined && declared) {
+        out.notes.push_back("reassembled a " + which + " PDU/frame from " + std::to_string(candidate.size()) +
+                             " byte(s) spanning " + std::to_string(completed_segment_count) +
+                             " TCP segments on this flow");
+    }
+    return true;
+}
+
 DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size_t index) const {
     DecodedPacket out;
     out.index = index;
@@ -264,6 +358,25 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
             return out;
         }
 
+        // Directional TCP flow identity, reused below both for cross-TCP-segment PDU/frame
+        // reassembly (tcp_reassembly_) and DNP3 cross-packet application-fragment reassembly
+        // (dnp3_reassembly_) -- see reassemble_tcp_payload/process_dnp3_frame.
+        std::string flow_key =
+            out.src_ip + ":" + std::to_string(tcp.src_port) + "->" + out.dst_ip + ":" + std::to_string(tcp.dst_port);
+
+        // Bytes to actually run protocol detection against: tcp.payload as-is, unless this flow
+        // has bytes buffered from an earlier packet (a PDU/frame split across TCP segments) that
+        // this segment continues, completes, or invalidates (gap/retransmission) -- see
+        // reassemble_tcp_payload's own comment in decoder.hpp for the full contract. `tcp_storage`
+        // backs `effective_payload` when combining was needed and must outlive its use below.
+        std::vector<uint8_t> tcp_storage;
+        ByteSpan effective_payload;
+        if (!reassemble_tcp_payload(tcp, flow_key, out, tcp_storage, effective_payload)) {
+            // Either still incomplete (buffered, waiting for more) or an ignored duplicate
+            // retransmission -- reassemble_tcp_payload has already filled in `out` either way.
+            return out;
+        }
+
         bool want_modbus = options_.protocol_filter == ProtocolFilter::Auto ||
                             options_.protocol_filter == ProtocolFilter::ModbusOnly;
         bool want_dnp3 = options_.protocol_filter == ProtocolFilter::Auto ||
@@ -272,7 +385,7 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                             options_.protocol_filter == ProtocolFilter::S7commOnly;
 
         if (want_modbus) {
-            if (auto mb = try_parse_modbus_tcp(tcp.payload)) {
+            if (auto mb = try_parse_modbus_tcp(effective_payload)) {
                 out.protocol = "modbus";
                 out.modbus_is_exception = mb->is_exception;
                 out.modbus_function_name = mb->function_name;
@@ -290,7 +403,7 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
         }
 
         if (want_dnp3) {
-            if (auto d = try_parse_dnp3_link_layer(tcp.payload)) {
+            if (auto d = try_parse_dnp3_link_layer(effective_payload)) {
                 out.protocol = "dnp3";
                 out.summary = d->summary;
 
@@ -332,10 +445,7 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                     }
                 };
 
-                std::string dnp3_flow_key = out.src_ip + ":" + std::to_string(tcp.src_port) + "->" +
-                                             out.dst_ip + ":" + std::to_string(tcp.dst_port);
-
-                if (auto app = process_dnp3_frame(*d, tcp.payload, dnp3_flow_key)) {
+                if (auto app = process_dnp3_frame(*d, effective_payload, flow_key)) {
                     merge_application_layer(*app, /*is_first_frame=*/true);
                 }
 
@@ -347,8 +457,8 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                 constexpr size_t kMaxDnp3FramesPerPayload = 50;
                 size_t offset = dnp3_frame_wire_length(*d);
                 size_t frame_count = 1;
-                while (offset < tcp.payload.size() && frame_count < kMaxDnp3FramesPerPayload) {
-                    ByteSpan rest = tcp.payload.from(offset);
+                while (offset < effective_payload.size() && frame_count < kMaxDnp3FramesPerPayload) {
+                    ByteSpan rest = effective_payload.from(offset);
                     auto next = try_parse_dnp3_link_layer(rest);
                     if (!next) break;  // remaining bytes aren't another DNP3 frame -- stop, don't guess
                     ++frame_count;
@@ -363,7 +473,7 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                             "are still fully decoded and included here and in dnp3_objects/dnp3_values";
                     }
                     out.notes.push_back(note);
-                    if (auto next_app = process_dnp3_frame(*next, rest, dnp3_flow_key)) {
+                    if (auto next_app = process_dnp3_frame(*next, rest, flow_key)) {
                         merge_application_layer(*next_app, /*is_first_frame=*/false);
                     }
                     offset += dnp3_frame_wire_length(*next);
@@ -386,7 +496,7 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
         }
 
         if (want_s7comm) {
-            if (auto cotp = try_parse_tpkt_cotp(tcp.payload)) {
+            if (auto cotp = try_parse_tpkt_cotp(effective_payload)) {
                 bool expected_port = port_in(tcp.src_port, COTP_TCP_PORT, options_.extra_s7comm_ports) ||
                                       port_in(tcp.dst_port, COTP_TCP_PORT, options_.extra_s7comm_ports);
                 auto annotate_port = [&]() {
@@ -446,7 +556,7 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
 
         out.protocol = "tcp";
         std::ostringstream s;
-        s << "TCP payload of " << tcp.payload.size() << " byte(s) on port " << tcp.src_port << "->"
+        s << "TCP payload of " << effective_payload.size() << " byte(s) on port " << tcp.src_port << "->"
           << tcp.dst_port << " did not match Modbus, DNP3, or COTP/S7comm";
         out.summary = s.str();
         return out;

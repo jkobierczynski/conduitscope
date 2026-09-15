@@ -84,6 +84,25 @@ struct Dnp3LinkFrame {
 // than silently skipping the check.
 std::optional<Dnp3LinkFrame> try_parse_dnp3_link_layer(ByteSpan tcp_payload);
 
+// Total on-the-wire size of one DNP3 data-link frame: the fixed 10-byte header, plus its user
+// data broken into <=16-byte blocks, each followed by its own 2-byte block CRC. Used to find
+// where the *next* data-link frame (if any) starts within the same TCP payload (Decoder's
+// same-payload frame-coalescing loop), and, via dnp3_link_frame_declared_length below, to detect
+// a frame truncated across a TCP segment boundary before it's even been fully parsed.
+size_t dnp3_frame_wire_length(const Dnp3LinkFrame& link);
+
+// Returns the total on-the-wire byte count one DNP3 data-link frame declares (the same
+// computation as dnp3_frame_wire_length, applied to the raw length field) if `payload` has enough
+// bytes to read that field (>= 3, i.e. the two start bytes plus the length byte) and starts with
+// the DNP3 magic bytes (0x05 0x64) -- regardless of whether `payload` actually holds that many
+// bytes yet; that's the point, so a caller can tell a truncated-but-recognized frame from one
+// that's actually complete. Returns std::nullopt if there aren't yet enough bytes to tell (< 3) or
+// the magic bytes don't match (definitely not DNP3). try_parse_dnp3_link_layer itself is
+// unchanged and still requires a full 10-byte header before recognizing a frame at all; this is
+// used only for detecting truncation across a TCP segment boundary -- see
+// Decoder::reassemble_tcp_payload in decoder.cpp.
+std::optional<size_t> dnp3_link_frame_declared_length(ByteSpan payload);
+
 // Reassembles one data-link frame's user data -- transport header byte plus whatever application-
 // layer bytes follow it -- stripping (not validating) the per-16-byte-block CRCs described in the
 // file header comment. `link` must be the result of a preceding successful try_parse_dnp3_link_layer

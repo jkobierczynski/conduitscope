@@ -95,9 +95,13 @@ Fatal error (bad arguments, unreadable/unrecognized input file, or a
 The command is a documented stub (\fBpolicy validate\fR) that ran but
 performed no real work.
 .SH LIMITATIONS
-No pcapng support; no general TCP stream reassembly (a Modbus PDU, or a
-single DNP3 data-link frame's own header/blocks, split across TCP segments
-will not be reassembled); IPv4 only; no IPv4 fragment reassembly; DNP3
+No pcapng support; general TCP stream reassembly is implemented but
+narrowly scoped: a Modbus PDU, a single DNP3 data-link frame's own
+header/blocks, or a TPKT/COTP frame split across TCP segments IS
+reassembled (per directional TCP flow, using each protocol's own declared
+length), but authoritative (non-heuristic) Modbus request/response pairing
+by transaction ID and chaining multiple complete TPKT/COTP frames into one
+S7comm message are not; IPv4 only; no IPv4 fragment reassembly; DNP3
 header and per-block CRCs are not validated; a DNP3 application fragment
 spanning more than one data-link frame IS reassembled across separate TCP
 segments (per TCP flow), though this path has no real-capture validation
