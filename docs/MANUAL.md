@@ -344,6 +344,17 @@ A batch of more than 200 points in one object header only gets the first 200
 individually decoded (the object's byte length is still fully accounted for
 either way); a note says so when it happens.
 
+Validated against both a large real 4SICS ICS-lab capture and a set of real
+(not synthetic) DNP3 captures from independent DNP3 stacks -- real CROB
+Select/Operate sequences including a rejected operate (`status=Not
+Supported`), a real polling session exercising Binary Input/Output/Counter/
+Internal-Indications objects, and a deliberately corrupted/fuzzed capture
+that must degrade gracefully rather than crash or fabricate a value. See
+`tests/real_captures/dnp3/ATTRIBUTION.md` for exact provenance. None of these
+captures happened to contain a fragment split across multiple data-link
+frames, so multi-data-link-frame reassembly (see LIMITATIONS and ROADMAP)
+remains untested against real traffic.
+
 ### S7comm / COTP (Siemens S7 PLCs, TCP port 102)
 
 The TPKT (RFC 1006) and COTP (ISO 8073 / X.224) framing that S7comm always
@@ -402,11 +413,36 @@ syntax id is recognized (by id) but not decoded at all, same as every other
 function code's parameter/data payload -- so is the entire Userdata
 parameter block used for vendor-specific diagnostics/CPU functions.
 
+The `M2.0`-`M2.4` shape above was later checked against the *entire* 140MB
+source capture it came from, not just the five originally spot-checked
+requests: over 1 million real `0xB2` items, all through the structural path
+with zero fallbacks. That's meaningfully more confidence the structural
+shape holds for a full real session, but it's still one real PLC/HMI
+session, not several independently different ones -- see
+`tests/real_captures/s7comm/ATTRIBUTION.md` for exactly how that traces back
+to the same original finding, including a correction of an initial
+overclaim (while pulling this data) that it was independent traffic.
+
 **S7comm-Plus** (protocol id `0x72`, the newer, largely undocumented protocol
 TIA Portal uses to talk to S7-1200/1500 CPUs) is detected and labeled but not
 decoded at all -- its structure is materially different from classic S7comm
 (object-oriented addressing, an integrity-protected footer) and out of scope
 for this groundwork release.
+
+Also validated against 14 additional real (not synthetic) S7comm captures
+from independent sources -- classic S7ANY item decoding up to nearly 9,000
+items in one capture, and confirmation the S7comm-Plus stub correctly fires
+on real S7-1200/1500 HMI traffic that turned out to use that protocol rather
+than classic S7comm despite its naming. See
+`tests/real_captures/s7comm/ATTRIBUTION.md` for exact provenance and for the
+`0xB2` finding described above.
+
+**Modbus/TCP** is likewise validated against real (not synthetic) captures
+now, not just the hand-built fixtures -- a clean Read Holding Registers
+session, and traffic exercising several function codes outside current scope
+(Diagnostics, Report Server ID, Read Exception Status, and others) that must
+degrade to a "not decoded" note rather than be misparsed. See
+`tests/real_captures/modbus/ATTRIBUTION.md`.
 
 ## CAPTURED FRAME PADDING
 

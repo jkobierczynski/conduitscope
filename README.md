@@ -37,7 +37,12 @@ Groundwork / v0.1.0. What works right now:
   located and skipped by computed length, just not value-decoded. A fragment
   spanning more than one data-link frame gets its transport header decoded and
   nothing more (needs cross-packet reassembly this tool doesn't do -- see
-  docs/MANUAL.md).
+  docs/MANUAL.md). Validated against a large real 4SICS ICS-lab capture and a
+  set of real (not synthetic) DNP3 captures from independent DNP3 stacks --
+  real CROB Select/Operate sequences (including a rejected operate), a real
+  polling session, and a deliberately corrupted/fuzzed capture that must
+  degrade gracefully rather than crash (see
+  tests/real_captures/dnp3/ATTRIBUTION.md for provenance).
 - S7comm/COTP: full TPKT+COTP framing decode (incl. connection-setup TSAP
   parameters), full S7comm header + function-code decoding, a full
   Setup Communication decode, and full item-level Read Var/Write Var
@@ -51,7 +56,15 @@ Groundwork / v0.1.0. What works right now:
   stub. Validated against real 4SICS ICS-lab captures -- including two much
   larger ones (1.25M and 2.27M packets) that turned out to be
   overwhelmingly S7comm traffic, which is exactly the case item-level
-  addressing was built for.
+  addressing was built for. The `0xB2` reconstruction's single validated
+  shape (`M2.0`-`M2.4`) was later re-checked against that same 1.25M-packet
+  capture in full: over 1 million real `0xB2` items, zero structural
+  fallbacks -- strong confidence for a full real session, though it's the
+  same session the original finding came from, not an independently
+  different one (see tests/real_captures/s7comm/ATTRIBUTION.md). Also
+  validated against 14 further real S7comm captures from independent
+  sources (up to ~9,000 real items in one) and 3 real Modbus captures --
+  see tests/real_captures/{s7comm,modbus}/ATTRIBUTION.md.
 - IPv4 payload is clamped to the header's own `total_length` field, so
   Ethernet's minimum-frame-size padding on short packets (bare ACKs, mostly)
   never gets misreported as phantom TCP payload -- found and fixed against a
