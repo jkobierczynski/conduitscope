@@ -128,23 +128,23 @@ endif()
 enable_testing()
 
 add_test(NAME decode_modbus_sample
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --format json)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --format json)
 set_tests_properties(decode_modbus_sample PROPERTIES
   PASS_REGULAR_EXPRESSION "Read Holding Registers")
 
 add_test(NAME decode_dnp3_sample
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text)
 set_tests_properties(decode_dnp3_sample PROPERTIES
   PASS_REGULAR_EXPRESSION "DNP3 data link frame")
 
 add_test(NAME dnp3_no_user_data_stays_link_only
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text)
 set_tests_properties(dnp3_no_user_data_stays_link_only PROPERTIES
   PASS_REGULAR_EXPRESSION "user_data=0 byte\\(s\\)"
   FAIL_REGULAR_EXPRESSION "user_data=0 byte\\(s\\)\\; transport")
 
 add_test(NAME dnp3_transport_and_read_class0_decoded
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text)
 set_tests_properties(dnp3_transport_and_read_class0_decoded PROPERTIES
   PASS_REGULAR_EXPRESSION "transport: FIR=1 FIN=1 SEQ=0 \\| application:.*function=Read \\(0x01\\) objects: \\[g60v1\\]")
 
@@ -152,52 +152,52 @@ set_tests_properties(dnp3_transport_and_read_class0_decoded PROPERTIES
 # so this is also the regression guard for the multi-block CRC reassembly logic: if it mis-skips
 # a block CRC, the object headers below would decode to garbage or fail to decode at all.
 add_test(NAME dnp3_response_multiblock_object_headers
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text)
 set_tests_properties(dnp3_response_multiblock_object_headers PROPERTIES
   PASS_REGULAR_EXPRESSION "object 0: g1v2 \\(Binary Input\\) qualifier=0x00 range=0-2 -- 3 point\\(s\\), 3 byte\\(s\\) of object data")
 
 add_test(NAME dnp3_response_second_object_after_block_boundary
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text)
 set_tests_properties(dnp3_response_second_object_after_block_boundary PROPERTIES
   PASS_REGULAR_EXPRESSION "object 1: g30v1 \\(Analog Input\\) qualifier=0x00 range=0-0 -- 1 point\\(s\\), 5 byte\\(s\\) of object data")
 
 add_test(NAME dnp3_response_iin_flags_decoded
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text)
 set_tests_properties(dnp3_response_iin_flags_decoded PROPERTIES
   PASS_REGULAR_EXPRESSION "function=Response \\(0x81\\) IIN=0x0080 \\[DEVICE_RESTART\\]")
 
 # Multi-data-link-frame fragment (transport FIN=0): application layer must be left undecoded,
 # not guessed at from the arbitrary trailing bytes in this fixture.
 add_test(NAME dnp3_multiframe_fragment_application_not_decoded
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text)
 set_tests_properties(dnp3_multiframe_fragment_application_not_decoded PROPERTIES
   PASS_REGULAR_EXPRESSION "transport: FIR=1 FIN=0 SEQ=0"
   FAIL_REGULAR_EXPRESSION "transport: FIR=1 FIN=0 SEQ=0 \\| application")
 
 add_test(NAME dnp3_unsupported_prefix_code_falls_back
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text)
 set_tests_properties(dnp3_unsupported_prefix_code_falls_back PROPERTIES
   PASS_REGULAR_EXPRESSION "prefix code 0x04 \\(object-size-prefixed or reserved\\), which this groundwork release does not decode")
 
 add_test(NAME dnp3_function_in_json
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format json)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format json)
 set_tests_properties(dnp3_function_in_json PROPERTIES
   PASS_REGULAR_EXPRESSION "\"dnp3_function\": \"Response\"")
 
 add_test(NAME dnp3_objects_in_json
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format json)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format json)
 set_tests_properties(dnp3_objects_in_json PROPERTIES
   PASS_REGULAR_EXPRESSION "\"dnp3_objects\": \\[\"g1v2 \\(Binary Input\\)\", \"g30v1 \\(Analog Input\\)\"\\]")
 
 # Point-value decoding: byte 0 of the g1v2 object data is 0x81 (ONLINE flag + STATE bit set) --
 # must decode to value "1" with the ONLINE flag, not just the raw byte length.
 add_test(NAME dnp3_binary_input_value_decoded
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text)
 set_tests_properties(dnp3_binary_input_value_decoded PROPERTIES
   PASS_REGULAR_EXPRESSION "idx=0: 1 \\[ONLINE\\]")
 
 add_test(NAME dnp3_analog_input_value_decoded
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text)
 set_tests_properties(dnp3_analog_input_value_decoded PROPERTIES
   PASS_REGULAR_EXPRESSION "g30v1.*idx=0: 0 \\[ONLINE\\]")
 
@@ -205,12 +205,12 @@ set_tests_properties(dnp3_analog_input_value_decoded PROPERTIES
 # on_time=1000ms, off_time=0ms, status=0 (Success). High security relevance -- this is literally
 # how DNP3 issues output commands, so getting every field named correctly matters.
 add_test(NAME dnp3_crob_value_decoded
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text)
 set_tests_properties(dnp3_crob_value_decoded PROPERTIES
   PASS_REGULAR_EXPRESSION "idx=7: code=Latch On tc=Close queue/clear=0x00 count=1 on_time=1000ms off_time=0ms status=Success")
 
 add_test(NAME dnp3_values_in_json
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format json)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format json)
 set_tests_properties(dnp3_values_in_json PROPERTIES
   PASS_REGULAR_EXPRESSION "\"dnp3_values\": \\[\"g1v2 idx=0: 1 \\[ONLINE\\]\"")
 
@@ -219,22 +219,22 @@ set_tests_properties(dnp3_values_in_json PROPERTIES
 # second frame -- previously silently dropped, since try_parse_dnp3_link_layer only ever looked
 # at the start of the payload -- must now be fully decoded and surfaced via a note, not lost.
 add_test(NAME dnp3_coalesced_frames_first_summary_unaffected
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text)
 set_tests_properties(dnp3_coalesced_frames_first_summary_unaffected PROPERTIES
   PASS_REGULAR_EXPRESSION "function=Read \\(0x01\\) objects: \\[g60v1\\]")
 
 add_test(NAME dnp3_coalesced_second_frame_noted
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text)
 set_tests_properties(dnp3_coalesced_second_frame_noted PROPERTIES
   PASS_REGULAR_EXPRESSION "additional DNP3 data link frame 2 found in the same TCP payload at byte offset 18")
 
 add_test(NAME dnp3_coalesced_second_frame_objects_decoded
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text)
 set_tests_properties(dnp3_coalesced_second_frame_objects_decoded PROPERTIES
   PASS_REGULAR_EXPRESSION "g12v1 \\(Binary Output Command \\(CROB\\)\\).*idx=7: code=Latch On")
 
 add_test(NAME dnp3_coalesced_frames_merged_in_json
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format json)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format json)
 set_tests_properties(dnp3_coalesced_frames_merged_in_json PROPERTIES
   PASS_REGULAR_EXPRESSION "\"dnp3_objects\": \\[\"g60v1 \\(Class Objects\\)\", \"g12v1 \\(Binary Output Command \\(CROB\\)\\)\"\\]")
 
@@ -248,7 +248,7 @@ set_tests_properties(dnp3_coalesced_frames_merged_in_json PROPERTIES
 # The FIR=1,FIN=0 starting frame (packet 8) must show only its own transport header -- nothing
 # decoded yet -- plus a note that reassembly has begun and is buffering.
 add_test(NAME dnp3_reassembly_start_frame_not_decoded
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text)
 set_tests_properties(dnp3_reassembly_start_frame_not_decoded PROPERTIES
   PASS_REGULAR_EXPRESSION "beginning a DNP3 fragment that spans multiple data-link frames \\(FIR=1, FIN=0, SEQ=5\\)"
   FAIL_REGULAR_EXPRESSION "transport: FIR=1 FIN=0 SEQ=5 \\| application")
@@ -257,43 +257,43 @@ set_tests_properties(dnp3_reassembly_start_frame_not_decoded PROPERTIES
 # full, concatenated application layer -- same CROB command as the single-frame packet 6, but
 # reconstructed from two frames delivered a packet apart.
 add_test(NAME dnp3_reassembly_completes_across_packets
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text)
 set_tests_properties(dnp3_reassembly_completes_across_packets PROPERTIES
   PASS_REGULAR_EXPRESSION "completed a 2-data-link-frame DNP3 fragment reassembled across separate TCP segments \\(18 application-layer byte\\(s\\) total\\)")
 
 add_test(NAME dnp3_reassembly_completed_object_decoded
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text)
 set_tests_properties(dnp3_reassembly_completed_object_decoded PROPERTIES
   PASS_REGULAR_EXPRESSION "function=Direct Operate \\(0x05\\) objects: \\[g12v1\\].*idx=7: code=Latch On tc=Close")
 
 add_test(NAME dnp3_reassembly_completed_function_in_json
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format json)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format json)
 set_tests_properties(dnp3_reassembly_completed_function_in_json PROPERTIES
   PASS_REGULAR_EXPRESSION "\"index\": 9,[^}]*\"dnp3_function\": \"Direct Operate\"")
 
 # packet 5 (FIR=1,FIN=1, same TCP flow as packet 4's never-completed start) must abandon packet
 # 4's stale in-progress reassembly rather than silently merging into it.
 add_test(NAME dnp3_reassembly_abandoned_by_new_complete_fragment
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text)
 set_tests_properties(dnp3_reassembly_abandoned_by_new_complete_fragment PROPERTIES
   PASS_REGULAR_EXPRESSION "a complete single-frame DNP3 fragment \\(FIR=1, FIN=1\\) arrived on this TCP flow while a previous multi-frame fragment reassembly was still in progress")
 
 # packet 10: a FIR=0 continuation with no reassembly in progress on its flow at all (orphan) --
 # must be left transport-only, with an explanatory note, never guessed at.
 add_test(NAME dnp3_reassembly_orphan_continuation_noted
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text)
 set_tests_properties(dnp3_reassembly_orphan_continuation_noted PROPERTIES
   PASS_REGULAR_EXPRESSION "continuation DNP3 data-link frame \\(FIR=0, SEQ=1\\) with no fragment reassembly in progress on this TCP flow")
 
 # packets 11-12: a sequence-number mismatch must discard the in-progress reassembly rather than
 # concatenating bytes out of order.
 add_test(NAME dnp3_reassembly_sequence_mismatch_discarded
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text)
 set_tests_properties(dnp3_reassembly_sequence_mismatch_discarded PROPERTIES
   PASS_REGULAR_EXPRESSION "continuation DNP3 data-link frame's sequence number \\(35\\) does not follow the previous frame's \\(expected 11\\)")
 
 add_test(NAME stats_mode_dnp3
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --stats)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --stats)
 set_tests_properties(stats_mode_dnp3 PROPERTIES
   PASS_REGULAR_EXPRESSION "dnp3 function codes:")
 
@@ -306,7 +306,7 @@ set_tests_properties(stats_mode_dnp3 PROPERTIES
 # A) Modbus response ADU split across two TCP segments: the first segment alone must show only
 # "buffering", never a modbus decode; the second must complete it correctly.
 add_test(NAME tcp_reassembly_modbus_first_segment_buffers
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tcp_reassembly.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tcp_reassembly.pcap" --format text)
 set_tests_properties(tcp_reassembly_modbus_first_segment_buffers PROPERTIES
   PASS_REGULAR_EXPRESSION "buffering a Modbus/TCP PDU/frame split across TCP segments 502->51600: 15 of 29 declared byte\\(s\\)")
 
@@ -318,55 +318,55 @@ set_tests_properties(tcp_reassembly_modbus_first_segment_buffers PROPERTIES
 # nothing about which packet actually produced it. Same technique already used for the JSON
 # per-object checks above (there bounded by '}' instead of '#').
 add_test(NAME tcp_reassembly_modbus_completes
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tcp_reassembly.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tcp_reassembly.pcap" --format text)
 set_tests_properties(tcp_reassembly_modbus_completes PROPERTIES
   PASS_REGULAR_EXPRESSION "response: 20 data byte\\(s\\) = 00 00 00 01 00 02 00 03 00 04 00 05 00 06 00 07 00 08 00 09[^#]*reassembled a Modbus/TCP PDU/frame from 29 byte\\(s\\) spanning 2 TCP segments")
 
 # B) A complete single-data-link-frame DNP3 fragment split mid-*header* across two TCP segments.
 add_test(NAME tcp_reassembly_dnp3_link_layer_completes
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tcp_reassembly.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tcp_reassembly.pcap" --format text)
 set_tests_properties(tcp_reassembly_dnp3_link_layer_completes PROPERTIES
   PASS_REGULAR_EXPRESSION "function=Read \\(0x01\\) objects: \\[g60v1\\][^#]*reassembled a DNP3 data-link PDU/frame from 18 byte\\(s\\) spanning 2 TCP segments")
 
 # C) A TPKT/S7comm Setup Communication request split across two TCP segments.
 add_test(NAME tcp_reassembly_tpkt_s7comm_completes
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tcp_reassembly.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tcp_reassembly.pcap" --format text)
 set_tests_properties(tcp_reassembly_tpkt_s7comm_completes PROPERTIES
   PASS_REGULAR_EXPRESSION "Setup Communication \\(negotiated PDU length=240[^#]*reassembled a TPKT/COTP PDU/frame from 25 byte\\(s\\) spanning 2 TCP segments")
 
 # D) A TCP sequence gap abandons the in-progress reassembly, and a later, ordinary request on the
 # same flow still decodes normally afterward (the abandoned state doesn't wedge the flow).
 add_test(NAME tcp_reassembly_gap_abandons_reassembly
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tcp_reassembly.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tcp_reassembly.pcap" --format text)
 set_tests_properties(tcp_reassembly_gap_abandons_reassembly PROPERTIES
   PASS_REGULAR_EXPRESSION "TCP sequence gap on this flow \\(expected seq 30009, got 30509, 500 byte\\(s\\) apparently missing\\) -- abandoning an in-progress 9-byte PDU/frame reassembly")
 
 add_test(NAME tcp_reassembly_flow_recovers_after_gap
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tcp_reassembly.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tcp_reassembly.pcap" --format text)
 set_tests_properties(tcp_reassembly_flow_recovers_after_gap PROPERTIES
   PASS_REGULAR_EXPRESSION "request: read 10 holding register\\(s\\) starting at address 0")
 
 # E) A fully-duplicate retransmission mid-reassembly is ignored, not misapplied; the real
 # completing segment afterward still finishes the PDU correctly.
 add_test(NAME tcp_reassembly_duplicate_retransmit_ignored
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tcp_reassembly.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tcp_reassembly.pcap" --format text)
 set_tests_properties(tcp_reassembly_duplicate_retransmit_ignored PROPERTIES
   PASS_REGULAR_EXPRESSION "retransmitted/duplicate TCP segment 502->51604 \\(fully overlaps bytes already buffered for an in-progress 20-byte PDU/frame reassembly")
 
 add_test(NAME tcp_reassembly_completes_despite_duplicate
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tcp_reassembly.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tcp_reassembly.pcap" --format text)
 set_tests_properties(tcp_reassembly_completes_despite_duplicate PROPERTIES
   PASS_REGULAR_EXPRESSION "response: 20 data byte\\(s\\) = 00 00 00 01 00 02 00 03 00 04 00 05 00 06 00 07 00 08 00 09[^#]*reassembled a Modbus/TCP PDU/frame from 29 byte\\(s\\) spanning 3 TCP segments")
 
 # F) A partial-overlap retransmission (repeats a few already-buffered bytes, then extends past
 # them with new ones) is trimmed to just its new bytes, not misaligned or duplicated.
 add_test(NAME tcp_reassembly_partial_overlap_trimmed
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tcp_reassembly.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tcp_reassembly.pcap" --format text)
 set_tests_properties(tcp_reassembly_partial_overlap_trimmed PROPERTIES
   PASS_REGULAR_EXPRESSION "TCP segment on this flow overlaps 3 already-buffered byte\\(s\\) \\(likely a retransmission\\) -- trimmed and only the new byte\\(s\\) appended")
 
 add_test(NAME tcp_reassembly_partial_overlap_completes_correctly
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tcp_reassembly.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tcp_reassembly.pcap" --format text)
 set_tests_properties(tcp_reassembly_partial_overlap_completes_correctly PROPERTIES
   PASS_REGULAR_EXPRESSION "response: 20 data byte\\(s\\) = 00 00 00 01 00 02 00 03 00 04 00 05 00 06 00 07 00 08 00 09[^#]*reassembled a Modbus/TCP PDU/frame from 29 byte\\(s\\) spanning 3 TCP segments")
 
@@ -396,11 +396,11 @@ set(DNP3_REAL_CAPTURES
 # here -- that would only test that decode ran, which the exit code already covers.
 foreach(capture ${DNP3_REAL_CAPTURES})
   add_test(NAME real_dnp3_${capture}_does_not_crash
-    COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/dnp3/${capture}.pcap" --format json)
+    COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/dnp3/${capture}.pcap" --format json)
 endforeach()
 
 add_test(NAME real_dnp3_read_class1_poll_decoded
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/dnp3/dnp3_read.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/dnp3/dnp3_read.pcap" --format text)
 set_tests_properties(real_dnp3_read_class1_poll_decoded PROPERTIES
   PASS_REGULAR_EXPRESSION "function=Read \\(0x01\\) objects: \\[g60v2\\]")
 
@@ -409,7 +409,7 @@ set_tests_properties(real_dnp3_read_class1_poll_decoded PROPERTIES
 # independent DNP3 master's actual wire encoding, not just the synthetic
 # fixture's one hand-constructed control byte.
 add_test(NAME real_dnp3_select_operate_crob_decoded
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/dnp3/dnp3_select_operate.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/dnp3/dnp3_select_operate.pcap" --format text)
 set_tests_properties(real_dnp3_select_operate_crob_decoded PROPERTIES
   PASS_REGULAR_EXPRESSION "idx=1: code=Latch On tc=NUL queue/clear=0x00 count=1 on_time=100ms off_time=100ms status=Success")
 
@@ -417,36 +417,36 @@ set_tests_properties(real_dnp3_select_operate_crob_decoded PROPERTIES
 # confirms the IEEE 1815 control-status-code table isn't only decoding whichever
 # single status value the synthetic fixture happens to use.
 add_test(NAME real_dnp3_test_data_part2_crob_status_success
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/dnp3/dnp3_test_data_part2.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/dnp3/dnp3_test_data_part2.pcap" --format text)
 set_tests_properties(real_dnp3_test_data_part2_crob_status_success PROPERTIES
   PASS_REGULAR_EXPRESSION "status=Success")
 
 add_test(NAME real_dnp3_test_data_part2_crob_status_not_supported
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/dnp3/dnp3_test_data_part2.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/dnp3/dnp3_test_data_part2.pcap" --format text)
 set_tests_properties(real_dnp3_test_data_part2_crob_status_not_supported PROPERTIES
   PASS_REGULAR_EXPRESSION "status=Not Supported")
 
 # Real polling session: Binary Input (bit-packed), Binary Output (byte-per-point
 # with flags), and Internal Indications objects all decoded from real traffic.
 add_test(NAME real_dnp3_test_data_part1_binary_input_decoded
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/dnp3/dnp3_test_data_part1.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/dnp3/dnp3_test_data_part1.pcap" --format text)
 set_tests_properties(real_dnp3_test_data_part1_binary_input_decoded PROPERTIES
   PASS_REGULAR_EXPRESSION "g1v1 \\(Binary Input\\).*idx=0: 0, idx=1: 1, idx=2: 0")
 
 add_test(NAME real_dnp3_test_data_part1_binary_output_flags_decoded
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/dnp3/dnp3_test_data_part1.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/dnp3/dnp3_test_data_part1.pcap" --format text)
 set_tests_properties(real_dnp3_test_data_part1_binary_output_flags_decoded PROPERTIES
   PASS_REGULAR_EXPRESSION "g10v2 \\(Binary Output\\).*idx=0: 0 \\[ONLINE\\]")
 
 add_test(NAME real_dnp3_test_data_part1_internal_indications_decoded
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/dnp3/dnp3_test_data_part1.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/dnp3/dnp3_test_data_part1.pcap" --format text)
 set_tests_properties(real_dnp3_test_data_part1_internal_indications_decoded PROPERTIES
   PASS_REGULAR_EXPRESSION "g80v1 \\(Internal Indications\\).*idx=7: 0")
 
 # Absolute timestamp (group 50 var 1) from a real Write request, not the
 # synthetic fixture.
 add_test(NAME real_dnp3_write_timestamp_decoded
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/dnp3/dnp3_write.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/dnp3/dnp3_write.pcap" --format text)
 set_tests_properties(real_dnp3_write_timestamp_decoded PROPERTIES
   PASS_REGULAR_EXPRESSION "g50v1 \\(Time and Date\\).*idx=0: 1156521360890ms-since-epoch")
 
@@ -454,7 +454,7 @@ set_tests_properties(real_dnp3_write_timestamp_decoded PROPERTIES
 # explaining why parsing stopped) rather than silently fabricate a value for
 # bytes that don't actually decode to anything meaningful.
 add_test(NAME real_dnp3_malformed_bails_out_with_a_note
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/dnp3/dnp3_malformed.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/dnp3/dnp3_malformed.pcap" --format text)
 set_tests_properties(real_dnp3_malformed_bails_out_with_a_note PROPERTIES
   PASS_REGULAR_EXPRESSION "is not in the known point-format table -- stopping object parsing")
 
@@ -491,11 +491,11 @@ set(S7COMM_REAL_CAPTURES
 )
 foreach(capture ${S7COMM_REAL_CAPTURES})
   add_test(NAME real_s7comm_${capture}_does_not_crash
-    COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/s7comm/${capture}.pcap" --format json)
+    COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/s7comm/${capture}.pcap" --format json)
 endforeach()
 
 add_test(NAME real_s7comm_read_db1dbd0_item_decoded
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/s7comm/s7comm_varservice_read_db1dbd0.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/s7comm/s7comm_varservice_read_db1dbd0.pcap" --format text)
 set_tests_properties(real_s7comm_read_db1dbd0_item_decoded PROPERTIES
   PASS_REGULAR_EXPRESSION "item 0: DB1\\.DBB0")
 
@@ -508,7 +508,7 @@ set_tests_properties(real_s7comm_read_db1dbd0_item_decoded PROPERTIES
 # transparently chain across it (0 buffered bytes + the real frame's own bytes = unchanged
 # decoded content) rather than mishandling or crashing on it.
 add_test(NAME real_s7comm_read_db1dbd0_eot_chaining_note
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/s7comm/s7comm_varservice_read_db1dbd0.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/s7comm/s7comm_varservice_read_db1dbd0.pcap" --format text)
 set_tests_properties(real_s7comm_read_db1dbd0_eot_chaining_note PROPERTIES
   PASS_REGULAR_EXPRESSION "reassembled a COTP/S7comm message from 24 user-data byte\\(s\\) chained across 2 complete TPKT/COTP frames")
 
@@ -516,7 +516,7 @@ set_tests_properties(real_s7comm_read_db1dbd0_eot_chaining_note PROPERTIES
 # not classic S7comm -- regression guard that the S7comm-Plus detection stub
 # fires correctly on real traffic, not just the one it was written against.
 add_test(NAME real_s7comm_plus_detected_not_decoded
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/s7comm/s7comm_plus_1511_db3_var1_hmi.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/s7comm/s7comm_plus_1511_db3_var1_hmi.pcap" --format text)
 set_tests_properties(real_s7comm_plus_detected_not_decoded PROPERTIES
   PASS_REGULAR_EXPRESSION "S7comm-Plus \\(TIA Portal S7-1200/1500 protocol\\) detected, not decoded")
 
@@ -527,13 +527,13 @@ set_tests_properties(real_s7comm_plus_detected_not_decoded PROPERTIES
 # not an independent one, but now checked at full volume instead of a
 # handful of spot-checked items).
 add_test(NAME real_s7comm_1200sym_item_decoded
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/s7comm/s7comm_1200sym_real_polling.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/s7comm/s7comm_1200sym_real_polling.pcap" --format text)
 set_tests_properties(real_s7comm_1200sym_item_decoded PROPERTIES
   PASS_REGULAR_EXPRESSION "item 0: M2\\.0 \\[EXPERIMENTAL 1200SYM \\(0xB2\\) decode, unverified -- reserved=0xff00 crc=0xea2db0d9"
   FAIL_REGULAR_EXPRESSION "unrecognized area1|multi-LID|byte\\(s\\) left after its CRC")
 
 add_test(NAME real_s7comm_1200sym_response_decoded
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/s7comm/s7comm_1200sym_real_polling.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/s7comm/s7comm_1200sym_real_polling.pcap" --format text)
 set_tests_properties(real_s7comm_1200sym_response_decoded PROPERTIES
   PASS_REGULAR_EXPRESSION "value 0: Success = 00")
 
@@ -549,55 +549,55 @@ set(MODBUS_REAL_CAPTURES
 )
 foreach(capture ${MODBUS_REAL_CAPTURES})
   add_test(NAME real_modbus_${capture}_does_not_crash
-    COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/modbus/${capture}.pcap" --format json)
+    COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/modbus/${capture}.pcap" --format json)
 endforeach()
 
 add_test(NAME real_modbus_read_holding_registers_decoded
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/modbus/modbus_read_holding_registers.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/modbus/modbus_read_holding_registers.pcap" --format text)
 set_tests_properties(real_modbus_read_holding_registers_decoded PROPERTIES
   PASS_REGULAR_EXPRESSION "Read Holding Registers: request: read 1 holding register\\(s\\) starting at address 1")
 
 # Real authoritative pairing evidence: this capture's request/response pairs share one TCP session,
 # so Decoder::pair_modbus_transaction must pair the first real response back to its real request.
 add_test(NAME real_modbus_read_holding_registers_authoritative_pairing
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/modbus/modbus_read_holding_registers.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/modbus/modbus_read_holding_registers.pcap" --format text)
 set_tests_properties(real_modbus_read_holding_registers_authoritative_pairing PROPERTIES
   PASS_REGULAR_EXPRESSION "authoritative pairing: response to transaction id 209 \\(unit 1\\) -- matches the request seen in packet #1")
 
 # Real traffic exercising a function code outside current scope must degrade
 # to a "not decoded" note, not be misparsed.
 add_test(NAME real_modbus_diagnostics_not_decoded
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/modbus/modbus_test_data_part1.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/modbus/modbus_test_data_part1.pcap" --format text)
 set_tests_properties(real_modbus_diagnostics_not_decoded PROPERTIES
   PASS_REGULAR_EXPRESSION "Diagnostics: Diagnostics \\(not decoded in this groundwork release\\)")
 
 add_test(NAME decode_s7comm_sample
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm.pcap" --format text)
 set_tests_properties(decode_s7comm_sample PROPERTIES
   PASS_REGULAR_EXPRESSION "Setup Communication")
 
 add_test(NAME decode_s7comm_readvar_sample
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm.pcap" --format json)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm.pcap" --format json)
 set_tests_properties(decode_s7comm_readvar_sample PROPERTIES
   PASS_REGULAR_EXPRESSION "Read Var")
 
 add_test(NAME decode_cotp_connection_request_sample
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm.pcap" --format text)
 set_tests_properties(decode_cotp_connection_request_sample PROPERTIES
   PASS_REGULAR_EXPRESSION "Connection Request \\(CR\\) calling-TSAP")
 
 add_test(NAME s7comm_read_var_item_address
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm.pcap" --format text)
 set_tests_properties(s7comm_read_var_item_address PROPERTIES
   PASS_REGULAR_EXPRESSION "DB10\\.DBW100")
 
 add_test(NAME s7comm_read_var_returned_value
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm.pcap" --format text)
 set_tests_properties(s7comm_read_var_returned_value PROPERTIES
   PASS_REGULAR_EXPRESSION "value 0: Success = 00 01 00 02 00 03 00 04 00 05")
 
 add_test(NAME s7comm_write_var_item_address
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm.pcap" --format text)
 set_tests_properties(s7comm_write_var_item_address PROPERTIES
   PASS_REGULAR_EXPRESSION "M0\\.0")
 
@@ -606,59 +606,59 @@ set_tests_properties(s7comm_write_var_item_address PROPERTIES
 # ("Reserved") -- it isn't a return code at all on a request, and doing so masked the
 # actual written value the first time this was implemented.
 add_test(NAME s7comm_write_var_value_not_mislabeled
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm.pcap" --format text)
 set_tests_properties(s7comm_write_var_value_not_mislabeled PROPERTIES
   PASS_REGULAR_EXPRESSION "value 0: 01"
   FAIL_REGULAR_EXPRESSION "Write Var.*Reserved")
 
 add_test(NAME s7comm_area_codes_and_transport_sizes
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_items.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_items.pcap" --format text)
 set_tests_properties(s7comm_area_codes_and_transport_sizes PROPERTIES
   PASS_REGULAR_EXPRESSION "item 3: DB5\\.DBD20")
 
 add_test(NAME s7comm_timer_area
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_items.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_items.pcap" --format text)
 set_tests_properties(s7comm_timer_area PROPERTIES
   PASS_REGULAR_EXPRESSION "item 5: T5")
 
 add_test(NAME s7comm_counter_area
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_items.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_items.pcap" --format text)
 set_tests_properties(s7comm_counter_area PROPERTIES
   PASS_REGULAR_EXPRESSION "item 6: C3")
 
 add_test(NAME s7comm_unsupported_syntax_id_noted
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_items.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_items.pcap" --format text)
 set_tests_properties(s7comm_unsupported_syntax_id_noted PROPERTIES
   PASS_REGULAR_EXPRESSION "syntax id 0xb0.*not decoded")
 
 add_test(NAME s7comm_1200sym_experimental_decode
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_1200sym.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_1200sym.pcap" --format text)
 set_tests_properties(s7comm_1200sym_experimental_decode PROPERTIES
   PASS_REGULAR_EXPRESSION "item 4: M2\\.4 \\[EXPERIMENTAL 1200SYM")
 
 add_test(NAME s7comm_1200sym_marked_in_summary
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_1200sym.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_1200sym.pcap" --format text)
 set_tests_properties(s7comm_1200sym_marked_in_summary PROPERTIES
   PASS_REGULAR_EXPRESSION "M2\\.0 \\[EXPERIMENTAL\\]")
 
 add_test(NAME s7comm_1200sym_marked_in_json
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_1200sym.pcap" --format json)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_1200sym.pcap" --format json)
 set_tests_properties(s7comm_1200sym_marked_in_json PROPERTIES
   PASS_REGULAR_EXPRESSION "\"M2\\.0 \\[EXPERIMENTAL\\]\"")
 
 # Fallback paths: shapes the experimental decode deliberately does not guess at.
 add_test(NAME s7comm_1200sym_unrecognized_area1_falls_back
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_1200sym.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_1200sym.pcap" --format text)
 set_tests_properties(s7comm_1200sym_unrecognized_area1_falls_back PROPERTIES
   PASS_REGULAR_EXPRESSION "item 5 is a 1200SYM \\(0xB2\\) item with an unrecognized area1 value")
 
 add_test(NAME s7comm_1200sym_multi_lid_falls_back
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_1200sym.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_1200sym.pcap" --format text)
 set_tests_properties(s7comm_1200sym_multi_lid_falls_back PROPERTIES
   PASS_REGULAR_EXPRESSION "item 6 is a 1200SYM \\(0xB2\\) item with 8 byte\\(s\\) left after its CRC")
 
 add_test(NAME s7comm_item_tags_in_json
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm.pcap" --format json)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm.pcap" --format json)
 set_tests_properties(s7comm_item_tags_in_json PROPERTIES
   PASS_REGULAR_EXPRESSION "\"s7comm_items\": \\[\"DB10\\.DBW100\"\\]")
 
@@ -675,19 +675,19 @@ set_tests_properties(s7comm_item_tags_in_json PROPERTIES
 # lands mid-byte inside a register value itself (see the fixture's own comment), so a wrong decode
 # here would mean the reassembly corrupted content, not just failed to buffer.
 add_test(NAME s7comm_chaining_first_frame_buffers
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_chaining.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_chaining.pcap" --format text)
 set_tests_properties(s7comm_chaining_first_frame_buffers PROPERTIES
   PASS_REGULAR_EXPRESSION "#1  [^#]*\\[cotp\\]  beginning a COTP/S7comm message fragmented across multiple complete TPKT/COTP frames on this TCP flow \\(EOT=0\\): 21 user-data byte\\(s\\) buffered across 1 frame\\(s\\)")
 
 add_test(NAME s7comm_chaining_completes_with_correct_values
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_chaining.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_chaining.pcap" --format text)
 set_tests_properties(s7comm_chaining_completes_with_correct_values PROPERTIES
   PASS_REGULAR_EXPRESSION "Ack_Data: Read Var \\(1 value\\(s\\): 13 ec 13 ed 13 ee 13 ef 13 f0\\)[^#]*reassembled a COTP/S7comm message from 28 user-data byte\\(s\\) chained across 2 complete TPKT/COTP frames")
 
 # B) A Disconnect Request mid-reassembly abandons the in-progress fragment with a note rather than
 # silently dropping it or splicing the Disconnect frame's own (irrelevant) bytes in.
 add_test(NAME s7comm_chaining_disconnect_abandons_reassembly
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_chaining.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_chaining.pcap" --format text)
 set_tests_properties(s7comm_chaining_disconnect_abandons_reassembly PROPERTIES
   PASS_REGULAR_EXPRESSION "a Disconnect Request \\(DR\\) frame arrived on this TCP flow while a COTP/S7comm fragment reassembly was still in progress \\(21 byte\\(s\\) buffered across 1 frame\\(s\\)\\) -- the earlier, incomplete fragment is abandoned")
 
@@ -697,7 +697,7 @@ set_tests_properties(s7comm_chaining_disconnect_abandons_reassembly PROPERTIES
 # spec. Found via a real capture (DNP3 traffic on port 20000 mislabeled as Modbus); must now fall
 # through to DNP3 detection instead.
 add_test(NAME modbus_function_code_zero_is_not_modbus
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus_false_positive.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus_false_positive.pcap" --format text)
 set_tests_properties(modbus_function_code_zero_is_not_modbus PROPERTIES
   PASS_REGULAR_EXPRESSION "\\[dnp3\\]"
   FAIL_REGULAR_EXPRESSION "\\[modbus\\]")
@@ -714,59 +714,93 @@ set_tests_properties(modbus_function_code_zero_is_not_modbus PROPERTIES
 # heuristic alone cannot tell them apart (its own note says so), so this is the strongest
 # real-world case for this feature. The response must still be authoritatively paired to packet #1.
 add_test(NAME modbus_pairing_write_single_paired_despite_ambiguous_shape
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus_pairing.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus_pairing.pcap" --format text)
 set_tests_properties(modbus_pairing_write_single_paired_despite_ambiguous_shape PROPERTIES
   PASS_REGULAR_EXPRESSION "authoritative pairing: response to transaction id 500 \\(unit 1\\) -- matches the request seen in packet #1")
 
 # B) A reused transaction ID before its first request is ever answered must be noted, and the
 # eventual response must pair to the SECOND (most recently outstanding) request, not the first.
 add_test(NAME modbus_pairing_reused_transaction_id_noted
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus_pairing.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus_pairing.pcap" --format text)
 set_tests_properties(modbus_pairing_reused_transaction_id_noted PROPERTIES
   PASS_REGULAR_EXPRESSION "transaction id 600 reused on this TCP flow before its previous outstanding request \\(packet #3\\) was matched with a response")
 
 add_test(NAME modbus_pairing_reused_transaction_id_pairs_to_latest_request
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus_pairing.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus_pairing.pcap" --format text)
 set_tests_properties(modbus_pairing_reused_transaction_id_pairs_to_latest_request PROPERTIES
   PASS_REGULAR_EXPRESSION "authoritative pairing: response to transaction id 600 \\(unit 1\\) -- matches the request seen in packet #4 \\(Read Holding Registers: request: read 5 holding register\\(s\\) starting at address 100\\)")
 
 # C) An orphan response (its request never seen on this session) -- already exercised incidentally
 # by sample_modbus.pcap's exception-response packet (transaction id 2, no matching request).
 add_test(NAME modbus_pairing_orphan_response_noted
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --format text)
 set_tests_properties(modbus_pairing_orphan_response_noted PROPERTIES
   PASS_REGULAR_EXPRESSION "no outstanding request found on this TCP session for transaction id 2")
 
 add_test(NAME info_modbus_sample
-  COMMAND conduitscope info --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap")
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap")
 set_tests_properties(info_modbus_sample PROPERTIES
   PASS_REGULAR_EXPRESSION "packets:")
 
 add_test(NAME stats_mode
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --stats)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --stats)
 set_tests_properties(stats_mode PROPERTIES
   PASS_REGULAR_EXPRESSION "modbus function codes:")
 
 add_test(NAME stats_mode_s7comm
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm.pcap" --stats)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm.pcap" --stats)
 set_tests_properties(stats_mode_s7comm PROPERTIES
   PASS_REGULAR_EXPRESSION "s7comm function codes:")
 
 add_test(NAME padded_ack_no_phantom_payload
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_padded_ack.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_padded_ack.pcap" --format text)
 set_tests_properties(padded_ack_no_phantom_payload PROPERTIES
   PASS_REGULAR_EXPRESSION "no payload"
   FAIL_REGULAR_EXPRESSION "TCP payload of")
 
 add_test(NAME padded_ack_trim_note_present
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_padded_ack.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_padded_ack.pcap" --format text)
 set_tests_properties(padded_ack_trim_note_present PROPERTIES
   PASS_REGULAR_EXPRESSION "were trimmed")
 
-add_test(NAME rejects_pcapng
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/not_a_pcap.pcapng")
-set_tests_properties(rejects_pcapng PROPERTIES
-  PASS_REGULAR_EXPRESSION "pcapng")
+# ---------------------------------------------------------------------------------------------
+# pcapng support (pcap_reader.cpp's is_pcapng_/next_pcapng()). Fixtures generated by
+# tools/make_sample_pcap.py's build_pcapng_*() functions.
+# ---------------------------------------------------------------------------------------------
+
+add_test(NAME rejects_malformed_pcapng
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/pcapng_bad_byte_order.pcapng")
+set_tests_properties(rejects_malformed_pcapng PROPERTIES
+  PASS_REGULAR_EXPRESSION "Section Header Block.*unrecognized byte-order magic")
+
+add_test(NAME pcapng_basic_decodes_same_as_classic_pcap
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcapng" --stats)
+set_tests_properties(pcapng_basic_decodes_same_as_classic_pcap PROPERTIES
+  PASS_REGULAR_EXPRESSION "modbus exception responses: 1")
+
+add_test(NAME pcapng_info_reports_pcapng_section_version
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcapng")
+set_tests_properties(pcapng_info_reports_pcapng_section_version PROPERTIES
+  PASS_REGULAR_EXPRESSION "pcap version:   1.0")
+
+add_test(NAME pcapng_nanosecond_resolution_reported
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_pcapng_nanosecond.pcapng")
+set_tests_properties(pcapng_nanosecond_resolution_reported PROPERTIES
+  PASS_REGULAR_EXPRESSION "timestamps:     nanosecond resolution")
+
+add_test(NAME pcapng_multi_interface_uses_each_packets_own_link_type
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_pcapng_multi_interface.pcapng" --format text)
+set_tests_properties(pcapng_multi_interface_uses_each_packets_own_link_type PROPERTIES
+  # Packet 2 is on interface 1 (raw IP, no Ethernet framing). If per-packet link type
+  # weren't actually applied here (e.g. if interface 1's raw IP bytes were misread as an
+  # Ethernet frame, the way they'd be decoded under interface 0's link type instead), this
+  # wouldn't decode as a clean Modbus request at all.
+  PASS_REGULAR_EXPRESSION "read 4 holding register\\(s\\) starting at address 0")
+
+add_test(NAME pcapng_simple_packet_block_decodes
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_pcapng_simple_packet_block.pcapng" --format text)
+set_tests_properties(pcapng_simple_packet_block_decodes PROPERTIES
+  PASS_REGULAR_EXPRESSION "Read Holding Registers")
 
 
 # ---------------------------------------------------------------------------------------------
@@ -779,152 +813,152 @@ set_tests_properties(rejects_pcapng PROPERTIES
 set(POLICY_DIR "${CMAKE_CURRENT_SOURCE_DIR}/tests/policies")
 
 add_test(NAME policy_modbus_sample_compliant
-  COMMAND conduitscope policy validate --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/compliant.yaml")
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/compliant.yaml")
 set_tests_properties(policy_modbus_sample_compliant PROPERTIES
   PASS_REGULAR_EXPRESSION "Result: COMPLIANT.*matched conduit \"HMI polls PLC via Modbus\"")
 
 add_test(NAME policy_dnp3_sample_compliant
-  COMMAND conduitscope policy validate --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --policy "${POLICY_DIR}/compliant.yaml")
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --policy "${POLICY_DIR}/compliant.yaml")
 set_tests_properties(policy_dnp3_sample_compliant PROPERTIES
   PASS_REGULAR_EXPRESSION "Result: COMPLIANT")
 
 add_test(NAME policy_s7comm_sample_compliant
-  COMMAND conduitscope policy validate --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm.pcap" --policy "${POLICY_DIR}/compliant.yaml")
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm.pcap" --policy "${POLICY_DIR}/compliant.yaml")
 set_tests_properties(policy_s7comm_sample_compliant PROPERTIES
   PASS_REGULAR_EXPRESSION "Result: COMPLIANT.*matched conduit \"Engineering station S7comm\"")
 
 add_test(NAME policy_json_format
-  COMMAND conduitscope policy validate --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/compliant.yaml" --format json)
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/compliant.yaml" --format json)
 set_tests_properties(policy_json_format PROPERTIES
   PASS_REGULAR_EXPRESSION "\"compliant\": true[^}]*\"verdict\": \"allowed\"")
 
 add_test(NAME policy_wrong_port_is_a_violation
-  COMMAND conduitscope policy validate --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/wrong_port.yaml")
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/wrong_port.yaml")
 set_tests_properties(policy_wrong_port_is_a_violation PROPERTIES
   PASS_REGULAR_EXPRESSION "Result: NON-COMPLIANT \\(1 violation\\(s\\), 0 unclassified flow\\(s\\)\\).*a conduit exists between zone 'hmi_zone' and zone 'plc_zone', but none permits modbus traffic on port 502")
 
 add_test(NAME policy_no_conduit_for_zone_pair_is_a_violation
-  COMMAND conduitscope policy validate --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/no_conduit_for_zone_pair.yaml")
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/no_conduit_for_zone_pair.yaml")
 set_tests_properties(policy_no_conduit_for_zone_pair_is_a_violation PROPERTIES
   PASS_REGULAR_EXPRESSION "no conduit permits any traffic from zone 'hmi_zone' to zone 'plc_zone'")
 
 add_test(NAME policy_unclassified_endpoint_reported
-  COMMAND conduitscope policy validate --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/unclassified_zone.yaml")
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/unclassified_zone.yaml")
 set_tests_properties(policy_unclassified_endpoint_reported PROPERTIES
   PASS_REGULAR_EXPRESSION "Result: NON-COMPLIANT \\(0 violation\\(s\\), 1 unclassified flow\\(s\\)\\).*no declared zone contains 192.168.1.10")
 
 add_test(NAME policy_bidirectional_conduit_matches_reverse_direction
-  COMMAND conduitscope policy validate --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bidirectional.yaml")
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bidirectional.yaml")
 set_tests_properties(policy_bidirectional_conduit_matches_reverse_direction PROPERTIES
   PASS_REGULAR_EXPRESSION "Result: COMPLIANT.*matched conduit \"PLC pushes to HMI")
 
 add_test(NAME policy_unexercised_conduits_listed
-  COMMAND conduitscope policy validate --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/compliant.yaml")
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/compliant.yaml")
 set_tests_properties(policy_unexercised_conduits_listed PROPERTIES
   PASS_REGULAR_EXPRESSION "Conduits never exercised by this capture \\(2\\):.*HMI polls PLC via DNP3.*Engineering station S7comm")
 
 # sample_policy_engine.pcap: client/server (initiator) determination and cotp->s7comm folding.
 add_test(NAME policy_engine_syn_handshake_gives_correct_direction
-  COMMAND conduitscope policy validate --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_policy_engine.pcap" --policy "${POLICY_DIR}/policy_engine_sample.yaml" --format json)
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_policy_engine.pcap" --policy "${POLICY_DIR}/policy_engine_sample.yaml" --format json)
 set_tests_properties(policy_engine_syn_handshake_gives_correct_direction PROPERTIES
   PASS_REGULAR_EXPRESSION "\"client_ip\": \"192.168.1.50\",[^}]*\"server_ip\": \"192.168.1.10\",[^}]*\"server_port\": 502")
 
 add_test(NAME policy_engine_late_syn_overrides_port_guess
-  COMMAND conduitscope policy validate --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_policy_engine.pcap" --policy "${POLICY_DIR}/policy_engine_sample.yaml" --format json)
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_policy_engine.pcap" --policy "${POLICY_DIR}/policy_engine_sample.yaml" --format json)
 set_tests_properties(policy_engine_late_syn_overrides_port_guess PROPERTIES
   PASS_REGULAR_EXPRESSION "\"client_ip\": \"192.168.1.50\",[^}]*\"server_ip\": \"192.168.1.10\",[^}]*\"server_port\": 55000")
 
 add_test(NAME policy_engine_no_protocol_recognized_is_unclassified
-  COMMAND conduitscope policy validate --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_policy_engine.pcap" --policy "${POLICY_DIR}/policy_engine_sample.yaml")
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_policy_engine.pcap" --policy "${POLICY_DIR}/policy_engine_sample.yaml")
 set_tests_properties(policy_engine_no_protocol_recognized_is_unclassified PROPERTIES
   PASS_REGULAR_EXPRESSION "no Modbus/DNP3/S7comm traffic was recognized on this flow \\(2 unrecognized/handshake packet\\(s\\) only\\)")
 
 add_test(NAME policy_engine_cotp_only_session_counts_as_s7comm
-  COMMAND conduitscope policy validate --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_policy_engine.pcap" --policy "${POLICY_DIR}/policy_engine_sample.yaml" --format json)
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_policy_engine.pcap" --policy "${POLICY_DIR}/policy_engine_sample.yaml" --format json)
 set_tests_properties(policy_engine_cotp_only_session_counts_as_s7comm PROPERTIES
   PASS_REGULAR_EXPRESSION "\"server_port\": 102,[^}]*\"client_zone\": \"hmi_zone\",[^}]*\"server_zone\": \"plc_zone\",[^}]*\"protocols\": \\[\"s7comm\"\\][^}]*\"verdict\": \"allowed\"")
 
 # Policy file validation errors -- each tests/policies/bad_*.yaml fixture exercises one specific
 # rejection (see that file's own header comment for exactly what it's testing).
 add_test(NAME policy_error_missing_zones
-  COMMAND conduitscope policy validate --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_missing_zones.yaml")
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_missing_zones.yaml")
 set_tests_properties(policy_error_missing_zones PROPERTIES
   PASS_REGULAR_EXPRESSION "missing required top-level 'zones' key")
 
 add_test(NAME policy_error_bad_cidr
-  COMMAND conduitscope policy validate --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_cidr.yaml")
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_cidr.yaml")
 set_tests_properties(policy_error_bad_cidr PROPERTIES
   PASS_REGULAR_EXPRESSION "is not a valid IPv4 address or CIDR block")
 
 add_test(NAME policy_error_unknown_zone_reference
-  COMMAND conduitscope policy validate --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_unknown_zone.yaml")
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_unknown_zone.yaml")
 set_tests_properties(policy_error_unknown_zone_reference PROPERTIES
   PASS_REGULAR_EXPRESSION "'to' zone 'z2' is not declared in 'zones'")
 
 add_test(NAME policy_error_overlapping_zones
-  COMMAND conduitscope policy validate --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_overlap.yaml")
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_overlap.yaml")
 set_tests_properties(policy_error_overlapping_zones PROPERTIES
   PASS_REGULAR_EXPRESSION "overlap -- each address must belong to at most one zone")
 
 add_test(NAME policy_error_bad_port
-  COMMAND conduitscope policy validate --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_port.yaml")
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_port.yaml")
 set_tests_properties(policy_error_bad_port PROPERTIES
   PASS_REGULAR_EXPRESSION "is not a valid TCP port")
 
 add_test(NAME policy_error_reserved_zone_name
-  COMMAND conduitscope policy validate --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_reserved_zone_name.yaml")
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_reserved_zone_name.yaml")
 set_tests_properties(policy_error_reserved_zone_name PROPERTIES
   PASS_REGULAR_EXPRESSION "'unclassified' is a reserved zone name")
 
 add_test(NAME policy_error_duplicate_zone_name
-  COMMAND conduitscope policy validate --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_duplicate_zone.yaml")
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_duplicate_zone.yaml")
 set_tests_properties(policy_error_duplicate_zone_name PROPERTIES
   PASS_REGULAR_EXPRESSION "duplicate key 'z1'")
 
 add_test(NAME policy_error_duplicate_conduit_name
-  COMMAND conduitscope policy validate --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_duplicate_conduit.yaml")
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_duplicate_conduit.yaml")
 set_tests_properties(policy_error_duplicate_conduit_name PROPERTIES
   PASS_REGULAR_EXPRESSION "duplicate conduit name 'c1'")
 
 add_test(NAME policy_error_empty_conduits
-  COMMAND conduitscope policy validate --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_empty_conduits.yaml")
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_empty_conduits.yaml")
 set_tests_properties(policy_error_empty_conduits PROPERTIES
   PASS_REGULAR_EXPRESSION "'conduits' must declare at least one conduit")
 
 add_test(NAME policy_error_tab_indentation
-  COMMAND conduitscope policy validate --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_tab_indent.yaml")
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_tab_indent.yaml")
 set_tests_properties(policy_error_tab_indentation PROPERTIES
   PASS_REGULAR_EXPRESSION "tab characters are not supported for indentation")
 
 add_test(NAME policy_error_bad_indentation
-  COMMAND conduitscope policy validate --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_indentation.yaml")
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_indentation.yaml")
 set_tests_properties(policy_error_bad_indentation PROPERTIES
   PASS_REGULAR_EXPRESSION "indentation does not match any enclosing block")
 
 add_test(NAME policy_error_flow_mapping_unsupported
-  COMMAND conduitscope policy validate --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_flow_mapping.yaml")
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_flow_mapping.yaml")
 set_tests_properties(policy_error_flow_mapping_unsupported PROPERTIES
   PASS_REGULAR_EXPRESSION "flow mappings \\('\\{\\.\\.\\.\\}'\\) are not supported")
 
 add_test(NAME policy_error_missing_policy_file
-  COMMAND conduitscope policy validate --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${CMAKE_CURRENT_SOURCE_DIR}/tests/policies/does_not_exist.yaml")
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${CMAKE_CURRENT_SOURCE_DIR}/tests/policies/does_not_exist.yaml")
 set_tests_properties(policy_error_missing_policy_file PROPERTIES
   WILL_FAIL TRUE)
 
 add_test(NAME policy_output_to_file
-  COMMAND conduitscope policy validate --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/compliant.yaml" --output "${CMAKE_CURRENT_BINARY_DIR}/policy_report.txt")
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/compliant.yaml" --output "${CMAKE_CURRENT_BINARY_DIR}/policy_report.txt")
 set_tests_properties(policy_output_to_file PROPERTIES
   FAIL_REGULAR_EXPRESSION "COMPLIANT")
 
 # Regression tests for two real bugs found in code review before this feature was first committed
 # (see each fixture's own header comment for the full story).
 add_test(NAME policy_trailing_comma_in_flow_sequence
-  COMMAND conduitscope policy validate --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/trailing_commas.yaml")
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/trailing_commas.yaml")
 set_tests_properties(policy_trailing_comma_in_flow_sequence PROPERTIES
   PASS_REGULAR_EXPRESSION "Result: COMPLIANT.*matched conduit \"trailing commas everywhere\"")
 
 add_test(NAME policy_error_line_number_is_the_zones_own_line
-  COMMAND conduitscope policy validate --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_overlap_after_description.yaml")
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_overlap_after_description.yaml")
 set_tests_properties(policy_error_line_number_is_the_zones_own_line PROPERTIES
   PASS_REGULAR_EXPRESSION "bad_overlap_after_description.yaml:11: zone 'z1' .* and zone 'z2' .* overlap")
 
@@ -945,20 +979,20 @@ set_tests_properties(policy_error_line_number_is_the_zones_own_line PROPERTIES
 add_test(NAME live_capture_requires_exactly_one_source_decode
   COMMAND conduitscope decode)
 set_tests_properties(live_capture_requires_exactly_one_source_decode PROPERTIES
-  PASS_REGULAR_EXPRESSION "needs exactly one of -r/--input.*or -i/--interface")
+  PASS_REGULAR_EXPRESSION "needs exactly one of -r/--read.*or -i/--interface")
 
 add_test(NAME live_capture_input_and_interface_are_mutually_exclusive_decode
-  COMMAND conduitscope decode --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --interface lo)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --interface lo)
 set_tests_properties(live_capture_input_and_interface_are_mutually_exclusive_decode PROPERTIES
   WILL_FAIL TRUE)
 
 add_test(NAME live_capture_requires_exactly_one_source_policy_validate
   COMMAND conduitscope policy validate --policy "${POLICY_DIR}/compliant.yaml")
 set_tests_properties(live_capture_requires_exactly_one_source_policy_validate PROPERTIES
-  PASS_REGULAR_EXPRESSION "needs exactly one of -r/--input.*or -i/--interface")
+  PASS_REGULAR_EXPRESSION "needs exactly one of -r/--read.*or -i/--interface")
 
 add_test(NAME live_capture_input_and_interface_are_mutually_exclusive_policy_validate
-  COMMAND conduitscope policy validate --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --interface lo --policy "${POLICY_DIR}/compliant.yaml")
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --interface lo --policy "${POLICY_DIR}/compliant.yaml")
 set_tests_properties(live_capture_input_and_interface_are_mutually_exclusive_policy_validate PROPERTIES
   WILL_FAIL TRUE)
 

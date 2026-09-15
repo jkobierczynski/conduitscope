@@ -1,7 +1,7 @@
 # conduitscope
 
 `conduitscope` decodes Modbus/TCP, DNP3, and S7comm/COTP (Siemens S7 PLC protocol)
-traffic from offline pcap captures, and checks it against a zone/conduit segmentation
+traffic from offline pcap/pcapng captures, and checks it against a zone/conduit segmentation
 policy. It's an OT/ICS conduit-auditing tool: `decode`/`info` give you reliable
 protocol decoding and a stats view, and `policy validate` maps that decoded traffic
 against an IEC 62443-style zone/conduit model (for NIS2-flavored compliance work) --
@@ -10,11 +10,12 @@ between them, and get back a compliant/non-compliant report naming every flow th
 wasn't explicitly permitted. See [docs/MANUAL.md](docs/MANUAL.md)'s POLICY FILE FORMAT
 section for the schema.
 
-Offline pcap files are still the primary, always-available way in: no libpcap on
-Linux, no Npcap SDK on Windows, no elevated privileges needed to build or run --
+Offline capture files are still the primary, always-available way in: no libpcap
+on Linux, no Npcap SDK on Windows, no elevated privileges needed to build or run --
 just a C++17 compiler and CMake. Capture traffic with whatever's already on your
-system (`tcpdump -w capture.pcap ...`, Wireshark's "save as pcap"), then decode it
-here.
+system (`tcpdump -w capture.pcap ...`, Wireshark/`dumpcap`'s default pcapng output),
+then decode it here -- both classic pcap and pcapng are read transparently,
+auto-detected from the file itself.
 
 Live capture (`-i/--interface`) is also available now, as the one deliberate
 exception to that zero-dependency design: it's an *optional*, build-time-detected
@@ -28,9 +29,10 @@ section.
 
 Groundwork / v0.1.0. What works right now:
 
-- Classic pcap file reading (Ethernet and raw-IP link types; IPv4; TCP, with
-  PDU/frame-level reassembly across TCP segments for Modbus, DNP3 data-link
-  frames, and TPKT/COTP -- see below and docs/MANUAL.md)
+- Classic pcap and pcapng file reading, auto-detected (Ethernet and raw-IP
+  link types; IPv4; TCP, with PDU/frame-level reassembly across TCP segments
+  for Modbus, DNP3 data-link frames, and TPKT/COTP -- see below and
+  docs/MANUAL.md)
 - Full Modbus/TCP decoding for the read (1-4), write-single (5-6), and
   write-multiple (15-16) function code families, plus exception responses.
   Every response also gets authoritative (MBAP transaction-ID + TCP-session,
@@ -208,7 +210,7 @@ python3 tools/make_sample_pcap.py
 build/conduitscope decode -r tests/sample_modbus.pcap
 build/conduitscope decode -r tests/sample_s7comm.pcap --stats
 build/conduitscope decode -r tests/sample_modbus.pcap --format json
-build/conduitscope info -i tests/sample_modbus.pcap
+build/conduitscope info -r tests/sample_modbus.pcap
 
 # Check a capture against a zone/conduit policy (see tests/policies/*.yaml for more examples,
 # and docs/MANUAL.md's POLICY FILE FORMAT section for the schema):

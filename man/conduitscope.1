@@ -1,28 +1,30 @@
 .TH CONDUITSCOPE 1 "2026" "conduitscope 0.1.0" "User Commands"
 .SH NAME
-conduitscope \- decode Modbus/TCP, DNP3, and S7comm/COTP traffic from offline pcap captures
+conduitscope \- decode Modbus/TCP, DNP3, and S7comm/COTP traffic from offline pcap/pcapng captures
 .SH SYNOPSIS
 .B conduitscope
 [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-color\fR] [\fB\-\-log\-file\fR \fIFILE\fR] \fICOMMAND\fR [\fIOPTIONS\fR]
 .SH DESCRIPTION
 .B conduitscope
-reads a classic-format pcap capture file, or optionally a live network
+reads a pcap or pcapng capture file, or optionally a live network
 interface (see \fBLIVE CAPTURE\fR below), and decodes Modbus/TCP, DNP3, and
 S7comm (Siemens S7 PLC protocol, over TPKT/COTP, TCP port 102) traffic found
 inside its TCP streams, and checks decoded traffic against a
 zone-and-conduit segmentation policy (IEC 62443 / NIS2 style work) via
 \fBpolicy validate\fR.
 .PP
-Only classic pcap files are read (what tcpdump writes by default). pcapng is
-not yet supported and is reported with a conversion hint
-(\fBtshark \-F pcap\fR) rather than a generic error.
+Both classic pcap (what tcpdump writes by default) and pcapng (what
+\fBdumpcap\fR/current Wireshark default to) are read transparently --
+auto-detected from the file itself, nothing to specify on the command
+line. See \fBdocs/MANUAL.md\fR's "pcap vs. pcapng" section for exactly
+which pcapng block types are understood.
 .SH COMMANDS
 .TP
 .B decode (\fB\-r\fR \fIFILE\fR | \fB\-i\fR \fIINTERFACE\fR) [\fIOPTIONS\fR]
 Decode a capture (or live interface) and print each recognized packet. See
 \fBOPTIONS (decode)\fR below.
 .TP
-.B info \fB\-i\fR \fIFILE\fR
+.B info \fB\-r\fR \fIFILE\fR
 Print pcap file metadata and a protocol histogram. Offline files only; see
 \fBLIVE CAPTURE\fR for the live equivalent.
 .TP
@@ -43,8 +45,8 @@ Print version and build information, including whether this build has live
 capture support.
 .SH OPTIONS (decode)
 .TP
-.BR \-r ", " \-\-input " " \fIFILE\fR
-Input pcap file. Required unless \fB\-i\fR is given; mutually exclusive with it.
+.BR \-r ", " \-\-read " " \fIFILE\fR
+Input capture file (classic pcap or pcapng, auto-detected). Required unless \fB\-i\fR is given; mutually exclusive with it.
 .TP
 .BR \-i ", " \-\-interface " " \fINAME\fR
 Capture live from this network interface instead of reading a file. Required
@@ -97,8 +99,8 @@ Print an aggregate summary instead of one line per packet. Ignores
 Abort on the first malformed packet instead of warning and continuing.
 .SH OPTIONS (policy validate)
 .TP
-.BR \-r ", " \-\-input " " \fIFILE\fR
-Input pcap file. Required unless \fB\-i\fR is given; mutually exclusive with it.
+.BR \-r ", " \-\-read " " \fIFILE\fR
+Input capture file (classic pcap or pcapng, auto-detected). Required unless \fB\-i\fR is given; mutually exclusive with it.
 .TP
 .BR \-i ", " \-\-interface " " \fINAME\fR
 Check live traffic from this network interface instead of reading a file.
@@ -189,7 +191,11 @@ for \fBpolicy validate\fR while it was still a documented stub.
 \fBpolicy validate\fR only: the capture and policy were both valid, but the
 capture is NON-COMPLIANT (at least one violation and/or unclassified flow).
 .SH LIMITATIONS
-No pcapng support; general TCP stream reassembly is implemented but
+A handful of rare/obsolete pcapng block types (the pre-2000s "Packet Block",
+Interface Statistics Blocks, Name Resolution Blocks, Decryption Secrets
+Blocks, and custom/vendor block types) are skipped rather than decoded --
+no mainstream capture tool writes these, so this essentially never matters
+in practice; general TCP stream reassembly is implemented but
 narrowly scoped: a Modbus PDU, a single DNP3 data-link frame's own
 header/blocks, or a TPKT/COTP frame split across TCP segments IS
 reassembled (per directional TCP flow, using each protocol's own declared
@@ -238,7 +244,7 @@ conduitscope decode \-r capture.pcap
 Get file metadata and a protocol histogram:
 .RS
 .EX
-conduitscope info \-i capture.pcap
+conduitscope info \-r capture.pcap
 .EE
 .RE
 .PP

@@ -14,7 +14,7 @@ conduitscope decode (-r FILE | -i INTERFACE) [-o FILE] [-f text|json|csv] [--pro
                      [--max-packets N] [--stats] [--strict]
                      [--filter BPF] [--duration SECONDS] [--snaplen BYTES] [--no-promiscuous]
 
-conduitscope info -i FILE
+conduitscope info -r FILE
 
 conduitscope interfaces
 
@@ -32,7 +32,7 @@ exception to conduitscope's otherwise zero-dependency design (see BUILDING).
 
 ## DESCRIPTION
 
-conduitscope reads a classic-format pcap capture file -- or, optionally, a
+conduitscope reads a pcap or pcapng capture file -- or, optionally, a
 live network interface (see LIVE CAPTURE below) -- walks each packet's
 Ethernet/IPv4/TCP headers, and attempts to recognize and decode Modbus/TCP,
 DNP3, or S7comm (Siemens S7 PLC protocol, riding on TPKT/COTP) payloads
@@ -78,15 +78,31 @@ option reference, and BUILDING for how CMake finds libpcap/the Npcap SDK.
 
 ### pcap vs. pcapng
 
-conduitscope reads **classic pcap** (the format tcpdump writes by default, and
-what `tshark -F pcap` / Wireshark's "Save As > Wireshark/tcpdump/... - pcap"
-produce). It does **not** yet read **pcapng** (the newer block-structured
-format some tools default to, including recent Wireshark). If you point it at
-a pcapng file it will tell you so explicitly and suggest the conversion:
+conduitscope reads both **classic pcap** (the format tcpdump writes by
+default, and what `tshark -F pcap` / Wireshark's "Save As > ... - pcap"
+produce) and **pcapng** (the newer block-structured format `dumpcap` and
+current Wireshark default to). Which format a given file is gets
+auto-detected from its first four bytes -- there is nothing to specify on
+the command line, and `-r`/`--read` takes either format interchangeably.
 
-```sh
-tshark -F pcap -r capture.pcapng -w capture.pcap
-```
+For pcapng specifically, conduitscope understands the Section Header,
+Interface Description, Enhanced Packet, and Simple Packet blocks -- between
+them, that's every block a mainstream capture tool (dumpcap, Wireshark,
+tshark) actually writes, including a capture that mixes more than one
+interface (each with its own link type, snaplen, and timestamp resolution)
+into a single file, and a file that concatenates more than one capture
+section together. Anything else -- the obsolete "Packet Block" pcapng
+superseded in the mid-2000s, Interface Statistics Blocks, Name Resolution
+Blocks, Decryption Secrets Blocks, or any custom/vendor block type -- is
+skipped rather than decoded, per the pcapng spec's own forward-compatibility
+rule for unrecognized blocks; see LIMITATIONS for what that means in
+practice (in short: it essentially never comes up against a file a current
+tool wrote).
+
+A pcapng file that's corrupt -- a bad byte-order magic, a truncated block, a
+block-length mismatch between a block's start and end -- is reported with a
+specific error naming what's wrong, the same way a truncated classic pcap
+file is.
 
 ## GLOBAL OPTIONS
 
@@ -111,7 +127,7 @@ conduitscope decode (-r FILE | -i INTERFACE) [options]
 
 | Option | Default | Description |
 |---|---|---|
-| `-r, --input FILE` | *(required unless `-i` given)* | Input pcap file. Must exist; must be classic pcap format. Mutually exclusive with `-i`. |
+| `-r, --read FILE` | *(required unless `-i` given)* | Input capture file. Must exist; classic pcap or pcapng, auto-detected. Mutually exclusive with `-i`. |
 | `-i, --interface NAME` | *(required unless `-r` given)* | Capture live from this network interface instead of reading a file -- see LIVE CAPTURE below and `conduitscope interfaces`. Requires libpcap/Npcap support to have been built in. Mutually exclusive with `-r`. |
 | `--filter BPF` | *(none)* | BPF capture filter (tcpdump syntax, e.g. `"port 502 or port 102"`). Only meaningful with `-i`. |
 | `--duration SECONDS` | `0` (unlimited) | Stop a live capture (`-i`) after this many seconds. `0` means rely on `--max-packets` and/or Ctrl+C instead. |
@@ -130,12 +146,12 @@ conduitscope decode (-r FILE | -i INTERFACE) [options]
 ### `info` -- print pcap file metadata and a protocol histogram
 
 ```
-conduitscope info -i FILE
+conduitscope info -r FILE
 ```
 
 | Option | Default | Description |
 |---|---|---|
-| `-i, --input FILE` | *(required)* | Input pcap file. |
+| `-r, --read FILE` | *(required)* | Input capture file. Classic pcap or pcapng, auto-detected. |
 
 Prints the pcap format version, link type, snaplen, timestamp resolution, and
 then the same protocol/function-code histogram as `decode --stats`, without
@@ -166,7 +182,7 @@ conduitscope policy validate (-r FILE | -i INTERFACE) --policy POLICY_FILE [opti
 
 | Option | Default | Description |
 |---|---|---|
-| `-r, --input FILE` | *(required unless `-i` given)* | Input pcap file. Must exist; must be classic pcap format. Mutually exclusive with `-i`. |
+| `-r, --read FILE` | *(required unless `-i` given)* | Input capture file. Must exist; classic pcap or pcapng, auto-detected. Mutually exclusive with `-i`. |
 | `-i, --interface NAME` | *(required unless `-r` given)* | Check live traffic from this network interface instead of reading a file -- see LIVE CAPTURE below. Requires libpcap/Npcap support to have been built in. Mutually exclusive with `-r`. There's no `--max-packets` here (matching this command's offline-file surface, which never had one either); a live run relies on `--duration` and/or Ctrl+C to stop. |
 | `--filter BPF` | *(none)* | BPF capture filter (tcpdump syntax). Only meaningful with `-i`. |
 | `--duration SECONDS` | `0` (unlimited) | Stop a live capture (`-i`) after this many seconds; `0` means rely on Ctrl+C instead. |
@@ -916,7 +932,15 @@ clamp to in that case.)
 
 These are current, not aspirational -- each has a corresponding ROADMAP item.
 
-- **pcapng is not supported.** Convert with `tshark -F pcap -r in.pcapng -w out.pcap`.
+- **A handful of rare/obsolete pcapng block types are skipped, not decoded.**
+  Specifically the obsolete "Packet Block" (superseded by the Enhanced Packet
+  Block industry-wide in the mid-2000s), Interface Statistics Blocks, Name
+  Resolution Blocks, Decryption Secrets Blocks, and any custom/vendor block
+  type. No packets are lost from a file written by any mainstream capture
+  tool (dumpcap, Wireshark, tshark all use the Enhanced Packet Block); this
+  only matters for a file from an unusual/legacy writer, and even then only
+  means `conduitscope info`'s packet count would read lower than an external
+  tool's for that specific file. See "pcap vs. pcapng" above.
 - **General TCP stream reassembly is implemented, but narrowly scoped.**
   `Decoder::reassemble_tcp_payload` (`decoder.hpp`/`decoder.cpp`) buffers a
   single Modbus MBAP message, DNP3 data-link frame, or TPKT/COTP frame's own
@@ -1133,7 +1157,7 @@ These are current, not aspirational -- each has a corresponding ROADMAP item.
 | Code | Meaning |
 |---|---|
 | 0 | Success. For `policy validate`: the capture is COMPLIANT (every observed flow was explicitly allowed by a conduit). |
-| 1 | A fatal error occurred -- bad arguments, the input file could not be opened, the file is not a recognized pcap (including the pcapng case), (with `--strict`) a packet failed to parse, or (for `policy validate`) the policy file couldn't be opened or failed validation (see POLICY FILE FORMAT's "Validation errors"). |
+| 1 | A fatal error occurred -- bad arguments, the input file could not be opened, the file is not a recognized capture format (classic pcap or pcapng) or is corrupt, (with `--strict`) a packet failed to parse, or (for `policy validate`) the policy file couldn't be opened or failed validation (see POLICY FILE FORMAT's "Validation errors"). |
 | 2 | *(currently unused)* Reserved rather than reused: an earlier groundwork release used this for `policy validate` while it was still a documented stub with no evaluation engine behind it. Nothing returns it now that `policy validate` is fully implemented, but the value is left unclaimed in case a future documented-stub command needs it again. |
 | 3 | `policy validate` only: the capture and policy file were both readable and valid, but the capture is NON-COMPLIANT -- `PolicyReport::compliant()` is false (at least one violation and/or unclassified flow was found). Distinct from 1 specifically so a script can tell "ran fine, found problems" apart from "couldn't even run". |
 
@@ -1155,7 +1179,7 @@ Get just the aggregate picture of what's in a large capture before deciding
 how to filter it:
 
 ```sh
-conduitscope info -i capture.pcap
+conduitscope info -r capture.pcap
 ```
 
 Pull out only the Modbus exception responses, as JSON, using `jq`:
@@ -1252,33 +1276,33 @@ Rough order, each building on the groundwork this release establishes:
 1. **Validate live capture against a real Windows/Npcap install and a real
    OT/mirrored-switch-port network**, not just Linux loopback -- see LIVE
    CAPTURE's "Windows / Npcap notes" and LIMITATIONS.
-2. **pcapng support**, now a more concrete need given live capture exists:
-   `dumpcap`/current Wireshark default to pcapng, so a capture taken on one
-   machine and decoded offline on another may need conversion first (see
-   "pcap vs. pcapng" above) even though a *live* capture through
-   conduitscope itself never hits that format question at all.
-3. Colorized text output (the `--no-color` flag is already reserved for this).
-4. **Confirm or replace the EXPERIMENTAL `0xB2` (S7-1200/1500 "symbolic"
+2. Colorized text output (the `--no-color` flag is already reserved for this).
+3. **Confirm or replace the EXPERIMENTAL `0xB2` (S7-1200/1500 "symbolic"
    addressing) decode** against a source with real authority -- a PLC or
    TIA Portal project under your own control, ideally, rather than more
    public reverse-engineering writeups -- and extend it to the shapes it
    currently falls back to raw hex on: DB-area items, and items with more
    than one LID entry (structured/nested symbol access). Promote it out of
    [EXPERIMENTAL] once confirmed.
-5. S7comm-Plus decoding, and PLC Control/Stop parameter decoding (these
+4. S7comm-Plus decoding, and PLC Control/Stop parameter decoding (these
    send commands that change PLC run state -- high security relevance).
-6. **DNP3 CRC validation** (both the header CRC and the per-block CRCs), so a
+5. **DNP3 CRC validation** (both the header CRC and the per-block CRCs), so a
    corrupted frame that still starts with the right magic bytes is flagged
    rather than silently "decoded".
-7. **DNP3 absolute-time rendering as a calendar date** (currently a raw
+6. **DNP3 absolute-time rendering as a calendar date** (currently a raw
    milliseconds-since-epoch count -- see LIMITATIONS), and value decoding for
    the group/variation combinations still outside the point-format table
    (double-precision Analog Input Event variants, Octet String, File
    Control, Analog Input Reporting Deadband).
-8. **A policy `from`/`to` zone list wider than two endpoints per conduit**
+7. **A policy `from`/`to` zone list wider than two endpoints per conduit**
    (e.g. "any of these three zones may reach this one"), if real policy
    files turn out to want that instead of one conduit per zone pair -- kept
    off the schema for now rather than guessed at ahead of a real use case.
+
+**pcapng support** is also now done: both classic pcap and pcapng are read
+transparently (auto-detected, no flag needed) -- see "pcap vs. pcapng"
+above and LIMITATIONS for the small set of rare/obsolete pcapng block types
+that are skipped rather than decoded.
 
 All of what was originally tracked here as "general TCP stream reassembly"
 is now done: PDU/frame-level reassembly across TCP segments

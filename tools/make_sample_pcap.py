@@ -19,6 +19,69 @@ TESTS_DIR = ROOT / "tests"
 
 PCAP_MAGIC_LE_MICROSECOND = 0xA1B2C3D4
 LINKTYPE_ETHERNET = 1
+LINKTYPE_RAW = 101
+
+# --- pcapng block builders -------------------------------------------------------------
+# Minimal, little-endian-only (conduitscope's pcapng reader handles both byte orders, but
+# there is no need to exercise that here -- the LE/BE bootstrap logic itself lives entirely
+# in pcap_reader.cpp and isn't sensitive to which order a given *test* file happens to use).
+PCAPNG_BYTE_ORDER_MAGIC = 0x1A2B3C4D
+PCAPNG_SHB_TYPE = 0x0A0D0D0A
+PCAPNG_IDB_TYPE = 0x00000001
+PCAPNG_SPB_TYPE = 0x00000003
+PCAPNG_EPB_TYPE = 0x00000006
+
+
+def pcapng_block(block_type: int, body: bytes) -> bytes:
+    """Wraps `body` in a pcapng block: Block Type, Block Total Length, the (4-byte-padded)
+    body, then Block Total Length again."""
+    pad = (-len(body)) % 4
+    padded = body + b"\x00" * pad
+    total_length = 12 + len(padded)
+    return struct.pack("<II", block_type, total_length) + padded + struct.pack("<I", total_length)
+
+
+def pcapng_option(code: int, value: bytes) -> bytes:
+    pad = (-len(value)) % 4
+    return struct.pack("<HH", code, len(value)) + value + b"\x00" * pad
+
+
+def pcapng_shb() -> bytes:
+    # Byte-Order Magic, major version 1, minor version 0, section length -1 (unknown/don't care).
+    body = struct.pack("<IHHq", PCAPNG_BYTE_ORDER_MAGIC, 1, 0, -1)
+    return pcapng_block(PCAPNG_SHB_TYPE, body)
+
+
+def pcapng_idb(linktype=LINKTYPE_ETHERNET, snaplen=262144, tsresol=None) -> bytes:
+    """`tsresol`, if given, is the raw if_tsresol option byte: 6 (the default, so normally
+    omitted) means microsecond resolution, 9 means nanosecond."""
+    body = struct.pack("<HHI", linktype, 0, snaplen)
+    if tsresol is not None:
+        body += pcapng_option(9, bytes([tsresol]))
+    body += pcapng_option(0, b"")  # opt_endofopt
+    return pcapng_block(PCAPNG_IDB_TYPE, body)
+
+
+def pcapng_epb(interface_id: int, ts_ticks: int, payload: bytes, orig_len=None) -> bytes:
+    """`ts_ticks` is the full 64-bit timestamp in units of the owning interface's declared
+    resolution (e.g. microseconds since the epoch at the default resolution) -- not seconds
+    and not split into a sec/frac pair the way classic pcap and Enhanced Packet Block's own
+    ts_high/ts_low split might suggest; the split here is purely how the 64-bit value is laid
+    out on the wire, not a sec/frac semantic split."""
+    if orig_len is None:
+        orig_len = len(payload)
+    ts_high = (ts_ticks >> 32) & 0xFFFFFFFF
+    ts_low = ts_ticks & 0xFFFFFFFF
+    body = struct.pack("<IIIII", interface_id, ts_high, ts_low, len(payload), orig_len) + payload
+    return pcapng_block(PCAPNG_EPB_TYPE, body)
+
+
+def pcapng_spb(payload: bytes, orig_len=None) -> bytes:
+    """Simple Packet Block: always implicitly interface 0, no timestamp."""
+    if orig_len is None:
+        orig_len = len(payload)
+    body = struct.pack("<I", orig_len) + payload
+    return pcapng_block(PCAPNG_SPB_TYPE, body)
 
 
 def pcap_global_header(linktype=LINKTYPE_ETHERNET, snaplen=262144):
@@ -827,12 +890,98 @@ def build_padded_ack_sample():
     (TESTS_DIR / "sample_padded_ack.pcap").write_bytes(data)
 
 
-def build_not_a_pcap():
-    # First 4 bytes are the byte-order-independent pcapng Section Header
-    # Block magic (0A 0D 0D 0A); the rest just needs to pad the file out to
-    # conduitscope's 24-byte global-header read so the pcapng-specific error
-    # message path is exercised rather than a generic "too short" error.
-    (TESTS_DIR / "not_a_pcap.pcapng").write_bytes(bytes([0x0A, 0x0D, 0x0D, 0x0A]) + b"\x00" * 28)
+def build_pcapng_malformed():
+    # First 4 bytes are the byte-order-independent pcapng Section Header Block magic
+    # (0A 0D 0D 0A), which conduitscope's reader correctly recognizes as pcapng; the next 8
+    # bytes (Block Total Length + what should be the Byte-Order Magic field) are left zeroed,
+    # which is not a valid byte-order magic in either endianness. This exercises the "this is
+    # pcapng, but it's corrupt" error path specifically -- distinct from "not a capture file
+    # at all" -- since a zeroed Byte-Order Magic is the first thing that can go wrong while
+    # parsing a real pcapng file.
+    (TESTS_DIR / "pcapng_bad_byte_order.pcapng").write_bytes(bytes([0x0A, 0x0D, 0x0D, 0x0A]) + b"\x00" * 28)
+
+
+def build_pcapng_basic_sample():
+    """Same three Modbus/TCP packets as build_modbus_sample(), wrapped in pcapng blocks
+    (one Section Header Block, one Interface Description Block, three Enhanced Packet
+    Blocks) instead of a classic pcap global header + records. Exercises the ordinary,
+    by-far-most-common pcapng shape (what dumpcap/Wireshark/tshark write by default today)."""
+    mb_req = struct.pack("!HHHBB HH", 1, 0, 6, 1, 3, 0, 10)
+    tcp_req = tcp_header(51000, 502, 1000, 2000, TCP_PSH | TCP_ACK, len(mb_req)) + mb_req
+    ip_req = ipv4_header(HMI_IP, PLC_IP, 6, len(tcp_req), 0x1000) + tcp_req
+    eth_req = eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip_req
+
+    reg_data = b"".join(struct.pack("!H", v) for v in range(10))
+    mb_resp = struct.pack("!HHHBBB", 1, 0, 2 + 1 + len(reg_data), 1, 3, len(reg_data)) + reg_data
+    tcp_resp = tcp_header(502, 51000, 2000, 1000 + len(mb_req), TCP_PSH | TCP_ACK, len(mb_resp)) + mb_resp
+    ip_resp = ipv4_header(PLC_IP, HMI_IP, 6, len(tcp_resp), 0x1001) + tcp_resp
+    eth_resp = eth_header(HMI_MAC, PLC_MAC, 0x0800) + ip_resp
+
+    mb_exc = struct.pack("!HHHBBB", 2, 0, 3, 1, 0x83, 0x02)
+    tcp_exc = tcp_header(502, 51000, 3000, 1000, TCP_PSH | TCP_ACK, len(mb_exc)) + mb_exc
+    ip_exc = ipv4_header(PLC_IP, HMI_IP, 6, len(tcp_exc), 0x1002) + tcp_exc
+    eth_exc = eth_header(HMI_MAC, PLC_MAC, 0x0800) + ip_exc
+
+    packets = [eth_req, eth_resp, eth_exc]
+    data = pcapng_shb() + pcapng_idb()
+    for i, pkt in enumerate(packets):
+        ts_ticks = (1_700_000_000 + i) * 1_000_000  # microsecond ticks, matching the IDB's default resolution
+        data += pcapng_epb(0, ts_ticks, pkt)
+    (TESTS_DIR / "sample_modbus.pcapng").write_bytes(data)
+
+
+def build_pcapng_nanosecond_sample():
+    """A single interface declared with if_tsresol=9 (nanosecond resolution) and one packet,
+    to exercise pcapng's per-interface timestamp resolution (something classic pcap's single
+    global header can't express at all -- it picks one resolution for the whole file via its
+    magic number)."""
+    mb_req = struct.pack("!HHHBB HH", 1, 0, 6, 1, 3, 0, 10)
+    tcp_req = tcp_header(51000, 502, 1000, 2000, TCP_PSH | TCP_ACK, len(mb_req)) + mb_req
+    ip_req = ipv4_header(HMI_IP, PLC_IP, 6, len(tcp_req), 0x1000) + tcp_req
+    eth_req = eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip_req
+
+    ts_ticks = 1_700_000_000 * 1_000_000_000 + 123_456_789  # whole seconds + a distinctive nanosecond remainder
+    data = pcapng_shb() + pcapng_idb(tsresol=9) + pcapng_epb(0, ts_ticks, eth_req)
+    (TESTS_DIR / "sample_pcapng_nanosecond.pcapng").write_bytes(data)
+
+
+def build_pcapng_multi_interface_sample():
+    """Two Interface Description Blocks (interface 0: Ethernet; interface 1: raw IP, no
+    link-layer header) each with one packet referencing it, to prove per-packet/
+    per-interface link type is honored -- a pcapng-only capability (classic pcap has exactly
+    one link type for the whole file) that a capture merging two differently-configured NICs
+    into one file (e.g. dumpcap capturing on both an Ethernet uplink and a raw tunnel
+    interface at once) would actually need."""
+    mb_req = struct.pack("!HHHBB HH", 1, 0, 6, 1, 3, 0, 10)
+    tcp_req = tcp_header(51000, 502, 1000, 2000, TCP_PSH | TCP_ACK, len(mb_req)) + mb_req
+    ip_req = ipv4_header(HMI_IP, PLC_IP, 6, len(tcp_req), 0x1000) + tcp_req
+    eth_pkt = eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip_req  # interface 0: needs an Ethernet header stripped first
+
+    mb_req2 = struct.pack("!HHHBB HH", 2, 0, 6, 1, 3, 0, 4)
+    tcp_req2 = tcp_header(51100, 502, 5000, 6000, TCP_PSH | TCP_ACK, len(mb_req2)) + mb_req2
+    raw_ip_pkt = ipv4_header(HMI_IP, PLC_IP, 6, len(tcp_req2), 0x2000) + tcp_req2  # interface 1: IP header comes first, no Ethernet framing
+
+    data = (
+        pcapng_shb()
+        + pcapng_idb(linktype=LINKTYPE_ETHERNET)
+        + pcapng_idb(linktype=LINKTYPE_RAW, snaplen=65535)
+        + pcapng_epb(0, 1_700_000_500 * 1_000_000, eth_pkt)
+        + pcapng_epb(1, 1_700_000_501 * 1_000_000, raw_ip_pkt)
+    )
+    (TESTS_DIR / "sample_pcapng_multi_interface.pcapng").write_bytes(data)
+
+
+def build_pcapng_simple_packet_block_sample():
+    """A Simple Packet Block -- the minimal, timestamp-less, always-interface-0 packet
+    record a handful of lightweight/embedded pcapng writers use instead of the Enhanced
+    Packet Block every mainstream tool (dumpcap, Wireshark, tshark) actually writes."""
+    mb_req = struct.pack("!HHHBB HH", 1, 0, 6, 1, 3, 0, 10)
+    tcp_req = tcp_header(51000, 502, 1000, 2000, TCP_PSH | TCP_ACK, len(mb_req)) + mb_req
+    ip_req = ipv4_header(HMI_IP, PLC_IP, 6, len(tcp_req), 0x1000) + tcp_req
+    eth_req = eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip_req
+
+    data = pcapng_shb() + pcapng_idb() + pcapng_spb(eth_req)
+    (TESTS_DIR / "sample_pcapng_simple_packet_block.pcapng").write_bytes(data)
 
 
 if __name__ == "__main__":
@@ -848,5 +997,9 @@ if __name__ == "__main__":
     build_policy_engine_sample()
     build_tcp_reassembly_sample()
     build_padded_ack_sample()
-    build_not_a_pcap()
+    build_pcapng_malformed()
+    build_pcapng_basic_sample()
+    build_pcapng_nanosecond_sample()
+    build_pcapng_multi_interface_sample()
+    build_pcapng_simple_packet_block_sample()
     print("wrote sample fixtures to", TESTS_DIR)

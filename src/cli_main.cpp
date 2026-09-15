@@ -397,8 +397,8 @@ int main(int argc, char** argv) {
     bool decode_stats = false, decode_strict = false;
 
     auto* decode_input_opt =
-        decode_cmd->add_option("-r,--input", decode_input,
-                                "Input pcap file (classic pcap; pcapng is not yet supported)")
+        decode_cmd->add_option("-r,--read", decode_input,
+                                "Input capture file (classic pcap or pcapng, auto-detected)")
             ->check(CLI::ExistingFile);
     auto* decode_interface_opt = decode_cmd->add_option(
         "-i,--interface", decode_interface,
@@ -451,7 +451,9 @@ int main(int argc, char** argv) {
     auto* info_cmd = app.add_subcommand(
         "info", "Print pcap file metadata and a protocol histogram, without full per-packet output");
     std::string info_input;
-    info_cmd->add_option("-i,--input", info_input, "Input pcap file")->required()->check(CLI::ExistingFile);
+    info_cmd->add_option("-r,--read", info_input, "Input capture file (classic pcap or pcapng, auto-detected)")
+        ->required()
+        ->check(CLI::ExistingFile);
 
     // --- interfaces -----------------------------------------------------------
     auto* interfaces_cmd = app.add_subcommand(
@@ -470,7 +472,8 @@ int main(int argc, char** argv) {
     std::string policy_format = "text";
     bool policy_strict = false;
     auto* policy_input_opt =
-        policy_validate_cmd->add_option("-r,--input", policy_input, "Input pcap file (classic pcap)")
+        policy_validate_cmd->add_option("-r,--read", policy_input,
+                                         "Input capture file (classic pcap or pcapng, auto-detected)")
             ->check(CLI::ExistingFile);
     auto* policy_interface_opt = policy_validate_cmd->add_option(
         "-i,--interface", policy_interface,
@@ -515,12 +518,12 @@ int main(int argc, char** argv) {
     // built-in "exactly one of these two plain options" validator, so it's checked by hand here,
     // once parsing has otherwise succeeded, with a message that names both flags.
     if (decode_cmd->parsed() && decode_input.empty() == decode_interface.empty()) {
-        std::cerr << "error: 'decode' needs exactly one of -r/--input (an offline pcap file) or "
+        std::cerr << "error: 'decode' needs exactly one of -r/--read (an offline capture file) or "
                      "-i/--interface (a live capture interface)\n";
         return 1;
     }
     if (policy_validate_cmd->parsed() && policy_input.empty() == policy_interface.empty()) {
-        std::cerr << "error: 'policy validate' needs exactly one of -r/--input (an offline pcap "
+        std::cerr << "error: 'policy validate' needs exactly one of -r/--read (an offline capture "
                      "file) or -i/--interface (a live capture interface)\n";
         return 1;
     }
