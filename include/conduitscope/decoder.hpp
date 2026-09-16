@@ -19,6 +19,7 @@
 #include "conduitscope/goose.hpp"
 #include "conduitscope/hartip.hpp"
 #include "conduitscope/iec104.hpp"
+#include "conduitscope/mms.hpp"
 #include "conduitscope/modbus.hpp"
 #include "conduitscope/opcua.hpp"
 #include "conduitscope/pcap_reader.hpp"
@@ -42,6 +43,7 @@ enum class ProtocolFilter {
     BacnetOnly,   // only attempt BACnet/IP (BVLC/NPDU/APDU) decoding
     HartIpOnly,   // only attempt HART-IP (session control / tunneled Pass-Through) decoding
     OpcUaOnly,    // only attempt OPC UA (UA-TCP / Secure Conversation) decoding
+    MmsOnly,      // only attempt TPKT/COTP/IEC 61850 MMS decoding
 };
 
 struct DecodeOptions {
@@ -445,6 +447,52 @@ struct DecodedPacket {
     bool opcua_body_shown_as_hex = false;
     std::string opcua_body_hex;
     size_t opcua_body_length = 0;
+
+    // Only set when protocol == "mms" -- see try_parse_mms in mms.hpp. MMS rides the exact same
+    // TCP port 102 / TPKT+COTP transport as S7comm (see s7comm.hpp/cotp.hpp) -- S7comm's own
+    // single-byte protocol-id gate is always tried first, so this decoder is only ever reached
+    // once that has already failed (see decoder.cpp's own dispatch-order comment). Fields below
+    // mirror MmsFrame field-for-field; see mms.hpp for the full four-layer (Session/Presentation/
+    // ACSE/MMS) byte layout and decode scope of each.
+    bool mms_is_bare = false;
+    uint8_t mms_session_spdu_type = 0;
+    std::string mms_session_pdu_name;
+
+    bool mms_has_presentation = false;
+    std::vector<std::string> mms_presentation_context_list;
+    uint32_t mms_presentation_context_id = 0;
+    bool mms_presentation_context_is_acse = false;
+
+    bool mms_has_acse = false;
+    std::string mms_acse_pdu_name;
+    std::string mms_acse_application_context_name;
+    bool mms_acse_has_result = false;
+    std::string mms_acse_result_name;
+    std::vector<std::string> mms_acse_values;
+
+    bool mms_has_pdu = false;
+    std::string mms_pdu_name;
+
+    bool mms_has_invoke_id = false;
+    uint32_t mms_invoke_id = 0;
+
+    bool mms_service_recognized = false;
+    std::string mms_service_name;
+    bool mms_service_body_decoded = false;
+
+    bool mms_is_response = false;
+
+    bool mms_has_error = false;
+    std::string mms_error_name;
+
+    // Tier 1 service-specific decoded fields (and Initiate's own capability negotiation, and
+    // InformationReport's own variable+value list, and ServiceError/RejectPDU detail) --
+    // mirrors opcua_values'/hartip_values' scheme.
+    std::vector<std::string> mms_values;
+
+    bool mms_body_shown_as_hex = false;
+    std::string mms_body_hex;
+    size_t mms_body_length = 0;
 };
 
 // Cross-packet DNP3 fragment-reassembly state for one directional TCP flow (src ip:port -> dst

@@ -66,6 +66,7 @@ constexpr const char* kBrightYellow = "\033[93m";
 constexpr const char* kBrightBlue = "\033[94m";
 constexpr const char* kBrightWhite = "\033[97m";
 constexpr const char* kBrightRed = "\033[91m";
+constexpr const char* kBoldBlue = "\033[1;34m";
 
 // Color for a packet's "[protocol]" tag -- picked so a mixed-protocol capture scans quickly by
 // eye, not for any deeper meaning. parse-error is the one exception: it gets the same "something
@@ -85,6 +86,9 @@ const char* protocol_tag_color(const std::string& protocol) {
     if (protocol == "bacnet") return kBrightBlue;
     if (protocol == "hartip") return kBrightWhite;
     if (protocol == "opcua") return kBrightRed;
+    if (protocol == "mms") return kBoldBlue;  // deliberately close to s7comm's plain blue -- they
+                                                // share the same TPKT/COTP transport/port, bold
+                                                // distinguishes MMS at a glance
     if (protocol == "parse-error") return kBoldRed;
     return kDim;  // tcp / udp / non-tcp / non-ip / unsupported-link: recognized, nothing OT-specific
 }
@@ -492,6 +496,74 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
             out_ << "    \"opcua_body_hex\": \"" << json_escape(p.opcua_body_hex) << "\",\n";
         }
     }
+    if (p.protocol == "mms") {
+        out_ << "    \"mms_is_bare\": " << (p.mms_is_bare ? "true" : "false") << ",\n";
+        if (!p.mms_is_bare) {
+            out_ << "    \"mms_session_pdu\": \"" << json_escape(p.mms_session_pdu_name) << "\",\n";
+            out_ << "    \"mms_has_presentation\": " << (p.mms_has_presentation ? "true" : "false") << ",\n";
+            if (p.mms_has_presentation) {
+                if (!p.mms_presentation_context_list.empty()) {
+                    out_ << "    \"mms_presentation_contexts\": [";
+                    for (size_t i = 0; i < p.mms_presentation_context_list.size(); ++i) {
+                        if (i != 0) out_ << ", ";
+                        out_ << "\"" << json_escape(p.mms_presentation_context_list[i]) << "\"";
+                    }
+                    out_ << "],\n";
+                }
+                out_ << "    \"mms_presentation_context_id\": " << p.mms_presentation_context_id << ",\n";
+                out_ << "    \"mms_presentation_context_is_acse\": "
+                     << (p.mms_presentation_context_is_acse ? "true" : "false") << ",\n";
+            }
+            out_ << "    \"mms_has_acse\": " << (p.mms_has_acse ? "true" : "false") << ",\n";
+            if (p.mms_has_acse) {
+                out_ << "    \"mms_acse_pdu\": \"" << json_escape(p.mms_acse_pdu_name) << "\",\n";
+                if (!p.mms_acse_application_context_name.empty()) {
+                    out_ << "    \"mms_acse_application_context_name\": \""
+                         << json_escape(p.mms_acse_application_context_name) << "\",\n";
+                }
+                if (p.mms_acse_has_result) {
+                    out_ << "    \"mms_acse_result\": \"" << json_escape(p.mms_acse_result_name) << "\",\n";
+                }
+                if (!p.mms_acse_values.empty()) {
+                    out_ << "    \"mms_acse_values\": [";
+                    for (size_t i = 0; i < p.mms_acse_values.size(); ++i) {
+                        if (i != 0) out_ << ", ";
+                        out_ << "\"" << json_escape(p.mms_acse_values[i]) << "\"";
+                    }
+                    out_ << "],\n";
+                }
+            }
+        }
+        out_ << "    \"mms_has_pdu\": " << (p.mms_has_pdu ? "true" : "false") << ",\n";
+        if (p.mms_has_pdu) {
+            out_ << "    \"mms_pdu\": \"" << json_escape(p.mms_pdu_name) << "\",\n";
+            out_ << "    \"mms_is_response\": " << (p.mms_is_response ? "true" : "false") << ",\n";
+            if (p.mms_has_invoke_id) {
+                out_ << "    \"mms_invoke_id\": " << p.mms_invoke_id << ",\n";
+            }
+            out_ << "    \"mms_service_recognized\": " << (p.mms_service_recognized ? "true" : "false")
+                 << ",\n";
+            if (p.mms_service_recognized) {
+                out_ << "    \"mms_service\": \"" << json_escape(p.mms_service_name) << "\",\n";
+            }
+            if (p.mms_has_error) {
+                out_ << "    \"mms_error\": \"" << json_escape(p.mms_error_name) << "\",\n";
+            }
+        }
+        if (!p.mms_values.empty()) {
+            out_ << "    \"mms_values\": [";
+            for (size_t i = 0; i < p.mms_values.size(); ++i) {
+                if (i != 0) out_ << ", ";
+                out_ << "\"" << json_escape(p.mms_values[i]) << "\"";
+            }
+            out_ << "],\n";
+        }
+        out_ << "    \"mms_body_shown_as_hex\": " << (p.mms_body_shown_as_hex ? "true" : "false") << ",\n";
+        if (p.mms_body_shown_as_hex) {
+            out_ << "    \"mms_body_length\": " << p.mms_body_length << ",\n";
+            out_ << "    \"mms_body_hex\": \"" << json_escape(p.mms_body_hex) << "\",\n";
+        }
+    }
     out_ << "    \"notes\": [";
     for (size_t i = 0; i < p.notes.size(); ++i) {
         if (i != 0) out_ << ", ";
@@ -580,6 +652,10 @@ void StatsWriter::write_packet(const DecodedPacket& p) {
         if (p.opcua_service_recognized) {
             opcua_service_counts_[p.opcua_service_name]++;
         }
+    }
+    if (p.protocol == "mms") {
+        if (p.mms_has_pdu) mms_pdu_counts_[p.mms_pdu_name]++;
+        if (p.mms_service_recognized) mms_service_counts_[p.mms_service_name]++;
     }
     if (!has_ts_) {
         first_ts_ = last_ts_ = p.timestamp;
@@ -699,6 +775,18 @@ void StatsWriter::print_summary(std::ostream& out) const {
     if (!opcua_service_counts_.empty()) {
         out << "opcua services:\n";
         for (const auto& [name, count] : opcua_service_counts_) {
+            out << "  " << std::left << std::setw(60) << name << count << "\n";
+        }
+    }
+    if (!mms_pdu_counts_.empty()) {
+        out << "mms pdu types:\n";
+        for (const auto& [name, count] : mms_pdu_counts_) {
+            out << "  " << std::left << std::setw(40) << name << count << "\n";
+        }
+    }
+    if (!mms_service_counts_.empty()) {
+        out << "mms services:\n";
+        for (const auto& [name, count] : mms_service_counts_) {
             out << "  " << std::left << std::setw(60) << name << count << "\n";
         }
     }

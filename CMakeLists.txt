@@ -40,6 +40,7 @@ add_library(conduitscope_core STATIC
   src/opcua.cpp
   src/cotp.cpp
   src/s7comm.cpp
+  src/mms.cpp
   src/decoder.cpp
   src/output.cpp
   src/yaml_mini.cpp
@@ -678,7 +679,7 @@ set_tests_properties(enip_unregister_session_decoded PROPERTIES
 add_test(NAME enip_nop_not_detected
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enip_nop_precedence.pcap" --format text)
 set_tests_properties(enip_nop_not_detected PROPERTIES
-  PASS_REGULAR_EXPRESSION "\\[tcp\\]  TCP payload of 24 byte\\(s\\) on port 52001->44818 did not match OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, COTP/S7comm, or HART-IP")
+  PASS_REGULAR_EXPRESSION "\\[tcp\\]  TCP payload of 24 byte\\(s\\) on port 52001->44818 did not match OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, COTP/S7comm/MMS, or HART-IP")
 
 # --------------------------------------------------------------------------
 # EtherNet/IP CIP I/O (implicit messaging), synthetic (tests/sample_enip_cip_io.pcap): UDP/2222
@@ -2320,6 +2321,246 @@ add_test(NAME real_s7comm_1200sym_response_decoded
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/s7comm/s7comm_1200sym_real_polling.pcap" --format text)
 set_tests_properties(real_s7comm_1200sym_response_decoded PROPERTIES
   PASS_REGULAR_EXPRESSION "value 0: Success = 00")
+
+# --------------------------------------------------------------------------
+# IEC 61850 MMS (ISO 9506) -- synthetic fixture (tools/make_sample_pcap.py's own build_mms_sample,
+# see its docstring for the full scenario list). Session(ISO 8327-1)/Presentation(ISO 8823)/
+# ACSE(ISO 8650-1)/MMS(ISO 9506-2) TLVs are hand-built to match src/mms.cpp's own decode logic --
+# not captured from a real tool -- so these are regression tests for THIS decoder's own encode/
+# decode round trip, not independent validation (see tests/real_captures/mms/ below for that).
+# --------------------------------------------------------------------------
+add_test(NAME mms_does_not_crash
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format json)
+
+add_test(NAME mms_stats_counted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --stats)
+set_tests_properties(mms_stats_counted PROPERTIES
+  PASS_REGULAR_EXPRESSION "packets: +55[^\n]*\n[^\n]*\nprotocols:\n *cotp +7\n *mms +47\n *tcp +1\nmms pdu types:\n *cancel-ErrorPDU +1\n *cancel-RequestPDU +3\n *cancel-ResponsePDU +1\n *conclude-ErrorPDU +1\n *conclude-RequestPDU +4\n *conclude-ResponsePDU +1\n *confirmed-ErrorPDU +1\n *confirmed-RequestPDU +15\n *confirmed-ResponsePDU +16\n *initiate-RequestPDU +1\n *initiate-ResponsePDU +1\n *rejectPDU +1\n *unconfirmed-PDU \\(informationReport\\) +1\nmms services:\n *defineNamedVariableList +2\n *deleteNamedVariableList +2\n *getCapabilityList +3\n *getDomainAttributes +2\n *getNameList +3\n *getNamedVariableListAttributes +2\n *getVariableAccessAttributes +2\n *identify +4\n *informationReport +1\n *read +3\n *status +2\n *takeControl +2\n *write +2")
+
+add_test(NAME mms_association_aarq_aare
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format text)
+set_tests_properties(mms_association_aarq_aare PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[mms\\]  MMS/CONNECT \\(CN\\) AARQ initiate-RequestPDU\n.*\\[mms\\]  MMS/ACCEPT \\(AC\\) AARE \\(accepted\\) initiate-ResponsePDU")
+
+# Presentation context-definition-list (the "1=ACSE / 3=MMS" convention -- see mms.hpp) and the
+# negotiated Initiate parameters, both from the AARQ frame.
+add_test(NAME mms_association_presentation_and_initiate_fields
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format json)
+set_tests_properties(mms_association_presentation_and_initiate_fields PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"summary\": \"MMS/CONNECT \\(CN\\) AARQ initiate-RequestPDU\",.*\"mms_presentation_contexts\": \\[\"context 1 = 2.2.1.0.1 \\(ACSE\\)\", \"context 3 = 1.0.9506.2.3 \\(MMS\\)\"\\],.*\"mms_acse_application_context_name\": \"2.2.1.0.1 \\(ACSE\\)\",.*\"proposedVersionNumber=1\", \"parameterCBB=\\[str1,str2,vnam,valt,tpy,vlis\\]\", \"servicesSupported=\\[status,getNameList,identify,read,write,getVariableAccessAttributes,defineNamedVariableList,getNamedVariableListAttributes,deleteNamedVariableList,getDomainAttributes,getCapabilityList,informationReport\\]")
+
+add_test(NAME mms_read_request_and_response_values
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format json)
+set_tests_properties(mms_read_request_and_response_values PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"mms_values\": \\[\"specificationWithResult=true\", \"variable=IED1Device/GGIO1\\$ST\\$Ind1\\$stVal\"\\],.*\"mms_values\": \\[\"result\\[0\\]=true\"\\],")
+
+add_test(NAME mms_write_request_and_response_values
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format json)
+set_tests_properties(mms_write_request_and_response_values PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"mms_values\": \\[\"variable=IED1Device/GGIO1\\$SP\\$Ind1\\$setVal\", \"value\\[0\\]=false\"\\],.*\"mms_values\": \\[\"result\\[0\\]=success\"\\],")
+
+add_test(NAME mms_getnamelist_values
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format json)
+set_tests_properties(mms_getnamelist_values PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"mms_values\": \\[\"objectScope=domain:IED1Device\"\\],.*\"mms_values\": \\[\"listOfIdentifier=\\[LLN0,GGIO1,MMXU1\\]\", \"moreFollows=false\"\\],")
+
+add_test(NAME mms_identify_response_values
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format json)
+set_tests_properties(mms_identify_response_values PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"mms_values\": \\[\"vendorName=ConduitScope Labs\", \"modelName=Virtual IED\", \"revision=1.0\", \"listOfAbstractSyntaxes=\\[1.0.9506.2.3 \\(MMS\\)\\]\"\\],")
+
+add_test(NAME mms_getvariableaccessattributes_values
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format json)
+set_tests_properties(mms_getvariableaccessattributes_values PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"mms_values\": \\[\"name=IED1Device/GGIO1\\$ST\\$Ind1\\$stVal\"\\],.*\"mms_values\": \\[\"mmsDeletable=false\", \"typeSpecification=<TypeSpecification, not decoded>\"\\],")
+
+# DefineNamedVariableList/GetNamedVariableListAttributes/DeleteNamedVariableList -- also exercises
+# decode_object_name_flexible's own EXPLICIT-vs-natural-tag distinction (see mms.cpp): the request's
+# own variableListName is passed as a bare, natural-tagged ObjectName, while
+# GetNamedVariableListAttributes-Request wraps it EXPLICIT-style -- both must render the same name.
+add_test(NAME mms_definenamedvariablelist_and_response
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format json)
+set_tests_properties(mms_definenamedvariablelist_and_response PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"mms_values\": \\[\"variableListName=MyDataSet1\", \"member\\[0\\]=IED1Device/GGIO1\\$ST\\$Ind1\\$stVal\", \"member\\[1\\]=IED1Device/GGIO1\\$ST\\$Ind2\\$stVal\"\\],.*\"mms_values\": \\[\"result=success\"\\],")
+
+add_test(NAME mms_getnamedvariablelistattributes_response
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format json)
+set_tests_properties(mms_getnamedvariablelistattributes_response PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"mms_values\": \\[\"variableListName=MyDataSet1\"\\],.*\"mms_values\": \\[\"mmsDeletable=true\", \"member\\[0\\]=IED1Device/GGIO1\\$ST\\$Ind1\\$stVal\", \"member\\[1\\]=IED1Device/GGIO1\\$ST\\$Ind2\\$stVal\"\\],")
+
+add_test(NAME mms_deletenamedvariablelist_response
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format json)
+set_tests_properties(mms_deletenamedvariablelist_response PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"mms_values\": \\[\"listOfVariableListName\\[0\\]=MyDataSet1\"\\],.*\"mms_values\": \\[\"numberMatched=1\", \"numberDeleted=1\"\\],")
+
+add_test(NAME mms_getcapabilitylist_response
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format json)
+set_tests_properties(mms_getcapabilitylist_response PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"mms_values\": \\[\"listOfCapabilities=\\[STR1,VNAM,VALT\\]\", \"moreFollows=false\"\\],")
+
+add_test(NAME mms_getdomainattributes_response
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format json)
+set_tests_properties(mms_getdomainattributes_response PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"mms_values\": \\[\"domainName=IED1Device\"\\],.*\"mms_values\": \\[\"listOfCapabilities=\\[STR1\\]\", \"state=2\", \"mmsDeletable=false\", \"sharable=true\"\\],")
+
+# InformationReport -- this decoder's own MMS analog of its GOOSE decoder (see mms.hpp); also
+# exercises Data's own utc-time (tag 17, IEC 61850-8-1 addition) rendering.
+add_test(NAME mms_information_report_values
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format json)
+set_tests_properties(mms_information_report_values PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"summary\": \"MMS/DATA TRANSFER / GIVE TOKENS unconfirmed-PDU \\(informationReport\\) informationReport\",.*\"mms_values\": \\[\"variable=list:MyDataSet1\", \"result\\[0\\]=true\", \"result\\[1\\]=2023-11-14T22:13:20.000Z \\[accuracy=10bit\\]\"\\],")
+
+# Tier1/Tier2 split -- takeControl(19) is a real, named confirmedServiceRequest/Response
+# alternative this decoder recognizes by name but does not further decode (mirrors the real
+# tests/real_captures/mms/mms-takeControl.pcap finding): service_recognized=true, but the body is
+# shown as hex, not structurally decoded.
+add_test(NAME mms_tier2_takecontrol_shown_as_hex
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format json)
+set_tests_properties(mms_tier2_takecontrol_shown_as_hex PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"mms_service\": \"takeControl\",\n *\"mms_body_shown_as_hex\": true,\n *\"mms_body_length\": 12,\n *\"mms_body_hex\": \"800a49454431446576696365\"")
+
+add_test(NAME mms_serviceerror_note
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format text)
+set_tests_properties(mms_serviceerror_note PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[mms\\]  MMS/DATA TRANSFER / GIVE TOKENS confirmed-ErrorPDU invokeID=12 error=resource\\(1\\)\n *note: additionalDescription=variable not found")
+
+add_test(NAME mms_rejectpdu_text
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format text)
+set_tests_properties(mms_rejectpdu_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[mms\\]  MMS/DATA TRANSFER / GIVE TOKENS rejectPDU invokeID=13")
+
+add_test(NAME mms_cancel_request_response_and_error
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format text)
+set_tests_properties(mms_cancel_request_response_and_error PROPERTIES
+  PASS_REGULAR_EXPRESSION "cancel-RequestPDU invokeID=5\n.*cancel-ResponsePDU invokeID=5\n.*cancel-RequestPDU invokeID=99\n.*cancel-ErrorPDU invokeID=99 error=cancel\\(1\\)")
+
+# Malformed/truncated confirmedServiceRequest/Response -- invokeID present, service field missing
+# entirely. Mirrors the real, genuinely truncated frame 18 of
+# tests/real_captures/mms/iec61850_read.pcap (see its own ATTRIBUTION.md).
+add_test(NAME mms_malformed_confirmed_request_and_response_notes
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format text)
+set_tests_properties(mms_malformed_confirmed_request_and_response_notes PROPERTIES
+  PASS_REGULAR_EXPRESSION "confirmed-RequestPDU invokeID=77\n *note: confirmedServiceRequest field missing \\(malformed or truncated PDU\\)\n.*confirmed-ResponsePDU invokeID=78\n *note: confirmedServiceResponse field missing \\(malformed or truncated PDU\\)")
+
+add_test(NAME mms_conclude_request_response_and_error
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format text)
+set_tests_properties(mms_conclude_request_response_and_error PROPERTIES
+  PASS_REGULAR_EXPRESSION "conclude-RequestPDU\n.*conclude-ResponsePDU\n.*conclude-RequestPDU\n.*conclude-ErrorPDU error=conclude\\(2\\)")
+
+# Bare MMS -- no Session/Presentation/ACSE at all (see mms.hpp's own "Bare MMS" section).
+add_test(NAME mms_bare_mms_frames
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format text)
+set_tests_properties(mms_bare_mms_frames PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[mms\\]  MMS \\(bare\\) confirmed-RequestPDU identify invokeID=1\n.*\\[mms\\]  MMS \\(bare\\) confirmed-ResponsePDU identify invokeID=1\n.*\\[mms\\]  MMS \\(bare\\) cancel-RequestPDU invokeID=1\n.*\\[mms\\]  MMS \\(bare\\) conclude-RequestPDU")
+
+# Bare-Presentation ongoing message -- Session omitted entirely (a real shape this decoder's own
+# validation found -- see mms.cpp's looks_like_bare_presentation and its ATTRIBUTION.md citation).
+add_test(NAME mms_bare_presentation_no_session
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format text)
+set_tests_properties(mms_bare_presentation_no_session PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[mms\\]  MMS/\\(no Session layer\\) confirmed-RequestPDU status invokeID=1\n.*\\[mms\\]  MMS/\\(no Session layer\\) confirmed-ResponsePDU status invokeID=1")
+
+# A single TPKT/session/presentation/MMS frame split mid-frame across two raw TCP segments --
+# Decoder::reassemble_tcp_payload (the same general per-flow mechanism
+# sample_tcp_reassembly.pcap's own scenario C exercises for S7comm).
+add_test(NAME mms_tcp_split_reassembly
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format text)
+set_tests_properties(mms_tcp_split_reassembly PROPERTIES
+  PASS_REGULAR_EXPRESSION "buffering a TPKT/COTP PDU/frame split across TCP segments 102->49303.*waiting for more\n.*confirmed-ResponsePDU getCapabilityList invokeID=20\n *note: reassembled a TPKT/COTP PDU/frame from 63 byte\\(s\\) spanning 2 TCP segments on this flow")
+
+add_test(NAME mms_tcp_split_reassembled_result_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format json)
+set_tests_properties(mms_tcp_split_reassembled_result_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"mms_service\": \"getCapabilityList\",.*\"mms_values\": \\[\"listOfCapabilities=\\[STR1,STR2,VNAM,VALT,VADR\\]\", \"moreFollows=false\"\\],")
+
+# One MMS message chained across two COMPLETE TPKT/COTP DT frames via the EOT bit --
+# Decoder::reassemble_cotp_data_frame (mirrors sample_s7comm_chaining.pcap's own scenario A): the
+# split lands mid-way through a GetNameList response's own listOfIdentifier, so it only decodes
+# correctly if both frames are genuinely concatenated.
+add_test(NAME mms_cotp_eot_chaining
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format text)
+set_tests_properties(mms_cotp_eot_chaining PROPERTIES
+  PASS_REGULAR_EXPRESSION "beginning a COTP/S7comm message fragmented across multiple complete TPKT/COTP frames.*40 user-data byte\\(s\\) buffered.*waiting for the final.*\n.*confirmed-ResponsePDU getNameList invokeID=21\n *note: reassembled a COTP/S7comm message from 80 user-data byte\\(s\\) chained across 2 complete TPKT/COTP frames")
+
+add_test(NAME mms_cotp_eot_chained_result_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format json)
+set_tests_properties(mms_cotp_eot_chained_result_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"mms_service\": \"getNameList\",.*\"mms_values\": \\[\"listOfIdentifier=\\[Domain1LLN0,Domain1GGIO1,Domain1MMXU1,Domain1XCBR1\\]\", \"moreFollows=false\"\\],")
+
+# Two complete MMS frames coalesced by the sender/OS into one TCP segment: cotp.cpp's own COTP/
+# TPKT framing decodes only the first, with an honest note about the rest (see its own "possible
+# pipelined TPKT frames" comment) -- this documents that known, already-labeled limitation for MMS
+# specifically, matching what the same coalescing shape already does for every other single-PDU-
+# per-call COTP-based protocol in this codebase.
+add_test(NAME mms_pipelined_tpkt_frames_limitation_note
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format text)
+set_tests_properties(mms_pipelined_tpkt_frames_limitation_note PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[mms\\]  MMS \\(bare\\) conclude-RequestPDU\n *note: 9 additional byte\\(s\\) remain in this TCP segment after this TPKT frame \\(possible pipelined TPKT frames; only the first is decoded in this groundwork release\\)")
+
+# --------------------------------------------------------------------------
+# Real-world IEC 61850 MMS captures -- see tests/real_captures/mms/ATTRIBUTION.md for provenance:
+# three small captures from ITI/ICS-Security-Tools's own IEC61850/MMS pcap set (one full Session/
+# Presentation/ACSE association plus a Read/conclude exchange with two genuinely malformed frames;
+# two entirely-bare-MMS captures, takeControl/relinquishControl and cancelRequest), plus one much
+# larger (224-frame) capture this project generated itself against a real, independent MMS stack
+# (mz-automation/libiec61850) rather than against this decoder's own output -- see ATTRIBUTION.md's
+# own "Independent-stack validation traffic" section. Two genuine structural-gate bugs (the
+# Presentation layer's own fully-encoded-data tag being mistaken for a bogus third SPDU, and
+# looks_like_bare_mms_pdu missing the 3 primitive MMSpdu alternatives) were found and fixed via
+# this validation -- also documented in ATTRIBUTION.md, not just fixed silently.
+# --------------------------------------------------------------------------
+set(MMS_REAL_CAPTURES
+  iec61850_read
+  mms-takeControl
+  mms-cancelRequest
+  libiec61850_loopback_capture
+)
+foreach(capture ${MMS_REAL_CAPTURES})
+  add_test(NAME real_mms_${capture}_does_not_crash
+    COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/mms/${capture}.pcap" --format json)
+endforeach()
+
+add_test(NAME real_mms_iec61850_read_association_and_read
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/mms/iec61850_read.pcap" --format text)
+set_tests_properties(real_mms_iec61850_read_association_and_read PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[mms\\]  MMS/CONNECT \\(CN\\) AARQ initiate-RequestPDU\n.*confirmed-RequestPDU read invokeID=0\n.*confirmed-ResponsePDU read invokeID=0\n.*conclude-RequestPDU")
+
+# Frame 18 is a real, genuinely truncated confirmed-ResponsePDU (invokeID only, 7 bytes total on
+# the wire) -- this decoder degrades to an honest note rather than guessing or crashing (see
+# ATTRIBUTION.md's own "What each real capture actually contains" section).
+add_test(NAME real_mms_iec61850_read_truncated_response_note
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/mms/iec61850_read.pcap" --format text)
+set_tests_properties(real_mms_iec61850_read_truncated_response_note PROPERTIES
+  PASS_REGULAR_EXPRESSION "confirmed-ResponsePDU invokeID=0\n *note: confirmedServiceResponse field missing \\(malformed or truncated PDU\\)")
+
+# Both real bare-MMS captures: entirely bare (no Session/Presentation/ACSE) real traffic, and the
+# specific real fix this decoder's own validation found -- cancel-RequestPDU/conclude-RequestPDU
+# are primitive, not constructed, and looks_like_bare_mms_pdu originally missed them (see
+# ATTRIBUTION.md).
+add_test(NAME real_mms_takecontrol_bare_sequence
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/mms/mms-takeControl.pcap" --format text)
+set_tests_properties(real_mms_takecontrol_bare_sequence PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[mms\\]  MMS \\(bare\\) initiate-RequestPDU\n.*confirmed-RequestPDU takeControl invokeID=1\n.*confirmed-RequestPDU relinquishControl invokeID=1\n.*\\[mms\\]  MMS \\(bare\\) conclude-RequestPDU")
+
+add_test(NAME real_mms_cancelrequest_bare_sequence
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/mms/mms-cancelRequest.pcap" --format text)
+set_tests_properties(real_mms_cancelrequest_bare_sequence PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[mms\\]  MMS \\(bare\\) initiate-RequestPDU\n.*cancel-RequestPDU invokeID=1\n.*\\[mms\\]  MMS \\(bare\\) conclude-RequestPDU")
+
+# Independent-stack validation traffic (mz-automation/libiec61850, 224 frames): 117 recognized as
+# mms, zero parse warnings -- see ATTRIBUTION.md's own "Independent-stack validation traffic"
+# section for the full methodology and the tshark 4.2.2 recursion-depth assertion failure this
+# traffic also found (motivating kMaxDataRecursionDepth).
+add_test(NAME real_mms_libiec61850_loopback_stats
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/mms/libiec61850_loopback_capture.pcap" --stats)
+set_tests_properties(real_mms_libiec61850_loopback_stats PROPERTIES
+  PASS_REGULAR_EXPRESSION "packets: +224[^\n]*\n[^\n]*\nprotocols:\n *cotp +16\n *mms +117\n *tcp +91\nmms pdu types:\n *confirmed-RequestPDU +42\n *confirmed-ResponsePDU +42\n *initiate-RequestPDU +8\n *initiate-ResponsePDU +8\n *unconfirmed-PDU \\(informationReport\\) +17\nmms services:\n *getNameList +6\n *getVariableAccessAttributes +8\n *identify +2\n *informationReport +17\n *read +44\n *write +24")
+
+add_test(NAME real_mms_libiec61850_loopback_no_parse_warnings
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/mms/libiec61850_loopback_capture.pcap" --format json)
+set_tests_properties(real_mms_libiec61850_loopback_no_parse_warnings PROPERTIES
+  FAIL_REGULAR_EXPRESSION "warning:")
+
 
 # --------------------------------------------------------------------------
 # Real-world Modbus/TCP captures -- see tests/real_captures/modbus/ATTRIBUTION.md.

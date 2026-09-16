@@ -2325,6 +2325,782 @@ def build_s7comm_chaining_sample():
     (TESTS_DIR / "sample_s7comm_chaining.pcap").write_bytes(data)
 
 
+# ==================================================================================================
+# IEC 61850 MMS (ISO 9506) fixture helpers -- Session(ISO 8327-1)/Presentation(ISO 8823)/
+# ACSE(ISO 8650-1)/MMS(ISO 9506-2) TLV builders, matching src/mms.cpp's own decode logic field for
+# field (see that file's own header comments for the wire-format citations these mirror). Reuses
+# the generic BER helpers above (ber_length/ber_tlv/ber_int) and the MMS "Data" value builders
+# already defined for GOOSE/SV (data_bool/data_int/... -- MMS's own Data CHOICE, ISO 9506-2, is the
+# exact same encoding IEC 61850-8-1 reuses for GOOSE/SV's own allData).
+# --------------------------------------------------------------------------------------------------
+
+def oid_bytes(dotted: str) -> bytes:
+    """OBJECT IDENTIFIER content octets (X.690 8.19) for a dotted-decimal string."""
+    parts = [int(p) for p in dotted.split(".")]
+    out = bytes([parts[0] * 40 + parts[1]])
+    for value in parts[2:]:
+        if value == 0:
+            out += bytes([0])
+            continue
+        chunks = []
+        v = value
+        while v > 0:
+            chunks.insert(0, v & 0x7F)
+            v >>= 7
+        for i in range(len(chunks) - 1):
+            chunks[i] |= 0x80
+        out += bytes(chunks)
+    return out
+
+
+def ber_tag_bytes(class_bits: int, constructed: bool, tag_number: int) -> bytes:
+    """One BER tag's own octet(s) -- single-byte form for tag_number<=30, the high-tag-number
+    multi-byte form (X.690 8.1.2.4) otherwise. `class_bits` is one of 0x00/0x40/0x80/0xC0
+    (universal/application/context/private)."""
+    first = class_bits | (0x20 if constructed else 0x00)
+    if tag_number <= 30:
+        return bytes([first | tag_number])
+    out = [tag_number & 0x7F]
+    v = tag_number >> 7
+    while v > 0:
+        out.insert(0, (v & 0x7F) | 0x80)
+        v >>= 7
+    return bytes([first | 0x1F]) + bytes(out)
+
+
+def ber_tlv_tag(class_bits: int, constructed: bool, tag_number: int, content: bytes = b"") -> bytes:
+    return ber_tag_bytes(class_bits, constructed, tag_number) + ber_length(len(content)) + content
+
+
+def ctx_c(tag: int, content: bytes = b"") -> bytes: return ber_tlv_tag(0x80, True, tag, content)
+def ctx_p(tag: int, content: bytes = b"") -> bytes: return ber_tlv_tag(0x80, False, tag, content)
+def app_c(tag: int, content: bytes = b"") -> bytes: return ber_tlv_tag(0x40, True, tag, content)
+def app_p(tag: int, content: bytes = b"") -> bytes: return ber_tlv_tag(0x40, False, tag, content)
+def uni_c(tag: int, content: bytes = b"") -> bytes: return ber_tlv_tag(0x00, True, tag, content)
+def uni_p(tag: int, content: bytes = b"") -> bytes: return ber_tlv_tag(0x00, False, tag, content)
+
+# confirmedServiceRequest/Response CHOICE alternative -- same shape as ctx_c/ctx_p, named
+# separately for readability at MMS-layer call sites.
+def svc(tag: int, constructed: bool, content: bytes = b"") -> bytes:
+    return ctx_c(tag, content) if constructed else ctx_p(tag, content)
+
+# Top-level MMSpdu CHOICE alternative -- see mms.cpp's own looks_like_bare_mms_pdu comment for
+# which of the 14 alternatives are constructed (SEQUENCE) vs. primitive (Unsigned32/NULL).
+def mms_pdu(tag: int, constructed: bool, content: bytes = b"") -> bytes:
+    return ctx_c(tag, content) if constructed else ctx_p(tag, content)
+
+
+# ---- ObjectName (mms.cpp's decode_object_name/decode_object_name_flexible) -----------------------
+def object_name_vmd(name: str) -> bytes:
+    return ctx_p(0, name.encode("ascii"))
+
+
+def object_name_domain(domain: str, item: str) -> bytes:
+    # decode_object_name reads the two children's raw content directly regardless of their own
+    # tag -- UNIVERSAL VisibleString (tag 26) used here purely for wire-realism.
+    return ctx_c(1, uni_p(26, domain.encode("ascii")) + uni_p(26, item.encode("ascii")))
+
+
+def object_name_aa(name: str) -> bytes:
+    return ctx_p(2, name.encode("ascii"))
+
+
+# ---- VariableSpecification / VariableAccessSpecification (mms.cpp) --------------------------------
+def var_spec_name(object_name_alt: bytes) -> bytes:
+    return ctx_c(0, object_name_alt)  # name[0], EXPLICIT wrap around the ObjectName alternative
+
+
+def list_of_variable(var_specs) -> bytes:
+    entries = b"".join(uni_c(16, vs) for vs in var_specs)  # each: SEQUENCE{variableSpecification, ...}
+    return ctx_c(0, entries)  # listOfVariable[0]
+
+
+def variable_list_name(object_name_alt: bytes) -> bytes:
+    return ctx_c(1, object_name_alt)  # variableListName[1], EXPLICIT wrap around ObjectName
+
+
+# ---- AccessResult (mms.cpp's decode_access_result) -------------------------------------------------
+def access_result_success(data_bytes: bytes) -> bytes:
+    return data_bytes  # a Data value TLV directly, untagged (e.g. data_bool(...)/data_int(...))
+
+
+def access_result_failure(error_code: int) -> bytes:
+    return ctx_p(0, ber_int(error_code))  # failure[0] DataAccessError
+
+
+def write_result_success() -> bytes:
+    return ctx_p(1, b"")
+
+
+def write_result_failure(error_code: int) -> bytes:
+    return ctx_p(0, ber_int(error_code))
+
+
+# ---- Bit-string content (unused-bit-count byte + MSB-first bits) for parameterCBB/servicesSupported
+def bitstring_content(bit_indexes, num_bits: int) -> bytes:
+    num_bytes = (num_bits + 7) // 8
+    unused = num_bytes * 8 - num_bits
+    buf = bytearray(num_bytes)
+    for b in bit_indexes:
+        buf[b // 8] |= (0x80 >> (b % 8))
+    return bytes([unused]) + bytes(buf)
+
+
+# ---- Tier1 confirmedServiceRequest/Response body builders (mms.cpp's own dispatch table) ----------
+def status_request(toggle: bool) -> bytes:
+    return svc(0, False, b"\x01" if toggle else b"\x00")
+
+
+def status_response(vmd_logical: int, vmd_physical: int) -> bytes:
+    content = ctx_p(0, ber_int(vmd_logical)) + ctx_p(1, ber_int(vmd_physical))
+    return svc(0, True, content)
+
+
+def getnamelist_request(scope_kind: str, scope_domain: str = None, continue_after: str = None) -> bytes:
+    if scope_kind == "vmd":
+        inner = ctx_p(0, b"")
+    elif scope_kind == "domain":
+        inner = ctx_p(1, scope_domain.encode("ascii"))
+    else:
+        inner = ctx_p(2, b"")
+    content = ctx_c(1, inner)  # objectScope[1], EXPLICIT wrap around the ObjectScope CHOICE
+    if continue_after is not None:
+        content += ctx_p(2, continue_after.encode("ascii"))
+    return svc(1, True, content)
+
+
+def getnamelist_response(identifiers, more_follows: bool = False) -> bytes:
+    idlist = b"".join(uni_p(26, s.encode("ascii")) for s in identifiers)
+    content = ctx_c(0, idlist) + ctx_p(1, b"\x01" if more_follows else b"\x00")
+    return svc(1, True, content)
+
+
+def identify_response(vendor: str, model: str, revision: str, abstract_syntaxes=None) -> bytes:
+    content = ctx_p(0, vendor.encode("ascii")) + ctx_p(1, model.encode("ascii")) + ctx_p(2, revision.encode("ascii"))
+    if abstract_syntaxes:
+        oids = b"".join(uni_p(6, oid_bytes(o)) for o in abstract_syntaxes)
+        content += ctx_c(3, oids)
+    return svc(2, True, content)
+
+
+def read_request(spec_with_result: bool, var_access_spec: bytes) -> bytes:
+    content = b""
+    if spec_with_result:
+        content += ctx_p(0, b"\x01")
+    content += ctx_c(1, var_access_spec)  # variableAccessSpecification[1], EXPLICIT wrap
+    return svc(4, True, content)
+
+
+def read_response(results, var_access_spec: bytes = None) -> bytes:
+    content = ctx_c(0, var_access_spec) if var_access_spec is not None else b""
+    content += ctx_c(1, b"".join(results))  # listOfAccessResult[1], IMPLICIT SEQUENCE OF, no extra wrap
+    return svc(4, True, content)
+
+
+def write_request(var_access_spec: bytes, values) -> bytes:
+    content = var_access_spec + uni_c(16, b"".join(values))  # listOfData: SEQUENCE OF Data
+    return svc(5, True, content)
+
+
+def write_response(results) -> bytes:
+    return svc(5, True, b"".join(results))
+
+
+def getvariableaccessattributes_request(object_name_alt: bytes) -> bytes:
+    return svc(6, True, ctx_c(0, object_name_alt))  # name[0], EXPLICIT wrap
+
+
+def getvariableaccessattributes_response(deletable: bool, type_specification_placeholder: bytes = b"\x00") -> bytes:
+    content = ctx_p(0, b"\x01" if deletable else b"\x00") + ctx_c(2, type_specification_placeholder)
+    return svc(6, True, content)
+
+
+def definenamedvariablelist_request(object_name_alt: bytes, members) -> bytes:
+    member_entries = b"".join(uni_c(16, m) for m in members)  # each: SEQUENCE{variableSpecification, ...}
+    content = object_name_alt + uni_c(16, member_entries)
+    return svc(11, True, content)
+
+
+def definenamedvariablelist_response() -> bytes:
+    return svc(11, False, b"")  # DefineNamedVariableList-Response ::= NULL
+
+
+def getnamedvariablelistattributes_request(object_name_alt: bytes) -> bytes:
+    # GetNamedVariableListAttributes-Request ::= ObjectName, IMPLICIT-behaving-as-EXPLICIT over the
+    # CHOICE (see mms.cpp's decode_object_name_flexible header comment) -- content is the single
+    # natural-tagged ObjectName alternative.
+    return svc(12, True, object_name_alt)
+
+
+def getnamedvariablelistattributes_response(deletable: bool, members) -> bytes:
+    member_entries = b"".join(uni_c(16, m) for m in members)
+    content = ctx_p(0, b"\x01" if deletable else b"\x00") + ctx_c(1, member_entries)
+    return svc(12, True, content)
+
+
+def deletenamedvariablelist_request(scope: int = None, names=None, domain_name: str = None) -> bytes:
+    content = b""
+    if scope is not None:
+        content += ctx_p(0, ber_int(scope))
+    if names:
+        content += ctx_c(1, b"".join(names))  # each: a natural-tagged ObjectName alternative directly
+    if domain_name is not None:
+        content += ctx_p(2, domain_name.encode("ascii"))
+    return svc(13, True, content)
+
+
+def deletenamedvariablelist_response(matched: int, deleted: int) -> bytes:
+    content = ctx_p(0, ber_int(matched)) + ctx_p(1, ber_int(deleted))
+    return svc(13, True, content)
+
+
+def getcapabilitylist_request(continue_after: str = None) -> bytes:
+    content = ctx_p(0, continue_after.encode("ascii")) if continue_after is not None else b""
+    return svc(71, True, content)
+
+
+def getcapabilitylist_response(caps, more_follows: bool = False) -> bytes:
+    caplist = b"".join(uni_p(26, c.encode("ascii")) for c in caps)
+    content = ctx_c(0, caplist) + ctx_p(1, b"\x01" if more_follows else b"\x00")
+    return svc(71, True, content)
+
+
+def getdomainattributes_request(domain_name: str) -> bytes:
+    return svc(37, False, domain_name.encode("ascii"))
+
+
+def getdomainattributes_response(caps, state: int, deletable: bool, sharable: bool,
+                                  program_invocations=None, upload_in_progress: int = None) -> bytes:
+    content = ctx_c(0, b"".join(uni_p(26, c.encode("ascii")) for c in caps))
+    content += ctx_p(1, ber_int(state))
+    content += ctx_p(2, b"\x01" if deletable else b"\x00")
+    content += ctx_p(3, b"\x01" if sharable else b"\x00")
+    if program_invocations is not None:
+        content += ctx_c(4, b"".join(uni_p(26, p.encode("ascii")) for p in program_invocations))
+    if upload_in_progress is not None:
+        content += ctx_p(5, ber_int(upload_in_progress))
+    return svc(37, True, content)
+
+
+# ---- confirmed-RequestPDU/ResponsePDU wrapper (mms.cpp's decode_confirmed_request/response) -------
+def confirmed_request_pdu(invoke_id: int, service_body: bytes = None) -> bytes:
+    content = uni_p(2, ber_int(invoke_id))
+    if service_body is not None:
+        content += service_body
+    return mms_pdu(0, True, content)
+
+
+def confirmed_response_pdu(invoke_id: int, service_body: bytes = None) -> bytes:
+    content = uni_p(2, ber_int(invoke_id))
+    if service_body is not None:
+        content += service_body
+    return mms_pdu(1, True, content)
+
+
+# ---- ServiceError fields, shared by confirmed-ErrorPDU/cancel-ErrorPDU/conclude-ErrorPDU/
+# initiate-ErrorPDU (mms.cpp's decode_service_error is called on a different enclosing TLV per PDU
+# type -- see each builder below for exactly how these fields get wrapped).
+def service_error_fields(category_tag: int, code: int, additional_code: int = None,
+                          additional_description: str = None) -> bytes:
+    content = ctx_c(0, ctx_p(category_tag, ber_int(code)))  # errorClass[0], EXPLICIT wrap
+    if additional_code is not None:
+        content += ctx_p(1, ber_int(additional_code))
+    if additional_description is not None:
+        content += ctx_p(2, additional_description.encode("ascii"))
+    return content
+
+
+def confirmed_error_pdu(invoke_id: int, category_tag: int, code: int, modifier_position: int = None,
+                         additional_code: int = None, additional_description: str = None) -> bytes:
+    content = ctx_p(0, ber_int(invoke_id))
+    if modifier_position is not None:
+        content += ctx_p(1, ber_int(modifier_position))
+    content += ctx_c(2, service_error_fields(category_tag, code, additional_code, additional_description))
+    return mms_pdu(2, True, content)
+
+
+def unconfirmed_pdu(service_alt: bytes) -> bytes:
+    return mms_pdu(3, True, service_alt)
+
+
+def information_report(var_access_spec: bytes, results) -> bytes:
+    content = var_access_spec + uni_c(16, b"".join(results))
+    return ctx_c(0, content)  # informationReport[0] -- the unconfirmed-PDU's own choice alternative
+
+
+def reject_pdu(invoke_id: int, reason_tag: int, reason_code: int) -> bytes:
+    content = ctx_p(0, ber_int(invoke_id)) + ctx_p(reason_tag, ber_int(reason_code))
+    return mms_pdu(4, True, content)
+
+
+def cancel_request_pdu(invoke_id: int) -> bytes:
+    return mms_pdu(5, False, ber_int(invoke_id))
+
+
+def cancel_response_pdu(invoke_id: int) -> bytes:
+    return mms_pdu(6, False, ber_int(invoke_id))
+
+
+def cancel_error_pdu(invoke_id: int, category_tag: int, code: int) -> bytes:
+    content = ctx_p(0, ber_int(invoke_id)) + ctx_c(1, service_error_fields(category_tag, code))
+    return mms_pdu(7, True, content)
+
+
+def initiate_pdu(is_response: bool, local_detail: int, max_calling: int, max_called: int, nesting: int,
+                  version: int, parameter_cbb_bits, services_supported_bits) -> bytes:
+    content = ctx_p(0, ber_int(local_detail))
+    content += ctx_p(1, ber_int(max_calling))
+    content += ctx_p(2, ber_int(max_called))
+    content += ctx_p(3, ber_int(nesting))
+    detail = ctx_p(0, ber_int(version))
+    detail += ctx_p(1, bitstring_content(parameter_cbb_bits, 11))   # ParameterSupportOptions, 11 bits
+    detail += ctx_p(2, bitstring_content(services_supported_bits, 85))  # ServiceSupportOptions, 85 bits
+    content += ctx_c(4, detail)
+    return mms_pdu(9 if is_response else 8, True, content)
+
+
+def initiate_error_pdu(category_tag: int, code: int) -> bytes:
+    return mms_pdu(10, True, service_error_fields(category_tag, code))
+
+
+def conclude_request_pdu() -> bytes:
+    return mms_pdu(11, False, b"")
+
+
+def conclude_response_pdu() -> bytes:
+    return mms_pdu(12, False, b"")
+
+
+def conclude_error_pdu(category_tag: int, code: int) -> bytes:
+    return mms_pdu(13, True, service_error_fields(category_tag, code))
+
+
+def malformed_confirmed_request_no_service(invoke_id: int) -> bytes:
+    return mms_pdu(0, True, uni_p(2, ber_int(invoke_id)))  # invokeID present, service field missing
+
+
+def malformed_confirmed_response_no_service(invoke_id: int) -> bytes:
+    return mms_pdu(1, True, uni_p(2, ber_int(invoke_id)))
+
+
+# ---- Presentation layer (ISO 8823) -----------------------------------------------------------------
+def presentation_context_item(ctx_id: int, transfer_syntax_oid: str) -> bytes:
+    content = uni_p(2, ber_int(ctx_id)) + uni_p(6, oid_bytes(transfer_syntax_oid))
+    return uni_c(16, content)  # SEQUENCE{presentation-context-identifier, transfer-syntax-name}
+
+
+def presentation_context_list(items) -> bytes:
+    return ctx_c(4, b"".join(items))  # presentation-context-definition-list[4]
+
+
+def pdv_entry(context_id: int, single_asn1_bytes: bytes) -> bytes:
+    content = uni_p(2, ber_int(context_id)) + ctx_c(0, single_asn1_bytes)  # single-ASN1-type[0], EXPLICIT
+    return uni_c(16, content)  # PDV-list SEQUENCE element
+
+
+def user_data_fully_encoded(pdv: bytes) -> bytes:
+    return app_c(1, pdv)  # user-data CHOICE, fully-encoded-data[APPLICATION 1] alternative
+
+
+def presentation_association(context_list, context_id: int, single_asn1_bytes: bytes) -> bytes:
+    """CP-type/CPA-type (association-time): a UNIVERSAL SET wrapping normal-mode-parameters, which
+    itself carries the context-definition-list and the fully-encoded user-data (see mms.cpp's
+    decode_presentation)."""
+    ctxlist = presentation_context_list([presentation_context_item(cid, oid) for cid, oid in context_list])
+    userdata = user_data_fully_encoded(pdv_entry(context_id, single_asn1_bytes))
+    npm = ctx_c(2, ctxlist + userdata)  # normal-mode-parameters[2]
+    return uni_c(17, npm)  # SET, universal tag 17
+
+
+def presentation_bare_fully_encoded(context_id: int, single_asn1_bytes: bytes) -> bytes:
+    """The ongoing-message shape with no CP-type/CPA-type wrapper -- just the bare fully-encoded-
+    data CHOICE alternative directly."""
+    return user_data_fully_encoded(pdv_entry(context_id, single_asn1_bytes))
+
+
+# ---- ACSE layer (ISO 8650-1) -------------------------------------------------------------------
+ACSE_APPLICATION_CONTEXT_OID = "2.2.1.0.1"
+
+
+def acse_user_information(inner_pdu_bytes: bytes) -> bytes:
+    external = uni_c(16, ctx_c(0, inner_pdu_bytes))  # EXTERNAL ~= SEQUENCE{single-ASN1-type[0] inner}
+    return ctx_c(30, external)  # user-information[30] IMPLICIT Association-data (SEQUENCE OF EXTERNAL)
+
+
+def acse_aarq(user_info_pdu: bytes, app_context_oid: str = ACSE_APPLICATION_CONTEXT_OID) -> bytes:
+    content = ctx_c(1, uni_p(6, oid_bytes(app_context_oid))) + acse_user_information(user_info_pdu)
+    return ctx_c(0, content)
+
+
+def acse_aare(result: int, user_info_pdu: bytes, app_context_oid: str = ACSE_APPLICATION_CONTEXT_OID) -> bytes:
+    content = (ctx_c(1, uni_p(6, oid_bytes(app_context_oid))) +
+               ctx_c(2, uni_p(2, ber_int(result))) +
+               acse_user_information(user_info_pdu))
+    return ctx_c(1, content)
+
+
+def acse_rlrq(reason: int = None) -> bytes:
+    return ctx_c(2, ctx_p(0, ber_int(reason)) if reason is not None else b"")
+
+
+def acse_rlre(reason: int = None) -> bytes:
+    return ctx_c(3, ctx_p(0, ber_int(reason)) if reason is not None else b"")
+
+
+def acse_abrt(source: int, diagnostic: int = None) -> bytes:
+    content = ctx_p(0, ber_int(source))
+    if diagnostic is not None:
+        content += ctx_p(1, ber_int(diagnostic))
+    return ctx_c(4, content)
+
+
+# ---- Session layer (ISO 8327-1) ------------------------------------------------------------------
+def session_param(code: int, content: bytes) -> bytes:
+    assert len(content) <= 254, "Session parameter content exceeds the one-byte-length form"
+    return bytes([code, len(content)]) + content
+
+
+def session_spdu(si: int, params: bytes = b"") -> bytes:
+    assert len(params) <= 254, "Session SPDU parameters exceed the one-byte-length form (extended " \
+                                "form -- LI==0xFF -- is not supported by conduitscope's own decoder)"
+    return bytes([si, len(params)]) + params
+
+
+def session_connect(user_data_bytes: bytes) -> bytes:
+    # A small genuinely-nested Connect_Accept_Item(5)/Linking_Information(33) pair, purely to
+    # exercise walk_session_parameters' own recursion -- see mms.cpp's own header comment on which
+    # PGI codes recurse vs. which (193/194, used below) carry the next layer's raw bytes directly.
+    nested = session_param(33, b"\x00\x01")
+    params = session_param(5, nested) + session_param(193, user_data_bytes)
+    return session_spdu(13, params)  # CONNECT (CN)
+
+
+def session_accept(user_data_bytes: bytes) -> bytes:
+    params = session_param(193, user_data_bytes)
+    return session_spdu(14, params)  # ACCEPT (AC)
+
+
+def session_ongoing_prefix(count: int = 2) -> bytes:
+    # The "ubiquitous SI=1" shape real traffic uses for every ongoing Data-Transfer message: one or
+    # more ubiquitous SI=1/LI=0 markers (Data Transfer / Give Tokens share SPDU type 1) followed
+    # directly by Presentation-layer bytes with no Session parameter at all -- see mms.cpp's own
+    # ATTRIBUTION.md-cited header comment. `count`=2 by default specifically to also exercise the
+    # real structural-gate bug this decoder's own real-capture validation found and fixed (the
+    # Presentation layer's own fully-encoded-data tag, 0x61=97, being mistaken for a third bogus
+    # SPDU by a looser bound).
+    return session_spdu(1, b"") * count
+
+
+def build_mms_sample():
+    """IEC 61850 MMS (ISO 9506) over the same TPKT/COTP transport S7comm shares -- see mms.hpp's own
+    file header for the full Session/Presentation/ACSE/MMS layer stack this exercises. Covers: a
+    full association (Session CONNECT/ACCEPT wrapping Presentation CP-type/CPA-type wrapping ACSE
+    AARQ/AARE wrapping MMS initiate-RequestPDU/ResponsePDU), the "ubiquitous SI=1" ongoing-message
+    shape (two concatenated SI=1/LI=0 markers -- see session_ongoing_prefix's own comment for why
+    2, not 1), every Tier1 confirmed service this decoder fully decodes, an InformationReport, the
+    Tier1/Tier2 split (a confirmed service this decoder recognizes by name but doesn't further
+    decode), ServiceError/RejectPDU/Cancel-*/Conclude-* PDUs, and a genuinely malformed/truncated
+    confirmedServiceRequest (invokeID present, service field missing -- mirrors the real one found
+    in tests/real_captures/mms/iec61850_read.pcap, see its own ATTRIBUTION.md). Separate flows (own
+    port pairs, so they can't interact) cover: a bare MMS PDU (no Session/Presentation/ACSE at all),
+    a bare-Presentation ongoing message (Session omitted entirely -- the newer of this decoder's two
+    "skip a layer" shapes, see mms.cpp's looks_like_bare_presentation), a single TPKT/session/
+    presentation/MMS frame split mid-frame across two raw TCP segments (Decoder::
+    reassemble_tcp_payload), a single MMS message chained across two COMPLETE TPKT/COTP DT frames
+    via the EOT bit (Decoder::reassemble_cotp_data_frame), and two complete MMS frames coalesced by
+    the sender/OS into one TCP segment (this decoder's own COTP/TPKT framing decodes only the first
+    of these, with an honest note about the rest -- see cotp.cpp -- so this documents that known
+    limitation for MMS specifically rather than a successful decode of both)."""
+    ENG_IP, PLC_PORT = HMI_IP, 102
+    packets = []
+    ident = [0x7000]
+
+    # ---------------------------------------------------------------------------------------------
+    # Main flow: full association, then a long run of ongoing Data-Transfer messages.
+    # ---------------------------------------------------------------------------------------------
+    ENG_PORT = 49300
+    client_seq = [10000]
+    server_seq = [20000]
+
+    def add(from_client: bool, tpkt_bytes: bytes):
+        ident[0] += 1
+        if from_client:
+            src_ip, dst_ip, src_mac, dst_mac = ENG_IP, PLC_IP, HMI_MAC, PLC_MAC
+            src_port, dst_port = ENG_PORT, PLC_PORT
+            seq, ack = client_seq[0], server_seq[0]
+            client_seq[0] += len(tpkt_bytes)
+        else:
+            src_ip, dst_ip, src_mac, dst_mac = PLC_IP, ENG_IP, PLC_MAC, HMI_MAC
+            src_port, dst_port = PLC_PORT, ENG_PORT
+            seq, ack = server_seq[0], client_seq[0]
+            server_seq[0] += len(tpkt_bytes)
+        tcp = tcp_header(src_port, dst_port, seq, ack, TCP_PSH | TCP_ACK, len(tpkt_bytes)) + tpkt_bytes
+        ip = ipv4_header(src_ip, dst_ip, 6, len(tcp), ident[0]) + tcp
+        packets.append(eth_header(dst_mac, src_mac, 0x0800) + ip)
+
+    def dt(bytes_) -> bytes:
+        return tpkt_frame(COTP_DT_HEADER, bytes_)
+
+    def ongoing(mms_pdu_bytes: bytes) -> bytes:
+        return session_ongoing_prefix(2) + presentation_bare_fully_encoded(3, mms_pdu_bytes)
+
+    # 1) & 2) COTP Connection Request/Confirm -- engineering workstation <-> IED.
+    cr = cotp_connection_pdu(0xE0, 0x0000, 0x0002, bytes([0x01, 0x00]), bytes([0x03, 0x02]))
+    add(True, tpkt_frame(cr))
+    cc = cotp_connection_pdu(0xD0, 0x0002, 0x6001, bytes([0x01, 0x00]), bytes([0x03, 0x02]))
+    add(False, tpkt_frame(cc))
+
+    # 3) Session CONNECT / Presentation CP-type / ACSE AARQ / MMS initiate-RequestPDU -- the
+    #    association-establishment exchange every real IEC 61850 MMS session begins with.
+    initiate_req = initiate_pdu(False, local_detail=1400, max_calling=5, max_called=5, nesting=6,
+                                 version=1, parameter_cbb_bits=[0, 1, 2, 3, 6, 7],
+                                 services_supported_bits=[0, 1, 2, 4, 5, 6, 11, 12, 13, 37, 71, 79])
+    aarq = acse_aarq(initiate_req)
+    cp = presentation_association([(1, ACSE_APPLICATION_CONTEXT_OID), (3, "1.0.9506.2.3")], 1, aarq)
+    add(True, dt(session_connect(cp)))
+
+    # 4) Session ACCEPT / Presentation CPA-type / ACSE AARE (accepted) / MMS initiate-ResponsePDU.
+    initiate_resp = initiate_pdu(True, local_detail=1400, max_calling=5, max_called=5, nesting=6,
+                                  version=1, parameter_cbb_bits=[0, 1, 2, 3, 6, 7],
+                                  services_supported_bits=[0, 1, 2, 4, 5, 6, 11, 12, 13, 37, 71, 79])
+    aare = acse_aare(0, initiate_resp)
+    cpa = presentation_association([(1, ACSE_APPLICATION_CONTEXT_OID), (3, "1.0.9506.2.3")], 1, aare)
+    add(False, dt(session_accept(cpa)))
+
+    # 5) & 6) Read -- one variable, specificationWithResult=true.
+    read_var = list_of_variable([var_spec_name(object_name_domain("IED1Device", "GGIO1$ST$Ind1$stVal"))])
+    add(True, dt(ongoing(confirmed_request_pdu(1, read_request(True, read_var)))))
+    add(False, dt(ongoing(confirmed_response_pdu(1, read_response([access_result_success(data_bool(True))])))))
+
+    # 7) & 8) Write -- one variable, one boolean value.
+    write_var = list_of_variable([var_spec_name(object_name_domain("IED1Device", "GGIO1$SP$Ind1$setVal"))])
+    add(True, dt(ongoing(confirmed_request_pdu(2, write_request(write_var, [data_bool(False)])))))
+    add(False, dt(ongoing(confirmed_response_pdu(2, write_response([write_result_success()])))))
+
+    # 9) & 10) GetNameList -- scoped to a domain.
+    add(True, dt(ongoing(confirmed_request_pdu(3, getnamelist_request("domain", "IED1Device")))))
+    add(False, dt(ongoing(confirmed_response_pdu(
+        3, getnamelist_response(["LLN0", "GGIO1", "MMXU1"], more_follows=False)))))
+
+    # 11) & 12) Identify.
+    add(True, dt(ongoing(confirmed_request_pdu(4, svc(2, False, b"")))))  # identify-Request ::= NULL
+    add(False, dt(ongoing(confirmed_response_pdu(
+        4, identify_response("ConduitScope Labs", "Virtual IED", "1.0", ["1.0.9506.2.3"])))))
+
+    # 13) & 14) GetVariableAccessAttributes.
+    gvaa_name = object_name_domain("IED1Device", "GGIO1$ST$Ind1$stVal")
+    add(True, dt(ongoing(confirmed_request_pdu(5, getvariableaccessattributes_request(gvaa_name)))))
+    add(False, dt(ongoing(confirmed_response_pdu(5, getvariableaccessattributes_response(False)))))
+
+    # 15) & 16) DefineNamedVariableList.
+    dnvl_members = [var_spec_name(object_name_domain("IED1Device", "GGIO1$ST$Ind1$stVal")),
+                     var_spec_name(object_name_domain("IED1Device", "GGIO1$ST$Ind2$stVal"))]
+    add(True, dt(ongoing(confirmed_request_pdu(
+        6, definenamedvariablelist_request(object_name_vmd("MyDataSet1"), dnvl_members)))))
+    add(False, dt(ongoing(confirmed_response_pdu(6, definenamedvariablelist_response()))))
+
+    # 17) & 18) GetNamedVariableListAttributes.
+    add(True, dt(ongoing(confirmed_request_pdu(
+        7, getnamedvariablelistattributes_request(object_name_vmd("MyDataSet1"))))))
+    add(False, dt(ongoing(confirmed_response_pdu(
+        7, getnamedvariablelistattributes_response(True, dnvl_members)))))
+
+    # 19) & 20) DeleteNamedVariableList.
+    add(True, dt(ongoing(confirmed_request_pdu(
+        8, deletenamedvariablelist_request(names=[object_name_vmd("MyDataSet1")])))))
+    add(False, dt(ongoing(confirmed_response_pdu(8, deletenamedvariablelist_response(1, 1)))))
+
+    # 21) & 22) GetCapabilityList.
+    add(True, dt(ongoing(confirmed_request_pdu(9, getcapabilitylist_request()))))
+    add(False, dt(ongoing(confirmed_response_pdu(
+        9, getcapabilitylist_response(["STR1", "VNAM", "VALT"], more_follows=False)))))
+
+    # 23) & 24) GetDomainAttributes.
+    add(True, dt(ongoing(confirmed_request_pdu(10, getdomainattributes_request("IED1Device")))))
+    add(False, dt(ongoing(confirmed_response_pdu(
+        10, getdomainattributes_response(["STR1"], state=2, deletable=False, sharable=True)))))
+
+    # 25) InformationReport -- an unconfirmed, unsolicited report from the IED (this decoder's own
+    #     MMS analog of its GOOSE decoder, see mms.hpp).
+    report_var = variable_list_name(object_name_vmd("MyDataSet1"))
+    add(False, dt(ongoing(unconfirmed_pdu(information_report(
+        report_var, [access_result_success(data_bool(True)),
+                     access_result_success(data_utc_time(1_700_000_000, 0, 0x0A))])))))
+
+    # 26) & 27) Tier2 demo -- takeControl(19) is a real, named confirmedServiceRequest/Response
+    #     alternative (see kConfirmedServiceNames) that this decoder's own Tier1 dispatch does NOT
+    #     further decode (mirrors the real tests/real_captures/mms/mms-takeControl.pcap finding):
+    #     service_recognized=true, service_name=takeControl, but the body is shown as hex, not
+    #     structurally decoded.
+    add(True, dt(ongoing(confirmed_request_pdu(11, svc(19, True, ctx_p(0, b"IED1Device"))))))
+    add(False, dt(ongoing(confirmed_response_pdu(11, svc(19, True, b"")))))
+
+    # 28) ServiceError -- a Read request answered with confirmed-ErrorPDU instead of a normal
+    #     response (errorClass=resource(3)).
+    add(True, dt(ongoing(confirmed_request_pdu(12, read_request(False, read_var)))))
+    add(False, dt(ongoing(confirmed_error_pdu(
+        12, category_tag=3, code=1, additional_description="variable not found"))))
+
+    # 29) RejectPDU -- server rejects invokeID 13 outright (confirmed-requestPDU category).
+    add(False, dt(ongoing(reject_pdu(13, reason_tag=1, reason_code=1))))
+
+    # 30) & 31) Cancel-Request/Response -- client cancels the earlier GetVariableAccessAttributes
+    #     (invokeID 5).
+    add(True, dt(ongoing(cancel_request_pdu(5))))
+    add(False, dt(ongoing(cancel_response_pdu(5))))
+
+    # 32) & 33) Cancel-Error -- a cancel for an invokeID the server has nothing outstanding for.
+    add(True, dt(ongoing(cancel_request_pdu(99))))
+    add(False, dt(ongoing(cancel_error_pdu(99, category_tag=10, code=1))))
+
+    # 34) & 35) Malformed/truncated confirmedServiceRequest/Response -- invokeID present, service
+    #     field missing entirely. Mirrors the real, genuinely truncated frame 18 of
+    #     tests/real_captures/mms/iec61850_read.pcap (see its own ATTRIBUTION.md) -- this decoder
+    #     degrades to an honest note rather than guessing or crashing.
+    add(True, dt(ongoing(malformed_confirmed_request_no_service(77))))
+    add(False, dt(ongoing(malformed_confirmed_response_no_service(78))))
+
+    # 36) & 37) Conclude-Request/Response -- normal, graceful association release at the MMS level.
+    add(True, dt(ongoing(conclude_request_pdu())))
+    add(False, dt(ongoing(conclude_response_pdu())))
+
+    # 38) & 39) Conclude-Error -- a second conclude attempt the server refuses.
+    add(True, dt(ongoing(conclude_request_pdu())))
+    add(False, dt(ongoing(conclude_error_pdu(category_tag=9, code=2))))
+
+    # ---------------------------------------------------------------------------------------------
+    # Separate flow: a bare MMS PDU -- no Session/Presentation/ACSE at all, the COTP Data frame's
+    # user data starting directly with the MMS PDU's own tag byte (see mms.hpp's own "Bare MMS"
+    # section; confirmed against tests/real_captures/mms/mms-cancelRequest.pcap and
+    # mms-takeControl.pcap, both entirely bare).
+    # ---------------------------------------------------------------------------------------------
+    BARE_PORT = 49301
+    bare_client_seq, bare_server_seq = [30000], [40000]
+
+    def add_bare(from_client: bool, tpkt_bytes: bytes):
+        ident[0] += 1
+        if from_client:
+            src_ip, dst_ip, src_mac, dst_mac = ENG_IP, PLC_IP, HMI_MAC, PLC_MAC
+            src_port, dst_port = BARE_PORT, PLC_PORT
+            seq, ack = bare_client_seq[0], bare_server_seq[0]
+            bare_client_seq[0] += len(tpkt_bytes)
+        else:
+            src_ip, dst_ip, src_mac, dst_mac = PLC_IP, ENG_IP, PLC_MAC, HMI_MAC
+            src_port, dst_port = PLC_PORT, BARE_PORT
+            seq, ack = bare_server_seq[0], bare_client_seq[0]
+            bare_server_seq[0] += len(tpkt_bytes)
+        tcp = tcp_header(src_port, dst_port, seq, ack, TCP_PSH | TCP_ACK, len(tpkt_bytes)) + tpkt_bytes
+        ip = ipv4_header(src_ip, dst_ip, 6, len(tcp), ident[0]) + tcp
+        packets.append(eth_header(dst_mac, src_mac, 0x0800) + ip)
+
+    bare_cr = cotp_connection_pdu(0xE0, 0x0000, 0x0003, bytes([0x01, 0x00]), bytes([0x03, 0x02]))
+    add_bare(True, tpkt_frame(bare_cr))
+    bare_cc = cotp_connection_pdu(0xD0, 0x0003, 0x6002, bytes([0x01, 0x00]), bytes([0x03, 0x02]))
+    add_bare(False, tpkt_frame(bare_cc))
+    add_bare(True, dt(confirmed_request_pdu(1, svc(2, False, b""))))  # bare identify-Request
+    add_bare(False, dt(confirmed_response_pdu(1, identify_response("ConduitScope Labs", "Virtual IED", "1.0"))))
+    add_bare(True, dt(cancel_request_pdu(1)))
+    add_bare(False, dt(conclude_request_pdu()))  # unrelated bare PDU right after, just to vary shapes
+
+    # ---------------------------------------------------------------------------------------------
+    # Separate flow: bare-Presentation ongoing message -- Session omitted entirely (see mms.hpp's
+    # "Bare MMS" section's own related-shape paragraph and mms.cpp's looks_like_bare_presentation;
+    # confirmed against tests/real_captures/mms/ATTRIBUTION.md's own real-capture finding).
+    # ---------------------------------------------------------------------------------------------
+    NOSESS_PORT = 49302
+    nosess_client_seq, nosess_server_seq = [50000], [60000]
+
+    def add_nosess(from_client: bool, tpkt_bytes: bytes):
+        ident[0] += 1
+        if from_client:
+            src_ip, dst_ip, src_mac, dst_mac = ENG_IP, PLC_IP, HMI_MAC, PLC_MAC
+            src_port, dst_port = NOSESS_PORT, PLC_PORT
+            seq, ack = nosess_client_seq[0], nosess_server_seq[0]
+            nosess_client_seq[0] += len(tpkt_bytes)
+        else:
+            src_ip, dst_ip, src_mac, dst_mac = PLC_IP, ENG_IP, PLC_MAC, HMI_MAC
+            src_port, dst_port = PLC_PORT, NOSESS_PORT
+            seq, ack = nosess_server_seq[0], nosess_client_seq[0]
+            nosess_server_seq[0] += len(tpkt_bytes)
+        tcp = tcp_header(src_port, dst_port, seq, ack, TCP_PSH | TCP_ACK, len(tpkt_bytes)) + tpkt_bytes
+        ip = ipv4_header(src_ip, dst_ip, 6, len(tcp), ident[0]) + tcp
+        packets.append(eth_header(dst_mac, src_mac, 0x0800) + ip)
+
+    nosess_cr = cotp_connection_pdu(0xE0, 0x0000, 0x0004, bytes([0x01, 0x00]), bytes([0x03, 0x02]))
+    add_nosess(True, tpkt_frame(nosess_cr))
+    nosess_cc = cotp_connection_pdu(0xD0, 0x0004, 0x6003, bytes([0x01, 0x00]), bytes([0x03, 0x02]))
+    add_nosess(False, tpkt_frame(nosess_cc))
+    status_body = confirmed_request_pdu(1, status_request(True))
+    add_nosess(True, dt(presentation_bare_fully_encoded(3, status_body)))
+    status_resp_body = confirmed_response_pdu(1, status_response(0, 0))
+    add_nosess(False, dt(presentation_bare_fully_encoded(3, status_resp_body)))
+
+    # ---------------------------------------------------------------------------------------------
+    # Separate flow: one complete TPKT/session/presentation/MMS frame split mid-frame across two
+    # raw TCP segments -- Decoder::reassemble_tcp_payload, the same general per-flow mechanism
+    # sample_tcp_reassembly.pcap's own scenario C exercises for S7comm.
+    # ---------------------------------------------------------------------------------------------
+    SPLIT_PORT = 49303
+    split_frame = dt(ongoing(confirmed_response_pdu(
+        20, getcapabilitylist_response(["STR1", "STR2", "VNAM", "VALT", "VADR"], more_follows=False))))
+    split_at = len(split_frame) // 2
+    ident[0] += 1
+    tcp_s1 = tcp_header(PLC_PORT, SPLIT_PORT, 70000, 500, TCP_PSH | TCP_ACK,
+                         len(split_frame[:split_at])) + split_frame[:split_at]
+    ip_s1 = ipv4_header(PLC_IP, ENG_IP, 6, len(tcp_s1), ident[0]) + tcp_s1
+    packets.append(eth_header(HMI_MAC, PLC_MAC, 0x0800) + ip_s1)
+    ident[0] += 1
+    tcp_s2 = tcp_header(PLC_PORT, SPLIT_PORT, 70000 + split_at, 500, TCP_PSH | TCP_ACK,
+                         len(split_frame[split_at:])) + split_frame[split_at:]
+    ip_s2 = ipv4_header(PLC_IP, ENG_IP, 6, len(tcp_s2), ident[0]) + tcp_s2
+    packets.append(eth_header(HMI_MAC, PLC_MAC, 0x0800) + ip_s2)
+
+    # ---------------------------------------------------------------------------------------------
+    # Separate flow: one MMS message chained across two COMPLETE TPKT/COTP DT frames via the EOT
+    # bit -- Decoder::reassemble_cotp_data_frame -- mirroring sample_s7comm_chaining.pcap's own
+    # scenario A, but for MMS: the split lands mid-way through a GetNameList response's own
+    # listOfIdentifier so it only decodes correctly if both frames are genuinely concatenated.
+    # ---------------------------------------------------------------------------------------------
+    CHAIN_PORT = 49304
+    COTP_DT_HEADER_FRAGMENT = bytes([0xF0, 0x00])  # EOT bit clear -- not the last fragment
+    chain_payload = ongoing(confirmed_response_pdu(
+        21, getnamelist_response(["Domain1LLN0", "Domain1GGIO1", "Domain1MMXU1", "Domain1XCBR1"],
+                                  more_follows=False)))
+    chain_split = len(chain_payload) // 2
+    frame_c1 = tpkt_frame(COTP_DT_HEADER_FRAGMENT, chain_payload[:chain_split])
+    frame_c2 = tpkt_frame(COTP_DT_HEADER, chain_payload[chain_split:])
+    ident[0] += 1
+    tcp_c1 = tcp_header(PLC_PORT, CHAIN_PORT, 80000, 600, TCP_PSH | TCP_ACK, len(frame_c1)) + frame_c1
+    ip_c1 = ipv4_header(PLC_IP, ENG_IP, 6, len(tcp_c1), ident[0]) + tcp_c1
+    packets.append(eth_header(HMI_MAC, PLC_MAC, 0x0800) + ip_c1)
+    ident[0] += 1
+    tcp_c2 = tcp_header(PLC_PORT, CHAIN_PORT, 80000 + len(frame_c1), 600, TCP_PSH | TCP_ACK,
+                         len(frame_c2)) + frame_c2
+    ip_c2 = ipv4_header(PLC_IP, ENG_IP, 6, len(tcp_c2), ident[0]) + tcp_c2
+    packets.append(eth_header(HMI_MAC, PLC_MAC, 0x0800) + ip_c2)
+
+    # ---------------------------------------------------------------------------------------------
+    # Separate flow: two complete MMS frames (Conclude-Request twice) coalesced by the sender/OS
+    # into ONE TCP segment. cotp.cpp's own COTP/TPKT framing is genuinely single-PDU-per-call (see
+    # its own "possible pipelined TPKT frames; only the first is decoded in this groundwork
+    # release" note) -- unlike EtherNet/IP's or HART-IP's own dedicated multi-message-per-segment
+    # loops, so this deliberately exercises (and documents, via the note it produces) that known,
+    # already-honestly-labeled limitation for MMS specifically, rather than a successful decode of
+    # both frames.
+    # ---------------------------------------------------------------------------------------------
+    COALESCE_PORT = 49305
+    coalesced = dt(conclude_request_pdu()) + dt(conclude_request_pdu())
+    ident[0] += 1
+    tcp_co = tcp_header(COALESCE_PORT, PLC_PORT, 90000, 700, TCP_PSH | TCP_ACK, len(coalesced)) + coalesced
+    ip_co = ipv4_header(ENG_IP, PLC_IP, 6, len(tcp_co), ident[0]) + tcp_co
+    packets.append(eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip_co)
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_010_000 + i, i * 1000)
+    (TESTS_DIR / "sample_mms.pcap").write_bytes(data)
+
+
 def build_policy_engine_sample():
     """Exercises PolicyEngine's client/server (initiator) determination and its cross-protocol
     "cotp counts as s7comm" folding (see policy_engine.cpp) -- none of which the other sample
@@ -3537,6 +4313,7 @@ if __name__ == "__main__":
     build_s7comm_items_sample()
     build_s7comm_1200sym_sample()
     build_s7comm_chaining_sample()
+    build_mms_sample()
     build_policy_engine_sample()
     build_tcp_reassembly_sample()
     build_padded_ack_sample()

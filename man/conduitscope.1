@@ -1,6 +1,6 @@
 .TH CONDUITSCOPE 1 "2026" "conduitscope 0.1.0" "User Commands"
 .SH NAME
-conduitscope \- decode Modbus/TCP, DNP3, IEC 60870-5-104, S7comm/COTP, EtherNet/IP (CIP explicit and implicit messaging), PROFINET RT (DCP and cyclic real-time IO), IEC 61850-8-1 GOOSE, IEC 61850-9-2 Sampled Values, EtherCAT, BACnet/IP, HART-IP, and OPC UA Binary traffic from offline pcap/pcapng captures
+conduitscope \- decode Modbus/TCP, DNP3, IEC 60870-5-104, S7comm/COTP, IEC 61850 MMS (Manufacturing Message Specification, ISO 9506), EtherNet/IP (CIP explicit and implicit messaging), PROFINET RT (DCP and cyclic real-time IO), IEC 61850-8-1 GOOSE, IEC 61850-9-2 Sampled Values, EtherCAT, BACnet/IP, HART-IP, and OPC UA Binary traffic from offline pcap/pcapng captures
 .SH SYNOPSIS
 .B conduitscope
 [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-color\fR|\fB\-\-color\fR] [\fB\-\-log\-file\fR \fIFILE\fR] \fICOMMAND\fR [\fIOPTIONS\fR]
@@ -9,7 +9,12 @@ conduitscope \- decode Modbus/TCP, DNP3, IEC 60870-5-104, S7comm/COTP, EtherNet/
 reads a pcap or pcapng capture file, or optionally a live network
 interface (see \fBLIVE CAPTURE\fR below), and decodes Modbus/TCP, DNP3,
 IEC 60870-5-104 (TCP port 2404), S7comm (Siemens S7 PLC protocol, over
-TPKT/COTP, TCP port 102), and EtherNet/IP (CIP explicit messaging, TCP port
+TPKT/COTP, TCP port 102), IEC 61850 MMS (Manufacturing Message
+Specification, ISO 9506, the same TPKT/COTP transport and TCP port 102
+S7comm uses, but a distinct, independent application protocol with its own
+Session/Presentation/ACSE layering -- detected by its own separate
+structural gate, tried once S7comm's own gate has already failed), and
+EtherNet/IP (CIP explicit messaging, TCP port
 44818) traffic found inside its TCP streams, plus EtherNet/IP CIP I/O
 (implicit messaging, UDP port 2222) traffic found inside its UDP streams,
 plus PROFINET RT (EtherType 0x8892, DCP device discovery/configuration and
@@ -90,8 +95,8 @@ Write output here instead of stdout.
 .BR \-f ", " \-\-format " " {text,json,csv}
 Output format. Default: text.
 .TP
-.B \-\-protocol {auto,modbus,dnp3,iec104,s7comm,enip,profinet,goose,sv,ethercat,bacnet,hartip,opcua}
-Restrict decoding to one protocol. Default: auto (tries all seven TCP
+.B \-\-protocol {auto,modbus,dnp3,iec104,s7comm,mms,enip,profinet,goose,sv,ethercat,bacnet,hartip,opcua}
+Restrict decoding to one protocol. Default: auto (tries all eight TCP
 protocols, independent of port number, plus CIP I/O and BACnet/IP on every
 UDP payload,
 plus PROFINET RT on every non-IPv4 Ethernet frame carrying EtherType
@@ -103,13 +108,21 @@ protocol, since its own 3-byte ASCII MessageType magic (HEL/ACK/ERR/RHE/
 OPN/CLO/MSG) has zero collision risk against any other protocol's own
 detection gate; EtherNet/IP is tried next, then IEC 104 before Modbus, since an
 IEC 104 I-format APDU with sequence numbers 0/0 -- universal at session
-start -- coincidentally also matches Modbus's MBAP-header detection, and
+start -- coincidentally also matches Modbus's MBAP-header detection, MMS is
+tried immediately after S7comm/COTP (same TPKT/COTP framing, same TCP port
+102, S7comm's own stronger single-byte protocol-id gate tried first) using
+its own separate structural gate (a plausible Session SPDU type, a "bare
+MMS" PDU tag, or "bare Presentation" bytes -- see \fBdocs/MANUAL.md\fR's
+PROTOCOL COVERAGE MMS section), and
 HART-IP is tried last of all, on both TCP and UDP, since its own 8-byte
 header check is the weakest structural gate of any protocol here and is
 known to collide with Modbus/TCP's own detection on TCP (never resolved by
 reordering -- see
 \fBdocs/MANUAL.md\fR's PROTOCOL DETECTION section). \fBenip\fR covers both
 EtherNet/IP explicit messaging (TCP) and CIP I/O implicit messaging (UDP).
+\fBmms\fR is IEC 61850 MMS -- shares S7comm's exact transport/port but is a
+distinct protocol; there is no separate \fB\-\-mms\-port\fR, see
+\fB\-\-s7comm\-port\fR below.
 \fBsv\fR is IEC 61850-9-2 Sampled Values. \fBethercat\fR is EtherCAT.
 \fBbacnet\fR is BACnet/IP.
 \fBhartip\fR is HART-IP, tried on both TCP and UDP.
@@ -127,7 +140,10 @@ Same as \fB\-\-modbus\-port\fR, for DNP3. Repeatable.
 Same as \fB\-\-modbus\-port\fR, for IEC 60870-5-104. Repeatable.
 .TP
 .B \-\-s7comm\-port \fIPORT\fR
-Same as \fB\-\-modbus\-port\fR, for COTP/S7comm. Repeatable.
+Same as \fB\-\-modbus\-port\fR, for COTP/S7comm. Repeatable. There is no
+separate \fB\-\-mms\-port\fR \-\- MMS rides the identical TPKT/COTP
+transport on the identical TCP port 102 S7comm uses, so this option also
+governs the "expected port" annotation for MMS traffic.
 .TP
 .B \-\-enip\-port \fIPORT\fR
 Same as \fB\-\-modbus\-port\fR, for EtherNet/IP explicit messaging (TCP). Repeatable.
@@ -242,7 +258,10 @@ Applies to \fBdecode\fR's \fBtext\fR format only (not \fBjson\fR/\fBcsv\fR,
 and not \fBpolicy validate\fR's report, which stays plain text by design --
 it's meant to be diffed/archived/piped as an audit artifact). The
 \fB[protocol]\fR tag is colored per protocol: cyan for Modbus, magenta for
-DNP3, green for IEC 104, blue for S7comm/COTP, yellow for EtherNet/IP,
+DNP3, green for IEC 104, blue for S7comm/COTP, bold blue for MMS
+(deliberately close to S7comm's plain blue \-\- they share the same
+TPKT/COTP transport/port, bold distinguishes MMS at a glance), yellow for
+EtherNet/IP,
 bright cyan for PROFINET RT, bright green for GOOSE, bright magenta for
 Sampled Values, bright yellow for EtherCAT, bright blue for BACnet/IP,
 bright white for HART-IP, bright red for OPC UA, dim
@@ -440,7 +459,33 @@ S7comm item-level addressing (inside Read Var / Write Var) is fully
 confident only for the classic S7ANY syntax; the S7-1200/1500 "symbolic"
 syntax (0xB2) gets an EXPERIMENTAL, unverified decode, marked
 [EXPERIMENTAL] everywhere it appears;
-S7comm-Plus is detected but never decoded; live capture is an optional,
+S7comm-Plus is detected but never decoded;
+IEC 61850 MMS (TCP port 102, shares S7comm's own TPKT/COTP transport) is
+also now decoded \-\- the full Session/Presentation/ACSE/MMS layer stack,
+including, unlike this tool's own OPC UA decoder, MMS's own self-describing
+"Data" value type (14 of 17 alternatives, depth-capped at 32 levels against
+a real recursion-assertion denial-of-service bug this decoder's own
+validation found in tshark 4.2.2's own MMS dissector) \-\- but only 11 of
+MMS's 78 confirmedServices (status, getNameList, identify, read, write,
+getVariableAccessAttributes, defineNamedVariableList,
+getNamedVariableListAttributes, deleteNamedVariableList,
+getDomainAttributes, getCapabilityList) get full field decoding, the rest
+are name + invokeID only with the body shown as raw hex; the Session
+layer's extended (2-byte) length form is not supported, only the "normal"
+one-byte-length-per-parameter form; \fBAddress\fR (non-symbolic variable
+addressing) and \fBTypeSpecification\fR are recognized but not decoded;
+this decoder assumes the near-universal "1=ACSE, 3=MMS"
+presentation-context convention for an ongoing message with no
+context-list of its own, corroborated by every real capture checked but an
+assumption, not a guarantee; and validation is against three small genuine
+real-world captures plus a 224-frame capture this project generated itself
+against a real independent stack (\fBmz-automation/libiec61850\fR),
+117 of 224 frames recognized, zero parse warnings (see
+\fBdocs/MANUAL.md\fR's PROTOCOL COVERAGE MMS section and
+\fBtests/real_captures/mms/ATTRIBUTION.md\fR for the full detail, including
+two genuine structural-detection-gate bugs this validation pass caught and
+fixed);
+live capture is an optional,
 build-time-detected feature (see LIVE CAPTURE) whose Windows/Npcap path has
 not yet been run on a real Windows machine, validated on Linux so far only
 against loopback traffic;
@@ -477,6 +522,14 @@ Decode as JSON and filter with jq:
 .RS
 .EX
 conduitscope decode \-r capture.pcap \-f json | jq '.[] | select(.protocol=="modbus")'
+.EE
+.RE
+.PP
+Decode IEC 61850 MMS traffic and show every read/write/report value:
+.RS
+.EX
+conduitscope decode \-r capture.pcap \-\-protocol mms \-f json \e
+  | jq \-r '.[] | select(.mms_values) | "\e(.src_ip) \-> \e(.dst_ip): \e(.mms_values | join(", "))"'
 .EE
 .RE
 .PP

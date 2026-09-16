@@ -2,14 +2,14 @@
 
 ## NAME
 
-conduitscope -- decode Modbus/TCP, DNP3, IEC 60870-5-104, S7comm/COTP, EtherNet/IP (CIP explicit and implicit messaging), PROFINET RT (DCP and cyclic real-time IO), IEC 61850-8-1 GOOSE, IEC 61850-9-2 Sampled Values, EtherCAT, BACnet/IP, HART-IP, and OPC UA Binary traffic from offline pcap captures
+conduitscope -- decode Modbus/TCP, DNP3, IEC 60870-5-104, S7comm/COTP, IEC 61850 MMS (Manufacturing Message Specification, ISO 9506), EtherNet/IP (CIP explicit and implicit messaging), PROFINET RT (DCP and cyclic real-time IO), IEC 61850-8-1 GOOSE, IEC 61850-9-2 Sampled Values, EtherCAT, BACnet/IP, HART-IP, and OPC UA Binary traffic from offline pcap captures
 
 ## SYNOPSIS
 
 ```
 conduitscope [-q|--quiet] [--no-color|--color] [--log-file FILE] [--version] [-h|--help] <command> [command options]
 
-conduitscope decode (-r FILE | -i INTERFACE) [-o FILE] [-f text|json|csv] [--protocol auto|modbus|dnp3|s7comm|iec104|enip|profinet|goose|sv|ethercat|bacnet|hartip|opcua]
+conduitscope decode (-r FILE | -i INTERFACE) [-o FILE] [-f text|json|csv] [--protocol auto|modbus|dnp3|s7comm|mms|iec104|enip|profinet|goose|sv|ethercat|bacnet|hartip|opcua]
                      [--modbus-port PORT]... [--dnp3-port PORT]... [--s7comm-port PORT]... [--iec104-port PORT]...
                      [--enip-port PORT]... [--enip-io-port PORT]... [--bacnet-port PORT]... [--hartip-port PORT]... [--opcua-port PORT]...
                      [--max-packets N] [--stats] [--strict]
@@ -153,10 +153,10 @@ conduitscope decode (-r FILE | -i INTERFACE) [options]
 | `--no-promiscuous` | off (i.e. promiscuous by default) | With `-i`, don't put the interface into promiscuous mode. Promiscuous is the default because the main live-capture use case -- watching a mirrored/SPAN switch port for zone/conduit traffic -- needs to see traffic that isn't addressed to the capturing host at all. |
 | `-o, --output FILE` | stdout | Write decoded output here instead of stdout. |
 | `-f, --format {text,json,csv}` | `text` | Output format. See OUTPUT FORMATS below. |
-| `--protocol {auto,modbus,dnp3,s7comm,iec104,enip,profinet,goose,sv,ethercat,bacnet,hartip,opcua}` | `auto` | Restrict decoding to one protocol. `auto` opportunistically tries OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, S7comm/COTP, and HART-IP detection on every TCP payload, CIP I/O, BACnet/IP, and HART-IP detection on every UDP payload, PROFINET RT (DCP/cyclic) detection on every non-IPv4 Ethernet frame carrying EtherType `0x8892`, GOOSE detection on every non-IPv4 Ethernet frame carrying EtherType `0x88B8`, Sampled Values detection on every non-IPv4 Ethernet frame carrying EtherType `0x88BA`, and EtherCAT detection on every non-IPv4 Ethernet frame carrying EtherType `0x88A4`, regardless of port (see PROTOCOL DETECTION below). `enip` covers both EtherNet/IP explicit messaging (TCP) and CIP I/O implicit messaging (UDP). `profinet` covers both DCP and cyclic real-time IO. `sv` is IEC 61850-9-2 Sampled Values. `ethercat` is EtherCAT. `bacnet` is BACnet/IP. `hartip` is HART-IP (covers both UDP and TCP). `opcua` is OPC UA Binary (UA-TCP/Secure Conversation, TCP only). |
+| `--protocol {auto,modbus,dnp3,s7comm,mms,iec104,enip,profinet,goose,sv,ethercat,bacnet,hartip,opcua}` | `auto` | Restrict decoding to one protocol. `auto` opportunistically tries OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, S7comm/COTP, MMS, and HART-IP detection on every TCP payload, CIP I/O, BACnet/IP, and HART-IP detection on every UDP payload, PROFINET RT (DCP/cyclic) detection on every non-IPv4 Ethernet frame carrying EtherType `0x8892`, GOOSE detection on every non-IPv4 Ethernet frame carrying EtherType `0x88B8`, Sampled Values detection on every non-IPv4 Ethernet frame carrying EtherType `0x88BA`, and EtherCAT detection on every non-IPv4 Ethernet frame carrying EtherType `0x88A4`, regardless of port (see PROTOCOL DETECTION below). `enip` covers both EtherNet/IP explicit messaging (TCP) and CIP I/O implicit messaging (UDP). `mms` is IEC 61850 MMS (Manufacturing Message Specification, ISO 9506) -- shares S7comm's exact TPKT/COTP transport and TCP port 102, but is a distinct application protocol; see `--s7comm-port` below and PROTOCOL COVERAGE's MMS section. `profinet` covers both DCP and cyclic real-time IO. `sv` is IEC 61850-9-2 Sampled Values. `ethercat` is EtherCAT. `bacnet` is BACnet/IP. `hartip` is HART-IP (covers both UDP and TCP). `opcua` is OPC UA Binary (UA-TCP/Secure Conversation, TCP only). |
 | `--modbus-port PORT` | *(502 built in)* | Additional TCP port to treat as "expected" for Modbus. Repeatable. Does **not** gate detection -- it only changes whether a decoded Modbus frame is annotated as appearing on an unexpected port, which is itself a useful signal when auditing a conduit. |
 | `--dnp3-port PORT` | *(20000 built in)* | Same as `--modbus-port`, for DNP3. Repeatable. |
-| `--s7comm-port PORT` | *(102 built in)* | Same as `--modbus-port`, for COTP/S7comm. Repeatable. |
+| `--s7comm-port PORT` | *(102 built in)* | Same as `--modbus-port`, for COTP/S7comm. Repeatable. There is no separate `--mms-port` -- MMS rides the identical TPKT/COTP transport on the identical TCP port 102 S7comm uses (see `mms.hpp`'s file header), so this same option's "expected port" annotation also governs MMS traffic. |
 | `--iec104-port PORT` | *(2404 built in)* | Same as `--modbus-port`, for IEC 104. Repeatable. |
 | `--enip-port PORT` | *(44818 built in)* | Same as `--modbus-port`, for EtherNet/IP explicit messaging (TCP). Repeatable. |
 | `--enip-io-port PORT` | *(2222 built in)* | Same as `--modbus-port`, for EtherNet/IP CIP I/O implicit messaging (UDP). Repeatable. |
@@ -535,10 +535,10 @@ text the `text` report shows).
 ## PROTOCOL DETECTION
 
 In `--protocol auto` (the default), every non-empty TCP payload is tested
-against all seven protocols, independent of port number. **OPC UA is tried
+against all eight protocols, independent of port number. **OPC UA is tried
 first of all, then EtherNet/IP, then IEC 104**, before Modbus/TCP, and
-**HART-IP is tried last**, after S7comm/COTP -- see the notes at the end of
-this section for why that specific ordering matters, not just which
+**HART-IP is tried last**, after S7comm/COTP and MMS -- see the notes at the
+end of this section for why that specific ordering matters, not just which
 protocols are tried:
 
 - **OPC UA**: recognized by its 8-byte UA-TCP common header -- the leading 3
@@ -632,6 +632,31 @@ protocols are tried:
   parsed, it's reported as `cotp` (this is the normal case for COTP
   Connection Request/Confirm frames, which carry TSAP session-setup
   parameters rather than S7comm).
+- **MMS (IEC 61850 Manufacturing Message Specification, ISO 9506)**: decoding
+  is attempted under the exact same gate as S7comm/COTP above (`want_s7comm
+  || want_mms` in `decoder.cpp`, the same TPKT/COTP framing, the same
+  default TCP port 102) -- S7comm's own single-byte protocol-id gate
+  (`0x32`/`0x72`) is tried first, since it is materially stronger and
+  cheaper, and MMS is only attempted once that has already failed. MMS then
+  layers its own, separate structural detection gate on top, recognizing
+  three distinct shapes in the COTP Data frame's user data: (a) a full
+  Session-layer SPDU whose leading SI byte is a plausible ISO 8327-1 SPDU
+  type (`1`-`64`, `CLSES_UNIT_DATA(64)` being the highest one-byte type the
+  standard defines -- deliberately not the looser `< 0x80` a first pass at
+  this used, see PROTOCOL COVERAGE's MMS section for the real-capture-found
+  collision that tightened it); (b) a "bare MMS" PDU -- the COTP Data
+  frame's user data starts directly with an MMS PDU's own tag byte
+  (CONTEXT-class, tag number 0-13: constructed `0xA0`-`0xAD` for 11 of the
+  14 `MMSpdu` alternatives, or primitive `0x80`-`0x8D` for the remaining 3 --
+  `cancel-RequestPDU`/`cancel-ResponsePDU` and `conclude-RequestPDU`/
+  `conclude-ResponsePDU`, the only primitive ones); or (c) "bare
+  Presentation" -- the Session layer is skipped entirely but Presentation-
+  layer bytes (leading byte `0x31` CP-type/CPA-type, `0x61`
+  fully-encoded-data, or `0x60` simply-encoded-data) are still present. If
+  none of the three match, this decoder does not claim the traffic as MMS at
+  all and falls through to the generic COTP/S7comm handling above. See
+  PROTOCOL COVERAGE's MMS section for the full four-layer decode this gate
+  unlocks.
 - **HART-IP**: recognized by its 8-byte fixed header -- the MessageType byte
   must be one of 5 defined values (`0x00`-`0x03`, `0x0F`) *and* the MessageID
   byte must be one of 4 defined values (`0x00`-`0x03`), plus this decoder's
@@ -698,15 +723,18 @@ this collision occurs on genuine field traffic, not just a hand-built
 fixture.
 
 `--protocol modbus`, `--protocol dnp3`, `--protocol s7comm`, `--protocol
-iec104`, `--protocol enip`, `--protocol profinet`, `--protocol goose`,
-`--protocol sv`, `--protocol ethercat`, `--protocol bacnet`, `--protocol
-hartip`, or `--protocol opcua` restrict decoding to only that protocol
-(useful for large mixed captures, or for scripting a two-pass analysis).
-`--protocol enip` covers both EtherNet/IP explicit messaging (TCP, above)
-and CIP I/O implicit messaging (UDP, below) -- they're the same overall
-protocol family. `--protocol hartip` covers both HART-IP over TCP (above)
-and over UDP (below) -- HART-IP uses the identical wire format on either
-transport. `--protocol opcua` is TCP only -- OPC UA has no UDP mapping.
+mms`, `--protocol iec104`, `--protocol enip`, `--protocol profinet`,
+`--protocol goose`, `--protocol sv`, `--protocol ethercat`, `--protocol
+bacnet`, `--protocol hartip`, or `--protocol opcua` restrict decoding to
+only that protocol (useful for large mixed captures, or for scripting a
+two-pass analysis). `--protocol enip` covers both EtherNet/IP explicit
+messaging (TCP, above) and CIP I/O implicit messaging (UDP, below) --
+they're the same overall protocol family. `--protocol mms` restricts to MMS
+specifically, distinct from `--protocol s7comm` even though both share the
+same TPKT/COTP transport and port. `--protocol hartip` covers both HART-IP
+over TCP (above) and over UDP (below) -- HART-IP uses the identical wire
+format on either transport. `--protocol opcua` is TCP only -- OPC UA has no
+UDP mapping.
 
 **CIP I/O (implicit messaging), UDP port 2222** is tried, port-independently,
 against every non-empty UDP payload, the same "opportunistic, payload-shape"
@@ -1380,6 +1408,97 @@ unencrypted, a real OT-security finding this decoder surfaces rather than
 hides -- alongside a `notes` entry beginning `"SECURITY FINDING: ..."`. See
 PROTOCOL COVERAGE's OPC UA section for the full rationale.
 
+The following fields appear only when `protocol` is `mms`:
+
+- `mms_is_bare`: `true`/`false` -- always present. `true` when the COTP Data
+  frame's own user data is a bare MMS PDU with no Session/Presentation/ACSE
+  layers at all (see PROTOCOL DETECTION's "bare MMS" shape); when `true`,
+  none of the `mms_session_*`/`mms_presentation_*`/`mms_acse_*` fields below
+  are present.
+- `mms_session_pdu`: the decoded Session SPDU name (e.g. `"CONNECT (CN)"`,
+  `"DATA TRANSFER / GIVE TOKENS"`, `"ACCEPT (AC)"`), `"(no Session layer)"`
+  for the "bare Presentation" shape (Session skipped, Presentation still
+  present), or `"type N"` for an SPDU type this decoder recognizes
+  structurally but doesn't name. Present only when `mms_is_bare` is `false`.
+- `mms_has_presentation`: `true`/`false` -- whether Session's own user-data
+  parameter was present and unwrapped as Presentation's fully-encoded-data
+  alternative. Present only when `mms_is_bare` is `false`.
+- `mms_presentation_contexts`: an array of strings, each
+  `"context N = <OID> (<name>)"` (e.g. `"context 1 = 2.2.1.0.1 (ACSE)"`) --
+  present only when the Presentation layer carried its own
+  presentation-context-definition-list, which only ever appears on an
+  association-establishment frame (CONNECT/ACCEPT), never on an ongoing
+  Data-Transfer message.
+- `mms_presentation_context_id`: the PDV's own presentation-context-
+  identifier, as a plain integer. Present when `mms_has_presentation` is
+  `true`.
+- `mms_presentation_context_is_acse`: `true`/`false` -- `true` when
+  `mms_presentation_context_id` is `1`, per the near-universal "1=ACSE,
+  3=MMS" convention this stateless-per-message decoder assumes for an
+  ongoing frame with no context-definition-list of its own to resolve
+  against (see PROTOCOL COVERAGE's MMS section). Present when
+  `mms_has_presentation` is `true`.
+- `mms_has_acse`: `true`/`false` -- whether an ACSE APDU was reached
+  (association-establishment/release frames only). Present when
+  `mms_has_presentation` is `true`.
+- `mms_acse_pdu`: one of `"AARQ"`/`"AARE"`/`"RLRQ"`/`"RLRE"`/`"ABRT"`.
+  Present when `mms_has_acse` is `true`.
+- `mms_acse_application_context_name`: the negotiated application-context
+  OID, with a friendly name in parens when recognized (e.g.
+  `"1.0.9506.2.3 (MMS)"`). Present when `mms_acse_pdu` is `"AARQ"` or
+  `"AARE"`.
+- `mms_acse_result`: one of `"accepted"`/`"rejected-permanent"`/
+  `"rejected-transient"`/`"unknown(N)"`. Present only on an `"AARE"` that
+  carries a result.
+- `mms_acse_values`: an array of `"key=value"` strings -- RLRQ/RLRE reason,
+  or ABRT source/diagnostic, when present.
+- `mms_has_pdu`: `true`/`false` -- always present when `protocol` is `mms`.
+  Whether an MMS-layer PDU itself was reached and decoded, whether by
+  unwrapping ACSE's own user-information (an association frame), a
+  Presentation PDV's MMS-context payload directly (an ongoing Data-Transfer
+  frame), or a bare frame (`mms_is_bare`) -- `false` if this decoder reached
+  no further than the Session/Presentation/ACSE layers (e.g. an ACSE PDU
+  whose own user-information was absent or unrecognized).
+- `mms_pdu`: the `MMSpdu` CHOICE alternative name (e.g.
+  `"confirmed-RequestPDU"`, `"initiate-ResponsePDU"`, `"rejectPDU"`,
+  `"cancel-ErrorPDU"`, `"unconfirmed-PDU (informationReport)"`). Present
+  when `mms_has_pdu` is `true`.
+- `mms_is_response`: `true`/`false` -- best-effort: `true` for a
+  `*ResponsePDU` shape, `false` for a `*RequestPDU` shape. Present under the
+  same condition as `mms_pdu`.
+- `mms_invoke_id`: the confirmed-Request/Response/ErrorPDU's own invokeID,
+  as a plain integer -- this decoder's own closest analog to OPC UA's
+  RequestHandle or S7comm's PDU reference, though (see "Deliberately NOT
+  implemented" in PROTOCOL COVERAGE's MMS section) never correlated back to
+  the request it answers across packets. Present when `mms_has_pdu` is
+  `true` and the PDU type carries an invokeID.
+- `mms_service_recognized`: `true`/`false` -- `true` when the
+  ConfirmedServiceRequest/Response (or unconfirmed-PDU service) CHOICE
+  alternative is one of the 78 defined MMS confirmed services this
+  decoder's own dispatch table names, regardless of whether this decoder
+  goes on to fully decode its body (Tier 1 vs. Tier 2 -- see PROTOCOL
+  COVERAGE). Present when `mms_has_pdu` is `true`.
+- `mms_service`: the service name (e.g. `"read"`, `"takeControl"`). Present
+  when `mms_service_recognized` is `true`.
+- `mms_error`: the errorClass category name plus numeric code (e.g.
+  `"resource(1)"`), for a `confirmed-ErrorPDU`/`initiate-ErrorPDU`/
+  `cancel-ErrorPDU`/`conclude-ErrorPDU`'s own ServiceError. Present only
+  when the PDU carries one.
+- `mms_values`: an array of decoded `"field=value"` strings, present only
+  when non-empty. The exact shape varies by PDU/service -- e.g.
+  `"variable=simpleIOGenericIO/LLN0$Events"` (a Read/Write/
+  InformationReport ObjectName), `"result[0]=true"` (a decoded Data value
+  from a `read` response or report), or `"servicesSupported=[status,
+  getNameList,...]"` (initiate-RequestPDU/ResponsePDU's own capability
+  negotiation, one entry per SET bit).
+- `mms_body_shown_as_hex`: `true`/`false` -- always present when
+  `mms_has_pdu` is `true`. `true` for a Tier 2 (recognized-but-not-decoded)
+  confirmed service, or any MMS structure this decoder doesn't further
+  parse (see PROTOCOL COVERAGE and LIMITATIONS).
+- `mms_body_length` / `mms_body_hex`: the raw hex bytes (space-separated
+  octets) and their count. Present only when `mms_body_shown_as_hex` is
+  `true` and at least one byte remained.
+
 ### csv
 
 Header row followed by one row per packet:
@@ -1664,6 +1783,402 @@ degrade to a "not decoded" note rather than be misparsed. See
 `tests/real_captures/modbus/ATTRIBUTION.md`. The same capture also confirms
 authoritative transaction-ID pairing (see PROTOCOL DETECTION) against a real
 request/response session, not just the synthetic fixtures.
+
+### IEC 61850 MMS (Manufacturing Message Specification, ISO 9506, TCP port 102, shares TPKT/COTP transport with S7comm)
+
+MMS always rides inside a COTP Data (DT) frame's own user data on TCP port
+102 -- the SAME transport and port S7comm uses -- but it is not S7comm: it
+is a full, independent ISO/OSI application built on three more layers
+stacked on top of COTP, each with its own ASN.1 BER TLV encoding:
+
+```
+COTP Data frame user data
+  -> ISO 8327-1 Session Protocol       (one SPDU: type + length + optional parameters)
+    -> ISO 8823 Presentation Protocol  (CP-type/CPA-type at association time, or a bare
+                                         "fully-encoded-data" wrapper on every later message)
+      -> ISO 8650-1 ACSE               (AARQ/AARE/RLRQ/RLRE/ABRT -- association-time only)
+        -> MMS (ISO 9506)              (the actual application PDU -- Initiate, Read, Write,
+                                         GetNameList, Report, ... -- the payload this decoder exists to reach)
+```
+
+This decoder walks all four layers to reach the MMS PDU, decoding enough of
+Session/Presentation/ACSE to correctly locate the next layer's bytes and to
+surface genuinely useful association-time detail (which abstract
+syntaxes/application-context were negotiated, whether the association was
+accepted), then gives the MMS PDU itself the deepest decode in this file --
+including, unlike this codebase's own OPC UA decoder's Variant/DataValue
+gap, MMS's own "Data" value type (see below): this decoder does NOT leave
+MMS's actual read/write/report VALUES undecoded. Sourcing was cross-checked
+against ISO 8327-1/8823/8650-1's own tables (via Wireshark's
+`packet-ses.h`/`packet-pres.c`/`packet-acse.c`, themselves generated
+directly from each layer's own ASN.1) and MMS's own ISO 9506-2 ASN.1 module
+(via Wireshark's own `mms.asn`, the source its `asn2wrs` compiler consumes
+to generate `packet-mms.c`) -- the same "generated from the standard's own
+machine-readable grammar" sourcing standard already applied to OPC UA's
+`NodeIds.csv`/`StatusCode.csv`. Every tag number was additionally confirmed
+byte-for-byte, by hand, against real captured traffic (`tshark -V`/`-x`),
+both this decoder's own `libiec61850`-generated fixture traffic and genuine
+real-world captures -- see `tests/real_captures/mms/ATTRIBUTION.md`.
+
+#### Structural detection gate: three shapes
+
+Since MMS shares S7comm's exact transport and port, it is only attempted
+once S7comm's own, stronger, single-byte protocol-id gate (`0x32`/`0x72`)
+has already failed (`want_s7comm || want_mms` in `decoder.cpp`). This
+decoder then recognizes three distinct shapes in the COTP Data frame's own
+user data:
+
+- **A full Session-layer SPDU** -- the leading SI byte is a plausible ISO
+  8327-1 SPDU type (`1`-`64`, `CLSES_UNIT_DATA(64)` being the highest
+  one-byte type the standard defines). Every SPDU type this decoder
+  recognizes by name (every value ISO 8327-1 and this decoder's own
+  real-capture research actually found in IEC 61850 MMS traffic): CONNECT
+  (CN, 13), ACCEPT (AC, 14), REFUSE (RF, 12), FINISH (FN, 9), DISCONNECT
+  (DN, 10), ABORT (AB, 25), ABORT ACCEPT (AA, 26), and DATA TRANSFER / GIVE
+  TOKENS (both genuinely share SPDU type 1 on the wire -- which one an
+  implementation "means" is a session-layer token-passing distinction this
+  stateless decoder does not track, so it consumes any number of
+  consecutive SI=1/LI=0 pairs generically and labels the shape "DATA
+  TRANSFER / GIVE TOKENS" rather than confidently picking one). Any other
+  SPDU type is still structurally consumed (byte alignment for whatever
+  follows stays correct) but shown only by its raw type number.
+- **"Bare MMS"** -- the COTP Data frame's own user data begins directly
+  with an MMS PDU's own tag byte: CONTEXT-class, tag number 0-13 --
+  constructed `0xA0`-`0xAD` for 11 of the 14 `MMSpdu` alternatives
+  (`SEQUENCE`-typed, so constructed on the wire), or primitive
+  `0x80`-`0x8D` for the remaining 3 (`cancel-RequestPDU`/
+  `cancel-ResponsePDU ::= Unsigned32`, `conclude-RequestPDU`/
+  `conclude-ResponsePDU ::= NULL`) -- confirmed against real captures (see
+  Validation below). Since every valid Session SPDU type is a small number
+  (1-64) and every MMS top-level PDU tag is CONTEXT-class with the class+
+  constructed-or-not bits at `0x80` or above, there is no ambiguity: this
+  decoder checks the Session-SPDU shape first and falls back to bare MMS
+  only when that check fails.
+- **"Bare Presentation"** -- Session is skipped entirely, but
+  Presentation-layer bytes are still present: CP-type/CPA-type (UNIVERSAL
+  SET, `0x31`), fully-encoded-data (APPLICATION 1 constructed, `0x61`), or
+  simply-encoded-data (APPLICATION 0 primitive, `0x60`). A small number of
+  real, independently-encoded stacks omit the Session-layer "ubiquitous
+  SI=1" marker(s) entirely on an ongoing Data-Transfer message once an
+  association is established.
+
+If none of the three match, this decoder does not claim the traffic as MMS
+at all and falls through to the generic COTP/S7comm handling. The upper
+SPDU-type bound above is deliberately `64`, not the looser `< 0x80` a first
+pass at this decoder used: `0x61` (97 decimal, Presentation's own
+fully-encoded-data tag) is less than `0x80` and was genuinely mistaken for a
+third, bogus SPDU by that looser check -- a real collision this decoder's
+own validation pass found in `iec61850_read.pcap`'s own ongoing
+Data-Transfer frames (two concatenated SI=1/LI=0 pairs immediately followed
+by Presentation bytes), see "Two real structural-gate bugs" below.
+
+#### Session, Presentation, and ACSE layers
+
+**Session (ISO 8327-1)**: one SPDU = SI (1 byte, the SPDU type) + LI (1
+byte -- a plain length, 0-254; `255` is reserved to mean "2-byte extended
+length follows", never observed in real traffic and not implemented).
+Session parameters use their own nested PGI/PI TLV scheme, not ASN.1 BER;
+this decoder walks that list generically for every SPDU type that carries
+parameters and specifically extracts PGI 193 ("Session user data") or 194
+("Extended user data") when present -- that parameter's own content IS the
+next layer's bytes.
+
+**Presentation (ISO 8823)**: at association time, a CP-type/CPA-type SET
+containing a presentation-context-definition-list (a SEQUENCE OF
+{presentation-context-identifier, abstract-syntax-name OID,
+transfer-syntax-name-list}), decoded into "context N = `<OID>` (`<name>`)"
+values (e.g. `"context 1 = 2.2.1.0.1 (ACSE)"`, `"context 3 = 1.0.9506.2.1
+(mms-abstract-syntax-version1)"`). Every SPDU's own "user-data" CHOICE field
+is then unwrapped -- only the "fully-encoded-data" alternative (APPLICATION
+1 constructed, `0x61`) is implemented, a SEQUENCE OF PDV-list, each PDV
+being {presentation-context-identifier, presentation-data-values CHOICE},
+of which only the "single-ASN1-type" alternative (CONTEXT 0, `0xA0`) is
+implemented -- the only shape this decoder's own research (spec text and
+every capture examined) ever found in practice. "Simply-encoded-data"
+(APPLICATION 0) is recognized as a distinct, valid shape but shown as raw
+hex, not decoded further.
+
+Resolving which presentation-context-id means ACSE vs. MMS is where this
+decoder's stateless-per-message design meets a real limit: it cannot
+remember a context-definition-list negotiated in an earlier Connect frame
+while decoding a later ongoing Data-Transfer frame that references a
+context-id by number alone. In every capture this decoder's own research
+examined, the negotiated numbering is identical -- context-id 1 = ACSE,
+context-id 3 = MMS -- the de-facto universal convention essentially every
+IEC 61850 MMS stack uses. This decoder assumes that convention for any
+Data-Transfer PDV whose own frame has no in-message context-definition-list
+to resolve against -- an honestly-stated assumption, corroborated by every
+real capture checked, not a guess invented for this decoder (see
+LIMITATIONS).
+
+**ACSE (ISO 8650-1 / X.227)**: present only on an association-
+establishment/release frame, never an ongoing Data-Transfer message (those
+carry MMS directly at presentation-context 3). All five top-level ACSE APDU
+tags are recognized -- AARQ (APPLICATION 0, `0x60`), AARE (APPLICATION 1,
+`0x61` -- the same byte value as Presentation's own fully-encoded-data tag;
+disambiguated purely positionally, since ACSE tags are only dispatched on
+after Presentation's own content is already unwrapped), RLRQ (APPLICATION
+2, `0x62`), RLRE (APPLICATION 3, `0x63`), ABRT (APPLICATION 4, `0x64`) --
+and decodes application-context-name (an OID, always `1.0.9506.2.3` for
+MMS/IEC 61850 traffic), AARE's own result
+(accepted/rejected-permanent/rejected-transient) and result-source-
+diagnostic, and, the field this decoder actually needs, user-information
+(CONTEXT 30, `0xBE`): a SEQUENCE OF EXTERNAL whose first entry's own
+"encoding" CHOICE, when single-ASN1-type (CONTEXT 0, `0xA0` -- the only
+alternative implemented, the only one ever observed), contains the MMS PDU
+itself (Initiate-RequestPDU inside an AARQ, Initiate-ResponsePDU inside an
+AARE). AARQ/AARE's calling/called-AP-title and AE-qualifier fields, when
+present, are surfaced as plain OID/integer values without resolving
+AP-title-form1 further than "present, structurally skipped" (never observed
+in this decoder's own research); the authentication-value field is
+structurally skipped, not decoded (never observed either, and safely
+skippable per ACSE's own EXPLICIT tagging without losing byte alignment).
+
+#### MMS layer: MMSpdu, Tier 1 vs. Tier 2 services, and the Data value type
+
+`MMSpdu` is a CHOICE of 14 alternatives, each its own CONTEXT-class
+constructed tag 0-13 (`0xA0`-`0xAD`): confirmed-RequestPDU(0),
+confirmed-ResponsePDU(1), confirmed-ErrorPDU(2), unconfirmed-PDU(3),
+rejectPDU(4), cancel-RequestPDU(5), cancel-ResponsePDU(6),
+cancel-ErrorPDU(7), initiate-RequestPDU(8), initiate-ResponsePDU(9),
+initiate-ErrorPDU(10), conclude-RequestPDU(11), conclude-ResponsePDU(12),
+conclude-ErrorPDU(13).
+
+**initiate-RequestPDU/ResponsePDU** -- the MMS analog of this codebase's own
+S7comm "Setup Communication" / OPC UA OpenSecureChannel -- are decoded in
+full: localDetail(Calling/Called), proposedMaxServOutstanding(Calling/
+Called), proposed/negotiatedDataStructureNestingLevel, and the nested
+InitRequestDetail/InitResponseDetail's own version number and two BIT
+STRING capability fields (ParameterSupportOptions -- str1/str2/vnam/valt/
+vadr/vsca/tpy/vlis/real/cei -- and ServiceSupportOptions, one bit per
+confirmed service, ~85 bits), with every SET bit surfaced by name.
+
+**confirmed-RequestPDU/ResponsePDU** always carry an invokeID (an
+application-chosen correlation number, never itself correlated back to the
+request it answers across packets -- see "Deliberately not implemented"
+below) and a ConfirmedServiceRequest/Response CHOICE selecting one of 78
+defined confirmed services. This decoder's own dispatch table names every
+one of the 78 and splits them into two tiers:
+
+- **Tier 1** (full field decode -- 11 services): `status`, `getNameList`,
+  `identify`, `read`, `write`, `getVariableAccessAttributes`,
+  `defineNamedVariableList`, `getNamedVariableListAttributes`,
+  `deleteNamedVariableList`, `getDomainAttributes`, `getCapabilityList` --
+  the services this decoder's own research found are (a) universally
+  present in real IEC 61850 MMS traffic and (b) simple enough to decode
+  with full confidence. Tier 1 also covers unconfirmed-PDU's own
+  informationReport (see below) and every one of rejectPDU/cancel-*/
+  conclude-* (each small and fully specified).
+- **Tier 2** (service name + invokeID only, body shown as raw hex): every
+  other confirmed service -- `rename`, `defineNamedVariable`,
+  `defineScatteredAccess`, `getScatteredAccessAttributes`,
+  `deleteVariableAccess`, `defineNamedType`, `getNamedTypeAttributes`,
+  `deleteNamedType`, `input`, `output`, `takeControl`,
+  `relinquishControl`, every semaphore/event-condition/event-action/
+  event-enrollment/journal/file/program-invocation/domain-download service
+  -- genuinely rare in ordinary IEC 61850 process-data traffic (belonging
+  more to MMS's original general-purpose industrial-messaging scope than to
+  IEC 61850's own narrower profile of it), each with its own, sometimes
+  large, request/response grammar this first-pass release does not
+  implement field-by-field.
+
+**The Data value type**: unlike this codebase's own OPC UA decoder (which
+deliberately leaves Variant/DataValue undecoded), this decoder fully
+implements MMS's own "Data" CHOICE (ISO 9506-2's own self-describing value
+type, used everywhere an actual read/write/report VALUE appears on the
+wire) -- 14 of its 17 defined alternatives: array/structure (recursive
+SEQUENCE OF Data, tags 1/2, capped at 32 levels of recursion -- see below),
+boolean(3), bit-string(4), integer(5)/unsigned(6) (BER INTEGER, sign-
+extended for integer, not for unsigned), floating-point(7) (an OCTET STRING
+whose first byte is the IEEE754 exponent width in bits -- 8, the only width
+ever found in practice -- followed by the big-endian IEEE754 value itself;
+any other declared width is shown as raw hex rather than guessed at),
+octet-string(9), visible-string(10), bcd(13), booleanArray(14) (a BIT
+STRING whose bits are individually rendered true/false), objId(15) (an
+OBJECT IDENTIFIER), mMSString(16, a UTF-8 string -- an IEC 61850 Edition 2
+addition), utc-time(17) (an 8-byte OCTET STRING -- 4 bytes
+SecondsSinceEpoch + 3 bytes FractionOfSecond + 1 byte leap-seconds-known/
+clock-failure/clock-not-synchronized/accuracy flags -- an IEC 61850-8-1
+addition). The 3 alternatives NOT decoded, each shown as raw hex, are
+real[8] (BER REAL, ISO 9506's own alternative float encoding),
+generalized-time[11] (ASN.1 GeneralizedTime), and binary-time[12]
+(TimeOfDay) -- none was ever observed in this decoder's own research. This
+is a genuine, meaningful strength of this decoder over leaving values
+opaque: the actual point values an MMS client reads or writes, and every
+value inside an InformationReport, are visible in this decoder's own
+output, not merely that a read/write/report happened.
+
+**Recursion depth cap**: Data's own array/structure alternatives are
+recursive. This decoder caps recursion at 32 levels -- a real,
+independently-reproducible bug was found DURING this decoder's own
+validation: `tshark` 4.2.2's own MMS dissector hits an internal
+`recursion_depth <= 100` assertion and aborts dissection entirely on
+roughly 43 of 224 frames of genuine, non-malicious, independent-stack-
+generated report traffic this decoder's own research captured (see
+Validation below) -- a concrete, observed reminder that an unbounded-
+recursion deeply-nested Data value is a real denial-of-service surface for
+any MMS parser, this decoder included were it not for this cap. Past the
+cap, this decoder stops descending and shows the remaining bytes as raw hex
+rather than recursing further or guessing -- never crashing, never
+hanging.
+
+**InformationReport** (unconfirmed-PDU's own [0] alternative) is this
+decoder's own MMS analog of its GOOSE decoder, and IEC 61850-8-1's actual
+mechanism for Buffered/Unbuffered Report Control Blocks -- decoded in
+full: variableAccessSpecification (either a listOfVariable, each entry an
+ObjectName rendered the same domain/item `$`-separated-path style as
+GetNameList/Read/Write, or a variableListName ObjectName, including the
+special, reserved vmd-specific "RPT" name real Report traffic actually
+uses to mean "this report's own pre-configured dataset") and
+listOfAccessResult (each entry decoded with the same Data-value decoder
+used everywhere else in this file). This decoder does NOT attempt to label
+which positional value in that list is RptID vs. SeqNum vs. an actual
+dataset member's value -- IEC 61850's own optional-fields negotiation
+(ReportedOptFlds, decided out-of-band when the Report Control Block was
+configured) determines that, information this stateless-per-message
+decoder does not have -- the same honest positional-list-without-field-
+labels posture this codebase's own GOOSE decoder already takes for
+allData.
+
+**ObjectName rendering**: domain-specific (the overwhelmingly common IEC
+61850 shape) is rendered `"domainId/itemId"` (e.g.
+`"simpleIOGenericIO/LLN0$Events"`, `"simpleIOGenericIO/GGIO1$MX$AnIn1$mag$f"`
+-- the itemId's own `$` separators are IEC 61850's own logical-node/
+functional-constraint/data-object/data-attribute path convention, left
+as-is rather than reinterpreted); vmd-specific and aa-specific are rendered
+as their own bare Identifier string.
+
+**ServiceError** (confirmed-ErrorPDU, cancel-ErrorPDU, conclude-ErrorPDU,
+initiate-ErrorPDU) decodes into an errorClass category name + numeric code
+(e.g. `"access(2)"` for object-non-existent) plus, when present,
+additionalCode and additionalDescription -- the MMS analog of this
+codebase's own S7comm error-class/error-code or OPC UA StatusCode decode.
+`rejectPDU` decodes into its own originalInvokeID (when present) and
+rejectReason category + specific reason name.
+
+#### Deliberately not implemented
+
+Stateful association/invocation tracking (correlating a later Data-Transfer
+message's presentation-context-id back to an earlier Connect frame's own
+context-definition-list, or a confirmed-ResponsePDU's own invokeID back to
+the confirmed-RequestPDU that invoked it) -- this decoder is, like every
+other protocol in this codebase, a stateless-per-message decoder with
+TCP-stream-level reassembly only (COTP's own EOT-based fragment
+reassembly, already implemented for S7comm and shared as-is by MMS -- MMS
+needs no reassembly mechanism of its own); Presentation-layer context
+renegotiation mid-association (ISO 8823's own "presentation-context-
+addition-list" extension) -- never observed in real traffic; AARQ/AARE's
+own authentication-value field, structurally skipped; and MMS's own
+file-transfer services (`obtainFile`/`fileOpen`/`fileRead`/`fileClose`/
+`fileRename`/`fileDelete`/`fileDirectory`) are named (Tier 2) but not
+decoded -- IEC 61850's own COMTRADE/disturbance-file-retrieval use of MMS
+file services is a real, if narrower, OT-security-relevant use case this
+first-pass release leaves for future work (see ROADMAP). `Address`
+(non-symbolic variable addressing, one of VariableSpecification's own two
+alternatives alongside `name`) is likewise structurally recognized but
+shown only as `"address=<Address, not decoded>"`, not decoded field-by-
+field, since real IEC 61850 traffic overwhelmingly addresses variables by
+symbolic `name` instead. `TypeSpecification` (part of
+defineNamedVariableList/getVariableAccessAttributes-response) is likewise
+recognized as present but shown only as `"typeSpecification=<TypeSpecification,
+not decoded>"`.
+
+#### Validation
+
+Two real bugs this validation pass caught, both in this decoder's own
+first-pass structural detection gate (documented in full, in this
+project's own exact framing, in `tests/real_captures/mms/ATTRIBUTION.md` --
+summarized here): first, the "bare MMS" gate originally required the
+leading byte's constructed bit to be set, reasoning correctly but
+incompletely that 11 of the 14 `MMSpdu` alternatives are `SEQUENCE`-typed
+and so constructed on the wire -- the remaining 3
+(`cancel-RequestPDU`/`cancel-ResponsePDU ::= Unsigned32` and
+`conclude-RequestPDU`/`conclude-ResponsePDU ::= NULL`) are primitive, and
+`mms-cancelRequest.pcap`'s own genuine `cancel-RequestPDU`/
+`conclude-RequestPDU` frames were silently missed (falling back to the
+generic `cotp` label) until this pass caught it; fixed by dropping the
+constructed-bit requirement entirely, since context-class tag number 0-13
+alone is sufficient (no primitive/constructed ambiguity risk -- every
+alternative's own shape is fixed by its type, not chosen per-message).
+Second, the Session-layer SPDU-walking loop's own "is this byte a plausible
+SPDU type" check originally accepted any value below `0x80`; real traffic
+in `iec61850_read.pcap`'s own ongoing Data-Transfer frames sends two
+concatenated SI=1/LI=0 pairs before Presentation's own bytes begin, and
+Presentation's own fully-encoded-data tag (`0x61`, 97 decimal) is less than
+`0x80` and was genuinely mistaken for a third, bogus SPDU; fixed by
+tightening the bound to the real ISO 8327-1 range (1-64).
+
+Real-capture validation used four files -- three genuine real-world
+historical captures from `ITI/ICS-Security-Tools`'s own
+`pcaps/IEC61850/MMS - Specific Commands/` directory (the same general
+ICS-security resource collection already used for other protocols in this
+project), and one this project generated itself:
+
+- **`iec61850_read.pcap`** (20 frames) -- a full association: COTP
+  Connection Request/Confirm, a Session `CONNECT (CN)` SPDU carrying an
+  ACSE `AARQ` (application-context-name `1.0.9506.2.3 (MMS)`, a
+  presentation-context-definition-list decoding into `context 1 =
+  2.2.1.0.1 (ACSE)` / `context 3 = 1.0.9506.2.1
+  (mms-abstract-syntax-version1)`) wrapping an `initiate-RequestPDU` (full
+  capability negotiation), a `read` confirmed-RequestPDU/ResponsePDU pair
+  (`variable=mu`, a genuinely zero-length `listOfAccessResult`, hand-
+  verified byte-for-byte, not a decode gap), and a
+  `conclude-RequestPDU`/response pair. Two frames are genuinely malformed:
+  frame 10 (the server's own ACCEPT response) declares a Session-layer
+  length that doesn't match the bytes actually remaining -- hand-verified,
+  and independently flagged `[Malformed Packet]` by `tshark` 4.2.2 on the
+  same frame -- and this decoder degrades gracefully (falls back to the
+  generic `cotp` label rather than guessing); frame 18's own
+  confirmed-ResponsePDU has its `confirmedServiceResponse` field entirely
+  missing after invokeID (7 content bytes total), reported as a note
+  rather than guessed at.
+- **`mms-takeControl.pcap`** (24 frames) and **`mms-cancelRequest.pcap`**
+  (20 frames) are both "bare MMS" -- the real-world shape that motivated
+  this decoder's own "Bare MMS" fallback path. `mms-takeControl.pcap`
+  contains a bare `initiate-RequestPDU` followed by
+  `takeControl`/`relinquishControl` confirmed-RequestPDUs (both Tier 2).
+  `mms-cancelRequest.pcap` contains a bare `initiate-RequestPDU`, then a
+  genuine `cancel-RequestPDU` (invokeID=1) and `conclude-RequestPDU` --
+  both primitive MMSpdu alternatives, which is what caught the first bug
+  above. Both files also contain COTP Data frames whose own declared
+  length indicator is `0` (genuinely malformed per COTP's own framing
+  rules), reported honestly as `parse-error` by this decoder's own
+  pre-existing COTP layer (`cotp.cpp`, unmodified by this MMS work) --
+  confirmed to be a pre-existing characteristic of the capture files
+  themselves, not something this MMS work introduced, by reproducing the
+  identical warning with `--protocol s7comm`.
+
+`libiec61850_loopback_capture.pcap` is **not** a found-in-the-wild
+capture -- generated by this project itself, building and running
+[`mz-automation/libiec61850`](https://github.com/mz-automation/libiec61850)
+(commit `96d69e9c`, a real, independent, widely-used open-source IEC 61850
+stack) entirely inside this project's own development environment and
+capturing the resulting loopback traffic with `tshark -i lo`: a server
+running `examples/server_example_basic_io`'s own generic IO model against
+four of libiec61850's own bundled example client programs in sequence,
+covering model browsing, reads, writes, control operations, and periodic
+report generation. Decoding it with `--protocol mms` recognizes **117 of
+224 frames** as `mms` (the rest are TCP handshake/ACK-only segments and the
+loopback COTP Connection Request/Confirm, correctly reported as `tcp`/
+`cotp`) -- **zero parse warnings, zero parse errors, zero crashes** --
+across a full association (AARQ/AARE, 8 of each), `read` (24 pairs),
+`write` (13 pairs), `getNameList` (3 pairs), `identify` (1 pair),
+`getVariableAccessAttributes` (4 pairs), and 17 `informationReport`s
+(periodic Report Control Block traffic). One `informationReport` (frame
+24) decodes a real, independently-encoded `Data` value of every kind this
+decoder implements in one message: `mMSString` (`"Events1"`), `bit-string`
+(`bits[1,2,3,4,8]`), `integer`, `binary-time` (correctly shown as raw hex
+-- out of this decoder's own documented scope), a domain-qualified
+`visible-string` dataset reference (`"simpleIOGenericIO/LLN0$Events"`),
+`boolean`s, and further `bit-string`s -- independent, byte-for-byte
+confirmation that `decode_data_value`'s own understanding of the `Data`
+CHOICE matches a real, independent encoder's output, not only this
+decoder's own synthetic fixture. Cross-checking this same capture against
+tshark's own MMS dissector for ground truth is also what surfaced the
+`recursion_depth <= 100` assertion-failure bug cited above under
+"Recursion depth cap" -- see `tests/real_captures/mms/ATTRIBUTION.md` for
+the complete writeup of both real bugs this validation pass found. See
+`include/conduitscope/mms.hpp`'s file header for the full writeup.
 
 ### IEC 60870-5-104 (TCP port 2404)
 
@@ -3394,8 +3909,10 @@ These are current, not aspirational -- each has a corresponding ROADMAP item.
   flow, when it is split across two or more TCP segments -- so a Modbus PDU
   that straddles a segment boundary, a DNP3 data-link frame split
   mid-header, an IEC 104 APDU split mid-APCI/ASDU, an EtherNet/IP
-  encapsulation message split mid-header or mid-CIP-message, an S7comm
-  request/response TPKT frame split across segments, or an OPC UA chunk
+  encapsulation message split mid-header or mid-CIP-message, an S7comm or
+  MMS request/response TPKT frame split across segments (the same TPKT/COTP
+  reassembly buffers both, since MMS rides the identical framing -- see
+  PROTOCOL COVERAGE's MMS section), or an OPC UA chunk
   split across segments all now get fully
   reassembled and decoded, not just the first segment's worth of bytes.
   Each protocol's own declared length field (the MBAP length, the DNP3
@@ -3421,7 +3938,11 @@ These are current, not aspirational -- each has a corresponding ROADMAP item.
   DETECTION) and chaining a genuine S7comm message across multiple complete
   TPKT/COTP frames via COTP's own EOT bit
   (`Decoder::reassemble_cotp_data_frame` -- see PROTOCOL COVERAGE's S7comm/
-  COTP section, and further down in this list).
+  COTP section, and further down in this list). MMS shares this exact
+  EOT-based fragment-reassembly mechanism as-is (it needs no mechanism of
+  its own -- see PROTOCOL COVERAGE's MMS section), though it has no
+  real-capture evidence of ever needing it: every real MMS capture checked
+  so far carries its message complete in a single COTP Data frame.
 
   DNP3 additionally has its own separate, higher-layer reassembly: an
   *application* fragment that spans multiple complete data-link frames
@@ -3834,6 +4355,43 @@ These are current, not aspirational -- each has a corresponding ROADMAP item.
   sequence signal worth trusting for that. Buffering is capped at 1 MiB /
   2000 frames per flow against a pathological/malformed capture.
 - **S7comm-Plus (protocol id 0x72) is detected but never decoded.**
+- **Most of MMS's 78 confirmedServices are Tier 2 (name + invokeID only,
+  body shown as raw hex).** Only 11 are fully field-decoded (Tier 1):
+  `status`, `getNameList`, `identify`, `read`, `write`,
+  `getVariableAccessAttributes`, `defineNamedVariableList`,
+  `getNamedVariableListAttributes`, `deleteNamedVariableList`,
+  `getDomainAttributes`, `getCapabilityList` -- see PROTOCOL COVERAGE's MMS
+  section for why exactly these 11 and not others.
+- **MMS's Session layer only supports the "normal" (one-byte-length-per-
+  parameter) SPDU length form ISO 8327-1 defines** -- the extended 2-byte
+  length form (LI `0xFF`) is recognized as a distinct, legal encoding but
+  not implemented, since it has never been observed in real IEC 61850 MMS
+  traffic during this decoder's own research.
+- **MMS's `TypeSpecification` and non-symbolic `Address` variable
+  addressing are not decoded** -- both are structurally recognized as
+  present (shown as e.g. `"address=<Address, not decoded>"` /
+  `"typeSpecification=<TypeSpecification, not decoded>"` inside
+  `mms_values`) but not decoded field-by-field, since real IEC 61850
+  traffic overwhelmingly addresses variables by symbolic `name` instead.
+- **MMS's "1=ACSE, 3=MMS" presentation-context convention is an honest
+  assumption, not a guarantee.** This decoder is stateless per message, so
+  it cannot remember a context-definition-list negotiated on an earlier
+  Connect frame while decoding a later, unrelated ongoing Data-Transfer
+  frame -- it instead assumes the near-universal convention that
+  presentation-context 1 means ACSE and 3 means MMS, the same
+  honestly-stated-assumption pattern already used elsewhere in this
+  codebase (e.g. HART-IP's Status-byte handling). Every real capture
+  checked corroborates this convention, but a hypothetical stack that
+  negotiated a different numbering would be misread.
+- **Multiple complete MMS/TPKT/COTP frames coalesced into a single TCP
+  segment: only the first is decoded.** This is a pre-existing general
+  COTP/TPKT framing limitation, not new to MMS -- `try_parse_tpkt_cotp`
+  (`cotp.cpp`) clamps parsing to exactly one TPKT frame's own declared
+  length so a second, pipelined TPKT frame in the same TCP segment can't be
+  misread as part of the first one's payload, and notes how many
+  additional bytes remain undecoded rather than guessing at them; it now
+  also applies to MMS specifically, since MMS shares this exact TPKT/COTP
+  framing with S7comm.
 - **Live capture (`-i`) is an optional, build-time-detected feature, not
   always present.** A binary built without libpcap/Npcap found still runs
   everything else identically; `-i`/`interfaces` just report that clearly.
@@ -3955,6 +4513,15 @@ item tags conduitscope decoded, one line per Read Var / Write Var packet:
 ```sh
 conduitscope decode -r capture.pcap --protocol s7comm -f json \
   | jq -r '.[] | select(.s7comm_items) | "\(.src_ip) -> \(.dst_ip): \(.s7comm_items | join(", "))"'
+```
+
+See every IEC 61850 MMS read/write/report value decoded on a capture that
+shares S7comm's own port 102 -- variable names and their values, one line
+per packet that carries any:
+
+```sh
+conduitscope decode -r capture.pcap --protocol mms -f json \
+  | jq -r '.[] | select(.mms_values) | "\(.src_ip) -> \(.dst_ip): \(.mms_values | join(", "))"'
 ```
 
 See which DNP3 function codes and object groups/variations flow over a
@@ -4343,6 +4910,26 @@ Rough order, each building on the groundwork this release establishes:
     non-`'F'` chunk, and any Tier 2 service besides Call, if a second real
     OPC UA capture with that coverage ever turns up (see
     `tests/real_captures/opcua/ATTRIBUTION.md`'s own honest scope).
+12. **Extend MMS's Tier 2 confirmedServices to full field decoding** --
+    currently 67 of the 78 defined confirmed services (see PROTOCOL
+    COVERAGE's MMS section) get only a name + invokeID, body shown as raw
+    hex. The file-transfer services (`obtainFile`/`fileOpen`/`fileRead`/
+    `fileClose`/`fileRename`/`fileDelete`/`fileDirectory`) are the most
+    OT-security-relevant of these to prioritize -- IEC 61850's own
+    COMTRADE/disturbance-file-retrieval use of MMS file services is a real
+    use case this first-pass release leaves undecoded. Also: decode
+    `Address` (non-symbolic variable addressing) and `TypeSpecification`
+    (currently both shown only as a structural placeholder); implement the
+    Session layer's extended (2-byte) length form, if real traffic using it
+    ever turns up; and widen real-capture validation beyond the three small
+    ITI/ICS-Security-Tools captures and one self-generated libiec61850
+    session this decoder currently has (see
+    `tests/real_captures/mms/ATTRIBUTION.md`) -- in particular, a real
+    capture exercising a Tier 2 service, a ServiceError/rejectPDU on real
+    traffic (currently synthetic-fixture-validated only), or a stack that
+    negotiates a presentation-context numbering other than the assumed
+    "1=ACSE, 3=MMS" convention, would meaningfully extend this decoder's
+    own confidence.
 
 **pcapng support** is also now done: both classic pcap and pcapng are read
 transparently (auto-detected, no flag needed) -- see "pcap vs. pcapng"
@@ -4621,6 +5208,37 @@ contains two deliberately malformed CallRequest packets -- one of which
 triggered Wireshark's own ~2-minute dissector freeze -- that this decoder's
 own Tier 2 raw-hex scope is structurally immune to, since it never attempts
 to parse a malformed CallRequest body at all.
+
+**IEC 61850 MMS support** is also now done: the full four-layer stack
+(Session ISO 8327-1 / Presentation ISO 8823 / ACSE ISO 8650-1 / MMS ISO
+9506-2) is decoded, sharing S7comm's exact TPKT/COTP transport and TCP port
+102 but detected by its own, separate structural gate recognizing three
+shapes (a full Session-layer association, "bare MMS", and "bare
+Presentation") -- see PROTOCOL COVERAGE's MMS section and item 12 above for
+what's still out of scope. Unlike this codebase's own OPC UA decoder, MMS's
+own self-describing "Data" value type (14 of 17 alternatives) IS decoded in
+full, so the actual read/write/report values an MMS client exchanges are
+visible, not just that an exchange happened; a hard-capped 32-level
+recursion depth on Data's own array/structure alternatives defends against
+a real denial-of-service class this decoder's own validation independently
+confirmed -- `tshark` 4.2.2's own MMS dissector hits an internal recursion
+assertion and aborts entirely on roughly 43 of 224 frames of genuine,
+non-malicious traffic this decoder's own research captured. 11 of MMS's 78
+confirmedServices get full field decoding (Tier 1); the rest are named with
+invokeID only, body shown as raw hex (Tier 2), the same two-tier scoping
+precedent this codebase already applies to OPC UA's own service dispatch.
+Validated against three genuine real-world captures from
+`ITI/ICS-Security-Tools` (one a full association with two independently-
+confirmed malformed frames, two "bare MMS" -- the shape that caught a real
+bug in this decoder's own first-pass bare-MMS structural gate, since 3 of
+the 14 `MMSpdu` alternatives are primitive, not constructed, on the wire)
+plus a 224-frame capture this project generated itself against a real,
+independent open-source stack (`mz-automation/libiec61850`) -- 117 of 224
+frames recognized as `mms`, zero parse warnings, zero parse errors, zero
+crashes, and a real informationReport frame confirming this decoder's own
+`Data`-value decode against an independent encoder byte-for-byte (see
+`tests/real_captures/mms/ATTRIBUTION.md` for both structural-gate bugs this
+validation pass found and fixed).
 
 ## BUILDING
 

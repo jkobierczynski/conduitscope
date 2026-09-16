@@ -99,6 +99,9 @@ private:
     std::map<std::string, size_t> opcua_message_type_counts_;  // "Hello"/"OpenSecureChannel"/"Message"/...
     std::map<std::string, size_t> opcua_service_counts_;  // keyed by service name, only when
                                                              // opcua_service_recognized
+    std::map<std::string, size_t> mms_pdu_counts_;      // "confirmed-RequestPDU"/"initiate-RequestPDU"/...
+    std::map<std::string, size_t> mms_service_counts_;  // keyed by service name, only when
+                                                          // mms_service_recognized
     bool has_ts_ = false;
     double first_ts_ = 0.0, last_ts_ = 0.0;
 };

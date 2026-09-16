@@ -17,6 +17,7 @@
 #include "conduitscope/iec104.hpp"
 #include "conduitscope/ipv4.hpp"
 #include "conduitscope/link_layer.hpp"
+#include "conduitscope/mms.hpp"
 #include "conduitscope/modbus.hpp"
 #include "conduitscope/profinet.hpp"
 #include "conduitscope/s7comm.hpp"
@@ -281,6 +282,8 @@ bool Decoder::reassemble_tcp_payload(const TcpSegment& tcp, const std::string& f
                       options_.protocol_filter == ProtocolFilter::Dnp3Only;
     bool want_s7comm = options_.protocol_filter == ProtocolFilter::Auto ||
                         options_.protocol_filter == ProtocolFilter::S7commOnly;
+    bool want_mms = options_.protocol_filter == ProtocolFilter::Auto ||
+                     options_.protocol_filter == ProtocolFilter::MmsOnly;
     bool want_hartip = options_.protocol_filter == ProtocolFilter::Auto ||
                         options_.protocol_filter == ProtocolFilter::HartIpOnly;
     bool want_opcua = options_.protocol_filter == ProtocolFilter::Auto ||
@@ -343,7 +346,7 @@ bool Decoder::reassemble_tcp_payload(const TcpSegment& tcp, const std::string& f
             which = "DNP3 data-link";
         }
     }
-    if (!declared && want_s7comm) {
+    if (!declared && (want_s7comm || want_mms)) {
         if (auto d = tpkt_declared_length(candidate)) {
             declared = d;
             which = "TPKT/COTP";
@@ -979,6 +982,8 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                           options_.protocol_filter == ProtocolFilter::Dnp3Only;
         bool want_s7comm = options_.protocol_filter == ProtocolFilter::Auto ||
                             options_.protocol_filter == ProtocolFilter::S7commOnly;
+        bool want_mms = options_.protocol_filter == ProtocolFilter::Auto ||
+                         options_.protocol_filter == ProtocolFilter::MmsOnly;
         bool want_hartip = options_.protocol_filter == ProtocolFilter::Auto ||
                             options_.protocol_filter == ProtocolFilter::HartIpOnly;
         bool want_opcua = options_.protocol_filter == ProtocolFilter::Auto ||
@@ -1334,7 +1339,7 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
             }
         }
 
-        if (want_s7comm) {
+        if (want_s7comm || want_mms) {
             if (auto cotp = try_parse_tpkt_cotp(effective_payload)) {
                 bool expected_port = port_in(tcp.src_port, COTP_TCP_PORT, options_.extra_s7comm_ports) ||
                                       port_in(tcp.dst_port, COTP_TCP_PORT, options_.extra_s7comm_ports);
@@ -1380,41 +1385,88 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                     // legitimately be empty (e.g. every buffered fragment plus the final one all
                     // carried zero bytes of user data, seen in real captures -- see
                     // tests/real_captures/s7comm/ATTRIBUTION.md).
-                    if (auto s7 = try_parse_s7comm(s7_candidate)) {
-                        out.protocol = "s7comm";
-                        out.summary = s7->summary;
-                        for (const auto& n : s7->notes) out.notes.push_back(n);
-                        out.s7comm_has_function = s7->has_function;
-                        out.s7comm_function_name = s7->function_name;
-                        constexpr size_t kMaxTags = 50;
-                        for (size_t i = 0; i < s7->items.size() && i < kMaxTags; ++i) {
-                            const auto& it = s7->items[i];
-                            std::string display_tag = !it.tag.empty() ? it.tag : it.area_name;
-                            // A consumer parsing this array as trusted addresses must not mistake an
-                            // unverified reconstruction for the well-established S7ANY decode.
-                            if (it.is_experimental) display_tag += " [EXPERIMENTAL]";
-                            out.s7comm_item_tags.push_back(display_tag);
-                        }
-                        for (size_t i = 0; i < s7->data_items.size() && i < kMaxTags; ++i) {
-                            const auto& di = s7->data_items[i];
-                            // return_code_name is only set for items that carry a return code on
-                            // the wire (Read Var / Write Var responses); a Write Var request's
-                            // value item has none, so this falls straight through to the value.
-                            if (!di.return_code_name.empty() && di.return_code != 0xFF) {
-                                out.s7comm_value_summaries.push_back(di.return_code_name);
-                            } else if (di.has_value_fields && di.transport_size == 0x03 && di.data.size() == 1) {
-                                out.s7comm_value_summaries.push_back(di.data.at(0) != 0 ? "1" : "0");
-                            } else if (di.has_value_fields && !di.data.empty()) {
-                                out.s7comm_value_summaries.push_back(to_hex(di.data, ""));
-                            } else if (!di.return_code_name.empty()) {
-                                out.s7comm_value_summaries.push_back("ok");
-                            } else {
-                                out.s7comm_value_summaries.push_back("");
+                    if (want_s7comm) {
+                        if (auto s7 = try_parse_s7comm(s7_candidate)) {
+                            out.protocol = "s7comm";
+                            out.summary = s7->summary;
+                            for (const auto& n : s7->notes) out.notes.push_back(n);
+                            out.s7comm_has_function = s7->has_function;
+                            out.s7comm_function_name = s7->function_name;
+                            constexpr size_t kMaxTags = 50;
+                            for (size_t i = 0; i < s7->items.size() && i < kMaxTags; ++i) {
+                                const auto& it = s7->items[i];
+                                std::string display_tag = !it.tag.empty() ? it.tag : it.area_name;
+                                // A consumer parsing this array as trusted addresses must not mistake an
+                                // unverified reconstruction for the well-established S7ANY decode.
+                                if (it.is_experimental) display_tag += " [EXPERIMENTAL]";
+                                out.s7comm_item_tags.push_back(display_tag);
                             }
+                            for (size_t i = 0; i < s7->data_items.size() && i < kMaxTags; ++i) {
+                                const auto& di = s7->data_items[i];
+                                // return_code_name is only set for items that carry a return code on
+                                // the wire (Read Var / Write Var responses); a Write Var request's
+                                // value item has none, so this falls straight through to the value.
+                                if (!di.return_code_name.empty() && di.return_code != 0xFF) {
+                                    out.s7comm_value_summaries.push_back(di.return_code_name);
+                                } else if (di.has_value_fields && di.transport_size == 0x03 && di.data.size() == 1) {
+                                    out.s7comm_value_summaries.push_back(di.data.at(0) != 0 ? "1" : "0");
+                                } else if (di.has_value_fields && !di.data.empty()) {
+                                    out.s7comm_value_summaries.push_back(to_hex(di.data, ""));
+                                } else if (!di.return_code_name.empty()) {
+                                    out.s7comm_value_summaries.push_back("ok");
+                                } else {
+                                    out.s7comm_value_summaries.push_back("");
+                                }
+                            }
+                            for (const auto& n : cotp->notes) out.notes.push_back(n);
+                            annotate_port();
+                            return out;
                         }
-                        for (const auto& n : cotp->notes) out.notes.push_back(n);
-                        annotate_port();
-                        return out;
+                    }
+
+                    // MMS shares this exact TCP port 102 / TPKT+COTP transport with S7comm -- see
+                    // mms.hpp's own file-header comment on dispatch ordering. S7comm's single-byte
+                    // protocol-id gate is tried first (above) since it is materially stronger and
+                    // cheaper; this is only reached once that has already failed.
+                    if (want_mms) {
+                        if (auto mms = try_parse_mms(s7_candidate)) {
+                            out.protocol = "mms";
+                            out.summary = mms->summary;
+                            for (const auto& n : mms->notes) out.notes.push_back(n);
+                            out.mms_is_bare = mms->is_bare;
+                            out.mms_session_spdu_type = mms->session_spdu_type;
+                            out.mms_session_pdu_name = mms->session_pdu_name;
+                            out.mms_has_presentation = mms->has_presentation;
+                            out.mms_presentation_context_list = mms->presentation_context_list;
+                            out.mms_presentation_context_id = mms->presentation_context_id;
+                            out.mms_presentation_context_is_acse = mms->presentation_context_is_acse;
+                            out.mms_has_acse = mms->has_acse;
+                            out.mms_acse_pdu_name = mms->acse_pdu_name;
+                            out.mms_acse_application_context_name = mms->acse_application_context_name;
+                            out.mms_acse_has_result = mms->acse_has_result;
+                            out.mms_acse_result_name = mms->acse_result_name;
+                            out.mms_acse_values = mms->acse_values;
+                            out.mms_has_pdu = mms->has_pdu;
+                            out.mms_pdu_name = mms->pdu_name;
+                            out.mms_has_invoke_id = mms->has_invoke_id;
+                            out.mms_invoke_id = mms->invoke_id;
+                            out.mms_service_recognized = mms->service_recognized;
+                            out.mms_service_name = mms->service_name;
+                            out.mms_service_body_decoded = mms->service_body_decoded;
+                            out.mms_is_response = mms->is_response;
+                            out.mms_has_error = mms->has_error;
+                            out.mms_error_name = mms->error_name;
+                            constexpr size_t kMaxMmsValues = 50;
+                            for (size_t i = 0; i < mms->values.size() && i < kMaxMmsValues; ++i) {
+                                out.mms_values.push_back(mms->values[i]);
+                            }
+                            out.mms_body_shown_as_hex = mms->body_shown_as_hex;
+                            out.mms_body_hex = mms->body_hex;
+                            out.mms_body_length = mms->body_length;
+                            for (const auto& n : cotp->notes) out.notes.push_back(n);
+                            annotate_port();
+                            return out;
+                        }
                     }
                 }
 
@@ -1522,7 +1574,7 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
         std::ostringstream s;
         s << "TCP payload of " << effective_payload.size() << " byte(s) on port " << tcp.src_port << "->"
           << tcp.dst_port
-          << " did not match OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, COTP/S7comm, or HART-IP";
+          << " did not match OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, COTP/S7comm/MMS, or HART-IP";
         out.summary = s.str();
         return out;
 

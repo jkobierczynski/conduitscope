@@ -3,8 +3,9 @@
 `conduitscope` decodes Modbus/TCP, DNP3, IEC 60870-5-104, S7comm/COTP (Siemens S7 PLC
 protocol), EtherNet/IP (CIP explicit and implicit messaging), PROFINET RT (DCP device
 discovery/configuration and cyclic real-time I/O data), IEC 61850-8-1 GOOSE,
-IEC 61850-9-2 Sampled Values, EtherCAT, BACnet/IP, HART-IP, and OPC UA Binary
-(UA-TCP/Secure Conversation) traffic from offline pcap/pcapng captures, and checks it
+IEC 61850-9-2 Sampled Values, EtherCAT, BACnet/IP, HART-IP, OPC UA Binary
+(UA-TCP/Secure Conversation), and IEC 61850 MMS (Manufacturing Message Specification,
+ISO 9506) traffic from offline pcap/pcapng captures, and checks it
 against a zone/conduit segmentation policy. It's an OT/ICS conduit-auditing tool: `decode`/`info` give you reliable
 protocol decoding and a stats view, and `policy validate` maps that decoded traffic
 against an IEC 62443-style zone/conduit model (for NIS2-flavored compliance work) --
@@ -409,6 +410,42 @@ Groundwork / v0.1.0. What works right now:
   2-minute dissector freeze) that this decoder's own Tier-2 raw-hex scope is
   structurally immune to -- see include/conduitscope/opcua.hpp's file header for the
   full writeup.
+- IEC 61850 MMS (Manufacturing Message Specification, ISO 9506) over the same
+  TPKT/COTP transport S7comm shares (TCP port 102): the full ISO stack an MMS PDU
+  actually rides on is decoded, not just the MMS PDU itself -- Session (ISO 8327-1,
+  SPDU type and its User Data parameter), Presentation (ISO 8823, the presentation-
+  context-definition-list and its "1=ACSE / 3=MMS" convention), and ACSE (ISO 8650-1,
+  AARQ/AARE/RLRQ/RLRE/ABRT, association time only) all render as named fields, not
+  raw hex. Real IEC 61850 traffic genuinely takes three different shapes at this
+  boundary -- a full Session/Presentation/ACSE association, an ongoing message that
+  skips straight to a bare MMS PDU with nothing above it, and (a shape this
+  decoder's own real-capture validation specifically found) an ongoing message that
+  skips only Session, landing straight on Presentation bytes -- and all three are
+  recognized by their own structural gate, not guessed at. MMS's own self-describing
+  `Data` value type (14 of its 17 CHOICE alternatives, including FloatingPoint,
+  UtcTime, and nested array/structure with a hard recursion-depth cap) is fully
+  decoded -- a documented strength relative to this codebase's own OPC UA decoder,
+  which leaves the analogous Variant/DataValue type as raw hex. At the service
+  layer, a deliberate two-tier split mirroring OPC UA's own: 11 of MMS's 78
+  confirmedServiceRequest/Response alternatives (status, getNameList, identify,
+  read, write, getVariableAccessAttributes, defineNamedVariableList,
+  getNamedVariableListAttributes, deleteNamedVariableList, getDomainAttributes,
+  getCapabilityList) are fully field-decoded, InformationReport (the MMS analog of
+  this codebase's own GOOSE decoder) is fully decoded, and every other named
+  service -- takeControl among them -- is recognized and named but shown as raw
+  hex. initiate-Request/ResponsePDU, ServiceError, RejectPDU, and the Cancel-*/
+  Conclude-* PDU families are all decoded too. Three small real captures (a full
+  association plus a Read/conclude exchange with two genuinely malformed frames;
+  two entirely bare-MMS captures, takeControl/relinquishControl and
+  cancelRequest) were found and validated, plus a much larger one (224 frames)
+  this project generated itself against a real, independent MMS stack
+  (mz-automation/libiec61850) rather than against this decoder's own output. That
+  validation caught two genuine structural-gate bugs -- both found and fixed, not
+  just discovered and left -- and independently reproduced a real recursion-depth
+  assertion failure in tshark 4.2.2's own MMS dissector on ordinary, non-malicious
+  traffic (motivating this decoder's own recursion-depth cap); see
+  tests/real_captures/mms/ATTRIBUTION.md for the full writeup and
+  include/conduitscope/mms.hpp for the wire-format details.
 - Non-IPv4 Ethernet frames and non-TCP IPv4 payloads (including UDP) are now
   recognized and named, not just reported as a bare hex/number and dropped:
   ARP, LLDP, PTP, MPLS, and stacked-VLAN (802.1ad/QinQ) EtherTypes; ICMP,
@@ -542,7 +579,8 @@ that runs it -- the SDK used at build time only supplies headers/import librarie
 
 ```sh
 # Generate synthetic Modbus/TCP, DNP3, IEC 104, S7comm/COTP, EtherNet/IP, PROFINET RT,
-# GOOSE, Sampled Values, EtherCAT, BACnet/IP, HART-IP, and OPC UA captures and decode them (no live traffic needed):
+# GOOSE, Sampled Values, EtherCAT, BACnet/IP, HART-IP, OPC UA, and IEC 61850 MMS captures and
+# decode them (no live traffic needed):
 python3 tools/make_sample_pcap.py
 build/conduitscope decode -r tests/sample_modbus.pcap
 build/conduitscope decode -r tests/sample_s7comm.pcap --stats
@@ -555,6 +593,7 @@ build/conduitscope decode -r tests/sample_ethercat.pcap
 build/conduitscope decode -r tests/sample_bacnet.pcap
 build/conduitscope decode -r tests/sample_hartip.pcap
 build/conduitscope decode -r tests/sample_opcua.pcap
+build/conduitscope decode -r tests/sample_mms.pcap --stats
 build/conduitscope decode -r tests/sample_modbus.pcap --format json
 build/conduitscope info -r tests/sample_modbus.pcap
 
