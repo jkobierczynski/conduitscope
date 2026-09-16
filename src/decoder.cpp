@@ -19,6 +19,7 @@
 #include "conduitscope/link_layer.hpp"
 #include "conduitscope/mms.hpp"
 #include "conduitscope/modbus.hpp"
+#include "conduitscope/mqtt.hpp"
 #include "conduitscope/profinet.hpp"
 #include "conduitscope/s7comm.hpp"
 #include "conduitscope/sv.hpp"
@@ -48,13 +49,14 @@ std::string well_known_udp_port_name(uint16_t /*port*/) {
 }
 
 // Canonicalizes both directions of one TCP 4-tuple into a single, direction-independent session
-// key, so Decoder::modbus_pending_ can track outstanding requests per SESSION (request and
-// response travel in opposite directions) rather than per directional flow -- unlike flow_key
-// (used by dnp3_reassembly_/tcp_reassembly_/cotp_reassembly_, which genuinely are per-direction).
-// "<->" is used as the join delimiter specifically so this can never collide with a directional
-// flow_key string (which always uses "->"), even though the two happen to key different maps.
-std::string modbus_session_key(const std::string& ip_a, uint16_t port_a, const std::string& ip_b,
-                                uint16_t port_b) {
+// key, so Decoder::modbus_pending_/mqtt_session_version_ can track state per SESSION (a request and
+// its response, or a CONNECT and a later SUBSCRIBE, can travel in opposite directions) rather than
+// per directional flow -- unlike flow_key (used by dnp3_reassembly_/tcp_reassembly_/
+// cotp_reassembly_, which genuinely are per-direction). "<->" is used as the join delimiter
+// specifically so this can never collide with a directional flow_key string (which always uses
+// "->"), even though the two happen to key different maps.
+std::string tcp_session_key(const std::string& ip_a, uint16_t port_a, const std::string& ip_b,
+                             uint16_t port_b) {
     std::string ea = ip_a + ":" + std::to_string(port_a);
     std::string eb = ip_b + ":" + std::to_string(port_b);
     return (ea < eb) ? (ea + "<->" + eb) : (eb + "<->" + ea);
@@ -288,6 +290,8 @@ bool Decoder::reassemble_tcp_payload(const TcpSegment& tcp, const std::string& f
                         options_.protocol_filter == ProtocolFilter::HartIpOnly;
     bool want_opcua = options_.protocol_filter == ProtocolFilter::Auto ||
                        options_.protocol_filter == ProtocolFilter::OpcUaOnly;
+    bool want_mqtt = options_.protocol_filter == ProtocolFilter::Auto ||
+                      options_.protocol_filter == ProtocolFilter::MqttOnly;
 
     // OPC UA is checked first of all: its own structural detection gate (the leading 3 bytes must
     // be one of exactly 7 fixed ASCII MessageType strings -- "HEL"/"ACK"/"ERR"/"RHE"/"OPN"/"CLO"/
@@ -374,6 +378,19 @@ bool Decoder::reassemble_tcp_payload(const TcpSegment& tcp, const std::string& f
         if (auto d = hartip_declared_length(candidate)) {
             declared = d;
             which = "HART-IP message";
+        }
+    }
+    // MQTT is tried LAST of all -- its own structural detection gate is honestly weaker still than
+    // HART-IP's (a single leading byte, not two -- see mqtt.hpp's own "structural detection gate"
+    // paragraph for the full comparison), so it gets the lowest priority in this opportunistic
+    // dispatch chain, the same "weaker signal, lower priority" principle already established for
+    // HART-IP itself. No specific byte-for-byte collision with another protocol above was found
+    // during this feature's own research, but this ordering means any that do exist resolve in
+    // every other protocol's favor, not MQTT's.
+    if (!declared && want_mqtt) {
+        if (auto d = mqtt_declared_length(candidate)) {
+            declared = d;
+            which = "MQTT packet";
         }
     }
 
@@ -988,6 +1005,8 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                             options_.protocol_filter == ProtocolFilter::HartIpOnly;
         bool want_opcua = options_.protocol_filter == ProtocolFilter::Auto ||
                            options_.protocol_filter == ProtocolFilter::OpcUaOnly;
+        bool want_mqtt = options_.protocol_filter == ProtocolFilter::Auto ||
+                          options_.protocol_filter == ProtocolFilter::MqttOnly;
 
         // Tried first of all -- see the matching, fuller comment in reassemble_tcp_payload above
         // for why OPC UA's own magic-string detection gate is strong enough, and non-colliding
@@ -1232,7 +1251,7 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                 out.summary = mb->function_name + ": " + mb->summary;
                 for (const auto& n : mb->notes) out.notes.push_back(n);
 
-                std::string session = modbus_session_key(out.src_ip, tcp.src_port, out.dst_ip, tcp.dst_port);
+                std::string session = tcp_session_key(out.src_ip, tcp.src_port, out.dst_ip, tcp.dst_port);
                 pair_modbus_transaction(*mb, flow_key, session, index, out);
 
                 bool expected_port = port_in(tcp.src_port, MODBUS_TCP_PORT, options_.extra_modbus_ports) ||
@@ -1570,11 +1589,125 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
             }
         }
 
+        // Tried LAST of all -- see the matching, fuller comment in reassemble_tcp_payload above for
+        // why MQTT's own structural detection gate is deliberately given the lowest priority in
+        // this opportunistic, port-independent dispatch chain, even below HART-IP's.
+        if (want_mqtt) {
+            std::string mqtt_session_key = tcp_session_key(out.src_ip, tcp.src_port, out.dst_ip, tcp.dst_port);
+            auto session_it = mqtt_session_version_.find(mqtt_session_key);
+            uint8_t session_hint = session_it != mqtt_session_version_.end() ? session_it->second : 0;
+
+            if (auto first = try_parse_mqtt_message(effective_payload, session_hint)) {
+                out.protocol = "mqtt";
+                out.summary = first->summary;
+
+                auto merge_mqtt = [&](const MqttMessage& m, bool is_first_message) {
+                    for (const auto& n : m.notes) out.notes.push_back(n);
+                    if (!is_first_message) return;
+                    out.mqtt_packet_type_name = m.packet_type_name;
+                    out.mqtt_remaining_length = m.remaining_length;
+                    out.mqtt_dup = m.dup;
+                    out.mqtt_retain = m.retain;
+                    out.mqtt_qos = m.qos;
+                    out.mqtt_has_packet_id = m.has_packet_id;
+                    out.mqtt_packet_id = m.packet_id;
+                    out.mqtt_topic = m.topic;
+                    out.mqtt_has_payload = m.has_payload;
+                    out.mqtt_payload_length = m.payload_length;
+                    out.mqtt_payload_hex = m.payload_hex;
+                    out.mqtt_protocol_version_name = m.protocol_version_name;
+                    out.mqtt_values = m.values;
+                    out.mqtt_is_sparkplug = m.is_sparkplug;
+                    if (m.is_sparkplug) {
+                        out.mqtt_sparkplug_group_id = m.sparkplug_group_id;
+                        out.mqtt_sparkplug_message_type = m.sparkplug_message_type;
+                        out.mqtt_sparkplug_edge_node_id = m.sparkplug_edge_node_id;
+                        out.mqtt_sparkplug_device_id = m.sparkplug_device_id;
+                        out.mqtt_sparkplug_is_state = m.sparkplug_is_state;
+                        if (m.sparkplug_is_state) {
+                            out.mqtt_sparkplug_state_host_id = m.sparkplug_state_host_id;
+                            out.mqtt_sparkplug_state_text = m.sparkplug_state_text;
+                        } else {
+                            out.mqtt_sparkplug_payload_decoded = m.sparkplug_payload.parse_ok;
+                            out.mqtt_sparkplug_has_timestamp = m.sparkplug_payload.has_timestamp;
+                            out.mqtt_sparkplug_timestamp = m.sparkplug_payload.timestamp;
+                            out.mqtt_sparkplug_has_seq = m.sparkplug_payload.has_seq;
+                            out.mqtt_sparkplug_seq = m.sparkplug_payload.seq;
+                            out.mqtt_sparkplug_has_uuid = m.sparkplug_payload.has_uuid;
+                            out.mqtt_sparkplug_uuid = m.sparkplug_payload.uuid;
+                            out.mqtt_sparkplug_has_body = m.sparkplug_payload.has_body;
+                            out.mqtt_sparkplug_body_length = m.sparkplug_payload.body_length;
+                            out.mqtt_sparkplug_metric_count = m.sparkplug_payload.metric_count;
+                            out.mqtt_sparkplug_metrics = m.sparkplug_payload.metrics;
+                        }
+                    }
+                };
+                merge_mqtt(*first, /*is_first_message=*/true);
+
+                // A CONNECT anywhere in this payload updates this session's tracked version for
+                // every later packet on it (including any further coalesced packets in this very
+                // same TCP payload, handled via `running_hint` below) -- see mqtt.hpp's "Version
+                // disambiguation" section and mqtt_session_version_'s own declaration in
+                // decoder.hpp.
+                uint8_t running_hint = session_hint;
+                auto maybe_learn_version = [&](const MqttMessage& m) {
+                    if (m.packet_type != 1) return;
+                    if (m.connect_discovered_version == 5) {
+                        running_hint = 5;
+                        mqtt_session_version_[mqtt_session_key] = running_hint;
+                    } else if (m.connect_discovered_version == 4 || m.connect_discovered_version == 3) {
+                        // Level 3 is the pre-OASIS "MQTT 3.1" CONNECT (ProtocolName "MQIsdp") --
+                        // seen in real traffic (e.g. older Paho clients). Its SUBSCRIBE/SUBACK/
+                        // UNSUBSCRIBE/PUBLISH wire shapes are identical to 3.1.1's (no unconditional
+                        // Properties section), so it's tracked under the same "4" hint value rather
+                        // than left to fall back on the weaker per-packet heuristic.
+                        running_hint = 4;
+                        mqtt_session_version_[mqtt_session_key] = running_hint;
+                    }
+                };
+                maybe_learn_version(*first);
+
+                // Small control packets (PINGREQ/PUBACK/SUBACK/...) are common and it's normal for
+                // a sender or the OS to coalesce several into one TCP segment before flushing, the
+                // same pattern as every other small-message protocol in this codebase.
+                constexpr size_t kMaxMqttMessagesPerPayload = 50;
+                size_t offset = first->wire_length;
+                size_t message_count = 1;
+                while (offset < effective_payload.size() && message_count < kMaxMqttMessagesPerPayload) {
+                    ByteSpan rest = effective_payload.from(offset);
+                    auto next = try_parse_mqtt_message(rest, running_hint);
+                    if (!next) break;  // remaining bytes aren't another MQTT packet -- stop, don't guess
+                    ++message_count;
+                    std::string note = "additional MQTT packet " + std::to_string(message_count) +
+                                        " found in the same TCP payload at byte offset " + std::to_string(offset) +
+                                        " (coalesced by the sender/OS): " + next->summary;
+                    out.notes.push_back(note);
+                    merge_mqtt(*next, /*is_first_message=*/false);
+                    maybe_learn_version(*next);
+                    offset += next->wire_length;
+                }
+                if (message_count >= kMaxMqttMessagesPerPayload) {
+                    out.notes.push_back("stopped after " + std::to_string(kMaxMqttMessagesPerPayload) +
+                                         " MQTT packet(s) in this one TCP payload, more may remain (safety cap)");
+                }
+
+                bool expected_port = port_in(tcp.src_port, MQTT_PORT, options_.extra_mqtt_ports) ||
+                                      port_in(tcp.dst_port, MQTT_PORT, options_.extra_mqtt_ports);
+                if (!expected_port) {
+                    out.notes.push_back("seen on TCP port " + std::to_string(tcp.src_port) + "->" +
+                                         std::to_string(tcp.dst_port) +
+                                         ", which is not a configured/standard MQTT port (1883)");
+                }
+                return out;
+            }
+        }
+
         out.protocol = "tcp";
         std::ostringstream s;
         s << "TCP payload of " << effective_payload.size() << " byte(s) on port " << tcp.src_port << "->"
           << tcp.dst_port
-          << " did not match OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, COTP/S7comm/MMS, or HART-IP";
+          << " did not match OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, COTP/S7comm/MMS, HART-IP, or "
+             "MQTT";
         out.summary = s.str();
         return out;
 

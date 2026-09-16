@@ -41,6 +41,7 @@ add_library(conduitscope_core STATIC
   src/cotp.cpp
   src/s7comm.cpp
   src/mms.cpp
+  src/mqtt.cpp
   src/decoder.cpp
   src/output.cpp
   src/yaml_mini.cpp
@@ -679,7 +680,7 @@ set_tests_properties(enip_unregister_session_decoded PROPERTIES
 add_test(NAME enip_nop_not_detected
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enip_nop_precedence.pcap" --format text)
 set_tests_properties(enip_nop_not_detected PROPERTIES
-  PASS_REGULAR_EXPRESSION "\\[tcp\\]  TCP payload of 24 byte\\(s\\) on port 52001->44818 did not match OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, COTP/S7comm/MMS, or HART-IP")
+  PASS_REGULAR_EXPRESSION "\\[tcp\\]  TCP payload of 24 byte\\(s\\) on port 52001->44818 did not match OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, COTP/S7comm/MMS, HART-IP, or MQTT")
 
 # --------------------------------------------------------------------------
 # EtherNet/IP CIP I/O (implicit messaging), synthetic (tests/sample_enip_cip_io.pcap): UDP/2222
@@ -2560,6 +2561,292 @@ add_test(NAME real_mms_libiec61850_loopback_no_parse_warnings
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/mms/libiec61850_loopback_capture.pcap" --format json)
 set_tests_properties(real_mms_libiec61850_loopback_no_parse_warnings PROPERTIES
   FAIL_REGULAR_EXPRESSION "warning:")
+
+# --------------------------------------------------------------------------
+# MQTT (v3.1.1/v5.0) + Sparkplug B -- synthetic fixture (tools/make_sample_pcap.py's own
+# build_mqtt_sample, see its docstring/comments for the full scenario list). Hand-built to match
+# src/mqtt.cpp's own decode logic -- not captured from a real tool -- so these are regression tests
+# for THIS decoder's own encode/decode round trip, not independent validation (see
+# tests/real_captures/mqtt/ below for that).
+# --------------------------------------------------------------------------
+add_test(NAME mqtt_does_not_crash
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mqtt.pcap" --format json)
+
+add_test(NAME mqtt_stats_counted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mqtt.pcap" --stats)
+set_tests_properties(mqtt_stats_counted PROPERTIES
+  PASS_REGULAR_EXPRESSION "packets: +55[^\n]*\n[^\n]*\nprotocols:\n *mqtt +52\n *tcp +3\nmqtt packet types:\n *AUTH +2\n *CONNACK +4\n *CONNECT +4\n *DISCONNECT +2\n *PINGREQ +3\n *PINGRESP +2\n *PUBACK +2\n *PUBCOMP +1\n *PUBLISH +14\n *PUBREC +1\n *PUBREL +1\n *SUBACK +4\n *SUBSCRIBE +4\n *UNSUBACK +4\n *UNSUBSCRIBE +4\nmqtt sparkplug b publishes: 8\nmqtt sparkplug b message types:\n *DBIRTH +1\n *DDATA +1\n *DDEATH +1\n *NBIRTH +1\n *NDATA +3\n *STATE +1")
+
+# Flow A: full MQTT 3.1.1 lifecycle, port 61000.
+add_test(NAME mqtt_v311_full_lifecycle_text
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mqtt.pcap" --format text)
+set_tests_properties(mqtt_v311_full_lifecycle_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[mqtt\\]  CONNECT \\(MQTT 3.1.1\\)\n.*\\[mqtt\\]  CONNACK \\(MQTT 3.1.1\\)\n.*qos=0 retain payload=6 byte\\(s\\)\n.*qos=1 id=1 payload=4 byte\\(s\\)\n.*\\[mqtt\\]  PUBACK id=1\n.*qos=2 id=2 payload=13 byte\\(s\\)\n.*\\[mqtt\\]  PUBREC id=2\n.*\\[mqtt\\]  PUBREL id=2\n.*\\[mqtt\\]  PUBCOMP id=2\n.*SUBSCRIBE \\(MQTT 3.1.1\\) id=3\n.*SUBACK \\(MQTT 3.1.1\\) id=3\n.*UNSUBSCRIBE \\(MQTT 3.1.1\\) id=4\n.*UNSUBACK \\(MQTT 3.1.1\\) id=4\n.*\\[mqtt\\]  PINGREQ\n.*\\[mqtt\\]  PINGRESP\n.*\\[mqtt\\]  DISCONNECT")
+
+# CONNECT's own cleartext Username/Password decode (a deliberate design choice -- see mqtt.cpp's
+# decode_connect comment) plus the Will fields.
+add_test(NAME mqtt_v311_connect_cleartext_credentials_and_will
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mqtt.pcap" --format json)
+set_tests_properties(mqtt_v311_connect_cleartext_credentials_and_will PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"summary\": \"CONNECT \\(MQTT 3.1.1\\)\",.*\"mqtt_values\": \\[\"ProtocolName=\\\\\"MQTT\\\\\"\", \"ProtocolLevel=4 \\(3.1.1\\)\", \"CleanSession=true\", \"WillFlag=true\", \"WillQoS=0\", \"WillRetain=false\", \"UsernameFlag=true\", \"PasswordFlag=true\", \"KeepAlive=60s\", \"ClientId=\\\\\"plc1-hmi\\\\\"\", \"WillTopic=\\\\\"devices/plc1/lwt\\\\\"\", \"WillPayload=<7 byte\\(s\\), not decoded further>\", \"Username=\\\\\"admin\\\\\"\", \"Password=\\\\\"Passw0rd!\\\\\"\"\\]")
+
+add_test(NAME mqtt_v311_connack_accepted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mqtt.pcap" --format json)
+set_tests_properties(mqtt_v311_connack_accepted PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"summary\": \"CONNACK \\(MQTT 3.1.1\\)\",.*\"mqtt_values\": \\[\"SessionPresent=false\", \"ReturnCode=0 \\(Connection Accepted\\)\"\\]")
+
+# SUBSCRIBE/SUBACK on a session with a CONNECT already seen -- version comes from tracking, not the
+# heuristic (see decoder.cpp's mqtt_session_version_).
+add_test(NAME mqtt_v311_subscribe_suback_session_tracked
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mqtt.pcap" --format json)
+set_tests_properties(mqtt_v311_subscribe_suback_session_tracked PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"mqtt_values\": \\[\"TopicFilter=\\\\\"devices/\\+/status\\\\\" QoS=0\", \"TopicFilter=\\\\\"devices/plc1/#\\\\\" QoS=1\"\\],.*\"notes\": \\[\"MQTT version for this SUBSCRIBE determined via this TCP session's own CONNECT \\(tracked\\)\"\\].*\"mqtt_values\": \\[\"ReasonCode=0x00 \\(Granted QoS 0\\)\", \"ReasonCode=0x01 \\(Granted QoS 1\\)\"\\],.*\"notes\": \\[\"MQTT version for this SUBACK determined via this TCP session's own CONNECT \\(tracked\\)\"\\]")
+
+# Flow B: full MQTT 5.0 lifecycle with Properties on every applicable packet type, port 62000.
+add_test(NAME mqtt_v5_full_lifecycle_text
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mqtt.pcap" --format text)
+set_tests_properties(mqtt_v5_full_lifecycle_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[mqtt\\]  CONNECT \\(MQTT 5.0\\)\n.*\\[mqtt\\]  CONNACK \\(MQTT 5.0\\)\n.*PUBLISH \\(MQTT 5.0\\).*qos=1 id=1 payload=4 byte\\(s\\)\n.*PUBACK \\(MQTT 5.0\\) id=1\n.*SUBSCRIBE \\(MQTT 5.0\\) id=2\n.*SUBACK \\(MQTT 5.0\\) id=2\n.*UNSUBSCRIBE \\(MQTT 5.0\\) id=3\n.*UNSUBACK \\(MQTT 5.0\\) id=3\n.*\\[mqtt\\]  AUTH \\(MQTT 5.0\\)\n.*\\[mqtt\\]  AUTH \\(MQTT 5.0\\)\n.*\\[mqtt\\]  DISCONNECT \\(MQTT 5.0\\)")
+
+# CONNECT v5's Properties block (SessionExpiryInterval/ReceiveMaximum/UserProperty on the CONNECT
+# itself, WillDelayInterval inside the Will Properties) -- also regression-tests the earlier
+# Modbus/CONNACK precedence collision fix (see kMaxPlausibleMbapLength in src/modbus.cpp): this
+# CONNACK's own body happens to read as a plausible-looking MBAP header otherwise.
+add_test(NAME mqtt_v5_connect_properties
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mqtt.pcap" --format json)
+set_tests_properties(mqtt_v5_connect_properties PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"summary\": \"CONNECT \\(MQTT 5.0\\)\",.*\"SessionExpiryInterval=3600\", \"ReceiveMaximum=20\", \"UserProperty: \\\\\"app\\\\\"=\\\\\"conduitscope-test\\\\\"\", \"ClientId=\\\\\"plc2-controller\\\\\"\", \"Will.WillDelayInterval=5\"")
+
+add_test(NAME mqtt_v5_connack_properties
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mqtt.pcap" --format json)
+set_tests_properties(mqtt_v5_connack_properties PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"summary\": \"CONNACK \\(MQTT 5.0\\)\",.*\"mqtt_values\": \\[\"SessionPresent=false\", \"ReasonCode=0x00 \\(Success\\)\", \"ServerKeepAlive=60\", \"TopicAliasMaximum=10\"\\]")
+
+add_test(NAME mqtt_v5_publish_properties
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mqtt.pcap" --format json)
+set_tests_properties(mqtt_v5_publish_properties PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"mqtt_topic\": \"devices/plc2/temp\",.*\"mqtt_values\": \\[\"PayloadFormatIndicator=1\", \"ContentType=\\\\\"text/plain\\\\\"\"\\]")
+
+# SubscriptionIdentifier + NoLocal + RetainHandling on a v5 SUBSCRIBE, and the corresponding
+# UNSUBSCRIBE (no Properties content, but still session-tracked as v5).
+add_test(NAME mqtt_v5_subscribe_properties
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mqtt.pcap" --format json)
+set_tests_properties(mqtt_v5_subscribe_properties PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"summary\": \"SUBSCRIBE \\(MQTT 5.0\\) id=2\",.*\"mqtt_values\": \\[\"SubscriptionIdentifier=7\", \"TopicFilter=\\\\\"devices/plc2/#\\\\\" QoS=1 NoLocal RetainHandling=0\"\\]")
+
+# AUTH exchange (Continue authentication / Success), MQTT5-only packet type.
+add_test(NAME mqtt_v5_auth_exchange
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mqtt.pcap" --format json)
+set_tests_properties(mqtt_v5_auth_exchange PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"summary\": \"AUTH \\(MQTT 5.0\\)\",.*\"mqtt_values\": \\[\"ReasonCode=0x18 \\(Continue authentication\\)\", \"AuthenticationMethod=\\\\\"SCRAM-SHA-256\\\\\"\", \"AuthenticationData=<8 byte\\(s\\)>\"\\].*\"summary\": \"AUTH \\(MQTT 5.0\\)\",.*\"mqtt_values\": \\[\"ReasonCode=0x00 \\(Success\\)\", \"AuthenticationMethod=\\\\\"SCRAM-SHA-256\\\\\"\"\\]")
+
+add_test(NAME mqtt_v5_disconnect_with_reason
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mqtt.pcap" --format json)
+set_tests_properties(mqtt_v5_disconnect_with_reason PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"summary\": \"DISCONNECT \\(MQTT 5.0\\)\",.*\"mqtt_values\": \\[\"ReasonCode=0x04 \\(Disconnect with Will Message\\)\", \"ReasonString=\\\\\"administrative disconnect\\\\\"\"\\]")
+
+# --------------------------------------------------------------------------
+# Sparkplug B (Eclipse Tahu), flows C/C5, port 63000/63005 -- hand-rolled protobuf decode of the
+# org.eclipse.tahu.protobuf.Payload/Metric messages (see mqtt.cpp's read_pb_* functions).
+# --------------------------------------------------------------------------
+add_test(NAME mqtt_sparkplug_nbirth_metrics
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mqtt.pcap" --format json)
+set_tests_properties(mqtt_sparkplug_nbirth_metrics PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"mqtt_topic\": \"spBv1.0/PlantA/NBIRTH/EdgeNode1\",.*\"mqtt_sparkplug_message_type\": \"NBIRTH\",.*\"mqtt_sparkplug_metrics\": \\[\"\\\\\"bdSeq\\\\\" type=UInt64 value=0\", \"\\\\\"Temperature\\\\\" type=Float value=21.500000 ts=2023-11-14T22:13:20.000Z\", \"\\\\\"Running\\\\\" type=Boolean value=true ts=2023-11-14T22:13:20.000Z\", \"\\\\\"Count\\\\\" type=Int32 value=-5 ts=2023-11-14T22:13:20.000Z\", \"\\\\\"SerialNumber\\\\\" type=String value=\\\\\"SN-00123\\\\\" ts=2023-11-14T22:13:20.000Z\", \"\\\\\"StartTime\\\\\" type=DateTime value=2023-11-14T22:13:20.000Z ts=2023-11-14T22:13:20.000Z\"\\]")
+
+# The Int32 metric above (-5) is the non-obvious sign-reinterpretation test: Sparkplug's int_value
+# is a raw uint32 wire value, NOT zigzag-encoded, so a negative signed value must be reinterpreted
+# from its two's-complement bit pattern -- see render_sparkplug_metric's own comment on this.
+
+add_test(NAME mqtt_sparkplug_dbirth_metrics
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mqtt.pcap" --format json)
+set_tests_properties(mqtt_sparkplug_dbirth_metrics PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"mqtt_topic\": \"spBv1.0/PlantA/DBIRTH/EdgeNode1/Device1\",.*\"mqtt_sparkplug_device_id\": \"Device1\",.*\"mqtt_sparkplug_metrics\": \\[\"\\\\\"Pressure\\\\\" type=Double value=101.325000 ts=2023-11-14T22:13:21.000Z\", \"\\\\\"Status\\\\\" type=Text value=\\\\\"OK\\\\\" ts=2023-11-14T22:13:21.000Z\"\\]")
+
+# Null Boolean and an undecoded Bytes value (Tier-2 scope -- shown as a byte count, not decoded
+# further, see sparkplug_datatype_name/render_sparkplug_metric's own Tier1/Tier2 split).
+add_test(NAME mqtt_sparkplug_ddata_null_and_bytes_metrics
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mqtt.pcap" --format json)
+set_tests_properties(mqtt_sparkplug_ddata_null_and_bytes_metrics PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"mqtt_sparkplug_message_type\": \"DDATA\",.*\"mqtt_sparkplug_metrics\": \\[\"\\\\\"Pressure\\\\\" type=Double value=101.900000 ts=2023-11-14T22:13:23.000Z\", \"\\\\\"Fault\\\\\" type=Boolean value=null ts=2023-11-14T22:13:23.000Z\", \"\\\\\"Firmware\\\\\" type=Bytes value=<4 byte\\(s\\), not decoded further> ts=2023-11-14T22:13:23.000Z\"\\]")
+
+add_test(NAME mqtt_sparkplug_ddeath_zero_metrics
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mqtt.pcap" --format json)
+set_tests_properties(mqtt_sparkplug_ddeath_zero_metrics PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"mqtt_sparkplug_message_type\": \"DDEATH\",.*\"mqtt_sparkplug_device_id\": \"Device1\",.*\"mqtt_sparkplug_payload_decoded\": true,.*\"mqtt_sparkplug_metric_count\": 0,")
+
+# STATE namespace: a separate spBv1.0/STATE/{host_id} topic carrying JSON text, NOT protobuf.
+add_test(NAME mqtt_sparkplug_state_topic_json_text
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mqtt.pcap" --format json)
+set_tests_properties(mqtt_sparkplug_state_topic_json_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"mqtt_topic\": \"spBv1.0/STATE/scada-host-1\",.*\"mqtt_sparkplug_message_type\": \"STATE\",.*\"mqtt_sparkplug_is_state\": true,.*\"mqtt_sparkplug_state_host_id\": \"scada-host-1\",.*\"mqtt_sparkplug_state_text\": \"\\{\\\\\"online\\\\\":true,\\\\\"timestamp\\\\\":1700000000000\\}\"")
+
+# A deliberately malformed Sparkplug payload (a length-delimited field declaring more bytes than
+# actually follow) -- decode_sparkplug_payload degrades gracefully with an honest note rather than
+# crashing or silently truncating.
+add_test(NAME mqtt_sparkplug_malformed_payload_note
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mqtt.pcap" --format json)
+set_tests_properties(mqtt_sparkplug_malformed_payload_note PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"mqtt_sparkplug_payload_decoded\": false,.*\"mqtt_sparkplug_metric_count\": 0,.*\"notes\": \\[\"Sparkplug B protobuf Payload could not be fully decoded: requested 200 bytes at offset 3 but only 6 bytes are available -- whatever metrics were found before the failure are still shown below\"\\]")
+
+# An MQTT5 Properties block on a Sparkplug PUBLISH containing one unrecognized property id --
+# decode_properties shows it as raw hex and keeps going, rather than aborting the whole message
+# (the Sparkplug payload right after it still decodes correctly).
+add_test(NAME mqtt_v5_unknown_property_id_and_sparkplug_still_decodes
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mqtt.pcap" --format json)
+set_tests_properties(mqtt_v5_unknown_property_id_and_sparkplug_still_decodes PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"mqtt_topic\": \"spBv1.0/PlantA/NDATA/EdgeNode2\",.*\"mqtt_values\": \\[\"PayloadFormatIndicator=1\", \"\\(unknown property id 100, 1 remaining properties byte\\(s\\) not decoded: ff\\)\"\\],.*\"mqtt_sparkplug_metrics\": \\[\"\\\\\"X\\\\\" type=Int32 value=1\"\\]")
+
+# --------------------------------------------------------------------------
+# Flows D1/D2: SUBSCRIBE/SUBACK/UNSUBSCRIBE version-disambiguation HEURISTIC -- no CONNECT is ever
+# seen on either flow, so decoder.cpp's mqtt_session_version_ map has nothing to go on and mqtt.cpp's
+# own per-packet-type heuristic determines the shape (see mqtt.hpp's "Version disambiguation"
+# section). D1 is v3.1.1-shaped, D2 is v5-shaped; both correctly resolve via SUBSCRIBE/UNSUBSCRIBE's
+# stronger topic-filter-string evidence. SUBACK is documented as the weakest of the three heuristics
+# (an empty/degenerate reason-code list can misresolve, since almost any byte value forms a
+# "valid"-looking Properties block) -- the SUBACK responses on both flows below happen to hit exactly
+# that degenerate case and resolve to v5 regardless of which flow they're on, which is expected,
+# already-documented behavior, not a bug.
+# --------------------------------------------------------------------------
+add_test(NAME mqtt_version_heuristic_d1_v311_shape
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mqtt.pcap" --format json)
+set_tests_properties(mqtt_version_heuristic_d1_v311_shape PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"summary\": \"SUBSCRIBE \\(MQTT 3.1.1\\) id=4100\",.*\"notes\": \\[\"MQTT version for this SUBSCRIBE determined via heuristic \\(only the v3.1.1-without-Properties shape parsed cleanly\\)\"\\].*\"summary\": \"UNSUBSCRIBE \\(MQTT 3.1.1\\) id=4101\",.*\"notes\": \\[\"MQTT version for this UNSUBSCRIBE determined via heuristic \\(only the v3.1.1-without-Properties shape parsed cleanly\\)\"\\]")
+
+add_test(NAME mqtt_version_heuristic_d2_v5_shape
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mqtt.pcap" --format json)
+set_tests_properties(mqtt_version_heuristic_d2_v5_shape PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"summary\": \"SUBSCRIBE \\(MQTT 5.0\\) id=4200\",.*\"notes\": \\[\"MQTT version for this SUBSCRIBE determined via heuristic \\(only the v5-with-Properties shape parsed cleanly\\)\"\\].*\"summary\": \"UNSUBSCRIBE \\(MQTT 5.0\\) id=4201\",.*\"notes\": \\[\"MQTT version for this UNSUBSCRIBE determined via heuristic \\(only the v5-with-Properties shape parsed cleanly\\)\"\\]")
+
+add_test(NAME mqtt_version_heuristic_suback_weakest_evidence
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mqtt.pcap" --format json)
+set_tests_properties(mqtt_version_heuristic_suback_weakest_evidence PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"summary\": \"SUBACK \\(MQTT 5.0\\) id=4100\",.*\"notes\": \\[\"MQTT version for this SUBACK determined via heuristic \\(a Properties block parsed cleanly within the declared Remaining Length -- the weakest-evidence heuristic of the three ambiguous MQTT packet types, see mqtt.hpp\\)\"\\]")
+
+# --------------------------------------------------------------------------
+# Flow E: one PUBLISH split mid-message across two TCP segments -- Decoder::reassemble_tcp_payload,
+# driven by mqtt_declared_length. No CONNECT on this flow, so the reassembled PUBLISH also carries
+# the "protocol version not known" note (PUBLISH's own version ambiguity, separate from the
+# SUBSCRIBE-family heuristic above).
+# --------------------------------------------------------------------------
+add_test(NAME mqtt_tcp_split_reassembly
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mqtt.pcap" --format text)
+set_tests_properties(mqtt_tcp_split_reassembly PROPERTIES
+  PASS_REGULAR_EXPRESSION "buffering a MQTT packet PDU/frame split across TCP segments 65000->1883: 115 of 230 declared byte\\(s\\).*waiting for more\n.*topic=\"devices/plc1/split-test\" qos=1 id=9 payload=200 byte\\(s\\)\n *note: reassembled a MQTT packet PDU/frame from 230 byte\\(s\\) spanning 2 TCP segments on this flow\n *note: MQTT protocol version for this TCP session is not known \\(no CONNECT seen on it in this capture\\)")
+
+# Flow F: PINGREQ + PUBACK + PINGREQ coalesced by the sender/OS into ONE TCP segment -- the
+# wire_length-driven "additional MQTT packet" loop in decoder.cpp.
+add_test(NAME mqtt_coalesced_packets_in_one_segment
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mqtt.pcap" --format json)
+set_tests_properties(mqtt_coalesced_packets_in_one_segment PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"summary\": \"PINGREQ\",.*\"notes\": \\[\"additional MQTT packet 2 found in the same TCP payload at byte offset 2 \\(coalesced by the sender/OS\\): PUBACK id=5\", \"additional MQTT packet 3 found in the same TCP payload at byte offset 6 \\(coalesced by the sender/OS\\): PINGREQ\"\\]")
+
+# --------------------------------------------------------------------------
+# Flow G: negative/edge cases.
+# --------------------------------------------------------------------------
+# An invalid QoS=3 PUBLISH (MQTT-3.3.1-4 reserves QoS to 0-2) that also happens to be missing its
+# Packet Identifier -- both the invalid-QoS note and the graceful "could not fully decode" note fire
+# together, rather than a crash or a silent misparse.
+add_test(NAME mqtt_invalid_qos_and_truncated_body_notes
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mqtt.pcap" --format json)
+set_tests_properties(mqtt_invalid_qos_and_truncated_body_notes PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"mqtt_qos\": 3,.*\"mqtt_topic\": \"devices/plc1/badqos\",.*\"notes\": \\[\"PUBLISH fixed header flags declare QoS=3, which is invalid \\(MQTT-3.3.1-4 reserves QoS to 0-2\\) -- decoding continues treating it as-is\", \"could not fully decode this PUBLISH packet's own body: byte offset 22 is out of range \\(buffer size 22\\)\"\\]")
+
+# A CONNECT-shaped byte sequence whose Protocol Name is neither "MQTT" nor "MQIsdp" -- this MUST be
+# rejected outright by the structural detection gate (the stronger CONNECT-specific check in
+# try_parse_mqtt_message), not decoded as MQTT at all, and must fall all the way through to the
+# generic "did not match any protocol" fallback.
+add_test(NAME mqtt_bogus_connect_protocol_name_rejected
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mqtt.pcap" --format text)
+set_tests_properties(mqtt_bogus_connect_protocol_name_rejected PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[tcp\\]  TCP payload of 16 byte\\(s\\) on port 55020->1883 did not match OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, COTP/S7comm/MMS, HART-IP, or MQTT")
+
+# A genuinely truncated/incomplete final packet on its own flow -- declares more Remaining Length
+# than actually follows, with nothing more ever arriving in this capture -- the TCP-reassembly
+# "buffering, waiting for more" path never completes, mirroring sample_opcua.pcap's own equivalent
+# regression case.
+add_test(NAME mqtt_truncated_final_packet_never_completes
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mqtt.pcap" --format text)
+set_tests_properties(mqtt_truncated_final_packet_never_completes PROPERTIES
+  PASS_REGULAR_EXPRESSION "buffering a MQTT packet PDU/frame split across TCP segments 55030->1883: 20 of 126 declared byte\\(s\\) seen so far across 1 segment\\(s\\) on this flow, waiting for more")
+
+# Flow H: PINGREQ/PINGRESP on a TCP session where neither port is 1883 -- the "not a configured/
+# standard MQTT port" annotation (never a detection gate -- see decoder.cpp's expected_port).
+add_test(NAME mqtt_unexpected_port_note
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mqtt.pcap" --format json)
+set_tests_properties(mqtt_unexpected_port_note PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"summary\": \"PINGREQ\",.*\"mqtt_packet_type\": \"PINGREQ\",.*\"mqtt_remaining_length\": 0,.*\"mqtt_is_sparkplug\": false,.*\"notes\": \\[\"seen on TCP port 52000->52001, which is not a configured/standard MQTT port \\(1883\\)\"\\]")
+
+# --protocol mqtt / --mqtt-port CLI plumbing.
+add_test(NAME mqtt_protocol_filter_only_decodes_mqtt
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mqtt.pcap" --protocol mqtt --stats)
+set_tests_properties(mqtt_protocol_filter_only_decodes_mqtt PROPERTIES
+  PASS_REGULAR_EXPRESSION "protocols:\n *mqtt +52\n *tcp +3")
+
+add_test(NAME mqtt_extra_port_option_accepted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mqtt.pcap" --mqtt-port 52000 --mqtt-port 52001 --format json)
+set_tests_properties(mqtt_extra_port_option_accepted PROPERTIES
+  FAIL_REGULAR_EXPRESSION "not a configured/standard MQTT port")
+
+# --------------------------------------------------------------------------
+# Real-world MQTT captures -- see tests/real_captures/mqtt/ATTRIBUTION.md for provenance: a real
+# Eclipse Paho client (MQTT 3.1, pre-OASIS "MQIsdp") talking to a broker, in two container formats
+# (pcap and pcapng, confirmed byte-for-byte identical decode output), plus a third file from the
+# same source that is genuinely corrupt from its very first frame -- kept and tested as-is. This
+# validation found and fixed a real bug: Decoder's session version tracking didn't recognize a
+# ProtocolLevel=3 (MQTT 3.1) CONNECT, only 4/5 -- see ATTRIBUTION.md's own write-up.
+# --------------------------------------------------------------------------
+add_test(NAME real_mqtt_packets_tcpdump_does_not_crash
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/mqtt/mqtt_packets_tcpdump.pcap" --format json)
+
+add_test(NAME real_mqtt_packets_pcapng_does_not_crash
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/mqtt/mqtt_packets.pcapng" --format json)
+
+add_test(NAME real_mqtt_pcap_and_pcapng_containers_agree
+  COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/mqtt_pcap_pcapng_agree.sh" "$<TARGET_FILE:conduitscope>"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/mqtt/mqtt_packets_tcpdump.pcap"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/mqtt/mqtt_packets.pcapng")
+
+# Real Eclipse Paho MQTT 3.1 (pre-OASIS "MQIsdp"/level 3) CONNECT -- the whole reason this capture
+# was worth keeping: this decoder's synthetic fixture never exercises ProtocolLevel=3.
+add_test(NAME real_mqtt_paho_v31_connect
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/mqtt/mqtt_packets_tcpdump.pcap" --format json)
+set_tests_properties(real_mqtt_paho_v31_connect PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"summary\": \"CONNECT \\(MQTT 3.1\\)\",.*\"mqtt_protocol_version\": \"3.1\",.*\"mqtt_values\": \\[\"ProtocolName=\\\\\"MQIsdp\\\\\"\", \"ProtocolLevel=3 \\(3.1\\)\",.*\"ClientId=\\\\\"paho/34AAE54A75D839566E\\\\\"\"\\]")
+
+# Regression test for the session-version-tracking fix this capture's validation found: SUBACK on a
+# session whose only CONNECT was ProtocolLevel=3 must resolve via tracking, not the heuristic --
+# and the PUBLISH frames on both sessions must NOT carry the "version not known" note.
+add_test(NAME real_mqtt_v31_session_version_tracked_not_heuristic
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/mqtt/mqtt_packets_tcpdump.pcap" --format text)
+set_tests_properties(real_mqtt_v31_session_version_tracked_not_heuristic PROPERTIES
+  PASS_REGULAR_EXPRESSION "SUBSCRIBE \\(MQTT 3.1.1\\) id=1\n *note: MQTT version for this SUBSCRIBE determined via this TCP session's own CONNECT \\(tracked\\)\n.*SUBACK \\(MQTT 3.1.1\\) id=1\n *note: MQTT version for this SUBACK determined via this TCP session's own CONNECT \\(tracked\\)"
+  FAIL_REGULAR_EXPRESSION "version for this SUBACK determined via heuristic|version for this TCP session is not known")
+
+# Real client payload ("Hello from the Paho blocking client") and the retain flag on it.
+add_test(NAME real_mqtt_paho_publish_payload
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/mqtt/mqtt_packets_tcpdump.pcap" --format json)
+set_tests_properties(real_mqtt_paho_publish_payload PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"mqtt_retain\": true,.*\"mqtt_topic\": \"SampleTopic\",.*\"mqtt_payload_length\": 35,.*\"mqtt_payload_hex\": \"48656c6c6f2066726f6d20746865205061686f20626c6f636b696e6720636c69656e74\"")
+
+# Two complete MQTT packets (PUBLISH + DISCONNECT) genuinely coalesced by the real client/OS into
+# one TCP segment -- previously only exercised by this project's own synthetic Flow F.
+add_test(NAME real_mqtt_coalesced_publish_disconnect
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/mqtt/mqtt_packets_tcpdump.pcap" --format json)
+set_tests_properties(real_mqtt_coalesced_publish_disconnect PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"notes\": \\[\"additional MQTT packet 2 found in the same TCP payload at byte offset 25 \\(coalesced by the sender/OS\\): DISCONNECT\"\\]")
+
+add_test(NAME real_mqtt_no_undecoded_notes
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/mqtt/mqtt_packets_tcpdump.pcap" --format text)
+set_tests_properties(real_mqtt_no_undecoded_notes PROPERTIES
+  FAIL_REGULAR_EXPRESSION "could not fully decode|warning:")
+
+# The RedHat61 file is genuinely corrupt from its very first frame (see ATTRIBUTION.md's own byte-
+# level analysis) -- this decoder must reject it with a clear error, not crash or silently misparse.
+add_test(NAME real_mqtt_redhat61_corrupt_file_reports_clear_error
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/mqtt/mqtt_packets_RedHat61_tcpdump.pcap" --format text)
+set_tests_properties(real_mqtt_redhat61_corrupt_file_reports_clear_error PROPERTIES
+  PASS_REGULAR_EXPRESSION "error: '.*mqtt_packets_RedHat61_tcpdump\\.pcap' reports an implausible captured length \\([0-9]+ bytes\\) -- the file is likely truncated or corrupt")
 
 
 # --------------------------------------------------------------------------

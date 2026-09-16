@@ -21,6 +21,7 @@
 #include "conduitscope/iec104.hpp"
 #include "conduitscope/mms.hpp"
 #include "conduitscope/modbus.hpp"
+#include "conduitscope/mqtt.hpp"
 #include "conduitscope/opcua.hpp"
 #include "conduitscope/pcap_reader.hpp"
 #include "conduitscope/profinet.hpp"
@@ -44,6 +45,7 @@ enum class ProtocolFilter {
     HartIpOnly,   // only attempt HART-IP (session control / tunneled Pass-Through) decoding
     OpcUaOnly,    // only attempt OPC UA (UA-TCP / Secure Conversation) decoding
     MmsOnly,      // only attempt TPKT/COTP/IEC 61850 MMS decoding
+    MqttOnly,     // only attempt MQTT (v3.1.1/v5.0) / Sparkplug B decoding
 };
 
 struct DecodeOptions {
@@ -65,6 +67,7 @@ struct DecodeOptions {
     std::vector<uint16_t> extra_bacnet_ports;   // UDP -- see BACNET_UDP_PORT (47808/0xBAC0)
     std::vector<uint16_t> extra_hartip_ports;   // TCP AND UDP -- see HARTIP_PORT (5094, same for both)
     std::vector<uint16_t> extra_opcua_ports;    // TCP only -- see OPCUA_PORT (4840)
+    std::vector<uint16_t> extra_mqtt_ports;     // TCP only -- see MQTT_PORT (1883)
     // If true, a parse failure at the Ethernet/IPv4/TCP layer is rethrown to
     // the caller instead of being recorded as a per-packet "parse-error"
     // result. Off by default so one malformed packet doesn't abort decoding
@@ -96,7 +99,7 @@ struct DecodedPacket {
     std::string tcp_flags;
 
     // "iec104", "modbus", "dnp3", "s7comm", "enip", "profinet", "goose", "sv", "ethercat", "bacnet",
-    // "hartip", "opcua", "cotp"
+    // "hartip", "opcua", "mms", "mqtt", "cotp"
     // (recognized TPKT/COTP framing but not S7comm inside it -- e.g. a connection setup frame),
     // "tcp" (recognized transport, no app-layer match), "udp" (recognized transport, no app-layer
     // protocol decoded -- see udp.hpp; UDP/2222 CIP I/O traffic that try_parse_cip_io actually
@@ -493,6 +496,48 @@ struct DecodedPacket {
     bool mms_body_shown_as_hex = false;
     std::string mms_body_hex;
     size_t mms_body_length = 0;
+
+    // Only set when protocol == "mqtt" -- see try_parse_mqtt_message in mqtt.hpp. MQTT rides plain
+    // TCP, conventionally port 1883 (this decoder's own structural detection gate is honestly weak
+    // -- see mqtt.hpp's file header comment -- so it is tried LAST in decoder.cpp's opportunistic
+    // TCP dispatch chain, after HART-IP). Fields below mirror MqttMessage field-for-field.
+    std::string mqtt_packet_type_name;  // "CONNECT"/"PUBLISH"/... -- always set when protocol == "mqtt"
+    uint32_t mqtt_remaining_length = 0;
+    bool mqtt_dup = false, mqtt_retain = false;  // PUBLISH only
+    uint8_t mqtt_qos = 0;                         // PUBLISH only
+    bool mqtt_has_packet_id = false;
+    uint16_t mqtt_packet_id = 0;
+    std::string mqtt_topic;  // PUBLISH only
+    bool mqtt_has_payload = false;
+    size_t mqtt_payload_length = 0;
+    std::string mqtt_payload_hex;  // PUBLISH only -- raw application payload, not value-decoded,
+                                     // EXCEPT left empty when Sparkplug B decode below succeeded
+    std::string mqtt_protocol_version_name;  // "3.1.1"/"5.0"/"" (unknown) -- see mqtt.hpp's own
+                                               // "Version disambiguation" section
+    // Every other packet-type-specific field, including every decoded MQTT5 Property -- mirrors
+    // opcua_values'/bacnet_values'/hartip_values' scheme.
+    std::vector<std::string> mqtt_values;
+
+    // Sparkplug B -- PUBLISH only, set only when the topic matched the spBv1.0 namespace.
+    bool mqtt_is_sparkplug = false;
+    std::string mqtt_sparkplug_group_id, mqtt_sparkplug_message_type, mqtt_sparkplug_edge_node_id,
+        mqtt_sparkplug_device_id;
+    bool mqtt_sparkplug_is_state = false;
+    std::string mqtt_sparkplug_state_host_id;  // set only when mqtt_sparkplug_is_state
+    std::string mqtt_sparkplug_state_text;      // set only when mqtt_sparkplug_is_state -- raw JSON
+                                                  // text, unparsed (see mqtt.hpp)
+    bool mqtt_sparkplug_payload_decoded = false;  // protobuf Payload decode succeeded structurally
+                                                    // (only meaningful when !mqtt_sparkplug_is_state)
+    bool mqtt_sparkplug_has_timestamp = false;
+    uint64_t mqtt_sparkplug_timestamp = 0;
+    bool mqtt_sparkplug_has_seq = false;
+    uint64_t mqtt_sparkplug_seq = 0;
+    bool mqtt_sparkplug_has_uuid = false;
+    std::string mqtt_sparkplug_uuid;
+    bool mqtt_sparkplug_has_body = false;
+    size_t mqtt_sparkplug_body_length = 0;
+    size_t mqtt_sparkplug_metric_count = 0;  // every metric found, even past the rendering cap below
+    std::vector<std::string> mqtt_sparkplug_metrics;  // one rendered summary per metric, capped
 };
 
 // Cross-packet DNP3 fragment-reassembly state for one directional TCP flow (src ip:port -> dst
@@ -597,6 +642,16 @@ private:
     // See CotpFragmentReassembly above. Keyed by directional flow_key, same shape as
     // dnp3_reassembly_/tcp_reassembly_. `mutable` for the same reason as dnp3_reassembly_.
     mutable std::unordered_map<std::string, CotpFragmentReassembly> cotp_reassembly_;
+
+    // MQTT protocol version (0=unknown, 4=v3.1.1, 5=v5.0) learned from a CONNECT packet seen
+    // earlier on this TCP SESSION (both directions -- keyed the same way as modbus_pending_'s outer
+    // key, via the session_key helper in decoder.cpp, since a later SUBSCRIBE/SUBACK/UNSUBSCRIBE
+    // needing this hint can arrive in either direction relative to the CONNECT itself). Used only to
+    // disambiguate the handful of MQTT packet types whose own wire shape is genuinely ambiguous
+    // between v3.1.1 and v5 without it -- see mqtt.hpp's "Version disambiguation" section; every
+    // other MQTT packet type is self-describing and never consults this map. `mutable` for the same
+    // reason as dnp3_reassembly_ above.
+    mutable std::unordered_map<std::string, uint8_t> mqtt_session_version_;
 
     // Decodes one DNP3 data-link frame's transport header and, once its fragment is complete,
     // application layer -- buffering across packets via dnp3_reassembly_[flow_key] when the

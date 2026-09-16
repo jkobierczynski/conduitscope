@@ -7,6 +7,22 @@ namespace conduitscope {
 
 namespace {
 
+// The Modbus Application Protocol spec caps a PDU at 253 bytes, so mbap_length (unit_id + PDU)
+// can never legitimately exceed 254 -- found via a real capture: non-Modbus traffic on port 502
+// (digitalbond's MODBUS-TestDataPart1, deliberately exercising traffic outside this decoder's
+// scope) had two bytes that coincidentally read as protocol_id==0, with a "length" field of
+// several thousand. Without this cap, that flow would be mistaken for a genuine Modbus PDU split
+// across TCP segments and buffered indefinitely waiting for bytes that would never complete it as
+// Modbus -- or, for a payload that already arrived complete in one segment, decoded outright as a
+// bogus Modbus frame with a "length mismatch" note instead of being rejected so another protocol's
+// decoder gets a turn (seen with a synthetic MQTT CONNACK whose body happened to read as
+// protocol_id==0 with a huge bogus mbap_length). A little slack above the strict 254 theoretical
+// max is kept in case of a nonstandard/extended real device; 300 is still two orders of magnitude
+// below the false positive this guards against. Shared by both modbus_tcp_declared_length (the
+// reassembly-side check) and try_parse_modbus_tcp (the final decode gate) so the two stay
+// consistent.
+constexpr uint16_t kMaxPlausibleMbapLength = 300;
+
 enum FunctionCode : uint8_t {
     FC_READ_COILS = 0x01,
     FC_READ_DISCRETE_INPUTS = 0x02,
@@ -168,16 +184,6 @@ std::optional<size_t> modbus_tcp_declared_length(ByteSpan payload) {
         // bytes that a non-Modbus flow will never deliver in the shape we'd expect.
         return std::nullopt;
     }
-    // The Modbus Application Protocol spec caps a PDU at 253 bytes, so mbap_length (unit_id + PDU)
-    // can never legitimately exceed 254 -- found via a real capture: non-Modbus traffic on port
-    // 502 (digitalbond's MODBUS-TestDataPart1, deliberately exercising traffic outside this
-    // decoder's scope) had two bytes that coincidentally read as protocol_id==0, with a "length"
-    // field of several thousand. Without this cap, that flow would be mistaken for a genuine
-    // Modbus PDU split across TCP segments and buffered indefinitely waiting for bytes that would
-    // never complete it as Modbus. A little slack above the strict 254 theoretical max is kept
-    // in case of a nonstandard/extended real device; 300 is still two orders of magnitude below
-    // the false positive this guards against.
-    constexpr uint16_t kMaxPlausibleMbapLength = 300;
     if (mbap_length > kMaxPlausibleMbapLength) {
         return std::nullopt;
     }
@@ -201,6 +207,12 @@ std::optional<ModbusFrame> try_parse_modbus_tcp(ByteSpan tcp_payload) {
         return std::nullopt;
     }
     uint16_t mbap_length = c.u16be();
+    if (mbap_length > kMaxPlausibleMbapLength) {
+        // Same guard as modbus_tcp_declared_length, applied here too: a payload that already
+        // arrived complete in one TCP segment still deserves this check, not just the
+        // reassembly-buffering path -- see kMaxPlausibleMbapLength's comment for why.
+        return std::nullopt;
+    }
     uint8_t unit_id = c.u8();
 
     ModbusFrame frame;

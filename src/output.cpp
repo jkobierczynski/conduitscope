@@ -67,6 +67,7 @@ constexpr const char* kBrightBlue = "\033[94m";
 constexpr const char* kBrightWhite = "\033[97m";
 constexpr const char* kBrightRed = "\033[91m";
 constexpr const char* kBoldBlue = "\033[1;34m";
+constexpr const char* kBoldCyan = "\033[1;36m";
 
 // Color for a packet's "[protocol]" tag -- picked so a mixed-protocol capture scans quickly by
 // eye, not for any deeper meaning. parse-error is the one exception: it gets the same "something
@@ -89,6 +90,9 @@ const char* protocol_tag_color(const std::string& protocol) {
     if (protocol == "mms") return kBoldBlue;  // deliberately close to s7comm's plain blue -- they
                                                 // share the same TPKT/COTP transport/port, bold
                                                 // distinguishes MMS at a glance
+    if (protocol == "mqtt") return kBoldCyan;  // bold, vs. Modbus's plain cyan -- deliberately
+                                                 // distinct from every other tag color, no shared
+                                                 // transport/port with any other decoded protocol
     if (protocol == "parse-error") return kBoldRed;
     return kDim;  // tcp / udp / non-tcp / non-ip / unsupported-link: recognized, nothing OT-specific
 }
@@ -564,6 +568,83 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
             out_ << "    \"mms_body_hex\": \"" << json_escape(p.mms_body_hex) << "\",\n";
         }
     }
+    if (p.protocol == "mqtt") {
+        out_ << "    \"mqtt_packet_type\": \"" << json_escape(p.mqtt_packet_type_name) << "\",\n";
+        out_ << "    \"mqtt_remaining_length\": " << p.mqtt_remaining_length << ",\n";
+        if (!p.mqtt_protocol_version_name.empty()) {
+            out_ << "    \"mqtt_protocol_version\": \"" << json_escape(p.mqtt_protocol_version_name) << "\",\n";
+        }
+        if (p.mqtt_packet_type_name == "PUBLISH") {
+            out_ << "    \"mqtt_dup\": " << (p.mqtt_dup ? "true" : "false") << ",\n";
+            out_ << "    \"mqtt_qos\": " << static_cast<unsigned>(p.mqtt_qos) << ",\n";
+            out_ << "    \"mqtt_retain\": " << (p.mqtt_retain ? "true" : "false") << ",\n";
+            out_ << "    \"mqtt_topic\": \"" << json_escape(p.mqtt_topic) << "\",\n";
+        }
+        if (p.mqtt_has_packet_id) {
+            out_ << "    \"mqtt_packet_id\": " << p.mqtt_packet_id << ",\n";
+        }
+        if (p.mqtt_has_payload) {
+            out_ << "    \"mqtt_payload_length\": " << p.mqtt_payload_length << ",\n";
+            // Omitted only when a successful Sparkplug B decode cleared it (see mqtt.hpp) -- a
+            // genuinely empty payload still renders an empty hex string, same as p.mqtt_payload_length == 0.
+            bool hex_cleared_by_sparkplug = p.mqtt_payload_length > 0 && p.mqtt_payload_hex.empty();
+            if (!hex_cleared_by_sparkplug) {
+                out_ << "    \"mqtt_payload_hex\": \"" << json_escape(p.mqtt_payload_hex) << "\",\n";
+            }
+        }
+        if (!p.mqtt_values.empty()) {
+            out_ << "    \"mqtt_values\": [";
+            for (size_t i = 0; i < p.mqtt_values.size(); ++i) {
+                if (i != 0) out_ << ", ";
+                out_ << "\"" << json_escape(p.mqtt_values[i]) << "\"";
+            }
+            out_ << "],\n";
+        }
+        out_ << "    \"mqtt_is_sparkplug\": " << (p.mqtt_is_sparkplug ? "true" : "false") << ",\n";
+        if (p.mqtt_is_sparkplug) {
+            out_ << "    \"mqtt_sparkplug_message_type\": \"" << json_escape(p.mqtt_sparkplug_message_type)
+                 << "\",\n";
+            out_ << "    \"mqtt_sparkplug_is_state\": " << (p.mqtt_sparkplug_is_state ? "true" : "false")
+                 << ",\n";
+            if (p.mqtt_sparkplug_is_state) {
+                out_ << "    \"mqtt_sparkplug_state_host_id\": \"" << json_escape(p.mqtt_sparkplug_state_host_id)
+                     << "\",\n";
+                out_ << "    \"mqtt_sparkplug_state_text\": \"" << json_escape(p.mqtt_sparkplug_state_text)
+                     << "\",\n";
+            } else {
+                out_ << "    \"mqtt_sparkplug_group_id\": \"" << json_escape(p.mqtt_sparkplug_group_id) << "\",\n";
+                out_ << "    \"mqtt_sparkplug_edge_node_id\": \"" << json_escape(p.mqtt_sparkplug_edge_node_id)
+                     << "\",\n";
+                if (!p.mqtt_sparkplug_device_id.empty()) {
+                    out_ << "    \"mqtt_sparkplug_device_id\": \"" << json_escape(p.mqtt_sparkplug_device_id)
+                         << "\",\n";
+                }
+                out_ << "    \"mqtt_sparkplug_payload_decoded\": "
+                     << (p.mqtt_sparkplug_payload_decoded ? "true" : "false") << ",\n";
+                if (p.mqtt_sparkplug_has_timestamp) {
+                    out_ << "    \"mqtt_sparkplug_timestamp\": " << p.mqtt_sparkplug_timestamp << ",\n";
+                }
+                if (p.mqtt_sparkplug_has_seq) {
+                    out_ << "    \"mqtt_sparkplug_seq\": " << p.mqtt_sparkplug_seq << ",\n";
+                }
+                if (p.mqtt_sparkplug_has_uuid) {
+                    out_ << "    \"mqtt_sparkplug_uuid\": \"" << json_escape(p.mqtt_sparkplug_uuid) << "\",\n";
+                }
+                if (p.mqtt_sparkplug_has_body) {
+                    out_ << "    \"mqtt_sparkplug_body_length\": " << p.mqtt_sparkplug_body_length << ",\n";
+                }
+                out_ << "    \"mqtt_sparkplug_metric_count\": " << p.mqtt_sparkplug_metric_count << ",\n";
+                if (!p.mqtt_sparkplug_metrics.empty()) {
+                    out_ << "    \"mqtt_sparkplug_metrics\": [";
+                    for (size_t i = 0; i < p.mqtt_sparkplug_metrics.size(); ++i) {
+                        if (i != 0) out_ << ", ";
+                        out_ << "\"" << json_escape(p.mqtt_sparkplug_metrics[i]) << "\"";
+                    }
+                    out_ << "],\n";
+                }
+            }
+        }
+    }
     out_ << "    \"notes\": [";
     for (size_t i = 0; i < p.notes.size(); ++i) {
         if (i != 0) out_ << ", ";
@@ -656,6 +737,13 @@ void StatsWriter::write_packet(const DecodedPacket& p) {
     if (p.protocol == "mms") {
         if (p.mms_has_pdu) mms_pdu_counts_[p.mms_pdu_name]++;
         if (p.mms_service_recognized) mms_service_counts_[p.mms_service_name]++;
+    }
+    if (p.protocol == "mqtt") {
+        mqtt_packet_type_counts_[p.mqtt_packet_type_name]++;
+        if (p.mqtt_is_sparkplug) {
+            mqtt_sparkplug_count_++;
+            mqtt_sparkplug_message_type_counts_[p.mqtt_sparkplug_message_type]++;
+        }
     }
     if (!has_ts_) {
         first_ts_ = last_ts_ = p.timestamp;
@@ -788,6 +876,19 @@ void StatsWriter::print_summary(std::ostream& out) const {
         out << "mms services:\n";
         for (const auto& [name, count] : mms_service_counts_) {
             out << "  " << std::left << std::setw(60) << name << count << "\n";
+        }
+    }
+    if (!mqtt_packet_type_counts_.empty()) {
+        out << "mqtt packet types:\n";
+        for (const auto& [name, count] : mqtt_packet_type_counts_) {
+            out << "  " << std::left << std::setw(40) << name << count << "\n";
+        }
+        out << "mqtt sparkplug b publishes: " << mqtt_sparkplug_count_ << "\n";
+    }
+    if (!mqtt_sparkplug_message_type_counts_.empty()) {
+        out << "mqtt sparkplug b message types:\n";
+        for (const auto& [name, count] : mqtt_sparkplug_message_type_counts_) {
+            out << "  " << std::left << std::setw(40) << name << count << "\n";
         }
     }
 }

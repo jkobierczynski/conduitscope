@@ -4290,6 +4290,427 @@ def build_hartip_sample():
     (TESTS_DIR / "sample_hartip.pcap").write_bytes(data)
 
 
+def mqtt_vbi(n: int) -> bytes:
+    out = b""
+    while True:
+        b = n % 128
+        n //= 128
+        if n > 0:
+            b |= 0x80
+        out += bytes([b])
+        if n == 0:
+            break
+    return out
+
+
+def mqtt_str(s: str) -> bytes:
+    b = s.encode("utf-8")
+    return struct.pack(">H", len(b)) + b
+
+
+def mqtt_bin(b: bytes) -> bytes:
+    return struct.pack(">H", len(b)) + b
+
+
+def mqtt_packet(packet_type: int, flags: int, body: bytes = b"") -> bytes:
+    return bytes([(packet_type << 4) | flags]) + mqtt_vbi(len(body)) + body
+
+
+def mqtt_property_byte(prop_id: int, value: int) -> bytes: return mqtt_vbi(prop_id) + bytes([value])
+def mqtt_property_u16(prop_id: int, value: int) -> bytes: return mqtt_vbi(prop_id) + struct.pack(">H", value)
+def mqtt_property_u32(prop_id: int, value: int) -> bytes: return mqtt_vbi(prop_id) + struct.pack(">I", value)
+def mqtt_property_vbi(prop_id: int, value: int) -> bytes: return mqtt_vbi(prop_id) + mqtt_vbi(value)
+def mqtt_property_str(prop_id: int, value: str) -> bytes: return mqtt_vbi(prop_id) + mqtt_str(value)
+def mqtt_property_bin(prop_id: int, value: bytes) -> bytes: return mqtt_vbi(prop_id) + mqtt_bin(value)
+
+
+def mqtt_property_strpair(prop_id: int, key: str, value: str) -> bytes:
+    return mqtt_vbi(prop_id) + mqtt_str(key) + mqtt_str(value)
+
+
+def mqtt_properties(*entries: bytes) -> bytes:
+    body = b"".join(entries)
+    return mqtt_vbi(len(body)) + body
+
+
+# Sparkplug B -- minimal protobuf wire-format encoder (varint + length-delimited + fixed32/64),
+# matching src/mqtt.cpp's own hand-rolled decoder field-for-field (org.eclipse.tahu.protobuf.Payload,
+# fetched raw from github.com/eclipse-tahu/tahu/blob/master/sparkplug_b/sparkplug_b.proto).
+
+def pb_varint(n: int) -> bytes:
+    if n < 0:
+        n &= 0xFFFFFFFFFFFFFFFF
+    out = b""
+    while True:
+        b = n & 0x7F
+        n >>= 7
+        if n:
+            out += bytes([b | 0x80])
+        else:
+            out += bytes([b])
+            break
+    return out
+
+
+def pb_tag(field: int, wire_type: int) -> bytes: return pb_varint((field << 3) | wire_type)
+def pb_bytes_field(field: int, data: bytes) -> bytes: return pb_tag(field, 2) + pb_varint(len(data)) + data
+def pb_varint_field(field: int, value: int) -> bytes: return pb_tag(field, 0) + pb_varint(value)
+
+
+def pb_fixed32_field(field: int, raw: bytes) -> bytes:
+    assert len(raw) == 4
+    return pb_tag(field, 5) + raw
+
+
+def pb_fixed64_field(field: int, raw: bytes) -> bytes:
+    assert len(raw) == 8
+    return pb_tag(field, 1) + raw
+
+
+SPARKPLUG_DATATYPES = {
+    "Int8": 1, "Int16": 2, "Int32": 3, "Int64": 4, "UInt8": 5, "UInt16": 6, "UInt32": 7, "UInt64": 8,
+    "Float": 9, "Double": 10, "Boolean": 11, "String": 12, "DateTime": 13, "Text": 14, "UUID": 15,
+    "Bytes": 17,
+}
+
+
+def sparkplug_metric(name, datatype, value=None, alias=None, timestamp=None, is_null=False,
+                      is_historical=False) -> bytes:
+    dt = SPARKPLUG_DATATYPES[datatype]
+    out = pb_bytes_field(1, name.encode("utf-8"))
+    if alias is not None:
+        out += pb_varint_field(2, alias)
+    if timestamp is not None:
+        out += pb_varint_field(3, timestamp)
+    out += pb_varint_field(4, dt)
+    if is_historical:
+        out += pb_varint_field(5, 1)
+    if is_null:
+        out += pb_varint_field(7, 1)
+        return out
+    if datatype in ("Int8", "Int16", "Int32", "UInt8", "UInt16", "UInt32"):
+        # Signed types are stored as their raw two's-complement bit pattern reinterpreted as
+        # unsigned in the uint32 int_value field -- see mqtt.hpp's own documented rationale (a
+        # negative value here deliberately produces the inefficient 5-byte varint real Sparkplug
+        # traffic is known for, exercising that exact decode path).
+        raw = (value & 0xFFFFFFFF) if value < 0 else value
+        out += pb_varint_field(10, raw)
+    elif datatype in ("Int64", "UInt64"):
+        raw = (value & 0xFFFFFFFFFFFFFFFF) if value < 0 else value
+        out += pb_varint_field(11, raw)
+    elif datatype == "Float":
+        out += pb_fixed32_field(12, struct.pack("<f", value))
+    elif datatype == "Double":
+        out += pb_fixed64_field(13, struct.pack("<d", value))
+    elif datatype == "Boolean":
+        out += pb_varint_field(14, 1 if value else 0)
+    elif datatype in ("String", "Text", "UUID"):
+        out += pb_bytes_field(15, value.encode("utf-8"))
+    elif datatype == "DateTime":
+        out += pb_varint_field(11, value)  # long_value, milliseconds since the Unix epoch
+    elif datatype == "Bytes":
+        out += pb_bytes_field(16, value)
+    else:
+        raise ValueError("unhandled datatype in sample fixture builder: " + datatype)
+    return out
+
+
+def sparkplug_payload(metrics, timestamp=None, seq=None, uuid=None, body=None) -> bytes:
+    out = b""
+    if timestamp is not None:
+        out += pb_varint_field(1, timestamp)
+    for m in metrics:
+        out += pb_bytes_field(2, m)
+    if seq is not None:
+        out += pb_varint_field(3, seq)
+    if uuid is not None:
+        out += pb_bytes_field(4, uuid.encode("utf-8"))
+    if body is not None:
+        out += pb_bytes_field(5, body)
+    return out
+
+
+def build_mqtt_sample():
+    """MQTT v3.1.1 and v5.0, plus Sparkplug B on top of PUBLISH -- see mqtt.hpp's file header
+    comment for the full byte layout and decode scope each packet below exercises: a full v3.1.1
+    CONNECT/CONNACK/PUBLISH(qos0/1/2)/SUBSCRIBE/UNSUBSCRIBE/PINGREQ/DISCONNECT lifecycle including a
+    cleartext Username/Password CONNECT (a genuine, directly actionable OT-security finding this
+    decoder deliberately surfaces -- see mqtt.hpp's own reasoning); a full v5.0 lifecycle exercising
+    Properties on CONNECT/CONNACK/PUBLISH/PUBACK/SUBSCRIBE/SUBACK/UNSUBSCRIBE/UNSUBACK/AUTH/
+    DISCONNECT; a Sparkplug B flow (NBIRTH/DBIRTH/NDATA/DDATA/DDEATH plus the separate STATE
+    namespace) covering every scalar DataType this decoder decodes, a negative-Int32 metric (the
+    documented sign-handling gotcha), a null-valued metric, a Bytes-typed (Tier 2) metric, and a
+    genuinely malformed Sparkplug payload; two flows exercising the SUBSCRIBE/UNSUBSCRIBE version-
+    disambiguation HEURISTIC (no CONNECT ever seen on either flow in this capture) in both its
+    v3.1.1-shape and v5-shape forms; a PUBLISH split mid-message across two TCP segments (
+    Decoder::reassemble_tcp_payload, driven by mqtt_declared_length); three small packets (PINGREQ +
+    PUBACK + PINGREQ) coalesced by the sender/OS into one TCP segment; an invalid QoS=3 PUBLISH; a
+    CONNECT-shaped byte whose Protocol Name is neither "MQTT" nor "MQIsdp" (a structural-gate
+    REJECTION regression case -- this packet must NOT be recognized as MQTT at all); an unrecognized
+    MQTT5 Property Identifier (decode_properties' own contained-failure fallback); and a genuinely
+    truncated/incomplete final packet (the TCP-reassembly "buffering, waiting for more" path,
+    mirroring sample_opcua.pcap's own equivalent case). No real capture happens to be attributed for
+    this fixture set yet at the time each packet was written -- see tests/real_captures/mqtt/
+    ATTRIBUTION.md (if present) for the current state of that search."""
+    packets = []
+
+    def make_flow(sport, dport=1883, src_ip=HMI_IP, dst_ip=PLC_IP, src_mac=HMI_MAC, dst_mac=PLC_MAC,
+                  ident_start=0x9000):
+        state = {"cseq": 10000, "sseq": 20000, "ident": ident_start}
+
+        def add(from_client: bool, payload: bytes):
+            if from_client:
+                s_port, d_port = sport, dport
+                s_ip, d_ip = src_ip, dst_ip
+                s_mac, d_mac = src_mac, dst_mac
+                seq, ack = state["cseq"], state["sseq"]
+                state["cseq"] += len(payload)
+            else:
+                s_port, d_port = dport, sport
+                s_ip, d_ip = dst_ip, src_ip
+                s_mac, d_mac = dst_mac, src_mac
+                seq, ack = state["sseq"], state["cseq"]
+                state["sseq"] += len(payload)
+            tcp = tcp_header(s_port, d_port, seq, ack, TCP_PSH | TCP_ACK, len(payload)) + payload
+            ip = ipv4_header(s_ip, d_ip, 6, len(tcp), state["ident"] & 0xFFFF) + tcp
+            state["ident"] += 1
+            packets.append(eth_header(d_mac, s_mac, 0x0800) + ip)
+
+        return add
+
+    # ---------------------------------------------------------------------------------------------
+    # Flow A: full v3.1.1 lifecycle, port 61000.
+    # ---------------------------------------------------------------------------------------------
+    a = make_flow(61000)
+    connect_body = (mqtt_str("MQTT") + bytes([4]) + bytes([0xC6]) + struct.pack(">H", 60) +
+                    mqtt_str("plc1-hmi") + mqtt_str("devices/plc1/lwt") + mqtt_bin(b"offline") +
+                    mqtt_str("admin") + mqtt_bin(b"Passw0rd!"))
+    a(True, mqtt_packet(1, 0, connect_body))  # CONNECT: will(qos1,retain0)+username+password
+    a(False, mqtt_packet(2, 0, bytes([0x00, 0x00])))  # CONNACK: session present=0, accepted
+
+    a(True, mqtt_packet(3, 0x01, mqtt_str("devices/plc1/status") + b"online"))  # PUBLISH qos0 retain
+
+    a(True, mqtt_packet(3, 0x02, mqtt_str("devices/plc1/temp") + struct.pack(">H", 1) + b"72.3"))  # qos1
+    a(False, mqtt_packet(4, 0, struct.pack(">H", 1)))  # PUBACK id=1
+
+    a(True, mqtt_packet(3, 0x04,
+                         mqtt_str("devices/plc1/alarm") + struct.pack(">H", 2) + b"HIGH_PRESSURE"))  # qos2
+    a(False, mqtt_packet(5, 0, struct.pack(">H", 2)))  # PUBREC id=2
+    a(True, mqtt_packet(6, 0x02, struct.pack(">H", 2)))  # PUBREL id=2
+    a(False, mqtt_packet(7, 0, struct.pack(">H", 2)))  # PUBCOMP id=2
+
+    sub_body = (struct.pack(">H", 3) + mqtt_str("devices/+/status") + bytes([0]) +
+                mqtt_str("devices/plc1/#") + bytes([1]))
+    a(True, mqtt_packet(8, 0x02, sub_body))  # SUBSCRIBE id=3, 2 filters
+    a(False, mqtt_packet(9, 0, struct.pack(">H", 3) + bytes([0, 1])))  # SUBACK id=3
+
+    unsub_body = struct.pack(">H", 4) + mqtt_str("devices/+/status")
+    a(True, mqtt_packet(10, 0x02, unsub_body))  # UNSUBSCRIBE id=4
+    a(False, mqtt_packet(11, 0, struct.pack(">H", 4)))  # UNSUBACK id=4 (v3.1.1: packet id only)
+
+    a(True, mqtt_packet(12, 0))  # PINGREQ
+    a(False, mqtt_packet(13, 0))  # PINGRESP
+    a(True, mqtt_packet(14, 0))  # DISCONNECT (v3.1.1: Remaining Length always 0)
+
+    # ---------------------------------------------------------------------------------------------
+    # Flow B: full v5.0 lifecycle exercising Properties throughout, port 62000.
+    # ---------------------------------------------------------------------------------------------
+    b = make_flow(62000)
+    connect_props = mqtt_properties(
+        mqtt_property_u32(17, 3600),  # SessionExpiryInterval
+        mqtt_property_u16(33, 20),    # ReceiveMaximum
+        mqtt_property_strpair(38, "app", "conduitscope-test"),  # UserProperty
+    )
+    will_props = mqtt_properties(mqtt_property_u32(24, 5))  # WillDelayInterval
+    connect_v5_body = (mqtt_str("MQTT") + bytes([5]) + bytes([0xC6]) + struct.pack(">H", 30) +
+                        connect_props + mqtt_str("plc2-controller") + will_props +
+                        mqtt_str("devices/plc2/lwt") + mqtt_bin(b"offline") +
+                        mqtt_str("svc-account") + mqtt_bin(b"hunter2v5"))
+    b(True, mqtt_packet(1, 0, connect_v5_body))
+    connack_props = mqtt_properties(mqtt_property_u16(19, 60), mqtt_property_u16(34, 10))
+    b(False, mqtt_packet(2, 0, bytes([0x00, 0x00]) + connack_props))
+
+    pub_props = mqtt_properties(mqtt_property_byte(1, 1), mqtt_property_str(3, "text/plain"))
+    b(True, mqtt_packet(3, 0x02, mqtt_str("devices/plc2/temp") + struct.pack(">H", 1) + pub_props + b"68.9"))
+    b(False, mqtt_packet(4, 0, struct.pack(">H", 1) + bytes([0x00])))  # PUBACK v5: reason, no properties
+
+    sub_v5_props = mqtt_properties(mqtt_property_vbi(11, 7))  # SubscriptionIdentifier
+    sub_v5_body = struct.pack(">H", 2) + sub_v5_props + mqtt_str("devices/plc2/#") + bytes([0x05])  # QoS1+NoLocal
+    b(True, mqtt_packet(8, 0x02, sub_v5_body))
+    b(False, mqtt_packet(9, 0, struct.pack(">H", 2) + mqtt_vbi(0) + bytes([0x01])))
+
+    unsub_v5_body = struct.pack(">H", 3) + mqtt_vbi(0) + mqtt_str("devices/plc2/#")
+    b(True, mqtt_packet(10, 0x02, unsub_v5_body))
+    b(False, mqtt_packet(11, 0, struct.pack(">H", 3) + mqtt_vbi(0) + bytes([0x00])))
+
+    auth_props = mqtt_properties(mqtt_property_str(21, "SCRAM-SHA-256"),
+                                  mqtt_property_bin(22, bytes(range(8))))
+    b(True, mqtt_packet(15, 0, bytes([0x18]) + auth_props))  # AUTH: Continue authentication
+    auth_resp_props = mqtt_properties(mqtt_property_str(21, "SCRAM-SHA-256"))
+    b(False, mqtt_packet(15, 0, bytes([0x00]) + auth_resp_props))  # AUTH: Success
+
+    disc_props = mqtt_properties(mqtt_property_str(31, "administrative disconnect"))
+    b(True, mqtt_packet(14, 0, bytes([0x04]) + disc_props))  # DISCONNECT: with Will Message
+
+    # ---------------------------------------------------------------------------------------------
+    # Flow C: Sparkplug B, port 63000 -- a v3.1.1 CONNECT/CONNACK first so this flow's own version
+    # is session-tracked (not heuristic) for the PUBLISH packets that follow.
+    # ---------------------------------------------------------------------------------------------
+    c = make_flow(63000, src_ip=PLC_IP, dst_ip=HMI_IP, src_mac=PLC_MAC, dst_mac=HMI_MAC)
+    c_connect = mqtt_str("MQTT") + bytes([4]) + bytes([0x02]) + struct.pack(">H", 30) + mqtt_str("edge-node-1")
+    c(True, mqtt_packet(1, 0, c_connect))
+    c(False, mqtt_packet(2, 0, bytes([0x00, 0x00])))
+
+    ts0 = 1_700_000_000_000
+    nbirth_metrics = [
+        sparkplug_metric("bdSeq", "UInt64", 0),
+        sparkplug_metric("Temperature", "Float", 21.5, timestamp=ts0),
+        sparkplug_metric("Running", "Boolean", True, timestamp=ts0),
+        sparkplug_metric("Count", "Int32", -5, timestamp=ts0),  # negative -- sign-handling gotcha
+        sparkplug_metric("SerialNumber", "String", "SN-00123", timestamp=ts0),
+        sparkplug_metric("StartTime", "DateTime", ts0, timestamp=ts0),
+    ]
+    c(True, mqtt_packet(3, 0, mqtt_str("spBv1.0/PlantA/NBIRTH/EdgeNode1") +
+                         sparkplug_payload(nbirth_metrics, timestamp=ts0, seq=0)))
+
+    dbirth_metrics = [
+        sparkplug_metric("Pressure", "Double", 101.325, timestamp=ts0 + 1000),
+        sparkplug_metric("Status", "Text", "OK", timestamp=ts0 + 1000),
+    ]
+    c(True, mqtt_packet(3, 0, mqtt_str("spBv1.0/PlantA/DBIRTH/EdgeNode1/Device1") +
+                         sparkplug_payload(dbirth_metrics, timestamp=ts0 + 1000, seq=1)))
+
+    ndata_metrics = [sparkplug_metric("Temperature", "Float", 22.1, timestamp=ts0 + 2000)]
+    c(True, mqtt_packet(3, 0, mqtt_str("spBv1.0/PlantA/NDATA/EdgeNode1") +
+                         sparkplug_payload(ndata_metrics, timestamp=ts0 + 2000, seq=2)))
+
+    ddata_metrics = [
+        sparkplug_metric("Pressure", "Double", 101.9, timestamp=ts0 + 3000),
+        sparkplug_metric("Fault", "Boolean", None, is_null=True, timestamp=ts0 + 3000),
+        sparkplug_metric("Firmware", "Bytes", bytes([0xDE, 0xAD, 0xBE, 0xEF]), timestamp=ts0 + 3000),
+    ]
+    c(True, mqtt_packet(3, 0, mqtt_str("spBv1.0/PlantA/DDATA/EdgeNode1/Device1") +
+                         sparkplug_payload(ddata_metrics, timestamp=ts0 + 3000, seq=3)))
+
+    c(True, mqtt_packet(3, 0, mqtt_str("spBv1.0/PlantA/DDEATH/EdgeNode1/Device1") +
+                         sparkplug_payload([], timestamp=ts0 + 4000, seq=4, body=b"\x00")))
+
+    state_json = b'{"online":true,"timestamp":1700000000000}'
+    c(True, mqtt_packet(3, 0, mqtt_str("spBv1.0/STATE/scada-host-1") + state_json))
+
+    # A genuinely malformed Sparkplug payload -- a topic that matches the namespace but a payload
+    # that is NOT valid protobuf (a length-delimited field claiming far more bytes than are present)
+    # -- exercises decode_sparkplug_payload's own try/catch fallback (parse_ok=false, note added).
+    malformed_sp = pb_tag(2, 2) + pb_varint(200) + bytes([0x01, 0x02, 0x03])  # claims 200 bytes, has 3
+    c(True, mqtt_packet(3, 0, mqtt_str("spBv1.0/PlantA/NDATA/EdgeNode1") + malformed_sp))
+
+    # A v5 PUBLISH carrying an unrecognized MQTT5 Property Identifier (100 is not in mqtt.hpp's own
+    # 27-entry table) -- exercises decode_properties' own "can't safely continue past an unknown
+    # property" contained-failure fallback. Uses a fresh v5-tracked sub-flow so the Properties
+    # section is unambiguously expected.
+    c5 = make_flow(63005, src_ip=PLC_IP, dst_ip=HMI_IP, src_mac=PLC_MAC, dst_mac=HMI_MAC)
+    c5(True, mqtt_packet(1, 0, mqtt_str("MQTT") + bytes([5]) + bytes([0x02]) + struct.pack(">H", 30) +
+                          mqtt_properties() + mqtt_str("edge-node-2")))
+    c5(False, mqtt_packet(2, 0, bytes([0x00, 0x00]) + mqtt_properties()))
+    bogus_props = mqtt_properties(mqtt_property_byte(1, 1))
+    # Splice in one unknown property id (100) with a bogus 1-byte value, by rebuilding the length
+    # prefix around a hand-assembled properties body rather than using mqtt_properties() (which only
+    # knows named property ids from mqtt.hpp's own table).
+    bogus_body = mqtt_vbi(1) + bytes([0x01]) + mqtt_vbi(100) + bytes([0xFF])
+    bogus_props = mqtt_vbi(len(bogus_body)) + bogus_body
+    c5(True, mqtt_packet(3, 0, mqtt_str("spBv1.0/PlantA/NDATA/EdgeNode2") + bogus_props +
+                          sparkplug_payload([sparkplug_metric("X", "Int32", 1)], seq=0)))
+
+    # ---------------------------------------------------------------------------------------------
+    # Flows D1/D2: SUBSCRIBE/UNSUBSCRIBE version-disambiguation HEURISTIC -- no CONNECT is ever sent
+    # on either flow in this capture, so Decoder's own per-session version tracking has nothing to
+    # go on and mqtt.cpp's own heuristic (see mqtt.hpp's "Version disambiguation" section) is what
+    # actually determines the shape.
+    # ---------------------------------------------------------------------------------------------
+    # Packet identifiers below are deliberately >= 4096 (so the packet-id high byte is > 3), not
+    # small round numbers -- see the ATTRIBUTION-style note in decoder.cpp/hartip.cpp: HART-IP's own
+    # declared_length gate (tried earlier in the TCP dispatch chain than MQTT) treats byte offset 1
+    # as a HART-IP "message type" (valid values include 15/NAK) and byte offset 2 as a "message id"
+    # that must be <= 3 -- for a SUBSCRIBE/UNSUBSCRIBE/SUBACK/UNSUBACK packet, byte offset 2 is the
+    # packet identifier's high byte, so a small packet id (e.g. 100) can coincidentally satisfy
+    # HART-IP's gate and get misclassified/buffered as a truncated HART-IP message before MQTT ever
+    # gets a turn. A packet id >= 4096 makes that high byte > 3 and steps around the collision.
+    d1 = make_flow(64001)  # v3.1.1-shape (no Properties section)
+    d1(True, mqtt_packet(8, 0x02, struct.pack(">H", 4100) + mqtt_str("test/topic") + bytes([0])))
+    d1(False, mqtt_packet(9, 0, struct.pack(">H", 4100) + bytes([0x00])))
+    d1(True, mqtt_packet(10, 0x02, struct.pack(">H", 4101) + mqtt_str("test/topic")))
+    d1(False, mqtt_packet(11, 0, struct.pack(">H", 4101)))
+
+    d2 = make_flow(64002)  # v5-shape (unconditional Properties section, even if empty)
+    d2(True, mqtt_packet(8, 0x02, struct.pack(">H", 4200) + mqtt_properties() + mqtt_str("test/topic") +
+                          bytes([0x01])))
+    d2(False, mqtt_packet(9, 0, struct.pack(">H", 4200) + mqtt_properties() + bytes([0x01])))
+    d2(True, mqtt_packet(10, 0x02, struct.pack(">H", 4201) + mqtt_properties() + mqtt_str("test/topic")))
+    d2(False, mqtt_packet(11, 0, struct.pack(">H", 4201) + mqtt_properties() + bytes([0x00])))
+
+    # ---------------------------------------------------------------------------------------------
+    # Flow E: one PUBLISH split mid-message across two TCP segments -- Decoder::reassemble_tcp_payload,
+    # driven by mqtt_declared_length. Port 65000.
+    # ---------------------------------------------------------------------------------------------
+    split_payload = mqtt_str("devices/plc1/split-test") + struct.pack(">H", 9) + (b"X" * 200)
+    split_frame = mqtt_packet(3, 0x02, split_payload)
+    split_at = len(split_frame) // 2
+    tcp_e1 = tcp_header(65000, 1883, 30000, 400, TCP_PSH | TCP_ACK, len(split_frame[:split_at])) + \
+        split_frame[:split_at]
+    ip_e1 = ipv4_header(HMI_IP, PLC_IP, 6, len(tcp_e1), 0x9100) + tcp_e1
+    packets.append(eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip_e1)
+    tcp_e2 = tcp_header(65000, 1883, 30000 + split_at, 400, TCP_PSH | TCP_ACK,
+                         len(split_frame[split_at:])) + split_frame[split_at:]
+    ip_e2 = ipv4_header(HMI_IP, PLC_IP, 6, len(tcp_e2), 0x9101) + tcp_e2
+    packets.append(eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip_e2)
+
+    # ---------------------------------------------------------------------------------------------
+    # Flow F: PINGREQ + PUBACK + PINGREQ coalesced by the sender/OS into ONE TCP segment -- the
+    # wire_length-driven "additional MQTT packet" loop in decoder.cpp. Port 55010.
+    # ---------------------------------------------------------------------------------------------
+    coalesced = mqtt_packet(12, 0) + mqtt_packet(4, 0, struct.pack(">H", 5)) + mqtt_packet(12, 0)
+    tcp_f = tcp_header(55010, 1883, 40000, 500, TCP_PSH | TCP_ACK, len(coalesced)) + coalesced
+    ip_f = ipv4_header(HMI_IP, PLC_IP, 6, len(tcp_f), 0x9200) + tcp_f
+    packets.append(eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip_f)
+
+    # ---------------------------------------------------------------------------------------------
+    # Flow G: negative/edge cases, port 55020.
+    # ---------------------------------------------------------------------------------------------
+    g = make_flow(55020)
+    # An invalid QoS=3 PUBLISH (MQTT-3.3.1-4 reserves QoS to 0-2) -- fixed header flags 0x06 =
+    # DUP=0, QoS=(0x06>>1)&0x3=3, RETAIN=0.
+    g(True, mqtt_packet(3, 0x06, mqtt_str("devices/plc1/badqos") + b"x"))
+
+    # A CONNECT-shaped byte whose Protocol Name is neither "MQTT" nor "MQIsdp" -- this MUST be
+    # rejected outright by the structural detection gate (see mqtt.hpp), not decoded as MQTT at all.
+    bogus_connect = mqtt_str("BOGUS") + bytes([4]) + bytes([0x02]) + struct.pack(">H", 30) + mqtt_str("x")
+    g(True, mqtt_packet(1, 0, bogus_connect))
+
+    # A genuinely truncated/incomplete final packet on its own flow -- declares more Remaining
+    # Length than actually follows, with nothing more ever arriving on this flow in this capture --
+    # the TCP-reassembly "buffering, waiting for more" path, mirroring sample_opcua.pcap's own
+    # equivalent regression case.
+    full_trunc_frame = mqtt_packet(3, 0, mqtt_str("devices/plc1/truncated") + (b"Y" * 100))
+    truncated_bytes = full_trunc_frame[:20]
+    tcp_t = tcp_header(55030, 1883, 50000, 600, TCP_PSH | TCP_ACK, len(truncated_bytes)) + truncated_bytes
+    ip_t = ipv4_header(HMI_IP, PLC_IP, 6, len(tcp_t), 0x9300) + tcp_t
+    packets.append(eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip_t)
+
+    # ---------------------------------------------------------------------------------------------
+    # Flow H: PINGREQ/PINGRESP on a TCP session where NEITHER port is 1883 (or any --mqtt-port
+    # addition) -- exercises the "not a configured/standard MQTT port (1883)" note. Every other
+    # flow above uses port 1883 on one side, so without this flow that note path goes untested.
+    # ---------------------------------------------------------------------------------------------
+    h = make_flow(52000, dport=52001)
+    h(True, mqtt_packet(12, 0))
+    h(False, mqtt_packet(13, 0))
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_020_000 + i, i * 1000)
+    (TESTS_DIR / "sample_mqtt.pcap").write_bytes(data)
+
+
 if __name__ == "__main__":
     TESTS_DIR.mkdir(exist_ok=True)
     build_modbus_sample()
@@ -4314,6 +4735,7 @@ if __name__ == "__main__":
     build_s7comm_1200sym_sample()
     build_s7comm_chaining_sample()
     build_mms_sample()
+    build_mqtt_sample()
     build_policy_engine_sample()
     build_tcp_reassembly_sample()
     build_padded_ack_sample()

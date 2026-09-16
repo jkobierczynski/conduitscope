@@ -4,8 +4,9 @@
 protocol), EtherNet/IP (CIP explicit and implicit messaging), PROFINET RT (DCP device
 discovery/configuration and cyclic real-time I/O data), IEC 61850-8-1 GOOSE,
 IEC 61850-9-2 Sampled Values, EtherCAT, BACnet/IP, HART-IP, OPC UA Binary
-(UA-TCP/Secure Conversation), and IEC 61850 MMS (Manufacturing Message Specification,
-ISO 9506) traffic from offline pcap/pcapng captures, and checks it
+(UA-TCP/Secure Conversation), IEC 61850 MMS (Manufacturing Message Specification,
+ISO 9506), and MQTT (v3.1/v3.1.1/v5.0, including Sparkplug B) traffic from offline
+pcap/pcapng captures, and checks it
 against a zone/conduit segmentation policy. It's an OT/ICS conduit-auditing tool: `decode`/`info` give you reliable
 protocol decoding and a stats view, and `policy validate` maps that decoded traffic
 against an IEC 62443-style zone/conduit model (for NIS2-flavored compliance work) --
@@ -446,6 +447,44 @@ Groundwork / v0.1.0. What works right now:
   traffic (motivating this decoder's own recursion-depth cap); see
   tests/real_captures/mms/ATTRIBUTION.md for the full writeup and
   include/conduitscope/mms.hpp for the wire-format details.
+- MQTT (v3.1/v3.1.1/v5.0, conventionally TCP port 1883) and Sparkplug B (the
+  Eclipse Tahu IIoT convention layered on top of it): documented honestly as
+  having the weakest structural detection gate in this codebase -- MQTT has
+  no fixed magic number or length field this decoder can key off unambiguously,
+  so it's dispatched dead last, after every other protocol (including
+  HART-IP's own already-weak gate) has had a chance to claim the bytes first.
+  Real validation against this codebase's own real-capture test set found two
+  genuine cross-protocol collisions this ordering alone didn't fully solve --
+  a v5 CONNACK payload that coincidentally satisfied Modbus/TCP's
+  `protocol_id==0` tell, and small MQTT packet identifiers that coincidentally
+  satisfied HART-IP's own weak `message_type`/`message_id` gate -- both found
+  and fixed (a missing length-plausibility cap added to Modbus's TCP parser,
+  and a test-fixture-side change for the HART-IP case, deliberately without
+  weakening HART-IP's own otherwise-sound gate). Once traffic is recognized as
+  MQTT, CONNECT/CONNACK/PUBLISH/SUBSCRIBE/SUBACK/UNSUBSCRIBE/UNSUBACK/
+  PINGREQ/PINGRESP/DISCONNECT/AUTH are all field-decoded across all three
+  protocol versions, with MQTT5's Properties (a TLV scheme absent from 3.1/
+  3.1.1) fully parsed, not just skipped. Because SUBSCRIBE/SUBACK/UNSUBSCRIBE's
+  own wire shapes are ambiguous between MQTT versions, this decoder tracks
+  each TCP session's version from its own CONNECT packet rather than
+  guessing per-packet where it can help it. CONNECT's cleartext username/
+  password fields are decoded as a deliberate security finding, not omitted --
+  this protocol has no transport encryption of its own, and seeing credentials
+  in the clear here is the point. Sparkplug B's protobuf-encoded payloads
+  (NBIRTH/NDEATH/DBIRTH/DDEATH/DDATA/NDATA, the `spBv1.0/...` topic
+  convention) are decoded via a hand-rolled Protocol Buffers reader (no
+  external protobuf dependency), including the typed Metric value union and
+  nested Template/DataSet metric types. A real capture was found and
+  validated -- a genuine Eclipse Paho client's MQTT 3.1 traffic (not just
+  3.1.1/5.0) -- and it immediately found a real bug this decoder's own
+  synthetic fixture had never exercised: MQTT 3.1's session-version tracking
+  was silently never learned at all (only 3.1.1 and 5.0 were), so every
+  SUBSCRIBE/SUBACK/PUBLISH after a real MQTT 3.1 CONNECT fell back to weaker
+  per-packet heuristics instead of the CONNECT that was right there; found and
+  fixed. No real Sparkplug B capture was found despite a genuine search
+  (this is the one gap honestly documented, not swept under the rug) -- see
+  tests/real_captures/mqtt/ATTRIBUTION.md for the full writeup and
+  include/conduitscope/mqtt.hpp for the wire-format details.
 - Non-IPv4 Ethernet frames and non-TCP IPv4 payloads (including UDP) are now
   recognized and named, not just reported as a bare hex/number and dropped:
   ARP, LLDP, PTP, MPLS, and stacked-VLAN (802.1ad/QinQ) EtherTypes; ICMP,

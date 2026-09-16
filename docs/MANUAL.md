@@ -9,9 +9,9 @@ conduitscope -- decode Modbus/TCP, DNP3, IEC 60870-5-104, S7comm/COTP, IEC 61850
 ```
 conduitscope [-q|--quiet] [--no-color|--color] [--log-file FILE] [--version] [-h|--help] <command> [command options]
 
-conduitscope decode (-r FILE | -i INTERFACE) [-o FILE] [-f text|json|csv] [--protocol auto|modbus|dnp3|s7comm|mms|iec104|enip|profinet|goose|sv|ethercat|bacnet|hartip|opcua]
+conduitscope decode (-r FILE | -i INTERFACE) [-o FILE] [-f text|json|csv] [--protocol auto|modbus|dnp3|s7comm|mms|mqtt|iec104|enip|profinet|goose|sv|ethercat|bacnet|hartip|opcua]
                      [--modbus-port PORT]... [--dnp3-port PORT]... [--s7comm-port PORT]... [--iec104-port PORT]...
-                     [--enip-port PORT]... [--enip-io-port PORT]... [--bacnet-port PORT]... [--hartip-port PORT]... [--opcua-port PORT]...
+                     [--enip-port PORT]... [--enip-io-port PORT]... [--bacnet-port PORT]... [--hartip-port PORT]... [--opcua-port PORT]... [--mqtt-port PORT]...
                      [--max-packets N] [--stats] [--strict]
                      [--filter BPF] [--duration SECONDS] [--snaplen BYTES] [--no-promiscuous]
 
@@ -153,7 +153,7 @@ conduitscope decode (-r FILE | -i INTERFACE) [options]
 | `--no-promiscuous` | off (i.e. promiscuous by default) | With `-i`, don't put the interface into promiscuous mode. Promiscuous is the default because the main live-capture use case -- watching a mirrored/SPAN switch port for zone/conduit traffic -- needs to see traffic that isn't addressed to the capturing host at all. |
 | `-o, --output FILE` | stdout | Write decoded output here instead of stdout. |
 | `-f, --format {text,json,csv}` | `text` | Output format. See OUTPUT FORMATS below. |
-| `--protocol {auto,modbus,dnp3,s7comm,mms,iec104,enip,profinet,goose,sv,ethercat,bacnet,hartip,opcua}` | `auto` | Restrict decoding to one protocol. `auto` opportunistically tries OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, S7comm/COTP, MMS, and HART-IP detection on every TCP payload, CIP I/O, BACnet/IP, and HART-IP detection on every UDP payload, PROFINET RT (DCP/cyclic) detection on every non-IPv4 Ethernet frame carrying EtherType `0x8892`, GOOSE detection on every non-IPv4 Ethernet frame carrying EtherType `0x88B8`, Sampled Values detection on every non-IPv4 Ethernet frame carrying EtherType `0x88BA`, and EtherCAT detection on every non-IPv4 Ethernet frame carrying EtherType `0x88A4`, regardless of port (see PROTOCOL DETECTION below). `enip` covers both EtherNet/IP explicit messaging (TCP) and CIP I/O implicit messaging (UDP). `mms` is IEC 61850 MMS (Manufacturing Message Specification, ISO 9506) -- shares S7comm's exact TPKT/COTP transport and TCP port 102, but is a distinct application protocol; see `--s7comm-port` below and PROTOCOL COVERAGE's MMS section. `profinet` covers both DCP and cyclic real-time IO. `sv` is IEC 61850-9-2 Sampled Values. `ethercat` is EtherCAT. `bacnet` is BACnet/IP. `hartip` is HART-IP (covers both UDP and TCP). `opcua` is OPC UA Binary (UA-TCP/Secure Conversation, TCP only). |
+| `--protocol {auto,modbus,dnp3,s7comm,mms,mqtt,iec104,enip,profinet,goose,sv,ethercat,bacnet,hartip,opcua}` | `auto` | Restrict decoding to one protocol. `auto` opportunistically tries OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, S7comm/COTP, MMS, HART-IP, and MQTT detection on every TCP payload (in that order -- MQTT last of all, see PROTOCOL DETECTION), CIP I/O, BACnet/IP, and HART-IP detection on every UDP payload, PROFINET RT (DCP/cyclic) detection on every non-IPv4 Ethernet frame carrying EtherType `0x8892`, GOOSE detection on every non-IPv4 Ethernet frame carrying EtherType `0x88B8`, Sampled Values detection on every non-IPv4 Ethernet frame carrying EtherType `0x88BA`, and EtherCAT detection on every non-IPv4 Ethernet frame carrying EtherType `0x88A4`, regardless of port (see PROTOCOL DETECTION below). `enip` covers both EtherNet/IP explicit messaging (TCP) and CIP I/O implicit messaging (UDP). `mms` is IEC 61850 MMS (Manufacturing Message Specification, ISO 9506) -- shares S7comm's exact TPKT/COTP transport and TCP port 102, but is a distinct application protocol; see `--s7comm-port` below and PROTOCOL COVERAGE's MMS section. `mqtt` is MQTT (v3.1/v3.1.1/v5.0) plus Sparkplug B -- see `--mqtt-port` below and PROTOCOL COVERAGE's MQTT section. `profinet` covers both DCP and cyclic real-time IO. `sv` is IEC 61850-9-2 Sampled Values. `ethercat` is EtherCAT. `bacnet` is BACnet/IP. `hartip` is HART-IP (covers both UDP and TCP). `opcua` is OPC UA Binary (UA-TCP/Secure Conversation, TCP only). |
 | `--modbus-port PORT` | *(502 built in)* | Additional TCP port to treat as "expected" for Modbus. Repeatable. Does **not** gate detection -- it only changes whether a decoded Modbus frame is annotated as appearing on an unexpected port, which is itself a useful signal when auditing a conduit. |
 | `--dnp3-port PORT` | *(20000 built in)* | Same as `--modbus-port`, for DNP3. Repeatable. |
 | `--s7comm-port PORT` | *(102 built in)* | Same as `--modbus-port`, for COTP/S7comm. Repeatable. There is no separate `--mms-port` -- MMS rides the identical TPKT/COTP transport on the identical TCP port 102 S7comm uses (see `mms.hpp`'s file header), so this same option's "expected port" annotation also governs MMS traffic. |
@@ -163,6 +163,7 @@ conduitscope decode (-r FILE | -i INTERFACE) [options]
 | `--bacnet-port PORT` | *(47808 built in)* | Same as `--modbus-port`, for BACnet/IP (UDP). Repeatable. |
 | `--hartip-port PORT` | *(5094 built in)* | Same as `--modbus-port`, for HART-IP. Repeatable. Applies to both TCP and UDP, since HART-IP uses the same port number on either transport. |
 | `--opcua-port PORT` | *(4840 built in)* | Same as `--modbus-port`, for OPC UA. Repeatable. TCP only -- OPC UA has no UDP mapping. |
+| `--mqtt-port PORT` | *(1883 built in)* | Same as `--modbus-port`, for MQTT. Repeatable. TCP only. |
 | `--max-packets N` | `0` (unlimited) | Stop after decoding this many packets. With `-i`, this also bounds a live capture (in addition to `--duration` and Ctrl+C). |
 | `--stats` | off | Print an aggregate summary (protocol counts, Modbus function-code histogram, exception count, capture time span) instead of one line per packet. Ignores `--format`. |
 | `--strict` | off | Abort with a nonzero exit status on the first packet that fails to parse at the Ethernet/IPv4/TCP layer, instead of reporting a per-packet warning and continuing. Does not affect Modbus/DNP3-level ambiguity, which is always handled by heuristic + note rather than error. |
@@ -535,11 +536,11 @@ text the `text` report shows).
 ## PROTOCOL DETECTION
 
 In `--protocol auto` (the default), every non-empty TCP payload is tested
-against all eight protocols, independent of port number. **OPC UA is tried
+against all nine protocols, independent of port number. **OPC UA is tried
 first of all, then EtherNet/IP, then IEC 104**, before Modbus/TCP, and
-**HART-IP is tried last**, after S7comm/COTP and MMS -- see the notes at the
-end of this section for why that specific ordering matters, not just which
-protocols are tried:
+**HART-IP is tried second-to-last, with MQTT tried last of all**, after
+S7comm/COTP and MMS -- see the notes at the end of this section for why that
+specific ordering matters, not just which protocols are tried:
 
 - **OPC UA**: recognized by its 8-byte UA-TCP common header -- the leading 3
   bytes (MessageType) must be one of exactly 7 fixed ASCII strings (`HEL`,
@@ -664,9 +665,22 @@ protocols are tried:
   8 (the header's own size). This is honestly the weakest structural gate of
   any protocol in this list -- two adjacent bytes each landing on one of a
   handful of small values, versus e.g. EtherNet/IP's three independent
-  checks or IEC 104's multi-bit-pattern APCI -- and it is tried **last** in
-  this chain, deliberately, precisely because of that weakness: see "Why
-  HART-IP is tried last" below.
+  checks or IEC 104's multi-bit-pattern APCI -- and it is tried
+  **second-to-last** in this chain, deliberately, precisely because of that
+  weakness: see "Why HART-IP is tried last" below.
+- **MQTT**: recognized by its one-byte fixed header (Control Packet Type in
+  the top nibble, flags in the bottom nibble, which must be exactly one
+  fixed value for every type except PUBLISH -- see PROTOCOL COVERAGE) plus a
+  1-4-byte Variable Byte Integer Remaining Length. This is honestly the
+  **weakest** structural gate of any protocol in this list -- weaker even
+  than HART-IP's own -- so MQTT is tried dead **last**, after every other
+  protocol here (including HART-IP) has declined a payload. CONNECT gets a
+  much stronger, version-specific check on top (its own Protocol Name field
+  must read literally `"MQTT"` or `"MQIsdp"`), but every other MQTT packet
+  type relies on the weak one-byte gate alone. See PROTOCOL COVERAGE's MQTT
+  section for the real, demonstrated collisions this weak gate caused
+  against this project's own synthetic fixture (both found and fixed) and
+  "Why MQTT is tried last" below.
 
 Because detection is payload-shape based, traffic running on a non-standard
 port is still decoded correctly -- and conduitscope tells you it's on a
@@ -722,12 +736,40 @@ paragraph, the matching comments in `src/decoder.cpp`, and
 this collision occurs on genuine field traffic, not just a hand-built
 fixture.
 
+**Why MQTT is tried last of all.** Dispatched even after HART-IP, for the
+same reason as HART-IP's own placement, but for an even weaker gate: this
+project's own synthetic MQTT fixture (`tests/sample_mqtt.pcap`) surfaced two
+real, demonstrated collisions against earlier-dispatched protocols' gates
+while it was being built, both found and fixed rather than left as
+theoretical risk. First, a v5 CONNACK whose body (two zero bytes, then an
+MQTT5 Properties block) coincidentally satisfied Modbus/TCP's own
+protocol-id==0 tell with a large, plausible mbap_length -- caught because
+`try_parse_modbus_tcp` (unlike `modbus_tcp_declared_length`, its sibling used
+during TCP reassembly) didn't apply the same `kMaxPlausibleMbapLength` (300
+bytes) sanity cap; fixed by applying that cap in both places (see
+`src/modbus.cpp`). Second, a SUBSCRIBE/UNSUBSCRIBE packet identifier
+(`>= 4096` after the fix, originally a small round number) happened to
+satisfy HART-IP's own two-byte gate (a "plausible" MessageType/MessageID
+pair), absorbing the packet into HART-IP's own TCP-reassembly buffering
+instead of ever reaching MQTT -- resolved in the test fixture itself
+(picking packet identifiers whose high byte exceeds HART-IP's own
+MessageID<=3 check), not by weakening HART-IP's gate, consistent with how
+this project has always preferred fixing the *specific* collision over
+loosening an otherwise-sound check. Both are documented in
+`tools/make_sample_pcap.py`'s own comments at the exact fixture packets that
+exercise them. Unlike the IEC-104-vs-Modbus collision above, and like the
+HART-IP-vs-Modbus collision, no attempt was made to make MQTT's own gate
+stronger to avoid needing to be last -- CONNECT's Protocol Name check aside,
+tightening every other MQTT packet type's one-byte gate further isn't
+possible without contradicting the MQTT spec itself (the flags nibble really
+is unconstrained for PUBLISH, by design).
+
 `--protocol modbus`, `--protocol dnp3`, `--protocol s7comm`, `--protocol
-mms`, `--protocol iec104`, `--protocol enip`, `--protocol profinet`,
-`--protocol goose`, `--protocol sv`, `--protocol ethercat`, `--protocol
-bacnet`, `--protocol hartip`, or `--protocol opcua` restrict decoding to
-only that protocol (useful for large mixed captures, or for scripting a
-two-pass analysis). `--protocol enip` covers both EtherNet/IP explicit
+mms`, `--protocol mqtt`, `--protocol iec104`, `--protocol enip`,
+`--protocol profinet`, `--protocol goose`, `--protocol sv`, `--protocol
+ethercat`, `--protocol bacnet`, `--protocol hartip`, or `--protocol opcua`
+restrict decoding to only that protocol (useful for large mixed captures, or
+for scripting a two-pass analysis). `--protocol enip` covers both EtherNet/IP explicit
 messaging (TCP, above) and CIP I/O implicit messaging (UDP, below) --
 they're the same overall protocol family. `--protocol mms` restricts to MMS
 specifically, distinct from `--protocol s7comm` even though both share the
@@ -887,7 +929,7 @@ that don't apply to a given packet (e.g. `src_ip` for a non-IP frame) are
 `null`. Intended to be piped into `jq` or read by a future policy-evaluation
 layer.
 
-Seventy-three fields are only present (omitted entirely, not `null`) on
+Ninety-eight fields are only present (omitted entirely, not `null`) on
 packets where they apply:
 
 - `modbus_paired_request_index`: the `index` of the specific earlier request
@@ -1498,6 +1540,79 @@ The following fields appear only when `protocol` is `mms`:
 - `mms_body_length` / `mms_body_hex`: the raw hex bytes (space-separated
   octets) and their count. Present only when `mms_body_shown_as_hex` is
   `true` and at least one byte remained.
+- `mqtt_packet_type`: the MQTT Control Packet Type name (`"CONNECT"`,
+  `"PUBLISH"`, ...), always present when `protocol` is `mqtt`.
+- `mqtt_remaining_length`: the fixed header's own Remaining Length (Variable
+  Byte Integer), always present when `protocol` is `mqtt`.
+- `mqtt_protocol_version`: `"3.1"`, `"3.1.1"`, or `"5.0"`, when known for
+  this specific message -- either self-describing (CONNECT/CONNACK/
+  UNSUBACK/DISCONNECT/AUTH) or resolved via this TCP session's own tracked
+  CONNECT or, failing that, the per-packet-type heuristic (SUBSCRIBE/
+  SUBACK/UNSUBSCRIBE only -- see PROTOCOL DETECTION). Absent when truly
+  unknown (e.g. a PUBLISH on a session whose CONNECT wasn't captured).
+- `mqtt_dup` / `mqtt_qos` / `mqtt_retain`: the PUBLISH fixed-header flag
+  bits, present only when `mqtt_packet_type` is `"PUBLISH"`.
+- `mqtt_topic`: the PUBLISH Topic Name, present only when
+  `mqtt_packet_type` is `"PUBLISH"`.
+- `mqtt_packet_id`: the Packet Identifier, present on PUBLISH (QoS>0 only),
+  PUBACK/PUBREC/PUBREL/PUBCOMP, SUBSCRIBE/SUBACK, and UNSUBSCRIBE/UNSUBACK.
+- `mqtt_payload_length`: the PUBLISH application payload's byte count,
+  present only when `mqtt_packet_type` is `"PUBLISH"`.
+- `mqtt_payload_hex`: the raw application payload as hex (space-free octet
+  string), present when `mqtt_payload_length` is present AND greater than
+  zero -- EXCEPT left absent when the payload was a Sparkplug B protobuf
+  message that this decoder successfully decoded (see `mqtt_is_sparkplug`
+  below), in which case the decoded `mqtt_sparkplug_*` fields carry the
+  content instead of raw hex.
+- `mqtt_values`: an array of decoded `"field=value"` strings, present only
+  when non-empty -- CONNECT's own negotiated fields (including, by
+  deliberate design, cleartext `Username=`/`Password=` when present -- see
+  PROTOCOL COVERAGE's own security note), CONNACK's SessionPresent/Return
+  or Reason Code, SUBSCRIBE/UNSUBSCRIBE's topic filters, SUBACK/UNSUBACK's
+  reason codes, MQTT5 Properties on any packet type that carries them (one
+  `"PropertyName=value"` entry per recognized property; an unrecognized
+  property id is still shown, as `"(unknown property id N, K remaining
+  properties byte(s) not decoded: <hex>)"`, rather than aborting the whole
+  message), and AUTH/DISCONNECT's reason code plus reason string.
+- `mqtt_is_sparkplug`: `true`/`false`, always present when
+  `mqtt_packet_type` is `"PUBLISH"`. `true` when the topic matches the
+  Sparkplug B `spBv1.0/...` namespace (either the protobuf-payload shape or
+  the separate `spBv1.0/STATE/{host_id}` JSON-text shape -- see
+  `mqtt_sparkplug_is_state`).
+- `mqtt_sparkplug_message_type`: `"NBIRTH"`/`"NDEATH"`/`"DBIRTH"`/
+  `"DDEATH"`/`"NDATA"`/`"DDATA"`/`"NCMD"`/`"DCMD"`/`"STATE"`. Present when
+  `mqtt_is_sparkplug` is `true`.
+- `mqtt_sparkplug_is_state`: `true`/`false`, present when `mqtt_is_sparkplug`
+  is `true`. `true` for the `spBv1.0/STATE/{host_id}` namespace (a JSON
+  text payload, not protobuf); `false` for every other Sparkplug message
+  type (an `org.eclipse.tahu.protobuf.Payload`).
+- `mqtt_sparkplug_group_id` / `mqtt_sparkplug_edge_node_id` /
+  `mqtt_sparkplug_device_id`: the topic's own `{group_id}`/{edge_node_id}`/
+  `{device_id}` segments (the last only for D-prefixed message types).
+  Present when `mqtt_sparkplug_is_state` is `false`.
+- `mqtt_sparkplug_state_host_id` / `mqtt_sparkplug_state_text`: the STATE
+  topic's own `{host_id}` segment and the raw JSON text payload (not
+  further parsed as JSON -- see LIMITATIONS). Present when
+  `mqtt_sparkplug_is_state` is `true`.
+- `mqtt_sparkplug_payload_decoded`: `true`/`false`, present when
+  `mqtt_sparkplug_is_state` is `false`. `false` when this decoder's
+  hand-rolled protobuf reader hit a structural problem partway through
+  (truncated/malformed bytes) -- whatever metrics were found before the
+  failure are still shown in `mqtt_sparkplug_metrics`, and `notes` explains
+  what went wrong.
+- `mqtt_sparkplug_timestamp` / `mqtt_sparkplug_seq` / `mqtt_sparkplug_uuid`
+  / `mqtt_sparkplug_body_length`: the Sparkplug B `Payload` message's own
+  optional top-level fields (proto2 presence semantics -- each is present
+  in the JSON output only when the encoder actually set it).
+- `mqtt_sparkplug_metric_count`: the total number of `Metric` entries found
+  in the `Payload`, present when `mqtt_sparkplug_is_state` is `false` (may
+  be `0`, e.g. a DDEATH carrying no metrics).
+- `mqtt_sparkplug_metrics`: an array of one rendered string per metric
+  (capped at 50), e.g. `"\"Temperature\" type=Float value=21.500000
+  ts=2023-11-14T22:13:20.000Z"`, present only when non-empty. A `Bytes`/
+  `File`/`DataSet`/`Template` value renders as `"<N byte(s), not decoded
+  further>"` (Tier 2 scope -- see PROTOCOL COVERAGE); a null metric
+  (`is_null=true`) renders its value as `null`.
 
 ### csv
 
@@ -2179,6 +2294,153 @@ tshark's own MMS dissector for ground truth is also what surfaced the
 "Recursion depth cap" -- see `tests/real_captures/mms/ATTRIBUTION.md` for
 the complete writeup of both real bugs this validation pass found. See
 `include/conduitscope/mms.hpp`'s file header for the full writeup.
+
+### MQTT (v3.1/v3.1.1/v5.0, conventionally TCP port 1883) and Sparkplug B
+
+MQTT is a general-purpose IIoT/pub-sub transport, not an OT-specific protocol on its own, but it's
+increasingly how OT data reaches IT/cloud systems -- and Sparkplug B (Eclipse Tahu), an MQTT topic
+and payload convention purpose-built for OT/IIoT telemetry, is squarely in this project's scope.
+Both versions of the wire format predating OASIS standardization are handled: MQTT 3.1 (the
+original Eclipse/IBM-era "MQIsdp" protocol name, ProtocolLevel 3), MQTT 3.1.1 (OASIS, "MQTT",
+level 4), and MQTT 5.0 (OASIS, level 5).
+
+#### Structural detection gate: honestly the weakest in this codebase
+
+MQTT's fixed header is one byte (top nibble = Control Packet Type 1-15, bottom nibble = flags) plus
+a 1-4-byte Variable Byte Integer Remaining Length. For most packet types the flags nibble must be
+exactly one fixed value (`0x00`, or `0x02` for PUBREL/SUBSCRIBE/UNSUBSCRIBE); PUBLISH alone allows
+all 16 values (DUP/QoS/RETAIN bits). This is a weak structural tell on its own -- weaker than
+HART-IP's own documented "weakest gate in this codebase" -- so MQTT is dispatched **last** in
+`decoder.cpp`'s opportunistic TCP protocol-detection chain, tried only after OPC UA, EtherNet/IP,
+IEC 104, Modbus, DNP3, COTP/S7comm/MMS, and HART-IP have all declined a given TCP payload. CONNECT
+gets one significant exception: this decoder additionally requires its literal Protocol Name field
+to read `"MQTT"` or `"MQIsdp"` before accepting it, a much stronger, version-specific tell that
+rejects CONNECT-shaped-but-bogus bytes outright rather than guessing.
+
+This weak gate is a real, demonstrated source of false positives, not a theoretical concern: this
+decoder's own synthetic test fixture (`tests/sample_mqtt.pcap`) originally included a v5 CONNACK
+whose body bytes coincidentally satisfied Modbus/TCP's own `protocol_id==0` tell with a large,
+plausible-looking (if wrong) MBAP length -- caught and fixed by tightening Modbus's own
+`kMaxPlausibleMbapLength` cap (300 bytes) to apply to its final decode gate, not just its
+TCP-reassembly-length gate (see `src/modbus.cpp`); and a SUBSCRIBE/UNSUBSCRIBE pair whose packet
+identifier happened to read as a "plausible" HART-IP message type/id, absorbing it into HART-IP's
+own reassembly buffering. Both are documented, fixed collisions between this decoder's own
+synthetic MQTT traffic and other, earlier-dispatched protocols' own gates -- not merely a warning
+that such collisions are theoretically possible.
+
+#### Version disambiguation
+
+Most MQTT packet types are self-describing from their own bytes alone: CONNECT states its version
+explicitly (Protocol Name + Level); CONNACK, PUBACK/PUBREC/PUBREL/PUBCOMP, UNSUBACK, DISCONNECT,
+and AUTH all have a version-independent shortcut encoding (e.g. CONNACK's body is exactly 2 bytes
+for pre-v5, more for v5's own Properties section). Only **SUBSCRIBE, SUBACK, and UNSUBSCRIBE** are
+genuinely ambiguous -- v5 adds an unconditional Properties section (even when empty, still a
+1-byte-minimum Property Length of `0`) that 3.1/3.1.1 lack entirely, and nothing else in either
+shape rules the other out on its own. This decoder resolves that ambiguity two ways, in order:
+
+1. **Per-TCP-session version tracking** (`Decoder::mqtt_session_version_`, keyed by source/
+   destination IP+port pair in either direction -- the same `tcp_session_key` helper Modbus's own
+   transaction pairing uses): any CONNECT seen anywhere on a session, in either direction, updates
+   that session's tracked version for every later packet on it, including further packets coalesced
+   into the very same TCP payload. A CONNECT declaring ProtocolLevel 3 (MQTT 3.1) or 4 (3.1.1) is
+   tracked identically -- their SUBSCRIBE/SUBACK/UNSUBSCRIBE/PUBLISH wire shapes are identical, the
+   only wire-visible 3.1-vs-3.1.1 difference is in CONNECT's own fields (see the real-capture
+   validation finding below, which is exactly what caught this decoder's own gap here).
+2. **A per-packet-type heuristic**, used only when no CONNECT was ever seen on this session in this
+   capture (e.g. the capture starts mid-session): SUBSCRIBE and UNSUBSCRIBE try parsing both shapes
+   and prefer whichever parses to a fully self-consistent result (a valid v5 Properties block
+   followed by at least one well-formed topic filter, vs. a clean v3.x-shaped filter list); SUBACK
+   is explicitly documented and tested as the **least reliable** of the three, since its own body is
+   just a flat list of single reason-code bytes -- almost any byte value looks "valid" whichever
+   shape is assumed, so a short or degenerate reason-code list can misresolve (a real, expected
+   limitation, not silently hidden -- see `mqtt_version_heuristic_suback_weakest_evidence` in
+   `CMakeLists.txt`). A PUBLISH on a session with no known version is decoded assuming no Properties
+   section, with an explicit note that a genuine v5 session's own leading Properties block would be
+   misread as the start of the application payload in that case.
+
+Every decision -- tracked or heuristic, and which heuristic evidence won -- is recorded in `notes`,
+never silently guessed.
+
+#### MQTT5 Properties
+
+A single, generic, table-driven decoder (`decode_properties` in `src/mqtt.cpp`) handles all 27
+defined MQTT5 Property Identifiers across every packet type that can carry them (CONNECT, CONNACK,
+PUBLISH, PUBACK/PUBREC/PUBREL/PUBCOMP, SUBSCRIBE/SUBACK, UNSUBSCRIBE/UNSUBACK, DISCONNECT, AUTH),
+covering all seven of the spec's own property value types (Byte, Two/Four-Byte Integer, Variable
+Byte Integer, UTF-8 String, UTF-8 String Pair -- User Property -- and Binary Data). An unrecognized
+property identifier doesn't abort the whole message: it's shown as `"(unknown property id N, K
+remaining properties byte(s) not decoded: <hex>)"` and decoding continues.
+
+#### Sparkplug B: a hand-rolled Protocol Buffers reader
+
+Sparkplug B's own payload is Google Protocol Buffers (proto2), and this decoder has no external
+protobuf dependency (consistent with the whole project's zero-required-dependency design) -- so
+`src/mqtt.cpp` implements a small, purpose-built protobuf wire-format reader (varint, tag = field
+number + wire type, the four wire types Sparkplug actually uses) against the exact
+`org.eclipse.tahu.protobuf.Payload`/`Metric` schema (sourced verbatim from
+`github.com/eclipse-tahu/tahu`'s own `sparkplug_b.proto`), not a general-purpose protobuf decoder.
+The topic namespace itself (`spBv1.0/{group_id}/{message_type}/{edge_node_id}[/{device_id}]`, or
+the separate `spBv1.0/STATE/{host_id}` namespace carrying plain JSON text, not protobuf) is parsed
+independently of the MQTT layer above it.
+
+A deliberate Tier 1/Tier 2 split on Sparkplug's own `DataType` enum, mirroring the same pattern this
+codebase already uses for OPC UA's/MMS's service coverage: Int8 through UInt64, Float, Double,
+Boolean, String, DateTime, Text, and UUID are fully value-decoded (Tier 1) -- including the
+non-obvious detail that `int_value`/`long_value` are raw `uint32`/`uint64` wire values, **not**
+zigzag-encoded, so a negative signed value must be reinterpreted from its two's-complement bit
+pattern (matches Eclipse Tahu's own reference client behavior; see `render_sparkplug_metric`'s own
+comment and the `mqtt_sparkplug_nbirth_metrics` test's Int32 `-5` case). Bytes, File, DataSet,
+Template, PropertySet/PropertySetList, and every Array variant are Tier 2: recognized and counted,
+shown as `"<N byte(s), not decoded further>"` rather than parsed field-by-field. A malformed or
+truncated Sparkplug payload degrades gracefully -- whatever metrics parsed before the failure are
+still shown, with an honest note about what went wrong, rather than aborting the whole PUBLISH or
+crashing (`mqtt_sparkplug_malformed_payload_note` test).
+
+#### A deliberate security finding: CONNECT's cleartext credentials
+
+Like this codebase's OPC UA Identity Token decode, CONNECT's own Username/Password fields (when
+present) are decoded and shown in cleartext in `mqtt_values` -- this is a deliberate design choice,
+not an oversight: MQTT's own Username/Password fields carry no confidentiality of their own (TLS is
+what protects them on the wire, and this decoder doesn't attempt TLS interception), so showing them
+plainly is both accurate to what the wire actually carries and directly useful for exactly the kind
+of security review this project targets (spotting unencrypted MQTT broker credentials in a
+capture).
+
+#### Deliberately not implemented
+
+Retained-message tracking, Will Message delivery correlation, and QoS 2 exactly-once delivery-state
+tracking across packets (this decoder is, like every protocol in this codebase, a stateless-per-
+message decoder with TCP-stream-level reassembly only -- it decodes each PUBREC/PUBREL/PUBCOMP on
+its own, it does not track which QoS 2 flow they belong to); MQTT-SN (the UDP-based MQTT variant for
+constrained devices -- an entirely different wire format, out of scope); TLS decryption (as with
+every protocol here, this decoder reads whatever bytes are on the wire -- it doesn't strip TLS); and
+Sparkplug B's own STATE topic JSON payload is shown as raw text (`mqtt_sparkplug_state_text`), not
+further parsed as JSON.
+
+#### Validation
+
+Real-world MQTT traffic was harder to find than this project's usual ICS/OT pcap sources: MQTT is a
+general transport, not ICS-specific, so `automayt/ICS-pcap` and `ITI/ICS-Security-Tools` (this
+project's usual real-capture sources) have nothing. `pradeesi/MQTT-Wireshark-Capture`, a small
+personal repo made for a blog post, supplied a real Eclipse Paho client session (two container
+formats, pcap and pcapng, confirmed to decode byte-for-byte identically) plus a third file from the
+same source that turned out to be genuinely corrupt from its very first frame (this decoder
+correctly rejects it with a clear error rather than misparsing it -- see
+`tests/real_captures/mqtt/ATTRIBUTION.md` for the full byte-level analysis of exactly how it's
+corrupt).
+
+That real capture caught a genuine bug: every CONNECT in it uses **MQTT 3.1** (`ProtocolLevel=3`,
+`ProtocolName="MQIsdp"`) rather than 3.1.1 -- a real, still-encountered wire shape this project's own
+synthetic fixture never happened to exercise (`build_mqtt_sample()` only builds ProtocolLevel 4 and
+5 CONNECTs). `Decoder`'s session-version-tracking lambda originally only recognized
+`connect_discovered_version` 4 or 5, so a real MQTT 3.1 session's own SUBSCRIBE/SUBACK fell back to
+the (weaker) heuristic instead of using the CONNECT that was right there, and PUBLISH carried a
+spurious "version not known" note despite a CONNECT having been seen. Fixed by tracking level 3
+identically to level 4 (their ambiguous-packet-type wire shapes are identical) -- see
+`tests/real_captures/mqtt/ATTRIBUTION.md`'s own write-up for the complete before/after decode
+output. Sparkplug B itself remains validated only against this project's own synthetic, hand-built
+protobuf fixture -- a genuine, real-world Sparkplug B capture was searched for specifically and not
+found; see ATTRIBUTION.md's own honest account of that search.
 
 ### IEC 60870-5-104 (TCP port 2404)
 
@@ -3904,22 +4166,24 @@ These are current, not aspirational -- each has a corresponding ROADMAP item.
 - **General TCP stream reassembly is implemented, but narrowly scoped.**
   `Decoder::reassemble_tcp_payload` (`decoder.hpp`/`decoder.cpp`) buffers a
   single Modbus MBAP message, DNP3 data-link frame, IEC 104 APDU, EtherNet/IP
-  encapsulation message, TPKT/COTP frame, HART-IP message, or OPC UA
-  UA-TCP/SecureConversation chunk's own bytes, per directional TCP
-  flow, when it is split across two or more TCP segments -- so a Modbus PDU
-  that straddles a segment boundary, a DNP3 data-link frame split
+  encapsulation message, TPKT/COTP frame, HART-IP message, OPC UA
+  UA-TCP/SecureConversation chunk, or MQTT packet's own bytes, per directional
+  TCP flow, when it is split across two or more TCP segments -- so a Modbus
+  PDU that straddles a segment boundary, a DNP3 data-link frame split
   mid-header, an IEC 104 APDU split mid-APCI/ASDU, an EtherNet/IP
   encapsulation message split mid-header or mid-CIP-message, an S7comm or
   MMS request/response TPKT frame split across segments (the same TPKT/COTP
   reassembly buffers both, since MMS rides the identical framing -- see
-  PROTOCOL COVERAGE's MMS section), or an OPC UA chunk
+  PROTOCOL COVERAGE's MMS section), an OPC UA chunk, or an MQTT packet (whose
+  own Remaining Length is honestly the weakest of this whole list's declared-
+  length signals -- see PROTOCOL DETECTION's "Why MQTT is tried last")
   split across segments all now get fully
   reassembled and decoded, not just the first segment's worth of bytes.
   Each protocol's own declared length field (the MBAP length, the DNP3
   data-link length byte, the IEC 104 APCI length byte, the EtherNet/IP
   encapsulation header's length field, the TPKT length field, HART-IP's
-  MsgLength field, OPC UA's MessageSize field) is what tells
-  the reassembler how many bytes to wait for; a segment
+  MsgLength field, OPC UA's MessageSize field, MQTT's own Remaining Length)
+  is what tells the reassembler how many bytes to wait for; a segment
   whose sequence number doesn't extend the buffered bytes contiguously is
   either trimmed (an overlapping retransmission) or, if it's genuinely ahead
   of where expected (a gap -- a segment very likely wasn't captured), causes
@@ -4449,6 +4713,45 @@ These are current, not aspirational -- each has a corresponding ROADMAP item.
   tell apart from one continuous session -- see the general TCP-reassembly
   limitation above for the same underlying reason). Ordinary real traffic
   never exercises this.
+- **MQTT's own structural detection gate is honestly the weakest in this
+  codebase, weaker even than HART-IP's** -- see PROTOCOL DETECTION's "Why
+  MQTT is tried last" for the two real collisions against this project's own
+  synthetic fixture that this weakness caused (both found and fixed, not
+  merely theoretical). CONNECT alone gets a materially stronger,
+  version-specific check (its own Protocol Name field must read `"MQTT"` or
+  `"MQIsdp"`); every other MQTT packet type relies on the one-byte fixed
+  header alone.
+- **MQTT's SUBACK version-disambiguation heuristic is the least reliable of
+  the three ambiguous packet types** (SUBSCRIBE/SUBACK/UNSUBSCRIBE), used
+  only when no CONNECT was ever seen on a session in this capture. SUBACK's
+  own body is a flat list of single reason-code bytes -- almost any byte
+  value looks structurally "valid" whichever shape (v3.x or v5) is assumed,
+  so a short or degenerate reason-code list can resolve to the wrong
+  version. This is deliberately not hidden: the decoded output always notes
+  which of the three evidence tiers (session-tracked, SUBSCRIBE/UNSUBSCRIBE
+  heuristic, or SUBACK's own weaker heuristic) produced a given version
+  label, and this project's own test suite (`mqtt_version_heuristic_suback_
+  weakest_evidence` in `CMakeLists.txt`) pins down a case where it
+  misresolves, rather than only testing cases where it happens to get it
+  right.
+- **MQTT QoS 2 exactly-once delivery state, retained-message tracking, and
+  Will Message delivery are not tracked across packets** -- like every
+  protocol in this codebase, this decoder is a stateless-per-message decoder
+  with TCP-stream-level reassembly only; PUBREC/PUBREL/PUBCOMP are each
+  decoded on their own, not correlated into a single logical QoS 2 exchange.
+- **Sparkplug B is validated only against this project's own synthetic,
+  hand-built protobuf fixture** -- a real-world Sparkplug B capture was
+  specifically searched for and not found (see
+  `tests/real_captures/mqtt/ATTRIBUTION.md`'s own honest account of that
+  search). MQTT itself (the layer underneath Sparkplug B) does have real
+  independent validation -- see PROTOCOL COVERAGE's MQTT Validation
+  subsection.
+- **Sparkplug B's Bytes, File, DataSet, Template, PropertySet/
+  PropertySetList, and Array `DataType`s are recognized and counted but not
+  value-decoded** (Tier 2, shown as `"<N byte(s), not decoded further>"`) --
+  see PROTOCOL COVERAGE's MQTT section for the full Tier 1/Tier 2 split.
+  Sparkplug's own STATE topic payload (plain JSON text, not protobuf) is
+  likewise shown as raw text, not parsed as JSON.
 
 ## EXIT STATUS
 
@@ -4773,6 +5076,33 @@ wrong:
 conduitscope policy validate -r capture.pcap --policy policy.yaml -f json \
   | jq -r '.flows[] | select(.verdict == "violation") |
            "\(.client_ip) -> \(.server_ip):\(.server_port) (\(.protocols | join("+"))): \(.reason)"'
+```
+
+Find MQTT CONNECT packets carrying cleartext credentials -- the same
+deliberate security-finding pattern as OPC UA's Identity Token check above,
+since MQTT's own Username/Password fields carry no confidentiality of their
+own:
+
+```sh
+conduitscope decode -r capture.pcap --protocol mqtt -f json \
+  | jq -r '.[] | select(.mqtt_values // [] | any(startswith("Username=") or startswith("Password="))) |
+           "\(.src_ip):\(.src_port) -> \(.dst_ip):\(.dst_port): \(.mqtt_values[] | select(startswith("Username=") or startswith("Password=")))"'
+```
+
+Pull out every decoded Sparkplug B metric across a capture, grouped by
+group/edge-node/device:
+
+```sh
+conduitscope decode -r capture.pcap --protocol mqtt -f json \
+  | jq -r '.[] | select(.mqtt_is_sparkplug and (.mqtt_sparkplug_metrics // [] | length > 0)) |
+           "\(.mqtt_sparkplug_group_id)/\(.mqtt_sparkplug_edge_node_id)\(.mqtt_sparkplug_device_id // "" | if . == "" then "" else "/" + . end) \(.mqtt_sparkplug_message_type): \(.mqtt_sparkplug_metrics | join(", "))"'
+```
+
+Note MQTT traffic on a port your zone policy doesn't expect on 1883:
+
+```sh
+conduitscope decode -r capture.pcap --protocol mqtt --mqtt-port 1883 -f text \
+  | grep -B1 "not a configured/standard MQTT port"
 ```
 
 ## ROADMAP
@@ -5239,6 +5569,42 @@ crashes, and a real informationReport frame confirming this decoder's own
 `Data`-value decode against an independent encoder byte-for-byte (see
 `tests/real_captures/mms/ATTRIBUTION.md` for both structural-gate bugs this
 validation pass found and fixed).
+
+**MQTT (v3.1/v3.1.1/v5.0) and Sparkplug B support** is also now done: the
+first protocol this tool decodes that isn't OT-specific on its own, but is
+squarely in scope for how OT data reaches IT/cloud systems today, plus
+Sparkplug B -- an OT/IIoT-focused MQTT topic and payload convention built on
+Protocol Buffers -- decoded via a small, purpose-built, hand-rolled protobuf
+wire-format reader rather than a general-purpose protobuf dependency
+(consistent with this project's zero-required-dependency design). Every MQTT
+Control Packet Type is decoded (CONNECT through AUTH), including all 27
+MQTT5 Property Identifiers via one generic, table-driven decoder. Version
+disambiguation for the three genuinely ambiguous packet types (SUBSCRIBE/
+SUBACK/UNSUBSCRIBE) combines authoritative per-TCP-session CONNECT tracking
+with an honestly-scoped fallback heuristic, documented as least reliable for
+SUBACK specifically -- see PROTOCOL COVERAGE's MQTT section. This decoder's
+own structural detection gate is honestly the weakest in the whole codebase
+(weaker even than HART-IP's own documented weakest gate), so MQTT is
+dispatched dead last in the TCP protocol-detection chain -- a real,
+demonstrated design consequence, not a theoretical one: building this
+feature's own synthetic test fixture surfaced two genuine collisions against
+earlier-dispatched protocols' gates (a v5 CONNACK against Modbus/TCP's own
+protocol-id==0 tell, and a SUBSCRIBE/UNSUBSCRIBE packet identifier against
+HART-IP's own two-byte gate), both found and fixed, not just noted as
+possible. Like this codebase's own OPC UA Identity Token decode, CONNECT's
+cleartext Username/Password fields are decoded and shown deliberately, not
+by oversight. Validated against a real Eclipse Paho MQTT 3.1 client session
+(`pradeesi/MQTT-Wireshark-Capture`, two container formats confirmed to
+decode byte-for-byte identically, plus a third file from the same source
+found to be genuinely corrupt and correctly rejected with a clear error) --
+that validation caught and fixed a real bug in this decoder's own
+session-version-tracking logic, which originally only recognized
+ProtocolLevel 4/5 CONNECTs, not the pre-OASIS MQTT 3.1 (level 3, "MQIsdp")
+shape a real client in the wild still used (see
+`tests/real_captures/mqtt/ATTRIBUTION.md` for the complete writeup). A real
+Sparkplug B capture was specifically searched for and not found, so
+Sparkplug B decoding itself remains validated only against this project's
+own synthetic, hand-built protobuf fixture -- see LIMITATIONS.
 
 ## BUILDING
 
