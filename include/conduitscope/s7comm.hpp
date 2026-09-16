@@ -30,8 +30,11 @@
 // doesn't cover (an unrecognized area code, more than one LID entry) falls
 // back to raw hex rather than guessing further. Every other syntax id is
 // shown as raw hex, same as every other function code's parameter/data
-// payload. S7comm-Plus (TIA Portal's newer, largely undocumented protocol,
-// protocol id 0x72) is detected but not decoded at all.
+// payload. S7comm-Plus (TIA Portal's newer, largely undocumented protocol, protocol id 0x72) is
+// a wholly different, independent application protocol that merely shares this same COTP Data /
+// TCP port 102 transport -- try_parse_s7comm below deliberately does NOT recognize it (it returns
+// std::nullopt for a 0x72 first byte, the same as for any other non-S7comm payload); its own
+// decode lives in s7commplus.hpp/try_parse_s7comm_plus, dispatched separately by decoder.cpp.
 //
 // Reference behavior cross-checked against the Wireshark packet-s7comm.c
 // dissector and the Arkime s7comm.c parser (both open source); this is an
@@ -117,8 +120,6 @@ struct S7DataItem {
 };
 
 struct S7CommFrame {
-    bool is_plus = false;  // true if this is S7comm-Plus (0x72) rather than classic S7comm (0x32)
-
     uint8_t rosctr = 0;
     std::string rosctr_name;  // "Job", "Ack", "Ack_Data", "Userdata", or "Unknown (0xNN)"
     uint16_t pdu_reference = 0;
@@ -157,13 +158,12 @@ std::string s7comm_rosctr_name(uint8_t rosctr);
 std::string s7comm_function_name(uint8_t function_code);
 std::string s7comm_return_code_name(uint8_t return_code);
 
-// Attempts to interpret `cotp_user_data` (the payload of a COTP Data frame)
-// as an S7comm or S7comm-Plus header. Returns std::nullopt (never throws) if
-// the payload is empty or its first byte isn't a recognized S7comm protocol
-// id (0x32 or 0x72) -- the standard signal that this COTP Data frame is
-// carrying something other than S7comm. Once the protocol id is confirmed,
-// a header that's too short to hold the fixed fields throws ParseError
-// rather than silently returning a partial result.
+// Attempts to interpret `cotp_user_data` (the payload of a COTP Data frame) as a CLASSIC S7comm
+// header. Returns std::nullopt (never throws) if the payload is empty or its first byte isn't
+// S7COMM_PROTOCOL_ID (0x32) -- the standard signal that this COTP Data frame is carrying
+// something other than classic S7comm, INCLUDING S7comm-Plus (0x72, see s7commplus.hpp) or MMS.
+// Once the protocol id is confirmed, a header that's too short to hold the fixed fields throws
+// ParseError rather than silently returning a partial result.
 std::optional<S7CommFrame> try_parse_s7comm(ByteSpan cotp_user_data);
 
 }  // namespace conduitscope

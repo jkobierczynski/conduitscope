@@ -2791,6 +2791,535 @@ def session_ongoing_prefix(count: int = 2) -> bytes:
     return session_spdu(1, b"") * count
 
 
+# --- S7comm-Plus (0x72) helpers -----------------------------------------------------------
+# See include/conduitscope/s7commplus.hpp / src/s7commplus.cpp for the exact wire format these
+# mirror. All multi-byte integers used directly in a header/envelope are big-endian; the
+# "varuint"/"varint" fields are this protocol's own Variable-Length Quantity encoding (big-endian/
+# MSB-first 7-bit groups, continuation bit 0x80; the signed forms use bit 0x40 of the FIRST byte
+# as a sign flag with only 6 payload bits in that first byte).
+S7P_OPCODE_REQUEST = 0x31
+S7P_OPCODE_RESPONSE = 0x32
+S7P_OPCODE_NOTIFICATION = 0x33
+S7P_OPCODE_RESPONSE2 = 0x02
+
+S7P_PDUTYPE_CONNECT = 0x01
+S7P_PDUTYPE_DATA = 0x02
+S7P_PDUTYPE_DATAFW1_5 = 0x03
+S7P_PDUTYPE_KEEPALIVE = 0xff
+
+S7P_FC_EXPLORE = 0x04bb
+S7P_FC_CREATEOBJECT = 0x04ca
+S7P_FC_DELETEOBJECT = 0x04d4
+S7P_FC_SETVARIABLE = 0x04f2
+S7P_FC_GETLINK = 0x0524
+S7P_FC_SETMULTIVAR = 0x0542
+S7P_FC_GETMULTIVAR = 0x054c
+S7P_FC_BEGINSEQUENCE = 0x0556
+S7P_FC_ENDSEQUENCE = 0x0560
+S7P_FC_INVOKE = 0x056b
+S7P_FC_GETVARSUBSTR = 0x0586
+
+
+def vlq_u(value: int, max_groups: int = 5) -> bytes:
+    """Unsigned varuint32/varuint64 encoder: plain big-endian/MSB-first 7-bit groups, matching
+    read_varuint32/read_varuint64 in s7commplus.cpp exactly (no sign-flag reservation)."""
+    assert value >= 0
+    if value == 0:
+        return bytes([0])
+    k = max(1, -(-value.bit_length() // 7))
+    assert k <= max_groups, f"{value} needs {k} groups, only {max_groups} allowed"
+    shift = (k - 1) * 7
+    out = bytearray()
+    for i in range(k):
+        g = (value >> shift) & 0x7f
+        out.append(g | (0x80 if i != k - 1 else 0))
+        shift -= 7
+    return bytes(out)
+
+
+def vlq_s(value: int, max_groups: int = 5) -> bytes:
+    """Signed varint32/varint64 encoder: first byte carries 6 payload bits plus a 0x40 sign flag,
+    every following byte carries 7 payload bits -- matches read_varint32/read_varint64 exactly."""
+    if value == 0:
+        return bytes([0])
+    neg = value < 0
+    extra = 0
+    while True:
+        total_bits = 6 + extra * 7
+        lo, hi = -(1 << (total_bits - 1)), (1 << (total_bits - 1)) - 1
+        if lo <= value <= hi:
+            break
+        extra += 1
+        assert extra < max_groups, f"{value} does not fit in {max_groups} varint groups"
+    total_bits = 6 + extra * 7
+    uval = value & ((1 << total_bits) - 1)
+    groups, shift = [], extra * 7
+    groups.append((uval >> shift) & 0x3f)
+    shift -= 7
+    while shift >= 0:
+        groups.append((uval >> shift) & 0x7f)
+        shift -= 7
+    out = bytearray()
+    for i, g in enumerate(groups):
+        b = g | (0x40 if (i == 0 and neg) else 0)
+        b |= 0x80 if i != len(groups) - 1 else 0
+        out.append(b)
+    return bytes(out)
+
+
+def s7p_returnvalue(code: int) -> bytes:
+    """A ReturnValue: a varuint64 whose low 16 bits are the signed error code -- encoded here as
+    just that low-16-bit value (upper OMS-line/error-source/debug-info bits left zero, matching
+    the common real-world case of a "plain" success/failure code with no extra flags set)."""
+    return vlq_u(code & 0xffff, max_groups=9)
+
+
+# --- Value encoding (S7CommPlusValue, see decode_value/decode_value_element) --------------------
+def s7p_scalar(datatype: int, payload: bytes) -> bytes:
+    return bytes([0x00, datatype]) + payload
+
+
+def s7p_array(datatype: int, elements, address_array: bool = False) -> bytes:
+    flags = 0x20 if address_array else 0x10
+    return bytes([flags, datatype]) + vlq_u(len(elements)) + b"".join(elements)
+
+
+def s7p_sparsearray(datatype: int, keyed_elements) -> bytes:
+    out = bytearray([0x40, datatype])
+    for key, elem in keyed_elements:
+        out += vlq_u(key)
+        out += elem
+    out += vlq_u(0)  # terminating null key
+    return bytes(out)
+
+
+def s7p_struct_members(pairs) -> bytes:
+    """`pairs`: list of (id, value_bytes). Used both for a Struct value's own members (looping,
+    needs the trailing null terminator) -- see decode_id_value_list(looping=true)."""
+    out = b"".join(vlq_u(id_) + v for id_, v in pairs)
+    out += vlq_u(0)
+    return out
+
+
+def s7p_value_struct(pairs) -> bytes:
+    # flags=0 (scalar) + datatype 0x17 (Struct) + 4-byte marker (not further interpreted) +
+    # the nested, null-terminated id-value-list of members.
+    return bytes([0x00, 0x17]) + struct.pack("!I", 0) + s7p_struct_members(pairs)
+
+
+def s7p_idvalue(id_: int, value_bytes: bytes) -> bytes:
+    """One {id, value} pair as consumed by decode_id_value_list(looping=false) -- exactly one
+    pair, no trailing null terminator (SetMultiVariables/SetVariable request items)."""
+    return vlq_u(id_) + value_bytes
+
+
+# Fixed-width scalar element encoders (datatype byte, payload) pairs for the common cases used
+# below -- element payload only, matching decode_value_element's per-datatype byte layout exactly.
+def el_bool(v: bool) -> bytes: return bytes([1 if v else 0])
+def el_usint(v: int) -> bytes: return bytes([v & 0xff])
+def el_uint(v: int) -> bytes: return struct.pack("!H", v & 0xffff)
+def el_udint(v: int) -> bytes: return vlq_u(v)
+def el_ulint(v: int) -> bytes: return vlq_u(v, max_groups=9)
+def el_sint(v: int) -> bytes: return struct.pack("!b", v)
+def el_int(v: int) -> bytes: return struct.pack("!h", v)
+def el_dint(v: int) -> bytes: return vlq_s(v)
+def el_lint(v: int) -> bytes: return vlq_s(v, max_groups=9)
+def el_byte(v: int) -> bytes: return bytes([v & 0xff])
+def el_word(v: int) -> bytes: return struct.pack("!H", v & 0xffff)
+def el_dword(v: int) -> bytes: return struct.pack("!I", v & 0xffffffff)
+def el_lword(v: int) -> bytes: return struct.pack("!Q", v & 0xffffffffffffffff)
+def el_real(v: float) -> bytes: return struct.pack("!f", v)
+def el_lreal(v: float) -> bytes: return struct.pack("!d", v)
+def el_timestamp(ns: int) -> bytes: return struct.pack("!Q", ns)
+def el_timespan(ns: int) -> bytes: return vlq_u(ns, max_groups=9)
+def el_rid(v: int) -> bytes: return struct.pack("!I", v)
+def el_aid(v: int) -> bytes: return vlq_u(v)
+def el_variant(type_id: int) -> bytes: return vlq_u(type_id)
+
+
+def el_blob(data: bytes) -> bytes:
+    return bytes([0]) + vlq_u(len(data)) + data
+
+
+def el_wstring(s: str) -> bytes:
+    b = s.encode("utf-8")
+    return vlq_u(len(b)) + b
+
+
+# --- Item address encoding (decode_item_address) ------------------------------------------------
+def s7p_item_symbolic(crc: int, area2: int, lid_depth: int = 1, base_area: int = 0,
+                       extra_lids=None, area1: int = 0x0000) -> bytes:
+    extra_lids = extra_lids or []
+    field2 = (area1 << 16) | area2
+    out = vlq_u(crc) + vlq_u(field2) + vlq_u(lid_depth) + vlq_u(base_area)
+    for v in extra_lids:
+        out += vlq_u(v)
+    return out
+
+
+def s7p_item_object_id(rid: int, base_id: int, lid_depth: int = 1, extra_ids=None) -> bytes:
+    extra_ids = extra_ids or []
+    out = vlq_u(0) + vlq_u(rid) + vlq_u(lid_depth) + vlq_u(base_id)
+    for v in extra_ids:
+        out += vlq_u(v)
+    return out
+
+
+# --- Function bodies (see the matching decode_request_*/decode_response_* in s7commplus.cpp) ----
+def s7p_getmultivar_request(item_addrs) -> bytes:
+    out = struct.pack("!I", 0)  # link_id = 0 (the "normal", non-subscribed-link path)
+    out += vlq_u(len(item_addrs)) + vlq_u(len(item_addrs))  # item_count + "fields in complete set"
+    for a in item_addrs:
+        out += a
+    return out
+
+
+def s7p_getmultivar_request_subscribed(link_id: int, ids) -> bytes:
+    out = struct.pack("!I", link_id)
+    out += vlq_u(len(ids))  # item_count (present on the wire, unused by this branch's own loop)
+    out += vlq_u(len(ids))  # addr_count
+    for i in ids:
+        out += vlq_u(i)
+    return out
+
+
+def s7p_getmultivar_response(return_code: int, item_values, item_errors=()) -> bytes:
+    out = s7p_returnvalue(return_code)
+    for item_num, value_bytes in item_values:
+        out += vlq_u(item_num) + value_bytes
+    out += vlq_u(0)
+    for item_num, err_code in item_errors:
+        out += vlq_u(item_num) + s7p_returnvalue(err_code)
+    out += vlq_u(0)
+    return out
+
+
+def s7p_setmultivar_request_marker0(item_addrs, idvalue_pairs) -> bytes:
+    out = struct.pack("!I", 0)
+    out += vlq_u(len(item_addrs)) + vlq_u(len(item_addrs))
+    for a in item_addrs:
+        out += a
+    for iv in idvalue_pairs:
+        out += iv
+    return out
+
+
+def s7p_setmultivar_request_marker(marker: int, ids, idvalue_pairs) -> bytes:
+    out = struct.pack("!I", marker)
+    out += vlq_u(len(ids)) + vlq_u(len(ids))  # item_count + addr_count
+    for i in ids:
+        out += vlq_u(i)
+    for iv in idvalue_pairs:
+        out += iv
+    return out
+
+
+def s7p_setmultivar_response(return_code: int, item_errors=()) -> bytes:
+    out = s7p_returnvalue(return_code)
+    for item_num, err_code in item_errors:
+        out += vlq_u(item_num) + s7p_returnvalue(err_code)
+    out += vlq_u(0)
+    return out
+
+
+def s7p_setvariable_request(object_id: int, idvalue_pairs) -> bytes:
+    out = struct.pack("!I", object_id) + vlq_u(len(idvalue_pairs))
+    for iv in idvalue_pairs:
+        out += iv
+    return out
+
+
+def s7p_setvariable_response(return_code: int) -> bytes:
+    return s7p_returnvalue(return_code)
+
+
+def s7p_deleteobject_request(object_id: int) -> bytes:
+    return struct.pack("!I", object_id)
+
+
+def s7p_deleteobject_response(return_code: int, object_id: int) -> bytes:
+    return s7p_returnvalue(return_code) + struct.pack("!I", object_id)
+
+
+# --- Envelope / header / trailer / integrity ------------------------------------------------
+def s7p_integrity(integrity_id: int = 1, digest_len: int = 32) -> bytes:
+    out = vlq_u(integrity_id) + bytes([digest_len])
+    if digest_len == 32:
+        out += bytes((i * 7 + 3) % 256 for i in range(32))  # arbitrary deterministic filler
+    return out
+
+
+def s7p_envelope(opcode: int, function_code: int, seq: int, body: bytes, session_id: int = 0,
+                  integrity: bool = True) -> bytes:
+    out = bytearray([opcode])
+    out += struct.pack("!H", 0)  # reserved1
+    out += struct.pack("!H", function_code)
+    out += struct.pack("!H", 0)  # reserved2
+    out += struct.pack("!H", seq)
+    if opcode == S7P_OPCODE_REQUEST:
+        out += struct.pack("!I", session_id) + bytes([0])
+    else:
+        out += bytes([0])
+    out += body
+    if integrity:
+        out += s7p_integrity()
+    return bytes(out)
+
+
+def s7p_frame(pdu_type: int, data_part: bytes) -> bytes:
+    data_length = len(data_part)
+    hdr = bytes([0x72, pdu_type]) + struct.pack("!H", data_length)
+    trl = bytes([0x72, pdu_type]) + struct.pack("!H", data_length)
+    return hdr + data_part + trl
+
+
+def s7p_frame_no_trailer(pdu_type: int, partial_data: bytes, declared_full_length: int) -> bytes:
+    """A telegram whose trailer hasn't arrived yet (the ABSENCE of a trailer, not COTP's own EOT
+    bit, is S7comm-Plus's own fragmentation signal -- see s7commplus.hpp; this decoder does not
+    reassemble across it, only reports it)."""
+    hdr = bytes([0x72, pdu_type]) + struct.pack("!H", declared_full_length)
+    return hdr + partial_data
+
+
+def s7p_keepalive(seq: int) -> bytes:
+    return bytes([0x72, S7P_PDUTYPE_KEEPALIVE, seq & 0xff, 0x00])
+
+
+def build_s7commplus_sample():
+    """S7comm-Plus (0x72) -- see s7commplus.hpp's own file header for the wire format this
+    exercises. Main flow (port 102, one long-lived TCP session, mirroring a real TIA Portal HMI
+    connection): COTP Connection Request/Confirm, then every Tier-1 function this decoder fully
+    decodes in both directions -- GetMultiVariables (both the normal "link_id=0" item-address path,
+    covering a symbolic Merker/DB/nested-LID/unrecognized-IQMCT-area/unrecognized-area address
+    shapes plus an object-ID-style item, and the "subscribed link" item-number path) with a
+    response covering nearly every datatype (including a genuinely nested Struct-of-Struct, an
+    Array, an Addressarray, and a Sparsearray) plus a per-item error entry; SetMultiVariables in
+    both its marker==0 (native symbolic item-address) and marker!=0 (object-ID) request shapes,
+    responses with per-item errors; SetVariable and DeleteObject request/response pairs. Then the
+    Tier-2 (named, not body-decoded) shapes: Connect, Notification, DataFW1_5, and one
+    representative "other" function code (Explore) neither direction decodes. Then a Keep Alive
+    PDU (its own distinct 4-byte-header-only framing). Then two deliberate edge cases: a value with
+    an array-of-Struct (the one shape this decoder deliberately refuses to decode, throwing
+    ParseError rather than risk silent misalignment -- see s7commplus.hpp/decode_value's own
+    comment, and the genuine bug this project's own code review caught before ever building it),
+    and a value using the one datatype code (S7String, 0x19) this decoder's value switch does not
+    implement, both exercising the per-Data-part try/catch's graceful "decoding stopped" note
+    rather than losing the whole packet. Separate flows (own port pairs): a telegram missing its
+    trailer (S7comm-Plus's own above-COTP fragmentation signal, NOT reassembled by this decoder --
+    reported as such); a completely truncated (<4 byte) telegram (the outer catch(ParseError)
+    "could not parse packet" path); and a session on a non-102 TCP port (the "not a configured/
+    standard COTP/S7comm port" note)."""
+    ENG_IP, PLC_PORT = HMI_IP, 102
+    packets = []
+    ident = [0x8000]
+
+    # ---------------------------------------------------------------------------------------------
+    # Main flow, port 50300.
+    # ---------------------------------------------------------------------------------------------
+    ENG_PORT = 50300
+    client_seq, server_seq = [30000], [40000]
+
+    def add(from_client: bool, tpkt_bytes: bytes, sport=ENG_PORT, dport=PLC_PORT):
+        ident[0] += 1
+        if from_client:
+            src_ip, dst_ip, src_mac, dst_mac = ENG_IP, PLC_IP, HMI_MAC, PLC_MAC
+            src_port, dst_port = sport, dport
+            seq, ack = client_seq[0], server_seq[0]
+            client_seq[0] += len(tpkt_bytes)
+        else:
+            src_ip, dst_ip, src_mac, dst_mac = PLC_IP, ENG_IP, PLC_MAC, HMI_MAC
+            src_port, dst_port = dport, sport
+            seq, ack = server_seq[0], client_seq[0]
+            server_seq[0] += len(tpkt_bytes)
+        tcp = tcp_header(src_port, dst_port, seq, ack, TCP_PSH | TCP_ACK, len(tpkt_bytes)) + tpkt_bytes
+        ip = ipv4_header(src_ip, dst_ip, 6, len(tcp), ident[0]) + tcp
+        packets.append(eth_header(dst_mac, src_mac, 0x0800) + ip)
+
+    def dt(s7p_bytes: bytes) -> bytes:
+        return tpkt_frame(COTP_DT_HEADER, s7p_bytes)
+
+    # 1) & 2) COTP Connection Request/Confirm.
+    cr = cotp_connection_pdu(0xE0, 0x0000, 0x0003, bytes([0x01, 0x00]), bytes([0x03, 0x02]))
+    add(True, tpkt_frame(cr))
+    cc = cotp_connection_pdu(0xD0, 0x0003, 0x7001, bytes([0x01, 0x00]), bytes([0x03, 0x02]))
+    add(False, tpkt_frame(cc))
+
+    # 3) & 4) GetMultiVariables request/response -- the "normal" (link_id=0) item-address path,
+    #    covering five distinct address shapes in one request: symbolic Merker (M), symbolic DB
+    #    with a nested LID (struct/array member chain), an unrecognized IQMCT area code, a wholly
+    #    unrecognized area1/area2 pair, and an object-ID-style item.
+    items_a = [
+        s7p_item_symbolic(0xea2db0d9, 0x52, lid_depth=1),                       # SYM-CRC=..., LID=M
+        s7p_item_symbolic(0xa9bc66e6, 5, lid_depth=2,                           # SYM-CRC=..., LID=DB5.10
+                           extra_lids=[10], area1=0x8a0e, base_area=0),
+        s7p_item_symbolic(0x11111111, 0x99, lid_depth=1),                       # unrecognized IQMCT area
+        s7p_item_symbolic(0x22222222, 0x5678, lid_depth=1, area1=0x1234),       # unrecognized area1/area2
+        s7p_item_object_id(rid=100, base_id=500, lid_depth=2, extra_ids=[7]),   # by IDs: RID=100, ID=500, ID=7
+    ]
+    req_a = s7p_getmultivar_request(items_a)
+    add(True, dt(s7p_frame(S7P_PDUTYPE_DATA, s7p_envelope(S7P_OPCODE_REQUEST, S7P_FC_GETMULTIVAR, 1,
+                                                            req_a, session_id=0x1001, integrity=False))))
+
+    values_a = [
+        (1, s7p_scalar(0x07, el_int(-1234))),                                    # Int
+        (2, s7p_array(0x08, [el_dint(1), el_dint(2), el_dint(-3)])),             # Array of DInt
+        (3, s7p_array(0x03, [el_uint(10), el_uint(20)], address_array=True)),    # Addressarray of UInt
+        (4, s7p_sparsearray(0x0a, [(5, el_byte(0xAA)), (9, el_byte(0xBB))])),    # Sparsearray of Byte
+        (5, s7p_value_struct([(315, s7p_scalar(0x04, el_udint(320))),
+                               (316, s7p_value_struct([(1826, s7p_scalar(0x05, el_ulint(123456789))),
+                                                        (1827, s7p_scalar(0x04, el_udint(42)))])),
+                               (317, s7p_scalar(0x15, el_wstring("V1.0;6ES7 511-1AK00-0AB0")))])),
+        (6, s7p_scalar(0x0f, el_lreal(3.14159265))),                             # LReal
+        (7, s7p_scalar(0x10, el_timestamp(1_726_000_000_123_456_789))),          # Timestamp
+        (8, s7p_scalar(0x11, el_timespan(1_500_000_000))),                       # Timespan
+        (9, s7p_scalar(0x14, el_blob(bytes(range(40))))),                        # Blob (truncated display)
+    ]
+    resp_a = s7p_getmultivar_response(0, values_a, item_errors=[(10, -12)])  # one item: Object not found
+    add(False, dt(s7p_frame(S7P_PDUTYPE_DATA, s7p_envelope(S7P_OPCODE_RESPONSE, S7P_FC_GETMULTIVAR, 1,
+                                                             resp_a))))
+
+    # 5) & 6) GetMultiVariables request/response -- the "subscribed link" item-number path
+    #    (link_id != 0), a genuinely different request shape from items_a above.
+    req_b = s7p_getmultivar_request_subscribed(link_id=42, ids=[1, 2, 3])
+    add(True, dt(s7p_frame(S7P_PDUTYPE_DATA, s7p_envelope(S7P_OPCODE_REQUEST, S7P_FC_GETMULTIVAR, 2,
+                                                            req_b, session_id=0x1001, integrity=False))))
+    resp_b = s7p_getmultivar_response(0, [(1, s7p_scalar(0x01, el_bool(True))),
+                                           (2, s7p_scalar(0x01, el_bool(False))),
+                                           (3, s7p_scalar(0x02, el_usint(7)))])
+    add(False, dt(s7p_frame(S7P_PDUTYPE_DATA, s7p_envelope(S7P_OPCODE_RESPONSE, S7P_FC_GETMULTIVAR, 2,
+                                                             resp_b))))
+
+    # 7) & 8) SetMultiVariables -- marker==0 (native symbolic item-address) request shape.
+    set_items_a = [s7p_item_symbolic(0xdeadbeef, 0x52, lid_depth=1),
+                   s7p_item_symbolic(0xcafef00d, 5, lid_depth=2, extra_lids=[20], area1=0x8a0e)]
+    set_values_a = [s7p_idvalue(1, s7p_scalar(0x0e, el_real(98.6))),
+                    s7p_idvalue(2, s7p_scalar(0x0c, el_dword(0xdeadbeef)))]
+    req_c = s7p_setmultivar_request_marker0(set_items_a, set_values_a)
+    add(True, dt(s7p_frame(S7P_PDUTYPE_DATA, s7p_envelope(S7P_OPCODE_REQUEST, S7P_FC_SETMULTIVAR, 3,
+                                                            req_c, session_id=0x1001, integrity=False))))
+    resp_c = s7p_setmultivar_response(0)
+    add(False, dt(s7p_frame(S7P_PDUTYPE_DATA, s7p_envelope(S7P_OPCODE_RESPONSE, S7P_FC_SETMULTIVAR, 3,
+                                                             resp_c))))
+
+    # 9) & 10) SetMultiVariables -- marker!=0 (object-ID) request shape, with a per-item error in
+    #     the response (a genuine write failure, not just an "OK" -- Invalid CRC this time).
+    req_d = s7p_setmultivar_request_marker(
+        0x00000388, [306, 305],
+        [s7p_idvalue(1, s7p_scalar(0x04, el_udint(320))), s7p_idvalue(2, s7p_scalar(0x03, el_uint(3)))])
+    add(True, dt(s7p_frame(S7P_PDUTYPE_DATA, s7p_envelope(S7P_OPCODE_REQUEST, S7P_FC_SETMULTIVAR, 4,
+                                                            req_d, session_id=0x1001, integrity=False))))
+    resp_d = s7p_setmultivar_response(0, item_errors=[(2, -17)])  # item 2: Invalid CRC
+    add(False, dt(s7p_frame(S7P_PDUTYPE_DATA, s7p_envelope(S7P_OPCODE_RESPONSE, S7P_FC_SETMULTIVAR, 4,
+                                                             resp_d))))
+
+    # 11) & 12) SetVariable request/response.
+    req_e = s7p_setvariable_request(0x00000390, [s7p_idvalue(1, s7p_scalar(0x01, el_bool(True)))])
+    add(True, dt(s7p_frame(S7P_PDUTYPE_DATA, s7p_envelope(S7P_OPCODE_REQUEST, S7P_FC_SETVARIABLE, 5,
+                                                            req_e, session_id=0x1001, integrity=False))))
+    resp_e = s7p_setvariable_response(0)
+    add(False, dt(s7p_frame(S7P_PDUTYPE_DATA, s7p_envelope(S7P_OPCODE_RESPONSE, S7P_FC_SETVARIABLE, 5,
+                                                             resp_e))))
+
+    # 13) & 14) DeleteObject request/response (the real captures only ever showed the request side
+    #     -- this is the only place the response shape is validated at all, even synthetically).
+    req_f = s7p_deleteobject_request(0x0000039a)
+    add(True, dt(s7p_frame(S7P_PDUTYPE_DATA, s7p_envelope(S7P_OPCODE_REQUEST, S7P_FC_DELETEOBJECT, 6,
+                                                            req_f, session_id=0x1001, integrity=False))))
+    resp_f = s7p_deleteobject_response(0, 0x0000039a)
+    add(False, dt(s7p_frame(S7P_PDUTYPE_DATA, s7p_envelope(S7P_OPCODE_RESPONSE, S7P_FC_DELETEOBJECT, 6,
+                                                             resp_f))))
+
+    # 15) & 16) Connect PDU (Tier-2: recognized, not decoded) -- a second logical "session"
+    #     handshake exchanged mid-flow, as real TIA Portal HMI sessions do when reconnecting.
+    add(True, dt(s7p_frame(S7P_PDUTYPE_CONNECT, bytes(range(20)))))
+    add(False, dt(s7p_frame(S7P_PDUTYPE_CONNECT, bytes(range(20, 40)))))
+
+    # 17) Notification (Tier-2: opcode recognized, body not decoded) -- no function code, no
+    #     session id; a materially different envelope shape from Request/Response.
+    notif_body = bytes([S7P_OPCODE_NOTIFICATION]) + bytes(range(30))
+    add(False, dt(s7p_frame(S7P_PDUTYPE_DATA, notif_body)))
+
+    # 18) DataFW1_5 (Tier-2: header only -- PDU type/Data Length/trailer decoded, entire Data part
+    #     left raw, see s7commplus.hpp on why).
+    fw15_data = s7p_envelope(S7P_OPCODE_REQUEST, S7P_FC_GETMULTIVAR, 7,
+                              s7p_getmultivar_request([s7p_item_symbolic(0x1, 0x52)]),
+                              session_id=0x1001, integrity=False)
+    add(True, dt(s7p_frame(S7P_PDUTYPE_DATAFW1_5, fw15_data)))
+
+    # 19) & 20) Explore (Tier-2: an "other" function code neither direction decodes).
+    req_g = struct.pack("!I", 0x00000001) + bytes(range(10))  # arbitrary body, never parsed
+    add(True, dt(s7p_frame(S7P_PDUTYPE_DATA, s7p_envelope(S7P_OPCODE_REQUEST, S7P_FC_EXPLORE, 8,
+                                                            req_g, session_id=0x1001, integrity=False))))
+    resp_g = s7p_returnvalue(0) + bytes(range(10))
+    add(False, dt(s7p_frame(S7P_PDUTYPE_DATA, s7p_envelope(S7P_OPCODE_RESPONSE, S7P_FC_EXPLORE, 8,
+                                                             resp_g))))
+
+    # 21) Keep Alive -- its own distinct 4-byte header-only framing (no Data part, no trailer).
+    add(True, dt(s7p_keepalive(9)))
+
+    # 22) & 23) Edge cases exercising the Data part's own try/catch: an array-of-Struct value (the
+    #     one shape this decoder deliberately refuses rather than risk silent misalignment -- see
+    #     s7commplus.hpp/decode_value's own comment, and the bug this project's own code review
+    #     caught before ever building it) and a value using S7String (0x19), the one datatype code
+    #     the reference plugin's own generic value switch doesn't implement either.
+    # datatype=Struct, is_array=true: decode_value reads the flags/datatype/array-size header, then
+    # decode_value_element consumes the Struct element's own 4-byte marker (present below, all
+    # zero, matching s7p_value_struct's own marker) before decode_value sees is_struct=true and
+    # throws -- the nested member list a real Struct element would have next is never reached.
+    array_of_struct_value = s7p_array(0x17, [struct.pack("!I", 0)])
+    req_h_values = [(1, array_of_struct_value)]
+    req_h = s7p_getmultivar_response(0, req_h_values)  # reusing the response shape (item-value-list)
+    # via a GetMultiVariables Response envelope -- content only, doesn't need to be a real response
+    add(False, dt(s7p_frame(S7P_PDUTYPE_DATA, s7p_envelope(S7P_OPCODE_RESPONSE, S7P_FC_GETMULTIVAR, 10,
+                                                             req_h))))
+
+    s7string_value = s7p_scalar(0x19, b"\x05HELLO")  # datatype 0x19 -- unrecognized by decode_value_element
+    req_i = s7p_getmultivar_response(0, [(1, s7string_value)])
+    add(False, dt(s7p_frame(S7P_PDUTYPE_DATA, s7p_envelope(S7P_OPCODE_RESPONSE, S7P_FC_GETMULTIVAR, 11,
+                                                             req_i))))
+
+    # ---------------------------------------------------------------------------------------------
+    # Separate flow: a telegram missing its trailer -- S7comm-Plus's own above-COTP fragmentation
+    # signal (not COTP's own EOT bit), NOT reassembled by this decoder -- reported as such rather
+    # than guessed at. Own port pair so it can't interact with the main flow's reassembly state.
+    # ---------------------------------------------------------------------------------------------
+    frag_port = 50301
+    full_body = s7p_envelope(S7P_OPCODE_REQUEST, S7P_FC_GETMULTIVAR, 12,
+                              s7p_getmultivar_request([s7p_item_symbolic(0x1, 0x52)]),
+                              session_id=0x1001, integrity=False)
+    partial = full_body[: len(full_body) // 2]
+    frag = s7p_frame_no_trailer(S7P_PDUTYPE_DATA, partial, declared_full_length=len(full_body))
+    tcp_frag = tcp_header(frag_port, PLC_PORT, 100, 200, TCP_PSH | TCP_ACK, len(dt(frag))) + dt(frag)
+    ip_frag = ipv4_header(ENG_IP, PLC_IP, 6, len(tcp_frag), 0x8100) + tcp_frag
+    packets.append(eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip_frag)
+
+    # ---------------------------------------------------------------------------------------------
+    # Separate flow: a completely truncated (<4 byte) telegram -- too short even for the fixed
+    # header, so try_parse_s7comm_plus throws ParseError, surfaced via the decoder's outer
+    # catch(ParseError) as protocol="parse-error" rather than a partial S7comm-Plus decode.
+    # ---------------------------------------------------------------------------------------------
+    trunc_port = 50302
+    trunc = bytes([0x72, S7P_PDUTYPE_DATA])  # only 2 of the required 4 header bytes
+    tcp_trunc = tcp_header(trunc_port, PLC_PORT, 100, 200, TCP_PSH | TCP_ACK, len(dt(trunc))) + dt(trunc)
+    ip_trunc = ipv4_header(ENG_IP, PLC_IP, 6, len(tcp_trunc), 0x8200) + tcp_trunc
+    packets.append(eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip_trunc)
+
+    # ---------------------------------------------------------------------------------------------
+    # Separate flow: a Keep Alive on a TCP session where NEITHER port is 102 (or any
+    # --s7comm-port addition) -- exercises the "not a configured/standard COTP/S7comm port" note.
+    # ---------------------------------------------------------------------------------------------
+    other_port_a, other_port_b = 50303, 50304
+    ka = tpkt_frame(COTP_DT_HEADER, s7p_keepalive(1))
+    tcp_ka = tcp_header(other_port_a, other_port_b, 100, 200, TCP_PSH | TCP_ACK, len(ka)) + ka
+    ip_ka = ipv4_header(ENG_IP, PLC_IP, 6, len(tcp_ka), 0x8300) + tcp_ka
+    packets.append(eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip_ka)
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_030_000 + i, i * 1000)
+    (TESTS_DIR / "sample_s7commplus.pcap").write_bytes(data)
+
+
 def build_mms_sample():
     """IEC 61850 MMS (ISO 9506) over the same TPKT/COTP transport S7comm shares -- see mms.hpp's own
     file header for the full Session/Presentation/ACSE/MMS layer stack this exercises. Covers: a
@@ -4734,6 +5263,7 @@ if __name__ == "__main__":
     build_s7comm_items_sample()
     build_s7comm_1200sym_sample()
     build_s7comm_chaining_sample()
+    build_s7commplus_sample()
     build_mms_sample()
     build_mqtt_sample()
     build_policy_engine_sample()

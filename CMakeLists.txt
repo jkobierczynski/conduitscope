@@ -40,6 +40,7 @@ add_library(conduitscope_core STATIC
   src/opcua.cpp
   src/cotp.cpp
   src/s7comm.cpp
+  src/s7commplus.cpp
   src/mms.cpp
   src/mqtt.cpp
   src/decoder.cpp
@@ -2298,13 +2299,81 @@ add_test(NAME real_s7comm_read_db1dbd0_eot_chaining_note
 set_tests_properties(real_s7comm_read_db1dbd0_eot_chaining_note PROPERTIES
   PASS_REGULAR_EXPRESSION "reassembled a COTP/S7comm message from 24 user-data byte\\(s\\) chained across 2 complete TPKT/COTP frames")
 
-# A capture named after S7-1500 HMI traffic that turns out to be S7comm-Plus,
-# not classic S7comm -- regression guard that the S7comm-Plus detection stub
-# fires correctly on real traffic, not just the one it was written against.
-add_test(NAME real_s7comm_plus_detected_not_decoded
+# Real-world S7comm-Plus (0x72) traffic -- two captures named after S7-1500 HMI/OPC
+# traffic that turn out to be S7comm-Plus, not classic S7comm (see ATTRIBUTION.md's
+# S7comm-Plus addendum for what each file actually contains once decoded). These are
+# the same two files that, before full S7comm-Plus decoding existed, only exercised
+# the old "detected, not decoded" stub -- now used to validate the real Tier-1
+# decoder (GetMultiVariables/SetMultiVariables/DeleteObject) against genuine
+# TIA Portal wire traffic, not just the synthetic fixture.
+add_test(NAME real_s7comm_plus_db3_var1_hmi_getmultivar_request_item_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/s7comm/s7comm_plus_1511_db3_var1_hmi.pcap" --format json)
+set_tests_properties(real_s7comm_plus_db3_var1_hmi_getmultivar_request_item_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"summary\": \"Data: Request GetMultiVariables \\(seq=19\\) \\(1 item\\(s\\)\\)\",.*\"s7plus_items\": \\[\"SYM-CRC=a9bc66e6, LID=DB3.10\"\\]")
+
+add_test(NAME real_s7comm_plus_db3_var1_hmi_getmultivar_response_value_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/s7comm/s7comm_plus_1511_db3_var1_hmi.pcap" --format json)
+set_tests_properties(real_s7comm_plus_db3_var1_hmi_getmultivar_response_value_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"summary\": \"Data: Response GetMultiVariables \\(seq=4\\) \\(1 value\\(s\\)\\)\",.*\"s7plus_return_code_name\": \"OK\",.*\"s7plus_values\": \\[\"item=1: \\(Byte\\) = 0x02\"\\],.*\"s7plus_integrity_digest_present\": true")
+
+add_test(NAME real_s7comm_plus_db3_var1_hmi_deleteobject_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/s7comm/s7comm_plus_1511_db3_var1_hmi.pcap" --format json)
+set_tests_properties(real_s7comm_plus_db3_var1_hmi_deleteobject_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"summary\": \"Data: Request DeleteObject \\(seq=12\\) \\(1 item\\(s\\)\\)\",.*\"s7plus_items\": \\[\"Delete Object Id=0x0000038a\"\\]")
+
+# SetMultiVariables carrying a genuinely nested Struct-of-Struct value (id=1803/1804 each a
+# nested Struct with a Blob member) plus a WString -- the richest single value this real
+# capture exercises, and the only real-world confirmation this decoder's recursive
+# decode_value_element has of struct nesting actually working end to end.
+add_test(NAME real_s7comm_plus_db3_var1_hmi_setmultivar_nested_struct_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/s7comm/s7comm_plus_1511_db3_var1_hmi.pcap" --format json)
+set_tests_properties(real_s7comm_plus_db3_var1_hmi_setmultivar_nested_struct_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "Data: Request SetMultiVariables.*\\(WString\\) = \\\\\"1;6ES7 511-1AK00-0AB0;V1.0\\\\\".*id=1803: \\(Struct\\) Struct \\{ id=1826: \\(ULInt\\).*id=1805: \\(Blob\\) = ")
+
+add_test(NAME real_s7comm_plus_db3_var1_hmi_setmultivar_response_ok
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/s7comm/s7comm_plus_1511_db3_var1_hmi.pcap" --format text)
-set_tests_properties(real_s7comm_plus_detected_not_decoded PROPERTIES
-  PASS_REGULAR_EXPRESSION "S7comm-Plus \\(TIA Portal S7-1200/1500 protocol\\) detected, not decoded")
+set_tests_properties(real_s7comm_plus_db3_var1_hmi_setmultivar_response_ok PROPERTIES
+  PASS_REGULAR_EXPRESSION "Data: Response SetMultiVariables \\(seq=2\\)")
+
+# Connect (session handshake, PDU type 0x01) and GetVarSubStreamed remain Tier-2 (named, not
+# body-decoded) -- regression guard that both are still correctly recognized on real traffic.
+add_test(NAME real_s7comm_plus_db3_var1_hmi_connect_recognized_not_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/s7comm/s7comm_plus_1511_db3_var1_hmi.pcap" --format text)
+set_tests_properties(real_s7comm_plus_db3_var1_hmi_connect_recognized_not_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[s7comm-plus\\]  Connect\n *note: Connect PDU \\(session establishment handshake\\) is recognized but not decoded")
+
+add_test(NAME real_s7comm_plus_db3_var1_hmi_getvarsubstreamed_recognized_not_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/s7comm/s7comm_plus_1511_db3_var1_hmi.pcap" --format text)
+set_tests_properties(real_s7comm_plus_db3_var1_hmi_getvarsubstreamed_recognized_not_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "GetVarSubStreamed request body is recognized but not decoded.*GetVarSubStreamed response body is recognized but not decoded")
+
+# Above-COTP reassembly (trailer-absence based, not COTP's own EOT bit) confirmed on real
+# TIA Portal traffic, not just the synthetic fixture.
+add_test(NAME real_s7comm_plus_db3_var1_hmi_above_cotp_reassembly_note
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/s7comm/s7comm_plus_1511_db3_var1_hmi.pcap" --format text)
+set_tests_properties(real_s7comm_plus_db3_var1_hmi_above_cotp_reassembly_note PROPERTIES
+  PASS_REGULAR_EXPRESSION "reassembled a COTP/S7comm message from 419 user-data byte\\(s\\) chained across 2 complete TPKT/COTP frames")
+
+# The "opc_request_all_types" capture's name matches its content: a single 40-item
+# GetMultiVariables request/response pair that walks nearly every S7comm-Plus datatype this
+# decoder knows (Bool/USInt/Byte/Word/UDInt/UInt/DInt/DWord/Int/Timestamp/LInt/LReal/Timespan/
+# ULInt/LWord/Real/SInt, plus USInt arrays) -- by far the richest real-world datatype coverage
+# either capture provides, and the main reason to keep this file distinct from db3_var1_hmi
+# rather than only testing one of the two.
+add_test(NAME real_s7comm_plus_opc_all_types_getmultivar_40_items_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/s7comm/s7comm_plus_1511_opc_request_all_types.pcap" --format json)
+set_tests_properties(real_s7comm_plus_opc_all_types_getmultivar_40_items_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"summary\": \"Data: Response GetMultiVariables \\(seq=9\\) \\(40 value\\(s\\)\\)\",.*item=22: \\(Timestamp\\) = 1970-01-01T00:00:00.000.000.000Z.*item=24: \\(LReal\\) = 0.000000.*item=25: \\(Timespan\\) = 0 ns.*item=31: \\(USInt\\) Array\\[256\\]")
+
+# Regression guard: neither real S7comm-Plus capture should ever produce a per-item decode
+# error (S7CommPlusItemError) or a ParseError-triggered "decoding stopped" note -- both
+# real files decode cleanly end to end with this implementation.
+foreach(s7plus_capture s7comm_plus_1511_db3_var1_hmi s7comm_plus_1511_opc_request_all_types)
+  add_test(NAME real_${s7plus_capture}_no_item_errors
+    COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/s7comm/${s7plus_capture}.pcap" --format json)
+  set_tests_properties(real_${s7plus_capture}_no_item_errors PROPERTIES
+    FAIL_REGULAR_EXPRESSION "s7plus_item_errors|decoding stopped")
+endforeach()
 
 # Real 0xB2 (1200SYM) traffic: structural decode must still succeed (no
 # "unrecognized area1"/"multi-LID" fallback), matching what held across the
@@ -3002,6 +3071,163 @@ add_test(NAME s7comm_chaining_disconnect_abandons_reassembly
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_chaining.pcap" --format text)
 set_tests_properties(s7comm_chaining_disconnect_abandons_reassembly PROPERTIES
   PASS_REGULAR_EXPRESSION "a Disconnect Request \\(DR\\) frame arrived on this TCP flow while a COTP/S7comm fragment reassembly was still in progress \\(21 byte\\(s\\) buffered across 1 frame\\(s\\)\\) -- the earlier, incomplete fragment is abandoned")
+
+# --------------------------------------------------------------------------
+# S7comm-Plus (0x72) -- tests/sample_s7commplus.pcap, see tools/make_sample_pcap.py's own
+# build_s7commplus_sample() docstring for the full scenario list. Validated against real TIA
+# Portal traffic too -- see the real_s7comm_plus_* cases above and
+# tests/real_captures/s7comm/ATTRIBUTION.md's own S7comm-Plus addendum.
+# --------------------------------------------------------------------------
+
+# GetMultiVariables request: all five item-address shapes decode_item_address branches on, in one
+# request -- symbolic Merker (no extra LID), symbolic DB with a nested LID, an unrecognized IQMCT
+# area code, a wholly unrecognized area1/area2 pair, and object-ID-style addressing.
+add_test(NAME s7commplus_getmultivar_request_item_address_shapes
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7commplus.pcap" --format json)
+set_tests_properties(s7commplus_getmultivar_request_item_address_shapes PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"summary\": \"Data: Request GetMultiVariables \\(seq=1\\) \\(5 item\\(s\\)\\)\",.*\"s7plus_items\": \\[\"SYM-CRC=ea2db0d9, LID=M\", \"SYM-CRC=a9bc66e6, LID=DB5.10\", \"SYM-CRC=11111111, LID=Unknown IQMCT area 0x0099\", \"SYM-CRC=22222222, LID=Unknown area 0x1234/0x5678\", \"by IDs: RID=100, ID=500, ID=7\"\\]")
+
+# GetMultiVariables response: scalar Int, Array of (signed varint) DInt, Addressarray of UInt,
+# Sparsearray of Byte, a genuinely nested Struct-of-Struct with a WString leaf, LReal, Timestamp,
+# Timespan, Blob, and a per-item error -- effectively every datatype/array-kind this decoder
+# supports in one response.
+add_test(NAME s7commplus_getmultivar_response_all_datatype_shapes
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7commplus.pcap" --format json)
+set_tests_properties(s7commplus_getmultivar_response_all_datatype_shapes PROPERTIES
+  PASS_REGULAR_EXPRESSION "item=1: \\(Int\\) = -1234.*item=2: \\(DInt\\) Array\\[3\\] = \\[1, 2, -3\\].*item=3: \\(UInt\\) Addressarray\\[2\\] = \\[10, 20\\].*item=4: \\(Byte\\) Sparsearray = \\[0xaa, 0xbb\\].*id=315: \\(UDInt\\) = 320; id=316: \\(Struct\\) Struct \\{ id=1826: \\(ULInt\\) = 123456789; id=1827: \\(UDInt\\) = 42 \\}; id=317: \\(WString\\) = .V1.0;6ES7 511-1AK00-0AB0.*item=6: \\(LReal\\) = 3.141593.*item=7: \\(Timestamp\\) = 2024-09-10T20:26:40.*item=8: \\(Timespan\\) = 1500000000 ns.*item=9: \\(Blob\\) = 000102030405.*item=10: Object not found \\(-12\\)")
+
+add_test(NAME s7commplus_getmultivar_response_integrity_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7commplus.pcap" --format json)
+set_tests_properties(s7commplus_getmultivar_response_integrity_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"summary\": \"Data: Response GetMultiVariables \\(seq=1\\) \\(9 value\\(s\\)\\)\",.*\"s7plus_integrity_digest_present\": true")
+
+# GetMultiVariables request/response via the "subscribed link" item-number path (link_id != 0) --
+# a materially different request shape from the item-address list above.
+add_test(NAME s7commplus_getmultivar_subscribed_link_request
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7commplus.pcap" --format json)
+set_tests_properties(s7commplus_getmultivar_subscribed_link_request PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"s7plus_items\": \\[\"by subscribed Link-Id=42, ID=1\", \"by subscribed Link-Id=42, ID=2\", \"by subscribed Link-Id=42, ID=3\"\\]")
+
+add_test(NAME s7commplus_getmultivar_subscribed_link_response
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7commplus.pcap" --format json)
+set_tests_properties(s7commplus_getmultivar_subscribed_link_response PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"s7plus_values\": \\[\"item=1: \\(Bool\\) = 0x01\", \"item=2: \\(Bool\\) = 0x00\", \"item=3: \\(USInt\\) = 7\"\\]")
+
+# SetMultiVariables -- marker==0 (native symbolic item-address) request shape, and its response.
+add_test(NAME s7commplus_setmultivar_marker0_request
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7commplus.pcap" --format json)
+set_tests_properties(s7commplus_setmultivar_marker0_request PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"s7plus_items\": \\[\"SYM-CRC=deadbeef, LID=M\", \"SYM-CRC=cafef00d, LID=DB5.20\"\\],.*\"s7plus_values\": \\[\"id=1: \\(Real\\) = 98.599998\", \"id=2: \\(DWord\\) = 0xdeadbeef\"\\]")
+
+add_test(NAME s7commplus_setmultivar_marker0_response_ok
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7commplus.pcap" --format text)
+set_tests_properties(s7commplus_setmultivar_marker0_response_ok PROPERTIES
+  PASS_REGULAR_EXPRESSION "Data: Response SetMultiVariables \\(seq=3\\)")
+
+# SetMultiVariables -- marker!=0 (object-ID) request shape, and a response carrying a genuine
+# per-item write failure (Invalid CRC), not just success.
+add_test(NAME s7commplus_setmultivar_marker_object_id_request
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7commplus.pcap" --format json)
+set_tests_properties(s7commplus_setmultivar_marker_object_id_request PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"s7plus_items\": \\[\"in Object Id=0x00000388, ID=306\", \"in Object Id=0x00000388, ID=305\"\\]")
+
+add_test(NAME s7commplus_setmultivar_response_item_error
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7commplus.pcap" --format json)
+set_tests_properties(s7commplus_setmultivar_response_item_error PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"s7plus_item_errors\": \\[\"item=2: Invalid CRC \\(-17\\)\"\\]")
+
+# SetVariable and DeleteObject request/response pairs -- DeleteObject's response side is only
+# validated here (the real captures never showed one, only the request -- see ATTRIBUTION.md).
+add_test(NAME s7commplus_setvariable_request_response
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7commplus.pcap" --format json)
+set_tests_properties(s7commplus_setvariable_request_response PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"s7plus_items\": \\[\"SetVariable in Object Id=0x00000390\"\\],.*\"s7plus_values\": \\[\"id=1: \\(Bool\\) = 0x01\"\\].*Data: Response SetVariable \\(seq=5\\)")
+
+add_test(NAME s7commplus_deleteobject_request_response
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7commplus.pcap" --format json)
+set_tests_properties(s7commplus_deleteobject_request_response PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"summary\": \"Data: Request DeleteObject \\(seq=6\\) \\(1 item\\(s\\)\\)\",.*\"s7plus_items\": \\[\"Delete Object Id=0x0000039a\"\\].*\"summary\": \"Data: Response DeleteObject \\(seq=6\\) \\(1 item\\(s\\)\\)\",.*\"s7plus_return_code_name\": \"OK\",.*\"s7plus_items\": \\[\"Delete Object Id=0x0000039a\"\\]")
+
+# Tier-2 (named, not body-decoded) shapes: Connect (both directions), Notification, DataFW1_5
+# (header-only decode), and an "other" function code (Explore) neither direction decodes.
+add_test(NAME s7commplus_connect_both_directions_not_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7commplus.pcap" --format text)
+set_tests_properties(s7commplus_connect_both_directions_not_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[s7comm-plus\\]  Connect\n *note: Connect PDU.*\\[s7comm-plus\\]  Connect\n *note: Connect PDU")
+
+add_test(NAME s7commplus_notification_not_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7commplus.pcap" --format text)
+set_tests_properties(s7commplus_notification_not_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "Data: Notification\n *note: Notification body \\(subscribed/cyclic variable updates\\) is recognized but not decoded")
+
+add_test(NAME s7commplus_datafw1_5_header_only
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7commplus.pcap" --format text)
+set_tests_properties(s7commplus_datafw1_5_header_only PROPERTIES
+  PASS_REGULAR_EXPRESSION "DataFW1_5 \\(24 byte\\(s\\) data, not decoded\\)\n *note: DataFW1_5 PDU \\(firmware >= V1.5\\) moves its Integrity part")
+
+add_test(NAME s7commplus_other_function_code_not_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7commplus.pcap" --format text)
+set_tests_properties(s7commplus_other_function_code_not_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "Explore request body is recognized but not decoded.*Explore response body is recognized but not decoded")
+
+# Keep Alive: its own distinct 4-byte header-only framing, no Data part, no trailer.
+add_test(NAME s7commplus_keepalive_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7commplus.pcap" --format text)
+set_tests_properties(s7commplus_keepalive_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[s7comm-plus\\]  Keep Alive \\(seq=9\\)")
+
+# Edge cases exercising the Data part's own try/catch -- both must degrade to a clear note, never
+# a crash or a silently wrong decode. The array-of-Struct case is a regression guard for a real
+# bug this project's own code review caught (and fixed) before this decoder was ever built.
+add_test(NAME s7commplus_array_of_struct_rejected
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7commplus.pcap" --format text)
+set_tests_properties(s7commplus_array_of_struct_rejected PROPERTIES
+  PASS_REGULAR_EXPRESSION "S7comm-Plus Data part decoding stopped: an array of Struct values was encountered -- this decoder does not support delimiting per-element nested member lists")
+
+add_test(NAME s7commplus_unrecognized_datatype_s7string_rejected
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7commplus.pcap" --format text)
+set_tests_properties(s7commplus_unrecognized_datatype_s7string_rejected PROPERTIES
+  PASS_REGULAR_EXPRESSION "S7comm-Plus Data part decoding stopped: unrecognized S7comm-Plus value datatype 0x19")
+
+# A telegram missing its trailer -- S7comm-Plus's own above-COTP fragmentation signal (NOT COTP's
+# own EOT bit), which this decoder does not reassemble across, only reports.
+add_test(NAME s7commplus_missing_trailer_fragment_noted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7commplus.pcap" --format text)
+set_tests_properties(s7commplus_missing_trailer_fragment_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "Data \\(fragment, awaiting further data\\)\n *note: S7comm-Plus telegram has no trailer in this frame -- it continues in a further TPKT/COTP frame")
+
+# A telegram too short even for the fixed 4-byte header -- surfaced via the decoder's outer
+# catch(ParseError) as protocol=parse-error, not a partial/guessed S7comm-Plus decode.
+add_test(NAME s7commplus_truncated_header_is_parse_error
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7commplus.pcap" --format text)
+set_tests_properties(s7commplus_truncated_header_is_parse_error PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[parse-error\\]  could not parse packet: S7comm-Plus header is truncated \\(need 4 bytes, have 2\\)")
+
+# A session on a TCP port pair that is neither 102 nor a configured --s7comm-port addition.
+add_test(NAME s7commplus_unexpected_port_noted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7commplus.pcap" --format text)
+set_tests_properties(s7commplus_unexpected_port_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "seen on TCP port 50303->50304, which is not a configured/standard COTP/S7comm port \\(102\\)")
+
+add_test(NAME s7commplus_does_not_crash
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7commplus.pcap" --format json)
+
+add_test(NAME s7commplus_csv_does_not_crash
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7commplus.pcap" --format csv)
+
+add_test(NAME s7commplus_stats_counted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7commplus.pcap" --stats)
+set_tests_properties(s7commplus_stats_counted PROPERTIES
+  PASS_REGULAR_EXPRESSION "s7comm-plus")
+
+# Regression guard for a documented custom --protocol/policy-validate value: "s7comm-plus" must be
+# accepted, and --stats confirms the full PDU-type/function/Tier-1 breakdown this fixture is meant
+# to exercise (note: the COTP Connection Request/Confirm frames still show up as their own "cotp"
+# protocol -- COTP-level framing is always surfaced, matching classic S7comm/MMS's own filters).
+add_test(NAME s7commplus_protocol_filter
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7commplus.pcap" --protocol s7comm-plus --stats)
+set_tests_properties(s7commplus_protocol_filter PROPERTIES
+  PASS_REGULAR_EXPRESSION "protocols:\n *cotp +2\n *parse-error +1\n *s7comm-plus +23\ns7comm-plus pdu types:\n *Connect +2\n *Data +18\n *DataFW1_5 +1\n *Keep Alive +2\ns7comm-plus functions:\n *DeleteObject +2\n *Explore +2\n *GetMultiVariables +6\n *SetMultiVariables +4\n *SetVariable +2\ns7comm-plus function bodies fully decoded \\(Tier 1\\): 12")
 
 # Regression guard for a real false positive: non-Modbus traffic (here, bytes that also happen
 # to satisfy DNP3's 0x05 0x64 start) whose first four bytes look like transaction_id + a valid

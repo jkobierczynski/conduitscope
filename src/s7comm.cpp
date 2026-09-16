@@ -536,18 +536,15 @@ std::optional<S7CommFrame> try_parse_s7comm(ByteSpan cotp_user_data) {
         return std::nullopt;
     }
     uint8_t protocol_id = cotp_user_data.at(0);
-    if (protocol_id != S7COMM_PROTOCOL_ID && protocol_id != S7COMM_PLUS_PROTOCOL_ID) {
-        return std::nullopt;  // not S7comm at all -- some other protocol inside this COTP Data frame
+    if (protocol_id != S7COMM_PROTOCOL_ID) {
+        // Not classic S7comm. Note this deliberately also excludes S7COMM_PLUS_PROTOCOL_ID
+        // (0x72) -- S7comm-Plus is a wholly different application protocol that merely shares
+        // this same COTP Data / TCP port 102 transport; see s7commplus.hpp/try_parse_s7comm_plus,
+        // called separately from decoder.cpp, for that decode.
+        return std::nullopt;
     }
 
     S7CommFrame frame;
-
-    if (protocol_id == S7COMM_PLUS_PROTOCOL_ID) {
-        frame.is_plus = true;
-        frame.summary = "S7comm-Plus (TIA Portal S7-1200/1500 protocol) detected, not decoded in this "
-                         "groundwork release";
-        return frame;
-    }
 
     // Fixed header: protocol_id(1) + rosctr(1) + redundancy(2) + pdu_ref(2) +
     // param_len(2) + data_len(2) = 10 bytes total.

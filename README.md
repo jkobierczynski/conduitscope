@@ -1,7 +1,8 @@
 # conduitscope
 
 `conduitscope` decodes Modbus/TCP, DNP3, IEC 60870-5-104, S7comm/COTP (Siemens S7 PLC
-protocol), EtherNet/IP (CIP explicit and implicit messaging), PROFINET RT (DCP device
+protocol) and S7comm-Plus (Siemens TIA Portal / S7-1200/1500's newer protocol),
+EtherNet/IP (CIP explicit and implicit messaging), PROFINET RT (DCP device
 discovery/configuration and cyclic real-time I/O data), IEC 61850-8-1 GOOSE,
 IEC 61850-9-2 Sampled Values, EtherCAT, BACnet/IP, HART-IP, OPC UA Binary
 (UA-TCP/Secure Conversation), IEC 61850 MMS (Manufacturing Message Specification,
@@ -121,8 +122,10 @@ Groundwork / v0.1.0. What works right now:
   `I0.0`, `MB50`, `T5`), plus the returned/written values. S7-1200/1500
   "symbolic" addressing (`0xB2`) -- confirmed to be common in real traffic --
   also gets a tag, but via an **experimental, unverified** reconstruction
-  clearly marked as such everywhere it appears; S7comm-Plus is a documented
-  stub. A single S7comm message that doesn't fit one negotiated PDU length
+  clearly marked as such everywhere it appears; S7comm-Plus (the newer,
+  TIA-Portal-native protocol sharing this same transport) is now fully
+  decoded too -- see its own bullet below. A single S7comm message that
+  doesn't fit one negotiated PDU length
   and gets chained across multiple complete TPKT/COTP frames (via COTP's own
   EOT bit) is reassembled into one logical message before decoding, not just
   the first frame's bytes -- real captures confirm the reassembly itself is
@@ -485,6 +488,54 @@ Groundwork / v0.1.0. What works right now:
   (this is the one gap honestly documented, not swept under the rug) -- see
   tests/real_captures/mqtt/ATTRIBUTION.md for the full writeup and
   include/conduitscope/mqtt.hpp for the wire-format details.
+- S7comm-Plus (Siemens TIA Portal / S7-1200/1500's newer, object-oriented
+  protocol), over the same TPKT/COTP transport and TCP port 102 classic
+  S7comm and MMS share, disambiguated by its own protocol id byte (`0x72` vs
+  classic S7comm's `0x32`): unlike every other protocol this codebase
+  supports, S7comm-Plus has never been officially published by Siemens --
+  no standards document, no ASN.1 module -- so every byte-layout fact this
+  decoder asserts is sourced from the open-source Wireshark plugin
+  `packet-s7comm_plus.c` (Thomas Wiens, the same author as classic S7comm's
+  own mainline dissector), itself the product of years of community
+  reverse-engineering; that honesty (including a couple of the original
+  German source comments' own hedges, "seems to be", "currently unknown")
+  is carried through rather than rounded up to false confidence. A two-tier
+  split, same posture as MMS/OPC UA above: GetMultiVariables/
+  SetMultiVariables (TIA Portal's functional replacement for classic
+  S7comm's Read Var/Write Var, and what dominates real traffic),
+  SetVariable, and DeleteObject are fully decoded in both directions,
+  including the protocol's own native symbolic item addressing (a CRC-like
+  hash of the compiled symbol name plus a chain of struct/array-member
+  "LID" values -- genuinely native, unlike classic S7comm's own
+  EXPERIMENTAL `0xB2` reconstruction, though a LID's/CRC's *symbolic
+  meaning* is inherently unresolvable without TIA Portal's own project
+  database, same class of limitation as DNP3/OPC UA point indices) and the
+  self-describing `Value` encoding (20+ datatypes, INCLUDING recursively
+  nested STRUCT values -- confirmed against real Struct-of-Struct traffic,
+  not just a synthetic fixture). Connect (session handshake), Notification
+  (the cyclic/subscribed-variable feed), CreateObject, Explore, GetLink,
+  BeginSequence/EndSequence, Invoke, and GetVarSubStreamed are all
+  recognized and named but not body-decoded; DataFW1_5 (firmware >= V1.5)
+  gets header-only decode, a deliberately more conservative scope cut after
+  this decoder could not independently confirm the reference plugin's own
+  byte-accounting for where that variant's body actually starts. Checksums/
+  digests (the Integrity part's SHA-256-sized value) are surfaced, never
+  verified, same posture as DNP3/HART-IP. Two real S7-1511 captures --
+  originally added to this project only to validate the old "detected, not
+  decoded" stub -- were re-decoded once full support existed: real HMI
+  traffic exercising GetMultiVariables/SetMultiVariables/DeleteObject
+  Tier-1 decoding (including a genuinely nested Struct-of-Struct-with-Blob
+  value) and Connect/GetVarSubStreamed Tier-2 recognition, plus a
+  40-item-in-one-request "all types" capture walking nearly every datatype
+  this decoder knows -- zero per-item decode errors in either file. This
+  project's own code review (not real-capture validation) caught two
+  genuine correctness bugs before this decoder was ever built or tested: an
+  array-of-Struct value that this decoder cannot safely delimit per-element
+  (now a deliberate, explicit refusal rather than a silent misalignment
+  risk) and an unsigned-integer-underflow risk in a truncated-frame length
+  calculation. See tests/real_captures/s7comm/ATTRIBUTION.md's own
+  S7comm-Plus addendum and include/conduitscope/s7commplus.hpp for the
+  wire-format details.
 - Non-IPv4 Ethernet frames and non-TCP IPv4 payloads (including UDP) are now
   recognized and named, not just reported as a bare hex/number and dropped:
   ARP, LLDP, PTP, MPLS, and stacked-VLAN (802.1ad/QinQ) EtherTypes; ICMP,

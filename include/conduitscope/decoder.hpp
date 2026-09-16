@@ -25,6 +25,7 @@
 #include "conduitscope/opcua.hpp"
 #include "conduitscope/pcap_reader.hpp"
 #include "conduitscope/profinet.hpp"
+#include "conduitscope/s7commplus.hpp"
 #include "conduitscope/sv.hpp"
 #include "conduitscope/tcp.hpp"
 
@@ -46,6 +47,7 @@ enum class ProtocolFilter {
     OpcUaOnly,    // only attempt OPC UA (UA-TCP / Secure Conversation) decoding
     MmsOnly,      // only attempt TPKT/COTP/IEC 61850 MMS decoding
     MqttOnly,     // only attempt MQTT (v3.1.1/v5.0) / Sparkplug B decoding
+    S7commPlusOnly,  // only attempt TPKT/COTP/S7comm-Plus decoding
 };
 
 struct DecodeOptions {
@@ -60,7 +62,8 @@ struct DecodeOptions {
     // zone policy.
     std::vector<uint16_t> extra_modbus_ports;
     std::vector<uint16_t> extra_dnp3_ports;
-    std::vector<uint16_t> extra_s7comm_ports;
+    std::vector<uint16_t> extra_s7comm_ports;  // also governs S7comm-Plus and MMS "expected port"
+                                                 // annotations -- all three share TCP port 102
     std::vector<uint16_t> extra_iec104_ports;
     std::vector<uint16_t> extra_enip_ports;
     std::vector<uint16_t> extra_enip_io_ports;  // UDP, unlike extra_enip_ports (TCP) -- see ENIP_IO_UDP_PORT
@@ -99,7 +102,7 @@ struct DecodedPacket {
     std::string tcp_flags;
 
     // "iec104", "modbus", "dnp3", "s7comm", "enip", "profinet", "goose", "sv", "ethercat", "bacnet",
-    // "hartip", "opcua", "mms", "mqtt", "cotp"
+    // "hartip", "opcua", "mms", "mqtt", "s7comm-plus", "cotp"
     // (recognized TPKT/COTP framing but not S7comm inside it -- e.g. a connection setup frame),
     // "tcp" (recognized transport, no app-layer match), "udp" (recognized transport, no app-layer
     // protocol decoded -- see udp.hpp; UDP/2222 CIP I/O traffic that try_parse_cip_io actually
@@ -148,6 +151,50 @@ struct DecodedPacket {
     // value or return code (e.g. "0004" for a 2-byte value, "Success", "Object does not exist").
     // Same 50-entry cap as s7comm_item_tags.
     std::vector<std::string> s7comm_value_summaries;
+
+    // Only set when protocol == "s7comm-plus" -- see s7commplus.hpp/try_parse_s7comm_plus. A
+    // DIFFERENT, independent application protocol from classic S7comm above despite the shared
+    // "s7comm" name and TCP port 102/TPKT/COTP transport -- kept as its own "protocol" value
+    // (not an s7comm variant flag) for the same reason MMS is its own protocol value despite
+    // sharing that transport too.
+    std::string s7plus_pdu_type_name;  // "Connect", "Data", "DataFW1_5", "Keep Alive" -- always
+                                         // set when protocol == "s7comm-plus"
+    bool s7plus_is_keepalive = false;
+    uint8_t s7plus_keepalive_seq = 0;   // only meaningful when s7plus_is_keepalive
+    bool s7plus_has_opcode = false;
+    std::string s7plus_opcode_name;     // "Request"/"Response"/"Notification"/"Response2"
+    bool s7plus_has_function = false;
+    uint16_t s7plus_function_code = 0;
+    std::string s7plus_function_name;   // e.g. "GetMultiVariables", or "Unknown (0xNNNN)"
+    bool s7plus_has_sequence_number = false;
+    uint16_t s7plus_sequence_number = 0;
+    bool s7plus_has_session_id = false;  // Request telegrams only
+    uint32_t s7plus_session_id = 0;
+    // True only for the Tier-1 functions this decoder fully decodes (GetMultiVariables,
+    // SetMultiVariables, SetVariable, DeleteObject) -- see s7commplus.hpp's file header for the
+    // full Tier-1/Tier-2 split and why. False means the function code was still named (see
+    // s7plus_function_name) but its body is shown only via `notes`, same "named but not decoded"
+    // convention as MMS's other 67 services or OPC UA's Tier 2 services.
+    bool s7plus_body_decoded = false;
+    bool s7plus_has_return_value = false;
+    int16_t s7plus_return_code = 0;
+    std::string s7plus_return_code_name;
+    // Item addresses (GetMultiVariables/SetMultiVariables requests, SetVariable/DeleteObject) --
+    // S7comm-Plus's own native symbolic (CRC+LID) or object-id addressing, see
+    // S7CommPlusItemAddress::tag in s7commplus.hpp. Capped at 50 entries, same reason as
+    // s7comm_item_tags above.
+    std::vector<std::string> s7plus_item_tags;
+    // Decoded {id, value} pairs -- response values (GetMultiVariables), or values being written
+    // (SetMultiVariables/SetVariable requests). Same 50-entry cap.
+    std::vector<std::string> s7plus_value_summaries;
+    // Per-item status from a GetMultiVariables/SetMultiVariables response's own errorvalue-list.
+    // Same 50-entry cap.
+    std::vector<std::string> s7plus_item_errors;
+    bool s7plus_has_integrity = false;
+    bool s7plus_integrity_digest_present = false;  // false for the DataFW1_5 id-only shape (not
+                                                      // decoded in this release) or a short digest
+    uint8_t s7plus_integrity_digest_length = 0;      // expected 32; digest bytes never verified
+    bool s7plus_has_trailer = false;
 
     // Only set when protocol == "dnp3" and this fragment's application layer was decoded (see
     // Dnp3ApplicationFragment::application_decoded in dnp3.hpp -- false for a fragment that spans

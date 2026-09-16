@@ -292,6 +292,8 @@ bool Decoder::reassemble_tcp_payload(const TcpSegment& tcp, const std::string& f
                        options_.protocol_filter == ProtocolFilter::OpcUaOnly;
     bool want_mqtt = options_.protocol_filter == ProtocolFilter::Auto ||
                       options_.protocol_filter == ProtocolFilter::MqttOnly;
+    bool want_s7commplus = options_.protocol_filter == ProtocolFilter::Auto ||
+                            options_.protocol_filter == ProtocolFilter::S7commPlusOnly;
 
     // OPC UA is checked first of all: its own structural detection gate (the leading 3 bytes must
     // be one of exactly 7 fixed ASCII MessageType strings -- "HEL"/"ACK"/"ERR"/"RHE"/"OPN"/"CLO"/
@@ -350,7 +352,7 @@ bool Decoder::reassemble_tcp_payload(const TcpSegment& tcp, const std::string& f
             which = "DNP3 data-link";
         }
     }
-    if (!declared && (want_s7comm || want_mms)) {
+    if (!declared && (want_s7comm || want_mms || want_s7commplus)) {
         if (auto d = tpkt_declared_length(candidate)) {
             declared = d;
             which = "TPKT/COTP";
@@ -1007,6 +1009,8 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                            options_.protocol_filter == ProtocolFilter::OpcUaOnly;
         bool want_mqtt = options_.protocol_filter == ProtocolFilter::Auto ||
                           options_.protocol_filter == ProtocolFilter::MqttOnly;
+        bool want_s7commplus = options_.protocol_filter == ProtocolFilter::Auto ||
+                                options_.protocol_filter == ProtocolFilter::S7commPlusOnly;
 
         // Tried first of all -- see the matching, fuller comment in reassemble_tcp_payload above
         // for why OPC UA's own magic-string detection gate is strong enough, and non-colliding
@@ -1358,7 +1362,7 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
             }
         }
 
-        if (want_s7comm || want_mms) {
+        if (want_s7comm || want_mms || want_s7commplus) {
             if (auto cotp = try_parse_tpkt_cotp(effective_payload)) {
                 bool expected_port = port_in(tcp.src_port, COTP_TCP_PORT, options_.extra_s7comm_ports) ||
                                       port_in(tcp.dst_port, COTP_TCP_PORT, options_.extra_s7comm_ports);
@@ -1437,6 +1441,55 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                                     out.s7comm_value_summaries.push_back("");
                                 }
                             }
+                            for (const auto& n : cotp->notes) out.notes.push_back(n);
+                            annotate_port();
+                            return out;
+                        }
+                    }
+
+                    // S7comm-Plus shares this exact TCP port 102 / TPKT+COTP transport with
+                    // classic S7comm and MMS, but is disambiguated by its own protocol id byte
+                    // (0x72 vs S7comm's 0x32) -- no collision risk with the S7comm check just
+                    // above, since a single leading byte can't match both. Tried here, before
+                    // MMS, purely for file-organization reasons (S7comm and S7comm-Plus are
+                    // conceptually "the same vendor's two generations", not because of any
+                    // detection-strength ordering need -- see s7commplus.hpp).
+                    if (want_s7commplus) {
+                        if (auto s7p = try_parse_s7comm_plus(s7_candidate)) {
+                            out.protocol = "s7comm-plus";
+                            out.summary = s7p->summary;
+                            for (const auto& n : s7p->notes) out.notes.push_back(n);
+                            out.s7plus_pdu_type_name = s7p->pdu_type_name;
+                            out.s7plus_is_keepalive = s7p->is_keepalive;
+                            out.s7plus_keepalive_seq = s7p->keepalive_seq;
+                            out.s7plus_has_opcode = s7p->has_data_part && !s7p->is_notification &&
+                                                     !s7p->opcode_name.empty();
+                            out.s7plus_opcode_name = s7p->opcode_name;
+                            out.s7plus_has_function = s7p->has_function;
+                            out.s7plus_function_code = s7p->function_code;
+                            out.s7plus_function_name = s7p->function_name;
+                            out.s7plus_has_sequence_number = s7p->has_sequence_number;
+                            out.s7plus_sequence_number = s7p->sequence_number;
+                            out.s7plus_has_session_id = s7p->has_session_id;
+                            out.s7plus_session_id = s7p->session_id;
+                            out.s7plus_body_decoded = s7p->body_decoded;
+                            out.s7plus_has_return_value = s7p->has_return_value;
+                            out.s7plus_return_code = s7p->return_code;
+                            out.s7plus_return_code_name = s7p->return_code_name;
+                            constexpr size_t kMaxTags = 50;
+                            for (size_t i = 0; i < s7p->item_addresses.size() && i < kMaxTags; ++i) {
+                                out.s7plus_item_tags.push_back(s7p->item_addresses[i].tag);
+                            }
+                            for (size_t i = 0; i < s7p->id_values.size() && i < kMaxTags; ++i) {
+                                out.s7plus_value_summaries.push_back(s7p->id_values[i].rendered);
+                            }
+                            for (size_t i = 0; i < s7p->item_errors.size() && i < kMaxTags; ++i) {
+                                out.s7plus_item_errors.push_back(s7p->item_errors[i].rendered);
+                            }
+                            out.s7plus_has_integrity = s7p->has_integrity;
+                            out.s7plus_integrity_digest_present = s7p->integrity_digest_present;
+                            out.s7plus_integrity_digest_length = s7p->integrity_digest_length;
+                            out.s7plus_has_trailer = s7p->has_trailer;
                             for (const auto& n : cotp->notes) out.notes.push_back(n);
                             annotate_port();
                             return out;

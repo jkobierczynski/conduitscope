@@ -1613,6 +1613,60 @@ The following fields appear only when `protocol` is `mms`:
   `File`/`DataSet`/`Template` value renders as `"<N byte(s), not decoded
   further>"` (Tier 2 scope -- see PROTOCOL COVERAGE); a null metric
   (`is_null=true`) renders its value as `null`.
+- `s7plus_pdu_type`: the S7comm-Plus header's own PDU type name
+  (`"Connect"`, `"Data"`, `"DataFW1_5"`, `"Keep Alive"`), always present
+  when `protocol` is `s7comm-plus`.
+- `s7plus_keepalive_seq`: the Keep Alive PDU's own 1-byte sequence number,
+  present only when `s7plus_pdu_type` is `"Keep Alive"`.
+- `s7plus_opcode`: `"Request"`/`"Response"`/`"Notification"`/`"Response2"`,
+  present when `s7plus_pdu_type` is `"Data"` (or `"DataFW1_5"`'s own -- no,
+  DataFW1_5's Data part is not decoded, so this is present only for `"Data"`)
+  and an opcode byte was reached.
+- `s7plus_function`: the function code's name (e.g. `"GetMultiVariables"`,
+  `"Unknown (0xNNNN)"` for an unrecognized code), present when a
+  Request/Response/Response2 envelope's function code field was reached
+  (i.e. not for a Notification, which carries no function code at all).
+- `s7plus_body_decoded`: `true`/`false`, present under the same condition as
+  `s7plus_function`. `true` only for the four Tier-1 functions
+  (GetMultiVariables/SetMultiVariables/SetVariable/DeleteObject) AND when
+  that decode actually ran to completion without falling back early (e.g.
+  an array-of-Struct or unrecognized-datatype value partway through still
+  leaves this `false`, even for a Tier-1 function -- see PROTOCOL COVERAGE
+  and LIMITATIONS).
+- `s7plus_sequence_number`: the envelope's own 2-byte sequence number,
+  correlating a request to its response within a session (alongside TCP
+  itself). Present under the same condition as `s7plus_function`.
+- `s7plus_session_id`: the Request envelope's own 4-byte session id.
+  Present only on a Request.
+- `s7plus_return_code` / `s7plus_return_code_name`: the ReturnValue's
+  low-16-bit signed error code, as a plain integer and its name (e.g. `0` /
+  `"OK"`, `-12` / `"Object not found"`). Present only on a Response/
+  Response2 body this decoder fully decoded (`s7plus_body_decoded: true`)
+  that carries a ReturnValue.
+- `s7plus_items`: an array of rendered item-address strings (e.g.
+  `"SYM-CRC=a9bc66e6, LID=DB3.10"`, `"Delete Object Id=0x0000038a"`, `"by
+  IDs: RID=100, ID=500, ID=7"`, `"by subscribed Link-Id=42, ID=1"`),
+  present only when non-empty -- GetMultiVariables/SetMultiVariables
+  request item addresses, or SetVariable/DeleteObject's own object-id.
+- `s7plus_values`: an array of rendered `"id=<id>: (Type) = value"` or
+  `"item=<n>: (Type) = value"` strings, present only when non-empty --
+  GetMultiVariables response values, or SetMultiVariables/SetVariable
+  request values being written. A nested Struct value renders its members
+  inline (`"(Struct) Struct { id=315: (UDInt) = 320; ... }"`), flattened to
+  one string rather than a nested JSON structure -- see PROTOCOL COVERAGE.
+- `s7plus_item_errors`: an array of rendered `"item=<n>: <name> (<code>)"`
+  per-item status strings, present only when non-empty -- a
+  GetMultiVariables/SetMultiVariables response's own itemnumber-errorvalue
+  list.
+- `s7plus_integrity_digest_present`: `true`/`false`, present only when an
+  Integrity part was reached at all (i.e. only for a Tier-1-decoded body
+  with enough remaining bytes -- see PROTOCOL COVERAGE). `true` only when
+  the digest length byte read exactly 32 and that many bytes were actually
+  present; the digest bytes themselves are never verified either way.
+- `s7plus_has_trailer`: `true`/`false`, always present when `protocol` is
+  `s7comm-plus`. `false` means this telegram is a fragment awaiting a
+  further TPKT/COTP frame this decoder does not reassemble across -- see
+  LIMITATIONS.
 
 ### csv
 
@@ -1861,17 +1915,17 @@ session, not several independently different ones -- see
 to the same original finding, including a correction of an initial
 overclaim (while pulling this data) that it was independent traffic.
 
-**S7comm-Plus** (protocol id `0x72`, the newer, largely undocumented protocol
-TIA Portal uses to talk to S7-1200/1500 CPUs) is detected and labeled but not
-decoded at all -- its structure is materially different from classic S7comm
-(object-oriented addressing, an integrity-protected footer) and out of scope
-for this groundwork release.
+**S7comm-Plus** (protocol id `0x72`, the newer, TIA-Portal-native protocol
+S7-1200/1500 CPUs use) rides this exact same transport but is a materially
+different, object-oriented protocol -- see its own dedicated section below
+for the full decode this codebase now gives it.
 
 Also validated against 14 additional real (not synthetic) S7comm captures
 from independent sources -- classic S7ANY item decoding up to nearly 9,000
-items in one capture, and confirmation the S7comm-Plus stub correctly fires
-on real S7-1200/1500 HMI traffic that turned out to use that protocol rather
-than classic S7comm despite its naming. See
+items in one capture, and confirmation that traffic named after S7-1200/1500
+HMI hardware in this set actually turned out to be S7comm-Plus, not classic
+S7comm, despite its naming (now a real-world validation case for the
+S7comm-Plus decoder below, not just a detection-stub regression guard). See
 `tests/real_captures/s7comm/ATTRIBUTION.md` for exact provenance and for the
 `0xB2` finding described above -- also where the COTP EOT-chaining finding
 described below is documented.
@@ -1898,6 +1952,192 @@ degrade to a "not decoded" note rather than be misparsed. See
 `tests/real_captures/modbus/ATTRIBUTION.md`. The same capture also confirms
 authoritative transaction-ID pairing (see PROTOCOL DETECTION) against a real
 request/response session, not just the synthetic fixtures.
+
+### S7comm-Plus (Siemens TIA Portal / S7-1200/1500's newer protocol, TCP port 102, shares TPKT/COTP transport with S7comm)
+
+S7comm-Plus rides inside a COTP Data (DT) frame's user data -- the SAME
+TCP port 102, TPKT/COTP transport classic S7comm and MMS share -- but it is
+a wholly different, much newer application protocol, introduced with the
+S7-1200/1500 generation of PLCs and TIA Portal, identified by its own
+protocol id byte (`0x72` vs. classic S7comm's `0x32`) rather than any
+negotiated presentation-context or session type. Unlike classic S7comm's
+fixed-format ROSCTR/function/parameter/data layout, S7comm-Plus is
+object-oriented on the wire: requests and responses name numeric "IDs" (of
+objects, attributes, or symbol references) and carry self-describing typed
+values, more reminiscent of MMS's own `Data` CHOICE or OPC UA's own Variant
+than of S7ANY's fixed item layout.
+
+**Sourcing, and an honesty note.** Unlike every other protocol this codebase
+supports, S7comm-Plus has never been officially published by Siemens: there
+is no standards document, no ASN.1 module, no XML/CSV table this decoder's
+tag tables could be generated from (contrast MMS's own ISO 9506-2 module, or
+OPC UA's own `NodeIds.csv`/`StatusCode.csv`). Every byte-layout fact this
+decoder asserts is instead sourced from the open-source Wireshark plugin
+`packet-s7comm_plus.c`, written by Thomas Wiens -- the SAME author as
+classic S7comm's own mainline Wireshark dissector this codebase already
+cross-checks `s7comm.cpp` against -- and itself the product of years of
+public, community reverse-engineering effort (it has never been merged into
+mainline Wireshark, unlike classic S7comm's own `packet-s7comm.c`, confirmed
+by checking mainline Wireshark's own `dissectors/CMakeLists.txt`). This
+decoder is an independent implementation, not a port of that plugin, but it
+does not claim any confidence beyond what that plugin's own source comments
+claim -- several of them, hedged in the original German ("*scheint*" =
+"seems to be", "*z.Zt. unbekannt*" = "currently unknown"), are carried
+through honestly rather than rounded up to false confidence.
+
+#### Wire structure
+
+```
+Header (4 bytes)      protocol id (0x72) + PDU type (Connect/Data/DataFW1_5/Keep Alive)
+                         + [Keep Alive only: 1-byte sequence number + 1 reserved byte] or
+                         [everything else: 2-byte big-endian Data Length]
+Data part              (Connect/Data/DataFW1_5 only -- absent for Keep Alive)
+  opcode (1 byte)      Request (0x31) / Response (0x32) / Notification (0x33) / Response2 (0x02)
+  reserved(2) + function code (2 bytes BE) + reserved(2) + sequence number (2 bytes BE)
+  Request only: session id (4 bytes) + 1 reserved byte; Response/Response2: 1 reserved byte
+  function-specific body
+  Integrity part       near the end of most Data/Response bodies: an id plus what is presumed
+                         to be a SHA-256-sized digest (32 bytes) of the telegram -- surfaced,
+                         never verified, same posture this codebase already takes toward
+                         DNP3/HART-IP checksums
+Trailer (4 bytes)      protocol id + PDU type + Data Length, mirroring the header
+```
+
+A complete S7comm-Plus telegram always ends with that trailer. A telegram
+can be split across several TPKT/COTP frames (a large CreateObject upload or
+Explore response, mainly); per the reference plugin's own reassembly state
+machine, that split is signalled by the ABSENCE of the trailer, NOT by
+COTP's own End-of-TSDU bit -- i.e. a captured COTP Data frame can be a
+complete, EOT=1 COTP PDU while still carrying only an incomplete S7comm-Plus
+telegram. This decoder's usual COTP-level reassembly (shared with classic
+S7comm/MMS, keyed on COTP's own EOT bit) is therefore NOT sufficient by
+itself for S7comm-Plus, and this decoder does not additionally implement
+S7comm-Plus's own above-COTP, trailer-based reassembly (a genuinely
+separate, TCP-session-keyed state machine in the reference plugin) -- a
+telegram missing its trailer is reported as such (`"summary": "Data
+(fragment, awaiting further data)"`, plus a note) with whatever of the Data
+part fits in that one frame decoded, rather than guessed at across frames it
+hasn't seen. See LIMITATIONS.
+
+#### Two-tier function coverage
+
+Same two-tier split this codebase already applies to MMS (11 of 78 services)
+and OPC UA (Tier 1/Tier 2):
+
+**Tier 1 -- fully decoded, both directions:**
+
+- **GetMultiVariables (`0x054c`) / SetMultiVariables (`0x0542`)** -- the
+  actual variable read/write traffic that dominates real S7comm-Plus
+  captures, TIA Portal's functional replacement for classic S7comm's Read
+  Var/Write Var. Item addresses are S7comm-Plus's own native symbolic
+  addressing -- a CRC-like hash of the compiled symbol name plus a chain of
+  "LID" (local id) values identifying struct/array members. This is NOT the
+  same thing as classic S7comm's own EXPERIMENTAL `0xB2` "symbolic" syntax
+  (see above) -- that was an unconfirmed reconstruction of a convention
+  embedded inside a DIFFERENT protocol's item syntax; here the CRC+LID
+  layout IS S7comm-Plus's actual native addressing scheme, decoded with
+  confidence, not experimentally. What IS an inherent, protocol-level
+  limitation (not a decoding uncertainty) is that a LID's or CRC's SYMBOLIC
+  MEANING -- which tag name it refers to -- depends on TIA Portal's own
+  compiled project database, which never appears on the wire; this decoder
+  renders the numbers faithfully but cannot resolve them to tag names, the
+  same "can't resolve an opaque identifier without out-of-band context"
+  limitation this codebase already accepts for DNP3/IEC 104 point indices or
+  OPC UA NodeIds. GetMultiVariables also has a second, distinct request
+  shape -- a "subscribed link" item-number list, rather than a full item
+  address list -- both decoded.
+- **SetVariable (`0x04f2`) and DeleteObject (`0x04d4`)** -- simple enough (a
+  bare object id, or an id plus one self-describing value) to fully decode
+  both directions.
+- **The self-describing "Value" encoding** used throughout: a 1-byte
+  datatype-flags/array-kind byte (scalar/array/address-array/sparse-array),
+  a 1-byte datatype code, an optional array size, and then that many typed
+  values -- every datatype the reference plugin's own switch statement
+  recognizes is decoded here too (Null/Bool/USInt/UInt/UDInt/ULInt/SInt/
+  Int/DInt/LInt/Byte/Word/DWord/LWord/Real/LReal/Timestamp/Timespan/RID/
+  AID/Blob/WString/Variant/Struct), INCLUDING nested STRUCT values --
+  recursed, with the same kind of depth cap MMS's own `Data`-value decoder
+  already uses, for the same reason: an attacker-controlled or corrupt
+  capture must not be able to blow the C++ call stack. `S7String` (`0x19`)
+  is the one datatype the reference plugin's own generic value switch does
+  NOT implement either (its own comment says it is "only for
+  tag-description", a separate, far more complex function this decoder does
+  not implement) -- shown as an unrecognized datatype, honestly, rather
+  than guessed at, and the whole Data part decode degrades gracefully (a
+  "decoding stopped" note) rather than losing the whole packet. An
+  **array of Struct values** is a real but rare shape this decoder
+  deliberately refuses to decode -- delimiting N separate per-element
+  nested member lists isn't something this implementation (or, seemingly,
+  the reference plugin itself) cleanly supports, so it throws and degrades
+  gracefully rather than risk silent byte misalignment.
+- **The ReturnValue status code** every Response/Response2 body starts with:
+  a packed value whose low 16 bits are a signed error code -- decoded with
+  confidence (it is what every response's success/failure hinges on), with
+  the rest of the 64-bit value surfaced as a raw note rather than asserted
+  bit-for-bit for OMS-line/error-source/debug-info sub-fields the reference
+  plugin itself only comments on informally.
+
+**Tier 2 -- recognized (function/PDU type named, session id/sequence number
+decoded, Integrity/Trailer still decoded) but body not decoded:**
+
+- **CreateObject (`0x04ca`)** -- the single most complex shape in this
+  protocol, a full, deeply nested TIA Portal block definition.
+- **Explore (`0x04bb`), GetLink (`0x0524`), BeginSequence/EndSequence
+  (`0x0556`/`0x0560`), Invoke (`0x056b`), GetVarSubStreamed (`0x0586`)** --
+  each has its own bespoke body shape not implemented here.
+- **Notification (opcode `0x33`)** -- S7comm-Plus's own cyclic/subscribed
+  variable-change-of-value feed, a materially different body shape from the
+  Request/Response envelope above (no function code, no session id).
+- **Connect (PDU type `0x01`)** -- the session-establishment handshake,
+  including (per real-world research, not this decoder's own decode) a
+  random-nonce/session-id exchange and, on TIA Portal V13+/
+  firmware-encrypted sessions, a Diffie-Hellman-style key exchange this
+  decoder makes no attempt to parse.
+- **DataFW1_5 (PDU type `0x03`, firmware >= V1.5)** -- per the reference
+  plugin's own source comments, this variant moves the Integrity part from
+  the end of the Data part to a different position near the front, in a
+  shape the plugin's own author describes as awkward to place in its own
+  output tree -- and, critically, the plugin's own byte-accounting for
+  where the function-specific body then starts is not something this
+  decoder could independently confirm with confidence. Rather than risk a
+  wrong offset silently producing a plausible-looking but incorrect decode,
+  this decoder decodes ONLY the outer header (PDU type, Data Length,
+  trailer presence) for DataFW1_5 and shows its entire Data part as raw
+  hex -- a deliberately more conservative scope cut than PDU type Data's
+  own Tier 1/Tier 2 split above.
+
+#### Real-world validation
+
+Two real captures -- `s7comm_plus_1511_db3_var1_hmi.pcap` and
+`s7comm_plus_1511_opc_request_all_types.pcap`, originally added to this
+project only to validate the OLD "detected, not decoded" stub -- were
+re-decoded once this full decoder existed. `db3_var1_hmi` is genuinely rich
+real HMI traffic: GetMultiVariables (both the symbolic-addressing and
+subscribed-link request shapes), SetMultiVariables (including a genuinely
+nested Struct-of-Struct value with a `WString` member and a 360-byte
+`Blob`), and DeleteObject all exercise Tier-1 decoding correctly, with
+Connect and GetVarSubStreamed correctly recognized as Tier-2. It also
+repeatedly exercises this decoder's above-COTP, trailer-based reassembly
+DETECTION on real traffic (every SetMultiVariables request here arrives
+split across 2 TPKT/COTP frames). `opc_request_all_types` lives up to its
+name: a single 40-item GetMultiVariables request/response pair walks nearly
+every datatype this decoder knows in one call. **Zero per-item decode
+errors, zero `ParseError`-triggered fallbacks, in either file.** See
+`tests/real_captures/s7comm/ATTRIBUTION.md`'s own S7comm-Plus addendum for
+the full writeup, including which shapes (KeepAlive, DataFW1_5,
+Notification, CreateObject, Explore, GetLink, BeginSequence/EndSequence,
+Invoke, a DeleteObject response, array-of-Struct, Sparsearray) remain
+validated only against the synthetic fixture (`tests/sample_s7commplus.pcap`,
+built by `tools/make_sample_pcap.py`'s own `build_s7commplus_sample()`) since
+neither real capture happened to exercise them.
+
+This project's own code review -- not real-capture validation -- caught two
+genuine correctness bugs before this decoder was ever built or tested: the
+array-of-Struct misalignment risk described above (now a deliberate,
+explicit refusal), and an unsigned-integer-underflow risk in a
+truncated-frame length calculation (`data.size() - kHeaderLen` when
+`data.size() < kHeaderLen`, fixed by clamping via the already-established
+`available_after_header`/`data_take` pattern used elsewhere in `s7comm.cpp`).
 
 ### IEC 61850 MMS (Manufacturing Message Specification, ISO 9506, TCP port 102, shares TPKT/COTP transport with S7comm)
 
@@ -3778,8 +4018,8 @@ encrypted body's essentially-random leading byte will, in the overwhelming
 majority of cases, simply fail the NodeId-encoding-byte check (only 6 of
 256 values, plus 2 ExpandedNodeId flag bits, are valid) and fall straight
 to "body shown as raw hex, service unrecognized" -- the same honest,
-no-hidden-state fallback this decoder already applies to S7comm-Plus
-elsewhere in this codebase.
+no-hidden-state fallback this decoder already applies to S7comm-Plus's own
+Tier-2 (named-but-not-decoded) function bodies elsewhere in this codebase.
 
 #### Primitive encoding
 
@@ -4618,7 +4858,38 @@ These are current, not aspirational -- each has a corresponding ROADMAP item.
   reassembly's sequence-number check here, since COTP gives no per-fragment
   sequence signal worth trusting for that. Buffering is capped at 1 MiB /
   2000 frames per flow against a pathological/malformed capture.
-- **S7comm-Plus (protocol id 0x72) is detected but never decoded.**
+- **S7comm-Plus (protocol id 0x72) is only Tier-1-decoded for
+  GetMultiVariables/SetMultiVariables/SetVariable/DeleteObject.** Every other
+  function -- CreateObject, Explore, GetLink, BeginSequence/EndSequence,
+  Invoke, GetVarSubStreamed -- and the Notification/Connect PDU shapes are
+  recognized (named) but not body-decoded (Tier 2). `DataFW1_5` (firmware >=
+  V1.5) gets header-only decode; its entire Data part is shown as raw hex,
+  since this decoder could not independently confirm the reference plugin's
+  own byte-accounting for where that variant's function-specific body
+  actually starts -- see PROTOCOL COVERAGE's S7comm-Plus section.
+- **S7comm-Plus's own above-COTP fragmentation (a telegram split across
+  multiple TPKT/COTP frames, signalled by the ABSENCE of the trailer, not
+  COTP's own EOT bit) is detected and reported but not reassembled.** A
+  telegram missing its trailer decodes only as far as the bytes present in
+  that one frame; the continuation frame(s) are not stitched back in. This
+  is a genuinely separate, TCP-session-keyed state machine in the reference
+  plugin that this decoder does not replicate.
+- **S7comm-Plus's native symbolic item addressing (CRC + LID chain) decodes
+  the numbers faithfully but cannot resolve what they mean.** A LID's or
+  CRC's symbolic meaning (which tag name it refers to) depends on TIA
+  Portal's own compiled project database, which never appears on the wire --
+  the same class of limitation this codebase already accepts for DNP3/IEC
+  104 point indices and OPC UA NodeIds.
+- **S7comm-Plus does not decode an array of Struct values.** Delimiting N
+  separate per-element nested member lists for that shape isn't something
+  this implementation (or, seemingly, the reference Wireshark plugin itself)
+  cleanly supports; encountering one aborts that Data part's decode with a
+  note rather than risk silent byte misalignment.
+- **S7comm-Plus's ReturnValue is only decoded down to its low-16-bit signed
+  error code.** The remaining OMS-line/error-source/debug-info sub-fields of
+  the full 64-bit value are surfaced as a raw note, not asserted
+  bit-for-bit -- the reference plugin's own source only comments on their
+  meaning informally.
 - **Most of MMS's 78 confirmedServices are Tier 2 (name + invokeID only,
   body shown as raw hex).** Only 11 are fully field-decoded (Tier 1):
   `status`, `getNameList`, `identify`, `read`, `write`,
@@ -4825,6 +5096,26 @@ per packet that carries any:
 ```sh
 conduitscope decode -r capture.pcap --protocol mms -f json \
   | jq -r '.[] | select(.mms_values) | "\(.src_ip) -> \(.dst_ip): \(.mms_values | join(", "))"'
+```
+
+See every S7comm-Plus (TIA Portal S7-1200/1500) variable read/write value
+decoded on the same shared port 102 -- item addresses and the values read or
+written, one line per GetMultiVariables/SetMultiVariables/SetVariable packet
+that carries any:
+
+```sh
+conduitscope decode -r capture.pcap --protocol s7comm-plus -f json \
+  | jq -r '.[] | select(.s7plus_values) | "\(.src_ip) -> \(.dst_ip): \(.s7plus_values | join(", "))"'
+```
+
+See which S7comm-Plus function codes flow over a capture, and how many got
+Tier-1 (full value) decoding vs. Tier-2 (name only) -- e.g. to spot
+CreateObject/Explore traffic (TIA Portal project uploads/downloads or
+online-view browsing) alongside the ordinary GetMultiVariables/
+SetMultiVariables read/write traffic:
+
+```sh
+conduitscope decode -r capture.pcap --protocol s7comm-plus --stats
 ```
 
 See which DNP3 function codes and object groups/variations flow over a
@@ -5119,8 +5410,13 @@ Rough order, each building on the groundwork this release establishes:
    currently falls back to raw hex on: DB-area items, and items with more
    than one LID entry (structured/nested symbol access). Promote it out of
    [EXPERIMENTAL] once confirmed.
-3. S7comm-Plus decoding, and PLC Control/Stop parameter decoding (these
-   send commands that change PLC run state -- high security relevance).
+3. **PLC Control/Stop parameter decoding** (these send commands that change
+   PLC run state -- high security relevance), and extending S7comm-Plus's
+   own Tier-2 functions (CreateObject, Explore, GetLink, BeginSequence/
+   EndSequence, Invoke, GetVarSubStreamed, Notification, Connect, and
+   DataFW1_5's Data part) to Tier 1, plus S7comm-Plus's own above-COTP,
+   trailer-based reassembly (currently detected and reported, not
+   reassembled -- see LIMITATIONS).
 4. **DNP3 CRC validation** (both the header CRC and the per-block CRCs), so a
    corrupted frame that still starts with the right magic bytes is flagged
    rather than silently "decoded".

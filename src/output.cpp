@@ -68,6 +68,7 @@ constexpr const char* kBrightWhite = "\033[97m";
 constexpr const char* kBrightRed = "\033[91m";
 constexpr const char* kBoldBlue = "\033[1;34m";
 constexpr const char* kBoldCyan = "\033[1;36m";
+constexpr const char* kBoldMagenta = "\033[1;35m";
 
 // Color for a packet's "[protocol]" tag -- picked so a mixed-protocol capture scans quickly by
 // eye, not for any deeper meaning. parse-error is the one exception: it gets the same "something
@@ -90,6 +91,16 @@ const char* protocol_tag_color(const std::string& protocol) {
     if (protocol == "mms") return kBoldBlue;  // deliberately close to s7comm's plain blue -- they
                                                 // share the same TPKT/COTP transport/port, bold
                                                 // distinguishes MMS at a glance
+    if (protocol == "s7comm-plus") return kBoldMagenta;  // deliberately NOT a third shade of blue
+                                                            // alongside s7comm's plain blue/mms's
+                                                            // bold blue (despite sharing their
+                                                            // exact TPKT/COTP transport/port) --
+                                                            // S7comm-Plus is a wholly different,
+                                                            // independent application protocol
+                                                            // from classic S7comm (see
+                                                            // s7commplus.hpp), and bold magenta
+                                                            // stays visually distinct from DNP3's
+                                                            // own plain magenta too
     if (protocol == "mqtt") return kBoldCyan;  // bold, vs. Modbus's plain cyan -- deliberately
                                                  // distinct from every other tag color, no shared
                                                  // transport/port with any other decoded protocol
@@ -645,6 +656,58 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
             }
         }
     }
+    if (p.protocol == "s7comm-plus") {
+        out_ << "    \"s7plus_pdu_type\": \"" << json_escape(p.s7plus_pdu_type_name) << "\",\n";
+        if (p.s7plus_is_keepalive) {
+            out_ << "    \"s7plus_keepalive_seq\": " << static_cast<unsigned>(p.s7plus_keepalive_seq) << ",\n";
+        }
+        if (p.s7plus_has_opcode) {
+            out_ << "    \"s7plus_opcode\": \"" << json_escape(p.s7plus_opcode_name) << "\",\n";
+        }
+        if (p.s7plus_has_function) {
+            out_ << "    \"s7plus_function\": \"" << json_escape(p.s7plus_function_name) << "\",\n";
+            out_ << "    \"s7plus_body_decoded\": " << (p.s7plus_body_decoded ? "true" : "false") << ",\n";
+        }
+        if (p.s7plus_has_sequence_number) {
+            out_ << "    \"s7plus_sequence_number\": " << p.s7plus_sequence_number << ",\n";
+        }
+        if (p.s7plus_has_session_id) {
+            out_ << "    \"s7plus_session_id\": " << p.s7plus_session_id << ",\n";
+        }
+        if (p.s7plus_has_return_value) {
+            out_ << "    \"s7plus_return_code\": " << p.s7plus_return_code << ",\n";
+            out_ << "    \"s7plus_return_code_name\": \"" << json_escape(p.s7plus_return_code_name) << "\",\n";
+        }
+        if (!p.s7plus_item_tags.empty()) {
+            out_ << "    \"s7plus_items\": [";
+            for (size_t i = 0; i < p.s7plus_item_tags.size(); ++i) {
+                if (i != 0) out_ << ", ";
+                out_ << "\"" << json_escape(p.s7plus_item_tags[i]) << "\"";
+            }
+            out_ << "],\n";
+        }
+        if (!p.s7plus_value_summaries.empty()) {
+            out_ << "    \"s7plus_values\": [";
+            for (size_t i = 0; i < p.s7plus_value_summaries.size(); ++i) {
+                if (i != 0) out_ << ", ";
+                out_ << "\"" << json_escape(p.s7plus_value_summaries[i]) << "\"";
+            }
+            out_ << "],\n";
+        }
+        if (!p.s7plus_item_errors.empty()) {
+            out_ << "    \"s7plus_item_errors\": [";
+            for (size_t i = 0; i < p.s7plus_item_errors.size(); ++i) {
+                if (i != 0) out_ << ", ";
+                out_ << "\"" << json_escape(p.s7plus_item_errors[i]) << "\"";
+            }
+            out_ << "],\n";
+        }
+        if (p.s7plus_has_integrity) {
+            out_ << "    \"s7plus_integrity_digest_present\": "
+                 << (p.s7plus_integrity_digest_present ? "true" : "false") << ",\n";
+        }
+        out_ << "    \"s7plus_has_trailer\": " << (p.s7plus_has_trailer ? "true" : "false") << ",\n";
+    }
     out_ << "    \"notes\": [";
     for (size_t i = 0; i < p.notes.size(); ++i) {
         if (i != 0) out_ << ", ";
@@ -743,6 +806,13 @@ void StatsWriter::write_packet(const DecodedPacket& p) {
         if (p.mqtt_is_sparkplug) {
             mqtt_sparkplug_count_++;
             mqtt_sparkplug_message_type_counts_[p.mqtt_sparkplug_message_type]++;
+        }
+    }
+    if (p.protocol == "s7comm-plus") {
+        s7plus_pdu_type_counts_[p.s7plus_pdu_type_name]++;
+        if (p.s7plus_has_function) {
+            s7plus_function_counts_[p.s7plus_function_name]++;
+            if (p.s7plus_body_decoded) s7plus_body_decoded_count_++;
         }
     }
     if (!has_ts_) {
@@ -890,6 +960,19 @@ void StatsWriter::print_summary(std::ostream& out) const {
         for (const auto& [name, count] : mqtt_sparkplug_message_type_counts_) {
             out << "  " << std::left << std::setw(40) << name << count << "\n";
         }
+    }
+    if (!s7plus_pdu_type_counts_.empty()) {
+        out << "s7comm-plus pdu types:\n";
+        for (const auto& [name, count] : s7plus_pdu_type_counts_) {
+            out << "  " << std::left << std::setw(40) << name << count << "\n";
+        }
+    }
+    if (!s7plus_function_counts_.empty()) {
+        out << "s7comm-plus functions:\n";
+        for (const auto& [name, count] : s7plus_function_counts_) {
+            out << "  " << std::left << std::setw(40) << name << count << "\n";
+        }
+        out << "s7comm-plus function bodies fully decoded (Tier 1): " << s7plus_body_decoded_count_ << "\n";
     }
 }
 

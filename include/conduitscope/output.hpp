@@ -106,6 +106,12 @@ private:
     size_t mqtt_sparkplug_count_ = 0;  // PUBLISH packets whose topic matched the spBv1.0 namespace
     std::map<std::string, size_t> mqtt_sparkplug_message_type_counts_;  // "NBIRTH"/.../"STATE",
                                                                           // only when mqtt_is_sparkplug
+    std::map<std::string, size_t> s7plus_pdu_type_counts_;  // "Connect"/"Data"/"DataFW1_5"/"Keep Alive"
+    std::map<std::string, size_t> s7plus_function_counts_;  // keyed by function name, only when
+                                                               // s7plus_has_function
+    size_t s7plus_body_decoded_count_ = 0;  // Tier-1 functions this decoder fully decoded (see
+                                              // s7commplus.hpp); the gap vs. s7plus_has_function's
+                                              // own total count is everything left Tier-2
     bool has_ts_ = false;
     double first_ts_ = 0.0, last_ts_ = 0.0;
 };
