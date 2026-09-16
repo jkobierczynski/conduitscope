@@ -11,6 +11,7 @@
 #include "conduitscope/dnp3.hpp"
 #include "conduitscope/enip.hpp"
 #include "conduitscope/ethercat.hpp"
+#include "conduitscope/ffhse.hpp"
 #include "conduitscope/goose.hpp"
 #include "conduitscope/hartip.hpp"
 #include "conduitscope/opcua.hpp"
@@ -294,6 +295,8 @@ bool Decoder::reassemble_tcp_payload(const TcpSegment& tcp, const std::string& f
                       options_.protocol_filter == ProtocolFilter::MqttOnly;
     bool want_s7commplus = options_.protocol_filter == ProtocolFilter::Auto ||
                             options_.protocol_filter == ProtocolFilter::S7commPlusOnly;
+    bool want_ffhse = options_.protocol_filter == ProtocolFilter::Auto ||
+                       options_.protocol_filter == ProtocolFilter::FfHseOnly;
 
     // OPC UA is checked first of all: its own structural detection gate (the leading 3 bytes must
     // be one of exactly 7 fixed ASCII MessageType strings -- "HEL"/"ACK"/"ERR"/"RHE"/"OPN"/"CLO"/
@@ -393,6 +396,22 @@ bool Decoder::reassemble_tcp_payload(const TcpSegment& tcp, const std::string& f
         if (auto d = mqtt_declared_length(candidate)) {
             declared = d;
             which = "MQTT packet";
+        }
+    }
+    // FF-HSE is tried LAST of all, even after MQTT -- its own structural detection gate is a
+    // SINGLE byte at offset 2 (ProtocolAndType) landing on one of 12 valid values out of 256, plus
+    // a Message Length >= 12 plausibility check that all but the smallest 12 possible 32-bit values
+    // already satisfy -- honestly a WEAKER anchor than even HART-IP's own two-adjacent-byte gate
+    // (see ffhse.hpp's own file header comment), so it gets the lowest priority in this
+    // opportunistic, port-independent dispatch chain. No specific byte-for-byte collision with
+    // another protocol above was found during this feature's own scoping, but given how weak this
+    // gate is on its own, this ordering means any such collision resolves in every other protocol's
+    // favor, not FF-HSE's -- the same "weaker signal, lower priority" principle already established
+    // for HART-IP and MQTT above.
+    if (!declared && want_ffhse) {
+        if (auto d = ffhse_declared_length(candidate)) {
+            declared = d;
+            which = "FF-HSE PDU";
         }
     }
 
@@ -927,6 +946,85 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                 }
             }
 
+            // Tried last among these UDP checks, port-independently, even after HART-IP -- see the
+            // matching comment in reassemble_tcp_payload for why FF-HSE's own structural detection
+            // gate is deliberately given the lowest priority in this decoder's opportunistic
+            // dispatch. UNLIKE every protocol above, a single UDP datagram can carry more than one
+            // concatenated FF-HSE PDU back-to-back -- see ffhse.hpp's own "UDP framing" paragraph --
+            // so this is its own coalescing while-loop, not a single try_parse_ffhse call.
+            bool want_ffhse = options_.protocol_filter == ProtocolFilter::Auto ||
+                               options_.protocol_filter == ProtocolFilter::FfHseOnly;
+            if (want_ffhse) {
+                if (auto frame = try_parse_ffhse(udp.payload)) {
+                    out.protocol = "ffhse";
+                    out.summary = frame->summary;
+
+                    auto merge_ffhse = [&](const FfhseFrame& f, bool is_first_message) {
+                        for (const auto& n : f.notes) out.notes.push_back(n);
+                        if (!is_first_message) return;
+                        out.ffhse_version = f.header.version;
+                        out.ffhse_options = f.header.options;
+                        out.ffhse_protocol_name = f.header.protocol_name;
+                        out.ffhse_type_name = f.header.type_name;
+                        out.ffhse_confirmed = f.header.confirmed;
+                        out.ffhse_service_id = f.header.service_id;
+                        out.ffhse_fda_address = f.header.fda_address;
+                        out.ffhse_link_id = f.header.link_id;
+                        out.ffhse_message_length = f.header.message_length;
+                        out.ffhse_has_message_number = f.trailer.has_message_number;
+                        out.ffhse_message_number = f.trailer.message_number;
+                        out.ffhse_has_invoke_id = f.trailer.has_invoke_id;
+                        out.ffhse_invoke_id = f.trailer.invoke_id;
+                        out.ffhse_has_time_stamp = f.trailer.has_time_stamp;
+                        out.ffhse_time_stamp = f.trailer.time_stamp;
+                        out.ffhse_has_extended_control_field = f.trailer.has_extended_control_field;
+                        out.ffhse_extended_control_field = f.trailer.extended_control_field;
+                        out.ffhse_message_name = f.message_name;
+                        out.ffhse_recognized = f.recognized;
+                        out.ffhse_body_decoded = f.body_decoded;
+                        out.ffhse_values = f.values;
+                        out.ffhse_body_shown_as_hex = f.body_shown_as_hex;
+                        out.ffhse_body_hex = f.body_hex;
+                        out.ffhse_body_length = f.body_length;
+                    };
+                    merge_ffhse(*frame, /*is_first_message=*/true);
+
+                    constexpr size_t kMaxFfhseMessagesPerDatagram = 50;
+                    size_t offset = frame->wire_length;
+                    size_t message_count = 1;
+                    while (offset < udp.payload.size() && message_count < kMaxFfhseMessagesPerDatagram) {
+                        ByteSpan rest = udp.payload.from(offset);
+                        auto next = try_parse_ffhse(rest);
+                        if (!next) break;  // remaining bytes aren't another FF-HSE PDU -- stop, don't guess
+                        ++message_count;
+                        std::string note = "additional FF-HSE PDU " + std::to_string(message_count) +
+                                            " found in the same UDP datagram at byte offset " + std::to_string(offset) +
+                                            ": " + next->summary;
+                        out.notes.push_back(note);
+                        merge_ffhse(*next, /*is_first_message=*/false);
+                        offset += next->wire_length;
+                    }
+                    if (message_count >= kMaxFfhseMessagesPerDatagram) {
+                        out.notes.push_back("stopped after " + std::to_string(kMaxFfhseMessagesPerDatagram) +
+                                             " FF-HSE PDU(s) in this one UDP datagram, more may remain (safety cap)");
+                    }
+
+                    auto is_ffhse_port = [&](uint16_t port) {
+                        return port_in(port, FFHSE_PORT_ANNUNC, options_.extra_ffhse_ports) ||
+                               port_in(port, FFHSE_PORT_FMS, options_.extra_ffhse_ports) ||
+                               port_in(port, FFHSE_PORT_SM, options_.extra_ffhse_ports) ||
+                               port_in(port, FFHSE_PORT_LAN, options_.extra_ffhse_ports);
+                    };
+                    if (!is_ffhse_port(udp.src_port) && !is_ffhse_port(udp.dst_port)) {
+                        out.notes.push_back("seen on UDP port " + std::to_string(udp.src_port) + "->" +
+                                             std::to_string(udp.dst_port) +
+                                             ", which is not a configured/standard FF-HSE port "
+                                             "(1089/1090/1091/3622)");
+                    }
+                    return out;
+                }
+            }
+
             // Groundwork plumbing beyond this point: the UDP header/payload split is recognized
             // and reported (src/dst port, byte count), but no other application-layer protocol
             // riding on UDP is decoded -- see udp.hpp's file header comment and docs/MANUAL.md's
@@ -1011,6 +1109,8 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                           options_.protocol_filter == ProtocolFilter::MqttOnly;
         bool want_s7commplus = options_.protocol_filter == ProtocolFilter::Auto ||
                                 options_.protocol_filter == ProtocolFilter::S7commPlusOnly;
+        bool want_ffhse = options_.protocol_filter == ProtocolFilter::Auto ||
+                           options_.protocol_filter == ProtocolFilter::FfHseOnly;
 
         // Tried first of all -- see the matching, fuller comment in reassemble_tcp_payload above
         // for why OPC UA's own magic-string detection gate is strong enough, and non-colliding
@@ -1755,12 +1855,89 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
             }
         }
 
+        // Tried LAST of all, even after MQTT -- see the matching, fuller comment in
+        // reassemble_tcp_payload above for why FF-HSE's own structural detection gate is
+        // deliberately given the lowest priority in this opportunistic, port-independent dispatch
+        // chain.
+        if (want_ffhse) {
+            if (auto frame = try_parse_ffhse(effective_payload)) {
+                out.protocol = "ffhse";
+                out.summary = frame->summary;
+
+                auto merge_ffhse = [&](const FfhseFrame& f, bool is_first_message) {
+                    for (const auto& n : f.notes) out.notes.push_back(n);
+                    if (!is_first_message) return;
+                    out.ffhse_version = f.header.version;
+                    out.ffhse_options = f.header.options;
+                    out.ffhse_protocol_name = f.header.protocol_name;
+                    out.ffhse_type_name = f.header.type_name;
+                    out.ffhse_confirmed = f.header.confirmed;
+                    out.ffhse_service_id = f.header.service_id;
+                    out.ffhse_fda_address = f.header.fda_address;
+                    out.ffhse_link_id = f.header.link_id;
+                    out.ffhse_message_length = f.header.message_length;
+                    out.ffhse_has_message_number = f.trailer.has_message_number;
+                    out.ffhse_message_number = f.trailer.message_number;
+                    out.ffhse_has_invoke_id = f.trailer.has_invoke_id;
+                    out.ffhse_invoke_id = f.trailer.invoke_id;
+                    out.ffhse_has_time_stamp = f.trailer.has_time_stamp;
+                    out.ffhse_time_stamp = f.trailer.time_stamp;
+                    out.ffhse_has_extended_control_field = f.trailer.has_extended_control_field;
+                    out.ffhse_extended_control_field = f.trailer.extended_control_field;
+                    out.ffhse_message_name = f.message_name;
+                    out.ffhse_recognized = f.recognized;
+                    out.ffhse_body_decoded = f.body_decoded;
+                    out.ffhse_values = f.values;
+                    out.ffhse_body_shown_as_hex = f.body_shown_as_hex;
+                    out.ffhse_body_hex = f.body_hex;
+                    out.ffhse_body_length = f.body_length;
+                };
+                merge_ffhse(*frame, /*is_first_message=*/true);
+
+                // Like HART-IP/EtherNet/IP's own small messages, it's normal for a sender or the OS
+                // to coalesce several FF-HSE PDUs into one TCP segment before flushing.
+                constexpr size_t kMaxFfhseMessagesPerPayload = 50;
+                size_t offset = frame->wire_length;
+                size_t message_count = 1;
+                while (offset < effective_payload.size() && message_count < kMaxFfhseMessagesPerPayload) {
+                    ByteSpan rest = effective_payload.from(offset);
+                    auto next = try_parse_ffhse(rest);
+                    if (!next) break;  // remaining bytes aren't another FF-HSE PDU -- stop, don't guess
+                    ++message_count;
+                    std::string note = "additional FF-HSE PDU " + std::to_string(message_count) +
+                                        " found in the same TCP payload at byte offset " + std::to_string(offset) +
+                                        " (coalesced by the sender/OS): " + next->summary;
+                    out.notes.push_back(note);
+                    merge_ffhse(*next, /*is_first_message=*/false);
+                    offset += next->wire_length;
+                }
+                if (message_count >= kMaxFfhseMessagesPerPayload) {
+                    out.notes.push_back("stopped after " + std::to_string(kMaxFfhseMessagesPerPayload) +
+                                         " FF-HSE PDU(s) in this one TCP payload, more may remain (safety cap)");
+                }
+
+                auto is_ffhse_port = [&](uint16_t port) {
+                    return port_in(port, FFHSE_PORT_ANNUNC, options_.extra_ffhse_ports) ||
+                           port_in(port, FFHSE_PORT_FMS, options_.extra_ffhse_ports) ||
+                           port_in(port, FFHSE_PORT_SM, options_.extra_ffhse_ports) ||
+                           port_in(port, FFHSE_PORT_LAN, options_.extra_ffhse_ports);
+                };
+                if (!is_ffhse_port(tcp.src_port) && !is_ffhse_port(tcp.dst_port)) {
+                    out.notes.push_back("seen on TCP port " + std::to_string(tcp.src_port) + "->" +
+                                         std::to_string(tcp.dst_port) +
+                                         ", which is not a configured/standard FF-HSE port "
+                                         "(1089/1090/1091/3622)");
+                }
+                return out;
+            }
+        }
+
         out.protocol = "tcp";
         std::ostringstream s;
         s << "TCP payload of " << effective_payload.size() << " byte(s) on port " << tcp.src_port << "->"
           << tcp.dst_port
-          << " did not match OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, COTP/S7comm/MMS, HART-IP, or "
-             "MQTT";
+          << " did not match OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, COTP/S7comm/MMS, HART-IP, "
+             "MQTT, or FF-HSE";
         out.summary = s.str();
         return out;
 

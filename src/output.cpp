@@ -104,6 +104,11 @@ const char* protocol_tag_color(const std::string& protocol) {
     if (protocol == "mqtt") return kBoldCyan;  // bold, vs. Modbus's plain cyan -- deliberately
                                                  // distinct from every other tag color, no shared
                                                  // transport/port with any other decoded protocol
+    if (protocol == "ffhse") return kBrightRed;  // deliberately shares opcua's bright red rather
+                                                    // than adding a 20th distinct hue -- the two
+                                                    // never share a transport/port, so there is no
+                                                    // realistic capture where this collision would
+                                                    // actually confuse a reader scanning by eye
     if (protocol == "parse-error") return kBoldRed;
     return kDim;  // tcp / udp / non-tcp / non-ip / unsupported-link: recognized, nothing OT-specific
 }
@@ -708,6 +713,40 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
         }
         out_ << "    \"s7plus_has_trailer\": " << (p.s7plus_has_trailer ? "true" : "false") << ",\n";
     }
+    if (p.protocol == "ffhse") {
+        out_ << "    \"ffhse_version\": " << static_cast<unsigned>(p.ffhse_version) << ",\n";
+        out_ << "    \"ffhse_options\": " << static_cast<unsigned>(p.ffhse_options) << ",\n";
+        out_ << "    \"ffhse_protocol\": \"" << json_escape(p.ffhse_protocol_name) << "\",\n";
+        out_ << "    \"ffhse_type\": \"" << json_escape(p.ffhse_type_name) << "\",\n";
+        out_ << "    \"ffhse_confirmed\": " << (p.ffhse_confirmed ? "true" : "false") << ",\n";
+        out_ << "    \"ffhse_service_id\": " << static_cast<unsigned>(p.ffhse_service_id) << ",\n";
+        std::ostringstream fda_addr;
+        fda_addr << "0x" << std::hex << std::uppercase << std::setw(8) << std::setfill('0') << p.ffhse_fda_address;
+        out_ << "    \"ffhse_fda_address\": \"" << fda_addr.str() << "\",\n";
+        out_ << "    \"ffhse_link_id\": " << p.ffhse_link_id << ",\n";
+        out_ << "    \"ffhse_message_length\": " << p.ffhse_message_length << ",\n";
+        if (p.ffhse_has_message_number) out_ << "    \"ffhse_message_number\": " << p.ffhse_message_number << ",\n";
+        if (p.ffhse_has_invoke_id) out_ << "    \"ffhse_invoke_id\": " << p.ffhse_invoke_id << ",\n";
+        if (p.ffhse_has_time_stamp) out_ << "    \"ffhse_time_stamp\": " << p.ffhse_time_stamp << ",\n";
+        if (p.ffhse_has_extended_control_field)
+            out_ << "    \"ffhse_extended_control_field\": " << p.ffhse_extended_control_field << ",\n";
+        out_ << "    \"ffhse_message_name\": \"" << json_escape(p.ffhse_message_name) << "\",\n";
+        out_ << "    \"ffhse_recognized\": " << (p.ffhse_recognized ? "true" : "false") << ",\n";
+        out_ << "    \"ffhse_body_decoded\": " << (p.ffhse_body_decoded ? "true" : "false") << ",\n";
+        if (!p.ffhse_values.empty()) {
+            out_ << "    \"ffhse_values\": [";
+            for (size_t i = 0; i < p.ffhse_values.size(); ++i) {
+                if (i != 0) out_ << ", ";
+                out_ << "\"" << json_escape(p.ffhse_values[i]) << "\"";
+            }
+            out_ << "],\n";
+        }
+        out_ << "    \"ffhse_body_shown_as_hex\": " << (p.ffhse_body_shown_as_hex ? "true" : "false") << ",\n";
+        if (p.ffhse_body_shown_as_hex) {
+            out_ << "    \"ffhse_body_length\": " << p.ffhse_body_length << ",\n";
+            out_ << "    \"ffhse_body_hex\": \"" << json_escape(p.ffhse_body_hex) << "\",\n";
+        }
+    }
     out_ << "    \"notes\": [";
     for (size_t i = 0; i < p.notes.size(); ++i) {
         if (i != 0) out_ << ", ";
@@ -813,6 +852,13 @@ void StatsWriter::write_packet(const DecodedPacket& p) {
         if (p.s7plus_has_function) {
             s7plus_function_counts_[p.s7plus_function_name]++;
             if (p.s7plus_body_decoded) s7plus_body_decoded_count_++;
+        }
+    }
+    if (p.protocol == "ffhse") {
+        ffhse_protocol_counts_[p.ffhse_protocol_name]++;
+        if (p.ffhse_recognized) {
+            ffhse_message_counts_[p.ffhse_message_name]++;
+            if (p.ffhse_body_decoded) ffhse_body_decoded_count_++;
         }
     }
     if (!has_ts_) {
@@ -973,6 +1019,19 @@ void StatsWriter::print_summary(std::ostream& out) const {
             out << "  " << std::left << std::setw(40) << name << count << "\n";
         }
         out << "s7comm-plus function bodies fully decoded (Tier 1): " << s7plus_body_decoded_count_ << "\n";
+    }
+    if (!ffhse_protocol_counts_.empty()) {
+        out << "ffhse sub-protocols:\n";
+        for (const auto& [name, count] : ffhse_protocol_counts_) {
+            out << "  " << std::left << std::setw(40) << name << count << "\n";
+        }
+    }
+    if (!ffhse_message_counts_.empty()) {
+        out << "ffhse messages:\n";
+        for (const auto& [name, count] : ffhse_message_counts_) {
+            out << "  " << std::left << std::setw(60) << name << count << "\n";
+        }
+        out << "ffhse message bodies fully decoded (Tier 1): " << ffhse_body_decoded_count_ << "\n";
     }
 }
 

@@ -16,6 +16,7 @@
 #include "conduitscope/dnp3.hpp"
 #include "conduitscope/enip.hpp"
 #include "conduitscope/ethercat.hpp"
+#include "conduitscope/ffhse.hpp"
 #include "conduitscope/goose.hpp"
 #include "conduitscope/hartip.hpp"
 #include "conduitscope/iec104.hpp"
@@ -48,6 +49,7 @@ enum class ProtocolFilter {
     MmsOnly,      // only attempt TPKT/COTP/IEC 61850 MMS decoding
     MqttOnly,     // only attempt MQTT (v3.1.1/v5.0) / Sparkplug B decoding
     S7commPlusOnly,  // only attempt TPKT/COTP/S7comm-Plus decoding
+    FfHseOnly,    // only attempt FOUNDATION Fieldbus HSE (FDA/SM/FMS/LAN Redundancy) decoding
 };
 
 struct DecodeOptions {
@@ -71,6 +73,10 @@ struct DecodeOptions {
     std::vector<uint16_t> extra_hartip_ports;   // TCP AND UDP -- see HARTIP_PORT (5094, same for both)
     std::vector<uint16_t> extra_opcua_ports;    // TCP only -- see OPCUA_PORT (4840)
     std::vector<uint16_t> extra_mqtt_ports;     // TCP only -- see MQTT_PORT (1883)
+    std::vector<uint16_t> extra_ffhse_ports;    // TCP AND UDP -- see FFHSE_PORT_ANNUNC/_FMS/_SM/_LAN
+                                                  // (1089/1090/1091/3622); a single list covers all
+                                                  // four, since the sub-protocol is signaled in-band,
+                                                  // not by port -- see ffhse.hpp
     // If true, a parse failure at the Ethernet/IPv4/TCP layer is rethrown to
     // the caller instead of being recorded as a per-packet "parse-error"
     // result. Off by default so one malformed packet doesn't abort decoding
@@ -585,6 +591,49 @@ struct DecodedPacket {
     size_t mqtt_sparkplug_body_length = 0;
     size_t mqtt_sparkplug_metric_count = 0;  // every metric found, even past the rendering cap below
     std::vector<std::string> mqtt_sparkplug_metrics;  // one rendered summary per metric, capped
+
+    // Only set when protocol == "ffhse" -- see try_parse_ffhse in ffhse.hpp. FOUNDATION Fieldbus
+    // HSE rides EITHER TCP or UDP, conventionally ports 1089/1090/1091/3622 depending on
+    // sub-protocol (FDA/SM/FMS/LAN Redundancy), all recorded as "expected port" annotations only
+    // (the sub-protocol is signaled in-band via the header, not by port) -- see ffhse.hpp's file
+    // header comment for this decoder's own honest comparison of its structural detection gate
+    // against this codebase's other opportunistic detectors (it is weaker than even HART-IP's).
+    uint8_t ffhse_version = 0;
+    uint8_t ffhse_options = 0;  // raw Options byte
+    std::string ffhse_protocol_name;  // "FDA Session Management"/"SM"/"FMS"/"LAN Redundancy" --
+                                        // always set when protocol == "ffhse"
+    std::string ffhse_type_name;      // "Request"/"Response"/"Error"
+    bool ffhse_confirmed = false;     // Service byte's own bit 7
+    uint8_t ffhse_service_id = 0;     // Service byte & 0x7f
+    uint32_t ffhse_fda_address = 0;
+    uint16_t ffhse_link_id = 0;       // fda_address >> 16 -- see ffhse.hpp's "LinkId branch"
+    uint32_t ffhse_message_length = 0;
+
+    // Optional trailer fields -- present only when their own Options bit is set.
+    bool ffhse_has_message_number = false;
+    uint32_t ffhse_message_number = 0;
+    bool ffhse_has_invoke_id = false;
+    uint32_t ffhse_invoke_id = 0;
+    bool ffhse_has_time_stamp = false;
+    uint64_t ffhse_time_stamp = 0;
+    bool ffhse_has_extended_control_field = false;
+    uint32_t ffhse_extended_control_field = 0;
+
+    // Best-effort message name, e.g. "FDA Open Session Req", "SM Identify Rsp", "FMS Initiate
+    // Err" -- always set when protocol == "ffhse".
+    std::string ffhse_message_name;
+    bool ffhse_recognized = false;   // this decoder recognized the (protocol,type,confirmed,
+                                       // service id) combination at all (Tier 1 OR Tier 2)
+    bool ffhse_body_decoded = false;  // true only for a Tier-1 message whose body matched this
+                                        // decoder's expected shape -- see ffhse.hpp's Tier-1/Tier-2
+                                        // split
+    // One "field=value" entry per decoded field, wire order -- mirrors hartip_values'/
+    // bacnet_values' scheme. Populated only when ffhse_body_decoded.
+    std::vector<std::string> ffhse_values;
+
+    bool ffhse_body_shown_as_hex = false;
+    std::string ffhse_body_hex;
+    size_t ffhse_body_length = 0;
 };
 
 // Cross-packet DNP3 fragment-reassembly state for one directional TCP flow (src ip:port -> dst

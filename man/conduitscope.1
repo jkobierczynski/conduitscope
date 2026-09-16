@@ -1,6 +1,6 @@
 .TH CONDUITSCOPE 1 "2026" "conduitscope 0.1.0" "User Commands"
 .SH NAME
-conduitscope \- decode Modbus/TCP, DNP3, IEC 60870-5-104, S7comm/COTP, S7comm-Plus (Siemens TIA Portal / S7-1200/1500), IEC 61850 MMS (Manufacturing Message Specification, ISO 9506), EtherNet/IP (CIP explicit and implicit messaging), PROFINET RT (DCP and cyclic real-time IO), IEC 61850-8-1 GOOSE, IEC 61850-9-2 Sampled Values, EtherCAT, BACnet/IP, HART-IP, OPC UA Binary, and MQTT (v3.1/v3.1.1/v5.0, including Sparkplug B) traffic from offline pcap/pcapng captures
+conduitscope \- decode Modbus/TCP, DNP3, IEC 60870-5-104, S7comm/COTP, S7comm-Plus (Siemens TIA Portal / S7-1200/1500), IEC 61850 MMS (Manufacturing Message Specification, ISO 9506), EtherNet/IP (CIP explicit and implicit messaging), PROFINET RT (DCP and cyclic real-time IO), IEC 61850-8-1 GOOSE, IEC 61850-9-2 Sampled Values, EtherCAT, BACnet/IP, HART-IP, OPC UA Binary, MQTT (v3.1/v3.1.1/v5.0, including Sparkplug B), and FOUNDATION Fieldbus HSE (FDA/SM/FMS/LAN Redundancy) traffic from offline pcap/pcapng captures
 .SH SYNOPSIS
 .B conduitscope
 [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-color\fR|\fB\-\-color\fR] [\fB\-\-log\-file\fR \fIFILE\fR] \fICOMMAND\fR [\fIOPTIONS\fR]
@@ -41,7 +41,12 @@ HART-IP \-\- due to having no fixed magic number or length field of its own)
 and, layered on top of it, Sparkplug B (the Eclipse Tahu IIoT convention,
 protobuf-encoded payloads under the \fIspBv1.0/...\fR topic namespace,
 decoded via a hand-rolled Protocol Buffers reader) traffic found inside its
-TCP streams, and checks
+TCP streams, plus FOUNDATION Fieldbus HSE (FF-HSE \-\- FDA port 1090, SM
+port 1091, LAN Redundancy port 3622, ff-annunc port 1089, all TCP AND UDP,
+tried dead LAST of all protocols on both transports due to its own
+genuinely weak, single-byte structural detection gate \-\- the sub-protocol
+itself is signaled in-band by the header, not by port) traffic found on
+either transport, and checks
 decoded traffic against a
 zone-and-conduit segmentation policy (IEC 62443 / NIS2 style work) via
 \fBpolicy validate\fR.
@@ -106,9 +111,10 @@ Write output here instead of stdout.
 .BR \-f ", " \-\-format " " {text,json,csv}
 Output format. Default: text.
 .TP
-.B \-\-protocol {auto,modbus,dnp3,iec104,s7comm,s7comm\-plus,mms,enip,profinet,goose,sv,ethercat,bacnet,hartip,opcua,mqtt}
-Restrict decoding to one protocol. Default: auto (tries all ten TCP
-protocols, independent of port number, plus CIP I/O and BACnet/IP on every
+.B \-\-protocol {auto,modbus,dnp3,iec104,s7comm,s7comm\-plus,mms,enip,profinet,goose,sv,ethercat,bacnet,hartip,opcua,mqtt,ff\-hse}
+Restrict decoding to one protocol. Default: auto (tries all eleven TCP
+protocols, independent of port number, plus CIP I/O, BACnet/IP, HART-IP, and
+FF-HSE on every
 UDP payload,
 plus PROFINET RT on every non-IPv4 Ethernet frame carrying EtherType
 0x8892, plus GOOSE on every non-IPv4 Ethernet frame carrying EtherType
@@ -128,13 +134,14 @@ tried immediately after (same TPKT/COTP framing, same TCP port
 its own separate structural gate (a plausible Session SPDU type, a "bare
 MMS" PDU tag, or "bare Presentation" bytes -- see \fBdocs/MANUAL.md\fR's
 PROTOCOL COVERAGE MMS section), and
-HART-IP is tried second-to-last, on both TCP and UDP, since its own 8-byte
-header check is the weakest structural gate of any protocol here and is
+HART-IP is tried third-to-last, on both TCP and UDP, since its own 8-byte
+header check was the weakest structural gate of any protocol here and is
 known to collide with Modbus/TCP's own detection on TCP (never resolved by
 reordering -- see
-\fBdocs/MANUAL.md\fR's PROTOCOL DETECTION section), and MQTT is tried last
-of all: it has no fixed magic number or length field of its own, so it only
-gets a turn once every other protocol (HART-IP included) has already
+\fBdocs/MANUAL.md\fR's PROTOCOL DETECTION section), MQTT is tried
+second-to-last: it has no fixed magic number or length field of its own, so
+it only gets a turn once every other protocol except FF-HSE (HART-IP
+included) has already
 declined the bytes; real validation nonetheless found two genuine
 collisions this ordering alone didn't resolve -- a v5 CONNACK payload that
 coincidentally satisfied Modbus/TCP's own \fIprotocol_id==0\fR tell (fixed
@@ -142,7 +149,11 @@ with a length-plausibility cap in Modbus's TCP parser) and small MQTT
 packet identifiers that coincidentally satisfied HART-IP's own weak gate
 (worked around on the test-fixture side, deliberately without weakening
 HART-IP's own gate) -- see \fBdocs/MANUAL.md\fR's PROTOCOL DETECTION
-section. \fBenip\fR covers both
+section, and FF-HSE is tried dead LAST of all, on both TCP and UDP: its own
+structural gate is a SINGLE byte at header offset 2 landing on one of 12
+valid values out of 256, honestly the weakest gate in this whole codebase,
+weaker even than MQTT's own -- see \fBdocs/MANUAL.md\fR's PROTOCOL
+DETECTION section's "Why FF-HSE is tried last of all". \fBenip\fR covers both
 EtherNet/IP explicit messaging (TCP) and CIP I/O implicit messaging (UDP).
 \fBmms\fR is IEC 61850 MMS -- shares S7comm's exact transport/port but is a
 distinct protocol; there is no separate \fB\-\-mms\-port\fR, see
@@ -150,6 +161,8 @@ distinct protocol; there is no separate \fB\-\-mms\-port\fR, see
 \fBsv\fR is IEC 61850-9-2 Sampled Values. \fBethercat\fR is EtherCAT.
 \fBbacnet\fR is BACnet/IP.
 \fBhartip\fR is HART-IP, tried on both TCP and UDP.
+\fBff\-hse\fR is FOUNDATION Fieldbus HSE (FDA/SM/FMS/LAN Redundancy), tried
+on both TCP and UDP.
 \fBprofinet\fR covers both DCP and cyclic real-time IO.
 \fBopcua\fR is OPC UA Binary (UA-TCP/Secure Conversation), TCP only.
 .TP
@@ -189,6 +202,12 @@ Same as \fB\-\-modbus\-port\fR, for OPC UA. Repeatable. TCP only.
 .B \-\-mqtt\-port \fIPORT\fR
 Same as \fB\-\-modbus\-port\fR, for MQTT (built\-in default: 1883).
 Repeatable. TCP only.
+.TP
+.B \-\-ffhse\-port \fIPORT\fR
+Same as \fB\-\-modbus\-port\fR, for FOUNDATION Fieldbus HSE (built\-in
+defaults: 1089/1090/1091/3622). Repeatable. Applies to both TCP and UDP,
+and shared across FDA/SM/FMS/LAN Redundancy \-\- the sub-protocol is
+signaled in-band by the header, not by port.
 .TP
 .B \-\-max\-packets \fIN\fR
 Stop after decoding this many packets. Default: 0 (unlimited). With
@@ -299,7 +318,10 @@ Sampled Values, bright yellow for EtherCAT, bright blue for BACnet/IP,
 bright white for HART-IP, bright red for OPC UA, bold cyan for MQTT
 (deliberately close to Modbus's plain cyan, but bold and otherwise distinct
 from every other tag color -- MQTT shares no transport/port with any other
-decoded protocol), dim
+decoded protocol), bright red for FF-HSE too (deliberately shares OPC UA's
+own bright red rather than adding a 20th distinct hue -- the two never
+share a transport/port, so there is no realistic capture where this
+collision would actually confuse a reader scanning by eye), dim
 for everything else
 recognized but not OT\-specific. A Modbus exception response's summary, and a
 \fBparse\-error\fR packet's whole line, are bold red. Notes are dim.
@@ -509,13 +531,39 @@ and fixed; despite a genuine search, no real Sparkplug B capture was
 found, so Sparkplug B decoding is validated only against a hand-built
 synthetic fixture (see \fBdocs/MANUAL.md\fR's LIMITATIONS section and
 \fBtests/real_captures/mqtt/ATTRIBUTION.md\fR for the full detail);
+FOUNDATION Fieldbus HSE (FF-HSE, ports 1089/1090/1091/3622, TCP and UDP) is
+also now decoded \-\- the 12-byte common header, its Options/trailer
+bitmask fields, the great majority of FDA/SM/LAN Redundancy messages, and
+FMS's own session-lifecycle/status/identify/read/write family, all sourced
+from Wireshark's own vendor-authored \fBpacket-ff.c\fR dissector (no free
+copy of FF-HSE's own paywalled FieldComm Group specs was available) \-\-
+but its own structural detection gate (a single byte at header offset 2)
+is honestly the WEAKEST in this whole codebase, so it is dispatched dead
+LAST of all protocols, on both TCP and UDP; FMS's Get OD, Define/Delete
+Variable List, the Download/Upload and Program Invocation families, and
+unconfirmed Event Notification are named only, shown as raw hex (FMS Get
+OD is left undecoded even by the reference dissector itself); FMS
+Read/Write values are likewise always left as raw hex, since an FMS value
+has no self-describing wire type without external Object Dictionary
+context; the SM Identify Rsp / SM Device Annunciation LinkId branch (whose
+trailing version-number list's own internal shape depends on a LinkId
+value computed from the header, not the body) is this decoder's single
+trickiest piece; whether cyclic Publisher/Subscriber traffic reuses the
+unconfirmed FMS Information Report family is flagged everywhere as this
+decoder's own inference, never asserted as fact; Network Management
+(FF-803) and full HSE Redundancy beyond basic LAN Redundancy Get/Put/
+Diagnostic are entirely out of scope; and despite a genuine multi-source
+search, no real FF-HSE capture was found anywhere, so validation is
+against a hand-built synthetic fixture only (see \fBdocs/MANUAL.md\fR's
+PROTOCOL COVERAGE FOUNDATION Fieldbus HSE section and LIMITATIONS section
+for the full detail);
 non-IPv4
 Ethernet frames and non-TCP
 IPv4 payloads (including UDP) are otherwise still just recognized and
 NAMED for a small OT-relevant set (ARP, LLDP, ICMP, and the rest) but not further decoded, and
 \fBpolicy validate\fR does not yet evaluate any non-TCP traffic (CIP I/O,
-PROFINET RT, GOOSE, Sampled Values, EtherCAT, BACnet/IP, and HART-IP's own
-UDP traffic included) against a conduit;
+PROFINET RT, GOOSE, Sampled Values, EtherCAT, BACnet/IP, HART-IP's own UDP
+traffic, and FF-HSE's own UDP traffic included) against a conduit;
 Modbus request/response
 classification falls back to a payload-shape heuristic only when
 authoritative pairing can't be done (no matching request on this session);
@@ -745,6 +793,25 @@ group/edge-node/device:
 conduitscope decode \-r capture.pcap \-\-protocol mqtt \-f json \e
   | jq \-r '.[] | select(.mqtt_is_sparkplug and (.mqtt_sparkplug_metrics // [] | length > 0)) |
            "\e(.mqtt_sparkplug_group_id)/\e(.mqtt_sparkplug_edge_node_id)\e(.mqtt_sparkplug_device_id // "" | if . == "" then "" else "/" + . end) \e(.mqtt_sparkplug_message_type): \e(.mqtt_sparkplug_metrics | join(", "))"'
+.EE
+.RE
+.PP
+Summarize FF-HSE traffic by sub-protocol and message name:
+.RS
+.EX
+conduitscope decode \-r capture.pcap \-\-protocol ff\-hse \-f json \e
+  | jq \-r '[.[] | select(.ffhse_protocol != null) | "\e(.ffhse_protocol) / \e(.ffhse_message_name)"] |
+           group_by(.) | map("\e(length)x \e(.[0])") | .[]'
+.EE
+.RE
+.PP
+Pull every decoded FF-HSE field=value pair, alongside which message they
+came from:
+.RS
+.EX
+conduitscope decode \-r capture.pcap \-\-protocol ff\-hse \-f json \e
+  | jq \-r '.[] | select(.ffhse_values // [] | length > 0) |
+           "\e(.src_ip) \-> \e(.dst_ip): \e(.ffhse_message_name): \e(.ffhse_values | join(", "))"'
 .EE
 .RE
 .PP

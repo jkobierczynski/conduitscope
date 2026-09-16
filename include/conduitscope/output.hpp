@@ -112,6 +112,13 @@ private:
     size_t s7plus_body_decoded_count_ = 0;  // Tier-1 functions this decoder fully decoded (see
                                               // s7commplus.hpp); the gap vs. s7plus_has_function's
                                               // own total count is everything left Tier-2
+    std::map<std::string, size_t> ffhse_protocol_counts_;  // "FDA Session Management"/"SM"/"FMS"/
+                                                              // "LAN Redundancy"
+    std::map<std::string, size_t> ffhse_message_counts_;   // keyed by ffhse_message_name, only
+                                                              // when ffhse_recognized
+    size_t ffhse_body_decoded_count_ = 0;  // Tier-1 messages this decoder fully decoded -- the gap
+                                             // vs. ffhse_message_counts_'s own total is everything
+                                             // left Tier-2 or unrecognized
     bool has_ts_ = false;
     double first_ts_ = 0.0, last_ts_ = 0.0;
 };

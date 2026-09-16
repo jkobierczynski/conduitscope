@@ -6,7 +6,8 @@ EtherNet/IP (CIP explicit and implicit messaging), PROFINET RT (DCP device
 discovery/configuration and cyclic real-time I/O data), IEC 61850-8-1 GOOSE,
 IEC 61850-9-2 Sampled Values, EtherCAT, BACnet/IP, HART-IP, OPC UA Binary
 (UA-TCP/Secure Conversation), IEC 61850 MMS (Manufacturing Message Specification,
-ISO 9506), and MQTT (v3.1/v3.1.1/v5.0, including Sparkplug B) traffic from offline
+ISO 9506), MQTT (v3.1/v3.1.1/v5.0, including Sparkplug B), and FOUNDATION
+Fieldbus HSE (FDA/SM/FMS/LAN Redundancy) traffic from offline
 pcap/pcapng captures, and checks it
 against a zone/conduit segmentation policy. It's an OT/ICS conduit-auditing tool: `decode`/`info` give you reliable
 protocol decoding and a stats view, and `policy validate` maps that decoded traffic
@@ -535,6 +536,50 @@ Groundwork / v0.1.0. What works right now:
   risk) and an unsigned-integer-underflow risk in a truncated-frame length
   calculation. See tests/real_captures/s7comm/ATTRIBUTION.md's own
   S7comm-Plus addendum and include/conduitscope/s7commplus.hpp for the
+  wire-format details.
+- FOUNDATION Fieldbus HSE (FF-HSE, ports 1089/1090/1091/3622 for
+  FDA/FMS/SM/LAN Redundancy respectively, TCP and UDP -- but the
+  sub-protocol is signaled in-band by the header itself, so every port is
+  an "expected port" annotation only, never a detection gate): FF-HSE's own
+  official FieldComm Group specifications are all paywalled, so every byte
+  offset this decoder asserts is instead cross-checked against Wireshark's
+  own mainline dissector, `packet-ff.c`/`packet-ff.h` (GPL-2.0-or-later,
+  vendor-authored by Yukiyo Akisada, a Yokogawa engineer, directly against
+  the official FF-588-1.3 spec with inline spec-clause citations) -- a raw
+  copy of that dissector source was available for direct inspection, not
+  just a secondhand transcription, which is what let the full ErrorClass/
+  ErrorCode tables and every FDA/SM/FMS/LAN Redundancy service name be
+  pulled byte-for-byte rather than approximated. The same two-tier split
+  this codebase already applies to MMS/OPC UA/S7comm-Plus: the 12-byte
+  common header, its Options/trailer bitmask fields, and the great majority
+  of FDA/SM/LAN Redundancy messages plus FMS's own session-lifecycle/
+  status/identify/read/write family are fully decoded, while FMS's Get OD,
+  Define/Delete Variable List, the Download/Upload and Program Invocation
+  families, and unconfirmed Event Notification are named only, shown as raw
+  hex (FMS Get OD is left undecoded even by the reference dissector itself,
+  since OD entries depend on Device Description content neither has
+  access to). The single trickiest piece is the LinkId branch shared by SM
+  Identify Rsp and SM Device Annunciation: a 108-byte fixed body plus a
+  trailing version-number list whose *internal* shape (2-byte pairs vs.
+  4-byte quads) depends on a LinkId value computed from the 12-byte
+  header's own FDA Address field, not anything inside the message body --
+  documented explicitly since getting it backwards would silently
+  misinterpret every list entry after the first. This decoder's own
+  structural detection gate is honestly the **weakest in this codebase**:
+  a single byte at header offset 2, landing on one of 12 valid values out
+  of 256 -- weaker even than HART-IP's already-weak two-byte gate -- so
+  FF-HSE is dispatched dead last in Auto mode, after every other protocol
+  here including HART-IP and MQTT, on both TCP and UDP. No distinct cyclic
+  Publisher/Subscriber message shape was found anywhere in the reference
+  source, so this decoder's best guess that HSE's cyclic/multicast
+  function-block traffic reuses the FMS Information Report family (Service
+  Ids 0/16/17/18) is flagged everywhere as an unconfirmed inference, never
+  asserted as fact. No public real-world FF-HSE capture could be found
+  (the usual ICS pcap collections predate it or don't cover it, and a
+  small synthetic capture referenced in a Wireshark GitLab bug report
+  could not be retrieved either) -- this decoder is therefore validated
+  only against its own synthetic fixture. See docs/MANUAL.md's FOUNDATION
+  Fieldbus HSE section and include/conduitscope/ffhse.hpp for the full
   wire-format details.
 - Non-IPv4 Ethernet frames and non-TCP IPv4 payloads (including UDP) are now
   recognized and named, not just reported as a bare hex/number and dropped:

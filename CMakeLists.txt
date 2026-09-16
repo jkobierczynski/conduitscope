@@ -37,6 +37,7 @@ add_library(conduitscope_core STATIC
   src/ethercat.cpp
   src/bacnet.cpp
   src/hartip.cpp
+  src/ffhse.cpp
   src/opcua.cpp
   src/cotp.cpp
   src/s7comm.cpp
@@ -681,7 +682,7 @@ set_tests_properties(enip_unregister_session_decoded PROPERTIES
 add_test(NAME enip_nop_not_detected
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enip_nop_precedence.pcap" --format text)
 set_tests_properties(enip_nop_not_detected PROPERTIES
-  PASS_REGULAR_EXPRESSION "\\[tcp\\]  TCP payload of 24 byte\\(s\\) on port 52001->44818 did not match OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, COTP/S7comm/MMS, HART-IP, or MQTT")
+  PASS_REGULAR_EXPRESSION "\\[tcp\\]  TCP payload of 24 byte\\(s\\) on port 52001->44818 did not match OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, COTP/S7comm/MMS, HART-IP, MQTT, or FF-HSE")
 
 # --------------------------------------------------------------------------
 # EtherNet/IP CIP I/O (implicit messaging), synthetic (tests/sample_enip_cip_io.pcap): UDP/2222
@@ -2828,7 +2829,7 @@ set_tests_properties(mqtt_invalid_qos_and_truncated_body_notes PROPERTIES
 add_test(NAME mqtt_bogus_connect_protocol_name_rejected
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mqtt.pcap" --format text)
 set_tests_properties(mqtt_bogus_connect_protocol_name_rejected PROPERTIES
-  PASS_REGULAR_EXPRESSION "\\[tcp\\]  TCP payload of 16 byte\\(s\\) on port 55020->1883 did not match OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, COTP/S7comm/MMS, HART-IP, or MQTT")
+  PASS_REGULAR_EXPRESSION "\\[tcp\\]  TCP payload of 16 byte\\(s\\) on port 55020->1883 did not match OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, COTP/S7comm/MMS, HART-IP, MQTT, or FF-HSE")
 
 # A genuinely truncated/incomplete final packet on its own flow -- declares more Remaining Length
 # than actually follows, with nothing more ever arriving in this capture -- the TCP-reassembly
@@ -3300,6 +3301,221 @@ add_test(NAME padded_ack_trim_note_present
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_padded_ack.pcap" --format text)
 set_tests_properties(padded_ack_trim_note_present PROPERTIES
   PASS_REGULAR_EXPRESSION "were trimmed")
+
+# --------------------------------------------------------------------------
+# FOUNDATION Fieldbus HSE (FDA/SM/FMS/LAN Redundancy) -- tests/sample_ffhse.pcap, see
+# tools/make_sample_pcap.py's own build_ffhse_sample() docstring for the full scenario list.
+# --------------------------------------------------------------------------
+
+# FDA Open Session Req/Rsp/Err -- the Rsp also carries a Message-Number + Invoke-Id trailer.
+add_test(NAME ffhse_fda_open_session_req_rsp_err
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ffhse.pcap" --format json)
+set_tests_properties(ffhse_fda_open_session_req_rsp_err PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"ffhse_message_name\": \"FDA Open Session Req\",.*\"ffhse_values\": \\[\"session-index=1\", \"max-buffer-size=8192\", \"max-msg-length=8192\", \"reserved=0x00\", \"nma-configuration-use=1 \\(NMA Configuration Permitted\\)\".*\"ffhse_message_number\": 1,.*\"ffhse_invoke_id\": 1,.*\"ffhse_message_name\": \"FDA Open Session Rsp\".*\"ffhse_message_name\": \"FDA Open Session Err\",.*\"error-class=5 \\(Service\\)\", \"error-code=6 \\(unsupported service\\)\"")
+
+# FDA Idle Req/Rsp (both expected empty) and an FDA service id this decoder does not recognize.
+add_test(NAME ffhse_fda_idle_and_unrecognized_service
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ffhse.pcap" --format json)
+set_tests_properties(ffhse_fda_idle_and_unrecognized_service PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"ffhse_message_name\": \"FDA Idle Req\",.*\"ffhse_body_decoded\": true.*\"ffhse_message_name\": \"FDA Idle Rsp\",.*\"ffhse_message_name\": \"FDA service 2\",.*\"ffhse_recognized\": false,.*\"ffhse_body_shown_as_hex\": true.*FDA service id 2 is not recognized by this decoder -- shown as raw hex")
+
+# SM Find Tag Query Req and SM Find Tag Reply Req (unconfirmed) -- the Reply's own FDA Address
+# Selector list (2 entries).
+add_test(NAME ffhse_sm_find_tag_query_and_reply
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ffhse.pcap" --format json)
+set_tests_properties(ffhse_sm_find_tag_query_and_reply PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"ffhse_message_name\": \"SM Find Tag Query Req\",.*\"query-type=0 \\(PD Tag query for primary device\\)\".*\"ffhse_message_name\": \"SM Find Tag Reply Req\",.*\"fda-address-selector\\[0\\]=0x1111\", \"fda-address-selector\\[1\\]=0x2222\"")
+
+# SM Identify Rsp on BOTH LinkId branches -- the single trickiest piece of this decoder (see
+# ffhse.hpp's own "The LinkId branch" section): LinkId != 0 decodes the trailing list as 2-byte
+# H1NodeAddress+VersionNumber pairs; LinkId == 0 decodes it as 4-byte H1LinkId+Reserved+Version
+# quads -- same total byte count, different internal shape.
+add_test(NAME ffhse_sm_identify_linkid_nonzero_branch
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ffhse.pcap" --format json)
+set_tests_properties(ffhse_sm_identify_linkid_nonzero_branch PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"version-number-list\\[0\\].a=h1-node-address=0x01 version=1\", \"version-number-list\\[0\\].b=h1-node-address=0x02 version=1\".*LinkId \\(this PDU's own header FDA Address, upper 16 bits\\) = 0x0005 -- version-number-list decoded as H1NodeAddress\\+VersionNumber pairs")
+
+add_test(NAME ffhse_sm_identify_linkid_zero_branch
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ffhse.pcap" --format json)
+set_tests_properties(ffhse_sm_identify_linkid_zero_branch PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"version-number-list\\[0\\]=h1-link-id=0x0005 version=1\", \"version-number-list\\[1\\]=h1-link-id=0x0006 version=2\".*LinkId \\(this PDU's own header FDA Address, upper 16 bits\\) = 0x0000 -- version-number-list decoded as H1LinkId\\+Reserved\\+VersionNumber quads")
+
+# SM Device Annunciation Req (unconfirmed) reuses the SAME 108-byte-plus-list shape as SM
+# Identify Rsp, on both LinkId branches again.
+add_test(NAME ffhse_sm_device_annunciation_both_linkid_branches
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ffhse.pcap" --format json)
+set_tests_properties(ffhse_sm_device_annunciation_both_linkid_branches PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"ffhse_message_name\": \"SM Device Annunciation Req\",.*H1NodeAddress\\+VersionNumber pairs.*\"ffhse_message_name\": \"SM Device Annunciation Req\",.*H1LinkId\\+Reserved\\+VersionNumber quads")
+
+# SM Clear Address Req/Rsp (confirmed) -- Rsp is expected empty.
+add_test(NAME ffhse_sm_clear_address_req_rsp
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ffhse.pcap" --format json)
+set_tests_properties(ffhse_sm_clear_address_req_rsp PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"ffhse_message_name\": \"SM Clear Address Req\",.*\"interface-to-clear=0x01\".*\"ffhse_message_name\": \"SM Clear Address Rsp\",.*\"ffhse_body_decoded\": true")
+
+# SM Set Assignment Info Req/Rsp (two DIFFERENT body shapes) and its own Err.
+add_test(NAME ffhse_sm_set_assignment_info_req_rsp_err
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ffhse.pcap" --format json)
+set_tests_properties(ffhse_sm_set_assignment_info_req_rsp_err PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"ffhse_message_name\": \"SM Set Assignment Info Req\",.*\"h1-new-address=0x05\".*\"ffhse_message_name\": \"SM Set Assignment Info Rsp\",.*\"max-device-index=8\", \"hse-repeat-time=1000\".*\"ffhse_message_name\": \"SM Set Assignment Info Err\",.*\"error-class=5 \\(Service\\)\", \"error-code=12 \\(assignments already made\\)\"")
+
+# SM Clear Assignment Info Req/Rsp (Rsp expected empty) and an SM unconfirmed service id this
+# decoder does not recognize.
+add_test(NAME ffhse_sm_clear_assignment_and_unrecognized_service
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ffhse.pcap" --format json)
+set_tests_properties(ffhse_sm_clear_assignment_and_unrecognized_service PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"ffhse_message_name\": \"SM Clear Assignment Info Req\",.*\"ffhse_message_name\": \"SM Clear Assignment Info Rsp\",.*\"ffhse_message_name\": \"SM unconfirmed service 7\",.*SM unconfirmed service id 7 is not recognized by this decoder -- shown as raw hex")
+
+# FMS Initiate Req/Rsp/Err -- the Rsp also carries a full 8-byte Time Stamp trailer.
+add_test(NAME ffhse_fms_initiate_req_rsp_err_with_timestamp_trailer
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ffhse.pcap" --format json)
+set_tests_properties(ffhse_fms_initiate_req_rsp_err_with_timestamp_trailer PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"ffhse_message_name\": \"FMS Initiate Req\",.*\"connect-option=1 \\(VCR Selector\\)\".*\"ffhse_time_stamp\": 72623859790382856,.*\"ffhse_message_name\": \"FMS Initiate Rsp\",.*\"ver-od-called=1\", \"prof-num-called=1\".*\"ffhse_message_name\": \"FMS Initiate Err\",.*\"error-class=11 \\(FMS Initiate\\)\", \"error-code=2 \\(feature-not-supported\\)\"")
+
+# FMS Status Req (empty)/Rsp and FMS Identify Req (empty)/Rsp.
+add_test(NAME ffhse_fms_status_and_identify
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ffhse.pcap" --format json)
+set_tests_properties(ffhse_fms_status_and_identify PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"ffhse_message_name\": \"FMS Status Req\",.*\"ffhse_message_name\": \"FMS Status Rsp\",.*\"logical-status=0x00\", \"physical-status=0x00\", \"local-detail=0\".*\"ffhse_message_name\": \"FMS Identify Req\",.*\"ffhse_message_name\": \"FMS Identify Rsp\",.*\"vendor-name=..Yokogawa")
+
+# FMS Read / Read with Subindex -- the Req's Index is decoded, but the Rsp's own returned VALUE
+# is deliberately left raw (no self-describing wire type without external Object Dictionary
+# context) -- see ffhse.hpp's Tier-1/Tier-2 split paragraph.
+add_test(NAME ffhse_fms_read_and_read_with_subindex_value_left_raw
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ffhse.pcap" --format json)
+set_tests_properties(ffhse_fms_read_and_read_with_subindex_value_left_raw PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"ffhse_message_name\": \"FMS Read Req\",.*\"ffhse_values\": \\[\"index=315\"\\].*\"ffhse_message_name\": \"FMS Read Rsp\",.*has no self-describing wire type without external Object Dictionary context.*\"ffhse_message_name\": \"FMS Read with Subindex Req\",.*\"index=316\", \"subindex=2\".*\"ffhse_message_name\": \"FMS Read with Subindex Rsp\",.*has no self-describing wire type")
+
+# FMS Write / Write with Subindex -- Index is genuinely decoded, but Data is left raw hex inline
+# (same reasoning as Read's own value).
+add_test(NAME ffhse_fms_write_and_write_with_subindex_data_left_raw
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ffhse.pcap" --format json)
+set_tests_properties(ffhse_fms_write_and_write_with_subindex_data_left_raw PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"ffhse_message_name\": \"FMS Write Req\",.*\"index=315\".*\"ffhse_body_hex\": \"42a00000\",.*Write Data has no self-describing wire type.*\"ffhse_message_name\": \"FMS Write Rsp\",.*\"ffhse_message_name\": \"FMS Write with Subindex Req\",.*\"index=316\", \"subindex=2\".*Write Data has no self-describing wire type")
+
+# The FMS unconfirmed Information Report family -- 2 body shapes reused across 4 service ids
+# (plain Index+Data vs Index+Subindex+Data).
+add_test(NAME ffhse_fms_information_report_family
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ffhse.pcap" --format json)
+set_tests_properties(ffhse_fms_information_report_family PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"ffhse_message_name\": \"FMS Information Report Req\",.*\"ffhse_values\": \\[\"index=315\"\\].*\"ffhse_message_name\": \"FMS Information Report with Subindex Req\",.*\"index=316\", \"subindex=2\".*\"ffhse_message_name\": \"FMS Information Report On Change Req\",.*\"ffhse_message_name\": \"FMS Information Report On Change with Subindex Req\",.*\"index=316\", \"subindex=2\"")
+
+# FMS Unsolicited Status Req (unconfirmed, same 8-byte shape as the confirmed Status Rsp) and
+# FMS Abort (unconfirmed).
+add_test(NAME ffhse_fms_unsolicited_status_and_abort
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ffhse.pcap" --format json)
+set_tests_properties(ffhse_fms_unsolicited_status_and_abort PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"ffhse_message_name\": \"FMS Unsolicited Status Req\",.*\"logical-status=0x01\", \"physical-status=0x00\", \"local-detail=5\".*\"ffhse_message_name\": \"FMS Abort Req\",.*\"abort-detail=000102030405060708090a0b0c0d0e0f\", \"abort-id=0x01\", \"reason-code=0x02\"")
+
+# FMS Event Notification Req (unconfirmed) -- Tier 2, shown as raw hex.
+add_test(NAME ffhse_fms_event_notification_tier2
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ffhse.pcap" --format json)
+set_tests_properties(ffhse_fms_event_notification_tier2 PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"ffhse_message_name\": \"FMS Event Notification Req\",.*\"ffhse_recognized\": true,.*\"ffhse_body_decoded\": false,.*\"ffhse_body_shown_as_hex\": true.*this decoder does not further decode message FMS Event Notification -- shown as raw hex")
+
+# FMS Get OD Req/Rsp (confirmed) -- Tier 2, both directions, with the note that even the
+# reference Wireshark dissector leaves OD entries undecoded.
+add_test(NAME ffhse_fms_get_od_tier2_both_directions
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ffhse.pcap" --format json)
+set_tests_properties(ffhse_fms_get_od_tier2_both_directions PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"ffhse_message_name\": \"FMS Get OD Req\",.*even the reference Wireshark dissector leaves FMS Get OD entries undecoded.*\"ffhse_message_name\": \"FMS Get OD Rsp\",.*even the reference Wireshark dissector leaves FMS Get OD entries undecoded")
+
+# An FMS confirmed AND an FMS unconfirmed service id this decoder does not recognize.
+add_test(NAME ffhse_fms_confirmed_and_unconfirmed_unrecognized_service
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ffhse.pcap" --format json)
+set_tests_properties(ffhse_fms_confirmed_and_unconfirmed_unrecognized_service PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"ffhse_message_name\": \"FMS confirmed service 50\",.*FMS confirmed service id 50 is not recognized by this decoder.*\"ffhse_message_name\": \"FMS unconfirmed service 99\",.*FMS unconfirmed service id 99 is not recognized by this decoder")
+
+# LAN Redundancy Get Info Req (empty)/Rsp and Put Info Req/Rsp (identical shape both directions).
+add_test(NAME ffhse_lan_get_and_put_info
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ffhse.pcap" --format json)
+set_tests_properties(ffhse_lan_get_and_put_info PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"ffhse_message_name\": \"LAN Redundancy Get Info Req\",.*\"ffhse_message_name\": \"LAN Redundancy Get Info Rsp\",.*\"max-msg-num-diff=1 \\(Do not detect a fault\\)\".*\"lr-flags-flag=cross-cable\", \"lr-flags-flag=multi-trans\".*\"ffhse_message_name\": \"LAN Redundancy Put Info Req\",.*\"ffhse_message_name\": \"LAN Redundancy Put Info Rsp\"")
+
+# LAN Redundancy Get Statistics Req (empty)/Rsp (2 XCableStat entries) and its own Err.
+add_test(NAME ffhse_lan_get_statistics_req_rsp_err
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ffhse.pcap" --format json)
+set_tests_properties(ffhse_lan_get_statistics_req_rsp_err PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"ffhse_message_name\": \"LAN Redundancy Get Statistics Req\",.*\"ffhse_message_name\": \"LAN Redundancy Get Statistics Rsp\",.*\"num-x-cable-stat=2\", \"x-cable-stat\\[0\\]=5\", \"x-cable-stat\\[1\\]=7\".*\"ffhse_message_name\": \"LAN Redundancy Get Statistics Err\",.*\"error-class=8 \\(Other\\)\"")
+
+# LAN Redundancy Diagnostic Message Req (unconfirmed) -- 1 interface-status entry across all 4
+# parallel lists (A-to-A/B-to-A/A-to-B/B-to-B).
+add_test(NAME ffhse_lan_diagnostic_message
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ffhse.pcap" --format json)
+set_tests_properties(ffhse_lan_diagnostic_message PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"ffhse_message_name\": \"LAN Redundancy Diagnostic Message Req\",.*\"if-a-to-a-status\\[0\\]=1\", \"if-b-to-a-status\\[0\\]=0\", \"if-a-to-b-status\\[0\\]=1\", \"if-b-to-b-status\\[0\\]=0\"")
+
+# LAN Redundancy unconfirmed AND confirmed service ids this decoder does not recognize.
+add_test(NAME ffhse_lan_unrecognized_services
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ffhse.pcap" --format json)
+set_tests_properties(ffhse_lan_unrecognized_services PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"ffhse_message_name\": \"LAN Redundancy unconfirmed service 5\",.*LAN Redundancy unconfirmed service id 5 is not recognized.*\"ffhse_message_name\": \"LAN Redundancy confirmed service 9\",.*LAN Redundancy confirmed service id 9 is not recognized")
+
+# A message with ALL FOUR optional trailer fields present at once (Options 0xE8 = 232).
+add_test(NAME ffhse_all_four_trailer_fields_present
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ffhse.pcap" --format json)
+set_tests_properties(ffhse_all_four_trailer_fields_present PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"ffhse_options\": 232,.*\"ffhse_message_number\": 7,.*\"ffhse_invoke_id\": 8,.*\"ffhse_time_stamp\": 1234605616436508552,.*\"ffhse_extended_control_field\": 168496141,.*\"ffhse_message_name\": \"FMS Status Req\"")
+
+# The decorative Pad Length sub-field (Options low 3 bits) is surfaced (as part of the raw
+# Options byte) but plays no role in this decoder's own length arithmetic -- see ffhse.hpp's
+# Options paragraph.
+add_test(NAME ffhse_pad_length_decorative_not_acted_on
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ffhse.pcap" --format json)
+set_tests_properties(ffhse_pad_length_decorative_not_acted_on PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"ffhse_options\": 7,.*\"ffhse_message_name\": \"FDA Idle Req\",.*\"ffhse_recognized\": true,.*\"ffhse_body_decoded\": true")
+
+# Two FF-HSE PDUs concatenated into ONE UDP datagram -- exercises the wire_length-driven
+# coalescing while-loop in decoder.cpp's UDP dispatch.
+add_test(NAME ffhse_udp_multi_pdu_coalescing
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ffhse.pcap" --format json)
+set_tests_properties(ffhse_udp_multi_pdu_coalescing PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"ffhse_message_name\": \"FDA Idle Req\",.*additional FF-HSE PDU 2 found in the same UDP datagram at byte offset 12: FDA Idle Rsp")
+
+# Malformed/truncated: Message Length claims a full 52-byte FDA Open Session Req body, but only
+# 20 bytes of it are actually present -- exercises both the "declares more than available" note
+# and require_min's own fallback to raw hex, never a crash or a silently wrong decode.
+add_test(NAME ffhse_malformed_truncated_body_falls_back_to_raw_hex
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ffhse.pcap" --format json)
+set_tests_properties(ffhse_malformed_truncated_body_falls_back_to_raw_hex PROPERTIES
+  PASS_REGULAR_EXPRESSION "FF-HSE message declares Message Length 64 but only 32 byte\\(s\\) are available -- truncated.*FF-HSE body\\+trailer \\(52 byte\\(s\\), from Message Length/Options\\) exceeds the 20 byte\\(s\\) actually available in this PDU -- truncated by 32 byte\\(s\\).*FDA Open Session Req body is 20 byte\\(s\\), expected at least 52 -- not decoded, shown as raw hex")
+
+# Unexpected port: an otherwise perfectly valid SM Identify Req on a port that is none of the 4
+# configured FF-HSE ports -- still decodes, but with the "not a configured/standard FF-HSE port"
+# note (matches HART-IP's/BACnet's own posture: port is an annotation, never a detection gate).
+add_test(NAME ffhse_unexpected_port_noted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ffhse.pcap" --format json)
+set_tests_properties(ffhse_unexpected_port_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"ffhse_message_name\": \"SM Identify Req\",.*seen on UDP port 52200->40000, which is not a configured/standard FF-HSE port \\(1089/1090/1091/3622\\)")
+
+# FF-HSE over TCP: the same 4 ports serve both transports -- a genuine FMS Initiate
+# request/response round trip.
+add_test(NAME ffhse_tcp_round_trip
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ffhse.pcap" --format json)
+set_tests_properties(ffhse_tcp_round_trip PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"src_port\": 52300,.*\"protocol\": \"ffhse\",.*\"ffhse_message_name\": \"FMS Initiate Req\",.*\"dst_port\": 52300,.*\"ffhse_message_name\": \"FMS Initiate Rsp\"")
+
+# One FDA Open Session Req PDU split across TWO TCP segments -- exercises
+# ffhse_declared_length-driven cross-segment reassembly (mirrors hartip_declared_length's own
+# TCP reassembly test): the first segment alone must show "buffering", not a wrong decode, and
+# the reassembled PDU must decode correctly once the second segment arrives.
+add_test(NAME ffhse_tcp_segment_split_reassembly
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ffhse.pcap" --format text)
+set_tests_properties(ffhse_tcp_segment_split_reassembly PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[tcp\\]  buffering a FF-HSE PDU PDU/frame split across TCP segments 52310->1090: 20 of 64 declared byte\\(s\\) seen so far across 1 segment\\(s\\) on this flow, waiting for more.*\\[ffhse\\]  FDA Open Session Req \\[session-index=1 \\+7 more\\]\n *note: reassembled a FF-HSE PDU PDU/frame from 64 byte\\(s\\) spanning 2 TCP segments on this flow")
+
+# Two SM Clear Assignment Info Rsp messages coalesced into ONE TCP segment (sender/OS coalescing)
+# -- exercises the wire_length-driven "additional FF-HSE message" loop for TCP.
+add_test(NAME ffhse_tcp_coalesced_pdus
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ffhse.pcap" --format json)
+set_tests_properties(ffhse_tcp_coalesced_pdus PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"ffhse_message_name\": \"SM Clear Assignment Info Rsp\",.*additional FF-HSE PDU 2 found in the same TCP payload at byte offset 12 \\(coalesced by the sender/OS\\): SM Clear Assignment Info Rsp")
+
+# --stats accumulation: sub-protocol counts, per-message counts, and the Tier-1-decoded total.
+add_test(NAME stats_mode_ffhse
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ffhse.pcap" --stats)
+set_tests_properties(stats_mode_ffhse PROPERTIES
+  PASS_REGULAR_EXPRESSION "ffhse sub-protocols:.*FDA Session Management.*FMS.*LAN Redundancy.*SM.*ffhse messages:.*ffhse message bodies fully decoded \\(Tier 1\\): [0-9]+")
 
 # ---------------------------------------------------------------------------------------------
 # pcapng support (pcap_reader.cpp's is_pcapng_/next_pcapng()). Fixtures generated by

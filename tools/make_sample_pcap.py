@@ -5240,6 +5240,512 @@ def build_mqtt_sample():
     (TESTS_DIR / "sample_mqtt.pcap").write_bytes(data)
 
 
+FFHSE_PORT_ANNUNC = 1089
+FFHSE_PORT_FMS = 1090
+FFHSE_PORT_SM = 1091
+FFHSE_PORT_LAN = 3622
+
+FFHSE_FDA = 0x04
+FFHSE_SM = 0x08
+FFHSE_FMS = 0x0c
+FFHSE_LAN = 0x10
+FFHSE_REQ = 0
+FFHSE_RSP = 1
+FFHSE_ERR = 2
+
+
+def ffhse_udp_frame(payload: bytes, sport: int, dport: int, src_ip: str, dst_ip: str,
+                     src_mac: bytes, dst_mac: bytes) -> bytes:
+    udp = udp_header(sport, dport, payload)
+    ip = ipv4_header(src_ip, dst_ip, 17, len(udp), 0x7400)
+    return eth_header(dst_mac, src_mac, 0x0800) + ip + udp
+
+
+def ffhse_pdu(protocol: int, type_: int, service_id: int, confirmed: bool, body: bytes = b"",
+              fda_address: int = 0, pad_length: int = 0, message_number=None, invoke_id=None,
+              time_stamp=None, ext_ctrl=None, version: int = 1, msg_length_override: int = None) -> bytes:
+    """The 12-byte FF-HSE common header (+ optional trailer, order fixed: Message Number, Invoke
+    Id, Time Stamp, Extended Control Field -- each only on the wire when its own kwarg here is not
+    None, which also sets its own Options bit) plus `body` -- see ffhse.hpp's file header comment.
+    `msg_length_override`, when given, writes a deliberately wrong Message Length (for
+    malformed-input fixtures) instead of the correct 12+len(body)+len(trailer)."""
+    options = pad_length & 0x07
+    trailer = b""
+    if message_number is not None:
+        options |= 0x80
+        trailer += struct.pack("!I", message_number)
+    if invoke_id is not None:
+        options |= 0x40
+        trailer += struct.pack("!I", invoke_id)
+    if time_stamp is not None:
+        options |= 0x20
+        trailer += struct.pack("!Q", time_stamp)
+    if ext_ctrl is not None:
+        options |= 0x08
+        trailer += struct.pack("!I", ext_ctrl)
+    protocol_and_type = (protocol & 0xfc) | (type_ & 0x03)
+    service = (0x80 if confirmed else 0x00) | (service_id & 0x7f)
+    total_length = msg_length_override if msg_length_override is not None else 12 + len(body) + len(trailer)
+    header = struct.pack("!BBBBII", version, options, protocol_and_type, service, fda_address, total_length)
+    return header + body + trailer
+
+
+def ffhse_str(s: str, n: int) -> bytes:
+    return s.encode("ascii")[:n].ljust(n, b"\x00")
+
+
+def ffhse_error_body(error_class: int, error_code: int, additional_code: int, description: str,
+                      remainder: bytes = b"") -> bytes:
+    return struct.pack("!BBH", error_class, error_code, additional_code) + ffhse_str(description, 16) + remainder
+
+
+def fda_open_session_body(session_index: int, max_buffer_size: int, max_msg_length: int, nma_use: int,
+                           inactivity_close_time: int, transmit_delay_time: int, pd_tag: str,
+                           reserved: int = 0) -> bytes:
+    return (struct.pack("!IIIBBHI", session_index, max_buffer_size, max_msg_length, reserved, nma_use,
+                         inactivity_close_time, transmit_delay_time) + ffhse_str(pd_tag, 32))
+
+
+def sm_find_tag_query_body(query_type: int, index: int, tag: str, vfd_tag: str) -> bytes:
+    return struct.pack("!B3xI", query_type, index) + ffhse_str(tag, 32) + ffhse_str(vfd_tag, 32)
+
+
+def sm_find_tag_reply_body(query_type: int, h1_node_address: int, fda_addr_link_id: int, vfd_reference: int,
+                            od_index: int, ip_address_bytes: bytes, od_version: int, device_id: str, pd_tag: str,
+                            dup_state: int, selectors) -> bytes:
+    assert len(ip_address_bytes) == 16
+    out = struct.pack("!BBHII", query_type, h1_node_address, fda_addr_link_id, vfd_reference, od_index)
+    out += ip_address_bytes
+    out += struct.pack("!I", od_version)
+    out += ffhse_str(device_id, 32) + ffhse_str(pd_tag, 32)
+    out += struct.pack("!BBH", dup_state, 0, len(selectors))
+    out += b"".join(struct.pack("!H", s) for s in selectors)
+    return out
+
+
+def sm_identify_body(smk_state: int, dev_type: int, dev_redundancy_state: int, dup_state: int, device_index: int,
+                      max_device_index: int, op_ip_bytes: bytes, device_id: str, pd_tag: str, hse_repeat_time: int,
+                      lr_port: int, annunciation_version: int, hse_device_version: int,
+                      entries_link_nonzero=None, entries_link_zero=None) -> bytes:
+    """Builds the 108-byte fixed shape + the LinkId-branched trailing version-number list -- see
+    ffhse.hpp's own "The LinkId branch" section. Pass exactly one of entries_link_nonzero (a list
+    of (h1-node-a, ver-a, h1-node-b, ver-b) 4-tuples -- for a header whose own FDA Address upper 16
+    bits, i.e. LinkId, will be NONZERO) or entries_link_zero (a list of (h1-link-id, version)
+    2-tuples -- for a header whose LinkId will be ZERO)."""
+    assert len(op_ip_bytes) == 16
+    if entries_link_nonzero is not None:
+        n = len(entries_link_nonzero)
+    elif entries_link_zero is not None:
+        n = len(entries_link_zero)
+    else:
+        n = 0
+    out = struct.pack("!BBBBHH", smk_state, dev_type, dev_redundancy_state, dup_state, device_index,
+                       max_device_index)
+    out += op_ip_bytes
+    out += ffhse_str(device_id, 32) + ffhse_str(pd_tag, 32)
+    out += struct.pack("!IH2xII", hse_repeat_time, lr_port, annunciation_version, hse_device_version)
+    out += struct.pack("!I", n)
+    if entries_link_nonzero is not None:
+        for (na, va, nb, vb) in entries_link_nonzero:
+            out += struct.pack("!BBBB", na, va, nb, vb)
+    elif entries_link_zero is not None:
+        for (h1link, ver) in entries_link_zero:
+            out += struct.pack("!HBB", h1link, 0, ver)
+    return out
+
+
+def sm_clear_address_body(device_id: str, pd_tag: str, iface: int) -> bytes:
+    return ffhse_str(device_id, 32) + ffhse_str(pd_tag, 32) + bytes([iface]) + b"\x00" * 3
+
+
+def sm_set_assignment_body(device_id: str, pd_tag: str, h1_new_address: int, dev_redundancy_state: int,
+                            lr_port: int, hse_repeat_time: int, device_index: int, max_device_index: int,
+                            op_ip_bytes: bytes, clear_dup_detection_state: int) -> bytes:
+    assert len(op_ip_bytes) == 16
+    out = ffhse_str(device_id, 32) + ffhse_str(pd_tag, 32)
+    out += struct.pack("!BBHIHH", h1_new_address, dev_redundancy_state, lr_port, hse_repeat_time,
+                        device_index, max_device_index)
+    out += op_ip_bytes
+    out += b"\x00" * 3
+    out += bytes([clear_dup_detection_state])
+    return out
+
+
+def sm_set_assignment_rsp_body(max_device_index: int, hse_repeat_time: int) -> bytes:
+    return b"\x00\x00" + struct.pack("!HI", max_device_index, hse_repeat_time)
+
+
+def sm_clear_assignment_body(device_id: str, pd_tag: str) -> bytes:
+    return ffhse_str(device_id, 32) + ffhse_str(pd_tag, 32)
+
+
+def fms_initiate_req_body(connect_option: int, access_protection: int, passwd_and_access_grps: int,
+                           ver_od_calling: int, prof_num_calling: int, pd_tag: str) -> bytes:
+    return struct.pack("!BBHHH", connect_option, access_protection, passwd_and_access_grps, ver_od_calling,
+                        prof_num_calling) + ffhse_str(pd_tag, 32)
+
+
+def fms_initiate_rsp_body(ver_od_called: int, prof_num_called: int) -> bytes:
+    return struct.pack("!HH", ver_od_called, prof_num_called)
+
+
+def fms_abort_body(detail_bytes: bytes, abort_id: int, reason_code: int) -> bytes:
+    assert len(detail_bytes) == 16
+    return detail_bytes + bytes([abort_id, reason_code]) + b"\x00\x00"
+
+
+def fms_status_body(logical_status: int, physical_status: int, local_detail: int) -> bytes:
+    return struct.pack("!BB2xI", logical_status, physical_status, local_detail)
+
+
+def fms_identify_body(vendor_name: str, model_name: str, revision: str) -> bytes:
+    return ffhse_str(vendor_name, 32) + ffhse_str(model_name, 32) + ffhse_str(revision, 32)
+
+
+def fms_read_body(index: int) -> bytes:
+    return struct.pack("!I", index)
+
+
+def fms_read_subindex_body(index: int, subindex: int) -> bytes:
+    return struct.pack("!II", index, subindex)
+
+
+def fms_index_data_body(index: int, data: bytes) -> bytes:
+    return struct.pack("!I", index) + data
+
+
+def fms_index_subindex_data_body(index: int, subindex: int, data: bytes) -> bytes:
+    return struct.pack("!II", index, subindex) + data
+
+
+def lan_info_body(lr_attrs_version: int, max_msg_num_diff: int, lr_flags: int, diag_msg_interval: int,
+                   aging_time: int, a_send: bytes, a_recv: bytes, b_send: bytes, b_recv: bytes) -> bytes:
+    for b in (a_send, a_recv, b_send, b_recv):
+        assert len(b) == 16
+    return (struct.pack("!IBB2xII", lr_attrs_version, max_msg_num_diff, lr_flags, diag_msg_interval, aging_time)
+            + a_send + a_recv + b_send + b_recv)
+
+
+def lan_statistics_body(recv_a: int, miss_a: int, fault_a: int, recv_b: int, miss_b: int, fault_b: int,
+                         stats) -> bytes:
+    return (struct.pack("!IIIIIII", recv_a, miss_a, fault_a, recv_b, miss_b, fault_b, len(stats))
+            + b"".join(struct.pack("!I", v) for v in stats))
+
+
+def lan_diagnostic_body(device_index: int, num_if: int, trans_if: int, diag_msg_interval: int, pd_tag: str,
+                         dup_state: int, a_to_a, b_to_a, a_to_b, b_to_b) -> bytes:
+    n = len(a_to_a)
+    assert len(b_to_a) == n and len(a_to_b) == n and len(b_to_b) == n
+    out = struct.pack("!HBBI", device_index, num_if, trans_if, diag_msg_interval)
+    out += ffhse_str(pd_tag, 32)
+    out += b"\x00"  # 1-byte reserved gap before dup_state (body offset 41 -- see decode_lan_diagnostic_req)
+    out += bytes([dup_state])
+    out += struct.pack("!H", n)
+    for lst in (a_to_a, b_to_a, a_to_b, b_to_b):
+        out += b"".join(struct.pack("!I", v) for v in lst)
+    return out
+
+
+def build_ffhse_sample():
+    """FOUNDATION Fieldbus HSE (FDA/SM/FMS/LAN Redundancy, all 4 signaled in-band via the 12-byte
+    common header's own ProtocolAndType/Service bytes -- ports 1089/1090/1091/3622 are recorded as
+    "expected port" annotations only, never a detection gate) -- see ffhse.hpp's file header
+    comment for the exact wire format each packet below exercises (cross-checked against
+    Wireshark's own packet-ff.c/packet-ff.h). No real capture happens to be attributed for this
+    fixture set yet -- see ffhse.hpp's own sourcing paragraph for the current state of that
+    search.
+
+    Every packet here uses Version=1 (FfhseHeader::version is never itself validated), chosen
+    specifically because it structurally cannot collide with any earlier-tried protocol's own TCP
+    declared-length gate in decoder.cpp's dispatch chain (OPC UA's magic-string check, EtherNet/
+    IP's 9-value command enum, IEC104's start byte, Modbus/TCP's protocol-id==0 check, DNP3's sync
+    bytes, TPKT's version==3 byte, HART-IP's own message-type/message-id two-byte gate all fail to
+    match a leading Version=1 byte or FF-HSE's own always->=4 ProtocolAndType byte at HART-IP's
+    message-id offset) -- see decoder.cpp's own FF-HSE dispatch-order comment.
+
+    Scenario coverage: all 4 sub-protocols x Req/Rsp/Err where applicable; every Options trailer
+    combination (none, one field, all four fields); FDA Open Session + Idle; SM Identify AND SM
+    Device Annunciation on BOTH LinkId branches (the single trickiest piece of this decoder); SM
+    Find Tag Query/Reply; the SM Clear/Set/Clear-Assignment Address family; the FMS Initiate
+    handshake; Status; Identify; Read/Write (+with-subindex, both directions); the Information
+    Report family; Abort; Tier-2 FMS Event Notification and Get OD; LAN Redundancy Get/Put Info,
+    Get Statistics, and Diagnostic (with its 4 parallel interface-status lists); unrecognized
+    service ids on every sub-protocol/confirmed-flag combination; a concatenated multi-PDU-per-
+    UDP-datagram case; an unexpected-port case; a malformed/truncated case; and, over TCP, a
+    genuine request/response round trip, a TCP-segment-split PDU, and two PDUs coalesced into one
+    TCP segment."""
+    packets = []
+
+    def add(payload: bytes, dport: int, sport: int = 52200, from_client: bool = True):
+        if from_client:
+            packets.append(ffhse_udp_frame(payload, sport, dport, HMI_IP, PLC_IP, HMI_MAC, PLC_MAC))
+        else:
+            packets.append(ffhse_udp_frame(payload, dport, sport, PLC_IP, HMI_IP, PLC_MAC, HMI_MAC))
+
+    op_ip = bytes([192, 168, 1, 10]) + b"\x00" * 12
+    dev_ip = bytes([192, 168, 1, 20]) + b"\x00" * 12
+
+    # 1)-3) FDA Open Session Req/Rsp/Err -- the Rsp also carries a Message-Number + Invoke-Id
+    #    trailer (Options 0xC0), exercising two of the four optional trailer fields at once.
+    open_session = fda_open_session_body(1, 8192, 8192, nma_use=1, inactivity_close_time=180,
+                                          transmit_delay_time=10, pd_tag="PLC-01")
+    add(ffhse_pdu(FFHSE_FDA, FFHSE_REQ, 1, True, open_session), dport=FFHSE_PORT_ANNUNC)
+    add(ffhse_pdu(FFHSE_FDA, FFHSE_RSP, 1, True, open_session, message_number=1, invoke_id=1),
+        dport=FFHSE_PORT_ANNUNC, from_client=False)
+    add(ffhse_pdu(FFHSE_FDA, FFHSE_ERR, 1, True, ffhse_error_body(5, 6, 0, "unsupported service")),
+        dport=FFHSE_PORT_ANNUNC, from_client=False)
+
+    # 4)-5) FDA Idle Req/Rsp -- both expected EMPTY.
+    add(ffhse_pdu(FFHSE_FDA, FFHSE_REQ, 3, True), dport=FFHSE_PORT_ANNUNC)
+    add(ffhse_pdu(FFHSE_FDA, FFHSE_RSP, 3, True), dport=FFHSE_PORT_ANNUNC, from_client=False)
+
+    # 6) FDA unrecognized service id -- shown as raw hex, not guessed at.
+    add(ffhse_pdu(FFHSE_FDA, FFHSE_REQ, 2, True, bytes([0xAA, 0xBB])), dport=FFHSE_PORT_ANNUNC)
+
+    # 7) SM Find Tag Query Req (unconfirmed).
+    add(ffhse_pdu(FFHSE_SM, FFHSE_REQ, 1, False,
+                  sm_find_tag_query_body(0, 0, "PT-101", "")), dport=FFHSE_PORT_SM)
+
+    # 8) SM Find Tag Reply Req (unconfirmed) with 2 FDA Address Selector entries.
+    add(ffhse_pdu(FFHSE_SM, FFHSE_REQ, 2, False,
+                  sm_find_tag_reply_body(0, 0x05, 0x1234, 100, 200, dev_ip, 1, "DEV-0001", "PT-101", 0x01,
+                                          [0x1111, 0x2222])),
+        dport=FFHSE_PORT_SM)
+
+    # 9) SM Identify Req (confirmed) -- empty body.
+    add(ffhse_pdu(FFHSE_SM, FFHSE_REQ, 3, True), dport=FFHSE_PORT_SM)
+
+    # 10) SM Identify Rsp (confirmed) -- LinkId != 0 branch (2-byte H1NodeAddress+VersionNumber
+    #     pairs). LinkId comes from the HEADER's own FDA Address upper 16 bits, not the body.
+    identify_nonzero = sm_identify_body(0x03, 0x02, 0x00, 0x00, 1, 8, op_ip, "DEV-0001", "PT-101",
+                                         1000, FFHSE_PORT_LAN, 1, 1,
+                                         entries_link_nonzero=[(0x01, 1, 0x02, 1), (0x03, 2, 0x04, 1)])
+    add(ffhse_pdu(FFHSE_SM, FFHSE_RSP, 3, True, identify_nonzero, fda_address=0x00050000),
+        dport=FFHSE_PORT_SM, from_client=False)
+
+    # 11) SM Identify Rsp (confirmed) -- LinkId == 0 branch (4-byte H1LinkId+Reserved+Version
+    #     quads) -- the OTHER half of the LinkId branch, same message shape.
+    identify_zero = sm_identify_body(0x03, 0x02, 0x00, 0x00, 2, 8, op_ip, "DEV-0002", "PT-102",
+                                      1000, FFHSE_PORT_LAN, 1, 1,
+                                      entries_link_zero=[(0x0005, 1), (0x0006, 2)])
+    add(ffhse_pdu(FFHSE_SM, FFHSE_RSP, 3, True, identify_zero, fda_address=0x00000000),
+        dport=FFHSE_PORT_SM, from_client=False)
+
+    # 12) & 13) SM Device Annunciation Req (unconfirmed) -- the SAME 108-byte-plus-list shape as
+    #     SM Identify Rsp, on BOTH LinkId branches again (a device announcing itself unsolicited).
+    add(ffhse_pdu(FFHSE_SM, FFHSE_REQ, 16, False, identify_nonzero, fda_address=0x00050000),
+        dport=FFHSE_PORT_ANNUNC)
+    add(ffhse_pdu(FFHSE_SM, FFHSE_REQ, 16, False, identify_zero, fda_address=0x00000000),
+        dport=FFHSE_PORT_ANNUNC)
+
+    # 14) & 15) SM Clear Address Req/Rsp (confirmed) -- Rsp is expected EMPTY.
+    add(ffhse_pdu(FFHSE_SM, FFHSE_REQ, 12, True, sm_clear_address_body("DEV-0001", "PT-101", 0x01)),
+        dport=FFHSE_PORT_SM)
+    add(ffhse_pdu(FFHSE_SM, FFHSE_RSP, 12, True), dport=FFHSE_PORT_SM, from_client=False)
+
+    # 16) & 17) SM Set Assignment Info Req/Rsp (confirmed) -- two DIFFERENT body shapes, unlike
+    #     most other confirmed services here.
+    add(ffhse_pdu(FFHSE_SM, FFHSE_REQ, 14, True,
+                  sm_set_assignment_body("DEV-0001", "PT-101", 0x05, 0x00, FFHSE_PORT_LAN, 1000, 1, 8, op_ip,
+                                          0x00)),
+        dport=FFHSE_PORT_SM)
+    add(ffhse_pdu(FFHSE_SM, FFHSE_RSP, 14, True, sm_set_assignment_rsp_body(8, 1000)),
+        dport=FFHSE_PORT_SM, from_client=False)
+
+    # 18) SM Set Assignment Info Err.
+    add(ffhse_pdu(FFHSE_SM, FFHSE_ERR, 14, True, ffhse_error_body(5, 12, 0, "assignments already made")),
+        dport=FFHSE_PORT_SM, from_client=False)
+
+    # 19) & 20) SM Clear Assignment Info Req/Rsp (confirmed) -- Rsp is expected EMPTY.
+    add(ffhse_pdu(FFHSE_SM, FFHSE_REQ, 15, True, sm_clear_assignment_body("DEV-0001", "PT-101")),
+        dport=FFHSE_PORT_SM)
+    add(ffhse_pdu(FFHSE_SM, FFHSE_RSP, 15, True), dport=FFHSE_PORT_SM, from_client=False)
+
+    # 21) SM unconfirmed unrecognized service id -- shown as raw hex.
+    add(ffhse_pdu(FFHSE_SM, FFHSE_REQ, 7, False, bytes([0x01, 0x02])), dport=FFHSE_PORT_SM)
+
+    # 22)-24) FMS Initiate Req/Rsp/Err -- the confirmed service that establishes an FMS
+    #     association. The Rsp also carries a full 8-byte Time Stamp trailer (Options 0x20).
+    add(ffhse_pdu(FFHSE_FMS, FFHSE_REQ, 96, True,
+                  fms_initiate_req_body(1, 0x00, 0x0000, 1, 1, "PT-101")), dport=FFHSE_PORT_FMS)
+    add(ffhse_pdu(FFHSE_FMS, FFHSE_RSP, 96, True, fms_initiate_rsp_body(1, 1), time_stamp=0x0102030405060708),
+        dport=FFHSE_PORT_FMS, from_client=False)
+    add(ffhse_pdu(FFHSE_FMS, FFHSE_ERR, 96, True, ffhse_error_body(11, 2, 0, "feature-not-supported")),
+        dport=FFHSE_PORT_FMS, from_client=False)
+
+    # 25) & 26) FMS Status Req (empty)/Rsp.
+    add(ffhse_pdu(FFHSE_FMS, FFHSE_REQ, 0, True), dport=FFHSE_PORT_FMS)
+    add(ffhse_pdu(FFHSE_FMS, FFHSE_RSP, 0, True, fms_status_body(0x00, 0x00, 0)),
+        dport=FFHSE_PORT_FMS, from_client=False)
+
+    # 27) & 28) FMS Identify Req (empty)/Rsp.
+    add(ffhse_pdu(FFHSE_FMS, FFHSE_REQ, 1, True), dport=FFHSE_PORT_FMS)
+    add(ffhse_pdu(FFHSE_FMS, FFHSE_RSP, 1, True, fms_identify_body("Yokogawa", "HSE-Transmitter", "1.0")),
+        dport=FFHSE_PORT_FMS, from_client=False)
+
+    # 29) & 30) FMS Read Req/Rsp -- the Rsp's own returned value is deliberately left raw (no
+    #     self-describing wire type without external Object Dictionary context -- see ffhse.hpp).
+    add(ffhse_pdu(FFHSE_FMS, FFHSE_REQ, 2, True, fms_read_body(315)), dport=FFHSE_PORT_FMS)
+    add(ffhse_pdu(FFHSE_FMS, FFHSE_RSP, 2, True, struct.pack("!f", 72.5)),
+        dport=FFHSE_PORT_FMS, from_client=False)
+
+    # 31) & 32) FMS Read with Subindex Req/Rsp -- same "value left raw" treatment.
+    add(ffhse_pdu(FFHSE_FMS, FFHSE_REQ, 82, True, fms_read_subindex_body(316, 2)), dport=FFHSE_PORT_FMS)
+    add(ffhse_pdu(FFHSE_FMS, FFHSE_RSP, 82, True, struct.pack("!I", 42)),
+        dport=FFHSE_PORT_FMS, from_client=False)
+
+    # 33) & 34) FMS Write Req (Index decoded, Data left raw inline)/Rsp (expected EMPTY).
+    add(ffhse_pdu(FFHSE_FMS, FFHSE_REQ, 3, True, fms_index_data_body(315, struct.pack("!f", 80.0))),
+        dport=FFHSE_PORT_FMS)
+    add(ffhse_pdu(FFHSE_FMS, FFHSE_RSP, 3, True), dport=FFHSE_PORT_FMS, from_client=False)
+
+    # 35) & 36) FMS Write with Subindex Req/Rsp (expected EMPTY).
+    add(ffhse_pdu(FFHSE_FMS, FFHSE_REQ, 83, True,
+                  fms_index_subindex_data_body(316, 2, struct.pack("!I", 99))), dport=FFHSE_PORT_FMS)
+    add(ffhse_pdu(FFHSE_FMS, FFHSE_RSP, 83, True), dport=FFHSE_PORT_FMS, from_client=False)
+
+    # 37)-40) FMS unconfirmed Information Report family -- plain, with Subindex, On Change, and On
+    #     Change with Subindex (2 shapes total, reused across 4 service ids).
+    add(ffhse_pdu(FFHSE_FMS, FFHSE_REQ, 0, False, fms_index_data_body(315, struct.pack("!f", 72.5))),
+        dport=FFHSE_PORT_FMS)
+    add(ffhse_pdu(FFHSE_FMS, FFHSE_REQ, 16, False,
+                  fms_index_subindex_data_body(316, 2, struct.pack("!I", 7))), dport=FFHSE_PORT_FMS)
+    add(ffhse_pdu(FFHSE_FMS, FFHSE_REQ, 17, False, fms_index_data_body(315, struct.pack("!f", 73.0))),
+        dport=FFHSE_PORT_FMS)
+    add(ffhse_pdu(FFHSE_FMS, FFHSE_REQ, 18, False,
+                  fms_index_subindex_data_body(316, 2, struct.pack("!I", 8))), dport=FFHSE_PORT_FMS)
+
+    # 41) FMS Unsolicited Status Req (unconfirmed) -- same 8-byte shape as the confirmed Status Rsp.
+    add(ffhse_pdu(FFHSE_FMS, FFHSE_REQ, 1, False, fms_status_body(0x01, 0x00, 5)), dport=FFHSE_PORT_FMS)
+
+    # 42) FMS Abort (unconfirmed).
+    add(ffhse_pdu(FFHSE_FMS, FFHSE_REQ, 112, False, fms_abort_body(bytes(range(16)), 1, 2)),
+        dport=FFHSE_PORT_FMS)
+
+    # 43) FMS Event Notification Req (unconfirmed) -- Tier 2, shown as raw hex.
+    add(ffhse_pdu(FFHSE_FMS, FFHSE_REQ, 2, False, bytes([0x01, 0x02, 0x03, 0x04])), dport=FFHSE_PORT_FMS)
+
+    # 44) & 45) FMS Get OD Req/Rsp (confirmed) -- Tier 2, even the reference dissector leaves OD
+    #     entries undecoded.
+    add(ffhse_pdu(FFHSE_FMS, FFHSE_REQ, 4, True, bytes([0x00, 0x00, 0x01, 0x3B])), dport=FFHSE_PORT_FMS)
+    add(ffhse_pdu(FFHSE_FMS, FFHSE_RSP, 4, True, bytes([0xDE, 0xAD, 0xBE, 0xEF])),
+        dport=FFHSE_PORT_FMS, from_client=False)
+
+    # 46) FMS Initiate Download Sequence Req (confirmed) -- another Tier 2 confirmed service.
+    add(ffhse_pdu(FFHSE_FMS, FFHSE_REQ, 9, True, bytes([0x00, 0x01])), dport=FFHSE_PORT_FMS)
+
+    # 47) FMS confirmed unrecognized service id -- shown as raw hex.
+    add(ffhse_pdu(FFHSE_FMS, FFHSE_REQ, 50, True, bytes([0x00])), dport=FFHSE_PORT_FMS)
+
+    # 48) FMS unconfirmed unrecognized service id -- shown as raw hex.
+    add(ffhse_pdu(FFHSE_FMS, FFHSE_REQ, 99, False, bytes([0x00])), dport=FFHSE_PORT_FMS)
+
+    # 49) & 50) LAN Redundancy Get Info Req (empty)/Rsp.
+    a_send, a_recv = bytes([10, 0, 0, 1]) + b"\x00" * 12, bytes([10, 0, 0, 2]) + b"\x00" * 12
+    b_send, b_recv = bytes([10, 0, 1, 1]) + b"\x00" * 12, bytes([10, 0, 1, 2]) + b"\x00" * 12
+    add(ffhse_pdu(FFHSE_LAN, FFHSE_REQ, 1, True), dport=FFHSE_PORT_LAN)
+    add(ffhse_pdu(FFHSE_LAN, FFHSE_RSP, 1, True,
+                  lan_info_body(1, 1, 0x03, 5000, 30000, a_send, a_recv, b_send, b_recv)),
+        dport=FFHSE_PORT_LAN, from_client=False)
+
+    # 51) & 52) LAN Redundancy Put Info Req/Rsp -- identical shape both directions.
+    put_info = lan_info_body(1, 0, 0x01, 5000, 30000, a_send, a_recv, b_send, b_recv)
+    add(ffhse_pdu(FFHSE_LAN, FFHSE_REQ, 2, True, put_info), dport=FFHSE_PORT_LAN)
+    add(ffhse_pdu(FFHSE_LAN, FFHSE_RSP, 2, True, put_info), dport=FFHSE_PORT_LAN, from_client=False)
+
+    # 53) & 54) LAN Redundancy Get Statistics Req (empty)/Rsp with 2 XCableStat entries.
+    add(ffhse_pdu(FFHSE_LAN, FFHSE_REQ, 3, True), dport=FFHSE_PORT_LAN)
+    add(ffhse_pdu(FFHSE_LAN, FFHSE_RSP, 3, True,
+                  lan_statistics_body(100, 1, 0, 100, 0, 0, [5, 7])), dport=FFHSE_PORT_LAN, from_client=False)
+
+    # 55) LAN Redundancy Get Statistics Err.
+    add(ffhse_pdu(FFHSE_LAN, FFHSE_ERR, 3, True, ffhse_error_body(8, 0, 0, "other")),
+        dport=FFHSE_PORT_LAN, from_client=False)
+
+    # 56) LAN Redundancy Diagnostic Message Req (unconfirmed) -- 1 interface-status entry across
+    #     all 4 parallel lists (A-to-A/B-to-A/A-to-B/B-to-B).
+    add(ffhse_pdu(FFHSE_LAN, FFHSE_REQ, 1, False,
+                  lan_diagnostic_body(1, 2, 0, 5000, "PT-101", 0x00, [1], [0], [1], [0])),
+        dport=FFHSE_PORT_LAN)
+
+    # 57) LAN Redundancy unconfirmed unrecognized service id -- shown as raw hex.
+    add(ffhse_pdu(FFHSE_LAN, FFHSE_REQ, 5, False, bytes([0x00])), dport=FFHSE_PORT_LAN)
+
+    # 58) LAN Redundancy confirmed unrecognized service id -- shown as raw hex.
+    add(ffhse_pdu(FFHSE_LAN, FFHSE_REQ, 9, True, bytes([0x00])), dport=FFHSE_PORT_LAN)
+
+    # 59) A message with ALL FOUR trailer fields present at once (Options 0xE8) -- FMS Status Req.
+    add(ffhse_pdu(FFHSE_FMS, FFHSE_REQ, 0, True, message_number=7, invoke_id=8,
+                  time_stamp=0x1122334455667788, ext_ctrl=0x0A0B0C0D), dport=FFHSE_PORT_FMS)
+
+    # 60) A message with the decorative Pad Length sub-field set (Options low 3 bits = 0x07) --
+    #     surfaced but not acted on in any length arithmetic (see ffhse.hpp's Options paragraph).
+    add(ffhse_pdu(FFHSE_FDA, FFHSE_REQ, 3, True, pad_length=0x07), dport=FFHSE_PORT_ANNUNC)
+
+    # 61) Two FF-HSE PDUs concatenated into ONE UDP datagram (FDA Idle Req + FDA Idle Rsp) --
+    #     exercises the wire_length-driven coalescing while-loop in decoder.cpp's UDP dispatch.
+    add(ffhse_pdu(FFHSE_FDA, FFHSE_REQ, 3, True) + ffhse_pdu(FFHSE_FDA, FFHSE_RSP, 3, True),
+        dport=FFHSE_PORT_ANNUNC)
+
+    # 62) Malformed/truncated: Message Length claims a full 52-byte FDA Open Session Req body, but
+    #     only 20 bytes of it are actually present in the captured payload -- exercises BOTH the
+    #     "Message Length exceeds bytes available" note (from the true UDP datagram being short)
+    #     and require_min's own "not enough bytes for this shape" fallback to raw hex.
+    truncated_body = open_session[:20]
+    add(ffhse_pdu(FFHSE_FDA, FFHSE_REQ, 1, True, truncated_body,
+                  msg_length_override=12 + len(open_session)), dport=FFHSE_PORT_ANNUNC)
+
+    # 63) Unexpected port: an otherwise perfectly valid SM Identify Req on a port that is none of
+    #     the 4 configured FF-HSE ports -- still decodes, but with the "not a configured/standard
+    #     FF-HSE port" note.
+    add(ffhse_pdu(FFHSE_SM, FFHSE_REQ, 3, True), dport=40000)
+
+    # --- FF-HSE over TCP: the same 4 ports serve both transports -- see ffhse.hpp. ---
+    client_seq = [5000]
+    server_seq = [6000]
+
+    def add_tcp(from_client: bool, payload: bytes, sport: int = 52300, dport: int = FFHSE_PORT_FMS):
+        if from_client:
+            src_port, dst_port = sport, dport
+            src_ip, dst_ip = HMI_IP, PLC_IP
+            src_mac, dst_mac = HMI_MAC, PLC_MAC
+            seq, ack = client_seq[0], server_seq[0]
+            client_seq[0] += len(payload)
+        else:
+            src_port, dst_port = dport, sport
+            src_ip, dst_ip = PLC_IP, HMI_IP
+            src_mac, dst_mac = PLC_MAC, HMI_MAC
+            seq, ack = server_seq[0], client_seq[0]
+            server_seq[0] += len(payload)
+        tcp = tcp_header(src_port, dst_port, seq, ack, TCP_PSH | TCP_ACK, len(payload)) + payload
+        ip = ipv4_header(src_ip, dst_ip, 6, len(tcp), 0x7500 + len(packets)) + tcp
+        packets.append(eth_header(dst_mac, src_mac, 0x0800) + ip)
+
+    # 64) & 65) A genuine FMS Initiate request/response round trip over TCP.
+    add_tcp(True, ffhse_pdu(FFHSE_FMS, FFHSE_REQ, 96, True,
+                             fms_initiate_req_body(1, 0x00, 0x0000, 1, 1, "PT-101")))
+    add_tcp(False, ffhse_pdu(FFHSE_FMS, FFHSE_RSP, 96, True, fms_initiate_rsp_body(1, 1)))
+
+    # 66) & 67) One FDA Open Session Req PDU split across TWO TCP segments -- the FIRST segment
+    #     carries only the 12-byte header plus a few body bytes; the SECOND carries the rest.
+    #     Exercises ffhse_declared_length-driven cross-segment reassembly (mirrors
+    #     hartip_declared_length's own TCP reassembly test).
+    split_pdu = ffhse_pdu(FFHSE_FDA, FFHSE_REQ, 1, True, open_session)
+    split_point = 20
+    add_tcp(True, split_pdu[:split_point], sport=52310)
+    add_tcp(True, split_pdu[split_point:], sport=52310)
+
+    # 68) Two SM Clear Assignment Info Rsp messages coalesced into ONE TCP segment (sender/OS
+    #     coalescing) -- exercises the wire_length-driven "additional FF-HSE message" loop for TCP.
+    add_tcp(True, ffhse_pdu(FFHSE_SM, FFHSE_RSP, 15, True) + ffhse_pdu(FFHSE_SM, FFHSE_RSP, 15, True),
+            sport=52320, dport=FFHSE_PORT_SM)
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_007_000 + i, i * 1000)
+    (TESTS_DIR / "sample_ffhse.pcap").write_bytes(data)
+
+
 if __name__ == "__main__":
     TESTS_DIR.mkdir(exist_ok=True)
     build_modbus_sample()
@@ -5266,6 +5772,7 @@ if __name__ == "__main__":
     build_s7commplus_sample()
     build_mms_sample()
     build_mqtt_sample()
+    build_ffhse_sample()
     build_policy_engine_sample()
     build_tcp_reassembly_sample()
     build_padded_ack_sample()

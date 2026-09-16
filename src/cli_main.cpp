@@ -172,7 +172,7 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
                 const std::vector<int>& iec104_ports, const std::vector<int>& enip_ports,
                 const std::vector<int>& enip_io_ports, const std::vector<int>& bacnet_ports,
                 const std::vector<int>& hartip_ports, const std::vector<int>& opcua_ports,
-                const std::vector<int>& mqtt_ports,
+                const std::vector<int>& mqtt_ports, const std::vector<int>& ffhse_ports,
                 size_t max_packets,
                 bool stats, bool strict, bool quiet,
                 bool no_color, bool force_color, std::ostream& diag) {
@@ -212,6 +212,7 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
                                : (protocol == "opcua")  ? ProtocolFilter::OpcUaOnly
                                : (protocol == "mqtt")   ? ProtocolFilter::MqttOnly
                                : (protocol == "s7comm-plus") ? ProtocolFilter::S7commPlusOnly
+                               : (protocol == "ff-hse") ? ProtocolFilter::FfHseOnly
                                                         : ProtocolFilter::Auto;
     for (int p : modbus_ports) options.extra_modbus_ports.push_back(static_cast<uint16_t>(p));
     for (int p : dnp3_ports) options.extra_dnp3_ports.push_back(static_cast<uint16_t>(p));
@@ -223,6 +224,7 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
     for (int p : hartip_ports) options.extra_hartip_ports.push_back(static_cast<uint16_t>(p));
     for (int p : opcua_ports) options.extra_opcua_ports.push_back(static_cast<uint16_t>(p));
     for (int p : mqtt_ports) options.extra_mqtt_ports.push_back(static_cast<uint16_t>(p));
+    for (int p : ffhse_ports) options.extra_ffhse_ports.push_back(static_cast<uint16_t>(p));
 
     try {
         PacketSource source = open_packet_source(input, interface_name, snaplen, promiscuous, filter,
@@ -455,7 +457,7 @@ int main(int argc, char** argv) {
     std::string decode_protocol = "auto";
     std::vector<int> decode_modbus_ports, decode_dnp3_ports, decode_s7comm_ports, decode_iec104_ports,
         decode_enip_ports, decode_enip_io_ports, decode_bacnet_ports, decode_hartip_ports,
-        decode_opcua_ports, decode_mqtt_ports;
+        decode_opcua_ports, decode_mqtt_ports, decode_ffhse_ports;
     size_t decode_max_packets = 0;
     bool decode_stats = false, decode_strict = false;
 
@@ -490,7 +492,7 @@ int main(int argc, char** argv) {
     decode_cmd
         ->add_option("--protocol", decode_protocol,
                       "Restrict decoding to one protocol instead of auto-detecting all of them")
-        ->transform(CLI::IsMember({"auto", "modbus", "dnp3", "s7comm", "mms", "iec104", "enip", "profinet", "goose", "sv", "ethercat", "bacnet", "hartip", "opcua", "mqtt", "s7comm-plus"}))
+        ->transform(CLI::IsMember({"auto", "modbus", "dnp3", "s7comm", "mms", "iec104", "enip", "profinet", "goose", "sv", "ethercat", "bacnet", "hartip", "opcua", "mqtt", "s7comm-plus", "ff-hse"}))
         ->capture_default_str();
     decode_cmd->add_option("--modbus-port", decode_modbus_ports,
                             "Additional TCP port to treat as expected for Modbus (repeatable); "
@@ -530,6 +532,11 @@ int main(int argc, char** argv) {
                             "Additional TCP port to treat as expected for MQTT (repeatable); "
                             "does not change detection, only whether the port is flagged as "
                             "unexpected");
+    decode_cmd->add_option("--ffhse-port", decode_ffhse_ports,
+                            "Additional TCP or UDP port to treat as expected for FOUNDATION "
+                            "Fieldbus HSE (repeatable, shared across FDA/SM/FMS/LAN Redundancy -- "
+                            "the sub-protocol is signaled in-band, not by port); does not change "
+                            "detection, only whether the port is flagged as unexpected");
     decode_cmd->add_option("--max-packets", decode_max_packets,
                             "Stop after decoding this many packets (0 = unlimited)")
         ->capture_default_str();
@@ -636,7 +643,7 @@ int main(int argc, char** argv) {
                            decode_promiscuous, decode_output, decode_format, decode_protocol,
                            decode_modbus_ports, decode_dnp3_ports, decode_s7comm_ports, decode_iec104_ports,
                            decode_enip_ports, decode_enip_io_ports, decode_bacnet_ports, decode_hartip_ports,
-                           decode_opcua_ports, decode_mqtt_ports, decode_max_packets, decode_stats, decode_strict,
+                           decode_opcua_ports, decode_mqtt_ports, decode_ffhse_ports, decode_max_packets, decode_stats, decode_strict,
                            quiet, no_color, force_color, *diag);
     }
     if (info_cmd->parsed()) {

@@ -9,9 +9,9 @@ conduitscope -- decode Modbus/TCP, DNP3, IEC 60870-5-104, S7comm/COTP, IEC 61850
 ```
 conduitscope [-q|--quiet] [--no-color|--color] [--log-file FILE] [--version] [-h|--help] <command> [command options]
 
-conduitscope decode (-r FILE | -i INTERFACE) [-o FILE] [-f text|json|csv] [--protocol auto|modbus|dnp3|s7comm|mms|mqtt|iec104|enip|profinet|goose|sv|ethercat|bacnet|hartip|opcua]
+conduitscope decode (-r FILE | -i INTERFACE) [-o FILE] [-f text|json|csv] [--protocol auto|modbus|dnp3|s7comm|mms|mqtt|iec104|enip|profinet|goose|sv|ethercat|bacnet|hartip|opcua|s7comm-plus|ff-hse]
                      [--modbus-port PORT]... [--dnp3-port PORT]... [--s7comm-port PORT]... [--iec104-port PORT]...
-                     [--enip-port PORT]... [--enip-io-port PORT]... [--bacnet-port PORT]... [--hartip-port PORT]... [--opcua-port PORT]... [--mqtt-port PORT]...
+                     [--enip-port PORT]... [--enip-io-port PORT]... [--bacnet-port PORT]... [--hartip-port PORT]... [--opcua-port PORT]... [--mqtt-port PORT]... [--ffhse-port PORT]...
                      [--max-packets N] [--stats] [--strict]
                      [--filter BPF] [--duration SECONDS] [--snaplen BYTES] [--no-promiscuous]
 
@@ -153,7 +153,7 @@ conduitscope decode (-r FILE | -i INTERFACE) [options]
 | `--no-promiscuous` | off (i.e. promiscuous by default) | With `-i`, don't put the interface into promiscuous mode. Promiscuous is the default because the main live-capture use case -- watching a mirrored/SPAN switch port for zone/conduit traffic -- needs to see traffic that isn't addressed to the capturing host at all. |
 | `-o, --output FILE` | stdout | Write decoded output here instead of stdout. |
 | `-f, --format {text,json,csv}` | `text` | Output format. See OUTPUT FORMATS below. |
-| `--protocol {auto,modbus,dnp3,s7comm,mms,mqtt,iec104,enip,profinet,goose,sv,ethercat,bacnet,hartip,opcua}` | `auto` | Restrict decoding to one protocol. `auto` opportunistically tries OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, S7comm/COTP, MMS, HART-IP, and MQTT detection on every TCP payload (in that order -- MQTT last of all, see PROTOCOL DETECTION), CIP I/O, BACnet/IP, and HART-IP detection on every UDP payload, PROFINET RT (DCP/cyclic) detection on every non-IPv4 Ethernet frame carrying EtherType `0x8892`, GOOSE detection on every non-IPv4 Ethernet frame carrying EtherType `0x88B8`, Sampled Values detection on every non-IPv4 Ethernet frame carrying EtherType `0x88BA`, and EtherCAT detection on every non-IPv4 Ethernet frame carrying EtherType `0x88A4`, regardless of port (see PROTOCOL DETECTION below). `enip` covers both EtherNet/IP explicit messaging (TCP) and CIP I/O implicit messaging (UDP). `mms` is IEC 61850 MMS (Manufacturing Message Specification, ISO 9506) -- shares S7comm's exact TPKT/COTP transport and TCP port 102, but is a distinct application protocol; see `--s7comm-port` below and PROTOCOL COVERAGE's MMS section. `mqtt` is MQTT (v3.1/v3.1.1/v5.0) plus Sparkplug B -- see `--mqtt-port` below and PROTOCOL COVERAGE's MQTT section. `profinet` covers both DCP and cyclic real-time IO. `sv` is IEC 61850-9-2 Sampled Values. `ethercat` is EtherCAT. `bacnet` is BACnet/IP. `hartip` is HART-IP (covers both UDP and TCP). `opcua` is OPC UA Binary (UA-TCP/Secure Conversation, TCP only). |
+| `--protocol {auto,modbus,dnp3,s7comm,mms,mqtt,iec104,enip,profinet,goose,sv,ethercat,bacnet,hartip,opcua,s7comm-plus,ff-hse}` | `auto` | Restrict decoding to one protocol. `auto` opportunistically tries OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, S7comm/COTP, S7comm-Plus, MMS, HART-IP, MQTT, and FF-HSE detection on every TCP payload (in that order -- FF-HSE last of all, even after MQTT, see PROTOCOL DETECTION), CIP I/O, BACnet/IP, HART-IP, and FF-HSE detection on every UDP payload (FF-HSE last there too), PROFINET RT (DCP/cyclic) detection on every non-IPv4 Ethernet frame carrying EtherType `0x8892`, GOOSE detection on every non-IPv4 Ethernet frame carrying EtherType `0x88B8`, Sampled Values detection on every non-IPv4 Ethernet frame carrying EtherType `0x88BA`, and EtherCAT detection on every non-IPv4 Ethernet frame carrying EtherType `0x88A4`, regardless of port (see PROTOCOL DETECTION below). `enip` covers both EtherNet/IP explicit messaging (TCP) and CIP I/O implicit messaging (UDP). `mms` is IEC 61850 MMS (Manufacturing Message Specification, ISO 9506) -- shares S7comm's exact TPKT/COTP transport and TCP port 102, but is a distinct application protocol; see `--s7comm-port` below and PROTOCOL COVERAGE's MMS section. `s7comm-plus` is S7comm-Plus (TIA Portal / S7-1200/1500) -- shares the same TPKT/COTP transport and TCP port 102, disambiguated by its own protocol id byte; see `--s7comm-port` below and PROTOCOL COVERAGE's S7comm-Plus section. `mqtt` is MQTT (v3.1/v3.1.1/v5.0) plus Sparkplug B -- see `--mqtt-port` below and PROTOCOL COVERAGE's MQTT section. `profinet` covers both DCP and cyclic real-time IO. `sv` is IEC 61850-9-2 Sampled Values. `ethercat` is EtherCAT. `bacnet` is BACnet/IP. `hartip` is HART-IP (covers both UDP and TCP). `opcua` is OPC UA Binary (UA-TCP/Secure Conversation, TCP only). `ff-hse` is FOUNDATION Fieldbus HSE (covers FDA/SM/FMS/LAN Redundancy, on both TCP and UDP) -- see `--ffhse-port` below and PROTOCOL COVERAGE's FOUNDATION Fieldbus HSE section. |
 | `--modbus-port PORT` | *(502 built in)* | Additional TCP port to treat as "expected" for Modbus. Repeatable. Does **not** gate detection -- it only changes whether a decoded Modbus frame is annotated as appearing on an unexpected port, which is itself a useful signal when auditing a conduit. |
 | `--dnp3-port PORT` | *(20000 built in)* | Same as `--modbus-port`, for DNP3. Repeatable. |
 | `--s7comm-port PORT` | *(102 built in)* | Same as `--modbus-port`, for COTP/S7comm. Repeatable. There is no separate `--mms-port` -- MMS rides the identical TPKT/COTP transport on the identical TCP port 102 S7comm uses (see `mms.hpp`'s file header), so this same option's "expected port" annotation also governs MMS traffic. |
@@ -164,6 +164,7 @@ conduitscope decode (-r FILE | -i INTERFACE) [options]
 | `--hartip-port PORT` | *(5094 built in)* | Same as `--modbus-port`, for HART-IP. Repeatable. Applies to both TCP and UDP, since HART-IP uses the same port number on either transport. |
 | `--opcua-port PORT` | *(4840 built in)* | Same as `--modbus-port`, for OPC UA. Repeatable. TCP only -- OPC UA has no UDP mapping. |
 | `--mqtt-port PORT` | *(1883 built in)* | Same as `--modbus-port`, for MQTT. Repeatable. TCP only. |
+| `--ffhse-port PORT` | *(1089/1090/1091/3622 built in)* | Same as `--modbus-port`, for FOUNDATION Fieldbus HSE. Repeatable. Applies to both TCP and UDP, and shared across FDA/SM/FMS/LAN Redundancy -- the sub-protocol is signaled in-band by the header, not by port. |
 | `--max-packets N` | `0` (unlimited) | Stop after decoding this many packets. With `-i`, this also bounds a live capture (in addition to `--duration` and Ctrl+C). |
 | `--stats` | off | Print an aggregate summary (protocol counts, Modbus function-code histogram, exception count, capture time span) instead of one line per packet. Ignores `--format`. |
 | `--strict` | off | Abort with a nonzero exit status on the first packet that fails to parse at the Ethernet/IPv4/TCP layer, instead of reporting a per-packet warning and continuing. Does not affect Modbus/DNP3-level ambiguity, which is always handled by heuristic + note rather than error. |
@@ -536,11 +537,12 @@ text the `text` report shows).
 ## PROTOCOL DETECTION
 
 In `--protocol auto` (the default), every non-empty TCP payload is tested
-against all nine protocols, independent of port number. **OPC UA is tried
+against all eleven TCP-capable protocols, independent of port number. **OPC UA is tried
 first of all, then EtherNet/IP, then IEC 104**, before Modbus/TCP, and
-**HART-IP is tried second-to-last, with MQTT tried last of all**, after
-S7comm/COTP and MMS -- see the notes at the end of this section for why that
-specific ordering matters, not just which protocols are tried:
+**HART-IP is tried third-to-last, MQTT second-to-last, with FF-HSE tried
+last of all**, after S7comm/COTP, S7comm-Plus, and MMS -- see the notes at
+the end of this section for why that specific ordering matters, not just
+which protocols are tried:
 
 - **OPC UA**: recognized by its 8-byte UA-TCP common header -- the leading 3
   bytes (MessageType) must be one of exactly 7 fixed ASCII strings (`HEL`,
@@ -671,16 +673,33 @@ specific ordering matters, not just which protocols are tried:
 - **MQTT**: recognized by its one-byte fixed header (Control Packet Type in
   the top nibble, flags in the bottom nibble, which must be exactly one
   fixed value for every type except PUBLISH -- see PROTOCOL COVERAGE) plus a
-  1-4-byte Variable Byte Integer Remaining Length. This is honestly the
-  **weakest** structural gate of any protocol in this list -- weaker even
-  than HART-IP's own -- so MQTT is tried dead **last**, after every other
-  protocol here (including HART-IP) has declined a payload. CONNECT gets a
+  1-4-byte Variable Byte Integer Remaining Length. This was previously the
+  **weakest** structural gate of any protocol in this list, so MQTT was
+  tried dead last of all -- until FF-HSE's own gate (below) was found to be
+  weaker still, so MQTT now sits second-to-last, after every protocol here
+  except FF-HSE (including HART-IP) has declined a payload. CONNECT gets a
   much stronger, version-specific check on top (its own Protocol Name field
   must read literally `"MQTT"` or `"MQIsdp"`), but every other MQTT packet
   type relies on the weak one-byte gate alone. See PROTOCOL COVERAGE's MQTT
   section for the real, demonstrated collisions this weak gate caused
   against this project's own synthetic fixture (both found and fixed) and
   "Why MQTT is tried last" below.
+- **FF-HSE**: recognized by a SINGLE byte at header offset 2
+  (ProtocolAndType) -- its top 6 bits (`& 0xfc`) must land on one of 4
+  valid protocol values and its bottom 2 bits (`& 0x03`) on one of 3 valid
+  type values (12 valid byte values out of 256 possible), plus this
+  decoder's own added plausibility check that the declared Message Length
+  field is at least 12 (the header's own size) -- a check that all but the
+  smallest 12 possible 32-bit values already satisfy. This is honestly the
+  **weakest structural gate of any protocol in this codebase**, weaker even
+  than MQTT's own one-byte-plus-Variable-Byte-Integer gate, so FF-HSE is
+  dispatched dead **last** of all, on both TCP and UDP, after every other
+  protocol here (including HART-IP and MQTT) has declined a payload. No
+  specific byte-for-byte collision with another protocol was found during
+  this feature's own scoping, but given how weak this gate is on its own,
+  this ordering means any such collision resolves in every other protocol's
+  favor, not FF-HSE's -- see `ffhse.hpp`'s own "Structural detection gate"
+  paragraph and `decoder.cpp`'s own dispatch-order comment.
 
 Because detection is payload-shape based, traffic running on a non-standard
 port is still decoded correctly -- and conduitscope tells you it's on a
@@ -736,7 +755,10 @@ paragraph, the matching comments in `src/decoder.cpp`, and
 this collision occurs on genuine field traffic, not just a hand-built
 fixture.
 
-**Why MQTT is tried last of all.** Dispatched even after HART-IP, for the
+**Why MQTT is tried last of all (of the protocols known at the time this
+placement was chosen -- FF-HSE, added later, was found to have a still
+weaker gate and now sits after it; see "Why FF-HSE is tried last of all"
+below).** Dispatched even after HART-IP, for the
 same reason as HART-IP's own placement, but for an even weaker gate: this
 project's own synthetic MQTT fixture (`tests/sample_mqtt.pcap`) surfaced two
 real, demonstrated collisions against earlier-dispatched protocols' gates
@@ -764,10 +786,39 @@ tightening every other MQTT packet type's one-byte gate further isn't
 possible without contradicting the MQTT spec itself (the flags nibble really
 is unconstrained for PUBLISH, by design).
 
+**Why FF-HSE is tried last of all.** Dispatched even after MQTT, for the
+same "weaker signal, lower priority" principle already established for
+HART-IP and MQTT above, but with the weakest gate of the three: a SINGLE
+byte at header offset 2 (ProtocolAndType) landing on one of 12 valid values
+out of 256, plus a Message Length plausibility check that all but the
+smallest 12 possible 32-bit values already satisfy -- honestly weaker than
+even MQTT's own one-byte-fixed-header-plus-Variable-Byte-Integer-Length
+gate, since MQTT's Remaining Length field is itself a meaningful structural
+constraint FF-HSE's Message Length check barely is. Unlike the HART-IP-vs-
+Modbus and MQTT-vs-{Modbus,HART-IP} collisions above, no specific
+byte-for-byte collision against another protocol's own gate was found
+during this feature's own scoping -- but that is a narrower claim than "no
+collision exists": given how weak this gate is in isolation (roughly a
+1-in-21 chance of a random byte at offset 2 alone satisfying it, before the
+Message Length check even applies), this decoder does not claim collision-
+freedom the way OPC UA or EtherNet/IP's own multi-check gates can. FF-HSE
+being dispatched dead last means any such collision, discovered later,
+would resolve in every other protocol's favor by default, consistent with
+this codebase's established ordering philosophy. This gate applies
+identically on UDP (see below) -- unlike the HART-IP-vs-Modbus collision,
+which is TCP-only (it depends on Modbus's own declared-length TCP
+reassembly pre-check, which has no UDP equivalent), FF-HSE's own weak gate
+has no such transport asymmetry, since FF-HSE itself defines no declared-
+length pre-check any other protocol here could collide against on UDP
+either. See `include/conduitscope/ffhse.hpp`'s own "Structural detection
+gate" paragraph and `src/decoder.cpp`'s own dispatch-order comment for the
+full detail.
+
 `--protocol modbus`, `--protocol dnp3`, `--protocol s7comm`, `--protocol
 mms`, `--protocol mqtt`, `--protocol iec104`, `--protocol enip`,
 `--protocol profinet`, `--protocol goose`, `--protocol sv`, `--protocol
-ethercat`, `--protocol bacnet`, `--protocol hartip`, or `--protocol opcua`
+ethercat`, `--protocol bacnet`, `--protocol hartip`, `--protocol opcua`,
+`--protocol s7comm-plus`, or `--protocol ff-hse`
 restrict decoding to only that protocol (useful for large mixed captures, or
 for scripting a two-pass analysis). `--protocol enip` covers both EtherNet/IP explicit
 messaging (TCP, above) and CIP I/O implicit messaging (UDP, below) --
@@ -776,7 +827,9 @@ specifically, distinct from `--protocol s7comm` even though both share the
 same TPKT/COTP transport and port. `--protocol hartip` covers both HART-IP
 over TCP (above) and over UDP (below) -- HART-IP uses the identical wire
 format on either transport. `--protocol opcua` is TCP only -- OPC UA has no
-UDP mapping.
+UDP mapping. `--protocol ff-hse` covers all four FF-HSE sub-protocols
+(FDA/SM/FMS/LAN Redundancy) on both TCP and UDP (below) -- like HART-IP,
+FF-HSE uses the identical wire format on either transport.
 
 **CIP I/O (implicit messaging), UDP port 2222** is tried, port-independently,
 against every non-empty UDP payload, the same "opportunistic, payload-shape"
@@ -871,18 +924,37 @@ section for exactly what's decoded once the gate matches.
 
 **HART-IP, UDP/TCP port 5094** is tried, port-independently, against every
 non-empty UDP payload too, using the same 8-byte-header gate described above
-for TCP (MessageType/MessageID/MsgLength) -- HART-IP is the only protocol in
-this list that opportunistically checks both transports with the identical
-wire format. Unlike the TCP chain, HART-IP is tried on UDP payloads alongside
-CIP I/O and BACnet/IP with no ordering concern: the Modbus/TCP collision
-described above is a TCP-only artifact (it depends on Modbus's own
-declared-length TCP reassembly pre-check, which has no UDP equivalent), so
-HART-IP over UDP is checked and decoded exactly like any other well-behaved
-protocol here, with no known collision. `--hartip-port` only changes whether
-a decoded frame is annotated as appearing on an unexpected port (default
-5094), the same as every other per-protocol port option -- it never gates
-detection. See PROTOCOL COVERAGE's HART-IP section for exactly what's
-decoded once the gate matches.
+for TCP (MessageType/MessageID/MsgLength) -- HART-IP and FF-HSE (below) are
+the only two protocols in this list that opportunistically check both
+transports with the identical wire format. Unlike the TCP chain, HART-IP is
+tried on UDP payloads alongside CIP I/O and BACnet/IP with no ordering
+concern: the Modbus/TCP collision described above is a TCP-only artifact (it
+depends on Modbus's own declared-length TCP reassembly pre-check, which has
+no UDP equivalent), so HART-IP over UDP is checked and decoded exactly like
+any other well-behaved protocol here, with no known collision. `--hartip-port`
+only changes whether a decoded frame is annotated as appearing on an
+unexpected port (default 5094), the same as every other per-protocol port
+option -- it never gates detection. See PROTOCOL COVERAGE's HART-IP section
+for exactly what's decoded once the gate matches.
+
+**FF-HSE, ports 1089/1090/1091/3622** is tried, port-independently, against
+every non-empty UDP payload too, using the same single-byte-at-offset-2 gate
+described above for TCP -- but, unlike HART-IP's own UDP placement, FF-HSE
+IS tried last among the UDP protocols here (after CIP I/O and BACnet/IP,
+and after HART-IP), the same "weakest gate, lowest priority" placement it
+gets on the TCP chain, since this gate's own weakness (see "Why FF-HSE is
+tried last of all" above) is a property of the gate itself, not of which
+transport it's being checked against. A single UDP datagram can (and,
+per the reference dissector's own comments about coalesced diagnostic/
+status traffic, sometimes does) carry more than one concatenated FF-HSE PDU
+back-to-back; this is walked in a loop, the same coalescing pattern this
+codebase already uses for EtherNet/IP's and HART-IP's own coalesced UDP
+messages -- see `ffhse.hpp`'s own "UDP framing" paragraph. `--ffhse-port`
+only changes whether a decoded frame is annotated as appearing on an
+unexpected port (default 1089/1090/1091/3622), the same as every other
+per-protocol port option -- it never gates detection. See PROTOCOL
+COVERAGE's FOUNDATION Fieldbus HSE section for exactly what's decoded once
+the gate matches.
 
 ## OUTPUT FORMATS
 
@@ -929,7 +1001,7 @@ that don't apply to a given packet (e.g. `src_ip` for a non-IP frame) are
 `null`. Intended to be piped into `jq` or read by a future policy-evaluation
 layer.
 
-Ninety-eight fields are only present (omitted entirely, not `null`) on
+Over a hundred fields are only present (omitted entirely, not `null`) on
 packets where they apply:
 
 - `modbus_paired_request_index`: the `index` of the specific earlier request
@@ -1667,6 +1739,48 @@ The following fields appear only when `protocol` is `mms`:
   `s7comm-plus`. `false` means this telegram is a fragment awaiting a
   further TPKT/COTP frame this decoder does not reassemble across -- see
   LIMITATIONS.
+- `ffhse_version` / `ffhse_options`: the header's raw Version/Options bytes,
+  always present when `protocol` is `ffhse`.
+- `ffhse_protocol`: `"FDA"`/`"SM"`/`"FMS"`/`"LAN Redundancy"`, always
+  present when `protocol` is `ffhse`.
+- `ffhse_type`: `"Request"`/`"Response"`/`"Error"`, always present when
+  `protocol` is `ffhse`.
+- `ffhse_confirmed`: `true`/`false`, the Service byte's own confirmed-
+  service flag, always present when `protocol` is `ffhse`.
+- `ffhse_service_id`: the Service byte's low 7 bits, always present when
+  `protocol` is `ffhse`.
+- `ffhse_fda_address`: the full 4-byte FDA Address field as hex (e.g.
+  `"0x00010203"`), always present when `protocol` is `ffhse`.
+- `ffhse_link_id`: the FDA Address field's own top 16 bits, always present
+  when `protocol` is `ffhse` -- see PROTOCOL COVERAGE's FOUNDATION Fieldbus
+  HSE section's LinkId branch.
+- `ffhse_message_length`: the header's own declared total PDU length,
+  always present when `protocol` is `ffhse`.
+- `ffhse_message_number` / `ffhse_invoke_id` / `ffhse_time_stamp` /
+  `ffhse_extended_control_field`: present only when the corresponding
+  trailer Options bit was set. `ffhse_time_stamp` is always the raw 64-bit
+  value -- no epoch/scale confidently sourced, never interpreted as a
+  calendar date.
+- `ffhse_message_name`: a best-effort message name (e.g. `"FDA Open Session
+  Req"`, `"SM Identify Rsp"`, `"FMS Initiate Err"`), always present when
+  `protocol` is `ffhse`, even for an unrecognized combination (e.g. `"SM
+  unconfirmed service 99"`).
+- `ffhse_recognized`: `true`/`false`, always present when `protocol` is
+  `ffhse` -- whether this decoder recognizes the (Protocol, Type,
+  ConfirmedFlag, ServiceId) combination at all (Tier 1 OR Tier 2).
+- `ffhse_body_decoded`: `true`/`false`, always present when `protocol` is
+  `ffhse` -- `true` only for a Tier-1 message whose body matched this
+  decoder's expected shape.
+- `ffhse_values`: an array of one `"field-name=value"` string per decoded
+  field, wire order (e.g. `"session-index=1"`, `"index=315"`,
+  `"error-class=5 (Service)"`), present only when non-empty (a Tier-1-
+  decoded body).
+- `ffhse_body_shown_as_hex`: `true`/`false`, always present when `protocol`
+  is `ffhse` -- `true` for a Tier-2 message's whole body, or for the
+  trailing "remainder" bytes past a Tier-1 message's own decoded shape.
+- `ffhse_body_length` / `ffhse_body_hex`: present only when
+  `ffhse_body_shown_as_hex` is `true` -- the undecoded byte count and its
+  hex rendering.
 
 ### csv
 
@@ -4303,6 +4417,251 @@ appears -- see that ATTRIBUTION.md's own writeup for the complete, honest
 scope. See `include/conduitscope/opcua.hpp`'s file header for the full
 writeup.
 
+### FOUNDATION Fieldbus HSE (FDA port 1090, SM port 1091, LAN Redundancy port 3622, ff-annunc port 1089, all TCP AND UDP)
+
+FOUNDATION Fieldbus HSE (High Speed Ethernet, "FF-HSE") is an Ethernet-based
+fieldbus protocol built around four sub-protocols sharing one 12-byte common
+header: **FDA** (Field Device Access, session management), **SM** (System
+Management, device commissioning/discovery), **FMS** (Fieldbus Message
+Specification, the actual read/write/report data traffic), and **LAN
+Redundancy** (dual-LAN fault detection/switchover). Unlike a port number
+picking the sub-protocol the way TCP port 502 picks Modbus, FF-HSE signals
+which of the four a given message belongs to IN-BAND, via the header's own
+`ProtocolAndType` byte -- so, matching this codebase's existing HART-IP/
+BACnet posture, all four ports (1089/1090/1091/3622) are recorded as
+"expected port" annotations only, never a detection gate, and a message can
+arrive on any of them (or a fifth, unexpected port) and still decode
+identically.
+
+**Sourcing, and an honesty note.** FF-HSE's own official specifications
+(FF-581/586/588/589/593/803/941, published by FieldComm Group) are all
+paywalled -- no free copy of any of them was available while building this
+decoder. Instead, every byte offset this decoder asserts is cross-checked
+against Wireshark's mainline dissector, `epan/dissectors/packet-ff.c`
+(15,317 lines) plus `packet-ff.h` (720 lines), protocol short name "FF",
+first written in 2008 by Yukiyo Akisada -- a Yokogawa engineer -- directly
+against the official FF-588-1.3 spec, with inline spec-clause citations
+throughout its own source comments. GPL-2.0-or-later, vendor-authored, and
+spec-cited: that gives this decoder meaningfully **higher** sourcing
+confidence than some of this codebase's other decoders (e.g. S7comm-Plus,
+which relies on a third-party reverse-engineered plugin never merged into
+mainline Wireshark) -- but it is still secondary (dissector-derived, not
+primary-spec-derived), so every field name and byte offset below should be
+read as "what Wireshark's own vendor-authored dissector does", not as
+independently verified against FieldComm Group's own text. A raw copy of
+`packet-ff.c`/`packet-ff.h` (fetched from the Wireshark project's own GitHub
+mirror) was actually available for direct inspection while building this
+decoder -- not just a secondhand transcription of it -- which is what let
+the full ErrorClass/ErrorCode name tables (11 ErrorClasses, each with its
+own nested ErrorCode table) and every FDA/SM/FMS/LAN Redundancy service name
+be pulled byte-for-byte from the reference source rather than approximated.
+
+#### The 12-byte common header
+
+```
+Version(1)          @0   not validated (nor is it by the reference dissector) -- surfaced as-is
+Options(1)          @1   bitmask: message-number/invoke-id/time-stamp/extended-control-field
+                           presence, plus a decorative, unused Pad Length sub-field
+ProtocolAndType(1)  @2   PROTOCOL_MASK=0xfc: FDA(0x04)/SM(0x08)/FMS(0x0c)/LAN Redundancy(0x10)
+                           TYPE_MASK=0x03: Request(0x00)/Response(0x01)/Error(0x02)
+Service(1)          @3   bit7=Confirmed-service flag, bits0-6=Service Id
+FDA Address(4)      @4   composite address; only its own top 16 bits ("LinkId") are interpreted,
+                           and only for the SM Identify Rsp / SM Device Annunciation shape
+Message Length(4)   @8   this PDU's OWN total length, header+body+trailer -- doubles as the
+                           TCP declared-length framing field and this decoder's own plausibility check
+```
+
+All fields big-endian. The dispatch key this decoder uses internally is
+conceptually `(Protocol, Type, ConfirmedFlag, ServiceId)` -- the confirmed
+flag genuinely disambiguates real collisions (FMS Service Id 1 is "FMS
+Identify" when confirmed, but "FMS Unsolicited Status" when unconfirmed --
+same Protocol, same Type, same numeric Service Id, an entirely different
+message).
+
+**Structural detection gate**, deliberately the weakest in this codebase --
+see PROTOCOL DETECTION's "Why FF-HSE is tried last of all": accept a buffer
+as FF-HSE when there are at least 12 bytes, `ProtocolAndType & 0xfc` is one
+of the 4 valid protocol values, `ProtocolAndType & 0x03` is one of the 3
+valid type values, and Message Length is at least 12. That is a single byte
+at offset 2 landing on one of 12 valid values out of 256 possible, plus a
+length check that is barely a constraint at all -- honestly weaker even
+than HART-IP's own two-adjacent-byte gate, which is itself already this
+codebase's previous weakest. FF-HSE is therefore dispatched LAST of all
+protocols in Auto mode, on both TCP and UDP, after even HART-IP and MQTT.
+
+**Options byte**: `0x80`=Message-Number-present (4-byte trailer field),
+`0x40`=Invoke-Id-present (4-byte trailer field), `0x20`=Time-Stamp-present
+(8-byte trailer field, raw 64-bit value -- no epoch/scale confidently
+sourced), `0x10`=reserved (not surfaced), `0x08`=Extended-Control-Field-
+present (4-byte trailer field), `0x07` (low 3 bits)=Pad Length. Pad Length
+is surfaced as a raw value but never acted on in this decoder's own length
+arithmetic -- confirmed directly from the reference source, whose own
+`dissect_ff()` reads it into a display-only field and never uses it to
+adjust an offset either.
+
+**Trailer**: present in this fixed order at the END of the PDU, but only
+the fields whose own Options bit is set are actually on the wire (a field
+whose bit is clear is skipped entirely, not left as a gap): Message
+Number, Invoke Id, Time Stamp, Extended Control Field. This decoder's
+length accounting reproduces the reference `dissect_ff()`'s own arithmetic
+exactly -- Message Length minus each present trailer field's own byte
+count minus 12 (the header) leaves the body length -- and it is guarded
+defensively against underflow/malformed lengths, clamped and noted rather
+than allowed to throw or produce a negative body length.
+
+**TCP framing**: Message Length (header offset 8) is this protocol's PDU-
+length-prefix for TCP stream reassembly, mirroring `hartip_declared_length`/
+`enip_declared_length` exactly.
+
+**UDP framing**: unlike every protocol above it in this codebase, a single
+UDP datagram can (and, per the reference source's own comments about
+coalesced diagnostic/status traffic, sometimes does in practice) carry more
+than one concatenated FF-HSE PDU back-to-back -- walked in a loop, the same
+`wire_length`-driven pattern this codebase already uses for EtherNet/IP's
+and HART-IP's own coalesced messages. The loop stops silently, not as an
+error, the moment a sub-PDU's own declared length is implausible or doesn't
+fit the bytes remaining in the datagram.
+
+#### Two-tier coverage: Tier-1 (full value decode) vs. Tier-2 (named only, raw-hex body)
+
+The same split this codebase already applies to HART-IP's command dispatch,
+BACnet's service dispatch, MMS's/OPC UA's service dispatch, and
+S7comm-Plus's function dispatch.
+
+**Tier 1** -- decoded with confidence: the great majority of FDA/SM/LAN
+Redundancy messages (Open/Idle/Close Session, Find Tag Query/Reply,
+Identify, Device Annunciation, Clear Address, Set/Clear Assignment Info,
+Get/Put Info, Get Statistics, Diagnostic Message), plus FMS's own
+session-lifecycle/status/identify/read/write family (Initiate, Status,
+Identify, Read, Read with Subindex, Write, Write with Subindex,
+Information Report and its On-Change/Subindex variants, Unsolicited
+Status, Abort). One shared function decodes every Error body (20 bytes
+fixed + remainder) regardless of which sub-protocol/service produced it --
+ErrorClass (11 named values), ErrorCode (looked up via a nested,
+per-ErrorClass table, an unmapped pair rendered `"unknown(N)"` rather than
+guessed at), AdditionalCode (raw), and AdditionalDescription (ASCII,
+trailing NULs trimmed).
+
+**Tier 2** -- named only, body shown as raw hex: FMS's Get OD, Define/
+Delete Variable List, the Download/Upload sequence families,
+RequestDomainDownload/Upload, the Program Invocation lifecycle,
+AlterEventConditionMonitoring, AcknowledgeEventNotification, the Put OD
+family, the Generic Download sequence family, and unconfirmed Event
+Notification. FMS Get OD is notable among these: even the reference
+Wireshark dissector itself leaves OD (Object Dictionary) entries undecoded
+as raw bytes, since their own shape depends on Device Description content
+this decoder has no access to either -- good precedent for this decoder's
+own choice not to guess there.
+
+FMS Read/Read-with-Subindex responses (and Write/Write-with-Subindex
+requests) are Tier-2 in a narrower sense: their HEADER is fully decoded
+(Index/Subindex), but their own returned/written VALUE is deliberately left
+as raw hex, since an FMS value has no self-describing wire type without
+external Object Dictionary context to interpret it against -- the exact
+same honesty precedent this codebase's EtherNet/IP CIP I/O decoder already
+sets for connected I/O data, and S7comm-Plus sets for several datatypes it
+declines to parse further.
+
+#### The LinkId branch: the single trickiest piece of this decoder
+
+SM Identify Rsp and SM Device Annunciation Req share an exact 108-byte
+fixed body shape plus a trailing, variable-length version-number list.
+`LinkId` is computed as the top 16 bits of the 12-byte common HEADER's own
+FDA Address field (`(uint16_t)(header.fda_address >> 16)`) -- NOT anything
+inside this message's own body. Once `NumOfEntriesInVerNumList` (`N`, a
+uint32 at body offset 104) is known:
+
+- **LinkId != 0**: the list is `N*2` entries of a 2-byte
+  (H1NodeAddress(1B), VersionNumber(1B)) pair.
+- **LinkId == 0**: the list is `N` entries of a 4-byte (H1LinkId(2B BE),
+  Reserved(1B), VersionNumber(1B)) quad.
+
+Either way, the list consumes exactly `4*N` total bytes starting at body
+offset 108 -- only the INTERNAL shape of those bytes depends on LinkId, not
+the total byte count, which is why both branches land on the same
+"remainder starts at `108+4*N`" offset. Getting this branch wrong (e.g.
+reading N as 4-byte quads when LinkId != 0) would silently misinterpret
+every entry after the first -- this decoder computes LinkId from the header
+exactly once, before entering either message's own body-decode function,
+and threads it through explicitly rather than re-deriving it separately in
+each. See `include/conduitscope/ffhse.hpp`'s file header comment for the
+full writeup, including the FDA Address field's own remaining bits (shown
+raw, as hex, not otherwise decoded).
+
+#### UNCONFIRMED working hypothesis: cyclic Publisher/Subscriber traffic
+
+No distinct "cyclic Publisher/Subscriber" message shape was identified
+anywhere in the reference source consulted while building this decoder.
+This decoder's own best guess -- a guess, **not** a confirmed fact -- is
+that HSE's cyclic/multicast function-block data reuses the unconfirmed FMS
+Information Report family (Service Ids 0/16/17/18) rather than having any
+wire shape of its own. This is presented here, and everywhere else this
+decoder or its documentation mentions it, as an inference this decoder
+makes, never as an established fact about the FF-HSE protocol -- no
+independent source (paywalled spec or otherwise) was available to confirm
+or refute it.
+
+#### JSON field reference
+
+All fields present only when `protocol` is `ffhse`:
+
+- `ffhse_version`, `ffhse_options`: the header's raw Version/Options bytes.
+- `ffhse_protocol`: `"FDA"`/`"SM"`/`"FMS"`/`"LAN Redundancy"`.
+- `ffhse_type`: `"Request"`/`"Response"`/`"Error"`.
+- `ffhse_confirmed`: `true`/`false`, the Service byte's own confirmed-service flag.
+- `ffhse_service_id`: the Service byte's low 7 bits.
+- `ffhse_fda_address`: the full 4-byte FDA Address field, as hex (e.g. `"0x00010203"`).
+- `ffhse_link_id`: the FDA Address field's own top 16 bits -- see the LinkId branch above.
+- `ffhse_message_length`: the header's own declared total PDU length.
+- `ffhse_message_number` / `ffhse_invoke_id` / `ffhse_time_stamp` /
+  `ffhse_extended_control_field`: present only when the corresponding
+  Options bit was set (see the trailer above); `ffhse_time_stamp` is always
+  the raw 64-bit value, never interpreted as a calendar date.
+- `ffhse_message_name`: a best-effort message name, e.g. `"FDA Open Session
+  Req"`, `"SM Identify Rsp"`, `"FMS Initiate Err"`, `"LAN Redundancy Get
+  Statistics Rsp"` -- always present, even for an unrecognized combination
+  (e.g. `"SM unconfirmed service 99"`, with `ffhse_recognized: false`).
+- `ffhse_recognized`: `true`/`false`, whether this decoder recognizes the
+  `(Protocol, Type, ConfirmedFlag, ServiceId)` combination at all (Tier 1
+  OR Tier 2).
+- `ffhse_body_decoded`: `true`/`false`, `true` only for a Tier-1 message
+  whose body matched this decoder's expected shape.
+- `ffhse_values`: an array of one `"field-name=value"` string per decoded
+  field, wire order (e.g. `"session-index=1"`, `"index=315"`,
+  `"error-class=5 (Service)"`, `"h1-new-address=0x05"`,
+  `"pd-tag=\"TT-101\""`), present only when non-empty (i.e. only for a
+  Tier-1-decoded body).
+- `ffhse_body_shown_as_hex`: `true`/`false` -- `true` for a Tier-2
+  message's whole body, OR for the trailing "remainder" bytes past a
+  Tier-1 message's own fixed/variable decoded shape.
+- `ffhse_body_length` / `ffhse_body_hex`: present only when
+  `ffhse_body_shown_as_hex` is `true` -- the undecoded byte count and its
+  hex rendering.
+
+#### Validation
+
+Despite a genuine, multi-source search -- `automayt/ICS-pcap`,
+`ITI/ICS-Security-Tools`, the 4SICS GeekLounge/Netresec collections, and
+malware-traffic-analysis.net -- **no public real-world FF-HSE capture was
+found**. A small synthetic 4-message concatenation test capture referenced
+in a Wireshark GitLab bug report was also identified but could not be
+retrieved. This decoder's every path is therefore validated only by
+construction: hand-built against `packet-ff.c`'s own dissection logic and
+exercised against the synthetic `tests/sample_ffhse.pcap` fixture (see
+`tools/make_sample_pcap.py`'s `build_ffhse_sample()`), covering every
+Tier-1 message family across all four sub-protocols in both directions
+(plus Error bodies), both LinkId branches of the SM Identify Rsp / SM
+Device Annunciation shape, every trailer-field combination, Pad Length's
+decorative non-effect, UDP multi-PDU coalescing, TCP coalescing and
+cross-segment reassembly, an unexpected port note, and malformed/truncated-
+body fallback to raw hex -- the same honest gap already documented for CIP
+I/O, PROFINET RT's cyclic IO data, and Sampled Values, among others in this
+codebase. If a real FF-HSE capture becomes available later, it should be
+added and this section updated accordingly, the same way this project has
+handled every other protocol where independent traffic was eventually
+found after an earlier empty search. See `include/conduitscope/ffhse.hpp`'s
+file header for the full writeup.
+
 ### Link/IP-layer plumbing: non-IPv4 Ethernet, and non-TCP IPv4 (including UDP)
 
 Every protocol above rides on Ethernet + IPv4 + TCP. Traffic outside that --
@@ -5023,6 +5382,51 @@ These are current, not aspirational -- each has a corresponding ROADMAP item.
   see PROTOCOL COVERAGE's MQTT section for the full Tier 1/Tier 2 split.
   Sparkplug's own STATE topic payload (plain JSON text, not protobuf) is
   likewise shown as raw text, not parsed as JSON.
+- **FF-HSE's own structural detection gate is honestly the weakest in this
+  codebase** -- a single byte at header offset 2 landing on one of 12 valid
+  values out of 256, plus a length check that is barely a constraint at
+  all, weaker even than MQTT's own gate. FF-HSE is therefore dispatched
+  dead last of every protocol here, on both TCP and UDP -- see PROTOCOL
+  DETECTION's "Why FF-HSE is tried last of all".
+- **FF-HSE's Tier-2 scope covers FMS's Get OD, Define/Delete Variable
+  List, the Download/Upload sequence families, RequestDomainDownload/
+  Upload, the Program Invocation lifecycle, AlterEventConditionMonitoring,
+  AcknowledgeEventNotification, the Put OD family, the Generic Download
+  sequence family, and unconfirmed Event Notification** -- named only,
+  body shown as raw hex. FMS Get OD is left undecoded even by the
+  reference Wireshark dissector itself, since OD entries depend on Device
+  Description content neither has access to.
+- **FMS Read/Read-with-Subindex response values, and Write/Write-with-
+  Subindex request values, are left as raw hex** -- an FMS value has no
+  self-describing wire type without external Object Dictionary context to
+  interpret it against, the same honesty precedent this codebase's
+  EtherNet/IP CIP I/O decoder and S7comm-Plus already set elsewhere.
+- **No real FF-HSE capture could be found anywhere, despite a genuine
+  multi-source search** (`automayt/ICS-pcap`, `ITI/ICS-Security-Tools`, the
+  4SICS GeekLounge/Netresec collections, and malware-traffic-analysis.net;
+  a small synthetic test capture referenced in a Wireshark GitLab bug
+  report was identified but could not be retrieved either) -- this decoder
+  is therefore validated only against its own synthetic fixture. See
+  PROTOCOL COVERAGE's FOUNDATION Fieldbus HSE section's Validation
+  subsection.
+- **The cyclic Publisher/Subscriber wire shape is an unconfirmed inference,
+  not a confirmed fact.** No distinct cyclic Publisher/Subscriber message
+  shape was identified in the reference source consulted while building
+  this decoder; this decoder's own best guess is that it reuses the
+  unconfirmed FMS Information Report family (Service Ids 0/16/17/18), but
+  that is a guess -- no independent source was available to confirm or
+  refute it. See PROTOCOL COVERAGE's FOUNDATION Fieldbus HSE section.
+- **FF-HSE's own Network Management (FF-803) and full HSE Redundancy
+  scope are entirely out of scope.** Only basic LAN Redundancy Get Info/
+  Put Info/Get Statistics/Diagnostic Message are decoded (LAN Redundancy's
+  own Tier-1 message set); Network Management as a whole, and any HSE
+  Redundancy behavior beyond that basic message set, are not implemented
+  at all -- not even named/Tier-2.
+- **The LinkId branch (SM Identify Rsp / SM Device Annunciation Req) is
+  the single trickiest piece of this decoder** -- getting it wrong would
+  silently misinterpret every version-number-list entry after the first.
+  Both branches are covered by the synthetic fixture, but only that
+  fixture -- see PROTOCOL COVERAGE's FOUNDATION Fieldbus HSE section.
 
 ## EXIT STATUS
 
@@ -5394,6 +5798,35 @@ Note MQTT traffic on a port your zone policy doesn't expect on 1883:
 ```sh
 conduitscope decode -r capture.pcap --protocol mqtt --mqtt-port 1883 -f text \
   | grep -B1 "not a configured/standard MQTT port"
+```
+
+Summarize FF-HSE traffic by sub-protocol and message name -- a quick way to
+see which of FDA/SM/FMS/LAN Redundancy dominates a capture:
+
+```sh
+conduitscope decode -r capture.pcap --protocol ff-hse -f json \
+  | jq -r '[.[] | select(.ffhse_protocol != null) | "\(.ffhse_protocol) / \(.ffhse_message_name)"] |
+           group_by(.) | map("\(length)x \(.[0])") | .[]'
+```
+
+Pull every decoded FF-HSE field=value pair (e.g. from FMS Read/Write
+traffic, SM device commissioning, or Error bodies), alongside which
+message they came from:
+
+```sh
+conduitscope decode -r capture.pcap --protocol ff-hse -f json \
+  | jq -r '.[] | select(.ffhse_values // [] | length > 0) |
+           "\(.src_ip) -> \(.dst_ip): \(.ffhse_message_name): \(.ffhse_values | join(", "))"'
+```
+
+Find FF-HSE Error responses, grouped by ErrorClass -- useful for spotting a
+device that keeps rejecting a particular class of request:
+
+```sh
+conduitscope decode -r capture.pcap --protocol ff-hse -f json \
+  | jq -r '.[] | select(.ffhse_type == "Error") |
+           (.ffhse_values[] | select(startswith("error-class="))) as $ec |
+           "\(.ffhse_message_name): \($ec)"' | sort | uniq -c | sort -rn
 ```
 
 ## ROADMAP
