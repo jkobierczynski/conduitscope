@@ -20,6 +20,7 @@
 #include "conduitscope/hartip.hpp"
 #include "conduitscope/iec104.hpp"
 #include "conduitscope/modbus.hpp"
+#include "conduitscope/opcua.hpp"
 #include "conduitscope/pcap_reader.hpp"
 #include "conduitscope/profinet.hpp"
 #include "conduitscope/sv.hpp"
@@ -28,7 +29,7 @@
 namespace conduitscope {
 
 enum class ProtocolFilter {
-    Auto,         // opportunistically detect IEC104/Modbus/DNP3/S7comm/EtherNet-IP/PROFINET/GOOSE/SV/EtherCAT/BACnet-IP/HART-IP regardless of port
+    Auto,         // opportunistically detect IEC104/Modbus/DNP3/S7comm/EtherNet-IP/PROFINET/GOOSE/SV/EtherCAT/BACnet-IP/HART-IP/OPC-UA regardless of port
     ModbusOnly,   // only attempt Modbus decoding
     Dnp3Only,     // only attempt DNP3 decoding
     S7commOnly,   // only attempt TPKT/COTP/S7comm decoding
@@ -40,6 +41,7 @@ enum class ProtocolFilter {
     EthercatOnly, // only attempt EtherCAT decoding
     BacnetOnly,   // only attempt BACnet/IP (BVLC/NPDU/APDU) decoding
     HartIpOnly,   // only attempt HART-IP (session control / tunneled Pass-Through) decoding
+    OpcUaOnly,    // only attempt OPC UA (UA-TCP / Secure Conversation) decoding
 };
 
 struct DecodeOptions {
@@ -60,6 +62,7 @@ struct DecodeOptions {
     std::vector<uint16_t> extra_enip_io_ports;  // UDP, unlike extra_enip_ports (TCP) -- see ENIP_IO_UDP_PORT
     std::vector<uint16_t> extra_bacnet_ports;   // UDP -- see BACNET_UDP_PORT (47808/0xBAC0)
     std::vector<uint16_t> extra_hartip_ports;   // TCP AND UDP -- see HARTIP_PORT (5094, same for both)
+    std::vector<uint16_t> extra_opcua_ports;    // TCP only -- see OPCUA_PORT (4840)
     // If true, a parse failure at the Ethernet/IPv4/TCP layer is rethrown to
     // the caller instead of being recorded as a per-packet "parse-error"
     // result. Off by default so one malformed packet doesn't abort decoding
@@ -91,7 +94,7 @@ struct DecodedPacket {
     std::string tcp_flags;
 
     // "iec104", "modbus", "dnp3", "s7comm", "enip", "profinet", "goose", "sv", "ethercat", "bacnet",
-    // "hartip", "cotp"
+    // "hartip", "opcua", "cotp"
     // (recognized TPKT/COTP framing but not S7comm inside it -- e.g. a connection setup frame),
     // "tcp" (recognized transport, no app-layer match), "udp" (recognized transport, no app-layer
     // protocol decoded -- see udp.hpp; UDP/2222 CIP I/O traffic that try_parse_cip_io actually
@@ -392,6 +395,56 @@ struct DecodedPacket {
     // Mirrors bacnet_values'/enip_cip_values' scheme. Empty when this command is outside the
     // first-pass dispatch table (commands 77/178, and any unrecognized command number).
     std::vector<std::string> hartip_values;
+
+    // Only set when protocol == "opcua" -- see try_parse_opcua_message in opcua.hpp. OPC UA rides
+    // TCP only (no UDP mapping in the spec); its own structural detection gate (a 3-byte ASCII
+    // MessageType magic string against a 7-member allowlist) is one of the STRONGEST gates in
+    // this codebase -- see opcua.hpp's own confidence comparison.
+    std::string opcua_message_type;  // "Hello"/"Acknowledge"/"Error"/"ReverseHello"/
+                                       // "OpenSecureChannel"/"CloseSecureChannel"/"Message"
+    char opcua_chunk_type = 'F';      // 'F'/'C'/'A' -- see opcua.hpp's "Chunking" section
+    uint32_t opcua_message_size = 0;  // this chunk's own declared total length, header included
+
+    // Set only for OpenSecureChannel/CloseSecureChannel/Message (the SecureConversation messages
+    // -- Hello/Acknowledge/Error/ReverseHello have no SecureChannelId of their own).
+    bool opcua_has_secure_channel = false;
+    uint32_t opcua_secure_channel_id = 0;
+    bool opcua_is_asymmetric = false;  // true only for OpenSecureChannel
+    std::string opcua_security_policy_uri;  // asymmetric (OpenSecureChannel) only
+    bool opcua_has_sender_certificate = false;
+    size_t opcua_sender_certificate_length = 0;
+    bool opcua_has_receiver_certificate_thumbprint = false;
+    uint32_t opcua_token_id = 0;  // symmetric (CloseSecureChannel/Message) only
+    uint32_t opcua_sequence_number = 0;
+    uint32_t opcua_request_id = 0;
+
+    // Set only for Message (MSG) whose leading bytes this decoder could parse as a NodeId -- see
+    // opcua.hpp's "Opportunistic MSG/OPN/CLO body decode" section for why this can fail even on a
+    // structurally valid OPC UA message (an encrypted/signed body).
+    bool opcua_service_recognized = false;  // TypeId matched a name in this decoder's own table
+    std::string opcua_service_name;         // e.g. "OpenSecureChannelRequest" -- empty when !opcua_service_recognized
+    uint16_t opcua_service_namespace = 0;
+    uint32_t opcua_service_type_id = 0;  // the raw numeric identifier
+    bool opcua_service_body_decoded = false;  // true for this decoder's "Tier 1" services (full
+                                                // field decode); false for "Tier 2" (named, header
+                                                // decoded, body shown as raw hex) and for any
+                                                // unrecognized TypeId -- see opcua.hpp
+
+    bool opcua_has_header = false;  // RequestHeader/ResponseHeader was itself decoded
+    uint32_t opcua_request_handle = 0;
+    bool opcua_is_response = false;
+    uint32_t opcua_status_code = 0;       // ResponseHeader's own ServiceResult
+    std::string opcua_status_code_name;   // "Good"/"Uncertain"/"Bad (0xNNNNNNNN)" -- see opcua.hpp
+    bool opcua_status_is_good = false;
+
+    // Decoded field-by-field summary of this Tier-1 service's own request/response fields --
+    // mirrors bacnet_values'/hartip_values' scheme. Empty when opcua_service_body_decoded is
+    // false.
+    std::vector<std::string> opcua_values;
+
+    bool opcua_body_shown_as_hex = false;
+    std::string opcua_body_hex;
+    size_t opcua_body_length = 0;
 };
 
 // Cross-packet DNP3 fragment-reassembly state for one directional TCP flow (src ip:port -> dst

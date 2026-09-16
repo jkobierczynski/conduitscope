@@ -96,6 +96,9 @@ private:
     std::map<std::string, size_t> hartip_message_type_counts_;
     std::map<std::string, size_t> hartip_command_counts_;  // keyed by "N (Name)" or "N", only when
                                                               // hartip_has_pass_through
+    std::map<std::string, size_t> opcua_message_type_counts_;  // "Hello"/"OpenSecureChannel"/"Message"/...
+    std::map<std::string, size_t> opcua_service_counts_;  // keyed by service name, only when
+                                                             // opcua_service_recognized
     bool has_ts_ = false;
     double first_ts_ = 0.0, last_ts_ = 0.0;
 };

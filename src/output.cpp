@@ -65,6 +65,7 @@ constexpr const char* kBrightMagenta = "\033[95m";
 constexpr const char* kBrightYellow = "\033[93m";
 constexpr const char* kBrightBlue = "\033[94m";
 constexpr const char* kBrightWhite = "\033[97m";
+constexpr const char* kBrightRed = "\033[91m";
 
 // Color for a packet's "[protocol]" tag -- picked so a mixed-protocol capture scans quickly by
 // eye, not for any deeper meaning. parse-error is the one exception: it gets the same "something
@@ -83,6 +84,7 @@ const char* protocol_tag_color(const std::string& protocol) {
     if (protocol == "ethercat") return kBrightYellow;
     if (protocol == "bacnet") return kBrightBlue;
     if (protocol == "hartip") return kBrightWhite;
+    if (protocol == "opcua") return kBrightRed;
     if (protocol == "parse-error") return kBoldRed;
     return kDim;  // tcp / udp / non-tcp / non-ip / unsupported-link: recognized, nothing OT-specific
 }
@@ -429,6 +431,67 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
             }
         }
     }
+    if (p.protocol == "opcua") {
+        out_ << "    \"opcua_message_type\": \"" << json_escape(p.opcua_message_type) << "\",\n";
+        out_ << "    \"opcua_chunk_type\": \"" << std::string(1, p.opcua_chunk_type) << "\",\n";
+        out_ << "    \"opcua_message_size\": " << p.opcua_message_size << ",\n";
+        out_ << "    \"opcua_has_secure_channel\": " << (p.opcua_has_secure_channel ? "true" : "false")
+             << ",\n";
+        if (p.opcua_has_secure_channel) {
+            out_ << "    \"opcua_secure_channel_id\": " << p.opcua_secure_channel_id << ",\n";
+            out_ << "    \"opcua_is_asymmetric\": " << (p.opcua_is_asymmetric ? "true" : "false") << ",\n";
+            if (p.opcua_is_asymmetric) {
+                out_ << "    \"opcua_security_policy_uri\": \"" << json_escape(p.opcua_security_policy_uri)
+                     << "\",\n";
+                out_ << "    \"opcua_has_sender_certificate\": "
+                     << (p.opcua_has_sender_certificate ? "true" : "false") << ",\n";
+                if (p.opcua_has_sender_certificate)
+                    out_ << "    \"opcua_sender_certificate_length\": " << p.opcua_sender_certificate_length
+                         << ",\n";
+                out_ << "    \"opcua_has_receiver_certificate_thumbprint\": "
+                     << (p.opcua_has_receiver_certificate_thumbprint ? "true" : "false") << ",\n";
+            } else {
+                out_ << "    \"opcua_token_id\": " << p.opcua_token_id << ",\n";
+            }
+            out_ << "    \"opcua_sequence_number\": " << p.opcua_sequence_number << ",\n";
+            out_ << "    \"opcua_request_id\": " << p.opcua_request_id << ",\n";
+        }
+        out_ << "    \"opcua_service_recognized\": " << (p.opcua_service_recognized ? "true" : "false")
+             << ",\n";
+        if (p.opcua_service_recognized) {
+            out_ << "    \"opcua_service_name\": \"" << json_escape(p.opcua_service_name) << "\",\n";
+        }
+        if (p.opcua_service_namespace != 0 || p.opcua_service_type_id != 0 || p.opcua_service_recognized) {
+            out_ << "    \"opcua_service_namespace\": " << p.opcua_service_namespace << ",\n";
+            out_ << "    \"opcua_service_type_id\": " << p.opcua_service_type_id << ",\n";
+        }
+        out_ << "    \"opcua_has_header\": " << (p.opcua_has_header ? "true" : "false") << ",\n";
+        if (p.opcua_has_header) {
+            out_ << "    \"opcua_request_handle\": " << p.opcua_request_handle << ",\n";
+            out_ << "    \"opcua_is_response\": " << (p.opcua_is_response ? "true" : "false") << ",\n";
+            if (p.opcua_is_response) {
+                out_ << "    \"opcua_status_code\": " << p.opcua_status_code << ",\n";
+                out_ << "    \"opcua_status_code_name\": \"" << json_escape(p.opcua_status_code_name)
+                     << "\",\n";
+                out_ << "    \"opcua_status_is_good\": " << (p.opcua_status_is_good ? "true" : "false")
+                     << ",\n";
+            }
+        }
+        if (!p.opcua_values.empty()) {
+            out_ << "    \"opcua_values\": [";
+            for (size_t i = 0; i < p.opcua_values.size(); ++i) {
+                if (i != 0) out_ << ", ";
+                out_ << "\"" << json_escape(p.opcua_values[i]) << "\"";
+            }
+            out_ << "],\n";
+        }
+        out_ << "    \"opcua_body_shown_as_hex\": " << (p.opcua_body_shown_as_hex ? "true" : "false")
+             << ",\n";
+        if (p.opcua_body_shown_as_hex) {
+            out_ << "    \"opcua_body_length\": " << p.opcua_body_length << ",\n";
+            out_ << "    \"opcua_body_hex\": \"" << json_escape(p.opcua_body_hex) << "\",\n";
+        }
+    }
     out_ << "    \"notes\": [";
     for (size_t i = 0; i < p.notes.size(); ++i) {
         if (i != 0) out_ << ", ";
@@ -510,6 +573,12 @@ void StatsWriter::write_packet(const DecodedPacket& p) {
             std::string key = std::to_string(static_cast<unsigned>(p.hartip_command));
             if (!p.hartip_command_name.empty()) key += " (" + p.hartip_command_name + ")";
             hartip_command_counts_[key]++;
+        }
+    }
+    if (p.protocol == "opcua") {
+        opcua_message_type_counts_[p.opcua_message_type]++;
+        if (p.opcua_service_recognized) {
+            opcua_service_counts_[p.opcua_service_name]++;
         }
     }
     if (!has_ts_) {
@@ -618,6 +687,18 @@ void StatsWriter::print_summary(std::ostream& out) const {
     if (!hartip_command_counts_.empty()) {
         out << "hartip pass-through commands:\n";
         for (const auto& [name, count] : hartip_command_counts_) {
+            out << "  " << std::left << std::setw(60) << name << count << "\n";
+        }
+    }
+    if (!opcua_message_type_counts_.empty()) {
+        out << "opcua message types:\n";
+        for (const auto& [name, count] : opcua_message_type_counts_) {
+            out << "  " << std::left << std::setw(40) << name << count << "\n";
+        }
+    }
+    if (!opcua_service_counts_.empty()) {
+        out << "opcua services:\n";
+        for (const auto& [name, count] : opcua_service_counts_) {
             out << "  " << std::left << std::setw(60) << name << count << "\n";
         }
     }

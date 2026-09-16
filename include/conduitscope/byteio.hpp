@@ -112,6 +112,12 @@ public:
         return (d << 24) | (c << 16) | (b << 8) | a;
     }
 
+    uint64_t u64le() {
+        uint64_t lo = u32le();
+        uint64_t hi = u32le();
+        return (hi << 32) | lo;
+    }
+
     ByteSpan bytes(size_t n) {
         ByteSpan s = span_.subspan(pos_, n);
         pos_ += n;

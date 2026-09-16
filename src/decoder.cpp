@@ -13,6 +13,7 @@
 #include "conduitscope/ethercat.hpp"
 #include "conduitscope/goose.hpp"
 #include "conduitscope/hartip.hpp"
+#include "conduitscope/opcua.hpp"
 #include "conduitscope/iec104.hpp"
 #include "conduitscope/ipv4.hpp"
 #include "conduitscope/link_layer.hpp"
@@ -282,12 +283,23 @@ bool Decoder::reassemble_tcp_payload(const TcpSegment& tcp, const std::string& f
                         options_.protocol_filter == ProtocolFilter::S7commOnly;
     bool want_hartip = options_.protocol_filter == ProtocolFilter::Auto ||
                         options_.protocol_filter == ProtocolFilter::HartIpOnly;
+    bool want_opcua = options_.protocol_filter == ProtocolFilter::Auto ||
+                       options_.protocol_filter == ProtocolFilter::OpcUaOnly;
 
-    // EtherNet/IP is checked first: its own dedicated TCP port (44818, no overlap with the other
+    // OPC UA is checked first of all: its own structural detection gate (the leading 3 bytes must
+    // be one of exactly 7 fixed ASCII MessageType strings -- "HEL"/"ACK"/"ERR"/"RHE"/"OPN"/"CLO"/
+    // "MSG" -- see opcua.hpp's own "structural detection gate" paragraph) is a magic-string check
+    // against a small allowlist, which this codebase's own research found cannot collide with any
+    // other protocol's own leading-bytes gate below (none of those 7 strings' constituent bytes
+    // can satisfy Modbus's protocol-id==0 check, IEC104's 0x68 start byte, TPKT's version==3 byte,
+    // DNP3's 0x0564 sync bytes, or EtherNet/IP's own small enumerated command-code set) -- so,
+    // unlike HART-IP below, trying it first costs nothing and is the safest place for it.
+    //
+    // EtherNet/IP is checked next: its own dedicated TCP port (44818, no overlap with the other
     // four protocols) plus three independent structural checks (a 9-value command enum, a
     // 7-value status enum, and a reserved-must-be-0 options field -- see try_parse_enip's header
     // comment in enip.hpp) make it, if anything, a stronger signal than IEC104's own -- so it
-    // costs nothing to try first and is the safest place for it.
+    // costs nothing to try next and is the safest place for it.
     //
     // IEC104 is checked next, ahead of Modbus, even though Modbus has been in this dispatch
     // chain the longest -- see try_parse_iec104_apci's header comment for the collision this
@@ -301,7 +313,13 @@ bool Decoder::reassemble_tcp_payload(const TcpSegment& tcp, const std::string& f
     //
     std::optional<size_t> declared;
     std::string which;
-    if (want_enip) {
+    if (want_opcua) {
+        if (auto d = opcua_declared_length(candidate)) {
+            declared = d;
+            which = "OPC UA message";
+        }
+    }
+    if (!declared && want_enip) {
         if (auto d = enip_declared_length(candidate)) {
             declared = d;
             which = "EtherNet/IP encapsulation message";
@@ -963,10 +981,98 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                             options_.protocol_filter == ProtocolFilter::S7commOnly;
         bool want_hartip = options_.protocol_filter == ProtocolFilter::Auto ||
                             options_.protocol_filter == ProtocolFilter::HartIpOnly;
+        bool want_opcua = options_.protocol_filter == ProtocolFilter::Auto ||
+                           options_.protocol_filter == ProtocolFilter::OpcUaOnly;
 
-        // Tried first -- see the matching comment in reassemble_tcp_payload above for why
+        // Tried first of all -- see the matching, fuller comment in reassemble_tcp_payload above
+        // for why OPC UA's own magic-string detection gate is strong enough, and non-colliding
+        // enough with every other protocol below, that trying it first costs nothing.
+        if (want_opcua) {
+            if (auto msg = try_parse_opcua_message(effective_payload)) {
+                out.protocol = "opcua";
+                out.summary = msg->summary;
+
+                auto merge_opcua = [&](const OpcUaMessage& m, bool is_first_message) {
+                    for (const auto& n : m.notes) out.notes.push_back(n);
+                    if (!is_first_message) return;
+                    out.opcua_message_type = m.message_type;
+                    out.opcua_chunk_type = m.chunk_type;
+                    out.opcua_message_size = m.message_size;
+                    out.opcua_has_secure_channel = m.has_secure_channel;
+                    if (m.has_secure_channel) {
+                        out.opcua_secure_channel_id = m.secure_channel_id;
+                        out.opcua_is_asymmetric = m.is_asymmetric;
+                        if (m.is_asymmetric) {
+                            out.opcua_security_policy_uri = m.security_policy_uri;
+                            out.opcua_has_sender_certificate = m.has_sender_certificate;
+                            out.opcua_sender_certificate_length = m.sender_certificate_length;
+                            out.opcua_has_receiver_certificate_thumbprint =
+                                m.has_receiver_certificate_thumbprint;
+                        } else {
+                            out.opcua_token_id = m.token_id;
+                        }
+                        out.opcua_sequence_number = m.sequence_number;
+                        out.opcua_request_id = m.request_id;
+                    }
+                    out.opcua_service_recognized = m.service_recognized;
+                    out.opcua_service_name = m.service_name;
+                    out.opcua_service_namespace = m.service_namespace;
+                    out.opcua_service_type_id = m.service_type_id;
+                    out.opcua_service_body_decoded = m.service_body_decoded;
+                    out.opcua_has_header = m.has_header;
+                    if (m.has_header) {
+                        out.opcua_request_handle = m.header.request_handle;
+                        out.opcua_is_response = m.header.is_response;
+                        out.opcua_status_code = m.header.status_code;
+                        out.opcua_status_code_name = m.header.status_code_name;
+                        out.opcua_status_is_good = m.header.status_is_good;
+                    }
+                    out.opcua_values = m.values;
+                    out.opcua_body_shown_as_hex = m.body_shown_as_hex;
+                    if (m.body_shown_as_hex) {
+                        out.opcua_body_hex = m.body_hex;
+                        out.opcua_body_length = m.body_length;
+                    }
+                };
+                merge_opcua(*msg, /*is_first_message=*/true);
+
+                // Like EtherNet/IP/HART-IP's own small messages, it's normal for a sender or the
+                // OS to coalesce several OPC UA chunks into one TCP segment before flushing.
+                constexpr size_t kMaxOpcUaMessagesPerPayload = 50;
+                size_t offset = msg->wire_length;
+                size_t message_count = 1;
+                while (offset < effective_payload.size() && message_count < kMaxOpcUaMessagesPerPayload) {
+                    ByteSpan rest = effective_payload.from(offset);
+                    auto next = try_parse_opcua_message(rest);
+                    if (!next) break;  // remaining bytes aren't another OPC UA message -- stop, don't guess
+                    ++message_count;
+                    std::string note = "additional OPC UA message " + std::to_string(message_count) +
+                                        " found in the same TCP payload at byte offset " + std::to_string(offset) +
+                                        " (coalesced by the sender/OS): " + next->summary;
+                    out.notes.push_back(note);
+                    merge_opcua(*next, /*is_first_message=*/false);
+                    offset += next->wire_length;
+                }
+                if (message_count >= kMaxOpcUaMessagesPerPayload) {
+                    out.notes.push_back("stopped after " + std::to_string(kMaxOpcUaMessagesPerPayload) +
+                                         " OPC UA message(s) in this one TCP payload, more may remain "
+                                         "(safety cap)");
+                }
+
+                bool expected_port = port_in(tcp.src_port, OPCUA_PORT, options_.extra_opcua_ports) ||
+                                      port_in(tcp.dst_port, OPCUA_PORT, options_.extra_opcua_ports);
+                if (!expected_port) {
+                    out.notes.push_back("seen on TCP port " + std::to_string(tcp.src_port) + "->" +
+                                         std::to_string(tcp.dst_port) +
+                                         ", which is not a configured/standard OPC UA port (4840)");
+                }
+                return out;
+            }
+        }
+
+        // Tried next -- see the matching comment in reassemble_tcp_payload above for why
         // EtherNet/IP's own structural checks are strong enough that dispatch order doesn't
-        // matter for it the way it does for IEC104-vs-Modbus, but trying it first costs nothing.
+        // matter for it the way it does for IEC104-vs-Modbus, but trying it early costs nothing.
         if (want_enip) {
             if (auto frame = try_parse_enip(effective_payload)) {
                 out.protocol = "enip";
@@ -1415,7 +1521,8 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
         out.protocol = "tcp";
         std::ostringstream s;
         s << "TCP payload of " << effective_payload.size() << " byte(s) on port " << tcp.src_port << "->"
-          << tcp.dst_port << " did not match EtherNet/IP, IEC 104, Modbus, DNP3, COTP/S7comm, or HART-IP";
+          << tcp.dst_port
+          << " did not match OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, COTP/S7comm, or HART-IP";
         out.summary = s.str();
         return out;
 

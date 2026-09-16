@@ -1,6 +1,6 @@
 .TH CONDUITSCOPE 1 "2026" "conduitscope 0.1.0" "User Commands"
 .SH NAME
-conduitscope \- decode Modbus/TCP, DNP3, IEC 60870-5-104, S7comm/COTP, EtherNet/IP (CIP explicit and implicit messaging), PROFINET RT (DCP and cyclic real-time IO), IEC 61850-8-1 GOOSE, IEC 61850-9-2 Sampled Values, EtherCAT, BACnet/IP, and HART-IP traffic from offline pcap/pcapng captures
+conduitscope \- decode Modbus/TCP, DNP3, IEC 60870-5-104, S7comm/COTP, EtherNet/IP (CIP explicit and implicit messaging), PROFINET RT (DCP and cyclic real-time IO), IEC 61850-8-1 GOOSE, IEC 61850-9-2 Sampled Values, EtherCAT, BACnet/IP, HART-IP, and OPC UA Binary traffic from offline pcap/pcapng captures
 .SH SYNOPSIS
 .B conduitscope
 [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-color\fR|\fB\-\-color\fR] [\fB\-\-log\-file\fR \fIFILE\fR] \fICOMMAND\fR [\fIOPTIONS\fR]
@@ -22,7 +22,10 @@ IP/TCP/UDP layer at all, plus BACnet/IP (UDP port 47808/0xBAC0, ASHRAE 135
 Annex J, detected by payload shape rather than port) traffic found inside
 its UDP streams, plus HART-IP (UDP/TCP port 5094, IEC 62591 / HCF_SPEC-151,
 tried last of all protocols on both transports due to its own genuinely
-weak structural detection gate) traffic found on either, and checks
+weak structural detection gate) traffic found on either, plus OPC UA Binary
+(TCP port 4840, UA-TCP transport / OPC UA Secure Conversation, OPC 10000-6,
+tried FIRST of all protocols due to its own strong structural detection
+gate) traffic found inside its TCP streams, and checks
 decoded traffic against a
 zone-and-conduit segmentation policy (IEC 62443 / NIS2 style work) via
 \fBpolicy validate\fR.
@@ -87,15 +90,18 @@ Write output here instead of stdout.
 .BR \-f ", " \-\-format " " {text,json,csv}
 Output format. Default: text.
 .TP
-.B \-\-protocol {auto,modbus,dnp3,iec104,s7comm,enip,profinet,goose,sv,ethercat,bacnet,hartip}
-Restrict decoding to one protocol. Default: auto (tries all six TCP
+.B \-\-protocol {auto,modbus,dnp3,iec104,s7comm,enip,profinet,goose,sv,ethercat,bacnet,hartip,opcua}
+Restrict decoding to one protocol. Default: auto (tries all seven TCP
 protocols, independent of port number, plus CIP I/O and BACnet/IP on every
 UDP payload,
 plus PROFINET RT on every non-IPv4 Ethernet frame carrying EtherType
 0x8892, plus GOOSE on every non-IPv4 Ethernet frame carrying EtherType
 0x88B8, plus Sampled Values on every non-IPv4 Ethernet frame carrying
 EtherType 0x88BA, plus EtherCAT on every non-IPv4 Ethernet frame carrying
-EtherType 0x88A4; EtherNet/IP is tried first, then IEC 104 before Modbus, since an
+EtherType 0x88A4; OPC UA is tried first of all, ahead of every other TCP
+protocol, since its own 3-byte ASCII MessageType magic (HEL/ACK/ERR/RHE/
+OPN/CLO/MSG) has zero collision risk against any other protocol's own
+detection gate; EtherNet/IP is tried next, then IEC 104 before Modbus, since an
 IEC 104 I-format APDU with sequence numbers 0/0 -- universal at session
 start -- coincidentally also matches Modbus's MBAP-header detection, and
 HART-IP is tried last of all, on both TCP and UDP, since its own 8-byte
@@ -108,6 +114,7 @@ EtherNet/IP explicit messaging (TCP) and CIP I/O implicit messaging (UDP).
 \fBbacnet\fR is BACnet/IP.
 \fBhartip\fR is HART-IP, tried on both TCP and UDP.
 \fBprofinet\fR covers both DCP and cyclic real-time IO.
+\fBopcua\fR is OPC UA Binary (UA-TCP/Secure Conversation), TCP only.
 .TP
 .B \-\-modbus\-port \fIPORT\fR
 Additional TCP port to treat as expected for Modbus. Repeatable. Does not
@@ -134,6 +141,9 @@ Same as \fB\-\-modbus\-port\fR, for BACnet/IP (UDP). Repeatable.
 .B \-\-hartip\-port \fIPORT\fR
 Same as \fB\-\-modbus\-port\fR, for HART-IP. Repeatable. Applies to both TCP
 and UDP, since HART-IP uses the same port number on either transport.
+.TP
+.B \-\-opcua\-port \fIPORT\fR
+Same as \fB\-\-modbus\-port\fR, for OPC UA. Repeatable. TCP only.
 .TP
 .B \-\-max\-packets \fIN\fR
 Stop after decoding this many packets. Default: 0 (unlimited). With
@@ -235,7 +245,7 @@ it's meant to be diffed/archived/piped as an audit artifact). The
 DNP3, green for IEC 104, blue for S7comm/COTP, yellow for EtherNet/IP,
 bright cyan for PROFINET RT, bright green for GOOSE, bright magenta for
 Sampled Values, bright yellow for EtherCAT, bright blue for BACnet/IP,
-bright white for HART-IP, dim
+bright white for HART-IP, bright red for OPC UA, dim
 for everything else
 recognized but not OT\-specific. A Modbus exception response's summary, and a
 \fBparse\-error\fR packet's whole line, are bold red. Notes are dim.
@@ -390,7 +400,33 @@ fixture and a genuine 116-frame real capture, but that real capture only
 exercises 9 of the roughly 20 decoded commands, no Error/NAK messages, no
 BACK frame type, and no non-Success response codes (see
 \fBdocs/MANUAL.md\fR's LIMITATIONS section and
-\fBtests/real_captures/hartip/ATTRIBUTION.md\fR for the full detail); non-IPv4
+\fBtests/real_captures/hartip/ATTRIBUTION.md\fR for the full detail); OPC UA
+Binary (TCP port 4840, UA-TCP transport / OPC UA Secure Conversation, tried
+FIRST of all protocols due to its own strong, collision-free structural
+detection gate) is also now decoded -- the 8-byte UA-TCP common header, the
+Secure Conversation security/sequence headers, and full field-level
+("Tier 1") decode of the connection-lifecycle and discovery services
+(Hello/Acknowledge/Error/ReverseHello, OpenSecureChannel, GetEndpoints,
+FindServers, CreateSession, ActivateSession -- including, deliberately, the
+cleartext Password field of a UserName/Password identity token sent over an
+unencrypted channel, flagged as a SECURITY FINDING) -- but OPC UA's own
+Variant/DataValue self-describing value encoding is NOT implemented, so
+Read/Write/Browse/Call and every subscription service are named and have
+their RequestHeader/ResponseHeader decoded only, their own bodies shown as
+raw hex; a logical message split across multiple 'C'/'F' OPC UA chunks
+(distinct from ordinary TCP-segment reassembly, which IS implemented) is
+not reassembled, only a single complete 'F' chunk's body is decoded; there
+is no stateful channel/session tracking (a TokenId or AuthenticationToken is
+never correlated back to the exchange that issued it); the StatusCode table
+is a first-pass ~20 entries out of the OPC Foundation's own ~700, with every
+other value still correctly decoding its Good/Uncertain/Bad severity from
+the raw hex; and real-capture validation, while genuine (two independent-
+stack sessions, 9 of ~15 Tier 1 services, real multi-segment TCP reassembly),
+never exercises FindServers, CloseSession, CloseSecureChannel, any Tier 2
+service besides Call, a non-Anonymous identity token, a non-'F' chunk, or a
+structurally-invalid NodeId (see \fBdocs/MANUAL.md\fR's LIMITATIONS section
+and \fBtests/real_captures/opcua/ATTRIBUTION.md\fR for the full detail);
+non-IPv4
 Ethernet frames and non-TCP
 IPv4 payloads (including UDP) are otherwise still just recognized and
 NAMED for a small OT-relevant set (ARP, LLDP, ICMP, and the rest) but not further decoded, and
@@ -521,6 +557,28 @@ conduitscope decode \-r capture.pcap \-\-protocol hartip \-f json \e
 .EE
 .RE
 .PP
+Build an OPC UA endpoint/security-posture inventory -- every distinct
+endpoint offered by a server's own GetEndpointsResponse, useful for
+spotting an endpoint still accepting SecurityMode "None":
+.RS
+.EX
+conduitscope decode \-r capture.pcap \-\-protocol opcua \-f json \e
+  | jq \-r '[.[] | select(.opcua_service_name == "GetEndpointsResponse") | .opcua_values[] | select(startswith("endpoint["))] | unique[]'
+.EE
+.RE
+.PP
+Find every OPC UA ActivateSession request that placed a UserName/Password
+credential on the wire in cleartext -- this decoder's own deliberate
+"SECURITY FINDING" note, worth flagging on any conduit that should be
+running an authenticated, encrypted OPC UA session:
+.RS
+.EX
+conduitscope decode \-r capture.pcap \-\-protocol opcua \-f json \e
+  | jq \-r '.[] | select(.notes // [] | any(startswith("SECURITY FINDING"))) |
+           "\e(.src_ip):\e(.src_port) \-> \e(.dst_ip):\e(.dst_port): \e(.opcua_values[] | select(startswith("username=") or startswith("password=")))"'
+.EE
+.RE
+.PP
 Surface TCP flows still stuck "buffering" a Modbus/TCP PDU that never
 arrives -- the signature of HART-IP's own documented weak-detection-gate
 collision (see LIMITATIONS above):
@@ -548,7 +606,7 @@ conduitscope interfaces
 Decode live traffic from eth0 for 60 seconds:
 .RS
 .EX
-conduitscope decode \-i eth0 \-\-filter "port 502 or port 102 or port 5094" \-\-duration 60
+conduitscope decode \-i eth0 \-\-filter "port 502 or port 102 or port 5094 or port 4840" \-\-duration 60
 .EE
 .RE
 .PP

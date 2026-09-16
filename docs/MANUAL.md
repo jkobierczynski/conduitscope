@@ -2,16 +2,16 @@
 
 ## NAME
 
-conduitscope -- decode Modbus/TCP, DNP3, IEC 60870-5-104, S7comm/COTP, EtherNet/IP (CIP explicit and implicit messaging), PROFINET RT (DCP and cyclic real-time IO), IEC 61850-8-1 GOOSE, IEC 61850-9-2 Sampled Values, EtherCAT, BACnet/IP, and HART-IP traffic from offline pcap captures
+conduitscope -- decode Modbus/TCP, DNP3, IEC 60870-5-104, S7comm/COTP, EtherNet/IP (CIP explicit and implicit messaging), PROFINET RT (DCP and cyclic real-time IO), IEC 61850-8-1 GOOSE, IEC 61850-9-2 Sampled Values, EtherCAT, BACnet/IP, HART-IP, and OPC UA Binary traffic from offline pcap captures
 
 ## SYNOPSIS
 
 ```
 conduitscope [-q|--quiet] [--no-color|--color] [--log-file FILE] [--version] [-h|--help] <command> [command options]
 
-conduitscope decode (-r FILE | -i INTERFACE) [-o FILE] [-f text|json|csv] [--protocol auto|modbus|dnp3|s7comm|iec104|enip|profinet|goose|sv|ethercat|bacnet|hartip]
+conduitscope decode (-r FILE | -i INTERFACE) [-o FILE] [-f text|json|csv] [--protocol auto|modbus|dnp3|s7comm|iec104|enip|profinet|goose|sv|ethercat|bacnet|hartip|opcua]
                      [--modbus-port PORT]... [--dnp3-port PORT]... [--s7comm-port PORT]... [--iec104-port PORT]...
-                     [--enip-port PORT]... [--enip-io-port PORT]... [--bacnet-port PORT]... [--hartip-port PORT]...
+                     [--enip-port PORT]... [--enip-io-port PORT]... [--bacnet-port PORT]... [--hartip-port PORT]... [--opcua-port PORT]...
                      [--max-packets N] [--stats] [--strict]
                      [--filter BPF] [--duration SECONDS] [--snaplen BYTES] [--no-promiscuous]
 
@@ -153,7 +153,7 @@ conduitscope decode (-r FILE | -i INTERFACE) [options]
 | `--no-promiscuous` | off (i.e. promiscuous by default) | With `-i`, don't put the interface into promiscuous mode. Promiscuous is the default because the main live-capture use case -- watching a mirrored/SPAN switch port for zone/conduit traffic -- needs to see traffic that isn't addressed to the capturing host at all. |
 | `-o, --output FILE` | stdout | Write decoded output here instead of stdout. |
 | `-f, --format {text,json,csv}` | `text` | Output format. See OUTPUT FORMATS below. |
-| `--protocol {auto,modbus,dnp3,s7comm,iec104,enip,profinet,goose,sv,ethercat,bacnet,hartip}` | `auto` | Restrict decoding to one protocol. `auto` opportunistically tries EtherNet/IP, IEC 104, Modbus, DNP3, S7comm/COTP, and HART-IP detection on every TCP payload, CIP I/O, BACnet/IP, and HART-IP detection on every UDP payload, PROFINET RT (DCP/cyclic) detection on every non-IPv4 Ethernet frame carrying EtherType `0x8892`, GOOSE detection on every non-IPv4 Ethernet frame carrying EtherType `0x88B8`, Sampled Values detection on every non-IPv4 Ethernet frame carrying EtherType `0x88BA`, and EtherCAT detection on every non-IPv4 Ethernet frame carrying EtherType `0x88A4`, regardless of port (see PROTOCOL DETECTION below). `enip` covers both EtherNet/IP explicit messaging (TCP) and CIP I/O implicit messaging (UDP). `profinet` covers both DCP and cyclic real-time IO. `sv` is IEC 61850-9-2 Sampled Values. `ethercat` is EtherCAT. `bacnet` is BACnet/IP. `hartip` is HART-IP (covers both UDP and TCP). |
+| `--protocol {auto,modbus,dnp3,s7comm,iec104,enip,profinet,goose,sv,ethercat,bacnet,hartip,opcua}` | `auto` | Restrict decoding to one protocol. `auto` opportunistically tries OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, S7comm/COTP, and HART-IP detection on every TCP payload, CIP I/O, BACnet/IP, and HART-IP detection on every UDP payload, PROFINET RT (DCP/cyclic) detection on every non-IPv4 Ethernet frame carrying EtherType `0x8892`, GOOSE detection on every non-IPv4 Ethernet frame carrying EtherType `0x88B8`, Sampled Values detection on every non-IPv4 Ethernet frame carrying EtherType `0x88BA`, and EtherCAT detection on every non-IPv4 Ethernet frame carrying EtherType `0x88A4`, regardless of port (see PROTOCOL DETECTION below). `enip` covers both EtherNet/IP explicit messaging (TCP) and CIP I/O implicit messaging (UDP). `profinet` covers both DCP and cyclic real-time IO. `sv` is IEC 61850-9-2 Sampled Values. `ethercat` is EtherCAT. `bacnet` is BACnet/IP. `hartip` is HART-IP (covers both UDP and TCP). `opcua` is OPC UA Binary (UA-TCP/Secure Conversation, TCP only). |
 | `--modbus-port PORT` | *(502 built in)* | Additional TCP port to treat as "expected" for Modbus. Repeatable. Does **not** gate detection -- it only changes whether a decoded Modbus frame is annotated as appearing on an unexpected port, which is itself a useful signal when auditing a conduit. |
 | `--dnp3-port PORT` | *(20000 built in)* | Same as `--modbus-port`, for DNP3. Repeatable. |
 | `--s7comm-port PORT` | *(102 built in)* | Same as `--modbus-port`, for COTP/S7comm. Repeatable. |
@@ -162,6 +162,7 @@ conduitscope decode (-r FILE | -i INTERFACE) [options]
 | `--enip-io-port PORT` | *(2222 built in)* | Same as `--modbus-port`, for EtherNet/IP CIP I/O implicit messaging (UDP). Repeatable. |
 | `--bacnet-port PORT` | *(47808 built in)* | Same as `--modbus-port`, for BACnet/IP (UDP). Repeatable. |
 | `--hartip-port PORT` | *(5094 built in)* | Same as `--modbus-port`, for HART-IP. Repeatable. Applies to both TCP and UDP, since HART-IP uses the same port number on either transport. |
+| `--opcua-port PORT` | *(4840 built in)* | Same as `--modbus-port`, for OPC UA. Repeatable. TCP only -- OPC UA has no UDP mapping. |
 | `--max-packets N` | `0` (unlimited) | Stop after decoding this many packets. With `-i`, this also bounds a live capture (in addition to `--duration` and Ctrl+C). |
 | `--stats` | off | Print an aggregate summary (protocol counts, Modbus function-code histogram, exception count, capture time span) instead of one line per packet. Ignores `--format`. |
 | `--strict` | off | Abort with a nonzero exit status on the first packet that fails to parse at the Ethernet/IPv4/TCP layer, instead of reporting a per-packet warning and continuing. Does not affect Modbus/DNP3-level ambiguity, which is always handled by heuristic + note rather than error. |
@@ -534,11 +535,31 @@ text the `text` report shows).
 ## PROTOCOL DETECTION
 
 In `--protocol auto` (the default), every non-empty TCP payload is tested
-against all six protocols, independent of port number. **EtherNet/IP is
-tried first, then IEC 104**, before Modbus/TCP, and **HART-IP is tried
-last**, after S7comm/COTP -- see the notes at the end of this section for why
-that specific ordering matters, not just which protocols are tried:
+against all seven protocols, independent of port number. **OPC UA is tried
+first of all, then EtherNet/IP, then IEC 104**, before Modbus/TCP, and
+**HART-IP is tried last**, after S7comm/COTP -- see the notes at the end of
+this section for why that specific ordering matters, not just which
+protocols are tried:
 
+- **OPC UA**: recognized by its 8-byte UA-TCP common header -- the leading 3
+  bytes (MessageType) must be one of exactly 7 fixed ASCII strings (`HEL`,
+  `ACK`, `ERR`, `RHE`, `OPN`, `CLO`, `MSG`), the 4th byte (ChunkType) must be
+  `'F'`, `'C'`, or `'A'`, and the following 4-byte MessageSize field must be
+  at least `8` (the header's own size). A 3-byte ASCII match against 7
+  specific strings is a materially stronger structural signal than most of
+  this codebase's own gates -- roughly a 1-in-16-million collision space per
+  candidate offset before the ChunkType/MessageSize checks even apply -- and
+  research checking it byte-by-byte against every other protocol's own
+  leading-bytes gate here (Modbus's protocol-id==0, IEC 104's `0x68` start
+  byte, TPKT's version==3 byte, DNP3's `0x05 0x64` sync bytes, EtherNet/IP's
+  small enumerated command set) found no possible collision, so it costs
+  nothing to try first and is the safest place for it -- the opposite
+  ordering rationale from HART-IP's own weak-gate "tried last" placement
+  below. Applied port-independently; TCP port 4840 is recorded as an
+  "expected port" annotation only, the same posture every other protocol
+  here uses for its own port. See PROTOCOL COVERAGE's OPC UA section for the
+  service-layer decode this unlocks once the UA-TCP/SecureConversation
+  framing is recognized.
 - **EtherNet/IP**: recognized by its 24-byte encapsulation header -- the
   command field must be one of the nine standard encapsulation commands
   (`ListServices`, `ListIdentity`, `ListInterfaces`, `RegisterSession`,
@@ -678,13 +699,14 @@ fixture.
 
 `--protocol modbus`, `--protocol dnp3`, `--protocol s7comm`, `--protocol
 iec104`, `--protocol enip`, `--protocol profinet`, `--protocol goose`,
-`--protocol sv`, `--protocol ethercat`, `--protocol bacnet`, or `--protocol
-hartip` restrict decoding to only that protocol (useful for large mixed
-captures, or for scripting a two-pass analysis). `--protocol enip` covers
-both EtherNet/IP explicit messaging (TCP, above) and CIP I/O implicit
-messaging (UDP, below) -- they're the same overall protocol family.
-`--protocol hartip` covers both HART-IP over TCP (above) and over UDP
-(below) -- HART-IP uses the identical wire format on either transport.
+`--protocol sv`, `--protocol ethercat`, `--protocol bacnet`, `--protocol
+hartip`, or `--protocol opcua` restrict decoding to only that protocol
+(useful for large mixed captures, or for scripting a two-pass analysis).
+`--protocol enip` covers both EtherNet/IP explicit messaging (TCP, above)
+and CIP I/O implicit messaging (UDP, below) -- they're the same overall
+protocol family. `--protocol hartip` covers both HART-IP over TCP (above)
+and over UDP (below) -- HART-IP uses the identical wire format on either
+transport. `--protocol opcua` is TCP only -- OPC UA has no UDP mapping.
 
 **CIP I/O (implicit messaging), UDP port 2222** is tried, port-independently,
 against every non-empty UDP payload, the same "opportunistic, payload-shape"
@@ -1247,6 +1269,116 @@ The following fields appear only when `protocol` is `hartip`:
   section) when the command's data actually matched the byte layout this
   decoder expects -- absent for every out-of-scope or wrong-length command
   (shown as raw hex with a note instead).
+
+The following fields appear only when `protocol` is `opcua`:
+
+- `opcua_message_type`: the UA-TCP common header's MessageType, spelled out
+  -- one of `"Hello"`, `"Acknowledge"`, `"Error"`, `"ReverseHello"`,
+  `"OpenSecureChannel"`, `"CloseSecureChannel"`, or `"Message"`. Always
+  present.
+- `opcua_chunk_type`: the ChunkType byte, as a single character -- `"F"`
+  (final/only chunk), `"C"` (intermediate chunk -- see LIMITATIONS'
+  "Chunking" entry), or `"A"` (abort). Always present.
+- `opcua_message_size`: this one chunk's own declared total byte length
+  (header included), as a plain integer -- not the reassembled multi-chunk
+  message's total length when `opcua_chunk_type` isn't `"F"`. Always
+  present.
+- `opcua_has_secure_channel`: `true`/`false` -- `true` for OpenSecureChannel/
+  CloseSecureChannel/Message (which carry the 12-byte SecureConversation
+  header below), `false` for Hello/Acknowledge/Error/ReverseHello (which
+  don't). Always present. The fields below are only present when this is
+  `true`.
+- `opcua_secure_channel_id`: the SecureConversation header's SecureChannelId
+  field, as a plain integer (`0` on the very first OpenSecureChannel request
+  of a new channel, before the server assigns a real one).
+- `opcua_is_asymmetric`: `true`/`false` -- `true` only for OpenSecureChannel
+  (Asymmetric Algorithm Security Header), `false` for CloseSecureChannel/
+  Message (Symmetric Algorithm Security Header).
+- `opcua_security_policy_uri`: the Asymmetric Algorithm Security Header's
+  SecurityPolicyUri (e.g.
+  `"http://opcfoundation.org/UA/SecurityPolicy#None"`) -- itself a real
+  security-audit signal (see PROTOCOL COVERAGE's OPC UA section). Present
+  only when `opcua_is_asymmetric` is `true`.
+- `opcua_has_sender_certificate` / `opcua_sender_certificate_length`: whether
+  a SenderCertificate was present (non-null, non-empty) and, if so, its byte
+  length -- the certificate bytes themselves are never surfaced, the same
+  posture this decoder already applies to HART-IP's Data-Link Checksum or
+  Sampled Values' `seqData`. Present only when `opcua_is_asymmetric` is
+  `true`.
+- `opcua_has_receiver_certificate_thumbprint`: same, for the
+  ReceiverCertificateThumbprint field. Present only when
+  `opcua_is_asymmetric` is `true`.
+- `opcua_token_id`: the Symmetric Algorithm Security Header's TokenId field,
+  as a plain integer -- the previously-negotiated security token this
+  message claims to use. Present only when `opcua_is_asymmetric` is
+  `false` (i.e. for CloseSecureChannel/Message).
+- `opcua_sequence_number` / `opcua_request_id`: the SequenceHeader's own two
+  fields, as plain integers. Present alongside every other
+  `opcua_has_secure_channel`-gated field above.
+- `opcua_service_recognized`: `true`/`false` -- `true` when the Message-layer
+  body's own leading NodeId ("TypeId") matched a service this decoder's own
+  dispatch table knows (Tier 1 or Tier 2 -- see PROTOCOL COVERAGE). Always
+  present for OpenSecureChannel/CloseSecureChannel/Message; absent for
+  Hello/Acknowledge/Error/ReverseHello (which have no service TypeId of
+  their own).
+- `opcua_service_name`: the recognized service's own name (e.g.
+  `"CreateSessionRequest"`). Present only when `opcua_service_recognized`
+  is `true`.
+- `opcua_service_namespace` / `opcua_service_type_id`: the service TypeId
+  NodeId's own namespace and numeric identifier, as plain integers -- present
+  even when `opcua_service_recognized` is `false`, so an unrecognized
+  service is still identifiable by its raw TypeId (see PROTOCOL COVERAGE).
+  Absent only when the TypeId itself couldn't be read at all (a
+  structurally-invalid NodeId encoding byte -- see LIMITATIONS).
+- `opcua_service_body_decoded`: `true`/`false` -- `true` for a Tier 1
+  (fully field-decoded) service, `false` for Tier 2 (header only, body
+  shown as raw hex) or an unrecognized service. Present only when
+  `opcua_service_recognized` is `true`.
+- `opcua_has_header`: `true`/`false` -- whether this service's own
+  RequestHeader/ResponseHeader was itself decoded (true for both Tier 1 and
+  Tier 2 services; false for an unrecognized service, since this decoder
+  doesn't guess whether an unknown TypeId's body even starts with a
+  RequestHeader or a ResponseHeader shape). Present alongside
+  `opcua_service_recognized`.
+- `opcua_request_handle`: the RequestHeader/ResponseHeader's own
+  RequestHandle field, as a plain integer. Present only when
+  `opcua_has_header` is `true`.
+- `opcua_is_response`: `true`/`false` -- whether this is the
+  ResponseHeader shape (`true`) or RequestHeader shape (`false`). Present
+  under the same condition as `opcua_request_handle`.
+- `opcua_status_code` / `opcua_status_code_name` / `opcua_status_is_good`:
+  a ResponseHeader's own ServiceResult StatusCode -- the raw 32-bit value,
+  its name (e.g. `"Good"`, `"BadSessionClosed"`, or a decoded-severity-plus-
+  raw-hex fallback like `"Bad (0x80af0000)"` for a code outside this
+  decoder's own first-pass ~20-entry named table -- see PROTOCOL COVERAGE),
+  and whether its top 2 bits indicate the Good severity. Present only when
+  `opcua_is_response` is `true`.
+- `opcua_values`: an array of decoded field/value strings (e.g.
+  `"security-mode=None"`, `"session-id=ns=1;i=1001"`,
+  `"identity=anonymous (policy-id=anonymous)"`) -- present for Hello/
+  Acknowledge/Error/ReverseHello (always) and for a Tier 1 service (always
+  includes at least the RequestHeader/ResponseHeader's own `timestamp=`/
+  `request-handle=`/`service-result=` entries, plus that service's own
+  fields); absent for a Tier 2 or unrecognized service (see
+  `opcua_body_shown_as_hex` instead).
+- `opcua_body_shown_as_hex`: `true`/`false` -- `true` for a Tier 2 service
+  (RequestHeader/ResponseHeader decoded into `opcua_values`, but the
+  service-specific body shown as raw hex instead -- Variant/DataValue
+  encoding is not implemented by this first-pass release, see LIMITATIONS),
+  an unrecognized service, a non-`'F'` chunk (see LIMITATIONS' "Chunking"
+  entry), or any structural parse failure past the point already decoded.
+  Always present when `opcua_has_secure_channel` is `true`.
+- `opcua_body_hex` / `opcua_body_length`: the raw hex bytes (space-separated
+  octets, e.g. `"00 00 00 00 02 00 00 00"`) and their count. Present only
+  when `opcua_body_shown_as_hex` is `true` and at least one byte remained.
+
+Every ActivateSessionRequest whose UserIdentityToken is a UserNameIdentityToken
+with an empty EncryptionAlgorithm gets its Password decoded into
+`opcua_values` in cleartext (e.g. `"password=Sup3rSecret!1"`), deliberately
+-- per OPC 10000-4 7.41 this means the password was placed on the wire
+unencrypted, a real OT-security finding this decoder surfaces rather than
+hides -- alongside a `notes` entry beginning `"SECURITY FINDING: ..."`. See
+PROTOCOL COVERAGE's OPC UA section for the full rationale.
 
 ### csv
 
@@ -2761,6 +2893,399 @@ defensive/fallback path are validated only against the hand-built
 that ATTRIBUTION.md's own "Gaps" section for the complete, honest list. See
 `include/conduitscope/hartip.hpp`'s file header for the full writeup.
 
+### OPC UA Binary (TCP port 4840, UA-TCP transport / OPC UA Secure Conversation, OPC 10000-6)
+
+Unlike every protocol above, OPC UA rides on TCP only (there is no UDP
+mapping in the spec), and unlike every protocol above except EtherNet/IP/
+CIP, every multi-byte field is **little-endian** -- a legacy of its DCOM/OLE
+lineage predating the pure-Ethernet-fieldbus protocols this codebase
+otherwise covers. Sourcing for this section was cross-checked against three
+independent sources: the OPC Foundation's own published reference
+documentation (Part 4 "Services", Part 6 "Mappings"), the OPC Foundation's
+own machine-readable `NodeIds.csv`/`StatusCode.csv`
+(`github.com/OPCFoundation/UA-Nodeset`) for every numeric service identifier
+and named StatusCode this section asserts, and python-opcua's own
+machine-generated protocol bindings (`github.com/FreeOpcUa/python-opcua`,
+generated directly from the OPC Foundation's schema) as an independent
+cross-check on field order and type.
+
+#### The 8-byte UA-TCP common header
+
+Every message begins with: MessageType (3 bytes, ASCII -- `"HEL"` Hello,
+`"ACK"` Acknowledge, `"ERR"` Error, `"RHE"` ReverseHello, `"OPN"`
+OpenSecureChannel, `"CLO"` CloseSecureChannel, `"MSG"` Message), ChunkType (1
+byte, ASCII -- `'F'` final/only chunk, `'C'` intermediate chunk, `'A'`
+abort), and MessageSize (4 bytes, little-endian -- this one chunk's own
+total byte length, header included, *not* the reassembled multi-chunk
+message's total length -- see "Chunking" below). The first four -- Hello,
+Acknowledge, Error, ReverseHello -- are plain UA Connection Protocol
+messages: always exactly one `'F'` chunk, body follows the header directly.
+The last three -- OpenSecureChannel, CloseSecureChannel, Message -- are OPC
+UA Secure Conversation messages, carrying a further SecureChannelId,
+security header, and sequence header before their own body (see below).
+
+**Structural detection gate**: MessageType must be one of exactly those 7
+fixed 3-byte ASCII strings, ChunkType one of the 3 fixed characters (all
+three accepted even on a non-Message message, deliberately more permissive
+than the spec's own stricter "always `'F'`" requirement, to stay a pure
+detection gate rather than a well-formedness check), plus a MessageSize
+plausibility check (`>= 8`, the header's own fixed size). See PROTOCOL
+DETECTION above for why this gate is strong enough, and confirmed
+collision-free with every other protocol here, to be tried first in the
+dispatch chain.
+
+- **Hello** (client->server, always the first message on a new connection):
+  ProtocolVersion, ReceiveBufferSize, SendBufferSize, MaxMessageSize,
+  MaxChunkCount (4 bytes each, UInt32), then EndpointUrl (a UA String).
+- **Acknowledge** (server->client, in reply to Hello): the same 5 UInt32
+  fields, no EndpointUrl.
+- **Error** (either direction, terminates the connection): a StatusCode (see
+  "StatusCode decode" below) + Reason (a UA String).
+- **ReverseHello** (used only for the "reverse connect" pattern, where a
+  Server initiates the TCP connection to a Client): ServerUri + EndpointUrl
+  (both UA Strings).
+
+#### OPC UA Secure Conversation: SecureChannelId, security header, sequence header
+
+Immediately after the 8-byte common header, for OpenSecureChannel/
+CloseSecureChannel/Message alike: **SecureChannelId** (4 bytes, UInt32 --
+`0` on the very first OpenSecureChannel request of a new channel, before the
+server assigns and returns the real one). Then a **security header** whose
+shape depends on MessageType:
+
+- **OpenSecureChannel** (Asymmetric Algorithm Security Header):
+  SecurityPolicyUri (a UA String, e.g.
+  `"http://opcfoundation.org/UA/SecurityPolicy#None"`) + SenderCertificate
+  (a ByteString) + ReceiverCertificateThumbprint (a ByteString).
+  SecurityPolicyUri is surfaced in full -- it is itself the single most
+  useful security-audit signal this decoder can offer (see "Security
+  posture is visible even when the body is not" below) -- while the two
+  certificate fields are surfaced only as presence + byte length, never the
+  certificate bytes themselves (the same posture this codebase already
+  applies to HART-IP's Data-Link Checksum or Sampled Values' `seqData`).
+- **CloseSecureChannel / Message** (Symmetric Algorithm Security Header):
+  TokenId (4 bytes, UInt32) only -- the previously-negotiated security
+  token this message claims to use.
+
+Then a **sequence header**, present either way: SequenceNumber + RequestId
+(4 bytes each, UInt32).
+
+**Security posture is visible even when the body is not.** This decoder
+does not track SecureChannel/Session state across messages (no correlation
+table keyed by SecureChannelId -- see "Deliberately not implemented"
+below), so it has no way to know, from a Message chunk alone, what
+SecurityMode a given TokenId corresponds to. But the OpenSecureChannel
+exchange that negotiated that token is, itself, always fully decoded by
+this decoder (when readable at all -- see next paragraph), and its own
+SecurityPolicyUri + MessageSecurityMode fields are exactly the two values
+that determine whether every later Message chunk on that same
+SecureChannelId is even readable in the first place. A capture showing
+SecurityPolicyUri `"...#None"` and MessageSecurityMode `"None"` on the
+OpenSecureChannel exchange is itself the audit finding (an OPC UA endpoint
+accepting no security at all) independent of whether this decoder goes on
+to successfully read any later Message body -- and this decoder's own real
+capture (see Validation below) is exactly that: a genuine, real-world
+`"...#None"` OpenSecureChannel exchange, not a hypothetical.
+
+**Opportunistic body decode.** This decoder does not know, a priori,
+whether a given OpenSecureChannel/CloseSecureChannel/Message chunk's body
+is plaintext (SecurityMode None), signed-but-not-encrypted (Sign -- the
+body IS still plaintext, only a trailing signature is added), or genuinely
+encrypted (SignAndEncrypt). Rather than tracking channel state to know in
+advance, it simply attempts to parse the body as a NodeId-prefixed service
+structure (see "Service identification" below) and accepts the result only
+if it is fully self-consistent (a structurally valid NodeId encoding byte,
+a numeric identifier this decoder recognizes or can at least bounds-check,
+and enough remaining bytes for whatever it then tries to read). An
+encrypted body's essentially-random leading byte will, in the overwhelming
+majority of cases, simply fail the NodeId-encoding-byte check (only 6 of
+256 values, plus 2 ExpandedNodeId flag bits, are valid) and fall straight
+to "body shown as raw hex, service unrecognized" -- the same honest,
+no-hidden-state fallback this decoder already applies to S7comm-Plus
+elsewhere in this codebase.
+
+#### Primitive encoding
+
+Boolean/SByte/Byte (1 byte), Int16/UInt16 (2), Int32/UInt32 (4), Int64/
+UInt64 (8), Float (4, IEEE-754), Double (8, IEEE-754) -- all little-endian.
+**String**/**ByteString**: an Int32 length prefix (little-endian); `-1`
+means null (no bytes follow); `0` means empty (a distinct, non-null empty
+value); otherwise that many bytes follow. **DateTime**: an Int64,
+100-nanosecond intervals since 1601-01-01T00:00:00Z (the Win32 FILETIME
+epoch), decoded to a calendar date/time the same way this codebase already
+renders GOOSE/SV timestamps. **Guid**: NOT 16 raw bytes in wire order --
+Data1 (UInt32 LE) + Data2 (UInt16 LE) + Data3 (UInt16 LE) + Data4 (8 raw
+bytes, network/big-endian order), the same mixed-endianness Microsoft's own
+GUID wire format uses. **NodeId**: a 1-byte encoding mask (low 6 bits
+selecting the shape; the top 2 bits are ExpandedNodeId-only flags) --
+Two-Byte (`0x00`, Identifier as 1 byte, namespace implicitly 0), Four-Byte
+(`0x01`, Namespace 1 byte + Identifier UInt16), Numeric (`0x02`, Namespace
+UInt16 + Identifier UInt32), String (`0x03`, Namespace UInt16 + Identifier
+String), Guid (`0x04`, Namespace UInt16 + Identifier Guid), ByteString
+(`0x05`, Namespace UInt16 + Identifier ByteString); any other low-6-bits
+value is a structural parse failure (see "Opportunistic body decode"
+above). **ExpandedNodeId**: a NodeId whose mask byte may additionally flag
+a NamespaceUri String (bit `0x80`) and/or a ServerIndex UInt32 (bit `0x40`)
+-- read and skipped for correct byte alignment, but not surfaced as
+separate fields (no real capture or service in this decoder's own dispatch
+table was found needing either). **QualifiedName**: NamespaceIndex (UInt16)
++ Name (String). **LocalizedText**: a 1-byte mask (bit `0x01` Locale
+present, bit `0x02` Text present) + whichever fields that mask flags.
+**ExtensionObject**: TypeId (NodeId) + Encoding (1 byte: `0x00` no body,
+`0x01` ByteString body, `0x02` XML body) + [Int32 length + body bytes, only
+when Encoding != `0x00`] -- used to identify identity-token structures (see
+"Identity token decode" below) and otherwise skipped structurally.
+**StatusCode** (4 bytes, UInt32): see "StatusCode decode" below. **Arrays**:
+an Int32 element count prefix (`-1` = null/absent, distinct from `0` =
+present-but-empty) followed by that many encoded elements back-to-back.
+
+#### StatusCode decode
+
+The top 2 bits (`0xC0000000`) are the severity -- `00` Good (`0x00000000`),
+`01` Uncertain (`0x40000000`), `10` Bad (`0x80000000`) -- always decodable
+regardless of whether the specific value is one this decoder names. The
+named table below is a deliberate first pass -- the handful most relevant
+to an OT security audit's own concerns (auth/certificate/session/timeout
+failures), cross-checked against the OPC Foundation's own published
+`StatusCode.csv` (which enumerates ~700 named codes total), not an attempt
+at all of them:
+
+`Good`, `Uncertain`, `BadUnexpectedError`, `BadTimeout`,
+`BadServiceUnsupported`, `BadCertificateInvalid`, `BadSecurityChecksFailed`,
+`BadUserAccessDenied`, `BadIdentityTokenInvalid`,
+`BadIdentityTokenRejected`, `BadSecureChannelIdInvalid`,
+`BadSessionIdInvalid`, `BadSessionClosed`, `BadNodeIdInvalid`,
+`BadNodeIdUnknown`, `BadNotReadable`, `BadNotWritable`,
+`BadRequestTypeInvalid`, `BadSecurityPolicyRejected`, `BadTypeMismatch`.
+
+Any other value is rendered as its decoded severity word plus the raw hex
+value (e.g. `"Bad (0x80af0000)"`), never guessed at -- this decoder's own
+real capture (see Validation below) exercises exactly this fallback, twice,
+on two StatusCodes (`BadInternalError`/`0x80020000`,
+`BadDecodingError`/`0x80070000`) outside this table.
+
+#### Service identification: Tier 1 (full decode) vs. Tier 2 (header only)
+
+Every OPC UA service request/response, and ServiceFault, begins with its
+own NodeId "TypeId" whose numeric identifier is looked up against the OPC
+Foundation's own `NodeIds.csv` (specifically, each service's own
+`_Encoding_DefaultBinary` entry -- the single most error-prone part of
+implementing OPC UA Binary by hand, so this decoder never guesses one).
+This decoder's own dispatch table covers two tiers:
+
+- **Tier 1** ("full decode" -- RequestHeader/ResponseHeader plus every
+  service-specific field is decoded): the UA Connection Protocol handshake
+  (Hello/Acknowledge/Error/ReverseHello, above, which have no TypeId/
+  RequestHeader of their own) plus, at the service layer,
+  **OpenSecureChannel**, **CloseSecureChannel**, **GetEndpoints**,
+  **FindServers**, **CreateSession**, **ActivateSession**,
+  **CloseSession**, and **ServiceFault** -- deliberately the connection/
+  channel/session lifecycle plus the two discovery services, not the
+  data-access services (Tier 2 below). This is itself a deliberate
+  first-pass scope decision: the lifecycle+discovery services above are (a)
+  universally present in every real OPC UA capture regardless of what the
+  client/server actually do with the connection afterward, (b) individually
+  simple enough (no Variant/DataValue encoding anywhere in any of them) to
+  decode with full confidence, and (c) collectively the highest
+  OT-security-audit value of any OPC UA service group -- SecurityPolicyUri/
+  MessageSecurityMode, the full endpoint/server inventory (an OPC UA analog
+  of this codebase's existing BACnet I-Am / EtherNet/IP ListIdentity /
+  HART-IP Read-Unique-Identifier "device fingerprinting" framing), and,
+  deliberately, the UserIdentityToken carried in every ActivateSession
+  request (see "Identity token decode" below).
+  - **RequestHeader**: AuthenticationToken (a NodeId -- the session's own
+    secret; consumed, not surfaced), Timestamp (DateTime), RequestHandle
+    (UInt32), ReturnDiagnostics (a bitmask; consumed, not surfaced),
+    AuditEntryId (String; consumed, not surfaced), TimeoutHint (UInt32),
+    AdditionalHeader (an ExtensionObject; consumed, not surfaced).
+  - **ResponseHeader**: Timestamp, RequestHandle, ServiceResult (a
+    StatusCode -- see "StatusCode decode" above), ServiceDiagnostics (a
+    DiagnosticInfo; structurally skipped, not surfaced -- see "Deliberately
+    not implemented" below), StringTable (an array of String; consumed, not
+    surfaced), AdditionalHeader.
+  - **Hello/Acknowledge/Error/ReverseHello**: see "The 8-byte UA-TCP common
+    header" above.
+  - **OpenSecureChannel request**: ClientProtocolVersion, RequestType
+    (`"Issue"`/`"Renew"`), SecurityMode (`"None"`/`"Sign"`/
+    `"SignAndEncrypt"`), ClientNonce (length only), RequestedLifetime (ms).
+  - **OpenSecureChannel response**: ServerProtocolVersion, the newly-
+    assigned SecureChannelId + TokenId, when the token was created,
+    RevisedLifetime (ms), ServerNonce (length only).
+  - **GetEndpoints request**: EndpointUrl (LocaleIds/ProfileUris arrays are
+    consumed, not surfaced).
+  - **GetEndpoints response**: the full array of EndpointDescription --
+    EndpointUrl, ApplicationDescription's own ApplicationUri, SecurityMode,
+    SecurityPolicyUri per endpoint (ServerCertificate, UserTokenPolicy
+    array, TransportProfileUri, SecurityLevel are consumed, not surfaced).
+  - **FindServers request**: EndpointUrl (LocaleIds/ServerUris arrays
+    consumed, not surfaced).
+  - **FindServers response**: the array of ApplicationDescription --
+    ApplicationUri + ApplicationType (`"Server"`/`"Client"`/
+    `"ClientAndServer"`/`"DiscoveryServer"`) per server.
+  - **CreateSession request**: the client's own ApplicationUri, EndpointUrl,
+    SessionName, RequestedSessionTimeout (ms) (ServerUri, ClientNonce,
+    ClientCertificate, MaxResponseMessageSize are consumed/named without
+    full surfacing, or surfaced as plain numbers).
+  - **CreateSession response**: SessionId (a NodeId, rendered e.g.
+    `"ns=1;i=1001"`), RevisedSessionTimeout (ms), the count of
+    ServerEndpoints returned, MaxRequestMessageSize (AuthenticationToken,
+    ServerNonce, ServerCertificate, ServerSoftwareCertificates,
+    ServerSignature are consumed, not surfaced -- the endpoint array
+    itself, when non-empty, is already surfaced in full by GetEndpoints
+    above, so it isn't re-decoded here).
+  - **ActivateSession request**: see "Identity token decode" below
+    (ClientSignature, ClientSoftwareCertificates, UserTokenSignature are
+    consumed, not surfaced; LocaleIds is consumed and counted internally
+    only).
+  - **ActivateSession response**: the count of result StatusCodes and how
+    many were Good (ServerNonce is length-only; DiagnosticInfos array is
+    structurally skipped).
+  - **CloseSession request**: DeleteSubscriptions (a boolean).
+  - **CloseSession response / CloseSecureChannel request+response /
+    ServiceFault**: no parameters beyond RequestHeader/ResponseHeader
+    itself (confirmed against python-opcua's own generated bindings -- none
+    of these four have a Parameters structure of their own at all).
+- **Tier 2** ("header only" -- RequestHeader/ResponseHeader is decoded
+  exactly as in Tier 1, giving at minimum a request handle and, for a
+  response, the ServiceResult StatusCode -- but every service-specific
+  field after the header is shown only as raw hex): **Cancel**,
+  **AddNodes**, **Browse**, **BrowseNext**,
+  **TranslateBrowsePathsToNodeIds**, **RegisterNodes**, **UnregisterNodes**,
+  **Read**, **HistoryRead**, **Write**, **Call**,
+  **CreateMonitoredItems**, **ModifyMonitoredItems**,
+  **DeleteMonitoredItems**, **CreateSubscription**,
+  **ModifySubscription**, **SetPublishingMode**, **Publish**,
+  **Republish**, **DeleteSubscriptions** (request and response pairs for
+  each). These are the services whose own bodies need the Variant/
+  DataValue self-describing value encoding (OPC 10000-6 5.2.2.16/5.1.6 -- a
+  25-BuiltInType, recursive/array-capable encoding) this first-pass release
+  does not implement -- see LIMITATIONS and ROADMAP for the honest scope of
+  that gap. Even without their own bodies decoded, this tier is still
+  genuinely useful: the service name, request handle, and (for a response)
+  whether the overall call succeeded are all visible, often enough to
+  answer "is this conduit doing OPC UA reads/writes/subscriptions at all,
+  and are they succeeding" without needing the actual values.
+
+A TypeId this decoder's dispatch table does not recognize at all is
+reported by its raw namespace + numeric identifier only (`"service
+type-id N, namespace M -- not in this decoder's dispatch table"`); this
+decoder does not attempt to guess whether it's even shaped like a Request
+or a Response (RequestHeader and ResponseHeader have genuinely different
+leading fields -- a NodeId vs. a DateTime -- and blindly assuming one would
+risk mis-parsing), so its entire body, RequestHeader/ResponseHeader
+included, is shown as raw hex.
+
+#### Identity token decode: a deliberate security finding
+
+ActivateSessionRequest's own UserIdentityToken field is an ExtensionObject
+wrapping one of four standard structures, identified by that
+ExtensionObject's own TypeId: **AnonymousIdentityToken** (PolicyId only, no
+credential of any kind), **UserNameIdentityToken** (PolicyId, UserName,
+Password, EncryptionAlgorithm), **X509IdentityToken** (PolicyId +
+CertificateData, shown as presence + length only), **IssuedIdentityToken**
+(PolicyId + TokenData, shown as presence + length only, + EncryptionAlgorithm).
+
+UserNameIdentityToken is decoded in full, **deliberately, including the
+Password field**: per OPC 10000-4 7.41, EncryptionAlgorithm empty/null
+means Password was NOT encrypted with the server's public key before being
+placed on the wire -- i.e. it is either (a) already plaintext, when the
+entire SecureChannel itself is also unencrypted (SecurityMode None -- the
+same posture "Security posture is visible even when the body is not" above
+already lets this decoder flag), or (b) plaintext regardless of
+SecureChannel security, on any implementation that (non-conformantly, but
+not rarely) omits password encryption even when a SecurityPolicy is in
+use. Either way, an EncryptionAlgorithm-empty UserName+Password pair on the
+wire IS a real, actionable, documented OPC UA security finding (credential
+exposure via anonymous/no-security ActivateSession), not a hypothetical
+this decoder invented -- decoding it plainly serves this whole tool's
+stated purpose as an OT-security-auditing decoder (the same reasoning
+already applied to this codebase's HART-IP Response-Code naming). When
+EncryptionAlgorithm is instead a non-empty string, the Password bytes ARE
+genuinely encrypted ciphertext and are shown only as a byte length, never
+as hex/text. UserName itself is always decoded as plain text regardless of
+EncryptionAlgorithm (the spec never encrypts UserName, only Password),
+since a leaked username alone -- even with an encrypted password -- is
+still a legitimate account-enumeration finding. See OUTPUT FORMATS above
+for the exact `opcua_values`/`notes` shape this produces.
+
+#### Chunking
+
+A single logical Message-layer request/response CAN be split across
+multiple Message chunks (ChunkType `'C'` for every chunk but the last,
+`'F'` for the last) when it exceeds the negotiated SendBufferSize/
+MaxMessageSize -- the OPC UA analog of this codebase's own COTP EOT-bit
+reassembly for S7comm, or DNP3's multi-frame application-fragment
+reassembly. This first-pass release does NOT implement that cross-chunk
+reassembly: only a single, complete `'F'`-chunk message has its service
+body decoded (Tier 1) or even attempted (Tier 2/unrecognized); a `'C'`
+(intermediate) or `'A'` (abort) chunk is fully decoded at the UA-TCP/
+SecureConversation header level (MessageType, ChunkType, SecureChannelId,
+security header, sequence header -- everything that doesn't require
+knowing the reassembled message boundary) but its own body is always shown
+as raw hex, regardless of what service TypeId a fully-reassembled version
+of it might carry. In this decoder's own experience building its test
+fixture, a chunked message is the exception rather than the rule for the
+session/discovery/lifecycle services Tier 1 targets (their own bodies are
+all small, fixed, or short-array-bounded) -- chunking matters most for the
+very services (bulk Browse/Read results, large Publish notifications) this
+first pass already leaves at Tier 2 raw-hex depth, so this scope decision
+costs relatively little of this release's own practical coverage. This is
+a separate mechanism from the general TCP-segment-level reassembly
+PROTOCOL DETECTION and LIMITATIONS describe (one Message chunk split
+across several TCP *segments* IS reassembled -- this decoder's own real
+capture exercises exactly that, twice, across 5 and 6 segments
+respectively -- what isn't reassembled is one logical message split across
+several OPC UA *chunks*).
+
+#### Deliberately not implemented
+
+Stateful channel/session tracking (correlating a Message chunk's own
+TokenId back to the OpenSecureChannel exchange that negotiated it, or a
+Request's AuthenticationToken back to the CreateSession response that
+issued it) -- this decoder is, like every other protocol in this codebase,
+a stateless-per-message decoder with TCP-stream-level reassembly only, not
+a full conversation-tracking OPC UA stack; Variant/DataValue value decoding
+(see Tier 2 above); multi-level DiagnosticInfo's own optional SymbolicId/
+NamespaceUri/LocalizedText/Locale/AdditionalInfo/InnerStatusCode/
+InnerDiagnosticInfo fields are structurally skipped (correctly consumed for
+byte alignment, but none of the seven is itself surfaced as a decoded
+value); and OPC UA's separate PubSub/UADP mapping (an entirely different,
+connectionless UDP/MQTT/AMQP-based wire format used for telemetry
+publishing, unrelated to the client/server UA-TCP mapping this decoder
+covers) is out of scope entirely, not merely undecoded.
+
+#### Validation
+
+A real capture WAS found: two back-to-back OPC UA sessions from Wireshark
+Bug 3986's own attachment (a 2009 dissector-freeze reproduction capture --
+see `tests/real_captures/opcua/ATTRIBUTION.md` for full provenance),
+independently cross-validated field-by-field against Wireshark/tshark's own
+OPC UA dissector on every value checked (service TypeIds, SecureChannelId/
+SecurityPolicyUri/SequenceNumber, RequestHandle/Timestamp, the full
+EndpointDescription array, CreateSessionResponse's own SessionId,
+ActivateSessionRequest's own AnonymousIdentityToken, and both sessions' own
+Error StatusCodes). Notably, this capture uses a non-standard TCP port
+(12001, not 4840) that Wireshark's own *default* configuration doesn't even
+recognize as OPC UA (needing an explicit "Decode As" to be dissected at
+all) -- this decoder recognizes it without any `--opcua-port` hint, real-
+world confirmation of the port-independent detection design PROTOCOL
+DETECTION describes. This capture also genuinely exercises TCP-segment-
+level reassembly (two responses split across 5 and 6 segments respectively)
+and contains two deliberately malformed CallRequest packets (per Wireshark
+Bug 3986's own report; one of which triggered Wireshark's own ~2-minute
+dissector freeze) -- this decoder's own Tier 2 scope, which never attempts
+to parse CallRequest's own body at all, is structurally immune to whatever
+specific malformation caused that freeze. It is narrow, though: only 9 of
+the ~15 Tier 1 services appear (no FindServers or CloseSession/
+CloseSecureChannel in either session), both sessions use SecurityPolicy
+`"...#None"` and an Anonymous identity token (no credential-exposure
+finding on this particular capture -- that logic is instead exercised on
+real bytes only by this decoder's own synthetic fixture, `tests/
+sample_opcua.pcap`, packets 13-14), and no Tier 2 service other than Call
+appears -- see that ATTRIBUTION.md's own writeup for the complete, honest
+scope. See `include/conduitscope/opcua.hpp`'s file header for the full
+writeup.
+
 ### Link/IP-layer plumbing: non-IPv4 Ethernet, and non-TCP IPv4 (including UDP)
 
 Every protocol above rides on Ethernet + IPv4 + TCP. Traffic outside that --
@@ -2864,16 +3389,19 @@ These are current, not aspirational -- each has a corresponding ROADMAP item.
 - **General TCP stream reassembly is implemented, but narrowly scoped.**
   `Decoder::reassemble_tcp_payload` (`decoder.hpp`/`decoder.cpp`) buffers a
   single Modbus MBAP message, DNP3 data-link frame, IEC 104 APDU, EtherNet/IP
-  encapsulation message, or TPKT/COTP frame's own bytes, per directional TCP
+  encapsulation message, TPKT/COTP frame, HART-IP message, or OPC UA
+  UA-TCP/SecureConversation chunk's own bytes, per directional TCP
   flow, when it is split across two or more TCP segments -- so a Modbus PDU
   that straddles a segment boundary, a DNP3 data-link frame split
   mid-header, an IEC 104 APDU split mid-APCI/ASDU, an EtherNet/IP
-  encapsulation message split mid-header or mid-CIP-message, or an S7comm
-  request/response TPKT frame split across segments all now get fully
+  encapsulation message split mid-header or mid-CIP-message, an S7comm
+  request/response TPKT frame split across segments, or an OPC UA chunk
+  split across segments all now get fully
   reassembled and decoded, not just the first segment's worth of bytes.
   Each protocol's own declared length field (the MBAP length, the DNP3
   data-link length byte, the IEC 104 APCI length byte, the EtherNet/IP
-  encapsulation header's length field, the TPKT length field) is what tells
+  encapsulation header's length field, the TPKT length field, HART-IP's
+  MsgLength field, OPC UA's MessageSize field) is what tells
   the reassembler how many bytes to wait for; a segment
   whose sequence number doesn't extend the buffered bytes contiguously is
   either trimmed (an overlapping retransmission) or, if it's genuinely ahead
@@ -2904,16 +3432,21 @@ These are current, not aspirational -- each has a corresponding ROADMAP item.
   (see tests/real_captures/dnp3/ATTRIBUTION.md) used only complete,
   single-data-link-frame fragments, so it has no real-world example to
   confirm against, only the synthetic fixtures in tests/sample_dnp3.pcap.
-  The general TCP-segment-level reassembly described above is unvalidated
-  against real traffic for the same reason (every real capture checked kept
+  The general TCP-segment-level reassembly described above was, for a long
+  time, unvalidated against real traffic (every real capture checked kept
   every PDU/frame within one TCP segment, including all six real IEC 104
   captures and both real EtherNet/IP captures -- see
   tests/real_captures/iec104/ATTRIBUTION.md and
-  tests/real_captures/enip/ATTRIBUTION.md) -- it was verified by diffing this
+  tests/real_captures/enip/ATTRIBUTION.md) -- verified instead by diffing this
   tool's full output against every real fixture before and after adding it
   (byte-for-byte identical), confirming it changes nothing for traffic that
   doesn't need it, and by synthetic fixtures (tests/sample_tcp_reassembly.pcap)
-  for the reassembly itself. It's also distinct from multiple *complete*
+  for the reassembly itself. That changed with OPC UA's own real capture
+  (`tests/real_captures/opcua/ATTRIBUTION.md`), which genuinely does split
+  multiple messages across TCP segments (a GetEndpointsResponse across 5
+  segments, a CreateSessionResponse across 6, a CallRequest across 4) --
+  the first real-world confirmation this mechanism gets, all correctly
+  reassembled and decoded. It's also distinct from multiple *complete*
   DNP3 data-link frames landing in one TCP segment (common, since DNP3
   frames are small), which conduitscope handles separately -- see PROTOCOL
   COVERAGE's DNP3 section.
@@ -3121,6 +3654,53 @@ These are current, not aspirational -- each has a corresponding ROADMAP item.
   the hand-built `tests/sample_hartip.pcap`, cross-checked against
   HCF_SPEC-307 and Wireshark's `packet-hart_ip.c` source rather than an
   independent real capture.
+- **OPC UA's Variant/DataValue self-describing value encoding is not
+  implemented** -- the single largest scope gap in this decoder's own OPC
+  UA coverage. Read, Write, Browse, Call, and every subscription/
+  MonitoredItem-management service (the "Tier 2" set -- see PROTOCOL
+  COVERAGE's OPC UA section) are named, and have RequestHeader/
+  ResponseHeader decoded, but their own service-specific bodies are shown
+  only as raw hex; this is the primary item on ROADMAP. This means the
+  actual values a client reads or writes are never visible, only that a
+  Read/Write/Call/etc. happened, its request handle, and (for a response)
+  whether it succeeded.
+- **OPC UA chunk reassembly is not implemented** -- a logical message split
+  across multiple `'C'`/`'F'` OPC UA chunks (distinct from ordinary TCP-
+  segment-level reassembly, which IS implemented -- see PROTOCOL COVERAGE's
+  "Chunking" subsection) has its UA-TCP/SecureConversation header fully
+  decoded per chunk, but only a single, complete `'F'` chunk gets its
+  service body decoded; a `'C'`/`'A'` chunk's own body is always raw hex.
+- **OPC UA has no stateful channel/session tracking** -- a Message chunk's
+  own TokenId is never correlated back to the OpenSecureChannel exchange
+  that negotiated it, nor a Request's AuthenticationToken back to the
+  CreateSession response that issued it. This decoder is, like every other
+  protocol in this codebase, a stateless-per-message decoder with
+  TCP-stream-level reassembly only, not a full conversation-tracking OPC UA
+  stack -- so, for instance, this decoder cannot tell you from a Message
+  chunk alone what SecurityMode its own TokenId corresponds to (though the
+  OpenSecureChannel exchange that negotiated it is itself always decoded in
+  full -- see "Security posture is visible even when the body is not" in
+  PROTOCOL COVERAGE).
+- **OPC UA's StatusCode table is a deliberate first pass**, the same scoping
+  precedent as HART-IP's Response Code table above -- roughly 20 named
+  values (auth/certificate/session/timeout failures, the subset most
+  relevant to an OT security audit) out of the OPC Foundation's own
+  ~700-entry `StatusCode.csv`. Every other value still decodes its
+  severity (Good/Uncertain/Bad) correctly from the top 2 bits, shown
+  alongside the raw hex value, never guessed at -- this decoder's own real
+  capture (see `tests/real_captures/opcua/ATTRIBUTION.md`) exercises this
+  exact fallback, twice.
+- **OPC UA's real-capture validation is narrow.** The one real capture
+  found (`tests/real_captures/opcua/ATTRIBUTION.md`) is genuine OPC UA
+  traffic from an independent stack implementation, and it does exercise 9
+  of the ~15 Tier 1 services plus genuine multi-segment TCP reassembly --
+  but it never exercises FindServers, CloseSession, CloseSecureChannel, any
+  Tier 2 service other than Call, a non-Anonymous identity token (so the
+  UserName/Password cleartext-credential "SECURITY FINDING" logic is
+  validated only against this decoder's own synthetic fixture, not real
+  bytes), a non-`'F'` chunk, or a structurally-invalid NodeId -- see
+  PROTOCOL COVERAGE's OPC UA Validation subsection for the complete,
+  honest scope.
 - **DNP3 CRCs are not validated** -- neither the data-link header CRC nor the
   per-block CRCs within the user data. A corrupted DNP3 frame that still
   starts with the right magic bytes will be "decoded" without any indication
@@ -3559,6 +4139,29 @@ conduitscope decode -r capture.pcap --protocol hartip -f json \
            "\(.hartip_address): \(.hartip_values | join(", "))"] | unique[]'
 ```
 
+Build an OPC UA endpoint/security-posture inventory -- every distinct
+endpoint offered by a server's own GetEndpointsResponse, the OPC UA analog
+of BACnet's I-Am / EtherNet/IP's ListIdentity / HART-IP's Read-Unique-
+Identifier "device fingerprinting" query, useful for spotting an endpoint
+still accepting SecurityMode "None":
+
+```sh
+conduitscope decode -r capture.pcap --protocol opcua -f json \
+  | jq -r '[.[] | select(.opcua_service_name == "GetEndpointsResponse") | .opcua_values[] | select(startswith("endpoint["))] | unique[]'
+```
+
+Find every OPC UA ActivateSession request that placed a UserName/Password
+credential on the wire in cleartext -- this decoder's own deliberate
+"SECURITY FINDING" note (see PROTOCOL COVERAGE's OPC UA "Identity token
+decode" section), worth flagging on any conduit that should be running an
+authenticated, encrypted OPC UA session:
+
+```sh
+conduitscope decode -r capture.pcap --protocol opcua -f json \
+  | jq -r '.[] | select(.notes // [] | any(startswith("SECURITY FINDING"))) |
+           "\(.src_ip):\(.src_port) -> \(.dst_ip):\(.dst_port): \(.opcua_values[] | select(startswith("username=") or startswith("password=")))"'
+```
+
 Surface TCP flows still stuck "buffering" a Modbus/TCP PDU that never
 arrives -- the signature of HART-IP's own documented weak-detection-gate
 collision (a real HART-IP Session Initiate message misclassified as
@@ -3723,6 +4326,23 @@ Rough order, each building on the groundwork this release establishes:
     response codes, and the ten-plus commands the one real capture found for
     this feature doesn't happen to exercise (see
     `tests/real_captures/hartip/ATTRIBUTION.md`'s own "Gaps" section).
+
+11. **Implement OPC UA's Variant/DataValue self-describing value encoding**
+    (OPC 10000-6 5.2.2.16/5.1.6) -- the single largest remaining OPC UA
+    scope gap (see PROTOCOL COVERAGE's "Tier 2" section and LIMITATIONS).
+    This would promote Read, Write, Browse, Call, and the subscription/
+    MonitoredItem-management services from header-only (Tier 2) to full
+    value decoding (Tier 1), which is where the actual process/tag values
+    an OPC UA client reads or writes would become visible. Also: OPC UA
+    chunk reassembly (a logical message split across multiple `'C'`/`'F'`
+    chunks -- distinct from the already-implemented TCP-segment-level
+    reassembly, see PROTOCOL COVERAGE's "Chunking" subsection); widening the
+    StatusCode table past its current ~20-entry first pass; and widening
+    real-capture validation to FindServers, CloseSession,
+    CloseSecureChannel, a non-Anonymous identity token on real traffic, a
+    non-`'F'` chunk, and any Tier 2 service besides Call, if a second real
+    OPC UA capture with that coverage ever turns up (see
+    `tests/real_captures/opcua/ATTRIBUTION.md`'s own honest scope).
 
 **pcapng support** is also now done: both classic pcap and pcapng are read
 transparently (auto-detected, no flag needed) -- see "pcap vs. pcapng"
@@ -3967,6 +4587,40 @@ previously-undocumented false-positive pattern against unrelated background
 TCP traffic). See LIMITATIONS for the complete list of what's still out of
 scope (Checksum verification, per-command Response Code resolution, and
 more).
+
+**OPC UA Binary support** is also now done: the 8-byte UA-TCP common
+header, the full OpenSecureChannel/CloseSecureChannel/Message
+SecureConversation framing (SecureChannelId, security header, sequence
+header), and a "first pass" two-tier service decode -- Tier 1 covers the
+full connection/channel/session lifecycle plus both discovery services
+(15 request/response pairs in all, including ServiceFault), Tier 2 names
+every other service and decodes its RequestHeader/ResponseHeader while
+leaving the Variant/DataValue-dependent body as raw hex -- see PROTOCOL
+COVERAGE's OPC UA section and item 11 above for what's still out of scope.
+Unlike HART-IP above, this protocol's own structural detection gate (a
+3-byte ASCII MessageType match against 7 fixed strings) is strong enough,
+and confirmed collision-free with every other protocol in this dispatch
+chain, to be tried FIRST rather than last -- the opposite ordering
+rationale from HART-IP's own weak-gate placement, see PROTOCOL DETECTION.
+Deliberately, ActivateSessionRequest's own UserName/Password identity token
+is decoded including the cleartext Password whenever EncryptionAlgorithm is
+empty, flagged with an explicit `"SECURITY FINDING"` note -- a real,
+documented OPC UA credential-exposure pattern (OPC 10000-4 7.41), not a
+hypothetical, and directly in service of this tool's own stated purpose as
+an OT-security-auditing decoder. A real capture was found and validated:
+two OPC UA sessions from a well-known, widely-mirrored 2009 Wireshark
+dissector-bug reproduction capture, on a non-standard TCP port that
+Wireshark's own default configuration doesn't even recognize as OPC UA --
+this decoder does, without any port hint, cross-checked field-by-field
+against tshark's own OPC UA dissector once pointed at the right port (see
+`tests/real_captures/opcua/ATTRIBUTION.md`). That same capture also
+happens to be the first real-world confirmation this project's general
+TCP-segment-level reassembly mechanism gets (two responses genuinely split
+across 5 and 6 TCP segments, both reassembled and decoded correctly), and
+contains two deliberately malformed CallRequest packets -- one of which
+triggered Wireshark's own ~2-minute dissector freeze -- that this decoder's
+own Tier 2 raw-hex scope is structurally immune to, since it never attempts
+to parse a malformed CallRequest body at all.
 
 ## BUILDING
 

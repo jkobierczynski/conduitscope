@@ -3,7 +3,8 @@
 `conduitscope` decodes Modbus/TCP, DNP3, IEC 60870-5-104, S7comm/COTP (Siemens S7 PLC
 protocol), EtherNet/IP (CIP explicit and implicit messaging), PROFINET RT (DCP device
 discovery/configuration and cyclic real-time I/O data), IEC 61850-8-1 GOOSE,
-IEC 61850-9-2 Sampled Values, EtherCAT, BACnet/IP, and HART-IP traffic from offline pcap/pcapng captures, and checks it
+IEC 61850-9-2 Sampled Values, EtherCAT, BACnet/IP, HART-IP, and OPC UA Binary
+(UA-TCP/Secure Conversation) traffic from offline pcap/pcapng captures, and checks it
 against a zone/conduit segmentation policy. It's an OT/ICS conduit-auditing tool: `decode`/`info` give you reliable
 protocol decoding and a stats view, and `policy validate` maps that decoded traffic
 against an IEC 62443-style zone/conduit model (for NIS2-flavored compliance work) --
@@ -30,7 +31,7 @@ section.
 ## Why not just use tshark?
 
 Fair question -- tshark wins on raw protocol-decoding breadth (thousands of
-dissectors vs. conduitscope's eleven-plus-CIP-I/O) and is usually still the
+dissectors vs. conduitscope's twelve-plus-CIP-I/O) and is usually still the
 better first reach for general packet analysis. conduitscope isn't trying to
 replace it; it does one thing tshark fundamentally doesn't:
 
@@ -374,6 +375,40 @@ Groundwork / v0.1.0. What works right now:
   collision on genuine field traffic, plus a second, previously-undocumented
   false-positive pattern where the same weak gate also matches unrelated background
   TCP traffic; see tests/real_captures/hartip/ATTRIBUTION.md for both.
+- OPC UA Binary (TCP port 4840, UA-TCP transport / OPC UA Secure Conversation, OPC
+  10000-6): the 8-byte UA-TCP common header (MessageType/ChunkType/MessageSize) and,
+  for OpenSecureChannel/CloseSecureChannel/Message, the SecureChannelId plus
+  security header (SecurityPolicyUri and certificate presence/length for
+  OpenSecureChannel; TokenId for the rest) and sequence header are always decoded --
+  unlike every other protocol in this codebase except EtherNet/IP/CIP, OPC UA's own
+  binary encoding is little-endian throughout. At the service layer, a deliberate
+  two-tier scope: the full connection/channel/session lifecycle plus both discovery
+  services (Hello/Acknowledge/Error/ReverseHello, OpenSecureChannel,
+  CloseSecureChannel, GetEndpoints, FindServers, CreateSession, ActivateSession,
+  CloseSession, ServiceFault) are fully field-decoded, including -- deliberately --
+  ActivateSession's own UserIdentityToken, which surfaces a cleartext
+  UserName/Password credential as a real, actionable OT-security finding whenever
+  EncryptionAlgorithm is empty (the same "decode what's genuinely useful for an
+  audit" reasoning already applied to this codebase's HART-IP Response-Code
+  naming); everything needing the Variant/DataValue self-describing value encoding
+  (Read, Write, Browse, Call, Subscribe/MonitoredItem management, and more) is named
+  via its own service TypeId and has its RequestHeader/ResponseHeader decoded, but
+  its body is shown as raw hex -- this first pass does not implement Variant/
+  DataValue. The structural detection gate (MessageType against 7 fixed 3-byte ASCII
+  strings) is strong enough, and confirmed collision-free with every other
+  protocol's own gate, that it's tried first in the dispatch chain -- the opposite
+  ordering rationale from HART-IP's own weak-gate "tried last" placement. A real
+  capture was found and validated: two OPC UA sessions from a well-known, widely-
+  mirrored Wireshark dissector-bug reproduction capture (Bug 3986, 2009), on a
+  non-standard TCP port (12001, not 4840) that Wireshark's own *default*
+  configuration doesn't even recognize as OPC UA -- this decoder does, without any
+  port hint, cross-checked field-by-field against tshark's own OPC UA dissector
+  (via "Decode As") once pointed at the right port; see
+  tests/real_captures/opcua/ATTRIBUTION.md for the full writeup, including the two
+  genuinely malformed CallRequest packets (one of which triggered Wireshark's own
+  2-minute dissector freeze) that this decoder's own Tier-2 raw-hex scope is
+  structurally immune to -- see include/conduitscope/opcua.hpp's file header for the
+  full writeup.
 - Non-IPv4 Ethernet frames and non-TCP IPv4 payloads (including UDP) are now
   recognized and named, not just reported as a bare hex/number and dropped:
   ARP, LLDP, PTP, MPLS, and stacked-VLAN (802.1ad/QinQ) EtherTypes; ICMP,
@@ -399,16 +434,20 @@ Groundwork / v0.1.0. What works right now:
   real capture, not just synthetic traffic
 - General TCP stream reassembly at the PDU/frame level: a Modbus MBAP
   message, a DNP3 data-link frame, an IEC 104 APDU, an EtherNet/IP
-  encapsulation message, a TPKT/COTP frame, or a HART-IP message
+  encapsulation message, a TPKT/COTP frame, a HART-IP message, or an OPC UA
+  UA-TCP/Secure Conversation chunk
   split across two or more TCP segments is buffered per directional flow and decoded once
   complete, using each protocol's own declared-length field to know how many
-  bytes to wait for. HART-IP's own declared-length check is tried last in
-  this chain, deliberately, because of the Modbus-collision limitation
-  described above. Resyncs rather than reorders on capture gaps, and trims
+  bytes to wait for. OPC UA's own declared-length check is tried FIRST in this
+  chain (its structural gate is strong and collision-free -- see above), while
+  HART-IP's own is tried LAST, deliberately, because of the Modbus-collision
+  limitation described above. Resyncs rather than reorders on capture gaps, and trims
   overlapping retransmissions rather than duplicating bytes. Verified
   byte-for-byte behavior-identical against every real capture in this
-  project's test set (none of which happen to split a PDU across segments)
-  and against 6 synthetic scenarios covering the happy path plus gaps,
+  project's test set -- including, now, OPC UA's own real capture, which
+  genuinely exercises this machinery: two responses split across 5 and 6 TCP
+  segments respectively, reassembled and decoded correctly -- and against 6
+  synthetic scenarios covering the happy path plus gaps,
   full-duplicate retransmits, and partial-overlap retransmits; see
   docs/MANUAL.md's LIMITATIONS for exact scope. Modbus request/response
   pairing and multi-frame S7comm chaining are separate mechanisms, described
@@ -503,7 +542,7 @@ that runs it -- the SDK used at build time only supplies headers/import librarie
 
 ```sh
 # Generate synthetic Modbus/TCP, DNP3, IEC 104, S7comm/COTP, EtherNet/IP, PROFINET RT,
-# GOOSE, Sampled Values, EtherCAT, BACnet/IP, and HART-IP captures and decode them (no live traffic needed):
+# GOOSE, Sampled Values, EtherCAT, BACnet/IP, HART-IP, and OPC UA captures and decode them (no live traffic needed):
 python3 tools/make_sample_pcap.py
 build/conduitscope decode -r tests/sample_modbus.pcap
 build/conduitscope decode -r tests/sample_s7comm.pcap --stats
@@ -515,6 +554,7 @@ build/conduitscope decode -r tests/sample_sv.pcap
 build/conduitscope decode -r tests/sample_ethercat.pcap
 build/conduitscope decode -r tests/sample_bacnet.pcap
 build/conduitscope decode -r tests/sample_hartip.pcap
+build/conduitscope decode -r tests/sample_opcua.pcap
 build/conduitscope decode -r tests/sample_modbus.pcap --format json
 build/conduitscope info -r tests/sample_modbus.pcap
 
@@ -528,7 +568,7 @@ To decode traffic you've actually captured, e.g. from a Modbus simulator such as
 [4SICS ICS pcaps](https://www.netresec.com/?page=PCAP4SICS):
 
 ```sh
-tcpdump -i <iface> -w capture.pcap port 502 or port 20000 or port 2404 or port 102 or port 44818 or port 2222 or port 47808 or port 5094
+tcpdump -i <iface> -w capture.pcap port 502 or port 20000 or port 2404 or port 102 or port 44818 or port 2222 or port 47808 or port 5094 or port 4840
 build/conduitscope decode -r capture.pcap
 ```
 
@@ -537,7 +577,7 @@ intermediate file and check traffic in real time:
 
 ```sh
 build/conduitscope interfaces                                    # list capturable interfaces
-build/conduitscope decode -i eth0 --filter "port 502 or port 2404 or port 102 or port 44818 or port 2222 or port 47808 or port 5094" --duration 60
+build/conduitscope decode -i eth0 --filter "port 502 or port 2404 or port 102 or port 44818 or port 2222 or port 47808 or port 5094 or port 4840" --duration 60
 build/conduitscope policy validate -i eth0 --policy tests/policies/compliant.yaml --duration 60
 # or just Ctrl+C to stop either one early -- both still print whatever was captured so far
 ```

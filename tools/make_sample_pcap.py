@@ -2670,6 +2670,529 @@ def hartip_udp_frame(payload: bytes, sport=HARTIP_PORT, dport=HARTIP_PORT, src_i
     return eth_header(dst_mac, src_mac, 0x0800) + ip + udp
 
 
+OPCUA_PORT = 4840
+
+# --- OPC UA Binary (UA-TCP / Secure Conversation) primitive encoders -----------------------
+# Mirrors opcua.hpp's own "Primitive encoding" section byte-for-byte -- these are the inverse of
+# the readers in opcua.cpp (read_string/read_bytestring/read_node_id/etc.), not independently
+# reinvented, so a mistake here would show up as this decoder failing to parse its own fixture.
+
+# 1601-01-01 -> 1970-01-01, in seconds -- see opcua.cpp's format_opcua_datetime.
+OPCUA_FILETIME_EPOCH_OFFSET = 11644473600
+# A fixed, deliberately unremarkable RequestHeader/ResponseHeader timestamp for every message
+# below (except the two "sentinel" cases noted at their own call sites) -- reuses this file's own
+# existing 1_700_006_000 unix-time convention (see build_hartip_sample) so every fixture in this
+# repository anchors to the same rough point in time.
+OPCUA_FIXED_TICKS = (1_700_006_000 + OPCUA_FILETIME_EPOCH_OFFSET) * 10_000_000
+
+
+def opcua_string(s):
+    """UA String: Int32 LE length prefix (-1 = null, distinct from 0 = present-but-empty), then
+    that many UTF-8 bytes. `s=None` encodes the null form."""
+    if s is None:
+        return struct.pack("<i", -1)
+    b = s.encode("utf-8")
+    return struct.pack("<i", len(b)) + b
+
+
+def opcua_bytestring(b):
+    """UA ByteString -- same Int32-length-prefix shape as opcua_string, raw bytes instead of UTF-8."""
+    if b is None:
+        return struct.pack("<i", -1)
+    return struct.pack("<i", len(b)) + b
+
+
+def opcua_array_count(n):
+    return struct.pack("<i", n)
+
+
+def node_id_two_byte(identifier):
+    """NodeId encoding 0x00 -- Identifier(1 byte); namespace implicitly 0."""
+    assert 0 <= identifier <= 0xFF
+    return bytes([0x00, identifier])
+
+
+def node_id_four_byte(identifier, ns=0):
+    """NodeId encoding 0x01 -- Namespace(1 byte) + Identifier(UInt16 LE). Used below for every
+    service TypeId (all namespace 0, all well under 65536 -- see src/opcua.cpp's kServices table)."""
+    assert 0 <= ns <= 0xFF and 0 <= identifier <= 0xFFFF
+    return bytes([0x01, ns]) + struct.pack("<H", identifier)
+
+
+def node_id_numeric(ns, identifier):
+    """NodeId encoding 0x02 -- Namespace(UInt16 LE) + Identifier(UInt32 LE)."""
+    return bytes([0x02]) + struct.pack("<H", ns) + struct.pack("<I", identifier)
+
+
+def node_id_string(ns, s):
+    """NodeId encoding 0x03 -- Namespace(UInt16 LE) + Identifier(String)."""
+    return bytes([0x03]) + struct.pack("<H", ns) + opcua_string(s)
+
+
+def null_node_id():
+    """The conventional Null NodeId (Two-Byte encoding, identifier 0) -- used below everywhere a
+    real session's AuthenticationToken would go (this decoder consumes, but never validates or
+    correlates, that field -- see opcua.hpp's "Deliberately NOT implemented" section)."""
+    return node_id_two_byte(0)
+
+
+def opcua_localized_text(locale=None, text=None):
+    """LocalizedText -- a 1-byte presence mask (0x01=Locale present, 0x02=Text present) then
+    whichever of Locale(String)/Text(String) that mask flags."""
+    mask = (0x01 if locale is not None else 0) | (0x02 if text is not None else 0)
+    out = bytes([mask])
+    if locale is not None:
+        out += opcua_string(locale)
+    if text is not None:
+        out += opcua_string(text)
+    return out
+
+
+def opcua_extension_object(type_id_bytes, encoding=0x00, body=b""):
+    """ExtensionObject -- TypeId(NodeId) + Encoding(1 byte) + [Int32 length + body, only when
+    Encoding != 0x00]."""
+    out = type_id_bytes + bytes([encoding])
+    if encoding in (0x01, 0x02):
+        out += struct.pack("<i", len(body)) + body
+    return out
+
+
+def opcua_extension_object_null():
+    """The conventional "no AdditionalHeader" ExtensionObject every RequestHeader/ResponseHeader
+    ends with below -- Null TypeId, Encoding 0x00 (no body)."""
+    return opcua_extension_object(null_node_id(), 0x00)
+
+
+def opcua_diagnostic_info_null():
+    """The conventional "nothing set" DiagnosticInfo -- a single mask byte of 0 (no optional field
+    present, so nothing recursive follows) -- see opcua.cpp's skip_diagnostic_info."""
+    return bytes([0x00])
+
+
+def opcua_signature_data(algorithm=None, signature=None):
+    """SignatureData -- Algorithm(String) + Signature(ByteString); empty/null for every fixture
+    below (this decoder only structurally skips it, never surfaces it -- see opcua.cpp)."""
+    return opcua_string(algorithm) + opcua_bytestring(signature)
+
+
+def opcua_application_description(app_uri, product_uri="", app_name_text=None, app_name_locale=None,
+                                    app_type=0, gateway_uri=None, discovery_profile_uri=None,
+                                    discovery_urls=()):
+    body = opcua_string(app_uri)
+    body += opcua_string(product_uri)
+    body += opcua_localized_text(app_name_locale, app_name_text)
+    body += struct.pack("<I", app_type)
+    body += opcua_string(gateway_uri)
+    body += opcua_string(discovery_profile_uri)
+    body += opcua_array_count(len(discovery_urls))
+    for u in discovery_urls:
+        body += opcua_string(u)
+    return body
+
+
+def opcua_endpoint_description(endpoint_url, server_app_desc_bytes, server_cert=None, security_mode=1,
+                                security_policy_uri="http://opcfoundation.org/UA/SecurityPolicy#None",
+                                user_token_policies=(),
+                                transport_profile_uri="http://opcfoundation.org/UA-Profile/Transport/uatcp-uasc-uabinary",
+                                security_level=0):
+    body = opcua_string(endpoint_url)
+    body += server_app_desc_bytes
+    body += opcua_bytestring(server_cert)
+    body += struct.pack("<I", security_mode)
+    body += opcua_string(security_policy_uri)
+    body += opcua_array_count(len(user_token_policies))
+    for policy_id, token_type, issued_token_type, issuer_endpoint_url, sec_policy in user_token_policies:
+        body += opcua_string(policy_id)
+        body += struct.pack("<I", token_type)
+        body += opcua_string(issued_token_type)
+        body += opcua_string(issuer_endpoint_url)
+        body += opcua_string(sec_policy)
+    body += opcua_string(transport_profile_uri)
+    body += bytes([security_level])
+    return body
+
+
+def opcua_request_header(request_handle, auth_token_bytes=None, ts_ticks=None, return_diagnostics=0,
+                          audit_entry_id=None, timeout_hint=0):
+    """RequestHeader -- shared by every service (Tier 1 and Tier 2 alike). See
+    opcua.cpp's read_request_header."""
+    if auth_token_bytes is None:
+        auth_token_bytes = null_node_id()
+    if ts_ticks is None:
+        ts_ticks = OPCUA_FIXED_TICKS
+    body = auth_token_bytes
+    body += struct.pack("<Q", ts_ticks & 0xFFFFFFFFFFFFFFFF)
+    body += struct.pack("<I", request_handle)
+    body += struct.pack("<I", return_diagnostics)
+    body += opcua_string(audit_entry_id)
+    body += struct.pack("<I", timeout_hint)
+    body += opcua_extension_object_null()
+    return body
+
+
+def opcua_response_header(request_handle, service_result=0, ts_ticks=None, string_table=()):
+    """ResponseHeader -- shared by every service. See opcua.cpp's read_response_header."""
+    if ts_ticks is None:
+        ts_ticks = OPCUA_FIXED_TICKS
+    body = struct.pack("<Q", ts_ticks & 0xFFFFFFFFFFFFFFFF)
+    body += struct.pack("<I", request_handle)
+    body += struct.pack("<I", service_result)
+    body += opcua_diagnostic_info_null()
+    body += opcua_array_count(len(string_table))
+    for s in string_table:
+        body += opcua_string(s)
+    body += opcua_extension_object_null()
+    return body
+
+
+# Identity token TypeIds (namespace 0, _Encoding_DefaultBinary) -- must match opcua.cpp's own
+# kAnonymousIdentityToken/kUserNameIdentityToken/kX509IdentityToken/kIssuedIdentityToken constants.
+OPCUA_ANONYMOUS_IDENTITY_TOKEN = 321
+OPCUA_USERNAME_IDENTITY_TOKEN = 324
+OPCUA_X509_IDENTITY_TOKEN = 327
+OPCUA_ISSUED_IDENTITY_TOKEN = 940
+
+
+def opcua_anonymous_identity_token_body(policy_id="anonymous"):
+    return opcua_string(policy_id)
+
+
+def opcua_username_identity_token_body(policy_id, username, password, encryption_algorithm=None):
+    return (opcua_string(policy_id) + opcua_string(username) + opcua_bytestring(password) +
+            opcua_string(encryption_algorithm))
+
+
+def opcua_identity_token(type_id_numeric, body_bytes):
+    return opcua_extension_object(node_id_four_byte(type_id_numeric), 0x01, body_bytes)
+
+
+def opcua_service_message(service_id, header_bytes, params_bytes=b""):
+    """A complete service-layer body: TypeId(NodeId, Four-Byte encoding, namespace 0) followed by
+    that service's own RequestHeader/ResponseHeader and parameters -- see opcua.hpp's "Service
+    identification" section. `service_id` is the service's own "_Encoding_DefaultBinary" NodeId, as
+    cross-checked against the OPC Foundation's own NodeIds.csv in src/opcua.cpp's kServices table."""
+    return node_id_four_byte(service_id) + header_bytes + params_bytes
+
+
+def opcua_ua_tcp_header(message_type, chunk_type, total_size):
+    assert len(message_type) == 3
+    return message_type.encode("ascii") + chunk_type.encode("ascii") + struct.pack("<I", total_size)
+
+
+def opcua_simple_message(message_type, body, chunk_type="F", total_size_override=None):
+    """A UA Connection Protocol message (Hello/Acknowledge/Error/ReverseHello) -- 8-byte header
+    directly followed by `body`, no SecureConversation framing."""
+    total = total_size_override if total_size_override is not None else 8 + len(body)
+    return opcua_ua_tcp_header(message_type, chunk_type, total) + body
+
+
+def opcua_asymmetric_security_header(policy_uri, sender_cert=None, receiver_cert_thumbprint=None):
+    return opcua_string(policy_uri) + opcua_bytestring(sender_cert) + opcua_bytestring(receiver_cert_thumbprint)
+
+
+def opcua_sequence_header(sequence_number, request_id):
+    return struct.pack("<II", sequence_number, request_id)
+
+
+def opcua_opn_message(secure_channel_id, policy_uri, sequence_number, request_id, service_body,
+                       chunk_type="F"):
+    """An OpenSecureChannel (OPN) message: 8-byte header + SecureChannelId + Asymmetric Algorithm
+    Security Header + SequenceHeader + service body."""
+    inner = (struct.pack("<I", secure_channel_id) + opcua_asymmetric_security_header(policy_uri) +
+             opcua_sequence_header(sequence_number, request_id) + service_body)
+    return opcua_ua_tcp_header("OPN", chunk_type, 8 + len(inner)) + inner
+
+
+def opcua_symmetric_message(message_type, secure_channel_id, token_id, sequence_number, request_id,
+                             service_body, chunk_type="F"):
+    """A CloseSecureChannel (CLO) or Message (MSG) chunk: 8-byte header + SecureChannelId +
+    Symmetric Algorithm Security Header (TokenId only) + SequenceHeader + service body."""
+    inner = (struct.pack("<I", secure_channel_id) + struct.pack("<I", token_id) +
+             opcua_sequence_header(sequence_number, request_id) + service_body)
+    return opcua_ua_tcp_header(message_type, chunk_type, 8 + len(inner)) + inner
+
+
+def build_opcua_sample():
+    """OPC UA Binary (UA-TCP / OPC UA Secure Conversation, TCP-only, conventionally port 4840) --
+    the UA Connection Protocol handshake (Hello/Acknowledge), a full OpenSecureChannel/
+    CloseSecureChannel round trip (SecurityPolicyUri "...#None", so the body stays plaintext-
+    decodable -- see opcua.hpp's "Opportunistic MSG/OPN/CLO body decode" section), GetEndpoints/
+    FindServers discovery, a CreateSession/ActivateSession/CloseSession lifecycle -- including,
+    deliberately, an Anonymous ActivateSession AND a UserName/Password one with an empty
+    EncryptionAlgorithm (the cleartext-credential-exposure "SECURITY FINDING" case opcua.hpp's own
+    "Identity token decode" section documents) -- a Tier-2 (header-decoded, body-raw-hex) Read
+    request/response pair, an entirely unrecognized service TypeId, an Error message, a
+    ReverseHello (on its own, separately-directioned connection, per spec), a non-'F' (intermediate)
+    chunk, a structurally-invalid NodeId shape (regression case for the inner try/catch that must
+    still preserve the already-decoded channel/security/sequence fields), a genuinely truncated/
+    incomplete capture (TCP-reassembly "buffering, waiting for more" path), port-independence (a
+    valid exchange on a non-standard TCP port), and two OPC UA messages coalesced into one TCP
+    segment. No real capture happens to be attributed for this fixture set yet at the time each
+    packet was written -- see tests/real_captures/opcua/ATTRIBUTION.md (if present) or opcua.hpp's/
+    opcua.cpp's own Validation paragraph for the current state of that search."""
+    packets = []
+    client_seq = [10000]
+    server_seq = [20000]
+
+    def add(from_client: bool, payload: bytes, sport=53000, dport=OPCUA_PORT, src_ip=None, dst_ip=None,
+            src_mac=None, dst_mac=None):
+        if from_client:
+            src_port, dst_port = sport, dport
+            s_ip, d_ip = src_ip or HMI_IP, dst_ip or PLC_IP
+            s_mac, d_mac = src_mac or HMI_MAC, dst_mac or PLC_MAC
+            seq, ack = client_seq[0], server_seq[0]
+            client_seq[0] += len(payload)
+        else:
+            src_port, dst_port = dport, sport
+            s_ip, d_ip = dst_ip or PLC_IP, src_ip or HMI_IP
+            s_mac, d_mac = dst_mac or PLC_MAC, src_mac or HMI_MAC
+            seq, ack = server_seq[0], client_seq[0]
+            server_seq[0] += len(payload)
+        tcp = tcp_header(src_port, dst_port, seq, ack, TCP_PSH | TCP_ACK, len(payload)) + payload
+        ip = ipv4_header(s_ip, d_ip, 6, len(tcp), 0x7300 + len(packets)) + tcp
+        packets.append(eth_header(d_mac, s_mac, 0x0800) + ip)
+
+    endpoint_url = "opc.tcp://192.168.1.10:4840/UA/PLC"
+    none_policy = "http://opcfoundation.org/UA/SecurityPolicy#None"
+    basic256_policy = "http://opcfoundation.org/UA/SecurityPolicy#Basic256Sha256"
+
+    # 1) & 2) Hello (client->server, always the first message on a new connection) / Acknowledge.
+    hel_body = (struct.pack("<IIIII", 0, 65536, 65536, 0, 0) + opcua_string(endpoint_url))
+    add(True, opcua_simple_message("HEL", hel_body))
+    ack_body = struct.pack("<IIIII", 0, 65536, 65536, 0, 0)
+    add(False, opcua_simple_message("ACK", ack_body))
+
+    # 3) & 4) OpenSecureChannel request/response -- SecurityPolicyUri "...#None" and
+    #    MessageSecurityMode "None", itself the audit finding this decoder's own file header
+    #    comment's "Security posture is visible even when the body is not" section describes.
+    #    SecureChannelId is 0 on the request (not yet assigned); the response assigns 500001.
+    opn_req_params = (struct.pack("<III", 0, 0, 1) + opcua_bytestring(b"") + struct.pack("<I", 3_600_000))
+    opn_req_body = opcua_service_message(446, opcua_request_header(1), opn_req_params)  # OpenSecureChannelRequest
+    add(True, opcua_opn_message(0, none_policy, 1, 1, opn_req_body))
+
+    channel_id = 500001
+    token_id = 1
+    opn_resp_params = (struct.pack("<III", 0, channel_id, token_id) +
+                        struct.pack("<Q", OPCUA_FIXED_TICKS + 10_000_000) +  # +1s
+                        struct.pack("<I", 3_600_000) + opcua_bytestring(bytes(range(4))))
+    opn_resp_body = opcua_service_message(449, opcua_response_header(1, 0), opn_resp_params)  # OpenSecureChannelResponse
+    add(False, opcua_opn_message(channel_id, none_policy, 1, 1, opn_resp_body))
+
+    # 5) & 6) GetEndpoints request/response -- device/endpoint fingerprinting, this codebase's own
+    #    OPC UA analog of BACnet I-Am / EtherNet/IP ListIdentity / HART-IP Read-Unique-Identifier.
+    ge_req_params = opcua_string(endpoint_url) + opcua_array_count(0) + opcua_array_count(0)
+    ge_req_body = opcua_service_message(428, opcua_request_header(2), ge_req_params)  # GetEndpointsRequest
+    add(True, opcua_symmetric_message("MSG", channel_id, token_id, 2, 2, ge_req_body))
+
+    server_app_desc = opcua_application_description(
+        "urn:conduitscope:sample-plc", "urn:conduitscope:conduitscope:sample-plc:product",
+        app_name_text="ConduitScope Sample PLC", app_name_locale="en", app_type=0)
+    endpoint_none = opcua_endpoint_description(endpoint_url, server_app_desc, security_mode=1,
+                                                security_policy_uri=none_policy)
+    endpoint_secure = opcua_endpoint_description(
+        endpoint_url, server_app_desc, security_mode=3, security_policy_uri=basic256_policy,
+        user_token_policies=[("username_basic256", 1, None, None, basic256_policy)])
+    ge_resp_params = opcua_array_count(2) + endpoint_none + endpoint_secure
+    ge_resp_body = opcua_service_message(431, opcua_response_header(2, 0), ge_resp_params)  # GetEndpointsResponse
+    add(False, opcua_symmetric_message("MSG", channel_id, token_id, 2, 2, ge_resp_body))
+
+    # 7) & 8) FindServers request/response -- the second Tier-1 discovery service.
+    fs_req_params = opcua_string(endpoint_url) + opcua_array_count(0) + opcua_array_count(0)
+    fs_req_body = opcua_service_message(422, opcua_request_header(3), fs_req_params)  # FindServersRequest
+    add(True, opcua_symmetric_message("MSG", channel_id, token_id, 3, 3, fs_req_body))
+
+    fs_resp_params = opcua_array_count(1) + server_app_desc
+    fs_resp_body = opcua_service_message(425, opcua_response_header(3, 0), fs_resp_params)  # FindServersResponse
+    add(False, opcua_symmetric_message("MSG", channel_id, token_id, 3, 3, fs_resp_body))
+
+    # 9) & 10) CreateSession request/response.
+    client_app_desc = opcua_application_description(
+        "urn:conduitscope:sample-hmi", app_name_text="ConduitScope Sample HMI", app_name_locale="en",
+        app_type=1)
+    cs_req_params = (client_app_desc + opcua_string(None) + opcua_string(endpoint_url) +
+                      opcua_string("ConduitScope Sample Session") + opcua_bytestring(bytes(range(4))) +
+                      opcua_bytestring(None) + struct.pack("<d", 1_200_000.0) + struct.pack("<I", 0))
+    cs_req_body = opcua_service_message(461, opcua_request_header(4), cs_req_params)  # CreateSessionRequest
+    add(True, opcua_symmetric_message("MSG", channel_id, token_id, 4, 4, cs_req_body))
+
+    session_id = node_id_numeric(1, 1001)
+    session_auth_token = node_id_string(1, "sample-session-auth-token")
+    cs_resp_params = (session_id + session_auth_token + struct.pack("<d", 1_200_000.0) +
+                       opcua_bytestring(bytes(range(4, 8))) + opcua_bytestring(None) +
+                       opcua_array_count(0) + opcua_array_count(0) + opcua_signature_data() +
+                       struct.pack("<I", 0))
+    cs_resp_body = opcua_service_message(464, opcua_response_header(4, 0), cs_resp_params)  # CreateSessionResponse
+    add(False, opcua_symmetric_message("MSG", channel_id, token_id, 4, 4, cs_resp_body))
+
+    # 11) & 12) ActivateSession request/response -- Anonymous identity, the unremarkable case.
+    as_anon_params = (opcua_signature_data() + opcua_array_count(0) + opcua_array_count(1) +
+                       opcua_string("en") +
+                       opcua_identity_token(OPCUA_ANONYMOUS_IDENTITY_TOKEN,
+                                            opcua_anonymous_identity_token_body("anonymous")) +
+                       opcua_signature_data())
+    as_anon_req_body = opcua_service_message(467, opcua_request_header(5, auth_token_bytes=session_auth_token),
+                                              as_anon_params)  # ActivateSessionRequest
+    add(True, opcua_symmetric_message("MSG", channel_id, token_id, 5, 5, as_anon_req_body))
+
+    as_resp_params = opcua_bytestring(bytes(range(8, 12))) + opcua_array_count(1) + struct.pack("<I", 0) + \
+        opcua_array_count(0)
+    as_anon_resp_body = opcua_service_message(470, opcua_response_header(5, 0), as_resp_params)  # ActivateSessionResponse
+    add(False, opcua_symmetric_message("MSG", channel_id, token_id, 5, 5, as_anon_resp_body))
+
+    # 13) & 14) ActivateSession request/response -- UserName/Password identity with an EMPTY
+    #     EncryptionAlgorithm: per OPC 10000-4 7.41, this means the password was placed on the wire
+    #     UNENCRYPTED -- a real, documented OPC UA security finding this decoder deliberately
+    #     surfaces (see opcua.hpp's "Identity token decode" section and its own "SECURITY FINDING"
+    #     note). Pairs with this same exchange's own OpenSecureChannel above having negotiated
+    #     SecurityPolicy "...#None" in the first place -- the worst-case, and not hypothetical,
+    #     combination.
+    as_userpass_params = (
+        opcua_signature_data() + opcua_array_count(0) + opcua_array_count(1) + opcua_string("en") +
+        opcua_identity_token(
+            OPCUA_USERNAME_IDENTITY_TOKEN,
+            opcua_username_identity_token_body("username_basic256", "operator1", b"Sup3rSecret!1",
+                                                encryption_algorithm=None)) +
+        opcua_signature_data())
+    as_userpass_req_body = opcua_service_message(
+        467, opcua_request_header(6, auth_token_bytes=session_auth_token), as_userpass_params)
+    add(True, opcua_symmetric_message("MSG", channel_id, token_id, 6, 6, as_userpass_req_body))
+
+    as_userpass_resp_body = opcua_service_message(470, opcua_response_header(6, 0), as_resp_params)
+    add(False, opcua_symmetric_message("MSG", channel_id, token_id, 6, 6, as_userpass_resp_body))
+
+    # 15) & 16) Read request/response -- Tier 2 (RequestHeader/ResponseHeader decoded; the
+    #     NodesToRead/Results arrays need the Variant/DataValue encoding this first-pass release
+    #     does not implement, so they're shown as raw hex -- see opcua.hpp's "Service
+    #     identification" section). The bytes below are deliberately NOT a valid ReadRequest
+    #     parameters encoding -- this tier never attempts to parse past the header at all.
+    read_req_params = bytes([0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x0A, 0x0B])
+    read_req_body = opcua_service_message(631, opcua_request_header(7, auth_token_bytes=session_auth_token),
+                                           read_req_params)  # ReadRequest
+    add(True, opcua_symmetric_message("MSG", channel_id, token_id, 7, 7, read_req_body))
+
+    read_resp_params = bytes([0x02, 0x00, 0x00, 0x00, 0xAA, 0xBB, 0x00, 0x00, 0x00, 0x00])
+    read_resp_body = opcua_service_message(634, opcua_response_header(7, 0), read_resp_params)  # ReadResponse
+    add(False, opcua_symmetric_message("MSG", channel_id, token_id, 7, 7, read_resp_body))
+
+    # 17) A service TypeId this decoder's dispatch table does not recognize AT ALL (Numeric
+    #     encoding, namespace 0, identifier 999999 -- not one of the ~53 known values in
+    #     src/opcua.cpp's kServices table) -- this decoder does not guess whether it's even shaped
+    #     like a Request or Response, so the ENTIRE remainder is shown as raw hex.
+    unknown_service_body = node_id_numeric(0, 999999) + bytes([0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01])
+    add(True, opcua_symmetric_message("MSG", channel_id, token_id, 8, 8, unknown_service_body))
+
+    # 18) & 19) CloseSession request/response.
+    cls_req_body = opcua_service_message(473, opcua_request_header(9, auth_token_bytes=session_auth_token),
+                                          bytes([0x01]))  # CloseSessionRequest, DeleteSubscriptions=true
+    add(True, opcua_symmetric_message("MSG", channel_id, token_id, 9, 9, cls_req_body))
+    clsr_resp_body = opcua_service_message(476, opcua_response_header(9, 0))  # CloseSessionResponse, no params
+    add(False, opcua_symmetric_message("MSG", channel_id, token_id, 9, 9, clsr_resp_body))
+
+    # 20) CloseSecureChannel request -- no response by spec (mirrors EtherNet/IP's own
+    #     UnRegisterSession -- see build_enip_sample -- the client just closes the TCP connection
+    #     afterward).
+    clo_body = opcua_service_message(452, opcua_request_header(10, auth_token_bytes=session_auth_token))
+    add(True, opcua_symmetric_message("CLO", channel_id, token_id, 10, 10, clo_body))
+
+    # 21) A standalone Error message (either direction; sent here as if the server were rejecting a
+    #     new request on an already-closed channel) -- StatusCode + Reason, both decoded.
+    err_body = struct.pack("<I", 0x80220000) + opcua_string("SecureChannel has been closed")  # BadSecureChannelIdInvalid
+    add(False, opcua_simple_message("ERR", err_body))
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_007_000 + i, i * 1000)
+
+    # 22) ReverseHello -- used only for the "reverse connect" pattern, where the SERVER initiates
+    #     the TCP connection to the Client (the opposite direction from every packet above) -- a
+    #     dedicated, separately-directioned connection, per spec.
+    rhe_body = opcua_string("urn:conduitscope:sample-plc") + opcua_string(endpoint_url)
+    rhe_tcp = tcp_header(OPCUA_PORT, 53100, 30000, 0, TCP_PSH | TCP_ACK,
+                          len(opcua_simple_message("RHE", rhe_body))) + opcua_simple_message("RHE", rhe_body)
+    rhe_ip = ipv4_header(PLC_IP, HMI_IP, 6, len(rhe_tcp), 0x7400) + rhe_tcp
+    data += pcap_record(eth_header(HMI_MAC, PLC_MAC, 0x0800) + rhe_ip, 1_700_007_100, 0)
+
+    # 23) A non-'F' (intermediate) chunk -- fully decoded at the UA-TCP/SecureConversation HEADER
+    #     level (MessageType/ChunkType/SecureChannelId/security header/sequence header), but its own
+    #     body is always shown as raw hex regardless of what it might contain -- this decoder does
+    #     not reassemble a message split across multiple chunks (see opcua.hpp's "Chunking" section).
+    #     Uses a fresh channel/token pair (this flow's own OpenSecureChannel is not itself shown --
+    #     only the chunking behavior is under test here).
+    chunk_c_body = struct.pack("<I", 424242) + struct.pack("<I", 7) + opcua_sequence_header(1, 1) + \
+        bytes([0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08])
+    chunk_c_msg = opcua_ua_tcp_header("MSG", "C", 8 + len(chunk_c_body)) + chunk_c_body
+    data += pcap_record(
+        eth_header(PLC_MAC, HMI_MAC, 0x0800) +
+        ipv4_header(HMI_IP, PLC_IP, 6,
+                    20 + len(tcp_header(53200, OPCUA_PORT, 1, 1, TCP_PSH | TCP_ACK, len(chunk_c_msg))) +
+                    len(chunk_c_msg), 0x7500) +
+        tcp_header(53200, OPCUA_PORT, 1, 1, TCP_PSH | TCP_ACK, len(chunk_c_msg)) + chunk_c_msg,
+        1_700_007_200, 0)
+
+    # 24) A structurally-invalid NodeId encoding byte (0x3F -- low 6 bits outside the valid 0x00-
+    #     0x05 range) as a MSG service TypeId -- regression case for the inner try/catch in
+    #     try_parse_opcua_message that must fall back to raw hex for JUST the service body while
+    #     preserving the already-decoded SecureChannelId/security header/sequence header fields
+    #     (see opcua.hpp's "Opportunistic MSG/OPN/CLO body decode" section).
+    bad_nodeid_body = struct.pack("<I", 555555) + struct.pack("<I", 9) + opcua_sequence_header(2, 2) + \
+        bytes([0x3F, 0xAA, 0xBB, 0xCC])
+    bad_nodeid_msg = opcua_ua_tcp_header("MSG", "F", 8 + len(bad_nodeid_body)) + bad_nodeid_body
+    data += pcap_record(
+        eth_header(PLC_MAC, HMI_MAC, 0x0800) +
+        ipv4_header(HMI_IP, PLC_IP, 6,
+                    20 + len(tcp_header(53201, OPCUA_PORT, 1, 1, TCP_PSH | TCP_ACK, len(bad_nodeid_msg))) +
+                    len(bad_nodeid_msg), 0x7501) +
+        tcp_header(53201, OPCUA_PORT, 1, 1, TCP_PSH | TCP_ACK, len(bad_nodeid_msg)) + bad_nodeid_msg,
+        1_700_007_201, 0)
+
+    # 25) A genuinely truncated/incomplete capture: a Hello message declaring a MessageSize larger
+    #     than the bytes actually sent, with no follow-up TCP segment -- this decoder's usual
+    #     declared-length TCP reassembly (opcua_declared_length, mirroring hartip_declared_length/
+    #     enip_declared_length) buffers it, reports protocol "tcp", and never resolves it (the same
+    #     honest "buffering, waiting for more" posture this codebase already uses for every other
+    #     declared-length protocol -- see reassemble_tcp_payload in decoder.cpp).
+    truncated_hel = struct.pack("<IIIII", 0, 65536, 65536, 0, 0) + opcua_string(endpoint_url)
+    # Declares 100 bytes more than are actually sent.
+    truncated_msg = opcua_ua_tcp_header("HEL", "F", 8 + len(truncated_hel) + 100) + truncated_hel
+    data += pcap_record(
+        eth_header(PLC_MAC, HMI_MAC, 0x0800) +
+        ipv4_header(HMI_IP, PLC_IP, 6,
+                    20 + len(tcp_header(53202, OPCUA_PORT, 1, 1, TCP_PSH | TCP_ACK, len(truncated_msg))) +
+                    len(truncated_msg), 0x7502) +
+        tcp_header(53202, OPCUA_PORT, 1, 1, TCP_PSH | TCP_ACK, len(truncated_msg)) + truncated_msg,
+        1_700_007_202, 0)
+
+    # 26) Port-independence: a structurally valid Hello/Acknowledge exchange on a TCP port other
+    #     than 4840 -- still decoded, annotated as an unexpected port (mirrors BACnet's/HART-IP's/
+    #     EtherNet/IP's own posture).
+    alt_hel = opcua_simple_message("HEL", struct.pack("<IIIII", 0, 65536, 65536, 0, 0) + opcua_string(endpoint_url))
+    data += pcap_record(
+        eth_header(PLC_MAC, HMI_MAC, 0x0800) +
+        ipv4_header(HMI_IP, PLC_IP, 6,
+                    20 + len(tcp_header(53210, 51005, 1, 1, TCP_PSH | TCP_ACK, len(alt_hel))) + len(alt_hel),
+                    0x7503) +
+        tcp_header(53210, 51005, 1, 1, TCP_PSH | TCP_ACK, len(alt_hel)) + alt_hel,
+        1_700_007_203, 0)
+
+    # 27) Two OPC UA messages coalesced into ONE TCP segment (sender/OS coalescing, mirrors HART-
+    #     IP's/EtherNet/IP's own coalescing tests) -- a Hello immediately followed by an
+    #     Acknowledge, both sent together as a single TCP payload, exercising the wire_length-
+    #     driven "additional OPC UA message" loop in decoder.cpp.
+    coalesced_hel = opcua_simple_message("HEL", struct.pack("<IIIII", 0, 65536, 65536, 0, 0) +
+                                          opcua_string(endpoint_url))
+    coalesced_ack = opcua_simple_message("ACK", struct.pack("<IIIII", 0, 65536, 65536, 0, 0))
+    coalesced_payload = coalesced_hel + coalesced_ack
+    data += pcap_record(
+        eth_header(PLC_MAC, HMI_MAC, 0x0800) +
+        ipv4_header(HMI_IP, PLC_IP, 6,
+                    20 + len(tcp_header(53220, OPCUA_PORT, 1, 1, TCP_PSH | TCP_ACK, len(coalesced_payload))) +
+                    len(coalesced_payload), 0x7504) +
+        tcp_header(53220, OPCUA_PORT, 1, 1, TCP_PSH | TCP_ACK, len(coalesced_payload)) + coalesced_payload,
+        1_700_007_204, 0)
+
+    (TESTS_DIR / "sample_opcua.pcap").write_bytes(data)
+
+
 def build_hartip_sample():
     """HART-IP (TCP or UDP, conventionally port 5094 for both) -- the fixed 8-byte header, its
     four session-control body shapes, and the tunneled classic-HART Pass-Through PDU -- see
@@ -3009,6 +3532,7 @@ if __name__ == "__main__":
     build_ethercat_sample()
     build_bacnet_sample()
     build_hartip_sample()
+    build_opcua_sample()
     build_s7comm_sample()
     build_s7comm_items_sample()
     build_s7comm_1200sym_sample()
