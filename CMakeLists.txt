@@ -36,6 +36,7 @@ add_library(conduitscope_core STATIC
   src/sv.cpp
   src/ethercat.cpp
   src/bacnet.cpp
+  src/hartip.cpp
   src/cotp.cpp
   src/s7comm.cpp
   src/decoder.cpp
@@ -676,7 +677,7 @@ set_tests_properties(enip_unregister_session_decoded PROPERTIES
 add_test(NAME enip_nop_not_detected
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enip_nop_precedence.pcap" --format text)
 set_tests_properties(enip_nop_not_detected PROPERTIES
-  PASS_REGULAR_EXPRESSION "\\[tcp\\]  TCP payload of 24 byte\\(s\\) on port 52001->44818 did not match EtherNet/IP, IEC 104, Modbus, DNP3, or COTP/S7comm")
+  PASS_REGULAR_EXPRESSION "\\[tcp\\]  TCP payload of 24 byte\\(s\\) on port 52001->44818 did not match EtherNet/IP, IEC 104, Modbus, DNP3, COTP/S7comm, or HART-IP")
 
 # --------------------------------------------------------------------------
 # EtherNet/IP CIP I/O (implicit messaging), synthetic (tests/sample_enip_cip_io.pcap): UDP/2222
@@ -1636,6 +1637,394 @@ add_test(NAME real_bacnet_padding_note_text_as_expected
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/bacnet/ICS-OT-Network-001-bacnet-excerpt.pcap" --format text)
 set_tests_properties(real_bacnet_padding_note_text_as_expected PROPERTIES
   PASS_REGULAR_EXPRESSION "note: 1 trailing byte\\(s\\) after the IP header's declared total length were trimmed \\(almost always Ethernet minimum-frame-size padding, not real payload\\)")
+
+# --------------------------------------------------------------------------
+# HART-IP (synthetic, tests/sample_hartip.pcap): 8-byte fixed header, Session
+# Initiate/Close/Keep Alive/Pass-Through message bodies, the full per-command
+# value-decode dispatch table, packed-ASCII and HART-timestamp decoding, and
+# the documented, deliberately-unresolved TCP Session-Initiate-vs-Modbus/TCP
+# detection collision. See tools/make_sample_pcap.py's build_hartip_sample
+# for the exact byte layout each assertion below is checking (packet numbers
+# in comments match that function's own numbered comments 1-63), and
+# hartip.hpp's file header comment for the structural detection gate and the
+# known collision's full explanation. JSON is pretty-printed one field per
+# line, so assertions below join fields with ".*" (CMake's regex "." matches
+# newlines) except where a field (e.g. hartip_values, notes) is itself a
+# single-line JSON array.
+# --------------------------------------------------------------------------
+
+add_test(NAME hartip_session_initiate_request_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap" --format text)
+set_tests_properties(hartip_session_initiate_request_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[hartip\\]  Request Session Initiate host-type=Primary Host inactivity-close-timer=180s")
+
+add_test(NAME hartip_session_initiate_response_json
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap")
+set_tests_properties(hartip_session_initiate_response_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"hartip_message_type\": \"Response\",.*\"hartip_message_id\": \"Session Initiate\",.*\"hartip_host_type\": \"Secondary Host\",.*\"hartip_inactivity_close_timer\": 180,")
+
+add_test(NAME hartip_keep_alive_request_and_response_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap" --format text)
+set_tests_properties(hartip_keep_alive_request_and_response_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[hartip\\]  Request Keep Alive\n.*\\[hartip\\]  Response Keep Alive")
+
+add_test(NAME hartip_session_close_request_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap" --format text)
+set_tests_properties(hartip_session_close_request_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[hartip\\]  Request Session Close\n")
+
+add_test(NAME hartip_error_known_code_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap" --format text)
+set_tests_properties(hartip_error_known_code_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[hartip\\]  Error Session Close error-code=0 \\(Session closed\\)")
+
+add_test(NAME hartip_nak_known_code_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap" --format text)
+set_tests_properties(hartip_nak_known_code_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[hartip\\]  NAK Session Close error-code=2 \\(Service unavailable\\)")
+
+add_test(NAME hartip_error_unknown_code_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap" --format text)
+set_tests_properties(hartip_error_unknown_code_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[hartip\\]  Error Session Close error-code=9 \\(unknown\\(9\\)\\)")
+
+add_test(NAME hartip_error_nak_malformed_body_noted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap" --format text)
+set_tests_properties(hartip_error_nak_malformed_body_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "note: Error/NAK body is 2 byte\\(s\\), expected exactly 1 -- not decoded: 0001")
+
+add_test(NAME hartip_session_initiate_malformed_body_noted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap" --format text)
+set_tests_properties(hartip_session_initiate_malformed_body_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "note: Session Initiate body is 3 byte\\(s\\), expected exactly 5 -- not decoded: 010203")
+
+add_test(NAME hartip_session_close_malformed_body_noted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap" --format text)
+set_tests_properties(hartip_session_close_malformed_body_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "note: Session Close body is 1 byte\\(s\\), expected 0 \\(empty\\) -- not decoded: aa")
+
+add_test(NAME hartip_cmd0_request_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap" --format text)
+set_tests_properties(hartip_cmd0_request_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[hartip\\]  Request Pass Through STX command=0 \\(Read Unique Identifier\\)")
+
+add_test(NAME hartip_cmd0_response_basic_form_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap")
+set_tests_properties(hartip_cmd0_response_basic_form_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"hartip_command\": 0,.*\"hartip_command_name\": \"Read Unique Identifier\",.*\"hartip_values\": \\[\"expansion-code=0xFE\", \"expanded-device-type=0x1234\", \"min-request-preambles=5\", \"universal-command-revision=7\", \"device-revision=1\", \"software-revision=3\", \"hardware-revision=12\", \"physical-signaling-code=2\", \"flags=0x80\", \"device-id=001122\"\\],.*Read Unique Identifier response is the 12-byte basic form")
+
+add_test(NAME hartip_cmd11_response_extended_form_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap")
+set_tests_properties(hartip_cmd11_response_extended_form_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"hartip_command\": 11,.*\"hartip_command_name\": \"Read Unique Identifier\",.*\"min-response-preambles=5\", \"max-device-variables=24\", \"configuration-change-counter=7\", \"extended-device-status=0x00\", \"manufacturer-id=0x004B\", \"private-label-distributor-code=0x004B\", \"device-profile=1\"\\]")
+
+add_test(NAME hartip_cmd21_response_long_address_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap")
+set_tests_properties(hartip_cmd21_response_long_address_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"hartip_is_long_address\": true,.*\"hartip_address\": \"82004b0001\",.*\"hartip_command\": 21,")
+
+add_test(NAME hartip_cmd1_request_and_response_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap")
+set_tests_properties(hartip_cmd1_request_and_response_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"hartip_command\": 1,.*\"hartip_command_name\": \"Read Primary Variable\",.*\"notes\": \\[\\]\n *\\},.*\"hartip_values\": \\[\"pv-units=1\", \"pv=72.500000\"\\]")
+
+add_test(NAME hartip_cmd2_response_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap")
+set_tests_properties(hartip_cmd2_response_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"hartip_command\": 2,.*\"hartip_command_name\": \"Read Loop Current and Percent of Range\",.*\"hartip_values\": \\[\"pv-loop-current-ma=12.500000\", \"pv-percent-range=65.625000\"\\]")
+
+add_test(NAME hartip_cmd3_response_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap")
+set_tests_properties(hartip_cmd3_response_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"hartip_command\": 3,.*\"hartip_command_name\": \"Read Dynamic Variables and Loop Current\",.*\"hartip_values\": \\[\"pv-loop-current-ma=12.500000\", \"pv-units=1\", \"pv=72.500000\", \"sv-units=32\", \"sv=15.000000\", \"tv-units=33\", \"tv=25.000000\", \"qv-units=250\", \"qv=0.000000\"\\]")
+
+add_test(NAME hartip_cmd6_response_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap")
+set_tests_properties(hartip_cmd6_response_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"hartip_command\": 6,.*\"hartip_command_name\": \"Write Polling Address\",.*\"hartip_values\": \\[\"poll-address=3\", \"loop-current-mode=0\"\\]")
+
+add_test(NAME hartip_cmd7_response_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap")
+set_tests_properties(hartip_cmd7_response_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"hartip_command\": 7,.*\"hartip_command_name\": \"Read Loop Configuration\",.*\"hartip_values\": \\[\"poll-address=0\", \"loop-current-mode=1\"\\]")
+
+add_test(NAME hartip_cmd8_response_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap")
+set_tests_properties(hartip_cmd8_response_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"hartip_command\": 8,.*\"hartip_command_name\": \"Read Dynamic Variable Classifications\",.*\"hartip_values\": \\[\"pv-classification=1\", \"sv-classification=2\", \"tv-classification=2\", \"qv-classification=3\"\\]")
+
+add_test(NAME hartip_cmd9_response_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap")
+set_tests_properties(hartip_cmd9_response_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"hartip_command\": 9,.*\"hartip_command_name\": \"Read Device Variables with Status\",.*\"device-variable\\[0\\]-code=1\", \"device-variable\\[0\\]-classification=1\", \"device-variable\\[0\\]-units=1\", \"device-variable\\[0\\]-value=72.500000\", \"device-variable\\[0\\]-status=0x00\", \"device-variable\\[1\\]-code=2\".*\"timestamp=00:01:30.000\"\\]")
+
+add_test(NAME hartip_cmd12_response_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap")
+set_tests_properties(hartip_cmd12_response_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"hartip_command\": 12,.*\"hartip_command_name\": \"Read Message\",.*\"hartip_values\": \\[\"message=PUMP 1 HIGH VIBRATION ALARM     \"\\]")
+
+add_test(NAME hartip_cmd17_request_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap")
+set_tests_properties(hartip_cmd17_request_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"hartip_command\": 17,.*\"hartip_command_name\": \"Write Message\",.*\"hartip_values\": \\[\"message=CALIBRATED 2026                 \"\\]")
+
+add_test(NAME hartip_cmd13_response_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap")
+set_tests_properties(hartip_cmd13_response_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"hartip_command\": 13,.*\"hartip_command_name\": \"Read Tag, Descriptor, Date\",.*\"hartip_values\": \\[\"tag=PT-101  \", \"descriptor=PUMP DISCH PRESS\", \"date=03/15/2026\"\\]")
+
+add_test(NAME hartip_cmd18_request_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap")
+set_tests_properties(hartip_cmd18_request_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"hartip_command\": 18,.*\"hartip_command_name\": \"Write Tag, Descriptor, Date\",.*\"hartip_values\": \\[\"tag=PT-101  \", \"descriptor=PUMP DISCH PRESS\", \"date=03/15/2026\"\\]")
+
+add_test(NAME hartip_cmd14_response_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap")
+set_tests_properties(hartip_cmd14_response_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"hartip_command\": 14,.*\"hartip_command_name\": \"Read Primary Variable Transducer Information\",.*\"hartip_values\": \\[\"transducer-serial-number=010203\", \"limit-units=1\", \"upper-transducer-limit=500.000000\", \"lower-transducer-limit=-500.000000\", \"minimum-span=1.000000\"\\]")
+
+add_test(NAME hartip_cmd15_response_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap")
+set_tests_properties(hartip_cmd15_response_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"hartip_command\": 15,.*\"hartip_command_name\": \"Read Device Information\",.*\"pv-alarm-selection=0\", \"pv-transfer-function=0\", \"range-units=1\", \"upper-range-value=500.000000\", \"lower-range-value=0.000000\", \"damping-value=0.500000\", \"write-protect=0\", \"reserved=0x00\", \"pv-analog-channel-flags=0x00\"\\]")
+
+add_test(NAME hartip_cmd16_response_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap")
+set_tests_properties(hartip_cmd16_response_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"hartip_command\": 16,.*\"hartip_command_name\": \"Read Final Assembly Number\",.*\"hartip_values\": \\[\"final-assembly-number=12345\"\\]")
+
+add_test(NAME hartip_cmd19_request_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap")
+set_tests_properties(hartip_cmd19_request_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"hartip_command\": 19,.*\"hartip_command_name\": \"Write Final Assembly Number\",.*\"hartip_values\": \\[\"final-assembly-number=12345\"\\]")
+
+add_test(NAME hartip_cmd20_response_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap")
+set_tests_properties(hartip_cmd20_response_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"hartip_command\": 20,.*\"hartip_command_name\": \"Read Long Tag\",.*\"hartip_values\": \\[\"long-tag=PUMP-101-DISCHARGE-PRESSURE     \"\\]")
+
+add_test(NAME hartip_cmd22_request_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap")
+set_tests_properties(hartip_cmd22_request_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"hartip_command\": 22,.*\"hartip_command_name\": \"Write Long Tag\",.*\"hartip_values\": \\[\"long-tag=PUMP-101-DISCHARGE-PRESSURE     \"\\]")
+
+add_test(NAME hartip_cmd31_dispatches_to_203_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap")
+set_tests_properties(hartip_cmd31_dispatches_to_203_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"hartip_command\": 31,.*\"hartip_response_code\": 0,.*\"hartip_values\": \\[\"extended-command-number=64386\", \"index-of-first-discrete-variable=0\", \"number-of-discrete-variables=2\", \"extended-device-status=0x00\", \"timestamp=00:00:05.000\", \"discrete-variable\\[0\\]-state=1\", \"discrete-variable\\[0\\]-status=0x00\", \"discrete-variable\\[1\\]-state=0\", \"discrete-variable\\[1\\]-status=0x00\"\\]")
+
+add_test(NAME hartip_cmd31_non_64386_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap")
+set_tests_properties(hartip_cmd31_non_64386_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"hartip_command\": 31,.*\"hartip_response_code\": 0,.*\"hartip_response_is_comm_error\": false,.*\"hartip_response_code_name\": \"Success\",.*\"hartip_device_status\": 0,.*\"hartip_values\": \\[\"extended-command-number=1000\"\\]")
+
+add_test(NAME hartip_cmd203_standalone_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap")
+set_tests_properties(hartip_cmd203_standalone_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"hartip_command\": 203,.*\"hartip_response_code\": 0,.*\"hartip_values\": \\[\"index-of-first-discrete-variable=0\", \"number-of-discrete-variables=2\", \"extended-device-status=0x00\", \"timestamp=00:00:05.000\", \"discrete-variable\\[0\\]-state=1\", \"discrete-variable\\[0\\]-status=0x00\", \"discrete-variable\\[1\\]-state=0\", \"discrete-variable\\[1\\]-status=0x00\"\\]")
+
+add_test(NAME hartip_cmd33_response_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap")
+set_tests_properties(hartip_cmd33_response_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"hartip_command\": 33,.*\"hartip_command_name\": \"Read Device Variables\",.*\"device-variable\\[0\\]-code=1\", \"device-variable\\[0\\]-units=1\", \"device-variable\\[0\\]-value=72.500000\", \"device-variable\\[1\\]-code=2\", \"device-variable\\[1\\]-units=32\", \"device-variable\\[1\\]-value=15.000000\"\\]")
+
+add_test(NAME hartip_cmd38_request_and_response_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap")
+set_tests_properties(hartip_cmd38_request_and_response_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"hartip_command\": 38,.*\"hartip_command_name\": \"Reset Configuration Changed Flag\",.*\"notes\": \\[\\]\n *\\},.*\"hartip_command\": 38,.*\"hartip_command_name\": \"Reset Configuration Changed Flag\",.*\"hartip_response_code\": 0,.*\"hartip_values\": \\[\"configuration-change-counter=42\"\\]")
+
+add_test(NAME hartip_cmd48_minimal_and_extended_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap")
+set_tests_properties(hartip_cmd48_minimal_and_extended_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"hartip_command\": 48,.*\"hartip_command_name\": \"Read Additional Device Status\",.*\"hartip_values\": \\[\"device-specific-status=000000000000\"\\],.*\"notes\": \\[\\]\n *\\},.*\"device-specific-status=000000000000\", \"extended-device-status=0x00\", \"device-operating-mode=0x01\", \"standardized-status-0=0x00\", \"standardized-status-1=0x00\", \"standardized-status-2=0x00\", \"standardized-status-3=0x00\", \"analog-channel-saturated=0x00\", \"analog-channel-fixed=0x00\"\\]")
+
+add_test(NAME hartip_cmd77_out_of_scope_raw_hex_noted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap" --format text)
+set_tests_properties(hartip_cmd77_out_of_scope_raw_hex_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "command=77 \\(I/O Card/Channel embedded-command relay\\) response-code=0 \\(Success\\)\n *note: command 77 \\(I/O Card/Channel embedded-command relay\\) data \\(4 byte\\(s\\)\\) does not match the byte layout this decoder expects -- not value-decoded, shown as raw hex")
+
+add_test(NAME hartip_cmd178_out_of_scope_raw_hex_noted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap" --format text)
+set_tests_properties(hartip_cmd178_out_of_scope_raw_hex_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "command=178 \\(Batch/aggregate command\\) response-code=0 \\(Success\\)\n *note: command 178 \\(Batch/aggregate command\\) data \\(5 byte\\(s\\)\\) does not match the byte layout this decoder expects -- not value-decoded, shown as raw hex")
+
+add_test(NAME hartip_cmd99_unrecognized_raw_hex_noted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap" --format text)
+set_tests_properties(hartip_cmd99_unrecognized_raw_hex_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "command=99 response-code=0 \\(Success\\)\n *note: command 99 is not one of this decoder's first-pass value-decoded commands -- not decoded, shown as raw hex")
+
+add_test(NAME hartip_wrong_length_recognized_command_raw_hex_noted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap" --format text)
+set_tests_properties(hartip_wrong_length_recognized_command_raw_hex_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "command=1 \\(Read Primary Variable\\) response-code=0 \\(Success\\)\n *note: command 1 \\(Read Primary Variable\\) data \\(4 byte\\(s\\)\\) does not match the byte layout this decoder expects -- not value-decoded, shown as raw hex")
+
+add_test(NAME hartip_comm_error_response_code_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap")
+set_tests_properties(hartip_comm_error_response_code_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"hartip_response_code\": 200,.*\"hartip_response_is_comm_error\": true,.*\"hartip_comm_error_flags\": \\[\"vertical-parity-error\", \"longitudinal-parity-error\"\\],")
+
+add_test(NAME hartip_single_definition_response_code_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap" --format text)
+set_tests_properties(hartip_single_definition_response_code_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "response-code=32 \\(Busy\\)")
+
+add_test(NAME hartip_unlisted_response_code_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap" --format text)
+set_tests_properties(hartip_unlisted_response_code_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "response-code=100 \\(command-specific response code 100 \\(meaning depends on which command produced it -- not decoded\\)\\)")
+
+add_test(NAME hartip_all_device_status_flags_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap")
+set_tests_properties(hartip_all_device_status_flags_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"hartip_device_status\": 255,.*\"hartip_device_status_flags\": \\[\"field-device-malfunction\", \"configuration-changed\", \"cold-start\", \"more-status-available\", \"loop-current-fixed\", \"loop-current-saturated\", \"non-primary-variable-out-of-limits\", \"primary-variable-out-of-limits\"\\],")
+
+add_test(NAME hartip_back_frame_type_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap" --format text)
+set_tests_properties(hartip_back_frame_type_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[hartip\\]  Response Pass Through BACK command=2 \\(Read Loop Current and Percent of Range\\)")
+
+add_test(NAME hartip_byte_count_too_small_noted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap" --format text)
+set_tests_properties(hartip_byte_count_too_small_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "note: Pass-Through Byte Count \\(1\\) is smaller than the 2 Response Code/Device Status byte\\(s\\) it must include -- Data length treated as 0")
+
+add_test(NAME hartip_truncated_before_checksum_noted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap" --format text)
+set_tests_properties(hartip_truncated_before_checksum_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "note: Pass-Through body truncated before its trailing Checksum byte")
+
+add_test(NAME hartip_truncated_before_command_noted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap" --format text)
+set_tests_properties(hartip_truncated_before_command_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[hartip\\]  Request Pass Through STX command=0\n *note: Pass-Through body truncated before its Command byte")
+
+add_test(NAME hartip_trailing_bytes_after_checksum_noted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap" --format text)
+set_tests_properties(hartip_trailing_bytes_after_checksum_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "note: 2 trailing byte\\(s\\) remain after the Checksum -- unexpected, not decoded")
+
+add_test(NAME hartip_non_standard_udp_port_noted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap" --format text)
+set_tests_properties(hartip_non_standard_udp_port_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "192.168.1.50:51005 -> 192.168.1.10:51006  \\[hartip\\]  Request Keep Alive\n *note: seen on UDP port 51005->51006, which is not a configured/standard HART-IP port \\(5094\\)")
+
+add_test(NAME hartip_msg_length_implausible_falls_back_to_udp
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap" --format text)
+set_tests_properties(hartip_msg_length_implausible_falls_back_to_udp PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[udp\\]  UDP payload of 13 byte\\(s\\) on port 5094->5094")
+
+add_test(NAME hartip_invalid_message_type_falls_back_to_udp
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap" --format text)
+set_tests_properties(hartip_invalid_message_type_falls_back_to_udp PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[udp\\]  UDP payload of 8 byte\\(s\\) on port 5094->5094")
+
+# The documented, deliberately-unresolved limitation: a HART-IP Session Initiate message's own
+# header (MessageID 0, Status 0) reads as a plausible Modbus/TCP MBAP header, so on TCP it is
+# misclassified as Modbus/TCP "buffering, waiting for more" bytes that never arrive -- see
+# hartip.hpp's "KNOWN, ACCEPTED, DOCUMENTED LIMITATION" paragraph and decoder.cpp's matching
+# comments on both the declared-length chain and the TCP dispatch chain for the full explanation
+# and why reordering HART-IP ahead of Modbus was tried and rejected (it regressed this project's
+# own Modbus/S7comm test corpus). These three packets (a genuine Session Initiate request,
+# response, and the start of a coalesced Keep Alive) are never decoded as hartip on this flow.
+add_test(NAME hartip_modbus_collision_known_limitation
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap" --format text)
+set_tests_properties(hartip_modbus_collision_known_limitation PROPERTIES
+  PASS_REGULAR_EXPRESSION "52010->5094: 13 of 106 declared byte\\(s\\) seen so far across 1 segment\\(s\\) on this flow, waiting for more\n.*5094->52010: 13 of 106 declared byte\\(s\\) seen so far across 1 segment\\(s\\) on this flow, waiting for more\n.*52010->5094: 29 of 106 declared byte\\(s\\) seen so far across 2 segment\\(s\\) on this flow, waiting for more")
+
+add_test(NAME hartip_modbus_collision_never_reports_hartip_protocol
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap")
+set_tests_properties(hartip_modbus_collision_never_reports_hartip_protocol PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"src_port\": 52010,\n *\"dst_port\": 5094,\n *\"tcp_flags\": \"ACK,PSH\",\n *\"protocol\": \"tcp\",")
+
+add_test(NAME hartip_tcp_pass_through_non_standard_port_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap" --format text)
+set_tests_properties(hartip_tcp_pass_through_non_standard_port_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "192.168.1.50:52099 -> 192.168.1.10:15094  \\[hartip\\]  Request Pass Through STX command=1 \\(Read Primary Variable\\)\n *note: seen on TCP port 52099->15094, which is not a configured/standard HART-IP port \\(5094\\)\n.*192.168.1.10:15094 -> 192.168.1.50:52099  \\[hartip\\]  Response Pass Through ACK command=1 \\(Read Primary Variable\\) response-code=0 \\(Success\\) \\[pv-units=1 \\+1 more\\]\n *note: seen on TCP port 15094->52099, which is not a configured/standard HART-IP port \\(5094\\)")
+
+add_test(NAME hartip_tcp_coalesced_keep_alive_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap" --format text)
+set_tests_properties(hartip_tcp_coalesced_keep_alive_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "192.168.1.50:52150 -> 192.168.1.10:5094  \\[hartip\\]  Request Keep Alive\n *note: additional HART-IP message 2 found in the same TCP payload at byte offset 8 \\(coalesced by the sender/OS\\): Request Keep Alive")
+
+add_test(NAME hartip_stats_counted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap" --stats)
+set_tests_properties(hartip_stats_counted PROPERTIES
+  PASS_REGULAR_EXPRESSION "packets: +63[^\n]*\n[^\n]*\nprotocols:\n *hartip +58\n *tcp +3\n *udp +2\nhartip message types:\n *Error +3\n *NAK +1\n *Request +16\n *Response +38\nhartip pass-through commands:\n")
+
+# --------------------------------------------------------------------------
+# Real-world HART-IP capture -- see tests/real_captures/hartip/ATTRIBUTION.md for provenance: a
+# genuine 116-frame, 72-second capture (automayt/ICS-pcap, fetched via GitHub's LFS media CDN)
+# of a WirelessHART gateway ("wihartgw") running the same command sequence over both UDP and TCP.
+# Independently cross-validated against tshark's own HART-IP dissector (see ATTRIBUTION.md) and,
+# notably, this capture reproduces the documented TCP Modbus-collision limitation on genuine field
+# traffic, plus a second, previously-undocumented weak-gate false-positive pattern against
+# unrelated background TCP traffic -- see ATTRIBUTION.md's own two dedicated sections for both.
+# --------------------------------------------------------------------------
+
+add_test(NAME real_hartip_does_not_crash
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/hartip/hart_ip.pcapng" --format json)
+
+add_test(NAME real_hartip_stats_summary
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/hartip/hart_ip.pcapng" --stats)
+set_tests_properties(real_hartip_stats_summary PROPERTIES
+  PASS_REGULAR_EXPRESSION "packets: +116[^\n]*\n[^\n]*\nprotocols:\n *hartip +46\n *modbus +2\n *non-ip +4\n *non-tcp +1\n *tcp +63\n.*hartip message types:\n *Request +23\n *Response +23\nhartip pass-through commands:\n")
+
+add_test(NAME real_hartip_command_coverage_json
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/hartip/hart_ip.pcapng" --stats)
+set_tests_properties(real_hartip_command_coverage_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "0 \\(Read Unique Identifier\\) +4\n *1 \\(Read Primary Variable\\) +4\n *12 \\(Read Message\\) +4\n *13 \\(Read Tag, Descriptor, Date\\) +4\n *2 \\(Read Loop Current and Percent of Range\\) +4\n *20 \\(Read Long Tag\\) +4\n *3 \\(Read Dynamic Variables and Loop Current\\) +4\n *48 \\(Read Additional Device Status\\) +4\n *9 \\(Read Device Variables with Status\\) +4")
+
+add_test(NAME real_hartip_session_initiate_request_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/hartip/hart_ip.pcapng" --format text)
+set_tests_properties(real_hartip_session_initiate_request_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[hartip\\]  Request Session Initiate host-type=Primary Host inactivity-close-timer=30000s")
+
+# A real device sent IEEE-754 NaN bytes for PV Loop Current -- tshark's own HART-IP dissector
+# decodes the identical real bytes the same way (see ATTRIBUTION.md); not a decoder bug.
+add_test(NAME real_hartip_nan_loop_current_matches_wireshark
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/hartip/hart_ip.pcapng" --format text)
+set_tests_properties(real_hartip_nan_loop_current_matches_wireshark PROPERTIES
+  PASS_REGULAR_EXPRESSION "command=2 \\(Read Loop Current and Percent of Range\\) response-code=0 \\(Success\\) \\[pv-loop-current-ma=nan \\+1 more\\]")
+
+# Packed-ASCII decode of a real device's Message field -- cross-checked byte-for-byte against
+# tshark's own dissector output (see ATTRIBUTION.md); genuine lab/demo placeholder text, not a bug.
+add_test(NAME real_hartip_packed_ascii_message_matches_wireshark
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/hartip/hart_ip.pcapng" --format text)
+set_tests_properties(real_hartip_packed_ascii_message_matches_wireshark PROPERTIES
+  PASS_REGULAR_EXPRESSION "command=12 \\(Read Message\\) response-code=0 \\(Success\\) \\[message=@ABCDEFGHIJKLMNO/ !-#\\$%&'\\(\\)\\*\\+,-\\.\\]")
+
+# Command 0 (Read Unique Identifier) is genuinely addressed to the universal short address 0 --
+# the real device's own long address (264e0000d2) is only used starting with the next command,
+# exactly the standard HART discover-then-address pattern this decoder's hartip_is_long_address/
+# hartip_address fields are meant to capture.
+add_test(NAME real_hartip_short_address_universal_poll_for_unique_id
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/hartip/hart_ip.pcapng")
+set_tests_properties(real_hartip_short_address_universal_poll_for_unique_id PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"hartip_is_long_address\": false,.*\"hartip_address\": \"00\",.*\"hartip_command\": 0,.*\"hartip_command_name\": \"Read Unique Identifier\",")
+
+add_test(NAME real_hartip_long_address_used_for_later_commands
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/hartip/hart_ip.pcapng")
+set_tests_properties(real_hartip_long_address_used_for_later_commands PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"hartip_is_long_address\": true,.*\"hartip_address\": \"264e0000d2\",.*\"hartip_command\": 20,.*\"hartip_command_name\": \"Read Long Tag\",.*\"long-tag=wihartgw")
+
+# The documented TCP Session-Initiate-vs-Modbus/TCP collision (see hartip.hpp's "KNOWN, ACCEPTED,
+# DOCUMENTED LIMITATION" paragraph, decoder.cpp's matching comments, and tests/sample_hartip.pcap's
+# own packets 58-60) reproduced on genuine field traffic: this real TCP session's own Session
+# Initiate request and response both get misclassified as Modbus/TCP, exactly as documented.
+add_test(NAME real_hartip_modbus_collision_confirmed_on_real_traffic
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/hartip/hart_ip.pcapng" --format text)
+set_tests_properties(real_hartip_modbus_collision_confirmed_on_real_traffic PROPERTIES
+  PASS_REGULAR_EXPRESSION "192.168.0.101:49559 -> 192.168.0.10:5094  \\[modbus\\]  Unknown \\(0xd\\): Unknown \\(0xd\\)[^\n]*\n.*192.168.0.10:5094 -> 192.168.0.101:49559  \\[modbus\\]  Unknown \\(0xd\\): Unknown \\(0xd\\)")
+
+# New (see ATTRIBUTION.md): the weak declared-length gate also false-positives against unrelated
+# background TCP traffic having nothing to do with HART-IP (a TLS connection and an SMB
+# connection elsewhere in this same capture) -- real-world confirmation, beyond the Modbus
+# collision above, that hartip.hpp's own "structural detection gate is genuinely weak" paragraph
+# is not overstated.
+add_test(NAME real_hartip_weak_gate_false_positive_on_unrelated_tcp_traffic
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/hartip/hart_ip.pcapng" --format text)
+set_tests_properties(real_hartip_weak_gate_false_positive_on_unrelated_tcp_traffic PROPERTIES
+  PASS_REGULAR_EXPRESSION "50322->443: 27 of 54734 declared byte\\(s\\) seen so far.*49343->445: 44 of 19778 declared byte\\(s\\) seen so far")
 
 # --------------------------------------------------------------------------
 # Real-world S7comm/COTP captures -- see tests/real_captures/s7comm/ATTRIBUTION.md

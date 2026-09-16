@@ -64,6 +64,7 @@ constexpr const char* kBrightGreen = "\033[92m";
 constexpr const char* kBrightMagenta = "\033[95m";
 constexpr const char* kBrightYellow = "\033[93m";
 constexpr const char* kBrightBlue = "\033[94m";
+constexpr const char* kBrightWhite = "\033[97m";
 
 // Color for a packet's "[protocol]" tag -- picked so a mixed-protocol capture scans quickly by
 // eye, not for any deeper meaning. parse-error is the one exception: it gets the same "something
@@ -81,6 +82,7 @@ const char* protocol_tag_color(const std::string& protocol) {
     if (protocol == "sv") return kBrightMagenta;
     if (protocol == "ethercat") return kBrightYellow;
     if (protocol == "bacnet") return kBrightBlue;
+    if (protocol == "hartip") return kBrightWhite;
     if (protocol == "parse-error") return kBoldRed;
     return kDim;  // tcp / udp / non-tcp / non-ip / unsupported-link: recognized, nothing OT-specific
 }
@@ -368,6 +370,65 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
             }
         }
     }
+    if (p.protocol == "hartip") {
+        out_ << "    \"hartip_version\": " << static_cast<unsigned>(p.hartip_version) << ",\n";
+        out_ << "    \"hartip_message_type\": \"" << json_escape(p.hartip_message_type) << "\",\n";
+        out_ << "    \"hartip_message_id\": \"" << json_escape(p.hartip_message_id) << "\",\n";
+        out_ << "    \"hartip_status\": " << static_cast<unsigned>(p.hartip_status) << ",\n";
+        out_ << "    \"hartip_transaction_id\": " << p.hartip_transaction_id << ",\n";
+        out_ << "    \"hartip_msg_length\": " << p.hartip_msg_length << ",\n";
+        if (p.hartip_has_session_init) {
+            out_ << "    \"hartip_host_type\": \"" << json_escape(p.hartip_host_type_name) << "\",\n";
+            out_ << "    \"hartip_inactivity_close_timer\": " << p.hartip_inactivity_close_timer << ",\n";
+        }
+        if (p.hartip_has_error) {
+            out_ << "    \"hartip_error_code\": " << static_cast<unsigned>(p.hartip_error_code) << ",\n";
+            out_ << "    \"hartip_error_code_name\": \"" << json_escape(p.hartip_error_code_name) << "\",\n";
+        }
+        out_ << "    \"hartip_has_pass_through\": " << (p.hartip_has_pass_through ? "true" : "false") << ",\n";
+        if (p.hartip_has_pass_through) {
+            out_ << "    \"hartip_frame_type\": \"" << json_escape(p.hartip_frame_type) << "\",\n";
+            out_ << "    \"hartip_is_response\": " << (p.hartip_is_response ? "true" : "false") << ",\n";
+            out_ << "    \"hartip_is_long_address\": " << (p.hartip_is_long_address ? "true" : "false") << ",\n";
+            out_ << "    \"hartip_address\": \"" << json_escape(p.hartip_address_hex) << "\",\n";
+            out_ << "    \"hartip_command\": " << static_cast<unsigned>(p.hartip_command) << ",\n";
+            if (!p.hartip_command_name.empty())
+                out_ << "    \"hartip_command_name\": \"" << json_escape(p.hartip_command_name) << "\",\n";
+            if (p.hartip_is_response) {
+                out_ << "    \"hartip_response_code\": " << static_cast<unsigned>(p.hartip_response_code) << ",\n";
+                out_ << "    \"hartip_response_is_comm_error\": "
+                     << (p.hartip_response_is_comm_error ? "true" : "false") << ",\n";
+                if (!p.hartip_response_code_name.empty())
+                    out_ << "    \"hartip_response_code_name\": \"" << json_escape(p.hartip_response_code_name)
+                         << "\",\n";
+                if (!p.hartip_comm_error_flags.empty()) {
+                    out_ << "    \"hartip_comm_error_flags\": [";
+                    for (size_t i = 0; i < p.hartip_comm_error_flags.size(); ++i) {
+                        if (i != 0) out_ << ", ";
+                        out_ << "\"" << json_escape(p.hartip_comm_error_flags[i]) << "\"";
+                    }
+                    out_ << "],\n";
+                }
+                out_ << "    \"hartip_device_status\": " << static_cast<unsigned>(p.hartip_device_status) << ",\n";
+                if (!p.hartip_device_status_flags.empty()) {
+                    out_ << "    \"hartip_device_status_flags\": [";
+                    for (size_t i = 0; i < p.hartip_device_status_flags.size(); ++i) {
+                        if (i != 0) out_ << ", ";
+                        out_ << "\"" << json_escape(p.hartip_device_status_flags[i]) << "\"";
+                    }
+                    out_ << "],\n";
+                }
+            }
+            if (!p.hartip_values.empty()) {
+                out_ << "    \"hartip_values\": [";
+                for (size_t i = 0; i < p.hartip_values.size(); ++i) {
+                    if (i != 0) out_ << ", ";
+                    out_ << "\"" << json_escape(p.hartip_values[i]) << "\"";
+                }
+                out_ << "],\n";
+            }
+        }
+    }
     out_ << "    \"notes\": [";
     for (size_t i = 0; i < p.notes.size(); ++i) {
         if (i != 0) out_ << ", ";
@@ -441,6 +502,14 @@ void StatsWriter::write_packet(const DecodedPacket& p) {
         bacnet_bvlc_function_counts_[p.bacnet_bvlc_function]++;
         if (p.bacnet_has_apdu && !p.bacnet_service_name.empty()) {
             bacnet_service_counts_[p.bacnet_service_name]++;
+        }
+    }
+    if (p.protocol == "hartip") {
+        hartip_message_type_counts_[p.hartip_message_type]++;
+        if (p.hartip_has_pass_through) {
+            std::string key = std::to_string(static_cast<unsigned>(p.hartip_command));
+            if (!p.hartip_command_name.empty()) key += " (" + p.hartip_command_name + ")";
+            hartip_command_counts_[key]++;
         }
     }
     if (!has_ts_) {
@@ -538,6 +607,18 @@ void StatsWriter::print_summary(std::ostream& out) const {
         out << "bacnet apdu services:\n";
         for (const auto& [name, count] : bacnet_service_counts_) {
             out << "  " << std::left << std::setw(40) << name << count << "\n";
+        }
+    }
+    if (!hartip_message_type_counts_.empty()) {
+        out << "hartip message types:\n";
+        for (const auto& [name, count] : hartip_message_type_counts_) {
+            out << "  " << std::left << std::setw(40) << name << count << "\n";
+        }
+    }
+    if (!hartip_command_counts_.empty()) {
+        out << "hartip pass-through commands:\n";
+        for (const auto& [name, count] : hartip_command_counts_) {
+            out << "  " << std::left << std::setw(60) << name << count << "\n";
         }
     }
 }

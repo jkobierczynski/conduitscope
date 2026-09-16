@@ -93,6 +93,9 @@ private:
     std::map<std::string, size_t> bacnet_bvlc_function_counts_;
     std::map<std::string, size_t> bacnet_service_counts_;  // keyed by APDU service-choice name,
                                                               // only when bacnet_has_apdu
+    std::map<std::string, size_t> hartip_message_type_counts_;
+    std::map<std::string, size_t> hartip_command_counts_;  // keyed by "N (Name)" or "N", only when
+                                                              // hartip_has_pass_through
     bool has_ts_ = false;
     double first_ts_ = 0.0, last_ts_ = 0.0;
 };

@@ -12,6 +12,7 @@
 #include "conduitscope/enip.hpp"
 #include "conduitscope/ethercat.hpp"
 #include "conduitscope/goose.hpp"
+#include "conduitscope/hartip.hpp"
 #include "conduitscope/iec104.hpp"
 #include "conduitscope/ipv4.hpp"
 #include "conduitscope/link_layer.hpp"
@@ -279,6 +280,8 @@ bool Decoder::reassemble_tcp_payload(const TcpSegment& tcp, const std::string& f
                       options_.protocol_filter == ProtocolFilter::Dnp3Only;
     bool want_s7comm = options_.protocol_filter == ProtocolFilter::Auto ||
                         options_.protocol_filter == ProtocolFilter::S7commOnly;
+    bool want_hartip = options_.protocol_filter == ProtocolFilter::Auto ||
+                        options_.protocol_filter == ProtocolFilter::HartIpOnly;
 
     // EtherNet/IP is checked first: its own dedicated TCP port (44818, no overlap with the other
     // four protocols) plus three independent structural checks (a 9-value command enum, a
@@ -295,6 +298,7 @@ bool Decoder::reassemble_tcp_payload(const TcpSegment& tcp, const std::string& f
     // the collision in IEC104's favor without needing to make Modbus's own check any stricter --
     // the same fix already applied once before for a real-capture-found DNP3-vs-Modbus collision
     // (see modbus.cpp's function-code-0 check).
+    //
     std::optional<size_t> declared;
     std::string which;
     if (want_enip) {
@@ -325,6 +329,30 @@ bool Decoder::reassemble_tcp_payload(const TcpSegment& tcp, const std::string& f
         if (auto d = tpkt_declared_length(candidate)) {
             declared = d;
             which = "TPKT/COTP";
+        }
+    }
+    // HART-IP is tried LAST in this chain, deliberately -- unlike every protocol above, its own
+    // structural detection gate is genuinely weak (two adjacent bytes each landing on one of a
+    // handful of small values -- see hartip.hpp's "structural detection gate" paragraph). A real
+    // collision WAS found while scoping this feature -- a HART-IP Session Initiate message's own
+    // header (MessageID 0, Status almost always 0 -- the only value ever observed in this
+    // decoder's own research) reads as a plausible Modbus/TCP MBAP header (protocol-id==0), the
+    // same shape of collision this codebase already resolved once for IEC104 (see
+    // try_parse_iec104_apci's header comment) by reordering. That fix isn't safe to repeat here,
+    // though: unlike IEC104's own multi-field structural check, HART-IP's two-byte gate is weak
+    // enough that trying it ahead of Modbus/DNP3/S7comm measurably regresses this project's own
+    // existing Modbus/S7comm test corpus (confirmed empirically while scoping this feature -- ~2%
+    // of ordinary Modbus/TCP traffic with a non-zero unit ID also happens to satisfy HART-IP's own
+    // gate). So this decoder accepts, rather than resolves, the Session-Initiate-over-TCP
+    // collision: it is tried last, and a genuine HART-IP Session Initiate message whose Status is
+    // 0 will be misclassified as Modbus/TCP (or COTP/S7comm, or left as generic "tcp") when it
+    // rides over TCP -- see tests/sample_hartip.pcap's own "known collision" packet and
+    // hartip.hpp's LIMITATIONS-relevant note for the honest, documented scope of this gap. HART-IP
+    // over UDP is entirely unaffected (UDP has no equivalent declared-length pre-check at all).
+    if (!declared && want_hartip) {
+        if (auto d = hartip_declared_length(candidate)) {
+            declared = d;
+            which = "HART-IP message";
         }
     }
 
@@ -795,6 +823,70 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                 }
             }
 
+            // Tried last among these UDP checks, port-independently -- see the matching comment in
+            // reassemble_tcp_payload above for why HART-IP's own weaker structural detection gate
+            // is deliberately given the lowest priority in this decoder's opportunistic dispatch.
+            bool want_hartip = options_.protocol_filter == ProtocolFilter::Auto ||
+                                options_.protocol_filter == ProtocolFilter::HartIpOnly;
+            if (want_hartip) {
+                if (auto frame = try_parse_hartip(udp.payload)) {
+                    out.protocol = "hartip";
+                    out.summary = frame->summary;
+                    for (const auto& n : frame->notes) out.notes.push_back(n);
+                    out.hartip_version = frame->version;
+                    out.hartip_message_type = frame->message_type_name;
+                    out.hartip_message_id = frame->message_id_name;
+                    out.hartip_status = frame->status;
+                    out.hartip_transaction_id = frame->transaction_id;
+                    out.hartip_msg_length = frame->msg_length;
+                    out.hartip_has_session_init = frame->has_session_init;
+                    if (frame->has_session_init) {
+                        out.hartip_host_type_name = frame->session_init.host_type_name;
+                        out.hartip_inactivity_close_timer = frame->session_init.inactivity_close_timer;
+                    }
+                    out.hartip_has_error = frame->has_error;
+                    if (frame->has_error) {
+                        out.hartip_error_code = frame->error_code;
+                        out.hartip_error_code_name = frame->error_code_name;
+                    }
+                    out.hartip_has_pass_through = frame->has_pass_through;
+                    if (frame->has_pass_through) {
+                        const HartIpPassThrough& pt = frame->pass_through;
+                        out.hartip_frame_type = pt.frame_type_name;
+                        out.hartip_is_response = pt.is_response;
+                        out.hartip_is_long_address = pt.is_long_address;
+                        if (pt.is_long_address) {
+                            out.hartip_address_hex = pt.long_address_hex;
+                        } else {
+                            std::ostringstream a;
+                            a << std::hex << std::uppercase << std::setfill('0') << std::setw(2)
+                              << static_cast<unsigned>(pt.short_address);
+                            out.hartip_address_hex = a.str();
+                        }
+                        out.hartip_command = pt.command;
+                        out.hartip_command_name = pt.command_name;
+                        if (pt.is_response) {
+                            out.hartip_response_code = pt.response_code;
+                            out.hartip_response_is_comm_error = pt.response_is_comm_error;
+                            out.hartip_response_code_name = pt.response_code_name;
+                            out.hartip_comm_error_flags = pt.comm_error_flags;
+                            out.hartip_device_status = pt.device_status;
+                            out.hartip_device_status_flags = pt.device_status_flags;
+                        }
+                        out.hartip_values = pt.values;
+                    }
+
+                    bool expected_port = port_in(udp.src_port, HARTIP_PORT, options_.extra_hartip_ports) ||
+                                          port_in(udp.dst_port, HARTIP_PORT, options_.extra_hartip_ports);
+                    if (!expected_port) {
+                        out.notes.push_back("seen on UDP port " + std::to_string(udp.src_port) + "->" +
+                                             std::to_string(udp.dst_port) +
+                                             ", which is not a configured/standard HART-IP port (5094)");
+                    }
+                    return out;
+                }
+            }
+
             // Groundwork plumbing beyond this point: the UDP header/payload split is recognized
             // and reported (src/dst port, byte count), but no other application-layer protocol
             // riding on UDP is decoded -- see udp.hpp's file header comment and docs/MANUAL.md's
@@ -869,6 +961,8 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                           options_.protocol_filter == ProtocolFilter::Dnp3Only;
         bool want_s7comm = options_.protocol_filter == ProtocolFilter::Auto ||
                             options_.protocol_filter == ProtocolFilter::S7commOnly;
+        bool want_hartip = options_.protocol_filter == ProtocolFilter::Auto ||
+                            options_.protocol_filter == ProtocolFilter::HartIpOnly;
 
         // Tried first -- see the matching comment in reassemble_tcp_payload above for why
         // EtherNet/IP's own structural checks are strong enough that dispatch order doesn't
@@ -1226,10 +1320,102 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
             }
         }
 
+        // Tried LAST -- see the matching, fuller comment in reassemble_tcp_payload above for why
+        // HART-IP's own weaker structural detection gate is deliberately given the lowest priority
+        // in this opportunistic, port-independent dispatch chain, and for the accepted, documented
+        // collision (HART-IP Session Initiate over TCP misclassifying as Modbus/TCP) this ordering
+        // does NOT resolve.
+        if (want_hartip) {
+            if (auto frame = try_parse_hartip(effective_payload)) {
+                out.protocol = "hartip";
+                out.summary = frame->summary;
+
+                auto merge_hartip = [&](const HartIpFrame& f, bool is_first_message) {
+                    for (const auto& n : f.notes) out.notes.push_back(n);
+                    if (!is_first_message) return;
+                    out.hartip_version = f.version;
+                    out.hartip_message_type = f.message_type_name;
+                    out.hartip_message_id = f.message_id_name;
+                    out.hartip_status = f.status;
+                    out.hartip_transaction_id = f.transaction_id;
+                    out.hartip_msg_length = f.msg_length;
+                    out.hartip_has_session_init = f.has_session_init;
+                    if (f.has_session_init) {
+                        out.hartip_host_type_name = f.session_init.host_type_name;
+                        out.hartip_inactivity_close_timer = f.session_init.inactivity_close_timer;
+                    }
+                    out.hartip_has_error = f.has_error;
+                    if (f.has_error) {
+                        out.hartip_error_code = f.error_code;
+                        out.hartip_error_code_name = f.error_code_name;
+                    }
+                    out.hartip_has_pass_through = f.has_pass_through;
+                    if (f.has_pass_through) {
+                        const HartIpPassThrough& pt = f.pass_through;
+                        out.hartip_frame_type = pt.frame_type_name;
+                        out.hartip_is_response = pt.is_response;
+                        out.hartip_is_long_address = pt.is_long_address;
+                        if (pt.is_long_address) {
+                            out.hartip_address_hex = pt.long_address_hex;
+                        } else {
+                            std::ostringstream a;
+                            a << std::hex << std::uppercase << std::setfill('0') << std::setw(2)
+                              << static_cast<unsigned>(pt.short_address);
+                            out.hartip_address_hex = a.str();
+                        }
+                        out.hartip_command = pt.command;
+                        out.hartip_command_name = pt.command_name;
+                        if (pt.is_response) {
+                            out.hartip_response_code = pt.response_code;
+                            out.hartip_response_is_comm_error = pt.response_is_comm_error;
+                            out.hartip_response_code_name = pt.response_code_name;
+                            out.hartip_comm_error_flags = pt.comm_error_flags;
+                            out.hartip_device_status = pt.device_status;
+                            out.hartip_device_status_flags = pt.device_status_flags;
+                        }
+                        out.hartip_values = pt.values;
+                    }
+                };
+                merge_hartip(*frame, /*is_first_message=*/true);
+
+                // Like EtherNet/IP's own encapsulation messages, one HART-IP message is small and
+                // it's normal for a sender or the OS to coalesce several into one TCP segment.
+                constexpr size_t kMaxHartIpMessagesPerPayload = 50;
+                size_t offset = frame->wire_length;
+                size_t message_count = 1;
+                while (offset < effective_payload.size() && message_count < kMaxHartIpMessagesPerPayload) {
+                    ByteSpan rest = effective_payload.from(offset);
+                    auto next = try_parse_hartip(rest);
+                    if (!next) break;  // remaining bytes aren't another HART-IP message -- stop, don't guess
+                    ++message_count;
+                    std::string note = "additional HART-IP message " + std::to_string(message_count) +
+                                        " found in the same TCP payload at byte offset " + std::to_string(offset) +
+                                        " (coalesced by the sender/OS): " + next->summary;
+                    out.notes.push_back(note);
+                    merge_hartip(*next, /*is_first_message=*/false);
+                    offset += next->wire_length;
+                }
+                if (message_count >= kMaxHartIpMessagesPerPayload) {
+                    out.notes.push_back("stopped after " + std::to_string(kMaxHartIpMessagesPerPayload) +
+                                         " HART-IP message(s) in this one TCP payload, more may remain "
+                                         "(safety cap)");
+                }
+
+                bool expected_port = port_in(tcp.src_port, HARTIP_PORT, options_.extra_hartip_ports) ||
+                                      port_in(tcp.dst_port, HARTIP_PORT, options_.extra_hartip_ports);
+                if (!expected_port) {
+                    out.notes.push_back("seen on TCP port " + std::to_string(tcp.src_port) + "->" +
+                                         std::to_string(tcp.dst_port) +
+                                         ", which is not a configured/standard HART-IP port (5094)");
+                }
+                return out;
+            }
+        }
+
         out.protocol = "tcp";
         std::ostringstream s;
         s << "TCP payload of " << effective_payload.size() << " byte(s) on port " << tcp.src_port << "->"
-          << tcp.dst_port << " did not match EtherNet/IP, IEC 104, Modbus, DNP3, or COTP/S7comm";
+          << tcp.dst_port << " did not match EtherNet/IP, IEC 104, Modbus, DNP3, COTP/S7comm, or HART-IP";
         out.summary = s.str();
         return out;
 

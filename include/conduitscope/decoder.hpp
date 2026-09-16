@@ -17,6 +17,7 @@
 #include "conduitscope/enip.hpp"
 #include "conduitscope/ethercat.hpp"
 #include "conduitscope/goose.hpp"
+#include "conduitscope/hartip.hpp"
 #include "conduitscope/iec104.hpp"
 #include "conduitscope/modbus.hpp"
 #include "conduitscope/pcap_reader.hpp"
@@ -27,7 +28,7 @@
 namespace conduitscope {
 
 enum class ProtocolFilter {
-    Auto,         // opportunistically detect IEC104/Modbus/DNP3/S7comm/EtherNet-IP/PROFINET/GOOSE/SV/EtherCAT/BACnet-IP regardless of port
+    Auto,         // opportunistically detect IEC104/Modbus/DNP3/S7comm/EtherNet-IP/PROFINET/GOOSE/SV/EtherCAT/BACnet-IP/HART-IP regardless of port
     ModbusOnly,   // only attempt Modbus decoding
     Dnp3Only,     // only attempt DNP3 decoding
     S7commOnly,   // only attempt TPKT/COTP/S7comm decoding
@@ -38,6 +39,7 @@ enum class ProtocolFilter {
     SvOnly,       // only attempt IEC 61850-9-2 Sampled Values decoding
     EthercatOnly, // only attempt EtherCAT decoding
     BacnetOnly,   // only attempt BACnet/IP (BVLC/NPDU/APDU) decoding
+    HartIpOnly,   // only attempt HART-IP (session control / tunneled Pass-Through) decoding
 };
 
 struct DecodeOptions {
@@ -57,6 +59,7 @@ struct DecodeOptions {
     std::vector<uint16_t> extra_enip_ports;
     std::vector<uint16_t> extra_enip_io_ports;  // UDP, unlike extra_enip_ports (TCP) -- see ENIP_IO_UDP_PORT
     std::vector<uint16_t> extra_bacnet_ports;   // UDP -- see BACNET_UDP_PORT (47808/0xBAC0)
+    std::vector<uint16_t> extra_hartip_ports;   // TCP AND UDP -- see HARTIP_PORT (5094, same for both)
     // If true, a parse failure at the Ethernet/IPv4/TCP layer is rethrown to
     // the caller instead of being recorded as a per-packet "parse-error"
     // result. Off by default so one malformed packet doesn't abort decoding
@@ -87,7 +90,8 @@ struct DecodedPacket {
     uint16_t src_port = 0, dst_port = 0;
     std::string tcp_flags;
 
-    // "iec104", "modbus", "dnp3", "s7comm", "enip", "profinet", "goose", "sv", "ethercat", "cotp"
+    // "iec104", "modbus", "dnp3", "s7comm", "enip", "profinet", "goose", "sv", "ethercat", "bacnet",
+    // "hartip", "cotp"
     // (recognized TPKT/COTP framing but not S7comm inside it -- e.g. a connection setup frame),
     // "tcp" (recognized transport, no app-layer match), "udp" (recognized transport, no app-layer
     // protocol decoded -- see udp.hpp; UDP/2222 CIP I/O traffic that try_parse_cip_io actually
@@ -104,7 +108,9 @@ struct DecodedPacket {
     // promoted to "sv" instead -- see sv_asdu_count below; EtherType 0x88A4 traffic that
     // try_parse_ethercat DOES recognize is promoted to "ethercat" instead -- see
     // ethercat_frame_type below; a UDP payload that try_parse_bacnet recognizes as a BACnet/IP
-    // BVLC message is promoted to "bacnet" instead -- see bacnet_bvlc_function below),
+    // BVLC message is promoted to "bacnet" instead -- see bacnet_bvlc_function below; a TCP or UDP
+    // payload that try_parse_hartip recognizes as a HART-IP message is promoted to "hartip"
+    // instead -- see hartip_message_type below),
     // "unsupported-link", or "parse-error".
     std::string protocol;
     std::string summary;
@@ -335,6 +341,57 @@ struct DecodedPacket {
     // enip_cip_values' scheme. Empty when this PDU's service is outside the first-pass set, or
     // when segmented.
     std::vector<std::string> bacnet_values;
+
+    // Only set when protocol == "hartip" -- see try_parse_hartip in hartip.hpp. Unlike every
+    // other protocol above, HART-IP is detected identically on BOTH has_tcp and has_udp payloads
+    // (conventionally port 5094 for both) -- see hartip.hpp's "structural detection gate"
+    // paragraph for why this decoder's own detection anchor here is honestly weaker than most of
+    // this codebase's other opportunistic detectors.
+    uint8_t hartip_version = 0;
+    std::string hartip_message_type;  // "Request"/"Response"/"Publish"/"Error"/"NAK" -- always set
+                                        // when protocol == "hartip"
+    std::string hartip_message_id;    // "Session Initiate"/"Session Close"/"Keep Alive"/
+                                        // "Pass Through" -- always set when protocol == "hartip"
+    uint8_t hartip_status = 0;        // raw byte -- see hartip.hpp, no authoritative bit table found
+    uint16_t hartip_transaction_id = 0;  // "Sequence Number" in Wireshark's own UI text
+    uint16_t hartip_msg_length = 0;      // this message's own declared total length, header included
+
+    // Set only for a Session Initiate (MessageID 0) message with a structurally valid 5-byte body.
+    bool hartip_has_session_init = false;
+    std::string hartip_host_type_name;  // "Secondary Host"/"Primary Host"
+    uint32_t hartip_inactivity_close_timer = 0;  // seconds
+
+    // Set only for an Error (MessageType 3) or NAK (MessageType 15) message with a structurally
+    // valid 1-byte body -- checked BEFORE MessageID, see hartip.hpp.
+    bool hartip_has_error = false;
+    uint8_t hartip_error_code = 0;
+    std::string hartip_error_code_name;
+
+    // Set only for a Pass Through (MessageID 3) message -- the tunneled classic wired-HART
+    // token-passing Data-Link PDU that carries the actual HART command/response traffic. Covers
+    // Request/Response/Publish alike -- see hartip.hpp.
+    bool hartip_has_pass_through = false;
+    std::string hartip_frame_type;  // "STX"/"ACK"/"BACK"/"unknown(N)"
+    bool hartip_is_response = false;
+    bool hartip_is_long_address = false;
+    std::string hartip_address_hex;  // the short (masked 0x3F, rendered as 2 hex digits) or the
+                                       // 5-byte long address, whichever hartip_is_long_address says
+    uint8_t hartip_command = 0;
+    std::string hartip_command_name;  // best-effort name; empty for commands 31/203 -- see hartip.hpp
+
+    // Present only when hartip_is_response.
+    uint8_t hartip_response_code = 0;
+    bool hartip_response_is_comm_error = false;
+    std::string hartip_response_code_name;  // empty when hartip_response_is_comm_error
+    std::vector<std::string> hartip_comm_error_flags;  // set only when hartip_response_is_comm_error
+    uint8_t hartip_device_status = 0;
+    std::vector<std::string> hartip_device_status_flags;
+
+    // Decoded field-by-field summary of this command's request/response data -- see hartip.hpp's
+    // "Command dispatch" section for exactly which command numbers this decoder value-decodes.
+    // Mirrors bacnet_values'/enip_cip_values' scheme. Empty when this command is outside the
+    // first-pass dispatch table (commands 77/178, and any unrecognized command number).
+    std::vector<std::string> hartip_values;
 };
 
 // Cross-packet DNP3 fragment-reassembly state for one directional TCP flow (src ip:port -> dst

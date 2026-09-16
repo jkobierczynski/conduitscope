@@ -3,7 +3,7 @@
 `conduitscope` decodes Modbus/TCP, DNP3, IEC 60870-5-104, S7comm/COTP (Siemens S7 PLC
 protocol), EtherNet/IP (CIP explicit and implicit messaging), PROFINET RT (DCP device
 discovery/configuration and cyclic real-time I/O data), IEC 61850-8-1 GOOSE,
-IEC 61850-9-2 Sampled Values, EtherCAT, and BACnet/IP traffic from offline pcap/pcapng captures, and checks it
+IEC 61850-9-2 Sampled Values, EtherCAT, BACnet/IP, and HART-IP traffic from offline pcap/pcapng captures, and checks it
 against a zone/conduit segmentation policy. It's an OT/ICS conduit-auditing tool: `decode`/`info` give you reliable
 protocol decoding and a stats view, and `policy validate` maps that decoded traffic
 against an IEC 62443-style zone/conduit model (for NIS2-flavored compliance work) --
@@ -30,7 +30,7 @@ section.
 ## Why not just use tshark?
 
 Fair question -- tshark wins on raw protocol-decoding breadth (thousands of
-dissectors vs. conduitscope's ten-plus-CIP-I/O) and is usually still the
+dissectors vs. conduitscope's eleven-plus-CIP-I/O) and is usually still the
 better first reach for general packet analysis. conduitscope isn't trying to
 replace it; it does one thing tshark fundamentally doesn't:
 
@@ -343,6 +343,37 @@ Groundwork / v0.1.0. What works right now:
   does NOT exercise (device discovery, WriteProperty, every non-scalar
   PropertyValue type, BBMD/FDT functions, and more) -- see
   include/conduitscope/bacnet.hpp's file header for the full writeup.
+- HART-IP (UDP/TCP port 5094, IEC 62591 / HCF_SPEC-151): tunnels classic wired-HART
+  traffic over IP, either terminating a Session Initiate/Keep-Alive/Session-Close
+  session and Pass-Through-wrapped HART commands directly, or carrying them
+  end-to-end between a host and a WirelessHART/wired-HART gateway. The 8-byte fixed
+  header (Version, MessageType, MessageID, Status, TransactionID, MsgLength) and all
+  four MessageID-selected body shapes are decoded, including the full byte-by-byte
+  Pass-Through Data-Link PDU (Delimiter/Frame-Type/Address, Command, Byte Count,
+  Response Code, Device Status, Data, Checksum). This is deliberately the most
+  honestly-caveated detection gate in this codebase: unlike the dedicated-EtherType
+  or multi-field-structural protocols above, HART-IP rides over TCP or UDP with only
+  two adjacent header bytes (MessageType in a 5-value set, MessageID in a 4-value
+  set) as its structural anchor, and a real, accepted collision follows from that --
+  a genuine HART-IP Session Initiate message's own header happens to also look like
+  a plausible Modbus/TCP MBAP header, so on TCP it's tried last and, when it loses
+  that race, is reported as Modbus/TCP "buffering, waiting for more" instead (UDP is
+  unaffected; so is every other HART-IP message type). Rather than silently
+  papering over that with an unsafe reordering fix (tried, and it measurably
+  regressed this codebase's own Modbus/S7comm test corpus), it's documented,
+  demonstrated in the synthetic fixture, and left as an honest, accepted limitation
+  -- see include/conduitscope/hartip.hpp's file header for the full writeup. Command
+  value-decoding covers the common read/write commands (0/11/21 Read Unique
+  Identifier, 1-3, 6-9, 12-20, 22, 31/203, 33, 38, 48, and more) including
+  packed-ASCII (6-bit, 3-byte-to-4-char) text field decoding and HART-format
+  timestamps, with less-common and device-specific commands (77, 178, and anything
+  else outside this first pass) named via the command-number table but shown as raw
+  hex. A real capture was found and validated -- 116 frames, a WirelessHART gateway
+  exchange over both UDP and TCP, cross-checked field-by-field against Wireshark's
+  own HART-IP dissector -- and it independently reproduced the documented Modbus
+  collision on genuine field traffic, plus a second, previously-undocumented
+  false-positive pattern where the same weak gate also matches unrelated background
+  TCP traffic; see tests/real_captures/hartip/ATTRIBUTION.md for both.
 - Non-IPv4 Ethernet frames and non-TCP IPv4 payloads (including UDP) are now
   recognized and named, not just reported as a bare hex/number and dropped:
   ARP, LLDP, PTP, MPLS, and stacked-VLAN (802.1ad/QinQ) EtherTypes; ICMP,
@@ -368,10 +399,12 @@ Groundwork / v0.1.0. What works right now:
   real capture, not just synthetic traffic
 - General TCP stream reassembly at the PDU/frame level: a Modbus MBAP
   message, a DNP3 data-link frame, an IEC 104 APDU, an EtherNet/IP
-  encapsulation message, or a TPKT/COTP frame
+  encapsulation message, a TPKT/COTP frame, or a HART-IP message
   split across two or more TCP segments is buffered per directional flow and decoded once
   complete, using each protocol's own declared-length field to know how many
-  bytes to wait for. Resyncs rather than reorders on capture gaps, and trims
+  bytes to wait for. HART-IP's own declared-length check is tried last in
+  this chain, deliberately, because of the Modbus-collision limitation
+  described above. Resyncs rather than reorders on capture gaps, and trims
   overlapping retransmissions rather than duplicating bytes. Verified
   byte-for-byte behavior-identical against every real capture in this
   project's test set (none of which happen to split a PDU across segments)
@@ -470,7 +503,7 @@ that runs it -- the SDK used at build time only supplies headers/import librarie
 
 ```sh
 # Generate synthetic Modbus/TCP, DNP3, IEC 104, S7comm/COTP, EtherNet/IP, PROFINET RT,
-# GOOSE, Sampled Values, EtherCAT, and BACnet/IP captures and decode them (no live traffic needed):
+# GOOSE, Sampled Values, EtherCAT, BACnet/IP, and HART-IP captures and decode them (no live traffic needed):
 python3 tools/make_sample_pcap.py
 build/conduitscope decode -r tests/sample_modbus.pcap
 build/conduitscope decode -r tests/sample_s7comm.pcap --stats
@@ -481,6 +514,7 @@ build/conduitscope decode -r tests/sample_goose.pcap
 build/conduitscope decode -r tests/sample_sv.pcap
 build/conduitscope decode -r tests/sample_ethercat.pcap
 build/conduitscope decode -r tests/sample_bacnet.pcap
+build/conduitscope decode -r tests/sample_hartip.pcap
 build/conduitscope decode -r tests/sample_modbus.pcap --format json
 build/conduitscope info -r tests/sample_modbus.pcap
 
@@ -494,7 +528,7 @@ To decode traffic you've actually captured, e.g. from a Modbus simulator such as
 [4SICS ICS pcaps](https://www.netresec.com/?page=PCAP4SICS):
 
 ```sh
-tcpdump -i <iface> -w capture.pcap port 502 or port 20000 or port 2404 or port 102 or port 44818 or port 2222 or port 47808
+tcpdump -i <iface> -w capture.pcap port 502 or port 20000 or port 2404 or port 102 or port 44818 or port 2222 or port 47808 or port 5094
 build/conduitscope decode -r capture.pcap
 ```
 
@@ -503,7 +537,7 @@ intermediate file and check traffic in real time:
 
 ```sh
 build/conduitscope interfaces                                    # list capturable interfaces
-build/conduitscope decode -i eth0 --filter "port 502 or port 2404 or port 102 or port 44818 or port 2222 or port 47808" --duration 60
+build/conduitscope decode -i eth0 --filter "port 502 or port 2404 or port 102 or port 44818 or port 2222 or port 47808 or port 5094" --duration 60
 build/conduitscope policy validate -i eth0 --policy tests/policies/compliant.yaml --duration 60
 # or just Ctrl+C to stop either one early -- both still print whatever was captured so far
 ```

@@ -170,7 +170,8 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
                 const std::string& format, const std::string& protocol, const std::vector<int>& modbus_ports,
                 const std::vector<int>& dnp3_ports, const std::vector<int>& s7comm_ports,
                 const std::vector<int>& iec104_ports, const std::vector<int>& enip_ports,
-                const std::vector<int>& enip_io_ports, const std::vector<int>& bacnet_ports, size_t max_packets,
+                const std::vector<int>& enip_io_ports, const std::vector<int>& bacnet_ports,
+                const std::vector<int>& hartip_ports, size_t max_packets,
                 bool stats, bool strict, bool quiet,
                 bool no_color, bool force_color, std::ostream& diag) {
     std::ofstream file_out;
@@ -204,6 +205,7 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
                                : (protocol == "sv")     ? ProtocolFilter::SvOnly
                                : (protocol == "ethercat") ? ProtocolFilter::EthercatOnly
                                : (protocol == "bacnet") ? ProtocolFilter::BacnetOnly
+                               : (protocol == "hartip") ? ProtocolFilter::HartIpOnly
                                                         : ProtocolFilter::Auto;
     for (int p : modbus_ports) options.extra_modbus_ports.push_back(static_cast<uint16_t>(p));
     for (int p : dnp3_ports) options.extra_dnp3_ports.push_back(static_cast<uint16_t>(p));
@@ -212,6 +214,7 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
     for (int p : enip_ports) options.extra_enip_ports.push_back(static_cast<uint16_t>(p));
     for (int p : enip_io_ports) options.extra_enip_io_ports.push_back(static_cast<uint16_t>(p));
     for (int p : bacnet_ports) options.extra_bacnet_ports.push_back(static_cast<uint16_t>(p));
+    for (int p : hartip_ports) options.extra_hartip_ports.push_back(static_cast<uint16_t>(p));
 
     try {
         PacketSource source = open_packet_source(input, interface_name, snaplen, promiscuous, filter,
@@ -443,7 +446,7 @@ int main(int argc, char** argv) {
     std::string decode_format = "text";
     std::string decode_protocol = "auto";
     std::vector<int> decode_modbus_ports, decode_dnp3_ports, decode_s7comm_ports, decode_iec104_ports,
-        decode_enip_ports, decode_enip_io_ports, decode_bacnet_ports;
+        decode_enip_ports, decode_enip_io_ports, decode_bacnet_ports, decode_hartip_ports;
     size_t decode_max_packets = 0;
     bool decode_stats = false, decode_strict = false;
 
@@ -478,7 +481,7 @@ int main(int argc, char** argv) {
     decode_cmd
         ->add_option("--protocol", decode_protocol,
                       "Restrict decoding to one protocol instead of auto-detecting all of them")
-        ->transform(CLI::IsMember({"auto", "modbus", "dnp3", "s7comm", "iec104", "enip", "profinet", "goose", "sv", "ethercat", "bacnet"}))
+        ->transform(CLI::IsMember({"auto", "modbus", "dnp3", "s7comm", "iec104", "enip", "profinet", "goose", "sv", "ethercat", "bacnet", "hartip"}))
         ->capture_default_str();
     decode_cmd->add_option("--modbus-port", decode_modbus_ports,
                             "Additional TCP port to treat as expected for Modbus (repeatable); "
@@ -504,6 +507,10 @@ int main(int argc, char** argv) {
                             "Additional UDP port to treat as expected for BACnet/IP (repeatable); "
                             "does not change detection, only whether the port is flagged as "
                             "unexpected");
+    decode_cmd->add_option("--hartip-port", decode_hartip_ports,
+                            "Additional TCP or UDP port to treat as expected for HART-IP "
+                            "(repeatable); does not change detection, only whether the port is "
+                            "flagged as unexpected");
     decode_cmd->add_option("--max-packets", decode_max_packets,
                             "Stop after decoding this many packets (0 = unlimited)")
         ->capture_default_str();
@@ -609,8 +616,8 @@ int main(int argc, char** argv) {
         return run_decode(decode_input, decode_interface, decode_filter, decode_duration, decode_snaplen,
                            decode_promiscuous, decode_output, decode_format, decode_protocol,
                            decode_modbus_ports, decode_dnp3_ports, decode_s7comm_ports, decode_iec104_ports,
-                           decode_enip_ports, decode_enip_io_ports, decode_bacnet_ports, decode_max_packets,
-                           decode_stats, decode_strict, quiet, no_color, force_color, *diag);
+                           decode_enip_ports, decode_enip_io_ports, decode_bacnet_ports, decode_hartip_ports,
+                           decode_max_packets, decode_stats, decode_strict, quiet, no_color, force_color, *diag);
     }
     if (info_cmd->parsed()) {
         return run_info(info_input, std::cout);

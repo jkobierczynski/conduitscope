@@ -2,16 +2,16 @@
 
 ## NAME
 
-conduitscope -- decode Modbus/TCP, DNP3, IEC 60870-5-104, S7comm/COTP, EtherNet/IP (CIP explicit and implicit messaging), PROFINET RT (DCP and cyclic real-time IO), IEC 61850-8-1 GOOSE, IEC 61850-9-2 Sampled Values, EtherCAT, and BACnet/IP traffic from offline pcap captures
+conduitscope -- decode Modbus/TCP, DNP3, IEC 60870-5-104, S7comm/COTP, EtherNet/IP (CIP explicit and implicit messaging), PROFINET RT (DCP and cyclic real-time IO), IEC 61850-8-1 GOOSE, IEC 61850-9-2 Sampled Values, EtherCAT, BACnet/IP, and HART-IP traffic from offline pcap captures
 
 ## SYNOPSIS
 
 ```
 conduitscope [-q|--quiet] [--no-color|--color] [--log-file FILE] [--version] [-h|--help] <command> [command options]
 
-conduitscope decode (-r FILE | -i INTERFACE) [-o FILE] [-f text|json|csv] [--protocol auto|modbus|dnp3|s7comm|iec104|enip|profinet|goose|sv|ethercat|bacnet]
+conduitscope decode (-r FILE | -i INTERFACE) [-o FILE] [-f text|json|csv] [--protocol auto|modbus|dnp3|s7comm|iec104|enip|profinet|goose|sv|ethercat|bacnet|hartip]
                      [--modbus-port PORT]... [--dnp3-port PORT]... [--s7comm-port PORT]... [--iec104-port PORT]...
-                     [--enip-port PORT]... [--enip-io-port PORT]... [--bacnet-port PORT]...
+                     [--enip-port PORT]... [--enip-io-port PORT]... [--bacnet-port PORT]... [--hartip-port PORT]...
                      [--max-packets N] [--stats] [--strict]
                      [--filter BPF] [--duration SECONDS] [--snaplen BYTES] [--no-promiscuous]
 
@@ -153,7 +153,7 @@ conduitscope decode (-r FILE | -i INTERFACE) [options]
 | `--no-promiscuous` | off (i.e. promiscuous by default) | With `-i`, don't put the interface into promiscuous mode. Promiscuous is the default because the main live-capture use case -- watching a mirrored/SPAN switch port for zone/conduit traffic -- needs to see traffic that isn't addressed to the capturing host at all. |
 | `-o, --output FILE` | stdout | Write decoded output here instead of stdout. |
 | `-f, --format {text,json,csv}` | `text` | Output format. See OUTPUT FORMATS below. |
-| `--protocol {auto,modbus,dnp3,s7comm,iec104,enip,profinet,goose,sv,ethercat,bacnet}` | `auto` | Restrict decoding to one protocol. `auto` opportunistically tries EtherNet/IP, IEC 104, Modbus, DNP3, and S7comm/COTP detection on every TCP payload, CIP I/O and BACnet/IP detection on every UDP payload, PROFINET RT (DCP/cyclic) detection on every non-IPv4 Ethernet frame carrying EtherType `0x8892`, GOOSE detection on every non-IPv4 Ethernet frame carrying EtherType `0x88B8`, Sampled Values detection on every non-IPv4 Ethernet frame carrying EtherType `0x88BA`, and EtherCAT detection on every non-IPv4 Ethernet frame carrying EtherType `0x88A4`, regardless of port (see PROTOCOL DETECTION below). `enip` covers both EtherNet/IP explicit messaging (TCP) and CIP I/O implicit messaging (UDP). `profinet` covers both DCP and cyclic real-time IO. `sv` is IEC 61850-9-2 Sampled Values. `ethercat` is EtherCAT. `bacnet` is BACnet/IP. |
+| `--protocol {auto,modbus,dnp3,s7comm,iec104,enip,profinet,goose,sv,ethercat,bacnet,hartip}` | `auto` | Restrict decoding to one protocol. `auto` opportunistically tries EtherNet/IP, IEC 104, Modbus, DNP3, S7comm/COTP, and HART-IP detection on every TCP payload, CIP I/O, BACnet/IP, and HART-IP detection on every UDP payload, PROFINET RT (DCP/cyclic) detection on every non-IPv4 Ethernet frame carrying EtherType `0x8892`, GOOSE detection on every non-IPv4 Ethernet frame carrying EtherType `0x88B8`, Sampled Values detection on every non-IPv4 Ethernet frame carrying EtherType `0x88BA`, and EtherCAT detection on every non-IPv4 Ethernet frame carrying EtherType `0x88A4`, regardless of port (see PROTOCOL DETECTION below). `enip` covers both EtherNet/IP explicit messaging (TCP) and CIP I/O implicit messaging (UDP). `profinet` covers both DCP and cyclic real-time IO. `sv` is IEC 61850-9-2 Sampled Values. `ethercat` is EtherCAT. `bacnet` is BACnet/IP. `hartip` is HART-IP (covers both UDP and TCP). |
 | `--modbus-port PORT` | *(502 built in)* | Additional TCP port to treat as "expected" for Modbus. Repeatable. Does **not** gate detection -- it only changes whether a decoded Modbus frame is annotated as appearing on an unexpected port, which is itself a useful signal when auditing a conduit. |
 | `--dnp3-port PORT` | *(20000 built in)* | Same as `--modbus-port`, for DNP3. Repeatable. |
 | `--s7comm-port PORT` | *(102 built in)* | Same as `--modbus-port`, for COTP/S7comm. Repeatable. |
@@ -161,6 +161,7 @@ conduitscope decode (-r FILE | -i INTERFACE) [options]
 | `--enip-port PORT` | *(44818 built in)* | Same as `--modbus-port`, for EtherNet/IP explicit messaging (TCP). Repeatable. |
 | `--enip-io-port PORT` | *(2222 built in)* | Same as `--modbus-port`, for EtherNet/IP CIP I/O implicit messaging (UDP). Repeatable. |
 | `--bacnet-port PORT` | *(47808 built in)* | Same as `--modbus-port`, for BACnet/IP (UDP). Repeatable. |
+| `--hartip-port PORT` | *(5094 built in)* | Same as `--modbus-port`, for HART-IP. Repeatable. Applies to both TCP and UDP, since HART-IP uses the same port number on either transport. |
 | `--max-packets N` | `0` (unlimited) | Stop after decoding this many packets. With `-i`, this also bounds a live capture (in addition to `--duration` and Ctrl+C). |
 | `--stats` | off | Print an aggregate summary (protocol counts, Modbus function-code histogram, exception count, capture time span) instead of one line per packet. Ignores `--format`. |
 | `--strict` | off | Abort with a nonzero exit status on the first packet that fails to parse at the Ethernet/IPv4/TCP layer, instead of reporting a per-packet warning and continuing. Does not affect Modbus/DNP3-level ambiguity, which is always handled by heuristic + note rather than error. |
@@ -533,10 +534,10 @@ text the `text` report shows).
 ## PROTOCOL DETECTION
 
 In `--protocol auto` (the default), every non-empty TCP payload is tested
-against all five protocols, independent of port number. **EtherNet/IP is
-tried first, then IEC 104**, before Modbus/TCP -- see the notes at the end of
-this section for why that specific ordering matters, not just which
-protocols are tried:
+against all six protocols, independent of port number. **EtherNet/IP is
+tried first, then IEC 104**, before Modbus/TCP, and **HART-IP is tried
+last**, after S7comm/COTP -- see the notes at the end of this section for why
+that specific ordering matters, not just which protocols are tried:
 
 - **EtherNet/IP**: recognized by its 24-byte encapsulation header -- the
   command field must be one of the nine standard encapsulation commands
@@ -610,6 +611,16 @@ protocols are tried:
   parsed, it's reported as `cotp` (this is the normal case for COTP
   Connection Request/Confirm frames, which carry TSAP session-setup
   parameters rather than S7comm).
+- **HART-IP**: recognized by its 8-byte fixed header -- the MessageType byte
+  must be one of 5 defined values (`0x00`-`0x03`, `0x0F`) *and* the MessageID
+  byte must be one of 4 defined values (`0x00`-`0x03`), plus this decoder's
+  own added plausibility check that the declared MsgLength field is at least
+  8 (the header's own size). This is honestly the weakest structural gate of
+  any protocol in this list -- two adjacent bytes each landing on one of a
+  handful of small values, versus e.g. EtherNet/IP's three independent
+  checks or IEC 104's multi-bit-pattern APCI -- and it is tried **last** in
+  this chain, deliberately, precisely because of that weakness: see "Why
+  HART-IP is tried last" below.
 
 Because detection is payload-shape based, traffic running on a non-standard
 port is still decoded correctly -- and conduitscope tells you it's on a
@@ -635,13 +646,45 @@ Modbus collision. `tests/sample_iec104_modbus_precedence.pcap` (see
 `tools/make_sample_pcap.py`) is a minimal regression fixture pinning this
 down.
 
+**Why HART-IP is tried last, and the collision this does NOT resolve.**
+Unlike IEC 104 above, this is a collision that was found while scoping
+HART-IP support and deliberately left **unresolved**, not fixed by
+reordering. A HART-IP Session Initiate message's own header (MessageID `0`,
+Status `0` -- the only Status value ever observed in this decoder's own
+research) makes its header bytes read as a plausible Modbus/TCP MBAP header
+purely by coincidence: bytes 2-3 (Status, still `0x0000`) satisfy Modbus's
+protocol-id==0 check, and bytes 4-5 (HART-IP's own TransactionID field) read
+as a small, plausible Modbus `mbap_length`. This is the exact same *shape* of
+collision already resolved once for IEC 104 above -- but trying HART-IP
+first, the same way, was tried while scoping this feature and **measurably
+regressed** this project's own existing Modbus/S7comm test corpus (roughly
+2% of ordinary Modbus/TCP traffic with a non-zero unit ID also happened to
+satisfy HART-IP's own two-byte gate, because that gate, unlike IEC 104's, is
+genuinely weak -- see above). So this decoder accepts the collision rather
+than resolving it: HART-IP is tried last, and a genuine HART-IP Session
+Initiate message riding over TCP with Status `0` is misclassified as
+Modbus/TCP (or COTP/S7comm, or left as generic `tcp`) instead. HART-IP over
+UDP is entirely unaffected (UDP has no equivalent declared-length
+pre-check to collide against), and every other HART-IP message type
+(Keep Alive, Session Close, Pass Through) is also unaffected, since their
+own MessageID values don't produce the protocol-id==0 collision. See
+`include/conduitscope/hartip.hpp`'s "KNOWN, ACCEPTED, DOCUMENTED LIMITATION"
+paragraph, the matching comments in `src/decoder.cpp`, and
+`tests/sample_hartip.pcap`'s own dedicated demonstration packets (see
+`tools/make_sample_pcap.py`) for the full writeup -- and
+`tests/real_captures/hartip/ATTRIBUTION.md` for independent confirmation
+this collision occurs on genuine field traffic, not just a hand-built
+fixture.
+
 `--protocol modbus`, `--protocol dnp3`, `--protocol s7comm`, `--protocol
 iec104`, `--protocol enip`, `--protocol profinet`, `--protocol goose`,
-`--protocol sv`, `--protocol ethercat`, or `--protocol bacnet` restrict
-decoding to only that protocol (useful for large mixed captures, or for
-scripting a two-pass analysis). `--protocol enip` covers both
-EtherNet/IP explicit messaging (TCP, above) and CIP I/O implicit messaging
-(UDP, below) -- they're the same overall protocol family.
+`--protocol sv`, `--protocol ethercat`, `--protocol bacnet`, or `--protocol
+hartip` restrict decoding to only that protocol (useful for large mixed
+captures, or for scripting a two-pass analysis). `--protocol enip` covers
+both EtherNet/IP explicit messaging (TCP, above) and CIP I/O implicit
+messaging (UDP, below) -- they're the same overall protocol family.
+`--protocol hartip` covers both HART-IP over TCP (above) and over UDP
+(below) -- HART-IP uses the identical wire format on either transport.
 
 **CIP I/O (implicit messaging), UDP port 2222** is tried, port-independently,
 against every non-empty UDP payload, the same "opportunistic, payload-shape"
@@ -734,6 +777,21 @@ mismatch) rather than rejected outright, the same tolerant-declared-length
 posture GOOSE/SV/EtherCAT already take. See PROTOCOL COVERAGE's BACnet/IP
 section for exactly what's decoded once the gate matches.
 
+**HART-IP, UDP/TCP port 5094** is tried, port-independently, against every
+non-empty UDP payload too, using the same 8-byte-header gate described above
+for TCP (MessageType/MessageID/MsgLength) -- HART-IP is the only protocol in
+this list that opportunistically checks both transports with the identical
+wire format. Unlike the TCP chain, HART-IP is tried on UDP payloads alongside
+CIP I/O and BACnet/IP with no ordering concern: the Modbus/TCP collision
+described above is a TCP-only artifact (it depends on Modbus's own
+declared-length TCP reassembly pre-check, which has no UDP equivalent), so
+HART-IP over UDP is checked and decoded exactly like any other well-behaved
+protocol here, with no known collision. `--hartip-port` only changes whether
+a decoded frame is annotated as appearing on an unexpected port (default
+5094), the same as every other per-protocol port option -- it never gates
+detection. See PROTOCOL COVERAGE's HART-IP section for exactly what's
+decoded once the gate matches.
+
 ## OUTPUT FORMATS
 
 ### text (default)
@@ -754,7 +812,8 @@ The `[protocol]` tag is colored per protocol (so a mixed-protocol capture
 scans quickly by eye): cyan for Modbus, magenta for DNP3, blue for S7comm and
 COTP-without-S7comm, green for IEC 104, yellow for EtherNet/IP, bright cyan
 for PROFINET RT, bright green for GOOSE, bright magenta for Sampled Values,
-bright yellow for EtherCAT, bright blue for BACnet/IP, dim for everything else recognized
+bright yellow for EtherCAT, bright blue for BACnet/IP, bright white for
+HART-IP, dim for everything else recognized
 but not OT-specific (`tcp`/`udp`/`non-tcp`/`non-ip`/`unsupported-link`). A Modbus
 exception response's summary, and a `parse-error` packet's entire line, are
 bold red -- both mean "look at this one" over everything else in a long
@@ -1098,6 +1157,96 @@ packets where they apply:
 All array fields are capped at 50 entries for a single heavily-batched
 request/response; see PROTOCOL COVERAGE for where the full list still shows
 up when a packet has more items than that.
+
+The following fields appear only when `protocol` is `hartip`:
+
+- `hartip_version`: the header's Version byte, as a plain integer. Always
+  present.
+- `hartip_message_type`: the header's MessageType byte, named -- one of
+  `"Request"`, `"Response"`, `"Publish"`, `"Error"`, or `"NAK"`. Always
+  present.
+- `hartip_message_id`: the header's MessageID byte, named -- one of
+  `"Session Initiate"`, `"Session Close"`, `"Keep Alive"`, or
+  `"Pass Through"`. Always present.
+- `hartip_status`: the header's Status byte, as a plain integer. Always
+  present. Every message this decoder's own research and real-capture
+  testing has observed carries Status `0` -- see LIMITATIONS.
+- `hartip_transaction_id`: the header's TransactionID (a.k.a. Sequence
+  Number) field, as a plain integer. Always present.
+- `hartip_msg_length`: the header's declared MsgLength field (the body's own
+  byte count, not including the 8-byte header), as a plain integer. Always
+  present.
+- `hartip_host_type`: the Session Initiate body's Host Type byte, named
+  (`"Primary Host"` or `"Secondary Host"`). Present only for a
+  structurally-valid Session Initiate message (`hartip_message_id` is
+  `"Session Initiate"` and the body is exactly 5 bytes).
+- `hartip_inactivity_close_timer`: the Session Initiate body's Inactivity
+  Close Timer field (seconds), as a plain integer. Present under the same
+  condition as `hartip_host_type`.
+- `hartip_error_code`: an Error/NAK message's 1-byte error code, as a plain
+  integer. Present only for a structurally-valid Error/NAK message
+  (`hartip_message_type` is `"Error"` or `"NAK"` and the body is exactly 1
+  byte).
+- `hartip_error_code_name`: that same error code, named from the 25-entry
+  table HCF_SPEC-307 defines (e.g. `"Session closed"`,
+  `"Service unavailable"`), or `"unknown(N)"` for a structurally-valid but
+  undefined code. Present under the same condition as `hartip_error_code`.
+- `hartip_has_pass_through`: `true`/`false` -- `true` when `hartip_message_id`
+  is `"Pass Through"` (regardless of whether the wrapped HART Data-Link PDU
+  itself parses further). Always present.
+- `hartip_frame_type`: the Pass-Through body's Delimiter byte's Frame Type
+  field, named (`"STX"`, `"ACK"`, `"BACK"`, or `"unknown(N)"` for an
+  undefined value). Present only when `hartip_has_pass_through` is `true`
+  and the Delimiter byte itself was present.
+- `hartip_is_response`: `true`/`false` -- the Frame Type's field-device-vs-
+  master direction (`"ACK"`/`"BACK"` are responses; `"STX"` is a request).
+  Present under the same condition as `hartip_frame_type`.
+- `hartip_is_long_address`: `true`/`false` -- the Delimiter byte's Address
+  Type bit (5-byte Unique/long address vs. 1-byte polling/short address).
+  Present under the same condition as `hartip_frame_type`.
+- `hartip_address`: the HART Data-Link address itself, as lowercase hex (1
+  byte for a short address, e.g. `"01"`; 5 bytes for a long address, e.g.
+  `"264e0000d2"`). Present under the same condition as `hartip_frame_type`.
+- `hartip_command`: the Pass-Through PDU's Command byte, as a plain integer.
+  Present only when the Command byte itself was present (i.e. the body
+  wasn't truncated before reaching it -- see LIMITATIONS).
+- `hartip_command_name`: that same command number, named from this decoder's
+  own command-number table (e.g. `"Read Primary Variable"`), when the number
+  is one this decoder recognizes at all (value-decoded or not); absent for a
+  command number outside that table (the command is still shown as a bare
+  number in `summary` and `hartip_command`). Present only alongside
+  `hartip_command`.
+- `hartip_response_code`: a response frame's Response Code byte, as a plain
+  integer (bit 7 set means this is a comm-error bitmask, not a
+  command-specific code -- see `hartip_response_is_comm_error`). Present
+  only for a response (`hartip_is_response` is `true`) whose Byte Count was
+  large enough to include it.
+- `hartip_response_is_comm_error`: `true`/`false` -- the Response Code
+  byte's bit 7. Present under the same condition as `hartip_response_code`.
+- `hartip_response_code_name`: the Response Code, named from the 25-entry
+  single-definition table this decoder uses (e.g. `"Success"`, `"Busy"`), or
+  a `"command-specific response code N (meaning depends on which command
+  produced it -- not decoded)"` placeholder for a structurally valid but
+  unlisted non-comm-error code. Present only when
+  `hartip_response_is_comm_error` is `false` (a comm-error code has no
+  single meaning to name -- see `hartip_comm_error_flags` instead).
+- `hartip_comm_error_flags`: an array of the Response Code byte's individual
+  comm-error bit names (e.g. `"vertical-parity-error"`,
+  `"longitudinal-parity-error"`). Present only when
+  `hartip_response_is_comm_error` is `true`.
+- `hartip_device_status`: a response frame's Device Status byte, as a plain
+  integer. Present under the same condition as `hartip_response_code`.
+- `hartip_device_status_flags`: an array of the Device Status byte's
+  individual flag names (e.g. `"field-device-malfunction"`,
+  `"configuration-changed"`), present only when at least one flag bit is
+  set (an all-zero Device Status omits this field rather than emitting an
+  empty array).
+- `hartip_values`: an array of decoded field/value strings (e.g.
+  `"pv-units=1"`, `"pv=72.500000"`), present only for the "first-pass"
+  command set this decoder value-decodes (see PROTOCOL COVERAGE's HART-IP
+  section) when the command's data actually matched the byte layout this
+  decoder expects -- absent for every out-of-scope or wrong-length command
+  (shown as raw hex with a note instead).
 
 ### csv
 
@@ -2386,6 +2535,232 @@ stubs unfetchable in this environment; `kargs.net`'s own capture archive,
 blocked by this session's network policy). See
 `include/conduitscope/bacnet.hpp`'s file header for the full writeup.
 
+### HART-IP (UDP/TCP port 5094, IEC 62591 / HCF_SPEC-151)
+
+Unlike every protocol above, HART-IP genuinely rides on either transport
+with the identical wire format -- some deployments run it purely as a
+UDP-datagram protocol between a host and a single field device or gateway;
+others establish a long-lived TCP session first. Detection is the same
+"opportunistic, payload-shape" approach as BACnet/IP and CIP I/O, applied on
+both TCP and UDP (see PROTOCOL DETECTION above for the exact gate and the
+TCP-only Modbus collision it doesn't resolve). Every multi-byte field is
+big-endian.
+
+#### The 8-byte fixed header
+
+Every HART-IP message begins with: Version (1 byte, always `1` in every
+message this decoder's own research and every real capture checked so far
+carries), MessageType (1 byte -- `0` Request, `1` Response, `2` Publish, `3`
+Error, `15`/`0x0F` NAK), MessageID (1 byte -- `0` Session Initiate, `1`
+Session Close, `2` Keep Alive, `3` Pass Through), Status (1 byte -- every
+message observed so far is `0`; see LIMITATIONS), TransactionID/Sequence
+Number (2 bytes), and MsgLength (2 bytes -- the body's own byte count,
+*not* including this 8-byte header). Error/NAK is checked before MessageID
+(it can apply to a Session Initiate/Close/Keep-Alive/Pass-Through request
+alike), then the body is decoded by MessageID:
+
+- **Session Initiate** (5-byte body): Host Type (1 byte -- `0` Primary Host,
+  `1` Secondary Host) + Inactivity Close Timer (4 bytes, unsigned, seconds).
+- **Session Close** (empty body): no fields.
+- **Keep Alive** (empty body): no fields.
+- **Error / NAK** (1-byte body): a single Error Code byte, named from a
+  25-entry single-definition table transcribed from HCF_SPEC-307 (e.g. `0`
+  "Session closed", `2` "Service unavailable"); a structurally valid but
+  undefined code is rendered `"unknown(N)"` rather than guessed at.
+- **Pass Through** (variable-length body): the classic wired-HART Data-Link
+  PDU, described next.
+
+A body that's present but the wrong length for its MessageID (e.g. a
+3-byte Session Initiate body) is noted and shown as raw hex rather than
+partially decoded or guessed at.
+
+#### The Pass-Through body: classic HART Data-Link PDU
+
+This is where HART-IP earns its name -- it's a thin IP transport wrapping
+the same Data-Link PDU wired HART has used since the 1980s, byte for byte:
+
+- **Delimiter** (1 byte): Frame Type (bits 0-2 -- `1` `"BACK"` Burst Frame,
+  `2` `"STX"` Master->Field Device/request, `6` `"ACK"` Field Device->
+  Master/response; an undefined value is `"unknown(N)"`. Frame Type ACK or
+  BACK is this decoder's own `hartip_is_response` signal, deciding whether
+  Response Code + Device Status are present at all), Physical Layer Type
+  (bits 3-4 -- `0` Asynchronous, `1` Synchronous, named but not further
+  interpreted), Expansion Byte Count (bits 5-6, a raw count of trailing
+  expansion bytes this decoder counts and skips rather than interprets),
+  and Address Type (bit 7 -- `0` Polling/short address, `1` Unique/long
+  address).
+- **Address** (1 byte, masked to the low 6 bits, for Polling/short; 5 raw
+  bytes for Unique/long): shown as lowercase hex.
+  Command 0/11/21 (Read Unique Identifier) is the standard way a master
+  discovers a device's own long address before switching to addressing it
+  that way for every subsequent command -- this decoder's real capture
+  (see Validation below) shows exactly that pattern on genuine traffic.
+- **Command** (1 byte): the command number, as a plain integer, named from
+  this decoder's own command table when recognized (see "Command
+  value-decode" below) regardless of whether the data itself was
+  value-decoded.
+- **Byte Count** (1 byte): declared length of everything from here to (but
+  not including) the Checksum -- for a response, this includes the 2
+  Response Code/Device Status bytes; a Byte Count too small to even cover
+  those 2 bytes is noted and Data length is treated as 0 rather than
+  underflowing.
+- **Response Code** (1 byte, responses only): bit 7 set means the low 7
+  bits are a data-link-layer comm-error bitmask (e.g.
+  `"vertical-parity-error"`, `"longitudinal-parity-error"` -- 6 bits
+  cross-corroborated across vendor HART references; the low bit's own
+  meaning isn't confidently sourced and is deliberately not asserted)
+  rather than a command-specific code. Otherwise, per HCF_SPEC-307's own
+  three-way classification (single-definition, multi-definition, and
+  warning codes), only the single-definition codes -- the ones whose
+  meaning is the same regardless of which command produced them -- are
+  named (e.g. `0` "Success", `32` "Busy"); every other 0-127 value is
+  rendered as an explicit "command-specific response code N (meaning
+  depends on which command produced it -- not decoded)" placeholder,
+  deliberately not guessed at, since a multi-definition or warning code's
+  actual meaning depends on knowing that specific command's own spec text,
+  most of which this project doesn't have.
+- **Device Status** (1 byte, responses only): an 8-bit flag byte (e.g.
+  `"field-device-malfunction"`, `"configuration-changed"`,
+  `"more-status-available"`), cross-corroborated across multiple vendor
+  command-reference manuals during this decoder's own research.
+- **Data** (variable length, per Byte Count minus the 2 Response Code/Device
+  Status bytes for a response): the command's own payload -- see "Command
+  value-decode" below.
+- **Checksum** (1 byte): present but not itself verified (see LIMITATIONS).
+
+A body truncated before its Command byte, before its trailing Checksum
+byte, or carrying trailing bytes after the Checksum, is noted explicitly
+rather than silently mis-parsed.
+
+#### Command value-decode ("first pass")
+
+Mirroring this codebase's existing "first pass" precedent (BACnet/IP's
+service subset, EtherNet/IP CIP explicit messaging's own service subset,
+DNP3's group/variation table): a deliberately scoped set of the most common
+read/write commands gets full field-level value decoding; everything else
+is named (when the command number is recognized at all) but shown as raw
+hex.
+
+- **0 / 11 / 21** (Read Unique Identifier, in its short-address/
+  long-address/burst-mode forms): both the 12-byte "basic" response form and
+  the fuller 22-byte "extended" form (adding Min. Response Preambles, Max.
+  Device Variables, Configuration Change Counter, Extended Device Status,
+  Manufacturer ID, Private-Label Distributor Code, and Device Profile) are
+  recognized by length and decoded accordingly, with a note when the
+  shorter basic form was used.
+- **1** (Read Primary Variable): PV Units + PV (IEEE-754 float).
+- **2** (Read Loop Current and Percent of Range): PV Loop Current (float,
+  mA) + PV Percent of Range (float).
+- **3** (Read Dynamic Variables and Loop Current): PV Loop Current, then up
+  to four Units+Value pairs (PV/SV/TV/QV).
+- **6** (Write Polling Address) / **7** (Read Loop Configuration): Poll
+  Address + Loop Current Mode.
+- **8** (Read Dynamic Variable Classifications): PV/SV/TV/QV Classification
+  bytes.
+- **9** (Read Device Variables with Status): Extended Device Status, then
+  each present Device Variable's Code/Classification/Units/Value/Status,
+  then a HART-format Timestamp (see below) -- request and response have
+  different shapes (the request names which variables to read; only the
+  response's fixed layout is value-decoded, the same request/response
+  asymmetry commands 33/203 below also have).
+- **12 / 17** (Read/Write Message): a 24-byte packed-ASCII field (see
+  below).
+- **13 / 18** (Read/Write Tag, Descriptor, Date): packed-ASCII Tag (6 raw
+  bytes / 8 characters) + packed-ASCII Descriptor (12 raw bytes / 16
+  characters) + a 3-byte Date field.
+- **14** (Read Primary Variable Transducer Information): Transducer Serial
+  Number + Limit Units + Upper/Lower Transducer Limit (floats) + Minimum
+  Span (float).
+- **15** (Read Device Information): PV Alarm Selection, PV Transfer
+  Function, Range Units, Upper/Lower Range Value (floats), Damping Value
+  (float), Write Protect, and the reserved/PV-analog-channel-flags bytes.
+- **16 / 19** (Read/Write Final Assembly Number): a 3-byte unsigned integer.
+- **20 / 22** (Read/Write Long Tag): a 32-byte field -- unlike Message,
+  Tag, and Descriptor above, Long Tag is plain, *unpacked* ASCII (one byte
+  per character), not packed-ASCII.
+- **31**: the 2-byte Extended Command Number is always decoded. This
+  decoder deliberately does not assert an authoritative name for command
+  31 as a whole -- research across FieldComm Group's own material and
+  multiple vendor HART command references found none, and one source's own
+  description of the Universal/Common-Practice command ranges explicitly
+  excludes 31 from both. When the Extended Command Number is `64386`
+  (`0xFB82`) -- a pairing directly confirmed in Wireshark's own source --
+  the rest of the body is further decoded exactly like command 203 below.
+- **33** (Read Device Variables): up to 4 Device Variable Code/Units/Value
+  triples, per however many codes the request asked for.
+- **38** (Reset Configuration Changed Flag): empty request; response
+  returns the new Configuration Change Counter.
+- **48** (Read Additional Device Status): both the 6-byte "minimal" response
+  form and the fuller 14-byte "extended" form (adding Extended Device
+  Status, Device Operating Mode, 4 Standardized Status bytes, and
+  Analog-Channel-Saturated/Fixed bytes) are recognized by length.
+- **203** (Read Discrete Variables (with Status), informally -- like 31,
+  no authoritative top-level name is asserted for 203 itself: every source
+  consulted places command numbers >=128 in HART's Device-Specific,
+  vendor-defined-per-device range, which by the protocol's own design has
+  no single FieldComm Group name. Wireshark's own dissector decodes this
+  exact shape, strongly suggesting it's at least a common vendor
+  convention, so this decoder decodes the *structure* with that same
+  confidence while being honest that "203" is not a name it can vouch for
+  across every device that might emit it -- see command 31 above for the
+  other way this same shape can appear on the wire): Index of First
+  Discrete Variable, Number of Discrete Variables, Extended Device Status,
+  a HART-format Timestamp, then 1-6 slots of Discrete Variable
+  State/Status.
+
+**Packed-ASCII decoding**: HART's own 6-bit character encoding (3 raw bytes
+pack 4 characters, each a 6-bit code offset from ASCII `0x20`) is decoded
+per HCF_SPEC-307's own table, verified both by hand (Wireshark's own
+`dissect_packAscii` cross-checked field-by-field during this decoder's
+research) and mathematically (`tools/make_sample_pcap.py`'s own `pack_ascii`
+helper is the exact inverse of this decoder's `decode_packed_ascii`, used to
+build every packed-ASCII synthetic test fixture).
+
+**HART-format timestamps**: a 4-byte field, raw units of 1/32 millisecond
+(the units HCF_SPEC-307 defines), decoded to `hr:min:sec.ms`.
+
+**Explicitly out of scope, named but shown as raw hex**: commands 77 (I/O
+Card/Channel embedded-command relay) and 178 (Batch/aggregate command) are
+explicitly named (they're common enough in real gateway traffic -- this
+decoder's real capture, see Validation below, contains neither, but they
+were named proactively from the command-number table during this decoder's
+own research) but not value-decoded, since their own data layout is
+gateway/vendor-specific rather than a single fixed HART Universal/
+Common-Practice shape. Every other command number outside the list above is
+named via the full command-number table when recognized at all, or shown
+as a bare number when not -- either way, the data itself is always raw hex
+with an explanatory note. A recognized command whose data doesn't match
+the expected length (a malformed capture, or simply a command variant this
+decoder's first pass doesn't cover) falls back to the same raw-hex-with-note
+treatment rather than mis-decoding.
+
+#### Validation
+
+A real capture WAS found: a 116-frame, 72-second capture of a WirelessHART
+gateway running the same nine-command read sequence over both UDP and TCP
+-- see `tests/real_captures/hartip/ATTRIBUTION.md` for full provenance and,
+notably, independent cross-validation against Wireshark/tshark's own
+HART-IP dissector, field-by-field, on several of the more surprising real
+decodes (two genuine IEEE-754 NaN PV Loop Current values, a packed-ASCII
+message field that decodes to literal ASCII-table-order text). It also
+independently reproduces, on real field traffic, the TCP Session-Initiate-
+vs-Modbus/TCP collision PROTOCOL DETECTION above documents as an accepted
+limitation, plus a second, previously-undocumented false-positive pattern
+where the same weak declared-length gate also matches unrelated background
+TCP traffic -- see that ATTRIBUTION.md's own two dedicated sections for
+both. It is narrow, though: only 9 of the ~20 value-decoded commands appear
+(0, 1, 2, 3, 9, 12, 13, 20, 48), every response is Success with no
+comm-error or non-zero command-specific code, Error/NAK and the BACK frame
+type never appear, and no malformed/truncated/wrong-length input appears
+either -- unsurprising for a clean, successful field-device exchange, but it
+means the remaining commands, response-code/comm-error variety, and every
+defensive/fallback path are validated only against the hand-built
+`tests/sample_hartip.pcap` fixture (see `tools/make_sample_pcap.py`'s
+`build_hartip_sample`), cross-checked against HCF_SPEC-307 and Wireshark's
+`packet-hart_ip.c` source rather than an independent real capture -- see
+that ATTRIBUTION.md's own "Gaps" section for the complete, honest list. See
+`include/conduitscope/hartip.hpp`'s file header for the full writeup.
+
 ### Link/IP-layer plumbing: non-IPv4 Ethernet, and non-TCP IPv4 (including UDP)
 
 Every protocol above rides on Ethernet + IPv4 + TCP. Traffic outside that --
@@ -2690,6 +3065,62 @@ These are current, not aspirational -- each has a corresponding ROADMAP item.
   stubs, unfetchable in this environment) and `kargs.net`'s own capture
   archive (blocked by this session's network policy) -- see that
   ATTRIBUTION.md for the full search record.
+- **HART-IP's own structural detection gate is the weakest in this
+  codebase**, and it has a real, deliberately unresolved consequence: a
+  genuine HART-IP Session Initiate message riding over TCP is misclassified
+  as Modbus/TCP instead (or, less often, COTP/S7comm, or left as generic
+  `tcp`) -- see PROTOCOL DETECTION's "Why HART-IP is tried last" for the
+  full mechanism and why reordering was tried and rejected. This is
+  independently confirmed on genuine field traffic, not just a hand-built
+  fixture (see `tests/real_captures/hartip/ATTRIBUTION.md`), which also
+  surfaced a second, related false-positive pattern: the same weak gate
+  occasionally matches unrelated background TCP traffic that has nothing
+  to do with HART-IP at all (a TLS connection and an SMB connection, in
+  that capture), reported as "buffering a HART-IP message" that never
+  resolves. Both are harmless in the sense that no wrong data is ever
+  presented as HART-IP -- the affected traffic is simply reported under
+  its own correct protocol (or generic `tcp`) instead -- but a HART-IP
+  session's own establishment message can go uncounted in
+  `--protocol hartip`/stats output as a result. HART-IP over UDP has no
+  equivalent issue.
+- **HART-IP's Checksum byte is parsed and located but never verified** --
+  the same "surfaced raw, never checked" posture DNP3's own CRCs get (see
+  below): computing/verifying it would need the HART XOR algorithm applied
+  across the whole PDU, out of scope for this groundwork release. A
+  corrupted Pass-Through PDU that otherwise still looks structurally valid
+  is decoded without any indication the Checksum was wrong.
+- **HART-IP's Status header byte is not interpreted at all** -- every
+  message this decoder's own research and every real capture checked so
+  far carries Status `0`; a non-zero value is passed through as a plain
+  integer with no further meaning asserted, since no authoritative source
+  consulted during this decoder's research defines one.
+- **Commands 31 and 203 have no authoritative top-level name asserted**,
+  by design, not oversight -- see PROTOCOL COVERAGE's HART-IP section for
+  the full reasoning (both sit outside HART's own Universal/Common-Practice
+  numbering, and no source consulted names either one, though Wireshark's
+  own dissector decodes the same byte shape this decoder does, which is why
+  the *structure* is still decoded with confidence).
+- **HART-IP command value-decoding is a deliberate "first pass"**, the same
+  scoping precedent this codebase already applies to BACnet/IP's service
+  subset, EtherNet/IP CIP explicit messaging's own service subset, and
+  DNP3's group/variation table -- see PROTOCOL COVERAGE's HART-IP section
+  for the exact command list. Commands 77 and 178 are named but not
+  value-decoded; any other unlisted command is shown as a bare number.
+  Multi-definition and warning-class Response Codes (as HCF_SPEC-307 itself
+  classifies them) are deliberately not resolved to a per-command meaning,
+  since doing so honestly would need every command's own spec text, most of
+  which this project doesn't have. The 116-frame real capture that
+  validates this decoder (see `tests/real_captures/hartip/ATTRIBUTION.md`)
+  is genuine, and independently cross-validated field-by-field against
+  Wireshark's own HART-IP dissector, but narrow: only 9 of the ~20
+  value-decoded commands appear, every response is Success with no
+  comm-error or non-zero command-specific code, Error/NAK and the BACK
+  frame type never appear, and no malformed/truncated/wrong-length input
+  appears either -- the remaining commands, response-code/comm-error
+  variety, and every defensive/fallback path are validated only against
+  the hand-built `tests/sample_hartip.pcap`, cross-checked against
+  HCF_SPEC-307 and Wireshark's `packet-hart_ip.c` source rather than an
+  independent real capture.
 - **DNP3 CRCs are not validated** -- neither the data-link header CRC nor the
   per-block CRCs within the user data. A corrupted DNP3 frame that still
   starts with the right magic bytes will be "decoded" without any indication
@@ -3117,6 +3548,29 @@ conduitscope decode -r capture.pcap --protocol bacnet -f json \
            "\(.src_ip) -> \(.dst_ip): \(.bacnet_service_name) \(.bacnet_values // [] | join(", "))"'
 ```
 
+Build a HART-IP field-device inventory from every Read Unique Identifier
+response seen (commands 0/11/21) -- the long address, expanded device type,
+and revision fields are this protocol's own device-fingerprinting message,
+the HART analog of BACnet's I-Am:
+
+```sh
+conduitscope decode -r capture.pcap --protocol hartip -f json \
+  | jq -r '[.[] | select(.hartip_command_name == "Read Unique Identifier" and .hartip_is_response == true) |
+           "\(.hartip_address): \(.hartip_values | join(", "))"] | unique[]'
+```
+
+Surface TCP flows still stuck "buffering" a Modbus/TCP PDU that never
+arrives -- the signature of HART-IP's own documented weak-detection-gate
+collision (a real HART-IP Session Initiate message misclassified as
+Modbus/TCP, or unrelated background traffic false-positiving against
+HART-IP's own gate; see PROTOCOL DETECTION and LIMITATIONS), worth a manual
+look on a conduit expected to carry HART-IP:
+
+```sh
+conduitscope decode -r capture.pcap -f json \
+  | jq -r '[.[] | select(.summary | test("buffering a (Modbus/TCP PDU|HART-IP message)")) | .summary] | unique[]'
+```
+
 Find every Modbus write whose response was never authoritatively paired --
 either the response wasn't captured, or it used a different session/
 transaction ID than expected (worth a closer look on a conduit that should
@@ -3250,9 +3704,25 @@ Rough order, each building on the groundwork this release establishes:
    BACnet/IP) worth checking a conduit against -- PROFINET RT, GOOSE,
    Sampled Values, and EtherCAT all ride raw Ethernet with no IP layer at
    all, though, so they would need a conduit-rule shape that isn't
-   IP/CIDR-based to ever be covered; CIP I/O and BACnet/IP, by contrast, are
-   ordinary IP/UDP traffic, so extending `policy validate` to evaluate UDP
-   flows at all (see LIMITATIONS) would cover both of them at once.
+   IP/CIDR-based to ever be covered; CIP I/O, BACnet/IP, and HART-IP's own
+   UDP traffic, by contrast, are ordinary IP/UDP traffic, so extending
+   `policy validate` to evaluate UDP flows at all (see LIMITATIONS) would
+   cover all three at once (HART-IP's own TCP traffic is already covered by
+   `policy validate` today, the same as any other TCP-based protocol here).
+
+10. **Extend HART-IP's command value-decode table** beyond the "first pass"
+    set (see PROTOCOL COVERAGE) -- commands 77 and 178 in particular, since
+    they're common enough in real gateway traffic to have been named
+    proactively even though no real capture found so far happens to carry
+    either. Also: verify the HART Data-Link Checksum (the XOR algorithm
+    across the whole PDU, currently surfaced raw and never checked -- see
+    LIMITATIONS); resolve multi-definition/warning-class Response Codes to
+    their actual per-command meaning, if a reliable source for enough
+    individual commands' own spec text ever turns up; and widen real-capture
+    validation to Error/NAK messages, the BACK frame type, non-Success
+    response codes, and the ten-plus commands the one real capture found for
+    this feature doesn't happen to exercise (see
+    `tests/real_captures/hartip/ATTRIBUTION.md`'s own "Gaps" section).
 
 **pcapng support** is also now done: both classic pcap and pcapng are read
 transparently (auto-detected, no flag needed) -- see "pcap vs. pcapng"
@@ -3475,6 +3945,28 @@ this manual applies identically whether the traffic came from a file or a
 live interface. See LIVE CAPTURE above for the full reference and
 LIMITATIONS for what's not yet validated (the Windows/Npcap path, and a real
 production OT network rather than loopback).
+
+**HART-IP support** is also now done: the 8-byte fixed header, all four
+MessageID-selected body shapes (Session Initiate/Close/Keep Alive/Pass
+Through), the full byte-by-byte Pass-Through Data-Link PDU, a "first pass"
+command value-decode set, packed-ASCII and HART-format-timestamp decoding,
+and opportunistic detection on both TCP and UDP -- see PROTOCOL COVERAGE's
+HART-IP section. Unlike every protocol added before it, this one surfaced a
+genuine, unavoidable detection collision rather than a resolvable one: a
+HART-IP Session Initiate message's own header happens to also look like a
+plausible Modbus/TCP MBAP header, and unlike the IEC-104-vs-Modbus collision
+this project already resolved once by reordering, the same fix measurably
+regressed this project's own Modbus/S7comm test corpus when tried here (see
+PROTOCOL DETECTION's "Why HART-IP is tried last"). Rather than silently
+working around that with an unsafe fix, it's documented as an accepted
+limitation, demonstrated in the synthetic fixture, and -- independently --
+confirmed to occur on genuine field traffic, not just a hand-built one, by
+the real HART-IP capture found for this feature (see
+`tests/real_captures/hartip/ATTRIBUTION.md`, which also surfaced a second,
+previously-undocumented false-positive pattern against unrelated background
+TCP traffic). See LIMITATIONS for the complete list of what's still out of
+scope (Checksum verification, per-command Response Code resolution, and
+more).
 
 ## BUILDING
 

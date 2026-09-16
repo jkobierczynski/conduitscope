@@ -1,6 +1,6 @@
 .TH CONDUITSCOPE 1 "2026" "conduitscope 0.1.0" "User Commands"
 .SH NAME
-conduitscope \- decode Modbus/TCP, DNP3, IEC 60870-5-104, S7comm/COTP, EtherNet/IP (CIP explicit and implicit messaging), PROFINET RT (DCP and cyclic real-time IO), IEC 61850-8-1 GOOSE, IEC 61850-9-2 Sampled Values, EtherCAT, and BACnet/IP traffic from offline pcap/pcapng captures
+conduitscope \- decode Modbus/TCP, DNP3, IEC 60870-5-104, S7comm/COTP, EtherNet/IP (CIP explicit and implicit messaging), PROFINET RT (DCP and cyclic real-time IO), IEC 61850-8-1 GOOSE, IEC 61850-9-2 Sampled Values, EtherCAT, BACnet/IP, and HART-IP traffic from offline pcap/pcapng captures
 .SH SYNOPSIS
 .B conduitscope
 [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-color\fR|\fB\-\-color\fR] [\fB\-\-log\-file\fR \fIFILE\fR] \fICOMMAND\fR [\fIOPTIONS\fR]
@@ -20,7 +20,9 @@ GOOSE's sibling protocol, ASN.1 BER-encoded SavPdu), and EtherCAT (EtherType
 directly on the wire, with no
 IP/TCP/UDP layer at all, plus BACnet/IP (UDP port 47808/0xBAC0, ASHRAE 135
 Annex J, detected by payload shape rather than port) traffic found inside
-its UDP streams, and checks
+its UDP streams, plus HART-IP (UDP/TCP port 5094, IEC 62591 / HCF_SPEC-151,
+tried last of all protocols on both transports due to its own genuinely
+weak structural detection gate) traffic found on either, and checks
 decoded traffic against a
 zone-and-conduit segmentation policy (IEC 62443 / NIS2 style work) via
 \fBpolicy validate\fR.
@@ -85,8 +87,8 @@ Write output here instead of stdout.
 .BR \-f ", " \-\-format " " {text,json,csv}
 Output format. Default: text.
 .TP
-.B \-\-protocol {auto,modbus,dnp3,iec104,s7comm,enip,profinet,goose,sv,ethercat,bacnet}
-Restrict decoding to one protocol. Default: auto (tries all five TCP
+.B \-\-protocol {auto,modbus,dnp3,iec104,s7comm,enip,profinet,goose,sv,ethercat,bacnet,hartip}
+Restrict decoding to one protocol. Default: auto (tries all six TCP
 protocols, independent of port number, plus CIP I/O and BACnet/IP on every
 UDP payload,
 plus PROFINET RT on every non-IPv4 Ethernet frame carrying EtherType
@@ -95,11 +97,16 @@ plus PROFINET RT on every non-IPv4 Ethernet frame carrying EtherType
 EtherType 0x88BA, plus EtherCAT on every non-IPv4 Ethernet frame carrying
 EtherType 0x88A4; EtherNet/IP is tried first, then IEC 104 before Modbus, since an
 IEC 104 I-format APDU with sequence numbers 0/0 -- universal at session
-start -- coincidentally also matches Modbus's MBAP-header detection; see
+start -- coincidentally also matches Modbus's MBAP-header detection, and
+HART-IP is tried last of all, on both TCP and UDP, since its own 8-byte
+header check is the weakest structural gate of any protocol here and is
+known to collide with Modbus/TCP's own detection on TCP (never resolved by
+reordering -- see
 \fBdocs/MANUAL.md\fR's PROTOCOL DETECTION section). \fBenip\fR covers both
 EtherNet/IP explicit messaging (TCP) and CIP I/O implicit messaging (UDP).
 \fBsv\fR is IEC 61850-9-2 Sampled Values. \fBethercat\fR is EtherCAT.
 \fBbacnet\fR is BACnet/IP.
+\fBhartip\fR is HART-IP, tried on both TCP and UDP.
 \fBprofinet\fR covers both DCP and cyclic real-time IO.
 .TP
 .B \-\-modbus\-port \fIPORT\fR
@@ -123,6 +130,10 @@ Same as \fB\-\-modbus\-port\fR, for EtherNet/IP CIP I/O implicit messaging (UDP)
 .TP
 .B \-\-bacnet\-port \fIPORT\fR
 Same as \fB\-\-modbus\-port\fR, for BACnet/IP (UDP). Repeatable.
+.TP
+.B \-\-hartip\-port \fIPORT\fR
+Same as \fB\-\-modbus\-port\fR, for HART-IP. Repeatable. Applies to both TCP
+and UDP, since HART-IP uses the same port number on either transport.
 .TP
 .B \-\-max\-packets \fIN\fR
 Stop after decoding this many packets. Default: 0 (unlimited). With
@@ -223,7 +234,8 @@ it's meant to be diffed/archived/piped as an audit artifact). The
 \fB[protocol]\fR tag is colored per protocol: cyan for Modbus, magenta for
 DNP3, green for IEC 104, blue for S7comm/COTP, yellow for EtherNet/IP,
 bright cyan for PROFINET RT, bright green for GOOSE, bright magenta for
-Sampled Values, bright yellow for EtherCAT, bright blue for BACnet/IP, dim
+Sampled Values, bright yellow for EtherCAT, bright blue for BACnet/IP,
+bright white for HART-IP, dim
 for everything else
 recognized but not OT\-specific. A Modbus exception response's summary, and a
 \fBparse\-error\fR packet's whole line, are bold red. Notes are dim.
@@ -353,12 +365,38 @@ own service data (no cross-packet reassembly); validated against a genuine
 trend-log objects), but device discovery, WriteProperty, every
 PropertyValue type besides a scalar Unsigned, every other BVLC function,
 and NPDU routing fields are validated only against a hand-built synthetic
-fixture; non-IPv4
+fixture; HART-IP (UDP/TCP port 5094, IEC 62591 / HCF_SPEC-151) is also now
+decoded -- the 8-byte HART-IP header, all four MessageID-selected body
+shapes (Session Initiate, Session Close, Keep Alive, Pass Through), and,
+inside Pass-Through, the full wired-HART Data-Link PDU (Delimiter/Address/
+Command/Byte-Count/Response-Code/Device-Status/Data/Checksum) -- but its
+own structural detection gate (an 8-byte header with only loose value
+checks) is the weakest of any protocol in this tool, and is a KNOWN,
+ACCEPTED, DOCUMENTED LIMITATION: on TCP it collides with Modbus/TCP's own
+MBAP-header detection on certain byte patterns (reordering the two was
+tried and rejected -- it regressed ~2% of this tool's own Modbus/TCP test
+corpus -- so HART-IP is deliberately tried last), and, confirmed on a
+genuine real capture, the same weak gate also false-positives against
+unrelated background TCP traffic (TLS, SMB) that has nothing to do with
+either protocol; the Data-Link Checksum is surfaced raw and never verified;
+the Device-Status byte's flags are decoded but the header's own Status byte
+is, per the spec itself, always 0 in current usage; commands 31 and 203 are
+decoded structurally but deliberately given no authoritative top-level name
+(no reliable source names either, only an inferred pairing); command
+value-decoding is a "first pass" covering the most common read/write/
+identification commands, with commands 77 and 178 in particular named but
+not value-decoded; and validation is against both a comprehensive synthetic
+fixture and a genuine 116-frame real capture, but that real capture only
+exercises 9 of the roughly 20 decoded commands, no Error/NAK messages, no
+BACK frame type, and no non-Success response codes (see
+\fBdocs/MANUAL.md\fR's LIMITATIONS section and
+\fBtests/real_captures/hartip/ATTRIBUTION.md\fR for the full detail); non-IPv4
 Ethernet frames and non-TCP
 IPv4 payloads (including UDP) are otherwise still just recognized and
 NAMED for a small OT-relevant set (ARP, LLDP, ICMP, and the rest) but not further decoded, and
 \fBpolicy validate\fR does not yet evaluate any non-TCP traffic (CIP I/O,
-PROFINET RT, GOOSE, Sampled Values, EtherCAT, and BACnet/IP included) against a conduit;
+PROFINET RT, GOOSE, Sampled Values, EtherCAT, BACnet/IP, and HART-IP's own
+UDP traffic included) against a conduit;
 Modbus request/response
 classification falls back to a payload-shape heuristic only when
 authoritative pairing can't be done (no matching request on this session);
@@ -474,6 +512,25 @@ conduitscope decode \-r capture.pcap \-\-protocol bacnet \-f json \e
 .EE
 .RE
 .PP
+Build a quick HART-IP device inventory (Unique Identifier responses by address):
+.RS
+.EX
+conduitscope decode \-r capture.pcap \-\-protocol hartip \-f json \e
+  | jq \-r '[.[] | select(.hartip_command_name == "Read Unique Identifier" and .hartip_is_response == true) |
+           "\e(.hartip_address): \e(.hartip_values | join(", "))"] | unique[]'
+.EE
+.RE
+.PP
+Surface TCP flows still stuck "buffering" a Modbus/TCP PDU that never
+arrives -- the signature of HART-IP's own documented weak-detection-gate
+collision (see LIMITATIONS above):
+.RS
+.EX
+conduitscope decode \-r capture.pcap \-f json \e
+  | jq \-r '[.[] | select(.summary | test("buffering a (Modbus/TCP PDU|HART\-IP message)")) | .summary] | unique[]'
+.EE
+.RE
+.PP
 Check a capture against a zone/conduit policy:
 .RS
 .EX
@@ -491,7 +548,7 @@ conduitscope interfaces
 Decode live traffic from eth0 for 60 seconds:
 .RS
 .EX
-conduitscope decode \-i eth0 \-\-filter "port 502 or port 102" \-\-duration 60
+conduitscope decode \-i eth0 \-\-filter "port 502 or port 102 or port 5094" \-\-duration 60
 .EE
 .RE
 .PP
