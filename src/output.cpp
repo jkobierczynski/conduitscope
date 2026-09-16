@@ -61,6 +61,7 @@ constexpr const char* kGreen = "\033[32m";
 constexpr const char* kYellow = "\033[33m";
 constexpr const char* kBrightCyan = "\033[96m";
 constexpr const char* kBrightGreen = "\033[92m";
+constexpr const char* kBrightMagenta = "\033[95m";
 
 // Color for a packet's "[protocol]" tag -- picked so a mixed-protocol capture scans quickly by
 // eye, not for any deeper meaning. parse-error is the one exception: it gets the same "something
@@ -75,6 +76,7 @@ const char* protocol_tag_color(const std::string& protocol) {
     if (protocol == "enip") return kYellow;
     if (protocol == "profinet") return kBrightCyan;
     if (protocol == "goose") return kBrightGreen;
+    if (protocol == "sv") return kBrightMagenta;
     if (protocol == "parse-error") return kBoldRed;
     return kDim;  // tcp / udp / non-tcp / non-ip / unsupported-link: recognized, nothing OT-specific
 }
@@ -262,6 +264,34 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
             out_ << "],\n";
         }
     }
+    if (p.protocol == "sv") {
+        std::ostringstream appid;
+        appid << "0x" << std::hex << std::uppercase << std::setw(4) << std::setfill('0') << p.sv_appid;
+        out_ << "    \"sv_appid\": \"" << appid.str() << "\",\n";
+        out_ << "    \"sv_simulated\": " << (p.sv_simulated ? "true" : "false") << ",\n";
+        out_ << "    \"sv_no_asdu\": " << p.sv_no_asdu << ",\n";
+        out_ << "    \"sv_asdu_count\": " << p.sv_asdu_count << ",\n";
+        if (p.sv_asdu_count > 0) {
+            out_ << "    \"sv_id\": \"" << json_escape(p.sv_id) << "\",\n";
+            if (!p.sv_dat_set.empty()) out_ << "    \"sv_dat_set\": \"" << json_escape(p.sv_dat_set) << "\",\n";
+            out_ << "    \"sv_smp_cnt\": " << p.sv_smp_cnt << ",\n";
+            out_ << "    \"sv_conf_rev\": " << p.sv_conf_rev << ",\n";
+            if (!p.sv_smp_synch.empty()) out_ << "    \"sv_smp_synch\": \"" << json_escape(p.sv_smp_synch) << "\",\n";
+            if (p.sv_smp_rate != 0) out_ << "    \"sv_smp_rate\": " << p.sv_smp_rate << ",\n";
+            if (!p.sv_smp_mod.empty()) out_ << "    \"sv_smp_mod\": \"" << json_escape(p.sv_smp_mod) << "\",\n";
+            out_ << "    \"sv_seq_data_length\": " << p.sv_seq_data_length << ",\n";
+            out_ << "    \"sv_seq_data_hex\": \"" << json_escape(p.sv_seq_data_hex) << "\",\n";
+            if (!p.sv_gmid_hex.empty()) out_ << "    \"sv_gmid_hex\": \"" << json_escape(p.sv_gmid_hex) << "\",\n";
+        }
+        if (!p.sv_asdus.empty()) {
+            out_ << "    \"sv_asdus\": [";
+            for (size_t i = 0; i < p.sv_asdus.size(); ++i) {
+                if (i != 0) out_ << ", ";
+                out_ << "\"" << json_escape(p.sv_asdus[i]) << "\"";
+            }
+            out_ << "],\n";
+        }
+    }
     out_ << "    \"notes\": [";
     for (size_t i = 0; i < p.notes.size(); ++i) {
         if (i != 0) out_ << ", ";
@@ -322,6 +352,10 @@ void StatsWriter::write_packet(const DecodedPacket& p) {
         if (p.goose_has_pdu) goose_pdu_count_++;
         if (p.goose_is_gse_management) goose_gse_management_count_++;
         if (p.goose_simulated) goose_simulated_count_++;
+    }
+    if (p.protocol == "sv") {
+        sv_frame_count_++;
+        sv_asdu_total_ += p.sv_asdu_count;
     }
     if (!has_ts_) {
         first_ts_ = last_ts_ = p.timestamp;
@@ -396,6 +430,10 @@ void StatsWriter::print_summary(std::ostream& out) const {
         out << "goose pdus: " << goose_pdu_count_ << "\n";
         out << "goose gse management pdus (not decoded further): " << goose_gse_management_count_ << "\n";
         out << "goose simulated (S-bit or simulation field set): " << goose_simulated_count_ << "\n";
+    }
+    if (sv_frame_count_ > 0) {
+        out << "sv frames: " << sv_frame_count_ << "\n";
+        out << "sv asdus (summed across every frame): " << sv_asdu_total_ << "\n";
     }
 }
 

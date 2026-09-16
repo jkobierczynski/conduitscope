@@ -19,12 +19,13 @@
 #include "conduitscope/modbus.hpp"
 #include "conduitscope/pcap_reader.hpp"
 #include "conduitscope/profinet.hpp"
+#include "conduitscope/sv.hpp"
 #include "conduitscope/tcp.hpp"
 
 namespace conduitscope {
 
 enum class ProtocolFilter {
-    Auto,         // opportunistically detect IEC104/Modbus/DNP3/S7comm/EtherNet-IP/PROFINET/GOOSE regardless of port
+    Auto,         // opportunistically detect IEC104/Modbus/DNP3/S7comm/EtherNet-IP/PROFINET/GOOSE/SV regardless of port
     ModbusOnly,   // only attempt Modbus decoding
     Dnp3Only,     // only attempt DNP3 decoding
     S7commOnly,   // only attempt TPKT/COTP/S7comm decoding
@@ -32,6 +33,7 @@ enum class ProtocolFilter {
     EnipOnly,     // only attempt EtherNet/IP (CIP explicit messaging) decoding
     ProfinetOnly, // only attempt PROFINET RT (DCP + cyclic IO data) decoding
     GooseOnly,    // only attempt IEC 61850-8-1 GOOSE decoding
+    SvOnly,       // only attempt IEC 61850-9-2 Sampled Values decoding
 };
 
 struct DecodeOptions {
@@ -80,19 +82,21 @@ struct DecodedPacket {
     uint16_t src_port = 0, dst_port = 0;
     std::string tcp_flags;
 
-    // "iec104", "modbus", "dnp3", "s7comm", "enip", "profinet", "goose", "cotp" (recognized
+    // "iec104", "modbus", "dnp3", "s7comm", "enip", "profinet", "goose", "sv", "cotp" (recognized
     // TPKT/COTP framing but not S7comm inside it -- e.g. a connection setup frame), "tcp"
     // (recognized transport, no app-layer match), "udp" (recognized transport, no app-layer
     // protocol decoded -- see udp.hpp; UDP/2222 CIP I/O traffic that try_parse_cip_io actually
     // recognizes is promoted to "enip" instead -- see enip_has_io below), "non-tcp" (a non-TCP,
     // non-UDP IPv4 payload, e.g. ICMP), "non-ip" (a non-IPv4 Ethernet frame, e.g. ARP, or a
-    // raw-Ethernet OT protocol this tool doesn't decode like EtherCAT or IEC 61850-9-2 Sampled
-    // Values, or a PROFINET RT frame whose FrameID try_parse_profinet doesn't recognize, or a
-    // GOOSE frame whose outer APDU tag try_parse_goose doesn't recognize -- see link_layer.hpp's
-    // ethertype_name; EtherType 0x8892 traffic that try_parse_profinet DOES recognize is promoted
-    // to "profinet" instead -- see profinet_has_dcp/profinet_has_cyclic_data below; EtherType
-    // 0x88B8 traffic that try_parse_goose DOES recognize is promoted to "goose" instead -- see
-    // goose_has_pdu/goose_is_gse_management below), "unsupported-link", or "parse-error".
+    // raw-Ethernet OT protocol this tool doesn't decode like EtherCAT, or a PROFINET RT frame
+    // whose FrameID try_parse_profinet doesn't recognize, or a GOOSE frame whose outer APDU tag
+    // try_parse_goose doesn't recognize, or an SV frame whose outer APDU tag try_parse_sv doesn't
+    // recognize -- see link_layer.hpp's ethertype_name; EtherType 0x8892 traffic that
+    // try_parse_profinet DOES recognize is promoted to "profinet" instead -- see
+    // profinet_has_dcp/profinet_has_cyclic_data below; EtherType 0x88B8 traffic that
+    // try_parse_goose DOES recognize is promoted to "goose" instead -- see goose_has_pdu/
+    // goose_is_gse_management below; EtherType 0x88BA traffic that try_parse_sv DOES recognize is
+    // promoted to "sv" instead -- see sv_asdu_count below), "unsupported-link", or "parse-error".
     std::string protocol;
     std::string summary;
     std::vector<std::string> notes;
@@ -220,6 +224,35 @@ struct DecodedPacket {
     // 0b0000000000000"), capped at 50 entries for the same reason as profinet_dcp_blocks/
     // enip_cip_values -- see goose.hpp's GooseDataValue for the dotted-path scheme.
     std::vector<std::string> goose_all_data;
+
+    // Only set when protocol == "sv" -- see try_parse_sv in sv.hpp. Like GOOSE and PROFINET RT
+    // above, SV rides directly on raw Ethernet (EtherType 0x88BA, has_ip stays false) --
+    // src_mac/dst_mac (above) are the only addressing this packet carries.
+    uint16_t sv_appid = 0;
+    bool sv_simulated = false;  // header S-bit (Reserved1 0x8000) -- SV has no PDU-level
+                                  // simulation field to cross-check it against, unlike GOOSE
+    uint64_t sv_no_asdu = 0;     // SavPdu's declared noASDU count
+    uint64_t sv_asdu_count = 0;  // how many ASDUs were actually decoded -- a mismatch against
+                                   // sv_no_asdu is noted
+
+    // The first decoded ASDU's own fields, promoted here for convenience -- the great majority of
+    // real SV traffic carries exactly one ASDU per frame (see sv.hpp's LIMITATIONS-relevant
+    // Validation paragraph). See sv_asdus below for every ASDU when sv_asdu_count > 1. All
+    // empty/0 when sv_asdu_count == 0.
+    std::string sv_id;
+    std::string sv_dat_set;      // empty when the optional datSet field wasn't present
+    uint64_t sv_smp_cnt = 0;
+    uint64_t sv_conf_rev = 0;
+    std::string sv_smp_synch;    // "none"/"local"/"global"/"unknown(N)", empty when absent
+    uint64_t sv_smp_rate = 0;    // 0 when the optional smpRate field wasn't present
+    std::string sv_smp_mod;      // "samplesPerNormalPeriod"/etc, empty when absent
+    std::string sv_seq_data_hex; // raw hex, deliberately not value-decoded -- see sv.hpp
+    size_t sv_seq_data_length = 0;
+    std::string sv_gmid_hex;     // 8-byte EUI-64 grandmaster identity, raw hex; empty when absent
+
+    // One summary string per decoded ASDU (e.g. "svID=\"MU01\" smpCnt=1234 confRev=1"), capped at
+    // 50 entries for the same reason as profinet_dcp_blocks/goose_all_data.
+    std::vector<std::string> sv_asdus;
 };
 
 // Cross-packet DNP3 fragment-reassembly state for one directional TCP flow (src ip:port -> dst

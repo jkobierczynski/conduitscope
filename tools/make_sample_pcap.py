@@ -998,6 +998,170 @@ def build_goose_sample():
     (TESTS_DIR / "sample_goose.pcap").write_bytes(data)
 
 
+def sv_asdu(sv_id: str, smp_cnt: int, conf_rev: int, seq_data: bytes, dat_set=None, refr_tm=None,
+            smp_synch=None, smp_rate=None, smp_mod=None, gmid=None) -> bytes:
+    """Builds one 0x30-tagged (UNIVERSAL SEQUENCE) ASDU element -- ASDU_sequence field order (see
+    sv.hpp's file header comment's ASDU field table). `dat_set`/`refr_tm`/`smp_synch`/`smp_rate`/
+    `smp_mod`/`gmid` are all OPTIONAL per spec -- pass None (the default) to omit that field
+    entirely (exercises try_parse_sv's optional-field-absence path). `refr_tm` and `gmid`, when
+    given, are already-encoded byte strings (8 bytes each -- see utctime_bytes for refr_tm)."""
+    parts = [ber_tlv(0x80, sv_id.encode("ascii"))]
+    if dat_set is not None:
+        parts.append(ber_tlv(0x81, dat_set.encode("ascii")))
+    parts.append(ber_tlv(0x82, ber_int(smp_cnt)))
+    parts.append(ber_tlv(0x83, ber_int(conf_rev)))
+    if refr_tm is not None:
+        parts.append(ber_tlv(0x84, refr_tm))
+    if smp_synch is not None:
+        parts.append(ber_tlv(0x85, ber_int(smp_synch)))
+    if smp_rate is not None:
+        parts.append(ber_tlv(0x86, ber_int(smp_rate)))
+    parts.append(ber_tlv(0x87, seq_data))
+    if smp_mod is not None:
+        parts.append(ber_tlv(0x88, ber_int(smp_mod)))
+    if gmid is not None:
+        parts.append(ber_tlv(0x89, gmid))
+    return ber_tlv(0x30, b"".join(parts))
+
+
+def sv_sav_pdu(asdus, no_asdu=None) -> bytes:
+    """Builds the 0x60-tagged SampledValues/SavPdu: noASDU + seqASDU, `asdus` being a list of
+    already-encoded sv_asdu() elements (see sv.hpp's file header comment). `no_asdu` overrides the
+    declared noASDU count when given, independent of len(asdus) -- for deliberately exercising
+    decode_sav_pdu's mismatch-count note; defaults to len(asdus)."""
+    n = no_asdu if no_asdu is not None else len(asdus)
+    parts = [ber_tlv(0x80, ber_int(n)), ber_tlv(0xA2, b"".join(asdus))]
+    return ber_tlv(0x60, b"".join(parts))
+
+
+def sv_frame(appid: int, apdu: bytes, dst: bytes = None, src: bytes = None, vlan_tci=None,
+             reserved1: int = 0, declared_length=None) -> bytes:
+    """One raw-Ethernet SV frame: EtherType 0x88BA, with the identical 8-byte APPID/Length/
+    Reserved1/Reserved2 header goose_frame uses (SV and GOOSE share this header shape -- see
+    sv.hpp's file header comment). Same optional-VLAN-tag/declared_length-override behavior as
+    goose_frame."""
+    dst = dst if dst is not None else PLC_MAC
+    src = src if src is not None else HMI_MAC
+    length = declared_length if declared_length is not None else (8 + len(apdu))
+    header = struct.pack("!HHHH", appid, length, reserved1, 0) + apdu
+    if vlan_tci is not None:
+        return struct.pack("!6s6sHH", dst, src, 0x8100, vlan_tci) + struct.pack("!H", 0x88BA) + header
+    return eth_header(dst, src, 0x88BA) + header
+
+
+def build_sv_sample():
+    """IEC 61850-9-2 Sampled Values (EtherType 0x88BA): the ASN.1 BER-encoded SavPdu (noASDU +
+    one or more ASDU elements) and each ASDU's own svID/datSet/smpCnt/confRev/refrTm/smpSynch/
+    smpRate/seqData/smpMod/gmidData fields. See sv.hpp's file header comment for the exact wire
+    format each packet below exercises (cross-checked against Wireshark's packet-sv.c) -- no real
+    SV capture was found despite a genuine search (see sv.hpp's Validation paragraph), so every
+    path here is synthetic-only, unlike GOOSE's real-capture-corroborated fixture."""
+    packets = []
+    refr_tm = utctime_bytes(0x386EBBF3, 0x421728, 0x0A)  # arbitrary but plausible UtcTime bytes,
+                                                            # same encoding goose.hpp's UtcTime
+                                                            # paragraph documents
+
+    # 1) A baseline full-field ASDU -- every optional field present (datSet, refrTm, smpSynch=
+    #    global, smpRate, smpMod=samplesPerNormalPeriod, gmidData), a plausible 9-2LE-shaped
+    #    64-byte seqData (8 channels x (4-byte value + 4-byte quality), though this decoder never
+    #    interprets it that way -- see sv.hpp's seqData paragraph).
+    seq_data_1 = bytes(64)
+    gmid_1 = bytes.fromhex("0019FBFFFE001122")  # vendor OUI 00:19:FB + 0xFFFE + card ID, the
+                                                  # EUI-64 shape dissect_sv_GmidData checks for
+    asdu1 = sv_asdu("IED1/MSVCB01", 1234, 1, seq_data_1, dat_set="IED1/LLN0$MEAS1", refr_tm=refr_tm,
+                     smp_synch=2, smp_rate=4000, smp_mod=0, gmid=gmid_1)
+    packets.append(sv_frame(0x4000, sv_sav_pdu([asdu1])))
+
+    # 2) Every optional field (datSet, refrTm, smpSynch, smpRate, smpMod, gmidData) OMITTED
+    #    entirely -- exercises try_parse_sv's optional-field-absence path (spec-legal).
+    asdu2 = sv_asdu("IED1/MSVCB02", 5678, 1, bytes(8))
+    packets.append(sv_frame(0x4001, sv_sav_pdu([asdu2])))
+
+    # 3) Two ASDUs in one seqASDU (noASDU=2) -- a merging unit publishing two logical streams in
+    #    one frame; smpSynch=local on the first, smpSynch=none on the second, exercising both
+    #    enumerated values plus multi-ASDU decoding/summarization (sv_asdus).
+    asdu3a = sv_asdu("IED2/MSVCB01", 100, 3, bytes(8), smp_synch=1)
+    asdu3b = sv_asdu("IED2/MSVCB02", 200, 3, bytes(8), smp_synch=0)
+    packets.append(sv_frame(0x4002, sv_sav_pdu([asdu3a, asdu3b])))
+
+    # 4) Header S-bit set ("Simulated") -- unlike GOOSE, SV's ASDU has no PDU-level simulation
+    #    field to cross-check against (see sv.hpp's file header comment), so this is simply
+    #    sv_simulated=true with no consistency note to make.
+    asdu4 = sv_asdu("IED1/MSVCB04", 1, 1, bytes(8))
+    packets.append(sv_frame(0x4003, sv_sav_pdu([asdu4]), reserved1=0x8000))
+
+    # 5) smpSynch and smpMod both carrying a value outside the recognized enumeration (5) --
+    #    rendered as "unknown(5)" rather than guessed at or dropped.
+    asdu5 = sv_asdu("IED1/MSVCB05", 1, 1, bytes(8), smp_synch=5, smp_mod=5)
+    packets.append(sv_frame(0x4004, sv_sav_pdu([asdu5])))
+
+    # 6) smpMod=samplesPerSecond(1) and smpMod=secondsPerSample(2) -- the two enumerated values
+    #    packet 1/5 above don't already cover -- one ASDU each, to keep every enumerated value
+    #    individually attributable in the decoded output.
+    asdu6a = sv_asdu("IED1/MSVCB06", 1, 1, bytes(8), smp_mod=1)
+    packets.append(sv_frame(0x4005, sv_sav_pdu([asdu6a])))
+    asdu6b = sv_asdu("IED1/MSVCB07", 1, 1, bytes(8), smp_mod=2)
+    packets.append(sv_frame(0x4006, sv_sav_pdu([asdu6b])))
+
+    # 7) noASDU declares 3 but seqASDU actually carries only 2 -- exercises decode_sav_pdu's
+    #    mismatch-count note (mirroring GOOSE's numDatSetEntries mismatch test).
+    asdu7a = sv_asdu("IED3/MSVCB01", 1, 1, bytes(8))
+    asdu7b = sv_asdu("IED3/MSVCB02", 1, 1, bytes(8))
+    packets.append(sv_frame(0x4007, sv_sav_pdu([asdu7a, asdu7b], no_asdu=3)))
+
+    # 8) 802.1Q VLAN-priority-tagged SV, multicast to the well-known SV MAC range (01-0C-CD-04-
+    #    xx-xx, distinct from GOOSE's 01-0C-CD-01-xx-xx -- see sv.hpp's file header comment and
+    #    IEC 61850-8-1's own default multicast address table) -- confirms parse_ethernet's single-
+    #    VLAN-tag unwrap composes correctly with SV detection, mirroring GOOSE's own VLAN test.
+    asdu8 = sv_asdu("IED4/MSVCB01", 1, 1, bytes(8))
+    packets.append(sv_frame(0x5000, sv_sav_pdu([asdu8]), dst=bytes.fromhex("010ccd040001"),
+                             src=bytes.fromhex("000c291a2b3c"), vlan_tci=0x8000))
+
+    # 9) Header too short for even the fixed 8-byte APPID/Length/Reserved1/Reserved2 -- must not
+    #    crash, falls through to the generic "non-ip" ethertype-name-only report.
+    packets.append(eth_header(PLC_MAC, HMI_MAC, 0x88BA) + bytes([0x00, 0x01, 0x00, 0x02]))
+
+    # 10) A full 8-byte header but the byte immediately after it is not 0x60 -- must NOT be
+    #     misdetected as SV; falls through to the generic "non-ip" report.
+    packets.append(eth_header(PLC_MAC, HMI_MAC, 0x88BA) + struct.pack("!HHHH", 0x0009, 10, 0, 0) +
+                    bytes([0x99, 0x01, 0x02, 0x03]))
+
+    # 11) Length field declares fewer than 8 bytes (bogus, mirroring GOOSE's own test) -- falls
+    #     back to "use all available bytes instead", still decodes correctly, with a note.
+    asdu11 = sv_asdu("IED5/MSVCB01", 1, 1, bytes(8))
+    packets.append(sv_frame(0x4008, sv_sav_pdu([asdu11]), declared_length=3))
+
+    # 12) The outer APDU TLV's own declared length exceeds what's actually present (a plausibly
+    #     snaplen-truncated capture) -- decodes nothing from SavPdu's fields (nothing complete to
+    #     decode) but is still confidently recognized as "sv" rather than falling back to
+    #     "non-ip", with a truncation note. Built by hand, mirroring GOOSE's own test #14.
+    truncated_apdu = bytes([0x60]) + ber_length(200) + ber_tlv(0x80, ber_int(1))
+    packets.append(sv_frame(0x4009, truncated_apdu))
+
+    # 13) A seqASDU element whose tag is not the expected UNIVERSAL SEQUENCE tag (0x30) -- skipped
+    #     with a note rather than mis-parsed as an ASDU.
+    bogus_sav_pdu = ber_tlv(0x80, ber_int(1)) + ber_tlv(0xA2, ber_tlv(0x31, bytes([0x80, 0x01, 0x41])))
+    packets.append(sv_frame(0x400A, ber_tlv(0x60, bogus_sav_pdu)))
+
+    # 14) An unrecognized ASDU field tag (0x8F, not part of ASDU_sequence -- see sv.hpp's file
+    #     header comment) -- skipped with a note, raw hex shown, rest of the ASDU still decoded.
+    asdu14_content = ber_tlv(0x80, b"IED6/MSVCB01") + ber_tlv(0x82, ber_int(1)) + ber_tlv(0x83, ber_int(1)) + \
+                      ber_tlv(0x8F, bytes([0xAA, 0xBB])) + ber_tlv(0x87, bytes(8))
+    packets.append(sv_frame(0x400B, ber_tlv(0x60, ber_tlv(0x80, ber_int(1)) +
+                                              ber_tlv(0xA2, ber_tlv(0x30, asdu14_content)))))
+
+    # 15) An unrecognized SavPdu-level field tag (context tag 1 -- reserved/unused per
+    #     SavPdu_sequence, see sv.hpp's file header comment) -- skipped with a note.
+    asdu15 = sv_asdu("IED7/MSVCB01", 1, 1, bytes(8))
+    bogus_sav_pdu_2 = ber_tlv(0x81, bytes([0x00])) + ber_tlv(0x80, ber_int(1)) + ber_tlv(0xA2, asdu15)
+    packets.append(sv_frame(0x400C, ber_tlv(0x60, bogus_sav_pdu_2)))
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_003_000 + i, i * 1000)
+    (TESTS_DIR / "sample_sv.pcap").write_bytes(data)
+
+
 ENIP_PORT = 44818
 
 
@@ -1820,6 +1984,7 @@ if __name__ == "__main__":
     build_enip_cip_io_sample()
     build_profinet_sample()
     build_goose_sample()
+    build_sv_sample()
     build_s7comm_sample()
     build_s7comm_items_sample()
     build_s7comm_1200sym_sample()

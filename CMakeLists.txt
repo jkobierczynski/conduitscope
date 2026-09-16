@@ -33,6 +33,7 @@ add_library(conduitscope_core STATIC
   src/enip.cpp
   src/profinet.cpp
   src/goose.cpp
+  src/sv.cpp
   src/cotp.cpp
   src/s7comm.cpp
   src/decoder.cpp
@@ -1032,6 +1033,114 @@ add_test(NAME real_goose_mms_and_goose_mixed_protocols_decoded
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/goose/sample_file_mms_and_goose.pcap" --stats)
 set_tests_properties(real_goose_mms_and_goose_mixed_protocols_decoded PROPERTIES
   PASS_REGULAR_EXPRESSION "cotp[^\n]*\n *goose +34")
+
+# --------------------------------------------------------------------------
+# IEC 61850-9-2 Sampled Values (synthetic, tests/sample_sv.pcap): the ASN.1 BER-encoded SavPdu
+# (noASDU + one or more ASDU elements) -- see tools/make_sample_pcap.py's build_sv_sample for the
+# exact byte layout each assertion below is checking, and sv.hpp's file header comment for the
+# decoder itself. Like GOOSE and PROFINET RT, SV rides directly on raw Ethernet (EtherType
+# 0x88BA) -- there is no IP/TCP/UDP layer at all. No real SV capture was found despite a genuine
+# search (see sv.hpp's Validation paragraph), so unlike GOOSE, there is no real-capture test block
+# below -- every path here is synthetic-only.
+# --------------------------------------------------------------------------
+add_test(NAME sv_full_field_asdu_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_sv.pcap")
+set_tests_properties(sv_full_field_asdu_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"sv_id\": \"IED1/MSVCB01\".*\"sv_dat_set\": \"IED1/LLN0\\$MEAS1\".*\"sv_smp_cnt\": 1234.*\"sv_conf_rev\": 1.*\"sv_smp_synch\": \"global\".*\"sv_smp_rate\": 4000.*\"sv_smp_mod\": \"samplesPerNormalPeriod\".*\"sv_seq_data_length\": 64.*\"sv_gmid_hex\": \"0019fbfffe001122\"")
+
+add_test(NAME sv_optional_fields_absent_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_sv.pcap" --format text)
+set_tests_properties(sv_optional_fields_absent_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "SV IED1/MSVCB02 smpCnt=5678 confRev=1\n")
+
+# Two ASDUs in one seqASDU -- exercises the SEQUENCE OF ASDU decode, the frame summary's "(+N more
+# ASDU(s))" suffix, and sv_asdus carrying one entry per ASDU.
+add_test(NAME sv_multiple_asdus_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_sv.pcap")
+set_tests_properties(sv_multiple_asdus_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"sv_asdu_count\": 2.*\"sv_asdus\": \\[\"svID=\\\\\"IED2/MSVCB01\\\\\"[^\"]*smpSynch=local[^\"]*\", \"svID=\\\\\"IED2/MSVCB02\\\\\"[^\"]*smpSynch=none")
+
+add_test(NAME sv_multiple_asdus_summary_suffix
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_sv.pcap" --format text)
+set_tests_properties(sv_multiple_asdus_summary_suffix PROPERTIES
+  PASS_REGULAR_EXPRESSION "SV IED2/MSVCB01 smpCnt=100 confRev=3 smpSynch=local \\(\\+1 more ASDU\\(s\\)\\)")
+
+# Header S-bit set -- SV has no PDU-level simulation field to cross-check against (unlike GOOSE),
+# so this is simply sv_simulated=true with no consistency note.
+add_test(NAME sv_header_sbit_simulated
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_sv.pcap")
+set_tests_properties(sv_header_sbit_simulated PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"sv_simulated\": true.*\"sv_id\": \"IED1/MSVCB04\"")
+
+add_test(NAME sv_unrecognized_smp_synch_and_smp_mod_rendered_as_unknown
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_sv.pcap")
+set_tests_properties(sv_unrecognized_smp_synch_and_smp_mod_rendered_as_unknown PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"sv_id\": \"IED1/MSVCB05\".*\"sv_smp_synch\": \"unknown\\(5\\)\".*\"sv_smp_mod\": \"unknown\\(5\\)\"")
+
+add_test(NAME sv_smp_mod_samples_per_second_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_sv.pcap")
+set_tests_properties(sv_smp_mod_samples_per_second_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"sv_id\": \"IED1/MSVCB06\".*\"sv_smp_mod\": \"samplesPerSecond\"")
+
+add_test(NAME sv_smp_mod_seconds_per_sample_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_sv.pcap")
+set_tests_properties(sv_smp_mod_seconds_per_sample_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"sv_id\": \"IED1/MSVCB07\".*\"sv_smp_mod\": \"secondsPerSample\"")
+
+add_test(NAME sv_no_asdu_mismatch_noted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_sv.pcap" --format text)
+set_tests_properties(sv_no_asdu_mismatch_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "note: noASDU declares 3 but 2 ASDU\\(s\\) were actually found in seqASDU")
+
+add_test(NAME sv_vlan_tagged_multicast_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_sv.pcap" --format text)
+set_tests_properties(sv_vlan_tagged_multicast_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "SV IED4/MSVCB01 smpCnt=1 confRev=1")
+
+# An SV frame too short for even the fixed 8-byte APPID/Length/Reserved1/Reserved2 header must NOT
+# be misdetected -- falls through to the generic "non-ip" ethertype-name-only report.
+add_test(NAME sv_truncated_header_falls_back_to_non_ip
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_sv.pcap" --format text)
+set_tests_properties(sv_truncated_header_falls_back_to_non_ip PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[non-ip\\]  Ethernet frame with ethertype 0x88ba \\(IEC 61850-9-2 Sampled Values\\) \\(not IPv4\\)")
+
+# A full 8-byte header but the byte immediately after it is not 0x60 -- must NOT be misdetected as
+# SV; both this packet and the truncated-header one above fall back to the same "non-ip" report,
+# so this asserts there are exactly two such lines in the whole file (no false positive elsewhere).
+add_test(NAME sv_wrong_outer_tag_falls_back_to_non_ip
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_sv.pcap" --format text)
+set_tests_properties(sv_wrong_outer_tag_falls_back_to_non_ip PROPERTIES
+  PASS_REGULAR_EXPRESSION "non-ip\\][^\n]*\n#11[^\n]*non-ip\\]")
+
+add_test(NAME sv_bogus_length_field_falls_back_to_available_bytes
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_sv.pcap" --format text)
+set_tests_properties(sv_bogus_length_field_falls_back_to_available_bytes PROPERTIES
+  PASS_REGULAR_EXPRESSION "SV IED5/MSVCB01 smpCnt=1 confRev=1[^\n]*\n *note: Length field \\(3\\) is implausible")
+
+add_test(NAME sv_truncated_apdu_partial_decode_noted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_sv.pcap" --format text)
+set_tests_properties(sv_truncated_apdu_partial_decode_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "SV appid=0x4009 noASDU=1 \\(0 ASDU\\(s\\) decoded\\)[^\n]*\n *note: SV APDU declares 200 byte\\(s\\) but only 3 remain -- decoding what's present")
+
+add_test(NAME sv_wrong_asdu_element_tag_skipped_with_note
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_sv.pcap" --format text)
+set_tests_properties(sv_wrong_asdu_element_tag_skipped_with_note PROPERTIES
+  PASS_REGULAR_EXPRESSION "note: seqASDU element tag=0x31 is not the expected UNIVERSAL SEQUENCE tag \\(0x30\\) -- skipped")
+
+add_test(NAME sv_unrecognized_asdu_field_tag_noted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_sv.pcap" --format text)
+set_tests_properties(sv_unrecognized_asdu_field_tag_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "SV IED6/MSVCB01 smpCnt=1 confRev=1[^\n]*\n *note: unrecognized ASDU field tag=0x8F len=2 -- skipped, raw hex: aa bb")
+
+add_test(NAME sv_unrecognized_sav_pdu_field_tag_noted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_sv.pcap" --format text)
+set_tests_properties(sv_unrecognized_sav_pdu_field_tag_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "SV IED7/MSVCB01 smpCnt=1 confRev=1[^\n]*\n *note: unrecognized SavPdu field tag=0x81 len=1 -- skipped, raw hex: 00")
+
+add_test(NAME sv_stats_counted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_sv.pcap" --stats)
+set_tests_properties(sv_stats_counted PROPERTIES
+  PASS_REGULAR_EXPRESSION "sv frames: 14\nsv asdus \\(summed across every frame\\): 14")
 
 # --------------------------------------------------------------------------
 # Real-world S7comm/COTP captures -- see tests/real_captures/s7comm/ATTRIBUTION.md

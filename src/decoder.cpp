@@ -15,6 +15,7 @@
 #include "conduitscope/modbus.hpp"
 #include "conduitscope/profinet.hpp"
 #include "conduitscope/s7comm.hpp"
+#include "conduitscope/sv.hpp"
 #include "conduitscope/tcp.hpp"
 #include "conduitscope/udp.hpp"
 
@@ -560,6 +561,52 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                                 std::string label = !v.type_name.empty() ? v.type_name : "raw";
                                 out.goose_all_data.push_back(v.path + ": " + label + "=" + v.value);
                             }
+                        }
+                        return out;
+                    }
+                }
+
+                // IEC 61850-9-2 Sampled Values (EtherType 0x88BA), same rationale/pattern as
+                // GOOSE above -- the two share their entire link-layer header format (see
+                // sv.hpp's file header comment) -- try_parse_sv's own outer-APDU-tag check is
+                // this decoder's structural gate.
+                bool want_sv = options_.protocol_filter == ProtocolFilter::Auto ||
+                                options_.protocol_filter == ProtocolFilter::SvOnly;
+                if (want_sv && eth.ethertype == ETHERTYPE_IEC61850_SV) {
+                    if (auto sv = try_parse_sv(eth.payload)) {
+                        out.protocol = "sv";
+                        out.summary = sv->summary;
+                        out.sv_appid = sv->appid;
+                        out.sv_simulated = sv->header_simulated;
+                        out.sv_no_asdu = sv->no_asdu;
+                        out.sv_asdu_count = sv->asdus.size();
+                        for (const auto& n : sv->notes) out.notes.push_back(n);
+
+                        if (!sv->asdus.empty()) {
+                            const SvAsdu& first = sv->asdus[0];
+                            out.sv_id = first.sv_id;
+                            if (first.dat_set) out.sv_dat_set = *first.dat_set;
+                            out.sv_smp_cnt = first.smp_cnt;
+                            out.sv_conf_rev = first.conf_rev;
+                            if (first.smp_synch) out.sv_smp_synch = *first.smp_synch;
+                            if (first.smp_rate) out.sv_smp_rate = *first.smp_rate;
+                            if (first.smp_mod) out.sv_smp_mod = *first.smp_mod;
+                            out.sv_seq_data_hex = first.seq_data_hex;
+                            out.sv_seq_data_length = first.seq_data_length;
+                            if (first.gmid_hex) out.sv_gmid_hex = *first.gmid_hex;
+                        }
+                        constexpr size_t kMaxSvAsduSummaries = 50;
+                        for (const auto& asdu : sv->asdus) {
+                            if (out.sv_asdus.size() >= kMaxSvAsduSummaries) break;
+                            std::ostringstream a;
+                            a << "svID=\"" << asdu.sv_id << "\"";
+                            if (asdu.dat_set) a << " datSet=\"" << *asdu.dat_set << "\"";
+                            a << " smpCnt=" << asdu.smp_cnt << " confRev=" << asdu.conf_rev;
+                            if (asdu.smp_synch) a << " smpSynch=" << *asdu.smp_synch;
+                            if (asdu.smp_rate) a << " smpRate=" << *asdu.smp_rate;
+                            if (asdu.smp_mod) a << " smpMod=" << *asdu.smp_mod;
+                            a << " seqData=" << asdu.seq_data_length << " byte(s)";
+                            out.sv_asdus.push_back(a.str());
                         }
                         return out;
                     }

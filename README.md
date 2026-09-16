@@ -2,9 +2,9 @@
 
 `conduitscope` decodes Modbus/TCP, DNP3, IEC 60870-5-104, S7comm/COTP (Siemens S7 PLC
 protocol), EtherNet/IP (CIP explicit and implicit messaging), PROFINET RT (DCP device
-discovery/configuration and cyclic real-time I/O data), and IEC 61850-8-1 GOOSE traffic
-from offline pcap/pcapng captures, and checks it against a zone/conduit segmentation
-policy. It's an OT/ICS conduit-auditing tool: `decode`/`info` give you reliable
+discovery/configuration and cyclic real-time I/O data), IEC 61850-8-1 GOOSE, and
+IEC 61850-9-2 Sampled Values traffic from offline pcap/pcapng captures, and checks it
+against a zone/conduit segmentation policy. It's an OT/ICS conduit-auditing tool: `decode`/`info` give you reliable
 protocol decoding and a stats view, and `policy validate` maps that decoded traffic
 against an IEC 62443-style zone/conduit model (for NIS2-flavored compliance work) --
 you write a policy file naming your zones (IP/CIDR ranges) and the conduits allowed
@@ -30,7 +30,7 @@ section.
 ## Why not just use tshark?
 
 Fair question -- tshark wins on raw protocol-decoding breadth (thousands of
-dissectors vs. conduitscope's seven-plus-CIP-I/O) and is usually still the
+dissectors vs. conduitscope's eight-plus-CIP-I/O) and is usually still the
 better first reach for general packet analysis. conduitscope isn't trying to
 replace it; it does one thing tshark fundamentally doesn't:
 
@@ -253,19 +253,39 @@ Groundwork / v0.1.0. What works right now:
   honest gap list. R-GOOSE (routable GOOSE, IEC 61850-90-5, a UDP/IP
   encapsulation with a completely different session layer) and IEC 61850-9-2
   Sampled Values (the sibling EtherType `0x88BA`) are out of scope.
+- IEC 61850-9-2 Sampled Values (EtherType `0x88BA`): SV's sibling protocol to
+  GOOSE, also riding directly on raw Ethernet with the identical 8-byte
+  APPID/Length/Reserved1(S-bit)/Reserved2 header. The full `SavPdu` (`noASDU`
+  plus one or more `ASDU` elements in `seqASDU` -- unlike GOOSE, every ASDU in
+  the sequence is decoded, since multiple ASDUs per SavPdu is core, spec-defined
+  behavior, not a rare edge case) is decoded: `svID`, `datSet`, `smpCnt`
+  (the primary stream-integrity/replay-detection signal), `confRev`,
+  `refrTm`, `smpSynch`, `smpRate`, `smpMod`, and the Ed.2.1 `gmidData`
+  (grandmaster clock identity) field. `seqData` -- the actual sample
+  payload -- is deliberately shown only as raw hex and never value-decoded:
+  interpreting it (e.g. as the common "9-2LE" 8-channel profile) requires an
+  implementation profile layered on top of the base ASN.1, which the standard
+  itself doesn't assert; Wireshark gates the same interpretation behind an
+  opt-in preference, off by default, and this decoder mirrors that. Despite a
+  genuine multi-source search (Wireshark's own test-capture tree and
+  SampleCaptures wiki, several public ICS-pcap repositories, IEC 61850 tooling
+  projects, and a Wireshark GitLab issue's attached sample), no real,
+  publicly-downloadable SV capture was found, so validation here is
+  synthetic-fixture-only -- see include/conduitscope/sv.hpp's file header for
+  the full honest writeup. R-SV (routable SV, IEC 61850-90-5) is out of scope.
 - Non-IPv4 Ethernet frames and non-TCP IPv4 payloads (including UDP) are now
   recognized and named, not just reported as a bare hex/number and dropped:
-  ARP, IEC 61850 Sampled Values, EtherCAT, LLDP, PTP, MPLS, and
-  stacked-VLAN (802.1ad/QinQ) EtherTypes; ICMP, IGMP, GRE, ESP, AH, OSPF,
-  and SCTP IP protocol numbers; and the UDP header itself (source/destination
-  port, byte count) -- EtherNet/IP's own UDP port (2222) is decoded, not just
-  named, when the traffic on it actually looks like CIP I/O (see above),
-  PROFINET RT's EtherType is decoded, not just named, when the FrameID looks
-  like DCP or cyclic IO data (see above), and IEC 61850-8-1 GOOSE's EtherType
-  is decoded, not just named, when the outer APDU tag matches (see above).
+  ARP, EtherCAT, LLDP, PTP, MPLS, and stacked-VLAN (802.1ad/QinQ) EtherTypes;
+  ICMP, IGMP, GRE, ESP, AH, OSPF, and SCTP IP protocol numbers; and the UDP
+  header itself (source/destination port, byte count) -- EtherNet/IP's own
+  UDP port (2222) is decoded, not just named, when the traffic on it actually
+  looks like CIP I/O (see above), PROFINET RT's EtherType is decoded, not
+  just named, when the FrameID looks like DCP or cyclic IO data (see above),
+  and both IEC 61850-8-1 GOOSE's and IEC 61850-9-2 Sampled Values' EtherTypes
+  are decoded, not just named, when the outer APDU tag matches (see above).
   This is otherwise groundwork plumbing, not a new protocol decoder -- none
   of the remaining named-but-not-decoded protocols' own framing is parsed
-  any further yet, and `policy
+  any further yet (EtherCAT is the most notable one left), and `policy
   validate` does not yet evaluate any non-TCP traffic against any conduit
   (still counted as `skipped_non_tcp`, same as before) -- but it's a real,
   confirmed visibility gap this closes: re-running conduitscope's own
@@ -379,8 +399,8 @@ that runs it -- the SDK used at build time only supplies headers/import librarie
 ## Quick start
 
 ```sh
-# Generate synthetic Modbus/TCP, DNP3, IEC 104, S7comm/COTP, EtherNet/IP, PROFINET RT, and
-# GOOSE captures and decode them (no live traffic needed):
+# Generate synthetic Modbus/TCP, DNP3, IEC 104, S7comm/COTP, EtherNet/IP, PROFINET RT,
+# GOOSE, and Sampled Values captures and decode them (no live traffic needed):
 python3 tools/make_sample_pcap.py
 build/conduitscope decode -r tests/sample_modbus.pcap
 build/conduitscope decode -r tests/sample_s7comm.pcap --stats
@@ -388,6 +408,7 @@ build/conduitscope decode -r tests/sample_iec104.pcap
 build/conduitscope decode -r tests/sample_enip.pcap
 build/conduitscope decode -r tests/sample_enip_cip_io.pcap
 build/conduitscope decode -r tests/sample_goose.pcap
+build/conduitscope decode -r tests/sample_sv.pcap
 build/conduitscope decode -r tests/sample_modbus.pcap --format json
 build/conduitscope info -r tests/sample_modbus.pcap
 

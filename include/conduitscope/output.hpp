@@ -83,6 +83,9 @@ private:
     size_t goose_pdu_count_ = 0;
     size_t goose_gse_management_count_ = 0;
     size_t goose_simulated_count_ = 0;
+    size_t sv_frame_count_ = 0;
+    size_t sv_asdu_total_ = 0;  // summed across every decoded SV frame, since one frame can carry
+                                 // more than one ASDU -- see sv_asdu_count
     bool has_ts_ = false;
     double first_ts_ = 0.0, last_ts_ = 0.0;
 };

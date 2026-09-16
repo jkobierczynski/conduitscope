@@ -2,14 +2,14 @@
 
 ## NAME
 
-conduitscope -- decode Modbus/TCP, DNP3, IEC 60870-5-104, S7comm/COTP, EtherNet/IP (CIP explicit and implicit messaging), PROFINET RT (DCP and cyclic real-time IO), and IEC 61850-8-1 GOOSE traffic from offline pcap captures
+conduitscope -- decode Modbus/TCP, DNP3, IEC 60870-5-104, S7comm/COTP, EtherNet/IP (CIP explicit and implicit messaging), PROFINET RT (DCP and cyclic real-time IO), IEC 61850-8-1 GOOSE, and IEC 61850-9-2 Sampled Values traffic from offline pcap captures
 
 ## SYNOPSIS
 
 ```
 conduitscope [-q|--quiet] [--no-color|--color] [--log-file FILE] [--version] [-h|--help] <command> [command options]
 
-conduitscope decode (-r FILE | -i INTERFACE) [-o FILE] [-f text|json|csv] [--protocol auto|modbus|dnp3|s7comm|iec104|enip|profinet|goose]
+conduitscope decode (-r FILE | -i INTERFACE) [-o FILE] [-f text|json|csv] [--protocol auto|modbus|dnp3|s7comm|iec104|enip|profinet|goose|sv]
                      [--modbus-port PORT]... [--dnp3-port PORT]... [--s7comm-port PORT]... [--iec104-port PORT]...
                      [--enip-port PORT]... [--enip-io-port PORT]...
                      [--max-packets N] [--stats] [--strict]
@@ -44,7 +44,9 @@ frames directly on the wire (EtherType `0x8892`, no IP/TCP/UDP layer at
 all) and decodes DCP device discovery/configuration exchanges and cyclic
 real-time IO datagrams, and recognizes IEC 61850-8-1 GOOSE frames (EtherType
 `0x88B8`, likewise no IP/TCP/UDP layer) and decodes the ASN.1 BER-encoded
-GOOSE PDU. It is designed as groundwork for auditing
+GOOSE PDU, and recognizes IEC 61850-9-2 Sampled Values frames (EtherType
+`0x88BA`, GOOSE's sibling protocol, same header shape and BER encoding) and
+decodes the ASN.1 BER-encoded SavPdu. It is designed as groundwork for auditing
 OT/ICS network traffic against a zone-and-conduit segmentation model (the kind
 IEC 62443-3-2 and, by extension, NIS2 risk-assessment work call for): the
 protocol-decoding layer (`decode`/`info`) and, now, the zone/conduit
@@ -144,7 +146,7 @@ conduitscope decode (-r FILE | -i INTERFACE) [options]
 | `--no-promiscuous` | off (i.e. promiscuous by default) | With `-i`, don't put the interface into promiscuous mode. Promiscuous is the default because the main live-capture use case -- watching a mirrored/SPAN switch port for zone/conduit traffic -- needs to see traffic that isn't addressed to the capturing host at all. |
 | `-o, --output FILE` | stdout | Write decoded output here instead of stdout. |
 | `-f, --format {text,json,csv}` | `text` | Output format. See OUTPUT FORMATS below. |
-| `--protocol {auto,modbus,dnp3,s7comm,iec104,enip,profinet,goose}` | `auto` | Restrict decoding to one protocol. `auto` opportunistically tries EtherNet/IP, IEC 104, Modbus, DNP3, and S7comm/COTP detection on every TCP payload, CIP I/O detection on every UDP payload, PROFINET RT (DCP/cyclic) detection on every non-IPv4 Ethernet frame carrying EtherType `0x8892`, and GOOSE detection on every non-IPv4 Ethernet frame carrying EtherType `0x88B8`, regardless of port (see PROTOCOL DETECTION below). `enip` covers both EtherNet/IP explicit messaging (TCP) and CIP I/O implicit messaging (UDP). `profinet` covers both DCP and cyclic real-time IO. |
+| `--protocol {auto,modbus,dnp3,s7comm,iec104,enip,profinet,goose,sv}` | `auto` | Restrict decoding to one protocol. `auto` opportunistically tries EtherNet/IP, IEC 104, Modbus, DNP3, and S7comm/COTP detection on every TCP payload, CIP I/O detection on every UDP payload, PROFINET RT (DCP/cyclic) detection on every non-IPv4 Ethernet frame carrying EtherType `0x8892`, GOOSE detection on every non-IPv4 Ethernet frame carrying EtherType `0x88B8`, and Sampled Values detection on every non-IPv4 Ethernet frame carrying EtherType `0x88BA`, regardless of port (see PROTOCOL DETECTION below). `enip` covers both EtherNet/IP explicit messaging (TCP) and CIP I/O implicit messaging (UDP). `profinet` covers both DCP and cyclic real-time IO. `sv` is IEC 61850-9-2 Sampled Values. |
 | `--modbus-port PORT` | *(502 built in)* | Additional TCP port to treat as "expected" for Modbus. Repeatable. Does **not** gate detection -- it only changes whether a decoded Modbus frame is annotated as appearing on an unexpected port, which is itself a useful signal when auditing a conduit. |
 | `--dnp3-port PORT` | *(20000 built in)* | Same as `--modbus-port`, for DNP3. Repeatable. |
 | `--s7comm-port PORT` | *(102 built in)* | Same as `--modbus-port`, for COTP/S7comm. Repeatable. |
@@ -626,9 +628,9 @@ Modbus collision. `tests/sample_iec104_modbus_precedence.pcap` (see
 down.
 
 `--protocol modbus`, `--protocol dnp3`, `--protocol s7comm`, `--protocol
-iec104`, `--protocol enip`, `--protocol profinet`, or `--protocol goose`
-restrict decoding to only that protocol (useful for large mixed captures, or
-for scripting a two-pass analysis). `--protocol enip` covers both
+iec104`, `--protocol enip`, `--protocol profinet`, `--protocol goose`, or
+`--protocol sv` restrict decoding to only that protocol (useful for large
+mixed captures, or for scripting a two-pass analysis). `--protocol enip` covers both
 EtherNet/IP explicit messaging (TCP, above) and CIP I/O implicit messaging
 (UDP, below) -- they're the same overall protocol family.
 
@@ -671,6 +673,20 @@ present, with a note -- rather than rejected outright, on the theory that a
 matched outer tag is already strong enough evidence this is a truncated
 capture of real GOOSE traffic, not a false positive (see LIMITATIONS).
 
+**IEC 61850-9-2 Sampled Values, EtherType `0x88BA`** is tried the same way,
+port-independently against every non-IPv4 Ethernet frame with that
+EtherType: the 8-byte header's declared Length must be plausible (at least
+the 8-byte header itself) and the outer ASN.1 BER APDU tag immediately after
+the header must be `0x60` (`savPdu`) -- SV's `SampledValues` CHOICE has only
+this one alternative, unlike GOOSE's two, so there is exactly one tag to
+check (see PROTOCOL COVERAGE's Sampled Values section). As with PROFINET RT
+and GOOSE, this EtherType has zero collision risk with any other protocol
+here, so that single tag check is the only structural gate; a frame whose
+outer tag isn't `0x60` falls back to the generic `non-ip` report. Once the
+tag matches, header/APDU length mismatches against the bytes actually
+available are handled tolerantly -- clamped to what's present, with a note --
+the same as GOOSE.
+
 ## OUTPUT FORMATS
 
 ### text (default)
@@ -690,7 +706,8 @@ the packet line.
 The `[protocol]` tag is colored per protocol (so a mixed-protocol capture
 scans quickly by eye): cyan for Modbus, magenta for DNP3, blue for S7comm and
 COTP-without-S7comm, green for IEC 104, yellow for EtherNet/IP, bright cyan
-for PROFINET RT, bright green for GOOSE, dim for everything else recognized
+for PROFINET RT, bright green for GOOSE, bright magenta for Sampled Values,
+dim for everything else recognized
 but not OT-specific (`tcp`/`udp`/`non-tcp`/`non-ip`/`unsupported-link`). A Modbus
 exception response's summary, and a `parse-error` packet's entire line, are
 bold red -- both mean "look at this one" over everything else in a long
@@ -714,7 +731,7 @@ that don't apply to a given packet (e.g. `src_ip` for a non-IP frame) are
 `null`. Intended to be piped into `jq` or read by a future policy-evaluation
 layer.
 
-Forty-three fields are only present (omitted entirely, not `null`) on packets
+Fifty-eight fields are only present (omitted entirely, not `null`) on packets
 where they apply:
 
 - `modbus_paired_request_index`: the `index` of the specific earlier request
@@ -864,6 +881,51 @@ where they apply:
   children appearing as subsequent entries under dotted index paths (e.g.
   `"2.0: boolean=false"`) -- see PROTOCOL COVERAGE. Capped at 50 entries,
   same reason as `enip_cip_values`.
+- `sv_appid`: the Sampled Values header's APPID, as a 4-hex-digit hex string
+  (e.g. `"0x4000"`), when protocol is `sv`. Always present alongside
+  `sv_simulated`, `sv_no_asdu`, and `sv_asdu_count`.
+- `sv_simulated`: `true`/`false` -- `true` when the shared header's Reserved1
+  S-bit is set, marking test/simulated traffic (identical bit to GOOSE's).
+- `sv_no_asdu`: the SavPdu's declared `noASDU` count, as a plain integer. A
+  mismatch against the number of ASDU elements actually found in `seqASDU`
+  is called out in `notes`.
+- `sv_asdu_count`: the number of ASDU elements actually decoded from
+  `seqASDU` -- unlike GOOSE (which decodes only the first APDU's content),
+  every ASDU in the sequence is decoded, since multiple ASDUs per SavPdu is
+  core, spec-defined behavior. The `sv_id`/`sv_dat_set`/... fields below
+  describe only the *first* ASDU; see `sv_asdus` for a summary of all of
+  them.
+- `sv_id`: the first ASDU's `svID` VisibleString (e.g. `"IED1/MSVCB01"`) --
+  the Sampled Value Control Block reference identifying the publisher.
+  Present when `sv_asdu_count` is greater than 0.
+- `sv_dat_set`: the first ASDU's OPTIONAL `datSet` VisibleString, when
+  present in the PDU.
+- `sv_smp_cnt`: the first ASDU's `smpCnt` (Sample Count) counter, as a plain
+  integer -- the primary stream-integrity/replay-detection signal, analogous
+  to GOOSE's `stNum`/`sqNum`: it increments on every sample and wraps at
+  65535.
+- `sv_conf_rev`: the first ASDU's `confRev` (Configuration Revision) counter,
+  as a plain integer -- changes only when an engineering tool has touched
+  this IED's Sampled Value Control Block configuration.
+- `sv_smp_synch`: the first ASDU's OPTIONAL `smpSynch` field, rendered as
+  `"none"`, `"local"`, `"global"`, or `"unknown(N)"` for any other value,
+  when present in the PDU.
+- `sv_smp_rate`: the first ASDU's OPTIONAL `smpRate` field, as a plain
+  integer, when present and nonzero.
+- `sv_smp_mod`: the first ASDU's OPTIONAL `smpMod` field, rendered as
+  `"samplesPerNormalPeriod"`, `"samplesPerSecond"`, `"secondsPerSample"`, or
+  `"unknown(N)"` for any other value, when present in the PDU.
+- `sv_seq_data_length`: the first ASDU's `seqData` OCTET STRING length in
+  bytes. Always present when `sv_asdu_count` is greater than 0.
+- `sv_seq_data_hex`: the first ASDU's `seqData` payload as raw lowercase hex,
+  never value-decoded -- see PROTOCOL COVERAGE's Sampled Values section for
+  why.
+- `sv_gmid_hex`: the first ASDU's OPTIONAL Ed.2.1 `gmidData` field (an 8-byte
+  EUI-64 grandmaster clock identity) as raw lowercase hex, when present.
+- `sv_asdus`: an array of one entry per ASDU element decoded from `seqASDU`,
+  each a `"svID=\"...\" [datSet=\"...\"] smpCnt=N confRev=N [smpSynch=...]
+  [smpRate=N] [smpMod=...] seqData=N byte(s)"` string. Capped at 50 entries,
+  same reason as `goose_all_data`.
 
 All array fields are capped at 50 entries for a single heavily-batched
 request/response; see PROTOCOL COVERAGE for where the full list still shows
@@ -1617,10 +1679,11 @@ than rejected outright; see PROTOCOL DETECTION.
 
 **Explicitly out of scope**: R-GOOSE (routable GOOSE, IEC 61850-90-5, which
 rides over UDP/IP with a completely different session-layer wrapper and
-never reaches this EtherType-based dispatch at all), IEC 61850-9-2 Sampled
-Values (the sibling EtherType `0x88BA`, unrelated wire format), and MMS (a
+never reaches this EtherType-based dispatch at all) and MMS (a
 different, TCP-based IEC 61850-8-1 mapping -- this tool's COTP decoding
-stops at the COTP layer, see the S7comm/COTP section above).
+stops at the COTP layer, see the S7comm/COTP section above). GOOSE's sibling
+protocol, IEC 61850-9-2 Sampled Values (EtherType `0x88BA`), is a separate
+decoder -- see the next section.
 
 #### Validation
 
@@ -1645,6 +1708,112 @@ source rather than an independent real capture -- the same honest gap
 already documented for PROFINET RT's cyclic IO data and EtherNet/IP's CIP
 I/O implicit messaging.
 
+### IEC 61850-9-2 Sampled Values (EtherType `0x88BA`)
+
+SV (Sampled Values) is GOOSE's sibling protocol under IEC 61850-8-1's common
+"Ethertype header" (Annex A): it rides directly on raw Ethernet -- no
+IPv4/TCP/UDP layer at all -- and shares GOOSE's identical 8-byte header
+format, all fields big-endian: `APPID`(2) + `Length`(2, covers the header
+**and** the APDU together, including itself) + `Reserved1`(2, top-bit
+`0x8000` is the S-bit, Simulated) + `Reserved2`(2). Unlike GOOSE, SV has no
+PDU-level simulation flag to cross-check the header's S-bit against, so a
+set S-bit is simply reported as `sv_simulated: true` with no consistency
+note.
+
+What follows the header is an ASN.1 BER TLV-encoded APDU. SV's
+`SampledValues` CHOICE has only **one** alternative (cross-checked against
+Wireshark's `packet-sv.c`): `0x60` (`savPdu`, APPLICATION class 0,
+constructed). Any other outer tag falls back to the generic `non-ip`
+ethertype-name-only report, exactly as GOOSE does -- see PROTOCOL DETECTION.
+
+#### SavPdu fields
+
+| Tag | Field | Type | Notes |
+|---|---|---|---|
+| `0x80` | `noASDU` | INTEGER | Declared count of ASDU elements in `seqASDU`; checked against the actual decoded count, mismatch noted. |
+| `0xA2` | `seqASDU` | SEQUENCE OF ASDU (constructed) | See below. Context tag `1` is unused/reserved in the standard -- a genuine gap in the tag numbering, not an omission here. |
+
+Unlike GOOSE's `allData` (which nests `Data`-choice TLVs directly with no
+per-item wrapper), each element inside `seqASDU` carries its own standard
+ASN.1 UNIVERSAL SEQUENCE tag (`0x30`) wrapping the ASDU's own fields. An
+element whose tag isn't `0x30` is skipped with a note rather than
+misinterpreted.
+
+#### ASDU fields
+
+Every field is BER IMPLICIT-tagged context-class and **primitive** (tags
+`0x80`-`0x89`) -- there is no constructed field inside an ASDU, unlike
+GOOSE's `allData`.
+
+| Tag | Field | Type | Notes |
+|---|---|---|---|
+| `0x80` | `svID` | VisibleString | The Sampled Value Control Block reference identifying the publisher. |
+| `0x81` | `datSet` | VisibleString | OPTIONAL. |
+| `0x82` | `smpCnt` | INTEGER (0-65535) | Sample Count -- increments on every sample and wraps. The primary stream-integrity/replay-detection signal, analogous to GOOSE's `stNum`/`sqNum`. |
+| `0x83` | `confRev` | INTEGER | Configuration Revision -- changes only when an engineering tool has touched this IED's Sampled Value Control Block configuration. |
+| `0x84` | `refrTm` | UtcTime (8 bytes) | OPTIONAL. Same encoding as GOOSE's `t` field (see the GOOSE section above); decoded internally but, matching GOOSE's own `t` field, not yet exposed in JSON output (see LIMITATIONS). |
+| `0x85` | `smpSynch` | INTEGER (enum) | OPTIONAL. `0`=none, `1`=local, `2`=global, anything else rendered as `"unknown(N)"`. |
+| `0x86` | `smpRate` | INTEGER (0-65535) | OPTIONAL. |
+| `0x87` | `seqData` | OCTET STRING | Mandatory -- the actual sample payload. See below: shown only as raw hex, never value-decoded. |
+| `0x88` | `smpMod` | INTEGER (enum) | OPTIONAL. `0`=samplesPerNormalPeriod, `1`=samplesPerSecond, `2`=secondsPerSample, anything else rendered as `"unknown(N)"`. |
+| `0x89` | `gmidData` | OCTET STRING (8 bytes) | OPTIONAL -- an IEC 61850-9-2 Ed.2.1/2020 amendment field: an EUI-64 PTP grandmaster clock identity (vendor OUI + `0xFFFE` + card ID). |
+
+BER INTEGER fields use the same arbitrary-length big-endian two's-complement
+decode as GOOSE (`decode_ber_integer`).
+
+#### `seqData` is deliberately never value-decoded
+
+`seqData` is shown only as raw hex plus its byte length, by design --
+mirroring the established precedent this decoder already applies to
+PROFINET RT's cyclic IO data and EtherNet/IP's CIP I/O Connected Data Item:
+there is no generic, self-describing wire-level type to decode it as. The
+common "9-2LE" profile (UCA's IEC 61850-9-2 Light Edition: 8 channels of a
+4-byte INT32 value + 4-byte Quality bitmask, 64 bytes total) is an
+*implementation profile* layered on top of the base standard, not something
+the base ASN.1 asserts -- a `seqData` payload can legally be any length and
+any internal layout under a different profile or a vendor-specific one.
+Wireshark itself gates 9-2LE interpretation behind an opt-in preference
+(`decode_data_as_phsmeas`, off by default), which this decoder's philosophy
+mirrors exactly: decode confidently only where the wire format is
+unambiguous.
+
+#### Multiple ASDUs vs. multiple top-level PDUs
+
+Unlike GOOSE (which decodes only the first APDU per frame, since multiple
+APDUs per frame were never observed in any real capture), SV decodes **all**
+ASDU elements within one frame's `seqASDU` -- multiple ASDUs per SavPdu is
+core, spec-defined, always-relevant functionality (a publisher merging
+several sample streams into one multicast), not a rare/untested edge case.
+This matches `packet-sv.c`'s own unconditional `SEQUENCE_OF_ASDU` decode.
+SV still conservatively decodes only the **first** top-level `SampledValues`
+PDU per frame, matching GOOSE's own conservative handling of that separate
+(and separately rare) case; both header/APDU length mismatches against the
+bytes actually available are handled tolerantly -- clamped to what's
+present, with a note -- rather than rejected outright, the same as GOOSE.
+
+**Explicitly out of scope**: R-SV (routable SV, IEC 61850-90-5, a different
+UDP/IP session wrapper, the same relationship R-GOOSE has to GOOSE),
+IEC 61850-8-1 GOOSE (a separate decoder, see above), and MMS (a different,
+TCP-based mapping).
+
+#### Validation
+
+Despite a genuine, multi-source search -- Wireshark's own test-capture tree
+and SampleCaptures wiki, the ITI/ICS-Security-Tools, automayt/ICS-pcap, and
+mrhenrike/PCAPTrafficAnalysis repositories, several IEC 61850 tooling
+projects, a Zenodo substation IDS dataset, and a sample pcap attached to
+Wireshark's own original SV-support GitLab issue -- **no real, publicly
+downloadable IEC 61850-9-2 Sampled Values capture was found**. Every path in
+this decoder is therefore validated only by construction: hand-built against
+`packet-sv.c`'s dissection logic and exercised against the synthetic
+`tests/sample_sv.pcap` fixture (see `tools/make_sample_pcap.py`'s
+`build_sv_sample`), covering full/optional-absent field combinations, both
+enumerated fields' full value sets plus their `"unknown(N)"` fallback,
+multi-ASDU decoding, VLAN-tagged framing, a `noASDU` mismatch, and every
+malformed/truncated-input path this section describes -- the same honest gap
+already documented for CIP I/O and (partially) GOOSE. See
+`include/conduitscope/sv.hpp`'s file header for the full writeup.
+
 ### Link/IP-layer plumbing: non-IPv4 Ethernet, and non-TCP IPv4 (including UDP)
 
 Every protocol above rides on Ethernet + IPv4 + TCP. Traffic outside that --
@@ -1655,17 +1824,17 @@ deliberately small, OT-relevant set of values, cross-checked against
 Wireshark's own `epan/etypes.h` (EtherTypes) and the long-stable IANA IP
 protocol number registry (not reverse-engineered from a single capture):
 
-- **EtherTypes** (`link_layer.hpp`'s `ethertype_name`): ARP, IPv6, two
-  raw-Ethernet (no IP layer at all) OT protocols this tool names but doesn't
-  decode -- EtherCAT, IEC 61850-9-2 Sampled Values -- plus LLDP, PTP (IEEE
-  1588), MPLS unicast, and 802.1ad/stacked-VLAN (the QinQ case
-  `parse_ethernet`'s own comment already documented as "will simply fail to
-  recognize the inner ethertype" -- it's now named as such instead of a bare
-  `0x8100`). PROFINET RT (`0x8892`) and IEC 61850-8-1 GOOSE (`0x88B8`) are
-  also named here, but, like CIP I/O below, a frame that actually looks like
-  DCP/cyclic IO data or a GOOSE APDU is decoded and reported as `profinet`/
-  `goose`, not `non-ip` -- see PROTOCOL COVERAGE's PROFINET RT and GOOSE
-  sections.
+- **EtherTypes** (`link_layer.hpp`'s `ethertype_name`): ARP, IPv6, one
+  remaining raw-Ethernet (no IP layer at all) OT protocol this tool names but
+  doesn't decode -- EtherCAT -- plus LLDP, PTP (IEEE 1588), MPLS unicast, and
+  802.1ad/stacked-VLAN (the QinQ case `parse_ethernet`'s own comment already
+  documented as "will simply fail to recognize the inner ethertype" -- it's
+  now named as such instead of a bare `0x8100`). PROFINET RT (`0x8892`),
+  IEC 61850-8-1 GOOSE (`0x88B8`), and IEC 61850-9-2 Sampled Values (`0x88BA`)
+  are also named here, but, like CIP I/O below, a frame that actually looks
+  like DCP/cyclic IO data, a GOOSE APDU, or a SavPdu is decoded and reported
+  as `profinet`/`goose`/`sv`, not `non-ip` -- see PROTOCOL COVERAGE's
+  PROFINET RT, GOOSE, and Sampled Values sections.
 - **IPv4 protocol numbers** (`ipv4.hpp`'s `ip_protocol_name`): ICMP, IGMP,
   IPv6-in-IPv4, GRE, ESP, AH, ICMPv6, OSPF, SCTP -- alongside TCP and UDP,
   which get their own dedicated handling (below and elsewhere in this
@@ -1683,11 +1852,12 @@ protocol number registry (not reverse-engineered from a single capture):
   handling, same as before.
 
 **This is groundwork plumbing, explicitly not a new protocol decoder --**
-**except for CIP I/O, PROFINET RT, and now GOOSE, which are** (see PROTOCOL
-COVERAGE's EtherNet/IP, PROFINET RT, and GOOSE sections). None of Sampled
-Values/EtherCAT's own framing is parsed -- these EtherTypes are *named*, not
-*decoded*. A value outside every table above still shows only as a bare hex
-ethertype or decimal protocol number, exactly as before -- nothing is
+**except for CIP I/O, PROFINET RT, GOOSE, and now Sampled Values, which are**
+(see PROTOCOL COVERAGE's EtherNet/IP, PROFINET RT, GOOSE, and Sampled Values
+sections). EtherCAT's own framing is not parsed -- that EtherType is
+*named*, not *decoded* -- the only named-but-undecoded raw-Ethernet OT
+protocol left. A value outside every table above still shows only as a bare
+hex ethertype or decimal protocol number, exactly as before -- nothing is
 guessed at for an EtherType/protocol/port this tool doesn't recognize.
 
 `policy validate` does not yet evaluate any of this traffic against a
@@ -1807,21 +1977,22 @@ These are current, not aspirational -- each has a corresponding ROADMAP item.
   header will very likely fail to parse and be reported as a parse-error on
   the fragments after the first.
 - **Non-IPv4 Ethernet frames and non-TCP IPv4 payloads (including UDP) are
-  named but not decoded, with three exceptions (CIP I/O, PROFINET RT, and
-  GOOSE).** A deliberately small, OT-relevant set of EtherTypes/
-  IP-protocol-numbers is recognized by name (ARP, IEC 61850-9-2 Sampled
-  Values, ICMP, and the rest -- see PROTOCOL COVERAGE); nothing outside that
+  named but not decoded, with four exceptions (CIP I/O, PROFINET RT, GOOSE,
+  and Sampled Values).** A deliberately small, OT-relevant set of EtherTypes/
+  IP-protocol-numbers is recognized by name (ARP, EtherCAT, ICMP, and the
+  rest -- see PROTOCOL COVERAGE); nothing outside that
   set gets more than a bare hex/decimal number, and even a *named* one gets
-  no further parsing of its own framing. The three exceptions are
+  no further parsing of its own framing. The four exceptions are
   EtherNet/IP's CIP I/O traffic on UDP port 2222, PROFINET RT (EtherType
-  `0x8892`, DCP and cyclic real-time IO), and IEC 61850-8-1 GOOSE (EtherType
-  `0x88B8`), all of which are now decoded, not just named -- see PROTOCOL
-  COVERAGE's EtherNet/IP, PROFINET RT, and GOOSE sections. `policy validate`
-  does not yet evaluate ANY UDP traffic against a conduit, decoded or not
-  (it only ever looks at TCP flows), and never evaluates PROFINET RT or
-  GOOSE either (both ride raw Ethernet with no IP/TCP/UDP layer at all, so
-  there is no IP-based conduit rule that could match either) -- see that
-  section and ROADMAP.
+  `0x8892`, DCP and cyclic real-time IO), IEC 61850-8-1 GOOSE (EtherType
+  `0x88B8`), and IEC 61850-9-2 Sampled Values (EtherType `0x88BA`), all of
+  which are now decoded, not just named -- see PROTOCOL COVERAGE's
+  EtherNet/IP, PROFINET RT, GOOSE, and Sampled Values sections. `policy
+  validate` does not yet evaluate ANY UDP traffic against a conduit, decoded
+  or not (it only ever looks at TCP flows), and never evaluates PROFINET RT,
+  GOOSE, or Sampled Values either (all three ride raw Ethernet with no
+  IP/TCP/UDP layer at all, so there is no IP-based conduit rule that could
+  match any of them) -- see that section and ROADMAP.
 - **CIP I/O (implicit messaging) decoding does not value-decode the actual
   I/O data, and has no cross-datagram state.** The Connected Data Item's
   contents are shown only as raw hex -- see PROTOCOL COVERAGE's CIP I/O
@@ -1871,8 +2042,26 @@ These are current, not aspirational -- each has a corresponding ROADMAP item.
   is decoded even though the spec technically allows more than one (never
   observed in practice); leftover bytes are noted, not decoded further. No
   GSE Management PDU content is decoded at all (named only). R-GOOSE (IEC
-  61850-90-5) and IEC 61850-9-2 Sampled Values are out of scope entirely --
-  neither reaches this decoder's EtherType-based dispatch.
+  61850-90-5) is out of scope entirely -- it never reaches this decoder's
+  EtherType-based dispatch. GOOSE's sibling protocol, IEC 61850-9-2 Sampled
+  Values, is a separate decoder -- see the next bullet.
+- **Sampled Values has no real-capture validation at all, for any code
+  path.** Unlike GOOSE, every SV path -- the full/optional-absent ASDU field
+  decode, both enumerated fields' full value sets, multi-ASDU decoding,
+  VLAN-tagged framing, and every malformed/truncated-input path -- is
+  validated only against the hand-built `tests/sample_sv.pcap`, despite a
+  genuine multi-source search for a real capture that found none (see
+  PROTOCOL COVERAGE's Sampled Values section and
+  `include/conduitscope/sv.hpp`'s file header for the full search writeup).
+  `seqData` (the actual sample payload) is never value-decoded by design --
+  shown only as raw hex, since interpreting it requires an implementation
+  profile (e.g. "9-2LE") layered on top of the base ASN.1, not something the
+  standard itself asserts. `refrTm` is decoded internally but not yet
+  exposed in JSON output, matching GOOSE's own `t`-field gap. Only the first
+  top-level `SampledValues` PDU in a frame is decoded (matching GOOSE's own
+  conservative handling there), though -- unlike GOOSE -- every ASDU *within*
+  that PDU's `seqASDU` is decoded, since multiple ASDUs per SavPdu is core,
+  spec-defined behavior. R-SV (IEC 61850-90-5) is out of scope entirely.
 - **DNP3 CRCs are not validated** -- neither the data-link header CRC nor the
   per-block CRCs within the user data. A corrupted DNP3 frame that still
   starts with the right magic bytes will be "decoded" without any indication
@@ -2238,6 +2427,28 @@ conduitscope decode -r capture.pcap --protocol goose -f json \
            (group_by(.goose_st_num)[] | "\($ref): stNum=\(.[0].goose_st_num) sqNum 1..\([.[].goose_sq_num] | max)")'
 ```
 
+Build a Sampled Values publisher/stream inventory -- every distinct `svID`
+seen, alongside its `smpRate`/`smpMod`, useful as a first pass at what's
+actually publishing SV on a substation segment:
+
+```sh
+conduitscope decode -r capture.pcap --protocol sv -f json \
+  | jq -r '[.[] | select(.sv_id != null) | "\(.sv_id) smpRate=\(.sv_smp_rate // "n/a") smpMod=\(.sv_smp_mod // "n/a")"] | unique[]'
+```
+
+Spot a Sampled Values stream-continuity gap -- for each publisher, flag any
+consecutive `smpCnt` jump bigger than 1 (accounting for the 0-65535 wrap),
+which can indicate dropped samples or a spoofed/replayed stream:
+
+```sh
+conduitscope decode -r capture.pcap --protocol sv -f json \
+  | jq -r '[.[] | select(.sv_id != null)] | group_by(.sv_id) |
+           .[] | .[0].sv_id as $id | [.[].sv_smp_cnt] as $counts |
+           range(1; $counts | length) as $i |
+           (($counts[$i] - $counts[$i-1] + 65536) % 65536) as $gap |
+           select($gap != 1) | "\($id): smpCnt jumped by \($gap) at index \($i)"'
+```
+
 Find every Modbus write whose response was never authoritatively paired --
 either the response wasn't captured, or it used a different session/
 transaction ID than expected (worth a closer look on a conduit that should
@@ -2323,17 +2534,17 @@ Rough order, each building on the groundwork this release establishes:
    narrow in practice -- e.g. a real device addressing a Symbol-object tag
    by numeric instance ID rather than by name, which this release's gating
    would currently show structurally rather than as a tag read.
-9. **Decode IEC 61850-9-2 Sampled Values**, the last named-but-undecoded
-   raw-Ethernet OT protocol from this item's original list, now that
-   EtherNet/IP's UDP-based protocol (CIP I/O), PROFINET RT, and IEC
-   61850-8-1 GOOSE are all done -- see PROTOCOL COVERAGE's CIP I/O,
-   PROFINET RT, and GOOSE subsections and the "now done" paragraphs below.
-   Sampled Values (EtherType `0x88BA`) shares GOOSE's ASN.1-BER-over-raw-
-   Ethernet foundations closely enough that much of `goose.cpp`'s BER
-   machinery (TLV walking, BER INTEGER decode) should carry over directly,
-   but its own APDU shape and its high-rate (typically 4800 samples/sec)
-   streaming semantics are a distinct research-and-validate cycle, not a
-   copy-paste of GOOSE's. Also, separately: validate CIP I/O decoding
+9. ~~Decode IEC 61850-9-2 Sampled Values~~ -- **done**, see PROTOCOL
+   COVERAGE's Sampled Values subsection and the "now done" paragraph below.
+   That closes out this item's original "decode the remaining
+   named-but-undecoded raw-Ethernet OT protocol" call-out entirely: CIP I/O,
+   PROFINET RT, GOOSE, and now Sampled Values are all done. **EtherCAT is
+   the only remaining named-but-undecoded raw-Ethernet OT protocol left**,
+   and, unlike GOOSE/SV's shared ASN.1-BER foundation, it's a fixed-binary-
+   layout protocol with its own distinct framing (datagram-chained frames
+   addressed by an auto-incrementing working counter) -- a fresh
+   research-and-validate cycle, not something existing PROFINET RT/GOOSE/SV
+   machinery carries over into. Also, separately: validate CIP I/O decoding
    against a real capture (none was found while building it -- see
    `tests/real_captures/enip/ATTRIBUTION.md`) if one ever turns up, and
    consider cross-datagram CIP I/O correlation (connection ID back to its
@@ -2346,12 +2557,15 @@ Rough order, each building on the groundwork this release establishes:
    LIMITATIONS). And for GOOSE: real-capture validation for optional-field
    absence, every `allData` type beyond boolean/bit-string, and a GSE
    Management PDU, none of which any real capture found so far exercises
-   (see `tests/real_captures/goose/ATTRIBUTION.md`). And widen `policy
+   (see `tests/real_captures/goose/ATTRIBUTION.md`). And for Sampled Values:
+   real-capture validation for literally every code path, since none was
+   found at all despite a genuine multi-source search (see PROTOCOL
+   COVERAGE's Sampled Values subsection). And widen `policy
    validate` beyond TCP-only conduits, now that there are actual decoded
-   non-TCP protocols (CIP I/O, PROFINET RT, GOOSE) worth checking a conduit
-   against -- PROFINET RT and GOOSE both ride raw Ethernet with no IP layer
-   at all, though, so they would need a conduit-rule shape that isn't
-   IP/CIDR-based to ever be covered.
+   non-TCP protocols (CIP I/O, PROFINET RT, GOOSE, Sampled Values) worth
+   checking a conduit against -- PROFINET RT, GOOSE, and Sampled Values all
+   ride raw Ethernet with no IP layer at all, though, so they would need a
+   conduit-rule shape that isn't IP/CIDR-based to ever be covered.
 
 **pcapng support** is also now done: both classic pcap and pcapng are read
 transparently (auto-detected, no flag needed) -- see "pcap vs. pcapng"
@@ -2384,13 +2598,14 @@ DETECTION.
 **Link/IP-layer plumbing for non-IPv4/non-TCP traffic** is also now done:
 non-IPv4 Ethernet frames and non-TCP IPv4 payloads (including UDP) are
 recognized and named for a deliberately small, OT-relevant set of
-EtherTypes/IP-protocol-numbers (ARP, IEC 61850-9-2 Sampled Values, ICMP,
+EtherTypes/IP-protocol-numbers (ARP, EtherCAT, ICMP,
 and the rest), rather than just a bare hex/decimal number and nothing else
 -- see PROTOCOL COVERAGE's link/IP-layer plumbing section and item 9 above
-for what's still out of scope (IEC 61850-9-2 Sampled Values remains named,
+for what's still out of scope (EtherCAT remains named,
 not decoded), and `policy validate` doesn't yet evaluate any non-TCP
-traffic against a conduit. PROFINET RT and IEC 61850-8-1 GOOSE, formerly in
-this same named-but-not-decoded set, are decoded now -- see the next two
+traffic against a conduit. PROFINET RT, IEC 61850-8-1 GOOSE, and
+IEC 61850-9-2 Sampled Values, formerly in
+this same named-but-not-decoded set, are decoded now -- see the next three
 paragraphs.
 
 **EtherNet/IP CIP I/O (implicit messaging) decoding** is also now done: the
@@ -2437,6 +2652,34 @@ from-scratch BER walker run against a real capture's bytes disproved -- see
 PROTOCOL COVERAGE's GOOSE subsection and `tests/real_captures/goose/
 ATTRIBUTION.md` for the full story, mirroring the PROFINET RT
 BlockInfo/BlockQualifier bug the paragraph above describes.
+
+**IEC 61850-9-2 Sampled Values decoding** is also now done: the third
+protocol this tool decodes directly over raw Ethernet, alongside PROFINET RT
+and GOOSE, and the final answer to item 9's original "decode the remaining
+named-but-undecoded raw-Ethernet protocol" call-out. SV shares GOOSE's
+8-byte header format and ASN.1 BER TLV foundation, but has its own distinct
+APDU shape: a single-alternative outer CHOICE (`0x60` `savPdu`, vs. GOOSE's
+two), and a `SavPdu` wrapping `noASDU` plus a `seqASDU` of one or more
+per-item `0x30`-tagged `ASDU` elements -- all of which, unlike GOOSE's
+single-APDU-per-frame scope, are decoded (multiple ASDUs per SavPdu is core,
+spec-defined behavior, not a rare edge case). Every `ASDU` field is decoded
+(`svID`, `datSet`, `smpCnt` -- the primary stream-integrity/replay-detection
+signal, analogous to GOOSE's `stNum`/`sqNum` -- `confRev`, `refrTm`,
+`smpSynch`, `smpRate`, `smpMod`, and the Ed.2.1 `gmidData` grandmaster-clock
+field) except `seqData` (the sample payload itself), which is deliberately
+shown only as raw hex and never value-decoded -- interpreting it requires an
+implementation profile (e.g. the common "9-2LE" 8-channel layout) layered on
+top of the base ASN.1, not something the standard itself asserts, the same
+"no generic self-describing wire-level type" reasoning already applied to
+PROFINET RT's cyclic IO data and CIP I/O's Connected Data Item -- see
+PROTOCOL COVERAGE's Sampled Values subsection for the full field tables and
+LIMITATIONS for what's still open. Unlike every other protocol added so far,
+no real capture was found for *any* SV code path despite a genuine
+multi-source search (Wireshark's own test-capture tree and wiki, several
+public ICS-pcap repositories, IEC 61850 tooling projects, and a Wireshark
+GitLab issue's attached sample) -- validation here is honestly
+synthetic-fixture-only from the start; see `include/conduitscope/sv.hpp`'s
+file header for the full search writeup.
 
 **Colorized text output** is also now done: see OUTPUT FORMATS' "Color"
 subsection for the scheme and the `--color`/`--no-color`/auto-detection
