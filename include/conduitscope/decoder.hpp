@@ -10,6 +10,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "conduitscope/bacnet.hpp"
 #include "conduitscope/byteio.hpp"
 #include "conduitscope/cotp.hpp"
 #include "conduitscope/dnp3.hpp"
@@ -26,7 +27,7 @@
 namespace conduitscope {
 
 enum class ProtocolFilter {
-    Auto,         // opportunistically detect IEC104/Modbus/DNP3/S7comm/EtherNet-IP/PROFINET/GOOSE/SV/EtherCAT regardless of port
+    Auto,         // opportunistically detect IEC104/Modbus/DNP3/S7comm/EtherNet-IP/PROFINET/GOOSE/SV/EtherCAT/BACnet-IP regardless of port
     ModbusOnly,   // only attempt Modbus decoding
     Dnp3Only,     // only attempt DNP3 decoding
     S7commOnly,   // only attempt TPKT/COTP/S7comm decoding
@@ -36,6 +37,7 @@ enum class ProtocolFilter {
     GooseOnly,    // only attempt IEC 61850-8-1 GOOSE decoding
     SvOnly,       // only attempt IEC 61850-9-2 Sampled Values decoding
     EthercatOnly, // only attempt EtherCAT decoding
+    BacnetOnly,   // only attempt BACnet/IP (BVLC/NPDU/APDU) decoding
 };
 
 struct DecodeOptions {
@@ -54,6 +56,7 @@ struct DecodeOptions {
     std::vector<uint16_t> extra_iec104_ports;
     std::vector<uint16_t> extra_enip_ports;
     std::vector<uint16_t> extra_enip_io_ports;  // UDP, unlike extra_enip_ports (TCP) -- see ENIP_IO_UDP_PORT
+    std::vector<uint16_t> extra_bacnet_ports;   // UDP -- see BACNET_UDP_PORT (47808/0xBAC0)
     // If true, a parse failure at the Ethernet/IPv4/TCP layer is rethrown to
     // the caller instead of being recorded as a per-packet "parse-error"
     // result. Off by default so one malformed packet doesn't abort decoding
@@ -100,7 +103,9 @@ struct DecodedPacket {
     // goose_is_gse_management below; EtherType 0x88BA traffic that try_parse_sv DOES recognize is
     // promoted to "sv" instead -- see sv_asdu_count below; EtherType 0x88A4 traffic that
     // try_parse_ethercat DOES recognize is promoted to "ethercat" instead -- see
-    // ethercat_frame_type below), "unsupported-link", or "parse-error".
+    // ethercat_frame_type below; a UDP payload that try_parse_bacnet recognizes as a BACnet/IP
+    // BVLC message is promoted to "bacnet" instead -- see bacnet_bvlc_function below),
+    // "unsupported-link", or "parse-error".
     std::string protocol;
     std::string summary;
     std::vector<std::string> notes;
@@ -288,6 +293,48 @@ struct DecodedPacket {
     // One summary string per decoded datagram (e.g. "APRD idx=2 adp=0x0000 ado=0x0130 len=2
     // wkc=1"), capped at 50 entries for the same reason as sv_asdus/goose_all_data.
     std::vector<std::string> ethercat_datagrams;
+
+    // Only set when protocol == "bacnet" -- see try_parse_bacnet in bacnet.hpp. Unlike EtherCAT/
+    // PROFINET/GOOSE/SV above, BACnet/IP rides on UDP (conventionally port 47808/0xBAC0, has_ip
+    // and has_udp both stay true) -- the same "opportunistic, payload-shape" detection posture as
+    // EtherNet/IP CIP I/O (see enip_has_io above).
+    std::string bacnet_bvlc_function;  // "BVLC-Result"/.../"Original-Unicast-NPDU"/... -- always
+                                         // set when protocol == "bacnet"
+    bool bacnet_has_npdu = false;  // true only for the BVLC functions that carry an NPDU
+                                     // (Forwarded-NPDU/Distribute-Broadcast-To-Network/Original-
+                                     // Unicast-NPDU/Original-Broadcast-NPDU) -- see bacnet.hpp
+
+    uint8_t bacnet_npdu_version = 0;
+    bool bacnet_npdu_is_network_layer_message = false;  // Control NET bit -- when true, this NPDU
+                                                           // has no APDU at all, see bacnet.hpp
+    bool bacnet_npdu_expecting_reply = false;
+    uint8_t bacnet_npdu_priority = 0;  // 0-3
+    bool bacnet_npdu_has_dest = false;
+    uint16_t bacnet_npdu_dnet = 0;
+    bool bacnet_npdu_has_src = false;
+    uint16_t bacnet_npdu_snet = 0;
+    uint8_t bacnet_npdu_hop_count = 0;       // meaningful only when bacnet_npdu_has_dest
+    std::string bacnet_npdu_message_type;    // set only when bacnet_npdu_is_network_layer_message
+                                                // -- named only, not decoded further, see bacnet.hpp
+
+    // Set only when there IS an APDU (bacnet_has_npdu && !bacnet_npdu_is_network_layer_message).
+    bool bacnet_has_apdu = false;
+    std::string bacnet_apdu_type;      // "Confirmed-Request"/"Unconfirmed-Request"/"Simple-ACK"/
+                                          // "Complex-ACK"/"Segment-ACK"/"Error"/"Reject"/"Abort"
+    std::string bacnet_service_name;   // confirmed/unconfirmed service-choice name, when this PDU
+                                          // type carries one -- empty for Segment-ACK/Reject/Abort
+    int32_t bacnet_invoke_id = -1;     // -1 only for Segment-ACK's own separate invoke-id-like
+                                          // field naming (still populated -- see bacnet.hpp), kept
+                                          // signed so "-1" unambiguously means "not present"
+    bool bacnet_segmented = false;     // Confirmed-Request/Complex-ACK's SEG bit -- see bacnet.hpp's
+                                          // segmentation paragraph for why segmented APDUs' service
+                                          // data is never value-decoded
+
+    // Decoded field-by-field summary of the "first pass" services' request/ACK data (Who-Is/
+    // I-Am/Who-Has/I-Have/ReadProperty/WriteProperty/generic-Error) -- see bacnet.hpp. Mirrors
+    // enip_cip_values' scheme. Empty when this PDU's service is outside the first-pass set, or
+    // when segmented.
+    std::vector<std::string> bacnet_values;
 };
 
 // Cross-packet DNP3 fragment-reassembly state for one directional TCP flow (src ip:port -> dst

@@ -1,6 +1,6 @@
 .TH CONDUITSCOPE 1 "2026" "conduitscope 0.1.0" "User Commands"
 .SH NAME
-conduitscope \- decode Modbus/TCP, DNP3, IEC 60870-5-104, S7comm/COTP, EtherNet/IP (CIP explicit and implicit messaging), PROFINET RT (DCP and cyclic real-time IO), IEC 61850-8-1 GOOSE, IEC 61850-9-2 Sampled Values, and EtherCAT traffic from offline pcap/pcapng captures
+conduitscope \- decode Modbus/TCP, DNP3, IEC 60870-5-104, S7comm/COTP, EtherNet/IP (CIP explicit and implicit messaging), PROFINET RT (DCP and cyclic real-time IO), IEC 61850-8-1 GOOSE, IEC 61850-9-2 Sampled Values, EtherCAT, and BACnet/IP traffic from offline pcap/pcapng captures
 .SH SYNOPSIS
 .B conduitscope
 [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-color\fR|\fB\-\-color\fR] [\fB\-\-log\-file\fR \fIFILE\fR] \fICOMMAND\fR [\fIOPTIONS\fR]
@@ -18,7 +18,9 @@ BER-encoded GOOSE PDU), IEC 61850-9-2 Sampled Values (EtherType 0x88BA,
 GOOSE's sibling protocol, ASN.1 BER-encoded SavPdu), and EtherCAT (EtherType
 0x88A4, plain fixed-binary-layout framing, no ASN.1/BER) traffic found
 directly on the wire, with no
-IP/TCP/UDP layer at all, and checks
+IP/TCP/UDP layer at all, plus BACnet/IP (UDP port 47808/0xBAC0, ASHRAE 135
+Annex J, detected by payload shape rather than port) traffic found inside
+its UDP streams, and checks
 decoded traffic against a
 zone-and-conduit segmentation policy (IEC 62443 / NIS2 style work) via
 \fBpolicy validate\fR.
@@ -83,9 +85,10 @@ Write output here instead of stdout.
 .BR \-f ", " \-\-format " " {text,json,csv}
 Output format. Default: text.
 .TP
-.B \-\-protocol {auto,modbus,dnp3,iec104,s7comm,enip,profinet,goose,sv,ethercat}
+.B \-\-protocol {auto,modbus,dnp3,iec104,s7comm,enip,profinet,goose,sv,ethercat,bacnet}
 Restrict decoding to one protocol. Default: auto (tries all five TCP
-protocols, independent of port number, plus CIP I/O on every UDP payload,
+protocols, independent of port number, plus CIP I/O and BACnet/IP on every
+UDP payload,
 plus PROFINET RT on every non-IPv4 Ethernet frame carrying EtherType
 0x8892, plus GOOSE on every non-IPv4 Ethernet frame carrying EtherType
 0x88B8, plus Sampled Values on every non-IPv4 Ethernet frame carrying
@@ -96,6 +99,7 @@ start -- coincidentally also matches Modbus's MBAP-header detection; see
 \fBdocs/MANUAL.md\fR's PROTOCOL DETECTION section). \fBenip\fR covers both
 EtherNet/IP explicit messaging (TCP) and CIP I/O implicit messaging (UDP).
 \fBsv\fR is IEC 61850-9-2 Sampled Values. \fBethercat\fR is EtherCAT.
+\fBbacnet\fR is BACnet/IP.
 \fBprofinet\fR covers both DCP and cyclic real-time IO.
 .TP
 .B \-\-modbus\-port \fIPORT\fR
@@ -116,6 +120,9 @@ Same as \fB\-\-modbus\-port\fR, for EtherNet/IP explicit messaging (TCP). Repeat
 .TP
 .B \-\-enip\-io\-port \fIPORT\fR
 Same as \fB\-\-modbus\-port\fR, for EtherNet/IP CIP I/O implicit messaging (UDP). Repeatable.
+.TP
+.B \-\-bacnet\-port \fIPORT\fR
+Same as \fB\-\-modbus\-port\fR, for BACnet/IP (UDP). Repeatable.
 .TP
 .B \-\-max\-packets \fIN\fR
 Stop after decoding this many packets. Default: 0 (unlimited). With
@@ -216,7 +223,8 @@ it's meant to be diffed/archived/piped as an audit artifact). The
 \fB[protocol]\fR tag is colored per protocol: cyan for Modbus, magenta for
 DNP3, green for IEC 104, blue for S7comm/COTP, yellow for EtherNet/IP,
 bright cyan for PROFINET RT, bright green for GOOSE, bright magenta for
-Sampled Values, bright yellow for EtherCAT, dim for everything else
+Sampled Values, bright yellow for EtherCAT, bright blue for BACnet/IP, dim
+for everything else
 recognized but not OT\-specific. A Modbus exception response's summary, and a
 \fBparse\-error\fR packet's whole line, are bold red. Notes are dim.
 .PP
@@ -331,12 +339,26 @@ confidence source; validated against a genuine 986-frame real capture (zero
 declared-Length-vs-actual-bytes mismatches across all 986 frames, confirming
 the chain-bounding design), but APRW/FPRW/BRW/LRW/ARMW/FRMW/EXT/NOP, the
 Circulating bit, VLAN tagging, and non-Type-1 frames are validated only
-against a hand-built synthetic fixture; non-IPv4
+against a hand-built synthetic fixture; BACnet/IP (UDP port 47808/0xBAC0,
+detected by payload shape, not port) is also now decoded -- BVLC framing
+(including every BBMD/foreign-device-table management function), NPDU
+(including DEST/SRC routing and Network Layer Messages, named only), and
+APDU (all 8 PDU types, byte-accurate including segmentation) are decoded,
+but service value-decoding is a deliberate "first pass" covering only
+Who-Is/I-Am/Who-Has/I-Have device discovery and ReadProperty/
+WriteProperty/generic-Error -- every other service is named only, shown as
+raw hex, as is a constructed/array PropertyValue and a segmented APDU's
+own service data (no cross-packet reassembly); validated against a genuine
+54-frame real capture (Original-Unicast-NPDU ReadProperty traffic against
+trend-log objects), but device discovery, WriteProperty, every
+PropertyValue type besides a scalar Unsigned, every other BVLC function,
+and NPDU routing fields are validated only against a hand-built synthetic
+fixture; non-IPv4
 Ethernet frames and non-TCP
 IPv4 payloads (including UDP) are otherwise still just recognized and
 NAMED for a small OT-relevant set (ARP, LLDP, ICMP, and the rest) but not further decoded, and
 \fBpolicy validate\fR does not yet evaluate any non-TCP traffic (CIP I/O,
-PROFINET RT, GOOSE, Sampled Values, and EtherCAT included) against a conduit;
+PROFINET RT, GOOSE, Sampled Values, EtherCAT, and BACnet/IP included) against a conduit;
 Modbus request/response
 classification falls back to a payload-shape heuristic only when
 authoritative pairing can't be done (no matching request on this session);
@@ -441,6 +463,14 @@ didn't respond):
 conduitscope decode \-r capture.pcap \-\-protocol ethercat \-f json \e
   | jq \-r '.[] | select(.ethercat_first_wkc == 0) |
            "\e(.index): \e(.ethercat_first_cmd_name) adp=\e(.ethercat_first_adp // "n/a")"'
+.EE
+.RE
+.PP
+Build a quick BACnet device inventory from I-Am announcements:
+.RS
+.EX
+conduitscope decode \-r capture.pcap \-\-protocol bacnet \-f json \e
+  | jq \-r '[.[] | select(.bacnet_service_name == "i\-Am") | "\e(.src_ip): \e(.bacnet_values | join(", "))"] | unique[]'
 .EE
 .RE
 .PP

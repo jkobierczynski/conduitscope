@@ -2,16 +2,16 @@
 
 ## NAME
 
-conduitscope -- decode Modbus/TCP, DNP3, IEC 60870-5-104, S7comm/COTP, EtherNet/IP (CIP explicit and implicit messaging), PROFINET RT (DCP and cyclic real-time IO), IEC 61850-8-1 GOOSE, IEC 61850-9-2 Sampled Values, and EtherCAT traffic from offline pcap captures
+conduitscope -- decode Modbus/TCP, DNP3, IEC 60870-5-104, S7comm/COTP, EtherNet/IP (CIP explicit and implicit messaging), PROFINET RT (DCP and cyclic real-time IO), IEC 61850-8-1 GOOSE, IEC 61850-9-2 Sampled Values, EtherCAT, and BACnet/IP traffic from offline pcap captures
 
 ## SYNOPSIS
 
 ```
 conduitscope [-q|--quiet] [--no-color|--color] [--log-file FILE] [--version] [-h|--help] <command> [command options]
 
-conduitscope decode (-r FILE | -i INTERFACE) [-o FILE] [-f text|json|csv] [--protocol auto|modbus|dnp3|s7comm|iec104|enip|profinet|goose|sv|ethercat]
+conduitscope decode (-r FILE | -i INTERFACE) [-o FILE] [-f text|json|csv] [--protocol auto|modbus|dnp3|s7comm|iec104|enip|profinet|goose|sv|ethercat|bacnet]
                      [--modbus-port PORT]... [--dnp3-port PORT]... [--s7comm-port PORT]... [--iec104-port PORT]...
-                     [--enip-port PORT]... [--enip-io-port PORT]...
+                     [--enip-port PORT]... [--enip-io-port PORT]... [--bacnet-port PORT]...
                      [--max-packets N] [--stats] [--strict]
                      [--filter BPF] [--duration SECONDS] [--snaplen BYTES] [--no-promiscuous]
 
@@ -46,10 +46,14 @@ real-time IO datagrams, and recognizes IEC 61850-8-1 GOOSE frames (EtherType
 `0x88B8`, likewise no IP/TCP/UDP layer) and decodes the ASN.1 BER-encoded
 GOOSE PDU, recognizes IEC 61850-9-2 Sampled Values frames (EtherType
 `0x88BA`, GOOSE's sibling protocol, same header shape and BER encoding) and
-decodes the ASN.1 BER-encoded SavPdu, and recognizes EtherCAT frames
+decodes the ASN.1 BER-encoded SavPdu, recognizes EtherCAT frames
 (EtherType `0x88A4`, likewise no IP/TCP/UDP layer, though plain
 fixed-binary-layout rather than ASN.1/BER) and decodes the frame header plus
-the chained EtherCAT datagram(s) it carries. It is designed as groundwork for auditing
+the chained EtherCAT datagram(s) it carries, and recognizes BACnet/IP frames
+(UDP port 47808/0xBAC0, ASHRAE 135 Annex J -- detected by payload shape, not
+port, like CIP I/O) and decodes the BVLC framing header, NPDU network layer,
+and APDU application layer, including a first-pass set of the most common
+BACnet services. It is designed as groundwork for auditing
 OT/ICS network traffic against a zone-and-conduit segmentation model (the kind
 IEC 62443-3-2 and, by extension, NIS2 risk-assessment work call for): the
 protocol-decoding layer (`decode`/`info`) and, now, the zone/conduit
@@ -149,13 +153,14 @@ conduitscope decode (-r FILE | -i INTERFACE) [options]
 | `--no-promiscuous` | off (i.e. promiscuous by default) | With `-i`, don't put the interface into promiscuous mode. Promiscuous is the default because the main live-capture use case -- watching a mirrored/SPAN switch port for zone/conduit traffic -- needs to see traffic that isn't addressed to the capturing host at all. |
 | `-o, --output FILE` | stdout | Write decoded output here instead of stdout. |
 | `-f, --format {text,json,csv}` | `text` | Output format. See OUTPUT FORMATS below. |
-| `--protocol {auto,modbus,dnp3,s7comm,iec104,enip,profinet,goose,sv,ethercat}` | `auto` | Restrict decoding to one protocol. `auto` opportunistically tries EtherNet/IP, IEC 104, Modbus, DNP3, and S7comm/COTP detection on every TCP payload, CIP I/O detection on every UDP payload, PROFINET RT (DCP/cyclic) detection on every non-IPv4 Ethernet frame carrying EtherType `0x8892`, GOOSE detection on every non-IPv4 Ethernet frame carrying EtherType `0x88B8`, Sampled Values detection on every non-IPv4 Ethernet frame carrying EtherType `0x88BA`, and EtherCAT detection on every non-IPv4 Ethernet frame carrying EtherType `0x88A4`, regardless of port (see PROTOCOL DETECTION below). `enip` covers both EtherNet/IP explicit messaging (TCP) and CIP I/O implicit messaging (UDP). `profinet` covers both DCP and cyclic real-time IO. `sv` is IEC 61850-9-2 Sampled Values. `ethercat` is EtherCAT. |
+| `--protocol {auto,modbus,dnp3,s7comm,iec104,enip,profinet,goose,sv,ethercat,bacnet}` | `auto` | Restrict decoding to one protocol. `auto` opportunistically tries EtherNet/IP, IEC 104, Modbus, DNP3, and S7comm/COTP detection on every TCP payload, CIP I/O and BACnet/IP detection on every UDP payload, PROFINET RT (DCP/cyclic) detection on every non-IPv4 Ethernet frame carrying EtherType `0x8892`, GOOSE detection on every non-IPv4 Ethernet frame carrying EtherType `0x88B8`, Sampled Values detection on every non-IPv4 Ethernet frame carrying EtherType `0x88BA`, and EtherCAT detection on every non-IPv4 Ethernet frame carrying EtherType `0x88A4`, regardless of port (see PROTOCOL DETECTION below). `enip` covers both EtherNet/IP explicit messaging (TCP) and CIP I/O implicit messaging (UDP). `profinet` covers both DCP and cyclic real-time IO. `sv` is IEC 61850-9-2 Sampled Values. `ethercat` is EtherCAT. `bacnet` is BACnet/IP. |
 | `--modbus-port PORT` | *(502 built in)* | Additional TCP port to treat as "expected" for Modbus. Repeatable. Does **not** gate detection -- it only changes whether a decoded Modbus frame is annotated as appearing on an unexpected port, which is itself a useful signal when auditing a conduit. |
 | `--dnp3-port PORT` | *(20000 built in)* | Same as `--modbus-port`, for DNP3. Repeatable. |
 | `--s7comm-port PORT` | *(102 built in)* | Same as `--modbus-port`, for COTP/S7comm. Repeatable. |
 | `--iec104-port PORT` | *(2404 built in)* | Same as `--modbus-port`, for IEC 104. Repeatable. |
 | `--enip-port PORT` | *(44818 built in)* | Same as `--modbus-port`, for EtherNet/IP explicit messaging (TCP). Repeatable. |
 | `--enip-io-port PORT` | *(2222 built in)* | Same as `--modbus-port`, for EtherNet/IP CIP I/O implicit messaging (UDP). Repeatable. |
+| `--bacnet-port PORT` | *(47808 built in)* | Same as `--modbus-port`, for BACnet/IP (UDP). Repeatable. |
 | `--max-packets N` | `0` (unlimited) | Stop after decoding this many packets. With `-i`, this also bounds a live capture (in addition to `--duration` and Ctrl+C). |
 | `--stats` | off | Print an aggregate summary (protocol counts, Modbus function-code histogram, exception count, capture time span) instead of one line per packet. Ignores `--format`. |
 | `--strict` | off | Abort with a nonzero exit status on the first packet that fails to parse at the Ethernet/IPv4/TCP layer, instead of reporting a per-packet warning and continuing. Does not affect Modbus/DNP3-level ambiguity, which is always handled by heuristic + note rather than error. |
@@ -632,9 +637,9 @@ down.
 
 `--protocol modbus`, `--protocol dnp3`, `--protocol s7comm`, `--protocol
 iec104`, `--protocol enip`, `--protocol profinet`, `--protocol goose`,
-`--protocol sv`, or `--protocol ethercat` restrict decoding to only that
-protocol (useful for large mixed captures, or for scripting a two-pass
-analysis). `--protocol enip` covers both
+`--protocol sv`, `--protocol ethercat`, or `--protocol bacnet` restrict
+decoding to only that protocol (useful for large mixed captures, or for
+scripting a two-pass analysis). `--protocol enip` covers both
 EtherNet/IP explicit messaging (TCP, above) and CIP I/O implicit messaging
 (UDP, below) -- they're the same overall protocol family.
 
@@ -709,6 +714,26 @@ datagram-chain scan (clamped tolerantly to the bytes actually available,
 with a note, when implausible) rather than walking every byte physically
 present in the frame -- see PROTOCOL COVERAGE's EtherCAT section for why.
 
+**BACnet/IP, UDP port 47808/0xBAC0 (ASHRAE 135 Annex J)** is tried,
+port-independently, against every non-empty UDP payload -- the same
+"opportunistic, payload-shape" philosophy CIP I/O above uses, since BACnet/IP
+rides over UDP rather than a dedicated EtherType the way PROFINET RT/GOOSE/
+SV/EtherCAT do: the BVLC (BACnet Virtual Link Layer) header's Type byte must
+be exactly `0x81` (the Annex J value; `0x82` is BACnet Secure Connect, a
+different, unrelated protocol this decoder does not attempt) *and* its
+Function byte must be one of the 13 values the spec defines (`0x00`-`0x0C`).
+Two independently-fixed byte values is the same structural-confidence
+philosophy CIP I/O's own Sequenced Address Item check uses; a UDP payload
+that doesn't match either check falls back to the generic `udp` report,
+regardless of port. `--bacnet-port` only changes whether a decoded frame is
+annotated as appearing on an unexpected port (default 47808), the same as
+every other per-protocol port option -- it never gates detection. Once the
+gate matches, the BVLC header's own declared Length field is checked
+tolerantly against the bytes actually available (clamped, with a note, on a
+mismatch) rather than rejected outright, the same tolerant-declared-length
+posture GOOSE/SV/EtherCAT already take. See PROTOCOL COVERAGE's BACnet/IP
+section for exactly what's decoded once the gate matches.
+
 ## OUTPUT FORMATS
 
 ### text (default)
@@ -729,7 +754,7 @@ The `[protocol]` tag is colored per protocol (so a mixed-protocol capture
 scans quickly by eye): cyan for Modbus, magenta for DNP3, blue for S7comm and
 COTP-without-S7comm, green for IEC 104, yellow for EtherNet/IP, bright cyan
 for PROFINET RT, bright green for GOOSE, bright magenta for Sampled Values,
-bright yellow for EtherCAT, dim for everything else recognized
+bright yellow for EtherCAT, bright blue for BACnet/IP, dim for everything else recognized
 but not OT-specific (`tcp`/`udp`/`non-tcp`/`non-ip`/`unsupported-link`). A Modbus
 exception response's summary, and a `parse-error` packet's entire line, are
 bold red -- both mean "look at this one" over everything else in a long
@@ -997,6 +1022,78 @@ packets where they apply:
   trailing `irq`/`circulating` are shown only when notable, to keep the
   common case uncluttered). Capped at 50 entries, same reason as
   `sv_asdus`/`goose_all_data`.
+- `bacnet_bvlc_function`: the BVLC header's Function byte, named (e.g.
+  `"Original-Unicast-NPDU"`, `"BVLC-Result"`, `"Write-Broadcast-Distribution-
+  Table"`, `"Secure-BVLL"`), when protocol is `bacnet`. Always present.
+- `bacnet_has_npdu`: `true`/`false` -- `true` for every BVLC function that
+  carries an NPDU (the large majority: Original-Unicast/Broadcast-NPDU,
+  Forwarded-NPDU, Distribute-Broadcast-To-Network); `false` for the BBMD/
+  foreign-device-table management functions that are pure BVLC (BVLC-Result,
+  Write/Read-BDT(-Ack), Register-Foreign-Device, Read/Delete-FDT-Entry) and
+  for the opaque Secure-BVLL. The fields below are only present when this is
+  `true`.
+- `bacnet_npdu_version`: the NPDU header's Version byte, as a plain integer
+  (always `1` for any NPDU actually seen on the wire today).
+- `bacnet_npdu_is_network_layer_message`: `true`/`false` -- the Control
+  byte's NET bit. When `true`, this NPDU carries a Network Layer Message
+  (router-to-router traffic such as Who-Is-Router-To-Network) instead of an
+  APDU -- `bacnet_npdu_message_type` is set and every `bacnet_has_apdu`/
+  `bacnet_apdu_*` field below is absent.
+- `bacnet_npdu_expecting_reply`: `true`/`false` -- the Control byte's
+  Expecting-Reply bit (network-layer-message traffic only).
+- `bacnet_npdu_priority`: the Control byte's 2-bit network priority field
+  (0-3), as a plain integer.
+- `bacnet_npdu_has_dest`: `true`/`false` -- the Control byte's
+  Destination-Specifier bit. When `true`, `bacnet_npdu_dnet` and
+  `bacnet_npdu_hop_count` are present (the DADR MAC bytes themselves are
+  decoded but not currently promoted to a JSON field).
+- `bacnet_npdu_dnet`: the destination network number, as a plain integer.
+  Present only when `bacnet_npdu_has_dest` is `true`.
+- `bacnet_npdu_has_src`: `true`/`false` -- the Control byte's
+  Source-Specifier bit (this NPDU was forwarded from another network by a
+  router). When `true`, `bacnet_npdu_snet` is present (the SADR MAC bytes
+  themselves are decoded but not currently promoted to a JSON field).
+- `bacnet_npdu_snet`: the source network number, as a plain integer. Present
+  only when `bacnet_npdu_has_src` is `true`.
+- `bacnet_npdu_hop_count`: the NPDU's HopCount byte, as a plain integer.
+  Present only when `bacnet_npdu_has_dest` is `true` (HopCount only exists
+  when DNET/DLEN/DADR are present).
+- `bacnet_npdu_message_type`: the Network Layer Message's named MessageType
+  (e.g. `"Who-Is-Router-To-Network"`, or `"vendor-proprietary(128)"` for a
+  vendor-proprietary message type, which also carries its own 2-byte Vendor
+  ID -- not currently promoted to its own JSON field). Present only when
+  `bacnet_npdu_is_network_layer_message` is `true`.
+- `bacnet_has_apdu`: `true`/`false` -- `true` only when this NPDU carries an
+  APDU (`bacnet_has_npdu` is `true` and
+  `bacnet_npdu_is_network_layer_message` is `false`) *and* the APDU itself
+  parsed (a truncated or unrecognized APDU type leaves this `false` with a
+  note instead). The fields below are only present when this is `true`.
+- `bacnet_apdu_type`: the APDU's PDU type, named -- one of
+  `"Confirmed-Request"`, `"Unconfirmed-Request"`, `"Simple-ACK"`,
+  `"Complex-ACK"`, `"Segment-ACK"`, `"Error"`, `"Reject"`, or `"Abort"`.
+- `bacnet_service_name`: the confirmed/unconfirmed service-choice name (e.g.
+  `"readProperty"`, `"who-Is"`), when this PDU type carries one (every type
+  except Segment-ACK). For Error, this is the *original request's* service
+  choice (the one that errored), not a service of the Error PDU itself.
+- `bacnet_invoke_id`: the APDU's invoke ID, as a plain integer, or `-1` for
+  Segment-ACK's own separately-encoded invoke-id-like field when it wasn't
+  otherwise applicable, and for Unconfirmed-Request (which has no invoke ID
+  at all).
+- `bacnet_segmented`: `true`/`false` -- Confirmed-Request/Complex-ACK's SEG
+  bit. When `true`, the service data is a single segment of a larger,
+  multi-datagram message; this decoder does no cross-packet APDU
+  reassembly, so `bacnet_values` is absent and a note explains the service
+  data is shown as raw hex instead (see PROTOCOL COVERAGE's BACnet/IP
+  section).
+- `bacnet_values`: an array of decoded field/value strings (e.g.
+  `"object=analog-input,3"`, `"property=present-value"`,
+  `"value=(Real) 72.500000"`, `"priority=8"`), present only for the
+  "first-pass" service set this decoder value-decodes (Who-Is, I-Am,
+  Who-Has, I-Have, ReadProperty request/ACK, WriteProperty request, generic
+  Error) when a single primitive value was actually present to decode --
+  absent for every other service (shown as raw hex with a note instead) and
+  for a constructed/array PropertyValue (also raw hex with a note -- see
+  PROTOCOL COVERAGE).
 
 All array fields are capped at 50 entries for a single heavily-batched
 request/response; see PROTOCOL COVERAGE for where the full list still shows
@@ -2035,6 +2132,260 @@ real capture -- the same honest gap this codebase already documents for
 several other protocols' less-common paths. See
 `include/conduitscope/ethercat.hpp`'s file header for the full writeup.
 
+### BACnet/IP (UDP port 47808/0xBAC0, ASHRAE 135 Annex J)
+
+Unlike PROFINET RT, IEC 61850-8-1 GOOSE, IEC 61850-9-2 Sampled Values, and
+EtherCAT, BACnet/IP does not ride directly on raw Ethernet -- it rides on
+UDP, conventionally port 47808 (0xBAC0), detected the same "opportunistic,
+payload-shape" way EtherNet/IP CIP I/O (UDP port 2222) already is (see
+PROTOCOL DETECTION above). Every multi-byte field at every layer is
+big-endian (unlike EtherCAT's little-endian, the same as every other
+protocol in this codebase). This section, and this decoder, is
+cross-checked against Wireshark's own BACnet dissectors --
+`epan/dissectors/packet-bvlc.c` (BVLC), `packet-bacnet.c` (NPDU), and
+`packet-bacapp.c` (APDU, BACnet's own tag encoding, and service value
+decode) -- byte offset by byte offset. Three layers are decoded: BVLC (the
+UDP framing header), NPDU (the network layer), and APDU (the application
+layer, where BACnet's actual services live).
+
+#### BVLC (4-byte fixed header, ASHRAE 135 Annex J.2)
+
+| Field | Size | Notes |
+|---|---|---|
+| `Type` | 1 | Must be `0x81` ("BACnet/IP, Annex J") -- the only value this decoder recognizes. A separate value, `0x82`, exists for BACnet/SC (Secure Connect), an entirely different WebSocket-based transport this decoder does not attempt. |
+| `Function` | 1 | Which of 13 defined BVLC functions this is -- see the table below. |
+| `Length` | 2 | Total byte length of this BVLC message INCLUDING the 4-byte header, big-endian. Trusted only when at least 4 and not exceeding the bytes actually present -- clamped tolerantly to the available bytes, with a note, otherwise. |
+
+**Function table**: `0x00` BVLC-Result, `0x01` Write-Broadcast-
+Distribution-Table, `0x02` Read-Broadcast-Distribution-Table, `0x03`
+Read-Broadcast-Distribution-Table-Ack, `0x04` Forwarded-NPDU, `0x05`
+Register-Foreign-Device, `0x06` Read-Foreign-Device-Table, `0x07`
+Read-Foreign-Device-Table-Ack, `0x08` Delete-Foreign-Device-Table-Entry,
+`0x09` Distribute-Broadcast-To-Network, `0x0A` Original-Unicast-NPDU,
+`0x0B` Original-Broadcast-NPDU, `0x0C` Secure-BVLL.
+
+Functions `0x00`-`0x03` and `0x05`-`0x08` are BBMD (BACnet Broadcast
+Management Device) foreign-device-table/broadcast-distribution-table
+management -- routing-level housekeeping between BBMDs, carrying no NPDU at
+all. Their own sub-fields ARE decoded: BVLC-Result's 2-byte result code;
+Write-BDT/Read-BDT-Ack's list of 10-byte BDT entries
+(IP(4)+Port(2)+Mask(4)); Register-Foreign-Device's 2-byte Time-To-Live;
+Read-FDT-Ack's list of 10-byte FDT entries (IP(4)+Port(2)+TTL(2)+
+Timeout(2)); Delete-FDT-Entry's 6-byte IP+Port.
+
+Functions `0x09` (Distribute-Broadcast-To-Network), `0x0A`
+(Original-Unicast-NPDU), `0x0B` (Original-Broadcast-NPDU), and `0x04`
+(Forwarded-NPDU) all carry an NPDU immediately after the 4-byte BVLC header
+(`0x09`/`0x0A`/`0x0B`) or after the header plus a 6-byte "originating
+device" B/IP address (`0x04` -- IP(4)+Port(2), the BBMD-forwarded
+broadcast's actual source, decoded and surfaced separately from the UDP/IP
+headers' own source address/port). In real deployments, `0x0A`
+(Original-Unicast-NPDU) is by far the most common -- ordinary unicast
+request/response traffic between a client and a single device, not going
+through a BBMD at all (all 54 frames in this decoder's real capture fixture
+are this function -- see Validation below).
+
+Function `0x0C` (Secure-BVLL) wraps an entire BACnet/SC-style
+encrypted/signed payload -- this decoder does not attempt decryption (no
+key material exists on the wire), so it is named only, the same "no
+generic self-describing wire-level type" posture this codebase already
+applies to opaque/encrypted or engineering-configuration-dependent payloads
+(PROFINET cyclic IO data, EtherNet/IP CIP I/O's Connected Data Item, SV's
+`seqData`, EtherCAT's `Data`).
+
+**Structural detection gate**: BVLC `Type == 0x81` AND `Function` one of
+the 13 values above -- a 2-byte anchor (Type gives a 1-in-256 match by
+itself, Function narrows a false positive further to 13-in-256 of those),
+applied port-independently in Auto mode; UDP port 47808 is recorded as an
+"expected port" annotation only, never a gate. See PROTOCOL DETECTION
+above.
+
+#### NPDU (Network Layer PDU, ASHRAE 135 clause 6)
+
+| Field | Size | Notes |
+|---|---|---|
+| `Version` | 1 | Always `0x01` ("ASHRAE 135-1995") in every version of the standard published so far; surfaced as-is, not gated on. |
+| `Control` | 1 | A bitmask -- see below. |
+| `DNET`, `DLEN`, `DADR` | 2, 1, `DLEN` | Present only when Control's DEST bit is set: destination network number, MAC address length (`0` = broadcast on DNET, `1` = MS/TP or ARCNET MAC, `6` = Ethernet MAC, otherwise a vendor MAC format), and the MAC address itself. |
+| `SNET`, `SLEN`, `SADR` | 2, 1, `SLEN` | Present only when Control's SRC bit is set, same shape as DNET/DLEN/DADR but for the originating network/MAC -- used when a BACnet router forwarded this NPDU from another network (SADR/SNET identify the ORIGINAL sender, not the router). |
+| `HopCount` | 1 | Present only when DEST is set: decremented by each router the NPDU passes through, protects against routing loops. |
+| `MessageType` [+ `VendorID`] | 1 [+2] | Present only when Control's NET bit is set: which Network Layer Message this is. A 2-byte VendorID (big-endian) immediately follows MessageType only when MessageType is in the vendor-proprietary range (>= `0x80`). |
+
+**Control bitmask**: bit 7 (`0x80`) NET -- this NPDU carries a Network
+Layer Message, NOT an APDU, when set; bit 6 (`0x40`) reserved; bit 5
+(`0x20`) DEST -- DNET/DLEN/DADR (and HopCount) are present; bit 4 (`0x10`)
+reserved; bit 3 (`0x08`) SRC -- SNET/SLEN/SADR are present; bit 2 (`0x04`)
+EXPECT -- sender is requesting a reply be routed back; bits 1-0 PRIORITY --
+2-bit priority (0=Normal, 1=Urgent, 2=Critical Equipment, 3=Life Safety).
+
+Network Layer Messages (Who-Is-Router-To-Network/I-Am-Router-To-Network/
+Initialize-Routing-Table/.../Network-Number-Is, `0x00`-`0x13`
+ASHRAE-defined, `0x14`-`0x7F` reserved, `0x80`-`0xFF` vendor-proprietary)
+are named only via a range-string table, not value-decoded -- real-world
+OT-security-relevant BACnet traffic is overwhelmingly application-layer
+(device/object discovery, property access), not the inter-router control
+plane; this mirrors this codebase's existing "first pass" service-scoping
+precedent (below). When Control's NET bit is clear, everything after the
+fixed NPDU header is one complete APDU.
+
+#### APDU (Application Layer PDU, ASHRAE 135 clause 20)
+
+The first byte's top 4 bits select one of 8 PDU types:
+
+| Type | Name | Layout |
+|---|---|---|
+| 0 | Confirmed-Request | byte0 = type\<\<4 \| SEG\<\<3 \| MOR\<\<2 \| SA\<\<1 \| reserved; byte1 = max-segs-accepted(3 bits)\<\<5 \| max-apdu-len-accepted(4 bits)\<\<1 \| reserved; invoke-id(1); [sequence-number(1) + proposed-window-size(1), only if SEG]; service-choice(1); service-request data. |
+| 1 | Unconfirmed-Request | byte0 = type\<\<4 \| reserved(4 bits); service-choice(1); service-request data. |
+| 2 | Simple-ACK | byte0 = type\<\<4 \| reserved; invoke-id(1); service-ACK-choice(1) -- no further data. |
+| 3 | Complex-ACK | byte0 = type\<\<4 \| SEG\<\<3 \| MOR\<\<2 \| reserved; invoke-id(1); [sequence-number(1) + proposed-window-size(1), only if SEG]; service-ACK-choice(1); service-ACK data. |
+| 4 | Segment-ACK | byte0 = type\<\<4 \| reserved(2 bits)\<\<2 \| NAK\<\<1 \| SRV; original-invoke-id(1); sequence-number(1); actual-window-size(1) -- exactly 4 bytes total, no further data. |
+| 5 | Error | byte0 = type\<\<4 \| reserved; original-invoke-id(1); error-choice(1) (the confirmed service this error responds to); error data. |
+| 6 | Reject | byte0 = type\<\<4 \| reserved; original-invoke-id(1); reject-reason(1) (a fixed 10-entry ASHRAE table) -- no further data. |
+| 7 | Abort | byte0 = type\<\<4 \| reserved(2 bits)\<\<1 \| SRV; original-invoke-id(1); abort-reason(1) (a fixed 12-entry ASHRAE table) -- no further data. |
+
+A PDU type outside `0`-`7` is not recognized -- the BVLC/NPDU layers still
+decode, only the APDU itself is left unrecognized, with a note.
+
+**Segmentation**: SEG/MOR are the Segmented-Message/More-Follows bits.
+When SEG is set, this decoder decodes the sequence-number/
+proposed-window-size header fields but does NOT attempt to value-decode
+that segment's own service data: a single UDP datagram carries one
+segment, not the whole reassembled service message, and this decoder (like
+every other UDP-based protocol in this codebase) does no cross-packet
+reassembly -- the segment's raw bytes are shown as hex only, with a note
+explaining why.
+
+**Error PDUs**: this decoder value-decodes only the GENERIC error shape
+(errorClass + errorCode, both application-tagged Enumerated). Several
+confirmed services (AddListElement, CreateObject, WritePropertyMultiple,
+ConfirmedPrivateTransfer, VTClose, SubscribeCOVPropertyMultiple,
+AuthRequest) define their OWN richer, service-specific error structure
+instead -- an error response to one of those 7 services is named
+(error-choice's service name) but its error body is shown as raw hex, not
+mis-decoded as a generic errorClass/errorCode pair.
+
+#### Service value decode ("first pass")
+
+Service choice tables (35 confirmed + 15 unconfirmed entries, transcribed
+in full from `packet-bacapp.c`'s own `BACnetConfirmedServiceChoice[]`/
+`BACnetUnconfirmedServiceChoice[]`) are used to NAME every confirmed/
+unconfirmed service this decoder sees. Value decode of the actual
+service-request/service-ACK data, though, is a deliberate "first pass"
+subset -- mirroring this codebase's existing "first pass" precedent
+(EtherNet/IP CIP explicit messaging's own service subset, DNP3's
+group/variation table, S7comm's classic-syntax-only addressing):
+
+- **Who-Is** (unconfirmed 8): optional context-tag[0]
+  device-instance-range-low-limit(unsigned) + context-tag[1]
+  ...-high-limit(unsigned) -- both present or neither, per spec.
+- **I-Am** (unconfirmed 0): application-tagged ObjectIdentifier (always a
+  device object) + application-tagged Unsigned (Max-APDU-Length-Accepted)
+  + application-tagged Enumerated (Segmentation-Supported, a 4-entry
+  table) + application-tagged Unsigned (Vendor-ID) -- the single richest
+  device-discovery/fingerprinting message on the wire, the BACnet analog
+  of EtherNet/IP's ListIdentity response.
+- **Who-Has** (unconfirmed 7): optional context-tag[0]/[1] device-instance
+  low/high limit (unsigned, same optional-pair rule as Who-Is), then
+  EITHER context-tag[2] ObjectIdentifier OR context-tag[3] ObjectName
+  (CharacterString) -- a CHOICE, exactly one of the two is present.
+- **I-Have** (unconfirmed 1): application-tagged ObjectIdentifier (the
+  device) + application-tagged ObjectIdentifier (the object found) +
+  application-tagged CharacterString (its Object-Name).
+- **ReadProperty request** (confirmed 12): context-tag[0] ObjectIdentifier
+  + context-tag[1] PropertyIdentifier (named via a 539-entry table) +
+  optional context-tag[2] PropertyArrayIndex (unsigned).
+- **ReadProperty ACK** (confirmed 12's Complex-Ack): context-tag[0]
+  ObjectIdentifier + context-tag[1] PropertyIdentifier + optional
+  context-tag[2] PropertyArrayIndex + context-tag[3] PropertyValue,
+  opening/closing-tag-wrapped around exactly one application-tagged
+  primitive value in this decoder's "first pass" (see "Property value
+  decode" below).
+- **WriteProperty request** (confirmed 15): same context-tag[0]/[1]/[2] as
+  ReadProperty request, then context-tag[3] PropertyValue (same
+  opening/closing-tag-wrapped single-primitive decode), then optional
+  context-tag[4] Priority (unsigned, 1-16).
+- **Error** (any confirmed service's error response): generic
+  errorClass+errorCode only, per the PDU-type table above.
+
+Every OTHER confirmed or unconfirmed service (ReadPropertyMultiple/
+WritePropertyMultiple/SubscribeCOV/AtomicReadFile/
+DeviceCommunicationControl/ReinitializeDevice/
+ConfirmedEventNotification/UnconfirmedCOVNotification/... -- the large
+majority of the two tables) is named via the service-choice table, but its
+data is shown only as raw hex + byte length, not value-decoded. This
+"first pass" set was chosen because Who-Is/I-Am/Who-Has/I-Have are
+collectively the single most security-relevant BACnet traffic pattern for
+passive OT monitoring (unauthenticated device and object discovery, the
+BACnet analog of an ARP sweep or a Modbus/S7comm "what devices exist here"
+probe), and ReadProperty/WriteProperty are the most common property-access
+pattern (ReadPropertyMultiple, deliberately NOT decoded here, is more
+efficient and increasingly common in modern deployments but has a
+materially more complex nested-list wire shape -- named only, like every
+other out-of-scope service, rather than half-decoded).
+
+**Property value decode**: a PropertyValue's single application-tagged
+primitive is decoded for application tag numbers 0-12: Null, Boolean,
+Unsigned (1-8 bytes, big-endian), Signed (1-8 bytes, two's-complement
+big-endian), Real (4-byte IEEE 754 single), Double (8-byte IEEE 754
+double), Octet-String (raw hex), Character-String (1-byte
+character-set-encoding tag + string bytes -- ANSI X3.4/UTF-8 decoded
+as-is; the other five ASHRAE-defined character sets, including IBM/MS
+DBCS's extra 2-byte code-page field, are recognized and their raw bytes
+shown, but not transcoded), Bit-String (1-byte unused-bit count + bitfield,
+rendered as a T/F string), Enumerated (1-4 bytes, big-endian, same encoding
+as Unsigned), Date, Time, Object-Identifier. Tag number 13-15 (reserved by
+ASHRAE) or a context-specific/constructed value inside the PropertyValue
+wrapper (an array, a list, or a service-specific structured value) is
+shown as "not decoded" plus raw hex, not misrepresented as one of the
+primitive types above -- the same "decode confidently only where the wire
+format is unambiguous" philosophy already applied throughout this
+codebase.
+
+Object type / property identifier / error class / error code tables
+(65/539/8/230 entries respectively) are transcribed in full from
+`packet-bacapp.c`'s own value-string tables -- unlike the service-choice
+scoping above, there is no reason to truncate these: they are flat,
+unambiguous lookup tables, and property-identifier/object-type names in
+particular are high-value for OT asset inventory from passive capture. A
+value outside every table (or in an explicitly vendor-proprietary/
+ASHRAE-reserved range) is rendered `"unknown(N)"` or
+`"vendor-proprietary(N)"`/`"reserved(N)"` as appropriate, never guessed at.
+
+**Explicitly out of scope**: BACnet/SC (Secure Connect, an entirely
+different WebSocket-based transport under BVLC Type `0x82`, not `0x81`);
+Secure-BVLL's encrypted payload; every Network Layer Message's own data
+(named only); every APDU service outside the "first pass" list (named
+only); ReadPropertyMultiple/WritePropertyMultiple's nested
+list-of-results structure specifically (the most notable omission from
+real-world traffic); cross-packet APDU segmentation reassembly; MS/TP,
+ARCNET, LonTalk, or BACnet/SC MAC address formats appearing inside
+DADR/SADR (only their raw bytes are shown -- this decoder only ever sees
+BACnet/IP's own Ethernet/IPv4 framing).
+
+#### Validation
+
+A real capture WAS found: `ICS-OT-Network-001-bacnet-excerpt.pcap` (54
+frames, extracted from a larger mixed-OT-protocol capture -- see
+`tests/real_captures/bacnet/ATTRIBUTION.md` for full provenance). It
+confirms BVLC Original-Unicast-NPDU framing, a plain (no DEST/SRC/
+Network-Layer-Message) NPDU, and 27 Confirmed-Request/Complex-ACK
+ReadProperty request/response pairs against trend-log objects, with
+Unsigned-typed PropertyValue decode, all byte-for-byte correct with zero
+crashes or unexpected fallbacks -- but it is narrow: everything else
+described above (Who-Is/I-Am/Who-Has/I-Have, WriteProperty, Simple-ACK/
+Error/Reject/Abort/Segment-ACK, every BVLC function besides
+Original-Unicast-NPDU, NPDU DEST/SRC/Network-Layer-Message, every
+PropertyValue type besides Unsigned, and segmentation) is validated only
+against the hand-built `tests/sample_bacnet.pcap` fixture (see
+`tools/make_sample_pcap.py`'s `build_bacnet_sample`), cross-checked against
+Wireshark's dissector source rather than an independent real capture --
+see that ATTRIBUTION.md's own "Gaps" section for the complete, honest
+list, including the two real-capture sources that were checked and could
+not be used (`automayt/ICS-pcap`'s `BACNET/` directory, Git-LFS pointer
+stubs unfetchable in this environment; `kargs.net`'s own capture archive,
+blocked by this session's network policy). See
+`include/conduitscope/bacnet.hpp`'s file header for the full writeup.
+
 ### Link/IP-layer plumbing: non-IPv4 Ethernet, and non-TCP IPv4 (including UDP)
 
 Every protocol above rides on Ethernet + IPv4 + TCP. Traffic outside that --
@@ -2200,23 +2551,24 @@ These are current, not aspirational -- each has a corresponding ROADMAP item.
   header will very likely fail to parse and be reported as a parse-error on
   the fragments after the first.
 - **Non-IPv4 Ethernet frames and non-TCP IPv4 payloads (including UDP) are
-  named but not decoded, with five exceptions (CIP I/O, PROFINET RT, GOOSE,
-  Sampled Values, and EtherCAT).** A deliberately small, OT-relevant set of
-  EtherTypes/IP-protocol-numbers is recognized by name (ARP, LLDP, ICMP, and
-  the rest -- see PROTOCOL COVERAGE); nothing outside that
-  set gets more than a bare hex/decimal number, and even a *named* one gets
-  no further parsing of its own framing. The five exceptions are
+  named but not decoded, with six exceptions (CIP I/O, PROFINET RT, GOOSE,
+  Sampled Values, EtherCAT, and BACnet/IP).** A deliberately small,
+  OT-relevant set of EtherTypes/IP-protocol-numbers is recognized by name
+  (ARP, LLDP, ICMP, and the rest -- see PROTOCOL COVERAGE); nothing outside
+  that set gets more than a bare hex/decimal number, and even a *named* one
+  gets no further parsing of its own framing. The six exceptions are
   EtherNet/IP's CIP I/O traffic on UDP port 2222, PROFINET RT (EtherType
   `0x8892`, DCP and cyclic real-time IO), IEC 61850-8-1 GOOSE (EtherType
-  `0x88B8`), IEC 61850-9-2 Sampled Values (EtherType `0x88BA`), and EtherCAT
-  (EtherType `0x88A4`), all of which are now decoded, not just named -- see
-  PROTOCOL COVERAGE's EtherNet/IP, PROFINET RT, GOOSE, Sampled Values, and
-  EtherCAT sections. `policy validate` does not yet evaluate ANY UDP traffic
-  against a conduit, decoded or not (it only ever looks at TCP flows), and
-  never evaluates PROFINET RT, GOOSE, Sampled Values, or EtherCAT either (all
-  four ride raw Ethernet with no IP/TCP/UDP layer at all, so there is no
-  IP-based conduit rule that could match any of them) -- see that section and
-  ROADMAP.
+  `0x88B8`), IEC 61850-9-2 Sampled Values (EtherType `0x88BA`), EtherCAT
+  (EtherType `0x88A4`), and BACnet/IP (UDP port 47808/0xBAC0), all of which
+  are now decoded, not just named -- see PROTOCOL COVERAGE's EtherNet/IP,
+  PROFINET RT, GOOSE, Sampled Values, EtherCAT, and BACnet/IP sections.
+  `policy validate` does not yet evaluate ANY UDP traffic against a conduit,
+  decoded or not (it only ever looks at TCP flows -- this applies equally to
+  CIP I/O and BACnet/IP), and never evaluates PROFINET RT, GOOSE, Sampled
+  Values, or EtherCAT either (all four ride raw Ethernet with no IP/TCP/UDP
+  layer at all, so there is no IP-based conduit rule that could match any of
+  them) -- see that section and ROADMAP.
 - **CIP I/O (implicit messaging) decoding does not value-decode the actual
   I/O data, and has no cross-datagram state.** The Connected Data Item's
   contents are shown only as raw hex -- see PROTOCOL COVERAGE's CIP I/O
@@ -2308,6 +2660,36 @@ These are current, not aspirational -- each has a corresponding ROADMAP item.
   and the CoE/SoE/EoE/FoE/AoE mailbox protocol family, Frame Type 5
   ("Mailbox"), Frame Types 2-4 (ADS/RAW-IO/NV), and Distributed Clock
   register semantics are all out of scope entirely.
+- **BACnet/IP's service value-decoding is a deliberate first-pass subset,
+  and its real-capture validation is narrow.** Only Who-Is/I-Am/Who-Has/
+  I-Have/ReadProperty (request+ACK)/WriteProperty (request)/generic-Error
+  are value-decoded; every other confirmed/unconfirmed service
+  (ReadPropertyMultiple/WritePropertyMultiple/SubscribeCOV/and the rest of
+  the 50 service-choice table entries) is named only, its data shown as raw
+  hex -- see PROTOCOL COVERAGE's BACnet/IP section for the full rationale.
+  A PropertyValue that is constructed (an array/list, or a
+  service-specific structured value) rather than a single primitive is
+  likewise shown as raw hex with a note, never guessed at. Segmented APDUs
+  are decoded only at the header level (sequence-number/
+  proposed-window-size); the segment's own service data is never
+  value-decoded, since this decoder does no cross-packet APDU reassembly
+  (the same posture General TCP stream reassembly's own scope note takes
+  for what it does and doesn't cover, just at BACnet's own layer instead of
+  TCP's). The 54-frame real capture that validates this decoder (see
+  `tests/real_captures/bacnet/ATTRIBUTION.md`) is genuine but narrow: 100%
+  Original-Unicast-NPDU, plain (no DEST/SRC/Network-Layer-Message) NPDU,
+  Confirmed-Request/Complex-ACK ReadProperty traffic against one property
+  shape (a scalar Unsigned value) on one object type (trend-log) -- device
+  discovery, WriteProperty, every non-Unsigned PropertyValue type, every
+  BVLC function besides Original-Unicast-NPDU, NPDU routing fields, and
+  segmentation are all validated only against the hand-built
+  `tests/sample_bacnet.pcap`, cross-checked against `packet-bvlc.c`/
+  `packet-bacnet.c`/`packet-bacapp.c`'s source rather than an independent
+  real capture. Two additional real-capture sources were checked and could
+  not be used: `automayt/ICS-pcap`'s `BACNET/` directory (Git-LFS pointer
+  stubs, unfetchable in this environment) and `kargs.net`'s own capture
+  archive (blocked by this session's network policy) -- see that
+  ATTRIBUTION.md for the full search record.
 - **DNP3 CRCs are not validated** -- neither the data-link header CRC nor the
   per-block CRCs within the user data. A corrupted DNP3 frame that still
   starts with the right magic bytes will be "decoded" without any indication
@@ -2715,6 +3097,26 @@ conduitscope decode -r capture.pcap --protocol ethercat -f json \
   | jq -r '[.[] | select(.ethercat_first_ado != null) | "\(.ethercat_first_cmd_name) ado=\(.ethercat_first_ado) (decimal)"] | unique[]'
 ```
 
+Build a BACnet device inventory -- every distinct device seen announcing
+itself via I-Am (unsolicited or in response to a Who-Is sweep), the BACnet
+analog of passively fingerprinting hosts from ARP/DHCP traffic:
+
+```sh
+conduitscope decode -r capture.pcap --protocol bacnet -f json \
+  | jq -r '[.[] | select(.bacnet_service_name == "i-Am") | "\(.src_ip): \(.bacnet_values | join(", "))"] | unique[]'
+```
+
+Find every BACnet ReadProperty/WriteProperty exchange naming a specific
+object and property, useful for a first pass at what an engineering
+workstation or historian is actually polling before writing zone/conduit
+policy for it:
+
+```sh
+conduitscope decode -r capture.pcap --protocol bacnet -f json \
+  | jq -r '.[] | select(.bacnet_service_name | test("^(read|write)Property$")) |
+           "\(.src_ip) -> \(.dst_ip): \(.bacnet_service_name) \(.bacnet_values // [] | join(", "))"'
+```
+
 Find every Modbus write whose response was never authoritatively paired --
 either the response wasn't captured, or it used a different session/
 transaction ID than expected (worth a closer look on a conduit that should
@@ -2831,12 +3233,26 @@ Rough order, each building on the groundwork this release establishes:
    EtherCAT subsection and `tests/real_captures/ethercat/ATTRIBUTION.md`),
    and CoE/SoE/EoE/FoE/AoE mailbox decoding, if a reliable way to recognize
    it without per-slave SyncManager configuration knowledge ever turns up.
-   And widen `policy validate` beyond TCP-only conduits, now that there are
-   actual decoded non-TCP protocols (CIP I/O, PROFINET RT, GOOSE, Sampled
-   Values, EtherCAT) worth checking a conduit against -- PROFINET RT, GOOSE,
+   And for BACnet/IP: real-capture validation for device discovery
+   (Who-Is/I-Am/Who-Has/I-Have), WriteProperty, every PropertyValue type
+   besides a scalar Unsigned, every BVLC function besides
+   Original-Unicast-NPDU, NPDU DEST/SRC/Network-Layer-Message routing
+   fields, and segmentation, none of which the one real capture found so
+   far exercises (see PROTOCOL COVERAGE's BACnet/IP subsection and
+   `tests/real_captures/bacnet/ATTRIBUTION.md`); extending value decoding
+   beyond the "first pass" service set (ReadPropertyMultiple/
+   WritePropertyMultiple in particular, since they're increasingly the more
+   efficient, more common choice in modern deployments); and revisiting
+   `kargs.net`'s own capture archive for a richer real-capture source if
+   this project's network access to it is ever unblocked. And widen `policy
+   validate` beyond TCP-only conduits, now that there are actual decoded
+   non-TCP protocols (CIP I/O, PROFINET RT, GOOSE, Sampled Values, EtherCAT,
+   BACnet/IP) worth checking a conduit against -- PROFINET RT, GOOSE,
    Sampled Values, and EtherCAT all ride raw Ethernet with no IP layer at
    all, though, so they would need a conduit-rule shape that isn't
-   IP/CIDR-based to ever be covered.
+   IP/CIDR-based to ever be covered; CIP I/O and BACnet/IP, by contrast, are
+   ordinary IP/UDP traffic, so extending `policy validate` to evaluate UDP
+   flows at all (see LIMITATIONS) would cover both of them at once.
 
 **pcapng support** is also now done: both classic pcap and pcapng are read
 transparently (auto-detected, no flag needed) -- see "pcap vs. pcapng"
@@ -2981,6 +3397,40 @@ matching the actual chained-datagram byte count, zero mismatches. See
 exactly which Cmd values/bits/frame Types that capture does and doesn't
 exercise, and `include/conduitscope/ethercat.hpp`'s file header for the
 full writeup.
+
+**BACnet/IP decoding** is also now done: the second protocol this tool
+decodes over UDP, alongside CIP I/O, using the same port-independent
+"opportunistic, payload-shape" detection posture rather than a dedicated
+EtherType the way PROFINET RT/GOOSE/SV/EtherCAT get to use. Three layers
+are decoded: BVLC (the UDP framing header, including every BBMD/
+foreign-device-table management function), NPDU (the network layer,
+including DEST/SRC routing fields and Network Layer Messages, named only),
+and APDU (the application layer, byte-accurate across all 8 PDU types
+including segmentation's SEG/MOR bits). Service value-decoding is a
+deliberate "first pass" -- mirroring this codebase's existing service-
+scoping precedent for EtherNet/IP CIP explicit messaging and DNP3's
+group/variation table -- covering Who-Is/I-Am/Who-Has/I-Have device/object
+discovery and ReadProperty/WriteProperty/generic-Error, the two most
+security-relevant BACnet traffic patterns for passive OT monitoring; a
+constructed/array PropertyValue is the fifth application of this
+codebase's "no generic self-describing wire-level type" reasoning, after
+PROFINET RT's cyclic IO data, CIP I/O's Connected Data Item, SV's
+`seqData`, and EtherCAT's `Data` -- see PROTOCOL COVERAGE's BACnet/IP
+subsection for the full field/service tables and LIMITATIONS for what's
+still open. A real capture WAS found: 54 frames (a ReadProperty polling
+session against trend-log objects) extracted from a larger mixed-OT-
+protocol capture whose own README doesn't even mention BACnet -- found
+only by actually running this decoder against every file in that
+repository. Two better-looking real-capture sources were checked first and
+couldn't be used: `automayt/ICS-pcap`'s own `BACNET/` directory (the
+better-populated public BACnet collection, but stored via Git LFS, which
+this environment cannot resolve -- the same limitation already hit for
+this project's EtherCAT/GOOSE/SV real captures) and `kargs.net`'s own
+capture archive (BACnet dissector co-author Steve Karg's ~220-file
+collection, almost certainly the single best BACnet source on the public
+web, but blocked outright by this session's network policy) -- see
+`tests/real_captures/bacnet/ATTRIBUTION.md` for the full search record and
+`include/conduitscope/bacnet.hpp`'s file header for the full writeup.
 
 **Colorized text output** is also now done: see OUTPUT FORMATS' "Color"
 subsection for the scheme and the `--color`/`--no-color`/auto-detection

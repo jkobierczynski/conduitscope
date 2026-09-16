@@ -35,6 +35,7 @@ add_library(conduitscope_core STATIC
   src/goose.cpp
   src/sv.cpp
   src/ethercat.cpp
+  src/bacnet.cpp
   src/cotp.cpp
   src/s7comm.cpp
   src/decoder.cpp
@@ -1302,6 +1303,339 @@ add_test(NAME real_ethercat_logical_addressing_lrd_lwr_present
   COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/ethercat/ICS-Ethercat-001.pcap")
 set_tests_properties(real_ethercat_logical_addressing_lrd_lwr_present PROPERTIES
   PASS_REGULAR_EXPRESSION "\"ethercat_first_cmd_name\": \"LRD\"")
+
+# --------------------------------------------------------------------------
+# BACnet/IP (synthetic, tests/sample_bacnet.pcap): BVLC framing, NPDU network layer, APDU
+# application layer/services over UDP port 47808 -- see tools/make_sample_pcap.py's
+# build_bacnet_sample for the exact byte layout each assertion below is checking (packet numbers
+# in comments match that function's own numbered comments 1-53), and bacnet.hpp's file header
+# comment for the decoder itself. Unlike EtherCAT/GOOSE/SV/PROFINET, BACnet/IP rides over UDP, so
+# detection is a payload-shape gate (BVLC Type 0x81 + Function 0x00-0x0C) applied port-
+# independently, mirroring CIP I/O's own opportunistic detection.
+# --------------------------------------------------------------------------
+
+# 1-2) Who-Is, unrestricted and with a device-instance range.
+add_test(NAME bacnet_who_is_unrestricted_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap" --format text)
+set_tests_properties(bacnet_who_is_unrestricted_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[bacnet\\]  BVLC Original-Broadcast-NPDU Unconfirmed-Request who-Is\n")
+
+add_test(NAME bacnet_who_is_with_range_decoded_in_json
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap")
+set_tests_properties(bacnet_who_is_with_range_decoded_in_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"bacnet_service_name\": \"who-Is\".*\"bacnet_values\": \\[\"device-instance-range-low=100\", \"device-instance-range-high=200\"\\]")
+
+# 3) I-Am -- device object-identifier, Max-APDU-Length-Accepted, Segmentation-Supported, Vendor-ID.
+add_test(NAME bacnet_i_am_all_four_fields_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap")
+set_tests_properties(bacnet_i_am_all_four_fields_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"bacnet_service_name\": \"i-Am\".*\"bacnet_values\": \\[\"device-object=device,1234\", \"max-apdu-length-accepted=1476\", \"segmentation-supported=no-segmentation\", \"vendor-id=260\"\\]")
+
+# 4-5) Who-Has, both CHOICE branches (by ObjectIdentifier-with-range, and by ObjectName).
+add_test(NAME bacnet_who_has_by_object_identifier_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap" --format text)
+set_tests_properties(bacnet_who_has_by_object_identifier_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "who-Has \\[device-instance-range-low=1 \\+2 more\\]")
+
+add_test(NAME bacnet_who_has_by_object_name_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap")
+set_tests_properties(bacnet_who_has_by_object_name_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"bacnet_values\": \\[\"object-name=ZN-T-1\"\\]")
+
+# 6) I-Have -- device id + object id + object name.
+add_test(NAME bacnet_i_have_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap")
+set_tests_properties(bacnet_i_have_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"bacnet_service_name\": \"i-Have\".*\"bacnet_values\": \\[\"device=device,1234\", \"object=analog-input,3\", \"object-name=ZN-T-1\"\\]")
+
+# 7-14) ReadProperty request + ACKs covering every primitive PropertyValue type this decoder
+# handles: Real, Unsigned, Enumerated, Boolean, CharacterString, BitString, and a propertyArrayIndex.
+add_test(NAME bacnet_read_property_request_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap" --format text)
+set_tests_properties(bacnet_read_property_request_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "Confirmed-Request invoke-id=10 readProperty \\[object=analog-input,3 \\+1 more\\]")
+
+add_test(NAME bacnet_read_property_ack_real_value_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap")
+set_tests_properties(bacnet_read_property_ack_real_value_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"bacnet_invoke_id\": 10.*\"bacnet_values\": \\[\"object=analog-input,3\", \"property=present-value\", \"value=\\(Real\\) 72.500000\"\\]")
+
+add_test(NAME bacnet_read_property_ack_unsigned_value_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap")
+set_tests_properties(bacnet_read_property_ack_unsigned_value_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"bacnet_invoke_id\": 11.*\"object=multi-state-input,1\".*\"value=\\(Unsigned Integer\\) 3\"")
+
+add_test(NAME bacnet_read_property_ack_enumerated_value_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap")
+set_tests_properties(bacnet_read_property_ack_enumerated_value_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"bacnet_invoke_id\": 12.*\"object=binary-input,1\".*\"value=\\(Enumerated\\) 1\"")
+
+add_test(NAME bacnet_read_property_ack_boolean_value_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap")
+set_tests_properties(bacnet_read_property_ack_boolean_value_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"bacnet_invoke_id\": 13.*\"value=\\(Boolean\\) FALSE\"")
+
+add_test(NAME bacnet_read_property_ack_character_string_value_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap")
+set_tests_properties(bacnet_read_property_ack_character_string_value_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"bacnet_invoke_id\": 14.*\"value=\\(Character String\\) ZN-T-1\"")
+
+add_test(NAME bacnet_read_property_ack_bit_string_value_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap")
+set_tests_properties(bacnet_read_property_ack_bit_string_value_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"bacnet_invoke_id\": 15.*\"value=\\(Bit String\\)")
+
+add_test(NAME bacnet_read_property_ack_array_index_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap")
+set_tests_properties(bacnet_read_property_ack_array_index_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"bacnet_invoke_id\": 16.*\"bacnet_values\": \\[\"object=analog-input,3\", \"property=present-value\", \"property-array-index=0\", \"value=\\(Real\\) 1.000000\"\\]")
+
+# 15) A constructed (array/list-shaped) PropertyValue -- not a single primitive, so this decoder's
+# first pass does not value-decode it, only notes as much -- see bacnet.hpp's "Property value
+# decode" paragraph.
+add_test(NAME bacnet_read_property_ack_constructed_value_not_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap" --format text)
+set_tests_properties(bacnet_read_property_ack_constructed_value_not_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "invoke-id=17 readProperty \\[object=analog-input,3 \\+1 more\\]\n *note: property value is constructed \\(an array/list or service-specific structured value\\), not a single primitive -- not value-decoded in this first-pass release")
+
+# 16-17) WriteProperty, without and with the optional Priority field (context[4]).
+add_test(NAME bacnet_write_property_no_priority_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap")
+set_tests_properties(bacnet_write_property_no_priority_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"bacnet_service_name\": \"writeProperty\".*\"bacnet_invoke_id\": 20.*\"bacnet_values\": \\[\"object=binary-output,5\", \"property=present-value\", \"value=\\(Enumerated\\) 1\"\\]")
+
+add_test(NAME bacnet_write_property_with_priority_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap")
+set_tests_properties(bacnet_write_property_with_priority_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"bacnet_invoke_id\": 21.*\"bacnet_values\": \\[\"object=binary-output,5\", \"property=present-value\", \"value=\\(Enumerated\\) 0\", \"priority=8\"\\]")
+
+# 18) Simple-ACK.
+add_test(NAME bacnet_simple_ack_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap" --format text)
+set_tests_properties(bacnet_simple_ack_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "Simple-ACK invoke-id=20 writeProperty\n")
+
+# 19) Generic Error PDU shape (errorClass/errorCode).
+add_test(NAME bacnet_generic_error_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap" --format text)
+set_tests_properties(bacnet_generic_error_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "Error invoke-id=22 readProperty property/unknown-property\n")
+
+# 20) Error PDU whose error-choice defines its OWN service-specific error structure -- named but
+# shown as raw hex with an explanatory note, not misdecoded as the generic shape.
+add_test(NAME bacnet_service_specific_error_not_misdecoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap" --format text)
+set_tests_properties(bacnet_service_specific_error_not_misdecoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "Error invoke-id=23 writePropertyMultiple\n *note: error-choice writePropertyMultiple may use a service-specific error structure rather than the generic errorClass/errorCode shape this decoder decodes -- see bacnet.hpp")
+
+# 21-23) Reject and Abort (both server=false and server=true).
+add_test(NAME bacnet_reject_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap" --format text)
+set_tests_properties(bacnet_reject_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "Reject invoke-id=24 unrecognized-service\n")
+
+add_test(NAME bacnet_abort_client_and_server_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap" --format text)
+set_tests_properties(bacnet_abort_client_and_server_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "Abort invoke-id=25 other\n.*Abort invoke-id=26 out-of-resources\n")
+
+# 24-25) Segment-ACK, ordinary and negative/server.
+add_test(NAME bacnet_segment_ack_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap" --format text)
+set_tests_properties(bacnet_segment_ack_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "Segment-ACK invoke-id=27\n.*Segment-ACK invoke-id=28\n")
+
+# 26-27) Segmented Confirmed-Request/Complex-ACK -- header fields decoded, service data left as
+# raw hex with an explanatory note (no cross-packet reassembly). service_choice 14
+# (readPropertyMultiple) doubles as an "outside the first-pass value-decode set" example.
+add_test(NAME bacnet_segmented_apdu_not_value_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap" --format text)
+set_tests_properties(bacnet_segmented_apdu_not_value_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "invoke-id=30 readPropertyMultiple\n *note: segmented APDU:[^\n]*\n.*invoke-id=31 readPropertyMultiple\n *note: segmented APDU:")
+
+add_test(NAME bacnet_segmented_flag_true_in_json
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap")
+set_tests_properties(bacnet_segmented_flag_true_in_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"bacnet_invoke_id\": 30.*\"bacnet_segmented\": true")
+
+# 28-29) A confirmed and an unconfirmed service outside the "first pass" value-decode set -- named
+# via the service-choice table, data not value-decoded.
+add_test(NAME bacnet_out_of_scope_services_named_only
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap" --format text)
+set_tests_properties(bacnet_out_of_scope_services_named_only PROPERTIES
+  PASS_REGULAR_EXPRESSION "Confirmed-Request invoke-id=32 subscribeCOV\n.*Unconfirmed-Request unconfirmedCOVNotification\n")
+
+# 30-33) NPDU DEST/SRC/both -- DNET/DLEN/DADR, SNET/SLEN/SADR, HopCount.
+add_test(NAME bacnet_npdu_dest_present_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap")
+set_tests_properties(bacnet_npdu_dest_present_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"bacnet_npdu_has_dest\": true,.*\"bacnet_npdu_dnet\": 5,.*\"bacnet_npdu_hop_count\": 255")
+
+# DLEN/DADR themselves (6-byte MAC vs. DLEN=0 broadcast-on-destination-network) aren't promoted to
+# DecodedPacket/JSON -- npdu.dadr_hex only ever reaches the (currently unused-in-JSON) NPDU struct
+# field -- so packets #30 and #31 (ordinary 6-byte DADR vs. DLEN=0 broadcast) are only
+# distinguishable from each other via full-frame internals this decoder doesn't yet surface; both
+# still decode as ordinary DEST-present NPDUs with no notes, which this asserts by requiring the
+# dnet=5 shape to appear twice.
+add_test(NAME bacnet_npdu_dest_present_both_dadr_shapes_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap")
+set_tests_properties(bacnet_npdu_dest_present_both_dadr_shapes_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"bacnet_npdu_dnet\": 5,.*\"bacnet_npdu_dnet\": 5,")
+
+add_test(NAME bacnet_npdu_src_present_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap")
+set_tests_properties(bacnet_npdu_src_present_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"bacnet_npdu_has_src\": true,.*\"bacnet_npdu_snet\": 7,.*\"device-object=device,999\"")
+
+add_test(NAME bacnet_npdu_dest_and_src_both_present_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap")
+set_tests_properties(bacnet_npdu_dest_and_src_both_present_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"bacnet_npdu_has_dest\": true,.*\"bacnet_npdu_dnet\": 5,.*\"bacnet_npdu_has_src\": true,.*\"bacnet_npdu_snet\": 7")
+
+# 34-35) Network Layer Message -- named message type, and vendor-proprietary with its Vendor ID.
+add_test(NAME bacnet_network_layer_message_named
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap" --format text)
+set_tests_properties(bacnet_network_layer_message_named PROPERTIES
+  PASS_REGULAR_EXPRESSION "Network-Layer-Message Who-Is-Router-To-Network\n")
+
+add_test(NAME bacnet_network_layer_message_vendor_proprietary_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap" --format text)
+set_tests_properties(bacnet_network_layer_message_vendor_proprietary_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "Network-Layer-Message vendor-proprietary\\(128\\)\n")
+
+# 36) BVLC-Result -- no NPDU at all, result code surfaced in both summary and notes (the bug this
+# project's manual fixture review caught -- see the session's own record of the fix).
+add_test(NAME bacnet_bvlc_result_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap" --format text)
+set_tests_properties(bacnet_bvlc_result_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "BVLC BVLC-Result result-code=0x0\n *note: result-code=0x0")
+
+# 37-39) Write-BDT / Read-BDT / Read-BDT-Ack -- 10-byte-entry (IP+Port+Mask) BBMD tables.
+add_test(NAME bacnet_write_bdt_entries_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap" --format text)
+set_tests_properties(bacnet_write_bdt_entries_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "BVLC Write-Broadcast-Distribution-Table \\(2 entry/entries\\)\n *note: 2 table entry/entries: 192\\.168\\.1\\.1:47808 mask=255\\.255\\.255\\.0; 192\\.168\\.2\\.1:47808 mask=255\\.255\\.255\\.0")
+
+add_test(NAME bacnet_read_bdt_request_and_ack_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap" --format text)
+set_tests_properties(bacnet_read_bdt_request_and_ack_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "BVLC Read-Broadcast-Distribution-Table\n.*BVLC Read-Broadcast-Distribution-Table-Ack \\(2 entry/entries\\)")
+
+# 40-43) Register-Foreign-Device (TTL) / Read-FDT / Read-FDT-Ack (TTL+Timeout) / Delete-FDT-Entry.
+add_test(NAME bacnet_register_foreign_device_ttl_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap" --format text)
+set_tests_properties(bacnet_register_foreign_device_ttl_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "BVLC Register-Foreign-Device ttl=300s\n *note: registration-ttl=300s")
+
+add_test(NAME bacnet_read_fdt_request_and_ack_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap" --format text)
+set_tests_properties(bacnet_read_fdt_request_and_ack_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "BVLC Read-Foreign-Device-Table\n.*BVLC Read-Foreign-Device-Table-Ack \\(1 entry/entries\\)\n *note: 1 table entry/entries: 192\\.168\\.1\\.50:47808 ttl=300 timeout=180")
+
+add_test(NAME bacnet_delete_fdt_entry_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap" --format text)
+set_tests_properties(bacnet_delete_fdt_entry_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "BVLC Delete-Foreign-Device-Table-Entry\n *note: delete-entry=192\\.168\\.1\\.50:47808")
+
+# 44) Forwarded-NPDU -- the originating device's own address surfaced distinctly from this
+# packet's own UDP/IP source (the relaying BBMD).
+add_test(NAME bacnet_forwarded_npdu_originating_address_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap" --format text)
+set_tests_properties(bacnet_forwarded_npdu_originating_address_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "BVLC Forwarded-NPDU Unconfirmed-Request who-Is\n *note: forwarded-from=192\\.168\\.5\\.20:47808")
+
+# 45) Distribute-Broadcast-To-Network.
+add_test(NAME bacnet_distribute_broadcast_to_network_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap" --format text)
+set_tests_properties(bacnet_distribute_broadcast_to_network_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "BVLC Distribute-Broadcast-To-Network Unconfirmed-Request who-Is\n")
+
+# 46) Secure-BVLL -- opaque, encrypted/signed, named only with an explanatory note.
+add_test(NAME bacnet_secure_bvll_opaque_named_only
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap" --format text)
+set_tests_properties(bacnet_secure_bvll_opaque_named_only PROPERTIES
+  PASS_REGULAR_EXPRESSION "BVLC Secure-BVLL\n *note: Secure-BVLL payload is encrypted/signed -- not decodable without key material this decoder has no access to")
+
+# 47) BVLC declared Length mismatched against bytes actually present -- tolerated with a note, not
+# a rejection (mirrors GOOSE/SV/EtherCAT's own tolerant-declared-length handling).
+add_test(NAME bacnet_declared_length_mismatch_noted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap" --format text)
+set_tests_properties(bacnet_declared_length_mismatch_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "who-Is\n *note: BVLC header's own declared Length \\(18\\) does not match the 8 byte\\(s\\) actually present in this UDP datagram")
+
+# 48-50) Truncated BVLC header, wrong Type byte (0x82, BACnet/SC's own), and an undefined Function
+# byte (0x0D) -- all three must NOT be misdetected as BACnet/IP, falling back to the generic "udp"
+# report -- see bacnet.hpp's "structural detection gate" paragraph. Exactly three such fallbacks
+# appear consecutively (packets #48-50); packet #53 (below) is a fourth, separate udp fallback.
+add_test(NAME bacnet_malformed_bvlc_header_falls_back_to_udp
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap" --format text)
+set_tests_properties(bacnet_malformed_bvlc_header_falls_back_to_udp PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[udp\\]  UDP payload of 2 byte\\(s\\)[^\n]*\n.*\\[udp\\]  UDP payload of 8 byte\\(s\\)[^\n]*\n.*\\[udp\\]  UDP payload of 8 byte\\(s\\)")
+
+# 51) NPDU truncated right after Version/Control -- BVLC/NPDU still decode, no APDU present.
+add_test(NAME bacnet_npdu_with_no_apdu_bytes_noted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap" --format text)
+set_tests_properties(bacnet_npdu_with_no_apdu_bytes_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "NPDU \\(no APDU\\)\n *note: no APDU bytes present after the NPDU header")
+
+# 52) APDU PDU type not one of the 8 the spec defines -- BVLC/NPDU decode fine, only the APDU
+# itself is left unrecognized.
+add_test(NAME bacnet_apdu_type_not_recognized_noted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap" --format text)
+set_tests_properties(bacnet_apdu_type_not_recognized_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "NPDU \\(APDU type not recognized\\)\n *note: APDU type 15 is not one of the 8 the spec defines \\(0-7\\)")
+
+# 53) Ordinary UDP traffic on an unrelated port -- must not be misdetected regardless of port (the
+# structural gate is Type+Function, not port).
+add_test(NAME bacnet_unrelated_udp_traffic_not_misdetected
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap" --format text)
+set_tests_properties(bacnet_unrelated_udp_traffic_not_misdetected PROPERTIES
+  PASS_REGULAR_EXPRESSION "51000->51001\n")
+
+add_test(NAME bacnet_stats_counted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap" --stats)
+set_tests_properties(bacnet_stats_counted PROPERTIES
+  PASS_REGULAR_EXPRESSION "packets: +53[^\n]*\n[^\n]*\nprotocols:\n *bacnet +49\n *udp +4\nbacnet bvlc functions:\n *BVLC-Result +1\n.*bacnet apdu services:\n *i-Am +2\n")
+
+# --------------------------------------------------------------------------
+# Real-world BACnet/IP capture -- see tests/real_captures/bacnet/ATTRIBUTION.md for provenance: a
+# 54-frame excerpt of mrhenrike/PCAPTrafficAnalysis's ICS-OT-Network-001.pcap, a ReadProperty
+# polling session against trend-log objects 34-42 (total-record-count/record-count/
+# last-notify-record, all plain Unsigned Integer values). automayt/ICS-pcap's own BACNET/
+# directory (23 files) was checked first and found to be Git-LFS pointer stubs this environment
+# cannot resolve -- see ATTRIBUTION.md for the full search record, including kargs.net's own
+# capture archive being blocked by this session's network policy.
+# --------------------------------------------------------------------------
+add_test(NAME real_bacnet_ics_ot_network_001_does_not_crash
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/bacnet/ICS-OT-Network-001-bacnet-excerpt.pcap" --format json)
+
+add_test(NAME real_bacnet_stats_all_original_unicast_readproperty
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/bacnet/ICS-OT-Network-001-bacnet-excerpt.pcap" --stats)
+set_tests_properties(real_bacnet_stats_all_original_unicast_readproperty PROPERTIES
+  PASS_REGULAR_EXPRESSION "packets: +54[^\n]*\n[^\n]*\nprotocols:\n *bacnet +54\nbacnet bvlc functions:\n *Original-Unicast-NPDU +54\nbacnet apdu services:\n *readProperty +54")
+
+add_test(NAME real_bacnet_first_request_response_pair_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/bacnet/ICS-OT-Network-001-bacnet-excerpt.pcap" --format text)
+set_tests_properties(real_bacnet_first_request_response_pair_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "Confirmed-Request invoke-id=52 readProperty \\[object=trend-log,34 \\+1 more\\]\n.*Complex-ACK invoke-id=52 readProperty \\[object=trend-log,34 \\+2 more\\]")
+
+# Trend-log fill-state properties -- every ReadProperty-ACK's value decodes as a plain
+# application-tagged Unsigned Integer (see ATTRIBUTION.md for the full property/value breakdown).
+add_test(NAME real_bacnet_trend_log_properties_decoded_as_unsigned
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/bacnet/ICS-OT-Network-001-bacnet-excerpt.pcap")
+set_tests_properties(real_bacnet_trend_log_properties_decoded_as_unsigned PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"object=trend-log,34\", \"property=total-record-count\", \"value=\\(Unsigned Integer\\) 347329\"")
+
+# Every note in this real capture is the same ordinary Ethernet-padding-trim note (27 of the 54
+# Confirmed-Request frames carry it, confirmed via `grep -c` while writing this fixture -- see
+# ATTRIBUTION.md) -- no parse-error, no fallback-protocol, no unexpected note text anywhere else
+# in the file. real_bacnet_stats_all_original_unicast_readproperty above already confirms all 54
+# frames land as bacnet/readProperty with no fallback; this confirms the padding note's exact,
+# expected text.
+add_test(NAME real_bacnet_padding_note_text_as_expected
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/bacnet/ICS-OT-Network-001-bacnet-excerpt.pcap" --format text)
+set_tests_properties(real_bacnet_padding_note_text_as_expected PROPERTIES
+  PASS_REGULAR_EXPRESSION "note: 1 trailing byte\\(s\\) after the IP header's declared total length were trimmed \\(almost always Ethernet minimum-frame-size padding, not real payload\\)")
 
 # --------------------------------------------------------------------------
 # Real-world S7comm/COTP captures -- see tests/real_captures/s7comm/ATTRIBUTION.md

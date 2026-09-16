@@ -5,6 +5,7 @@
 #include <iomanip>
 #include <sstream>
 
+#include "conduitscope/bacnet.hpp"
 #include "conduitscope/byteio.hpp"
 #include "conduitscope/cotp.hpp"
 #include "conduitscope/dnp3.hpp"
@@ -741,6 +742,54 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                                              std::to_string(udp.dst_port) +
                                              ", which is not a configured/standard EtherNet/IP CIP I/O port "
                                              "(2222)");
+                    }
+                    return out;
+                }
+            }
+
+            // Also tried first, port-independently -- try_parse_bacnet's structural check (BVLC
+            // Type==0x81 + Function in the 13-value 0x00-0x0C range) is a 2-byte anchor, the same
+            // "opportunistic, payload-shape" posture as CIP I/O's own check just above -- see
+            // bacnet.hpp's "structural detection gate" paragraph.
+            bool want_bacnet = options_.protocol_filter == ProtocolFilter::Auto ||
+                                options_.protocol_filter == ProtocolFilter::BacnetOnly;
+            if (want_bacnet) {
+                if (auto bacnet = try_parse_bacnet(udp.payload)) {
+                    out.protocol = "bacnet";
+                    out.summary = bacnet->summary;
+                    out.bacnet_bvlc_function = bacnet->bvlc_function_name;
+                    out.bacnet_has_npdu = bacnet->has_npdu;
+                    for (const auto& n : bacnet->notes) out.notes.push_back(n);
+                    if (bacnet->has_npdu) {
+                        const BacnetNpdu& npdu = bacnet->npdu;
+                        out.bacnet_npdu_version = npdu.version;
+                        out.bacnet_npdu_is_network_layer_message = npdu.is_network_layer_message;
+                        out.bacnet_npdu_expecting_reply = npdu.expecting_reply;
+                        out.bacnet_npdu_priority = npdu.priority;
+                        out.bacnet_npdu_has_dest = npdu.has_dest;
+                        out.bacnet_npdu_dnet = npdu.dnet;
+                        out.bacnet_npdu_has_src = npdu.has_src;
+                        out.bacnet_npdu_snet = npdu.snet;
+                        out.bacnet_npdu_hop_count = npdu.hop_count;
+                        if (npdu.is_network_layer_message) {
+                            out.bacnet_npdu_message_type = npdu.message_type_name;
+                        } else if (npdu.has_apdu) {
+                            const BacnetApdu& apdu = npdu.apdu;
+                            out.bacnet_has_apdu = true;
+                            out.bacnet_apdu_type = apdu.pdu_type_name;
+                            out.bacnet_service_name = apdu.service_choice_name;
+                            out.bacnet_invoke_id = apdu.invoke_id;
+                            out.bacnet_segmented = apdu.segmented;
+                            out.bacnet_values = apdu.values;
+                        }
+                    }
+
+                    bool expected_port = port_in(udp.src_port, BACNET_UDP_PORT, options_.extra_bacnet_ports) ||
+                                          port_in(udp.dst_port, BACNET_UDP_PORT, options_.extra_bacnet_ports);
+                    if (!expected_port) {
+                        out.notes.push_back("seen on UDP port " + std::to_string(udp.src_port) + "->" +
+                                             std::to_string(udp.dst_port) +
+                                             ", which is not a configured/standard BACnet/IP port (47808)");
                     }
                     return out;
                 }

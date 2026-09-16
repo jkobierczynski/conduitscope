@@ -90,6 +90,9 @@ private:
     size_t ethercat_datagram_total_ = 0;  // summed across every decoded EtherCAT frame, since one
                                             // frame can carry more than one datagram -- see
                                             // ethercat_datagram_count
+    std::map<std::string, size_t> bacnet_bvlc_function_counts_;
+    std::map<std::string, size_t> bacnet_service_counts_;  // keyed by APDU service-choice name,
+                                                              // only when bacnet_has_apdu
     bool has_ts_ = false;
     double first_ts_ = 0.0, last_ts_ = 0.0;
 };

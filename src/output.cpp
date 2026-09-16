@@ -63,6 +63,7 @@ constexpr const char* kBrightCyan = "\033[96m";
 constexpr const char* kBrightGreen = "\033[92m";
 constexpr const char* kBrightMagenta = "\033[95m";
 constexpr const char* kBrightYellow = "\033[93m";
+constexpr const char* kBrightBlue = "\033[94m";
 
 // Color for a packet's "[protocol]" tag -- picked so a mixed-protocol capture scans quickly by
 // eye, not for any deeper meaning. parse-error is the one exception: it gets the same "something
@@ -79,6 +80,7 @@ const char* protocol_tag_color(const std::string& protocol) {
     if (protocol == "goose") return kBrightGreen;
     if (protocol == "sv") return kBrightMagenta;
     if (protocol == "ethercat") return kBrightYellow;
+    if (protocol == "bacnet") return kBrightBlue;
     if (protocol == "parse-error") return kBoldRed;
     return kDim;  // tcp / udp / non-tcp / non-ip / unsupported-link: recognized, nothing OT-specific
 }
@@ -327,6 +329,45 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
             }
         }
     }
+    if (p.protocol == "bacnet") {
+        out_ << "    \"bacnet_bvlc_function\": \"" << json_escape(p.bacnet_bvlc_function) << "\",\n";
+        out_ << "    \"bacnet_has_npdu\": " << (p.bacnet_has_npdu ? "true" : "false") << ",\n";
+        if (p.bacnet_has_npdu) {
+            out_ << "    \"bacnet_npdu_version\": " << static_cast<unsigned>(p.bacnet_npdu_version) << ",\n";
+            out_ << "    \"bacnet_npdu_is_network_layer_message\": "
+                 << (p.bacnet_npdu_is_network_layer_message ? "true" : "false") << ",\n";
+            out_ << "    \"bacnet_npdu_expecting_reply\": " << (p.bacnet_npdu_expecting_reply ? "true" : "false")
+                 << ",\n";
+            out_ << "    \"bacnet_npdu_priority\": " << static_cast<unsigned>(p.bacnet_npdu_priority) << ",\n";
+            out_ << "    \"bacnet_npdu_has_dest\": " << (p.bacnet_npdu_has_dest ? "true" : "false") << ",\n";
+            if (p.bacnet_npdu_has_dest) out_ << "    \"bacnet_npdu_dnet\": " << p.bacnet_npdu_dnet << ",\n";
+            out_ << "    \"bacnet_npdu_has_src\": " << (p.bacnet_npdu_has_src ? "true" : "false") << ",\n";
+            if (p.bacnet_npdu_has_src) out_ << "    \"bacnet_npdu_snet\": " << p.bacnet_npdu_snet << ",\n";
+            if (p.bacnet_npdu_has_dest)
+                out_ << "    \"bacnet_npdu_hop_count\": " << static_cast<unsigned>(p.bacnet_npdu_hop_count)
+                     << ",\n";
+            if (p.bacnet_npdu_is_network_layer_message) {
+                out_ << "    \"bacnet_npdu_message_type\": \"" << json_escape(p.bacnet_npdu_message_type)
+                     << "\",\n";
+            }
+            out_ << "    \"bacnet_has_apdu\": " << (p.bacnet_has_apdu ? "true" : "false") << ",\n";
+            if (p.bacnet_has_apdu) {
+                out_ << "    \"bacnet_apdu_type\": \"" << json_escape(p.bacnet_apdu_type) << "\",\n";
+                if (!p.bacnet_service_name.empty())
+                    out_ << "    \"bacnet_service_name\": \"" << json_escape(p.bacnet_service_name) << "\",\n";
+                out_ << "    \"bacnet_invoke_id\": " << p.bacnet_invoke_id << ",\n";
+                out_ << "    \"bacnet_segmented\": " << (p.bacnet_segmented ? "true" : "false") << ",\n";
+                if (!p.bacnet_values.empty()) {
+                    out_ << "    \"bacnet_values\": [";
+                    for (size_t i = 0; i < p.bacnet_values.size(); ++i) {
+                        if (i != 0) out_ << ", ";
+                        out_ << "\"" << json_escape(p.bacnet_values[i]) << "\"";
+                    }
+                    out_ << "],\n";
+                }
+            }
+        }
+    }
     out_ << "    \"notes\": [";
     for (size_t i = 0; i < p.notes.size(); ++i) {
         if (i != 0) out_ << ", ";
@@ -395,6 +436,12 @@ void StatsWriter::write_packet(const DecodedPacket& p) {
     if (p.protocol == "ethercat") {
         ethercat_frame_type_counts_[p.ethercat_frame_type_name]++;
         ethercat_datagram_total_ += p.ethercat_datagram_count;
+    }
+    if (p.protocol == "bacnet") {
+        bacnet_bvlc_function_counts_[p.bacnet_bvlc_function]++;
+        if (p.bacnet_has_apdu && !p.bacnet_service_name.empty()) {
+            bacnet_service_counts_[p.bacnet_service_name]++;
+        }
     }
     if (!has_ts_) {
         first_ts_ = last_ts_ = p.timestamp;
@@ -480,6 +527,18 @@ void StatsWriter::print_summary(std::ostream& out) const {
             out << "  " << std::left << std::setw(40) << name << count << "\n";
         }
         out << "ethercat datagrams (summed across every frame): " << ethercat_datagram_total_ << "\n";
+    }
+    if (!bacnet_bvlc_function_counts_.empty()) {
+        out << "bacnet bvlc functions:\n";
+        for (const auto& [name, count] : bacnet_bvlc_function_counts_) {
+            out << "  " << std::left << std::setw(40) << name << count << "\n";
+        }
+    }
+    if (!bacnet_service_counts_.empty()) {
+        out << "bacnet apdu services:\n";
+        for (const auto& [name, count] : bacnet_service_counts_) {
+            out << "  " << std::left << std::setw(40) << name << count << "\n";
+        }
     }
 }
 

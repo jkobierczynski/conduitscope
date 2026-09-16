@@ -1326,6 +1326,469 @@ def build_ethercat_sample():
     (TESTS_DIR / "sample_ethercat.pcap").write_bytes(data)
 
 
+BACNET_PORT = 47808
+
+
+def ip4(addr: str) -> bytes:
+    return bytes(int(o) for o in addr.split("."))
+
+
+def bacnet_app_tag(tag_no: int, value: bytes) -> bytes:
+    """One application-tagged primitive (class bit 0) -- tag byte + optional extended-length
+    escape + value bytes. Only the short (LVT<=4, no extended length) and the one-byte-escape
+    (5<=LVT<=253) forms are needed for this fixture's own values -- see bacnet.hpp's tag-encoding
+    paragraph for the full clause-20.2.1 rules this mirrors."""
+    lvt = len(value)
+    if lvt <= 4:
+        return bytes([(tag_no << 4) | lvt]) + value
+    if lvt < 254:
+        return bytes([(tag_no << 4) | 5, lvt]) + value
+    raise ValueError("fixture helper doesn't need LVT>=254 encoding")
+
+
+def bacnet_app_bool(value: bool) -> bytes:
+    """Application-tagged Boolean -- the LVT field itself IS the value (0/1), no separate value
+    byte at all -- see bacnet.hpp's Property value decode paragraph."""
+    return bytes([(1 << 4) | (1 if value else 0)])
+
+
+def bacnet_context_tag(tag_no: int, value: bytes) -> bytes:
+    """One context-tagged primitive (class bit set, 0x08) -- same LVT/value shape as an
+    application tag, just with the class bit set and the tag number meaning "field position"
+    rather than "type"."""
+    lvt = len(value)
+    if lvt <= 4:
+        return bytes([(tag_no << 4) | 0x08 | lvt]) + value
+    if lvt < 254:
+        return bytes([(tag_no << 4) | 0x08 | 5, lvt]) + value
+    raise ValueError("fixture helper doesn't need LVT>=254 encoding")
+
+
+def bacnet_open(tag_no: int) -> bytes:
+    return bytes([(tag_no << 4) | 0x08 | 6])
+
+
+def bacnet_close(tag_no: int) -> bytes:
+    return bytes([(tag_no << 4) | 0x08 | 7])
+
+
+def bacnet_object_id(obj_type: int, instance: int) -> bytes:
+    raw = ((obj_type & 0x3FF) << 22) | (instance & 0x3FFFFF)
+    return struct.pack("!I", raw)
+
+
+def bacnet_unsigned(value: int) -> bytes:
+    """Minimal big-endian byte count (1-4 bytes) for an Unsigned/Enumerated value -- mirrors how
+    a real BACnet stack encodes these (never more bytes than needed)."""
+    n = 1
+    while value >= (1 << (8 * n)) and n < 4:
+        n += 1
+    return value.to_bytes(n, "big")
+
+
+def bacnet_char_string(text: str, charset: int = 0) -> bytes:
+    return bytes([charset]) + text.encode("ascii")
+
+
+def bacnet_bit_string(bits: str) -> bytes:
+    """`bits` a string of '1'/'0' characters, MSB first -- packed into whole bytes with an
+    unused-bit-count prefix, mirroring fBitStringTagVSBase's own encoding."""
+    n = len(bits)
+    pad = (8 - (n % 8)) % 8
+    padded = bits + ("0" * pad)
+    out = bytes([pad])
+    for i in range(0, len(padded), 8):
+        byte = 0
+        for b in padded[i:i + 8]:
+            byte = (byte << 1) | (1 if b == "1" else 0)
+        out += bytes([byte])
+    return out
+
+
+def bacnet_property_value(app_tag_no: int, value: bytes, context_tag: int = 3) -> bytes:
+    return bacnet_open(context_tag) + bacnet_app_tag(app_tag_no, value) + bacnet_close(context_tag)
+
+
+def bacnet_property_value_bool(value: bool, context_tag: int = 3) -> bytes:
+    return bacnet_open(context_tag) + bacnet_app_bool(value) + bacnet_close(context_tag)
+
+
+def bacnet_object_property_reference(obj_type: int, instance: int, prop_id: int, array_index=None) -> bytes:
+    out = bacnet_context_tag(0, bacnet_object_id(obj_type, instance)) + \
+        bacnet_context_tag(1, bacnet_unsigned(prop_id))
+    if array_index is not None:
+        out += bacnet_context_tag(2, bacnet_unsigned(array_index))
+    return out
+
+
+def bvlc_message(function: int, body: bytes) -> bytes:
+    total = 4 + len(body)
+    return struct.pack("!BBH", 0x81, function, total) + body
+
+
+def npdu_header(control: int = 0x00, dnet=None, dadr: bytes = b"", snet=None, sadr: bytes = b"",
+                hop_count=None, version: int = 1) -> bytes:
+    out = bytes([version, control])
+    if control & 0x20:  # DEST present
+        out += struct.pack("!H", dnet if dnet is not None else 0) + bytes([len(dadr)]) + dadr
+    if control & 0x08:  # SRC present
+        out += struct.pack("!H", snet if snet is not None else 0) + bytes([len(sadr)]) + sadr
+    if control & 0x20:
+        out += bytes([hop_count if hop_count is not None else 255])
+    return out
+
+
+def npdu_network_message(msg_type: int, control: int = 0x80, vendor_id=None, body: bytes = b"", **kw) -> bytes:
+    out = npdu_header(control=control, **kw)
+    out += bytes([msg_type])
+    if msg_type >= 0x80:
+        out += struct.pack("!H", vendor_id if vendor_id is not None else 0)
+    return out + body
+
+
+def apdu_confirmed_request(service_choice: int, data: bytes = b"", invoke_id: int = 1, segmented: bool = False,
+                            more: bool = False, seg_accepted: bool = True, seq: int = 0, window: int = 16,
+                            max_segs_apdu_byte: int = 0x30) -> bytes:
+    byte0 = (0 << 4) | (0x08 if segmented else 0) | (0x04 if more else 0) | (0x02 if seg_accepted else 0)
+    out = bytes([byte0, max_segs_apdu_byte, invoke_id])
+    if segmented:
+        out += bytes([seq, window])
+    return out + bytes([service_choice]) + data
+
+
+def apdu_unconfirmed_request(service_choice: int, data: bytes = b"") -> bytes:
+    return bytes([(1 << 4), service_choice]) + data
+
+
+def apdu_simple_ack(service_choice: int, invoke_id: int = 1) -> bytes:
+    return bytes([(2 << 4), invoke_id, service_choice])
+
+
+def apdu_complex_ack(service_choice: int, data: bytes = b"", invoke_id: int = 1, segmented: bool = False,
+                      more: bool = False, seq: int = 0, window: int = 16) -> bytes:
+    byte0 = (3 << 4) | (0x08 if segmented else 0) | (0x04 if more else 0)
+    out = bytes([byte0, invoke_id])
+    if segmented:
+        out += bytes([seq, window])
+    return out + bytes([service_choice]) + data
+
+
+def apdu_segment_ack(invoke_id: int, seq: int, window: int, nak: bool = False, server: bool = False) -> bytes:
+    byte0 = (4 << 4) | (0x02 if nak else 0) | (0x01 if server else 0)
+    return bytes([byte0, invoke_id, seq, window])
+
+
+def apdu_error(error_choice: int, error_class: int, error_code: int, invoke_id: int = 1) -> bytes:
+    return (bytes([(5 << 4), invoke_id, error_choice]) +
+            bacnet_app_tag(9, bacnet_unsigned(error_class)) +
+            bacnet_app_tag(9, bacnet_unsigned(error_code)))
+
+
+def apdu_error_service_specific(error_choice: int, invoke_id: int = 1) -> bytes:
+    """A service-specific error body (deliberately NOT the generic errorClass/errorCode shape) --
+    here, WritePropertyMultipleError's own first-failed-write-attempt structure (a context[0]-
+    wrapped object-id + context[1] priority + generic error, per fWritePropertyMultipleError) --
+    exercises this decoder's "may use a service-specific error structure" note, since it does not
+    special-case any of the 7 services that define one -- see bacnet.hpp's PDU-type-5 paragraph."""
+    body = bacnet_open(0) + bacnet_context_tag(0, bacnet_object_id(0, 3)) + bacnet_close(0)
+    return bytes([(5 << 4), invoke_id, error_choice]) + body
+
+
+def apdu_reject(reason: int, invoke_id: int = 1) -> bytes:
+    return bytes([(6 << 4), invoke_id, reason])
+
+
+def apdu_abort(reason: int, invoke_id: int = 1, server: bool = False) -> bytes:
+    byte0 = (7 << 4) | (0x01 if server else 0)
+    return bytes([byte0, invoke_id, reason])
+
+
+def bacnet_frame(dst=None, src=None, sport=BACNET_PORT, dport=BACNET_PORT, bvlc: bytes = b"",
+                  src_ip=None, dst_ip=None) -> bytes:
+    dst = dst if dst is not None else b"\xff\xff\xff\xff\xff\xff"
+    src = src if src is not None else PLC_MAC
+    src_ip = src_ip if src_ip is not None else PLC_IP
+    dst_ip = dst_ip if dst_ip is not None else "192.168.1.255"
+    udp = udp_header(sport, dport, bvlc)
+    ip = ipv4_header(src_ip, dst_ip, 17, len(udp), 0x7000)
+    return eth_header(dst, src, 0x0800) + ip + udp
+
+
+def build_bacnet_sample():
+    """BACnet/IP (Annex J) over UDP port 47808: BVLC framing, NPDU network layer, APDU application
+    layer/services -- see bacnet.hpp's file header comment for the exact wire format each packet
+    below exercises (cross-checked against Wireshark's own packet-bvlc.c/packet-bacnet.c/
+    packet-bacapp.c). No real capture happens to be attributed for this fixture set yet at the time
+    each packet was written -- see tests/real_captures/bacnet/ATTRIBUTION.md (if present) or
+    bacnet.hpp's own Validation paragraph for the current state of that search."""
+    packets = []
+
+    def add(bvlc: bytes, **kw):
+        packets.append(bacnet_frame(bvlc=bvlc, **kw))
+
+    # 1) Who-Is, unrestricted (no device-instance range) -- the single most common BACnet/IP
+    #    discovery broadcast, Original-Broadcast-NPDU carrying an Unconfirmed-Request.
+    add(bvlc_message(0x0B, npdu_header() + apdu_unconfirmed_request(8)))
+
+    # 2) Who-Is with a device-instance range (context[0]/[1] both present).
+    add(bvlc_message(0x0B, npdu_header() +
+                      apdu_unconfirmed_request(8, bacnet_context_tag(0, bacnet_unsigned(100)) +
+                                                bacnet_context_tag(1, bacnet_unsigned(200)))))
+
+    # 3) I-Am -- device object-identifier, Max-APDU-Length-Accepted, Segmentation-Supported,
+    #    Vendor-ID -- the richest device-discovery/fingerprinting message on the wire.
+    add(bvlc_message(0x0A, npdu_header() +
+                      apdu_unconfirmed_request(0, bacnet_app_tag(12, bacnet_object_id(8, 1234)) +
+                                                bacnet_app_tag(2, bacnet_unsigned(1476)) +
+                                                bacnet_app_tag(9, bacnet_unsigned(3)) +
+                                                bacnet_app_tag(2, bacnet_unsigned(260)))))
+
+    # 4) Who-Has, by ObjectIdentifier, with a device-instance range.
+    add(bvlc_message(0x0B, npdu_header() +
+                      apdu_unconfirmed_request(7, bacnet_context_tag(0, bacnet_unsigned(1)) +
+                                                bacnet_context_tag(1, bacnet_unsigned(4194302)) +
+                                                bacnet_context_tag(2, bacnet_object_id(0, 3)))))
+
+    # 5) Who-Has, by ObjectName instead (the CHOICE's other branch), no range.
+    add(bvlc_message(0x0B, npdu_header() +
+                      apdu_unconfirmed_request(7, bacnet_context_tag(3, bacnet_char_string("ZN-T-1")))))
+
+    # 6) I-Have -- device id + object id + object name.
+    add(bvlc_message(0x0A, npdu_header() +
+                      apdu_unconfirmed_request(1, bacnet_app_tag(12, bacnet_object_id(8, 1234)) +
+                                                bacnet_app_tag(12, bacnet_object_id(0, 3)) +
+                                                bacnet_app_tag(7, bacnet_char_string("ZN-T-1")))))
+
+    # 7) ReadProperty request -- present-value (85) of analog-input,3.
+    add(bvlc_message(0x0A, npdu_header() +
+                      apdu_confirmed_request(12, bacnet_object_property_reference(0, 3, 85), invoke_id=10)))
+
+    # 8) ReadProperty ACK -- Real value (the most common analog present-value type).
+    add(bvlc_message(0x0A, npdu_header() +
+                      apdu_complex_ack(12, bacnet_object_property_reference(0, 3, 85) +
+                                       bacnet_property_value(4, struct.pack("!f", 72.5)), invoke_id=10)))
+
+    # 9) ReadProperty ACK -- Unsigned value (e.g. a multi-state-input's present-value).
+    add(bvlc_message(0x0A, npdu_header() +
+                      apdu_complex_ack(12, bacnet_object_property_reference(13, 1, 85) +
+                                       bacnet_property_value(2, bacnet_unsigned(3)), invoke_id=11)))
+
+    # 10) ReadProperty ACK -- Enumerated value (e.g. a binary-input's present-value, 0/1).
+    add(bvlc_message(0x0A, npdu_header() +
+                      apdu_complex_ack(12, bacnet_object_property_reference(3, 1, 85) +
+                                       bacnet_property_value(9, bacnet_unsigned(1)), invoke_id=12)))
+
+    # 11) ReadProperty ACK -- Boolean value (e.g. out-of-service).
+    add(bvlc_message(0x0A, npdu_header() +
+                      apdu_complex_ack(12, bacnet_object_property_reference(0, 3, 81) +
+                                       bacnet_property_value_bool(False), invoke_id=13)))
+
+    # 12) ReadProperty ACK -- CharacterString value (object-name).
+    add(bvlc_message(0x0A, npdu_header() +
+                      apdu_complex_ack(12, bacnet_object_property_reference(0, 3, 77) +
+                                       bacnet_property_value(7, bacnet_char_string("ZN-T-1")),
+                                       invoke_id=14)))
+
+    # 13) ReadProperty ACK -- BitString value (e.g. status-flags: in-alarm=F,fault=F,overridden=F,
+    #     out-of-service=T).
+    add(bvlc_message(0x0A, npdu_header() +
+                      apdu_complex_ack(12, bacnet_object_property_reference(0, 3, 111) +
+                                       bacnet_property_value(8, bacnet_bit_string("0001")),
+                                       invoke_id=15)))
+
+    # 14) ReadProperty ACK with a propertyArrayIndex present (context[2]).
+    add(bvlc_message(0x0A, npdu_header() +
+                      apdu_complex_ack(12, bacnet_object_property_reference(0, 3, 85, array_index=0) +
+                                       bacnet_property_value(4, struct.pack("!f", 1.0)), invoke_id=16)))
+
+    # 15) ReadProperty ACK whose PropertyValue is CONSTRUCTED (here: two Real values back-to-back
+    #     inside the open/close bracket, standing in for an array/list) -- not a single primitive,
+    #     so this decoder's "first pass" does not value-decode it, only notes as much and skips
+    #     past it structurally -- see bacnet.hpp's "Property value decode" paragraph.
+    constructed_value = (bacnet_open(3) + bacnet_app_tag(4, struct.pack("!f", 1.0)) +
+                          bacnet_app_tag(4, struct.pack("!f", 2.0)) + bacnet_close(3))
+    add(bvlc_message(0x0A, npdu_header() +
+                      apdu_complex_ack(12, bacnet_object_property_reference(0, 3, 85) + constructed_value,
+                                       invoke_id=17)))
+
+    # 16) WriteProperty request, no Priority.
+    add(bvlc_message(0x0A, npdu_header() +
+                      apdu_confirmed_request(15, bacnet_object_property_reference(4, 5, 85) +
+                                              bacnet_property_value(9, bacnet_unsigned(1)), invoke_id=20)))
+
+    # 17) WriteProperty request WITH Priority (context[4]).
+    add(bvlc_message(0x0A, npdu_header() +
+                      apdu_confirmed_request(15, bacnet_object_property_reference(4, 5, 85) +
+                                              bacnet_property_value(9, bacnet_unsigned(0)) +
+                                              bacnet_context_tag(4, bacnet_unsigned(8)), invoke_id=21)))
+
+    # 18) Simple-ACK -- e.g. acknowledging the WriteProperty above.
+    add(bvlc_message(0x0A, npdu_header() + apdu_simple_ack(15, invoke_id=20)))
+
+    # 19) Error-PDU, generic shape -- errorClass=property(2), errorCode=unknown-property(32).
+    add(bvlc_message(0x0A, npdu_header() + apdu_error(12, 2, 32, invoke_id=22)))
+
+    # 20) Error-PDU whose error-choice (WritePropertyMultiple, 16) defines its OWN service-
+    #     specific error structure rather than the generic errorClass/errorCode shape -- this
+    #     decoder doesn't special-case those 7 services, so it's named but shown as raw hex, with
+    #     an explanatory note -- see bacnet.hpp's PDU-type-5 paragraph.
+    add(bvlc_message(0x0A, npdu_header() + apdu_error_service_specific(16, invoke_id=23)))
+
+    # 21) Reject-PDU.
+    add(bvlc_message(0x0A, npdu_header() + apdu_reject(9, invoke_id=24)))  # unrecognized-service
+
+    # 22) Abort-PDU, server=False (client aborted).
+    add(bvlc_message(0x0A, npdu_header() + apdu_abort(0, invoke_id=25, server=False)))
+
+    # 23) Abort-PDU, server=True (server aborted).
+    add(bvlc_message(0x0A, npdu_header() + apdu_abort(9, invoke_id=26, server=True)))  # out-of-resources
+
+    # 24) Segment-ACK, ordinary (not negative, not server).
+    add(bvlc_message(0x0A, npdu_header() + apdu_segment_ack(invoke_id=27, seq=2, window=8)))
+
+    # 25) Segment-ACK, negative (NAK) and server bits both set.
+    add(bvlc_message(0x0A, npdu_header() + apdu_segment_ack(invoke_id=28, seq=0, window=8, nak=True, server=True)))
+
+    # 26) A segmented Confirmed-Request (SEG bit set) -- this decoder decodes the sequence-
+    #     number/proposed-window-size header fields but deliberately does NOT value-decode the
+    #     segment's own service data (no cross-packet reassembly) -- shown as raw hex with an
+    #     explanatory note. service_choice 14 = readPropertyMultiple, a service this decoder
+    #     doesn't value-decode even when unsegmented, doubling as an "outside the first-pass set"
+    #     example too.
+    add(bvlc_message(0x0A, npdu_header() +
+                      apdu_confirmed_request(14, bytes([0xAA, 0xBB, 0xCC, 0xDD]), invoke_id=30,
+                                              segmented=True, seq=1, window=8)))
+
+    # 27) A segmented Complex-ACK.
+    add(bvlc_message(0x0A, npdu_header() +
+                      apdu_complex_ack(14, bytes([0xEE, 0xFF]), invoke_id=31, segmented=True, seq=2,
+                                       window=8)))
+
+    # 28) A confirmed service outside this decoder's "first pass" set (SubscribeCOV, 5) -- named
+    #     via the service-choice table, but its data is shown as raw hex, not value-decoded.
+    add(bvlc_message(0x0A, npdu_header() +
+                      apdu_confirmed_request(5, bytes([0x0C, 0x02, 0x00, 0x03]), invoke_id=32)))
+
+    # 29) An unconfirmed service outside the "first pass" set (UnconfirmedCOVNotification, 2).
+    add(bvlc_message(0x0B, npdu_header() + apdu_unconfirmed_request(2, bytes([0x09, 0x01, 0x64]))))
+
+    # 30) NPDU with DEST present (DNET/DLEN/DADR + trailing HopCount) -- an ordinary 6-byte
+    #     Ethernet MAC destination address on a remote network.
+    add(bvlc_message(0x0A, npdu_header(control=0x20, dnet=5, dadr=bytes.fromhex("aabbccddeeff"),
+                                        hop_count=255) +
+                      apdu_unconfirmed_request(8)))
+
+    # 31) NPDU with DEST present and DLEN=0 -- broadcast on the destination network.
+    add(bvlc_message(0x0A, npdu_header(control=0x20, dnet=5, dadr=b"", hop_count=255) +
+                      apdu_unconfirmed_request(8)))
+
+    # 32) NPDU with SRC present (this NPDU was forwarded from another network by a router).
+    add(bvlc_message(0x0A, npdu_header(control=0x08, snet=7, sadr=bytes.fromhex("112233445566")) +
+                      apdu_unconfirmed_request(0, bacnet_app_tag(12, bacnet_object_id(8, 999)) +
+                                                bacnet_app_tag(2, bacnet_unsigned(480)) +
+                                                bacnet_app_tag(9, bacnet_unsigned(3)) +
+                                                bacnet_app_tag(2, bacnet_unsigned(0)))))
+
+    # 33) NPDU with BOTH DEST and SRC present (a router forwarding across two networks).
+    add(bvlc_message(0x0A, npdu_header(control=0x28, dnet=5, dadr=bytes.fromhex("aabbccddeeff"),
+                                        snet=7, sadr=bytes.fromhex("112233445566"), hop_count=200) +
+                      apdu_unconfirmed_request(8)))
+
+    # 34) A Network Layer Message (Control NET bit set) -- Who-Is-Router-To-Network (0x00), no
+    #     APDU at all. Named only, not value-decoded -- see bacnet.hpp's NPDU section.
+    add(bvlc_message(0x0A, npdu_network_message(0x00)))
+
+    # 35) A vendor-proprietary Network Layer Message (message type 0x80+, carries a 2-byte Vendor
+    #     ID immediately after the message type).
+    add(bvlc_message(0x0A, npdu_network_message(0x80, vendor_id=999, body=bytes([0x01, 0x02]))))
+
+    # 36) BVLC-Result (0x00) -- a BBMD's ack/nak of a preceding BDT/FDT-management request; no
+    #     NPDU at all (the whole message is BVLC).
+    add(bvlc_message(0x00, struct.pack("!H", 0x0000)))
+
+    # 37) Write-Broadcast-Distribution-Table -- two 10-byte BDT entries (IP+Port+Mask).
+    bdt_entries = (ip4("192.168.1.1") + struct.pack("!H", 47808) + ip4("255.255.255.0") +
+                   ip4("192.168.2.1") + struct.pack("!H", 47808) + ip4("255.255.255.0"))
+    add(bvlc_message(0x01, bdt_entries))
+
+    # 38) Read-Broadcast-Distribution-Table -- an empty request, nothing beyond the BVLC header.
+    add(bvlc_message(0x02, b""))
+
+    # 39) Read-Broadcast-Distribution-Table-Ack -- same 10-byte-entry shape as function 0x01.
+    add(bvlc_message(0x03, bdt_entries))
+
+    # 40) Register-Foreign-Device -- 2-byte Time-To-Live.
+    add(bvlc_message(0x05, struct.pack("!H", 300)))
+
+    # 41) Read-Foreign-Device-Table -- an empty request.
+    add(bvlc_message(0x06, b""))
+
+    # 42) Read-Foreign-Device-Table-Ack -- one 10-byte entry (IP+Port+TTL+Timeout).
+    fdt_entry = ip4("192.168.1.50") + struct.pack("!H", 47808) + struct.pack("!HH", 300, 180)
+    add(bvlc_message(0x07, fdt_entry))
+
+    # 43) Delete-Foreign-Device-Table-Entry -- 6-byte IP+Port.
+    add(bvlc_message(0x08, ip4("192.168.1.50") + struct.pack("!H", 47808)))
+
+    # 44) Forwarded-NPDU -- a BBMD relaying a Who-Is broadcast on behalf of a foreign device,
+    #     carrying the ORIGINATING device's own 6-byte B/IP address ahead of the NPDU (distinct
+    #     from this packet's own UDP/IP source, which is the relaying BBMD).
+    add(bvlc_message(0x04, ip4("192.168.5.20") + struct.pack("!H", 47808) +
+                      npdu_header() + apdu_unconfirmed_request(8)))
+
+    # 45) Distribute-Broadcast-To-Network -- a foreign device asking its BBMD to broadcast an
+    #     NPDU on its behalf.
+    add(bvlc_message(0x09, npdu_header() + apdu_unconfirmed_request(8)))
+
+    # 46) Secure-BVLL -- an opaque, encrypted/signed payload this decoder cannot decrypt --
+    #     named only, with a note, see bacnet.hpp's BVLC section.
+    add(bvlc_message(0x0C, bytes([0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08])))
+
+    # 47) BVLC header's own declared Length mismatched against the bytes actually present --
+    #     surfaced as a note, not a rejection (mirrors GOOSE/SV/EtherCAT's own tolerant-declared-
+    #     length handling).
+    mismatched = bytearray(bvlc_message(0x0A, npdu_header() + apdu_unconfirmed_request(8)))
+    struct.pack_into("!H", mismatched, 2, len(mismatched) + 10)
+    add(bytes(mismatched))
+
+    # 48) BVLC message truncated before even the fixed 4-byte header completes -- must not crash,
+    #     falls back to the generic "udp" groundwork report (structural detection gate declines).
+    add(bytes([0x81, 0x0A]))
+
+    # 49) BVLC Type byte is not 0x81 (here 0x82, BACnet/SC's own type byte) -- must NOT be
+    #     misdetected as BACnet/IP (Annex J) -- see bacnet.hpp's "structural detection gate"
+    #     paragraph.
+    wrong_type = bytearray(bvlc_message(0x0A, npdu_header() + apdu_unconfirmed_request(8)))
+    wrong_type[0] = 0x82
+    add(bytes(wrong_type))
+
+    # 50) BVLC Function byte is not one of the 13 the spec defines (0x00-0x0C) -- here 0x0D --
+    #     must NOT be misdetected.
+    bogus_function = bytearray(bvlc_message(0x0A, npdu_header() + apdu_unconfirmed_request(8)))
+    bogus_function[1] = 0x0D
+    add(bytes(bogus_function))
+
+    # 51) NPDU truncated right after Version/Control (no APDU bytes at all present).
+    add(bvlc_message(0x0A, bytes([0x01, 0x00])))
+
+    # 52) An APDU PDU type this decoder doesn't recognize (top nibble 15, not one of the 8 the
+    #     spec defines 0-7) -- the BVLC/NPDU layers still decode fine; only the APDU itself is
+    #     left unrecognized, with a note.
+    add(bvlc_message(0x0A, npdu_header() + bytes([0xF0])))
+
+    # 53) Not BACnet/IP at all -- ordinary UDP traffic on an unrelated port with a payload that
+    #     happens to start with 0x81 -- must not be misdetected regardless of port (the structural
+    #     gate is Type+Function, not port -- see bacnet.hpp).
+    add_unrelated = bacnet_frame(sport=51000, dport=51001,
+                                  bvlc=bytes([0x99, 0x99, 0x99, 0x99]))
+    packets.append(add_unrelated)
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_005_000 + i, i * 1000)
+    (TESTS_DIR / "sample_bacnet.pcap").write_bytes(data)
+
+
 ENIP_PORT = 44818
 
 
@@ -2150,6 +2613,7 @@ if __name__ == "__main__":
     build_goose_sample()
     build_sv_sample()
     build_ethercat_sample()
+    build_bacnet_sample()
     build_s7comm_sample()
     build_s7comm_items_sample()
     build_s7comm_1200sym_sample()

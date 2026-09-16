@@ -3,7 +3,7 @@
 `conduitscope` decodes Modbus/TCP, DNP3, IEC 60870-5-104, S7comm/COTP (Siemens S7 PLC
 protocol), EtherNet/IP (CIP explicit and implicit messaging), PROFINET RT (DCP device
 discovery/configuration and cyclic real-time I/O data), IEC 61850-8-1 GOOSE,
-IEC 61850-9-2 Sampled Values, and EtherCAT traffic from offline pcap/pcapng captures, and checks it
+IEC 61850-9-2 Sampled Values, EtherCAT, and BACnet/IP traffic from offline pcap/pcapng captures, and checks it
 against a zone/conduit segmentation policy. It's an OT/ICS conduit-auditing tool: `decode`/`info` give you reliable
 protocol decoding and a stats view, and `policy validate` maps that decoded traffic
 against an IEC 62443-style zone/conduit model (for NIS2-flavored compliance work) --
@@ -30,7 +30,7 @@ section.
 ## Why not just use tshark?
 
 Fair question -- tshark wins on raw protocol-decoding breadth (thousands of
-dissectors vs. conduitscope's nine-plus-CIP-I/O) and is usually still the
+dissectors vs. conduitscope's ten-plus-CIP-I/O) and is usually still the
 better first reach for general packet analysis. conduitscope isn't trying to
 replace it; it does one thing tshark fundamentally doesn't:
 
@@ -309,6 +309,40 @@ Groundwork / v0.1.0. What works right now:
   2-4 (ADS/RAW-IO/NV), and Distributed Clock register semantics are all out
   of scope -- see include/conduitscope/ethercat.hpp's file header for the
   full honest writeup.
+- BACnet/IP (UDP port 47808/0xBAC0, ASHRAE 135 Annex J): unlike EtherCAT/
+  GOOSE/SV/PROFINET RT, this one rides over UDP, so detection is a
+  payload-shape gate (BVLC Type `0x81` + Function in `0x00`-`0x0C`) applied
+  port-independently to every UDP payload, mirroring CIP I/O's own
+  opportunistic detection rather than PROFINET/GOOSE/SV's dedicated-EtherType
+  approach. Three layers are decoded: BVLC (the UDP framing header, including
+  every BBMD/foreign-device-table management function -- Write/Read-BDT,
+  Register-Foreign-Device, Read/Delete-FDT-Entry, Forwarded-NPDU,
+  Distribute-Broadcast-To-Network -- plus the opaque, undecodable
+  Secure-BVLL), NPDU (the network layer: DNET/DLEN/DADR and SNET/SLEN/SADR
+  routing fields, HopCount, and Network Layer Messages named but not
+  value-decoded), and APDU (the application layer: all 8 PDU types --
+  Confirmed/Unconfirmed-Request, Simple-ACK, Complex-ACK, Segment-ACK, Error,
+  Reject, Abort -- byte-accurate down to segmentation's SEG/MOR bits). Service
+  value-decoding is a deliberate first pass, the same scoping precedent this
+  codebase already applies to EtherNet/IP CIP explicit messaging and DNP3's
+  object table: Who-Is, I-Am, Who-Has, I-Have, ReadProperty request/ACK,
+  WriteProperty request, and generic Error are fully value-decoded (including
+  every primitive property-value type -- Real, Unsigned, Signed, Double,
+  Boolean, Enumerated, CharacterString, BitString, OctetString, Date, Time,
+  ObjectIdentifier); everything else (ReadPropertyMultiple/
+  WritePropertyMultiple, SubscribeCOV, segmented service data, and a
+  constructed/array PropertyValue -- the fifth "no generic self-describing
+  wire-level type" case in this codebase, after PROFINET's cyclic IO data,
+  CIP I/O's Connected Data Item, SV's `seqData`, and EtherCAT's `Data`) is
+  named via the full service-choice table but shown as raw hex with an
+  explanatory note. A real capture was found and validated: 54 frames (a
+  ReadProperty polling session against trend-log objects) extracted from a
+  larger mixed-OT-protocol capture -- see
+  tests/real_captures/bacnet/ATTRIBUTION.md for the full provenance and, more
+  usefully, its honest "Gaps" section listing everything that real traffic
+  does NOT exercise (device discovery, WriteProperty, every non-scalar
+  PropertyValue type, BBMD/FDT functions, and more) -- see
+  include/conduitscope/bacnet.hpp's file header for the full writeup.
 - Non-IPv4 Ethernet frames and non-TCP IPv4 payloads (including UDP) are now
   recognized and named, not just reported as a bare hex/number and dropped:
   ARP, LLDP, PTP, MPLS, and stacked-VLAN (802.1ad/QinQ) EtherTypes; ICMP,
@@ -436,7 +470,7 @@ that runs it -- the SDK used at build time only supplies headers/import librarie
 
 ```sh
 # Generate synthetic Modbus/TCP, DNP3, IEC 104, S7comm/COTP, EtherNet/IP, PROFINET RT,
-# GOOSE, Sampled Values, and EtherCAT captures and decode them (no live traffic needed):
+# GOOSE, Sampled Values, EtherCAT, and BACnet/IP captures and decode them (no live traffic needed):
 python3 tools/make_sample_pcap.py
 build/conduitscope decode -r tests/sample_modbus.pcap
 build/conduitscope decode -r tests/sample_s7comm.pcap --stats
@@ -446,6 +480,7 @@ build/conduitscope decode -r tests/sample_enip_cip_io.pcap
 build/conduitscope decode -r tests/sample_goose.pcap
 build/conduitscope decode -r tests/sample_sv.pcap
 build/conduitscope decode -r tests/sample_ethercat.pcap
+build/conduitscope decode -r tests/sample_bacnet.pcap
 build/conduitscope decode -r tests/sample_modbus.pcap --format json
 build/conduitscope info -r tests/sample_modbus.pcap
 
@@ -459,7 +494,7 @@ To decode traffic you've actually captured, e.g. from a Modbus simulator such as
 [4SICS ICS pcaps](https://www.netresec.com/?page=PCAP4SICS):
 
 ```sh
-tcpdump -i <iface> -w capture.pcap port 502 or port 20000 or port 2404 or port 102 or port 44818 or port 2222
+tcpdump -i <iface> -w capture.pcap port 502 or port 20000 or port 2404 or port 102 or port 44818 or port 2222 or port 47808
 build/conduitscope decode -r capture.pcap
 ```
 
@@ -468,7 +503,7 @@ intermediate file and check traffic in real time:
 
 ```sh
 build/conduitscope interfaces                                    # list capturable interfaces
-build/conduitscope decode -i eth0 --filter "port 502 or port 2404 or port 102 or port 44818 or port 2222" --duration 60
+build/conduitscope decode -i eth0 --filter "port 502 or port 2404 or port 102 or port 44818 or port 2222 or port 47808" --duration 60
 build/conduitscope policy validate -i eth0 --policy tests/policies/compliant.yaml --duration 60
 # or just Ctrl+C to stop either one early -- both still print whatever was captured so far
 ```
