@@ -12,6 +12,7 @@
 #include "conduitscope/ipv4.hpp"
 #include "conduitscope/link_layer.hpp"
 #include "conduitscope/modbus.hpp"
+#include "conduitscope/profinet.hpp"
 #include "conduitscope/s7comm.hpp"
 #include "conduitscope/tcp.hpp"
 #include "conduitscope/udp.hpp"
@@ -489,6 +490,46 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
             out.vlan_id = eth.vlan_id;
 
             if (eth.ethertype != ETHERTYPE_IPV4) {
+                // PROFINET RT (EtherType 0x8892) is tried first, port-independently -- there is
+                // no port at all here, but same rationale as CIP I/O's own UDP dispatch (see
+                // above): try_parse_profinet's FrameID check is this decoder's only structural
+                // gate, and this EtherType has zero collision risk with any other protocol this
+                // tool decodes (see profinet.hpp's file header comment).
+                bool want_profinet = options_.protocol_filter == ProtocolFilter::Auto ||
+                                      options_.protocol_filter == ProtocolFilter::ProfinetOnly;
+                if (want_profinet && eth.ethertype == ETHERTYPE_PROFINET) {
+                    if (auto pn = try_parse_profinet(eth.payload)) {
+                        out.protocol = "profinet";
+                        out.summary = pn->summary;
+                        out.profinet_frame_id = pn->frame_id;
+                        out.profinet_frame_id_name = pn->frame_id_name;
+                        for (const auto& n : pn->notes) out.notes.push_back(n);
+
+                        if (pn->has_dcp) {
+                            out.profinet_has_dcp = true;
+                            out.profinet_dcp_service_name = pn->dcp_service_name;
+                            out.profinet_dcp_service_type_name = pn->dcp_service_type_name;
+                            constexpr size_t kMaxDcpBlockValues = 50;
+                            for (const auto& block : pn->dcp_blocks) {
+                                if (out.profinet_dcp_blocks.size() >= kMaxDcpBlockValues) break;
+                                std::string label = !block.name.empty() ? block.name
+                                                                          : ("option=" + std::to_string(block.option) +
+                                                                             " suboption=" + std::to_string(block.suboption));
+                                out.profinet_dcp_blocks.push_back(label + "=" + block.value);
+                            }
+                        }
+                        if (pn->has_cyclic_data) {
+                            out.profinet_has_cyclic_data = true;
+                            out.profinet_cyclic_io_data_hex = pn->cyclic_io_data_hex;
+                            out.profinet_cyclic_io_data_length = pn->cyclic_io_data_length;
+                            out.profinet_cyclic_cycle_counter = pn->cyclic_cycle_counter;
+                            out.profinet_cyclic_data_status_summary = pn->cyclic_data_status_summary;
+                            out.profinet_cyclic_transfer_status = pn->cyclic_transfer_status;
+                        }
+                        return out;
+                    }
+                }
+
                 out.protocol = "non-ip";
                 std::ostringstream s;
                 s << "Ethernet frame with ethertype 0x" << std::hex << eth.ethertype << std::dec;

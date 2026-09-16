@@ -613,7 +613,12 @@ def build_link_and_transport_layer_sample():
     # deliberately unrecognized ethertype (0x9999, not a real IANA/IEEE assignment) to pin down
     # that an unknown ethertype still shows the bare hex number and nothing else, never a guess.
     add_eth(0x0806, bytes(28))                    # ARP (28-byte body, arbitrary content -- not parsed)
-    add_eth(0x8892, bytes([0xAA] * 20))            # PROFINET RT -- content arbitrary, not parsed
+    # PROFINET RT (0x8892) IS decoded by this tool now (see build_profinet_sample below) --
+    # FrameID 0x1234 falls in a genuinely reserved FrameID range (0x1000-0x7FFF, see
+    # profinet.hpp's file header comment), so try_parse_profinet correctly declines it and this
+    # still exercises the "recognized ethertype, content not decoded" fallback path, same as
+    # before this feature existed.
+    add_eth(0x8892, bytes([0x12, 0x34]) + bytes([0xAA] * 18))
     add_eth(0x88B8, bytes([0xBB] * 20))            # IEC 61850-8-1 GOOSE -- content arbitrary, not parsed
     add_eth(0x9999, bytes([0xCC] * 10))            # unrecognized ethertype -- must stay unnamed
 
@@ -636,6 +641,126 @@ def build_link_and_transport_layer_sample():
     for i, pkt in enumerate(packets):
         data += pcap_record(pkt, 1_700_002_900 + i, i * 1000)
     (TESTS_DIR / "sample_link_transport_layers.pcap").write_bytes(data)
+
+
+def profinet_frame(frame_id: int, payload: bytes, dst: bytes = None, src: bytes = None) -> bytes:
+    """One raw-Ethernet PROFINET RT frame: EtherType 0x8892, then a 2-byte big-endian FrameID,
+    then `payload` -- see profinet.hpp's file header comment for the wire format."""
+    dst = dst if dst is not None else PLC_MAC
+    src = src if src is not None else HMI_MAC
+    return eth_header(dst, src, 0x8892) + struct.pack("!H", frame_id) + payload
+
+
+def dcp_block(option: int, suboption: int, data: bytes) -> bytes:
+    """One DCP block: Option(1) + Suboption(1) + DCPBlockLength(2, big-endian) + `data`, plus a
+    pad byte if `data`'s length is odd (word-alignment -- see profinet.cpp's decode_dcp_blocks)."""
+    block = struct.pack("!BBH", option, suboption, len(data)) + data
+    if len(data) % 2 != 0:
+        block += b"\x00"
+    return block
+
+
+def dcp_pdu(service_id: int, service_type: int, xid: int, blocks: bytes, response_delay: int = 0) -> bytes:
+    """A DCP PDU (the bytes immediately after the FrameID): ServiceID(1) + ServiceType(1) +
+    Xid(4) + ResponseDelay-or-Reserved(2) + DCPDataLength(2), all big-endian, then `blocks`."""
+    return struct.pack("!BBIHH", service_id, service_type, xid, response_delay, len(blocks)) + blocks
+
+
+def dcp_block_with_prefix(option: int, suboption: int, content: bytes) -> bytes:
+    """An Option 0x01/0x02 DCP block carrying the 2-byte BlockInfo/BlockQualifier prefix real
+    devices send before the block's actual content in specific (ServiceID, direction)
+    combinations -- see profinet.hpp's file header comment's "IMPORTANT wire-format wrinkle"
+    paragraph and dcp_block_prefix_len's comment in profinet.cpp. The prefix's own value isn't
+    surfaced by this decoder, so an arbitrary placeholder (0x0000) is used here, same as most real
+    devices' Get/Identify responses (see tests/real_captures/profinet/ATTRIBUTION.md)."""
+    return dcp_block(option, suboption, struct.pack("!H", 0x0000) + content)
+
+
+def build_profinet_sample():
+    """PROFINET RT (EtherType 0x8892): DCP (Discovery and Configuration Protocol) request/response
+    exchanges and cyclic real-time IO data frames. See profinet.hpp's file header comment for the
+    exact wire format each packet below exercises (independently cross-checked against Wireshark's
+    packet-pn-rt.c/packet-pn-dcp.c dissector sources, not reverse-engineered from a single
+    example), and tests/real_captures/profinet/ATTRIBUTION.md for why there's no real-capture
+    coverage alongside this synthetic fixture."""
+    packets = []
+
+    def add(frame_id, payload, dst=None, src=None):
+        packets.append(profinet_frame(frame_id, payload, dst, src))
+
+    # 1) DCP Identify Request (multicast) -- an "All Selector" block (Option 0xFF, Suboption
+    #    0xFF, zero-length), the real shape a PROFINET engineering tool broadcasts to discover
+    #    every device on the segment. Option 0xFF/Suboption 0xFF isn't in this decoder's known
+    #    block table, so its (empty) value is shown as raw hex -- exercises the "block not
+    #    decoded" note path.
+    xid = 0x00112233
+    add(0xFEFE, dcp_pdu(5, 0, xid, dcp_block(0xFF, 0xFF, b"")))
+
+    # 2) DCP Identify Response (unicast) replying to the request above -- same Xid, ServiceType=1
+    #    (Response-Success), and every one of this decoder's five value-decoded block types in one
+    #    PDU: MACAddress, IPParameter, NameOfStation (deliberately an ODD-length string, "plc-1",
+    #    forcing the pad byte before the next block -- if that padding were wrong, DeviceID/
+    #    DeviceRole below would misparse), DeviceID, DeviceRole. An Identify Response is one of the
+    #    (ServiceID, direction) combinations that carries a 2-byte BlockInfo prefix before each
+    #    Option 0x01/0x02 block's actual content (see dcp_block_with_prefix), confirmed against a
+    #    real device's own Identify Response bytes -- see tests/real_captures/profinet/
+    #    ATTRIBUTION.md.
+    resp_blocks = (
+        dcp_block_with_prefix(0x01, 0x01, PLC_MAC) +
+        dcp_block_with_prefix(0x01, 0x02, bytes([192, 168, 1, 10]) + bytes([255, 255, 255, 0]) + bytes([192, 168, 1, 1])) +
+        dcp_block_with_prefix(0x02, 0x02, b"plc-1") +
+        dcp_block_with_prefix(0x02, 0x03, struct.pack("!HH", 0x002A, 0x0101)) +
+        dcp_block_with_prefix(0x02, 0x04, bytes([0x01, 0x00]))
+    )
+    add(0xFEFF, dcp_pdu(5, 1, xid, resp_blocks), dst=HMI_MAC, src=PLC_MAC)
+
+    # 3) DCP Set request carrying an IPParameter block -- the other (ServiceID, direction)
+    #    combination that carries a 2-byte prefix (BlockQualifier this time, same 2-byte shape --
+    #    see dcp_block_with_prefix), confirmed against a real device's own Set Request bytes.
+    set_blocks = dcp_block_with_prefix(
+        0x01, 0x02, bytes([192, 168, 1, 20]) + bytes([255, 255, 255, 0]) + bytes([192, 168, 1, 1]))
+    add(0xFEFD, dcp_pdu(4, 0, 0x00445566, set_blocks))
+
+    # 4) DCP Hello (device announcement on power-up/link-up) carrying just a NameOfStation block --
+    #    Hello is the third (ServiceID, direction) combination that carries the 2-byte BlockInfo
+    #    prefix (see dcp_block_prefix_len's comment in profinet.cpp).
+    add(0xFEFC, dcp_pdu(6, 0, 0x00998877, dcp_block_with_prefix(0x02, 0x02, b"device-1")))
+
+    # 5) Cyclic RT IO data, unicast (FrameID 0x8001): 8 bytes of IO data, a healthy DataStatus
+    #    (Primary, Valid, Run, Ok -- bits 0x01|0x04|0x10|0x20 = 0x35), TransferStatus=0 (OK).
+    add(0x8001, bytes(range(1, 9)) + struct.pack("!HBB", 0x1234, 0x35, 0x00))
+
+    # 6) Cyclic RT IO data, multicast (FrameID 0xBC00, the first multicast FrameID): a
+    #    backup/invalid/stopped/problem DataStatus with the Ignore bit set (0x80) and a nonzero
+    #    TransferStatus -- exercises the "bad status"/"ignore this frame" wording.
+    add(0xBC00, bytes([0xAA, 0xBB, 0xCC, 0xDD]) + struct.pack("!HBB", 0x5678, 0x80, 0x01))
+
+    # 7) Cyclic RT IO data with NO IO data at all (frame is exactly the 4-byte trailer) --
+    #    exercises the "no IO data present" note.
+    add(0x8002, struct.pack("!HBB", 0x0001, 0x35, 0x00))
+
+    # 8) Alarm High (FrameID 0xFC01) -- a recognized FrameID this groundwork release names but
+    #    does not further decode (Alarm frames carry their own block structure, out of scope --
+    #    see profinet.hpp's file header comment).
+    add(0xFC01, bytes([0x00] * 12))
+
+    # 9) A DCP PDU too short for even the fixed 10-byte header -- must not crash, and must note
+    #    the truncation rather than guess at fields that aren't there.
+    add(0xFEFD, bytes([0x03, 0x00, 0x01]))
+
+    # 10) A cyclic-range FrameID with fewer than 4 bytes of payload -- too short for even the
+    #     trailer; must not crash, and must note the truncation.
+    add(0x8003, bytes([0x01, 0x02]))
+
+    # 11) A reserved/unrecognized FrameID (0x1000, start of the 0x1000-0x7FFF reserved range) --
+    #     must NOT be misdetected as anything; falls through to the generic "non-ip" ethertype-
+    #     name-only report, same as tests/sample_link_transport_layers.pcap's own 0x8892 packet.
+    add(0x1000, bytes([0xEE] * 10))
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_002_700 + i, i * 1000)
+    (TESTS_DIR / "sample_profinet.pcap").write_bytes(data)
 
 
 ENIP_PORT = 44818
@@ -1458,6 +1583,7 @@ if __name__ == "__main__":
     build_enip_sample()
     build_enip_nop_precedence_sample()
     build_enip_cip_io_sample()
+    build_profinet_sample()
     build_s7comm_sample()
     build_s7comm_items_sample()
     build_s7comm_1200sym_sample()

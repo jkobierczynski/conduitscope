@@ -17,17 +17,19 @@
 #include "conduitscope/iec104.hpp"
 #include "conduitscope/modbus.hpp"
 #include "conduitscope/pcap_reader.hpp"
+#include "conduitscope/profinet.hpp"
 #include "conduitscope/tcp.hpp"
 
 namespace conduitscope {
 
 enum class ProtocolFilter {
-    Auto,         // opportunistically detect IEC104/Modbus/DNP3/S7comm/EtherNet-IP regardless of port
+    Auto,         // opportunistically detect IEC104/Modbus/DNP3/S7comm/EtherNet-IP/PROFINET regardless of port
     ModbusOnly,   // only attempt Modbus decoding
     Dnp3Only,     // only attempt DNP3 decoding
     S7commOnly,   // only attempt TPKT/COTP/S7comm decoding
     Iec104Only,   // only attempt IEC 60870-5-104 decoding
     EnipOnly,     // only attempt EtherNet/IP (CIP explicit messaging) decoding
+    ProfinetOnly, // only attempt PROFINET RT (DCP + cyclic IO data) decoding
 };
 
 struct DecodeOptions {
@@ -76,13 +78,16 @@ struct DecodedPacket {
     uint16_t src_port = 0, dst_port = 0;
     std::string tcp_flags;
 
-    // "iec104", "modbus", "dnp3", "s7comm", "enip", "cotp" (recognized TPKT/COTP framing but not
-    // S7comm inside it -- e.g. a connection setup frame), "tcp" (recognized transport, no
-    // app-layer match), "udp" (recognized transport, no app-layer protocol decoded -- see
-    // udp.hpp; UDP/2222 CIP I/O traffic that try_parse_cip_io actually recognizes is promoted to
-    // "enip" instead -- see enip_has_io below), "non-tcp" (a non-TCP, non-UDP IPv4 payload, e.g.
-    // ICMP), "non-ip" (a non-IPv4 Ethernet frame, e.g. ARP or a raw-Ethernet OT protocol like
-    // PROFINET/GOOSE -- see link_layer.hpp's ethertype_name), "unsupported-link", or
+    // "iec104", "modbus", "dnp3", "s7comm", "enip", "profinet", "cotp" (recognized TPKT/COTP
+    // framing but not S7comm inside it -- e.g. a connection setup frame), "tcp" (recognized
+    // transport, no app-layer match), "udp" (recognized transport, no app-layer protocol decoded
+    // -- see udp.hpp; UDP/2222 CIP I/O traffic that try_parse_cip_io actually recognizes is
+    // promoted to "enip" instead -- see enip_has_io below), "non-tcp" (a non-TCP, non-UDP IPv4
+    // payload, e.g. ICMP), "non-ip" (a non-IPv4 Ethernet frame, e.g. ARP, or a raw-Ethernet OT
+    // protocol this tool doesn't decode like GOOSE/EtherCAT, or a PROFINET RT frame whose
+    // FrameID try_parse_profinet doesn't recognize -- see link_layer.hpp's ethertype_name;
+    // EtherType 0x8892 traffic that try_parse_profinet DOES recognize is promoted to "profinet"
+    // instead -- see profinet_has_dcp/profinet_has_cyclic_data below), "unsupported-link", or
     // "parse-error".
     std::string protocol;
     std::string summary;
@@ -165,6 +170,31 @@ struct DecodedPacket {
     bool enip_io_has_data = false;   // true once a Connected Data Item (0x00B1) was located
     std::string enip_io_data_hex;    // raw hex, deliberately not value-decoded -- see enip.hpp
     size_t enip_io_data_length = 0;
+
+    // Only set when protocol == "profinet" -- see try_parse_profinet in profinet.hpp. PROFINET RT
+    // rides directly on raw Ethernet (EtherType 0x8892, has_ip stays false), so unlike every other
+    // protocol above there is no src_ip/dst_ip/src_port/dst_port for it -- src_mac/dst_mac (above)
+    // are the only addressing this packet carries.
+    uint16_t profinet_frame_id = 0;
+    std::string profinet_frame_id_name;  // always set when protocol == "profinet"
+
+    // DCP (Discovery and Configuration Protocol) -- set only when profinet_frame_id is one of the
+    // four DCP FrameIDs (see profinet.hpp).
+    bool profinet_has_dcp = false;
+    std::string profinet_dcp_service_name;       // Hello / Get / Set / Identify
+    std::string profinet_dcp_service_type_name;  // Request / Response-Success / ...
+    // One entry per decoded DCP block (e.g. "NameOfStation=\"plc-01\""), capped at 50 entries for
+    // the same reason as enip_cip_values.
+    std::vector<std::string> profinet_dcp_blocks;
+
+    // Cyclic RT IO data -- set only when profinet_frame_id falls in the cyclic RT FrameID ranges
+    // (see profinet.hpp).
+    bool profinet_has_cyclic_data = false;
+    std::string profinet_cyclic_io_data_hex;  // raw hex, deliberately not value-decoded
+    size_t profinet_cyclic_io_data_length = 0;
+    uint16_t profinet_cyclic_cycle_counter = 0;
+    std::string profinet_cyclic_data_status_summary;
+    uint8_t profinet_cyclic_transfer_status = 0;
 };
 
 // Cross-packet DNP3 fragment-reassembly state for one directional TCP flow (src ip:port -> dst

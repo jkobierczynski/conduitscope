@@ -59,6 +59,7 @@ constexpr const char* kMagenta = "\033[35m";
 constexpr const char* kBlue = "\033[34m";
 constexpr const char* kGreen = "\033[32m";
 constexpr const char* kYellow = "\033[33m";
+constexpr const char* kBrightCyan = "\033[96m";
 
 // Color for a packet's "[protocol]" tag -- picked so a mixed-protocol capture scans quickly by
 // eye, not for any deeper meaning. parse-error is the one exception: it gets the same "something
@@ -71,6 +72,7 @@ const char* protocol_tag_color(const std::string& protocol) {
     if (protocol == "cotp") return kBlue;  // recognized TPKT/COTP framing, no S7comm inside yet
     if (protocol == "iec104") return kGreen;
     if (protocol == "enip") return kYellow;
+    if (protocol == "profinet") return kBrightCyan;
     if (protocol == "parse-error") return kBoldRed;
     return kDim;  // tcp / udp / non-tcp / non-ip / unsupported-link: recognized, nothing OT-specific
 }
@@ -207,6 +209,33 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
             out_ << "    \"enip_io_data_hex\": \"" << json_escape(p.enip_io_data_hex) << "\",\n";
         }
     }
+    if (p.protocol == "profinet") {
+        std::ostringstream fid;
+        fid << "0x" << std::hex << std::uppercase << std::setw(4) << std::setfill('0') << p.profinet_frame_id;
+        out_ << "    \"profinet_frame_id\": \"" << fid.str() << "\",\n";
+        out_ << "    \"profinet_frame_id_name\": \"" << json_escape(p.profinet_frame_id_name) << "\",\n";
+    }
+    if (p.profinet_has_dcp) {
+        out_ << "    \"profinet_dcp_service\": \"" << json_escape(p.profinet_dcp_service_name) << "\",\n";
+        out_ << "    \"profinet_dcp_service_type\": \"" << json_escape(p.profinet_dcp_service_type_name) << "\",\n";
+        if (!p.profinet_dcp_blocks.empty()) {
+            out_ << "    \"profinet_dcp_blocks\": [";
+            for (size_t i = 0; i < p.profinet_dcp_blocks.size(); ++i) {
+                if (i != 0) out_ << ", ";
+                out_ << "\"" << json_escape(p.profinet_dcp_blocks[i]) << "\"";
+            }
+            out_ << "],\n";
+        }
+    }
+    if (p.profinet_has_cyclic_data) {
+        out_ << "    \"profinet_cyclic_io_data_length\": " << p.profinet_cyclic_io_data_length << ",\n";
+        out_ << "    \"profinet_cyclic_io_data_hex\": \"" << json_escape(p.profinet_cyclic_io_data_hex) << "\",\n";
+        out_ << "    \"profinet_cyclic_cycle_counter\": " << p.profinet_cyclic_cycle_counter << ",\n";
+        out_ << "    \"profinet_cyclic_data_status\": \"" << json_escape(p.profinet_cyclic_data_status_summary)
+             << "\",\n";
+        out_ << "    \"profinet_cyclic_transfer_status\": " << static_cast<unsigned>(p.profinet_cyclic_transfer_status)
+             << ",\n";
+    }
     out_ << "    \"notes\": [";
     for (size_t i = 0; i < p.notes.size(); ++i) {
         if (i != 0) out_ << ", ";
@@ -257,6 +286,11 @@ void StatsWriter::write_packet(const DecodedPacket& p) {
         if (!p.enip_command_name.empty()) enip_command_counts_[p.enip_command_name]++;
         if (p.enip_has_cip) enip_cip_service_counts_[p.enip_cip_service_name]++;
         if (p.enip_has_io) enip_io_datagram_count_++;
+    }
+    if (p.protocol == "profinet") {
+        profinet_frame_id_counts_[p.profinet_frame_id_name]++;
+        if (p.profinet_has_dcp) profinet_dcp_count_++;
+        if (p.profinet_has_cyclic_data) profinet_cyclic_count_++;
     }
     if (!has_ts_) {
         first_ts_ = last_ts_ = p.timestamp;
@@ -318,6 +352,14 @@ void StatsWriter::print_summary(std::ostream& out) const {
     }
     if (enip_io_datagram_count_ > 0) {
         out << "enip cip i/o (implicit messaging) datagrams: " << enip_io_datagram_count_ << "\n";
+    }
+    if (!profinet_frame_id_counts_.empty()) {
+        out << "profinet frame id types:\n";
+        for (const auto& [name, count] : profinet_frame_id_counts_) {
+            out << "  " << std::left << std::setw(60) << name << count << "\n";
+        }
+        out << "profinet dcp messages: " << profinet_dcp_count_ << "\n";
+        out << "profinet cyclic rt io datagrams: " << profinet_cyclic_count_ << "\n";
     }
 }
 

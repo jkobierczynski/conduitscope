@@ -31,6 +31,7 @@ add_library(conduitscope_core STATIC
   src/dnp3.cpp
   src/iec104.cpp
   src/enip.cpp
+  src/profinet.cpp
   src/cotp.cpp
   src/s7comm.cpp
   src/decoder.cpp
@@ -747,6 +748,142 @@ add_test(NAME real_enip_multiple_service_packet_decoded
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/enip/ethernetip_cip_explicit_messaging.pcap" --format text)
 set_tests_properties(real_enip_multiple_service_packet_decoded PROPERTIES
   PASS_REGULAR_EXPRESSION "Multiple_Service_Packet")
+
+# --------------------------------------------------------------------------
+# PROFINET RT (synthetic, tests/sample_profinet.pcap): DCP (Discovery and Configuration
+# Protocol) request/response exchanges and cyclic real-time IO data frames -- see
+# tools/make_sample_pcap.py's build_profinet_sample for the exact byte layout each assertion
+# below is checking, and profinet.hpp's file header comment for the decoder itself. Unlike every
+# other protocol above, PROFINET RT rides directly on raw Ethernet (EtherType 0x8892) -- there is
+# no IP/TCP/UDP layer at all.
+# --------------------------------------------------------------------------
+add_test(NAME profinet_dcp_identify_request_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_profinet.pcap" --format text)
+set_tests_properties(profinet_dcp_identify_request_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[profinet\\]  DCP Identify Request xid=0x00112233")
+
+add_test(NAME profinet_dcp_unknown_block_shown_as_raw_hex
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_profinet.pcap" --format text)
+set_tests_properties(profinet_dcp_unknown_block_shown_as_raw_hex PROPERTIES
+  PASS_REGULAR_EXPRESSION "note: DCP block option=0xFF suboption=0xFF not decoded")
+
+# The Identify Response: same Xid as the Request above (authoritative pairing isn't attempted by
+# this decoder, but a matching Xid is still a useful correlation signal for a human reading the
+# output), and all five of this decoder's value-decoded DCP block types in one PDU.
+add_test(NAME profinet_dcp_identify_response_headline_fields_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_profinet.pcap" --format text)
+set_tests_properties(profinet_dcp_identify_response_headline_fields_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "DCP Identify Response-Success xid=0x00112233 name_of_station=\"plc-1\" vendor=0x002A device=0x0101")
+
+# Regression guard for DCP block-list padding (see profinet.cpp's decode_dcp_blocks): the
+# NameOfStation block above is a deliberately ODD-length string ("plc-1", 5 bytes); if the pad
+# byte before the next block were handled wrong, DeviceID/DeviceRole below would misparse instead
+# of decoding cleanly.
+add_test(NAME profinet_dcp_response_all_blocks_decoded_in_json
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_profinet.pcap")
+set_tests_properties(profinet_dcp_response_all_blocks_decoded_in_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"profinet_dcp_blocks\": \\[\"MACAddress=00:0C:29:AA:BB:CC\", \"IPParameter=ip=192.168.1.10 subnet=255.255.255.0 gateway=192.168.1.1\", \"NameOfStation=plc-1\", \"DeviceID=vendor=0x002A device=0x0101\", \"DeviceRole=0x01 \\[IO Device\\]\"\\]")
+
+add_test(NAME profinet_dcp_set_request_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_profinet.pcap" --format text)
+set_tests_properties(profinet_dcp_set_request_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[profinet\\]  DCP Set Request xid=0x00445566")
+
+# Regression guard for the OTHER (ServiceID, direction) combination that carries a 2-byte prefix
+# before an Option 0x01/0x02 block's content (BlockQualifier, for a Set Request -- see
+# dcp_block_prefix_len's comment in profinet.cpp): if that prefix weren't stripped, this
+# IPParameter block would show as an unrecognized 14-byte blob instead of decoding cleanly.
+add_test(NAME profinet_dcp_set_request_block_qualifier_stripped
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_profinet.pcap")
+set_tests_properties(profinet_dcp_set_request_block_qualifier_stripped PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"profinet_dcp_blocks\": \\[\"IPParameter=ip=192.168.1.20 subnet=255.255.255.0 gateway=192.168.1.1\"\\]")
+
+add_test(NAME profinet_dcp_hello_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_profinet.pcap" --format text)
+set_tests_properties(profinet_dcp_hello_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "DCP Hello Request xid=0x00998877 name_of_station=\"device-1\"")
+
+add_test(NAME profinet_cyclic_unicast_healthy_status_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_profinet.pcap" --format text)
+set_tests_properties(profinet_cyclic_unicast_healthy_status_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "Cyclic RT IO data \\(RT_CLASS_1, unicast\\): 8 byte\\(s\\) IO data, cycle_counter=4660 data_status=\\[Primary,Valid,Run,Ok\\] transfer_status=OK")
+
+add_test(NAME profinet_cyclic_multicast_bad_status_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_profinet.pcap" --format text)
+set_tests_properties(profinet_cyclic_multicast_bad_status_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "Cyclic RT IO data \\(RT_CLASS_1, multicast\\): 4 byte\\(s\\) IO data, cycle_counter=22136 data_status=\\[Backup,Invalid,Stop,Problem,Ignore\\] transfer_status=ignore this frame \\(0x01\\)")
+
+add_test(NAME profinet_cyclic_empty_io_data_noted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_profinet.pcap" --format text)
+set_tests_properties(profinet_cyclic_empty_io_data_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "0 byte\\(s\\) IO data[^\n]*\n *note: no IO data present")
+
+add_test(NAME profinet_alarm_high_named_only
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_profinet.pcap" --format text)
+set_tests_properties(profinet_alarm_high_named_only PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[profinet\\]  PROFINET RT: Alarm High \\(frame_id=0xFC01\\)")
+
+add_test(NAME profinet_dcp_truncated_header_noted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_profinet.pcap" --format text)
+set_tests_properties(profinet_dcp_truncated_header_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "note: DCP PDU too short \\(3 byte\\(s\\)\\) for the fixed 10-byte header")
+
+add_test(NAME profinet_cyclic_truncated_trailer_noted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_profinet.pcap" --format text)
+set_tests_properties(profinet_cyclic_truncated_trailer_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "note: cyclic RT frame too short \\(2 byte\\(s\\)\\) for the 4-byte CycleCounter/DataStatus/TransferStatus trailer")
+
+# A reserved/unrecognized FrameID (0x1000) must NOT be misdetected as PROFINET -- falls through to
+# the same generic "non-ip" ethertype-name-only report as any other 0x8892 traffic this decoder
+# doesn't recognize (see tests/sample_link_transport_layers.pcap's own 0x8892 coverage).
+add_test(NAME profinet_reserved_frame_id_falls_back_to_non_ip
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_profinet.pcap" --format text)
+set_tests_properties(profinet_reserved_frame_id_falls_back_to_non_ip PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[non-ip\\]  Ethernet frame with ethertype 0x8892 \\(PROFINET RT\\) \\(not IPv4\\)")
+
+add_test(NAME profinet_stats_counted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_profinet.pcap" --stats)
+set_tests_properties(profinet_stats_counted PROPERTIES
+  PASS_REGULAR_EXPRESSION "profinet dcp messages: 4\nprofinet cyclic rt io datagrams: 3")
+
+# --------------------------------------------------------------------------
+# Real-world PROFINET RT/DCP captures -- see tests/real_captures/profinet/ATTRIBUTION.md for
+# provenance. Both sourced from the ITI/ICS-Security-Tools public pcap collection: fourteen real
+# targeted DCP Identify Requests from a live segment, and a real Identify/Set exchange that
+# caught a genuine decoding bug (a missing BlockInfo/BlockQualifier prefix -- see
+# ATTRIBUTION.md's writeup and dcp_block_prefix_len's comment in profinet.cpp) before this
+# feature ever shipped.
+# --------------------------------------------------------------------------
+set(PROFINET_REAL_CAPTURES
+  profinet_rt_identify_requests
+  profinet_change_ip_using_dcp
+)
+# Same baseline regression guard as the other protocols' real-capture loops above: must never
+# crash the parser or exit non-zero, independent of what it does or doesn't manage to decode.
+foreach(capture ${PROFINET_REAL_CAPTURES})
+  add_test(NAME real_profinet_${capture}_does_not_crash
+    COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/profinet/${capture}.pcap" --format json)
+endforeach()
+
+# The targeted-identify capture: several independent real devices' own FrameID/Xid/NameOfStation
+# encodings, not just the synthetic fixture's hand-constructed bytes.
+add_test(NAME real_profinet_identify_requests_named_stations_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/profinet/profinet_rt_identify_requests.pcap" --format text)
+set_tests_properties(real_profinet_identify_requests_named_stations_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "DCP Identify Request xid=0x0300BF9A name_of_station=\"switch3\"")
+
+# The bug-catching capture: confirms the BlockInfo-prefix fix against the real device's actual
+# bytes -- if this regressed, name_of_station would go back to two leading NUL bytes and
+# DeviceID/DeviceRole/IPParameter would go back to being undecoded.
+add_test(NAME real_profinet_change_ip_identify_response_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/profinet/profinet_change_ip_using_dcp.pcap" --format text)
+set_tests_properties(real_profinet_change_ip_identify_response_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "DCP Identify Response-Success xid=0x01000001 name_of_station=\"X208-BORD\" vendor=0x002A device=0x0A01")
+
+add_test(NAME real_profinet_change_ip_set_request_ip_parameter_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/profinet/profinet_change_ip_using_dcp.pcap")
+set_tests_properties(real_profinet_change_ip_set_request_ip_parameter_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"profinet_dcp_blocks\": \\[\"IPParameter=ip=192.168.0.10 subnet=255.255.255.0 gateway=192.168.0.1\"\\]")
 
 # --------------------------------------------------------------------------
 # Real-world S7comm/COTP captures -- see tests/real_captures/s7comm/ATTRIBUTION.md

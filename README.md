@@ -1,7 +1,8 @@
 # conduitscope
 
 `conduitscope` decodes Modbus/TCP, DNP3, IEC 60870-5-104, S7comm/COTP (Siemens S7 PLC
-protocol), and EtherNet/IP (CIP explicit and implicit messaging) traffic from offline pcap/pcapng captures, and checks it against a zone/conduit segmentation
+protocol), EtherNet/IP (CIP explicit and implicit messaging), and PROFINET RT (DCP device
+discovery/configuration and cyclic real-time I/O data) traffic from offline pcap/pcapng captures, and checks it against a zone/conduit segmentation
 policy. It's an OT/ICS conduit-auditing tool: `decode`/`info` give you reliable
 protocol decoding and a stats view, and `policy validate` maps that decoded traffic
 against an IEC 62443-style zone/conduit model (for NIS2-flavored compliance work) --
@@ -24,6 +25,42 @@ and `conduitscope interfaces` work; if it doesn't, the build is exactly as
 dependency-free as before, and those two just report that clearly at runtime
 instead of not existing. See [docs/MANUAL.md](docs/MANUAL.md)'s LIVE CAPTURE
 section.
+
+## Why not just use tshark?
+
+Fair question -- tshark wins on raw protocol-decoding breadth (thousands of
+dissectors vs. conduitscope's six-plus-CIP-I/O) and is usually still the
+better first reach for general packet analysis. conduitscope isn't trying to
+replace it; it does one thing tshark fundamentally doesn't:
+
+- **Turns a capture into a compliance verdict.** `policy validate` takes a
+  capture and a written zone/conduit policy file (the kind of artifact an
+  IEC 62443-3-2 or NIS2 risk assessment actually asks for) and reports which
+  flows were explicitly permitted and which weren't. tshark has no concept
+  of zones, conduits, or a pass/fail audit report -- you'd be doing that
+  comparison by hand.
+- **Labels every heuristic as a heuristic.** Where a general-purpose
+  dissector will confidently render a field on shaky evidence, conduitscope
+  is built around "decode confidently only where the wire format is
+  unambiguous": anything inferred rather than authoritatively known (Modbus
+  request/response classification, EtherNet/IP tag-read disambiguation,
+  S7comm's experimental symbolic addressing) is explicitly noted as such in
+  the output, not silently presented as fact -- important when the output
+  might get cited in an audit report.
+- **Small enough to actually read.** A few thousand lines of C++17, zero
+  required dependencies for offline analysis (no libpcap needed unless you
+  want live capture -- see below). You can read every decoder end to end and
+  know exactly what it does and doesn't claim, which matters more than usual
+  when pointing a tool at security-sensitive OT captures -- Wireshark/
+  tshark's dissector surface is enormous and has a long CVE history.
+- **JSON output shaped for the audit pipeline**, not just for rendering in a
+  GUI: authoritative Modbus request/response pairing, EtherNet/IP CIP I/O
+  connection tracking, IEC 104 cause-of-transmission, and so on, designed to
+  be piped into `jq` or a policy-checking layer.
+
+In short: tshark for exploring an unfamiliar capture or decoding something
+obscure; conduitscope for the specific, repeatable "does this OT network's
+traffic match what the segmentation policy says it should" question.
 
 ## Status
 
@@ -167,21 +204,43 @@ Groundwork / v0.1.0. What works right now:
   real EtherNet/IP captures above) -- validated by construction against the
   wire format as cross-checked against Wireshark's dissector source and the
   CISA `icsnpp-enip` Zeek parser; see tests/real_captures/enip/ATTRIBUTION.md.
+- PROFINET RT (EtherType `0x8892`): unlike every other protocol above, this
+  one rides directly on raw Ethernet -- no IPv4/TCP/UDP layer at all. Two
+  FrameID-discriminated shapes are fully decoded: DCP (Discovery and
+  Configuration Protocol) -- Hello/Get/Set/Identify request/response
+  exchanges, including device-fingerprinting fields (NameOfStation, Vendor/
+  DeviceID, DeviceRole, MAC/IP configuration) -- and cyclic real-time I/O
+  data, whose trailing CycleCounter/DataStatus/TransferStatus fields are
+  decoded while the I/O data itself is shown only as raw hex (no GSD/GSDML
+  device description to know an assembly's layout from, same reasoning as
+  CIP I/O's Connected Data Item above). Building this against a real capture
+  caught a genuine bug before it ever shipped: several DCP block types carry
+  an undocumented-in-the-obvious-sources extra 2-byte prefix before their
+  actual content, but only in specific request/response directions -- see
+  tests/real_captures/profinet/ATTRIBUTION.md for the full writeup. Every
+  other FrameID range (RTC3, Alarm High/Low, PTCP, fragmentation, ...) is
+  named but not further decoded; a genuinely reserved/unrecognized FrameID
+  falls back to the same generic "non-ip" ethertype-name-only report as
+  before this feature. No real cyclic RT IO data capture was found (same gap
+  as CIP I/O above, for the same reason); DCP IS validated against two real
+  captures -- see tests/real_captures/profinet/ATTRIBUTION.md.
 - Non-IPv4 Ethernet frames and non-TCP IPv4 payloads (including UDP) are now
   recognized and named, not just reported as a bare hex/number and dropped:
-  ARP, PROFINET RT, IEC 61850 GOOSE/Sampled Values, EtherCAT, LLDP, PTP, MPLS,
-  and stacked-VLAN (802.1ad/QinQ) EtherTypes; ICMP, IGMP, GRE, ESP, AH, OSPF,
+  ARP, IEC 61850 GOOSE/Sampled Values, EtherCAT, LLDP, PTP, MPLS, and
+  stacked-VLAN (802.1ad/QinQ) EtherTypes; ICMP, IGMP, GRE, ESP, AH, OSPF,
   and SCTP IP protocol numbers; and the UDP header itself (source/destination
   port, byte count) -- EtherNet/IP's own UDP port (2222) is decoded, not just
-  named, when the traffic on it actually looks like CIP I/O (see above). This
-  is otherwise groundwork plumbing, not a new protocol decoder -- none of the
-  remaining protocols' own framing is parsed any further yet (no GOOSE/
-  PROFINET decode), and `policy validate` does not yet evaluate any non-TCP
-  traffic against any conduit (still counted as `skipped_non_tcp`, same as
-  before) -- but it's a real, confirmed visibility gap this closes:
-  re-running conduitscope's own real-capture test set after adding this
-  surfaced genuine ARP and UDP (DNS, NetBIOS) traffic that was previously
-  invisible. See docs/MANUAL.md's PROTOCOL COVERAGE and ROADMAP.
+  named, when the traffic on it actually looks like CIP I/O (see above), and
+  PROFINET RT's EtherType is decoded, not just named, when the FrameID looks
+  like DCP or cyclic IO data (see above). This is otherwise groundwork
+  plumbing, not a new protocol decoder -- none of the remaining protocols'
+  own framing is parsed any further yet (no GOOSE decode), and `policy
+  validate` does not yet evaluate any non-TCP traffic against any conduit
+  (still counted as `skipped_non_tcp`, same as before) -- but it's a real,
+  confirmed visibility gap this closes: re-running conduitscope's own
+  real-capture test set after adding this surfaced genuine ARP and UDP (DNS,
+  NetBIOS) traffic that was previously invisible. See docs/MANUAL.md's
+  PROTOCOL COVERAGE and ROADMAP.
 - IPv4 payload is clamped to the header's own `total_length` field, so
   Ethernet's minimum-frame-size padding on short packets (bare ACKs, mostly)
   never gets misreported as phantom TCP payload -- found and fixed against a

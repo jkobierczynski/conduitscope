@@ -2,14 +2,14 @@
 
 ## NAME
 
-conduitscope -- decode Modbus/TCP, DNP3, IEC 60870-5-104, S7comm/COTP, and EtherNet/IP (CIP explicit and implicit messaging) traffic from offline pcap captures
+conduitscope -- decode Modbus/TCP, DNP3, IEC 60870-5-104, S7comm/COTP, EtherNet/IP (CIP explicit and implicit messaging), and PROFINET RT (DCP and cyclic real-time IO) traffic from offline pcap captures
 
 ## SYNOPSIS
 
 ```
 conduitscope [-q|--quiet] [--no-color|--color] [--log-file FILE] [--version] [-h|--help] <command> [command options]
 
-conduitscope decode (-r FILE | -i INTERFACE) [-o FILE] [-f text|json|csv] [--protocol auto|modbus|dnp3|s7comm|iec104|enip]
+conduitscope decode (-r FILE | -i INTERFACE) [-o FILE] [-f text|json|csv] [--protocol auto|modbus|dnp3|s7comm|iec104|enip|profinet]
                      [--modbus-port PORT]... [--dnp3-port PORT]... [--s7comm-port PORT]... [--iec104-port PORT]...
                      [--enip-port PORT]... [--enip-io-port PORT]...
                      [--max-packets N] [--stats] [--strict]
@@ -39,7 +39,10 @@ Ethernet/IPv4/TCP or Ethernet/IPv4/UDP headers, and attempts to recognize
 and decode Modbus/TCP, DNP3, IEC 60870-5-104, S7comm (Siemens S7 PLC
 protocol, riding on TPKT/COTP), or EtherNet/IP (CIP explicit messaging)
 payloads inside the TCP stream, and EtherNet/IP CIP I/O (implicit
-messaging) payloads inside the UDP stream. It is designed as groundwork for auditing
+messaging) payloads inside the UDP stream. It also recognizes PROFINET RT
+frames directly on the wire (EtherType `0x8892`, no IP/TCP/UDP layer at
+all) and decodes DCP device discovery/configuration exchanges and cyclic
+real-time IO datagrams. It is designed as groundwork for auditing
 OT/ICS network traffic against a zone-and-conduit segmentation model (the kind
 IEC 62443-3-2 and, by extension, NIS2 risk-assessment work call for): the
 protocol-decoding layer (`decode`/`info`) and, now, the zone/conduit
@@ -139,7 +142,7 @@ conduitscope decode (-r FILE | -i INTERFACE) [options]
 | `--no-promiscuous` | off (i.e. promiscuous by default) | With `-i`, don't put the interface into promiscuous mode. Promiscuous is the default because the main live-capture use case -- watching a mirrored/SPAN switch port for zone/conduit traffic -- needs to see traffic that isn't addressed to the capturing host at all. |
 | `-o, --output FILE` | stdout | Write decoded output here instead of stdout. |
 | `-f, --format {text,json,csv}` | `text` | Output format. See OUTPUT FORMATS below. |
-| `--protocol {auto,modbus,dnp3,s7comm,iec104,enip}` | `auto` | Restrict decoding to one protocol. `auto` opportunistically tries EtherNet/IP, IEC 104, Modbus, DNP3, and S7comm/COTP detection on every TCP payload, and CIP I/O detection on every UDP payload, regardless of port (see PROTOCOL DETECTION below). `enip` covers both EtherNet/IP explicit messaging (TCP) and CIP I/O implicit messaging (UDP). |
+| `--protocol {auto,modbus,dnp3,s7comm,iec104,enip,profinet}` | `auto` | Restrict decoding to one protocol. `auto` opportunistically tries EtherNet/IP, IEC 104, Modbus, DNP3, and S7comm/COTP detection on every TCP payload, CIP I/O detection on every UDP payload, and PROFINET RT (DCP/cyclic) detection on every non-IPv4 Ethernet frame carrying EtherType `0x8892`, regardless of port (see PROTOCOL DETECTION below). `enip` covers both EtherNet/IP explicit messaging (TCP) and CIP I/O implicit messaging (UDP). `profinet` covers both DCP and cyclic real-time IO. |
 | `--modbus-port PORT` | *(502 built in)* | Additional TCP port to treat as "expected" for Modbus. Repeatable. Does **not** gate detection -- it only changes whether a decoded Modbus frame is annotated as appearing on an unexpected port, which is itself a useful signal when auditing a conduit. |
 | `--dnp3-port PORT` | *(20000 built in)* | Same as `--modbus-port`, for DNP3. Repeatable. |
 | `--s7comm-port PORT` | *(102 built in)* | Same as `--modbus-port`, for COTP/S7comm. Repeatable. |
@@ -621,10 +624,11 @@ Modbus collision. `tests/sample_iec104_modbus_precedence.pcap` (see
 down.
 
 `--protocol modbus`, `--protocol dnp3`, `--protocol s7comm`, `--protocol
-iec104`, or `--protocol enip` restrict decoding to only that protocol (useful
-for large mixed captures, or for scripting a two-pass analysis). `--protocol
-enip` covers both EtherNet/IP explicit messaging (TCP, above) and CIP I/O
-implicit messaging (UDP, below) -- they're the same overall protocol family.
+iec104`, `--protocol enip`, or `--protocol profinet` restrict decoding to
+only that protocol (useful for large mixed captures, or for scripting a
+two-pass analysis). `--protocol enip` covers both EtherNet/IP explicit
+messaging (TCP, above) and CIP I/O implicit messaging (UDP, below) --
+they're the same overall protocol family.
 
 **CIP I/O (implicit messaging), UDP port 2222** is tried, port-independently,
 against every non-empty UDP payload, the same "opportunistic, payload-shape"
@@ -637,6 +641,18 @@ TCP detection and IEC 104's APCI checks already use -- strong enough that a
 false-positive match against unrelated UDP traffic is not a realistic
 concern, even without a dedicated-port requirement. See PROTOCOL COVERAGE's
 EtherNet/IP section for what is and isn't decoded once that anchor matches.
+
+**PROFINET RT, EtherType `0x8892`** is tried, port-independently (there is no
+port at all -- this rides directly on raw Ethernet, no IPv4/TCP/UDP layer),
+against every non-IPv4 Ethernet frame with that EtherType: the 2-byte
+FrameID immediately after the EtherType must fall into one of the named
+ranges/values PROTOCOL COVERAGE's PROFINET RT section documents. Unlike
+every UDP/TCP-based protocol above, this EtherType has zero collision risk
+with any other protocol this tool decodes, so the FrameID check is this
+decoder's only structural gate -- but it's still applied rather than
+accepting every `0x8892` frame unconditionally: a frame in a genuinely
+reserved/unrecognized FrameID range falls back to the generic `non-ip`
+ethertype-name-only report, same as before this feature existed.
 
 ## OUTPUT FORMATS
 
@@ -680,7 +696,7 @@ that don't apply to a given packet (e.g. `src_ip` for a non-IP frame) are
 `null`. Intended to be piped into `jq` or read by a future policy-evaluation
 layer.
 
-Twenty-one fields are only present (omitted entirely, not `null`) on packets
+Thirty-one fields are only present (omitted entirely, not `null`) on packets
 where they apply:
 
 - `modbus_paired_request_index`: the `index` of the specific earlier request
@@ -764,6 +780,34 @@ where they apply:
 - `enip_io_data_hex`: the Connected Data Item's contents as lowercase hex,
   with no separator (e.g. `"deadbeef"`) -- **never value-decoded**, see
   PROTOCOL COVERAGE and LIMITATIONS for why.
+- `profinet_frame_id`: the PROFINET RT FrameID, as a 4-hex-digit hex string
+  (e.g. `"0xFEFF"`), when protocol is `profinet`. Always present alongside
+  `profinet_frame_id_name`.
+- `profinet_frame_id_name`: a human-readable name for that FrameID (e.g.
+  `"DCP Identify Response"`, `"Cyclic RT IO data (RT_CLASS_1, unicast)"`,
+  `"Alarm High"`), alongside `profinet_frame_id`.
+- `profinet_dcp_service`: the DCP service name (`"Hello"`/`"Get"`/`"Set"`/
+  `"Identify"`), when the FrameID is one of the four DCP FrameIDs.
+- `profinet_dcp_service_type`: the DCP service type name (`"Request"`/
+  `"Response-Success"`/`"Response-not-supported"`), alongside
+  `profinet_dcp_service`.
+- `profinet_dcp_blocks`: an array of one entry per decoded DCP block, e.g.
+  `"NameOfStation=plc-01"` or `"IPParameter=ip=192.168.1.10
+  subnet=255.255.255.0 gateway=192.168.1.1"` for a value-decoded block, or
+  `"option=2 suboption=5=<hex>"` for one this decoder doesn't value-decode
+  (see PROTOCOL COVERAGE). Capped at 50 entries, same reason as
+  `enip_cip_values`.
+- `profinet_cyclic_io_data_length`: the cyclic RT IO data's byte length, when
+  the FrameID falls in a cyclic RT range (see PROTOCOL COVERAGE).
+- `profinet_cyclic_io_data_hex`: the IO data's contents as lowercase hex,
+  with no separator -- **never value-decoded**, same reasoning as
+  `enip_io_data_hex`.
+- `profinet_cyclic_cycle_counter`: the trailer's CycleCounter value, alongside
+  `profinet_cyclic_io_data_length`.
+- `profinet_cyclic_data_status`: the trailer's DataStatus bits rendered as a
+  comma-separated list of named states (e.g. `"Primary,Valid,Run,Ok"`).
+- `profinet_cyclic_transfer_status`: the trailer's raw TransferStatus byte as
+  a plain integer (`0` = OK, nonzero = ignore this frame's data).
 
 All array fields are capped at 50 entries for a single heavily-batched
 request/response; see PROTOCOL COVERAGE for where the full list still shows
@@ -1290,6 +1334,122 @@ format as cross-checked against Wireshark's dissector source and the CISA
 `icsnpp-enip` Zeek parser, not against an independent real capture the way
 explicit messaging is above.
 
+### PROFINET RT (EtherType `0x8892`)
+
+Unlike every protocol above, PROFINET RT rides directly on raw Ethernet --
+there is no IPv4/TCP/UDP layer at all. The payload immediately after the
+EtherType (or after a single 802.1Q VLAN tag, already unwrapped) begins with
+a 2-byte, big-endian FrameID -- the sole discriminator for everything that
+follows; there is no other common header. Every multi-byte field this
+decoder reads is big-endian (confirmed against Wireshark's own
+`packet-pn-rt.c`/`packet-pn-dcp.c` dissector sources), matching this
+codebase's other protocols (Modbus, DNP3, IEC 104, S7comm) rather than
+EtherNet/IP/CIP's little-endian wire format.
+
+FrameID ranges (cross-checked against `packet-pn-rt.c`'s own range table):
+
+- `0xFEFC`/`0xFEFD`/`0xFEFE`/`0xFEFF` -- DCP Hello/Get-or-Set/Identify-Request/
+  Identify-Response -- **fully decoded**, see below.
+- `0x8000`-`0xBBFF` (unicast) / `0xBC00`-`0xBFFF` (multicast) -- cyclic
+  real-time IO data -- **fully decoded**, see below.
+- `0x0100`-`0x0FFF` (RTC3), `0xC000`-`0xFBFF` (RT_CLASS_UDP -- which in
+  practice rides over UDP/IP, not this raw-Ethernet EtherType), `0x0020`-
+  `0x0081` (Sync), `0xFC01`/`0xFC41` (Alarm High, plain/with security),
+  `0xFE01`/`0xFE41` (Alarm Low, plain/with security), `0xFE02`/`0xFE42` (RSI,
+  plain/with security), `0xFE03` (SXP), `0xFF00`-`0xFF01` (PTCP Announce),
+  `0xFF20`-`0xFF21` (PTCP Follow Up), `0xFF40`-`0xFF43` (Acyclic RT Delay),
+  `0xFF80`-`0xFF8F` (Fragmentation) -- **named only**, nothing further
+  decoded (Alarm frames carry their own block structure, out of scope for
+  this groundwork release).
+- Anything else, including every genuinely reserved range in the table
+  above -- **not recognized at all**: falls back to the generic `non-ip`
+  ethertype-name-only report, exactly as before this feature existed.
+
+#### DCP (Discovery and Configuration Protocol)
+
+The PROFINET analog of EtherNet/IP's ListIdentity -- a device-fingerprinting/
+configuration exchange an engineering tool uses to discover and configure
+devices on a segment. After the FrameID: `ServiceID`(1) + `ServiceType`(1) +
+`Xid`(4) + `ResponseDelay`-or-`Reserved`(2) + `DCPDataLength`(2, the byte
+count of the block list that follows -- this makes a DCP PDU
+self-delimited even if the Ethernet frame carries trailing minimum-frame-
+size padding after it, unlike cyclic RT data below). `ServiceID`: `Get`=3,
+`Set`=4, `Identify`=5, `Hello`=6. `ServiceType`: `Request`=0,
+`Response-Success`=1, `Response-not-supported`=5.
+
+The block list is `Option`(1) + `Suboption`(1) + `DCPBlockLength`(2) + that
+many bytes of block-specific data, +1 pad byte if `DCPBlockLength` is odd
+(word-alignment). Five Option/Suboption blocks are value-decoded -- the ones
+most useful for OT asset inventory/fingerprinting: Option `0x01` (IP)
+Suboption `0x01` (MAC Address) and Suboption `0x02` (IPParameter: IP +
+subnet mask + gateway); Option `0x02` (Device Properties) Suboption `0x02`
+(NameOfStation, ASCII), Suboption `0x03` (DeviceID: VendorID + DeviceID),
+and Suboption `0x04` (DeviceRole). Any other Option/Suboption is shown as
+raw hex, never guessed at.
+
+**A real capture caught a genuine bug in this decoder before it ever
+shipped.** Every Option `0x01`/`0x02` block above is preceded by an extra
+2-byte `BlockInfo` (or, for a Set Request, `BlockQualifier`) field *before*
+its actual content -- but only for specific (ServiceID, direction)
+combinations: present for an Identify Response, a Hello, and a Get Response
+(`BlockInfo`); present for a Set Request (`BlockQualifier`); absent for an
+Identify Request, a Get Request, and a Set Response. An earlier draft of
+this decoder, built from cross-checking Wireshark's dissector source and
+several secondary write-ups, missed this entirely -- it silently produced a
+station name with two leading NUL bytes and declined to decode
+DeviceID/DeviceRole/IPParameter as the wrong size. Decoding a real DCP
+Identify Response/Set Request exchange (see `tests/real_captures/profinet/
+ATTRIBUTION.md`) against that draft surfaced the bug immediately; manually
+walking the packet's own bytes against `packet-pn-dcp.c`'s
+`dissect_PNDCP_Suboption_Device`/`dissect_PNDCP_Suboption_IP` confirmed the
+fix. Neither field's own value is surfaced (their meaning isn't needed for
+this decoder's scope) -- only their presence/absence and length are used, to
+correctly locate each block's real content.
+
+#### Cyclic RT IO data
+
+The real-time, cyclic I/O data exchange between an IO Controller (e.g. a
+PLC) and an IO Device (e.g. a remote I/O module) -- the PROFINET analog of
+EtherNet/IP's CIP implicit messaging. Unlike DCP, there is **no length
+field anywhere** in a cyclic RT frame: the FrameID is followed directly by
+the IO data, then a fixed 4-byte trailer at the very end of the frame --
+`CycleCounter`(2) + `DataStatus`(1) + `TransferStatus`(1) (field order and
+byte order cross-checked against `packet-pn-rt.c`'s `dissect_pn_rt`, which
+reads these three fields from `pdu_len-4`/`pdu_len-2`/`pdu_len-1`
+respectively). IO data length is therefore inferred as "everything between
+the FrameID and the last 4 bytes" -- which means this decoder **cannot**
+tell real IO data apart from Ethernet minimum-frame-size padding if the
+capture includes any (see LIMITATIONS). IO data itself is shown only as raw
+hex, never value-decoded, for the same reason as CIP I/O's Connected Data
+Item: no generic self-describing wire-level type, and no GSD/GSDML device
+description to know an assembly's layout from.
+
+`DataStatus`'s bits (cross-checked against `packet-pn-rt.c`'s
+`dissect_DataStatus`): `0x01` State (1=Primary/0=Backup), `0x02` Redundancy
+(context-dependent between Input/Output CRs, not further interpreted here),
+`0x04` Data_Valid (1=Valid/0=Invalid), `0x08` reserved, `0x10`
+Provider_State (1=Run/0=Stop), `0x20` Station_Problem_Indicator (1=Ok/
+0=Problem), `0x40` reserved, `0x80` Ignore (1=Ignore/0=Evaluate).
+`TransferStatus`: 0=OK, nonzero=ignore this frame's data.
+
+#### Validation
+
+DCP is validated against two real captures: fourteen real targeted DCP
+Identify Requests from several independent devices on a live segment
+(confirming FrameID/Xid/NameOfStation decoding against real traffic, not
+just hand-built bytes), and a real Identify/Set exchange that both confirms
+the decode AND is the capture that caught the BlockInfo/BlockQualifier bug
+above -- see `tests/real_captures/profinet/ATTRIBUTION.md` for exact
+provenance and the full bug writeup. No real cyclic RT IO data capture was
+found (searched across the same public pcap collections that supplied the
+DCP captures, for the same underlying reason CIP I/O's own search came up
+empty: capturing the cyclic I/O scan itself requires being on the segment
+during active PLC-to-I/O-device operation, a narrower window than a DCP
+exchange an engineering tool can trigger on demand) -- validated only by
+construction (`tests/sample_profinet.pcap`, see `tools/make_sample_pcap.py`'s
+`build_profinet_sample`) against the wire format as cross-checked against
+Wireshark's dissector source.
+
 ### Link/IP-layer plumbing: non-IPv4 Ethernet, and non-TCP IPv4 (including UDP)
 
 Every protocol above rides on Ethernet + IPv4 + TCP. Traffic outside that --
@@ -1301,12 +1461,15 @@ Wireshark's own `epan/etypes.h` (EtherTypes) and the long-stable IANA IP
 protocol number registry (not reverse-engineered from a single capture):
 
 - **EtherTypes** (`link_layer.hpp`'s `ethertype_name`): ARP, IPv6, three
-  raw-Ethernet (no IP layer at all) OT protocols -- PROFINET RT, EtherCAT,
-  IEC 61850-8-1 GOOSE, IEC 61850-9-2 Sampled Values -- plus LLDP, PTP
-  (IEEE 1588), MPLS unicast, and 802.1ad/stacked-VLAN (the QinQ case
-  `parse_ethernet`'s own comment already documented as "will simply fail to
-  recognize the inner ethertype" -- it's now named as such instead of a bare
-  `0x8100`).
+  raw-Ethernet (no IP layer at all) OT protocols this tool names but doesn't
+  decode -- EtherCAT, IEC 61850-8-1 GOOSE, IEC 61850-9-2 Sampled Values --
+  plus LLDP, PTP (IEEE 1588), MPLS unicast, and 802.1ad/stacked-VLAN (the
+  QinQ case `parse_ethernet`'s own comment already documented as "will
+  simply fail to recognize the inner ethertype" -- it's now named as such
+  instead of a bare `0x8100`). PROFINET RT (`0x8892`) is also named here,
+  but, like CIP I/O below, a frame that actually looks like DCP or cyclic IO
+  data is decoded and reported as `profinet`, not `non-ip` -- see PROTOCOL
+  COVERAGE's PROFINET RT section.
 - **IPv4 protocol numbers** (`ipv4.hpp`'s `ip_protocol_name`): ICMP, IGMP,
   IPv6-in-IPv4, GRE, ESP, AH, ICMPv6, OSPF, SCTP -- alongside TCP and UDP,
   which get their own dedicated handling (below and elsewhere in this
@@ -1324,12 +1487,12 @@ protocol number registry (not reverse-engineered from a single capture):
   handling, same as before.
 
 **This is groundwork plumbing, explicitly not a new protocol decoder --**
-**except for CIP I/O, which now is one** (see PROTOCOL COVERAGE's EtherNet/IP
-section). None of PROFINET/GOOSE/Sampled Values/EtherCAT's own framing is
-parsed -- these EtherTypes are *named*, not *decoded*. A value outside every
-table above still shows only as a bare hex ethertype or decimal protocol
-number, exactly as before -- nothing is guessed at for an EtherType/protocol/
-port this tool doesn't recognize.
+**except for CIP I/O and PROFINET RT, which now are** (see PROTOCOL
+COVERAGE's EtherNet/IP and PROFINET RT sections). None of GOOSE/Sampled
+Values/EtherCAT's own framing is parsed -- these EtherTypes are *named*, not
+*decoded*. A value outside every table above still shows only as a bare hex
+ethertype or decimal protocol number, exactly as before -- nothing is
+guessed at for an EtherType/protocol/port this tool doesn't recognize.
 
 `policy validate` does not yet evaluate any of this traffic against a
 conduit: it's still counted only in `PolicyReport::skipped_non_tcp`, exactly
@@ -1448,16 +1611,20 @@ These are current, not aspirational -- each has a corresponding ROADMAP item.
   header will very likely fail to parse and be reported as a parse-error on
   the fragments after the first.
 - **Non-IPv4 Ethernet frames and non-TCP IPv4 payloads (including UDP) are
-  named but not decoded, with one exception (CIP I/O).** A deliberately
-  small, OT-relevant set of EtherTypes/IP-protocol-numbers is recognized by
-  name (ARP, PROFINET RT, IEC 61850 GOOSE/Sampled Values, ICMP, and the rest
-  -- see PROTOCOL COVERAGE); nothing outside that set gets more than a bare
-  hex/decimal number, and even a *named* one gets no further parsing of its
-  own framing. The one exception is EtherNet/IP's CIP I/O traffic on UDP
-  port 2222, which is now decoded, not just named -- see PROTOCOL COVERAGE's
-  EtherNet/IP section. `policy validate` does not yet evaluate ANY UDP
-  traffic against a conduit, decoded or not (it only ever looks at TCP
-  flows) -- see that section and ROADMAP.
+  named but not decoded, with two exceptions (CIP I/O and PROFINET RT).** A
+  deliberately small, OT-relevant set of EtherTypes/IP-protocol-numbers is
+  recognized by name (ARP, IEC 61850 GOOSE/Sampled Values, ICMP, and the
+  rest -- see PROTOCOL COVERAGE); nothing outside that set gets more than a
+  bare hex/decimal number, and even a *named* one gets no further parsing of
+  its own framing. The two exceptions are EtherNet/IP's CIP I/O traffic on
+  UDP port 2222, and PROFINET RT (EtherType `0x8892`, DCP and cyclic real-
+  time IO), both of which are now decoded, not just named -- see PROTOCOL
+  COVERAGE's EtherNet/IP and PROFINET RT sections. `policy validate` does
+  not yet evaluate ANY UDP traffic against a conduit, decoded or not (it
+  only ever looks at TCP flows), and never evaluates PROFINET RT either
+  (it rides raw Ethernet with no IP/TCP/UDP layer at all, so there is no
+  IP-based conduit rule that could match it) -- see that section and
+  ROADMAP.
 - **CIP I/O (implicit messaging) decoding does not value-decode the actual
   I/O data, and has no cross-datagram state.** The Connected Data Item's
   contents are shown only as raw hex -- see PROTOCOL COVERAGE's CIP I/O
@@ -1473,6 +1640,26 @@ These are current, not aspirational -- each has a corresponding ROADMAP item.
   ATTRIBUTION.md` for exactly what was searched and what corroborating
   sources (Wireshark's dissector source, the CISA `icsnpp-enip` Zeek parser)
   were used instead.
+- **PROFINET RT cyclic IO data has no reliable length, no real-capture
+  validation, and DCP request/response pairing isn't cross-checked.** A
+  cyclic RT frame (FrameID `0x8000`-`0xBFFF`) has no length field for its IO
+  data -- conduitscope infers it as everything between the FrameID and the
+  fixed 4-byte CycleCounter/DataStatus/TransferStatus trailer, which is
+  indistinguishable from Ethernet minimum-frame-length padding when the
+  real IO payload is short; a short IO datagram may therefore show padding
+  bytes as if they were IO data (see PROTOCOL COVERAGE's PROFINET RT
+  section). No real capture containing cyclic RT IO data was found to
+  validate `decode_cyclic` against -- only the hand-built
+  `tests/sample_profinet.pcap` exercises it; see `tests/real_captures/
+  profinet/ATTRIBUTION.md` for what was searched. DCP decoding itself IS
+  validated against two real captures (including one that caught a real
+  BlockInfo/BlockQualifier decoding bug before this feature shipped -- see
+  that same ATTRIBUTION.md and PROTOCOL COVERAGE), but a DCP Xid is never
+  used to authoritatively pair a request to its response the way Modbus
+  transaction IDs are (`Decoder::pair_modbus_transaction`) -- each DCP PDU
+  is decoded independently. RTC3 and RT_CLASS_UDP FrameID ranges, and
+  Alarm/PTCP/fragmentation frames, are recognized and named but their own
+  payloads are not further decoded (only DCP and cyclic IO frames are).
 - **DNP3 CRCs are not validated** -- neither the data-link header CRC nor the
   per-block CRCs within the user data. A corrupted DNP3 frame that still
   starts with the right magic bytes will be "decoded" without any indication
@@ -1796,6 +1983,26 @@ conduitscope decode -r capture.pcap --protocol enip -f json \
            .[] | "\(.[0].enip_io_connection_id): \(length) datagram(s), \([.[].enip_io_data_length // 0] | add) byte(s) of I/O data"'
 ```
 
+Build a quick PROFINET device inventory -- every NameOfStation seen in a DCP
+exchange, deduplicated, useful as a first pass at what's actually on a
+PROFINET segment before writing zone/conduit policy for it:
+
+```sh
+conduitscope decode -r capture.pcap --protocol profinet -f json \
+  | jq -r '[.[] | select(.profinet_dcp_blocks != null) |
+           .profinet_dcp_blocks[] | select(startswith("NameOfStation="))] | unique[]'
+```
+
+Summarize PROFINET cyclic RT IO traffic by FrameID -- how many datagrams and
+how many bytes of IO data each FrameID (effectively, each IO connection)
+carried, and whether any carried a non-OK TransferStatus worth investigating:
+
+```sh
+conduitscope decode -r capture.pcap --protocol profinet -f json \
+  | jq -r '[.[] | select(.profinet_has_cyclic_data == true)] | group_by(.profinet_frame_id) |
+           .[] | "\(.[0].profinet_frame_id): \(length) datagram(s), \([.[].profinet_cyclic_io_data_length // 0] | add) byte(s) of I/O data, \([.[] | select(.profinet_cyclic_transfer_status != 0)] | length) non-OK TransferStatus"'
+```
+
 Find every Modbus write whose response was never authoritatively paired --
 either the response wasn't captured, or it used a different session/
 transaction ID than expected (worth a closer look on a conduit that should
@@ -1881,11 +2088,11 @@ Rough order, each building on the groundwork this release establishes:
    narrow in practice -- e.g. a real device addressing a Symbol-object tag
    by numeric instance ID rather than by name, which this release's gating
    would currently show structurally rather than as a tag read.
-9. **Decode a real protocol over raw Ethernet**, now that EtherNet/IP's own
-   UDP-based protocol is done (CIP I/O -- see PROTOCOL COVERAGE's CIP I/O
-   subsection and the "now done" paragraph below) -- one of the named-but-
-   undecoded raw-Ethernet protocols (PROFINET RT, IEC 61850 GOOSE/Sampled
-   Values), whichever real capture availability favors first. Its own
+9. **Decode the remaining named-but-undecoded raw-Ethernet protocol**, now
+   that both EtherNet/IP's UDP-based protocol (CIP I/O) and PROFINET RT are
+   done -- see PROTOCOL COVERAGE's CIP I/O and PROFINET RT subsections and
+   the "now done" paragraphs below -- leaving IEC 61850 GOOSE/Sampled
+   Values as the one still only named, not decoded. Its own
    research-and-validate cycle, same as every protocol added so far --
    naming an EtherType is not the same groundwork as decoding what rides on
    it. Also, separately: validate CIP I/O decoding against a real capture
@@ -1893,9 +2100,16 @@ Rough order, each building on the groundwork this release establishes:
    ATTRIBUTION.md`) if one ever turns up, and consider cross-datagram CIP
    I/O correlation (connection ID back to its Forward_Open, sequence-number
    continuity/gap detection) -- see LIMITATIONS for exactly what's missing
-   there now. And widen `policy validate` beyond TCP-only conduits, now that
-   there's an actual decoded non-TCP protocol (CIP I/O) worth checking a
-   conduit against.
+   there now. Likewise for PROFINET RT: a real cyclic RT IO data capture to
+   validate `decode_cyclic` against (none found either -- see
+   `tests/real_captures/profinet/ATTRIBUTION.md`), and resolving the
+   cyclic-IO-data-vs-Ethernet-padding ambiguity if a reliable way to tell
+   them apart ever turns up (see LIMITATIONS). And widen `policy validate`
+   beyond TCP-only conduits, now that there are actual decoded non-TCP
+   protocols (CIP I/O, PROFINET RT) worth checking a conduit against --
+   PROFINET RT rides raw Ethernet with no IP layer at all, though, so it
+   would need a conduit-rule shape that isn't IP/CIDR-based to ever be
+   covered.
 
 **pcapng support** is also now done: both classic pcap and pcapng are read
 transparently (auto-detected, no flag needed) -- see "pcap vs. pcapng"
@@ -1928,12 +2142,13 @@ DETECTION.
 **Link/IP-layer plumbing for non-IPv4/non-TCP traffic** is also now done:
 non-IPv4 Ethernet frames and non-TCP IPv4 payloads (including UDP) are
 recognized and named for a deliberately small, OT-relevant set of
-EtherTypes/IP-protocol-numbers (ARP, PROFINET RT, IEC 61850 GOOSE/Sampled
-Values, ICMP, and the rest), rather than just a bare hex/decimal number and
-nothing else -- see PROTOCOL COVERAGE's link/IP-layer plumbing section and
-item 9 above for what's still out of scope: this is naming, not decoding,
-of a raw-Ethernet OT protocol, and `policy validate` doesn't yet evaluate
-any non-TCP traffic against a conduit.
+EtherTypes/IP-protocol-numbers (ARP, IEC 61850 GOOSE/Sampled Values, ICMP,
+and the rest), rather than just a bare hex/decimal number and nothing else
+-- see PROTOCOL COVERAGE's link/IP-layer plumbing section and item 9 above
+for what's still out of scope (IEC 61850 GOOSE/Sampled Values remain named,
+not decoded), and `policy validate` doesn't yet evaluate any non-TCP
+traffic against a conduit. PROFINET RT, formerly in this same
+named-but-not-decoded set, is decoded now -- see the next paragraph.
 
 **EtherNet/IP CIP I/O (implicit messaging) decoding** is also now done: the
 first protocol this tool decodes over UDP, and the direct extension of the
@@ -1944,6 +2159,21 @@ data) is located and shown as raw hex, deliberately never value-decoded --
 see PROTOCOL COVERAGE's CIP I/O subsection and LIMITATIONS for exactly why,
 and item 9 above for what's still open (real-capture validation,
 cross-datagram correlation, and widening `policy validate` to cover it).
+
+**PROFINET RT (DCP and cyclic real-time IO) decoding** is also now done:
+the first protocol this tool decodes directly over raw Ethernet, with no
+IP/TCP/UDP layer at all -- item 9 above's other most likely next
+candidate, alongside CIP I/O, and now also done. FrameID-based dispatch
+covers DCP (device discovery/configuration -- full PDU header, block
+list, and five value-decoded block types) and cyclic real-time IO
+datagrams (IO data plus the CycleCounter/DataStatus/TransferStatus
+trailer) -- see PROTOCOL COVERAGE's PROFINET RT subsection for the full
+FrameID range table and LIMITATIONS for what's still open (cyclic IO
+data's length ambiguity, no real cyclic-IO capture to validate against,
+and no cross-datagram DCP request/response pairing). Validating this
+decoder against two real DCP captures caught a genuine decoding bug before
+it ever shipped -- see PROTOCOL COVERAGE's PROFINET RT subsection and
+`tests/real_captures/profinet/ATTRIBUTION.md` for the full story.
 
 **Colorized text output** is also now done: see OUTPUT FORMATS' "Color"
 subsection for the scheme and the `--color`/`--no-color`/auto-detection

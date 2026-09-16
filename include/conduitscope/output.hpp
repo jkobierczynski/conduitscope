@@ -77,6 +77,9 @@ private:
     std::map<std::string, size_t> enip_command_counts_;
     std::map<std::string, size_t> enip_cip_service_counts_;
     size_t enip_io_datagram_count_ = 0;  // CIP I/O (implicit messaging) UDP datagrams -- see enip_has_io
+    std::map<std::string, size_t> profinet_frame_id_counts_;
+    size_t profinet_dcp_count_ = 0;
+    size_t profinet_cyclic_count_ = 0;
     bool has_ts_ = false;
     double first_ts_ = 0.0, last_ts_ = 0.0;
 };
