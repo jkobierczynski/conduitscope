@@ -1,0 +1,15 @@
+# Regression fixture: 'functions' given on a conduit whose 'protocols' is the wildcard 'any' --
+# also rejected, same reason as bad_functions_multi_protocol.yaml (the "requires exactly one
+# protocol" rule explicitly excludes 'any', even though it's technically a one-element list).
+zones:
+  hmi_zone:
+    networks: [192.168.1.50/32]
+  plc_zone:
+    networks: [192.168.1.10/32]
+
+conduits:
+  - name: "any-protocol with functions"
+    from: hmi_zone
+    to: plc_zone
+    protocol: any
+    functions: [Read Holding Registers]

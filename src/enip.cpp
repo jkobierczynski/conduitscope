@@ -970,6 +970,36 @@ std::optional<CipIoFrame> try_parse_cip_io_impl(ByteSpan udp_payload) {
 
 }  // namespace
 
+std::vector<std::string> enip_known_cip_service_names() {
+    std::vector<std::string> out;
+    auto add_unique = [&](const std::string& name) {
+        if (std::find(out.begin(), out.end(), name) == out.end()) out.push_back(name);
+    };
+    // Rockwell Symbol-object (named-tag) request services -- have_path=true, is_symbolic=true.
+    for (uint8_t base : {uint8_t{0x4C}, uint8_t{0x4D}, uint8_t{0x4E}, uint8_t{0x52}, uint8_t{0x53}, uint8_t{0x55}}) {
+        add_unique(cip_service_name(base, /*have_path=*/true, /*is_symbolic=*/true, /*is_conn_mgr=*/false));
+    }
+    // Connection Manager-directed request services -- have_path=true, is_conn_mgr=true.
+    for (uint8_t base : {uint8_t{0x52}, uint8_t{0x54}, uint8_t{0x4E}, uint8_t{0x5B}}) {
+        add_unique(cip_service_name(base, /*have_path=*/true, /*is_symbolic=*/false, /*is_conn_mgr=*/true));
+    }
+    // Reply-direction names (have_path=false) -- includes the two genuinely ambiguous "A/B
+    // (reply)" strings alongside the unambiguous reply-side names; see this function's own header
+    // comment in enip.hpp's KNOWN LIMITATION paragraph.
+    for (uint8_t base : {uint8_t{0x52}, uint8_t{0x4E}, uint8_t{0x4C}, uint8_t{0x4D}, uint8_t{0x53}, uint8_t{0x55},
+                          uint8_t{0x54}, uint8_t{0x5B}}) {
+        add_unique(cip_service_name(base, /*have_path=*/false, false, false));
+    }
+    // Generic common services (CIP Volume 1) -- unambiguous regardless of path/object.
+    for (uint8_t base : {uint8_t{0x01}, uint8_t{0x02}, uint8_t{0x03}, uint8_t{0x04}, uint8_t{0x05}, uint8_t{0x06},
+                          uint8_t{0x07}, uint8_t{0x08}, uint8_t{0x09}, uint8_t{0x0A}, uint8_t{0x0D}, uint8_t{0x0E},
+                          uint8_t{0x10}, uint8_t{0x11}, uint8_t{0x15}, uint8_t{0x16}, uint8_t{0x17}, uint8_t{0x18},
+                          uint8_t{0x19}}) {
+        add_unique(cip_service_name(base, /*have_path=*/false, /*is_symbolic=*/false, /*is_conn_mgr=*/false));
+    }
+    return out;
+}
+
 std::optional<size_t> enip_declared_length(ByteSpan payload) {
     if (payload.size() < 4) {
         return std::nullopt;

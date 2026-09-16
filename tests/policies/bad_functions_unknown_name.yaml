@@ -1,0 +1,16 @@
+# Regression fixture: a 'functions' entry that isn't one of modbus's known function names AND
+# isn't close enough to any of them to get a "did you mean" suggestion (see
+# nearest_function_name's comment in policy.cpp) -- the error must name the entry but must NOT
+# offer a suggestion.
+zones:
+  hmi_zone:
+    networks: [192.168.1.50/32]
+  plc_zone:
+    networks: [192.168.1.10/32]
+
+conduits:
+  - name: "unknown function, no plausible suggestion"
+    from: hmi_zone
+    to: plc_zone
+    protocol: modbus
+    functions: ["Totally Unrelated Nonsense Function"]

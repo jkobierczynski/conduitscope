@@ -147,6 +147,19 @@ void decode_write_multiple(ModbusFrame& frame, ByteSpan data, const char* unit_n
 
 }  // namespace
 
+std::vector<std::string> modbus_known_function_names() {
+    // Calls the same function_name(fc) switch above for every possible byte value and keeps only
+    // the ones that resolved to a real name rather than the dynamic "Unknown (0x.." fallback --
+    // see modbus.hpp's own comment on this function for why this reuses function_name() instead of
+    // a second, separately-maintained list of names.
+    std::vector<std::string> out;
+    for (int fc = 0; fc <= 0xFF; ++fc) {
+        std::string name = function_name(static_cast<uint8_t>(fc));
+        if (name.rfind("Unknown (0x", 0) != 0) out.push_back(std::move(name));
+    }
+    return out;
+}
+
 std::string modbus_exception_name(uint8_t code) {
     switch (code) {
         case 0x01: return "Illegal Function";

@@ -1,0 +1,23 @@
+# Exercises the 'functions:' allow-list for IEC 104 (matched against
+# DecodedPacket::iec104_asdu_type_short_name, the clean mnemonic -- NOT the compound
+# iec104_asdu_type_name -- see iec104_type_short_name's comment in iec104.hpp). This one conduit
+# only permits "C_IC_NA_1" (Interrogation command). Used against TWO different captures (see
+# CMakeLists.txt):
+#   - tests/sample_iec104_modbus_precedence.pcap: its one flow only ever carries a C_IC_NA_1 ASDU
+#     -- must report COMPLIANT, matched to this conduit.
+#   - tests/sample_iec104.pcap: its one flow carries C_IC_NA_1, M_SP_NA_1, M_ME_TD_1, AND
+#     C_DC_NA_1 -- must report a Violation naming "C_DC_NA_1", "M_ME_TD_1", and "M_SP_NA_1" as the
+#     disallowed functions observed (C_IC_NA_1, also observed there, IS permitted).
+zones:
+  hmi_zone:
+    networks: [192.168.1.50/32]
+  plc_zone:
+    networks: [192.168.1.10/32]
+
+conduits:
+  - name: "iec104 interrogation only"
+    from: hmi_zone
+    to: plc_zone
+    protocols: [iec104]
+    ports: [2404]
+    functions: [C_IC_NA_1]

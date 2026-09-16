@@ -222,6 +222,12 @@ struct DecodedPacket {
     // same pattern as DNP3's multi-frame-per-payload handling.
     bool iec104_has_asdu = false;
     std::string iec104_asdu_type_name;
+    // Just the mnemonic half of iec104_asdu_type_name (e.g. "M_SP_NA_1" rather than "M_SP_NA_1
+    // (Single-point information)") -- see iec104_type_short_name's comment in iec104.hpp. This is
+    // the field a policy file's 'functions:' entries for an iec104-restricted conduit are
+    // validated/matched against (see policy.cpp/PolicyEngine), since the parenthetical description
+    // in iec104_asdu_type_name bundles two independent pieces of information into one string.
+    std::string iec104_asdu_type_short_name;
     std::string iec104_cot_name;
     uint16_t iec104_common_address = 0;
     // One entry per decoded information object across every ASDU found in this TCP payload (e.g.

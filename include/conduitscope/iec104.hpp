@@ -112,6 +112,11 @@ struct Iec104InformationObject {
 struct Iec104Asdu {
     uint8_t type_id = 0;
     std::string type_name;  // e.g. "M_SP_NA_1 (Single-point information)", or "Unknown (type NN)"
+    // Just the mnemonic half of type_name, e.g. "M_SP_NA_1", or "Unknown(NN)" (no space -- see
+    // iec104_type_short_name's own comment for why this differs from type_name's unknown-value
+    // style). This is the clean, single-token field policy matching uses -- see that function's
+    // comment.
+    std::string type_short_name;
 
     bool sq = false;           // VSQ bit8: true = sequential IOAs (one explicit IOA, then +1 each), false = one
                                 // explicit IOA per object (discontinuous)
@@ -148,5 +153,24 @@ struct Iec104Asdu {
 // Never throws: anything it cannot make sense of is recorded in the returned Iec104Asdu's
 // notes/note fields rather than propagated as a ParseError, mirroring decode_dnp3_application_layer.
 Iec104Asdu decode_iec104_asdu(ByteSpan asdu_bytes);
+
+// Returns just the mnemonic (e.g. "M_SP_NA_1") for a KNOWN ASDU type ID -- the same short_name
+// half of the {type_id, short_name, description} table that backs Iec104Asdu::type_name's compound
+// "<short_name> (<description>)" rendering (see iec104.cpp) -- or "Unknown(N)" (no space, unlike
+// type_name's "Unknown (type N)") for a type ID outside that table, deliberately kept a clean,
+// single policy-matchable token distinguishable at a glance from type_name's own unknown-value
+// style. This is the field DecodedPacket::iec104_asdu_type_short_name is populated from, and what a
+// policy file's 'functions:' entries for an iec104-restricted conduit are validated/matched
+// against (see policy.cpp and PolicyEngine) -- type_name's parenthetical description is NOT used
+// for policy matching, since it bundles two independent pieces of information into one string.
+std::string iec104_type_short_name(uint8_t type_id);
+
+// Returns every canonical ASDU short name (the mnemonic half only, e.g. "M_SP_NA_1") this decoder
+// can produce for a KNOWN type ID -- excluding the dynamic "Unknown(N)" fallback used for a type ID
+// outside the table. Used by policy.cpp to validate a policy file's 'functions:' entries for an
+// iec104-restricted conduit against exactly the strings iec104_type_short_name/
+// DecodedPacket::iec104_asdu_type_short_name can actually hold. Order is stable across calls (the
+// table's own declaration order) but not alphabetized.
+std::vector<std::string> iec104_known_asdu_short_names();
 
 }  // namespace conduitscope

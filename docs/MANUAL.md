@@ -419,6 +419,7 @@ conduits:
     protocols: [<modbus | dnp3 | s7comm | iec104 | enip | any>, <...>]
     ports: [<port>, <...>]                  # omit entirely to mean "any port"
     bidirectional: <true | false>           # default: false
+    functions: [<function/service name>, <...>]  # optional; see "Function-level restrictions" below
 ```
 
 **Zones.** Each zone name maps to one or more IPv4 CIDR blocks (`10.10.10.0/24`)
@@ -465,6 +466,188 @@ singular alias is also accepted for a conduit that only lists one protocol
 field (`networks`, `protocols`, `ports`) also accepts a single bare value in
 place of a one-element list, for readability on a short policy file.
 
+### Function-level restrictions
+
+`functions` (singular alias `function`, mirroring `protocol`/`protocols`)
+narrows a conduit from "this protocol is allowed" down to "only these named
+functions/services within this protocol are allowed" -- e.g. a conduit that
+permits Modbus reads from an HMI zone into a PLC zone but not writes. It's
+optional; omitting it (the default, and the only option before this field
+existed) leaves a conduit unrestricted -- every function/service the
+protocol decodes is permitted, exactly as before.
+
+**One protocol only.** `functions`/`function` is only valid on a conduit
+whose `protocols`/`protocol` resolves to **exactly one concrete protocol**
+-- not the wildcard `any`, and not a list of more than one protocol. Each
+protocol has its own, entirely separate table of known function/service
+names (see below), so there's no single table to validate a multi-protocol
+or `any`-protocol conduit's `functions` entries against. A conduit needing
+different function allow-lists per protocol should instead be written as one
+conduit per protocol. Violating this is a load-time `PolicyError`:
+
+```
+error: policy.yaml:N: conduit '<name>': 'functions' requires exactly one protocol in
+'protocols' (not 'any', and not a list of more than one) -- write one conduit per
+protocol when the allowed functions differ
+```
+
+**Exact decoder strings, matched case-insensitively.** Each entry in
+`functions` must be one of that protocol's own canonical function/service
+names -- the exact strings its decoder already emits, as listed in
+`DecodedPacket`'s `modbus_function_name`, `dnp3_function_name`,
+`s7comm_function_name`, `iec104_asdu_type_short_name` (the clean mnemonic,
+e.g. `"M_SP_NA_1"` -- *not* the more verbose `iec104_asdu_type_name`, which
+still exists unchanged for display), and `enip_cip_service_name` fields.
+Matching, both at policy-load-time validation and at report time, is
+case-insensitive, but a policy file's entries are normalized to the
+decoder's own canonical casing for display (error messages, "permits only"
+reasons) regardless of how the file spelled them.
+
+Practical tip: rather than guessing at a name or transcribing one from this
+manual, run `decode --format json` on a sample capture of the traffic you
+want to allow-list and copy the exact string out of its
+`modbus_function_name`/`dnp3_function_name`/`s7comm_function_name`/
+`iec104_asdu_type_short_name`/`enip_cip_service_name` field -- that guarantees
+an exact match.
+
+An entry that isn't a known name for that protocol is rejected at load
+time, with a "did you mean" suggestion when a known name is a plausible
+typo of it:
+
+```
+error: policy.yaml:N: conduit '<name>': unknown modbus function 'Read Holding Registerss'
+-- did you mean 'Read Holding Registers'?
+```
+
+and without one when nothing is close enough:
+
+```
+error: policy.yaml:N: conduit '<name>': unknown modbus function 'Totally Unrelated Nonsense Function'
+```
+
+**Matching semantics: flow-level, strict-all.** `functions` is checked at
+the same granularity everything else in a conduit is checked at -- the
+whole TCP flow (both directions of one 4-tuple, aggregated over the
+capture), not per-packet. A flow that otherwise matches a `functions`-
+restricted conduit on protocol/port/zone/direction is **Allowed** only if
+**every distinct** function/service name observed anywhere on that flow is
+in the conduit's allow-list. If even one observed function isn't
+permitted, the whole flow is a **Violation** -- the reason names exactly
+which observed function(s) weren't permitted and what the conduit does
+permit, e.g.:
+
+```
+function 'Write Single Register' observed; conduit 'modbus reads only' permits only: Read Holding Registers
+```
+
+or, with more than one disallowed function observed on the same flow:
+
+```
+functions 'Read', 'Response' observed; conduit 'dnp3 direct operate only' permits only: Direct Operate
+```
+
+(functions that *are* permitted but also observed on that same flow are
+not named in the reason -- only the disallowed ones are.)
+
+**Worked example.** `tests/sample_modbus_pairing.pcap` carries two separate
+Modbus flows: one client (port 51701) issuing only "Read Holding
+Registers", another (port 51700) issuing only "Write Single Register".
+Against `tests/policies/functions_modbus.yaml`, whose one conduit allows
+only `Read Holding Registers`:
+
+```sh
+$ conduitscope policy validate -r tests/sample_modbus_pairing.pcap \
+    --policy tests/policies/functions_modbus.yaml
+Zone/conduit policy validation
+  capture: tests/sample_modbus_pairing.pcap
+  policy:  tests/policies/functions_modbus.yaml (2 zone(s), 1 conduit(s))
+
+Result: NON-COMPLIANT (1 violation(s), 0 unclassified flow(s))
+
+Flows evaluated: 2 (1 allowed, 1 violation(s), 0 unclassified)
+  5 total packet(s) in capture, 0 skipped (non-TCP/non-IP)
+
+VIOLATIONS (1):
+  [1] 192.168.1.50 -> 192.168.1.10:502  (modbus, 2 packet(s))
+      zones: hmi_zone -> plc_zone
+      function 'Write Single Register' observed; conduit 'modbus reads only' permits only: Read Holding Registers
+
+UNCLASSIFIED TRAFFIC (0):
+  (none)
+
+ALLOWED (1):
+  [1] 192.168.1.50 -> 192.168.1.10:502  (modbus, 3 packet(s))
+      zones: hmi_zone -> plc_zone, matched conduit "modbus reads only"
+
+Conduits never exercised by this capture (0):
+  (none)
+```
+
+Both flows share the same conduit's protocol/port/zone/direction; only
+`functions` tells them apart. See the "EXAMPLES" entries below for a
+`policy validate` run showing the compliant side of the same conduit.
+
+**Known function/service names.** For reference (and to save a round trip
+through `decode --format json` when you just need the list), each
+protocol's currently known names, as `modbus_known_function_names()`/
+`dnp3_known_function_names()`/`s7comm_known_function_names()`/
+`iec104_known_asdu_short_names()`/`enip_known_cip_service_names()` (see
+each protocol's own header) enumerate them:
+
+- **Modbus** (15): Read Coils, Read Discrete Inputs, Read Holding
+  Registers, Read Input Registers, Write Single Coil, Write Single
+  Register, Read Exception Status, Diagnostics, Write Multiple Coils,
+  Write Multiple Registers, Report Server ID, Mask Write Register,
+  Read/Write Multiple Registers, Read FIFO Queue, Encapsulated Interface
+  Transport
+- **DNP3** (37): Confirm, Read, Write, Select, Operate, Direct Operate,
+  Direct Operate No Ack, Immediate Freeze, Immediate Freeze No Ack, Freeze
+  Clear, Freeze Clear No Ack, Freeze At Time, Freeze At Time No Ack, Cold
+  Restart, Warm Restart, Initialize Data, Initialize Application, Start
+  Application, Stop Application, Save Configuration, Enable Unsolicited
+  Responses, Disable Unsolicited Responses, Assign Classes, Delay
+  Measurement, Record Current Time, Open File, Close File, Delete File,
+  Get File Info, Authenticate File, Abort File, Activate Config,
+  Authentication Request, Authentication Error, Response, Unsolicited
+  Response, Authentication Response
+- **S7comm** (12): CPU services, Read Var, Write Var, Request Download,
+  Download Block, Download Ended, Start Upload, Upload, End Upload, PLC
+  Control, PLC Stop, Setup Communication
+- **IEC 60870-5-104** (30, the short ASDU mnemonic -- matched against
+  `iec104_asdu_type_short_name`, not `iec104_asdu_type_name`): M_SP_NA_1,
+  M_SP_TA_1, M_SP_TB_1, M_DP_NA_1, M_DP_TA_1, M_DP_TB_1, M_ME_NA_1,
+  M_ME_TD_1, M_ME_NB_1, M_ME_TE_1, M_ME_NC_1, M_ME_TF_1, M_IT_NA_1,
+  M_IT_TB_1, C_SC_NA_1, C_SC_TA_1, C_DC_NA_1, C_DC_TA_1, C_RC_NA_1,
+  C_SE_NA_1, C_SE_TA_1, C_SE_NB_1, C_SE_NC_1, C_SE_TC_1, M_EI_NA_1,
+  C_IC_NA_1, C_CI_NA_1, C_RD_NA_1, C_CS_NA_1, C_RP_NA_1
+- **EtherNet/IP** (31): Read_Tag, Write_Tag, Read_Modify_Write_Tag,
+  Read_Tag_Fragmented, Write_Tag_Fragmented, Get_Instance_Attribute_List,
+  Unconnected_Send, Forward_Open, Forward_Close, Large_Forward_Open,
+  Unconnected_Send/Read_Tag_Fragmented (reply), Forward_Close/
+  Read_Modify_Write_Tag (reply), Get_Attributes_All, Set_Attributes_All,
+  Get_Attribute_List, Set_Attribute_List, Reset, Start, Stop, Create,
+  Delete, Multiple_Service_Packet, Apply_Attributes,
+  Get_Attribute_Single, Set_Attribute_Single, Find_Next_Object_Instance,
+  Restore, Save, No_Op, Get_Member, Set_Member
+
+**A known, deliberate limitation: EtherNet/IP's ambiguous compound
+names.** Two of the EtherNet/IP names above --
+`Unconnected_Send/Read_Tag_Fragmented (reply)` and
+`Forward_Close/Read_Modify_Write_Tag (reply)` -- are genuinely ambiguous:
+CIP encodes a reply's service code in a way that collides between two
+different request services when the originating request wasn't itself
+seen (e.g. capture started mid-session), so the decoder honestly reports
+"it was one of these two" rather than guessing. A `functions:` allow-list
+naming only the single request-side name (e.g. `Read_Tag_Fragmented`
+alone, without the compound reply form) will never match a flow whose only
+evidence is that ambiguous reply -- there is no way to confidently
+allow-list a service the decoder itself can't confidently identify. This
+is correct, honest behavior, not a bug: an ambiguous service can't be
+safely treated as matching a specific allow-listed name. If this matters
+for a given conduit, either capture from session start (so the original
+request is seen and the reply resolves unambiguously) or list the compound
+name itself in `functions`.
+
 ### Validation errors
 
 Every rule below is checked when the policy file is loaded, before any
@@ -489,6 +672,14 @@ error (see EXIT STATUS):
 - a conduit port outside `[1, 65535]`
 - a conduit's `bidirectional` value that isn't a recognizable boolean
   (`true`/`false`/`yes`/`no`)
+- a conduit's `functions`/`function` given while `protocols`/`protocol`
+  resolves to anything other than exactly one concrete protocol (i.e. it's
+  `any`, or a list of more than one) -- see "Function-level restrictions"
+  above
+- a conduit's `functions`/`function` entry that isn't one of its
+  protocol's own known function/service names (case-insensitively) -- the
+  error names the closest known name ("did you mean '...'?") when one is a
+  plausible typo, and omits the suggestion when nothing is close enough
 
 ### Unsupported YAML constructs
 
@@ -505,6 +696,16 @@ characters used for indentation.
   "policy": "policy.yaml",
   "zone_count": 2,
   "conduit_count": 3,
+  "conduits": [
+    {
+      "name": "HMI polls PLC via Modbus",
+      "from": "hmi_zone",
+      "to": "plc_zone",
+      "bidirectional": false,
+      "protocols": ["modbus"],
+      "functions": []
+    }
+  ],
   "compliant": true,
   "total_packets": 3,
   "skipped_non_tcp": 0,
@@ -519,6 +720,7 @@ characters used for indentation.
       "client_zone": "hmi_zone",
       "server_zone": "plc_zone",
       "protocols": ["modbus"],
+      "observed_functions": ["Read Holding Registers"],
       "packet_count": 3,
       "verdict": "allowed",
       "matched_conduit": "HMI polls PLC via Modbus",
@@ -533,6 +735,127 @@ characters used for indentation.
 `matched_conduit` is only non-`null` when `verdict` is `"allowed"`; `reason`
 is only non-`null` otherwise (a short, human-readable explanation, the same
 text the `text` report shows).
+
+Two fields are additive since function-level restrictions were introduced
+and appear on every report regardless of whether any conduit actually uses
+`functions`:
+
+- **`conduits[]`** -- one entry per conduit declared in the policy (in
+  declaration order), summarizing `name`, `from`, `to`, `bidirectional`,
+  `protocols`, and `functions` (empty array `[]` when that conduit is
+  unrestricted -- the pre-existing default) exactly as the policy file
+  declared them. Useful for an audit pipeline that wants to render the
+  policy itself alongside its verdicts without re-parsing the YAML.
+- **`observed_functions`** (per flow) -- the distinct, non-empty
+  function/service names observed on that flow, sorted. Populated for
+  every flow regardless of whether the matched conduit (if any) restricts
+  `functions` -- purely informational when it doesn't, and exactly what a
+  `functions`-restricted conduit's match (or violation reason) was
+  computed from when it does.
+
+### Addressing scope: what a zone can (and can't yet) be built from
+
+Every zone in this file is a set of IPv4 CIDR blocks, full stop -- see
+"Zones" above and `policy.hpp`'s own `CidrBlock`, a plain 32-bit
+host-order integer plus prefix length. There is no IPv6 anywhere in this
+tool (see `ipv4.hpp`'s own scope note), and no other layer-3 addressing
+scheme of any kind. This section is an honest accounting of what that
+means for the protocols `decode` recognizes but a zone can't classify by,
+and for the protocols a conduit can't yet name at all -- worth reading
+before assuming a conduit covers more than it actually does.
+
+**The `protocols` enum is closed to six values**: `modbus`, `dnp3`,
+`s7comm`, `iec104`, `enip`, `any` -- see "Validation errors" below.
+`decode` recognizes considerably more than that (BACnet/IP, HART-IP, OPC
+UA, MMS, MQTT, FOUNDATION Fieldbus HSE among them), but none of those can
+be named in a conduit's `protocols`/`protocol` field -- the closest a
+conduit gets to covering their traffic is `any`, which matches every
+protocol indiscriminately and can't be scoped down to just one of them.
+Concretely: there is no way today to write a conduit that says "only
+HART-IP is allowed here" -- only "anything is allowed here" or, by
+omission, "none of {modbus, dnp3, s7comm, iec104, enip} is allowed here"
+(which becomes a Violation once both endpoints are zone-classified). This
+is a straightforward enum-and-dispatch-table widening for the protocols
+above, not a design limitation of the engine -- it simply hasn't been
+done for them yet (see ROADMAP).
+
+**`policy validate` only ever evaluates TCP flows** (see "`policy
+validate`" above and LIMITATIONS) -- so even where a protocol's UDP
+traffic is fully decoded by `decode` (BACnet/IP, HART-IP, CIP I/O, FF-HSE),
+none of it reaches the policy engine at all yet, independent of the
+`protocols`-enum question above. HART-IP's own TCP traffic is the one
+partial exception: it's evaluated as a flow like any TCP-based protocol
+here, but -- per the previous paragraph -- can currently only ever match
+an `any` conduit, never a `protocol: hartip` one.
+
+**For the four protocols with no IP layer at all** -- PROFINET RT, IEC
+61850-8-1 GOOSE, IEC 61850-9-2 Sampled Values, and EtherCAT (see PROTOCOL
+COVERAGE) -- a CIDR-based zone model doesn't apply, and isn't really the
+right tool anyway: none of these four can leave the Ethernet segment/VLAN
+they were transmitted on, by construction, since there's no IP header for
+a router to act on. That's a physical/topological guarantee, not
+something `policy validate` needs to verify the way it verifies an IP
+conduit. The question worth asking about these four instead is whether
+the traffic is on the segment/VLAN it's supposed to be on AT ALL (a
+mis-patched switch port, an accidentally bridged VLAN) -- a
+VLAN-membership check, not an IPv4-zone check, and not one this tool
+implements yet, though the raw material already exists unused: every
+packet's 802.1Q tag is decoded generically (`has_vlan_tag`/`vlan_id` in
+`DecodedPacket`) regardless of protocol, it's just never consulted by
+`PolicyEngine`. Two narrower asterisks worth knowing about: IEC 61850-90-5
+defines routable variants of GOOSE and SV (R-GOOSE/R-SV, wrapped in UDP/IP
+multicast) that CAN cross routers -- this decoder deliberately doesn't
+recognize either (see `goose.hpp`/`sv.hpp`), so that traffic wouldn't even
+be identified as GOOSE/SV today, let alone zone-classified. PROFINET has a
+similar UDP/IP-routable class (`RT_CLASS_UDP`) this decoder's raw-Ethernet
+decode path doesn't walk either (see `profinet.hpp`).
+
+**Every protocol's own addressing, beyond plain IPv4 src/dst, and what
+this tool does with it today:**
+
+- **BACnet/IP's NPDU** carries a genuine internetwork addressing scheme
+  of its own -- DNET/SNET (destination/source network numbers) and hop
+  count, for routing across MS/TP-to-IP internetworks -- and it's fully
+  decoded and exposed (`bacnet_npdu_dnet`/`bacnet_npdu_snet`/
+  `bacnet_npdu_hop_count`), the closest thing this tool has to a working
+  non-IP network-layer address. Not consulted by the zone engine (and
+  moot for `policy validate` today regardless, since BACnet/IP is UDP --
+  see above). Separately, I-Am's own device Object Identifier (the actual
+  "which device is this" answer) is decoded into `bacnet_values` as a
+  `device-object=...` string -- readable, but not a structured field a
+  policy could reference.
+- **DNP3's data-link header** carries its own 2-byte source/destination
+  address (the outstation/master address) -- parsed internally
+  (`Dnp3LinkFrame::source`/`destination` in `dnp3.hpp`) but, unlike every
+  other field in this list, NOT currently exposed to `DecodedPacket` or
+  JSON output at all. `decode`'s own output today has no way to show
+  which DNP3 address a frame was for. This is the single most
+  consequential gap in this section: serial-to-IP DNP3 gateways routinely
+  multiplex several outstations behind one IP address, so an IP-only zone
+  model can under-identify the actual field device on a shared gateway in
+  a way none of the other protocols here are exposed to. See ROADMAP.
+- **IEC 104's ASDU** carries a Common Address (station/sector address)
+  and per-point Information Object Addresses, both decoded and exposed
+  (`iec104_common_address`, IOAs inline in `iec104_object_values`). Not
+  consulted by the zone engine.
+- **EtherNet/IP's CIP Path** (class/instance/attribute) is an
+  application-layer object address, not a network-layer one -- it still
+  rides plain IPv4/TCP underneath. S7comm's TSAP (where Siemens packs
+  rack/slot addressing) sits at the COTP/transport boundary, also above
+  plain IPv4, but is shown only as raw hex (`calling_tsap_hex`/
+  `called_tsap_hex`) -- rack/slot are never decoded out of it.
+- **GOOSE/Sampled Values** use IEC 61850's own logical addressing --
+  APPID (scopes a stream to a VLAN/segment) plus a GoCB reference or
+  `svID` (the actual publisher identity) -- and **EtherCAT** uses ADP/ADO
+  (station address + memory offset) to address one slave within a
+  segment. Both are decoded and exposed; neither is IP-like, and neither
+  reaches the zone engine, consistent with these four protocols having no
+  IP layer at all (see above).
+
+None of this changes what's Allowed/Violation/Unclassified today -- every
+item above describes information `decode` already surfaces (or, for
+DNP3's link address, doesn't yet) that `PolicyEngine` doesn't currently
+use for zone classification. See ROADMAP for what's actually planned.
 
 ## PROTOCOL DETECTION
 
@@ -5773,6 +6096,83 @@ conduitscope policy validate -r capture.pcap --policy policy.yaml -f json \
            "\(.client_ip) -> \(.server_ip):\(.server_port) (\(.protocols | join("+"))): \(.reason)"'
 ```
 
+Check a `functions:`-restricted conduit against a compliant S7comm flow
+(`tests/policies/functions_s7comm.yaml` permits only "Read Var"; this
+capture's one flow only ever issues Read Var):
+
+```sh
+$ conduitscope policy validate -r tests/sample_s7comm_items.pcap \
+    --policy tests/policies/functions_s7comm.yaml
+Zone/conduit policy validation
+  capture: tests/sample_s7comm_items.pcap
+  policy:  tests/policies/functions_s7comm.yaml (2 zone(s), 1 conduit(s))
+
+Result: COMPLIANT
+
+Flows evaluated: 1 (1 allowed, 0 violation(s), 0 unclassified)
+  1 total packet(s) in capture, 0 skipped (non-TCP/non-IP)
+
+VIOLATIONS (0):
+  (none)
+
+UNCLASSIFIED TRAFFIC (0):
+  (none)
+
+ALLOWED (1):
+  [1] 192.168.1.50 -> 192.168.1.10:102  (s7comm, 1 packet(s))
+      zones: hmi_zone -> plc_zone, matched conduit "s7comm read var only"
+
+Conduits never exercised by this capture (0):
+  (none)
+```
+
+The same conduit against `tests/sample_s7comm.pcap`, whose flow also issues
+Setup Communication and Write Var -- a violation, since `functions:`
+matching is strict-all (every distinct function observed must be
+permitted):
+
+```sh
+$ conduitscope policy validate -r tests/sample_s7comm.pcap \
+    --policy tests/policies/functions_s7comm.yaml
+Zone/conduit policy validation
+  capture: tests/sample_s7comm.pcap
+  policy:  tests/policies/functions_s7comm.yaml (2 zone(s), 1 conduit(s))
+
+Result: NON-COMPLIANT (1 violation(s), 0 unclassified flow(s))
+
+Flows evaluated: 1 (0 allowed, 1 violation(s), 0 unclassified)
+  8 total packet(s) in capture, 0 skipped (non-TCP/non-IP)
+
+VIOLATIONS (1):
+  [1] 192.168.1.50 -> 192.168.1.10:102  (s7comm, 8 packet(s))
+      zones: hmi_zone -> plc_zone
+      functions 'Setup Communication', 'Write Var' observed; conduit 's7comm read var only' permits only: Read Var
+
+UNCLASSIFIED TRAFFIC (0):
+  (none)
+
+ALLOWED (0):
+  (none)
+
+Conduits never exercised by this capture (1):
+  - s7comm read var only
+```
+
+A misspelled `functions:` entry is caught at policy-load time, before any
+capture is even opened, and offers a correction when one is plausible:
+
+```sh
+$ conduitscope policy validate -r tests/sample_modbus.pcap \
+    --policy tests/policies/bad_functions_typo.yaml
+error: tests/policies/bad_functions_typo.yaml:15: conduit 'unknown function, plausible typo':
+unknown modbus function 'Read Holding Registerss' -- did you mean 'Read Holding Registers'?
+```
+
+See the "Function-level restrictions" subsection of POLICY FILE FORMAT
+above for the one-protocol-only rule, the full list of each protocol's
+known function/service names, and the EtherNet/IP ambiguous-compound-name
+limitation.
+
 Find MQTT CONNECT packets carrying cleartext credentials -- the same
 deliberate security-finding pattern as OPC UA's Identity Token check above,
 since MQTT's own Username/Password fields carry no confidentiality of their
@@ -5989,6 +6389,29 @@ Rough order, each building on the groundwork this release establishes:
     negotiates a presentation-context numbering other than the assumed
     "1=ACSE, 3=MMS" convention, would meaningfully extend this decoder's
     own confidence.
+13. **Expose DNP3's own data-link source/destination address** (parsed
+    internally today, in `Dnp3LinkFrame::source`/`destination`, but never
+    surfaced to `DecodedPacket` or JSON output at all -- see POLICY FILE
+    FORMAT's "Addressing scope" section) as `dnp3_source_address`/
+    `dnp3_destination_address`, and consider a zone model that can
+    classify by this address in addition to (or instead of) IP -- the
+    single most consequential addressing gap in this codebase, since
+    serial-to-IP DNP3 gateways routinely multiplex several outstations
+    behind one IP.
+14. **Widen the conduit `protocols` enum** beyond its current
+    `{modbus, dnp3, s7comm, iec104, enip, any}` to name the other
+    protocols `decode` already recognizes (BACnet/IP, HART-IP, OPC UA,
+    MMS, MQTT, FOUNDATION Fieldbus HSE) individually, rather than only
+    being reachable through `any` -- a straightforward enum-and-
+    dispatch-table widening, not a design change (see POLICY FILE
+    FORMAT's "Addressing scope" section).
+15. **A VLAN-membership-based conduit/zone model**, as an alternative to
+    (not a replacement for) the existing IPv4-CIDR one, for the four
+    protocols with no IP layer at all (PROFINET RT, GOOSE, Sampled
+    Values, EtherCAT) -- 802.1Q tags are already decoded generically
+    (`has_vlan_tag`/`vlan_id`) but never consulted by `PolicyEngine`. Also
+    worth reconsidering once DNP3's link address (item 13) is exposed: a
+    zone model keyed on that address rather than (or alongside) IP.
 
 **pcapng support** is also now done: both classic pcap and pcapng are read
 transparently (auto-detected, no flag needed) -- see "pcap vs. pcapng"

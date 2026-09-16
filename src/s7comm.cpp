@@ -20,26 +20,47 @@ std::string s7comm_rosctr_name(uint8_t rosctr) {
     }
 }
 
+namespace {
+
+// The single table backing both s7comm_function_name(uint8_t) and s7comm_known_function_names()
+// -- see s7comm.hpp's own comment on s7comm_known_function_names() for why this was refactored
+// out of a plain switch: one place ("code N means this name") asserts the mapping, not two.
+struct S7CommFunctionEntry {
+    uint8_t code;
+    const char* name;
+};
+
+constexpr S7CommFunctionEntry kS7CommFunctions[] = {
+    {0x00, "CPU services"},
+    {0x04, "Read Var"},
+    {0x05, "Write Var"},
+    {0x1A, "Request Download"},
+    {0x1B, "Download Block"},
+    {0x1C, "Download Ended"},
+    {0x1D, "Start Upload"},
+    {0x1E, "Upload"},
+    {0x1F, "End Upload"},
+    {0x28, "PLC Control"},
+    {0x29, "PLC Stop"},
+    {0xF0, "Setup Communication"},
+};
+
+}  // namespace
+
 std::string s7comm_function_name(uint8_t fc) {
-    switch (fc) {
-        case 0x00: return "CPU services";
-        case 0x04: return "Read Var";
-        case 0x05: return "Write Var";
-        case 0x1A: return "Request Download";
-        case 0x1B: return "Download Block";
-        case 0x1C: return "Download Ended";
-        case 0x1D: return "Start Upload";
-        case 0x1E: return "Upload";
-        case 0x1F: return "End Upload";
-        case 0x28: return "PLC Control";
-        case 0x29: return "PLC Stop";
-        case 0xF0: return "Setup Communication";
-        default: {
-            std::ostringstream out;
-            out << "Unknown (0x" << std::hex << static_cast<unsigned>(fc) << ")";
-            return out.str();
-        }
+    for (const auto& entry : kS7CommFunctions) {
+        if (entry.code == fc) return entry.name;
     }
+    std::ostringstream out;
+    out << "Unknown (0x" << std::hex << static_cast<unsigned>(fc) << ")";
+    return out.str();
+}
+
+std::vector<std::string> s7comm_known_function_names() {
+    std::vector<std::string> out;
+    out.reserve(sizeof(kS7CommFunctions) / sizeof(kS7CommFunctions[0]));
+    for (const auto& entry : kS7CommFunctions) out.push_back(entry.name);
+    return out;
 }
 
 std::string s7comm_return_code_name(uint8_t code) {

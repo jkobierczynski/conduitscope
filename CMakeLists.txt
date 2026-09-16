@@ -3750,6 +3750,88 @@ set_tests_properties(policy_error_line_number_is_the_zones_own_line PROPERTIES
   PASS_REGULAR_EXPRESSION "bad_overlap_after_description.yaml:11: zone 'z1' .* and zone 'z2' .* overlap")
 
 # ---------------------------------------------------------------------------------------------
+# 'functions:' allow-list (policy.hpp/policy_engine.cpp) -- restricts WHICH function/service
+# within an already-permitted protocol a conduit allows. Fixtures: tests/policies/functions_*.yaml
+# (one per protocol) and tests/policies/bad_functions_*.yaml (load-time validation errors). See
+# each fixture's own header comment for exactly what it's testing.
+# ---------------------------------------------------------------------------------------------
+
+add_test(NAME policy_functions_modbus_restricted
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus_pairing.pcap" --policy "${POLICY_DIR}/functions_modbus.yaml")
+set_tests_properties(policy_functions_modbus_restricted PROPERTIES
+  PASS_REGULAR_EXPRESSION "matched conduit \"modbus reads only\".*function 'Write Single Register' observed; conduit 'modbus reads only' permits only: Read Holding Registers")
+
+add_test(NAME policy_functions_modbus_json_observed_functions
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus_pairing.pcap" --policy "${POLICY_DIR}/functions_modbus.yaml" --format json)
+set_tests_properties(policy_functions_modbus_json_observed_functions PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"conduits\": \\[.*\"functions\": \\[\"Read Holding Registers\"\\].*\"observed_functions\": \\[\"Write Single Register\"\\]")
+
+add_test(NAME policy_functions_dnp3_restricted
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --policy "${POLICY_DIR}/functions_dnp3.yaml")
+set_tests_properties(policy_functions_dnp3_restricted PROPERTIES
+  PASS_REGULAR_EXPRESSION "matched conduit \"dnp3 direct operate only\".*functions 'Read', 'Response' observed; conduit 'dnp3 direct operate only' permits only: Direct Operate")
+
+add_test(NAME policy_functions_s7comm_compliant
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_items.pcap" --policy "${POLICY_DIR}/functions_s7comm.yaml")
+set_tests_properties(policy_functions_s7comm_compliant PROPERTIES
+  PASS_REGULAR_EXPRESSION "Result: COMPLIANT.*matched conduit \"s7comm read var only\"")
+
+add_test(NAME policy_functions_s7comm_violation
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm.pcap" --policy "${POLICY_DIR}/functions_s7comm.yaml")
+set_tests_properties(policy_functions_s7comm_violation PROPERTIES
+  PASS_REGULAR_EXPRESSION "functions 'Setup Communication', 'Write Var' observed; conduit 's7comm read var only' permits only: Read Var")
+
+add_test(NAME policy_functions_iec104_compliant
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_iec104_modbus_precedence.pcap" --policy "${POLICY_DIR}/functions_iec104.yaml")
+set_tests_properties(policy_functions_iec104_compliant PROPERTIES
+  PASS_REGULAR_EXPRESSION "Result: COMPLIANT.*matched conduit \"iec104 interrogation only\"")
+
+add_test(NAME policy_functions_iec104_violation
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_iec104.pcap" --policy "${POLICY_DIR}/functions_iec104.yaml")
+set_tests_properties(policy_functions_iec104_violation PROPERTIES
+  PASS_REGULAR_EXPRESSION "functions 'C_DC_NA_1', 'M_ME_TD_1', 'M_SP_NA_1' observed; conduit 'iec104 interrogation only' permits only: C_IC_NA_1")
+
+add_test(NAME policy_functions_enip_restricted
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_policy_functions_enip.pcap" --policy "${POLICY_DIR}/functions_enip.yaml")
+set_tests_properties(policy_functions_enip_restricted PROPERTIES
+  PASS_REGULAR_EXPRESSION "matched conduit \"enip read tag only\".*function 'Write_Tag' observed; conduit 'enip read tag only' permits only: Read_Tag")
+
+add_test(NAME policy_functions_singular_alias
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/functions_singular_alias.yaml")
+set_tests_properties(policy_functions_singular_alias PROPERTIES
+  PASS_REGULAR_EXPRESSION "Result: COMPLIANT.*matched conduit \"singular protocol/function alias\"")
+
+add_test(NAME policy_functions_case_insensitive_match
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/functions_case_insensitive.yaml")
+set_tests_properties(policy_functions_case_insensitive_match PROPERTIES
+  PASS_REGULAR_EXPRESSION "Result: COMPLIANT.*matched conduit \"case-insensitive function match\"")
+
+add_test(NAME policy_error_functions_multi_protocol_rejected
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_functions_multi_protocol.yaml")
+set_tests_properties(policy_error_functions_multi_protocol_rejected PROPERTIES
+  PASS_REGULAR_EXPRESSION "'functions' requires exactly one protocol in 'protocols' \\(not 'any', and not a list of more than one\\)")
+
+add_test(NAME policy_error_functions_any_protocol_rejected
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_functions_any_protocol.yaml")
+set_tests_properties(policy_error_functions_any_protocol_rejected PROPERTIES
+  PASS_REGULAR_EXPRESSION "'functions' requires exactly one protocol in 'protocols' \\(not 'any', and not a list of more than one\\)")
+
+add_test(NAME policy_error_functions_unknown_name_no_suggestion
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_functions_unknown_name.yaml")
+set_tests_properties(policy_error_functions_unknown_name_no_suggestion PROPERTIES
+  PASS_REGULAR_EXPRESSION "unknown modbus function 'Totally Unrelated Nonsense Function'"
+  FAIL_REGULAR_EXPRESSION "did you mean")
+
+add_test(NAME policy_error_functions_unknown_name_with_suggestion
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_functions_typo.yaml")
+set_tests_properties(policy_error_functions_unknown_name_with_suggestion PROPERTIES
+  PASS_REGULAR_EXPRESSION "unknown modbus function 'Read Holding Registerss' -- did you mean 'Read Holding Registers'\\?")
+
+# Regression guard: a conduit with 'functions' omitted entirely must behave exactly as before this
+# feature existed -- already covered by every pre-existing policy_* test above (none of them use
+# 'functions:'), so no new fixture is needed here; this comment just records that coverage exists.
+
+# ---------------------------------------------------------------------------------------------
 # Live capture (live_capture.hpp/cpp) -- an optional, build-time-detected libpcap (Linux) / Npcap
 # (Windows) dependency; see CMakeLists.txt's CONDUITSCOPE_HAVE_PCAP detection above. The CLI
 # surface (-i/--interface, --filter, --duration, --snaplen, --no-promiscuous, `interfaces`) exists

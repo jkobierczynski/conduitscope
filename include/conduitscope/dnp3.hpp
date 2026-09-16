@@ -84,6 +84,15 @@ struct Dnp3LinkFrame {
 // than silently skipping the check.
 std::optional<Dnp3LinkFrame> try_parse_dnp3_link_layer(ByteSpan tcp_payload);
 
+// Returns every canonical DNP3 application-layer function name this decoder can produce for a
+// KNOWN function code (every case dnp3.cpp's internal function-code table defines, including the
+// three response codes 0x81/0x82/0x83) -- excluding the dynamic "Unknown (0xNN)" fallback used for
+// a function code outside that table. Used by policy.cpp to validate a policy file's 'functions:'
+// entries for a dnp3-restricted conduit against exactly the strings
+// Dnp3ApplicationFragment::function_name/DecodedPacket::dnp3_function_name can actually hold.
+// Order is stable across calls (the table's own declaration order) but not alphabetized.
+std::vector<std::string> dnp3_known_function_names();
+
 // Total on-the-wire size of one DNP3 data-link frame: the fixed 10-byte header, plus its user
 // data broken into <=16-byte blocks, each followed by its own 2-byte block CRC. Used to find
 // where the *next* data-link frame (if any) starts within the same TCP payload (Decoder's

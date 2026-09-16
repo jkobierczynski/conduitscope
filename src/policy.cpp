@@ -4,10 +4,16 @@
 #include <algorithm>
 #include <cctype>
 #include <fstream>
+#include <limits>
 #include <sstream>
 #include <unordered_set>
 
+#include "conduitscope/dnp3.hpp"
+#include "conduitscope/enip.hpp"
+#include "conduitscope/iec104.hpp"
 #include "conduitscope/ipv4.hpp"
+#include "conduitscope/modbus.hpp"
+#include "conduitscope/s7comm.hpp"
 #include "conduitscope/yaml_mini.hpp"
 
 namespace conduitscope {
@@ -68,6 +74,64 @@ const Zone* find_zone(const Policy& policy, const std::string& name) {
         if (z.name == name) return &z;
     }
     return nullptr;
+}
+
+bool equal_ci(const std::string& a, const std::string& b) { return to_lower(a) == to_lower(b); }
+
+// The one place this file maps a resolved single-protocol string ("modbus"/"dnp3"/"s7comm"/
+// "iec104"/"enip") to that protocol's own canonical function/service name table -- see each
+// *_known_*_names() function's own comment (modbus.hpp/dnp3.hpp/s7comm.hpp/iec104.hpp/enip.hpp)
+// for exactly what it returns and why. Never called with "any" or an unresolved protocol string --
+// the one-protocol-only 'functions' rule below (see parse_policy_text) is checked first.
+std::vector<std::string> known_function_names_for(const std::string& protocol) {
+    if (protocol == "modbus") return modbus_known_function_names();
+    if (protocol == "dnp3") return dnp3_known_function_names();
+    if (protocol == "s7comm") return s7comm_known_function_names();
+    if (protocol == "iec104") return iec104_known_asdu_short_names();
+    if (protocol == "enip") return enip_known_cip_service_names();
+    return {};
+}
+
+// Case-insensitive Levenshtein edit distance between `a` and `b`, for the 'functions:' "did you
+// mean" suggestion below -- deliberately just this (not e.g. a word-token-aware metric): these are
+// short, mostly-plain-English function/service names, and a typo (wrong case already handled
+// separately, a dropped/doubled/transposed letter) is exactly what plain character-level edit
+// distance catches well, without the complexity a fancier metric would add for little real benefit
+// here (see the caller for how the result is thresholded).
+size_t levenshtein_distance_ci(const std::string& a, const std::string& b) {
+    std::string la = to_lower(a), lb = to_lower(b);
+    size_t n = la.size(), m = lb.size();
+    std::vector<size_t> prev(m + 1), cur(m + 1);
+    for (size_t j = 0; j <= m; ++j) prev[j] = j;
+    for (size_t i = 1; i <= n; ++i) {
+        cur[0] = i;
+        for (size_t j = 1; j <= m; ++j) {
+            size_t cost = (la[i - 1] == lb[j - 1]) ? 0 : 1;
+            cur[j] = std::min({prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost});
+        }
+        std::swap(prev, cur);
+    }
+    return prev[m];
+}
+
+// Returns the closest name in `candidates` to `given` (by levenshtein_distance_ci) when it's close
+// enough to plausibly be a typo of it, or "" when nothing is close enough to be worth suggesting
+// (an arbitrary but generous fixed distance threshold -- these are real function/service names, not
+// short codes, so a handful of character edits is still clearly "almost this one" rather than "a
+// different, unrelated name").
+std::string nearest_function_name(const std::string& given, const std::vector<std::string>& candidates) {
+    constexpr size_t kMaxSuggestDistance = 5;
+    std::string best;
+    size_t best_dist = std::numeric_limits<size_t>::max();
+    for (const auto& candidate : candidates) {
+        size_t dist = levenshtein_distance_ci(given, candidate);
+        if (dist < best_dist) {
+            best_dist = dist;
+            best = candidate;
+        }
+    }
+    if (best_dist <= kMaxSuggestDistance) return best;
+    return "";
 }
 
 }  // namespace
@@ -302,6 +366,42 @@ Policy parse_policy_text(const std::string& text, const std::string& source_name
                 fail(source_name, item.line, "conduit '" + c.name + "': 'bidirectional' must be true or false");
             }
         }
+
+        if (const yaml_mini::Node* funcs = item.find("functions") ? item.find("functions") : item.find("function")) {
+            auto func_list = as_scalar_list(*funcs, source_name, "conduit '" + c.name + "'s 'functions'");
+            if (!func_list.empty()) {
+                // See policy.hpp's Conduit::functions comment and parse_policy_text's own comment
+                // for why: the known-function-name table to validate/match against is entirely
+                // per-protocol, so 'functions' only makes sense once 'protocols' has resolved to
+                // exactly one concrete protocol.
+                if (c.protocols.size() != 1 || c.protocols[0] == "any") {
+                    fail(source_name, funcs->line,
+                         "conduit '" + c.name +
+                             "': 'functions' requires exactly one protocol in 'protocols' (not "
+                             "'any', and not a list of more than one) -- write one conduit per "
+                             "protocol when the allowed functions differ");
+                }
+                const std::string& proto = c.protocols[0];
+                std::vector<std::string> known = known_function_names_for(proto);
+                for (const auto& f : func_list) {
+                    const std::string* canonical = nullptr;
+                    for (const auto& k : known) {
+                        if (equal_ci(k, f.text)) {
+                            canonical = &k;
+                            break;
+                        }
+                    }
+                    if (!canonical) {
+                        std::string suggestion = nearest_function_name(f.text, known);
+                        std::string msg = "conduit '" + c.name + "': unknown " + proto + " function '" +
+                                           f.text + "'";
+                        if (!suggestion.empty()) msg += " -- did you mean '" + suggestion + "'?";
+                        fail(source_name, f.line, msg);
+                    }
+                    c.functions.push_back(*canonical);
+                }
+            }
+        }  // absent/empty 'functions'/'function' means "no restriction" -- c.functions stays empty
 
         if (const auto* desc = item.find("description")) {
             if (desc->type == NodeType::Scalar) c.description = desc->scalar;

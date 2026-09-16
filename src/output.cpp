@@ -201,6 +201,7 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
     }
     if (p.protocol == "iec104" && p.iec104_has_asdu) {
         out_ << "    \"iec104_asdu_type\": \"" << json_escape(p.iec104_asdu_type_name) << "\",\n";
+        out_ << "    \"iec104_asdu_type_short\": \"" << json_escape(p.iec104_asdu_type_short_name) << "\",\n";
         out_ << "    \"iec104_cot\": \"" << json_escape(p.iec104_cot_name) << "\",\n";
         out_ << "    \"iec104_common_address\": " << p.iec104_common_address << ",\n";
     }

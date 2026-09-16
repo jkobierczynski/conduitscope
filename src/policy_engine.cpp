@@ -2,6 +2,7 @@
 #include "conduitscope/policy_engine.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <ostream>
 #include <sstream>
@@ -44,6 +45,25 @@ std::string protocol_list_text(const std::vector<std::string>& protocols) {
     for (size_t i = 0; i < protocols.size(); ++i) {
         if (i) out += "+";
         out += protocols[i];
+    }
+    return out;
+}
+
+std::string to_lower_copy(const std::string& s) {
+    std::string out = s;
+    std::transform(out.begin(), out.end(), out.begin(), [](unsigned char c) { return std::tolower(c); });
+    return out;
+}
+
+bool equal_ci(const std::string& a, const std::string& b) { return to_lower_copy(a) == to_lower_copy(b); }
+
+// Joins `items` with ", " -- shared by the "functions observed" and "permits only" halves of a
+// functions-restricted conduit's violation reason (see the functions-matching block in finish()).
+std::string join_comma(const std::vector<std::string>& items) {
+    std::string out;
+    for (size_t i = 0; i < items.size(); ++i) {
+        if (i) out += ", ";
+        out += items[i];
     }
     return out;
 }
@@ -123,19 +143,35 @@ void PolicyEngine::observe(const DecodedPacket& dp) {
 
     FlowState& fs = it->second;
     ++fs.packet_count;
+    // Each protocol contributes its own already-decoded function/service name field (never more
+    // than one of the five is ever populated for a given packet, since a packet has exactly one
+    // decoded protocol) -- see FlowReport::observed_functions' comment for the full list, and
+    // policy.hpp's Conduit::functions comment for how these feed a functions-restricted conduit's
+    // matching below (finish()).
     if (dp.protocol == "modbus") {
         fs.protocols.insert("modbus");
+        if (!dp.modbus_function_name.empty()) fs.functions.insert(dp.modbus_function_name);
     } else if (dp.protocol == "dnp3") {
         fs.protocols.insert("dnp3");
+        if (dp.dnp3_has_function && !dp.dnp3_function_name.empty()) fs.functions.insert(dp.dnp3_function_name);
     } else if (dp.protocol == "s7comm" || dp.protocol == "cotp") {
         // "cotp" (TPKT/COTP framing recognized, but not a decoded S7comm message -- e.g. a
         // connection-setup frame) is still legitimately part of an S7comm session on the wire, so
-        // it counts toward the same "s7comm" conduit protocol, not a separate one.
+        // it counts toward the same "s7comm" conduit protocol, not a separate one. It never carries
+        // a decoded s7comm_function_name of its own, though (dp.protocol == "cotp" means no S7comm
+        // message was decoded on this packet at all).
         fs.protocols.insert("s7comm");
+        if (dp.protocol == "s7comm" && dp.s7comm_has_function && !dp.s7comm_function_name.empty()) {
+            fs.functions.insert(dp.s7comm_function_name);
+        }
     } else if (dp.protocol == "iec104") {
         fs.protocols.insert("iec104");
+        if (dp.iec104_has_asdu && !dp.iec104_asdu_type_short_name.empty()) {
+            fs.functions.insert(dp.iec104_asdu_type_short_name);
+        }
     } else if (dp.protocol == "enip") {
         fs.protocols.insert("enip");
+        if (dp.enip_has_cip && !dp.enip_cip_service_name.empty()) fs.functions.insert(dp.enip_cip_service_name);
     }
 }
 
@@ -155,6 +191,8 @@ PolicyReport PolicyEngine::finish() const {
         fr.packet_count = fs.packet_count;
         fr.protocols.assign(fs.protocols.begin(), fs.protocols.end());
         std::sort(fr.protocols.begin(), fr.protocols.end());
+        fr.observed_functions.assign(fs.functions.begin(), fs.functions.end());
+        std::sort(fr.observed_functions.begin(), fr.observed_functions.end());
 
         auto client_ip_u32 = parse_ipv4_string(fs.client_ip);
         auto server_ip_u32 = parse_ipv4_string(fs.server_ip);
@@ -198,9 +236,38 @@ PolicyReport PolicyEngine::finish() const {
                 break;
             }
             if (matched) {
-                fr.verdict = FlowVerdict::Allowed;
-                fr.matched_conduit = matched->name;
-                exercised_conduits.insert(matched->name);
+                // A conduit's own 'functions' allow-list (see policy.hpp's Conduit::functions
+                // comment) is a further, strict-all restriction on top of the protocol/port/
+                // direction match already found above: every distinct function/service name
+                // observed on this WHOLE flow must be in the conduit's allow-list, not just some of
+                // them -- one disallowed function anywhere on the flow makes the whole flow a
+                // Violation, matching this engine's existing flow-level (not per-packet) verdict
+                // granularity. An empty allow-list (the common case) means no restriction at all,
+                // exactly the behavior before this feature existed.
+                std::vector<std::string> disallowed;
+                if (!matched->functions.empty()) {
+                    for (const auto& fn : fr.observed_functions) {
+                        bool ok = std::any_of(matched->functions.begin(), matched->functions.end(),
+                                               [&](const std::string& allowed) { return equal_ci(fn, allowed); });
+                        if (!ok) disallowed.push_back(fn);
+                    }
+                }
+                if (!disallowed.empty()) {
+                    fr.verdict = FlowVerdict::Violation;
+                    std::ostringstream reason;
+                    reason << (disallowed.size() > 1 ? "functions " : "function ");
+                    for (size_t i = 0; i < disallowed.size(); ++i) {
+                        if (i) reason << ", ";
+                        reason << "'" << disallowed[i] << "'";
+                    }
+                    reason << " observed; conduit '" << matched->name << "' permits only: "
+                           << join_comma(matched->functions);
+                    fr.reason = reason.str();
+                } else {
+                    fr.verdict = FlowVerdict::Allowed;
+                    fr.matched_conduit = matched->name;
+                    exercised_conduits.insert(matched->name);
+                }
             } else {
                 fr.verdict = FlowVerdict::Violation;
                 std::ostringstream reason;
@@ -314,6 +381,35 @@ void write_policy_report_json(std::ostream& out, const PolicyReport& report, con
     out << "  \"policy\": \"" << json_escape(policy_path) << "\",\n";
     out << "  \"zone_count\": " << policy.zones.size() << ",\n";
     out << "  \"conduit_count\": " << policy.conduits.size() << ",\n";
+
+    // Additive per-conduit summary, primarily so a scripted audit pipeline can see each conduit's
+    // 'functions' allow-list (empty means unrestricted) without re-parsing the policy YAML itself.
+    // Placed here, before "compliant", so it never lands between any of this schema's pre-existing
+    // fields -- see docs/MANUAL.md's POLICY FILE FORMAT "JSON report schema" for the full schema.
+    out << "  \"conduits\": [\n";
+    for (size_t i = 0; i < policy.conduits.size(); ++i) {
+        const Conduit& c = policy.conduits[i];
+        out << "    {\n";
+        out << "      \"name\": \"" << json_escape(c.name) << "\",\n";
+        out << "      \"from\": \"" << json_escape(c.from_zone) << "\",\n";
+        out << "      \"to\": \"" << json_escape(c.to_zone) << "\",\n";
+        out << "      \"bidirectional\": " << (c.bidirectional ? "true" : "false") << ",\n";
+        out << "      \"protocols\": [";
+        for (size_t j = 0; j < c.protocols.size(); ++j) {
+            if (j) out << ", ";
+            out << "\"" << json_escape(c.protocols[j]) << "\"";
+        }
+        out << "],\n";
+        out << "      \"functions\": [";
+        for (size_t j = 0; j < c.functions.size(); ++j) {
+            if (j) out << ", ";
+            out << "\"" << json_escape(c.functions[j]) << "\"";
+        }
+        out << "]\n";
+        out << "    }" << (i + 1 < policy.conduits.size() ? "," : "") << "\n";
+    }
+    out << "  ],\n";
+
     out << "  \"compliant\": " << (report.compliant() ? "true" : "false") << ",\n";
     out << "  \"total_packets\": " << report.total_packets << ",\n";
     out << "  \"skipped_non_tcp\": " << report.skipped_non_tcp << ",\n";
@@ -334,6 +430,12 @@ void write_policy_report_json(std::ostream& out, const PolicyReport& report, con
         for (size_t j = 0; j < f.protocols.size(); ++j) {
             if (j) out << ", ";
             out << "\"" << json_escape(f.protocols[j]) << "\"";
+        }
+        out << "],\n";
+        out << "      \"observed_functions\": [";
+        for (size_t j = 0; j < f.observed_functions.size(); ++j) {
+            if (j) out << ", ";
+            out << "\"" << json_escape(f.observed_functions[j]) << "\"";
         }
         out << "],\n";
         out << "      \"packet_count\": " << f.packet_count << ",\n";

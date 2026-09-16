@@ -1,0 +1,20 @@
+# Exercises the 'functions:' allow-list (policy.hpp/policy_engine.cpp) for Modbus, against
+# tests/sample_modbus_pairing.pcap, which carries two SEPARATE flows: client port 51701 (Read
+# Holding Registers only) and client port 51700 (Write Single Register only) -- see
+# tools/make_sample_pcap.py's build_modbus_pairing_sample. This one conduit only permits "Read
+# Holding Registers", so validating that capture against this policy must report the 51701 flow
+# ALLOWED (matched conduit) and the 51700 flow a Violation naming "Write Single Register" as the
+# disallowed function observed.
+zones:
+  hmi_zone:
+    networks: [192.168.1.50/32]
+  plc_zone:
+    networks: [192.168.1.10/32]
+
+conduits:
+  - name: "modbus reads only"
+    from: hmi_zone
+    to: plc_zone
+    protocols: [modbus]
+    ports: [502]
+    functions: [Read Holding Registers]

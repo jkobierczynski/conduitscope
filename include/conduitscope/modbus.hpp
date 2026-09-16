@@ -82,4 +82,14 @@ std::optional<size_t> modbus_tcp_declared_length(ByteSpan payload);
 
 std::string modbus_exception_name(uint8_t exception_code);
 
+// Returns every canonical Modbus function name this decoder can produce for a KNOWN function code
+// (every case modbus.cpp's internal function-code table defines) -- excluding the dynamic
+// "Unknown (0xNN)" fallback used for a function code outside that table. Used by policy.cpp to
+// validate a policy file's 'functions:' entries for a modbus-restricted conduit against exactly
+// the strings ModbusFrame::function_name/DecodedPacket::modbus_function_name can actually hold, so
+// there is exactly one place ("code N means this name") this is asserted -- the function-code
+// table in modbus.cpp -- rather than a second, separately-maintained list. Order is stable across
+// calls (the table's own declaration order) but not alphabetized.
+std::vector<std::string> modbus_known_function_names();
+
 }  // namespace conduitscope

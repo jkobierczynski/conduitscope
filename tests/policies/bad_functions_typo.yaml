@@ -1,0 +1,15 @@
+# Regression fixture: a 'functions' entry that's a plausible typo of a real modbus function name
+# ("Read Holding Registerss", one letter over) -- the error must offer "did you mean 'Read Holding
+# Registers'?" (see nearest_function_name's comment in policy.cpp).
+zones:
+  hmi_zone:
+    networks: [192.168.1.50/32]
+  plc_zone:
+    networks: [192.168.1.10/32]
+
+conduits:
+  - name: "unknown function, plausible typo"
+    from: hmi_zone
+    to: plc_zone
+    protocol: modbus
+    functions: ["Read Holding Registerss"]

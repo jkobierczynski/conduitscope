@@ -1,0 +1,20 @@
+# Exercises the 'functions:' allow-list for DNP3, against tests/sample_dnp3.pcap, which carries
+# (among other flows) client port 51501 -- Direct Operate only -- and client port 51500 -- Read,
+# Response, AND Direct Operate all on the same flow. This one conduit only permits "Direct
+# Operate", so validating that capture against this policy must report the 51501 flow ALLOWED
+# (matched conduit) and the 51500 flow a Violation naming "Read" and "Response" as the disallowed
+# functions observed (Direct Operate, also observed there, IS permitted -- it's Read/Response that
+# aren't).
+zones:
+  hmi_zone:
+    networks: [192.168.1.50/32]
+  plc_zone:
+    networks: [192.168.1.10/32]
+
+conduits:
+  - name: "dnp3 direct operate only"
+    from: hmi_zone
+    to: plc_zone
+    protocols: [dnp3]
+    ports: [20000]
+    functions: [Direct Operate]

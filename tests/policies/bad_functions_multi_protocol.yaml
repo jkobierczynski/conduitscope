@@ -1,0 +1,16 @@
+# Regression fixture: 'functions' given on a conduit whose 'protocols' resolves to more than one
+# concrete protocol -- rejected at load time (see parse_policy_text's own comment in policy.hpp
+# and policy.cpp) because there is no single function/service name table to validate/match
+# against otherwise.
+zones:
+  hmi_zone:
+    networks: [192.168.1.50/32]
+  plc_zone:
+    networks: [192.168.1.10/32]
+
+conduits:
+  - name: "multi-protocol with functions"
+    from: hmi_zone
+    to: plc_zone
+    protocols: [modbus, dnp3]
+    functions: [Read Holding Registers]

@@ -76,6 +76,23 @@ struct Conduit {
     std::vector<std::string> protocols;
     std::vector<uint16_t> ports;
     bool bidirectional = false;
+
+    // Optional allow-list of function/service names this conduit permits WITHIN its single
+    // protocol -- e.g. only "Read Holding Registers" on an otherwise-permitted Modbus conduit, not
+    // "Write Multiple Registers" too. Empty (the default -- omitted, or 'functions'/'function' not
+    // given) means fully unrestricted, exactly the behavior before this field existed: every
+    // function/service the protocol decodes is permitted. Non-empty only ever appears alongside
+    // `protocols` resolving to exactly one concrete protocol (parse_policy_text rejects any other
+    // combination -- see its own comment below) -- each string is stored in the CANONICAL casing
+    // that protocol's decoder itself emits (modbus_function_name/dnp3_function_name/
+    // s7comm_function_name/iec104_type_short_name/enip_cip_service_name -- see each protocol's own
+    // *_known_*_names() function), regardless of how the policy file capitalized it, since matching
+    // (PolicyEngine) is case-insensitive but display (error messages, report reasons) always uses
+    // the decoder's own casing. See docs/MANUAL.md's POLICY FILE FORMAT section for the full
+    // schema and PolicyEngine::finish (policy_engine.cpp) for exactly how a flow's observed
+    // functions are checked against this list.
+    std::vector<std::string> functions;
+
     int line = 0;
 };
 
@@ -111,6 +128,15 @@ struct PolicyError : std::runtime_error {
 //   - a conduit's protocol not in {modbus, dnp3, s7comm, any}
 //   - a conduit's port outside [1, 65535]
 //   - a conduit's 'bidirectional' value that isn't a recognizable boolean
+//   - a conduit's 'functions'/'function' given while 'protocols'/'protocol' resolves to anything
+//     other than exactly one concrete protocol (i.e. it's 'any', or a list of more than one) --
+//     the function/service name tables the entries are validated against are entirely separate per
+//     protocol (see modbus_known_function_names/dnp3_known_function_names/
+//     s7comm_known_function_names/iec104_known_asdu_short_names/enip_known_cip_service_names), so
+//     there would be no single table to validate/match against otherwise
+//   - a conduit's 'functions'/'function' entry that isn't one of its protocol's own known function/
+//     service names (case-insensitively) -- the error names the closest known name ("did you mean
+//     '...'?") when one is a plausible typo, and omits the suggestion when nothing is close enough
 Policy parse_policy_text(const std::string& text, const std::string& source_name);
 
 // Reads `path` and calls parse_policy_text with its contents. Throws

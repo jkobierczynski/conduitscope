@@ -30,8 +30,12 @@
 namespace conduitscope {
 
 enum class FlowVerdict {
-    Allowed,        // a conduit permits this flow's protocol(s) at this port, in this direction
-    Violation,      // both endpoints are zone-classified, but no conduit permits this flow
+    Allowed,        // a conduit permits this flow's protocol(s) at this port, in this direction,
+                    // and (if that conduit restricts 'functions') every function/service observed
+                    // on the flow
+    Violation,      // both endpoints are zone-classified, but no conduit permits this flow -- OR
+                    // one does on protocol/port/direction, but restricts 'functions' and at least
+                    // one function/service observed on the flow isn't in its allow-list
     Unclassified,   // at least one endpoint matched no declared zone, or no app-layer protocol was
                     // ever recognized on this flow -- there's nothing to check against a conduit
 };
@@ -44,6 +48,14 @@ struct FlowReport {
     uint16_t server_port = 0;
     std::string client_zone, server_zone;  // "unclassified" when Policy::zone_for found nothing
     std::vector<std::string> protocols;    // distinct app protocols observed: "modbus"/"dnp3"/"s7comm"/"iec104"/"enip"
+    // Distinct, non-empty function/service names observed on this flow, sorted -- whichever of
+    // modbus_function_name/dnp3_function_name/s7comm_function_name/iec104_asdu_type_short_name/
+    // enip_cip_service_name each contributing packet's own protocol populates (see
+    // PolicyEngine::observe). Populated regardless of whether the matched conduit (if any)
+    // actually restricts 'functions' -- purely informational/scriptable via the JSON report when it
+    // doesn't (see write_policy_report_json), and exactly what a functions-restricted conduit's
+    // match (or the reason it didn't match) is computed from when it does.
+    std::vector<std::string> observed_functions;
     size_t packet_count = 0;
     FlowVerdict verdict = FlowVerdict::Unclassified;
     std::string matched_conduit;  // set (non-empty) only when verdict == Allowed
@@ -110,6 +122,10 @@ private:
         uint16_t server_port = 0;
         bool initiator_known = false;  // true once decided by an actual SYN/SYN-ACK, not the port guess
         std::unordered_set<std::string> protocols;
+        // Distinct, non-empty function/service names observed on this flow so far -- see
+        // FlowReport::observed_functions' comment for exactly which DecodedPacket field feeds this
+        // per protocol.
+        std::unordered_set<std::string> functions;
         size_t packet_count = 0;
     };
 

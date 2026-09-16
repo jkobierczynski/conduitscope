@@ -1,0 +1,20 @@
+# Exercises case-insensitive 'functions:' matching, both at policy-load-time validation (this file
+# spells the function name in all lowercase, which must still validate against modbus's canonical
+# "Read Holding Registers") and at PolicyEngine runtime matching (a decoded flow's own
+# "Read Holding Registers" -- decoder casing -- must still match this lowercase entry). Validated
+# against tests/sample_modbus.pcap -- must report COMPLIANT, matched to this conduit, and the
+# report's matched conduit / permits-only text uses the CANONICAL (decoder) casing regardless of
+# how this file spelled it (see Conduit::functions' comment in policy.hpp).
+zones:
+  hmi_zone:
+    networks: [192.168.1.50/32]
+  plc_zone:
+    networks: [192.168.1.10/32]
+
+conduits:
+  - name: "case-insensitive function match"
+    from: hmi_zone
+    to: plc_zone
+    protocol: modbus
+    ports: [502]
+    functions: [read holding registers]

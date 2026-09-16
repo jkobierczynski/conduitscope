@@ -456,6 +456,19 @@ std::vector<uint8_t> reassemble_user_data(ByteSpan after_header, size_t logical_
 
 }  // namespace
 
+std::vector<std::string> dnp3_known_function_names() {
+    // Calls the same dnp3_function_name(fc) switch above for every possible byte value and keeps
+    // only the ones that resolved to a real name rather than the dynamic "Unknown (0x.." fallback
+    // -- see dnp3.hpp's own comment on this function for why this reuses dnp3_function_name()
+    // instead of a second, separately-maintained list of names.
+    std::vector<std::string> out;
+    for (int fc = 0; fc <= 0xFF; ++fc) {
+        std::string name = dnp3_function_name(static_cast<uint8_t>(fc));
+        if (name.rfind("Unknown (0x", 0) != 0) out.push_back(std::move(name));
+    }
+    return out;
+}
+
 std::optional<Dnp3LinkFrame> try_parse_dnp3_link_layer(ByteSpan tcp_payload) {
     // Fixed data link header: start(2) + length(1) + control(1) + destination(2) +
     // source(2) + CRC(2) = 10 bytes.

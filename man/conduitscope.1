@@ -74,9 +74,15 @@ below.
 Zone/conduit policy check: decodes the capture (or live interface) exactly
 as \fBdecode\fR would, groups it into TCP flows, and checks each against the
 zones/conduits declared in the policy file (a restricted, dependency-free
-YAML subset -- see \fBdocs/MANUAL.md\fR's POLICY FILE FORMAT section).
-Prints a compliant/non-compliant report; see \fBOPTIONS (policy validate)\fR
-and \fBEXIT STATUS\fR below.
+YAML subset -- see \fBdocs/MANUAL.md\fR's POLICY FILE FORMAT section). A
+conduit may optionally narrow itself to specific named functions/services
+within its one protocol via \fBfunctions:\fR (e.g. Modbus reads but not
+writes) -- matched, flow-wide and strict-all, against the exact
+function/service name strings that protocol's decoder emits; see
+\fBdocs/MANUAL.md\fR's "Function-level restrictions" subsection for the
+schema, the one-protocol-only rule, and the EtherNet/IP ambiguous-name
+limitation. Prints a compliant/non-compliant report; see \fBOPTIONS (policy
+validate)\fR and \fBEXIT STATUS\fR below.
 .TP
 .B version
 Print version and build information, including whether this build has live
@@ -244,7 +250,9 @@ Same meaning as \fBdecode\fR's \fB\-\-no\-promiscuous\fR.
 .TP
 .B \-\-policy \fIFILE\fR
 Zone/conduit policy file. Required. See \fBdocs/MANUAL.md\fR's POLICY FILE
-FORMAT section for the schema.
+FORMAT section for the schema, including the optional per-conduit
+\fBfunctions:\fR (singular alias \fBfunction:\fR) allow-list restricting a
+conduit to specific named functions/services within its one protocol.
 .TP
 .BR \-o ", " \-\-output " " \fIFILE\fR
 Write the report here instead of stdout.

@@ -1,0 +1,20 @@
+# Exercises the 'functions:' allow-list for EtherNet/IP, against
+# tests/sample_policy_functions_enip.pcap (see tools/make_sample_pcap.py's
+# build_policy_functions_enip_sample), which carries two SEPARATE flows: client port 53000 (a
+# Read_Tag request/response only) and client port 53001 (a Write_Tag request/response only). This
+# one conduit only permits "Read_Tag", so validating that capture against this policy must report
+# the 53000 flow ALLOWED (matched conduit) and the 53001 flow a Violation naming "Write_Tag" as
+# the disallowed function observed.
+zones:
+  hmi_zone:
+    networks: [192.168.1.50/32]
+  plc_zone:
+    networks: [192.168.1.10/32]
+
+conduits:
+  - name: "enip read tag only"
+    from: hmi_zone
+    to: plc_zone
+    protocols: [enip]
+    ports: [44818]
+    functions: [Read_Tag]

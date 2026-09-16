@@ -246,4 +246,26 @@ struct CipIoFrame {
 // decode_cpf_and_cip already gives those item types on the TCP side.
 std::optional<CipIoFrame> try_parse_cip_io(ByteSpan udp_payload);
 
+// Returns every canonical CIP service name this decoder can produce for a KNOWN (service code,
+// context) combination -- built from the same cip_service_name(uint8_t,bool,bool,bool) this file's
+// CipMessage decoding itself calls (see enip.cpp), across the specific (have_path, is_symbolic,
+// is_conn_mgr) combinations that reach every name it can return, deduplicated -- excluding the
+// dynamic "Unknown (0xNN)" fallback used for a service code outside every known table. Used by
+// policy.cpp to validate a policy file's 'functions:' entries for an enip-restricted conduit
+// against exactly the strings CipMessage::service_name/DecodedPacket::enip_cip_service_name can
+// actually hold.
+//
+// KNOWN LIMITATION (see enip.hpp's file header comment's SCOPING NOTE): this includes the two
+// genuinely reply-side-ambiguous names ("Unconnected_Send/Read_Tag_Fragmented (reply)",
+// "Forward_Close/Read_Modify_Write_Tag (reply)") as real, listable strings -- a policy author CAN
+// allow-list them explicitly -- but a reply that produces one of them will never match a
+// functions:-restricted conduit that instead lists the request-side name alone (e.g. just
+// "Read_Tag_Fragmented"), since the decoder cannot honestly resolve the ambiguity without having
+// seen the original request. That is the correct, honest behavior for an ambiguous service, not a
+// bug -- do not special-case it in PolicyEngine's matching logic.
+//
+// Order is stable across calls (the order these combinations are tried in, first-seen, deduplicated)
+// but not alphabetized.
+std::vector<std::string> enip_known_cip_service_names();
+
 }  // namespace conduitscope

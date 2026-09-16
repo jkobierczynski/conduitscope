@@ -29,44 +29,65 @@ std::string u_function_name(uint8_t c0) {
 
 // --- ASDU header naming tables --------------------------------------------
 
-std::string iec104_type_name(uint8_t type_id) {
-    switch (type_id) {
-        case 1: return "M_SP_NA_1 (Single-point information)";
-        case 2: return "M_SP_TA_1 (Single-point information with time tag)";
-        case 30: return "M_SP_TB_1 (Single-point information with time tag CP56Time2a)";
-        case 3: return "M_DP_NA_1 (Double-point information)";
-        case 4: return "M_DP_TA_1 (Double-point information with time tag)";
-        case 31: return "M_DP_TB_1 (Double-point information with time tag CP56Time2a)";
-        case 9: return "M_ME_NA_1 (Measured value, normalized value)";
-        case 34: return "M_ME_TD_1 (Measured value, normalized value with time tag CP56Time2a)";
-        case 11: return "M_ME_NB_1 (Measured value, scaled value)";
-        case 35: return "M_ME_TE_1 (Measured value, scaled value with time tag CP56Time2a)";
-        case 13: return "M_ME_NC_1 (Measured value, short floating point)";
-        case 36: return "M_ME_TF_1 (Measured value, short floating point with time tag CP56Time2a)";
-        case 15: return "M_IT_NA_1 (Integrated totals)";
-        case 37: return "M_IT_TB_1 (Integrated totals with time tag CP56Time2a)";
-        case 45: return "C_SC_NA_1 (Single command)";
-        case 58: return "C_SC_TA_1 (Single command with time tag CP56Time2a)";
-        case 46: return "C_DC_NA_1 (Double command)";
-        case 59: return "C_DC_TA_1 (Double command with time tag CP56Time2a)";
-        case 47: return "C_RC_NA_1 (Regulating step command)";
-        case 48: return "C_SE_NA_1 (Set point command, normalized value)";
-        case 61: return "C_SE_TA_1 (Set point command, normalized value with time tag CP56Time2a)";
-        case 49: return "C_SE_NB_1 (Set point command, scaled value)";
-        case 50: return "C_SE_NC_1 (Set point command, short floating point)";
-        case 63: return "C_SE_TC_1 (Set point command, short floating point with time tag CP56Time2a)";
-        case 70: return "M_EI_NA_1 (End of initialization)";
-        case 100: return "C_IC_NA_1 (Interrogation command)";
-        case 101: return "C_CI_NA_1 (Counter interrogation command)";
-        case 102: return "C_RD_NA_1 (Read command)";
-        case 103: return "C_CS_NA_1 (Clock synchronization command)";
-        case 105: return "C_RP_NA_1 (Reset process command)";
-        default: {
-            std::ostringstream s;
-            s << "Unknown (type " << static_cast<unsigned>(type_id) << ")";
-            return s.str();
-        }
+// The single table backing iec104_type_name(uint8_t) (this file, anonymous-namespace-internal),
+// the exported iec104_type_short_name(uint8_t), and iec104_known_asdu_short_names() -- one place
+// ("type ID N means this mnemonic/description") asserts the mapping, not several. `short_name` is
+// the mnemonic conduitscope's policy-matching feature (policy.cpp/PolicyEngine) matches a
+// 'functions:' entry against; `description` is only ever shown composed into type_name's
+// parenthetical, never on its own.
+struct Iec104TypeEntry {
+    uint8_t type_id;
+    const char* short_name;
+    const char* description;
+};
+
+constexpr Iec104TypeEntry kIec104Types[] = {
+    {1, "M_SP_NA_1", "Single-point information"},
+    {2, "M_SP_TA_1", "Single-point information with time tag"},
+    {30, "M_SP_TB_1", "Single-point information with time tag CP56Time2a"},
+    {3, "M_DP_NA_1", "Double-point information"},
+    {4, "M_DP_TA_1", "Double-point information with time tag"},
+    {31, "M_DP_TB_1", "Double-point information with time tag CP56Time2a"},
+    {9, "M_ME_NA_1", "Measured value, normalized value"},
+    {34, "M_ME_TD_1", "Measured value, normalized value with time tag CP56Time2a"},
+    {11, "M_ME_NB_1", "Measured value, scaled value"},
+    {35, "M_ME_TE_1", "Measured value, scaled value with time tag CP56Time2a"},
+    {13, "M_ME_NC_1", "Measured value, short floating point"},
+    {36, "M_ME_TF_1", "Measured value, short floating point with time tag CP56Time2a"},
+    {15, "M_IT_NA_1", "Integrated totals"},
+    {37, "M_IT_TB_1", "Integrated totals with time tag CP56Time2a"},
+    {45, "C_SC_NA_1", "Single command"},
+    {58, "C_SC_TA_1", "Single command with time tag CP56Time2a"},
+    {46, "C_DC_NA_1", "Double command"},
+    {59, "C_DC_TA_1", "Double command with time tag CP56Time2a"},
+    {47, "C_RC_NA_1", "Regulating step command"},
+    {48, "C_SE_NA_1", "Set point command, normalized value"},
+    {61, "C_SE_TA_1", "Set point command, normalized value with time tag CP56Time2a"},
+    {49, "C_SE_NB_1", "Set point command, scaled value"},
+    {50, "C_SE_NC_1", "Set point command, short floating point"},
+    {63, "C_SE_TC_1", "Set point command, short floating point with time tag CP56Time2a"},
+    {70, "M_EI_NA_1", "End of initialization"},
+    {100, "C_IC_NA_1", "Interrogation command"},
+    {101, "C_CI_NA_1", "Counter interrogation command"},
+    {102, "C_RD_NA_1", "Read command"},
+    {103, "C_CS_NA_1", "Clock synchronization command"},
+    {105, "C_RP_NA_1", "Reset process command"},
+};
+
+const Iec104TypeEntry* find_iec104_type(uint8_t type_id) {
+    for (const auto& entry : kIec104Types) {
+        if (entry.type_id == type_id) return &entry;
     }
+    return nullptr;
+}
+
+std::string iec104_type_name(uint8_t type_id) {
+    if (const auto* entry = find_iec104_type(type_id)) {
+        return std::string(entry->short_name) + " (" + entry->description + ")";
+    }
+    std::ostringstream s;
+    s << "Unknown (type " << static_cast<unsigned>(type_id) << ")";
+    return s.str();
 }
 
 std::string iec104_cot_name(uint8_t cot) {
@@ -385,6 +406,20 @@ void decode_iec104_element(uint8_t type_id, Cursor& c, std::string& value, std::
 
 }  // namespace
 
+std::string iec104_type_short_name(uint8_t type_id) {
+    if (const auto* entry = find_iec104_type(type_id)) return entry->short_name;
+    std::ostringstream s;
+    s << "Unknown(" << static_cast<unsigned>(type_id) << ")";
+    return s.str();
+}
+
+std::vector<std::string> iec104_known_asdu_short_names() {
+    std::vector<std::string> out;
+    out.reserve(sizeof(kIec104Types) / sizeof(kIec104Types[0]));
+    for (const auto& entry : kIec104Types) out.push_back(entry.short_name);
+    return out;
+}
+
 std::optional<Iec104Apci> try_parse_iec104_apci(ByteSpan tcp_payload) {
     if (tcp_payload.size() < 6) {
         return std::nullopt;
@@ -478,6 +513,7 @@ Iec104Asdu decode_iec104_asdu(ByteSpan asdu_bytes) {
     Cursor c(asdu_bytes);
     asdu.type_id = c.u8();
     asdu.type_name = iec104_type_name(asdu.type_id);
+    asdu.type_short_name = iec104_type_short_name(asdu.type_id);
 
     uint8_t vsq = c.u8();
     asdu.sq = (vsq & 0x80) != 0;

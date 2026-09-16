@@ -1,0 +1,18 @@
+# Exercises the singular 'function:' alias (mirroring the existing 'protocol:' singular alias) for
+# a one-element 'functions:' list, combined with the singular 'protocol:' alias -- both used
+# together, since 'functions' requires 'protocols' to resolve to exactly one protocol regardless of
+# which spelling produced it. Validated against tests/sample_modbus.pcap, whose one flow only ever
+# carries "Read Holding Registers" -- must report COMPLIANT, matched to this conduit.
+zones:
+  hmi_zone:
+    networks: [192.168.1.50/32]
+  plc_zone:
+    networks: [192.168.1.10/32]
+
+conduits:
+  - name: "singular protocol/function alias"
+    from: hmi_zone
+    to: plc_zone
+    protocol: modbus
+    ports: [502]
+    function: "Read Holding Registers"

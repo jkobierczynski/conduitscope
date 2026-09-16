@@ -1271,6 +1271,7 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                         out.summary += "; " + asdu.summary;
                         out.iec104_has_asdu = true;
                         out.iec104_asdu_type_name = asdu.type_name;
+                        out.iec104_asdu_type_short_name = asdu.type_short_name;
                         out.iec104_cot_name = asdu.cot_name;
                         out.iec104_common_address = asdu.common_address;
                     }

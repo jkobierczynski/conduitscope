@@ -632,18 +632,24 @@ Groundwork / v0.1.0. What works right now:
   deliberately restricted, dependency-free YAML subset -- no vendored YAML
   library, same zero-dependency approach as everything else here) declares
   zones (IPv4 CIDR blocks) and conduits (an allowed protocol+port
-  relationship, in a given direction, between two zones). Every decoded TCP
-  flow in the capture is classified into a zone pair, checked against the
-  policy's conduits, and reported as allowed, a violation, or unclassified
-  (an endpoint matching no declared zone, or a flow with no recognized
-  protocol at all) -- text or JSON output, a distinct exit status for
-  "found problems" vs. "couldn't run" vs. "clean", and a report that also
-  lists any conduit the capture never exercised. Built entirely on top of
-  the decoding layer above (S7comm item tags, decoded DNP3 point values,
-  Modbus address+quantity decoding, and authoritative Modbus request/
-  response pairing are exactly the concrete facts this checks policy
-  against) rather than duplicating any of its parsing. See
-  docs/MANUAL.md's POLICY FILE FORMAT section for the full schema and
+  relationship, in a given direction, between two zones), optionally
+  narrowed with `functions:` to only certain named functions/services
+  within a conduit's one protocol (e.g. Modbus reads but not writes) --
+  matched against the exact function/service name strings each protocol's
+  own decoder emits. Every decoded TCP flow in the capture is classified
+  into a zone pair, checked against the policy's conduits (and, for a
+  `functions`-restricted conduit, checked flow-wide against every distinct
+  function/service observed), and reported as allowed, a violation, or
+  unclassified (an endpoint matching no declared zone, or a flow with no
+  recognized protocol at all) -- text or JSON output, a distinct exit
+  status for "found problems" vs. "couldn't run" vs. "clean", and a report
+  that also lists any conduit the capture never exercised. Built entirely
+  on top of the decoding layer above (S7comm item tags, decoded DNP3 point
+  values, Modbus address+quantity decoding, and authoritative Modbus
+  request/response pairing are exactly the concrete facts this checks
+  policy against) rather than duplicating any of its parsing. See
+  docs/MANUAL.md's POLICY FILE FORMAT section (including its
+  "Function-level restrictions" subsection) for the full schema and
   LIMITATIONS for exactly what it does and doesn't check (e.g. the
   SYN-based flow-direction heuristic's fallback case).
 - Live capture (`decode -i`/`policy validate -i`, plus `conduitscope interfaces`

@@ -1,0 +1,20 @@
+# Exercises the 'functions:' allow-list for S7comm. This one conduit only permits "Read Var".
+# Used against TWO different captures (see CMakeLists.txt):
+#   - tests/sample_s7comm_items.pcap: its one flow only ever carries Read Var -- must report
+#     COMPLIANT, matched to this conduit.
+#   - tests/sample_s7comm.pcap: its one flow carries Setup Communication, Read Var, AND Write Var
+#     -- must report a Violation naming "Setup Communication" and "Write Var" as the disallowed
+#     functions observed (Read Var, also observed there, IS permitted).
+zones:
+  hmi_zone:
+    networks: [192.168.1.50/32]
+  plc_zone:
+    networks: [192.168.1.10/32]
+
+conduits:
+  - name: "s7comm read var only"
+    from: hmi_zone
+    to: plc_zone
+    protocols: [s7comm]
+    ports: [102]
+    functions: [Read Var]

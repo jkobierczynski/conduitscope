@@ -158,6 +158,15 @@ std::string s7comm_rosctr_name(uint8_t rosctr);
 std::string s7comm_function_name(uint8_t function_code);
 std::string s7comm_return_code_name(uint8_t return_code);
 
+// Returns every canonical S7comm function name this decoder can produce for a KNOWN function code
+// (every entry in s7comm.cpp's function-code table, the same table s7comm_function_name(uint8_t)
+// itself looks up) -- excluding the dynamic "Unknown (0xNN)" fallback used for a function code
+// outside that table. Used by policy.cpp to validate a policy file's 'functions:' entries for an
+// s7comm-restricted conduit against exactly the strings S7CommFrame::function_name/
+// DecodedPacket::s7comm_function_name can actually hold. Order is stable across calls (the table's
+// own declaration order) but not alphabetized.
+std::vector<std::string> s7comm_known_function_names();
+
 // Attempts to interpret `cotp_user_data` (the payload of a COTP Data frame) as a CLASSIC S7comm
 // header. Returns std::nullopt (never throws) if the payload is empty or its first byte isn't
 // S7COMM_PROTOCOL_ID (0x32) -- the standard signal that this COTP Data frame is carrying

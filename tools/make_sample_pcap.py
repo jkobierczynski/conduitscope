@@ -2035,6 +2035,62 @@ def build_enip_cip_io_sample():
     (TESTS_DIR / "sample_enip_cip_io.pcap").write_bytes(data)
 
 
+def build_policy_functions_enip_sample():
+    """Minimal fixture for the policy 'functions:' allow-list feature (policy.hpp/policy_engine.cpp)
+    covering EtherNet/IP specifically: unlike every other protocol's existing sample fixtures,
+    sample_enip.pcap's one Read_Tag/Write_Tag round trip happens on a SINGLE TCP flow, so there is
+    no existing capture with a flow that exercises just one CIP service on its own -- needed to
+    demonstrate a functions-restricted conduit passing a compliant flow while flagging a DIFFERENT
+    flow on the same protocol/port/zone-pair as a violation (see PolicyEngine's strict-all function
+    matching in finish()). Two separate flows, one CIP service (request+response) on each:
+      - client port 53000: Read_Tag only.
+      - client port 53001: Write_Tag only.
+    No RegisterSession/ListIdentity handshake -- see build_enip_sample for that; this fixture is
+    deliberately as small as it can be while still giving PolicyEngine two independent flows to
+    tell apart."""
+    packets = []
+    ident = [0x5200]
+
+    def add(from_client: bool, client_port: int, seq: int, ack: int, payload: bytes):
+        if from_client:
+            src_ip, dst_ip = HMI_IP, PLC_IP
+            src_mac, dst_mac = HMI_MAC, PLC_MAC
+            src_port, dst_port = client_port, ENIP_PORT
+        else:
+            src_ip, dst_ip = PLC_IP, HMI_IP
+            src_mac, dst_mac = PLC_MAC, HMI_MAC
+            src_port, dst_port = ENIP_PORT, client_port
+        tcp = tcp_header(src_port, dst_port, seq, ack, TCP_PSH | TCP_ACK, len(payload)) + payload
+        ip = ipv4_header(src_ip, dst_ip, 6, len(tcp), ident[0]) + tcp
+        ident[0] += 1
+        packets.append(eth_header(dst_mac, src_mac, 0x0800) + ip)
+
+    session_handle = 0x99887766
+    ctx = b"CS-PLFN1"
+
+    # Flow A (client port 53000): Read_Tag request/response only.
+    req_a = enip_message(0x006F, data=enip_cpf_unconnected(cip_read_tag_request("Speed", 1)),
+                          session_handle=session_handle, sender_context=ctx)
+    add(True, 53000, 1000, 2000, req_a)
+    resp_a = enip_message(0x006F, data=enip_cpf_unconnected(cip_read_tag_response(0xC4, struct.pack("<i", 7))),
+                           session_handle=session_handle, sender_context=ctx)
+    add(False, 53000, 2000, 1000 + len(req_a), resp_a)
+
+    # Flow B (client port 53001): Write_Tag request/response only.
+    req_b = enip_message(
+        0x006F, data=enip_cpf_unconnected(cip_write_tag_request("Speed", 0xC4, struct.pack("<i", 55), 1)),
+        session_handle=session_handle, sender_context=ctx)
+    add(True, 53001, 3000, 4000, req_b)
+    resp_b = enip_message(0x006F, data=enip_cpf_unconnected(cip_write_tag_response(0x00)),
+                           session_handle=session_handle, sender_context=ctx)
+    add(False, 53001, 4000, 3000 + len(req_b), resp_b)
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_020_000 + i, i * 1000)
+    (TESTS_DIR / "sample_policy_functions_enip.pcap").write_bytes(data)
+
+
 def tpkt_frame(cotp_header: bytes, user_data: bytes = b"") -> bytes:
     """Wraps a COTP header in its length-indicator byte and the 4-byte TPKT
     header, then appends `user_data` (e.g. an S7comm payload) AFTER the
@@ -5758,6 +5814,7 @@ if __name__ == "__main__":
     build_enip_sample()
     build_enip_nop_precedence_sample()
     build_enip_cip_io_sample()
+    build_policy_functions_enip_sample()
     build_profinet_sample()
     build_goose_sample()
     build_sv_sample()
