@@ -14,6 +14,7 @@
 #include "conduitscope/cotp.hpp"
 #include "conduitscope/dnp3.hpp"
 #include "conduitscope/enip.hpp"
+#include "conduitscope/goose.hpp"
 #include "conduitscope/iec104.hpp"
 #include "conduitscope/modbus.hpp"
 #include "conduitscope/pcap_reader.hpp"
@@ -23,13 +24,14 @@
 namespace conduitscope {
 
 enum class ProtocolFilter {
-    Auto,         // opportunistically detect IEC104/Modbus/DNP3/S7comm/EtherNet-IP/PROFINET regardless of port
+    Auto,         // opportunistically detect IEC104/Modbus/DNP3/S7comm/EtherNet-IP/PROFINET/GOOSE regardless of port
     ModbusOnly,   // only attempt Modbus decoding
     Dnp3Only,     // only attempt DNP3 decoding
     S7commOnly,   // only attempt TPKT/COTP/S7comm decoding
     Iec104Only,   // only attempt IEC 60870-5-104 decoding
     EnipOnly,     // only attempt EtherNet/IP (CIP explicit messaging) decoding
     ProfinetOnly, // only attempt PROFINET RT (DCP + cyclic IO data) decoding
+    GooseOnly,    // only attempt IEC 61850-8-1 GOOSE decoding
 };
 
 struct DecodeOptions {
@@ -78,17 +80,19 @@ struct DecodedPacket {
     uint16_t src_port = 0, dst_port = 0;
     std::string tcp_flags;
 
-    // "iec104", "modbus", "dnp3", "s7comm", "enip", "profinet", "cotp" (recognized TPKT/COTP
-    // framing but not S7comm inside it -- e.g. a connection setup frame), "tcp" (recognized
-    // transport, no app-layer match), "udp" (recognized transport, no app-layer protocol decoded
-    // -- see udp.hpp; UDP/2222 CIP I/O traffic that try_parse_cip_io actually recognizes is
-    // promoted to "enip" instead -- see enip_has_io below), "non-tcp" (a non-TCP, non-UDP IPv4
-    // payload, e.g. ICMP), "non-ip" (a non-IPv4 Ethernet frame, e.g. ARP, or a raw-Ethernet OT
-    // protocol this tool doesn't decode like GOOSE/EtherCAT, or a PROFINET RT frame whose
-    // FrameID try_parse_profinet doesn't recognize -- see link_layer.hpp's ethertype_name;
-    // EtherType 0x8892 traffic that try_parse_profinet DOES recognize is promoted to "profinet"
-    // instead -- see profinet_has_dcp/profinet_has_cyclic_data below), "unsupported-link", or
-    // "parse-error".
+    // "iec104", "modbus", "dnp3", "s7comm", "enip", "profinet", "goose", "cotp" (recognized
+    // TPKT/COTP framing but not S7comm inside it -- e.g. a connection setup frame), "tcp"
+    // (recognized transport, no app-layer match), "udp" (recognized transport, no app-layer
+    // protocol decoded -- see udp.hpp; UDP/2222 CIP I/O traffic that try_parse_cip_io actually
+    // recognizes is promoted to "enip" instead -- see enip_has_io below), "non-tcp" (a non-TCP,
+    // non-UDP IPv4 payload, e.g. ICMP), "non-ip" (a non-IPv4 Ethernet frame, e.g. ARP, or a
+    // raw-Ethernet OT protocol this tool doesn't decode like EtherCAT or IEC 61850-9-2 Sampled
+    // Values, or a PROFINET RT frame whose FrameID try_parse_profinet doesn't recognize, or a
+    // GOOSE frame whose outer APDU tag try_parse_goose doesn't recognize -- see link_layer.hpp's
+    // ethertype_name; EtherType 0x8892 traffic that try_parse_profinet DOES recognize is promoted
+    // to "profinet" instead -- see profinet_has_dcp/profinet_has_cyclic_data below; EtherType
+    // 0x88B8 traffic that try_parse_goose DOES recognize is promoted to "goose" instead -- see
+    // goose_has_pdu/goose_is_gse_management below), "unsupported-link", or "parse-error".
     std::string protocol;
     std::string summary;
     std::vector<std::string> notes;
@@ -195,6 +199,27 @@ struct DecodedPacket {
     uint16_t profinet_cyclic_cycle_counter = 0;
     std::string profinet_cyclic_data_status_summary;
     uint8_t profinet_cyclic_transfer_status = 0;
+
+    // Only set when protocol == "goose" -- see try_parse_goose in goose.hpp. Like PROFINET RT
+    // above, GOOSE rides directly on raw Ethernet (EtherType 0x88B8, has_ip stays false), so there
+    // is no src_ip/dst_ip/src_port/dst_port for it -- src_mac/dst_mac (above) are the only
+    // addressing this packet carries. GOOSE traffic is commonly multicast to a well-known MAC
+    // range (01-0C-CD-01-xx-xx) and/or 802.1Q priority-tagged -- see has_vlan_tag/vlan_id above.
+    bool goose_is_gse_management = false;  // outer APDU tag 0xA0 -- named only, fields below unset
+    bool goose_has_pdu = false;            // outer APDU tag 0x61 -- IECGoosePdu decoded, fields below set
+    uint16_t goose_appid = 0;              // always set when protocol == "goose"
+    bool goose_simulated = false;          // header S-bit set, or the PDU's own simulation field true
+    std::string goose_gocb_ref;
+    std::string goose_dat_set;
+    std::string goose_go_id;               // empty when the optional goID field wasn't present
+    uint64_t goose_st_num = 0;
+    uint64_t goose_sq_num = 0;
+    uint64_t goose_conf_rev = 0;
+    uint64_t goose_num_dat_set_entries = 0;
+    // One entry per decoded allData value (e.g. "0: boolean=false", "6.1: bit-string=13-bit
+    // 0b0000000000000"), capped at 50 entries for the same reason as profinet_dcp_blocks/
+    // enip_cip_values -- see goose.hpp's GooseDataValue for the dotted-path scheme.
+    std::vector<std::string> goose_all_data;
 };
 
 // Cross-packet DNP3 fragment-reassembly state for one directional TCP flow (src ip:port -> dst

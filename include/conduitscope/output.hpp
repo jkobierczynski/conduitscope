@@ -80,6 +80,9 @@ private:
     std::map<std::string, size_t> profinet_frame_id_counts_;
     size_t profinet_dcp_count_ = 0;
     size_t profinet_cyclic_count_ = 0;
+    size_t goose_pdu_count_ = 0;
+    size_t goose_gse_management_count_ = 0;
+    size_t goose_simulated_count_ = 0;
     bool has_ts_ = false;
     double first_ts_ = 0.0, last_ts_ = 0.0;
 };

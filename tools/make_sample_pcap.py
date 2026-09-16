@@ -763,6 +763,241 @@ def build_profinet_sample():
     (TESTS_DIR / "sample_profinet.pcap").write_bytes(data)
 
 
+def ber_length(n: int) -> bytes:
+    """BER length octets for a content length of `n` bytes -- short form (one byte, 0-127) or
+    long form (a byte with the top bit set and the low 7 bits giving how many big-endian length
+    bytes follow) -- see goose.cpp's read_ber_length."""
+    if n < 128:
+        return bytes([n])
+    length_bytes = []
+    v = n
+    while v > 0:
+        length_bytes.insert(0, v & 0xFF)
+        v >>= 8
+    return bytes([0x80 | len(length_bytes)]) + bytes(length_bytes)
+
+
+def ber_tlv(tag: int, content: bytes) -> bytes:
+    """One BER TLV: tag(1) + BER length + content."""
+    return bytes([tag]) + ber_length(len(content)) + content
+
+
+def ber_int(value: int) -> bytes:
+    """Minimal-length big-endian two's-complement BER INTEGER content bytes for `value` -- see
+    goose.cpp's decode_ber_integer."""
+    n_bytes = 1
+    while True:
+        try:
+            return value.to_bytes(n_bytes, "big", signed=True)
+        except OverflowError:
+            n_bytes += 1
+
+
+def utctime_bytes(seconds: int, fraction24: int, quality: int) -> bytes:
+    """The 8-byte UtcTime encoding: Seconds(4) + Fraction-of-second(3) + TimeQuality(1), all
+    big-endian -- see goose.hpp's file header comment's UtcTime paragraph."""
+    return struct.pack("!I", seconds) + fraction24.to_bytes(3, "big") + bytes([quality])
+
+
+# --- GOOSE allData "Data" choice value builders -- see goose.hpp's file header comment's allData
+# paragraph for the tag table each of these matches. ------------------------------------------
+def data_bool(v: bool) -> bytes: return ber_tlv(0x83, b"\x01" if v else b"\x00")
+def data_bitstring(unused: int, bits: bytes) -> bytes: return ber_tlv(0x84, bytes([unused]) + bits)
+def data_int(v: int) -> bytes: return ber_tlv(0x85, ber_int(v))
+def data_unsigned(v: int) -> bytes: return ber_tlv(0x86, ber_int(v))
+def data_float_single(f: float) -> bytes: return ber_tlv(0x87, bytes([8]) + struct.pack("!f", f))
+def data_float_double(f: float) -> bytes: return ber_tlv(0x87, bytes([11]) + struct.pack("!d", f))
+def data_real_raw(raw: bytes) -> bytes: return ber_tlv(0x88, raw)
+def data_octet_string(b: bytes) -> bytes: return ber_tlv(0x89, b)
+def data_visible_string(s: str) -> bytes: return ber_tlv(0x8A, s.encode("ascii"))
+def data_binary_time_raw(raw: bytes) -> bytes: return ber_tlv(0x8C, raw)
+def data_bcd(v: int) -> bytes: return ber_tlv(0x8D, ber_int(v))
+def data_boolean_array(unused: int, bits: bytes) -> bytes: return ber_tlv(0x8E, bytes([unused]) + bits)
+def data_obj_id_raw(raw: bytes) -> bytes: return ber_tlv(0x8F, raw)
+def data_mms_string(s: str) -> bytes: return ber_tlv(0x90, s.encode("ascii"))
+def data_utc_time(seconds: int, fraction24: int, quality: int) -> bytes:
+    return ber_tlv(0x91, utctime_bytes(seconds, fraction24, quality))
+def data_structure(children: bytes) -> bytes: return ber_tlv(0xA2, children)
+def data_array(children: bytes) -> bytes: return ber_tlv(0xA1, children)
+def data_unrecognized(tag: int, raw: bytes) -> bytes: return ber_tlv(tag, raw)
+
+
+def goose_pdu(gocb_ref: str, time_allowed_to_live: int, dat_set: str, go_id, t_bytes: bytes,
+              st_num: int, sq_num: int, simulation, conf_rev: int, nds_com,
+              num_dat_set_entries: int, all_data: bytes) -> bytes:
+    """Builds the 0x61-tagged IECGoosePdu -- fields in IECGoosePdu_sequence order (see goose.hpp's
+    file header comment). `go_id`/`simulation`/`nds_com` are optional per spec -- pass None to
+    omit that field entirely (exercises try_parse_goose's optional-field-absence path).
+    `num_dat_set_entries` is passed explicitly, independent of `all_data`'s actual content, so a
+    caller can deliberately mismatch them (see decode_goose_pdu's cross-check note)."""
+    parts = [
+        ber_tlv(0x80, gocb_ref.encode("ascii")),
+        ber_tlv(0x81, ber_int(time_allowed_to_live)),
+        ber_tlv(0x82, dat_set.encode("ascii")),
+    ]
+    if go_id is not None:
+        parts.append(ber_tlv(0x83, go_id.encode("ascii")))
+    parts.append(ber_tlv(0x84, t_bytes))
+    parts.append(ber_tlv(0x85, ber_int(st_num)))
+    parts.append(ber_tlv(0x86, ber_int(sq_num)))
+    if simulation is not None:
+        parts.append(ber_tlv(0x87, b"\x01" if simulation else b"\x00"))
+    parts.append(ber_tlv(0x88, ber_int(conf_rev)))
+    if nds_com is not None:
+        parts.append(ber_tlv(0x89, b"\x01" if nds_com else b"\x00"))
+    parts.append(ber_tlv(0x8A, ber_int(num_dat_set_entries)))
+    parts.append(ber_tlv(0xAB, all_data))
+    return ber_tlv(0x61, b"".join(parts))
+
+
+def goose_frame(appid: int, apdu: bytes, dst: bytes = None, src: bytes = None, vlan_tci=None,
+                 reserved1: int = 0, declared_length=None) -> bytes:
+    """One raw-Ethernet GOOSE frame: EtherType 0x88B8 (optionally after one 802.1Q VLAN tag when
+    `vlan_tci` is given, e.g. real GOOSE traffic's common priority-tagging -- see goose.hpp's file
+    header comment), then the 8-byte APPID/Length/Reserved1/Reserved2 header, then `apdu`.
+    `declared_length` overrides the header's own Length field when given (for exercising the
+    "Length field is implausible" path); it defaults to the real total (8 + len(apdu))."""
+    dst = dst if dst is not None else PLC_MAC
+    src = src if src is not None else HMI_MAC
+    length = declared_length if declared_length is not None else (8 + len(apdu))
+    header = struct.pack("!HHHH", appid, length, reserved1, 0) + apdu
+    if vlan_tci is not None:
+        return struct.pack("!6s6sHH", dst, src, 0x8100, vlan_tci) + struct.pack("!H", 0x88B8) + header
+    return eth_header(dst, src, 0x88B8) + header
+
+
+def build_goose_sample():
+    """IEC 61850-8-1 GOOSE (EtherType 0x88B8): the ASN.1 BER-encoded GOOSE PDU (gocbRef/datSet/
+    goID/timestamp/stNum/sqNum/simulation/confRev/ndsCom/allData) and the allData dataset's own
+    recursive "Data" values. See goose.hpp's file header comment for the exact wire format each
+    packet below exercises (independently cross-checked against Wireshark's packet-goose.c, not
+    reverse-engineered from a single example), and tests/real_captures/goose/ATTRIBUTION.md for
+    which of these paths a real capture also validates vs. which are synthetic-only."""
+    packets = []
+    ts_field = utctime_bytes(0x386EBBF3, 0x421728, 0x0A)  # a real device's own 't' bytes (see
+                                                            # tests/real_captures/goose/ATTRIBUTION.md)
+
+    # 1) A baseline full-field GOOSE PDU -- every field present (including the three optional
+    #    ones), boolean + bit-string allData, matching the shape every real capture checked while
+    #    building this decoder actually used (see ATTRIBUTION.md).
+    all_data_1 = data_bool(False) + data_bitstring(3, bytes([0x00, 0x00])) + data_bool(True) + data_bitstring(3, bytes([0x20, 0x00]))
+    pdu1 = goose_pdu("IED1/LLN0$GO$gcb01", 2000, "IED1/LLN0$GOOSE1", "gcb01", ts_field,
+                      1, 1, False, 1, False, 4, all_data_1)
+    packets.append(goose_frame(0x0001, pdu1))
+
+    # 2) Every optional field (goID, simulation, ndsCom) OMITTED entirely -- exercises
+    #    try_parse_goose's optional-field-absence path (spec-legal; no real capture checked ever
+    #    did this -- see ATTRIBUTION.md).
+    pdu2 = goose_pdu("IED1/LLN0$GO$gcb02", 2000, "IED1/LLN0$GOOSE2", None, ts_field,
+                      1, 1, None, 1, None, 1, data_bool(True))
+    packets.append(goose_frame(0x0002, pdu2))
+
+    # 3) Header S-bit set ("Simulated") but the PDU's own simulation field is explicitly false --
+    #    the inconsistency Wireshark's own ei_goose_invalid_sim flags (see goose.hpp's file header
+    #    comment and try_parse_goose's mismatch note).
+    pdu3 = goose_pdu("IED1/LLN0$GO$gcb03", 2000, "IED1/LLN0$GOOSE3", None, ts_field,
+                      1, 1, False, 1, None, 1, data_bool(False))
+    packets.append(goose_frame(0x0003, pdu3, reserved1=0x8000))
+
+    # 4) Header S-bit set AND the PDU's own simulation field true -- consistent, no mismatch note;
+    #    goose_simulated ends up true either way.
+    pdu4 = goose_pdu("IED1/LLN0$GO$gcb04", 2000, "IED1/LLN0$GOOSE4", None, ts_field,
+                      1, 1, True, 1, None, 1, data_bool(False))
+    packets.append(goose_frame(0x0004, pdu4, reserved1=0x8000))
+
+    # 5) Every allData "Data" choice type this decoder value-decodes that no real capture checked
+    #    ever exercised (see ATTRIBUTION.md): integer (negative, to exercise sign-extension),
+    #    unsigned, bcd, floating-point single AND double precision, octet-string, visible-string,
+    #    mMSString, and a nested utc-time value.
+    all_data_5 = (
+        data_int(-5) + data_unsigned(70000) + data_bcd(42) +
+        data_float_single(3.5) + data_float_double(-2.25) +
+        data_octet_string(bytes([0xDE, 0xAD, 0xBE, 0xEF])) +
+        data_visible_string("hello") + data_mms_string("world") +
+        data_utc_time(0x386EBBF3, 0x800000, 0x27)
+    )
+    pdu5 = goose_pdu("IED2/LLN0$GO$gcb05", 5000, "IED2/LLN0$GOOSE5", "gcb05", ts_field,
+                      3, 1, None, 2, None, 9, all_data_5)
+    packets.append(goose_frame(0x1005, pdu5))
+
+    # 6) Nested structure/array -- a structure of [boolean, integer] followed by an array of two
+    #    floating-point values -- exercises decode_data_sequence's recursion and the dotted
+    #    "N.M" path scheme (GooseDataValue::path).
+    inner_structure = data_bool(True) + data_int(7)
+    inner_array = data_float_single(1.5) + data_float_single(2.5)
+    all_data_6 = data_structure(inner_structure) + data_array(inner_array)
+    pdu6 = goose_pdu("IED2/LLN0$GO$gcb06", 5000, "IED2/LLN0$GOOSE6", None, ts_field,
+                      1, 1, None, 1, None, 2, all_data_6)
+    packets.append(goose_frame(0x1006, pdu6))
+
+    # 7) Types this decoder recognizes by name but deliberately never value-decodes (real ASN.1
+    #    REAL, binary-time, objId -- see goose.hpp's file header comment), plus one entirely
+    #    unrecognized tag (0x95) -- all four show as raw hex, and the unrecognized one also
+    #    triggers a "tag not recognized" note (type_name left empty).
+    all_data_7 = (
+        data_real_raw(bytes([0x01, 0x02, 0x03])) +
+        data_binary_time_raw(bytes([0x00, 0x00, 0x00, 0x01])) +
+        data_obj_id_raw(bytes([0x28, 0x01, 0x02])) +
+        data_unrecognized(0x95, bytes([0xFF, 0xEE]))
+    )
+    pdu7 = goose_pdu("IED2/LLN0$GO$gcb07", 5000, "IED2/LLN0$GOOSE7", None, ts_field,
+                      1, 1, None, 1, None, 4, all_data_7)
+    packets.append(goose_frame(0x1007, pdu7))
+
+    # 8) numDatSetEntries declares 5 but allData actually carries only 2 top-level values --
+    #    exercises decode_goose_pdu's mismatch-count note.
+    pdu8 = goose_pdu("IED2/LLN0$GO$gcb08", 5000, "IED2/LLN0$GOOSE8", None, ts_field,
+                      1, 1, None, 1, None, 5, data_bool(True) + data_bool(False))
+    packets.append(goose_frame(0x1008, pdu8))
+
+    # 9) A GSE Management PDU (outer APDU tag 0xA0, GetReferenceRequest/Response -- an
+    #    engineering-tool query/response exchange) -- named only, not decoded further; out of this
+    #    release's scope (see goose.hpp's file header comment).
+    gse_mgmt_apdu = ber_tlv(0xA0, bytes([0x80, 0x02, 0x00, 0x01]))  # arbitrary placeholder content
+    packets.append(goose_frame(0x2000, gse_mgmt_apdu))
+
+    # 10) 802.1Q VLAN-priority-tagged GOOSE, and a multicast destination MAC in the well-known
+    #     GOOSE range (01-0C-CD-01-xx-xx) -- real GOOSE traffic's common framing (see goose.hpp's
+    #     file header comment and tests/real_captures/goose/ATTRIBUTION.md's VLAN-tagged real
+    #     frame), confirming parse_ethernet's single-VLAN-tag unwrap composes correctly with GOOSE
+    #     detection (mirroring PROFINET RT's own untagged-only synthetic coverage -- this is
+    #     GOOSE's dedicated VLAN test).
+    pdu10 = goose_pdu("IED3/LLN0$GO$gcb10", 2000, "IED3/LLN0$GOOSE10", None, ts_field,
+                       1, 1, None, 1, None, 1, data_bool(True))
+    packets.append(goose_frame(0x3001, pdu10, dst=bytes.fromhex("010ccd010001"),
+                                src=bytes.fromhex("000c291a2b3c"), vlan_tci=0x8000))
+
+    # 11) Header too short for even the fixed 8-byte APPID/Length/Reserved1/Reserved2 -- must not
+    #     crash, falls through to the generic "non-ip" ethertype-name-only report.
+    packets.append(eth_header(PLC_MAC, HMI_MAC, 0x88B8) + bytes([0x00, 0x01, 0x00, 0x02]))
+
+    # 12) A full 8-byte header but the byte immediately after it is neither 0x61 nor 0xA0 -- must
+    #     NOT be misdetected as GOOSE; falls through to the generic "non-ip" report, same as
+    #     tests/sample_link_transport_layers.pcap's own 0x88B8 packet (arbitrary 0xBB bytes).
+    packets.append(eth_header(PLC_MAC, HMI_MAC, 0x88B8) + struct.pack("!HHHH", 0x0009, 10, 0, 0) +
+                    bytes([0x99, 0x01, 0x02, 0x03]))
+
+    # 13) Length field declares fewer than 8 bytes (bogus per packet-goose.c's own
+    #     ei_goose_bogus_length check) -- falls back to "use all available bytes instead", still
+    #     decodes correctly, with a note.
+    pdu13 = goose_pdu("IED4/LLN0$GO$gcb13", 2000, "IED4/LLN0$GOOSE13", None, ts_field,
+                       1, 1, None, 1, None, 1, data_bool(True))
+    packets.append(goose_frame(0x1013, pdu13, declared_length=3))
+
+    # 14) The outer APDU TLV's own declared length exceeds what's actually present (a
+    #     snaplen-truncated capture, most plausibly) -- decodes nothing from the PDU fields
+    #     (there's nothing complete to decode) but is still confidently recognized as "goose"
+    #     rather than falling back to "non-ip", with a truncation note. Built by hand rather than
+    #     via goose_pdu/goose_frame, since this needs a genuinely inconsistent outer length.
+    truncated_apdu = bytes([0x61]) + ber_length(200) + ber_tlv(0x80, b"IED5/LLN0$GO$gcb14")
+    packets.append(goose_frame(0x1014, truncated_apdu))
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_002_800 + i, i * 1000)
+    (TESTS_DIR / "sample_goose.pcap").write_bytes(data)
+
+
 ENIP_PORT = 44818
 
 
@@ -1584,6 +1819,7 @@ if __name__ == "__main__":
     build_enip_nop_precedence_sample()
     build_enip_cip_io_sample()
     build_profinet_sample()
+    build_goose_sample()
     build_s7comm_sample()
     build_s7comm_items_sample()
     build_s7comm_1200sym_sample()

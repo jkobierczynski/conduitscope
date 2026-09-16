@@ -8,6 +8,7 @@
 #include "conduitscope/cotp.hpp"
 #include "conduitscope/dnp3.hpp"
 #include "conduitscope/enip.hpp"
+#include "conduitscope/goose.hpp"
 #include "conduitscope/iec104.hpp"
 #include "conduitscope/ipv4.hpp"
 #include "conduitscope/link_layer.hpp"
@@ -525,6 +526,40 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                             out.profinet_cyclic_cycle_counter = pn->cyclic_cycle_counter;
                             out.profinet_cyclic_data_status_summary = pn->cyclic_data_status_summary;
                             out.profinet_cyclic_transfer_status = pn->cyclic_transfer_status;
+                        }
+                        return out;
+                    }
+                }
+
+                // IEC 61850-8-1 GOOSE (EtherType 0x88B8), same rationale/pattern as PROFINET RT
+                // above: port-independent, try_parse_goose's own outer-APDU-tag check is this
+                // decoder's structural gate (see goose.hpp's file header comment).
+                bool want_goose = options_.protocol_filter == ProtocolFilter::Auto ||
+                                   options_.protocol_filter == ProtocolFilter::GooseOnly;
+                if (want_goose && eth.ethertype == ETHERTYPE_IEC61850_GOOSE) {
+                    if (auto gs = try_parse_goose(eth.payload)) {
+                        out.protocol = "goose";
+                        out.summary = gs->summary;
+                        out.goose_appid = gs->appid;
+                        out.goose_is_gse_management = gs->is_gse_management;
+                        out.goose_has_pdu = gs->has_pdu;
+                        for (const auto& n : gs->notes) out.notes.push_back(n);
+
+                        if (gs->has_pdu) {
+                            out.goose_simulated = gs->header_simulated || (gs->simulation && *gs->simulation);
+                            out.goose_gocb_ref = gs->gocb_ref;
+                            out.goose_dat_set = gs->dat_set;
+                            if (gs->go_id) out.goose_go_id = *gs->go_id;
+                            out.goose_st_num = gs->st_num;
+                            out.goose_sq_num = gs->sq_num;
+                            out.goose_conf_rev = gs->conf_rev;
+                            out.goose_num_dat_set_entries = gs->num_dat_set_entries;
+                            constexpr size_t kMaxGooseDataValueEntries = 50;
+                            for (const auto& v : gs->all_data) {
+                                if (out.goose_all_data.size() >= kMaxGooseDataValueEntries) break;
+                                std::string label = !v.type_name.empty() ? v.type_name : "raw";
+                                out.goose_all_data.push_back(v.path + ": " + label + "=" + v.value);
+                            }
                         }
                         return out;
                     }

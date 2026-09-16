@@ -199,6 +199,7 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
                                : (protocol == "iec104") ? ProtocolFilter::Iec104Only
                                : (protocol == "enip")   ? ProtocolFilter::EnipOnly
                                : (protocol == "profinet") ? ProtocolFilter::ProfinetOnly
+                               : (protocol == "goose")  ? ProtocolFilter::GooseOnly
                                                         : ProtocolFilter::Auto;
     for (int p : modbus_ports) options.extra_modbus_ports.push_back(static_cast<uint16_t>(p));
     for (int p : dnp3_ports) options.extra_dnp3_ports.push_back(static_cast<uint16_t>(p));
@@ -472,7 +473,7 @@ int main(int argc, char** argv) {
     decode_cmd
         ->add_option("--protocol", decode_protocol,
                       "Restrict decoding to one protocol instead of auto-detecting all of them")
-        ->transform(CLI::IsMember({"auto", "modbus", "dnp3", "s7comm", "iec104", "enip", "profinet"}))
+        ->transform(CLI::IsMember({"auto", "modbus", "dnp3", "s7comm", "iec104", "enip", "profinet", "goose"}))
         ->capture_default_str();
     decode_cmd->add_option("--modbus-port", decode_modbus_ports,
                             "Additional TCP port to treat as expected for Modbus (repeatable); "

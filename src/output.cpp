@@ -60,6 +60,7 @@ constexpr const char* kBlue = "\033[34m";
 constexpr const char* kGreen = "\033[32m";
 constexpr const char* kYellow = "\033[33m";
 constexpr const char* kBrightCyan = "\033[96m";
+constexpr const char* kBrightGreen = "\033[92m";
 
 // Color for a packet's "[protocol]" tag -- picked so a mixed-protocol capture scans quickly by
 // eye, not for any deeper meaning. parse-error is the one exception: it gets the same "something
@@ -73,6 +74,7 @@ const char* protocol_tag_color(const std::string& protocol) {
     if (protocol == "iec104") return kGreen;
     if (protocol == "enip") return kYellow;
     if (protocol == "profinet") return kBrightCyan;
+    if (protocol == "goose") return kBrightGreen;
     if (protocol == "parse-error") return kBoldRed;
     return kDim;  // tcp / udp / non-tcp / non-ip / unsupported-link: recognized, nothing OT-specific
 }
@@ -236,6 +238,30 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
         out_ << "    \"profinet_cyclic_transfer_status\": " << static_cast<unsigned>(p.profinet_cyclic_transfer_status)
              << ",\n";
     }
+    if (p.protocol == "goose") {
+        std::ostringstream appid;
+        appid << "0x" << std::hex << std::uppercase << std::setw(4) << std::setfill('0') << p.goose_appid;
+        out_ << "    \"goose_appid\": \"" << appid.str() << "\",\n";
+        out_ << "    \"goose_is_gse_management\": " << (p.goose_is_gse_management ? "true" : "false") << ",\n";
+    }
+    if (p.goose_has_pdu) {
+        out_ << "    \"goose_simulated\": " << (p.goose_simulated ? "true" : "false") << ",\n";
+        out_ << "    \"goose_gocb_ref\": \"" << json_escape(p.goose_gocb_ref) << "\",\n";
+        out_ << "    \"goose_dat_set\": \"" << json_escape(p.goose_dat_set) << "\",\n";
+        if (!p.goose_go_id.empty()) out_ << "    \"goose_go_id\": \"" << json_escape(p.goose_go_id) << "\",\n";
+        out_ << "    \"goose_st_num\": " << p.goose_st_num << ",\n";
+        out_ << "    \"goose_sq_num\": " << p.goose_sq_num << ",\n";
+        out_ << "    \"goose_conf_rev\": " << p.goose_conf_rev << ",\n";
+        out_ << "    \"goose_num_dat_set_entries\": " << p.goose_num_dat_set_entries << ",\n";
+        if (!p.goose_all_data.empty()) {
+            out_ << "    \"goose_all_data\": [";
+            for (size_t i = 0; i < p.goose_all_data.size(); ++i) {
+                if (i != 0) out_ << ", ";
+                out_ << "\"" << json_escape(p.goose_all_data[i]) << "\"";
+            }
+            out_ << "],\n";
+        }
+    }
     out_ << "    \"notes\": [";
     for (size_t i = 0; i < p.notes.size(); ++i) {
         if (i != 0) out_ << ", ";
@@ -291,6 +317,11 @@ void StatsWriter::write_packet(const DecodedPacket& p) {
         profinet_frame_id_counts_[p.profinet_frame_id_name]++;
         if (p.profinet_has_dcp) profinet_dcp_count_++;
         if (p.profinet_has_cyclic_data) profinet_cyclic_count_++;
+    }
+    if (p.protocol == "goose") {
+        if (p.goose_has_pdu) goose_pdu_count_++;
+        if (p.goose_is_gse_management) goose_gse_management_count_++;
+        if (p.goose_simulated) goose_simulated_count_++;
     }
     if (!has_ts_) {
         first_ts_ = last_ts_ = p.timestamp;
@@ -360,6 +391,11 @@ void StatsWriter::print_summary(std::ostream& out) const {
         }
         out << "profinet dcp messages: " << profinet_dcp_count_ << "\n";
         out << "profinet cyclic rt io datagrams: " << profinet_cyclic_count_ << "\n";
+    }
+    if (goose_pdu_count_ > 0 || goose_gse_management_count_ > 0) {
+        out << "goose pdus: " << goose_pdu_count_ << "\n";
+        out << "goose gse management pdus (not decoded further): " << goose_gse_management_count_ << "\n";
+        out << "goose simulated (S-bit or simulation field set): " << goose_simulated_count_ << "\n";
     }
 }
 

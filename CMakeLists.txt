@@ -32,6 +32,7 @@ add_library(conduitscope_core STATIC
   src/iec104.cpp
   src/enip.cpp
   src/profinet.cpp
+  src/goose.cpp
   src/cotp.cpp
   src/s7comm.cpp
   src/decoder.cpp
@@ -884,6 +885,153 @@ add_test(NAME real_profinet_change_ip_set_request_ip_parameter_decoded
   COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/profinet/profinet_change_ip_using_dcp.pcap")
 set_tests_properties(real_profinet_change_ip_set_request_ip_parameter_decoded PROPERTIES
   PASS_REGULAR_EXPRESSION "\"profinet_dcp_blocks\": \\[\"IPParameter=ip=192.168.0.10 subnet=255.255.255.0 gateway=192.168.0.1\"\\]")
+
+# --------------------------------------------------------------------------
+# IEC 61850-8-1 GOOSE (synthetic, tests/sample_goose.pcap): the ASN.1 BER-encoded GOOSE PDU and
+# its recursive allData "Data" values -- see tools/make_sample_pcap.py's build_goose_sample for
+# the exact byte layout each assertion below is checking, and goose.hpp's file header comment for
+# the decoder itself. Like PROFINET RT, GOOSE rides directly on raw Ethernet (EtherType 0x88B8) --
+# there is no IP/TCP/UDP layer at all.
+# --------------------------------------------------------------------------
+add_test(NAME goose_full_field_pdu_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_goose.pcap" --format text)
+set_tests_properties(goose_full_field_pdu_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[goose\\]  GOOSE IED1/LLN0\\$GO\\$gcb01 goID=\"gcb01\" stNum=1 sqNum=1 confRev=1")
+
+add_test(NAME goose_optional_fields_absent_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_goose.pcap" --format text)
+set_tests_properties(goose_optional_fields_absent_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "GOOSE IED1/LLN0\\$GO\\$gcb02 stNum=1 sqNum=1 confRev=1\n")
+
+add_test(NAME goose_header_sbit_simulation_mismatch_noted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_goose.pcap" --format text)
+set_tests_properties(goose_header_sbit_simulation_mismatch_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "gcb03.*\\[SIMULATED\\][^\n]*\n *note: header S-bit \\(Reserved1 0x8000, \"Simulated\"\\) is set but the PDU's own simulation field is false")
+
+# The S-bit and the PDU's own simulation field are BOTH true here -- consistent, so no mismatch
+# note should appear (a regression here would mean the mismatch check fires on every simulated
+# frame, not just an inconsistent one).
+add_test(NAME goose_header_sbit_simulation_consistent_no_mismatch_note
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_goose.pcap" --format text)
+set_tests_properties(goose_header_sbit_simulation_consistent_no_mismatch_note PROPERTIES
+  PASS_REGULAR_EXPRESSION "gcb04.*\\[SIMULATED\\]\n"
+  FAIL_REGULAR_EXPRESSION "gcb04[^\n]*\n *note: header S-bit")
+
+# allData Data-choice types no real capture checked ever exercised (see tests/real_captures/goose/
+# ATTRIBUTION.md's "gaps" section): integer (negative, sign-extension), unsigned, bcd,
+# floating-point single AND double precision, octet-string, visible-string, mMSString, utc-time.
+add_test(NAME goose_all_data_type_diversity_decoded_in_json
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_goose.pcap")
+set_tests_properties(goose_all_data_type_diversity_decoded_in_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "0: integer=-5.*1: unsigned=70000.*2: bcd=42.*3: floating-point=3.5f \\(single precision\\).*4: floating-point=-2.25 \\(double precision\\).*5: octet-string=de ad be ef.*6: visible-string=hello.*7: mMSString=world.*8: utc-time=946781171")
+
+add_test(NAME goose_utc_time_data_value_quality_bits_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_goose.pcap")
+set_tests_properties(goose_utc_time_data_value_quality_bits_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "utc-time=946781171.500000000s accuracy=7-bit \\[ClockNotSynchronized\\]")
+
+# Nested structure (a boolean + an integer) followed by a nested array (two floats) -- exercises
+# decode_data_sequence's recursion, the dotted "N.M" path scheme, and the container-entry's own
+# rendered child count.
+add_test(NAME goose_nested_structure_array_decoded_in_json
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_goose.pcap")
+set_tests_properties(goose_nested_structure_array_decoded_in_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "0: structure=\\(2 flattened value\\(s\\) follow\\).*0.0: boolean=true.*0.1: integer=7.*1: array=\\(2 flattened value\\(s\\) follow\\).*1.0: floating-point=1.5f \\(single precision\\).*1.1: floating-point=2.5f \\(single precision\\)")
+
+# Types this decoder names but deliberately never value-decodes (real/binary-time/objId) show as
+# raw hex WITHOUT a note (they're recognized, just out of scope); the one truly unrecognized tag
+# (0x95) shows as raw hex AND triggers a "tag not recognized" note.
+add_test(NAME goose_named_but_not_decoded_data_types_shown_as_raw_hex
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_goose.pcap")
+set_tests_properties(goose_named_but_not_decoded_data_types_shown_as_raw_hex PROPERTIES
+  PASS_REGULAR_EXPRESSION "0: real=01 02 03.*1: binary-time=00 00 00 01.*2: objId=28 01 02.*3: raw=ff ee")
+
+add_test(NAME goose_unrecognized_data_tag_noted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_goose.pcap" --format text)
+set_tests_properties(goose_unrecognized_data_tag_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "note: allData\\[3\\]: tag not recognized -- raw hex: ff ee")
+
+add_test(NAME goose_num_dat_set_entries_mismatch_noted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_goose.pcap" --format text)
+set_tests_properties(goose_num_dat_set_entries_mismatch_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "note: numDatSetEntries declares 5 but 2 top-level Data value\\(s\\) were actually found in allData")
+
+add_test(NAME goose_gse_management_named_only
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_goose.pcap" --format text)
+set_tests_properties(goose_gse_management_named_only PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[goose\\]  GOOSE: GSE Management PDU \\(appid=0x2000\\) -- not decoded further")
+
+add_test(NAME goose_vlan_tagged_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_goose.pcap" --format text)
+set_tests_properties(goose_vlan_tagged_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "GOOSE IED3/LLN0\\$GO\\$gcb10 stNum=1 sqNum=1 confRev=1")
+
+# A GOOSE frame too short for even the fixed 8-byte APPID/Length/Reserved1/Reserved2 header must
+# NOT be misdetected -- falls through to the generic "non-ip" ethertype-name-only report, same as
+# tests/sample_link_transport_layers.pcap's own 0x88B8 coverage.
+add_test(NAME goose_truncated_header_falls_back_to_non_ip
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_goose.pcap" --format text)
+set_tests_properties(goose_truncated_header_falls_back_to_non_ip PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[non-ip\\]  Ethernet frame with ethertype 0x88b8 \\(IEC 61850-8-1 GOOSE\\) \\(not IPv4\\)")
+
+add_test(NAME goose_bogus_length_field_falls_back_to_available_bytes
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_goose.pcap" --format text)
+set_tests_properties(goose_bogus_length_field_falls_back_to_available_bytes PROPERTIES
+  PASS_REGULAR_EXPRESSION "GOOSE IED4/LLN0\\$GO\\$gcb13[^\n]*\n *note: Length field \\(3\\) is implausible")
+
+add_test(NAME goose_truncated_apdu_partial_decode_noted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_goose.pcap" --format text)
+set_tests_properties(goose_truncated_apdu_partial_decode_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "GOOSE IED5/LLN0\\$GO\\$gcb14[^\n]*\n *note: GOOSE APDU declares 200 byte\\(s\\) but only 20 remain -- decoding what's present")
+
+add_test(NAME goose_stats_counted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_goose.pcap" --stats)
+set_tests_properties(goose_stats_counted PROPERTIES
+  PASS_REGULAR_EXPRESSION "goose pdus: 11\ngoose gse management pdus \\(not decoded further\\): 1\ngoose simulated \\(S-bit or simulation field set\\): 2")
+
+# --------------------------------------------------------------------------
+# Real-world IEC 61850-8-1 GOOSE captures -- see tests/real_captures/goose/ATTRIBUTION.md for
+# provenance. All four sourced from the same ITI/ICS-Security-Tools public pcap collection
+# PROFINET RT's real fixtures came from: a GE F650 relay's own retransmission/sqNum-reset
+# sequence, a single maximally-complete VLAN-tagged frame, a 451-frame bulk-validation capture,
+# and a mixed MMS+GOOSE capture used as a crash-safety/non-interference check.
+# --------------------------------------------------------------------------
+set(GOOSE_REAL_CAPTURES
+  goose_ge_f650_retransmissions
+  goose_demo_full_fields
+  sample_file_goose
+  sample_file_mms_and_goose
+)
+# Same baseline regression guard as the other protocols' real-capture loops above: must never
+# crash the parser or exit non-zero, independent of what it does or doesn't manage to decode.
+foreach(capture ${GOOSE_REAL_CAPTURES})
+  add_test(NAME real_goose_${capture}_does_not_crash
+    COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/goose/${capture}.pcap" --format json)
+endforeach()
+
+# The F650 relay capture: sqNum counts 10, 11, 12 then RESETS to 1 while stNum stays at 1 -- a
+# publisher restart/re-enable mid-capture, the real-world shape stNum/sqNum are meant to follow
+# (see goose.hpp's file header comment).
+add_test(NAME real_goose_f650_sqnum_sequence_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/goose/goose_ge_f650_retransmissions.pcap" --format text)
+set_tests_properties(real_goose_f650_sqnum_sequence_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "sqNum=10[^\n]*\n[^\n]*sqNum=11[^\n]*\n[^\n]*sqNum=12[^\n]*\n[^\n]*sqNum=1 ")
+
+add_test(NAME real_goose_demo_full_fields_vlan_and_multi_byte_integer_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/goose/goose_demo_full_fields.pcap")
+set_tests_properties(real_goose_demo_full_fields_vlan_and_multi_byte_integer_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"goose_gocb_ref\": \"111\".*\"goose_go_id\": \"333\".*\"goose_num_dat_set_entries\": 10")
+
+add_test(NAME real_goose_sample_file_bulk_zero_notes
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/goose/sample_file_goose.pcap")
+set_tests_properties(real_goose_sample_file_bulk_zero_notes PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"goose_gocb_ref\": \"AA1C1Q01A1LD0/LLN0\\$GO\\$gcb_A\""
+  FAIL_REGULAR_EXPRESSION "\"notes\": \\[\"")
+
+add_test(NAME real_goose_mms_and_goose_mixed_protocols_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/goose/sample_file_mms_and_goose.pcap" --stats)
+set_tests_properties(real_goose_mms_and_goose_mixed_protocols_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "cotp[^\n]*\n *goose +34")
 
 # --------------------------------------------------------------------------
 # Real-world S7comm/COTP captures -- see tests/real_captures/s7comm/ATTRIBUTION.md
