@@ -1162,6 +1162,170 @@ def build_sv_sample():
     (TESTS_DIR / "sample_sv.pcap").write_bytes(data)
 
 
+def ecat_datagram(cmd: int, idx: int, data: bytes = b"", *, adp: int = 0, ado: int = 0,
+                   logical_address: int = None, irq: int = 0, circulating: bool = False,
+                   more: bool = False, wkc: int = 0) -> bytes:
+    """Builds one 10-byte EcParserHDR header + Data + 2-byte WKC EtherCAT datagram -- see
+    ethercat.hpp's file header comment's datagram field table. `cmd` selects the addressing mode:
+    for LRD/LWR/LRW (10/11/12) pass `logical_address` (a single 32-bit address); for every other
+    Cmd pass `adp`/`ado` (the default, both 0) instead -- whichever doesn't apply to `cmd` is simply
+    ignored, matching decode_one_datagram's own `logical_addressing = (cmd in {10,11,12})` switch.
+    `more` sets the Len word's More bit (0x8000), chaining this datagram to whatever bytes
+    immediately follow it in the same frame -- see decode_datagram_chain. `circulating` sets the Len
+    word's Circulating bit (0x4000, "frame has circulated once on a ring segment")."""
+    if logical_address is not None:
+        address = struct.pack("<I", logical_address)
+    else:
+        address = struct.pack("<HH", adp, ado)
+    len_word = len(data) & 0x07FF
+    if circulating:
+        len_word |= 0x4000
+    if more:
+        len_word |= 0x8000
+    header = struct.pack("<BB", cmd, idx) + address + struct.pack("<HH", len_word, irq)
+    return header + data + struct.pack("<H", wkc)
+
+
+def ecat_frame(datagrams: bytes, *, frame_type: int = 1, reserved: bool = False,
+               declared_length=None, dst: bytes = None, src: bytes = None, vlan_tci=None) -> bytes:
+    """One raw-Ethernet EtherCAT frame: EtherType 0x88A4, the 2-byte frame header (Length(11 bits) +
+    Reserved(1 bit) + Type(4 bits), all little-endian -- see ethercat.hpp's file header comment),
+    followed by `datagrams` (the concatenation of one or more already-encoded ecat_datagram() calls,
+    already chained via their own More bits -- meaningful only when frame_type == 1; for any other
+    Type, `datagrams` is simply raw, undecoded bytes). `declared_length` overrides the header's own
+    Length field independent of len(datagrams), for deliberately exercising the "implausible Length"
+    fallback path documented in ethercat.hpp; defaults to len(datagrams) (the honest, correct value
+    this decoder's real capture fixture shows in all 986 of 986 real frames -- see Validation)."""
+    dst = dst if dst is not None else PLC_MAC
+    src = src if src is not None else HMI_MAC
+    length = declared_length if declared_length is not None else len(datagrams)
+    header_word = (length & 0x07FF) | (0x0800 if reserved else 0) | ((frame_type & 0x0F) << 12)
+    payload = struct.pack("<H", header_word) + datagrams
+    if vlan_tci is not None:
+        return struct.pack("!6s6sHH", dst, src, 0x8100, vlan_tci) + struct.pack("!H", 0x88A4) + payload
+    return eth_header(dst, src, 0x88A4) + payload
+
+
+def build_ethercat_sample():
+    """EtherCAT (EtherType 0x88A4): the 2-byte frame header (Length+Reserved+Type) and, for Type 1
+    ("EtherCAT command") frames, the chained EtherCAT datagram(s) that follow -- see ethercat.hpp's
+    file header comment for the exact wire format each packet below exercises (cross-checked against
+    Wireshark's own packet-ethercat-frame.c/packet-ethercat-datagram.c). Packet 1 below reproduces
+    tests/real_captures/ethercat/ICS-Ethercat-001.pcap's own frame 0 byte-for-byte (BRD/AL-Status,
+    idx=2, adp=0x0000, ado=0x0130, wkc=0), and packet 2 reproduces that same capture's boot-time
+    auto-increment topology-discovery chain (Adp 0x0000, 0xFFFF, 0xFFFE, 0xFFFD, 0xFFFC in one
+    frame) -- see ethercat.hpp's "Auto increment addressing" paragraph. Every other packet below is
+    synthetic-only, covering paths the real capture doesn't happen to exercise (see ethercat.hpp's
+    Validation paragraph and tests/real_captures/ethercat/ATTRIBUTION.md)."""
+    packets = []
+
+    # 1) Baseline: a single BRD (Broadcast Read) datagram, byte-for-byte identical to the real
+    #    capture's own frame 0 (a master polling every slave's AL Status register, ado=0x0130, at
+    #    boot) -- see ethercat.hpp's Validation paragraph.
+    packets.append(ecat_frame(ecat_datagram(7, 2, bytes(2), adp=0x0000, ado=0x0130, wkc=0)))
+
+    # 2) Five chained APRD (Auto Increment Physical Read) datagrams in one frame, reproducing the
+    #    real capture's own boot-time topology-discovery sequence: Adp 0x0000, 0xFFFF, 0xFFFE,
+    #    0xFFFD, 0xFFFC -- "whichever slave is first on the segment", then second, third, ... -- see
+    #    ethercat.hpp's "Auto increment addressing" paragraph. Exercises the More-bit chain, the
+    #    frame summary's "(+N more datagram(s))" suffix, and ethercat_datagram_count == 5.
+    topo_chain = b"".join([
+        ecat_datagram(1, 10, bytes(2), adp=0x0000, ado=0x0130, wkc=1, more=True),
+        ecat_datagram(1, 11, bytes(2), adp=0xFFFF, ado=0x0130, wkc=1, more=True),
+        ecat_datagram(1, 12, bytes(2), adp=0xFFFE, ado=0x0130, wkc=1, more=True),
+        ecat_datagram(1, 13, bytes(2), adp=0xFFFD, ado=0x0130, wkc=1, more=True),
+        ecat_datagram(1, 14, bytes(2), adp=0xFFFC, ado=0x0130, wkc=1, more=False),
+    ])
+    packets.append(ecat_frame(topo_chain))
+
+    # 3) Logical addressing (LRD/LWR/LRW, cmd 10/11/12) -- each uses a single 32-bit logical address
+    #    instead of Adp+Ado, exercising EthercatDatagram::logical_addressing/logical_address.
+    packets.append(ecat_frame(ecat_datagram(10, 20, bytes(4), logical_address=0x00010000, wkc=1)))
+    packets.append(ecat_frame(ecat_datagram(11, 21, bytes(4), logical_address=0x00020000, wkc=1)))
+    packets.append(ecat_frame(ecat_datagram(12, 22, bytes(4), logical_address=0x00030000, wkc=3)))
+
+    # 4) Every Cmd value the real capture does NOT exercise (see ATTRIBUTION.md) -- APRW/FPRW/BRW
+    #    (the ReadWrite variants of AP/FP/BRD-BWR), ARMW/FRMW (Read Multiple Write), EXT, and NOP --
+    #    one datagram each, all using the ordinary Adp+Ado default addressing case.
+    packets.append(ecat_frame(ecat_datagram(3, 30, bytes(2), adp=0x0001, ado=0x0800, wkc=1)))   # APRW
+    packets.append(ecat_frame(ecat_datagram(6, 31, bytes(2), adp=0x0002, ado=0x0800, wkc=1)))   # FPRW
+    packets.append(ecat_frame(ecat_datagram(9, 32, bytes(2), adp=0x0000, ado=0x0800, wkc=1)))   # BRW
+    packets.append(ecat_frame(ecat_datagram(13, 33, bytes(2), adp=0x0003, ado=0x0910, wkc=1)))  # ARMW
+    packets.append(ecat_frame(ecat_datagram(14, 34, bytes(2), adp=0x0004, ado=0x0910, wkc=1)))  # FRMW
+    packets.append(ecat_frame(ecat_datagram(255, 35, bytes(2), adp=0x0000, ado=0x0000, wkc=0)))  # EXT
+    packets.append(ecat_frame(ecat_datagram(0, 36, b"", adp=0x0000, ado=0x0000, wkc=0)))         # NOP
+
+    # 5) An unrecognized/reserved Cmd byte (200) -- rendered "unknown(200)" rather than guessed at,
+    #    but still decoded structurally (Adp/Ado addressing, the default case).
+    packets.append(ecat_frame(ecat_datagram(200, 40, bytes(2), adp=0x0005, ado=0x0100, wkc=0)))
+
+    # 6) The Len word's Circulating bit (0x4000, "frame has circulated once") set -- never observed
+    #    in the real capture (see ethercat.hpp's Len(2) field paragraph), synthetic-only.
+    packets.append(ecat_frame(ecat_datagram(4, 41, bytes(2), adp=0x0006, ado=0x0130, wkc=1, circulating=True)))
+
+    # 7) The frame header's own Reserved bit (0x0800, must be zero per spec) set -- surfaced as a
+    #    note, not a rejection (the EtherType alone remains the primary confidence signal -- see
+    #    ethercat.hpp's "structural detection gate" paragraph).
+    packets.append(ecat_frame(ecat_datagram(4, 42, bytes(2), adp=0x0007, ado=0x0130, wkc=1), reserved=True))
+
+    # 8) WKC=0 on a command that should reach at least one slave -- the field's single unambiguous
+    #    "something didn't respond" signal, surfaced raw with no verdict (see ethercat.hpp's WKC
+    #    paragraph). BWR (Broadcast Write) is a plausible real-world command to see this on.
+    packets.append(ecat_frame(ecat_datagram(8, 43, bytes(2), adp=0x0000, ado=0x0130, wkc=0)))
+
+    # 9) Frame Types 2-5 (ADS/RAW-IO/NV/Mailbox) -- named only, not decoded further, the same
+    #    "named only" pattern goose.hpp's GSE Management PDU and profinet.hpp's non-cyclic FrameID
+    #    ranges already use. Payload bytes are arbitrary raw content, never interpreted.
+    for t in (2, 3, 4, 5):
+        packets.append(ecat_frame(bytes([0xAA, 0xBB, 0xCC, 0xDD]), frame_type=t,
+                                   declared_length=4))
+
+    # 10) A genuinely unrecognized/reserved Type value (0, not one of the spec's five 1-5) -- must
+    #     NOT be misdetected as EtherCAT at all; falls back to the generic "non-ip" ethertype-name-
+    #     only report, the same "structural detection gate" this decoder applies to every raw-
+    #     Ethernet protocol (see ethercat.hpp's file header comment).
+    packets.append(ecat_frame(bytes([0x01, 0x02]), frame_type=0, declared_length=2))
+
+    # 11) 802.1Q VLAN-priority-tagged EtherCAT -- confirms parse_ethernet's single-VLAN-tag unwrap
+    #     composes correctly with EtherCAT detection, mirroring GOOSE/SV's own VLAN tests.
+    packets.append(ecat_frame(ecat_datagram(7, 44, bytes(2), adp=0x0000, ado=0x0130, wkc=1),
+                               dst=bytes.fromhex("010ccd040001"), src=bytes.fromhex("000c291a2b3c"),
+                               vlan_tci=0x8000))
+
+    # 12) Header too short for even the fixed 2-byte frame header -- must not crash, falls through
+    #     to the generic "non-ip" ethertype-name-only report.
+    packets.append(eth_header(PLC_MAC, HMI_MAC, 0x88A4) + bytes([0x01]))
+
+    # 13) A bogus/implausible declared Length (0 -- must be >= 1 per try_parse_ethercat) -- falls
+    #     back to "using all available bytes instead", still decodes the one datagram actually
+    #     present correctly, with a note (mirroring GOOSE/SV's own bogus-Length tests).
+    packets.append(ecat_frame(ecat_datagram(7, 45, bytes(2), adp=0x0000, ado=0x0130, wkc=1),
+                               declared_length=0))
+
+    # 14) More bit set on the last (only) datagram decoded, but no bytes remain in this frame's
+    #     declared Length afterward -- the chain is truncated; noted, not silently accepted.
+    packets.append(ecat_frame(ecat_datagram(1, 46, bytes(2), adp=0x0000, ado=0x0130, wkc=1, more=True)))
+
+    # 15) A declared Length that claims more bytes than a partial datagram header actually needs --
+    #     specifically, only 5 bytes are present where a full 10-byte EcParserHDR is required --
+    #     exercises decode_one_datagram's own "chain truncated, stopping" header-level bounds check
+    #     (distinct from #14's Data+WKC-level truncation).
+    packets.append(ecat_frame(bytes([0x01, 0x47, 0x00, 0x00, 0x30])))
+
+    # 16) The safety cap (kMaxEthercatDatagrams == 200): a chain of 210 NOP datagrams, every one
+    #     with More set, inside a frame whose declared Length is deliberately implausible (0, so the
+    #     "use all available bytes" fallback -- see #13 -- is what actually bounds the scan; the
+    #     11-bit Length field alone couldn't express this many bytes). Exercises the "stopped after
+    #     N datagram(s) (safety cap)" note.
+    capped_chain = b"".join(ecat_datagram(0, i & 0xFF, b"", wkc=0, more=True) for i in range(210))
+    packets.append(ecat_frame(capped_chain, declared_length=0))
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_004_000 + i, i * 1000)
+    (TESTS_DIR / "sample_ethercat.pcap").write_bytes(data)
+
+
 ENIP_PORT = 44818
 
 
@@ -1985,6 +2149,7 @@ if __name__ == "__main__":
     build_profinet_sample()
     build_goose_sample()
     build_sv_sample()
+    build_ethercat_sample()
     build_s7comm_sample()
     build_s7comm_items_sample()
     build_s7comm_1200sym_sample()

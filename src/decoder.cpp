@@ -2,12 +2,14 @@
 #include "conduitscope/decoder.hpp"
 
 #include <algorithm>
+#include <iomanip>
 #include <sstream>
 
 #include "conduitscope/byteio.hpp"
 #include "conduitscope/cotp.hpp"
 #include "conduitscope/dnp3.hpp"
 #include "conduitscope/enip.hpp"
+#include "conduitscope/ethercat.hpp"
 #include "conduitscope/goose.hpp"
 #include "conduitscope/iec104.hpp"
 #include "conduitscope/ipv4.hpp"
@@ -607,6 +609,68 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                             if (asdu.smp_mod) a << " smpMod=" << *asdu.smp_mod;
                             a << " seqData=" << asdu.seq_data_length << " byte(s)";
                             out.sv_asdus.push_back(a.str());
+                        }
+                        return out;
+                    }
+                }
+
+                // EtherCAT (EtherType 0x88A4), same rationale/pattern as PROFINET RT/GOOSE/SV
+                // above -- try_parse_ethercat's own frame-header Type check is this decoder's
+                // structural gate (see ethercat.hpp's file header comment's "structural detection
+                // gate" paragraph for why that gate is weaker than GOOSE/SV/PROFINET's own, and
+                // why the dedicated EtherType still makes this a safe default in Auto mode).
+                bool want_ethercat = options_.protocol_filter == ProtocolFilter::Auto ||
+                                      options_.protocol_filter == ProtocolFilter::EthercatOnly;
+                if (want_ethercat && eth.ethertype == ETHERTYPE_ETHERCAT) {
+                    if (auto ec = try_parse_ethercat(eth.payload)) {
+                        out.protocol = "ethercat";
+                        out.summary = ec->summary;
+                        out.ethercat_frame_type = ec->frame_type;
+                        out.ethercat_frame_type_name = ec->frame_type_name;
+                        out.ethercat_declared_length = ec->declared_length;
+                        out.ethercat_has_datagrams = ec->has_datagrams;
+                        out.ethercat_datagram_count = ec->datagrams.size();
+                        for (const auto& n : ec->notes) out.notes.push_back(n);
+
+                        if (!ec->datagrams.empty()) {
+                            const EthercatDatagram& first = ec->datagrams[0];
+                            out.ethercat_first_cmd = first.cmd;
+                            out.ethercat_first_cmd_name = first.cmd_name;
+                            out.ethercat_first_idx = first.idx;
+                            out.ethercat_first_logical_addressing = first.logical_addressing;
+                            out.ethercat_first_adp = first.adp;
+                            out.ethercat_first_ado = first.ado;
+                            out.ethercat_first_logical_address = first.logical_address;
+                            out.ethercat_first_data_hex = first.data_hex;
+                            out.ethercat_first_data_length = first.data_length;
+                            out.ethercat_first_wkc = first.wkc;
+                            out.ethercat_first_irq = first.irq;
+                            out.ethercat_first_circulating = first.circulating;
+                        }
+                        constexpr size_t kMaxEthercatDatagramSummaries = 50;
+                        for (const auto& dgram : ec->datagrams) {
+                            if (out.ethercat_datagrams.size() >= kMaxEthercatDatagramSummaries) break;
+                            std::ostringstream a;
+                            a << dgram.cmd_name << " idx=" << static_cast<unsigned>(dgram.idx) << " ";
+                            if (dgram.logical_addressing) {
+                                a << "logAddr=0x" << std::hex << std::uppercase << std::setw(8) << std::setfill('0')
+                                  << dgram.logical_address << std::dec;
+                            } else {
+                                a << "adp=0x" << std::hex << std::uppercase << std::setw(4) << std::setfill('0')
+                                  << dgram.adp << " ado=0x" << std::setw(4) << std::setfill('0') << dgram.ado
+                                  << std::dec;
+                            }
+                            a << " len=" << dgram.data_len << " wkc=" << dgram.wkc;
+                            // irq/circulating are shown only when notable (irq != 0, circulating
+                            // set) to keep the common case's summary line uncluttered -- the same
+                            // "only when it deviates" posture ethercat.hpp's frame-level notes take
+                            // for the Reserved bit.
+                            if (dgram.irq != 0) {
+                                a << " irq=0x" << std::hex << std::uppercase << std::setw(4) << std::setfill('0')
+                                  << dgram.irq << std::dec;
+                            }
+                            if (dgram.circulating) a << " circulating";
+                            out.ethercat_datagrams.push_back(a.str());
                         }
                         return out;
                     }

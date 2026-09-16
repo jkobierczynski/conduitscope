@@ -86,6 +86,10 @@ private:
     size_t sv_frame_count_ = 0;
     size_t sv_asdu_total_ = 0;  // summed across every decoded SV frame, since one frame can carry
                                  // more than one ASDU -- see sv_asdu_count
+    std::map<std::string, size_t> ethercat_frame_type_counts_;
+    size_t ethercat_datagram_total_ = 0;  // summed across every decoded EtherCAT frame, since one
+                                            // frame can carry more than one datagram -- see
+                                            // ethercat_datagram_count
     bool has_ts_ = false;
     double first_ts_ = 0.0, last_ts_ = 0.0;
 };

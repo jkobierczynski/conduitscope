@@ -2,14 +2,14 @@
 
 ## NAME
 
-conduitscope -- decode Modbus/TCP, DNP3, IEC 60870-5-104, S7comm/COTP, EtherNet/IP (CIP explicit and implicit messaging), PROFINET RT (DCP and cyclic real-time IO), IEC 61850-8-1 GOOSE, and IEC 61850-9-2 Sampled Values traffic from offline pcap captures
+conduitscope -- decode Modbus/TCP, DNP3, IEC 60870-5-104, S7comm/COTP, EtherNet/IP (CIP explicit and implicit messaging), PROFINET RT (DCP and cyclic real-time IO), IEC 61850-8-1 GOOSE, IEC 61850-9-2 Sampled Values, and EtherCAT traffic from offline pcap captures
 
 ## SYNOPSIS
 
 ```
 conduitscope [-q|--quiet] [--no-color|--color] [--log-file FILE] [--version] [-h|--help] <command> [command options]
 
-conduitscope decode (-r FILE | -i INTERFACE) [-o FILE] [-f text|json|csv] [--protocol auto|modbus|dnp3|s7comm|iec104|enip|profinet|goose|sv]
+conduitscope decode (-r FILE | -i INTERFACE) [-o FILE] [-f text|json|csv] [--protocol auto|modbus|dnp3|s7comm|iec104|enip|profinet|goose|sv|ethercat]
                      [--modbus-port PORT]... [--dnp3-port PORT]... [--s7comm-port PORT]... [--iec104-port PORT]...
                      [--enip-port PORT]... [--enip-io-port PORT]...
                      [--max-packets N] [--stats] [--strict]
@@ -44,9 +44,12 @@ frames directly on the wire (EtherType `0x8892`, no IP/TCP/UDP layer at
 all) and decodes DCP device discovery/configuration exchanges and cyclic
 real-time IO datagrams, and recognizes IEC 61850-8-1 GOOSE frames (EtherType
 `0x88B8`, likewise no IP/TCP/UDP layer) and decodes the ASN.1 BER-encoded
-GOOSE PDU, and recognizes IEC 61850-9-2 Sampled Values frames (EtherType
+GOOSE PDU, recognizes IEC 61850-9-2 Sampled Values frames (EtherType
 `0x88BA`, GOOSE's sibling protocol, same header shape and BER encoding) and
-decodes the ASN.1 BER-encoded SavPdu. It is designed as groundwork for auditing
+decodes the ASN.1 BER-encoded SavPdu, and recognizes EtherCAT frames
+(EtherType `0x88A4`, likewise no IP/TCP/UDP layer, though plain
+fixed-binary-layout rather than ASN.1/BER) and decodes the frame header plus
+the chained EtherCAT datagram(s) it carries. It is designed as groundwork for auditing
 OT/ICS network traffic against a zone-and-conduit segmentation model (the kind
 IEC 62443-3-2 and, by extension, NIS2 risk-assessment work call for): the
 protocol-decoding layer (`decode`/`info`) and, now, the zone/conduit
@@ -146,7 +149,7 @@ conduitscope decode (-r FILE | -i INTERFACE) [options]
 | `--no-promiscuous` | off (i.e. promiscuous by default) | With `-i`, don't put the interface into promiscuous mode. Promiscuous is the default because the main live-capture use case -- watching a mirrored/SPAN switch port for zone/conduit traffic -- needs to see traffic that isn't addressed to the capturing host at all. |
 | `-o, --output FILE` | stdout | Write decoded output here instead of stdout. |
 | `-f, --format {text,json,csv}` | `text` | Output format. See OUTPUT FORMATS below. |
-| `--protocol {auto,modbus,dnp3,s7comm,iec104,enip,profinet,goose,sv}` | `auto` | Restrict decoding to one protocol. `auto` opportunistically tries EtherNet/IP, IEC 104, Modbus, DNP3, and S7comm/COTP detection on every TCP payload, CIP I/O detection on every UDP payload, PROFINET RT (DCP/cyclic) detection on every non-IPv4 Ethernet frame carrying EtherType `0x8892`, GOOSE detection on every non-IPv4 Ethernet frame carrying EtherType `0x88B8`, and Sampled Values detection on every non-IPv4 Ethernet frame carrying EtherType `0x88BA`, regardless of port (see PROTOCOL DETECTION below). `enip` covers both EtherNet/IP explicit messaging (TCP) and CIP I/O implicit messaging (UDP). `profinet` covers both DCP and cyclic real-time IO. `sv` is IEC 61850-9-2 Sampled Values. |
+| `--protocol {auto,modbus,dnp3,s7comm,iec104,enip,profinet,goose,sv,ethercat}` | `auto` | Restrict decoding to one protocol. `auto` opportunistically tries EtherNet/IP, IEC 104, Modbus, DNP3, and S7comm/COTP detection on every TCP payload, CIP I/O detection on every UDP payload, PROFINET RT (DCP/cyclic) detection on every non-IPv4 Ethernet frame carrying EtherType `0x8892`, GOOSE detection on every non-IPv4 Ethernet frame carrying EtherType `0x88B8`, Sampled Values detection on every non-IPv4 Ethernet frame carrying EtherType `0x88BA`, and EtherCAT detection on every non-IPv4 Ethernet frame carrying EtherType `0x88A4`, regardless of port (see PROTOCOL DETECTION below). `enip` covers both EtherNet/IP explicit messaging (TCP) and CIP I/O implicit messaging (UDP). `profinet` covers both DCP and cyclic real-time IO. `sv` is IEC 61850-9-2 Sampled Values. `ethercat` is EtherCAT. |
 | `--modbus-port PORT` | *(502 built in)* | Additional TCP port to treat as "expected" for Modbus. Repeatable. Does **not** gate detection -- it only changes whether a decoded Modbus frame is annotated as appearing on an unexpected port, which is itself a useful signal when auditing a conduit. |
 | `--dnp3-port PORT` | *(20000 built in)* | Same as `--modbus-port`, for DNP3. Repeatable. |
 | `--s7comm-port PORT` | *(102 built in)* | Same as `--modbus-port`, for COTP/S7comm. Repeatable. |
@@ -628,9 +631,10 @@ Modbus collision. `tests/sample_iec104_modbus_precedence.pcap` (see
 down.
 
 `--protocol modbus`, `--protocol dnp3`, `--protocol s7comm`, `--protocol
-iec104`, `--protocol enip`, `--protocol profinet`, `--protocol goose`, or
-`--protocol sv` restrict decoding to only that protocol (useful for large
-mixed captures, or for scripting a two-pass analysis). `--protocol enip` covers both
+iec104`, `--protocol enip`, `--protocol profinet`, `--protocol goose`,
+`--protocol sv`, or `--protocol ethercat` restrict decoding to only that
+protocol (useful for large mixed captures, or for scripting a two-pass
+analysis). `--protocol enip` covers both
 EtherNet/IP explicit messaging (TCP, above) and CIP I/O implicit messaging
 (UDP, below) -- they're the same overall protocol family.
 
@@ -687,6 +691,24 @@ tag matches, header/APDU length mismatches against the bytes actually
 available are handled tolerantly -- clamped to what's present, with a note --
 the same as GOOSE.
 
+**EtherCAT, EtherType `0x88A4`** is tried the same way, port-independently
+against every non-IPv4 Ethernet frame with that EtherType: the 2-byte frame
+header's Type field (bits 12-15) must be one of the five values the spec
+defines (1-5 -- see PROTOCOL COVERAGE's EtherCAT section). Unlike PROFINET
+RT/GOOSE/SV's own structural gates, this one is honestly weaker: 4 bits admit
+16 possible values, of which 5 are spec-defined, a 5-in-16 chance of a
+coincidental match against unrelated traffic, versus GOOSE/SV's 1-in-256
+outer BER tag or PROFINET's own multi-value FrameID range table. The
+EtherType itself remains the primary confidence source -- it has zero
+collision risk with any other protocol this tool decodes, the same as
+PROFINET RT/GOOSE/SV's own EtherTypes -- and a frame whose Type value isn't
+one of the five falls back to the generic `non-ip` report, same as the other
+raw-Ethernet protocols here. Once the Type matches and is 1 ("EtherCAT
+command"), the frame header's declared Length field is used to bound the
+datagram-chain scan (clamped tolerantly to the bytes actually available,
+with a note, when implausible) rather than walking every byte physically
+present in the frame -- see PROTOCOL COVERAGE's EtherCAT section for why.
+
 ## OUTPUT FORMATS
 
 ### text (default)
@@ -707,7 +729,7 @@ The `[protocol]` tag is colored per protocol (so a mixed-protocol capture
 scans quickly by eye): cyan for Modbus, magenta for DNP3, blue for S7comm and
 COTP-without-S7comm, green for IEC 104, yellow for EtherNet/IP, bright cyan
 for PROFINET RT, bright green for GOOSE, bright magenta for Sampled Values,
-dim for everything else recognized
+bright yellow for EtherCAT, dim for everything else recognized
 but not OT-specific (`tcp`/`udp`/`non-tcp`/`non-ip`/`unsupported-link`). A Modbus
 exception response's summary, and a `parse-error` packet's entire line, are
 bold red -- both mean "look at this one" over everything else in a long
@@ -731,8 +753,8 @@ that don't apply to a given packet (e.g. `src_ip` for a non-IP frame) are
 `null`. Intended to be piped into `jq` or read by a future policy-evaluation
 layer.
 
-Fifty-eight fields are only present (omitted entirely, not `null`) on packets
-where they apply:
+Seventy-three fields are only present (omitted entirely, not `null`) on
+packets where they apply:
 
 - `modbus_paired_request_index`: the `index` of the specific earlier request
   packet this response was authoritatively paired to (by MBAP transaction ID
@@ -926,6 +948,55 @@ where they apply:
   each a `"svID=\"...\" [datSet=\"...\"] smpCnt=N confRev=N [smpSynch=...]
   [smpRate=N] [smpMod=...] seqData=N byte(s)"` string. Capped at 50 entries,
   same reason as `goose_all_data`.
+- `ethercat_frame_type`: the EtherCAT frame header's Type field, as a plain
+  integer (1-5), when protocol is `ethercat`. Always present alongside
+  `ethercat_frame_type_name` and `ethercat_declared_length`.
+- `ethercat_frame_type_name`: `"EtherCAT command"`, `"ADS"`, `"RAW-IO"`,
+  `"NV"`, or `"Mailbox"` -- the named meaning of `ethercat_frame_type`.
+- `ethercat_declared_length`: the frame header's own Length field (an 11-bit
+  magnitude), as a plain integer -- the declared byte length of the
+  datagram(s) that follow the header, NOT including the header's own 2
+  bytes. See PROTOCOL COVERAGE's EtherCAT section for how this decoder uses
+  it to bound the datagram-chain scan.
+- `ethercat_has_datagrams`: `true`/`false` -- `true` only when
+  `ethercat_frame_type` is 1 ("EtherCAT command"); Types 2-5 are named only,
+  not decoded further, so the fields below are absent when this is `false`.
+- `ethercat_datagram_count`: the number of EtherCAT datagrams actually
+  decoded from the frame's datagram chain.
+- `ethercat_first_cmd`: the first decoded datagram's `Cmd` byte, as a plain
+  integer. Present when `ethercat_datagram_count` is greater than 0.
+- `ethercat_first_cmd_name`: the first datagram's Cmd name (`"APRD"`,
+  `"LRD"`, ..., or `"unknown(N)"` for an unrecognized byte value -- see
+  PROTOCOL COVERAGE's Cmd table).
+- `ethercat_first_idx`: the first datagram's `Idx` byte, as a plain integer
+  -- an opaque per-datagram index the sender picks and a responding slave
+  echoes back unchanged.
+- `ethercat_first_adp` / `ethercat_first_ado`: the first datagram's 16-bit
+  position/station/broadcast address and register-or-memory offset, each as
+  a plain integer. Present only for non-logical-addressing commands (every
+  Cmd except `LRD`/`LWR`/`LRW`).
+- `ethercat_first_logical_address`: the first datagram's single 32-bit
+  logical address, as a plain integer. Present only for `LRD`/`LWR`/`LRW`
+  (in place of `ethercat_first_adp`/`ethercat_first_ado`).
+- `ethercat_first_data_length`: the first datagram's `Data` field length in
+  bytes.
+- `ethercat_first_data_hex`: the first datagram's `Data` payload as raw
+  lowercase hex, never value-decoded -- see PROTOCOL COVERAGE's EtherCAT
+  section for why.
+- `ethercat_first_wkc`: the first datagram's Working Counter, as a plain
+  integer -- surfaced raw, with no verdict about whether it's the value a
+  healthy bus should produce (this decoder has no slave-count/topology
+  knowledge to judge that) -- see PROTOCOL COVERAGE.
+- `ethercat_first_irq`: the first datagram's raw interrupt-request bitmask,
+  as a plain integer -- not decoded further.
+- `ethercat_first_circulating`: `true`/`false` -- the first datagram's Len
+  word Circulating bit ("frame has circulated once" on a ring segment).
+- `ethercat_datagrams`: an array of one entry per datagram decoded from the
+  frame's chain, each a `"CMD idx=N (adp=0xNNNN ado=0xNNNN |
+  logAddr=0xNNNNNNNN) len=N wkc=N [irq=0xNNNN] [circulating]"` string (the
+  trailing `irq`/`circulating` are shown only when notable, to keep the
+  common case uncluttered). Capped at 50 entries, same reason as
+  `sv_asdus`/`goose_all_data`.
 
 All array fields are capped at 50 entries for a single heavily-batched
 request/response; see PROTOCOL COVERAGE for where the full list still shows
@@ -1814,6 +1885,156 @@ malformed/truncated-input path this section describes -- the same honest gap
 already documented for CIP I/O and (partially) GOOSE. See
 `include/conduitscope/sv.hpp`'s file header for the full writeup.
 
+### EtherCAT (EtherType `0x88A4`)
+
+Like PROFINET RT, IEC 61850-8-1 GOOSE, and IEC 61850-9-2 Sampled Values,
+EtherCAT rides directly on raw Ethernet -- no IPv4/UDP/TCP layer at all.
+Unlike those three, though, EtherCAT's wire format is plain
+fixed-binary-layout, little-endian throughout -- there is no ASN.1/BER
+encoding anywhere in it. This section, and this decoder, is cross-checked
+against Wireshark's own EtherCAT plugin source (`plugins/epan/ethercat/
+packet-ethercat-frame.c` and `packet-ethercat-datagram.c`, contributed by
+Beckhoff Automation, the company that invented EtherCAT), byte offset by
+byte offset.
+
+#### Frame header
+
+Exactly 2 bytes, one 16-bit little-endian word, immediately after the
+EtherType (or after a single 802.1Q VLAN tag, already unwrapped):
+
+| Bits | Mask | Field | Notes |
+|---|---|---|---|
+| 0-10 | `0x07FF` | `Length` | Total byte length of the datagram(s) that follow this header, NOT including the header's own 2 bytes. See "Chained datagrams" below for how this decoder uses it. |
+| 11 | `0x0800` | `Reserved` | Must be zero per the spec; surfaced only as a note when set, never as a rejection. |
+| 12-15 | `0xF000` | `Type` | Which of five defined frame kinds this is -- see below. |
+
+`Type` values: `1` = "EtherCAT command" (the datagram-chain traffic this
+decoder fully decodes -- by far the overwhelming majority of real EtherCAT
+traffic, all 986 of 986 real frames in this decoder's real capture fixture),
+`2` = "ADS", `3` = "RAW-IO", `4` = "NV" (Beckhoff's ADS protocol and other
+vendor/legacy framings tunneled directly in each other's own frame shape
+under this same EtherType -- named only, not decoded further), `5` =
+"Mailbox" (a distinct, rarer framing occasionally used for direct
+engineering-tool mailbox access without a datagram chain at all -- also
+named only). Any other `Type` value (`0`, `6`-`15`) is not one of the five
+the spec defines -- this decoder does not recognize the frame at all in that
+case, falling back to the generic `non-ip` ethertype-name-only report (see
+PROTOCOL DETECTION's "structural detection gate" discussion).
+
+#### EtherCAT datagram fields (`Type` 1 only)
+
+One or more of these are chained back-to-back immediately after the 2-byte
+frame header, every multi-byte field little-endian:
+
+| Field | Size | Notes |
+|---|---|---|
+| `Cmd` | 1 | The command -- see the Cmd table below. Determines how `Address` is interpreted. |
+| `Idx` | 1 | An opaque index the sender picks and a responding slave echoes back unchanged -- lets a master match this datagram's eventual effect to the request that caused it, the EtherCAT analog of Modbus's transaction ID or GOOSE/SV's `sqNum`. |
+| `Address` | 4 | EITHER `Adp`(2)+`Ado`(2) -- a 16-bit position/station/broadcast address plus a 16-bit register-or-memory offset -- for every `Cmd` except `LRD`/`LWR`/`LRW`, OR a single 32-bit logical address for those three. |
+| `Len` | 2 | Another bit-field word: bits 0-10 (`0x07FF`) `Len` (byte length of `Data`), bits 11-13 (`0x3800`) Reserved (not surfaced), bit 14 (`0x4000`) `Circulating` ("frame has circulated once" -- a ring-topology loop-detection signal), bit 15 (`0x8000`) `More` (another datagram immediately follows when set -- this is the sole signal this decoder uses to know when the chain ends). |
+| `Irq` | 2 | An interrupt-request bitmask (one bit per slave in some deployments); shown as a raw hex value, not decoded further. |
+| `Data` | `Len` | The datagram's actual payload -- see "`Data` is deliberately never value-decoded" below. |
+| `WKC` | 2 | Working Counter, immediately after `Data` (outside the 10-byte fixed header) -- starts at 0 when the master sends the frame, and every slave that successfully executed the command increments it by an amount the spec defines per command type. This is EtherCAT's primary stream-integrity signal, the closest analog to GOOSE's `stNum`/`sqNum` or SV's `smpCnt` -- but this decoder has no slave-count/topology knowledge to know what value a given command SHOULD produce on a healthy bus, so it surfaces the raw value only, no verdict. |
+
+**Cmd table**: `0` NOP, `1` APRD (Auto Increment Physical Read), `2` APWR
+(Auto Increment Physical Write), `3` APRW (Auto Increment Physical
+ReadWrite), `4` FPRD (Configured-address Physical Read), `5` FPWR
+(Configured-address Physical Write), `6` FPRW (Configured-address Physical
+ReadWrite), `7` BRD (Broadcast Read), `8` BWR (Broadcast Write), `9` BRW
+(Broadcast ReadWrite), `10` LRD (Logical Read), `11` LWR (Logical Write),
+`12` LRW (Logical ReadWrite), `13` ARMW (Auto Increment Physical Read
+Multiple Write), `14` FRMW (Configured-address Physical Read Multiple
+Write), `255` EXT. Any other byte value is rendered `"unknown(N)"` rather
+than guessed at, but is still decoded structurally (Adp/Ado addressing, the
+default case) -- an unrecognized `Cmd` doesn't stop the rest of the datagram,
+or the chain, from being decoded.
+
+**"Auto increment" (AP\*) addressing**: `Adp` is interpreted as a *negative
+offset from the sending master*, decremented by 1 at every slave the frame
+physically passes through on its way around the segment -- so an AP command
+with `Adp=0x0000` addresses "whichever slave is first on the segment",
+`Adp=0xFFFF` (-1) addresses the second, `0xFFFE` (-2) the third, and so on.
+This decoder's real capture fixture's own boot-time topology-discovery
+sequence uses exactly this pattern (a master probing `Adp=0x0000`, then
+`0xFFFF`, `0xFFFE`, `0xFFFD`, ... in one chained frame, right after boot, to
+enumerate however many slaves are actually present). `Adp` is surfaced as a
+raw 16-bit hex value rather than a pre-computed signed offset, since the
+same field is a plain non-negative station address for FP/BRD/BWR/BRW
+commands.
+
+#### Chained datagrams / "declared Length"
+
+A frame's data-link payload commonly carries more than one datagram
+back-to-back (a master batching several slave register accesses into one
+Ethernet frame for efficiency); the `More` bit chains them. This decoder
+walks the chain until a datagram with `More` clear, a safety cap (200
+datagrams) is hit, or the bytes run out -- but bounds that walk by the frame
+header's own declared `Length` field (clamped tolerantly to the bytes
+actually available, with a note, when implausible), rather than walking
+every remaining byte in the Ethernet frame unconditionally the way
+Wireshark's own dissector does. This matters because Ethernet's own
+minimum-frame-size zero-padding, when present, would otherwise parse as a
+spurious trailing NOP-shaped datagram (`Cmd=0, Idx=0, Adp=Ado=0, Len=0,
+WKC=0`, all satisfied by an all-zero region) -- the same padding-vs-payload
+ambiguity already documented for PROFINET RT's cyclic IO data, except here
+it's avoidable: this decoder's real capture fixture shows the declared
+`Length` field exactly matching the actual chained-datagram byte count in
+all 986 of 986 real frames checked (zero mismatches -- see Validation
+below), so trusting it as the chain's authoritative extent is empirically
+well-founded, not just a spec reading.
+
+#### `Data` is deliberately never value-decoded
+
+An EtherCAT datagram's `Data` field is either raw ESC (EtherCAT Slave
+Controller) register content (for AP/FP/BRD/BWR/BRW/ARMW/FRMW commands --
+Wireshark's own dissector carries a ~150-entry ESC register table for this,
+deliberately not replicated here) or raw process-image content at a logical
+address (for LRD/LWR/LRW) whose actual layout is defined entirely by the
+specific slave devices' ESI/XML descriptions and the master's own
+process-image mapping -- information that exists nowhere on the wire, only
+in offline engineering configuration this decoder has no access to. This is
+the same "no generic self-describing wire-level type" reasoning already
+applied to PROFINET RT's cyclic IO data, EtherNet/IP's CIP I/O Connected
+Data Item, and IEC 61850-9-2 SV's `seqData` -- `Data` is shown only as raw
+hex plus its byte length, never interpreted. `Cmd`/`Idx`/`Address`/`Len`/
+`Irq`/`WKC` ARE all decoded, though, because every one of those is
+unambiguous straight from the spec, independent of any particular slave's
+configuration.
+
+**Explicitly out of scope**: the CoE/SoE/EoE/FoE/AoE "mailbox" protocol
+family -- SDO access, the most common way real EtherCAT configuration/
+diagnostic traffic actually happens -- is carried as ordinary `Data` (above)
+inside an ordinary FPRD/FPWR/... datagram addressed to a slave's SyncManager
+mailbox registers, which requires the same per-slave SyncManager
+configuration knowledge this decoder doesn't have to even recognize, let
+alone decode. Frame Type 5 ("Mailbox") is named only, not decoded, for the
+same reason. Frame Types 2-4 (ADS/RAW-IO/NV) are vendor/legacy framings
+under this same EtherType, also named only. Distributed Clock (DC) register
+semantics are not specially interpreted -- DC register reads/writes are
+decoded exactly like any other `Data` payload, as raw hex.
+
+#### Validation
+
+Unlike IEC 61850-9-2 Sampled Values, a genuine real capture WAS found:
+`ICS-Ethercat-001.pcap` (986 frames, a master's boot-time slave enumeration
+and register poll sequence against what looks like a small, up-to-five-slave
+demo segment) -- see `tests/real_captures/ethercat/ATTRIBUTION.md` for full
+provenance. Every one of its 986 frames is Type 1 with **zero notes**: no
+Reserved-bit warning, no implausible-Length fallback, no truncated-chain
+warning -- in particular, the declared `Length` field exactly matches its
+actual chained-datagram byte count in all 986 frames. Commands APRD/APWR/
+FPRD/FPWR/BRD/BWR/LRD/LWR all appear with real, structurally valid bytes,
+including the auto-increment topology-discovery pattern described above and
+up to 11 chained datagrams in a single frame -- but APRW/FPRW/BRW/LRW/ARMW/
+FRMW/EXT, the `Circulating` bit, 802.1Q VLAN tagging, frame Types other than
+1, and every malformed/truncated-input path this decoder handles are
+validated only against the hand-built `tests/sample_ethercat.pcap` fixture
+(see `tools/make_sample_pcap.py`'s `build_ethercat_sample`), cross-checked
+against `packet-ethercat-datagram.c`'s source rather than an independent
+real capture -- the same honest gap this codebase already documents for
+several other protocols' less-common paths. See
+`include/conduitscope/ethercat.hpp`'s file header for the full writeup.
+
 ### Link/IP-layer plumbing: non-IPv4 Ethernet, and non-TCP IPv4 (including UDP)
 
 Every protocol above rides on Ethernet + IPv4 + TCP. Traffic outside that --
@@ -1824,17 +2045,17 @@ deliberately small, OT-relevant set of values, cross-checked against
 Wireshark's own `epan/etypes.h` (EtherTypes) and the long-stable IANA IP
 protocol number registry (not reverse-engineered from a single capture):
 
-- **EtherTypes** (`link_layer.hpp`'s `ethertype_name`): ARP, IPv6, one
-  remaining raw-Ethernet (no IP layer at all) OT protocol this tool names but
-  doesn't decode -- EtherCAT -- plus LLDP, PTP (IEEE 1588), MPLS unicast, and
-  802.1ad/stacked-VLAN (the QinQ case `parse_ethernet`'s own comment already
-  documented as "will simply fail to recognize the inner ethertype" -- it's
-  now named as such instead of a bare `0x8100`). PROFINET RT (`0x8892`),
-  IEC 61850-8-1 GOOSE (`0x88B8`), and IEC 61850-9-2 Sampled Values (`0x88BA`)
-  are also named here, but, like CIP I/O below, a frame that actually looks
-  like DCP/cyclic IO data, a GOOSE APDU, or a SavPdu is decoded and reported
-  as `profinet`/`goose`/`sv`, not `non-ip` -- see PROTOCOL COVERAGE's
-  PROFINET RT, GOOSE, and Sampled Values sections.
+- **EtherTypes** (`link_layer.hpp`'s `ethertype_name`): ARP, IPv6, LLDP, PTP
+  (IEEE 1588), MPLS unicast, and 802.1ad/stacked-VLAN (the QinQ case
+  `parse_ethernet`'s own comment already documented as "will simply fail to
+  recognize the inner ethertype" -- it's now named as such instead of a bare
+  `0x8100`) are named but not decoded further. PROFINET RT (`0x8892`),
+  IEC 61850-8-1 GOOSE (`0x88B8`), IEC 61850-9-2 Sampled Values (`0x88BA`),
+  and EtherCAT (`0x88A4`) are also named here, but, like CIP I/O below, a
+  frame that actually looks like DCP/cyclic IO data, a GOOSE APDU, a SavPdu,
+  or an EtherCAT frame header is decoded and reported as
+  `profinet`/`goose`/`sv`/`ethercat`, not `non-ip` -- see PROTOCOL COVERAGE's
+  PROFINET RT, GOOSE, Sampled Values, and EtherCAT sections.
 - **IPv4 protocol numbers** (`ipv4.hpp`'s `ip_protocol_name`): ICMP, IGMP,
   IPv6-in-IPv4, GRE, ESP, AH, ICMPv6, OSPF, SCTP -- alongside TCP and UDP,
   which get their own dedicated handling (below and elsewhere in this
@@ -1852,13 +2073,15 @@ protocol number registry (not reverse-engineered from a single capture):
   handling, same as before.
 
 **This is groundwork plumbing, explicitly not a new protocol decoder --**
-**except for CIP I/O, PROFINET RT, GOOSE, and now Sampled Values, which are**
-(see PROTOCOL COVERAGE's EtherNet/IP, PROFINET RT, GOOSE, and Sampled Values
-sections). EtherCAT's own framing is not parsed -- that EtherType is
-*named*, not *decoded* -- the only named-but-undecoded raw-Ethernet OT
-protocol left. A value outside every table above still shows only as a bare
-hex ethertype or decimal protocol number, exactly as before -- nothing is
-guessed at for an EtherType/protocol/port this tool doesn't recognize.
+**except for CIP I/O, PROFINET RT, GOOSE, Sampled Values, and now EtherCAT,**
+**which are** (see PROTOCOL COVERAGE's EtherNet/IP, PROFINET RT, GOOSE,
+Sampled Values, and EtherCAT sections). With EtherCAT decoded, this project
+no longer tracks any named-but-undecoded raw-Ethernet OT protocol of its
+own -- ARP/LLDP/PTP/MPLS/stacked-VLAN above are general-purpose Ethernet
+framing, not OT-specific. A value outside every table above still shows only
+as a bare hex ethertype or decimal protocol number, exactly as before --
+nothing is guessed at for an EtherType/protocol/port this tool doesn't
+recognize.
 
 `policy validate` does not yet evaluate any of this traffic against a
 conduit: it's still counted only in `PolicyReport::skipped_non_tcp`, exactly
@@ -1977,22 +2200,23 @@ These are current, not aspirational -- each has a corresponding ROADMAP item.
   header will very likely fail to parse and be reported as a parse-error on
   the fragments after the first.
 - **Non-IPv4 Ethernet frames and non-TCP IPv4 payloads (including UDP) are
-  named but not decoded, with four exceptions (CIP I/O, PROFINET RT, GOOSE,
-  and Sampled Values).** A deliberately small, OT-relevant set of EtherTypes/
-  IP-protocol-numbers is recognized by name (ARP, EtherCAT, ICMP, and the
-  rest -- see PROTOCOL COVERAGE); nothing outside that
+  named but not decoded, with five exceptions (CIP I/O, PROFINET RT, GOOSE,
+  Sampled Values, and EtherCAT).** A deliberately small, OT-relevant set of
+  EtherTypes/IP-protocol-numbers is recognized by name (ARP, LLDP, ICMP, and
+  the rest -- see PROTOCOL COVERAGE); nothing outside that
   set gets more than a bare hex/decimal number, and even a *named* one gets
-  no further parsing of its own framing. The four exceptions are
+  no further parsing of its own framing. The five exceptions are
   EtherNet/IP's CIP I/O traffic on UDP port 2222, PROFINET RT (EtherType
   `0x8892`, DCP and cyclic real-time IO), IEC 61850-8-1 GOOSE (EtherType
-  `0x88B8`), and IEC 61850-9-2 Sampled Values (EtherType `0x88BA`), all of
-  which are now decoded, not just named -- see PROTOCOL COVERAGE's
-  EtherNet/IP, PROFINET RT, GOOSE, and Sampled Values sections. `policy
-  validate` does not yet evaluate ANY UDP traffic against a conduit, decoded
-  or not (it only ever looks at TCP flows), and never evaluates PROFINET RT,
-  GOOSE, or Sampled Values either (all three ride raw Ethernet with no
-  IP/TCP/UDP layer at all, so there is no IP-based conduit rule that could
-  match any of them) -- see that section and ROADMAP.
+  `0x88B8`), IEC 61850-9-2 Sampled Values (EtherType `0x88BA`), and EtherCAT
+  (EtherType `0x88A4`), all of which are now decoded, not just named -- see
+  PROTOCOL COVERAGE's EtherNet/IP, PROFINET RT, GOOSE, Sampled Values, and
+  EtherCAT sections. `policy validate` does not yet evaluate ANY UDP traffic
+  against a conduit, decoded or not (it only ever looks at TCP flows), and
+  never evaluates PROFINET RT, GOOSE, Sampled Values, or EtherCAT either (all
+  four ride raw Ethernet with no IP/TCP/UDP layer at all, so there is no
+  IP-based conduit rule that could match any of them) -- see that section and
+  ROADMAP.
 - **CIP I/O (implicit messaging) decoding does not value-decode the actual
   I/O data, and has no cross-datagram state.** The Connected Data Item's
   contents are shown only as raw hex -- see PROTOCOL COVERAGE's CIP I/O
@@ -2062,6 +2286,28 @@ These are current, not aspirational -- each has a corresponding ROADMAP item.
   conservative handling there), though -- unlike GOOSE -- every ASDU *within*
   that PDU's `seqASDU` is decoded, since multiple ASDUs per SavPdu is core,
   spec-defined behavior. R-SV (IEC 61850-90-5) is out of scope entirely.
+- **EtherCAT's frame-header structural gate is honestly weaker than this
+  codebase's other raw-Ethernet decoders, and real-capture validation, while
+  genuine, doesn't cover every Cmd/bit/Type.** The frame header's `Type`
+  field is 4 bits admitting 16 possible values, of which 5 are spec-defined
+  -- a 5-in-16 chance of a coincidental match against unrelated traffic,
+  versus GOOSE/SV's 1-in-256 outer BER tag or PROFINET's own FrameID range
+  table; the dedicated, collision-free EtherType remains the primary
+  confidence source (see PROTOCOL DETECTION). The 986-frame real capture
+  used to validate this decoder (see PROTOCOL COVERAGE's EtherCAT section
+  and `tests/real_captures/ethercat/ATTRIBUTION.md`) is genuine and confirms
+  the "declared Length bounds the chain" design empirically (zero
+  declared-Length-vs-actual-bytes mismatches across all 986 frames), but
+  covers only 8 of 15 `Cmd` values (APRD/FPRD/BRD/FPWR/LRD/LWR/BWR/APWR) --
+  APRW/FPRW/BRW/LRW/ARMW/FRMW/EXT/NOP, the `Circulating` bit, the frame
+  header's `Reserved` bit, 802.1Q VLAN tagging, frame Types other than 1, and
+  every malformed/truncated-input path are validated only against the
+  hand-built `tests/sample_ethercat.pcap`, cross-checked against
+  `packet-ethercat-datagram.c`'s source rather than an independent real
+  capture. `Data` is never value-decoded by design (see PROTOCOL COVERAGE),
+  and the CoE/SoE/EoE/FoE/AoE mailbox protocol family, Frame Type 5
+  ("Mailbox"), Frame Types 2-4 (ADS/RAW-IO/NV), and Distributed Clock
+  register semantics are all out of scope entirely.
 - **DNP3 CRCs are not validated** -- neither the data-link header CRC nor the
   per-block CRCs within the user data. A corrupted DNP3 frame that still
   starts with the right magic bytes will be "decoded" without any indication
@@ -2449,6 +2695,26 @@ conduitscope decode -r capture.pcap --protocol sv -f json \
            select($gap != 1) | "\($id): smpCnt jumped by \($gap) at index \($i)"'
 ```
 
+Spot an EtherCAT Working Counter anomaly -- every datagram whose `WKC` is 0,
+which (outside link-up probes at the very start of a session) usually means
+the addressed slave(s) didn't respond, alongside the `Cmd`/address that was
+sent:
+
+```sh
+conduitscope decode -r capture.pcap --protocol ethercat -f json \
+  | jq -r '.[] | select(.ethercat_first_wkc == 0) |
+           "\(.index): \(.ethercat_first_cmd_name) adp=\(.ethercat_first_adp // "n/a") ado=\(.ethercat_first_ado // "n/a") logAddr=\(.ethercat_first_logical_address // "n/a")"'
+```
+
+Build a register-access inventory -- every distinct `Cmd`+`Ado` combination
+seen, useful as a first pass at what an EtherCAT master is actually reading/
+writing on a segment before writing zone/conduit policy for it:
+
+```sh
+conduitscope decode -r capture.pcap --protocol ethercat -f json \
+  | jq -r '[.[] | select(.ethercat_first_ado != null) | "\(.ethercat_first_cmd_name) ado=\(.ethercat_first_ado) (decimal)"] | unique[]'
+```
+
 Find every Modbus write whose response was never authoritatively paired --
 either the response wasn't captured, or it used a different session/
 transaction ID than expected (worth a closer look on a conduit that should
@@ -2536,15 +2802,13 @@ Rough order, each building on the groundwork this release establishes:
    would currently show structurally rather than as a tag read.
 9. ~~Decode IEC 61850-9-2 Sampled Values~~ -- **done**, see PROTOCOL
    COVERAGE's Sampled Values subsection and the "now done" paragraph below.
-   That closes out this item's original "decode the remaining
-   named-but-undecoded raw-Ethernet OT protocol" call-out entirely: CIP I/O,
-   PROFINET RT, GOOSE, and now Sampled Values are all done. **EtherCAT is
-   the only remaining named-but-undecoded raw-Ethernet OT protocol left**,
-   and, unlike GOOSE/SV's shared ASN.1-BER foundation, it's a fixed-binary-
-   layout protocol with its own distinct framing (datagram-chained frames
-   addressed by an auto-incrementing working counter) -- a fresh
-   research-and-validate cycle, not something existing PROFINET RT/GOOSE/SV
-   machinery carries over into. Also, separately: validate CIP I/O decoding
+   ~~Decode EtherCAT~~ -- **also done**, see PROTOCOL COVERAGE's EtherCAT
+   subsection and its own "now done" paragraph below. That closes out this
+   item's original "decode the remaining named-but-undecoded raw-Ethernet OT
+   protocol" call-out entirely: CIP I/O, PROFINET RT, GOOSE, Sampled Values,
+   and now EtherCAT are all done, and this project no longer tracks any
+   named-but-undecoded raw-Ethernet OT protocol of its own. Also, separately:
+   validate CIP I/O decoding
    against a real capture (none was found while building it -- see
    `tests/real_captures/enip/ATTRIBUTION.md`) if one ever turns up, and
    consider cross-datagram CIP I/O correlation (connection ID back to its
@@ -2560,12 +2824,19 @@ Rough order, each building on the groundwork this release establishes:
    (see `tests/real_captures/goose/ATTRIBUTION.md`). And for Sampled Values:
    real-capture validation for literally every code path, since none was
    found at all despite a genuine multi-source search (see PROTOCOL
-   COVERAGE's Sampled Values subsection). And widen `policy
-   validate` beyond TCP-only conduits, now that there are actual decoded
-   non-TCP protocols (CIP I/O, PROFINET RT, GOOSE, Sampled Values) worth
-   checking a conduit against -- PROFINET RT, GOOSE, and Sampled Values all
-   ride raw Ethernet with no IP layer at all, though, so they would need a
-   conduit-rule shape that isn't IP/CIDR-based to ever be covered.
+   COVERAGE's Sampled Values subsection). And for EtherCAT: real-capture
+   validation for the Cmd values (APRW/FPRW/BRW/LRW/ARMW/FRMW/EXT/NOP), the
+   `Circulating` bit, VLAN tagging, and non-Type-1 frames the one real
+   capture found doesn't happen to exercise (see PROTOCOL COVERAGE's
+   EtherCAT subsection and `tests/real_captures/ethercat/ATTRIBUTION.md`),
+   and CoE/SoE/EoE/FoE/AoE mailbox decoding, if a reliable way to recognize
+   it without per-slave SyncManager configuration knowledge ever turns up.
+   And widen `policy validate` beyond TCP-only conduits, now that there are
+   actual decoded non-TCP protocols (CIP I/O, PROFINET RT, GOOSE, Sampled
+   Values, EtherCAT) worth checking a conduit against -- PROFINET RT, GOOSE,
+   Sampled Values, and EtherCAT all ride raw Ethernet with no IP layer at
+   all, though, so they would need a conduit-rule shape that isn't
+   IP/CIDR-based to ever be covered.
 
 **pcapng support** is also now done: both classic pcap and pcapng are read
 transparently (auto-detected, no flag needed) -- see "pcap vs. pcapng"
@@ -2598,14 +2869,13 @@ DETECTION.
 **Link/IP-layer plumbing for non-IPv4/non-TCP traffic** is also now done:
 non-IPv4 Ethernet frames and non-TCP IPv4 payloads (including UDP) are
 recognized and named for a deliberately small, OT-relevant set of
-EtherTypes/IP-protocol-numbers (ARP, EtherCAT, ICMP,
+EtherTypes/IP-protocol-numbers (ARP, LLDP, ICMP,
 and the rest), rather than just a bare hex/decimal number and nothing else
--- see PROTOCOL COVERAGE's link/IP-layer plumbing section and item 9 above
-for what's still out of scope (EtherCAT remains named,
-not decoded), and `policy validate` doesn't yet evaluate any non-TCP
-traffic against a conduit. PROFINET RT, IEC 61850-8-1 GOOSE, and
-IEC 61850-9-2 Sampled Values, formerly in
-this same named-but-not-decoded set, are decoded now -- see the next three
+-- see PROTOCOL COVERAGE's link/IP-layer plumbing section, and `policy
+validate` doesn't yet evaluate any non-TCP traffic against a conduit.
+PROFINET RT, IEC 61850-8-1 GOOSE, IEC 61850-9-2 Sampled Values, and
+EtherCAT, formerly in
+this same named-but-not-decoded set, are decoded now -- see the next four
 paragraphs.
 
 **EtherNet/IP CIP I/O (implicit messaging) decoding** is also now done: the
@@ -2680,6 +2950,37 @@ public ICS-pcap repositories, IEC 61850 tooling projects, and a Wireshark
 GitLab issue's attached sample) -- validation here is honestly
 synthetic-fixture-only from the start; see `include/conduitscope/sv.hpp`'s
 file header for the full search writeup.
+
+**EtherCAT decoding** is also now done: the fourth protocol this tool
+decodes directly over raw Ethernet, alongside PROFINET RT/GOOSE/SV, and the
+final answer to item 9's original "decode the remaining named-but-undecoded
+raw-Ethernet protocol" call-out -- this project no longer tracks any
+named-but-undecoded raw-Ethernet OT protocol of its own. Unlike GOOSE/SV's
+shared ASN.1-BER foundation, EtherCAT is a plain fixed-binary-layout
+protocol with its own distinct framing: a 2-byte frame header (Length/
+Reserved/Type) and, for Type 1 ("EtherCAT command") frames, a chain of
+EtherCAT datagrams (`Cmd`/`Idx`/`Adp`-`Ado`-or-logical-address/`Len`+flags/
+`Irq`/`Data`/Working Counter) -- see PROTOCOL COVERAGE's EtherCAT subsection
+for the full field tables and LIMITATIONS for what's still open. `Data` is
+deliberately never value-decoded, the fourth application of this codebase's
+"no generic self-describing wire-level type" reasoning after PROFINET RT's
+cyclic IO data, CIP I/O's Connected Data Item, and SV's `seqData`. One
+honest gap unique to this protocol: its frame-header `Type` field is a
+genuinely weaker structural detection signal than every other raw-Ethernet
+protocol here (5 of 16 possible 4-bit values, vs. GOOSE/SV's 1-in-256 outer
+tag or PROFINET's FrameID range table) -- the dedicated EtherType remains
+the primary confidence source. Unlike Sampled Values, a real capture WAS
+found (986 frames) and directly confirmed a deliberate design choice: this
+decoder bounds its datagram-chain scan by the frame header's own declared
+Length field, rather than walking every byte physically present in the
+frame the way Wireshark's own dissector does, specifically to avoid
+misreading Ethernet's minimum-frame-size zero-padding as a spurious
+trailing datagram -- all 986 real frames show declared Length exactly
+matching the actual chained-datagram byte count, zero mismatches. See
+`tests/real_captures/ethercat/ATTRIBUTION.md` for full provenance and
+exactly which Cmd values/bits/frame Types that capture does and doesn't
+exercise, and `include/conduitscope/ethercat.hpp`'s file header for the
+full writeup.
 
 **Colorized text output** is also now done: see OUTPUT FORMATS' "Color"
 subsection for the scheme and the `--color`/`--no-color`/auto-detection

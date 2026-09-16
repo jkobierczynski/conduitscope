@@ -14,6 +14,7 @@
 #include "conduitscope/cotp.hpp"
 #include "conduitscope/dnp3.hpp"
 #include "conduitscope/enip.hpp"
+#include "conduitscope/ethercat.hpp"
 #include "conduitscope/goose.hpp"
 #include "conduitscope/iec104.hpp"
 #include "conduitscope/modbus.hpp"
@@ -25,7 +26,7 @@
 namespace conduitscope {
 
 enum class ProtocolFilter {
-    Auto,         // opportunistically detect IEC104/Modbus/DNP3/S7comm/EtherNet-IP/PROFINET/GOOSE/SV regardless of port
+    Auto,         // opportunistically detect IEC104/Modbus/DNP3/S7comm/EtherNet-IP/PROFINET/GOOSE/SV/EtherCAT regardless of port
     ModbusOnly,   // only attempt Modbus decoding
     Dnp3Only,     // only attempt DNP3 decoding
     S7commOnly,   // only attempt TPKT/COTP/S7comm decoding
@@ -34,6 +35,7 @@ enum class ProtocolFilter {
     ProfinetOnly, // only attempt PROFINET RT (DCP + cyclic IO data) decoding
     GooseOnly,    // only attempt IEC 61850-8-1 GOOSE decoding
     SvOnly,       // only attempt IEC 61850-9-2 Sampled Values decoding
+    EthercatOnly, // only attempt EtherCAT decoding
 };
 
 struct DecodeOptions {
@@ -82,21 +84,23 @@ struct DecodedPacket {
     uint16_t src_port = 0, dst_port = 0;
     std::string tcp_flags;
 
-    // "iec104", "modbus", "dnp3", "s7comm", "enip", "profinet", "goose", "sv", "cotp" (recognized
-    // TPKT/COTP framing but not S7comm inside it -- e.g. a connection setup frame), "tcp"
-    // (recognized transport, no app-layer match), "udp" (recognized transport, no app-layer
+    // "iec104", "modbus", "dnp3", "s7comm", "enip", "profinet", "goose", "sv", "ethercat", "cotp"
+    // (recognized TPKT/COTP framing but not S7comm inside it -- e.g. a connection setup frame),
+    // "tcp" (recognized transport, no app-layer match), "udp" (recognized transport, no app-layer
     // protocol decoded -- see udp.hpp; UDP/2222 CIP I/O traffic that try_parse_cip_io actually
     // recognizes is promoted to "enip" instead -- see enip_has_io below), "non-tcp" (a non-TCP,
     // non-UDP IPv4 payload, e.g. ICMP), "non-ip" (a non-IPv4 Ethernet frame, e.g. ARP, or a
-    // raw-Ethernet OT protocol this tool doesn't decode like EtherCAT, or a PROFINET RT frame
-    // whose FrameID try_parse_profinet doesn't recognize, or a GOOSE frame whose outer APDU tag
-    // try_parse_goose doesn't recognize, or an SV frame whose outer APDU tag try_parse_sv doesn't
-    // recognize -- see link_layer.hpp's ethertype_name; EtherType 0x8892 traffic that
-    // try_parse_profinet DOES recognize is promoted to "profinet" instead -- see
-    // profinet_has_dcp/profinet_has_cyclic_data below; EtherType 0x88B8 traffic that
+    // PROFINET RT frame whose FrameID try_parse_profinet doesn't recognize, or a GOOSE frame
+    // whose outer APDU tag try_parse_goose doesn't recognize, or an SV frame whose outer APDU tag
+    // try_parse_sv doesn't recognize, or an EtherCAT frame whose header Type field
+    // try_parse_ethercat doesn't recognize -- see link_layer.hpp's ethertype_name; EtherType
+    // 0x8892 traffic that try_parse_profinet DOES recognize is promoted to "profinet" instead --
+    // see profinet_has_dcp/profinet_has_cyclic_data below; EtherType 0x88B8 traffic that
     // try_parse_goose DOES recognize is promoted to "goose" instead -- see goose_has_pdu/
     // goose_is_gse_management below; EtherType 0x88BA traffic that try_parse_sv DOES recognize is
-    // promoted to "sv" instead -- see sv_asdu_count below), "unsupported-link", or "parse-error".
+    // promoted to "sv" instead -- see sv_asdu_count below; EtherType 0x88A4 traffic that
+    // try_parse_ethercat DOES recognize is promoted to "ethercat" instead -- see
+    // ethercat_frame_type below), "unsupported-link", or "parse-error".
     std::string protocol;
     std::string summary;
     std::vector<std::string> notes;
@@ -253,6 +257,37 @@ struct DecodedPacket {
     // One summary string per decoded ASDU (e.g. "svID=\"MU01\" smpCnt=1234 confRev=1"), capped at
     // 50 entries for the same reason as profinet_dcp_blocks/goose_all_data.
     std::vector<std::string> sv_asdus;
+
+    // Only set when protocol == "ethercat" -- see try_parse_ethercat in ethercat.hpp. Like
+    // PROFINET RT/GOOSE/SV above, EtherCAT rides directly on raw Ethernet (EtherType 0x88A4,
+    // has_ip stays false) -- src_mac/dst_mac (above) are the only addressing this packet carries.
+    uint8_t ethercat_frame_type = 0;    // always set when protocol == "ethercat"
+    std::string ethercat_frame_type_name;  // "EtherCAT command"/"ADS"/"RAW-IO"/"NV"/"Mailbox"
+    uint16_t ethercat_declared_length = 0;  // the frame header's own Length field (11 bits)
+
+    // Set only when ethercat_frame_type == 1 ("EtherCAT command") -- Types 2-5 are named only,
+    // not decoded further, see ethercat.hpp.
+    bool ethercat_has_datagrams = false;
+    uint64_t ethercat_datagram_count = 0;  // how many datagrams were actually decoded
+
+    // The first decoded datagram's own fields, promoted here for convenience -- see sv_id/etc.
+    // above for the same pattern. All 0/empty when ethercat_datagram_count == 0.
+    uint8_t ethercat_first_cmd = 0;
+    std::string ethercat_first_cmd_name;
+    uint8_t ethercat_first_idx = 0;
+    bool ethercat_first_logical_addressing = false;
+    uint16_t ethercat_first_adp = 0;            // meaningful only when !ethercat_first_logical_addressing
+    uint16_t ethercat_first_ado = 0;            // meaningful only when !ethercat_first_logical_addressing
+    uint32_t ethercat_first_logical_address = 0;  // meaningful only when ethercat_first_logical_addressing
+    std::string ethercat_first_data_hex;  // raw hex, deliberately not value-decoded -- see ethercat.hpp
+    size_t ethercat_first_data_length = 0;
+    uint16_t ethercat_first_wkc = 0;  // Working Counter -- see ethercat.hpp's WKC paragraph
+    uint16_t ethercat_first_irq = 0;  // raw interrupt-request bitmask, not decoded further
+    bool ethercat_first_circulating = false;  // Len word's Circulating bit (0x4000)
+
+    // One summary string per decoded datagram (e.g. "APRD idx=2 adp=0x0000 ado=0x0130 len=2
+    // wkc=1"), capped at 50 entries for the same reason as sv_asdus/goose_all_data.
+    std::vector<std::string> ethercat_datagrams;
 };
 
 // Cross-packet DNP3 fragment-reassembly state for one directional TCP flow (src ip:port -> dst

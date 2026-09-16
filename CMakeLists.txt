@@ -34,6 +34,7 @@ add_library(conduitscope_core STATIC
   src/profinet.cpp
   src/goose.cpp
   src/sv.cpp
+  src/ethercat.cpp
   src/cotp.cpp
   src/s7comm.cpp
   src/decoder.cpp
@@ -1141,6 +1142,166 @@ add_test(NAME sv_stats_counted
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_sv.pcap" --stats)
 set_tests_properties(sv_stats_counted PROPERTIES
   PASS_REGULAR_EXPRESSION "sv frames: 14\nsv asdus \\(summed across every frame\\): 14")
+
+# --------------------------------------------------------------------------
+# EtherCAT (synthetic, tests/sample_ethercat.pcap): the 2-byte frame header (Length+Reserved+Type)
+# and, for Type 1 ("EtherCAT command") frames, the chained EtherCAT datagram(s) that follow -- see
+# tools/make_sample_pcap.py's build_ethercat_sample for the exact byte layout each assertion below
+# is checking, and ethercat.hpp's file header comment for the decoder itself. Like PROFINET RT/
+# GOOSE/SV, EtherCAT rides directly on raw Ethernet (EtherType 0x88A4) -- there is no IP/TCP/UDP
+# layer at all, and unlike those three, its wire format is plain fixed-binary, not ASN.1/BER.
+# --------------------------------------------------------------------------
+add_test(NAME ethercat_baseline_brd_matches_real_capture_frame_zero
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ethercat.pcap" --format text)
+set_tests_properties(ethercat_baseline_brd_matches_real_capture_frame_zero PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[ethercat\\]  ECAT BRD idx=2 adp=0x0000 ado=0x0130 len=2 wkc=0\n")
+
+add_test(NAME ethercat_chained_topology_discovery_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ethercat.pcap" --format text)
+set_tests_properties(ethercat_chained_topology_discovery_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "ECAT APRD idx=10 adp=0x0000 ado=0x0130 len=2 wkc=1 \\(\\+4 more datagram\\(s\\)\\)")
+
+add_test(NAME ethercat_chained_topology_discovery_auto_increment_addresses_in_json
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ethercat.pcap")
+set_tests_properties(ethercat_chained_topology_discovery_auto_increment_addresses_in_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"ethercat_datagram_count\": 5.*\"ethercat_datagrams\": \\[\"APRD idx=10 adp=0x0000[^\"]*\", \"APRD idx=11 adp=0xFFFF[^\"]*\", \"APRD idx=12 adp=0xFFFE[^\"]*\", \"APRD idx=13 adp=0xFFFD[^\"]*\", \"APRD idx=14 adp=0xFFFC[^\"]*\"\\]")
+
+add_test(NAME ethercat_logical_addressing_lrd_lwr_lrw_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ethercat.pcap" --format text)
+set_tests_properties(ethercat_logical_addressing_lrd_lwr_lrw_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "ECAT LRD idx=20 logAddr=0x00010000 len=4 wkc=1\n.*ECAT LWR idx=21 logAddr=0x00020000 len=4 wkc=1\n.*ECAT LRW idx=22 logAddr=0x00030000 len=4 wkc=3\n")
+
+add_test(NAME ethercat_logical_address_promoted_in_json
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ethercat.pcap")
+set_tests_properties(ethercat_logical_address_promoted_in_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"ethercat_first_cmd_name\": \"LRD\".*\"ethercat_first_logical_address\": 65536")
+
+# Cmd values the real capture (tests/real_captures/ethercat/ATTRIBUTION.md) does NOT exercise --
+# APRW/FPRW/BRW (ReadWrite variants), ARMW/FRMW (Read Multiple Write), EXT, and NOP -- one datagram
+# each, all decoded structurally via the ordinary Adp+Ado default addressing case.
+add_test(NAME ethercat_cmd_values_not_in_real_capture_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ethercat.pcap" --format text)
+set_tests_properties(ethercat_cmd_values_not_in_real_capture_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "ECAT APRW idx=30[^\n]*\n.*ECAT FPRW idx=31[^\n]*\n.*ECAT BRW idx=32[^\n]*\n.*ECAT ARMW idx=33[^\n]*\n.*ECAT FRMW idx=34[^\n]*\n.*ECAT EXT idx=35[^\n]*\n.*ECAT NOP idx=36 adp=0x0000 ado=0x0000 len=0 wkc=0\n")
+
+add_test(NAME ethercat_unrecognized_cmd_rendered_as_unknown
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ethercat.pcap" --format text)
+set_tests_properties(ethercat_unrecognized_cmd_rendered_as_unknown PROPERTIES
+  PASS_REGULAR_EXPRESSION "ECAT unknown\\(200\\) idx=40 adp=0x0005 ado=0x0100 len=2 wkc=0")
+
+# Len word's Circulating bit (0x4000) -- never observed set in the real capture (see
+# ATTRIBUTION.md), synthetic-only. Surfaced via ethercat_first_circulating and the per-datagram
+# summary's " circulating" suffix, not the terse top-level frame summary (matching how GOOSE's own
+# S-bit is surfaced in JSON/notes rather than its one-line summary).
+add_test(NAME ethercat_circulating_bit_decoded_in_json
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ethercat.pcap")
+set_tests_properties(ethercat_circulating_bit_decoded_in_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"ethercat_first_idx\": 41.*\"ethercat_first_circulating\": true.*\"ethercat_datagrams\": \\[\"FPRD idx=41[^\"]* circulating\"\\]")
+
+add_test(NAME ethercat_frame_header_reserved_bit_noted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ethercat.pcap" --format text)
+set_tests_properties(ethercat_frame_header_reserved_bit_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "ECAT FPRD idx=42[^\n]*\n *note: frame header Reserved bit is set -- the spec says this must be zero")
+
+add_test(NAME ethercat_wkc_zero_anomaly_surfaced_raw
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ethercat.pcap" --format text)
+set_tests_properties(ethercat_wkc_zero_anomaly_surfaced_raw PROPERTIES
+  PASS_REGULAR_EXPRESSION "ECAT BWR idx=43 adp=0x0000 ado=0x0130 len=2 wkc=0\n")
+
+# Frame Types 2-5 (ADS/RAW-IO/NV/Mailbox) -- named only, not decoded further, the same "named only"
+# pattern goose.hpp's GSE Management PDU and profinet.hpp's non-cyclic FrameID ranges already use.
+add_test(NAME ethercat_frame_types_2_to_5_named_only
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ethercat.pcap" --format text)
+set_tests_properties(ethercat_frame_types_2_to_5_named_only PROPERTIES
+  PASS_REGULAR_EXPRESSION "ECAT type=ADS \\(not decoded further\\)\n.*ECAT type=RAW-IO \\(not decoded further\\)\n.*ECAT type=NV \\(not decoded further\\)\n.*ECAT type=Mailbox \\(not decoded further\\)")
+
+# A genuinely unrecognized/reserved frame header Type value (0) -- must NOT be misdetected as
+# EtherCAT at all; falls back to the generic "non-ip" ethertype-name-only report -- see
+# ethercat.hpp's "structural detection gate" paragraph.
+add_test(NAME ethercat_unrecognized_type_falls_back_to_non_ip
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ethercat.pcap" --format text)
+set_tests_properties(ethercat_unrecognized_type_falls_back_to_non_ip PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[non-ip\\]  Ethernet frame with ethertype 0x88a4 \\(EtherCAT\\) \\(not IPv4\\)")
+
+# 802.1Q VLAN-priority-tagged EtherCAT -- confirms parse_ethernet's single-VLAN-tag unwrap composes
+# correctly with EtherCAT detection, mirroring GOOSE/SV's own VLAN tests.
+add_test(NAME ethercat_vlan_tagged_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ethercat.pcap" --format text)
+set_tests_properties(ethercat_vlan_tagged_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "ECAT BRD idx=44 adp=0x0000 ado=0x0130 len=2 wkc=1")
+
+# An EtherCAT frame too short for even the fixed 2-byte frame header must NOT be misdetected --
+# falls through to the generic "non-ip" ethertype-name-only report. Both this packet and the
+# unrecognized-Type one above fall back to the same "non-ip" report, so this asserts there are
+# exactly two such lines in the whole file (no false positive elsewhere).
+add_test(NAME ethercat_truncated_header_falls_back_to_non_ip
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ethercat.pcap" --format text)
+set_tests_properties(ethercat_truncated_header_falls_back_to_non_ip PROPERTIES
+  PASS_REGULAR_EXPRESSION "non-ip\\][^\n]*\n.*#23[^\n]*non-ip\\]")
+
+add_test(NAME ethercat_bogus_length_field_falls_back_to_available_bytes
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ethercat.pcap" --format text)
+set_tests_properties(ethercat_bogus_length_field_falls_back_to_available_bytes PROPERTIES
+  PASS_REGULAR_EXPRESSION "ECAT BRD idx=45 adp=0x0000 ado=0x0130 len=2 wkc=1[^\n]*\n *note: frame header Length \\(0\\) is implausible")
+
+add_test(NAME ethercat_more_bit_set_on_last_datagram_truncation_noted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ethercat.pcap" --format text)
+set_tests_properties(ethercat_more_bit_set_on_last_datagram_truncation_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "ECAT APRD idx=46[^\n]*\n *note: EtherCAT datagram chain: More bit set on the last datagram decoded, but no bytes remain")
+
+add_test(NAME ethercat_partial_datagram_header_truncation_noted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ethercat.pcap" --format text)
+set_tests_properties(ethercat_partial_datagram_header_truncation_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "ECAT 0 datagram\\(s\\) decoded[^\n]*\n *note: EtherCAT datagram header needs 10 byte\\(s\\) but only 5 remain -- chain truncated, stopping")
+
+add_test(NAME ethercat_safety_cap_stops_at_200_datagrams
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ethercat.pcap" --format text)
+set_tests_properties(ethercat_safety_cap_stops_at_200_datagrams PROPERTIES
+  PASS_REGULAR_EXPRESSION "ECAT NOP idx=0 adp=0x0000 ado=0x0000 len=0 wkc=0 \\(\\+199 more datagram\\(s\\)\\)[^\n]*\n *note: frame header Length \\(0\\) is implausible[^\n]*\n *note: EtherCAT datagram chain: stopped after 200 datagram\\(s\\) \\(safety cap\\)")
+
+add_test(NAME ethercat_stats_counted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ethercat.pcap" --stats)
+set_tests_properties(ethercat_stats_counted PROPERTIES
+  PASS_REGULAR_EXPRESSION "ethercat frame types:\n *ADS +1\n *EtherCAT command +21\n *Mailbox +1\n *NV +1\n *RAW-IO +1\nethercat datagrams \\(summed across every frame\\): 223")
+
+# --------------------------------------------------------------------------
+# Real-world EtherCAT captures -- see tests/real_captures/ethercat/ATTRIBUTION.md for provenance
+# (a public mirror of the same file `automayt/ICS-pcap` stores via Git LFS, confirmed identical by
+# SHA256). 986 frames, a master's boot-time slave enumeration and register poll sequence.
+# --------------------------------------------------------------------------
+add_test(NAME real_ethercat_ics_ethercat_001_does_not_crash
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/ethercat/ICS-Ethercat-001.pcap" --format json)
+
+add_test(NAME real_ethercat_frame_zero_matches_synthetic_baseline
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/ethercat/ICS-Ethercat-001.pcap" --format text)
+set_tests_properties(real_ethercat_frame_zero_matches_synthetic_baseline PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[ethercat\\]  ECAT BRD idx=2 adp=0x0000 ado=0x0130 len=2 wkc=0\n")
+
+# Every one of the 986 real frames is Type 1 with zero notes -- in particular, zero declared-Length-
+# vs-actual-chained-bytes mismatches (see ethercat.hpp's "declared Length" paragraph and
+# ATTRIBUTION.md), zero Reserved-bit warnings, zero truncated-chain warnings.
+add_test(NAME real_ethercat_stats_all_type1_zero_notes
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/ethercat/ICS-Ethercat-001.pcap" --stats)
+set_tests_properties(real_ethercat_stats_all_type1_zero_notes PROPERTIES
+  PASS_REGULAR_EXPRESSION "packets: +986[^\n]*\n[^\n]*\nprotocols:\n *ethercat +986\nethercat frame types:\n *EtherCAT command +986\nethercat datagrams \\(summed across every frame\\): 8140")
+
+add_test(NAME real_ethercat_no_notes_anywhere_in_capture
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/ethercat/ICS-Ethercat-001.pcap" --format text)
+set_tests_properties(real_ethercat_no_notes_anywhere_in_capture PROPERTIES
+  FAIL_REGULAR_EXPRESSION "note:")
+
+# Auto-increment topology-discovery pattern (Adp 0x0000, then 0xFFFF, 0xFFFE, ...) -- see
+# ethercat.hpp's "Auto increment addressing" paragraph -- appears in this real capture's early
+# frames.
+add_test(NAME real_ethercat_auto_increment_topology_discovery_pattern
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/ethercat/ICS-Ethercat-001.pcap" --format text)
+set_tests_properties(real_ethercat_auto_increment_topology_discovery_pattern PROPERTIES
+  PASS_REGULAR_EXPRESSION "ECAT BRD idx=2 adp=0x0000 ado=0x0130 len=2 wkc=0\n.*ECAT BRD idx=2 adp=0x0005 ado=0x0130 len=2 wkc=5\n")
+
+add_test(NAME real_ethercat_logical_addressing_lrd_lwr_present
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/ethercat/ICS-Ethercat-001.pcap")
+set_tests_properties(real_ethercat_logical_addressing_lrd_lwr_present PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"ethercat_first_cmd_name\": \"LRD\"")
 
 # --------------------------------------------------------------------------
 # Real-world S7comm/COTP captures -- see tests/real_captures/s7comm/ATTRIBUTION.md

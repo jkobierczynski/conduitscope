@@ -62,6 +62,7 @@ constexpr const char* kYellow = "\033[33m";
 constexpr const char* kBrightCyan = "\033[96m";
 constexpr const char* kBrightGreen = "\033[92m";
 constexpr const char* kBrightMagenta = "\033[95m";
+constexpr const char* kBrightYellow = "\033[93m";
 
 // Color for a packet's "[protocol]" tag -- picked so a mixed-protocol capture scans quickly by
 // eye, not for any deeper meaning. parse-error is the one exception: it gets the same "something
@@ -77,6 +78,7 @@ const char* protocol_tag_color(const std::string& protocol) {
     if (protocol == "profinet") return kBrightCyan;
     if (protocol == "goose") return kBrightGreen;
     if (protocol == "sv") return kBrightMagenta;
+    if (protocol == "ethercat") return kBrightYellow;
     if (protocol == "parse-error") return kBoldRed;
     return kDim;  // tcp / udp / non-tcp / non-ip / unsupported-link: recognized, nothing OT-specific
 }
@@ -292,6 +294,39 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
             out_ << "],\n";
         }
     }
+    if (p.protocol == "ethercat") {
+        out_ << "    \"ethercat_frame_type\": " << static_cast<unsigned>(p.ethercat_frame_type) << ",\n";
+        out_ << "    \"ethercat_frame_type_name\": \"" << json_escape(p.ethercat_frame_type_name) << "\",\n";
+        out_ << "    \"ethercat_declared_length\": " << p.ethercat_declared_length << ",\n";
+        out_ << "    \"ethercat_has_datagrams\": " << (p.ethercat_has_datagrams ? "true" : "false") << ",\n";
+        if (p.ethercat_has_datagrams) {
+            out_ << "    \"ethercat_datagram_count\": " << p.ethercat_datagram_count << ",\n";
+            if (p.ethercat_datagram_count > 0) {
+                out_ << "    \"ethercat_first_cmd\": " << static_cast<unsigned>(p.ethercat_first_cmd) << ",\n";
+                out_ << "    \"ethercat_first_cmd_name\": \"" << json_escape(p.ethercat_first_cmd_name) << "\",\n";
+                out_ << "    \"ethercat_first_idx\": " << static_cast<unsigned>(p.ethercat_first_idx) << ",\n";
+                if (p.ethercat_first_logical_addressing) {
+                    out_ << "    \"ethercat_first_logical_address\": " << p.ethercat_first_logical_address << ",\n";
+                } else {
+                    out_ << "    \"ethercat_first_adp\": " << p.ethercat_first_adp << ",\n";
+                    out_ << "    \"ethercat_first_ado\": " << p.ethercat_first_ado << ",\n";
+                }
+                out_ << "    \"ethercat_first_data_length\": " << p.ethercat_first_data_length << ",\n";
+                out_ << "    \"ethercat_first_data_hex\": \"" << json_escape(p.ethercat_first_data_hex) << "\",\n";
+                out_ << "    \"ethercat_first_wkc\": " << p.ethercat_first_wkc << ",\n";
+                out_ << "    \"ethercat_first_irq\": " << p.ethercat_first_irq << ",\n";
+                out_ << "    \"ethercat_first_circulating\": " << (p.ethercat_first_circulating ? "true" : "false") << ",\n";
+            }
+            if (!p.ethercat_datagrams.empty()) {
+                out_ << "    \"ethercat_datagrams\": [";
+                for (size_t i = 0; i < p.ethercat_datagrams.size(); ++i) {
+                    if (i != 0) out_ << ", ";
+                    out_ << "\"" << json_escape(p.ethercat_datagrams[i]) << "\"";
+                }
+                out_ << "],\n";
+            }
+        }
+    }
     out_ << "    \"notes\": [";
     for (size_t i = 0; i < p.notes.size(); ++i) {
         if (i != 0) out_ << ", ";
@@ -356,6 +391,10 @@ void StatsWriter::write_packet(const DecodedPacket& p) {
     if (p.protocol == "sv") {
         sv_frame_count_++;
         sv_asdu_total_ += p.sv_asdu_count;
+    }
+    if (p.protocol == "ethercat") {
+        ethercat_frame_type_counts_[p.ethercat_frame_type_name]++;
+        ethercat_datagram_total_ += p.ethercat_datagram_count;
     }
     if (!has_ts_) {
         first_ts_ = last_ts_ = p.timestamp;
@@ -434,6 +473,13 @@ void StatsWriter::print_summary(std::ostream& out) const {
     if (sv_frame_count_ > 0) {
         out << "sv frames: " << sv_frame_count_ << "\n";
         out << "sv asdus (summed across every frame): " << sv_asdu_total_ << "\n";
+    }
+    if (!ethercat_frame_type_counts_.empty()) {
+        out << "ethercat frame types:\n";
+        for (const auto& [name, count] : ethercat_frame_type_counts_) {
+            out << "  " << std::left << std::setw(40) << name << count << "\n";
+        }
+        out << "ethercat datagrams (summed across every frame): " << ethercat_datagram_total_ << "\n";
     }
 }
 

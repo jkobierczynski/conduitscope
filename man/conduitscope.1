@@ -1,6 +1,6 @@
 .TH CONDUITSCOPE 1 "2026" "conduitscope 0.1.0" "User Commands"
 .SH NAME
-conduitscope \- decode Modbus/TCP, DNP3, IEC 60870-5-104, S7comm/COTP, EtherNet/IP (CIP explicit and implicit messaging), PROFINET RT (DCP and cyclic real-time IO), IEC 61850-8-1 GOOSE, and IEC 61850-9-2 Sampled Values traffic from offline pcap/pcapng captures
+conduitscope \- decode Modbus/TCP, DNP3, IEC 60870-5-104, S7comm/COTP, EtherNet/IP (CIP explicit and implicit messaging), PROFINET RT (DCP and cyclic real-time IO), IEC 61850-8-1 GOOSE, IEC 61850-9-2 Sampled Values, and EtherCAT traffic from offline pcap/pcapng captures
 .SH SYNOPSIS
 .B conduitscope
 [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-color\fR|\fB\-\-color\fR] [\fB\-\-log\-file\fR \fIFILE\fR] \fICOMMAND\fR [\fIOPTIONS\fR]
@@ -14,9 +14,10 @@ TPKT/COTP, TCP port 102), and EtherNet/IP (CIP explicit messaging, TCP port
 (implicit messaging, UDP port 2222) traffic found inside its UDP streams,
 plus PROFINET RT (EtherType 0x8892, DCP device discovery/configuration and
 cyclic real-time IO), IEC 61850-8-1 GOOSE (EtherType 0x88B8, ASN.1
-BER-encoded GOOSE PDU), and IEC 61850-9-2 Sampled Values (EtherType 0x88BA,
-GOOSE's sibling protocol, ASN.1 BER-encoded SavPdu) traffic found directly
-on the wire, with no
+BER-encoded GOOSE PDU), IEC 61850-9-2 Sampled Values (EtherType 0x88BA,
+GOOSE's sibling protocol, ASN.1 BER-encoded SavPdu), and EtherCAT (EtherType
+0x88A4, plain fixed-binary-layout framing, no ASN.1/BER) traffic found
+directly on the wire, with no
 IP/TCP/UDP layer at all, and checks
 decoded traffic against a
 zone-and-conduit segmentation policy (IEC 62443 / NIS2 style work) via
@@ -82,18 +83,19 @@ Write output here instead of stdout.
 .BR \-f ", " \-\-format " " {text,json,csv}
 Output format. Default: text.
 .TP
-.B \-\-protocol {auto,modbus,dnp3,iec104,s7comm,enip,profinet,goose,sv}
+.B \-\-protocol {auto,modbus,dnp3,iec104,s7comm,enip,profinet,goose,sv,ethercat}
 Restrict decoding to one protocol. Default: auto (tries all five TCP
 protocols, independent of port number, plus CIP I/O on every UDP payload,
 plus PROFINET RT on every non-IPv4 Ethernet frame carrying EtherType
 0x8892, plus GOOSE on every non-IPv4 Ethernet frame carrying EtherType
 0x88B8, plus Sampled Values on every non-IPv4 Ethernet frame carrying
-EtherType 0x88BA; EtherNet/IP is tried first, then IEC 104 before Modbus, since an
+EtherType 0x88BA, plus EtherCAT on every non-IPv4 Ethernet frame carrying
+EtherType 0x88A4; EtherNet/IP is tried first, then IEC 104 before Modbus, since an
 IEC 104 I-format APDU with sequence numbers 0/0 -- universal at session
 start -- coincidentally also matches Modbus's MBAP-header detection; see
 \fBdocs/MANUAL.md\fR's PROTOCOL DETECTION section). \fBenip\fR covers both
 EtherNet/IP explicit messaging (TCP) and CIP I/O implicit messaging (UDP).
-\fBsv\fR is IEC 61850-9-2 Sampled Values.
+\fBsv\fR is IEC 61850-9-2 Sampled Values. \fBethercat\fR is EtherCAT.
 \fBprofinet\fR covers both DCP and cyclic real-time IO.
 .TP
 .B \-\-modbus\-port \fIPORT\fR
@@ -214,7 +216,7 @@ it's meant to be diffed/archived/piped as an audit artifact). The
 \fB[protocol]\fR tag is colored per protocol: cyan for Modbus, magenta for
 DNP3, green for IEC 104, blue for S7comm/COTP, yellow for EtherNet/IP,
 bright cyan for PROFINET RT, bright green for GOOSE, bright magenta for
-Sampled Values, dim for everything else
+Sampled Values, bright yellow for EtherCAT, dim for everything else
 recognized but not OT\-specific. A Modbus exception response's summary, and a
 \fBparse\-error\fR packet's whole line, are bold red. Notes are dim.
 .PP
@@ -316,12 +318,25 @@ in a frame's seqASDU is decoded, not just the first; despite a genuine
 multi-source search, no real Sampled Values capture was found anywhere, so
 this decoder is validated only against a hand-built synthetic fixture,
 covering every field, both enumerated fields' full value sets, multi-ASDU
-framing, and every malformed/truncated path; non-IPv4
+framing, and every malformed/truncated path; EtherCAT (EtherType 0x88A4,
+plain fixed-binary-layout, no ASN.1/BER) is also now decoded -- the 2-byte
+frame header (Length/Reserved/Type) and, for Type 1 ("EtherCAT command")
+frames, the chained EtherCAT datagram(s) (Cmd/Idx/Adp-Ado-or-logical-address/
+Len+flags/Irq/Data/Working Counter) -- Data is deliberately never
+value-decoded, same reasoning as SV's seqData above; its frame-header Type
+field is a genuinely weaker structural detection signal than this tool's
+other raw-Ethernet decoders (5 of 16 possible values, vs. GOOSE/SV's
+1-in-256 outer tag), so the dedicated EtherType remains the primary
+confidence source; validated against a genuine 986-frame real capture (zero
+declared-Length-vs-actual-bytes mismatches across all 986 frames, confirming
+the chain-bounding design), but APRW/FPRW/BRW/LRW/ARMW/FRMW/EXT/NOP, the
+Circulating bit, VLAN tagging, and non-Type-1 frames are validated only
+against a hand-built synthetic fixture; non-IPv4
 Ethernet frames and non-TCP
 IPv4 payloads (including UDP) are otherwise still just recognized and
-NAMED for a small OT-relevant set (ARP, EtherCAT, ICMP, and the rest) but not further decoded, and
+NAMED for a small OT-relevant set (ARP, LLDP, ICMP, and the rest) but not further decoded, and
 \fBpolicy validate\fR does not yet evaluate any non-TCP traffic (CIP I/O,
-PROFINET RT, GOOSE, and Sampled Values included) against a conduit;
+PROFINET RT, GOOSE, Sampled Values, and EtherCAT included) against a conduit;
 Modbus request/response
 classification falls back to a payload-shape heuristic only when
 authoritative pairing can't be done (no matching request on this session);
@@ -416,6 +431,16 @@ Build a quick Sampled Values publisher/stream inventory (svID + smpRate):
 .EX
 conduitscope decode \-r capture.pcap \-\-protocol sv \-f json \e
   | jq \-r '[.[] | select(.sv_id != null) | "\e(.sv_id) smpRate=\e(.sv_smp_rate // "n/a")"] | unique[]'
+.EE
+.RE
+.PP
+Spot an EtherCAT Working Counter anomaly (WKC=0, usually a slave that
+didn't respond):
+.RS
+.EX
+conduitscope decode \-r capture.pcap \-\-protocol ethercat \-f json \e
+  | jq \-r '.[] | select(.ethercat_first_wkc == 0) |
+           "\e(.index): \e(.ethercat_first_cmd_name) adp=\e(.ethercat_first_adp // "n/a")"'
 .EE
 .RE
 .PP
