@@ -734,7 +734,9 @@ tried and rejected -- it regressed ~2% of this tool's own Modbus/TCP test
 corpus -- so HART-IP is deliberately tried last), and, confirmed on a
 genuine real capture, the same weak gate also false-positives against
 unrelated background TCP traffic (TLS, SMB) that has nothing to do with
-either protocol; the Data-Link Checksum is surfaced raw and never verified;
+either protocol; the Data-Link Checksum IS now verified (computed and
+compared against the wire byte, a mismatch flagged as its own note), unlike
+S7comm-Plus's own Checksums/digests, which are still surfaced raw only;
 the Device-Status byte's flags are decoded but the header's own Status byte
 is, per the spec itself, always 0 in current usage; commands 31 and 203 are
 decoded structurally but deliberately given no authoritative top-level name

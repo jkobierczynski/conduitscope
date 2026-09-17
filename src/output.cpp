@@ -731,6 +731,13 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
                 }
                 out_ << "],\n";
             }
+            // The classic wired-HART longitudinal (XOR) checksum -- unconditionally emitted
+            // (unlike hartip_command_name/hartip_values, which are gated on non-empty) since a
+            // zero/false pair is itself meaningful here: it's exactly what a truncated body
+            // (checksum byte never read at all) also produces, and that truncation already gets
+            // its own note -- mirrors dnp3_header_crc_valid's own "always present" convention.
+            out_ << "    \"hartip_checksum\": " << static_cast<unsigned>(p.hartip_checksum) << ",\n";
+            out_ << "    \"hartip_checksum_valid\": " << (p.hartip_checksum_valid ? "true" : "false") << ",\n";
         }
     }
     if (p.protocol == "opcua") {

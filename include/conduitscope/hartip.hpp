@@ -156,10 +156,17 @@
 //                             IP already provides its own transport-level integrity -- confirmed
 //                             directly from packet-hartip.c, which labels but explicitly never
 //                             computes or verifies it (`proto_tree_add_checksum(...,
-//                             PROTO_CHECKSUM_NO_FLAGS)`). This decoder does the same: the byte is
-//                             surfaced raw, never verified (computing/verifying it would need the
-//                             HART XOR algorithm applied across the whole PDU, which is possible
-//                             but out of scope for this groundwork release -- see LIMITATIONS).
+//                             PROTO_CHECKSUM_NO_FLAGS)`). This decoder goes one step further than
+//                             Wireshark's own dissector here: the byte is both surfaced raw AND
+//                             verified. The algorithm is the classic wired-HART longitudinal
+//                             parity check -- XOR every byte from the Delimiter through the last
+//                             byte of Data inclusive (i.e. everything this PDU covers EXCEPT the
+//                             leading Preamble bytes, which are a physical-layer synchronization
+//                             artifact never covered by the checksum, and the Checksum byte
+//                             itself) -- and compare the result against the wire byte. A mismatch
+//                             is surfaced as a note on the packet; a checksum byte that's missing
+//                             entirely (body truncated before it) is never treated as valid either
+//                             way -- see `HartIpPassThrough::checksum_valid`'s own doc comment.
 //
 // ---------------------------------------------------------------------------------------------
 // Response Code (present only when is_response; cross-checked against HCF_SPEC-307, "Command
@@ -373,7 +380,12 @@ struct HartIpPassThrough {
     std::string data_hex;
     size_t data_length = 0;
 
-    uint8_t checksum = 0;  // never verified -- see file header comment
+    uint8_t checksum = 0;  // the wire's own trailing byte -- see file header comment
+    // True only when the checksum byte was actually present (not truncated) AND the computed
+    // longitudinal XOR across Delimiter..Data matched it. An unverifiable checksum (body
+    // truncated before the byte itself) is never treated as valid -- mirrors dnp3.hpp's own
+    // Dnp3LinkFrame::crc_validated convention ("unverifiable CRC is never treated as valid").
+    bool checksum_valid = false;
 
     std::string summary;
     std::vector<std::string> notes;

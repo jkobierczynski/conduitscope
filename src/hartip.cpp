@@ -980,6 +980,11 @@ void decode_pass_through(ByteSpan body, HartIpPassThrough& pt, std::vector<std::
         notes.push_back("Pass-Through body truncated before its Delimiter byte");
         return;
     }
+    // The longitudinal (XOR) checksum below covers every byte from the Delimiter through the
+    // last byte of Data inclusive -- i.e. everything from here (offset now points at the
+    // Delimiter, having already skipped any leading Preamble) up to, but not including, the
+    // Checksum byte itself.
+    size_t checksum_span_start = offset;
     pt.delimiter = body.at(offset++);
     pt.frame_type = static_cast<uint8_t>(pt.delimiter & 0x07);
     pt.frame_type_name = frame_type_name(pt.frame_type);
@@ -1066,7 +1071,15 @@ void decode_pass_through(ByteSpan body, HartIpPassThrough& pt, std::vector<std::
     decode_command_data(pt, data, notes);
 
     if (offset < size) {
-        pt.checksum = body.at(offset++);
+        pt.checksum = body.at(offset);
+        uint8_t computed = 0;
+        for (size_t i = checksum_span_start; i < offset; ++i) computed ^= body.at(i);
+        pt.checksum_valid = (computed == pt.checksum);
+        if (!pt.checksum_valid) {
+            notes.push_back("longitudinal (XOR) checksum mismatch: calculated " + hex_byte(computed) +
+                             ", frame declares " + hex_byte(pt.checksum));
+        }
+        offset++;
     } else {
         notes.push_back("Pass-Through body truncated before its trailing Checksum byte");
     }

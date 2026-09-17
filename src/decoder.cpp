@@ -1445,6 +1445,8 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                             out.hartip_device_status_flags = pt.device_status_flags;
                         }
                         out.hartip_values = pt.values;
+                        out.hartip_checksum = pt.checksum;
+                        out.hartip_checksum_valid = pt.checksum_valid;
                     }
 
                     bool expected_port = port_in(udp.src_port, HARTIP_PORT, options_.extra_hartip_ports) ||
@@ -2485,6 +2487,8 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                             out.hartip_device_status_flags = pt.device_status_flags;
                         }
                         out.hartip_values = pt.values;
+                        out.hartip_checksum = pt.checksum;
+                        out.hartip_checksum_valid = pt.checksum_valid;
                     }
                 };
                 merge_hartip(*frame, /*is_first_message=*/true);

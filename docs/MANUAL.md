@@ -2466,6 +2466,20 @@ The following fields appear only when `protocol` is `hartip`:
   section) when the command's data actually matched the byte layout this
   decoder expects -- absent for every out-of-scope or wrong-length command
   (shown as raw hex with a note instead).
+- `hartip_checksum`: the Pass-Through body's own trailing classic
+  wired-HART longitudinal (XOR) checksum byte, as a plain integer.
+  Unconditionally present whenever `hartip_has_pass_through` is `true`
+  (unlike most other Pass-Through fields above, never omitted) -- a `0`
+  paired with `hartip_checksum_valid: false` is exactly what a body
+  truncated before the Checksum byte also produces (see the accompanying
+  note in that case), the same "always present" convention
+  `dnp3_header_crc_valid` already established.
+- `hartip_checksum_valid`: `true` only when this decoder's own computed
+  checksum (XORing every byte from the Delimiter through the last byte of
+  Data, inclusive) matched `hartip_checksum`. A mismatch also adds a
+  `"longitudinal (XOR) checksum mismatch: calculated 0x.., frame declares
+  0x.."` note. See LIMITATIONS for what this validation does and doesn't
+  cover.
 
 The following fields appear only when `protocol` is `opcua`:
 
@@ -7873,12 +7887,19 @@ These are current, not aspirational -- each has a corresponding ROADMAP item.
   session's own establishment message can go uncounted in
   `--protocol hartip`/stats output as a result. HART-IP over UDP has no
   equivalent issue.
-- **HART-IP's Checksum byte is parsed and located but never verified** --
-  unlike DNP3's own data-link CRCs, which now genuinely are validated (see
-  above): computing/verifying it would need the HART XOR algorithm applied
-  across the whole PDU, out of scope for this groundwork release. A
-  corrupted Pass-Through PDU that otherwise still looks structurally valid
-  is decoded without any indication the Checksum was wrong.
+- **HART-IP's Pass-Through Checksum byte IS now verified** -- the classic
+  wired-HART longitudinal (XOR) checksum is computed across Delimiter..Data
+  inclusive and compared against the wire's own trailing byte; a mismatch
+  is surfaced as a note (`decode --format text`) or
+  `hartip_checksum_valid: false` (JSON) -- see `hartip_checksum`/
+  `hartip_checksum_valid` in JSON OUTPUT FIELDS and `HartIpPassThrough::
+  checksum_valid`'s own doc comment in `hartip.hpp`. Purely diagnostic
+  today, the same posture DNP3's own header/block CRC validation has: not
+  wired into `policy validate`/`PolicyEngine` (see ROADMAP item 10), and a
+  checksum byte that's missing entirely because the body was truncated
+  before it is never treated as valid either way, the same
+  "unverifiable is not valid" convention `dnp3_header_crc_valid` already
+  established.
 - **HART-IP's Status header byte is not interpreted at all** -- every
   message this decoder's own research and every real capture checked so
   far carries Status `0`; a non-zero value is passed through as a plain
@@ -9233,8 +9254,9 @@ conduit-model at all.
 PLC/TIA Portal authority, not on effort); item 3's S7comm-Plus Tier 2
 promotion; items 5 and 7's remaining DNP3/IEC 104 value-decode table
 gaps; item 8's CIP STRING2/STRINGN/STRINGI/EPATH/ENGUNIT-as-value and its
-symbolic-path-gating question; item 10's HART checksum/response-code
-work; item 11's OPC UA chunk reassembly and Browse/subscriptions/
+symbolic-path-gating question; item 10's remaining Response Code
+resolution/real-capture-widening work (its HART checksum-verification
+half is now done); item 11's OPC UA chunk reassembly and Browse/subscriptions/
 HistoryRead promotion; item 12's MMS `Address`/`TypeSpecification`
 decoding; item 14's per-protocol `functions` allow-lists; item 15's
 QinQ stacked-VLAN support; and item 17's protocol-grouped zones and
@@ -9386,9 +9408,22 @@ anything else on this list.
     this remains synthetic-fixture-only validated, like commands 31/203
     already were.
 
-    Still open: verify the HART Data-Link Checksum (the XOR algorithm
-    across the whole PDU, currently surfaced raw and never checked -- see
-    LIMITATIONS); resolve multi-definition/warning-class Response Codes to
+    ~~Still open: verify the HART Data-Link Checksum (the XOR algorithm
+    across the whole PDU, currently surfaced raw and never checked)~~ --
+    **also done**: the classic wired-HART longitudinal (XOR) checksum is
+    now computed across Delimiter..Data inclusive and compared against the
+    wire's own trailing Checksum byte -- see LIMITATIONS and
+    `hartip_checksum`/`hartip_checksum_valid` in JSON OUTPUT FIELDS.
+    Purely diagnostic, like DNP3's own CRC validation before it: not wired
+    into `policy validate`/`PolicyEngine`, which remains open and isn't
+    separately tracked as its own roadmap item, per the same reasoning
+    item 4's own DNP3 CRC entry already gives. Fixing this also surfaced
+    that `tests/sample_hartip.pcap`'s own Pass-Through packets had never
+    carried a genuinely correct checksum byte to begin with (an
+    unverified placeholder, harmless until this validation existed to
+    check it) -- corrected as part of this pass.
+
+    Still open: resolve multi-definition/warning-class Response Codes to
     their actual per-command meaning, if a reliable source for enough
     individual commands' own spec text ever turns up; and widen real-capture
     validation to Error/NAK messages, the BACK frame type, non-Success

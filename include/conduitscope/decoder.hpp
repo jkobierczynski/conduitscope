@@ -701,6 +701,15 @@ struct DecodedPacket {
     // first-pass dispatch table (commands 77/178, and any unrecognized command number).
     std::vector<std::string> hartip_values;
 
+    // The trailing classic wired-HART longitudinal (XOR) checksum byte, and whether this decoder's
+    // own computed checksum (Delimiter..Data inclusive, see hartip.hpp) matched it -- only
+    // meaningful when hartip_has_pass_through; hartip_checksum_valid is false both for a genuine
+    // mismatch AND for a checksum byte that was truncated away entirely (see
+    // HartIpPassThrough::checksum_valid's own doc comment -- an unverifiable checksum is never
+    // treated as valid, mirroring dnp3_header_crc_valid's own convention).
+    uint8_t hartip_checksum = 0;
+    bool hartip_checksum_valid = false;
+
     // Only set when protocol == "opcua" -- see try_parse_opcua_message in opcua.hpp. OPC UA rides
     // TCP only (no UDP mapping in the spec); its own structural detection gate (a 3-byte ASCII
     // MessageType magic string against a 7-member allowlist) is one of the STRONGEST gates in

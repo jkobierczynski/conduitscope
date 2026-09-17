@@ -399,7 +399,10 @@ Groundwork / v0.1.0. What works right now:
   header (Version, MessageType, MessageID, Status, TransactionID, MsgLength) and all
   four MessageID-selected body shapes are decoded, including the full byte-by-byte
   Pass-Through Data-Link PDU (Delimiter/Frame-Type/Address, Command, Byte Count,
-  Response Code, Device Status, Data, Checksum). This is deliberately the most
+  Response Code, Device Status, Data, Checksum) -- including the classic
+  wired-HART longitudinal (XOR) Data-Link Checksum itself, which is computed
+  and compared against the wire byte, not just surfaced raw (a mismatch is
+  flagged as its own note). This is deliberately the most
   honestly-caveated detection gate in this codebase: unlike the dedicated-EtherType
   or multi-field-structural protocols above, HART-IP rides over TCP or UDP with only
   two adjacent header bytes (MessageType in a 5-value set, MessageID in a 4-value
@@ -573,8 +576,8 @@ Groundwork / v0.1.0. What works right now:
   this decoder could not independently confirm the reference plugin's own
   byte-accounting for where that variant's body actually starts. Checksums/
   digests (the Integrity part's SHA-256-sized value) are surfaced, never
-  verified, same posture as HART-IP's own checksum (DNP3's data-link CRCs,
-  by contrast, are now genuinely validated -- see below). Two real S7-1511
+  verified (DNP3's data-link CRCs and HART-IP's own Data-Link Checksum, by
+  contrast, are now genuinely validated -- see below). Two real S7-1511
   captures --
   originally added to this project only to validate the old "detected, not
   decoded" stub -- were re-decoded once full support existed: real HMI

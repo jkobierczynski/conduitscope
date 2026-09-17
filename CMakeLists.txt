@@ -2704,6 +2704,35 @@ add_test(NAME hartip_truncated_before_checksum_noted
 set_tests_properties(hartip_truncated_before_checksum_noted PROPERTIES
   PASS_REGULAR_EXPRESSION "note: Pass-Through body truncated before its trailing Checksum byte")
 
+# The HART Data-Link (longitudinal/XOR) checksum: computed across Delimiter..Data inclusive and
+# compared against the wire's own trailing Checksum byte -- see hartip.hpp's file header comment's
+# Checksum entry and HartIpPassThrough::checksum_valid's own doc comment. A dedicated fixture
+# (tests/sample_hartip_checksum.pcap, 2 packets) rather than sample_hartip.pcap itself, since every
+# Pass-Through packet in that larger, widely-shared fixture now carries a genuinely correct
+# checksum (fixed as part of adding this verification -- previously an unverified placeholder byte)
+# and deliberately corrupting one there would perturb several existing "notes": [] assertions
+# elsewhere in this file.
+add_test(NAME hartip_checksum_valid_json
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip_checksum.pcap")
+set_tests_properties(hartip_checksum_valid_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"hartip_command\": 1,.*\"hartip_command_name\": \"Read Primary Variable\",.*\"hartip_checksum\": 4,.*\"hartip_checksum_valid\": true,.*\"notes\": \\[\\]")
+
+add_test(NAME hartip_checksum_mismatch_noted_and_invalid_json
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip_checksum.pcap")
+set_tests_properties(hartip_checksum_mismatch_noted_and_invalid_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"hartip_command\": 1,.*\"hartip_response_code\": 0,.*\"hartip_checksum\": 42,.*\"hartip_checksum_valid\": false,.*\"notes\": \\[\"longitudinal \\(XOR\\) checksum mismatch: calculated 0xD5, frame declares 0x2A\"\\]")
+
+add_test(NAME hartip_checksum_mismatch_noted_text
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip_checksum.pcap")
+set_tests_properties(hartip_checksum_mismatch_noted_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[hartip\\]  Response Pass Through ACK command=1 \\(Read Primary Variable\\) response-code=0 \\(Success\\) \\[pv-units=1 \\+1 more\\]\n *note: longitudinal \\(XOR\\) checksum mismatch: calculated 0xD5, frame declares 0x2A")
+
+add_test(NAME hartip_checksum_valid_does_not_note_anything_text
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip_checksum.pcap")
+set_tests_properties(hartip_checksum_valid_does_not_note_anything_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[hartip\\]  Request Pass Through STX command=1 \\(Read Primary Variable\\)\n *eth "
+  FAIL_REGULAR_EXPRESSION "Request Pass Through STX command=1[^\n]*\n *note:")
+
 add_test(NAME hartip_truncated_before_command_noted
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap" --format text)
 set_tests_properties(hartip_truncated_before_command_noted PROPERTIES
