@@ -27,13 +27,14 @@
 #include "conduitscope/pcap_reader.hpp"
 #include "conduitscope/profinet.hpp"
 #include "conduitscope/s7commplus.hpp"
+#include "conduitscope/stp.hpp"
 #include "conduitscope/sv.hpp"
 #include "conduitscope/tcp.hpp"
 
 namespace conduitscope {
 
 enum class ProtocolFilter {
-    Auto,         // opportunistically detect IEC104/Modbus/DNP3/S7comm/EtherNet-IP/PROFINET/GOOSE/SV/EtherCAT/BACnet-IP/HART-IP/OPC-UA regardless of port
+    Auto,         // opportunistically detect IEC104/Modbus/DNP3/S7comm/EtherNet-IP/PROFINET/GOOSE/SV/EtherCAT/STP/BACnet-IP/HART-IP/OPC-UA regardless of port
     ModbusOnly,   // only attempt Modbus decoding
     Dnp3Only,     // only attempt DNP3 decoding
     S7commOnly,   // only attempt TPKT/COTP/S7comm decoding
@@ -43,6 +44,7 @@ enum class ProtocolFilter {
     GooseOnly,    // only attempt IEC 61850-8-1 GOOSE decoding
     SvOnly,       // only attempt IEC 61850-9-2 Sampled Values decoding
     EthercatOnly, // only attempt EtherCAT decoding
+    StpOnly,      // only attempt STP/RSTP/MSTP (classic IEEE 802.3 LLC BPDU) decoding
     BacnetOnly,   // only attempt BACnet/IP (BVLC/NPDU/APDU) decoding
     HartIpOnly,   // only attempt HART-IP (session control / tunneled Pass-Through) decoding
     OpcUaOnly,    // only attempt OPC UA (UA-TCP / Secure Conversation) decoding
@@ -107,8 +109,8 @@ struct DecodedPacket {
     uint16_t src_port = 0, dst_port = 0;
     std::string tcp_flags;
 
-    // "iec104", "modbus", "dnp3", "s7comm", "enip", "profinet", "goose", "sv", "ethercat", "bacnet",
-    // "hartip", "opcua", "mms", "mqtt", "s7comm-plus", "cotp"
+    // "iec104", "modbus", "dnp3", "s7comm", "enip", "profinet", "goose", "sv", "ethercat", "stp",
+    // "bacnet", "hartip", "opcua", "mms", "mqtt", "s7comm-plus", "cotp"
     // (recognized TPKT/COTP framing but not S7comm inside it -- e.g. a connection setup frame),
     // "tcp" (recognized transport, no app-layer match), "udp" (recognized transport, no app-layer
     // protocol decoded -- see udp.hpp; UDP/2222 CIP I/O traffic that try_parse_cip_io actually
@@ -117,7 +119,11 @@ struct DecodedPacket {
     // PROFINET RT frame whose FrameID try_parse_profinet doesn't recognize, or a GOOSE frame
     // whose outer APDU tag try_parse_goose doesn't recognize, or an SV frame whose outer APDU tag
     // try_parse_sv doesn't recognize, or an EtherCAT frame whose header Type field
-    // try_parse_ethercat doesn't recognize -- see link_layer.hpp's ethertype_name; EtherType
+    // try_parse_ethercat doesn't recognize, or a classic-802.3-LLC-framed frame (EthernetFrame::
+    // is_llc_length -- see link_layer.hpp) whose LLC DSAP/SSAP isn't STP's 0x42/0x42 (reported as
+    // "IEEE 802.3 LLC frame, DSAP=0xNN SSAP=0xNN" -- a Cisco (R)PVST+ SNAP/OUI match, or a GARP
+    // destination-MAC match, gets its own more specific name in that same summary instead, see
+    // stp.hpp -- neither is decoded further) -- see link_layer.hpp's ethertype_name; EtherType
     // 0x8892 traffic that try_parse_profinet DOES recognize is promoted to "profinet" instead --
     // see profinet_has_dcp/profinet_has_cyclic_data below; EtherType 0x88B8 traffic that
     // try_parse_goose DOES recognize is promoted to "goose" instead -- see goose_has_pdu/
@@ -127,7 +133,9 @@ struct DecodedPacket {
     // ethercat_frame_type below; a UDP payload that try_parse_bacnet recognizes as a BACnet/IP
     // BVLC message is promoted to "bacnet" instead -- see bacnet_bvlc_function below; a TCP or UDP
     // payload that try_parse_hartip recognizes as a HART-IP message is promoted to "hartip"
-    // instead -- see hartip_message_type below),
+    // instead -- see hartip_message_type below; a classic-802.3-LLC-framed frame with LLC DSAP==
+    // SSAP==0x42, Control==0x03, and a destination MAC outside the GARP range that try_parse_stp
+    // recognizes is promoted to "stp" instead -- see stp_bpdu_type_name below),
     // "unsupported-link", or "parse-error".
     std::string protocol;
     std::string summary;
@@ -366,6 +374,66 @@ struct DecodedPacket {
     // One summary string per decoded datagram (e.g. "APRD idx=2 adp=0x0000 ado=0x0130 len=2
     // wkc=1"), capped at 50 entries for the same reason as sv_asdus/goose_all_data.
     std::vector<std::string> ethercat_datagrams;
+
+    // Only set when protocol == "stp" -- see try_parse_stp in stp.hpp. Unlike every EtherType-keyed
+    // raw-Ethernet protocol above, STP rides classic IEEE 802.3 LLC framing (has_ethernet stays
+    // true, has_ip stays false, src_mac/dst_mac are the only addressing) -- see link_layer.hpp's
+    // file header comment for the length-vs-EtherType plumbing this required.
+    std::string stp_protocol_version_name;  // "STP (802.1D)"/"RSTP (802.1w)"/"MSTP (802.1s)"/
+                                              // "SPB (802.1aq)" -- always set when protocol == "stp"
+    uint8_t stp_protocol_version = 0;        // 0/2/3/4, the raw Protocol Version Identifier byte
+    std::string stp_bpdu_type_name;          // "Configuration"/"Rapid/Multiple Spanning Tree"/
+                                               // "Topology Change Notification"
+    uint8_t stp_bpdu_type = 0;               // 0x00/0x02/0x80
+
+    bool stp_is_tcn = false;  // BPDU Type 0x80 -- nothing else below is ever set
+    bool stp_is_spb = false;  // Protocol Version 4 -- named only, nothing else below is ever set
+
+    // Set when !stp_is_tcn && !stp_is_spb (a Configuration or RST/MST BPDU whose common 35-byte
+    // body -- Flags through Forward Delay -- fit); false only for a truncated frame.
+    bool stp_has_common_body = false;
+    uint8_t stp_flags = 0;
+    bool stp_flag_tca = false, stp_flag_agreement = false, stp_flag_forwarding = false,
+         stp_flag_learning = false;
+    uint8_t stp_flag_port_role = 0;         // 0-3, see stp.hpp's role_vals table
+    std::string stp_flag_port_role_name;    // "Unknown"/"Alternate/Backup"/"Root"/"Designated" --
+                                              // meaningful only for RSTP/MSTP (version >= 2), still
+                                              // populated for version 0 (see stp.hpp)
+    bool stp_flag_proposal = false, stp_flag_tc = false;
+
+    uint16_t stp_root_priority = 0, stp_root_sys_id_ext = 0;
+    std::string stp_root_mac;
+    uint32_t stp_root_path_cost = 0;
+    uint16_t stp_bridge_priority = 0, stp_bridge_sys_id_ext = 0;
+    std::string stp_bridge_mac;
+    uint16_t stp_port_id_raw = 0;
+    uint16_t stp_port_priority = 0, stp_port_number = 0;  // see stp.hpp's "Port Identifier"
+                                                             // paragraph for the priority multiplier
+    double stp_message_age = 0.0, stp_max_age = 0.0, stp_hello_time = 0.0, stp_forward_delay = 0.0;  // seconds
+
+    // Set when stp_bpdu_type == 0x02 (RST/MST-shaped) and at least the Version 1 Length byte fit.
+    bool stp_has_version1 = false;
+    uint8_t stp_version_1_length = 0;
+
+    // Set only when the full three-part MSTP detection gate held (see stp.hpp) -- otherwise a
+    // Protocol Version 3 frame is still reported with stp_protocol_version_name == "MSTP (802.1s)"
+    // but stp_is_mstp stays false (decoded as a plain RST BPDU instead, matching the reference
+    // dissector's own fallback -- see stp.hpp's file header comment).
+    bool stp_is_mstp = false;
+    uint16_t stp_version_3_length = 0;
+    std::string stp_mst_config_name;
+    uint16_t stp_mst_config_revision_level = 0;
+    std::string stp_mst_config_digest_hex;   // 16 bytes, raw hex, never verified
+    uint32_t stp_cist_internal_root_path_cost = 0;
+    uint16_t stp_cist_bridge_priority = 0, stp_cist_bridge_sys_id_ext = 0;
+    std::string stp_cist_bridge_mac;
+    uint8_t stp_cist_remaining_hops = 0;
+
+    bool stp_is_alt_msti_format = false;  // legacy/alternative MSTI layout detected, not decoded
+
+    // One summary string per decoded MSTI Configuration Message, capped at 50 entries for the same
+    // reason as ethercat_datagrams/goose_all_data.
+    std::vector<std::string> stp_msti_messages;
 
     // Only set when protocol == "bacnet" -- see try_parse_bacnet in bacnet.hpp. Unlike EtherCAT/
     // PROFINET/GOOSE/SV above, BACnet/IP rides on UDP (conventionally port 47808/0xBAC0, has_ip

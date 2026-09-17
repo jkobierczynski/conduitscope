@@ -1,0 +1,13 @@
+# Sample Unix /etc/services-style file, used by CMakeLists.txt's --services test coverage (see
+# resolver.hpp/resolver.cpp). Exercises both override (a port the built-in table already names)
+# and supplement (a port the built-in table doesn't cover) behavior against tests/sample_modbus.pcap.
+#
+# Format: name  port/proto  [alias...]  [# comment] -- '#' starts a comment, blank lines are
+# skipped. See resolver.cpp's parse_services_file for the exact rules (last occurrence for a given
+# port/proto wins within this file, and every entry here overrides the built-in table).
+
+# Overrides the built-in table's 502/tcp -> "modbus" entry.
+custom-modbus   502/tcp   # overrides the built-in "modbus" name for this port
+
+# Supplements the built-in table: 51000/tcp isn't in it at all, so this is new.
+hmi-modbus-client   51000/tcp

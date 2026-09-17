@@ -1,0 +1,15 @@
+# Sample Unix /etc/hosts-style file, used by CMakeLists.txt's --resolve/--hosts test coverage
+# (see resolver.hpp/resolver.cpp). Addresses match tests/sample_modbus.pcap's two endpoints.
+#
+# Format: IP  name  [alias...] -- only the first name after the IP is used (aliases ignored),
+# '#' starts a comment, blank lines are skipped. See resolver.cpp's parse_hosts_file for the
+# exact rules (first occurrence of a given IP wins, a line whose address isn't valid IPv4 is
+# silently skipped).
+
+192.168.1.10    plc-01   plc-01.example.internal
+192.168.1.50    hmi-01
+
+# 192.168.1.99 is deliberately absent -- tests use it as a guaranteed hostname-lookup miss.
+
+# A duplicate of 192.168.1.10 below is ignored (first occurrence above wins) -- exercises that rule.
+192.168.1.10    should-never-win

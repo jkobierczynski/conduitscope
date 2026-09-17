@@ -9,7 +9,7 @@ conduitscope -- decode Modbus/TCP, DNP3, IEC 60870-5-104, S7comm/COTP, IEC 61850
 ```
 conduitscope [-q|--quiet] [--no-color|--color] [--log-file FILE] [--version] [-h|--help] <command> [command options]
 
-conduitscope decode (-r FILE | -i INTERFACE) [-o FILE] [-f text|json|csv] [--protocol auto|modbus|dnp3|s7comm|mms|mqtt|iec104|enip|profinet|goose|sv|ethercat|bacnet|hartip|opcua|s7comm-plus|ff-hse]
+conduitscope decode (-r FILE | -i INTERFACE) [-o FILE] [-f text|json|csv] [--protocol NAME]
                      [--modbus-port PORT]... [--dnp3-port PORT]... [--s7comm-port PORT]... [--iec104-port PORT]...
                      [--enip-port PORT]... [--enip-io-port PORT]... [--bacnet-port PORT]... [--hartip-port PORT]... [--opcua-port PORT]... [--mqtt-port PORT]... [--ffhse-port PORT]...
                      [--max-packets N] [--stats] [--strict]
@@ -30,6 +30,11 @@ conduitscope version
 They require this build to have been compiled with libpcap (Linux) / the Npcap
 SDK (Windows) found -- an optional, build-time-detected dependency, the one
 exception to conduitscope's otherwise zero-dependency design (see BUILDING).
+
+`--protocol NAME` restricts decoding to one protocol instead of the default
+`auto`; see PROTOCOL COVERAGE below for the full, current list of valid
+protocol names (one per subsection there) -- it's not repeated here so this
+list can't drift out of sync as protocols are added.
 
 ## DESCRIPTION
 
@@ -153,7 +158,7 @@ conduitscope decode (-r FILE | -i INTERFACE) [options]
 | `--no-promiscuous` | off (i.e. promiscuous by default) | With `-i`, don't put the interface into promiscuous mode. Promiscuous is the default because the main live-capture use case -- watching a mirrored/SPAN switch port for zone/conduit traffic -- needs to see traffic that isn't addressed to the capturing host at all. |
 | `-o, --output FILE` | stdout | Write decoded output here instead of stdout. |
 | `-f, --format {text,json,csv}` | `text` | Output format. See OUTPUT FORMATS below. |
-| `--protocol {auto,modbus,dnp3,s7comm,mms,mqtt,iec104,enip,profinet,goose,sv,ethercat,bacnet,hartip,opcua,s7comm-plus,ff-hse}` | `auto` | Restrict decoding to one protocol. `auto` opportunistically tries OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, S7comm/COTP, S7comm-Plus, MMS, HART-IP, MQTT, and FF-HSE detection on every TCP payload (in that order -- FF-HSE last of all, even after MQTT, see PROTOCOL DETECTION), CIP I/O, BACnet/IP, HART-IP, and FF-HSE detection on every UDP payload (FF-HSE last there too), PROFINET RT (DCP/cyclic) detection on every non-IPv4 Ethernet frame carrying EtherType `0x8892`, GOOSE detection on every non-IPv4 Ethernet frame carrying EtherType `0x88B8`, Sampled Values detection on every non-IPv4 Ethernet frame carrying EtherType `0x88BA`, and EtherCAT detection on every non-IPv4 Ethernet frame carrying EtherType `0x88A4`, regardless of port (see PROTOCOL DETECTION below). `enip` covers both EtherNet/IP explicit messaging (TCP) and CIP I/O implicit messaging (UDP). `mms` is IEC 61850 MMS (Manufacturing Message Specification, ISO 9506) -- shares S7comm's exact TPKT/COTP transport and TCP port 102, but is a distinct application protocol; see `--s7comm-port` below and PROTOCOL COVERAGE's MMS section. `s7comm-plus` is S7comm-Plus (TIA Portal / S7-1200/1500) -- shares the same TPKT/COTP transport and TCP port 102, disambiguated by its own protocol id byte; see `--s7comm-port` below and PROTOCOL COVERAGE's S7comm-Plus section. `mqtt` is MQTT (v3.1/v3.1.1/v5.0) plus Sparkplug B -- see `--mqtt-port` below and PROTOCOL COVERAGE's MQTT section. `profinet` covers both DCP and cyclic real-time IO. `sv` is IEC 61850-9-2 Sampled Values. `ethercat` is EtherCAT. `bacnet` is BACnet/IP. `hartip` is HART-IP (covers both UDP and TCP). `opcua` is OPC UA Binary (UA-TCP/Secure Conversation, TCP only). `ff-hse` is FOUNDATION Fieldbus HSE (covers FDA/SM/FMS/LAN Redundancy, on both TCP and UDP) -- see `--ffhse-port` below and PROTOCOL COVERAGE's FOUNDATION Fieldbus HSE section. |
+| `--protocol NAME` | `auto` | Restrict decoding to one protocol. See PROTOCOL COVERAGE below for the full, current list of valid protocol names (one per subsection there). `auto` opportunistically tries OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, S7comm/COTP, S7comm-Plus, MMS, HART-IP, MQTT, and FF-HSE detection on every TCP payload (in that order -- FF-HSE last of all, even after MQTT, see PROTOCOL DETECTION), CIP I/O, BACnet/IP, HART-IP, and FF-HSE detection on every UDP payload (FF-HSE last there too), PROFINET RT (DCP/cyclic) detection on every non-IPv4 Ethernet frame carrying EtherType `0x8892`, GOOSE detection on every non-IPv4 Ethernet frame carrying EtherType `0x88B8`, Sampled Values detection on every non-IPv4 Ethernet frame carrying EtherType `0x88BA`, EtherCAT detection on every non-IPv4 Ethernet frame carrying EtherType `0x88A4`, regardless of port, and Spanning Tree Protocol (STP/RSTP/MSTP) detection on every classic IEEE 802.3 length-framed Ethernet frame whose LLC header is DSAP=SSAP=`0x42` -- a structurally separate dispatch path from every EtherType-keyed protocol above, so there's no ordering/collision question between them (see PROTOCOL DETECTION below). `enip` covers both EtherNet/IP explicit messaging (TCP) and CIP I/O implicit messaging (UDP). `mms` is IEC 61850 MMS (Manufacturing Message Specification, ISO 9506) -- shares S7comm's exact TPKT/COTP transport and TCP port 102, but is a distinct application protocol; see `--s7comm-port` below and PROTOCOL COVERAGE's MMS section. `s7comm-plus` is S7comm-Plus (TIA Portal / S7-1200/1500) -- shares the same TPKT/COTP transport and TCP port 102, disambiguated by its own protocol id byte; see `--s7comm-port` below and PROTOCOL COVERAGE's S7comm-Plus section. `mqtt` is MQTT (v3.1/v3.1.1/v5.0) plus Sparkplug B -- see `--mqtt-port` below and PROTOCOL COVERAGE's MQTT section. `profinet` covers both DCP and cyclic real-time IO. `sv` is IEC 61850-9-2 Sampled Values. `ethercat` is EtherCAT. `bacnet` is BACnet/IP. `hartip` is HART-IP (covers both UDP and TCP). `opcua` is OPC UA Binary (UA-TCP/Secure Conversation, TCP only). `ff-hse` is FOUNDATION Fieldbus HSE (covers FDA/SM/FMS/LAN Redundancy, on both TCP and UDP) -- see `--ffhse-port` below and PROTOCOL COVERAGE's FOUNDATION Fieldbus HSE section. `stp` is Spanning Tree Protocol (STP/RSTP/MSTP) -- no port option, matching GOOSE/SV/EtherCAT/PROFINET's own no-port precedent for a protocol with no port at all; see PROTOCOL COVERAGE's Spanning Tree Protocol section. |
 | `--modbus-port PORT` | *(502 built in)* | Additional TCP port to treat as "expected" for Modbus. Repeatable. Does **not** gate detection -- it only changes whether a decoded Modbus frame is annotated as appearing on an unexpected port, which is itself a useful signal when auditing a conduit. |
 | `--dnp3-port PORT` | *(20000 built in)* | Same as `--modbus-port`, for DNP3. Repeatable. |
 | `--s7comm-port PORT` | *(102 built in)* | Same as `--modbus-port`, for COTP/S7comm. Repeatable. There is no separate `--mms-port` -- MMS rides the identical TPKT/COTP transport on the identical TCP port 102 S7comm uses (see `mms.hpp`'s file header), so this same option's "expected port" annotation also governs MMS traffic. |
@@ -168,6 +173,11 @@ conduitscope decode (-r FILE | -i INTERFACE) [options]
 | `--max-packets N` | `0` (unlimited) | Stop after decoding this many packets. With `-i`, this also bounds a live capture (in addition to `--duration` and Ctrl+C). |
 | `--stats` | off | Print an aggregate summary (protocol counts, Modbus function-code histogram, exception count, capture time span) instead of one line per packet. Ignores `--format`. |
 | `--strict` | off | Abort with a nonzero exit status on the first packet that fails to parse at the Ethernet/IPv4/TCP layer, instead of reporting a per-packet warning and continuing. Does not affect Modbus/DNP3-level ambiguity, which is always handled by heuristic + note rather than error. |
+| `--no-oui` | off (i.e. OUI/MAC-vendor resolution on by default) | Disable OUI (MAC vendor) resolution against the built-in table. See OUTPUT FORMATS' "Name resolution" subsection below. |
+| `--resolve` | off | Enable hostname resolution from an explicitly-supplied `--hosts` file. **Never performs live DNS, under any circumstance** -- file-only. See OUTPUT FORMATS' "Name resolution" subsection below. |
+| `--hosts FILE` | *(none)* | Unix `/etc/hosts`-style file to resolve IP addresses from, for `--resolve`. Must exist. |
+| `--nn` | off (i.e. service-name resolution on by default) | Disable service name (port -> name) resolution, from the built-in table and `--services` alike. Named after the `nc`/`nmap`/`tcpdump`-family `-n`/`-nn` "don't resolve names" convention. See OUTPUT FORMATS' "Name resolution" subsection below. |
+| `--services FILE` | *(none)* | Unix `/etc/services`-style file to supplement/override the built-in port->service-name table. Must exist. |
 
 ### `info` -- print pcap file metadata and a protocol histogram
 
@@ -1225,6 +1235,39 @@ datagram-chain scan (clamped tolerantly to the bytes actually available,
 with a note, when implausible) rather than walking every byte physically
 present in the frame -- see PROTOCOL COVERAGE's EtherCAT section for why.
 
+**Spanning Tree Protocol (STP/RSTP/MSTP)** is tried against classic IEEE
+802.3 length-framed Ethernet frames whose 3-byte LLC header has DSAP ==
+SSAP == `0x42` (the Bridge Group Address SAP) and Control == `0x03`
+("Unnumbered Information") -- structurally, this dispatch path is entirely
+SEPARATE from the EtherType-keyed dispatch chain every protocol above (and
+Modbus/DNP3/etc. below) is tried through: a length-framed frame's 16-bit
+"ethertype" field is by IEEE 802.3's own definition always `< 0x0600`, so it
+can never equal PROFINET RT's `0x8892`, GOOSE's `0x88B8`, Sampled Values'
+`0x88BA`, EtherCAT's `0x88A4`, or IPv4's `0x0800` -- there is no ordering or
+collision question between STP and any EtherType-keyed protocol here, the
+same way there is none between two different EtherTypes. Once that LLC
+shape matches, the structural gate is: the BPDU body's Protocol Identifier
+`== 0x0000` AND BPDU Type in `{0x00, 0x02, 0x80}` AND, for BPDU Types
+`0x00`/`0x02` only (a TCN's own version byte is never checked), Protocol
+Version Identifier in `{0, 2, 3, 4}`. This is a considerably STRONGER
+structural anchor than several other protocols' gates in this list --
+several independent small-valid-domain fields (a fixed 2-byte Protocol
+Identifier, a 3-value BPDU Type enum, and, for two of those three types, a
+4-value Protocol Version Identifier enum) must all co-occur, the same
+"multiple independent fields, not one loose length check" strength class as
+OPC UA's own 3-byte ASCII magic-string gate -- and notably stronger than
+HART-IP's, FF-HSE's, or EtherCAT's own honestly-weaker gates (above). One
+address DOES gate detection here, the sole such case in this codebase: DSAP/
+SSAP `0x42` is not exclusive to STP -- GARP (GVRP/GMRP) registers on the
+identical LLC SAP pair, and is disambiguated purely by destination MAC
+(`01:80:C2:00:00:0D` and `01:80:C2:00:00:20`-`0x2F`), checked BEFORE the BPDU
+body is even opened, matching Wireshark's own `dissect_bpdu` exactly -- see
+PROTOCOL COVERAGE's Spanning Tree Protocol section for why this one case
+needed an address check when every other detector in this codebase prefers
+a structural one. See that same section for the full wire format, what's
+decoded vs. named-only (Cisco PVST+, SPB, GARP), and the real-capture
+validation.
+
 **BACnet/IP, UDP port 47808/0xBAC0 (ASHRAE 135 Annex J)** is tried,
 port-independently, against every non-empty UDP payload -- the same
 "opportunistic, payload-shape" philosophy CIP I/O above uses, since BACnet/IP
@@ -1286,11 +1329,23 @@ the gate matches.
 One line per packet: index, timestamp, source and destination `ip:port`,
 `[protocol]`, and a summary. Any additional notes (heuristic explanations,
 port-mismatch warnings, malformed-field warnings) are printed indented below
-the packet line.
+the packet line, followed, for an Ethernet-linktype packet, by an `eth`
+line showing the raw source/destination MAC addresses.
 
 ```
 #1  1700000000.000000  192.168.1.50:51000 -> 192.168.1.10:502  [modbus]  Read Holding Registers: request: read 10 holding register(s) starting at address 0
         note: classified as a request because the PDU is exactly 4 bytes (address+quantity); this is a heuristic, not stream tracking
+        eth aa:bb:cc:11:22:33 -> aa:bb:cc:44:55:66
+```
+
+When name resolution is enabled (see "Name resolution" below), a hostname
+and/or a service name are appended in parentheses right after the raw IP or
+port they annotate, and a MAC vendor right after each `eth` line's address --
+the raw value itself is always shown too, never replaced:
+
+```
+#1  1700000000.000000  192.168.1.50 (hmi-01):51000 (hmi-modbus-client) -> 192.168.1.10 (plc-01):502 (custom-modbus)  [modbus]  Read Holding Registers: request: read 10 holding register(s) starting at address 0
+        eth aa:bb:cc:11:22:33 (Example Vendor, Inc.) -> aa:bb:cc:44:55:66 (Another Vendor Corp.)
 ```
 
 #### Color
@@ -1318,15 +1373,29 @@ plain text.
 ### json
 
 A JSON array, one object per packet, with fields `index`, `timestamp`,
-`captured_len`, `original_len`, `src_ip`, `dst_ip`, `src_port`, `dst_port`,
-`tcp_flags`, `protocol`, `summary`, and `notes` (an array of strings). Fields
-that don't apply to a given packet (e.g. `src_ip` for a non-IP frame) are
-`null`. Intended to be piped into `jq` or read by a future policy-evaluation
-layer.
+`captured_len`, `original_len`, `src_mac`, `dst_mac`, `src_ip`, `dst_ip`,
+`src_port`, `dst_port`, `tcp_flags`, `protocol`, `summary`, and `notes` (an
+array of strings). Fields that don't apply to a given packet (e.g. `src_ip`
+for a non-IP frame, or `src_mac`/`dst_mac` for a non-Ethernet-linktype
+capture) are `null`. Intended to be piped into `jq` or read by a future
+policy-evaluation layer.
 
 Over a hundred fields are only present (omitted entirely, not `null`) on
 packets where they apply:
 
+- `src_mac_vendor` / `dst_mac_vendor`: the OUI (MAC vendor) name for
+  `src_mac`/`dst_mac`, from the built-in OUI table (`--no-oui` disables this
+  lookup). Present only when `has_ethernet` and the lookup found a match --
+  see OUTPUT FORMATS' "Name resolution" subsection below.
+- `src_hostname` / `dst_hostname`: the hostname for `src_ip`/`dst_ip`, from
+  an explicitly-supplied `--hosts` file (`--resolve` enables this lookup;
+  never live DNS). Present only when the lookup is enabled, a `--hosts` file
+  was supplied, and it has a matching entry.
+- `src_port_service` / `dst_port_service`: the service name for
+  `src_port`/`dst_port` and the packet's transport (TCP or UDP), from the
+  built-in port->service-name table plus, if given, `--services`. Present
+  only when service-name resolution is enabled (`--nn` disables it) and a
+  matching entry exists.
 - `modbus_paired_request_index`: the `index` of the specific earlier request
   packet this response was authoritatively paired to (by MBAP transaction ID
   + TCP session, not the payload-shape heuristic), when protocol is `modbus`
@@ -2104,13 +2173,189 @@ The following fields appear only when `protocol` is `mms`:
 - `ffhse_body_length` / `ffhse_body_hex`: present only when
   `ffhse_body_shown_as_hex` is `true` -- the undecoded byte count and its
   hex rendering.
+- `stp_protocol_version` / `stp_protocol_version_name`: the Protocol Version
+  Identifier byte as a plain integer (0/2/3/4) and its name (`"STP
+  (802.1D)"`, `"RSTP (802.1w)"`, `"MSTP (802.1s)"`, `"SPB (802.1aq)"`),
+  always present when protocol is `stp`.
+- `stp_bpdu_type` / `stp_bpdu_type_name`: the BPDU Type byte as a plain
+  integer (`0x00`/`0x02`/`0x80`) and its name (`"Configuration"`, `"Rapid/
+  Multiple Spanning Tree"`, `"Topology Change Notification"`), always
+  present when protocol is `stp`.
+- `stp_is_tcn`: `true`/`false` -- `true` for a Topology Change Notification
+  (BPDU Type `0x80`), in which case nothing below is set (a TCN carries no
+  further fields). Always present when protocol is `stp`.
+- `stp_is_spb`: `true`/`false` -- `true` for a Protocol Version 4 (SPB,
+  802.1aq) frame, in which case nothing below is set either -- SPB is
+  named only, not decoded. Always present when protocol is `stp`.
+- `stp_has_common_body`: `true`/`false`, always present when protocol is
+  `stp` and `stp_is_tcn`/`stp_is_spb` are both `false` -- `false` only when
+  the frame was truncated before all 35 common Configuration/RST BPDU body
+  bytes fit. Every field below through `stp_forward_delay` is present only
+  when this is `true`.
+- `stp_flags`: the raw 8-bit Flags byte, as a plain integer.
+- `stp_flag_tca` / `stp_flag_agreement` / `stp_flag_forwarding` /
+  `stp_flag_learning` / `stp_flag_proposal` / `stp_flag_tc`: each `true`/
+  `false`, the individual Flags bits (Agreement/Forwarding/Learning/
+  Proposal are only ever meaningfully set under RSTP/MSTP, but are surfaced
+  for every version).
+- `stp_flag_port_role`: the Port Role sub-field's name (`"Unknown"`,
+  `"Alternate/Backup"`, `"Root"`, `"Designated"`) -- meaningful only under
+  RSTP/MSTP.
+- `stp_root_priority` / `stp_root_sys_id_ext` / `stp_root_mac`: the Root
+  Identifier's Bridge Priority (already in "multiple of 4096" form),
+  System ID Extension, and MAC address.
+- `stp_root_path_cost`: the Root Path Cost, as a plain integer.
+- `stp_bridge_priority` / `stp_bridge_sys_id_ext` / `stp_bridge_mac`: the
+  same split for the (local) Bridge Identifier.
+- `stp_port_priority` / `stp_port_number`: the Port Identifier's Port
+  Priority (already multiplied by 16 -- a DIFFERENT multiplier than the
+  Bridge/Root Identifier's own priority nibble) and Port Number, each a
+  plain integer. (There is no `stp_port_id_raw` field -- only this split
+  form is emitted.)
+- `stp_message_age` / `stp_max_age` / `stp_hello_time` / `stp_forward_delay`:
+  each a floating-point number of seconds (the raw 1/256-second field
+  divided by 256), fixed at 3 decimal places.
+- `stp_has_version1`: `true`/`false`, always present when
+  `stp_has_common_body` is `true` -- `false` only when the frame was
+  truncated right after the 35-byte common body (before the Version 1
+  Length byte, BPDU Type `0x02` only).
+- `stp_version_1_length`: the raw Version 1 Length byte, as a plain integer.
+  Present only when `stp_has_version1` is `true`.
+- `stp_is_mstp`: `true`/`false`, always present when `stp_has_common_body`
+  is `true` -- `true` only when the three-part MSTP detection gate holds
+  (Protocol Version Identifier >= 3, Version 1 Length == 0, and at least
+  102 bytes present -- see PROTOCOL COVERAGE). Every field below is present
+  only when this is `true`.
+- `stp_version_3_length`: the Version 3 Length field, as a plain integer.
+- `stp_mst_config_name`: the 32-byte MST Config Name, NUL-trimmed.
+- `stp_mst_config_revision_level`: the MST Config Revision Level, as a
+  plain integer.
+- `stp_mst_config_digest`: the 16-byte MST Config Digest as raw lowercase
+  hex, never verified.
+- `stp_cist_internal_root_path_cost`: the CIST Internal Root Path Cost, as
+  a plain integer. Only meaningful (and only ever nonzero from real bytes)
+  when `stp_version_3_length` is nonzero -- see PROTOCOL COVERAGE's "Version
+  3 Length == 0" paragraph for why this and the next three fields are left
+  at their defaults otherwise.
+- `stp_cist_bridge_priority` / `stp_cist_bridge_sys_id_ext` /
+  `stp_cist_bridge_mac`: the CIST Bridge Identifier's own priority/
+  extension/MAC split -- the CIST regional root's bridge ID, distinct from
+  `stp_bridge_priority`/etc. above.
+- `stp_cist_remaining_hops`: the CIST Remaining Hops byte, as a plain
+  integer.
+- `stp_msti_messages`: an array of one summary string per decoded MSTI
+  Configuration Message, each `"MSTID=N RegionalRoot=P/MAC Cost=N
+  BridgePrio=N PortPrio=N RemainingHops=N Role=... [TC] [Proposal]
+  [Agreement] [Learning] [Forwarding]"` (the bracketed flag suffixes shown
+  only when set). Present only when non-empty; absent (not an empty array)
+  when `stp_version_3_length` is `0`. Capped at 50 entries, same reason as
+  `ethercat_datagrams`/`sv_asdus`/`goose_all_data`.
+- `stp_is_alt_msti_format`: `true`/`false`, always present when
+  `stp_has_common_body` is `true` -- `true` only when Version 3 Length is
+  `0` AND the frame's total length matches the legacy/alternative MSTI
+  format's own sizing rule exactly (see PROTOCOL COVERAGE); that format is
+  named but not decoded either way.
 
 ### csv
 
 Header row followed by one row per packet:
-`index,timestamp,src_ip,src_port,dst_ip,dst_port,protocol,summary,notes`.
+`index,timestamp,src_mac,dst_mac,src_mac_vendor,dst_mac_vendor,src_ip,src_hostname,src_port,src_port_service,dst_ip,dst_hostname,dst_port,dst_port_service,protocol,summary,notes`.
 Fields are quoted per standard CSV rules when they contain a comma, quote, or
 newline; multiple notes are joined with ` | ` inside the single `notes` field.
+`src_mac`/`dst_mac` are empty for a non-Ethernet-linktype capture, exactly
+like `src_ip`/`dst_ip` are empty for a non-IP packet; every
+`*_vendor`/`*_hostname`/`*_service` annotation column is an empty field on a
+lookup miss or when that resolution is disabled (never a placeholder like
+`"unknown"`) -- see "Name resolution" below.
+
+### Name resolution (OUI / hostname / service name)
+
+`decode` (only -- see LIMITATIONS) can optionally annotate the raw
+MAC/IP/port values it decodes with a human-readable name, in all three
+output formats: a resolved name is always shown *in addition to* the raw
+value, never in place of it, and a lookup that finds nothing adds nothing to
+the output (no `"(unknown)"`/`null`/empty-placeholder noise) -- this is a
+security/OT auditing tool, so the ground-truth address or port that was
+actually observed on the wire stays visible exactly as decoded, always.
+There are three independent lookups, each its own flag, each with its own
+default:
+
+- **OUI / MAC vendor** (`src_mac_vendor`/`dst_mac_vendor` in JSON, the
+  `(vendor)` annotation on `decode`'s text-format `eth` line and CSV's
+  `src_mac_vendor`/`dst_mac_vendor` columns) -- **on by default**, disabled
+  with `--no-oui`. Looked up against a large table built into the
+  `conduitscope` binary itself; no external file, network access, or extra
+  flag is needed. This table is generated ahead of time by
+  `tools/generate_oui_table.py` from a fetched copy of the nmap project's
+  `nmap-mac-prefixes` file (`github.com/nmap/nmap`), which itself aggregates
+  the IEEE Registration Authority's three public MAC address block
+  registries -- MA-L (the classic 24-bit OUI), MA-M (28-bit), and MA-S
+  (36-bit) (`standards.ieee.org/products-programs/regauth`) -- not fetched
+  live at build time or run time; refreshing it against a newer IEEE
+  registry snapshot is a manual, offline step (rerun that script, commit the
+  regenerated `include/conduitscope/oui_table.gen.hpp`).
+- **Hostname** (`src_hostname`/`dst_hostname` in JSON and CSV, the
+  `(hostname)` annotation after an IP on `decode`'s text-format summary
+  line) -- **off by default**, enabled with `--resolve`. **File-only: this
+  never performs live DNS resolution of any kind, under any flag
+  combination.** The only source of a hostname is an explicitly-supplied
+  Unix `/etc/hosts`-style file, given with `--hosts FILE`:
+  ```
+  # comment
+  192.168.1.10   plc-01
+  192.168.1.50   hmi-01   hmi-01.plant.example   # aliases after the first name are ignored
+  ```
+  One IP + at least one name per line, whitespace-separated; `#` starts a
+  comment (whole-line or trailing); a line whose address doesn't parse as a
+  strict IPv4 dotted-quad is silently skipped (IPv6 hosts entries are not
+  supported, matching this whole codebase's IPv4-only scope). Only the first
+  name after the address is used; if the file has more than one line for
+  the same IP, the first one wins, matching a real `/etc/hosts`' own
+  behavior. `--resolve` given with no `--hosts` is a harmless no-op --
+  hostname resolution has nothing to resolve against, so no hostname
+  annotation is ever produced -- and prints a one-line advisory note (once,
+  respecting `--quiet`) rather than being treated as an error, since it's
+  more likely an oversight than something worth failing the run over.
+  Deliberately never live DNS: an unsolicited DNS query from the analysis
+  workstation, reaching an OT segment's own resolver or leaking out to the
+  internet while auditing traffic that was very likely captured specifically
+  because the network shouldn't be touched carelessly, is exactly the kind
+  of side effect an offline forensic/audit tool must not have -- it would
+  also make `decode`'s own output non-reproducible run-to-run as DNS records
+  change. `--hosts` is a static snapshot the operator supplies and can audit
+  themselves, nothing more.
+- **Service name** (`src_port_service`/`dst_port_service` in JSON and CSV,
+  the `(name)` annotation after a port on `decode`'s text-format summary
+  line) -- **on by default**, disabled with `--nn` (named after the
+  long-standing `nc`/`nmap`/`tcpdump`-family `-n`/`-nn` "don't resolve
+  names" convention). Looked up first against an explicitly-supplied Unix
+  `/etc/services`-style file (`--services FILE`, if given), falling back to
+  a small, curated table built into the binary:
+  ```
+  # name          port/proto
+  hmi-modbus-client   51000/tcp
+  custom-modbus       502/tcp
+  ```
+  One name + `port/proto` (`tcp` or `udp`) per line, whitespace-separated,
+  `#` comments as above; a malformed line is silently skipped. If the file
+  repeats an entry for the same port/protocol, the last one in the file
+  wins -- unlike the hosts file's first-wins rule, since this file's whole
+  purpose is deliberately overriding the built-in table (and itself). The
+  built-in table is **deliberately small and hand-curated, not an
+  exhaustive IANA services dump** -- there is no single canonical "the"
+  port/service mapping the way there is for OUIs (many ports are reused for
+  unrelated purposes by different organizations), so pretending to be
+  exhaustive here would just be a confident-looking source of wrong answers.
+  It covers exactly two things: every OT/ICS protocol port `decode` already
+  defaults to (Modbus/DNP3/S7comm/MMS/IEC104/EtherNet/IP/CIP
+  I/O/BACnet/HART-IP/OPC UA/MQTT/FF-HSE), and a modest set of common general
+  IT/OT-adjacent ports (FTP, SSH, DNS, DHCP, HTTP/HTTPS, NTP, SNMP, RDP, and
+  similar) for surrounding context on a capture that mixes OT traffic with
+  ordinary infrastructure traffic. `--services` is the documented way to
+  extend or override it for anything this table doesn't cover.
+
+Scope: this is `decode`-only. `policy validate`'s report is not (yet)
+enriched with any of these annotations -- see LIMITATIONS and ROADMAP.
 
 ## PROTOCOL COVERAGE
 
@@ -4985,6 +5230,261 @@ handled every other protocol where independent traffic was eventually
 found after an earlier empty search. See `include/conduitscope/ffhse.hpp`'s
 file header for the full writeup.
 
+### Spanning Tree Protocol (STP/RSTP/MSTP)
+
+IEEE Spanning Tree Protocol -- classic STP (802.1D), Rapid STP (802.1w), and
+Multiple STP (802.1s) -- is the first protocol this tool decodes that is
+reached neither through IPv4 nor through a DIX Ethernet II EtherType. A BPDU
+(Bridge Protocol Data Unit) rides classic IEEE 802.3 **length**-framed
+Ethernet, with a 3-byte LLC header (DSAP/SSAP/Control) immediately after the
+length field, conventionally addressed to the well-known multicast MAC
+`01:80:C2:00:00:00`. Every field offset, length, and quirk below is
+cross-checked directly against Wireshark's own `epan/dissectors/
+packet-bpdu.c`, the same sourcing standard this codebase already applies
+throughout (e.g. FF-HSE's `packet-ff.c`).
+
+#### The link-layer-plumbing milestone
+
+Every protocol decoded before this release was reached either through IPv4
+or through a DIX Ethernet II EtherType (PROFINET RT/EtherCAT/GOOSE/SV all
+still use a fixed EtherType, just no IP/TCP/UDP layer underneath). STP needs
+neither: `link_layer.hpp`'s `parse_ethernet` now also recognizes IEEE 802.3's
+own length-vs-EtherType boundary (a value strictly below `0x0600` in the
+position an EtherType would otherwise occupy is always a LENGTH -- classic
+802.3/LLC framing; `0x0600` and above is always a DIX EtherType -- the
+boundary is exact, never ambiguous) and, when it's a length, opens the
+3-byte LLC header (DSAP/SSAP/Control) that follows it, and, when that LLC
+header's DSAP/SSAP is `0xAA` (SNAP), the further 5-byte SNAP header (OUI +
+Protocol ID) underneath. This is additive groundwork, not a rewrite: every
+DIX Ethernet II frame (`ethertype >= 0x0600`) this tool already decoded is
+completely unaffected, since no existing dispatch path ever looked at a
+sub-`0x0600` "ethertype" value before -- it previously just fell through to
+a generic, unhelpful "non-ip" report naming a length as if it were an
+EtherType. `EthernetFrame::llc_payload` (the bytes immediately after the
+3-byte LLC header) is what `try_parse_stp` is actually handed; SNAP is not
+part of STP's own envelope (SNAP is Cisco PVST+'s, see "Out of scope"
+below) but the same plumbing is what lets this decoder *name* Cisco PVST+
+by its SNAP OUI without decoding it.
+
+#### Wire structure
+
+Offsets below are relative to the start of the BPDU body (right after the
+3-byte LLC header):
+
+| Field | Offset | Size | Notes |
+|---|---|---|---|
+| Protocol Identifier | 0 | 2 | Always `0x0000` when recognized. |
+| Protocol Version Identifier | 2 | 1 | `0`=STP (802.1D), `2`=RSTP (802.1w), `3`=MSTP (802.1s), `4`=SPB (802.1aq, named-only, see below). |
+| BPDU Type | 3 | 1 | `0x00`=Configuration, `0x80`=Topology Change Notification (TCN), `0x02`=RST BPDU (reused for BOTH RSTP and MSTP, disambiguated by Protocol Version Identifier, never by BPDU Type alone). |
+
+A **TCN BPDU** (Type `0x80`) is only those 4 bytes -- no flags, no bridge/
+root IDs, sent by a bridge upward toward the root the instant it detects a
+topology change. Its own version byte is never gated on: any version value
+still decodes as a plain TCN.
+
+A **Configuration BPDU** (Type `0x00`) and an **RST BPDU** (Type `0x02`)
+share an identical 35-byte common body:
+
+| Field | Offset | Size | Notes |
+|---|---|---|---|
+| Flags | 4 | 1 | See "Flags" below. |
+| Root Identifier | 5 | 8 | See "Bridge/Root Identifier" below. |
+| Root Path Cost | 13 | 4 | |
+| Bridge Identifier | 17 | 8 | See "Bridge/Root Identifier" below. |
+| Port Identifier | 25 | 2 | See "Port Identifier" below. |
+| Message Age | 27 | 2 | Units of 1/256 second. |
+| Max Age | 29 | 2 | Units of 1/256 second. |
+| Hello Time | 31 | 2 | Units of 1/256 second. |
+| Forward Delay | 33 | 2 | Units of 1/256 second. |
+
+For Type `0x00` (classic STP), the BPDU ends here -- only Flags bits 7 (TCA)
+and 0 (TC) are ever meaningful under classic STP, but every flag bit is
+still surfaced generically (this codebase's usual "show it, note when it's
+meaningful" posture). For Type `0x02`, one more byte follows: **Version 1
+Length** (offset 35, 1 byte), always `0x00` for pure RSTP -- a nonzero value
+here (together with version `>= 3` and enough captured bytes) signals that
+an MST extension does NOT follow (see "MSTP detection gate" below).
+
+**Flags** (1 byte, common body offset 4, and MSTI Flags offset 0 of each
+MSTI message -- identical bit layout both places): bit 7 (`0x80`) Topology
+Change Acknowledgment (TCA); bit 6 (`0x40`) Agreement (RSTP/MSTP only); bit
+5 (`0x20`) Forwarding (RSTP/MSTP only); bit 4 (`0x10`) Learning (RSTP/MSTP
+only); bits 3-2 (`0x0C`) Port Role (RSTP/MSTP only, `>> 2`: `0`=Unknown,
+`1`=Alternate/Backup, `2`=Root, `3`=Designated); bit 1 (`0x02`) Proposal
+(RSTP/MSTP only); bit 0 (`0x01`) Topology Change (TC).
+
+**Bridge/Root Identifier** (8 bytes, appears at Root Identifier, Bridge
+Identifier, CIST Bridge Identifier, and MSTI Regional Root -- identical
+packing every time): a 2-byte value, top 4 bits (`0xF000`) = Bridge
+Priority (rendered as the masked nibble itself, a multiple of 4096 --
+default priority 32768 = nibble 8), bottom 12 bits (`0x0FFF`) = System ID
+Extension (802.1t, carries a VLAN ID for per-VLAN spanning tree variants
+like PVST+, itself out of scope here) or, for MSTI Regional Root, the MSTI
+ID (MSTID) instead, followed by a 6-byte MAC. Both the raw 16-bit value and
+the priority/extension split are surfaced.
+
+**Port Identifier** (2 bytes, common body offset 25): Wireshark's own UI
+shows this as one raw 16-bit value, but the underlying 802.1D spec defines
+top 4 bits = Port Priority (a multiple of 16 -- default 128 = nibble 8, a
+DIFFERENT multiplier than Bridge/Root Identifier's own priority nibble) +
+bottom 12 bits = Port Number. This decoder decodes both the raw value and
+that split, per this codebase's own "decode a field as fully as the spec
+allows" convention even where the reference dissector's own UI doesn't
+bother splitting it.
+
+#### MSTP detection gate and the MST BPDU extension
+
+A Type-`0x02` BPDU is decoded as a full MST BPDU only when ALL THREE hold:
+Protocol Version Identifier `>= 3`, Version 1 Length `== 0`, and at least
+102 bytes are present in the whole BPDU body. When Type is `0x02` but that
+gate fails (even if version is 3), this decoder falls back to the plain
+36-byte RST BPDU shape above, exactly matching the reference source.
+
+When the gate holds, the MST BPDU body adds:
+
+| Field | Offset | Size | Notes |
+|---|---|---|---|
+| Version 3 Length | 36 | 2 | See "How many MSTI messages follow" below. |
+| MST Config Format Selector | 38 | 1 | |
+| MST Config Name | 39 | 32 | ASCII, NUL-padded. |
+| MST Config Revision Level | 71 | 2 | |
+| MST Config Digest | 73 | 16 | An MD5/HMAC-MD5 digest of the VLAN-to-MSTI mapping table; shown as raw hex, never verified (this codebase's usual non-verification-of-opaque-digests posture). |
+| CIST Internal Root Path Cost | 89 | 4 | Set only when Version 3 Length != 0 -- see below. |
+| CIST Bridge Identifier | 93 | 8 | Set only when Version 3 Length != 0 -- the CIST regional root's OWN bridge ID, distinct from the outer Root/Bridge Identifier at offset 5/17. |
+| CIST Remaining Hops | 101 | 1 | Set only when Version 3 Length != 0. |
+| MSTI Configuration Message(s) | 102 | 16 each | See below. |
+
+**How many MSTI messages follow** -- the reference source's own arithmetic,
+not a naive `(Version 3 Length - 64) / 16`: if Version 3 Length is `>= 64`,
+total MSTI bytes = Version 3 Length - 64 (the ordinary case). If it's
+nonzero but `< 64`, it's instead treated as a COUNT OF MESSAGES rather than
+bytes (total MSTI bytes = Version 3 Length * 16) -- a work-around for real
+Cisco C3550 firmware observed sending Version 3 Length in units of messages
+instead of octets; this decoder reproduces that exactly and notes when it's
+taken. The resulting byte count is clamped to whatever bytes are actually
+present and to a whole number of 16-byte messages (a partial trailing
+message is noted, not decoded), and capped at 64 messages (the reference
+source's own documented ceiling) against a malformed/adversarial capture.
+
+**Version 3 Length == 0** is the "Alternative MSTI format" trigger: an
+older, per-instance layout with MSTID as its own explicit field, a
+different byte order, and 26 bytes per message instead of 16. This decoder
+recognizes the trigger condition structurally (`StpFrame::is_alt_msti_format`)
+and names it, but does NOT decode its body -- explicitly out of scope for
+this release. Since CIST Bridge Identifier/Root Path Cost genuinely live at
+different byte offsets in the alternative format, this decoder does not
+read them at the IEEE offsets for ANY Version-3-Length-0 frame at all,
+whether or not the alternative format's own exact-length trigger matches.
+
+**MSTI Configuration Message** (16 bytes each): MSTI Flags (offset 0, same
+8-bit layout as the common Flags byte); MSTI Regional Root (offset 1, 8
+bytes, the Bridge/Root Identifier packing above, `.ext` here is the MSTID);
+MSTI Internal Root Path Cost (offset 9, 4 bytes); MSTI Bridge Identifier
+Priority (offset 13, 1 byte); MSTI Port Identifier Priority (offset 14, 1
+byte); MSTI Remaining Hops (offset 15, 1 byte). The two Priority bytes are
+the one place this decoder's own research deliberately double-checked an
+assumption against the source and found it wrong: the reference dissector
+decodes ONLY the top nibble of each byte (`>> 4`), rendered as a bare 0-15
+value with NO multiplier (unlike every other priority field in this
+format) -- the bottom nibble of each byte is simply never decoded by the
+reference dissector at all, and this decoder matches that exactly.
+
+#### Structural detection gate
+
+Protocol Identifier `== 0x0000` AND BPDU Type in `{0x00, 0x02, 0x80}` AND
+(for `0x00`/`0x02` only -- a TCN's own version byte is never checked)
+Protocol Version Identifier in `{0, 2, 3, 4}` (version 4 is SPB, recognized
+structurally but named-only, never body-decoded). This decoder is
+deliberately slightly STRICTER here than Wireshark's own dissector, which
+accepts (and merely warns on) any Protocol Version Identifier byte at all --
+this decoder returns "not STP" for a Type-`0x00`/`0x02` BPDU whose version
+isn't one of `{0, 2, 3, 4}`, a deliberate, narrower choice, not a
+discrepancy this decoder failed to notice. See PROTOCOL DETECTION below for
+how this gate compares in strength to this codebase's other detectors.
+
+#### What's decoded vs. named-only
+
+**Decoded**: classic Configuration BPDUs, TCN BPDUs, RST BPDUs (RSTP and
+MSTP's own common 36-byte shape), and the full MST BPDU extension including
+every MSTI Configuration Message, up to the safety cap above.
+
+**Named but not decoded further** (matching this codebase's established
+"recognized but not this release's problem" posture -- see e.g. GOOSE's own
+GSE Management PDU):
+
+- **Cisco PVST+ / Rapid-PVST+**: a genuinely different wire envelope, not a
+  variant of the format above -- SNAP-encapsulated (LLC DSAP=SSAP=`0xAA`,
+  not `0x42`) with Cisco's OUI (`00:00:0C`), typically addressed to
+  `01:00:0C:CC:CC:CD`, with a proprietary Originating-VLAN TLV appended
+  after the standard BPDU body. Recognized structurally (SNAP DSAP/SSAP +
+  Cisco OUI) and named `"Cisco PVST+ (SNAP-encapsulated, not decoded)"`,
+  but its body is never decoded here -- the same treatment R-GOOSE/R-SV get
+  relative to GOOSE/SV.
+- **SPB** (Shortest Path Bridging, 802.1aq, Protocol Version Identifier
+  `== 4`, reusing BPDU Type `0x02`): named only, `"SPB (802.1aq), not
+  decoded -- out of scope"`. Wireshark's own dissector actually does decode
+  part of a version-4 SPB frame (it runs the identical MSTP body-parsing
+  path, then appends its own further "SPT Extension"); this decoder
+  deliberately does not follow that path -- ANY version-4 frame is
+  named-only from the Protocol Version Identifier byte alone.
+- **GARP (GVRP/GMRP)**: shares STP's own LLC DSAP/SSAP pair (`0x42`/`0x42`)
+  -- disambiguated ONLY by destination MAC, matching Wireshark's own
+  `dissect_bpdu` exactly: addresses `01:80:C2:00:00:0D` and
+  `01:80:C2:00:00:20`-`0x2F` are GVRP/GMRP, not STP, and are checked and
+  redirected to a `"GARP (GVRP/GMRP) ... not decoded"` report BEFORE
+  `try_parse_stp` is even called. This is the one case in this codebase
+  where a fixed address genuinely does gate detection -- everywhere else,
+  including STP's own Bridge Group Address multicast MAC, this codebase
+  prefers a structural check over an address check; this is the documented
+  exception, forced by DSAP/SSAP `0x42` alone being genuinely ambiguous
+  between STP and GARP.
+- **Any other LLC DSAP/SSAP pair** on a classic-802.3-framed packet (e.g.
+  IPX, SNA) is named generically by its raw DSAP/SSAP values, never guessed
+  at further.
+
+#### Validation
+
+Two real STP-family captures, both from `ITI/ICS-Security-Tools` (the same
+public collection this project's PROFINET/GOOSE/SV real fixtures already
+cite) -- see `tests/real_captures/stp/ATTRIBUTION.md` for full provenance:
+
+- **`plant1_stp_only.pcap`** (42 frames, trimmed by `tshark -Y stp` from the
+  same `Plant1.pcap` this project's PROFINET/CIP-I/O fixtures already draw
+  from): 42 real classic Configuration BPDUs, one bridge's steady-state
+  Hello traffic over an 82-second window, every one structurally identical
+  (`Root=32768/80/64:a0:e7:9a:05:80 Cost=4
+  Bridge=32768/80/64:ae:0c:34:a3:80 Port=0x8083`), no TC/TCA ever set.
+- **`sample_file_mms_and_goose.pcap`** (the same file this project's own
+  GOOSE/MMS real fixtures already use, byte-for-byte): 12 real RSTP RST
+  BPDUs (6 back-to-back pairs from bridge ports `0x8010`/`0x8013`, all
+  agreeing on the same root and steady-state `Role=Designated [Learning]
+  [Forwarding]`), mixed in with unrelated NTP/SMB/MMS/GOOSE traffic.
+
+Both captures confirm periodic Hello-interval BPDU transmission from an
+already-converged bridge, and both confirm the LLC padding-trim path
+(`llc_trailing_bytes_trimmed`) at two different byte counts (60-byte
+frames/8 trailing bytes for Plant1's classic BPDUs, 64-byte frames/7
+trailing bytes for the RST BPDUs' one extra Version-1-Length byte).
+
+**Honest gap**: neither real capture contains a TCN BPDU, any MSTP/
+MST-extension traffic, or SPB traffic, nor do they exercise the RST Port
+Role values Root/Alternate/Backup (only Designated appears), the
+Proposal/Agreement flags, the TC/TCA flags on a Configuration/RST BPDU,
+Cisco PVST+ framing, or GARP/GVRP/GMRP traffic. Every scan of both
+`mrhenrike/PCAPTrafficAnalysis` and `ITI/ICS-Security-Tools` for this
+project turned up nothing further along those lines. All of that -- every
+RST Port Role and flag combination, TCN under both a classic and RSTP
+Protocol Version, the full MST BPDU extension (including the Cisco Version-
+3-Length-below-64 work-around and multi-MSTI-message framing), SPB
+named-only recognition, PVST+ named-only recognition, and GARP/GVRP/GMRP
+disambiguation by destination MAC -- is validated only against the
+synthetic `tests/sample_stp.pcap` fixture (see `tools/make_sample_pcap.py`'s
+`build_stp_sample`), cross-checked against the reference dissector's source
+rather than an independent real capture; packets 1 and 2 of that synthetic
+fixture reproduce the two real captures' own first frames byte-for-byte.
+This mirrors the same honest gap already documented for this codebase's
+other protocols' less-common paths.
+
 ### Link/IP-layer plumbing: non-IPv4 Ethernet, and non-TCP IPv4 (including UDP)
 
 Every protocol above rides on Ethernet + IPv4 + TCP. Traffic outside that --
@@ -5750,6 +6250,54 @@ These are current, not aspirational -- each has a corresponding ROADMAP item.
   silently misinterpret every version-number-list entry after the first.
   Both branches are covered by the synthetic fixture, but only that
   fixture -- see PROTOCOL COVERAGE's FOUNDATION Fieldbus HSE section.
+- **Cisco PVST+/Rapid-PVST+ is named only, not decoded.** It's a genuinely
+  different wire envelope (SNAP-encapsulated, Cisco OUI, a proprietary TLV
+  appended after the standard BPDU body), not a variant of the format this
+  decoder handles -- recognized structurally and named, but its body,
+  including the standard BPDU fields it also nominally carries, is never
+  opened. See PROTOCOL COVERAGE's Spanning Tree Protocol section.
+- **SPB (802.1aq, Protocol Version Identifier 4) is named only, not
+  decoded**, even though Wireshark's own dissector actually does decode
+  part of a version-4 frame (the identical MSTP body-parsing path plus its
+  own further "SPT Extension") -- this decoder deliberately does not follow
+  that path; ANY version-4 frame is named-only from the version byte alone.
+- **The legacy/alternative MSTI Configuration Message format (Version 3
+  Length == 0) is recognized structurally and named, but its body is not
+  decoded** -- it uses a different per-instance layout (explicit MSTID
+  field, different byte order, 26 bytes per message instead of 16) this
+  decoder has no independent confirmation of beyond the reference source's
+  own trigger-condition arithmetic.
+- **No real TCN BPDU, MSTP/MST-extension traffic, or SPB traffic could be
+  found in either real capture used to validate this decoder**, nor do
+  those captures exercise the RST Port Role values Root/Alternate/Backup
+  (only Designated appears on real bytes), the Proposal/Agreement flags,
+  the TC/TCA flags on a Configuration/RST BPDU, Cisco PVST+ framing, or
+  GARP/GVRP/GMRP traffic -- every one of those paths is validated only
+  against the synthetic `tests/sample_stp.pcap` fixture, cross-checked
+  against the reference dissector's source rather than an independent real
+  capture. See `tests/real_captures/stp/ATTRIBUTION.md`'s own "Gaps"
+  section.
+- **GARP (GVRP/GMRP) disambiguation from STP is destination-MAC-based, the
+  one case in this codebase where a fixed address genuinely gates
+  detection** rather than a structural check -- forced by STP and GARP
+  genuinely sharing the identical LLC DSAP/SSAP pair (`0x42`/`0x42`) with
+  no other structural distinguisher available at that layer. GARP's own
+  body is never decoded, only named.
+- **Name resolution (OUI/hostname/service name) is `decode`-only.**
+  `policy validate`'s report (text or JSON) is not enriched with any
+  vendor/hostname/service-name annotation -- it's a separate, IP/zone-centric
+  report format with its own conventions, out of scope for this feature. See
+  OUTPUT FORMATS' "Name resolution" subsection and ROADMAP.
+- **The built-in service-name table is a small, hand-curated set, not an
+  exhaustive IANA services dump.** It covers this project's own OT/ICS
+  protocol default ports plus a modest set of common IT/OT-adjacent ports --
+  see OUTPUT FORMATS' "Name resolution" subsection for exactly what and why.
+  `--services` is the documented way to extend it for anything it doesn't
+  cover.
+- **Hostname resolution never touches the network, under any flag
+  combination.** The only hostname source is an explicitly-supplied
+  `--hosts` file; there is no live-DNS code path anywhere in this feature,
+  by design -- see OUTPUT FORMATS' "Name resolution" subsection.
 
 ## EXIT STATUS
 
@@ -6229,6 +6777,43 @@ conduitscope decode -r capture.pcap --protocol ff-hse -f json \
            "\(.ffhse_message_name): \($ec)"' | sort | uniq -c | sort -rn
 ```
 
+Build a quick STP bridge/root inventory from Configuration and RST BPDUs --
+one line per distinct (Bridge, Root) pair seen, useful for spotting an
+unexpected root-bridge change on a conduit that shouldn't have one:
+
+```sh
+conduitscope decode -r capture.pcap --protocol stp -f json \
+  | jq -r '[.[] | select(.stp_has_common_body) |
+           "Bridge=\(.stp_bridge_priority)/\(.stp_bridge_sys_id_ext)/\(.stp_bridge_mac) Root=\(.stp_root_priority)/\(.stp_root_sys_id_ext)/\(.stp_root_mac)"] | unique[]'
+```
+
+Find every MSTP BPDU and list its MSTI Configuration Messages, e.g. to spot
+which MST instances a region actually carries:
+
+```sh
+conduitscope decode -r capture.pcap --protocol stp -f json \
+  | jq -r '.[] | select(.stp_is_mstp) |
+           "\(.src_ip) -> \(.dst_ip): \(.stp_mst_config_name) \(.stp_msti_messages // [] | join(", "))"'
+```
+
+Decode a capture with hostnames and service names resolved against your own
+site's naming, on top of the OUI vendor lookup that's already on by default
+-- never touching live DNS, file-only:
+
+```sh
+conduitscope decode -r capture.pcap --resolve --hosts myhosts.txt -f json \
+  | jq -r '.[] | "\(.src_ip) (\(.src_hostname // "?")) -> \(.dst_ip) (\(.dst_hostname // "?")): \(.protocol)"'
+```
+
+Fingerprint every distinct MAC vendor seen talking on the wire -- a quick
+passive asset-inventory pass, without needing `--resolve`/`--hosts` at all
+since OUI resolution is on by default:
+
+```sh
+conduitscope decode -r capture.pcap -f json \
+  | jq -r '[.[] | .src_mac_vendor, .dst_mac_vendor] | map(select(. != null)) | unique[]'
+```
+
 ## ROADMAP
 
 Rough order, each building on the groundwork this release establishes:
@@ -6412,6 +6997,15 @@ Rough order, each building on the groundwork this release establishes:
     (`has_vlan_tag`/`vlan_id`) but never consulted by `PolicyEngine`. Also
     worth reconsidering once DNP3's link address (item 13) is exposed: a
     zone model keyed on that address rather than (or alongside) IP.
+16. **Extend `policy validate`'s report with the same OUI/hostname/service-
+    name annotations `decode` now has** (see OUTPUT FORMATS' "Name
+    resolution" subsection and LIMITATIONS) -- currently `decode`-only,
+    deliberately out of scope for this feature's first pass since
+    `policy validate`'s report is a separate, IP/zone-centric format with
+    its own conventions (`PolicyEngine`/`policy_engine.hpp`) rather than a
+    per-packet `DecodedPacket` stream. Would need its own `--no-oui`/
+    `--resolve`/`--hosts`/`--nn`/`--services` flags (or to share `decode`'s)
+    threaded through to wherever the report renders a MAC/IP/port today.
 
 **pcapng support** is also now done: both classic pcap and pcapng are read
 transparently (auto-detected, no flag needed) -- see "pcap vs. pcapng"

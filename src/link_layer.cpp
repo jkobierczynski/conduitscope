@@ -23,6 +23,51 @@ EthernetFrame parse_ethernet(ByteSpan frame) {
 
     eth.ethertype = ethertype;
     eth.payload = c.rest();
+
+    // Classic IEEE 802.3 length-framed LLC recognition -- see this file's header comment.
+    if (ethertype < ETHERTYPE_MIN_DIX) {
+        eth.is_llc_length = true;
+        eth.length_field = ethertype;
+
+        if (eth.payload.size() >= 3) {
+            Cursor lc(eth.payload);
+            eth.llc_dsap = lc.u8();
+            eth.llc_ssap = lc.u8();
+            eth.llc_control = lc.u8();
+            eth.has_llc = true;
+            size_t header_consumed = 3;
+            ByteSpan after_llc = lc.rest();
+
+            if (eth.llc_dsap == LLC_SAP_SNAP && eth.llc_ssap == LLC_SAP_SNAP && after_llc.size() >= 5) {
+                Cursor sc(after_llc);
+                for (auto& b : eth.snap_oui) b = sc.u8();
+                eth.snap_protocol_id = sc.u16be();
+                eth.has_snap = true;
+                header_consumed += 5;
+                after_llc = sc.rest();
+            }
+
+            // Bound by the 802.3 Length field when it's usable -- see EthernetFrame::llc_payload's
+            // comment for the fallback rationale.
+            if (eth.length_field >= header_consumed) {
+                size_t declared_client_len = eth.length_field - header_consumed;
+                if (declared_client_len <= after_llc.size()) {
+                    eth.llc_trailing_bytes_trimmed = after_llc.size() - declared_client_len;
+                    eth.llc_payload = after_llc.subspan(0, declared_client_len);
+                } else {
+                    // Declares more than was actually captured -- almost always snaplen truncation,
+                    // not evidence the Length field itself is wrong. Decode what's present.
+                    eth.llc_payload = after_llc;
+                }
+            } else {
+                // Too small to even cover the LLC/SNAP header already consumed -- implausible,
+                // fall back to everything actually captured (mirrors GOOSE/SV/EtherCAT's own
+                // tolerant "implausible declared length" fallback -- see e.g. goose.cpp).
+                eth.llc_payload = after_llc;
+            }
+        }
+    }
+
     return eth;
 }
 

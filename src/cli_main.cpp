@@ -32,6 +32,7 @@
 #include "conduitscope/pcap_reader.hpp"
 #include "conduitscope/policy.hpp"
 #include "conduitscope/policy_engine.hpp"
+#include "conduitscope/resolver.hpp"
 #include "conduitscope/version.hpp"
 
 namespace {
@@ -175,7 +176,9 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
                 const std::vector<int>& mqtt_ports, const std::vector<int>& ffhse_ports,
                 size_t max_packets,
                 bool stats, bool strict, bool quiet,
-                bool no_color, bool force_color, std::ostream& diag) {
+                bool no_color, bool force_color,
+                bool oui_enabled, bool resolve_hostnames, const std::string& hosts_path,
+                bool service_names_enabled, const std::string& services_path, std::ostream& diag) {
     std::ofstream file_out;
     std::ostream* out = &std::cout;
     bool writing_to_stdout = output.empty();
@@ -207,6 +210,7 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
                                : (protocol == "goose")  ? ProtocolFilter::GooseOnly
                                : (protocol == "sv")     ? ProtocolFilter::SvOnly
                                : (protocol == "ethercat") ? ProtocolFilter::EthercatOnly
+                               : (protocol == "stp")    ? ProtocolFilter::StpOnly
                                : (protocol == "bacnet") ? ProtocolFilter::BacnetOnly
                                : (protocol == "hartip") ? ProtocolFilter::HartIpOnly
                                : (protocol == "opcua")  ? ProtocolFilter::OpcUaOnly
@@ -227,6 +231,20 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
     for (int p : ffhse_ports) options.extra_ffhse_ports.push_back(static_cast<uint16_t>(p));
 
     try {
+        // Built once per `decode` invocation, before opening the packet source, so a bad --hosts/
+        // --services file (ResolverError -- see resolver.hpp) is reported before this process does
+        // anything else, same "fail fast on bad setup" posture as parse_policy_file in
+        // run_policy_validate below. Its own advisory notes (e.g. "--resolve with no --hosts
+        // file") are printed the same way every other decode-time advisory already is --
+        // unconditionally to `diag`, respecting --quiet -- not per-packet, since they describe the
+        // whole run's configuration, not any one packet.
+        std::vector<std::string> resolver_notes;
+        Resolver resolver(oui_enabled, resolve_hostnames, hosts_path, service_names_enabled,
+                           services_path, resolver_notes);
+        if (!quiet) {
+            for (const auto& note : resolver_notes) diag << "note: " << note << "\n";
+        }
+
         PacketSource source = open_packet_source(input, interface_name, snaplen, promiscuous, filter,
                                                    duration_seconds, max_packets);
         SigintGuard sigint_guard(source.live_ptr());
@@ -235,9 +253,9 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
         std::unique_ptr<OutputWriter> writer;
         StatsWriter stats_writer;
         if (!stats) {
-            if (format == "json") writer = std::make_unique<JsonWriter>(*out);
-            else if (format == "csv") writer = std::make_unique<CsvWriter>(*out);
-            else writer = std::make_unique<TextWriter>(*out, color);
+            if (format == "json") writer = std::make_unique<JsonWriter>(*out, resolver);
+            else if (format == "csv") writer = std::make_unique<CsvWriter>(*out, resolver);
+            else writer = std::make_unique<TextWriter>(*out, color, resolver);
             writer->begin();
         }
 
@@ -268,6 +286,9 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
                  << " packet(s) had parse warnings (shown above); rerun with --strict to stop at "
                     "the first one, or -q to silence this message\n";
         }
+    } catch (const ResolverError& e) {
+        std::cerr << "error: " << e.what() << "\n";
+        return 1;
     } catch (const ParseError& e) {
         std::cerr << "error: " << e.what() << "\n";
         return 1;
@@ -460,6 +481,8 @@ int main(int argc, char** argv) {
         decode_opcua_ports, decode_mqtt_ports, decode_ffhse_ports;
     size_t decode_max_packets = 0;
     bool decode_stats = false, decode_strict = false;
+    bool decode_oui = true, decode_resolve = false, decode_service_names = true;
+    std::string decode_hosts_file, decode_services_file;
 
     auto* decode_input_opt =
         decode_cmd->add_option("-r,--read", decode_input,
@@ -492,7 +515,7 @@ int main(int argc, char** argv) {
     decode_cmd
         ->add_option("--protocol", decode_protocol,
                       "Restrict decoding to one protocol instead of auto-detecting all of them")
-        ->transform(CLI::IsMember({"auto", "modbus", "dnp3", "s7comm", "mms", "iec104", "enip", "profinet", "goose", "sv", "ethercat", "bacnet", "hartip", "opcua", "mqtt", "s7comm-plus", "ff-hse"}))
+        ->transform(CLI::IsMember({"auto", "modbus", "dnp3", "s7comm", "mms", "iec104", "enip", "profinet", "goose", "sv", "ethercat", "stp", "bacnet", "hartip", "opcua", "mqtt", "s7comm-plus", "ff-hse"}))
         ->capture_default_str();
     decode_cmd->add_option("--modbus-port", decode_modbus_ports,
                             "Additional TCP port to treat as expected for Modbus (repeatable); "
@@ -545,6 +568,26 @@ int main(int argc, char** argv) {
                           "one line per packet; ignores --format");
     decode_cmd->add_flag("--strict", decode_strict,
                           "Abort on the first malformed packet instead of reporting it and continuing");
+    decode_cmd->add_flag("!--no-oui", decode_oui,
+                          "Disable OUI (MAC vendor) resolution, on by default -- see docs/"
+                          "MANUAL.md's OUTPUT FORMATS section");
+    decode_cmd->add_flag(
+        "--resolve", decode_resolve,
+        "Enable hostname resolution from an explicitly-supplied hosts file (--hosts); off by "
+        "default; NEVER performs live DNS -- file-only, see docs/MANUAL.md's OUTPUT FORMATS "
+        "section");
+    decode_cmd
+        ->add_option("--hosts", decode_hosts_file,
+                      "Unix /etc/hosts-style file to resolve IP addresses from, for --resolve")
+        ->check(CLI::ExistingFile);
+    decode_cmd->add_flag("!--nn", decode_service_names,
+                          "Disable service name resolution (built-in table plus --services), on "
+                          "by default");
+    decode_cmd
+        ->add_option("--services", decode_services_file,
+                      "Unix /etc/services-style file to supplement/override the built-in "
+                      "port->service-name table")
+        ->check(CLI::ExistingFile);
 
     // --- info -------------------------------------------------------------
     auto* info_cmd = app.add_subcommand(
@@ -644,7 +687,8 @@ int main(int argc, char** argv) {
                            decode_modbus_ports, decode_dnp3_ports, decode_s7comm_ports, decode_iec104_ports,
                            decode_enip_ports, decode_enip_io_ports, decode_bacnet_ports, decode_hartip_ports,
                            decode_opcua_ports, decode_mqtt_ports, decode_ffhse_ports, decode_max_packets, decode_stats, decode_strict,
-                           quiet, no_color, force_color, *diag);
+                           quiet, no_color, force_color, decode_oui, decode_resolve, decode_hosts_file,
+                           decode_service_names, decode_services_file, *diag);
     }
     if (info_cmd->parsed()) {
         return run_info(info_input, std::cout);

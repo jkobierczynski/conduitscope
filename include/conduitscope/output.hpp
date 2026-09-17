@@ -9,6 +9,7 @@
 #include <string>
 
 #include "conduitscope/decoder.hpp"
+#include "conduitscope/resolver.hpp"
 
 namespace conduitscope {
 
@@ -20,19 +21,30 @@ public:
     virtual void end() {}
 };
 
+// `resolver` is held as a reference, not owned -- it outlives every writer here, since
+// cli_main.cpp's run_decode constructs exactly one Resolver per `decode` invocation, on the stack,
+// before constructing whichever OutputWriter the requested --format needs, and destroys it only
+// after that writer is done. Every accessor on Resolver already returns std::nullopt when its own
+// lookup is disabled (--no-oui/--nn) or has nothing to resolve against (--resolve with no
+// --hosts), so a writer never needs to ask "is this lookup even enabled" itself -- it just calls
+// resolver_.oui_vendor()/hostname()/service_name() unconditionally and renders whatever comes
+// back, or nothing at all on a miss. See resolver.hpp's own file header for the full "annotation,
+// never replacement" contract every writer below follows.
 class TextWriter : public OutputWriter {
 public:
-    explicit TextWriter(std::ostream& out, bool color) : out_(out), color_(color) {}
+    explicit TextWriter(std::ostream& out, bool color, const Resolver& resolver)
+        : out_(out), color_(color), resolver_(resolver) {}
     void write_packet(const DecodedPacket& packet) override;
 
 private:
     std::ostream& out_;
     bool color_;
+    const Resolver& resolver_;
 };
 
 class JsonWriter : public OutputWriter {
 public:
-    explicit JsonWriter(std::ostream& out) : out_(out) {}
+    explicit JsonWriter(std::ostream& out, const Resolver& resolver) : out_(out), resolver_(resolver) {}
     void begin() override;
     void write_packet(const DecodedPacket& packet) override;
     void end() override;
@@ -40,16 +52,18 @@ public:
 private:
     std::ostream& out_;
     bool wrote_any_ = false;
+    const Resolver& resolver_;
 };
 
 class CsvWriter : public OutputWriter {
 public:
-    explicit CsvWriter(std::ostream& out) : out_(out) {}
+    explicit CsvWriter(std::ostream& out, const Resolver& resolver) : out_(out), resolver_(resolver) {}
     void begin() override;
     void write_packet(const DecodedPacket& packet) override;
 
 private:
     std::ostream& out_;
+    const Resolver& resolver_;
 };
 
 // Accumulates counts instead of printing per packet; call begin()/write_packet()
@@ -90,6 +104,15 @@ private:
     size_t ethercat_datagram_total_ = 0;  // summed across every decoded EtherCAT frame, since one
                                             // frame can carry more than one datagram -- see
                                             // ethercat_datagram_count
+    std::map<std::string, size_t> stp_bpdu_type_counts_;      // "Configuration"/"Rapid/Multiple
+                                                                 // Spanning Tree"/"Topology Change
+                                                                 // Notification"
+    std::map<std::string, size_t> stp_protocol_version_counts_;  // "STP (802.1D)"/"RSTP (802.1w)"/
+                                                                    // "MSTP (802.1s)"/"SPB (802.1aq)"
+    size_t stp_mstp_count_ = 0;      // full MST extension decoded -- see stp_is_mstp
+    size_t stp_msti_total_ = 0;      // summed across every decoded MST BPDU, since one can carry
+                                       // more than one MSTI Configuration Message
+    size_t stp_tc_count_ = 0;        // Configuration/RST/MST BPDUs with the TC flag set
     std::map<std::string, size_t> bacnet_bvlc_function_counts_;
     std::map<std::string, size_t> bacnet_service_counts_;  // keyed by APDU service-choice name,
                                                               // only when bacnet_has_apdu

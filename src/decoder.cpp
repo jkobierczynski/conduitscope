@@ -764,12 +764,139 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                     }
                 }
 
+                // STP (classic IEEE 802.3 LLC framing -- NOT any EtherType at all, see
+                // link_layer.hpp's file header comment). Every branch above is EtherType-keyed
+                // (ethertype >= 0x0800); a length-framed frame (eth.is_llc_length) can never match
+                // any of them, since 802.3 Length values are always < 0x0600. This is entirely
+                // additive: nothing above this point ever looked at a sub-0x0600 "ethertype" value.
+                if (eth.is_llc_length && eth.has_llc) {
+                    bool want_stp = options_.protocol_filter == ProtocolFilter::Auto ||
+                                     options_.protocol_filter == ProtocolFilter::StpOnly;
+
+                    // GARP (GVRP/GMRP) shares STP's own LLC DSAP/SSAP pair (0x42/0x42) --
+                    // disambiguated only by destination MAC, matching the reference source
+                    // (packet-bpdu.c's dissect_bpdu) exactly -- see stp.hpp's "GARP collision"
+                    // paragraph. Checked before try_parse_stp is even called.
+                    bool is_garp_dst = eth.dst_mac[0] == 0x01 && eth.dst_mac[1] == 0x80 &&
+                                        eth.dst_mac[2] == 0xC2 && eth.dst_mac[3] == 0x00 &&
+                                        eth.dst_mac[4] == 0x00 &&
+                                        (eth.dst_mac[5] == 0x0D || (eth.dst_mac[5] & 0xF0) == 0x20);
+
+                    if (want_stp && eth.llc_dsap == LLC_SAP_BPDU && eth.llc_ssap == LLC_SAP_BPDU &&
+                        eth.llc_control == LLC_CONTROL_UI && !is_garp_dst) {
+                        if (auto stp = try_parse_stp(eth.llc_payload)) {
+                            out.protocol = "stp";
+                            out.summary = stp->summary;
+                            for (const auto& n : stp->notes) out.notes.push_back(n);
+                            if (eth.llc_trailing_bytes_trimmed > 0) {
+                                out.notes.push_back(
+                                    std::to_string(eth.llc_trailing_bytes_trimmed) +
+                                    " trailing byte(s) after the 802.3 Length field's declared LLC "
+                                    "client-data length were trimmed (almost always Ethernet "
+                                    "minimum-frame-size padding, not real payload)");
+                            }
+
+                            out.stp_protocol_version_name = stp->protocol_version_name;
+                            out.stp_protocol_version = stp->protocol_version;
+                            out.stp_bpdu_type_name = stp->bpdu_type_name;
+                            out.stp_bpdu_type = stp->bpdu_type;
+                            out.stp_is_tcn = stp->is_tcn;
+                            out.stp_is_spb = stp->is_spb;
+
+                            if (stp->has_common_body) {
+                                out.stp_has_common_body = true;
+                                out.stp_flags = stp->flags;
+                                out.stp_flag_tca = stp->flag_tca;
+                                out.stp_flag_agreement = stp->flag_agreement;
+                                out.stp_flag_forwarding = stp->flag_forwarding;
+                                out.stp_flag_learning = stp->flag_learning;
+                                out.stp_flag_port_role = stp->flag_port_role;
+                                out.stp_flag_port_role_name = stp_port_role_name(stp->flag_port_role);
+                                out.stp_flag_proposal = stp->flag_proposal;
+                                out.stp_flag_tc = stp->flag_tc;
+
+                                out.stp_root_priority = stp->root_id.priority;
+                                out.stp_root_sys_id_ext = stp->root_id.ext;
+                                out.stp_root_mac = format_mac(stp->root_id.mac);
+                                out.stp_root_path_cost = stp->root_path_cost;
+                                out.stp_bridge_priority = stp->bridge_id.priority;
+                                out.stp_bridge_sys_id_ext = stp->bridge_id.ext;
+                                out.stp_bridge_mac = format_mac(stp->bridge_id.mac);
+                                out.stp_port_id_raw = stp->port_id_raw;
+                                out.stp_port_priority = stp->port_id_priority;
+                                out.stp_port_number = stp->port_id_number;
+                                out.stp_message_age = stp->message_age;
+                                out.stp_max_age = stp->max_age;
+                                out.stp_hello_time = stp->hello_time;
+                                out.stp_forward_delay = stp->forward_delay;
+
+                                out.stp_has_version1 = stp->has_version1;
+                                out.stp_version_1_length = stp->version_1_length;
+
+                                if (stp->is_mstp) {
+                                    out.stp_is_mstp = true;
+                                    out.stp_version_3_length = stp->version_3_length;
+                                    out.stp_mst_config_name = stp->mst_config_name;
+                                    out.stp_mst_config_revision_level = stp->mst_config_revision_level;
+                                    out.stp_mst_config_digest_hex = stp->mst_config_digest_hex;
+                                    out.stp_cist_internal_root_path_cost = stp->cist_internal_root_path_cost;
+                                    out.stp_cist_bridge_priority = stp->cist_bridge_id.priority;
+                                    out.stp_cist_bridge_sys_id_ext = stp->cist_bridge_id.ext;
+                                    out.stp_cist_bridge_mac = format_mac(stp->cist_bridge_id.mac);
+                                    out.stp_cist_remaining_hops = stp->cist_remaining_hops;
+
+                                    constexpr size_t kMaxStpMstiSummaries = 50;
+                                    for (const auto& m : stp->msti_messages) {
+                                        if (out.stp_msti_messages.size() >= kMaxStpMstiSummaries) break;
+                                        out.stp_msti_messages.push_back(stp_render_msti_summary(m));
+                                    }
+                                }
+                                out.stp_is_alt_msti_format = stp->is_alt_msti_format;
+                            }
+                            return out;
+                        }
+                    }
+
+                    // Not STP (or the GARP-destination-MAC / non-STP-DSAP fallback above) -- named
+                    // structurally where cheaply possible, never guessed at further.
+                    out.protocol = "non-ip";
+                    std::ostringstream s;
+                    if (is_garp_dst && eth.llc_dsap == LLC_SAP_BPDU && eth.llc_ssap == LLC_SAP_BPDU) {
+                        s << "GARP (GVRP/GMRP) -- shares STP's Bridge Group Address DSAP/SSAP "
+                             "(0x42/0x42), disambiguated by destination MAC, not decoded";
+                    } else if (eth.has_snap && eth.snap_oui == SNAP_OUI_CISCO) {
+                        s << "Cisco PVST+ (SNAP-encapsulated, not decoded)";
+                    } else if (eth.has_snap) {
+                        s << "IEEE 802.3 LLC/SNAP frame, DSAP=0x" << std::hex << std::uppercase
+                          << static_cast<unsigned>(eth.llc_dsap) << " SSAP=0x"
+                          << static_cast<unsigned>(eth.llc_ssap) << " OUI=" << std::setw(2)
+                          << std::setfill('0') << static_cast<unsigned>(eth.snap_oui[0]) << ":"
+                          << std::setw(2) << static_cast<unsigned>(eth.snap_oui[1]) << ":"
+                          << std::setw(2) << static_cast<unsigned>(eth.snap_oui[2])
+                          << " ProtocolID=0x" << std::setw(4) << eth.snap_protocol_id << std::dec
+                          << std::setfill(' ');
+                    } else {
+                        s << "IEEE 802.3 LLC frame, DSAP=0x" << std::hex << std::uppercase
+                          << static_cast<unsigned>(eth.llc_dsap) << " SSAP=0x"
+                          << static_cast<unsigned>(eth.llc_ssap) << " Control=0x"
+                          << static_cast<unsigned>(eth.llc_control) << std::dec
+                          << " (length=" << eth.length_field << ")";
+                    }
+                    out.summary = s.str();
+                    return out;
+                }
+
                 out.protocol = "non-ip";
                 std::ostringstream s;
-                s << "Ethernet frame with ethertype 0x" << std::hex << eth.ethertype << std::dec;
-                std::string name = ethertype_name(eth.ethertype);
-                if (!name.empty()) s << " (" << name << ")";
-                s << " (not IPv4)";
+                if (eth.is_llc_length) {
+                    s << "IEEE 802.3 frame, length=" << eth.length_field
+                      << " (too short for an LLC header)";
+                } else {
+                    s << "Ethernet frame with ethertype 0x" << std::hex << eth.ethertype << std::dec;
+                    std::string name = ethertype_name(eth.ethertype);
+                    if (!name.empty()) s << " (" << name << ")";
+                    s << " (not IPv4)";
+                }
                 out.summary = s.str();
                 return out;
             }

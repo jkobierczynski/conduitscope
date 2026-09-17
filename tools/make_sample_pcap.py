@@ -1326,6 +1326,355 @@ def build_ethercat_sample():
     (TESTS_DIR / "sample_ethercat.pcap").write_bytes(data)
 
 
+# --- STP / RSTP / MSTP (classic IEEE 802.3 LLC framing, not any EtherType) ---------------------
+
+STP_BRIDGE_GROUP_MAC = mac("01:80:c2:00:00:00")  # the well-known "Bridge Group Address" multicast
+
+
+def llc_length_frame(dsap: int, ssap: int, control: int, body: bytes, *, dst: bytes = None,
+                      src: bytes = None, vlan_tci=None, declared_length=None) -> bytes:
+    """One classic IEEE 802.3 length-framed LLC frame: MAC header, an 802.3 LENGTH field (not an
+    EtherType -- always < 0x0600), a 3-byte LLC header (DSAP/SSAP/Control), then `body`. See
+    link_layer.hpp's file header comment for why this is a new kind of frame for this codebase.
+    `declared_length` overrides the Length field's own value (defaults to 3 + len(body), the honest
+    LLC-header-plus-body length) -- for exercising the "implausible/truncated 802.3 Length field"
+    fallback paths in parse_ethernet."""
+    dst = dst if dst is not None else STP_BRIDGE_GROUP_MAC
+    src = src if src is not None else HMI_MAC
+    llc = bytes([dsap, ssap, control]) + body
+    length = declared_length if declared_length is not None else len(llc)
+    if vlan_tci is not None:
+        return struct.pack("!6s6sHH", dst, src, 0x8100, vlan_tci) + struct.pack("!H", length) + llc
+    return struct.pack("!6s6sH", dst, src, length) + llc
+
+
+def snap_pvst_frame(body: bytes = b"", *, dst: bytes = None, src: bytes = None) -> bytes:
+    """A SNAP-encapsulated classic-802.3 frame using Cisco's IEEE-assigned OUI (00:00:0C) --
+    structurally what a Cisco PVST+/Rapid-PVST+ BPDU looks like at the LLC/SNAP level (see stp.hpp's
+    "Out of scope" section: LLC DSAP=SSAP=0xAA, not 0x42). `body` is arbitrary bytes standing in for
+    PVST+'s own Protocol-ID-keyed body -- this decoder never looks past the SNAP header itself, so
+    its content doesn't matter for the "recognized but not decoded" assertion this fixture exists
+    for. 0x010B is Cisco's real SNAP Protocol ID for PVST+ BPDUs (CISCO_PID_PVSTPP in the reference
+    source), included for realism though this decoder never reads it."""
+    dst = dst if dst is not None else mac("01:00:0c:cc:cc:cd")
+    src = src if src is not None else HMI_MAC
+    snap = bytes([0x00, 0x00, 0x0C]) + struct.pack("!H", 0x010B) + body
+    return llc_length_frame(0xAA, 0xAA, 0x03, snap, dst=dst, src=src)
+
+
+def stp_priority_ext16(priority: int, ext: int) -> int:
+    """Packs a Bridge/Root/CIST-Bridge-Identifier-shaped 16-bit value: top 4 bits (masked, i.e.
+    `priority` is already given as its own multiple-of-4096 value, e.g. 32768) + bottom 12 bits
+    `ext` -- see stp.hpp's file header comment."""
+    return (priority & 0xF000) | (ext & 0x0FFF)
+
+
+def stp_port_id16(priority: int, number: int) -> int:
+    """Packs a Port-Identifier-shaped 16-bit value: top 4 bits = `priority` / 16 (`priority` is a
+    multiple of 16, e.g. 128), bottom 12 bits = `number` -- see stp.hpp's "Port Identifier"
+    paragraph for why this multiplier differs from stp_priority_ext16's own."""
+    return (((priority // 16) & 0xF) << 12) | (number & 0x0FFF)
+
+
+def stp_time256(seconds: float) -> int:
+    """Message Age/Max Age/Hello Time/Forward Delay are all in units of 1/256 second."""
+    return round(seconds * 256)
+
+
+def stp_common_body(version: int, bpdu_type: int, flags: int, root_priority: int, root_ext: int,
+                     root_mac: bytes, root_cost: int, bridge_priority: int, bridge_ext: int,
+                     bridge_mac: bytes, port_priority: int, port_number: int, msg_age: float,
+                     max_age: float, hello: float, fwd_delay: float) -> bytes:
+    """The 35-byte Configuration/RST BPDU common body -- Protocol Identifier through Forward Delay
+    inclusive -- see stp.hpp's file header comment."""
+    body = struct.pack("!HBBB", 0x0000, version, bpdu_type, flags)
+    body += struct.pack("!H", stp_priority_ext16(root_priority, root_ext)) + root_mac
+    body += struct.pack("!I", root_cost)
+    body += struct.pack("!H", stp_priority_ext16(bridge_priority, bridge_ext)) + bridge_mac
+    body += struct.pack("!H", stp_port_id16(port_priority, port_number))
+    body += struct.pack("!HHHH", stp_time256(msg_age), stp_time256(max_age), stp_time256(hello),
+                         stp_time256(fwd_delay))
+    assert len(body) == 35
+    return body
+
+
+def stp_msti_message(flags: int, mstid: int, regional_root_priority: int, regional_root_mac: bytes,
+                      internal_root_path_cost: int, bridge_priority_nibble: int,
+                      port_priority_nibble: int, remaining_hops: int, *,
+                      bridge_low_nibble: int = 0, port_low_nibble: int = 0) -> bytes:
+    """One 16-byte MSTI Configuration Message -- see stp.hpp's file header comment. `bridge_low_
+    nibble`/`port_low_nibble` let a test deliberately set the low (undecoded) nibble of the MSTI
+    Bridge/Port Identifier Priority bytes to a nonzero value, confirming this decoder truly never
+    decodes it (see stp.hpp's own double-checked-against-the-source paragraph on this field)."""
+    m = struct.pack("!B", flags)
+    m += struct.pack("!H", stp_priority_ext16(regional_root_priority, mstid)) + regional_root_mac
+    m += struct.pack("!I", internal_root_path_cost)
+    m += bytes([((bridge_priority_nibble & 0xF) << 4) | (bridge_low_nibble & 0xF)])
+    m += bytes([((port_priority_nibble & 0xF) << 4) | (port_low_nibble & 0xF)])
+    m += bytes([remaining_hops])
+    assert len(m) == 16
+    return m
+
+
+def stp_mst_extension(mst_config_name: str, mst_config_revision: int, mst_config_digest: bytes,
+                       cist_root_cost: int, cist_bridge_priority: int, cist_bridge_ext: int,
+                       cist_bridge_mac: bytes, cist_remaining_hops: int, msti_messages: bytes = b"",
+                       *, config_format_selector: int = 0, version_3_length_override=None) -> bytes:
+    """Version 3 Length onward -- the MST extension appended after the RST common body + a Version 1
+    Length byte of 0 (required for a full MST BPDU to be recognized at all, see stp.hpp)."""
+    name_bytes = mst_config_name.encode("ascii")[:32].ljust(32, b"\x00")
+    static_part = (struct.pack("!B", config_format_selector) + name_bytes +
+                   struct.pack("!H", mst_config_revision) +
+                   mst_config_digest.ljust(16, b"\x00")[:16] +
+                   struct.pack("!I", cist_root_cost) +
+                   struct.pack("!H", stp_priority_ext16(cist_bridge_priority, cist_bridge_ext)) +
+                   cist_bridge_mac + struct.pack("!B", cist_remaining_hops))
+    assert len(static_part) == 64
+    v3len = version_3_length_override if version_3_length_override is not None else (64 + len(msti_messages))
+    return struct.pack("!H", v3len) + static_part + msti_messages
+
+
+def build_stp_sample():
+    """STP/RSTP/MSTP (classic IEEE 802.3 LLC framing, LLC DSAP=SSAP=0x42, Control=0x03) -- see
+    stp.hpp's file header comment for the exact wire format each packet below exercises (cross-
+    checked against Wireshark's own packet-bpdu.c). Packets 1 and 2 reproduce two independent real
+    captures' own frames byte-for-byte (see tests/real_captures/stp/ATTRIBUTION.md): a classic
+    Configuration BPDU (Plant1.pcap frame 617) and an RSTP RST BPDU (Sample_File_MMS_and_GOOSE.pcap
+    frame 30). Every other packet below is synthetic-only, covering paths those real captures don't
+    happen to exercise (no real MSTP, no real TCN, no real malformed/truncated frame, no real
+    PVST+/GARP/VLAN-tagged frame in either capture)."""
+    packets = []
+
+    bridge_a = mac("00:1a:2b:3c:4d:5e")
+    bridge_b = mac("00:1a:2b:3c:4d:5f")
+    bridge_c = mac("00:1a:2b:3c:4d:60")
+
+    # 1) Byte-for-byte reproduction of a real classic Configuration BPDU (802.1D, version 0) --
+    #    Plant1.pcap frame 617 (see ATTRIBUTION.md): Root=32768/80/64:a0:e7:9a:05:80 Cost=4
+    #    Bridge=32768/80/64:ae:0c:34:a3:80 Port=0x8083, no flags, 8 bytes of Ethernet minimum-
+    #    frame-size padding after the 35-byte body (exercises llc_trailing_bytes_trimmed).
+    packets.append(bytes.fromhex(
+        "0180c200000064ae0c34ab9700264242030000000000805064a0e79a058000000004"
+        "805064ae0c34a38080830200140002000f000000000000000000"))
+
+    # 2) Byte-for-byte reproduction of a real RSTP RST BPDU (802.1w, version 2) --
+    #    Sample_File_MMS_and_GOOSE.pcap frame 30 (see ATTRIBUTION.md): Root=28672/4095/
+    #    00:40:15:18:1d:7c Cost=1100 Bridge=32768/0/00:0a:dc:06:19:5c Port=0x8010
+    #    Role=Designated, Learning+Forwarding set, Version 1 Length=0.
+    packets.append(bytes.fromhex(
+        "0180c2000000000adc06196b0027424203000002023c7fff004015181d7c00000"
+        "44c8000000adc06195c80100140140002000f00004563a240020320"))
+
+    # 3) TCN BPDU (Topology Change Notification, BPDU Type 0x80) -- 4-byte body only, no flags, no
+    #    bridge/root IDs. Synthetic (neither real capture contains one).
+    packets.append(llc_length_frame(0x42, 0x42, 0x03, struct.pack("!HBB", 0x0000, 0, 0x80)))
+
+    # 4) TCN BPDU with an unusual Protocol Version Identifier byte (2) -- a TCN BPDU's own version
+    #    byte is never gated on (see stp.hpp), still decoded as a plain TCN.
+    packets.append(llc_length_frame(0x42, 0x42, 0x03, struct.pack("!HBB", 0x0000, 2, 0x80)))
+
+    # 5) Classic Configuration BPDU with TC (Topology Change) and TCA (Topology Change
+    #    Acknowledgment) flags both set -- the only two flag bits ever meaningful under version 0.
+    packets.append(llc_length_frame(0x42, 0x42, 0x03, stp_common_body(
+        0, 0x00, 0x81, 32768, 0, bridge_a, 19, 32768, 0, bridge_a, 128, 3,
+        0.0, 20.0, 2.0, 15.0)))
+
+    # 6) Configuration BPDU (Type 0x00) with an unusual Protocol Version Identifier (2) -- an
+    #    unusual but still-decoded combination (see stp.hpp), exercises the "unusual combination"
+    #    note.
+    packets.append(llc_length_frame(0x42, 0x42, 0x03, stp_common_body(
+        2, 0x00, 0x00, 32768, 0, bridge_a, 0, 32768, 0, bridge_a, 128, 1,
+        0.0, 20.0, 2.0, 15.0)))
+
+    # 7) RST BPDU (Type 0x02) with Protocol Version Identifier 0 -- also an unusual combination
+    #    (RST BPDUs are conventionally version 2+), but the reference source decodes ANY Type-0x02
+    #    BPDU through the same 36-byte shape regardless of version, and this decoder matches that
+    #    exactly (see stp.hpp) -- no note, decoded normally, labeled "STP (802.1D) BPDU".
+    packets.append(llc_length_frame(0x42, 0x42, 0x03, stp_common_body(
+        0, 0x02, 0x00, 32768, 0, bridge_b, 0, 32768, 0, bridge_b, 128, 5,
+        0.0, 20.0, 2.0, 15.0) + struct.pack("!B", 0)))
+
+    # 8) RSTP RST BPDU, Port Role = Root (2), Proposal set, Agreement NOT set (the real capture's
+    #    own two frames are both Role=Designated with neither Proposal nor Agreement -- this
+    #    exercises a Port Role/flag combination that capture doesn't).
+    flags8 = 0x02 | (2 << 2)  # Proposal | Port Role=Root
+    packets.append(llc_length_frame(0x42, 0x42, 0x03, stp_common_body(
+        2, 0x02, flags8, 4096, 10, bridge_a, 200000, 32768, 0, bridge_b, 128, 7,
+        1.0, 20.0, 2.0, 15.0) + struct.pack("!B", 0)))
+
+    # 9) RSTP RST BPDU, Port Role = Alternate/Backup (1), Agreement set, Proposal NOT set, TC set.
+    flags9 = 0x40 | (1 << 2) | 0x01  # Agreement | Port Role=Alternate/Backup | TC
+    packets.append(llc_length_frame(0x42, 0x42, 0x03, stp_common_body(
+        2, 0x02, flags9, 32768, 0, bridge_b, 4, 32768, 0, bridge_c, 128, 9,
+        3.0, 20.0, 2.0, 15.0) + struct.pack("!B", 0)))
+
+    # 10) RSTP RST BPDU, Port Role = Unknown (0), no other flags set at all (flags byte 0x00).
+    packets.append(llc_length_frame(0x42, 0x42, 0x03, stp_common_body(
+        2, 0x02, 0x00, 32768, 0, bridge_c, 0, 32768, 0, bridge_c, 128, 1,
+        0.0, 20.0, 2.0, 15.0) + struct.pack("!B", 0)))
+
+    # 11) 802.1Q VLAN-priority-tagged RSTP RST BPDU -- confirms parse_ethernet's single-VLAN-tag
+    #     unwrap composes correctly with classic-802.3-LLC recognition, mirroring GOOSE/SV/
+    #     EtherCAT's own VLAN tests.
+    packets.append(llc_length_frame(0x42, 0x42, 0x03, stp_common_body(
+        2, 0x02, (3 << 2) | 0x30, 32768, 7, bridge_a, 100, 32768, 7, bridge_a, 128, 2,
+        0.0, 20.0, 2.0, 15.0) + struct.pack("!B", 0), vlan_tci=0x2000))
+
+    # 12) MSTP MST BPDU with 2 MSTI Configuration Messages -- ordinary case, Version 3 Length ==
+    #     64 + 2*16 == 96. The first MSTI message deliberately sets nonzero low nibbles on the
+    #     Bridge/Port Identifier Priority bytes (bridge_low_nibble/port_low_nibble) to confirm this
+    #     decoder truly ignores them (see stp.hpp).
+    msti1 = stp_msti_message(0x3C, 10, 32768, bridge_a, 20000, 8, 8, 20,
+                              bridge_low_nibble=0xF, port_low_nibble=0xA)
+    msti2 = stp_msti_message(0x00, 20, 4096, bridge_b, 0, 0, 0, 20)
+    mst_ext_12 = stp_mst_extension("region-1", 3, bytes.fromhex("00112233445566778899aabbccddeeff"[:32]),
+                                    50, 32768, 100, bridge_a, 19, msti1 + msti2)
+    packets.append(llc_length_frame(0x42, 0x42, 0x03, stp_common_body(
+        3, 0x02, 0x00, 32768, 100, bridge_a, 50, 32768, 100, bridge_a, 128, 3,
+        0.0, 20.0, 2.0, 15.0) + struct.pack("!B", 0) + mst_ext_12))
+
+    # 13) MSTP MST BPDU with 0 MSTI Configuration Messages (Version 3 Length == 64 exactly, the
+    #     VERSION_3_STATIC_LENGTH boundary with nothing past it).
+    mst_ext_13 = stp_mst_extension("region-empty", 1, b"\x11" * 16, 0, 32768, 0, bridge_c, 20, b"")
+    packets.append(llc_length_frame(0x42, 0x42, 0x03, stp_common_body(
+        3, 0x02, 0x00, 32768, 0, bridge_c, 0, 32768, 0, bridge_c, 128, 4,
+        0.0, 20.0, 2.0, 15.0) + struct.pack("!B", 0) + mst_ext_13))
+
+    # 14) MSTP MST BPDU exercising the reference source's own Cisco-C3550-firmware work-around:
+    #     Version 3 Length is nonzero but less than 64 (the static header size) -- treated as a
+    #     COUNT OF MESSAGES rather than bytes (2 here, so 2*16 == 32 MSTI bytes) -- see stp.hpp.
+    msti14a = stp_msti_message(0x00, 1, 32768, bridge_a, 10, 8, 8, 19)
+    msti14b = stp_msti_message(0x00, 2, 32768, bridge_b, 10, 8, 8, 19)
+    mst_ext_14 = stp_mst_extension("cisco-units", 0, b"\x22" * 16, 5, 32768, 0, bridge_a, 20,
+                                    msti14a + msti14b, version_3_length_override=2)
+    packets.append(llc_length_frame(0x42, 0x42, 0x03, stp_common_body(
+        3, 0x02, 0x00, 32768, 0, bridge_a, 5, 32768, 0, bridge_a, 128, 6,
+        0.0, 20.0, 2.0, 15.0) + struct.pack("!B", 0) + mst_ext_14))
+
+    # 15) MSTP MST BPDU whose Version 3 Length declares more MSTI bytes than are actually present
+    #     (32 declared, only 16 -- one message -- physically present) -- exercises the "decoding as
+    #     many whole messages as fit" truncation-tolerant fallback.
+    msti15 = stp_msti_message(0x00, 30, 32768, bridge_b, 1, 8, 8, 5)
+    mst_ext_15 = stp_mst_extension("truncated", 0, b"\x33" * 16, 1, 32768, 0, bridge_b, 5, msti15,
+                                    version_3_length_override=64 + 32)
+    packets.append(llc_length_frame(0x42, 0x42, 0x03, stp_common_body(
+        3, 0x02, 0x00, 32768, 0, bridge_b, 1, 32768, 0, bridge_b, 128, 8,
+        0.0, 20.0, 2.0, 15.0) + struct.pack("!B", 0) + mst_ext_15))
+
+    # 16) MSTP MST BPDU with a partial trailing MSTI Configuration Message (Version 3 Length
+    #     implies 64 + 20 bytes -- one whole 16-byte message plus 4 leftover bytes) -- exercises
+    #     the "partial trailing MSTI Configuration Message ... not decoded" note.
+    msti16 = stp_msti_message(0x00, 40, 32768, bridge_c, 1, 8, 8, 5)
+    mst_ext_16 = stp_mst_extension("partial-msti", 0, b"\x44" * 16, 1, 32768, 0, bridge_c, 5,
+                                    msti16 + b"\xaa\xbb\xcc\xdd",
+                                    version_3_length_override=64 + 20)
+    packets.append(llc_length_frame(0x42, 0x42, 0x03, stp_common_body(
+        3, 0x02, 0x00, 32768, 0, bridge_c, 1, 32768, 0, bridge_c, 128, 9,
+        0.0, 20.0, 2.0, 15.0) + struct.pack("!B", 0) + mst_ext_16))
+
+    # 17) Protocol Version 3 (MSTP-eligible) but the frame is too short (< 102 bytes total) for the
+    #     MST detection gate to hold -- falls back to a plain RST-shaped BPDU (36 bytes), noted.
+    packets.append(llc_length_frame(0x42, 0x42, 0x03, stp_common_body(
+        3, 0x02, 0x00, 32768, 0, bridge_a, 0, 32768, 0, bridge_a, 128, 10,
+        0.0, 20.0, 2.0, 15.0) + struct.pack("!B", 0)))
+
+    # 18) Protocol Version 3 with enough total bytes present, but Version 1 Length is NOT 0 -- the
+    #     MST detection gate's second condition fails, also falls back to a plain RST-shaped BPDU,
+    #     with the rest of the (>=102-byte) frame simply ignored.
+    packets.append(llc_length_frame(0x42, 0x42, 0x03, stp_common_body(
+        3, 0x02, 0x00, 32768, 0, bridge_b, 0, 32768, 0, bridge_b, 128, 11,
+        0.0, 20.0, 2.0, 15.0) + struct.pack("!B", 5) + b"\x00" * 70))
+
+    # 19) The legacy/alternative MSTI Configuration Message format's own detection trigger:
+    #     Version 3 Length == 0, and the frame's total length equals `MST Config Format Selector
+    #     byte's value + MST_BPDU_SIZE(38) + 1` -- named (is_alt_msti_format) but not decoded, see
+    #     stp.hpp. This trigger is only ever CHECKED once the outer MST-detection gate's own
+    #     `>= 102 total bytes` condition already holds (see stp.hpp's "MSTP detection" paragraph --
+    #     the alt-format check happens strictly inside that gate, not before it), so
+    #     config_format_selector must be chosen large enough that config_format_selector + 39 is
+    #     itself >= 102 -- 63 is the smallest value that satisfies both that and the alt-format's
+    #     own equality check simultaneously (63 + 39 == 102 exactly).
+    cfs19 = 63
+    body19 = stp_common_body(3, 0x02, 0x00, 32768, 0, bridge_c, 0, 32768, 0, bridge_c, 128, 12,
+                              0.0, 20.0, 2.0, 15.0) + struct.pack("!B", 0)
+    # Version 3 Length (0) + the rest of the fixed 38-byte-through-that-point header, using
+    # config_format_selector=26 as ALT_MSTI's own "length" stand-in, then exactly enough filler
+    # bytes so tvb_reported_length(tvb) == config_format_selector + MST_BPDU_SIZE + 1 == 65.
+    body19 += struct.pack("!H", 0)  # Version 3 Length == 0
+    body19 += struct.pack("!B", cfs19)  # MST Config Format Selector doubles as ALT's length field
+    alt_expected_len19 = cfs19 + 38 + 1  # == tvb_reported_length(tvb) the reference source checks
+    body19 += b"\x00" * (alt_expected_len19 - len(body19))  # pad so the WHOLE llc_payload matches
+    packets.append(llc_length_frame(0x42, 0x42, 0x03, body19))
+
+    # 20) SPB (802.1aq), Protocol Version Identifier 4 -- named-only, never body-decoded (see
+    #     stp.hpp). BPDU Type 0x02 reused, same as RST/MST.
+    packets.append(llc_length_frame(0x42, 0x42, 0x03, struct.pack("!HBB", 0x0000, 4, 0x02) +
+                                     b"\x00" * 40))
+
+    # 21) Malformed: Protocol Identifier != 0x0000 -- not recognized as STP at all, falls back to
+    #     the generic "IEEE 802.3 LLC frame, DSAP=... SSAP=... Control=..." report.
+    packets.append(llc_length_frame(0x42, 0x42, 0x03, struct.pack("!HBB", 0x1234, 0, 0x00) +
+                                     b"\x00" * 31))
+
+    # 22) Malformed: BPDU Type not one of {0x00, 0x02, 0x80} -- not recognized as STP at all.
+    packets.append(llc_length_frame(0x42, 0x42, 0x03, struct.pack("!HBB", 0x0000, 0, 0x01) +
+                                     b"\x00" * 31))
+
+    # 23) Malformed: Configuration BPDU truncated before the 35-byte common body fits (only 20
+    #     bytes of body present) -- structurally recognized (Protocol ID/Version/Type all valid)
+    #     but too short to decode further, noted.
+    packets.append(llc_length_frame(0x42, 0x42, 0x03,
+                                     struct.pack("!HBB", 0x0000, 0, 0x00) + b"\x00" * 16))
+
+    # 24) Malformed: RST BPDU truncated right after the 35-byte common body -- Version 1 Length
+    #     byte (offset 35) itself missing, noted.
+    packets.append(llc_length_frame(0x42, 0x42, 0x03, stp_common_body(
+        2, 0x02, 0x00, 32768, 0, bridge_a, 0, 32768, 0, bridge_a, 128, 13,
+        0.0, 20.0, 2.0, 15.0)))
+
+    # 25) Cisco PVST+ (SNAP-encapsulated, Cisco OUI 00:00:0C) -- recognized structurally, named,
+    #     but never decoded (see stp.hpp's "Out of scope" section).
+    packets.append(snap_pvst_frame(b"\x00\x00" + stp_common_body(
+        0, 0x00, 0x00, 32768, 5, bridge_a, 0, 32768, 5, bridge_a, 128, 1, 0.0, 20.0, 2.0, 15.0) +
+        struct.pack("!BH", 0, 0) + struct.pack("!HH", 0, 5)))  # Version1Length + PVST+ TLV, arbitrary
+
+    # 26) GARP (GVRP/GMRP) -- shares STP's own LLC DSAP/SSAP pair (0x42/0x42), disambiguated only
+    #     by destination MAC (01:80:C2:00:00:21, inside the GARP range) -- recognized structurally,
+    #     named "GARP (GVRP/GMRP)", never decoded, and NOT misdetected as STP -- see stp.hpp's
+    #     "GARP collision" paragraph and decoder.cpp's own dst-MAC check.
+    packets.append(llc_length_frame(0x42, 0x42, 0x03, struct.pack("!HBB", 0x0000, 0, 0x00) +
+                                     b"\x00" * 31, dst=mac("01:80:c2:00:00:21")))
+
+    # 27) Unrecognized LLC DSAP/SSAP on an otherwise well-formed classic-802.3 frame (0xE0/0xE0,
+    #     the well-known IPX SAP) -- not STP, not SNAP, not GARP -- named generically by its raw
+    #     DSAP/SSAP values, never guessed at further.
+    packets.append(llc_length_frame(0xE0, 0xE0, 0x03, b"\x00" * 10))
+
+    # 28) A length-framed 802.3 frame too short for even a 3-byte LLC header (only 2 bytes present
+    #     after the Length field) -- must not crash, falls back to the "too short for an LLC
+    #     header" report.
+    packets.append(struct.pack("!6s6sH", PLC_MAC, HMI_MAC, 5) + b"\x01\x02")
+
+    # 29) An implausible 802.3 Length field (1 -- too small to even cover the 3-byte LLC header
+    #     already consumed) on an otherwise well-formed, fully-present STP frame -- exercises
+    #     parse_ethernet's "Length field too small" fallback (uses all captured bytes instead), and
+    #     confirms try_parse_stp still decodes correctly despite it.
+    packets.append(llc_length_frame(0x42, 0x42, 0x03, struct.pack("!HBB", 0x0000, 0, 0x80),
+                                     declared_length=1))
+
+    # 30) An 802.3 Length field that declares MORE client-data bytes than were actually captured
+    #     (200, versus only 7 bytes -- LLC header + a 4-byte TCN body -- physically present) --
+    #     exercises parse_ethernet's snaplen-truncation fallback (uses whatever's actually present)
+    #     and confirms a TCN BPDU still decodes correctly from what's left.
+    packets.append(llc_length_frame(0x42, 0x42, 0x03, struct.pack("!HBB", 0x0000, 0, 0x80),
+                                     declared_length=200))
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_710_000_000 + i, i * 1000)
+    (TESTS_DIR / "sample_stp.pcap").write_bytes(data)
+
+
 BACNET_PORT = 47808
 
 
@@ -5819,6 +6168,7 @@ if __name__ == "__main__":
     build_goose_sample()
     build_sv_sample()
     build_ethercat_sample()
+    build_stp_sample()
     build_bacnet_sample()
     build_hartip_sample()
     build_opcua_sample()

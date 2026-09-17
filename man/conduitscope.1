@@ -1,6 +1,6 @@
 .TH CONDUITSCOPE 1 "2026" "conduitscope 0.1.0" "User Commands"
 .SH NAME
-conduitscope \- decode Modbus/TCP, DNP3, IEC 60870-5-104, S7comm/COTP, S7comm-Plus (Siemens TIA Portal / S7-1200/1500), IEC 61850 MMS (Manufacturing Message Specification, ISO 9506), EtherNet/IP (CIP explicit and implicit messaging), PROFINET RT (DCP and cyclic real-time IO), IEC 61850-8-1 GOOSE, IEC 61850-9-2 Sampled Values, EtherCAT, BACnet/IP, HART-IP, OPC UA Binary, MQTT (v3.1/v3.1.1/v5.0, including Sparkplug B), and FOUNDATION Fieldbus HSE (FDA/SM/FMS/LAN Redundancy) traffic from offline pcap/pcapng captures
+conduitscope \- decode Modbus/TCP, DNP3, IEC 60870-5-104, S7comm/COTP, S7comm-Plus (Siemens TIA Portal / S7-1200/1500), IEC 61850 MMS (Manufacturing Message Specification, ISO 9506), EtherNet/IP (CIP explicit and implicit messaging), PROFINET RT (DCP and cyclic real-time IO), IEC 61850-8-1 GOOSE, IEC 61850-9-2 Sampled Values, EtherCAT, BACnet/IP, HART-IP, OPC UA Binary, MQTT (v3.1/v3.1.1/v5.0, including Sparkplug B), FOUNDATION Fieldbus HSE (FDA/SM/FMS/LAN Redundancy), and IEEE Spanning Tree Protocol (STP/RSTP/MSTP) traffic from offline pcap/pcapng captures
 .SH SYNOPSIS
 .B conduitscope
 [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-color\fR|\fB\-\-color\fR] [\fB\-\-log\-file\fR \fIFILE\fR] \fICOMMAND\fR [\fIOPTIONS\fR]
@@ -46,7 +46,12 @@ port 1091, LAN Redundancy port 3622, ff-annunc port 1089, all TCP AND UDP,
 tried dead LAST of all protocols on both transports due to its own
 genuinely weak, single-byte structural detection gate \-\- the sub-protocol
 itself is signaled in-band by the header, not by port) traffic found on
-either transport, and checks
+either transport, plus IEEE Spanning Tree Protocol (STP/RSTP/MSTP \-\-
+BPDUs riding classic IEEE 802.3 length-framed Ethernet with a 3-byte LLC
+header, DSAP=SSAP=0x42, no IP/TCP/UDP layer and no EtherType at all \-\-
+the first protocol here reached neither via IPv4 nor a DIX EtherType, a
+structurally separate dispatch path from every EtherType-keyed protocol
+above) traffic found directly on the wire, and checks
 decoded traffic against a
 zone-and-conduit segmentation policy (IEC 62443 / NIS2 style work) via
 \fBpolicy validate\fR.
@@ -117,7 +122,7 @@ Write output here instead of stdout.
 .BR \-f ", " \-\-format " " {text,json,csv}
 Output format. Default: text.
 .TP
-.B \-\-protocol {auto,modbus,dnp3,iec104,s7comm,s7comm\-plus,mms,enip,profinet,goose,sv,ethercat,bacnet,hartip,opcua,mqtt,ff\-hse}
+.B \-\-protocol {auto,modbus,dnp3,iec104,s7comm,s7comm\-plus,mms,enip,profinet,goose,sv,ethercat,stp,bacnet,hartip,opcua,mqtt,ff\-hse}
 Restrict decoding to one protocol. Default: auto (tries all eleven TCP
 protocols, independent of port number, plus CIP I/O, BACnet/IP, HART-IP, and
 FF-HSE on every
@@ -126,7 +131,10 @@ plus PROFINET RT on every non-IPv4 Ethernet frame carrying EtherType
 0x8892, plus GOOSE on every non-IPv4 Ethernet frame carrying EtherType
 0x88B8, plus Sampled Values on every non-IPv4 Ethernet frame carrying
 EtherType 0x88BA, plus EtherCAT on every non-IPv4 Ethernet frame carrying
-EtherType 0x88A4; OPC UA is tried first of all, ahead of every other TCP
+EtherType 0x88A4, plus STP/RSTP/MSTP on every classic IEEE 802.3
+length-framed Ethernet frame whose LLC header is DSAP=SSAP=0x42 \-\- a
+structurally separate dispatch path from every EtherType-keyed protocol
+above, so there is no ordering/collision question between them; OPC UA is tried first of all, ahead of every other TCP
 protocol, since its own 3-byte ASCII MessageType magic (HEL/ACK/ERR/RHE/
 OPN/CLO/MSG) has zero collision risk against any other protocol's own
 detection gate; EtherNet/IP is tried next, then IEC 104 before Modbus, since an
@@ -165,6 +173,8 @@ EtherNet/IP explicit messaging (TCP) and CIP I/O implicit messaging (UDP).
 distinct protocol; there is no separate \fB\-\-mms\-port\fR, see
 \fB\-\-s7comm\-port\fR below.
 \fBsv\fR is IEC 61850-9-2 Sampled Values. \fBethercat\fR is EtherCAT.
+\fBstp\fR is Spanning Tree Protocol (STP/RSTP/MSTP) \-\- no port option,
+since it rides classic 802.3/LLC framing with no port at all.
 \fBbacnet\fR is BACnet/IP.
 \fBhartip\fR is HART-IP, tried on both TCP and UDP.
 \fBff\-hse\fR is FOUNDATION Fieldbus HSE (FDA/SM/FMS/LAN Redundancy), tried
@@ -225,6 +235,31 @@ Print an aggregate summary instead of one line per packet. Ignores
 .TP
 .B \-\-strict
 Abort on the first malformed packet instead of warning and continuing.
+.TP
+.B \-\-no\-oui
+Disable OUI (MAC vendor) resolution against the built-in table (IEEE MA-L/
+MA-M/MA-S registry data via nmap's nmap-mac-prefixes redistribution, see
+\fBtools/generate_oui_table.py\fR). On by default. See \fBdocs/MANUAL.md\fR's
+OUTPUT FORMATS "Name resolution" subsection.
+.TP
+.B \-\-resolve
+Enable hostname resolution from an explicitly-supplied \fB\-\-hosts\fR file.
+Off by default. File-only \-\- \fBnever\fR performs live DNS, under any flag
+combination. Given with no \fB\-\-hosts\fR, this is a harmless no-op (a
+one-line advisory note is printed, not an error).
+.TP
+.B \-\-hosts \fIFILE\fR
+Unix /etc/hosts-style file to resolve IP addresses from, for
+\fB\-\-resolve\fR. Must exist.
+.TP
+.B \-\-nn
+Disable service name (port\->name) resolution, from the built-in table and
+\fB\-\-services\fR alike. On by default. Named after the
+\fBnc\fR/\fBnmap\fR/\fBtcpdump\fR-family \fB\-n\fR/\fB\-nn\fR convention.
+.TP
+.B \-\-services \fIFILE\fR
+Unix /etc/services-style file to supplement/override the built-in
+port\->service-name table. Must exist.
 .SH OPTIONS (policy validate)
 .TP
 .BR \-r ", " \-\-read " " \fIFILE\fR
@@ -322,7 +357,11 @@ with S7comm and MMS, bold magenta keeps it visually distinct from both
 while still grouped with the S7 family), yellow for
 EtherNet/IP,
 bright cyan for PROFINET RT, bright green for GOOSE, bright magenta for
-Sampled Values, bright yellow for EtherCAT, bright blue for BACnet/IP,
+Sampled Values, bright yellow for EtherCAT, plain magenta for STP
+(deliberately shares DNP3's own plain magenta \-\- the two never share a
+transport/link at all, STP being classic 802.3 LLC framing rather than
+IP-based, so there is no realistic capture where this collision would
+actually confuse a reader scanning by eye), bright blue for BACnet/IP,
 bright white for HART-IP, bright red for OPC UA, bold cyan for MQTT
 (deliberately close to Modbus's plain cyan, but bold and otherwise distinct
 from every other tag color -- MQTT shares no transport/port with any other
@@ -565,6 +604,24 @@ search, no real FF-HSE capture was found anywhere, so validation is
 against a hand-built synthetic fixture only (see \fBdocs/MANUAL.md\fR's
 PROTOCOL COVERAGE FOUNDATION Fieldbus HSE section and LIMITATIONS section
 for the full detail);
+IEEE Spanning Tree Protocol (STP/RSTP/MSTP, no port at all \-\- classic
+IEEE 802.3 length-framed Ethernet, LLC DSAP=SSAP=0x42) is also now decoded
+\-\- classic Configuration BPDUs, TCN BPDUs, RST BPDUs (RSTP/MSTP's shared
+36-byte shape), and the full MST BPDU extension (every MSTI Configuration
+Message, plus the reference source's own Cisco-C3550-firmware Version-3-
+Length-below-64 work-around) \-\- but Cisco PVST+/Rapid-PVST+ (a different,
+SNAP-encapsulated envelope), SPB (802.1aq), and the legacy/alternative
+MSTI Configuration Message format (Version 3 Length == 0) are all named
+only, not decoded; GARP (GVRP/GMRP, which shares STP's own LLC DSAP/SSAP
+pair) is disambiguated purely by destination MAC \-\- the one case in this
+codebase where a fixed address genuinely gates detection rather than a
+structural check; validated against two real captures (42 classic
+Configuration BPDUs, 12 real RSTP RST BPDUs), but neither exercises a TCN,
+MSTP, SPB, the Proposal/Agreement flags, or a non-Designated Port Role on
+real bytes \-\- those paths are validated only against the synthetic
+\fBtests/sample_stp.pcap\fR fixture (see \fBdocs/MANUAL.md\fR's PROTOCOL
+COVERAGE Spanning Tree Protocol section and
+\fBtests/real_captures/stp/ATTRIBUTION.md\fR for the full detail);
 non-IPv4
 Ethernet frames and non-TCP
 IPv4 payloads (including UDP) are otherwise still just recognized and
@@ -820,6 +877,16 @@ came from:
 conduitscope decode \-r capture.pcap \-\-protocol ff\-hse \-f json \e
   | jq \-r '.[] | select(.ffhse_values // [] | length > 0) |
            "\e(.src_ip) \-> \e(.dst_ip): \e(.ffhse_message_name): \e(.ffhse_values | join(", "))"'
+.EE
+.RE
+.PP
+Build a quick STP bridge/root inventory (one line per distinct Bridge/Root
+pair seen):
+.RS
+.EX
+conduitscope decode \-r capture.pcap \-\-protocol stp \-f json \e
+  | jq \-r '[.[] | select(.stp_has_common_body) |
+           "Bridge=\e(.stp_bridge_priority)/\e(.stp_bridge_sys_id_ext)/\e(.stp_bridge_mac) Root=\e(.stp_root_priority)/\e(.stp_root_sys_id_ext)/\e(.stp_root_mac)"] | unique[]'
 .EE
 .RE
 .PP

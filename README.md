@@ -6,8 +6,9 @@ EtherNet/IP (CIP explicit and implicit messaging), PROFINET RT (DCP device
 discovery/configuration and cyclic real-time I/O data), IEC 61850-8-1 GOOSE,
 IEC 61850-9-2 Sampled Values, EtherCAT, BACnet/IP, HART-IP, OPC UA Binary
 (UA-TCP/Secure Conversation), IEC 61850 MMS (Manufacturing Message Specification,
-ISO 9506), MQTT (v3.1/v3.1.1/v5.0, including Sparkplug B), and FOUNDATION
-Fieldbus HSE (FDA/SM/FMS/LAN Redundancy) traffic from offline
+ISO 9506), MQTT (v3.1/v3.1.1/v5.0, including Sparkplug B), FOUNDATION
+Fieldbus HSE (FDA/SM/FMS/LAN Redundancy), and IEEE Spanning Tree Protocol
+(STP/RSTP/MSTP) traffic from offline
 pcap/pcapng captures, and checks it
 against a zone/conduit segmentation policy. It's an OT/ICS conduit-auditing tool: `decode`/`info` give you reliable
 protocol decoding and a stats view, and `policy validate` maps that decoded traffic
@@ -581,6 +582,31 @@ Groundwork / v0.1.0. What works right now:
   only against its own synthetic fixture. See docs/MANUAL.md's FOUNDATION
   Fieldbus HSE section and include/conduitscope/ffhse.hpp for the full
   wire-format details.
+- IEEE Spanning Tree Protocol (STP/RSTP/MSTP): the first protocol this tool
+  decodes that's reached neither through IPv4 nor through a DIX Ethernet II
+  EtherType -- a BPDU rides classic IEEE 802.3 length-framed Ethernet, with a
+  3-byte LLC header (DSAP=SSAP=`0x42`, the Bridge Group Address SAP)
+  underneath, which required teaching `link_layer.hpp` the length-vs-EtherType
+  boundary and LLC/SNAP framing (additive groundwork -- every existing
+  EtherType-keyed protocol is unaffected). Classic Configuration BPDUs, TCN
+  (Topology Change Notification) BPDUs, RST BPDUs (RSTP/MSTP's shared 36-byte
+  shape), and the full MST BPDU extension (including every MSTI Configuration
+  Message and the reference source's own Cisco-C3550-firmware Version-3-
+  Length work-around) are all decoded. Cisco PVST+/Rapid-PVST+ (a different,
+  SNAP-encapsulated envelope), SPB (802.1aq), the legacy/alternative MSTI
+  format, and GARP/GVRP/GMRP (which shares STP's own LLC SAP pair, the one
+  case in this codebase where destination MAC genuinely gates detection
+  rather than a structural check) are all recognized and named but not
+  decoded further. Validated against two real captures (42 classic
+  Configuration BPDUs from one bridge's steady-state Hello traffic, and 12
+  real RSTP RST BPDUs from six port pairs) -- both confirm periodic
+  Hello-interval BPDU transmission from an already-converged bridge, but
+  neither exercises a TCN, MSTP, SPB, Proposal/Agreement, or a non-Designated
+  Port Role on real bytes; those paths are validated only against the
+  synthetic `tests/sample_stp.pcap` fixture, whose first two packets
+  reproduce the real captures' own frames byte-for-byte. See
+  tests/real_captures/stp/ATTRIBUTION.md and
+  include/conduitscope/stp.hpp for the full writeup.
 - Non-IPv4 Ethernet frames and non-TCP IPv4 payloads (including UDP) are now
   recognized and named, not just reported as a bare hex/number and dropped:
   ARP, LLDP, PTP, MPLS, and stacked-VLAN (802.1ad/QinQ) EtherTypes; ICMP,
@@ -628,6 +654,15 @@ Groundwork / v0.1.0. What works right now:
   quick file metadata. Text output is colorized (per-protocol tags, red for
   exceptions/parse-errors) when writing to an interactive terminal, or
   forced on/off with `--color`/`--no-color`
+- `decode`-time name resolution: OUI/MAC-vendor lookup against a built-in
+  IEEE-registry-derived table (on by default, `--no-oui` disables it),
+  hostname resolution from an explicitly-supplied `--hosts` file
+  (`--resolve`, file-only -- never live DNS, under any circumstance), and
+  port->service-name lookup from a small curated built-in table plus an
+  optional `--services` file (`--nn` disables it). Every annotation is
+  additive next to the raw MAC/IP/port already decoded, never a
+  replacement for it -- see docs/MANUAL.md's OUTPUT FORMATS "Name
+  resolution" subsection
 - `policy validate`: a zone/conduit policy engine. A policy file (a
   deliberately restricted, dependency-free YAML subset -- no vendored YAML
   library, same zero-dependency approach as everything else here) declares

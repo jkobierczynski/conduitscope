@@ -35,6 +35,7 @@ add_library(conduitscope_core STATIC
   src/goose.cpp
   src/sv.cpp
   src/ethercat.cpp
+  src/stp.cpp
   src/bacnet.cpp
   src/hartip.cpp
   src/ffhse.cpp
@@ -45,6 +46,7 @@ add_library(conduitscope_core STATIC
   src/mms.cpp
   src/mqtt.cpp
   src/decoder.cpp
+  src/resolver.cpp
   src/output.cpp
   src/yaml_mini.cpp
   src/policy.cpp
@@ -1024,7 +1026,7 @@ endforeach()
 add_test(NAME real_goose_f650_sqnum_sequence_decoded
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/goose/goose_ge_f650_retransmissions.pcap" --format text)
 set_tests_properties(real_goose_f650_sqnum_sequence_decoded PROPERTIES
-  PASS_REGULAR_EXPRESSION "sqNum=10[^\n]*\n[^\n]*sqNum=11[^\n]*\n[^\n]*sqNum=12[^\n]*\n[^\n]*sqNum=1 ")
+  PASS_REGULAR_EXPRESSION "sqNum=10.*sqNum=11.*sqNum=12.*sqNum=1 ")
 
 add_test(NAME real_goose_demo_full_fields_vlan_and_multi_byte_integer_decoded
   COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/goose/goose_demo_full_fields.pcap")
@@ -1118,7 +1120,7 @@ set_tests_properties(sv_truncated_header_falls_back_to_non_ip PROPERTIES
 add_test(NAME sv_wrong_outer_tag_falls_back_to_non_ip
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_sv.pcap" --format text)
 set_tests_properties(sv_wrong_outer_tag_falls_back_to_non_ip PROPERTIES
-  PASS_REGULAR_EXPRESSION "non-ip\\][^\n]*\n#11[^\n]*non-ip\\]")
+  PASS_REGULAR_EXPRESSION "non-ip\\][^\n]*\n *eth [^\n]*\n#11[^\n]*non-ip\\]")
 
 add_test(NAME sv_bogus_length_field_falls_back_to_available_bytes
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_sv.pcap" --format text)
@@ -1309,6 +1311,279 @@ add_test(NAME real_ethercat_logical_addressing_lrd_lwr_present
   COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/ethercat/ICS-Ethercat-001.pcap")
 set_tests_properties(real_ethercat_logical_addressing_lrd_lwr_present PROPERTIES
   PASS_REGULAR_EXPRESSION "\"ethercat_first_cmd_name\": \"LRD\"")
+
+# --------------------------------------------------------------------------
+# STP/RSTP/MSTP (synthetic, tests/sample_stp.pcap): the first protocol in this codebase reached
+# via classic IEEE 802.3 length-framed LLC (DSAP=SSAP=0x42, Control=0x03) rather than a DIX
+# EtherType -- see link_layer.hpp's file header for that plumbing, and stp.hpp's file header for
+# the BPDU wire format and every documented deviation/scope decision. Packet numbers in comments
+# below match build_stp_sample()'s own numbered comments 1-30 in tools/make_sample_pcap.py.
+# --------------------------------------------------------------------------
+
+# 1) Classic Configuration BPDU (version 0) -- byte-for-byte reproduction of a real capture frame
+# (see real_stp_plant1_* below), including the 8 bytes of Ethernet minimum-frame-size padding.
+add_test(NAME stp_baseline_config_bpdu_matches_real_capture_frame
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_stp.pcap" --format text)
+set_tests_properties(stp_baseline_config_bpdu_matches_real_capture_frame PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[stp\\]  STP Configuration: Root=32768/80/64:a0:e7:9a:05:80 Cost=4 Bridge=32768/80/64:ae:0c:34:a3:80 Port=0x8083\n *note: 8 trailing byte\\(s\\) after the 802.3 Length field's declared LLC client-data length were trimmed")
+
+# 2) RSTP RST BPDU (version 2) -- byte-for-byte reproduction of a real capture frame (see
+# real_stp_mms_and_goose_* below).
+add_test(NAME stp_baseline_rst_bpdu_matches_real_capture_frame
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_stp.pcap" --format text)
+set_tests_properties(stp_baseline_rst_bpdu_matches_real_capture_frame PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[stp\\]  RSTP BPDU: Root=28672/4095/00:40:15:18:1d:7c Cost=1100 Bridge=32768/0/00:0a:dc:06:19:5c Port=0x8010 Role=Designated \\[Learning\\] \\[Forwarding\\]\n *note: 7 trailing byte\\(s\\)")
+
+# 3-4) TCN BPDU, decoded under both a classic STP (version 0) and an RSTP (version 2) Protocol
+# Version byte -- TCN BPDUs carry no version-specific body, only the version name in the summary
+# differs.
+add_test(NAME stp_tcn_under_stp_version_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_stp.pcap" --format text)
+set_tests_properties(stp_tcn_under_stp_version_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "#3  .*\\[stp\\]  STP Topology Change Notification \\(STP \\(802.1D\\)\\)")
+
+add_test(NAME stp_tcn_under_rstp_version_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_stp.pcap" --format text)
+set_tests_properties(stp_tcn_under_rstp_version_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "#4  .*\\[stp\\]  STP Topology Change Notification \\(RSTP \\(802.1w\\)\\)")
+
+# 5) Classic Configuration BPDU with the Topology Change and Topology Change Acknowledgment flags
+# both set.
+add_test(NAME stp_config_tc_and_tca_flags_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_stp.pcap" --format text)
+set_tests_properties(stp_config_tc_and_tca_flags_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "#5  .*\\[TC\\] \\[TCA\\]")
+
+add_test(NAME stp_config_tc_and_tca_flags_decoded_in_json
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_stp.pcap")
+set_tests_properties(stp_config_tc_and_tca_flags_decoded_in_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"index\": 5,.*\"stp_flags\": 129,.*\"stp_flag_tca\": true,.*\"stp_flag_tc\": true,")
+
+# 6) Configuration BPDU (Type 0x00) under an unusual Protocol Version (2, RSTP's version) --
+# decoded structurally anyway, with a note flagging the unusual combination.
+add_test(NAME stp_config_bpdu_unusual_version_noted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_stp.pcap" --format text)
+set_tests_properties(stp_config_bpdu_unusual_version_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "#6  .*\\[stp\\]  Configuration BPDU \\(version 2\\):.*\n *note: BPDU Type 0x00 \\(Configuration\\) with Protocol Version 2")
+
+# 7) RST/MST-shaped BPDU (Type 0x02) under Protocol Version 0 (STP's version) -- decoded as a
+# plain STP-labeled BPDU with no RST-specific role/flag rendering (Port Role always "Unknown"
+# because the flags byte isn't RST-shaped under version 0).
+add_test(NAME stp_type_0x02_under_stp_version_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_stp.pcap" --format text)
+set_tests_properties(stp_type_0x02_under_stp_version_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "#7  .*\\[stp\\]  STP \\(802.1D\\) BPDU: Root=32768/0/00:1a:2b:3c:4d:5f Cost=0 Bridge=32768/0/00:1a:2b:3c:4d:5f Port=0x8005 Role=Unknown")
+
+# 8-11) RST BPDU Port Role coverage: Root+Proposal, Alternate/Backup+TC+Agreement, Unknown (all
+# role bits clear), Designated+Learning+Forwarding.
+add_test(NAME stp_rst_port_role_root_with_proposal_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_stp.pcap" --format text)
+set_tests_properties(stp_rst_port_role_root_with_proposal_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "#8  .*Root=4096/10/00:1a:2b:3c:4d:5e Cost=200000 Bridge=32768/0/00:1a:2b:3c:4d:5f Port=0x8007 Role=Root \\[Proposal\\]")
+
+add_test(NAME stp_rst_port_role_alternate_backup_with_tc_and_agreement_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_stp.pcap" --format text)
+set_tests_properties(stp_rst_port_role_alternate_backup_with_tc_and_agreement_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "#9  .*Port=0x8009 Role=Alternate/Backup \\[TC\\] \\[Agreement\\]")
+
+add_test(NAME stp_rst_port_role_unknown_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_stp.pcap" --format text)
+set_tests_properties(stp_rst_port_role_unknown_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "#10  .*Port=0x8001 Role=Unknown")
+
+add_test(NAME stp_rst_port_role_designated_learning_forwarding_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_stp.pcap" --format text)
+set_tests_properties(stp_rst_port_role_designated_learning_forwarding_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "#11  .*Port=0x8002 Role=Designated \\[Learning\\] \\[Forwarding\\]")
+
+# 12) MSTP MST BPDU with two MSTI Configuration Messages -- full MST extension: MST Config Name,
+# Revision Level, digest, CIST Bridge Identifier/Remaining Hops, and both MSTI messages' own
+# Regional Root/Cost/Bridge+Port Identifier Priority nibble/Remaining Hops/role+flags.
+add_test(NAME stp_mstp_two_msti_messages_summary_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_stp.pcap" --format text)
+set_tests_properties(stp_mstp_two_msti_messages_summary_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "#12  .*MSTP BPDU: CIST Root=32768/100/00:1a:2b:3c:4d:5e Cost=50 CIST RegionalRoot=32768/100/00:1a:2b:3c:4d:5e Bridge=32768/100/00:1a:2b:3c:4d:5e MSTIs=2")
+
+add_test(NAME stp_mstp_two_msti_messages_full_fields_in_json
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_stp.pcap")
+set_tests_properties(stp_mstp_two_msti_messages_full_fields_in_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"index\": 12,.*\"stp_version_3_length\": 96,.*\"stp_mst_config_name\": \"region-1\",.*\"stp_mst_config_revision_level\": 3,.*\"stp_mst_config_digest\": \"00112233445566778899aabbccddeeff\",.*\"stp_cist_internal_root_path_cost\": 50,.*\"stp_cist_remaining_hops\": 19,.*\"stp_msti_messages\": \\[\"MSTID=10 RegionalRoot=32768/00:1a:2b:3c:4d:5e Cost=20000 BridgePrio=8 PortPrio=8 RemainingHops=20 Role=Designated \\[Learning\\] \\[Forwarding\\]\", \"MSTID=20 RegionalRoot=4096/00:1a:2b:3c:4d:5f Cost=0 BridgePrio=0 PortPrio=0 RemainingHops=20 Role=Unknown\"\\]")
+
+# 13) MSTP MST BPDU with zero MSTI Configuration Messages (Version 3 Length exactly the 64-byte
+# static MST extension header, no MSTI messages appended).
+add_test(NAME stp_mstp_zero_msti_messages_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_stp.pcap" --format text)
+set_tests_properties(stp_mstp_zero_msti_messages_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "#13  .*MSTIs=0")
+
+# 14) Version 3 Length nonzero but less than the 64-byte static MST extension header -- the
+# reference dissector's own Cisco-C3550-firmware work-around: reinterpreted as a COUNT OF
+# MESSAGES rather than bytes.
+add_test(NAME stp_mstp_version3_length_below_64_cisco_workaround_noted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_stp.pcap" --format text)
+set_tests_properties(stp_mstp_version3_length_below_64_cisco_workaround_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "#14  .*MSTIs=2\n *note: Version 3 Length \\(2\\) is nonzero but less than the 64-byte static MST extension header -- treated as a COUNT OF MESSAGES")
+
+# 15) Version 3 Length implies more MSTI bytes than actually remain -- decodes as many whole
+# messages as fit.
+add_test(NAME stp_mstp_partial_msti_bytes_decodes_whole_messages_that_fit
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_stp.pcap" --format text)
+set_tests_properties(stp_mstp_partial_msti_bytes_decodes_whole_messages_that_fit PROPERTIES
+  PASS_REGULAR_EXPRESSION "#15  .*MSTIs=1\n *note: Version 3 Length implies 32 byte\\(s\\) of MSTI Configuration Message\\(s\\) but only 16 byte\\(s\\) remain -- decoding as many whole messages as fit")
+
+# 16) A partial trailing MSTI Configuration Message (fewer than 16 leftover bytes) is left
+# undecoded and its leftover bytes are noted, not silently dropped.
+add_test(NAME stp_mstp_trailing_partial_msti_message_ignored_and_noted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_stp.pcap" --format text)
+set_tests_properties(stp_mstp_trailing_partial_msti_message_ignored_and_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "#16  .*MSTIs=1\n *note: Version 3 Length implies a partial trailing MSTI Configuration Message \\(4 byte\\(s\\) leftover\\) -- not decoded\n *note: 4 byte\\(s\\) remain after the last decoded MSTI Configuration Message -- ignored")
+
+# 17) Protocol Version 3 (MSTP) but too few bytes present for the MST extension's 102-byte
+# minimum -- falls back to a plain RST-shaped decode, matching the reference dissector.
+add_test(NAME stp_mstp_too_short_for_mst_extension_falls_back_to_rst
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_stp.pcap" --format text)
+set_tests_properties(stp_mstp_too_short_for_mst_extension_falls_back_to_rst PROPERTIES
+  PASS_REGULAR_EXPRESSION "#17  .*Port=0x800A Role=Unknown\n *note: Protocol Version 3 but only 36 byte\\(s\\) present \\(need >= 102\\) -- MST extension not attempted, decoded as a plain RST BPDU")
+
+# 18) Protocol Version 3 but Version 1 Length is nonzero -- the MST detection gate's second
+# condition fails, falls back to a plain RST-shaped decode (matches the reference source exactly).
+add_test(NAME stp_mstp_nonzero_version1_length_falls_back_to_rst
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_stp.pcap" --format text)
+set_tests_properties(stp_mstp_nonzero_version1_length_falls_back_to_rst PROPERTIES
+  PASS_REGULAR_EXPRESSION "#18  .*Port=0x800B Role=Unknown\n *note: Protocol Version 3 but Version 1 Length is 5 \\(not 0\\) -- MST extension not attempted, decoded as a plain RST BPDU \\(matches the reference source's own behavior exactly\\)")
+
+# 19) Version 3 Length is 0 (not merely below 64) and the frame's total length matches the
+# legacy/alternative MSTI Configuration Message format's own sizing rule -- named as such, but
+# that alternative format is deliberately not decoded (see stp.hpp for why).
+add_test(NAME stp_mstp_version3_length_zero_alt_format_named_not_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_stp.pcap" --format text)
+set_tests_properties(stp_mstp_version3_length_zero_alt_format_named_not_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "#19  .*MST Config Name=\"\" \\(CIST Bridge Identifier/MSTI not decoded -- Version 3 Length is 0, see notes\\)\n *note: Version 3 Length is 0 and the frame's total length matches the legacy/alternative MSTI Configuration Message format's own sizing rule")
+
+# 20) SPB (802.1aq, Protocol Version 4) -- named-only, not decoded, per this release's explicit
+# scope decision (see stp.hpp).
+add_test(NAME stp_spb_version4_named_only_not_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_stp.pcap" --format text)
+set_tests_properties(stp_spb_version4_named_only_not_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "#20  .*\\[stp\\]  SPB \\(802.1aq\\), not decoded -- out of scope")
+
+# 21-22) STP's own LLC DSAP/SSAP/Control (0x42/0x42/0x03) present, but the payload itself doesn't
+# structurally parse as STP (bad Protocol Identifier; unrecognized BPDU Type) -- falls back to
+# reporting the frame as a generic, unrecognized LLC frame rather than guessing.
+add_test(NAME stp_bad_protocol_identifier_and_bad_bpdu_type_fall_back_to_llc
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_stp.pcap" --format text)
+set_tests_properties(stp_bad_protocol_identifier_and_bad_bpdu_type_fall_back_to_llc PROPERTIES
+  PASS_REGULAR_EXPRESSION "#21  .*\\[non-ip\\]  IEEE 802.3 LLC frame, DSAP=0x42 SSAP=0x42 Control=0x3 \\(length=38\\)\n *eth [^\n]*\n#22  .*\\[non-ip\\]  IEEE 802.3 LLC frame, DSAP=0x42 SSAP=0x42 Control=0x3 \\(length=38\\)")
+
+# 23) Truncated before the common Configuration/RST BPDU body -- reported as truncated with an
+# explanatory note, not decoded further.
+add_test(NAME stp_truncated_before_common_body_noted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_stp.pcap" --format text)
+set_tests_properties(stp_truncated_before_common_body_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "#23  .*\\[stp\\]  Configuration BPDU \\(truncated before the common body\\)\n *note: only 20 byte\\(s\\) present, need 35 for the common Configuration/RST BPDU body")
+
+# 24) Common body present in full, but truncated right after it (no Version 1 Length byte at
+# all) -- decoded as RST-shaped with no trailer.
+add_test(NAME stp_truncated_with_no_version1_length_byte_noted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_stp.pcap" --format text)
+set_tests_properties(stp_truncated_with_no_version1_length_byte_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "#24  .*RST/MST BPDU \\(RSTP \\(802.1w\\)\\): Root=32768/0/00:1a:2b:3c:4d:5e Cost=0 Bridge=32768/0/00:1a:2b:3c:4d:5e \\(truncated -- no Version 1 Length\\)\n *note: Version 1 Length byte \\(offset 35\\) missing")
+
+# 25-28) Out-of-scope/unrecognized LLC traffic that must not crash and must not be misreported as
+# STP: SNAP-encapsulated Cisco PVST+, GARP (GVRP/GMRP, which collides with STP's own DSAP/SSAP and
+# is disambiguated only by destination MAC), an unrelated LLC DSAP/SSAP pair, and a length-framed
+# frame too short for even a 3-byte LLC header.
+add_test(NAME stp_cisco_pvst_plus_named_only_not_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_stp.pcap" --format text)
+set_tests_properties(stp_cisco_pvst_plus_named_only_not_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "#25  .*\\[non-ip\\]  Cisco PVST\\+ \\(SNAP-encapsulated, not decoded\\)")
+
+add_test(NAME stp_garp_disambiguated_by_dest_mac_not_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_stp.pcap" --format text)
+set_tests_properties(stp_garp_disambiguated_by_dest_mac_not_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "#26  .*\\[non-ip\\]  GARP \\(GVRP/GMRP\\) -- shares STP's Bridge Group Address DSAP/SSAP \\(0x42/0x42\\), disambiguated by destination MAC, not decoded")
+
+add_test(NAME stp_unrecognized_llc_dsap_ssap_reported_generically
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_stp.pcap" --format text)
+set_tests_properties(stp_unrecognized_llc_dsap_ssap_reported_generically PROPERTIES
+  PASS_REGULAR_EXPRESSION "#27  .*\\[non-ip\\]  IEEE 802.3 LLC frame, DSAP=0xE0 SSAP=0xE0 Control=0x3 \\(length=13\\)")
+
+add_test(NAME stp_too_short_for_llc_header_does_not_crash
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_stp.pcap" --format text)
+set_tests_properties(stp_too_short_for_llc_header_does_not_crash PROPERTIES
+  PASS_REGULAR_EXPRESSION "#28  .*\\[non-ip\\]  IEEE 802.3 frame, length=5 \\(too short for an LLC header\\)")
+
+# 29-30) The 802.3 Length field itself is implausible (too small to even cover the already-
+# consumed LLC header, or larger than the bytes actually captured) -- parse_ethernet falls back to
+# using whatever bytes are actually present, and the TCN BPDU underneath still decodes correctly
+# either way.
+add_test(NAME stp_implausibly_small_length_field_still_decodes
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_stp.pcap" --format text)
+set_tests_properties(stp_implausibly_small_length_field_still_decodes PROPERTIES
+  PASS_REGULAR_EXPRESSION "#29  .*\\[stp\\]  STP Topology Change Notification \\(STP \\(802.1D\\)\\)")
+
+add_test(NAME stp_length_field_exceeds_captured_bytes_still_decodes
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_stp.pcap" --format text)
+set_tests_properties(stp_length_field_exceeds_captured_bytes_still_decodes PROPERTIES
+  PASS_REGULAR_EXPRESSION "#30  .*\\[stp\\]  STP Topology Change Notification \\(STP \\(802.1D\\)\\)")
+
+# Stats accumulation across the whole synthetic fixture.
+add_test(NAME stp_stats_counted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_stp.pcap" --stats)
+set_tests_properties(stp_stats_counted PROPERTIES
+  PASS_REGULAR_EXPRESSION "stp bpdu types:\n *Configuration +4\n *Rapid/Multiple Spanning Tree +16\n *Topology Change Notification +4\nstp protocol versions:\n *MSTP \\(802.1s\\) +8\n *RSTP \\(802.1w\\) +8\n *SPB \\(802.1aq\\) +1\n *STP \\(802.1D\\) +7\nstp mst bpdus \\(full mst extension decoded\\): 6\nstp msti configuration messages \\(summed across every mst bpdu\\): 6\nstp topology change flag set: 2")
+
+# --------------------------------------------------------------------------
+# Real-world STP/RSTP captures -- see tests/real_captures/stp/ATTRIBUTION.md for provenance.
+# --------------------------------------------------------------------------
+
+# plant1_stp_only.pcap: 42 real classic Configuration BPDUs (version 0), all steady-state, all
+# identical Root/Bridge/Cost/Port, trimmed with `tshark -Y stp -w` from a much larger capture
+# (see ATTRIBUTION.md for why the trim was necessary and how it preserves the original bytes).
+add_test(NAME real_stp_plant1_does_not_crash
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/stp/plant1_stp_only.pcap")
+
+add_test(NAME real_stp_plant1_config_bpdu_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/stp/plant1_stp_only.pcap" --format text)
+set_tests_properties(real_stp_plant1_config_bpdu_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[stp\\]  STP Configuration: Root=32768/80/64:a0:e7:9a:05:80 Cost=4 Bridge=32768/80/64:ae:0c:34:a3:80 Port=0x8083")
+
+add_test(NAME real_stp_plant1_all_42_frames_decoded_as_stp
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/stp/plant1_stp_only.pcap" --stats)
+set_tests_properties(real_stp_plant1_all_42_frames_decoded_as_stp PROPERTIES
+  PASS_REGULAR_EXPRESSION "packets: +42.*protocols:\n *stp +42.*stp bpdu types:\n *Configuration +42")
+
+add_test(NAME real_stp_plant1_padding_trimmed_note_present
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/stp/plant1_stp_only.pcap" --format text)
+set_tests_properties(real_stp_plant1_padding_trimmed_note_present PROPERTIES
+  PASS_REGULAR_EXPRESSION "note: 8 trailing byte\\(s\\) after the 802.3 Length field's declared LLC client-data length were trimmed")
+
+# sample_file_mms_and_goose.pcap: 12 real RSTP RST BPDUs (version 2, steady-state Designated
+# [Learning] [Forwarding] on both bridge ports 0x8010 and 0x8013) mixed in with unrelated
+# MMS/GOOSE/NTP/SMB traffic -- confirms the STP decoder correctly ignores everything else in a
+# realistic, protocol-mixed capture.
+add_test(NAME real_stp_mms_and_goose_does_not_crash
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/stp/sample_file_mms_and_goose.pcap")
+
+add_test(NAME real_stp_mms_and_goose_rst_bpdu_port_8010_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/stp/sample_file_mms_and_goose.pcap" --format text)
+set_tests_properties(real_stp_mms_and_goose_rst_bpdu_port_8010_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[stp\\]  RSTP BPDU: Root=28672/4095/00:40:15:18:1d:7c Cost=1100 Bridge=32768/0/00:0a:dc:06:19:5c Port=0x8010 Role=Designated \\[Learning\\] \\[Forwarding\\]")
+
+add_test(NAME real_stp_mms_and_goose_rst_bpdu_port_8013_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/stp/sample_file_mms_and_goose.pcap" --format text)
+set_tests_properties(real_stp_mms_and_goose_rst_bpdu_port_8013_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[stp\\]  RSTP BPDU: Root=28672/4095/00:40:15:18:1d:7c Cost=1100 Bridge=32768/0/00:0a:dc:06:19:5c Port=0x8013 Role=Designated \\[Learning\\] \\[Forwarding\\]")
+
+add_test(NAME real_stp_mms_and_goose_exactly_12_stp_frames
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/stp/sample_file_mms_and_goose.pcap" --stats)
+set_tests_properties(real_stp_mms_and_goose_exactly_12_stp_frames PROPERTIES
+  PASS_REGULAR_EXPRESSION "stp +12.*stp bpdu types:\n *Rapid/Multiple Spanning Tree +12")
+
+add_test(NAME real_stp_mms_and_goose_json_fields_present
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/stp/sample_file_mms_and_goose.pcap")
+set_tests_properties(real_stp_mms_and_goose_json_fields_present PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"protocol\": \"stp\",.*\"stp_protocol_version_name\": \"RSTP \\(802.1w\\)\",.*\"stp_bpdu_type_name\": \"Rapid/Multiple Spanning Tree\",.*\"stp_root_mac\": \"00:40:15:18:1d:7c\",.*\"stp_bridge_mac\": \"00:0a:dc:06:19:5c\",")
 
 # --------------------------------------------------------------------------
 # BACnet/IP (synthetic, tests/sample_bacnet.pcap): BVLC framing, NPDU network layer, APDU
@@ -1949,7 +2224,7 @@ set_tests_properties(hartip_tcp_pass_through_non_standard_port_decoded PROPERTIE
 add_test(NAME hartip_tcp_coalesced_keep_alive_decoded
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap" --format text)
 set_tests_properties(hartip_tcp_coalesced_keep_alive_decoded PROPERTIES
-  PASS_REGULAR_EXPRESSION "192.168.1.50:52150 -> 192.168.1.10:5094  \\[hartip\\]  Request Keep Alive\n *note: additional HART-IP message 2 found in the same TCP payload at byte offset 8 \\(coalesced by the sender/OS\\): Request Keep Alive")
+  PASS_REGULAR_EXPRESSION "192.168.1.50:52150 -> 192.168.1.10:5094 \\(hart-ip\\)  \\[hartip\\]  Request Keep Alive\n *note: additional HART-IP message 2 found in the same TCP payload at byte offset 8 \\(coalesced by the sender/OS\\): Request Keep Alive")
 
 add_test(NAME hartip_stats_counted
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap" --stats)
@@ -2019,7 +2294,7 @@ set_tests_properties(real_hartip_long_address_used_for_later_commands PROPERTIES
 add_test(NAME real_hartip_modbus_collision_confirmed_on_real_traffic
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/hartip/hart_ip.pcapng" --format text)
 set_tests_properties(real_hartip_modbus_collision_confirmed_on_real_traffic PROPERTIES
-  PASS_REGULAR_EXPRESSION "192.168.0.101:49559 -> 192.168.0.10:5094  \\[modbus\\]  Unknown \\(0xd\\): Unknown \\(0xd\\)[^\n]*\n.*192.168.0.10:5094 -> 192.168.0.101:49559  \\[modbus\\]  Unknown \\(0xd\\): Unknown \\(0xd\\)")
+  PASS_REGULAR_EXPRESSION "192.168.0.101:49559 -> 192.168.0.10:5094 \\(hart-ip\\)  \\[modbus\\]  Unknown \\(0xd\\): Unknown \\(0xd\\)[^\n]*\n.*192.168.0.10:5094 \\(hart-ip\\) -> 192.168.0.101:49559  \\[modbus\\]  Unknown \\(0xd\\): Unknown \\(0xd\\)")
 
 # New (see ATTRIBUTION.md): the weak declared-length gate also false-positives against unrelated
 # background TCP traffic having nothing to do with HART-IP (a TLS connection and an SMB
@@ -2134,7 +2409,7 @@ set_tests_properties(opcua_error_message_decoded PROPERTIES
 add_test(NAME opcua_reverse_hello_decoded
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_opcua.pcap" --format text)
 set_tests_properties(opcua_reverse_hello_decoded PROPERTIES
-  PASS_REGULAR_EXPRESSION "192.168.1.10:4840 -> 192.168.1.50:53100  \\[opcua\\]  ReverseHello server-uri=urn:conduitscope:sample-plc endpoint-url=opc.tcp://192.168.1.10:4840/UA/PLC")
+  PASS_REGULAR_EXPRESSION "192.168.1.10:4840 \\(opcua\\) -> 192.168.1.50:53100  \\[opcua\\]  ReverseHello server-uri=urn:conduitscope:sample-plc endpoint-url=opc.tcp://192.168.1.10:4840/UA/PLC")
 
 add_test(NAME opcua_intermediate_chunk_not_reassembled_noted
   COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_opcua.pcap")
@@ -2159,7 +2434,7 @@ set_tests_properties(opcua_non_standard_port_noted PROPERTIES
 add_test(NAME opcua_coalesced_messages_decoded
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_opcua.pcap" --format text)
 set_tests_properties(opcua_coalesced_messages_decoded PROPERTIES
-  PASS_REGULAR_EXPRESSION "192.168.1.50:53220 -> 192.168.1.10:4840  \\[opcua\\]  Hello.*\n *note: additional OPC UA message 2 found in the same TCP payload at byte offset 66 \\(coalesced by the sender/OS\\): Acknowledge")
+  PASS_REGULAR_EXPRESSION "192.168.1.50:53220 -> 192.168.1.10:4840 \\(opcua\\)  \\[opcua\\]  Hello.*\n *note: additional OPC UA message 2 found in the same TCP payload at byte offset 66 \\(coalesced by the sender/OS\\): Acknowledge")
 
 add_test(NAME opcua_extra_port_option_suppresses_unexpected_port_note
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_opcua.pcap" --format text --opcua-port 51005)
@@ -3556,6 +3831,176 @@ add_test(NAME pcapng_simple_packet_block_decodes
 set_tests_properties(pcapng_simple_packet_block_decodes PROPERTIES
   PASS_REGULAR_EXPRESSION "Read Holding Registers")
 
+# ---------------------------------------------------------------------------------------------
+# Resolver (resolver.hpp/resolver.cpp): OUI (MAC vendor) resolution (on by default, --no-oui),
+# hostname resolution (off by default, --resolve/--hosts, file-only -- never live DNS), and
+# service name resolution (on by default, --nn/--services) -- see decoder.cpp's src_mac/dst_mac
+# gap-fix and output.cpp's TextWriter/JsonWriter/CsvWriter for how these are rendered. All tests
+# below use tests/sample_modbus.pcap, whose two endpoints' MACs (00:0c:29:11:22:33/
+# 00:0c:29:aa:bb:cc) are both in oui_table.gen.hpp's MA-L table as "VMware", and
+# tests/hosts_sample.txt / tests/services_sample.txt (see their own file headers) as the
+# --hosts/--services fixtures.
+# ---------------------------------------------------------------------------------------------
+
+set(RESOLVER_HOSTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/hosts_sample.txt")
+set(RESOLVER_SERVICES "${CMAKE_CURRENT_SOURCE_DIR}/tests/services_sample.txt")
+
+# --- OUI (MAC vendor), on by default --------------------------------------------------------
+
+add_test(NAME resolver_oui_vendor_shown_by_default_text
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --format text)
+set_tests_properties(resolver_oui_vendor_shown_by_default_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "eth 00:0c:29:11:22:33 \\(VMware\\) -> 00:0c:29:aa:bb:cc \\(VMware\\)")
+
+add_test(NAME resolver_oui_vendor_shown_by_default_json
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --format json)
+set_tests_properties(resolver_oui_vendor_shown_by_default_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"src_mac\": \"00:0c:29:11:22:33\",\n *\"dst_mac\": \"00:0c:29:aa:bb:cc\",\n *\"src_mac_vendor\": \"VMware\",\n *\"dst_mac_vendor\": \"VMware\",")
+
+add_test(NAME resolver_no_oui_suppresses_vendor_text
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --no-oui --format text)
+set_tests_properties(resolver_no_oui_suppresses_vendor_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "eth 00:0c:29:11:22:33 -> 00:0c:29:aa:bb:cc\n"
+  FAIL_REGULAR_EXPRESSION "VMware")
+
+add_test(NAME resolver_no_oui_suppresses_vendor_json
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --no-oui --format json)
+set_tests_properties(resolver_no_oui_suppresses_vendor_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"src_mac\": \"00:0c:29:11:22:33\","
+  FAIL_REGULAR_EXPRESSION "_mac_vendor")
+
+# src_mac/dst_mac themselves (the base gap-fix, independent of OUI resolution) are always present
+# for an Ethernet-linktype capture, even with --no-oui -- this is the actual base value, not an
+# annotation, so --no-oui only ever suppresses the vendor name, never the MAC itself.
+add_test(NAME resolver_base_src_dst_mac_always_present_regardless_of_no_oui
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --no-oui --format csv)
+set_tests_properties(resolver_base_src_dst_mac_always_present_regardless_of_no_oui PROPERTIES
+  PASS_REGULAR_EXPRESSION "00:0c:29:11:22:33,00:0c:29:aa:bb:cc,,,")
+
+# --- Hostname resolution, off by default, file-only ------------------------------------------
+
+add_test(NAME resolver_hostname_off_by_default
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --format text)
+set_tests_properties(resolver_hostname_off_by_default PROPERTIES
+  FAIL_REGULAR_EXPRESSION "hmi-01|plc-01")
+
+add_test(NAME resolver_resolve_with_no_hosts_file_is_a_harmless_noop
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --resolve --format text)
+set_tests_properties(resolver_resolve_with_no_hosts_file_is_a_harmless_noop PROPERTIES
+  PASS_REGULAR_EXPRESSION "note: --resolve was given with no --hosts file; hostname resolution has nothing to resolve against"
+  FAIL_REGULAR_EXPRESSION "hmi-01|plc-01|error:")
+
+add_test(NAME resolver_resolve_with_no_hosts_file_noop_note_respects_quiet
+  COMMAND conduitscope --quiet decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --resolve --format text)
+set_tests_properties(resolver_resolve_with_no_hosts_file_noop_note_respects_quiet PROPERTIES
+  FAIL_REGULAR_EXPRESSION "note: --resolve")
+
+add_test(NAME resolver_resolve_with_hosts_file_annotates_matching_ips_text
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --resolve --hosts "${RESOLVER_HOSTS}" --format text)
+set_tests_properties(resolver_resolve_with_hosts_file_annotates_matching_ips_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "192.168.1.50 \\(hmi-01\\):51000 -> 192.168.1.10 \\(plc-01\\):502")
+
+add_test(NAME resolver_resolve_with_hosts_file_annotates_matching_ips_json
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --resolve --hosts "${RESOLVER_HOSTS}" --format json)
+set_tests_properties(resolver_resolve_with_hosts_file_annotates_matching_ips_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"src_hostname\": \"hmi-01\",\n *\"dst_hostname\": \"plc-01\",")
+
+# tests/sample_modbus.pcap's own two addresses are the only ones hosts_sample.txt names; no other
+# IP appears in this capture, so a positive "hostname resolution finds nothing when nothing
+# matches" case is instead covered directly against Resolver's own file-parsing rules by the two
+# duplicate-IP/first-wins fixture lines in hosts_sample.txt (see its own file header) -- exercised
+# implicitly by the assertion above ("plc-01", not "should-never-win", for 192.168.1.10).
+add_test(NAME resolver_hosts_file_first_occurrence_wins_not_last
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --resolve --hosts "${RESOLVER_HOSTS}" --format text)
+set_tests_properties(resolver_hosts_file_first_occurrence_wins_not_last PROPERTIES
+  FAIL_REGULAR_EXPRESSION "should-never-win")
+
+# --- Service name resolution, on by default ---------------------------------------------------
+
+add_test(NAME resolver_service_name_shown_by_default_text
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --format text)
+set_tests_properties(resolver_service_name_shown_by_default_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "192.168.1.10:502 \\(modbus\\)")
+
+add_test(NAME resolver_service_name_shown_by_default_json
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --format json)
+set_tests_properties(resolver_service_name_shown_by_default_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"dst_port_service\": \"modbus\"")
+
+add_test(NAME resolver_nn_suppresses_service_name_text
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --nn --format text)
+set_tests_properties(resolver_nn_suppresses_service_name_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "192.168.1.10:502  \\[modbus\\]"
+  FAIL_REGULAR_EXPRESSION "\\(modbus\\)")
+
+add_test(NAME resolver_nn_suppresses_service_name_json
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --nn --format json)
+set_tests_properties(resolver_nn_suppresses_service_name_json PROPERTIES
+  FAIL_REGULAR_EXPRESSION "_port_service")
+
+# --nn only disables service names -- OUI vendor annotations (an independent, still-default-on
+# lookup) must still appear.
+add_test(NAME resolver_nn_does_not_affect_oui
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --nn --format text)
+set_tests_properties(resolver_nn_does_not_affect_oui PROPERTIES
+  PASS_REGULAR_EXPRESSION "eth 00:0c:29:11:22:33 \\(VMware\\)")
+
+add_test(NAME resolver_services_file_overrides_and_supplements_builtin_table_text
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --services "${RESOLVER_SERVICES}" --format text)
+set_tests_properties(resolver_services_file_overrides_and_supplements_builtin_table_text PROPERTIES
+  # 502/tcp: overridden from the built-in "modbus" to "custom-modbus". 51000/tcp: not in the
+  # built-in table at all, supplemented by the file as "hmi-modbus-client".
+  PASS_REGULAR_EXPRESSION "192.168.1.50:51000 \\(hmi-modbus-client\\) -> 192.168.1.10:502 \\(custom-modbus\\)"
+  FAIL_REGULAR_EXPRESSION "\\(modbus\\)")
+
+add_test(NAME resolver_services_file_overrides_and_supplements_builtin_table_csv
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --services "${RESOLVER_SERVICES}" --format csv)
+set_tests_properties(resolver_services_file_overrides_and_supplements_builtin_table_csv PROPERTIES
+  PASS_REGULAR_EXPRESSION "51000,hmi-modbus-client,192.168.1.10,,502,custom-modbus")
+
+add_test(NAME resolver_services_given_with_nn_is_unused_and_noted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --nn --services "${RESOLVER_SERVICES}" --format text)
+set_tests_properties(resolver_services_given_with_nn_is_unused_and_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "note: --services was given while --nn disables service name resolution"
+  FAIL_REGULAR_EXPRESSION "custom-modbus|hmi-modbus-client")
+
+# --- Combined: every resolution enabled at once, across all three formats --------------------
+
+add_test(NAME resolver_all_enabled_together_text
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --resolve --hosts "${RESOLVER_HOSTS}" --services "${RESOLVER_SERVICES}" --format text)
+set_tests_properties(resolver_all_enabled_together_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "192.168.1.50 \\(hmi-01\\):51000 \\(hmi-modbus-client\\) -> 192.168.1.10 \\(plc-01\\):502 \\(custom-modbus\\)")
+
+add_test(NAME resolver_all_enabled_together_json
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --resolve --hosts "${RESOLVER_HOSTS}" --services "${RESOLVER_SERVICES}" --format json)
+set_tests_properties(resolver_all_enabled_together_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"src_mac_vendor\": \"VMware\",.*\"src_hostname\": \"hmi-01\",.*\"dst_hostname\": \"plc-01\",.*\"src_port_service\": \"hmi-modbus-client\",.*\"dst_port_service\": \"custom-modbus\"")
+
+# --- Bad --hosts/--services paths rejected cleanly at CLI-parse time (CLI::ExistingFile) -----
+
+add_test(NAME resolver_bad_hosts_path_rejected
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --resolve --hosts "${CMAKE_CURRENT_SOURCE_DIR}/tests/does_not_exist_hosts.txt")
+set_tests_properties(resolver_bad_hosts_path_rejected PROPERTIES
+  WILL_FAIL TRUE)
+
+add_test(NAME resolver_bad_services_path_rejected
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --services "${CMAKE_CURRENT_SOURCE_DIR}/tests/does_not_exist_services.txt")
+set_tests_properties(resolver_bad_services_path_rejected PROPERTIES
+  WILL_FAIL TRUE)
+
+# --------------------------------------------------------------------------------------------
+# Gap fix (a necessary, deliberate part of this feature, not scope creep -- see resolver.hpp's
+# file header and docs/MANUAL.md): src_mac/dst_mac are now rendered for EVERY protocol on an
+# Ethernet-linktype capture, not just the raw-Ethernet ones (GOOSE/SV/EtherCAT/PROFINET/STP) whose
+# own MAC-bearing fields (stp_root_mac/etc.) were already shown. sample_enip.pcap is a plain
+# IPv4-based protocol (EtherNet/IP explicit messaging over TCP) that never had any MAC output at
+# all before this feature.
+# --------------------------------------------------------------------------------------------
+
+add_test(NAME resolver_mac_shown_for_plain_ip_protocol_not_just_raw_ethernet
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enip.pcap" --format text)
+set_tests_properties(resolver_mac_shown_for_plain_ip_protocol_not_just_raw_ethernet PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[enip\\].*\n *eth 00:0c:29:11:22:33 \\(VMware\\) -> 00:0c:29:aa:bb:cc \\(VMware\\)")
 
 # ---------------------------------------------------------------------------------------------
 # Colorized text output (output.cpp's TextWriter color_ path; --color/--no-color in cli_main.cpp).

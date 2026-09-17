@@ -41,12 +41,22 @@ std::string csv_escape(const std::string& s) {
 }
 
 namespace {
-std::string endpoint(const DecodedPacket& p, bool src) {
+// Renders one side (src or dst) of a packet's addressing for the text-format headline, with
+// Resolver-provided hostname/service-name annotations appended in parentheses right after the
+// raw value they explain -- never replacing it (see resolver.hpp's file header for why: this is a
+// security/OT tool, ground-truth addresses stay visible always). A lookup MISS adds nothing --
+// no "(unknown)" placeholder -- matching this codebase's existing convention of omitting a field
+// entirely on a negative result rather than noting every miss.
+std::string endpoint(const DecodedPacket& p, bool src, const Resolver& resolver) {
     if (!p.has_ip) return "-";
     std::string ip = src ? p.src_ip : p.dst_ip;
-    if (!p.has_tcp && !p.has_udp) return ip;
+    std::string rendered = ip;
+    if (auto host = resolver.hostname(ip)) rendered += " (" + *host + ")";
+    if (!p.has_tcp && !p.has_udp) return rendered;
     uint16_t port = src ? p.src_port : p.dst_port;
-    return ip + ":" + std::to_string(port);
+    std::string port_str = std::to_string(port);
+    if (auto svc = resolver.service_name(port, p.has_tcp ? "tcp" : "udp")) port_str += " (" + *svc + ")";
+    return rendered + ":" + port_str;
 }
 
 // ANSI SGR (Select Graphic Rendition) escape sequences. Only ever emitted when TextWriter::color_
@@ -85,6 +95,13 @@ const char* protocol_tag_color(const std::string& protocol) {
     if (protocol == "goose") return kBrightGreen;
     if (protocol == "sv") return kBrightMagenta;
     if (protocol == "ethercat") return kBrightYellow;
+    if (protocol == "stp") return kMagenta;  // deliberately shares DNP3's plain magenta -- the two
+                                                // never share a transport/link (STP is classic
+                                                // 802.3 LLC, not IP-based at all), so there is no
+                                                // realistic capture where this collision would
+                                                // actually confuse a reader scanning by eye, the
+                                                // same reasoning FF-HSE's bright red reuse documents
+                                                // above
     if (protocol == "bacnet") return kBrightBlue;
     if (protocol == "hartip") return kBrightWhite;
     if (protocol == "opcua") return kBrightRed;
@@ -121,7 +138,7 @@ void TextWriter::write_packet(const DecodedPacket& p) {
 
     std::ostringstream head;
     head << "#" << p.index << "  " << std::fixed << std::setprecision(6) << p.timestamp << "  "
-         << endpoint(p, true) << " -> " << endpoint(p, false) << "  ";
+         << endpoint(p, true, resolver_) << " -> " << endpoint(p, false, resolver_) << "  ";
     if (color_) head << protocol_tag_color(p.protocol);
     head << "[" << p.protocol << "]";
     if (color_) head << kReset;
@@ -138,6 +155,25 @@ void TextWriter::write_packet(const DecodedPacket& p) {
         if (color_) out_ << kReset;
         out_ << "\n";
     }
+
+    // Every Ethernet-linktype packet carries src_mac/dst_mac regardless of protocol (see
+    // decoder.cpp's Decoder::decode) -- shown here, with OUI vendor annotations, for every
+    // protocol alike, not just the raw-Ethernet ones (GOOSE/SV/EtherCAT/PROFINET/STP) that already
+    // fold their own MAC fields into stp_root_mac/etc. This was a real gap fixed as part of this
+    // feature: OUI resolution is meaningless without first showing the MAC address it annotates.
+    // Printed AFTER any notes (rather than between the summary line and them) so a packet's own
+    // notes -- often matched in tests immediately against the summary line right above them --
+    // stay exactly adjacent to it; this line is purely additive at the end of this packet's block.
+    if (p.has_ethernet) {
+        out_ << "        ";
+        if (color_) out_ << kDim;
+        out_ << "eth " << p.src_mac;
+        if (auto v = resolver_.oui_vendor(p.src_mac)) out_ << " (" << *v << ")";
+        out_ << " -> " << p.dst_mac;
+        if (auto v = resolver_.oui_vendor(p.dst_mac)) out_ << " (" << *v << ")";
+        if (color_) out_ << kReset;
+        out_ << "\n";
+    }
 }
 
 void JsonWriter::begin() { out_ << "[\n"; }
@@ -150,6 +186,46 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
     out_ << "    \"timestamp\": " << std::fixed << std::setprecision(6) << p.timestamp << ",\n";
     out_ << "    \"captured_len\": " << p.captured_len << ",\n";
     out_ << "    \"original_len\": " << p.original_len << ",\n";
+    // Resolver-derived fields (OUI vendor / hostname / service name) and the base src_mac/dst_mac
+    // gap-fix (see resolver.hpp's file header and this feature's own notes) are all grouped in one
+    // block here, right after original_len and before src_ip -- NOT scattered next to each field
+    // they annotate (src_mac next to src_ip, a service name next to its port, etc.), which would
+    // read more naturally but would insert content between fields several existing tests already
+    // match as strictly adjacent (src_port/dst_port/tcp_flags/protocol, and protocol/summary) --
+    // see CMakeLists.txt's hartip_modbus_collision_never_reports_hartip_protocol and
+    // udp_ports_populate_json_and_csv tests. Every field below is present (as a string) or `null`
+    // exactly like src_ip/dst_ip's own existing convention when the base value isn't applicable
+    // (!has_ethernet); every *_vendor/*_hostname/*_service annotation field is OMITTED ENTIRELY on
+    // a lookup miss or when that lookup is disabled, never emitted as null -- see resolver.hpp's
+    // file header for why an annotation is held to a stricter "omit, don't clutter" standard than
+    // a base decoded value.
+    out_ << "    \"src_mac\": " << (p.has_ethernet ? ("\"" + json_escape(p.src_mac) + "\"") : "null") << ",\n";
+    out_ << "    \"dst_mac\": " << (p.has_ethernet ? ("\"" + json_escape(p.dst_mac) + "\"") : "null") << ",\n";
+    if (p.has_ethernet) {
+        if (auto v = resolver_.oui_vendor(p.src_mac)) {
+            out_ << "    \"src_mac_vendor\": \"" << json_escape(*v) << "\",\n";
+        }
+        if (auto v = resolver_.oui_vendor(p.dst_mac)) {
+            out_ << "    \"dst_mac_vendor\": \"" << json_escape(*v) << "\",\n";
+        }
+    }
+    if (p.has_ip) {
+        if (auto h = resolver_.hostname(p.src_ip)) {
+            out_ << "    \"src_hostname\": \"" << json_escape(*h) << "\",\n";
+        }
+        if (auto h = resolver_.hostname(p.dst_ip)) {
+            out_ << "    \"dst_hostname\": \"" << json_escape(*h) << "\",\n";
+        }
+    }
+    if (p.has_tcp || p.has_udp) {
+        std::string proto = p.has_tcp ? "tcp" : "udp";
+        if (auto s = resolver_.service_name(p.src_port, proto)) {
+            out_ << "    \"src_port_service\": \"" << json_escape(*s) << "\",\n";
+        }
+        if (auto s = resolver_.service_name(p.dst_port, proto)) {
+            out_ << "    \"dst_port_service\": \"" << json_escape(*s) << "\",\n";
+        }
+    }
     out_ << "    \"src_ip\": " << (p.has_ip ? ("\"" + json_escape(p.src_ip) + "\"") : "null") << ",\n";
     out_ << "    \"dst_ip\": " << (p.has_ip ? ("\"" + json_escape(p.dst_ip) + "\"") : "null") << ",\n";
     bool has_port = p.has_tcp || p.has_udp;
@@ -356,6 +432,62 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
                 }
                 out_ << "],\n";
             }
+        }
+    }
+    if (p.protocol == "stp") {
+        out_ << "    \"stp_protocol_version\": " << static_cast<unsigned>(p.stp_protocol_version) << ",\n";
+        out_ << "    \"stp_protocol_version_name\": \"" << json_escape(p.stp_protocol_version_name) << "\",\n";
+        out_ << "    \"stp_bpdu_type\": " << static_cast<unsigned>(p.stp_bpdu_type) << ",\n";
+        out_ << "    \"stp_bpdu_type_name\": \"" << json_escape(p.stp_bpdu_type_name) << "\",\n";
+        out_ << "    \"stp_is_tcn\": " << (p.stp_is_tcn ? "true" : "false") << ",\n";
+        out_ << "    \"stp_is_spb\": " << (p.stp_is_spb ? "true" : "false") << ",\n";
+        if (p.stp_has_common_body) {
+            out_ << "    \"stp_flags\": " << static_cast<unsigned>(p.stp_flags) << ",\n";
+            out_ << "    \"stp_flag_tca\": " << (p.stp_flag_tca ? "true" : "false") << ",\n";
+            out_ << "    \"stp_flag_agreement\": " << (p.stp_flag_agreement ? "true" : "false") << ",\n";
+            out_ << "    \"stp_flag_forwarding\": " << (p.stp_flag_forwarding ? "true" : "false") << ",\n";
+            out_ << "    \"stp_flag_learning\": " << (p.stp_flag_learning ? "true" : "false") << ",\n";
+            out_ << "    \"stp_flag_port_role\": \"" << json_escape(p.stp_flag_port_role_name) << "\",\n";
+            out_ << "    \"stp_flag_proposal\": " << (p.stp_flag_proposal ? "true" : "false") << ",\n";
+            out_ << "    \"stp_flag_tc\": " << (p.stp_flag_tc ? "true" : "false") << ",\n";
+            out_ << "    \"stp_root_priority\": " << p.stp_root_priority << ",\n";
+            out_ << "    \"stp_root_sys_id_ext\": " << p.stp_root_sys_id_ext << ",\n";
+            out_ << "    \"stp_root_mac\": \"" << json_escape(p.stp_root_mac) << "\",\n";
+            out_ << "    \"stp_root_path_cost\": " << p.stp_root_path_cost << ",\n";
+            out_ << "    \"stp_bridge_priority\": " << p.stp_bridge_priority << ",\n";
+            out_ << "    \"stp_bridge_sys_id_ext\": " << p.stp_bridge_sys_id_ext << ",\n";
+            out_ << "    \"stp_bridge_mac\": \"" << json_escape(p.stp_bridge_mac) << "\",\n";
+            out_ << "    \"stp_port_priority\": " << p.stp_port_priority << ",\n";
+            out_ << "    \"stp_port_number\": " << p.stp_port_number << ",\n";
+            out_ << "    \"stp_message_age\": " << std::fixed << std::setprecision(3) << p.stp_message_age << ",\n";
+            out_ << "    \"stp_max_age\": " << std::fixed << std::setprecision(3) << p.stp_max_age << ",\n";
+            out_ << "    \"stp_hello_time\": " << std::fixed << std::setprecision(3) << p.stp_hello_time << ",\n";
+            out_ << "    \"stp_forward_delay\": " << std::fixed << std::setprecision(3) << p.stp_forward_delay << ",\n";
+            out_ << "    \"stp_has_version1\": " << (p.stp_has_version1 ? "true" : "false") << ",\n";
+            if (p.stp_has_version1) {
+                out_ << "    \"stp_version_1_length\": " << static_cast<unsigned>(p.stp_version_1_length) << ",\n";
+            }
+            out_ << "    \"stp_is_mstp\": " << (p.stp_is_mstp ? "true" : "false") << ",\n";
+            if (p.stp_is_mstp) {
+                out_ << "    \"stp_version_3_length\": " << p.stp_version_3_length << ",\n";
+                out_ << "    \"stp_mst_config_name\": \"" << json_escape(p.stp_mst_config_name) << "\",\n";
+                out_ << "    \"stp_mst_config_revision_level\": " << p.stp_mst_config_revision_level << ",\n";
+                out_ << "    \"stp_mst_config_digest\": \"" << json_escape(p.stp_mst_config_digest_hex) << "\",\n";
+                out_ << "    \"stp_cist_internal_root_path_cost\": " << p.stp_cist_internal_root_path_cost << ",\n";
+                out_ << "    \"stp_cist_bridge_priority\": " << p.stp_cist_bridge_priority << ",\n";
+                out_ << "    \"stp_cist_bridge_sys_id_ext\": " << p.stp_cist_bridge_sys_id_ext << ",\n";
+                out_ << "    \"stp_cist_bridge_mac\": \"" << json_escape(p.stp_cist_bridge_mac) << "\",\n";
+                out_ << "    \"stp_cist_remaining_hops\": " << static_cast<unsigned>(p.stp_cist_remaining_hops) << ",\n";
+                if (!p.stp_msti_messages.empty()) {
+                    out_ << "    \"stp_msti_messages\": [";
+                    for (size_t i = 0; i < p.stp_msti_messages.size(); ++i) {
+                        if (i != 0) out_ << ", ";
+                        out_ << "\"" << json_escape(p.stp_msti_messages[i]) << "\"";
+                    }
+                    out_ << "],\n";
+                }
+            }
+            out_ << "    \"stp_is_alt_msti_format\": " << (p.stp_is_alt_msti_format ? "true" : "false") << ",\n";
         }
     }
     if (p.protocol == "bacnet") {
@@ -760,7 +892,9 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
 void JsonWriter::end() { out_ << (wrote_any_ ? "\n]\n" : "]\n"); }
 
 void CsvWriter::begin() {
-    out_ << "index,timestamp,src_ip,src_port,dst_ip,dst_port,protocol,summary,notes\n";
+    out_ << "index,timestamp,src_mac,dst_mac,src_mac_vendor,dst_mac_vendor,src_ip,src_hostname,"
+            "src_port,src_port_service,dst_ip,dst_hostname,dst_port,dst_port_service,protocol,"
+            "summary,notes\n";
 }
 
 void CsvWriter::write_packet(const DecodedPacket& p) {
@@ -770,10 +904,35 @@ void CsvWriter::write_packet(const DecodedPacket& p) {
         notes << p.notes[i];
     }
     bool has_port = p.has_tcp || p.has_udp;
+    std::string proto = p.has_tcp ? "tcp" : "udp";
+
+    // Same "annotation, empty string on a miss/disabled, never a placeholder" convention as the
+    // text/JSON writers -- see resolver.hpp's file header. src_mac/dst_mac themselves (the base
+    // gap-fix, not a resolver annotation) are empty only when !has_ethernet, matching how src_ip/
+    // dst_ip/src_port/dst_port already render empty when their own has_ip/has_tcp/has_udp is false.
+    std::string src_mac_vendor, dst_mac_vendor, src_hostname, dst_hostname, src_port_service,
+        dst_port_service;
+    if (p.has_ethernet) {
+        if (auto v = resolver_.oui_vendor(p.src_mac)) src_mac_vendor = *v;
+        if (auto v = resolver_.oui_vendor(p.dst_mac)) dst_mac_vendor = *v;
+    }
+    if (p.has_ip) {
+        if (auto h = resolver_.hostname(p.src_ip)) src_hostname = *h;
+        if (auto h = resolver_.hostname(p.dst_ip)) dst_hostname = *h;
+    }
+    if (has_port) {
+        if (auto s = resolver_.service_name(p.src_port, proto)) src_port_service = *s;
+        if (auto s = resolver_.service_name(p.dst_port, proto)) dst_port_service = *s;
+    }
+
     out_ << p.index << ',' << std::fixed << std::setprecision(6) << p.timestamp << ','
-         << (p.has_ip ? csv_escape(p.src_ip) : "") << ',' << (has_port ? std::to_string(p.src_port) : "")
-         << ',' << (p.has_ip ? csv_escape(p.dst_ip) : "") << ','
-         << (has_port ? std::to_string(p.dst_port) : "") << ',' << csv_escape(p.protocol) << ','
+         << (p.has_ethernet ? csv_escape(p.src_mac) : "") << ','
+         << (p.has_ethernet ? csv_escape(p.dst_mac) : "") << ',' << csv_escape(src_mac_vendor) << ','
+         << csv_escape(dst_mac_vendor) << ',' << (p.has_ip ? csv_escape(p.src_ip) : "") << ','
+         << csv_escape(src_hostname) << ',' << (has_port ? std::to_string(p.src_port) : "") << ','
+         << csv_escape(src_port_service) << ',' << (p.has_ip ? csv_escape(p.dst_ip) : "") << ','
+         << csv_escape(dst_hostname) << ',' << (has_port ? std::to_string(p.dst_port) : "") << ','
+         << csv_escape(dst_port_service) << ',' << csv_escape(p.protocol) << ','
          << csv_escape(p.summary) << ',' << csv_escape(notes.str()) << "\n";
 }
 
@@ -816,6 +975,15 @@ void StatsWriter::write_packet(const DecodedPacket& p) {
     if (p.protocol == "ethercat") {
         ethercat_frame_type_counts_[p.ethercat_frame_type_name]++;
         ethercat_datagram_total_ += p.ethercat_datagram_count;
+    }
+    if (p.protocol == "stp") {
+        stp_bpdu_type_counts_[p.stp_bpdu_type_name]++;
+        stp_protocol_version_counts_[p.stp_protocol_version_name]++;
+        if (p.stp_is_mstp) {
+            stp_mstp_count_++;
+            stp_msti_total_ += p.stp_msti_messages.size();
+        }
+        if (p.stp_has_common_body && p.stp_flag_tc) stp_tc_count_++;
     }
     if (p.protocol == "bacnet") {
         bacnet_bvlc_function_counts_[p.bacnet_bvlc_function]++;
@@ -946,6 +1114,19 @@ void StatsWriter::print_summary(std::ostream& out) const {
             out << "  " << std::left << std::setw(40) << name << count << "\n";
         }
         out << "ethercat datagrams (summed across every frame): " << ethercat_datagram_total_ << "\n";
+    }
+    if (!stp_bpdu_type_counts_.empty()) {
+        out << "stp bpdu types:\n";
+        for (const auto& [name, count] : stp_bpdu_type_counts_) {
+            out << "  " << std::left << std::setw(40) << name << count << "\n";
+        }
+        out << "stp protocol versions:\n";
+        for (const auto& [name, count] : stp_protocol_version_counts_) {
+            out << "  " << std::left << std::setw(40) << name << count << "\n";
+        }
+        out << "stp mst bpdus (full mst extension decoded): " << stp_mstp_count_ << "\n";
+        out << "stp msti configuration messages (summed across every mst bpdu): " << stp_msti_total_ << "\n";
+        out << "stp topology change flag set: " << stp_tc_count_ << "\n";
     }
     if (!bacnet_bvlc_function_counts_.empty()) {
         out << "bacnet bvlc functions:\n";
