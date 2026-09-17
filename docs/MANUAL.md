@@ -678,13 +678,17 @@ each protocol's own header) enumerate them:
 - **S7comm** (12): CPU services, Read Var, Write Var, Request Download,
   Download Block, Download Ended, Start Upload, Upload, End Upload, PLC
   Control, PLC Stop, Setup Communication
-- **IEC 60870-5-104** (30, the short ASDU mnemonic -- matched against
+- **IEC 60870-5-104** (51, the short ASDU mnemonic -- matched against
   `iec104_asdu_type_short_name`, not `iec104_asdu_type_name`): M_SP_NA_1,
-  M_SP_TA_1, M_SP_TB_1, M_DP_NA_1, M_DP_TA_1, M_DP_TB_1, M_ME_NA_1,
-  M_ME_TD_1, M_ME_NB_1, M_ME_TE_1, M_ME_NC_1, M_ME_TF_1, M_IT_NA_1,
-  M_IT_TB_1, C_SC_NA_1, C_SC_TA_1, C_DC_NA_1, C_DC_TA_1, C_RC_NA_1,
-  C_SE_NA_1, C_SE_TA_1, C_SE_NB_1, C_SE_NC_1, C_SE_TC_1, M_EI_NA_1,
-  C_IC_NA_1, C_CI_NA_1, C_RD_NA_1, C_CS_NA_1, C_RP_NA_1
+  M_SP_TA_1, M_SP_TB_1, M_DP_NA_1, M_DP_TA_1, M_DP_TB_1, M_ST_NA_1,
+  M_ST_TA_1, M_ST_TB_1, M_BO_NA_1, M_BO_TA_1, M_BO_TB_1, M_ME_NA_1,
+  M_ME_TD_1, M_ME_TA_1, M_ME_NB_1, M_ME_TE_1, M_ME_TB_1, M_ME_NC_1,
+  M_ME_TF_1, M_ME_TC_1, M_ME_ND_1, M_IT_NA_1, M_IT_TB_1, M_IT_TA_1,
+  C_SC_NA_1, C_SC_TA_1, C_DC_NA_1, C_DC_TA_1, C_RC_NA_1, C_RC_TA_1,
+  C_SE_NA_1, C_SE_TA_1, C_SE_NB_1, C_SE_TB_1, C_SE_NC_1, C_SE_TC_1,
+  C_BO_NA_1, C_BO_TA_1, M_EI_NA_1, C_IC_NA_1, C_CI_NA_1, C_RD_NA_1,
+  C_CS_NA_1, C_RP_NA_1, C_CD_NA_1, C_TS_TA_1, P_ME_NA_1, P_ME_NB_1,
+  P_ME_NC_1, P_AC_NA_1
 - **EtherNet/IP** (31): Read_Tag, Write_Tag, Read_Modify_Write_Tag,
   Read_Tag_Fragmented, Write_Tag_Fragmented, Get_Instance_Attribute_List,
   Unconnected_Send, Forward_Open, Forward_Close, Large_Forward_Open,
@@ -3703,21 +3707,42 @@ dominate real traffic (see the type-ID coverage that shaped this table in
   enum), plus quality flags (`BL` blocked, `SB` substituted, `NT` not
   topical, `IV` invalid) shared with the state byte, and a CP24Time2a or
   CP56Time2a time tag for the `_TA_`/`_TB_` variants that carry one.
+- **Step position information** (types 5/6/32): the transducer position as a
+  signed 7-bit two's-complement value (`-64..+63`) plus a Transient (`T`)
+  flag for a mid-transit reading, a QDS quality byte (the same
+  `BL`/`SB`/`NT`/`IV`/`OV` flags measured values use -- VTI/QDS is a layout
+  the spec itself shares between step position and measured values), and a
+  time tag for the `_TA_`/`_TB_` variants.
+- **Bitstring of 32 bit, monitoring and command** (types 7/8/33 monitoring,
+  51/64 command): the raw 32-bit pattern rendered as an 8-hex-digit value
+  (e.g. `0xDEADBEEF`) -- there's no further per-bit semantic decode without
+  point-specific documentation of what each bit means, so the pattern is
+  shown as-is rather than guessed at. The monitoring variants add a QDS
+  quality byte and a time tag for `_TA_`/`_TB_`; the command variant adds
+  only a time tag (`_TA_`) since a BSI command carries no quality byte.
 - **Measured values -- normalized, scaled, and short-floating-point** (types
-  9/34, 11/35, 13/36): the decoded value (normalized values also show the
-  `-1..+1`-range fraction alongside the raw 16-bit integer), quality flags
-  (adding `OV` overflow, measured-values-only), and a time tag for the
-  `_T_` variants.
-- **Integrated totals** (types 15/37): the 32-bit counter value, its 5-bit
-  sequence number, and the `CY`(carry)/`CA`(adjusted)/`IV`(invalid) quality
-  bits, plus a time tag for the `_TB_` variant.
-- **Single, double, and regulating-step commands** (types 45/58, 46/59, 47),
-  and **set-point commands -- normalized, scaled, and short-floating-point**
-  (types 48/61, 49, 50/63) -- the object used to issue control actions, so
-  getting this one right matters more than most: the command state
-  (ON/OFF, step up/down, or the set-point value), the 5-bit qualifier
-  (no additional definition / short pulse / long pulse / persistent
-  output), the Select/Execute bit, and a time tag for the `_T_` variants.
+  9/34/10, 11/35/12, 13/36/14): the decoded value (normalized values also
+  show the `-1..+1`-range fraction alongside the raw 16-bit integer),
+  quality flags (adding `OV` overflow, shared with step position and
+  bitstring above), and a time tag for every `_T_` variant -- both the
+  original CP56Time2a-tagged ones (34/35/36) and the CP24Time2a-tagged ones
+  (10/12/14) that fill the gap between the untagged and CP56Time2a-tagged
+  forms. **M_ME_ND_1** (type 21) is the one exception worth calling out
+  separately: it's the normalized value with no QDS quality byte at all --
+  genuinely absent from the wire, not just unread -- so its decoded value
+  carries no quality flags.
+- **Integrated totals** (types 15/37/16): the 32-bit counter value, its
+  5-bit sequence number, and the `CY`(carry)/`CA`(adjusted)/`IV`(invalid)
+  quality bits, plus a time tag for the CP56Time2a-tagged `_TB_` variant and
+  the CP24Time2a-tagged `_TA_` variant.
+- **Single, double, and regulating-step commands** (types 45/58, 46/59,
+  47/60), and **set-point commands -- normalized, scaled, and
+  short-floating-point** (types 48/61, 49/62, 50/63) -- the object used to
+  issue control actions, so getting this one right matters more than most:
+  the command state (ON/OFF, step up/down, or the set-point value), the
+  5-bit qualifier (no additional definition / short pulse / long pulse /
+  persistent output), the Select/Execute bit, and a time tag for every
+  `_T_` variant.
 - **End of initialization** (type 70): the cause (local power switch on,
   local manual reset, remote reset) and whether parameters changed.
 - **General interrogation** (type 100): station (general) interrogation vs.
@@ -3725,6 +3750,20 @@ dominate real traffic (see the type-ID coverage that shaped this table in
 - **Clock synchronization** (type 103): the CP56Time2a timestamp being set.
 - **Reset process** (type 105): general reset vs. reset of pending
   time-tagged information.
+- **Delay acquisition command** (type 106): a plain millisecond delay
+  value -- no qualifier byte, unlike most other command types.
+- **Test command with time tag** (type 107): the 16-bit test sequence
+  number (shown as hex) and its CP56Time2a timestamp; the untagged
+  original, C_TS_NA_1 (type 104), is deliberately not decoded -- see below.
+- **Parameter of measured value -- normalized, scaled, and
+  short-floating-point** (types 110/111/112), and **parameter activation**
+  (type 113): the same value formats as the corresponding measured-value
+  types, plus a QPM qualifier byte for 110-112 (KPA "kind of parameter" --
+  threshold value / smoothing factor / low limit / high limit for
+  transmission, LPC "local parameter change", POP "parameter operation"),
+  or a QPA qualifier for 113 (act/deact of previously loaded parameters, of
+  the addressed object's own parameter, or of persistent cyclic/periodic
+  transmission of the addressed object).
 
 The SIQ/DIQ/QDS quality-bit layout, the SCO/DCO/RCO command-byte layout, and
 the CP24Time2a/CP56Time2a time-tag layout are cross-checked against
@@ -3735,6 +3774,28 @@ its information objects, which aren't skipped-and-shown the way an
 unrecognized DNP3 group/variation is (an ASDU has only one type ID for its
 whole object list, so there's no "later header" whose alignment needs
 preserving the way DNP3's per-header skip does).
+
+**Deliberately not decoded, as a scope decision rather than an oversight:**
+the protection-equipment event types (M_EP_TA_1/TB_1/TC_1 and their
+CP56Time2a-tagged M_EP_TD_1/TE_1/TF_1 counterparts) pack several named
+sub-fields -- event state, start/trip phase indicators, output circuit
+indicators -- into a single SEP/SPE/OCI/QDP byte each, and this project
+holds a higher confidence bar for anything describing a protection relay's
+trip/event semantics than could be independently verified this round;
+M_PS_NA_1 (packed single-point information with status change detection)
+was left out for the same reason, since its SCD field packs 16 points'
+current state and 16 points' change-detected flags into 4 bytes whose
+bit-to-point ordering wasn't independently verified either. The
+file-transfer ASDU type group (F_FR_NA_1 through F_SC_NB_1) is a different
+kind of gap: file transfer is inherently a multi-frame, stateful exchange --
+directory listing, section-by-section segment transfer, acknowledgements --
+which doesn't fit this decoder's deliberately stateless one-ASDU-at-a-time
+design, so it would need a redesign rather than another case in the decode
+table, left for a future round if it's ever needed. Finally, C_TS_NA_1, the
+original un-time-tagged test command, was skipped because C_TS_TA_1 (its
+CP56Time2a-tagged successor, which this decoder does decode) supersedes it
+in every real deployment and the standard itself deprecates 104 in favor of
+107.
 
 Validated against three independent real IEC 104 stacks' actual wire
 encodings: the Wireshark wiki's own sample capture (a clean TESTFR/STARTDT
@@ -3749,6 +3810,44 @@ negative activation confirmation. See
 `tests/real_captures/iec104/ATTRIBUTION.md` for exact provenance. None of
 these captures happened to split an APDU across a TCP segment boundary, so
 that path (see LIMITATIONS) remains untested against real traffic.
+
+**Worked example.** `tests/sample_iec104_extended_types.pcap` exercises all
+21 of the newly-decoded type IDs, one spontaneous report or activation
+each. Two of them, decoded with `decode --format json`: a step-position
+report (type 5) and a parameter-of-measured-value activation (type 110):
+
+```sh
+$ conduitscope decode --format json --read tests/sample_iec104_extended_types.pcap
+[
+  ...
+  {
+    "summary": "I-format N(S)=0 N(R)=0; M_ST_NA_1 (Step position information) COT=spontaneous CASDU=1 objects=1",
+    "iec104_asdu_type": "M_ST_NA_1 (Step position information)",
+    "iec104_asdu_type_short": "M_ST_NA_1",
+    "iec104_cot": "spontaneous",
+    "iec104_common_address": 1,
+    "iec104_objects": ["ioa=500: position=-10 [T]"],
+    ...
+  },
+  ...
+  {
+    "summary": "I-format N(S)=6 N(R)=11; P_ME_NA_1 (Parameter of measured value, normalized value) COT=activation CASDU=1 objects=1",
+    "iec104_asdu_type": "P_ME_NA_1 (Parameter of measured value, normalized value)",
+    "iec104_asdu_type_short": "P_ME_NA_1",
+    "iec104_cot": "activation",
+    "iec104_common_address": 1,
+    "iec104_objects": ["ioa=900: 16384 (0.5000) KPA=1 (threshold value) [LPC]"],
+    ...
+  },
+  ...
+]
+```
+
+`ioa=500: position=-10 [T]` is a tap-changer-style transducer caught
+mid-transit (the `T` flag) at position -10; `ioa=900: 16384 (0.5000)
+KPA=1 (threshold value) [LPC]` is a remote parameter-setting activation
+changing IOA 900's threshold-value parameter to 16384 (0.5 in the
+`-1..+1` normalized range), itself flagged as a local parameter change.
 
 ### EtherNet/IP (CIP explicit messaging, TCP port 44818; CIP I/O implicit messaging, UDP port 2222)
 
@@ -7474,16 +7573,23 @@ Rough order, each building on the groundwork this release establishes:
    (e.g. "any of these three zones may reach this one"), if real policy
    files turn out to want that instead of one conduit per zone pair -- kept
    off the schema for now rather than guessed at ahead of a real use case.
-7. **Extend IEC 104's information-element decode table** to the type IDs it
-   currently only structurally recognizes (ASDU header decoded, objects
-   not) -- step position (types 5/32), bitstring (types 7/33), packed
-   single-point-with-status-change-detection, parameter-setting commands,
-   file transfer, and full counter-interrogation (type 101)/read (102)
-   command decoding. The Wireshark wiki sample capture's general
-   interrogation response happens to cycle through several of these (see
-   `tests/real_captures/iec104/ATTRIBUTION.md`), so real-traffic validation
-   for at least step position and bitstring is already sitting there,
-   waiting on the decode table catching up.
+7. ~~Extend IEC 104's information-element decode table~~ to step position
+   (types 5/6/32) and bitstring of 32 bit (types 7/8/33, command 51/64) --
+   **done**, along with 17 more type IDs in the same pass: the
+   CP24Time2a-tagged measured-value/integrated-totals variants (10/12/14/
+   16), the normalized-value-without-quality-descriptor variant (21),
+   time-tagged regulating-step and scaled-setpoint commands (60/62), delay
+   acquisition (106), the time-tagged test command (107), and
+   parameter-of-measured-value/parameter-activation (110/111/112/113). See
+   PROTOCOL COVERAGE's IEC 60870-5-104 section for the full list and its
+   own paragraph on what's deliberately still excluded (the
+   protection-equipment event types, M_PS_NA_1 packed single-point with
+   status change detection, file transfer, and C_TS_NA_1). Still open and
+   not separately tracked as its own roadmap item: full counter-
+   interrogation (type 101)/read (102) command decoding -- both are
+   recognized, named type IDs, but their information elements aren't
+   value-decoded yet, the same "structurally located, not value-decoded"
+   state every still-unlisted type ID gets.
 8. **Extend EtherNet/IP's CIP value decoding to STRING/SHORT_STRING and
    structured (UDT/array) elementary types** -- currently shown as raw hex
    with an explicit note (see PROTOCOL COVERAGE and LIMITATIONS). The

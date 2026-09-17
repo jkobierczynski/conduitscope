@@ -161,12 +161,18 @@ Groundwork / v0.1.0. What works right now:
 - Full IEC 60870-5-104 decoding: APCI framing (I/S/U-format, sequence
   numbers, STARTDT/STOPDT/TESTFR act/con), and, for I-format APDUs, the
   ASDU -- type ID, cause of transmission, common/station address, and every
-  information object's address and value, for the type IDs that dominate
-  real traffic: single/double-point, measured values (normalized/scaled/
-  short-float, each with and without a CP24Time2a/CP56Time2a time tag),
-  integrated totals, single/double/regulating-step commands and set-point
-  commands, end-of-initialization, general interrogation, clock sync, and
-  reset process. Unlike DNP3, one I-format APDU always carries exactly one
+  information object's address and value, for 51 type IDs covering the
+  traffic that dominates real IEC 104 sessions: single/double-point, step
+  position, bitstring-of-32-bit, measured values (normalized/scaled/
+  short-float, each with and without a CP24Time2a/CP56Time2a time tag, plus
+  the normalized-without-quality-descriptor variant), integrated totals,
+  single/double/regulating-step commands, bitstring commands, and set-point
+  commands, delay acquisition, end-of-initialization, general interrogation,
+  clock sync, reset process, test command, and parameter loading/activation.
+  Deliberately not decoded: protection-equipment event types, packed
+  single-point with status change detection, and file transfer -- see
+  docs/MANUAL.md's PROTOCOL COVERAGE for why. Unlike DNP3, one I-format
+  APDU always carries exactly one
   complete ASDU, so no cross-frame application-fragment reassembly is
   needed -- only the same TCP-segment-level PDU reassembly every protocol
   here gets (see below). IEC 104 detection runs *before* Modbus in
@@ -712,7 +718,9 @@ Groundwork / v0.1.0. What works right now:
   deliberately restricted, dependency-free YAML subset -- no vendored YAML
   library, same zero-dependency approach as everything else here) declares
   zones (IPv4 CIDR blocks) and conduits (an allowed protocol+port
-  relationship, in a given direction, between two zones), optionally
+  relationship, in a given direction, from a set of one or more zones to
+  another set of one or more zones -- many-to-many, not just one zone to
+  one zone), optionally
   narrowed with `functions:` to only certain named functions/services
   within a conduit's one protocol (e.g. Modbus reads but not writes) --
   matched against the exact function/service name strings each protocol's

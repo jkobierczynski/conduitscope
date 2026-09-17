@@ -48,30 +48,51 @@ constexpr Iec104TypeEntry kIec104Types[] = {
     {3, "M_DP_NA_1", "Double-point information"},
     {4, "M_DP_TA_1", "Double-point information with time tag"},
     {31, "M_DP_TB_1", "Double-point information with time tag CP56Time2a"},
+    {5, "M_ST_NA_1", "Step position information"},
+    {6, "M_ST_TA_1", "Step position information with time tag"},
+    {32, "M_ST_TB_1", "Step position information with time tag CP56Time2a"},
+    {7, "M_BO_NA_1", "Bitstring of 32 bit"},
+    {8, "M_BO_TA_1", "Bitstring of 32 bit with time tag"},
+    {33, "M_BO_TB_1", "Bitstring of 32 bit with time tag CP56Time2a"},
     {9, "M_ME_NA_1", "Measured value, normalized value"},
     {34, "M_ME_TD_1", "Measured value, normalized value with time tag CP56Time2a"},
+    {10, "M_ME_TA_1", "Measured value, normalized value with time tag"},
     {11, "M_ME_NB_1", "Measured value, scaled value"},
     {35, "M_ME_TE_1", "Measured value, scaled value with time tag CP56Time2a"},
+    {12, "M_ME_TB_1", "Measured value, scaled value with time tag"},
     {13, "M_ME_NC_1", "Measured value, short floating point"},
     {36, "M_ME_TF_1", "Measured value, short floating point with time tag CP56Time2a"},
+    {14, "M_ME_TC_1", "Measured value, short floating point with time tag"},
+    {21, "M_ME_ND_1", "Measured value, normalized value without quality descriptor"},
     {15, "M_IT_NA_1", "Integrated totals"},
     {37, "M_IT_TB_1", "Integrated totals with time tag CP56Time2a"},
+    {16, "M_IT_TA_1", "Integrated totals with time tag"},
     {45, "C_SC_NA_1", "Single command"},
     {58, "C_SC_TA_1", "Single command with time tag CP56Time2a"},
     {46, "C_DC_NA_1", "Double command"},
     {59, "C_DC_TA_1", "Double command with time tag CP56Time2a"},
     {47, "C_RC_NA_1", "Regulating step command"},
+    {60, "C_RC_TA_1", "Regulating step command with time tag CP56Time2a"},
     {48, "C_SE_NA_1", "Set point command, normalized value"},
     {61, "C_SE_TA_1", "Set point command, normalized value with time tag CP56Time2a"},
     {49, "C_SE_NB_1", "Set point command, scaled value"},
+    {62, "C_SE_TB_1", "Set point command, scaled value with time tag CP56Time2a"},
     {50, "C_SE_NC_1", "Set point command, short floating point"},
     {63, "C_SE_TC_1", "Set point command, short floating point with time tag CP56Time2a"},
+    {51, "C_BO_NA_1", "Bitstring of 32 bit command"},
+    {64, "C_BO_TA_1", "Bitstring of 32 bit command with time tag CP56Time2a"},
     {70, "M_EI_NA_1", "End of initialization"},
     {100, "C_IC_NA_1", "Interrogation command"},
     {101, "C_CI_NA_1", "Counter interrogation command"},
     {102, "C_RD_NA_1", "Read command"},
     {103, "C_CS_NA_1", "Clock synchronization command"},
     {105, "C_RP_NA_1", "Reset process command"},
+    {106, "C_CD_NA_1", "Delay acquisition command"},
+    {107, "C_TS_TA_1", "Test command with time tag CP56Time2a"},
+    {110, "P_ME_NA_1", "Parameter of measured value, normalized value"},
+    {111, "P_ME_NB_1", "Parameter of measured value, scaled value"},
+    {112, "P_ME_NC_1", "Parameter of measured value, short floating point"},
+    {113, "P_AC_NA_1", "Parameter activation"},
 };
 
 const Iec104TypeEntry* find_iec104_type(uint8_t type_id) {
@@ -126,9 +147,11 @@ std::string iec104_cot_name(uint8_t cot) {
 // decode_iec104_element below and the file header comment for the type list.
 bool iec104_type_is_decoded(uint8_t type_id) {
     switch (type_id) {
-        case 1: case 2: case 30: case 3: case 4: case 31: case 9: case 34: case 11: case 35:
-        case 13: case 36: case 15: case 37: case 45: case 58: case 46: case 59: case 47:
-        case 48: case 61: case 49: case 50: case 63: case 70: case 100: case 103: case 105:
+        case 1: case 2: case 30: case 3: case 4: case 31: case 5: case 6: case 32: case 7:
+        case 8: case 33: case 9: case 34: case 10: case 11: case 35: case 12: case 13: case 36:
+        case 14: case 21: case 15: case 37: case 16: case 45: case 58: case 46: case 59: case 47:
+        case 60: case 48: case 61: case 49: case 62: case 50: case 63: case 51: case 64: case 70:
+        case 100: case 103: case 105: case 106: case 107: case 110: case 111: case 112: case 113:
             return true;
         default:
             return false;
@@ -151,6 +174,17 @@ float read_float_le(Cursor& c) {
     float f;
     std::memcpy(&f, &bits, sizeof(f));
     return f;
+}
+
+// Renders a 32-bit bitstring (BSI/command-bitstring information elements) as an 8-hex-digit,
+// zero-padded, uppercase "0x"-prefixed string -- the raw bit pattern IS the value for these
+// types (there's no further semantic decode without point-specific documentation of what each
+// bit means), matching how u_function_name already renders an unrecognized control byte as
+// "0x" + hex elsewhere in this file.
+std::string format_bitstring32(uint32_t bits) {
+    std::ostringstream s;
+    s << "0x" << std::hex << std::uppercase << std::setfill('0') << std::setw(8) << bits;
+    return s.str();
 }
 
 // Shared quality bits, used by SIQ/DIQ (bits4-7 only) and QDS (bits0,4-7 -- OV only applies to
@@ -237,6 +271,29 @@ std::string format_qos_suffix(uint8_t qos) {
     return " ql=" + std::to_string(ql) + (select ? " [Select]" : " [Execute]");
 }
 
+// QPM (Qualifier of Parameter of Measured values, types 110/111/112): bits0-5 = KPA "kind of
+// parameter", bit6 = LPC "local parameter change", bit7 = POP "parameter operation".
+std::string qpm_kpa_name(unsigned kpa) {
+    switch (kpa) {
+        case 0: return "not used";
+        case 1: return "threshold value";
+        case 2: return "smoothing factor";
+        case 3: return "low limit for transmission";
+        case 4: return "high limit for transmission";
+        default: return "reserved/other (" + std::to_string(kpa) + ")";
+    }
+}
+
+std::string format_qpm_suffix(uint8_t qpm) {
+    unsigned kpa = qpm & 0x3F;
+    bool lpc = (qpm & 0x40) != 0;
+    bool pop = (qpm & 0x80) != 0;
+    std::string s = " KPA=" + std::to_string(kpa) + " (" + qpm_kpa_name(kpa) + ")";
+    if (lpc) s += " [LPC]";
+    if (pop) s += " [POP]";
+    return s;
+}
+
 std::ostringstream make_fixed(int precision) {
     std::ostringstream s;
     s << std::fixed << std::setprecision(precision);
@@ -271,6 +328,32 @@ void decode_iec104_element(uint8_t type_id, Cursor& c, std::string& value, std::
             if (type_id == 31) value += " @ " + format_cp56time2a(c);
             break;
         }
+        case 5:   // M_ST_NA_1
+        case 6:   // M_ST_TA_1
+        case 32: {  // M_ST_TB_1
+            uint8_t vti = c.u8();
+            int position = vti & 0x7F;
+            if (position & 0x40) position -= 0x80;  // sign-extend the 7-bit two's complement value
+            bool transient = (vti & 0x80) != 0;
+            uint8_t qds = c.u8();
+            value = "position=" + std::to_string(position);
+            if (transient) flags.push_back("T");
+            append_quality_flags(flags, qds, /*has_overflow=*/true);
+            if (type_id == 6) value += " @ " + format_cp24time2a(c);
+            if (type_id == 32) value += " @ " + format_cp56time2a(c);
+            break;
+        }
+        case 7:   // M_BO_NA_1
+        case 8:   // M_BO_TA_1
+        case 33: {  // M_BO_TB_1
+            uint32_t bits = c.u32le();
+            uint8_t qds = c.u8();
+            value = format_bitstring32(bits);
+            append_quality_flags(flags, qds, /*has_overflow=*/true);
+            if (type_id == 8) value += " @ " + format_cp24time2a(c);
+            if (type_id == 33) value += " @ " + format_cp56time2a(c);
+            break;
+        }
         case 9:   // M_ME_NA_1
         case 34: {  // M_ME_TD_1
             int16_t raw = static_cast<int16_t>(c.u16le());
@@ -282,6 +365,16 @@ void decode_iec104_element(uint8_t type_id, Cursor& c, std::string& value, std::
             if (type_id == 34) value += " @ " + format_cp56time2a(c);
             break;
         }
+        case 10: {  // M_ME_TA_1 -- same layout as case 9 (M_ME_NA_1), + CP24Time2a
+            int16_t raw = static_cast<int16_t>(c.u16le());
+            uint8_t qds = c.u8();
+            auto s = make_fixed(4);
+            s << raw << " (" << (raw / 32768.0) << ")";
+            value = s.str();
+            append_quality_flags(flags, qds, /*has_overflow=*/true);
+            value += " @ " + format_cp24time2a(c);
+            break;
+        }
         case 11:  // M_ME_NB_1
         case 35: {  // M_ME_TE_1
             int16_t raw = static_cast<int16_t>(c.u16le());
@@ -289,6 +382,14 @@ void decode_iec104_element(uint8_t type_id, Cursor& c, std::string& value, std::
             value = std::to_string(raw);
             append_quality_flags(flags, qds, /*has_overflow=*/true);
             if (type_id == 35) value += " @ " + format_cp56time2a(c);
+            break;
+        }
+        case 12: {  // M_ME_TB_1 -- same layout as case 11 (M_ME_NB_1), + CP24Time2a
+            int16_t raw = static_cast<int16_t>(c.u16le());
+            uint8_t qds = c.u8();
+            value = std::to_string(raw);
+            append_quality_flags(flags, qds, /*has_overflow=*/true);
+            value += " @ " + format_cp24time2a(c);
             break;
         }
         case 13:  // M_ME_NC_1
@@ -302,6 +403,23 @@ void decode_iec104_element(uint8_t type_id, Cursor& c, std::string& value, std::
             if (type_id == 36) value += " @ " + format_cp56time2a(c);
             break;
         }
+        case 14: {  // M_ME_TC_1 -- same layout as case 13 (M_ME_NC_1), + CP24Time2a
+            float f = read_float_le(c);
+            uint8_t qds = c.u8();
+            auto s = make_fixed(6);
+            s << f;
+            value = s.str();
+            append_quality_flags(flags, qds, /*has_overflow=*/true);
+            value += " @ " + format_cp24time2a(c);
+            break;
+        }
+        case 21: {  // M_ME_ND_1 -- same value formula as case 9, but genuinely no QDS byte follows
+            int16_t raw = static_cast<int16_t>(c.u16le());
+            auto s = make_fixed(4);
+            s << raw << " (" << (raw / 32768.0) << ")";
+            value = s.str();
+            break;
+        }
         case 15:  // M_IT_NA_1
         case 37: {  // M_IT_TB_1
             int32_t raw = static_cast<int32_t>(c.u32le());
@@ -311,6 +429,16 @@ void decode_iec104_element(uint8_t type_id, Cursor& c, std::string& value, std::
             if (sq & 0x40) flags.push_back("CA");
             if (sq & 0x80) flags.push_back("IV");
             if (type_id == 37) value += " @ " + format_cp56time2a(c);
+            break;
+        }
+        case 16: {  // M_IT_TA_1 -- same layout as case 15 (M_IT_NA_1), + CP24Time2a
+            int32_t raw = static_cast<int32_t>(c.u32le());
+            uint8_t sq = c.u8();
+            value = std::to_string(raw) + " seq=" + std::to_string(sq & 0x1F);
+            if (sq & 0x20) flags.push_back("CY");
+            if (sq & 0x40) flags.push_back("CA");
+            if (sq & 0x80) flags.push_back("IV");
+            value += " @ " + format_cp24time2a(c);
             break;
         }
         case 45:  // C_SC_NA_1
@@ -333,6 +461,13 @@ void decode_iec104_element(uint8_t type_id, Cursor& c, std::string& value, std::
                                          /*two_bit_state=*/true);
             break;
         }
+        case 60: {  // C_RC_TA_1 -- same RCO layout as case 47 (C_RC_NA_1), + CP56Time2a
+            uint8_t rco = c.u8();
+            value = decode_command_byte(rco, "step up/higher", "step down/lower", "not permitted",
+                                         /*two_bit_state=*/true);
+            value += " @ " + format_cp56time2a(c);
+            break;
+        }
         case 48:  // C_SE_NA_1
         case 61: {  // C_SE_TA_1
             int16_t raw = static_cast<int16_t>(c.u16le());
@@ -349,6 +484,13 @@ void decode_iec104_element(uint8_t type_id, Cursor& c, std::string& value, std::
             value = std::to_string(raw) + format_qos_suffix(qos);
             break;
         }
+        case 62: {  // C_SE_TB_1 -- same layout as case 49 (C_SE_NB_1), + CP56Time2a
+            int16_t raw = static_cast<int16_t>(c.u16le());
+            uint8_t qos = c.u8();
+            value = std::to_string(raw) + format_qos_suffix(qos);
+            value += " @ " + format_cp56time2a(c);
+            break;
+        }
         case 50:  // C_SE_NC_1
         case 63: {  // C_SE_TC_1
             float f = read_float_le(c);
@@ -357,6 +499,13 @@ void decode_iec104_element(uint8_t type_id, Cursor& c, std::string& value, std::
             s << f << format_qos_suffix(qos);
             value = s.str();
             if (type_id == 63) value += " @ " + format_cp56time2a(c);
+            break;
+        }
+        case 51:  // C_BO_NA_1
+        case 64: {  // C_BO_TA_1
+            uint32_t bits = c.u32le();
+            value = format_bitstring32(bits);
+            if (type_id == 64) value += " @ " + format_cp56time2a(c);
             break;
         }
         case 70: {  // M_EI_NA_1
@@ -394,6 +543,52 @@ void decode_iec104_element(uint8_t type_id, Cursor& c, std::string& value, std::
                 case 1: value = "general reset"; break;
                 case 2: value = "reset pending time-tagged information"; break;
                 default: value = "reserved (" + std::to_string(static_cast<unsigned>(qrp)) + ")"; break;
+            }
+            break;
+        }
+        case 106: {  // C_CD_NA_1
+            uint16_t delay_ms = c.u16le();
+            value = std::to_string(delay_ms) + " ms";
+            break;
+        }
+        case 107: {  // C_TS_TA_1
+            uint16_t tsc = c.u16le();
+            std::ostringstream s;
+            s << "test sequence=0x" << std::hex << std::uppercase << std::setfill('0') << std::setw(4) << tsc;
+            value = s.str();
+            value += " @ " + format_cp56time2a(c);
+            break;
+        }
+        case 110: {  // P_ME_NA_1 -- same value formula as case 9 (M_ME_NA_1), + QPM
+            int16_t raw = static_cast<int16_t>(c.u16le());
+            uint8_t qpm = c.u8();
+            auto s = make_fixed(4);
+            s << raw << " (" << (raw / 32768.0) << ")" << format_qpm_suffix(qpm);
+            value = s.str();
+            break;
+        }
+        case 111: {  // P_ME_NB_1 -- same value formula as case 11 (M_ME_NB_1), + QPM
+            int16_t raw = static_cast<int16_t>(c.u16le());
+            uint8_t qpm = c.u8();
+            value = std::to_string(raw) + format_qpm_suffix(qpm);
+            break;
+        }
+        case 112: {  // P_ME_NC_1 -- same value formula as case 13 (M_ME_NC_1), + QPM
+            float f = read_float_le(c);
+            uint8_t qpm = c.u8();
+            auto s = make_fixed(6);
+            s << f << format_qpm_suffix(qpm);
+            value = s.str();
+            break;
+        }
+        case 113: {  // P_AC_NA_1
+            uint8_t qpa = c.u8();
+            switch (qpa) {
+                case 0: value = "not used"; break;
+                case 1: value = "act/deact of previously loaded parameters"; break;
+                case 2: value = "act/deact of the parameter of the addressed object"; break;
+                case 3: value = "act/deact of persistent cyclic or periodic transmission of the addressed object"; break;
+                default: value = "reserved/other (" + std::to_string(static_cast<unsigned>(qpa)) + ")"; break;
             }
             break;
         }

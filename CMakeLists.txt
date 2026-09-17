@@ -658,6 +658,116 @@ add_test(NAME iec104_s_format_supervisory_ack_decoded
 set_tests_properties(iec104_s_format_supervisory_ack_decoded PROPERTIES
   PASS_REGULAR_EXPRESSION "S-format \\(supervisory\\) N\\(R\\)=4")
 
+# --------------------------------------------------------------------------
+# The 21 ASDU type IDs added to the information-element decode table (synthetic,
+# tests/sample_iec104_extended_types.pcap) -- see tools/make_sample_pcap.py's
+# build_iec104_extended_types_sample for the exact byte layout each assertion below is checking.
+# --------------------------------------------------------------------------
+add_test(NAME iec104_step_position_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_iec104_extended_types.pcap")
+set_tests_properties(iec104_step_position_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"iec104_objects\": \\[\"ioa=500: position=-10 \\[T\\]\"\\]")
+
+add_test(NAME iec104_step_position_time_tagged_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_iec104_extended_types.pcap")
+set_tests_properties(iec104_step_position_time_tagged_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"iec104_objects\": \\[\"ioa=501: position=50 @ 15:12\\.345\"\\]")
+
+add_test(NAME iec104_step_position_time_tagged_cp56_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_iec104_extended_types.pcap")
+set_tests_properties(iec104_step_position_time_tagged_cp56_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"iec104_objects\": \\[\"ioa=502: position=-1 @ 2024-06-01 08:45:06\\.789 \\[OV\\]\"\\]")
+
+add_test(NAME iec104_bitstring32_monitoring_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_iec104_extended_types.pcap")
+set_tests_properties(iec104_bitstring32_monitoring_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"iec104_objects\": \\[\"ioa=600: 0xDEADBEEF\"\\]")
+
+add_test(NAME iec104_bitstring32_monitoring_time_tagged_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_iec104_extended_types.pcap")
+set_tests_properties(iec104_bitstring32_monitoring_time_tagged_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"iec104_objects\": \\[\"ioa=601: 0x0000FFFF @ 59:59\\.999 \\[IV\\]\"\\]")
+
+add_test(NAME iec104_bitstring32_monitoring_time_tagged_cp56_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_iec104_extended_types.pcap")
+set_tests_properties(iec104_bitstring32_monitoring_time_tagged_cp56_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"iec104_objects\": \\[\"ioa=602: 0x12345678 @ 2025-12-31 23:59:59\\.000 \\[SU\\]\"\\]")
+
+add_test(NAME iec104_measured_normalized_time_tagged_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_iec104_extended_types.pcap")
+set_tests_properties(iec104_measured_normalized_time_tagged_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"iec104_objects\": \\[\"ioa=700: 8192 \\(0\\.2500\\) @ 30:00\\.000\"\\]")
+
+add_test(NAME iec104_measured_scaled_time_tagged_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_iec104_extended_types.pcap")
+set_tests_properties(iec104_measured_scaled_time_tagged_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"iec104_objects\": \\[\"ioa=701: -1234 @ 01:01\\.000 \\[IV\\] \\[OV\\]\"\\]")
+
+add_test(NAME iec104_measured_short_float_time_tagged_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_iec104_extended_types.pcap")
+set_tests_properties(iec104_measured_short_float_time_tagged_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"iec104_objects\": \\[\"ioa=702: 100\\.500000 @ 45:45\\.123\"\\]")
+
+add_test(NAME iec104_integrated_totals_time_tagged_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_iec104_extended_types.pcap")
+set_tests_properties(iec104_integrated_totals_time_tagged_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"iec104_objects\": \\[\"ioa=703: 123456 seq=5 @ 10:00\\.500 \\[CY\\]\"\\]")
+
+add_test(NAME iec104_measured_normalized_no_quality_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_iec104_extended_types.pcap")
+set_tests_properties(iec104_measured_normalized_no_quality_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"iec104_objects\": \\[\"ioa=704: -16384 \\(-0\\.5000\\)\"\\]")
+
+add_test(NAME iec104_bitstring32_command_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_iec104_extended_types.pcap")
+set_tests_properties(iec104_bitstring32_command_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"iec104_objects\": \\[\"ioa=800: 0xFFFFFFFF\"\\]")
+
+add_test(NAME iec104_regulating_step_command_time_tagged_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_iec104_extended_types.pcap")
+set_tests_properties(iec104_regulating_step_command_time_tagged_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"iec104_objects\": \\[\"ioa=801: step up/higher qualifier=2 \\(long pulse duration\\) \\[Execute\\] @ 2023-01-01 00:00:00\\.000\"\\]")
+
+add_test(NAME iec104_scaled_setpoint_command_time_tagged_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_iec104_extended_types.pcap")
+set_tests_properties(iec104_scaled_setpoint_command_time_tagged_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"iec104_objects\": \\[\"ioa=802: 5000 ql=50 \\[Select\\] @ 2022-07-04 12:00:00\\.000\"\\]")
+
+add_test(NAME iec104_bitstring32_command_time_tagged_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_iec104_extended_types.pcap")
+set_tests_properties(iec104_bitstring32_command_time_tagged_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"iec104_objects\": \\[\"ioa=803: 0xCAFEBABE @ 2021-11-11 11:11:11\\.000\"\\]")
+
+add_test(NAME iec104_delay_acquisition_command_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_iec104_extended_types.pcap")
+set_tests_properties(iec104_delay_acquisition_command_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"iec104_objects\": \\[\"ioa=804: 5000 ms\"\\]")
+
+add_test(NAME iec104_test_command_time_tagged_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_iec104_extended_types.pcap")
+set_tests_properties(iec104_test_command_time_tagged_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"iec104_objects\": \\[\"ioa=805: test sequence=0x55AA @ 2020-02-29 03:03:03\\.003\"\\]")
+
+add_test(NAME iec104_parameter_normalized_value_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_iec104_extended_types.pcap")
+set_tests_properties(iec104_parameter_normalized_value_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"iec104_objects\": \\[\"ioa=900: 16384 \\(0\\.5000\\) KPA=1 \\(threshold value\\) \\[LPC\\]\"\\]")
+
+add_test(NAME iec104_parameter_scaled_value_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_iec104_extended_types.pcap")
+set_tests_properties(iec104_parameter_scaled_value_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"iec104_objects\": \\[\"ioa=901: -100 KPA=3 \\(low limit for transmission\\) \\[POP\\]\"\\]")
+
+add_test(NAME iec104_parameter_short_float_value_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_iec104_extended_types.pcap")
+set_tests_properties(iec104_parameter_short_float_value_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"iec104_objects\": \\[\"ioa=902: 2\\.500000 KPA=4 \\(high limit for transmission\\) \\[LPC\\] \\[POP\\]\"\\]")
+
+add_test(NAME iec104_parameter_activation_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_iec104_extended_types.pcap")
+set_tests_properties(iec104_parameter_activation_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"iec104_objects\": \\[\"ioa=903: act/deact of the parameter of the addressed object\"\\]")
+
 # Regression fixture for the IEC104-vs-Modbus detection collision found while scoping this
 # feature (see try_parse_iec104_apci's header comment in iec104.hpp and the dispatch-order
 # comment in decoder.cpp): an I-format APDU with N(S)=N(R)=0 whose APCI bytes also read as a

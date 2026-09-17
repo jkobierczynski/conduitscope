@@ -563,6 +563,14 @@ def cp56time2a(year: int, month: int, day: int, hour: int, minute: int, ms: int,
     )
 
 
+def cp24time2a(minute: int, ms: int, iv: bool = False) -> bytes:
+    return struct.pack(
+        "<HB",
+        ms,
+        (minute & 0x3F) | (0x80 if iv else 0),
+    )
+
+
 def iec104_asdu(type_id: int, vsq: int, cot_code: int, casdu: int, object_bytes: bytes,
                  test: bool = False, negative: bool = False, originator: int = 0) -> bytes:
     return (bytes([type_id, vsq, iec104_cot_byte(cot_code, test, negative), originator]) +
@@ -651,6 +659,162 @@ def build_iec104_sample():
     for i, pkt in enumerate(packets):
         data += pcap_record(pkt, 1_700_001_000 + i, i * 1000)
     (TESTS_DIR / "sample_iec104.pcap").write_bytes(data)
+
+
+def build_iec104_extended_types_sample():
+    """Exercises every one of the 21 ASDU type IDs added to the information-element decode table
+    alongside the original set covered by build_iec104_sample: step position (VTI), bitstring-of-
+    32-bit (BSI) monitoring and command, the CP24Time2a-tagged measured-value/integrated-totals
+    variants, the normalized-value-without-quality-descriptor variant, the time-tagged regulating-
+    step and scaled-setpoint commands, delay acquisition, test command with time tag, and
+    parameter-of-measured-value/parameter-activation -- one spontaneous report (COT=3) per
+    monitoring type and one activation (COT=6) per command/parameter type, each with a single
+    hand-picked object whose expected decoded string is computed in the comment right above it
+    (the same one CMakeLists.txt's iec104_*_decoded tests assert against). Starts with the same
+    STARTDT act/con handshake build_iec104_sample uses."""
+    packets = []
+    client_seq = [5000]
+    server_seq = [6000]
+    client_ns = [0]  # client's own N(S), incremented after each I-frame it sends
+    client_nr = [0]  # client's N(R): count of I-frames received so far from the server
+    server_ns = [0]  # server's own N(S)
+    server_nr = [0]  # server's N(R): count of I-frames received so far from the client
+
+    def add_tcp(from_client: bool, payload: bytes):
+        if from_client:
+            src_port, dst_port = 51900, IEC104_PORT
+            src_ip, dst_ip = HMI_IP, PLC_IP
+            src_mac, dst_mac = HMI_MAC, PLC_MAC
+            seq, ack = client_seq[0], server_seq[0]
+            client_seq[0] += len(payload)
+        else:
+            src_port, dst_port = IEC104_PORT, 51900
+            src_ip, dst_ip = PLC_IP, HMI_IP
+            src_mac, dst_mac = PLC_MAC, HMI_MAC
+            seq, ack = server_seq[0], client_seq[0]
+            server_seq[0] += len(payload)
+        tcp = tcp_header(src_port, dst_port, seq, ack, TCP_PSH | TCP_ACK, len(payload)) + payload
+        ip = ipv4_header(src_ip, dst_ip, 6, len(tcp), 0x7000 + len(packets)) + tcp
+        packets.append(eth_header(dst_mac, src_mac, 0x0800) + ip)
+
+    def add_u(from_client: bool, function_byte: int):
+        add_tcp(from_client, iec104_apdu(iec104_u_control(function_byte)))
+
+    def add_i(from_client: bool, asdu: bytes):
+        if from_client:
+            control = iec104_i_control(client_ns[0], client_nr[0])
+            client_ns[0] += 1
+            server_nr[0] = client_ns[0]
+        else:
+            control = iec104_i_control(server_ns[0], server_nr[0])
+            server_ns[0] += 1
+            client_nr[0] = server_ns[0]
+        add_tcp(from_client, iec104_apdu(control, asdu))
+
+    # 1) & 2) STARTDT act/con -- same handshake build_iec104_sample opens with.
+    add_u(True, IEC104_STARTDT_ACT)
+    add_u(False, IEC104_STARTDT_CON)
+
+    # M_ST_NA_1 (type 5): IOA 500, position=-10, transient, quality good. VTI = 7-bit two's
+    # complement -10 (0x76) with the transient bit (0x80) set -> 0xF6; QDS=0x00.
+    add_i(False, iec104_asdu(5, 0x01, 3, 1, ioa(500) + bytes([0xF6, 0x00])))
+
+    # M_ST_TA_1 (type 6): IOA 501, position=50 (not transient), quality good, CP24Time2a
+    # minute=15 ms=12345 ("15:12.345").
+    add_i(False, iec104_asdu(6, 0x01, 3, 1, ioa(501) + bytes([0x32, 0x00]) + cp24time2a(15, 12345)))
+
+    # M_ST_TB_1 (type 32): IOA 502, position=-1 (0x7F, not transient), QDS=0x01 (OV flag), CP56Time2a
+    # 2024-06-01 08:45:06.789.
+    add_i(False, iec104_asdu(32, 0x01, 3, 1,
+                              ioa(502) + bytes([0x7F, 0x01]) + cp56time2a(2024, 6, 1, 8, 45, 6789)))
+
+    # M_BO_NA_1 (type 7): IOA 600, bitstring=0xDEADBEEF, quality good.
+    add_i(False, iec104_asdu(7, 0x01, 3, 1, ioa(600) + struct.pack("<I", 0xDEADBEEF) + bytes([0x00])))
+
+    # M_BO_TA_1 (type 8): IOA 601, bitstring=0x0000FFFF, QDS=0x80 (IV flag), CP24Time2a
+    # minute=59 ms=59999 ("59:59.999").
+    add_i(False, iec104_asdu(8, 0x01, 3, 1,
+                              ioa(601) + struct.pack("<I", 0x0000FFFF) + bytes([0x80]) + cp24time2a(59, 59999)))
+
+    # M_BO_TB_1 (type 33): IOA 602, bitstring=0x12345678, quality good, CP56Time2a
+    # 2025-12-31 23:59:59.000 with the summer-time (SU) flag set.
+    add_i(False, iec104_asdu(33, 0x01, 3, 1,
+                              ioa(602) + struct.pack("<I", 0x12345678) + bytes([0x00]) +
+                              cp56time2a(2025, 12, 31, 23, 59, 59000, su=True)))
+
+    # M_ME_TA_1 (type 10): IOA 700, normalized value 8192 (fraction 0.25), quality good,
+    # CP24Time2a minute=30 ms=0 ("30:00.000").
+    add_i(False, iec104_asdu(10, 0x01, 3, 1,
+                              ioa(700) + struct.pack("<h", 8192) + bytes([0x00]) + cp24time2a(30, 0)))
+
+    # M_ME_TB_1 (type 12): IOA 701, scaled value -1234, QDS=0x01 (OV flag), CP24Time2a
+    # minute=1 ms=1000 with the IV time-invalid flag set ("01:01.000 [IV]").
+    add_i(False, iec104_asdu(12, 0x01, 3, 1,
+                              ioa(701) + struct.pack("<h", -1234) + bytes([0x01]) + cp24time2a(1, 1000, iv=True)))
+
+    # M_ME_TC_1 (type 14): IOA 702, short-float value 100.5, quality good, CP24Time2a
+    # minute=45 ms=45123 ("45:45.123").
+    add_i(False, iec104_asdu(14, 0x01, 3, 1,
+                              ioa(702) + struct.pack("<f", 100.5) + bytes([0x00]) + cp24time2a(45, 45123)))
+
+    # M_IT_TA_1 (type 16): IOA 703, counter value 123456, seq=5 with the CY (carry) flag set
+    # (sq byte = 5 | 0x20 = 0x25), CP24Time2a minute=10 ms=500 ("10:00.500").
+    add_i(False, iec104_asdu(16, 0x01, 3, 1,
+                              ioa(703) + struct.pack("<i", 123456) + bytes([0x25]) + cp24time2a(10, 500)))
+
+    # M_ME_ND_1 (type 21): IOA 704, normalized value -16384 (fraction -0.5) -- no QDS byte
+    # follows at all, unlike every other M_ME_* case.
+    add_i(False, iec104_asdu(21, 0x01, 3, 1, ioa(704) + struct.pack("<h", -16384)))
+
+    # C_BO_NA_1 (type 51): IOA 800, bitstring command=0xFFFFFFFF, activation.
+    add_i(True, iec104_asdu(51, 0x01, 6, 1, ioa(800) + struct.pack("<I", 0xFFFFFFFF)))
+
+    # C_RC_TA_1 (type 60): IOA 801, RCO byte 0x0A = state 2 ("step up/higher") | qualifier=2
+    # ("long pulse duration") << 2 | Execute (bit7=0), CP56Time2a 2023-01-01 00:00:00.000.
+    add_i(True, iec104_asdu(60, 0x01, 6, 1,
+                             ioa(801) + bytes([0x0A]) + cp56time2a(2023, 1, 1, 0, 0, 0)))
+
+    # C_SE_TB_1 (type 62): IOA 802, scaled setpoint 5000, QOS byte 0xB2 = ql=50 | Select
+    # (bit7=1), CP56Time2a 2022-07-04 12:00:00.000.
+    add_i(True, iec104_asdu(62, 0x01, 6, 1,
+                             ioa(802) + struct.pack("<h", 5000) + bytes([0xB2]) +
+                             cp56time2a(2022, 7, 4, 12, 0, 0)))
+
+    # C_BO_TA_1 (type 64): IOA 803, bitstring command=0xCAFEBABE, CP56Time2a
+    # 2021-11-11 11:11:11.000.
+    add_i(True, iec104_asdu(64, 0x01, 6, 1,
+                             ioa(803) + struct.pack("<I", 0xCAFEBABE) + cp56time2a(2021, 11, 11, 11, 11, 11000)))
+
+    # C_CD_NA_1 (type 106): IOA 804, delay acquisition command = 5000 ms.
+    add_i(True, iec104_asdu(106, 0x01, 6, 1, ioa(804) + struct.pack("<H", 5000)))
+
+    # C_TS_TA_1 (type 107): IOA 805, test sequence=0x55AA, CP56Time2a 2020-02-29 03:03:03.003.
+    add_i(True, iec104_asdu(107, 0x01, 6, 1,
+                             ioa(805) + struct.pack("<H", 0x55AA) + cp56time2a(2020, 2, 29, 3, 3, 3003)))
+
+    # P_ME_NA_1 (type 110): IOA 900, normalized parameter value 16384 (fraction 0.5), QPM byte
+    # 0x41 = KPA=1 ("threshold value") | LPC (bit6, local parameter change).
+    add_i(True, iec104_asdu(110, 0x01, 6, 1,
+                             ioa(900) + struct.pack("<h", 16384) + bytes([0x41])))
+
+    # P_ME_NB_1 (type 111): IOA 901, scaled parameter value -100, QPM byte 0x83 = KPA=3
+    # ("low limit for transmission") | POP (bit7, parameter operation).
+    add_i(True, iec104_asdu(111, 0x01, 6, 1,
+                             ioa(901) + struct.pack("<h", -100) + bytes([0x83])))
+
+    # P_ME_NC_1 (type 112): IOA 902, short-float parameter value 2.5, QPM byte 0xC4 = KPA=4
+    # ("high limit for transmission") | LPC | POP (both bit6 and bit7 set).
+    add_i(True, iec104_asdu(112, 0x01, 6, 1,
+                             ioa(902) + struct.pack("<f", 2.5) + bytes([0xC4])))
+
+    # P_AC_NA_1 (type 113): IOA 903, QPA=2 ("act/deact of the parameter of the addressed
+    # object").
+    add_i(True, iec104_asdu(113, 0x01, 6, 1, ioa(903) + bytes([0x02])))
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_002_000 + i, i * 1000)
+    (TESTS_DIR / "sample_iec104_extended_types.pcap").write_bytes(data)
 
 
 def build_iec104_modbus_precedence_sample():
@@ -6531,6 +6695,7 @@ if __name__ == "__main__":
     build_dnp3_sample()
     build_link_and_transport_layer_sample()
     build_iec104_sample()
+    build_iec104_extended_types_sample()
     build_iec104_modbus_precedence_sample()
     build_enip_sample()
     build_enip_nop_precedence_sample()

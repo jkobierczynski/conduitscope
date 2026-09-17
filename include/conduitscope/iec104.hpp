@@ -21,14 +21,36 @@
 // CP56Time2a time tags).
 //
 // Decoded ASDU types cover the type IDs that dominate real IEC 104 traffic -- monitoring
-// (single/double-point, measured values normalized/scaled/short-float, integrated totals, each
-// with and without a CP24Time2a/CP56Time2a time tag), commands (single/double/regulating-step,
-// set-point normalized/scaled/short-float, with and without time tag), end-of-initialization,
-// general interrogation, clock sync, and reset process -- cross-checked against lib60870-C and
-// Wireshark's packet-iec104.c dissector for the exact information-element bit layouts. A type ID
-// outside that table still gets its ASDU header (type/VSQ/COT/CASDU) decoded, just not its
-// information objects -- same "structurally located, not value-decoded" fallback DNP3 applies to
-// an unrecognized group/variation.
+// (single/double-point, step position, bitstring-of-32-bit, measured values
+// normalized/scaled/short-float, integrated totals, each with and without a CP24Time2a/
+// CP56Time2a time tag, plus the normalized-value-without-quality-descriptor variant),
+// commands (single/double/regulating-step, bitstring-of-32-bit, set-point
+// normalized/scaled/short-float, with and without time tag, delay acquisition, and test command
+// with time tag), end-of-initialization, general/counter interrogation, read, clock sync, reset
+// process, and parameter loading/activation (normalized/scaled/short-float parameter values and
+// parameter activation) -- cross-checked against lib60870-C/lib60870.NET and Wireshark's
+// packet-iec104.c dissector for the exact information-element bit layouts. A type ID outside
+// that table still gets its ASDU header (type/VSQ/COT/CASDU) decoded, just not its information
+// objects -- same "structurally located, not value-decoded" fallback DNP3 applies to an
+// unrecognized group/variation.
+//
+// Deliberately NOT decoded, as a scope decision rather than an oversight: the protection-
+// equipment event types (M_EP_TA_1/TB_1/TC_1 and their CP56Time2a-tagged M_EP_TD_1/TE_1/TF_1
+// counterparts) pack several named sub-fields -- event state, start/trip phase indicators, output
+// circuit indicators -- into a single SEP/SPE/OCI/QDP byte each, and this project holds a higher
+// confidence bar for anything describing a protection relay's trip/event semantics than could be
+// independently verified this round; M_PS_NA_1 (packed single-point information with status
+// change detection) was left out for the same reason, since its SCD field packs 16 points'
+// current state and 16 points' change-detected flags into 4 bytes whose bit-to-point ordering
+// wasn't independently verified either. The file-transfer ASDU type group (F_FR_NA_1 through
+// F_SC_NB_1) is a different kind of gap: file transfer is inherently a multi-frame, stateful
+// exchange -- directory listing, section-by-section segment transfer, acknowledgements -- which
+// doesn't fit this file's deliberately stateless one-ASDU-at-a-time design (see this file's own
+// opening sentence), so it would need a redesign rather than another case in decode_iec104_element,
+// left for a future round if it's ever needed. Finally, C_TS_NA_1, the original un-time-tagged
+// test command, was skipped because C_TS_TA_1 (its CP56Time2a-tagged successor, which this file
+// does decode) supersedes it in every real deployment and the standard itself deprecates 104 in
+// favor of 107.
 #pragma once
 
 #include <cstdint>
