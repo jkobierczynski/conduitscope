@@ -16,18 +16,22 @@
 #include "conduitscope/ffhse.hpp"
 #include "conduitscope/goose.hpp"
 #include "conduitscope/hartip.hpp"
+#include "conduitscope/hsrp.hpp"
 #include "conduitscope/opcua.hpp"
 #include "conduitscope/iec104.hpp"
+#include "conduitscope/igmp.hpp"
 #include "conduitscope/ipv4.hpp"
 #include "conduitscope/link_layer.hpp"
 #include "conduitscope/mms.hpp"
 #include "conduitscope/modbus.hpp"
 #include "conduitscope/mqtt.hpp"
 #include "conduitscope/profinet.hpp"
+#include "conduitscope/rip.hpp"
 #include "conduitscope/s7comm.hpp"
 #include "conduitscope/sv.hpp"
 #include "conduitscope/tcp.hpp"
 #include "conduitscope/udp.hpp"
+#include "conduitscope/vrrp.hpp"
 
 namespace conduitscope {
 
@@ -104,6 +108,84 @@ void fill_nbns_fields(DecodedPacket& out, const NbnsMessage& msg) {
     for (const auto& rr : msg.answers) out.nbns_records.push_back(rr.summary);
     for (const auto& rr : msg.authorities) out.nbns_records.push_back(rr.summary);
     for (const auto& rr : msg.additionals) out.nbns_records.push_back(rr.summary);
+}
+
+// Renders one RipRoute as a single line for DecodedPacket::rip_routes -- see rip.hpp for what
+// each of the three RTE shapes (ordinary route, full-table-request marker, authentication entry)
+// means.
+std::string rip_route_summary(const RipRoute& r) {
+    if (r.is_auth_entry) {
+        std::ostringstream s;
+        s << "authentication: " << r.auth_type_name;
+        if (r.auth_type == 3) {
+            s << " (key id " << static_cast<unsigned>(r.md5_key_id) << ")";
+        }
+        return s.str();
+    }
+    if (r.is_full_table_request) {
+        return "full table request";
+    }
+    std::ostringstream s;
+    s << r.address << "/" << r.subnet_mask << " via " << r.next_hop << " metric " << r.metric;
+    if (r.route_tag != 0) {
+        s << " tag " << r.route_tag;
+    }
+    return s.str();
+}
+
+// Flattens a parsed RipMessage (see rip.hpp) into DecodedPacket's rip_* fields.
+void fill_rip_fields(DecodedPacket& out, const RipMessage& msg) {
+    out.summary = msg.summary;
+    for (const auto& n : msg.notes) out.notes.push_back(n);
+    out.rip_version = msg.version;
+    out.rip_command_name = msg.command_name;
+    out.rip_routes_truncated = msg.routes_truncated;
+    for (const auto& r : msg.routes) out.rip_routes.push_back(rip_route_summary(r));
+}
+
+// Renders one IgmpGroupRecord as a single line for DecodedPacket::igmp_group_records.
+std::string igmp_group_record_summary(const IgmpGroupRecord& rec) {
+    std::ostringstream s;
+    s << rec.record_type_name << ": " << rec.multicast_address << " (" << rec.source_addresses.size()
+      << " source(s))";
+    return s.str();
+}
+
+// Flattens a parsed IgmpMessage (see igmp.hpp) into DecodedPacket's igmp_* fields.
+void fill_igmp_fields(DecodedPacket& out, const IgmpMessage& msg) {
+    out.summary = msg.summary;
+    for (const auto& n : msg.notes) out.notes.push_back(n);
+    out.igmp_version = msg.version;
+    out.igmp_type_name = msg.type_name;
+    out.igmp_group_address = msg.group_address;
+    out.igmp_group_records_truncated = msg.group_records_truncated;
+    for (const auto& rec : msg.group_records) out.igmp_group_records.push_back(igmp_group_record_summary(rec));
+}
+
+// Flattens a parsed VrrpMessage (see vrrp.hpp) into DecodedPacket's vrrp_* fields.
+void fill_vrrp_fields(DecodedPacket& out, const VrrpMessage& msg) {
+    out.summary = msg.summary;
+    for (const auto& n : msg.notes) out.notes.push_back(n);
+    out.vrrp_version = msg.version;
+    out.vrrp_virtual_router_id = msg.virtual_router_id;
+    out.vrrp_priority = msg.priority;
+    out.vrrp_ip_addresses = msg.ip_addresses;
+    out.vrrp_ip_addresses_truncated = msg.ip_addresses_truncated;
+}
+
+// Flattens a parsed HsrpMessage (see hsrp.hpp) into DecodedPacket's hsrp_* fields.
+void fill_hsrp_fields(DecodedPacket& out, const HsrpMessage& msg) {
+    out.summary = msg.summary;
+    for (const auto& n : msg.notes) out.notes.push_back(n);
+    out.hsrp_version = msg.version;
+    if (msg.version == 1) {
+        out.hsrp_opcode_name = msg.opcode_name;
+        out.hsrp_state_name = msg.state_name;
+        out.hsrp_virtual_ip = msg.virtual_ip;
+    } else {
+        for (const auto& tlv : msg.tlvs) out.hsrp_tlv_types.push_back(tlv.type_name);
+        out.hsrp_tlvs_truncated = msg.tlvs_truncated;
+    }
 }
 
 }  // namespace
@@ -1181,6 +1263,57 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                 }
             }
 
+            // RIP and HSRP, UNLIKE every opportunistic check above (CIP I/O/BACnet/HART-IP/FF-HSE),
+            // are port-GATED in Auto mode -- see extra_rip_ports/extra_hsrp_ports in decoder.hpp:
+            // try_parse_rip's and try_parse_hsrp's own structural checks are too weak (a handful of
+            // small integers for RIP; a version/opcode/state match or a self-consistent TLV chain
+            // for HSRP) to try against arbitrary UDP traffic on every port. They still have to run
+            // BEFORE FF-HSE's own fully opportunistic, any-port check just below, though: FF-HSE's
+            // structural gate is weak enough in the other direction (see its own "tried last, even
+            // after HART-IP" comment there) that it was found to accept a synthetic HSRPv1 message
+            // on port 1985 as truncated FF-HSE traffic -- a real collision between "port-gated but
+            // otherwise unchecked" and "opportunistic but weak," resolved by giving the port-gated
+            // check priority once its own gate (an exact, configured port) already matched.
+            bool want_rip = options_.protocol_filter == ProtocolFilter::Auto ||
+                             options_.protocol_filter == ProtocolFilter::RipOnly;
+            bool require_rip_port = options_.protocol_filter == ProtocolFilter::Auto;
+            if (want_rip) {
+                bool port_match = port_in(udp.src_port, RIP_PORT, options_.extra_rip_ports) ||
+                                   port_in(udp.dst_port, RIP_PORT, options_.extra_rip_ports);
+                if (!require_rip_port || port_match) {
+                    if (auto msg = try_parse_rip(udp.payload)) {
+                        out.protocol = "rip";
+                        fill_rip_fields(out, *msg);
+                        if (!port_match) {
+                            out.notes.push_back("seen on UDP port " + std::to_string(udp.src_port) + "->" +
+                                                 std::to_string(udp.dst_port) +
+                                                 ", which is not a configured/standard RIP port (520)");
+                        }
+                        return out;
+                    }
+                }
+            }
+
+            bool want_hsrp = options_.protocol_filter == ProtocolFilter::Auto ||
+                              options_.protocol_filter == ProtocolFilter::HsrpOnly;
+            bool require_hsrp_port = options_.protocol_filter == ProtocolFilter::Auto;
+            if (want_hsrp) {
+                bool port_match = port_in(udp.src_port, HSRP_PORT, options_.extra_hsrp_ports) ||
+                                   port_in(udp.dst_port, HSRP_PORT, options_.extra_hsrp_ports);
+                if (!require_hsrp_port || port_match) {
+                    if (auto msg = try_parse_hsrp(udp.payload)) {
+                        out.protocol = "hsrp";
+                        fill_hsrp_fields(out, *msg);
+                        if (!port_match) {
+                            out.notes.push_back("seen on UDP port " + std::to_string(udp.src_port) + "->" +
+                                                 std::to_string(udp.dst_port) +
+                                                 ", which is not a configured/standard HSRP port (1985)");
+                        }
+                        return out;
+                    }
+                }
+            }
+
             // Tried last among these UDP checks, port-independently, even after HART-IP -- see the
             // matching comment in reassemble_tcp_payload for why FF-HSE's own structural detection
             // gate is deliberately given the lowest priority in this decoder's opportunistic
@@ -1365,6 +1498,36 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
             }
             out.summary = s.str();
             return out;
+        }
+
+        // IGMP and VRRP each ride directly on IP (no UDP/TCP header), dispatched purely by their
+        // own IANA-exclusive IP protocol number rather than any port -- see igmp.hpp's/vrrp.hpp's
+        // own file header comments. Both are tried unconditionally (in Auto mode, or their own
+        // --protocol filter) since that protocol number alone is already a strong, exclusive
+        // signal; a payload that doesn't structurally match still falls through to "non-tcp"
+        // below rather than being forced into one of these two protocols.
+        if (ip.protocol == IGMP_IP_PROTOCOL) {
+            bool want_igmp = options_.protocol_filter == ProtocolFilter::Auto ||
+                              options_.protocol_filter == ProtocolFilter::IgmpOnly;
+            if (want_igmp) {
+                if (auto msg = try_parse_igmp(ip.payload)) {
+                    out.protocol = "igmp";
+                    fill_igmp_fields(out, *msg);
+                    return out;
+                }
+            }
+        }
+
+        if (ip.protocol == VRRP_IP_PROTOCOL) {
+            bool want_vrrp = options_.protocol_filter == ProtocolFilter::Auto ||
+                              options_.protocol_filter == ProtocolFilter::VrrpOnly;
+            if (want_vrrp) {
+                if (auto msg = try_parse_vrrp(ip.payload)) {
+                    out.protocol = "vrrp";
+                    fill_vrrp_fields(out, *msg);
+                    return out;
+                }
+            }
         }
 
         if (ip.protocol != IPPROTO_TCP_VALUE) {

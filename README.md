@@ -9,7 +9,8 @@ IEC 61850-9-2 Sampled Values, EtherCAT, BACnet/IP, HART-IP, OPC UA Binary
 ISO 9506), MQTT (v3.1/v3.1.1/v5.0, including Sparkplug B), FOUNDATION
 Fieldbus HSE (FDA/SM/FMS/LAN Redundancy), IEEE Spanning Tree Protocol
 (STP/RSTP/MSTP), DeviceNet (CAN-bus CIP, via SocketCAN pcap captures), DNS,
-mDNS, LLMNR, and NetBIOS Name Service (NBT-NS), plus detects DNS-over-HTTPS
+mDNS, LLMNR, and NetBIOS Name Service (NBT-NS), RIP, IGMP, VRRP, and HSRP,
+plus detects DNS-over-HTTPS
 (DoH) via TLS SNI matching,
 traffic from offline
 pcap/pcapng captures, and checks it
@@ -708,22 +709,52 @@ Groundwork / v0.1.0. What works right now:
 - Non-IPv4 Ethernet frames and non-TCP IPv4 payloads (including UDP) are now
   recognized and named, not just reported as a bare hex/number and dropped:
   ARP, LLDP, PTP, MPLS, and stacked-VLAN (802.1ad/QinQ) EtherTypes; ICMP,
-  IGMP, GRE, ESP, AH, OSPF, and SCTP IP protocol numbers; and the UDP header
+  GRE, ESP, AH, OSPF, and SCTP IP protocol numbers; and the UDP header
   itself (source/destination port, byte count) -- EtherNet/IP's own UDP port
   (2222) is decoded, not just named, when the traffic on it actually looks
   like CIP I/O (see above), PROFINET RT's EtherType is decoded, not just
   named, when the FrameID looks like DCP or cyclic IO data (see above), and
   IEC 61850-8-1 GOOSE's, IEC 61850-9-2 Sampled Values', and EtherCAT's own
   EtherTypes are all decoded, not just named, when their own structural gate
-  matches (see above). This is otherwise groundwork plumbing, not a new
-  protocol decoder -- none of the remaining named-but-not-decoded protocols'
-  own framing is parsed any further yet, and `policy validate` does not yet
-  evaluate any non-TCP traffic against any conduit (still counted as
-  `skipped_non_tcp`, same as before) -- but it's a real, confirmed visibility
-  gap this closes: re-running conduitscope's own real-capture test set after
-  adding this surfaced genuine ARP and UDP (DNS,
+  matches (see above). IGMP (IP protocol 2) and VRRP (IP protocol 112) are
+  likewise decoded, not just named, when their own structural gate matches
+  -- see the RIP/IGMP/VRRP/HSRP bullet below. This is otherwise groundwork
+  plumbing, not a new protocol decoder -- none of the remaining
+  named-but-not-decoded protocols' own framing is parsed any further yet,
+  and `policy validate` does not yet evaluate any non-TCP traffic against
+  any conduit (still counted as `skipped_non_tcp`, same as before) -- but
+  it's a real, confirmed visibility gap this closes: re-running
+  conduitscope's own real-capture test set after adding this surfaced
+  genuine ARP and UDP (DNS,
   NetBIOS) traffic that was previously invisible. See docs/MANUAL.md's
   PROTOCOL COVERAGE and ROADMAP.
+- RIP (v1/v2), IGMP (v1/v2/v3), VRRP (v2/v3), and HSRP (v1/v2) decoding: the
+  first batch of a broader routing/redundancy-protocol addition (PIM, EIGRP,
+  OSPF, BGP, and IGRP planned for a later round; IS-IS deliberately deferred
+  further still, since it rides the data-link layer directly like STP
+  rather than as an IP payload). Added because IGMP underlies GOOSE/SV's own
+  routable multicast variants, and because VRRP/HSRP are a straightforward
+  gateway-spoofing/MITM primitive worth surfacing regardless of whether a
+  segment is "OT" or "IT". RIP (UDP port 520) and HSRP (UDP port 1985) join
+  the DNS family above in being **port-gated** in `--protocol auto` (widen
+  with `--rip-port`/`--hsrp-port`, or bypass with `--protocol rip`/`hsrp`);
+  IGMP and VRRP need no port gate at all, dispatched purely by their own
+  IANA-exclusive IP protocol number (2 and 112). RIP's Simple Password and
+  VRRPv2's Simple Text Password authentication are decoded as the cleartext
+  they are; RIP's Keyed MD5 auth-header fields are decoded but its trailing
+  digest is neither located nor verified. A real dispatch-order collision
+  was found and fixed while building this: a synthetic HSRPv1 message
+  satisfied FF-HSE's own weaker, fully opportunistic gate until RIP/HSRP
+  were moved ahead of it in the UDP dispatch chain. Validated against
+  hand-built fixtures cross-checked against their governing RFCs and
+  Wireshark's own dissector source, plus one real capture for IGMP (12
+  genuine IGMPv3 Membership Reports trimmed from the same `Plant1.pcap`
+  this project's STP/PROFINET/CIP-I/O fixtures already draw from -- see
+  `tests/real_captures/igmp/ATTRIBUTION.md`); a 498-file search across three
+  public ICS pcap collections for the same effort found no RIP, VRRP, or
+  HSRP traffic anywhere, so those three remain synthetic-only, the same
+  accepted gap already documented for FF-HSE/DeviceNet. See docs/MANUAL.md's
+  PROTOCOL COVERAGE, PROTOCOL DETECTION, and LIMITATIONS.
 - IPv4 payload is clamped to the header's own `total_length` field, so
   Ethernet's minimum-frame-size padding on short packets (bare ACKs, mostly)
   never gets misreported as phantom TCP payload -- found and fixed against a

@@ -7562,6 +7562,310 @@ def build_vlan_zones_sample():
     (TESTS_DIR / "sample_vlan_zones.pcap").write_bytes(data)
 
 
+# --- RIP / IGMP / VRRP / HSRP -----------------------------------------------------------
+
+RIP_PORT = 520
+HSRP_PORT = 1985
+IGMP_IP_PROTOCOL = 2
+VRRP_IP_PROTOCOL = 112
+
+
+def ip_bytes4(addr: str) -> bytes:
+    return bytes(int(o) for o in addr.split("."))
+
+
+def udp_ip_eth_frame(payload: bytes, sport: int, dport: int, src_ip: str, dst_ip: str,
+                      src_mac: bytes, dst_mac: bytes, ident: int = 0x9000) -> bytes:
+    udp = udp_header(sport, dport, payload)
+    ip = ipv4_header(src_ip, dst_ip, 17, len(udp), ident)
+    return eth_header(dst_mac, src_mac, 0x0800) + ip + udp
+
+
+def ip_eth_frame(payload: bytes, protocol: int, src_ip: str, dst_ip: str, src_mac: bytes,
+                  dst_mac: bytes, ident: int = 0x9000) -> bytes:
+    """For IGMP/VRRP: no UDP/TCP header at all -- `payload` rides directly on IP."""
+    ip = ipv4_header(src_ip, dst_ip, protocol, len(payload), ident)
+    return eth_header(dst_mac, src_mac, 0x0800) + ip + payload
+
+
+def rip_rte(afi: int, route_tag: int, address: str, mask: str, next_hop: str, metric: int) -> bytes:
+    return (struct.pack("!HH", afi, route_tag) + ip_bytes4(address) + ip_bytes4(mask) +
+            ip_bytes4(next_hop) + struct.pack("!I", metric))
+
+
+def rip_auth_simple_password(password: bytes) -> bytes:
+    padded = password + b"\x00" * (16 - len(password))
+    return struct.pack("!HH", 0xFFFF, 2) + padded
+
+
+def rip_auth_md5(rip2_packet_length: int, key_id: int, auth_data_length: int, sequence_number: int) -> bytes:
+    return (struct.pack("!HHHBBI", 0xFFFF, 3, rip2_packet_length, key_id, auth_data_length,
+                         sequence_number) + bytes(8))
+
+
+def rip_message(command: int, version: int, rtes: list) -> bytes:
+    return struct.pack("!BBH", command, version, 0) + b"".join(rtes)
+
+
+def build_rip_sample():
+    """RIP v1 (RFC 1058) and v2 (RFC 2453) -- the full-table-request marker, ordinary routes,
+    both authentication types (Simple Password's cleartext password, and Keyed MD5's header
+    fields with its trailing digest deliberately NOT located/verified -- see rip.hpp's own file
+    header comment), a v1 message with a nonconformant nonzero Route Tag/Subnet Mask/Next Hop,
+    trailing bytes that don't form a complete 20-byte RTE, and one deliberately non-RIP-shaped
+    payload on RIP's own port 520 to exercise the structural detection gate correctly rejecting
+    it (falls back to generic 'udp')."""
+    packets = []
+
+    def add(payload: bytes, from_a: bool = True):
+        if from_a:
+            packets.append(udp_ip_eth_frame(payload, RIP_PORT, RIP_PORT, HMI_IP, PLC_IP, HMI_MAC, PLC_MAC))
+        else:
+            packets.append(udp_ip_eth_frame(payload, RIP_PORT, RIP_PORT, PLC_IP, HMI_IP, PLC_MAC, HMI_MAC))
+
+    # 1) RIPv2 Request: full routing table requested (single AFI=0 RTE, metric 16).
+    add(rip_message(1, 2, [rip_rte(0, 0, "0.0.0.0", "0.0.0.0", "0.0.0.0", 16)]))
+
+    # 2) RIPv2 Response: two ordinary routes.
+    add(rip_message(2, 2, [
+        rip_rte(2, 0, "10.0.0.0", "255.255.255.0", "0.0.0.0", 1),
+        rip_rte(2, 5, "10.0.1.0", "255.255.255.0", "0.0.0.0", 2),
+    ]), from_a=False)
+
+    # 3) RIPv2 Response with RIPv2 Simple Password authentication (sent in cleartext on the wire,
+    #    by design -- see rip.hpp's Security context note) plus one ordinary route.
+    add(rip_message(2, 2, [
+        rip_auth_simple_password(b"sample01"),
+        rip_rte(2, 0, "10.0.2.0", "255.255.255.0", "0.0.0.0", 3),
+    ]), from_a=False)
+
+    # 4) RIPv2 Response with Keyed MD5 authentication (RFC 2082): this decoder reads the auth
+    #    header's own fields but does not locate or verify the trailing digest, which is why the
+    #    16 bytes standing in for that digest here show up as an explicit "trailing byte(s) ...
+    #    do not form a full 20-byte RTE" note rather than being silently consumed.
+    add(rip_message(2, 2, [
+        rip_auth_md5(24, 1, 16, 42),
+        rip_rte(2, 0, "10.0.3.0", "255.255.255.0", "0.0.0.0", 4),
+    ]) + bytes(16), from_a=False)
+
+    # 5) RIPv1 Response: one conformant route (Route Tag/Subnet Mask/Next Hop all zero, as v1 requires).
+    add(rip_message(2, 1, [rip_rte(2, 0, "10.0.4.0", "0.0.0.0", "0.0.0.0", 5)]))
+
+    # 6) RIPv1 Response with a NONCONFORMANT route -- nonzero Route Tag/Subnet Mask/Next Hop
+    #    despite declaring version 1 -- triggers the "possible mislabeled RIPv2 traffic" note.
+    add(rip_message(2, 1, [rip_rte(2, 7, "10.0.5.0", "255.255.255.0", "10.0.5.1", 6)]))
+
+    # 7) Trailing garbage after one complete route: 5 stray bytes, not a full 20-byte RTE.
+    add(rip_message(2, 2, [rip_rte(2, 0, "10.0.6.0", "255.255.255.0", "0.0.0.0", 7)]) + bytes(5))
+
+    # 8) Deliberately NOT RIP: command byte 99 isn't one of RFC 1058's five values, even on RIP's
+    #    own port 520 -- the structural gate must reject this (falls back to generic "udp").
+    add(struct.pack("!BBH", 99, 2, 0) + rip_rte(2, 0, "10.0.7.0", "255.255.255.0", "0.0.0.0", 1))
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_030_000 + i, i * 1000)
+    (TESTS_DIR / "sample_rip.pcap").write_bytes(data)
+
+
+def igmp_header(msg_type: int, code: int, group: str) -> bytes:
+    return struct.pack("!BBH", msg_type, code, 0) + ip_bytes4(group)  # checksum left as 0
+
+
+def igmp_v3_query(group: str, max_resp_code: int, s_flag: bool, qrv: int, qqic: int,
+                   sources: list) -> bytes:
+    s_qrv = (0x08 if s_flag else 0) | (qrv & 0x07)
+    header = struct.pack("!BBH", 0x11, max_resp_code, 0) + ip_bytes4(group)
+    header += struct.pack("!BBH", s_qrv, qqic, len(sources))
+    for src in sources:
+        header += ip_bytes4(src)
+    return header  # checksum left as 0
+
+
+def igmp_v3_group_record(record_type: int, aux_data_len: int, group: str, sources: list) -> bytes:
+    rec = struct.pack("!BBH", record_type, aux_data_len, len(sources)) + ip_bytes4(group)
+    for src in sources:
+        rec += ip_bytes4(src)
+    rec += bytes(aux_data_len * 4)
+    return rec
+
+
+def igmp_v3_report(records: list) -> bytes:
+    # Type(1) + Reserved(1) + Checksum(2, left as 0) + Reserved(2) + Number of Group Records(2).
+    return struct.pack("!BBHHH", 0x22, 0, 0, 0, len(records)) + b"".join(records)
+
+
+def build_igmp_sample():
+    """IGMP v1/v2 (RFC 1112/2236) and v3 (RFC 3376) -- rides directly on IP protocol 2, no UDP/TCP
+    header at all, dispatched purely by that protocol number (see igmp.hpp). Covers a v1 Query/
+    Report pair, a v2 Query/Report/Leave trio, a v3 Query with a source list and the exponential
+    Max Resp Code/QQIC encoding, and a v3 Report with several group record types."""
+    packets = []
+    ALL_ROUTERS = "224.0.0.1"
+    GROUP_A, GROUP_B = "239.1.1.1", "239.2.2.2"
+
+    def add(payload: bytes, from_a: bool = True):
+        if from_a:
+            packets.append(ip_eth_frame(payload, IGMP_IP_PROTOCOL, HMI_IP, ALL_ROUTERS, HMI_MAC, PLC_MAC))
+        else:
+            packets.append(ip_eth_frame(payload, IGMP_IP_PROTOCOL, PLC_IP, GROUP_A, PLC_MAC, HMI_MAC))
+
+    # 1) IGMPv1 General Query (Code always 0 in v1).
+    add(igmp_header(0x11, 0, "0.0.0.0"))
+    # 2) IGMPv1 Membership Report for GROUP_A.
+    add(igmp_header(0x12, 0, GROUP_A), from_a=False)
+
+    # 3) IGMPv2 Group-Specific Query (nonzero Max Resp Code, a plain integer -- NOT the v3
+    #    exponential encoding, since this message is exactly 8 bytes).
+    add(igmp_header(0x11, 100, GROUP_A))
+    # 4) IGMPv2 Membership Report.
+    add(igmp_header(0x16, 0, GROUP_B), from_a=False)
+    # 5) IGMPv2 Leave Group.
+    add(igmp_header(0x17, 0, GROUP_B), from_a=False)
+
+    # 6) IGMPv3 General Query with a source list and an exponential-encoded Max Resp Code
+    #    (0x8C = exponent 0, mantissa 0xC -> (0xC|0x10)<<3 = 0x1C<<3 = 224 -> 22.4s in tenths).
+    add(igmp_v3_query("0.0.0.0", 0x8C, s_flag=True, qrv=2, qqic=125,
+                       sources=["10.0.0.1", "10.0.0.2"]))
+
+    # 7) IGMPv3 Membership Report with three group records exercising different record types.
+    add(igmp_v3_report([
+        igmp_v3_group_record(1, 0, GROUP_A, ["10.0.0.1", "10.0.0.2"]),  # MODE_IS_INCLUDE
+        igmp_v3_group_record(2, 0, GROUP_B, []),                        # MODE_IS_EXCLUDE, no sources
+        igmp_v3_group_record(5, 0, "239.3.3.3", ["10.0.0.3"]),          # ALLOW_NEW_SOURCES
+    ]), from_a=False)
+
+    # 8) Deliberately NOT IGMP: an unrecognized Type byte on IP protocol 2 -- structural gate must
+    #    reject it, falling back to generic "non-tcp".
+    add(struct.pack("!BBH", 0xEE, 0, 0) + ip_bytes4("0.0.0.0"))
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_031_000 + i, i * 1000)
+    (TESTS_DIR / "sample_igmp.pcap").write_bytes(data)
+
+
+def vrrp_message_v2(vrid: int, priority: int, addrs: list, auth_type: int = 0,
+                     adver_int: int = 1, auth_data: bytes = b"") -> bytes:
+    body = struct.pack("!BBBB", (2 << 4) | 1, vrid, priority, len(addrs))
+    body += struct.pack("!BBH", auth_type, adver_int, 0)  # checksum left as 0
+    for a in addrs:
+        body += ip_bytes4(a)
+    padded_auth = (auth_data + b"\x00" * 8)[:8]
+    body += padded_auth
+    return body
+
+
+def vrrp_message_v3(vrid: int, priority: int, addrs: list, interval_centisec: int = 100) -> bytes:
+    body = struct.pack("!BBBB", (3 << 4) | 1, vrid, priority, len(addrs))
+    body += struct.pack("!HH", interval_centisec & 0x0FFF, 0)  # checksum left as 0
+    for a in addrs:
+        body += ip_bytes4(a)
+    return body
+
+
+def build_vrrp_sample():
+    """VRRP v2 (RFC 3768) and v3 (RFC 5798) -- rides directly on IP protocol 112, no UDP/TCP
+    header at all (see vrrp.hpp). Covers ordinary v2/v3 Advertisements, v2 Simple Text Password
+    authentication (sent in cleartext -- see vrrp.hpp's Security context note), a Priority-0
+    'master is stepping down' Advertisement, and a deliberately non-VRRP-shaped payload on IP
+    protocol 112 to exercise the structural detection gate."""
+    packets = []
+    VRRP_GROUP = "224.0.0.18"
+
+    def add(payload: bytes, from_a: bool = True):
+        if from_a:
+            packets.append(ip_eth_frame(payload, VRRP_IP_PROTOCOL, HMI_IP, VRRP_GROUP, HMI_MAC, PLC_MAC))
+        else:
+            packets.append(ip_eth_frame(payload, VRRP_IP_PROTOCOL, PLC_IP, VRRP_GROUP, PLC_MAC, HMI_MAC))
+
+    # 1) VRRPv2 Advertisement, priority 100 (ordinary backup), no authentication, one virtual IP.
+    add(vrrp_message_v2(1, 100, ["192.168.1.1"]))
+
+    # 2) VRRPv2 Advertisement with Simple Text Password authentication.
+    add(vrrp_message_v2(1, 200, ["192.168.1.1"], auth_type=1, auth_data=b"cisco12"), from_a=False)
+
+    # 3) VRRPv2 Advertisement, priority 255 (address owner), two virtual IPs.
+    add(vrrp_message_v2(2, 255, ["192.168.2.1", "192.168.2.2"]))
+
+    # 4) VRRPv2 Advertisement, priority 0 -- the current master stepping down.
+    add(vrrp_message_v2(1, 0, ["192.168.1.1"]), from_a=False)
+
+    # 5) VRRPv3 Advertisement, centisecond interval.
+    add(vrrp_message_v3(3, 100, ["192.168.3.1"], interval_centisec=100))
+
+    # 6) Deliberately NOT VRRP: Type nibble is 2 (undefined; only 1 is ever used) -- structural
+    #    gate must reject it, falling back to generic "non-tcp".
+    add(struct.pack("!BBBB", (2 << 4) | 2, 1, 100, 0) + struct.pack("!BBH", 0, 1, 0))
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_032_000 + i, i * 1000)
+    (TESTS_DIR / "sample_vrrp.pcap").write_bytes(data)
+
+
+def hsrp_v1_message(opcode: int, state: int, hellotime: int, holdtime: int, priority: int,
+                     group: int, auth_data: bytes, virtual_ip: str) -> bytes:
+    padded_auth = (auth_data + b"\x00" * 8)[:8]
+    return (struct.pack("!BBBBBBBB", 0, opcode, state, hellotime, holdtime, priority, group, 0) +
+            padded_auth + ip_bytes4(virtual_ip))
+
+
+def hsrp_tlv(tlv_type: int, value: bytes) -> bytes:
+    return struct.pack("!BB", tlv_type, len(value)) + value
+
+
+def hsrp_v2_group_state(version: int, opcode: int, state: int, ip_version: int, group_number: int,
+                         identifier: bytes, priority: int, hello_time_ms: int, hold_time_ms: int,
+                         virtual_ip: str) -> bytes:
+    value = struct.pack("!BBBBH", version, opcode, state, ip_version, group_number)
+    value += identifier  # 6 bytes
+    value += struct.pack("!III", priority, hello_time_ms, hold_time_ms)
+    value += ip_bytes4(virtual_ip)
+    value += bytes(40 - len(value))  # pad to the TLV's declared 40-byte length -- see hsrp.hpp's
+                                       # own file header comment on this gap for IPv4
+    return hsrp_tlv(1, value)
+
+
+def build_hsrp_sample():
+    """HSRP v1 (RFC 2281, a fixed 20-byte message) and v2 (Cisco-proprietary TLV framing) -- see
+    hsrp.hpp for the exact wire layout and how this decoder tells the two apart. Covers v1's
+    Hello/Coup/Resign opcodes and its cleartext authentication field (see hsrp.hpp's Security
+    context note), a v2 Group State TLV, and a deliberately non-HSRP-shaped payload on HSRP's own
+    port 1985."""
+    packets = []
+    HSRP_GROUP = "224.0.0.102"
+
+    def add(payload: bytes, from_a: bool = True):
+        if from_a:
+            packets.append(udp_ip_eth_frame(payload, HSRP_PORT, HSRP_PORT, HMI_IP, HSRP_GROUP, HMI_MAC, PLC_MAC))
+        else:
+            packets.append(udp_ip_eth_frame(payload, HSRP_PORT, HSRP_PORT, PLC_IP, HSRP_GROUP, PLC_MAC, HMI_MAC))
+
+    # 1) HSRPv1 Hello, Active state, conventional "cisco" cleartext authentication.
+    add(hsrp_v1_message(0, 16, 3, 10, 100, 1, b"cisco", "192.168.1.1"))
+
+    # 2) HSRPv1 Coup -- a router asserting itself as the new Active router.
+    add(hsrp_v1_message(1, 4, 3, 10, 110, 1, b"cisco", "192.168.1.1"), from_a=False)
+
+    # 3) HSRPv1 Resign -- the Active router giving up the role.
+    add(hsrp_v1_message(2, 8, 3, 10, 100, 1, b"cisco", "192.168.1.1"))
+
+    # 4) HSRPv2: a single Group State TLV, Active state.
+    add(hsrp_v2_group_state(2, 0, 16, 4, 1, bytes.fromhex("000c29aabbcc"), 100, 3000, 10000,
+                             "192.168.2.1"))
+
+    # 5) Deliberately NOT HSRP: a payload that is neither a valid 20-byte v1 message nor a
+    #    self-consistent TLV chain -- structural gate must reject it, falling back to generic
+    #    "udp".
+    add(bytes([0x05, 0x00, 0x01, 0x02, 0x03]))
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_033_000 + i, i * 1000)
+    (TESTS_DIR / "sample_hsrp.pcap").write_bytes(data)
+
+
 if __name__ == "__main__":
     TESTS_DIR.mkdir(exist_ok=True)
     build_modbus_sample()
@@ -7609,4 +7913,8 @@ if __name__ == "__main__":
     build_nbns_sample()
     build_doh_sample()
     build_vlan_zones_sample()
+    build_rip_sample()
+    build_igmp_sample()
+    build_vrrp_sample()
+    build_hsrp_sample()
     print("wrote sample fixtures to", TESTS_DIR)

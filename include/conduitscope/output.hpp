@@ -153,6 +153,10 @@ private:
     std::map<std::string, size_t> dns_family_opcode_counts_;
     std::map<std::string, size_t> nbns_opcode_counts_;
     std::map<std::string, size_t> doh_provider_counts_;  // keyed by doh_matched_provider
+    std::map<std::string, size_t> rip_command_counts_;   // keyed by rip_command_name
+    std::map<std::string, size_t> igmp_type_counts_;     // keyed by igmp_type_name
+    std::map<std::string, size_t> vrrp_version_counts_;  // "VRRPv2"/"VRRPv3"
+    std::map<std::string, size_t> hsrp_version_counts_;  // "HSRPv1"/"HSRPv2"
     bool has_ts_ = false;
     double first_ts_ = 0.0, last_ts_ = 0.0;
 };

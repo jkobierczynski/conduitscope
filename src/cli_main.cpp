@@ -177,7 +177,8 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
                 const std::vector<int>& mqtt_ports, const std::vector<int>& ffhse_ports,
                 const std::vector<int>& dns_ports, const std::vector<int>& mdns_ports,
                 const std::vector<int>& llmnr_ports, const std::vector<int>& nbns_ports,
-                const std::vector<int>& doh_ports,
+                const std::vector<int>& doh_ports, const std::vector<int>& rip_ports,
+                const std::vector<int>& hsrp_ports,
                 size_t max_packets,
                 bool stats, bool strict, bool quiet,
                 bool no_color, bool force_color,
@@ -227,6 +228,10 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
                                : (protocol == "llmnr")  ? ProtocolFilter::LlmnrOnly
                                : (protocol == "nbns")   ? ProtocolFilter::NbnsOnly
                                : (protocol == "doh")    ? ProtocolFilter::DohOnly
+                               : (protocol == "rip")    ? ProtocolFilter::RipOnly
+                               : (protocol == "igmp")   ? ProtocolFilter::IgmpOnly
+                               : (protocol == "vrrp")   ? ProtocolFilter::VrrpOnly
+                               : (protocol == "hsrp")   ? ProtocolFilter::HsrpOnly
                                                         : ProtocolFilter::Auto;
     for (int p : modbus_ports) options.extra_modbus_ports.push_back(static_cast<uint16_t>(p));
     for (int p : dnp3_ports) options.extra_dnp3_ports.push_back(static_cast<uint16_t>(p));
@@ -244,6 +249,8 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
     for (int p : llmnr_ports) options.extra_llmnr_ports.push_back(static_cast<uint16_t>(p));
     for (int p : nbns_ports) options.extra_nbns_ports.push_back(static_cast<uint16_t>(p));
     for (int p : doh_ports) options.extra_doh_ports.push_back(static_cast<uint16_t>(p));
+    for (int p : rip_ports) options.extra_rip_ports.push_back(static_cast<uint16_t>(p));
+    for (int p : hsrp_ports) options.extra_hsrp_ports.push_back(static_cast<uint16_t>(p));
 
     try {
         // Built once per `decode` invocation, before opening the packet source, so a bad --hosts/
@@ -494,7 +501,7 @@ int main(int argc, char** argv) {
     std::vector<int> decode_modbus_ports, decode_dnp3_ports, decode_s7comm_ports, decode_iec104_ports,
         decode_enip_ports, decode_enip_io_ports, decode_bacnet_ports, decode_hartip_ports,
         decode_opcua_ports, decode_mqtt_ports, decode_ffhse_ports, decode_dns_ports, decode_mdns_ports,
-        decode_llmnr_ports, decode_nbns_ports, decode_doh_ports;
+        decode_llmnr_ports, decode_nbns_ports, decode_doh_ports, decode_rip_ports, decode_hsrp_ports;
     size_t decode_max_packets = 0;
     bool decode_stats = false, decode_strict = false;
     bool decode_oui = true, decode_resolve = false, decode_service_names = true;
@@ -531,7 +538,7 @@ int main(int argc, char** argv) {
     decode_cmd
         ->add_option("--protocol", decode_protocol,
                       "Restrict decoding to one protocol instead of auto-detecting all of them")
-        ->transform(CLI::IsMember({"auto", "modbus", "dnp3", "s7comm", "mms", "iec104", "enip", "profinet", "goose", "sv", "ethercat", "stp", "devicenet", "bacnet", "hartip", "opcua", "mqtt", "s7comm-plus", "ff-hse", "dns", "mdns", "llmnr", "nbns", "doh"}))
+        ->transform(CLI::IsMember({"auto", "modbus", "dnp3", "s7comm", "mms", "iec104", "enip", "profinet", "goose", "sv", "ethercat", "stp", "devicenet", "bacnet", "hartip", "opcua", "mqtt", "s7comm-plus", "ff-hse", "dns", "mdns", "llmnr", "nbns", "doh", "rip", "igmp", "vrrp", "hsrp"}))
         ->capture_default_str();
     decode_cmd->add_option("--modbus-port", decode_modbus_ports,
                             "Additional TCP port to treat as expected for Modbus (repeatable); "
@@ -599,6 +606,16 @@ int main(int argc, char** argv) {
                             "(repeatable); widens detection in Auto mode, same caveat as "
                             "--dns-port -- normally only attempted on port 443. Detection only -- "
                             "see docs/MANUAL.md; the DNS message itself is never visible");
+    decode_cmd->add_option("--rip-port", decode_rip_ports,
+                            "Additional UDP port to treat as expected for RIP (repeatable); widens "
+                            "detection in Auto mode, same caveat as --dns-port -- normally only "
+                            "attempted on port 520");
+    decode_cmd->add_option("--hsrp-port", decode_hsrp_ports,
+                            "Additional UDP port to treat as expected for HSRP (repeatable); "
+                            "widens detection in Auto mode, same caveat as --dns-port -- normally "
+                            "only attempted on port 1985. IGMP and VRRP need no port option at all "
+                            "-- both are dispatched purely by IP protocol number, see docs/"
+                            "MANUAL.md");
     decode_cmd->add_option("--max-packets", decode_max_packets,
                             "Stop after decoding this many packets (0 = unlimited)")
         ->capture_default_str();
@@ -727,6 +744,7 @@ int main(int argc, char** argv) {
                            decode_enip_ports, decode_enip_io_ports, decode_bacnet_ports, decode_hartip_ports,
                            decode_opcua_ports, decode_mqtt_ports, decode_ffhse_ports, decode_dns_ports,
                            decode_mdns_ports, decode_llmnr_ports, decode_nbns_ports, decode_doh_ports,
+                           decode_rip_ports, decode_hsrp_ports,
                            decode_max_packets, decode_stats, decode_strict,
                            quiet, no_color, force_color, decode_oui, decode_resolve, decode_hosts_file,
                            decode_service_names, decode_services_file, *diag);

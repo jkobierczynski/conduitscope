@@ -22,7 +22,9 @@
 #include "conduitscope/ffhse.hpp"
 #include "conduitscope/goose.hpp"
 #include "conduitscope/hartip.hpp"
+#include "conduitscope/hsrp.hpp"
 #include "conduitscope/iec104.hpp"
+#include "conduitscope/igmp.hpp"
 #include "conduitscope/mms.hpp"
 #include "conduitscope/modbus.hpp"
 #include "conduitscope/mqtt.hpp"
@@ -30,11 +32,13 @@
 #include "conduitscope/opcua.hpp"
 #include "conduitscope/pcap_reader.hpp"
 #include "conduitscope/profinet.hpp"
+#include "conduitscope/rip.hpp"
 #include "conduitscope/s7commplus.hpp"
 #include "conduitscope/stp.hpp"
 #include "conduitscope/sv.hpp"
 #include "conduitscope/tcp.hpp"
 #include "conduitscope/tls_sni.hpp"
+#include "conduitscope/vrrp.hpp"
 
 namespace conduitscope {
 
@@ -64,6 +68,10 @@ enum class ProtocolFilter {
     LlmnrOnly,    // only attempt LLMNR decoding
     NbnsOnly,     // only attempt NetBIOS Name Service (NBT-NS) decoding
     DohOnly,      // only attempt DNS-over-HTTPS detection (TLS ClientHello SNI only -- see tls_sni.hpp)
+    RipOnly,      // only attempt RIP v1/v2 decoding
+    IgmpOnly,     // only attempt IGMP v1/v2/v3 decoding
+    VrrpOnly,     // only attempt VRRP v2/v3 decoding
+    HsrpOnly,     // only attempt HSRP v1/v2 decoding
 };
 
 struct DecodeOptions {
@@ -102,6 +110,19 @@ struct DecodeOptions {
     std::vector<uint16_t> extra_llmnr_ports;    // UDP -- see LLMNR_PORT (5355)
     std::vector<uint16_t> extra_nbns_ports;     // UDP -- see NBNS_PORT (137)
     std::vector<uint16_t> extra_doh_ports;      // TCP -- see DOH_PORT (443)
+    std::vector<uint16_t> extra_rip_ports;      // UDP -- see RIP_PORT (520); joins the same
+                                                  // detection-gating group as DNS/mDNS/LLMNR/
+                                                  // NBT-NS above, for the same reason: RIP's wire
+                                                  // format signal (a handful of small integers) is
+                                                  // too weak to try opportunistically on every UDP
+                                                  // port -- see rip.hpp's own try_parse_rip comment.
+    std::vector<uint16_t> extra_hsrp_ports;     // UDP -- see HSRP_PORT (1985); same detection-
+                                                  // gating group and reasoning as extra_rip_ports
+                                                  // above -- see hsrp.hpp's own try_parse_hsrp
+                                                  // comment. IGMP and VRRP need no port list at
+                                                  // all: both are dispatched purely by their
+                                                  // IANA-exclusive IP protocol number (2 and 112),
+                                                  // which is a strong signal with no port concept.
     // If true, a parse failure at the Ethernet/IPv4/TCP layer is rethrown to
     // the caller instead of being recorded as a per-packet "parse-error"
     // result. Off by default so one malformed packet doesn't abort decoding
@@ -169,7 +190,15 @@ struct DecodedPacket {
     // matching port -- 53/5353/5355 -- that try_parse_dns_message recognizes, see dns_* fields
     // below), "nbns" (NetBIOS Name Service/NBT-NS, UDP port 137, see nbns_* fields below), and
     // "doh" (a TCP/443 flow whose TLS ClientHello SNI matches a known DNS-over-HTTPS resolver --
-    // detection only, see doh_* fields below and tls_sni.hpp).
+    // detection only, see doh_* fields below and tls_sni.hpp). Also "rip" (a UDP payload on port
+    // 520, or any port with --protocol rip, that try_parse_rip recognizes -- see rip_* fields
+    // below and rip.hpp), "igmp" (an IP payload with IP protocol number 2, dispatched regardless
+    // of port since IGMP has none, that try_parse_igmp recognizes -- see igmp_* fields below and
+    // igmp.hpp; a non-IGMP-shaped IP-protocol-2 payload still falls through to "non-tcp"), "vrrp"
+    // (an IP payload with IP protocol number 112 that try_parse_vrrp recognizes -- see vrrp_*
+    // fields below and vrrp.hpp; same "non-tcp" fallback if it doesn't structurally match), and
+    // "hsrp" (a UDP payload on port 1985, or any port with --protocol hsrp, that try_parse_hsrp
+    // recognizes -- see hsrp_* fields below and hsrp.hpp).
     std::string protocol;
     std::string summary;
     std::vector<std::string> notes;
@@ -875,6 +904,41 @@ struct DecodedPacket {
     std::string doh_sni;
     std::string doh_matched_provider;
     std::vector<std::string> doh_alpn_protocols;
+
+    // Only set when protocol == "rip" -- see try_parse_rip in rip.hpp.
+    uint8_t rip_version = 0;
+    std::string rip_command_name;
+    // One "route/entry" rendering per RipRoute, wire order -- e.g. "192.168.1.0/255.255.255.0 via
+    // 10.0.0.1 metric 2" for an ordinary route, "full table request" for the AFI-0 marker entry,
+    // or "authentication: Simple Password" / "authentication: Keyed MD5 (key id N)" for an auth
+    // entry. Capped at 50 entries, same convention as s7comm_item_tags above.
+    std::vector<std::string> rip_routes;
+    bool rip_routes_truncated = false;  // more than 50 route table entries were present
+
+    // Only set when protocol == "igmp" -- see try_parse_igmp in igmp.hpp.
+    int igmp_version = 0;
+    std::string igmp_type_name;
+    std::string igmp_group_address;  // Query/v1/v2 Report/Leave only; empty for a v3 Report
+    // One "type: multicast_address (N source(s))" entry per Group Record, wire order --
+    // v3 Report only. Capped at 50 entries.
+    std::vector<std::string> igmp_group_records;
+    bool igmp_group_records_truncated = false;  // more than 50 group records were declared
+
+    // Only set when protocol == "vrrp" -- see try_parse_vrrp in vrrp.hpp.
+    uint8_t vrrp_version = 0;
+    uint8_t vrrp_virtual_router_id = 0;
+    uint8_t vrrp_priority = 0;
+    std::vector<std::string> vrrp_ip_addresses;  // capped at 50 entries
+    bool vrrp_ip_addresses_truncated = false;    // more than 50 addresses were declared
+
+    // Only set when protocol == "hsrp" -- see try_parse_hsrp in hsrp.hpp.
+    uint8_t hsrp_version = 0;
+    std::string hsrp_opcode_name;   // v1 only; empty for v2 (see hsrp_tlv_types instead)
+    std::string hsrp_state_name;    // v1 only
+    std::string hsrp_virtual_ip;    // v1 only
+    std::vector<std::string> hsrp_tlv_types;  // v2 only: one "Group State"/"Interface State"/...
+                                                // entry per TLV, wire order. Capped at 50 entries.
+    bool hsrp_tlvs_truncated = false;          // more than 50 TLVs were present
 };
 
 // Cross-packet DNP3 fragment-reassembly state for one directional TCP flow (src ip:port -> dst

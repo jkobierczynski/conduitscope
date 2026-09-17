@@ -1701,6 +1701,28 @@ TLS-encrypted) decrypted content. See PROTOCOL COVERAGE's "DNS / mDNS /
 LLMNR / NetBIOS Name Service (NBT-NS) / DNS-over-HTTPS detection" section
 for the full wire formats and what is and isn't decoded.
 
+**RIP (UDP) and HSRP (UDP) join that same port-gated group** -- see
+`extra_rip_ports`/`extra_hsrp_ports` in `decoder.hpp` -- for the identical
+reason: RIP's own structural signal (a Command byte in `1..5`, a Version
+byte of `1` or `2`) and HSRP's (a version/opcode/state match for v1, or a
+self-consistent TLV chain for v2) are both too weak to try against
+arbitrary UDP traffic on every port. `--protocol auto` only attempts RIP on
+UDP port 520 and HSRP on UDP port 1985, widened by `--rip-port`/
+`--hsrp-port` respectively; `--protocol rip`/`--protocol hsrp` skip the port
+gate entirely, same as the DNS family above. Unlike RIP/HSRP, though, RIP
+and HSRP are tried BEFORE FF-HSE's own opportunistic (any-port) check in the
+UDP dispatch chain, not after every other opportunistic protocol the way
+DNS/mDNS/LLMNR/NBT-NS are -- a synthetic HSRPv1 message was found, while
+building this feature, to satisfy FF-HSE's own weaker structural gate and
+get misdetected as truncated FF-HSE traffic when tried in FF-HSE's usual
+lowest-priority position; once RIP's/HSRP's own port gate has already
+matched, that is a stronger signal than FF-HSE's port-independent one, so it
+runs first. **IGMP and VRRP need no port gate or option at all**: both ride
+directly on IP with no UDP/TCP header, and are dispatched purely by their
+own IANA-exclusive IP protocol number (2 and 112) -- a signal with no port
+concept to widen or restrict in the first place. See PROTOCOL COVERAGE's
+"RIP / IGMP / VRRP / HSRP" section for the full wire formats.
+
 ## OUTPUT FORMATS
 
 ### text (default)
@@ -6879,6 +6901,205 @@ name whose length byte isn't `0x20`, a ClientHello to an ordinary (non-DoH)
 hostname, and a non-TLS TCP/443 payload -- every one of which must fall
 through to the generic `udp`/`tcp` report rather than being misdetected.
 
+### RIP / IGMP / VRRP / HSRP
+
+Four IT routing/redundancy protocols, added alongside this project's OT/ICS
+coverage because they routinely share the same segments as GOOSE/SV's own
+routable multicast variants and because two of them (VRRP/HSRP) are a
+straightforward gateway-spoofing/MITM primitive worth surfacing on their own
+merits. RIP and HSRP are **port-gated in `--protocol auto`**, the same
+posture as the DNS family above and for the same reason (see PROTOCOL
+DETECTION); IGMP and VRRP need no port gate at all -- both are dispatched
+purely by their own IANA-exclusive IP protocol number, a strong signal with
+no port concept to gate in the first place.
+
+#### RIP (Routing Information Protocol) v1 (RFC 1058) and v2 (RFC 2453), UDP port 520
+
+A RIP message is a 4-byte header -- Command(1) + Version(1) + a 2-byte field
+RFC 1058 calls "must be zero" and RFC 2453 repurposes as a "Routing Domain"
+(shown as a raw value, not decoded further) -- followed by zero or more
+20-byte Route Table Entries (RTEs). Command: `1` Request, `2` Response, `3`
+Trace On (obsolete), `4` Trace Off (obsolete), `5` Reserved (RFC 1058's own
+note: historically used by Sun Microsystems' `routed`). RIPv1 and RIPv2
+share the exact same 20-byte RTE layout on the wire -- RIPv2 simply gives
+meaning to three fields RIPv1 requires to be zero (Route Tag, Subnet Mask,
+Next Hop) -- so every RTE is read the same way regardless of version, with a
+note raised when a supposed-v1 message's own "must be zero" fields aren't.
+
+Two RTE shapes are not ordinary routes and are recognized structurally
+rather than decoded as an address: Address Family Identifier (AFI) `0`
+marks a "give me your whole table" full-table-request marker entry (RFC
+1058 §3.4.1), and AFI `0xFFFF` (RIPv2 only) marks an authentication entry
+(RFC 2453 §4.2) rather than a route. Two authentication types are decoded:
+**Simple Password** (`AuthType 2`) is a 16-byte cleartext password, NUL-
+padded, decoded and surfaced directly; **Keyed MD5** (`AuthType 3`, RFC
+2082) has its own auth-header fields (RIP-2 Packet Length, Key ID, Auth Data
+Length, Sequence Number) fully decoded, but the actual MD5 digest -- a
+SEPARATE block appended after the last real route RTE, outside the RTE
+chain itself -- is neither located nor verified (see LIMITATIONS); those
+trailing digest bytes show up as an explicit "trailing byte(s) ... do not
+form a full 20-byte RTE" note rather than being silently consumed or
+misread as a bogus route.
+
+**Security context:** RIP has no meaningful authentication in practice.
+RIPv1 has none at all; RIPv2 Simple Password sends the password in
+plaintext on the wire; even Keyed MD5 only proves the sender knows a shared
+key, not who the sender actually is. Seeing RIP traffic at all on a segment
+is often worth a second look -- it is a legacy, low-security IGP a
+well-segmented modern network usually shouldn't be running.
+
+The detection gate itself is weak on its own (a handful of small integers:
+Command in `1..5`, Version `1` or `2`), which is why `--protocol auto` only
+tries it on UDP port 520 -- widen this with `--rip-port`, or bypass the gate
+entirely with `--protocol rip`.
+
+#### IGMP (Internet Group Management Protocol) v1/v2 (RFC 1112/2236) and v3 (RFC 3376), IP protocol 2
+
+IGMP rides directly on IP (protocol number 2) -- there is no UDP or TCP
+header, and therefore no port at all; dispatch in `--protocol auto` is keyed
+purely on that protocol number, which is IANA-exclusive to IGMP. Five
+message shapes are recognized by a Type byte, with Type `0x11` (Membership
+Query) further disambiguated by length since all three IGMP versions share
+that one Type value for a query: exactly 8 bytes is IGMPv1 (Max Resp Code
+always `0`) or IGMPv2 (Max Resp Code a nonzero plain integer, in tenths of a
+second -- NOT the v3 exponential encoding below); 12 or more bytes is an
+IGMPv3 Query, adding an S/QRV byte, a QQIC, and an optional source-address
+list. `0x12` is a Version 1 Membership Report, `0x16` a Version 2
+Membership Report, `0x17` a Version 2 Leave Group, and `0x22` an IGMPv3
+Membership Report, which is shaped completely differently from every other
+message here: a list of per-group **Group Records** (RFC 3376 §4.2) rather
+than one single group address --
+RecordType(1)+AuxDataLen(1)+NumSources(2)+MulticastAddress(4)+SourceAddress[N]
+(4 each)+AuxData(AuxDataLen 32-bit words, not decoded further). RecordType:
+`1` Mode Is Include, `2` Mode Is Exclude, `3` Change To Include Mode, `4`
+Change To Exclude Mode, `5` Allow New Sources, `6` Block Old Sources.
+
+IGMPv3's **Max Resp Code** (Query only) and **QQIC** fields share one
+exponential "floating-point" encoding (RFC 3376 §4.1.1/§4.1.7): a value
+below 128 (high bit clear) is used as-is; otherwise bits 6-4 are an
+exponent and bits 3-0 a mantissa, decoded as `(mantissa | 0x10) <<
+(exponent + 3)`. Both fields are rendered through this decoding (Max Resp
+Code as milliseconds, QQIC as seconds) rather than showing the raw encoded
+byte.
+
+**Security context:** IGMP has no authentication at all in any version --
+any host on the local segment can claim group membership, and more
+seriously, can send Membership Queries and impersonate a multicast router,
+which most hosts and IGMP-snooping switches will believe unquestioningly.
+
+Every repeated list here (a v3 Query's source addresses, a v3 Report's
+group records, and each group record's own source addresses) is capped at
+50 entries, the same convention used throughout this codebase, with a note
+when a packet declared more than that.
+
+#### VRRP (Virtual Router Redundancy Protocol) v2 (RFC 3768) and v3 (RFC 5798), IP protocol 112
+
+VRRP also rides directly on IP (protocol number 112, IANA-exclusive) with
+no UDP/TCP header and no port concept. Both versions share an 8-byte fixed
+header before the virtual IP address list: Version(high nibble)/Type(low
+nibble, always `1` -- Advertisement, the only value either RFC defines) +
+Virtual Router ID + Priority + a count of virtual IP addresses, then 4
+version-specific bytes -- v2: AuthType(1)+AdverInt(1, whole seconds)+
+Checksum(2); v3: Reserved(4 bits)+Max Advertisement Interval(12 bits,
+centiseconds)+Checksum(2), packed into 2 bytes; v3 removed authentication
+entirely. **Priority** `0` means the current master is stepping down, `255`
+means "address owner" (the router whose real interface address IS the
+virtual IP), and `1`-`254` is an ordinary backup's priority (RFC default
+100). After the address list, VRRPv2 (only) carries an 8-byte
+Authentication Data field, meaningful only for AuthType `1` (Simple Text
+Password -- decoded as cleartext); AuthType `2` (IP Authentication Header,
+already deprecated by RFC 3768 itself) and AuthType `254` (a non-standard
+Cisco MD5 extension seen in the wild) are named but not decoded further.
+This decoder does not handle VRRP-for-IPv6 (16-byte addresses, a different
+multicast group, and this project has no IPv6 address formatting anywhere).
+
+**Security context:** any host on the segment that can send a
+higher-priority Advertisement (or a Priority-0 "I'm stepping down") can
+take over as the virtual router -- a straightforward gateway-spoofing/MITM
+primitive. VRRPv2's only authentication option is cleartext and does
+nothing to stop a listener from replaying it; VRRPv3 relies purely on
+network-layer segmentation instead.
+
+The virtual IP address list is capped at 50 entries, same convention as
+elsewhere.
+
+#### HSRP (Hot Standby Router Protocol) v1 (RFC 2281) and v2 (Cisco proprietary), UDP port 1985
+
+HSRPv1 is a single fixed-format 20-byte UDP payload: Version(1, always `0`)
++ OpCode(1) + State(1) + Hellotime(1, seconds) + Holdtime(1, seconds) +
+Priority(1) + Group(1) + Reserved(1) + Authentication Data(8, cleartext) +
+Virtual IP Address(4). OpCode: `0` Hello, `1` Coup, `2` Resign, `3`
+Advertise. State: `0` Initial, `1` Learn, `2` Listen, `4` Speak, `8`
+Standby, `16` Active. HSRPv2 (never formally standardized by Cisco; needed
+for more than 255 groups and for IPv6) abandons that fixed layout entirely
+for a flat TLV chain with no header before the first TLV --
+Type(1)+Length(1, Value bytes only)+Value, repeated until the payload is
+exactly consumed. Four TLV types are defined: `1` Group State, `2`
+Interface State, `3` Text Authentication, `4` MD5 Authentication; only
+Group State is decoded field-by-field (Version+OpCode+State+IPVersion+Group
+Number+a 6-byte per-group Identifier+Priority+Hello/Hold Timer in
+milliseconds+Virtual IP Address), the other three are recognized and shown
+with their raw Value bytes, not decoded further. A Group State TLV declares
+a 40-byte length regardless of address family: for IPv6 that exactly
+accounts for all 40 bytes (24 + a 16-byte address), but for IPv4 it only
+accounts for 28 of the 40, leaving 12 reserved/padding bytes this decoder
+does not interpret; an IPv6 Group State's own Virtual IP Address is left
+undecoded (noted, not guessed at) since this project has no IPv6 address
+formatting anywhere.
+
+This decoder tries the HSRPv1 fixed shape first (exact length 20, Version
+byte `0`, a valid OpCode/State) and falls back to parsing the payload as a
+self-consistent HSRPv2 TLV chain otherwise -- requiring the TLV chain to
+consume the payload exactly, with a recognized first TLV type, is what
+keeps an arbitrary non-HSRP UDP payload from being misdetected, since HSRP
+has no protocol-identifying magic number in either version.
+
+**Security context:** like VRRP, HSRP lets any host on the segment send a
+higher-priority Hello/Coup and take over as the active router. HSRPv1's
+only authentication (an 8-byte plaintext field, conventionally the ASCII
+string `cisco`) provides no real protection and is surfaced directly.
+
+Both HSRPv1's and HSRPv2's own structural checks are weak enough on their
+own that `--protocol auto` only tries this decoder on UDP port 1985 --
+widen this with `--hsrp-port`, or bypass the gate with `--protocol hsrp`.
+**Dispatch-order note:** RIP and HSRP, despite being port-gated, are tried
+BEFORE FF-HSE's own fully opportunistic (any-port) check in this decoder's
+UDP dispatch chain -- a synthetic HSRPv1 message was found, while building
+this feature, to satisfy FF-HSE's own weaker structural gate and get
+misdetected as truncated FF-HSE traffic when tried in the other order; once
+RIP's/HSRP's own port gate has already matched, that specific check is a
+stronger signal than FF-HSE's opportunistic one, so it wins.
+
+#### Validation
+
+All four protocols here are validated against `tools/make_sample_pcap.py`'s
+own hand-built, RFC/Wireshark-cross-checked fixtures (`tests/sample_rip.pcap`,
+`sample_igmp.pcap`, `sample_vrrp.pcap`, `sample_hsrp.pcap`). Each fixture
+exercises both the intended decode paths and the negative controls each
+protocol's own detection-gating design depends on: an invalid RIP Command
+byte on RIP's own port, an unrecognized IGMP Type byte on IP protocol 2, an
+invalid VRRP Type nibble on IP protocol 112, and an HSRP payload that is
+neither a valid v1 message nor a self-consistent v2 TLV chain -- every one
+of which must fall through to the generic `udp`/`non-tcp` report rather
+than being misdetected.
+
+IGMP additionally has one real-world capture: `tests/real_captures/igmp/
+plant1_igmp_only.pcap`, 12 genuine IGMPv3 Membership Reports trimmed from
+the same `Plant1.pcap` this project's STP/PROFINET/CIP-I/O fixtures already
+draw from (see `tests/real_captures/igmp/ATTRIBUTION.md`), cross-checked
+field-by-field against `tshark`'s own IGMP dissector. It exercises two
+things the synthetic fixture alone does not: a genuine 4-byte IP Router
+Alert option (a 24-byte IP header, not the usual 20) on every frame, and a
+real occurrence of this decoder's Ethernet-minimum-frame-size padding note.
+A 498-file search across `automayt/ICS-pcap`, `ITI/ICS-Security-Tools`, and
+`mrhenrike/PCAPTrafficAnalysis` for the same real-capture effort found no
+RIP, VRRP, or HSRP traffic anywhere (unsurprising -- those collections are
+curated around single-device ICS protocol captures, not multi-router
+topologies); those three remain synthetic-fixture-only, the same accepted,
+precedented gap already documented for this codebase's FF-HSE and DeviceNet
+decoders (see `tests/real_captures/igmp/ATTRIBUTION.md`'s "Search outcome
+for RIP/VRRP/HSRP" section for the full account).
+
 ### Link/IP-layer plumbing: non-IPv4 Ethernet, and non-TCP IPv4 (including UDP)
 
 Every protocol above rides on Ethernet + IPv4 + TCP. Traffic outside that --
@@ -7809,6 +8030,38 @@ These are current, not aspirational -- each has a corresponding ROADMAP item.
   will not match traffic this decoder itself already decodes as
   `dns`/`mdns`/`llmnr`/`nbns`/`doh`. This was deliberately left out of this
   round's scope (decode/detect only) and is tracked in ROADMAP.
+- **RIP's Keyed MD5 (RFC 2082) authentication digest is neither located nor
+  verified.** The auth header's own fields (RIP-2 Packet Length, Key ID,
+  Auth Data Length, Sequence Number) are fully decoded, but the actual MD5
+  digest value -- a separate block appended after the last real route RTE,
+  outside the RTE chain -- is not computed or checked, and its trailing
+  bytes show up as a generic "trailing byte(s) do not form a full 20-byte
+  RTE" note rather than a dedicated digest field. See PROTOCOL COVERAGE's
+  RIP section.
+- **VRRP-for-IPv6 and HSRPv2-for-IPv6 cannot be decoded.** Neither VRRP nor
+  HSRP is IP-version-gated at the transport level, but this project has no
+  IPv6 address formatting anywhere in the codebase (see `ipv4.hpp`) -- a
+  VRRPv3 message never distinguishes IP version at all on the wire (RFC
+  5798 relies entirely on the address list's own byte count, 4 vs. 16 bytes
+  per entry, which this decoder does not attempt to disambiguate) and is
+  effectively only exercised against IPv4 addresses; an HSRPv2 Group State
+  TLV DOES declare its own IP Version field, so that case is at least
+  detected and explicitly noted as "not decoded" rather than silently
+  misread, per PROTOCOL COVERAGE's HSRP section.
+- **None of RIP/IGMP/VRRP/HSRP are wired into the `policy validate` conduit
+  `protocols` classification**, for the same reason and with the same
+  ROADMAP tracking as the DNS-family bullet above -- a conduit restricted to
+  one of these protocol names in policy YAML will not match traffic this
+  decoder already decodes as `rip`/`igmp`/`vrrp`/`hsrp`.
+- **RIP, VRRP, and HSRP have no real-capture validation at all** -- the same
+  honest gap already documented for this codebase's other synthetic-only
+  protocols (FF-HSE, DeviceNet); a 498-file search across three public ICS
+  pcap collections found no traffic for any of the three (unsurprising for
+  collections curated around single-device captures rather than multi-router
+  topologies). IGMP is the exception: it has one real capture
+  (`tests/real_captures/igmp/plant1_igmp_only.pcap`). See PROTOCOL
+  COVERAGE's "RIP / IGMP / VRRP / HSRP" section's own Validation subsection
+  and `tests/real_captures/igmp/ATTRIBUTION.md` for the full account.
 - **VLAN-zone conduits only ever consult a single, outermost 802.1Q tag --
   a stacked/QinQ frame can never be VLAN-zone-classified.** `parse_ethernet`
   (`link_layer.cpp`) only recognizes ordinary 802.1Q (EtherType `0x8100`);
@@ -8408,6 +8661,38 @@ malware avoiding detection:
 ```sh
 conduitscope decode -r capture.pcap --protocol doh -f json \
   | jq -r '.[] | "\(.src_ip) -> \(.dst_ip): \(.doh_matched_provider) (SNI \(.doh_sni))"'
+```
+
+Build a quick routing table inventory from a passive RIP capture -- every
+route advertised, by whom, and at what metric:
+
+```sh
+conduitscope decode -r capture.pcap --protocol rip -f json \
+  | jq -r '.[] | select(.rip_command == "Response") | .src_ip as $s |
+           (.rip_routes[] | select(startswith("authentication:") | not)) | "\($s): \(.)"'
+```
+
+See which hosts are joining/leaving which multicast groups over an IGMP
+capture -- a passive inventory of who is actually subscribed to
+GOOSE/SV-style multicast traffic:
+
+```sh
+conduitscope decode -r capture.pcap --protocol igmp -f json \
+  | jq -r '.[] | select(.igmp_type | test("Report|Leave")) |
+           "\(.src_ip): \(.igmp_type) \(.igmp_group_address)"'
+```
+
+Flag VRRP/HSRP traffic that looks like a first-hop-gateway takeover
+attempt in progress -- a Priority-0 VRRP "master is stopping" Advertisement
+or an HSRP Coup, either of which a legitimate failover can produce but
+which is also exactly what a gateway-spoofing/MITM attempt looks like on
+the wire (see PROTOCOL COVERAGE's VRRP/HSRP Security context notes):
+
+```sh
+conduitscope decode -r capture.pcap -f json \
+  | jq -r '.[] | select((.protocol == "vrrp" and .vrrp_priority == 0) or
+                         (.protocol == "hsrp" and .hsrp_opcode == "Coup")) |
+           "\(.src_ip): \(.summary)"'
 ```
 
 Check whether PROFINET RT/GOOSE/Sampled Values/EtherCAT traffic is on the
@@ -9150,6 +9435,37 @@ Deliberately left out of this pass, and not yet separately tracked as its
 own numbered roadmap item: wiring any of these five into `policy validate`/
 `PolicyEngine`'s conduit `protocols` classification, the same way item 14
 above did for the six protocols added there -- see LIMITATIONS.
+
+**RIP, IGMP, VRRP, and HSRP decode** are also now done: the first batch of a
+broader routing/redundancy-protocol addition (RIP, IGMP, VRRP, HSRP now;
+PIM, EIGRP, OSPF, BGP, and IGRP planned for a later round -- IS-IS was
+considered and deliberately deferred further still, since it rides directly
+on the data-link layer like STP rather than as an IP-protocol payload,
+roughly doubling the scope of decoding it relative to any of these). RIP
+(UDP port 520) and HSRP (UDP port 1985) join DNS/mDNS/LLMNR/NBT-NS/DoH in
+being port-gated in `--protocol auto` rather than tried opportunistically,
+for the same reason (neither has a strong enough self-describing wire
+signal) -- see PROTOCOL DETECTION. IGMP and VRRP need no port gate at all:
+both ride directly on IP (protocol numbers 2 and 112, both IANA-exclusive)
+with no UDP/TCP header, the same "no port concept" shape STP/GOOSE/SV/
+EtherCAT/PROFINET/DeviceNet already have for their own respective link
+layers. All four were added specifically because they routinely share OT
+segments with this project's existing coverage: IGMP underlies GOOSE/SV's
+own routable multicast variants, and VRRP/HSRP are a straightforward
+gateway-spoofing/MITM primitive worth surfacing regardless of whether a
+segment is otherwise "OT" or "IT" -- see PROTOCOL COVERAGE's "RIP / IGMP /
+VRRP / HSRP" section for the full wire formats, each protocol's own
+Security context note, and this section's Validation subsection. One real
+dispatch-order collision was found and fixed while building this feature:
+a synthetic HSRPv1 message satisfied FF-HSE's own weaker, fully
+opportunistic structural gate and was misdetected as truncated FF-HSE
+traffic until RIP/HSRP were moved ahead of FF-HSE (but still behind
+BACnet/HART-IP) in the UDP dispatch chain -- see PROTOCOL DETECTION.
+Deliberately left out of this pass, and not yet separately tracked as its
+own numbered roadmap item: wiring any of these four into `policy validate`/
+`PolicyEngine`'s conduit `protocols` classification (same gap as the DNS
+family above), and locating/verifying RIP's own Keyed MD5 authentication
+digest -- see LIMITATIONS for both.
 
 ### Protocols not covered at all
 

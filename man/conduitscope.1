@@ -1,6 +1,6 @@
 .TH CONDUITSCOPE 1 "2026" "conduitscope 0.1.0" "User Commands"
 .SH NAME
-conduitscope \- decode Modbus/TCP, DNP3, IEC 60870-5-104, S7comm/COTP, S7comm-Plus (Siemens TIA Portal / S7-1200/1500), IEC 61850 MMS (Manufacturing Message Specification, ISO 9506), EtherNet/IP (CIP explicit and implicit messaging), PROFINET RT (DCP and cyclic real-time IO), IEC 61850-8-1 GOOSE, IEC 61850-9-2 Sampled Values, EtherCAT, BACnet/IP, HART-IP, OPC UA Binary, MQTT (v3.1/v3.1.1/v5.0, including Sparkplug B), FOUNDATION Fieldbus HSE (FDA/SM/FMS/LAN Redundancy), IEEE Spanning Tree Protocol (STP/RSTP/MSTP), DeviceNet (CAN-bus CIP, via SocketCAN pcap captures), DNS, mDNS, LLMNR, and NetBIOS Name Service (NBT-NS), plus detect DNS-over-HTTPS (DoH) via TLS SNI matching, from offline pcap/pcapng captures
+conduitscope \- decode Modbus/TCP, DNP3, IEC 60870-5-104, S7comm/COTP, S7comm-Plus (Siemens TIA Portal / S7-1200/1500), IEC 61850 MMS (Manufacturing Message Specification, ISO 9506), EtherNet/IP (CIP explicit and implicit messaging), PROFINET RT (DCP and cyclic real-time IO), IEC 61850-8-1 GOOSE, IEC 61850-9-2 Sampled Values, EtherCAT, BACnet/IP, HART-IP, OPC UA Binary, MQTT (v3.1/v3.1.1/v5.0, including Sparkplug B), FOUNDATION Fieldbus HSE (FDA/SM/FMS/LAN Redundancy), IEEE Spanning Tree Protocol (STP/RSTP/MSTP), DeviceNet (CAN-bus CIP, via SocketCAN pcap captures), DNS, mDNS, LLMNR, and NetBIOS Name Service (NBT-NS), RIP, IGMP, VRRP, and HSRP, plus detect DNS-over-HTTPS (DoH) via TLS SNI matching, from offline pcap/pcapng captures
 .SH SYNOPSIS
 .B conduitscope
 [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-color\fR|\fB\-\-color\fR] [\fB\-\-log\-file\fR \fIFILE\fR] \fICOMMAND\fR [\fIOPTIONS\fR]
@@ -141,7 +141,7 @@ Write output here instead of stdout.
 .BR \-f ", " \-\-format " " {text,json,csv}
 Output format. Default: text.
 .TP
-.B \-\-protocol {auto,modbus,dnp3,iec104,s7comm,s7comm\-plus,mms,enip,profinet,goose,sv,ethercat,stp,devicenet,bacnet,hartip,opcua,mqtt,ff\-hse,dns,mdns,llmnr,nbns,doh}
+.B \-\-protocol {auto,modbus,dnp3,iec104,s7comm,s7comm\-plus,mms,enip,profinet,goose,sv,ethercat,stp,devicenet,bacnet,hartip,opcua,mqtt,ff\-hse,dns,mdns,llmnr,nbns,doh,rip,igmp,vrrp,hsrp}
 Restrict decoding to one protocol. Default: auto (tries all eleven TCP
 protocols, independent of port number, plus CIP I/O, BACnet/IP, HART-IP, and
 FF-HSE on every
@@ -216,7 +216,18 @@ posture every other protocol gets by default. \fBdoh\fR (DNS-over-HTTPS
 detection, TCP port 443) is detection-only \-\- its actual DNS content is
 TLS-encrypted and never decoded \-\- and works by matching a TLS
 ClientHello's plaintext SNI against a curated table of known public DoH
-resolvers; it is likewise port-gated in \fBauto\fR mode. See
+resolvers; it is likewise port-gated in \fBauto\fR mode.
+\fBrip\fR (UDP port 520) and \fBhsrp\fR (UDP port 1985) join that same
+port-gated group, for the identical reason \-\- neither has a
+self-describing wire-format signal strong enough to check safely against
+every UDP payload. Unlike dns/mdns/llmnr/nbns, though, rip/hsrp are tried
+BEFORE FF-HSE's own opportunistic check rather than after it: a synthetic
+HSRPv1 message was found, while building this feature, to satisfy FF-HSE's
+own weaker structural gate and get misdetected as truncated FF-HSE traffic
+in the other order.
+\fBigmp\fR (IP protocol 2) and \fBvrrp\fR (IP protocol 112) need no port
+gate or option at all \-\- both ride directly on IP with no UDP/TCP header,
+dispatched purely by their own IANA-exclusive IP protocol number. See
 \fBdocs/MANUAL.md\fR's PROTOCOL DETECTION and PROTOCOL COVERAGE sections
 for the full detail.
 .TP
@@ -286,6 +297,15 @@ default: 137). Repeatable. Also widens detection in \fBauto\fR mode.
 .B \-\-doh\-port \fIPORT\fR
 Same as \fB\-\-dns\-port\fR, for DNS-over-HTTPS detection (built\-in
 default: 443, TCP). Repeatable. Also widens detection in \fBauto\fR mode.
+.TP
+.B \-\-rip\-port \fIPORT\fR
+Same as \fB\-\-dns\-port\fR, for RIP (built\-in default: 520). Repeatable.
+Also widens detection in \fBauto\fR mode.
+.TP
+.B \-\-hsrp\-port \fIPORT\fR
+Same as \fB\-\-dns\-port\fR, for HSRP (built\-in default: 1985). Repeatable.
+Also widens detection in \fBauto\fR mode. IGMP and VRRP need no port option
+at all \-\- both are dispatched purely by IP protocol number.
 .TP
 .B \-\-max\-packets \fIN\fR
 Stop after decoding this many packets. Default: 0 (unlimited). With

@@ -83,6 +83,15 @@ constexpr const char* kBoldGreen = "\033[1;32m";
 constexpr const char* kWhite = "\033[37m";
 constexpr const char* kGray = "\033[90m";
 constexpr const char* kBoldYellow = "\033[1;33m";
+// Every plain/bright/bold combination of the 16 standard ANSI colors above is already spoken for
+// by an existing protocol tag by the time RIP/IGMP/VRRP/HSRP were added -- underline is a fresh
+// modifier dimension rather than another documented-reuse case like ffhse/opcua or mms/s7comm-plus
+// above (those needed to justify sharing a hue; there simply isn't a hue left to share from that
+// wouldn't require its own equally-long justification).
+constexpr const char* kUnderlineCyan = "\033[4;36m";
+constexpr const char* kUnderlineGreen = "\033[4;32m";
+constexpr const char* kUnderlineMagenta = "\033[4;35m";
+constexpr const char* kUnderlineYellow = "\033[4;33m";
 
 // Color for a packet's "[protocol]" tag -- picked so a mixed-protocol capture scans quickly by
 // eye, not for any deeper meaning. parse-error is the one exception: it gets the same "something
@@ -152,6 +161,13 @@ const char* protocol_tag_color(const std::string& protocol) {
     if (protocol == "doh") return kBoldYellow;          // also fresh -- DoH detection fires on
                                                         // ordinary TCP/443 traffic, which can appear
                                                         // alongside literally any other protocol here
+    if (protocol == "rip") return kUnderlineCyan;       // first use of the underline modifier --
+                                                        // see its own comment above; plain cyan is
+                                                        // already Modbus's, but the two never share
+                                                        // a transport (RIP is UDP/520 only)
+    if (protocol == "igmp") return kUnderlineGreen;
+    if (protocol == "vrrp") return kUnderlineMagenta;
+    if (protocol == "hsrp") return kUnderlineYellow;
     if (protocol == "parse-error") return kBoldRed;
     return kDim;  // tcp / udp / non-tcp / non-ip / unsupported-link: recognized, nothing OT-specific
 }
@@ -1029,6 +1045,67 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
             out_ << "],\n";
         }
     }
+    if (p.protocol == "rip") {
+        out_ << "    \"rip_version\": " << static_cast<unsigned>(p.rip_version) << ",\n";
+        out_ << "    \"rip_command\": \"" << json_escape(p.rip_command_name) << "\",\n";
+        if (!p.rip_routes.empty()) {
+            out_ << "    \"rip_routes\": [";
+            for (size_t i = 0; i < p.rip_routes.size(); ++i) {
+                if (i != 0) out_ << ", ";
+                out_ << "\"" << json_escape(p.rip_routes[i]) << "\"";
+            }
+            out_ << "],\n";
+        }
+        out_ << "    \"rip_routes_truncated\": " << (p.rip_routes_truncated ? "true" : "false") << ",\n";
+    }
+    if (p.protocol == "igmp") {
+        out_ << "    \"igmp_version\": " << p.igmp_version << ",\n";
+        out_ << "    \"igmp_type\": \"" << json_escape(p.igmp_type_name) << "\",\n";
+        if (!p.igmp_group_address.empty()) {
+            out_ << "    \"igmp_group_address\": \"" << json_escape(p.igmp_group_address) << "\",\n";
+        }
+        if (!p.igmp_group_records.empty()) {
+            out_ << "    \"igmp_group_records\": [";
+            for (size_t i = 0; i < p.igmp_group_records.size(); ++i) {
+                if (i != 0) out_ << ", ";
+                out_ << "\"" << json_escape(p.igmp_group_records[i]) << "\"";
+            }
+            out_ << "],\n";
+        }
+        out_ << "    \"igmp_group_records_truncated\": " << (p.igmp_group_records_truncated ? "true" : "false") << ",\n";
+    }
+    if (p.protocol == "vrrp") {
+        out_ << "    \"vrrp_version\": " << static_cast<unsigned>(p.vrrp_version) << ",\n";
+        out_ << "    \"vrrp_virtual_router_id\": " << static_cast<unsigned>(p.vrrp_virtual_router_id) << ",\n";
+        out_ << "    \"vrrp_priority\": " << static_cast<unsigned>(p.vrrp_priority) << ",\n";
+        if (!p.vrrp_ip_addresses.empty()) {
+            out_ << "    \"vrrp_ip_addresses\": [";
+            for (size_t i = 0; i < p.vrrp_ip_addresses.size(); ++i) {
+                if (i != 0) out_ << ", ";
+                out_ << "\"" << json_escape(p.vrrp_ip_addresses[i]) << "\"";
+            }
+            out_ << "],\n";
+        }
+        out_ << "    \"vrrp_ip_addresses_truncated\": " << (p.vrrp_ip_addresses_truncated ? "true" : "false") << ",\n";
+    }
+    if (p.protocol == "hsrp") {
+        out_ << "    \"hsrp_version\": " << static_cast<unsigned>(p.hsrp_version) << ",\n";
+        if (p.hsrp_version == 1) {
+            out_ << "    \"hsrp_opcode\": \"" << json_escape(p.hsrp_opcode_name) << "\",\n";
+            out_ << "    \"hsrp_state\": \"" << json_escape(p.hsrp_state_name) << "\",\n";
+            out_ << "    \"hsrp_virtual_ip\": \"" << json_escape(p.hsrp_virtual_ip) << "\",\n";
+        } else {
+            if (!p.hsrp_tlv_types.empty()) {
+                out_ << "    \"hsrp_tlv_types\": [";
+                for (size_t i = 0; i < p.hsrp_tlv_types.size(); ++i) {
+                    if (i != 0) out_ << ", ";
+                    out_ << "\"" << json_escape(p.hsrp_tlv_types[i]) << "\"";
+                }
+                out_ << "],\n";
+            }
+            out_ << "    \"hsrp_tlvs_truncated\": " << (p.hsrp_tlvs_truncated ? "true" : "false") << ",\n";
+        }
+    }
     out_ << "    \"notes\": [";
     for (size_t i = 0; i < p.notes.size(); ++i) {
         if (i != 0) out_ << ", ";
@@ -1193,6 +1270,18 @@ void StatsWriter::write_packet(const DecodedPacket& p) {
     }
     if (p.protocol == "doh") {
         doh_provider_counts_[p.doh_matched_provider]++;
+    }
+    if (p.protocol == "rip") {
+        rip_command_counts_[p.rip_command_name]++;
+    }
+    if (p.protocol == "igmp") {
+        igmp_type_counts_[p.igmp_type_name]++;
+    }
+    if (p.protocol == "vrrp") {
+        vrrp_version_counts_["VRRPv" + std::to_string(p.vrrp_version)]++;
+    }
+    if (p.protocol == "hsrp") {
+        hsrp_version_counts_["HSRPv" + std::to_string(p.hsrp_version)]++;
     }
     if (!has_ts_) {
         first_ts_ = last_ts_ = p.timestamp;
@@ -1406,6 +1495,30 @@ void StatsWriter::print_summary(std::ostream& out) const {
     if (!doh_provider_counts_.empty()) {
         out << "doh matched providers:\n";
         for (const auto& [name, count] : doh_provider_counts_) {
+            out << "  " << std::left << std::setw(40) << name << count << "\n";
+        }
+    }
+    if (!rip_command_counts_.empty()) {
+        out << "rip commands:\n";
+        for (const auto& [name, count] : rip_command_counts_) {
+            out << "  " << std::left << std::setw(40) << name << count << "\n";
+        }
+    }
+    if (!igmp_type_counts_.empty()) {
+        out << "igmp types:\n";
+        for (const auto& [name, count] : igmp_type_counts_) {
+            out << "  " << std::left << std::setw(40) << name << count << "\n";
+        }
+    }
+    if (!vrrp_version_counts_.empty()) {
+        out << "vrrp versions:\n";
+        for (const auto& [name, count] : vrrp_version_counts_) {
+            out << "  " << std::left << std::setw(40) << name << count << "\n";
+        }
+    }
+    if (!hsrp_version_counts_.empty()) {
+        out << "hsrp versions:\n";
+        for (const auto& [name, count] : hsrp_version_counts_) {
             out << "  " << std::left << std::setw(40) << name << count << "\n";
         }
     }
