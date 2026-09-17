@@ -57,6 +57,13 @@ std::string to_lower_copy(const std::string& s) {
 
 bool equal_ci(const std::string& a, const std::string& b) { return to_lower_copy(a) == to_lower_copy(b); }
 
+// True if `zone` is one of `zones` -- used to check a flow's client/server zone against a
+// conduit's (now list-valued, many-to-many) from_zones/to_zones -- see the matching logic in
+// finish() below.
+bool zone_list_contains(const std::vector<std::string>& zones, const std::string& zone) {
+    return std::find(zones.begin(), zones.end(), zone) != zones.end();
+}
+
 // Joins `items` with ", " -- shared by the "functions observed" and "permits only" halves of a
 // functions-restricted conduit's violation reason (see the functions-matching block in finish()).
 std::string join_comma(const std::vector<std::string>& items) {
@@ -217,8 +224,10 @@ PolicyReport PolicyEngine::finish() const {
             const Conduit* matched = nullptr;
             bool zone_pair_has_any_conduit = false;
             for (const auto& c : policy_.conduits) {
-                bool forward = (c.from_zone == fr.client_zone && c.to_zone == fr.server_zone);
-                bool reverse = c.bidirectional && (c.to_zone == fr.client_zone && c.from_zone == fr.server_zone);
+                bool forward = zone_list_contains(c.from_zones, fr.client_zone) &&
+                               zone_list_contains(c.to_zones, fr.server_zone);
+                bool reverse = c.bidirectional && zone_list_contains(c.to_zones, fr.client_zone) &&
+                               zone_list_contains(c.from_zones, fr.server_zone);
                 if (!forward && !reverse) continue;
                 zone_pair_has_any_conduit = true;
 
@@ -391,8 +400,18 @@ void write_policy_report_json(std::ostream& out, const PolicyReport& report, con
         const Conduit& c = policy.conduits[i];
         out << "    {\n";
         out << "      \"name\": \"" << json_escape(c.name) << "\",\n";
-        out << "      \"from\": \"" << json_escape(c.from_zone) << "\",\n";
-        out << "      \"to\": \"" << json_escape(c.to_zone) << "\",\n";
+        out << "      \"from\": [";
+        for (size_t j = 0; j < c.from_zones.size(); ++j) {
+            if (j) out << ", ";
+            out << "\"" << json_escape(c.from_zones[j]) << "\"";
+        }
+        out << "],\n";
+        out << "      \"to\": [";
+        for (size_t j = 0; j < c.to_zones.size(); ++j) {
+            if (j) out << ", ";
+            out << "\"" << json_escape(c.to_zones[j]) << "\"";
+        }
+        out << "],\n";
         out << "      \"bidirectional\": " << (c.bidirectional ? "true" : "false") << ",\n";
         out << "      \"protocols\": [";
         for (size_t j = 0; j < c.protocols.size(); ++j) {

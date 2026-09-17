@@ -296,21 +296,33 @@ Policy parse_policy_text(const std::string& text, const std::string& source_name
 
         const auto* from = item.find("from");
         const auto* to = item.find("to");
-        if (!from || from->type != NodeType::Scalar || from->scalar.empty()) {
+        if (!from) {
             fail(source_name, item.line, "conduit '" + c.name + "' is missing a required 'from' zone");
         }
-        if (!to || to->type != NodeType::Scalar || to->scalar.empty()) {
+        if (!to) {
             fail(source_name, item.line, "conduit '" + c.name + "' is missing a required 'to' zone");
         }
-        c.from_zone = from->scalar;
-        c.to_zone = to->scalar;
-        if (!find_zone(policy, c.from_zone)) {
-            fail(source_name, item.line,
-                 "conduit '" + c.name + "': 'from' zone '" + c.from_zone + "' is not declared in 'zones'");
+        auto from_list = as_scalar_list(*from, source_name, "conduit '" + c.name + "'s 'from'");
+        if (from_list.empty()) {
+            fail(source_name, from->line, "conduit '" + c.name + "' declares no 'from' zones");
         }
-        if (!find_zone(policy, c.to_zone)) {
-            fail(source_name, item.line,
-                 "conduit '" + c.name + "': 'to' zone '" + c.to_zone + "' is not declared in 'zones'");
+        for (const auto& z : from_list) {
+            if (!find_zone(policy, z.text)) {
+                fail(source_name, item.line,
+                     "conduit '" + c.name + "': 'from' zone '" + z.text + "' is not declared in 'zones'");
+            }
+            c.from_zones.push_back(z.text);
+        }
+        auto to_list = as_scalar_list(*to, source_name, "conduit '" + c.name + "'s 'to'");
+        if (to_list.empty()) {
+            fail(source_name, to->line, "conduit '" + c.name + "' declares no 'to' zones");
+        }
+        for (const auto& z : to_list) {
+            if (!find_zone(policy, z.text)) {
+                fail(source_name, item.line,
+                     "conduit '" + c.name + "': 'to' zone '" + z.text + "' is not declared in 'zones'");
+            }
+            c.to_zones.push_back(z.text);
         }
 
         const yaml_mini::Node* protos = item.find("protocols");

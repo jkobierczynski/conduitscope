@@ -424,8 +424,8 @@ zones:
 conduits:
   - name: "<conduit name>"
     description: "<optional free text>"
-    from: <zone name>
-    to: <zone name>
+    from: <zone name or [zone name, ...]>
+    to: <zone name or [zone name, ...]>
     protocols: [<modbus | dnp3 | s7comm | iec104 | enip | any>, <...>]
     ports: [<port>, <...>]                  # omit entirely to mean "any port"
     bidirectional: <true | false>           # default: false
@@ -442,11 +442,26 @@ zone is reported as the reserved zone name `unclassified` (which you
 therefore can't declare yourself -- see "Validation errors" below).
 
 **Conduits.** Each conduit permits one or more protocols, on one or more
-ports (or any port, if `ports` is omitted), from one zone to another. At
-least one conduit is required -- a policy with zones but zero conduits would
-flag every zone-classified flow as a violation, which is almost certainly
-not what a first policy file intended, so it's rejected outright rather than
-silently accepted as an implicit deny-all.
+ports (or any port, if `ports` is omitted), from a set of one or more zones
+to a set of one or more zones. `from`/`to` each accept either a single zone
+name (`from: hmi_zone`) or a list of zone names (`from: [corp_zone,
+hmi_zone]`), and when either is a list the conduit is many-to-many: it
+permits traffic from ANY zone named in `from` to ANY zone named in `to`, not
+just one specific zone pair. For example, a conduit permitting Modbus from
+either a corporate zone or a remote-access zone, into either of two
+redundant PLC zones, can be written as a single conduit --
+
+```yaml
+from: [corp_zone, remote_access_zone]
+to: [plc_zone_a, plc_zone_b]
+protocols: [modbus]
+```
+
+-- instead of needing one conduit per zone-pair combination (four, in this
+example). At least one conduit is required -- a policy with zones but zero
+conduits would flag every zone-classified flow as a violation, which is
+almost certainly not what a first policy file intended, so it's rejected
+outright rather than silently accepted as an implicit deny-all.
 
 `protocols` uses the same protocol names conduitscope's own decoded output
 uses: `modbus`, `dnp3`, `s7comm`, `iec104`, `enip`, plus the wildcard `any`. A COTP session
@@ -459,22 +474,62 @@ conduits are TCP-only (see LIMITATIONS), so there is currently no way to
 write a conduit matching CIP I/O (implicit messaging, UDP 2222) traffic,
 even though `decode` now decodes it -- see ROADMAP.
 
-`from`/`to` describe a **direction**: which zone initiates the TCP
-connection (`from`) and which zone answers it (`to`) -- not which zone sends
-which bytes once the connection is up (a Modbus response, for instance,
-flows from the server back to the client, but the conduit is still written
-`from: <client zone> to: <server zone>`, matching who dialed whom). Most
-real OT conduits are one-directional this way (an HMI/engineering zone
-reaching into a control-network zone). Set `bidirectional: true` on a
-conduit that should also permit the same protocol/port set initiated the
-opposite way.
+`from`/`to` describe a **direction**: which zone(s) initiate the TCP
+connection (`from`) and which zone(s) answer it (`to`) -- not which zone
+sends which bytes once the connection is up (a Modbus response, for
+instance, flows from the server back to the client, but the conduit is
+still written `from: <client zone(s)> to: <server zone(s)>`, matching who
+dialed whom). A flow matches when its client is in ANY of the `from` zones
+and its server is in ANY of the `to` zones. Most real OT conduits are
+one-directional this way (an HMI/engineering zone reaching into a
+control-network zone). Set `bidirectional: true` on a conduit that should
+also permit the same protocol/port set initiated the opposite way (checked
+symmetrically against the same zone lists: client in `to`, server in
+`from`).
 
 `ports` restricts which TCP port on the **responding** (server) side of the
 connection this conduit covers; omit it to allow any port. A `protocol`
 singular alias is also accepted for a conduit that only lists one protocol
 (`protocol: modbus` instead of `protocols: [modbus]`), and every list-typed
-field (`networks`, `protocols`, `ports`) also accepts a single bare value in
-place of a one-element list, for readability on a short policy file.
+field (`networks`, `protocols`, `ports`, `from`, `to`) also accepts a single
+bare value in place of a one-element list, for readability on a short
+policy file.
+
+**Worked example.** `tests/policies/multi_from_zones.yaml` declares three
+zones (`corp_zone`, `hmi_zone`, `plc_zone`) and one conduit whose `from` is
+a list, `[corp_zone, hmi_zone]` -- deliberately listing `hmi_zone` (the zone
+that actually matches `tests/sample_modbus.pcap`'s HMI, 192.168.1.50)
+second, not first, to prove matching checks every list entry, not just
+index 0:
+
+```sh
+$ conduitscope policy validate -r tests/sample_modbus.pcap --policy tests/policies/multi_from_zones.yaml
+Zone/conduit policy validation
+  capture: tests/sample_modbus.pcap
+  policy:  tests/policies/multi_from_zones.yaml (3 zone(s), 1 conduit(s))
+
+Result: COMPLIANT
+
+Flows evaluated: 1 (1 allowed, 0 violation(s), 0 unclassified)
+  3 total packet(s) in capture, 0 skipped (non-TCP/non-IP)
+
+VIOLATIONS (0):
+  (none)
+
+UNCLASSIFIED TRAFFIC (0):
+  (none)
+
+ALLOWED (1):
+  [1] 192.168.1.50 -> 192.168.1.10:502  (modbus, 3 packet(s))
+      zones: hmi_zone -> plc_zone, matched conduit "corp or HMI reaches PLC via Modbus"
+
+Conduits never exercised by this capture (0):
+  (none)
+```
+
+See also `tests/policies/multi_to_zones.yaml` (the same idea on the `to`
+side) and `tests/policies/multi_zone_bidirectional.yaml` (list-widened
+`from`/`to` combined with `bidirectional: true` reverse matching).
 
 ### Function-level restrictions
 
@@ -677,7 +732,10 @@ error (see EXIT STATUS):
   `name` is a value, not a key, so two conduits genuinely could share one
   without a YAML parser objecting)
 - a conduit missing `name`/`from`/`to`/`protocols`, or whose `from`/`to`
-  names a zone that isn't declared in `zones`
+  (each a single zone name or a list of them) names a zone that isn't
+  declared in `zones` -- every entry of a list `from`/`to` is checked, not
+  just the first
+- a conduit's `from`/`to` list being empty (e.g. `from: []`)
 - a conduit protocol outside `{modbus, dnp3, s7comm, iec104, enip, any}`
 - a conduit port outside `[1, 65535]`
 - a conduit's `bidirectional` value that isn't a recognizable boolean
@@ -700,6 +758,12 @@ characters used for indentation.
 
 ### JSON report schema (`-f json`)
 
+`from`/`to` are always rendered as JSON arrays of zone names, even when the
+policy file wrote a single zone name for that field -- a conduit's `from`/
+`to` can now each hold more than one zone (see "Conduits" above), so the
+JSON shape is array-always rather than switching between a bare string and
+an array depending on how the policy file happened to write it:
+
 ```json
 {
   "capture": "capture.pcap",
@@ -709,8 +773,8 @@ characters used for indentation.
   "conduits": [
     {
       "name": "HMI polls PLC via Modbus",
-      "from": "hmi_zone",
-      "to": "plc_zone",
+      "from": ["hmi_zone"],
+      "to": ["plc_zone"],
       "bidirectional": false,
       "protocols": ["modbus"],
       "functions": []

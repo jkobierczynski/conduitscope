@@ -2,8 +2,9 @@
 // policy.hpp - zone/conduit policy file parsing for `policy validate`.
 //
 // A policy file declares named zones (each a set of IPv4 CIDR blocks) and
-// named conduits (an allowed protocol+port relationship from one zone to
-// another). See docs/MANUAL.md's POLICY FILE FORMAT section for the full
+// named conduits (an allowed protocol+port relationship from a set of zones
+// to a set of zones -- many-to-many, not just one zone to one zone). See
+// docs/MANUAL.md's POLICY FILE FORMAT section for the full
 // schema, worked examples, and the reasoning behind each validation rule
 // below. PolicyEngine (policy_engine.hpp) is what actually evaluates decoded
 // traffic against a Policy parsed here; this file only parses and validates
@@ -57,22 +58,31 @@ struct Zone {
     int line = 0;  // policy-file line the zone was declared on, for PolicyEngine reports
 };
 
-// One allowed conduit between two zones. `protocols` holds lowercased values
-// from {"modbus", "dnp3", "s7comm", "any"} (parse_policy_text rejects
-// anything else) -- "any" matches every protocol conduitscope recognizes.
-// `ports` is the set of TCP ports this conduit covers on the RESPONDING
-// (server) side of the connection; empty means "any port" (parse_policy_text
-// allows omitting the field entirely for that). `bidirectional` additionally
-// allows the same protocol/port set initiated the opposite way (to -> from
-// zone) -- most real OT conduits are one-directional (an HMI/engineering
-// zone reaching into a control-network zone), which is why this defaults to
-// false; see docs/MANUAL.md's POLICY FILE FORMAT section for why direction
-// is modeled this way rather than tracked per-packet.
+// One allowed conduit between a set of zones. `from_zones`/`to_zones` each
+// name one or more declared zones (the policy file's `from`/`to` keys accept
+// either a single scalar zone name or a list of them -- see as_scalar_list in
+// policy.cpp for the shared single-or-list parsing, also used by `networks`,
+// `protocols`, and `ports`), and the conduit is many-to-many: it permits
+// traffic from ANY zone in `from_zones` to ANY zone in `to_zones`, not just
+// one specific pair. This lets e.g. "permit traffic from either the
+// corporate zone or the remote-access zone into either of two PLC zones" be
+// written as one conduit, instead of one conduit per zone pair. `protocols`
+// holds lowercased values from {"modbus", "dnp3", "s7comm", "any"}
+// (parse_policy_text rejects anything else) -- "any" matches every protocol
+// conduitscope recognizes. `ports` is the set of TCP ports this conduit
+// covers on the RESPONDING (server) side of the connection; empty means "any
+// port" (parse_policy_text allows omitting the field entirely for that).
+// `bidirectional` additionally allows the same protocol/port set initiated
+// the opposite way (a `to_zones` member -> a `from_zones` member) -- most
+// real OT conduits are one-directional (an HMI/engineering zone reaching
+// into a control-network zone), which is why this defaults to false; see
+// docs/MANUAL.md's POLICY FILE FORMAT section for why direction is modeled
+// this way rather than tracked per-packet.
 struct Conduit {
     std::string name;
     std::string description;
-    std::string from_zone;
-    std::string to_zone;
+    std::vector<std::string> from_zones;
+    std::vector<std::string> to_zones;
     std::vector<std::string> protocols;
     std::vector<uint16_t> ports;
     bool bidirectional = false;
@@ -124,7 +134,9 @@ struct PolicyError : std::runtime_error {
 //     explicitly would make that reporting ambiguous
 //   - a duplicate zone or conduit name
 //   - a conduit missing 'name'/'from'/'to'/'protocols', or whose 'from'/'to'
-//     names a zone that isn't declared
+//     contains a zone name that isn't declared in 'zones' (each entry of a
+//     list 'from'/'to' is checked, not just the first)
+//   - a conduit's 'from'/'to' list being empty (e.g. 'from: []')
 //   - a conduit's protocol not in {modbus, dnp3, s7comm, any}
 //   - a conduit's port outside [1, 65535]
 //   - a conduit's 'bidirectional' value that isn't a recognizable boolean
