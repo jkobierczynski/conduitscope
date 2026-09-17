@@ -14,7 +14,9 @@ PIM, EIGRP, and OSPFv2,
 plus detects DNS-over-HTTPS
 (DoH) via TLS SNI matching, and recognizes (by name only, not full decode)
 RDP, VNC, TeamViewer, AnyDesk, and Zoom -- the "interactive remote control"
-tier of the IT protocols an OT auditor flags,
+tier of the IT protocols an OT auditor flags -- plus SMB, SSH, HTTP, HTTPS,
+SNMPv1/v2c, Telnet, FTP, and TFTP, the "lateral-movement and
+credential-harvesting" tier of the same family,
 traffic from offline
 pcap/pcapng captures, and checks it
 against a zone/conduit segmentation policy. It's an OT/ICS conduit-auditing tool: `decode`/`info` give you reliable
@@ -852,6 +854,19 @@ Groundwork / v0.1.0. What works right now:
   codebase. `--protocol remote-access` isolates the family;
   `--remote-access-port` widens its expected-port set. See
   docs/MANUAL.md's PROTOCOL COVERAGE "Tier 1 remote-access protocol
+  recognition" section
+- Tier 2 of the same family: SMB, SSH, HTTP, HTTPS, SNMPv1/v2c, Telnet,
+  FTP, and TFTP -- the lateral-movement/credential-harvesting protocols
+  most hardening guides say shouldn't be on a production OT segment at
+  all. SMB's direct-hosting magic, SSH's version-exchange banner, and
+  HTTP's own request-line/status-line are genuine, port-independent
+  structural signatures; HTTPS reuses this project's own TLS ClientHello
+  parser (already built for DoH detection); SNMPv1/v2c genuinely extracts
+  and surfaces the cleartext community string itself, since that string is
+  the whole audit finding; Telnet/FTP/TFTP each have a narrower,
+  port-gated signal. `--protocol lateral-movement` isolates the family;
+  `--lateral-movement-port` widens its expected-port set. See
+  docs/MANUAL.md's PROTOCOL COVERAGE "Tier 2 lateral-movement protocol
   recognition" section
 - Name resolution, shared by `decode` and `policy validate` alike: OUI/MAC-
   vendor lookup against a built-in IEEE-registry-derived table (on by

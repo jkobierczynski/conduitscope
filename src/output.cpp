@@ -114,6 +114,22 @@ constexpr const char* kBoldUnderlineMagenta = "\033[1;4;35m";
 constexpr const char* kBoldUnderlineYellow = "\033[1;4;33m";
 constexpr const char* kBoldUnderlineBlue = "\033[1;4;34m";
 constexpr const char* kBoldUnderlineRed = "\033[1;4;31m";
+// Tier 2 "IT protocols an OT auditor flags" round (SMB/SSH/HTTP/HTTPS/SNMPv1v2c/Telnet/FTP/TFTP --
+// see it_protocols.hpp): plain/bright/bold/underline/bold+underline are now ALL fully spoken for,
+// so this introduces italic as a fresh fourth modifier dimension -- six italic hues plus two more
+// combining italic with bold covers all eight of this round's new tags without a fifth dimension.
+// Same "no fresh hue left, genuine reuse" justification Tier 1's own bold+underline round documents
+// above, not a "these never collide" case: several of these eight (SSH especially, sometimes HTTP/
+// HTTPS on a jump host) can very plausibly coexist with anything else in this table in a real mixed
+// IT/OT capture, so the "[protocol]" tag text is again what actually disambiguates in practice.
+constexpr const char* kItalicRed = "\033[3;31m";
+constexpr const char* kItalicGreen = "\033[3;32m";
+constexpr const char* kItalicYellow = "\033[3;33m";
+constexpr const char* kItalicBlue = "\033[3;34m";
+constexpr const char* kItalicMagenta = "\033[3;35m";
+constexpr const char* kItalicCyan = "\033[3;36m";
+constexpr const char* kBoldItalicRed = "\033[1;3;31m";
+constexpr const char* kBoldItalicGreen = "\033[1;3;32m";
 
 // Color for a packet's "[protocol]" tag -- picked so a mixed-protocol capture scans quickly by
 // eye, not for any deeper meaning. parse-error is the one exception: it gets the same "something
@@ -210,6 +226,20 @@ const char* protocol_tag_color(const std::string& protocol) {
     if (protocol == "teamviewer") return kBoldUnderlineMagenta;
     if (protocol == "anydesk") return kBoldUnderlineYellow;
     if (protocol == "zoom") return kBoldUnderlineBlue;
+    if (protocol == "smb") return kItalicRed;          // red doubles as a mild "this shouldn't be
+                                                           // running here" cue, same reasoning igrp's
+                                                           // and rdp's own color choices document --
+                                                           // NCSC's own rule of thumb names SMB as a
+                                                           // wormable-malware path
+    if (protocol == "ssh") return kItalicGreen;
+    if (protocol == "http") return kItalicYellow;
+    if (protocol == "https") return kItalicBlue;
+    if (protocol == "snmp") return kItalicMagenta;
+    if (protocol == "telnet") return kItalicCyan;
+    if (protocol == "ftp") return kBoldItalicRed;       // also a mild "cleartext credentials" cue,
+                                                           // same reasoning as smb's own plain-italic
+                                                           // red just above
+    if (protocol == "tftp") return kBoldItalicGreen;
     if (protocol == "parse-error") return kBoldRed;
     return kDim;  // tcp / udp / non-tcp / non-ip / unsupported-link: recognized, nothing OT-specific
 }

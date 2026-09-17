@@ -11,7 +11,7 @@ conduitscope [-q|--quiet] [--no-color|--color] [--log-file FILE] [--version] [-h
 
 conduitscope decode (-r FILE | -i INTERFACE) [-o FILE] [-f text|json|csv] [--protocol NAME]
                      [--modbus-port PORT]... [--dnp3-port PORT]... [--s7comm-port PORT]... [--iec104-port PORT]...
-                     [--enip-port PORT]... [--enip-io-port PORT]... [--bacnet-port PORT]... [--hartip-port PORT]... [--opcua-port PORT]... [--mqtt-port PORT]... [--ffhse-port PORT]... [--remote-access-port PORT]...
+                     [--enip-port PORT]... [--enip-io-port PORT]... [--bacnet-port PORT]... [--hartip-port PORT]... [--opcua-port PORT]... [--mqtt-port PORT]... [--ffhse-port PORT]... [--remote-access-port PORT]... [--lateral-movement-port PORT]...
                      [--max-packets N] [--stats] [--strict]
                      [--filter BPF] [--duration SECONDS] [--snaplen BYTES] [--no-promiscuous]
 
@@ -167,7 +167,7 @@ conduitscope decode (-r FILE | -i INTERFACE) [options]
 | `--no-promiscuous` | off (i.e. promiscuous by default) | With `-i`, don't put the interface into promiscuous mode. Promiscuous is the default because the main live-capture use case -- watching a mirrored/SPAN switch port for zone/conduit traffic -- needs to see traffic that isn't addressed to the capturing host at all. |
 | `-o, --output FILE` | stdout | Write decoded output here instead of stdout. |
 | `-f, --format {text,json,csv}` | `text` | Output format. See OUTPUT FORMATS below. |
-| `--protocol NAME` | `auto` | Restrict decoding to one protocol. See PROTOCOL COVERAGE below for the full, current list of valid protocol names (one per subsection there). `auto` opportunistically tries OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, S7comm/COTP, S7comm-Plus, MMS, HART-IP, MQTT, and FF-HSE detection on every TCP payload (in that order -- FF-HSE last of all, even after MQTT, see PROTOCOL DETECTION), CIP I/O, BACnet/IP, HART-IP, and FF-HSE detection on every UDP payload (FF-HSE last there too), PROFINET RT (DCP/cyclic) detection on every non-IPv4 Ethernet frame carrying EtherType `0x8892`, GOOSE detection on every non-IPv4 Ethernet frame carrying EtherType `0x88B8`, Sampled Values detection on every non-IPv4 Ethernet frame carrying EtherType `0x88BA`, EtherCAT detection on every non-IPv4 Ethernet frame carrying EtherType `0x88A4`, regardless of port, and Spanning Tree Protocol (STP/RSTP/MSTP) detection on every classic IEEE 802.3 length-framed Ethernet frame whose LLC header is DSAP=SSAP=`0x42` -- a structurally separate dispatch path from every EtherType-keyed protocol above, so there's no ordering/collision question between them (see PROTOCOL DETECTION below). `enip` covers both EtherNet/IP explicit messaging (TCP) and CIP I/O implicit messaging (UDP). `mms` is IEC 61850 MMS (Manufacturing Message Specification, ISO 9506) -- shares S7comm's exact TPKT/COTP transport and TCP port 102, but is a distinct application protocol; see `--s7comm-port` below and PROTOCOL COVERAGE's MMS section. `s7comm-plus` is S7comm-Plus (TIA Portal / S7-1200/1500) -- shares the same TPKT/COTP transport and TCP port 102, disambiguated by its own protocol id byte; see `--s7comm-port` below and PROTOCOL COVERAGE's S7comm-Plus section. `mqtt` is MQTT (v3.1/v3.1.1/v5.0) plus Sparkplug B -- see `--mqtt-port` below and PROTOCOL COVERAGE's MQTT section. `profinet` covers both DCP and cyclic real-time IO. `sv` is IEC 61850-9-2 Sampled Values. `ethercat` is EtherCAT. `bacnet` is BACnet/IP. `hartip` is HART-IP (covers both UDP and TCP). `opcua` is OPC UA Binary (UA-TCP/Secure Conversation, TCP only). `ff-hse` is FOUNDATION Fieldbus HSE (covers FDA/SM/FMS/LAN Redundancy, on both TCP and UDP) -- see `--ffhse-port` below and PROTOCOL COVERAGE's FOUNDATION Fieldbus HSE section. `stp` is Spanning Tree Protocol (STP/RSTP/MSTP) -- no port option, matching GOOSE/SV/EtherCAT/PROFINET's own no-port precedent for a protocol with no port at all; see PROTOCOL COVERAGE's Spanning Tree Protocol section. `devicenet` is DeviceNet (CAN-bus CIP) -- no port option either, the same no-port precedent, but unlike every other value in this list it isn't reached through Ethernet at all: it's gated on the capture's own pcap link type being `LINKTYPE_CAN_SOCKETCAN` (227, standard Linux SocketCAN capture framing -- what `candump -l`/`tcpdump -i can0`/Wireshark itself write capturing a CAN bus), checked before any protocol filter, so `--protocol devicenet` against an ordinary Ethernet-linktype capture simply decodes nothing (every packet still parses at the link layer, just with no application-layer match) rather than erroring; see PROTOCOL COVERAGE's DeviceNet section. `remote-access` covers Tier 1 of the "IT protocols an OT auditor flags" family (RDP/VNC/TeamViewer/AnyDesk/Zoom, each its own `protocol` value even under this one filter name) -- see `--remote-access-port` below and PROTOCOL COVERAGE's "Tier 1 remote-access protocol recognition" section. |
+| `--protocol NAME` | `auto` | Restrict decoding to one protocol. See PROTOCOL COVERAGE below for the full, current list of valid protocol names (one per subsection there). `auto` opportunistically tries OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, S7comm/COTP, S7comm-Plus, MMS, HART-IP, MQTT, and FF-HSE detection on every TCP payload (in that order -- FF-HSE last of all, even after MQTT, see PROTOCOL DETECTION), CIP I/O, BACnet/IP, HART-IP, and FF-HSE detection on every UDP payload (FF-HSE last there too), PROFINET RT (DCP/cyclic) detection on every non-IPv4 Ethernet frame carrying EtherType `0x8892`, GOOSE detection on every non-IPv4 Ethernet frame carrying EtherType `0x88B8`, Sampled Values detection on every non-IPv4 Ethernet frame carrying EtherType `0x88BA`, EtherCAT detection on every non-IPv4 Ethernet frame carrying EtherType `0x88A4`, regardless of port, and Spanning Tree Protocol (STP/RSTP/MSTP) detection on every classic IEEE 802.3 length-framed Ethernet frame whose LLC header is DSAP=SSAP=`0x42` -- a structurally separate dispatch path from every EtherType-keyed protocol above, so there's no ordering/collision question between them (see PROTOCOL DETECTION below). `enip` covers both EtherNet/IP explicit messaging (TCP) and CIP I/O implicit messaging (UDP). `mms` is IEC 61850 MMS (Manufacturing Message Specification, ISO 9506) -- shares S7comm's exact TPKT/COTP transport and TCP port 102, but is a distinct application protocol; see `--s7comm-port` below and PROTOCOL COVERAGE's MMS section. `s7comm-plus` is S7comm-Plus (TIA Portal / S7-1200/1500) -- shares the same TPKT/COTP transport and TCP port 102, disambiguated by its own protocol id byte; see `--s7comm-port` below and PROTOCOL COVERAGE's S7comm-Plus section. `mqtt` is MQTT (v3.1/v3.1.1/v5.0) plus Sparkplug B -- see `--mqtt-port` below and PROTOCOL COVERAGE's MQTT section. `profinet` covers both DCP and cyclic real-time IO. `sv` is IEC 61850-9-2 Sampled Values. `ethercat` is EtherCAT. `bacnet` is BACnet/IP. `hartip` is HART-IP (covers both UDP and TCP). `opcua` is OPC UA Binary (UA-TCP/Secure Conversation, TCP only). `ff-hse` is FOUNDATION Fieldbus HSE (covers FDA/SM/FMS/LAN Redundancy, on both TCP and UDP) -- see `--ffhse-port` below and PROTOCOL COVERAGE's FOUNDATION Fieldbus HSE section. `stp` is Spanning Tree Protocol (STP/RSTP/MSTP) -- no port option, matching GOOSE/SV/EtherCAT/PROFINET's own no-port precedent for a protocol with no port at all; see PROTOCOL COVERAGE's Spanning Tree Protocol section. `devicenet` is DeviceNet (CAN-bus CIP) -- no port option either, the same no-port precedent, but unlike every other value in this list it isn't reached through Ethernet at all: it's gated on the capture's own pcap link type being `LINKTYPE_CAN_SOCKETCAN` (227, standard Linux SocketCAN capture framing -- what `candump -l`/`tcpdump -i can0`/Wireshark itself write capturing a CAN bus), checked before any protocol filter, so `--protocol devicenet` against an ordinary Ethernet-linktype capture simply decodes nothing (every packet still parses at the link layer, just with no application-layer match) rather than erroring; see PROTOCOL COVERAGE's DeviceNet section. `remote-access` covers Tier 1 of the "IT protocols an OT auditor flags" family (RDP/VNC/TeamViewer/AnyDesk/Zoom, each its own `protocol` value even under this one filter name) -- see `--remote-access-port` below and PROTOCOL COVERAGE's "Tier 1 remote-access protocol recognition" section. `lateral-movement` covers Tier 2 of the same family (SMB/SSH/HTTP/HTTPS/SNMPv1v2c/Telnet/FTP/TFTP, again each its own `protocol` value under this one filter name) -- see `--lateral-movement-port` below and PROTOCOL COVERAGE's "Tier 2 lateral-movement protocol recognition" section. |
 | `--modbus-port PORT` | *(502 built in)* | Additional TCP port to treat as "expected" for Modbus. Repeatable. Does **not** gate detection -- it only changes whether a decoded Modbus frame is annotated as appearing on an unexpected port, which is itself a useful signal when auditing a conduit. |
 | `--dnp3-port PORT` | *(20000 built in)* | Same as `--modbus-port`, for DNP3. Repeatable. |
 | `--s7comm-port PORT` | *(102 built in)* | Same as `--modbus-port`, for COTP/S7comm. Repeatable. There is no separate `--mms-port` -- MMS rides the identical TPKT/COTP transport on the identical TCP port 102 S7comm uses (see `mms.hpp`'s file header), so this same option's "expected port" annotation also governs MMS traffic. |
@@ -1933,6 +1933,25 @@ port` still widens what counts as VNC's own "expected" port for the "seen
 on a non-standard port" note, it just never gates whether the banner check
 itself runs. `--protocol remote-access` skips every port gate in this
 family at once, same as `--protocol rip`/`--protocol hsrp` above.
+
+**SNMP, Telnet, FTP, and TFTP (Tier 2 of the same family) are also
+port-gated in `--protocol auto`**, widened by the one shared
+`--lateral-movement-port` option (`extra_lateral_movement_ports` in
+`decoder.hpp`) -- see PROTOCOL COVERAGE's "Tier 2 lateral-movement protocol
+recognition" section for the per-protocol reasoning; HTTPS's own port-only
+fallback (an already-established session with no visible ClientHello) is
+widened by the same option. **SMB, SSH, and HTTP are the exceptions in this
+tier**: SMB's direct-hosting magic, SSH's version-exchange banner, and
+HTTP's own request-line/status-line are all checked port-independently even
+in Auto mode, the identical "structural signature overrides the port gate"
+treatment VNC gets in Tier 1 -- `--lateral-movement-port` still widens what
+counts as each one's own "expected" port for the "seen on a non-standard
+port" note, it just never gates whether the check itself runs. HTTPS's own
+strong signal (a genuine TLS ClientHello) is checked port-independently
+too, for the same reason, but is layered directly into the DoH detection
+call site rather than gated by this option at all -- see PROTOCOL
+COVERAGE's Tier 2 section. `--protocol lateral-movement` skips every port
+gate in this tier at once, same as `--protocol remote-access` above.
 
 ## OUTPUT FORMATS
 
@@ -7630,6 +7649,134 @@ inside of; what matters for a name-only recognizer is that the port/
 structural gate itself is correct, which the synthetic fixture confirms
 directly.
 
+### Tier 2 lateral-movement protocol recognition (SMB, SSH, HTTP, HTTPS, SNMPv1/v2c, Telnet, FTP, TFTP)
+
+The second tier of ROADMAP item 18's "IT protocols an OT auditor flags"
+family: protocols that "should be absent from a production OT segment
+entirely per most hardening guides" (IEC 62443-3-3, NCSC, NIST SP 800-82) --
+lateral-movement and credential-harvesting tools, not interactive-session
+tools like Tier 1's own RDP/VNC/TeamViewer/AnyDesk/Zoom. See
+`include/conduitscope/it_protocols.hpp`'s own file header comment (the Tier
+2 half) for the full confidence-tier reasoning summarized here.
+
+Same deliberately name-only posture as Tier 1: each of these eight is
+identified from its port and (for six of the eight) a structural signature,
+reported as its own `protocol` value (`smb`/`ssh`/`http`/`https`/`snmp`/
+`telnet`/`ftp`/`tftp`) with a one-line `summary` -- nothing about the
+traffic past that point is parsed, with one narrow, deliberate exception
+(SNMP's community string, below). Confidence again varies sharply and every
+summary/note says so honestly:
+
+- **SMB** (TCP 445 direct-hosting, or TCP 139 over a NetBIOS Session
+  Service wrapper, RFC 1002) is identified from its own 4-byte magic
+  (`0xFF"SMB"` for SMB1/CIFS, `0xFE"SMB"` for SMB2/3, `0xFD"SMB"` for an
+  SMB2/3 Transform/encrypted header) -- direct-hosting is checked
+  **port-independently** (a genuinely strong signal, same treatment VNC's
+  RFB banner gets); the NetBIOS-wrapped form is gated to port 139, since
+  its own leading type byte alone is too common a value to check
+  opportunistically.
+- **SSH** (TCP port 22, IANA `ssh`) is identified from RFC 4253's own
+  version-exchange banner (`SSH-2.0-OpenSSH_9.6`, always the first bytes of
+  a real session, in the clear). Checked **port-independently** -- SSH
+  deliberately running on a nonstandard port (a common jump-host hardening
+  practice) is still worth flagging, arguably more so. Past the banner, SSH
+  is fully encrypted; an established session falls back to a port-only
+  match, explicitly noted as weaker.
+- **HTTP** is identified from its own request-line or status-line (RFC
+  9112) -- checked **port-independently and deliberately so**: the entire
+  point of flagging vendor web UIs (Siemens WinCC and similar embedded
+  management interfaces) is that they routinely run on whatever port the
+  vendor picked, not just 80/8080/8000 (a curated "commonly configured" set
+  used only for the non-standard-port note, never a detection gate).
+- **HTTPS** reuses this project's own TLS ClientHello parser
+  (`tls_sni.hpp`, already built for DoH detection -- see that section
+  above) rather than re-implementing TLS record/handshake parsing.
+  Deliberately layered right after the existing DoH check, on the same
+  single, un-reassembled TCP segment: a DoH match always wins (a known
+  public DoH resolver hostname is strictly more specific than "generic
+  HTTPS"), and a ClientHello that parses but isn't a known DoH provider's
+  hostname falls through to `https` instead. This does **not** by itself
+  confirm the traffic is specifically HTTP-over-TLS rather than some other
+  TLS-wrapped protocol sharing the same port (MQTT-over-TLS, OPC UA over
+  TLS, and similar all begin with an identical ClientHello) -- ALPN
+  offering `http/1.1`/`h2` is a genuine confirmation when present; absent
+  that, a standard HTTPS port (443/8443, or a configured extra port) is
+  treated as good-enough corroboration to still call it `https`, but the
+  note says so honestly rather than implying a confidence neither signal
+  backs up. An already-established, fully-encrypted session with no
+  visible ClientHello in a given packet gets the weakest, port-only
+  fallback, same treatment RDP's own post-handshake traffic gets in Tier 1.
+- **SNMPv1/v2c** (UDP 161 agent / 162 trap) is identified from the fixed
+  ASN.1 BER prefix every SNMPv1/v2c PDU shares -- a `SEQUENCE` wrapping an
+  `INTEGER` version (0 = v1, 1 = v2c; v3's very different, USM-
+  authenticated framing is out of scope, since v3 has no cleartext
+  community string to extract in the first place) followed by an `OCTET
+  STRING` community string. This is the one deliberate departure from this
+  family's usual name-only posture: the community string itself is
+  extracted and surfaced in both the `summary` and a dedicated `note`,
+  since per this item's own wording, "a cleartext community string sniffed
+  once maps every SNMP-speaking device on the segment" -- the audit value
+  here IS the string, not just knowing SNMP was present. Gated to port
+  161/162 (unlike SMB/SSH/HTTP above), since ASN.1's own tag bytes are
+  common enough elsewhere that checking them opportunistically on every UDP
+  port would risk real false positives.
+- **Telnet** (TCP port 23) is identified from an IAC (`0xFF`) option-
+  negotiation triplet (RFC 854), which a real session sends in a burst
+  right at connection start. Gated to port 23 even for this structural
+  check -- unlike SMB/SSH/HTTP, `0xFF` alone is too common a byte value in
+  arbitrary binary traffic to check opportunistically. Most packets past
+  that initial burst are the port-only fallback instead.
+- **FTP**'s control channel (TCP port 21 only -- the dynamically-negotiated
+  data channel PORT/PASV/EPRT/EPSV set up has no fixed port and no content
+  signature of its own past raw file bytes, so it's explicitly out of
+  scope) is identified from a 3-digit reply code (RFC 959) or a known
+  command verb (`USER`/`PASS`/`RETR`/`STOR`/`LIST`/`PASV`/...). Gated to
+  port 21, same "too common a byte shape otherwise" reasoning as Telnet.
+- **TFTP** (UDP port 69) has a strong signature for exactly its first two
+  opcodes -- RRQ (1) and WRQ (2), each followed by a NUL-terminated
+  filename and a NUL-terminated, well-known mode string (`netascii`/
+  `octet`/`mail`, RFC 1350) -- validated in full. DATA/ACK/ERROR (the rest
+  of a transfer, once under way) have no comparable signature and fall to
+  the port-only match, explicitly noted as such.
+
+`--protocol lateral-movement` isolates this family from the CLI, the same
+as every other `--protocol` value; `--lateral-movement-port` (repeatable)
+widens what counts as an "expected" port for all eight at once (one shared
+option, the same grouping `--remote-access-port` already established for
+Tier 1) -- SMB's direct-hosting magic, SSH's banner, and HTTP's request-
+line/status-line are never port-gated regardless of this option, for the
+same reason VNC's RFB banner isn't in Tier 1 (see OPTIONS).
+
+One real implementation wrinkle, in the same spirit as Tier 1's RDP/COTP
+one: an FTP reply-code or command-verb line's own leading ASCII bytes can,
+purely by coincidence, satisfy MQTT's own single-byte opportunistic
+detection gate (mqtt.hpp) -- confirmed empirically while building this
+tier's own test fixture (an early "220 Welcome..." FTP banner was
+mis-parsed as a bogus MQTT PUBLISH message before this was fixed). Unlike
+RDP/COTP's genuine shared wire framing, this is pure coincidence, not two
+protocols actually sharing a format, so it's resolved by port instead of
+by dispatch-order precedence: FTP traffic on its own well-known
+control-channel port (21, or a configured `--lateral-movement-port`) that
+structurally matches an FTP reply-code/command-verb line is excluded from
+MQTT's own opportunistic detection entirely (both its declared-length
+reassembly probe and its full message parse), since no real MQTT broker
+runs on port 21 -- see `decoder.cpp`'s own comments at both call sites.
+
+Validated against `tests/sample_lateral_movement.pcap` (21 packets,
+hand-built with scapy, including scapy's own `SNMP` ASN.1 layer for
+correctness): direct-hosting and NetBIOS-wrapped SMB; SSH banners on a
+standard and a non-standard port; HTTP request-lines and a status-line
+response, standard and vendor-arbitrary ports; ALPN-confirmed and
+port-only-confirmed HTTPS ClientHellos plus the port-only fallback; Telnet
+with and without an IAC negotiation burst; FTP reply codes, command verbs,
+and the port-only fallback (plus a dedicated regression proving the
+MQTT-collision fix); SNMPv2c and SNMPv1 with distinct community strings,
+plus the port-only fallback for a non-BER UDP/161 packet; and TFTP RRQ,
+WRQ, and a DATA-opcode port-only fallback. As with Tier 1, no real capture
+of any of these eight was sought for this groundwork pass -- what matters
+for a name-only recognizer is that the port/structural gate itself is
+correct, which the synthetic fixture confirms directly.
+
 ### Link/IP-layer plumbing: non-IPv4 Ethernet, and non-TCP IPv4 (including UDP)
 
 Every protocol above rides on Ethernet + IPv4 + TCP. Traffic outside that --
@@ -8681,15 +8828,41 @@ These are current, not aspirational -- each has a corresponding ROADMAP item.
   other off-port TPKT/COTP frame gets -- see PROTOCOL COVERAGE's "Tier 1
   remote-access protocol recognition" section and `decoder.cpp`'s own
   comment at that call site.
-- **None of RDP/VNC/TeamViewer/AnyDesk/Zoom are wired into the
-  `policy validate` conduit-matching engine yet** -- this groundwork pass
-  only recognizes and names them in `decode` output; a conduit naming
-  `rdp`/`vnc`/etc. in its `protocols` list is not yet a supported value
-  (see ROADMAP item 18's own "modeling gap" paragraph for what a future
-  pass would need).
-- **SMB/SSH/HTTP(S)/SNMP/Telnet/FTP/TFTP and every other protocol in
-  ROADMAP item 18's tiers 2-5 are not recognized at all yet** -- only
-  Tier 1 (RDP/VNC/TeamViewer/AnyDesk/Zoom) is implemented so far.
+- **None of RDP/VNC/TeamViewer/AnyDesk/Zoom/SMB/SSH/HTTP/HTTPS/SNMP/
+  Telnet/FTP/TFTP are wired into the `policy validate` conduit-matching
+  engine yet** -- this groundwork pass only recognizes and names them in
+  `decode` output; a conduit naming `rdp`/`vnc`/`smb`/`ssh`/etc. in its
+  `protocols` list is not yet a supported value (see ROADMAP item 18's own
+  "modeling gap" paragraph for what a future pass would need).
+- **TeamViewer, AnyDesk, Zoom, and (in Tier 2) SNMP/Telnet/FTP/TFTP's own
+  port-only fallbacks are all recognized by port number alone**, the
+  weakest identification gate in this codebase -- a completely unrelated
+  service happening to run on one of these ports would be misidentified
+  with total confidence; see PROTOCOL COVERAGE's Tier 1/Tier 2 sections for
+  which of each tier's protocols have a genuine structural signature
+  (SMB/SSH/HTTP/HTTPS/VNC/RDP's own handshake) versus which don't.
+- **HTTPS recognition cannot distinguish genuine HTTP-over-TLS from any
+  other TLS-wrapped protocol sharing the same ClientHello framing** (MQTT-
+  over-TLS, OPC UA over TLS, and similar) unless ALPN explicitly offers
+  `http/1.1`/`h2` -- absent that, a standard port is treated as good-enough
+  corroboration, but the note says so honestly. See PROTOCOL COVERAGE's
+  Tier 2 section.
+- **SNMPv3 is not recognized at all** -- its USM-authenticated, optionally
+  encrypted framing has no fixed cleartext community string to extract,
+  which is this whole check's only signal; a v3 PDU on port 161/162 falls
+  to SNMP's own port-only fallback, explicitly noted as possibly v3 rather
+  than malformed.
+- **FTP's dynamically-negotiated data channel (via PORT/PASV/EPRT/EPSV) is
+  never recognized** -- only the control channel on TCP port 21 is; the
+  data channel has no fixed port and no content signature of its own past
+  raw file bytes, so it's indistinguishable from any other ephemeral-port
+  TCP flow.
+- **Telnet/FTP/TFTP's own structural checks only fire on port 21/23/69
+  (or a configured `--lateral-movement-port`)** -- unlike SMB/SSH/HTTP,
+  none of these three are checked port-independently even in Auto mode,
+  since their own structural tells (a single `0xFF` byte, a 3-digit
+  number, a 2-byte opcode) are too common a shape in arbitrary binary
+  traffic to try opportunistically without real false-positive risk.
 
 ## EXIT STATUS
 
@@ -9784,7 +9957,7 @@ anything else on this list.
     interactive remote control of an HMI/engineering station -- RDP
     (TCP 3389), VNC, TeamViewer/AnyDesk~~ -- **done, and also extended to
     Zoom**: see this item's own "Tier 1 -- done" paragraph below for what
-    was actually built; (2) lateral-movement and
+    was actually built; ~~(2) lateral-movement and
     credential-harvesting protocols that should be absent from a production
     OT segment entirely per most hardening guides (IEC 62443-3-3, NCSC,
     NIST SP 800-82) -- SMB/NetBIOS (445/139, also wormable IT malware's
@@ -9794,7 +9967,8 @@ anything else on this list.
     web servers are a routine finding), SNMPv1/v2c (161/162, a cleartext
     community string sniffed once maps every SNMP-speaking device on the
     segment), and Telnet/FTP/TFTP (all three move credentials, and often
-    firmware/config files, in cleartext); (3) protocols that are
+    firmware/config files, in cleartext)~~ -- **done**: see this item's own
+    "Tier 2 -- done" paragraph below for what was actually built; (3) protocols that are
     individually unremarkable in limited form but worth an auditor's
     attention for where they terminate and whether the OT side blindly
     trusts enterprise IT for them -- NTP, DHCP, LDAP/Active Directory (DNS
@@ -9895,7 +10069,59 @@ anything else on this list.
     BEFORE this decoder's existing, opportunistic (port-independent)
     S7comm/MMS dispatch got a chance to claim it as generic `cotp` traffic
     first -- see `it_protocols.hpp`'s and `decoder.cpp`'s own comments at
-    that call site for the full reasoning. Tiers 2-5 remain open.
+    that call site for the full reasoning.
+
+    **Tier 2 -- done**, and see PROTOCOL COVERAGE's own "Tier 2
+    lateral-movement protocol recognition" section for the full writeup:
+    `decode` now also recognizes SMB, SSH, HTTP, HTTPS, SNMPv1/v2c, Telnet,
+    FTP, and TFTP -- eight more `protocol` values (`"smb"`/`"ssh"`/`"http"`/
+    `"https"`/`"snmp"`/`"telnet"`/`"ftp"`/`"tftp"`), the same fix to this
+    item's own "modeling gap" paragraph below Tier 1 already made, now
+    covering the family the ROADMAP calls out as most worth an auditor's
+    attention: protocols that "should be absent from a production OT
+    segment entirely per most hardening guides." Confidence is, once again,
+    reported honestly rather than uniformly: SMB's direct-hosting magic
+    (`0xFF`/`0xFE`/`0xFD` + `"SMB"`), SSH's RFC 4253 version-exchange
+    banner, and HTTP's own request-line/status-line are all genuine,
+    self-describing cleartext structural signatures, checked
+    port-independently even in Auto mode (deliberately so for HTTP -- a
+    vendor web UI like Siemens WinCC running on whatever port the vendor
+    picked is exactly the case this item names); HTTPS reuses this
+    project's own `tls_sni.hpp` TLS ClientHello parser (already built for
+    DoH detection) rather than re-implementing TLS parsing, layered so a
+    DoH match always wins and a ClientHello that isn't a known DoH
+    provider's hostname falls through to generic `"https"` instead (ALPN
+    offering `"http/1.1"`/`"h2"` confirms it outright; a standard port with
+    no ALPN is still called `"https"` but says so honestly; no ClientHello
+    at all is the weakest, port-only fallback for an already-established
+    session); SNMPv1/v2c genuinely extracts and surfaces the cleartext
+    community string itself (a deliberate, narrow departure from this
+    family's usual name-only posture -- see this item's own SNMP wording:
+    "a cleartext community string sniffed once maps every SNMP-speaking
+    device on the segment," so the audit value IS the string); and Telnet/
+    FTP/TFTP each have a real but narrower signal (an IAC negotiation
+    burst, a 3-digit reply code or known command verb, and an RRQ/WRQ's
+    filename+mode respectively) gated to their own well-known port, since
+    unlike SMB/SSH/HTTP none of their own structural tells are strong
+    enough to check port-independently without real false-positive risk.
+    `--protocol lateral-movement` isolates this family, and
+    `--lateral-movement-port` widens its "expected port" set (one shared
+    option across all eight, the same grouping `--remote-access-port`
+    already established for Tier 1) -- see OPTIONS. One real implementation
+    wrinkle worth recording, in the same spirit as Tier 1's RDP/COTP one:
+    an FTP reply-code or command-verb line's own leading ASCII bytes can,
+    purely by coincidence, satisfy MQTT's own single-byte "control packet
+    type + a plausible variable-length remaining-length" opportunistic
+    detection gate (mqtt.hpp) -- confirmed empirically while building this
+    tier's own test fixture. Unlike RDP/COTP's genuine shared framing, this
+    is pure coincidence, not two protocols sharing a wire format, so it's
+    resolved by port instead: FTP traffic on its own well-known
+    control-channel port (21, or a configured `--lateral-movement-port`)
+    that structurally matches an FTP reply-code/command-verb line is
+    excluded from MQTT's own opportunistic detection (both its declared-
+    length reassembly probe and its full message parse), since no real
+    MQTT broker runs on port 21 -- see `decoder.cpp`'s own comments at both
+    call sites for the full reasoning. Tiers 3-5 remain open.
 
     Scoped honestly, this is name-only recognition (port plus a minimal
     structural signature), not full protocol decoding -- the same
@@ -9911,10 +10137,11 @@ anything else on this list.
     port 3389 rather than 102 disambiguates the two, and since this tier
     only needs to NAME the PDU (Connection Request vs. Confirm), `cotp.hpp`
     already parses enough of the X.224 header for that; no new framing or
-    payload parsing code was needed. SMB is a heavier lift structurally
-    (NetBIOS Session Service framing, then SMB1-vs-SMB2/3 dialect
-    negotiation) but still only needs enough of the header to name it "SMB,
-    dialect X," not to unpack a single request -- a conduit or asset
+    payload parsing code was needed. SMB turned out to be a lighter lift
+    than this paragraph originally expected, too (see "Tier 2 -- done"
+    above): naming it only ever needed the leading 4-byte magic (either
+    directly, or 4 bytes into a NetBIOS Session Service wrapper), not a
+    full SMB1-vs-SMB2/3 dialect negotiation walk -- a conduit or asset
     inventory that has zero tolerance for a protocol existing inside an OT
     zone at all doesn't need to look inside it to register the finding.
 

@@ -712,7 +712,31 @@ bool Decoder::reassemble_tcp_payload(const TcpSegment& tcp, const std::string& f
     // HART-IP itself. No specific byte-for-byte collision with another protocol above was found
     // during this feature's own research, but this ordering means any that do exist resolve in
     // every other protocol's favor, not MQTT's.
-    if (!declared && want_mqtt) {
+    //
+    // One real, empirically-confirmed collision Tier 2 of the "IT protocols an OT auditor flags"
+    // family DID find, though (see it_protocols.hpp's own file header comment): an FTP reply-code
+    // line ("220 Welcome...") or command-verb line ("USER anonymous...") begins with ASCII bytes
+    // that can coincidentally satisfy MQTT's own single-byte "control packet type + flags, then a
+    // plausible variable-length-encoded remaining length" gate purely by chance (an ASCII digit or
+    // uppercase letter's top nibble often lands on a valid MQTT control-packet-type value, and the
+    // following byte, itself printable ASCII, is always < 0x80 and so parses as a complete one-byte
+    // varint). Unlike HART-IP/MQTT/FF-HSE's own mutual "weaker signal, lower priority" ordering
+    // above, this is resolved by PORT, the same way RDP's own collision with S7comm/MMS's COTP
+    // framing is (see decode()'s own TCP dispatch, right before the S7comm/MMS COTP check): real
+    // MQTT brokers do not run on FTP's own well-known control-channel port (21), so a candidate on
+    // that port (or a configured --lateral-movement-port) that structurally matches an FTP reply-
+    // code/command-verb line is deliberately excluded from MQTT's own declared-length probe below,
+    // letting it fall straight through to Tier 2's own FTP recognition once reassembly completes
+    // (immediately, since no declared-length framing claims it) rather than being buffered
+    // indefinitely waiting for MQTT bytes that will never arrive.
+    bool want_lateral_movement_reassembly = options_.protocol_filter == ProtocolFilter::Auto ||
+                                             options_.protocol_filter == ProtocolFilter::LateralMovementOnly;
+    bool candidate_is_ftp_control =
+        want_lateral_movement_reassembly &&
+        (port_in(tcp.src_port, FTP_CONTROL_PORT, options_.extra_lateral_movement_ports) ||
+         port_in(tcp.dst_port, FTP_CONTROL_PORT, options_.extra_lateral_movement_ports)) &&
+        looks_like_ftp_control_line(candidate);
+    if (!declared && want_mqtt && !candidate_is_ftp_control) {
         if (auto d = mqtt_declared_length(candidate)) {
             declared = d;
             which = "MQTT packet";
@@ -1696,6 +1720,24 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                 }
             }
 
+            // Tier 2 "IT protocols an OT auditor flags" recognition -- see it_protocols.hpp and the
+            // matching comment on the TCP side of this dispatch for why this is tried last. Only
+            // SNMP and TFTP are reachable here (SMB/SSH/HTTP/HTTPS/Telnet/FTP are all TCP-only by
+            // spec, so is_tcp=false short-circuits their own checks inside
+            // try_recognize_it_lateral_movement immediately).
+            bool want_lateral_movement_udp = options_.protocol_filter == ProtocolFilter::Auto ||
+                                              options_.protocol_filter == ProtocolFilter::LateralMovementOnly;
+            if (want_lateral_movement_udp) {
+                if (auto m = try_recognize_it_lateral_movement(udp.payload, udp.src_port, udp.dst_port,
+                                                                 /*is_tcp=*/false,
+                                                                 options_.extra_lateral_movement_ports)) {
+                    out.protocol = m->protocol;
+                    out.summary = m->summary;
+                    for (const auto& n : m->notes) out.notes.push_back(n);
+                    return out;
+                }
+            }
+
             // Groundwork plumbing beyond this point: the UDP header/payload split is recognized
             // and reported (src/dst port, byte count), but no other application-layer protocol
             // riding on UDP is decoded -- see udp.hpp's file header comment and docs/MANUAL.md's
@@ -1847,6 +1889,63 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                     }
                     return out;
                 }
+            }
+        }
+
+        // Generic HTTPS detection -- Tier 2 of the "IT protocols an OT auditor flags" family (see
+        // it_protocols.hpp's own file header comment for the full writeup). Deliberately layered
+        // right here, directly after the DoH check above and reusing that SAME single-TCP-segment
+        // try_parse_tls_client_hello call this codebase already has (tls_sni.hpp) rather than
+        // duplicating TLS record/handshake parsing: a DoH match always wins (a known public DoH
+        // resolver hostname is strictly more specific than "generic HTTPS"), and a ClientHello that
+        // parses but ISN'T a known DoH provider's hostname falls through to here instead, tagged
+        // "https". Checked port-independently even in Auto mode -- TLS record/handshake framing
+        // (ContentType=Handshake, HandshakeType=ClientHello) is a genuinely strong, self-describing
+        // signal, the same treatment SSH's version-exchange banner and SMB's direct-hosting magic
+        // get below (see it_protocols.hpp) -- a vendor web UI terminating TLS on a nonstandard port
+        // is exactly the case worth still catching. This does NOT confirm the traffic is
+        // specifically HTTP-over-TLS rather than some other TLS-wrapped protocol sharing the same
+        // port (MQTT-over-TLS, OPC UA over TLS, etc. all begin with the identical ClientHello
+        // framing) -- ALPN offering "http/1.1"/"h2" is a genuine confirmation when present; absent
+        // that, a standard HTTPS port (443/8443, or a configured extra port) is treated as good
+        // enough corroboration to still call it "https", but says so honestly in a note rather than
+        // implying a confidence neither signal actually backs up.
+        bool want_lateral_movement_early = options_.protocol_filter == ProtocolFilter::Auto ||
+                                            options_.protocol_filter == ProtocolFilter::LateralMovementOnly;
+        if (want_lateral_movement_early) {
+            if (auto hello = try_parse_tls_client_hello(tcp.payload)) {
+                bool alpn_confirms_http =
+                    std::find(hello->alpn_protocols.begin(), hello->alpn_protocols.end(), "http/1.1") !=
+                        hello->alpn_protocols.end() ||
+                    std::find(hello->alpn_protocols.begin(), hello->alpn_protocols.end(), "h2") !=
+                        hello->alpn_protocols.end();
+                bool port_match = port_in(tcp.src_port, HTTPS_PORT_443, options_.extra_lateral_movement_ports) ||
+                                   port_in(tcp.dst_port, HTTPS_PORT_443, options_.extra_lateral_movement_ports) ||
+                                   port_in(tcp.src_port, HTTPS_PORT_8443, options_.extra_lateral_movement_ports) ||
+                                   port_in(tcp.dst_port, HTTPS_PORT_8443, options_.extra_lateral_movement_ports);
+                out.protocol = "https";
+                std::ostringstream s;
+                s << "HTTPS/TLS ClientHello";
+                if (!hello->sni.empty()) s << " (SNI: " << hello->sni << ")";
+                out.summary = s.str();
+                if (alpn_confirms_http) {
+                    out.notes.push_back("ALPN offered \"http/1.1\" or \"h2\", confirming this is "
+                                         "specifically HTTP-over-TLS rather than some other TLS-"
+                                         "wrapped protocol");
+                } else if (port_match) {
+                    out.notes.push_back("TLS ClientHello on a standard/configured HTTPS port, but "
+                                         "ALPN did not confirm HTTP specifically -- most likely HTTPS, "
+                                         "but any other TLS-wrapped protocol sharing this port would "
+                                         "look identical at this layer");
+                } else {
+                    out.notes.push_back("seen on TCP port " + std::to_string(tcp.src_port) + "->" +
+                                         std::to_string(tcp.dst_port) +
+                                         ", which is not a configured/standard HTTPS port (443/8443), "
+                                         "and ALPN did not confirm HTTP specifically -- a genuine TLS "
+                                         "ClientHello was observed, but this could be any TLS-wrapped "
+                                         "protocol using this port, not necessarily HTTPS");
+                }
+                return out;
             }
         }
 
@@ -2576,8 +2675,20 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
 
         // Tried LAST of all -- see the matching, fuller comment in reassemble_tcp_payload above for
         // why MQTT's own structural detection gate is deliberately given the lowest priority in
-        // this opportunistic, port-independent dispatch chain, even below HART-IP's.
-        if (want_mqtt) {
+        // this opportunistic, port-independent dispatch chain, even below HART-IP's. The SAME
+        // FTP-vs-MQTT collision reassemble_tcp_payload's own declared-length probe already
+        // excludes (see that comment for the full reasoning) applies here too, to MQTT's own full
+        // message parse, not just its length probe -- an FTP reply-code/command-verb line on port
+        // 21 that happened to satisfy MQTT's length gate would otherwise still be mis-parsed here
+        // as a (bogus, near-empty) PUBLISH message once past the buffering stage.
+        bool want_lateral_movement_mqtt_carveout = options_.protocol_filter == ProtocolFilter::Auto ||
+                                                    options_.protocol_filter == ProtocolFilter::LateralMovementOnly;
+        bool effective_payload_is_ftp_control =
+            want_lateral_movement_mqtt_carveout &&
+            (port_in(tcp.src_port, FTP_CONTROL_PORT, options_.extra_lateral_movement_ports) ||
+             port_in(tcp.dst_port, FTP_CONTROL_PORT, options_.extra_lateral_movement_ports)) &&
+            looks_like_ftp_control_line(effective_payload);
+        if (want_mqtt && !effective_payload_is_ftp_control) {
             std::string mqtt_session_key = tcp_session_key(out.src_ip, tcp.src_port, out.dst_ip, tcp.dst_port);
             auto session_it = mqtt_session_version_.find(mqtt_session_key);
             uint8_t session_hint = session_it != mqtt_session_version_.end() ? session_it->second : 0;
@@ -2784,12 +2895,32 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
             }
         }
 
+        // Tier 2 "IT protocols an OT auditor flags" recognition -- see it_protocols.hpp. Tried LAST,
+        // same "weakest signals last" reasoning Tier 1 just above documents -- a real OT-protocol
+        // session or a Tier 1 remote-access match always gets first chance. HTTPS's own strong
+        // ClientHello check already ran much earlier (right after the DoH check, before TCP
+        // reassembly -- see that call site's own comment); what reaches this point for "https" is
+        // only ever its port-only fallback, handled inside try_recognize_it_lateral_movement below
+        // exactly like every other Tier 2 protocol's own weak fallback.
+        bool want_lateral_movement = options_.protocol_filter == ProtocolFilter::Auto ||
+                                      options_.protocol_filter == ProtocolFilter::LateralMovementOnly;
+        if (want_lateral_movement) {
+            if (auto m = try_recognize_it_lateral_movement(effective_payload, tcp.src_port, tcp.dst_port,
+                                                             /*is_tcp=*/true, options_.extra_lateral_movement_ports)) {
+                out.protocol = m->protocol;
+                out.summary = m->summary;
+                for (const auto& n : m->notes) out.notes.push_back(n);
+                return out;
+            }
+        }
+
         out.protocol = "tcp";
         std::ostringstream s;
         s << "TCP payload of " << effective_payload.size() << " byte(s) on port " << tcp.src_port << "->"
           << tcp.dst_port
           << " did not match OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, COTP/S7comm/MMS, HART-IP, "
-             "MQTT, FF-HSE, or the RDP/VNC/TeamViewer/AnyDesk/Zoom remote-access family";
+             "MQTT, FF-HSE, the RDP/VNC/TeamViewer/AnyDesk/Zoom remote-access family, or the SMB/SSH/"
+             "HTTP/HTTPS/Telnet/FTP lateral-movement family";
         out.summary = s.str();
         return out;
 

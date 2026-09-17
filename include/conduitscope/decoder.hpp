@@ -85,6 +85,10 @@ enum class ProtocolFilter {
                         // (RDP/VNC/TeamViewer/AnyDesk/Zoom) -- see it_protocols.hpp. One filter
                         // value covers all five, the same "one feature toggle, several sub-
                         // protocols sharing it" convention FfHseOnly already established.
+    LateralMovementOnly,  // only attempt the Tier 2 "IT protocols an OT auditor flags" recognition
+                           // (SMB/SSH/HTTP/HTTPS/SNMPv1v2c/Telnet/FTP/TFTP) -- see it_protocols.hpp.
+                           // One filter value covers all eight, the same grouping RemoteAccessOnly
+                           // above already established for Tier 1.
 };
 
 struct DecodeOptions {
@@ -149,6 +153,18 @@ struct DecodeOptions {
     // opportunistic checks get -- this list still extends what counts as VNC's "expected" port for
     // the purposes of the "seen on a non-standard port" note, just never gates the detection itself.
     std::vector<uint16_t> extra_remote_access_ports;
+    // One shared list across all eight Tier 2 "IT protocols an OT auditor flags" protocols (SMB/
+    // SSH/HTTP/HTTPS/SNMPv1v2c/Telnet/FTP/TFTP -- see it_protocols.hpp), the same one-list grouping
+    // extra_remote_access_ports above already established for Tier 1. Gates detection for the four
+    // protocols with no strong port-independent signature (SNMP, Telnet, FTP, TFTP -- joins the
+    // same detection-gating group as extra_dns_ports/extra_rip_ports/etc. above) and extends the
+    // "expected port" set for HTTPS's own port-only fallback. SMB/SSH/HTTP are the exceptions: SMB's
+    // direct-hosting magic, SSH's version-exchange banner, and HTTP's request-line/status-line are
+    // all checked port-independently even in Auto mode (each is a genuinely strong, self-describing
+    // signal, the same "structural signature overrides the port gate" treatment VNC's RFB banner
+    // gets above) -- this list still extends what counts as each one's own "expected" port for the
+    // purposes of the "seen on a non-standard port" note, just never gates those three's detection.
+    std::vector<uint16_t> extra_lateral_movement_ports;
     // If true, a parse failure at the Ethernet/IPv4/TCP layer is rethrown to
     // the caller instead of being recorded as a per-packet "parse-error"
     // result. Off by default so one malformed packet doesn't abort decoding

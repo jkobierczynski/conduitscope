@@ -2,7 +2,9 @@
 #include "conduitscope/it_protocols.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <sstream>
+#include <utility>
 
 namespace conduitscope {
 
@@ -137,6 +139,406 @@ std::optional<ItRemoteAccessMatch> try_recognize_it_remote_access(ByteSpan paylo
         }
         m.summary = s.str();
         return m;
+    }
+
+    return std::nullopt;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Tier 2 -- see it_protocols.hpp's own header comment for the full per-protocol confidence writeup.
+
+namespace {
+
+// Matches the 4-byte SMB magic (0xFF/0xFE/0xFD + "SMB") at `offset` within `payload`. Returns a
+// human-readable label naming which SMB generation/framing it is, or std::nullopt if it doesn't
+// match at all.
+std::optional<std::string> match_smb_magic(ByteSpan payload, size_t offset) {
+    if (payload.size() < offset + 4) return std::nullopt;
+    uint8_t b0 = payload.at(offset);
+    if (b0 != 0xFF && b0 != 0xFE && b0 != 0xFD) return std::nullopt;
+    if (payload.at(offset + 1) != 'S' || payload.at(offset + 2) != 'M' || payload.at(offset + 3) != 'B') {
+        return std::nullopt;
+    }
+    if (b0 == 0xFF) return std::string("SMB1 (CIFS) header, 0xFF\"SMB\" magic");
+    if (b0 == 0xFE) return std::string("SMB2/SMB3 header, 0xFE\"SMB\" magic");
+    return std::string("SMB2/SMB3 Transform (encrypted) header, 0xFD\"SMB\" magic");
+}
+
+// RFC 4253 section 4.2's own version-exchange banner: "SSH-" + protoversion + "-" + a software
+// version/comment field, CR- or LF-terminated, max 255 bytes including the terminator. Returns the
+// full banner line (without its terminator) on a match.
+std::optional<std::string> match_ssh_banner(ByteSpan payload) {
+    static const char kPrefix[] = "SSH-";
+    if (payload.size() < 6) return std::nullopt;
+    for (size_t i = 0; i < 4; ++i) {
+        if (payload.at(i) != static_cast<uint8_t>(kPrefix[i])) return std::nullopt;
+    }
+    size_t limit = std::min<size_t>(payload.size(), 255);
+    size_t line_end = 0;
+    bool found_end = false;
+    for (size_t i = 4; i < limit; ++i) {
+        uint8_t c = payload.at(i);
+        if (c == '\r' || c == '\n') {
+            line_end = i;
+            found_end = true;
+            break;
+        }
+    }
+    if (!found_end) return std::nullopt;  // truncated within this segment -- not confirmed
+    // Require a "-" delimiting protoversion from softwareversion, with at least one digit before it
+    // (e.g. "2.0-" or "1.99-") -- this is what actually distinguishes a real banner from four
+    // arbitrary "SSH-" bytes at the start of unrelated traffic.
+    size_t dash = 0;
+    bool found_dash = false;
+    for (size_t i = 4; i < line_end; ++i) {
+        if (payload.at(i) == '-') {
+            dash = i;
+            found_dash = true;
+            break;
+        }
+    }
+    if (!found_dash || dash == 4) return std::nullopt;
+    bool saw_digit = false;
+    for (size_t i = 4; i < dash; ++i) {
+        uint8_t c = payload.at(i);
+        if (c >= '0' && c <= '9') {
+            saw_digit = true;
+        } else if (c != '.') {
+            return std::nullopt;  // protoversion must be digits and dots only
+        }
+    }
+    if (!saw_digit) return std::nullopt;
+    std::string line;
+    for (size_t i = 0; i < line_end; ++i) line += static_cast<char>(payload.at(i));
+    return line;
+}
+
+// RFC 9112's request-line/status-line shape. Returns a short description on a match; checks only
+// the first (at most) 256 bytes, since a real request-line/status-line is always short.
+std::optional<std::string> match_http(ByteSpan payload) {
+    static const std::vector<std::string> kVerbs = {"GET",  "POST", "PUT",     "DELETE", "HEAD",
+                                                       "OPTIONS", "PATCH", "CONNECT", "TRACE"};
+    size_t limit = std::min<size_t>(payload.size(), 256);
+    std::string prefix;
+    for (size_t i = 0; i < limit; ++i) prefix += static_cast<char>(payload.at(i));
+
+    for (const auto& verb : kVerbs) {
+        std::string needle = verb + " ";
+        if (prefix.size() < needle.size() || prefix.compare(0, needle.size(), needle) != 0) continue;
+        if (prefix.find(" HTTP/1.") != std::string::npos || prefix.find(" HTTP/2") != std::string::npos ||
+            prefix.find(" HTTP/0.9") != std::string::npos) {
+            return "HTTP request (" + verb + " ...)";
+        }
+    }
+    static const std::vector<std::string> kStatusPrefixes = {"HTTP/1.0 ", "HTTP/1.1 ", "HTTP/2 ",
+                                                                "HTTP/0.9 "};
+    for (const auto& sp : kStatusPrefixes) {
+        if (prefix.size() < sp.size() + 3 || prefix.compare(0, sp.size(), sp) != 0) continue;
+        bool digits = true;
+        for (size_t i = 0; i < 3; ++i) {
+            char c = prefix[sp.size() + i];
+            if (c < '0' || c > '9') { digits = false; break; }
+        }
+        if (digits) {
+            std::string code = prefix.substr(sp.size(), 3);
+            return "HTTP response (status " + code + ")";
+        }
+    }
+    return std::nullopt;
+}
+
+// IAC (0xFF) + WILL/WONT/DO/DONT (0xFB-0xFE) + one option byte, RFC 854 -- returns true on at
+// least one well-formed triplet anywhere in the payload (real sessions send several back-to-back
+// at connection start, but this doesn't insist on that).
+bool has_telnet_negotiation(ByteSpan payload) {
+    if (payload.size() < 3) return false;
+    for (size_t i = 0; i + 2 < payload.size(); ++i) {
+        if (payload.at(i) != 0xFF) continue;
+        uint8_t cmd = payload.at(i + 1);
+        if (cmd == 0xFB || cmd == 0xFC || cmd == 0xFD || cmd == 0xFE) return true;
+    }
+    return false;
+}
+
+// A 3-digit FTP reply code (RFC 959 4.2) followed by ' ' (final line) or '-' (start of a multiline
+// reply), or a known command verb followed by ' ', CR, LF, or end-of-buffer.
+std::optional<std::string> match_ftp(ByteSpan payload) {
+    if (payload.size() >= 4) {
+        bool digits = true;
+        for (size_t i = 0; i < 3; ++i) {
+            uint8_t c = payload.at(i);
+            if (c < '0' || c > '9') { digits = false; break; }
+        }
+        if (digits) {
+            uint8_t c3 = payload.at(3);
+            if (c3 == ' ' || c3 == '-') {
+                std::string code;
+                for (size_t i = 0; i < 3; ++i) code += static_cast<char>(payload.at(i));
+                return "FTP reply code " + code;
+            }
+        }
+    }
+    static const std::vector<std::string> kVerbs = {
+        "USER", "PASS", "ACCT", "CWD",  "CDUP", "SMNT", "QUIT", "REIN", "PORT", "PASV",
+        "TYPE", "STRU", "MODE", "RETR", "STOR", "STOU", "APPE", "ALLO", "REST", "RNFR",
+        "RNTO", "ABOR", "DELE", "RMD",  "MKD",  "PWD",  "LIST", "NLST", "SITE", "SYST",
+        "STAT", "HELP", "NOOP", "FEAT", "EPSV", "EPRT"};
+    for (const auto& verb : kVerbs) {
+        if (payload.size() < verb.size()) continue;
+        bool match = true;
+        for (size_t i = 0; i < verb.size(); ++i) {
+            if (payload.at(i) != static_cast<uint8_t>(verb[i])) { match = false; break; }
+        }
+        if (!match) continue;
+        if (payload.size() == verb.size()) return "FTP command \"" + verb + "\"";
+        uint8_t next = payload.at(verb.size());
+        if (next == ' ' || next == '\r' || next == '\n') return "FTP command \"" + verb + "\"";
+    }
+    return std::nullopt;
+}
+
+// Minimal BER length decoder (definite form only, short or up to 4 long-form length bytes --
+// ample for anything SNMP's own SEQUENCE/INTEGER/OCTET STRING triple ever needs). Returns
+// {length, bytes-this-length-field-itself-consumed}, or std::nullopt if malformed/out-of-range.
+std::optional<std::pair<size_t, size_t>> ber_length(ByteSpan payload, size_t offset) {
+    if (offset >= payload.size()) return std::nullopt;
+    uint8_t b0 = payload.at(offset);
+    if ((b0 & 0x80) == 0) return std::make_pair(static_cast<size_t>(b0), static_cast<size_t>(1));
+    size_t num_len_bytes = b0 & 0x7F;
+    if (num_len_bytes == 0 || num_len_bytes > 4) return std::nullopt;  // indefinite form, or absurd
+    if (offset + 1 + num_len_bytes > payload.size()) return std::nullopt;
+    size_t len = 0;
+    for (size_t i = 0; i < num_len_bytes; ++i) len = (len << 8) | payload.at(offset + 1 + i);
+    return std::make_pair(len, static_cast<size_t>(1 + num_len_bytes));
+}
+
+struct SnmpMatch {
+    int version = 0;  // 0 = v1, 1 = v2c
+    std::string community;
+};
+
+// SEQUENCE { INTEGER version, OCTET STRING community, ... } -- the fixed prefix every SNMPv1/v2c
+// PDU shares (RFC 1157/RFC 1901). Deliberately requires the community string to be printable ASCII
+// -- a real one always is, and requiring it is what keeps this from false-positiving on arbitrary
+// binary UDP traffic that happens to start with a plausible-looking SEQUENCE/INTEGER shape.
+std::optional<SnmpMatch> match_snmpv1v2c(ByteSpan payload) {
+    if (payload.size() < 2 || payload.at(0) != 0x30) return std::nullopt;  // SEQUENCE
+    auto seq_len = ber_length(payload, 1);
+    if (!seq_len) return std::nullopt;
+    size_t pos = 1 + seq_len->second;
+
+    if (pos >= payload.size() || payload.at(pos) != 0x02) return std::nullopt;  // INTEGER
+    auto int_len = ber_length(payload, pos + 1);
+    if (!int_len || int_len->first < 1 || int_len->first > 4) return std::nullopt;
+    pos = pos + 1 + int_len->second;
+    if (pos + int_len->first > payload.size()) return std::nullopt;
+    int version = 0;
+    for (size_t i = 0; i < int_len->first; ++i) version = (version << 8) | payload.at(pos + i);
+    pos += int_len->first;
+    if (version != 0 && version != 1) return std::nullopt;  // only v1/v2c -- v3 has no cleartext
+                                                               // community string, see file header
+
+    if (pos >= payload.size() || payload.at(pos) != 0x04) return std::nullopt;  // OCTET STRING
+    auto str_len = ber_length(payload, pos + 1);
+    if (!str_len) return std::nullopt;
+    pos = pos + 1 + str_len->second;
+    if (pos + str_len->first > payload.size()) return std::nullopt;
+    if (str_len->first == 0 || str_len->first > 128) return std::nullopt;  // a real community string
+                                                                              // is always short
+    std::string community;
+    for (size_t i = 0; i < str_len->first; ++i) {
+        uint8_t c = payload.at(pos + i);
+        if (c < 0x20 || c > 0x7e) return std::nullopt;  // must be printable ASCII, see comment above
+        community += static_cast<char>(c);
+    }
+    SnmpMatch m;
+    m.version = version;
+    m.community = community;
+    return m;
+}
+
+// TFTP RRQ/WRQ (opcode 1/2, RFC 1350 section 5): opcode + NUL-terminated filename + NUL-terminated
+// mode ("netascii"/"octet"/"mail", case-insensitive). Deliberately does not attempt to parse the
+// optional RFC 2347 option/value pairs some RRQ/WRQ packets append -- naming the request is enough.
+std::optional<std::string> match_tftp_request(ByteSpan payload) {
+    if (payload.size() < 4) return std::nullopt;
+    uint16_t opcode = (static_cast<uint16_t>(payload.at(0)) << 8) | payload.at(1);
+    if (opcode != 1 && opcode != 2) return std::nullopt;
+
+    size_t pos = 2;
+    std::string filename;
+    while (pos < payload.size() && payload.at(pos) != 0) {
+        uint8_t c = payload.at(pos);
+        if (c < 0x20 || c > 0x7e) return std::nullopt;
+        filename += static_cast<char>(c);
+        ++pos;
+        if (filename.size() > 255) return std::nullopt;
+    }
+    if (pos >= payload.size() || filename.empty()) return std::nullopt;
+    ++pos;  // skip filename's NUL terminator
+
+    std::string mode;
+    while (pos < payload.size() && payload.at(pos) != 0) {
+        uint8_t c = payload.at(pos);
+        if (c < 0x20 || c > 0x7e) return std::nullopt;
+        mode += static_cast<char>(c);
+        ++pos;
+        if (mode.size() > 16) return std::nullopt;
+    }
+    if (mode.empty()) return std::nullopt;
+    std::string mode_lower = mode;
+    std::transform(mode_lower.begin(), mode_lower.end(), mode_lower.begin(),
+                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (mode_lower != "netascii" && mode_lower != "octet" && mode_lower != "mail") return std::nullopt;
+
+    std::string op_name = (opcode == 1) ? "RRQ (read request)" : "WRQ (write request)";
+    return op_name + " for \"" + filename + "\", mode " + mode;
+}
+
+}  // namespace
+
+bool looks_like_ftp_control_line(ByteSpan payload) { return match_ftp(payload).has_value(); }
+
+std::optional<ItLateralMovementMatch> try_recognize_it_lateral_movement(ByteSpan payload, uint16_t src_port,
+                                                                          uint16_t dst_port, bool is_tcp,
+                                                                          const std::vector<uint16_t>& extra_ports) {
+    if (is_tcp) {
+        // 1. SMB direct-hosting magic -- port-independent, a genuinely strong signal (see file
+        // header comment), same treatment VNC's RFB banner gets above.
+        if (auto d = match_smb_magic(payload, 0)) {
+            ItLateralMovementMatch m;
+            m.protocol = "smb";
+            m.summary = "SMB, direct TCP hosting (" + *d + ")";
+            if (!port_in(src_port, SMB_PORT_445, extra_ports) && !port_in(dst_port, SMB_PORT_445, extra_ports)) {
+                m.notes.push_back("seen on TCP port " + std::to_string(src_port) + "->" +
+                                   std::to_string(dst_port) +
+                                   ", which is not the configured/standard direct-hosting SMB port (445)");
+            }
+            return m;
+        }
+        // 2. SMB over a NetBIOS Session Service wrapper -- gated to port 139 (the wrapper's own
+        // leading type byte alone is too common a value to check opportunistically, unlike the
+        // direct-hosting magic above).
+        if ((port_in(src_port, SMB_NETBIOS_SESSION_PORT_139, extra_ports) ||
+             port_in(dst_port, SMB_NETBIOS_SESSION_PORT_139, extra_ports)) &&
+            payload.size() >= 8 && payload.at(0) == 0x00) {
+            if (auto d = match_smb_magic(payload, 4)) {
+                ItLateralMovementMatch m;
+                m.protocol = "smb";
+                m.summary = "SMB over NetBIOS Session Service (RFC 1002 session message wrapper, " + *d + ")";
+                return m;
+            }
+        }
+        // 3. SSH version-exchange banner -- port-independent, same reasoning as SMB/VNC above: SSH
+        // deliberately running on a nonstandard port is still worth flagging.
+        if (auto banner = match_ssh_banner(payload)) {
+            ItLateralMovementMatch m;
+            m.protocol = "ssh";
+            m.summary = "SSH version-exchange banner \"" + *banner + "\"";
+            if (!port_in(src_port, SSH_PORT, extra_ports) && !port_in(dst_port, SSH_PORT, extra_ports)) {
+                m.notes.push_back("seen on TCP port " + std::to_string(src_port) + "->" +
+                                   std::to_string(dst_port) +
+                                   ", which is not a configured/standard SSH port (22)");
+            }
+            return m;
+        }
+        // 4. HTTP request-line/status-line -- port-independent by design, since a vendor web UI's
+        // whole point is running on whatever port the vendor picked.
+        if (auto h = match_http(payload)) {
+            ItLateralMovementMatch m;
+            m.protocol = "http";
+            m.summary = *h;
+            if (!port_in(src_port, HTTP_PORT_80, extra_ports) && !port_in(dst_port, HTTP_PORT_80, extra_ports) &&
+                !port_in(src_port, HTTP_PORT_8080, extra_ports) && !port_in(dst_port, HTTP_PORT_8080, extra_ports) &&
+                !port_in(src_port, HTTP_PORT_8000, extra_ports) && !port_in(dst_port, HTTP_PORT_8000, extra_ports)) {
+                m.notes.push_back("seen on TCP port " + std::to_string(src_port) + "->" +
+                                   std::to_string(dst_port) +
+                                   ", not one of this decoder's curated \"commonly configured\" HTTP "
+                                   "ports (80/8080/8000) -- exactly the vendor-web-UI-on-an-arbitrary-"
+                                   "port case this check is meant to catch");
+            }
+            return m;
+        }
+        // 5. Telnet IAC negotiation -- gated to port 23 (IAC's 0xFF is too common a byte value in
+        // arbitrary binary traffic to check opportunistically, unlike SMB/SSH/HTTP's own much more
+        // self-describing signatures above).
+        if (port_in(src_port, TELNET_PORT, extra_ports) || port_in(dst_port, TELNET_PORT, extra_ports)) {
+            ItLateralMovementMatch m;
+            m.protocol = "telnet";
+            if (has_telnet_negotiation(payload)) {
+                m.summary = "Telnet (TCP port " + std::to_string(TELNET_PORT) +
+                             ") -- IAC option-negotiation sequence observed";
+            } else {
+                m.summary = "Telnet (TCP port " + std::to_string(TELNET_PORT) +
+                             ") -- port match only, no IAC negotiation sequence in this packet "
+                             "(already-established session data looks like this)";
+            }
+            return m;
+        }
+        // 6. FTP control channel -- gated to port 21 (the data channel is out of scope, see file
+        // header comment).
+        if (port_in(src_port, FTP_CONTROL_PORT, extra_ports) || port_in(dst_port, FTP_CONTROL_PORT, extra_ports)) {
+            ItLateralMovementMatch m;
+            m.protocol = "ftp";
+            if (auto f = match_ftp(payload)) {
+                m.summary = "FTP control channel (TCP port " + std::to_string(FTP_CONTROL_PORT) + ") -- " + *f;
+            } else {
+                m.summary = "FTP control channel (TCP port " + std::to_string(FTP_CONTROL_PORT) +
+                             ") -- port match only, no reply code or command verb recognized in this packet";
+            }
+            return m;
+        }
+        // 7. HTTPS port-only fallback -- the actual ClientHello structural check runs earlier in
+        // decoder.cpp, reusing tls_sni.hpp (see it_protocols.hpp's own file header comment for why);
+        // this only covers an already-established, fully-encrypted session on a configured HTTPS
+        // port with no visible ClientHello in this particular packet.
+        if (port_in(src_port, HTTPS_PORT_443, extra_ports) || port_in(dst_port, HTTPS_PORT_443, extra_ports) ||
+            port_in(src_port, HTTPS_PORT_8443, extra_ports) || port_in(dst_port, HTTPS_PORT_8443, extra_ports)) {
+            ItLateralMovementMatch m;
+            m.protocol = "https";
+            m.summary = "HTTPS/TLS (TCP port 443/8443) -- port match only, no TLS ClientHello in "
+                         "this packet (an already-established, encrypted session looks like this)";
+            return m;
+        }
+    } else {
+        // 1. SNMPv1/v2c -- gated to port 161/162 (see file header comment for why, unlike SMB/SSH/
+        // HTTP above).
+        if (port_in(src_port, SNMP_AGENT_PORT, extra_ports) || port_in(dst_port, SNMP_AGENT_PORT, extra_ports) ||
+            port_in(src_port, SNMP_TRAP_PORT, extra_ports) || port_in(dst_port, SNMP_TRAP_PORT, extra_ports)) {
+            ItLateralMovementMatch m;
+            m.protocol = "snmp";
+            bool is_trap_port = port_in(src_port, SNMP_TRAP_PORT, extra_ports) ||
+                                 port_in(dst_port, SNMP_TRAP_PORT, extra_ports);
+            if (auto s = match_snmpv1v2c(payload)) {
+                std::string ver = (s->version == 0) ? "v1" : "v2c";
+                m.summary = "SNMP" + ver + " (UDP port " + (is_trap_port ? "162, trap" : "161, agent") +
+                             ") -- community string \"" + s->community + "\"";
+                m.notes.push_back("cleartext community string \"" + s->community +
+                                   "\" was observed on the wire in this packet -- treat it as "
+                                   "compromised, it maps every SNMP-speaking device on this segment "
+                                   "that shares it");
+            } else {
+                m.summary = "SNMP (UDP port 161/162) -- port match only, not decodable as an SNMPv1/"
+                             "v2c BER structure in this packet (could be SNMPv3, which authenticates/"
+                             "encrypts and has no cleartext community string, or a malformed/"
+                             "truncated PDU)";
+            }
+            return m;
+        }
+        // 2. TFTP -- gated to port 69, same reasoning as Telnet/FTP above.
+        if (port_in(src_port, TFTP_PORT, extra_ports) || port_in(dst_port, TFTP_PORT, extra_ports)) {
+            ItLateralMovementMatch m;
+            m.protocol = "tftp";
+            if (auto t = match_tftp_request(payload)) {
+                m.summary = "TFTP (UDP port " + std::to_string(TFTP_PORT) + ") -- " + *t;
+            } else {
+                m.summary = "TFTP (UDP port " + std::to_string(TFTP_PORT) +
+                             ") -- port match only, not a recognizable RRQ/WRQ in this packet (a "
+                             "DATA/ACK/ERROR packet mid-transfer looks like this -- only the initial "
+                             "RRQ/WRQ has a strong structural signature, see file header comment)";
+            }
+            return m;
+        }
     }
 
     return std::nullopt;

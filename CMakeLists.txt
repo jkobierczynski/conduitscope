@@ -907,7 +907,7 @@ set_tests_properties(enip_unregister_session_decoded PROPERTIES
 add_test(NAME enip_nop_not_detected
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enip_nop_precedence.pcap" --format text)
 set_tests_properties(enip_nop_not_detected PROPERTIES
-  PASS_REGULAR_EXPRESSION "\\[tcp\\]  TCP payload of 24 byte\\(s\\) on port 52001->44818 did not match OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, COTP/S7comm/MMS, HART-IP, MQTT, FF-HSE, or the RDP/VNC/TeamViewer/AnyDesk/Zoom remote-access family")
+  PASS_REGULAR_EXPRESSION "\\[tcp\\]  TCP payload of 24 byte\\(s\\) on port 52001->44818 did not match OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, COTP/S7comm/MMS, HART-IP, MQTT, FF-HSE, the RDP/VNC/TeamViewer/AnyDesk/Zoom remote-access family, or the SMB/SSH/HTTP/HTTPS/Telnet/FTP lateral-movement family")
 
 # --------------------------------------------------------------------------
 # EtherNet/IP CIP STRING/SHORT_STRING and Structured Data Type (UDT/array-of-UDT tag) value
@@ -3749,7 +3749,7 @@ set_tests_properties(mqtt_invalid_qos_and_truncated_body_notes PROPERTIES
 add_test(NAME mqtt_bogus_connect_protocol_name_rejected
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mqtt.pcap" --format text)
 set_tests_properties(mqtt_bogus_connect_protocol_name_rejected PROPERTIES
-  PASS_REGULAR_EXPRESSION "\\[tcp\\]  TCP payload of 16 byte\\(s\\) on port 55020->1883 did not match OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, COTP/S7comm/MMS, HART-IP, MQTT, FF-HSE, or the RDP/VNC/TeamViewer/AnyDesk/Zoom remote-access family")
+  PASS_REGULAR_EXPRESSION "\\[tcp\\]  TCP payload of 16 byte\\(s\\) on port 55020->1883 did not match OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, COTP/S7comm/MMS, HART-IP, MQTT, FF-HSE, the RDP/VNC/TeamViewer/AnyDesk/Zoom remote-access family, or the SMB/SSH/HTTP/HTTPS/Telnet/FTP lateral-movement family")
 
 # A genuinely truncated/incomplete final packet on its own flow -- declares more Remaining Length
 # than actually follows, with nothing more ever arriving in this capture -- the TCP-reassembly
@@ -4629,12 +4629,20 @@ set_tests_properties(doh_provider_suffix_match_nextdns PROPERTIES
 add_test(NAME doh_unrelated_https_sni_not_flagged
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_doh.pcap" --format text)
 set_tests_properties(doh_unrelated_https_sni_not_flagged PROPERTIES
-  PASS_REGULAR_EXPRESSION "\\[tcp\\]  TCP payload of 76 byte\\(s\\) on port 54001->443 did not match")
+  # A genuine ClientHello whose SNI (www.example.com) is NOT a known DoH provider is not tagged
+  # "doh" -- it now falls through to Tier 2's own generic HTTPS recognition instead (see
+  # it_protocols.hpp's ROADMAP item 18 Tier 2 writeup), no longer to the generic "tcp" fallback this
+  # test originally checked for, since that fallback gap is exactly what Tier 2 fixes.
+  PASS_REGULAR_EXPRESSION "\\[https\\]  HTTPS/TLS ClientHello \\(SNI: www\\.example\\.com\\)")
 
 add_test(NAME doh_non_tls_tcp443_not_misdetected
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_doh.pcap" --format text)
 set_tests_properties(doh_non_tls_tcp443_not_misdetected PROPERTIES
-  PASS_REGULAR_EXPRESSION "\\[tcp\\]  TCP payload of 8 byte\\(s\\) on port 54003->443 did not match")
+  # 8 bytes of non-TLS junk on TCP/443 is not tagged "doh" (no ClientHello parses) -- it now falls
+  # through to Tier 2's own HTTPS port-only fallback instead (a configured HTTPS port, no visible
+  # ClientHello in this packet), no longer to the generic "tcp" fallback this test originally checked
+  # for, since that fallback gap is exactly what Tier 2 fixes.
+  PASS_REGULAR_EXPRESSION "\\[https\\]  HTTPS/TLS \\(TCP port 443/8443\\) -- port match only")
 
 add_test(NAME protocol_filter_dns_only
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dns.pcap" --protocol dns --format text)
@@ -6037,13 +6045,182 @@ set_tests_properties(remote_access_extra_port_widens_expected_range PROPERTIES
 add_test(NAME remote_access_falls_through_to_generic_tcp_summary
   COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mqtt.pcap")
 set_tests_properties(remote_access_falls_through_to_generic_tcp_summary PROPERTIES
-  PASS_REGULAR_EXPRESSION "did not match OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, COTP/S7comm/MMS, HART-IP, MQTT, FF-HSE, or the RDP/VNC/TeamViewer/AnyDesk/Zoom remote-access family")
+  PASS_REGULAR_EXPRESSION "did not match OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, COTP/S7comm/MMS, HART-IP, MQTT, FF-HSE, the RDP/VNC/TeamViewer/AnyDesk/Zoom remote-access family, or the SMB/SSH/HTTP/HTTPS/Telnet/FTP lateral-movement family")
 
 add_test(NAME remote_access_rdp_carve_out_does_not_affect_real_s7comm
   COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm.pcap")
 set_tests_properties(remote_access_rdp_carve_out_does_not_affect_real_s7comm PROPERTIES
   PASS_REGULAR_EXPRESSION "\\[s7comm\\]"
   FAIL_REGULAR_EXPRESSION "\\[rdp\\]")
+
+# ---------------------------------------------------------------------------------------------
+# Tier 2 "IT protocols an OT auditor flags" recognition (SMB/SSH/HTTP/HTTPS/SNMPv1v2c/Telnet/FTP/
+# TFTP -- see it_protocols.hpp's own Tier 2 file header comment and docs/MANUAL.md's ROADMAP item
+# 18). Fixture built by tools/make_sample_pcap.py-style scapy script (not itself checked in as a
+# generator -- see tests/sample_remote_access.pcap's own precedent from Tier 1), 21 packets:
+#   1  TCP 52400->445   SMB direct-hosting magic (0xFE"SMB")                        -> smb
+#   2  TCP 52401->139   SMB over NetBIOS Session Service wrapper (0xFF"SMB")         -> smb
+#   3  TCP 52402->22    SSH banner, standard port                                    -> ssh
+#   4  TCP 59022->52403 SSH banner, non-standard port                                -> ssh (noted)
+#   5  TCP 52404->8080  HTTP request-line, curated port                              -> http
+#   6  TCP 52405->34567 HTTP request-line, arbitrary vendor-web-UI port              -> http (noted)
+#   7  TCP 34567->52405 HTTP status-line response, same arbitrary port               -> http (noted)
+#   8  TCP 52407->443   TLS ClientHello, SNI + ALPN http/1.1                         -> https (ALPN-confirmed)
+#   9  TCP 52408->443   TLS ClientHello, SNI, no ALPN                                -> https (port-only confirmed)
+#  10  TCP 52409->8443  opaque byte, no ClientHello                                  -> https (weak port fallback)
+#  11  TCP 52410->23    Telnet IAC negotiation                                       -> telnet
+#  12  TCP 52411->23    opaque byte, no IAC negotiation                              -> telnet (weak fallback)
+#  13  TCP 21->52412    FTP reply code 220                                           -> ftp
+#  14  TCP 52413->21    FTP command USER                                             -> ftp
+#  15  TCP 52414->21    opaque byte, no reply code/verb                              -> ftp (weak fallback)
+#  16  UDP 52415->161   SNMPv2c GetRequest, community "public"                       -> snmp
+#  17  UDP 52416->162   SNMPv1 Trap, community "private"                             -> snmp
+#  18  UDP 52417->161   2 arbitrary bytes, not valid SNMP BER                        -> snmp (weak fallback)
+#  19  UDP 52418->69    TFTP RRQ "firmware.bin" mode octet                           -> tftp
+#  20  UDP 52419->69    TFTP WRQ "config.cfg" mode netascii                          -> tftp
+#  21  UDP 52420->69    TFTP DATA opcode, no RRQ/WRQ structure                       -> tftp (weak fallback)
+add_test(NAME lateral_movement_smb_direct_hosting_recognized
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_lateral_movement.pcap")
+set_tests_properties(lateral_movement_smb_direct_hosting_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[smb\\]  SMB, direct TCP hosting \\(SMB2/SMB3 header, 0xFE\"SMB\" magic\\)")
+
+add_test(NAME lateral_movement_smb_netbios_wrapper_recognized
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_lateral_movement.pcap")
+set_tests_properties(lateral_movement_smb_netbios_wrapper_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[smb\\]  SMB over NetBIOS Session Service \\(RFC 1002 session message wrapper, SMB1 \\(CIFS\\) header, 0xFF\"SMB\" magic\\)")
+
+add_test(NAME lateral_movement_ssh_banner_standard_port_no_note
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_lateral_movement.pcap")
+set_tests_properties(lateral_movement_ssh_banner_standard_port_no_note PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"protocol\": \"ssh\",\n *\"summary\": \"SSH version-exchange banner \\\\\"SSH-2\\.0-OpenSSH_9\\.6\\\\\"\",\n *\"notes\": \\[\\]")
+
+add_test(NAME lateral_movement_ssh_banner_nonstandard_port_noted
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_lateral_movement.pcap")
+set_tests_properties(lateral_movement_ssh_banner_nonstandard_port_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "SSH-2\\.0-libssh_0\\.10\\.6.*\n.*note: seen on TCP port 59022->52403, which is not a configured/standard SSH port \\(22\\)")
+
+add_test(NAME lateral_movement_http_request_line_recognized
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_lateral_movement.pcap")
+set_tests_properties(lateral_movement_http_request_line_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[http\\]  HTTP request \\(GET \\.\\.\\.\\)")
+
+add_test(NAME lateral_movement_http_vendor_web_ui_port_noted
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_lateral_movement.pcap")
+set_tests_properties(lateral_movement_http_vendor_web_ui_port_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "HTTP request \\(GET \\.\\.\\.\\).*\n.*note: seen on TCP port 52405->34567, not one of this decoder's curated")
+
+add_test(NAME lateral_movement_http_status_line_response_recognized
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_lateral_movement.pcap")
+set_tests_properties(lateral_movement_http_status_line_response_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[http\\]  HTTP response \\(status 200\\)")
+
+add_test(NAME lateral_movement_https_clienthello_alpn_confirmed
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_lateral_movement.pcap")
+set_tests_properties(lateral_movement_https_clienthello_alpn_confirmed PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[https\\]  HTTPS/TLS ClientHello \\(SNI: plc-web\\.example\\.com\\).*\n.*note: ALPN offered")
+
+add_test(NAME lateral_movement_https_clienthello_port_only_confirmed
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_lateral_movement.pcap")
+set_tests_properties(lateral_movement_https_clienthello_port_only_confirmed PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[https\\]  HTTPS/TLS ClientHello \\(SNI: vendor-hmi\\.local\\).*\n.*note: TLS ClientHello on a standard/configured HTTPS port, but ALPN did not confirm")
+
+add_test(NAME lateral_movement_https_port_only_fallback
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_lateral_movement.pcap")
+set_tests_properties(lateral_movement_https_port_only_fallback PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[https\\]  HTTPS/TLS \\(TCP port 443/8443\\) -- port match only")
+
+add_test(NAME lateral_movement_telnet_iac_negotiation_recognized
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_lateral_movement.pcap")
+set_tests_properties(lateral_movement_telnet_iac_negotiation_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[telnet\\]  Telnet \\(TCP port 23\\) -- IAC option-negotiation sequence observed")
+
+add_test(NAME lateral_movement_telnet_port_only_fallback
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_lateral_movement.pcap")
+set_tests_properties(lateral_movement_telnet_port_only_fallback PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[telnet\\]  Telnet \\(TCP port 23\\) -- port match only, no IAC negotiation")
+
+add_test(NAME lateral_movement_ftp_reply_code_recognized
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_lateral_movement.pcap")
+set_tests_properties(lateral_movement_ftp_reply_code_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[ftp\\]  FTP control channel \\(TCP port 21\\) -- FTP reply code 220")
+
+add_test(NAME lateral_movement_ftp_command_verb_recognized
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_lateral_movement.pcap")
+set_tests_properties(lateral_movement_ftp_command_verb_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[ftp\\]  FTP control channel \\(TCP port 21\\) -- FTP command \"USER\"")
+
+add_test(NAME lateral_movement_ftp_port_only_fallback
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_lateral_movement.pcap")
+set_tests_properties(lateral_movement_ftp_port_only_fallback PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[ftp\\]  FTP control channel \\(TCP port 21\\) -- port match only, no reply code or command verb")
+
+add_test(NAME lateral_movement_ftp_reply_not_misdetected_as_mqtt
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_lateral_movement.pcap")
+set_tests_properties(lateral_movement_ftp_reply_not_misdetected_as_mqtt PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[ftp\\]  FTP control channel \\(TCP port 21\\) -- FTP reply code 220"
+  FAIL_REGULAR_EXPRESSION "\\[mqtt\\]")
+
+add_test(NAME lateral_movement_snmpv2c_community_string_surfaced
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_lateral_movement.pcap")
+set_tests_properties(lateral_movement_snmpv2c_community_string_surfaced PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[snmp\\]  SNMPv2c \\(UDP port 161, agent\\) -- community string \"public\"\n.*note: cleartext community string \"public\" was observed")
+
+add_test(NAME lateral_movement_snmpv1_trap_community_string_surfaced
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_lateral_movement.pcap")
+set_tests_properties(lateral_movement_snmpv1_trap_community_string_surfaced PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[snmp\\]  SNMPv1 \\(UDP port 162, trap\\) -- community string \"private\"")
+
+add_test(NAME lateral_movement_snmp_port_only_fallback
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_lateral_movement.pcap")
+set_tests_properties(lateral_movement_snmp_port_only_fallback PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[snmp\\]  SNMP \\(UDP port 161/162\\) -- port match only, not decodable as an SNMPv1/v2c BER structure")
+
+add_test(NAME lateral_movement_tftp_rrq_recognized
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_lateral_movement.pcap")
+set_tests_properties(lateral_movement_tftp_rrq_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[tftp\\]  TFTP \\(UDP port 69\\) -- RRQ \\(read request\\) for \"firmware\\.bin\", mode octet")
+
+add_test(NAME lateral_movement_tftp_wrq_recognized
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_lateral_movement.pcap")
+set_tests_properties(lateral_movement_tftp_wrq_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[tftp\\]  TFTP \\(UDP port 69\\) -- WRQ \\(write request\\) for \"config\\.cfg\", mode netascii")
+
+add_test(NAME lateral_movement_tftp_port_only_fallback
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_lateral_movement.pcap")
+set_tests_properties(lateral_movement_tftp_port_only_fallback PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[tftp\\]  TFTP \\(UDP port 69\\) -- port match only, not a recognizable RRQ/WRQ")
+
+add_test(NAME lateral_movement_stats_counted
+  COMMAND conduitscope decode --format text --stats --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_lateral_movement.pcap")
+set_tests_properties(lateral_movement_stats_counted PROPERTIES
+  PASS_REGULAR_EXPRESSION "ftp +3\n *http +3\n *https +3\n *smb +2\n *snmp +3\n *ssh +2\n *telnet +2\n *tftp +3")
+
+add_test(NAME lateral_movement_protocol_filter_isolates_family
+  COMMAND conduitscope decode --format text --protocol lateral-movement --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_lateral_movement.pcap")
+set_tests_properties(lateral_movement_protocol_filter_isolates_family PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[smb\\].*\\[smb\\].*\\[ssh\\].*\\[ssh\\].*\\[http\\].*\\[http\\].*\\[http\\].*\\[https\\].*\\[https\\].*\\[https\\].*\\[telnet\\].*\\[telnet\\].*\\[ftp\\].*\\[ftp\\].*\\[ftp\\].*\\[snmp\\].*\\[snmp\\].*\\[snmp\\].*\\[tftp\\].*\\[tftp\\].*\\[tftp\\]"
+  FAIL_REGULAR_EXPRESSION "\\[tcp\\]|\\[udp\\]")
+
+add_test(NAME lateral_movement_extra_port_widens_expected_range
+  COMMAND conduitscope decode --format json --lateral-movement-port 34567 --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_lateral_movement.pcap")
+set_tests_properties(lateral_movement_extra_port_widens_expected_range PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"src_port\": 52405,\n *\"dst_port\": 34567,\n *\"tcp_flags\": \"ACK,PSH\",\n *\"protocol\": \"http\",\n *\"summary\": \"HTTP request \\(GET \\.\\.\\.\\)\",\n *\"notes\": \\[\\]")
+
+add_test(NAME lateral_movement_falls_through_to_generic_tcp_summary
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mqtt.pcap")
+set_tests_properties(lateral_movement_falls_through_to_generic_tcp_summary PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[mqtt\\]")
+
+add_test(NAME lateral_movement_ftp_carveout_does_not_affect_real_mqtt
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mqtt.pcap")
+set_tests_properties(lateral_movement_ftp_carveout_does_not_affect_real_mqtt PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[mqtt\\]"
+  FAIL_REGULAR_EXPRESSION "\\[ftp\\]")
+
+add_test(NAME lateral_movement_https_early_detection_does_not_affect_doh
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_doh.pcap")
+set_tests_properties(lateral_movement_https_early_detection_does_not_affect_doh PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[doh\\]  likely DNS-over-HTTPS")
 
 # ---------------------------------------------------------------------------------------------
 # Live capture (live_capture.hpp/cpp) -- an optional, build-time-detected libpcap (Linux) / Npcap

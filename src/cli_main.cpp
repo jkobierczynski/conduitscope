@@ -180,6 +180,7 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
                 const std::vector<int>& llmnr_ports, const std::vector<int>& nbns_ports,
                 const std::vector<int>& doh_ports, const std::vector<int>& rip_ports,
                 const std::vector<int>& hsrp_ports, const std::vector<int>& remote_access_ports,
+                const std::vector<int>& lateral_movement_ports,
                 size_t max_packets,
                 bool stats, bool strict, bool quiet,
                 bool no_color, bool force_color,
@@ -239,6 +240,7 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
                                : (protocol == "eigrp")  ? ProtocolFilter::EigrpOnly
                                : (protocol == "ospf")   ? ProtocolFilter::OspfOnly
                                : (protocol == "remote-access") ? ProtocolFilter::RemoteAccessOnly
+                               : (protocol == "lateral-movement") ? ProtocolFilter::LateralMovementOnly
                                                         : ProtocolFilter::Auto;
     for (int p : modbus_ports) options.extra_modbus_ports.push_back(static_cast<uint16_t>(p));
     for (int p : dnp3_ports) options.extra_dnp3_ports.push_back(static_cast<uint16_t>(p));
@@ -259,6 +261,7 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
     for (int p : rip_ports) options.extra_rip_ports.push_back(static_cast<uint16_t>(p));
     for (int p : hsrp_ports) options.extra_hsrp_ports.push_back(static_cast<uint16_t>(p));
     for (int p : remote_access_ports) options.extra_remote_access_ports.push_back(static_cast<uint16_t>(p));
+    for (int p : lateral_movement_ports) options.extra_lateral_movement_ports.push_back(static_cast<uint16_t>(p));
 
     try {
         // Built once per `decode` invocation, before opening the packet source, so a bad --hosts/
@@ -630,7 +633,7 @@ int main(int argc, char** argv) {
         decode_enip_ports, decode_enip_io_ports, decode_bacnet_ports, decode_hartip_ports,
         decode_opcua_ports, decode_mqtt_ports, decode_ffhse_ports, decode_dns_ports, decode_mdns_ports,
         decode_llmnr_ports, decode_nbns_ports, decode_doh_ports, decode_rip_ports, decode_hsrp_ports,
-        decode_remote_access_ports;
+        decode_remote_access_ports, decode_lateral_movement_ports;
     size_t decode_max_packets = 0;
     bool decode_stats = false, decode_strict = false;
     bool decode_oui = true, decode_resolve = false, decode_service_names = true;
@@ -668,7 +671,7 @@ int main(int argc, char** argv) {
     decode_cmd
         ->add_option("--protocol", decode_protocol,
                       "Restrict decoding to one protocol instead of auto-detecting all of them")
-        ->transform(CLI::IsMember({"auto", "modbus", "dnp3", "s7comm", "mms", "iec104", "enip", "profinet", "goose", "sv", "ethercat", "stp", "devicenet", "bacnet", "hartip", "opcua", "mqtt", "s7comm-plus", "ff-hse", "dns", "mdns", "llmnr", "nbns", "doh", "rip", "igmp", "vrrp", "hsrp", "igrp", "pim", "eigrp", "ospf", "remote-access"}))
+        ->transform(CLI::IsMember({"auto", "modbus", "dnp3", "s7comm", "mms", "iec104", "enip", "profinet", "goose", "sv", "ethercat", "stp", "devicenet", "bacnet", "hartip", "opcua", "mqtt", "s7comm-plus", "ff-hse", "dns", "mdns", "llmnr", "nbns", "doh", "rip", "igmp", "vrrp", "hsrp", "igrp", "pim", "eigrp", "ospf", "remote-access", "lateral-movement"}))
         ->capture_default_str();
     decode_cmd->add_option("--modbus-port", decode_modbus_ports,
                             "Additional TCP port to treat as expected for Modbus (repeatable); "
@@ -753,6 +756,14 @@ int main(int argc, char** argv) {
         "item 18); widens detection in Auto mode for RDP's COTP-gated check and the three port-only "
         "protocols (TeamViewer/AnyDesk/Zoom), same caveat as --dns-port -- VNC's own RFB banner "
         "check is never port-gated regardless, see it_protocols.hpp");
+    decode_cmd->add_option(
+        "--lateral-movement-port", decode_lateral_movement_ports,
+        "Additional TCP or UDP port to treat as expected for the Tier 2 \"IT protocols an OT "
+        "auditor flags\" family (SMB/SSH/HTTP/HTTPS/SNMPv1v2c/Telnet/FTP/TFTP -- see docs/"
+        "MANUAL.md's ROADMAP item 18); widens detection in Auto mode for SNMP/Telnet/FTP/TFTP's own "
+        "port-gated checks and HTTPS's port-only fallback, same caveat as --dns-port -- SMB's "
+        "direct-hosting magic, SSH's version-exchange banner, and HTTP's request-line/status-line "
+        "are never port-gated regardless, see it_protocols.hpp");
     decode_cmd->add_option("--max-packets", decode_max_packets,
                             "Stop after decoding this many packets (0 = unlimited)")
         ->capture_default_str();
@@ -999,6 +1010,7 @@ int main(int argc, char** argv) {
                            decode_opcua_ports, decode_mqtt_ports, decode_ffhse_ports, decode_dns_ports,
                            decode_mdns_ports, decode_llmnr_ports, decode_nbns_ports, decode_doh_ports,
                            decode_rip_ports, decode_hsrp_ports, decode_remote_access_ports,
+                           decode_lateral_movement_ports,
                            decode_max_packets, decode_stats, decode_strict,
                            quiet, no_color, force_color, decode_oui, decode_resolve, decode_hosts_file,
                            decode_service_names, decode_services_file, decode_show_vlan, *diag);
