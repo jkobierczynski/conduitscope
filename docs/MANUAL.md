@@ -5257,20 +5257,34 @@ This decoder's own dispatch table covers two tiers:
   RequestHeader of their own) plus, at the service layer,
   **OpenSecureChannel**, **CloseSecureChannel**, **GetEndpoints**,
   **FindServers**, **CreateSession**, **ActivateSession**,
-  **CloseSession**, and **ServiceFault** -- deliberately the connection/
-  channel/session lifecycle plus the two discovery services, not the
-  data-access services (Tier 2 below). This is itself a deliberate
-  first-pass scope decision: the lifecycle+discovery services above are (a)
-  universally present in every real OPC UA capture regardless of what the
-  client/server actually do with the connection afterward, (b) individually
-  simple enough (no Variant/DataValue encoding anywhere in any of them) to
-  decode with full confidence, and (c) collectively the highest
-  OT-security-audit value of any OPC UA service group -- SecurityPolicyUri/
-  MessageSecurityMode, the full endpoint/server inventory (an OPC UA analog
-  of this codebase's existing BACnet I-Am / EtherNet/IP ListIdentity /
-  HART-IP Read-Unique-Identifier "device fingerprinting" framing), and,
-  deliberately, the UserIdentityToken carried in every ActivateSession
-  request (see "Identity token decode" below).
+  **CloseSession**, **ServiceFault**, and -- now that Variant/DataValue
+  value decoding (below) exists to give their own service-specific fields
+  somewhere to go -- **Read**, **Write**, and **Call**. The lifecycle+
+  discovery services were promoted first, in a deliberate first-pass scope
+  decision: they are (a) universally present in every real OPC UA capture
+  regardless of what the client/server actually do with the connection
+  afterward, (b) individually simple enough (no Variant/DataValue encoding
+  anywhere in any of them) to decode with full confidence, and (c)
+  collectively the highest OT-security-audit value of any OPC UA service
+  group -- SecurityPolicyUri/MessageSecurityMode, the full endpoint/server
+  inventory (an OPC UA analog of this codebase's existing BACnet I-Am /
+  EtherNet/IP ListIdentity / HART-IP Read-Unique-Identifier "device
+  fingerprinting" framing), and, deliberately, the UserIdentityToken carried
+  in every ActivateSession request (see "Identity token decode" below).
+  Read/Write/Call were promoted in a later round, for a different reason:
+  they are the three OPC UA services whose entire reason for existing IS
+  carrying a Variant or DataValue -- ReadResponse's own Results, WriteRequest's
+  own NodesToWrite, and CallRequest/CallResponse's own Input/Output Arguments
+  are, respectively, an array of DataValue, an array of DataValue, and arrays
+  of Variant. Browse and the subscription/MonitoredItem-management services
+  stay at Tier 2 (below) deliberately, even with value decoding now available:
+  neither actually carries a Variant/DataValue anywhere in its own body
+  (Browse deals in NodeId/BrowseDirection/ReferenceDescription; MonitoredItem
+  creation's own MonitoringFilter is an ExtensionObject), so promoting them
+  would be a separate, unrelated decode effort. HistoryRead does carry
+  DataValue/Variant, but its own HistoryReadDetails ExtensionObject dispatches
+  across five different sub-structures -- enough additional scope of its own
+  that this first pass leaves it at Tier 2 too.
   - **RequestHeader**: AuthenticationToken (a NodeId -- the session's own
     secret; consumed, not surfaced), Timestamp (DateTime), RequestHandle
     (UInt32), ReturnDiagnostics (a bitmask; consumed, not surfaced),
@@ -5323,26 +5337,92 @@ This decoder's own dispatch table covers two tiers:
     ServiceFault**: no parameters beyond RequestHeader/ResponseHeader
     itself (confirmed against python-opcua's own generated bindings -- none
     of these four have a Parameters structure of their own at all).
+  - **Read request**: MaxAge (ms), TimestampsToReturn, and the full
+    NodesToRead array -- NodeId + AttributeId + IndexRange (when non-empty)
+    per entry (DataEncoding is consumed, not surfaced).
+  - **Read response**: the full Results array, each entry a DataValue (see
+    "Variant/DataValue value decoding" below) (DiagnosticInfos array is
+    structurally skipped).
+  - **Write request**: the full NodesToWrite array -- NodeId + AttributeId +
+    IndexRange (when non-empty) + the DataValue being written, per entry.
+  - **Write response**: the count of result StatusCodes and how many were
+    Good (DiagnosticInfos array is structurally skipped).
+  - **Call request**: the full MethodsToCall array -- ObjectId + MethodId +
+    InputArguments (each argument its own Variant), per entry.
+  - **Call response**: the full Results array -- StatusCode + OutputArguments
+    (each its own Variant), per entry (InputArgumentResults/
+    InputArgumentDiagnosticInfos are consumed, not individually surfaced --
+    the overall call StatusCode is).
 - **Tier 2** ("header only" -- RequestHeader/ResponseHeader is decoded
   exactly as in Tier 1, giving at minimum a request handle and, for a
   response, the ServiceResult StatusCode -- but every service-specific
   field after the header is shown only as raw hex): **Cancel**,
   **AddNodes**, **Browse**, **BrowseNext**,
   **TranslateBrowsePathsToNodeIds**, **RegisterNodes**, **UnregisterNodes**,
-  **Read**, **HistoryRead**, **Write**, **Call**,
+  **HistoryRead**,
   **CreateMonitoredItems**, **ModifyMonitoredItems**,
   **DeleteMonitoredItems**, **CreateSubscription**,
   **ModifySubscription**, **SetPublishingMode**, **Publish**,
   **Republish**, **DeleteSubscriptions** (request and response pairs for
-  each). These are the services whose own bodies need the Variant/
-  DataValue self-describing value encoding (OPC 10000-6 5.2.2.16/5.1.6 -- a
-  25-BuiltInType, recursive/array-capable encoding) this first-pass release
-  does not implement -- see LIMITATIONS and ROADMAP for the honest scope of
-  that gap. Even without their own bodies decoded, this tier is still
+  each). None of these actually carries a Variant/DataValue anywhere in its
+  own body except HistoryRead (see the Tier 1 paragraph above for why each
+  one specifically stays here even though Variant/DataValue value decoding
+  now exists). Even without their own bodies decoded, this tier is still
   genuinely useful: the service name, request handle, and (for a response)
   whether the overall call succeeded are all visible, often enough to
-  answer "is this conduit doing OPC UA reads/writes/subscriptions at all,
-  and are they succeeding" without needing the actual values.
+  answer "is this conduit doing OPC UA browsing/subscriptions at all, and
+  are they succeeding" without needing the actual values.
+
+#### Variant/DataValue value decoding
+
+OPC 10000-6 5.2.2.16/5.2.2.17 define two self-describing, recursive value
+containers used throughout the OPC UA data model:
+
+- **Variant**: any one of 25 BuiltInTypes (Boolean, SByte, Byte, Int16,
+  UInt16, Int32, UInt32, Int64, UInt64, Float, Double, String, DateTime,
+  Guid, ByteString, XmlElement, NodeId, ExpandedNodeId, StatusCode,
+  QualifiedName, LocalizedText, ExtensionObject, DataValue, Variant,
+  DiagnosticInfo -- numeric ids 1-25, 0 reserved as the "Null" sentinel),
+  either a scalar or an array, optionally with ArrayDimensions. Wire shape: a
+  1-byte EncodingMask (low 6 bits = the BuiltInType numeric id; bit `0x80` =
+  an array, not a scalar, follows; bit `0x40` = an ArrayDimensions field
+  follows) then either one scalar value or an Int32 ArrayLength plus that
+  many elements, then (if the dims bit is set) an Int32 count plus that many
+  Int32 dimension sizes. XmlElement is encoded identically to ByteString (a
+  UTF-8-serialized XML document), per the spec, and rendered as text rather
+  than hex. ExtensionObject, DataValue, and Variant-of-Variant are all valid
+  Variant contents; recursion (DataValue-in-Variant-in-DataValue...) is
+  bounded to 10 levels deep, mirroring this decoder's own DiagnosticInfo
+  recursion guard.
+- **DataValue**: a Variant plus up to five optional metadata fields --
+  StatusCode, SourceTimestamp, SourcePicoseconds, ServerTimestamp,
+  ServerPicoseconds. Wire shape: a 1-byte EncodingMask (bit `0x01` Value,
+  `0x02` StatusCode, `0x04` SourceTimestamp, `0x08` ServerTimestamp, `0x10`
+  SourcePicoseconds, `0x20` ServerPicoseconds) then whichever fields it
+  flags -- in **wire order**, cross-checked against the OPC Foundation's own
+  reference documentation and *not* simply ascending bit order:
+  SourcePicoseconds (mask bit `0x10`) is encoded **before** ServerTimestamp
+  (mask bit `0x08`), even though its own bit is numerically after
+  ServerTimestamp's.
+
+A BuiltInType id this decoder does not recognize (0 means "no value" for a
+Variant; anything outside 1-25 is not valid at all) is treated as a decode
+failure for that Variant -- the same "don't guess" posture this decoder
+already takes for an unrecognized NodeId encoding shape.
+
+Two small, closed value tables ride alongside this decoding, following this
+codebase's own "don't guess a numeric table entry" discipline:
+
+- **AttributeId** (Read/Write's own attribute selector): the 22 attributes
+  defined since OPC UA 1.03 (NodeId through UserExecutable), cross-checked
+  against open62541's own published `UA_AttributeId` constants. The four
+  attributes 1.04/1.05 later added (DataTypeDefinition, RolePermissions,
+  UserRolePermissions, AccessRestrictions, AccessLevelEx) were not
+  corroborated with the same confidence and are rendered as a bare number
+  (`"attribute-id=N"`) rather than a guessed name.
+- **TimestampsToReturn** (Read/HistoryRead's own request parameter):
+  `Source`/`Server`/`Both`/`Neither`/`Invalid`, cross-checked against OPC
+  10000-4 7.39.
 
 A TypeId this decoder's dispatch table does not recognize at all is
 reported by its raw namespace + numeric identifier only (`"service
@@ -5403,11 +5483,12 @@ knowing the reassembled message boundary) but its own body is always shown
 as raw hex, regardless of what service TypeId a fully-reassembled version
 of it might carry. In this decoder's own experience building its test
 fixture, a chunked message is the exception rather than the rule for the
-session/discovery/lifecycle services Tier 1 targets (their own bodies are
-all small, fixed, or short-array-bounded) -- chunking matters most for the
-very services (bulk Browse/Read results, large Publish notifications) this
-first pass already leaves at Tier 2 raw-hex depth, so this scope decision
-costs relatively little of this release's own practical coverage. This is
+session/discovery/lifecycle/data-access services Tier 1 targets (their own
+bodies are all small, fixed, or short-array-bounded) -- chunking matters
+most for the very services (bulk Browse results, large Publish
+notifications) this first pass already leaves at Tier 2 raw-hex depth, so
+this scope decision costs relatively little of this release's own
+practical coverage. This is
 a separate mechanism from the general TCP-segment-level reassembly
 PROTOCOL DETECTION and LIMITATIONS describe (one Message chunk split
 across several TCP *segments* IS reassembled -- this decoder's own real
@@ -5422,8 +5503,11 @@ TokenId back to the OpenSecureChannel exchange that negotiated it, or a
 Request's AuthenticationToken back to the CreateSession response that
 issued it) -- this decoder is, like every other protocol in this codebase,
 a stateless-per-message decoder with TCP-stream-level reassembly only, not
-a full conversation-tracking OPC UA stack; Variant/DataValue value decoding
-(see Tier 2 above); multi-level DiagnosticInfo's own optional SymbolicId/
+a full conversation-tracking OPC UA stack; Browse/subscription/
+MonitoredItem-management and HistoryRead body decoding (see Tier 2 above --
+Variant/DataValue value decoding itself IS implemented; these specific
+services simply don't need it, or need additional scope of their own);
+multi-level DiagnosticInfo's own optional SymbolicId/
 NamespaceUri/LocalizedText/Locale/AdditionalInfo/InnerStatusCode/
 InnerDiagnosticInfo fields are structurally skipped (correctly consumed for
 byte alignment, but none of the seven is itself surfaced as a decoded
@@ -5451,18 +5535,34 @@ DETECTION describes. This capture also genuinely exercises TCP-segment-
 level reassembly (two responses split across 5 and 6 segments respectively)
 and contains two deliberately malformed CallRequest packets (per Wireshark
 Bug 3986's own report; one of which triggered Wireshark's own ~2-minute
-dissector freeze) -- this decoder's own Tier 2 scope, which never attempts
-to parse CallRequest's own body at all, is structurally immune to whatever
-specific malformation caused that freeze. It is narrow, though: only 9 of
-the ~15 Tier 1 services appear (no FindServers or CloseSession/
-CloseSecureChannel in either session), both sessions use SecurityPolicy
-`"...#None"` and an Anonymous identity token (no credential-exposure
-finding on this particular capture -- that logic is instead exercised on
-real bytes only by this decoder's own synthetic fixture, `tests/
-sample_opcua.pcap`, packets 13-14), and no Tier 2 service other than Call
-appears -- see that ATTRIBUTION.md's own writeup for the complete, honest
-scope. See `include/conduitscope/opcua.hpp`'s file header for the full
-writeup.
+dissector freeze). When Call was still Tier 2, this decoder's own scope
+(never attempting to parse CallRequest's own body at all) was structurally
+immune to whatever specific malformation caused that freeze; now that Call
+is Tier 1, this decoder's own bounds-checked Variant/DataValue reads
+correctly DETECT the malformation instead of merely being immune to it --
+hand-verifying both sessions' own bytes confirms session 1's CallRequest
+claims a MethodId NodeId with a 262144-byte String identifier when only
+~21 bytes are actually present in the captured body, and session 2's
+CallRequest has a MethodId NodeId with a structurally-invalid encoding byte
+(shape `0x07`, outside the valid `0x00`-`0x05` range) -- both genuinely
+malformed fuzz-test payloads, not decode bugs. This decoder falls back to
+raw hex for both (`"service type-id 712, ns=0 -- not in this decoder's
+dispatch table"`), the same honest fallback an unrecognized TypeId gets,
+rather than asserting a "CallRequest" label it was never able to verify.
+It is narrow, though: only 9 of the ~21 Tier 1 request/response entries
+appear (no FindServers or CloseSession/CloseSecureChannel in either
+session, and neither session's own Read/Write happens to appear either),
+both sessions use SecurityPolicy `"...#None"` and an Anonymous identity
+token (no credential-exposure finding on this particular capture -- that
+logic is instead exercised on real bytes only by this decoder's own
+synthetic fixture, `tests/sample_opcua.pcap`, packets 13-14), a
+well-formed Read/Write/Call exchange is likewise exercised on real bytes
+nowhere (both real CallRequest bodies being malformed, as above -- this
+decoder's own synthetic fixture is the only real-bytes-adjacent validation
+Read/Write/Call's own Variant/DataValue decoding has so far), and no Tier
+2 service appears at all -- see that ATTRIBUTION.md's own writeup for the
+complete, honest scope. See `include/conduitscope/opcua.hpp`'s file header
+for the full writeup.
 
 ### FOUNDATION Fieldbus HSE (FDA port 1090, SM port 1091, LAN Redundancy port 3622, ff-annunc port 1089, all TCP AND UDP)
 
@@ -6589,16 +6689,22 @@ These are current, not aspirational -- each has a corresponding ROADMAP item.
   the hand-built `tests/sample_hartip.pcap`, cross-checked against
   HCF_SPEC-307 and Wireshark's `packet-hart_ip.c` source rather than an
   independent real capture.
-- **OPC UA's Variant/DataValue self-describing value encoding is not
-  implemented** -- the single largest scope gap in this decoder's own OPC
-  UA coverage. Read, Write, Browse, Call, and every subscription/
-  MonitoredItem-management service (the "Tier 2" set -- see PROTOCOL
-  COVERAGE's OPC UA section) are named, and have RequestHeader/
+- **OPC UA's Browse/subscription/MonitoredItem-management/HistoryRead
+  services stay Tier 2** -- these are named, and have RequestHeader/
   ResponseHeader decoded, but their own service-specific bodies are shown
-  only as raw hex; this is the primary item on ROADMAP. This means the
-  actual values a client reads or writes are never visible, only that a
-  Read/Write/Call/etc. happened, its request handle, and (for a response)
-  whether it succeeded.
+  only as raw hex. Unlike the previous limitation here, this is no longer a
+  Variant/DataValue gap: that self-describing value encoding IS now fully
+  implemented (see PROTOCOL COVERAGE's "Variant/DataValue value decoding"
+  section), and Read/Write/Call were promoted to Tier 1 specifically because
+  they're the services whose entire reason for existing is carrying one.
+  Browse and the subscription/MonitoredItem-management services simply
+  don't carry a Variant/DataValue anywhere in their own bodies at all (a
+  separate, unrelated decode effort); HistoryRead does, but its own
+  HistoryReadDetails ExtensionObject dispatches across five different
+  sub-structures, additional scope of its own this first pass leaves for
+  later (see ROADMAP). For these services, only that a Browse/Subscribe/
+  etc. happened, its request handle, and (for a response) whether it
+  succeeded are visible.
 - **OPC UA chunk reassembly is not implemented** -- a logical message split
   across multiple `'C'`/`'F'` OPC UA chunks (distinct from ordinary TCP-
   segment-level reassembly, which IS implemented -- see PROTOCOL COVERAGE's
@@ -6628,14 +6734,18 @@ These are current, not aspirational -- each has a corresponding ROADMAP item.
 - **OPC UA's real-capture validation is narrow.** The one real capture
   found (`tests/real_captures/opcua/ATTRIBUTION.md`) is genuine OPC UA
   traffic from an independent stack implementation, and it does exercise 9
-  of the ~15 Tier 1 services plus genuine multi-segment TCP reassembly --
+  of the ~21 Tier 1 request/response entries plus genuine multi-segment TCP
+  reassembly --
   but it never exercises FindServers, CloseSession, CloseSecureChannel, any
-  Tier 2 service other than Call, a non-Anonymous identity token (so the
-  UserName/Password cleartext-credential "SECURITY FINDING" logic is
-  validated only against this decoder's own synthetic fixture, not real
-  bytes), a non-`'F'` chunk, or a structurally-invalid NodeId -- see
-  PROTOCOL COVERAGE's OPC UA Validation subsection for the complete,
-  honest scope.
+  Tier 2 service, a non-Anonymous identity token (so the UserName/Password
+  cleartext-credential "SECURITY FINDING" logic is validated only against
+  this decoder's own synthetic fixture, not real bytes), a non-`'F'` chunk,
+  or a structurally-invalid NodeId -- see PROTOCOL COVERAGE's OPC UA
+  Validation subsection for the complete, honest scope. Its own CallRequest
+  (now Tier 1) turned out to be genuinely malformed in both sessions --
+  Achilles Satellite fuzz-test payloads, not well-formed traffic -- so this
+  capture still does not validate a well-formed Read/Write/Call exchange
+  against real bytes; only this decoder's own synthetic fixtures do that.
 - **DNP3 data-link CRCs are now validated** -- both the header CRC and every
   per-block CRC within the user data are genuinely calculated and compared
   against the on-the-wire value (`dnp3_header_crc_valid`/`dnp3_block_count`/
@@ -7786,22 +7896,43 @@ Rough order, each building on the groundwork this release establishes:
     response codes, and the ten-plus commands (now including 77/178) the
     one real capture found for this feature doesn't happen to exercise.
 
-11. **Implement OPC UA's Variant/DataValue self-describing value encoding**
-    (OPC 10000-6 5.2.2.16/5.1.6) -- the single largest remaining OPC UA
-    scope gap (see PROTOCOL COVERAGE's "Tier 2" section and LIMITATIONS).
-    This would promote Read, Write, Browse, Call, and the subscription/
-    MonitoredItem-management services from header-only (Tier 2) to full
-    value decoding (Tier 1), which is where the actual process/tag values
-    an OPC UA client reads or writes would become visible. Also: OPC UA
-    chunk reassembly (a logical message split across multiple `'C'`/`'F'`
-    chunks -- distinct from the already-implemented TCP-segment-level
-    reassembly, see PROTOCOL COVERAGE's "Chunking" subsection); widening the
-    StatusCode table past its current ~20-entry first pass; and widening
-    real-capture validation to FindServers, CloseSession,
-    CloseSecureChannel, a non-Anonymous identity token on real traffic, a
-    non-`'F'` chunk, and any Tier 2 service besides Call, if a second real
-    OPC UA capture with that coverage ever turns up (see
-    `tests/real_captures/opcua/ATTRIBUTION.md`'s own honest scope).
+11. ~~Implement OPC UA's Variant/DataValue self-describing value encoding~~
+    (OPC 10000-6 5.2.2.16/5.2.2.17) -- **done**: full Variant/DataValue value
+    decoding (all 25 BuiltInTypes, scalar and array, ArrayDimensions, and
+    DataValue's own non-bit-numeric wire field order) is now implemented --
+    see PROTOCOL COVERAGE's "Variant/DataValue value decoding" section. This
+    promoted **Read**, **Write**, and **Call** from header-only (Tier 2) to
+    full value decoding (Tier 1) -- the three services whose entire reason
+    for existing IS carrying a Variant or DataValue, so this is where the
+    actual process/tag values an OPC UA client reads or writes are now
+    visible. **Browse** and the subscription/MonitoredItem-management
+    services were deliberately left at Tier 2: neither actually carries a
+    Variant/DataValue anywhere in its own body, so promoting them is a
+    separate, unrelated decode effort. **HistoryRead** does carry
+    DataValue/Variant, but its own HistoryReadDetails ExtensionObject
+    dispatches across five different sub-structures -- enough additional
+    scope of its own that it's left for a later round too. Validated
+    against this decoder's own synthetic fixtures (a DataValue with all six
+    optional fields set, to regression-test the field-order finding above;
+    Float/Null scalars; String/UInt32 Variant arrays, the latter with
+    ArrayDimensions) AND, unexpectedly, against the existing real capture:
+    promoting Call to Tier 1 revealed that BOTH sessions' own CallRequest in
+    that capture are genuinely malformed (Achilles Satellite fuzz-test
+    payloads -- one claims a 262144-byte String with ~21 bytes actually
+    present, the other has a structurally-invalid NodeId encoding byte) --
+    this decoder's own bounds-checked reads now correctly reject them rather
+    than the old Tier-2 behavior of labeling them "CallRequest" without ever
+    attempting to parse their bodies. Still open: OPC UA chunk reassembly (a
+    logical message split across multiple `'C'`/`'F'` chunks -- distinct
+    from the already-implemented TCP-segment-level reassembly, see PROTOCOL
+    COVERAGE's "Chunking" subsection); widening the StatusCode table past
+    its current ~20-entry first pass; promoting Browse/subscriptions/
+    HistoryRead to Tier 1 (see above); and widening real-capture validation
+    to FindServers, CloseSession, CloseSecureChannel, a non-Anonymous
+    identity token, a non-`'F'` chunk, and a well-formed (non-fuzzed) Read/
+    Write/Call exchange, if a second real OPC UA capture with that coverage
+    ever turns up (see `tests/real_captures/opcua/ATTRIBUTION.md`'s own
+    honest scope).
 12. **Extend MMS's Tier 2 confirmedServices to full field decoding** --
     currently 67 of the 78 defined confirmed services (see PROTOCOL
     COVERAGE's MMS section) get only a name + invokeID, body shown as raw

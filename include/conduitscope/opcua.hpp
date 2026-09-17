@@ -3,9 +3,11 @@
 // connection-protocol messages (Hello, Acknowledge, Error, ReverseHello), the 12-byte
 // SecureConversation chunk header used by OpenSecureChannel/CloseSecureChannel/Message, their
 // security and sequence headers, and, for the service-layer Message body, a "first pass" set of
-// the most common OPC UA services -- session lifecycle, endpoint/server discovery, and identity
+// the most common OPC UA services -- session lifecycle, endpoint/server discovery, identity
 // (including, deliberately, cleartext-credential exposure when a client authenticates with
-// UserName/Password over an unencrypted SecureChannel -- see "Identity token decode" below).
+// UserName/Password over an unencrypted SecureChannel -- see "Identity token decode" below), and
+// data access (Read/Write/Call, full Variant/DataValue self-describing value decoding included --
+// see "Variant/DataValue value decoding" below).
 //
 // OPC UA rides over plain TCP only (no UDP mapping exists in the spec), conventionally port 4840
 // -- see try_parse_opcua_message's own "structural detection gate" paragraph below for why this
@@ -212,36 +214,76 @@
 // decoded): the UA Connection Protocol handshake (Hello/Acknowledge/Error/ReverseHello, covered
 // above, which have no TypeId/RequestHeader of their own) plus, at the service layer,
 // OpenSecureChannel, CloseSecureChannel, GetEndpoints, FindServers, CreateSession,
-// ActivateSession, CloseSession, and ServiceFault -- deliberately the connection/channel/session
-// LIFECYCLE plus the two discovery services, not the data-access services (Read/Write/Browse/
-// Subscribe/Call/etc. -- see Tier 2 immediately below). This is itself a deliberate first-pass
-// scope decision, not an oversight: the lifecycle+discovery services above are (a) universally
-// present in every real OPC UA capture regardless of what the client/server actually do with the
-// connection afterward, (b) individually simple enough (no Variant/DataValue encoding anywhere in
-// any of them) to decode with full confidence in this file's own "verify every field against a
-// primary or schema-generated source, never guess" discipline, and (c) collectively the highest
+// ActivateSession, CloseSession, ServiceFault, and -- now that Variant/DataValue value decoding
+// (below) exists to give their own service-specific fields somewhere to go -- Read, Write, and
+// Call. This is itself a deliberate first-pass scope decision, not an oversight: the
+// lifecycle+discovery services were (a) universally present in every real OPC UA capture
+// regardless of what the client/server actually do with the connection afterward, (b)
+// individually simple enough (no Variant/DataValue encoding anywhere in any of them) to decode
+// with full confidence in this file's own "verify every field against a primary or
+// schema-generated source, never guess" discipline, and (c) collectively the highest
 // OT-security-audit value of any OPC UA service group: SecurityPolicyUri/MessageSecurityMode
 // (is this endpoint accepting no security at all?), the full endpoint/server inventory
 // (EndpointDescription's own SecurityMode/SecurityPolicyUri per endpoint -- an OPC UA analog of
 // this codebase's existing BACnet I-Am / EtherNet/IP ListIdentity / HART-IP Read-Unique-Identifier
 // "device fingerprinting" framing), and -- deliberately -- the UserIdentityToken carried in every
-// ActivateSession request (see "Identity token decode" below).
+// ActivateSession request (see "Identity token decode" below). Read/Write/Call are promoted
+// alongside them for a different, equally deliberate reason: they are the three OPC UA services
+// whose entire reason for existing IS carrying a Variant or DataValue -- ReadResponse's own
+// Results, WriteRequest's own NodesToWrite, and CallRequest/CallResponse's own Input/Output
+// Arguments are, respectively, an array of DataValue, an array of DataValue, and arrays of
+// Variant -- so once the value-decoding machinery existed at all, leaving these three at Tier 2
+// would have meant showing exactly the fields an OT-security audit of live process values most
+// needs as raw hex. Browse and the subscription/MonitoredItem-management services are
+// DELIBERATELY still Tier 2 even though value decoding now exists: Browse's own
+// BrowseDescription/ReferenceDescription deal in NodeId/BrowseDirection/ReferenceTypeId, and
+// MonitoredItem creation's own MonitoringFilter is an ExtensionObject -- neither carries a
+// Variant/DataValue anywhere in its own body, so promoting them would be a separate, unrelated
+// decode effort, not a natural extension of this one (see ROADMAP in docs/MANUAL.md). HistoryRead
+// DOES carry DataValue/Variant in its own HistoryReadResult, but its own HistoryReadDetails
+// ExtensionObject dispatches across five different sub-structures (ReadRawModifiedDetails/
+// ReadAtTimeDetails/ReadProcessedDetails/ReadEventDetails/ReadAnnotationDataDetails) -- enough
+// additional scope of its own that this first pass leaves it at Tier 2 too.
 //
 // Tier 2 ("header only" -- RequestHeader/ResponseHeader is decoded exactly as in Tier 1, giving at
 // minimum a request handle and, for a response, the ServiceResult StatusCode -- but every
-// service-specific field after the header is shown only as raw hex, not decoded): Read, Write,
-// Browse, BrowseNext, TranslateBrowsePathsToNodeIds, CreateSubscription, ModifySubscription,
+// service-specific field after the header is shown only as raw hex, not decoded): Browse,
+// BrowseNext, TranslateBrowsePathsToNodeIds, CreateSubscription, ModifySubscription,
 // DeleteSubscriptions, CreateMonitoredItems, ModifyMonitoredItems, DeleteMonitoredItems,
-// SetPublishingMode, Publish, Republish, Call, Cancel, RegisterNodes, UnregisterNodes, AddNodes,
-// HistoryRead. These are the services whose own bodies need the Variant/DataValue encoding (OPC
-// 10000-6 5.2.2.16/5.1.6 -- a self-describing, 25-BuiltInType, recursive/array-capable value
-// encoding) that this first-pass release does NOT implement -- see LIMITATIONS and ROADMAP in
-// docs/MANUAL.md for the honest scope of that gap and what it would take to close it. Even without
-// their own bodies decoded, this tier is still genuinely useful: the service NAME itself (what
-// kind of operation this is), the request handle, and -- for a response -- whether the overall
-// call succeeded (ServiceResult) are all visible, which is often enough to answer "is this
-// conduit doing OPC UA reads/writes/subscriptions at all, and are they succeeding" without needing
-// the actual values.
+// SetPublishingMode, Publish, Republish, Cancel, RegisterNodes, UnregisterNodes, AddNodes,
+// HistoryRead -- see the Tier 1 paragraph above for why each of these specifically stays here even
+// though Variant/DataValue value decoding now exists. Even without their own bodies decoded, this
+// tier is still genuinely useful: the service NAME itself (what kind of operation this is), the
+// request handle, and -- for a response -- whether the overall call succeeded (ServiceResult) are
+// all visible, which is often enough to answer "is this conduit doing OPC UA browsing/
+// subscriptions at all, and are they succeeding" without needing the actual values.
+//
+// Variant/DataValue value decoding: OPC 10000-6 5.2.2.16/5.2.2.17 define two self-describing,
+// recursive value containers used throughout the OPC UA data model -- Variant (any one of 25
+// BuiltInTypes, either a scalar or an array, optionally with ArrayDimensions) and DataValue (a
+// Variant plus up to five optional metadata fields: StatusCode, SourceTimestamp,
+// SourcePicoseconds, ServerTimestamp, ServerPicoseconds). A Variant is a 1-byte EncodingMask (low
+// 6 bits = the BuiltInType numeric id, 1-25; bit 0x80 = an array, not a scalar, follows; bit 0x40
+// = an ArrayDimensions field follows) followed by either one scalar value or an Int32 ArrayLength
+// plus that many elements, followed (if the dims bit is set) by an Int32 count plus that many
+// Int32 dimension sizes. A DataValue is a 1-byte EncodingMask (bit 0x01 Value, 0x02 StatusCode,
+// 0x04 SourceTimestamp, 0x08 ServerTimestamp, 0x10 SourcePicoseconds, 0x20 ServerPicoseconds)
+// followed by whichever fields it flags -- in WIRE order, which this decoder cross-checked against
+// the OPC Foundation's own reference documentation and is NOT simply ascending bit order:
+// SourcePicoseconds (mask bit 0x10) is encoded BEFORE ServerTimestamp (mask bit 0x08), even though
+// its own bit is numerically after ServerTimestamp's. A BuiltInType id this decoder does not
+// recognize (0 is the reserved Null sentinel, meaning "no value" for a Variant; ids outside 1-25
+// are not valid at all) is treated as a decode failure for that Variant, the same "don't guess"
+// posture this file already takes for an unrecognized NodeId encoding shape. Recursion (a
+// Variant's own BuiltInType 24 is Variant-of-Variant; type 23 is Variant-of-DataValue) is bounded
+// to 10 levels deep, mirroring this file's own DiagnosticInfo recursion guard below. Two small,
+// closed value tables ride alongside this decoding: AttributeId (Read/Write's own attribute
+// selector -- the 22 attributes defined since OPC UA 1.03, cross-checked against open62541's own
+// published UA_AttributeId constants; the four attributes 1.04/1.05 later added --
+// DataTypeDefinition/RolePermissions/UserRolePermissions/AccessRestrictions/AccessLevelEx -- were
+// not corroborated with the same confidence and are rendered as a bare number instead of a guessed
+// name, this file's own "don't guess a numeric table entry" discipline) and TimestampsToReturn
+// (Read/HistoryRead's own request parameter, cross-checked against OPC 10000-4 7.39).
 //
 // A TypeId this file's dispatch table does not recognize AT ALL (any numeric identifier not
 // covering-Tier1-or-Tier2's ~40 known values) is reported by its raw namespace+numeric-identifier
@@ -302,8 +344,11 @@
 // TokenId back to the OpenSecureChannel exchange that negotiated it, or a Request's
 // AuthenticationToken back to the CreateSession response that issued it) -- this decoder is, like
 // every other protocol in this codebase, a stateless-per-message decoder with TCP-stream-level
-// reassembly only (see "Chunking" above), not a full conversation-tracking OPC UA stack; Variant/
-// DataValue value decoding (see Tier 2 above); multi-level DiagnosticInfo's own optional
+// reassembly only (see "Chunking" above), not a full conversation-tracking OPC UA stack;
+// Browse/subscription/MonitoredItem-management and HistoryRead body decoding (see the Tier 1/Tier
+// 2 paragraphs above -- Variant/DataValue value decoding itself IS implemented; these specific
+// services simply don't need it, or need additional scope of their own); multi-level
+// DiagnosticInfo's own optional
 // SymbolicId/NamespaceUri/LocalizedText/Locale/AdditionalInfo/InnerStatusCode/InnerDiagnosticInfo
 // fields are structurally skipped (the EncodingMask byte and, when set, each flagged field are all
 // correctly consumed so byte alignment for whatever follows in the same message stays correct --

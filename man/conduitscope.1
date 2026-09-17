@@ -546,22 +546,32 @@ Secure Conversation security/sequence headers, and full field-level
 (Hello/Acknowledge/Error/ReverseHello, OpenSecureChannel, GetEndpoints,
 FindServers, CreateSession, ActivateSession -- including, deliberately, the
 cleartext Password field of a UserName/Password identity token sent over an
-unencrypted channel, flagged as a SECURITY FINDING) -- but OPC UA's own
-Variant/DataValue self-describing value encoding is NOT implemented, so
-Read/Write/Browse/Call and every subscription service are named and have
-their RequestHeader/ResponseHeader decoded only, their own bodies shown as
-raw hex; a logical message split across multiple 'C'/'F' OPC UA chunks
-(distinct from ordinary TCP-segment reassembly, which IS implemented) is
-not reassembled, only a single complete 'F' chunk's body is decoded; there
-is no stateful channel/session tracking (a TokenId or AuthenticationToken is
-never correlated back to the exchange that issued it); the StatusCode table
-is a first-pass ~20 entries out of the OPC Foundation's own ~700, with every
-other value still correctly decoding its Good/Uncertain/Bad severity from
-the raw hex; and real-capture validation, while genuine (two independent-
-stack sessions, 9 of ~15 Tier 1 services, real multi-segment TCP reassembly),
-never exercises FindServers, CloseSession, CloseSecureChannel, any Tier 2
-service besides Call, a non-Anonymous identity token, a non-'F' chunk, or a
-structurally-invalid NodeId (see \fBdocs/MANUAL.md\fR's LIMITATIONS section
+unencrypted channel, flagged as a SECURITY FINDING) -- and OPC UA's own
+Variant/DataValue self-describing value encoding IS now implemented, which
+promoted Read/Write/Call to full ("Tier 1") decode too, so their own
+process/tag values (ReadResponse's Results, WriteRequest's NodesToWrite,
+Call's Input/Output Arguments) are genuinely decoded, not just named;
+Browse and every subscription/MonitoredItem-management service, plus
+HistoryRead, are still named with their RequestHeader/ResponseHeader
+decoded only, their own bodies shown as raw hex, since none of the former
+actually carries a Variant/DataValue in its own body and the latter needs
+additional scope of its own; a logical message split across multiple
+'C'/'F' OPC UA chunks (distinct from ordinary TCP-segment reassembly, which
+IS implemented) is not reassembled, only a single complete 'F' chunk's body
+is decoded; there is no stateful channel/session tracking (a TokenId or
+AuthenticationToken is never correlated back to the exchange that issued
+it); the StatusCode table is a first-pass ~20 entries out of the OPC
+Foundation's own ~700, with every other value still correctly decoding its
+Good/Uncertain/Bad severity from the raw hex; and real-capture validation,
+while genuine (two independent-stack sessions, 9 of ~21 Tier 1
+request/response entries, real multi-segment TCP reassembly), never
+exercises FindServers, CloseSession, CloseSecureChannel, any Tier 2
+service, a non-Anonymous identity token, a non-'F' chunk, a
+structurally-invalid NodeId, or a well-formed (non-fuzzed) Read/Write/Call
+exchange -- both real CallRequest bodies in that capture turn out to be
+genuinely malformed Achilles-Satellite fuzz-test payloads, which this
+decoder's own bounds-checked reads now correctly reject (see
+\fBdocs/MANUAL.md\fR's LIMITATIONS section
 and \fBtests/real_captures/opcua/ATTRIBUTION.md\fR for the full detail);
 MQTT (v3.1/v3.1.1/v5.0, conventionally TCP port 1883) and, layered on top
 of it, Sparkplug B are also now decoded \-\- but MQTT's own structural

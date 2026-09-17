@@ -5242,6 +5242,98 @@ def opcua_sequence_header(sequence_number, request_id):
     return struct.pack("<II", sequence_number, request_id)
 
 
+# --- Variant/DataValue encoders -- mirror src/opcua.cpp's format_scalar_value/format_variant/
+# format_data_value byte-for-byte (the inverse of those readers, not independently reinvented --
+# see this file's own "Primitive encoding" comment above for why that matters). Only the handful
+# of BuiltInTypes the Read/Write/Call fixtures below actually use are implemented; this is a test
+# fixture generator, not a general-purpose encoder.
+
+def opcua_qualified_name(ns, name=None):
+    """QualifiedName -- NamespaceIndex(UInt16 LE) + Name(String). See opcua.cpp's
+    read_qualified_name_display."""
+    return struct.pack("<H", ns) + opcua_string(name)
+
+
+def opcua_read_value_id(node_id_bytes, attribute, index_range=None, data_encoding_ns=0,
+                         data_encoding_name=None):
+    """ReadValueId -- NodeId + AttributeId(UInt32 LE) + IndexRange(String) + DataEncoding
+    (QualifiedName). Shared by ReadRequest's NodesToRead and (minus DataEncoding) WriteRequest's
+    NodesToWrite -- see opcua.cpp's decode_read_request_params."""
+    return (node_id_bytes + struct.pack("<I", attribute) + opcua_string(index_range) +
+            opcua_qualified_name(data_encoding_ns, data_encoding_name))
+
+
+def opcua_variant_int32(v):
+    """Variant(scalar Int32) -- EncodingMask=6 (Int32, no array/dims bits) + Int32 LE."""
+    return bytes([6]) + struct.pack("<i", v)
+
+
+def opcua_variant_float(v):
+    """Variant(scalar Float) -- EncodingMask=10 (Float) + IEEE-754 single LE."""
+    return bytes([10]) + struct.pack("<f", v)
+
+
+def opcua_variant_null():
+    """Variant(Null) -- EncodingMask=0, no value follows."""
+    return bytes([0x00])
+
+
+def opcua_variant_string_array(strings):
+    """Variant(array of String) -- EncodingMask=12|0x80 (String, array bit set) + Int32 ArrayLength
+    + that many String elements, no ArrayDimensions."""
+    body = bytes([12 | 0x80]) + struct.pack("<i", len(strings))
+    for s in strings:
+        body += opcua_string(s)
+    return body
+
+
+def opcua_variant_uint32_array(values, dims=None):
+    """Variant(array of UInt32) -- EncodingMask=7|0x80 (UInt32, array bit), +0x40 when
+    ArrayDimensions follows -- + Int32 ArrayLength + that many UInt32 LE elements + (if dims)
+    Int32 count + that many Int32 LE dimension sizes."""
+    mask = 7 | 0x80
+    if dims:
+        mask |= 0x40
+    body = bytes([mask]) + struct.pack("<i", len(values))
+    for v in values:
+        body += struct.pack("<I", v)
+    if dims:
+        body += struct.pack("<i", len(dims))
+        for d in dims:
+            body += struct.pack("<i", d)
+    return body
+
+
+def opcua_data_value(variant_bytes=None, status=None, source_ts_ticks=None, source_picoseconds=None,
+                      server_ts_ticks=None, server_picoseconds=None):
+    """DataValue(variable) -- 1-byte EncodingMask + whichever fields it flags, in WIRE order:
+    Value, StatusCode, SourceTimestamp, SourcePicoseconds, ServerTimestamp, ServerPicoseconds --
+    NOT bit order (SourcePicoseconds's bit, 0x10, is numerically after ServerTimestamp's, 0x08, but
+    precedes it on the wire). Mirrors opcua.cpp's format_data_value exactly -- see that function's
+    own header comment for the cross-checked sourcing behind this field order."""
+    mask = 0
+    body = b""
+    if variant_bytes is not None:
+        mask |= 0x01
+        body += variant_bytes
+    if status is not None:
+        mask |= 0x02
+        body += struct.pack("<I", status)
+    if source_ts_ticks is not None:
+        mask |= 0x04
+        body += struct.pack("<Q", source_ts_ticks & 0xFFFFFFFFFFFFFFFF)
+    if source_picoseconds is not None:
+        mask |= 0x10
+        body += struct.pack("<H", source_picoseconds)
+    if server_ts_ticks is not None:
+        mask |= 0x08
+        body += struct.pack("<Q", server_ts_ticks & 0xFFFFFFFFFFFFFFFF)
+    if server_picoseconds is not None:
+        mask |= 0x20
+        body += struct.pack("<H", server_picoseconds)
+    return bytes([mask]) + body
+
+
 def opcua_opn_message(secure_channel_id, policy_uri, sequence_number, request_id, service_body,
                        chunk_type="F"):
     """An OpenSecureChannel (OPN) message: 8-byte header + SecureChannelId + Asymmetric Algorithm
@@ -5268,8 +5360,10 @@ def build_opcua_sample():
     FindServers discovery, a CreateSession/ActivateSession/CloseSession lifecycle -- including,
     deliberately, an Anonymous ActivateSession AND a UserName/Password one with an empty
     EncryptionAlgorithm (the cleartext-credential-exposure "SECURITY FINDING" case opcua.hpp's own
-    "Identity token decode" section documents) -- a Tier-2 (header-decoded, body-raw-hex) Read
-    request/response pair, an entirely unrecognized service TypeId, an Error message, a
+    "Identity token decode" section documents) -- Tier-1 Read/Write/Call request/response pairs
+    exercising the full Variant/DataValue value decode (a DataValue with all six optional fields
+    set, a Float scalar, a Null Variant, and Variant arrays with and without ArrayDimensions), an
+    entirely unrecognized service TypeId, an Error message, a
     ReverseHello (on its own, separately-directioned connection, per spec), a non-'F' (intermediate)
     chunk, a structurally-invalid NodeId shape (regression case for the inner try/catch that must
     still preserve the already-decoded channel/security/sequence fields), a genuinely truncated/
@@ -5408,41 +5502,93 @@ def build_opcua_sample():
     as_userpass_resp_body = opcua_service_message(470, opcua_response_header(6, 0), as_resp_params)
     add(False, opcua_symmetric_message("MSG", channel_id, token_id, 6, 6, as_userpass_resp_body))
 
-    # 15) & 16) Read request/response -- Tier 2 (RequestHeader/ResponseHeader decoded; the
-    #     NodesToRead/Results arrays need the Variant/DataValue encoding this first-pass release
-    #     does not implement, so they're shown as raw hex -- see opcua.hpp's "Service
-    #     identification" section). The bytes below are deliberately NOT a valid ReadRequest
-    #     parameters encoding -- this tier never attempts to parse past the header at all.
-    read_req_params = bytes([0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x0A, 0x0B])
+    # 15) & 16) Read request/response -- Tier 1 (promoted once Variant/DataValue value decoding
+    #     existed to give NodesToRead/Results somewhere to go -- see opcua.cpp's own comment ahead
+    #     of decode_read_request_params). One ReadValueId (ns=2;i=1001, attribute=Value,
+    #     TimestampsToReturn=Both); the response's one DataValue deliberately sets ALL SIX optional
+    #     fields (Value/Status/SourceTimestamp/SourcePicoseconds/ServerTimestamp/ServerPicoseconds)
+    #     as a regression fixture for format_data_value's non-bit-numeric wire field order (Source-
+    #     Picoseconds, mask bit 0x10, precedes ServerTimestamp, mask bit 0x08, on the wire).
+    read_req_params = (struct.pack("<d", 5000.0) + struct.pack("<I", 2) + opcua_array_count(1) +
+                        opcua_read_value_id(node_id_numeric(2, 1001), 13))  # attribute 13 = Value
     read_req_body = opcua_service_message(631, opcua_request_header(7, auth_token_bytes=session_auth_token),
                                            read_req_params)  # ReadRequest
     add(True, opcua_symmetric_message("MSG", channel_id, token_id, 7, 7, read_req_body))
 
-    read_resp_params = bytes([0x02, 0x00, 0x00, 0x00, 0xAA, 0xBB, 0x00, 0x00, 0x00, 0x00])
+    read_resp_params = (opcua_array_count(1) +
+                         opcua_data_value(opcua_variant_int32(42), status=0,
+                                          source_ts_ticks=OPCUA_FIXED_TICKS, source_picoseconds=500,
+                                          server_ts_ticks=OPCUA_FIXED_TICKS + 10_000_000,
+                                          server_picoseconds=250) +
+                         opcua_array_count(0))  # DiagnosticInfos
     read_resp_body = opcua_service_message(634, opcua_response_header(7, 0), read_resp_params)  # ReadResponse
     add(False, opcua_symmetric_message("MSG", channel_id, token_id, 7, 7, read_resp_body))
 
-    # 17) A service TypeId this decoder's dispatch table does not recognize AT ALL (Numeric
+    # 17) & 18) Write request/response -- one WriteValue (ns=2;i=1002, attribute=Value) carrying a
+    #     DataValue with only its Value field set (a scalar Float, 3.5) -- the common "just write
+    #     the value" case, unlike the Read response's every-field-set case above.
+    write_req_params = (opcua_array_count(1) + node_id_numeric(2, 1002) + struct.pack("<I", 13) +
+                         opcua_string(None) + opcua_data_value(opcua_variant_float(3.5)))
+    write_req_body = opcua_service_message(673, opcua_request_header(8, auth_token_bytes=session_auth_token),
+                                            write_req_params)  # WriteRequest
+    add(True, opcua_symmetric_message("MSG", channel_id, token_id, 8, 8, write_req_body))
+
+    write_resp_params = opcua_array_count(1) + struct.pack("<I", 0) + opcua_array_count(0)  # 1x Good
+    write_resp_body = opcua_service_message(676, opcua_response_header(8, 0), write_resp_params)  # WriteResponse
+    add(False, opcua_symmetric_message("MSG", channel_id, token_id, 8, 8, write_resp_body))
+
+    # 19) & 20) Call request/response -- one CallMethodRequest (object ns=2;i=2000, method
+    #     ns=2;i=2001) whose single input argument is itself a Variant array (String[3]); the
+    #     response's single output argument is a Variant array (UInt32[2]) WITH ArrayDimensions
+    #     set -- exercises format_variant's array-of-scalar path and its own ArrayDimensions tail
+    #     in both directions, on top of format_data_value's coverage above.
+    call_req_params = (opcua_array_count(1) + node_id_numeric(2, 2000) + node_id_numeric(2, 2001) +
+                        opcua_array_count(1) + opcua_variant_string_array(["a", "bee", "c"]))
+    call_req_body = opcua_service_message(712, opcua_request_header(9, auth_token_bytes=session_auth_token),
+                                           call_req_params)  # CallRequest
+    add(True, opcua_symmetric_message("MSG", channel_id, token_id, 9, 9, call_req_body))
+
+    call_resp_params = (opcua_array_count(1) + struct.pack("<I", 0) + opcua_array_count(0) +
+                         opcua_array_count(0) + opcua_array_count(1) +
+                         opcua_variant_uint32_array([10, 20], dims=[2]))
+    call_resp_body = opcua_service_message(715, opcua_response_header(9, 0), call_resp_params)  # CallResponse
+    add(False, opcua_symmetric_message("MSG", channel_id, token_id, 9, 9, call_resp_body))
+
+    # 21) & 22) Write request/response -- a Null Variant (EncodingMask 0x00, no value at all): the
+    #     degenerate case format_variant's own `type_id == 0` branch exists for, distinct from a
+    #     present-but-empty array or a present scalar.
+    null_write_params = (opcua_array_count(1) + node_id_numeric(2, 1003) + struct.pack("<I", 13) +
+                          opcua_string(None) + opcua_data_value(opcua_variant_null()))
+    null_write_req_body = opcua_service_message(
+        673, opcua_request_header(10, auth_token_bytes=session_auth_token), null_write_params)  # WriteRequest
+    add(True, opcua_symmetric_message("MSG", channel_id, token_id, 10, 10, null_write_req_body))
+
+    null_write_resp_params = opcua_array_count(1) + struct.pack("<I", 0) + opcua_array_count(0)
+    null_write_resp_body = opcua_service_message(676, opcua_response_header(10, 0),
+                                                  null_write_resp_params)  # WriteResponse
+    add(False, opcua_symmetric_message("MSG", channel_id, token_id, 10, 10, null_write_resp_body))
+
+    # 23) A service TypeId this decoder's dispatch table does not recognize AT ALL (Numeric
     #     encoding, namespace 0, identifier 999999 -- not one of the ~53 known values in
     #     src/opcua.cpp's kServices table) -- this decoder does not guess whether it's even shaped
     #     like a Request or Response, so the ENTIRE remainder is shown as raw hex.
     unknown_service_body = node_id_numeric(0, 999999) + bytes([0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01])
-    add(True, opcua_symmetric_message("MSG", channel_id, token_id, 8, 8, unknown_service_body))
+    add(True, opcua_symmetric_message("MSG", channel_id, token_id, 11, 11, unknown_service_body))
 
-    # 18) & 19) CloseSession request/response.
-    cls_req_body = opcua_service_message(473, opcua_request_header(9, auth_token_bytes=session_auth_token),
+    # 24) & 25) CloseSession request/response.
+    cls_req_body = opcua_service_message(473, opcua_request_header(11, auth_token_bytes=session_auth_token),
                                           bytes([0x01]))  # CloseSessionRequest, DeleteSubscriptions=true
-    add(True, opcua_symmetric_message("MSG", channel_id, token_id, 9, 9, cls_req_body))
-    clsr_resp_body = opcua_service_message(476, opcua_response_header(9, 0))  # CloseSessionResponse, no params
-    add(False, opcua_symmetric_message("MSG", channel_id, token_id, 9, 9, clsr_resp_body))
+    add(True, opcua_symmetric_message("MSG", channel_id, token_id, 12, 12, cls_req_body))
+    clsr_resp_body = opcua_service_message(476, opcua_response_header(11, 0))  # CloseSessionResponse, no params
+    add(False, opcua_symmetric_message("MSG", channel_id, token_id, 12, 12, clsr_resp_body))
 
-    # 20) CloseSecureChannel request -- no response by spec (mirrors EtherNet/IP's own
+    # 26) CloseSecureChannel request -- no response by spec (mirrors EtherNet/IP's own
     #     UnRegisterSession -- see build_enip_sample -- the client just closes the TCP connection
     #     afterward).
-    clo_body = opcua_service_message(452, opcua_request_header(10, auth_token_bytes=session_auth_token))
-    add(True, opcua_symmetric_message("CLO", channel_id, token_id, 10, 10, clo_body))
+    clo_body = opcua_service_message(452, opcua_request_header(12, auth_token_bytes=session_auth_token))
+    add(True, opcua_symmetric_message("CLO", channel_id, token_id, 13, 13, clo_body))
 
-    # 21) A standalone Error message (either direction; sent here as if the server were rejecting a
+    # 27) A standalone Error message (either direction; sent here as if the server were rejecting a
     #     new request on an already-closed channel) -- StatusCode + Reason, both decoded.
     err_body = struct.pack("<I", 0x80220000) + opcua_string("SecureChannel has been closed")  # BadSecureChannelIdInvalid
     add(False, opcua_simple_message("ERR", err_body))
@@ -5451,7 +5597,7 @@ def build_opcua_sample():
     for i, pkt in enumerate(packets):
         data += pcap_record(pkt, 1_700_007_000 + i, i * 1000)
 
-    # 22) ReverseHello -- used only for the "reverse connect" pattern, where the SERVER initiates
+    # 28) ReverseHello -- used only for the "reverse connect" pattern, where the SERVER initiates
     #     the TCP connection to the Client (the opposite direction from every packet above) -- a
     #     dedicated, separately-directioned connection, per spec.
     rhe_body = opcua_string("urn:conduitscope:sample-plc") + opcua_string(endpoint_url)
@@ -5460,7 +5606,7 @@ def build_opcua_sample():
     rhe_ip = ipv4_header(PLC_IP, HMI_IP, 6, len(rhe_tcp), 0x7400) + rhe_tcp
     data += pcap_record(eth_header(HMI_MAC, PLC_MAC, 0x0800) + rhe_ip, 1_700_007_100, 0)
 
-    # 23) A non-'F' (intermediate) chunk -- fully decoded at the UA-TCP/SecureConversation HEADER
+    # 29) A non-'F' (intermediate) chunk -- fully decoded at the UA-TCP/SecureConversation HEADER
     #     level (MessageType/ChunkType/SecureChannelId/security header/sequence header), but its own
     #     body is always shown as raw hex regardless of what it might contain -- this decoder does
     #     not reassemble a message split across multiple chunks (see opcua.hpp's "Chunking" section).
@@ -5477,7 +5623,7 @@ def build_opcua_sample():
         tcp_header(53200, OPCUA_PORT, 1, 1, TCP_PSH | TCP_ACK, len(chunk_c_msg)) + chunk_c_msg,
         1_700_007_200, 0)
 
-    # 24) A structurally-invalid NodeId encoding byte (0x3F -- low 6 bits outside the valid 0x00-
+    # 30) A structurally-invalid NodeId encoding byte (0x3F -- low 6 bits outside the valid 0x00-
     #     0x05 range) as a MSG service TypeId -- regression case for the inner try/catch in
     #     try_parse_opcua_message that must fall back to raw hex for JUST the service body while
     #     preserving the already-decoded SecureChannelId/security header/sequence header fields
@@ -5493,7 +5639,7 @@ def build_opcua_sample():
         tcp_header(53201, OPCUA_PORT, 1, 1, TCP_PSH | TCP_ACK, len(bad_nodeid_msg)) + bad_nodeid_msg,
         1_700_007_201, 0)
 
-    # 25) A genuinely truncated/incomplete capture: a Hello message declaring a MessageSize larger
+    # 31) A genuinely truncated/incomplete capture: a Hello message declaring a MessageSize larger
     #     than the bytes actually sent, with no follow-up TCP segment -- this decoder's usual
     #     declared-length TCP reassembly (opcua_declared_length, mirroring hartip_declared_length/
     #     enip_declared_length) buffers it, reports protocol "tcp", and never resolves it (the same
@@ -5510,7 +5656,7 @@ def build_opcua_sample():
         tcp_header(53202, OPCUA_PORT, 1, 1, TCP_PSH | TCP_ACK, len(truncated_msg)) + truncated_msg,
         1_700_007_202, 0)
 
-    # 26) Port-independence: a structurally valid Hello/Acknowledge exchange on a TCP port other
+    # 32) Port-independence: a structurally valid Hello/Acknowledge exchange on a TCP port other
     #     than 4840 -- still decoded, annotated as an unexpected port (mirrors BACnet's/HART-IP's/
     #     EtherNet/IP's own posture).
     alt_hel = opcua_simple_message("HEL", struct.pack("<IIIII", 0, 65536, 65536, 0, 0) + opcua_string(endpoint_url))
@@ -5522,7 +5668,7 @@ def build_opcua_sample():
         tcp_header(53210, 51005, 1, 1, TCP_PSH | TCP_ACK, len(alt_hel)) + alt_hel,
         1_700_007_203, 0)
 
-    # 27) Two OPC UA messages coalesced into ONE TCP segment (sender/OS coalescing, mirrors HART-
+    # 33) Two OPC UA messages coalesced into ONE TCP segment (sender/OS coalescing, mirrors HART-
     #     IP's/EtherNet/IP's own coalescing tests) -- a Hello immediately followed by an
     #     Acknowledge, both sent together as a single TCP payload, exercising the wire_length-
     #     driven "additional OPC UA message" loop in decoder.cpp.

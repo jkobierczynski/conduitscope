@@ -2880,15 +2880,40 @@ add_test(NAME opcua_activate_session_username_password_cleartext_decoded
 set_tests_properties(opcua_activate_session_username_password_cleartext_decoded PROPERTIES
   PASS_REGULAR_EXPRESSION "\"identity=username \\(policy-id=username_basic256\\)\", \"username=operator1\", \"password=Sup3rSecret!1\"\\],.*\"notes\": \\[\"SECURITY FINDING: UserNameIdentityToken's own EncryptionAlgorithm field is empty, meaning the password above was placed on the wire UNENCRYPTED")
 
-add_test(NAME opcua_read_request_tier2_header_only_decoded
+add_test(NAME opcua_read_request_nodes_to_read_decoded
   COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_opcua.pcap")
-set_tests_properties(opcua_read_request_tier2_header_only_decoded PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"opcua_service_name\": \"ReadRequest\",.*\"opcua_values\": \\[\"timestamp=2023-11-14T23:53:20.000Z\", \"request-handle=7\"\\],.*\"opcua_body_shown_as_hex\": true,.*\"opcua_body_length\": 10,.*\"opcua_body_hex\": \"00 00 00 00 02 00 00 00 0a 0b\",")
+set_tests_properties(opcua_read_request_nodes_to_read_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"opcua_service_name\": \"ReadRequest\",.*\"opcua_values\": \\[.*\"max-age-ms=5000.000000\", \"timestamps-to-return=Both\", \"nodes-to-read-count=1\", \"nodes-to-read\\[0\\]=ns=2;i=1001 attribute=Value\"\\],.*\"opcua_body_shown_as_hex\": false,")
 
-add_test(NAME opcua_read_response_tier2_header_only_decoded
+add_test(NAME opcua_read_response_datavalue_all_six_fields_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_opcua.pcap")
+set_tests_properties(opcua_read_response_datavalue_all_six_fields_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"opcua_service_name\": \"ReadResponse\",.*\"opcua_values\": \\[.*\"results-count=1\", \"results\\[0\\]=\\{value=\\(Int32\\) 42, status=Good, source-timestamp=2023-11-14T23:53:20.000Z, source-picoseconds=500, server-timestamp=2023-11-14T23:53:21.000Z, server-picoseconds=250\\}\"\\],")
+
+add_test(NAME opcua_write_request_float_value_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_opcua.pcap")
+set_tests_properties(opcua_write_request_float_value_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"opcua_service_name\": \"WriteRequest\",.*\"nodes-to-write-count=1\", \"nodes-to-write\\[0\\]=ns=2;i=1002 attribute=Value value=\\{value=\\(Float\\) 3.500000\\}\"\\],")
+
+add_test(NAME opcua_write_response_good_status_decoded
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_opcua.pcap" --format text)
-set_tests_properties(opcua_read_response_tier2_header_only_decoded PROPERTIES
-  PASS_REGULAR_EXPRESSION "\\[opcua\\]  Message channel=500001 token=1 ReadResponse result=Good")
+set_tests_properties(opcua_write_response_good_status_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[opcua\\]  Message channel=500001 token=1 WriteResponse result=Good")
+
+add_test(NAME opcua_call_request_input_string_array_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_opcua.pcap")
+set_tests_properties(opcua_call_request_input_string_array_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"opcua_service_name\": \"CallRequest\",.*\"call\\[0\\]=object=ns=2;i=2000 method=ns=2;i=2001 input-arguments=\\[\\(String\\[3\\]\\) a, bee, c\\]\"\\],")
+
+add_test(NAME opcua_call_response_output_uint32_array_with_dims_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_opcua.pcap")
+set_tests_properties(opcua_call_response_output_uint32_array_with_dims_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"opcua_service_name\": \"CallResponse\",.*\"result\\[0\\]=status=Good output-arguments=\\[\\(UInt32\\[2\\]\\) 10, 20 dims=\\[2\\]\\]\"\\],")
+
+add_test(NAME opcua_write_request_null_variant_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_opcua.pcap")
+set_tests_properties(opcua_write_request_null_variant_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"opcua_service_name\": \"WriteRequest\",.*\"nodes-to-write\\[0\\]=ns=2;i=1003 attribute=Value value=\\{value=\\(Null\\)\\}\"\\],")
 
 add_test(NAME opcua_unrecognized_service_typeid_shown_as_hex
   COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_opcua.pcap")
@@ -2898,7 +2923,7 @@ set_tests_properties(opcua_unrecognized_service_typeid_shown_as_hex PROPERTIES
 add_test(NAME opcua_close_session_decoded
   COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_opcua.pcap")
 set_tests_properties(opcua_close_session_decoded PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"opcua_service_name\": \"CloseSessionRequest\",.*\"opcua_values\": \\[\"timestamp=2023-11-14T23:53:20.000Z\", \"request-handle=9\", \"delete-subscriptions=true\"\\],")
+  PASS_REGULAR_EXPRESSION "\"opcua_service_name\": \"CloseSessionRequest\",.*\"opcua_values\": \\[\"timestamp=2023-11-14T23:53:20.000Z\", \"request-handle=11\", \"delete-subscriptions=true\"\\],")
 
 add_test(NAME opcua_close_secure_channel_decoded
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_opcua.pcap" --format text)
@@ -2954,7 +2979,7 @@ set_tests_properties(opcua_protocol_filter_excludes_other_protocols PROPERTIES
 add_test(NAME opcua_stats_counted
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_opcua.pcap" --stats)
 set_tests_properties(opcua_stats_counted PROPERTIES
-  PASS_REGULAR_EXPRESSION "packets: +27[^\n]*\n[^\n]*\nprotocols:\n *opcua +26\n *tcp +1\nopcua message types:\n *Acknowledge +1\n *CloseSecureChannel +1\n *Error +1\n *Hello +3\n *Message +17\n *OpenSecureChannel +2\n *ReverseHello +1\nopcua services:\n *ActivateSessionRequest +2\n *ActivateSessionResponse +2\n")
+  PASS_REGULAR_EXPRESSION "packets: +33[^\n]*\n[^\n]*\nprotocols:\n *opcua +32\n *tcp +1\nopcua message types:\n *Acknowledge +1\n *CloseSecureChannel +1\n *Error +1\n *Hello +3\n *Message +23\n *OpenSecureChannel +2\n *ReverseHello +1\nopcua services:\n *ActivateSessionRequest +2\n *ActivateSessionResponse +2\n *CallRequest +1\n *CallResponse +1\n")
 
 # --------------------------------------------------------------------------
 # Real-world OPC UA capture -- see tests/real_captures/opcua/ATTRIBUTION.md for provenance: two
@@ -2973,7 +2998,14 @@ add_test(NAME real_opcua_does_not_crash
 add_test(NAME real_opcua_stats_summary
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/opcua/opc-ua-ap-method-wireshark-freeze.pcap" --stats)
 set_tests_properties(real_opcua_stats_summary PROPERTIES
-  PASS_REGULAR_EXPRESSION "packets: +90[^\n]*\n[^\n]*\nprotocols:\n *opcua +24\n *tcp +66\nopcua message types:\n *Acknowledge +2\n *Error +2\n *Hello +2\n *Message +14\n *OpenSecureChannel +4\nopcua services:\n *ActivateSessionRequest +2\n *ActivateSessionResponse +2\n *CallRequest +2\n *CreateSessionRequest +2\n *CreateSessionResponse +2\n *GetEndpointsRequest +2\n *GetEndpointsResponse +2\n *OpenSecureChannelRequest +2\n *OpenSecureChannelResponse +2")
+  # Both sessions' CallRequest (TypeId 712) no longer appear under "opcua services" now that Call is
+  # Tier 1: their own bodies are genuinely malformed (Achilles Satellite fuzz-test payloads -- see
+  # ATTRIBUTION.md -- e.g. session 1's carries a method-id NodeId claiming a 262144-byte String with
+  # only ~21 bytes actually left in the captured body), so decode_call_request_params's own bounds-
+  # checked reads now correctly throw and this decoder honestly falls back to "not in this decoder's
+  # dispatch table" for them, rather than the old Tier-2 behavior of labeling them "CallRequest"
+  # without ever having attempted to parse their bodies at all -- see the tests below this one.
+  PASS_REGULAR_EXPRESSION "packets: +90[^\n]*\n[^\n]*\nprotocols:\n *opcua +24\n *tcp +66\nopcua message types:\n *Acknowledge +2\n *Error +2\n *Hello +2\n *Message +14\n *OpenSecureChannel +4\nopcua services:\n *ActivateSessionRequest +2\n *ActivateSessionResponse +2\n *CreateSessionRequest +2\n *CreateSessionResponse +2\n *GetEndpointsRequest +2\n *GetEndpointsResponse +2\n *OpenSecureChannelRequest +2\n *OpenSecureChannelResponse +2")
 
 add_test(NAME real_opcua_port_independent_detection_on_nonstandard_port
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/opcua/opc-ua-ap-method-wireshark-freeze.pcap" --format text)
@@ -3000,25 +3032,35 @@ add_test(NAME real_opcua_activate_session_anonymous_real_client
 set_tests_properties(real_opcua_activate_session_anonymous_real_client PROPERTIES
   PASS_REGULAR_EXPRESSION "\"opcua_service_name\": \"ActivateSessionRequest\",.*\"identity=anonymous \\(policy-id=0\\)\"\\],")
 
-add_test(NAME real_opcua_call_request_first_session_tier2_reassembled_across_4_segments
+add_test(NAME real_opcua_call_request_first_session_body_rejected_as_malformed
   COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/opcua/opc-ua-ap-method-wireshark-freeze.pcap")
-set_tests_properties(real_opcua_call_request_first_session_tier2_reassembled_across_4_segments PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"summary\": \"Message channel=6495 token=1 CallRequest\",.*\"opcua_message_size\": 5224,.*\"opcua_service_type_id\": 712,")
+set_tests_properties(real_opcua_call_request_first_session_body_rejected_as_malformed PROPERTIES
+  # This session's CallRequest (TypeId 712, reassembled from 4 TCP segments) is one of the Achilles
+  # Satellite fuzz-test payloads this capture is built from (see ATTRIBUTION.md): its CallMethodRequest
+  # array's own MethodId NodeId claims a String identifier 262144 bytes long with only ~21 bytes
+  # actually present in the captured body. Now that Call is Tier 1, decode_call_request_params's
+  # bounds-checked read_string throws, and this decoder correctly falls back to raw hex rather than
+  # asserting a "CallRequest" label it was never able to verify -- see opcua.cpp's inner try/catch
+  # around the service-body decode.
+  PASS_REGULAR_EXPRESSION "\"summary\": \"Message channel=6495 token=1 \\(service type-id 712, ns=0 -- not in this decoder's dispatch table\\)\",.*\"opcua_message_size\": 5224,.*\"opcua_service_recognized\": false,.*\"opcua_service_type_id\": 712,.*\"opcua_body_shown_as_hex\": true,")
 
-add_test(NAME real_opcua_call_request_second_session_much_smaller
+add_test(NAME real_opcua_call_request_second_session_body_rejected_as_malformed
   COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/opcua/opc-ua-ap-method-wireshark-freeze.pcap")
-set_tests_properties(real_opcua_call_request_second_session_much_smaller PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"summary\": \"Message channel=6496 token=1 CallRequest\",.*\"opcua_message_size\": 110,.*\"opcua_service_type_id\": 712,")
+set_tests_properties(real_opcua_call_request_second_session_body_rejected_as_malformed PROPERTIES
+  # This session's CallRequest carries a structurally-invalid MethodId NodeId encoding byte (shape
+  # 0x07, outside the valid 0x00-0x05 range) -- the same real-world fuzz-test posture as the first
+  # session above, just a different malformed field.
+  PASS_REGULAR_EXPRESSION "\"summary\": \"Message channel=6496 token=1 \\(service type-id 712, ns=0 -- not in this decoder's dispatch table\\)\",.*\"opcua_message_size\": 110,.*\"opcua_service_recognized\": false,.*\"opcua_service_type_id\": 712,.*\"opcua_body_shown_as_hex\": true,")
 
 add_test(NAME real_opcua_malformed_call_request_gets_error_not_response_first_session
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/opcua/opc-ua-ap-method-wireshark-freeze.pcap" --format text)
 set_tests_properties(real_opcua_malformed_call_request_gets_error_not_response_first_session PROPERTIES
-  PASS_REGULAR_EXPRESSION "\\[opcua\\]  Message channel=6495 token=1 CallRequest\n.*\\[opcua\\]  Error error=Bad \\(0x80020000\\) reason=")
+  PASS_REGULAR_EXPRESSION "\\[opcua\\]  Message channel=6495 token=1 \\(service type-id 712, ns=0 -- not in this decoder's dispatch table\\)\n.*\\[opcua\\]  Error error=Bad \\(0x80020000\\) reason=")
 
 add_test(NAME real_opcua_malformed_call_request_gets_error_not_response_second_session
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/opcua/opc-ua-ap-method-wireshark-freeze.pcap" --format text)
 set_tests_properties(real_opcua_malformed_call_request_gets_error_not_response_second_session PROPERTIES
-  PASS_REGULAR_EXPRESSION "\\[opcua\\]  Message channel=6496 token=1 CallRequest\n.*\\[opcua\\]  Error error=Bad \\(0x80070000\\) reason=")
+  PASS_REGULAR_EXPRESSION "\\[opcua\\]  Message channel=6496 token=1 \\(service type-id 712, ns=0 -- not in this decoder's dispatch table\\)\n.*\\[opcua\\]  Error error=Bad \\(0x80070000\\) reason=")
 
 add_test(NAME real_opcua_security_policy_none_both_sessions
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/opcua/opc-ua-ap-method-wireshark-freeze.pcap" --format text)

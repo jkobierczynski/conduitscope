@@ -34,6 +34,33 @@ double bits_to_double(uint64_t bits) {
     return d;
 }
 
+// The same portable bit-reinterpret posture as to_i32/bits_to_double above, for the remaining
+// signed-integer/float widths Variant scalar decoding needs (see "Variant/DataValue value
+// decoding" below).
+int16_t to_i16(uint16_t v) {
+    int16_t r;
+    std::memcpy(&r, &v, sizeof(r));
+    return r;
+}
+
+int64_t to_i64(uint64_t v) {
+    int64_t r;
+    std::memcpy(&r, &v, sizeof(r));
+    return r;
+}
+
+float bits_to_float(uint32_t bits) {
+    float f;
+    std::memcpy(&f, &bits, sizeof(f));
+    return f;
+}
+
+std::string format_float(float v) {
+    std::ostringstream s;
+    s << std::fixed << std::setprecision(6) << v;
+    return s.str();
+}
+
 // ticks: 100-nanosecond intervals since 1601-01-01T00:00:00Z (the Win32 FILETIME epoch) -- see
 // opcua.hpp's "Primitive encoding" section for why OPC UA's own DateTime uses this epoch.
 std::string format_opcua_datetime(int64_t ticks) {
@@ -83,6 +110,24 @@ OpcUaByteString read_bytestring(Cursor& c) {
 
 int32_t read_array_count(Cursor& c) { return std::max<int32_t>(to_i32(c.u32le()), 0); }
 
+// Guid(16) -- Data1(UInt32 LE) + Data2(UInt16 LE) + Data3(UInt16 LE) + Data4(8 raw bytes, network/
+// big-endian order) -- see opcua.hpp's "Primitive encoding" section. Shared by NodeId's own Guid
+// shape (0x04, below) and Variant's standalone Guid BuiltInType (14, see "Variant/DataValue value
+// decoding" below) -- the same wire layout either way.
+std::string read_guid_string(Cursor& c) {
+    uint32_t d1 = c.u32le();
+    uint16_t d2 = c.u16le();
+    uint16_t d3 = c.u16le();
+    ByteSpan d4 = c.bytes(8);
+    std::ostringstream g;
+    g << std::hex << std::setfill('0') << std::setw(8) << d1 << "-" << std::setw(4) << d2 << "-" << std::setw(4)
+      << d3 << "-";
+    for (size_t i = 0; i < 2; ++i) g << std::setw(2) << static_cast<unsigned>(d4.at(i));
+    g << "-";
+    for (size_t i = 2; i < 8; ++i) g << std::setw(2) << static_cast<unsigned>(d4.at(i));
+    return g.str();
+}
+
 // A decoded NodeId (see opcua.hpp's "Primitive encoding" -- NodeId). Throws ParseError when the
 // encoding byte's low 6 bits aren't one of the 6 valid shapes (0x00-0x05): unlike an ordinary
 // missing/short field, an unrecognized NodeId shape means this decoder has no way to know how
@@ -123,22 +168,10 @@ OpcUaNodeIdInfo read_node_id(Cursor& c) {
             id.ns = c.u16le();
             id.string_id = read_string(c).value_or("");
             break;
-        case 0x04: {  // Guid -- Data1(UInt32 LE) + Data2(UInt16 LE) + Data3(UInt16 LE) +
-                       // Data4(8 raw bytes, network order) -- see opcua.hpp
+        case 0x04:  // Guid -- see read_guid_string above
             id.ns = c.u16le();
-            uint32_t d1 = c.u32le();
-            uint16_t d2 = c.u16le();
-            uint16_t d3 = c.u16le();
-            ByteSpan d4 = c.bytes(8);
-            std::ostringstream g;
-            g << std::hex << std::setfill('0') << std::setw(8) << d1 << "-" << std::setw(4) << d2 << "-"
-              << std::setw(4) << d3 << "-";
-            for (size_t i = 0; i < 2; ++i) g << std::setw(2) << static_cast<unsigned>(d4.at(i));
-            g << "-";
-            for (size_t i = 2; i < 8; ++i) g << std::setw(2) << static_cast<unsigned>(d4.at(i));
-            id.guid_id = g.str();
+            id.guid_id = read_guid_string(c);
             break;
-        }
         case 0x05:  // ByteString
             id.ns = c.u16le();
             id.bytestring_id = read_bytestring(c);
@@ -190,6 +223,13 @@ std::string read_localized_text(Cursor& c) {
     if (has_text) return text;
     if (has_locale) return "[" + locale + "]";
     return "";
+}
+
+// QualifiedName(variable) -- NamespaceIndex(UInt16, LE) + Name(String) -- see opcua.hpp.
+std::string read_qualified_name_display(Cursor& c) {
+    uint16_t ns = c.u16le();
+    auto name = read_string(c);
+    return "ns=" + std::to_string(ns) + ";" + name.value_or("");
 }
 
 struct OpcUaExtensionObjectInfo {
@@ -289,6 +329,214 @@ std::string application_type_name(uint32_t v) {
         case 1: return "Client";
         case 2: return "ClientAndServer";
         case 3: return "DiscoveryServer";
+        default: return "unknown(" + std::to_string(v) + ")";
+    }
+}
+
+// ------------------------------------------------------------------------------------------
+// Variant/DataValue value decoding -- see opcua.hpp's "Variant/DataValue value decoding" section
+// for the full byte layout and sourcing (OPC 10000-6 5.2.2.16/5.2.2.17, cross-checked against
+// python-opcua's own struct_from_binary source for Variant, and independently against the OPC
+// Foundation's own reference documentation for DataValue's field order, since python-opcua's own
+// binary codec does not implement DataValue itself).
+
+// BuiltInType numeric ids 1-25 (0 is the reserved "Null" sentinel -- see format_variant below),
+// cross-checked against python-opcua's own generated VariantType enum. Returns nullptr for any id
+// outside 1-25 (including the two reserved-for-future-use ids 26/31 the spec itself leaves
+// undefined) -- this decoder does not guess a name for those, the same "don't guess a numeric
+// table entry" discipline this codebase applies everywhere else.
+const char* builtin_type_name(uint8_t type_id) {
+    static const char* kNames[] = {
+        nullptr,           "Boolean",         "SByte",     "Byte",     "Int16",     "UInt16",
+        "Int32",           "UInt32",          "Int64",     "UInt64",   "Float",     "Double",
+        "String",          "DateTime",        "Guid",      "ByteString", "XmlElement", "NodeId",
+        "ExpandedNodeId",  "StatusCode",      "QualifiedName", "LocalizedText", "ExtensionObject",
+        "DataValue",       "Variant",         "DiagnosticInfo",
+    };
+    if (type_id == 0 || type_id >= sizeof(kNames) / sizeof(kNames[0])) return nullptr;
+    return kNames[type_id];
+}
+
+std::string format_variant(Cursor& c, int depth);
+
+// Reads and formats ONE value of the given BuiltInType (used for both a scalar Variant and each
+// element of a Variant array -- OPC UA's own Variant encoding does not repeat the type tag per
+// array element, only once in the Variant's own EncodingMask, so this function is always called
+// already knowing which type to expect). `depth` is only meaningful for the two recursive cases
+// (DataValue=23, Variant=24) and is passed straight through to format_variant/format_data_value's
+// own recursion-depth guard.
+std::string format_data_value(Cursor& c, int depth);
+
+std::string format_scalar_value(uint8_t type_id, Cursor& c, int depth) {
+    switch (type_id) {
+        case 1: return c.u8() != 0 ? "true" : "false";                       // Boolean
+        case 2: return std::to_string(static_cast<int>(static_cast<int8_t>(c.u8())));  // SByte
+        case 3: return std::to_string(static_cast<unsigned>(c.u8()));        // Byte
+        case 4: return std::to_string(to_i16(c.u16le()));                    // Int16
+        case 5: return std::to_string(c.u16le());                           // UInt16
+        case 6: return std::to_string(to_i32(c.u32le()));                    // Int32
+        case 7: return std::to_string(c.u32le());                           // UInt32
+        case 8: return std::to_string(to_i64(c.u64le()));                    // Int64
+        case 9: return std::to_string(c.u64le());                           // UInt64
+        case 10: return format_float(bits_to_float(c.u32le()));              // Float
+        case 11: return format_double(bits_to_double(c.u64le()));            // Double
+        case 12: {                                                          // String
+            auto s = read_string(c);
+            return s.has_value() ? *s : "<null>";
+        }
+        case 13: return format_opcua_datetime(to_i64(c.u64le()));            // DateTime
+        case 14: return read_guid_string(c);                                 // Guid
+        case 15: {                                                          // ByteString
+            OpcUaByteString bs = read_bytestring(c);
+            if (!bs.present) return "<null>";
+            if (bs.length == 0) return "<empty>";
+            return to_hex(bs.data, "");
+        }
+        case 16: {  // XmlElement -- encoded identically to ByteString (a UTF-8-serialized XML
+                    // document) per OPC 10000-6 5.2.2 -- rendered as text, not hex, since it's
+                    // meant to be read (unlike a certificate ByteString elsewhere in this file).
+            OpcUaByteString bs = read_bytestring(c);
+            if (!bs.present) return "<null>";
+            if (bs.length == 0) return "<empty>";
+            return std::string(reinterpret_cast<const char*>(bs.data.data()), bs.data.size());
+        }
+        case 17:                                                            // NodeId
+        case 18:                                                            // ExpandedNodeId
+            return node_id_display(read_node_id(c));
+        case 19: return status_code_name(c.u32le());                        // StatusCode
+        case 20: return read_qualified_name_display(c);                     // QualifiedName
+        case 21: return read_localized_text(c);                             // LocalizedText
+        case 22: {                                                         // ExtensionObject --
+            // structural only, the same posture this file's own ActivateSession identity-token
+            // decode already takes for every ExtensionObject type this dispatch table doesn't
+            // specifically recognize: shown as its own TypeId + body length, not decoded further.
+            OpcUaExtensionObjectInfo eo = read_extension_object(c);
+            if (eo.encoding == 0x00) return "<ExtensionObject type=" + node_id_display(eo.type_id) + ", no body>";
+            return "<ExtensionObject type=" + node_id_display(eo.type_id) + ", " +
+                   std::to_string(eo.body.size()) + " byte(s)>";
+        }
+        case 23: return format_data_value(c, depth + 1);                    // DataValue (recursive)
+        case 24: return format_variant(c, depth + 1);                       // Variant (recursive --
+            // the spec does not actually permit a Variant to directly contain a scalar Variant of
+            // itself in practice, only arrays of Variant for certain structured uses, but this
+            // decoder handles it structurally either way rather than assuming it can't occur.
+        case 25:                                                            // DiagnosticInfo --
+            skip_diagnostic_info(c);  // structural only, never surfaced -- see opcua.hpp
+            return "<DiagnosticInfo>";
+        default:
+            throw ParseError("BuiltInType id " + std::to_string(static_cast<unsigned>(type_id)) +
+                              " is not a valid Variant scalar type (must be 1-25)");
+    }
+}
+
+// Variant(variable) -- OPC 10000-6 5.2.2.16: a 1-byte EncodingMask (low 6 bits = BuiltInType id,
+// 0 = Null/no value; bit 0x40 = ArrayDimensions field follows; bit 0x80 = an array, not a scalar,
+// of that type follows), cross-checked against python-opcua's own variant_from_binary, which reads
+// in exactly this order: EncodingMask -> (if array bit) Int32 ArrayLength + that many elements,
+// else one scalar element -> (if ArrayDimensions bit) Int32 count + that many Int32 dimension
+// sizes. `depth` guards against a pathological/malicious DataValue-in-Variant-in-DataValue... chain
+// (each recursive step is a legitimate, spec-permitted shape, but this decoder still bounds it,
+// the same posture skip_diagnostic_info's own depth guard already takes for the analogous
+// InnerDiagnosticInfo recursion).
+std::string format_variant(Cursor& c, int depth) {
+    if (depth > 10) throw ParseError("Variant/DataValue nested more than 10 levels deep");
+    uint8_t mask = c.u8();
+    uint8_t type_id = mask & 0x3F;
+    bool has_array_dims = (mask & 0x40) != 0;
+    bool is_array = (mask & 0x80) != 0;
+
+    if (type_id == 0) return "(Null)";
+    const char* tname = builtin_type_name(type_id);
+    if (!tname) {
+        throw ParseError("Variant EncodingMask's BuiltInType id " + std::to_string(static_cast<unsigned>(type_id)) +
+                          " is not a valid BuiltInType (must be 0-25)");
+    }
+
+    std::ostringstream out;
+    if (!is_array) {
+        out << "(" << tname << ") " << format_scalar_value(type_id, c, depth);
+    } else {
+        int32_t n = to_i32(c.u32le());
+        if (n < 0) {
+            out << "(" << tname << "[]) <null>";
+        } else {
+            out << "(" << tname << "[" << n << "]) ";
+            for (int32_t i = 0; i < n; ++i) {
+                if (i > 0) out << ", ";
+                out << format_scalar_value(type_id, c, depth);
+            }
+        }
+    }
+    if (has_array_dims) {
+        int32_t dn = to_i32(c.u32le());
+        out << " dims=[";
+        for (int32_t i = 0; i < dn; ++i) {
+            if (i > 0) out << ",";
+            out << to_i32(c.u32le());
+        }
+        out << "]";
+    }
+    return out.str();
+}
+
+// DataValue(variable) -- OPC 10000-6 5.2.2.17: a 1-byte EncodingMask (bit 0x01 Value present, 0x02
+// StatusCode present, 0x04 SourceTimestamp present, 0x08 ServerTimestamp present, 0x10
+// SourcePicoseconds present, 0x20 ServerPicoseconds present), cross-checked against the OPC
+// Foundation's own reference documentation for both the bit assignments and the exact field
+// order when multiple are present -- NOT simply the bit order: Value, StatusCode,
+// SourceTimestamp, SourcePicoseconds, ServerTimestamp, ServerPicoseconds (SourcePicoseconds comes
+// before ServerTimestamp on the wire, even though its own mask bit, 0x10, is numerically after
+// ServerTimestamp's, 0x08).
+std::string format_data_value(Cursor& c, int depth) {
+    if (depth > 10) throw ParseError("Variant/DataValue nested more than 10 levels deep");
+    uint8_t mask = c.u8();
+    std::vector<std::string> parts;
+    if (mask & 0x01) parts.push_back("value=" + format_variant(c, depth + 1));
+    if (mask & 0x02) parts.push_back("status=" + status_code_name(c.u32le()));
+    if (mask & 0x04) parts.push_back("source-timestamp=" + format_opcua_datetime(to_i64(c.u64le())));
+    if (mask & 0x10) parts.push_back("source-picoseconds=" + std::to_string(c.u16le()));
+    if (mask & 0x08) parts.push_back("server-timestamp=" + format_opcua_datetime(to_i64(c.u64le())));
+    if (mask & 0x20) parts.push_back("server-picoseconds=" + std::to_string(c.u16le()));
+    if (parts.empty()) return "{}";
+    std::ostringstream out;
+    out << "{";
+    for (size_t i = 0; i < parts.size(); ++i) {
+        if (i > 0) out << ", ";
+        out << parts[i];
+    }
+    out << "}";
+    return out.str();
+}
+
+// AttributeId (Read/Write's own ReadValueId/WriteValue attribute selector) -- the 22 attributes
+// defined since OPC UA 1.03 (NodeId through UserExecutable), cross-checked against open62541's own
+// published UA_AttributeId constants. Later spec editions (1.04+) added DataTypeDefinition(23)/
+// RolePermissions(24)/UserRolePermissions(25)/AccessRestrictions(26), and 1.05 added
+// AccessLevelEx(27), but this decoder was not able to cross-corroborate those four across a second
+// independent source with the same confidence as 1-22, so -- the same "don't guess a numeric table
+// entry" discipline as builtin_type_name above -- anything outside 1-22 is rendered as a bare
+// number rather than a guessed name.
+std::string attribute_id_name(uint32_t id) {
+    static const char* kNames[] = {
+        nullptr,  "NodeId",         "NodeClass",      "BrowseName",       "DisplayName",
+        "Description", "WriteMask", "UserWriteMask",  "IsAbstract",       "Symmetric",
+        "InverseName",  "ContainsNoLoops", "EventNotifier", "Value",      "DataType",
+        "ValueRank",    "ArrayDimensions", "AccessLevel",   "UserAccessLevel",
+        "MinimumSamplingInterval", "Historizing",     "Executable",       "UserExecutable",
+    };
+    if (id >= 1 && id < sizeof(kNames) / sizeof(kNames[0])) return kNames[id];
+    return "attribute-id=" + std::to_string(id);
+}
+
+// TimestampsToReturn (Read/HistoryRead's own request parameter) -- cross-checked against the OPC
+// Foundation's own reference documentation, Part 4 7.39.
+std::string timestamps_to_return_name(uint32_t v) {
+    switch (v) {
+        case 0: return "Source";
+        case 1: return "Server";
+        case 2: return "Both";
+        case 3: return "Neither";
+        case 4: return "Invalid";
         default: return "unknown(" + std::to_string(v) + ")";
     }
 }
@@ -615,6 +863,122 @@ void decode_close_session_request_params(Cursor& c, std::vector<std::string>& va
 }
 
 // ------------------------------------------------------------------------------------------
+// Read/Write/Call -- promoted to Tier 1 (see opcua.hpp's "Service identification" section) now
+// that Variant/DataValue value decoding (above) exists to give their own service-specific fields
+// somewhere to go. These are the three OPC UA services whose entire reason for existing IS a
+// Variant or DataValue -- Browse and the subscription/MonitoredItem-management services (still
+// Tier 2) do NOT actually carry a Variant/DataValue anywhere in their own bodies (Browse deals in
+// NodeId/BrowseDirection/ReferenceDescription; MonitoredItem creation deals in a MonitoringFilter
+// ExtensionObject), so promoting them is a separate, unrelated decode effort -- see ROADMAP in
+// docs/MANUAL.md.
+
+// ReadValueId -- shared by ReadRequest's own NodesToRead array.
+void decode_read_request_params(Cursor& c, std::vector<std::string>& values) {
+    double max_age_ms = bits_to_double(c.u64le());
+    uint32_t timestamps_to_return = c.u32le();
+    int32_t n = read_array_count(c);
+    values.push_back("max-age-ms=" + format_double(max_age_ms));
+    values.push_back("timestamps-to-return=" + timestamps_to_return_name(timestamps_to_return));
+    values.push_back("nodes-to-read-count=" + std::to_string(n));
+    for (int32_t i = 0; i < n; ++i) {
+        OpcUaNodeIdInfo node = read_node_id(c);
+        uint32_t attribute = c.u32le();
+        auto index_range = read_string(c);
+        read_qualified_name_display(c);  // DataEncoding -- consumed, not surfaced (only meaningful
+                                           // for a non-Binary encoding, which this decoder itself
+                                           // couldn't read anyway)
+        std::string entry = "nodes-to-read[" + std::to_string(i) + "]=" + node_id_display(node) +
+                             " attribute=" + attribute_id_name(attribute);
+        if (index_range.has_value() && !index_range->empty()) entry += " range=" + *index_range;
+        values.push_back(entry);
+    }
+}
+
+void decode_read_response_params(Cursor& c, std::vector<std::string>& values) {
+    int32_t n = read_array_count(c);
+    values.push_back("results-count=" + std::to_string(n));
+    for (int32_t i = 0; i < n; ++i) {
+        values.push_back("results[" + std::to_string(i) + "]=" + format_data_value(c, 0));
+    }
+    int32_t n_diag = read_array_count(c);
+    for (int32_t i = 0; i < n_diag; ++i) skip_diagnostic_info(c);  // DiagnosticInfos -- consumed,
+                                                                     // not surfaced, the same
+                                                                     // convention ResponseHeader's
+                                                                     // own ServiceDiagnostics uses
+}
+
+// WriteValue -- shared by WriteRequest's own NodesToWrite array.
+void decode_write_request_params(Cursor& c, std::vector<std::string>& values) {
+    int32_t n = read_array_count(c);
+    values.push_back("nodes-to-write-count=" + std::to_string(n));
+    for (int32_t i = 0; i < n; ++i) {
+        OpcUaNodeIdInfo node = read_node_id(c);
+        uint32_t attribute = c.u32le();
+        auto index_range = read_string(c);
+        std::string dv = format_data_value(c, 0);
+        std::string entry = "nodes-to-write[" + std::to_string(i) + "]=" + node_id_display(node) +
+                             " attribute=" + attribute_id_name(attribute);
+        if (index_range.has_value() && !index_range->empty()) entry += " range=" + *index_range;
+        entry += " value=" + dv;
+        values.push_back(entry);
+    }
+}
+
+void decode_write_response_params(Cursor& c, std::vector<std::string>& values) {
+    int32_t n = read_array_count(c);
+    int good = 0;
+    for (int32_t i = 0; i < n; ++i) {
+        uint32_t sc = c.u32le();
+        if ((sc & 0xC0000000u) == 0) ++good;
+    }
+    values.push_back("results=" + std::to_string(n) + " status code(s) (" + std::to_string(good) + " Good)");
+    int32_t n_diag = read_array_count(c);
+    for (int32_t i = 0; i < n_diag; ++i) skip_diagnostic_info(c);
+}
+
+// CallMethodRequest -- shared by CallRequest's own MethodsToCall array.
+void decode_call_request_params(Cursor& c, std::vector<std::string>& values) {
+    int32_t n = read_array_count(c);
+    values.push_back("methods-to-call-count=" + std::to_string(n));
+    for (int32_t i = 0; i < n; ++i) {
+        OpcUaNodeIdInfo object_id = read_node_id(c);
+        OpcUaNodeIdInfo method_id = read_node_id(c);
+        int32_t n_args = read_array_count(c);
+        std::ostringstream args;
+        for (int32_t j = 0; j < n_args; ++j) {
+            if (j > 0) args << ", ";
+            args << format_variant(c, 0);
+        }
+        values.push_back("call[" + std::to_string(i) + "]=object=" + node_id_display(object_id) +
+                          " method=" + node_id_display(method_id) + " input-arguments=[" + args.str() + "]");
+    }
+}
+
+// CallMethodResult -- shared by CallResponse's own Results array.
+void decode_call_response_params(Cursor& c, std::vector<std::string>& values) {
+    int32_t n = read_array_count(c);
+    values.push_back("results-count=" + std::to_string(n));
+    for (int32_t i = 0; i < n; ++i) {
+        uint32_t status = c.u32le();
+        int32_t n_arg_results = read_array_count(c);
+        for (int32_t j = 0; j < n_arg_results; ++j) c.u32le();  // InputArgumentResults -- per-
+                                                                  // argument StatusCode, consumed,
+                                                                  // not individually surfaced (the
+                                                                  // overall call status is)
+        int32_t n_arg_diag = read_array_count(c);
+        for (int32_t j = 0; j < n_arg_diag; ++j) skip_diagnostic_info(c);  // InputArgumentDiagnosticInfos
+        int32_t n_out = read_array_count(c);
+        std::ostringstream outs;
+        for (int32_t j = 0; j < n_out; ++j) {
+            if (j > 0) outs << ", ";
+            outs << format_variant(c, 0);
+        }
+        values.push_back("result[" + std::to_string(i) + "]=status=" + status_code_name(status) +
+                          " output-arguments=[" + outs.str() + "]");
+    }
+}
+
+// ------------------------------------------------------------------------------------------
 // Service dispatch table -- see opcua.hpp's "Service identification" section for Tier 1 vs.
 // Tier 2. Every numeric id below is this service's own "_Encoding_DefaultBinary" NodeId,
 // cross-checked against the OPC Foundation's own published NodeIds.csv (see this file's own
@@ -645,8 +1009,20 @@ constexpr ServiceInfo kServices[] = {
     {470, "ActivateSessionResponse", true, true},
     {473, "CloseSessionRequest", false, true},
     {476, "CloseSessionResponse", true, true},
-    // Tier 2 -- see opcua.hpp: these all need the Variant/DataValue encoding this first-pass
-    // release does not implement, so only RequestHeader/ResponseHeader is decoded.
+    {631, "ReadRequest", false, true},
+    {634, "ReadResponse", true, true},
+    {673, "WriteRequest", false, true},
+    {676, "WriteResponse", true, true},
+    {712, "CallRequest", false, true},
+    {715, "CallResponse", true, true},
+    // Tier 2 -- see opcua.hpp: Browse and the subscription/MonitoredItem-management services don't
+    // actually carry a Variant/DataValue anywhere in their own bodies (see the "Read/Write/Call"
+    // comment above decode_read_request_params in this file), so promoting them is a separate,
+    // unrelated decode effort from the one Read/Write/Call above needed; HistoryRead does carry
+    // DataValue/Variant but its own HistoryReadDetails ExtensionObject dispatch (Raw/Processed/
+    // AtTime/Annotation/Modified -- five different sub-structures) is enough additional scope this
+    // first pass leaves it for a later round too -- only RequestHeader/ResponseHeader is decoded
+    // for all of these.
     {479, "CancelRequest", false, false},
     {482, "CancelResponse", true, false},
     {488, "AddNodesRequest", false, false},
@@ -661,14 +1037,8 @@ constexpr ServiceInfo kServices[] = {
     {563, "RegisterNodesResponse", true, false},
     {566, "UnregisterNodesRequest", false, false},
     {569, "UnregisterNodesResponse", true, false},
-    {631, "ReadRequest", false, false},
-    {634, "ReadResponse", true, false},
     {664, "HistoryReadRequest", false, false},
     {667, "HistoryReadResponse", true, false},
-    {673, "WriteRequest", false, false},
-    {676, "WriteResponse", true, false},
-    {712, "CallRequest", false, false},
-    {715, "CallResponse", true, false},
     {751, "CreateMonitoredItemsRequest", false, false},
     {754, "CreateMonitoredItemsResponse", true, false},
     {763, "ModifyMonitoredItemsRequest", false, false},
@@ -713,6 +1083,12 @@ void call_tier1_decoder(const std::string& name, Cursor& c, std::vector<std::str
     else if (name == "ActivateSessionRequest") decode_activate_session_request_params(c, values, notes);
     else if (name == "ActivateSessionResponse") decode_activate_session_response_params(c, values);
     else if (name == "CloseSessionRequest") decode_close_session_request_params(c, values);
+    else if (name == "ReadRequest") decode_read_request_params(c, values);
+    else if (name == "ReadResponse") decode_read_response_params(c, values);
+    else if (name == "WriteRequest") decode_write_request_params(c, values);
+    else if (name == "WriteResponse") decode_write_response_params(c, values);
+    else if (name == "CallRequest") decode_call_request_params(c, values);
+    else if (name == "CallResponse") decode_call_response_params(c, values);
 }
 
 // ------------------------------------------------------------------------------------------

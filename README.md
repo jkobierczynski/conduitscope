@@ -415,25 +415,29 @@ Groundwork / v0.1.0. What works right now:
   UserName/Password credential as a real, actionable OT-security finding whenever
   EncryptionAlgorithm is empty (the same "decode what's genuinely useful for an
   audit" reasoning already applied to this codebase's HART-IP Response-Code
-  naming); everything needing the Variant/DataValue self-describing value encoding
-  (Read, Write, Browse, Call, Subscribe/MonitoredItem management, and more) is named
-  via its own service TypeId and has its RequestHeader/ResponseHeader decoded, but
-  its body is shown as raw hex -- this first pass does not implement Variant/
-  DataValue. The structural detection gate (MessageType against 7 fixed 3-byte ASCII
-  strings) is strong enough, and confirmed collision-free with every other
-  protocol's own gate, that it's tried first in the dispatch chain -- the opposite
-  ordering rationale from HART-IP's own weak-gate "tried last" placement. A real
-  capture was found and validated: two OPC UA sessions from a well-known, widely-
-  mirrored Wireshark dissector-bug reproduction capture (Bug 3986, 2009), on a
-  non-standard TCP port (12001, not 4840) that Wireshark's own *default*
-  configuration doesn't even recognize as OPC UA -- this decoder does, without any
-  port hint, cross-checked field-by-field against tshark's own OPC UA dissector
-  (via "Decode As") once pointed at the right port; see
-  tests/real_captures/opcua/ATTRIBUTION.md for the full writeup, including the two
-  genuinely malformed CallRequest packets (one of which triggered Wireshark's own
-  2-minute dissector freeze) that this decoder's own Tier-2 raw-hex scope is
-  structurally immune to -- see include/conduitscope/opcua.hpp's file header for the
-  full writeup.
+  naming). Variant/DataValue -- OPC UA's own self-describing, 25-BuiltInType,
+  recursive/array-capable value encoding -- is now fully implemented too, which
+  promoted Read, Write, and Call to full field decoding: ReadResponse's own Results,
+  WriteRequest's own NodesToWrite, and Call's own Input/Output Arguments are all
+  genuinely decoded down to the actual process/tag values, not just named.
+  Everything still needing that encoding but NOT actually carrying one in its own
+  body (Browse, Subscribe/MonitoredItem management, and more) stays named via its
+  own service TypeId with RequestHeader/ResponseHeader decoded but its body shown as
+  raw hex -- a deliberate scope line, not a gap in the value-decoding itself. The
+  structural detection gate (MessageType against 7 fixed 3-byte ASCII strings) is
+  strong enough, and confirmed collision-free with every other protocol's own gate,
+  that it's tried first in the dispatch chain -- the opposite ordering rationale
+  from HART-IP's own weak-gate "tried last" placement. A real capture was found and
+  validated: two OPC UA sessions from a well-known, widely-mirrored Wireshark
+  dissector-bug reproduction capture (Bug 3986, 2009), on a non-standard TCP port
+  (12001, not 4840) that Wireshark's own *default* configuration doesn't even
+  recognize as OPC UA -- this decoder does, without any port hint, cross-checked
+  field-by-field against tshark's own OPC UA dissector (via "Decode As") once
+  pointed at the right port; see tests/real_captures/opcua/ATTRIBUTION.md for the
+  full writeup, including the two genuinely malformed CallRequest packets (one of
+  which triggered Wireshark's own 2-minute dissector freeze) that this decoder's own
+  bounds-checked Variant/DataValue reads now correctly DETECT as malformed -- see
+  include/conduitscope/opcua.hpp's file header for the full writeup.
 - IEC 61850 MMS (Manufacturing Message Specification, ISO 9506) over the same
   TPKT/COTP transport S7comm shares (TCP port 102): the full ISO stack an MMS PDU
   actually rides on is decoded, not just the MMS PDU itself -- Session (ISO 8327-1,
@@ -448,9 +452,12 @@ Groundwork / v0.1.0. What works right now:
   recognized by their own structural gate, not guessed at. MMS's own self-describing
   `Data` value type (14 of its 17 CHOICE alternatives, including FloatingPoint,
   UtcTime, and nested array/structure with a hard recursion-depth cap) is fully
-  decoded -- a documented strength relative to this codebase's own OPC UA decoder,
-  which leaves the analogous Variant/DataValue type as raw hex. At the service
-  layer, a deliberate two-tier split mirroring OPC UA's own: 11 of MMS's 78
+  decoded -- unconditionally, for every MMS service that carries one, unlike this
+  codebase's own OPC UA decoder, whose analogous Variant/DataValue type is fully
+  decoded too but only for the three services (Read/Write/Call) actually promoted
+  to full decode; Browse and the subscription services still leave it as raw hex.
+  At the service layer, a deliberate two-tier split mirroring OPC UA's own: 11 of
+  MMS's 78
   confirmedServiceRequest/Response alternatives (status, getNameList, identify,
   read, write, getVariableAccessAttributes, defineNamedVariableList,
   getNamedVariableListAttributes, deleteNamedVariableList, getDomainAttributes,

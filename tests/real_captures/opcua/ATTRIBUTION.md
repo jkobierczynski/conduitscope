@@ -39,9 +39,11 @@ confirmed on real traffic" below). Decoding the whole file with this decoder's o
   larger message still being reassembled -- see below), split across the two sessions as **Hello,
   Acknowledge, OpenSecureChannel Request/Response, GetEndpointsRequest/Response,
   CreateSessionRequest/Response, ActivateSessionRequest/Response, CallRequest, and Error** --
-  between them, every Tier 1 service this decoder's own dispatch table covers except FindServers
-  and CloseSession/CloseSecureChannel (this capture's own two sessions never call those; see
-  opcua.hpp's own Tier-1/Tier-2 scope rationale) actually appears on the wire.
+  between them, every Tier 1 service this decoder's own dispatch table covers except FindServers,
+  CloseSession/CloseSecureChannel, and Read/Write (this capture's own two sessions never call
+  those; see opcua.hpp's own Tier-1/Tier-2 scope rationale) actually appears on the wire. Both
+  sessions' own CallRequest, though, turns out to be malformed -- see below -- so this decoder
+  reports each as an unrecognized TypeId rather than a genuinely-verified CallRequest.
 - The client identifies itself (`ApplicationUri`) as
   `uri://AchillesSatellite/Opc.Ua.ServerTestTool/55ea864a-2be8-4bc6-bb73-1123c54d0fc4` against a
   server endpoint named `StackTestServer` -- consistent with this file's own Wireshark-bug
@@ -65,9 +67,18 @@ confirmed on real traffic" below). Decoding the whole file with this decoder's o
   capture but by its own synthetic fixture -- see `tests/sample_opcua.pcap`'s own packets 13-14 --
   since no real capture containing that specific identity-token shape happened to turn up in this
   search).
-- Both sessions send exactly one **CallRequest**, and this decoder correctly leaves each at Tier 2
-  (RequestHeader decoded, the rest shown as raw hex; see opcua.hpp's own Tier 2 scope -- Call needs
-  the Variant/DataValue encoding this first-pass release does not implement). The two are strikingly
+- Both sessions send exactly one **CallRequest**. Call is now Tier 1 (promoted once this
+  decoder's own Variant/DataValue value decoding was implemented -- see opcua.hpp's own Tier 1
+  scope), so this decoder now genuinely ATTEMPTS to parse each one's own CallMethodRequest array --
+  and, hand-verifying both bodies byte-for-byte, both turn out to be genuinely malformed: session
+  1's own MethodId NodeId claims a String identifier 262,144 bytes long with only ~21 bytes actually
+  present in the captured body; session 2's own MethodId NodeId has a structurally-invalid encoding
+  byte (shape `0x07`, outside the valid `0x00`-`0x05` range this decoder's own `read_node_id`
+  accepts). This decoder's own bounds-checked reads correctly throw on both, and the inner
+  try/catch around service-body decoding (see opcua.hpp's own "Opportunistic MSG/OPN/CLO body
+  decode" section) falls back to raw hex with the service reported as unrecognized --
+  `"service type-id 712, ns=0 -- not in this decoder's dispatch table"` -- rather than asserting a
+  "CallRequest" label this decoder was never actually able to verify. The two are strikingly
   different in size: the first session's is 5,224 bytes on the wire (a 5,165-byte body, reassembled
   from 4 TCP segments -- see "TCP reassembly" below), while the second session's is a mere 110 bytes
   (a 51-byte body, fitting in one segment). Per Wireshark Bug 3986's own report, it is specifically
@@ -79,12 +90,12 @@ confirmed on real traffic" below). Decoding the whole file with this decoder's o
   second, both correctly decoded by this file's `decode_error`/`status_code_name` even though
   neither code happens to be one of this decoder's own first-pass ~20-entry named table (both fall
   back, correctly and honestly, to their decoded severity word plus raw hex -- exactly the "never
-  guessed at" posture opcua.hpp's own "StatusCode decode" section documents). Because this decoder's
-  own Tier 2 scope never attempts to
-  parse CallRequest's own malformed body at all, it is structurally immune to whatever specific
-  malformation caused Wireshark's C dissector to freeze for two minutes on the same bytes -- a
-  small, real-world illustration of why this project's own "decode only what can be verified,
-  raw-hex the rest" discipline is also a robustness property, not merely an honesty one.
+  guessed at" posture opcua.hpp's own "StatusCode decode" section documents). This decoder's own
+  bounds-checked, exception-on-overrun reads (`ByteSpan::at()`/`subspan()`, caught by the inner
+  try/catch already described) mean it never attempts to walk past the malformed field the way a
+  dissector without that discipline might -- a small, real-world illustration of why this project's
+  own "decode only what can be verified, raw-hex the rest" posture is also a robustness property,
+  not merely an honesty one, independent of which Tier a service happens to be decoded at.
 
 ### TCP reassembly exercised on real, multi-segment traffic
 
@@ -96,7 +107,8 @@ independently-generated multi-segment message, not only this project's own synth
 `sample_opcua.pcap` coalescing fixture (which exercises the *opposite* direction -- multiple
 complete messages coalesced into one segment, not one message split across several). The first
 session's own CallRequest (5,224 bytes) is similarly reassembled across 4 segments before this
-decoder discovers it is Tier 2. Every reassembly in this capture completes and decodes correctly;
+decoder discovers its own body is malformed (see above). Every reassembly in this capture
+completes and decodes correctly;
 none of the 66 `tcp`-reported frames are a reassembly this decoder gave up on -- they are ordinary
 ACK-only segments carrying no application payload.
 
