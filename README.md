@@ -8,7 +8,9 @@ IEC 61850-9-2 Sampled Values, EtherCAT, BACnet/IP, HART-IP, OPC UA Binary
 (UA-TCP/Secure Conversation), IEC 61850 MMS (Manufacturing Message Specification,
 ISO 9506), MQTT (v3.1/v3.1.1/v5.0, including Sparkplug B), FOUNDATION
 Fieldbus HSE (FDA/SM/FMS/LAN Redundancy), IEEE Spanning Tree Protocol
-(STP/RSTP/MSTP), and DeviceNet (CAN-bus CIP, via SocketCAN pcap captures)
+(STP/RSTP/MSTP), DeviceNet (CAN-bus CIP, via SocketCAN pcap captures), DNS,
+mDNS, LLMNR, and NetBIOS Name Service (NBT-NS), plus detects DNS-over-HTTPS
+(DoH) via TLS SNI matching,
 traffic from offline
 pcap/pcapng captures, and checks it
 against a zone/conduit segmentation policy. It's an OT/ICS conduit-auditing tool: `decode`/`info` give you reliable
@@ -671,6 +673,38 @@ Groundwork / v0.1.0. What works right now:
   ControlNet Traffic Analyzer, which produces no pcap-compatible output.
   See docs/MANUAL.md's DeviceNet section and
   include/conduitscope/devicenet.hpp for the full writeup.
+- DNS, mDNS, LLMNR, NetBIOS Name Service (NBT-NS), and DNS-over-HTTPS (DoH)
+  detection: the first name-resolution protocols decoded here, and the
+  first anywhere in this codebase deliberately **port-gated** in
+  `--protocol auto` rather than tried opportunistically port-independent --
+  none of the four DNS-shaped protocols has a self-describing wire-format
+  signal strong enough to check safely against every UDP payload the way
+  every other protocol here does, so detection only runs against traffic on
+  each protocol's standard port (or one added via `--dns-port`/
+  `--mdns-port`/`--llmnr-port`/`--nbns-port`/`--doh-port`), unless the
+  protocol is selected explicitly with `--protocol`. DNS (port 53), mDNS
+  (port 5353), and LLMNR (port 5355) share one implementation, since RFC
+  6762 and RFC 4795 both explicitly reuse RFC 1035's wire format verbatim,
+  differing only in a few header-bit meanings and, for mDNS, two
+  class-field top-bit reinterpretations (the QU and cache-flush bits);
+  "first pass" RDATA decoding covers A/AAAA/NS/CNAME/PTR/MX/SOA/TXT/SRV,
+  with EDNS0's OPT pseudo-record correctly recognized. NBT-NS (port 137,
+  RFC 1002) gets its own decoder, including first-level NetBIOS name
+  encoding, NB (address) and NBSTAT (name table) resource records, and the
+  Microsoft/Wireshark suffix-byte convention for what service a name
+  represents. DoH is detection-only, by necessity, not choice -- its actual
+  DNS content is TLS-encrypted and invisible to any pcap-based tool without
+  the session's own decryption keys -- so it works by matching a TLS
+  ClientHello's plaintext SNI against a curated table of a dozen known
+  public DoH resolvers (Cloudflare, Google, Quad9, OpenDNS, AdGuard,
+  NextDNS, and more); a private/enterprise resolver not on that table is
+  never flagged, since there's no other signal available. Deliberately out
+  of scope for this pass: DNS-over-TCP, DoT/DNS-over-QUIC content, and
+  wiring any of these five into `policy validate`'s conduit `protocols`
+  classification. Validated against hand-built fixtures cross-checked
+  against their governing RFCs, including deliberate negative-control
+  packets for every detection gate -- see docs/MANUAL.md's PROTOCOL
+  COVERAGE and LIMITATIONS.
 - Non-IPv4 Ethernet frames and non-TCP IPv4 payloads (including UDP) are now
   recognized and named, not just reported as a bare hex/number and dropped:
   ARP, LLDP, PTP, MPLS, and stacked-VLAN (802.1ad/QinQ) EtherTypes; ICMP,

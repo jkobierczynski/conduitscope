@@ -80,6 +80,9 @@ constexpr const char* kBoldBlue = "\033[1;34m";
 constexpr const char* kBoldCyan = "\033[1;36m";
 constexpr const char* kBoldMagenta = "\033[1;35m";
 constexpr const char* kBoldGreen = "\033[1;32m";
+constexpr const char* kWhite = "\033[37m";
+constexpr const char* kGray = "\033[90m";
+constexpr const char* kBoldYellow = "\033[1;33m";
 
 // Color for a packet's "[protocol]" tag -- picked so a mixed-protocol capture scans quickly by
 // eye, not for any deeper meaning. parse-error is the one exception: it gets the same "something
@@ -136,6 +139,19 @@ const char* protocol_tag_color(const std::string& protocol) {
                                                         // mixed-protocol capture containing it is
                                                         // structurally impossible in the first place
                                                         // -- no collision risk to reason about either way
+    if (protocol == "dns" || protocol == "mdns" || protocol == "llmnr") return kWhite;  // one shared
+                                                        // color for all three -- they're the exact
+                                                        // same wire format (see dns.hpp), not just a
+                                                        // deliberate hue reuse the way ffhse/opcua or
+                                                        // mms/s7comm are; the "[protocol]" tag text
+                                                        // itself is what actually disambiguates them
+    if (protocol == "nbns") return kGray;               // a fresh hue -- NBT-NS traffic routinely
+                                                        // coexists with DNS-family and everything
+                                                        // else in a real mixed IT/OT capture, unlike
+                                                        // e.g. DeviceNet's own link-layer isolation
+    if (protocol == "doh") return kBoldYellow;          // also fresh -- DoH detection fires on
+                                                        // ordinary TCP/443 traffic, which can appear
+                                                        // alongside literally any other protocol here
     if (protocol == "parse-error") return kBoldRed;
     return kDim;  // tcp / udp / non-tcp / non-ip / unsupported-link: recognized, nothing OT-specific
 }
@@ -957,6 +973,62 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
             out_ << "    \"ffhse_body_hex\": \"" << json_escape(p.ffhse_body_hex) << "\",\n";
         }
     }
+    if (p.protocol == "dns" || p.protocol == "mdns" || p.protocol == "llmnr") {
+        std::ostringstream txn_id;
+        txn_id << "0x" << std::hex << std::uppercase << std::setw(4) << std::setfill('0') << p.dns_transaction_id;
+        out_ << "    \"dns_transaction_id\": \"" << txn_id.str() << "\",\n";
+        out_ << "    \"dns_is_response\": " << (p.dns_is_response ? "true" : "false") << ",\n";
+        out_ << "    \"dns_opcode\": \"" << json_escape(p.dns_opcode_name) << "\",\n";
+        out_ << "    \"dns_header_flags\": \"" << json_escape(p.dns_header_flags) << "\",\n";
+        out_ << "    \"dns_rcode\": \"" << json_escape(p.dns_rcode_name) << "\",\n";
+        out_ << "    \"dns_qdcount\": " << p.dns_qdcount << ",\n";
+        out_ << "    \"dns_ancount\": " << p.dns_ancount << ",\n";
+        out_ << "    \"dns_nscount\": " << p.dns_nscount << ",\n";
+        out_ << "    \"dns_arcount\": " << p.dns_arcount << ",\n";
+        if (!p.dns_records.empty()) {
+            out_ << "    \"dns_records\": [";
+            for (size_t i = 0; i < p.dns_records.size(); ++i) {
+                if (i != 0) out_ << ", ";
+                out_ << "\"" << json_escape(p.dns_records[i]) << "\"";
+            }
+            out_ << "],\n";
+        }
+        out_ << "    \"dns_records_truncated\": " << (p.dns_records_truncated ? "true" : "false") << ",\n";
+    }
+    if (p.protocol == "nbns") {
+        std::ostringstream txn_id;
+        txn_id << "0x" << std::hex << std::uppercase << std::setw(4) << std::setfill('0') << p.nbns_transaction_id;
+        out_ << "    \"nbns_transaction_id\": \"" << txn_id.str() << "\",\n";
+        out_ << "    \"nbns_is_response\": " << (p.nbns_is_response ? "true" : "false") << ",\n";
+        out_ << "    \"nbns_opcode\": \"" << json_escape(p.nbns_opcode_name) << "\",\n";
+        out_ << "    \"nbns_flags\": \"" << json_escape(p.nbns_flags) << "\",\n";
+        out_ << "    \"nbns_rcode\": \"" << json_escape(p.nbns_rcode_name) << "\",\n";
+        out_ << "    \"nbns_qdcount\": " << p.nbns_qdcount << ",\n";
+        out_ << "    \"nbns_ancount\": " << p.nbns_ancount << ",\n";
+        out_ << "    \"nbns_nscount\": " << p.nbns_nscount << ",\n";
+        out_ << "    \"nbns_arcount\": " << p.nbns_arcount << ",\n";
+        if (!p.nbns_records.empty()) {
+            out_ << "    \"nbns_records\": [";
+            for (size_t i = 0; i < p.nbns_records.size(); ++i) {
+                if (i != 0) out_ << ", ";
+                out_ << "\"" << json_escape(p.nbns_records[i]) << "\"";
+            }
+            out_ << "],\n";
+        }
+        out_ << "    \"nbns_records_truncated\": " << (p.nbns_records_truncated ? "true" : "false") << ",\n";
+    }
+    if (p.protocol == "doh") {
+        out_ << "    \"doh_sni\": \"" << json_escape(p.doh_sni) << "\",\n";
+        out_ << "    \"doh_matched_provider\": \"" << json_escape(p.doh_matched_provider) << "\",\n";
+        if (!p.doh_alpn_protocols.empty()) {
+            out_ << "    \"doh_alpn_protocols\": [";
+            for (size_t i = 0; i < p.doh_alpn_protocols.size(); ++i) {
+                if (i != 0) out_ << ", ";
+                out_ << "\"" << json_escape(p.doh_alpn_protocols[i]) << "\"";
+            }
+            out_ << "],\n";
+        }
+    }
     out_ << "    \"notes\": [";
     for (size_t i = 0; i < p.notes.size(); ++i) {
         if (i != 0) out_ << ", ";
@@ -1112,6 +1184,15 @@ void StatsWriter::write_packet(const DecodedPacket& p) {
             ffhse_message_counts_[p.ffhse_message_name]++;
             if (p.ffhse_body_decoded) ffhse_body_decoded_count_++;
         }
+    }
+    if (p.protocol == "dns" || p.protocol == "mdns" || p.protocol == "llmnr") {
+        dns_family_opcode_counts_[p.protocol + " " + p.dns_opcode_name]++;
+    }
+    if (p.protocol == "nbns") {
+        nbns_opcode_counts_[p.nbns_opcode_name]++;
+    }
+    if (p.protocol == "doh") {
+        doh_provider_counts_[p.doh_matched_provider]++;
     }
     if (!has_ts_) {
         first_ts_ = last_ts_ = p.timestamp;
@@ -1309,6 +1390,24 @@ void StatsWriter::print_summary(std::ostream& out) const {
             out << "  " << std::left << std::setw(60) << name << count << "\n";
         }
         out << "ffhse message bodies fully decoded (Tier 1): " << ffhse_body_decoded_count_ << "\n";
+    }
+    if (!dns_family_opcode_counts_.empty()) {
+        out << "dns/mdns/llmnr opcodes:\n";
+        for (const auto& [name, count] : dns_family_opcode_counts_) {
+            out << "  " << std::left << std::setw(40) << name << count << "\n";
+        }
+    }
+    if (!nbns_opcode_counts_.empty()) {
+        out << "nbns opcodes:\n";
+        for (const auto& [name, count] : nbns_opcode_counts_) {
+            out << "  " << std::left << std::setw(40) << name << count << "\n";
+        }
+    }
+    if (!doh_provider_counts_.empty()) {
+        out << "doh matched providers:\n";
+        for (const auto& [name, count] : doh_provider_counts_) {
+            out << "  " << std::left << std::setw(40) << name << count << "\n";
+        }
     }
 }
 

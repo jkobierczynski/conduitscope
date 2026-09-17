@@ -65,6 +65,47 @@ std::string tcp_session_key(const std::string& ip_a, uint16_t port_a, const std:
     return (ea < eb) ? (ea + "<->" + eb) : (eb + "<->" + ea);
 }
 
+// Flattens a parsed DnsMessage (shared by "dns"/"mdns"/"llmnr" -- see dns.hpp) into
+// DecodedPacket's dns_* fields, in wire order (questions, then answer/authority/additional).
+void fill_dns_fields(DecodedPacket& out, const DnsMessage& msg) {
+    out.summary = msg.summary;
+    for (const auto& n : msg.notes) out.notes.push_back(n);
+    out.dns_transaction_id = msg.transaction_id;
+    out.dns_is_response = msg.is_response;
+    out.dns_opcode_name = msg.opcode_name;
+    out.dns_header_flags = msg.header_flags;
+    out.dns_rcode_name = msg.rcode_name;
+    out.dns_qdcount = msg.qdcount;
+    out.dns_ancount = msg.ancount;
+    out.dns_nscount = msg.nscount;
+    out.dns_arcount = msg.arcount;
+    out.dns_records_truncated = msg.records_truncated;
+    for (const auto& q : msg.questions) out.dns_records.push_back(q.summary);
+    for (const auto& rr : msg.answers) out.dns_records.push_back(rr.summary);
+    for (const auto& rr : msg.authorities) out.dns_records.push_back(rr.summary);
+    for (const auto& rr : msg.additionals) out.dns_records.push_back(rr.summary);
+}
+
+// Flattens a parsed NbnsMessage (see nbns.hpp) into DecodedPacket's nbns_* fields.
+void fill_nbns_fields(DecodedPacket& out, const NbnsMessage& msg) {
+    out.summary = msg.summary;
+    for (const auto& n : msg.notes) out.notes.push_back(n);
+    out.nbns_transaction_id = msg.transaction_id;
+    out.nbns_is_response = msg.is_response;
+    out.nbns_opcode_name = msg.opcode_name;
+    out.nbns_flags = msg.flags;
+    out.nbns_rcode_name = msg.rcode_name;
+    out.nbns_qdcount = msg.qdcount;
+    out.nbns_ancount = msg.ancount;
+    out.nbns_nscount = msg.nscount;
+    out.nbns_arcount = msg.arcount;
+    out.nbns_records_truncated = msg.records_truncated;
+    for (const auto& q : msg.questions) out.nbns_records.push_back(q.summary);
+    for (const auto& rr : msg.answers) out.nbns_records.push_back(rr.summary);
+    for (const auto& rr : msg.authorities) out.nbns_records.push_back(rr.summary);
+    for (const auto& rr : msg.additionals) out.nbns_records.push_back(rr.summary);
+}
+
 }  // namespace
 
 std::optional<Dnp3ApplicationFragment> Decoder::process_dnp3_frame(Dnp3LinkFrame& link, ByteSpan tcp_payload,
@@ -1219,6 +1260,92 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                 }
             }
 
+            // DNS / mDNS / LLMNR / NBT-NS -- UNLIKE every UDP check above, these are port-GATED in
+            // Auto mode, not tried opportunistically port-independent: none of the four has any
+            // self-describing wire-format signal at all, so trying them against arbitrary UDP
+            // traffic on every port would false-positive constantly -- see dns.hpp's/nbns.hpp's
+            // own "Detection" paragraphs. An explicit --protocol dns/mdns/llmnr/nbns skips the
+            // port gate (the user is asserting the protocol identity directly).
+            bool want_dns = options_.protocol_filter == ProtocolFilter::Auto ||
+                             options_.protocol_filter == ProtocolFilter::DnsOnly;
+            bool require_dns_port = options_.protocol_filter == ProtocolFilter::Auto;
+            if (want_dns) {
+                bool port_match = port_in(udp.src_port, DNS_PORT, options_.extra_dns_ports) ||
+                                   port_in(udp.dst_port, DNS_PORT, options_.extra_dns_ports);
+                if (!require_dns_port || port_match) {
+                    if (auto msg = try_parse_dns_message(udp.payload, DnsFlavor::Dns)) {
+                        out.protocol = "dns";
+                        fill_dns_fields(out, *msg);
+                        if (!port_match) {
+                            out.notes.push_back("seen on UDP port " + std::to_string(udp.src_port) + "->" +
+                                                 std::to_string(udp.dst_port) +
+                                                 ", which is not a configured/standard DNS port (53)");
+                        }
+                        return out;
+                    }
+                }
+            }
+
+            bool want_mdns = options_.protocol_filter == ProtocolFilter::Auto ||
+                              options_.protocol_filter == ProtocolFilter::MdnsOnly;
+            bool require_mdns_port = options_.protocol_filter == ProtocolFilter::Auto;
+            if (want_mdns) {
+                bool port_match = port_in(udp.src_port, MDNS_PORT, options_.extra_mdns_ports) ||
+                                   port_in(udp.dst_port, MDNS_PORT, options_.extra_mdns_ports);
+                if (!require_mdns_port || port_match) {
+                    if (auto msg = try_parse_dns_message(udp.payload, DnsFlavor::Mdns)) {
+                        out.protocol = "mdns";
+                        fill_dns_fields(out, *msg);
+                        if (!port_match) {
+                            out.notes.push_back("seen on UDP port " + std::to_string(udp.src_port) + "->" +
+                                                 std::to_string(udp.dst_port) +
+                                                 ", which is not a configured/standard mDNS port (5353)");
+                        }
+                        return out;
+                    }
+                }
+            }
+
+            bool want_llmnr = options_.protocol_filter == ProtocolFilter::Auto ||
+                               options_.protocol_filter == ProtocolFilter::LlmnrOnly;
+            bool require_llmnr_port = options_.protocol_filter == ProtocolFilter::Auto;
+            if (want_llmnr) {
+                bool port_match = port_in(udp.src_port, LLMNR_PORT, options_.extra_llmnr_ports) ||
+                                   port_in(udp.dst_port, LLMNR_PORT, options_.extra_llmnr_ports);
+                if (!require_llmnr_port || port_match) {
+                    if (auto msg = try_parse_dns_message(udp.payload, DnsFlavor::Llmnr)) {
+                        out.protocol = "llmnr";
+                        fill_dns_fields(out, *msg);
+                        if (!port_match) {
+                            out.notes.push_back("seen on UDP port " + std::to_string(udp.src_port) + "->" +
+                                                 std::to_string(udp.dst_port) +
+                                                 ", which is not a configured/standard LLMNR port (5355)");
+                        }
+                        return out;
+                    }
+                }
+            }
+
+            bool want_nbns = options_.protocol_filter == ProtocolFilter::Auto ||
+                              options_.protocol_filter == ProtocolFilter::NbnsOnly;
+            bool require_nbns_port = options_.protocol_filter == ProtocolFilter::Auto;
+            if (want_nbns) {
+                bool port_match = port_in(udp.src_port, NBNS_PORT, options_.extra_nbns_ports) ||
+                                   port_in(udp.dst_port, NBNS_PORT, options_.extra_nbns_ports);
+                if (!require_nbns_port || port_match) {
+                    if (auto msg = try_parse_nbns(udp.payload)) {
+                        out.protocol = "nbns";
+                        fill_nbns_fields(out, *msg);
+                        if (!port_match) {
+                            out.notes.push_back("seen on UDP port " + std::to_string(udp.src_port) + "->" +
+                                                 std::to_string(udp.dst_port) +
+                                                 ", which is not a configured/standard NBT-NS port (137)");
+                        }
+                        return out;
+                    }
+                }
+            }
+
             // Groundwork plumbing beyond this point: the UDP header/payload split is recognized
             // and reported (src/dst port, byte count), but no other application-layer protocol
             // riding on UDP is decoded -- see udp.hpp's file header comment and docs/MANUAL.md's
@@ -1262,6 +1389,36 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
             out.summary = "TCP segment " + std::to_string(tcp.src_port) + " -> " +
                            std::to_string(tcp.dst_port) + " with no payload (handshake/ACK/teardown)";
             return out;
+        }
+
+        // DNS-over-HTTPS detection -- deliberately checked against tcp.payload directly, a SINGLE
+        // TCP segment, never effective_payload's cross-segment reassembly below: this is
+        // detection-only (see tls_sni.hpp's file header comment for why the DNS message itself
+        // can never be decoded here), and a ClientHello split across segments simply isn't
+        // detected rather than needing its own reassembly machinery for a feature this narrow.
+        // Port-gated in Auto mode, same rationale and same exception for an explicit --protocol
+        // doh as DNS/mDNS/LLMNR/NBT-NS above -- see tls_sni.hpp's own "Detection" paragraph.
+        bool want_doh = options_.protocol_filter == ProtocolFilter::Auto ||
+                         options_.protocol_filter == ProtocolFilter::DohOnly;
+        bool require_doh_port = options_.protocol_filter == ProtocolFilter::Auto;
+        if (want_doh) {
+            bool port_match = port_in(tcp.src_port, DOH_PORT, options_.extra_doh_ports) ||
+                               port_in(tcp.dst_port, DOH_PORT, options_.extra_doh_ports);
+            if (!require_doh_port || port_match) {
+                if (auto doh = try_detect_doh(tcp.payload)) {
+                    out.protocol = "doh";
+                    out.summary = doh->summary;
+                    out.doh_sni = doh->sni;
+                    out.doh_matched_provider = doh->matched_provider;
+                    out.doh_alpn_protocols = doh->alpn_protocols;
+                    if (!port_match) {
+                        out.notes.push_back("seen on TCP port " + std::to_string(tcp.src_port) + "->" +
+                                             std::to_string(tcp.dst_port) +
+                                             ", which is not a configured/standard HTTPS/DoH port (443)");
+                    }
+                    return out;
+                }
+            }
         }
 
         // Directional TCP flow identity, reused below both for cross-TCP-segment PDU/frame

@@ -7097,6 +7097,399 @@ def build_ffhse_sample():
     (TESTS_DIR / "sample_ffhse.pcap").write_bytes(data)
 
 
+# ---------------------------------------------------------------------------------------------
+# DNS / mDNS / LLMNR / NBT-NS / DoH-detection (ROADMAP: "Add DNS, DoH, NBT-NS name resolution
+# decode") -- see dns.hpp/nbns.hpp/tls_sni.hpp's own file header comments for the wire formats
+# these fixtures exercise.
+
+DNS_PORT = 53
+MDNS_PORT = 5353
+LLMNR_PORT = 5355
+NBNS_PORT = 137
+DOH_PORT = 443
+
+
+def dns_name(name: str) -> bytes:
+    """Ordinary length-prefixed DNS labels, no compression -- RFC 1035 4.1.2. `name` may be ""
+    or "." for the root name."""
+    if name in ("", "."):
+        return b"\x00"
+    out = b""
+    for label in name.rstrip(".").split("."):
+        out += bytes([len(label)]) + label.encode("ascii")
+    return out + b"\x00"
+
+
+def dns_message(qr: int, opcode: int, flags_bits: int, rcode: int, questions: list, answers: list,
+                 authorities: list = (), additionals: list = (), txn_id: int = 0x1234) -> bytes:
+    """Builds one raw DNS/mDNS/LLMNR-shaped message. `flags_bits` is the caller-computed AA/TC/RD/
+    RA (or C/TC/T for LLMNR) bit pattern already shifted into word2's bit5-8 position (i.e. the
+    caller passes e.g. 0x0400 for AA/C, 0x0200 for TC, 0x0100 for RD/T, 0x0080 for RA) -- kept
+    generic here since the three flavors disagree on what those bits mean, not just their values.
+    Each of questions/answers/authorities/additionals is already-encoded bytes for that section."""
+    word2 = (qr << 15) | ((opcode & 0x0F) << 11) | (flags_bits & 0x07F0) | (rcode & 0x0F)
+    header = struct.pack("!HHHHHH", txn_id, word2, len(questions), len(answers), len(authorities),
+                          len(additionals))
+    return header + b"".join(questions) + b"".join(answers) + b"".join(authorities) + b"".join(additionals)
+
+
+def dns_question(name: str, qtype: int, qclass: int = 1) -> bytes:
+    return dns_name(name) + struct.pack("!HH", qtype, qclass)
+
+
+def dns_rr(name: str, rtype: int, rclass: int, ttl: int, rdata: bytes) -> bytes:
+    return dns_name(name) + struct.pack("!HHIH", rtype, rclass, ttl, len(rdata)) + rdata
+
+
+def dns_rdata_a(addr: str) -> bytes:
+    return bytes(int(o) for o in addr.split("."))
+
+
+def dns_rdata_aaaa(addr_hextets: list) -> bytes:
+    return b"".join(struct.pack("!H", h) for h in addr_hextets)
+
+
+def dns_rdata_soa(mname: str, rname: str, serial: int, refresh: int, retry: int, expire: int,
+                   minimum: int) -> bytes:
+    return dns_name(mname) + dns_name(rname) + struct.pack("!IIIII", serial, refresh, retry, expire, minimum)
+
+
+def dns_rdata_txt(*strings: str) -> bytes:
+    return b"".join(bytes([len(s)]) + s.encode("ascii") for s in strings)
+
+
+def dns_rdata_srv(priority: int, weight: int, port: int, target: str) -> bytes:
+    return struct.pack("!HHH", priority, weight, port) + dns_name(target)
+
+
+def dns_rdata_mx(preference: int, exchange: str) -> bytes:
+    return struct.pack("!H", preference) + dns_name(exchange)
+
+
+def dns_udp_frame(payload: bytes, sport: int, dport: int, src_ip: str, dst_ip: str, src_mac: bytes,
+                   dst_mac: bytes) -> bytes:
+    udp = udp_header(sport, dport, payload)
+    ip = ipv4_header(src_ip, dst_ip, 17, len(udp), 0x7100)
+    return eth_header(dst_mac, src_mac, 0x0800) + ip + udp
+
+
+def build_dns_sample():
+    """Classic DNS (UDP port 53) -- header/flags, question, and the "first pass" RDATA types
+    (A/AAAA/NS/CNAME/PTR/MX/SOA/TXT/SRV), an EDNS0 OPT pseudo-record, a name-compression pointer,
+    and the structural detection gate correctly rejecting non-DNS-shaped UDP/53 traffic -- see
+    dns.hpp's file header comment for the exact wire format and RFC sourcing."""
+    packets = []
+
+    def add(payload: bytes, dport: int = DNS_PORT, sport: int = 53500, from_client: bool = True):
+        if from_client:
+            packets.append(dns_udp_frame(payload, sport, dport, HMI_IP, PLC_IP, HMI_MAC, PLC_MAC))
+        else:
+            packets.append(dns_udp_frame(payload, dport, sport, PLC_IP, HMI_IP, PLC_MAC, HMI_MAC))
+
+    # 1) Ordinary A query.
+    add(dns_message(0, 0, 0x0100, 0, [dns_question("plc01.plant.example.", 1)], []))
+
+    # 2) A response, AA set, one A answer.
+    add(dns_message(1, 0, 0x0400, 0, [dns_question("plc01.plant.example.", 1)],
+                     [dns_rr("plc01.plant.example.", 1, 1, 300, dns_rdata_a("192.168.1.10"))]),
+        from_client=False)
+
+    # 3) AAAA response.
+    add(dns_message(1, 0, 0x0400, 0, [dns_question("plc01.plant.example.", 28)],
+                     [dns_rr("plc01.plant.example.", 28, 1, 300,
+                             dns_rdata_aaaa([0x2001, 0x0db8, 0, 0, 0, 0, 0, 0x0a]))]),
+        from_client=False)
+
+    # 4) A CNAME record whose RDATA is a compression pointer (RFC 1035 4.1.4) back to byte 12 --
+    #    the question section's own name, "hmi.plant.example." -- rather than a literal label
+    #    sequence, exercising pointer-following specifically (the result is a self-referential
+    #    CNAME, which is a perfectly decodable, if unusual, wire shape -- not the same as a
+    #    pointer LOOP, since what it points at is an ordinary label sequence, not another
+    #    pointer). A second, unrelated A answer for a different name follows in the same message
+    #    purely to also exercise "more than one answer."
+    cname_answer = dns_name("hmi.plant.example.") + struct.pack("!HHIH", 5, 1, 300, 2) + b"\xc0\x0c"
+    a_answer = dns_rr("plc01.plant.example.", 1, 1, 300, dns_rdata_a("192.168.1.10"))
+    add(dns_message(1, 0, 0x0400, 0, [dns_question("hmi.plant.example.", 1)],
+                     [cname_answer, a_answer]), from_client=False)
+
+    # 5) NS + MX + TXT + SOA + SRV, one of each, in the additional section (purely to exercise
+    #    every "first pass" RDATA type in one capture -- a real message wouldn't mix them like
+    #    this).
+    add(dns_message(1, 0, 0x0400, 0, [dns_question("plant.example.", 2)],
+                     [dns_rr("plant.example.", 2, 1, 3600, dns_name("ns1.plant.example."))],
+                     additionals=[
+                         dns_rr("plant.example.", 15, 1, 3600, dns_rdata_mx(10, "mail.plant.example.")),
+                         dns_rr("plant.example.", 16, 1, 3600, dns_rdata_txt("v=spf1 -all", "site=plant-1")),
+                         dns_rr("plant.example.", 6, 1, 3600,
+                                dns_rdata_soa("ns1.plant.example.", "hostmaster.plant.example.",
+                                              2024010101, 7200, 3600, 1209600, 3600)),
+                         dns_rr("_ldap._tcp.dc._msdcs.plant.example.", 33, 1, 600,
+                                dns_rdata_srv(0, 100, 389, "dc01.plant.example.")),
+                     ]),
+        from_client=False)
+
+    # 6) NXDOMAIN response, no answers.
+    add(dns_message(1, 0, 0x0180, 3, [dns_question("doesnotexist.plant.example.", 1)], []),
+        from_client=False)
+
+    # 7) A query with an EDNS0 OPT pseudo-record in the additional section (RFC 6891) -- class
+    #    field repurposed as UDP payload size, TTL repurposed as extended-rcode/version/flags (DO
+    #    bit set here).
+    opt_ttl = (0 << 24) | (0 << 16) | 0x8000
+    add(dns_message(0, 0, 0x0100, 0, [dns_question("plc01.plant.example.", 1)], [],
+                     additionals=[dns_name(".") + struct.pack("!HHIH", 41, 4096, opt_ttl, 0)]))
+
+    # 8) Malformed: declared ANCOUNT=5 but only one answer actually present -- exercises
+    #    records_truncated.
+    header = struct.pack("!HHHHHH", 0x9999, 0x8180, 1, 5, 0, 0)
+    q = dns_question("plc01.plant.example.", 1)
+    one_answer = dns_rr("plc01.plant.example.", 1, 1, 300, dns_rdata_a("192.168.1.10"))
+    add(header + q + one_answer, from_client=False)
+
+    # 9) Not DNS-shaped at all -- ordinary UDP/53 traffic with a payload that is NOT 12 bytes of
+    #    plausible header + label sequence -- must not be misdetected (the structural gate rejects
+    #    it, so this falls back to generic "udp").
+    add(b"\x99\x99\x99\x99\x99\x99")
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_008_000 + i, i * 1000)
+    (TESTS_DIR / "sample_dns.pcap").write_bytes(data)
+
+
+def build_mdns_sample():
+    """Multicast DNS (UDP port 5353) -- the QU (unicast-response-requested) bit on a question and
+    the cache-flush bit on a response record, both top-bit reinterpretations of the DNS wire
+    format's own CLASS field -- see dns.hpp's file header comment (RFC 6762 6.2/10.2)."""
+    packets = []
+    mdns_group_ip = "224.0.0.251"
+
+    def add(payload: bytes, from_client: bool = True):
+        if from_client:
+            packets.append(dns_udp_frame(payload, MDNS_PORT, MDNS_PORT, HMI_IP, mdns_group_ip, HMI_MAC,
+                                          bytes.fromhex("01005e0000fb")))
+        else:
+            packets.append(dns_udp_frame(payload, MDNS_PORT, MDNS_PORT, PLC_IP, mdns_group_ip, PLC_MAC,
+                                          bytes.fromhex("01005e0000fb")))
+
+    # 1) A query for a ".local" name, QU bit set on the question.
+    q_qu = dns_question("plc01.local.", 1)
+    q_qu = q_qu[:-2] + struct.pack("!H", 1 | 0x8000)  # set the QU top bit on QCLASS
+    add(dns_message(0, 0, 0, 0, [q_qu], []))
+
+    # 2) The matching response, cache-flush bit set on the A record, AA set (mDNS responses are
+    #    conventionally authoritative). dns_rr() has no cache-flush parameter, so this record is
+    #    built directly rather than through it -- its CLASS field's top bit is the cache-flush bit
+    #    (RFC 6762 10.2), not an ordinary class value.
+    a_rr = dns_name("plc01.local.") + struct.pack("!HHIH", 1, 1 | 0x8000, 120, 4) + dns_rdata_a("192.168.1.10")
+    add(dns_message(1, 0, 0x0400, 0, [], [a_rr]), from_client=False)
+
+    # 3) Typical mDNS/DNS-SD service-discovery shape: PTR -> SRV + TXT for a service instance.
+    ptr_rr = dns_rr("_http._tcp.local.", 12, 1 | 0x8000, 120, dns_name("PLC01._http._tcp.local."))
+    srv_rr = dns_rr("PLC01._http._tcp.local.", 33, 1 | 0x8000, 120, dns_rdata_srv(0, 0, 80, "plc01.local."))
+    txt_rr = dns_rr("PLC01._http._tcp.local.", 16, 1 | 0x8000, 120, dns_rdata_txt("path=/status"))
+    add(dns_message(1, 0, 0x0400, 0, [], [ptr_rr, srv_rr, txt_rr]), from_client=False)
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_008_500 + i, i * 1000)
+    (TESTS_DIR / "sample_mdns.pcap").write_bytes(data)
+
+
+def build_llmnr_sample():
+    """LLMNR (UDP port 5355) -- the C (Conflict) and T (Tentative) bits, which replace DNS's own
+    AA/RD bit positions, and the reserved-Z-bits detection-gate rejection -- see dns.hpp's file
+    header comment (RFC 4795 2.1.1)."""
+    packets = []
+    llmnr_group_ip = "224.0.0.252"
+
+    def add(payload: bytes, from_client: bool = True):
+        if from_client:
+            packets.append(dns_udp_frame(payload, LLMNR_PORT, LLMNR_PORT, HMI_IP, llmnr_group_ip, HMI_MAC,
+                                          bytes.fromhex("01005e0000fc")))
+        else:
+            packets.append(dns_udp_frame(payload, LLMNR_PORT, LLMNR_PORT, PLC_IP, llmnr_group_ip, PLC_MAC,
+                                          bytes.fromhex("01005e0000fc")))
+
+    # 1) An ordinary query, no flags set.
+    add(dns_message(0, 0, 0, 0, [dns_question("hmi-eng01.", 1)], []))
+
+    # 2) A unicast response, name is unique (C clear), not tentative.
+    add(dns_message(1, 0, 0, 0, [dns_question("hmi-eng01.", 1)],
+                     [dns_rr("hmi-eng01.", 1, 1, 0, dns_rdata_a("192.168.1.50"))]), from_client=False)
+
+    # 3) A response with C (conflict) set -- more than one node claims this name.
+    add(dns_message(1, 0, 0x0400, 0, [dns_question("dupe-host.", 1)],
+                     [dns_rr("dupe-host.", 1, 1, 0, dns_rdata_a("192.168.1.77"))]), from_client=False)
+
+    # 4) Malformed: reserved Z bits nonzero -- RFC 4795 says implementations MUST zero these; this
+    #    decoder treats a nonzero value as a detection-gate rejection (see dns.hpp), so this packet
+    #    must NOT decode as "llmnr" at all.
+    bad = struct.pack("!HHHHHH", 0xABCD, 0x00F0, 1, 0, 0, 0) + dns_question("bad.", 1)
+    add(bad)
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_009_000 + i, i * 1000)
+    (TESTS_DIR / "sample_llmnr.pcap").write_bytes(data)
+
+
+def nbns_encode_name(name: str, suffix: int) -> bytes:
+    """First-level-encodes a NetBIOS name (RFC 1002 4.1): pads/truncates to 15 characters, appends
+    the 1-byte suffix, then maps each raw byte's two nibbles to 'A'+nibble."""
+    raw = (name.upper()[:15]).ljust(15) + chr(suffix)
+    out = bytearray()
+    for ch in raw.encode("latin-1"):
+        out.append(ord('A') + (ch >> 4))
+        out.append(ord('A') + (ch & 0x0F))
+    return bytes([0x20]) + bytes(out) + b"\x00"  # + zero-length scope-ID terminator
+
+
+def nbns_message(r: int, opcode: int, nm_flags_bits: int, rcode: int, questions: list, answers: list,
+                  txn_id: int = 0x5678) -> bytes:
+    word2 = (r << 15) | ((opcode & 0x0F) << 11) | (nm_flags_bits & 0x07F0) | (rcode & 0x0F)
+    header = struct.pack("!HHHHHH", txn_id, word2, len(questions), len(answers), 0, 0)
+    return header + b"".join(questions) + b"".join(answers)
+
+
+def nbns_question(name: str, suffix: int, qtype: int) -> bytes:
+    return nbns_encode_name(name, suffix) + struct.pack("!HH", qtype, 1)
+
+
+def nbns_nb_rr(name: str, suffix: int, ttl: int, addresses: list) -> bytes:
+    """`addresses` is a list of (is_group, node_type, ip_str) tuples."""
+    rdata = b""
+    for is_group, node_type, ip in addresses:
+        flags = (0x8000 if is_group else 0) | ((node_type & 0x03) << 13)
+        rdata += struct.pack("!H", flags) + dns_rdata_a(ip)
+    return nbns_encode_name(name, suffix) + struct.pack("!HHIH", 0x0020, 1, ttl, len(rdata)) + rdata
+
+
+def nbns_nbstat_rr(name: str, suffix: int, names: list, mac: bytes) -> bytes:
+    """`names` is a list of (name, suffix, is_group, node_type, active, permanent) tuples."""
+    rdata = bytes([len(names)])
+    for nm_name, nm_suffix, is_group, node_type, active, permanent in names:
+        raw = (nm_name.upper()[:15]).ljust(15) + chr(nm_suffix)
+        flags = (0x8000 if is_group else 0) | ((node_type & 0x03) << 13)
+        if active: flags |= 0x0400
+        if permanent: flags |= 0x0200
+        rdata += raw.encode("latin-1") + struct.pack("!H", flags)
+    rdata += mac + b"\x00" * 40  # UNIT_ID + a zeroed-out STATISTICS tail (not individually decoded)
+    return nbns_encode_name(name, suffix) + struct.pack("!HHIH", 0x0021, 1, 0, len(rdata)) + rdata
+
+
+def build_nbns_sample():
+    """NetBIOS Name Service / NBT-NS (UDP port 137) -- the first-level name encoding, an NB
+    positive-response address list, and an NBSTAT node-status table with a MAC address -- see
+    nbns.hpp's file header comment (RFC 1002 4.1/4.2)."""
+    packets = []
+    nbns_broadcast_ip = "192.168.1.255"
+
+    def add(payload: bytes, from_client: bool = True):
+        if from_client:
+            packets.append(dns_udp_frame(payload, NBNS_PORT, NBNS_PORT, HMI_IP, nbns_broadcast_ip, HMI_MAC,
+                                          b"\xff\xff\xff\xff\xff\xff"))
+        else:
+            packets.append(dns_udp_frame(payload, NBNS_PORT, NBNS_PORT, PLC_IP, HMI_IP, PLC_MAC, HMI_MAC))
+
+    # 1) NB name query, broadcast, RD set.
+    add(nbns_message(0, 0, 0x0100, 0, [nbns_question("PLC01", 0x00, 0x0020)], []))
+
+    # 2) NB positive name query response, AA set, one unique B-node address.
+    add(nbns_message(1, 0, 0x0400, 0, [], [nbns_nb_rr("PLC01", 0x00, 300000, [(False, 0, "192.168.1.10")])]),
+        from_client=False)
+
+    # 3) NBSTAT query.
+    add(nbns_message(0, 0, 0x0100, 0, [nbns_question("*", 0x00, 0x0021)], []))
+
+    # 4) NBSTAT response -- workstation + file-server + domain-controller-group names, plus the
+    #    responding node's MAC address.
+    names = [
+        ("PLC01", 0x00, False, 0, True, True),
+        ("PLC01", 0x20, False, 0, True, True),
+        ("PLANT", 0x1C, True, 0, True, False),
+    ]
+    add(nbns_message(1, 0, 0x0400, 0, [], [nbns_nbstat_rr("*", 0x00, names, PLC_MAC)]), from_client=False)
+
+    # 5) Not NBT-NS-shaped -- ordinary UDP/137 traffic whose "name" length byte isn't 0x20 -- must
+    #    not be misdetected.
+    add(struct.pack("!HHHHHH", 0x1111, 0, 1, 0, 0, 0) + b"\x10" + b"X" * 16)
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_009_500 + i, i * 1000)
+    (TESTS_DIR / "sample_nbns.pcap").write_bytes(data)
+
+
+def tls_extension(ext_type: int, data: bytes) -> bytes:
+    return struct.pack("!HH", ext_type, len(data)) + data
+
+
+def tls_sni_extension(hostname: str) -> bytes:
+    name = hostname.encode("ascii")
+    server_name = struct.pack("!BH", 0, len(name)) + name
+    server_name_list = struct.pack("!H", len(server_name)) + server_name
+    return tls_extension(0x0000, server_name_list)
+
+
+def tls_alpn_extension(*protocols: str) -> bytes:
+    entries = b"".join(bytes([len(p)]) + p.encode("ascii") for p in protocols)
+    return tls_extension(0x0010, struct.pack("!H", len(entries)) + entries)
+
+
+def tls_client_hello(hostname: str = None, alpn: list = None) -> bytes:
+    """A minimal, syntactically-valid TLS 1.2-shaped ClientHello -- just enough structure for
+    try_parse_tls_client_hello to walk through (legacy_version + random + empty session id + one
+    cipher suite + null compression + optionally SNI/ALPN extensions) -- see tls_sni.hpp."""
+    body = struct.pack("!H", 0x0303)  # legacy_version: "TLS 1.2" (used as a compatibility value
+                                        # even by real TLS 1.3 ClientHellos)
+    body += b"\x00" * 32               # random
+    body += b"\x00"                    # session_id length 0
+    body += struct.pack("!H", 2) + b"\x13\x01"  # one cipher suite (TLS_AES_128_GCM_SHA256)
+    body += b"\x01\x00"                # compression methods: length 1, "null"
+    extensions = b""
+    if hostname is not None:
+        extensions += tls_sni_extension(hostname)
+    if alpn:
+        extensions += tls_alpn_extension(*alpn)
+    if extensions or hostname is not None or alpn is not None:
+        body += struct.pack("!H", len(extensions)) + extensions
+    handshake = struct.pack("!B", 0x01) + struct.pack("!I", len(body))[1:] + body  # ClientHello, 24-bit length
+    record = struct.pack("!BHH", 0x16, 0x0301, len(handshake)) + handshake
+    return record
+
+
+def build_doh_sample():
+    """DNS-over-HTTPS detection (TCP port 443) -- a TLS ClientHello whose SNI matches a known
+    public DoH resolver (detected as "doh"), one whose SNI does NOT (ordinary ambient HTTPS
+    traffic, correctly left alone), and a non-TLS TCP/443 payload (also correctly left alone) --
+    see tls_sni.hpp's file header comment."""
+    packets = []
+
+    def add(payload: bytes, sport: int = 54000, dport: int = DOH_PORT, seq: int = 1000):
+        tcp = tcp_header(sport, dport, seq, 0, TCP_PSH | TCP_ACK, len(payload)) + payload
+        ip = ipv4_header(HMI_IP, PLC_IP, 6, len(tcp), 0x7200)
+        packets.append(eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip + tcp)
+
+    # 1) ClientHello to a known Cloudflare DoH hostname, with ALPN offering h2 -- detected as "doh".
+    add(tls_client_hello("cloudflare-dns.com", alpn=["h2", "http/1.1"]))
+
+    # 2) ClientHello to an unrelated hostname -- ordinary HTTPS, must NOT be flagged as "doh".
+    add(tls_client_hello("www.example.com"), sport=54001)
+
+    # 3) ClientHello to a NextDNS per-account subdomain -- exercises the "*.suffix" provider-table
+    #    matching (see tls_sni.hpp), not just an exact hostname.
+    add(tls_client_hello("abc123.dns.nextdns.io"), sport=54002)
+
+    # 4) Not a TLS ClientHello at all -- ordinary TCP/443 payload -- must not be misdetected.
+    add(b"\x99\x99\x99\x99\x99\x99\x99\x99", sport=54003)
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_010_000 + i, i * 1000)
+    (TESTS_DIR / "sample_doh.pcap").write_bytes(data)
+
+
 if __name__ == "__main__":
     TESTS_DIR.mkdir(exist_ok=True)
     build_modbus_sample()
@@ -7138,4 +7531,9 @@ if __name__ == "__main__":
     build_pcapng_nanosecond_sample()
     build_pcapng_multi_interface_sample()
     build_pcapng_simple_packet_block_sample()
+    build_dns_sample()
+    build_mdns_sample()
+    build_llmnr_sample()
+    build_nbns_sample()
+    build_doh_sample()
     print("wrote sample fixtures to", TESTS_DIR)

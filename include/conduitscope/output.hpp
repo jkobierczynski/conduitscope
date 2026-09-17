@@ -147,6 +147,12 @@ private:
     size_t ffhse_body_decoded_count_ = 0;  // Tier-1 messages this decoder fully decoded -- the gap
                                              // vs. ffhse_message_counts_'s own total is everything
                                              // left Tier-2 or unrecognized
+    // Keyed by "<protocol> <opcode name>" (e.g. "dns Query", "mdns Query", "llmnr Query") --
+    // one shared map for all three DNS-message-shaped protocols, since they share DecodedPacket's
+    // own dns_* field family too -- see dns.hpp.
+    std::map<std::string, size_t> dns_family_opcode_counts_;
+    std::map<std::string, size_t> nbns_opcode_counts_;
+    std::map<std::string, size_t> doh_provider_counts_;  // keyed by doh_matched_provider
     bool has_ts_ = false;
     double first_ts_ = 0.0, last_ts_ = 0.0;
 };

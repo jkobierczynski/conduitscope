@@ -1290,9 +1290,13 @@ full detail.
 mms`, `--protocol mqtt`, `--protocol iec104`, `--protocol enip`,
 `--protocol profinet`, `--protocol goose`, `--protocol sv`, `--protocol
 ethercat`, `--protocol bacnet`, `--protocol hartip`, `--protocol opcua`,
-`--protocol s7comm-plus`, or `--protocol ff-hse`
+`--protocol s7comm-plus`, `--protocol ff-hse`, `--protocol dns`, `--protocol
+mdns`, `--protocol llmnr`, `--protocol nbns`, or `--protocol doh`
 restrict decoding to only that protocol (useful for large mixed captures, or
-for scripting a two-pass analysis). `--protocol enip` covers both EtherNet/IP explicit
+for scripting a two-pass analysis). Unlike every protocol named above,
+selecting `dns`/`mdns`/`llmnr`/`nbns`/`doh` explicitly also changes detection
+itself, not just which results are kept -- see the port-gated paragraph at
+the end of this section for why. `--protocol enip` covers both EtherNet/IP explicit
 messaging (TCP, above) and CIP I/O implicit messaging (UDP, below) --
 they're the same overall protocol family. `--protocol mms` restricts to MMS
 specifically, distinct from `--protocol s7comm` even though both share the
@@ -1484,6 +1488,55 @@ restricts decoding to it the same way every other `--protocol` value does,
 but since the link-type check runs first regardless of `--protocol`, it has
 no effect at all on an ordinary Ethernet-linktype capture (nothing on such a
 capture is ever a SocketCAN record to begin with).
+
+**DNS, mDNS, LLMNR, NBT-NS (UDP), and DoH detection (TCP) are the only
+protocols in this codebase that are PORT-GATED in `--protocol auto`, not
+tried opportunistically port-independent the way every protocol above is.**
+Every other detector in this list works because its wire format carries at
+least one reasonably strong self-describing structural signal -- a magic
+byte sequence, a small enumerated field, an exact declared length. DNS and
+its close relatives have none: a 12-byte DNS-shaped header (transaction ID,
+a handful of flag bits, four 16-bit counts) is trivially satisfied by
+essentially any 12 bytes of unrelated traffic, so checking it against every
+UDP payload regardless of port -- this codebase's usual posture -- would
+misdetect constantly. So in `--protocol auto`, `try_parse_dns_message`/
+`try_parse_nbns`/`try_detect_doh` are only even attempted when the packet's
+source or destination port matches that protocol's standard port (DNS 53,
+mDNS 5353, LLMNR 5355, NBT-NS 137, DoH detection on TCP 443) or one
+explicitly added via `--dns-port`/`--mdns-port`/`--llmnr-port`/`--nbns-port`/
+`--doh-port`. This makes those five options the ONE place in this tool's
+entire `--*-port` family where the option actually WIDENS detection, rather
+than only annotating a decoded frame as appearing on an unexpected port --
+every other `--*-port` option in this manual (`--bacnet-port`,
+`--hartip-port`, `--ffhse-port`, and so on) is purely cosmetic, since those
+protocols are already detected port-independently. Selecting a protocol
+explicitly (`--protocol dns`, `--mdns`, `--llmnr`, `--nbns`, or `--doh`)
+skips the port gate entirely, the same "opportunistic" posture every other
+protocol gets by default, on the theory that asking for one of these five by
+name is itself a strong enough signal of intent that the port check would
+just be getting in the way.
+
+On top of the port gate, each of these five layers its own structural
+sanity check, so a packet merely arriving on the right port but obviously
+not shaped like the protocol still falls through to the generic `udp`/`tcp`
+report: DNS/mDNS/LLMNR check that the declared question/answer/authority/
+additional counts are not larger than the smallest possible encoding of
+that many entries could fit in the payload actually present (and LLMNR
+additionally rejects a nonzero reserved header bit -- RFC 4795 mandates
+implementations zero it, so a real LLMNR sender never sets it); NBT-NS
+applies a similar per-section minimum-size check *and* requires the very
+first NAME field in the message to successfully decode as a first-level-
+encoded NetBIOS name (a fixed-length-32 requirement per RFC 1002 -- a
+meaningfully stronger tell than DNS's own variable-length label
+plausibility check); DoH detection requires a well-formed TLS ClientHello
+whose SNI extension matches a curated table of known public DoH resolver
+hostnames (see PROTOCOL COVERAGE below) -- a private or enterprise DoH
+resolver not on that table is deliberately never flagged, since there is no
+wire-format signal that distinguishes "DoH to some server" from "any other
+HTTPS traffic" without either a recognizable hostname or the (unavailable,
+TLS-encrypted) decrypted content. See PROTOCOL COVERAGE's "DNS / mDNS /
+LLMNR / NetBIOS Name Service (NBT-NS) / DNS-over-HTTPS detection" section
+for the full wire formats and what is and isn't decoded.
 
 ## OUTPUT FORMATS
 
@@ -2515,6 +2568,76 @@ The following fields appear only when `protocol` is `mms`:
   always present when `protocol` is `devicenet` -- this decoder never
   value-decodes the payload beyond the Group 3 header/service bytes and
   Group 2 Duplicate-MAC-ID-Check fields above.
+- `dns_transaction_id`: the 16-bit transaction ID as a 4-digit uppercase hex
+  string (e.g. `"0x1A2B"`), always present when `protocol` is `dns`, `mdns`,
+  or `llmnr` -- these three share one field family, since RFC 6762/4795 both
+  reuse RFC 1035's wire format verbatim; the `protocol` string itself is what
+  disambiguates them (see PROTOCOL COVERAGE).
+- `dns_is_response`: `true`/`false`, the header's QR bit, always present for
+  `dns`/`mdns`/`llmnr`.
+- `dns_opcode`: the header's Opcode name (e.g. `"Query"`, `"Status"`,
+  `"Update"`), always present for `dns`/`mdns`/`llmnr`.
+- `dns_header_flags`: a compact rendering of the flavor-specific flag bits
+  actually set (e.g. `"AA TC RD RA"` for DNS/mDNS, `"C T"` for LLMNR's own
+  Conflict/Tentative bits), or `""` when none are set -- see PROTOCOL
+  COVERAGE for exactly which bit occupies which position per flavor.
+- `dns_rcode`: the header's Rcode name (e.g. `"NoError"`, `"NXDomain"`,
+  `"Refused"`), always present for `dns`/`mdns`/`llmnr`.
+- `dns_qdcount` / `dns_ancount` / `dns_nscount` / `dns_arcount`: the header's
+  four section counts, as plain integers, always present for
+  `dns`/`mdns`/`llmnr` -- these are the header's own DECLARED counts, which
+  can exceed the number of entries actually present in a truncated capture;
+  see `dns_records_truncated` below.
+- `dns_records`: an array of one human-readable summary string per Question/
+  Answer/Authority/Additional entry actually parsed, in wire order (e.g.
+  `"Q: hmi.plant.example. IN A"`, `"AN: hmi.plant.example. IN A 300s
+  192.168.1.50"`), present only when non-empty. RDATA is fully decoded only
+  for the "first pass" type set (A/AAAA/NS/CNAME/PTR/MX/SOA/TXT/SRV); other
+  types are named (via a table of common values) with their RDATA shown as
+  raw hex -- see PROTOCOL COVERAGE. An EDNS0 OPT pseudo-record (type 41)
+  renders its repurposed CLASS/TTL fields (UDP payload size, extended-RCODE,
+  version, DO bit) rather than misrepresenting them as an ordinary
+  class/TTL.
+- `dns_records_truncated`: `true`/`false`, always present for
+  `dns`/`mdns`/`llmnr` -- `true` when parsing ran out of bytes before
+  reaching every entry the header's own counts declared (a genuinely
+  truncated capture, not a parse error).
+- `nbns_transaction_id`: the 16-bit NAME_TRN_ID as a 4-digit uppercase hex
+  string, always present when `protocol` is `nbns`.
+- `nbns_is_response`: `true`/`false`, the header's R bit, always present for
+  `nbns`.
+- `nbns_opcode`: the header's OPCODE name (`"Query"`, `"Registration"`,
+  `"Release"`, `"WACK"`, `"Refresh"`), always present for `nbns`.
+- `nbns_flags`: a compact rendering of the NM_FLAGS bits actually set (e.g.
+  `"AA RA B"`), or `""` when none are set.
+- `nbns_rcode`: the header's RCODE name (`"Success"`, `"Format Error"`,
+  `"Name Error"`, etc.), always present for `nbns`.
+- `nbns_qdcount` / `nbns_ancount` / `nbns_nscount` / `nbns_arcount`: the
+  header's four section counts, as plain integers, always present for
+  `nbns`.
+- `nbns_records`: an array of one summary string per Question/Answer/
+  Authority/Additional entry actually parsed, present only when non-empty.
+  An NB resource record's summary lists each `NB_ADDRESS` with its Group/
+  Unique flag and Node Type (B/P/M-node); an NBSTAT resource record's
+  summary lists each entry in the returned name table (name, Microsoft/
+  Wireshark-convention suffix name, and ACT/PRM/CNF/DRG flags) followed by
+  the responding node's own MAC address (UNIT_ID) -- the STATISTICS
+  structure's remaining bytes past UNIT_ID are not further decoded (see
+  LIMITATIONS) and are not included in this summary.
+- `nbns_records_truncated`: `true`/`false`, always present for `nbns` --
+  same meaning as `dns_records_truncated` above.
+- `doh_sni`: the TLS ClientHello's Server Name Indication hostname, always
+  present when `protocol` is `doh`. This is the plaintext hostname the
+  client is connecting to -- the DNS query/answer itself, inside the TLS
+  session this ClientHello begins, is never visible to this decoder.
+- `doh_matched_provider`: the curated provider label the SNI matched (e.g.
+  `"Cloudflare DNS"`, `"Google Public DNS"`, `"NextDNS"`), always present
+  when `protocol` is `doh` -- see PROTOCOL COVERAGE for the full provider
+  table. A DoH resolver not on this table is never reported as `doh` at all
+  (see LIMITATIONS), so this field is never empty when present.
+- `doh_alpn_protocols`: an array of the ClientHello's own ALPN-advertised
+  protocol strings (e.g. `["h2", "http/1.1"]`), present only when the
+  extension was present and non-empty.
 
 ### csv
 
@@ -6426,6 +6549,173 @@ Group 3 message with no payload and one missing its service byte, the
 unclassified `0x07F0`-`0x07FF` range, all three of EFF/RTR/ERR rejection,
 a CAN FD frame, and a truncated payload's clamp-and-note path.
 
+### DNS / mDNS / LLMNR / NetBIOS Name Service (NBT-NS) / DNS-over-HTTPS detection
+
+Five name-resolution protocols, covered together because four of them share
+one wire format and the fifth (DoH) is detection-only for a fundamentally
+different reason (its actual content is TLS-encrypted). Unlike every
+protocol above, all five are **port-gated in `--protocol auto`** rather than
+tried opportunistically port-independent -- see PROTOCOL DETECTION's own
+dedicated paragraph for why, and for exactly how `--dns-port`/`--mdns-port`/
+`--llmnr-port`/`--nbns-port`/`--doh-port` widen that gate. This section
+covers the wire formats and what is and isn't decoded once a payload passes
+its port and structural gates.
+
+#### DNS, mDNS, and LLMNR (shared wire format)
+
+DNS (RFC 1035, UDP port 53), mDNS (RFC 6762, UDP port 5353), and LLMNR (RFC
+4795, UDP port 5355) all share one 12-byte header shape plus one Question/
+Resource-Record encoding -- RFC 6762 and RFC 4795 both explicitly reuse RFC
+1035's message format verbatim, so this decoder implements ONE shared
+`DnsMessage` parser for all three, parameterized only by which header-bit
+layout and class-field top-bit reinterpretation applies (see below); the
+`protocol` string itself (`"dns"`/`"mdns"`/`"llmnr"`) is what disambiguates
+them in output, not a different field family.
+
+**Header (12 bytes, all fields big-endian):** a 16-bit transaction ID,
+followed by a second 16-bit word whose bit layout differs by flavor --
+
+| Bit(s) | DNS / mDNS (RFC 1035 §4.1.1) | LLMNR (RFC 4795 §2.1.1) |
+|---|---|---|
+| 0 | QR (query=0/response=1) | QR |
+| 1-4 | OPCODE | OPCODE |
+| 5 | AA (Authoritative Answer) | C (Conflict) |
+| 6 | TC (Truncated) | TC |
+| 7 | RD (Recursion Desired) | T (Tentative) |
+| 8 | RA (Recursion Available) | reserved (part of Z) |
+| 9-11 | Z (reserved, must be 0) | Z (reserved, must be 0 -- 4 bits here, not 3) |
+| 12-15 | RCODE | RCODE |
+
+then four 16-bit counts (QDCOUNT/ANCOUNT/NSCOUNT/ARCOUNT). LLMNR's own
+reserved Z bits are a strong enough tell that this decoder treats a nonzero
+value as an outright detection-gate REJECTION (RFC 4795 mandates
+implementations zero them, so a real LLMNR sender never sets them) -- DNS's
+and mDNS's own reserved bit is only noted, not rejected, since ordinary DNS
+resolvers have been observed setting it in the wild.
+
+**Names** use length-prefixed labels (1-63 bytes each, terminated by a
+zero-length root label) or a 2-byte compression pointer (RFC 1035 §4.1.4 --
+top two bits set, remaining 14 bits an offset from the start of the
+message) that redirects decoding elsewhere in the same message; pointer-
+following is capped at 128 hops as a loop guard. **Questions** are
+NAME+QTYPE(2)+QCLASS(2); **Resource Records** are
+NAME+TYPE(2)+CLASS(2)+TTL(4)+RDLENGTH(2)+RDATA(RDLENGTH bytes). A ~38-entry
+type table names every commonly-seen RR type (A, NS, CNAME, SOA, PTR, MX,
+TXT, AAAA, SRV, NAPTR, DS, RRSIG, DNSKEY, NSEC, TLSA, SVCB/HTTPS, and so on),
+but RDATA is only value-decoded for the "first pass" set this decoder
+currently covers -- **A, AAAA, NS, CNAME, PTR, MX, SOA, TXT, SRV** -- the
+same scoping pattern established for BACnet/DNP3/S7comm/EtherNet-IP
+elsewhere in this codebase; every other named type's RDATA is shown as raw
+hex rather than misdecoded. An EDNS0 OPT pseudo-record (type 41, RFC 6891)
+is specially recognized: its CLASS field is repurposed as the requestor's
+UDP payload size and its TTL field is repurposed as extended-RCODE/
+version/flags (including the DO -- DNSSEC OK -- bit), and this decoder
+renders those repurposed meanings rather than showing them as an ordinary
+class/TTL.
+
+**mDNS-specific bit repurposing (RFC 6762 §6.2/§10.2):** the top bit of a
+question's QCLASS is the "QU" (unicast-response-requested) bit, and the top
+bit of a resource record's CLASS is the "cache-flush" bit. Both are stripped
+from the rendered class name and surfaced as their own boolean annotation
+rather than corrupting the class value.
+
+**DNS-over-TCP is not decoded** -- only the UDP form of all three flavors.
+This project's own `resolver.hpp` (used for the `--resolve`/`--hosts`
+hostname-annotation feature elsewhere in this tool) never performs live DNS
+lookups of its own; this decoder similarly never resolves anything on the
+network, it only decodes DNS-shaped traffic already present in the capture.
+
+#### NetBIOS Name Service (NBT-NS, RFC 1002 §4.2, UDP port 137)
+
+NBT-NS shares RFC 1035's general Header/Question/Resource-Record shape in
+spirit but not in wire-level detail -- its own 12-byte header is
+`NAME_TRN_ID(2)` + a second word laid out `R(1) OPCODE(4) NM_FLAGS(7)
+RCODE(4)`, where NM_FLAGS is itself `AA(1) TC(1) RD(1) RA(1) reserved(2)
+B(1)`, followed by the same four 16-bit QDCOUNT/ANCOUNT/NSCOUNT/ARCOUNT
+counts DNS uses. OPCODE: `0` Query, `5` Registration, `6` Release, `7` WACK,
+`8` Refresh. RCODE: `0` Success, `1` Format Error, `2` Server Error, `3`
+Name Error, `4` Unsupported Request Error, `5` Refused Error, `6` Active
+Error, `7` Name in Conflict Error.
+
+**NetBIOS names use RFC 1002 §4.1's "First-Level Encoding":** a 16-byte raw
+NetBIOS name (15 characters padded with spaces, plus a 1-byte suffix) is
+encoded on the wire as a length byte -- ALWAYS exactly `0x20` (32) -- followed
+by 32 bytes, each raw nibble mapped to `'A' + nibble`. This fixed-length
+requirement is this decoder's own strongest structural detection gate (see
+PROTOCOL DETECTION): a genuine first-level-encoded name can never be any
+length other than exactly 32 bytes, unlike a DNS label's legitimate 1-63
+byte range. The 16th (suffix) byte is not part of RFC 1002 itself but is
+the near-universal Microsoft/Wireshark convention for what service a name
+represents, and is named accordingly wherever this decoder shows a NetBIOS
+name (e.g. `0x00` Workstation Service, `0x03` Messenger, `0x1B` Domain
+Master Browser/PDC, `0x1C` Domain Controllers, `0x1D` Master Browser, `0x1E`
+Browser Election, `0x20` File Server Service, and roughly a dozen more).
+
+**Question types:** `NB` (`0x0020`, "find this name's address(es)") and
+`NBSTAT` (`0x0021`, "find this node's full name table"). **NB resource
+record RDATA** is a list of `NB_FLAGS(2)+NB_ADDRESS(4)` entries, NB_FLAGS'
+top bit being the Group/Unique flag and the next two bits the owning node's
+type (B/P/M-node). **NBSTAT resource record RDATA** is `NUM_NAMES(1)`
+followed by that many 18-byte entries (a raw, NOT first-level-encoded,
+16-byte NetBIOS name plus a 2-byte NAME_FLAGS word -- Group/Unique, node
+type, and the DRG/CNF/ACT/PRM bits), then a STATISTICS structure whose
+first 6 bytes are the responding node's own MAC address (UNIT_ID). This
+decoder deliberately does not hard-code the STATISTICS structure's exact
+remaining byte length past UNIT_ID -- conflicting sources give 44 vs. 46
+total bytes for the full structure, and re-deriving it byte-by-byte from RFC
+1002's own ASCII diagram did not resolve the discrepancy -- so whatever
+bytes remain within the record's own declared RDLENGTH after UNIT_ID are
+simply hex-dumped rather than asserting a specific structure over them (see
+`nbns_records` in the OUTPUT FORMATS json section).
+
+#### DNS-over-HTTPS (DoH) detection (TCP port 443) -- detection only, never decoded
+
+DoH's actual DNS query and answer travel inside a TLS session, which this
+project's zero-decryption-keys posture (the same posture `resolver.hpp`
+already takes toward live DNS -- see above) can never see regardless of how
+this decoder is extended. What CAN be seen, in plaintext, is the TLS
+ClientHello that opens the connection -- specifically its Server Name
+Indication (SNI, RFC 6066 §3) extension, which names the hostname the
+client is connecting to before encryption begins. This decoder parses a
+single-segment TLS 1.x record (`0x16` Handshake / `0x01` ClientHello) far
+enough to extract the SNI hostname and, if present, the ALPN (RFC 7301)
+protocol list, then checks the SNI against a curated table of known public
+DoH resolver hostnames (`*.suffix` pattern matching, i.e. exact hostname or
+any subdomain of it): Cloudflare (`*.cloudflare-dns.com`, `one.one.one.one`),
+Google (`*.dns.google`, `dns.google.com`), Quad9 (`*.quad9.net`), OpenDNS
+(`*.opendns.com`), AdGuard (`*.adguard-dns.com`, `*.adguard.com`), NextDNS
+(`*.nextdns.io`), DNS.SB (`*.dns.sb`), CleanBrowsing
+(`*.cleanbrowsing.org`), ControlD (`*.controld.com`), Pi-DNS
+(`*.pi-dns.com`), Mullvad (`*.mullvad.net`), and Digitale Gesellschaft
+(`*.digitale-gesellschaft.ch`). Only a ClientHello whose SNI matches this
+table is ever reported as `doh` -- everything else, including perfectly
+ordinary HTTPS to an unrelated site, falls through untouched (there is
+nothing else `--protocol auto` would even attempt against TCP port 443
+traffic that doesn't match, since this decoder has no other TLS-content
+decoder). See LIMITATIONS for what this deliberately cannot detect: a
+private or enterprise DoH resolver not on this table, a ClientHello whose
+SNI extension spans more than one TCP segment, and TLS Encrypted Client
+Hello (ECH), all of which defeat this SNI-matching approach entirely --
+there being no available signal at all in those cases, not merely one this
+decoder chooses not to pursue.
+
+#### Validation
+
+All five protocols here are validated against `tools/make_sample_pcap.py`'s
+own hand-built, RFC/Wireshark-cross-checked fixtures (`tests/sample_dns.pcap`,
+`sample_mdns.pcap`, `sample_llmnr.pcap`, `sample_nbns.pcap`,
+`sample_doh.pcap`) rather than a real capture -- the same honest gap already
+documented for this codebase's other synthetic-only protocols. Each fixture
+deliberately exercises both the intended decode paths (ordinary queries and
+responses, EDNS0, mDNS's QU/cache-flush bits, LLMNR's Conflict bit, NBT-NS's
+NB and NBSTAT record types, DoH's exact-hostname and `*.suffix` matching)
+and the negative controls this section's own detection-gating design
+depends on: a non-DNS-shaped UDP/53 payload, a deliberately truncated DNS
+message, an LLMNR message with nonzero reserved Z bits, a malformed NBT-NS
+name whose length byte isn't `0x20`, a ClientHello to an ordinary (non-DoH)
+hostname, and a non-TLS TCP/443 payload -- every one of which must fall
+through to the generic `udp`/`tcp` report rather than being misdetected.
+
 ### Link/IP-layer plumbing: non-IPv4 Ethernet, and non-TCP IPv4 (including UDP)
 
 Every protocol above rides on Ethernet + IPv4 + TCP. Traffic outside that --
@@ -7308,6 +7598,51 @@ These are current, not aspirational -- each has a corresponding ROADMAP item.
   proprietary ControlNet Traffic Analyzer, which produces no pcap-compatible
   output. This is a structural limitation, not a scope gap: see PROTOCOL
   COVERAGE's DeviceNet section's "Why not ControlNet too" note.
+- **DNS, mDNS, LLMNR, and NBT-NS are UDP only -- DNS-over-TCP is not
+  decoded.** These four protocols do have a TCP form in principle (RFC 1035
+  §4.2.2 for DNS itself, used for zone transfers and oversized responses);
+  this decoder's own detection and parsing only cover the UDP wire format.
+  See PROTOCOL COVERAGE's DNS/mDNS/LLMNR/NBT-NS/DoH section.
+- **DoH, DoT, and DNS-over-QUIC content is never visible, and never will
+  be, by this or any pcap-based tool without the session's own decryption
+  keys.** The actual DNS query and answer travel inside TLS (DoH/DoT) or
+  QUIC (DoH-over-QUIC/DoQ), which this project's zero-decryption-keys
+  posture cannot and does not attempt to decrypt. Only DoH gets even
+  detection-level treatment (via plaintext SNI matching, see below); DoT
+  (TCP port 853) and DoQ have no equivalent plaintext signal this decoder
+  currently looks for at all, and are not attempted.
+- **DoH detection depends entirely on a curated hostname table, and misses
+  everything not on it.** A private, enterprise, or simply less-common
+  public DoH resolver -- anything whose hostname isn't in the
+  `*.suffix`-matched provider table PROTOCOL COVERAGE's DoH subsection
+  lists -- is never flagged as `doh`, because there is no wire-format signal
+  that distinguishes "DoH to some server" from "any other HTTPS traffic" 
+  without either a recognizable hostname or the (unavailable) decrypted
+  content. This is a fundamental limitation of SNI-based detection, not a
+  table this decoder merely hasn't gotten around to extending yet.
+- **DoH detection only looks at a single TCP segment.** A TLS ClientHello
+  whose SNI extension happens to land across a TCP segment boundary (large
+  cipher-suite lists, or an unusually early MTU-driven split) is not
+  detected -- this decoder deliberately reuses the single-segment
+  `tcp.payload` here rather than this codebase's general cross-segment TCP
+  reassembly (`effective_payload`), since a ClientHello split this way is
+  uncommon in practice and reassembling TLS handshakes generically was out
+  of scope for a detection-only feature.
+- **TLS Encrypted Client Hello (ECH), if in use, defeats DoH detection
+  entirely.** ECH encrypts the SNI extension itself (leaving only an
+  "outer" ClientHello with a generic placeholder name), which removes the
+  one plaintext signal this decoder's DoH detection depends on. ECH is not
+  yet widely deployed by the public DoH resolvers this table covers, but
+  where it is used, this decoder cannot and does not attempt to see through
+  it.
+- **None of DNS/mDNS/LLMNR/NBT-NS/DoH are wired into the `policy validate`
+  conduit `protocols` classification.** `PolicyEngine::observe()` (see
+  POLICY FILE FORMAT) does not yet recognize these five as conduit traffic
+  the way it does for e.g. `modbus`/`dnp3`/`bacnet` -- a conduit
+  specifically restricted to one of these protocol names in policy YAML
+  will not match traffic this decoder itself already decodes as
+  `dns`/`mdns`/`llmnr`/`nbns`/`doh`. This was deliberately left out of this
+  round's scope (decode/detect only) and is tracked in ROADMAP.
 
 ## EXIT STATUS
 
@@ -7854,6 +8189,28 @@ since OUI resolution is on by default:
 ```sh
 conduitscope decode -r capture.pcap -f json \
   | jq -r '[.[] | .src_mac_vendor, .dst_mac_vendor] | map(select(. != null)) | unique[]'
+```
+
+See who's sending LLMNR/NBT-NS broadcast name-resolution queries on an OT
+segment -- the fallback-resolution traffic LLMNR/NBT-NS poisoning attacks
+(e.g. Responder) exploit, and traffic that arguably shouldn't be present on
+a well-segmented OT network at all:
+
+```sh
+conduitscope decode -r capture.pcap --protocol llmnr -f json \
+  | jq -r '.[] | select(.protocol == "llmnr" and (.dns_is_response | not)) |
+           "\(.src_ip): \(.dns_records[0] // "?")"'
+```
+
+Flag DNS-over-HTTPS to a known public resolver -- on a well-segmented OT
+network this is worth a look either way: it bypasses whatever DNS-based
+egress monitoring/filtering the network relies on, whether that's
+deliberate (an engineer's laptop dodging a captive portal) or a sign of
+malware avoiding detection:
+
+```sh
+conduitscope decode -r capture.pcap --protocol doh -f json \
+  | jq -r '.[] | "\(.src_ip) -> \(.dst_ip): \(.doh_matched_provider) (SNI \(.doh_sni))"'
 ```
 
 ## ROADMAP
@@ -8523,6 +8880,44 @@ shape a real client in the wild still used (see
 Sparkplug B capture was specifically searched for and not found, so
 Sparkplug B decoding itself remains validated only against this project's
 own synthetic, hand-built protobuf fixture -- see LIMITATIONS.
+
+**DNS, mDNS, LLMNR, and NetBIOS Name Service (NBT-NS) decode, plus
+DNS-over-HTTPS (DoH) detection,** are also now done: the first name-
+resolution protocols this tool decodes, and the first protocols anywhere in
+this codebase that are deliberately port-gated in `--protocol auto` rather
+than tried opportunistically port-independent -- see PROTOCOL DETECTION's
+own dedicated paragraph for why (none of the four DNS-shaped protocols has
+a self-describing wire-format signal strong enough to check safely against
+every UDP payload the way this codebase's other detectors do). DNS, mDNS,
+and LLMNR share one implementation (`DnsMessage`/`try_parse_dns_message`),
+since RFC 6762 and RFC 4795 both explicitly reuse RFC 1035's message format
+verbatim, differing only in three header bits' meaning (AA/RD/RA vs.
+LLMNR's C/T/wider-Z) and, for mDNS, two class-field top-bit reinterpretations
+(QU and cache-flush); "first pass" RDATA decoding covers A/AAAA/NS/CNAME/
+PTR/MX/SOA/TXT/SRV, the same service-layer scoping precedent already
+established for BACnet/DNP3/S7comm/EtherNet-IP, with EDNS0's OPT
+pseudo-record correctly recognized. NBT-NS gets its own decoder (RFC 1002),
+including first-level name encoding/decoding, NB (address) and NBSTAT (name
+table) resource records, and the Microsoft/Wireshark suffix-byte
+convention for what service a NetBIOS name represents -- explicitly
+documented as convention, not part of RFC 1002 itself. DoH is
+detection-only, by necessity rather than choice: its actual DNS content
+travels inside TLS, invisible to this or any tool without the session's own
+decryption keys, so detection instead matches a TLS ClientHello's plaintext
+SNI against a curated table of a dozen known public DoH resolvers -- see
+PROTOCOL COVERAGE's "DNS / mDNS / LLMNR / NetBIOS Name Service (NBT-NS) /
+DNS-over-HTTPS detection" section for the full wire formats, and LIMITATIONS
+for what none of this can see (DNS-over-TCP, DoT/DoQ content, a DoH
+resolver not on the curated table, a ClientHello split across TCP segments,
+and TLS Encrypted Client Hello). All five are validated against hand-built
+synthetic fixtures cross-checked against their governing RFCs, including
+deliberate negative-control packets for every detection gate -- no real
+capture was sought for this feature, since these are widely-documented,
+standard protocols rather than a proprietary or hard-to-source OT one.
+Deliberately left out of this pass, and not yet separately tracked as its
+own numbered roadmap item: wiring any of these five into `policy validate`/
+`PolicyEngine`'s conduit `protocols` classification, the same way item 14
+above did for the six protocols added there -- see LIMITATIONS.
 
 ### Protocols not covered at all
 

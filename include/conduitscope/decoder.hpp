@@ -16,6 +16,7 @@
 #include "conduitscope/cotp.hpp"
 #include "conduitscope/devicenet.hpp"
 #include "conduitscope/dnp3.hpp"
+#include "conduitscope/dns.hpp"
 #include "conduitscope/enip.hpp"
 #include "conduitscope/ethercat.hpp"
 #include "conduitscope/ffhse.hpp"
@@ -25,6 +26,7 @@
 #include "conduitscope/mms.hpp"
 #include "conduitscope/modbus.hpp"
 #include "conduitscope/mqtt.hpp"
+#include "conduitscope/nbns.hpp"
 #include "conduitscope/opcua.hpp"
 #include "conduitscope/pcap_reader.hpp"
 #include "conduitscope/profinet.hpp"
@@ -32,6 +34,7 @@
 #include "conduitscope/stp.hpp"
 #include "conduitscope/sv.hpp"
 #include "conduitscope/tcp.hpp"
+#include "conduitscope/tls_sni.hpp"
 
 namespace conduitscope {
 
@@ -56,6 +59,11 @@ enum class ProtocolFilter {
     MqttOnly,     // only attempt MQTT (v3.1.1/v5.0) / Sparkplug B decoding
     S7commPlusOnly,  // only attempt TPKT/COTP/S7comm-Plus decoding
     FfHseOnly,    // only attempt FOUNDATION Fieldbus HSE (FDA/SM/FMS/LAN Redundancy) decoding
+    DnsOnly,      // only attempt classic DNS (UDP port 53) decoding
+    MdnsOnly,     // only attempt Multicast DNS decoding
+    LlmnrOnly,    // only attempt LLMNR decoding
+    NbnsOnly,     // only attempt NetBIOS Name Service (NBT-NS) decoding
+    DohOnly,      // only attempt DNS-over-HTTPS detection (TLS ClientHello SNI only -- see tls_sni.hpp)
 };
 
 struct DecodeOptions {
@@ -83,6 +91,17 @@ struct DecodeOptions {
                                                   // (1089/1090/1091/3622); a single list covers all
                                                   // four, since the sub-protocol is signaled in-band,
                                                   // not by port -- see ffhse.hpp
+    // UNLIKE every extra_*_ports list above, these five DO gate detection in Auto mode, not just
+    // the "expected port" annotation -- see dns.hpp's/nbns.hpp's/tls_sni.hpp's own "Detection"
+    // paragraphs for why: DNS/mDNS/LLMNR/NBT-NS have no self-describing wire-format signal at all,
+    // and DoH detection is inherently port+SNI based, so port-independent opportunistic detection
+    // (this codebase's usual posture) would false-positive constantly. Only meaningful in Auto
+    // mode -- an explicit --protocol dns/mdns/llmnr/nbns/doh already skips the port gate entirely.
+    std::vector<uint16_t> extra_dns_ports;      // UDP -- see DNS_PORT (53)
+    std::vector<uint16_t> extra_mdns_ports;     // UDP -- see MDNS_PORT (5353)
+    std::vector<uint16_t> extra_llmnr_ports;    // UDP -- see LLMNR_PORT (5355)
+    std::vector<uint16_t> extra_nbns_ports;     // UDP -- see NBNS_PORT (137)
+    std::vector<uint16_t> extra_doh_ports;      // TCP -- see DOH_PORT (443)
     // If true, a parse failure at the Ethernet/IPv4/TCP layer is rethrown to
     // the caller instead of being recorded as a per-packet "parse-error"
     // result. Off by default so one malformed packet doesn't abort decoding
@@ -146,7 +165,11 @@ struct DecodedPacket {
     // devicenet_can_id below; an EFF/RTR/ERR-flagged frame on that same link type is "non-ip"
     // (named structurally by which flag(s) are set, never decoded further -- not a valid DeviceNet
     // frame shape at all)),
-    // "unsupported-link", or "parse-error".
+    // "unsupported-link", or "parse-error". Also "dns"/"mdns"/"llmnr" (a UDP payload on the
+    // matching port -- 53/5353/5355 -- that try_parse_dns_message recognizes, see dns_* fields
+    // below), "nbns" (NetBIOS Name Service/NBT-NS, UDP port 137, see nbns_* fields below), and
+    // "doh" (a TCP/443 flow whose TLS ClientHello SNI matches a known DNS-over-HTTPS resolver --
+    // detection only, see doh_* fields below and tls_sni.hpp).
     std::string protocol;
     std::string summary;
     std::vector<std::string> notes;
@@ -813,6 +836,45 @@ struct DecodedPacket {
     bool ffhse_body_shown_as_hex = false;
     std::string ffhse_body_hex;
     size_t ffhse_body_length = 0;
+
+    // Only set when protocol == "dns", "mdns", or "llmnr" -- see try_parse_dns_message in
+    // dns.hpp. All three share this one field family (rather than each getting its own, the way
+    // most other protocols do) because all three are the exact same wire format -- see dns.hpp's
+    // file header comment for exactly what differs between them, which is reflected here only in
+    // dns_header_flags' letters (only meaningful together with `protocol` -- the same bit
+    // position means something different depending on flavor).
+    uint16_t dns_transaction_id = 0;
+    bool dns_is_response = false;
+    std::string dns_opcode_name;
+    std::string dns_header_flags;  // e.g. "AA,RD" (dns/mdns) or "C,T" (llmnr); empty if none set
+    std::string dns_rcode_name;
+    uint16_t dns_qdcount = 0, dns_ancount = 0, dns_nscount = 0, dns_arcount = 0;  // as declared
+    // One "section: name TYPE CLASS ..." entry per question/answer/authority/additional record
+    // actually parsed, in wire order -- mirrors bacnet_values'/ffhse_values' scheme but section-
+    // tagged (e.g. "question: example.com. A IN" / "answer: example.com. A IN ttl=300s ->
+    // address=93.184.216.34") rather than split into parallel per-section arrays, since that's
+    // the order they appear in the message. See dns.hpp's DnsResourceRecordEntry/DnsQuestionEntry
+    // for the structured form this is rendered from.
+    std::vector<std::string> dns_records;
+    bool dns_records_truncated = false;  // declared counts implied more than the payload had room for
+
+    // Only set when protocol == "nbns" (NetBIOS Name Service/NBT-NS) -- see try_parse_nbns in
+    // nbns.hpp.
+    uint16_t nbns_transaction_id = 0;
+    bool nbns_is_response = false;
+    std::string nbns_opcode_name;
+    std::string nbns_flags;  // e.g. "AA,RD,B" -- wire order AA,TC,RD,RA,B
+    std::string nbns_rcode_name;
+    uint16_t nbns_qdcount = 0, nbns_ancount = 0, nbns_nscount = 0, nbns_arcount = 0;
+    std::vector<std::string> nbns_records;  // same section-tagged scheme as dns_records above
+    bool nbns_records_truncated = false;
+
+    // Only set when protocol == "doh" -- detection only, see try_detect_doh in tls_sni.hpp. There
+    // is deliberately no "doh_query"/"doh_answer" field of any kind: the DNS message itself is
+    // TLS-encrypted and never visible to this decoder.
+    std::string doh_sni;
+    std::string doh_matched_provider;
+    std::vector<std::string> doh_alpn_protocols;
 };
 
 // Cross-packet DNP3 fragment-reassembly state for one directional TCP flow (src ip:port -> dst
