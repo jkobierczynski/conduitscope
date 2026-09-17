@@ -882,6 +882,48 @@ set_tests_properties(enip_nop_not_detected PROPERTIES
   PASS_REGULAR_EXPRESSION "\\[tcp\\]  TCP payload of 24 byte\\(s\\) on port 52001->44818 did not match OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, COTP/S7comm/MMS, HART-IP, MQTT, or FF-HSE")
 
 # --------------------------------------------------------------------------
+# EtherNet/IP CIP STRING/SHORT_STRING and Structured Data Type (UDT/array-of-UDT tag) value
+# decoding, synthetic (tests/sample_enip_string_and_structured.pcap) -- see
+# tools/make_sample_pcap.py's build_enip_string_and_structured_sample for the exact byte layout
+# each assertion below is checking.
+# --------------------------------------------------------------------------
+add_test(NAME enip_string_read_tag_response_value_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enip_string_and_structured.pcap")
+set_tests_properties(enip_string_read_tag_response_value_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"enip_cip_values\": \\[\"type=STRING\", \"PumpFault\"\\]")
+
+add_test(NAME enip_short_string_write_tag_request_value_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enip_string_and_structured.pcap")
+set_tests_properties(enip_short_string_write_tag_request_value_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"enip_cip_values\": \\[\"type=SHORT_STRING element_count=1\", \"OK\"\\]")
+
+add_test(NAME enip_empty_string_read_tag_response_value_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enip_string_and_structured.pcap")
+set_tests_properties(enip_empty_string_read_tag_response_value_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"enip_cip_values\": \\[\"type=STRING\", \"\"\\]")
+
+add_test(NAME enip_structured_read_tag_response_value_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enip_string_and_structured.pcap")
+set_tests_properties(enip_structured_read_tag_response_value_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"enip_cip_values\": \\[\"type=Structured Data Type \\(0x02A0\\)\", \"structure_handle=0x1234\"\\],\n    \"notes\": \\[\"UDT/structured member data \\(6 byte\\(s\\)\\) not value-decoded -- this decoder has no access to the tag's Template definition \\(member names/types/offsets\\), obtained separately via Get_Attribute_List against the Template object: 01 00 2a 00 00 00\"\\]")
+
+add_test(NAME enip_structured_write_tag_request_value_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enip_string_and_structured.pcap")
+set_tests_properties(enip_structured_write_tag_request_value_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"enip_cip_values\": \\[\"type=Structured Data Type \\(0x02A0\\) element_count=1\", \"structure_handle=0x1234\"\\]")
+
+# Regression: before cip_is_plausible_type_code was widened to include the >= 0x02A0 structured
+# range (see that function's comment in enip.cpp), a genuine UDT Read_Tag response like the one
+# above was WRONGLY rejected into the "response data does not start with a recognized CIP
+# elementary type code" fallback note -- assert the structure_handle value is present AND that
+# fallback note is absent for this specific response.
+add_test(NAME enip_structured_type_code_not_misclassified_as_implausible
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enip_string_and_structured.pcap")
+set_tests_properties(enip_structured_type_code_not_misclassified_as_implausible PROPERTIES
+  PASS_REGULAR_EXPRESSION "structure_handle=0x1234"
+  FAIL_REGULAR_EXPRESSION "response data does not start with a recognized CIP elementary type code")
+
+# --------------------------------------------------------------------------
 # EtherNet/IP CIP I/O (implicit messaging), synthetic (tests/sample_enip_cip_io.pcap): UDP/2222
 # datagrams -- see tools/make_sample_pcap.py's build_enip_cip_io_sample for the exact byte layout
 # each assertion below is checking, and enip.hpp's file header comment's CIP implicit messaging

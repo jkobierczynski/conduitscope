@@ -3896,11 +3896,75 @@ value-decoded for a "first pass" set:
   tag, not a class/instance address): `Read_Tag`/`Read_Tag_Fragmented`
   (element count, and full type+value decoding of the response for the
   common fixed-size numeric elementary types -- BOOL/SINT/INT/DINT/LINT/
-  USINT/UINT/UDINT/ULINT/REAL/LREAL/BYTE/WORD/DWORD/LWORD), `Write_Tag`/
-  `Write_Tag_Fragmented` (type, element count, and the values being
-  written), and `Read_Modify_Write_Tag` (the OR/AND bit masks; its success
-  response carries no data, confirmed against a real capture -- see
-  `tests/real_captures/enip/ATTRIBUTION.md`).
+  USINT/UINT/UDINT/ULINT/REAL/LREAL/BYTE/WORD/DWORD/LWORD -- plus, now,
+  STRING (`0xD0`) and SHORT_STRING (`0xDA`), decoded to plain text (a
+  2-byte or 1-byte length prefix respectively, an empty string decoding
+  correctly to an empty text entry), and Structured Data Type (any type
+  code `>= 0x02A0`, Rockwell's encoding for a UDT-typed or array-of-UDT-
+  typed tag) -- see below), `Write_Tag`/`Write_Tag_Fragmented` (type,
+  element count, and the values being written -- same type coverage as the
+  read side), and `Read_Modify_Write_Tag` (the OR/AND bit masks; its
+  success response carries no data, confirmed against a real capture --
+  see `tests/real_captures/enip/ATTRIBUTION.md`).
+
+**STRING/SHORT_STRING and Structured Data Type (UDT/array) value decoding.**
+STRING (`0xD0`) is a 2-byte length prefix followed by that many bytes of
+text; SHORT_STRING (`0xDA`) is the same idea with a 1-byte length prefix --
+both decode to plain text embedded directly in `enip_cip_values`, matching
+how `bacnet.cpp`'s Character String decode embeds recognized-charset text
+directly with no quoting/escaping wrapper of its own (JSON output already
+runs every `values[]` entry through `output.cpp`'s own JSON string
+escaping). A CIP type code `>= 0x02A0` is Rockwell/ODVA's Structured Data
+Type sentinel -- Logix5000's encoding for reading or writing a UDT-typed
+(or array-of-UDT-typed) tag: the type code itself carries no size/member
+information, only signaling that what follows is a 2-byte Structure
+Handle (a fingerprint of the UDT's member layout) then the raw struct
+instance bytes. This decoder has no access to the tag's Template
+definition (member names/types/offsets) -- that's obtained separately, out
+of band, via a `Get_Attribute_List` exchange against the Template object,
+not something tracked across packets here -- so it stops at extracting the
+Structure Handle and shows the remaining member bytes as hex with an
+explicit note, rather than guessing at member boundaries; this also means
+an array of struct instances can't be split into one entry per element,
+since there's no way to know where one instance ends and the next begins
+without that same missing per-instance size information, so the whole
+remaining byte range is shown as a single block. **This closes a real gap,
+not just an extension**: before this release, `cip_is_plausible_type_code`
+(the Read_Tag(_Fragmented) response heuristic -- see below) only accepted
+the `0xC1`-`0xDE` elementary-type range, so a genuine UDT tag-read response
+was wrongly rejected as "not a Rockwell tag read at all" and fell through
+to the generic not-decoded path; the plausibility gate now also accepts
+the `>= 0x02A0` structured range. Deliberately still **not** decoded, for
+the same reasons documented in `decode_cip_structured_element`'s own
+comment in `enip.cpp`: STRING2 (`0xD5`, double-byte character sets),
+STRINGN (`0xD9`), STRINGI (`0xDE`, international string), and EPATH/
+ENGUNIT (`0xDC`/`0xDD`) as an elementary *value* (as opposed to EPATH
+appearing in a request path, already decoded above).
+
+For example, a Read_Tag response for a STRING tag:
+
+```json
+"enip_cip_service": "Read_Tag",
+"enip_cip_status": "Success",
+"enip_cip_values": ["type=STRING", "PumpFault"]
+```
+
+and a Read_Tag response for a UDT-typed tag (`type=Structured Data Type
+(0x02A0)`, structure handle `0x1234`, 6 bytes of member data that can't be
+split further without the tag's Template definition):
+
+```json
+"enip_cip_service": "Read_Tag",
+"enip_cip_status": "Success",
+"enip_cip_values": ["type=Structured Data Type (0x02A0)", "structure_handle=0x1234"],
+"notes": ["UDT/structured member data (6 byte(s)) not value-decoded -- this decoder has no access to the tag's Template definition (member names/types/offsets), obtained separately via Get_Attribute_List against the Template object: 01 00 2a 00 00 00"]
+```
+
+(both taken from an actual `decode --format json --read
+tests/sample_enip_string_and_structured.pcap` run -- see
+`tools/make_sample_pcap.py`'s `build_enip_string_and_structured_sample` for
+the full six-exchange fixture, including the empty-STRING edge case and a
+Write_Tag carrying a Structured Data Type value.)
 
 That symbolic-path gating is the key scoping decision of this groundwork
 release, and it's not a simplification for its own sake: several of these
@@ -3916,12 +3980,12 @@ byte pair that's a plausible CIP elementary type code?), the same kind of
 heuristic `modbus_tcp`'s own request/response classification uses.
 
 A request/response whose service is recognized by name but falls outside
-this "first pass" value-decoded set (including every STRING/structured/
-UDT/array CIP data type, and every service this decoder doesn't have a
-table entry for at all) is still shown structurally -- service name and
-request path, response status -- with its data shown as raw hex and an
-explicit note that this groundwork release doesn't decode it further,
-never guessed at.
+this "first pass" value-decoded set (including the still-out-of-scope
+STRING2/STRINGN/STRINGI/EPATH/ENGUNIT-as-a-value CIP data types noted
+above, and every service this decoder doesn't have a table entry for at
+all) is still shown structurally -- service name and request path,
+response status -- with its data shown as raw hex and an explicit note
+that this groundwork release doesn't decode it further, never guessed at.
 
 Validated against two real captures: a real Rockwell 1756-ENBT/A
 ControlLogix EtherNet/IP bridge module's ListIdentity exchange, and a
@@ -6638,15 +6702,17 @@ These are current, not aspirational -- each has a corresponding ROADMAP item.
   class/instance-addressed request using one of those same service codes
   (a real, confirmed collision -- see tests/real_captures/enip/
   ATTRIBUTION.md and PROTOCOL COVERAGE) is shown structurally (service name
-  + path + raw hex) instead. Within the decoded element types, only the
+  + path + raw hex) instead. Within the decoded element types, the
   fixed-size numeric elementary types (BOOL/SINT/INT/DINT/LINT/USINT/UINT/
-  UDINT/ULINT/REAL/LREAL/BYTE/WORD/DWORD/LWORD) are value-decoded --
-  STRING/SHORT_STRING and every structured/UDT/array type are recognized by
-  code but shown as raw hex with an explicit note, not guessed at (Logix5000's
-  exact bit-level convention for distinguishing a structured-type response
-  from an elementary one could not be confirmed against authoritative
-  documentation during this feature's research, so no special-casing was
-  attempted for it -- see the ROADMAP). A bare CIP response's Read_Tag(
+  UDINT/ULINT/REAL/LREAL/BYTE/WORD/DWORD/LWORD), STRING/SHORT_STRING (text),
+  and Structured Data Type (UDT/array, type code `>= 0x02A0`) are all
+  value-decoded -- the structured case down to its 2-byte Structure Handle,
+  with the remaining member bytes shown as hex, since this decoder has no
+  access to the tag's Template definition (member names/types/offsets),
+  which would require a separate, out-of-band `Get_Attribute_List` exchange
+  against the Template object this decoder doesn't perform. STRING2/
+  STRINGN/STRINGI/EPATH/ENGUNIT-as-a-value remain recognized by code but
+  shown as raw hex with an explicit note, not guessed at. A bare CIP response's Read_Tag(
   Fragmented) disambiguation from a same-service-code non-tag reply relies
   on a payload-shape heuristic (a plausible CIP elementary type code at the
   start of the response data), same category of heuristic as Modbus's own
@@ -6798,11 +6864,12 @@ These are current, not aspirational -- each has a corresponding ROADMAP item.
 - **QinQ (stacked 802.1Q) VLAN tags are not unwrapped**, only a single tag.
 - **`policy validate`'s zones are IPv4 CIDR-only** (matching every other
   IPv4-only limitation in this document) and its conduits are TCP-only --
-  unlike `decode`, which now also decodes one UDP-based protocol (CIP I/O,
-  see PROTOCOL COVERAGE). A policy can't reference a UDP service, a MAC
-  address, or a hostname, and non-TCP/non-IP packets -- including CIP I/O
-  traffic -- are counted (`skipped_non_tcp` in the JSON report) but never
-  evaluated against any conduit.
+  unlike `decode`, which now also decodes three UDP-based protocols (CIP
+  I/O, BACnet/IP, and HART-IP's own UDP traffic, see PROTOCOL COVERAGE). A
+  policy can't reference a UDP service, a MAC address, or a hostname, and
+  non-TCP/non-IP packets -- including CIP I/O, BACnet/IP, and HART-IP-over-
+  UDP traffic -- are counted (`skipped_non_tcp` in the JSON report) but
+  never evaluated against any conduit.
 - **`policy validate`'s client/server (initiator) determination falls back
   to a port-number heuristic when no SYN/SYN-ACK is captured for a flow**
   (e.g. a capture that starts mid-session): whichever endpoint's port is one
@@ -7548,13 +7615,20 @@ Rough order, each building on the groundwork this release establishes:
    currently falls back to raw hex on: DB-area items, and items with more
    than one LID entry (structured/nested symbol access). Promote it out of
    [EXPERIMENTAL] once confirmed.
-3. **PLC Control/Stop parameter decoding** (these send commands that change
-   PLC run state -- high security relevance), and extending S7comm-Plus's
-   own Tier-2 functions (CreateObject, Explore, GetLink, BeginSequence/
-   EndSequence, Invoke, GetVarSubStreamed, Notification, Connect, and
-   DataFW1_5's Data part) to Tier 1, plus S7comm-Plus's own above-COTP,
-   trailer-based reassembly (currently detected and reported, not
-   reassembled -- see LIMITATIONS).
+3. ~~PLC Control/Stop parameter decoding~~ (these send commands that change
+   PLC run state -- high security relevance) -- **done**: classic S7comm's
+   function codes `0x28` (PLC Control / PI-Service) and `0x29` (PLC Stop) are
+   both fully decoded -- see PROTOCOL COVERAGE's S7comm / COTP section's
+   "PLC Control (`0x28`) / PLC Stop (`0x29`)" entry and
+   `include/conduitscope/s7comm.hpp`'s file header. Still open, and now
+   standing on its own now that the PLC Control/Stop half above is done:
+   extending S7comm-Plus's own Tier-2 functions (CreateObject, Explore,
+   GetLink, BeginSequence/EndSequence, Invoke, GetVarSubStreamed,
+   Notification, Connect, and DataFW1_5's Data part) to Tier 1, plus
+   S7comm-Plus's own above-COTP, trailer-based reassembly (currently
+   detected and reported, not reassembled -- see PROTOCOL COVERAGE's
+   S7comm-Plus section, `include/conduitscope/s7commplus.hpp`'s file header,
+   and LIMITATIONS).
 4. ~~DNP3 CRC validation (both the header CRC and the per-block CRCs), so a
    corrupted frame that still starts with the right magic bytes is flagged
    rather than silently "decoded"~~ -- **done**, see PROTOCOL COVERAGE's DNP3
@@ -7569,10 +7643,14 @@ Rough order, each building on the groundwork this release establishes:
    point-format table (double-precision Analog Input Event variants, Octet
    String, File Control, Analog Input Reporting Deadband) remains open and
    isn't separately tracked as its own roadmap item yet.
-6. **A policy `from`/`to` zone list wider than two endpoints per conduit**
-   (e.g. "any of these three zones may reach this one"), if real policy
-   files turn out to want that instead of one conduit per zone pair -- kept
-   off the schema for now rather than guessed at ahead of a real use case.
+6. ~~A policy `from`/`to` zone list wider than two endpoints per conduit~~
+   (e.g. "any of these three zones may reach this one") -- **done**: a
+   conduit's `from`/`to` each accept a single zone name or a list of them,
+   and the conduit is many-to-many (any `from` zone to any `to` zone) --
+   see POLICY FILE FORMAT's "Schema" section and its "Worked example"
+   (`tests/policies/multi_from_zones.yaml`, `multi_to_zones.yaml`, and
+   `multi_zone_bidirectional.yaml`). Nothing remains genuinely open about
+   this item.
 7. ~~Extend IEC 104's information-element decode table~~ to step position
    (types 5/6/32) and bitstring of 32 bit (types 7/8/33, command 51/64) --
    **done**, along with 17 more type IDs in the same pass: the
@@ -7590,19 +7668,23 @@ Rough order, each building on the groundwork this release establishes:
    recognized, named type IDs, but their information elements aren't
    value-decoded yet, the same "structurally located, not value-decoded"
    state every still-unlisted type ID gets.
-8. **Extend EtherNet/IP's CIP value decoding to STRING/SHORT_STRING and
-   structured (UDT/array) elementary types** -- currently shown as raw hex
-   with an explicit note (see PROTOCOL COVERAGE and LIMITATIONS). The
-   structured-type case specifically needs confirming Logix5000's exact
-   bit-level convention for telling a structured-type Read_Tag response
-   apart from an elementary one against authoritative documentation (not
-   confirmed during this feature's research -- see LIMITATIONS); STRING/
-   SHORT_STRING's wire format is better-documented and could reasonably come
-   first. Also worth revisiting once real-world evidence exists: whether the
-   symbolic-path-gating gate itself (see PROTOCOL COVERAGE) is ever too
-   narrow in practice -- e.g. a real device addressing a Symbol-object tag
-   by numeric instance ID rather than by name, which this release's gating
-   would currently show structurally rather than as a tag read.
+8. ~~Extend EtherNet/IP's CIP value decoding to STRING/SHORT_STRING and
+   structured (UDT/array) elementary types~~ -- **done**: STRING (`0xD0`)/
+   SHORT_STRING (`0xDA`) decode to plain text, and Structured Data Type
+   (any type code `>= 0x02A0`) decodes its 2-byte Structure Handle (member
+   bytes shown as hex, no Template definition available) -- see PROTOCOL
+   COVERAGE's EtherNet/IP section and the "now done" paragraph below. Fixing
+   this also fixed a real bug: `cip_is_plausible_type_code` previously only
+   accepted the `0xC1`-`0xDE` elementary range, so a genuine UDT Read_Tag
+   response was wrongly rejected as "not a Rockwell tag read at all"; it
+   now also accepts the `>= 0x02A0` structured range. STRING2/STRINGN/
+   STRINGI/EPATH/ENGUNIT-as-a-value remain open and aren't separately
+   tracked as their own roadmap item. Still open and worth revisiting once
+   real-world evidence exists: whether the symbolic-path-gating gate itself
+   (see PROTOCOL COVERAGE) is ever too narrow in practice -- e.g. a real
+   device addressing a Symbol-object tag by numeric instance ID rather than
+   by name, which this release's gating would currently show structurally
+   rather than as a tag read.
 9. ~~Decode IEC 61850-9-2 Sampled Values~~ -- **done**, see PROTOCOL
    COVERAGE's Sampled Values subsection and the "now done" paragraph below.
    ~~Decode EtherCAT~~ -- **also done**, see PROTOCOL COVERAGE's EtherCAT
@@ -7761,9 +7843,11 @@ DETECTION.
 Common Packet Format item parsing, and a "first pass" CIP explicit-message
 decode (generic common services, Connection Manager's Unconnected_Send/
 Forward_Open/Forward_Close, and, symbolic-path-gated, the Rockwell
-Symbol-object tag services) -- see PROTOCOL COVERAGE's EtherNet/IP section
-and item 8 above for what's still out of scope (STRING/structured/UDT/array
-value decoding). EtherNet/IP detection runs first in Auto-mode dispatch,
+Symbol-object tag services, including STRING/SHORT_STRING and Structured
+Data Type (UDT/array) value decoding -- see item 8's "done" note) -- see
+PROTOCOL COVERAGE's EtherNet/IP section and item 8 above for what's still
+out of scope (STRING2/STRINGN/STRINGI/EPATH/ENGUNIT-as-a-value). EtherNet/IP
+detection runs first in Auto-mode dispatch,
 ahead of even IEC 104, since its own dedicated port plus three independent
 structural checks make it, if anything, a stronger signal -- see PROTOCOL
 DETECTION.
@@ -8084,6 +8168,72 @@ shape a real client in the wild still used (see
 Sparkplug B capture was specifically searched for and not found, so
 Sparkplug B decoding itself remains validated only against this project's
 own synthetic, hand-built protobuf fixture -- see LIMITATIONS.
+
+### Protocols not covered at all
+
+An honest orientation for "does it do X" -- well-known OT/ICS protocols
+this tool decodes no part of, and why, as of this release. This is
+separate from every still-open item above (all of which name a protocol
+this tool DOES decode, at least partially); everything below is a protocol
+with zero bytes of it decoded anywhere in this codebase.
+
+- **PROFIBUS DP.** An RS-485 fieldbus, not Ethernet-based -- there is no
+  IP/Ethernet framing to capture with a standard NIC at all, only dedicated
+  fieldbus-tap hardware this project has no access to and so could not
+  validate a decoder against even if one were written. The same structural
+  category as ControlNet (see PROTOCOL COVERAGE's DeviceNet section, "Why
+  not ControlNet too"): not a scope choice, a hard capture-availability
+  wall.
+- **CANopen.** The most plausible near-term candidate on this list.
+  DeviceNet already rides raw CAN frames captured via SocketCAN
+  (`LINKTYPE_CAN_SOCKETCAN`, see PROTOCOL COVERAGE's DeviceNet section) --
+  `can_socketcan.hpp`/`.cpp` decode the pcap record and CAN frame header
+  generically, and its own file header says outright that "any CAN
+  application protocol's frames (DeviceNet, CANopen, J1939, or raw CAN
+  traffic with no higher-layer protocol at all) would show up in a capture
+  this same way." CANopen would reuse that exact link-layer plumbing
+  unchanged; only a CANopen-specific message-group/object-dictionary
+  decoder (the equivalent of `devicenet.cpp`) would need to be written. It
+  just hasn't been built yet -- a real, reasonably scoped future roadmap
+  item, not an exclusion.
+- **Modbus RTU/ASCII (serial).** Not to be confused with Modbus/TCP, which
+  this tool fully decodes (see PROTOCOL COVERAGE's Modbus/TCP section). The
+  serial variants ride RS-232/RS-485 directly, with no equivalent of
+  DeviceNet's SocketCAN situation -- there is no established pcap
+  link-layer encoding for raw serial traffic this project could build
+  against, and this project hasn't investigated any serial-to-pcap capture
+  mechanism (a USB-serial sniffer's own vendor format, for instance) that
+  might produce one. Unlike CANopen, there is currently no link-layer
+  plumbing here to reuse at all.
+- **PROFIBUS PA / HART's own 4-20mA analog signal.** Not a packet-capture
+  question at all -- this is a physical/analog wire-level signal (current
+  loop, or PROFIBUS PA's own bus-powered physical layer), with nothing that
+  could ever appear in a pcap file. Distinct from HART-IP (the IP-routable
+  gateway encapsulation of HART), which this tool fully decodes -- see
+  PROTOCOL COVERAGE's HART-IP section.
+- **ICCP/TASE.2 (IEC 60870-6, substation-to-control-center).** A plausible
+  future candidate, not a trivial one: this project already decodes MMS in
+  full (see PROTOCOL COVERAGE's IEC 61850 MMS section), and TASE.2 is built
+  on top of MMS's own Session/Presentation/ACSE/MMS stack, but with its own
+  distinct object model (bilateral tables, ICCP-specific object classes)
+  that shares transport DNA with MMS, not application-layer semantics.
+  Decoding it would be new work built on existing groundwork, not an
+  extension of the existing MMS decoder.
+- **OPC Classic (DA/HDA/AE, COM/DCOM-based).** Distinct from OPC UA, which
+  this tool fully decodes (see PROTOCOL COVERAGE's OPC UA Binary section).
+  OPC Classic's wire protocol is COM/DCOM -- MSRPC, a large, generic
+  Windows RPC mechanism with no OT-specific structure of its own -- making
+  this a substantially larger and less OT-focused undertaking than anything
+  else on this list. Likely low priority for that reason.
+- **Ethernet POWERLINK (EtherType `0x88AB`) and SERCOS III.** Real-time
+  Ethernet motion-control protocols in the same general category as
+  PROFINET RT and EtherCAT, both of which this tool already decodes (see
+  PROTOCOL COVERAGE's PROFINET RT and EtherCAT sections). No structural
+  obstacle here -- these simply haven't been reached yet.
+- **WirelessHART.** The RF mesh variant of HART, not the IP-based one --
+  distinct from HART-IP (see PROTOCOL COVERAGE's HART-IP section), which
+  this tool fully decodes. Like PROFIBUS DP, this is not capturable via a
+  standard NIC/pcap at all without dedicated radio-capture hardware.
 
 ## BUILDING
 

@@ -175,9 +175,13 @@ struct CipTypeInfo {
     size_t size;
 };
 
-// The "first pass" decoded subset: the common fixed-size numeric types. STRING/SHORT_STRING and
-// structured/UDT/array types are recognized by code (see cip_is_plausible_type_code) but not
-// value-decoded -- see the file header comment's scoping note.
+// The "first pass" decoded subset: the common fixed-size numeric types. STRING (0xD0)/
+// SHORT_STRING (0xDA) and structured/UDT/array types (>= 0x02A0) are recognized by code (see
+// cip_type_is_variable_length_string/cip_type_is_structured) and ARE value-decoded, but via their
+// own dedicated decode paths (decode_cip_string_elements/decode_cip_structured_element) rather
+// than through this fixed-{name,size} table, since neither fits its model -- see those functions'
+// own comments. STRING2/STRINGN/STRINGI/EPATH/ENGUNIT-as-a-value remain out of scope; see
+// decode_cip_structured_element's comment.
 std::optional<CipTypeInfo> cip_type_info(uint16_t type_code) {
     switch (type_code) {
         case 0xC1: return CipTypeInfo{"BOOL", 1};
@@ -199,7 +203,22 @@ std::optional<CipTypeInfo> cip_type_info(uint16_t type_code) {
     }
 }
 
+// STRING (0xD0) and SHORT_STRING (0xDA) are self-length-prefixed on the wire (see
+// decode_cip_string_elements), unlike every type cip_type_info knows about -- there is no fixed
+// per-element byte size to multiply a count by, so they need their own dedicated decode path
+// rather than fitting cip_type_info's {name, size} model.
+bool cip_type_is_variable_length_string(uint16_t type_code) {
+    return type_code == 0xD0 || type_code == 0xDA;
+}
+
+// A CIP type code >= 0x02A0 is Rockwell/ODVA's "Structured Data Type" sentinel -- see
+// decode_cip_structured_element's own comment for the full reasoning and wire format.
+bool cip_type_is_structured(uint16_t type_code) { return type_code >= 0x02A0; }
+
 std::string cip_type_display_name(uint16_t type_code) {
+    if (cip_type_is_structured(type_code)) {
+        return "Structured Data Type (" + hex4(type_code) + ")";
+    }
     static const std::pair<uint16_t, const char*> kNames[] = {
         {0xC1, "BOOL"},         {0xC2, "SINT"},   {0xC3, "INT"},          {0xC4, "DINT"},
         {0xC5, "LINT"},         {0xC6, "USINT"},  {0xC7, "UINT"},         {0xC8, "UDINT"},
@@ -216,13 +235,17 @@ std::string cip_type_display_name(uint16_t type_code) {
     return "Unknown (" + hex4(type_code) + ")";
 }
 
-// The whole ODVA elementary-type code range -- used as a plausibility gate for the Read Tag(
-// Fragmented) response heuristic (see decode_cip_response_data): a real elementary type code
-// always falls in here, so a response that doesn't is either a structured/UDT/array type this
-// decoder doesn't decode, or -- just as likely, per real-capture research, see enip.hpp's file
-// header comment -- not a Rockwell tag read at all, but some other object class's reuse of the
-// same service number against a class/instance-addressed path.
-bool cip_is_plausible_type_code(uint16_t type_code) { return type_code >= 0xC1 && type_code <= 0xDE; }
+// The whole ODVA elementary-type code range, PLUS the >= 0x02A0 Structured Data Type range (see
+// cip_type_is_structured) -- used as a plausibility gate for the Read Tag(Fragmented) response
+// heuristic (see decode_cip_response_data): a real elementary type code always falls in
+// 0xC1-0xDE, and a genuine UDT (or array-of-UDT) tag read always falls in the structured range --
+// together still a strong signal (both are Rockwell/ODVA-reserved sentinel ranges no unrelated
+// object class's reply would coincidentally start with), so a response outside BOTH ranges is not
+// a Rockwell tag read at all, but some other object class's reuse of the same service number
+// against a class/instance-addressed path.
+bool cip_is_plausible_type_code(uint16_t type_code) {
+    return (type_code >= 0xC1 && type_code <= 0xDE) || cip_type_is_structured(type_code);
+}
 
 // --- EPATH walking ------------------------------------------------------------
 
@@ -332,10 +355,13 @@ CipMessage decode_cip_message(ByteSpan bytes, int depth);  // forward declaratio
 
 // Decodes up to kMaxCipElements array elements of `type_code` starting at `c`'s current position,
 // appending one rendered value per element to msg.values. For a type outside the decoded subset
-// (cip_type_info returns nullopt), shows the remaining bytes as hex instead -- either because it's
-// a recognized-but-out-of-scope elementary type (STRING/structured/EPATH/...) or, when
-// `type_code` isn't even a plausible elementary type code at all, the caller has already noted
-// that separately and this function is not reached for that case (see decode_cip_response_data).
+// (cip_type_info returns nullopt), shows the remaining bytes as hex instead -- a recognized-but-
+// out-of-scope elementary type (STRING2/STRINGN/STRINGI/EPATH/ENGUNIT-as-a-value/time-family
+// types/...; STRING/SHORT_STRING and structured/UDT types are handled by their own dedicated
+// decode paths before this function is ever called -- see decode_cip_string_elements/
+// decode_cip_structured_element and their callers). When `type_code` isn't even a plausible
+// elementary type code at all, the caller has already noted that separately and this function is
+// not reached for that case (see decode_cip_response_data).
 void decode_cip_typed_elements(Cursor& c, uint16_t type_code, uint16_t count, CipMessage& msg) {
     auto info = cip_type_info(type_code);
     if (!info) {
@@ -380,6 +406,84 @@ void decode_cip_typed_elements(Cursor& c, uint16_t type_code, uint16_t count, Ci
         msg.notes.push_back("truncated while decoding element " + std::to_string(decoded_count + 1) + " of " +
                              std::to_string(count));
     }
+}
+
+// Decodes up to `count` STRING (0xD0)/SHORT_STRING (0xDA) elements starting at `c`'s current
+// position, appending one rendered value per element to msg.values -- plain decoded text, matching
+// how bacnet.cpp's Character String decode embeds recognized-charset text directly with no
+// quoting/escaping wrapper (JSON-format output already runs every values[] entry through
+// output.cpp's own json_escape, so control bytes/quotes inside the text are handled safely there,
+// not here). Unlike decode_cip_typed_elements's fixed-size types, there is no fixed per-element
+// size to multiply `count` by -- each element's own length prefix says how many bytes it (and
+// therefore where the next element starts) occupies. `count` is an upper bound, not a guarantee:
+// a Write_Tag(_Fragmented) request carries a real, wire-declared element_count (see
+// decode_write_tag_request), but a Read_Tag(_Fragmented) RESPONSE carries no element count at all
+// (see decode_cip_response_data's own comment on why) -- for that caller, `count` is passed as
+// 0xFFFF, a sentinel meaning "however many fit" rather than a real declared bound, and this simply
+// stops when kMaxCipElements or the available bytes run out (the overwhelmingly common case being
+// exactly one string).
+void decode_cip_string_elements(Cursor& c, uint16_t type_code, uint16_t count, CipMessage& msg) {
+    constexpr uint16_t kUnknownCount = 0xFFFF;
+    size_t decoded_count = 0;
+    bool truncated = false;
+    try {
+        for (uint16_t i = 0; i < count && decoded_count < kMaxCipElements; ++i) {
+            if (c.remaining() == 0) break;
+            size_t len = (type_code == 0xDA) ? c.u8() : c.u16le();
+            if (len > c.remaining()) {
+                truncated = true;
+                break;
+            }
+            std::string text;
+            text.reserve(len);
+            for (size_t j = 0; j < len; ++j) text += static_cast<char>(c.u8());
+            msg.values.push_back(text);
+            ++decoded_count;
+        }
+    } catch (const ParseError&) {
+        truncated = true;
+    }
+    if (truncated) {
+        msg.notes.push_back("truncated while decoding " + cip_type_display_name(type_code) + " element " +
+                             std::to_string(decoded_count + 1));
+    }
+    if (count != kUnknownCount && count > kMaxCipElements) {
+        msg.notes.push_back("stopped after " + std::to_string(kMaxCipElements) + " of " + std::to_string(count) +
+                             " element(s) (safety cap)");
+    }
+    msg.data_decoded = true;
+}
+
+// A CIP "Structured Data Type" response/request value (Rockwell Logix5000's encoding for
+// reading/writing a UDT-typed -- or array-of-UDT-typed -- tag): the type code itself
+// (cip_type_is_structured) is just a sentinel meaning "what follows is a 2-byte Structure Handle,
+// then the raw struct instance bytes" -- it carries no size/member information on its own. This
+// decoder has no access to the UDT's Template definition (member names/types/offsets), which is
+// obtained separately, out of band, via a Get_Attribute_List against the Template object -- not
+// something tracked across packets here -- so it stops at extracting the Structure Handle (real,
+// useful metadata: it's effectively a fingerprint of the UDT's member layout) and shows the
+// remaining bytes as hex rather than guessing at member boundaries. This also means an array of
+// struct instances can't be split into one entry per element -- there's no way to know where one
+// instance ends and the next begins without that same missing per-instance size information -- so
+// the whole remaining byte range is shown as a single block. STRING2 (0xD5, double-byte character
+// sets), STRINGN (0xD9), STRINGI (0xDE, international string), and EPATH/ENGUNIT (0xDC/0xDD) as an
+// elementary value remain deliberately out of scope -- only STRING/SHORT_STRING and structured/UDT
+// are covered.
+void decode_cip_structured_element(Cursor& c, CipMessage& msg) {
+    if (c.remaining() < 2) {
+        msg.notes.push_back("Structured Data Type value too short for a structure handle");
+        msg.data_decoded = true;
+        return;
+    }
+    uint16_t structure_handle = c.u16le();
+    msg.values.push_back("structure_handle=" + hex4(structure_handle));
+    if (c.remaining() > 0) {
+        msg.notes.push_back("UDT/structured member data (" + std::to_string(c.remaining()) +
+                             " byte(s)) not value-decoded -- this decoder has no access to the tag's "
+                             "Template definition (member names/types/offsets), obtained separately via "
+                             "Get_Attribute_List against the Template object: " + to_hex(c.rest()));
+    }
+    msg.data_decoded = true;
 }
 
 // Shared by Multiple_Service_Packet's request AND response: the envelope (a 16-bit member/reply
@@ -439,7 +543,13 @@ void decode_write_tag_request(CipMessage& msg, ByteSpan data, bool fragmented) {
         head << " byte_offset=" << c.u32le();
     }
     msg.values.push_back(head.str());
-    decode_cip_typed_elements(c, type_code, count, msg);
+    if (cip_type_is_structured(type_code)) {
+        decode_cip_structured_element(c, msg);
+    } else if (cip_type_is_variable_length_string(type_code)) {
+        decode_cip_string_elements(c, type_code, count, msg);
+    } else {
+        decode_cip_typed_elements(c, type_code, count, msg);
+    }
 }
 
 // Unconnected_Send (Connection Manager service 0x52): Priority/Time_Tick(1) + Timeout_Ticks(1) +
@@ -578,16 +688,22 @@ void decode_cip_response_data(uint8_t base, CipMessage& msg, ByteSpan data, int 
             uint16_t type_code = c.u16le();
             if (cip_is_plausible_type_code(type_code)) {
                 msg.values.push_back("type=" + cip_type_display_name(type_code));
-                auto info = cip_type_info(type_code);
-                if (info && info->size > 0) {
-                    uint16_t count = static_cast<uint16_t>(std::min<size_t>(c.remaining() / info->size, 0xFFFFu));
-                    decode_cip_typed_elements(c, type_code, count, msg);
+                if (cip_type_is_structured(type_code)) {
+                    decode_cip_structured_element(c, msg);
+                } else if (cip_type_is_variable_length_string(type_code)) {
+                    decode_cip_string_elements(c, type_code, /*count=*/0xFFFF, msg);
                 } else {
-                    msg.notes.push_back(cip_type_display_name(type_code) +
-                                         " is not value-decoded in this groundwork release -- showing "
-                                         "remaining bytes as hex: " +
-                                         to_hex(c.rest()));
-                    msg.data_decoded = true;
+                    auto info = cip_type_info(type_code);
+                    if (info && info->size > 0) {
+                        uint16_t count = static_cast<uint16_t>(std::min<size_t>(c.remaining() / info->size, 0xFFFFu));
+                        decode_cip_typed_elements(c, type_code, count, msg);
+                    } else {
+                        msg.notes.push_back(cip_type_display_name(type_code) +
+                                             " is not value-decoded in this groundwork release -- showing "
+                                             "remaining bytes as hex: " +
+                                             to_hex(c.rest()));
+                        msg.data_decoded = true;
+                    }
                 }
                 return;
             }

@@ -2716,6 +2716,108 @@ def build_enip_sample():
     (TESTS_DIR / "sample_enip.pcap").write_bytes(data)
 
 
+def build_enip_string_and_structured_sample():
+    """A hand-built EtherNet/IP session (RegisterSession handshake, then a series of symbolic
+    Read_Tag/Write_Tag request+response pairs over that one registered session) exercising the two
+    CIP value categories build_enip_sample above doesn't touch: STRING (0xD0)/SHORT_STRING (0xDA)
+    elementary types, and Rockwell Logix5000's Structured Data Type (UDT/array-of-UDT tag)
+    encoding (type code >= 0x02A0, a 2-byte Structure Handle followed by raw member bytes) -- see
+    decode_cip_string_elements/decode_cip_structured_element in enip.cpp for the decoder side."""
+    packets = []
+    client_seq = [8000]
+    server_seq = [9000]
+
+    def add(from_client: bool, payload: bytes):
+        if from_client:
+            src_port, dst_port = 52000, ENIP_PORT
+            src_ip, dst_ip = HMI_IP, PLC_IP
+            src_mac, dst_mac = HMI_MAC, PLC_MAC
+            seq, ack = client_seq[0], server_seq[0]
+            client_seq[0] += len(payload)
+        else:
+            src_port, dst_port = ENIP_PORT, 52000
+            src_ip, dst_ip = PLC_IP, HMI_IP
+            src_mac, dst_mac = PLC_MAC, HMI_MAC
+            seq, ack = server_seq[0], client_seq[0]
+            server_seq[0] += len(payload)
+        tcp = tcp_header(src_port, dst_port, seq, ack, TCP_PSH | TCP_ACK, len(payload)) + payload
+        ip = ipv4_header(src_ip, dst_ip, 6, len(tcp), 0x5200 + len(packets)) + tcp
+        packets.append(eth_header(dst_mac, src_mac, 0x0800) + ip)
+
+    session_handle = 0x55667788
+    ctx = b"CS-ENIP2"
+
+    # 1) & 2) RegisterSession request/response -- same handshake shape as build_enip_sample above.
+    add(True, enip_message(0x0065, data=struct.pack("<HH", 1, 0), session_handle=0, sender_context=ctx))
+    add(False, enip_message(0x0065, data=struct.pack("<HH", 1, 0), session_handle=session_handle,
+                             sender_context=ctx))
+
+    # 3) & 4) Read_Tag request/response for tag "FaultMessage": a STRING (0xD0) value. Expected
+    #    decoded values: type=STRING, "PumpFault" (len=9, ASCII, no null terminator/padding).
+    fault_text = b"PumpFault"
+    add(True, enip_message(0x006F, data=enip_cpf_unconnected(cip_read_tag_request("FaultMessage", 1)),
+                            session_handle=session_handle, sender_context=ctx))
+    add(False, enip_message(
+        0x006F,
+        data=enip_cpf_unconnected(cip_read_tag_response(0xD0, struct.pack("<H", len(fault_text)) + fault_text)),
+        session_handle=session_handle, sender_context=ctx))
+
+    # 5) & 6) Write_Tag request/response for tag "StatusCode": a SHORT_STRING (0xDA) value.
+    #    Expected decoded value: type=SHORT_STRING element_count=1, "OK" (len=2, ASCII).
+    status_text = b"OK"
+    add(True, enip_message(
+        0x006F,
+        data=enip_cpf_unconnected(cip_write_tag_request(
+            "StatusCode", 0xDA, bytes([len(status_text)]) + status_text, 1)),
+        session_handle=session_handle, sender_context=ctx))
+    add(False, enip_message(0x006F, data=enip_cpf_unconnected(cip_write_tag_response(0x00)),
+                             session_handle=session_handle, sender_context=ctx))
+
+    # 7) & 8) Read_Tag request/response for tag "EmptyMessage": a STRING (0xD0) value whose length
+    #    prefix is 0 -- the empty-string edge case. Expected decoded values: type=STRING, "" (an
+    #    empty string entry in enip_cip_values).
+    add(True, enip_message(0x006F, data=enip_cpf_unconnected(cip_read_tag_request("EmptyMessage", 1)),
+                            session_handle=session_handle, sender_context=ctx))
+    add(False, enip_message(
+        0x006F, data=enip_cpf_unconnected(cip_read_tag_response(0xD0, struct.pack("<H", 0))),
+        session_handle=session_handle, sender_context=ctx))
+
+    # 9) & 10) Read_Tag request/response for tag "MotorParams": a UDT-typed tag -- Structured Data
+    #    Type (type code 0x02A0, in the >= 0x02A0 reserved range) + a hand-chosen Structure Handle
+    #    (0x1234) + 6 bytes of arbitrary "member data" (meaningless here -- shown as hex, since
+    #    this decoder has no Template definition to split it into members). Expected decoded
+    #    values: type=Structured Data Type (0x02A0), structure_handle=0x1234; the member bytes
+    #    show up as a hex note, not as a values[] entry.
+    structure_handle = 0x1234
+    member_bytes = b"\x01\x00\x2A\x00\x00\x00"
+    add(True, enip_message(0x006F, data=enip_cpf_unconnected(cip_read_tag_request("MotorParams", 1)),
+                            session_handle=session_handle, sender_context=ctx))
+    add(False, enip_message(
+        0x006F,
+        data=enip_cpf_unconnected(cip_read_tag_response(
+            0x02A0, struct.pack("<H", structure_handle) + member_bytes)),
+        session_handle=session_handle, sender_context=ctx))
+
+    # 11) & 12) Write_Tag request/response writing the same UDT shape back to "MotorParams".
+    #     Expected decoded values: type=Structured Data Type (0x02A0) element_count=1,
+    #     structure_handle=0x1234 (same member bytes note as above).
+    add(True, enip_message(
+        0x006F,
+        data=enip_cpf_unconnected(cip_write_tag_request(
+            "MotorParams", 0x02A0, struct.pack("<H", structure_handle) + member_bytes, 1)),
+        session_handle=session_handle, sender_context=ctx))
+    add(False, enip_message(0x006F, data=enip_cpf_unconnected(cip_write_tag_response(0x00)),
+                             session_handle=session_handle, sender_context=ctx))
+
+    # 13) UnRegisterSession -- no response by spec.
+    add(True, enip_message(0x0066, data=b"", session_handle=session_handle, sender_context=ctx))
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_002_100 + i, i * 1000)
+    (TESTS_DIR / "sample_enip_string_and_structured.pcap").write_bytes(data)
+
+
 def build_enip_nop_precedence_sample():
     """Regression fixture for the NOP-exclusion fix (see enip_command_name's comment in enip.cpp
     and tests/real_captures/enip/ATTRIBUTION.md): a 24-byte all-zero buffer -- exactly what a NOP
@@ -6698,6 +6800,7 @@ if __name__ == "__main__":
     build_iec104_extended_types_sample()
     build_iec104_modbus_precedence_sample()
     build_enip_sample()
+    build_enip_string_and_structured_sample()
     build_enip_nop_precedence_sample()
     build_enip_cip_io_sample()
     build_policy_functions_enip_sample()
