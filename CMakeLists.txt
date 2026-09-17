@@ -5615,6 +5615,138 @@ set_tests_properties(policy_vlan_zone_json_format PROPERTIES
   PASS_REGULAR_EXPRESSION "\"is_vlan_conduit\": true.*\"ethernet_flows\": \\[.*\"has_vlan_tag\": true,\n *\"vlan_id\": 100,\n *\"vlan_zone\": \"ot_vlan\".*\"has_vlan_tag\": false,\n *\"vlan_id\": null,\n *\"vlan_zone\": \"unclassified\"")
 
 # ---------------------------------------------------------------------------------------------
+# Resolver, wired into `policy validate`'s report too (write_policy_report_text/
+# write_policy_report_json in policy_engine.cpp) -- the same OUI/hostname/service-name
+# annotations exercised earlier (see this file's own "Resolver" section, above the resolver_*
+# `decode` tests) now applied to FlowReport's client_ip/server_ip/server_port (and its
+# client_mac/server_mac base-value gap-fix) and EthernetFlowReport's mac_a/mac_b.
+# `policy validate` takes the identical --no-oui/--resolve/--hosts/--nn/--services flags (see
+# cli_main.cpp's policy_validate_cmd) against the same tests/hosts_sample.txt/
+# tests/services_sample.txt fixtures used by `decode`'s own resolver tests (RESOLVER_HOSTS/
+# RESOLVER_SERVICES, set once, above). resolver.hpp's file header previously documented this as
+# an explicit ROADMAP follow-up, out of scope for the original `decode`-only feature -- this
+# section is that follow-up.
+# ---------------------------------------------------------------------------------------------
+
+add_test(NAME policy_resolver_oui_vendor_shown_by_default_text
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/compliant.yaml")
+set_tests_properties(policy_resolver_oui_vendor_shown_by_default_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "mac: 00:0c:29:11:22:33 \\(VMware\\) -> 00:0c:29:aa:bb:cc \\(VMware\\)")
+
+add_test(NAME policy_resolver_oui_vendor_shown_by_default_json
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/compliant.yaml" --format json)
+set_tests_properties(policy_resolver_oui_vendor_shown_by_default_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"client_mac\": \"00:0c:29:11:22:33\",\n *\"server_mac\": \"00:0c:29:aa:bb:cc\",\n *\"client_mac_vendor\": \"VMware\",\n *\"server_mac_vendor\": \"VMware\",")
+
+add_test(NAME policy_resolver_no_oui_suppresses_vendor_text
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/compliant.yaml" --no-oui)
+set_tests_properties(policy_resolver_no_oui_suppresses_vendor_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "mac: 00:0c:29:11:22:33 -> 00:0c:29:aa:bb:cc\n"
+  FAIL_REGULAR_EXPRESSION "VMware")
+
+# client_mac/server_mac themselves (the base gap-fix) stay present in JSON even with --no-oui --
+# only the *_vendor annotation is suppressed, same "base value vs. annotation" distinction as
+# decode's own resolver_base_src_dst_mac_always_present_regardless_of_no_oui test.
+add_test(NAME policy_resolver_no_oui_suppresses_vendor_json
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/compliant.yaml" --no-oui --format json)
+set_tests_properties(policy_resolver_no_oui_suppresses_vendor_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"client_mac\": \"00:0c:29:11:22:33\","
+  FAIL_REGULAR_EXPRESSION "_mac_vendor")
+
+add_test(NAME policy_resolver_hostname_off_by_default
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/compliant.yaml")
+set_tests_properties(policy_resolver_hostname_off_by_default PROPERTIES
+  FAIL_REGULAR_EXPRESSION "hmi-01|plc-01")
+
+add_test(NAME policy_resolver_resolve_with_hosts_file_annotates_text
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/compliant.yaml" --resolve --hosts "${RESOLVER_HOSTS}")
+set_tests_properties(policy_resolver_resolve_with_hosts_file_annotates_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "192.168.1.50 \\(hmi-01\\) -> 192.168.1.10 \\(plc-01\\):502")
+
+add_test(NAME policy_resolver_resolve_with_hosts_file_annotates_json
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/compliant.yaml" --resolve --hosts "${RESOLVER_HOSTS}" --format json)
+set_tests_properties(policy_resolver_resolve_with_hosts_file_annotates_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"client_hostname\": \"hmi-01\",\n *\"server_hostname\": \"plc-01\",")
+
+add_test(NAME policy_resolver_service_name_shown_by_default_text
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/compliant.yaml")
+set_tests_properties(policy_resolver_service_name_shown_by_default_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "192.168.1.10:502 \\(modbus\\)")
+
+add_test(NAME policy_resolver_nn_suppresses_service_name_text
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/compliant.yaml" --nn)
+set_tests_properties(policy_resolver_nn_suppresses_service_name_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "192.168.1.10:502  \\("
+  FAIL_REGULAR_EXPRESSION "502 \\(modbus\\)")
+
+add_test(NAME policy_resolver_nn_suppresses_service_name_json
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/compliant.yaml" --nn --format json)
+set_tests_properties(policy_resolver_nn_suppresses_service_name_json PROPERTIES
+  FAIL_REGULAR_EXPRESSION "_port_service")
+
+# --nn only disables service names -- OUI vendor annotation (an independent, still-default-on
+# lookup) must still appear.
+add_test(NAME policy_resolver_nn_does_not_affect_oui
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/compliant.yaml" --nn)
+set_tests_properties(policy_resolver_nn_does_not_affect_oui PROPERTIES
+  PASS_REGULAR_EXPRESSION "mac: 00:0c:29:11:22:33 \\(VMware\\)")
+
+add_test(NAME policy_resolver_services_file_overrides_builtin_table_text
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/compliant.yaml" --services "${RESOLVER_SERVICES}")
+set_tests_properties(policy_resolver_services_file_overrides_builtin_table_text PROPERTIES
+  # 502/tcp: overridden from the built-in "modbus" to "custom-modbus" -- FlowReport's server_port
+  # is the only port it carries (no client port -- see FlowReport's own comment), so unlike
+  # decode's own equivalent test, there's no client-side port to also exercise the "supplement" half.
+  PASS_REGULAR_EXPRESSION "192.168.1.10:502 \\(custom-modbus\\)"
+  FAIL_REGULAR_EXPRESSION "\\(modbus\\)")
+
+add_test(NAME policy_resolver_all_enabled_together_text
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/compliant.yaml" --resolve --hosts "${RESOLVER_HOSTS}" --services "${RESOLVER_SERVICES}")
+set_tests_properties(policy_resolver_all_enabled_together_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "192.168.1.50 \\(hmi-01\\) -> 192.168.1.10 \\(plc-01\\):502 \\(custom-modbus\\).*mac: 00:0c:29:11:22:33 \\(VMware\\) -> 00:0c:29:aa:bb:cc \\(VMware\\)")
+
+add_test(NAME policy_resolver_all_enabled_together_json
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/compliant.yaml" --resolve --hosts "${RESOLVER_HOSTS}" --services "${RESOLVER_SERVICES}" --format json)
+set_tests_properties(policy_resolver_all_enabled_together_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"client_mac_vendor\": \"VMware\",[^}]*\"server_mac_vendor\": \"VMware\",[^}]*\"client_hostname\": \"hmi-01\",[^}]*\"server_hostname\": \"plc-01\",[^}]*\"server_port_service\": \"custom-modbus\",")
+
+# --- Bad --hosts/--services paths rejected cleanly at CLI-parse time, same as decode's own -----
+
+add_test(NAME policy_resolver_bad_hosts_path_rejected
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/compliant.yaml" --resolve --hosts "${CMAKE_CURRENT_SOURCE_DIR}/tests/does_not_exist_hosts.txt")
+set_tests_properties(policy_resolver_bad_hosts_path_rejected PROPERTIES
+  WILL_FAIL TRUE)
+
+add_test(NAME policy_resolver_bad_services_path_rejected
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/compliant.yaml" --services "${CMAKE_CURRENT_SOURCE_DIR}/tests/does_not_exist_services.txt")
+set_tests_properties(policy_resolver_bad_services_path_rejected PROPERTIES
+  WILL_FAIL TRUE)
+
+# --- EthernetFlowReport (VLAN-zone L2 flows): OUI vendor annotation only -- no IP/port exists ---
+
+add_test(NAME policy_resolver_ethernet_flow_oui_vendor_shown_by_default_text
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_vlan_zones.pcap" --policy "${POLICY_DIR}/vlan_zone_mixed_results.yaml")
+set_tests_properties(policy_resolver_ethernet_flow_oui_vendor_shown_by_default_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "00:0c:29:11:22:33 \\(VMware\\) <-> 00:0c:29:aa:bb:cc \\(VMware\\)  \\(profinet")
+
+add_test(NAME policy_resolver_ethernet_flow_no_oui_suppresses_vendor_text
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_vlan_zones.pcap" --policy "${POLICY_DIR}/vlan_zone_mixed_results.yaml" --no-oui)
+set_tests_properties(policy_resolver_ethernet_flow_no_oui_suppresses_vendor_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "00:0c:29:11:22:33 <-> 00:0c:29:aa:bb:cc  \\(profinet"
+  FAIL_REGULAR_EXPRESSION "VMware")
+
+add_test(NAME policy_resolver_ethernet_flow_oui_vendor_json
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_vlan_zones.pcap" --policy "${POLICY_DIR}/vlan_zone_mixed_results.yaml" --format json)
+set_tests_properties(policy_resolver_ethernet_flow_oui_vendor_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"mac_a\": \"00:0c:29:11:22:33\",\n *\"mac_b\": \"00:0c:29:aa:bb:cc\",\n *\"mac_a_vendor\": \"VMware\",\n *\"mac_b_vendor\": \"VMware\",")
+
+add_test(NAME policy_resolver_ethernet_flow_no_oui_suppresses_vendor_json
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_vlan_zones.pcap" --policy "${POLICY_DIR}/vlan_zone_mixed_results.yaml" --no-oui --format json)
+set_tests_properties(policy_resolver_ethernet_flow_no_oui_suppresses_vendor_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"mac_a\": \"00:0c:29:11:22:33\","
+  FAIL_REGULAR_EXPRESSION "mac_._vendor")
+
+# ---------------------------------------------------------------------------------------------
 # Live capture (live_capture.hpp/cpp) -- an optional, build-time-detected libpcap (Linux) / Npcap
 # (Windows) dependency; see CMakeLists.txt's CONDUITSCOPE_HAVE_PCAP detection above. The CLI
 # surface (-i/--interface, --filter, --duration, --snaplen, --no-promiscuous, `interfaces`) exists

@@ -58,11 +58,16 @@
 // `--no-oui`, not `--nooui`, for consistency with those two. `--resolve`/`--hosts`/`--nn`/
 // `--services` are exactly as requested.
 //
-// Scope boundary: this is used ONLY by `decode`'s three per-packet output writers
-// (TextWriter/JsonWriter/CsvWriter in output.cpp), wired up in cli_main.cpp's run_decode. It is
-// deliberately NOT wired into `policy validate`/PolicyEngine/policy_engine.cpp's own report
-// rendering -- that's a separate, IP/zone-centric report format with its own conventions, out of
-// scope for this feature (see docs/MANUAL.md's ROADMAP for a follow-up note).
+// Scope: originally used only by `decode`'s three per-packet output writers
+// (TextWriter/JsonWriter/CsvWriter in output.cpp), wired up in cli_main.cpp's run_decode. A
+// follow-up feature (see docs/MANUAL.md's ROADMAP history) later wired the same Resolver into
+// `policy validate`'s own report too -- write_policy_report_text/write_policy_report_json in
+// policy_engine.cpp, wired up in cli_main.cpp's run_policy_validate, taking the identical
+// --no-oui/--resolve/--hosts/--nn/--services flags. That report has its own IP/zone-centric
+// conventions (see policy_engine.hpp's own comments on FlowReport/EthernetFlowReport), but the
+// same three lookups and the same "annotation, never a replacement; a miss adds nothing" rule
+// from this file apply there unchanged -- see write_policy_report_text/write_policy_report_json's
+// own doc comments in policy_engine.hpp for exactly how each report field is annotated.
 //
 // What this deliberately does NOT do, beyond "no live DNS" above:
 //   - No IPv6 anywhere, matching this entire codebase's IPv4-only convention (see ipv4.hpp's own

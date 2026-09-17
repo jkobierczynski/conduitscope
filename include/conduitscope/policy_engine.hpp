@@ -29,6 +29,15 @@
 
 namespace conduitscope {
 
+// Forward-declared rather than #include "conduitscope/resolver.hpp" here: this header only ever
+// needs a `const Resolver&` reference (in the two free function declarations at the bottom), never
+// any of its members, so a full include would be an unnecessary compile-time dependency for every
+// translation unit that just wants PolicyEngine/PolicyReport. See resolver.hpp's own file header
+// for why this OUI/hostname/service-name annotation now reaches `policy validate`'s report too --
+// it was originally scoped out there, but the same Resolver instance decode's writers already use
+// is now threaded through here as well (see write_policy_report_text/write_policy_report_json).
+class Resolver;
+
 enum class FlowVerdict {
     Allowed,        // a conduit permits this flow's protocol(s) at this port, in this direction,
                     // and (if that conduit restricts 'functions') every function/service observed
@@ -66,6 +75,18 @@ struct FlowReport {
     FlowVerdict verdict = FlowVerdict::Unclassified;
     std::string matched_conduit;  // set (non-empty) only when verdict == Allowed
     std::string reason;           // set (non-empty) when verdict != Allowed: why, for the report
+
+    // client_mac/server_mac: the same Ethernet source addressing decode's own DecodedPacket::
+    // src_mac/dst_mac carries, attributed to whichever side PolicyEngine decided is the client/
+    // server (see PolicyEngine::observe's doc comment) -- has_mac is false, and both strings stay
+    // empty, only for a capture whose link type isn't Ethernet at all (DecodedPacket::has_ethernet
+    // false for every packet on this flow; see decoder.hpp), which is rare but not impossible (a
+    // raw-IP or Linux "cooked capture" pcap). This is purely a base-value addition (mirroring
+    // decode's own src_mac/dst_mac gap-fix in output.cpp), independent of whether OUI resolution is
+    // even enabled -- a Resolver is only needed to turn this MAC into a vendor annotation, not to
+    // populate it in the first place.
+    bool has_mac = false;
+    std::string client_mac, server_mac;
 };
 
 // One observed raw-Ethernet "L2 flow" -- PROFINET RT, GOOSE, Sampled Values, or EtherCAT traffic
@@ -181,6 +202,11 @@ private:
         // per protocol.
         std::unordered_set<std::string> functions;
         size_t packet_count = 0;
+        // See FlowReport::has_mac/client_mac/server_mac's own comment -- mirrored here verbatim,
+        // set/refreshed exactly where client_ip/server_ip are (both the initial-packet guess and the
+        // later-SYN upgrade, see PolicyEngine::observe).
+        bool has_mac = false;
+        std::string client_mac, server_mac;
     };
 
     // Aggregated state for one L2 flow (protocol + canonical MAC pair) -- see EthernetFlowReport's
@@ -206,12 +232,31 @@ private:
 // Renders `report` as a human-readable, colorless text report to `out`. `capture_path`/
 // `policy_path` are shown in the report header purely for context (this function performs no I/O
 // of its own). `policy` supplies zone/conduit counts and names referenced in the report.
+//
+// `resolver` supplies the same OUI (MAC vendor)/hostname/service-name annotations `decode`'s own
+// TextWriter already provides (see resolver.hpp) -- a flow's client_ip/server_ip get a hostname
+// annotation, server_port gets a service-name annotation, and client_mac/server_mac (when has_mac)
+// or an EthernetFlowReport's mac_a/mac_b get an OUI-vendor annotation, all rendered inline right
+// after the raw value exactly like decode's own convention: never a replacement, and a lookup miss
+// (or a disabled lookup) adds nothing. Pass a default-constructed-equivalent Resolver (all three
+// lookups left at their CLI defaults, or all disabled via --no-oui/--nn with no --resolve) for a
+// caller that wants the byte-for-byte pre-annotation report; there is no separate unannotated
+// overload, matching decode's own writers, which always take a Resolver too.
 void write_policy_report_text(std::ostream& out, const PolicyReport& report, const Policy& policy,
-                               const std::string& capture_path, const std::string& policy_path);
+                               const std::string& capture_path, const std::string& policy_path,
+                               const Resolver& resolver);
 
 // Renders `report` as JSON to `out`, for scripting/automation (e.g. feeding a NIS2/IEC 62443 audit
 // pipeline). See docs/MANUAL.md's POLICY FILE FORMAT section for the exact schema.
+//
+// `resolver`: see write_policy_report_text's own comment above -- the JSON schema follows decode's
+// JsonWriter convention instead of the text convention: each annotation is its own separate named
+// field (client_mac_vendor/server_mac_vendor, client_hostname/server_hostname,
+// server_port_service, and for ethernet_flows mac_a_vendor/mac_b_vendor) placed alongside the base
+// field(s) it annotates, OMITTED ENTIRELY (not emitted as null) on a lookup miss or disabled
+// lookup -- see docs/MANUAL.md's POLICY FILE FORMAT "JSON report schema" for the exact field list.
 void write_policy_report_json(std::ostream& out, const PolicyReport& report, const Policy& policy,
-                               const std::string& capture_path, const std::string& policy_path);
+                               const std::string& capture_path, const std::string& policy_path,
+                               const Resolver& resolver);
 
 }  // namespace conduitscope

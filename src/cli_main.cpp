@@ -368,7 +368,9 @@ constexpr int kExitPolicyNonCompliant = 3;
 int run_policy_validate(const std::string& input, const std::string& interface_name,
                          const std::string& filter, int duration_seconds, int snaplen, bool promiscuous,
                          const std::string& policy_path, const std::string& output, const std::string& format,
-                         bool strict, bool quiet, std::ostream& diag) {
+                         bool strict, bool quiet,
+                         bool oui_enabled, bool resolve_hostnames, const std::string& hosts_path,
+                         bool service_names_enabled, const std::string& services_path, std::ostream& diag) {
     std::ofstream file_out;
     std::ostream* out = &std::cout;
     if (!output.empty()) {
@@ -382,6 +384,17 @@ int run_policy_validate(const std::string& input, const std::string& interface_n
 
     try {
         Policy policy = parse_policy_file(policy_path);
+
+        // Same Resolver, built the same "fail fast before opening the packet source" way, that
+        // run_decode above already builds for `decode`'s writers -- see resolver.hpp's file header:
+        // this OUI/hostname/service-name annotation now reaches `policy validate`'s report too, not
+        // just `decode`'s per-packet output.
+        std::vector<std::string> resolver_notes;
+        Resolver resolver(oui_enabled, resolve_hostnames, hosts_path, service_names_enabled,
+                           services_path, resolver_notes);
+        if (!quiet) {
+            for (const auto& note : resolver_notes) diag << "note: " << note << "\n";
+        }
 
         DecodeOptions options;
         options.strict = strict;
@@ -412,9 +425,9 @@ int run_policy_validate(const std::string& input, const std::string& interface_n
         std::string capture_label = interface_name.empty() ? input : "live:" + interface_name;
         PolicyReport report = engine.finish();
         if (format == "json") {
-            write_policy_report_json(*out, report, policy, capture_label, policy_path);
+            write_policy_report_json(*out, report, policy, capture_label, policy_path, resolver);
         } else {
-            write_policy_report_text(*out, report, policy, capture_label, policy_path);
+            write_policy_report_text(*out, report, policy, capture_label, policy_path, resolver);
         }
 
         if (!interface_name.empty() && !quiet) {
@@ -429,6 +442,9 @@ int run_policy_validate(const std::string& input, const std::string& interface_n
     } catch (const PolicyError& e) {
         // e.what() is already "<policy_path>:<line>: <message>" (see policy.cpp's fail()) --
         // no need to prefix the path again here.
+        std::cerr << "error: " << e.what() << "\n";
+        return 1;
+    } catch (const ResolverError& e) {
         std::cerr << "error: " << e.what() << "\n";
         return 1;
     } catch (const ParseError& e) {
@@ -673,6 +689,8 @@ int main(int argc, char** argv) {
     bool policy_promiscuous = true;
     std::string policy_format = "text";
     bool policy_strict = false;
+    bool policy_oui = true, policy_resolve = false, policy_service_names = true;
+    std::string policy_hosts_file, policy_services_file;
     auto* policy_input_opt =
         policy_validate_cmd->add_option("-r,--read", policy_input,
                                          "Input capture file (classic pcap or pcapng, auto-detected)")
@@ -709,6 +727,26 @@ int main(int argc, char** argv) {
         ->capture_default_str();
     policy_validate_cmd->add_flag("--strict", policy_strict,
                                    "Abort on the first malformed packet instead of reporting it and continuing");
+    policy_validate_cmd->add_flag("!--no-oui", policy_oui,
+                                   "Disable OUI (MAC vendor) resolution in the report, on by default -- "
+                                   "see docs/MANUAL.md's OUTPUT FORMATS section");
+    policy_validate_cmd->add_flag(
+        "--resolve", policy_resolve,
+        "Enable hostname resolution from an explicitly-supplied hosts file (--hosts) in the report; "
+        "off by default; NEVER performs live DNS -- file-only, see docs/MANUAL.md's OUTPUT FORMATS "
+        "section");
+    policy_validate_cmd
+        ->add_option("--hosts", policy_hosts_file,
+                      "Unix /etc/hosts-style file to resolve IP addresses from, for --resolve")
+        ->check(CLI::ExistingFile);
+    policy_validate_cmd->add_flag("!--nn", policy_service_names,
+                                   "Disable service name resolution (built-in table plus --services) "
+                                   "in the report, on by default");
+    policy_validate_cmd
+        ->add_option("--services", policy_services_file,
+                      "Unix /etc/services-style file to supplement/override the built-in "
+                      "port->service-name table")
+        ->check(CLI::ExistingFile);
 
     // --- version ------------------------------------------------------------
     app.add_subcommand("version", "Print version and build information");
@@ -762,7 +800,8 @@ int main(int argc, char** argv) {
     if (policy_validate_cmd->parsed()) {
         return run_policy_validate(policy_input, policy_interface, policy_filter, policy_duration, policy_snaplen,
                                     policy_promiscuous, policy_file, policy_output, policy_format, policy_strict,
-                                    quiet, *diag);
+                                    quiet, policy_oui, policy_resolve, policy_hosts_file, policy_service_names,
+                                    policy_services_file, *diag);
     }
     if (policy_cmd->parsed()) {
         std::cerr << "error: 'policy' needs a subcommand (currently only 'validate' exists)\n";

@@ -228,6 +228,11 @@ conduitscope policy validate (-r FILE | -i INTERFACE) --policy POLICY_FILE [opti
 | `-o, --output FILE` | stdout | Write the report here instead of stdout. |
 | `-f, --format {text,json}` | `text` | Report format. `text` is the human-readable report shown throughout this section; `json` is meant for scripting an audit pipeline -- see POLICY FILE FORMAT's "JSON report schema" below. |
 | `--strict` | off | Same meaning as `decode --strict`: abort on the first packet that fails to parse at the Ethernet/IPv4/TCP layer, instead of reporting a warning and continuing to evaluate the rest of the capture. |
+| `--no-oui` | off (i.e. OUI/MAC-vendor resolution on by default) | Same meaning as `decode --no-oui`: disable OUI (MAC vendor) resolution against the built-in table, applied to the report's flow MAC addresses. See OUTPUT FORMATS' "Name resolution" subsection. |
+| `--resolve` | off | Same meaning as `decode --resolve`: enable hostname resolution from an explicitly-supplied `--hosts` file, applied to the report's flow IP addresses. **Never performs live DNS** -- file-only. |
+| `--hosts FILE` | *(none)* | Same meaning as `decode --hosts`: Unix `/etc/hosts`-style file to resolve IP addresses from, for `--resolve`. Must exist. |
+| `--nn` | off (i.e. service-name resolution on by default) | Same meaning as `decode --nn`: disable service name (port -> name) resolution, applied to the report's flow server port. |
+| `--services FILE` | *(none)* | Same meaning as `decode --services`: Unix `/etc/services`-style file to supplement/override the built-in port->service-name table. Must exist. |
 
 With `-i`, the report's `capture:` line shows `live:<interface>` in place of a
 file path, and Ctrl+C (or `--duration` elapsing) stops the capture and still
@@ -287,13 +292,20 @@ UNCLASSIFIED TRAFFIC (0):
   (none)
 
 ALLOWED (1):
-  [1] 192.168.1.50 -> 192.168.1.10:502  (modbus, 3 packet(s))
+  [1] 192.168.1.50 -> 192.168.1.10:502 (modbus)  (modbus, 3 packet(s))
       zones: hmi_zone -> plc_zone, matched conduit "HMI polls PLC via Modbus"
+      mac: 00:0c:29:11:22:33 (VMware) -> 00:0c:29:aa:bb:cc (VMware)
 
 Conduits never exercised by this capture (2):
   - HMI polls PLC via DNP3
   - Engineering station S7comm
 ```
+
+The `(modbus)` after `:502` and the `(VMware)` vendor names come from the
+same OUI/service-name resolution `decode` has, on by default -- see OUTPUT
+FORMATS' "Name resolution" subsection and the option table above. Add
+`--resolve --hosts FILE` to also annotate `192.168.1.50`/`192.168.1.10`
+with a hostname, exactly as `decode` would.
 
 ### `version` -- print version and build information
 
@@ -950,7 +962,12 @@ an array depending on how the policy file happened to write it:
     {
       "client_ip": "192.168.1.50",
       "server_ip": "192.168.1.10",
+      "client_mac": "00:0c:29:11:22:33",
+      "server_mac": "00:0c:29:aa:bb:cc",
+      "client_mac_vendor": "VMware",
+      "server_mac_vendor": "VMware",
       "server_port": 502,
+      "server_port_service": "modbus",
       "client_zone": "hmi_zone",
       "server_zone": "plc_zone",
       "protocols": ["modbus"],
@@ -972,6 +989,23 @@ is only non-`null` otherwise (a short, human-readable explanation, the same
 text the `text` report shows). Same for `ethernet_flows[]`'s own `verdict`/
 `matched_conduit`/`reason` below.
 
+**Resolver annotations** (`--no-oui`/`--resolve`/`--hosts`/`--nn`/
+`--services` -- see the option table above and OUTPUT FORMATS' "Name
+resolution" subsection): `client_mac`/`server_mac` are a base-value
+addition, present as a string whenever this flow's link type is Ethernet
+(`null` only for a non-Ethernet-linktype capture, e.g. raw IP or a Linux
+"cooked capture"), independent of whether OUI resolution is even enabled.
+`client_mac_vendor`/`server_mac_vendor` (OUI lookup), `client_hostname`/
+`server_hostname` (hostname lookup -- absent above since `--resolve` wasn't
+given), and `server_port_service` (service-name lookup; `FlowReport` only
+ever carries the server's port, not the client's -- see its own comment in
+`policy_engine.hpp`) are each OMITTED ENTIRELY, never emitted as `null`, on
+a lookup miss or a
+disabled lookup (`--no-oui`/`--nn`, or `--resolve` with no matching
+`--hosts` entry). Same convention `decode`'s own JSON output uses for its
+`src_mac_vendor`/`dst_mac_vendor`/`src_hostname`/`dst_hostname`/
+`src_port_service`/`dst_port_service` fields.
+
 **`is_vlan_conduit`** (per conduit, ROADMAP item 15) -- `true` when every
 zone this conduit references is a VLAN zone, `false` when every zone is an
 IPv4 zone (a conduit can never mix the two -- see "Conduits" above).
@@ -987,6 +1021,8 @@ these protocols have neither):
   "protocol": "goose",
   "mac_a": "00:0c:29:11:22:33",
   "mac_b": "00:0c:29:aa:bb:cc",
+  "mac_a_vendor": "VMware",
+  "mac_b_vendor": "VMware",
   "has_vlan_tag": true,
   "vlan_id": 100,
   "vlan_zone": "ot_vlan",
@@ -996,6 +1032,11 @@ these protocols have neither):
   "reason": null
 }
 ```
+
+`mac_a_vendor`/`mac_b_vendor` are the same OUI-vendor annotation as
+`flows[]`'s own `client_mac_vendor`/`server_mac_vendor` above, omitted
+entirely (never `null`) on a lookup miss or `--no-oui` -- an L2 flow has no
+IP or port at all, so there's no hostname/service-name equivalent here.
 
 `vlan_id` is `null` when `has_vlan_tag` is `false` (the frame carried no
 802.1Q tag at all). `vlan_zone` is the declared VLAN zone the frame's tag
@@ -2923,8 +2964,11 @@ default:
   ordinary infrastructure traffic. `--services` is the documented way to
   extend or override it for anything this table doesn't cover.
 
-Scope: this is `decode`-only. `policy validate`'s report is not (yet)
-enriched with any of these annotations -- see LIMITATIONS and ROADMAP.
+Scope: `decode` and `policy validate` share the exact same three lookups and
+CLI flags. `policy validate` takes the identical `--no-oui`/`--resolve`/
+`--hosts`/`--nn`/`--services` options and annotates its own report the same
+way -- see POLICY FILE FORMAT's "`policy validate`" section for exactly
+which report fields get which annotation.
 
 ## PROTOCOL COVERAGE
 
@@ -8149,11 +8193,6 @@ These are current, not aspirational -- each has a corresponding ROADMAP item.
   genuinely sharing the identical LLC DSAP/SSAP pair (`0x42`/`0x42`) with
   no other structural distinguisher available at that layer. GARP's own
   body is never decoded, only named.
-- **Name resolution (OUI/hostname/service name) is `decode`-only.**
-  `policy validate`'s report (text or JSON) is not enriched with any
-  vendor/hostname/service-name annotation -- it's a separate, IP/zone-centric
-  report format with its own conventions, out of scope for this feature. See
-  OUTPUT FORMATS' "Name resolution" subsection and ROADMAP.
 - **The built-in service-name table is a small, hand-curated set, not an
   exhaustive IANA services dump.** It covers this project's own OT/ICS
   protocol default ports plus a modest set of common IT/OT-adjacent ports --
@@ -9260,15 +9299,31 @@ Rough order, each building on the groundwork this release establishes:
     doing nothing); and, unrelated to VLANs, DNP3's link address (item
     13) as an alternative (or additional) zone key once/if that's ever
     taken on.
-16. **Extend `policy validate`'s report with the same OUI/hostname/service-
-    name annotations `decode` now has** (see OUTPUT FORMATS' "Name
-    resolution" subsection and LIMITATIONS) -- currently `decode`-only,
-    deliberately out of scope for this feature's first pass since
-    `policy validate`'s report is a separate, IP/zone-centric format with
-    its own conventions (`PolicyEngine`/`policy_engine.hpp`) rather than a
-    per-packet `DecodedPacket` stream. Would need its own `--no-oui`/
-    `--resolve`/`--hosts`/`--nn`/`--services` flags (or to share `decode`'s)
-    threaded through to wherever the report renders a MAC/IP/port today.
+16. ~~Extend `policy validate`'s report with the same OUI/hostname/service-
+    name annotations `decode` now has~~ -- **done**: `policy validate` now
+    takes the identical `--no-oui`/`--resolve`/`--hosts`/`--nn`/`--services`
+    flags `decode` does (see OUTPUT FORMATS' "Name resolution" subsection),
+    and its own report -- still the separate, IP/zone-centric format
+    described in POLICY FILE FORMAT, not a per-packet `DecodedPacket`
+    stream -- is annotated the same way: a `FlowReport`'s `client_ip`/
+    `server_ip` get a hostname annotation, `server_port` gets a service-name
+    annotation, and its `client_mac`/`server_mac` (a base-value gap-fix
+    mirroring `decode`'s own `src_mac`/`dst_mac` addition -- populated from
+    the same `DecodedPacket::src_mac`/`dst_mac` PolicyEngine already sees,
+    null/absent only for a non-Ethernet-linktype capture) get an OUI-vendor
+    annotation; an `EthernetFlowReport`'s `mac_a`/`mac_b` get OUI-vendor
+    annotation only, since an L2 flow has no IP or port at all. Text format
+    renders these inline right after the raw value (a `client_ip -> ip:port`
+    headline plus a `mac: a -> b` line beneath it); JSON format adds them as
+    separate fields (`client_mac`/`server_mac`, `client_mac_vendor`/
+    `server_mac_vendor`, `client_hostname`/`server_hostname`,
+    `server_port_service` on a flow; `mac_a_vendor`/`mac_b_vendor` on an
+    Ethernet flow), omitted entirely on a lookup miss or a disabled lookup,
+    never emitted as `null` -- the exact same "annotation, not a
+    replacement; a miss adds nothing" convention `resolver.hpp`'s file
+    header documents for `decode`. See `write_policy_report_text`/
+    `write_policy_report_json` in `policy_engine.hpp`/`.cpp` and
+    `run_policy_validate` in `cli_main.cpp`.
 17. **Passive OT asset inventory: pcap -> zones and conduits.** A new
     subcommand (working name `inventory`) that runs the opposite direction
     from `policy validate` -- instead of checking observed traffic against

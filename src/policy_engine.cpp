@@ -13,6 +13,7 @@
 #include "conduitscope/iec104.hpp"
 #include "conduitscope/ipv4.hpp"
 #include "conduitscope/modbus.hpp"
+#include "conduitscope/resolver.hpp"
 
 namespace conduitscope {
 
@@ -172,6 +173,14 @@ void PolicyEngine::observe(const DecodedPacket& dp) {
         fs.client_ip = src_is_client ? dp.src_ip : dp.dst_ip;
         fs.server_ip = src_is_client ? dp.dst_ip : dp.src_ip;
         fs.server_port = src_is_client ? dp.dst_port : dp.src_port;
+        // See FlowState::has_mac's own comment -- only ever set from an Ethernet-linktype packet;
+        // left at its default (false, empty) for a raw-IP/cooked-capture flow, exactly like
+        // DecodedPacket::src_mac/dst_mac themselves stay meaningless when !has_ethernet.
+        if (dp.has_ethernet) {
+            fs.has_mac = true;
+            fs.client_mac = src_is_client ? dp.src_mac : dp.dst_mac;
+            fs.server_mac = src_is_client ? dp.dst_mac : dp.src_mac;
+        }
         flow_order_.push_back(key);
         it = flows_.emplace(key, std::move(fs)).first;
     } else if (!it->second.initiator_known && (is_syn || is_syn_ack)) {
@@ -181,6 +190,11 @@ void PolicyEngine::observe(const DecodedPacket& dp) {
         it->second.client_ip = src_is_client ? dp.src_ip : dp.dst_ip;
         it->second.server_ip = src_is_client ? dp.dst_ip : dp.src_ip;
         it->second.server_port = src_is_client ? dp.dst_port : dp.src_port;
+        if (dp.has_ethernet) {
+            it->second.has_mac = true;
+            it->second.client_mac = src_is_client ? dp.src_mac : dp.dst_mac;
+            it->second.server_mac = src_is_client ? dp.dst_mac : dp.src_mac;
+        }
         it->second.initiator_known = true;
     }
 
@@ -269,6 +283,9 @@ PolicyReport PolicyEngine::finish() const {
         std::sort(fr.protocols.begin(), fr.protocols.end());
         fr.observed_functions.assign(fs.functions.begin(), fs.functions.end());
         std::sort(fr.observed_functions.begin(), fr.observed_functions.end());
+        fr.has_mac = fs.has_mac;
+        fr.client_mac = fs.client_mac;
+        fr.server_mac = fs.server_mac;
 
         auto client_ip_u32 = parse_ipv4_string(fs.client_ip);
         auto server_ip_u32 = parse_ipv4_string(fs.server_ip);
@@ -432,7 +449,8 @@ size_t PolicyReport::unclassified_count() const {
 
 namespace {
 
-void write_flow_group_text(std::ostream& out, const std::vector<const FlowReport*>& group, const char* label) {
+void write_flow_group_text(std::ostream& out, const std::vector<const FlowReport*>& group, const char* label,
+                            const Resolver& resolver) {
     out << label << " (" << group.size() << "):\n";
     if (group.empty()) {
         out << "  (none)\n";
@@ -440,7 +458,17 @@ void write_flow_group_text(std::ostream& out, const std::vector<const FlowReport
     }
     for (size_t i = 0; i < group.size(); ++i) {
         const FlowReport& f = *group[i];
-        out << "  [" << (i + 1) << "] " << f.client_ip << " -> " << f.server_ip << ":" << f.server_port;
+        // Hostname/service-name annotations, inline right after the raw value they explain -- same
+        // convention as output.cpp's endpoint() helper (see resolver.hpp's file header). A flow's
+        // server_port is always a TCP port (PolicyEngine only ever aggregates has_tcp packets into
+        // FlowReport -- see PolicyEngine::observe), so "tcp" is hardcoded here, unlike endpoint()'s
+        // own tcp/udp branch.
+        out << "  [" << (i + 1) << "] " << f.client_ip;
+        if (auto h = resolver.hostname(f.client_ip)) out << " (" << *h << ")";
+        out << " -> " << f.server_ip;
+        if (auto h = resolver.hostname(f.server_ip)) out << " (" << *h << ")";
+        out << ":" << f.server_port;
+        if (auto s = resolver.service_name(f.server_port, "tcp")) out << " (" << *s << ")";
         if (!f.protocols.empty()) out << "  (" << protocol_list_text(f.protocols) << ", " << f.packet_count << " packet(s))";
         else out << "  (" << f.packet_count << " packet(s), no recognized protocol)";
         out << "\n      zones: " << f.client_zone << " -> " << f.server_zone;
@@ -448,6 +476,17 @@ void write_flow_group_text(std::ostream& out, const std::vector<const FlowReport
             out << ", matched conduit \"" << f.matched_conduit << "\"";
         }
         out << "\n";
+        // MAC addressing (with OUI vendor annotations), as its own line -- absent entirely when this
+        // flow's link type isn't Ethernet (f.has_mac false; see FlowReport::has_mac's own comment).
+        // Mirrors decode's own TextWriter, which prints its "eth ..." line the same way, after the
+        // rest of a packet's info rather than folded into it.
+        if (f.has_mac) {
+            out << "      mac: " << f.client_mac;
+            if (auto v = resolver.oui_vendor(f.client_mac)) out << " (" << *v << ")";
+            out << " -> " << f.server_mac;
+            if (auto v = resolver.oui_vendor(f.server_mac)) out << " (" << *v << ")";
+            out << "\n";
+        }
         if (!f.reason.empty()) {
             out << "      " << f.reason << "\n";
         }
@@ -456,9 +495,10 @@ void write_flow_group_text(std::ostream& out, const std::vector<const FlowReport
 
 // Same idea as write_flow_group_text, for the L2/VLAN-zone side of the report -- rendered under a
 // "MAC_A <-> MAC_B" heading rather than "client -> server", since these protocols have no
-// client/server distinction (see EthernetFlowReport's own comment).
+// client/server distinction (see EthernetFlowReport's own comment). There is no IP or port here at
+// all, so only OUI vendor annotation applies (no hostname/service-name equivalent is possible).
 void write_ethernet_flow_group_text(std::ostream& out, const std::vector<const EthernetFlowReport*>& group,
-                                     const char* label) {
+                                     const char* label, const Resolver& resolver) {
     out << label << " (" << group.size() << "):\n";
     if (group.empty()) {
         out << "  (none)\n";
@@ -466,8 +506,11 @@ void write_ethernet_flow_group_text(std::ostream& out, const std::vector<const E
     }
     for (size_t i = 0; i < group.size(); ++i) {
         const EthernetFlowReport& f = *group[i];
-        out << "  [" << (i + 1) << "] " << f.mac_a << " <-> " << f.mac_b << "  (" << f.protocol << ", "
-            << f.packet_count << " packet(s))";
+        out << "  [" << (i + 1) << "] " << f.mac_a;
+        if (auto v = resolver.oui_vendor(f.mac_a)) out << " (" << *v << ")";
+        out << " <-> " << f.mac_b;
+        if (auto v = resolver.oui_vendor(f.mac_b)) out << " (" << *v << ")";
+        out << "  (" << f.protocol << ", " << f.packet_count << " packet(s))";
         out << "\n      vlan: " << (f.has_vlan_tag ? std::to_string(f.vlan_id) : std::string("(untagged)"))
             << ", zone: " << f.vlan_zone;
         if (f.verdict == FlowVerdict::Allowed) {
@@ -483,7 +526,8 @@ void write_ethernet_flow_group_text(std::ostream& out, const std::vector<const E
 }  // namespace
 
 void write_policy_report_text(std::ostream& out, const PolicyReport& report, const Policy& policy,
-                               const std::string& capture_path, const std::string& policy_path) {
+                               const std::string& capture_path, const std::string& policy_path,
+                               const Resolver& resolver) {
     out << "Zone/conduit policy validation\n";
     out << "  capture: " << capture_path << "\n";
     out << "  policy:  " << policy_path << " (" << policy.zones.size() << " zone(s), " << policy.conduits.size()
@@ -514,11 +558,11 @@ void write_policy_report_text(std::ostream& out, const PolicyReport& report, con
         else allowed.push_back(&f);
     }
 
-    write_flow_group_text(out, violations, "VIOLATIONS");
+    write_flow_group_text(out, violations, "VIOLATIONS", resolver);
     out << "\n";
-    write_flow_group_text(out, unclassified, "UNCLASSIFIED TRAFFIC");
+    write_flow_group_text(out, unclassified, "UNCLASSIFIED TRAFFIC", resolver);
     out << "\n";
-    write_flow_group_text(out, allowed, "ALLOWED");
+    write_flow_group_text(out, allowed, "ALLOWED", resolver);
     out << "\n";
 
     // Only printed at all once a policy declares at least one VLAN zone (see
@@ -546,11 +590,11 @@ void write_policy_report_text(std::ostream& out, const PolicyReport& report, con
             else eth_allowed_list.push_back(&f);
         }
 
-        write_ethernet_flow_group_text(out, eth_violations, "ETHERNET VIOLATIONS");
+        write_ethernet_flow_group_text(out, eth_violations, "ETHERNET VIOLATIONS", resolver);
         out << "\n";
-        write_ethernet_flow_group_text(out, eth_unclassified_list, "ETHERNET UNCLASSIFIED TRAFFIC");
+        write_ethernet_flow_group_text(out, eth_unclassified_list, "ETHERNET UNCLASSIFIED TRAFFIC", resolver);
         out << "\n";
-        write_ethernet_flow_group_text(out, eth_allowed_list, "ETHERNET ALLOWED");
+        write_ethernet_flow_group_text(out, eth_allowed_list, "ETHERNET ALLOWED", resolver);
         out << "\n";
     }
 
@@ -565,7 +609,8 @@ void write_policy_report_text(std::ostream& out, const PolicyReport& report, con
 }
 
 void write_policy_report_json(std::ostream& out, const PolicyReport& report, const Policy& policy,
-                               const std::string& capture_path, const std::string& policy_path) {
+                               const std::string& capture_path, const std::string& policy_path,
+                               const Resolver& resolver) {
     out << "{\n";
     out << "  \"capture\": \"" << json_escape(capture_path) << "\",\n";
     out << "  \"policy\": \"" << json_escape(policy_path) << "\",\n";
@@ -625,6 +670,32 @@ void write_policy_report_json(std::ostream& out, const PolicyReport& report, con
         out << "      \"client_ip\": \"" << json_escape(f.client_ip) << "\",\n";
         out << "      \"server_ip\": \"" << json_escape(f.server_ip) << "\",\n";
         out << "      \"server_port\": " << f.server_port << ",\n";
+        // Resolver-derived annotations (OUI vendor / hostname / service name) plus the base
+        // client_mac/server_mac gap-fix -- same grouping/omission convention as output.cpp's
+        // JsonWriter (see resolver.hpp's file header): client_mac/server_mac are always present as a
+        // string or `null` (null only when this flow's link type isn't Ethernet -- f.has_mac false),
+        // while every *_vendor/*_hostname/*_port_service annotation field is OMITTED ENTIRELY on a
+        // lookup miss or disabled lookup, never emitted as null.
+        out << "      \"client_mac\": " << (f.has_mac ? ("\"" + json_escape(f.client_mac) + "\"") : "null") << ",\n";
+        out << "      \"server_mac\": " << (f.has_mac ? ("\"" + json_escape(f.server_mac) + "\"") : "null") << ",\n";
+        if (f.has_mac) {
+            if (auto v = resolver.oui_vendor(f.client_mac)) {
+                out << "      \"client_mac_vendor\": \"" << json_escape(*v) << "\",\n";
+            }
+            if (auto v = resolver.oui_vendor(f.server_mac)) {
+                out << "      \"server_mac_vendor\": \"" << json_escape(*v) << "\",\n";
+            }
+        }
+        if (auto h = resolver.hostname(f.client_ip)) {
+            out << "      \"client_hostname\": \"" << json_escape(*h) << "\",\n";
+        }
+        if (auto h = resolver.hostname(f.server_ip)) {
+            out << "      \"server_hostname\": \"" << json_escape(*h) << "\",\n";
+        }
+        // server_port is always TCP here -- see write_flow_group_text's own comment above.
+        if (auto s = resolver.service_name(f.server_port, "tcp")) {
+            out << "      \"server_port_service\": \"" << json_escape(*s) << "\",\n";
+        }
         out << "      \"client_zone\": \"" << json_escape(f.client_zone) << "\",\n";
         out << "      \"server_zone\": \"" << json_escape(f.server_zone) << "\",\n";
         out << "      \"protocols\": [";
@@ -657,6 +728,15 @@ void write_policy_report_json(std::ostream& out, const PolicyReport& report, con
         out << "      \"protocol\": \"" << json_escape(f.protocol) << "\",\n";
         out << "      \"mac_a\": \"" << json_escape(f.mac_a) << "\",\n";
         out << "      \"mac_b\": \"" << json_escape(f.mac_b) << "\",\n";
+        // OUI vendor annotations only -- no IP/port exists on an L2 flow, so no hostname/service-name
+        // equivalent applies here (see write_ethernet_flow_group_text's own comment). Omitted
+        // entirely on a lookup miss or --no-oui, never emitted as null, same convention as above.
+        if (auto v = resolver.oui_vendor(f.mac_a)) {
+            out << "      \"mac_a_vendor\": \"" << json_escape(*v) << "\",\n";
+        }
+        if (auto v = resolver.oui_vendor(f.mac_b)) {
+            out << "      \"mac_b_vendor\": \"" << json_escape(*v) << "\",\n";
+        }
         out << "      \"has_vlan_tag\": " << (f.has_vlan_tag ? "true" : "false") << ",\n";
         out << "      \"vlan_id\": " << (f.has_vlan_tag ? std::to_string(f.vlan_id) : std::string("null")) << ",\n";
         out << "      \"vlan_zone\": \"" << json_escape(f.vlan_zone) << "\",\n";

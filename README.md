@@ -813,14 +813,14 @@ Groundwork / v0.1.0. What works right now:
   quick file metadata. Text output is colorized (per-protocol tags, red for
   exceptions/parse-errors) when writing to an interactive terminal, or
   forced on/off with `--color`/`--no-color`
-- `decode`-time name resolution: OUI/MAC-vendor lookup against a built-in
-  IEEE-registry-derived table (on by default, `--no-oui` disables it),
-  hostname resolution from an explicitly-supplied `--hosts` file
-  (`--resolve`, file-only -- never live DNS, under any circumstance), and
-  port->service-name lookup from a small curated built-in table plus an
-  optional `--services` file (`--nn` disables it). Every annotation is
-  additive next to the raw MAC/IP/port already decoded, never a
-  replacement for it -- see docs/MANUAL.md's OUTPUT FORMATS "Name
+- Name resolution, shared by `decode` and `policy validate` alike: OUI/MAC-
+  vendor lookup against a built-in IEEE-registry-derived table (on by
+  default, `--no-oui` disables it), hostname resolution from an explicitly-
+  supplied `--hosts` file (`--resolve`, file-only -- never live DNS, under
+  any circumstance), and port->service-name lookup from a small curated
+  built-in table plus an optional `--services` file (`--nn` disables it).
+  Every annotation is additive next to the raw MAC/IP/port already decoded,
+  never a replacement for it -- see docs/MANUAL.md's OUTPUT FORMATS "Name
   resolution" subsection
 - `policy validate`: a zone/conduit policy engine. A policy file (a
   deliberately restricted, dependency-free YAML subset -- no vendored YAML

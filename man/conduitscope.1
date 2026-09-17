@@ -384,6 +384,31 @@ Report format. Default: text.
 .TP
 .B \-\-strict
 Abort on the first malformed packet instead of warning and continuing.
+.TP
+.B \-\-no\-oui
+Same meaning as \fBdecode\fR's \fB\-\-no\-oui\fR: disable OUI (MAC vendor)
+resolution against the built-in table, applied to the report's flow MAC
+addresses. On by default. See \fBdocs/MANUAL.md\fR's OUTPUT FORMATS "Name
+resolution" subsection.
+.TP
+.B \-\-resolve
+Same meaning as \fBdecode\fR's \fB\-\-resolve\fR: enable hostname resolution
+from an explicitly-supplied \fB\-\-hosts\fR file, applied to the report's
+flow IP addresses. Off by default. File-only \-\- \fBnever\fR performs live
+DNS, under any flag combination.
+.TP
+.B \-\-hosts \fIFILE\fR
+Unix /etc/hosts-style file to resolve IP addresses from, for
+\fB\-\-resolve\fR. Must exist.
+.TP
+.B \-\-nn
+Same meaning as \fBdecode\fR's \fB\-\-nn\fR: disable service name
+(port\->name) resolution, applied to the report's flow server port. On by
+default.
+.TP
+.B \-\-services \fIFILE\fR
+Unix /etc/services-style file to supplement/override the built-in
+port\->service-name table. Must exist.
 .SH LIVE CAPTURE
 \fB\-i/\-\-interface\fR and \fBinterfaces\fR require this build to have been
 compiled with libpcap (Linux) or the Npcap SDK (Windows) found by CMake --

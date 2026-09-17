@@ -65,13 +65,17 @@ std::string ip_protocol_name(uint8_t protocol) {
         case 1: return "ICMP";
         case 2: return "IGMP";
         case 6: return "TCP";
+        case 9: return "IGRP";
         case 17: return "UDP";
         case 41: return "IPv6-in-IPv4 (6in4)";
         case 47: return "GRE";
         case 50: return "ESP";
         case 51: return "AH";
         case 58: return "ICMPv6";
+        case 88: return "EIGRP";
         case 89: return "OSPF";
+        case 103: return "PIM";
+        case 112: return "VRRP";
         case 132: return "SCTP";
         default: return "";
     }
