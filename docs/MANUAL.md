@@ -904,14 +904,20 @@ this tool does with it today:**
   policy could reference.
 - **DNP3's data-link header** carries its own 2-byte source/destination
   address (the outstation/master address) -- parsed internally
-  (`Dnp3LinkFrame::source`/`destination` in `dnp3.hpp`) but, unlike every
-  other field in this list, NOT currently exposed to `DecodedPacket` or
-  JSON output at all. `decode`'s own output today has no way to show
-  which DNP3 address a frame was for. This is the single most
-  consequential gap in this section: serial-to-IP DNP3 gateways routinely
-  multiplex several outstations behind one IP address, so an IP-only zone
-  model can under-identify the actual field device on a shared gateway in
-  a way none of the other protocols here are exposed to. See ROADMAP.
+  (`Dnp3LinkFrame::source`/`destination` in `dnp3.hpp`) and now exposed to
+  `DecodedPacket`/JSON output as `dnp3_source_address`/
+  `dnp3_destination_address` (ROADMAP item 13, done): `decode`'s own
+  output can now show which DNP3 address a frame was for, always set
+  whenever `protocol == "dnp3"` (even a link-layer-only control frame with
+  no user data still has a header carrying both addresses), mirroring the
+  first data-link frame found in a TCP payload, same "first frame only"
+  convention as `dnp3_link_crc_valid`/`dnp3_header_crc_valid`. Still NOT
+  consulted by the zone engine, though: serial-to-IP DNP3 gateways
+  routinely multiplex several outstations behind one IP address, so an
+  IP-only zone model can under-identify the actual field device on a
+  shared gateway in a way none of the other protocols here are exposed
+  to -- a zone model keyed on this address (in addition to, or instead
+  of, IP) remains open future work. See ROADMAP.
 - **IEC 104's ASDU** carries a Common Address (station/sector address)
   and per-point Information Object Addresses, both decoded and exposed
   (`iec104_common_address`, IOAs inline in `iec104_object_values`). Not
@@ -1526,6 +1532,21 @@ packets where they apply:
   Control Ack_Data (response) packets only -- the two documented
   status-flag bits, present when the response's parameter block was long
   enough to carry them.
+- `dnp3_source_address` / `dnp3_destination_address`: the data-link
+  header's own 16-bit DNP3 station addresses (`Dnp3LinkFrame::source`/
+  `destination` in `dnp3.hpp`) -- NOT IP addresses; the actual outstation/
+  master identity, set whenever protocol is `dnp3` (same "needs no
+  application-layer decode" scope as the CRC fields above -- even a
+  link-layer-only control frame with no user data still has a header
+  carrying both addresses). Mirrors the *first* data-link frame found in
+  this TCP payload, same "first frame only" convention as the CRC fields
+  below; reliability tracks `dnp3_header_crc_valid` -- a bad header CRC
+  means these two values cannot be trusted either. This is the field a
+  serial-to-IP DNP3 gateway multiplexing several outstations behind one
+  shared IP needs to actually tell them apart -- see POLICY FILE FORMAT's
+  "Addressing scope" section for why an IP-only zone model can't do that
+  on its own, and ROADMAP for the (still open) idea of a zone model keyed
+  on this address.
 - `dnp3_link_crc_valid` / `dnp3_header_crc_valid` / `dnp3_block_count` /
   `dnp3_block_crc_failures`: data-link CRC-16 validation results, set
   whenever protocol is `dnp3` (unlike `dnp3_function` below, these need no
@@ -2558,8 +2579,14 @@ cover.
 ### DNP3
 
 Detected reliably (via the 0x05 0x64 start bytes) and its data-link-layer
-header is decoded: source and destination DNP3 addresses, the raw control
-byte, and the frame length field (broken down into the resulting
+header is decoded: source and destination DNP3 addresses (16-bit DNP3
+station addresses, NOT IP addresses -- exposed as `dnp3_source_address`/
+`dnp3_destination_address` in JSON output, always set whenever
+`protocol == "dnp3"`, even for a link-layer-only control frame with no
+user data at all; see JSON OUTPUT FIELDS and POLICY FILE FORMAT's
+"Addressing scope" section for why this matters on a serial-to-IP DNP3
+gateway multiplexing several outstations behind one shared IP), the raw
+control byte, and the frame length field (broken down into the resulting
 transport/application-layer byte count), plus the header CRC-16, which is
 now genuinely calculated and validated against the on-the-wire value (see
 "Data-link CRC-16 validation" below).
@@ -7993,15 +8020,25 @@ Rough order, each building on the groundwork this release establishes:
     negotiates a presentation-context numbering other than the assumed
     "1=ACSE, 3=MMS" convention, would meaningfully extend this decoder's
     own confidence.
-13. **Expose DNP3's own data-link source/destination address** (parsed
-    internally today, in `Dnp3LinkFrame::source`/`destination`, but never
-    surfaced to `DecodedPacket` or JSON output at all -- see POLICY FILE
-    FORMAT's "Addressing scope" section) as `dnp3_source_address`/
-    `dnp3_destination_address`, and consider a zone model that can
-    classify by this address in addition to (or instead of) IP -- the
-    single most consequential addressing gap in this codebase, since
-    serial-to-IP DNP3 gateways routinely multiplex several outstations
-    behind one IP.
+13. ~~**Expose DNP3's own data-link source/destination address**~~ --
+    **done**: `Dnp3LinkFrame::source`/`destination` (already parsed
+    internally for the data-link summary line) are now surfaced on
+    `DecodedPacket` and in JSON output as `dnp3_source_address`/
+    `dnp3_destination_address` -- see JSON OUTPUT FIELDS and POLICY FILE
+    FORMAT's "Addressing scope" section, both updated. Set whenever
+    `protocol == "dnp3"`, even for a link-layer-only control frame with no
+    user data at all (a data-link header carries both addresses
+    regardless), mirroring the first data-link frame found in a TCP
+    payload, same "first frame only" convention this decoder's own DNP3
+    CRC fields already use; reliability tracks `dnp3_header_crc_valid`.
+    Still open, left for a future round: the ROADMAP item's own further
+    suggestion of "a zone model that can classify by this address in
+    addition to (or instead of) IP" -- the single most consequential
+    addressing gap in this codebase, since serial-to-IP DNP3 gateways
+    routinely multiplex several outstations behind one IP, but a genuinely
+    separate scope of its own (policy file format changes, `PolicyEngine`
+    matching logic, and its own test/documentation pass) from simply
+    exposing the two fields this round completed.
 14. **Widen the conduit `protocols` enum** beyond its current
     `{modbus, dnp3, s7comm, iec104, enip, any}` to name the other
     protocols `decode` already recognizes (BACnet/IP, HART-IP, OPC UA,

@@ -424,7 +424,12 @@ across multiple complete TPKT/COTP frames via COTP's own EOT bit is also
 reassembled, though real-capture validation of that path so far only
 confirms it is transparent on content-free "priming" fragments, not genuine
 multi-frame content splitting (synthetic-fixture-validated only); IPv4
-only; no IPv4 fragment reassembly; DNP3
+only; no IPv4 fragment reassembly; DNP3's
+own 16-bit data-link source/destination station addresses (NOT IP
+addresses) are exposed as \fIdnp3_source_address\fR/
+\fIdnp3_destination_address\fR, the actual outstation/master identity a
+serial-to-IP gateway multiplexes behind one shared IP, but not (yet)
+consulted by the zone/conduit engine; DNP3
 header and per-block CRCs are now validated (\fIdnp3_link_crc_valid\fR and
 related JSON fields, plus a \fBnotes\fR entry on mismatch), diagnostic only
 -- a mismatch never stops decoding and is not (yet) evaluated by

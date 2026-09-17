@@ -89,7 +89,10 @@ Groundwork / v0.1.0. What works right now:
   docs/MANUAL.md.
 - Full DNP3 decoding through the application layer for a single-data-link-frame
   fragment (the large majority of real traffic): data-link header
-  (source/destination addresses, frame length), transport header (FIR/FIN/SEQ,
+  (source/destination addresses -- 16-bit DNP3 station addresses, exposed as
+  `dnp3_source_address`/`dnp3_destination_address`, the actual outstation/
+  master identity a serial-to-IP gateway multiplexes behind one shared IP;
+  frame length), transport header (FIR/FIN/SEQ,
   with correct per-16-byte-block CRC reassembly of the user data), function
   code, Internal Indications on responses, and every object header
   (group/variation/qualifier/range) -- with **point values decoded**, not just

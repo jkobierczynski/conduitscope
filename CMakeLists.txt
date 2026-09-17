@@ -329,6 +329,21 @@ add_test(NAME dnp3_no_user_data_header_crc_still_validated
 set_tests_properties(dnp3_no_user_data_header_crc_still_validated PROPERTIES
   PASS_REGULAR_EXPRESSION "\"index\": 1,[^}]*\"dnp3_link_crc_valid\": true,\n    \"dnp3_header_crc_valid\": true,\n    \"dnp3_block_count\": 0,\n    \"dnp3_block_crc_failures\": 0")
 
+# Data-link source/destination address (Dnp3LinkFrame::source/destination -- 16-bit DNP3 station
+# addresses, NOT IP addresses, see decoder.hpp's own dnp3_source_address/dnp3_destination_address
+# comment) surfaced to JSON output: packet 1 is master(1)->outstation(1024), packet 3 is the
+# reverse direction, outstation(1024)->master(1) -- confirms both fields render correctly, and
+# that the direction actually flips with the real traffic direction rather than being a fixed pair.
+add_test(NAME dnp3_source_destination_address_master_to_outstation
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format json)
+set_tests_properties(dnp3_source_destination_address_master_to_outstation PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"index\": 1,[^}]*\"dnp3_source_address\": 1,\n    \"dnp3_destination_address\": 1024,")
+
+add_test(NAME dnp3_source_destination_address_outstation_to_master
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format json)
+set_tests_properties(dnp3_source_destination_address_outstation_to_master PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"index\": 3,[^}]*\"dnp3_source_address\": 1024,\n    \"dnp3_destination_address\": 1,")
+
 # Packet 2: single-block Read Class 0 request -- one valid block.
 add_test(NAME dnp3_read_class0_crc_valid_single_block
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format json)

@@ -294,6 +294,8 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
              << ",\n";
     }
     if (p.protocol == "dnp3") {
+        out_ << "    \"dnp3_source_address\": " << p.dnp3_source_address << ",\n";
+        out_ << "    \"dnp3_destination_address\": " << p.dnp3_destination_address << ",\n";
         out_ << "    \"dnp3_link_crc_valid\": " << (p.dnp3_link_crc_valid ? "true" : "false") << ",\n";
         out_ << "    \"dnp3_header_crc_valid\": " << (p.dnp3_header_crc_valid ? "true" : "false") << ",\n";
         out_ << "    \"dnp3_block_count\": " << p.dnp3_block_count << ",\n";

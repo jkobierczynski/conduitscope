@@ -275,6 +275,20 @@ struct DecodedPacket {
     size_t dnp3_block_crc_failures = 0;  // how many of those blocks' CRCs failed (mismatch or
                                           // couldn't be read at all, e.g. truncated capture)
 
+    // DNP3 data-link source/destination address (Dnp3LinkFrame::source/destination in dnp3.hpp --
+    // each a 16-bit DNP3 station address, NOT an IP address: the actual outstation/master
+    // identity a serial-to-IP DNP3 gateway multiplexes behind one shared IP, which IP-only
+    // zone/conduit matching (see PolicyEngine/POLICY FILE FORMAT's "Addressing scope" section)
+    // cannot distinguish on its own). Always set whenever protocol == "dnp3" -- unlike
+    // dnp3_has_function above, a link-layer-only control frame with no user data at all still has
+    // a data-link header carrying both addresses -- but, same "first frame only" convention as
+    // dnp3_link_crc_valid/dnp3_header_crc_valid above, mirrors only the FIRST DNP3 data link frame
+    // found in this TCP payload; a coalesced later frame's own source/destination, if different,
+    // is not reflected here. Their reliability tracks dnp3_header_crc_valid: a bad header CRC
+    // means these two values (like control/length on the same frame) cannot be trusted either.
+    uint16_t dnp3_source_address = 0;
+    uint16_t dnp3_destination_address = 0;
+
     // Only set when protocol == "iec104". Reflects the first APDU found in this TCP payload (an
     // I-format APDU with a decoded ASDU) -- see the coalescing loop in decoder.cpp for how
     // additional APDUs coalesced into the same payload are still fully decoded and folded in here,

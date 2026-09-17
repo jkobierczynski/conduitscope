@@ -1619,6 +1619,8 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                 out.dnp3_header_crc_valid = d->header_crc_valid;
                 out.dnp3_block_count = d->block_count;
                 out.dnp3_block_crc_failures = d->block_crc_failures;
+                out.dnp3_source_address = d->source;
+                out.dnp3_destination_address = d->destination;
 
                 // DNP3 frames are small (<=255 bytes on the wire) and it's normal for a sender
                 // or the OS to coalesce several into one TCP segment before flushing. Keep
