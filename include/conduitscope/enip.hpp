@@ -246,6 +246,27 @@ struct CipIoFrame {
 // decode_cpf_and_cip already gives those item types on the TCP side.
 std::optional<CipIoFrame> try_parse_cip_io(ByteSpan udp_payload);
 
+// Resolves one CIP service code to a human-readable name. `base` is the service code with the
+// request/response reply bit (0x80) already stripped off (a request byte's low 7 bits, or a
+// response byte's low 7 bits -- both are "base" here, the reply bit itself is tracked separately
+// by CipMessage::is_response above). `have_path`/`is_symbolic`/`is_conn_mgr` disambiguate the
+// handful of service codes that mean different things to different CIP object classes -- see this
+// function's own definition in enip.cpp for the exact disambiguation rules and every named
+// service code table.
+//
+// Exposed here (rather than kept enip.cpp-local, which is where every other naming table in this
+// file lives) specifically so devicenet.cpp can call it directly: DeviceNet's own Group 3
+// (Unconnected Explicit Request/Response) messages use this exact same CIP request/response-bit-
+// plus-7-bit-service-code convention (see devicenet.hpp's file header comment), and this decoder
+// reuses this one table rather than maintaining a second, duplicate copy of the generic CIP
+// service-code names for it. devicenet.cpp always calls this with have_path=true, is_symbolic=
+// false, is_conn_mgr=false (see cip_service_name's own comment in enip.cpp for exactly why that
+// combination is the right one to reuse from DeviceNet, and devicenet.hpp for the four DeviceNet-
+// specific service codes -- 0x4B-0x4E -- devicenet.cpp checks BEFORE ever calling this function,
+// since DeviceNet defines those four codes completely differently from EtherNet/IP's own
+// Rockwell-tag-addressing use of some of the same numeric values).
+std::string cip_service_name(uint8_t base, bool have_path, bool is_symbolic, bool is_conn_mgr);
+
 // Returns every canonical CIP service name this decoder can produce for a KNOWN (service code,
 // context) combination -- built from the same cip_service_name(uint8_t,bool,bool,bool) this file's
 // CipMessage decoding itself calls (see enip.cpp), across the specific (have_path, is_symbolic,

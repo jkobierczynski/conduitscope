@@ -79,6 +79,7 @@ constexpr const char* kBrightRed = "\033[91m";
 constexpr const char* kBoldBlue = "\033[1;34m";
 constexpr const char* kBoldCyan = "\033[1;36m";
 constexpr const char* kBoldMagenta = "\033[1;35m";
+constexpr const char* kBoldGreen = "\033[1;32m";
 
 // Color for a packet's "[protocol]" tag -- picked so a mixed-protocol capture scans quickly by
 // eye, not for any deeper meaning. parse-error is the one exception: it gets the same "something
@@ -126,6 +127,15 @@ const char* protocol_tag_color(const std::string& protocol) {
                                                     // never share a transport/port, so there is no
                                                     // realistic capture where this collision would
                                                     // actually confuse a reader scanning by eye
+    if (protocol == "devicenet") return kBoldGreen;  // a genuinely new hue (not a documented reuse
+                                                        // like mms/s7comm-plus/mqtt/ffhse above) --
+                                                        // DeviceNet is the only protocol in this
+                                                        // codebase that isn't Ethernet-based at all
+                                                        // (see decoder.hpp's own comment on
+                                                        // devicenet_can_id/can_socketcan.hpp), so a
+                                                        // mixed-protocol capture containing it is
+                                                        // structurally impossible in the first place
+                                                        // -- no collision risk to reason about either way
     if (protocol == "parse-error") return kBoldRed;
     return kDim;  // tcp / udp / non-tcp / non-ip / unsupported-link: recognized, nothing OT-specific
 }
@@ -489,6 +499,38 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
             }
             out_ << "    \"stp_is_alt_msti_format\": " << (p.stp_is_alt_msti_format ? "true" : "false") << ",\n";
         }
+    }
+    if (p.protocol == "devicenet") {
+        std::ostringstream canid;
+        canid << "0x" << std::hex << std::uppercase << std::setw(4) << std::setfill('0') << p.devicenet_can_id;
+        out_ << "    \"devicenet_can_id\": \"" << canid.str() << "\",\n";
+        out_ << "    \"devicenet_group\": " << p.devicenet_group << ",\n";
+        out_ << "    \"devicenet_group_name\": \"" << json_escape(p.devicenet_group_name) << "\",\n";
+        out_ << "    \"devicenet_message_type\": \"" << json_escape(p.devicenet_message_type_name) << "\",\n";
+        if (p.devicenet_has_source_mac_id) {
+            out_ << "    \"devicenet_source_mac_id\": " << static_cast<unsigned>(p.devicenet_source_mac_id) << ",\n";
+        }
+        if (p.devicenet_has_group3_header) {
+            out_ << "    \"devicenet_dest_mac_id\": " << static_cast<unsigned>(p.devicenet_dest_mac_id) << ",\n";
+            out_ << "    \"devicenet_is_fragmented\": " << (p.devicenet_is_fragmented ? "true" : "false") << ",\n";
+            out_ << "    \"devicenet_is_xid\": " << (p.devicenet_is_xid ? "true" : "false") << ",\n";
+        }
+        if (p.devicenet_has_cip_service) {
+            out_ << "    \"devicenet_cip_is_response\": " << (p.devicenet_cip_is_response ? "true" : "false") << ",\n";
+            out_ << "    \"devicenet_cip_service\": \"" << json_escape(p.devicenet_cip_service_name) << "\",\n";
+        }
+        if (p.devicenet_has_dup_mac_id_check) {
+            out_ << "    \"devicenet_dup_mac_id_is_response\": "
+                 << (p.devicenet_dup_mac_id_is_response ? "true" : "false") << ",\n";
+            out_ << "    \"devicenet_dup_mac_id_physical_port_number\": "
+                 << static_cast<unsigned>(p.devicenet_dup_mac_id_physical_port_number) << ",\n";
+            out_ << "    \"devicenet_dup_mac_id_vendor_id\": " << p.devicenet_dup_mac_id_vendor_id << ",\n";
+            out_ << "    \"devicenet_dup_mac_id_serial_number\": " << p.devicenet_dup_mac_id_serial_number << ",\n";
+        }
+        out_ << "    \"devicenet_fd\": " << (p.devicenet_fd ? "true" : "false") << ",\n";
+        out_ << "    \"devicenet_payload_truncated\": " << (p.devicenet_payload_truncated ? "true" : "false") << ",\n";
+        out_ << "    \"devicenet_payload_length\": " << p.devicenet_payload_length << ",\n";
+        out_ << "    \"devicenet_payload_hex\": \"" << json_escape(p.devicenet_payload_hex) << "\",\n";
     }
     if (p.protocol == "bacnet") {
         out_ << "    \"bacnet_bvlc_function\": \"" << json_escape(p.bacnet_bvlc_function) << "\",\n";
@@ -985,6 +1027,12 @@ void StatsWriter::write_packet(const DecodedPacket& p) {
         }
         if (p.stp_has_common_body && p.stp_flag_tc) stp_tc_count_++;
     }
+    if (p.protocol == "devicenet") {
+        devicenet_group_counts_[p.devicenet_group_name]++;
+        devicenet_message_type_counts_[p.devicenet_message_type_name]++;
+        if (p.devicenet_is_fragmented) devicenet_fragmented_count_++;
+        if (p.devicenet_fd) devicenet_fd_count_++;
+    }
     if (p.protocol == "bacnet") {
         bacnet_bvlc_function_counts_[p.bacnet_bvlc_function]++;
         if (p.bacnet_has_apdu && !p.bacnet_service_name.empty()) {
@@ -1127,6 +1175,18 @@ void StatsWriter::print_summary(std::ostream& out) const {
         out << "stp mst bpdus (full mst extension decoded): " << stp_mstp_count_ << "\n";
         out << "stp msti configuration messages (summed across every mst bpdu): " << stp_msti_total_ << "\n";
         out << "stp topology change flag set: " << stp_tc_count_ << "\n";
+    }
+    if (!devicenet_group_counts_.empty()) {
+        out << "devicenet message groups:\n";
+        for (const auto& [name, count] : devicenet_group_counts_) {
+            out << "  " << std::left << std::setw(40) << name << count << "\n";
+        }
+        out << "devicenet message types:\n";
+        for (const auto& [name, count] : devicenet_message_type_counts_) {
+            out << "  " << std::left << std::setw(60) << name << count << "\n";
+        }
+        out << "devicenet fragmented group 3 messages: " << devicenet_fragmented_count_ << "\n";
+        out << "devicenet can fd frames: " << devicenet_fd_count_ << "\n";
     }
     if (!bacnet_bvlc_function_counts_.empty()) {
         out << "bacnet bvlc functions:\n";

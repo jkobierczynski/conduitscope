@@ -27,9 +27,18 @@ namespace conduitscope {
 // this tool understands. Anything else is reported per-packet as "unsupported link
 // type" rather than treated as a fatal error, so a mixed-capability capture can still
 // be partially decoded.
+//
+// LINKTYPE_CAN_SOCKETCAN (227) is Linux SocketCAN's own pcap capture framing -- what
+// `candump -l`, `tcpdump -i can0`, or Wireshark itself write when capturing a CAN
+// (Controller Area Network) bus. It is a wholly separate, unrelated link layer from
+// Ethernet (no MAC addresses, no EtherType, no relationship to LINKTYPE_ETHERNET's own
+// framing at all) -- see can_socketcan.hpp's own file header comment for the exact
+// 8-byte-header-plus-payload record shape, and devicenet.hpp for the one protocol this
+// codebase currently decodes on top of it (DeviceNet).
 enum LinkType : uint32_t {
     LINKTYPE_ETHERNET = 1,
     LINKTYPE_RAW = 101,
+    LINKTYPE_CAN_SOCKETCAN = 227,
 };
 
 struct PcapFileInfo {

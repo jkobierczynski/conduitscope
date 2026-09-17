@@ -20,6 +20,7 @@ TESTS_DIR = ROOT / "tests"
 PCAP_MAGIC_LE_MICROSECOND = 0xA1B2C3D4
 LINKTYPE_ETHERNET = 1
 LINKTYPE_RAW = 101
+LINKTYPE_CAN_SOCKETCAN = 227
 
 # --- pcapng block builders -------------------------------------------------------------
 # Minimal, little-endian-only (conduitscope's pcapng reader handles both byte orders, but
@@ -1362,6 +1363,35 @@ def snap_pvst_frame(body: bytes = b"", *, dst: bytes = None, src: bytes = None) 
     return llc_length_frame(0xAA, 0xAA, 0x03, snap, dst=dst, src=src)
 
 
+CAN_EFF_FLAG = 0x80000000
+CAN_RTR_FLAG = 0x40000000
+CAN_ERR_FLAG = 0x20000000
+CANFD_FDF_FLAG = 0x04
+
+
+def can_socketcan_frame(can_id: int, payload: bytes = b"", *, eff: bool = False, rtr: bool = False,
+                         err: bool = False, fd: bool = False, fd_flags: int = 0,
+                         payload_length_override=None) -> bytes:
+    """One SocketCAN pcap capture record (LINKTYPE_CAN_SOCKETCAN == 227): the fixed 8-byte header
+    (4-byte BIG-ENDIAN CAN ID + flags, 1-byte Payload Length, 1-byte FD Flags, 2 reserved bytes)
+    immediately followed by `payload` -- see can_socketcan.hpp's file header comment for the exact
+    wire format, cross-checked directly against libpcap's own pcap/can_socketcan.h and tcpdump.org's
+    own LINKTYPE_CAN_SOCKETCAN registry page ("The CAN ID and flags field is in big-endian byte
+    order"). `payload_length_override` lets a test deliberately claim a Payload Length that doesn't
+    match len(payload) -- for exercising parse_socketcan_frame's own truncation-tolerance path."""
+    can_id_flags = can_id & (0x1FFFFFFF if eff else 0x7FF)
+    if eff:
+        can_id_flags |= CAN_EFF_FLAG
+    if rtr:
+        can_id_flags |= CAN_RTR_FLAG
+    if err:
+        can_id_flags |= CAN_ERR_FLAG
+    flags_byte = (fd_flags | CANFD_FDF_FLAG) if fd else fd_flags
+    payload_length = payload_length_override if payload_length_override is not None else len(payload)
+    header = struct.pack("!IBBBB", can_id_flags, payload_length, flags_byte, 0, 0)
+    return header + payload
+
+
 def stp_priority_ext16(priority: int, ext: int) -> int:
     """Packs a Bridge/Root/CIST-Bridge-Identifier-shaped 16-bit value: top 4 bits (masked, i.e.
     `priority` is already given as its own multiple-of-4096 value, e.g. 32768) + bottom 12 bits
@@ -1673,6 +1703,158 @@ def build_stp_sample():
     for i, pkt in enumerate(packets):
         data += pcap_record(pkt, 1_710_000_000 + i, i * 1000)
     (TESTS_DIR / "sample_stp.pcap").write_bytes(data)
+
+
+def build_devicenet_sample():
+    """DeviceNet over SocketCAN pcap framing (LINKTYPE_CAN_SOCKETCAN == 227) -- see
+    can_socketcan.hpp/devicenet.hpp's own file header comments for the exact wire formats each
+    packet below exercises (cross-checked against libpcap's own pcap/can_socketcan.h and
+    Wireshark's own epan/dissectors/packet-devicenet.c). Entirely synthetic -- no real public
+    DeviceNet/CAN capture was found during this task's own research (see devicenet.hpp/this
+    project's task notes); every packet below is hand-built directly from the reference sources.
+    Packet numbers in comments match this function's own numbered comments 1-30."""
+    packets = []
+
+    # 1) Group 1, Slave's I/O Multicast Poll Response (message bits 0x0300), Source MAC ID 5.
+    packets.append(can_socketcan_frame(0x0300 | 5, bytes([0x11, 0x22, 0x33, 0x44])))
+
+    # 2) Group 1, Slave's I/O Change of State or Cyclic Message (0x0340), Source MAC ID 12.
+    packets.append(can_socketcan_frame(0x0340 | 12, bytes([0xAA, 0xBB])))
+
+    # 3) Group 1, Slave's I/O Bit-Strobe Response Message (0x0380), Source MAC ID 0, empty payload
+    #    (a bit-strobe response can legitimately carry 0 or 1 bytes).
+    packets.append(can_socketcan_frame(0x0380 | 0, b""))
+
+    # 4) Group 1, Slave's I/O Poll Response or COS/Cyclic Ack Message (0x03C0), Source MAC ID 63
+    #    (the largest possible 6-bit MAC ID).
+    packets.append(can_socketcan_frame(0x03C0 | 63, bytes([0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08])))
+
+    # 5) Group 1, an unnamed message-ID sub-value (0x0040 -- not one of the four named values) --
+    #    falls back to "Other Group 1 Message", the reference dissector's own fallback string.
+    packets.append(can_socketcan_frame(0x0040 | 7, bytes([0x00])))
+
+    # 6) Group 2, Master's I/O Bit-Strobe Command Message (message bits 0x00), Source MAC ID 20
+    #    ((20 << 3) == 0xA0).
+    packets.append(can_socketcan_frame(0x0400 | (20 << 3) | 0x00, bytes([0xFF] * 8)))
+
+    # 7) Group 2, Slave's Explicit/Unconnected Response Messages (0x03), Source MAC ID 3.
+    packets.append(can_socketcan_frame(0x0400 | (3 << 3) | 0x03, bytes([0x00, 0x10])))
+
+    # 8) Group 2, Master's Explicit Request Messages (0x04), Source MAC ID 10.
+    packets.append(can_socketcan_frame(0x0400 | (10 << 3) | 0x04, bytes([0x0E, 0x01, 0x02])))
+
+    # 9) Group 2, Group 2 Only Unconnected Explicit Request Messages (0x06), Source MAC ID 45.
+    packets.append(can_socketcan_frame(0x0400 | (45 << 3) | 0x06, bytes([0x4B])))
+
+    # 10) Group 2, Duplicate MAC ID Check Messages (0x07), Source MAC ID 7 -- with the full decoded
+    #     payload structure: RR bit clear (Request), Physical Port Number 2, Vendor ID 0x00AB
+    #     (little-endian), Serial Number 0x12345678 (little-endian) -- see devicenet.hpp's Group 2
+    #     paragraph.
+    dup10 = bytes([0x02]) + struct.pack("<H", 0x00AB) + struct.pack("<I", 0x12345678)
+    packets.append(can_socketcan_frame(0x0400 | (7 << 3) | 0x07, dup10))
+
+    # 11) Group 2, Duplicate MAC ID Check Messages, RESPONSE this time (RR bit set, byte0 bit 0x80),
+    #     Physical Port Number 1, Vendor ID 0x1234, Serial Number 0xCAFEBABE.
+    dup11 = bytes([0x80 | 0x01]) + struct.pack("<H", 0x1234) + struct.pack("<I", 0xCAFEBABE)
+    packets.append(can_socketcan_frame(0x0400 | (7 << 3) | 0x07, dup11))
+
+    # 12) Group 3, a generic Group 3 Message (message bits 0x000), Source MAC ID 9, non-fragmented,
+    #     destination MAC ID 15, CIP service 0x0E (Get_Attribute_Single -- a GENERIC CIP service
+    #     code, reused directly from enip.hpp's cip_service_name, not DeviceNet-specific), Request.
+    packets.append(can_socketcan_frame(0x0600 | 9, bytes([15, 0x0E, 0x01, 0x02])))
+
+    # 13) Group 3, Unconnected Explicit Request Message (0x180), Source MAC ID 12, destination MAC
+    #     ID 20, CIP service 0x4B (Open Explicit Message Connection Request -- DeviceNet-SPECIFIC,
+    #     not in EtherNet/IP's own generic CIP table), Request.
+    packets.append(can_socketcan_frame(0x0600 | 0x180 | 12, bytes([20, 0x4B, 0x00, 0x00, 0x01, 0x00, 0x00])))
+
+    # 14) Group 3, Unconnected Explicit Response Message (0x140), Source MAC ID 20 (the target
+    #     replying), destination MAC ID 12 (back to the originator), CIP service 0x4C (Close
+    #     Connection Request -- also DeviceNet-specific) with the reply bit (0x80) set -> Response.
+    packets.append(can_socketcan_frame(0x0600 | 0x140 | 20, bytes([12, 0x80 | 0x4C])))
+
+    # 15) Group 3, Unconnected Explicit Request Message (0x180), CIP service 0x4D (Device Heartbeat
+    #     Message -- DeviceNet-specific), Source MAC ID 1, destination MAC ID 1 (a device
+    #     heartbeating to itself's own group, a legitimate real-world shape).
+    packets.append(can_socketcan_frame(0x0600 | 0x180 | 1, bytes([1, 0x4D])))
+
+    # 16) Group 3, Unconnected Explicit Request Message (0x180), CIP service 0x4E (Device Shutdown
+    #     Message -- DeviceNet-specific; note this differs entirely from EtherNet/IP's own 0x4E,
+    #     which is Forward_Close/Read_Modify_Write_Tag -- see devicenet.hpp/cip_service_name).
+    packets.append(can_socketcan_frame(0x0600 | 0x180 | 2, bytes([2, 0x4E])))
+
+    # 17) Group 3, Invalid Group 3 Message (message bits 0x1C0) -- named as such (matches the
+    #     reference dissector's own fallback for this specific message-ID value), still structurally
+    #     decoded (destination MAC ID + service byte), not rejected outright.
+    packets.append(can_socketcan_frame(0x0600 | 0x1C0 | 5, bytes([5, 0x01])))
+
+    # 18) Group 3, non-fragmented, XID flag set (byte0 bit 0x40) alongside destination MAC ID 30.
+    packets.append(can_socketcan_frame(0x0600 | 0x180 | 8, bytes([0x40 | 30, 0x0E])))
+
+    # 19) Group 3, FRAGMENTED message (byte0 bit 0x80 set) -- not reassembled, matching Wireshark's
+    #     own unimplemented TODO (see devicenet.hpp). Destination MAC ID 40 is still decoded; nothing
+    #     past byte 0 is.
+    packets.append(can_socketcan_frame(0x0600 | 0x180 | 3, bytes([0x80 | 40, 0x4B, 0xFF, 0xFF])))
+
+    # 20) Group 3, non-fragmented, but the payload has ONLY the destination-MAC-ID byte (no service
+    #     byte at all) -- exercises the "service byte isn't present" tolerant path.
+    packets.append(can_socketcan_frame(0x0600 | 0x180 | 4, bytes([11])))
+
+    # 21) Group 3 message with NO payload at all -- exercises the "no payload, nothing Group-3-
+    #     specific decodable" tolerant path (CAN ID classification alone still succeeds).
+    packets.append(can_socketcan_frame(0x0600 | 6, b""))
+
+    # 22) Group 4, Communication Faulted Response Message (0x2C).
+    packets.append(can_socketcan_frame(0x07C0 | 0x2C, bytes([0x00])))
+
+    # 23) Group 4, Communication Faulted Request Message (0x2D).
+    packets.append(can_socketcan_frame(0x07C0 | 0x2D, bytes([0x01, 0x02])))
+
+    # 24) Group 4, Offline Ownership Response Message (0x2E).
+    packets.append(can_socketcan_frame(0x07C0 | 0x2E, bytes([0x03])))
+
+    # 25) Group 4, Offline Ownership Request Message (0x2F).
+    packets.append(can_socketcan_frame(0x07C0 | 0x2F, bytes([5, 0x01])))
+
+    # 26) Group 4, a message-ID value not one of the four named ones -- "Reserved Group 4 Message",
+    #     the reference dissector's own fallback.
+    packets.append(can_socketcan_frame(0x07C0 | 0x10, b""))
+
+    # 27) Unclassified CAN ID range (0x07F0-0x07FF) -- the reference dissector itself has no
+    #     handling at all for this range; shown structurally only, no message group invented.
+    packets.append(can_socketcan_frame(0x07F5, bytes([0xDE, 0xAD])))
+
+    # 28) Extended Frame Format (EFF, 29-bit id) -- NOT a valid DeviceNet frame shape, rejected
+    #     exactly the way Wireshark's own packet-devicenet.c rejects it (its very first check).
+    packets.append(can_socketcan_frame(0x1ABCDEF, bytes([0x01]), eff=True))
+
+    # 29) Remote Transmission Request (RTR) -- also rejected, same reasoning.
+    packets.append(can_socketcan_frame(0x0305, b"", rtr=True))
+
+    # 30) Error frame (ERR) -- also rejected, same reasoning.
+    packets.append(can_socketcan_frame(0x0000, b"", err=True))
+
+    # 31) CAN FD frame (fd_flags bit 0x04 set) on an otherwise ordinary Group 1 CAN ID -- the
+    #     CAN-ID-derived message-group classification is still shown, but DeviceNet.hpp's own
+    #     documented CAN-FD-out-of-scope note means the payload is NOT semantically decoded (no
+    #     "I/O data=N byte(s)" annotation the equivalent non-FD Group 1 packet gets).
+    packets.append(can_socketcan_frame(0x0300 | 9, bytes([0x01] * 16), fd=True))
+
+    # 32) Truncated: fewer than the fixed 8-byte SocketCAN header itself is present (only 5 bytes
+    #     total) -- must not crash; reported as a "parse-error" packet, the same tolerant handling
+    #     an undersized Ethernet frame already gets from parse_ethernet.
+    packets.append(b"\x00\x00\x03\x05\x02")
+
+    # 33) Truncated payload: the 8-byte header is fully present and declares a Payload Length of 8,
+    #     but only 3 payload bytes actually follow in the captured record -- exercises
+    #     parse_socketcan_frame's own truncation-tolerant clamping (not a thrown ParseError).
+    packets.append(can_socketcan_frame(0x0300 | 22, bytes([0x01, 0x02, 0x03]),
+                                        payload_length_override=8))
+
+    data = pcap_global_header(linktype=LINKTYPE_CAN_SOCKETCAN)
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_720_000_000 + i, i * 1000)
+    (TESTS_DIR / "sample_devicenet.pcap").write_bytes(data)
 
 
 BACNET_PORT = 47808
@@ -6169,6 +6351,7 @@ if __name__ == "__main__":
     build_sv_sample()
     build_ethercat_sample()
     build_stp_sample()
+    build_devicenet_sample()
     build_bacnet_sample()
     build_hartip_sample()
     build_opcua_sample()

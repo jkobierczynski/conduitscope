@@ -36,6 +36,8 @@ add_library(conduitscope_core STATIC
   src/sv.cpp
   src/ethercat.cpp
   src/stp.cpp
+  src/can_socketcan.cpp
+  src/devicenet.cpp
   src/bacnet.cpp
   src/hartip.cpp
   src/ffhse.cpp
@@ -1584,6 +1586,253 @@ add_test(NAME real_stp_mms_and_goose_json_fields_present
   COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/stp/sample_file_mms_and_goose.pcap")
 set_tests_properties(real_stp_mms_and_goose_json_fields_present PROPERTIES
   PASS_REGULAR_EXPRESSION "\"protocol\": \"stp\",.*\"stp_protocol_version_name\": \"RSTP \\(802.1w\\)\",.*\"stp_bpdu_type_name\": \"Rapid/Multiple Spanning Tree\",.*\"stp_root_mac\": \"00:40:15:18:1d:7c\",.*\"stp_bridge_mac\": \"00:0a:dc:06:19:5c\",")
+
+# --------------------------------------------------------------------------
+# DeviceNet over SocketCAN (synthetic, tests/sample_devicenet.pcap) -- LINKTYPE_CAN_SOCKETCAN
+# (227), this codebase's second wholly new link layer after STP's own classic-802.3-LLC work
+# above, and a wholly SEPARATE one from Ethernet (no MAC addresses, no IP layer at all -- see
+# can_socketcan.hpp/devicenet.hpp's own file header comments). No real public DeviceNet/CAN
+# capture was found during this feature's own research (searched github.com/ITI/ICS-Security-
+# Tools and general web search for "DeviceNet pcap"/"CAN capture" -- ICS-Security-Tools' own
+# pcaps/README.md lists no CAN-bus or DeviceNet capture of any kind among its protocol-organized
+# captures, and no other public source turned one up either) -- synthetic-only, matching several
+# other protocols already in this codebase (e.g. FOUNDATION Fieldbus HSE, per ffhse.hpp). Packet
+# numbers in comments below match build_devicenet_sample()'s own numbered comments 1-33 in
+# tools/make_sample_pcap.py.
+# --------------------------------------------------------------------------
+
+# 1-4) Group 1: all four named message types, with Source MAC ID extraction (id & 0x003F) and
+# I/O data shown as raw byte count only (never further decoded).
+add_test(NAME devicenet_group1_multicast_poll_response_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_devicenet.pcap" --format text)
+set_tests_properties(devicenet_group1_multicast_poll_response_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "#1  .*\\[devicenet\\]  DeviceNet Group 1 \\(Slave's I/O Multicast Poll Response\\): SrcMAC=5 CAN ID=0x0305 I/O data=4 byte\\(s\\) \\(not decoded further\\)")
+
+add_test(NAME devicenet_group1_change_of_state_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_devicenet.pcap" --format text)
+set_tests_properties(devicenet_group1_change_of_state_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "#2  .*DeviceNet Group 1 \\(Slave's I/O Change of State or Cyclic Message\\): SrcMAC=12 CAN ID=0x034C")
+
+add_test(NAME devicenet_group1_bit_strobe_response_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_devicenet.pcap" --format text)
+set_tests_properties(devicenet_group1_bit_strobe_response_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "#3  .*DeviceNet Group 1 \\(Slave's I/O Bit-Strobe Response Message\\): SrcMAC=0 CAN ID=0x0380 I/O data=0 byte\\(s\\)")
+
+add_test(NAME devicenet_group1_poll_response_or_cos_ack_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_devicenet.pcap" --format text)
+set_tests_properties(devicenet_group1_poll_response_or_cos_ack_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "#4  .*DeviceNet Group 1 \\(Slave's I/O Poll Response or COS/Cyclic Ack Message\\): SrcMAC=63 CAN ID=0x03FF I/O data=8 byte\\(s\\)")
+
+# 5) Group 1, unnamed message-ID sub-value -- falls back to "Other Group 1 Message".
+add_test(NAME devicenet_group1_other_message_fallback
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_devicenet.pcap" --format text)
+set_tests_properties(devicenet_group1_other_message_fallback PROPERTIES
+  PASS_REGULAR_EXPRESSION "#5  .*DeviceNet Group 1 \\(Other Group 1 Message\\): SrcMAC=7 CAN ID=0x0047")
+
+# 6-9) Group 2: several named message types, with Source MAC ID extraction ((id & 0x01F8) >> 3).
+add_test(NAME devicenet_group2_bit_strobe_command_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_devicenet.pcap" --format text)
+set_tests_properties(devicenet_group2_bit_strobe_command_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "#6  .*DeviceNet Group 2 \\(Master's I/O Bit-Strobe Command Message\\): SrcMAC=20 CAN ID=0x04A0")
+
+add_test(NAME devicenet_group2_explicit_unconnected_response_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_devicenet.pcap" --format text)
+set_tests_properties(devicenet_group2_explicit_unconnected_response_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "#7  .*DeviceNet Group 2 \\(Slave's Explicit/Unconnected Response Messages\\): SrcMAC=3 CAN ID=0x041B")
+
+add_test(NAME devicenet_group2_explicit_request_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_devicenet.pcap" --format text)
+set_tests_properties(devicenet_group2_explicit_request_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "#8  .*DeviceNet Group 2 \\(Master's Explicit Request Messages\\): SrcMAC=10 CAN ID=0x0454")
+
+add_test(NAME devicenet_group2_only_unconnected_explicit_request_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_devicenet.pcap" --format text)
+set_tests_properties(devicenet_group2_only_unconnected_explicit_request_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "#9  .*DeviceNet Group 2 \\(Group 2 Only Unconnected Explicit Request Messages\\): SrcMAC=45 CAN ID=0x056E")
+
+# 10-11) Group 2 Duplicate MAC ID Check Messages, both directions, with the full optional payload
+# decode (RR bit, Physical Port Number, little-endian Vendor ID, little-endian Serial Number).
+add_test(NAME devicenet_dup_mac_id_check_request_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_devicenet.pcap" --format text)
+set_tests_properties(devicenet_dup_mac_id_check_request_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "#10  .*DeviceNet Group 2 \\(Duplicate MAC ID Check Messages\\): SrcMAC=7 CAN ID=0x043F Request PhysicalPort=2 VendorID=0xAB Serial=305419896")
+
+add_test(NAME devicenet_dup_mac_id_check_response_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_devicenet.pcap" --format text)
+set_tests_properties(devicenet_dup_mac_id_check_response_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "#11  .*DeviceNet Group 2 \\(Duplicate MAC ID Check Messages\\): SrcMAC=7 CAN ID=0x043F Response PhysicalPort=1 VendorID=0x1234 Serial=3405691582")
+
+add_test(NAME devicenet_dup_mac_id_check_json_fields_present
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_devicenet.pcap")
+set_tests_properties(devicenet_dup_mac_id_check_json_fields_present PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"index\": 10,.*\"devicenet_dup_mac_id_is_response\": false,.*\"devicenet_dup_mac_id_physical_port_number\": 2,.*\"devicenet_dup_mac_id_vendor_id\": 171,.*\"devicenet_dup_mac_id_serial_number\": 305419896,")
+
+# 12) Group 3, generic "Group 3 Message", Source MAC ID extraction (id & 0x3F, NOT shifted --
+# unlike Group 2's own shifted extraction), and a GENERIC CIP service code (0x0E,
+# Get_Attribute_Single) reused directly from enip.hpp's cip_service_name.
+add_test(NAME devicenet_group3_generic_message_generic_cip_service_reused
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_devicenet.pcap" --format text)
+set_tests_properties(devicenet_group3_generic_message_generic_cip_service_reused PROPERTIES
+  PASS_REGULAR_EXPRESSION "#12  .*DeviceNet Group 3 \\(Group 3 Message\\): SrcMAC=9 CAN ID=0x0609 DestMAC=15 Request Service=Get_Attribute_Single \\(2 byte\\(s\\) of request/response data, not decoded")
+
+# 13-16) Group 3 explicit messaging using DeviceNet's own four service codes (0x4B-0x4E) --
+# distinct from EtherNet/IP's own unrelated use of some of the same numeric values (see
+# devicenet.hpp/cip_service_name's own comment in enip.cpp).
+add_test(NAME devicenet_group3_open_explicit_message_connection_request_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_devicenet.pcap" --format text)
+set_tests_properties(devicenet_group3_open_explicit_message_connection_request_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "#13  .*DeviceNet Group 3 \\(Unconnected Explicit Request Message\\): SrcMAC=12 CAN ID=0x078C DestMAC=20 Request Service=Open Explicit Message Connection Request")
+
+add_test(NAME devicenet_group3_close_connection_response_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_devicenet.pcap" --format text)
+set_tests_properties(devicenet_group3_close_connection_response_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "#14  .*DeviceNet Group 3 \\(Unconnected Explicit Response Message\\): SrcMAC=20 CAN ID=0x0754 DestMAC=12 Response Service=Close Connection Request")
+
+add_test(NAME devicenet_group3_device_heartbeat_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_devicenet.pcap" --format text)
+set_tests_properties(devicenet_group3_device_heartbeat_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "#15  .*Service=Device Heartbeat Message")
+
+add_test(NAME devicenet_group3_device_shutdown_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_devicenet.pcap" --format text)
+set_tests_properties(devicenet_group3_device_shutdown_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "#16  .*Service=Device Shutdown Message")
+
+add_test(NAME devicenet_group3_cip_service_json_fields_present
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_devicenet.pcap")
+set_tests_properties(devicenet_group3_cip_service_json_fields_present PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"index\": 14,.*\"devicenet_group\": 3,.*\"devicenet_dest_mac_id\": 12,.*\"devicenet_is_fragmented\": false,.*\"devicenet_cip_is_response\": true,.*\"devicenet_cip_service\": \"Close Connection Request\",")
+
+# 17) Group 4, message-ID value not one of the four named ones -- "Reserved Group 4 Message".
+add_test(NAME devicenet_group4_reserved_message_fallback
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_devicenet.pcap" --format text)
+set_tests_properties(devicenet_group4_reserved_message_fallback PROPERTIES
+  PASS_REGULAR_EXPRESSION "#17  .*DeviceNet Group 4 \\(Reserved Group 4 Message\\): CAN ID=0x07C5")
+
+# 18) Group 3, XID flag set alongside a non-fragmented service byte.
+add_test(NAME devicenet_group3_xid_flag_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_devicenet.pcap" --format text)
+set_tests_properties(devicenet_group3_xid_flag_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "#18  .*DestMAC=30 \\[XID\\] Request Service=Get_Attribute_Single")
+
+# 19) Group 3, FRAGMENTED message -- not reassembled, matching Wireshark's own unimplemented TODO.
+add_test(NAME devicenet_group3_fragmented_not_reassembled
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_devicenet.pcap" --format text)
+set_tests_properties(devicenet_group3_fragmented_not_reassembled PROPERTIES
+  PASS_REGULAR_EXPRESSION "#19  .*DestMAC=40 \\[Fragmented -- not reassembled, matches upstream's own unimplemented TODO, see devicenet.hpp\\]\n *note: Group 3 Fragmentation flag set")
+
+# 20) Group 3, non-fragmented, but no service byte present -- tolerant partial decode.
+add_test(NAME devicenet_group3_missing_service_byte_noted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_devicenet.pcap" --format text)
+set_tests_properties(devicenet_group3_missing_service_byte_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "#20  .*DestMAC=11\n *note: Group 3 non-fragmented message but the CIP-style service/request-response byte")
+
+# 21) Group 3 message with no payload at all -- CAN ID classification alone still succeeds.
+add_test(NAME devicenet_group3_no_payload_noted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_devicenet.pcap" --format text)
+set_tests_properties(devicenet_group3_no_payload_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "#21  .*DeviceNet Group 3 \\(Group 3 Message\\): SrcMAC=6 CAN ID=0x0606\n *note: Group 3 message with no payload at all")
+
+# 22-25) Group 4, all four named message types (no MAC ID extraction defined for Group 4 at all).
+add_test(NAME devicenet_group4_comm_faulted_response_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_devicenet.pcap" --format text)
+set_tests_properties(devicenet_group4_comm_faulted_response_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "#22  .*DeviceNet Group 4 \\(Communication Faulted Response Message\\): CAN ID=0x07EC")
+
+add_test(NAME devicenet_group4_comm_faulted_request_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_devicenet.pcap" --format text)
+set_tests_properties(devicenet_group4_comm_faulted_request_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "#23  .*DeviceNet Group 4 \\(Communication Faulted Request Message\\): CAN ID=0x07ED")
+
+add_test(NAME devicenet_group4_offline_ownership_response_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_devicenet.pcap" --format text)
+set_tests_properties(devicenet_group4_offline_ownership_response_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "#24  .*DeviceNet Group 4 \\(Offline Ownership Response Message\\): CAN ID=0x07EE")
+
+add_test(NAME devicenet_group4_offline_ownership_request_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_devicenet.pcap" --format text)
+set_tests_properties(devicenet_group4_offline_ownership_request_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "#25  .*DeviceNet Group 4 \\(Offline Ownership Request Message\\): CAN ID=0x07EF")
+
+# 27) Unclassified CAN ID range (0x07F0-0x07FF) -- the reference dissector has no handling for
+# this range at all; shown structurally only.
+add_test(NAME devicenet_unclassified_id_range_noted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_devicenet.pcap" --format text)
+set_tests_properties(devicenet_unclassified_id_range_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "#27  .*DeviceNet frame, unclassified CAN ID range: CAN ID=0x07F5\n *note: CAN ID 0x07F5 falls in the 0x07F0-0x07FF range")
+
+# 28-30) EFF/RTR/ERR frames -- NOT valid DeviceNet frame shapes, rejected exactly the way
+# Wireshark's own packet-devicenet.c rejects them (its very first check).
+add_test(NAME devicenet_eff_frame_rejected
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_devicenet.pcap" --format text)
+set_tests_properties(devicenet_eff_frame_rejected PROPERTIES
+  PASS_REGULAR_EXPRESSION "#28  .*\\[non-ip\\]  CAN frame, id=0x1ABCDEF \\[EFF -- extended 29-bit id\\] \\(not a valid DeviceNet frame shape\\)")
+
+add_test(NAME devicenet_rtr_frame_rejected
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_devicenet.pcap" --format text)
+set_tests_properties(devicenet_rtr_frame_rejected PROPERTIES
+  PASS_REGULAR_EXPRESSION "#29  .*\\[non-ip\\]  CAN frame, id=0x305 \\[RTR -- remote transmission request\\] \\(not a valid DeviceNet frame shape\\)")
+
+add_test(NAME devicenet_err_frame_rejected
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_devicenet.pcap" --format text)
+set_tests_properties(devicenet_err_frame_rejected PROPERTIES
+  PASS_REGULAR_EXPRESSION "#30  .*\\[non-ip\\]  CAN frame, id=0x0 \\[ERR -- error frame\\] \\(not a valid DeviceNet frame shape\\)")
+
+# 31) CAN FD frame -- CAN-ID-derived classification still shown, but no payload semantic decode.
+add_test(NAME devicenet_can_fd_frame_not_semantically_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_devicenet.pcap" --format text)
+set_tests_properties(devicenet_can_fd_frame_not_semantically_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "#31  .*DeviceNet Group 1 \\(Slave's I/O Multicast Poll Response\\): SrcMAC=9 CAN ID=0x0309\n *note: CAN FD frame \\(fd_flags 0x04 set\\)")
+
+# 32) Truncated: fewer than the fixed 8-byte SocketCAN header itself is present -- must not
+# crash; reported as a "parse-error" packet, the same tolerant handling an undersized Ethernet
+# frame already gets from parse_ethernet.
+add_test(NAME devicenet_truncated_header_does_not_crash
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_devicenet.pcap" --format text)
+set_tests_properties(devicenet_truncated_header_does_not_crash PROPERTIES
+  PASS_REGULAR_EXPRESSION "#32  .*\\[parse-error\\]  could not parse packet:")
+
+# 33) Truncated payload: header fully present and declares Payload Length 8, but only 3 payload
+# bytes actually follow -- exercises parse_socketcan_frame's own truncation-tolerant clamping
+# (not a thrown ParseError, unlike packet 32 above).
+add_test(NAME devicenet_truncated_payload_clamped_and_noted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_devicenet.pcap" --format text)
+set_tests_properties(devicenet_truncated_payload_clamped_and_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "#33  .*DeviceNet Group 1 \\(Slave's I/O Multicast Poll Response\\): SrcMAC=22 CAN ID=0x0316 I/O data=3 byte\\(s\\) \\(not decoded further\\)\n *note: Payload Length declares 8 byte\\(s\\) but only 3 byte\\(s\\) remain in the captured record -- payload clamped to what was actually captured")
+
+# --protocol devicenet: an ordinary Ethernet-linktype capture (sample_stp.pcap) is completely
+# unaffected -- DeviceNet dispatch is gated on link_type == LINKTYPE_CAN_SOCKETCAN, checked
+# BEFORE any protocol filter, so restricting to --protocol devicenet on a non-CAN capture simply
+# means nothing in it is recognized as any protocol at all (every packet still decodes at the
+# link layer, just with no application-layer match) -- confirms no accidental cross-link-type
+# leakage either way.
+add_test(NAME devicenet_protocol_filter_still_decodes_on_can_capture
+  COMMAND conduitscope decode --protocol devicenet --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_devicenet.pcap" --format text)
+set_tests_properties(devicenet_protocol_filter_still_decodes_on_can_capture PROPERTIES
+  PASS_REGULAR_EXPRESSION "#1  .*\\[devicenet\\]  DeviceNet Group 1")
+
+add_test(NAME devicenet_protocol_filter_excludes_other_protocols_on_can_capture
+  COMMAND conduitscope decode --protocol modbus --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_devicenet.pcap" --format text)
+set_tests_properties(devicenet_protocol_filter_excludes_other_protocols_on_can_capture PROPERTIES
+  PASS_REGULAR_EXPRESSION "#1  .*\\[non-ip\\]  CAN frame, id=0x305 \\(not decoded -- DeviceNet decoding disabled by --protocol\\)")
+
+add_test(NAME devicenet_protocol_filter_does_not_affect_ethernet_capture
+  COMMAND conduitscope decode --protocol devicenet --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_stp.pcap" --format text)
+set_tests_properties(devicenet_protocol_filter_does_not_affect_ethernet_capture PROPERTIES
+  FAIL_REGULAR_EXPRESSION "\\[devicenet\\]")
+
+# Stats accumulation across the whole synthetic fixture.
+add_test(NAME devicenet_stats_counted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_devicenet.pcap" --stats)
+set_tests_properties(devicenet_stats_counted PROPERTIES
+  PASS_REGULAR_EXPRESSION "devicenet message groups:\n *Group 1 +7\n *Group 2 +6\n *Group 3 +9\n *Group 4 +6\n *Unclassified \\(0x07F0-0x07FF\\) +1\ndevicenet message types:.*devicenet fragmented group 3 messages: 1\ndevicenet can fd frames: 1")
+
+# `info` reports the same devicenet message-type histogram --stats does, for a link-type-only
+# protocol with no port at all (mirrors GOOSE's own `info` precedent).
+add_test(NAME devicenet_info_reports_message_types
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_devicenet.pcap")
+set_tests_properties(devicenet_info_reports_message_types PROPERTIES
+  PASS_REGULAR_EXPRESSION "link type: +Linux SocketCAN \\(DeviceNet\\).*devicenet message groups:\n *Group 1 +7\n *Group 2 +6\n *Group 3 +9\n *Group 4 +6")
 
 # --------------------------------------------------------------------------
 # BACnet/IP (synthetic, tests/sample_bacnet.pcap): BVLC framing, NPDU network layer, APDU

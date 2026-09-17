@@ -102,77 +102,10 @@ std::string cip_class_name(uint32_t class_id) {
     }
 }
 
-// CIP service codes above the generic-common-services range (0x32+) are class-specific -- the
-// same number means different things to different object classes. `have_path`/`is_symbolic`/
-// `is_conn_mgr` disambiguate the two collisions this decoder's "first pass" scope actually cares
-// about (see enip.hpp's file header comment's scoping note): 0x4E (Forward_Close for the
-// Connection Manager object vs. Read_Modify_Write_Tag for a Rockwell Symbol-object tag) and 0x52
-// (Unconnected_Send for the Connection Manager object vs. Read_Tag_Fragmented for a tag). For a
-// response (have_path == false, since a response never repeats the request's path on the wire),
-// only those two ambiguous codes are called out as such; every other tag-service/Connection-
-// Manager-service code is unambiguous even without a path.
-std::string cip_service_name(uint8_t base, bool have_path, bool is_symbolic, bool is_conn_mgr) {
-    if (have_path) {
-        if (is_symbolic) {
-            switch (base) {
-                case 0x4C: return "Read_Tag";
-                case 0x4D: return "Write_Tag";
-                case 0x4E: return "Read_Modify_Write_Tag";
-                case 0x52: return "Read_Tag_Fragmented";
-                case 0x53: return "Write_Tag_Fragmented";
-                case 0x55: return "Get_Instance_Attribute_List";
-                default: break;
-            }
-        }
-        if (is_conn_mgr) {
-            switch (base) {
-                case 0x52: return "Unconnected_Send";
-                case 0x54: return "Forward_Open";
-                case 0x4E: return "Forward_Close";
-                case 0x5B: return "Large_Forward_Open";
-                default: break;
-            }
-        }
-    } else {
-        if (base == 0x52) return "Unconnected_Send/Read_Tag_Fragmented (reply)";
-        if (base == 0x4E) return "Forward_Close/Read_Modify_Write_Tag (reply)";
-        switch (base) {
-            case 0x4C: return "Read_Tag";
-            case 0x4D: return "Write_Tag";
-            case 0x53: return "Write_Tag_Fragmented";
-            case 0x55: return "Get_Instance_Attribute_List";
-            case 0x54: return "Forward_Open";
-            case 0x5B: return "Large_Forward_Open";
-            default: break;
-        }
-    }
-    switch (base) {
-        case 0x01: return "Get_Attributes_All";
-        case 0x02: return "Set_Attributes_All";
-        case 0x03: return "Get_Attribute_List";
-        case 0x04: return "Set_Attribute_List";
-        case 0x05: return "Reset";
-        case 0x06: return "Start";
-        case 0x07: return "Stop";
-        case 0x08: return "Create";
-        case 0x09: return "Delete";
-        case 0x0A: return "Multiple_Service_Packet";
-        case 0x0D: return "Apply_Attributes";
-        case 0x0E: return "Get_Attribute_Single";
-        case 0x10: return "Set_Attribute_Single";
-        case 0x11: return "Find_Next_Object_Instance";
-        case 0x15: return "Restore";
-        case 0x16: return "Save";
-        case 0x17: return "No_Op";
-        case 0x18: return "Get_Member";
-        case 0x19: return "Set_Member";
-        default: {
-            std::ostringstream s;
-            s << "Unknown (0x" << std::hex << std::uppercase << static_cast<unsigned>(base) << ")";
-            return s.str();
-        }
-    }
-}
+// cip_service_name is declared in enip.hpp (not anonymous-namespace-local) and defined below,
+// after this anonymous namespace closes, specifically so devicenet.cpp can call it directly to
+// resolve DeviceNet's own Group 3 explicit-messaging CIP service codes without duplicating this
+// table -- see enip.hpp's own comment on it and devicenet.hpp's file header comment.
 
 // CIP Volume 1 Appendix B general status codes.
 std::string cip_general_status_name(uint8_t status) {
@@ -969,6 +902,91 @@ std::optional<CipIoFrame> try_parse_cip_io_impl(ByteSpan udp_payload) {
 }
 
 }  // namespace
+
+// CIP service codes above the generic-common-services range (0x32+) are class-specific -- the
+// same number means different things to different object classes. `have_path`/`is_symbolic`/
+// `is_conn_mgr` disambiguate the two collisions this decoder's "first pass" scope actually cares
+// about (see enip.hpp's file header comment's scoping note): 0x4E (Forward_Close for the
+// Connection Manager object vs. Read_Modify_Write_Tag for a Rockwell Symbol-object tag) and 0x52
+// (Unconnected_Send for the Connection Manager object vs. Read_Tag_Fragmented for a tag). For a
+// response (have_path == false, since a response never repeats the request's path on the wire),
+// only those two ambiguous codes are called out as such; every other tag-service/Connection-
+// Manager-service code is unambiguous even without a path.
+//
+// Moved out of this file's own anonymous namespace (it used to live there, alongside every other
+// enip.cpp-local naming table) and declared in enip.hpp specifically so devicenet.cpp can call it
+// directly -- see enip.hpp's own comment on this function. devicenet.cpp always passes
+// have_path=true, is_symbolic=false, is_conn_mgr=false (DeviceNet's own Group 3 explicit
+// messaging has no EtherNet/IP-style embedded request path for this decoder to have parsed --
+// see devicenet.hpp's file header comment's CIP scoping note), which -- by this function's own
+// control flow -- skips both the is_symbolic and is_conn_mgr tag/Connection-Manager-specific
+// tables entirely and falls straight through to the generic common-services switch below. That is
+// deliberate: it means DeviceNet never accidentally picks up an EtherNet/IP-Rockwell-specific name
+// (e.g. "Read_Tag" for 0x4C) for a service code DeviceNet itself defines completely differently
+// (0x4C is "Close Connection Request" in DeviceNet -- see devicenet.hpp) -- devicenet.cpp checks
+// its own small DeviceNet-specific table FIRST, before ever calling this function at all.
+std::string cip_service_name(uint8_t base, bool have_path, bool is_symbolic, bool is_conn_mgr) {
+    if (have_path) {
+        if (is_symbolic) {
+            switch (base) {
+                case 0x4C: return "Read_Tag";
+                case 0x4D: return "Write_Tag";
+                case 0x4E: return "Read_Modify_Write_Tag";
+                case 0x52: return "Read_Tag_Fragmented";
+                case 0x53: return "Write_Tag_Fragmented";
+                case 0x55: return "Get_Instance_Attribute_List";
+                default: break;
+            }
+        }
+        if (is_conn_mgr) {
+            switch (base) {
+                case 0x52: return "Unconnected_Send";
+                case 0x54: return "Forward_Open";
+                case 0x4E: return "Forward_Close";
+                case 0x5B: return "Large_Forward_Open";
+                default: break;
+            }
+        }
+    } else {
+        if (base == 0x52) return "Unconnected_Send/Read_Tag_Fragmented (reply)";
+        if (base == 0x4E) return "Forward_Close/Read_Modify_Write_Tag (reply)";
+        switch (base) {
+            case 0x4C: return "Read_Tag";
+            case 0x4D: return "Write_Tag";
+            case 0x53: return "Write_Tag_Fragmented";
+            case 0x55: return "Get_Instance_Attribute_List";
+            case 0x54: return "Forward_Open";
+            case 0x5B: return "Large_Forward_Open";
+            default: break;
+        }
+    }
+    switch (base) {
+        case 0x01: return "Get_Attributes_All";
+        case 0x02: return "Set_Attributes_All";
+        case 0x03: return "Get_Attribute_List";
+        case 0x04: return "Set_Attribute_List";
+        case 0x05: return "Reset";
+        case 0x06: return "Start";
+        case 0x07: return "Stop";
+        case 0x08: return "Create";
+        case 0x09: return "Delete";
+        case 0x0A: return "Multiple_Service_Packet";
+        case 0x0D: return "Apply_Attributes";
+        case 0x0E: return "Get_Attribute_Single";
+        case 0x10: return "Set_Attribute_Single";
+        case 0x11: return "Find_Next_Object_Instance";
+        case 0x15: return "Restore";
+        case 0x16: return "Save";
+        case 0x17: return "No_Op";
+        case 0x18: return "Get_Member";
+        case 0x19: return "Set_Member";
+        default: {
+            std::ostringstream s;
+            s << "Unknown (0x" << std::hex << std::uppercase << static_cast<unsigned>(base) << ")";
+            return s.str();
+        }
+    }
+}
 
 std::vector<std::string> enip_known_cip_service_names() {
     std::vector<std::string> out;

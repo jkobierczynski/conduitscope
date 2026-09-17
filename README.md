@@ -7,8 +7,9 @@ discovery/configuration and cyclic real-time I/O data), IEC 61850-8-1 GOOSE,
 IEC 61850-9-2 Sampled Values, EtherCAT, BACnet/IP, HART-IP, OPC UA Binary
 (UA-TCP/Secure Conversation), IEC 61850 MMS (Manufacturing Message Specification,
 ISO 9506), MQTT (v3.1/v3.1.1/v5.0, including Sparkplug B), FOUNDATION
-Fieldbus HSE (FDA/SM/FMS/LAN Redundancy), and IEEE Spanning Tree Protocol
-(STP/RSTP/MSTP) traffic from offline
+Fieldbus HSE (FDA/SM/FMS/LAN Redundancy), IEEE Spanning Tree Protocol
+(STP/RSTP/MSTP), and DeviceNet (CAN-bus CIP, via SocketCAN pcap captures)
+traffic from offline
 pcap/pcapng captures, and checks it
 against a zone/conduit segmentation policy. It's an OT/ICS conduit-auditing tool: `decode`/`info` give you reliable
 protocol decoding and a stats view, and `policy validate` maps that decoded traffic
@@ -607,6 +608,37 @@ Groundwork / v0.1.0. What works right now:
   reproduce the real captures' own frames byte-for-byte. See
   tests/real_captures/stp/ATTRIBUTION.md and
   include/conduitscope/stp.hpp for the full writeup.
+- DeviceNet (CAN-bus CIP): the second wholly new link layer this tool has
+  added, and a completely separate one from Ethernet -- a pcap capture of a
+  CAN bus (`LINKTYPE_CAN_SOCKETCAN`, what `candump -l`/`tcpdump -i can0`
+  write) carries no MAC addresses, no IP layer, no EtherType at all, just
+  an 8-byte SocketCAN record per CAN frame, dispatched through its own
+  top-level branch in `Decoder::decode` rather than through
+  `parse_ethernet`. CAN 11-bit standard identifiers are classified into 4
+  message groups (I/O data, master/scanner commands plus Duplicate-MAC-ID-
+  Check, unconnected explicit CIP messaging, and offline/fault
+  notifications), each with its own MAC-ID bit layout, cross-checked
+  directly against Wireshark's own `packet-devicenet.c`. Group 3's own CIP
+  explicit-message service codes reuse this codebase's existing
+  `cip_service_name` (from `enip.cpp`) for the shared CIP common-services
+  set, adding DeviceNet's own four extra codes (Open/Close Explicit Message
+  Connection, Device Heartbeat, Device Shutdown). Extended (29-bit) IDs,
+  RTR, and error frames aren't valid DeviceNet at all and are rejected
+  outright; CAN FD frames are recognized but not semantically decoded
+  (DeviceNet predates CAN FD); Group 3 fragmentation is flagged but not
+  reassembled, matching Wireshark's own dissector's own unimplemented TODO,
+  not a gap unique to this port. No real public DeviceNet/CAN-bus capture
+  could be found anywhere (including `ITI/ICS-Security-Tools`, the source
+  of several other real captures already used here) -- validated only
+  against the synthetic `tests/sample_devicenet.pcap` fixture. ControlNet,
+  the other CIP-family protocol requested alongside DeviceNet, is
+  deliberately NOT included: it rides a proprietary physical layer (RG-6
+  coax, Manchester coding, token-passing) that no pcap-based tool --
+  Wireshark included, which has no ControlNet dissector at all -- can ever
+  capture; the only real way to observe it is Rockwell's own proprietary
+  ControlNet Traffic Analyzer, which produces no pcap-compatible output.
+  See docs/MANUAL.md's DeviceNet section and
+  include/conduitscope/devicenet.hpp for the full writeup.
 - Non-IPv4 Ethernet frames and non-TCP IPv4 payloads (including UDP) are now
   recognized and named, not just reported as a bare hex/number and dropped:
   ARP, LLDP, PTP, MPLS, and stacked-VLAN (802.1ad/QinQ) EtherTypes; ICMP,

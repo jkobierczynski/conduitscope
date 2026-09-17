@@ -7,7 +7,9 @@
 
 #include "conduitscope/bacnet.hpp"
 #include "conduitscope/byteio.hpp"
+#include "conduitscope/can_socketcan.hpp"
 #include "conduitscope/cotp.hpp"
+#include "conduitscope/devicenet.hpp"
 #include "conduitscope/dnp3.hpp"
 #include "conduitscope/enip.hpp"
 #include "conduitscope/ethercat.hpp"
@@ -903,10 +905,75 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
             network_layer_payload = eth.payload;
         } else if (link_type == LINKTYPE_RAW) {
             network_layer_payload = frame;
+        } else if (link_type == LINKTYPE_CAN_SOCKETCAN) {
+            // DeviceNet (CAN-bus CIP) -- see can_socketcan.hpp/devicenet.hpp. A wholly separate
+            // link layer from Ethernet: has_ethernet and has_ip both stay false for every packet
+            // reached this way (no MAC addresses, no IP layer at all -- see devicenet.hpp's own
+            // comment on DecodedPacket's devicenet_* fields). This returns directly, the same
+            // pattern the EtherType-keyed non-IPv4 branches above use, rather than falling through
+            // to the IPv4/TCP/UDP parsing below, which has nothing to do here.
+            CanSocketcanFrame can = parse_socketcan_frame(frame);
+            // NOTE: can.notes (e.g. a truncated-payload note) is NOT copied into out.notes here --
+            // try_parse_devicenet's own DeviceNetFrame::notes already forwards every CanSocketcanFrame
+            // note verbatim (see devicenet.cpp), and the fallback branch below (not-DeviceNet) adds
+            // them itself, so copying here too would duplicate every such note.
+
+            bool want_devicenet = options_.protocol_filter == ProtocolFilter::Auto ||
+                                   options_.protocol_filter == ProtocolFilter::DevicenetOnly;
+            if (want_devicenet) {
+                if (auto dn = try_parse_devicenet(can)) {
+                    out.protocol = "devicenet";
+                    out.summary = dn->summary;
+                    for (const auto& n : dn->notes) out.notes.push_back(n);
+
+                    out.devicenet_can_id = dn->can_id;
+                    out.devicenet_group = dn->group;
+                    out.devicenet_group_name = dn->group_name;
+                    out.devicenet_message_type_name = dn->message_type_name;
+                    out.devicenet_has_source_mac_id = dn->has_source_mac_id;
+                    out.devicenet_source_mac_id = dn->source_mac_id;
+                    out.devicenet_has_group3_header = dn->has_group3_header;
+                    out.devicenet_is_fragmented = dn->is_fragmented;
+                    out.devicenet_is_xid = dn->is_xid;
+                    out.devicenet_dest_mac_id = dn->dest_mac_id;
+                    out.devicenet_has_cip_service = dn->has_cip_service;
+                    out.devicenet_cip_is_response = dn->cip_is_response;
+                    out.devicenet_cip_service = dn->cip_service;
+                    out.devicenet_cip_service_name = dn->cip_service_name;
+                    out.devicenet_has_dup_mac_id_check = dn->has_dup_mac_id_check;
+                    out.devicenet_dup_mac_id_is_response = dn->dup_mac_id_is_response;
+                    out.devicenet_dup_mac_id_physical_port_number = dn->dup_mac_id_physical_port_number;
+                    out.devicenet_dup_mac_id_vendor_id = dn->dup_mac_id_vendor_id;
+                    out.devicenet_dup_mac_id_serial_number = dn->dup_mac_id_serial_number;
+                    out.devicenet_fd = dn->fd;
+                    out.devicenet_payload_truncated = can.truncated;
+                    out.devicenet_payload_hex = to_hex(dn->payload, "");
+                    out.devicenet_payload_length = dn->payload.size();
+                    return out;
+                }
+            }
+
+            // Not DeviceNet (EFF/RTR/ERR flag set -- see can_socketcan.hpp/devicenet.hpp) --
+            // named structurally, never decoded further.
+            for (const auto& n : can.notes) out.notes.push_back(n);
+            out.protocol = "non-ip";
+            std::ostringstream s;
+            s << "CAN frame, id=0x" << std::hex << std::uppercase << can.id << std::dec;
+            if (can.eff) s << " [EFF -- extended 29-bit id]";
+            if (can.rtr) s << " [RTR -- remote transmission request]";
+            if (can.err) s << " [ERR -- error frame]";
+            if (!can.eff && !can.rtr && !can.err) {
+                s << " (not decoded -- DeviceNet decoding disabled by --protocol)";
+            } else {
+                s << " (not a valid DeviceNet frame shape)";
+            }
+            out.summary = s.str();
+            return out;
         } else {
             out.protocol = "unsupported-link";
             out.summary = "capture link type " + std::to_string(link_type) +
-                           " is not supported in this groundwork release (only Ethernet and raw IP are)";
+                           " is not supported in this groundwork release (only Ethernet, raw IP, "
+                           "and SocketCAN are)";
             return out;
         }
 

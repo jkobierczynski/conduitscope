@@ -113,6 +113,11 @@ private:
     size_t stp_msti_total_ = 0;      // summed across every decoded MST BPDU, since one can carry
                                        // more than one MSTI Configuration Message
     size_t stp_tc_count_ = 0;        // Configuration/RST/MST BPDUs with the TC flag set
+    std::map<std::string, size_t> devicenet_group_counts_;   // "Group 1"/"Group 2"/"Group 3"/
+                                                                // "Group 4"/"Unclassified (0x07F0-0x07FF)"
+    std::map<std::string, size_t> devicenet_message_type_counts_;
+    size_t devicenet_fragmented_count_ = 0;  // Group 3 messages with the Fragmentation flag set
+    size_t devicenet_fd_count_ = 0;          // CAN FD frames -- see devicenet.hpp's scope note
     std::map<std::string, size_t> bacnet_bvlc_function_counts_;
     std::map<std::string, size_t> bacnet_service_counts_;  // keyed by APDU service-choice name,
                                                               // only when bacnet_has_apdu

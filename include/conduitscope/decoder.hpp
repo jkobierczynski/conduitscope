@@ -12,7 +12,9 @@
 
 #include "conduitscope/bacnet.hpp"
 #include "conduitscope/byteio.hpp"
+#include "conduitscope/can_socketcan.hpp"
 #include "conduitscope/cotp.hpp"
+#include "conduitscope/devicenet.hpp"
 #include "conduitscope/dnp3.hpp"
 #include "conduitscope/enip.hpp"
 #include "conduitscope/ethercat.hpp"
@@ -45,6 +47,8 @@ enum class ProtocolFilter {
     SvOnly,       // only attempt IEC 61850-9-2 Sampled Values decoding
     EthercatOnly, // only attempt EtherCAT decoding
     StpOnly,      // only attempt STP/RSTP/MSTP (classic IEEE 802.3 LLC BPDU) decoding
+    DevicenetOnly, // only attempt DeviceNet (CAN-bus CIP) decoding -- meaningful only on a
+                    // LINKTYPE_CAN_SOCKETCAN capture, see can_socketcan.hpp/devicenet.hpp
     BacnetOnly,   // only attempt BACnet/IP (BVLC/NPDU/APDU) decoding
     HartIpOnly,   // only attempt HART-IP (session control / tunneled Pass-Through) decoding
     OpcUaOnly,    // only attempt OPC UA (UA-TCP / Secure Conversation) decoding
@@ -110,6 +114,7 @@ struct DecodedPacket {
     std::string tcp_flags;
 
     // "iec104", "modbus", "dnp3", "s7comm", "enip", "profinet", "goose", "sv", "ethercat", "stp",
+    // "devicenet" (LINKTYPE_CAN_SOCKETCAN captures only -- see can_socketcan.hpp/devicenet.hpp),
     // "bacnet", "hartip", "opcua", "mms", "mqtt", "s7comm-plus", "cotp"
     // (recognized TPKT/COTP framing but not S7comm inside it -- e.g. a connection setup frame),
     // "tcp" (recognized transport, no app-layer match), "udp" (recognized transport, no app-layer
@@ -135,7 +140,12 @@ struct DecodedPacket {
     // payload that try_parse_hartip recognizes as a HART-IP message is promoted to "hartip"
     // instead -- see hartip_message_type below; a classic-802.3-LLC-framed frame with LLC DSAP==
     // SSAP==0x42, Control==0x03, and a destination MAC outside the GARP range that try_parse_stp
-    // recognizes is promoted to "stp" instead -- see stp_bpdu_type_name below),
+    // recognizes is promoted to "stp" instead -- see stp_bpdu_type_name below; on a
+    // LINKTYPE_CAN_SOCKETCAN capture, a CAN frame that try_parse_devicenet recognizes (i.e. not an
+    // EFF/RTR/ERR-flagged frame, see can_socketcan.hpp/devicenet.hpp) is "devicenet" -- see
+    // devicenet_can_id below; an EFF/RTR/ERR-flagged frame on that same link type is "non-ip"
+    // (named structurally by which flag(s) are set, never decoded further -- not a valid DeviceNet
+    // frame shape at all)),
     // "unsupported-link", or "parse-error".
     std::string protocol;
     std::string summary;
@@ -434,6 +444,46 @@ struct DecodedPacket {
     // One summary string per decoded MSTI Configuration Message, capped at 50 entries for the same
     // reason as ethercat_datagrams/goose_all_data.
     std::vector<std::string> stp_msti_messages;
+
+    // Only set when protocol == "devicenet" -- see try_parse_devicenet in devicenet.hpp. Unlike
+    // every other protocol this tool decodes, DeviceNet rides a wholly different link layer (CAN,
+    // via SocketCAN pcap framing, LINKTYPE_CAN_SOCKETCAN -- see can_socketcan.hpp) rather than
+    // Ethernet at all: has_ethernet AND has_ip both stay false for these packets (no MAC addresses,
+    // no IP layer -- src_mac/dst_mac/src_ip/dst_ip are all meaningless here), the same "no
+    // conventional addressing at all" shape STP's own has_ip==false (but has_ethernet==true, since
+    // STP at least still rides Ethernet framing) doesn't quite share -- DeviceNet is the first
+    // protocol in this codebase with NEITHER.
+    uint16_t devicenet_can_id = 0;         // the masked 11-bit standard CAN identifier (0-0x7FF)
+    int devicenet_group = 0;               // 1-4, or 0 for the unclassified 0x07F0-0x07FF range
+    std::string devicenet_group_name;      // "Group 1"/"Group 2"/"Group 3"/"Group 4"/
+                                             // "Unclassified (0x07F0-0x07FF)"
+    std::string devicenet_message_type_name;  // per-group named message type, see devicenet.hpp
+
+    bool devicenet_has_source_mac_id = false;  // Groups 1-3 only
+    uint8_t devicenet_source_mac_id = 0;
+
+    bool devicenet_has_group3_header = false;  // Group 3 only -- see devicenet.hpp
+    bool devicenet_is_fragmented = false;
+    bool devicenet_is_xid = false;
+    uint8_t devicenet_dest_mac_id = 0;  // only meaningful when devicenet_has_group3_header
+
+    bool devicenet_has_cip_service = false;  // Group 3, non-fragmented only
+    bool devicenet_cip_is_response = false;
+    uint8_t devicenet_cip_service = 0;       // the 7-bit service code, reply bit already stripped
+    std::string devicenet_cip_service_name;
+
+    bool devicenet_has_dup_mac_id_check = false;  // Group 2, message ID 0x07 only -- see devicenet.hpp
+    bool devicenet_dup_mac_id_is_response = false;
+    uint8_t devicenet_dup_mac_id_physical_port_number = 0;
+    uint16_t devicenet_dup_mac_id_vendor_id = 0;
+    uint32_t devicenet_dup_mac_id_serial_number = 0;
+
+    bool devicenet_fd = false;  // CAN FD frame -- payload not semantically decoded, see devicenet.hpp
+    bool devicenet_payload_truncated = false;  // the underlying SocketCAN record's own payload was
+                                                 // shorter than its declared Payload Length -- see
+                                                 // can_socketcan.hpp
+    std::string devicenet_payload_hex;
+    size_t devicenet_payload_length = 0;
 
     // Only set when protocol == "bacnet" -- see try_parse_bacnet in bacnet.hpp. Unlike EtherCAT/
     // PROFINET/GOOSE/SV above, BACnet/IP rides on UDP (conventionally port 47808/0xBAC0, has_ip

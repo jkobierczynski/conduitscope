@@ -158,7 +158,7 @@ conduitscope decode (-r FILE | -i INTERFACE) [options]
 | `--no-promiscuous` | off (i.e. promiscuous by default) | With `-i`, don't put the interface into promiscuous mode. Promiscuous is the default because the main live-capture use case -- watching a mirrored/SPAN switch port for zone/conduit traffic -- needs to see traffic that isn't addressed to the capturing host at all. |
 | `-o, --output FILE` | stdout | Write decoded output here instead of stdout. |
 | `-f, --format {text,json,csv}` | `text` | Output format. See OUTPUT FORMATS below. |
-| `--protocol NAME` | `auto` | Restrict decoding to one protocol. See PROTOCOL COVERAGE below for the full, current list of valid protocol names (one per subsection there). `auto` opportunistically tries OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, S7comm/COTP, S7comm-Plus, MMS, HART-IP, MQTT, and FF-HSE detection on every TCP payload (in that order -- FF-HSE last of all, even after MQTT, see PROTOCOL DETECTION), CIP I/O, BACnet/IP, HART-IP, and FF-HSE detection on every UDP payload (FF-HSE last there too), PROFINET RT (DCP/cyclic) detection on every non-IPv4 Ethernet frame carrying EtherType `0x8892`, GOOSE detection on every non-IPv4 Ethernet frame carrying EtherType `0x88B8`, Sampled Values detection on every non-IPv4 Ethernet frame carrying EtherType `0x88BA`, EtherCAT detection on every non-IPv4 Ethernet frame carrying EtherType `0x88A4`, regardless of port, and Spanning Tree Protocol (STP/RSTP/MSTP) detection on every classic IEEE 802.3 length-framed Ethernet frame whose LLC header is DSAP=SSAP=`0x42` -- a structurally separate dispatch path from every EtherType-keyed protocol above, so there's no ordering/collision question between them (see PROTOCOL DETECTION below). `enip` covers both EtherNet/IP explicit messaging (TCP) and CIP I/O implicit messaging (UDP). `mms` is IEC 61850 MMS (Manufacturing Message Specification, ISO 9506) -- shares S7comm's exact TPKT/COTP transport and TCP port 102, but is a distinct application protocol; see `--s7comm-port` below and PROTOCOL COVERAGE's MMS section. `s7comm-plus` is S7comm-Plus (TIA Portal / S7-1200/1500) -- shares the same TPKT/COTP transport and TCP port 102, disambiguated by its own protocol id byte; see `--s7comm-port` below and PROTOCOL COVERAGE's S7comm-Plus section. `mqtt` is MQTT (v3.1/v3.1.1/v5.0) plus Sparkplug B -- see `--mqtt-port` below and PROTOCOL COVERAGE's MQTT section. `profinet` covers both DCP and cyclic real-time IO. `sv` is IEC 61850-9-2 Sampled Values. `ethercat` is EtherCAT. `bacnet` is BACnet/IP. `hartip` is HART-IP (covers both UDP and TCP). `opcua` is OPC UA Binary (UA-TCP/Secure Conversation, TCP only). `ff-hse` is FOUNDATION Fieldbus HSE (covers FDA/SM/FMS/LAN Redundancy, on both TCP and UDP) -- see `--ffhse-port` below and PROTOCOL COVERAGE's FOUNDATION Fieldbus HSE section. `stp` is Spanning Tree Protocol (STP/RSTP/MSTP) -- no port option, matching GOOSE/SV/EtherCAT/PROFINET's own no-port precedent for a protocol with no port at all; see PROTOCOL COVERAGE's Spanning Tree Protocol section. |
+| `--protocol NAME` | `auto` | Restrict decoding to one protocol. See PROTOCOL COVERAGE below for the full, current list of valid protocol names (one per subsection there). `auto` opportunistically tries OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, S7comm/COTP, S7comm-Plus, MMS, HART-IP, MQTT, and FF-HSE detection on every TCP payload (in that order -- FF-HSE last of all, even after MQTT, see PROTOCOL DETECTION), CIP I/O, BACnet/IP, HART-IP, and FF-HSE detection on every UDP payload (FF-HSE last there too), PROFINET RT (DCP/cyclic) detection on every non-IPv4 Ethernet frame carrying EtherType `0x8892`, GOOSE detection on every non-IPv4 Ethernet frame carrying EtherType `0x88B8`, Sampled Values detection on every non-IPv4 Ethernet frame carrying EtherType `0x88BA`, EtherCAT detection on every non-IPv4 Ethernet frame carrying EtherType `0x88A4`, regardless of port, and Spanning Tree Protocol (STP/RSTP/MSTP) detection on every classic IEEE 802.3 length-framed Ethernet frame whose LLC header is DSAP=SSAP=`0x42` -- a structurally separate dispatch path from every EtherType-keyed protocol above, so there's no ordering/collision question between them (see PROTOCOL DETECTION below). `enip` covers both EtherNet/IP explicit messaging (TCP) and CIP I/O implicit messaging (UDP). `mms` is IEC 61850 MMS (Manufacturing Message Specification, ISO 9506) -- shares S7comm's exact TPKT/COTP transport and TCP port 102, but is a distinct application protocol; see `--s7comm-port` below and PROTOCOL COVERAGE's MMS section. `s7comm-plus` is S7comm-Plus (TIA Portal / S7-1200/1500) -- shares the same TPKT/COTP transport and TCP port 102, disambiguated by its own protocol id byte; see `--s7comm-port` below and PROTOCOL COVERAGE's S7comm-Plus section. `mqtt` is MQTT (v3.1/v3.1.1/v5.0) plus Sparkplug B -- see `--mqtt-port` below and PROTOCOL COVERAGE's MQTT section. `profinet` covers both DCP and cyclic real-time IO. `sv` is IEC 61850-9-2 Sampled Values. `ethercat` is EtherCAT. `bacnet` is BACnet/IP. `hartip` is HART-IP (covers both UDP and TCP). `opcua` is OPC UA Binary (UA-TCP/Secure Conversation, TCP only). `ff-hse` is FOUNDATION Fieldbus HSE (covers FDA/SM/FMS/LAN Redundancy, on both TCP and UDP) -- see `--ffhse-port` below and PROTOCOL COVERAGE's FOUNDATION Fieldbus HSE section. `stp` is Spanning Tree Protocol (STP/RSTP/MSTP) -- no port option, matching GOOSE/SV/EtherCAT/PROFINET's own no-port precedent for a protocol with no port at all; see PROTOCOL COVERAGE's Spanning Tree Protocol section. `devicenet` is DeviceNet (CAN-bus CIP) -- no port option either, the same no-port precedent, but unlike every other value in this list it isn't reached through Ethernet at all: it's gated on the capture's own pcap link type being `LINKTYPE_CAN_SOCKETCAN` (227, standard Linux SocketCAN capture framing -- what `candump -l`/`tcpdump -i can0`/Wireshark itself write capturing a CAN bus), checked before any protocol filter, so `--protocol devicenet` against an ordinary Ethernet-linktype capture simply decodes nothing (every packet still parses at the link layer, just with no application-layer match) rather than erroring; see PROTOCOL COVERAGE's DeviceNet section. |
 | `--modbus-port PORT` | *(502 built in)* | Additional TCP port to treat as "expected" for Modbus. Repeatable. Does **not** gate detection -- it only changes whether a decoded Modbus frame is annotated as appearing on an unexpected port, which is itself a useful signal when auditing a conduit. |
 | `--dnp3-port PORT` | *(20000 built in)* | Same as `--modbus-port`, for DNP3. Repeatable. |
 | `--s7comm-port PORT` | *(102 built in)* | Same as `--modbus-port`, for COTP/S7comm. Repeatable. There is no separate `--mms-port` -- MMS rides the identical TPKT/COTP transport on the identical TCP port 102 S7comm uses (see `mms.hpp`'s file header), so this same option's "expected port" annotation also governs MMS traffic. |
@@ -1322,6 +1322,30 @@ per-protocol port option -- it never gates detection. See PROTOCOL
 COVERAGE's FOUNDATION Fieldbus HSE section for exactly what's decoded once
 the gate matches.
 
+**DeviceNet** is detected completely differently from every protocol above:
+not by a structural gate applied to a TCP/UDP payload or an EtherType, but
+by the pcap capture's own declared link type. Before any Ethernet parsing is
+even attempted, `Decoder::decode` checks whether the capture's link type is
+`LINKTYPE_CAN_SOCKETCAN` (227); if it is, every packet is parsed as a
+SocketCAN capture record (`parse_socketcan_frame`, see
+`can_socketcan.hpp`) and handed to `try_parse_devicenet`, a wholly separate
+top-level branch that never calls `parse_ethernet` at all -- there is no
+ordering or collision question with any other protocol in this list, the
+same way there's none between two different EtherTypes, because DeviceNet
+isn't reached through the EtherType-keyed dispatch chain in the first
+place. Within that branch, the only rejection is structural and absolute: a
+CAN frame with its EFF (extended 29-bit ID), RTR (remote transmission
+request), or ERR (error frame) bit set is not a valid DeviceNet frame shape
+at all and is reported as `non-ip` (named by which flag is set), mirroring
+Wireshark's own `dissect_devicenet`'s literal first check. Every other
+standard-11-bit-ID CAN frame on this link type is accepted as `devicenet`
+and message-group-classified by its CAN ID -- see PROTOCOL COVERAGE's
+DeviceNet section for the full classification. `--protocol devicenet`
+restricts decoding to it the same way every other `--protocol` value does,
+but since the link-type check runs first regardless of `--protocol`, it has
+no effect at all on an ordinary Ethernet-linktype capture (nothing on such a
+capture is ever a SocketCAN record to begin with).
+
 ## OUTPUT FORMATS
 
 ### text (default)
@@ -2255,6 +2279,53 @@ The following fields appear only when `protocol` is `mms`:
   `0` AND the frame's total length matches the legacy/alternative MSTI
   format's own sizing rule exactly (see PROTOCOL COVERAGE); that format is
   named but not decoded either way.
+- `devicenet_can_id`: the masked 11-bit standard CAN identifier as hex
+  (e.g. `"0x0305"`), always present when `protocol` is `devicenet`.
+- `devicenet_group`: `1`-`4` for a classified message group, or `0` for the
+  unclassified `0x07F0`-`0x07FF` range, always present when `protocol` is
+  `devicenet`.
+- `devicenet_group_name`: `"Group 1"`/`"Group 2"`/`"Group 3"`/`"Group 4"`/
+  `"Unclassified (0x07F0-0x07FF)"`, always present when `protocol` is
+  `devicenet`.
+- `devicenet_message_type`: the per-group named message type (e.g.
+  `"Slave's I/O Multicast Poll Response"`, `"Duplicate MAC ID Check
+  Messages"`, `"Unconnected Explicit Request Message"`), always present
+  when `protocol` is `devicenet` -- see PROTOCOL COVERAGE's DeviceNet
+  section for the full per-group name table.
+- `devicenet_source_mac_id`: the CAN-ID-derived Source MAC ID (0-63),
+  present only for Groups 1-3 -- Group 4 has no MAC ID extraction defined
+  at all, in this decoder or the reference dissector it's sourced from.
+- `devicenet_dest_mac_id` / `devicenet_is_fragmented` / `devicenet_is_xid`:
+  the Group 3 payload header's destination MAC ID (bits `0x3F` of the first
+  payload byte) and its Fragmentation (`0x80`)/XID (`0x40`) flags, present
+  only for a Group 3 message whose first payload byte was actually
+  captured.
+- `devicenet_cip_is_response` / `devicenet_cip_service`: the Group 3
+  CIP-style service byte's own Request/Response bit and resolved service
+  name (e.g. `"Get_Attribute_Single"`, `"Open Explicit Message Connection
+  Request"`), present only for a non-fragmented Group 3 message whose
+  second payload byte was captured -- see PROTOCOL COVERAGE's DeviceNet
+  section for how this reuses EtherNet/IP's own `cip_service_name`.
+- `devicenet_dup_mac_id_is_response` / `devicenet_dup_mac_id_physical_port_number`
+  / `devicenet_dup_mac_id_vendor_id` / `devicenet_dup_mac_id_serial_number`:
+  the Group 2 message-ID-`0x07` (Duplicate MAC ID Check) payload's own
+  Request/Response bit, Physical Port Number, and little-endian Vendor
+  ID/Serial Number, present only when that payload shape was decoded (not a
+  CAN FD frame, and at least 7 payload bytes present).
+- `devicenet_fd`: `true`/`false`, always present when `protocol` is
+  `devicenet` -- `true` for a CAN FD frame, in which case only the
+  CAN-ID-derived fields above are populated; the payload is not
+  semantically decoded (see PROTOCOL COVERAGE's DeviceNet section and
+  LIMITATIONS).
+- `devicenet_payload_truncated`: `true`/`false`, always present when
+  `protocol` is `devicenet` -- `true` when the underlying SocketCAN
+  record's own payload was shorter than its declared Payload Length (a
+  snaplen-truncated or otherwise short capture).
+- `devicenet_payload_length` / `devicenet_payload_hex`: the payload's byte
+  count and hex rendering (clamped to whatever was actually captured),
+  always present when `protocol` is `devicenet` -- this decoder never
+  value-decodes the payload beyond the Group 3 header/service bytes and
+  Group 2 Duplicate-MAC-ID-Check fields above.
 
 ### csv
 
@@ -5485,6 +5556,255 @@ fixture reproduce the two real captures' own first frames byte-for-byte.
 This mirrors the same honest gap already documented for this codebase's
 other protocols' less-common paths.
 
+### DeviceNet (CAN-bus CIP, pcap link type `LINKTYPE_CAN_SOCKETCAN` == 227)
+
+DeviceNet is ODVA's original CAN-bus-based CIP (Common Industrial Protocol)
+network -- the same application protocol family EtherNet/IP's own explicit
+messaging uses, but carried directly over a CAN (Controller Area Network)
+bus's 11-bit standard identifiers instead of Ethernet/IP/TCP/UDP. There is
+no Ethernet, no IP, no TCP/UDP anywhere in this protocol at all. Every
+message-group boundary, bitmask, and named value below is cross-checked
+directly against Wireshark's own `epan/dissectors/packet-devicenet.c`, the
+same sourcing standard this codebase already established for STP
+(`packet-bpdu.c`) and FF-HSE (`packet-ff.c`).
+
+#### The second link-layer milestone
+
+STP was this codebase's first addition of a link layer other than plain DIX
+Ethernet II framing, but it stayed within classic Ethernet/802.3/LLC
+framing underneath -- `parse_ethernet` just learned a second way to read
+what follows the source MAC. DeviceNet needs something STP didn't: a pcap
+capture of a CAN bus carries no Ethernet header, no MAC addresses, and no
+EtherType at all -- just one small fixed-format record per CAN frame,
+directly. This is captured under the pcap `LINKTYPE_CAN_SOCKETCAN` (227)
+link type -- Linux SocketCAN's own capture framing, what `candump -l`,
+`tcpdump -i can0`, or Wireshark itself write when capturing a CAN
+interface. Because this is a wholly separate, unrelated link layer from
+Ethernet, it does not extend `parse_ethernet`/`link_layer.hpp` the way STP's
+LLC/SNAP recognition did; it lives in its own pair of files
+(`can_socketcan.hpp`/`.cpp`) with its own entry in `pcap_reader.hpp`'s
+`LinkType` enum and its own top-level branch in `Decoder::decode`, checked
+before any Ethernet parsing is attempted at all -- see PROTOCOL DETECTION's
+own DeviceNet paragraph. `has_ethernet` and `has_ip` both stay `false` for
+every DeviceNet packet (`src_mac`/`dst_mac`/`src_ip`/`dst_ip` are all
+meaningless here) -- the first protocol in this codebase with neither, a
+shape STP's own `has_ip == false` (but `has_ethernet == true`, since STP at
+least still rides Ethernet framing) doesn't quite share.
+
+SocketCAN framing itself is protocol-agnostic -- any CAN application
+protocol's frames (DeviceNet, CANopen, J1939, or raw CAN traffic with no
+higher-layer protocol at all) would show up in a capture this same way.
+DeviceNet is the only protocol this codebase currently decodes on top of
+it; `can_socketcan.hpp`/`.cpp` only understands the pcap record shape and
+CAN frame header/flag bits, nothing about DeviceNet's own message-group
+semantics.
+
+#### SocketCAN capture record wire format
+
+An 8-byte fixed header immediately followed by `payload_length` bytes of
+payload -- no trailer, no padding beyond what `payload_length` itself
+declares:
+
+| Field | Offset | Size | Notes |
+|---|---|---|---|
+| CAN ID + flags | 0 | 4 | **Big-endian** -- the one easy mistake to make here, since the in-kernel `canid_t` value this mirrors is native-endian; a capture file always stores it byte-swapped to big-endian. See "CAN ID + flags" below. |
+| Payload Length | 4 | 1 | 0-8 for a classic CAN frame, 0-64 when the FD flag (below) is set. Not validated against CAN FD's discrete legal size set (0,1,2,...,8,12,16,20,24,32,48,64) -- read as-is, clamped to what was actually captured. |
+| FD Flags | 5 | 1 | Bit `0x04` (`CANFD_FDF`) marks a CAN FD frame. The other bits (`CANFD_BRS`/`CANFD_ESI`) are read into `fd_flags` but not individually decoded -- DeviceNet predates CAN FD and never sets them. |
+| Reserved | 6 | 1 | Always 0 on the wire; read but not surfaced/validated. |
+| Reserved | 7 | 1 | Same. |
+| Payload | 8 | `payload_length` | See message-group classification below. |
+
+**CAN ID + flags** (the 4-byte big-endian value at offset 0) -- top 3 bits
+are flags, bottom 29 bits are the identifier:
+
+| Bit | Flag | Meaning |
+|---|---|---|
+| 31 (`0x80000000`) | EFF | Extended Frame Format -- a 29-bit extended identifier (SAE J1939 and others use this; DeviceNet never does). |
+| 30 (`0x40000000`) | RTR | Remote Transmission Request -- requests data from another node, carries no payload of its own regardless of what Payload Length claims. |
+| 29 (`0x20000000`) | ERR | Error frame -- signals a bus-level error condition, not an ordinary data frame. |
+| 28-0 (`0x1FFFFFFF`) | -- | The identifier -- only the bottom 11 bits (`0x7FF`) are meaningful when EFF is clear (standard ID); all 29 bits are meaningful when EFF is set (extended ID). |
+
+**Truncation handling** matches this codebase's usual "degrade tolerantly,
+never crash" posture: a capture record with fewer than the fixed 8-byte
+header itself present is a parse error (there's nothing meaningful left to
+decode without even the declared payload length); a header-present-but-
+payload-short record (a snaplen-truncated or otherwise short capture) is
+handled tolerantly instead -- the payload is clamped to whatever bytes are
+actually present, `devicenet_payload_truncated` is set, and a note explains
+it, rather than the whole packet failing.
+
+#### DeviceNet frame validity and message-group classification
+
+`try_parse_devicenet` rejects a CAN frame outright -- the ONLY rejection
+condition -- when EFF, RTR, or ERR is set, mirroring
+`dissect_devicenet`'s own literal first check
+(`if (can_info.id & (CAN_ERR_FLAG | CAN_RTR_FLAG | CAN_EFF_FLAG)) return
+0;`) exactly; such a frame is reported as `non-ip`, named by which flag(s)
+are set (e.g. `"CAN frame, id=0x1ABCDEF [EFF -- extended 29-bit id] (not a
+valid DeviceNet frame shape)"`), not decoded further. Extended (29-bit) IDs,
+RTR frames, and error frames simply are not valid DeviceNet at all --
+DeviceNet only ever uses standard 11-bit CAN identifiers.
+
+Every other frame -- standard 11-bit ID, no RTR/ERR -- is classified into
+one of four message groups purely by where its masked 11-bit CAN ID falls,
+checked in this exact order (matching the reference dissector's own
+if/else-if chain):
+
+| Group | CAN ID range | Source MAC ID extraction | Message ID extraction |
+|---|---|---|---|
+| 1 | `id <= 0x03FF` | `id & 0x003F` (bits 0-5) | `id & 0x03C0` (bits 6-9) |
+| 2 | `0x0400 <= id <= 0x05FF` | `(id & 0x01F8) >> 3` (bits 3-8) | `id & 0x0007` (bits 0-2) |
+| 3 | `0x0600 <= id <= 0x07BF` | `id & 0x3F` (bits 0-5, no shift) | `id & 0x01C0` (bits 6-8) |
+| 4 | `0x07C0 <= id <= 0x07EF` | *(none defined)* | `id & 0x3F` |
+| Unclassified | `0x07F0 <= id <= 0x07FF` | *(none)* | *(none -- the reference dissector's own if/else-if chain simply falls through here too)* |
+
+Note Group 2's Source MAC ID extraction is right-shifted by 3 (a genuinely
+different bit layout from Group 1's and Group 3's own unshifted 6-bit
+masks) -- getting this wrong would silently misattribute every Group 2
+frame to the wrong MAC ID.
+
+**Group 1** (a slave device's own I/O data going back to a master/scanner):
+Message ID `0x0300`/`0x0340`/`0x0380`/`0x03C0` are named ("Slave's I/O
+Multicast Poll Response", "...Change of State or Cyclic Message", "...
+Bit-Strobe Response Message", "...Poll Response or COS/Cyclic Ack
+Message"); anything else in range falls back to "Other Group 1 Message"
+(the reference dissector's own fallback, not a gap here). The payload is
+raw I/O data, shown only as a byte count -- never further decoded, matching
+the reference dissector exactly (it has no decode for Group 1 payload
+bytes either, absent an out-of-band device-behavior configuration this
+decoder has no equivalent of).
+
+**Group 2** (a master/scanner's own commands to a slave, plus a slave's
+explicit/unconnected responses): Message ID 0-7 are all named (e.g.
+"Master's I/O Bit-Strobe Command Message", "Slave's Explicit/Unconnected
+Response Messages", "Duplicate MAC ID Check Messages" for 7). Message ID 7
+(Duplicate MAC ID Check) additionally decodes its own small fixed payload
+when at least 7 bytes are present and the frame isn't CAN FD: byte 0 bit
+`0x80` is the same CIP-style Request/Response bit Group 3's own service
+byte uses, byte 0 bits `0x7F` are a Physical Port Number, bytes 1-2 are a
+little-endian Vendor ID, and bytes 3-6 are a little-endian Serial Number.
+
+**Group 3** (Unconnected/Group-2-Only-Unconnected explicit messaging --
+CIP explicit messages) is the only group that also carries structure in its
+PAYLOAD, not just its CAN ID. Message ID `0x000`/`0x040`/`0x080`/`0x0C0`/
+`0x100` are all genuinely generic "Group 3 Message" in the reference source
+too; `0x140` is "Unconnected Explicit Response Message", `0x180` is
+"Unconnected Explicit Request Message", `0x1C0` is "Invalid Group 3
+Message". The first payload byte (when present) carries: bit `0x80`
+Fragmentation flag, bit `0x40` XID flag, bits `0x3F` destination MAC ID.
+When Fragmentation is set, this is a fragmented message -- Wireshark's own
+dissector does NOT reassemble Group 3 fragments either (its own
+`dissect_devicenet` has a literal `/* TODO: Handle fragmentation */`
+comment immediately before reporting it unhandled), and this decoder
+matches that gap faithfully rather than inventing its own reassembly:
+nothing past the first payload byte is decoded for a fragmented message.
+When Fragmentation is clear and a second payload byte is present, that byte
+is a CIP-style service/request-response byte -- top bit `0x80` = response
+(vs. request), bottom 7 bits = the CIP service code. This is EXACTLY the
+same convention EtherNet/IP's own CIP explicit messaging uses (see
+PROTOCOL COVERAGE's EtherNet/IP section), so this decoder reuses
+`enip.cpp`'s own `cip_service_name` directly for the generic CIP
+common-services set, rather than duplicating a second name table. DeviceNet
+additionally defines four of its own service codes, checked BEFORE
+`cip_service_name` is ever called: `0x4B` "Open Explicit Message Connection
+Request", `0x4C` "Close Connection Request", `0x4D` "Device Heartbeat
+Message", `0x4E` "Device Shutdown Message" -- note these four numeric
+values mean something COMPLETELY DIFFERENT under EtherNet/IP's own
+Rockwell symbolic-tag addressing (e.g. `0x4C` is `Read_Tag` there), which
+is exactly why `cip_service_name` is called from here with
+`have_path=true`/`is_symbolic=false`/`is_conn_mgr=false` -- the combination
+that avoids ever picking up that unrelated table by accident (see
+`cip_service_name`'s own comment in `enip.cpp`). Beyond the service code
+name itself, a Group 3 explicit message's own request path/data is not
+further decoded -- see "Out of scope" below.
+
+**Group 4** (`0x07C0`-`0x07EF`): Message ID `0x2C`/`0x2D`/`0x2E`/`0x2F` are
+named ("Communication Faulted Response/Request Message", "Offline
+Ownership Response/Request Message"); anything else falls back to
+"Reserved Group 4 Message". No MAC ID extraction is defined for Group 4 in
+the reference dissector at all, so none is invented here either.
+
+**`0x07F0`-`0x07FF`**: the reference dissector has no handling for this
+range at all -- its own if/else-if chain simply falls through with nothing
+decoded once the ID exceeds Group 4's own range. This decoder matches that:
+`devicenet_group` stays `0` ("Unclassified"), only the raw CAN ID is shown,
+and a note explains why -- not a guessed fifth message group.
+
+#### CAN FD
+
+DeviceNet as a protocol predates CAN FD entirely and never sets FD Flags'
+`CANFD_FDF` bit. `can_socketcan.hpp` still recognizes and surfaces the flag
+structurally (so this decoder never crashes or misreads a CAN FD frame's
+larger payload), but for an FD frame, this decoder does not attempt Group 1
+I/O / Group 2 Duplicate-MAC-ID-Check / Group 3 service-byte payload
+decoding at all -- only the CAN-ID-derived message-group classification
+(which needs no payload access) is still shown, with a note.
+
+#### Out of scope for this release
+
+Matching this codebase's established "recognized but not this release's
+problem" posture (see e.g. STP's Cisco PVST+/SPB out-of-scope section
+above):
+
+- **Extended (29-bit) IDs, RTR frames, error frames** -- not valid
+  DeviceNet at all, rejected outright (see above).
+- **CAN FD frame payloads** -- recognized structurally, not semantically
+  decoded (see above).
+- **Group 3 fragmentation reassembly** -- matches Wireshark's own
+  dissector's own unimplemented TODO; not a gap unique to this port.
+- **Full CIP object/class/instance/attribute request-path decoding**
+  within a Group 3 explicit message's own payload, beyond the destination
+  MAC ID / service code bytes already decoded. EtherNet/IP's own `enip.cpp`
+  has much richer CIP path decoding (`CipPath`, EPATH logical segments, the
+  ANSI Extended Symbol segment for Rockwell named-tag addressing), none of
+  which this file replicates -- even the reference DeviceNet dissector
+  itself only partially decodes a handful of specific services' (Open/
+  Close Explicit Message) own small fixed request/response bodies past the
+  service byte; this decoder does not replicate even that. The bytes
+  following a decoded service code are shown only as raw hex, the same
+  "structural only" treatment CIP I/O's own assembly data gets.
+
+#### Why not ControlNet too
+
+ODVA's other original CIP network, ControlNet, is not decoded here, and
+this is a structural impossibility for a pcap-based tool, not a scope
+choice or something planned for later. ControlNet uses a proprietary
+physical layer -- RG-6 coaxial cable, Manchester-coded signaling, and an
+implicit token-passing MAC scheme -- that no standard packet capture tool,
+including Wireshark itself, can sniff: there is no pcap `LINKTYPE_*` value
+for it, and no `packet-controlnet.c` exists anywhere in Wireshark's own
+dissector tree. The only way to observe ControlNet traffic in practice is
+Rockwell Automation's own proprietary ControlNet Traffic Analyzer hardware/
+software, which does not produce a pcap-compatible file format this (or any
+other) pcap-decoding tool could read. There is no capture file this tool
+could ever be handed that would contain decodable ControlNet traffic --
+categorically different from DeviceNet (an ordinary, standard SocketCAN
+pcap capture) or even STP (classic Ethernet framing), and the same category
+of hard limit as "this tool can't decode encrypted TLS payloads without the
+key," not a gap tracked on ROADMAP.
+
+#### Validation
+
+No real public DeviceNet/CAN-bus capture was found during this feature's
+research -- searched `ITI/ICS-Security-Tools` (the same collection this
+project's PROFINET/GOOSE/SV/STP real fixtures already draw from; its own
+`pcaps/README.md` lists no CAN-bus or DeviceNet capture of any kind among
+its protocol-organized captures) plus general web search for "DeviceNet
+pcap"/"CAN capture", and no other public source turned one up either. This
+decoder is therefore validated only against the synthetic
+`tests/sample_devicenet.pcap` fixture (33 frames -- see
+`tools/make_sample_pcap.py`'s `build_devicenet_sample`), hand-built and
+cross-checked against `packet-devicenet.c`'s own source rather than an
+independent real capture -- the same honest gap already documented for
+this codebase's other synthetic-only protocols (e.g. FOUNDATION Fieldbus
+HSE, Sampled Values). The fixture exercises all four message groups and
+every named message type within them, the Duplicate MAC ID Check payload
+in both directions, all four DeviceNet-specific CIP service codes plus a
+generic reused CIP service, the XID flag, a fragmented Group 3 message, a
+Group 3 message with no payload and one missing its service byte, the
+unclassified `0x07F0`-`0x07FF` range, all three of EFF/RTR/ERR rejection,
+a CAN FD frame, and a truncated payload's clamp-and-note path.
+
 ### Link/IP-layer plumbing: non-IPv4 Ethernet, and non-TCP IPv4 (including UDP)
 
 Every protocol above rides on Ethernet + IPv4 + TCP. Traffic outside that --
@@ -6298,6 +6618,31 @@ These are current, not aspirational -- each has a corresponding ROADMAP item.
   combination.** The only hostname source is an explicitly-supplied
   `--hosts` file; there is no live-DNS code path anywhere in this feature,
   by design -- see OUTPUT FORMATS' "Name resolution" subsection.
+- **DeviceNet's Group 3 explicit messages are not reassembled when
+  fragmented, and CAN FD frames are not semantically decoded.** A
+  fragmented Group 3 message (Fragmentation flag set) is recognized and
+  flagged, but nothing past its first payload byte is decoded -- this
+  matches Wireshark's own `packet-devicenet.c`, which has never implemented
+  fragment reassembly either, not a gap unique to this port. A CAN FD frame
+  is recognized structurally (so it's never misread or crashes this
+  decoder), but only its CAN-ID-derived message-group classification is
+  shown -- DeviceNet as a protocol predates CAN FD and never uses it, so
+  there is no real traffic this would apply to anyway. See PROTOCOL
+  COVERAGE's DeviceNet section.
+- **DeviceNet has no real-capture validation at all.** Despite a genuine
+  search (`ITI/ICS-Security-Tools` and general web search), no public
+  DeviceNet/CAN-bus capture was found -- validation is against the
+  synthetic `tests/sample_devicenet.pcap` fixture only, cross-checked
+  against `packet-devicenet.c`'s own source rather than independent real
+  bytes. See PROTOCOL COVERAGE's DeviceNet section.
+- **ControlNet (ODVA's other original CIP network) cannot be decoded by
+  this or any pcap-based tool.** It rides a proprietary physical layer (RG-6
+  coax, Manchester coding, implicit token-passing) that no standard capture
+  tool -- including Wireshark, which has no ControlNet dissector at all --
+  can sniff; the only real-world way to observe it is Rockwell's own
+  proprietary ControlNet Traffic Analyzer, which produces no pcap-compatible
+  output. This is a structural limitation, not a scope gap: see PROTOCOL
+  COVERAGE's DeviceNet section's "Why not ControlNet too" note.
 
 ## EXIT STATUS
 
@@ -6794,6 +7139,16 @@ which MST instances a region actually carries:
 conduitscope decode -r capture.pcap --protocol stp -f json \
   | jq -r '.[] | select(.stp_is_mstp) |
            "\(.src_ip) -> \(.dst_ip): \(.stp_mst_config_name) \(.stp_msti_messages // [] | join(", "))"'
+```
+
+Summarize a DeviceNet (CAN-bus) capture by message group and type -- a
+quick passive traffic inventory off a CAN bus, the same grouping pattern
+the FF-HSE example above uses:
+
+```sh
+conduitscope decode -r capture.pcap --protocol devicenet -f json \
+  | jq -r '[.[] | select(.protocol == "devicenet") | "\(.devicenet_group_name) / \(.devicenet_message_type)"] |
+           group_by(.) | map("\(length)x \(.[0])") | .[]'
 ```
 
 Decode a capture with hostnames and service names resolved against your own

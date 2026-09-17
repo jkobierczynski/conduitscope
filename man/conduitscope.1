@@ -1,6 +1,6 @@
 .TH CONDUITSCOPE 1 "2026" "conduitscope 0.1.0" "User Commands"
 .SH NAME
-conduitscope \- decode Modbus/TCP, DNP3, IEC 60870-5-104, S7comm/COTP, S7comm-Plus (Siemens TIA Portal / S7-1200/1500), IEC 61850 MMS (Manufacturing Message Specification, ISO 9506), EtherNet/IP (CIP explicit and implicit messaging), PROFINET RT (DCP and cyclic real-time IO), IEC 61850-8-1 GOOSE, IEC 61850-9-2 Sampled Values, EtherCAT, BACnet/IP, HART-IP, OPC UA Binary, MQTT (v3.1/v3.1.1/v5.0, including Sparkplug B), FOUNDATION Fieldbus HSE (FDA/SM/FMS/LAN Redundancy), and IEEE Spanning Tree Protocol (STP/RSTP/MSTP) traffic from offline pcap/pcapng captures
+conduitscope \- decode Modbus/TCP, DNP3, IEC 60870-5-104, S7comm/COTP, S7comm-Plus (Siemens TIA Portal / S7-1200/1500), IEC 61850 MMS (Manufacturing Message Specification, ISO 9506), EtherNet/IP (CIP explicit and implicit messaging), PROFINET RT (DCP and cyclic real-time IO), IEC 61850-8-1 GOOSE, IEC 61850-9-2 Sampled Values, EtherCAT, BACnet/IP, HART-IP, OPC UA Binary, MQTT (v3.1/v3.1.1/v5.0, including Sparkplug B), FOUNDATION Fieldbus HSE (FDA/SM/FMS/LAN Redundancy), IEEE Spanning Tree Protocol (STP/RSTP/MSTP), and DeviceNet (CAN-bus CIP, via SocketCAN pcap captures) traffic from offline pcap/pcapng captures
 .SH SYNOPSIS
 .B conduitscope
 [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-color\fR|\fB\-\-color\fR] [\fB\-\-log\-file\fR \fIFILE\fR] \fICOMMAND\fR [\fIOPTIONS\fR]
@@ -51,7 +51,11 @@ BPDUs riding classic IEEE 802.3 length-framed Ethernet with a 3-byte LLC
 header, DSAP=SSAP=0x42, no IP/TCP/UDP layer and no EtherType at all \-\-
 the first protocol here reached neither via IPv4 nor a DIX EtherType, a
 structurally separate dispatch path from every EtherType-keyed protocol
-above) traffic found directly on the wire, and checks
+above) traffic found directly on the wire, plus DeviceNet (CAN-bus CIP \-\-
+a pcap link type of its own, \fILINKTYPE_CAN_SOCKETCAN\fR, rather than
+Ethernet at all: no MAC addresses, no IP layer, no EtherType, dispatched
+through a wholly separate top-level branch checked before any Ethernet
+parsing is attempted) traffic found on a SocketCAN capture, and checks
 decoded traffic against a
 zone-and-conduit segmentation policy (IEC 62443 / NIS2 style work) via
 \fBpolicy validate\fR.
@@ -122,7 +126,7 @@ Write output here instead of stdout.
 .BR \-f ", " \-\-format " " {text,json,csv}
 Output format. Default: text.
 .TP
-.B \-\-protocol {auto,modbus,dnp3,iec104,s7comm,s7comm\-plus,mms,enip,profinet,goose,sv,ethercat,stp,bacnet,hartip,opcua,mqtt,ff\-hse}
+.B \-\-protocol {auto,modbus,dnp3,iec104,s7comm,s7comm\-plus,mms,enip,profinet,goose,sv,ethercat,stp,devicenet,bacnet,hartip,opcua,mqtt,ff\-hse}
 Restrict decoding to one protocol. Default: auto (tries all eleven TCP
 protocols, independent of port number, plus CIP I/O, BACnet/IP, HART-IP, and
 FF-HSE on every
@@ -175,6 +179,10 @@ distinct protocol; there is no separate \fB\-\-mms\-port\fR, see
 \fBsv\fR is IEC 61850-9-2 Sampled Values. \fBethercat\fR is EtherCAT.
 \fBstp\fR is Spanning Tree Protocol (STP/RSTP/MSTP) \-\- no port option,
 since it rides classic 802.3/LLC framing with no port at all.
+\fBdevicenet\fR is DeviceNet (CAN-bus CIP) \-\- no port option either, and
+meaningful only against a \fILINKTYPE_CAN_SOCKETCAN\fR capture (gated on
+the capture's own pcap link type, checked before any protocol filter, so
+it has no effect on an ordinary Ethernet-linktype capture).
 \fBbacnet\fR is BACnet/IP.
 \fBhartip\fR is HART-IP, tried on both TCP and UDP.
 \fBff\-hse\fR is FOUNDATION Fieldbus HSE (FDA/SM/FMS/LAN Redundancy), tried
@@ -368,7 +376,10 @@ from every other tag color -- MQTT shares no transport/port with any other
 decoded protocol), bright red for FF-HSE too (deliberately shares OPC UA's
 own bright red rather than adding a 20th distinct hue -- the two never
 share a transport/port, so there is no realistic capture where this
-collision would actually confuse a reader scanning by eye), dim
+collision would actually confuse a reader scanning by eye), bold green for
+DeviceNet (a genuinely new hue -- DeviceNet is the only protocol here that
+isn't Ethernet-based at all, so a mixed-protocol capture containing it is
+structurally impossible, no collision risk to reason about either way), dim
 for everything else
 recognized but not OT\-specific. A Modbus exception response's summary, and a
 \fBparse\-error\fR packet's whole line, are bold red. Notes are dim.
@@ -622,6 +633,24 @@ real bytes \-\- those paths are validated only against the synthetic
 \fBtests/sample_stp.pcap\fR fixture (see \fBdocs/MANUAL.md\fR's PROTOCOL
 COVERAGE Spanning Tree Protocol section and
 \fBtests/real_captures/stp/ATTRIBUTION.md\fR for the full detail);
+DeviceNet (CAN-bus CIP, a wholly separate pcap link type from Ethernet \-\-
+\fILINKTYPE_CAN_SOCKETCAN\fR) is also now decoded \-\- CAN 11-bit standard
+identifiers classified into 4 message groups (I/O data, master/scanner
+commands plus Duplicate-MAC-ID-Check, unconnected explicit CIP messaging,
+offline/fault notifications), Group 3's CIP explicit-message service codes
+reusing EtherNet/IP's own \fBcip_service_name\fR plus DeviceNet's own four
+extra codes \-\- but extended (29-bit) IDs, RTR, and error frames are
+rejected as not valid DeviceNet at all, CAN FD frames are recognized but
+not semantically decoded, and Group 3 fragmentation is flagged but not
+reassembled, matching Wireshark's own \fBpacket-devicenet.c\fR's own
+unimplemented TODO, not a gap unique to this port; no real public
+DeviceNet/CAN-bus capture could be found anywhere, so validation is
+against the synthetic \fBtests/sample_devicenet.pcap\fR fixture only (see
+\fBdocs/MANUAL.md\fR's PROTOCOL COVERAGE DeviceNet section); ControlNet,
+the other CIP-family network, is out of reach of this or any pcap-based
+tool entirely (proprietary Manchester-coded coax physical layer, no
+Wireshark dissector, no pcap link type \-\- see that same section's "Why
+not ControlNet too" note), a structural limitation, not a tracked gap;
 non-IPv4
 Ethernet frames and non-TCP
 IPv4 payloads (including UDP) are otherwise still just recognized and
@@ -887,6 +916,15 @@ pair seen):
 conduitscope decode \-r capture.pcap \-\-protocol stp \-f json \e
   | jq \-r '[.[] | select(.stp_has_common_body) |
            "Bridge=\e(.stp_bridge_priority)/\e(.stp_bridge_sys_id_ext)/\e(.stp_bridge_mac) Root=\e(.stp_root_priority)/\e(.stp_root_sys_id_ext)/\e(.stp_root_mac)"] | unique[]'
+.EE
+.RE
+.PP
+Summarize a DeviceNet (CAN-bus) capture by message group and type:
+.RS
+.EX
+conduitscope decode \-r capture.pcap \-\-protocol devicenet \-f json \e
+  | jq \-r '[.[] | select(.protocol == "devicenet") | "\e(.devicenet_group_name) / \e(.devicenet_message_type)"] |
+           group_by(.) | map("\e(length)x \e(.[0])") | .[]'
 .EE
 .RE
 .PP
