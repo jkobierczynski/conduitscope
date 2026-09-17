@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // live_capture.cpp - see live_capture.hpp for the design rationale (optional, build-time-detected
 // libpcap/Npcap dependency; this whole file compiles either way, behavior gated on
 // CONDUITSCOPE_HAVE_PCAP, which CMakeLists.txt defines only when it actually found a usable

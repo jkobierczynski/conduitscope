@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // mms.hpp - IEC 61850 MMS (Manufacturing Message Specification, ISO 9506) decoding.
 //
 // MMS always rides inside a COTP Data (DT) frame's user data (see cotp.hpp) on TCP port 102 --

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // udp.hpp - minimal UDP header parsing.
 //
 // This is deliberately the same narrow scope as tcp.hpp: it reads one UDP

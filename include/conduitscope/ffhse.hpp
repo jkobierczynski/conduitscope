@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // ffhse.hpp - FOUNDATION Fieldbus HSE (High Speed Ethernet) decoding: the fixed 12-byte common
 // header shared by all four FF-HSE sub-protocols (FDA, SM, FMS, LAN Redundancy), the optional
 // trailer fields it signals, and the request/response/error message bodies each sub-protocol

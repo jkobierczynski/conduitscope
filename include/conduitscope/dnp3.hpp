@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // dnp3.hpp - DNP3 data link, transport, and application layer decoding.
 //
 // DNP3 is layered (data link -> transport -> application, with per-16-byte-
@@ -42,10 +42,16 @@
 // its own 2-byte CRC (including a short final block). Dnp3LinkFrame's
 // user_data_bytes is the *logical* byte count; the actual wire bytes to
 // consume are more than that. try_parse_dnp3_transport_and_application
-// reassembles the logical bytes (locating and skipping, but not validating,
-// every block CRC) before decoding anything -- getting this wrong would
+// reassembles the logical bytes (locating, and now validating, every block
+// CRC) before decoding anything -- getting the reassembly itself wrong would
 // silently misparse every multi-block fragment, so treat it with the same
-// care as the IPv4 total-length clamp fix (see ipv4.cpp).
+// care as the IPv4 total-length clamp fix (see ipv4.cpp). Both the header
+// CRC (try_parse_dnp3_link_layer) and every block CRC (reassemble_user_data
+// in dnp3.cpp) are now actually calculated and compared against the
+// on-the-wire value -- a mismatch never stops decoding (this codebase's
+// consistent degrade-gracefully-and-keep-going philosophy), it is only
+// recorded via Dnp3LinkFrame's crc fields and a `notes` entry with the
+// specific calculated-vs-declared values.
 //
 // A note on ByteSpan safety: unlike every other protocol decoder here,
 // Dnp3ApplicationFragment is NOT allowed to store a ByteSpan/Cursor into the
@@ -74,15 +80,50 @@ struct Dnp3LinkFrame {
     uint16_t source = 0;
     size_t user_data_bytes = 0;  // length_field - 5 (control+dest+src), i.e. transport+application layer size
     std::string summary;
-    bool crc_validated = false;  // always false in this release -- see notes below
+
+    // Header CRC-16 (over the first 8 bytes of the data-link header: the two start bytes, length,
+    // control, destination, source -- everything before the CRC field itself), calculated and
+    // compared against the on-the-wire (little-endian) value at parse time by
+    // try_parse_dnp3_link_layer -- see dnp3.cpp's dnp3_crc16 for the algorithm. This is the only
+    // CRC check that can be done before any user data is even read, and it is the more severe of
+    // the two: a bad header CRC means destination/source/control/length on this frame cannot be
+    // trusted at all, unlike a bad block CRC below, which only affects that one block's data.
+    bool header_crc_valid = false;
+    uint16_t header_crc_calculated = 0;
+    uint16_t header_crc_on_wire = 0;
+
+    // Block CRC summary, filled in by reassemble_dnp3_user_data once it has actually read the
+    // user-data blocks (there is nothing to check yet at try_parse_dnp3_link_layer time). Stays at
+    // its default "no blocks" values for a link-layer-only control frame with user_data_bytes == 0
+    // -- reassemble_dnp3_user_data is never even called for one, so there is genuinely nothing to
+    // report beyond the header check. block_count is how many <=16-byte blocks the frame's user
+    // data was split into (0 or more of them may have been impossible to fully read at all, e.g. a
+    // capture truncated mid-block -- those count as failures too, see reassemble_user_data in
+    // dnp3.cpp); block_crc_failures is how many of those blocks' CRCs did not validate.
+    size_t block_count = 0;
+    size_t block_crc_failures = 0;
+
+    // True only once every check that could be performed -- the header CRC, and every block CRC
+    // reassemble_dnp3_user_data managed to read -- passed. False for any mismatch, AND false for a
+    // block whose CRC couldn't even be checked because the capture was truncated first (an
+    // unverifiable CRC is never treated as valid). Set to header_crc_valid at parse time (the best
+    // information available before any user data has been read -- already the final answer for a
+    // frame with no user data at all), then narrowed by reassemble_dnp3_user_data (ANDing in the
+    // block result) once/if that runs. Repurposed from always-false in an earlier groundwork
+    // release -- see dnp3.cpp's dnp3_crc16 for the actual CRC-16 algorithm (table-driven,
+    // reflected, seed 0, final complement -- verified against Wireshark's wsutil/crc16.c and the
+    // standard CRC-16/DNP reference test vector via a compile-time static_assert right next to it).
+    bool crc_validated = false;
 };
 
 // Returns std::nullopt (never throws) if `tcp_payload` does not start with the
 // DNP3 data link start bytes (0x05 0x64) or is too short to hold a full data
-// link header. Does NOT validate the header CRC -- that is not implemented in
-// this groundwork release, and the summary/notes say so explicitly rather
-// than silently skipping the check.
-std::optional<Dnp3LinkFrame> try_parse_dnp3_link_layer(ByteSpan tcp_payload);
+// link header. Calculates and validates the header CRC (see
+// Dnp3LinkFrame::header_crc_valid/crc_validated above), appending a specific
+// calculated-vs-declared note to `notes` on a mismatch -- decoding still
+// proceeds regardless (this codebase's consistent degrade-gracefully
+// philosophy), the mismatch is only recorded, never fatal.
+std::optional<Dnp3LinkFrame> try_parse_dnp3_link_layer(ByteSpan tcp_payload, std::vector<std::string>& notes);
 
 // Returns every canonical DNP3 application-layer function name this decoder can produce for a
 // KNOWN function code (every case dnp3.cpp's internal function-code table defines, including the
@@ -113,14 +154,20 @@ size_t dnp3_frame_wire_length(const Dnp3LinkFrame& link);
 std::optional<size_t> dnp3_link_frame_declared_length(ByteSpan payload);
 
 // Reassembles one data-link frame's user data -- transport header byte plus whatever application-
-// layer bytes follow it -- stripping (not validating) the per-16-byte-block CRCs described in the
+// layer bytes follow it -- locating and validating the per-16-byte-block CRCs described in the
 // file header comment. `link` must be the result of a preceding successful try_parse_dnp3_link_layer
-// call on the same `tcp_payload`. Returns an empty vector if link.user_data_bytes == 0 (a data-link
-// frame with no user data at all). Exposed (rather than kept internal to
+// call on the same `tcp_payload`; it is taken by non-const reference because this is also where
+// link.block_count/block_crc_failures/crc_validated get their final values (ANDing the block result
+// into the header result already set by try_parse_dnp3_link_layer) -- see Dnp3LinkFrame's own
+// comment. Returns an empty vector if link.user_data_bytes == 0 (a data-link frame with no user
+// data at all) WITHOUT touching link's block_* fields (there is nothing to check -- see
+// Dnp3LinkFrame's comment on why that case is fine). Exposed (rather than kept internal to
 // try_parse_dnp3_transport_and_application) so Decoder can get at one frame's transport byte and
 // application-layer bytes on their own, to buffer them across packets when a fragment spans more
-// than one data-link frame -- see the file header comment. Appends to `notes` on truncation.
-std::vector<uint8_t> reassemble_dnp3_user_data(const Dnp3LinkFrame& link, ByteSpan tcp_payload,
+// than one data-link frame -- see the file header comment. Appends to `notes` on truncation and on
+// any block CRC mismatch (calculated-vs-declared values), same degrade-gracefully-and-keep-going
+// philosophy as every other malformed-input case in this file.
+std::vector<uint8_t> reassemble_dnp3_user_data(Dnp3LinkFrame& link, ByteSpan tcp_payload,
                                                 std::vector<std::string>& notes);
 
 // One decoded point value within an object header's object data.
@@ -215,15 +262,19 @@ struct Dnp3ApplicationFragment {
     std::vector<std::string> notes;
 };
 
-// Reassembles the data-link frame's user data (stripping, not validating, the per-16-byte-block
-// CRCs -- see the file header comment), then decodes the transport header and, for a complete
-// single-frame fragment, the application layer on top of it via decode_dnp3_application_layer.
-// `link` must be the result of a preceding successful try_parse_dnp3_link_layer call on the same
-// `tcp_payload`. Returns std::nullopt only when link.user_data_bytes == 0 (a data-link frame with
-// no user data at all, e.g. a link-layer-only control frame) -- there is nothing above the data
-// link layer to decode in that case. Never throws: a reassembly or application-layer shape it
-// cannot make sense of is recorded in `notes` on the returned fragment rather than propagated as a
-// ParseError, since the data link layer itself was already valid.
+// Reassembles the data-link frame's user data (locating and validating the per-16-byte-block CRCs
+// -- see the file header comment and Dnp3LinkFrame's own comment; `link` is taken by non-const
+// reference for the same reason as reassemble_dnp3_user_data's -- its block_count/
+// block_crc_failures/crc_validated fields are finalized here), then decodes the transport header
+// and, for a complete single-frame fragment, the application layer on top of it via
+// decode_dnp3_application_layer. `link` must be the result of a preceding successful
+// try_parse_dnp3_link_layer call on the same `tcp_payload`. Returns std::nullopt only when
+// link.user_data_bytes == 0 (a data-link frame with no user data at all, e.g. a link-layer-only
+// control frame) -- there is nothing above the data link layer to decode in that case (link's
+// crc_validated is already final in this case too, set by try_parse_dnp3_link_layer itself). Never
+// throws: a reassembly or application-layer shape it cannot make sense of is recorded in `notes` on
+// the returned fragment rather than propagated as a ParseError, since the data link layer itself
+// was already valid.
 //
 // This is the single-frame convenience path: for a fragment spanning more than one data-link
 // frame (transport_fir && !transport_fin), it decodes only the transport header and stops, same
@@ -231,7 +282,7 @@ struct Dnp3ApplicationFragment {
 // above/below directly, with its own per-TCP-flow buffering, to reassemble and decode that case
 // (see decoder.hpp's Decoder::process_dnp3_frame) -- that is the only thing that actually performs
 // cross-packet reassembly in this codebase.
-std::optional<Dnp3ApplicationFragment> try_parse_dnp3_transport_and_application(const Dnp3LinkFrame& link,
+std::optional<Dnp3ApplicationFragment> try_parse_dnp3_transport_and_application(Dnp3LinkFrame& link,
                                                                                  ByteSpan tcp_payload);
 
 // Decodes the application layer -- control byte, function code, IIN (for responses), and every

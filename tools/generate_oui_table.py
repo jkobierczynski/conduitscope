@@ -59,7 +59,7 @@ def load(path):
 
 def emit(by_bits, out_path, source_note):
     with open(out_path, 'w', encoding='utf-8') as out:
-        out.write("// SPDX-License-Identifier: MIT\n")
+        out.write("// SPDX-License-Identifier: Apache-2.0\n")
         out.write("// oui_table.gen.hpp - GENERATED FILE, do not hand-edit -- see\n")
         out.write("// tools/generate_oui_table.py (which regenerates this from a fetched copy of nmap's\n")
         out.write("// nmap-mac-prefixes file) for how this table was produced and exactly how to refresh it.\n")

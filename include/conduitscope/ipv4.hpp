@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // ipv4.hpp - minimal IPv4 header parsing.
 //
 // Groundwork scope: IPv4 only. IPv6 is out of scope for this first pass since

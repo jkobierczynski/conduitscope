@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // decoder.hpp - orchestrates link/IPv4/TCP parsing and protocol dispatch
 // (Modbus/DNP3) for a single captured packet, producing one DecodedPacket
 // that every output writer (text/json/csv) renders from.
@@ -176,6 +176,31 @@ struct DecodedPacket {
     // Same 50-entry cap as s7comm_item_tags.
     std::vector<std::string> s7comm_value_summaries;
 
+    // Only set for function_code == 0x29 (PLC Stop), Job (request) side -- see
+    // S7CommFrame::plc_stop_message in s7comm.hpp for the exact wire layout and what is/isn't
+    // decoded. Security context: this is the wire-level mechanism behind the well-known
+    // unauthenticated ICS attack that halts an S7-300/400 class CPU with no authentication at all.
+    std::string s7comm_plc_stop_message;
+
+    // Only set for function_code == 0x28 (PLC Control / "PI-Service"), Job (request) side, whose
+    // PI service name was decoded -- see S7CommFrame's pi_* fields in s7comm.hpp for the full
+    // wire layout and the deliberate _N_* Sinumerik/CNC scope boundary (name+description lookup
+    // only, no parameter decode).
+    bool s7comm_has_pi_service = false;
+    std::string s7comm_pi_service_name;
+    std::string s7comm_pi_service_description;  // empty when pi_service_name isn't in the known table
+    // _INSE/_INS2/_DELE only -- one "<type><number> (<destination>)" string per block descriptor,
+    // e.g. "DB100 (Passive)", "FC5 (Active)". Capped at 50 entries, same reason as s7comm_item_tags.
+    std::vector<std::string> s7comm_pi_control_blocks;
+    // P_PROGRAM/_MODU/_GARB only, when a non-empty argument was present on the wire.
+    std::string s7comm_pi_control_argument;
+
+    // Only set for function_code == 0x28, Ack_Data (response) side, whose 1-byte status field was
+    // present -- see S7CommFrame::has_pi_control_status in s7comm.hpp.
+    bool s7comm_has_pi_control_status = false;
+    bool s7comm_pi_control_has_more_data = false;  // status bit 0x01
+    bool s7comm_pi_control_has_error = false;      // status bit 0x02
+
     // Only set when protocol == "s7comm-plus" -- see s7commplus.hpp/try_parse_s7comm_plus. A
     // DIFFERENT, independent application protocol from classic S7comm above despite the shared
     // "s7comm" name and TCP port 102/TPKT/COTP transport -- kept as its own "protocol" value
@@ -233,6 +258,22 @@ struct DecodedPacket {
     // (see dnp3.hpp) -- empty for an object header outside that table, or when no object headers
     // had any points (e.g. a Class 0 poll). Capped at 50 entries, same reason as s7comm_items.
     std::vector<std::string> dnp3_point_values;
+
+    // Data-link CRC validation -- see Dnp3LinkFrame::crc_validated/header_crc_valid/block_count/
+    // block_crc_failures in dnp3.hpp for the full semantics. Unlike dnp3_has_function above (which
+    // needs a fully decoded application layer), these mirror the FIRST DNP3 data link frame found
+    // in this TCP payload and are always set whenever protocol == "dnp3" -- a link-layer-only
+    // control frame with no user data at all still has a header CRC to check. A frame coalesced
+    // after the first one (see the coalescing loop in decoder.cpp) gets its own CRC-mismatch note
+    // in `notes` if it has one, same as its function/objects/values, but isn't reflected in these
+    // headline fields, same "first frame only" convention as dnp3_has_function/dnp3_function_name.
+    bool dnp3_link_crc_valid = false;    // header CRC AND every block CRC (if any) validated
+    bool dnp3_header_crc_valid = false;  // header CRC alone -- false means destination/source/
+                                          // control/length on this frame cannot be trusted at all
+    size_t dnp3_block_count = 0;         // <=16-byte user-data blocks this frame had (0 for a
+                                          // link-layer-only control frame with no user data)
+    size_t dnp3_block_crc_failures = 0;  // how many of those blocks' CRCs failed (mismatch or
+                                          // couldn't be read at all, e.g. truncated capture)
 
     // Only set when protocol == "iec104". Reflects the first APDU found in this TCP payload (an
     // I-format APDU with a decoded ASDU) -- see the coalescing loop in decoder.cpp for how
@@ -880,7 +921,9 @@ private:
     // supersedes as decoder.cpp's call site precisely because that function has no flow to buffer
     // against. Same nullopt contract: only when link.user_data_bytes == 0. See dnp3.hpp for the
     // reassemble_dnp3_user_data/decode_dnp3_application_layer primitives this is built from.
-    std::optional<Dnp3ApplicationFragment> process_dnp3_frame(const Dnp3LinkFrame& link, ByteSpan tcp_payload,
+    // `link` is non-const: this is where link.block_count/block_crc_failures/crc_validated get
+    // their final values (see reassemble_dnp3_user_data/Dnp3LinkFrame's own comments in dnp3.hpp).
+    std::optional<Dnp3ApplicationFragment> process_dnp3_frame(Dnp3LinkFrame& link, ByteSpan tcp_payload,
                                                                 const std::string& flow_key) const;
 
     // Determines the bytes protocol detection (Modbus/DNP3-link-layer/TPKT) should run against

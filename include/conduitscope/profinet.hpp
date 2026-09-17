@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // profinet.hpp - PROFINET RT (EtherType 0x8892) decoding: FrameID classification, DCP
 // (Discovery and Configuration Protocol) request/response decoding, and cyclic real-time I/O
 // data framing.

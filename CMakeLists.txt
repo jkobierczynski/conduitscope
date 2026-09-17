@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 cmake_minimum_required(VERSION 3.16)
 project(conduitscope VERSION 0.1.0 LANGUAGES CXX)
 
@@ -314,6 +314,79 @@ add_test(NAME stats_mode_dnp3
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --stats)
 set_tests_properties(stats_mode_dnp3 PROPERTIES
   PASS_REGULAR_EXPRESSION "dnp3 function codes:")
+
+# --------------------------------------------------------------------------
+# Data-link CRC-16 validation (header CRC + per-block CRC, both now actually calculated and
+# compared against the on-the-wire value -- see dnp3_crc16 in dnp3.cpp). tools/make_sample_pcap.py
+# now gives every sample_dnp3.pcap frame a genuinely correct CRC by default (dnp3_link_frame), so
+# packets 1-12 above all validate cleanly; packets 13 and 14 below are deliberately corrupted.
+# --------------------------------------------------------------------------
+
+# Packet 1: a link-layer-only control frame with no user data at all -- must still get its header
+# CRC checked (block_count/block_crc_failures stay 0, there is nothing to reassemble).
+add_test(NAME dnp3_no_user_data_header_crc_still_validated
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format json)
+set_tests_properties(dnp3_no_user_data_header_crc_still_validated PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"index\": 1,[^}]*\"dnp3_link_crc_valid\": true,\n    \"dnp3_header_crc_valid\": true,\n    \"dnp3_block_count\": 0,\n    \"dnp3_block_crc_failures\": 0")
+
+# Packet 2: single-block Read Class 0 request -- one valid block.
+add_test(NAME dnp3_read_class0_crc_valid_single_block
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format json)
+set_tests_properties(dnp3_read_class0_crc_valid_single_block PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"index\": 2,[^}]*\"dnp3_link_crc_valid\": true,\n    \"dnp3_header_crc_valid\": true,\n    \"dnp3_block_count\": 1,\n    \"dnp3_block_crc_failures\": 0")
+
+# Packet 3: the 23-byte multi-block Response -- two valid blocks, exercising the multi-block CRC
+# path (block boundary at 16 bytes) with genuinely correct CRCs, not just correct block placement.
+add_test(NAME dnp3_multiblock_response_crc_valid_two_blocks
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format json)
+set_tests_properties(dnp3_multiblock_response_crc_valid_two_blocks PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"index\": 3,[^}]*\"dnp3_link_crc_valid\": true,\n    \"dnp3_header_crc_valid\": true,\n    \"dnp3_block_count\": 2,\n    \"dnp3_block_crc_failures\": 0")
+
+# Packet 13: the same Read Class 0 request as packet 2, but with a deliberately corrupted header
+# CRC. The specific calculated-vs-declared note must appear, AND the application layer -- which a
+# bad HEADER crc has no bearing on -- must still decode exactly as it does for packet 2, proving
+# a CRC failure never stops decoding (this codebase's consistent degrade-gracefully philosophy).
+add_test(NAME dnp3_bad_header_crc_noted_and_still_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text)
+set_tests_properties(dnp3_bad_header_crc_noted_and_still_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "function=Read \\(0x01\\) objects: \\[g60v1\\]\n *note: header CRC mismatch: calculated 0x[0-9a-f][0-9a-f][0-9a-f][0-9a-f], frame declares 0x[0-9a-f][0-9a-f][0-9a-f][0-9a-f]")
+
+add_test(NAME dnp3_bad_header_crc_fields_in_json
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format json)
+set_tests_properties(dnp3_bad_header_crc_fields_in_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"index\": 13,[^}]*\"dnp3_link_crc_valid\": false,\n    \"dnp3_header_crc_valid\": false,\n    \"dnp3_block_count\": 1,\n    \"dnp3_block_crc_failures\": 0")
+
+# Packet 14: the same 23-byte multi-block Response as packet 3, but with ONLY block 2's CRC
+# corrupted (block 1's CRC and the header CRC are both left correct) -- confirms per-block
+# granularity, and that object headers still decode from the (structurally untouched) bytes.
+add_test(NAME dnp3_bad_block_crc_noted_and_objects_still_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text)
+set_tests_properties(dnp3_bad_block_crc_noted_and_objects_still_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "block 2 CRC mismatch \\(7 data byte\\(s\\)\\): calculated 0x[0-9a-f][0-9a-f][0-9a-f][0-9a-f], frame declares 0x[0-9a-f][0-9a-f][0-9a-f][0-9a-f]\n.*object 0: g1v2 \\(Binary Input\\)"
+  FAIL_REGULAR_EXPRESSION "block 1 CRC mismatch")
+
+add_test(NAME dnp3_bad_block_crc_fields_in_json
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format json)
+set_tests_properties(dnp3_bad_block_crc_fields_in_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"index\": 14,[^}]*\"dnp3_link_crc_valid\": false,\n    \"dnp3_header_crc_valid\": true,\n    \"dnp3_block_count\": 2,\n    \"dnp3_block_crc_failures\": 1")
+
+# Real-world confirmation, independent of the synthetic fixture above: a genuine capture's own
+# CRC bytes (computed by a real DNP3 stack, not by tools/make_sample_pcap.py) must validate --
+# this is a strong end-to-end check that the algorithm/table genuinely matches the DNP3 spec, not
+# just conduitscope's own generator.
+add_test(NAME real_dnp3_read_link_crc_valid
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/dnp3/dnp3_read.pcap" --format json)
+set_tests_properties(real_dnp3_read_link_crc_valid PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"dnp3_link_crc_valid\": true")
+
+# Same, but for a link-layer-only control frame (Request Link Status carries no user data) --
+# regression guard for the "no user data" path specifically, since that's the one case where
+# process_dnp3_frame is never called at all (see decoder.cpp) and the crc fields must still be
+# populated correctly from try_parse_dnp3_link_layer alone.
+add_test(NAME real_dnp3_request_link_status_crc_valid_with_no_user_data
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/dnp3/dnp3_request_link_status.pcap" --format json)
+set_tests_properties(real_dnp3_request_link_status_crc_valid_with_no_user_data PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"dnp3_link_crc_valid\": true")
 
 # --------------------------------------------------------------------------
 # General TCP stream reassembly (Decoder::reassemble_tcp_payload / tcp_reassembly_) -- a single
@@ -3596,6 +3669,113 @@ add_test(NAME s7comm_chaining_disconnect_abandons_reassembly
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_chaining.pcap" --format text)
 set_tests_properties(s7comm_chaining_disconnect_abandons_reassembly PROPERTIES
   PASS_REGULAR_EXPRESSION "a Disconnect Request \\(DR\\) frame arrived on this TCP flow while a COTP/S7comm fragment reassembly was still in progress \\(21 byte\\(s\\) buffered across 1 frame\\(s\\)\\) -- the earlier, incomplete fragment is abandoned")
+
+# --------------------------------------------------------------------------
+# PLC Control (0x28) / PLC Stop (0x29) parameter decoding -- tests/sample_s7comm_pi_control.pcap,
+# see tools/make_sample_pcap.py's own build_s7comm_pi_control_sample() docstring for the full
+# scenario list. s7comm_known_function_names()/s7comm_function_name() themselves are untouched --
+# these two function codes were already named there; only their parameter decoding is new here.
+# --------------------------------------------------------------------------
+
+add_test(NAME s7comm_plc_stop_message_decoded_text
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_pi_control.pcap" --format text)
+set_tests_properties(s7comm_plc_stop_message_decoded_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "Job: PLC Stop \\(\"PLC_STOP\"\\)")
+
+add_test(NAME s7comm_plc_stop_message_in_json
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_pi_control.pcap" --format json)
+set_tests_properties(s7comm_plc_stop_message_in_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"s7comm_plc_stop_message\": \"PLC_STOP\"")
+
+add_test(NAME s7comm_pi_control_insert_two_blocks_text
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_pi_control.pcap" --format text)
+set_tests_properties(s7comm_pi_control_insert_two_blocks_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "Job: PLC Control \\(_INSE - Activates a PLC module, 2 block\\(s\\): DB100 \\(Passive\\), FC5 \\(Active\\)\\)")
+
+add_test(NAME s7comm_pi_control_insert_two_blocks_in_json
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_pi_control.pcap" --format json)
+set_tests_properties(s7comm_pi_control_insert_two_blocks_in_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"s7comm_pi_service_name\": \"_INSE\",\n *\"s7comm_pi_service_description\": \"Activates a PLC module\",[^}]*\"s7comm_pi_control_blocks\": \\[\"DB100 \\(Passive\\)\", \"FC5 \\(Active\\)\"\\]")
+
+add_test(NAME s7comm_pi_control_delete_block_text
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_pi_control.pcap" --format text)
+set_tests_properties(s7comm_pi_control_delete_block_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "Job: PLC Control \\(_DELE - Removes module from the PLC's passive file system, 1 block\\(s\\): DB50 \\(Active as well as passive\\)\\)")
+
+add_test(NAME s7comm_pi_control_pprogram_empty_argument_text
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_pi_control.pcap" --format text)
+set_tests_properties(s7comm_pi_control_pprogram_empty_argument_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "Job: PLC Control \\(P_PROGRAM - PLC Start / Stop\\)\n")
+
+add_test(NAME s7comm_pi_control_pprogram_argument_text
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_pi_control.pcap" --format text)
+set_tests_properties(s7comm_pi_control_pprogram_argument_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "Job: PLC Control \\(P_PROGRAM - PLC Start / Stop, arg=\"OB1\"\\)")
+
+add_test(NAME s7comm_pi_control_pprogram_argument_in_json
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_pi_control.pcap" --format json)
+set_tests_properties(s7comm_pi_control_pprogram_argument_in_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"s7comm_pi_control_argument\": \"OB1\"")
+
+# Sinumerik/CNC-specific PI service name: the name+description lookup must fire, but the
+# parameter block itself must be explicitly noted as NOT decoded (the deliberate scope boundary).
+add_test(NAME s7comm_pi_control_sinumerik_name_lookup_only_text
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_pi_control.pcap" --format text)
+set_tests_properties(s7comm_pi_control_sinumerik_name_lookup_only_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "Job: PLC Control \\(_N_F_XFER - Selects file for uploading\\)\n *note: PLC Control PI service \"_N_F_XFER\" \\(Selects file for uploading\\) has a 4-byte parameter block that is not decoded -- Sinumerik/CNC-specific")
+
+add_test(NAME s7comm_pi_control_non_numeric_block_number_noted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_pi_control.pcap" --format text)
+set_tests_properties(s7comm_pi_control_non_numeric_block_number_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "non-numeric block number \\(ABCDE\\)")
+
+add_test(NAME s7comm_pi_control_truncated_block_descriptor_noted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_pi_control.pcap" --format text)
+set_tests_properties(s7comm_pi_control_truncated_block_descriptor_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "note: PLC Control block descriptor 1 is truncated \\(need 8 bytes, have 0\\)")
+
+add_test(NAME s7comm_pi_control_response_status_both_flags_text
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_pi_control.pcap" --format text)
+set_tests_properties(s7comm_pi_control_response_status_both_flags_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "Ack_Data: PLC Control \\(more data=yes, error=yes\\)")
+
+add_test(NAME s7comm_pi_control_response_status_no_flags_text
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_pi_control.pcap" --format text)
+set_tests_properties(s7comm_pi_control_response_status_no_flags_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "Ack_Data: PLC Control \\(more data=no, error=no\\)")
+
+add_test(NAME s7comm_pi_control_response_status_in_json
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_pi_control.pcap" --format json)
+set_tests_properties(s7comm_pi_control_response_status_in_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"s7comm_pi_control_has_more_data\": true,\n *\"s7comm_pi_control_has_error\": true,.*\"s7comm_pi_control_has_more_data\": false,\n *\"s7comm_pi_control_has_error\": false,")
+
+# Malformed/truncated 0x29 and 0x28 packets must degrade gracefully -- a note, never a crash or a
+# thrown ParseError escaping try_parse_s7comm (see s7comm.hpp's tolerant-parsing convention).
+add_test(NAME s7comm_plc_stop_truncated_noted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_pi_control.pcap" --format text)
+set_tests_properties(s7comm_plc_stop_truncated_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "note: PLC Stop parameter block is too short to contain its reserved bytes and message-length field")
+
+add_test(NAME s7comm_pi_control_truncated_reserved_noted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_pi_control.pcap" --format text)
+set_tests_properties(s7comm_pi_control_truncated_reserved_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "note: PLC Control parameter block is too short to contain its reserved bytes and PI parameter-length field")
+
+add_test(NAME s7comm_pi_control_declared_paramlen_exceeds_available_noted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_pi_control.pcap" --format text)
+set_tests_properties(s7comm_pi_control_declared_paramlen_exceeds_available_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "note: PLC Control PI parameter block is truncated \\(declares 50 byte\\(s\\), only 3 available\\)\n *note: PLC Control parameter block is missing its PI service name length byte")
+
+add_test(NAME s7comm_pi_control_sample_does_not_crash
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_pi_control.pcap" --format json)
+
+add_test(NAME s7comm_pi_control_sample_csv_does_not_crash
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_pi_control.pcap" --format csv)
+
+add_test(NAME s7comm_pi_control_sample_stats_counted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_pi_control.pcap" --stats)
+set_tests_properties(s7comm_pi_control_sample_stats_counted PROPERTIES
+  PASS_REGULAR_EXPRESSION "s7comm function codes:\n *PLC Control +[0-9]+\n *PLC Stop +[0-9]+")
 
 # --------------------------------------------------------------------------
 # S7comm-Plus (0x72) -- tests/sample_s7commplus.pcap, see tools/make_sample_pcap.py's own

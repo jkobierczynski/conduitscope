@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // pcap_reader.hpp - reader for offline capture files: both classic pcap and pcapng.
 //
 // This reads offline capture files (what tcpdump/Wireshark/`tshark -w` write) rather than

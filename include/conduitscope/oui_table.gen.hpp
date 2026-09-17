@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // oui_table.gen.hpp - GENERATED FILE, do not hand-edit -- see
 // tools/generate_oui_table.py (which regenerates this from a fetched copy of nmap's
 // nmap-mac-prefixes file) for how this table was produced and exactly how to refresh it.

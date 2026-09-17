@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // iec104.hpp - IEC 60870-5-104 (APCI + ASDU) decoding.
 //
 // Unlike DNP3, IEC 104 needs no cross-frame application-fragment reassembly: an I-format APDU

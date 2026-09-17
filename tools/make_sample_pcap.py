@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Generates the synthetic pcap fixtures under tests/.
 
 Pure standard library (struct only) -- deliberately has no dependency on
@@ -248,27 +248,82 @@ def build_modbus_pairing_sample():
     (TESTS_DIR / "sample_modbus_pairing.pcap").write_bytes(data)
 
 
+# DNP3 data-link CRC-16 table (reflected, polynomial 0x3D65 / reflected form 0xA6BC, seed 0, final
+# complement) -- the EXACT same table as kDnp3CrcTable in src/dnp3.cpp, copied verbatim rather than
+# re-derived, so this generator and conduitscope's own validator are guaranteed to agree bit-for-
+# bit. conduitscope now actually validates both the header CRC and every block CRC (previously it
+# only located and skipped them), so every frame this file builds gets a genuinely correct CRC by
+# default -- see dnp3_crc16/dnp3_block_crc_encode/dnp3_link_frame below. The two deliberately
+# CORRUPTED frames in build_dnp3_sample (packets 13 and 14) start from a correctly-CRC'd frame and
+# then flip specific CRC bytes, so the corruption is unambiguous and doesn't depend on this table
+# being subtly wrong in some other way.
+DNP3_CRC_TABLE = [
+    0x0000, 0x365E, 0x6CBC, 0x5AE2, 0xD978, 0xEF26, 0xB5C4, 0x839A,
+    0xFF89, 0xC9D7, 0x9335, 0xA56B, 0x26F1, 0x10AF, 0x4A4D, 0x7C13,
+    0xB26B, 0x8435, 0xDED7, 0xE889, 0x6B13, 0x5D4D, 0x07AF, 0x31F1,
+    0x4DE2, 0x7BBC, 0x215E, 0x1700, 0x949A, 0xA2C4, 0xF826, 0xCE78,
+    0x29AF, 0x1FF1, 0x4513, 0x734D, 0xF0D7, 0xC689, 0x9C6B, 0xAA35,
+    0xD626, 0xE078, 0xBA9A, 0x8CC4, 0x0F5E, 0x3900, 0x63E2, 0x55BC,
+    0x9BC4, 0xAD9A, 0xF778, 0xC126, 0x42BC, 0x74E2, 0x2E00, 0x185E,
+    0x644D, 0x5213, 0x08F1, 0x3EAF, 0xBD35, 0x8B6B, 0xD189, 0xE7D7,
+    0x535E, 0x6500, 0x3FE2, 0x09BC, 0x8A26, 0xBC78, 0xE69A, 0xD0C4,
+    0xACD7, 0x9A89, 0xC06B, 0xF635, 0x75AF, 0x43F1, 0x1913, 0x2F4D,
+    0xE135, 0xD76B, 0x8D89, 0xBBD7, 0x384D, 0x0E13, 0x54F1, 0x62AF,
+    0x1EBC, 0x28E2, 0x7200, 0x445E, 0xC7C4, 0xF19A, 0xAB78, 0x9D26,
+    0x7AF1, 0x4CAF, 0x164D, 0x2013, 0xA389, 0x95D7, 0xCF35, 0xF96B,
+    0x8578, 0xB326, 0xE9C4, 0xDF9A, 0x5C00, 0x6A5E, 0x30BC, 0x06E2,
+    0xC89A, 0xFEC4, 0xA426, 0x9278, 0x11E2, 0x27BC, 0x7D5E, 0x4B00,
+    0x3713, 0x014D, 0x5BAF, 0x6DF1, 0xEE6B, 0xD835, 0x82D7, 0xB489,
+    0xA6BC, 0x90E2, 0xCA00, 0xFC5E, 0x7FC4, 0x499A, 0x1378, 0x2526,
+    0x5935, 0x6F6B, 0x3589, 0x03D7, 0x804D, 0xB613, 0xECF1, 0xDAAF,
+    0x14D7, 0x2289, 0x786B, 0x4E35, 0xCDAF, 0xFBF1, 0xA113, 0x974D,
+    0xEB5E, 0xDD00, 0x87E2, 0xB1BC, 0x3226, 0x0478, 0x5E9A, 0x68C4,
+    0x8F13, 0xB94D, 0xE3AF, 0xD5F1, 0x566B, 0x6035, 0x3AD7, 0x0C89,
+    0x709A, 0x46C4, 0x1C26, 0x2A78, 0xA9E2, 0x9FBC, 0xC55E, 0xF300,
+    0x3D78, 0x0B26, 0x51C4, 0x679A, 0xE400, 0xD25E, 0x88BC, 0xBEE2,
+    0xC2F1, 0xF4AF, 0xAE4D, 0x9813, 0x1B89, 0x2DD7, 0x7735, 0x416B,
+    0xF5E2, 0xC3BC, 0x995E, 0xAF00, 0x2C9A, 0x1AC4, 0x4026, 0x7678,
+    0x0A6B, 0x3C35, 0x66D7, 0x5089, 0xD313, 0xE54D, 0xBFAF, 0x89F1,
+    0x4789, 0x71D7, 0x2B35, 0x1D6B, 0x9EF1, 0xA8AF, 0xF24D, 0xC413,
+    0xB800, 0x8E5E, 0xD4BC, 0xE2E2, 0x6178, 0x5726, 0x0DC4, 0x3B9A,
+    0xDC4D, 0xEA13, 0xB0F1, 0x86AF, 0x0535, 0x336B, 0x6989, 0x5FD7,
+    0x23C4, 0x159A, 0x4F78, 0x7926, 0xFABC, 0xCCE2, 0x9600, 0xA05E,
+    0x6E26, 0x5878, 0x029A, 0x34C4, 0xB75E, 0x8100, 0xDBE2, 0xEDBC,
+    0x91AF, 0xA7F1, 0xFD13, 0xCB4D, 0x48D7, 0x7E89, 0x246B, 0x1235,
+]
+
+
+def dnp3_crc16(data: bytes) -> int:
+    """Same algorithm as conduitscope's own dnp3_crc16 (src/dnp3.cpp): table-driven, reflected,
+    seed 0, final bitwise complement."""
+    crc = 0
+    for b in data:
+        crc = DNP3_CRC_TABLE[(crc ^ b) & 0xFF] ^ (crc >> 8)
+    return (~crc) & 0xFFFF
+
+
+assert dnp3_crc16(b"123456789") == 0xEA82, "DNP3 CRC-16 reference test vector failed"
+
+
 def dnp3_block_crc_encode(payload: bytes) -> bytes:
     """Splits `payload` (the logical transport+application bytes) into <=16-byte blocks, each
-    followed by its own 2-byte CRC -- the real DNP3 data-link user-data wire format. The CRC
-    bytes are placeholders (conduitscope does not validate them, same as the header CRC), but
-    their *placement* -- every 16 bytes, including a short final block -- must be real, since
-    that's exactly the reassembly logic being exercised."""
+    followed by its own genuine, correctly-computed 2-byte CRC (little-endian on the wire) --
+    the real DNP3 data-link user-data wire format, now that conduitscope actually validates it."""
     out = b""
     for i in range(0, len(payload), 16):
         chunk = payload[i:i + 16]
-        out += chunk + b"\xAB\xCD"  # placeholder block CRC, not validated by conduitscope
+        out += chunk + struct.pack("<H", dnp3_crc16(chunk))
     return out
 
 
 def dnp3_link_frame(source: int, destination: int, user_data: bytes, control: int = 0xC4) -> bytes:
-    """A full DNP3 data-link frame: 10-byte header (start+length+control+dest+src+header-CRC,
-    header CRC a placeholder like the block CRCs) followed by `user_data`'s block-CRC-encoded
-    wire bytes."""
+    """A full DNP3 data-link frame: 10-byte header (start+length+control+dest+src+header-CRC, a
+    genuine, correctly-computed CRC over the first 8 header bytes) followed by `user_data`'s
+    block-CRC-encoded wire bytes."""
     length_field = 5 + len(user_data)
     assert length_field <= 255, "single data-link frame can't carry this much user data"
-    header = (bytes([0x05, 0x64, length_field, control]) + struct.pack("<HH", destination, source) +
-              b"\xEF\xBE")  # placeholder header CRC, not validated by conduitscope
+    header_no_crc = bytes([0x05, 0x64, length_field, control]) + struct.pack("<HH", destination, source)
+    header = header_no_crc + struct.pack("<H", dnp3_crc16(header_no_crc))
     return header + dnp3_block_crc_encode(user_data)
 
 
@@ -416,6 +471,42 @@ def build_dnp3_sample():
                         len(mismatch_second)) + mismatch_second
     ip12 = ipv4_header(HMI_IP, PLC_IP, 6, len(tcp12), 0x200B) + tcp12
     packets.append(eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip12)
+
+    # 13) Same Read Class 0 request as packet 2 (read_class0), but with the header CRC
+    #     deliberately corrupted (flip every bit of both header CRC bytes) -- exercises
+    #     header_crc_valid=false / dnp3_link_crc_valid=false while confirming decoding still
+    #     proceeds normally otherwise (destination/source/control are still shown, the
+    #     application layer -- unaffected by a corrupted HEADER CRC -- still decodes the same
+    #     Read/g60v1 as packet 2). This is the "more severe" CRC failure: a bad header CRC means
+    #     destination/source/control/length can't be trusted, unlike a bad block CRC (packet 14
+    #     below), which only affects that one block's data.
+    good_header_frame = dnp3_link_frame(source=1, destination=1024, user_data=read_class0)
+    bad_header_crc_frame = bytearray(good_header_frame)
+    bad_header_crc_frame[8] ^= 0xFF
+    bad_header_crc_frame[9] ^= 0xFF
+    bad_header_crc_frame = bytes(bad_header_crc_frame)
+    tcp13 = tcp_header(51500, 20000, 5006, 6000, TCP_PSH | TCP_ACK, len(bad_header_crc_frame)) + bad_header_crc_frame
+    ip13 = ipv4_header(HMI_IP, PLC_IP, 6, len(tcp13), 0x200C) + tcp13
+    packets.append(eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip13)
+
+    # 14) Same 23-byte multi-block Response as packet 3 (resp_payload), but with ONLY block 2's
+    #     CRC deliberately corrupted (block 1's CRC, and the header CRC, are both left genuinely
+    #     correct) -- exercises per-block granularity: block_count=2, block_crc_failures=1,
+    #     header_crc_valid stays true, dnp3_link_crc_valid is false overall. Object headers still
+    #     decode from the (structurally intact -- corrupting a CRC never touches the data bytes
+    #     it covers) bytes regardless, same degrade-gracefully philosophy as everywhere else in
+    #     this decoder.
+    good_multiblock_frame = dnp3_link_frame(source=1024, destination=1, user_data=resp_payload)
+    bad_block_crc_frame = bytearray(good_multiblock_frame)
+    # header(10) + block 1 data(16) + block 1 CRC(2) + block 2 data(7) = offset of block 2's own
+    # 2-byte CRC (resp_payload is 23 bytes: a 16-byte block 1 and a 7-byte block 2).
+    block2_crc_offset = 10 + 16 + 2 + 7
+    bad_block_crc_frame[block2_crc_offset] ^= 0xFF
+    bad_block_crc_frame[block2_crc_offset + 1] ^= 0xFF
+    bad_block_crc_frame = bytes(bad_block_crc_frame)
+    tcp14 = tcp_header(20000, 51500, 6001, 6100, TCP_PSH | TCP_ACK, len(bad_block_crc_frame)) + bad_block_crc_frame
+    ip14 = ipv4_header(PLC_IP, HMI_IP, 6, len(tcp14), 0x200D) + tcp14
+    packets.append(eth_header(HMI_MAC, PLC_MAC, 0x0800) + ip14)
 
     data = pcap_global_header()
     for i, pkt in enumerate(packets):
@@ -2910,6 +3001,105 @@ def build_s7comm_chaining_sample():
     for i, pkt in enumerate(packets):
         data += pcap_record(pkt, 1_700_000_600 + i, i * 1000)
     (TESTS_DIR / "sample_s7comm_chaining.pcap").write_bytes(data)
+
+
+def build_s7comm_pi_control_sample():
+    """Function codes 0x28 (PLC Control / "PI-Service") and 0x29 (PLC Stop) parameter decoding --
+    see s7comm.hpp's file header for the security context and the deliberate _N_* Sinumerik/CNC
+    scope boundary. Each scenario below is its own standalone one-packet TCP "flow" (distinct
+    source port), same pattern as build_s7comm_items_sample() -- this decoder is stateless
+    per-packet for these function codes, no COTP/TCP reassembly is being exercised here."""
+    ENG_IP = HMI_IP
+
+    def block_descriptor(block_type: str, block_number, dest: str) -> bytes:
+        # block_number is normally an int (formatted as 5 decimal digits, zero-padded, matching
+        # real S7comm traffic), but a raw 5-character str is accepted too, to build the
+        # non-numeric-block-number malformed-input scenario below.
+        number_field = f"{block_number:05d}" if isinstance(block_number, int) else block_number
+        assert len(block_type) == 2 and len(number_field) == 5 and len(dest) == 1
+        return block_type.encode("ascii") + number_field.encode("ascii") + dest.encode("ascii")
+
+    def blocks_param(blocks) -> bytes:
+        return bytes([len(blocks), 0x00]) + b"".join(block_descriptor(*b) for b in blocks)
+
+    def pi_control_param(pi_param: bytes, name: bytes) -> bytes:
+        return bytes([0x28]) + bytes(7) + struct.pack("!H", len(pi_param)) + pi_param + bytes([len(name)]) + name
+
+    packets = []
+
+    def add_request(param: bytes, port: int, ident: int, pdu_ref: int):
+        req = s7_header(0x01, pdu_ref, len(param), 0) + param
+        cotp = tpkt_frame(COTP_DT_HEADER, req)
+        tcp = tcp_header(port, 102, 1000 + pdu_ref, 1100 + pdu_ref, TCP_PSH | TCP_ACK, len(cotp)) + cotp
+        ip = ipv4_header(ENG_IP, PLC_IP, 6, len(tcp), ident) + tcp
+        packets.append(eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip)
+
+    def add_response(param: bytes, port: int, ident: int, pdu_ref: int):
+        resp = s7_header(0x03, pdu_ref, len(param), 0) + struct.pack("!BB", 0, 0) + param
+        cotp = tpkt_frame(COTP_DT_HEADER, resp)
+        tcp = tcp_header(102, port, 1100 + pdu_ref, 1000 + pdu_ref, TCP_PSH | TCP_ACK, len(cotp)) + cotp
+        ip = ipv4_header(PLC_IP, ENG_IP, 6, len(tcp), ident) + tcp
+        packets.append(eth_header(HMI_MAC, PLC_MAC, 0x0800) + ip)
+
+    # 1) PLC Stop -- Job request. Real traffic carries literally "PLC_STOP", used here too (this
+    #    decoder doesn't validate against it -- see s7comm.cpp/plc_stop_message).
+    add_request(bytes([0x29]) + bytes(5) + bytes([8]) + b"PLC_STOP", 49210, 0x3810, 101)
+
+    # 2) PLC Control _INSE -- activates/inserts 2 blocks of different types: DB100 (Passive
+    #    filesystem destination) and FC5 (Active).
+    add_request(pi_control_param(blocks_param([("DB", 100, "P"), ("FC", 5, "A")]), b"_INSE"),
+                49211, 0x3811, 102)
+
+    # 3) PLC Control _DELE -- removes 1 block, destination code 'B' (Active as well as passive).
+    add_request(pi_control_param(blocks_param([("DB", 50, "B")]), b"_DELE"), 49212, 0x3812, 103)
+
+    # 4) PLC Control P_PROGRAM -- bare invocation, no argument (paramlen == 0).
+    add_request(pi_control_param(b"", b"P_PROGRAM"), 49213, 0x3813, 104)
+
+    # 5) PLC Control P_PROGRAM -- with a non-empty argument. "OB1" here is an arbitrary test
+    #    string, not a claim about what this specific argument value means on real hardware --
+    #    see s7comm.hpp/pi_control_argument for why this decoder doesn't interpret it.
+    add_request(pi_control_param(b"OB1", b"P_PROGRAM"), 49214, 0x3814, 105)
+
+    # 6) PLC Control with a Sinumerik/CNC-specific PI service name (_N_F_XFER) that has a non-empty
+    #    parameter block -- confirms the name+description lookup fires (it's in kPiServiceNames)
+    #    while the parameter block itself is deliberately left undecoded (scope boundary).
+    add_request(pi_control_param(bytes([0xAA, 0xBB, 0xCC, 0xDD]), b"_N_F_XFER"), 49215, 0x3815, 106)
+
+    # 7) PLC Control _INSE -- a block descriptor whose 5-character number field isn't all digits,
+    #    exercising the "non-numeric block number" fallback rather than a crash/garbage int.
+    add_request(pi_control_param(blocks_param([("DB", "ABCDE", "P")]), b"_INSE"), 49216, 0x3816, 107)
+
+    # 8) PLC Control _INSE -- declares 2 blocks but only ships one complete 8-byte descriptor,
+    #    exercising parse_pi_control_blocks' truncation note (and confirming no crash).
+    truncated_blocks_param = bytes([2, 0x00]) + block_descriptor("DB", 10, "P")
+    add_request(pi_control_param(truncated_blocks_param, b"_INSE"), 49217, 0x3817, 108)
+
+    # 9) PLC Control Ack_Data response -- both status flag bits set (more data + error).
+    add_response(bytes([0x28, 0x03]), 49218, 0x3818, 109)
+
+    # 10) PLC Control Ack_Data response -- neither status flag bit set.
+    add_response(bytes([0x28, 0x00]), 49219, 0x3819, 110)
+
+    # 11) PLC Stop -- truncated request: only the function code byte, none of the reserved/
+    #     length/message bytes. Must degrade gracefully (a note, no crash), never throw.
+    add_request(bytes([0x29]), 49220, 0x3820, 111)
+
+    # 12) PLC Control -- truncated request: only 2 of the 7 reserved bytes present, nowhere near
+    #     enough for the reserved-bytes-plus-paramlen-field shape. Must degrade gracefully.
+    add_request(bytes([0x28, 0x00, 0x00]), 49221, 0x3821, 112)
+
+    # 13) PLC Control -- declares a 50-byte PI parameter block but only 3 bytes are actually
+    #     present (and the PI service name length byte is missing entirely). Exercises both the
+    #     "parameter block truncated" note and the "missing name length byte" note together,
+    #     without crashing.
+    add_request(bytes([0x28]) + bytes(7) + struct.pack("!H", 50) + bytes([0x01, 0x02, 0x03]),
+                49222, 0x3822, 113)
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_000_700 + i, i * 1000)
+    (TESTS_DIR / "sample_s7comm_pi_control.pcap").write_bytes(data)
 
 
 # ==================================================================================================
@@ -6359,6 +6549,7 @@ if __name__ == "__main__":
     build_s7comm_items_sample()
     build_s7comm_1200sym_sample()
     build_s7comm_chaining_sample()
+    build_s7comm_pi_control_sample()
     build_s7commplus_sample()
     build_mms_sample()
     build_mqtt_sample()

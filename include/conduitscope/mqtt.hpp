@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // mqtt.hpp - MQTT v3.1.1 and v5.0 decoding, plus Sparkplug B (Eclipse Tahu) topic/payload
 // recognition layered on top of MQTT PUBLISH.
 //

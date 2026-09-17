@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // modbus.hpp - Modbus/TCP (MBAP header + PDU) decoding.
 //
 // Covers the function codes that make up the overwhelming majority of real

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // enip.hpp - EtherNet/IP encapsulation protocol + CIP (Common Industrial
 // Protocol) explicit messaging decoding (TCP port 44818), plus CIP implicit
 // (real-time I/O) messaging decoding (UDP port 2222).

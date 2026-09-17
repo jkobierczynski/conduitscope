@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // s7commplus.hpp - S7comm-Plus (Siemens TIA Portal / S7-1200/1500 protocol) decoding.
 //
 // S7comm-Plus rides inside a COTP Data (DT) frame's user data (see cotp.hpp), the SAME TCP port

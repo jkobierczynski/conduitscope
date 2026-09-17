@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # mqtt_pcap_pcapng_agree.sh -- see CMakeLists.txt's real_mqtt_pcap_and_pcapng_containers_agree and
 # tests/real_captures/mqtt/ATTRIBUTION.md. mqtt_packets_tcpdump.pcap and mqtt_packets.pcapng are two
 # different container formats of the exact same underlying capture (both from

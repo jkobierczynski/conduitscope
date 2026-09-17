@@ -1,7 +1,8 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 #include "conduitscope/dnp3.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cstring>
 #include <iomanip>
 #include <sstream>
@@ -22,6 +23,76 @@ std::string hex16(uint16_t v) {
     s << "0x" << std::hex << std::setw(4) << std::setfill('0') << static_cast<unsigned>(v);
     return s.str();
 }
+
+// DNP3 data-link CRC-16: table-driven, reflected, polynomial 0x3D65 (reflected form 0xA6BC, which
+// is where this table comes from), seed 0, final result is the bitwise complement of the running
+// CRC register. Used for BOTH the 8-byte data-link header CRC and every <=16-byte user-data block
+// CRC -- same algorithm, just applied to different spans (see try_parse_dnp3_link_layer and
+// reassemble_user_data below). Cross-checked against Wireshark's own wsutil/crc16.c
+// (crc16_0x3D65_seed/crc16_reflected, as used by packet-dnp.c's calculateCRC/calculateCRCtvb) AND
+// the independently-known CRC-16/DNP catalogue reference test vector (see the static_assert right
+// below the table) -- do not substitute a different DNP3 CRC table/algorithm without re-deriving
+// and re-checking it the same way; a subtly wrong table here would make every genuinely valid
+// frame's CRC silently (and incorrectly) fail to validate.
+constexpr std::array<uint16_t, 256> kDnp3CrcTable = {
+    0x0000, 0x365E, 0x6CBC, 0x5AE2, 0xD978, 0xEF26, 0xB5C4, 0x839A,
+    0xFF89, 0xC9D7, 0x9335, 0xA56B, 0x26F1, 0x10AF, 0x4A4D, 0x7C13,
+    0xB26B, 0x8435, 0xDED7, 0xE889, 0x6B13, 0x5D4D, 0x07AF, 0x31F1,
+    0x4DE2, 0x7BBC, 0x215E, 0x1700, 0x949A, 0xA2C4, 0xF826, 0xCE78,
+    0x29AF, 0x1FF1, 0x4513, 0x734D, 0xF0D7, 0xC689, 0x9C6B, 0xAA35,
+    0xD626, 0xE078, 0xBA9A, 0x8CC4, 0x0F5E, 0x3900, 0x63E2, 0x55BC,
+    0x9BC4, 0xAD9A, 0xF778, 0xC126, 0x42BC, 0x74E2, 0x2E00, 0x185E,
+    0x644D, 0x5213, 0x08F1, 0x3EAF, 0xBD35, 0x8B6B, 0xD189, 0xE7D7,
+    0x535E, 0x6500, 0x3FE2, 0x09BC, 0x8A26, 0xBC78, 0xE69A, 0xD0C4,
+    0xACD7, 0x9A89, 0xC06B, 0xF635, 0x75AF, 0x43F1, 0x1913, 0x2F4D,
+    0xE135, 0xD76B, 0x8D89, 0xBBD7, 0x384D, 0x0E13, 0x54F1, 0x62AF,
+    0x1EBC, 0x28E2, 0x7200, 0x445E, 0xC7C4, 0xF19A, 0xAB78, 0x9D26,
+    0x7AF1, 0x4CAF, 0x164D, 0x2013, 0xA389, 0x95D7, 0xCF35, 0xF96B,
+    0x8578, 0xB326, 0xE9C4, 0xDF9A, 0x5C00, 0x6A5E, 0x30BC, 0x06E2,
+    0xC89A, 0xFEC4, 0xA426, 0x9278, 0x11E2, 0x27BC, 0x7D5E, 0x4B00,
+    0x3713, 0x014D, 0x5BAF, 0x6DF1, 0xEE6B, 0xD835, 0x82D7, 0xB489,
+    0xA6BC, 0x90E2, 0xCA00, 0xFC5E, 0x7FC4, 0x499A, 0x1378, 0x2526,
+    0x5935, 0x6F6B, 0x3589, 0x03D7, 0x804D, 0xB613, 0xECF1, 0xDAAF,
+    0x14D7, 0x2289, 0x786B, 0x4E35, 0xCDAF, 0xFBF1, 0xA113, 0x974D,
+    0xEB5E, 0xDD00, 0x87E2, 0xB1BC, 0x3226, 0x0478, 0x5E9A, 0x68C4,
+    0x8F13, 0xB94D, 0xE3AF, 0xD5F1, 0x566B, 0x6035, 0x3AD7, 0x0C89,
+    0x709A, 0x46C4, 0x1C26, 0x2A78, 0xA9E2, 0x9FBC, 0xC55E, 0xF300,
+    0x3D78, 0x0B26, 0x51C4, 0x679A, 0xE400, 0xD25E, 0x88BC, 0xBEE2,
+    0xC2F1, 0xF4AF, 0xAE4D, 0x9813, 0x1B89, 0x2DD7, 0x7735, 0x416B,
+    0xF5E2, 0xC3BC, 0x995E, 0xAF00, 0x2C9A, 0x1AC4, 0x4026, 0x7678,
+    0x0A6B, 0x3C35, 0x66D7, 0x5089, 0xD313, 0xE54D, 0xBFAF, 0x89F1,
+    0x4789, 0x71D7, 0x2B35, 0x1D6B, 0x9EF1, 0xA8AF, 0xF24D, 0xC413,
+    0xB800, 0x8E5E, 0xD4BC, 0xE2E2, 0x6178, 0x5726, 0x0DC4, 0x3B9A,
+    0xDC4D, 0xEA13, 0xB0F1, 0x86AF, 0x0535, 0x336B, 0x6989, 0x5FD7,
+    0x23C4, 0x159A, 0x4F78, 0x7926, 0xFABC, 0xCCE2, 0x9600, 0xA05E,
+    0x6E26, 0x5878, 0x029A, 0x34C4, 0xB75E, 0x8100, 0xDBE2, 0xEDBC,
+    0x91AF, 0xA7F1, 0xFD13, 0xCB4D, 0x48D7, 0x7E89, 0x246B, 0x1235,
+};
+
+// Core CRC loop, over a raw pointer/length rather than a ByteSpan so it can be used in a
+// constexpr/compile-time context (see the static_assert below) as well as at runtime.
+constexpr uint16_t dnp3_crc16(const uint8_t* data, size_t len) {
+    uint16_t crc = 0;
+    for (size_t i = 0; i < len; ++i) {
+        crc = static_cast<uint16_t>(kDnp3CrcTable[(crc ^ data[i]) & 0xFF] ^ (crc >> 8));
+    }
+    return static_cast<uint16_t>(~crc);
+}
+
+// Convenience overload for the ByteSpan chunks this file actually has at both CRC check sites
+// (the 8-byte header span, and each <=16-byte user-data block) -- same core loop as above.
+uint16_t dnp3_crc16(ByteSpan data) { return dnp3_crc16(data.data(), data.size()); }
+
+// CRC-16/DNP reference test vector: the CRC of ASCII "123456789" must be 0xEA82. Checked at
+// COMPILE TIME (not just in a test run) so a broken table transcription, wrong seed, wrong
+// update-step bit order, or missing final complement fails the build outright rather than
+// shipping a silently-wrong validator -- see kDnp3CrcTable's own comment for how this was
+// independently derived and cross-checked before landing here.
+constexpr uint8_t kDnp3CrcTestVector[] = {'1', '2', '3', '4', '5', '6', '7', '8', '9'};
+static_assert(dnp3_crc16(kDnp3CrcTestVector, sizeof(kDnp3CrcTestVector)) == 0xEA82,
+              "DNP3 CRC-16 implementation does not reproduce the CRC-16/DNP reference test vector "
+              "(CRC of ASCII \"123456789\" must be 0xEA82) -- check kDnp3CrcTable's transcription, "
+              "the seed, the per-byte update step, or the final complement");
 
 std::string dnp3_function_name(uint8_t fc) {
     switch (fc) {
@@ -414,13 +485,27 @@ std::vector<std::string> iin_flag_names(uint16_t iin) {
     return names;
 }
 
-// Strips (without validating) the 2-byte CRC that follows every 16-byte-or-shorter block of
+// Aggregated block-CRC-check result across every block reassemble_user_data manages to look at --
+// see Dnp3LinkFrame::block_count/block_crc_failures/crc_validated, which reassemble_dnp3_user_data
+// copies this into.
+struct Dnp3BlockCrcResult {
+    size_t block_count = 0;
+    size_t block_crc_failures = 0;
+    // False on ANY mismatch, and also false the moment a truncation prevents a block (or its CRC)
+    // from being fully read -- an unverifiable CRC is never counted as valid. Starts true (the
+    // "zero blocks, so nothing failed" case, e.g. logical_bytes == 0) and can only go false.
+    bool all_blocks_valid = true;
+};
+
+// Locates (and, now, validates) the 2-byte CRC that follows every 16-byte-or-shorter block of
 // DNP3 data-link user data, returning the reassembled logical bytes. `after_header` is
 // everything in the TCP payload after the 10-byte data link header; `logical_bytes` is
 // Dnp3LinkFrame::user_data_bytes. Stops early -- noting why -- if the capture was truncated
-// before every block could be read.
+// before every block (or its CRC) could be read; a mismatched or unreadable block CRC never stops
+// reassembly itself (the block's data bytes are still recovered/appended either way) -- only a
+// literal truncation (nothing left to read) does, same as before this feature.
 std::vector<uint8_t> reassemble_user_data(ByteSpan after_header, size_t logical_bytes,
-                                           std::vector<std::string>& notes) {
+                                           std::vector<std::string>& notes, Dnp3BlockCrcResult& block_crc) {
     std::vector<uint8_t> out;
     out.reserve(logical_bytes);
     Cursor c(after_header);
@@ -435,6 +520,7 @@ std::vector<uint8_t> reassemble_user_data(ByteSpan after_header, size_t logical_
                              " remain -- transport/application decoding stopped at " +
                              std::to_string(out.size()) + " of " + std::to_string(logical_bytes) +
                              " logical byte(s)");
+            block_crc.all_blocks_valid = false;
             ByteSpan tail = c.bytes(c.remaining());
             for (size_t i = 0; i < tail.size(); ++i) out.push_back(tail.at(i));
             return out;
@@ -442,14 +528,25 @@ std::vector<uint8_t> reassemble_user_data(ByteSpan after_header, size_t logical_
         ByteSpan chunk = c.bytes(chunk_len);
         for (size_t i = 0; i < chunk.size(); ++i) out.push_back(chunk.at(i));
         remaining_logical -= chunk_len;
+        ++block_crc.block_count;
 
         if (c.remaining() < 2) {
             notes.push_back("block CRC after a " + std::to_string(chunk_len) +
                              "-byte data block is truncated (capture cut off) -- the block's data bytes "
-                             "were still recovered");
+                             "were still recovered, but its CRC could not be checked");
+            block_crc.block_crc_failures++;
+            block_crc.all_blocks_valid = false;
             return out;
         }
-        c.skip(2);  // block CRC -- present but not validated in this release, same as the header CRC
+        uint16_t block_crc_on_wire = c.u16le();  // on-the-wire block CRC is little-endian, same as the header CRC
+        uint16_t block_crc_calculated = dnp3_crc16(chunk);
+        if (block_crc_calculated != block_crc_on_wire) {
+            block_crc.block_crc_failures++;
+            block_crc.all_blocks_valid = false;
+            notes.push_back("block " + std::to_string(block_crc.block_count) + " CRC mismatch (" +
+                             std::to_string(chunk_len) + " data byte(s)): calculated " +
+                             hex16(block_crc_calculated) + ", frame declares " + hex16(block_crc_on_wire));
+        }
     }
     return out;
 }
@@ -469,7 +566,7 @@ std::vector<std::string> dnp3_known_function_names() {
     return out;
 }
 
-std::optional<Dnp3LinkFrame> try_parse_dnp3_link_layer(ByteSpan tcp_payload) {
+std::optional<Dnp3LinkFrame> try_parse_dnp3_link_layer(ByteSpan tcp_payload, std::vector<std::string>& notes) {
     // Fixed data link header: start(2) + length(1) + control(1) + destination(2) +
     // source(2) + CRC(2) = 10 bytes.
     if (tcp_payload.size() < 10) {
@@ -486,15 +583,28 @@ std::optional<Dnp3LinkFrame> try_parse_dnp3_link_layer(ByteSpan tcp_payload) {
     uint8_t control = c.u8();
     uint16_t destination = c.u16le();
     uint16_t source = c.u16le();
-    c.u16be();  // header CRC -- present but not validated in this release
+    uint16_t header_crc_on_wire = c.u16le();  // on-the-wire header CRC is little-endian
 
     Dnp3LinkFrame frame;
     frame.length_field = length_field;
     frame.control = control;
     frame.destination = destination;
     frame.source = source;
-    frame.crc_validated = false;
     frame.user_data_bytes = (length_field >= 5) ? static_cast<size_t>(length_field - 5) : 0;
+
+    // Header CRC covers exactly the 8 bytes before it: the two start bytes, length, control,
+    // destination, source.
+    frame.header_crc_calculated = dnp3_crc16(tcp_payload.subspan(0, 8));
+    frame.header_crc_on_wire = header_crc_on_wire;
+    frame.header_crc_valid = (frame.header_crc_calculated == frame.header_crc_on_wire);
+    // Best answer available before any user data has been read -- already final for a frame with
+    // none at all (reassemble_dnp3_user_data narrows this further, ANDing in the block result, for
+    // a frame that actually has user data -- see Dnp3LinkFrame's own comment).
+    frame.crc_validated = frame.header_crc_valid;
+    if (!frame.header_crc_valid) {
+        notes.push_back("header CRC mismatch: calculated " + hex16(frame.header_crc_calculated) +
+                         ", frame declares " + hex16(frame.header_crc_on_wire));
+    }
 
     std::ostringstream out;
     out << "DNP3 data link frame: source=" << source << " destination=" << destination
@@ -523,16 +633,21 @@ std::optional<size_t> dnp3_link_frame_declared_length(ByteSpan payload) {
     return 10 + user_data_bytes + 2 * blocks;
 }
 
-std::vector<uint8_t> reassemble_dnp3_user_data(const Dnp3LinkFrame& link, ByteSpan tcp_payload,
+std::vector<uint8_t> reassemble_dnp3_user_data(Dnp3LinkFrame& link, ByteSpan tcp_payload,
                                                 std::vector<std::string>& notes) {
     if (link.user_data_bytes == 0) {
         return {};
     }
     ByteSpan after_header = tcp_payload.size() > 10 ? tcp_payload.from(10) : ByteSpan();
-    return reassemble_user_data(after_header, link.user_data_bytes, notes);
+    Dnp3BlockCrcResult block_crc;
+    std::vector<uint8_t> out = reassemble_user_data(after_header, link.user_data_bytes, notes, block_crc);
+    link.block_count = block_crc.block_count;
+    link.block_crc_failures = block_crc.block_crc_failures;
+    link.crc_validated = link.header_crc_valid && block_crc.all_blocks_valid;
+    return out;
 }
 
-std::optional<Dnp3ApplicationFragment> try_parse_dnp3_transport_and_application(const Dnp3LinkFrame& link,
+std::optional<Dnp3ApplicationFragment> try_parse_dnp3_transport_and_application(Dnp3LinkFrame& link,
                                                                                  ByteSpan tcp_payload) {
     if (link.user_data_bytes == 0) {
         return std::nullopt;

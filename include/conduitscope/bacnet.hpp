@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // bacnet.hpp - BACnet/IP (Annex J) decoding: BVLC (BACnet Virtual Link Control, the UDP framing
 // header) + NPDU (Network Layer PDU) + APDU (Application Layer PDU, the service layer).
 //

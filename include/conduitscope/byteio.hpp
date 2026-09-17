@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // byteio.hpp - bounds-checked, endianness-explicit byte reading helpers.
 //
 // Network/capture data is untrusted and variable-length, so every read here

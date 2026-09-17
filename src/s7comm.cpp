@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 #include "conduitscope/s7comm.hpp"
 
 #include <algorithm>
@@ -526,6 +526,144 @@ void append_item_notes(const std::vector<S7Item>& items, std::vector<std::string
     }
 }
 
+// --- PLC Control (0x28) / PLC Stop (0x29) parameter decoding ----------
+//
+// Reference behavior for the wire layout and the PI service name table below is Wireshark's own
+// packet-s7comm.c dissector (its pi_service_names[] array) -- see s7comm.hpp's file header for
+// the scope boundary around the _N_* Sinumerik/CNC-specific services (name+description lookup
+// only, no parameter-block decode) and why a handful of bytes in both function codes' fixed
+// layout are left as unknown/reserved rather than guessed at.
+
+// Copies raw bytes into a std::string verbatim, with no printability filtering -- matching this
+// codebase's existing convention (see goose.cpp/sv.cpp's own ascii_text) of showing whatever
+// ASCII text is actually on the wire rather than second-guessing it.
+std::string ascii_text(ByteSpan s) {
+    std::string text;
+    text.reserve(s.size());
+    for (size_t i = 0; i < s.size(); ++i) text += static_cast<char>(s.at(i));
+    return text;
+}
+
+struct PiServiceEntry {
+    const char* name;
+    const char* description;
+};
+
+// The first six entries are the ones whose parameter block gets a full structural decode
+// (see try_parse_s7comm's 0x28 branch); every entry after that is looked up for a name+
+// description only. This is a partial transcription of Wireshark's ~65-entry pi_service_names[]
+// table (packet-s7comm.c, around line 1516) -- covering the six PLC-control services plus the
+// most commonly-seen/clearly-documented _N_* Sinumerik/CNC services -- not the full table: several
+// of Wireshark's own _N_* descriptions are terse or unclear enough that transcribing them here
+// would just be copying uncertainty, and the _N_* family is out of this decoder's scope anyway
+// (see s7comm.hpp's file header). A PI service name that isn't in this table still gets shown
+// (pi_service_name is always set), just with an empty pi_service_description.
+constexpr PiServiceEntry kPiServiceNames[] = {
+    {"_INSE", "Activates a PLC module"},
+    {"_INS2", "Activates a PLC module"},
+    {"_DELE", "Removes module from the PLC's passive file system"},
+    {"P_PROGRAM", "PLC Start / Stop"},
+    {"_MODU", "PLC Copy Ram to Rom"},
+    {"_GARB", "Compress PLC memory"},
+    {"_N_LOGIN_", "Login"},
+    {"_N_LOGOUT", "Logout"},
+    {"_N_CANCEL", "Cancels NC alarm"},
+    {"_N_DASAVE", "Copying data from SRAM to FLASH"},
+    {"_N_DIGIOF", "Turns off digitizing"},
+    {"_N_DIGION", "Turns on digitizing"},
+    {"_N_DZERO_", "Set all D nos. invalid for function \"unique D no.\""},
+    {"_N_ENDEXT", "(no further description available)"},
+    {"_N_F_OPER", "Opens a file read-only"},
+    {"_N_OST_OF", "Overstore OFF"},
+    {"_N_OST_ON", "Overstore ON"},
+    {"_N_SCALE_", "Unit of measurement setting (metric<->INCH)"},
+    {"_N_SETUFR", "Activates user frame"},
+    {"_N_STRTLK", "The global start disable is set"},
+    {"_N_STRTUL", "The global start disable is reset"},
+    {"_N_TMRASS", "Resets the Active status"},
+    {"_N_F_DELE", "Deletes file"},
+    {"_N_EXTERN", "Selects external program for execution"},
+    {"_N_EXTMOD", "Selects external program for execution"},
+    {"_N_F_DELR", "Delete file even without access rights"},
+    {"_N_F_XFER", "Selects file for uploading"},
+    {"_N_LOCKE_", "Locks the active file for editing"},
+    {"_N_SELECT", "(selects a program/file)"},
+    {"_N_SRTEXT", "(selects external program)"},
+    {"_N_F_CLOS", "(closes a file)"},
+    {"_N_F_OPEN", "(opens a file)"},
+    {"_N_F_SEEK", "(seeks within a file)"},
+    {"_N_ASUP__", "(interrupt/ASUP-related)"},
+    {"_N_CHEKDM", "(tool/magazine check)"},
+    {"_N_CHKDNO", "(tool D-number check)"},
+};
+
+std::string pi_service_description_lookup(const std::string& name) {
+    for (const auto& entry : kPiServiceNames) {
+        if (name == entry.name) return entry.description;
+    }
+    return "";
+}
+
+// _INSE / _INS2 / _DELE parameter block: count(1) + reserved(1) + count * an 8-byte block
+// descriptor (2 ASCII block-type chars + 5 ASCII decimal block-number chars + 1 ASCII destination
+// filesystem char). Never throws -- a truncated descriptor is noted and parsing stops there,
+// matching this file's existing tolerant-parsing convention.
+void parse_pi_control_blocks(ByteSpan block_span, std::vector<std::string>& out,
+                              std::vector<std::string>& notes) {
+    Cursor bc(block_span);
+    if (bc.remaining() < 2) {
+        if (bc.remaining() > 0) {
+            notes.push_back("PLC Control block-activate/delete parameter block is too short to "
+                             "contain its block-count and reserved bytes");
+        }
+        return;
+    }
+    uint8_t count = bc.u8();
+    bc.u8();  // reserved, typically 0x00 -- not otherwise documented
+
+    for (uint8_t i = 0; i < count; ++i) {
+        if (bc.remaining() < 8) {
+            notes.push_back("PLC Control block descriptor " + std::to_string(i) +
+                             " is truncated (need 8 bytes, have " + std::to_string(bc.remaining()) + ")");
+            break;
+        }
+        ByteSpan desc = bc.bytes(8);
+        std::string type = ascii_text(desc.subspan(0, 2));
+        std::string number_str = ascii_text(desc.subspan(2, 5));
+        char dest = static_cast<char>(desc.at(7));
+
+        bool numeric = !number_str.empty();
+        for (char ch : number_str) {
+            if (ch < '0' || ch > '9') {
+                numeric = false;
+                break;
+            }
+        }
+        std::string number_display = numeric ? std::to_string(std::stoi(number_str))
+                                              : ("non-numeric block number (" + number_str + ")");
+
+        std::string dest_name;
+        switch (dest) {
+            case 'P': dest_name = "Passive"; break;
+            case 'A': dest_name = "Active"; break;
+            case 'B': dest_name = "Active as well as passive"; break;
+            default: dest_name = std::string(1, dest); break;
+        }
+
+        out.push_back(type + number_display + " (" + dest_name + ")");
+    }
+}
+
+void append_pi_control_block_notes(const std::vector<std::string>& blocks, std::vector<std::string>& notes) {
+    for (size_t i = 0; i < blocks.size() && i < kMaxDetailedNotes; ++i) {
+        notes.push_back("block " + std::to_string(i) + ": " + blocks[i]);
+    }
+    if (blocks.size() > kMaxDetailedNotes) {
+        notes.push_back("... and " + std::to_string(blocks.size() - kMaxDetailedNotes) +
+                         " more block(s) not listed individually");
+    }
+}
+
 void append_value_notes(const std::vector<S7DataItem>& items, std::vector<std::string>& notes) {
     for (size_t i = 0; i < items.size() && i < kMaxDetailedNotes; ++i) {
         const auto& di = items[i];
@@ -664,6 +802,102 @@ std::optional<S7CommFrame> try_parse_s7comm(ByteSpan cotp_user_data) {
                 append_item_notes(frame.items, frame.notes);
                 append_value_notes(frame.data_items, frame.notes);
             }
+        } else if (frame.function_code == 0x29) {
+            // PLC Stop: Job (request) side only -- see S7CommFrame::plc_stop_message in
+            // s7comm.hpp for the wire layout and why the Ack/Ack_Data side is deliberately left
+            // undecorated (Wireshark's own dissector doesn't special-case it either). Re-read from
+            // param_span, same convention as the Read/Write Var branch above.
+            if (frame.rosctr == 0x01) {
+                Cursor pc(param_span);
+                if (pc.remaining() >= 1) pc.u8();  // function code, already known
+                if (pc.remaining() >= 6) {
+                    pc.skip(5);  // unknown/reserved -- see s7comm.hpp's file header
+                    uint8_t len = pc.u8();
+                    size_t take = std::min<size_t>(len, pc.remaining());
+                    if (take < len) {
+                        frame.notes.push_back("PLC Stop message string is truncated (declares " +
+                                               std::to_string(len) + " byte(s), only " +
+                                               std::to_string(take) + " available)");
+                    }
+                    frame.plc_stop_message = ascii_text(pc.bytes(take));
+                } else {
+                    frame.notes.push_back("PLC Stop parameter block is too short to contain its "
+                                           "reserved bytes and message-length field");
+                }
+            }
+        } else if (frame.function_code == 0x28) {
+            // PLC Control (PI-Service): see S7CommFrame's pi_* fields and s7comm.hpp's file header
+            // for the wire layout and the deliberate _N_* Sinumerik/CNC scope boundary. Re-read
+            // from param_span, same convention as the branches above.
+            Cursor pc(param_span);
+            if (pc.remaining() >= 1) pc.u8();  // function code, already known
+
+            if (frame.rosctr == 0x01) {
+                if (pc.remaining() >= 9) {  // reserved(7) + paramlen(2)
+                    pc.skip(7);  // unknown/reserved -- see s7comm.hpp's file header
+                    uint16_t pi_param_len = pc.u16be();
+                    size_t pi_param_take = std::min<size_t>(pi_param_len, pc.remaining());
+                    if (pi_param_take < pi_param_len) {
+                        frame.notes.push_back("PLC Control PI parameter block is truncated (declares " +
+                                               std::to_string(pi_param_len) + " byte(s), only " +
+                                               std::to_string(pi_param_take) + " available)");
+                    }
+                    ByteSpan pi_param_span = pc.bytes(pi_param_take);
+
+                    if (pc.remaining() >= 1) {
+                        uint8_t name_len = pc.u8();
+                        size_t name_take = std::min<size_t>(name_len, pc.remaining());
+                        if (name_take < name_len) {
+                            frame.notes.push_back("PLC Control PI service name is truncated (declares " +
+                                                   std::to_string(name_len) + " byte(s), only " +
+                                                   std::to_string(name_take) + " available)");
+                        }
+                        frame.has_pi_service = true;
+                        frame.pi_service_name = ascii_text(pc.bytes(name_take));
+                        frame.pi_service_description = pi_service_description_lookup(frame.pi_service_name);
+
+                        if (frame.pi_service_name == "_INSE" || frame.pi_service_name == "_INS2" ||
+                            frame.pi_service_name == "_DELE") {
+                            parse_pi_control_blocks(pi_param_span, frame.pi_control_blocks, frame.notes);
+                            append_pi_control_block_notes(frame.pi_control_blocks, frame.notes);
+                        } else if (frame.pi_service_name == "P_PROGRAM" || frame.pi_service_name == "_MODU" ||
+                                   frame.pi_service_name == "_GARB") {
+                            if (!pi_param_span.empty()) {
+                                frame.pi_control_argument = ascii_text(pi_param_span);
+                            }
+                        } else if (!pi_param_span.empty()) {
+                            // The _N_* Sinumerik/CNC family (and anything else this table doesn't
+                            // name) is a deliberate scope boundary -- name+description lookup
+                            // only, no attempt to decode the parameter block's own structure. See
+                            // s7comm.hpp's file header for why.
+                            frame.notes.push_back(
+                                "PLC Control PI service \"" + frame.pi_service_name + "\"" +
+                                (frame.pi_service_description.empty()
+                                     ? ""
+                                     : " (" + frame.pi_service_description + ")") +
+                                " has a " + std::to_string(pi_param_span.size()) +
+                                "-byte parameter block that is not decoded -- Sinumerik/CNC-specific "
+                                "and other non-PLC-control PI services are a deliberate scope boundary "
+                                "here, see s7comm.hpp's file header");
+                        }
+                    } else {
+                        frame.notes.push_back(
+                            "PLC Control parameter block is missing its PI service name length byte");
+                    }
+                } else {
+                    frame.notes.push_back("PLC Control parameter block is too short to contain its "
+                                           "reserved bytes and PI parameter-length field");
+                }
+            } else if (frame.rosctr == 0x03) {
+                // Ack_Data: a single status byte with two flag bits, present only when the
+                // parameter block holds at least the function code plus that byte.
+                if (frame.param_length >= 2 && pc.remaining() >= 1) {
+                    uint8_t status = pc.u8();
+                    frame.has_pi_control_status = true;
+                    frame.pi_control_has_more_data = (status & 0x01) != 0;
+                    frame.pi_control_has_error = (status & 0x02) != 0;
+                }
+            }
         }
     } else if (frame.rosctr == 0x07) {
         frame.notes.push_back("Userdata parameter block (vendor-specific extensions -- diagnostics, "
@@ -688,6 +922,34 @@ std::optional<S7CommFrame> try_parse_s7comm(ByteSpan cotp_user_data) {
             s << (frame.items.empty() ? " (" : ", ") << frame.data_items.size()
               << (frame.items.empty() ? " value(s): " : " value(s)=[") << brief_value_list(frame.data_items)
               << (frame.items.empty() ? ")" : "]");
+        }
+        if (!frame.plc_stop_message.empty()) {
+            s << " (\"" << frame.plc_stop_message << "\")";
+        }
+        if (frame.has_pi_service) {
+            s << " (" << frame.pi_service_name;
+            if (!frame.pi_service_description.empty()) {
+                s << " - " << frame.pi_service_description;
+            }
+            if (!frame.pi_control_argument.empty()) {
+                s << ", arg=\"" << frame.pi_control_argument << "\"";
+            }
+            if (!frame.pi_control_blocks.empty()) {
+                s << ", " << frame.pi_control_blocks.size() << " block(s): ";
+                size_t shown = std::min<size_t>(frame.pi_control_blocks.size(), 3);
+                for (size_t i = 0; i < shown; ++i) {
+                    if (i) s << ", ";
+                    s << frame.pi_control_blocks[i];
+                }
+                if (frame.pi_control_blocks.size() > shown) {
+                    s << ", +" << (frame.pi_control_blocks.size() - shown) << " more";
+                }
+            }
+            s << ")";
+        }
+        if (frame.has_pi_control_status) {
+            s << " (more data=" << (frame.pi_control_has_more_data ? "yes" : "no")
+              << ", error=" << (frame.pi_control_has_error ? "yes" : "no") << ")";
         }
     }
     if (frame.has_error && (frame.error_class != 0 || frame.error_code != 0)) {

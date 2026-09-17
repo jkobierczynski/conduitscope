@@ -9,7 +9,8 @@ conduitscope \- decode Modbus/TCP, DNP3, IEC 60870-5-104, S7comm/COTP, S7comm-Pl
 reads a pcap or pcapng capture file, or optionally a live network
 interface (see \fBLIVE CAPTURE\fR below), and decodes Modbus/TCP, DNP3,
 IEC 60870-5-104 (TCP port 2404), S7comm (Siemens S7 PLC protocol, over
-TPKT/COTP, TCP port 102), S7comm-Plus (Siemens TIA Portal / S7-1200/1500's
+TPKT/COTP, TCP port 102, including PLC Control/PLC Stop parameter
+decoding), S7comm-Plus (Siemens TIA Portal / S7-1200/1500's
 newer, object-oriented protocol, the same TPKT/COTP transport and TCP port
 102 S7comm uses but disambiguated by its own protocol id byte, 0x72 vs
 S7comm's 0x32 -- GetMultiVariables/SetMultiVariables/SetVariable/
@@ -424,7 +425,10 @@ reassembled, though real-capture validation of that path so far only
 confirms it is transparent on content-free "priming" fragments, not genuine
 multi-frame content splitting (synthetic-fixture-validated only); IPv4
 only; no IPv4 fragment reassembly; DNP3
-header and per-block CRCs are not validated; a DNP3 application fragment
+header and per-block CRCs are now validated (\fIdnp3_link_crc_valid\fR and
+related JSON fields, plus a \fBnotes\fR entry on mismatch), diagnostic only
+-- a mismatch never stops decoding and is not (yet) evaluated by
+\fBpolicy validate\fR; a DNP3 application fragment
 spanning more than one data-link frame IS reassembled across separate TCP
 segments (per TCP flow), though this path has no real-capture validation
 yet; DNP3 point values are decoded
@@ -664,7 +668,10 @@ authoritative pairing can't be done (no matching request on this session);
 S7comm item-level addressing (inside Read Var / Write Var) is fully
 confident only for the classic S7ANY syntax; the S7-1200/1500 "symbolic"
 syntax (0xB2) gets an EXPERIMENTAL, unverified decode, marked
-[EXPERIMENTAL] everywhere it appears;
+[EXPERIMENTAL] everywhere it appears; PLC Control's (0x28) _N_*
+Sinumerik/CNC PI services get a name+description lookup only, never a
+parameter-block decode, and P_PROGRAM/_MODU/_GARB argument strings are
+shown raw, never semantically interpreted;
 S7comm-Plus (TCP port 102, shares S7comm's own TPKT/COTP transport,
 disambiguated by its own protocol id byte 0x72) is now decoded too, with the
 same two-tier posture as MMS/OPC UA: GetMultiVariables, SetMultiVariables,
@@ -970,4 +977,4 @@ Full reference: \fBdocs/MANUAL.md\fR in the conduitscope source tree.
 .SH AUTHOR
 Jurgen Kobierczynski
 .SH LICENSE
-MIT
+Apache-2.0

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 #include "conduitscope/pcap_reader.hpp"
 
 #include <algorithm>

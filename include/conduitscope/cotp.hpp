@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // cotp.hpp - TPKT (RFC 1006) + COTP (ISO 8073 / X.224) framing detection and
 // header decoding. This is the transport that S7comm (Siemens S7 PLCs, TCP
 // port 102) always rides on, so it's implemented as its own layer rather

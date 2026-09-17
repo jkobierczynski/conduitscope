@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 #include "conduitscope/output.hpp"
 
 #include <algorithm>
@@ -265,6 +265,39 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
             out_ << "\"" << json_escape(p.s7comm_value_summaries[i]) << "\"";
         }
         out_ << "],\n";
+    }
+    if (!p.s7comm_plc_stop_message.empty()) {
+        out_ << "    \"s7comm_plc_stop_message\": \"" << json_escape(p.s7comm_plc_stop_message) << "\",\n";
+    }
+    if (p.s7comm_has_pi_service) {
+        out_ << "    \"s7comm_pi_service_name\": \"" << json_escape(p.s7comm_pi_service_name) << "\",\n";
+        if (!p.s7comm_pi_service_description.empty()) {
+            out_ << "    \"s7comm_pi_service_description\": \"" << json_escape(p.s7comm_pi_service_description)
+                 << "\",\n";
+        }
+    }
+    if (!p.s7comm_pi_control_argument.empty()) {
+        out_ << "    \"s7comm_pi_control_argument\": \"" << json_escape(p.s7comm_pi_control_argument) << "\",\n";
+    }
+    if (!p.s7comm_pi_control_blocks.empty()) {
+        out_ << "    \"s7comm_pi_control_blocks\": [";
+        for (size_t i = 0; i < p.s7comm_pi_control_blocks.size(); ++i) {
+            if (i != 0) out_ << ", ";
+            out_ << "\"" << json_escape(p.s7comm_pi_control_blocks[i]) << "\"";
+        }
+        out_ << "],\n";
+    }
+    if (p.s7comm_has_pi_control_status) {
+        out_ << "    \"s7comm_pi_control_has_more_data\": "
+             << (p.s7comm_pi_control_has_more_data ? "true" : "false") << ",\n";
+        out_ << "    \"s7comm_pi_control_has_error\": " << (p.s7comm_pi_control_has_error ? "true" : "false")
+             << ",\n";
+    }
+    if (p.protocol == "dnp3") {
+        out_ << "    \"dnp3_link_crc_valid\": " << (p.dnp3_link_crc_valid ? "true" : "false") << ",\n";
+        out_ << "    \"dnp3_header_crc_valid\": " << (p.dnp3_header_crc_valid ? "true" : "false") << ",\n";
+        out_ << "    \"dnp3_block_count\": " << p.dnp3_block_count << ",\n";
+        out_ << "    \"dnp3_block_crc_failures\": " << p.dnp3_block_crc_failures << ",\n";
     }
     if (p.protocol == "dnp3" && p.dnp3_has_function) {
         out_ << "    \"dnp3_function\": \"" << json_escape(p.dnp3_function_name) << "\",\n";

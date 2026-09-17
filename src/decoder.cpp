@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 #include "conduitscope/decoder.hpp"
 
 #include <algorithm>
@@ -67,7 +67,7 @@ std::string tcp_session_key(const std::string& ip_a, uint16_t port_a, const std:
 
 }  // namespace
 
-std::optional<Dnp3ApplicationFragment> Decoder::process_dnp3_frame(const Dnp3LinkFrame& link, ByteSpan tcp_payload,
+std::optional<Dnp3ApplicationFragment> Decoder::process_dnp3_frame(Dnp3LinkFrame& link, ByteSpan tcp_payload,
                                                                      const std::string& flow_key) const {
     if (link.user_data_bytes == 0) {
         return std::nullopt;
@@ -1565,7 +1565,7 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
         }
 
         if (want_dnp3) {
-            if (auto d = try_parse_dnp3_link_layer(effective_payload)) {
+            if (auto d = try_parse_dnp3_link_layer(effective_payload, out.notes)) {
                 out.protocol = "dnp3";
                 out.summary = d->summary;
 
@@ -1610,6 +1610,15 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                 if (auto app = process_dnp3_frame(*d, effective_payload, flow_key)) {
                     merge_application_layer(*app, /*is_first_frame=*/true);
                 }
+                // Read AFTER process_dnp3_frame: that call (when it runs -- it doesn't for a
+                // link-layer-only control frame with no user data, see its own doc comment) is
+                // what finalizes block_count/block_crc_failures/crc_validated on top of the header
+                // result try_parse_dnp3_link_layer already set -- see Dnp3LinkFrame's own comment
+                // in dnp3.hpp for why. Either way, by this point d's crc fields are final.
+                out.dnp3_link_crc_valid = d->crc_validated;
+                out.dnp3_header_crc_valid = d->header_crc_valid;
+                out.dnp3_block_count = d->block_count;
+                out.dnp3_block_crc_failures = d->block_crc_failures;
 
                 // DNP3 frames are small (<=255 bytes on the wire) and it's normal for a sender
                 // or the OS to coalesce several into one TCP segment before flushing. Keep
@@ -1621,7 +1630,7 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                 size_t frame_count = 1;
                 while (offset < effective_payload.size() && frame_count < kMaxDnp3FramesPerPayload) {
                     ByteSpan rest = effective_payload.from(offset);
-                    auto next = try_parse_dnp3_link_layer(rest);
+                    auto next = try_parse_dnp3_link_layer(rest, out.notes);
                     if (!next) break;  // remaining bytes aren't another DNP3 frame -- stop, don't guess
                     ++frame_count;
                     std::string note = "additional DNP3 data link frame " + std::to_string(frame_count) +
@@ -1736,6 +1745,17 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                                     out.s7comm_value_summaries.push_back("");
                                 }
                             }
+                            out.s7comm_plc_stop_message = s7->plc_stop_message;
+                            out.s7comm_has_pi_service = s7->has_pi_service;
+                            out.s7comm_pi_service_name = s7->pi_service_name;
+                            out.s7comm_pi_service_description = s7->pi_service_description;
+                            out.s7comm_pi_control_argument = s7->pi_control_argument;
+                            for (size_t i = 0; i < s7->pi_control_blocks.size() && i < kMaxTags; ++i) {
+                                out.s7comm_pi_control_blocks.push_back(s7->pi_control_blocks[i]);
+                            }
+                            out.s7comm_has_pi_control_status = s7->has_pi_control_status;
+                            out.s7comm_pi_control_has_more_data = s7->pi_control_has_more_data;
+                            out.s7comm_pi_control_has_error = s7->pi_control_has_error;
                             for (const auto& n : cotp->notes) out.notes.push_back(n);
                             annotate_port();
                             return out;

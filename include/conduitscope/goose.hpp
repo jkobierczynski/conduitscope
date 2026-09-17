@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // goose.hpp - IEC 61850-8-1 GOOSE (Generic Object Oriented Substation Event, EtherType 0x88B8)
 // decoding: the 8-byte GOOSE APDU header, the ASN.1 BER-encoded GOOSE PDU (gocbRef/datSet/goID/
 // timestamp/stNum/sqNum/simulation/confRev/ndsCom/the allData dataset), and, recursively, the

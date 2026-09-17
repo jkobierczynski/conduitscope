@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // cli_main.cpp - command-line interface, built on the vendored CLI11 header.
 //
 // See docs/MANUAL.md for the full option reference; --help at any level

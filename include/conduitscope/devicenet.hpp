@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // devicenet.hpp - DeviceNet (ODVA's original CAN-bus-based CIP network) frame decoding.
 //
 // DeviceNet carries CIP (Common Industrial Protocol) messages directly over a CAN (Controller

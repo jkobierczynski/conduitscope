@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // tcp.hpp - minimal TCP header parsing.
 //
 // This file itself just reads one TCP segment's header and payload as they

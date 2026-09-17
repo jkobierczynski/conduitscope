@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // s7comm.hpp - S7comm (Siemens S7 PLC protocol) header decoding.
 //
 // S7comm always rides inside a COTP Data (DT) frame's user data (see
@@ -30,7 +30,27 @@
 // doesn't cover (an unrecognized area code, more than one LID entry) falls
 // back to raw hex rather than guessing further. Every other syntax id is
 // shown as raw hex, same as every other function code's parameter/data
-// payload. S7comm-Plus (TIA Portal's newer, largely undocumented protocol, protocol id 0x72) is
+// payload.
+//
+// Function codes 0x28 (PLC Control -- the general "Program Invocation" (PI-Service) mechanism
+// used to start/stop the PLC's own user program, copy RAM to ROM, compress memory and -- most
+// security-relevant -- activate or delete logic blocks on a live controller) and 0x29 (PLC Stop
+// -- the wire-level mechanism behind the well-known unauthenticated ICS attack that halts an
+// S7-300/400 class CPU's execution with no authentication at all) are also decoded: PLC Stop's
+// request-side reserved bytes and confirmation string, and PLC Control's PI service name plus --
+// for the _INSE/_INS2/_DELE block-activate/delete services and the P_PROGRAM/_MODU/_GARB
+// program-control services -- its parameter block (see S7CommFrame's pi_control_* fields). PLC
+// Control's PI service name is also looked up against Wireshark's own name table for every other
+// PI service, INCLUDING the large family of _N_* Sinumerik/CNC-specific services (login, file
+// transfer, tool/magazine management, ...) -- but only for a name+description lookup, never a
+// parameter-block decode: those are a different, much larger domain (dozens of per-service
+// argument layouts, all specific to CNC machine-tool control rather than ordinary PLC control)
+// and are a deliberate, documented scope boundary here, the same honest-scoping convention this
+// file already uses for 0xB2's unverified shapes above. A handful of bytes in both 0x28's and
+// 0x29's fixed layout are simply unknown/reserved -- Wireshark's own packet-s7comm.c dissector
+// doesn't document their meaning either, so this decoder doesn't invent one.
+//
+// S7comm-Plus (TIA Portal's newer, largely undocumented protocol, protocol id 0x72) is
 // a wholly different, independent application protocol that merely shares this same COTP Data /
 // TCP port 102 transport -- try_parse_s7comm below deliberately does NOT recognize it (it returns
 // std::nullopt for a 0x72 first byte, the same as for any other non-S7comm payload); its own
@@ -149,6 +169,40 @@ struct S7CommFrame {
     //     (has_value_fields is false on each, since Write Var confirmations carry no value payload).
     std::vector<S7Item> items;
     std::vector<S7DataItem> data_items;
+
+    // Only populated for function_code == 0x29 (PLC Stop), Job (request) side -- Wireshark's own
+    // dissector doesn't decode the Ack/Ack_Data side either (see s7comm.cpp), so neither does this
+    // one; a response just falls through to the generic "no special decode" path. Wire layout
+    // after the function code byte: 5 unknown/reserved bytes (meaning not documented anywhere,
+    // including in Wireshark's own dissector -- not guessed at here) + a 1-byte length + that many
+    // ASCII bytes. In real traffic the string is literally "PLC_STOP", but this decodes whatever
+    // ASCII text is actually present rather than validating against that specific value.
+    std::string plc_stop_message;
+
+    // Only populated for function_code == 0x28 (PLC Control / "PI-Service"). See s7comm.hpp's file
+    // header for the wire layout, the six PI services whose parameter blocks are fully decoded
+    // (pi_control_argument/pi_control_blocks below), and the deliberate scope boundary around the
+    // _N_* Sinumerik/CNC-specific PI services (name+description lookup only, no parameter decode).
+    bool has_pi_service = false;              // Job (request) side only
+    std::string pi_service_name;              // raw PI service name off the wire, e.g. "_INSE", "P_PROGRAM"
+    std::string pi_service_description;       // looked-up human description; empty if pi_service_name
+                                               // isn't in the known table (see s7comm.cpp's kPiServiceNames)
+    // P_PROGRAM / _MODU / _GARB only, and only when the parameter block was non-empty: its single
+    // ASCII argument string, decoded as-is. Deliberately NOT semantically interpreted (e.g. no
+    // attempt to claim a given argument means "cold restart" vs. "warm restart") -- see the file
+    // header for why: no authoritative documentation of specific argument values was available,
+    // and Wireshark's own dissector doesn't interpret them either.
+    std::string pi_control_argument;
+    // _INSE / _INS2 / _DELE only: one formatted "<type><number> (<destination>)" string per block
+    // descriptor in the parameter block, e.g. "DB100 (Passive)", "FC5 (Active)".
+    std::vector<std::string> pi_control_blocks;
+
+    // Only populated for function_code == 0x28, Ack_Data (response) side, when the parameter
+    // block is at least 2 bytes (function code + the status byte itself): the status byte's two
+    // documented flag bits.
+    bool has_pi_control_status = false;
+    bool pi_control_has_more_data = false;  // 0x01: more data of the block/file can still be retrieved
+    bool pi_control_has_error = false;      // 0x02: an error occurred
 
     std::string summary;
     std::vector<std::string> notes;

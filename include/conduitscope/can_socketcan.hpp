@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // can_socketcan.hpp - Linux SocketCAN pcap capture framing (pcap LINKTYPE_CAN_SOCKETCAN == 227).
 //
 // This is the SECOND wholly new link-layer this codebase has ever had to add (the first was

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // hartip.hpp - HART-IP decoding: the fixed 8-byte HART-IP message header, its four session-
 // control message shapes (Session Initiate, Session Close, Keep Alive, Error/NAK), and the
 // Pass-Through message that tunnels the classic wired-HART token-passing Data-Link PDU (the

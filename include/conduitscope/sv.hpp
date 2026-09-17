@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // sv.hpp - IEC 61850-9-2 Sampled Values (SV, EtherType 0x88BA) decoding: the 8-byte SV APDU
 // header (identical in shape to GOOSE's, see goose.hpp), the ASN.1 BER-encoded SavPdu (noASDU +
 // one or more ASDU elements), and each ASDU's own svID/datSet/smpCnt/confRev/refrTm/smpSynch/

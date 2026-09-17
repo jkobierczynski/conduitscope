@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // stp.hpp - IEEE Spanning Tree Protocol family: STP (802.1D), RSTP (802.1w), and MSTP (802.1s)
 // BPDU (Bridge Protocol Data Unit) decoding.
 //

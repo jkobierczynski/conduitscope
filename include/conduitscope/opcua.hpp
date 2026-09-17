@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // opcua.hpp - OPC UA Binary (UA-TCP / OPC UA Secure Conversation) decoding: the 8-byte UA-TCP
 // connection-protocol messages (Hello, Acknowledge, Error, ReverseHello), the 12-byte
 // SecureConversation chunk header used by OpenSecureChannel/CloseSecureChannel/Message, their

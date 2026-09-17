@@ -97,7 +97,13 @@ Groundwork / v0.1.0. What works right now:
   Binary/Analog/Counter Input and Output states and readings (with quality
   flags), CROB output-command fields (control code, trip/close, on/off time,
   status -- this is literally how DNP3 issues commands), and absolute
-  timestamps. A group/variation outside that table still gets its object data
+  timestamps. The data-link CRC-16 (the 8-byte header's own CRC, and every
+  <=16-byte user-data block's own separate CRC) is now genuinely calculated
+  and validated against the on-the-wire value, not just located and skipped
+  -- a mismatch is flagged (`dnp3_link_crc_valid`/`dnp3_header_crc_valid`/
+  `dnp3_block_count`/`dnp3_block_crc_failures` plus a specific `notes` entry)
+  without ever stopping decoding, diagnostic only (not yet wired into
+  `policy validate`); see docs/MANUAL.md. A group/variation outside that table still gets its object data
   located and skipped by computed length, just not value-decoded. Multiple
   complete DNP3 data-link frames coalesced into one TCP segment (common,
   since DNP3 frames are small) are all found and decoded, not just the first.
@@ -125,7 +131,12 @@ Groundwork / v0.1.0. What works right now:
   `I0.0`, `MB50`, `T5`), plus the returned/written values. S7-1200/1500
   "symbolic" addressing (`0xB2`) -- confirmed to be common in real traffic --
   also gets a tag, but via an **experimental, unverified** reconstruction
-  clearly marked as such everywhere it appears; S7comm-Plus (the newer,
+  clearly marked as such everywhere it appears; PLC Control (`0x28`) and PLC
+  Stop (`0x29`) -- the general Program Invocation mechanism used to push or
+  remove logic blocks on a live controller, and the wire-level mechanism
+  behind the well-known unauthenticated "PLC Stop" DoS technique,
+  respectively -- also get their own parameters decoded now (PI service
+  name/block descriptors, and the Stop confirmation string); S7comm-Plus (the newer,
   TIA-Portal-native protocol sharing this same transport) is now fully
   decoded too -- see its own bullet below. A single S7comm message that
   doesn't fit one negotiated PDU length
@@ -523,7 +534,9 @@ Groundwork / v0.1.0. What works right now:
   this decoder could not independently confirm the reference plugin's own
   byte-accounting for where that variant's body actually starts. Checksums/
   digests (the Integrity part's SHA-256-sized value) are surfaced, never
-  verified, same posture as DNP3/HART-IP. Two real S7-1511 captures --
+  verified, same posture as HART-IP's own checksum (DNP3's data-link CRCs,
+  by contrast, are now genuinely validated -- see below). Two real S7-1511
+  captures --
   originally added to this project only to validate the old "detected, not
   decoded" stub -- were re-decoded once full support existed: real HMI
   traffic exercising GetMultiVariables/SetMultiVariables/DeleteObject
@@ -831,4 +844,4 @@ build/conduitscope policy validate -i eth0 --policy tests/policies/compliant.yam
 
 ## License
 
-MIT -- see [LICENSE](LICENSE).
+Apache-2.0 -- see [LICENSE](LICENSE).

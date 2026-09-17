@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // policy.hpp - zone/conduit policy file parsing for `policy validate`.
 //
 // A policy file declares named zones (each a set of IPv4 CIDR blocks) and

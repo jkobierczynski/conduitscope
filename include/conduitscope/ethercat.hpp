@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // ethercat.hpp - EtherCAT (EtherType 0x88A4) decoding: the 2-byte EtherCAT frame header (Length +
 // Type), and, for Type 1 ("EtherCAT command") frames, the chained EtherCAT datagram(s) that
 // follow -- Cmd/Idx/Address/Len+flags/IRQ header, the datagram's own Data payload, and the

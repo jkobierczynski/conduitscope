@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // link_layer.hpp - Ethernet II (and single 802.1Q VLAN tag) framing, PLUS (new in this release)
 // classic IEEE 802.3 length-framed LLC/SNAP recognition.
 //

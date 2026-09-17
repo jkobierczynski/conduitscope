@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // policy_engine.hpp - evaluates decoded packets (DecodedPacket, from
 // Decoder) against a parsed zone/conduit Policy (policy.hpp), for the
 // `policy validate` command.

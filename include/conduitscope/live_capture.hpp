@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // live_capture.hpp - optional live packet capture via libpcap (Linux) / Npcap (Windows).
 //
 // This is the one place in conduitscope that is allowed to depend on something outside this

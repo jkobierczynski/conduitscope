@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # live_capture_max_packets_smoke.sh -- the one CTest case (see CMakeLists.txt's
 # live_capture_max_packets_stops_capture_early_with_real_traffic) that actually exercises live
 # capture against REAL loopback traffic rather than an idle interface. Every other live-capture

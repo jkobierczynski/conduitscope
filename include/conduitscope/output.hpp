@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // output.hpp - renders a stream of DecodedPacket values as text, JSON, or
 // CSV, plus a StatsWriter that accumulates a summary instead of per-packet
 // lines (used by `decode --stats` and the `info` command).

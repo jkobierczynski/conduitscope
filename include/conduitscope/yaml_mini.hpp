@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // yaml_mini.hpp - a minimal, purpose-built parser for the restricted YAML
 // subset conduitscope's zone/conduit policy files use (see policy.hpp).
 //

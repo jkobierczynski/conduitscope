@@ -1437,6 +1437,41 @@ packets where they apply:
   `"1"` for a decoded bit, or a return-code name like `"Object does not
   exist"`), on Read Var / Write Var *response* packets, and alongside
   `s7comm_items` on Write Var request packets (the values being written).
+- `s7comm_plc_stop_message`: the PLC Stop (function `0x29`) request's
+  confirmation string (in real traffic, literally `"PLC_STOP"`), on a Job
+  (request) packet whose message was decoded. Never set on a response
+  packet -- see PROTOCOL COVERAGE.
+- `s7comm_pi_service_name` / `s7comm_pi_service_description`: the PLC
+  Control (function `0x28`) request's PI service name (e.g. `"_INSE"`,
+  `"P_PROGRAM"`, or one of the `_N_*` Sinumerik/CNC names) and, when that
+  name is in the known table, its looked-up description (e.g. `"Activates a
+  PLC module"`). `s7comm_pi_service_description` is omitted, not `null`,
+  when the name isn't in the table -- see PROTOCOL COVERAGE for exactly
+  which names that covers.
+- `s7comm_pi_control_argument`: `P_PROGRAM`/`_MODU`/`_GARB` only -- the PI
+  service's raw ASCII argument string, decoded as-is with no semantic
+  interpretation attached (see PROTOCOL COVERAGE for why).
+- `s7comm_pi_control_blocks`: `_INSE`/`_INS2`/`_DELE` only -- an array of
+  one `"<type><number> (<destination>)"` entry per block descriptor in the
+  parameter block, e.g. `"DB100 (Passive)"`, `"FC5 (Active)"`.
+- `s7comm_pi_control_has_more_data` / `s7comm_pi_control_has_error`: PLC
+  Control Ack_Data (response) packets only -- the two documented
+  status-flag bits, present when the response's parameter block was long
+  enough to carry them.
+- `dnp3_link_crc_valid` / `dnp3_header_crc_valid` / `dnp3_block_count` /
+  `dnp3_block_crc_failures`: data-link CRC-16 validation results, set
+  whenever protocol is `dnp3` (unlike `dnp3_function` below, these need no
+  application-layer decode -- even a link-layer-only control frame with no
+  user data has a header CRC to check). `dnp3_header_crc_valid` is the
+  8-byte header CRC alone; `dnp3_block_count`/`dnp3_block_crc_failures` are
+  how many <=16-byte user-data blocks this frame had and how many of those
+  failed their own CRC; `dnp3_link_crc_valid` is true only when the header
+  AND every block validated. All four mirror the *first* data-link frame
+  found in this TCP payload, same "first frame only" convention as
+  `dnp3_function` below -- an additional coalesced frame's own CRC mismatch
+  (if any) still gets a `notes` entry. See PROTOCOL COVERAGE's DNP3
+  "Data-link CRC-16 validation" section for the exact semantics and the
+  `notes` text a mismatch produces.
 - `dnp3_function`: the DNP3 function name (`"Read"`, `"Response"`, ...), when
   protocol is `dnp3` and this fragment's application layer was decoded (see
   PROTOCOL COVERAGE for when that is -- a fragment split across multiple
@@ -2457,16 +2492,16 @@ cover.
 Detected reliably (via the 0x05 0x64 start bytes) and its data-link-layer
 header is decoded: source and destination DNP3 addresses, the raw control
 byte, and the frame length field (broken down into the resulting
-transport/application-layer byte count). The header CRC is present in the
-frame but **not validated** in this release, same as every other CRC/checksum
-in this release.
+transport/application-layer byte count), plus the header CRC-16, which is
+now genuinely calculated and validated against the on-the-wire value (see
+"Data-link CRC-16 validation" below).
 
 On top of the data link layer, conduitscope reassembles the user data (data
-link frames split it into <=16-byte blocks, each with its own CRC -- also not
-validated, but correctly located and skipped so the bytes above them line up)
-and decodes the **transport header** (1 byte: FIR/FIN fragment-boundary flags
-and a 6-bit sequence number) for every data-link frame that carries any user
-data at all.
+link frames split it into <=16-byte blocks, each with its own CRC-16, now
+also genuinely calculated and validated per block, not just located and
+skipped) and decodes the **transport header** (1 byte: FIR/FIN
+fragment-boundary flags and a 6-bit sequence number) for every data-link
+frame that carries any user data at all.
 
 DNP3 frames are small (<=255 bytes on the wire), so it's normal for a sender
 or the OS to coalesce two or more complete data-link frames into a single TCP
@@ -2573,6 +2608,70 @@ A batch of more than 200 points in one object header only gets the first 200
 individually decoded (the object's byte length is still fully accounted for
 either way); a note says so when it happens.
 
+**Data-link CRC-16 validation:** both CRCs described above -- the 8-byte
+header CRC and every <=16-byte user-data block's own CRC -- are now genuinely
+calculated and compared against their on-the-wire value, not just located and
+skipped as in an earlier release. The header CRC covers the first 8 bytes of
+the data-link header (the two start bytes, length, control, destination,
+source, i.e. everything before the CRC field itself); each user-data block's
+CRC is checked individually, not cumulatively, so a bad CRC on one block of a
+multi-block frame doesn't taint the others. Exposed in JSON as
+`dnp3_header_crc_valid` (the header CRC alone), `dnp3_block_count` /
+`dnp3_block_crc_failures` (how many <=16-byte blocks this frame had, and how
+many of those failed), and `dnp3_link_crc_valid` (true only when the header
+AND every block validated) -- see OUTPUT FORMATS' JSON field reference below.
+A mismatch never stops decoding or drops the frame, consistent with this
+tool's degrade-gracefully-and-keep-going philosophy applied elsewhere in this
+codebase (a malformed object header, a truncated frame, S7comm-Plus's
+array-of-Struct refusal): it's flagged via those fields plus a specific
+`notes` entry naming both the calculated and the on-the-wire value, e.g.
+`"header CRC mismatch: calculated 0x8aca, frame declares 0x7535"` or
+`"block 2 CRC mismatch (7 data byte(s)): calculated 0xdcf9, frame declares
+0x2306"`, and decoding proceeds using the on-wire bytes exactly as it did
+before this feature existed. The algorithm itself (a reflected CRC-16,
+polynomial `0x3D65`, seed 0, with the running register's final bitwise
+complement) is cross-checked against Wireshark's own `wsutil/crc16.c`
+implementation and against the independently-known CRC-16/DNP catalogue
+reference test vector (the CRC of ASCII `"123456789"` must be `0xEA82`) via a
+compile-time `static_assert` sitting right next to the CRC table in
+`dnp3.cpp` -- a mistranscribed table, wrong seed, or missing final complement
+fails the build outright rather than shipping a silently-incorrect
+validator.
+
+Real-world confirmation, independent of the synthetic fixture: this tool's
+own real DNP3 captures (`dnp3_read.pcap`, and every other fixture in
+`tests/real_captures/dnp3/`) exercise this against genuine CRC bytes computed
+by independent DNP3 stacks, not just bytes `tools/make_sample_pcap.py`
+produced -- and they validate cleanly, a strong end-to-end confirmation the
+algorithm/table genuinely matches the DNP3 spec rather than just this
+project's own generator. One of those real captures also turned up a
+genuinely interesting, honest finding, not a clean pass across the board: the
+Request Link Status response frame present in both `dnp3_request_link.pcap`
+and `dnp3_request_link_status.pcap` fails header-CRC validation
+(`dnp3_header_crc_valid: false`, an on-the-wire CRC of `0x0000` against a
+different calculated value) -- and that same frame's own `length_field` is
+`0`, which is itself spec-non-conformant (IEEE 1815 requires `length_field >=
+5` to cover control+destination+source alone, before any user data at all).
+This is pre-existing behavior in the capture that the new validator surfaces,
+not something this feature broke or a false positive: the frame was already
+structurally odd, and the CRC check is doing exactly its job by calling that
+out rather than silently accepting it.
+
+**Security relevance:** on a live serial-to-IP DNP3 link, a bad data-link CRC
+can mean either ordinary line noise on the serial leg of a gateway, or
+evidence of tampering/injection on the wire -- this decoder surfaces the
+mismatch as a fact (which frame, which CRC, calculated vs. declared) rather
+than asserting either cause; telling them apart is an analyst judgment call
+this tool deliberately doesn't make on your behalf, the same posture this
+codebase already takes with every other "flagged, not diagnosed" finding.
+**Not wired into `policy validate`:** CRC validity is purely diagnostic/
+informational in `decode` output today -- `PolicyEngine` does not factor a
+bad DNP3 CRC into a flow's allowed/violation verdict at all. This is a
+distinct, separate gap from the DNP3 link-address gap POLICY FILE FORMAT's
+"Addressing scope" subsection documents (that one is about the outstation/
+master address never reaching the zone engine; this one is about CRC
+validity never reaching it either) -- see that subsection and ROADMAP.
+
 Validated against both a large real 4SICS ICS-lab capture and a set of real
 (not synthetic) DNP3 captures from independent DNP3 stacks -- real CROB
 Select/Operate sequences including a rejected operate (`status=Not
@@ -2657,6 +2756,59 @@ plausible reconstruction, not a certainty -- see LIMITATIONS. Every other
 syntax id is recognized (by id) but not decoded at all, same as every other
 function code's parameter/data payload -- so is the entire Userdata
 parameter block used for vendor-specific diagnostics/CPU functions.
+
+**PLC Control (`0x28`) / PLC Stop (`0x29`)** -- two function codes long
+recognized only by name (see the function-code table above) -- now get their
+parameter blocks decoded too. **PLC Stop** is the wire-level mechanism
+behind a well-known, unauthenticated ICS attack: an S7comm session needs no
+authentication of its own at the protocol level, so issuing this single
+function code against an S7-300/400 class CPU halts its program execution --
+the exact technique tools like Metasploit's `s7_stop` module automate. The
+request's confirmation string (in real traffic, literally the ASCII text
+`"PLC_STOP"`) is decoded and shown as-is, whatever text is actually present;
+the Ack/Ack_Data (response) side is deliberately left without a special
+decode, matching Wireshark's own `packet-s7comm.c` dissector, which doesn't
+special-case it either.
+
+**PLC Control** is the general "Program Invocation" (PI-Service) mechanism
+-- one function code covering an entire family of named services, several of
+them just as security-relevant as PLC Stop: `_INSE`/`_INS2` activate a
+compiled logic block (a DB/FC/FB/OB) on a live controller, and `_DELE`
+removes one from the CPU's passive file system -- this is literally how
+logic gets pushed to or pulled from a running PLC over the wire, again with
+no protocol-level authentication. For these three block-management services,
+the full block descriptor list is decoded: one
+`"<type><number> (<destination>)"` entry per block in the parameter block
+(e.g. `"DB100 (Passive)"`, `"FC5 (Active)"`), naming the block type, number,
+and destination filesystem (Passive/Active/both). For `P_PROGRAM` (PLC
+Start/Stop), `_MODU` (copy RAM to ROM), and `_GARB` (compress PLC memory),
+the raw ASCII argument string is decoded as-is but deliberately **not**
+semantically interpreted -- no attempt is made to claim a given argument
+value means, say, "cold restart" vs. "warm restart" -- matching the same
+restraint the upstream Wireshark dissector (the reference source for this
+decoder's wire-layout facts) applies to the identical argument bytes. Every
+PI service name, not just these six, is looked up against a name+description
+table transcribed from Wireshark's own `pi_service_names[]` array, including
+the large `_N_*` Sinumerik/CNC-specific service family (login, file
+transfer, tool/magazine management, and more) -- but for that family it's a
+name+description lookup only, deliberately with no parameter-block decode:
+dozens of per-service argument layouts, all specific to CNC machine-tool
+control rather than ordinary PLC control, a scope boundary documented in
+`s7comm.hpp`'s file header, the same honest-scoping convention this decoder
+already applies to `0xB2`'s unverified shapes above. Only a subset of
+Wireshark's own ~65-entry table is transcribed here -- the six PLC-control
+services above plus the most commonly-seen/clearly-documented `_N_*`
+entries -- since several of Wireshark's own `_N_*` descriptions are
+themselves too terse or unclear to transcribe with any confidence, and the
+family is out of scope for parameter decoding regardless; a PI service name
+outside this subset still gets its raw name shown (never invented or
+guessed at), just with an empty description. The Ack_Data (response) side
+of PLC Control also gets a small status-flags byte decoded, when the
+response's parameter block is long enough to carry it: bit `0x01` ("more
+data of the block/file can still be retrieved") and bit `0x02` ("an error
+occurred"). A handful of bytes in both function codes' fixed layout are
+simply unknown/reserved -- Wireshark's own dissector doesn't document their
+meaning either, so this decoder doesn't invent one here either.
 
 The `M2.0`-`M2.4` shape above was later checked against the *entire* 140MB
 source capture it came from, not just the five originally spot-checked
@@ -2752,7 +2904,8 @@ Data part              (Connect/Data/DataFW1_5 only -- absent for Keep Alive)
   Integrity part       near the end of most Data/Response bodies: an id plus what is presumed
                          to be a SHA-256-sized digest (32 bytes) of the telegram -- surfaced,
                          never verified, same posture this codebase already takes toward
-                         DNP3/HART-IP checksums
+                         HART-IP's own checksum (DNP3's data-link CRCs, by contrast, ARE
+                         validated -- see PROTOCOL COVERAGE's DNP3 section)
 Trailer (4 bytes)      protocol id + PDU type + Data Length, mirroring the header
 ```
 
@@ -6144,8 +6297,8 @@ These are current, not aspirational -- each has a corresponding ROADMAP item.
   `--protocol hartip`/stats output as a result. HART-IP over UDP has no
   equivalent issue.
 - **HART-IP's Checksum byte is parsed and located but never verified** --
-  the same "surfaced raw, never checked" posture DNP3's own CRCs get (see
-  below): computing/verifying it would need the HART XOR algorithm applied
+  unlike DNP3's own data-link CRCs, which now genuinely are validated (see
+  above): computing/verifying it would need the HART XOR algorithm applied
   across the whole PDU, out of scope for this groundwork release. A
   corrupted Pass-Through PDU that otherwise still looks structurally valid
   is decoded without any indication the Checksum was wrong.
@@ -6228,11 +6381,21 @@ These are current, not aspirational -- each has a corresponding ROADMAP item.
   bytes), a non-`'F'` chunk, or a structurally-invalid NodeId -- see
   PROTOCOL COVERAGE's OPC UA Validation subsection for the complete,
   honest scope.
-- **DNP3 CRCs are not validated** -- neither the data-link header CRC nor the
-  per-block CRCs within the user data. A corrupted DNP3 frame that still
-  starts with the right magic bytes will be "decoded" without any indication
-  a CRC was wrong; the block CRCs are correctly *located and skipped* (so
-  reassembly lines up) but their contents are never checked.
+- **DNP3 data-link CRCs are now validated** -- both the header CRC and every
+  per-block CRC within the user data are genuinely calculated and compared
+  against the on-the-wire value (`dnp3_header_crc_valid`/`dnp3_block_count`/
+  `dnp3_block_crc_failures`/`dnp3_link_crc_valid`, plus a specific `notes`
+  entry on a mismatch) -- see PROTOCOL COVERAGE's DNP3 "Data-link CRC-16
+  validation" section. This is purely diagnostic: a mismatch is flagged, but
+  decoding is never stopped and the frame is never dropped, and CRC validity
+  is **not** wired into `policy validate`/`PolicyEngine` -- a flow with a
+  CRC-invalid DNP3 frame gets exactly the same Allowed/Violation verdict it
+  would with a valid one. One of this project's own real captures
+  (`dnp3_request_link.pcap`/`dnp3_request_link_status.pcap`) has a
+  Request Link Status response frame that genuinely fails header-CRC
+  validation and also has a spec-non-conformant `length_field` of 0 --
+  pre-existing behavior the new validator surfaces, not a bug in this
+  feature (see PROTOCOL COVERAGE for the detail).
 - **DNP3 point values are decoded only for the group/variation combinations
   in the built-in point-format table** (see PROTOCOL COVERAGE for the full
   list -- it covers the object types common in real traffic). Outside that
@@ -6332,6 +6495,18 @@ These are current, not aspirational -- each has a corresponding ROADMAP item.
   and `0xB2` is recognized but shown as raw hex, not decoded at all. The
   Userdata ROSCTR (vendor-specific diagnostics/CPU functions) is entirely
   unparsed beyond being labeled.
+- **PLC Control's `_N_*` Sinumerik/CNC PI services get a name+description
+  lookup only, never a parameter-block decode, and `P_PROGRAM`/`_MODU`/
+  `_GARB` arguments are shown raw, never semantically interpreted.** Dozens
+  of per-service argument layouts, all specific to CNC machine-tool control
+  rather than ordinary PLC control, are out of scope entirely (see PROTOCOL
+  COVERAGE); only a subset of Wireshark's own ~65-entry PI-service name
+  table is transcribed here, so a PI service name outside that subset still
+  shows its raw name but with an empty description. `P_PROGRAM` (PLC
+  Start/Stop), `_MODU` (copy RAM to ROM), and `_GARB` (compress PLC memory)
+  each carry a single ASCII argument string that's decoded as-is with no
+  attempt to interpret what a specific value means -- matching the same
+  restraint the upstream Wireshark dissector applies to the identical bytes.
 - **A few S7comm data-item transport sizes use a best-effort length
   interpretation.** The two overwhelmingly common cases (BIT, and
   BYTE/WORD/DWORD-family reads/writes) are decoded with high confidence
@@ -6709,6 +6884,18 @@ conduitscope decode -r capture.pcap --protocol s7comm -f json \
   | jq -r '.[] | select(.s7comm_items) | "\(.src_ip) -> \(.dst_ip): \(.s7comm_items | join(", "))"'
 ```
 
+Spot who's issuing PLC Control / PLC Stop commands against a live S7 PLC --
+function codes `0x28`/`0x29`, the mechanism behind the well-known
+unauthenticated "PLC Stop" DoS technique and, for `_INSE`/`_INS2`/`_DELE`,
+remote logic-block push/removal -- genuinely useful for spotting who's
+allowed to issue control commands to a controller on a given conduit:
+
+```sh
+conduitscope decode -r capture.pcap --protocol s7comm -f json \
+  | jq -r '.[] | select(.s7comm_plc_stop_message or .s7comm_pi_service_name) |
+           "\(.src_ip) -> \(.dst_ip): \(.summary)"'
+```
+
 See every IEC 61850 MMS read/write/report value decoded on a capture that
 shares S7comm's own port 102 -- variable names and their values, one line
 per packet that carries any:
@@ -6754,6 +6941,16 @@ what it commanded:
 conduitscope decode -r capture.pcap --protocol dnp3 -f json \
   | jq -r '.[] | select(.dnp3_values) | .src_ip as $s | .dst_ip as $d |
            (.dnp3_values[] | select(startswith("g12v1"))) | "\($s) -> \($d): \(.)"'
+```
+
+Flag every DNP3 data-link frame whose CRC-16 didn't validate -- line noise on
+a serial-to-IP gateway, or possible tampering, worth a closer look either way
+(see PROTOCOL COVERAGE's DNP3 "Data-link CRC-16 validation" section):
+
+```sh
+conduitscope decode -r capture.pcap --protocol dnp3 -f json \
+  | jq -r '.[] | select(.dnp3_link_crc_valid == false) |
+           "\(.src_ip) -> \(.dst_ip): header_ok=\(.dnp3_header_crc_valid) blocks=\(.dnp3_block_count) failed=\(.dnp3_block_crc_failures)"'
 ```
 
 See which IEC 104 ASDU types and causes of transmission flow over a
@@ -7190,9 +7387,14 @@ Rough order, each building on the groundwork this release establishes:
    DataFW1_5's Data part) to Tier 1, plus S7comm-Plus's own above-COTP,
    trailer-based reassembly (currently detected and reported, not
    reassembled -- see LIMITATIONS).
-4. **DNP3 CRC validation** (both the header CRC and the per-block CRCs), so a
+4. ~~DNP3 CRC validation (both the header CRC and the per-block CRCs), so a
    corrupted frame that still starts with the right magic bytes is flagged
-   rather than silently "decoded".
+   rather than silently "decoded"~~ -- **done**, see PROTOCOL COVERAGE's DNP3
+   "Data-link CRC-16 validation" section and LIMITATIONS. Not yet wired into
+   `policy validate`/`PolicyEngine` (purely diagnostic in `decode` output
+   today) -- that remains open, and isn't separately tracked as its own
+   roadmap item, since no concrete use case has motivated a specific
+   verdict-impact design for it yet.
 5. **DNP3 absolute-time rendering as a calendar date** (currently a raw
    milliseconds-since-epoch count -- see LIMITATIONS), and value decoding for
    the group/variation combinations still outside the point-format table
@@ -7725,4 +7927,4 @@ live capture ENABLED (found ...)` / `DISABLED (...)`).
 
 ## LICENSE
 
-MIT. See [LICENSE](../LICENSE).
+Apache-2.0. See [LICENSE](../LICENSE).

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // resolver.hpp - optional, additive human-readable name resolution for `decode`'s output: MAC ->
 // vendor (OUI), IP -> hostname, port -> service name. Every lookup here is a pure ANNOTATION
 // alongside the raw value it explains -- never a replacement for it. This is a security/OT
