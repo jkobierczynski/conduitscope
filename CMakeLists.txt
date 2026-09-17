@@ -58,6 +58,7 @@ add_library(conduitscope_core STATIC
   src/pim.cpp
   src/eigrp.cpp
   src/ospf.cpp
+  src/it_protocols.cpp
   src/decoder.cpp
   src/resolver.cpp
   src/output.cpp
@@ -906,7 +907,7 @@ set_tests_properties(enip_unregister_session_decoded PROPERTIES
 add_test(NAME enip_nop_not_detected
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enip_nop_precedence.pcap" --format text)
 set_tests_properties(enip_nop_not_detected PROPERTIES
-  PASS_REGULAR_EXPRESSION "\\[tcp\\]  TCP payload of 24 byte\\(s\\) on port 52001->44818 did not match OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, COTP/S7comm/MMS, HART-IP, MQTT, or FF-HSE")
+  PASS_REGULAR_EXPRESSION "\\[tcp\\]  TCP payload of 24 byte\\(s\\) on port 52001->44818 did not match OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, COTP/S7comm/MMS, HART-IP, MQTT, FF-HSE, or the RDP/VNC/TeamViewer/AnyDesk/Zoom remote-access family")
 
 # --------------------------------------------------------------------------
 # EtherNet/IP CIP STRING/SHORT_STRING and Structured Data Type (UDT/array-of-UDT tag) value
@@ -3748,7 +3749,7 @@ set_tests_properties(mqtt_invalid_qos_and_truncated_body_notes PROPERTIES
 add_test(NAME mqtt_bogus_connect_protocol_name_rejected
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mqtt.pcap" --format text)
 set_tests_properties(mqtt_bogus_connect_protocol_name_rejected PROPERTIES
-  PASS_REGULAR_EXPRESSION "\\[tcp\\]  TCP payload of 16 byte\\(s\\) on port 55020->1883 did not match OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, COTP/S7comm/MMS, HART-IP, MQTT, or FF-HSE")
+  PASS_REGULAR_EXPRESSION "\\[tcp\\]  TCP payload of 16 byte\\(s\\) on port 55020->1883 did not match OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, COTP/S7comm/MMS, HART-IP, MQTT, FF-HSE, or the RDP/VNC/TeamViewer/AnyDesk/Zoom remote-access family")
 
 # A genuinely truncated/incomplete final packet on its own flow -- declares more Remaining Length
 # than actually follows, with nothing more ever arriving in this capture -- the TCP-reassembly
@@ -5957,6 +5958,92 @@ add_test(NAME inventory_resolver_bad_hosts_path_rejected
   COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --resolve --hosts "${CMAKE_CURRENT_SOURCE_DIR}/tests/does_not_exist_hosts.txt")
 set_tests_properties(inventory_resolver_bad_hosts_path_rejected PROPERTIES
   WILL_FAIL TRUE)
+
+# ---------------------------------------------------------------------------------------------
+# Tier 1 "IT protocols an OT auditor flags" recognition (it_protocols.hpp/cpp) -- RDP, VNC,
+# TeamViewer, AnyDesk, and Zoom. See docs/MANUAL.md's ROADMAP item 18 for the full "why this
+# matters to an OT auditor" framing. Name-only recognition, deliberately: no decoding past
+# identifying which of the five a flow most likely is. tests/sample_remote_access.pcap (8 packets,
+# built with scapy, see its own construction notes in git history) covers every one of this
+# family's distinct confidence tiers:
+#   #1 RDP, genuine X.224 Connection Request over TPKT/COTP, standard port 3389 (strong signal)
+#   #2 RDP, port-only fallback, standard port 3389 (an already-established, encrypted session)
+#   #3 VNC, genuine RFB protocol-version banner, standard port 5900 (strong signal)
+#   #4 VNC, genuine RFB banner on a NON-standard port (still confidently identified -- port-
+#      independent structural check, see it_protocols.hpp)
+#   #5 TeamViewer, port-only, standard port 5938 (weakest tier -- no structural signal exists)
+#   #6 AnyDesk, port-only, standard port 7070 (weakest tier)
+#   #7 Zoom, port-only, UDP client range 8801-8810 (weakest tier)
+#   #8 Zoom, port-only, UDP STUN range 3478-3479 (weakest tier, explicitly non-exclusive-to-Zoom)
+# ---------------------------------------------------------------------------------------------
+
+add_test(NAME remote_access_rdp_connection_request_recognized
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_remote_access.pcap")
+set_tests_properties(remote_access_rdp_connection_request_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"src_port\": 52100,\n *\"dst_port\": 3389,.*\"protocol\": \"rdp\",\n *\"summary\": \"RDP X.224 Connection Request \\(CR\\)\",\n *\"notes\": \\[\\]")
+
+add_test(NAME remote_access_rdp_port_only_fallback_noted_weak
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_remote_access.pcap")
+set_tests_properties(remote_access_rdp_port_only_fallback_noted_weak PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[rdp\\]  RDP \\(TCP port 3389\\) -- port match only, not confirmed by an X.224 Connection Request/Confirm in this packet")
+
+add_test(NAME remote_access_vnc_rfb_banner_recognized_standard_port
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_remote_access.pcap")
+set_tests_properties(remote_access_vnc_rfb_banner_recognized_standard_port PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"src_port\": 5900,.*\"protocol\": \"vnc\",\n *\"summary\": \"VNC \\(RFB\\) server protocol-version banner \\\\\"RFB 003.008\\\\\"\",\n *\"notes\": \\[\\]")
+
+add_test(NAME remote_access_vnc_rfb_banner_recognized_nonstandard_port
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_remote_access.pcap")
+set_tests_properties(remote_access_vnc_rfb_banner_recognized_nonstandard_port PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[vnc\\]  VNC \\(RFB\\) server protocol-version banner \"RFB 003.889\"\n *note: seen on TCP port 59001->52201, which is not a configured/standard VNC port \\(5900-5906\\)")
+
+add_test(NAME remote_access_teamviewer_port_only_recognized
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_remote_access.pcap")
+set_tests_properties(remote_access_teamviewer_port_only_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[teamviewer\\]  TeamViewer \\(TCP port 5938\\) -- port match only; TeamViewer's own wire protocol is encrypted from its first byte")
+
+add_test(NAME remote_access_anydesk_port_only_recognized
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_remote_access.pcap")
+set_tests_properties(remote_access_anydesk_port_only_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[anydesk\\]  AnyDesk \\(TCP port 7070, AnyDesk's own documented default\\) -- port match only")
+
+add_test(NAME remote_access_zoom_client_port_range_recognized
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_remote_access.pcap")
+set_tests_properties(remote_access_zoom_client_port_range_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[zoom\\]  Zoom \\(UDP port 8801-8810 client range, per Zoom's own documented port usage\\) -- port match only")
+
+add_test(NAME remote_access_zoom_stun_port_range_recognized_as_shared
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_remote_access.pcap")
+set_tests_properties(remote_access_zoom_stun_port_range_recognized_as_shared PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[zoom\\]  Zoom \\(UDP port 3478-3479 STUN range\\) -- port match only; this range is a shared STUN convention, not exclusive to Zoom")
+
+add_test(NAME remote_access_stats_counted
+  COMMAND conduitscope decode --stats --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_remote_access.pcap")
+set_tests_properties(remote_access_stats_counted PROPERTIES
+  PASS_REGULAR_EXPRESSION "anydesk +1\n *rdp +2\n *teamviewer +1\n *vnc +2\n *zoom +2")
+
+add_test(NAME remote_access_protocol_filter_isolates_family
+  COMMAND conduitscope decode --protocol remote-access --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_remote_access.pcap")
+set_tests_properties(remote_access_protocol_filter_isolates_family PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[rdp\\].*\\[rdp\\].*\\[vnc\\].*\\[vnc\\].*\\[teamviewer\\].*\\[anydesk\\].*\\[zoom\\].*\\[zoom\\]"
+  FAIL_REGULAR_EXPRESSION "\\[tcp\\]|\\[udp\\]|\\[cotp\\]")
+
+add_test(NAME remote_access_extra_port_widens_expected_range
+  COMMAND conduitscope decode --format text --remote-access-port 59001 --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_remote_access.pcap")
+set_tests_properties(remote_access_extra_port_widens_expected_range PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[vnc\\]  VNC \\(RFB\\) server protocol-version banner \"RFB 003.889\"\n *eth "
+  FAIL_REGULAR_EXPRESSION "RFB 003.889\"\n *note: seen on TCP port")
+
+add_test(NAME remote_access_falls_through_to_generic_tcp_summary
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mqtt.pcap")
+set_tests_properties(remote_access_falls_through_to_generic_tcp_summary PROPERTIES
+  PASS_REGULAR_EXPRESSION "did not match OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, COTP/S7comm/MMS, HART-IP, MQTT, FF-HSE, or the RDP/VNC/TeamViewer/AnyDesk/Zoom remote-access family")
+
+add_test(NAME remote_access_rdp_carve_out_does_not_affect_real_s7comm
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm.pcap")
+set_tests_properties(remote_access_rdp_carve_out_does_not_affect_real_s7comm PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[s7comm\\]"
+  FAIL_REGULAR_EXPRESSION "\\[rdp\\]")
 
 # ---------------------------------------------------------------------------------------------
 # Live capture (live_capture.hpp/cpp) -- an optional, build-time-detected libpcap (Linux) / Npcap

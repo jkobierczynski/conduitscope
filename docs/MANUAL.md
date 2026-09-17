@@ -11,7 +11,7 @@ conduitscope [-q|--quiet] [--no-color|--color] [--log-file FILE] [--version] [-h
 
 conduitscope decode (-r FILE | -i INTERFACE) [-o FILE] [-f text|json|csv] [--protocol NAME]
                      [--modbus-port PORT]... [--dnp3-port PORT]... [--s7comm-port PORT]... [--iec104-port PORT]...
-                     [--enip-port PORT]... [--enip-io-port PORT]... [--bacnet-port PORT]... [--hartip-port PORT]... [--opcua-port PORT]... [--mqtt-port PORT]... [--ffhse-port PORT]...
+                     [--enip-port PORT]... [--enip-io-port PORT]... [--bacnet-port PORT]... [--hartip-port PORT]... [--opcua-port PORT]... [--mqtt-port PORT]... [--ffhse-port PORT]... [--remote-access-port PORT]...
                      [--max-packets N] [--stats] [--strict]
                      [--filter BPF] [--duration SECONDS] [--snaplen BYTES] [--no-promiscuous]
 
@@ -167,7 +167,7 @@ conduitscope decode (-r FILE | -i INTERFACE) [options]
 | `--no-promiscuous` | off (i.e. promiscuous by default) | With `-i`, don't put the interface into promiscuous mode. Promiscuous is the default because the main live-capture use case -- watching a mirrored/SPAN switch port for zone/conduit traffic -- needs to see traffic that isn't addressed to the capturing host at all. |
 | `-o, --output FILE` | stdout | Write decoded output here instead of stdout. |
 | `-f, --format {text,json,csv}` | `text` | Output format. See OUTPUT FORMATS below. |
-| `--protocol NAME` | `auto` | Restrict decoding to one protocol. See PROTOCOL COVERAGE below for the full, current list of valid protocol names (one per subsection there). `auto` opportunistically tries OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, S7comm/COTP, S7comm-Plus, MMS, HART-IP, MQTT, and FF-HSE detection on every TCP payload (in that order -- FF-HSE last of all, even after MQTT, see PROTOCOL DETECTION), CIP I/O, BACnet/IP, HART-IP, and FF-HSE detection on every UDP payload (FF-HSE last there too), PROFINET RT (DCP/cyclic) detection on every non-IPv4 Ethernet frame carrying EtherType `0x8892`, GOOSE detection on every non-IPv4 Ethernet frame carrying EtherType `0x88B8`, Sampled Values detection on every non-IPv4 Ethernet frame carrying EtherType `0x88BA`, EtherCAT detection on every non-IPv4 Ethernet frame carrying EtherType `0x88A4`, regardless of port, and Spanning Tree Protocol (STP/RSTP/MSTP) detection on every classic IEEE 802.3 length-framed Ethernet frame whose LLC header is DSAP=SSAP=`0x42` -- a structurally separate dispatch path from every EtherType-keyed protocol above, so there's no ordering/collision question between them (see PROTOCOL DETECTION below). `enip` covers both EtherNet/IP explicit messaging (TCP) and CIP I/O implicit messaging (UDP). `mms` is IEC 61850 MMS (Manufacturing Message Specification, ISO 9506) -- shares S7comm's exact TPKT/COTP transport and TCP port 102, but is a distinct application protocol; see `--s7comm-port` below and PROTOCOL COVERAGE's MMS section. `s7comm-plus` is S7comm-Plus (TIA Portal / S7-1200/1500) -- shares the same TPKT/COTP transport and TCP port 102, disambiguated by its own protocol id byte; see `--s7comm-port` below and PROTOCOL COVERAGE's S7comm-Plus section. `mqtt` is MQTT (v3.1/v3.1.1/v5.0) plus Sparkplug B -- see `--mqtt-port` below and PROTOCOL COVERAGE's MQTT section. `profinet` covers both DCP and cyclic real-time IO. `sv` is IEC 61850-9-2 Sampled Values. `ethercat` is EtherCAT. `bacnet` is BACnet/IP. `hartip` is HART-IP (covers both UDP and TCP). `opcua` is OPC UA Binary (UA-TCP/Secure Conversation, TCP only). `ff-hse` is FOUNDATION Fieldbus HSE (covers FDA/SM/FMS/LAN Redundancy, on both TCP and UDP) -- see `--ffhse-port` below and PROTOCOL COVERAGE's FOUNDATION Fieldbus HSE section. `stp` is Spanning Tree Protocol (STP/RSTP/MSTP) -- no port option, matching GOOSE/SV/EtherCAT/PROFINET's own no-port precedent for a protocol with no port at all; see PROTOCOL COVERAGE's Spanning Tree Protocol section. `devicenet` is DeviceNet (CAN-bus CIP) -- no port option either, the same no-port precedent, but unlike every other value in this list it isn't reached through Ethernet at all: it's gated on the capture's own pcap link type being `LINKTYPE_CAN_SOCKETCAN` (227, standard Linux SocketCAN capture framing -- what `candump -l`/`tcpdump -i can0`/Wireshark itself write capturing a CAN bus), checked before any protocol filter, so `--protocol devicenet` against an ordinary Ethernet-linktype capture simply decodes nothing (every packet still parses at the link layer, just with no application-layer match) rather than erroring; see PROTOCOL COVERAGE's DeviceNet section. |
+| `--protocol NAME` | `auto` | Restrict decoding to one protocol. See PROTOCOL COVERAGE below for the full, current list of valid protocol names (one per subsection there). `auto` opportunistically tries OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, S7comm/COTP, S7comm-Plus, MMS, HART-IP, MQTT, and FF-HSE detection on every TCP payload (in that order -- FF-HSE last of all, even after MQTT, see PROTOCOL DETECTION), CIP I/O, BACnet/IP, HART-IP, and FF-HSE detection on every UDP payload (FF-HSE last there too), PROFINET RT (DCP/cyclic) detection on every non-IPv4 Ethernet frame carrying EtherType `0x8892`, GOOSE detection on every non-IPv4 Ethernet frame carrying EtherType `0x88B8`, Sampled Values detection on every non-IPv4 Ethernet frame carrying EtherType `0x88BA`, EtherCAT detection on every non-IPv4 Ethernet frame carrying EtherType `0x88A4`, regardless of port, and Spanning Tree Protocol (STP/RSTP/MSTP) detection on every classic IEEE 802.3 length-framed Ethernet frame whose LLC header is DSAP=SSAP=`0x42` -- a structurally separate dispatch path from every EtherType-keyed protocol above, so there's no ordering/collision question between them (see PROTOCOL DETECTION below). `enip` covers both EtherNet/IP explicit messaging (TCP) and CIP I/O implicit messaging (UDP). `mms` is IEC 61850 MMS (Manufacturing Message Specification, ISO 9506) -- shares S7comm's exact TPKT/COTP transport and TCP port 102, but is a distinct application protocol; see `--s7comm-port` below and PROTOCOL COVERAGE's MMS section. `s7comm-plus` is S7comm-Plus (TIA Portal / S7-1200/1500) -- shares the same TPKT/COTP transport and TCP port 102, disambiguated by its own protocol id byte; see `--s7comm-port` below and PROTOCOL COVERAGE's S7comm-Plus section. `mqtt` is MQTT (v3.1/v3.1.1/v5.0) plus Sparkplug B -- see `--mqtt-port` below and PROTOCOL COVERAGE's MQTT section. `profinet` covers both DCP and cyclic real-time IO. `sv` is IEC 61850-9-2 Sampled Values. `ethercat` is EtherCAT. `bacnet` is BACnet/IP. `hartip` is HART-IP (covers both UDP and TCP). `opcua` is OPC UA Binary (UA-TCP/Secure Conversation, TCP only). `ff-hse` is FOUNDATION Fieldbus HSE (covers FDA/SM/FMS/LAN Redundancy, on both TCP and UDP) -- see `--ffhse-port` below and PROTOCOL COVERAGE's FOUNDATION Fieldbus HSE section. `stp` is Spanning Tree Protocol (STP/RSTP/MSTP) -- no port option, matching GOOSE/SV/EtherCAT/PROFINET's own no-port precedent for a protocol with no port at all; see PROTOCOL COVERAGE's Spanning Tree Protocol section. `devicenet` is DeviceNet (CAN-bus CIP) -- no port option either, the same no-port precedent, but unlike every other value in this list it isn't reached through Ethernet at all: it's gated on the capture's own pcap link type being `LINKTYPE_CAN_SOCKETCAN` (227, standard Linux SocketCAN capture framing -- what `candump -l`/`tcpdump -i can0`/Wireshark itself write capturing a CAN bus), checked before any protocol filter, so `--protocol devicenet` against an ordinary Ethernet-linktype capture simply decodes nothing (every packet still parses at the link layer, just with no application-layer match) rather than erroring; see PROTOCOL COVERAGE's DeviceNet section. `remote-access` covers Tier 1 of the "IT protocols an OT auditor flags" family (RDP/VNC/TeamViewer/AnyDesk/Zoom, each its own `protocol` value even under this one filter name) -- see `--remote-access-port` below and PROTOCOL COVERAGE's "Tier 1 remote-access protocol recognition" section. |
 | `--modbus-port PORT` | *(502 built in)* | Additional TCP port to treat as "expected" for Modbus. Repeatable. Does **not** gate detection -- it only changes whether a decoded Modbus frame is annotated as appearing on an unexpected port, which is itself a useful signal when auditing a conduit. |
 | `--dnp3-port PORT` | *(20000 built in)* | Same as `--modbus-port`, for DNP3. Repeatable. |
 | `--s7comm-port PORT` | *(102 built in)* | Same as `--modbus-port`, for COTP/S7comm. Repeatable. There is no separate `--mms-port` -- MMS rides the identical TPKT/COTP transport on the identical TCP port 102 S7comm uses (see `mms.hpp`'s file header), so this same option's "expected port" annotation also governs MMS traffic. |
@@ -1919,6 +1919,20 @@ dispatched purely by their own IANA-exclusive IP protocol number (2, 112, 9,
 103, 88, and 89 respectively) -- a signal with no port concept to widen or
 restrict in the first place. See PROTOCOL COVERAGE's "RIP / IGMP / VRRP /
 HSRP" and "IGRP / PIM / EIGRP / OSPF" sections for the full wire formats.
+
+**RDP, TeamViewer, AnyDesk, and Zoom (Tier 1 of the "IT protocols an OT
+auditor flags" family) are also port-gated in `--protocol auto`**, widened
+by the one shared `--remote-access-port` option (`extra_remote_access_ports`
+in `decoder.hpp`) -- see `--remote-access-port` above and PROTOCOL
+COVERAGE's "Tier 1 remote-access protocol recognition" section for the
+per-protocol reasoning. **VNC is the one exception in this whole family**:
+its RFB protocol-version banner is checked port-independently even in Auto
+mode, the same "structural signature overrides the port gate" treatment
+BACnet/IP's or HART-IP's own opportunistic checks get -- `--remote-access-
+port` still widens what counts as VNC's own "expected" port for the "seen
+on a non-standard port" note, it just never gates whether the banner check
+itself runs. `--protocol remote-access` skips every port gate in this
+family at once, same as `--protocol rip`/`--protocol hsrp` above.
 
 ## OUTPUT FORMATS
 
@@ -7536,6 +7550,86 @@ already documented for RIP/VRRP/HSRP above (see `tests/real_captures/igmp/
 ATTRIBUTION.md`'s "Search outcome for IGRP/PIM/EIGRP/OSPF" section for the
 full account).
 
+### Tier 1 remote-access protocol recognition (RDP, VNC, TeamViewer, AnyDesk, Zoom)
+
+The first tier of ROADMAP item 18's "IT protocols an OT auditor flags"
+family: interactive remote-control tools that, if reachable from an OT
+zone, give an attacker a full interactive session with an HMI or
+engineering station -- categorically more dangerous than a Modbus/DNP3/
+S7comm read/write, since none of those model "an interactive shell" at
+all. See `include/conduitscope/it_protocols.hpp`'s own file header comment
+for the full confidence-tier reasoning summarized here.
+
+Deliberately name-only recognition, not protocol decoding -- the same
+"recognized but not decoded" posture ARP/LLDP/ICMP already have (see "Link/
+IP-layer plumbing" below): each of these five is identified from its port
+and, for two of them, a minimal structural signature, and reported as its
+own `protocol` value (`rdp`/`vnc`/`teamviewer`/`anydesk`/`zoom`) with a
+one-line `summary` -- nothing about the traffic past that point is parsed.
+Confidence varies sharply and every summary/note says so plainly rather
+than presenting one uniform confidence level:
+
+- **VNC** (RFC 6143) has the strongest signal in this tier: every RFB
+  server sends a fixed, 12-byte ASCII protocol-version banner (`RFB
+  003.008\n`) as the very first bytes of a session, in the clear, before
+  any negotiation happens. Checked **port-independently** -- a real VNC
+  server on a nonstandard port is still confidently identified (`decode`
+  still notes the port itself isn't the conventional 5900-5906 range, but
+  that's informational, not a detection gate).
+- **RDP** (TCP port 3389, IANA `ms-wbt-server`) is identified from its
+  initial X.224 Connection Request/Confirm, which rides the IDENTICAL
+  TPKT (RFC 1006) + COTP (ISO 8073) framing this project's `cotp.hpp`
+  already implements for S7comm/MMS on TCP port 102 -- reused here, not
+  reimplemented. This one genuinely required a dispatch-order fix: since
+  the existing S7comm/MMS COTP check runs opportunistically (port-
+  independent) elsewhere in `decoder.cpp`, it would otherwise claim a
+  genuine RDP handshake on port 3389 as generic `cotp` traffic before this
+  check ever ran -- so RDP's own Connection Request/Confirm check on port
+  3389 runs BEFORE that opportunistic S7comm/MMS dispatch, deliberately
+  narrow (only a Connection Request/Confirm on port 3389 itself is
+  intercepted there; see `decoder.cpp`'s own comment at that call site).
+  Past that initial handshake, an RDP session is TLS-wrapped and opaque --
+  subsequent packets on port 3389 fall back to the same port-only
+  recognition the next three protocols get, explicitly noted as such
+  (`decode`'s summary says "port match only, not confirmed by an X.224
+  Connection Request/Confirm in this packet").
+- **TeamViewer** (TCP/UDP port 5938, IANA `teamviewer`) and **AnyDesk**
+  (TCP/UDP port 7070, AnyDesk's own documented default) have no known
+  cleartext structural signature at all -- both are encrypted from their
+  very first byte -- so both are recognized by port number alone, the
+  single weakest identification gate in this entire codebase (weaker even
+  than HART-IP's own loosely-checked-header gate: there is no payload
+  check whatsoever here).
+- **Zoom** rides UDP/TCP ports 8801-8810 for client media/signaling, plus
+  UDP 3478-3479 for STUN (per Zoom's own documented network-firewall
+  guidance) -- also port-only, and the STUN range gets its own explicit
+  caveat that it's a shared convention, not exclusive to Zoom (other
+  WebRTC-based conferencing tools commonly use the same range). Zoom's own
+  documented TCP 443/80 fallback is deliberately NOT recognized: those
+  ports are shared with so much ordinary HTTPS/HTTP traffic that treating
+  them as a Zoom signal would be far too weak even by this tier's own
+  already-loose "port alone" standard.
+
+`--protocol remote-access` isolates this family from the CLI, the same as
+every other `--protocol` value; `--remote-access-port` (repeatable) widens
+what counts as an "expected" port for all five at once (one shared option,
+the same "one feature toggle" grouping `--ffhse-port` already established
+for FF-HSE's own four sub-protocols) -- VNC's own RFB banner check is
+never port-gated regardless of this option, since it's a genuinely strong,
+self-describing signal (see OPTIONS).
+
+Validated against `tests/sample_remote_access.pcap` (8 packets, hand-built
+with scapy): a genuine RDP Connection Request on port 3389; RDP port-only
+fallback traffic; a genuine VNC RFB banner on both the standard port and a
+nonstandard one; TeamViewer, AnyDesk, and both Zoom port ranges. No real
+capture of any of these five protocols was sought for this groundwork
+pass -- unlike this project's usual "found a real capture, cross-checked
+against it" standard for a fully-decoded protocol, that bar doesn't apply
+the same way to five protocols this decoder deliberately never looks
+inside of; what matters for a name-only recognizer is that the port/
+structural gate itself is correct, which the synthetic fixture confirms
+directly.
+
 ### Link/IP-layer plumbing: non-IPv4 Ethernet, and non-TCP IPv4 (including UDP)
 
 Every protocol above rides on Ethernet + IPv4 + TCP. Traffic outside that --
@@ -8567,6 +8661,35 @@ These are current, not aspirational -- each has a corresponding ROADMAP item.
   POLICY FILE FORMAT's "Addressing scope" section for the full list of
   addressing schemes this tool decodes but doesn't (yet, or ever) use for
   zone classification.
+- **TeamViewer, AnyDesk, and Zoom are recognized by port number alone --
+  the single weakest identification gate anywhere in this codebase.**
+  Unlike every other protocol `decode` recognizes, there is no payload
+  check whatsoever backing these three matches: a completely unrelated
+  service that happens to run on TCP/UDP 5938, 7070, 8801-8810, or
+  3478-3479 would be misidentified with total confidence. RDP's port-only
+  fallback (traffic on port 3389 that isn't itself a Connection Request/
+  Confirm) carries the same weakness. VNC is the one exception -- its RFB
+  banner check is a genuine structural signature. See PROTOCOL COVERAGE's
+  "Tier 1 remote-access protocol recognition" section and
+  `it_protocols.hpp`'s own file header comment for the full reasoning.
+- **RDP recognition on TCP port 3389 is scoped to its own Connection
+  Request/Confirm only, never a Data frame.** A COTP Data frame arriving
+  on port 3389 (which RDP's own handshake never actually produces, since
+  RDP itself doesn't ride COTP Data PDUs past the initial X.224 exchange)
+  still falls through to the generic, port-independent COTP/S7comm/MMS
+  dispatch and is reported as plain `cotp` traffic, the same treatment any
+  other off-port TPKT/COTP frame gets -- see PROTOCOL COVERAGE's "Tier 1
+  remote-access protocol recognition" section and `decoder.cpp`'s own
+  comment at that call site.
+- **None of RDP/VNC/TeamViewer/AnyDesk/Zoom are wired into the
+  `policy validate` conduit-matching engine yet** -- this groundwork pass
+  only recognizes and names them in `decode` output; a conduit naming
+  `rdp`/`vnc`/etc. in its `protocols` list is not yet a supported value
+  (see ROADMAP item 18's own "modeling gap" paragraph for what a future
+  pass would need).
+- **SMB/SSH/HTTP(S)/SNMP/Telnet/FTP/TFTP and every other protocol in
+  ROADMAP item 18's tiers 2-5 are not recognized at all yet** -- only
+  Tier 1 (RDP/VNC/TeamViewer/AnyDesk/Zoom) is implemented so far.
 
 ## EXIT STATUS
 
@@ -9657,9 +9780,11 @@ anything else on this list.
     finding.** These give an attacker a session, not just a register write
     -- categorically more dangerous than anything Modbus/DNP3/S7comm's own
     read/write transactions can represent, since none of those model "an
-    interactive shell" at all. Four tiers, roughly by severity: (1)
+    interactive shell" at all. Five tiers, roughly by severity: ~~(1)
     interactive remote control of an HMI/engineering station -- RDP
-    (TCP 3389), VNC, TeamViewer/AnyDesk; (2) lateral-movement and
+    (TCP 3389), VNC, TeamViewer/AnyDesk~~ -- **done, and also extended to
+    Zoom**: see this item's own "Tier 1 -- done" paragraph below for what
+    was actually built; (2) lateral-movement and
     credential-harvesting protocols that should be absent from a production
     OT segment entirely per most hardening guides (IEC 62443-3-3, NCSC,
     NIST SP 800-82) -- SMB/NetBIOS (445/139, also wormable IT malware's
@@ -9738,6 +9863,40 @@ anything else on this list.
     HTTPS) rather than riding raw OT protocols -- or an interactive-access
     or tunneling protocol -- straight across the boundary.
 
+    **Tier 1 -- done**, and see PROTOCOL COVERAGE's own "Tier 1 remote-
+    access protocol recognition" section for the full writeup: `decode`
+    (and, since it's a normal protocol dispatch, `policy validate`/
+    `inventory` too) now recognizes RDP, VNC, TeamViewer, AnyDesk, and
+    Zoom (added to this tier during implementation, alongside the four
+    originally named here), each reported as its own `protocol` value
+    (`"rdp"`/`"vnc"`/`"teamviewer"`/`"anydesk"`/`"zoom"`) rather than
+    folded into a generic `tcp`/`udp` bucket -- directly fixing this
+    item's own "modeling gap" paragraph below for this one tier: a
+    conduit with no rule for RDP traffic now shows `"protocol": "rdp"`
+    left unclassified by the policy, not a generic `tcp` flow. Confidence
+    varies sharply by protocol, honestly reflected in every summary/note
+    this produces, not smoothed over into one uniform confidence level:
+    VNC's RFB protocol-version banner (RFC 6143) and RDP's initial X.224
+    Connection Request/Confirm (reusing this project's own `cotp.hpp` TPKT/
+    COTP parser, exactly the reuse this item originally proposed) are both
+    genuine cleartext structural signatures; TeamViewer, AnyDesk, and Zoom
+    have none at all (encrypted from their first byte) and are recognized
+    by port number alone -- the single weakest identification gate in this
+    entire codebase, weaker even than HART-IP's own loosely-checked-header
+    gate, since there is no payload check whatsoever. `--protocol
+    remote-access` isolates this family the same way every other
+    `--protocol` value does, and `--remote-access-port` widens its
+    "expected port" set (one shared option across all five, the same
+    "one feature toggle" grouping `--ffhse-port` already established) --
+    see OPTIONS. One real implementation wrinkle worth recording: RDP's
+    X.224 handshake and S7comm/MMS's own COTP Data/Connection frames share
+    IDENTICAL TPKT+COTP wire framing (see LIMITATIONS), so recognizing RDP
+    required intercepting a Connection Request/Confirm on TCP port 3389
+    BEFORE this decoder's existing, opportunistic (port-independent)
+    S7comm/MMS dispatch got a chance to claim it as generic `cotp` traffic
+    first -- see `it_protocols.hpp`'s and `decoder.cpp`'s own comments at
+    that call site for the full reasoning. Tiers 2-5 remain open.
+
     Scoped honestly, this is name-only recognition (port plus a minimal
     structural signature), not full protocol decoding -- the same
     "recognized but not decoded" posture ARP/LLDP/ICMP already have (see
@@ -9745,12 +9904,14 @@ anything else on this list.
     bitmap updates or SMB's own file listings, and several of these (RDP
     past its initial handshake, HTTPS, any VPN tunnel) are encrypted and
     structurally opaque by design past their first few packets anyway. One
-    genuinely useful technical shortcut: RDP's own initial X.224 Connection
-    Request/Confirm rides the identical TPKT framing this codebase's COTP
-    parser (`cotp.hpp`, currently used for S7comm/MMS on TCP port 102)
-    already implements -- port 3389 rather than 102 likely disambiguates
-    the two without new framing code, though the X.224 payload itself would
-    still need its own small parser. SMB is a heavier lift structurally
+    genuinely useful technical shortcut, now realized (see "Tier 1 -- done"
+    above): RDP's own initial X.224 Connection Request/Confirm rides the
+    identical TPKT framing this codebase's COTP parser (`cotp.hpp`,
+    currently used for S7comm/MMS on TCP port 102) already implements --
+    port 3389 rather than 102 disambiguates the two, and since this tier
+    only needs to NAME the PDU (Connection Request vs. Confirm), `cotp.hpp`
+    already parses enough of the X.224 header for that; no new framing or
+    payload parsing code was needed. SMB is a heavier lift structurally
     (NetBIOS Session Service framing, then SMB1-vs-SMB2/3 dialect
     negotiation) but still only needs enough of the header to name it "SMB,
     dialect X," not to unpack a single request -- a conduit or asset

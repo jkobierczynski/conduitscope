@@ -100,6 +100,20 @@ constexpr const char* kUnderlineBlue = "\033[4;34m";
 constexpr const char* kUnderlineRed = "\033[4;31m";
 constexpr const char* kUnderlineWhite = "\033[4;37m";
 constexpr const char* kBoldUnderlineCyan = "\033[1;4;36m";
+// Tier 1 "IT protocols an OT auditor flags" round (RDP/VNC/TeamViewer/AnyDesk/Zoom -- see
+// it_protocols.hpp): every plain/bright/bold hue AND every underline hue is already spoken for by
+// this point, so this rounds out the bold+underline combination OSPF's own tag started (only cyan
+// used there) with its remaining four standard hues, rather than inventing a third escape-code
+// dimension for five tags. These five protocols very much CAN coexist with anything else in this
+// table in a real mixed IT/OT capture (unlike e.g. DeviceNet's link-layer isolation), so this is a
+// genuine "no fresh hue left" reuse, not a "these never collide" one -- the "[protocol]" tag text
+// is what actually disambiguates them from OSPF/each other in practice, the same reliance DNS/
+// mDNS/LLMNR's own shared kWhite already has.
+constexpr const char* kBoldUnderlineGreen = "\033[1;4;32m";
+constexpr const char* kBoldUnderlineMagenta = "\033[1;4;35m";
+constexpr const char* kBoldUnderlineYellow = "\033[1;4;33m";
+constexpr const char* kBoldUnderlineBlue = "\033[1;4;34m";
+constexpr const char* kBoldUnderlineRed = "\033[1;4;31m";
 
 // Color for a packet's "[protocol]" tag -- picked so a mixed-protocol capture scans quickly by
 // eye, not for any deeper meaning. parse-error is the one exception: it gets the same "something
@@ -189,6 +203,13 @@ const char* protocol_tag_color(const std::string& protocol) {
                                                            // with an extra bold weight to
                                                            // disambiguate from RIP's plain-underline
                                                            // cyan costs nothing in practice
+    if (protocol == "rdp") return kBoldUnderlineRed;       // red doubles as a mild "this shouldn't
+                                                              // be running here" cue, same reasoning
+                                                              // igrp's own color choice documents
+    if (protocol == "vnc") return kBoldUnderlineGreen;
+    if (protocol == "teamviewer") return kBoldUnderlineMagenta;
+    if (protocol == "anydesk") return kBoldUnderlineYellow;
+    if (protocol == "zoom") return kBoldUnderlineBlue;
     if (protocol == "parse-error") return kBoldRed;
     return kDim;  // tcp / udp / non-tcp / non-ip / unsupported-link: recognized, nothing OT-specific
 }

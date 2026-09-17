@@ -12,7 +12,9 @@ Fieldbus HSE (FDA/SM/FMS/LAN Redundancy), IEEE Spanning Tree Protocol
 mDNS, LLMNR, and NetBIOS Name Service (NBT-NS), RIP, IGMP, VRRP, HSRP, IGRP,
 PIM, EIGRP, and OSPFv2,
 plus detects DNS-over-HTTPS
-(DoH) via TLS SNI matching,
+(DoH) via TLS SNI matching, and recognizes (by name only, not full decode)
+RDP, VNC, TeamViewer, AnyDesk, and Zoom -- the "interactive remote control"
+tier of the IT protocols an OT auditor flags,
 traffic from offline
 pcap/pcapng captures, and checks it
 against a zone/conduit segmentation policy. It's an OT/ICS conduit-auditing tool: `decode`/`info` give you reliable
@@ -835,6 +837,22 @@ Groundwork / v0.1.0. What works right now:
 - `decode` shows a VLAN-tagged packet's 802.1Q VLAN ID by default (`eth ...
   vlan 100` in text, `has_vlan_tag`/`vlan_id` in JSON, a trailing `vlan_id`
   column in CSV) -- `--no-vlan` suppresses it
+- HART-IP's own classic wired-HART longitudinal (XOR) Data-Link Checksum is
+  now computed and verified against the wire byte, not just surfaced raw --
+  a mismatch is flagged as its own note / `hartip_checksum_valid: false`
+- Tier 1 of the "IT protocols an OT auditor flags" family (see ROADMAP item
+  18): RDP, VNC, TeamViewer, AnyDesk, and Zoom are each recognized by name
+  (their own `protocol` value, not folded into a generic `tcp`/`udp`
+  bucket) -- name-only, never decoded further, the same "recognized but
+  not decoded" posture ARP/LLDP/ICMP already have. VNC's RFB protocol-
+  version banner and RDP's initial X.224 Connection Request/Confirm
+  (reusing this project's own TPKT/COTP parser) are genuine cleartext
+  structural signatures; TeamViewer, AnyDesk, and Zoom have none and are
+  recognized by port number alone, the weakest identification gate in this
+  codebase. `--protocol remote-access` isolates the family;
+  `--remote-access-port` widens its expected-port set. See
+  docs/MANUAL.md's PROTOCOL COVERAGE "Tier 1 remote-access protocol
+  recognition" section
 - Name resolution, shared by `decode` and `policy validate` alike: OUI/MAC-
   vendor lookup against a built-in IEEE-registry-derived table (on by
   default, `--no-oui` disables it), hostname resolution from an explicitly-

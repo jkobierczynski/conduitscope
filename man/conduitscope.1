@@ -1,6 +1,6 @@
 .TH CONDUITSCOPE 1 "2026" "conduitscope 0.1.0" "User Commands"
 .SH NAME
-conduitscope \- decode Modbus/TCP, DNP3, IEC 60870-5-104, S7comm/COTP, S7comm-Plus (Siemens TIA Portal / S7-1200/1500), IEC 61850 MMS (Manufacturing Message Specification, ISO 9506), EtherNet/IP (CIP explicit and implicit messaging), PROFINET RT (DCP and cyclic real-time IO), IEC 61850-8-1 GOOSE, IEC 61850-9-2 Sampled Values, EtherCAT, BACnet/IP, HART-IP, OPC UA Binary, MQTT (v3.1/v3.1.1/v5.0, including Sparkplug B), FOUNDATION Fieldbus HSE (FDA/SM/FMS/LAN Redundancy), IEEE Spanning Tree Protocol (STP/RSTP/MSTP), DeviceNet (CAN-bus CIP, via SocketCAN pcap captures), DNS, mDNS, LLMNR, and NetBIOS Name Service (NBT-NS), RIP, IGMP, VRRP, HSRP, IGRP, PIM, EIGRP, and OSPFv2, plus detect DNS-over-HTTPS (DoH) via TLS SNI matching, from offline pcap/pcapng captures
+conduitscope \- decode Modbus/TCP, DNP3, IEC 60870-5-104, S7comm/COTP, S7comm-Plus (Siemens TIA Portal / S7-1200/1500), IEC 61850 MMS (Manufacturing Message Specification, ISO 9506), EtherNet/IP (CIP explicit and implicit messaging), PROFINET RT (DCP and cyclic real-time IO), IEC 61850-8-1 GOOSE, IEC 61850-9-2 Sampled Values, EtherCAT, BACnet/IP, HART-IP, OPC UA Binary, MQTT (v3.1/v3.1.1/v5.0, including Sparkplug B), FOUNDATION Fieldbus HSE (FDA/SM/FMS/LAN Redundancy), IEEE Spanning Tree Protocol (STP/RSTP/MSTP), DeviceNet (CAN-bus CIP, via SocketCAN pcap captures), DNS, mDNS, LLMNR, and NetBIOS Name Service (NBT-NS), RIP, IGMP, VRRP, HSRP, IGRP, PIM, EIGRP, and OSPFv2, plus detect DNS-over-HTTPS (DoH) via TLS SNI matching, plus recognize (by name only, not full decode) RDP, VNC, TeamViewer, AnyDesk, and Zoom, from offline pcap/pcapng captures
 .SH SYNOPSIS
 .B conduitscope
 [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-color\fR|\fB\-\-color\fR] [\fB\-\-log\-file\fR \fIFILE\fR] \fICOMMAND\fR [\fIOPTIONS\fR]
@@ -65,7 +65,14 @@ usual port-independent posture -- see \fBdocs/MANUAL.md\fR's PROTOCOL
 DETECTION section), plus DNS-over-HTTPS (DoH) detection (TCP port 443,
 also port-gated) via a TLS ClientHello's plaintext SNI matched against a
 curated table of known public DoH resolvers -- detection only, since DoH's
-actual DNS content is TLS-encrypted and never decoded, and checks
+actual DNS content is TLS-encrypted and never decoded, plus recognizes (by
+name only, port plus a minimal structural signature where one exists --
+never full decoding) RDP (TCP port 3389, identified from its initial X.224
+Connection Request/Confirm reusing this tool's own TPKT/COTP parser), VNC
+(a genuine RFB protocol-version banner, checked port-independently), and
+TeamViewer/AnyDesk/Zoom (recognized by port number alone -- no payload
+signature exists for any of the three, the weakest identification gate in
+this tool), and checks
 decoded traffic against a
 zone-and-conduit segmentation policy (IEC 62443 / NIS2 style work) via
 \fBpolicy validate\fR.
@@ -156,7 +163,7 @@ Write output here instead of stdout.
 .BR \-f ", " \-\-format " " {text,json,csv}
 Output format. Default: text.
 .TP
-.B \-\-protocol {auto,modbus,dnp3,iec104,s7comm,s7comm\-plus,mms,enip,profinet,goose,sv,ethercat,stp,devicenet,bacnet,hartip,opcua,mqtt,ff\-hse,dns,mdns,llmnr,nbns,doh,rip,igmp,vrrp,hsrp,igrp,pim,eigrp,ospf}
+.B \-\-protocol {auto,modbus,dnp3,iec104,s7comm,s7comm\-plus,mms,enip,profinet,goose,sv,ethercat,stp,devicenet,bacnet,hartip,opcua,mqtt,ff\-hse,dns,mdns,llmnr,nbns,doh,rip,igmp,vrrp,hsrp,igrp,pim,eigrp,ospf,remote\-access}
 Restrict decoding to one protocol. Default: auto (tries all eleven TCP
 protocols, independent of port number, plus CIP I/O, BACnet/IP, HART-IP, and
 FF-HSE on every
@@ -326,6 +333,15 @@ Also widens detection in \fBauto\fR mode.
 Same as \fB\-\-dns\-port\fR, for HSRP (built\-in default: 1985). Repeatable.
 Also widens detection in \fBauto\fR mode. IGMP and VRRP need no port option
 at all \-\- both are dispatched purely by IP protocol number.
+.TP
+.B \-\-remote\-access\-port \fIPORT\fR
+Additional TCP or UDP port to treat as expected for the Tier 1 "IT
+protocols an OT auditor flags" family (RDP/VNC/TeamViewer/AnyDesk/Zoom;
+built\-in defaults: 3389, 5900\-5906, 5938, 7070, 8801\-8810, 3478\-3479).
+Repeatable. One shared option across all five. Widens detection in
+\fBauto\fR mode for RDP's COTP\-gated check and the three port\-only
+protocols (TeamViewer/AnyDesk/Zoom) \-\- VNC's own RFB banner check is
+never port\-gated regardless.
 .TP
 .B \-\-max\-packets \fIN\fR
 Stop after decoding this many packets. Default: 0 (unlimited). With

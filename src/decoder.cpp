@@ -1676,6 +1676,26 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                 }
             }
 
+            // Tier 1 "IT protocols an OT auditor flags" recognition -- see it_protocols.hpp and the
+            // matching comment on the TCP side of this dispatch (reassemble_tcp_payload's own tail)
+            // for why this is tried last. Only TeamViewer, AnyDesk, and Zoom are reachable here in
+            // practice (RDP and VNC are both TCP-only by spec, so is_tcp=false short-circuits their
+            // own checks inside try_recognize_it_remote_access immediately) -- kept as one shared
+            // call anyway rather than a UDP-specific variant, since the port-only logic for those
+            // three protocols is identical regardless of transport.
+            bool want_remote_access_udp = options_.protocol_filter == ProtocolFilter::Auto ||
+                                           options_.protocol_filter == ProtocolFilter::RemoteAccessOnly;
+            if (want_remote_access_udp) {
+                if (auto m = try_recognize_it_remote_access(udp.payload, udp.src_port, udp.dst_port,
+                                                              /*is_tcp=*/false,
+                                                              options_.extra_remote_access_ports)) {
+                    out.protocol = m->protocol;
+                    out.summary = m->summary;
+                    for (const auto& n : m->notes) out.notes.push_back(n);
+                    return out;
+                }
+            }
+
             // Groundwork plumbing beyond this point: the UDP header/payload split is recognized
             // and reported (src/dst port, byte count), but no other application-layer protocol
             // riding on UDP is decoded -- see udp.hpp's file header comment and docs/MANUAL.md's
@@ -2234,6 +2254,33 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
             }
         }
 
+        // RDP's initial X.224 Connection Request/Confirm, checked BEFORE the opportunistic, port-
+        // independent COTP/S7comm dispatch just below -- see it_protocols.hpp's own file header
+        // comment for why: RDP's handshake rides the IDENTICAL TPKT+COTP framing S7comm/MMS use on
+        // port 102, so without this carve-out the S7comm/MMS dispatch below (which tries every TCP
+        // payload against try_parse_tpkt_cotp regardless of port) would claim a genuine RDP CR/CC on
+        // port 3389 as generic "cotp" traffic first, and try_recognize_it_remote_access's own
+        // matching check (run much later, only as a last resort -- see this function's TCP tail)
+        // would never get a chance to run at all. Deliberately narrow: ONLY a Connection Request/
+        // Confirm on port 3389 (or a configured extra port) is intercepted here -- a Data frame on
+        // that same port (not RDP's own handshake shape at all) still falls through to the generic
+        // COTP dispatch below exactly as it always has, the same "genuinely ambiguous, both
+        // readings left available" posture this codebase's HART-IP/Modbus MBAP-header collision
+        // already has (see hartip.hpp).
+        bool want_remote_access_early = options_.protocol_filter == ProtocolFilter::Auto ||
+                                         options_.protocol_filter == ProtocolFilter::RemoteAccessOnly;
+        if (want_remote_access_early &&
+            (port_in(tcp.src_port, RDP_PORT, options_.extra_remote_access_ports) ||
+             port_in(tcp.dst_port, RDP_PORT, options_.extra_remote_access_ports))) {
+            if (auto cotp = try_parse_tpkt_cotp(effective_payload)) {
+                if (cotp->kind == CotpPduKind::ConnectionRequest || cotp->kind == CotpPduKind::ConnectionConfirm) {
+                    out.protocol = "rdp";
+                    out.summary = "RDP X.224 " + cotp->pdu_type_name;
+                    return out;
+                }
+            }
+        }
+
         if (want_s7comm || want_mms || want_s7commplus) {
             if (auto cotp = try_parse_tpkt_cotp(effective_payload)) {
                 bool expected_port = port_in(tcp.src_port, COTP_TCP_PORT, options_.extra_s7comm_ports) ||
@@ -2717,12 +2764,32 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
             }
         }
 
+        // Tier 1 "IT protocols an OT auditor flags" recognition -- see it_protocols.hpp. Tried
+        // LAST among every TCP check above, deliberately: this is name-only recognition with the
+        // weakest structural confidence in this codebase for three of its five protocols (port
+        // number alone -- see it_protocols.hpp's own file header comment), so a real S7comm/MMS/
+        // OPC UA/EtherNet/IP/etc. session gets every chance to be identified by its own, far
+        // stronger signal first. It never collides with any of those anyway (none of RDP/VNC/
+        // TeamViewer/AnyDesk/Zoom's own ports overlap a port this decoder already dispatches on),
+        // so this ordering is a belt-and-suspenders precaution, not a fix for an actual conflict.
+        bool want_remote_access = options_.protocol_filter == ProtocolFilter::Auto ||
+                                   options_.protocol_filter == ProtocolFilter::RemoteAccessOnly;
+        if (want_remote_access) {
+            if (auto m = try_recognize_it_remote_access(effective_payload, tcp.src_port, tcp.dst_port,
+                                                          /*is_tcp=*/true, options_.extra_remote_access_ports)) {
+                out.protocol = m->protocol;
+                out.summary = m->summary;
+                for (const auto& n : m->notes) out.notes.push_back(n);
+                return out;
+            }
+        }
+
         out.protocol = "tcp";
         std::ostringstream s;
         s << "TCP payload of " << effective_payload.size() << " byte(s) on port " << tcp.src_port << "->"
           << tcp.dst_port
           << " did not match OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, COTP/S7comm/MMS, HART-IP, "
-             "MQTT, or FF-HSE";
+             "MQTT, FF-HSE, or the RDP/VNC/TeamViewer/AnyDesk/Zoom remote-access family";
         out.summary = s.str();
         return out;
 

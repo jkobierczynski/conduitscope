@@ -27,6 +27,7 @@
 #include "conduitscope/iec104.hpp"
 #include "conduitscope/igmp.hpp"
 #include "conduitscope/igrp.hpp"
+#include "conduitscope/it_protocols.hpp"
 #include "conduitscope/mms.hpp"
 #include "conduitscope/modbus.hpp"
 #include "conduitscope/mqtt.hpp"
@@ -80,6 +81,10 @@ enum class ProtocolFilter {
     PimOnly,      // only attempt PIMv2 decoding
     EigrpOnly,    // only attempt Cisco EIGRP decoding
     OspfOnly,     // only attempt OSPFv2 decoding
+    RemoteAccessOnly,  // only attempt the Tier 1 "IT protocols an OT auditor flags" recognition
+                        // (RDP/VNC/TeamViewer/AnyDesk/Zoom) -- see it_protocols.hpp. One filter
+                        // value covers all five, the same "one feature toggle, several sub-
+                        // protocols sharing it" convention FfHseOnly already established.
 };
 
 struct DecodeOptions {
@@ -133,6 +138,17 @@ struct DecodeOptions {
                                                   // IP protocol number (2, 112, 9, 103, 88, and 89
                                                   // respectively), which is a strong signal with
                                                   // no port concept.
+    // One shared list across all five Tier 1 "IT protocols an OT auditor flags" protocols (RDP/
+    // VNC/TeamViewer/AnyDesk/Zoom -- see it_protocols.hpp), the same "one feature toggle" grouping
+    // extra_ffhse_ports already established. Gates detection for RDP's COTP-based check and for
+    // the three port-only protocols (TeamViewer/AnyDesk/Zoom, which have no payload signal at all)
+    // -- joins the same detection-gating group as DNS/RIP/HSRP above for that reason. VNC is the
+    // one exception: its RFB protocol-version banner (see it_protocols.hpp) is checked port-
+    // independently even in Auto mode, since it's a genuinely strong, self-describing signal, the
+    // same "structural signature overrides the port gate" treatment BACnet/IP's or HART-IP's own
+    // opportunistic checks get -- this list still extends what counts as VNC's "expected" port for
+    // the purposes of the "seen on a non-standard port" note, just never gates the detection itself.
+    std::vector<uint16_t> extra_remote_access_ports;
     // If true, a parse failure at the Ethernet/IPv4/TCP layer is rethrown to
     // the caller instead of being recorded as a per-packet "parse-error"
     // result. Off by default so one malformed packet doesn't abort decoding
