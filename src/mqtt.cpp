@@ -38,19 +38,9 @@ std::string to_hex_byte(uint8_t b) {
     return s.str();
 }
 
-// milliseconds since the Unix epoch -- Sparkplug's own DateTime/timestamp convention (Payload's
-// top-level `timestamp` and Metric's own `timestamp`/DateTime-typed values all share it).
-std::string format_millis_epoch(uint64_t millis) {
-    std::time_t tt = static_cast<std::time_t>(millis / 1000);
-    std::tm* tm_utc = std::gmtime(&tt);
-    if (!tm_utc) {
-        return std::to_string(millis) + " (raw epoch millisecond value -- out of range for calendar display)";
-    }
-    std::ostringstream s;
-    s << std::put_time(tm_utc, "%Y-%m-%dT%H:%M:%S") << '.' << std::setfill('0') << std::setw(3)
-      << (millis % 1000) << 'Z';
-    return s.str();
-}
+// format_millis_epoch is declared in mqtt.hpp (not anonymous-namespace-local) and defined below,
+// after this anonymous namespace closes, specifically so dnp3.cpp can call it directly to render
+// DNP3's own milliseconds-since-epoch absolute time format -- see mqtt.hpp's own comment on it.
 
 // ------------------------------------------------------------------------------------------
 // MQTT Variable Byte Integer (VBI) -- 7 payload bits/byte, MSB continuation flag, least-
@@ -1170,6 +1160,22 @@ std::string build_summary(const MqttMessage& msg) {
 }
 
 }  // namespace
+
+// milliseconds since the Unix epoch -- Sparkplug's own DateTime/timestamp convention (Payload's
+// top-level `timestamp` and Metric's own `timestamp`/DateTime-typed values all share it), and,
+// since dnp3.cpp now calls this directly too, DNP3's own Group 50 "Time and Date"/absolute-time-
+// trailer format as well (see mqtt.hpp's comment on this declaration).
+std::string format_millis_epoch(uint64_t millis) {
+    std::time_t tt = static_cast<std::time_t>(millis / 1000);
+    std::tm* tm_utc = std::gmtime(&tt);
+    if (!tm_utc) {
+        return std::to_string(millis) + " (raw epoch millisecond value -- out of range for calendar display)";
+    }
+    std::ostringstream s;
+    s << std::put_time(tm_utc, "%Y-%m-%dT%H:%M:%S") << '.' << std::setfill('0') << std::setw(3)
+      << (millis % 1000) << 'Z';
+    return s.str();
+}
 
 std::optional<size_t> mqtt_declared_length(ByteSpan payload) {
     if (payload.size() < 2) return std::nullopt;

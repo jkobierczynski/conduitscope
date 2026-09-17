@@ -539,7 +539,17 @@ set_tests_properties(real_dnp3_test_data_part1_internal_indications_decoded PROP
 add_test(NAME real_dnp3_write_timestamp_decoded
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/dnp3/dnp3_write.pcap" --format text)
 set_tests_properties(real_dnp3_write_timestamp_decoded PROPERTIES
-  PASS_REGULAR_EXPRESSION "g50v1 \\(Time and Date\\).*idx=0: 1156521360890ms-since-epoch")
+  PASS_REGULAR_EXPRESSION "g50v1 \\(Time and Date\\).*idx=0: 2006-08-25T15:56:00.890Z \\(1156521360890ms-since-epoch\\)")
+
+# Same real Write request's Group 50 timestamp, now asserting the calendar-date rendering is
+# present (not just the raw millisecond count) in both text and JSON output -- 1156521360890ms
+# since the Unix epoch is 2006-08-25T15:56:00.890Z (computed independently of conduitscope, via
+# Python's datetime.utcfromtimestamp, not just eyeballed) -- see decode_absolute_time48 in
+# dnp3.cpp, which now reuses mqtt.hpp's format_millis_epoch for this rendering.
+add_test(NAME real_dnp3_write_timestamp_calendar_date_json
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/dnp3/dnp3_write.pcap" --format json)
+set_tests_properties(real_dnp3_write_timestamp_calendar_date_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"dnp3_values\": \\[\"g50v1 idx=0: 2006-08-25T15:56:00.890Z \\(1156521360890ms-since-epoch\\)\"\\]")
 
 # Deliberately corrupted/fuzzed capture: must degrade gracefully (a note
 # explaining why parsing stopped) rather than silently fabricate a value for

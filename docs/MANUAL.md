@@ -2580,9 +2580,10 @@ also decoded**, not just its byte length:
   queue/clear bits, operation count, on-time and off-time in milliseconds,
   and the status code (`Success`, `Timeout`, `Not Authorized`, and the rest
   of the standard IEEE 1815 control-status table).
-- **Time and Date** (group 50 variation 1): the 48-bit absolute timestamp, as
-  a raw milliseconds-since-epoch count (not converted to a calendar date --
-  see LIMITATIONS).
+- **Time and Date** (group 50 variation 1): the 48-bit absolute timestamp,
+  rendered as an ISO-8601 UTC calendar date/time (reusing MQTT Sparkplug's
+  own `format_millis_epoch`, since both are milliseconds-since-epoch --
+  see LIMITATIONS) with the raw millisecond count kept alongside it.
 - **Internal Indications as an object** (group 80 variation 1): each point
   decoded against the same IIN flag-name table used for the application
   layer's own IIN field.
@@ -4936,7 +4937,7 @@ means null (no bytes follow); `0` means empty (a distinct, non-null empty
 value); otherwise that many bytes follow. **DateTime**: an Int64,
 100-nanosecond intervals since 1601-01-01T00:00:00Z (the Win32 FILETIME
 epoch), decoded to a calendar date/time the same way this codebase already
-renders GOOSE/SV timestamps. **Guid**: NOT 16 raw bytes in wire order --
+renders MMS UtcTime / MQTT Sparkplug timestamps. **Guid**: NOT 16 raw bytes in wire order --
 Data1 (UInt32 LE) + Data2 (UInt16 LE) + Data3 (UInt16 LE) + Data4 (8 raw
 bytes, network/big-endian order), the same mixed-endianness Microsoft's own
 GUID wire format uses. **NodeId**: a 1-byte encoding mask (low 6 bits
@@ -6408,10 +6409,14 @@ These are current, not aspirational -- each has a corresponding ROADMAP item.
   object header are individually decoded; a larger batch's object data is
   still fully accounted for byte-wise, with a note that decoding was capped.
 - **DNP3 absolute timestamps (Time and Date objects, and event "with time"
-  variants) are shown as a raw milliseconds-since-epoch count, not a
-  calendar date.** Converting correctly needs UTC-safe 64-bit time handling
-  this tool doesn't otherwise depend on, and a subtly wrong date would be
-  worse than an honest millisecond count in a security-auditing tool.
+  variants) are shown as an ISO-8601 UTC calendar date/time, with the raw
+  milliseconds-since-epoch count kept alongside it in parentheses** -- via
+  the same `std::gmtime`-based rendering (and the same graceful
+  out-of-range fallback to a raw-value string) this codebase already uses
+  for MMS UtcTime, MQTT Sparkplug timestamps, OPC UA DateTime, and
+  S7comm-Plus timestamps; DNP3 reuses MQTT's own `format_millis_epoch`
+  directly rather than a separate copy, since both are milliseconds since
+  the Unix epoch.
 - **DNP3 32-bit floating-point values decode through a `float`, and 64-bit
   through a `double`** -- correct on any platform where those are IEEE 754
   binary32/binary64 (true of every mainstream compiler this project targets,
@@ -7395,11 +7400,12 @@ Rough order, each building on the groundwork this release establishes:
    today) -- that remains open, and isn't separately tracked as its own
    roadmap item, since no concrete use case has motivated a specific
    verdict-impact design for it yet.
-5. **DNP3 absolute-time rendering as a calendar date** (currently a raw
-   milliseconds-since-epoch count -- see LIMITATIONS), and value decoding for
-   the group/variation combinations still outside the point-format table
-   (double-precision Analog Input Event variants, Octet String, File
-   Control, Analog Input Reporting Deadband).
+5. ~~DNP3 absolute-time rendering as a calendar date~~ -- **done**, see
+   PROTOCOL COVERAGE's DNP3 "Time and Date" entry and LIMITATIONS. Value
+   decoding for the group/variation combinations still outside the
+   point-format table (double-precision Analog Input Event variants, Octet
+   String, File Control, Analog Input Reporting Deadband) remains open and
+   isn't separately tracked as its own roadmap item yet.
 6. **A policy `from`/`to` zone list wider than two endpoints per conduit**
    (e.g. "any of these three zones may reach this one"), if real policy
    files turn out to want that instead of one conduit per zone pair -- kept

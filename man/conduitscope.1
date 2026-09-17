@@ -434,8 +434,7 @@ segments (per TCP flow), though this path has no real-capture validation
 yet; DNP3 point values are decoded
 only for the group/variation combinations in the built-in point-format
 table (an object header outside it is still located and skipped by
-computed length); DNP3 absolute timestamps are shown as a raw
-milliseconds-since-epoch count, not a calendar date; IEC 104 needs no
+computed length); IEC 104 needs no
 cross-frame reassembly (one I-format APDU always carries exactly one ASDU)
 but its ASDU type-ID decode table, like DNP3's, covers only a "first pass"
 set of common monitoring/command/setpoint type IDs -- an ASDU outside that

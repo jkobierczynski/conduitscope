@@ -104,9 +104,14 @@
 // bit 0x80 LeapSecondsKnown, bit 0x40 ClockFailure, bit 0x20 ClockNotSynchronized, bits 0x1F
 // TimeAccuracy (a 5-bit count of how many bits of the fractional-second field are actually
 // accurate, 0-24 meaningful, higher values reserved/unspecified) -- this decoder renders all three
-// flags plus the raw accuracy value. This tool does NOT render seconds-since-epoch as a calendar
-// date, matching this codebase's existing DNP3 absolute-timestamp precedent (see docs/MANUAL.md's
-// LIMITATIONS) -- avoiding locale/timezone-dependent formatting entirely, everywhere in this tool.
+// flags plus the raw accuracy value. This tool does NOT render this seconds-since-epoch value as a
+// calendar date -- not because this codebase avoids calendar-date rendering in general (it doesn't:
+// MMS UtcTime, MQTT Sparkplug timestamps, OPC UA DateTime, S7comm-Plus timestamps, and DNP3's own
+// Group 50/event-"with time" absolute time are all rendered as calendar dates via std::gmtime, see
+// each protocol's own file for its version of the same pattern), but because IEC 61850's UtcTime is
+// itself sub-second-precision and used for tight event-sequencing/correlation (GOOSE/SV retransmit
+// on every state change, often many times a second), where the raw seconds+fractional-nanosecond
+// value has its own analytical value that a calendar-string rendering would obscure, not clarify.
 //
 // allData's own values (the ASN.1 `Data` CHOICE, IEC 61850-7-2's basic type list -- tag table
 // cross-checked against packet-goose.c's `Data_choice`, and independently against a real device's

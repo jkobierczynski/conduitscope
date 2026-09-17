@@ -183,6 +183,22 @@ namespace conduitscope {
 // detection gate, the same posture every other protocol's own port gets in this codebase.
 constexpr uint16_t MQTT_PORT = 1883;
 
+// Renders `millis` (milliseconds since the Unix epoch, Sparkplug's own DateTime/timestamp
+// convention -- see mqtt.hpp's file header comment) as an ISO-8601 UTC calendar timestamp,
+// "YYYY-MM-DDTHH:MM:SS.mmmZ", via std::gmtime -- or, for a value std::gmtime can't represent (out
+// of range for the platform's time_t/tm), a graceful fallback string naming the raw millisecond
+// value instead of fabricating a date.
+//
+// Exposed here (rather than kept mqtt.cpp-local, which is where it originated for Sparkplug B's
+// own timestamp fields) specifically so dnp3.cpp can call it directly: DNP3's Group 50 "Time and
+// Date" object (and the 48-bit absolute-time trailer on event objects' "with time" variants) is
+// the exact same wire shape -- milliseconds since the Unix epoch, as a uint64_t -- so this decoder
+// reuses this one function rather than maintaining a second, near-identical copy of the same
+// gmtime-based rendering. See dnp3.cpp's decode_absolute_time48 for that reuse, and
+// devicenet.cpp's reuse of enip.hpp's cip_service_name for the same kind of cross-file-reuse
+// precedent in this codebase.
+std::string format_millis_epoch(uint64_t millis);
+
 // One decoded Sparkplug B Metric (Payload.Metric in the Tahu .proto) -- see mqtt.hpp's file header
 // comment's "Sparkplug B" section for the full field-by-field decode scope. Not exposed on its own;
 // SparkplugPayload::metrics below holds the already-rendered one-line summary this codebase's other

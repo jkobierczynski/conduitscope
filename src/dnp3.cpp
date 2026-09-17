@@ -8,6 +8,8 @@
 #include <sstream>
 #include <utility>
 
+#include "conduitscope/mqtt.hpp"
+
 namespace conduitscope {
 
 namespace {
@@ -325,13 +327,20 @@ int32_t sign_extend(uint32_t v, unsigned bits) {
 }
 
 // 6-byte, little-endian, milliseconds-since-epoch -- the standard DNP3 absolute time format.
-// Rendered as the raw millisecond count rather than a calendar date: converting correctly needs
-// UTC-safe 64-bit time handling this tool doesn't otherwise depend on, and the raw count is
-// still directly useful (diffable, sortable) without risking a subtly wrong date rendering.
+// Rendered as an ISO-8601 UTC calendar timestamp (primary) plus the raw millisecond count
+// (parenthetical), e.g. "2025-09-17T11:54:56.096Z (1758110096096ms-since-epoch)" -- the calendar
+// rendering via mqtt.hpp's format_millis_epoch (std::gmtime-based, with a graceful out-of-range
+// fallback baked into that function itself, so a value std::gmtime can't represent never risks a
+// subtly wrong date), reused directly rather than duplicated because DNP3's absolute time is the
+// exact same wire shape (milliseconds since the Unix epoch, uint64_t) as Sparkplug's own
+// timestamp fields that function was originally written for -- see mqtt.hpp's own comment on it.
+// The raw count is kept alongside it, not dropped: it is still directly useful (diffable,
+// sortable), and this is the only place this value is exposed at all, in either text or JSON
+// output.
 std::string decode_absolute_time48(Cursor& c) {
     uint64_t ms = 0;
     for (int i = 0; i < 6; ++i) ms |= static_cast<uint64_t>(c.u8()) << (8 * i);
-    return std::to_string(ms) + "ms-since-epoch";
+    return format_millis_epoch(ms) + " (" + std::to_string(ms) + "ms-since-epoch)";
 }
 
 std::string crob_control_code_name(uint8_t code) {
