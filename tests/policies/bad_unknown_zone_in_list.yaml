@@ -1,0 +1,14 @@
+# Regression fixture: a conduit's 'from' is a list whose FIRST entry ('hmi_zone') is a validly
+# declared zone but whose SECOND entry ('nonexistent_zone') is not -- proves every entry in a list
+# 'from'/'to' is validated against 'zones', not just the first (see bad_unknown_zone.yaml for the
+# single-scalar version of this check).
+zones:
+  hmi_zone:
+    networks: [192.168.1.50/32]
+  plc_zone:
+    networks: [192.168.1.10/32]
+conduits:
+  - name: c1
+    from: [hmi_zone, nonexistent_zone]
+    to: plc_zone
+    protocols: [modbus]

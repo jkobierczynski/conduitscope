@@ -1,0 +1,20 @@
+# Regression fixture: a conduit's 'to' names a LIST of zones, not just one (see Conduit::to_zones
+# in policy.hpp) -- the mirror of multi_from_zones.yaml, but on the 'to' side. dmz_zone (unused by
+# any real traffic here) and plc_zone are both listed under 'to', with plc_zone (the zone that
+# actually matches tests/sample_modbus.pcap's PLC, 192.168.1.10) deliberately listed SECOND, not
+# first. Validating sample_modbus.pcap against this must report COMPLIANT, matched via the second
+# 'to' list entry.
+zones:
+  hmi_zone:
+    networks: [192.168.1.50/32]
+  dmz_zone:
+    networks: [172.16.0.0/16]
+  plc_zone:
+    networks: [192.168.1.10/32]
+
+conduits:
+  - name: "HMI reaches DMZ or PLC via Modbus"
+    from: hmi_zone
+    to: [dmz_zone, plc_zone]
+    protocols: [modbus]
+    ports: [502]

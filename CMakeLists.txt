@@ -4523,6 +4523,36 @@ add_test(NAME policy_bidirectional_conduit_matches_reverse_direction
 set_tests_properties(policy_bidirectional_conduit_matches_reverse_direction PROPERTIES
   PASS_REGULAR_EXPRESSION "Result: COMPLIANT.*matched conduit \"PLC pushes to HMI")
 
+add_test(NAME policy_multi_from_zones_matches_non_first_entry
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/multi_from_zones.yaml")
+set_tests_properties(policy_multi_from_zones_matches_non_first_entry PROPERTIES
+  PASS_REGULAR_EXPRESSION "Result: COMPLIANT.*matched conduit \"corp or HMI reaches PLC via Modbus\"")
+
+add_test(NAME policy_multi_to_zones_matches_non_first_entry
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/multi_to_zones.yaml")
+set_tests_properties(policy_multi_to_zones_matches_non_first_entry PROPERTIES
+  PASS_REGULAR_EXPRESSION "Result: COMPLIANT.*matched conduit \"HMI reaches DMZ or PLC via Modbus\"")
+
+add_test(NAME policy_multi_zone_bidirectional_reverse_match
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/multi_zone_bidirectional.yaml")
+set_tests_properties(policy_multi_zone_bidirectional_reverse_match PROPERTIES
+  PASS_REGULAR_EXPRESSION "Result: COMPLIANT.*matched conduit \"PLC-side pushes to HMI-side")
+
+add_test(NAME policy_json_multi_zone_conduit
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/multi_from_zones.yaml" --format json)
+set_tests_properties(policy_json_multi_zone_conduit PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"from\": \\[\"corp_zone\", \"hmi_zone\"\\][^}]*\"to\": \\[\"plc_zone\"\\]")
+
+add_test(NAME policy_error_unknown_zone_in_list
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_unknown_zone_in_list.yaml")
+set_tests_properties(policy_error_unknown_zone_in_list PROPERTIES
+  PASS_REGULAR_EXPRESSION "'from' zone 'nonexistent_zone' is not declared in 'zones'")
+
+add_test(NAME policy_error_empty_from_list
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_empty_from_list.yaml")
+set_tests_properties(policy_error_empty_from_list PROPERTIES
+  PASS_REGULAR_EXPRESSION "conduit 'c1' declares no 'from' zones")
+
 add_test(NAME policy_unexercised_conduits_listed
   COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/compliant.yaml")
 set_tests_properties(policy_unexercised_conduits_listed PROPERTIES

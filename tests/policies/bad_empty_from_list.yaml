@@ -1,0 +1,13 @@
+# Regression fixture: a conduit's 'from' is an explicit empty list ('from: []') -- must be
+# rejected with "declares no 'from' zones", matching the wording style of the existing "declares
+# no networks"/"declares no protocols" empty-list checks.
+zones:
+  hmi_zone:
+    networks: [192.168.1.50/32]
+  plc_zone:
+    networks: [192.168.1.10/32]
+conduits:
+  - name: c1
+    from: []
+    to: plc_zone
+    protocols: [modbus]

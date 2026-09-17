@@ -1,0 +1,20 @@
+# Regression fixture: a conduit's 'from' names a LIST of zones, not just one (see Conduit::from_zones
+# in policy.hpp). Three zones are declared: corp_zone (unused by any real traffic here) and hmi_zone
+# both listed under 'from' -- with hmi_zone (the zone that actually matches tests/sample_modbus.pcap's
+# HMI, 192.168.1.50) deliberately listed SECOND, not first, to prove matching checks every entry in
+# the list rather than just index 0. Validating sample_modbus.pcap against this must report COMPLIANT,
+# matched via the second 'from' list entry.
+zones:
+  corp_zone:
+    networks: [10.0.0.0/8]
+  hmi_zone:
+    networks: [192.168.1.50/32]
+  plc_zone:
+    networks: [192.168.1.10/32]
+
+conduits:
+  - name: "corp or HMI reaches PLC via Modbus"
+    from: [corp_zone, hmi_zone]
+    to: plc_zone
+    protocols: [modbus]
+    ports: [502]

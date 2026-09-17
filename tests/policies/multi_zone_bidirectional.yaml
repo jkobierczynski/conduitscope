@@ -1,0 +1,25 @@
+# Regression fixture: list-widened 'from'/'to' (Conduit::from_zones/to_zones) combined with
+# 'bidirectional: true' reverse matching (see bidirectional.yaml for the single-zone version of
+# this same scenario). The conduit is declared plc_zone-ish -> hmi_zone-ish -- i.e. in the REVERSE
+# of the actual traffic direction in tests/sample_modbus.pcap (where the HMI is the client) -- but
+# both 'from' and 'to' are now lists, with an unused decoy zone listed BEFORE the real zone in each
+# list, so this proves reverse matching checks every list entry on both sides, not just index 0.
+# Validating sample_modbus.pcap against this must report COMPLIANT, matched via the
+# reverse-direction + multi-zone-list combination.
+zones:
+  hmi_zone:
+    networks: [192.168.1.50/32]
+  plc_zone:
+    networks: [192.168.1.10/32]
+  dmz_zone:
+    networks: [172.16.0.0/16]
+  corp_zone:
+    networks: [10.0.0.0/8]
+
+conduits:
+  - name: "PLC-side pushes to HMI-side (bidirectional, multi-zone lists)"
+    from: [dmz_zone, plc_zone]
+    to: [corp_zone, hmi_zone]
+    protocols: [modbus]
+    ports: [502]
+    bidirectional: true
