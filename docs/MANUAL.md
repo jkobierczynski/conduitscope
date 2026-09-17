@@ -5002,20 +5002,47 @@ build every packed-ASCII synthetic test fixture).
 **HART-format timestamps**: a 4-byte field, raw units of 1/32 millisecond
 (the units HCF_SPEC-307 defines), decoded to `hr:min:sec.ms`.
 
-**Explicitly out of scope, named but shown as raw hex**: commands 77 (I/O
-Card/Channel embedded-command relay) and 178 (Batch/aggregate command) are
-explicitly named (they're common enough in real gateway traffic -- this
-decoder's real capture, see Validation below, contains neither, but they
-were named proactively from the command-number table during this decoder's
-own research) but not value-decoded, since their own data layout is
-gateway/vendor-specific rather than a single fixed HART Universal/
-Common-Practice shape. Every other command number outside the list above is
-named via the full command-number table when recognized at all, or shown
-as a bare number when not -- either way, the data itself is always raw hex
-with an explanatory note. A recognized command whose data doesn't match
-the expected length (a malformed capture, or simply a command variant this
-decoder's first pass doesn't cover) falls back to the same raw-hex-with-note
-treatment rather than mis-decoding.
+- **77** (Send Command to Sub-Device -- name per FieldComm Group's own
+  "HART-IP Application, Communication, and Control Analysis" document,
+  section 2.2.2, one of the I/O System Commands a HART-IP gateway/Remote
+  I/O supports): an I/O-card/channel-addressed RELAY that wraps another,
+  arbitrary HART command's own request or response to a sub-device reached
+  through a multiplexer's I/O Card/Channel -- IO Card + Channel + (request
+  only) TX Preamble Count + Embedded Command Delimiter (only its own
+  Address-Type bit is decoded) + Embedded Address (1 or 5 bytes, by that
+  bit) + Embedded Command Number + Embedded Command Byte Count + (response
+  only) Embedded Response Code + Embedded Device Status + the embedded
+  command's own Data. That embedded command is then decoded *recursively*
+  through this same command table (e.g. an embedded command 1 response
+  shows its own decoded PV value, prefixed `embedded-`), the same
+  recursive-reuse pattern this project's EtherNet/IP CIP decoder already
+  uses for Multiple Service Packet/Unconnected Send. Unlike every other
+  command here, request and response genuinely have a different field
+  shape (like command 38 above).
+- **178** (a BATCH/aggregate wrapper -- like 31 and 203, no authoritative
+  top-level name is asserted: FieldComm Group's own document frames this
+  command as the vehicle for a "Publish"/burst-mode feature bundling e.g.
+  commands 9 and 48 together, rather than giving it a standalone name, and
+  no other source consulted gives one either): Number of Commands, then
+  that many entries of Command Number + Command Byte Count + Response Code
+  + Data, decoded the same way regardless of request/response direction
+  (cross-checked against Wireshark's own dissector, which does the same).
+  Each entry's own Command Number/Data is decoded recursively through this
+  same command table too, prefixed `aggregate[i]-`.
+
+Every command number outside the table above (including ones a command 77
+or 178 recurses into) is named via the full command-number table when
+recognized at all, or shown as a bare number when not -- either way, the
+data itself is raw hex with an explanatory note. A recognized command whose
+data doesn't match the expected length (a malformed capture, or simply a
+command variant this decoder's first pass doesn't cover) falls back to the
+same raw-hex-with-note treatment rather than mis-decoding. Commands 77 and
+178's own sequential, multi-field layout means a truncation partway through
+is instead reported as a note pinpointing exactly which field was
+truncated, with every field already decoded still shown (the same "partial
+fill" posture the Pass-Through frame itself already takes), rather than
+falling back to a whole-message raw-hex dump that would just duplicate the
+fields already shown.
 
 #### Validation
 
@@ -7739,19 +7766,25 @@ Rough order, each building on the groundwork this release establishes:
    cover all three at once (HART-IP's own TCP traffic is already covered by
    `policy validate` today, the same as any other TCP-based protocol here).
 
-10. **Extend HART-IP's command value-decode table** beyond the "first pass"
-    set (see PROTOCOL COVERAGE) -- commands 77 and 178 in particular, since
-    they're common enough in real gateway traffic to have been named
-    proactively even though no real capture found so far happens to carry
-    either. Also: verify the HART Data-Link Checksum (the XOR algorithm
+10. ~~Extend HART-IP's command value-decode table beyond the "first pass"
+    set -- commands 77 and 178 in particular~~ -- **done**: command 77
+    (Send Command to Sub-Device) and command 178 (the unnamed BATCH/
+    aggregate wrapper) are both now value-decoded, including recursively
+    decoding whichever command(s) each one wraps through this decoder's own
+    existing command table -- see PROTOCOL COVERAGE's Command value-decode
+    section. No real capture found so far happens to carry either (see
+    `tests/real_captures/hartip/ATTRIBUTION.md`'s own "Gaps" section), so
+    this remains synthetic-fixture-only validated, like commands 31/203
+    already were.
+
+    Still open: verify the HART Data-Link Checksum (the XOR algorithm
     across the whole PDU, currently surfaced raw and never checked -- see
     LIMITATIONS); resolve multi-definition/warning-class Response Codes to
     their actual per-command meaning, if a reliable source for enough
     individual commands' own spec text ever turns up; and widen real-capture
     validation to Error/NAK messages, the BACK frame type, non-Success
-    response codes, and the ten-plus commands the one real capture found for
-    this feature doesn't happen to exercise (see
-    `tests/real_captures/hartip/ATTRIBUTION.md`'s own "Gaps" section).
+    response codes, and the ten-plus commands (now including 77/178) the
+    one real capture found for this feature doesn't happen to exercise.
 
 11. **Implement OPC UA's Variant/DataValue self-describing value encoding**
     (OPC 10000-6 5.2.2.16/5.1.6) -- the single largest remaining OPC UA
@@ -7821,6 +7854,33 @@ Rough order, each building on the groundwork this release establishes:
     per-packet `DecodedPacket` stream. Would need its own `--no-oui`/
     `--resolve`/`--hosts`/`--nn`/`--services` flags (or to share `decode`'s)
     threaded through to wherever the report renders a MAC/IP/port today.
+17. **Passive OT asset inventory: pcap -> zones and conduits.** A new
+    subcommand (working name `inventory`) that runs the opposite direction
+    from `policy validate` -- instead of checking observed traffic against
+    a hand-written zone/conduit policy, it infers a first-draft one from a
+    capture. Feed it a pcap from an industrial network and it identifies
+    Modbus, S7comm, DNP3, EtherNet/IP, and BACnet/IP talkers (all already
+    decoded by this project -- see PROTOCOL COVERAGE), builds an asset list
+    (IP/MAC, OUI vendor guess, protocols spoken, client-vs-server role
+    inferred from who initiates) and a communication matrix (who talks to
+    whom, over which protocol/port), then proposes an IEC 62443 zone/
+    conduit model from that matrix -- most likely grouped by protocol
+    and/or observed subnet as a first-pass heuristic -- rendered as a
+    diagram (Mermaid or Graphviz `.dot`) and, ideally, as a `policy`-format
+    YAML file directly loadable by `policy validate` (closing the loop:
+    discover, then enforce). NSA's GRASSMARLIN used to occupy this niche
+    but is abandoned; CISA's Malcolm covers similar ground but is a heavy
+    multi-container Zeek/OpenSearch/Elastic stack, not a lightweight
+    single-binary CLI -- a `tshark`/Zeek-log-adjacent tool that's just
+    "pcap in, zone/conduit model out" appears to be a genuine gap this
+    project's existing decode + `PolicyEngine`/zone infrastructure is
+    unusually well positioned to fill. An LLM-assisted zone-assignment
+    suggestion (which zone a given device most plausibly belongs in, with
+    a short rationale -- e.g. "talks Modbus only to 10.0.1.5, no traffic to
+    any other zone: candidate for a dedicated PLC zone") is an optional,
+    clearly-labeled enhancement on top of the heuristic grouping above, not
+    a prerequisite for it -- the deterministic pcap-to-model pipeline should
+    stand on its own first.
 
 **pcapng support** is also now done: both classic pcap and pcapng are read
 transparently (auto-detected, no flag needed) -- see "pcap vs. pcapng"

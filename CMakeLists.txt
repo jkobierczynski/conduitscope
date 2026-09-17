@@ -2602,15 +2602,35 @@ add_test(NAME hartip_cmd48_minimal_and_extended_decoded
 set_tests_properties(hartip_cmd48_minimal_and_extended_decoded PROPERTIES
   PASS_REGULAR_EXPRESSION "\"hartip_command\": 48,.*\"hartip_command_name\": \"Read Additional Device Status\",.*\"hartip_values\": \\[\"device-specific-status=000000000000\"\\],.*\"notes\": \\[\\]\n *\\},.*\"device-specific-status=000000000000\", \"extended-device-status=0x00\", \"device-operating-mode=0x01\", \"standardized-status-0=0x00\", \"standardized-status-1=0x00\", \"standardized-status-2=0x00\", \"standardized-status-3=0x00\", \"analog-channel-saturated=0x00\", \"analog-channel-fixed=0x00\"\\]")
 
-add_test(NAME hartip_cmd77_out_of_scope_raw_hex_noted
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap" --format text)
-set_tests_properties(hartip_cmd77_out_of_scope_raw_hex_noted PROPERTIES
-  PASS_REGULAR_EXPRESSION "command=77 \\(I/O Card/Channel embedded-command relay\\) response-code=0 \\(Success\\)\n *note: command 77 \\(I/O Card/Channel embedded-command relay\\) data \\(4 byte\\(s\\)\\) does not match the byte layout this decoder expects -- not value-decoded, shown as raw hex")
+add_test(NAME hartip_cmd77_response_short_address_embedded_command_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap")
+set_tests_properties(hartip_cmd77_response_short_address_embedded_command_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"hartip_command\": 77,.*\"hartip_command_name\": \"Send Command to Sub-Device\",.*\"hartip_values\": \\[\"io-card=3\", \"channel=1\", \"embedded-command-delimiter=0x00\", \"embedded-address=7\", \"embedded-command=1\", \"embedded-response-code=0 \\(Success\\)\", \"embedded-device-status=0x00\", \"embedded-command-name=Read Primary Variable\", \"embedded-pv-units=1\", \"embedded-pv=72.500000\"\\],.*\"notes\": \\[\\]")
 
-add_test(NAME hartip_cmd178_out_of_scope_raw_hex_noted
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap" --format text)
-set_tests_properties(hartip_cmd178_out_of_scope_raw_hex_noted PROPERTIES
-  PASS_REGULAR_EXPRESSION "command=178 \\(Batch/aggregate command\\) response-code=0 \\(Success\\)\n *note: command 178 \\(Batch/aggregate command\\) data \\(5 byte\\(s\\)\\) does not match the byte layout this decoder expects -- not value-decoded, shown as raw hex")
+add_test(NAME hartip_cmd77_response_long_address_embedded_command_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap")
+set_tests_properties(hartip_cmd77_response_long_address_embedded_command_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"hartip_command\": 77,.*\"hartip_values\": \\[\"io-card=3\", \"channel=1\", \"embedded-command-delimiter=0x80\", \"embedded-address=1eaabbccdd\", \"embedded-command=1\", \"embedded-response-code=0 \\(Success\\)\", \"embedded-device-status=0x00\", \"embedded-command-name=Read Primary Variable\", \"embedded-pv-units=1\", \"embedded-pv=72.500000\"\\]")
+
+add_test(NAME hartip_cmd77_request_embedded_command_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap")
+set_tests_properties(hartip_cmd77_request_embedded_command_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"hartip_message_type\": \"Request\",.*\"hartip_command\": 77,.*\"hartip_command_name\": \"Send Command to Sub-Device\",.*\"hartip_values\": \\[\"io-card=3\", \"channel=1\", \"tx-preamble-count=2\", \"embedded-command-delimiter=0x00\", \"embedded-address=7\", \"embedded-command=1\"\\]")
+
+add_test(NAME hartip_cmd77_truncated_before_embedded_command_number_noted
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap")
+set_tests_properties(hartip_cmd77_truncated_before_embedded_command_number_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"hartip_command\": 77,.*\"hartip_values\": \\[\"io-card=1\", \"channel=0\", \"embedded-command-delimiter=0x00\", \"embedded-address=5\"\\],.*\"notes\": \\[\"command 77 is truncated before its Embedded Command Number byte\"\\]")
+
+add_test(NAME hartip_cmd178_aggregate_recognized_and_unrecognized_entries_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap")
+set_tests_properties(hartip_cmd178_aggregate_recognized_and_unrecognized_entries_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"hartip_command\": 178,.*\"hartip_values\": \\[\"number-of-commands=2\", \"aggregate\\[0\\]-command=1\", \"aggregate\\[0\\]-response-code=0 \\(Success\\)\", \"aggregate\\[0\\]-command-name=Read Primary Variable\", \"aggregate\\[0\\]-pv-units=1\", \"aggregate\\[0\\]-pv=72.500000\", \"aggregate\\[1\\]-command=99\", \"aggregate\\[1\\]-response-code=0 \\(Success\\)\", \"aggregate\\[1\\]-data=aabb\"\\],.*\"notes\": \\[\"command 178 entry 1: command 99 is not one of this decoder's first-pass value-decoded commands -- not decoded, shown as raw hex\"\\]")
+
+add_test(NAME hartip_cmd178_entry_byte_count_too_small_noted
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap")
+set_tests_properties(hartip_cmd178_entry_byte_count_too_small_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"hartip_command\": 178,.*\"hartip_values\": \\[\"number-of-commands=2\", \"aggregate\\[0\\]-command=1\"\\],.*\"notes\": \\[\"command 178 entry 0's Command Byte Count \\(0\\) is smaller than the 1 Response Code byte it must include -- entry's Response Code/Data not decoded, remaining entries \\(if any\\) skipped\"\\]")
 
 add_test(NAME hartip_cmd99_unrecognized_raw_hex_noted
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap" --format text)
@@ -2713,7 +2733,7 @@ set_tests_properties(hartip_tcp_coalesced_keep_alive_decoded PROPERTIES
 add_test(NAME hartip_stats_counted
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap" --stats)
 set_tests_properties(hartip_stats_counted PROPERTIES
-  PASS_REGULAR_EXPRESSION "packets: +63[^\n]*\n[^\n]*\nprotocols:\n *hartip +58\n *tcp +3\n *udp +2\nhartip message types:\n *Error +3\n *NAK +1\n *Request +16\n *Response +38\nhartip pass-through commands:\n")
+  PASS_REGULAR_EXPRESSION "packets: +67[^\n]*\n[^\n]*\nprotocols:\n *hartip +62\n *tcp +3\n *udp +2\nhartip message types:\n *Error +3\n *NAK +1\n *Request +17\n *Response +41\nhartip pass-through commands:\n")
 
 # --------------------------------------------------------------------------
 # Real-world HART-IP capture -- see tests/real_captures/hartip/ATTRIBUTION.md for provenance: a

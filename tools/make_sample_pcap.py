@@ -5727,69 +5727,108 @@ def build_hartip_sample():
     assert len(cmd48_ext) == 14
     add(hartip_message(1, 3, pass_through_body(6, 48, cmd48_ext, response_code=0), txn=36))
 
-    # 42) Command 77 (I/O Card/Channel embedded-command relay) -- named only, deliberately NOT
-    #     value-decoded (recursively wraps another arbitrary command) -- shown as raw hex.
+    # 42) Command 77 (Send Command to Sub-Device) response -- I/O Card/Channel embedded-command
+    #     relay wrapping an embedded command 1 (Read Primary Variable) response, SHORT embedded
+    #     Address -- exercises the full recursive decode via decode_nested_command (hartip.cpp):
+    #     the embedded command's own PV value is decoded, not just shown as raw bytes.
+    cmd77_emb_byte_count = 2 + len(cmd1_data)  # embedded Response Code + Device Status + Data
+    cmd77_resp_short = bytes([3, 1, 0x00, 0x07, 1, cmd77_emb_byte_count, 0, 0]) + cmd1_data
+    add(hartip_message(1, 3, pass_through_body(6, 77, cmd77_resp_short, response_code=0), txn=60))
+
+    # 43) Command 77 response, same embedded command 1, but a LONG (5-byte, Unique ID) embedded
+    #     Address instead (Embedded Command Delimiter bit 7 set) -- exercises the embedded
+    #     Address's own 1-vs-5-byte branch independently of the outer Pass-Through frame's own
+    #     Address (which is short in every fixture in this file).
+    cmd77_resp_long = (bytes([3, 1, 0x80, 0x1E, 0xAA, 0xBB, 0xCC, 0xDD, 1, cmd77_emb_byte_count, 0, 0]) +
+                        cmd1_data)
+    add(hartip_message(1, 3, pass_through_body(6, 77, cmd77_resp_long, response_code=0), txn=61))
+
+    # 44) Command 77 REQUEST -- the request shape genuinely differs from the response shape above
+    #     (TX Preamble Count present, Response Code/Device Status absent, per hartip.hpp) --
+    #     relays an embedded command 1 REQUEST, whose own data is empty (Read Primary Variable
+    #     takes no request parameters), so nothing decodes past the embedded command number itself.
+    cmd77_req = bytes([3, 1, 2, 0x00, 0x07, 1, 0])
+    add(hartip_message(0, 3, pass_through_body(2, 77, cmd77_req), txn=62))
+
+    # 45) Command 77 response, truncated before its Embedded Command Number byte (only IO
+    #     Card/Channel/Embedded Command Delimiter/Address present) -- exercises the "partial fill,
+    #     note where it stopped" truncation posture decode_cmd_77's own header comment documents,
+    #     distinct from a structurally-unparseable command falling back to raw hex.
     add(hartip_message(1, 3, pass_through_body(6, 77, bytes([1, 0, 0, 5]), response_code=0), txn=37))
 
-    # 43) Command 178 (batch/aggregate command) -- same "named only, raw hex" treatment.
+    # 46) Command 178 response -- a BATCH/aggregate wrapper with 2 entries: entry 0 is a recognized
+    #     embedded command 1 (Read Primary Variable, decoded recursively, same reuse command 77
+    #     above uses); entry 1 is command 99, entirely outside this decoder's dispatch table, shown
+    #     as raw hex with its own note (command 178 itself has no top-level name asserted -- see
+    #     hartip.hpp).
+    cmd178_entry0 = struct.pack("!H", 1) + bytes([1 + len(cmd1_data), 0]) + cmd1_data
+    cmd178_entry1 = struct.pack("!H", 99) + bytes([1 + 2, 0]) + bytes([0xAA, 0xBB])
+    cmd178_data = bytes([2]) + cmd178_entry0 + cmd178_entry1
+    add(hartip_message(1, 3, pass_through_body(6, 178, cmd178_data, response_code=0), txn=63))
+
+    # 47) Command 178 response with entry 0's own Command Byte Count malformed (0, smaller than
+    #     the 1 Response Code byte it must include) -- the command as a whole is still
+    #     "recognized" (Number of Commands is shown) but entry 0's own Response Code/Data is not
+    #     decoded, and any remaining declared entries are skipped -- same "partial fill" posture
+    #     as #45 above.
     add(hartip_message(1, 3, pass_through_body(6, 178, bytes([2, 0, 1, 0, 2]), response_code=0), txn=38))
 
-    # 44) A command number entirely outside this decoder's dispatch table (99) -- no name at all,
-    #     raw hex, a different note wording than #42/#43 above.
+    # 48) A command number entirely outside this decoder's dispatch table (99) -- no name at all,
+    #     raw hex, a different note wording than #46/#47 above.
     add(hartip_message(1, 3, pass_through_body(6, 99, bytes([0xAA, 0xBB]), response_code=0), txn=39))
 
-    # 45) A recognized command (1, Read Primary Variable) whose response data length does NOT
+    # 49) A recognized command (1, Read Primary Variable) whose response data length does NOT
     #     match what this decoder expects (4 bytes instead of 5) -- named, but not value-decoded,
     #     shown as raw hex with a "does not match the byte layout" note (distinct wording from #44).
     add(hartip_message(1, 3, pass_through_body(6, 1, bytes([1, 2, 3, 4]), response_code=0), txn=40))
 
-    # 46) A response with the communication-error bit (bit 7) set in its Response Code --
+    # 50) A response with the communication-error bit (bit 7) set in its Response Code --
     #     0xC8 = 0x80 (comm-error) | 0x40 (vertical-parity-error) | 0x08 (longitudinal-parity-error).
     add(hartip_message(1, 3, pass_through_body(6, 2, cmd2_data, response_code=0xC8), txn=41))
 
-    # 47) A response whose Response Code is a "single-definition" code OTHER than Success (32,
+    # 51) A response whose Response Code is a "single-definition" code OTHER than Success (32,
     #     Busy) -- exercises the response_code_name lookup table beyond the all-zero default.
     add(hartip_message(1, 3, pass_through_body(6, 2, cmd2_data, response_code=32), txn=42))
 
-    # 48) A response whose Response Code (100) is command-specific and NOT in the single-definition
+    # 52) A response whose Response Code (100) is command-specific and NOT in the single-definition
     #     table -- "command-specific response code 100 (meaning depends on which command produced
     #     it -- not decoded)".
     add(hartip_message(1, 3, pass_through_body(6, 2, cmd2_data, response_code=100), txn=43))
 
-    # 49) A response with every Device Status bit set (0xFF) -- exercises all 8 named flags at once.
+    # 53) A response with every Device Status bit set (0xFF) -- exercises all 8 named flags at once.
     add(hartip_message(1, 3, pass_through_body(6, 1, cmd1_data, response_code=0, device_status=0xFF), txn=44))
 
-    # 50) BACK (Burst Frame, frame_type=1) -- also an is_response frame per hartip.hpp's own
+    # 54) BACK (Burst Frame, frame_type=1) -- also an is_response frame per hartip.hpp's own
     #     is_rsp derivation, carrying an unsolicited command 2 reading.
     add(hartip_message(1, 3, pass_through_body(1, 2, cmd2_data, response_code=0), txn=45))
 
-    # 51) Byte Count smaller than the Response Code/Device Status bytes it must include (a
+    # 55) Byte Count smaller than the Response Code/Device Status bytes it must include (a
     #     malformed response claiming byte_count=1 while still being a response, which needs at
     #     least 2) -- Data length is treated as 0 rather than underflowing.
     add(hartip_message(1, 3, pass_through_body(6, 2, b"", response_code=0, byte_count_override=1), txn=46))
 
-    # 52) Pass-Through body truncated before its trailing Checksum byte (byte_count correct, but
+    # 56) Pass-Through body truncated before its trailing Checksum byte (byte_count correct, but
     #     the checksum byte itself is simply missing from the wire).
     truncated_pt = pass_through_body(6, 2, cmd2_data, response_code=0, checksum=None)
     add(hartip_message(1, 3, truncated_pt, txn=47))
 
-    # 53) Pass-Through body truncated before its Command byte entirely (just preambles + delimiter
+    # 57) Pass-Through body truncated before its Command byte entirely (just preambles + delimiter
     #     + address).
     add(hartip_message(0, 3, bytes([0xFF, 0xFF, 0x02, 0x01]), txn=48))
 
-    # 54) Trailing byte(s) remain after the Checksum -- unexpected, not decoded.
+    # 58) Trailing byte(s) remain after the Checksum -- unexpected, not decoded.
     add(hartip_message(1, 3, pass_through_body(6, 2, cmd2_data, response_code=0) + bytes([0x00, 0x00]), txn=49))
 
-    # 55) Port-independence: a structurally valid HART-IP message on a UDP port other than 5094 --
+    # 59) Port-independence: a structurally valid HART-IP message on a UDP port other than 5094 --
     #     still decoded, annotated as an unexpected port (mirrors BACnet's/CIP I/O's own posture).
     add(hartip_message(0, 2, b"", txn=50), sport=51005, dport=51006)
 
-    # 56) MsgLength implausibly small (< 8, the header's own fixed size) -- this decoder's own
+    # 60) MsgLength implausibly small (< 8, the header's own fixed size) -- this decoder's own
     #     third, self-added plausibility check beyond Wireshark's own two-byte gate -- falls
     #     through to a generic "udp" groundwork report rather than being misdetected as HART-IP.
     add(hartip_message(0, 0, struct.pack("!BI", 1, 180), txn=51, msg_length_override=5))
 
-    # 57) MessageType/MessageID values outside the gate's 5/4-value sets -- also falls through to
+    # 61) MessageType/MessageID values outside the gate's 5/4-value sets -- also falls through to
     #     a generic "udp" report.
     add(hartip_message(99, 0, b"", txn=52))
 
@@ -5816,7 +5855,7 @@ def build_hartip_sample():
         ip = ipv4_header(src_ip, dst_ip, 6, len(tcp), 0x7200 + len(packets)) + tcp
         packets.append(eth_header(dst_mac, src_mac, 0x0800) + ip)
 
-    # 58), 59) & 60) KNOWN, ACCEPTED, DOCUMENTED COLLISION -- see the dispatch-order comment on
+    # 62), 63) & 64) KNOWN, ACCEPTED, DOCUMENTED COLLISION -- see the dispatch-order comment on
     #     HART-IP's own TCP declared-length check in decoder.cpp's reassemble_tcp_payload, and
     #     hartip.hpp's LIMITATIONS-relevant note. A HART-IP Session Initiate message's own header
     #     (MessageID 0, Status 0 -- the only value ever observed in this decoder's own research)
@@ -5833,13 +5872,13 @@ def build_hartip_sample():
     #     that follow just add more buffered bytes to the same phantom wait, never resolving it) --
     #     this flow uses its own dedicated TCP ports specifically so this documented, permanent
     #     misclassification doesn't contaminate the genuinely-working TCP Pass-Through round trip
-    #     in #61/#62 below (a different flow, unaffected -- Pass-Through's own MessageID 3 does not
+    #     in #65/#66 below (a different flow, unaffected -- Pass-Through's own MessageID 3 does not
     #     produce a protocol-id==0 collision).
     add_tcp(True, hartip_message(0, 0, struct.pack("!BI", 1, 60), txn=100))
     add_tcp(False, hartip_message(1, 0, struct.pack("!BI", 0, 60), txn=100))
     add_tcp(True, hartip_message(0, 2, b"", txn=101) + hartip_message(0, 2, b"", txn=102))
 
-    # 61) & 62) A Pass-Through command 1 request/response pair over TCP, on a DIFFERENT flow using
+    # 65) & 66) A Pass-Through command 1 request/response pair over TCP, on a DIFFERENT flow using
     #     a non-standard TCP port (to also exercise the "not a configured/standard HART-IP port"
     #     note on the TCP path) -- demonstrates genuine, working HART-IP-over-TCP decoding.
     #     Pass-Through's own MessageID (3) never produces the protocol-id==0 collision above, so
@@ -5848,7 +5887,7 @@ def build_hartip_sample():
     add_tcp(False, hartip_message(1, 3, pass_through_body(6, 1, cmd1_data, response_code=0), txn=103),
             sport=52099, dport=15094)
 
-    # 63) Two Keep Alive messages coalesced into ONE TCP segment (sender/OS coalescing), on YET
+    # 67) Two Keep Alive messages coalesced into ONE TCP segment (sender/OS coalescing), on YET
     #     ANOTHER fresh flow (Keep Alive's own MessageID, 2, does not collide with Modbus's
     #     protocol-id==0 check the way Session Initiate's MessageID 0 does -- see #58-60 above) --
     #     exercises the wire_length-driven "additional HART-IP message" loop in decoder.cpp with a

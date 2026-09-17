@@ -536,9 +536,288 @@ bool decode_cmd_31(ByteSpan data, HartIpPassThrough& pt, std::vector<std::string
     return true;
 }
 
+// Forward declaration -- commands 77 and 178 (below) both recursively re-dispatch an embedded/
+// aggregated command's own data through this same function (via decode_nested_command), the same
+// recursive-reuse pattern enip.cpp's own Multiple_Service_Packet/Unconnected_Send decoding uses
+// for CIP's structurally similar "one message wraps another message" shapes.
+void decode_command_data(HartIpPassThrough& pt, ByteSpan data, std::vector<std::string>& notes);
+
+// Decodes one embedded/aggregated HART command's own request or response data (used by both
+// command 77's single embedded command and command 178's list of aggregated commands) by
+// re-running it through this file's own top-level command dispatch, rather than duplicating any
+// per-command byte layout a second time. `is_response` must be propagated from the caller's own
+// outer-frame direction (this decoder has no other way to know it once inside a nested command's
+// own Data). Returns the nested HartIpPassThrough so the caller can fold command_recognized/
+// command_name/values into its OWN values under whatever prefix it chooses -- this function itself
+// does not touch `pt`, only `parent_notes` (so a truncation inside the nested command is reported
+// in context rather than silently swallowed).
+HartIpPassThrough decode_nested_command(uint8_t command, ByteSpan data, bool is_response,
+                                         std::vector<std::string>& parent_notes, const std::string& note_prefix) {
+    HartIpPassThrough nested;
+    nested.command = command;
+    nested.is_response = is_response;
+    std::vector<std::string> nested_notes;
+    decode_command_data(nested, data, nested_notes);
+    for (const auto& n : nested_notes) parent_notes.push_back(note_prefix + n);
+    return nested;
+}
+
+// Command 77 -- "Send Command to Sub-Device" (name per FieldComm Group's own "HART-IP
+// Application, Communication, and Control Analysis" document, section 2.2.2, which names this
+// command explicitly as one of the I/O System Commands a HART-IP gateway/Remote I/O supports; the
+// byte layout below is cross-checked against Wireshark's own dissect_cmd77). An I/O-card/channel-
+// addressed RELAY that wraps another, arbitrary HART command's own request or response to a
+// sub-device reachable through a multiplexer's I/O Card/Channel (used when a single HART-IP
+// gateway multiplexes several classic wired-HART multidrop segments).
+//
+// Request shape:  IO Card(1) + Channel(1) + TX Preamble Count(1, request-only) + Embedded Command
+//                  Delimiter(1) + Address(1 or 5, by the Embedded Command Delimiter's own bit 7 --
+//                  the SAME Address-Type convention as the outer Pass-Through Delimiter, directly
+//                  confirmed from Wireshark's own source for this embedded field too) + Embedded
+//                  Command Number(1) + Embedded Command Byte Count(1) + embedded request Data
+//                  (variable, per the Embedded Command Byte Count).
+// Response shape: IO Card(1) + Channel(1) + Embedded Command Delimiter(1) + Address(1 or 5) +
+//                  Embedded Command Number(1) + Embedded Command Byte Count(1) + Response Code(1)
+//                  + Device Status(1) + embedded response Data(Embedded Command Byte Count - 2 --
+//                  the same "Byte Count includes Response Code + Device Status" convention this
+//                  file's own outer Pass-Through Byte Count field already uses, confirmed the same
+//                  way for this embedded field in Wireshark's own source).
+// Wireshark's own dissector does NOT decompose the Embedded Command Delimiter's other bits (frame
+// type, physical layer, expansion byte count) for this nested field the way it does for the outer
+// Pass-Through Delimiter, so this decoder doesn't assert those sub-fields here either -- only the
+// sourced bit 7 (Address Type); the raw delimiter byte is still shown in full.
+//
+// The embedded command itself is then decoded recursively through this file's own top-level
+// command dispatch (decode_nested_command) -- e.g. an embedded command 1 (Read Primary Variable)
+// response shows its own decoded PV value under "embedded-pv=...", not just raw bytes.
+// A truncation partway through this command's own sequential field layout (after IO Card/Channel
+// have already been read) is reported via `notes` and STOPS parsing right there, returning true --
+// the same "partial fill, note where it stopped, still recognized" posture decode_pass_through
+// itself already takes for the outer frame, and deliberately NOT the "return false, discard
+// everything already understood" posture this file's simple fixed-length commands use, since
+// falling through to decode_command_data's own generic fallback here would additionally dump the
+// ENTIRE original data as raw hex right alongside the fields already decoded above it -- redundant
+// and confusing rather than informative.
+bool decode_cmd_77(ByteSpan data, HartIpPassThrough& pt, std::vector<std::string>& notes) {
+    size_t offset = 0;
+    if (offset + 2 > data.size()) return false;
+    uint8_t io_card = data.at(offset++);
+    uint8_t channel = data.at(offset++);
+    pt.values.push_back("io-card=" + std::to_string(io_card));
+    pt.values.push_back("channel=" + std::to_string(channel));
+
+    if (!pt.is_response) {
+        if (offset >= data.size()) {
+            notes.push_back("command 77 is truncated before its TX Preamble Count byte");
+            return true;
+        }
+        uint8_t tx_preambles = data.at(offset++);
+        pt.values.push_back("tx-preamble-count=" + std::to_string(tx_preambles));
+    }
+
+    if (offset >= data.size()) {
+        notes.push_back("command 77 is truncated before its Embedded Command Delimiter byte");
+        return true;
+    }
+    uint8_t emb_delim = data.at(offset++);
+    bool emb_long_addr = (emb_delim & 0x80) != 0;
+    pt.values.push_back("embedded-command-delimiter=" + hex_byte(emb_delim));
+
+    if (emb_long_addr) {
+        if (offset + 5 > data.size()) {
+            notes.push_back("command 77 is truncated before its 5-byte long embedded Address");
+            return true;
+        }
+        pt.values.push_back("embedded-address=" + to_hex(data.subspan(offset, 5), ""));
+        offset += 5;
+    } else {
+        if (offset >= data.size()) {
+            notes.push_back("command 77 is truncated before its embedded Address byte");
+            return true;
+        }
+        uint8_t short_addr = static_cast<uint8_t>(data.at(offset++) & 0x3F);
+        pt.values.push_back("embedded-address=" + std::to_string(short_addr));
+    }
+
+    if (offset >= data.size()) {
+        notes.push_back("command 77 is truncated before its Embedded Command Number byte");
+        return true;
+    }
+    uint8_t emb_cmd = data.at(offset++);
+    pt.values.push_back("embedded-command=" + std::to_string(emb_cmd));
+
+    if (offset >= data.size()) {
+        notes.push_back("command 77 is truncated before its Embedded Command Byte Count byte");
+        return true;
+    }
+    uint8_t emb_byte_count = data.at(offset++);
+
+    size_t header_bytes = pt.is_response ? 2 : 0;
+    if (pt.is_response) {
+        if (offset + 2 > data.size()) {
+            notes.push_back(
+                "command 77 is truncated before its embedded Response Code/Device Status bytes");
+            return true;
+        }
+        uint8_t emb_response_code = data.at(offset++);
+        uint8_t emb_device_status = data.at(offset++);
+        if (emb_response_code & 0x80) {
+            for (const auto& f : decode_comm_error_flags(emb_response_code)) {
+                pt.values.push_back("embedded-response-comm-error-flag=" + f);
+            }
+            pt.values.push_back("embedded-response-code=" + hex_byte(emb_response_code) + " (communication error)");
+        } else {
+            pt.values.push_back("embedded-response-code=" + std::to_string(emb_response_code) + " (" +
+                                 response_code_name(emb_response_code) + ")");
+        }
+        for (const auto& f : decode_device_status_flags(emb_device_status)) {
+            pt.values.push_back("embedded-device-status-flag=" + f);
+        }
+        pt.values.push_back("embedded-device-status=" + hex_byte(emb_device_status));
+    }
+
+    size_t emb_data_len;
+    if (emb_byte_count >= header_bytes) {
+        emb_data_len = static_cast<size_t>(emb_byte_count) - header_bytes;
+    } else {
+        notes.push_back("command 77's Embedded Command Byte Count (" + std::to_string(emb_byte_count) +
+                         ") is smaller than the " + std::to_string(header_bytes) +
+                         " Response Code/Device Status byte(s) it must include -- embedded Data length "
+                         "treated as 0");
+        emb_data_len = 0;
+    }
+    if (offset + emb_data_len > data.size()) {
+        notes.push_back("command 77 declares " + std::to_string(emb_data_len) +
+                         " embedded Data byte(s) (from its Embedded Command Byte Count) but only " +
+                         std::to_string(data.size() - offset) + " are available -- truncated");
+        emb_data_len = data.size() - offset;
+    }
+    ByteSpan emb_data = data.subspan(offset, emb_data_len);
+    offset += emb_data_len;
+
+    HartIpPassThrough nested = decode_nested_command(emb_cmd, emb_data, pt.is_response, notes,
+                                                       "command 77's embedded command " +
+                                                           std::to_string(emb_cmd) + ": ");
+    if (nested.command_recognized) {
+        if (!nested.command_name.empty()) pt.values.push_back("embedded-command-name=" + nested.command_name);
+        for (const auto& v : nested.values) pt.values.push_back("embedded-" + v);
+    } else if (!emb_data.empty()) {
+        pt.values.push_back("embedded-data=" + to_hex(emb_data, ""));
+    }
+
+    if (offset < data.size()) {
+        notes.push_back("command 77 has " + std::to_string(data.size() - offset) +
+                         " trailing byte(s) after its embedded command's own data -- not decoded");
+    }
+    return true;
+}
+
+// Command 178 -- a BATCH/aggregate wrapper that bundles up to several other commands' own data in
+// one message; cross-checked against Wireshark's own dissect_cmd178, which parses this exact shape
+// for BOTH directions alike (no request/response branch in its own source, unlike command 77
+// above) -- this decoder does the same, regardless of the outer Pass-Through frame's own
+// is_response. FieldComm Group's own "HART-IP Application, Communication, and Control Analysis"
+// document (Table 5) independently corroborates the per-entry Command Number/Byte Count/Response
+// Code/Data shape while framing command 178 as the vehicle for that document's own "Publish"/
+// burst-mode feature (bundling commands like 9 and 48 together into one unsolicited message) --
+// but it does not give command 178 a name distinct from that use case, and no other source
+// consulted gives one either, so, like commands 31 and 203, no top-level NAME is asserted for
+// command 178 itself.
+//
+// Shape: Number of Commands(1), then that many entries of [Command Number(2, big-endian) +
+// Command Byte Count(1) + Response Code(1) + Data(Command Byte Count - 1 -- the count includes the
+// Response Code byte itself, confirmed directly from Wireshark's own source)]. Unlike command 77,
+// there is no separate Device Status field per entry (or at all) in this wrapper -- Wireshark's own
+// source has no such field here; a nested command's OWN per-item status bytes (e.g. command 9's
+// per-Device-Variable Status byte) are unaffected, since those belong to that command's own
+// already-decoded shape. Each entry's Command Number/Data is then decoded recursively through this
+// file's own top-level command dispatch (decode_nested_command), the same reuse command 77 above
+// uses -- e.g. an aggregated command 9 entry shows its own decoded Device Variables, not just raw
+// bytes. A Command Number above 255 cannot match any entry in this file's (1-byte) command dispatch
+// table, so it is always left unrecognized/shown as raw hex rather than truncated into a byte.
+// The same "partial fill, note where it stopped, still recognized" posture decode_cmd_77 above
+// documents applies here too, once Number of Commands (and any earlier entries) have already been
+// decoded into pt.values.
+bool decode_cmd_178(ByteSpan data, HartIpPassThrough& pt, std::vector<std::string>& notes) {
+    size_t offset = 0;
+    if (offset >= data.size()) return false;
+    uint8_t num_commands = data.at(offset++);
+    pt.values.push_back("number-of-commands=" + std::to_string(num_commands));
+
+    for (size_t i = 0; i < num_commands; ++i) {
+        std::string prefix = "aggregate[" + std::to_string(i) + "]-";
+        if (offset + 2 > data.size()) {
+            notes.push_back("command 178 is truncated before entry " + std::to_string(i) +
+                             "'s Command Number");
+            return true;
+        }
+        uint16_t cmd_num = static_cast<uint16_t>((data.at(offset) << 8) | data.at(offset + 1));
+        offset += 2;
+        if (offset >= data.size()) {
+            notes.push_back("command 178 is truncated before entry " + std::to_string(i) +
+                             "'s Command Byte Count");
+            return true;
+        }
+        uint8_t cmd_byte_count = data.at(offset++);
+        pt.values.push_back(prefix + "command=" + std::to_string(cmd_num));
+
+        if (cmd_byte_count < 1) {
+            notes.push_back("command 178 entry " + std::to_string(i) + "'s Command Byte Count (" +
+                             std::to_string(cmd_byte_count) +
+                             ") is smaller than the 1 Response Code byte it must include -- entry's "
+                             "Response Code/Data not decoded, remaining entries (if any) skipped");
+            return true;
+        }
+        if (offset >= data.size()) {
+            notes.push_back("command 178 is truncated before entry " + std::to_string(i) +
+                             "'s Response Code");
+            return true;
+        }
+        uint8_t response_code = data.at(offset++);
+        if (response_code & 0x80) {
+            for (const auto& f : decode_comm_error_flags(response_code)) {
+                pt.values.push_back(prefix + "response-comm-error-flag=" + f);
+            }
+            pt.values.push_back(prefix + "response-code=" + hex_byte(response_code) + " (communication error)");
+        } else {
+            pt.values.push_back(prefix + "response-code=" + std::to_string(response_code) + " (" +
+                                 response_code_name(response_code) + ")");
+        }
+
+        size_t entry_data_len = static_cast<size_t>(cmd_byte_count) - 1;
+        if (offset + entry_data_len > data.size()) {
+            notes.push_back("command 178 entry " + std::to_string(i) + " declares " +
+                             std::to_string(entry_data_len) + " Data byte(s) (from its Command Byte Count) "
+                             "but only " + std::to_string(data.size() - offset) + " are available -- truncated");
+            entry_data_len = data.size() - offset;
+        }
+        ByteSpan entry_data = data.subspan(offset, entry_data_len);
+        offset += entry_data_len;
+
+        if (cmd_num <= 0xFF) {
+            HartIpPassThrough nested = decode_nested_command(static_cast<uint8_t>(cmd_num), entry_data,
+                                                               pt.is_response, notes,
+                                                               "command 178 entry " + std::to_string(i) + ": ");
+            if (nested.command_recognized) {
+                if (!nested.command_name.empty()) pt.values.push_back(prefix + "command-name=" + nested.command_name);
+                for (const auto& v : nested.values) pt.values.push_back(prefix + v);
+                continue;
+            }
+        }
+        if (!entry_data.empty()) pt.values.push_back(prefix + "data=" + to_hex(entry_data, ""));
+    }
+
+    if (offset < data.size()) {
+        notes.push_back("command 178 has " + std::to_string(data.size() - offset) +
+                         " trailing byte(s) after its declared entries -- not decoded");
+    }
+    return true;
+}
+
 // Dispatches a Pass-Through message's command-specific Data to the "first pass" decoders above --
 // see hartip.hpp's file header comment's "Command dispatch" section for exactly which command
-// numbers this decoder value-decodes and which (77, 178, and anything not listed at all) are left
+// numbers this decoder value-decodes (including, now, 77 and 178's own recursive relay/aggregate
+// decoding) and which (any command number outside this dispatch table entirely) are left
 // named-only/raw-hex.
 void decode_command_data(HartIpPassThrough& pt, ByteSpan data, std::vector<std::string>& notes) {
     uint8_t cmd = pt.command;
@@ -637,10 +916,11 @@ void decode_command_data(HartIpPassThrough& pt, ByteSpan data, std::vector<std::
             ok = decode_cmd_203(data, pt);
             break;
         case 77:
-            pt.command_name = "I/O Card/Channel embedded-command relay";
+            pt.command_name = "Send Command to Sub-Device";
+            ok = decode_cmd_77(data, pt, notes);
             break;
         case 178:
-            pt.command_name = "Batch/aggregate command";
+            ok = decode_cmd_178(data, pt, notes);
             break;
         default:
             break;

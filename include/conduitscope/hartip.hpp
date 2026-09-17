@@ -25,7 +25,7 @@
 // that level of confidence. HART command NAMES (as opposed to their byte layout) are likewise not
 // present in Wireshark's source at all (it identifies commands only by number) -- this file's
 // command-name table is cross-corroborated across FieldComm Group's own published material and
-// multiple independent vendor HART command references; two commands (31 and 203) are
+// multiple independent vendor HART command references; three commands (31, 178, and 203) are
 // deliberately left unnamed rather than guessed at -- see "Command dispatch" below.
 //
 // ---------------------------------------------------------------------------------------------
@@ -217,13 +217,16 @@
 // ---------------------------------------------------------------------------------------------
 // Command dispatch: HART command NAMES below are cross-corroborated across FieldComm Group's own
 // published material and multiple independent HART device vendors' own command references (high
-// confidence for every numbered command except 31 and 203 -- see those two entries). Byte layouts
-// are cross-checked against packet-hartip.c's own per-command dissection functions
-// (dissect_cmd0/1/2/.../203). Wireshark's own per-command functions are command-keyed, not
-// direction-keyed -- the SAME byte-offset table is used to decode a write command's REQUEST data
-// (the value being written) as decodes the matching read command's RESPONSE data (the value being
-// read back), since in practice they carry the identical field shape; this decoder does the same
-// rather than maintaining separate request/response tables per command.
+// confidence for every numbered command except 31, 178, and 203 -- see those entries). Byte
+// layouts are cross-checked against packet-hartip.c's own per-command dissection functions
+// (dissect_cmd0/1/2/.../203, plus dissect_cmd77/dissect_cmd178). Wireshark's own per-command
+// functions are command-keyed, not direction-keyed -- the SAME byte-offset table is used to
+// decode a write command's REQUEST data (the value being written) as decodes the matching read
+// command's RESPONSE data (the value being read back), since in practice they carry the identical
+// field shape; this decoder does the same rather than maintaining separate request/response
+// tables per command (command 77 is the one exception -- its request and response shapes
+// genuinely differ, like command 38's own already-documented exception -- see its own entry
+// below).
 //   0, 11, 21  Read Unique Identifier [Associated with Tag (11) / Long Tag (21)] -- device
 //              identification: Expansion Code, Expanded Device Type, Min. Request Preambles,
 //              Universal/Device/Software revisions, packed Hardware-Rev+Signaling byte, Flags,
@@ -286,15 +289,32 @@
 //              while being honest that "203" itself is not a name this decoder can vouch for
 //              across every device that might emit it.
 //
-// Explicitly out of scope (deliberately not value-decoded, named only, raw hex shown): commands
-// 77 (an I/O-card/channel embedded-command RELAY used by HART multiplexers -- recursively wraps
-// another, arbitrary command's own request/response) and 178 (a BATCH/aggregate command that
-// recursively wraps up to several other commands' results in one message) -- both are the same
-// "nested/nested-command" complexity this codebase already declines elsewhere (BACnet's
-// ReadPropertyMultiple/WritePropertyMultiple, EtherNet/IP's structured/UDT CIP types), named via
-// the command-number-is-known label but shown only as raw hex. Every command number outside this
-// file's dispatch table entirely is likewise named as "command N" (no further name asserted) and
-// shown as raw hex.
+//   77         Send Command to Sub-Device (name per FieldComm Group's own "HART-IP Application,
+//              Communication, and Control Analysis" document, section 2.2.2, one of the I/O
+//              System Commands a HART-IP gateway/Remote I/O supports) -- an I/O-card/channel-
+//              addressed RELAY that wraps another, arbitrary HART command's own request or
+//              response to a sub-device reachable through a multiplexer's I/O Card/Channel: IO
+//              Card(1) + Channel(1) + [TX Preamble Count(1), request-only] + Embedded Command
+//              Delimiter(1, only its bit 7 Address-Type is decoded -- see hartip.cpp) +
+//              Address(1 or 5) + Embedded Command Number(1) + Embedded Command Byte Count(1) +
+//              [Response Code(1) + Device Status(1), response-only] + embedded Data. The embedded
+//              command is decoded RECURSIVELY through this same dispatch table (see
+//              decode_nested_command in hartip.cpp) and its fields surfaced under an
+//              "embedded-" prefix, e.g. an embedded command 1 shows "embedded-pv=...".
+//   178        A BATCH/aggregate wrapper -- structurally decoded (Number of Commands(1), then that
+//              many entries of [Command Number(2) + Command Byte Count(1) + Response Code(1) +
+//              Data(Command Byte Count - 1)], parsed the same way regardless of request/response
+//              direction, cross-checked against Wireshark's own dissect_cmd178) but, like 31 and
+//              203, this decoder deliberately does NOT assert an authoritative top-level NAME for
+//              command 178 itself -- FieldComm Group's own document frames it as the vehicle for a
+//              "Publish"/burst-mode feature (bundling e.g. commands 9 and 48) rather than giving it
+//              a standalone name, and no other source consulted gives one either. Each entry's
+//              Command Number/Data is likewise decoded recursively through this same dispatch
+//              table and surfaced under an "aggregate[i]-" prefix.
+//
+// Every command number outside this file's dispatch table entirely (including commands 77/178
+// recurse into, if THEY turn out to be unrecognized) is named as "command N" (no further name
+// asserted) and shown as raw hex.
 //
 // Validation: see this file's own real-capture search record in tests/real_captures/hartip/
 // ATTRIBUTION.md (if present) or this decoder's own Validation paragraph in hartip.cpp for the
