@@ -338,6 +338,10 @@ Print an aggregate summary instead of one line per packet. Ignores
 .B \-\-strict
 Abort on the first malformed packet instead of warning and continuing.
 .TP
+.B \-\-no\-vlan
+Disable display of the 802.1Q VLAN ID for a VLAN-tagged packet. On by
+default. See \fBdocs/MANUAL.md\fR's OUTPUT FORMATS section.
+.TP
 .B \-\-no\-oui
 Disable OUI (MAC vendor) resolution against the built-in table (IEEE MA-L/
 MA-M/MA-S registry data via nmap's nmap-mac-prefixes redistribution, see

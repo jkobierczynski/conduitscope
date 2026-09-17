@@ -5177,6 +5177,69 @@ set_tests_properties(resolver_mac_shown_for_plain_ip_protocol_not_just_raw_ether
   PASS_REGULAR_EXPRESSION "\\[enip\\].*\n *eth 00:0c:29:11:22:33 \\(VMware\\) -> 00:0c:29:aa:bb:cc \\(VMware\\)")
 
 # ---------------------------------------------------------------------------------------------
+# VLAN ID display (output.cpp's TextWriter/JsonWriter/CsvWriter show_vlan_; --no-vlan in
+# cli_main.cpp). DecodedPacket::has_vlan_tag/vlan_id are already unconditionally populated by the
+# decoding layer for every Ethernet-linktype packet (link_layer.cpp's parse_ethernet unwraps a
+# single 802.1Q tag) -- this is purely a display toggle, shown by default. tests/sample_vlan_zones.pcap
+# (see build_vlan_zones_sample in tools/make_sample_pcap.py) carries VLAN 100, VLAN 200, and one
+# untagged flow, so it exercises both "tagged" and "untagged" in the same capture.
+# ---------------------------------------------------------------------------------------------
+
+add_test(NAME vlan_id_shown_by_default_text
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_vlan_zones.pcap" --format text)
+set_tests_properties(vlan_id_shown_by_default_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "eth 00:0c:29:11:22:33 \\(VMware\\) -> 00:0c:29:aa:bb:cc \\(VMware\\)  vlan 100")
+
+# The untagged flow (mac pair 00:0c:29:cc:55:66 -> 00:0c:29:dd:77:88) must never get a "vlan ..."
+# suffix at all -- has_vlan_tag is false, not vlan_id == 0.
+add_test(NAME vlan_id_omitted_for_untagged_packet_text
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_vlan_zones.pcap" --format text)
+set_tests_properties(vlan_id_omitted_for_untagged_packet_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "eth 00:0c:29:cc:55:66 \\(VMware\\) -> 00:0c:29:dd:77:88 \\(VMware\\)\n")
+
+add_test(NAME vlan_id_shown_by_default_json
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_vlan_zones.pcap" --format json)
+set_tests_properties(vlan_id_shown_by_default_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"dst_mac_vendor\": \"VMware\",\n *\"has_vlan_tag\": true,\n *\"vlan_id\": 100,")
+
+# The untagged flow gets has_vlan_tag: false / vlan_id: null, never omitted entirely -- unlike an
+# annotation, has_vlan_tag/vlan_id are always both present together when the flag is on, regardless
+# of whether this particular packet actually carries a tag (mirrors policy_engine.cpp's own
+# EthernetFlowReport JSON convention).
+add_test(NAME vlan_id_null_for_untagged_packet_json
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_vlan_zones.pcap" --format json)
+set_tests_properties(vlan_id_null_for_untagged_packet_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"has_vlan_tag\": false,\n *\"vlan_id\": null,")
+
+add_test(NAME vlan_id_shown_by_default_csv
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_vlan_zones.pcap" --format csv)
+set_tests_properties(vlan_id_shown_by_default_csv PROPERTIES
+  PASS_REGULAR_EXPRESSION "profinet,\"Cyclic RT IO data \\(RT_CLASS_1, unicast\\): 8 byte\\(s\\) IO data, cycle_counter=4660 data_status=\\[Primary,Valid,Run,Ok\\] transfer_status=OK\",,100")
+
+add_test(NAME no_vlan_suppresses_display_text
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_vlan_zones.pcap" --format text --no-vlan)
+set_tests_properties(no_vlan_suppresses_display_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "eth 00:0c:29:11:22:33 \\(VMware\\) -> 00:0c:29:aa:bb:cc \\(VMware\\)\n"
+  FAIL_REGULAR_EXPRESSION "vlan 100")
+
+add_test(NAME no_vlan_suppresses_display_json
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_vlan_zones.pcap" --format json --no-vlan)
+set_tests_properties(no_vlan_suppresses_display_json PROPERTIES
+  FAIL_REGULAR_EXPRESSION "has_vlan_tag|vlan_id")
+
+add_test(NAME no_vlan_suppresses_display_csv
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_vlan_zones.pcap" --format csv --no-vlan)
+set_tests_properties(no_vlan_suppresses_display_csv PROPERTIES
+  PASS_REGULAR_EXPRESSION "profinet,\"Cyclic RT IO data \\(RT_CLASS_1, unicast\\): 8 byte\\(s\\) IO data, cycle_counter=4660 data_status=\\[Primary,Valid,Run,Ok\\] transfer_status=OK\",,\n"
+  FAIL_REGULAR_EXPRESSION "transfer_status=OK\",,100")
+
+# --no-oui and --no-vlan are independent toggles -- suppressing one must not affect the other.
+add_test(NAME no_vlan_does_not_affect_oui
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_vlan_zones.pcap" --format text --no-vlan)
+set_tests_properties(no_vlan_does_not_affect_oui PROPERTIES
+  PASS_REGULAR_EXPRESSION "eth 00:0c:29:11:22:33 \\(VMware\\) -> 00:0c:29:aa:bb:cc \\(VMware\\)")
+
+# ---------------------------------------------------------------------------------------------
 # Colorized text output (output.cpp's TextWriter color_ path; --color/--no-color in cli_main.cpp).
 # CTest's COMMAND always runs with stdout piped (never a real terminal), so the "auto" default
 # (absent both flags) is exercised here as "no color, same as always being piped/redirected" --

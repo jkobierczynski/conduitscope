@@ -234,6 +234,12 @@ void TextWriter::write_packet(const DecodedPacket& p) {
         if (auto v = resolver_.oui_vendor(p.src_mac)) out_ << " (" << *v << ")";
         out_ << " -> " << p.dst_mac;
         if (auto v = resolver_.oui_vendor(p.dst_mac)) out_ << " (" << *v << ")";
+        // VLAN ID, shown by default (--no-vlan suppresses it) -- appended to the same eth line
+        // rather than its own, since it's a property of this one Ethernet frame just like the MAC
+        // pair right before it. has_vlan_tag is only ever true when has_ethernet is also true (a
+        // VLAN tag is unwrapped from the Ethernet header itself -- see link_layer.cpp), so nesting
+        // this inside the existing p.has_ethernet block is always safe.
+        if (show_vlan_ && p.has_vlan_tag) out_ << "  vlan " << p.vlan_id;
         if (color_) out_ << kReset;
         out_ << "\n";
     }
@@ -270,6 +276,15 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
         }
         if (auto v = resolver_.oui_vendor(p.dst_mac)) {
             out_ << "    \"dst_mac_vendor\": \"" << json_escape(*v) << "\",\n";
+        }
+        // VLAN ID, shown by default (--no-vlan omits both fields entirely, not just a value --
+        // this isn't a resolver annotation with its own "omit on a miss" convention, it's a base
+        // decoded fact the flag is meant to suppress outright). Mirrors policy_engine.cpp's own
+        // write_policy_report_json convention for EthernetFlowReport: has_vlan_tag always present
+        // alongside vlan_id, vlan_id null when untagged.
+        if (show_vlan_) {
+            out_ << "    \"has_vlan_tag\": " << (p.has_vlan_tag ? "true" : "false") << ",\n";
+            out_ << "    \"vlan_id\": " << (p.has_vlan_tag ? std::to_string(p.vlan_id) : "null") << ",\n";
         }
     }
     if (p.has_ip) {
@@ -1302,9 +1317,17 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
 void JsonWriter::end() { out_ << (wrote_any_ ? "\n]\n" : "]\n"); }
 
 void CsvWriter::begin() {
+    // vlan_id is a trailing column (rather than inserted next to src_mac/dst_mac, where it's
+    // conceptually closest) specifically so it never shifts the position of any existing column --
+    // several tests match adjacent fields by exact position (e.g.
+    // resolver_base_src_dst_mac_always_present_regardless_of_no_oui's
+    // "00:0c:29:11:22:33,00:0c:29:aa:bb:cc,,," expecting src_mac_vendor/dst_mac_vendor to
+    // immediately follow dst_mac). Empty both when the packet carries no VLAN tag and when
+    // --no-vlan suppresses display -- CSV has no null, and this column's header always exists
+    // regardless of the flag, so the row shape never changes based on it.
     out_ << "index,timestamp,src_mac,dst_mac,src_mac_vendor,dst_mac_vendor,src_ip,src_hostname,"
             "src_port,src_port_service,dst_ip,dst_hostname,dst_port,dst_port_service,protocol,"
-            "summary,notes\n";
+            "summary,notes,vlan_id\n";
 }
 
 void CsvWriter::write_packet(const DecodedPacket& p) {
@@ -1343,7 +1366,8 @@ void CsvWriter::write_packet(const DecodedPacket& p) {
          << csv_escape(src_port_service) << ',' << (p.has_ip ? csv_escape(p.dst_ip) : "") << ','
          << csv_escape(dst_hostname) << ',' << (has_port ? std::to_string(p.dst_port) : "") << ','
          << csv_escape(dst_port_service) << ',' << csv_escape(p.protocol) << ','
-         << csv_escape(p.summary) << ',' << csv_escape(notes.str()) << "\n";
+         << csv_escape(p.summary) << ',' << csv_escape(notes.str()) << ','
+         << ((show_vlan_ && p.has_vlan_tag) ? std::to_string(p.vlan_id) : "") << "\n";
 }
 
 void StatsWriter::write_packet(const DecodedPacket& p) {

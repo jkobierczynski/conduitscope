@@ -829,6 +829,9 @@ Groundwork / v0.1.0. What works right now:
   quick file metadata. Text output is colorized (per-protocol tags, red for
   exceptions/parse-errors) when writing to an interactive terminal, or
   forced on/off with `--color`/`--no-color`
+- `decode` shows a VLAN-tagged packet's 802.1Q VLAN ID by default (`eth ...
+  vlan 100` in text, `has_vlan_tag`/`vlan_id` in JSON, a trailing `vlan_id`
+  column in CSV) -- `--no-vlan` suppresses it
 - Name resolution, shared by `decode` and `policy validate` alike: OUI/MAC-
   vendor lookup against a built-in IEEE-registry-derived table (on by
   default, `--no-oui` disables it), hostname resolution from an explicitly-

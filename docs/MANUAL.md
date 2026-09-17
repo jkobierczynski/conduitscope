@@ -182,6 +182,7 @@ conduitscope decode (-r FILE | -i INTERFACE) [options]
 | `--max-packets N` | `0` (unlimited) | Stop after decoding this many packets. With `-i`, this also bounds a live capture (in addition to `--duration` and Ctrl+C). |
 | `--stats` | off | Print an aggregate summary (protocol counts, Modbus function-code histogram, exception count, capture time span) instead of one line per packet. Ignores `--format`. |
 | `--strict` | off | Abort with a nonzero exit status on the first packet that fails to parse at the Ethernet/IPv4/TCP layer, instead of reporting a per-packet warning and continuing. Does not affect Modbus/DNP3-level ambiguity, which is always handled by heuristic + note rather than error. |
+| `--no-vlan` | off (i.e. VLAN ID display on by default) | Disable display of the 802.1Q VLAN ID for a VLAN-tagged packet. See OUTPUT FORMATS below. |
 | `--no-oui` | off (i.e. OUI/MAC-vendor resolution on by default) | Disable OUI (MAC vendor) resolution against the built-in table. See OUTPUT FORMATS' "Name resolution" subsection below. |
 | `--resolve` | off | Enable hostname resolution from an explicitly-supplied `--hosts` file. **Never performs live DNS, under any circumstance** -- file-only. See OUTPUT FORMATS' "Name resolution" subsection below. |
 | `--hosts FILE` | *(none)* | Unix `/etc/hosts`-style file to resolve IP addresses from, for `--resolve`. Must exist. |
@@ -1935,6 +1936,14 @@ line showing the raw source/destination MAC addresses.
         eth aa:bb:cc:11:22:33 -> aa:bb:cc:44:55:66
 ```
 
+When a packet is 802.1Q VLAN-encapsulated, its VLAN ID is appended to the
+`eth` line (`vlan <id>`), on by default -- `--no-vlan` suppresses it:
+
+```
+#1  1700000000.000000  - -> -  [goose]  GOOSE IED1/LLN0$GO$gcb01 stNum=1 sqNum=1 confRev=1
+        eth aa:bb:cc:11:22:33 -> aa:bb:cc:44:55:66  vlan 100
+```
+
 When name resolution is enabled (see "Name resolution" below), a hostname
 and/or a service name are appended in parentheses right after the raw IP or
 port they annotate, and a MAC vendor right after each `eth` line's address --
@@ -1984,6 +1993,13 @@ packets where they apply:
   `src_mac`/`dst_mac`, from the built-in OUI table (`--no-oui` disables this
   lookup). Present only when `has_ethernet` and the lookup found a match --
   see OUTPUT FORMATS' "Name resolution" subsection below.
+- `has_vlan_tag` / `vlan_id`: whether this packet is 802.1Q VLAN-encapsulated
+  and, if so, its VLAN ID. Unlike the resolver annotations below, these two
+  fields aren't omitted individually on a "miss" -- they're present as a pair
+  whenever `has_ethernet` is true (`has_vlan_tag: false, vlan_id: null` for
+  an untagged packet, `has_vlan_tag: true, vlan_id: <n>` for a tagged one) --
+  and omitted as a pair entirely, on every packet, only when `--no-vlan`
+  disables display outright.
 - `src_hostname` / `dst_hostname`: the hostname for `src_ip`/`dst_ip`, from
   an explicitly-supplied `--hosts` file (`--resolve` enables this lookup;
   never live DNS). Present only when the lookup is enabled, a `--hosts` file
@@ -3023,14 +3039,21 @@ The following fields appear only when `protocol` is `mms`:
 ### csv
 
 Header row followed by one row per packet:
-`index,timestamp,src_mac,dst_mac,src_mac_vendor,dst_mac_vendor,src_ip,src_hostname,src_port,src_port_service,dst_ip,dst_hostname,dst_port,dst_port_service,protocol,summary,notes`.
+`index,timestamp,src_mac,dst_mac,src_mac_vendor,dst_mac_vendor,src_ip,src_hostname,src_port,src_port_service,dst_ip,dst_hostname,dst_port,dst_port_service,protocol,summary,notes,vlan_id`.
 Fields are quoted per standard CSV rules when they contain a comma, quote, or
 newline; multiple notes are joined with ` | ` inside the single `notes` field.
 `src_mac`/`dst_mac` are empty for a non-Ethernet-linktype capture, exactly
 like `src_ip`/`dst_ip` are empty for a non-IP packet; every
 `*_vendor`/`*_hostname`/`*_service` annotation column is an empty field on a
 lookup miss or when that resolution is disabled (never a placeholder like
-`"unknown"`) -- see "Name resolution" below.
+`"unknown"`) -- see "Name resolution" below. `vlan_id` (deliberately the
+trailing column, not next to `src_mac`/`dst_mac` where it's conceptually
+closest, so it never shifts any other column's position) is likewise an
+empty field both for an untagged packet and, regardless of whether the
+packet is tagged, whenever `--no-vlan` disables display -- CSV has no way to
+distinguish "no VLAN tag" from "not shown" the way JSON's `has_vlan_tag`
+can, so the column's header always exists but its value is empty in both
+cases.
 
 ### Name resolution (OUI / hostname / service name)
 
@@ -9159,6 +9182,65 @@ conduitscope policy validate -r capture.pcap --policy ot_vlans.yaml -f json \
 
 Rough order, each building on the groundwork this release establishes:
 
+### Priority order
+
+The numbered list below is chronological, not priority-ordered -- each item
+was added as it was scoped against the version before it, not ranked
+against every other item. Grouped by actual impact instead, for anyone
+deciding what to tackle next:
+
+**Foundational validation, blocking confidence in everything else built on
+top of it.** Item 1 (real Windows/Npcap capture against a real
+OT/mirrored-switch-port network, not just Linux loopback and found
+captures) -- every other item's correctness claims currently rest on
+synthetic fixtures and a handful of found real captures, never a live
+production-like capture end to end. Alongside it: widening `policy
+validate` to evaluate UDP flows at all, the single most-repeated "still
+open" call-out in this document (items 9, 14, 15, and 17 each hit it from
+a different angle) -- it's the one gap blocking BACnet/IP, EtherNet/IP CIP
+I/O, HART-IP's UDP form, and FF-HSE's UDP form from ever actually being
+checked against a conduit, and blocking `inventory`'s own UDP-based
+inferred conduits from ever showing anything but "never exercised."
+
+**Item 18** (the "IT protocols an OT auditor flags" family, just added) is
+comparatively cheap to build and high-value to an auditor: tiers 1-4
+(RDP/VNC/TeamViewer; SMB/SSH/HTTP/SNMP/Telnet/FTP/TFTP; NTP/DHCP/LDAP/
+RADIUS/TACACS+/802.1X; CAPWAP/LWAPP/GTP-U/PPPoE) are all name-only
+recognition -- the same lightweight "recognized but not decoded" posture
+ARP/LLDP/ICMP already have, no new parsing infrastructure required. Tier 5
+(generic tunnel/VPN naming) is a natural, similarly-cheap follow-on;
+actual decapsulation is explicitly out of scope for this pass.
+
+**Real-capture validation debt**, mostly inherited from item 9: CIP I/O,
+PROFINET RT, GOOSE, and EtherCAT all shipped without a real capture
+exercising more than a fraction of their own decode paths, and Sampled
+Values has zero real-capture coverage at all. BACnet/IP, HART-IP
+(item 10), OPC UA (item 11), and MMS (item 12) are in the same position to
+varying degrees. None of this is a known decode bug, but it's the largest
+concentration of "confirmed against synthetic fixtures only" risk in the
+codebase, and worth closing before stacking more protocols on top of
+unvalidated ones.
+
+**Item 13's DNP3 link-address zone model** is worth pulling forward out of
+its chronological position: the item's own text already calls it "the
+single most consequential addressing gap in this codebase," since a
+serial-to-IP DNP3 gateway multiplexing several outstations behind one IP
+is a routine real-world topology this tool currently can't zone/
+conduit-model at all.
+
+**Everything else is protocol-specific deepening, lower urgency**: item
+2's `0xB2` symbolic-addressing confirmation (blocked on access to real
+PLC/TIA Portal authority, not on effort); item 3's S7comm-Plus Tier 2
+promotion; items 5 and 7's remaining DNP3/IEC 104 value-decode table
+gaps; item 8's CIP STRING2/STRINGN/STRINGI/EPATH/ENGUNIT-as-value and its
+symbolic-path-gating question; item 10's HART checksum/response-code
+work; item 11's OPC UA chunk reassembly and Browse/subscriptions/
+HistoryRead promotion; item 12's MMS `Address`/`TypeSpecification`
+decoding; item 14's per-protocol `functions` allow-lists; item 15's
+QinQ stacked-VLAN support; and item 17's protocol-grouped zones and
+LLM-assisted zone suggestions. All genuinely useful, none blocking
+anything else on this list.
+
 1. **Validate live capture against a real Windows/Npcap install and a real
    OT/mirrored-switch-port network**, not just Linux loopback -- see LIVE
    CAPTURE's "Windows / Npcap notes" and LIMITATIONS.
@@ -9535,6 +9617,142 @@ Rough order, each building on the groundwork this release establishes:
     see LIMITATIONS), so an inferred UDP conduit always shows up as
     "never exercised by this capture" no matter how much UDP traffic the
     capture actually has.
+18. **Recognize the "IT protocols an OT auditor flags" family, and let
+    `policy validate`/`inventory` call out their mere presence as its own
+    finding.** These give an attacker a session, not just a register write
+    -- categorically more dangerous than anything Modbus/DNP3/S7comm's own
+    read/write transactions can represent, since none of those model "an
+    interactive shell" at all. Four tiers, roughly by severity: (1)
+    interactive remote control of an HMI/engineering station -- RDP
+    (TCP 3389), VNC, TeamViewer/AnyDesk; (2) lateral-movement and
+    credential-harvesting protocols that should be absent from a production
+    OT segment entirely per most hardening guides (IEC 62443-3-3, NCSC,
+    NIST SP 800-82) -- SMB/NetBIOS (445/139, also wormable IT malware's
+    usual path), SSH (22, benign if key-only and jump-hosted, high-risk if
+    password auth reaches a PLC/HMI directly), HTTP/HTTPS and vendor web
+    UIs (e.g. Siemens WinCC -- default credentials and unpatched embedded
+    web servers are a routine finding), SNMPv1/v2c (161/162, a cleartext
+    community string sniffed once maps every SNMP-speaking device on the
+    segment), and Telnet/FTP/TFTP (all three move credentials, and often
+    firmware/config files, in cleartext); (3) protocols that are
+    individually unremarkable in limited form but worth an auditor's
+    attention for where they terminate and whether the OT side blindly
+    trusts enterprise IT for them -- NTP, DHCP, LDAP/Active Directory (DNS
+    itself is a partial exception: already decoded, see PROTOCOL COVERAGE's
+    DNS section, so this item is about correlating its *termination point*,
+    not new decode work), and the AAA/network-access-control protocols that
+    sit right next to LDAP/AD in the same "does OT trust enterprise
+    identity infrastructure" question -- RADIUS (UDP 1812/1813, legacy
+    1645/1646, cleartext-by-default attribute encoding for anything past
+    the shared secret), TACACS+ (TCP 49, used almost exclusively for
+    device-administration AAA -- its presence on an OT segment usually
+    means switches/routers there authenticate admin logins against an
+    enterprise TACACS+ server), and IEEE 802.1X/EAPOL (no IP port at all --
+    EtherType `0x888E`, port-based network access control at the switch
+    port itself, so seeing it on an OT access port is evidence a device had
+    to authenticate onto the network, which cuts the other way from most of
+    this item: its *absence* on an OT switch port is often the finding,
+    since it means anything can plug in and reach the segment
+    unauthenticated); (4) wireless access-point control/data planes and
+    cellular backhaul -- an AP or wireless LAN controller reachable from (or
+    inside) an OT zone is itself a finding, independent of whatever rides
+    inside its tunnel: CAPWAP control (UDP 5246, RFC 5415) and data
+    (UDP 5247, the actual bridged client frames tunneled to the
+    controller), the older, Cisco-proprietary CAPWAP predecessor LWAPP
+    (UDP 12222 control / 12223 data), and cellular-backhaul-specific
+    protocols like PPPoE and GTP-U (UDP 2152 -- a well-known way SCADA
+    traffic leaves a site entirely outside any on-prem firewall's view, the
+    usual signature of an RTU or 4G/5G router phoning out through a
+    vendor's "cloud gateway" SIM); and (5) generic tunnel/VPN encapsulation
+    -- the broader problem CAPWAP/GTP-U above are specific instances of: an
+    inner VLAN, Modbus session, or entire plant subnet is invisible to
+    every decoder and to `policy validate`'s own flow model alike until the
+    outer tunnel is stripped off, so merely naming the outer protocol is
+    already a finding worth surfacing. Roughly by how the tunnel actually
+    presents on the wire: GRE (IP protocol 47, RFC 2784, common for an
+    AP-to-controller or site-to-site path, unencrypted by default); IPsec
+    ESP/AH/IKEv2 (UDP 500/4500, IP protocols 50/51 -- expected for a
+    remote-site link, but worth checking whether its traffic selectors
+    dump a whole plant subnet into IT, and whether it's split- or
+    full-tunneled); L2TP/L2TPv3 (UDP 1701, L2TPv3 often paired with
+    IPsec -- stretches one L2 segment across a WAN, widening the blast
+    radius); VXLAN (UDP 4789) and Geneve (UDP 6081), the common
+    data-center/campus/cloud overlay fabrics an OT VM or a virtualized
+    historian can end up riding on top of an ordinary IT underlay; NVGRE/
+    STT (IP protocol 47 / TCP 7878), less common but the same "the inner
+    frame isn't what the firewall inspects" concern as VXLAN/Geneve; MPLS/
+    L2VPN/VPLS/pseudowire (label-switched, no port at all -- a utility WAN
+    link often carries SCADA over a pseudowire, worth confirming encryption
+    and who else shares the same VRF); WireGuard (UDP 51820), OpenVPN
+    (UDP/TCP 1194), and SSTP (TCP 443, indistinguishable from ordinary
+    HTTPS at a glance) -- the shadow-IT and vendor-remote-access case, any
+    of which can tunnel literally anything; generic DTLS/TLS tunnels (443
+    and odd UDP ports -- CAPWAP's own data plane, some vendor AP control
+    channels, and LTE "offload" clients can all ride one); EoIP/IP-in-IP/
+    6in4/4in6/DS-Lite/MAP-E (IP protocols 4/41/etc. -- rare inside a plant
+    itself, common on a cellular CPE router, bypassing perimeter inspection
+    the same way); and CAPWAP's own alternate data-plane path, where a
+    wireless LAN controller decapsulates over GRE/L2TP/IP-in-IP instead of
+    native CAPWAP -- meaning the real decap point isn't the controller at
+    all, and is worth inspecting directly rather than assumed. NCSC's own
+    framing is the rule of thumb this item is named for: industrial
+    protocols (Modbus, DNP3, S7comm, and the rest already in PROTOCOL
+    COVERAGE) should stay inside isolated OT segments; anything that
+    legitimately needs to cross toward IT should be brokered through an
+    encrypted, authenticated channel (OPC UA over TLS, MQTT over TLS,
+    HTTPS) rather than riding raw OT protocols -- or an interactive-access
+    or tunneling protocol -- straight across the boundary.
+
+    Scoped honestly, this is name-only recognition (port plus a minimal
+    structural signature), not full protocol decoding -- the same
+    "recognized but not decoded" posture ARP/LLDP/ICMP already have (see
+    PROTOCOL COVERAGE): there is no OT-security value in parsing RDP's own
+    bitmap updates or SMB's own file listings, and several of these (RDP
+    past its initial handshake, HTTPS, any VPN tunnel) are encrypted and
+    structurally opaque by design past their first few packets anyway. One
+    genuinely useful technical shortcut: RDP's own initial X.224 Connection
+    Request/Confirm rides the identical TPKT framing this codebase's COTP
+    parser (`cotp.hpp`, currently used for S7comm/MMS on TCP port 102)
+    already implements -- port 3389 rather than 102 likely disambiguates
+    the two without new framing code, though the X.224 payload itself would
+    still need its own small parser. SMB is a heavier lift structurally
+    (NetBIOS Session Service framing, then SMB1-vs-SMB2/3 dialect
+    negotiation) but still only needs enough of the header to name it "SMB,
+    dialect X," not to unpack a single request -- a conduit or asset
+    inventory that has zero tolerance for a protocol existing inside an OT
+    zone at all doesn't need to look inside it to register the finding.
+
+    This also names a real modeling gap in `policy validate`'s current
+    allow-list design worth calling out up front: today, any TCP flow this
+    decoder doesn't recognize the protocol of already falls into
+    "Unclassified" (see POLICY FILE FORMAT's "Validation errors" and
+    OUTPUT FORMATS), which is correct but generic -- it can't distinguish
+    "this is SSH, which per NCSC's rule of thumb should never be here" from
+    "this is some protocol conduitscope simply hasn't been taught yet."
+    Recognizing these protocols by name turns that generic bucket into a
+    specific, actionable one ("SSH traffic observed on the plant-floor
+    VLAN, no conduit permits it" reads very differently from "unclassified
+    traffic"), and would let a future `policy validate`/`inventory` flag
+    call these out as their own severity tier independent of whether a
+    conduit happens to (wrongly) permit them -- per the rule of thumb
+    above, an interactive-access protocol reaching an OT zone is itself
+    worth flagging even inside a technically "compliant" policy that
+    happened to allow it.
+
+    Tier 5 (tunnels) deliberately stops at naming the outer protocol, not
+    decapsulating it -- actually stripping a GRE/IPsec/VXLAN/L2TP header
+    and re-running this decoder's own Ethernet/IPv4/TCP/UDP pipeline
+    against whatever inner packet comes out is a substantially larger
+    undertaking (a recursive decode, not a one-shot flag) than tiers 1-4's
+    "recognize and name it," and is left as explicitly separate, later
+    work of its own if this item's naming-only pass proves useful enough to
+    build on. Named recognition alone is still real progress over today's
+    behavior, though: an OT protocol fully tunneled inside GRE/IPsec/VXLAN
+    is currently invisible to `policy validate` -- not flagged, not even
+    unclassified, simply never seen as anything but opaque UDP/GRE payload
+    -- so surfacing "GRE tunnel observed, decap and re-run to see what's
+    inside" as its own finding is a meaningful improvement on its own,
+    independent of whether decapsulation itself ever gets built.
 
 **pcapng support** is also now done: both classic pcap and pcapng are read
 transparently (auto-detected, no flag needed) -- see "pcap vs. pcapng"

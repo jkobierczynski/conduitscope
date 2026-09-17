@@ -184,7 +184,8 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
                 bool stats, bool strict, bool quiet,
                 bool no_color, bool force_color,
                 bool oui_enabled, bool resolve_hostnames, const std::string& hosts_path,
-                bool service_names_enabled, const std::string& services_path, std::ostream& diag) {
+                bool service_names_enabled, const std::string& services_path, bool show_vlan,
+                std::ostream& diag) {
     std::ofstream file_out;
     std::ostream* out = &std::cout;
     bool writing_to_stdout = output.empty();
@@ -280,9 +281,9 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
         std::unique_ptr<OutputWriter> writer;
         StatsWriter stats_writer;
         if (!stats) {
-            if (format == "json") writer = std::make_unique<JsonWriter>(*out, resolver);
-            else if (format == "csv") writer = std::make_unique<CsvWriter>(*out, resolver);
-            else writer = std::make_unique<TextWriter>(*out, color, resolver);
+            if (format == "json") writer = std::make_unique<JsonWriter>(*out, resolver, show_vlan);
+            else if (format == "csv") writer = std::make_unique<CsvWriter>(*out, resolver, show_vlan);
+            else writer = std::make_unique<TextWriter>(*out, color, resolver, show_vlan);
             writer->begin();
         }
 
@@ -630,6 +631,7 @@ int main(int argc, char** argv) {
     size_t decode_max_packets = 0;
     bool decode_stats = false, decode_strict = false;
     bool decode_oui = true, decode_resolve = false, decode_service_names = true;
+    bool decode_show_vlan = true;
     std::string decode_hosts_file, decode_services_file;
 
     auto* decode_input_opt =
@@ -749,6 +751,9 @@ int main(int argc, char** argv) {
                           "one line per packet; ignores --format");
     decode_cmd->add_flag("--strict", decode_strict,
                           "Abort on the first malformed packet instead of reporting it and continuing");
+    decode_cmd->add_flag("!--no-vlan", decode_show_vlan,
+                          "Disable display of the 802.1Q VLAN ID for VLAN-tagged packets, on by "
+                          "default -- see docs/MANUAL.md's OUTPUT FORMATS section");
     decode_cmd->add_flag("!--no-oui", decode_oui,
                           "Disable OUI (MAC vendor) resolution, on by default -- see docs/"
                           "MANUAL.md's OUTPUT FORMATS section");
@@ -986,7 +991,7 @@ int main(int argc, char** argv) {
                            decode_rip_ports, decode_hsrp_ports,
                            decode_max_packets, decode_stats, decode_strict,
                            quiet, no_color, force_color, decode_oui, decode_resolve, decode_hosts_file,
-                           decode_service_names, decode_services_file, *diag);
+                           decode_service_names, decode_services_file, decode_show_vlan, *diag);
     }
     if (info_cmd->parsed()) {
         return run_info(info_input, std::cout);

@@ -30,21 +30,31 @@ public:
 // resolver_.oui_vendor()/hostname()/service_name() unconditionally and renders whatever comes
 // back, or nothing at all on a miss. See resolver.hpp's own file header for the full "annotation,
 // never replacement" contract every writer below follows.
+// `show_vlan` (default true, every constructor below) governs whether a VLAN-tagged packet's
+// 802.1Q VLAN ID (DecodedPacket::has_vlan_tag/vlan_id -- already unconditionally populated by the
+// decoding layer for every Ethernet-linktype packet, see link_layer.cpp's parse_ethernet) is shown
+// at all. Unlike the OUI/hostname/service-name annotations above, this isn't a resolver lookup
+// that can simply return nothing on a miss -- the VLAN ID is a base decoded fact -- so `decode`'s
+// `--no-vlan` flag (cli_main.cpp) wires straight into this constructor parameter instead of going
+// through Resolver, the same "pure display toggle" precedent TextWriter's own `color` parameter
+// already set.
 class TextWriter : public OutputWriter {
 public:
-    explicit TextWriter(std::ostream& out, bool color, const Resolver& resolver)
-        : out_(out), color_(color), resolver_(resolver) {}
+    explicit TextWriter(std::ostream& out, bool color, const Resolver& resolver, bool show_vlan = true)
+        : out_(out), color_(color), resolver_(resolver), show_vlan_(show_vlan) {}
     void write_packet(const DecodedPacket& packet) override;
 
 private:
     std::ostream& out_;
     bool color_;
     const Resolver& resolver_;
+    bool show_vlan_;
 };
 
 class JsonWriter : public OutputWriter {
 public:
-    explicit JsonWriter(std::ostream& out, const Resolver& resolver) : out_(out), resolver_(resolver) {}
+    explicit JsonWriter(std::ostream& out, const Resolver& resolver, bool show_vlan = true)
+        : out_(out), resolver_(resolver), show_vlan_(show_vlan) {}
     void begin() override;
     void write_packet(const DecodedPacket& packet) override;
     void end() override;
@@ -53,17 +63,20 @@ private:
     std::ostream& out_;
     bool wrote_any_ = false;
     const Resolver& resolver_;
+    bool show_vlan_;
 };
 
 class CsvWriter : public OutputWriter {
 public:
-    explicit CsvWriter(std::ostream& out, const Resolver& resolver) : out_(out), resolver_(resolver) {}
+    explicit CsvWriter(std::ostream& out, const Resolver& resolver, bool show_vlan = true)
+        : out_(out), resolver_(resolver), show_vlan_(show_vlan) {}
     void begin() override;
     void write_packet(const DecodedPacket& packet) override;
 
 private:
     std::ostream& out_;
     const Resolver& resolver_;
+    bool show_vlan_;
 };
 
 // Accumulates counts instead of printing per packet; call begin()/write_packet()
