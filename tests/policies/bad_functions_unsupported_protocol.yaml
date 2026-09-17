@@ -1,0 +1,18 @@
+# Regression fixture: 'functions' given on a conduit whose single resolved protocol is one of the
+# six 'protocols' was most recently widened to accept (bacnet/hartip/opcua/mms/mqtt/ffhse -- see
+# ROADMAP item 14) -- none of them has a known function/service name table yet (see
+# protocol_has_known_function_table in policy.cpp), so 'functions' is rejected with a specific,
+# honest message rather than silently failing every entry against an empty table.
+zones:
+  hmi_zone:
+    networks: [192.168.1.50/32]
+  plc_zone:
+    networks: [192.168.1.10/32]
+
+conduits:
+  - name: "opcua with functions"
+    from: hmi_zone
+    to: plc_zone
+    protocol: opcua
+    ports: [4840]
+    functions: [ReadRequest]

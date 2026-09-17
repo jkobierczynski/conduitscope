@@ -67,9 +67,16 @@ struct Zone {
 // one specific pair. This lets e.g. "permit traffic from either the
 // corporate zone or the remote-access zone into either of two PLC zones" be
 // written as one conduit, instead of one conduit per zone pair. `protocols`
-// holds lowercased values from {"modbus", "dnp3", "s7comm", "any"}
+// holds lowercased values from {"modbus", "dnp3", "s7comm", "iec104", "enip",
+// "bacnet", "hartip", "opcua", "mms", "mqtt", "ffhse", "any"}
 // (parse_policy_text rejects anything else) -- "any" matches every protocol
-// conduitscope recognizes. `ports` is the set of TCP ports this conduit
+// conduitscope recognizes. Of the six named after "enip", only
+// hartip/opcua/mms/mqtt/ffhse can ever actually match a flow today: `policy
+// validate` only ever evaluates TCP flows (see PolicyEngine::observe), and
+// "bacnet" names BACnet/IP, which this decoder only ever recognizes over UDP
+// (see decoder.cpp) -- so a conduit naming "bacnet" parses and validates
+// fine but can never be exercised by real traffic yet; see docs/MANUAL.md's
+// POLICY FILE FORMAT "Addressing scope" section. `ports` is the set of TCP ports this conduit
 // covers on the RESPONDING (server) side of the connection; empty means "any
 // port" (parse_policy_text allows omitting the field entirely for that).
 // `bidirectional` additionally allows the same protocol/port set initiated
@@ -137,7 +144,8 @@ struct PolicyError : std::runtime_error {
 //     contains a zone name that isn't declared in 'zones' (each entry of a
 //     list 'from'/'to' is checked, not just the first)
 //   - a conduit's 'from'/'to' list being empty (e.g. 'from: []')
-//   - a conduit's protocol not in {modbus, dnp3, s7comm, any}
+//   - a conduit's protocol not in {modbus, dnp3, s7comm, iec104, enip, bacnet, hartip, opcua, mms,
+//     mqtt, ffhse, any}
 //   - a conduit's port outside [1, 65535]
 //   - a conduit's 'bidirectional' value that isn't a recognizable boolean
 //   - a conduit's 'functions'/'function' given while 'protocols'/'protocol' resolves to anything
@@ -146,6 +154,11 @@ struct PolicyError : std::runtime_error {
 //     protocol (see modbus_known_function_names/dnp3_known_function_names/
 //     s7comm_known_function_names/iec104_known_asdu_short_names/enip_known_cip_service_names), so
 //     there would be no single table to validate/match against otherwise
+//   - a conduit's 'functions'/'function' given for one of the six protocols widened into
+//     'protocols' most recently (bacnet/hartip/opcua/mms/mqtt/ffhse) -- none of them has a known-
+//     function/service-name table yet (see known_function_names_for in policy.cpp), so there is
+//     nothing to validate a 'functions' entry against; write the conduit without 'functions' for
+//     now (see ROADMAP)
 //   - a conduit's 'functions'/'function' entry that isn't one of its protocol's own known function/
 //     service names (case-insensitively) -- the error names the closest known name ("did you mean
 //     '...'?") when one is a plausible typo, and omits the suggestion when nothing is close enough

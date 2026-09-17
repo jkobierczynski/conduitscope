@@ -1,0 +1,54 @@
+# A zone/conduit policy exercising the six protocols the conduit `protocols` enum was most
+# recently widened to accept -- bacnet/hartip/opcua/mms/mqtt/ffhse (see ROADMAP item 14 and
+# policy.hpp's own Conduit::protocols comment) -- alongside the original five. Same
+# hmi_zone/plc_zone pair and IPs as compliant.yaml (every synthetic fixture's HMI_IP/PLC_IP
+# constants share one /24, see tools/make_sample_pcap.py), one conduit per newly-widened
+# protocol, each matched against its own dedicated sample fixture (tests/sample_opcua.pcap,
+# sample_mms.pcap, sample_mqtt.pcap, sample_hartip.pcap, sample_ffhse.pcap).
+#
+# "bacnet" is declared even though it can never actually be exercised by `policy validate`: this
+# decoder only ever recognizes BACnet/IP over UDP (see decoder.cpp), and `policy validate` only
+# ever evaluates TCP flows (PolicyEngine::observe returns immediately for a non-TCP packet) -- so
+# this conduit exists purely to prove the policy file itself parses and validates a "bacnet"
+# conduit correctly, not that real traffic can ever match it. See docs/MANUAL.md's POLICY FILE
+# FORMAT "Addressing scope" section for the full explanation.
+zones:
+  hmi_zone:
+    description: "HMI / engineering workstation (synthetic fixtures' HMI_IP)"
+    networks:
+      - 192.168.1.50/32
+  plc_zone:
+    description: "PLC (synthetic fixtures' PLC_IP)"
+    networks: [192.168.1.10/32]
+
+conduits:
+  - name: "HMI reaches PLC via OPC UA"
+    from: hmi_zone
+    to: plc_zone
+    protocols: [opcua]
+    ports: [4840]
+  - name: "HMI reaches PLC via MMS"
+    from: hmi_zone
+    to: plc_zone
+    protocols: [mms]
+    ports: [102]
+  - name: "HMI reaches PLC via MQTT"
+    from: hmi_zone
+    to: plc_zone
+    protocols: [mqtt]
+    ports: [1883]
+  - name: "HMI reaches PLC via HART-IP"
+    from: hmi_zone
+    to: plc_zone
+    protocols: [hartip]
+    ports: [5094]
+  - name: "HMI reaches PLC via FF-HSE"
+    from: hmi_zone
+    to: plc_zone
+    protocols: [ffhse]
+    ports: [1089, 1090, 1091, 3622]
+  - name: "BACnet placeholder (never exercised -- BACnet/IP is UDP-only in this decoder)"
+    from: hmi_zone
+    to: plc_zone
+    protocols: [bacnet]
+    ports: [47808]

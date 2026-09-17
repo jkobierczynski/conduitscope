@@ -82,7 +82,12 @@ bool equal_ci(const std::string& a, const std::string& b) { return to_lower(a) =
 // "iec104"/"enip") to that protocol's own canonical function/service name table -- see each
 // *_known_*_names() function's own comment (modbus.hpp/dnp3.hpp/s7comm.hpp/iec104.hpp/enip.hpp)
 // for exactly what it returns and why. Never called with "any" or an unresolved protocol string --
-// the one-protocol-only 'functions' rule below (see parse_policy_text) is checked first.
+// the one-protocol-only 'functions' rule below (see parse_policy_text) is checked first. Returns
+// {} for any of the six protocols 'protocols' was more recently widened to accept (bacnet/hartip/
+// opcua/mms/mqtt/ffhse -- see ROADMAP) -- none of them has a known-function/service-name table
+// yet, and protocol_has_known_function_table below is what actually gates 'functions' for those,
+// with an honest error, rather than this function's empty-list return silently rejecting every
+// entry one at a time with a confusing "unknown function" message.
 std::vector<std::string> known_function_names_for(const std::string& protocol) {
     if (protocol == "modbus") return modbus_known_function_names();
     if (protocol == "dnp3") return dnp3_known_function_names();
@@ -90,6 +95,16 @@ std::vector<std::string> known_function_names_for(const std::string& protocol) {
     if (protocol == "iec104") return iec104_known_asdu_short_names();
     if (protocol == "enip") return enip_known_cip_service_names();
     return {};
+}
+
+// True for exactly the five protocols known_function_names_for above returns a non-empty table
+// for -- used to give 'functions' on any other protocol (including the six 'protocols' was more
+// recently widened to accept -- see parse_policy_text's own validation loop) a clear, specific
+// rejection instead of letting every 'functions' entry silently fail with a generic "unknown
+// function" message against an empty table.
+bool protocol_has_known_function_table(const std::string& protocol) {
+    return protocol == "modbus" || protocol == "dnp3" || protocol == "s7comm" ||
+           protocol == "iec104" || protocol == "enip";
 }
 
 // Case-insensitive Levenshtein edit distance between `a` and `b`, for the 'functions:' "did you
@@ -337,10 +352,12 @@ Policy parse_policy_text(const std::string& text, const std::string& source_name
         for (const auto& p : proto_list) {
             std::string lower = to_lower(p.text);
             if (lower != "modbus" && lower != "dnp3" && lower != "s7comm" && lower != "iec104" &&
-                lower != "enip" && lower != "any") {
+                lower != "enip" && lower != "bacnet" && lower != "hartip" && lower != "opcua" &&
+                lower != "mms" && lower != "mqtt" && lower != "ffhse" && lower != "any") {
                 fail(source_name, p.line,
                      "conduit '" + c.name + "': unknown protocol '" + p.text +
-                         "' (expected one of: modbus, dnp3, s7comm, iec104, enip, any)");
+                         "' (expected one of: modbus, dnp3, s7comm, iec104, enip, bacnet, hartip, "
+                         "opcua, mms, mqtt, ffhse, any)");
             }
             c.protocols.push_back(lower);
         }
@@ -394,6 +411,14 @@ Policy parse_policy_text(const std::string& text, const std::string& source_name
                              "protocol when the allowed functions differ");
                 }
                 const std::string& proto = c.protocols[0];
+                if (!protocol_has_known_function_table(proto)) {
+                    fail(source_name, funcs->line,
+                         "conduit '" + c.name + "': 'functions' is not yet supported for protocol '" +
+                             proto +
+                             "' -- only modbus, dnp3, s7comm, iec104, and enip have a known "
+                             "function/service name table so far (see ROADMAP); write the conduit "
+                             "without 'functions' for now");
+                }
                 std::vector<std::string> known = known_function_names_for(proto);
                 for (const auto& f : func_list) {
                     const std::string* canonical = nullptr;

@@ -4843,7 +4843,7 @@ set_tests_properties(policy_engine_late_syn_overrides_port_guess PROPERTIES
 add_test(NAME policy_engine_no_protocol_recognized_is_unclassified
   COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_policy_engine.pcap" --policy "${POLICY_DIR}/policy_engine_sample.yaml")
 set_tests_properties(policy_engine_no_protocol_recognized_is_unclassified PROPERTIES
-  PASS_REGULAR_EXPRESSION "no Modbus/DNP3/S7comm traffic was recognized on this flow \\(2 unrecognized/handshake packet\\(s\\) only\\)")
+  PASS_REGULAR_EXPRESSION "no recognized OT protocol traffic was found on this flow \\(2 unrecognized/handshake packet\\(s\\) only\\)")
 
 add_test(NAME policy_engine_cotp_only_session_counts_as_s7comm
   COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_policy_engine.pcap" --policy "${POLICY_DIR}/policy_engine_sample.yaml" --format json)
@@ -5015,6 +5015,57 @@ set_tests_properties(policy_error_functions_unknown_name_with_suggestion PROPERT
 # Regression guard: a conduit with 'functions' omitted entirely must behave exactly as before this
 # feature existed -- already covered by every pre-existing policy_* test above (none of them use
 # 'functions:'), so no new fixture is needed here; this comment just records that coverage exists.
+
+# --------------------------------------------------------------------------
+# Widened `protocols` enum (ROADMAP item 14): bacnet/hartip/opcua/mms/mqtt/ffhse, in addition to
+# the original modbus/dnp3/s7comm/iec104/enip/any -- see tests/policies/widened_protocols.yaml's
+# own header comment and policy.hpp's Conduit::protocols comment.
+# --------------------------------------------------------------------------
+
+add_test(NAME policy_widened_opcua_sample_matches_conduit
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_opcua.pcap" --policy "${POLICY_DIR}/widened_protocols.yaml")
+set_tests_properties(policy_widened_opcua_sample_matches_conduit PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\(opcua, [0-9]+ packet\\(s\\)\\)\n *zones: hmi_zone -> plc_zone, matched conduit \"HMI reaches PLC via OPC UA\"")
+
+add_test(NAME policy_widened_mms_sample_matches_conduit
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --policy "${POLICY_DIR}/widened_protocols.yaml")
+set_tests_properties(policy_widened_mms_sample_matches_conduit PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\(mms, [0-9]+ packet\\(s\\)\\)\n *zones: hmi_zone -> plc_zone, matched conduit \"HMI reaches PLC via MMS\"")
+
+add_test(NAME policy_widened_mqtt_sample_matches_conduit
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mqtt.pcap" --policy "${POLICY_DIR}/widened_protocols.yaml")
+set_tests_properties(policy_widened_mqtt_sample_matches_conduit PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\(mqtt, [0-9]+ packet\\(s\\)\\)\n *zones: hmi_zone -> plc_zone, matched conduit \"HMI reaches PLC via MQTT\"")
+
+add_test(NAME policy_widened_hartip_sample_matches_conduit
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap" --policy "${POLICY_DIR}/widened_protocols.yaml")
+set_tests_properties(policy_widened_hartip_sample_matches_conduit PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\(hartip, [0-9]+ packet\\(s\\)\\)\n *zones: hmi_zone -> plc_zone, matched conduit \"HMI reaches PLC via HART-IP\"")
+
+add_test(NAME policy_widened_ffhse_sample_matches_conduit
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ffhse.pcap" --policy "${POLICY_DIR}/widened_protocols.yaml")
+set_tests_properties(policy_widened_ffhse_sample_matches_conduit PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\(ffhse, [0-9]+ packet\\(s\\)\\)\n *zones: hmi_zone -> plc_zone, matched conduit \"HMI reaches PLC via FF-HSE\"")
+
+# BACnet/IP is UDP-only in this decoder (see decoder.cpp) and `policy validate` only ever
+# evaluates TCP flows -- so a "bacnet" conduit parses and validates fine (this policy file loads
+# without error against every fixture) but can never actually be exercised. Read against
+# sample_modbus.pcap (which has no BACnet traffic at all, real or otherwise) purely to confirm the
+# conduit is accepted and simply never matched.
+add_test(NAME policy_widened_bacnet_conduit_parses_but_never_exercised
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/widened_protocols.yaml")
+set_tests_properties(policy_widened_bacnet_conduit_parses_but_never_exercised PROPERTIES
+  PASS_REGULAR_EXPRESSION "Conduits never exercised by this capture \\(6\\):.*BACnet placeholder")
+
+add_test(NAME policy_error_functions_unsupported_protocol_rejected
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_opcua.pcap" --policy "${POLICY_DIR}/bad_functions_unsupported_protocol.yaml")
+set_tests_properties(policy_error_functions_unsupported_protocol_rejected PROPERTIES
+  PASS_REGULAR_EXPRESSION "'functions' is not yet supported for protocol 'opcua' -- only modbus, dnp3, s7comm, iec104, and enip have a known function/service name table so far")
+
+add_test(NAME policy_error_unknown_protocol_lists_full_widened_set
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_unknown_protocol.yaml")
+set_tests_properties(policy_error_unknown_protocol_lists_full_widened_set PROPERTIES
+  PASS_REGULAR_EXPRESSION "unknown protocol 'profinet' \\(expected one of: modbus, dnp3, s7comm, iec104, enip, bacnet, hartip, opcua, mms, mqtt, ffhse, any\\)")
 
 # ---------------------------------------------------------------------------------------------
 # Live capture (live_capture.hpp/cpp) -- an optional, build-time-detected libpcap (Linux) / Npcap

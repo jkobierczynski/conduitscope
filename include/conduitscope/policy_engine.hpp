@@ -47,14 +47,20 @@ struct FlowReport {
     std::string client_ip, server_ip;
     uint16_t server_port = 0;
     std::string client_zone, server_zone;  // "unclassified" when Policy::zone_for found nothing
-    std::vector<std::string> protocols;    // distinct app protocols observed: "modbus"/"dnp3"/"s7comm"/"iec104"/"enip"
+    std::vector<std::string> protocols;    // distinct app protocols observed: "modbus"/"dnp3"/"s7comm"/
+                                            // "iec104"/"enip"/"hartip"/"opcua"/"mms"/"mqtt"/"ffhse"
+                                            // (never "bacnet" -- see PolicyEngine::observe)
     // Distinct, non-empty function/service names observed on this flow, sorted -- whichever of
     // modbus_function_name/dnp3_function_name/s7comm_function_name/iec104_asdu_type_short_name/
-    // enip_cip_service_name each contributing packet's own protocol populates (see
-    // PolicyEngine::observe). Populated regardless of whether the matched conduit (if any)
+    // enip_cip_service_name/hartip_message_type/opcua_service_name/mms_service_name/
+    // mqtt_packet_type_name/ffhse_message_name each contributing packet's own protocol populates
+    // (see PolicyEngine::observe). Populated regardless of whether the matched conduit (if any)
     // actually restricts 'functions' -- purely informational/scriptable via the JSON report when it
     // doesn't (see write_policy_report_json), and exactly what a functions-restricted conduit's
-    // match (or the reason it didn't match) is computed from when it does.
+    // match (or the reason it didn't match) is computed from when it does -- though today that
+    // restriction mechanism (a conduit's own 'functions' list) only ever validates against modbus/
+    // dnp3/s7comm/iec104/enip (see policy.cpp's protocol_has_known_function_table); the last five
+    // protocols above still populate this field for reporting, just can't be filtered by it yet.
     std::vector<std::string> observed_functions;
     size_t packet_count = 0;
     FlowVerdict verdict = FlowVerdict::Unclassified;

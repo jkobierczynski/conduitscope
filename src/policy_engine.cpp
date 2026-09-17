@@ -151,10 +151,18 @@ void PolicyEngine::observe(const DecodedPacket& dp) {
     FlowState& fs = it->second;
     ++fs.packet_count;
     // Each protocol contributes its own already-decoded function/service name field (never more
-    // than one of the five is ever populated for a given packet, since a packet has exactly one
+    // than one of these is ever populated for a given packet, since a packet has exactly one
     // decoded protocol) -- see FlowReport::observed_functions' comment for the full list, and
     // policy.hpp's Conduit::functions comment for how these feed a functions-restricted conduit's
-    // matching below (finish()).
+    // matching below (finish()) -- though only the first five below (modbus/dnp3/s7comm/iec104/
+    // enip) can actually be restricted by a conduit's own 'functions' list today; the next five
+    // (hartip/opcua/mms/mqtt/ffhse -- 'protocols' was widened to accept all six, see ROADMAP) still
+    // populate fs.functions purely for FlowReport::observed_functions' own reporting/scripting use.
+    // "bacnet" is deliberately NOT handled here even though 'protocols' accepts it: this decoder
+    // only ever recognizes BACnet/IP over UDP (see decoder.cpp), and this function already returned
+    // above for any packet with !dp.has_tcp, so a dp.protocol == "bacnet" packet can never reach
+    // this point -- see policy.hpp's own Conduit::protocols comment and docs/MANUAL.md's POLICY
+    // FILE FORMAT "Addressing scope" section for the full explanation.
     if (dp.protocol == "modbus") {
         fs.protocols.insert("modbus");
         if (!dp.modbus_function_name.empty()) fs.functions.insert(dp.modbus_function_name);
@@ -179,6 +187,31 @@ void PolicyEngine::observe(const DecodedPacket& dp) {
     } else if (dp.protocol == "enip") {
         fs.protocols.insert("enip");
         if (dp.enip_has_cip && !dp.enip_cip_service_name.empty()) fs.functions.insert(dp.enip_cip_service_name);
+    } else if (dp.protocol == "hartip") {
+        fs.protocols.insert("hartip");
+        // hartip_message_type ("Request"/"Response"/"Publish"/"Error"/"NAK") is always set when
+        // protocol == "hartip" -- see decoder.hpp -- unlike the others above, no separate "was
+        // anything decoded at all" guard is needed.
+        if (!dp.hartip_message_type.empty()) fs.functions.insert(dp.hartip_message_type);
+    } else if (dp.protocol == "opcua") {
+        fs.protocols.insert("opcua");
+        if (dp.opcua_service_recognized && !dp.opcua_service_name.empty()) {
+            fs.functions.insert(dp.opcua_service_name);
+        }
+    } else if (dp.protocol == "mms") {
+        fs.protocols.insert("mms");
+        if (dp.mms_service_recognized && !dp.mms_service_name.empty()) {
+            fs.functions.insert(dp.mms_service_name);
+        }
+    } else if (dp.protocol == "mqtt") {
+        fs.protocols.insert("mqtt");
+        // mqtt_packet_type_name ("CONNECT"/"PUBLISH"/...) is always set when protocol == "mqtt" --
+        // see decoder.hpp -- same "no separate guard needed" shape as hartip_message_type above.
+        if (!dp.mqtt_packet_type_name.empty()) fs.functions.insert(dp.mqtt_packet_type_name);
+    } else if (dp.protocol == "ffhse") {
+        fs.protocols.insert("ffhse");
+        // ffhse_message_name is always set when protocol == "ffhse" -- see decoder.hpp.
+        if (!dp.ffhse_message_name.empty()) fs.functions.insert(dp.ffhse_message_name);
     }
 }
 
@@ -218,7 +251,7 @@ PolicyReport PolicyEngine::finish() const {
             fr.reason = reason.str();
         } else if (fs.protocols.empty()) {
             fr.verdict = FlowVerdict::Unclassified;
-            fr.reason = "no Modbus/DNP3/S7comm traffic was recognized on this flow (" +
+            fr.reason = "no recognized OT protocol traffic was found on this flow (" +
                          std::to_string(fs.packet_count) + " unrecognized/handshake packet(s) only)";
         } else {
             const Conduit* matched = nullptr;

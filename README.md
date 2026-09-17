@@ -737,8 +737,15 @@ Groundwork / v0.1.0. What works right now:
   narrowed with `functions:` to only certain named functions/services
   within a conduit's one protocol (e.g. Modbus reads but not writes) --
   matched against the exact function/service name strings each protocol's
-  own decoder emits. Every decoded TCP flow in the capture is classified
-  into a zone pair, checked against the policy's conduits (and, for a
+  own decoder emits. `protocols`/`protocol` names one of twelve values --
+  `modbus`, `dnp3`, `s7comm`, `iec104`, `enip`, `bacnet`, `hartip`,
+  `opcua`, `mms`, `mqtt`, `ffhse`, or the wildcard `any` -- though `bacnet`
+  can never actually match (this decoder only recognizes BACnet/IP over
+  UDP, and `policy validate` is TCP-only), and `functions:` is only
+  supported so far for the first five (see docs/MANUAL.md's "Addressing
+  scope" and "Function-level restrictions" subsections). Every decoded TCP
+  flow in the capture is classified into a zone pair, checked against the
+  policy's conduits (and, for a
   `functions`-restricted conduit, checked flow-wide against every distinct
   function/service observed), and reported as allowed, a violation, or
   unclassified (an endpoint matching no declared zone, or a flow with no

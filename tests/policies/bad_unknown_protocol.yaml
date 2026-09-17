@@ -1,0 +1,14 @@
+# Regression fixture: a conduit naming a protocol string this codebase doesn't recognize at all --
+# confirms the error message's own "expected one of" list reflects the full, current widened set
+# (see ROADMAP item 14 and policy.cpp's own protocol validation loop), not a stale, narrower one.
+zones:
+  hmi_zone:
+    networks: [192.168.1.50/32]
+  plc_zone:
+    networks: [192.168.1.10/32]
+
+conduits:
+  - name: "bogus protocol"
+    from: hmi_zone
+    to: plc_zone
+    protocol: profinet

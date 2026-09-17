@@ -426,7 +426,7 @@ conduits:
     description: "<optional free text>"
     from: <zone name or [zone name, ...]>
     to: <zone name or [zone name, ...]>
-    protocols: [<modbus | dnp3 | s7comm | iec104 | enip | any>, <...>]
+    protocols: [<modbus | dnp3 | s7comm | iec104 | enip | bacnet | hartip | opcua | mms | mqtt | ffhse | any>, <...>]
     ports: [<port>, <...>]                  # omit entirely to mean "any port"
     bidirectional: <true | false>           # default: false
     functions: [<function/service name>, <...>]  # optional; see "Function-level restrictions" below
@@ -464,7 +464,11 @@ almost certainly not what a first policy file intended, so it's rejected
 outright rather than silently accepted as an implicit deny-all.
 
 `protocols` uses the same protocol names conduitscope's own decoded output
-uses: `modbus`, `dnp3`, `s7comm`, `iec104`, `enip`, plus the wildcard `any`. A COTP session
+uses: `modbus`, `dnp3`, `s7comm`, `iec104`, `enip`, `bacnet`, `hartip`,
+`opcua`, `mms`, `mqtt`, `ffhse`, plus the wildcard `any` (ROADMAP item 14
+widened this from the original six -- `modbus`/`dnp3`/`s7comm`/`iec104`/
+`enip`/`any` -- to name every TCP-capable protocol `decode` recognizes
+individually). A COTP session
 that never carries a full S7comm message (e.g. only a connection
 request/confirm was captured) still counts as `s7comm` traffic for matching
 purposes -- see PROTOCOL COVERAGE's S7comm/COTP section for why a "cotp"-
@@ -472,7 +476,19 @@ tagged packet and an "s7comm"-tagged one are the same conduit on the wire.
 `enip` here only ever means EtherNet/IP explicit messaging (TCP 44818):
 conduits are TCP-only (see LIMITATIONS), so there is currently no way to
 write a conduit matching CIP I/O (implicit messaging, UDP 2222) traffic,
-even though `decode` now decodes it -- see ROADMAP.
+even though `decode` now decodes it -- see ROADMAP. `bacnet` is the one
+name among the newly-widened six that can never actually match real
+traffic today for the same TCP-only reason: this decoder only ever
+recognizes BACnet/IP over UDP (see decoder.cpp), so a `bacnet` conduit
+parses and validates fine but is never exercised by `policy validate` --
+see "Addressing scope" below. The other five newly-widened names
+(`hartip`, `opcua`, `mms`, `mqtt`, `ffhse`) DO match real TCP traffic --
+`hartip` specifically only its TCP form, since HART-IP also has a UDP
+form this engine doesn't evaluate (see "Addressing scope" below), and
+`mms` and `s7comm` share the same TCP port (102) but are still matched as
+two entirely separate conduit protocols, one per flow's own actually-
+decoded `protocol` tag, never conflated the way "cotp" folds into
+`s7comm` above.
 
 `from`/`to` describe a **direction**: which zone(s) initiate the TCP
 connection (`from`) and which zone(s) answer it (`to`) -- not which zone
@@ -555,6 +571,31 @@ error: policy.yaml:N: conduit '<name>': 'functions' requires exactly one protoco
 'protocols' (not 'any', and not a list of more than one) -- write one conduit per
 protocol when the allowed functions differ
 ```
+
+**Only five protocols have a known-function table so far.** `functions`
+only actually validates against `modbus`, `dnp3`, `s7comm`, `iec104`, and
+`enip` -- the five protocols `protocols` originally supported. The six
+protocols `protocols` was more recently widened to accept (`bacnet`,
+`hartip`, `opcua`, `mms`, `mqtt`, `ffhse` -- see ROADMAP item 14) don't
+have one yet, so `functions` on a conduit resolving to one of them is
+rejected outright at load time, rather than silently rejecting every entry
+one at a time against an empty table:
+
+```
+error: policy.yaml:N: conduit '<name>': 'functions' is not yet supported for protocol
+'opcua' -- only modbus, dnp3, s7comm, iec104, and enip have a known
+function/service name table so far (see ROADMAP); write the conduit without 'functions'
+for now
+```
+
+Traffic on one of these six protocols is still fully usable in an
+unrestricted (no `functions`) conduit, and (for the five of them that
+actually reach the policy engine -- see "Addressing scope" below for why
+`bacnet` never does) its function/service name is still folded into
+`FlowReport::observed_functions` for reporting -- see
+`PolicyEngine::observe`'s own comment and `hartip_message_type`/
+`opcua_service_name`/`mms_service_name`/`mqtt_packet_type_name`/
+`ffhse_message_name` for exactly which field each contributes.
 
 **Exact decoder strings, matched case-insensitively.** Each entry in
 `functions` must be one of that protocol's own canonical function/service
@@ -740,7 +781,8 @@ error (see EXIT STATUS):
   declared in `zones` -- every entry of a list `from`/`to` is checked, not
   just the first
 - a conduit's `from`/`to` list being empty (e.g. `from: []`)
-- a conduit protocol outside `{modbus, dnp3, s7comm, iec104, enip, any}`
+- a conduit protocol outside `{modbus, dnp3, s7comm, iec104, enip, bacnet,
+  hartip, opcua, mms, mqtt, ffhse, any}` (ROADMAP item 14)
 - a conduit port outside `[1, 65535]`
 - a conduit's `bidirectional` value that isn't a recognizable boolean
   (`true`/`false`/`yes`/`no`)
@@ -748,6 +790,12 @@ error (see EXIT STATUS):
   resolves to anything other than exactly one concrete protocol (i.e. it's
   `any`, or a list of more than one) -- see "Function-level restrictions"
   above
+- a conduit's `functions`/`function` given for `bacnet`, `hartip`, `opcua`,
+  `mms`, `mqtt`, or `ffhse` -- none of these six has a known function/
+  service name table yet (only `modbus`, `dnp3`, `s7comm`, `iec104`, and
+  `enip` do), so the error says which protocol and that `functions` isn't
+  supported for it yet rather than silently rejecting every entry against
+  an empty table -- see "Function-level restrictions" above
 - a conduit's `functions`/`function` entry that isn't one of its
   protocol's own known function/service names (case-insensitively) -- the
   error names the closest known name ("did you mean '...'?") when one is a
@@ -842,29 +890,46 @@ means for the protocols `decode` recognizes but a zone can't classify by,
 and for the protocols a conduit can't yet name at all -- worth reading
 before assuming a conduit covers more than it actually does.
 
-**The `protocols` enum is closed to six values**: `modbus`, `dnp3`,
-`s7comm`, `iec104`, `enip`, `any` -- see "Validation errors" below.
-`decode` recognizes considerably more than that (BACnet/IP, HART-IP, OPC
-UA, MMS, MQTT, FOUNDATION Fieldbus HSE among them), but none of those can
-be named in a conduit's `protocols`/`protocol` field -- the closest a
-conduit gets to covering their traffic is `any`, which matches every
-protocol indiscriminately and can't be scoped down to just one of them.
-Concretely: there is no way today to write a conduit that says "only
-HART-IP is allowed here" -- only "anything is allowed here" or, by
-omission, "none of {modbus, dnp3, s7comm, iec104, enip} is allowed here"
-(which becomes a Violation once both endpoints are zone-classified). This
-is a straightforward enum-and-dispatch-table widening for the protocols
-above, not a design limitation of the engine -- it simply hasn't been
-done for them yet (see ROADMAP).
+**The `protocols` enum names twelve values** (ROADMAP item 14, done):
+`modbus`, `dnp3`, `s7comm`, `iec104`, `enip`, `bacnet`, `hartip`, `opcua`,
+`mms`, `mqtt`, `ffhse`, `any` -- see "Validation errors" below. This was
+previously closed to the first five (plus `any`); `decode` recognized
+BACnet/IP, HART-IP, OPC UA, MMS, MQTT, and FOUNDATION Fieldbus HSE
+considerably before any of them could be named in a conduit's
+`protocols`/`protocol` field -- the closest a conduit could get to
+covering their traffic was `any`, which matches every protocol
+indiscriminately and can't be scoped down to just one of them. That gap
+is closed for all six now: a conduit CAN say "only OPC UA is allowed
+here" (`protocol: opcua`), and PolicyEngine's own flow-classification
+dispatch (`PolicyEngine::observe`) genuinely recognizes each of them, not
+just the policy-file parser -- see the "Widened `protocols` enum" tests
+in `CMakeLists.txt` and `tests/policies/widened_protocols.yaml` for
+end-to-end confirmation against each protocol's own real sample capture.
+One asterisk survives this widening, addressed in the very next
+paragraph: `bacnet` parses and validates like any other protocol name,
+but BACnet/IP itself can never actually match a flow, for a reason that
+has nothing to do with the enum.
 
 **`policy validate` only ever evaluates TCP flows** (see "`policy
 validate`" above and LIMITATIONS) -- so even where a protocol's UDP
 traffic is fully decoded by `decode` (BACnet/IP, HART-IP, CIP I/O, FF-HSE),
-none of it reaches the policy engine at all yet, independent of the
-`protocols`-enum question above. HART-IP's own TCP traffic is the one
-partial exception: it's evaluated as a flow like any TCP-based protocol
-here, but -- per the previous paragraph -- can currently only ever match
-an `any` conduit, never a `protocol: hartip` one.
+none of it reaches the policy engine at all. This is independent of the
+`protocols`-enum widening just described: naming a protocol in
+`protocols` only lets a conduit be MATCHED by that protocol's TCP traffic,
+it doesn't make UDP traffic suddenly visible to the engine. Concretely,
+of the six newly-named protocols: `hartip`, `opcua`, `mms`, `mqtt`, and
+`ffhse` all carry genuine TCP traffic this decoder recognizes, so naming
+them now does real work (`hartip` specifically only matches its own TCP
+form -- HART-IP's UDP form, like BACnet/IP's, still never reaches the
+engine). `bacnet` is the one exception with no TCP form to fall back on
+at all: this decoder only ever recognizes BACnet/IP over UDP (see
+`decoder.cpp`), so `protocol: bacnet` is accepted at policy-load time,
+appears in `unexercised_conduits` like any conduit real traffic never
+happened to exercise, but can never move out of that list -- there is no
+capture this engine could be given that would make it match. Fixing that
+needs `policy validate` to evaluate UDP flows at all, a separate,
+not-yet-scoped piece of future work this item deliberately didn't take on
+(see ROADMAP).
 
 **For the four protocols with no IP layer at all** -- PROFINET RT, IEC
 61850-8-1 GOOSE, IEC 61850-9-2 Sampled Values, and EtherCAT (see PROTOCOL
@@ -8039,13 +8104,32 @@ Rough order, each building on the groundwork this release establishes:
     separate scope of its own (policy file format changes, `PolicyEngine`
     matching logic, and its own test/documentation pass) from simply
     exposing the two fields this round completed.
-14. **Widen the conduit `protocols` enum** beyond its current
-    `{modbus, dnp3, s7comm, iec104, enip, any}` to name the other
-    protocols `decode` already recognizes (BACnet/IP, HART-IP, OPC UA,
-    MMS, MQTT, FOUNDATION Fieldbus HSE) individually, rather than only
-    being reachable through `any` -- a straightforward enum-and-
-    dispatch-table widening, not a design change (see POLICY FILE
-    FORMAT's "Addressing scope" section).
+14. ~~**Widen the conduit `protocols` enum**~~ -- **done**: `protocols`/
+    `protocol` now names twelve values -- the original
+    `modbus, dnp3, s7comm, iec104, enip, any` plus `bacnet`, `hartip`,
+    `opcua`, `mms`, `mqtt`, `ffhse` -- see POLICY FILE FORMAT's schema
+    block, its `protocols` explanation paragraph, and the "Addressing
+    scope" section, all updated. `PolicyEngine::observe`'s own flow-
+    classification dispatch was widened to match, not just the parser:
+    `hartip`, `opcua`, `mms`, `mqtt`, and `ffhse` genuinely classify real
+    TCP traffic now (each verified end-to-end against its own sample
+    capture -- see `tests/policies/widened_protocols.yaml` and the
+    "Widened `protocols` enum" tests in `CMakeLists.txt`), and their
+    function/service names (when decoded) still feed
+    `FlowReport::observed_functions` informationally. `bacnet` is accepted
+    syntactically and can appear in `unexercised_conduits`, but can never
+    actually match a flow: this decoder only recognizes BACnet/IP over
+    UDP, and `policy validate` only ever evaluates TCP flows -- see
+    "Addressing scope" for the full explanation. Deliberately left open,
+    a separate and larger scope of its own: `functions` allow-lists for
+    these six protocols (each needs its own known-name table, as
+    `modbus`/`dnp3`/`s7comm`/`iec104`/`enip` already have); naming one of
+    them in `functions` is now rejected with a specific "not yet
+    supported for protocol '...'" error rather than silently failing
+    every entry against an empty table. Also still open: `policy
+    validate` evaluating UDP flows at all (the only path that could ever
+    let `bacnet` -- or HART-IP's/FF-HSE's own UDP forms -- match), and
+    the VLAN-based zone model for protocols with no IP layer (item 15).
 15. **A VLAN-membership-based conduit/zone model**, as an alternative to
     (not a replacement for) the existing IPv4-CIDR one, for the four
     protocols with no IP layer at all (PROFINET RT, GOOSE, Sampled
