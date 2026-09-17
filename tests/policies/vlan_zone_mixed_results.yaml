@@ -1,0 +1,25 @@
+# Worked example: two VLAN-membership zones ("ot_vlan", VLAN 100, and "office_vlan", VLAN 200),
+# where office_vlan's own conduit deliberately does NOT permit goose (see ROADMAP item 15). Matched
+# against tests/sample_vlan_zones.pcap, this demonstrates all three VLAN-zone verdicts at once:
+# the four VLAN-100 flows are Allowed; the GOOSE flow tagged VLAN 200 is a Violation ("no conduit
+# permits goose traffic on VLAN zone 'office_vlan'") -- distinct from the "no zone at all" case,
+# since VLAN 200 IS a declared zone here, just one that doesn't permit this protocol; and the
+# untagged EtherCAT flow is Unclassified, since there is no VLAN tag to check membership on at all
+# regardless of what zones are declared.
+zones:
+  ot_vlan:
+    description: "OT segment -- PROFINET RT/GOOSE/SV/EtherCAT, tagged VLAN 100"
+    vlans: [100]
+  office_vlan:
+    description: "Office/IT segment, tagged VLAN 200 -- EtherCAT only, no GOOSE"
+    vlans: [200]
+
+conduits:
+  - name: "OT protocols permitted on ot_vlan"
+    from: ot_vlan
+    to: ot_vlan
+    protocol: any
+  - name: "EtherCAT only on office_vlan"
+    from: office_vlan
+    to: office_vlan
+    protocol: ethercat

@@ -197,6 +197,20 @@ const Zone* Policy::zone_for(uint32_t ip) const {
     return nullptr;
 }
 
+const Zone* Policy::zone_for_vlan(uint16_t vlan_id) const {
+    for (const auto& z : zones) {
+        if (!z.is_vlan_zone) continue;
+        for (uint16_t v : z.vlans) {
+            if (v == vlan_id) return &z;
+        }
+    }
+    return nullptr;
+}
+
+bool Policy::has_vlan_zone() const {
+    return std::any_of(zones.begin(), zones.end(), [](const Zone& z) { return z.is_vlan_zone; });
+}
+
 Policy parse_policy_text(const std::string& text, const std::string& source_name) {
     using yaml_mini::NodeType;
 
@@ -241,22 +255,59 @@ Policy parse_policy_text(const std::string& text, const std::string& source_name
             if (desc->type == NodeType::Scalar) zone.description = desc->scalar;
         }
         const yaml_mini::Node* nets = zval.find("networks");
-        if (!nets) {
-            fail(source_name, zval.line, "zone '" + zname + "' has no 'networks' key");
+        const yaml_mini::Node* vlans = zval.find("vlans");
+        if (!vlans) vlans = zval.find("vlan");  // singular alias, for a one-VLAN zone
+        if (nets && vlans) {
+            fail(source_name, zval.line,
+                 "zone '" + zname +
+                     "' declares both 'networks' and 'vlans' -- a zone is either an IPv4 zone or a "
+                     "VLAN zone, not both (see docs/MANUAL.md's POLICY FILE FORMAT section)");
         }
-        auto net_list = as_scalar_list(*nets, source_name, "zone '" + zname + "'s 'networks'");
-        if (net_list.empty()) {
-            fail(source_name, nets->line, "zone '" + zname + "' declares no networks");
+        if (!nets && !vlans) {
+            fail(source_name, zval.line, "zone '" + zname + "' has no 'networks' or 'vlans' key");
         }
-        for (const auto& item : net_list) {
-            auto cidr = parse_cidr(item.text);
-            if (!cidr) {
-                fail(source_name, item.line,
-                     "zone '" + zname + "': '" + item.text +
-                         "' is not a valid IPv4 address or CIDR block (expected e.g. '10.10.10.0/24' "
-                         "or a bare address)");
+        if (nets) {
+            auto net_list = as_scalar_list(*nets, source_name, "zone '" + zname + "'s 'networks'");
+            if (net_list.empty()) {
+                fail(source_name, nets->line, "zone '" + zname + "' declares no networks");
             }
-            zone.networks.push_back(*cidr);
+            for (const auto& item : net_list) {
+                auto cidr = parse_cidr(item.text);
+                if (!cidr) {
+                    fail(source_name, item.line,
+                         "zone '" + zname + "': '" + item.text +
+                             "' is not a valid IPv4 address or CIDR block (expected e.g. '10.10.10.0/24' "
+                             "or a bare address)");
+                }
+                zone.networks.push_back(*cidr);
+            }
+        } else {
+            zone.is_vlan_zone = true;
+            auto vlan_list = as_scalar_list(*vlans, source_name, "zone '" + zname + "'s 'vlans'");
+            if (vlan_list.empty()) {
+                fail(source_name, vlans->line, "zone '" + zname + "' declares no VLANs");
+            }
+            for (const auto& item : vlan_list) {
+                bool all_digits = !item.text.empty() &&
+                                   std::all_of(item.text.begin(), item.text.end(),
+                                               [](unsigned char ch) { return std::isdigit(ch); });
+                int value = -1;
+                if (all_digits) {
+                    try {
+                        value = std::stoi(item.text);
+                    } catch (const std::exception&) {
+                        value = -1;
+                    }
+                }
+                if (value < kMinVlanId || value > kMaxVlanId) {
+                    fail(source_name, item.line,
+                         "zone '" + zname + "': '" + item.text + "' is not a valid VLAN ID (expected " +
+                             std::to_string(kMinVlanId) + "-" + std::to_string(kMaxVlanId) +
+                             " -- VID 0 is reserved for priority-tagged, non-VLAN-member frames and "
+                             "4095 is reserved outright)");
+                }
+                zone.vlans.push_back(static_cast<uint16_t>(value));
+            }
         }
         policy.zones.push_back(std::move(zone));
     }
@@ -264,19 +315,35 @@ Policy parse_policy_text(const std::string& text, const std::string& source_name
         fail(source_name, zones_node->line, "'zones' must declare at least one zone");
     }
 
-    // No two zones may claim the same address -- an unambiguous zone-per-address model is the
-    // whole point of this feature (PolicyEngine has to be able to say definitively which single
-    // zone a packet's source/destination belongs to). O(zones^2 * networks^2) is fine for any
-    // policy file a person would actually hand-write.
+    // No two zones of the same kind may claim the same address/VLAN -- an unambiguous
+    // zone-per-address(-or-VLAN) model is the whole point of this feature (PolicyEngine has to be
+    // able to say definitively which single zone a packet belongs to). A CIDR zone and a VLAN zone
+    // can never overlap with each other -- they have no addressing scheme in common -- so only
+    // same-kind pairs are checked. O(zones^2 * networks^2) is fine for any policy file a person
+    // would actually hand-write.
     for (size_t i = 0; i < policy.zones.size(); ++i) {
         for (size_t j = i + 1; j < policy.zones.size(); ++j) {
-            for (const auto& a : policy.zones[i].networks) {
-                for (const auto& b : policy.zones[j].networks) {
-                    if (cidr_overlaps(a, b)) {
-                        fail(source_name, policy.zones[j].line,
-                             "zone '" + policy.zones[i].name + "' (" + a.text + ") and zone '" +
-                                 policy.zones[j].name + "' (" + b.text +
-                                 ") overlap -- each address must belong to at most one zone");
+            const Zone& za = policy.zones[i];
+            const Zone& zb = policy.zones[j];
+            if (za.is_vlan_zone != zb.is_vlan_zone) continue;
+            if (!za.is_vlan_zone) {
+                for (const auto& a : za.networks) {
+                    for (const auto& b : zb.networks) {
+                        if (cidr_overlaps(a, b)) {
+                            fail(source_name, zb.line,
+                                 "zone '" + za.name + "' (" + a.text + ") and zone '" + zb.name + "' (" +
+                                     b.text + ") overlap -- each address must belong to at most one zone");
+                        }
+                    }
+                }
+            } else {
+                for (uint16_t a : za.vlans) {
+                    for (uint16_t b : zb.vlans) {
+                        if (a == b) {
+                            fail(source_name, zb.line,
+                                 "zone '" + za.name + "' and zone '" + zb.name + "' both claim VLAN " +
+                                     std::to_string(a) + " -- each VLAN must belong to at most one zone");
+                        }
                     }
                 }
             }
@@ -340,6 +407,46 @@ Policy parse_policy_text(const std::string& text, const std::string& source_name
             c.to_zones.push_back(z.text);
         }
 
+        // Every zone this conduit references, on either side, must be the same kind (see
+        // policy.hpp's own header comment and Conduit's comment for why VLAN zones and CIDR zones
+        // can't mix on one conduit) -- determined here, once, since it drives every VLAN-zone-only
+        // validation rule below (protocol names, from==to, ports/bidirectional/functions rejection).
+        bool references_vlan_zone = false, references_ip_zone = false;
+        for (const auto& z : c.from_zones) {
+            (find_zone(policy, z)->is_vlan_zone ? references_vlan_zone : references_ip_zone) = true;
+        }
+        for (const auto& z : c.to_zones) {
+            (find_zone(policy, z)->is_vlan_zone ? references_vlan_zone : references_ip_zone) = true;
+        }
+        if (references_vlan_zone && references_ip_zone) {
+            fail(source_name, item.line,
+                 "conduit '" + c.name +
+                     "' mixes IPv4 zones and VLAN zones in its 'from'/'to' -- every zone a conduit "
+                     "references must be the same kind (see docs/MANUAL.md's POLICY FILE FORMAT "
+                     "section)");
+        }
+        bool is_vlan_conduit = references_vlan_zone;
+        c.is_vlan_conduit = is_vlan_conduit;
+
+        if (is_vlan_conduit) {
+            // A single raw-Ethernet frame carries at most one VLAN tag, so a VLAN-zone conduit
+            // can't model a directional flow between two different zones the way an IP-zone
+            // conduit does -- see policy.hpp's Conduit::from_zones/to_zones comment. Requiring the
+            // exact same SET (not just the same size/order) makes that explicit in the policy file.
+            std::vector<std::string> from_sorted = c.from_zones, to_sorted = c.to_zones;
+            std::sort(from_sorted.begin(), from_sorted.end());
+            std::sort(to_sorted.begin(), to_sorted.end());
+            from_sorted.erase(std::unique(from_sorted.begin(), from_sorted.end()), from_sorted.end());
+            to_sorted.erase(std::unique(to_sorted.begin(), to_sorted.end()), to_sorted.end());
+            if (from_sorted != to_sorted) {
+                fail(source_name, item.line,
+                     "conduit '" + c.name +
+                         "' is a VLAN-zone conduit; 'from' and 'to' must name the exact same VLAN "
+                         "zone(s) -- it permits its protocol(s) ON that VLAN zone, not a directional "
+                         "flow between two zones (see docs/MANUAL.md's POLICY FILE FORMAT section)");
+            }
+        }
+
         const yaml_mini::Node* protos = item.find("protocols");
         if (!protos) protos = item.find("protocol");  // singular alias, for a one-protocol conduit
         if (!protos) {
@@ -353,13 +460,35 @@ Policy parse_policy_text(const std::string& text, const std::string& source_name
             std::string lower = to_lower(p.text);
             if (lower != "modbus" && lower != "dnp3" && lower != "s7comm" && lower != "iec104" &&
                 lower != "enip" && lower != "bacnet" && lower != "hartip" && lower != "opcua" &&
-                lower != "mms" && lower != "mqtt" && lower != "ffhse" && lower != "any") {
+                lower != "mms" && lower != "mqtt" && lower != "ffhse" && lower != "profinet" &&
+                lower != "goose" && lower != "sv" && lower != "ethercat" && lower != "any") {
                 fail(source_name, p.line,
                      "conduit '" + c.name + "': unknown protocol '" + p.text +
                          "' (expected one of: modbus, dnp3, s7comm, iec104, enip, bacnet, hartip, "
-                         "opcua, mms, mqtt, ffhse, any)");
+                         "opcua, mms, mqtt, ffhse, profinet, goose, sv, ethercat, any)");
+            }
+            bool is_vlan_only_protocol =
+                lower == "profinet" || lower == "goose" || lower == "sv" || lower == "ethercat";
+            if (is_vlan_conduit && lower != "any" && !is_vlan_only_protocol) {
+                fail(source_name, p.line,
+                     "conduit '" + c.name + "': protocol '" + p.text +
+                         "' rides IPv4/TCP, not raw Ethernet, so it can never appear on a VLAN-zone "
+                         "conduit -- only profinet, goose, sv, ethercat, or 'any' can");
+            }
+            if (!is_vlan_conduit && is_vlan_only_protocol) {
+                fail(source_name, p.line,
+                     "conduit '" + c.name + "': protocol '" + p.text +
+                         "' has no IP layer at all, so it can never appear on an IPv4-zone conduit -- "
+                         "declare a VLAN zone instead (see docs/MANUAL.md's POLICY FILE FORMAT section)");
             }
             c.protocols.push_back(lower);
+        }
+
+        if (is_vlan_conduit && item.find("ports")) {
+            fail(source_name, item.line,
+                 "conduit '" + c.name +
+                     "': 'ports' has no meaning on a VLAN-zone conduit -- profinet/goose/sv/ethercat "
+                     "have no TCP/UDP layer at all");
         }
 
         if (const yaml_mini::Node* ports = item.find("ports")) {
@@ -394,6 +523,21 @@ Policy parse_policy_text(const std::string& text, const std::string& source_name
             } else {
                 fail(source_name, item.line, "conduit '" + c.name + "': 'bidirectional' must be true or false");
             }
+            if (is_vlan_conduit && c.bidirectional) {
+                fail(source_name, item.line,
+                     "conduit '" + c.name +
+                         "': 'bidirectional' has no meaning on a VLAN-zone conduit -- there is no "
+                         "client/server session to reverse (its 'from'/'to' already name the same "
+                         "zone(s), see above)");
+            }
+        }
+
+        if (is_vlan_conduit && (item.find("functions") || item.find("function"))) {
+            fail(source_name, item.line,
+                 "conduit '" + c.name +
+                     "': 'functions'/'function' has no meaning on a VLAN-zone conduit -- "
+                     "profinet/goose/sv/ethercat have no per-flow function/service name this engine "
+                     "tracks yet (see ROADMAP)");
         }
 
         if (const yaml_mini::Node* funcs = item.find("functions") ? item.find("functions") : item.find("function")) {

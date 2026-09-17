@@ -91,12 +91,17 @@ below.
 .TP
 .B policy validate (\fB\-r\fR \fIFILE\fR | \fB\-i\fR \fIINTERFACE\fR) \fB\-\-policy\fR \fIFILE\fR [\fIOPTIONS\fR]
 Zone/conduit policy check: decodes the capture (or live interface) exactly
-as \fBdecode\fR would, groups it into TCP flows, and checks each against the
+as \fBdecode\fR would, groups it into TCP flows (for IPv4-zone conduits) and,
+when the policy declares any VLAN zone, also into PROFINET RT/GOOSE/Sampled
+Values/EtherCAT "Ethernet flows" keyed by protocol and MAC pair (for
+VLAN-zone conduits), and checks each against the
 zones/conduits declared in the policy file (a restricted, dependency-free
 YAML subset -- see \fBdocs/MANUAL.md\fR's POLICY FILE FORMAT section). A
-conduit may optionally narrow itself to specific named functions/services
+zone is either a set of IPv4 CIDR blocks or a set of VLAN IDs
+(\fBvlans:\fR), never both; a conduit may optionally narrow itself to
+specific named functions/services
 within its one protocol via \fBfunctions:\fR (e.g. Modbus reads but not
-writes) -- matched, flow-wide and strict-all, against the exact
+writes, IPv4-zone conduits only) -- matched, flow-wide and strict-all, against the exact
 function/service name strings that protocol's decoder emits; see
 \fBdocs/MANUAL.md\fR's "Function-level restrictions" subsection for the
 schema, the one-protocol-only rule, and the EtherNet/IP ambiguous-name
@@ -728,9 +733,22 @@ non-IPv4
 Ethernet frames and non-TCP
 IPv4 payloads (including UDP) are otherwise still just recognized and
 NAMED for a small OT-relevant set (ARP, LLDP, ICMP, and the rest) but not further decoded, and
-\fBpolicy validate\fR does not yet evaluate any non-TCP traffic (CIP I/O,
-PROFINET RT, GOOSE, Sampled Values, EtherCAT, BACnet/IP, HART-IP's own UDP
-traffic, and FF-HSE's own UDP traffic included) against a conduit;
+\fBpolicy validate\fR does not yet evaluate any UDP traffic (CIP I/O,
+BACnet/IP, HART-IP's own UDP traffic, and FF-HSE's own UDP traffic
+included) against a conduit; a zone can instead be declared as a set of
+VLAN IDs (\fBvlans:\fR) rather than IPv4 CIDR blocks, and a conduit
+referencing only VLAN zones IS evaluated against PROFINET RT/GOOSE/Sampled
+Values/EtherCAT traffic (the four protocols with no IP layer at all),
+classified by whether the frame's own 802.1Q tag falls within a declared
+VLAN zone \-\- see \fBdocs/MANUAL.md\fR's POLICY FILE FORMAT "Addressing
+scope" section. A VLAN-zone conduit's \fBfrom\fR/\fBto\fR must name the
+exact same zone set (a single frame carries at most one VLAN tag, so
+there's no separate source/destination zone), and it can't use
+\fBports\fR, \fBbidirectional: true\fR, or \fBfunctions\fR/\fBfunction\fR
+\-\- none of those has a meaning for this traffic. Only a single, ordinary
+802.1Q tag is ever consulted: a stacked/QinQ frame (EtherType 0x88A8) is
+never unwrapped, so it isn't even decoded as PROFINET RT/GOOSE/SV/EtherCAT
+in the first place, let alone VLAN-zone-classified;
 Modbus request/response
 classification falls back to a payload-shape heuristic only when
 authoritative pairing can't be done (no matching request on this session);

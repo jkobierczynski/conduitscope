@@ -1,0 +1,11 @@
+# Regression fixture: 'ports' given on a VLAN-zone conduit -- profinet/goose/sv/ethercat have no
+# TCP/UDP layer at all, so 'ports' has no meaning here (see ROADMAP item 15).
+zones:
+  ot_vlan:
+    vlans: [100]
+conduits:
+  - name: c1
+    from: ot_vlan
+    to: ot_vlan
+    protocol: any
+    ports: [102]

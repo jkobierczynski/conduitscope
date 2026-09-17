@@ -899,12 +899,17 @@ def build_link_and_transport_layer_sample():
     (TESTS_DIR / "sample_link_transport_layers.pcap").write_bytes(data)
 
 
-def profinet_frame(frame_id: int, payload: bytes, dst: bytes = None, src: bytes = None) -> bytes:
+def profinet_frame(frame_id: int, payload: bytes, dst: bytes = None, src: bytes = None, vlan_tci=None) -> bytes:
     """One raw-Ethernet PROFINET RT frame: EtherType 0x8892, then a 2-byte big-endian FrameID,
-    then `payload` -- see profinet.hpp's file header comment for the wire format."""
+    then `payload` -- see profinet.hpp's file header comment for the wire format. `vlan_tci`, when
+    given, inserts an 802.1Q tag (EtherType 0x8100) before the real EtherType, the same
+    vlan_tci-optional shape goose_frame/sv_frame/ecat_frame below already use."""
     dst = dst if dst is not None else PLC_MAC
     src = src if src is not None else HMI_MAC
-    return eth_header(dst, src, 0x8892) + struct.pack("!H", frame_id) + payload
+    body = struct.pack("!H", frame_id) + payload
+    if vlan_tci is not None:
+        return struct.pack("!6s6sHH", dst, src, 0x8100, vlan_tci) + struct.pack("!H", 0x8892) + body
+    return eth_header(dst, src, 0x8892) + body
 
 
 def dcp_block(option: int, suboption: int, data: bytes) -> bytes:
@@ -7490,6 +7495,73 @@ def build_doh_sample():
     (TESTS_DIR / "sample_doh.pcap").write_bytes(data)
 
 
+def build_vlan_zones_sample():
+    """Exercises PolicyEngine's VLAN-membership zone/conduit model (ROADMAP item 15 -- see
+    policy.hpp's file header comment and PolicyEngine::observe's doc comment) for the four
+    protocols with no IP layer at all: PROFINET RT, GOOSE, Sampled Values, and EtherCAT. Each of
+    these carries at most one 802.1Q tag, so "L2 flows" here are keyed by (protocol, MAC pair)
+    only, never by VLAN -- see ethernet_flow_key in policy_engine.cpp. This one fixture is reused
+    by several tests/policies/*.yaml files that each declare a different VLAN zone layout, so it
+    deliberately covers every outcome a VLAN-zone policy can produce against the SAME capture:
+    membership in a declared zone, membership in the wrong VLAN entirely, and no VLAN tag at all."""
+    packets = []
+
+    # A second, distinct MAC pair for the "traffic on the wrong VLAN" scenario -- a different pair
+    # is required so this flow's key (protocol + MAC pair) doesn't collide with the VLAN-100 GOOSE
+    # flow below; PolicyEngine has no other way to tell them apart, since a single raw-Ethernet
+    # frame carries only one VLAN tag; see policy_engine.hpp's EthernetFlowState comment.
+    ENG_MAC = mac("00:0c:29:aa:11:22")
+    RTU_MAC = mac("00:0c:29:bb:33:44")
+
+    # A third, distinct MAC pair for the "no 802.1Q tag at all" scenario -- again required so this
+    # flow doesn't collide with either of the above.
+    OFFICE_A_MAC = mac("00:0c:29:cc:55:66")
+    OFFICE_B_MAC = mac("00:0c:29:dd:77:88")
+
+    ts_field = utctime_bytes(0x386EBBF3, 0x421728, 0x0A)  # same plausible UtcTime bytes
+                                                            # build_goose_sample/build_sv_sample use
+
+    # 1) PROFINET RT, cyclic IO data (FrameID 0x8001), tagged VLAN 100 -- HMI_MAC/PLC_MAC, the
+    #    "OT segment" pair every other protocol below on VLAN 100 also uses.
+    packets.append(profinet_frame(0x8001, bytes(range(1, 9)) + struct.pack("!HBB", 0x1234, 0x35, 0x00),
+                                   vlan_tci=100))
+
+    # 2) GOOSE, tagged VLAN 100 -- same HMI_MAC/PLC_MAC pair as (1); a distinct flow key from (1)
+    #    purely because the protocol differs (see ethernet_flow_key), not because of the VLAN.
+    pdu_goose_100 = goose_pdu("IED1/LLN0$GO$gcb01", 2000, "IED1/LLN0$GOOSE1", None, ts_field,
+                               1, 1, None, 1, None, 1, data_bool(True))
+    packets.append(goose_frame(0x0001, pdu_goose_100, vlan_tci=100))
+
+    # 3) Sampled Values, tagged VLAN 100 -- same HMI_MAC/PLC_MAC pair.
+    asdu_sv_100 = sv_asdu("IED1/MSVCB01", 1234, 1, bytes(8))
+    packets.append(sv_frame(0x4000, sv_sav_pdu([asdu_sv_100]), vlan_tci=100))
+
+    # 4) EtherCAT, tagged VLAN 100 -- same HMI_MAC/PLC_MAC pair; a single LRD (Logical Read)
+    #    datagram, the same shape build_ethercat_sample's logical-addressing packets use.
+    packets.append(ecat_frame(ecat_datagram(10, 30, bytes(4), logical_address=0x00010000, wkc=1),
+                               vlan_tci=100))
+
+    # 5) GOOSE again, but tagged VLAN 200 and using the ENG_MAC/RTU_MAC pair -- a policy that only
+    #    declares a VLAN-100 zone must classify this flow as Unclassified ("no declared VLAN zone
+    #    contains VLAN 200"); a policy that ALSO declares a VLAN-200 zone without a conduit
+    #    permitting goose there must classify it as a Violation instead ("no conduit permits goose
+    #    traffic on VLAN zone ...") -- see docs/MANUAL.md's worked VLAN-zone example.
+    pdu_goose_200 = goose_pdu("IED2/LLN0$GO$gcb02", 2000, "IED2/LLN0$GOOSE2", None, ts_field,
+                               1, 1, None, 1, None, 1, data_bool(False))
+    packets.append(goose_frame(0x0002, pdu_goose_200, dst=RTU_MAC, src=ENG_MAC, vlan_tci=200))
+
+    # 6) EtherCAT with NO 802.1Q tag at all, using the OFFICE_A_MAC/OFFICE_B_MAC pair -- must
+    #    always classify as Unclassified ("frame carries no 802.1Q VLAN tag at all"), regardless of
+    #    which VLAN zones the policy declares, since there is no VLAN membership to check at all.
+    packets.append(ecat_frame(ecat_datagram(10, 31, bytes(4), logical_address=0x00020000, wkc=1),
+                               dst=OFFICE_B_MAC, src=OFFICE_A_MAC))
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_020_000 + i, i * 1000)
+    (TESTS_DIR / "sample_vlan_zones.pcap").write_bytes(data)
+
+
 if __name__ == "__main__":
     TESTS_DIR.mkdir(exist_ok=True)
     build_modbus_sample()
@@ -7536,4 +7608,5 @@ if __name__ == "__main__":
     build_llmnr_sample()
     build_nbns_sample()
     build_doh_sample()
+    build_vlan_zones_sample()
     print("wrote sample fixtures to", TESTS_DIR)

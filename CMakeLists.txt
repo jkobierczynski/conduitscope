@@ -5170,7 +5170,91 @@ set_tests_properties(policy_error_functions_unsupported_protocol_rejected PROPER
 add_test(NAME policy_error_unknown_protocol_lists_full_widened_set
   COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_unknown_protocol.yaml")
 set_tests_properties(policy_error_unknown_protocol_lists_full_widened_set PROPERTIES
-  PASS_REGULAR_EXPRESSION "unknown protocol 'profinet' \\(expected one of: modbus, dnp3, s7comm, iec104, enip, bacnet, hartip, opcua, mms, mqtt, ffhse, any\\)")
+  PASS_REGULAR_EXPRESSION "unknown protocol 'profibus' \\(expected one of: modbus, dnp3, s7comm, iec104, enip, bacnet, hartip, opcua, mms, mqtt, ffhse, profinet, goose, sv, ethercat, any\\)")
+
+# --------------------------------------------------------------------------
+# VLAN-membership-based conduit/zone model (ROADMAP item 15): an alternative to the IPv4-CIDR zone
+# model for the four protocols with no IP layer at all (PROFINET RT, GOOSE, Sampled Values,
+# EtherCAT) -- see policy.hpp's file header comment, PolicyEngine::observe's doc comment, and
+# docs/MANUAL.md's POLICY FILE FORMAT section. Validation-error fixtures below reuse
+# sample_modbus.pcap (any capture will do -- every one of these errors fires at policy-load time,
+# before a single packet is ever decoded); the worked-example fixtures are matched against the
+# dedicated tests/sample_vlan_zones.pcap (see build_vlan_zones_sample in tools/make_sample_pcap.py).
+# --------------------------------------------------------------------------
+
+add_test(NAME policy_error_vlan_zone_both_networks_and_vlans
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_zone_both_networks_and_vlans.yaml")
+set_tests_properties(policy_error_vlan_zone_both_networks_and_vlans PROPERTIES
+  PASS_REGULAR_EXPRESSION "zone 'confused_zone' declares both 'networks' and 'vlans' -- a zone is either an IPv4 zone or a VLAN zone, not both")
+
+add_test(NAME policy_error_vlan_zone_neither_networks_nor_vlans
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_zone_neither_networks_nor_vlans.yaml")
+set_tests_properties(policy_error_vlan_zone_neither_networks_nor_vlans PROPERTIES
+  PASS_REGULAR_EXPRESSION "zone 'empty_zone' has no 'networks' or 'vlans' key")
+
+add_test(NAME policy_error_vlan_id_out_of_range
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_vlan_id_out_of_range.yaml")
+set_tests_properties(policy_error_vlan_id_out_of_range PROPERTIES
+  PASS_REGULAR_EXPRESSION "zone 'ot_vlan': '4095' is not a valid VLAN ID \\(expected 1-4094 -- VID 0 is reserved for priority-tagged, non-VLAN-member frames and 4095 is reserved outright\\)")
+
+add_test(NAME policy_error_vlan_overlap
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_vlan_overlap.yaml")
+set_tests_properties(policy_error_vlan_overlap PROPERTIES
+  PASS_REGULAR_EXPRESSION "zone 'ot_vlan' and zone 'scada_vlan' both claim VLAN 100 -- each VLAN must belong to at most one zone")
+
+add_test(NAME policy_error_conduit_mixed_zone_kinds
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_conduit_mixed_zone_kinds.yaml")
+set_tests_properties(policy_error_conduit_mixed_zone_kinds PROPERTIES
+  PASS_REGULAR_EXPRESSION "conduit 'c1' mixes IPv4 zones and VLAN zones in its 'from'/'to' -- every zone a conduit references must be the same kind")
+
+add_test(NAME policy_error_conduit_tcp_protocol_on_vlan_zone
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_conduit_tcp_protocol_on_vlan_zone.yaml")
+set_tests_properties(policy_error_conduit_tcp_protocol_on_vlan_zone PROPERTIES
+  PASS_REGULAR_EXPRESSION "conduit 'c1': protocol 'modbus' rides IPv4/TCP, not raw Ethernet, so it can never appear on a VLAN-zone conduit -- only profinet, goose, sv, ethercat, or 'any' can")
+
+add_test(NAME policy_error_conduit_vlan_protocol_on_ip_zone
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_conduit_vlan_protocol_on_ip_zone.yaml")
+set_tests_properties(policy_error_conduit_vlan_protocol_on_ip_zone PROPERTIES
+  PASS_REGULAR_EXPRESSION "conduit 'c1': protocol 'goose' has no IP layer at all, so it can never appear on an IPv4-zone conduit -- declare a VLAN zone instead")
+
+add_test(NAME policy_error_vlan_conduit_from_to_mismatch
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_vlan_conduit_from_to_mismatch.yaml")
+set_tests_properties(policy_error_vlan_conduit_from_to_mismatch PROPERTIES
+  PASS_REGULAR_EXPRESSION "conduit 'c1' is a VLAN-zone conduit; 'from' and 'to' must name the exact same VLAN zone\\(s\\) -- it permits its protocol\\(s\\) ON that VLAN zone, not a directional flow between two zones")
+
+add_test(NAME policy_error_vlan_conduit_ports_rejected
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_vlan_conduit_ports.yaml")
+set_tests_properties(policy_error_vlan_conduit_ports_rejected PROPERTIES
+  PASS_REGULAR_EXPRESSION "conduit 'c1': 'ports' has no meaning on a VLAN-zone conduit -- profinet/goose/sv/ethercat have no TCP/UDP layer at all")
+
+add_test(NAME policy_error_vlan_conduit_bidirectional_rejected
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_vlan_conduit_bidirectional.yaml")
+set_tests_properties(policy_error_vlan_conduit_bidirectional_rejected PROPERTIES
+  PASS_REGULAR_EXPRESSION "conduit 'c1': 'bidirectional' has no meaning on a VLAN-zone conduit -- there is no client/server session to reverse")
+
+add_test(NAME policy_error_vlan_conduit_functions_rejected
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_vlan_conduit_functions.yaml")
+set_tests_properties(policy_error_vlan_conduit_functions_rejected PROPERTIES
+  PASS_REGULAR_EXPRESSION "conduit 'c1': 'functions'/'function' has no meaning on a VLAN-zone conduit -- profinet/goose/sv/ethercat have no per-flow function/service name this engine tracks yet")
+
+# sample_vlan_zones.pcap: four protocols tagged VLAN 100 (HMI_MAC<->PLC_MAC), a GOOSE flow tagged
+# VLAN 200 on a distinct MAC pair, and an untagged EtherCAT flow on a third distinct MAC pair (see
+# build_vlan_zones_sample's own comment in tools/make_sample_pcap.py).
+
+add_test(NAME policy_vlan_zone_single_segment_allowed_and_unclassified
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_vlan_zones.pcap" --policy "${POLICY_DIR}/vlan_zone_single_segment.yaml")
+set_tests_properties(policy_vlan_zone_single_segment_allowed_and_unclassified PROPERTIES
+  PASS_REGULAR_EXPRESSION "Ethernet flows evaluated: 6 \\(4 allowed, 0 violation\\(s\\), 2 unclassified\\).*no declared VLAN zone contains VLAN 200.*frame carries no 802.1Q VLAN tag at all")
+
+add_test(NAME policy_vlan_zone_mixed_results_all_three_verdicts
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_vlan_zones.pcap" --policy "${POLICY_DIR}/vlan_zone_mixed_results.yaml")
+set_tests_properties(policy_vlan_zone_mixed_results_all_three_verdicts PROPERTIES
+  PASS_REGULAR_EXPRESSION "Ethernet flows evaluated: 6 \\(4 allowed, 1 violation\\(s\\), 1 unclassified\\).*no conduit permits goose traffic on VLAN zone 'office_vlan'.*frame carries no 802.1Q VLAN tag at all.*Conduits never exercised by this capture \\(1\\):.*EtherCAT only on office_vlan")
+
+add_test(NAME policy_vlan_zone_json_format
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_vlan_zones.pcap" --policy "${POLICY_DIR}/vlan_zone_mixed_results.yaml" --format json)
+set_tests_properties(policy_vlan_zone_json_format PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"is_vlan_conduit\": true.*\"ethernet_flows\": \\[.*\"has_vlan_tag\": true,\n *\"vlan_id\": 100,\n *\"vlan_zone\": \"ot_vlan\".*\"has_vlan_tag\": false,\n *\"vlan_id\": null,\n *\"vlan_zone\": \"unclassified\"")
 
 # ---------------------------------------------------------------------------------------------
 # Live capture (live_capture.hpp/cpp) -- an optional, build-time-detected libpcap (Linux) / Npcap

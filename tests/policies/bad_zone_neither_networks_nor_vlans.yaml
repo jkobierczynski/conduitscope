@@ -1,0 +1,11 @@
+# Regression fixture: a zone declaring NEITHER 'networks' nor 'vlans' -- there is nothing left for
+# this zone to mean once both addressing schemes are absent (see ROADMAP item 15's widened Zone
+# schema).
+zones:
+  empty_zone:
+    description: "forgot the addressing key entirely"
+conduits:
+  - name: c1
+    from: empty_zone
+    to: empty_zone
+    protocol: any

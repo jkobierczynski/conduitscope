@@ -1,0 +1,12 @@
+# Regression fixture: a zone declaring BOTH 'networks' and 'vlans' -- a zone is either an IPv4
+# zone or a VLAN zone, never both (see policy.hpp's Zone comment and ROADMAP item 15), since
+# PolicyEngine needs an unambiguous rule for which addressing scheme classifies a given packet.
+zones:
+  confused_zone:
+    networks: [10.0.0.0/24]
+    vlans: [100]
+conduits:
+  - name: c1
+    from: confused_zone
+    to: confused_zone
+    protocol: any

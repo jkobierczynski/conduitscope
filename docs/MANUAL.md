@@ -415,29 +415,46 @@ Two required top-level keys:
 zones:
   <zone name>:
     description: "<optional free text>"
-    networks:
-      - <IPv4 address or CIDR block>
-      - <...>
+    networks:                               # an IPv4 zone --
+      - <IPv4 address or CIDR block>        # for modbus/dnp3/s7comm/iec104/enip/
+      - <...>                               # bacnet/hartip/opcua/mms/mqtt/ffhse
   <zone name>:
-    networks: [<address or CIDR>, <...>]   # a flow-style list works too
+    networks: [<address or CIDR>, <...>]    # a flow-style list works too
+  <zone name>:
+    vlans: [<VLAN ID 1-4094>, <...>]        # a VLAN zone instead --
+                                             # for profinet/goose/sv/ethercat
+  <zone name>:
+    vlan: <VLAN ID>                         # singular alias, for a one-VLAN zone
 
 conduits:
   - name: "<conduit name>"
     description: "<optional free text>"
     from: <zone name or [zone name, ...]>
-    to: <zone name or [zone name, ...]>
-    protocols: [<modbus | dnp3 | s7comm | iec104 | enip | bacnet | hartip | opcua | mms | mqtt | ffhse | any>, <...>]
-    ports: [<port>, <...>]                  # omit entirely to mean "any port"
-    bidirectional: <true | false>           # default: false
-    functions: [<function/service name>, <...>]  # optional; see "Function-level restrictions" below
+    to: <zone name or [zone name, ...]>     # VLAN-zone conduit: must be the exact
+                                             # same zone(s) as 'from' -- see "Conduits" below
+    protocols: [<modbus | dnp3 | s7comm | iec104 | enip | bacnet | hartip | opcua | mms | mqtt | ffhse | profinet | goose | sv | ethercat | any>, <...>]
+    ports: [<port>, <...>]                  # omit entirely to mean "any port"; IPv4-zone conduits only
+    bidirectional: <true | false>           # default: false; IPv4-zone conduits only
+    functions: [<function/service name>, <...>]  # optional; see "Function-level restrictions" below; IPv4-zone conduits only
 ```
 
-**Zones.** Each zone name maps to one or more IPv4 CIDR blocks (`10.10.10.0/24`)
-or bare addresses (`10.10.10.5`, treated as `/32`). At least one zone is
-required. **No two zones may claim the same address** -- `policy validate`
-needs to say definitively which single zone a packet's source/destination
-belongs to, so overlapping networks across zones are rejected at load time,
-not silently resolved by declaration order. An address matching no declared
+**Zones.** Each zone name maps to EITHER one or more IPv4 CIDR blocks
+(`10.10.10.0/24`) or bare addresses (`10.10.10.5`, treated as `/32`), under
+`networks`, OR one or more VLAN IDs (`1`-`4094`), under `vlans` (singular
+alias `vlan`, for a one-VLAN zone) -- never both on the same zone, and never
+neither. Which kind a zone is drives which protocols a conduit referencing it
+can name (see "Conduits" below): `networks` zones classify
+modbus/dnp3/s7comm/iec104/enip/bacnet/hartip/opcua/mms/mqtt/ffhse traffic by
+IPv4 address, the way this file always has; `vlans` zones classify
+profinet/goose/sv/ethercat traffic -- the four protocols with no IP layer at
+all -- by which VLAN the frame was tagged with instead (ROADMAP item 15; see
+"Addressing scope" below for the full rationale). At least one zone is
+required. **No two zones of the same kind may claim the same address or
+VLAN** -- `policy validate` needs to say definitively which single zone a
+packet belongs to, so overlap within a kind is rejected at load time, not
+silently resolved by declaration order (an IPv4 zone and a VLAN zone can
+never overlap with each other, having no addressing scheme in common, so
+only same-kind pairs are checked). An address or VLAN matching no declared
 zone is reported as the reserved zone name `unclassified` (which you
 therefore can't declare yourself -- see "Validation errors" below).
 
@@ -465,10 +482,21 @@ outright rather than silently accepted as an implicit deny-all.
 
 `protocols` uses the same protocol names conduitscope's own decoded output
 uses: `modbus`, `dnp3`, `s7comm`, `iec104`, `enip`, `bacnet`, `hartip`,
-`opcua`, `mms`, `mqtt`, `ffhse`, plus the wildcard `any` (ROADMAP item 14
-widened this from the original six -- `modbus`/`dnp3`/`s7comm`/`iec104`/
-`enip`/`any` -- to name every TCP-capable protocol `decode` recognizes
-individually). A COTP session
+`opcua`, `mms`, `mqtt`, `ffhse`, `profinet`, `goose`, `sv`, `ethercat`, plus
+the wildcard `any` (ROADMAP item 14 widened this from the original six --
+`modbus`/`dnp3`/`s7comm`/`iec104`/`enip`/`any` -- to name every TCP-capable
+protocol `decode` recognizes individually; item 15 then added the four
+raw-Ethernet, no-IP-layer protocols -- `profinet`/`goose`/`sv`/`ethercat` --
+alongside the new VLAN-zone model below). Every zone a conduit references,
+on either side, must be the same kind -- a conduit can't mix an IPv4 zone
+and a VLAN zone, since there's no shared addressing scheme to classify a
+packet against. That kind, in turn, restricts which protocol names the
+conduit can use: `profinet`/`goose`/`sv`/`ethercat` (or `any`) only on a
+conduit whose zones are all VLAN zones, and every other protocol name (or
+`any`) only on a conduit whose zones are all IPv4 zones -- naming a TCP
+protocol on a VLAN-zone conduit, or a VLAN-only protocol on an IPv4-zone
+conduit, is a load-time `PolicyError` either way (see "Validation errors"
+below). A COTP session
 that never carries a full S7comm message (e.g. only a connection
 request/confirm was captured) still counts as `s7comm` traffic for matching
 purposes -- see PROTOCOL COVERAGE's S7comm/COTP section for why a "cotp"-
@@ -501,7 +529,23 @@ one-directional this way (an HMI/engineering zone reaching into a
 control-network zone). Set `bidirectional: true` on a conduit that should
 also permit the same protocol/port set initiated the opposite way (checked
 symmetrically against the same zone lists: client in `to`, server in
-`from`).
+`from`). None of this applies to a VLAN-zone conduit (see next paragraph):
+there is no client/server session to have a direction at all.
+
+**VLAN-zone conduits mean something different.** A single raw-Ethernet
+PROFINET RT/GOOSE/SV/EtherCAT frame carries at most one 802.1Q VLAN tag --
+unlike a TCP flow, there's no separate "source VLAN" and "destination VLAN"
+the way there's a client IP and a server IP. So a VLAN-zone conduit's
+`from` and `to` are required to name the **exact same set** of VLAN
+zone(s) -- violating this is a load-time `PolicyError` (see "Validation
+errors" below). Its meaning is "this protocol is permitted on this VLAN
+zone," not a directional flow between two zones. Following from that,
+three fields that only make sense for a directional, session-based TCP
+flow are rejected outright on a VLAN-zone conduit, also as load-time
+errors: `ports` (profinet/goose/sv/ethercat have no TCP/UDP layer at all),
+`bidirectional: true` (there's no client/server session to reverse -- `to`
+already equals `from`), and `functions`/`function` (these four protocols
+have no per-flow function/service name this engine tracks yet).
 
 `ports` restricts which TCP port on the **responding** (server) side of the
 connection this conduit covers; omit it to allow any port. A `protocol`
@@ -546,6 +590,52 @@ Conduits never exercised by this capture (0):
 See also `tests/policies/multi_to_zones.yaml` (the same idea on the `to`
 side) and `tests/policies/multi_zone_bidirectional.yaml` (list-widened
 `from`/`to` combined with `bidirectional: true` reverse matching).
+
+**Worked example, VLAN zones.** `tests/policies/vlan_zone_single_segment.yaml`
+declares one VLAN zone (`ot_vlan`, VLAN 100) and one conduit permitting every
+raw-Ethernet OT protocol on it. Matched against
+`tests/sample_vlan_zones.pcap` (four flows tagged VLAN 100, one GOOSE flow
+tagged VLAN 200, and one untagged EtherCAT flow):
+
+```sh
+$ conduitscope policy validate -r tests/sample_vlan_zones.pcap --policy tests/policies/vlan_zone_single_segment.yaml
+Zone/conduit policy validation
+  capture: tests/sample_vlan_zones.pcap
+  policy:  tests/policies/vlan_zone_single_segment.yaml (1 zone(s), 1 conduit(s))
+
+Result: NON-COMPLIANT (0 violation(s), 2 unclassified flow(s))
+
+Flows evaluated: 0 (0 allowed, 0 violation(s), 0 unclassified)
+  6 total packet(s) in capture, 0 skipped (non-TCP/non-IP)
+...
+Ethernet flows evaluated: 6 (4 allowed, 0 violation(s), 2 unclassified)
+  PROFINET RT/GOOSE/Sampled Values/EtherCAT traffic, classified by VLAN zone -- see docs/MANUAL.md's POLICY FILE FORMAT section
+
+ETHERNET UNCLASSIFIED TRAFFIC (2):
+  [1] 00:0c:29:aa:11:22 <-> 00:0c:29:bb:33:44  (goose, 1 packet(s))
+      vlan: 200, zone: unclassified
+      no declared VLAN zone contains VLAN 200
+  [2] 00:0c:29:cc:55:66 <-> 00:0c:29:dd:77:88  (ethercat, 1 packet(s))
+      vlan: (untagged), zone: unclassified
+      frame carries no 802.1Q VLAN tag at all
+
+ETHERNET ALLOWED (4):
+  [1] 00:0c:29:11:22:33 <-> 00:0c:29:aa:bb:cc  (profinet, 1 packet(s))
+      vlan: 100, zone: ot_vlan, matched conduit "OT protocols permitted on ot_vlan"
+  ...
+```
+
+Note the two distinct Ethernet flow sections -- separate from `Flows
+evaluated`/`VIOLATIONS`/`UNCLASSIFIED TRAFFIC`/`ALLOWED` above them, which
+stay IPv4-zone-only -- and that the VLAN-200 GOOSE traffic and the untagged
+EtherCAT traffic are both `Unclassified`, for two different reasons: no
+zone covers VLAN 200 at all, versus no VLAN tag to check membership on in
+the first place. `tests/policies/vlan_zone_mixed_results.yaml` adds a
+second VLAN zone (`office_vlan`, VLAN 200) with its own conduit that
+deliberately excludes `goose`, turning that same VLAN-200 traffic into a
+`Violation` ("no conduit permits goose traffic on VLAN zone 'office_vlan'")
+instead of `Unclassified` -- the "zone exists but no conduit covers this
+protocol" case, distinguished from "no zone matches this VLAN at all."
 
 ### Function-level restrictions
 
@@ -768,9 +858,15 @@ such as a missing top-level key). None of these can be bypassed with
 error (see EXIT STATUS):
 
 - a missing top-level `zones` or `conduits` key, or either being empty
+- a zone declaring both `networks` and `vlans` (a zone is either an IPv4
+  zone or a VLAN zone, never both), or neither
 - a zone with no `networks`, or a network that isn't a valid IPv4
   address/CIDR block
-- two zones whose networks overlap
+- a zone with no `vlans`, or a VLAN ID outside `[1, 4094]` (VID 0 is
+  reserved for priority-tagged, non-VLAN-member frames; 4095 is reserved
+  outright)
+- two zones of the same kind whose networks, or VLANs, overlap (an IPv4
+  zone and a VLAN zone can never overlap with each other)
 - a zone literally named `unclassified` (reserved -- see "Zones" above)
 - a duplicate zone name (a YAML-level error: mapping keys are inherently
   unique) or duplicate conduit name (a policy.cpp-level check: a conduit's
@@ -782,7 +878,18 @@ error (see EXIT STATUS):
   just the first
 - a conduit's `from`/`to` list being empty (e.g. `from: []`)
 - a conduit protocol outside `{modbus, dnp3, s7comm, iec104, enip, bacnet,
-  hartip, opcua, mms, mqtt, ffhse, any}` (ROADMAP item 14)
+  hartip, opcua, mms, mqtt, ffhse, profinet, goose, sv, ethercat, any}`
+  (ROADMAP items 14 and 15)
+- a conduit's `from`/`to` referencing both an IPv4 zone and a VLAN zone
+  (every zone a conduit references must be the same kind -- ROADMAP item 15)
+- a conduit naming a TCP/IP protocol (e.g. `modbus`) while its zones are
+  VLAN zones, or naming a VLAN-only protocol (`profinet`/`goose`/`sv`/
+  `ethercat`) while its zones are IPv4 zones (ROADMAP item 15)
+- a VLAN-zone conduit whose `from` and `to` don't name the exact same set
+  of VLAN zone(s) (ROADMAP item 15 -- see "Conduits" above for why)
+- a VLAN-zone conduit giving `ports`, `bidirectional: true`, or
+  `functions`/`function` -- none of these three has a meaning on a
+  VLAN-zone conduit (ROADMAP item 15 -- see "Conduits" above)
 - a conduit port outside `[1, 65535]`
 - a conduit's `bidirectional` value that isn't a recognizable boolean
   (`true`/`false`/`yes`/`no`)
@@ -828,6 +935,7 @@ an array depending on how the policy file happened to write it:
       "from": ["hmi_zone"],
       "to": ["plc_zone"],
       "bidirectional": false,
+      "is_vlan_conduit": false,
       "protocols": ["modbus"],
       "functions": []
     }
@@ -853,6 +961,7 @@ an array depending on how the policy file happened to write it:
       "reason": null
     }
   ],
+  "ethernet_flows": [],
   "unexercised_conduits": []
 }
 ```
@@ -860,7 +969,42 @@ an array depending on how the policy file happened to write it:
 `verdict` is one of `"allowed"`, `"violation"`, `"unclassified"`.
 `matched_conduit` is only non-`null` when `verdict` is `"allowed"`; `reason`
 is only non-`null` otherwise (a short, human-readable explanation, the same
-text the `text` report shows).
+text the `text` report shows). Same for `ethernet_flows[]`'s own `verdict`/
+`matched_conduit`/`reason` below.
+
+**`is_vlan_conduit`** (per conduit, ROADMAP item 15) -- `true` when every
+zone this conduit references is a VLAN zone, `false` when every zone is an
+IPv4 zone (a conduit can never mix the two -- see "Conduits" above).
+
+**`ethernet_flows[]`** (ROADMAP item 15) -- always present, empty on a
+policy that declares no VLAN zones (see "Addressing scope" below), one
+entry per "L2 flow": PROFINET RT/GOOSE/Sampled Values/EtherCAT traffic
+aggregated by protocol + MAC pair (no port, no client/server distinction --
+these protocols have neither):
+
+```json
+{
+  "protocol": "goose",
+  "mac_a": "00:0c:29:11:22:33",
+  "mac_b": "00:0c:29:aa:bb:cc",
+  "has_vlan_tag": true,
+  "vlan_id": 100,
+  "vlan_zone": "ot_vlan",
+  "packet_count": 1,
+  "verdict": "allowed",
+  "matched_conduit": "OT protocols permitted on ot_vlan",
+  "reason": null
+}
+```
+
+`vlan_id` is `null` when `has_vlan_tag` is `false` (the frame carried no
+802.1Q tag at all). `vlan_zone` is the declared VLAN zone the frame's tag
+falls within, or the reserved name `"unclassified"` when either the tag
+matches no declared zone or there's no tag to check at all -- `reason`
+distinguishes the two ("no declared VLAN zone contains VLAN N" vs. "frame
+carries no 802.1Q VLAN tag at all"). `allowed_count`/`violation_count`/
+`unclassified_count` at the top level are the combined totals across both
+`flows[]` and `ethernet_flows[]`.
 
 Two fields are additive since function-level restrictions were introduced
 and appear on every report regardless of whether any conduit actually uses
@@ -941,11 +1085,26 @@ something `policy validate` needs to verify the way it verifies an IP
 conduit. The question worth asking about these four instead is whether
 the traffic is on the segment/VLAN it's supposed to be on AT ALL (a
 mis-patched switch port, an accidentally bridged VLAN) -- a
-VLAN-membership check, not an IPv4-zone check, and not one this tool
-implements yet, though the raw material already exists unused: every
-packet's 802.1Q tag is decoded generically (`has_vlan_tag`/`vlan_id` in
-`DecodedPacket`) regardless of protocol, it's just never consulted by
-`PolicyEngine`. Two narrower asterisks worth knowing about: IEC 61850-90-5
+VLAN-membership check, not an IPv4-zone check. ROADMAP item 15 implements
+exactly that: a zone can declare `vlans: [...]` instead of `networks:
+[...]`, and a VLAN-zone conduit is matched against these four protocols'
+own traffic, classified by whichever declared VLAN zone (if any) the
+frame's own 802.1Q tag falls within -- see "Schema" and "Conduits" above
+for the full syntax, and "Validation errors" for what's rejected at load
+time. This still isn't a directional, per-flow model the way an IPv4
+conduit is: a single frame carries at most one VLAN tag, so there's no
+"destination VLAN" to check against a separate "source VLAN" the way an
+IPv4 conduit checks a client zone against a server zone -- a VLAN-zone
+conduit's `from`/`to` are required to name the same zone set, and it means
+"this protocol is permitted on this VLAN zone," full stop. Only a single, ordinary 802.1Q tag (EtherType `0x8100`) is ever recognized
+for this -- `parse_ethernet` (`link_layer.cpp`) has no case for a
+stacked/QinQ outer tag (EtherType `0x88A8`) at all, so a QinQ-tagged
+PROFINET RT/GOOSE/SV/EtherCAT frame isn't even decoded as that protocol in
+the first place (the outer `0x88A8` ethertype falls through to the generic
+"non-IP ethertype" path instead, before this decoder ever gets to look for
+a PROFINET/GOOSE/SV/EtherCAT ethertype underneath) -- see LIMITATIONS.
+Two narrower
+asterisks worth knowing about: IEC 61850-90-5
 defines routable variants of GOOSE and SV (R-GOOSE/R-SV, wrapped in UDP/IP
 multicast) that CAN cross routers -- this decoder deliberately doesn't
 recognize either (see `goose.hpp`/`sv.hpp`), so that traffic wouldn't even
@@ -998,13 +1157,17 @@ this tool does with it today:**
   `svID` (the actual publisher identity) -- and **EtherCAT** uses ADP/ADO
   (station address + memory offset) to address one slave within a
   segment. Both are decoded and exposed; neither is IP-like, and neither
-  reaches the zone engine, consistent with these four protocols having no
-  IP layer at all (see above).
+  reaches the zone engine (this is still true after ROADMAP item 15: a
+  VLAN-zone conduit classifies these four protocols' traffic by their
+  802.1Q tag alone, never by APPID/GoCB/`svID`/ADP/ADO -- those remain
+  informational, decoded-and-exposed-but-not-zone-classified fields, the
+  same as every other application-layer address in this list).
 
-None of this changes what's Allowed/Violation/Unclassified today -- every
-item above describes information `decode` already surfaces (or, for
-DNP3's link address, doesn't yet) that `PolicyEngine` doesn't currently
-use for zone classification. See ROADMAP for what's actually planned.
+None of this changes what's Allowed/Violation/Unclassified today, item 15
+excepted -- every other item above describes information `decode` already
+surfaces (or, for DNP3's link address, doesn't yet) that `PolicyEngine`
+still doesn't use for zone classification. See ROADMAP for what's actually
+planned.
 
 ## PROTOCOL DETECTION
 
@@ -6911,10 +7074,13 @@ These are current, not aspirational -- each has a corresponding ROADMAP item.
   PROFINET RT, GOOSE, Sampled Values, EtherCAT, and BACnet/IP sections.
   `policy validate` does not yet evaluate ANY UDP traffic against a conduit,
   decoded or not (it only ever looks at TCP flows -- this applies equally to
-  CIP I/O and BACnet/IP), and never evaluates PROFINET RT, GOOSE, Sampled
-  Values, or EtherCAT either (all four ride raw Ethernet with no IP/TCP/UDP
-  layer at all, so there is no IP-based conduit rule that could match any of
-  them) -- see that section and ROADMAP.
+  CIP I/O and BACnet/IP) -- see that section and ROADMAP. PROFINET RT,
+  GOOSE, Sampled Values, and EtherCAT are different: all four ride raw
+  Ethernet with no IP/TCP/UDP layer at all, so there is no IP-based conduit
+  rule that could ever match any of them, but ROADMAP item 15 added a
+  VLAN-membership-based conduit/zone model specifically for this case -- see
+  POLICY FILE FORMAT's "Addressing scope" section and the VLAN-zone
+  LIMITATIONS entries below for exactly what it does and doesn't cover.
 - **CIP I/O (implicit messaging) decoding does not value-decode the actual
   I/O data, and has no cross-datagram state.** The Connected Data Item's
   contents are shown only as raw hex -- see PROTOCOL COVERAGE's CIP I/O
@@ -7643,6 +7809,37 @@ These are current, not aspirational -- each has a corresponding ROADMAP item.
   will not match traffic this decoder itself already decodes as
   `dns`/`mdns`/`llmnr`/`nbns`/`doh`. This was deliberately left out of this
   round's scope (decode/detect only) and is tracked in ROADMAP.
+- **VLAN-zone conduits only ever consult a single, outermost 802.1Q tag --
+  a stacked/QinQ frame can never be VLAN-zone-classified.** `parse_ethernet`
+  (`link_layer.cpp`) only recognizes ordinary 802.1Q (EtherType `0x8100`);
+  a QinQ outer tag (EtherType `0x88A8`) has no case at all, so a
+  QinQ-tagged PROFINET RT/GOOSE/SV/EtherCAT frame isn't even decoded as
+  that protocol in the first place, let alone classified by its inner VLAN
+  membership -- see PROTOCOL COVERAGE's link/IP-layer plumbing section and
+  POLICY FILE FORMAT's "Addressing scope" section.
+- **A VLAN-zone conduit can't restrict WHICH direction a flow was
+  initiated, unlike an IPv4-zone conduit.** Its `from`/`to` are required to
+  name the exact same VLAN zone(s) (see POLICY FILE FORMAT's "Conduits"
+  section for the full rationale: a single raw-Ethernet frame carries at
+  most one VLAN tag, so there is no separate "source zone"/"destination
+  zone" the way an IPv4 conduit has a client zone and a server zone). This
+  is a deliberate design constraint of the VLAN-zone model itself, not
+  something planned to be relaxed later.
+- **`functions`/per-flow service restriction is not available for
+  VLAN-zone conduits.** PROFINET RT/GOOSE/Sampled Values/EtherCAT have no
+  per-flow function/service name this engine tracks yet (unlike
+  `modbus`/`dnp3`/`s7comm`/`iec104`/`enip`'s own known-function tables --
+  see "Function-level restrictions" above) -- `functions`/`function` on a
+  VLAN-zone conduit is rejected outright at load time rather than silently
+  doing nothing.
+- **`policy validate`'s VLAN-zone classification is membership-only, never
+  application-layer.** A VLAN-zone conduit's verdict depends solely on the
+  frame's own 802.1Q tag; none of GOOSE/SV's APPID or GoCB reference/`svID`,
+  or EtherCAT's ADP/ADO station addressing, factor into it at all, even
+  though all of them are already decoded and exposed by `decode` -- see
+  POLICY FILE FORMAT's "Addressing scope" section for the full list of
+  addressing schemes this tool decodes but doesn't (yet, or ever) use for
+  zone classification.
 
 ## EXIT STATUS
 
@@ -8213,6 +8410,17 @@ conduitscope decode -r capture.pcap --protocol doh -f json \
   | jq -r '.[] | "\(.src_ip) -> \(.dst_ip): \(.doh_matched_provider) (SNI \(.doh_sni))"'
 ```
 
+Check whether PROFINET RT/GOOSE/Sampled Values/EtherCAT traffic is on the
+VLAN it's supposed to be on -- a VLAN-membership zone/conduit policy (see
+POLICY FILE FORMAT's "Conduits" and "Addressing scope" sections), reported
+as JSON so a pipeline can flag anything that isn't `"allowed"`:
+
+```sh
+conduitscope policy validate -r capture.pcap --policy ot_vlans.yaml -f json \
+  | jq -r '.ethernet_flows[] | select(.verdict != "allowed") |
+           "\(.mac_a) <-> \(.mac_b) (\(.protocol)): \(.reason)"'
+```
+
 ## ROADMAP
 
 Rough order, each building on the groundwork this release establishes:
@@ -8487,13 +8695,37 @@ Rough order, each building on the groundwork this release establishes:
     validate` evaluating UDP flows at all (the only path that could ever
     let `bacnet` -- or HART-IP's/FF-HSE's own UDP forms -- match), and
     the VLAN-based zone model for protocols with no IP layer (item 15).
-15. **A VLAN-membership-based conduit/zone model**, as an alternative to
+15. ~~**A VLAN-membership-based conduit/zone model**~~, as an alternative to
     (not a replacement for) the existing IPv4-CIDR one, for the four
     protocols with no IP layer at all (PROFINET RT, GOOSE, Sampled
-    Values, EtherCAT) -- 802.1Q tags are already decoded generically
-    (`has_vlan_tag`/`vlan_id`) but never consulted by `PolicyEngine`. Also
-    worth reconsidering once DNP3's link address (item 13) is exposed: a
-    zone model keyed on that address rather than (or alongside) IP.
+    Values, EtherCAT) -- **done**: a zone can now declare `vlans: [...]`
+    instead of `networks: [...]`, and a conduit referencing only VLAN
+    zones is matched against these four protocols' own "L2 flows"
+    (aggregated by protocol + MAC pair, since none of them carry a
+    client/server IP the way a TCP flow does) -- see POLICY FILE FORMAT's
+    Schema, Conduits, Validation errors, JSON report schema, and
+    "Addressing scope" sections, all updated, plus its own worked example
+    (`tests/policies/vlan_zone_single_segment.yaml`,
+    `vlan_zone_mixed_results.yaml`). The genuinely hard design question
+    this item raised: a single raw-Ethernet frame carries at most one
+    802.1Q tag, so there's no "destination VLAN" the way a TCP flow has a
+    server IP distinct from its client IP -- a VLAN-zone conduit's `from`
+    and `to` are therefore required to name the exact same zone set,
+    reframing what it means from "a directional flow between two zones"
+    to "this protocol is permitted on this VLAN zone." Existing IPv4-only
+    policy files are provably unaffected: the entire VLAN-zone evaluation
+    path is gated behind `Policy::has_vlan_zone()`, so a policy declaring
+    zero VLAN zones behaves byte-for-byte as it did before this item
+    (PROFINET RT/GOOSE/SV/EtherCAT traffic still falls into
+    `skipped_non_tcp`, exactly as before). Deliberately left open: only
+    the single outermost 802.1Q tag is ever consulted -- a stacked/QinQ
+    frame (EtherType `0x88A8`) can never be VLAN-zone-classified (see
+    LIMITATIONS); `functions`/per-flow service restriction, which these
+    four protocols have no per-flow service name for yet (rejected
+    outright at load time on a VLAN-zone conduit rather than silently
+    doing nothing); and, unrelated to VLANs, DNP3's link address (item
+    13) as an alternative (or additional) zone key once/if that's ever
+    taken on.
 16. **Extend `policy validate`'s report with the same OUI/hostname/service-
     name annotations `decode` now has** (see OUTPUT FORMATS' "Name
     resolution" subsection and LIMITATIONS) -- currently `decode`-only,

@@ -1,0 +1,12 @@
+# Regression fixture: 'functions' given on a VLAN-zone conduit -- profinet/goose/sv/ethercat have
+# no per-flow function/service name this engine tracks yet (see ROADMAP item 15's own deferred-work
+# note).
+zones:
+  ot_vlan:
+    vlans: [100]
+conduits:
+  - name: c1
+    from: ot_vlan
+    to: ot_vlan
+    protocol: goose
+    functions: [SomeFunction]

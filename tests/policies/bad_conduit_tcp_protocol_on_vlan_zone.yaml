@@ -1,0 +1,11 @@
+# Regression fixture: a VLAN-zone conduit naming a TCP/IP protocol (modbus) -- modbus rides
+# IPv4/TCP, not raw Ethernet, so it can never appear on a VLAN-zone conduit; only profinet, goose,
+# sv, ethercat, or 'any' can (see ROADMAP item 15).
+zones:
+  ot_vlan:
+    vlans: [100]
+conduits:
+  - name: c1
+    from: ot_vlan
+    to: ot_vlan
+    protocol: modbus

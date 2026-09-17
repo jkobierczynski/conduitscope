@@ -68,20 +68,55 @@ struct FlowReport {
     std::string reason;           // set (non-empty) when verdict != Allowed: why, for the report
 };
 
+// One observed raw-Ethernet "L2 flow" -- PROFINET RT, GOOSE, Sampled Values, or EtherCAT traffic
+// between one pair of MAC addresses, aggregated the same way FlowReport aggregates a TCP 4-tuple,
+// but keyed and evaluated completely differently: there is no port, no client/server distinction
+// (no SYN, no session -- these protocols are cyclic/multicast publish traffic, not a connection),
+// and the "zone" question is VLAN membership, not IP CIDR membership -- see policy.hpp's own
+// header comment for the full "why" and PolicyEngine::observe's comment for exactly when this
+// report is even populated at all (only once the policy declares at least one VLAN zone).
+struct EthernetFlowReport {
+    std::string protocol;         // "profinet"/"goose"/"sv"/"ethercat"
+    std::string mac_a, mac_b;     // canonical order (mac_a < mac_b) -- no "source"/"destination"
+                                   // distinction is tracked, since neither MAC decides zone
+                                   // membership here (see vlan_zone below)
+    bool has_vlan_tag = false;
+    uint16_t vlan_id = 0;         // meaningful only when has_vlan_tag
+    std::string vlan_zone;        // "unclassified" when has_vlan_tag is false, or no declared VLAN
+                                   // zone contains vlan_id
+    size_t packet_count = 0;
+    FlowVerdict verdict = FlowVerdict::Unclassified;
+    std::string matched_conduit;  // set (non-empty) only when verdict == Allowed
+    std::string reason;           // set (non-empty) when verdict != Allowed: why, for the report
+};
+
 struct PolicyReport {
     std::vector<FlowReport> flows;  // one per observed TCP flow, in first-seen order
+    // One per observed raw-Ethernet L2 flow (PROFINET RT/GOOSE/SV/EtherCAT), in first-seen order --
+    // only ever non-empty when the policy declares at least one VLAN zone (Zone::is_vlan_zone);
+    // otherwise this traffic stays folded into skipped_non_tcp below, exactly as it was before
+    // VLAN zones existed (ROADMAP item 15) -- see PolicyEngine::observe's own comment for why.
+    std::vector<EthernetFlowReport> ethernet_flows;
     // Conduits declared in the policy that no observed flow ever matched -- informational only
     // (doesn't affect compliant()); useful for pruning a policy file or noticing a conduit that
-    // was supposed to be exercised by this capture but wasn't.
+    // was supposed to be exercised by this capture but wasn't. Spans both `flows` and
+    // `ethernet_flows` -- a VLAN-zone conduit no L2 flow ever matched appears here exactly like an
+    // IP-zone conduit no TCP flow ever matched.
     std::vector<std::string> unexercised_conduits;
-    size_t skipped_non_tcp = 0;  // packets with has_ip==false or has_tcp==false (including UDP):
-                                  // not part of any evaluated flow -- see PolicyEngine::observe
+    size_t skipped_non_tcp = 0;  // packets with has_ip==false or has_tcp==false (including UDP),
+                                  // and NOT one of PROFINET RT/GOOSE/SV/EtherCAT (see ethernet_flows
+                                  // above) -- or one of those four but the policy declares no VLAN
+                                  // zone at all: not part of any evaluated flow -- see
+                                  // PolicyEngine::observe
     size_t total_packets = 0;
 
+    // Every count below spans both `flows` and `ethernet_flows` -- an L2 flow's verdict counts
+    // exactly like a TCP flow's for compliance purposes; there is no separate "ethernet compliant"
+    // notion, one capture is either COMPLIANT or it isn't.
     size_t allowed_count() const;
     size_t violation_count() const;
     size_t unclassified_count() const;
-    // True only when every observed flow was explicitly Allowed -- any Violation OR any
+    // True only when every observed flow (TCP or L2) was explicitly Allowed -- any Violation OR any
     // Unclassified flow makes this false, since "traffic between addresses this policy doesn't
     // even classify" is itself a finding worth surfacing in an audit, not something to pass
     // silently. See cli_main.cpp for how this maps to `policy validate`'s exit code.
@@ -90,20 +125,33 @@ struct PolicyReport {
 
 class PolicyEngine {
 public:
-    explicit PolicyEngine(const Policy& policy) : policy_(policy) {}
+    explicit PolicyEngine(const Policy& policy)
+        : policy_(policy), any_vlan_zone_(policy.has_vlan_zone()) {}
 
     // Folds one already-decoded packet into this engine's per-flow state. Call once per packet, in
     // capture order (same discipline as Decoder::decode).
     //
-    // Packets with has_ip==false or has_tcp==false (non-IP, non-TCP -- including UDP, which
-    // `decode` now recognizes and reports on but this engine does not yet evaluate against any
-    // conduit, see docs/MANUAL.md's ROADMAP -- or a parse-error packet) aren't part of any TCP
-    // flow and are only counted toward PolicyReport::skipped_non_tcp -- this tool only ever
-    // checks TCP-based OT protocols against a policy's conduits, so there's nothing further to
-    // evaluate for them yet.
+    // Packets with protocol == "profinet"/"goose"/"sv"/"ethercat" are folded into an L2 flow
+    // (PolicyReport::ethernet_flows) instead of the TCP-flow path below, but ONLY when the policy
+    // declares at least one VLAN zone (`any_vlan_zone_`, cached from Policy::has_vlan_zone at
+    // construction) -- when it doesn't, this traffic is left in PolicyReport::skipped_non_tcp
+    // exactly as it was before VLAN zones existed (ROADMAP item 15), so a policy file written
+    // before this feature existed can never have its compliance verdict change just because a
+    // capture happens to also contain some raw-Ethernet OT traffic that policy's author never
+    // wrote a single conduit to address (see policy.hpp's Policy::has_vlan_zone comment). An L2
+    // flow is keyed by (protocol, canonical MAC pair) -- there is no port, and no client/server
+    // concept (no SYN, no session; see EthernetFlowReport's own comment) -- and classified by
+    // whether its VLAN tag (if any) falls in a declared VLAN zone, not by IP.
     //
-    // Client (initiator) vs. server is decided, per flow, the first time that flow is seen able to
-    // decide it:
+    // Every other packet with has_ip==false or has_tcp==false (non-IP, non-TCP -- including UDP,
+    // which `decode` now recognizes and reports on but this engine does not yet evaluate against
+    // any conduit, see docs/MANUAL.md's ROADMAP -- or a parse-error packet) isn't part of any TCP
+    // flow either and is only counted toward PolicyReport::skipped_non_tcp -- this tool only ever
+    // checks TCP-based OT protocols (plus, now, VLAN-zoned raw-Ethernet OT protocols) against a
+    // policy's conduits, so there's nothing further to evaluate for them yet.
+    //
+    // Client (initiator) vs. server is decided, per TCP flow, the first time that flow is seen able
+    // to decide it:
     //   1. A pure SYN packet (tcp_flags == "SYN") authoritatively marks its source as the client.
     //   2. A SYN-ACK packet (tcp_flags starts with "SYN,ACK") authoritatively marks its
     //      DESTINATION as the client (it's the server's reply to a SYN this engine may not have
@@ -135,9 +183,22 @@ private:
         size_t packet_count = 0;
     };
 
+    // Aggregated state for one L2 flow (protocol + canonical MAC pair) -- see EthernetFlowReport's
+    // own comment for why this has neither a port nor a client/server distinction.
+    struct EthernetFlowState {
+        std::string protocol;
+        std::string mac_a, mac_b;
+        bool has_vlan_tag = false;
+        uint16_t vlan_id = 0;
+        size_t packet_count = 0;
+    };
+
     const Policy& policy_;
+    bool any_vlan_zone_;  // cached Policy::has_vlan_zone() -- see observe()'s own comment
     std::unordered_map<std::string, FlowState> flows_;  // keyed by canonical session key
     std::vector<std::string> flow_order_;                // session keys, first-seen order
+    std::unordered_map<std::string, EthernetFlowState> ethernet_flows_;  // keyed by canonical L2 flow key
+    std::vector<std::string> ethernet_flow_order_;                        // L2 flow keys, first-seen order
     size_t skipped_non_tcp_ = 0;
     size_t total_packets_ = 0;
 };

@@ -1,0 +1,17 @@
+# Worked example: a single VLAN-membership zone ("ot_vlan", VLAN 100) with one conduit permitting
+# every raw-Ethernet OT protocol on it (see ROADMAP item 15). Matched against
+# tests/sample_vlan_zones.pcap, this demonstrates the "Allowed" and "Unclassified" verdicts a
+# VLAN-zone conduit can produce: the four VLAN-100 flows (profinet/goose/sv/ethercat, all on
+# HMI_MAC<->PLC_MAC) are Allowed; the GOOSE flow tagged VLAN 200 and the untagged EtherCAT flow are
+# both Unclassified, since this policy declares no zone that covers either of them (see
+# docs/MANUAL.md's POLICY FILE FORMAT section for the exact reasons each shows).
+zones:
+  ot_vlan:
+    description: "OT segment -- PROFINET RT/GOOSE/SV/EtherCAT, tagged VLAN 100"
+    vlans: [100]
+
+conduits:
+  - name: "OT protocols permitted on ot_vlan"
+    from: ot_vlan
+    to: ot_vlan
+    protocol: any

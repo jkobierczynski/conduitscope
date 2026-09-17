@@ -1,0 +1,11 @@
+# Regression fixture: a VLAN ID (4095) outside the valid range [1, 4094] -- VID 0 is reserved for
+# priority-tagged, non-VLAN-member frames and 4095 is reserved outright (802.1Q), so neither is a
+# real VLAN membership a zone can claim (see kMinVlanId/kMaxVlanId in policy.hpp).
+zones:
+  ot_vlan:
+    vlans: [4095]
+conduits:
+  - name: c1
+    from: ot_vlan
+    to: ot_vlan
+    protocol: any

@@ -1,0 +1,12 @@
+# Regression fixture: 'bidirectional: true' given on a VLAN-zone conduit -- there is no
+# client/server session to reverse (its 'from'/'to' already name the same zone(s)), so
+# 'bidirectional' has no meaning here (see ROADMAP item 15).
+zones:
+  ot_vlan:
+    vlans: [100]
+conduits:
+  - name: c1
+    from: ot_vlan
+    to: ot_vlan
+    protocol: any
+    bidirectional: true

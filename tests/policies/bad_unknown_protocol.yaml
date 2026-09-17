@@ -1,6 +1,9 @@
 # Regression fixture: a conduit naming a protocol string this codebase doesn't recognize at all --
 # confirms the error message's own "expected one of" list reflects the full, current widened set
-# (see ROADMAP item 14 and policy.cpp's own protocol validation loop), not a stale, narrower one.
+# (see ROADMAP items 14 and 15, and policy.cpp's own protocol validation loop), not a stale,
+# narrower one. "profibus" is deliberately used here rather than "profinet" -- profinet is now a
+# genuinely recognized (VLAN-zone-only) protocol name, so it can no longer serve as this fixture's
+# "protocol name that isn't recognized at all" example.
 zones:
   hmi_zone:
     networks: [192.168.1.50/32]
@@ -11,4 +14,4 @@ conduits:
   - name: "bogus protocol"
     from: hmi_zone
     to: plc_zone
-    protocol: profinet
+    protocol: profibus

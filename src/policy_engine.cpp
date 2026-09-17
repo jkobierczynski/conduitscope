@@ -24,6 +24,21 @@ std::string session_key(const std::string& ip_a, uint16_t port_a, const std::str
     return (ea < eb) ? (ea + "<->" + eb) : (eb + "<->" + ea);
 }
 
+// True for exactly the four protocols with no IP layer at all that PolicyEngine can classify by
+// VLAN zone -- see policy.hpp's own header comment and PolicyEngine::observe's comment.
+bool is_vlan_zone_eligible_protocol(const std::string& protocol) {
+    return protocol == "profinet" || protocol == "goose" || protocol == "sv" || protocol == "ethercat";
+}
+
+// Canonical (undirected) key for an L2 flow -- protocol plus a MAC pair in a fixed order, so
+// traffic seen from either direction between the same two MACs folds into one EthernetFlowState,
+// the same "canonicalize so direction doesn't fragment the flow" idea session_key uses for a TCP
+// 4-tuple above (mirrored here at the MAC-address layer since these protocols have no port/session
+// concept to canonicalize instead).
+std::string ethernet_flow_key(const std::string& protocol, const std::string& mac_a, const std::string& mac_b) {
+    return protocol + ":" + ((mac_a < mac_b) ? (mac_a + "<->" + mac_b) : (mac_b + "<->" + mac_a));
+}
+
 bool is_known_service_port(uint16_t port) {
     return port == MODBUS_TCP_PORT || port == DNP3_TCP_PORT || port == COTP_TCP_PORT ||
            port == IEC104_TCP_PORT || port == ENIP_TCP_PORT;
@@ -111,6 +126,27 @@ std::string json_escape(const std::string& s) {
 
 void PolicyEngine::observe(const DecodedPacket& dp) {
     ++total_packets_;
+
+    if (is_vlan_zone_eligible_protocol(dp.protocol) && any_vlan_zone_) {
+        // See this function's own doc comment (policy_engine.hpp) for why this branch only exists
+        // once the policy has opted in by declaring at least one VLAN zone -- backward
+        // compatibility for every policy file written before this feature existed.
+        std::string key = ethernet_flow_key(dp.protocol, dp.src_mac, dp.dst_mac);
+        auto it = ethernet_flows_.find(key);
+        if (it == ethernet_flows_.end()) {
+            EthernetFlowState es;
+            es.protocol = dp.protocol;
+            es.mac_a = (dp.src_mac < dp.dst_mac) ? dp.src_mac : dp.dst_mac;
+            es.mac_b = (dp.src_mac < dp.dst_mac) ? dp.dst_mac : dp.src_mac;
+            es.has_vlan_tag = dp.has_vlan_tag;
+            es.vlan_id = dp.vlan_id;
+            ethernet_flow_order_.push_back(key);
+            it = ethernet_flows_.emplace(key, std::move(es)).first;
+        }
+        ++it->second.packet_count;
+        return;
+    }
+
     if (!dp.has_ip || !dp.has_tcp) {
         ++skipped_non_tcp_;
         return;
@@ -327,6 +363,47 @@ PolicyReport PolicyEngine::finish() const {
         report.flows.push_back(std::move(fr));
     }
 
+    for (const auto& key : ethernet_flow_order_) {
+        const EthernetFlowState& es = ethernet_flows_.at(key);
+        EthernetFlowReport er;
+        er.protocol = es.protocol;
+        er.mac_a = es.mac_a;
+        er.mac_b = es.mac_b;
+        er.has_vlan_tag = es.has_vlan_tag;
+        er.vlan_id = es.vlan_id;
+        er.packet_count = es.packet_count;
+
+        const Zone* vz = es.has_vlan_tag ? policy_.zone_for_vlan(es.vlan_id) : nullptr;
+        er.vlan_zone = vz ? vz->name : "unclassified";
+
+        if (!vz) {
+            er.verdict = FlowVerdict::Unclassified;
+            er.reason = es.has_vlan_tag
+                            ? ("no declared VLAN zone contains VLAN " + std::to_string(es.vlan_id))
+                            : "frame carries no 802.1Q VLAN tag at all";
+        } else {
+            const Conduit* matched = nullptr;
+            for (const auto& c : policy_.conduits) {
+                if (!c.is_vlan_conduit) continue;
+                if (!zone_list_contains(c.from_zones, er.vlan_zone)) continue;
+                bool protocols_ok = std::find(c.protocols.begin(), c.protocols.end(), er.protocol) != c.protocols.end() ||
+                                     std::find(c.protocols.begin(), c.protocols.end(), "any") != c.protocols.end();
+                if (!protocols_ok) continue;
+                matched = &c;
+                break;
+            }
+            if (matched) {
+                er.verdict = FlowVerdict::Allowed;
+                er.matched_conduit = matched->name;
+                exercised_conduits.insert(matched->name);
+            } else {
+                er.verdict = FlowVerdict::Violation;
+                er.reason = "no conduit permits " + er.protocol + " traffic on VLAN zone '" + er.vlan_zone + "'";
+            }
+        }
+        report.ethernet_flows.push_back(std::move(er));
+    }
+
     for (const auto& c : policy_.conduits) {
         if (!exercised_conduits.count(c.name)) report.unexercised_conduits.push_back(c.name);
     }
@@ -336,15 +413,21 @@ PolicyReport PolicyEngine::finish() const {
 
 size_t PolicyReport::allowed_count() const {
     return static_cast<size_t>(
-        std::count_if(flows.begin(), flows.end(), [](const FlowReport& f) { return f.verdict == FlowVerdict::Allowed; }));
+               std::count_if(flows.begin(), flows.end(), [](const FlowReport& f) { return f.verdict == FlowVerdict::Allowed; })) +
+           static_cast<size_t>(std::count_if(ethernet_flows.begin(), ethernet_flows.end(),
+                                              [](const EthernetFlowReport& f) { return f.verdict == FlowVerdict::Allowed; }));
 }
 size_t PolicyReport::violation_count() const {
     return static_cast<size_t>(std::count_if(flows.begin(), flows.end(),
-                                              [](const FlowReport& f) { return f.verdict == FlowVerdict::Violation; }));
+                                              [](const FlowReport& f) { return f.verdict == FlowVerdict::Violation; })) +
+           static_cast<size_t>(std::count_if(ethernet_flows.begin(), ethernet_flows.end(),
+                                              [](const EthernetFlowReport& f) { return f.verdict == FlowVerdict::Violation; }));
 }
 size_t PolicyReport::unclassified_count() const {
     return static_cast<size_t>(std::count_if(
-        flows.begin(), flows.end(), [](const FlowReport& f) { return f.verdict == FlowVerdict::Unclassified; }));
+               flows.begin(), flows.end(), [](const FlowReport& f) { return f.verdict == FlowVerdict::Unclassified; })) +
+           static_cast<size_t>(std::count_if(ethernet_flows.begin(), ethernet_flows.end(),
+                                              [](const EthernetFlowReport& f) { return f.verdict == FlowVerdict::Unclassified; }));
 }
 
 namespace {
@@ -371,6 +454,32 @@ void write_flow_group_text(std::ostream& out, const std::vector<const FlowReport
     }
 }
 
+// Same idea as write_flow_group_text, for the L2/VLAN-zone side of the report -- rendered under a
+// "MAC_A <-> MAC_B" heading rather than "client -> server", since these protocols have no
+// client/server distinction (see EthernetFlowReport's own comment).
+void write_ethernet_flow_group_text(std::ostream& out, const std::vector<const EthernetFlowReport*>& group,
+                                     const char* label) {
+    out << label << " (" << group.size() << "):\n";
+    if (group.empty()) {
+        out << "  (none)\n";
+        return;
+    }
+    for (size_t i = 0; i < group.size(); ++i) {
+        const EthernetFlowReport& f = *group[i];
+        out << "  [" << (i + 1) << "] " << f.mac_a << " <-> " << f.mac_b << "  (" << f.protocol << ", "
+            << f.packet_count << " packet(s))";
+        out << "\n      vlan: " << (f.has_vlan_tag ? std::to_string(f.vlan_id) : std::string("(untagged)"))
+            << ", zone: " << f.vlan_zone;
+        if (f.verdict == FlowVerdict::Allowed) {
+            out << ", matched conduit \"" << f.matched_conduit << "\"";
+        }
+        out << "\n";
+        if (!f.reason.empty()) {
+            out << "      " << f.reason << "\n";
+        }
+    }
+}
+
 }  // namespace
 
 void write_policy_report_text(std::ostream& out, const PolicyReport& report, const Policy& policy,
@@ -387,8 +496,14 @@ void write_policy_report_text(std::ostream& out, const PolicyReport& report, con
     }
     out << "\n\n";
 
-    out << "Flows evaluated: " << report.flows.size() << " (" << report.allowed_count() << " allowed, "
-        << report.violation_count() << " violation(s), " << report.unclassified_count() << " unclassified)\n";
+    size_t flow_allowed = static_cast<size_t>(
+        std::count_if(report.flows.begin(), report.flows.end(), [](const FlowReport& f) { return f.verdict == FlowVerdict::Allowed; }));
+    size_t flow_violation = static_cast<size_t>(std::count_if(
+        report.flows.begin(), report.flows.end(), [](const FlowReport& f) { return f.verdict == FlowVerdict::Violation; }));
+    size_t flow_unclassified = static_cast<size_t>(std::count_if(
+        report.flows.begin(), report.flows.end(), [](const FlowReport& f) { return f.verdict == FlowVerdict::Unclassified; }));
+    out << "Flows evaluated: " << report.flows.size() << " (" << flow_allowed << " allowed, " << flow_violation
+        << " violation(s), " << flow_unclassified << " unclassified)\n";
     out << "  " << report.total_packets << " total packet(s) in capture, " << report.skipped_non_tcp
         << " skipped (non-TCP/non-IP)\n\n";
 
@@ -405,6 +520,39 @@ void write_policy_report_text(std::ostream& out, const PolicyReport& report, con
     out << "\n";
     write_flow_group_text(out, allowed, "ALLOWED");
     out << "\n";
+
+    // Only printed at all once a policy declares at least one VLAN zone (see
+    // PolicyEngine::observe's own comment) -- a report from a policy with only CIDR zones renders
+    // byte-for-byte identically to before this feature existed.
+    if (!report.ethernet_flows.empty()) {
+        size_t eth_allowed = static_cast<size_t>(std::count_if(
+            report.ethernet_flows.begin(), report.ethernet_flows.end(),
+            [](const EthernetFlowReport& f) { return f.verdict == FlowVerdict::Allowed; }));
+        size_t eth_violation = static_cast<size_t>(std::count_if(
+            report.ethernet_flows.begin(), report.ethernet_flows.end(),
+            [](const EthernetFlowReport& f) { return f.verdict == FlowVerdict::Violation; }));
+        size_t eth_unclassified = static_cast<size_t>(std::count_if(
+            report.ethernet_flows.begin(), report.ethernet_flows.end(),
+            [](const EthernetFlowReport& f) { return f.verdict == FlowVerdict::Unclassified; }));
+        out << "Ethernet flows evaluated: " << report.ethernet_flows.size() << " (" << eth_allowed << " allowed, "
+            << eth_violation << " violation(s), " << eth_unclassified << " unclassified)\n";
+        out << "  PROFINET RT/GOOSE/Sampled Values/EtherCAT traffic, classified by VLAN zone -- see "
+               "docs/MANUAL.md's POLICY FILE FORMAT section\n\n";
+
+        std::vector<const EthernetFlowReport*> eth_violations, eth_unclassified_list, eth_allowed_list;
+        for (const auto& f : report.ethernet_flows) {
+            if (f.verdict == FlowVerdict::Violation) eth_violations.push_back(&f);
+            else if (f.verdict == FlowVerdict::Unclassified) eth_unclassified_list.push_back(&f);
+            else eth_allowed_list.push_back(&f);
+        }
+
+        write_ethernet_flow_group_text(out, eth_violations, "ETHERNET VIOLATIONS");
+        out << "\n";
+        write_ethernet_flow_group_text(out, eth_unclassified_list, "ETHERNET UNCLASSIFIED TRAFFIC");
+        out << "\n";
+        write_ethernet_flow_group_text(out, eth_allowed_list, "ETHERNET ALLOWED");
+        out << "\n";
+    }
 
     out << "Conduits never exercised by this capture (" << report.unexercised_conduits.size() << "):\n";
     if (report.unexercised_conduits.empty()) {
@@ -446,6 +594,7 @@ void write_policy_report_json(std::ostream& out, const PolicyReport& report, con
         }
         out << "],\n";
         out << "      \"bidirectional\": " << (c.bidirectional ? "true" : "false") << ",\n";
+        out << "      \"is_vlan_conduit\": " << (c.is_vlan_conduit ? "true" : "false") << ",\n";
         out << "      \"protocols\": [";
         for (size_t j = 0; j < c.protocols.size(); ++j) {
             if (j) out << ", ";
@@ -495,6 +644,27 @@ void write_policy_report_json(std::ostream& out, const PolicyReport& report, con
         out << "      \"matched_conduit\": " << (f.matched_conduit.empty() ? "null" : ("\"" + json_escape(f.matched_conduit) + "\"")) << ",\n";
         out << "      \"reason\": " << (f.reason.empty() ? "null" : ("\"" + json_escape(f.reason) + "\"")) << "\n";
         out << "    }" << (i + 1 < report.flows.size() ? "," : "") << "\n";
+    }
+    out << "  ],\n";
+
+    // Empty exactly when the policy declares no VLAN zone at all (see PolicyEngine::observe's own
+    // comment) -- a report from a CIDR-zone-only policy renders this as an empty array, one more
+    // field than existed before this feature, but otherwise unchanged from before it.
+    out << "  \"ethernet_flows\": [\n";
+    for (size_t i = 0; i < report.ethernet_flows.size(); ++i) {
+        const EthernetFlowReport& f = report.ethernet_flows[i];
+        out << "    {\n";
+        out << "      \"protocol\": \"" << json_escape(f.protocol) << "\",\n";
+        out << "      \"mac_a\": \"" << json_escape(f.mac_a) << "\",\n";
+        out << "      \"mac_b\": \"" << json_escape(f.mac_b) << "\",\n";
+        out << "      \"has_vlan_tag\": " << (f.has_vlan_tag ? "true" : "false") << ",\n";
+        out << "      \"vlan_id\": " << (f.has_vlan_tag ? std::to_string(f.vlan_id) : std::string("null")) << ",\n";
+        out << "      \"vlan_zone\": \"" << json_escape(f.vlan_zone) << "\",\n";
+        out << "      \"packet_count\": " << f.packet_count << ",\n";
+        out << "      \"verdict\": \"" << verdict_name(f.verdict) << "\",\n";
+        out << "      \"matched_conduit\": " << (f.matched_conduit.empty() ? "null" : ("\"" + json_escape(f.matched_conduit) + "\"")) << ",\n";
+        out << "      \"reason\": " << (f.reason.empty() ? "null" : ("\"" + json_escape(f.reason) + "\"")) << "\n";
+        out << "    }" << (i + 1 < report.ethernet_flows.size() ? "," : "") << "\n";
     }
     out << "  ],\n";
 

@@ -1,0 +1,13 @@
+# Regression fixture: an IPv4-zone conduit naming a no-IP-layer protocol (goose) -- goose has no IP
+# layer at all, so it can never appear on an IPv4-zone conduit; declare a VLAN zone instead (see
+# ROADMAP item 15).
+zones:
+  hmi_zone:
+    networks: [192.168.1.50/32]
+  plc_zone:
+    networks: [192.168.1.10/32]
+conduits:
+  - name: c1
+    from: hmi_zone
+    to: plc_zone
+    protocol: goose

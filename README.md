@@ -764,36 +764,49 @@ Groundwork / v0.1.0. What works right now:
 - `policy validate`: a zone/conduit policy engine. A policy file (a
   deliberately restricted, dependency-free YAML subset -- no vendored YAML
   library, same zero-dependency approach as everything else here) declares
-  zones (IPv4 CIDR blocks) and conduits (an allowed protocol+port
-  relationship, in a given direction, from a set of one or more zones to
-  another set of one or more zones -- many-to-many, not just one zone to
-  one zone), optionally
-  narrowed with `functions:` to only certain named functions/services
-  within a conduit's one protocol (e.g. Modbus reads but not writes) --
-  matched against the exact function/service name strings each protocol's
-  own decoder emits. `protocols`/`protocol` names one of twelve values --
-  `modbus`, `dnp3`, `s7comm`, `iec104`, `enip`, `bacnet`, `hartip`,
-  `opcua`, `mms`, `mqtt`, `ffhse`, or the wildcard `any` -- though `bacnet`
-  can never actually match (this decoder only recognizes BACnet/IP over
-  UDP, and `policy validate` is TCP-only), and `functions:` is only
-  supported so far for the first five (see docs/MANUAL.md's "Addressing
-  scope" and "Function-level restrictions" subsections). Every decoded TCP
-  flow in the capture is classified into a zone pair, checked against the
-  policy's conduits (and, for a
+  zones and conduits. A zone is EITHER a set of IPv4 CIDR blocks OR a set
+  of VLAN IDs (`vlans: [...]`, a zone kind added specifically for the four
+  protocols with no IP layer at all -- see below), never both. An IPv4-zone
+  conduit is an allowed protocol+port relationship, in a given direction,
+  from a set of one or more zones to another set of one or more zones
+  (many-to-many, not just one zone to one zone), optionally narrowed with
+  `functions:` to only certain named functions/services within a conduit's
+  one protocol (e.g. Modbus reads but not writes) -- matched against the
+  exact function/service name strings each protocol's own decoder emits.
+  `protocols`/`protocol` names one of sixteen values -- `modbus`, `dnp3`,
+  `s7comm`, `iec104`, `enip`, `bacnet`, `hartip`, `opcua`, `mms`, `mqtt`,
+  `ffhse`, `profinet`, `goose`, `sv`, `ethercat`, or the wildcard `any` --
+  though `bacnet` can never actually match (this decoder only recognizes
+  BACnet/IP over UDP, and IPv4-zone conduits are TCP-only), and
+  `functions:` is only supported so far for the first five (see
+  docs/MANUAL.md's "Addressing scope" and "Function-level restrictions"
+  subsections). Every decoded TCP flow in the capture is classified into a
+  zone pair, checked against the policy's conduits (and, for a
   `functions`-restricted conduit, checked flow-wide against every distinct
   function/service observed), and reported as allowed, a violation, or
   unclassified (an endpoint matching no declared zone, or a flow with no
   recognized protocol at all) -- text or JSON output, a distinct exit
   status for "found problems" vs. "couldn't run" vs. "clean", and a report
-  that also lists any conduit the capture never exercised. Built entirely
-  on top of the decoding layer above (S7comm item tags, decoded DNP3 point
-  values, Modbus address+quantity decoding, and authoritative Modbus
-  request/response pairing are exactly the concrete facts this checks
-  policy against) rather than duplicating any of its parsing. See
-  docs/MANUAL.md's POLICY FILE FORMAT section (including its
-  "Function-level restrictions" subsection) for the full schema and
-  LIMITATIONS for exactly what it does and doesn't check (e.g. the
-  SYN-based flow-direction heuristic's fallback case).
+  that also lists any conduit the capture never exercised. A VLAN-zone
+  conduit (`from`/`to` naming only VLAN zones -- and required to name the
+  exact same zone set on both sides, since a single raw-Ethernet frame
+  carries at most one VLAN tag and so has no separate "source"/
+  "destination" zone the way a TCP flow does) instead classifies PROFINET
+  RT/GOOSE/Sampled Values/EtherCAT traffic -- aggregated into "L2 flows" by
+  protocol + MAC pair -- by whether its own 802.1Q tag falls within a
+  declared VLAN zone, reported the same three ways (allowed/violation/
+  unclassified) in a parallel "Ethernet flows" section of the same report;
+  a policy declaring no VLAN zones behaves exactly as before this existed.
+  Built entirely on top of the decoding layer above (S7comm item tags,
+  decoded DNP3 point values, Modbus address+quantity decoding, authoritative
+  Modbus request/response pairing, and the already-decoded generic 802.1Q
+  tag are exactly the concrete facts this checks policy against) rather
+  than duplicating any of its parsing. See docs/MANUAL.md's POLICY FILE
+  FORMAT section (including its "Function-level restrictions" and
+  "Addressing scope" subsections) for the full schema and LIMITATIONS for
+  exactly what it does and doesn't check (e.g. the SYN-based
+  flow-direction heuristic's fallback case, and the VLAN-zone model's own
+  QinQ/directionality/`functions` limits).
 - Live capture (`decode -i`/`policy validate -i`, plus `conduitscope interfaces`
   to list interfaces): an optional, build-time-detected libpcap (Linux) / Npcap
   (Windows) dependency -- see above and docs/MANUAL.md's LIVE CAPTURE section.
@@ -883,6 +896,9 @@ build/conduitscope info -r tests/sample_modbus.pcap
 # Check a capture against a zone/conduit policy (see tests/policies/*.yaml for more examples,
 # and docs/MANUAL.md's POLICY FILE FORMAT section for the schema):
 build/conduitscope policy validate -r tests/sample_modbus.pcap --policy tests/policies/compliant.yaml
+
+# Same, but for a VLAN-membership zone/conduit policy covering PROFINET RT/GOOSE/SV/EtherCAT:
+build/conduitscope policy validate -r tests/sample_vlan_zones.pcap --policy tests/policies/vlan_zone_mixed_results.yaml
 ```
 
 To decode traffic you've actually captured, e.g. from a Modbus simulator such as

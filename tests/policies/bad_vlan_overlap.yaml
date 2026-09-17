@@ -1,0 +1,17 @@
+# Regression fixture: two VLAN zones both claiming VLAN 100 -- each VLAN must belong to at most
+# one zone, the same unambiguous-membership rule bad_overlap.yaml already enforces for IPv4 CIDR
+# zones (see ROADMAP item 15).
+zones:
+  ot_vlan:
+    vlans: [100]
+  scada_vlan:
+    vlans: [100, 150]
+conduits:
+  - name: c1
+    from: ot_vlan
+    to: ot_vlan
+    protocol: any
+  - name: c2
+    from: scada_vlan
+    to: scada_vlan
+    protocol: any

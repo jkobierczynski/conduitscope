@@ -1,0 +1,14 @@
+# Regression fixture: a VLAN-zone conduit whose 'from' and 'to' name DIFFERENT VLAN zones -- a
+# single raw-Ethernet frame carries at most one VLAN tag, so a VLAN-zone conduit can't model a
+# directional flow between two different zones the way an IPv4-zone conduit does; 'from' and 'to'
+# must name the exact same VLAN zone(s) (see ROADMAP item 15 and policy.hpp's Conduit comment).
+zones:
+  ot_vlan:
+    vlans: [100]
+  scada_vlan:
+    vlans: [200]
+conduits:
+  - name: c1
+    from: ot_vlan
+    to: scada_vlan
+    protocol: any

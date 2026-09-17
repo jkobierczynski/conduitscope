@@ -1,0 +1,14 @@
+# Regression fixture: a conduit whose 'from'/'to' reference an IPv4 zone AND a VLAN zone in the
+# same conduit -- every zone a conduit references must be the same kind (see ROADMAP item 15 and
+# Conduit's comment in policy.hpp): there is no shared addressing scheme to evaluate a packet
+# against otherwise.
+zones:
+  hmi_zone:
+    networks: [192.168.1.50/32]
+  ot_vlan:
+    vlans: [100]
+conduits:
+  - name: c1
+    from: [hmi_zone, ot_vlan]
+    to: [hmi_zone, ot_vlan]
+    protocol: any
