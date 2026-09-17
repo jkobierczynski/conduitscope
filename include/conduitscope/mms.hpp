@@ -192,19 +192,37 @@
 //
 // Tier 1 (full field decode): status, getNameList, identify, read, write,
 // getVariableAccessAttributes, defineNamedVariableList, getNamedVariableListAttributes,
-// deleteNamedVariableList, getCapabilityList, getDomainAttributes -- the services this
-// decoder's own research found are (a) universally present in real IEC 61850 MMS traffic (model
-// browsing via getNameList, the actual reads/writes of process data via read/write, session
-// capability negotiation) and (b) simple enough to decode with full confidence. Tier 1 also
+// deleteNamedVariableList, getCapabilityList, getDomainAttributes, and the seven file-transfer
+// services obtainFile/fileOpen/fileRead/fileClose/fileRename/fileDelete/fileDirectory -- the
+// services this decoder's own research found are (a) universally present in real IEC 61850 MMS
+// traffic (model browsing via getNameList, the actual reads/writes of process data via
+// read/write, session capability negotiation) or (b) the most OT-security-relevant of MMS's
+// remaining services (the file-transfer group IEC 61850's own COMTRADE/disturbance-file-
+// retrieval and firmware/configuration-file transfer workflows ride on -- see ROADMAP item 12 in
+// docs/MANUAL.md), and each is (c) simple enough to decode with full confidence. Tier 1 also
 // covers unconfirmed-PDU's own informationReport (the MMS analog of this codebase's own GOOSE
 // decoder -- see "InformationReport" below) and every one of rejectPDU/cancel-*/conclude-*
 // (each small and fully specified).
+//
+// File-transfer services (obtainFile/fileOpen/fileRead/fileClose/fileRename/fileDelete/
+// fileDirectory): FileName (a SEQUENCE OF GraphicString) is rendered joined by "/", the same
+// convention Wireshark's own packet-mms.c dissect_mms_FileName uses; FileAttributes' own
+// lastModified (a GeneralizedTime -- an ASCII "YYYYMMDDHHMMSS[.fraction][zone]" text timestamp,
+// NOT the same wire shape as the Data CHOICE's own binary UtcTime above) is reformatted to this
+// codebase's ISO-8601 convention when it parses, shown verbatim otherwise; fileData (a raw
+// OCTET STRING) is rendered as a full, never-truncated hex dump, the same convention this
+// codebase already uses for OPC UA's own ByteString. ObtainFile-Request's own sourceFileServer
+// (an ApplicationReference -- AP-title/AE-qualifier/invocation-ids, every field itself OPTIONAL)
+// is structurally recognized but not deep-decoded, the same posture this file's own ACSE AARQ/
+// AARE decode already takes for AP-title/AE-qualifier elsewhere (see "Deliberately NOT
+// implemented" below). Address and TypeSpecification decoding, and wider real-capture
+// validation of this group specifically, remain open -- see ROADMAP item 12 in docs/MANUAL.md.
 //
 // Tier 2 (service name + invokeID only, body shown as raw hex): every other confirmed service
 // (rename, defineNamedVariable, defineScatteredAccess, getScatteredAccessAttributes,
 // deleteVariableAccess, defineNamedType, getNamedTypeAttributes, deleteNamedType, input, output,
 // takeControl, relinquishControl, every semaphore/event-condition/event-action/
-// event-enrollment/journal/file/program-invocation/domain-download service) -- these are, in
+// event-enrollment/journal/program-invocation/domain-download service) -- these are, in
 // this decoder's own research, genuinely rare in ordinary IEC 61850 process-data traffic
 // (belonging more to MMS's original general-purpose industrial-messaging scope than to IEC
 // 61850's own narrower profile of it) and each has its own, sometimes large, request/response
@@ -296,11 +314,11 @@
 // research; AARQ/AARE's own authentication-value field (ACSE's optional password/certificate
 // authentication mechanism) is structurally skipped, not decoded -- never observed in this
 // decoder's own research, and, per ACSE's own EXPLICIT tagging (see above), safely skippable
-// without losing byte alignment for whatever follows; and MMS's own file-transfer services
-// (obtainFile/fileOpen/fileRead/fileClose/fileRename/fileDelete/fileDirectory) are named
-// (Tier 2) but not decoded -- IEC 61850's own COMTRADE/disturbance-file-retrieval use of MMS
-// file services is a real, if narrower, OT-security-relevant use case this first-pass release
-// leaves for future work (see ROADMAP in docs/MANUAL.md).
+// without losing byte alignment for whatever follows; and, within the file-transfer services now
+// Tier 1 (see above), ObtainFile-Request's own sourceFileServer (ApplicationReference) is
+// structurally recognized but not deep-decoded, and GetVariableAccessAttributes-Response's own
+// Address/TypeSpecification fields remain undecoded -- both left for future work (see ROADMAP in
+// docs/MANUAL.md).
 //
 // Validation: see this file's own real-capture search record in tests/real_captures/mms/
 // ATTRIBUTION.md for the current state of that search, including both genuine real-world

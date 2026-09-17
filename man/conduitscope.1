@@ -708,12 +708,18 @@ also now decoded \-\- the full Session/Presentation/ACSE/MMS layer stack,
 including, unlike this tool's own OPC UA decoder, MMS's own self-describing
 "Data" value type (14 of 17 alternatives, depth-capped at 32 levels against
 a real recursion-assertion denial-of-service bug this decoder's own
-validation found in tshark 4.2.2's own MMS dissector) \-\- but only 11 of
+validation found in tshark 4.2.2's own MMS dissector) \-\- but only 18 of
 MMS's 78 confirmedServices (status, getNameList, identify, read, write,
 getVariableAccessAttributes, defineNamedVariableList,
 getNamedVariableListAttributes, deleteNamedVariableList,
-getDomainAttributes, getCapabilityList) get full field decoding, the rest
-are name + invokeID only with the body shown as raw hex; the Session
+getDomainAttributes, getCapabilityList, and the seven file-transfer
+services obtainFile, fileOpen, fileRead, fileClose, fileRename, fileDelete,
+fileDirectory \-\- IEC 61850's own COMTRADE/disturbance-file-retrieval
+workflow rides on exactly these seven) get full field decoding, the rest
+are name + invokeID only with the body shown as raw hex; within the
+file-transfer group, \fBObtainFile-Request\fR's own \fBsourceFileServer\fR
+(\fBApplicationReference\fR) is likewise recognized but not deep-decoded;
+the Session
 layer's extended (2-byte) length form is not supported, only the "normal"
 one-byte-length-per-parameter form; \fBAddress\fR (non-symbolic variable
 addressing) and \fBTypeSpecification\fR are recognized but not decoded;

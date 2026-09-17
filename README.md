@@ -456,12 +456,15 @@ Groundwork / v0.1.0. What works right now:
   codebase's own OPC UA decoder, whose analogous Variant/DataValue type is fully
   decoded too but only for the three services (Read/Write/Call) actually promoted
   to full decode; Browse and the subscription services still leave it as raw hex.
-  At the service layer, a deliberate two-tier split mirroring OPC UA's own: 11 of
+  At the service layer, a deliberate two-tier split mirroring OPC UA's own: 18 of
   MMS's 78
   confirmedServiceRequest/Response alternatives (status, getNameList, identify,
   read, write, getVariableAccessAttributes, defineNamedVariableList,
   getNamedVariableListAttributes, deleteNamedVariableList, getDomainAttributes,
-  getCapabilityList) are fully field-decoded, InformationReport (the MMS analog of
+  getCapabilityList, plus the seven file-transfer services obtainFile, fileOpen,
+  fileRead, fileClose, fileRename, fileDelete, fileDirectory -- IEC 61850's own
+  COMTRADE/disturbance-file-retrieval workflow rides on exactly these seven) are
+  fully field-decoded, InformationReport (the MMS analog of
   this codebase's own GOOSE decoder) is fully decoded, and every other named
   service -- takeControl among them -- is recognized and named but shown as raw
   hex. initiate-Request/ResponsePDU, ServiceError, RejectPDU, and the Cancel-*/

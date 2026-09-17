@@ -1103,6 +1103,216 @@ void decode_getdomainattributes_response(const BerTlv& body, MmsFrame& frame) {
     }
 }
 
+// ---- File-transfer services (ISO 9506-2's own "FILES" section, mms.asn's ObtainFile-Request
+// through FileDirectory-Response) -- promoted from Tier 2 to Tier 1 as the most OT-security-
+// relevant of this decoder's previously-undecoded confirmed services: IEC 61850's own COMTRADE/
+// disturbance-file-retrieval workflow, and firmware/configuration-file transfer more broadly,
+// rides on exactly these seven services (obtainFile, fileOpen, fileRead, fileClose, fileRename,
+// fileDelete, fileDirectory) -- see ROADMAP in docs/MANUAL.md. Every field's IMPLICIT/EXPLICIT
+// tagging below was read directly off mms.asn's own text (this module declares no module-level
+// AUTOMATIC/IMPLICIT TAGS, so a field with no explicit "IMPLICIT" keyword is EXPLICIT-tagged --
+// an extra wrapper TLV around the field's own universal-tagged encoding -- the same convention
+// already established by this file's own Read-Request/Read-Response decoders, e.g.
+// variableAccessSpecification's own "EXPLICIT wrap" comment above); FileDirectory-Response's own
+// listOfDirectoryEntry is the one EXPLICIT-tagged field in this whole section (every other field
+// here is IMPLICIT).
+
+// FileName ::= SEQUENCE OF GraphicString -- rendered joined by "/", the same convention
+// Wireshark's own packet-mms.c dissect_mms_FileName uses for a real filesystem-style path.
+// GraphicString content is treated identically to VisibleString/MMSString elsewhere in this file
+// (raw content bytes, no ISO 2022 character-set-escape interpretation -- the same "hand-roll the
+// specific subset actually needed" posture this decoder already takes for every other string
+// type).
+std::string decode_file_name(ByteSpan seq_of_content) {
+    std::vector<std::string> parts;
+    for (const auto& c : ber_children(seq_of_content)) parts.push_back(ber_visible_string(c.content));
+    std::ostringstream s;
+    for (size_t i = 0; i < parts.size(); ++i) {
+        if (i) s << "/";
+        s << parts[i];
+    }
+    return s.str();
+}
+
+// GeneralizedTime (ASN.1 UNIVERSAL 24) -- an ASCII text timestamp "YYYYMMDDHHMMSS[.fraction][Z]"
+// (X.690 imposes further restrictions for strict DER, but this decoder accepts the more general
+// BER form and reformats it to this codebase's own ISO-8601 convention, matching format_utc_time
+// above, whenever it matches the expected 14-digit shape; anything else is shown verbatim rather
+// than guessed at). Used only by FileAttributes' own lastModified field below.
+std::string format_generalized_time(ByteSpan content) {
+    std::string raw(reinterpret_cast<const char*>(content.data()), content.size());
+    if (raw.size() < 14) return raw;
+    for (int i = 0; i < 14; ++i) {
+        if (raw[static_cast<size_t>(i)] < '0' || raw[static_cast<size_t>(i)] > '9') return raw;
+    }
+    std::string frac;
+    size_t pos = 14;
+    if (pos < raw.size() && (raw[pos] == '.' || raw[pos] == ',')) {
+        size_t start = pos + 1;
+        size_t end = start;
+        while (end < raw.size() && raw[end] >= '0' && raw[end] <= '9') end++;
+        frac = raw.substr(start, end - start);
+        pos = end;
+    }
+    std::string zone = raw.substr(pos);  // "Z", "+HHMM", "-HHMM", or empty (local time -- rare and
+                                           // non-conformant in practice, shown verbatim either way)
+    std::ostringstream s;
+    s << raw.substr(0, 4) << "-" << raw.substr(4, 2) << "-" << raw.substr(6, 2) << "T" << raw.substr(8, 2)
+      << ":" << raw.substr(10, 2) << ":" << raw.substr(12, 2);
+    if (!frac.empty()) s << "." << frac;
+    s << zone;
+    return s.str();
+}
+
+// FileAttributes ::= SEQUENCE { sizeOfFile [0] IMPLICIT Unsigned32, lastModified [1] IMPLICIT
+// GeneralizedTime OPTIONAL } -- shared by FileOpen-Response and DirectoryEntry below.
+std::string decode_file_attributes(ByteSpan content) {
+    std::string size_str = "?";
+    std::string modified_str;
+    bool has_modified = false;
+    for (const auto& f : ber_children(content)) {
+        if (ber_class(f.tag_byte) != kBerClassContext) continue;
+        if (f.tag_number == 0) {
+            size_str = std::to_string(ber_unsigned(f.content));
+        } else if (f.tag_number == 1) {
+            modified_str = format_generalized_time(f.content);
+            has_modified = true;
+        }
+    }
+    std::ostringstream s;
+    s << "{sizeOfFile=" << size_str;
+    if (has_modified) s << ", lastModified=" << modified_str;
+    s << "}";
+    return s.str();
+}
+
+// ObtainFile-Request ::= SEQUENCE { sourceFileServer [0] IMPLICIT ApplicationReference OPTIONAL,
+// sourceFile [1] IMPLICIT FileName, destinationFile [2] IMPLICIT FileName }. sourceFileServer is
+// an ApplicationReference (AP-title/AE-qualifier/invocation-ids, every field itself OPTIONAL) --
+// structurally recognized but not deep-decoded, the same posture this file's own ACSE AARQ/AARE
+// decode already takes for AP-title/AE-qualifier elsewhere (see mms.hpp's "Deliberately NOT
+// implemented" section). ObtainFile-Response ::= NULL, nothing to decode.
+void decode_obtainfile_request(const BerTlv& body, MmsFrame& frame) {
+    for (const auto& f : ber_children(body.content)) {
+        if (ber_class(f.tag_byte) != kBerClassContext) continue;
+        if (f.tag_number == 0) frame.values.push_back("sourceFileServer=<ApplicationReference, not decoded>");
+        else if (f.tag_number == 1) frame.values.push_back("sourceFile=" + decode_file_name(f.content));
+        else if (f.tag_number == 2) frame.values.push_back("destinationFile=" + decode_file_name(f.content));
+    }
+}
+
+// FileOpen-Request ::= SEQUENCE { fileName [0] IMPLICIT FileName, initialPosition [1] IMPLICIT
+// Unsigned32 }.
+void decode_fileopen_request(const BerTlv& body, MmsFrame& frame) {
+    for (const auto& f : ber_children(body.content)) {
+        if (ber_class(f.tag_byte) != kBerClassContext) continue;
+        if (f.tag_number == 0) frame.values.push_back("fileName=" + decode_file_name(f.content));
+        else if (f.tag_number == 1) frame.values.push_back("initialPosition=" + std::to_string(ber_unsigned(f.content)));
+    }
+}
+
+// FileOpen-Response ::= SEQUENCE { frsmID [0] IMPLICIT Integer32, fileAttributes [1] IMPLICIT
+// FileAttributes } -- frsmID (File Read/write State Machine ID) is the handle every later
+// fileRead/fileClose on this file uses.
+void decode_fileopen_response(const BerTlv& body, MmsFrame& frame) {
+    for (const auto& f : ber_children(body.content)) {
+        if (ber_class(f.tag_byte) != kBerClassContext) continue;
+        if (f.tag_number == 0) frame.values.push_back("frsmID=" + std::to_string(ber_integer(f.content)));
+        else if (f.tag_number == 1) frame.values.push_back("fileAttributes=" + decode_file_attributes(f.content));
+    }
+}
+
+// FileRead-Request ::= Integer32 -- a bare primitive alternative (IMPLICIT at the
+// ConfirmedServiceRequest CHOICE level), so `body.content` IS the frsmID's own integer bytes
+// directly, the same shape as cancel-RequestPDU's own bare Unsigned32 elsewhere in this file.
+void decode_fileread_request(const BerTlv& body, MmsFrame& frame) {
+    frame.values.push_back("frsmID=" + std::to_string(ber_integer(body.content)));
+}
+
+// FileRead-Response ::= SEQUENCE { fileData [0] IMPLICIT OCTET STRING, moreFollows [1] IMPLICIT
+// BOOLEAN DEFAULT TRUE }.
+void decode_fileread_response(const BerTlv& body, MmsFrame& frame) {
+    bool more_follows = true;  // ASN.1 DEFAULT TRUE -- absent on the wire means "more data follows"
+    size_t data_len = 0;
+    std::string data_hex;
+    bool has_data = false;
+    for (const auto& f : ber_children(body.content)) {
+        if (ber_class(f.tag_byte) != kBerClassContext) continue;
+        if (f.tag_number == 0) {
+            has_data = true;
+            data_len = f.content.size();
+            data_hex = hex_of(f.content);
+        } else if (f.tag_number == 1) {
+            more_follows = ber_integer(f.content) != 0;
+        }
+    }
+    if (has_data) frame.values.push_back("fileData=" + std::to_string(data_len) + " byte(s): " + data_hex);
+    frame.values.push_back(std::string("moreFollows=") + (more_follows ? "true" : "false"));
+}
+
+// FileClose-Request ::= Integer32 -- same bare-primitive shape as FileRead-Request above.
+void decode_fileclose_request(const BerTlv& body, MmsFrame& frame) {
+    frame.values.push_back("frsmID=" + std::to_string(ber_integer(body.content)));
+}
+// FileClose-Response ::= NULL, nothing to decode.
+
+// FileRename-Request ::= SEQUENCE { currentFileName [0] IMPLICIT FileName, newFileName [1]
+// IMPLICIT FileName }.
+void decode_filerename_request(const BerTlv& body, MmsFrame& frame) {
+    for (const auto& f : ber_children(body.content)) {
+        if (ber_class(f.tag_byte) != kBerClassContext) continue;
+        if (f.tag_number == 0) frame.values.push_back("currentFileName=" + decode_file_name(f.content));
+        else if (f.tag_number == 1) frame.values.push_back("newFileName=" + decode_file_name(f.content));
+    }
+}
+// FileRename-Response ::= NULL, nothing to decode.
+
+// FileDelete-Request ::= FileName -- a bare (IMPLICIT-at-the-CHOICE-level) FileName, so
+// `body.content` IS the SEQUENCE OF GraphicString content directly (constructed, unlike
+// FileRead/FileClose's bare-INTEGER shape above, since FileName's own underlying type is
+// constructed).
+void decode_filedelete_request(const BerTlv& body, MmsFrame& frame) {
+    frame.values.push_back("fileName=" + decode_file_name(body.content));
+}
+// FileDelete-Response ::= NULL, nothing to decode.
+
+// FileDirectory-Request ::= SEQUENCE { fileSpecification [0] IMPLICIT FileName OPTIONAL,
+// continueAfter [1] IMPLICIT FileName OPTIONAL }.
+void decode_filedirectory_request(const BerTlv& body, MmsFrame& frame) {
+    for (const auto& f : ber_children(body.content)) {
+        if (ber_class(f.tag_byte) != kBerClassContext) continue;
+        if (f.tag_number == 0) frame.values.push_back("fileSpecification=" + decode_file_name(f.content));
+        else if (f.tag_number == 1) frame.values.push_back("continueAfter=" + decode_file_name(f.content));
+    }
+}
+
+// FileDirectory-Response ::= SEQUENCE { listOfDirectoryEntry [0] SEQUENCE OF DirectoryEntry
+// (EXPLICIT -- no IMPLICIT keyword in the ASN.1, see this section's own header comment),
+// moreFollows [1] IMPLICIT BOOLEAN DEFAULT FALSE }. DirectoryEntry ::= SEQUENCE { filename [0]
+// IMPLICIT FileName, fileAttributes [1] IMPLICIT FileAttributes }.
+void decode_filedirectory_response(const BerTlv& body, MmsFrame& frame) {
+    for (const auto& f : ber_children(body.content)) {
+        if (ber_class(f.tag_byte) != kBerClassContext) continue;
+        if (f.tag_number == 0) {
+            auto inner = ber_children(f.content);  // EXPLICIT wrap around SEQUENCE OF DirectoryEntry
+            if (inner.empty()) continue;
+            int idx = 0;
+            for (const auto& entry : ber_children(inner[0].content)) {
+                std::string filename, attrs;
+                for (const auto& ef : ber_children(entry.content)) {
+                    if (ber_class(ef.tag_byte) != kBerClassContext) continue;
+                    if (ef.tag_number == 0) filename = decode_file_name(ef.content);
+                    else if (ef.tag_number == 1) attrs = decode_file_attributes(ef.content);
+                }
+                frame.values.push_back("listOfDirectoryEntry[" + std::to_string(idx++) + "]=" + filename +
+                                        " " + attrs);
+            }
+        } else if (f.tag_number == 1) {
+            frame.values.push_back(std::string("moreFollows=") + (ber_integer(f.content) != 0 ? "true" : "false"));
+        }
+    }
+}
+
 // ---- InformationReport (unconfirmed-PDU's own [0] alternative) -- the MMS analog of this
 // codebase's own GOOSE decoder, see mms.hpp.
 void decode_information_report(const BerTlv& top, MmsFrame& frame) {
@@ -1328,7 +1538,14 @@ void dispatch_confirmed_service(const BerTlv& svc, MmsFrame& frame, bool is_resp
             case 12: decode_getnamedvariablelistattributes_request(svc, frame); break;
             case 13: decode_deletenamedvariablelist_request(svc, frame); break;
             case 37: decode_getdomainattributes_request(svc, frame); break;
+            case 46: decode_obtainfile_request(svc, frame); break;
             case 71: decode_getcapabilitylist_request(svc, frame); break;
+            case 72: decode_fileopen_request(svc, frame); break;
+            case 73: decode_fileread_request(svc, frame); break;
+            case 74: decode_fileclose_request(svc, frame); break;
+            case 75: decode_filerename_request(svc, frame); break;
+            case 76: decode_filedelete_request(svc, frame); break;
+            case 77: decode_filedirectory_request(svc, frame); break;
             default: decoded = false; break;
         }
     } else {
@@ -1343,7 +1560,14 @@ void dispatch_confirmed_service(const BerTlv& svc, MmsFrame& frame, bool is_resp
             case 12: decode_getnamedvariablelistattributes_response(svc, frame); break;
             case 13: decode_deletenamedvariablelist_response(svc, frame); break;
             case 37: decode_getdomainattributes_response(svc, frame); break;
+            case 46: break;  // ObtainFile-Response ::= NULL -- nothing to decode
             case 71: decode_getcapabilitylist_response(svc, frame); break;
+            case 72: decode_fileopen_response(svc, frame); break;
+            case 73: decode_fileread_response(svc, frame); break;
+            case 74: break;  // FileClose-Response ::= NULL -- nothing to decode
+            case 75: break;  // FileRename-Response ::= NULL -- nothing to decode
+            case 76: break;  // FileDelete-Response ::= NULL -- nothing to decode
+            case 77: decode_filedirectory_response(svc, frame); break;
             default: decoded = false; break;
         }
     }

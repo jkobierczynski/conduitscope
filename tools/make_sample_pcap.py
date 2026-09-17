@@ -3625,6 +3625,87 @@ def getdomainattributes_response(caps, state: int, deletable: bool, sharable: bo
     return svc(37, True, content)
 
 
+# ---- File-transfer services (mms.cpp's own "File-transfer services" section) -- FileName ::=
+# SEQUENCE OF GraphicString, rendered here as UNIVERSAL GraphicString (tag 25) elements per part,
+# joined "/" by the decoder; FileAttributes ::= SEQUENCE { sizeOfFile [0] IMPLICIT Unsigned32,
+# lastModified [1] IMPLICIT GeneralizedTime OPTIONAL } -- GeneralizedTime is raw ASCII text bytes,
+# not a BER-wrapped structure, since it is IMPLICIT over a primitive.
+def file_name(*parts: str) -> bytes:
+    return b"".join(uni_p(25, p.encode("ascii")) for p in parts)
+
+
+def file_attributes(size_of_file: int, last_modified: str = None) -> bytes:
+    content = ctx_p(0, ber_int(size_of_file))
+    if last_modified is not None:
+        content += ctx_p(1, last_modified.encode("ascii"))
+    return content
+
+
+def obtainfile_request(source_file, destination_file, include_source_file_server: bool = False) -> bytes:
+    content = b""
+    if include_source_file_server:
+        content += ctx_c(0, b"")  # ApplicationReference, empty -- every field OPTIONAL, not decoded
+    content += ctx_c(1, file_name(*source_file))
+    content += ctx_c(2, file_name(*destination_file))
+    return svc(46, True, content)
+
+
+def fileopen_request(file_name_parts, initial_position: int) -> bytes:
+    content = ctx_c(0, file_name(*file_name_parts)) + ctx_p(1, ber_int(initial_position))
+    return svc(72, True, content)
+
+
+def fileopen_response(frsm_id: int, size_of_file: int, last_modified: str = None) -> bytes:
+    content = ctx_p(0, ber_int(frsm_id)) + ctx_c(1, file_attributes(size_of_file, last_modified))
+    return svc(72, True, content)
+
+
+def fileread_request(frsm_id: int) -> bytes:
+    return svc(73, False, ber_int(frsm_id))  # FileRead-Request ::= Integer32, bare primitive
+
+
+def fileread_response(data: bytes, more_follows: bool = True) -> bytes:
+    content = ctx_p(0, data)
+    if not more_follows:  # DEFAULT TRUE -- only encode when overriding the default to false
+        content += ctx_p(1, b"\x00")
+    return svc(73, True, content)
+
+
+def fileclose_request(frsm_id: int) -> bytes:
+    return svc(74, False, ber_int(frsm_id))  # FileClose-Request ::= Integer32, bare primitive
+
+
+def filerename_request(current_file, new_file) -> bytes:
+    content = ctx_c(0, file_name(*current_file)) + ctx_c(1, file_name(*new_file))
+    return svc(75, True, content)
+
+
+def filedelete_request(file_name_parts) -> bytes:
+    return svc(76, True, file_name(*file_name_parts))  # FileDelete-Request ::= FileName, bare (constructed)
+
+
+def filedirectory_request(file_spec=None, continue_after=None) -> bytes:
+    content = b""
+    if file_spec is not None:
+        content += ctx_c(0, file_name(*file_spec))
+    if continue_after is not None:
+        content += ctx_c(1, file_name(*continue_after))
+    return svc(77, True, content)
+
+
+def directory_entry(file_name_parts, size_of_file: int, last_modified: str = None) -> bytes:
+    content = ctx_c(0, file_name(*file_name_parts)) + ctx_c(1, file_attributes(size_of_file, last_modified))
+    return uni_c(16, content)  # DirectoryEntry ::= SEQUENCE
+
+
+def filedirectory_response(entries, more_follows: bool = False) -> bytes:
+    content = ctx_c(0, uni_c(16, b"".join(entries)))  # listOfDirectoryEntry[0], EXPLICIT wrap around
+                                                         # SEQUENCE OF DirectoryEntry
+    if more_follows:  # DEFAULT FALSE -- only encode when overriding the default to true
+        content += ctx_p(1, b"\x01")
+    return svc(77, True, content)
+
+
 # ---- confirmed-RequestPDU/ResponsePDU wrapper (mms.cpp's decode_confirmed_request/response) -------
 def confirmed_request_pdu(invoke_id: int, service_body: bytes = None) -> bytes:
     content = uni_p(2, ber_int(invoke_id))
@@ -4369,8 +4450,10 @@ def build_mms_sample():
     full association (Session CONNECT/ACCEPT wrapping Presentation CP-type/CPA-type wrapping ACSE
     AARQ/AARE wrapping MMS initiate-RequestPDU/ResponsePDU), the "ubiquitous SI=1" ongoing-message
     shape (two concatenated SI=1/LI=0 markers -- see session_ongoing_prefix's own comment for why
-    2, not 1), every Tier1 confirmed service this decoder fully decodes, an InformationReport, the
-    Tier1/Tier2 split (a confirmed service this decoder recognizes by name but doesn't further
+    2, not 1), every Tier1 confirmed service this decoder fully decodes -- including the seven
+    file-transfer services (obtainFile/fileOpen/fileRead/fileClose/fileRename/fileDelete/
+    fileDirectory) IEC 61850's own COMTRADE/disturbance-file-retrieval workflow rides on -- an
+    InformationReport, the Tier1/Tier2 split (a confirmed service this decoder recognizes by name but doesn't further
     decode), ServiceError/RejectPDU/Cancel-*/Conclude-* PDUs, and a genuinely malformed/truncated
     confirmedServiceRequest (invokeID present, service field missing -- mirrors the real one found
     in tests/real_captures/mms/iec61850_read.pcap, see its own ATTRIBUTION.md). Separate flows (own
@@ -4492,51 +4575,91 @@ def build_mms_sample():
     add(False, dt(ongoing(confirmed_response_pdu(
         10, getdomainattributes_response(["STR1"], state=2, deletable=False, sharable=True)))))
 
-    # 25) InformationReport -- an unconfirmed, unsolicited report from the IED (this decoder's own
+    # 25) & 26) ObtainFile -- IEC 61850's own COMTRADE/disturbance-file-retrieval workflow rides on
+    #     this service (see ROADMAP in docs/MANUAL.md); sourceFileServer omitted (OPTIONAL).
+    add(True, dt(ongoing(confirmed_request_pdu(
+        11, obtainfile_request(["COMTRADE", "fault17.dat"], ["fault17.dat"])))))
+    add(False, dt(ongoing(confirmed_response_pdu(11, svc(46, False, b"")))))  # ObtainFile-Response ::= NULL
+
+    # 27) & 28) FileOpen -- fileAttributes' own lastModified (GeneralizedTime) exercised here.
+    add(True, dt(ongoing(confirmed_request_pdu(
+        12, fileopen_request(["COMTRADE", "fault17.dat"], initial_position=0)))))
+    add(False, dt(ongoing(confirmed_response_pdu(
+        12, fileopen_response(frsm_id=7, size_of_file=20480, last_modified="20250115120000Z")))))
+
+    # 29) & 30) FileRead -- moreFollows explicitly encoded false (overriding its own DEFAULT TRUE).
+    add(True, dt(ongoing(confirmed_request_pdu(13, fileread_request(frsm_id=7)))))
+    add(False, dt(ongoing(confirmed_response_pdu(
+        13, fileread_response(bytes.fromhex("cafebabe0102"), more_follows=False)))))
+
+    # 31) & 32) FileClose -- releases the frsmID FileOpen returned above.
+    add(True, dt(ongoing(confirmed_request_pdu(14, fileclose_request(frsm_id=7)))))
+    add(False, dt(ongoing(confirmed_response_pdu(14, svc(74, False, b"")))))  # FileClose-Response ::= NULL
+
+    # 33) & 34) FileRename.
+    add(True, dt(ongoing(confirmed_request_pdu(
+        15, filerename_request(["COMTRADE", "fault17.dat"], ["COMTRADE", "fault17_archived.dat"])))))
+    add(False, dt(ongoing(confirmed_response_pdu(15, svc(75, False, b"")))))  # FileRename-Response ::= NULL
+
+    # 35) & 36) FileDelete -- FileName is a bare (constructed) alternative at the CHOICE level.
+    add(True, dt(ongoing(confirmed_request_pdu(
+        16, filedelete_request(["COMTRADE", "fault17_archived.dat"])))))
+    add(False, dt(ongoing(confirmed_response_pdu(16, svc(76, False, b"")))))  # FileDelete-Response ::= NULL
+
+    # 37) & 38) FileDirectory -- listOfDirectoryEntry is the one EXPLICIT-tagged field in this whole
+    #     section (see mms.cpp's own header comment); moreFollows explicitly encoded true here
+    #     (overriding its own DEFAULT FALSE), and one entry omits lastModified (OPTIONAL).
+    add(True, dt(ongoing(confirmed_request_pdu(17, filedirectory_request(file_spec=["COMTRADE"])))))
+    add(False, dt(ongoing(confirmed_response_pdu(17, filedirectory_response(
+        [directory_entry(["COMTRADE", "fault17.cfg"], size_of_file=512, last_modified="20250115120000Z"),
+         directory_entry(["COMTRADE", "fault18.dat"], size_of_file=20480)],
+        more_follows=True)))))
+
+    # 39) InformationReport -- an unconfirmed, unsolicited report from the IED (this decoder's own
     #     MMS analog of its GOOSE decoder, see mms.hpp).
     report_var = variable_list_name(object_name_vmd("MyDataSet1"))
     add(False, dt(ongoing(unconfirmed_pdu(information_report(
         report_var, [access_result_success(data_bool(True)),
                      access_result_success(data_utc_time(1_700_000_000, 0, 0x0A))])))))
 
-    # 26) & 27) Tier2 demo -- takeControl(19) is a real, named confirmedServiceRequest/Response
+    # 40) & 41) Tier2 demo -- takeControl(19) is a real, named confirmedServiceRequest/Response
     #     alternative (see kConfirmedServiceNames) that this decoder's own Tier1 dispatch does NOT
     #     further decode (mirrors the real tests/real_captures/mms/mms-takeControl.pcap finding):
     #     service_recognized=true, service_name=takeControl, but the body is shown as hex, not
     #     structurally decoded.
-    add(True, dt(ongoing(confirmed_request_pdu(11, svc(19, True, ctx_p(0, b"IED1Device"))))))
-    add(False, dt(ongoing(confirmed_response_pdu(11, svc(19, True, b"")))))
+    add(True, dt(ongoing(confirmed_request_pdu(18, svc(19, True, ctx_p(0, b"IED1Device"))))))
+    add(False, dt(ongoing(confirmed_response_pdu(18, svc(19, True, b"")))))
 
-    # 28) ServiceError -- a Read request answered with confirmed-ErrorPDU instead of a normal
+    # 42) ServiceError -- a Read request answered with confirmed-ErrorPDU instead of a normal
     #     response (errorClass=resource(3)).
-    add(True, dt(ongoing(confirmed_request_pdu(12, read_request(False, read_var)))))
+    add(True, dt(ongoing(confirmed_request_pdu(19, read_request(False, read_var)))))
     add(False, dt(ongoing(confirmed_error_pdu(
-        12, category_tag=3, code=1, additional_description="variable not found"))))
+        19, category_tag=3, code=1, additional_description="variable not found"))))
 
-    # 29) RejectPDU -- server rejects invokeID 13 outright (confirmed-requestPDU category).
-    add(False, dt(ongoing(reject_pdu(13, reason_tag=1, reason_code=1))))
+    # 43) RejectPDU -- server rejects invokeID 20 outright (confirmed-requestPDU category).
+    add(False, dt(ongoing(reject_pdu(20, reason_tag=1, reason_code=1))))
 
-    # 30) & 31) Cancel-Request/Response -- client cancels the earlier GetVariableAccessAttributes
+    # 44) & 45) Cancel-Request/Response -- client cancels the earlier GetVariableAccessAttributes
     #     (invokeID 5).
     add(True, dt(ongoing(cancel_request_pdu(5))))
     add(False, dt(ongoing(cancel_response_pdu(5))))
 
-    # 32) & 33) Cancel-Error -- a cancel for an invokeID the server has nothing outstanding for.
+    # 46) & 47) Cancel-Error -- a cancel for an invokeID the server has nothing outstanding for.
     add(True, dt(ongoing(cancel_request_pdu(99))))
     add(False, dt(ongoing(cancel_error_pdu(99, category_tag=10, code=1))))
 
-    # 34) & 35) Malformed/truncated confirmedServiceRequest/Response -- invokeID present, service
+    # 48) & 49) Malformed/truncated confirmedServiceRequest/Response -- invokeID present, service
     #     field missing entirely. Mirrors the real, genuinely truncated frame 18 of
     #     tests/real_captures/mms/iec61850_read.pcap (see its own ATTRIBUTION.md) -- this decoder
     #     degrades to an honest note rather than guessing or crashing.
     add(True, dt(ongoing(malformed_confirmed_request_no_service(77))))
     add(False, dt(ongoing(malformed_confirmed_response_no_service(78))))
 
-    # 36) & 37) Conclude-Request/Response -- normal, graceful association release at the MMS level.
+    # 50) & 51) Conclude-Request/Response -- normal, graceful association release at the MMS level.
     add(True, dt(ongoing(conclude_request_pdu())))
     add(False, dt(ongoing(conclude_response_pdu())))
 
-    # 38) & 39) Conclude-Error -- a second conclude attempt the server refuses.
+    # 52) & 53) Conclude-Error -- a second conclude attempt the server refuses.
     add(True, dt(ongoing(conclude_request_pdu())))
     add(False, dt(ongoing(conclude_error_pdu(category_tag=9, code=2))))
 

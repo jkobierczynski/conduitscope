@@ -2996,7 +2996,7 @@ hasn't seen. See LIMITATIONS.
 
 #### Two-tier function coverage
 
-Same two-tier split this codebase already applies to MMS (11 of 78 services)
+Same two-tier split this codebase already applies to MMS (18 of 78 services)
 and OPC UA (Tier 1/Tier 2):
 
 **Tier 1 -- fully decoded, both directions:**
@@ -3290,27 +3290,50 @@ below) and a ConfirmedServiceRequest/Response CHOICE selecting one of 78
 defined confirmed services. This decoder's own dispatch table names every
 one of the 78 and splits them into two tiers:
 
-- **Tier 1** (full field decode -- 11 services): `status`, `getNameList`,
+- **Tier 1** (full field decode -- 18 services): `status`, `getNameList`,
   `identify`, `read`, `write`, `getVariableAccessAttributes`,
   `defineNamedVariableList`, `getNamedVariableListAttributes`,
-  `deleteNamedVariableList`, `getDomainAttributes`, `getCapabilityList` --
+  `deleteNamedVariableList`, `getDomainAttributes`, `getCapabilityList`,
+  plus the seven file-transfer services `obtainFile`, `fileOpen`,
+  `fileRead`, `fileClose`, `fileRename`, `fileDelete`, `fileDirectory` --
   the services this decoder's own research found are (a) universally
-  present in real IEC 61850 MMS traffic and (b) simple enough to decode
-  with full confidence. Tier 1 also covers unconfirmed-PDU's own
-  informationReport (see below) and every one of rejectPDU/cancel-*/
-  conclude-* (each small and fully specified).
+  present in real IEC 61850 MMS traffic or (b) the most OT-security-
+  relevant of MMS's remaining services (the file-transfer group IEC
+  61850's own COMTRADE/disturbance-file-retrieval and firmware/
+  configuration-file-transfer workflows ride on -- see ROADMAP item 12),
+  and each is (c) simple enough to decode with full confidence. Tier 1
+  also covers unconfirmed-PDU's own informationReport (see below) and
+  every one of rejectPDU/cancel-*/conclude-* (each small and fully
+  specified).
 - **Tier 2** (service name + invokeID only, body shown as raw hex): every
   other confirmed service -- `rename`, `defineNamedVariable`,
   `defineScatteredAccess`, `getScatteredAccessAttributes`,
   `deleteVariableAccess`, `defineNamedType`, `getNamedTypeAttributes`,
   `deleteNamedType`, `input`, `output`, `takeControl`,
   `relinquishControl`, every semaphore/event-condition/event-action/
-  event-enrollment/journal/file/program-invocation/domain-download service
+  event-enrollment/journal/program-invocation/domain-download service
   -- genuinely rare in ordinary IEC 61850 process-data traffic (belonging
   more to MMS's original general-purpose industrial-messaging scope than to
   IEC 61850's own narrower profile of it), each with its own, sometimes
   large, request/response grammar this first-pass release does not
   implement field-by-field.
+
+**The file-transfer services** (`obtainFile`/`fileOpen`/`fileRead`/
+`fileClose`/`fileRename`/`fileDelete`/`fileDirectory`): `FileName` (a
+`SEQUENCE OF GraphicString`) is rendered joined by `"/"`, the same
+convention Wireshark's own `packet-mms.c` `dissect_mms_FileName` uses;
+`FileAttributes`' own `lastModified` (a `GeneralizedTime` -- an ASCII
+`"YYYYMMDDHHMMSS[.fraction][zone]"` text timestamp, NOT the same wire
+shape as the Data CHOICE's own binary `utc-time[17]` above) is reformatted
+to this codebase's own ISO-8601 convention when it parses, shown verbatim
+otherwise; `fileData` (a raw `OCTET STRING`) is rendered as a full,
+never-truncated hex dump, the same convention already used for OPC UA's
+own `ByteString`. `ObtainFile-Request`'s own `sourceFileServer` (an
+`ApplicationReference` -- AP-title/AE-qualifier/invocation-ids, every
+field itself OPTIONAL) is structurally recognized but not deep-decoded,
+the same posture this decoder's own ACSE AARQ/AARE decode already takes
+for AP-title/AE-qualifier elsewhere (see "Deliberately not implemented"
+below).
 
 **The Data value type**: unlike this codebase's own OPC UA decoder (which
 deliberately leaves Variant/DataValue undecoded), this decoder fully
@@ -3398,20 +3421,18 @@ reassembly, already implemented for S7comm and shared as-is by MMS -- MMS
 needs no reassembly mechanism of its own); Presentation-layer context
 renegotiation mid-association (ISO 8823's own "presentation-context-
 addition-list" extension) -- never observed in real traffic; AARQ/AARE's
-own authentication-value field, structurally skipped; and MMS's own
-file-transfer services (`obtainFile`/`fileOpen`/`fileRead`/`fileClose`/
-`fileRename`/`fileDelete`/`fileDirectory`) are named (Tier 2) but not
-decoded -- IEC 61850's own COMTRADE/disturbance-file-retrieval use of MMS
-file services is a real, if narrower, OT-security-relevant use case this
-first-pass release leaves for future work (see ROADMAP). `Address`
-(non-symbolic variable addressing, one of VariableSpecification's own two
-alternatives alongside `name`) is likewise structurally recognized but
-shown only as `"address=<Address, not decoded>"`, not decoded field-by-
-field, since real IEC 61850 traffic overwhelmingly addresses variables by
-symbolic `name` instead. `TypeSpecification` (part of
-defineNamedVariableList/getVariableAccessAttributes-response) is likewise
-recognized as present but shown only as `"typeSpecification=<TypeSpecification,
-not decoded>"`.
+own authentication-value field, structurally skipped; and, within the
+file-transfer services (now Tier 1 -- see above), `ObtainFile-Request`'s
+own `sourceFileServer` (`ApplicationReference`) is structurally recognized
+but not deep-decoded. `Address` (non-symbolic variable addressing, one of
+VariableSpecification's own two alternatives alongside `name`) is likewise
+structurally recognized but shown only as `"address=<Address, not
+decoded>"`, not decoded field-by-field, since real IEC 61850 traffic
+overwhelmingly addresses variables by symbolic `name` instead.
+`TypeSpecification` (part of defineNamedVariableList/
+getVariableAccessAttributes-response) is likewise recognized as present but
+shown only as `"typeSpecification=<TypeSpecification, not decoded>"`. Both
+`Address` and `TypeSpecification` remain open items -- see ROADMAP item 12.
 
 #### Validation
 
@@ -6939,12 +6960,17 @@ These are current, not aspirational -- each has a corresponding ROADMAP item.
   bit-for-bit -- the reference plugin's own source only comments on their
   meaning informally.
 - **Most of MMS's 78 confirmedServices are Tier 2 (name + invokeID only,
-  body shown as raw hex).** Only 11 are fully field-decoded (Tier 1):
+  body shown as raw hex).** Only 18 are fully field-decoded (Tier 1):
   `status`, `getNameList`, `identify`, `read`, `write`,
   `getVariableAccessAttributes`, `defineNamedVariableList`,
   `getNamedVariableListAttributes`, `deleteNamedVariableList`,
-  `getDomainAttributes`, `getCapabilityList` -- see PROTOCOL COVERAGE's MMS
-  section for why exactly these 11 and not others.
+  `getDomainAttributes`, `getCapabilityList`, and the seven file-transfer
+  services `obtainFile`, `fileOpen`, `fileRead`, `fileClose`,
+  `fileRename`, `fileDelete`, `fileDirectory` -- see PROTOCOL COVERAGE's
+  MMS section for why exactly these 18 and not others. Within the
+  file-transfer group, `ObtainFile-Request`'s own `sourceFileServer`
+  (`ApplicationReference`) is likewise structurally recognized but not
+  deep-decoded.
 - **MMS's Session layer only supports the "normal" (one-byte-length-per-
   parameter) SPDU length form ISO 8327-1 defines** -- the extended 2-byte
   length form (LI `0xFF`) is recognized as a distinct, legal encoding but
@@ -7933,22 +7959,36 @@ Rough order, each building on the groundwork this release establishes:
     Write/Call exchange, if a second real OPC UA capture with that coverage
     ever turns up (see `tests/real_captures/opcua/ATTRIBUTION.md`'s own
     honest scope).
-12. **Extend MMS's Tier 2 confirmedServices to full field decoding** --
-    currently 67 of the 78 defined confirmed services (see PROTOCOL
-    COVERAGE's MMS section) get only a name + invokeID, body shown as raw
-    hex. The file-transfer services (`obtainFile`/`fileOpen`/`fileRead`/
-    `fileClose`/`fileRename`/`fileDelete`/`fileDirectory`) are the most
-    OT-security-relevant of these to prioritize -- IEC 61850's own
-    COMTRADE/disturbance-file-retrieval use of MMS file services is a real
-    use case this first-pass release leaves undecoded. Also: decode
-    `Address` (non-symbolic variable addressing) and `TypeSpecification`
-    (currently both shown only as a structural placeholder); implement the
-    Session layer's extended (2-byte) length form, if real traffic using it
-    ever turns up; and widen real-capture validation beyond the three small
-    ITI/ICS-Security-Tools captures and one self-generated libiec61850
-    session this decoder currently has (see
-    `tests/real_captures/mms/ATTRIBUTION.md`) -- in particular, a real
-    capture exercising a Tier 2 service, a ServiceError/rejectPDU on real
+12. ~~**Extend MMS's Tier 2 confirmedServices to full field decoding**~~ --
+    **done, scoped to the file-transfer services**: `obtainFile`/
+    `fileOpen`/`fileRead`/`fileClose`/`fileRename`/`fileDelete`/
+    `fileDirectory` are now Tier 1 (full field decode) -- see PROTOCOL
+    COVERAGE's MMS section and mms.hpp's own "File-transfer services"
+    paragraph. This was the ROADMAP item's own explicitly-named priority:
+    IEC 61850's own COMTRADE/disturbance-file-retrieval and firmware/
+    configuration-file-transfer workflows ride on exactly these seven
+    services, the most OT-security-relevant of MMS's remaining
+    Tier 2 group. `FileName` (a `SEQUENCE OF GraphicString`) is rendered
+    joined by "/", matching Wireshark's own `packet-mms.c`
+    `dissect_mms_FileName`; `GeneralizedTime` (an ASCII text timestamp,
+    distinct from the Data CHOICE's own binary `UtcTime`) is reformatted
+    to this codebase's ISO-8601 convention when it parses, shown verbatim
+    otherwise; `fileData` is a full, never-truncated hex dump.
+    `ObtainFile-Request`'s own `sourceFileServer` (an `ApplicationReference`)
+    is structurally recognized but not deep-decoded, the same posture this
+    decoder's own ACSE AARQ/AARE decode already takes for AP-title/
+    AE-qualifier elsewhere. 60 of the 78 defined confirmed services remain
+    Tier 2 (name + invokeID only, body shown as raw hex) -- see PROTOCOL
+    COVERAGE's MMS section for the full split. Still open, left for a
+    future round: decoding `Address` (non-symbolic variable addressing)
+    and `TypeSpecification` (currently both shown only as a structural
+    placeholder); implementing the Session layer's extended (2-byte)
+    length form, if real traffic using it ever turns up; and widening
+    real-capture validation beyond the three small ITI/ICS-Security-Tools
+    captures and one self-generated libiec61850 session this decoder
+    currently has (see `tests/real_captures/mms/ATTRIBUTION.md`) -- in
+    particular, a real capture exercising any Tier 2 service or the new
+    file-transfer services specifically, a ServiceError/rejectPDU on real
     traffic (currently synthetic-fixture-validated only), or a stack that
     negotiates a presentation-context numbering other than the assumed
     "1=ACSE, 3=MMS" convention, would meaningfully extend this decoder's
@@ -8307,10 +8347,13 @@ recursion depth on Data's own array/structure alternatives defends against
 a real denial-of-service class this decoder's own validation independently
 confirmed -- `tshark` 4.2.2's own MMS dissector hits an internal recursion
 assertion and aborts entirely on roughly 43 of 224 frames of genuine,
-non-malicious traffic this decoder's own research captured. 11 of MMS's 78
-confirmedServices get full field decoding (Tier 1); the rest are named with
-invokeID only, body shown as raw hex (Tier 2), the same two-tier scoping
-precedent this codebase already applies to OPC UA's own service dispatch.
+non-malicious traffic this decoder's own research captured. 18 of MMS's 78
+confirmedServices get full field decoding (Tier 1) -- including, as of item
+12's own completion, the seven file-transfer services IEC 61850's own
+COMTRADE/disturbance-file-retrieval workflow rides on; the rest are named
+with invokeID only, body shown as raw hex (Tier 2), the same two-tier
+scoping precedent this codebase already applies to OPC UA's own service
+dispatch.
 Validated against three genuine real-world captures from
 `ITI/ICS-Security-Tools` (one a full association with two independently-
 confirmed malformed frames, two "bare MMS" -- the shape that caught a real

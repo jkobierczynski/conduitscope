@@ -3227,7 +3227,7 @@ add_test(NAME mms_does_not_crash
 add_test(NAME mms_stats_counted
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --stats)
 set_tests_properties(mms_stats_counted PROPERTIES
-  PASS_REGULAR_EXPRESSION "packets: +55[^\n]*\n[^\n]*\nprotocols:\n *cotp +7\n *mms +47\n *tcp +1\nmms pdu types:\n *cancel-ErrorPDU +1\n *cancel-RequestPDU +3\n *cancel-ResponsePDU +1\n *conclude-ErrorPDU +1\n *conclude-RequestPDU +4\n *conclude-ResponsePDU +1\n *confirmed-ErrorPDU +1\n *confirmed-RequestPDU +15\n *confirmed-ResponsePDU +16\n *initiate-RequestPDU +1\n *initiate-ResponsePDU +1\n *rejectPDU +1\n *unconfirmed-PDU \\(informationReport\\) +1\nmms services:\n *defineNamedVariableList +2\n *deleteNamedVariableList +2\n *getCapabilityList +3\n *getDomainAttributes +2\n *getNameList +3\n *getNamedVariableListAttributes +2\n *getVariableAccessAttributes +2\n *identify +4\n *informationReport +1\n *read +3\n *status +2\n *takeControl +2\n *write +2")
+  PASS_REGULAR_EXPRESSION "packets: +69[^\n]*\n[^\n]*\nprotocols:\n *cotp +7\n *mms +61\n *tcp +1\nmms pdu types:\n *cancel-ErrorPDU +1\n *cancel-RequestPDU +3\n *cancel-ResponsePDU +1\n *conclude-ErrorPDU +1\n *conclude-RequestPDU +4\n *conclude-ResponsePDU +1\n *confirmed-ErrorPDU +1\n *confirmed-RequestPDU +22\n *confirmed-ResponsePDU +23\n *initiate-RequestPDU +1\n *initiate-ResponsePDU +1\n *rejectPDU +1\n *unconfirmed-PDU \\(informationReport\\) +1\nmms services:\n *defineNamedVariableList +2\n *deleteNamedVariableList +2\n *fileClose +2\n *fileDelete +2\n *fileDirectory +2\n *fileOpen +2\n *fileRead +2\n *fileRename +2\n *getCapabilityList +3\n *getDomainAttributes +2\n *getNameList +3\n *getNamedVariableListAttributes +2\n *getVariableAccessAttributes +2\n *identify +4\n *informationReport +1\n *obtainFile +2\n *read +3\n *status +2\n *takeControl +2\n *write +2")
 
 add_test(NAME mms_association_aarq_aare
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format text)
@@ -3295,6 +3295,48 @@ add_test(NAME mms_getdomainattributes_response
 set_tests_properties(mms_getdomainattributes_response PROPERTIES
   PASS_REGULAR_EXPRESSION "\"mms_values\": \\[\"domainName=IED1Device\"\\],.*\"mms_values\": \\[\"listOfCapabilities=\\[STR1\\]\", \"state=2\", \"mmsDeletable=false\", \"sharable=true\"\\],")
 
+# File-transfer services -- Tier1 promotion of obtainFile/fileOpen/fileRead/fileClose/fileRename/
+# fileDelete/fileDirectory (see mms.cpp's own "File-transfer services" section header comment and
+# docs/MANUAL.md's ROADMAP item 12). FileName's own "/"-joined rendering, GeneralizedTime's own
+# reformat to ISO-8601, and FileAttributes with/without its own OPTIONAL lastModified are all
+# exercised across these.
+add_test(NAME mms_obtainfile_request_values
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format json)
+set_tests_properties(mms_obtainfile_request_values PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"mms_values\": \\[\"sourceFile=COMTRADE/fault17.dat\", \"destinationFile=fault17.dat\"\\],")
+
+add_test(NAME mms_fileopen_request_and_response_values
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format json)
+set_tests_properties(mms_fileopen_request_and_response_values PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"mms_values\": \\[\"fileName=COMTRADE/fault17.dat\", \"initialPosition=0\"\\],.*\"mms_values\": \\[\"frsmID=7\", \"fileAttributes=\\{sizeOfFile=20480, lastModified=2025-01-15T12:00:00Z\\}\"\\],")
+
+add_test(NAME mms_fileread_request_and_response_values
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format json)
+set_tests_properties(mms_fileread_request_and_response_values PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"mms_values\": \\[\"frsmID=7\"\\],.*\"mms_values\": \\[\"fileData=6 byte\\(s\\): cafebabe0102\", \"moreFollows=false\"\\],")
+
+add_test(NAME mms_fileclose_request_and_null_response
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format text)
+set_tests_properties(mms_fileclose_request_and_null_response PROPERTIES
+  PASS_REGULAR_EXPRESSION "confirmed-RequestPDU fileClose invokeID=14\n.*confirmed-ResponsePDU fileClose invokeID=14")
+
+add_test(NAME mms_filerename_request_values
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format json)
+set_tests_properties(mms_filerename_request_values PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"mms_values\": \\[\"currentFileName=COMTRADE/fault17.dat\", \"newFileName=COMTRADE/fault17_archived.dat\"\\],")
+
+add_test(NAME mms_filedelete_request_values
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format json)
+set_tests_properties(mms_filedelete_request_values PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"mms_values\": \\[\"fileName=COMTRADE/fault17_archived.dat\"\\],")
+
+# FileDirectory-Response's own listOfDirectoryEntry is the one EXPLICIT-tagged field in this whole
+# section (see mms.cpp's header comment) -- two entries, one with lastModified, one without.
+add_test(NAME mms_filedirectory_request_and_response_values
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format json)
+set_tests_properties(mms_filedirectory_request_and_response_values PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"mms_values\": \\[\"fileSpecification=COMTRADE\"\\],.*\"mms_values\": \\[\"listOfDirectoryEntry\\[0\\]=COMTRADE/fault17.cfg \\{sizeOfFile=512, lastModified=2025-01-15T12:00:00Z\\}\", \"listOfDirectoryEntry\\[1\\]=COMTRADE/fault18.dat \\{sizeOfFile=20480\\}\", \"moreFollows=true\"\\],")
+
 # InformationReport -- this decoder's own MMS analog of its GOOSE decoder (see mms.hpp); also
 # exercises Data's own utc-time (tag 17, IEC 61850-8-1 addition) rendering.
 add_test(NAME mms_information_report_values
@@ -3314,12 +3356,12 @@ set_tests_properties(mms_tier2_takecontrol_shown_as_hex PROPERTIES
 add_test(NAME mms_serviceerror_note
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format text)
 set_tests_properties(mms_serviceerror_note PROPERTIES
-  PASS_REGULAR_EXPRESSION "\\[mms\\]  MMS/DATA TRANSFER / GIVE TOKENS confirmed-ErrorPDU invokeID=12 error=resource\\(1\\)\n *note: additionalDescription=variable not found")
+  PASS_REGULAR_EXPRESSION "\\[mms\\]  MMS/DATA TRANSFER / GIVE TOKENS confirmed-ErrorPDU invokeID=19 error=resource\\(1\\)\n *note: additionalDescription=variable not found")
 
 add_test(NAME mms_rejectpdu_text
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format text)
 set_tests_properties(mms_rejectpdu_text PROPERTIES
-  PASS_REGULAR_EXPRESSION "\\[mms\\]  MMS/DATA TRANSFER / GIVE TOKENS rejectPDU invokeID=13")
+  PASS_REGULAR_EXPRESSION "\\[mms\\]  MMS/DATA TRANSFER / GIVE TOKENS rejectPDU invokeID=20")
 
 add_test(NAME mms_cancel_request_response_and_error
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format text)
