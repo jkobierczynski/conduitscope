@@ -64,6 +64,7 @@ add_library(conduitscope_core STATIC
   src/yaml_mini.cpp
   src/policy.cpp
   src/policy_engine.cpp
+  src/asset_inventory.cpp
   src/live_capture.cpp
 )
 target_include_directories(conduitscope_core PUBLIC
@@ -5747,6 +5748,125 @@ set_tests_properties(policy_resolver_ethernet_flow_no_oui_suppresses_vendor_json
   FAIL_REGULAR_EXPRESSION "mac_._vendor")
 
 # ---------------------------------------------------------------------------------------------
+# `inventory` (asset_inventory.hpp/cpp) -- passive OT asset inventory: pcap -> zones and conduits,
+# ROADMAP item 17. Runs the opposite direction from `policy validate`: infers a first-draft
+# zone/conduit model from observed traffic instead of checking traffic against a hand-written one.
+# tests/sample_inventory.pcap (build_inventory_sample in tools/make_sample_pcap.py) is the primary
+# fixture -- unlike every other sample pcap, it deliberately spans TWO /24 subnets so the
+# cross-zone conduit-inference path (not just same-subnet grouping) is actually exercised; see that
+# builder's own comment for the full asset/zone/conduit layout it produces.
+# ---------------------------------------------------------------------------------------------
+
+add_test(NAME inventory_text_report_assets_communications_zones_conduits
+  COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_inventory.pcap")
+set_tests_properties(inventory_text_report_assets_communications_zones_conduits PROPERTIES
+  PASS_REGULAR_EXPRESSION "9 asset\\(s\\) observed, 14 total packet\\(s\\) in capture, 0 skipped.*ASSETS \\(9\\):.*10\\.0\\.5\\.21 .*\\[client\\]  dnp3, s7comm.*192\\.168\\.1\\.10 .*\\[server\\]  modbus.*COMMUNICATIONS \\(5\\):.*192\\.168\\.1\\.50 -> 192\\.168\\.1\\.10:502 \\(modbus\\)  modbus  \\[Read Holding Registers\\].*10\\.0\\.5\\.21 -> 192\\.168\\.1\\.11:20000 \\(dnp3\\)  dnp3  \\[Read, Response\\].*192\\.168\\.1\\.14 -> 192\\.168\\.1\\.15:47808  bacnet  \\[readProperty\\].*INFERRED ZONES \\(2, grouped by observed /24 subnet\\):.*zone_10_0_5_0_24 \\(10\\.0\\.5\\.0/24\\): 10\\.0\\.5\\.21, 10\\.0\\.5\\.22.*zone_192_168_1_0_24 \\(192\\.168\\.1\\.0/24\\): 192\\.168\\.1\\.10, 192\\.168\\.1\\.11.*INFERRED CONDUITS \\(5\\):.*zone_10_0_5_0_24 -> zone_192_168_1_0_24  \\(dnp3/20000\\).*zone_10_0_5_0_24 -> zone_192_168_1_0_24  \\(enip/44818\\).*zone_10_0_5_0_24 -> zone_192_168_1_0_24  \\(s7comm/102\\).*zone_192_168_1_0_24 -> zone_192_168_1_0_24  \\(bacnet/47808\\).*zone_192_168_1_0_24 -> zone_192_168_1_0_24  \\(modbus/502\\)")
+
+# Asset roles: an asset seen only initiating is [client], only receiving is [server]; nothing in
+# this fixture plays both roles on different edges, so [client+server] is covered separately (see
+# policy validate's own resolver_* text/json tests for the base-role-labeling behavior this
+# inherits -- update_asset's ever_client/ever_server tracking is what role_text() reads).
+add_test(NAME inventory_bacnet_unicast_registers_client_and_server_not_broadcast_filtered
+  COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_inventory.pcap")
+set_tests_properties(inventory_bacnet_unicast_registers_client_and_server_not_broadcast_filtered PROPERTIES
+  PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.14 .*\\[client\\]  bacnet.*192\\.168\\.1\\.15 .*\\[server\\]  bacnet")
+
+add_test(NAME inventory_json_report_shape
+  COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_inventory.pcap" --format json)
+set_tests_properties(inventory_json_report_shape PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"total_packets\": 14,\n *\"skipped_packets\": 0,\n *\"assets\": \\[.*\"protocols\": \\[\"dnp3\", \"s7comm\"\\],\n *\"role\": \"client\",.*\"edges\": \\[.*\"client_ip\": \"192\\.168\\.1\\.50\",\n *\"server_ip\": \"192\\.168\\.1\\.10\",\n *\"protocol\": \"modbus\",\n *\"server_port\": 502,.*\"zones\": \\[.*\"name\": \"zone_10_0_5_0_24\",\n *\"network\": \"10\\.0\\.5\\.0/24\",.*\"conduits\": \\[.*\"from_zone\": \"zone_10_0_5_0_24\",\n *\"to_zone\": \"zone_192_168_1_0_24\",\n *\"protocol\": \"dnp3\",\n *\"port\": 20000,")
+
+# A BACnet edge has no server_port_service field (mirrors the resolver's own miss-vs-disabled
+# convention: the annotation is simply omitted, never emitted as null) -- port 47808/tcp isn't in
+# the built-in services table (BACnet/IP is UDP, and Resolver::service_name is only ever looked up
+# against "tcp" here -- see write_inventory_report_json's own comment).
+add_test(NAME inventory_json_bacnet_edge_has_no_server_port_service
+  COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_inventory.pcap" --format json)
+set_tests_properties(inventory_json_bacnet_edge_has_no_server_port_service PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"server_ip\": \"192\\.168\\.1\\.15\",\n *\"protocol\": \"bacnet\",\n *\"server_port\": 47808,\n *\"observed_functions\"")
+
+add_test(NAME inventory_zone_prefix_override_regroups_zones
+  COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_inventory.pcap" --zone-prefix 16)
+set_tests_properties(inventory_zone_prefix_override_regroups_zones PROPERTIES
+  PASS_REGULAR_EXPRESSION "INFERRED ZONES \\(2, grouped by observed /16 subnet\\):.*zone_10_0_0_0_16 \\(10\\.0\\.0\\.0/16\\): 10\\.0\\.5\\.21, 10\\.0\\.5\\.22.*zone_192_168_0_0_16 \\(192\\.168\\.0\\.0/16\\): 192\\.168\\.1\\.10")
+
+add_test(NAME inventory_zone_prefix_out_of_range_rejected
+  COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --zone-prefix 33)
+set_tests_properties(inventory_zone_prefix_out_of_range_rejected PROPERTIES
+  WILL_FAIL TRUE)
+
+add_test(NAME inventory_bad_format_rejected
+  COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --format xml)
+set_tests_properties(inventory_bad_format_rejected PROPERTIES
+  WILL_FAIL TRUE)
+
+add_test(NAME inventory_bad_diagram_format_rejected
+  COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --diagram-format svg)
+set_tests_properties(inventory_bad_diagram_format_rejected PROPERTIES
+  WILL_FAIL TRUE)
+
+# --- Diagram output and --policy-out: both write to a FILE, not stdout, so (same as
+# mqtt_pcap_pcapng_agree.sh above) this is driven from a small shell script that prints every
+# file's content to stdout for a single PASS_REGULAR_EXPRESSION to check -- including closing the
+# "discover, then enforce" loop for real (the generated policy YAML fed straight back into
+# `policy validate` against the same capture) and the empty-capture edge case (write_inventory_
+# policy_yaml must not emit a 'zones:'/'conduits:' block referencing an undeclared placeholder
+# zone -- the "unclassified" bug this caught during development -- only explanatory comments).
+add_test(NAME inventory_diagram_and_policy_out_smoke
+  COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/inventory_diagram_and_policy_out.sh"
+          "$<TARGET_FILE:conduitscope>"
+          "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_inventory.pcap"
+          "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dns.pcap")
+set_tests_properties(inventory_diagram_and_policy_out_smoke PROPERTIES
+  PASS_REGULAR_EXPRESSION "=== mermaid diagram ===\ngraph LR\n *zone_10_0_5_0_24\\[\"zone_10_0_5_0_24<br/>10\\.0\\.5\\.0/24<br/>\\(2 asset\\(s\\)\\)\"\\].*zone_10_0_5_0_24 -->\\|\"dnp3/20000\"\\| zone_192_168_1_0_24.*=== dot diagram ===\ndigraph inventory \\{\n *rankdir=LR;.*\"zone_10_0_5_0_24\" -> \"zone_192_168_1_0_24\" \\[label=\"dnp3/20000\"\\];.*=== policy-out ===\n# Auto-generated by `conduitscope inventory`.*zones:\n *zone_10_0_5_0_24:.*networks:\n *- 10\\.0\\.5\\.0/24.*conduits:\n *- name: \"zone_10_0_5_0_24 -> zone_192_168_1_0_24 \\(dnp3/20000\\)\"\n *from: zone_10_0_5_0_24\n *to: zone_192_168_1_0_24\n *protocols: \\[dnp3\\]\n *ports: \\[20000\\].*=== round-trip through policy validate ===.*Result: COMPLIANT\n\nFlows evaluated: 4 \\(4 allowed, 0 violation\\(s\\), 0 unclassified\\).*Conduits never exercised by this capture \\(1\\):\n *- zone_192_168_1_0_24 -> zone_192_168_1_0_24 \\(bacnet/47808\\).*=== empty-capture policy-out ===.*No asset was observed in this capture")
+
+add_test(NAME inventory_policy_out_empty_capture_note_on_stderr
+  COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dns.pcap" --policy-out "${CMAKE_CURRENT_BINARY_DIR}/inventory_empty_policy_note_check.yaml" --output "${CMAKE_CURRENT_BINARY_DIR}/inventory_empty_note_check.report")
+set_tests_properties(inventory_policy_out_empty_capture_note_on_stderr PROPERTIES
+  PASS_REGULAR_EXPRESSION "note: no asset was observed, so .*inventory_empty_policy_note_check\\.yaml.* has no 'zones:'/'conduits:' keys and is not a loadable policy file as-is")
+
+# --- Resolver, wired into `inventory` the same way as `decode`/`policy validate` (--no-oui/------
+# --- --resolve/--hosts/--nn/--services) -- reuses sample_modbus.pcap and the same fixtures -------
+
+add_test(NAME inventory_resolver_oui_vendor_shown_by_default_text
+  COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap")
+set_tests_properties(inventory_resolver_oui_vendor_shown_by_default_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.10  00:0c:29:aa:bb:cc \\(VMware\\)")
+
+add_test(NAME inventory_resolver_no_oui_suppresses_vendor_text
+  COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --no-oui)
+set_tests_properties(inventory_resolver_no_oui_suppresses_vendor_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.10  00:0c:29:aa:bb:cc  \\[server\\]"
+  FAIL_REGULAR_EXPRESSION "VMware")
+
+add_test(NAME inventory_resolver_hostname_off_by_default
+  COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap")
+set_tests_properties(inventory_resolver_hostname_off_by_default PROPERTIES
+  FAIL_REGULAR_EXPRESSION "hmi-01|plc-01")
+
+add_test(NAME inventory_resolver_resolve_with_hosts_file_annotates_text
+  COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --resolve --hosts "${RESOLVER_HOSTS}")
+set_tests_properties(inventory_resolver_resolve_with_hosts_file_annotates_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.50 \\(hmi-01\\) -> 192\\.168\\.1\\.10 \\(plc-01\\):502")
+
+add_test(NAME inventory_resolver_services_file_overrides_builtin_table_text
+  COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --services "${RESOLVER_SERVICES}")
+set_tests_properties(inventory_resolver_services_file_overrides_builtin_table_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.10:502 \\(custom-modbus\\)"
+  FAIL_REGULAR_EXPRESSION "\\(modbus\\)")
+
+add_test(NAME inventory_resolver_nn_suppresses_service_name_text
+  COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --nn)
+set_tests_properties(inventory_resolver_nn_suppresses_service_name_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.10:502  modbus"
+  FAIL_REGULAR_EXPRESSION "502 \\(modbus\\)")
+
+add_test(NAME inventory_resolver_bad_hosts_path_rejected
+  COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --resolve --hosts "${CMAKE_CURRENT_SOURCE_DIR}/tests/does_not_exist_hosts.txt")
+set_tests_properties(inventory_resolver_bad_hosts_path_rejected PROPERTIES
+  WILL_FAIL TRUE)
+
+# ---------------------------------------------------------------------------------------------
 # Live capture (live_capture.hpp/cpp) -- an optional, build-time-detected libpcap (Linux) / Npcap
 # (Windows) dependency; see CMakeLists.txt's CONDUITSCOPE_HAVE_PCAP detection above. The CLI
 # surface (-i/--interface, --filter, --duration, --snaplen, --no-promiscuous, `interfaces`) exists
@@ -5778,6 +5898,16 @@ set_tests_properties(live_capture_requires_exactly_one_source_policy_validate PR
 add_test(NAME live_capture_input_and_interface_are_mutually_exclusive_policy_validate
   COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --interface lo --policy "${POLICY_DIR}/compliant.yaml")
 set_tests_properties(live_capture_input_and_interface_are_mutually_exclusive_policy_validate PROPERTIES
+  WILL_FAIL TRUE)
+
+add_test(NAME live_capture_requires_exactly_one_source_inventory
+  COMMAND conduitscope inventory)
+set_tests_properties(live_capture_requires_exactly_one_source_inventory PROPERTIES
+  PASS_REGULAR_EXPRESSION "needs exactly one of -r/--read.*or -i/--interface")
+
+add_test(NAME live_capture_input_and_interface_are_mutually_exclusive_inventory
+  COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --interface lo)
+set_tests_properties(live_capture_input_and_interface_are_mutually_exclusive_inventory PROPERTIES
   WILL_FAIL TRUE)
 
 add_test(NAME live_capture_version_reports_support

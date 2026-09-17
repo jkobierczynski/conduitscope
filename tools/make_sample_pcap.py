@@ -4876,6 +4876,136 @@ def build_policy_engine_sample():
     (TESTS_DIR / "sample_policy_engine.pcap").write_bytes(data)
 
 
+def build_inventory_sample():
+    """Feeds the `inventory` subcommand (asset_inventory.cpp/hpp) a capture that spans TWO distinct
+    /24 subnets -- every other sample fixture in this file uses only 192.168.1.0/24, which would
+    only ever exercise AssetInventoryEngine::finish's single-zone case. This is the one fixture that
+    proves inferred conduits can cross zone boundaries, not just connect a zone to itself.
+
+    Zone "plant" (192.168.1.0/24) hosts every server: the Modbus PLC, the DNP3 outstation, the
+    EtherNet/IP adapter, the S7-1500 PLC, and a BACnet AHU controller plus a BACnet operator
+    workstation (both in-zone, unlike the other four). Zone "engineering" (10.0.5.0/24) hosts a
+    single engineering workstation (10.0.5.21) that plays DNP3 master AND S7comm engineering client
+    -- one real asset legitimately speaking two protocols -- plus a second host (10.0.5.22) acting
+    as the EtherNet/IP explicit-messaging client, so the inferred asset list shows more than one
+    engineering-side IP too. The Modbus HMI stays in-zone with its PLC (192.168.1.50 -> .10), giving
+    the inferred conduit set a mix of intra-zone and cross-zone conduits:
+        zone_192_168_1_0_24  -> zone_192_168_1_0_24   (modbus/502)   [intra-zone]
+        zone_192_168_1_0_24  -> zone_192_168_1_0_24   (bacnet/47808) [intra-zone]
+        zone_10_0_5_0_24     -> zone_192_168_1_0_24   (dnp3/20000)   [cross-zone]
+        zone_10_0_5_0_24     -> zone_192_168_1_0_24   (s7comm/102)   [cross-zone]
+        zone_10_0_5_0_24     -> zone_192_168_1_0_24   (enip/44818)   [cross-zone]
+    """
+    packets = []
+
+    def add(payload: bytes):
+        packets.append(payload)
+
+    DNP3_OUTSTATION_IP, DNP3_OUTSTATION_MAC = "192.168.1.11", mac("00:0c:29:aa:bb:11")
+    ENIP_SERVER_IP, ENIP_SERVER_MAC = "192.168.1.12", mac("00:0c:29:aa:bb:12")
+    BACNET_CLIENT_IP, BACNET_CLIENT_MAC = "192.168.1.14", mac("00:0c:29:aa:bb:14")
+    BACNET_SERVER_IP, BACNET_SERVER_MAC = "192.168.1.15", mac("00:0c:29:aa:bb:15")
+    S7_PLC_IP, S7_PLC_MAC = "192.168.1.16", mac("00:0c:29:aa:bb:16")
+    ENG_IP, ENG_MAC = "10.0.5.21", mac("00:0c:29:de:ad:01")
+    ENIP_CLIENT_IP, ENIP_CLIENT_MAC = "10.0.5.22", mac("00:0c:29:de:ad:02")
+
+    # --- Modbus: HMI (192.168.1.50) -> PLC (192.168.1.10), intra-zone -----------------------------
+    mb_req = struct.pack("!HHHBB HH", 1, 0, 6, 1, 3, 0, 10)
+    tcp_req = tcp_header(51000, 502, 1000, 2000, TCP_PSH | TCP_ACK, len(mb_req)) + mb_req
+    ip_req = ipv4_header(HMI_IP, PLC_IP, 6, len(tcp_req), 0x1000) + tcp_req
+    add(eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip_req)
+    reg_data = b"".join(struct.pack("!H", v) for v in range(10))
+    mb_resp = struct.pack("!HHHBBB", 1, 0, 2 + 1 + len(reg_data), 1, 3, len(reg_data)) + reg_data
+    tcp_resp = tcp_header(502, 51000, 2000, 1000 + len(mb_req), TCP_PSH | TCP_ACK, len(mb_resp)) + mb_resp
+    ip_resp = ipv4_header(PLC_IP, HMI_IP, 6, len(tcp_resp), 0x1001) + tcp_resp
+    add(eth_header(HMI_MAC, PLC_MAC, 0x0800) + ip_resp)
+
+    # --- DNP3: engineering workstation (10.0.5.21, master) -> outstation (192.168.1.11), cross-zone
+    read_class0 = bytes([0xC0, 0xC0, 0x01, 60, 1, 0x06])
+    read_frame = dnp3_link_frame(source=1, destination=1024, user_data=read_class0)
+    tcp_dnp3_req = tcp_header(51500, 20000, 5000, 6000, TCP_PSH | TCP_ACK, len(read_frame)) + read_frame
+    ip_dnp3_req = ipv4_header(ENG_IP, DNP3_OUTSTATION_IP, 6, len(tcp_dnp3_req), 0x2000) + tcp_dnp3_req
+    add(eth_header(DNP3_OUTSTATION_MAC, ENG_MAC, 0x0800) + ip_dnp3_req)
+    resp_payload = bytes([0xC0, 0xC0, 0x81, 0x80, 0x00]) + bytes([1, 2, 0x00, 0, 2]) + bytes([0x81, 0x01, 0x00])
+    resp_frame = dnp3_link_frame(source=1024, destination=1, user_data=resp_payload)
+    tcp_dnp3_resp = tcp_header(20000, 51500, 6000, 5000 + len(read_frame), TCP_PSH | TCP_ACK,
+                                len(resp_frame)) + resp_frame
+    ip_dnp3_resp = ipv4_header(DNP3_OUTSTATION_IP, ENG_IP, 6, len(tcp_dnp3_resp), 0x2001) + tcp_dnp3_resp
+    add(eth_header(ENG_MAC, DNP3_OUTSTATION_MAC, 0x0800) + ip_dnp3_resp)
+
+    # --- S7comm: same engineering workstation (10.0.5.21) -> S7-1500 PLC (192.168.1.16), cross-zone
+    cr = cotp_connection_pdu(0xE0, 0x0000, 0x0001, bytes([0x01, 0x00]), bytes([0x03, 0x02]))
+    cotp_cr = tpkt_frame(cr)
+    tcp_cr = tcp_header(49200, 102, 200, 300, TCP_PSH | TCP_ACK, len(cotp_cr)) + cotp_cr
+    ip_cr = ipv4_header(ENG_IP, S7_PLC_IP, 6, len(tcp_cr), 0x3000) + tcp_cr
+    add(eth_header(S7_PLC_MAC, ENG_MAC, 0x0800) + ip_cr)
+    cc = cotp_connection_pdu(0xD0, 0x0001, 0x5001, bytes([0x01, 0x00]), bytes([0x03, 0x02]))
+    cotp_cc = tpkt_frame(cc)
+    tcp_cc = tcp_header(102, 49200, 300, 200 + len(cotp_cr), TCP_PSH | TCP_ACK, len(cotp_cc)) + cotp_cc
+    ip_cc = ipv4_header(S7_PLC_IP, ENG_IP, 6, len(tcp_cc), 0x3001) + tcp_cc
+    add(eth_header(ENG_MAC, S7_PLC_MAC, 0x0800) + ip_cc)
+    setup_param = struct.pack("!BBHHH", 0xF0, 0x00, 1, 1, 240)
+    setup_req = s7_header(0x01, 1, len(setup_param), 0) + setup_param
+    cotp_setup_req = tpkt_frame(COTP_DT_HEADER, setup_req)
+    tcp_s7_req = tcp_header(49200, 102, 400, 500, TCP_PSH | TCP_ACK, len(cotp_setup_req)) + cotp_setup_req
+    ip_s7_req = ipv4_header(ENG_IP, S7_PLC_IP, 6, len(tcp_s7_req), 0x3002) + tcp_s7_req
+    add(eth_header(S7_PLC_MAC, ENG_MAC, 0x0800) + ip_s7_req)
+    setup_resp_param = struct.pack("!BBHHH", 0xF0, 0x00, 1, 1, 240)
+    setup_resp = s7_header(0x03, 1, len(setup_resp_param), 0) + struct.pack("!BB", 0, 0) + setup_resp_param
+    cotp_setup_resp = tpkt_frame(COTP_DT_HEADER, setup_resp)
+    tcp_s7_resp = tcp_header(102, 49200, 500, 400 + len(cotp_setup_req), TCP_PSH | TCP_ACK,
+                              len(cotp_setup_resp)) + cotp_setup_resp
+    ip_s7_resp = ipv4_header(S7_PLC_IP, ENG_IP, 6, len(tcp_s7_resp), 0x3003) + tcp_s7_resp
+    add(eth_header(ENG_MAC, S7_PLC_MAC, 0x0800) + ip_s7_resp)
+
+    # --- EtherNet/IP: a SEPARATE engineering host (10.0.5.22) -> adapter (192.168.1.12), cross-zone
+    ctx = b"CS-INV01"
+    session_handle = 0x99887766
+
+    def add_enip(from_client: bool, payload: bytes, seq_state=[7000, 8000]):
+        if from_client:
+            src_port, dst_port = 52100, ENIP_PORT
+            src_ip, dst_ip, src_mac, dst_mac = ENIP_CLIENT_IP, ENIP_SERVER_IP, ENIP_CLIENT_MAC, ENIP_SERVER_MAC
+            seq, ack = seq_state[0], seq_state[1]
+            seq_state[0] += len(payload)
+        else:
+            src_port, dst_port = ENIP_PORT, 52100
+            src_ip, dst_ip, src_mac, dst_mac = ENIP_SERVER_IP, ENIP_CLIENT_IP, ENIP_SERVER_MAC, ENIP_CLIENT_MAC
+            seq, ack = seq_state[1], seq_state[0]
+            seq_state[1] += len(payload)
+        tcp = tcp_header(src_port, dst_port, seq, ack, TCP_PSH | TCP_ACK, len(payload)) + payload
+        ip = ipv4_header(src_ip, dst_ip, 6, len(tcp), 0x4000 + len(packets)) + tcp
+        add(eth_header(dst_mac, src_mac, 0x0800) + ip)
+
+    add_enip(True, enip_message(0x0065, data=struct.pack("<HH", 1, 0), session_handle=0, sender_context=ctx))
+    add_enip(False, enip_message(0x0065, data=struct.pack("<HH", 1, 0), session_handle=session_handle,
+                                  sender_context=ctx))
+    add_enip(True, enip_message(0x006F, data=enip_cpf_unconnected(cip_read_tag_request("Line3_Speed", 1)),
+                                 session_handle=session_handle, sender_context=ctx))
+    add_enip(False, enip_message(0x006F,
+                                  data=enip_cpf_unconnected(cip_read_tag_response(0xC4, struct.pack("<i", 7))),
+                                  session_handle=session_handle, sender_context=ctx))
+
+    # --- BACnet: operator workstation (192.168.1.14) -> AHU controller (192.168.1.15), intra-zone,
+    #     UNICAST (not the broadcast Who-Is/I-Am traffic build_bacnet_sample uses) so both endpoints
+    #     register as real assets/an edge rather than being filtered as broadcast destinations --
+    #     see looks_like_broadcast_or_multicast's own comment in asset_inventory.cpp.
+    req_apdu = apdu_confirmed_request(12, bacnet_object_property_reference(0, 3, 85), invoke_id=20)
+    req_bvlc = bvlc_message(0x0A, npdu_header() + req_apdu)
+    add(bacnet_frame(dst=BACNET_SERVER_MAC, src=BACNET_CLIENT_MAC, bvlc=req_bvlc,
+                      src_ip=BACNET_CLIENT_IP, dst_ip=BACNET_SERVER_IP))
+    ack_apdu = apdu_complex_ack(12, bacnet_object_property_reference(0, 3, 85) +
+                                 bacnet_property_value(4, struct.pack("!f", 68.0)), invoke_id=20)
+    ack_bvlc = bvlc_message(0x0A, npdu_header() + ack_apdu)
+    add(bacnet_frame(dst=BACNET_CLIENT_MAC, src=BACNET_SERVER_MAC, bvlc=ack_bvlc,
+                      src_ip=BACNET_SERVER_IP, dst_ip=BACNET_CLIENT_IP))
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_020_000 + i, i * 1000)
+    (TESTS_DIR / "sample_inventory.pcap").write_bytes(data)
+
+
 def build_tcp_reassembly_sample():
     """Exercises Decoder::reassemble_tcp_payload -- general, per-TCP-flow reassembly of a single
     PDU/frame's own bytes split across TCP segments -- directly. This is a different layer from
@@ -8400,6 +8530,7 @@ if __name__ == "__main__":
     build_mqtt_sample()
     build_ffhse_sample()
     build_policy_engine_sample()
+    build_inventory_sample()
     build_tcp_reassembly_sample()
     build_padded_ack_sample()
     build_pcapng_malformed()

@@ -20,8 +20,14 @@ protocol decoding and a stats view, and `policy validate` maps that decoded traf
 against an IEC 62443-style zone/conduit model (for NIS2-flavored compliance work) --
 you write a policy file naming your zones (IP/CIDR ranges) and the conduits allowed
 between them, and get back a compliant/non-compliant report naming every flow that
-wasn't explicitly permitted. See [docs/MANUAL.md](docs/MANUAL.md)'s POLICY FILE FORMAT
-section for the schema.
+wasn't explicitly permitted. A third command, `inventory`, runs the opposite
+direction: point it at a capture with no policy file at all, and it infers a
+first-draft zone/conduit model from what it actually sees (Modbus, DNP3, S7comm,
+EtherNet/IP, and BACnet/IP talkers) -- an asset list, a communication matrix, a
+Mermaid/Graphviz diagram, and a `policy`-format YAML file directly loadable by
+`policy validate`, closing the loop from passive discovery to active enforcement.
+See [docs/MANUAL.md](docs/MANUAL.md)'s POLICY FILE FORMAT section for the schema
+and its `inventory` subsection for a worked example.
 
 Offline capture files are still the primary, always-available way in: no libpcap
 on Linux, no Npcap SDK on Windows, no elevated privileges needed to build or run --
@@ -69,6 +75,16 @@ replace it; it does one thing tshark fundamentally doesn't:
   GUI: authoritative Modbus request/response pairing, EtherNet/IP CIP I/O
   connection tracking, IEC 104 cause-of-transmission, and so on, designed to
   be piped into `jq` or a policy-checking layer.
+- **Passive asset discovery, not just enforcement.** `inventory` runs the
+  opposite direction from `policy validate`: point it at a capture with no
+  policy file at all, and it infers a first-draft zone/conduit model --
+  NSA's GRASSMARLIN used to fill this niche but is abandoned, and CISA's
+  Malcolm covers similar ground but is a heavy multi-container Zeek/
+  OpenSearch/Elastic stack, not a single binary. `inventory` is the
+  lightweight, `tshark`-adjacent alternative: pcap in, zone/conduit model
+  out, in the same restricted policy-YAML shape `policy validate` already
+  understands -- so the model it discovers can be fed straight back in to
+  start enforcing it.
 
 In short: tshark for exploring an unfamiliar capture or decoding something
 obscure; conduitscope for the specific, repeatable "does this OT network's
@@ -868,7 +884,28 @@ Groundwork / v0.1.0. What works right now:
   exactly what it does and doesn't check (e.g. the SYN-based
   flow-direction heuristic's fallback case, and the VLAN-zone model's own
   QinQ/directionality/`functions` limits).
-- Live capture (`decode -i`/`policy validate -i`, plus `conduitscope interfaces`
+- `inventory`: passive OT asset inventory, the opposite direction from
+  `policy validate` -- infers a first-draft zone/conduit model from a
+  capture instead of checking one against a hand-written policy. Recognizes
+  the same five protocols this decoder's own `PolicyEngine` does (Modbus,
+  DNP3, S7comm, EtherNet/IP -- both TCP explicit messaging and UDP/2222 CIP
+  I/O -- and BACnet/IP); builds an asset list (IP/MAC, OUI vendor guess,
+  protocols spoken, client-vs-server role -- BACnet's client/server, which
+  both conventionally share UDP port 47808, is disambiguated by
+  Confirmed-Request/Unconfirmed-Request vs. ACK/Error/Reject/Abort APDU
+  type rather than the usual known-port heuristic) and a communication
+  matrix; groups assets into zones by observed subnet (`--zone-prefix`,
+  default `/24`); infers a conduit for every distinct zone-pair/protocol/
+  port combination actually observed, intra-zone or cross-zone alike;
+  renders a Mermaid or Graphviz `.dot` diagram (`--diagram`); and, via
+  `--policy-out`, writes the inferred model as a `policy`-format YAML file
+  directly loadable by `policy validate --policy` -- closing the loop:
+  discover, then enforce (a generated file round-trips cleanly against the
+  same capture, with the UDP-based conduits correctly reported as
+  "never exercised" since `policy validate` is TCP-only today -- see
+  LIMITATIONS). See docs/MANUAL.md's `inventory` subsection for a worked
+  example.
+- Live capture (`decode -i`/`policy validate -i`/`inventory -i`, plus `conduitscope interfaces`
   to list interfaces): an optional, build-time-detected libpcap (Linux) / Npcap
   (Windows) dependency -- see above and docs/MANUAL.md's LIVE CAPTURE section.
   `--duration`, `--filter` (BPF syntax), `--snaplen`, and Ctrl+C all stop a
@@ -876,8 +913,8 @@ Groundwork / v0.1.0. What works right now:
   captured so far. Validated end-to-end against real loopback traffic on Linux;
   the Windows/Npcap path is implemented against the same documented API but not
   yet run on a real Windows machine -- see docs/MANUAL.md's LIMITATIONS.
-- A `decode`/`info`/`interfaces`/`policy validate`/`version` command surface
-  with full `--help` at every level
+- A `decode`/`info`/`interfaces`/`policy validate`/`inventory`/`version`
+  command surface with full `--help` at every level
 
 See [docs/MANUAL.md](docs/MANUAL.md) for the complete option reference,
 output-format examples, exit codes, and the honest list of current limitations
@@ -960,6 +997,11 @@ build/conduitscope policy validate -r tests/sample_modbus.pcap --policy tests/po
 
 # Same, but for a VLAN-membership zone/conduit policy covering PROFINET RT/GOOSE/SV/EtherCAT:
 build/conduitscope policy validate -r tests/sample_vlan_zones.pcap --policy tests/policies/vlan_zone_mixed_results.yaml
+
+# Infer a first-draft zone/conduit model from a capture -- no policy file needed -- then feed
+# the generated policy straight back into `policy validate`: discover, then enforce.
+build/conduitscope inventory -r tests/sample_inventory.pcap --diagram zones.mmd --policy-out inferred.yaml
+build/conduitscope policy validate -r tests/sample_inventory.pcap --policy inferred.yaml
 ```
 
 To decode traffic you've actually captured, e.g. from a Modbus simulator such as

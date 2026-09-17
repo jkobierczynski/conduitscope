@@ -25,6 +25,7 @@
 #include <unistd.h>
 #endif
 
+#include "conduitscope/asset_inventory.hpp"
 #include "conduitscope/byteio.hpp"
 #include "conduitscope/decoder.hpp"
 #include "conduitscope/live_capture.hpp"
@@ -456,6 +457,110 @@ int run_policy_validate(const std::string& input, const std::string& interface_n
     }
 }
 
+// Passive OT asset inventory -- see asset_inventory.hpp's own file header and docs/MANUAL.md's
+// ROADMAP item 17. Unlike run_decode/run_policy_validate above, there is no "compliance"/pass-fail
+// concept here (nothing is being checked against anything), so this always returns 0 on success --
+// see EXIT STATUS.
+int run_inventory(const std::string& input, const std::string& interface_name, const std::string& filter,
+                   int duration_seconds, int snaplen, bool promiscuous, const std::string& output,
+                   const std::string& format, bool strict, bool quiet, uint8_t zone_prefix_len,
+                   const std::string& diagram_path, const std::string& diagram_format,
+                   const std::string& policy_out_path, bool oui_enabled, bool resolve_hostnames,
+                   const std::string& hosts_path, bool service_names_enabled, const std::string& services_path,
+                   std::ostream& diag) {
+    std::ofstream file_out;
+    std::ostream* out = &std::cout;
+    if (!output.empty()) {
+        file_out.open(output, std::ios::binary);
+        if (!file_out) {
+            std::cerr << "error: cannot open output file '" << output << "'\n";
+            return 1;
+        }
+        out = &file_out;
+    }
+
+    try {
+        // Same Resolver, built the same fail-fast way run_decode/run_policy_validate already do.
+        std::vector<std::string> resolver_notes;
+        Resolver resolver(oui_enabled, resolve_hostnames, hosts_path, service_names_enabled, services_path,
+                           resolver_notes);
+        if (!quiet) {
+            for (const auto& note : resolver_notes) diag << "note: " << note << "\n";
+        }
+
+        DecodeOptions options;
+        options.strict = strict;
+        // Same "no --max-packets" posture as run_policy_validate -- see its own comment.
+        PacketSource source =
+            open_packet_source(input, interface_name, snaplen, promiscuous, filter, duration_seconds, 0);
+        SigintGuard sigint_guard(source.live_ptr());
+        Decoder decoder(options);
+        AssetInventoryEngine engine(zone_prefix_len);
+
+        PcapPacket pkt;
+        size_t index = 0, warnings = 0;
+        while (source.next(pkt)) {
+            ++index;
+            DecodedPacket dp = decoder.decode(pkt, source.linktype(), index);
+            if (dp.protocol == "parse-error") {
+                ++warnings;
+                if (!quiet) diag << "warning: packet " << index << ": " << dp.summary << "\n";
+            }
+            engine.observe(dp);
+        }
+
+        std::string capture_label = interface_name.empty() ? input : "live:" + interface_name;
+        AssetInventoryReport report = engine.finish();
+        if (format == "json") {
+            write_inventory_report_json(*out, report, capture_label, resolver);
+        } else {
+            write_inventory_report_text(*out, report, capture_label, resolver);
+        }
+
+        if (!diagram_path.empty()) {
+            std::ofstream diagram_out(diagram_path, std::ios::binary);
+            if (!diagram_out) {
+                std::cerr << "error: cannot open diagram output file '" << diagram_path << "'\n";
+                return 1;
+            }
+            if (diagram_format == "dot") write_inventory_diagram_dot(diagram_out, report);
+            else write_inventory_diagram_mermaid(diagram_out, report);
+        }
+        if (!policy_out_path.empty()) {
+            std::ofstream policy_out(policy_out_path, std::ios::binary);
+            if (!policy_out) {
+                std::cerr << "error: cannot open policy output file '" << policy_out_path << "'\n";
+                return 1;
+            }
+            write_inventory_policy_yaml(policy_out, report);
+            if (report.zones.empty() && !quiet) {
+                diag << "note: no asset was observed, so '" << policy_out_path
+                     << "' has no 'zones:'/'conduits:' keys and is not a loadable policy file as-is "
+                        "-- see the file's own header comment\n";
+            }
+        }
+
+        if (!interface_name.empty() && !quiet) {
+            diag << "capture on '" << interface_name << "' stopped (" << index << " packet(s) captured)\n";
+        }
+        if (warnings > 0 && !quiet) {
+            diag << warnings
+                 << " packet(s) had parse warnings (shown above); rerun with --strict to stop at "
+                    "the first one, or -q to silence this message\n";
+        }
+        return 0;
+    } catch (const ResolverError& e) {
+        std::cerr << "error: " << e.what() << "\n";
+        return 1;
+    } catch (const ParseError& e) {
+        std::cerr << "error: " << e.what() << "\n";
+        return 1;
+    } catch (const CaptureError& e) {
+        std::cerr << "error: " << e.what() << "\n";
+        return 1;
+    }
+}
+
 int run_interfaces(std::ostream& out) {
     try {
         std::vector<InterfaceInfo> interfaces = list_interfaces();
@@ -748,6 +853,93 @@ int main(int argc, char** argv) {
                       "port->service-name table")
         ->check(CLI::ExistingFile);
 
+    // --- inventory ------------------------------------------------------------
+    auto* inventory_cmd = app.add_subcommand(
+        "inventory", "Passive OT asset inventory: infer a first-draft zone/conduit model (asset "
+                      "list, communication matrix, proposed zones/conduits) from a capture -- the "
+                      "opposite direction from 'policy validate'. See docs/MANUAL.md's ROADMAP "
+                      "item 17.");
+    std::string inventory_input, inventory_interface, inventory_filter, inventory_output;
+    int inventory_duration = 0;
+    int inventory_snaplen = 65535;
+    bool inventory_promiscuous = true;
+    std::string inventory_format = "text";
+    bool inventory_strict = false;
+    int inventory_zone_prefix = static_cast<int>(kDefaultInventoryZonePrefixLen);
+    std::string inventory_diagram_file;
+    std::string inventory_diagram_format = "mermaid";
+    std::string inventory_policy_out;
+    bool inventory_oui = true, inventory_resolve = false, inventory_service_names = true;
+    std::string inventory_hosts_file, inventory_services_file;
+
+    auto* inventory_input_opt =
+        inventory_cmd->add_option("-r,--read", inventory_input,
+                                   "Input capture file (classic pcap or pcapng, auto-detected)")
+            ->check(CLI::ExistingFile);
+    auto* inventory_interface_opt = inventory_cmd->add_option(
+        "-i,--interface", inventory_interface,
+        "Build the inventory from live traffic on this network interface instead of reading a "
+        "file (see 'conduitscope interfaces'); requires this build to have been compiled with "
+        "libpcap/Npcap support -- exactly one of -r/-i is required");
+    inventory_input_opt->excludes(inventory_interface_opt);
+    inventory_interface_opt->excludes(inventory_input_opt);
+    inventory_cmd->add_option("--filter", inventory_filter,
+                               "BPF capture filter (tcpdump syntax), only meaningful with -i");
+    inventory_cmd
+        ->add_option("--duration", inventory_duration,
+                      "Stop a live capture (-i) after this many seconds (0 = unlimited; stop with "
+                      "Ctrl+C instead)")
+        ->capture_default_str();
+    inventory_cmd->add_option("--snaplen", inventory_snaplen, "Maximum bytes captured per packet with -i")
+        ->capture_default_str();
+    inventory_cmd->add_flag(
+        "!--no-promiscuous", inventory_promiscuous,
+        "With -i, don't put the interface into promiscuous mode (by default it is, since the main "
+        "use case -- watching a mirrored/SPAN switch port -- needs traffic not addressed to this host)");
+    inventory_cmd->add_option("-o,--output", inventory_output, "Write the report here instead of stdout");
+    inventory_cmd->add_option("-f,--format", inventory_format, "Report format: text or json")
+        ->transform(CLI::IsMember({"text", "json"}))
+        ->capture_default_str();
+    inventory_cmd->add_flag("--strict", inventory_strict,
+                             "Abort on the first malformed packet instead of reporting it and continuing");
+    inventory_cmd
+        ->add_option("--zone-prefix", inventory_zone_prefix,
+                      "CIDR prefix length ([0, 32]) used to group observed asset IPs into "
+                      "inferred zones -- see docs/MANUAL.md's ROADMAP item 17")
+        ->capture_default_str()
+        ->check(CLI::Range(0, 32));
+    inventory_cmd->add_option("--diagram", inventory_diagram_file,
+                               "Also write a zone/conduit diagram here (see --diagram-format)");
+    inventory_cmd
+        ->add_option("--diagram-format", inventory_diagram_format,
+                      "Diagram format for --diagram: a Mermaid flowchart or Graphviz DOT")
+        ->transform(CLI::IsMember({"mermaid", "dot"}))
+        ->capture_default_str();
+    inventory_cmd->add_option(
+        "--policy-out", inventory_policy_out,
+        "Also write the inferred zone/conduit model as a policy YAML file here, directly loadable "
+        "by 'policy validate --policy' -- closes the discover-then-enforce loop");
+    inventory_cmd->add_flag("!--no-oui", inventory_oui,
+                             "Disable OUI (MAC vendor) resolution in the report, on by default -- "
+                             "see docs/MANUAL.md's OUTPUT FORMATS section");
+    inventory_cmd->add_flag(
+        "--resolve", inventory_resolve,
+        "Enable hostname resolution from an explicitly-supplied hosts file (--hosts) in the report; "
+        "off by default; NEVER performs live DNS -- file-only, see docs/MANUAL.md's OUTPUT FORMATS "
+        "section");
+    inventory_cmd
+        ->add_option("--hosts", inventory_hosts_file,
+                      "Unix /etc/hosts-style file to resolve IP addresses from, for --resolve")
+        ->check(CLI::ExistingFile);
+    inventory_cmd->add_flag("!--nn", inventory_service_names,
+                             "Disable service name resolution (built-in table plus --services) in "
+                             "the report, on by default");
+    inventory_cmd
+        ->add_option("--services", inventory_services_file,
+                      "Unix /etc/services-style file to supplement/override the built-in "
+                      "port->service-name table")
+        ->check(CLI::ExistingFile);
+
     // --- version ------------------------------------------------------------
     app.add_subcommand("version", "Print version and build information");
 
@@ -765,6 +957,11 @@ int main(int argc, char** argv) {
     if (policy_validate_cmd->parsed() && policy_input.empty() == policy_interface.empty()) {
         std::cerr << "error: 'policy validate' needs exactly one of -r/--read (an offline capture "
                      "file) or -i/--interface (a live capture interface)\n";
+        return 1;
+    }
+    if (inventory_cmd->parsed() && inventory_input.empty() == inventory_interface.empty()) {
+        std::cerr << "error: 'inventory' needs exactly one of -r/--read (an offline capture file) "
+                     "or -i/--interface (a live capture interface)\n";
         return 1;
     }
 
@@ -806,6 +1003,14 @@ int main(int argc, char** argv) {
     if (policy_cmd->parsed()) {
         std::cerr << "error: 'policy' needs a subcommand (currently only 'validate' exists)\n";
         return 1;
+    }
+    if (inventory_cmd->parsed()) {
+        return run_inventory(inventory_input, inventory_interface, inventory_filter, inventory_duration,
+                              inventory_snaplen, inventory_promiscuous, inventory_output, inventory_format,
+                              inventory_strict, quiet, static_cast<uint8_t>(inventory_zone_prefix),
+                              inventory_diagram_file, inventory_diagram_format, inventory_policy_out,
+                              inventory_oui, inventory_resolve, inventory_hosts_file, inventory_service_names,
+                              inventory_services_file, *diag);
     }
     std::cout << "conduitscope " << version_string() << "\n";
     return 0;

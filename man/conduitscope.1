@@ -108,6 +108,21 @@ schema, the one-protocol-only rule, and the EtherNet/IP ambiguous-name
 limitation. Prints a compliant/non-compliant report; see \fBOPTIONS (policy
 validate)\fR and \fBEXIT STATUS\fR below.
 .TP
+.B inventory (\fB\-r\fR \fIFILE\fR | \fB\-i\fR \fIINTERFACE\fR) [\fIOPTIONS\fR]
+Passive OT asset inventory: runs the opposite direction from \fBpolicy
+validate\fR \-\- instead of checking traffic against a hand\-written policy,
+infers a first\-draft zone/conduit model from a capture. Recognizes only
+Modbus, DNP3, S7comm, EtherNet/IP (TCP explicit messaging and UDP/2222 CIP
+I/O), and BACnet/IP traffic; builds an asset list (IP/MAC, OUI vendor
+guess, protocols spoken, client\-vs\-server role) and a communication
+matrix, groups assets into zones by observed subnet (\fB\-\-zone\-prefix\fR),
+and infers conduits from the matrix. Can render a Mermaid or Graphviz
+\fB.dot\fR diagram (\fB\-\-diagram\fR) and/or write the inferred model as a
+\fBpolicy\fR\-format YAML file directly loadable by \fBpolicy validate\fR
+(\fB\-\-policy\-out\fR \-\- closing the loop: discover, then enforce). See
+\fBOPTIONS (inventory)\fR below and \fBdocs/MANUAL.md\fR's \fBinventory\fR
+section for a worked example.
+.TP
 .B version
 Print version and build information, including whether this build has live
 capture support.
@@ -409,6 +424,78 @@ default.
 .B \-\-services \fIFILE\fR
 Unix /etc/services-style file to supplement/override the built-in
 port\->service-name table. Must exist.
+.SH OPTIONS (inventory)
+.TP
+.BR \-r ", " \-\-read " " \fIFILE\fR
+Input capture file (classic pcap or pcapng, auto-detected). Required unless \fB\-i\fR is given; mutually exclusive with it.
+.TP
+.BR \-i ", " \-\-interface " " \fINAME\fR
+Build the inventory from live traffic on this network interface instead of
+reading a file. Required unless \fB\-r\fR is given; mutually exclusive with it.
+.TP
+.B \-\-filter \fIBPF\fR
+BPF capture filter (tcpdump syntax). Only meaningful with \fB\-i\fR.
+.TP
+.B \-\-duration \fISECONDS\fR
+Stop a live capture (\fB\-i\fR) after this many seconds. Default: 0
+(unlimited -- rely on Ctrl+C instead).
+.TP
+.B \-\-snaplen \fIBYTES\fR
+Maximum bytes captured per packet with \fB\-i\fR. Default: 65535.
+.TP
+.B \-\-no\-promiscuous
+Same meaning as \fBdecode\fR's \fB\-\-no\-promiscuous\fR.
+.TP
+.BR \-o ", " \-\-output " " \fIFILE\fR
+Write the report here instead of stdout.
+.TP
+.BR \-f ", " \-\-format " " {text,json}
+Report format. Default: text.
+.TP
+.B \-\-strict
+Abort on the first malformed packet instead of warning and continuing.
+.TP
+.B \-\-zone\-prefix \fIN\fR
+CIDR prefix length (0\-32) inferred zones are grouped by: every observed
+asset IP is masked to this many bits, one zone per distinct resulting
+network. Default: 24.
+.TP
+.B \-\-diagram \fIFILE\fR
+Also write a zone/conduit diagram to this file. Format controlled by
+\fB\-\-diagram\-format\fR.
+.TP
+.BR \-\-diagram\-format " " {mermaid,dot}
+Diagram syntax for \fB\-\-diagram\fR: a Mermaid \fBgraph LR\fR block, or a
+Graphviz \fB.dot\fR \fBdigraph\fR. Default: mermaid.
+.TP
+.B \-\-policy\-out \fIFILE\fR
+Also write the inferred zone/conduit model as a \fBpolicy\fR\-format YAML
+file, directly loadable by \fBpolicy validate \-\-policy\fR \-\- closing the
+loop: discover, then enforce. If no asset was observed at all, the file
+contains only explanatory comments, no \fBzones:\fR/\fBconduits:\fR keys
+(not a validly-loadable policy as-is), and a note is printed saying so.
+.TP
+.B \-\-no\-oui
+Same meaning as \fBdecode\fR's \fB\-\-no\-oui\fR, applied to the report's
+asset/edge MAC addresses. On by default.
+.TP
+.B \-\-resolve
+Same meaning as \fBdecode\fR's \fB\-\-resolve\fR: enable hostname resolution
+from an explicitly-supplied \fB\-\-hosts\fR file. Off by default.
+File-only \-\- \fBnever\fR performs live DNS.
+.TP
+.B \-\-hosts \fIFILE\fR
+Unix /etc/hosts-style file to resolve IP addresses from, for
+\fB\-\-resolve\fR. Must exist.
+.TP
+.B \-\-nn
+Same meaning as \fBdecode\fR's \fB\-\-nn\fR: disable service name
+(port\->name) resolution, applied to each edge's server port. On by
+default.
+.TP
+.B \-\-services \fIFILE\fR
+Unix /etc/services-style file to supplement/override the built-in
+port\->service-name table. Must exist.
 .SH LIVE CAPTURE
 \fB\-i/\-\-interface\fR and \fBinterfaces\fR require this build to have been
 compiled with libpcap (Linux) or the Npcap SDK (Windows) found by CMake --
@@ -502,7 +589,9 @@ on with \fB\-\-color\fR (e.g. to pipe into \fBless \-R\fR) or off with
 .SH EXIT STATUS
 .TP
 .B 0
-Success. For \fBpolicy validate\fR: the capture is COMPLIANT.
+Success. For \fBpolicy validate\fR: the capture is COMPLIANT. For
+\fBinventory\fR: a report was produced \-\- it has no compliance concept, so
+this is returned on any successful run, even one that observed zero assets.
 .TP
 .B 1
 Fatal error (bad arguments, unreadable/unrecognized input file, a
@@ -516,6 +605,7 @@ for \fBpolicy validate\fR while it was still a documented stub.
 .B 3
 \fBpolicy validate\fR only: the capture and policy were both valid, but the
 capture is NON-COMPLIANT (at least one violation and/or unclassified flow).
+Never returned by \fBinventory\fR.
 .SH LIMITATIONS
 A handful of rare/obsolete pcapng block types (the pre-2000s "Packet Block",
 Interface Statistics Blocks, Name Resolution Blocks, Decryption Secrets
@@ -785,7 +875,12 @@ IPv4 payloads (including UDP) are otherwise still just recognized and
 NAMED for a small OT-relevant set (ARP, LLDP, ICMP, and the rest) but not further decoded, and
 \fBpolicy validate\fR does not yet evaluate any UDP traffic (CIP I/O,
 BACnet/IP, HART-IP's own UDP traffic, and FF-HSE's own UDP traffic
-included) against a conduit; a zone can instead be declared as a set of
+included) against a conduit \-\- this carries through to \fBinventory\fR
+too: it infers CIP I/O/BACnet-IP conduits from observed UDP traffic and
+\fB\-\-policy\-out\fR's generated policy file loads them without error, but
+feeding that file back into \fBpolicy validate\fR always reports them as
+"never exercised," regardless of how much matching UDP traffic the capture
+has; a zone can instead be declared as a set of
 VLAN IDs (\fBvlans:\fR) rather than IPv4 CIDR blocks, and a conduit
 referencing only VLAN zones IS evaluated against PROFINET RT/GOOSE/Sampled
 Values/EtherCAT traffic (the four protocols with no IP layer at all),
@@ -1092,6 +1187,16 @@ Check a capture against a zone/conduit policy:
 .RS
 .EX
 conduitscope policy validate \-r capture.pcap \-\-policy policy.yaml
+.EE
+.RE
+.PP
+Infer a first\-draft zone/conduit model from a capture, with a diagram, then
+feed the generated policy straight back into \fBpolicy validate\fR \-\-
+discover, then enforce:
+.RS
+.EX
+conduitscope inventory \-r capture.pcap \-\-diagram zones.mmd \-\-policy\-out inferred.yaml
+conduitscope policy validate \-r capture.pcap \-\-policy inferred.yaml
 .EE
 .RE
 .PP

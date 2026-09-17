@@ -22,6 +22,10 @@ conduitscope interfaces
 conduitscope policy validate (-r FILE | -i INTERFACE) --policy FILE [-o FILE] [-f text|json] [--strict]
                               [--filter BPF] [--duration SECONDS] [--snaplen BYTES] [--no-promiscuous]
 
+conduitscope inventory (-r FILE | -i INTERFACE) [-o FILE] [-f text|json] [--strict]
+                        [--zone-prefix N] [--diagram FILE] [--diagram-format mermaid|dot] [--policy-out FILE]
+                        [--filter BPF] [--duration SECONDS] [--snaplen BYTES] [--no-promiscuous]
+
 conduitscope version
 ```
 
@@ -66,8 +70,13 @@ evaluation layer (`policy validate`) both exist -- you write a policy file
 describing zones (IP/CIDR ranges) and conduits (the protocol/port traffic
 allowed between two zones), point `policy validate` at a capture and that
 policy, and get a compliant/non-compliant report naming every flow that
-wasn't explicitly permitted. See POLICY FILE FORMAT below for the schema and
-LIMITATIONS for exactly what this does and doesn't check.
+wasn't explicitly permitted. A third layer, `inventory`, runs the opposite
+direction: point it at a capture with no policy file at all, and it infers
+a first-draft zone/conduit model -- an asset list, a communication matrix,
+and a proposed zone/conduit YAML file directly loadable by `policy
+validate` -- closing the loop from passive discovery to active enforcement.
+See POLICY FILE FORMAT below for the schema and LIMITATIONS for exactly
+what this does and doesn't check.
 
 This is explicitly a groundwork/v0.1.0 release. It favors an honest, narrow
 feature set with clearly documented limitations over silently guessing at
@@ -306,6 +315,151 @@ same OUI/service-name resolution `decode` has, on by default -- see OUTPUT
 FORMATS' "Name resolution" subsection and the option table above. Add
 `--resolve --hosts FILE` to also annotate `192.168.1.50`/`192.168.1.10`
 with a hostname, exactly as `decode` would.
+
+### `inventory` -- passive OT asset inventory: pcap -> zones and conduits
+
+```
+conduitscope inventory (-r FILE | -i INTERFACE) [options]
+```
+
+Runs the opposite direction from `policy validate`: instead of checking
+observed traffic against a hand-written zone/conduit policy, `inventory`
+infers a first-draft one from a capture. See ROADMAP item 17 for the full
+rationale (prior art, and what this first pass deliberately does and
+doesn't cover).
+
+| Option | Default | Description |
+|---|---|---|
+| `-r, --read FILE` | *(required unless `-i` given)* | Input capture file. Must exist; classic pcap or pcapng, auto-detected. Mutually exclusive with `-i`. |
+| `-i, --interface NAME` | *(required unless `-r` given)* | Build the inventory from live traffic on this network interface instead of reading a file -- see LIVE CAPTURE below. Requires libpcap/Npcap support to have been built in. Mutually exclusive with `-r`. |
+| `--filter BPF` | *(none)* | BPF capture filter (tcpdump syntax). Only meaningful with `-i`. |
+| `--duration SECONDS` | `0` (unlimited) | Stop a live capture (`-i`) after this many seconds; `0` means rely on Ctrl+C instead. |
+| `--snaplen BYTES` | `65535` | Maximum bytes captured per packet with `-i`. |
+| `--no-promiscuous` | off (i.e. promiscuous by default) | Same meaning as `decode --no-promiscuous`. |
+| `-o, --output FILE` | stdout | Write the report here instead of stdout. |
+| `-f, --format {text,json}` | `text` | Report format. `text` is the human-readable report shown below; `json` mirrors its structure -- see JSON OUTPUT FIELDS-style output below. |
+| `--strict` | off | Same meaning as `decode --strict`: abort on the first packet that fails to parse at the Ethernet/IPv4/TCP layer, instead of reporting a warning and continuing. |
+| `--zone-prefix N` | `24` | CIDR prefix length (`0`-`32`) inferred zones are grouped by: every observed asset IP is masked to this many bits, and one zone is emitted per distinct resulting network. Narrow it (e.g. `16`) to lump a wider address range into fewer, bigger zones; widen it (e.g. `28`) for finer-grained, smaller zones. |
+| `--diagram FILE` | *(none)* | Also write a zone/conduit diagram to this file. Format controlled by `--diagram-format`. |
+| `--diagram-format {mermaid,dot}` | `mermaid` | Diagram syntax for `--diagram`: a Mermaid `graph LR` block, or a Graphviz `.dot` `digraph`. |
+| `--policy-out FILE` | *(none)* | Also write the inferred zone/conduit model as a `policy`-format YAML file, directly loadable by `policy validate --policy` -- closing the loop: discover, then enforce. See "Closing the loop" below. |
+| `--no-oui` | off (i.e. OUI/MAC-vendor resolution on by default) | Same meaning as `decode --no-oui`, applied to the report's asset/edge MAC addresses. |
+| `--resolve` | off | Same meaning as `decode --resolve`: enable hostname resolution from an explicitly-supplied `--hosts` file. **Never performs live DNS** -- file-only. |
+| `--hosts FILE` | *(none)* | Same meaning as `decode --hosts`: Unix `/etc/hosts`-style file to resolve IP addresses from, for `--resolve`. Must exist. |
+| `--nn` | off (i.e. service-name resolution on by default) | Same meaning as `decode --nn`: disable service name (port -> name) resolution, applied to each edge's server port. |
+| `--services FILE` | *(none)* | Same meaning as `decode --services`: Unix `/etc/services`-style file to supplement/override the built-in port->service-name table. Must exist. |
+
+Like `policy validate`, `inventory` decodes the capture exactly as `decode`
+would and does not change or duplicate any decoding logic -- see
+`AssetInventoryEngine` (`asset_inventory.hpp`/`.cpp`), built on the same
+already-public `DecodedPacket` output. Only five protocols are ever counted
+here, the same set `policy validate`'s own protocol enum eventually grew to
+recognize first: **Modbus**, **DNP3**, **S7comm** (a COTP-only session with
+no S7comm payload still counts, the same "cotp folds into s7comm"
+convention `PolicyEngine::observe` uses), **EtherNet/IP** (both explicit
+messaging over TCP and CIP I/O implicit messaging over UDP/2222), and
+**BACnet/IP**. Every other packet -- including every other protocol this
+project decodes -- is counted only in the report's `skipped_packets` total,
+never as an asset or an edge.
+
+For each recognized packet, `inventory` determines which side is the
+client (initiator) and which is the server, exactly as `PolicyEngine::
+observe` does for the four TCP-based protocols (SYN/SYN-ACK, falling back
+to a known-port heuristic) -- except for BACnet, whose client and server
+both conventionally listen on the same UDP port (47808), so the usual
+known-port-vs-ephemeral-port heuristic can't tell them apart at all;
+instead, the request/response APDU type decides (a Confirmed-Request or
+Unconfirmed-Request's source is the client; a Simple-ACK/Complex-ACK/
+Segment-ACK/Error/Reject/Abort's *destination* is). A broadcast or
+multicast destination (`255.255.255.255`, `224.0.0.0/4`, or any address
+ending in `.255` -- a pragmatic, non-subnet-mask-aware heuristic) is never
+treated as an asset or edge endpoint, since BACnet's own Who-Is/I-Am
+discovery traffic is routinely broadcast and would otherwise pollute the
+asset list with the broadcast address itself.
+
+Every observed IP becomes one **asset**: its MAC (and OUI vendor guess,
+resolver permitting), every protocol it was seen speaking, whether it was
+ever a client, ever a server, or both, and a packet count. Every distinct
+`(protocol, client, server, server port)` tuple becomes one **edge** --
+deliberately coarser than `policy validate`'s own per-TCP-session
+`FlowReport`, since an inventory answers "does X talk to Y over protocol
+P," not "how many sessions did X open to Y." Every observed asset IP is
+then masked to `--zone-prefix` bits and grouped into a **zone** (one per
+distinct resulting network, named `zone_<network>_<prefix>`), and every
+edge whose client and server zones (and protocol and port) form a distinct
+combination becomes one inferred **conduit** -- unlike `policy validate`'s
+report, there is no "declared but never exercised" concept here: only
+conduits actually observed on the wire are ever listed, since there is no
+hand-written policy to compare against.
+
+Example, against a synthetic two-subnet capture (`tests/sample_inventory.pcap`,
+which mixes an in-zone Modbus/BACnet pair with three engineering-workstation
+flows reaching across from a separate `/24`, specifically to exercise
+cross-zone conduit inference -- see that fixture's own comment in
+`tools/make_sample_pcap.py`):
+
+```sh
+$ conduitscope inventory -r tests/sample_inventory.pcap
+OT asset inventory
+  capture: tests/sample_inventory.pcap
+  scope:   Modbus, DNP3, S7comm, EtherNet/IP, and BACnet/IP only -- see docs/MANUAL.md's ROADMAP item 17
+
+9 asset(s) observed, 14 total packet(s) in capture, 0 skipped (not one of the five recognized protocols, or no IPv4 layer)
+
+ASSETS (9):
+  10.0.5.21  00:0c:29:de:ad:01 (VMware)  [client]  dnp3, s7comm  (6 packet(s))
+  10.0.5.22  00:0c:29:de:ad:02 (VMware)  [client]  enip  (4 packet(s))
+  192.168.1.10  00:0c:29:aa:bb:cc (VMware)  [server]  modbus  (2 packet(s))
+  ...
+
+COMMUNICATIONS (5):
+  192.168.1.50 -> 192.168.1.10:502 (modbus)  modbus  [Read Holding Registers]  (2 packet(s))
+  10.0.5.21 -> 192.168.1.11:20000 (dnp3)  dnp3  [Read, Response]  (2 packet(s))
+  ...
+
+INFERRED ZONES (2, grouped by observed /24 subnet):
+  zone_10_0_5_0_24 (10.0.5.0/24): 10.0.5.21, 10.0.5.22
+  zone_192_168_1_0_24 (192.168.1.0/24): 192.168.1.10, 192.168.1.11, 192.168.1.12, 192.168.1.14, 192.168.1.15, 192.168.1.16, 192.168.1.50
+
+INFERRED CONDUITS (5):
+  zone_10_0_5_0_24 -> zone_192_168_1_0_24  (dnp3/20000)  1 edge(s), 2 packet(s)
+  zone_10_0_5_0_24 -> zone_192_168_1_0_24  (enip/44818)  1 edge(s), 4 packet(s)
+  zone_10_0_5_0_24 -> zone_192_168_1_0_24  (s7comm/102)  1 edge(s), 4 packet(s)
+  zone_192_168_1_0_24 -> zone_192_168_1_0_24  (bacnet/47808)  1 edge(s), 2 packet(s)
+  zone_192_168_1_0_24 -> zone_192_168_1_0_24  (modbus/502)  1 edge(s), 2 packet(s)
+```
+
+#### Closing the loop
+
+`--policy-out` writes the inferred zones/conduits above as a `policy`-format
+YAML file -- headed by a comment block flagging it as an auto-generated,
+first-draft policy that should be reviewed (especially whether the inferred
+groupings reflect *intended* segmentation, not just what happened to be
+captured) before being used to gate real `policy validate` runs. It is
+directly loadable:
+
+```sh
+$ conduitscope inventory -r tests/sample_inventory.pcap --policy-out /tmp/inferred.yaml -o /dev/null
+$ conduitscope policy validate -r tests/sample_inventory.pcap --policy /tmp/inferred.yaml
+Result: COMPLIANT
+...
+Conduits never exercised by this capture (1):
+  - zone_192_168_1_0_24 -> zone_192_168_1_0_24 (bacnet/47808)
+```
+
+Every TCP-based conduit round-trips cleanly. The one UDP-based conduit here
+(BACnet/IP) parses and loads into the policy file fine, but `policy
+validate` only ever evaluates TCP flows (see LIMITATIONS), so a UDP-based
+inferred conduit always shows up as "never exercised" no matter how much
+matching UDP traffic the capture actually has -- not a bug in either
+command, just the current, documented edge of `policy validate`'s own
+scope (see ROADMAP item 9).
+
+If the capture carries no traffic from any of the five recognized
+protocols at all, there is nothing to infer even one zone from --
+`--policy-out`'s file then contains only explanatory comments, no
+`zones:`/`conduits:` keys at all (deliberately not a validly-loadable
+policy file), and `inventory` prints a note to that effect.
 
 ### `version` -- print version and build information
 
@@ -7543,7 +7697,14 @@ These are current, not aspirational -- each has a corresponding ROADMAP item.
   PROFINET RT, GOOSE, Sampled Values, EtherCAT, and BACnet/IP sections.
   `policy validate` does not yet evaluate ANY UDP traffic against a conduit,
   decoded or not (it only ever looks at TCP flows -- this applies equally to
-  CIP I/O and BACnet/IP) -- see that section and ROADMAP. PROFINET RT,
+  CIP I/O and BACnet/IP) -- see that section and ROADMAP. This carries
+  straight through to `inventory`: it can infer a CIP I/O or BACnet/IP
+  conduit from observed UDP traffic just fine (see COMMANDS' `inventory`
+  section), and `--policy-out`'s generated policy file loads that conduit
+  without error, but feeding it back into `policy validate` will always
+  report that conduit as "never exercised," no matter how much matching UDP
+  traffic the capture actually has -- not a bug in either command, just this
+  same limitation viewed from the discovery side. PROFINET RT,
   GOOSE, Sampled Values, and EtherCAT are different: all four ride raw
   Ethernet with no IP/TCP/UDP layer at all, so there is no IP-based conduit
   rule that could ever match any of them, but ROADMAP item 15 added a
@@ -8367,10 +8528,10 @@ These are current, not aspirational -- each has a corresponding ROADMAP item.
 
 | Code | Meaning |
 |---|---|
-| 0 | Success. For `policy validate`: the capture is COMPLIANT (every observed flow was explicitly allowed by a conduit). |
+| 0 | Success. For `policy validate`: the capture is COMPLIANT (every observed flow was explicitly allowed by a conduit). For `inventory`: the capture was read and a report was produced -- `inventory` has no compliance concept (there's no hand-written policy to be compliant *against*), so it returns 0 on any successful run, even one that observed zero assets. |
 | 1 | A fatal error occurred -- bad arguments, the input file could not be opened, the file is not a recognized capture format (classic pcap or pcapng) or is corrupt, (with `--strict`) a packet failed to parse, or (for `policy validate`) the policy file couldn't be opened or failed validation (see POLICY FILE FORMAT's "Validation errors"). |
 | 2 | *(currently unused)* Reserved rather than reused: an earlier groundwork release used this for `policy validate` while it was still a documented stub with no evaluation engine behind it. Nothing returns it now that `policy validate` is fully implemented, but the value is left unclaimed in case a future documented-stub command needs it again. |
-| 3 | `policy validate` only: the capture and policy file were both readable and valid, but the capture is NON-COMPLIANT -- `PolicyReport::compliant()` is false (at least one violation and/or unclassified flow was found). Distinct from 1 specifically so a script can tell "ran fine, found problems" apart from "couldn't even run". |
+| 3 | `policy validate` only: the capture and policy file were both readable and valid, but the capture is NON-COMPLIANT -- `PolicyReport::compliant()` is false (at least one violation and/or unclassified flow was found). Distinct from 1 specifically so a script can tell "ran fine, found problems" apart from "couldn't even run". Never returned by `inventory` (see code 0 above). |
 
 Non-fatal per-packet parse issues (without `--strict`) do not affect the exit
 status; they are reported as warnings (to stderr, or `--log-file`) and as
@@ -9324,33 +9485,56 @@ Rough order, each building on the groundwork this release establishes:
     header documents for `decode`. See `write_policy_report_text`/
     `write_policy_report_json` in `policy_engine.hpp`/`.cpp` and
     `run_policy_validate` in `cli_main.cpp`.
-17. **Passive OT asset inventory: pcap -> zones and conduits.** A new
-    subcommand (working name `inventory`) that runs the opposite direction
-    from `policy validate` -- instead of checking observed traffic against
-    a hand-written zone/conduit policy, it infers a first-draft one from a
-    capture. Feed it a pcap from an industrial network and it identifies
-    Modbus, S7comm, DNP3, EtherNet/IP, and BACnet/IP talkers (all already
-    decoded by this project -- see PROTOCOL COVERAGE), builds an asset list
-    (IP/MAC, OUI vendor guess, protocols spoken, client-vs-server role
-    inferred from who initiates) and a communication matrix (who talks to
-    whom, over which protocol/port), then proposes an IEC 62443 zone/
-    conduit model from that matrix -- most likely grouped by protocol
-    and/or observed subnet as a first-pass heuristic -- rendered as a
-    diagram (Mermaid or Graphviz `.dot`) and, ideally, as a `policy`-format
-    YAML file directly loadable by `policy validate` (closing the loop:
-    discover, then enforce). NSA's GRASSMARLIN used to occupy this niche
-    but is abandoned; CISA's Malcolm covers similar ground but is a heavy
+17. ~~**Passive OT asset inventory: pcap -> zones and conduits.**~~ A new
+    subcommand that runs the opposite direction from `policy validate` --
+    instead of checking observed traffic against a hand-written zone/
+    conduit policy, it infers a first-draft one from a capture -- **done**:
+    the `inventory` subcommand (see COMMANDS) identifies Modbus, DNP3,
+    S7comm (including a COTP-only session with no S7comm payload, the same
+    "cotp folds into s7comm" convention `PolicyEngine::observe` uses),
+    EtherNet/IP (both explicit messaging over TCP and CIP I/O implicit
+    messaging over UDP/2222), and BACnet/IP talkers (all already decoded
+    by this project -- see PROTOCOL COVERAGE), builds an asset list (IP/
+    MAC, OUI vendor guess, protocols spoken, client-vs-server role inferred
+    from who initiates -- a TCP handshake for the four TCP-based protocols,
+    the request/response APDU type for BACnet specifically, since its
+    client and server both conventionally listen on the same port 47808
+    and so can't be told apart by the usual known-port-vs-ephemeral-port
+    heuristic) and a communication matrix (`InventoryEdge`: who talks to
+    whom, over which protocol/port, aggregated across every TCP session
+    between that client/server/protocol/port tuple -- deliberately coarser
+    than `PolicyEngine::observe`'s own per-session `FlowReport`, since an
+    asset inventory answers "does X talk to Y over protocol P", not "how
+    many sessions did X open"), then proposes an IEC 62443 zone/conduit
+    model from that matrix -- grouped by observed subnet (`--zone-prefix`,
+    default `/24`), rendered as a diagram (Mermaid by default, or Graphviz
+    `.dot` via `--diagram-format`) and, via `--policy-out`, as a
+    `policy`-format YAML file directly loadable by `policy validate`,
+    closing the loop: discover, then enforce (verified end-to-end --
+    `tests/sample_inventory.pcap`'s own inferred policy round-trips back
+    through `policy validate` against the same capture with every observed
+    flow COMPLIANT). NSA's GRASSMARLIN used to occupy this niche but is
+    abandoned; CISA's Malcolm covers similar ground but is a heavy
     multi-container Zeek/OpenSearch/Elastic stack, not a lightweight
-    single-binary CLI -- a `tshark`/Zeek-log-adjacent tool that's just
-    "pcap in, zone/conduit model out" appears to be a genuine gap this
-    project's existing decode + `PolicyEngine`/zone infrastructure is
-    unusually well positioned to fill. An LLM-assisted zone-assignment
-    suggestion (which zone a given device most plausibly belongs in, with
-    a short rationale -- e.g. "talks Modbus only to 10.0.1.5, no traffic to
-    any other zone: candidate for a dedicated PLC zone") is an optional,
-    clearly-labeled enhancement on top of the heuristic grouping above, not
-    a prerequisite for it -- the deterministic pcap-to-model pipeline should
-    stand on its own first.
+    single-binary CLI -- `inventory` fills that gap: a `tshark`/Zeek-log-
+    adjacent tool that's just "pcap in, zone/conduit model out," built on
+    this project's existing decode + `PolicyEngine`/zone infrastructure.
+    Deliberately left open, a separate and larger scope of its own:
+    grouping zones by protocol in addition to (or instead of) observed
+    subnet -- this first pass implements only the subnet half of the
+    ROADMAP item's original "grouped by protocol and/or observed subnet"
+    heuristic; an LLM-assisted zone-assignment suggestion (which zone a
+    given device most plausibly belongs in, with a short rationale -- e.g.
+    "talks Modbus only to 10.0.1.5, no traffic to any other zone:
+    candidate for a dedicated PLC zone") on top of the deterministic
+    grouping above, which was always meant to stand on its own first; and,
+    inherited from `policy validate` itself, evaluating the UDP-based
+    conduits (BACnet/IP, EtherNet/IP CIP I/O) this feature can infer --
+    they parse and load into a policy file fine, but `policy validate`
+    only ever evaluates TCP flows today (item 9's own still-open call-out;
+    see LIMITATIONS), so an inferred UDP conduit always shows up as
+    "never exercised by this capture" no matter how much UDP traffic the
+    capture actually has.
 
 **pcapng support** is also now done: both classic pcap and pcapng are read
 transparently (auto-detected, no flag needed) -- see "pcap vs. pcapng"
