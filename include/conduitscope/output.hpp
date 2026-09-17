@@ -157,6 +157,10 @@ private:
     std::map<std::string, size_t> igmp_type_counts_;     // keyed by igmp_type_name
     std::map<std::string, size_t> vrrp_version_counts_;  // "VRRPv2"/"VRRPv3"
     std::map<std::string, size_t> hsrp_version_counts_;  // "HSRPv1"/"HSRPv2"
+    std::map<std::string, size_t> igrp_opcode_counts_;   // keyed by igrp_opcode_name
+    std::map<std::string, size_t> pim_type_counts_;      // keyed by pim_type_name
+    std::map<std::string, size_t> eigrp_opcode_counts_;  // keyed by eigrp_opcode_name
+    std::map<std::string, size_t> ospf_type_counts_;     // keyed by ospf_type_name
     bool has_ts_ = false;
     double first_ts_ = 0.0, last_ts_ = 0.0;
 };

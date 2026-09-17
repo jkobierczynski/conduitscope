@@ -9,7 +9,8 @@ IEC 61850-9-2 Sampled Values, EtherCAT, BACnet/IP, HART-IP, OPC UA Binary
 ISO 9506), MQTT (v3.1/v3.1.1/v5.0, including Sparkplug B), FOUNDATION
 Fieldbus HSE (FDA/SM/FMS/LAN Redundancy), IEEE Spanning Tree Protocol
 (STP/RSTP/MSTP), DeviceNet (CAN-bus CIP, via SocketCAN pcap captures), DNS,
-mDNS, LLMNR, and NetBIOS Name Service (NBT-NS), RIP, IGMP, VRRP, and HSRP,
+mDNS, LLMNR, and NetBIOS Name Service (NBT-NS), RIP, IGMP, VRRP, HSRP, IGRP,
+PIM, EIGRP, and OSPFv2,
 plus detects DNS-over-HTTPS
 (DoH) via TLS SNI matching,
 traffic from offline
@@ -709,16 +710,18 @@ Groundwork / v0.1.0. What works right now:
 - Non-IPv4 Ethernet frames and non-TCP IPv4 payloads (including UDP) are now
   recognized and named, not just reported as a bare hex/number and dropped:
   ARP, LLDP, PTP, MPLS, and stacked-VLAN (802.1ad/QinQ) EtherTypes; ICMP,
-  GRE, ESP, AH, OSPF, and SCTP IP protocol numbers; and the UDP header
+  GRE, ESP, AH, and SCTP IP protocol numbers; and the UDP header
   itself (source/destination port, byte count) -- EtherNet/IP's own UDP port
   (2222) is decoded, not just named, when the traffic on it actually looks
   like CIP I/O (see above), PROFINET RT's EtherType is decoded, not just
   named, when the FrameID looks like DCP or cyclic IO data (see above), and
   IEC 61850-8-1 GOOSE's, IEC 61850-9-2 Sampled Values', and EtherCAT's own
   EtherTypes are all decoded, not just named, when their own structural gate
-  matches (see above). IGMP (IP protocol 2) and VRRP (IP protocol 112) are
-  likewise decoded, not just named, when their own structural gate matches
-  -- see the RIP/IGMP/VRRP/HSRP bullet below. This is otherwise groundwork
+  matches (see above). IGMP (IP protocol 2), VRRP (IP protocol 112), IGRP
+  (IP protocol 9), PIM (IP protocol 103), EIGRP (IP protocol 88), and OSPF
+  (IP protocol 89) are likewise decoded, not just named, when their own
+  structural gate matches -- see the RIP/IGMP/VRRP/HSRP and IGRP/PIM/EIGRP/
+  OSPF bullets below. This is otherwise groundwork
   plumbing, not a new protocol decoder -- none of the remaining
   named-but-not-decoded protocols' own framing is parsed any further yet,
   and `policy validate` does not yet evaluate any non-TCP traffic against
@@ -729,10 +732,11 @@ Groundwork / v0.1.0. What works right now:
   NetBIOS) traffic that was previously invisible. See docs/MANUAL.md's
   PROTOCOL COVERAGE and ROADMAP.
 - RIP (v1/v2), IGMP (v1/v2/v3), VRRP (v2/v3), and HSRP (v1/v2) decoding: the
-  first batch of a broader routing/redundancy-protocol addition (PIM, EIGRP,
-  OSPF, BGP, and IGRP planned for a later round; IS-IS deliberately deferred
-  further still, since it rides the data-link layer directly like STP
-  rather than as an IP payload). Added because IGMP underlies GOOSE/SV's own
+  first batch of a broader routing/redundancy-protocol addition (IGRP, PIM,
+  EIGRP, and OSPF now also done -- see the bullet below; BGP planned for a
+  later round; IS-IS deliberately deferred further still, since it rides
+  the data-link layer directly like STP rather than as an IP payload).
+  Added because IGMP underlies GOOSE/SV's own
   routable multicast variants, and because VRRP/HSRP are a straightforward
   gateway-spoofing/MITM primitive worth surfacing regardless of whether a
   segment is "OT" or "IT". RIP (UDP port 520) and HSRP (UDP port 1985) join
@@ -755,6 +759,32 @@ Groundwork / v0.1.0. What works right now:
   HSRP traffic anywhere, so those three remain synthetic-only, the same
   accepted gap already documented for FF-HSE/DeviceNet. See docs/MANUAL.md's
   PROTOCOL COVERAGE, PROTOCOL DETECTION, and LIMITATIONS.
+- IGRP, PIM v2 (PIM-SM/PIM-DM), EIGRP (now RFC 7868), and OSPFv2 (RFC 2328)
+  decoding: the second batch of the routing/redundancy-protocol addition
+  begun above. All four ride directly on IP (protocol numbers 9, 103, 88,
+  and 89, all IANA-exclusive) with no UDP/TCP header and therefore no port
+  concept at all, the same "no port gate needed" shape IGMP/VRRP already
+  have. IGRP's classful route encoding reconstructs an Interior route's full
+  address by borrowing the packet's own source IP octet; EIGRP decodes both
+  the legacy Classic and current Wide-Metric route TLV formats, including
+  the compound-TLV case where one TLV carries several destination prefixes
+  sharing a next-hop/metric; PIM decodes all six common message types
+  (Hello, Register, Register-Stop, Join/Prune/Graft/Graft-Ack, Bootstrap,
+  Assert, Candidate-RP-Advertisement); OSPFv2 decodes Hello, DB Description,
+  LS Request, LS Update (with Router/Network/Summary/AS-External LSA
+  bodies), and LS Ack. EIGRP's and OSPF's own MD5/Cryptographic
+  authentication header fields are decoded but their digests are neither
+  located nor verified, the same posture as RIP's Keyed MD5 above. BGP, the
+  one protocol from the original request that rides over TCP instead of
+  directly on IP, is deliberately not part of this batch and remains
+  planned for a later round. Validated against hand-built fixtures
+  cross-checked against Wireshark's own dissector source (and RFCs, where
+  one exists -- IGRP predates the IETF RFC process for routing protocols);
+  the same 1,020-file search across three public ICS pcap collections that
+  found no RIP/VRRP/HSRP traffic found none of these four either, so all
+  four remain synthetic-only, the same accepted gap already documented
+  above. See docs/MANUAL.md's PROTOCOL COVERAGE, PROTOCOL DETECTION, and
+  LIMITATIONS.
 - IPv4 payload is clamped to the header's own `total_length` field, so
   Ethernet's minimum-frame-size padding on short packets (bare ACKs, mostly)
   never gets misreported as phantom TCP payload -- found and fixed against a

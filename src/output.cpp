@@ -92,6 +92,14 @@ constexpr const char* kUnderlineCyan = "\033[4;36m";
 constexpr const char* kUnderlineGreen = "\033[4;32m";
 constexpr const char* kUnderlineMagenta = "\033[4;35m";
 constexpr const char* kUnderlineYellow = "\033[4;33m";
+// IGRP/PIM/EIGRP/OSPF round: rounding out the underline dimension with the remaining three
+// standard hues (blue/red/white) still covers only 7 of underline's 8 possible hues -- one short
+// for four new protocols, so OSPF reuses underline-cyan's own blue-ish neighbor via a bold+
+// underline combination instead of inventing a genuinely new escape-code family for a single tag.
+constexpr const char* kUnderlineBlue = "\033[4;34m";
+constexpr const char* kUnderlineRed = "\033[4;31m";
+constexpr const char* kUnderlineWhite = "\033[4;37m";
+constexpr const char* kBoldUnderlineCyan = "\033[1;4;36m";
 
 // Color for a packet's "[protocol]" tag -- picked so a mixed-protocol capture scans quickly by
 // eye, not for any deeper meaning. parse-error is the one exception: it gets the same "something
@@ -168,6 +176,19 @@ const char* protocol_tag_color(const std::string& protocol) {
     if (protocol == "igmp") return kUnderlineGreen;
     if (protocol == "vrrp") return kUnderlineMagenta;
     if (protocol == "hsrp") return kUnderlineYellow;
+    if (protocol == "igrp") return kUnderlineRed;      // legacy/deprecated protocol -- red doubles
+                                                          // as a mild "this shouldn't be running"
+                                                          // visual cue, matching igrp.hpp's own
+                                                          // Security context note
+    if (protocol == "pim") return kUnderlineBlue;
+    if (protocol == "eigrp") return kUnderlineWhite;
+    if (protocol == "ospf") return kBoldUnderlineCyan;  // bold+underline cyan -- OSPF and RIP both
+                                                           // never share a transport (RIP is UDP/520
+                                                           // only, OSPF rides IP protocol 89
+                                                           // directly), so reusing cyan's hue here
+                                                           // with an extra bold weight to
+                                                           // disambiguate from RIP's plain-underline
+                                                           // cyan costs nothing in practice
     if (protocol == "parse-error") return kBoldRed;
     return kDim;  // tcp / udp / non-tcp / non-ip / unsupported-link: recognized, nothing OT-specific
 }
@@ -1106,6 +1127,169 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
             out_ << "    \"hsrp_tlvs_truncated\": " << (p.hsrp_tlvs_truncated ? "true" : "false") << ",\n";
         }
     }
+    if (p.protocol == "igrp") {
+        out_ << "    \"igrp_version\": " << static_cast<unsigned>(p.igrp_version) << ",\n";
+        out_ << "    \"igrp_opcode\": \"" << json_escape(p.igrp_opcode_name) << "\",\n";
+        out_ << "    \"igrp_autonomous_system\": " << p.igrp_autonomous_system << ",\n";
+        if (!p.igrp_routes.empty()) {
+            out_ << "    \"igrp_routes\": [";
+            for (size_t i = 0; i < p.igrp_routes.size(); ++i) {
+                if (i != 0) out_ << ", ";
+                out_ << "\"" << json_escape(p.igrp_routes[i]) << "\"";
+            }
+            out_ << "],\n";
+        }
+        out_ << "    \"igrp_routes_truncated\": " << (p.igrp_routes_truncated ? "true" : "false") << ",\n";
+    }
+    if (p.protocol == "pim") {
+        out_ << "    \"pim_type\": \"" << json_escape(p.pim_type_name) << "\",\n";
+        if (!p.pim_hello_options.empty()) {
+            out_ << "    \"pim_hello_options\": [";
+            for (size_t i = 0; i < p.pim_hello_options.size(); ++i) {
+                if (i != 0) out_ << ", ";
+                out_ << "\"" << json_escape(p.pim_hello_options[i]) << "\"";
+            }
+            out_ << "],\n";
+            out_ << "    \"pim_hello_options_truncated\": " << (p.pim_hello_options_truncated ? "true" : "false") << ",\n";
+        }
+        if (!p.pim_register_inner_src_ip.empty() || !p.pim_register_inner_group_ip.empty()) {
+            out_ << "    \"pim_register_border_bit\": " << (p.pim_register_border_bit ? "true" : "false") << ",\n";
+            out_ << "    \"pim_register_null_register_bit\": " << (p.pim_register_null_register_bit ? "true" : "false") << ",\n";
+            out_ << "    \"pim_register_inner_src_ip\": \"" << json_escape(p.pim_register_inner_src_ip) << "\",\n";
+            out_ << "    \"pim_register_inner_group_ip\": \"" << json_escape(p.pim_register_inner_group_ip) << "\",\n";
+        }
+        if (!p.pim_register_stop_group.empty()) {
+            out_ << "    \"pim_register_stop_group\": \"" << json_escape(p.pim_register_stop_group) << "\",\n";
+            out_ << "    \"pim_register_stop_source\": \"" << json_escape(p.pim_register_stop_source) << "\",\n";
+        }
+        if (!p.pim_jp_groups.empty() || !p.pim_jp_upstream_neighbor.empty()) {
+            out_ << "    \"pim_jp_upstream_neighbor\": \"" << json_escape(p.pim_jp_upstream_neighbor) << "\",\n";
+            out_ << "    \"pim_jp_holdtime_sec\": " << p.pim_jp_holdtime_sec << ",\n";
+            out_ << "    \"pim_jp_groups\": [";
+            for (size_t i = 0; i < p.pim_jp_groups.size(); ++i) {
+                if (i != 0) out_ << ", ";
+                out_ << "\"" << json_escape(p.pim_jp_groups[i]) << "\"";
+            }
+            out_ << "],\n";
+            out_ << "    \"pim_jp_groups_truncated\": " << (p.pim_jp_groups_truncated ? "true" : "false") << ",\n";
+        }
+        if (!p.pim_bsr_address.empty()) {
+            out_ << "    \"pim_bsr_fragment_tag\": " << p.pim_bsr_fragment_tag << ",\n";
+            out_ << "    \"pim_bsr_hash_mask_len\": " << static_cast<unsigned>(p.pim_bsr_hash_mask_len) << ",\n";
+            out_ << "    \"pim_bsr_priority\": " << static_cast<unsigned>(p.pim_bsr_priority) << ",\n";
+            out_ << "    \"pim_bsr_address\": \"" << json_escape(p.pim_bsr_address) << "\",\n";
+            out_ << "    \"pim_bsr_groups\": [";
+            for (size_t i = 0; i < p.pim_bsr_groups.size(); ++i) {
+                if (i != 0) out_ << ", ";
+                out_ << "\"" << json_escape(p.pim_bsr_groups[i]) << "\"";
+            }
+            out_ << "],\n";
+            out_ << "    \"pim_bsr_groups_truncated\": " << (p.pim_bsr_groups_truncated ? "true" : "false") << ",\n";
+        }
+        if (!p.pim_assert_group.empty()) {
+            out_ << "    \"pim_assert_group\": \"" << json_escape(p.pim_assert_group) << "\",\n";
+            out_ << "    \"pim_assert_source\": \"" << json_escape(p.pim_assert_source) << "\",\n";
+            out_ << "    \"pim_assert_rpt_bit\": " << (p.pim_assert_rpt_bit ? "true" : "false") << ",\n";
+            out_ << "    \"pim_assert_metric_preference\": " << p.pim_assert_metric_preference << ",\n";
+            out_ << "    \"pim_assert_metric\": " << p.pim_assert_metric << ",\n";
+        }
+        if (!p.pim_crp_rp_address.empty()) {
+            out_ << "    \"pim_crp_prefix_count\": " << static_cast<unsigned>(p.pim_crp_prefix_count) << ",\n";
+            out_ << "    \"pim_crp_priority\": " << static_cast<unsigned>(p.pim_crp_priority) << ",\n";
+            out_ << "    \"pim_crp_holdtime_sec\": " << p.pim_crp_holdtime_sec << ",\n";
+            out_ << "    \"pim_crp_rp_address\": \"" << json_escape(p.pim_crp_rp_address) << "\",\n";
+            out_ << "    \"pim_crp_groups\": [";
+            for (size_t i = 0; i < p.pim_crp_groups.size(); ++i) {
+                if (i != 0) out_ << ", ";
+                out_ << "\"" << json_escape(p.pim_crp_groups[i]) << "\"";
+            }
+            out_ << "],\n";
+            out_ << "    \"pim_crp_groups_truncated\": " << (p.pim_crp_groups_truncated ? "true" : "false") << ",\n";
+        }
+    }
+    if (p.protocol == "eigrp") {
+        out_ << "    \"eigrp_opcode\": \"" << json_escape(p.eigrp_opcode_name) << "\",\n";
+        out_ << "    \"eigrp_autonomous_system\": " << p.eigrp_autonomous_system << ",\n";
+        if (!p.eigrp_flags.empty()) {
+            out_ << "    \"eigrp_flags\": [";
+            for (size_t i = 0; i < p.eigrp_flags.size(); ++i) {
+                if (i != 0) out_ << ", ";
+                out_ << "\"" << json_escape(p.eigrp_flags[i]) << "\"";
+            }
+            out_ << "],\n";
+        }
+        if (!p.eigrp_general_tlvs.empty()) {
+            out_ << "    \"eigrp_general_tlvs\": [";
+            for (size_t i = 0; i < p.eigrp_general_tlvs.size(); ++i) {
+                if (i != 0) out_ << ", ";
+                out_ << "\"" << json_escape(p.eigrp_general_tlvs[i]) << "\"";
+            }
+            out_ << "],\n";
+        }
+        out_ << "    \"eigrp_general_tlvs_truncated\": " << (p.eigrp_general_tlvs_truncated ? "true" : "false") << ",\n";
+        if (!p.eigrp_routes.empty()) {
+            out_ << "    \"eigrp_routes\": [";
+            for (size_t i = 0; i < p.eigrp_routes.size(); ++i) {
+                if (i != 0) out_ << ", ";
+                out_ << "\"" << json_escape(p.eigrp_routes[i]) << "\"";
+            }
+            out_ << "],\n";
+        }
+        out_ << "    \"eigrp_routes_truncated\": " << (p.eigrp_routes_truncated ? "true" : "false") << ",\n";
+    }
+    if (p.protocol == "ospf") {
+        out_ << "    \"ospf_type\": \"" << json_escape(p.ospf_type_name) << "\",\n";
+        out_ << "    \"ospf_router_id\": \"" << json_escape(p.ospf_router_id) << "\",\n";
+        out_ << "    \"ospf_area_id\": \"" << json_escape(p.ospf_area_id) << "\",\n";
+        out_ << "    \"ospf_auth_type\": \"" << json_escape(p.ospf_auth_type_name) << "\",\n";
+        if (!p.ospf_hello_designated_router.empty() || !p.ospf_hello_neighbors.empty()) {
+            out_ << "    \"ospf_hello_designated_router\": \"" << json_escape(p.ospf_hello_designated_router) << "\",\n";
+            out_ << "    \"ospf_hello_backup_designated_router\": \"" << json_escape(p.ospf_hello_backup_designated_router) << "\",\n";
+            out_ << "    \"ospf_hello_neighbors\": [";
+            for (size_t i = 0; i < p.ospf_hello_neighbors.size(); ++i) {
+                if (i != 0) out_ << ", ";
+                out_ << "\"" << json_escape(p.ospf_hello_neighbors[i]) << "\"";
+            }
+            out_ << "],\n";
+            out_ << "    \"ospf_hello_neighbors_truncated\": " << (p.ospf_hello_neighbors_truncated ? "true" : "false") << ",\n";
+        }
+        if (!p.ospf_dbd_lsa_headers.empty()) {
+            out_ << "    \"ospf_dbd_lsa_headers\": [";
+            for (size_t i = 0; i < p.ospf_dbd_lsa_headers.size(); ++i) {
+                if (i != 0) out_ << ", ";
+                out_ << "\"" << json_escape(p.ospf_dbd_lsa_headers[i]) << "\"";
+            }
+            out_ << "],\n";
+            out_ << "    \"ospf_dbd_lsa_headers_truncated\": " << (p.ospf_dbd_lsa_headers_truncated ? "true" : "false") << ",\n";
+        }
+        if (!p.ospf_ls_requests.empty()) {
+            out_ << "    \"ospf_ls_requests\": [";
+            for (size_t i = 0; i < p.ospf_ls_requests.size(); ++i) {
+                if (i != 0) out_ << ", ";
+                out_ << "\"" << json_escape(p.ospf_ls_requests[i]) << "\"";
+            }
+            out_ << "],\n";
+            out_ << "    \"ospf_ls_requests_truncated\": " << (p.ospf_ls_requests_truncated ? "true" : "false") << ",\n";
+        }
+        if (!p.ospf_ls_update_lsas.empty()) {
+            out_ << "    \"ospf_ls_update_lsas\": [";
+            for (size_t i = 0; i < p.ospf_ls_update_lsas.size(); ++i) {
+                if (i != 0) out_ << ", ";
+                out_ << "\"" << json_escape(p.ospf_ls_update_lsas[i]) << "\"";
+            }
+            out_ << "],\n";
+            out_ << "    \"ospf_ls_update_lsas_truncated\": " << (p.ospf_ls_update_lsas_truncated ? "true" : "false") << ",\n";
+        }
+        if (!p.ospf_ls_ack_headers.empty()) {
+            out_ << "    \"ospf_ls_ack_headers\": [";
+            for (size_t i = 0; i < p.ospf_ls_ack_headers.size(); ++i) {
+                if (i != 0) out_ << ", ";
+                out_ << "\"" << json_escape(p.ospf_ls_ack_headers[i]) << "\"";
+            }
+            out_ << "],\n";
+            out_ << "    \"ospf_ls_ack_headers_truncated\": " << (p.ospf_ls_ack_headers_truncated ? "true" : "false") << ",\n";
+        }
+    }
     out_ << "    \"notes\": [";
     for (size_t i = 0; i < p.notes.size(); ++i) {
         if (i != 0) out_ << ", ";
@@ -1282,6 +1466,18 @@ void StatsWriter::write_packet(const DecodedPacket& p) {
     }
     if (p.protocol == "hsrp") {
         hsrp_version_counts_["HSRPv" + std::to_string(p.hsrp_version)]++;
+    }
+    if (p.protocol == "igrp") {
+        igrp_opcode_counts_[p.igrp_opcode_name]++;
+    }
+    if (p.protocol == "pim") {
+        pim_type_counts_[p.pim_type_name]++;
+    }
+    if (p.protocol == "eigrp") {
+        eigrp_opcode_counts_[p.eigrp_opcode_name]++;
+    }
+    if (p.protocol == "ospf") {
+        ospf_type_counts_[p.ospf_type_name]++;
     }
     if (!has_ts_) {
         first_ts_ = last_ts_ = p.timestamp;
@@ -1519,6 +1715,30 @@ void StatsWriter::print_summary(std::ostream& out) const {
     if (!hsrp_version_counts_.empty()) {
         out << "hsrp versions:\n";
         for (const auto& [name, count] : hsrp_version_counts_) {
+            out << "  " << std::left << std::setw(40) << name << count << "\n";
+        }
+    }
+    if (!igrp_opcode_counts_.empty()) {
+        out << "igrp opcodes:\n";
+        for (const auto& [name, count] : igrp_opcode_counts_) {
+            out << "  " << std::left << std::setw(40) << name << count << "\n";
+        }
+    }
+    if (!pim_type_counts_.empty()) {
+        out << "pim types:\n";
+        for (const auto& [name, count] : pim_type_counts_) {
+            out << "  " << std::left << std::setw(40) << name << count << "\n";
+        }
+    }
+    if (!eigrp_opcode_counts_.empty()) {
+        out << "eigrp opcodes:\n";
+        for (const auto& [name, count] : eigrp_opcode_counts_) {
+            out << "  " << std::left << std::setw(40) << name << count << "\n";
+        }
+    }
+    if (!ospf_type_counts_.empty()) {
+        out << "ospf types:\n";
+        for (const auto& [name, count] : ospf_type_counts_) {
             out << "  " << std::left << std::setw(40) << name << count << "\n";
         }
     }

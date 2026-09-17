@@ -18,6 +18,7 @@
 #include "conduitscope/dnp3.hpp"
 #include "conduitscope/dns.hpp"
 #include "conduitscope/enip.hpp"
+#include "conduitscope/eigrp.hpp"
 #include "conduitscope/ethercat.hpp"
 #include "conduitscope/ffhse.hpp"
 #include "conduitscope/goose.hpp"
@@ -25,12 +26,15 @@
 #include "conduitscope/hsrp.hpp"
 #include "conduitscope/iec104.hpp"
 #include "conduitscope/igmp.hpp"
+#include "conduitscope/igrp.hpp"
 #include "conduitscope/mms.hpp"
 #include "conduitscope/modbus.hpp"
 #include "conduitscope/mqtt.hpp"
 #include "conduitscope/nbns.hpp"
 #include "conduitscope/opcua.hpp"
+#include "conduitscope/ospf.hpp"
 #include "conduitscope/pcap_reader.hpp"
+#include "conduitscope/pim.hpp"
 #include "conduitscope/profinet.hpp"
 #include "conduitscope/rip.hpp"
 #include "conduitscope/s7commplus.hpp"
@@ -72,6 +76,10 @@ enum class ProtocolFilter {
     IgmpOnly,     // only attempt IGMP v1/v2/v3 decoding
     VrrpOnly,     // only attempt VRRP v2/v3 decoding
     HsrpOnly,     // only attempt HSRP v1/v2 decoding
+    IgrpOnly,     // only attempt Cisco IGRP decoding
+    PimOnly,      // only attempt PIMv2 decoding
+    EigrpOnly,    // only attempt Cisco EIGRP decoding
+    OspfOnly,     // only attempt OSPFv2 decoding
 };
 
 struct DecodeOptions {
@@ -119,10 +127,12 @@ struct DecodeOptions {
     std::vector<uint16_t> extra_hsrp_ports;     // UDP -- see HSRP_PORT (1985); same detection-
                                                   // gating group and reasoning as extra_rip_ports
                                                   // above -- see hsrp.hpp's own try_parse_hsrp
-                                                  // comment. IGMP and VRRP need no port list at
-                                                  // all: both are dispatched purely by their
-                                                  // IANA-exclusive IP protocol number (2 and 112),
-                                                  // which is a strong signal with no port concept.
+                                                  // comment. IGMP, VRRP, IGRP, PIM, EIGRP, and
+                                                  // OSPF need no port list at all: all six are
+                                                  // dispatched purely by their own IANA-exclusive
+                                                  // IP protocol number (2, 112, 9, 103, 88, and 89
+                                                  // respectively), which is a strong signal with
+                                                  // no port concept.
     // If true, a parse failure at the Ethernet/IPv4/TCP layer is rethrown to
     // the caller instead of being recorded as a per-packet "parse-error"
     // result. Off by default so one malformed packet doesn't abort decoding
@@ -198,7 +208,13 @@ struct DecodedPacket {
     // (an IP payload with IP protocol number 112 that try_parse_vrrp recognizes -- see vrrp_*
     // fields below and vrrp.hpp; same "non-tcp" fallback if it doesn't structurally match), and
     // "hsrp" (a UDP payload on port 1985, or any port with --protocol hsrp, that try_parse_hsrp
-    // recognizes -- see hsrp_* fields below and hsrp.hpp).
+    // recognizes -- see hsrp_* fields below and hsrp.hpp). Also "igrp" (an IP payload with IP
+    // protocol number 9 that try_parse_igrp recognizes -- see igrp_* fields below and igrp.hpp),
+    // "pim" (IP protocol number 103, try_parse_pim, see pim_* fields and pim.hpp), "eigrp" (IP
+    // protocol number 88, try_parse_eigrp, see eigrp_* fields and eigrp.hpp), and "ospf" (IP
+    // protocol number 89, try_parse_ospf, see ospf_* fields and ospf.hpp) -- all four dispatched
+    // regardless of port, the same IP-protocol-number posture as igmp/vrrp above; a non-matching
+    // payload on any of these four IP protocol numbers still falls through to "non-tcp".
     std::string protocol;
     std::string summary;
     std::vector<std::string> notes;
@@ -939,6 +955,94 @@ struct DecodedPacket {
     std::vector<std::string> hsrp_tlv_types;  // v2 only: one "Group State"/"Interface State"/...
                                                 // entry per TLV, wire order. Capped at 50 entries.
     bool hsrp_tlvs_truncated = false;          // more than 50 TLVs were present
+
+    // Only set when protocol == "igrp" -- see try_parse_igrp in igrp.hpp.
+    uint8_t igrp_version = 0;
+    std::string igrp_opcode_name;  // "Response" or "Request"
+    uint16_t igrp_autonomous_system = 0;
+    // One "<Interior|System|Exterior> <address> delay=Xus bw=Ykbps hops=Z" entry per route (or
+    // "... unreachable" when the route's Delay field is all-ones), Interior first then System then
+    // Exterior, matching wire order. Capped at 50 entries total.
+    std::vector<std::string> igrp_routes;
+    bool igrp_routes_truncated = false;
+
+    // Only set when protocol == "pim" -- see try_parse_pim in pim.hpp. Which of the fields below
+    // are populated depends on pim_type_name; see pim.hpp's own PimMessage for exactly which
+    // message type populates which group.
+    std::string pim_type_name;
+    std::vector<std::string> pim_hello_options;  // Hello only: one "TypeName: value" (or
+                                                   // "TypeName (addr1, addr2, ...)" for an Address
+                                                   // List option) entry per option. Capped at 50.
+    bool pim_hello_options_truncated = false;
+    bool pim_register_border_bit = false;         // Register only
+    bool pim_register_null_register_bit = false;  // Register only
+    std::string pim_register_inner_src_ip;        // Register only
+    std::string pim_register_inner_group_ip;      // Register only
+    std::string pim_register_stop_group;          // Register-Stop only
+    std::string pim_register_stop_source;         // Register-Stop only
+    std::string pim_jp_upstream_neighbor;         // Join/Prune, Graft, Graft-Ack only
+    uint16_t pim_jp_holdtime_sec = 0;             // Join/Prune, Graft, Graft-Ack only
+    // One "<group>: N join(s), M prune(s)" entry per group, wire order. Capped at 50.
+    std::vector<std::string> pim_jp_groups;
+    bool pim_jp_groups_truncated = false;
+    uint16_t pim_bsr_fragment_tag = 0;   // Bootstrap only
+    uint8_t pim_bsr_hash_mask_len = 0;   // Bootstrap only
+    uint8_t pim_bsr_priority = 0;        // Bootstrap only
+    std::string pim_bsr_address;         // Bootstrap only
+    std::vector<std::string> pim_bsr_groups;  // Bootstrap only: one "<group>: N candidate-RP(s)"
+                                                // entry per group. Capped at 50.
+    bool pim_bsr_groups_truncated = false;
+    std::string pim_assert_group;                 // Assert only
+    std::string pim_assert_source;                // Assert only
+    bool pim_assert_rpt_bit = false;              // Assert only
+    uint32_t pim_assert_metric_preference = 0;    // Assert only
+    uint32_t pim_assert_metric = 0;               // Assert only
+    uint8_t pim_crp_prefix_count = 0;             // Candidate-RP-Advertisement only
+    uint8_t pim_crp_priority = 0;                 // Candidate-RP-Advertisement only
+    uint16_t pim_crp_holdtime_sec = 0;            // Candidate-RP-Advertisement only
+    std::string pim_crp_rp_address;               // Candidate-RP-Advertisement only
+    std::vector<std::string> pim_crp_groups;      // Candidate-RP-Advertisement only. Capped at 50.
+    bool pim_crp_groups_truncated = false;
+
+    // Only set when protocol == "eigrp" -- see try_parse_eigrp in eigrp.hpp.
+    std::string eigrp_opcode_name;
+    uint16_t eigrp_autonomous_system = 0;
+    std::vector<std::string> eigrp_flags;  // zero or more of "Init"/"Conditional Receive"/
+                                             // "Restart"/"End Of Table", whichever bits are set
+    // One "TypeName: value" (or bare "TypeName" when not decoded further) entry per general TLV
+    // (Parameters/Authentication/Sequence/Software Version/Next Multicast Sequence/anything
+    // else), wire order. Capped at 50.
+    std::vector<std::string> eigrp_general_tlvs;
+    bool eigrp_general_tlvs_truncated = false;
+    // One EigrpRoute::summary entry per Classic or Wide-Metric IPv4 route TLV, wire order. Capped
+    // at 50.
+    std::vector<std::string> eigrp_routes;
+    bool eigrp_routes_truncated = false;
+
+    // Only set when protocol == "ospf" -- see try_parse_ospf in ospf.hpp. Which of the fields
+    // below are populated depends on ospf_type_name; see ospf.hpp's own OspfMessage for exactly
+    // which packet type populates which group.
+    std::string ospf_type_name;
+    std::string ospf_router_id;
+    std::string ospf_area_id;
+    std::string ospf_auth_type_name;
+    std::string ospf_hello_designated_router;         // Hello only
+    std::string ospf_hello_backup_designated_router;  // Hello only
+    std::vector<std::string> ospf_hello_neighbors;    // Hello only. Capped at 50.
+    bool ospf_hello_neighbors_truncated = false;
+    // One rendered "Type len N: LinkStateID AdvRouter Seq=... Age=...s" entry per LSA header, wire
+    // order. Capped at 50.
+    std::vector<std::string> ospf_dbd_lsa_headers;    // DB Description only
+    bool ospf_dbd_lsa_headers_truncated = false;
+    std::vector<std::string> ospf_ls_requests;        // LS Request only. Capped at 50.
+    bool ospf_ls_requests_truncated = false;
+    // Same one-line rendering as ospf_dbd_lsa_headers, but with a decoded body's own key fields
+    // appended when this LSA's type has one (see ospf.hpp) -- e.g. a Router-LSA's link count, a
+    // Network-LSA's mask, a Summary/ASBR-Summary/AS-External's metric.
+    std::vector<std::string> ospf_ls_update_lsas;     // LS Update only. Capped at 50.
+    bool ospf_ls_update_lsas_truncated = false;
+    std::vector<std::string> ospf_ls_ack_headers;     // LS Ack only. Capped at 50.
+    bool ospf_ls_ack_headers_truncated = false;
 };
 
 // Cross-packet DNP3 fragment-reassembly state for one directional TCP flow (src ip:port -> dst

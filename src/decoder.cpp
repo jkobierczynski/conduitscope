@@ -11,6 +11,7 @@
 #include "conduitscope/cotp.hpp"
 #include "conduitscope/devicenet.hpp"
 #include "conduitscope/dnp3.hpp"
+#include "conduitscope/eigrp.hpp"
 #include "conduitscope/enip.hpp"
 #include "conduitscope/ethercat.hpp"
 #include "conduitscope/ffhse.hpp"
@@ -20,11 +21,14 @@
 #include "conduitscope/opcua.hpp"
 #include "conduitscope/iec104.hpp"
 #include "conduitscope/igmp.hpp"
+#include "conduitscope/igrp.hpp"
 #include "conduitscope/ipv4.hpp"
 #include "conduitscope/link_layer.hpp"
 #include "conduitscope/mms.hpp"
 #include "conduitscope/modbus.hpp"
 #include "conduitscope/mqtt.hpp"
+#include "conduitscope/ospf.hpp"
+#include "conduitscope/pim.hpp"
 #include "conduitscope/profinet.hpp"
 #include "conduitscope/rip.hpp"
 #include "conduitscope/s7comm.hpp"
@@ -186,6 +190,197 @@ void fill_hsrp_fields(DecodedPacket& out, const HsrpMessage& msg) {
         for (const auto& tlv : msg.tlvs) out.hsrp_tlv_types.push_back(tlv.type_name);
         out.hsrp_tlvs_truncated = msg.tlvs_truncated;
     }
+}
+
+// Renders one IgrpRoute as a single line for DecodedPacket::igrp_routes -- see igrp.hpp for why
+// route_kind changes how address was reconstructed.
+std::string igrp_route_summary(const IgrpRoute& r) {
+    std::ostringstream s;
+    s << r.route_kind << " " << r.address;
+    if (r.unreachable) {
+        s << " unreachable";
+    } else {
+        s << " delay=" << r.delay_microseconds << "us bw=" << r.bandwidth_kbps
+          << "kbps hops=" << static_cast<unsigned>(r.hop_count);
+    }
+    return s.str();
+}
+
+// Flattens a parsed IgrpMessage (see igrp.hpp) into DecodedPacket's igrp_* fields.
+void fill_igrp_fields(DecodedPacket& out, const IgrpMessage& msg) {
+    out.summary = msg.summary;
+    for (const auto& n : msg.notes) out.notes.push_back(n);
+    out.igrp_version = msg.version;
+    out.igrp_opcode_name = msg.opcode_name;
+    out.igrp_autonomous_system = msg.autonomous_system;
+    out.igrp_routes_truncated = msg.routes_truncated;
+    for (const auto& r : msg.routes) out.igrp_routes.push_back(igrp_route_summary(r));
+}
+
+// Renders one PimHelloOption as a single line for DecodedPacket::pim_hello_options.
+std::string pim_hello_option_summary(const PimHelloOption& opt) {
+    if (!opt.addresses.empty()) {
+        std::ostringstream s;
+        s << opt.option_type_name << " (";
+        for (size_t i = 0; i < opt.addresses.size(); ++i) {
+            if (i != 0) s << ", ";
+            s << opt.addresses[i];
+        }
+        s << ")";
+        return s.str();
+    }
+    if (opt.value.empty()) return opt.option_type_name;
+    return opt.option_type_name + ": " + opt.value;
+}
+
+// Renders one PimJoinPruneGroup as a single line for DecodedPacket::pim_jp_groups.
+std::string pim_jp_group_summary(const PimJoinPruneGroup& g) {
+    std::ostringstream s;
+    s << g.group << ": " << g.joins.size() << " join(s), " << g.prunes.size() << " prune(s)";
+    return s.str();
+}
+
+// Renders one PimBsrGroupRps as a single line for DecodedPacket::pim_bsr_groups.
+std::string pim_bsr_group_summary(const PimBsrGroupRps& g) {
+    std::ostringstream s;
+    s << g.group << ": " << g.candidate_rps.size() << " candidate-RP(s)";
+    return s.str();
+}
+
+// Flattens a parsed PimMessage (see pim.hpp) into DecodedPacket's pim_* fields. Which fields end
+// up populated depends entirely on msg.type_name (pim.hpp's PimMessage doc comment says which
+// group belongs to which message type) -- this just copies every group across unconditionally,
+// since the unused ones are simply left at their default (empty/false/0) values.
+void fill_pim_fields(DecodedPacket& out, const PimMessage& msg) {
+    out.summary = msg.summary;
+    for (const auto& n : msg.notes) out.notes.push_back(n);
+    out.pim_type_name = msg.type_name;
+
+    out.pim_hello_options_truncated = msg.hello_options_truncated;
+    for (const auto& opt : msg.hello_options) out.pim_hello_options.push_back(pim_hello_option_summary(opt));
+
+    out.pim_register_border_bit = msg.register_border_bit;
+    out.pim_register_null_register_bit = msg.register_null_register_bit;
+    out.pim_register_inner_src_ip = msg.register_inner_src_ip;
+    out.pim_register_inner_group_ip = msg.register_inner_group_ip;
+
+    out.pim_register_stop_group = msg.register_stop_group;
+    out.pim_register_stop_source = msg.register_stop_source;
+
+    out.pim_jp_upstream_neighbor = msg.jp_upstream_neighbor;
+    out.pim_jp_holdtime_sec = msg.jp_holdtime_sec;
+    out.pim_jp_groups_truncated = msg.jp_groups_truncated;
+    for (const auto& g : msg.jp_groups) out.pim_jp_groups.push_back(pim_jp_group_summary(g));
+
+    out.pim_bsr_fragment_tag = msg.bsr_fragment_tag;
+    out.pim_bsr_hash_mask_len = msg.bsr_hash_mask_len;
+    out.pim_bsr_priority = msg.bsr_priority;
+    out.pim_bsr_address = msg.bsr_address;
+    out.pim_bsr_groups_truncated = msg.bsr_groups_truncated;
+    for (const auto& g : msg.bsr_groups) out.pim_bsr_groups.push_back(pim_bsr_group_summary(g));
+
+    out.pim_assert_group = msg.assert_group;
+    out.pim_assert_source = msg.assert_source;
+    out.pim_assert_rpt_bit = msg.assert_rpt_bit;
+    out.pim_assert_metric_preference = msg.assert_metric_preference;
+    out.pim_assert_metric = msg.assert_metric;
+
+    out.pim_crp_prefix_count = msg.crp_prefix_count;
+    out.pim_crp_priority = msg.crp_priority;
+    out.pim_crp_holdtime_sec = msg.crp_holdtime_sec;
+    out.pim_crp_rp_address = msg.crp_rp_address;
+    out.pim_crp_groups_truncated = msg.crp_groups_truncated;
+    out.pim_crp_groups = msg.crp_groups;
+}
+
+// Renders one EigrpGeneralTlv as a single line for DecodedPacket::eigrp_general_tlvs.
+std::string eigrp_general_tlv_summary(const EigrpGeneralTlv& tlv) {
+    if (tlv.value.empty()) return tlv.type_name;
+    return tlv.type_name + ": " + tlv.value;
+}
+
+// Flattens a parsed EigrpMessage (see eigrp.hpp) into DecodedPacket's eigrp_* fields.
+void fill_eigrp_fields(DecodedPacket& out, const EigrpMessage& msg) {
+    out.summary = msg.summary;
+    for (const auto& n : msg.notes) out.notes.push_back(n);
+    out.eigrp_opcode_name = msg.opcode_name;
+    out.eigrp_autonomous_system = msg.autonomous_system;
+    if (msg.flag_init) out.eigrp_flags.push_back("Init");
+    if (msg.flag_conditional_receive) out.eigrp_flags.push_back("Conditional Receive");
+    if (msg.flag_restart) out.eigrp_flags.push_back("Restart");
+    if (msg.flag_end_of_table) out.eigrp_flags.push_back("End Of Table");
+    out.eigrp_general_tlvs_truncated = msg.general_tlvs_truncated;
+    for (const auto& tlv : msg.general_tlvs) out.eigrp_general_tlvs.push_back(eigrp_general_tlv_summary(tlv));
+    out.eigrp_routes_truncated = msg.routes_truncated;
+    for (const auto& r : msg.routes) out.eigrp_routes.push_back(r.summary);
+}
+
+// Renders one OspfLsa's header ONLY (no body) as a single line -- used for DB Description and LS
+// Ack, which never carry LSA bodies (see ospf.hpp).
+std::string ospf_lsa_header_summary(const OspfLsa& lsa) {
+    std::ostringstream s;
+    s << lsa.type_name << " len " << lsa.length << ": " << lsa.link_state_id << " " << lsa.advertising_router
+      << " Seq=0x" << std::hex << std::uppercase << std::setw(8) << std::setfill('0') << lsa.sequence_number
+      << std::dec << " Age=" << lsa.age_sec << "s";
+    if (lsa.do_not_age) s << " (DoNotAge)";
+    return s.str();
+}
+
+// Renders one OspfLsa's header plus, when present, a short rendering of its decoded body -- used
+// for LS Update, the only packet type that ever carries LSA bodies.
+std::string ospf_lsa_full_summary(const OspfLsa& lsa) {
+    std::string s = ospf_lsa_header_summary(lsa);
+    if (lsa.router_body) {
+        s += " links=" + std::to_string(lsa.router_body->links.size());
+        if (lsa.router_body->flag_border) s += " ABR";
+        if (lsa.router_body->flag_external) s += " ASBR";
+        if (lsa.router_body->flag_virtual) s += " V";
+    } else if (lsa.network_body) {
+        s += " mask=" + lsa.network_body->network_mask +
+             " routers=" + std::to_string(lsa.network_body->attached_routers.size());
+    } else if (lsa.summary_body) {
+        s += " mask=" + lsa.summary_body->network_mask + " metric=" + std::to_string(lsa.summary_body->metric);
+    } else if (lsa.as_external_body) {
+        s += " mask=" + lsa.as_external_body->network_mask +
+             " metric=" + std::to_string(lsa.as_external_body->metric) +
+             (lsa.as_external_body->e_bit ? " (Type 2)" : " (Type 1)");
+    }
+    return s;
+}
+
+// Renders one OspfLsRequestEntry as a single line for DecodedPacket::ospf_ls_requests.
+std::string ospf_ls_request_summary(const OspfLsRequestEntry& e) {
+    return e.ls_type_name + ": " + e.link_state_id + " " + e.advertising_router;
+}
+
+// Flattens a parsed OspfMessage (see ospf.hpp) into DecodedPacket's ospf_* fields. Which of the
+// per-type field groups end up populated depends entirely on msg.type_name -- this just copies
+// every group across unconditionally, since the unused ones are simply left at their default
+// (empty/false/0) values.
+void fill_ospf_fields(DecodedPacket& out, const OspfMessage& msg) {
+    out.summary = msg.summary;
+    for (const auto& n : msg.notes) out.notes.push_back(n);
+    out.ospf_type_name = msg.type_name;
+    out.ospf_router_id = msg.router_id;
+    out.ospf_area_id = msg.area_id;
+    out.ospf_auth_type_name = msg.auth_type_name;
+
+    out.ospf_hello_designated_router = msg.hello_designated_router;
+    out.ospf_hello_backup_designated_router = msg.hello_backup_designated_router;
+    out.ospf_hello_neighbors_truncated = msg.hello_neighbors_truncated;
+    out.ospf_hello_neighbors = msg.hello_neighbors;
+
+    out.ospf_dbd_lsa_headers_truncated = msg.dbd_lsa_headers_truncated;
+    for (const auto& lsa : msg.dbd_lsa_headers) out.ospf_dbd_lsa_headers.push_back(ospf_lsa_header_summary(lsa));
+
+    out.ospf_ls_requests_truncated = msg.ls_requests_truncated;
+    for (const auto& e : msg.ls_requests) out.ospf_ls_requests.push_back(ospf_ls_request_summary(e));
+
+    out.ospf_ls_update_lsas_truncated = msg.ls_update_lsas_truncated;
+    for (const auto& lsa : msg.ls_update_lsas) out.ospf_ls_update_lsas.push_back(ospf_lsa_full_summary(lsa));
+
+    out.ospf_ls_ack_headers_truncated = msg.ls_ack_headers_truncated;
+    for (const auto& lsa : msg.ls_ack_headers) out.ospf_ls_ack_headers.push_back(ospf_lsa_header_summary(lsa));
 }
 
 }  // namespace
@@ -1500,12 +1695,13 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
             return out;
         }
 
-        // IGMP and VRRP each ride directly on IP (no UDP/TCP header), dispatched purely by their
-        // own IANA-exclusive IP protocol number rather than any port -- see igmp.hpp's/vrrp.hpp's
-        // own file header comments. Both are tried unconditionally (in Auto mode, or their own
-        // --protocol filter) since that protocol number alone is already a strong, exclusive
-        // signal; a payload that doesn't structurally match still falls through to "non-tcp"
-        // below rather than being forced into one of these two protocols.
+        // IGMP, VRRP, IGRP, PIM, EIGRP, and OSPF each ride directly on IP (no UDP/TCP header),
+        // dispatched purely by their own IANA-exclusive IP protocol number rather than any port --
+        // see igmp.hpp's/vrrp.hpp's/igrp.hpp's/pim.hpp's/eigrp.hpp's/ospf.hpp's own file header
+        // comments. All six are tried unconditionally (in Auto mode, or their own --protocol
+        // filter) since that protocol number alone is already a strong, exclusive signal; a
+        // payload that doesn't structurally match still falls through to "non-tcp" below rather
+        // than being forced into one of these six protocols.
         if (ip.protocol == IGMP_IP_PROTOCOL) {
             bool want_igmp = options_.protocol_filter == ProtocolFilter::Auto ||
                               options_.protocol_filter == ProtocolFilter::IgmpOnly;
@@ -1525,6 +1721,54 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                 if (auto msg = try_parse_vrrp(ip.payload)) {
                     out.protocol = "vrrp";
                     fill_vrrp_fields(out, *msg);
+                    return out;
+                }
+            }
+        }
+
+        if (ip.protocol == IGRP_IP_PROTOCOL) {
+            bool want_igrp = options_.protocol_filter == ProtocolFilter::Auto ||
+                              options_.protocol_filter == ProtocolFilter::IgrpOnly;
+            if (want_igrp) {
+                if (auto msg = try_parse_igrp(ip.payload, ip.src_addr)) {
+                    out.protocol = "igrp";
+                    fill_igrp_fields(out, *msg);
+                    return out;
+                }
+            }
+        }
+
+        if (ip.protocol == PIM_IP_PROTOCOL) {
+            bool want_pim = options_.protocol_filter == ProtocolFilter::Auto ||
+                             options_.protocol_filter == ProtocolFilter::PimOnly;
+            if (want_pim) {
+                if (auto msg = try_parse_pim(ip.payload)) {
+                    out.protocol = "pim";
+                    fill_pim_fields(out, *msg);
+                    return out;
+                }
+            }
+        }
+
+        if (ip.protocol == EIGRP_IP_PROTOCOL) {
+            bool want_eigrp = options_.protocol_filter == ProtocolFilter::Auto ||
+                               options_.protocol_filter == ProtocolFilter::EigrpOnly;
+            if (want_eigrp) {
+                if (auto msg = try_parse_eigrp(ip.payload)) {
+                    out.protocol = "eigrp";
+                    fill_eigrp_fields(out, *msg);
+                    return out;
+                }
+            }
+        }
+
+        if (ip.protocol == OSPF_IP_PROTOCOL) {
+            bool want_ospf = options_.protocol_filter == ProtocolFilter::Auto ||
+                              options_.protocol_filter == ProtocolFilter::OspfOnly;
+            if (want_ospf) {
+                if (auto msg = try_parse_ospf(ip.payload)) {
+                    out.protocol = "ospf";
+                    fill_ospf_fields(out, *msg);
                     return out;
                 }
             }

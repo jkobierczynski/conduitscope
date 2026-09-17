@@ -1717,11 +1717,12 @@ building this feature, to satisfy FF-HSE's own weaker structural gate and
 get misdetected as truncated FF-HSE traffic when tried in FF-HSE's usual
 lowest-priority position; once RIP's/HSRP's own port gate has already
 matched, that is a stronger signal than FF-HSE's port-independent one, so it
-runs first. **IGMP and VRRP need no port gate or option at all**: both ride
-directly on IP with no UDP/TCP header, and are dispatched purely by their
-own IANA-exclusive IP protocol number (2 and 112) -- a signal with no port
-concept to widen or restrict in the first place. See PROTOCOL COVERAGE's
-"RIP / IGMP / VRRP / HSRP" section for the full wire formats.
+runs first. **IGMP, VRRP, IGRP, PIM, EIGRP, and OSPF need no port gate or
+option at all**: all six ride directly on IP with no UDP/TCP header, and are
+dispatched purely by their own IANA-exclusive IP protocol number (2, 112, 9,
+103, 88, and 89 respectively) -- a signal with no port concept to widen or
+restrict in the first place. See PROTOCOL COVERAGE's "RIP / IGMP / VRRP /
+HSRP" and "IGRP / PIM / EIGRP / OSPF" sections for the full wire formats.
 
 ## OUTPUT FORMATS
 
@@ -7100,6 +7101,206 @@ precedented gap already documented for this codebase's FF-HSE and DeviceNet
 decoders (see `tests/real_captures/igmp/ATTRIBUTION.md`'s "Search outcome
 for RIP/VRRP/HSRP" section for the full account).
 
+### IGRP / PIM / EIGRP / OSPF
+
+Four more routing/multicast-routing protocols, added as a follow-up batch to
+RIP/IGMP/VRRP/HSRP above for the same reason (they routinely share segments
+with GOOSE/SV's own routable multicast variants, and seeing router-to-router
+traffic on a segment that shouldn't have any is itself worth a second look).
+All four ride directly on IP with **no port concept at all** -- dispatch in
+`--protocol auto` is keyed purely on each protocol's own IANA-exclusive IP
+protocol number (9, 103, 88, and 89 respectively), the same posture already
+established for IGMP/VRRP above. BGP, the one protocol from this same
+follow-up request that rides over TCP (port 179) instead of directly on IP,
+is deliberately **not** part of this batch -- it needs TCP stream
+reassembly, unlike the four protocols here, and is deferred to its own
+future round (see ROADMAP).
+
+#### IGRP (Interior Gateway Routing Protocol), IP protocol 9
+
+Cisco's IGRP predates EIGRP below and was formally end-of-life for Cisco IOS
+in 2016 -- it is included here purely for completeness (occasionally still
+seen in lab/training captures and legacy-equipment audits), and production
+traffic using it at all is itself a strong signal of unmaintained, legacy
+infrastructure. IGRP was never assigned its own RFC; it is documented here
+only by Cisco's own (long unmaintained) documentation and Wireshark's own
+`packet-igrp.c`, which this decoder was cross-checked against directly. A
+12-byte header -- Version(4 bits, only `1` is ever defined)/Opcode(4 bits,
+`1` Update/"Response", `2` Request) + Edition(1) + Autonomous System(2) +
+Interior/System/Exterior route counts (2 each) + Checksum(2, not verified)
+-- is followed by that many 14-byte route vectors: Network(3, see below) +
+Delay(3, units of 10 microseconds, all-ones = unreachable) + Bandwidth(3,
+scaled: kbps = 10,000,000 / raw) + MTU(2) + Reliability(1) + Load(1) + Hop
+Count(1).
+
+IGRP is a **classful** protocol, and its 3-byte Network field is the one
+genuinely tricky part of an otherwise simple format: an **Interior** route
+(a subnet of the network the packet itself was sent on) carries only the
+LOW-order 3 octets on the wire, with the missing high-order octet borrowed
+from the *IP source address of the packet carrying the route* -- decoding it
+correctly therefore requires the packet's own source IP, which is why
+`try_parse_igrp` (uniquely among every `try_parse_*` function in this
+codebase) takes an extra parameter beyond the raw payload. A **System** or
+**Exterior** route (a different major network) instead carries the
+HIGH-order 3 octets, with the missing low-order octet always `0` -- these
+can only ever name a bare class A/B/C network number, never a specific host.
+
+**Security context:** IGRP has no authentication of any kind, and is a
+distance-vector protocol with no loop-prevention beyond simple
+split-horizon/hold-down -- any host on the segment can inject routes.
+
+#### PIM (Protocol Independent Multicast) v2, PIM-SM/PIM-DM (RFC 7761/RFC 3973), IP protocol 103
+
+Only PIMv2 is decoded; PIMv1 (a much older, IGMP-framed design Cisco
+deprecated long ago) uses an entirely different wire format this decoder
+does not recognize. Every PIMv2 message shares a 4-byte common header --
+Version(4 bits, always `2`)/Type(4 bits) + a type-specific second byte
+(usually reserved) + Checksum(2, not verified) -- and this decoder fully
+decodes the six message types actually seen in normal PIM-SM/PIM-DM
+operation: `0` Hello (a TLV chain of options -- Hold Time, LAN Prune Delay,
+DR Priority, Generation ID, State Refresh Capable, and Address List are all
+decoded field-by-field); `1` Register (a Border/Null-Register flags word
+plus an encapsulated multicast data packet, whose own (Source, Group) this
+decoder extracts from fixed offsets but whose payload it does NOT decode
+further -- the same "don't recursively decode a fully independent inner
+protocol" posture this project takes elsewhere); `2` Register-Stop; `3`/`6`/
+`7` Join/Prune, Graft, and Graft-Ack (PIM-DM only for the latter two --
+RFC 3973 -- but all three share this exact wire format: an upstream
+neighbor, a holdtime, and a list of (group, joined sources, pruned sources)
+tuples); `4` Bootstrap (fragment tag/hash mask length/BSR priority/address,
+followed by a list of (group, candidate-RP list) tuples); `5` Assert (a
+group + source + a metric used to elect the LAN forwarder); `8`
+Candidate-RP-Advertisement. Five rarer types (`9` State-Refresh, `10`
+DF-Election, `11` ECMP-Redirect, `12` PFM, `13` Packed-Register) are
+recognized by Type value and named, but their bodies are not decoded
+further.
+
+PIM's three "Encoded Address" formats (Unicast, Group, Source -- RFC 7761
+§4.9) each begin with an Address Family byte and an Encoding Type byte; only
+Address Family `1` (IPv4, matching this project's IPv4-only posture
+everywhere else) and Encoding Type `0` (the plain "native" encoding) are
+supported. Encoding Type `1` (Native encoding with a trailing Join Attribute
+TLV chain, used only for a handful of BIDIR-PIM/MoFRR extensions) and
+Address Family `2` (IPv6) both stop decoding at that point in the message --
+whatever was already decoded is still returned, with a note -- rather than
+guessing at a length.
+
+**Security context:** PIM has no authentication in the versions this
+decoder recognizes -- any host on a PIM-enabled segment can send Join/
+Prune, Assert, or even Bootstrap/Candidate-RP-Advertisement messages and
+manipulate multicast forwarding state, including redirecting or
+blackholing multicast traffic. Because GOOSE/SV's own routable multicast
+variants and IGMP both already ride the same segments this decoder targets,
+unexpected PIM traffic -- especially Bootstrap/Candidate-RP-Advertisement
+from a host that isn't a legitimate RP/BSR -- is worth a second look.
+
+#### EIGRP (Enhanced Interior Gateway Routing Protocol), now RFC 7868, IP protocol 88
+
+A 20-byte header -- Version(1) + Opcode(1) + Checksum(2, not verified) +
+Flags(4: bit0 Init/bit1 Conditional Receive/bit2 Restart/bit3 End Of Table)
++ Sequence(4) + Acknowledge(4) + Virtual Router ID(2) + Autonomous System(2)
+-- is followed by a chain of TLVs (Type(2)+Length(2), Length counting the
+4-byte TLV header itself) running to the end of the packet. A Hello
+(Opcode `5`) with a nonzero Acknowledge field is displayed as `Hello (Ack)`,
+matching Wireshark's own convention -- an Ack is really just an empty Hello
+piggybacking an acknowledgement.
+
+The general (protocol-independent) TLVs are fully decoded: Parameters
+(K1-K6 + Hold Time), Authentication (header fields decoded -- Auth Type,
+declared digest length, Key ID, Key Sequence -- but, like RIP's own Keyed
+MD5 support, the MD5/SHA-256 digest itself is shown raw and NOT verified),
+Sequence (a list of peer addresses, IPv4 only), Software Version, and Next
+Multicast Sequence. Both IPv4 route TLV formats are fully decoded: the
+legacy **Classic** format (TLV types `0x0102`/`0x0103`, deprecated since
+EIGRP Release 8 but still common on older gear and lab captures) and the
+current **Wide-Metric**/Multi-Protocol format (TLV types `0x0602`/`0x0603`,
+what a modern EIGRP "named mode" configuration defaults to). A single route
+TLV of either format can (and in real captures often does) describe
+**multiple destination prefixes** sharing one next-hop and one metric --
+EIGRP's own compound-TLV design, not a decoding artifact -- with each
+destination stored prefix-length-compressed on the wire (only
+`ceil(prefix_len/8)` address bytes actually present) and expanded here to a
+normal dotted-quad/prefix-length pair. Everything else (Peer Stub
+Information/Termination/TID List, AppleTalk/IPX/IPv6/MTR route TLVs, and
+IPX SAP packets, i.e. Opcode `6`) is recognized -- named, counted, and its
+raw byte length shown -- but not decoded further.
+
+**Security context:** EIGRP supports MD5 and SHA-256 HMAC authentication
+(the Authentication TLV's own header fields are decoded, but not the
+digest, same posture as RIP's Keyed MD5), but plenty of real-world EIGRP
+deployments run with no authentication at all, in which case any host on
+the segment can inject or suppress routes. Multiple distinct AS numbers or
+repeated Parameter-TLV mismatches on one segment are themselves worth a
+second look, since EIGRP AS numbers/K-values effectively define a trust
+domain.
+
+#### OSPFv2 (Open Shortest Path First, RFC 2328), IP protocol 89
+
+Only OSPFv2 (IPv4) is decoded; OSPFv3 (which carries IPv6 semantics
+throughout, not just a different address family in an otherwise-similar
+header) is out of scope, matching this project's IPv4-only posture
+everywhere else -- an OSPFv3 packet's Version byte (`3`, not `2`) is
+rejected outright. Every OSPFv2 packet shares a 24-byte header --
+Version(1) + Type(1) + Packet Length(2) + Router ID(4) + Area ID(4) +
+Checksum(2, not verified) + Instance ID(1) + AuType(1) + Authentication(8)
+-- reflecting RFC 6549's backward-compatible reinterpretation of the
+classic 16-bit AuType field as Instance ID(1)+AuType(1) (a legacy capture
+with Instance ID always `0` decodes identically either way). Three AuTypes
+are recognized: `0` Null (no authentication), `1` Simple Password (decoded
+as cleartext), and `2` Cryptographic/MD5 (Key ID/Auth Data Length/Sequence
+Number header fields decoded; like RIP's own Keyed MD5 support, the actual
+digest -- a separate block appended after the packet's own declared length
+-- is neither located nor verified).
+
+Five packet Types are decoded in full: `1` Hello (network mask, timers,
+Options, DR/BDR, and the neighbor list already heard from); `2` DB
+Description (interface MTU, Options, the I/M/MS exchange-state flags, and a
+list of LSA headers -- never LSA bodies, which a DB Description never
+carries); `3` LS Request (a list of (LSA type, Link State ID, Advertising
+Router) tuples); `4` LS Update (a list of complete LSAs, header + body --
+the only packet type that ever carries LSA bodies); `5` LS Ack (LSA headers
+only, acknowledging receipt). Every LSA's 20-byte header is always decoded;
+the body is decoded, when present, for LSA types `1` Router (Flags +
+per-link LinkID/LinkData/LinkType/Metric list), `2` Network (network mask +
+attached-router list), `3`/`4` Summary/ASBR-Summary (identical format:
+network mask + TOS-0 metric), and `5`/`7` AS-External/NSSA-External
+(identical format: network mask + E-bit + TOS-0 metric + forwarding
+address + route tag). Types `6` (Group Membership/MOSPF, essentially unused
+today) and `8`-`11` (Opaque, RFC 2370/3630 -- MPLS-TE and other extensions)
+are recognized by type number but not decoded further; a Summary/AS-External
+LSA's TOS-specific metric blocks beyond the first (ordinary, non-TOS) one
+are likewise not decoded -- TOS-based routing was never widely deployed and
+real captures essentially always carry exactly one block per LSA.
+
+**Security context:** OSPF traffic on a segment defines that segment's IGP
+trust domain -- Simple Password authentication sends the password in
+plaintext, and even Null authentication (still the most common real-world
+setting) means any host that can reach the All-OSPF-Routers/
+All-DR-Routers multicast groups can inject Hello/LSA traffic and manipulate
+routing. Because a rogue OSPF speaker can originate its own Router-LSA
+claiming arbitrary links, unexpected OSPF traffic -- especially from a host
+that shouldn't itself be a router -- is worth a second look.
+
+#### Validation
+
+All four protocols here are validated against `tools/make_sample_pcap.py`'s
+own hand-built, RFC/Wireshark-cross-checked fixtures (`tests/sample_igrp.pcap`,
+`sample_pim.pcap`, `sample_eigrp.pcap`, `sample_ospf.pcap`), covering both the
+decode paths above and the negative control each protocol's detection
+depends on: a too-short IGRP payload, an unrecognized PIM Type nibble, a
+too-short EIGRP payload, and an OSPFv3 (Version 3) packet -- every one of
+which must fall through to the generic `non-tcp` report rather than being
+misdetected. IGRP's own graceful-degradation posture (a plausible header
+whose declared route count doesn't match the bytes actually present) is
+also exercised directly. The same 1,020-file search across `automayt/
+ICS-pcap`, `ITI/ICS-Security-Tools`, and `mrhenrike/PCAPTrafficAnalysis`
+that found no RIP/VRRP/HSRP traffic (see the previous section's Validation
+subsection) also found no IGRP, PIM, EIGRP, or OSPF traffic anywhere; all
+four remain synthetic-fixture-only, the same accepted, precedented gap
+already documented for RIP/VRRP/HSRP above (see `tests/real_captures/igmp/
+ATTRIBUTION.md`'s "Search outcome for IGRP/PIM/EIGRP/OSPF" section for the
+full account).
+
 ### Link/IP-layer plumbing: non-IPv4 Ethernet, and non-TCP IPv4 (including UDP)
 
 Every protocol above rides on Ethernet + IPv4 + TCP. Traffic outside that --
@@ -7121,10 +7322,13 @@ protocol number registry (not reverse-engineered from a single capture):
   or an EtherCAT frame header is decoded and reported as
   `profinet`/`goose`/`sv`/`ethercat`, not `non-ip` -- see PROTOCOL COVERAGE's
   PROFINET RT, GOOSE, Sampled Values, and EtherCAT sections.
-- **IPv4 protocol numbers** (`ipv4.hpp`'s `ip_protocol_name`): ICMP, IGMP,
-  IPv6-in-IPv4, GRE, ESP, AH, ICMPv6, OSPF, SCTP -- alongside TCP and UDP,
-  which get their own dedicated handling (below and elsewhere in this
-  document) rather than just a name.
+- **IPv4 protocol numbers** (`ipv4.hpp`'s `ip_protocol_name`): ICMP,
+  IPv6-in-IPv4, GRE, ESP, AH, ICMPv6, SCTP are named but not decoded
+  further. IGMP, VRRP, IGRP, PIM, EIGRP, and OSPF (protocol numbers 2, 112,
+  9, 103, 88, and 89) get their own dedicated handling instead of just a
+  name -- see PROTOCOL COVERAGE's "RIP / IGMP / VRRP / HSRP" and "IGRP /
+  PIM / EIGRP / OSPF" sections -- as do TCP and UDP (below and elsewhere in
+  this document).
 - **UDP** (`udp.hpp`, protocol `udp`): the 8-byte UDP header itself
   (source/destination port, declared length, clamped to what was actually
   captured the same way `parse_ipv4` already clamps to IPv4's own
@@ -8062,6 +8266,32 @@ These are current, not aspirational -- each has a corresponding ROADMAP item.
   (`tests/real_captures/igmp/plant1_igmp_only.pcap`). See PROTOCOL
   COVERAGE's "RIP / IGMP / VRRP / HSRP" section's own Validation subsection
   and `tests/real_captures/igmp/ATTRIBUTION.md` for the full account.
+- **EIGRP's and OSPF's authentication digests are neither located nor
+  verified**, the same posture as RIP's own Keyed MD5 support above: EIGRP's
+  Authentication TLV and OSPF's Cryptographic/MD5 AuType both have their
+  header fields (Auth Type/Key ID/Key Sequence, or Key ID/Auth Data Length/
+  Sequence Number) fully decoded, but the actual digest bytes -- appended
+  after the packet's own declared length in OSPF's case -- are not computed
+  or checked. See PROTOCOL COVERAGE's EIGRP and OSPFv2 sections.
+- **PIM has no IPv6 support at all** -- an Encoded Address with Address
+  Family `2` (IPv6), or Encoding Type `1` (Native + Join Attribute TLV,
+  used by a handful of BIDIR-PIM/MoFRR extensions), stops decoding of that
+  message at that point, with a note, rather than being guessed at. See
+  PROTOCOL COVERAGE's PIM section.
+- **None of IGRP/PIM/EIGRP/OSPF are wired into the `policy validate` conduit
+  `protocols` classification**, for the same reason and with the same
+  ROADMAP tracking as the DNS-family and RIP/IGMP/VRRP/HSRP bullets above --
+  a conduit restricted to one of these protocol names in policy YAML will
+  not match traffic this decoder already decodes as
+  `igrp`/`pim`/`eigrp`/`ospf`.
+- **IGRP, PIM, EIGRP, and OSPF have no real-capture validation at all** --
+  the same honest gap already documented above for RIP/VRRP/HSRP; a
+  1,020-file search across the same three public ICS pcap collections found
+  no traffic for any of the four (unsurprising for collections curated
+  around single-device captures rather than multi-router topologies). See
+  PROTOCOL COVERAGE's "IGRP / PIM / EIGRP / OSPF" section's own Validation
+  subsection and `tests/real_captures/igmp/ATTRIBUTION.md` for the full
+  account.
 - **VLAN-zone conduits only ever consult a single, outermost 802.1Q tag --
   a stacked/QinQ frame can never be VLAN-zone-classified.** `parse_ethernet`
   (`link_layer.cpp`) only recognizes ordinary 802.1Q (EtherType `0x8100`);
@@ -8693,6 +8923,25 @@ conduitscope decode -r capture.pcap -f json \
   | jq -r '.[] | select((.protocol == "vrrp" and .vrrp_priority == 0) or
                          (.protocol == "hsrp" and .hsrp_opcode == "Coup")) |
            "\(.src_ip): \(.summary)"'
+```
+
+Inventory every OSPF Router-LSA seen on a segment -- who is originating
+routes, and how many links each one claims (a rogue OSPF speaker often
+shows up as an unexpected Router ID or an implausible link count):
+
+```sh
+conduitscope decode -r capture.pcap --protocol ospf -f json \
+  | jq -r '.[] | .ospf_ls_update_lsas[]? | select(startswith("Router")) | .'
+```
+
+Check whether any router-to-router IGP traffic (IGRP, EIGRP, or OSPF) is
+present at all on a segment that is supposed to be a flat, switched OT
+network with no routers on it -- seeing any of it is itself a finding:
+
+```sh
+conduitscope decode -r capture.pcap -f json \
+  | jq -r '.[] | select(.protocol | test("^(igrp|eigrp|ospf)$")) |
+           "\(.src_ip) -> \(.dst_ip): \(.summary)"'
 ```
 
 Check whether PROFINET RT/GOOSE/Sampled Values/EtherCAT traffic is on the
@@ -9437,11 +9686,12 @@ own numbered roadmap item: wiring any of these five into `policy validate`/
 above did for the six protocols added there -- see LIMITATIONS.
 
 **RIP, IGMP, VRRP, and HSRP decode** are also now done: the first batch of a
-broader routing/redundancy-protocol addition (RIP, IGMP, VRRP, HSRP now;
-PIM, EIGRP, OSPF, BGP, and IGRP planned for a later round -- IS-IS was
-considered and deliberately deferred further still, since it rides directly
-on the data-link layer like STP rather than as an IP-protocol payload,
-roughly doubling the scope of decoding it relative to any of these). RIP
+broader routing/redundancy-protocol addition (RIP, IGMP, VRRP, HSRP, IGRP,
+PIM, EIGRP, and OSPF now done across two rounds -- see below; BGP planned
+for a later round still. IS-IS was considered and deliberately deferred
+further still, since it rides directly on the data-link layer like STP
+rather than as an IP-protocol payload, roughly doubling the scope of
+decoding it relative to any of these). RIP
 (UDP port 520) and HSRP (UDP port 1985) join DNS/mDNS/LLMNR/NBT-NS/DoH in
 being port-gated in `--protocol auto` rather than tried opportunistically,
 for the same reason (neither has a strong enough self-describing wire
@@ -9466,6 +9716,25 @@ own numbered roadmap item: wiring any of these four into `policy validate`/
 `PolicyEngine`'s conduit `protocols` classification (same gap as the DNS
 family above), and locating/verifying RIP's own Keyed MD5 authentication
 digest -- see LIMITATIONS for both.
+
+**IGRP, PIM, EIGRP, and OSPF decode** are now also done: the second batch of
+the routing/redundancy-protocol addition begun by RIP/IGMP/VRRP/HSRP above.
+All four ride directly on IP (protocol numbers 9, 103, 88, and 89, all
+IANA-exclusive) with no UDP/TCP header and therefore no port concept at all
+to gate -- the same "no port concept" shape IGMP/VRRP already have. BGP,
+the one protocol from the original request that instead rides over TCP
+(port 179), was deliberately left out of this batch and deferred to its own
+future round, since it needs TCP stream reassembly unlike these four. See
+PROTOCOL COVERAGE's "IGRP / PIM / EIGRP / OSPF" section for the full wire
+formats, each protocol's own Security context note, and this section's
+Validation subsection. Deliberately left out of this pass, and not yet
+separately tracked as its own numbered roadmap item: wiring any of these
+four into `policy validate`/`PolicyEngine`'s conduit `protocols`
+classification (same gap as the DNS family and RIP/IGMP/VRRP/HSRP above),
+and locating/verifying EIGRP's and OSPF's own authentication digests (same
+gap as RIP's Keyed MD5) -- see LIMITATIONS for both. **BGP is the next
+routing protocol planned** -- it will need TCP port-179 stream reassembly,
+unlike any of the eight routing/redundancy protocols decoded so far.
 
 ### Protocols not covered at all
 

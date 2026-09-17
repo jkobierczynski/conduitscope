@@ -98,3 +98,23 @@ collections). **RIP, VRRP, and HSRP validation therefore remains synthetic-fixtu
 and Wireshark-dissector-source cross-checked, per each protocol's own header-comment documentation)
 -- the same accepted, precedented outcome already documented for this project's FF-HSE and
 DeviceNet decoders.
+
+## Search outcome for IGRP/PIM/EIGRP/OSPF
+
+The IGRP/PIM/EIGRP/OSPF round (added alongside RIP/IGMP/VRRP/HSRP's own follow-up work) repeated
+this same search against the same three collections -- `automayt/ICS-pcap`, `ITI/ICS-Security-
+Tools`, and `mrhenrike/PCAPTrafficAnalysis` -- this time scanning all 1,020 `.pcap`/`.pcapng` files
+findable across all local clones of those collections with
+
+```
+tshark -r <file> -Y "igrp or eigrp or ospf or pim" -T fields -e frame.number -e frame.protocols
+```
+
+**No IGRP, PIM, EIGRP, or OSPF traffic was found in any of the 1,020 files searched.** This mirrors
+the RIP/VRRP/HSRP outcome above for exactly the same reason: these are all interior-gateway-
+protocol or router-to-router multicast-routing protocols that simply don't appear in single-device
+or individual-segment ICS/OT captures the way link-local protocols like IGMP do. **IGRP, PIM,
+EIGRP, and OSPF validation therefore remains synthetic-fixture-only** (Wireshark-dissector-source
+and RFC-cross-checked, per each protocol's own header-comment documentation) -- the same accepted,
+precedented outcome already documented above for RIP/VRRP/HSRP and, before that, for FF-HSE and
+DeviceNet.

@@ -7568,6 +7568,10 @@ RIP_PORT = 520
 HSRP_PORT = 1985
 IGMP_IP_PROTOCOL = 2
 VRRP_IP_PROTOCOL = 112
+IGRP_IP_PROTOCOL = 9
+EIGRP_IP_PROTOCOL = 88
+OSPF_IP_PROTOCOL = 89
+PIM_IP_PROTOCOL = 103
 
 
 def ip_bytes4(addr: str) -> bytes:
@@ -7866,6 +7870,502 @@ def build_hsrp_sample():
     (TESTS_DIR / "sample_hsrp.pcap").write_bytes(data)
 
 
+def igrp_route_vector(network3: bytes, delay: int, bandwidth: int, mtu: int, reliability: int,
+                       load: int, hop_count: int) -> bytes:
+    return (network3 + delay.to_bytes(3, "big") + bandwidth.to_bytes(3, "big") +
+            struct.pack("!HBBB", mtu, reliability, load, hop_count))
+
+
+def igrp_message(opcode: int, edition: int, autonomous_system: int, interior: list, system: list,
+                  exterior: list, version: int = 1) -> bytes:
+    header = struct.pack("!BBHHHHH", (version << 4) | opcode, edition, autonomous_system,
+                          len(interior), len(system), len(exterior), 0)
+    return header + b"".join(interior + system + exterior)
+
+
+def build_igrp_sample():
+    """Cisco IGRP (RFC-less, Cisco-proprietary) -- rides directly on IP protocol 9, no UDP/TCP
+    header at all (see igrp.hpp). Covers an Update ("Response") sent from HMI_IP (192.168.1.50)
+    with one Interior route (full address reconstructed by borrowing HMI_IP's own octet0=192), an
+    unreachable Interior route (Delay all-ones), one System route (a bare class-A network number),
+    and one Exterior route; a Request; a truncated route table (header declares 50 Interior routes
+    but only one complete 14-byte vector is actually present -- must still decode that one route,
+    per igrp.hpp's own graceful-degradation posture); and a payload shorter than the 12-byte header
+    to exercise outright rejection."""
+    packets = []
+    IGRP_ALL = "255.255.255.255"
+
+    def add(payload: bytes, from_a: bool = True):
+        if from_a:
+            packets.append(ip_eth_frame(payload, IGRP_IP_PROTOCOL, HMI_IP, IGRP_ALL, HMI_MAC, PLC_MAC))
+        else:
+            packets.append(ip_eth_frame(payload, IGRP_IP_PROTOCOL, PLC_IP, IGRP_ALL, PLC_MAC, HMI_MAC))
+
+    # 1) Update ("Response") from HMI_IP: Interior route 192.168.5.0 (network3=168.5.0, borrowing
+    #    HMI_IP's own octet0=192), an unreachable Interior route, a System route (10.0.0.0), and an
+    #    Exterior route (172.16.0.0).
+    interior = [
+        igrp_route_vector(bytes([168, 5, 0]), 100, 1000, 1500, 255, 1, 2),
+        igrp_route_vector(bytes([168, 6, 0]), 0xFFFFFF, 0, 1500, 255, 0, 255),  # unreachable
+    ]
+    system = [igrp_route_vector(bytes([10, 0, 0]), 200, 1000, 1500, 200, 0, 4)]
+    exterior = [igrp_route_vector(bytes([172, 16, 0]), 300, 500, 1500, 180, 0, 6)]
+    add(igrp_message(1, 5, 100, interior, system, exterior))
+
+    # 2) Request (opcode 2) -- an empty route table request.
+    add(igrp_message(2, 0, 100, [], [], []), from_a=False)
+
+    # 3) Truncated route table: header declares 50 Interior routes but only one complete 14-byte
+    #    vector is actually present.
+    add(struct.pack("!BBHHHHH", (1 << 4) | 1, 0, 100, 50, 0, 0, 0) +
+        igrp_route_vector(bytes([168, 7, 0]), 100, 1000, 1500, 255, 1, 2))
+
+    # 4) Deliberately NOT IGRP: shorter than the 12-byte header -- structural gate must reject it,
+    #    falling back to generic "non-tcp".
+    add(bytes([0x11, 0x00, 0x00]))
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_034_000 + i, i * 1000)
+    (TESTS_DIR / "sample_igrp.pcap").write_bytes(data)
+
+
+def pim_header(msg_type: int, version: int = 2) -> bytes:
+    return struct.pack("!BBH", (version << 4) | msg_type, 0, 0)
+
+
+def pim_encoded_unicast(addr: str) -> bytes:
+    return struct.pack("!BB", 1, 0) + ip_bytes4(addr)
+
+
+def pim_encoded_group(addr: str, mask_len: int = 32) -> bytes:
+    return struct.pack("!BBBB", 1, 0, 0, mask_len) + ip_bytes4(addr)
+
+
+def pim_encoded_source(addr: str, mask_len: int = 32, flags: int = 0) -> bytes:
+    return struct.pack("!BBBB", 1, 0, flags, mask_len) + ip_bytes4(addr)
+
+
+def pim_hello_option(option_type: int, value: bytes) -> bytes:
+    return struct.pack("!HH", option_type, len(value)) + value
+
+
+def pim_hello_message(options: list) -> bytes:
+    return pim_header(0) + b"".join(options)
+
+
+def pim_register_message(border: bool, null_register: bool, inner_src: str, inner_group: str) -> bytes:
+    flags = (0x80000000 if border else 0) | (0x40000000 if null_register else 0)
+    encap = bytearray(20)
+    encap[0] = 0x45  # version 4, IHL 5 -- a minimal, otherwise-unused IPv4-shaped header
+    encap[12:16] = ip_bytes4(inner_src)
+    encap[16:20] = ip_bytes4(inner_group)
+    return pim_header(1) + struct.pack("!I", flags) + bytes(encap)
+
+
+def pim_register_stop_message(group: str, source_addr: str) -> bytes:
+    return pim_header(2) + pim_encoded_group(group) + pim_encoded_unicast(source_addr)
+
+
+def pim_join_prune_message(msg_type: int, upstream: str, holdtime: int, groups: list) -> bytes:
+    body = pim_encoded_unicast(upstream) + struct.pack("!BBH", 0, len(groups), holdtime)
+    for group_addr, joins, prunes in groups:
+        body += pim_encoded_group(group_addr)
+        body += struct.pack("!HH", len(joins), len(prunes))
+        for src in joins:
+            body += pim_encoded_source(src)
+        for src in prunes:
+            body += pim_encoded_source(src)
+    return pim_header(msg_type) + body
+
+
+def pim_bootstrap_message(fragment_tag: int, hash_mask_len: int, priority: int, bsr_addr: str,
+                           groups: list) -> bytes:
+    body = struct.pack("!HBB", fragment_tag, hash_mask_len, priority) + pim_encoded_unicast(bsr_addr)
+    for group_addr, rps in groups:
+        body += pim_encoded_group(group_addr)
+        body += struct.pack("!BBH", len(rps), len(rps), 0)  # RP-Count == Frag-RP-Count here
+        for rp_addr, holdtime, rp_priority in rps:
+            body += pim_encoded_unicast(rp_addr) + struct.pack("!HBB", holdtime, rp_priority, 0)
+    return pim_header(4) + body
+
+
+def pim_assert_message(group_addr: str, source_addr: str, rpt_bit: bool, metric_pref: int,
+                        metric: int) -> bytes:
+    rpt_and_pref = (0x80000000 if rpt_bit else 0) | (metric_pref & 0x7FFFFFFF)
+    body = pim_encoded_group(group_addr) + pim_encoded_unicast(source_addr) + struct.pack(
+        "!II", rpt_and_pref, metric)
+    return pim_header(5) + body
+
+
+def pim_cand_rp_adv_message(priority: int, holdtime: int, rp_addr: str, groups: list) -> bytes:
+    body = struct.pack("!BBH", len(groups), priority, holdtime) + pim_encoded_unicast(rp_addr)
+    for g in groups:
+        body += pim_encoded_group(g)
+    return pim_header(8) + body
+
+
+def build_pim_sample():
+    """PIMv2 (RFC 7761/3973) -- rides directly on IP protocol 103, no UDP/TCP header at all (see
+    pim.hpp). Covers Hello (HoldTime/DR Priority/Generation ID/Address List options), Register
+    (encapsulating a real IPv4-shaped inner packet), Register-Stop, Join/Prune (one group with a
+    join and a prune source), Bootstrap (one candidate-RP), Assert, Candidate-RP-Advertisement, and
+    a deliberately non-PIM-shaped payload (Type nibble above the highest defined value) to exercise
+    the structural detection gate."""
+    packets = []
+    ALL_PIM_ROUTERS = "224.0.0.13"
+    GROUP_A = "239.1.1.1"
+
+    def add(payload: bytes, from_a: bool = True):
+        if from_a:
+            packets.append(ip_eth_frame(payload, PIM_IP_PROTOCOL, HMI_IP, ALL_PIM_ROUTERS, HMI_MAC, PLC_MAC))
+        else:
+            packets.append(ip_eth_frame(payload, PIM_IP_PROTOCOL, PLC_IP, ALL_PIM_ROUTERS, PLC_MAC, HMI_MAC))
+
+    # 1) Hello: HoldTime, DR Priority, Generation ID, and an Address List option.
+    add(pim_hello_message([
+        pim_hello_option(1, struct.pack("!H", 105)),
+        pim_hello_option(19, struct.pack("!I", 1)),
+        pim_hello_option(20, struct.pack("!I", 0x12345678)),
+        pim_hello_option(24, pim_encoded_unicast(HMI_IP)),
+    ]))
+
+    # 2) Register: encapsulates a real (source, group) = (10.0.0.5, 239.1.1.1) inner packet.
+    add(pim_register_message(border=False, null_register=False, inner_src="10.0.0.5", inner_group=GROUP_A),
+        from_a=False)
+
+    # 3) Register-Stop for the same (group, source).
+    add(pim_register_stop_message(GROUP_A, "10.0.0.5"))
+
+    # 4) Join/Prune: one upstream neighbor, one group with one join source and one prune source.
+    add(pim_join_prune_message(3, PLC_IP, 210, [(GROUP_A, ["10.0.0.5"], ["10.0.0.9"])]), from_a=False)
+
+    # 5) Bootstrap: one candidate-RP for one group.
+    add(pim_bootstrap_message(1, 30, 192, HMI_IP, [(GROUP_A, [(PLC_IP, 150, 1)])]))
+
+    # 6) Assert.
+    add(pim_assert_message(GROUP_A, "10.0.0.5", rpt_bit=False, metric_pref=0, metric=100), from_a=False)
+
+    # 7) Candidate-RP-Advertisement.
+    add(pim_cand_rp_adv_message(192, 150, HMI_IP, [GROUP_A]))
+
+    # 8) Deliberately NOT PIM: Type nibble 15, above the highest type this decoder recognizes (13)
+    #    -- structural gate must reject it, falling back to generic "non-tcp".
+    add(struct.pack("!BBH", (2 << 4) | 15, 0, 0))
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_035_000 + i, i * 1000)
+    (TESTS_DIR / "sample_pim.pcap").write_bytes(data)
+
+
+def eigrp_header(opcode: int, flags: int, sequence: int, acknowledge: int, vrid: int,
+                  autonomous_system: int, version: int = 2) -> bytes:
+    return struct.pack("!BBHIIIHH", version, opcode, 0, flags, sequence, acknowledge, vrid,
+                        autonomous_system)
+
+
+def eigrp_tlv(tlv_type: int, value: bytes) -> bytes:
+    return struct.pack("!HH", tlv_type, len(value) + 4) + value
+
+
+def eigrp_parameters_value(k1: int, k2: int, k3: int, k4: int, k5: int, k6: int, holdtime: int) -> bytes:
+    return bytes([k1, k2, k3, k4, k5, k6]) + struct.pack("!H", holdtime)
+
+
+def eigrp_authentication_value(auth_type: int, digest: bytes, key_id: int = 1, key_seq: int = 1) -> bytes:
+    return struct.pack("!HHII", auth_type, len(digest), key_id, key_seq) + bytes(8) + digest
+
+
+def eigrp_sequence_value(addrs: list) -> bytes:
+    body = b""
+    for a in addrs:
+        body += bytes([4]) + ip_bytes4(a)
+    return body
+
+
+def eigrp_software_version_value(ios_major: int, ios_minor: int, tlv_major: int, tlv_minor: int) -> bytes:
+    return bytes([ios_major, ios_minor, tlv_major, tlv_minor])
+
+
+def eigrp_classic_metric_bytes(delay: int, bandwidth: int, mtu: int, hop_count: int, reliability: int,
+                                load: int, internal_tag: int = 0, flags: int = 0) -> bytes:
+    return (struct.pack("!II", delay, bandwidth) + mtu.to_bytes(3, "big") +
+            struct.pack("!BBBB", hop_count, reliability, load, internal_tag) + bytes([flags]))
+
+
+def eigrp_wide_metric_bytes(priority: int, reliability: int, load: int, mtu: int, hop_count: int,
+                             delay_48: int, bandwidth_48: int, offset: int = 0) -> bytes:
+    return (bytes([offset, priority, reliability, load]) + mtu.to_bytes(3, "big") + bytes([hop_count]) +
+            delay_48.to_bytes(6, "big") + bandwidth_48.to_bytes(6, "big") + struct.pack("!HH", 0, 0))
+
+
+def eigrp_external_data_bytes(orig_router: str, as_num: int, route_tag: int, ext_metric: int,
+                               ext_protocol: int, is_external: bool = True,
+                               is_candidate_default: bool = False) -> bytes:
+    flags = (0x01 if is_external else 0) | (0x02 if is_candidate_default else 0)
+    return (ip_bytes4(orig_router) + struct.pack("!III", as_num, route_tag, ext_metric) +
+            struct.pack("!H", 0) + bytes([ext_protocol, flags]))
+
+
+def eigrp_destination(addr: str, prefix_len: int) -> bytes:
+    addr_bytes = ip_bytes4(addr)
+    n = (prefix_len + 7) // 8
+    return bytes([prefix_len]) + addr_bytes[:n]
+
+
+def eigrp_classic_route_tlv(external: bool, next_hop: str, metric: bytes, destinations: list,
+                             ext_data: bytes = b"") -> bytes:
+    tlv_type = 0x0103 if external else 0x0102
+    value = ip_bytes4(next_hop)
+    if external:
+        value += ext_data
+    value += metric
+    for addr, plen in destinations:
+        value += eigrp_destination(addr, plen)
+    return eigrp_tlv(tlv_type, value)
+
+
+def eigrp_wide_route_tlv(external: bool, topology_id: int, router_id: str, wide_metric: bytes,
+                          next_hop: str, destinations: list, ext_data: bytes = b"") -> bytes:
+    tlv_type = 0x0603 if external else 0x0602
+    value = struct.pack("!HH", topology_id, 1) + ip_bytes4(router_id)  # AFI=1 (IPv4)
+    value += wide_metric
+    value += ip_bytes4(next_hop)
+    if external:
+        value += ext_data
+    for addr, plen in destinations:
+        value += eigrp_destination(addr, plen)
+    return eigrp_tlv(tlv_type, value)
+
+
+def build_eigrp_sample():
+    """Cisco EIGRP, now RFC 7868 -- rides directly on IP protocol 88, no UDP/TCP header at all (see
+    eigrp.hpp). Covers a Hello with Parameters TLV; a Hello with a nonzero Acknowledge field
+    (rendered as "Hello (Ack)"); an Update with Authentication, Sequence, Software Version general
+    TLVs plus a Classic-format Internal route and a Classic-format External route (with two
+    destination prefixes sharing one next-hop/metric, exercising EIGRP's own compound-TLV design);
+    a second Update using the current Wide-Metric format for an Internal and an External route; and
+    a payload shorter than the 20-byte header to exercise outright rejection."""
+    packets = []
+    EIGRP_ALL = "224.0.0.10"
+
+    def add(payload: bytes, from_a: bool = True):
+        if from_a:
+            packets.append(ip_eth_frame(payload, EIGRP_IP_PROTOCOL, HMI_IP, EIGRP_ALL, HMI_MAC, PLC_MAC))
+        else:
+            packets.append(ip_eth_frame(payload, EIGRP_IP_PROTOCOL, PLC_IP, EIGRP_ALL, PLC_MAC, HMI_MAC))
+
+    # 1) Hello (opcode 5), Acknowledge=0, with a Parameters TLV (K1=1,K3=1, others 0; HoldTime=15s).
+    add(eigrp_header(5, 0, 0, 0, 0, 100) + eigrp_tlv(0x0001, eigrp_parameters_value(1, 0, 1, 0, 0, 0, 15)))
+
+    # 2) Hello with a nonzero Acknowledge field -- displays as "Hello (Ack)".
+    add(eigrp_header(5, 0, 0, 77, 0, 100), from_a=False)
+
+    # 3) Update (opcode 1): Authentication (MD5, digest not verified), Sequence (one peer address),
+    #    Software Version, a Classic Internal route (one destination), and a Classic External route
+    #    (TWO destination prefixes sharing one next-hop/metric -- EIGRP's own compound-TLV design).
+    classic_internal = eigrp_classic_route_tlv(
+        False, "10.0.0.1",
+        eigrp_classic_metric_bytes(100, 10000, 1500, 1, 255, 1),
+        [("10.0.1.0", 24)])
+    classic_external = eigrp_classic_route_tlv(
+        True, "10.0.0.1",
+        eigrp_classic_metric_bytes(200, 10000, 1500, 2, 255, 1),
+        [("192.168.10.0", 24), ("192.168.11.0", 24)],
+        ext_data=eigrp_external_data_bytes("10.0.0.9", 65000, 0, 20, 6))  # ext_protocol 6 = OSPF
+    add(eigrp_header(1, 0, 1001, 0, 0, 100) +
+        eigrp_tlv(0x0002, eigrp_authentication_value(2, bytes(16))) +
+        eigrp_tlv(0x0003, eigrp_sequence_value([HMI_IP])) +
+        eigrp_tlv(0x0004, eigrp_software_version_value(15, 2, 3, 0)) +
+        classic_internal + classic_external)
+
+    # 4) Update using the current Wide-Metric format: one Internal and one External route.
+    wide_internal = eigrp_wide_route_tlv(
+        False, 0, HMI_IP,
+        eigrp_wide_metric_bytes(128, 255, 1, 1500, 1, 1000000, 100000),
+        "10.0.0.1", [("10.0.2.0", 24)])
+    wide_external = eigrp_wide_route_tlv(
+        True, 0, HMI_IP,
+        eigrp_wide_metric_bytes(128, 255, 1, 1500, 2, 2000000, 100000),
+        "10.0.0.1", [("172.20.0.0", 16)],
+        ext_data=eigrp_external_data_bytes("10.0.0.9", 65000, 0, 20, 9))  # ext_protocol 9 = BGP
+    add(eigrp_header(1, 0, 1002, 0, 0, 100) + wide_internal + wide_external, from_a=False)
+
+    # 5) Deliberately NOT EIGRP: shorter than the 20-byte header -- structural gate must reject it,
+    #    falling back to generic "non-tcp".
+    add(bytes([0x02, 0x05, 0x00, 0x00]))
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_036_000 + i, i * 1000)
+    (TESTS_DIR / "sample_eigrp.pcap").write_bytes(data)
+
+
+def ospf_header(msg_type: int, router_id: str, area_id: str, packet_length: int, auth_type: int = 0,
+                 auth_data: bytes = None, instance_id: int = 0) -> bytes:
+    if auth_data is None:
+        auth_data = bytes(8)
+    else:
+        auth_data = (auth_data + bytes(8))[:8]
+    return (struct.pack("!BBH", 2, msg_type, packet_length) + ip_bytes4(router_id) + ip_bytes4(area_id) +
+            struct.pack("!HBB", 0, instance_id, auth_type) + auth_data)
+
+
+def ospf_crypto_auth_bytes(key_id: int, auth_data_len: int, seq: int) -> bytes:
+    return struct.pack("!HBBI", 0, key_id, auth_data_len, seq)
+
+
+def ospf_message(msg_type: int, router_id: str, area_id: str, body: bytes, auth_type: int = 0,
+                  auth_data: bytes = None, instance_id: int = 0) -> bytes:
+    total_len = 24 + len(body)
+    header = ospf_header(msg_type, router_id, area_id, total_len, auth_type, auth_data, instance_id)
+    return header + body
+
+
+def ospf_hello_body(network_mask: str, hello_interval: int, options: int, priority: int,
+                     dead_interval: int, dr: str, bdr: str, neighbors: list) -> bytes:
+    body = (ip_bytes4(network_mask) + struct.pack("!HBBI", hello_interval, options, priority, dead_interval) +
+            ip_bytes4(dr) + ip_bytes4(bdr))
+    for n in neighbors:
+        body += ip_bytes4(n)
+    return body
+
+
+def ospf_dbd_body(mtu: int, options: int, master: bool, more: bool, init: bool, seq: int,
+                   lsa_headers: list) -> bytes:
+    flags = (0x01 if master else 0) | (0x02 if more else 0) | (0x04 if init else 0)
+    body = struct.pack("!HBBI", mtu, options, flags, seq)
+    for h in lsa_headers:
+        body += h
+    return body
+
+
+def ospf_lsa_header(age: int, options: int, lsa_type: int, link_state_id: str, adv_router: str,
+                     seq: int, checksum: int, length: int, do_not_age: bool = False) -> bytes:
+    age_raw = (age & 0x7FFF) | (0x8000 if do_not_age else 0)
+    return (struct.pack("!HBB", age_raw, options, lsa_type) + ip_bytes4(link_state_id) +
+            ip_bytes4(adv_router) + struct.pack("!IHH", seq, checksum, length))
+
+
+def ospf_ls_request_entry(ls_type: int, link_state_id: str, adv_router: str) -> bytes:
+    return struct.pack("!I", ls_type) + ip_bytes4(link_state_id) + ip_bytes4(adv_router)
+
+
+def ospf_router_link(link_id: str, link_data: str, link_type: int, metric: int, tos_count: int = 0) -> bytes:
+    return ip_bytes4(link_id) + ip_bytes4(link_data) + struct.pack("!BBH", link_type, tos_count, metric)
+
+
+def ospf_router_lsa_body(border: bool, external: bool, virtual_: bool, links: list) -> bytes:
+    flags = (0x01 if border else 0) | (0x02 if external else 0) | (0x04 if virtual_ else 0)
+    body = struct.pack("!BBH", flags, 0, len(links))
+    for l in links:
+        body += l
+    return body
+
+
+def ospf_network_lsa_body(network_mask: str, attached_routers: list) -> bytes:
+    body = ip_bytes4(network_mask)
+    for r in attached_routers:
+        body += ip_bytes4(r)
+    return body
+
+
+def ospf_summary_lsa_body(network_mask: str, metric: int, tos: int = 0) -> bytes:
+    return ip_bytes4(network_mask) + bytes([tos]) + metric.to_bytes(3, "big")
+
+
+def ospf_as_external_lsa_body(network_mask: str, e_bit: bool, metric: int, forwarding_address: str,
+                               route_tag: int) -> bytes:
+    type_and_tos = 0x80 if e_bit else 0x00
+    return (ip_bytes4(network_mask) + bytes([type_and_tos]) + metric.to_bytes(3, "big") +
+            ip_bytes4(forwarding_address) + struct.pack("!I", route_tag))
+
+
+def ospf_lsa_full(age: int, options: int, lsa_type: int, link_state_id: str, adv_router: str, seq: int,
+                   body: bytes, do_not_age: bool = False) -> bytes:
+    length = 20 + len(body)
+    header = ospf_lsa_header(age, options, lsa_type, link_state_id, adv_router, seq, 0, length, do_not_age)
+    return header + body
+
+
+def ospf_ls_update_body(lsas: list) -> bytes:
+    body = struct.pack("!I", len(lsas))
+    for l in lsas:
+        body += l
+    return body
+
+
+def build_ospf_sample():
+    """OSPFv2 (RFC 2328) -- rides directly on IP protocol 89, no UDP/TCP header at all (see
+    ospf.hpp). Covers Hello (with one neighbor already heard from), DB Description (with two LSA
+    headers), LS Request, LS Update (Router/Network/Summary/AS-External LSAs, one with the
+    DoNotAge bit set), LS Ack, Simple Password and Cryptographic/MD5 authentication, and a
+    deliberately non-OSPF-shaped payload (Version byte 3, i.e. OSPFv3) to exercise the structural
+    detection gate."""
+    packets = []
+    ALL_OSPF_ROUTERS = "224.0.0.5"
+    ROUTER_A, ROUTER_B = "10.0.0.1", "10.0.0.2"
+    AREA0 = "0.0.0.0"
+
+    def add(payload: bytes, from_a: bool = True):
+        if from_a:
+            packets.append(ip_eth_frame(payload, OSPF_IP_PROTOCOL, HMI_IP, ALL_OSPF_ROUTERS, HMI_MAC, PLC_MAC))
+        else:
+            packets.append(ip_eth_frame(payload, OSPF_IP_PROTOCOL, PLC_IP, ALL_OSPF_ROUTERS, PLC_MAC, HMI_MAC))
+
+    # 1) Hello: E-bit set, one neighbor already heard from.
+    hello_body = ospf_hello_body("255.255.255.0", 10, 0x02, 1, 40, ROUTER_A, "0.0.0.0", [ROUTER_B])
+    add(ospf_message(1, ROUTER_A, AREA0, hello_body))
+
+    # 2) DB Description with Simple Password authentication (cleartext) and two LSA headers
+    #    (Router, Network -- headers only, no bodies).
+    lsa_hdrs = [
+        ospf_lsa_header(100, 0x02, 1, ROUTER_A, ROUTER_A, 0x80000001, 0, 20 + 24),
+        ospf_lsa_header(200, 0x02, 2, "10.0.0.0", ROUTER_B, 0x80000001, 0, 20 + 8),
+    ]
+    dbd_body = ospf_dbd_body(1500, 0x02, master=True, more=False, init=False, seq=12345,
+                              lsa_headers=lsa_hdrs)
+    add(ospf_message(2, ROUTER_B, AREA0, dbd_body, auth_type=1, auth_data=b"cisco123"), from_a=False)
+
+    # 3) LS Request: requesting the same two LSAs described above.
+    lsr_body = (ospf_ls_request_entry(1, ROUTER_A, ROUTER_A) +
+                ospf_ls_request_entry(2, "10.0.0.0", ROUTER_B))
+    add(ospf_message(3, ROUTER_A, AREA0, lsr_body))
+
+    # 4) LS Update with Cryptographic/MD5 authentication (header fields only; digest not verified):
+    #    a Router-LSA (one Point-to-Point link, ABR flag set), a Network-LSA, a Summary-LSA, and an
+    #    AS-External-LSA -- one of them (the Network-LSA) with the DoNotAge bit set.
+    router_body = ospf_router_lsa_body(
+        border=True, external=False, virtual_=False,
+        links=[ospf_router_link(ROUTER_B, "10.0.0.1", 1, 10)])
+    network_body = ospf_network_lsa_body("255.255.255.0", [ROUTER_A, ROUTER_B])
+    summary_body = ospf_summary_lsa_body("255.255.255.0", 20)
+    as_external_body = ospf_as_external_lsa_body("255.255.255.0", e_bit=True, metric=30,
+                                                  forwarding_address="0.0.0.0", route_tag=100)
+    lsu_body = ospf_ls_update_body([
+        ospf_lsa_full(50, 0x02, 1, ROUTER_A, ROUTER_A, 0x80000002, router_body),
+        ospf_lsa_full(60, 0x02, 2, "10.0.0.0", ROUTER_B, 0x80000001, network_body, do_not_age=True),
+        ospf_lsa_full(70, 0x02, 3, "10.0.3.0", ROUTER_A, 0x80000001, summary_body),
+        ospf_lsa_full(80, 0x02, 5, "10.0.4.0", ROUTER_A, 0x80000001, as_external_body),
+    ])
+    add(ospf_message(4, ROUTER_A, AREA0, lsu_body, auth_type=2,
+                      auth_data=ospf_crypto_auth_bytes(1, 16, 999)), from_a=False)
+
+    # 5) LS Ack: acknowledging the two LSA headers from the DB Description above.
+    add(ospf_message(5, ROUTER_B, AREA0, b"".join(lsa_hdrs)))
+
+    # 6) Deliberately NOT OSPF: Version byte 3 (OSPFv3, IPv6-only -- out of scope, see ospf.hpp)
+    #    -- structural gate must reject it, falling back to generic "non-tcp".
+    add(struct.pack("!BBH", 3, 1, 24) + ip_bytes4(ROUTER_A) + ip_bytes4(AREA0) + struct.pack("!HBB", 0, 0, 0) +
+        bytes(8))
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_037_000 + i, i * 1000)
+    (TESTS_DIR / "sample_ospf.pcap").write_bytes(data)
+
+
 if __name__ == "__main__":
     TESTS_DIR.mkdir(exist_ok=True)
     build_modbus_sample()
@@ -7917,4 +8417,8 @@ if __name__ == "__main__":
     build_igmp_sample()
     build_vrrp_sample()
     build_hsrp_sample()
+    build_igrp_sample()
+    build_pim_sample()
+    build_eigrp_sample()
+    build_ospf_sample()
     print("wrote sample fixtures to", TESTS_DIR)
