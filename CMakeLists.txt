@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 cmake_minimum_required(VERSION 3.16)
-project(conduitscope VERSION 0.1.0 LANGUAGES CXX)
+project(conduitscope VERSION 0.1.1 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -8,6 +8,17 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE Release)
+endif()
+
+# The version `conduitscope version` reports is PROJECT_VERSION above by
+# default (bumped by hand alongside each release), but the release CI job
+# (.github/workflows/ci.yml's `release` job) overrides it explicitly from
+# the pushed git tag via -DCONDUITSCOPE_VERSION_OVERRIDE=X.Y.Z, so the
+# published binary's own reported version can never drift from the tag it
+# was actually built from even if this line is forgotten before tagging.
+set(CONDUITSCOPE_REPORTED_VERSION "${PROJECT_VERSION}")
+if(CONDUITSCOPE_VERSION_OVERRIDE)
+  set(CONDUITSCOPE_REPORTED_VERSION "${CONDUITSCOPE_VERSION_OVERRIDE}")
 endif()
 
 # Embeds the project version / compiler / build type into the binary so

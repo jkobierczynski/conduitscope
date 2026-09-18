@@ -135,8 +135,9 @@ Discussed and adopted, in this order:
 1. **CI now** ([.github/workflows/ci.yml](../.github/workflows/ci.yml)):
    GCC and Clang, Debug and Release, plus a fifth leg with live capture
    explicitly disabled (to exercise the libpcap-not-found stub path), all
-   running the full CTest suite on every push/PR. Deliberately does
-   **not** yet include ASan/UBSan -- see next. Standing this up
+   running the full CTest suite on every push/PR, and also on a version
+   tag push (`v*`) so cutting a release gets the same verification.
+   Deliberately does **not** yet include ASan/UBSan -- see next. Standing this up
    immediately turned up a live example of exactly the risk the review's
    §11 describes: `mqtt.cpp`'s Sparkplug B "Bytes"/"File" datatype summary
    built a ternary mixing a `std::string` branch
@@ -167,6 +168,28 @@ Discussed and adopted, in this order:
    unprivileged user before pushing. The same `setcap` invocation is the
    recommended fix for the local-dev-machine version of this (once, on
    the built binary) instead of prefixing every test run with `sudo`.
+
+   A third addition, once the tag-push trigger above was in place: a
+   `release` job that only runs on a `v*` tag push, only after every
+   `build-and-test`/`build-without-libpcap` leg has already passed for
+   that exact commit, and publishes a GitHub Release for the tag with a
+   packaged Linux binary attached (stripped, bundled with README.md,
+   LICENSE, `man/`, and `docs/` -- this is an OT-audit tool, and the
+   person running it is often on an air-gapped or restricted network, so
+   the docs travel with the binary rather than staying link-only). This
+   surfaced a real version-drift bug: `CMakeLists.txt`'s own
+   `project(... VERSION 0.1.0 ...)` was still 0.1.0 when tag `v0.1.1` was
+   pushed, so a naively-built release binary would have reported the
+   wrong version from `conduitscope version`. Fixed with a
+   `CONDUITSCOPE_VERSION_OVERRIDE` CMake variable (substituted into
+   `version.hpp.in` in place of `PROJECT_VERSION` directly) that the
+   `release` job sets explicitly from the pushed tag, plus a "does the
+   built binary's reported version actually match the tag" check as its
+   own CI step -- so this class of drift fails the release job loudly
+   instead of quietly shipping a mislabeled binary. `CMakeLists.txt`'s own
+   `PROJECT_VERSION` was also bumped to 0.1.1 to match, but the override
+   is what makes this correct going forward even if a future tag is cut
+   without remembering that step.
 2. **Sanitizers and fuzzing next** (not yet started): ASan/UBSan folded
    into the same CI matrix, then small libFuzzer harnesses targeting the
    parsers with the most hand-rolled length/state-machine logic --

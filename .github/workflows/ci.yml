@@ -91,6 +91,83 @@ jobs:
         working-directory: build
         run: ctest -j"$(nproc)" --output-on-failure
 
+  release:
+    # Only for a version-tag push (v0.1.1, v1.2.3, ...), and only once every
+    # leg of build-and-test / build-without-libpcap has already passed for
+    # this exact commit -- a release is never published from code CI hasn't
+    # verified. Builds a fresh Release binary (not reused from the matrix
+    # above -- simpler and more obviously reproducible than downloading one
+    # matrix leg's artifact), packages it with the docs/README/LICENSE/man
+    # page (this is an OT-audit tool, and the people running it are often on
+    # an air-gapped or restricted network without a browser open to GitHub,
+    # so the docs travel with the binary rather than staying link-only), and
+    # publishes a GitHub Release for the tag with that tarball attached.
+    name: Publish release
+    needs: [build-and-test, build-without-libpcap]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install libpcap
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libpcap-dev
+
+      - name: Derive version from tag
+        id: version
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
+      # Explicitly overrides CMakeLists.txt's own hardcoded PROJECT_VERSION
+      # with the pushed tag (see CMakeLists.txt's own comment on
+      # CONDUITSCOPE_VERSION_OVERRIDE) -- so `conduitscope version` in the
+      # published binary always matches the tag it shipped under, even if
+      # bumping the CMakeLists.txt version was forgotten before tagging.
+      - name: Configure
+        run: >
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=Release
+          -DCONDUITSCOPE_VERSION_OVERRIDE=${{ steps.version.outputs.version }}
+
+      - name: Build
+        run: cmake --build build -j"$(nproc)"
+
+      - name: Verify reported version matches the tag
+        run: |
+          reported="$(build/conduitscope version)"
+          echo "$reported"
+          echo "$reported" | grep -q "conduitscope ${{ steps.version.outputs.version }} "
+
+      - name: Package
+        id: package
+        run: |
+          set -euo pipefail
+          name="conduitscope-${{ steps.version.outputs.version }}-linux-x86_64"
+          staging="/tmp/${name}"
+          mkdir -p "${staging}"
+          strip -o "${staging}/conduitscope" build/conduitscope
+          cp -r README.md LICENSE docs man "${staging}/"
+          tar -C /tmp -czf "${name}.tar.gz" "${name}"
+          sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256"
+          echo "archive=${name}.tar.gz" >> "$GITHUB_OUTPUT"
+          echo "checksum=${name}.tar.gz.sha256" >> "$GITHUB_OUTPUT"
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh release create "${{ steps.version.outputs.tag }}"
+          "${{ steps.package.outputs.archive }}"
+          "${{ steps.package.outputs.checksum }}"
+          --title "conduitscope ${{ steps.version.outputs.version }}"
+          --generate-notes
+
   build-without-libpcap:
     # A second, smaller leg with live capture explicitly disabled, so the
     # "libpcap/Npcap not found" stub path (live_capture.cpp's #else branch,
