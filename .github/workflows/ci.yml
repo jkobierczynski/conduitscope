@@ -161,12 +161,26 @@ jobs:
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: >
-          gh release create "${{ steps.version.outputs.tag }}"
-          "${{ steps.package.outputs.archive }}"
-          "${{ steps.package.outputs.checksum }}"
-          --title "conduitscope ${{ steps.version.outputs.version }}"
-          --generate-notes
+        run: |
+          set -euo pipefail
+          tag="${{ steps.version.outputs.tag }}"
+          # Idempotent: `gh release create` errors with "a release with the
+          # same tag name already exists" if a Release for this tag is
+          # already published -- which happens if this job is re-run (e.g.
+          # via "Re-run jobs" after an earlier success) or the tag was
+          # deleted and re-pushed to redo a release. Rather than failing the
+          # job, treat an already-published Release for this tag as done and
+          # skip re-publishing -- the existing Release (and its assets) are
+          # left untouched.
+          if gh release view "${tag}" >/dev/null 2>&1; then
+            echo "Release ${tag} already exists; skipping publish."
+            exit 0
+          fi
+          gh release create "${tag}" \
+            "${{ steps.package.outputs.archive }}" \
+            "${{ steps.package.outputs.checksum }}" \
+            --title "conduitscope ${{ steps.version.outputs.version }}" \
+            --generate-notes
 
   build-without-libpcap:
     # A second, smaller leg with live capture explicitly disabled, so the
