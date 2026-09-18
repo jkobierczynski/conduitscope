@@ -11,7 +11,7 @@ conduitscope [-q|--quiet] [--no-color|--color] [--log-file FILE] [--version] [-h
 
 conduitscope decode (-r FILE | -i INTERFACE) [-o FILE] [-f text|json|csv] [--protocol NAME]
                      [--modbus-port PORT]... [--dnp3-port PORT]... [--s7comm-port PORT]... [--iec104-port PORT]...
-                     [--enip-port PORT]... [--enip-io-port PORT]... [--bacnet-port PORT]... [--hartip-port PORT]... [--opcua-port PORT]... [--mqtt-port PORT]... [--ffhse-port PORT]... [--remote-access-port PORT]... [--lateral-movement-port PORT]... [--enterprise-trust-port PORT]... [--wireless-backhaul-port PORT]...
+                     [--enip-port PORT]... [--enip-io-port PORT]... [--bacnet-port PORT]... [--hartip-port PORT]... [--opcua-port PORT]... [--mqtt-port PORT]... [--ffhse-port PORT]... [--remote-access-port PORT]... [--lateral-movement-port PORT]... [--enterprise-trust-port PORT]... [--wireless-backhaul-port PORT]... [--tunnel-vpn-port PORT]...
                      [--max-packets N] [--stats] [--strict]
                      [--filter BPF] [--duration SECONDS] [--snaplen BYTES] [--no-promiscuous]
 
@@ -167,7 +167,7 @@ conduitscope decode (-r FILE | -i INTERFACE) [options]
 | `--no-promiscuous` | off (i.e. promiscuous by default) | With `-i`, don't put the interface into promiscuous mode. Promiscuous is the default because the main live-capture use case -- watching a mirrored/SPAN switch port for zone/conduit traffic -- needs to see traffic that isn't addressed to the capturing host at all. |
 | `-o, --output FILE` | stdout | Write decoded output here instead of stdout. |
 | `-f, --format {text,json,csv}` | `text` | Output format. See OUTPUT FORMATS below. |
-| `--protocol NAME` | `auto` | Restrict decoding to one protocol. See PROTOCOL COVERAGE below for the full, current list of valid protocol names (one per subsection there). `auto` opportunistically tries OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, S7comm/COTP, S7comm-Plus, MMS, HART-IP, MQTT, and FF-HSE detection on every TCP payload (in that order -- FF-HSE last of all, even after MQTT, see PROTOCOL DETECTION), CIP I/O, BACnet/IP, HART-IP, and FF-HSE detection on every UDP payload (FF-HSE last there too), PROFINET RT (DCP/cyclic) detection on every non-IPv4 Ethernet frame carrying EtherType `0x8892`, GOOSE detection on every non-IPv4 Ethernet frame carrying EtherType `0x88B8`, Sampled Values detection on every non-IPv4 Ethernet frame carrying EtherType `0x88BA`, EtherCAT detection on every non-IPv4 Ethernet frame carrying EtherType `0x88A4`, regardless of port, and Spanning Tree Protocol (STP/RSTP/MSTP) detection on every classic IEEE 802.3 length-framed Ethernet frame whose LLC header is DSAP=SSAP=`0x42` -- a structurally separate dispatch path from every EtherType-keyed protocol above, so there's no ordering/collision question between them (see PROTOCOL DETECTION below). `enip` covers both EtherNet/IP explicit messaging (TCP) and CIP I/O implicit messaging (UDP). `mms` is IEC 61850 MMS (Manufacturing Message Specification, ISO 9506) -- shares S7comm's exact TPKT/COTP transport and TCP port 102, but is a distinct application protocol; see `--s7comm-port` below and PROTOCOL COVERAGE's MMS section. `s7comm-plus` is S7comm-Plus (TIA Portal / S7-1200/1500) -- shares the same TPKT/COTP transport and TCP port 102, disambiguated by its own protocol id byte; see `--s7comm-port` below and PROTOCOL COVERAGE's S7comm-Plus section. `mqtt` is MQTT (v3.1/v3.1.1/v5.0) plus Sparkplug B -- see `--mqtt-port` below and PROTOCOL COVERAGE's MQTT section. `profinet` covers both DCP and cyclic real-time IO. `sv` is IEC 61850-9-2 Sampled Values. `ethercat` is EtherCAT. `bacnet` is BACnet/IP. `hartip` is HART-IP (covers both UDP and TCP). `opcua` is OPC UA Binary (UA-TCP/Secure Conversation, TCP only). `ff-hse` is FOUNDATION Fieldbus HSE (covers FDA/SM/FMS/LAN Redundancy, on both TCP and UDP) -- see `--ffhse-port` below and PROTOCOL COVERAGE's FOUNDATION Fieldbus HSE section. `stp` is Spanning Tree Protocol (STP/RSTP/MSTP) -- no port option, matching GOOSE/SV/EtherCAT/PROFINET's own no-port precedent for a protocol with no port at all; see PROTOCOL COVERAGE's Spanning Tree Protocol section. `devicenet` is DeviceNet (CAN-bus CIP) -- no port option either, the same no-port precedent, but unlike every other value in this list it isn't reached through Ethernet at all: it's gated on the capture's own pcap link type being `LINKTYPE_CAN_SOCKETCAN` (227, standard Linux SocketCAN capture framing -- what `candump -l`/`tcpdump -i can0`/Wireshark itself write capturing a CAN bus), checked before any protocol filter, so `--protocol devicenet` against an ordinary Ethernet-linktype capture simply decodes nothing (every packet still parses at the link layer, just with no application-layer match) rather than erroring; see PROTOCOL COVERAGE's DeviceNet section. `remote-access` covers Tier 1 of the "IT protocols an OT auditor flags" family (RDP/VNC/TeamViewer/AnyDesk/Zoom, each its own `protocol` value even under this one filter name) -- see `--remote-access-port` below and PROTOCOL COVERAGE's "Tier 1 remote-access protocol recognition" section. `lateral-movement` covers Tier 2 of the same family (SMB/SSH/HTTP/HTTPS/SNMPv1v2c/Telnet/FTP/TFTP, again each its own `protocol` value under this one filter name) -- see `--lateral-movement-port` below and PROTOCOL COVERAGE's "Tier 2 lateral-movement protocol recognition" section. `enterprise-trust` covers the six port-based protocols of Tier 3 of the same family (NTP/DHCP/LDAP/LDAPS/RADIUS/TACACS+, again each its own `protocol` value under this one filter name) -- see `--enterprise-trust-port` below and PROTOCOL COVERAGE's "Tier 3 enterprise-trust-boundary protocol recognition" section. `eapol` is Tier 3's seventh protocol, IEEE 802.1X/EAPOL -- EtherType-keyed, no port at all, so it has its own dedicated filter value rather than sharing `enterprise-trust`, the same split GOOSE/SV/EtherCAT/PROFINET's own EtherType-keyed filters already have from every port-based one; no port option exists for it. `wireless-backhaul` covers the five port-based protocols of Tier 4 of the same family (CAPWAP control/data, LWAPP control/data, GTP-U, again each its own `protocol` value under this one filter name) -- see `--wireless-backhaul-port` below and PROTOCOL COVERAGE's "Tier 4 wireless-backhaul-and-cellular protocol recognition" section. `pppoe` is Tier 4's sixth protocol, PPPoE -- EtherType-keyed, no port at all, the same split `eapol` has from `enterprise-trust`; no port option exists for it either. |
+| `--protocol NAME` | `auto` | Restrict decoding to one protocol. See PROTOCOL COVERAGE below for the full, current list of valid protocol names (one per subsection there). `auto` opportunistically tries OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, S7comm/COTP, S7comm-Plus, MMS, HART-IP, MQTT, and FF-HSE detection on every TCP payload (in that order -- FF-HSE last of all, even after MQTT, see PROTOCOL DETECTION), CIP I/O, BACnet/IP, HART-IP, and FF-HSE detection on every UDP payload (FF-HSE last there too), PROFINET RT (DCP/cyclic) detection on every non-IPv4 Ethernet frame carrying EtherType `0x8892`, GOOSE detection on every non-IPv4 Ethernet frame carrying EtherType `0x88B8`, Sampled Values detection on every non-IPv4 Ethernet frame carrying EtherType `0x88BA`, EtherCAT detection on every non-IPv4 Ethernet frame carrying EtherType `0x88A4`, regardless of port, and Spanning Tree Protocol (STP/RSTP/MSTP) detection on every classic IEEE 802.3 length-framed Ethernet frame whose LLC header is DSAP=SSAP=`0x42` -- a structurally separate dispatch path from every EtherType-keyed protocol above, so there's no ordering/collision question between them (see PROTOCOL DETECTION below). `enip` covers both EtherNet/IP explicit messaging (TCP) and CIP I/O implicit messaging (UDP). `mms` is IEC 61850 MMS (Manufacturing Message Specification, ISO 9506) -- shares S7comm's exact TPKT/COTP transport and TCP port 102, but is a distinct application protocol; see `--s7comm-port` below and PROTOCOL COVERAGE's MMS section. `s7comm-plus` is S7comm-Plus (TIA Portal / S7-1200/1500) -- shares the same TPKT/COTP transport and TCP port 102, disambiguated by its own protocol id byte; see `--s7comm-port` below and PROTOCOL COVERAGE's S7comm-Plus section. `mqtt` is MQTT (v3.1/v3.1.1/v5.0) plus Sparkplug B -- see `--mqtt-port` below and PROTOCOL COVERAGE's MQTT section. `profinet` covers both DCP and cyclic real-time IO. `sv` is IEC 61850-9-2 Sampled Values. `ethercat` is EtherCAT. `bacnet` is BACnet/IP. `hartip` is HART-IP (covers both UDP and TCP). `opcua` is OPC UA Binary (UA-TCP/Secure Conversation, TCP only). `ff-hse` is FOUNDATION Fieldbus HSE (covers FDA/SM/FMS/LAN Redundancy, on both TCP and UDP) -- see `--ffhse-port` below and PROTOCOL COVERAGE's FOUNDATION Fieldbus HSE section. `stp` is Spanning Tree Protocol (STP/RSTP/MSTP) -- no port option, matching GOOSE/SV/EtherCAT/PROFINET's own no-port precedent for a protocol with no port at all; see PROTOCOL COVERAGE's Spanning Tree Protocol section. `devicenet` is DeviceNet (CAN-bus CIP) -- no port option either, the same no-port precedent, but unlike every other value in this list it isn't reached through Ethernet at all: it's gated on the capture's own pcap link type being `LINKTYPE_CAN_SOCKETCAN` (227, standard Linux SocketCAN capture framing -- what `candump -l`/`tcpdump -i can0`/Wireshark itself write capturing a CAN bus), checked before any protocol filter, so `--protocol devicenet` against an ordinary Ethernet-linktype capture simply decodes nothing (every packet still parses at the link layer, just with no application-layer match) rather than erroring; see PROTOCOL COVERAGE's DeviceNet section. `remote-access` covers Tier 1 of the "IT protocols an OT auditor flags" family (RDP/VNC/TeamViewer/AnyDesk/Zoom, each its own `protocol` value even under this one filter name) -- see `--remote-access-port` below and PROTOCOL COVERAGE's "Tier 1 remote-access protocol recognition" section. `lateral-movement` covers Tier 2 of the same family (SMB/SSH/HTTP/HTTPS/SNMPv1v2c/Telnet/FTP/TFTP, again each its own `protocol` value under this one filter name) -- see `--lateral-movement-port` below and PROTOCOL COVERAGE's "Tier 2 lateral-movement protocol recognition" section. `enterprise-trust` covers the six port-based protocols of Tier 3 of the same family (NTP/DHCP/LDAP/LDAPS/RADIUS/TACACS+, again each its own `protocol` value under this one filter name) -- see `--enterprise-trust-port` below and PROTOCOL COVERAGE's "Tier 3 enterprise-trust-boundary protocol recognition" section. `eapol` is Tier 3's seventh protocol, IEEE 802.1X/EAPOL -- EtherType-keyed, no port at all, so it has its own dedicated filter value rather than sharing `enterprise-trust`, the same split GOOSE/SV/EtherCAT/PROFINET's own EtherType-keyed filters already have from every port-based one; no port option exists for it. `wireless-backhaul` covers the five port-based protocols of Tier 4 of the same family (CAPWAP control/data, LWAPP control/data, GTP-U, again each its own `protocol` value under this one filter name) -- see `--wireless-backhaul-port` below and PROTOCOL COVERAGE's "Tier 4 wireless-backhaul-and-cellular protocol recognition" section. `pppoe` is Tier 4's sixth protocol, PPPoE -- EtherType-keyed, no port at all, the same split `eapol` has from `enterprise-trust`; no port option exists for it either. `tunnel-vpn` covers the fourteen port/IP-protocol-number-based protocols of Tier 5 of the same family (GRE/NVGRE/EoIP, ESP, AH, IP-in-IP, 6in4, L2TP, IKE, VXLAN, Geneve, WireGuard, OpenVPN, dtls-tunnel, STT, again each its own `protocol` value under this one filter name) -- see `--tunnel-vpn-port` below and PROTOCOL COVERAGE's "Tier 5 generic tunnel/VPN encapsulation recognition" section. `mpls` is Tier 5's sixteenth protocol, MPLS -- EtherType-keyed, no port at all, the same split `eapol`/`pppoe` have from `enterprise-trust`/`wireless-backhaul`; no port option exists for it either. |
 | `--modbus-port PORT` | *(502 built in)* | Additional TCP port to treat as "expected" for Modbus. Repeatable. Does **not** gate detection -- it only changes whether a decoded Modbus frame is annotated as appearing on an unexpected port, which is itself a useful signal when auditing a conduit. |
 | `--dnp3-port PORT` | *(20000 built in)* | Same as `--modbus-port`, for DNP3. Repeatable. |
 | `--s7comm-port PORT` | *(102 built in)* | Same as `--modbus-port`, for COTP/S7comm. Repeatable. There is no separate `--mms-port` -- MMS rides the identical TPKT/COTP transport on the identical TCP port 102 S7comm uses (see `mms.hpp`'s file header), so this same option's "expected port" annotation also governs MMS traffic. |
@@ -1997,6 +1997,39 @@ dispatched purely by that EtherType, and reached only via `--protocol
 pppoe` or Auto mode -- it is not covered by `--protocol wireless-backhaul`
 or `--wireless-backhaul-port`, the same split EAPOL already has from
 `--protocol enterprise-trust`/`--enterprise-trust-port`.
+
+**Tier 5's own port-gating story is the most mixed of any tier**, because
+this tier itself splits three ways rather than the clean
+"port-based-vs-EtherType-keyed" split every earlier tier had. IKE, VXLAN,
+Geneve, WireGuard, OpenVPN, and L2TP's own UDP form (six of the
+fourteen `--protocol tunnel-vpn` protocols) are genuinely port-gated in
+`--protocol auto`, widened by one shared `--tunnel-vpn-port` option
+(`extra_tunnel_vpn_ports` in `decoder.hpp`) the same way
+`--wireless-backhaul-port` widens Tier 4's five -- even WireGuard's own
+exact-length match, this whole codebase's strongest structural signature
+outside DHCP/SMB, is still gated to port 51820 purely for consistency with
+the rest of this tier (see PROTOCOL COVERAGE's own Tier 5 section).
+**GRE, ESP, AH, IP-in-IP, 6in4, and L2TPv3's own direct-IP form (the
+other eight) need no port option at all**: like IGMP/VRRP/IGRP/PIM/
+EIGRP/OSPF, they're identified by IP protocol number, not a TCP/UDP port,
+so there is nothing for `--tunnel-vpn-port` to widen for them -- the IP
+protocol number itself is either GRE/ESP/AH/etc. or it isn't.
+**The generic DTLS-tunnel check is checked port-independently and is
+never gated at all**, reached in Auto mode or via `--protocol tunnel-vpn`
+regardless of port (see PROTOCOL COVERAGE) -- `--tunnel-vpn-port` has no
+effect on it, since there is no "unexpected port" concept for a check that
+was never tied to a port in the first place. `--protocol tunnel-vpn`
+skips every port gate among the six port-gated protocols at once, same as
+`--protocol wireless-backhaul`/`--protocol enterprise-trust`/`--protocol
+lateral-movement`/`--protocol remote-access` above, while leaving the
+eight IP-protocol-number-keyed protocols and the ungated DTLS check
+unaffected either way. **MPLS needs no port gate or option at all**: like
+EAPOL/PPPoE above, it rides directly on Ethernet (EtherType `0x8847`/
+`0x8848`, no IP/TCP/UDP layer at all), dispatched purely by that
+EtherType, and reached only via `--protocol mpls` or Auto mode -- it is
+not covered by `--protocol tunnel-vpn` or `--tunnel-vpn-port`, the same
+split EAPOL/PPPoE already have from `--protocol enterprise-trust`/
+`--protocol wireless-backhaul`.
 
 ## OUTPUT FORMATS
 
@@ -8125,6 +8158,242 @@ capture of any of these six was sought for this groundwork pass -- what
 matters for a name-only recognizer is that the port/structural gate
 itself is correct, which the synthetic fixture confirms directly.
 
+### Tier 5 generic tunnel/VPN encapsulation recognition (GRE, ESP, AH, IP-in-IP, 6in4, L2TP, IKE, VXLAN, Geneve, WireGuard, OpenVPN, dtls-tunnel, STT, MPLS)
+
+The fifth and final tier of ROADMAP item 18's "IT protocols an OT auditor
+flags" family: "generic tunnel/VPN encapsulation" -- the broader problem
+CAPWAP/GTP-U (Tier 4) are specific instances of. An inner VLAN, Modbus
+session, or entire plant subnet is invisible to every decoder in this
+codebase, and to `policy validate`'s own flow model, until the outer
+tunnel is stripped off -- so merely naming the outer protocol is already
+a finding worth surfacing. See `include/conduitscope/tunnel_vpn.hpp`'s and
+`include/conduitscope/mpls.hpp`'s own file header comments for the full
+confidence-tier reasoning summarized here.
+
+Fourteen of this tier's sixteen protocols are identified from either an
+IP protocol number or a TCP/UDP port, reported as their own `protocol`
+value with a one-line `summary`; the fifteenth, MPLS, rides raw Ethernet
+(EtherType `0x8847` unicast / `0x8848` multicast) rather than any port or
+IP layer at all, and is covered separately below. Confidence varies
+sharply, and every summary/note says so honestly:
+
+- **GRE** (IP protocol 47, RFC 2784) is identified purely by IP protocol
+  number plus one real structural check: its 3-bit Version field must be
+  0 (1 is Enhanced GRE/PPTP, out of scope here). Its own 16-bit Protocol
+  Type field (an EtherType value, named via the same `ethertype_name()`
+  lookup `decode`'s own summary lines already use) further splits this
+  into three names: **NVGRE** (RFC 8926, Protocol Type `0x6558` with the
+  Key flag set -- honestly noted as ambiguous with plain
+  Ethernet-bridging-over-GRE, which shares the identical Protocol Type
+  and is structurally indistinguishable from it without interpreting the
+  Key field's own VSID/FlowID split), **Mikrotik EoIP** (Protocol Type
+  `0x6400`, an unambiguous, widely-recognized-if-not-IANA-registered
+  value), and plain `gre` for everything else (most commonly IPv4,
+  Protocol Type `0x0800`, RFC 2784's own original use case).
+- **ESP** (IP protocol 50, RFC 4303) and **AH** (IP protocol 51,
+  RFC 4302) are checked purely by their own IANA-exclusive IP protocol
+  number -- there is no further structural gate to check, since ESP's
+  body is encrypted/authenticated and AH's own ICV is opaque by design.
+  ESP surfaces its SPI; AH additionally names the inner protocol it's
+  protecting (via its own Next Header field, since AH -- unlike ESP --
+  leaves the inner header visible) alongside its own SPI. Per this item's
+  own framing ("worth checking whether its traffic selectors dump a whole
+  plant subnet into IT, and whether it's split- or full-tunneled"), this
+  decoder cannot see traffic selectors or tunnel-mode negotiation at all
+  -- that lives in IKE's own SA negotiation, not in ESP/AH's per-packet
+  framing.
+- **IP-in-IP** (IP protocol 4, RFC 2003) is checked by IP protocol number
+  plus a real structural signature (the payload's first nibble must be 4,
+  IP version). Uniquely among this entire tier, its inner header is read
+  far enough to surface the inner src/dst IPv4 addresses -- the one
+  deliberate exception to this tier's own "name the tunnel, don't unwrap
+  it" posture, made because the inner header sits in plaintext
+  immediately after the outer one and directly answers this item's own
+  "an entire plant subnet is invisible... until the outer tunnel is
+  stripped off" framing at essentially zero additional cost.
+- **6in4** (IP protocol 41, RFC 4213) is checked the same way as IP-in-IP
+  -- IP protocol number plus a real structural signature (first nibble
+  must be 6, IPv6 version) -- but its own inner addresses are **not**
+  surfaced: this codebase has no IPv6 address parser at all, and writing
+  one solely to format two 128-bit addresses for this one case would be
+  real scope creep for a name-only recognition tier.
+- **L2TP/L2TPv3** (UDP port 1701, RFC 2661 v2 / RFC 3931 v3-over-UDP; and
+  IP protocol 115, RFC 3931 section 4.1, L2TPv3's own direct-IP
+  encapsulation -- an extension beyond this item's own literal text,
+  which only names L2TP's UDP 1701 form, the same "genuinely reachable
+  but unnamed by the ROADMAP text" addition Tier 1's own Zoom STUN ports
+  precedent already established) is identified as `l2tp` from either
+  transport. The UDP form has a genuine structural signature for v2 only
+  (a Flags/Version word whose Version nibble must be 2 and whose two
+  reserved-bit groups must be 0); a v2 structural mismatch on port 1701
+  is still reported `l2tp` (the port itself is IANA-registered
+  exclusively for L2TP) but explicitly flagged as the WEAK, port-only
+  fallback, since L2TPv3's own Session ID (both its UDP and direct-IP
+  forms) has no structural constraint distinguishing it from arbitrary
+  data -- the IP protocol number or port carries all the confidence
+  there.
+- **IKE** (UDP port 500, RFC 7296; also port 4500, RFC 3948
+  NAT-Traversal) has a genuine, multi-field structural signature: an
+  8-byte Initiator SPI, 8-byte Responder SPI, Next Payload/Version(Major/
+  Minor nibbles)/Exchange Type/Flags, Message ID, and a Length field
+  loosely checked against the captured payload. Port 4500 additionally
+  disambiguates IKE from raw NAT-Traversed **ESP** on the same port by
+  checking for RFC 3948's own 4-byte all-zero "non-ESP marker" -- present
+  means IKE (behind the marker), absent means the datagram IS an ESP
+  header directly, reported `esp` with a NAT-Traversed note.
+- **VXLAN** (UDP port 4789, RFC 7348) has a genuine structural signature:
+  an 8-byte header whose Flags byte must have the I bit (`0x08`, "VNI
+  valid") set and no other bits set, and whose trailing Reserved byte
+  must be 0. The 24-bit VNI is surfaced; the tunneled Ethernet frame
+  itself is never parsed.
+- **Geneve** (UDP port 6081, RFC 8926) has a genuine structural
+  signature: the first byte's top 2 bits (Version) must be 0, and the
+  second byte's low 6 bits (Reserved) must be 0. The 16-bit inner
+  Protocol Type (another EtherType, named the same way GRE's own is
+  above) and 24-bit VNI are surfaced; option TLVs and the tunneled frame
+  itself are never parsed.
+- **WireGuard** (UDP port 51820, the protocol's own wire format) has the
+  **strongest** structural signature in this entire tier: a 1-byte
+  Message Type (1/2/3/4) followed by 3 mandatory zero reserved bytes, and
+  Types 1-3 (Handshake Initiation/Response, Cookie Reply) each have an
+  EXACT, fixed total packet length (148/92/64 bytes) -- checked in full,
+  the same "self-describing enough to check port-independently" strength
+  SMB's magic or DHCP's cookie have, though this decoder still gates it
+  to port 51820 purely for consistency with every other UDP-side
+  protocol in this tier.
+- **OpenVPN** (UDP or TCP port 1194, the protocol's own wire format) has
+  a modest structural signature: the first byte's top 5 bits are an
+  Opcode from a small enumerated set (OpenVPN's own source-defined P_*
+  constants), the bottom 3 bits a Key ID -- a much weaker gate than
+  WireGuard's exact-length match above, closer to NTP's own LI/VN/Mode
+  gate, honestly reflected in every match. The TCP form is identical past
+  a 2-byte big-endian length prefix.
+- A **generic DTLS-record structural check** (no fixed port at all -- per
+  this item's own wording, "443 and odd UDP ports... CAPWAP's own data
+  plane, some vendor AP control channels, and LTE 'offload' clients can
+  all ride one") is tried **last** among every UDP check in this tier,
+  checked **port-independently** rather than gated: DTLS's own record
+  header (RFC 6347 -- ContentType, one of exactly four values, plus
+  ProtocolVersion, one of exactly three exact 16-bit values) is a
+  genuinely strong, multi-field match, the same "structural signature
+  overrides the port gate" treatment VNC/SMB/SSH/HTTP/DHCP already get.
+  DTLS's version-major byte (`0xFE`) never collides with plain TLS's own
+  (`0x03`), so this never misfires against an ordinary TLS ClientHello
+  either. Reported `dtls-tunnel` -- this decoder cannot tell CAPWAP's own
+  DTLS data plane, a vendor AP's DTLS control channel, an LTE offload
+  client, or a deliberate DTLS-based VPN apart from each other; naming
+  that SOME encrypted DTLS tunnel is present is the entire audit value
+  here.
+- **STT** (TCP port 7878) is recognized by **port number alone** -- the
+  same weakest-gate treatment LWAPP gets in Tier 4 -- since it has no
+  publicly authoritative wire-format specification (it's a TCP-like
+  framing used purely for NIC hardware-offload segmentation, never
+  actually establishing a real TCP connection) to check a structural
+  signature against.
+- **MPLS** (RFC 3032, EtherType `0x8847` unicast / `0x8848` multicast,
+  `mpls.hpp`) is architecturally different from the other fifteen: no
+  TCP/UDP port, no IP layer at all -- the same shape EAPOL/PPPoE have in
+  Tiers 3-4, dispatched from the same EtherType-keyed region of
+  `decoder.cpp`, with its own dedicated `--protocol mpls` value rather
+  than folding into `--protocol tunnel-vpn`. Its own label stack (Label/
+  Exp/Bottom-of-Stack/TTL, 4 bytes per label) is genuinely parsed in
+  full, walked label-by-label until a Bottom-of-Stack bit is found,
+  capped at 16 entries as a sanity bound -- a stack that runs out of
+  captured bytes first is reported truncated rather than treated as a
+  parse failure. Unlike every other protocol in this whole family, there
+  is no Version/Type field to structurally validate here at all: any
+  4-byte-aligned value is syntactically a valid label entry, so (exactly
+  like GRE's own Protocol Type sub-cases, or IGMP/VRRP's own
+  IP-protocol-number-only gate) the EtherType itself carries all of the
+  confidence. The payload past the Bottom-of-Stack label is deliberately
+  **not** decoded: an ordinary MPLS-switched IP packet and an MPLS
+  pseudowire/L2VPN/VPLS payload (an entire Ethernet frame, optionally
+  preceded by a 4-byte all-zero Pseudowire Control Word, RFC 4385) are
+  wire-format-identical from this decoder's own point of view, controlled
+  entirely by out-of-band LDP/BGP signaling a passive decoder never sees
+  -- a heuristic guess here would be far less reliable than IP-in-IP's
+  own first-nibble check (a pseudowire's Control Word is frequently all
+  zero bytes, indistinguishable from padding or truncation).
+
+Four protocols named in ROADMAP item 18's own Tier 5 text are deliberately
+**not** implemented, with the reasoning recorded here rather than silently
+skipped (the same posture Tier 3's own DNS paragraph and Tier 4's own SSTP
+self-correction already established) -- see LIMITATIONS for the
+user-facing version:
+
+- **SSTP** (TCP port 443) is not a separate `protocol` value at all: its
+  entire handshake, including the one distinguishing cleartext signal it
+  has (an HTTP `SSTP_DUPLEX_POST` request line), rides *inside* an
+  already-established TLS session -- SSTP is TLS-first, HTTP-inside, so
+  that string never appears in cleartext on the wire for this decoder
+  (which never decrypts TLS) to see. TCP/443 ClientHellos are already
+  unconditionally claimed by the existing HTTPS/DoH early-detection call
+  site before this tier's own TCP dispatch is ever reached, making a
+  separate SSTP branch dead code regardless -- the same reasoning that
+  also rules out a generic TCP-side "tls-tunnel" catch-all (redundant
+  with HTTPS's own port-only fallback for the identical reason).
+- **4in6** and **DS-Lite/MAP-E** (all IPv6-outer encapsulations) are not
+  reachable at all in this codebase: `decoder.cpp` only ever parses an
+  IPv4 outer header -- there is no call site these could ever be
+  dispatched from.
+- **MPLS's own L2VPN/VPLS/pseudowire** use case is not a separate
+  `protocol` value -- see MPLS's own paragraph above for why it's folded
+  into a note instead.
+- **CAPWAP's own alternate data-plane path** (a wireless LAN controller
+  decapsulating over GRE/L2TP/IP-in-IP instead of native CAPWAP -- this
+  item's own closing clause) needed no new code at all: GRE/L2TP/
+  IP-in-IP recognition, built for this tier anyway, already names exactly
+  that traffic when it's captured -- the same "needs no new decode work"
+  precedent Tier 3's own DNS paragraph established for Active-Directory
+  DNS correlation.
+
+`--protocol tunnel-vpn` isolates the fourteen IP-protocol-number/
+port-based protocols from the CLI (MPLS is reached only via its own
+`--protocol mpls`, or in Auto mode alongside everything else);
+`--tunnel-vpn-port` (repeatable) widens what counts as an "expected" port
+for every port-based protocol here EXCEPT dtls-tunnel (never port-gated,
+see above) -- one shared option, the same grouping
+`--wireless-backhaul-port` already established for Tier 4.
+GRE/ESP/AH/IP-in-IP/6in4/L2TP's own IP-protocol-number-keyed forms, and
+MPLS, need no port option at all, the same no-port precedent IGMP/VRRP/
+EAPOL/PPPoE already established (see OPTIONS).
+
+This tier hit a real, and more severe, protocol-collision wrinkle than
+any earlier one: HART-IP's own opportunistic, port-independent UDP
+detection gate (a 2-byte MessageType/MessageID check) is trivially
+satisfied not by coincidence but by two Tier 5 protocols' own
+**spec-mandated** wire formats -- RFC 3948's IKE NAT-T non-ESP marker (an
+all-zero 4-byte prefix by definition) and RFC 7348's VXLAN header (an
+all-zero Reserved field at that exact byte range by definition) --
+meaning, unlike Tier 2's FTP/MQTT or Tier 3's LDAP/MQTT coincidental
+collisions, genuine NAT-T IKE or VXLAN traffic would **always**
+misclassify as `hartip` in Auto mode, not merely occasionally. Resolved
+by excluding UDP ports 4500 and 4789 from HART-IP's own opportunistic
+Auto-mode attempt entirely (an explicit `--protocol hartip` still
+attempts every port, unaffected by this exclusion) -- see `decoder.cpp`'s
+own comment at that call site for the full reasoning; unlike the
+accepted, documented HART-IP/Modbus TCP collision noted in Tier 1's own
+writeup, this one was judged too severe (guaranteed rather than merely
+possible) to simply document and leave unresolved.
+
+Validated against `tests/sample_tunnel_vpn.pcap` (28 packets, hand-built
+with scapy): all three GRE sub-cases (plain, NVGRE/ambiguous, EoIP) plus a
+Version-mismatch fallback; ESP and AH over their own IP protocol numbers;
+IP-in-IP with its inner-address extraction plus a malformed fallback;
+6in4; L2TPv3's direct-IP form; IKEv2 on port 500; IKEv2 NAT-T with the
+non-ESP marker on port 4500; NAT-Traversed ESP (no marker) on the same
+port; L2TPv2 over UDP plus its own weak/v3 fallback; VXLAN plus a
+malformed fallback; Geneve; WireGuard's Handshake Initiation and
+Transport Data message types; OpenVPN over both UDP and TCP; STT; a
+generic DTLS record on a deliberately non-standard UDP port; and MPLS
+unicast/multicast, a two-label stack, and a truncated single-label stack.
+As with Tiers 1-4, no real capture of any of these sixteen was sought for
+this groundwork pass -- what matters for a name-only recognizer is that
+the port/IP-protocol-number/structural gate itself is correct, which the
+synthetic fixture confirms directly, including the HART-IP collision
+avoidance described above (both the NAT-T-marker and VXLAN packets are
+directly asserted to reach their own Tier 5 name rather than `hartip`).
+
 ### Link/IP-layer plumbing: non-IPv4 Ethernet, and non-TCP IPv4 (including UDP)
 
 Every protocol above rides on Ethernet + IPv4 + TCP. Traffic outside that --
@@ -9277,6 +9546,53 @@ These are current, not aspirational -- each has a corresponding ROADMAP item.
   PROTOCOL COVERAGE's Tier 4 section and `pppoe.hpp`'s own "structural
   detection gate" paragraph for why the EtherType itself, not Code, is
   what actually carries most of the confidence here).
+- **None of Tier 5's sixteen tunnel/VPN protocols are wired into the
+  `policy validate` conduit-matching engine yet either**, the same
+  groundwork-only scope as every protocol in this whole "IT protocols an
+  OT auditor flags" family -- see the bullet above.
+- **SSTP, 4in6, DS-Lite/MAP-E, MPLS's own L2VPN/VPLS/pseudowire use case,
+  and CAPWAP's own alternate data-plane path are deliberately not
+  implemented** -- see PROTOCOL COVERAGE's Tier 5 section for the full,
+  per-protocol reasoning (SSTP's handshake is TLS-first with nothing
+  cleartext for this decoder to see and would collide with the existing
+  HTTPS/DoH early-detection call site regardless; 4in6/DS-Lite/MAP-E are
+  IPv6-outer encapsulations this codebase has no call site for at all,
+  since `decoder.cpp` only ever parses an IPv4 outer header; MPLS's own
+  pseudowire payload is wire-format-identical to an ordinary MPLS-switched
+  IP packet from this decoder's own point of view, controlled entirely by
+  out-of-band LDP/BGP signaling; and CAPWAP's alternate data-plane path
+  needed no new code, since GRE/L2TP/IP-in-IP recognition already names
+  that traffic when captured).
+- **NVGRE cannot be structurally distinguished from plain
+  Ethernet-bridging-over-GRE** -- both share the identical GRE Protocol
+  Type (`0x6558`) and Key-flag shape; this decoder reports `nvgre` and
+  says so honestly rather than guessing further by interpreting the Key
+  field's own VSID/FlowID split. See PROTOCOL COVERAGE's Tier 5 section.
+- **6in4's inner IPv6 header is recognized but its addresses are never
+  surfaced** -- unlike IP-in-IP's own inner IPv4 src/dst extraction, this
+  codebase has no IPv6 address parser at all, and adding one solely to
+  format two 128-bit addresses for this one case was judged out of scope
+  for a name-only recognition tier. See PROTOCOL COVERAGE's Tier 5
+  section.
+- **The generic dtls-tunnel check cannot tell CAPWAP's own DTLS data
+  plane, a vendor AP's DTLS control channel, an LTE offload client, or a
+  deliberate DTLS-based VPN apart from each other** -- naming that SOME
+  encrypted DTLS tunnel is present, port-independently, is the entire
+  audit value this check provides. See PROTOCOL COVERAGE's Tier 5
+  section.
+- **STT is recognized by port number alone (TCP 7878)**, the same
+  weakest identification gate as LWAPP/TeamViewer/AnyDesk/Zoom -- it has
+  no publicly authoritative wire-format specification to check a
+  structural signature against. See PROTOCOL COVERAGE's Tier 5 section.
+- **HART-IP's own opportunistic Auto-mode UDP detection deliberately
+  excludes ports 4500 and 4789** (IKE NAT-T and VXLAN) to avoid a
+  guaranteed, spec-mandated misclassification -- both protocols' own
+  wire formats trivially satisfy HART-IP's loose 2-byte opportunistic
+  gate by definition (RFC 3948's all-zero non-ESP marker; RFC 7348's
+  all-zero VXLAN Reserved field), unlike the codebase's other, merely
+  possible HART-IP/Modbus TCP collision left undocumented-but-accepted.
+  An explicit `--protocol hartip` is unaffected by this exclusion and
+  still attempts every port. See PROTOCOL COVERAGE's Tier 5 section.
 
 ## EXIT STATUS
 
@@ -10414,7 +10730,7 @@ anything else on this list.
     traffic leaves a site entirely outside any on-prem firewall's view, the
     usual signature of an RTU or 4G/5G router phoning out through a
     vendor's "cloud gateway" SIM)~~ -- **done**: see this item's own "Tier 4
-    -- done" paragraph below for what was actually built; and (5) generic tunnel/VPN encapsulation
+    -- done" paragraph below for what was actually built; and ~~(5) generic tunnel/VPN encapsulation
     -- the broader problem CAPWAP/GTP-U above are specific instances of: an
     inner VLAN, Modbus session, or entire plant subnet is invisible to
     every decoder and to `policy validate`'s own flow model alike until the
@@ -10452,7 +10768,7 @@ anything else on this list.
     legitimately needs to cross toward IT should be brokered through an
     encrypted, authenticated channel (OPC UA over TLS, MQTT over TLS,
     HTTPS) rather than riding raw OT protocols -- or an interactive-access
-    or tunneling protocol -- straight across the boundary.
+    or tunneling protocol -- straight across the boundary.~~ -- **done**: see this item's own "Tier 5 -- done" paragraph below for what was actually built.
 
     **Tier 1 -- done**, and see PROTOCOL COVERAGE's own "Tier 1 remote-
     access protocol recognition" section for the full writeup: `decode`
@@ -10674,8 +10990,127 @@ anything else on this list.
     tier hit no real protocol-collision wrinkle worth recording: none of
     CAPWAP/LWAPP/GTP-U's own ports (5246/5247/12222/12223/2152) or PPPoE's
     own EtherTypes overlap any other protocol this decoder already
-    dispatches on, so no MQTT-style carve-out was needed. Tier 5 remains
-    open.
+    dispatches on, so no MQTT-style carve-out was needed.
+
+    **Tier 5 -- done**, and see PROTOCOL COVERAGE's own "Tier 5 generic
+    tunnel/VPN encapsulation recognition" section for the full writeup:
+    `decode` now also recognizes GRE, NVGRE, Mikrotik EoIP, IPsec ESP,
+    IPsec AH, IP-in-IP, 6in4, L2TP/L2TPv3, IKE, VXLAN, Geneve, WireGuard,
+    OpenVPN, a generic DTLS-tunnel structural check, STT, and MPLS --
+    sixteen more `protocol` values (`"gre"`/`"nvgre"`/`"eoip"`/`"esp"`/
+    `"ah"`/`"ip-in-ip"`/`"6in4"`/`"l2tp"`/`"ike"`/`"vxlan"`/`"geneve"`/
+    `"wireguard"`/`"openvpn"`/`"dtls-tunnel"`/`"stt"`/`"mpls"`), the same
+    fix to this item's own "modeling gap" paragraph below Tiers 1-4 already
+    made, now covering the family this item frames as "the broader problem
+    CAPWAP/GTP-U above are specific instances of": merely naming the outer
+    tunnel is already a finding, since an inner VLAN, Modbus session, or
+    entire plant subnet is invisible to every decoder (and to `policy
+    validate`'s own flow model) until it's stripped off. Organized, like
+    every earlier tier, around how each tunnel actually presents on the
+    wire rather than the ROADMAP text's own order -- three shapes, three
+    dispatch points, all in the new `tunnel_vpn.hpp`/`tunnel_vpn.cpp`
+    (except MPLS, see below): GRE (47), ESP (50), AH (51), IP-in-IP (4),
+    6in4 (41), and L2TPv3's own direct-IP form (115) ride raw IP with no
+    port at all, the same shape IGMP/VRRP/IGRP/PIM/EIGRP/OSPF already have;
+    IKE (500/4500), L2TP-over-UDP (1701), VXLAN (4789), Geneve (6081),
+    WireGuard (51820), OpenVPN (1194), and the generic dtls-tunnel check
+    are UDP-port-keyed; OpenVPN's own TCP framing and STT (7878) are
+    TCP-port-keyed. GRE's own Protocol Type field (an EtherType value)
+    further splits into three names: NVGRE (RFC 8926, Protocol Type
+    0x6558 with the Key flag set -- honestly noted as ambiguous with plain
+    Ethernet-bridging-over-GRE, which shares the identical Protocol Type
+    and is structurally indistinguishable from it), Mikrotik EoIP
+    (Protocol Type 0x6400, unambiguous), and plain `"gre"` for everything
+    else (most commonly IPv4, RFC 2784's own original use case). IP-in-IP
+    is the one deliberate exception to this whole tier's "name the tunnel,
+    don't unwrap it" posture: its inner IPv4 header sits in plaintext
+    immediately after the outer one, so its own inner src/dst addresses
+    are surfaced (directly answering this item's own "an entire plant
+    subnet is invisible... until the outer tunnel is stripped off"
+    framing) -- 6in4's own inner IPv6 addresses are NOT surfaced the same
+    way, since this codebase has no IPv6 address parser at all and writing
+    one solely for this case would be real scope creep. ESP/AH are opaque
+    past their own SPI (AH additionally names the inner protocol it's
+    protecting, via its own Next Header field, since AH -- unlike ESP --
+    leaves the inner header visible); L2TPv2-over-UDP has a genuine
+    structural check (Version/reserved-bit validation), while L2TPv3 (both
+    its own direct-IP form and its UDP form, which has no way to
+    distinguish itself from an L2TPv2 structural mismatch) is honestly
+    reported as the weaker, port-only fallback. IKE's own multi-field
+    header (SPI pair, Major/Minor Version, Exchange Type, Length) is a
+    genuine structural signature; port 4500 (RFC 3948 NAT-Traversal)
+    additionally disambiguates IKE from raw NAT-Traversed ESP by checking
+    for the 4-byte all-zero non-ESP marker RFC 3948 itself defines.
+    VXLAN/Geneve each have genuine structural signatures (VXLAN's own
+    Flags byte, Geneve's own Version/Reserved bits) and surface their VNI;
+    WireGuard has the strongest signature in this entire tier (an exact,
+    fixed total-packet-length match for three of its four message types);
+    OpenVPN's opcode byte is a modest, NTP-Mode-style signature, shared
+    verbatim between its UDP and TCP forms (the TCP form adds only a
+    2-byte length prefix). A generic DTLS-record structural check (no
+    fixed port at all, tried last and port-independently among every UDP
+    check in this tier -- ContentType plus one of DTLS's three exact
+    16-bit version values is a strong enough multi-field match to earn the
+    same "structural signature overrides the port gate" treatment VNC/SMB/
+    SSH/HTTP/DHCP already have) is reported `"dtls-tunnel"`: this decoder
+    cannot tell CAPWAP's own DTLS data plane, a vendor AP's DTLS control
+    channel, an LTE offload client, or a deliberate DTLS-based VPN apart
+    from each other, and per this item's own framing, naming that SOME
+    encrypted DTLS tunnel is present is the entire audit value here. STT
+    (TCP 7878) is recognized by port number alone, the same weakest-gate
+    treatment LWAPP gets in Tier 4, since it has no publicly authoritative
+    wire-format specification to check a structural signature against.
+    MPLS is architecturally different from the other fifteen, the same way
+    EAPOL/PPPoE were in Tiers 3-4: it rides raw Ethernet (EtherType
+    `0x8847` unicast / `0x8848` multicast), not any port or IP layer at
+    all, so it gets its own dedicated `--protocol mpls` value (not folded
+    into `--protocol tunnel-vpn`, which covers only the fourteen port/
+    IP-protocol-number-based protocols) and its own dedicated
+    `mpls.hpp`/`mpls.cpp`, dispatched from the same EtherType-keyed region
+    of `decoder.cpp` PROFINET/GOOSE/SV/EtherCAT/EAPOL/PPPoE already use.
+    Unlike every EtherType-keyed protocol before it, MPLS's own label
+    stack (RFC 3032: Label/Exp/Bottom-of-Stack/TTL, 4 bytes per label) has
+    no Version/Type field to structurally validate at all -- any 4-byte-
+    aligned value is syntactically a valid label entry, so the EtherType
+    itself carries all of the confidence, the same posture GRE's own
+    Protocol Type sub-cases and IGMP/VRRP's own IP-protocol-number-only
+    gate already have. The label stack itself IS genuinely parsed in full
+    (walked label-by-label until a Bottom-of-Stack bit is found, capped at
+    16 entries as a sanity bound) -- but the payload past the last label is
+    deliberately NOT decoded, since an ordinary MPLS-switched IP packet and
+    an MPLS pseudowire/L2VPN/VPLS payload (an entire Ethernet frame,
+    optionally preceded by a 4-byte all-zero Pseudowire Control Word) are
+    wire-format-identical from this decoder's own point of view, controlled
+    entirely by out-of-band LDP/BGP signaling this passive decoder never
+    sees; a heuristic guess here would be far less reliable than IP-in-IP's
+    own first-nibble check (a pseudowire's Control Word is frequently all
+    zero bytes, indistinguishable from padding or truncation). `--protocol
+    tunnel-vpn` isolates the fourteen port/IP-protocol-number-based
+    protocols (MPLS is reached only via its own `--protocol mpls`, or in
+    Auto mode alongside everything else), and `--tunnel-vpn-port` widens
+    every port-based protocol's shared "expected port" set EXCEPT
+    dtls-tunnel's own (never port-gated, see above) -- one option across
+    all fourteen, the same grouping `--wireless-backhaul-port` already
+    established for Tier 4; GRE/ESP/AH/IP-in-IP/6in4/L2TP's own
+    IP-protocol-number-keyed forms, and MPLS, need no port option at all,
+    the same no-port precedent IGMP/VRRP/EAPOL/PPPoE already established --
+    see OPTIONS. This tier DID hit a real, and more severe, protocol-
+    collision wrinkle than any earlier one: HART-IP's own opportunistic,
+    port-independent UDP detection gate (a 2-byte MessageType/MessageID
+    check) is trivially satisfied not by coincidence but by two Tier 5
+    protocols' own SPEC-MANDATED wire formats -- RFC 3948's IKE NAT-T
+    non-ESP marker (an all-zero 4-byte prefix by definition) and RFC 7348's
+    VXLAN header (an all-zero Reserved field at that exact byte range by
+    definition) -- meaning, unlike Tier 2's FTP/MQTT or Tier 3's LDAP/MQTT
+    coincidental collisions, genuine NAT-T IKE or VXLAN traffic would
+    ALWAYS misclassify as `"hartip"` in Auto mode, not merely
+    occasionally. Resolved by excluding ports 4500 and 4789 from HART-IP's
+    own opportunistic Auto-mode attempt entirely (an explicit `--protocol
+    hartip` still attempts every port, unaffected) -- see `decoder.cpp`'s
+    own comment at that call site for the full reasoning; unlike the
+    accepted, documented HART-IP/Modbus TCP collision noted above, this
+    one was judged too severe (guaranteed rather than merely possible) to
+    simply document and leave unresolved.
 
     Scoped honestly, this is name-only recognition (port plus a minimal
     structural signature), not full protocol decoding -- the same

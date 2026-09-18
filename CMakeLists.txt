@@ -61,6 +61,8 @@ add_library(conduitscope_core STATIC
   src/it_protocols.cpp
   src/eapol.cpp
   src/pppoe.cpp
+  src/tunnel_vpn.cpp
+  src/mpls.cpp
   src/decoder.cpp
   src/resolver.cpp
   src/output.cpp
@@ -909,7 +911,7 @@ set_tests_properties(enip_unregister_session_decoded PROPERTIES
 add_test(NAME enip_nop_not_detected
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enip_nop_precedence.pcap" --format text)
 set_tests_properties(enip_nop_not_detected PROPERTIES
-  PASS_REGULAR_EXPRESSION "\\[tcp\\]  TCP payload of 24 byte\\(s\\) on port 52001->44818 did not match OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, COTP/S7comm/MMS, HART-IP, MQTT, FF-HSE, the RDP/VNC/TeamViewer/AnyDesk/Zoom remote-access family, the SMB/SSH/HTTP/HTTPS/Telnet/FTP lateral-movement family, or the LDAP/LDAPS/TACACS\\+ enterprise-trust family")
+  PASS_REGULAR_EXPRESSION "\\[tcp\\]  TCP payload of 24 byte\\(s\\) on port 52001->44818 did not match OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, COTP/S7comm/MMS, HART-IP, MQTT, FF-HSE, the RDP/VNC/TeamViewer/AnyDesk/Zoom remote-access family, the SMB/SSH/HTTP/HTTPS/Telnet/FTP lateral-movement family, the LDAP/LDAPS/TACACS\\+ enterprise-trust family, or the OpenVPN/STT tunnel-VPN family")
 
 # --------------------------------------------------------------------------
 # EtherNet/IP CIP STRING/SHORT_STRING and Structured Data Type (UDT/array-of-UDT tag) value
@@ -3751,7 +3753,7 @@ set_tests_properties(mqtt_invalid_qos_and_truncated_body_notes PROPERTIES
 add_test(NAME mqtt_bogus_connect_protocol_name_rejected
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mqtt.pcap" --format text)
 set_tests_properties(mqtt_bogus_connect_protocol_name_rejected PROPERTIES
-  PASS_REGULAR_EXPRESSION "\\[tcp\\]  TCP payload of 16 byte\\(s\\) on port 55020->1883 did not match OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, COTP/S7comm/MMS, HART-IP, MQTT, FF-HSE, the RDP/VNC/TeamViewer/AnyDesk/Zoom remote-access family, the SMB/SSH/HTTP/HTTPS/Telnet/FTP lateral-movement family, or the LDAP/LDAPS/TACACS\\+ enterprise-trust family")
+  PASS_REGULAR_EXPRESSION "\\[tcp\\]  TCP payload of 16 byte\\(s\\) on port 55020->1883 did not match OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, COTP/S7comm/MMS, HART-IP, MQTT, FF-HSE, the RDP/VNC/TeamViewer/AnyDesk/Zoom remote-access family, the SMB/SSH/HTTP/HTTPS/Telnet/FTP lateral-movement family, the LDAP/LDAPS/TACACS\\+ enterprise-trust family, or the OpenVPN/STT tunnel-VPN family")
 
 # A genuinely truncated/incomplete final packet on its own flow -- declares more Remaining Length
 # than actually follows, with nothing more ever arriving in this capture -- the TCP-reassembly
@@ -6047,7 +6049,7 @@ set_tests_properties(remote_access_extra_port_widens_expected_range PROPERTIES
 add_test(NAME remote_access_falls_through_to_generic_tcp_summary
   COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mqtt.pcap")
 set_tests_properties(remote_access_falls_through_to_generic_tcp_summary PROPERTIES
-  PASS_REGULAR_EXPRESSION "did not match OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, COTP/S7comm/MMS, HART-IP, MQTT, FF-HSE, the RDP/VNC/TeamViewer/AnyDesk/Zoom remote-access family, the SMB/SSH/HTTP/HTTPS/Telnet/FTP lateral-movement family, or the LDAP/LDAPS/TACACS\\+ enterprise-trust family")
+  PASS_REGULAR_EXPRESSION "did not match OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, COTP/S7comm/MMS, HART-IP, MQTT, FF-HSE, the RDP/VNC/TeamViewer/AnyDesk/Zoom remote-access family, the SMB/SSH/HTTP/HTTPS/Telnet/FTP lateral-movement family, the LDAP/LDAPS/TACACS\\+ enterprise-trust family, or the OpenVPN/STT tunnel-VPN family")
 
 add_test(NAME remote_access_rdp_carve_out_does_not_affect_real_s7comm
   COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm.pcap")
@@ -6594,6 +6596,214 @@ add_test(NAME wireless_backhaul_pppoe_protocol_filter_isolates_pppoe_only
 set_tests_properties(wireless_backhaul_pppoe_protocol_filter_isolates_pppoe_only PROPERTIES
   PASS_REGULAR_EXPRESSION "\\[pppoe\\].*\\[pppoe\\].*\\[pppoe\\].*\\[pppoe\\].*\\[pppoe\\].*\\[pppoe\\].*\\[pppoe\\].*\\[pppoe\\].*\\[pppoe\\]"
   FAIL_REGULAR_EXPRESSION "\\[capwap-control\\]|\\[capwap-data\\]|\\[lwapp-control\\]|\\[lwapp-data\\]|\\[gtp-u\\]")
+
+# ---------------------------------------------------------------------------------------------
+# Tier 5 "IT protocols an OT auditor flags" recognition (GRE/NVGRE/EoIP, ESP, AH, IP-in-IP, 6in4,
+# L2TP, IKE, VXLAN, Geneve, WireGuard, OpenVPN, dtls-tunnel, STT, MPLS -- see tunnel_vpn.hpp's/
+# mpls.hpp's own Tier 5 file header comments and docs/MANUAL.md's ROADMAP item 18). Fixture built
+# by a scapy script (not itself checked in as a generator -- see tests/sample_wireless_backhaul
+# .pcap's own precedent from Tier 4), 28 packets:
+#    1  IP proto 47   GRE, Protocol Type 0x0800 (IPv4)                    -> gre
+#    2  IP proto 47   GRE, Protocol Type 0x6558, Key flag set             -> nvgre (noted)
+#    3  IP proto 47   GRE, Protocol Type 0x6400 (Mikrotik)                -> eoip
+#    4  IP proto 47   GRE, Version nibble != 0                            -> non-tcp (fallback)
+#    5  IP proto 50   ESP, SPI=0x12345678                                 -> esp
+#    6  IP proto 51   AH, Next Header=6 (TCP), SPI=0x87654321             -> ah
+#    7  IP proto 4    IP-in-IP, valid inner IPv4 header                   -> ip-in-ip (inner addrs)
+#    8  IP proto 4    IP-in-IP, first nibble != 4                         -> non-tcp (fallback)
+#    9  IP proto 41   6in4, first nibble == 6                             -> 6in4
+#   10  IP proto 115  L2TPv3 direct-IP, Session ID=0xAABBCCDD             -> l2tp
+#   11  UDP 52700->500    IKEv2 IKE_SA_INIT                               -> ike
+#   12  UDP 52701->4500   IKEv2 NAT-T (zero marker) INFORMATIONAL         -> ike
+#   13  UDP 52702->4500   ESP NAT-Traversed (no marker), SPI=0x99887766   -> esp
+#   14  UDP 52703->1701   L2TPv2 data message (Version=2, reserved clear) -> l2tp
+#   15  UDP 52704->1701   L2TP, Version nibble=3 (not v2 shape)           -> l2tp (weak fallback)
+#   16  UDP 52705->4789   VXLAN, Flags=0x08, VNI=0x00A1B2                 -> vxlan
+#   17  UDP 52706->4789   VXLAN, malformed Flags byte                    -> udp (fallback)
+#   18  UDP 52707->6081   Geneve, Version=0, Protocol Type=0x6558         -> geneve
+#   19  UDP 52708->51820  WireGuard Handshake Initiation (148 bytes)      -> wireguard
+#   20  UDP 52709->51820  WireGuard Transport Data (32 bytes)             -> wireguard
+#   21  UDP 52710->1194   OpenVPN P_CONTROL_HARD_RESET_CLIENT_V2          -> openvpn
+#   22  TCP 52711->1194   OpenVPN P_DATA_V2, 2-byte length prefix         -> openvpn
+#   23  TCP 52712->7878   STT, arbitrary bytes                            -> stt (port only)
+#   24  UDP 52713->9999   DTLS 1.2 Application Data record                -> dtls-tunnel
+#   25  MPLS unicast (0x8847), 1 label, Bottom-of-Stack set               -> mpls
+#   26  MPLS multicast (0x8848), 1 label                                  -> mpls
+#   27  MPLS unicast, 2-label stack                                       -> mpls
+#   28  MPLS unicast, 4 bytes only, Bottom-of-Stack NOT set               -> mpls (truncated)
+add_test(NAME tunnel_vpn_gre_plain_recognized
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tunnel_vpn.pcap")
+set_tests_properties(tunnel_vpn_gre_plain_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[gre\\]  GRE tunnel carrying 0x800 \\(IPv4\\)")
+
+add_test(NAME tunnel_vpn_gre_nvgre_ambiguity_noted
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tunnel_vpn.pcap")
+set_tests_properties(tunnel_vpn_gre_nvgre_ambiguity_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[nvgre\\]  NVGRE \\(or plain Ethernet-bridging-over-GRE.*\n.*note: Protocol Type 0x6558 with the Key flag set matches BOTH NVGRE")
+
+add_test(NAME tunnel_vpn_gre_eoip_recognized
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tunnel_vpn.pcap")
+set_tests_properties(tunnel_vpn_gre_eoip_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[eoip\\]  Mikrotik EoIP \\(Ethernet-over-IP\\) tunnel")
+
+add_test(NAME tunnel_vpn_gre_bad_version_falls_to_non_tcp
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tunnel_vpn.pcap")
+set_tests_properties(tunnel_vpn_gre_bad_version_falls_to_non_tcp PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[non-tcp\\]  IPv4 protocol number 47 \\(GRE\\) \\(not TCP\\)")
+
+add_test(NAME tunnel_vpn_esp_ip_proto_recognized
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tunnel_vpn.pcap")
+set_tests_properties(tunnel_vpn_esp_ip_proto_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[esp\\]  IPsec ESP tunnel \\(RFC 4303\\), SPI=0x12345678 -- payload is encrypted/authenticated, not decoded further")
+
+add_test(NAME tunnel_vpn_ah_recognized
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tunnel_vpn.pcap")
+set_tests_properties(tunnel_vpn_ah_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[ah\\]  IPsec AH tunnel \\(RFC 4302\\), protecting TCP, SPI=0x87654321")
+
+add_test(NAME tunnel_vpn_ip_in_ip_inner_addresses_recognized
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tunnel_vpn.pcap")
+set_tests_properties(tunnel_vpn_ip_in_ip_inner_addresses_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[ip-in-ip\\]  IP-in-IP tunnel \\(RFC 2003\\), inner 10\\.1\\.1\\.5 -> 10\\.1\\.1\\.99")
+
+add_test(NAME tunnel_vpn_ip_in_ip_malformed_falls_to_non_tcp
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tunnel_vpn.pcap")
+set_tests_properties(tunnel_vpn_ip_in_ip_malformed_falls_to_non_tcp PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[non-tcp\\]  IPv4 protocol number 4 \\(IP-in-IP\\) \\(not TCP\\)")
+
+add_test(NAME tunnel_vpn_6in4_recognized
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tunnel_vpn.pcap")
+set_tests_properties(tunnel_vpn_6in4_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[6in4\\]  6in4 \\(IPv6-in-IPv4\\) tunnel \\(RFC 4213\\) -- inner IPv6 header present but not decoded")
+
+add_test(NAME tunnel_vpn_l2tpv3_direct_ip_recognized
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tunnel_vpn.pcap")
+set_tests_properties(tunnel_vpn_l2tpv3_direct_ip_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[l2tp\\]  L2TPv3 tunnel \\(RFC 3931, direct IP encapsulation, IP protocol 115\\), Session ID=0xAABBCCDD")
+
+add_test(NAME tunnel_vpn_ike_sa_init_recognized
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tunnel_vpn.pcap")
+set_tests_properties(tunnel_vpn_ike_sa_init_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[ike\\]  IKEv2 IKE_SA_INIT")
+
+add_test(NAME tunnel_vpn_ike_natt_marker_recognized
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tunnel_vpn.pcap")
+set_tests_properties(tunnel_vpn_ike_natt_marker_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[ike\\]  IKEv2 \\(NAT-T, UDP 4500\\) INFORMATIONAL")
+
+add_test(NAME tunnel_vpn_esp_natt_no_marker_recognized
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tunnel_vpn.pcap")
+set_tests_properties(tunnel_vpn_esp_natt_no_marker_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[esp\\]  IPsec ESP tunnel \\(RFC 4303\\), SPI=0x99887766.*\\(NAT-Traversed, UDP 4500, no non-ESP marker present\\)")
+
+add_test(NAME tunnel_vpn_l2tpv2_udp_recognized
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tunnel_vpn.pcap")
+set_tests_properties(tunnel_vpn_l2tpv2_udp_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[l2tp\\]  L2TPv2 \\(RFC 2661\\) data message")
+
+add_test(NAME tunnel_vpn_l2tp_weak_fallback_on_port_1701
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tunnel_vpn.pcap")
+set_tests_properties(tunnel_vpn_l2tp_weak_fallback_on_port_1701 PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[l2tp\\]  L2TP on port 1701, Session ID=0x30102 \\(did not match L2TPv2's own structural shape")
+
+add_test(NAME tunnel_vpn_vxlan_recognized
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tunnel_vpn.pcap")
+set_tests_properties(tunnel_vpn_vxlan_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[vxlan\\]  VXLAN tunnel \\(RFC 7348\\), VNI=41394")
+
+add_test(NAME tunnel_vpn_vxlan_malformed_falls_to_generic_udp
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tunnel_vpn.pcap")
+set_tests_properties(tunnel_vpn_vxlan_malformed_falls_to_generic_udp PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[udp\\]  UDP payload of 8 byte\\(s\\) on port 52706->4789")
+
+add_test(NAME tunnel_vpn_geneve_recognized
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tunnel_vpn.pcap")
+set_tests_properties(tunnel_vpn_geneve_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[geneve\\]  Geneve tunnel \\(RFC 8926\\), VNI=50132, inner 0x6558")
+
+add_test(NAME tunnel_vpn_wireguard_handshake_initiation_recognized
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tunnel_vpn.pcap")
+set_tests_properties(tunnel_vpn_wireguard_handshake_initiation_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[wireguard\\]  WireGuard Handshake Initiation")
+
+add_test(NAME tunnel_vpn_wireguard_transport_data_recognized
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tunnel_vpn.pcap")
+set_tests_properties(tunnel_vpn_wireguard_transport_data_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[wireguard\\]  WireGuard Transport Data")
+
+add_test(NAME tunnel_vpn_openvpn_udp_recognized
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tunnel_vpn.pcap")
+set_tests_properties(tunnel_vpn_openvpn_udp_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[openvpn\\]  OpenVPN P_CONTROL_HARD_RESET_CLIENT_V2 \\(weak, opcode-only signature")
+
+add_test(NAME tunnel_vpn_openvpn_tcp_length_prefix_recognized
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tunnel_vpn.pcap")
+set_tests_properties(tunnel_vpn_openvpn_tcp_length_prefix_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[openvpn\\]  OpenVPN P_DATA_V2 \\(weak, opcode-only signature.*\\(TCP, 2-byte length prefix\\)")
+
+add_test(NAME tunnel_vpn_stt_port_only_recognized
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tunnel_vpn.pcap")
+set_tests_properties(tunnel_vpn_stt_port_only_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[stt\\]  STT \\(Stateless Transport Tunneling\\) on TCP port 7878 -- recognized by port number alone")
+
+add_test(NAME tunnel_vpn_dtls_tunnel_port_independent_recognized
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tunnel_vpn.pcap")
+set_tests_properties(tunnel_vpn_dtls_tunnel_port_independent_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[dtls-tunnel\\]  generic DTLS 1\\.2 record \\(content type 23\\)")
+
+add_test(NAME tunnel_vpn_mpls_unicast_single_label_recognized
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tunnel_vpn.pcap")
+set_tests_properties(tunnel_vpn_mpls_unicast_single_label_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[mpls\\]  MPLS, 1 label \\(top: label=100352 exp=0 ttl=254\\), payload not decoded further")
+
+add_test(NAME tunnel_vpn_mpls_multicast_recognized
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tunnel_vpn.pcap")
+set_tests_properties(tunnel_vpn_mpls_multicast_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[mpls\\]  MPLS, 1 label \\(top: label=100353 exp=0 ttl=200\\)")
+
+add_test(NAME tunnel_vpn_mpls_two_label_stack_recognized
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tunnel_vpn.pcap")
+set_tests_properties(tunnel_vpn_mpls_two_label_stack_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[mpls\\]  MPLS, 2 labels \\(top: label=200000 exp=0 ttl=255\\)")
+
+add_test(NAME tunnel_vpn_mpls_truncated_stack_noted
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tunnel_vpn.pcap")
+set_tests_properties(tunnel_vpn_mpls_truncated_stack_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[mpls\\]  MPLS, 1 label \\(top: label=777 exp=0 ttl=100\\) -- truncated, no Bottom-of-Stack label found")
+
+add_test(NAME tunnel_vpn_stats_counted
+  COMMAND conduitscope decode --format text --stats --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tunnel_vpn.pcap")
+set_tests_properties(tunnel_vpn_stats_counted PROPERTIES
+  PASS_REGULAR_EXPRESSION "6in4 +1\n *ah +1\n *dtls-tunnel +1\n *eoip +1\n *esp +2\n *geneve +1\n *gre +1\n *ike +2\n *ip-in-ip +1\n *l2tp +3\n *mpls +4\n *non-tcp +2\n *nvgre +1\n *openvpn +2\n *stt +1\n *udp +1\n *vxlan +1\n *wireguard +2")
+
+add_test(NAME tunnel_vpn_protocol_filter_isolates_port_and_ip_proto_family
+  COMMAND conduitscope decode --format text --protocol tunnel-vpn --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tunnel_vpn.pcap")
+set_tests_properties(tunnel_vpn_protocol_filter_isolates_port_and_ip_proto_family PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[gre\\].*\\[nvgre\\].*\\[eoip\\].*\\[esp\\].*\\[ah\\].*\\[ip-in-ip\\].*\\[6in4\\].*\\[l2tp\\].*\\[ike\\].*\\[ike\\].*\\[esp\\].*\\[l2tp\\].*\\[l2tp\\].*\\[vxlan\\].*\\[geneve\\].*\\[wireguard\\].*\\[wireguard\\].*\\[openvpn\\].*\\[openvpn\\].*\\[stt\\].*\\[dtls-tunnel\\]"
+  FAIL_REGULAR_EXPRESSION "\\[mpls\\]")
+
+add_test(NAME tunnel_vpn_mpls_protocol_filter_isolates_mpls_only
+  COMMAND conduitscope decode --format text --protocol mpls --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tunnel_vpn.pcap")
+set_tests_properties(tunnel_vpn_mpls_protocol_filter_isolates_mpls_only PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[mpls\\].*\\[mpls\\].*\\[mpls\\].*\\[mpls\\]"
+  FAIL_REGULAR_EXPRESSION "\\[gre\\]|\\[esp\\]|\\[ah\\]|\\[ike\\]|\\[vxlan\\]|\\[geneve\\]|\\[wireguard\\]|\\[openvpn\\]|\\[stt\\]|\\[dtls-tunnel\\]")
+
+add_test(NAME tunnel_vpn_ike_natt_collision_with_hartip_avoided
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tunnel_vpn.pcap")
+set_tests_properties(tunnel_vpn_ike_natt_collision_with_hartip_avoided PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[ike\\]  IKEv2 \\(NAT-T, UDP 4500\\)"
+  FAIL_REGULAR_EXPRESSION "\\[hartip\\]")
+
+add_test(NAME tunnel_vpn_vxlan_collision_with_hartip_avoided
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tunnel_vpn.pcap")
+set_tests_properties(tunnel_vpn_vxlan_collision_with_hartip_avoided PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[vxlan\\]  VXLAN tunnel"
+  FAIL_REGULAR_EXPRESSION "\\[hartip\\]")
+
+add_test(NAME tunnel_vpn_hartip_explicit_filter_still_reaches_port_4500_and_4789
+  COMMAND conduitscope decode --format text --protocol hartip --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tunnel_vpn.pcap")
+set_tests_properties(tunnel_vpn_hartip_explicit_filter_still_reaches_port_4500_and_4789 PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[hartip\\].*\\[hartip\\]")
 
 # ---------------------------------------------------------------------------------------------
 # Live capture (live_capture.hpp/cpp) -- an optional, build-time-detected libpcap (Linux) / Npcap

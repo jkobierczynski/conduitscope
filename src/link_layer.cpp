@@ -82,9 +82,12 @@ std::string ethertype_name(uint16_t ethertype) {
         case ETHERTYPE_IEC61850_GOOSE: return "IEC 61850-8-1 GOOSE";
         case ETHERTYPE_IEC61850_SV: return "IEC 61850-9-2 Sampled Values";
         case ETHERTYPE_EAPOL: return "IEEE 802.1X/EAPOL";
+        case ETHERTYPE_PPPOE_DISCOVERY: return "PPPoE Discovery";
+        case ETHERTYPE_PPPOE_SESSION: return "PPPoE Session";
         case ETHERTYPE_LLDP: return "LLDP";
         case ETHERTYPE_PTP: return "IEEE 1588 PTP";
         case ETHERTYPE_MPLS_UNICAST: return "MPLS unicast";
+        case ETHERTYPE_MPLS_MULTICAST: return "MPLS multicast";
         default: return "";
     }
 }

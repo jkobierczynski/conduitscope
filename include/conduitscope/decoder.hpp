@@ -31,6 +31,7 @@
 #include "conduitscope/it_protocols.hpp"
 #include "conduitscope/mms.hpp"
 #include "conduitscope/modbus.hpp"
+#include "conduitscope/mpls.hpp"
 #include "conduitscope/mqtt.hpp"
 #include "conduitscope/nbns.hpp"
 #include "conduitscope/opcua.hpp"
@@ -45,6 +46,7 @@
 #include "conduitscope/sv.hpp"
 #include "conduitscope/tcp.hpp"
 #include "conduitscope/tls_sni.hpp"
+#include "conduitscope/tunnel_vpn.hpp"
 #include "conduitscope/vrrp.hpp"
 
 namespace conduitscope {
@@ -109,6 +111,17 @@ enum class ProtocolFilter {
                            // has its own PppoeOnly below, the same split EapolOnly above already has
                            // from EnterpriseTrustOnly.
     PppoeOnly,             // only attempt PPPoE decoding -- see pppoe.hpp
+    TunnelVpnOnly,         // only attempt the Tier 5 "IT protocols an OT auditor flags" recognition
+                           // (GRE/NVGRE/EoIP, ESP, AH, IP-in-IP, 6in4, L2TP, IKE, VXLAN, Geneve,
+                           // WireGuard, OpenVPN, dtls-tunnel, STT -- see tunnel_vpn.hpp). One filter
+                           // value covers all fourteen IP-protocol-number/port-based protocols, the
+                           // same grouping RemoteAccessOnly/LateralMovementOnly/EnterpriseTrustOnly/
+                           // WirelessBackhaulOnly above already established for Tiers 1-4. MPLS (also
+                           // Tier 5, but EtherType-keyed, no port or IP layer at all -- see mpls.hpp)
+                           // is NOT covered by this filter value; it has its own MplsOnly below, the
+                           // same split EapolOnly/PppoeOnly above already have from their own port-
+                           // based tiers.
+    MplsOnly,              // only attempt MPLS label-stack decoding -- see mpls.hpp
 };
 
 struct DecodeOptions {
@@ -206,6 +219,19 @@ struct DecodeOptions {
     // CAPWAP/LWAPP/GTP-U's own signals are strong enough to check opportunistically on every UDP
     // port (see it_protocols.hpp's own Tier 4 comment for the full per-protocol reasoning).
     std::vector<uint16_t> extra_wireless_backhaul_ports;
+    // One shared list across all fourteen IP-protocol-number/port-based Tier 5 "IT protocols an OT
+    // auditor flags" protocols (GRE/NVGRE/EoIP, ESP, AH, IP-in-IP, 6in4, L2TP, IKE, VXLAN, Geneve,
+    // WireGuard, OpenVPN, dtls-tunnel, STT -- see tunnel_vpn.hpp), the same grouping
+    // extra_remote_access_ports/.../extra_wireless_backhaul_ports above already established for
+    // Tiers 1-4. MPLS has no port at all (EtherType-keyed, see mpls.hpp) so it is not covered by
+    // this list. GRE/ESP/AH/IP-in-IP/6in4/L2TP's own IP-protocol-number-keyed forms need no port
+    // list either -- like IGMP/VRRP/etc. above, they are dispatched purely by IP protocol number.
+    // Every port-based protocol here IS port-gated even for its own structural check (joins the
+    // same detection-gating group as extra_dns_ports/extra_rip_ports/etc. above) with one
+    // exception: dtls-tunnel's own DTLS record header is checked port-independently even in Auto
+    // mode, the same "structural signature overrides the port gate" treatment VNC/SMB/SSH/HTTP/DHCP
+    // already have -- see tunnel_vpn.hpp's own header comment for why.
+    std::vector<uint16_t> extra_tunnel_vpn_ports;
     // If true, a parse failure at the Ethernet/IPv4/TCP layer is rethrown to
     // the caller instead of being recorded as a per-packet "parse-error"
     // result. Off by default so one malformed packet doesn't abort decoding
@@ -622,6 +648,23 @@ struct DecodedPacket {
     bool pppoe_has_ppp_protocol = false;
     uint16_t pppoe_ppp_protocol = 0;
     std::string pppoe_ppp_protocol_name;
+
+    // Only set when protocol == "mpls" -- see try_parse_mpls in mpls.hpp. Like EAPOL/PPPoE above,
+    // MPLS rides raw Ethernet (EtherType 0x8847 unicast / 0x8848 multicast), not IP -- has_ethernet
+    // stays true, has_ip stays false. The fourteen IP-protocol-number/port-based Tier 5 protocols
+    // (GRE/NVGRE/EoIP, ESP, AH, IP-in-IP, 6in4, L2TP, IKE, VXLAN, Geneve, WireGuard, OpenVPN,
+    // dtls-tunnel, STT) have no fields of their own here -- like every port-based Tier 1-4 protocol,
+    // they only ever set protocol/summary/notes, see decoder.cpp's own Tier 5 dispatch.
+    bool mpls_is_multicast = false;  // true for EtherType 0x8848
+    // One summary string per label entry (e.g. "label=100352 exp=0 ttl=254 s=false"), in stack
+    // order (top label first), capped at kMaxMplsLabelDepth entries -- see mpls.hpp.
+    std::vector<std::string> mpls_labels;
+    size_t mpls_label_count = 0;
+    uint32_t mpls_top_label = 0;
+    uint8_t mpls_top_exp = 0;
+    uint8_t mpls_top_ttl = 0;
+    bool mpls_stack_truncated = false;
+    bool mpls_stack_too_deep = false;
 
     // Only set when protocol == "stp" -- see try_parse_stp in stp.hpp. Unlike every EtherType-keyed
     // raw-Ethernet protocol above, STP rides classic IEEE 802.3 LLC framing (has_ethernet stays

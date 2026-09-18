@@ -64,6 +64,7 @@ std::string ip_protocol_name(uint8_t protocol) {
     switch (protocol) {
         case 1: return "ICMP";
         case 2: return "IGMP";
+        case 4: return "IP-in-IP";
         case 6: return "TCP";
         case 9: return "IGRP";
         case 17: return "UDP";
@@ -76,6 +77,7 @@ std::string ip_protocol_name(uint8_t protocol) {
         case 89: return "OSPF";
         case 103: return "PIM";
         case 112: return "VRRP";
+        case 115: return "L2TPv3";
         case 132: return "SCTP";
         default: return "";
     }

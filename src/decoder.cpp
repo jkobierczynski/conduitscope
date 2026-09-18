@@ -1183,6 +1183,47 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                     }
                 }
 
+                // MPLS (EtherType 0x8847 unicast / 0x8848 multicast) -- ROADMAP item 18's Tier 5,
+                // same EtherType-keyed rationale/pattern as EAPOL/PPPoE above, except MPLS has its
+                // own dedicated ProtocolFilter::MplsOnly rather than sharing Tier 5's port/IP-
+                // protocol-number-based TunnelVpnOnly filter -- see decoder.hpp's own comment on
+                // both and mpls.hpp's file header comment for the full reasoning. There is no
+                // structural gate to fail here (see mpls.hpp's own try_parse_mpls comment) -- the
+                // EtherType alone carries all the confidence, so this always succeeds once at least
+                // 4 bytes are available.
+                bool want_mpls = options_.protocol_filter == ProtocolFilter::Auto ||
+                                   options_.protocol_filter == ProtocolFilter::MplsOnly;
+                if (want_mpls && (eth.ethertype == ETHERTYPE_MPLS_UNICAST ||
+                                    eth.ethertype == ETHERTYPE_MPLS_MULTICAST)) {
+                    if (auto mp = try_parse_mpls(eth.payload)) {
+                        out.protocol = "mpls";
+                        out.summary = mp->summary;
+                        out.mpls_is_multicast = (eth.ethertype == ETHERTYPE_MPLS_MULTICAST);
+                        out.mpls_stack_truncated = mp->stack_truncated;
+                        out.mpls_stack_too_deep = mp->stack_too_deep;
+                        out.mpls_label_count = mp->labels.size();
+                        if (!mp->labels.empty()) {
+                            const MplsLabelEntry& top = mp->labels.front();
+                            out.mpls_top_label = top.label;
+                            out.mpls_top_exp = top.exp;
+                            out.mpls_top_ttl = top.ttl;
+                        }
+                        constexpr size_t kMaxMplsLabelSummaries = 50;
+                        for (const auto& entry : mp->labels) {
+                            if (out.mpls_labels.size() >= kMaxMplsLabelSummaries) break;
+                            std::ostringstream ls;
+                            ls << "label=" << entry.label;
+                            if (!entry.label_name.empty()) ls << " (" << entry.label_name << ")";
+                            ls << " exp=" << static_cast<unsigned>(entry.exp)
+                               << " ttl=" << static_cast<unsigned>(entry.ttl)
+                               << " s=" << (entry.bottom_of_stack ? "true" : "false");
+                            out.mpls_labels.push_back(ls.str());
+                        }
+                        for (const auto& n : mp->notes) out.notes.push_back(n);
+                        return out;
+                    }
+                }
+
                 // STP (classic IEEE 802.3 LLC framing -- NOT any EtherType at all, see
                 // link_layer.hpp's file header comment). Every branch above is EtherType-keyed
                 // (ethertype >= 0x0800); a length-framed frame (eth.is_llc_length) can never match
@@ -1496,8 +1537,25 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
             // Tried last among these UDP checks, port-independently -- see the matching comment in
             // reassemble_tcp_payload above for why HART-IP's own weaker structural detection gate
             // is deliberately given the lowest priority in this decoder's opportunistic dispatch.
-            bool want_hartip = options_.protocol_filter == ProtocolFilter::Auto ||
-                                options_.protocol_filter == ProtocolFilter::HartIpOnly;
+            // UNLIKE the accepted, documented HART-IP/Modbus TCP collision noted below, ports 4500
+            // and 4789 are excluded from this opportunistic attempt entirely, not merely
+            // deprioritized: HART-IP's own gate (MessageType/MessageID at payload bytes 1/2 both
+            // being small enumerated values) is trivially, SYSTEMATICALLY satisfied by two Tier 5
+            // protocols' own spec-mandated wire formats rather than by coincidence -- RFC 3948's
+            // IKE NAT-T non-ESP marker (port 4500) is an all-zero 4-byte prefix by definition, and
+            // RFC 7348's VXLAN header (port 4789) has an all-zero Reserved field at that exact
+            // byte range by definition -- so without this exclusion, genuine NAT-T IKE/VXLAN
+            // traffic would ALWAYS misclassify as "hartip" rather than only occasionally, unlike
+            // the low-probability, coincidental collisions this codebase otherwise tolerates. See
+            // tunnel_vpn.hpp's own IKE/VXLAN paragraphs for the Tier 5 side of this. Only excluded
+            // in Auto mode -- an explicit `--protocol hartip` still attempts every port, same as
+            // every other explicit protocol filter in this codebase always overriding Auto's own
+            // opportunistic-detection caveats.
+            bool want_hartip =
+                options_.protocol_filter == ProtocolFilter::HartIpOnly ||
+                (options_.protocol_filter == ProtocolFilter::Auto && udp.dst_port != IKE_NATT_PORT &&
+                 udp.src_port != IKE_NATT_PORT && udp.dst_port != VXLAN_PORT &&
+                 udp.src_port != VXLAN_PORT);
             if (want_hartip) {
                 if (auto frame = try_parse_hartip(udp.payload)) {
                     out.protocol = "hartip";
@@ -1850,6 +1908,26 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                 }
             }
 
+            // Tier 5 "IT protocols an OT auditor flags" recognition, UDP-port-keyed half -- see
+            // tunnel_vpn.hpp. IKE, L2TP-over-UDP, VXLAN, Geneve, WireGuard, OpenVPN, and the generic
+            // dtls-tunnel structural check (port-independent, tried last within this function -- see
+            // its own header comment) are all UDP-only by spec, so there is no matching TCP-side
+            // call site for any of them; OpenVPN's own TCP framing and STT are dispatched
+            // separately, in the TCP tail region below (try_recognize_tunnel_vpn_tcp). GRE/ESP/AH/
+            // IP-in-IP/6in4/L2TP's own IP-protocol-number-keyed forms, and MPLS, are dispatched
+            // separately still, in the regions noted at their own call sites.
+            bool want_tunnel_vpn_udp = options_.protocol_filter == ProtocolFilter::Auto ||
+                                        options_.protocol_filter == ProtocolFilter::TunnelVpnOnly;
+            if (want_tunnel_vpn_udp) {
+                if (auto m = try_recognize_tunnel_vpn_udp(udp.payload, udp.src_port, udp.dst_port,
+                                                             options_.extra_tunnel_vpn_ports)) {
+                    out.protocol = m->protocol;
+                    out.summary = m->summary;
+                    for (const auto& n : m->notes) out.notes.push_back(n);
+                    return out;
+                }
+            }
+
             // Groundwork plumbing beyond this point: the UDP header/payload split is recognized
             // and reported (src/dst port, byte count), but no other application-layer protocol
             // riding on UDP is decoded -- see udp.hpp's file header comment and docs/MANUAL.md's
@@ -1945,6 +2023,29 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                 if (auto msg = try_parse_ospf(ip.payload)) {
                     out.protocol = "ospf";
                     fill_ospf_fields(out, *msg);
+                    return out;
+                }
+            }
+        }
+
+        // Tier 5 "IT protocols an OT auditor flags" recognition, IP-protocol-number-keyed half --
+        // see tunnel_vpn.hpp. GRE (47, with NVGRE/EoIP as its own Protocol-Type sub-cases), ESP (50),
+        // AH (51), IP-in-IP (4), 6in4 (41), and L2TPv3's own direct-IP form (115) all ride directly
+        // on IP with no port at all, same dispatch shape as IGMP/VRRP/IGRP/PIM/EIGRP/OSPF just
+        // above; the port/UDP/TCP-based half of this tier (IKE/L2TP-over-UDP/VXLAN/Geneve/
+        // WireGuard/OpenVPN/dtls-tunnel/STT) is dispatched separately, in the UDP and TCP tail
+        // regions below. MPLS, the fifteenth Tier 5 protocol, is dispatched separately still, in the
+        // EtherType-keyed region above -- see mpls.hpp.
+        if (ip.protocol == GRE_IP_PROTOCOL || ip.protocol == ESP_IP_PROTOCOL ||
+            ip.protocol == AH_IP_PROTOCOL || ip.protocol == IPIP_IP_PROTOCOL ||
+            ip.protocol == IPV6_6IN4_IP_PROTOCOL || ip.protocol == L2TPV3_IP_PROTOCOL) {
+            bool want_tunnel_vpn = options_.protocol_filter == ProtocolFilter::Auto ||
+                                    options_.protocol_filter == ProtocolFilter::TunnelVpnOnly;
+            if (want_tunnel_vpn) {
+                if (auto m = try_recognize_tunnel_vpn_ip_proto(ip.payload, ip.protocol)) {
+                    out.protocol = m->protocol;
+                    out.summary = m->summary;
+                    for (const auto& n : m->notes) out.notes.push_back(n);
                     return out;
                 }
             }
@@ -3087,14 +3188,31 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
             }
         }
 
+        // Tier 5 "IT protocols an OT auditor flags" recognition, TCP-port-keyed half -- see
+        // tunnel_vpn.hpp. Tried LAST, same "weakest signals last" reasoning Tiers 1-3 just above
+        // document. Only OpenVPN's own TCP framing and STT are reachable here (every other Tier 5
+        // protocol is UDP-only or IP-protocol-number-keyed, dispatched elsewhere -- see those call
+        // sites' own comments).
+        bool want_tunnel_vpn = options_.protocol_filter == ProtocolFilter::Auto ||
+                                options_.protocol_filter == ProtocolFilter::TunnelVpnOnly;
+        if (want_tunnel_vpn) {
+            if (auto m = try_recognize_tunnel_vpn_tcp(effective_payload, tcp.src_port, tcp.dst_port,
+                                                         options_.extra_tunnel_vpn_ports)) {
+                out.protocol = m->protocol;
+                out.summary = m->summary;
+                for (const auto& n : m->notes) out.notes.push_back(n);
+                return out;
+            }
+        }
+
         out.protocol = "tcp";
         std::ostringstream s;
         s << "TCP payload of " << effective_payload.size() << " byte(s) on port " << tcp.src_port << "->"
           << tcp.dst_port
           << " did not match OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, COTP/S7comm/MMS, HART-IP, "
              "MQTT, FF-HSE, the RDP/VNC/TeamViewer/AnyDesk/Zoom remote-access family, the SMB/SSH/"
-             "HTTP/HTTPS/Telnet/FTP lateral-movement family, or the LDAP/LDAPS/TACACS+ enterprise-"
-             "trust family";
+             "HTTP/HTTPS/Telnet/FTP lateral-movement family, the LDAP/LDAPS/TACACS+ enterprise-trust "
+             "family, or the OpenVPN/STT tunnel-VPN family";
         out.summary = s.str();
         return out;
 

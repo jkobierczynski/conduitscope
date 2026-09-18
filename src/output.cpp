@@ -162,6 +162,33 @@ constexpr const char* kUnderlineItalicBlue = "\033[4;3;34m";
 constexpr const char* kUnderlineItalicMagenta = "\033[4;3;35m";
 constexpr const char* kUnderlineItalicCyan = "\033[4;3;36m";
 
+// Tier 5 "IT protocols an OT auditor flags" round (GRE/NVGRE/EoIP, ESP, AH, IP-in-IP, 6in4, L2TP,
+// IKE, VXLAN, Geneve, WireGuard, OpenVPN, dtls-tunnel, STT, MPLS -- see tunnel_vpn.hpp/mpls.hpp):
+// sixteen new tags, the largest single round yet, so rather than hunt for one more leftover slot
+// per tag this pulls from three sources at once: the three Tier 3 "dim" hues (kDimRed/Green/Yellow)
+// left Blue/Magenta/Cyan unclaimed (dim was only ever paired with three of the six standard hues,
+// see that round's own comment above), which covers three of sixteen; a wholly fresh "bold+dim"
+// combination covers six more (every standard hue); and a wholly fresh "strikethrough" combination
+// -- a deliberate thematic fit for a tier about traffic that bypasses ordinary perimeter inspection
+// -- covers the remaining seven (all six standard hues plus white, since seven tags were left once
+// the first two sources were spent).
+constexpr const char* kDimBlue = "\033[2;34m";
+constexpr const char* kDimMagenta = "\033[2;35m";
+constexpr const char* kDimCyan = "\033[2;36m";
+constexpr const char* kBoldDimRed = "\033[1;2;31m";
+constexpr const char* kBoldDimGreen = "\033[1;2;32m";
+constexpr const char* kBoldDimYellow = "\033[1;2;33m";
+constexpr const char* kBoldDimBlue = "\033[1;2;34m";
+constexpr const char* kBoldDimMagenta = "\033[1;2;35m";
+constexpr const char* kBoldDimCyan = "\033[1;2;36m";
+constexpr const char* kStrikeRed = "\033[9;31m";
+constexpr const char* kStrikeGreen = "\033[9;32m";
+constexpr const char* kStrikeYellow = "\033[9;33m";
+constexpr const char* kStrikeBlue = "\033[9;34m";
+constexpr const char* kStrikeMagenta = "\033[9;35m";
+constexpr const char* kStrikeCyan = "\033[9;36m";
+constexpr const char* kStrikeWhite = "\033[9;37m";
+
 // Color for a packet's "[protocol]" tag -- picked so a mixed-protocol capture scans quickly by
 // eye, not for any deeper meaning. parse-error is the one exception: it gets the same "something
 // is wrong here" red as a Modbus exception response, rather than a plain identification color,
@@ -284,6 +311,31 @@ const char* protocol_tag_color(const std::string& protocol) {
     if (protocol == "lwapp-data") return kUnderlineItalicYellow;
     if (protocol == "gtp-u") return kUnderlineItalicGreen;
     if (protocol == "pppoe") return kUnderlineItalicRed;
+    if (protocol == "gre") return kDimBlue;
+    if (protocol == "nvgre") return kDimMagenta;
+    if (protocol == "eoip") return kDimCyan;
+    if (protocol == "esp") return kBoldDimRed;
+    if (protocol == "ah") return kBoldDimGreen;
+    if (protocol == "ip-in-ip") return kBoldDimYellow;
+    if (protocol == "6in4") return kBoldDimBlue;
+    if (protocol == "l2tp") return kBoldDimMagenta;
+    if (protocol == "ike") return kBoldDimCyan;
+    if (protocol == "vxlan") return kStrikeRed;
+    if (protocol == "geneve") return kStrikeGreen;
+    if (protocol == "wireguard") return kStrikeYellow;  // mild "shadow-IT" cue, same reasoning
+                                                           // igrp's/rdp's/smb's own color choices
+                                                           // document -- an unexpected WireGuard
+                                                           // tunnel is exactly the shadow-IT/vendor-
+                                                           // remote-access case ROADMAP item 18 calls
+                                                           // out
+    if (protocol == "openvpn") return kStrikeBlue;        // same "shadow-IT" cue as wireguard above
+    if (protocol == "dtls-tunnel") return kStrikeMagenta;
+    if (protocol == "stt") return kStrikeCyan;
+    if (protocol == "mpls") return kStrikeWhite;           // the seventh strikethrough hue -- MPLS is
+                                                              // this tier's one outlier (no port, no
+                                                              // IP layer, EtherType-keyed), so white
+                                                              // doubles as a visual "different shape"
+                                                              // cue too
     if (protocol == "parse-error") return kBoldRed;
     return kDim;  // tcp / udp / non-tcp / non-ip / unsupported-link: recognized, nothing OT-specific
 }

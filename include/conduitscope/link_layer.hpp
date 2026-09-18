@@ -81,6 +81,7 @@ constexpr uint16_t ETHERTYPE_PPPOE_SESSION = 0x8864;    // PPPoE Session stage, 
 constexpr uint16_t ETHERTYPE_LLDP = 0x88CC;
 constexpr uint16_t ETHERTYPE_PTP = 0x88F7;        // IEEE 1588 Precision Time Protocol
 constexpr uint16_t ETHERTYPE_MPLS_UNICAST = 0x8847;
+constexpr uint16_t ETHERTYPE_MPLS_MULTICAST = 0x8848;  // RFC 3032 -- raw Ethernet, no IP -- see mpls.hpp
 constexpr uint16_t ETHERTYPE_8021AD = 0x88A8;     // 802.1ad "provider bridging" / stacked (QinQ) VLAN tag
 
 // Returns a short human-readable name for a handful of EtherTypes worth calling out by name

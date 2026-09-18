@@ -21,7 +21,10 @@ LDAPS, RADIUS, TACACS+, and IEEE 802.1X/EAPOL, the "does the OT side
 blindly trust enterprise IT" tier of the same family, plus CAPWAP
 control/data, LWAPP control/data, GTP-U, and PPPoE, the "wireless
 access-point control/data planes and cellular backhaul" tier of the same
-family,
+family, plus GRE (and its NVGRE/Mikrotik EoIP sub-cases), IPsec ESP/AH,
+IP-in-IP, 6in4, L2TP/L2TPv3, IKE, VXLAN, Geneve, WireGuard, OpenVPN, a
+generic DTLS-tunnel structural check, STT, and MPLS, the "generic
+tunnel/VPN encapsulation" tier of the same family,
 traffic from offline
 pcap/pcapng captures, and checks it
 against a zone/conduit segmentation policy. It's an OT/ICS conduit-auditing tool: `decode`/`info` give you reliable
@@ -910,6 +913,32 @@ Groundwork / v0.1.0. What works right now:
   since none of this tier's checks are strong enough to run
   port-independently). See docs/MANUAL.md's PROTOCOL COVERAGE "Tier 4
   wireless-backhaul-and-cellular protocol recognition" section
+- Tier 5 of the same family, and the last: GRE (and its NVGRE/Mikrotik
+  EoIP sub-cases), IPsec ESP/AH, IP-in-IP, 6in4, L2TP/L2TPv3, IKE, VXLAN,
+  Geneve, WireGuard, OpenVPN, a generic DTLS-tunnel structural check, STT,
+  and MPLS -- "generic tunnel/VPN encapsulation," the broader problem
+  CAPWAP/GTP-U above are specific instances of: an inner VLAN, Modbus
+  session, or entire plant subnet is invisible to every decoder (and to
+  `policy validate`'s own flow model) until the outer tunnel is stripped
+  off, so merely naming the outer protocol is already a finding.
+  GRE/ESP/AH/IP-in-IP/6in4/L2TPv3's own direct-IP form ride raw IP with no
+  port at all (GRE's own Protocol Type field further splits it into
+  plain-GRE/NVGRE/EoIP); IP-in-IP is the one deliberate exception to this
+  whole tier's "name it, don't unwrap it" posture, surfacing its inner
+  src/dst IPv4 addresses since they sit in plaintext right after the outer
+  header. IKE, L2TP-over-UDP, VXLAN, Geneve, WireGuard, and OpenVPN are
+  UDP/TCP-port-keyed, each with its own genuine structural signature
+  (WireGuard's exact-length match is the strongest in this entire tier);
+  port 4500 additionally disambiguates IKE-over-NAT-T from raw
+  NAT-Traversed ESP via RFC 3948's own non-ESP marker. A generic
+  dtls-tunnel check is tried port-independently, last among every UDP
+  check. STT is recognized by port number alone. MPLS rides raw Ethernet
+  (EtherType `0x8847`/`0x8848`, no port at all, like EAPOL/PPPoE) and gets
+  its own dedicated `--protocol mpls` value, with its full label stack
+  genuinely parsed. `--protocol tunnel-vpn` isolates the fourteen
+  port/IP-protocol-number-based protocols; `--tunnel-vpn-port` widens
+  their shared expected-port set. See docs/MANUAL.md's PROTOCOL COVERAGE
+  "Tier 5 generic tunnel/VPN encapsulation recognition" section
 - Name resolution, shared by `decode` and `policy validate` alike: OUI/MAC-
   vendor lookup against a built-in IEEE-registry-derived table (on by
   default, `--no-oui` disables it), hostname resolution from an explicitly-
