@@ -10,6 +10,16 @@ name: CI
 on:
   push:
     branches: ["**"]
+    # Also run on a version tag (e.g. `git tag v0.1.0 && git push origin
+    # v0.1.0`), so cutting a release gets the same build-and-test
+    # verification as an ordinary push -- `branches` and `tags` are
+    # independent filters under one `push:` trigger, so this doesn't
+    # change when branch pushes fire, it only adds tag pushes matching
+    # this pattern. Doesn't also trigger on GitHub's separate "Release
+    # published" event (on: release), since publishing a Release from an
+    # already-pushed tag would otherwise fire this workflow twice for the
+    # same commit.
+    tags: ["v*"]
   pull_request:
     branches: ["**"]
   workflow_dispatch:
