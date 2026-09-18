@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <iomanip>
 #include <sstream>
 #include <utility>
 
@@ -898,6 +899,235 @@ std::optional<ItLateralMovementMatch> try_recognize_it_lateral_movement(ByteSpan
             }
             return m;
         }
+    }
+
+    return std::nullopt;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Tier 4 -- see it_protocols.hpp's own header comment for the full per-protocol confidence writeup.
+
+namespace {
+
+// RFC 5415 section 4.5 / IANA "CAPWAP Message Types" registry -- the common, well-established
+// subset; anything else is still reported by its raw numeric value (a vendor extension, or a type
+// added by an RFC past this file's own research).
+std::string capwap_message_type_name(uint32_t t) {
+    switch (t) {
+        case 1: return "Discovery Request";
+        case 2: return "Discovery Response";
+        case 3: return "Join Request";
+        case 4: return "Join Response";
+        case 5: return "Configuration Status Request";
+        case 6: return "Configuration Status Response";
+        case 7: return "Configuration Update Request";
+        case 8: return "Configuration Update Response";
+        case 9: return "WTP Event Request";
+        case 10: return "WTP Event Response";
+        case 11: return "Change State Event Request";
+        case 12: return "Change State Event Response";
+        case 13: return "Echo Request";
+        case 14: return "Echo Response";
+        case 15: return "Image Data Request";
+        case 16: return "Image Data Response";
+        case 17: return "Reset Request";
+        case 18: return "Reset Response";
+        case 19: return "Primary Discovery Request";
+        case 20: return "Primary Discovery Response";
+        case 21: return "Data Transfer Request";
+        case 22: return "Data Transfer Response";
+        case 23: return "Clear Configuration Request";
+        case 24: return "Clear Configuration Response";
+        case 25: return "Station Configuration Request";
+        case 26: return "Station Configuration Response";
+        default: return "";
+    }
+}
+
+struct CapwapMatch {
+    bool is_dtls = false;
+    bool has_message_type = false;
+    uint32_t message_type = 0;
+    std::string message_type_name;
+};
+
+// RFC 5415 section 4.3's Preamble (Version(4 bits)/Type(4 bits)) plus, for a plaintext header
+// (Type 0), the Transport Header's own HLEN field -- see it_protocols.hpp's own file header comment
+// for why this file doesn't attempt a bit-perfect decode of every transport-header field. Returns
+// std::nullopt only when the Preamble itself doesn't match (wrong Version, or a Type other than
+// 0/1) -- a plaintext header that's merely too short to resolve HLEN/a Message Type still returns a
+// CapwapMatch with has_message_type left false, so the caller can still report "Preamble matched,
+// nothing further resolvable" rather than treating it as no match at all. `want_control` selects
+// whether a plaintext header's Control Header (Message Type) is even looked for -- CAPWAP data has
+// no Control Header, only CAPWAP control does.
+std::optional<CapwapMatch> match_capwap(ByteSpan payload, bool want_control) {
+    if (payload.empty()) return std::nullopt;
+    uint8_t preamble = payload.at(0);
+    uint8_t version = (preamble >> 4) & 0x0F;
+    uint8_t type = preamble & 0x0F;
+    if (version != 0) return std::nullopt;  // only version RFC 5415 ever defines
+    if (type > 1) return std::nullopt;      // 0 = plaintext header, 1 = DTLS header
+
+    CapwapMatch m;
+    if (type == 1) {
+        m.is_dtls = true;
+        return m;
+    }
+
+    // Plaintext header -- need at least the 8-byte minimum Transport Header (HLEN's own minimum
+    // value, 2 words, when neither the optional Radio MAC Address nor Wireless Info field is
+    // present) before HLEN can even be trusted.
+    if (payload.size() < 1 + 8) return m;
+    uint8_t hlen = (payload.at(1) >> 3) & 0x1F;  // top 5 bits of the byte right after the Preamble
+    if (hlen < 2) return m;  // implausible -- shorter than the mandatory fields alone allow
+    size_t header_end = 1 + static_cast<size_t>(hlen) * 4;
+    if (!want_control || header_end + 4 > payload.size()) return m;  // Control Header's Message
+                                                                        // Type (4 bytes) doesn't fit
+    uint32_t message_type = (static_cast<uint32_t>(payload.at(header_end)) << 24) |
+                             (static_cast<uint32_t>(payload.at(header_end + 1)) << 16) |
+                             (static_cast<uint32_t>(payload.at(header_end + 2)) << 8) |
+                             static_cast<uint32_t>(payload.at(header_end + 3));
+    m.has_message_type = true;
+    m.message_type = message_type;
+    m.message_type_name = capwap_message_type_name(message_type);
+    return m;
+}
+
+// 3GPP TS 29.281's own enumerated Message Type registry -- the common subset; anything else is
+// still reported by its raw numeric value.
+std::string gtp_message_type_name(uint8_t t) {
+    switch (t) {
+        case 1: return "Echo Request";
+        case 2: return "Echo Response";
+        case 26: return "Error Indication";
+        case 31: return "Supported Extension Headers Notification";
+        case 254: return "End Marker";
+        case 255: return "G-PDU";  // the actual tunneled user-plane packet
+        default: return "";
+    }
+}
+
+struct GtpMatch {
+    std::string message_type_name;
+    uint8_t message_type = 0;
+    uint16_t declared_length = 0;
+    uint32_t teid = 0;
+};
+
+// 3GPP TS 29.281 section 5's mandatory 8-byte header: Flags(1, top nibble Version=1|PT=1 => 0x3) +
+// Message Type(1) + Length(2, big-endian, payload length AFTER this header) + TEID(4). Length is
+// deliberately not re-validated against the captured payload -- see it_protocols.hpp's own file
+// header comment for why.
+std::optional<GtpMatch> match_gtp_u(ByteSpan payload) {
+    if (payload.size() < 8) return std::nullopt;
+    uint8_t flags = payload.at(0);
+    if ((flags >> 4) != 0x3) return std::nullopt;  // Version(3 bits)=1, PT(1 bit)=1
+    uint8_t message_type = payload.at(1);
+    std::string name = gtp_message_type_name(message_type);
+    if (name.empty()) return std::nullopt;
+
+    GtpMatch m;
+    m.message_type = message_type;
+    m.message_type_name = name;
+    m.declared_length = static_cast<uint16_t>((payload.at(2) << 8) | payload.at(3));
+    m.teid = (static_cast<uint32_t>(payload.at(4)) << 24) | (static_cast<uint32_t>(payload.at(5)) << 16) |
+             (static_cast<uint32_t>(payload.at(6)) << 8) | static_cast<uint32_t>(payload.at(7));
+    return m;
+}
+
+}  // namespace
+
+std::optional<ItWirelessBackhaulMatch> try_recognize_it_wireless_backhaul(ByteSpan payload, uint16_t src_port,
+                                                                            uint16_t dst_port,
+                                                                            const std::vector<uint16_t>& extra_ports) {
+    // 1. CAPWAP control -- gated to port 5246 (see file header comment: a modest but genuine
+    // structural signature).
+    if (port_in(src_port, CAPWAP_CONTROL_PORT, extra_ports) || port_in(dst_port, CAPWAP_CONTROL_PORT, extra_ports)) {
+        ItWirelessBackhaulMatch m;
+        m.protocol = "capwap-control";
+        if (auto c = match_capwap(payload, /*want_control=*/true)) {
+            if (c->is_dtls) {
+                m.summary = "CAPWAP control, DTLS-protected (UDP port " + std::to_string(CAPWAP_CONTROL_PORT) +
+                             ") -- body is an opaque DTLS record, not decoded further";
+            } else if (c->has_message_type) {
+                if (!c->message_type_name.empty()) {
+                    m.summary = "CAPWAP control " + c->message_type_name + " (UDP port " +
+                                 std::to_string(CAPWAP_CONTROL_PORT) + ")";
+                } else {
+                    m.summary = "CAPWAP control, message type " + std::to_string(c->message_type) +
+                                 " (unrecognized) (UDP port " + std::to_string(CAPWAP_CONTROL_PORT) + ")";
+                }
+            } else {
+                m.summary = "CAPWAP control (UDP port " + std::to_string(CAPWAP_CONTROL_PORT) +
+                             ") -- plaintext Preamble present, Control Header/Message Type not "
+                             "resolvable in this packet (could be truncated, or an implausible HLEN)";
+            }
+        } else {
+            m.summary = "CAPWAP control (UDP port " + std::to_string(CAPWAP_CONTROL_PORT) +
+                         ") -- port match only, not a plausible Preamble in this packet";
+        }
+        return m;
+    }
+    // 2. CAPWAP data -- gated to port 5247, same modest structural check (Preamble + HLEN sanity)
+    // as CAPWAP control above, minus any Control Header/Message Type -- see file header comment for
+    // why this file goes no further than naming the tunnel itself.
+    if (port_in(src_port, CAPWAP_DATA_PORT, extra_ports) || port_in(dst_port, CAPWAP_DATA_PORT, extra_ports)) {
+        ItWirelessBackhaulMatch m;
+        m.protocol = "capwap-data";
+        if (auto c = match_capwap(payload, /*want_control=*/false)) {
+            if (c->is_dtls) {
+                m.summary = "CAPWAP data, DTLS-protected (UDP port " + std::to_string(CAPWAP_DATA_PORT) +
+                             ") -- the tunneled client frame is opaque, encrypted";
+            } else {
+                m.summary = "CAPWAP data (UDP port " + std::to_string(CAPWAP_DATA_PORT) +
+                             ") -- the actual bridged wireless client frame is tunneled here, not "
+                             "decoded (see it_protocols.hpp's own file header comment)";
+            }
+        } else {
+            m.summary = "CAPWAP data (UDP port " + std::to_string(CAPWAP_DATA_PORT) +
+                         ") -- port match only, not a plausible Preamble in this packet";
+        }
+        return m;
+    }
+    // 3. LWAPP control -- port only; LWAPP has no publicly documented wire format this file could
+    // check a structural signature against (see file header comment).
+    if (port_in(src_port, LWAPP_CONTROL_PORT, extra_ports) || port_in(dst_port, LWAPP_CONTROL_PORT, extra_ports)) {
+        ItWirelessBackhaulMatch m;
+        m.protocol = "lwapp-control";
+        m.summary = "LWAPP control (UDP port " + std::to_string(LWAPP_CONTROL_PORT) +
+                     ") -- port match only; LWAPP (CAPWAP's Cisco-proprietary predecessor) has no "
+                     "authoritative public wire-format specification this decoder could check a "
+                     "structural signature against";
+        return m;
+    }
+    // 4. LWAPP data -- ditto.
+    if (port_in(src_port, LWAPP_DATA_PORT, extra_ports) || port_in(dst_port, LWAPP_DATA_PORT, extra_ports)) {
+        ItWirelessBackhaulMatch m;
+        m.protocol = "lwapp-data";
+        m.summary = "LWAPP data (UDP port " + std::to_string(LWAPP_DATA_PORT) +
+                     ") -- port match only; same reasoning as LWAPP control above";
+        return m;
+    }
+    // 5. GTP-U -- gated to port 2152, a genuine structural signature (see file header comment).
+    if (port_in(src_port, GTP_U_PORT, extra_ports) || port_in(dst_port, GTP_U_PORT, extra_ports)) {
+        ItWirelessBackhaulMatch m;
+        m.protocol = "gtp-u";
+        if (auto g = match_gtp_u(payload)) {
+            std::ostringstream s;
+            s << "GTP-U " << g->message_type_name << " (TEID=0x" << std::hex << std::uppercase
+              << std::setw(8) << std::setfill('0') << g->teid << std::dec << ", UDP port " << GTP_U_PORT << ")";
+            m.summary = s.str();
+            if (g->message_type == 255) {
+                m.notes.push_back("G-PDU -- an actual tunneled user-plane packet; this decoder does "
+                                   "not unwrap the inner IP packet (see it_protocols.hpp's own file "
+                                   "header comment)");
+            }
+        } else {
+            m.summary = "GTP-U (UDP port " + std::to_string(GTP_U_PORT) +
+                         ") -- port match only, not a plausible Version/PT/Message-Type header in "
+                         "this packet";
+        }
+        return m;
     }
 
     return std::nullopt;

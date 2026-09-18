@@ -182,6 +182,7 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
                 const std::vector<int>& hsrp_ports, const std::vector<int>& remote_access_ports,
                 const std::vector<int>& lateral_movement_ports,
                 const std::vector<int>& enterprise_trust_ports,
+                const std::vector<int>& wireless_backhaul_ports,
                 size_t max_packets,
                 bool stats, bool strict, bool quiet,
                 bool no_color, bool force_color,
@@ -244,6 +245,8 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
                                : (protocol == "lateral-movement") ? ProtocolFilter::LateralMovementOnly
                                : (protocol == "enterprise-trust") ? ProtocolFilter::EnterpriseTrustOnly
                                : (protocol == "eapol")  ? ProtocolFilter::EapolOnly
+                               : (protocol == "wireless-backhaul") ? ProtocolFilter::WirelessBackhaulOnly
+                               : (protocol == "pppoe")  ? ProtocolFilter::PppoeOnly
                                                         : ProtocolFilter::Auto;
     for (int p : modbus_ports) options.extra_modbus_ports.push_back(static_cast<uint16_t>(p));
     for (int p : dnp3_ports) options.extra_dnp3_ports.push_back(static_cast<uint16_t>(p));
@@ -266,6 +269,7 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
     for (int p : remote_access_ports) options.extra_remote_access_ports.push_back(static_cast<uint16_t>(p));
     for (int p : lateral_movement_ports) options.extra_lateral_movement_ports.push_back(static_cast<uint16_t>(p));
     for (int p : enterprise_trust_ports) options.extra_enterprise_trust_ports.push_back(static_cast<uint16_t>(p));
+    for (int p : wireless_backhaul_ports) options.extra_wireless_backhaul_ports.push_back(static_cast<uint16_t>(p));
 
     try {
         // Built once per `decode` invocation, before opening the packet source, so a bad --hosts/
@@ -637,7 +641,8 @@ int main(int argc, char** argv) {
         decode_enip_ports, decode_enip_io_ports, decode_bacnet_ports, decode_hartip_ports,
         decode_opcua_ports, decode_mqtt_ports, decode_ffhse_ports, decode_dns_ports, decode_mdns_ports,
         decode_llmnr_ports, decode_nbns_ports, decode_doh_ports, decode_rip_ports, decode_hsrp_ports,
-        decode_remote_access_ports, decode_lateral_movement_ports, decode_enterprise_trust_ports;
+        decode_remote_access_ports, decode_lateral_movement_ports, decode_enterprise_trust_ports,
+        decode_wireless_backhaul_ports;
     size_t decode_max_packets = 0;
     bool decode_stats = false, decode_strict = false;
     bool decode_oui = true, decode_resolve = false, decode_service_names = true;
@@ -675,7 +680,7 @@ int main(int argc, char** argv) {
     decode_cmd
         ->add_option("--protocol", decode_protocol,
                       "Restrict decoding to one protocol instead of auto-detecting all of them")
-        ->transform(CLI::IsMember({"auto", "modbus", "dnp3", "s7comm", "mms", "iec104", "enip", "profinet", "goose", "sv", "ethercat", "stp", "devicenet", "bacnet", "hartip", "opcua", "mqtt", "s7comm-plus", "ff-hse", "dns", "mdns", "llmnr", "nbns", "doh", "rip", "igmp", "vrrp", "hsrp", "igrp", "pim", "eigrp", "ospf", "remote-access", "lateral-movement", "enterprise-trust", "eapol"}))
+        ->transform(CLI::IsMember({"auto", "modbus", "dnp3", "s7comm", "mms", "iec104", "enip", "profinet", "goose", "sv", "ethercat", "stp", "devicenet", "bacnet", "hartip", "opcua", "mqtt", "s7comm-plus", "ff-hse", "dns", "mdns", "llmnr", "nbns", "doh", "rip", "igmp", "vrrp", "hsrp", "igrp", "pim", "eigrp", "ospf", "remote-access", "lateral-movement", "enterprise-trust", "eapol", "wireless-backhaul", "pppoe"}))
         ->capture_default_str();
     decode_cmd->add_option("--modbus-port", decode_modbus_ports,
                             "Additional TCP port to treat as expected for Modbus (repeatable); "
@@ -776,6 +781,14 @@ int main(int argc, char** argv) {
         "and LDAPS's port-only fallback, same caveat as --dns-port -- DHCP's magic cookie is never "
         "port-gated regardless, see it_protocols.hpp. IEEE 802.1X/EAPOL needs no port option at all "
         "-- it has no port, see docs/MANUAL.md and eapol.hpp");
+    decode_cmd->add_option(
+        "--wireless-backhaul-port", decode_wireless_backhaul_ports,
+        "Additional UDP port to treat as expected for the Tier 4 \"IT protocols an OT auditor "
+        "flags\" family (CAPWAP control/data, LWAPP control/data, GTP-U -- see docs/MANUAL.md's "
+        "ROADMAP item 18); widens detection in Auto mode for all five, since none of this tier's "
+        "own structural checks are strong enough to run port-independently, same caveat as "
+        "--dns-port -- see it_protocols.hpp. PPPoE needs no port option at all -- it has no port, "
+        "see docs/MANUAL.md and pppoe.hpp");
     decode_cmd->add_option("--max-packets", decode_max_packets,
                             "Stop after decoding this many packets (0 = unlimited)")
         ->capture_default_str();
@@ -1023,6 +1036,7 @@ int main(int argc, char** argv) {
                            decode_mdns_ports, decode_llmnr_ports, decode_nbns_ports, decode_doh_ports,
                            decode_rip_ports, decode_hsrp_ports, decode_remote_access_ports,
                            decode_lateral_movement_ports, decode_enterprise_trust_ports,
+                           decode_wireless_backhaul_ports,
                            decode_max_packets, decode_stats, decode_strict,
                            quiet, no_color, force_color, decode_oui, decode_resolve, decode_hosts_file,
                            decode_service_names, decode_services_file, decode_show_vlan, *diag);

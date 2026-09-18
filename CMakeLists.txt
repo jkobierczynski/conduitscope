@@ -60,6 +60,7 @@ add_library(conduitscope_core STATIC
   src/ospf.cpp
   src/it_protocols.cpp
   src/eapol.cpp
+  src/pppoe.cpp
   src/decoder.cpp
   src/resolver.cpp
   src/output.cpp
@@ -6431,6 +6432,168 @@ add_test(NAME enterprise_trust_early_detection_does_not_affect_lateral_movement_
 set_tests_properties(enterprise_trust_early_detection_does_not_affect_lateral_movement_https PROPERTIES
   PASS_REGULAR_EXPRESSION "\\[https\\]  HTTPS/TLS ClientHello \\(SNI: plc-web\\.example\\.com\\)"
   FAIL_REGULAR_EXPRESSION "\\[ldaps\\]")
+
+# ---------------------------------------------------------------------------------------------
+# Tier 4 "IT protocols an OT auditor flags" recognition (CAPWAP control/data, LWAPP control/data,
+# GTP-U, PPPoE -- see it_protocols.hpp's/pppoe.hpp's own Tier 4 file header comments and
+# docs/MANUAL.md's ROADMAP item 18). Fixture built by a scapy script (not itself checked in as a
+# generator -- see tests/sample_enterprise_trust.pcap's own precedent from Tier 3), 23 packets:
+#    1  UDP 52600->5246   CAPWAP control, Discovery Request (msg type 1)     -> capwap-control
+#    2  UDP 52601->5246   CAPWAP control, DTLS-protected (Preamble Type=1)   -> capwap-control
+#    3  UDP 52602->5246   CAPWAP control, Preamble ok, too short for HLEN    -> capwap-control (weak fallback)
+#    4  UDP 52603->5246   CAPWAP control, Version nibble != 0                -> capwap-control (port-only fallback)
+#    5  UDP 52604->5247   CAPWAP data, plaintext Preamble                    -> capwap-data
+#    6  UDP 52605->5247   CAPWAP data, DTLS-protected                        -> capwap-data
+#    7  UDP 52606->5247   CAPWAP data, not a plausible Preamble              -> capwap-data (port-only fallback)
+#    8  UDP 52607->12222  LWAPP control, arbitrary bytes                     -> lwapp-control (port only)
+#    9  UDP 52608->12223  LWAPP data, arbitrary bytes                        -> lwapp-data (port only)
+#   10  UDP 52609->2152   GTP-U G-PDU (msg type 255), TEID=0x12345678        -> gtp-u (noted)
+#   11  UDP 52610->2152   GTP-U Echo Request (msg type 1)                    -> gtp-u
+#   12  UDP 52611->2152   GTP-U, Version/PT nibble != 0x3                    -> gtp-u (port-only fallback)
+#   13  UDP 52612->6000   CAPWAP control Echo Request on a NON-standard
+#                         port -- not recognized without widening; fixed
+#                         by --wireless-backhaul-port below                 -> udp
+#   14  PPPoE Discovery   PADI (code 0x09)                                   -> pppoe
+#   15  PPPoE Discovery   PADO (code 0x07)                                   -> pppoe
+#   16  PPPoE Discovery   PADR (code 0x19)                                   -> pppoe
+#   17  PPPoE Discovery   PADS (code 0x65), session=0x1234                   -> pppoe
+#   18  PPPoE Discovery   PADT (code 0xA7), session=0x1234                   -> pppoe
+#   19  PPPoE Session     Session Data, PPP protocol=LCP (0xC021)            -> pppoe
+#   20  PPPoE Session     Session Data, PPP protocol=PAP (0xC023)            -> pppoe (noted)
+#   21  PPPoE Session     Session Data, PPP protocol=IP (0x0021)             -> pppoe
+#   22  PPPoE Session     PADT (code 0xA7) mid-session                      -> pppoe
+#   23  PPPoE Session     malformed (Ver/Type nibbles wrong)                 -> non-ip
+add_test(NAME wireless_backhaul_capwap_control_discovery_request_recognized
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_wireless_backhaul.pcap")
+set_tests_properties(wireless_backhaul_capwap_control_discovery_request_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[capwap-control\\]  CAPWAP control Discovery Request \\(UDP port 5246\\)")
+
+add_test(NAME wireless_backhaul_capwap_control_dtls_protected_recognized
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_wireless_backhaul.pcap")
+set_tests_properties(wireless_backhaul_capwap_control_dtls_protected_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[capwap-control\\]  CAPWAP control, DTLS-protected \\(UDP port 5246\\) -- body is an opaque DTLS record")
+
+add_test(NAME wireless_backhaul_capwap_control_too_short_weak_fallback
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_wireless_backhaul.pcap")
+set_tests_properties(wireless_backhaul_capwap_control_too_short_weak_fallback PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[capwap-control\\]  CAPWAP control \\(UDP port 5246\\) -- plaintext Preamble present, Control Header/Message Type not resolvable")
+
+add_test(NAME wireless_backhaul_capwap_control_port_only_fallback
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_wireless_backhaul.pcap")
+set_tests_properties(wireless_backhaul_capwap_control_port_only_fallback PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[capwap-control\\]  CAPWAP control \\(UDP port 5246\\) -- port match only, not a plausible Preamble")
+
+add_test(NAME wireless_backhaul_capwap_data_recognized
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_wireless_backhaul.pcap")
+set_tests_properties(wireless_backhaul_capwap_data_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[capwap-data\\]  CAPWAP data \\(UDP port 5247\\) -- the actual bridged wireless client frame is tunneled here")
+
+add_test(NAME wireless_backhaul_capwap_data_dtls_protected_recognized
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_wireless_backhaul.pcap")
+set_tests_properties(wireless_backhaul_capwap_data_dtls_protected_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[capwap-data\\]  CAPWAP data, DTLS-protected \\(UDP port 5247\\) -- the tunneled client frame is opaque, encrypted")
+
+add_test(NAME wireless_backhaul_capwap_data_port_only_fallback
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_wireless_backhaul.pcap")
+set_tests_properties(wireless_backhaul_capwap_data_port_only_fallback PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[capwap-data\\]  CAPWAP data \\(UDP port 5247\\) -- port match only, not a plausible Preamble")
+
+add_test(NAME wireless_backhaul_lwapp_control_port_only_recognized
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_wireless_backhaul.pcap")
+set_tests_properties(wireless_backhaul_lwapp_control_port_only_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[lwapp-control\\]  LWAPP control \\(UDP port 12222\\) -- port match only; LWAPP \\(CAPWAP's Cisco-proprietary predecessor\\) has no authoritative public wire-format specification")
+
+add_test(NAME wireless_backhaul_lwapp_data_port_only_recognized
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_wireless_backhaul.pcap")
+set_tests_properties(wireless_backhaul_lwapp_data_port_only_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[lwapp-data\\]  LWAPP data \\(UDP port 12223\\) -- port match only; same reasoning as LWAPP control above")
+
+add_test(NAME wireless_backhaul_gtp_u_g_pdu_recognized_with_note
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_wireless_backhaul.pcap")
+set_tests_properties(wireless_backhaul_gtp_u_g_pdu_recognized_with_note PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[gtp-u\\]  GTP-U G-PDU \\(TEID=0x12345678, UDP port 2152\\).*\n.*note: G-PDU -- an actual tunneled user-plane packet")
+
+add_test(NAME wireless_backhaul_gtp_u_echo_request_recognized
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_wireless_backhaul.pcap")
+set_tests_properties(wireless_backhaul_gtp_u_echo_request_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[gtp-u\\]  GTP-U Echo Request \\(TEID=0x00000001, UDP port 2152\\)")
+
+add_test(NAME wireless_backhaul_gtp_u_port_only_fallback
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_wireless_backhaul.pcap")
+set_tests_properties(wireless_backhaul_gtp_u_port_only_fallback PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[gtp-u\\]  GTP-U \\(UDP port 2152\\) -- port match only, not a plausible Version/PT/Message-Type header")
+
+add_test(NAME wireless_backhaul_capwap_control_arbitrary_port_falls_to_udp_without_widening
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_wireless_backhaul.pcap")
+set_tests_properties(wireless_backhaul_capwap_control_arbitrary_port_falls_to_udp_without_widening PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"src_port\": 52612,\n *\"dst_port\": 6000,.*\n *\"protocol\": \"udp\"")
+
+add_test(NAME wireless_backhaul_extra_port_widens_capwap_control
+  COMMAND conduitscope decode --format json --wireless-backhaul-port 6000 --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_wireless_backhaul.pcap")
+set_tests_properties(wireless_backhaul_extra_port_widens_capwap_control PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"src_port\": 52612,\n *\"dst_port\": 6000,.*\n *\"protocol\": \"capwap-control\",\n *\"summary\": \"CAPWAP control Echo Request \\(UDP port 5246\\)\"")
+
+add_test(NAME wireless_backhaul_pppoe_padi_recognized
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_wireless_backhaul.pcap")
+set_tests_properties(wireless_backhaul_pppoe_padi_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[pppoe\\]  PPPoE PADI \\(session=0x0\\)")
+
+add_test(NAME wireless_backhaul_pppoe_pado_recognized
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_wireless_backhaul.pcap")
+set_tests_properties(wireless_backhaul_pppoe_pado_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[pppoe\\]  PPPoE PADO \\(session=0x0\\)")
+
+add_test(NAME wireless_backhaul_pppoe_padr_recognized
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_wireless_backhaul.pcap")
+set_tests_properties(wireless_backhaul_pppoe_padr_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[pppoe\\]  PPPoE PADR \\(session=0x0\\)")
+
+add_test(NAME wireless_backhaul_pppoe_pads_recognized
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_wireless_backhaul.pcap")
+set_tests_properties(wireless_backhaul_pppoe_pads_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[pppoe\\]  PPPoE PADS \\(session=0x1234\\)")
+
+add_test(NAME wireless_backhaul_pppoe_padt_recognized
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_wireless_backhaul.pcap")
+set_tests_properties(wireless_backhaul_pppoe_padt_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[pppoe\\]  PPPoE PADT \\(session=0x1234\\)")
+
+add_test(NAME wireless_backhaul_pppoe_session_lcp_recognized
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_wireless_backhaul.pcap")
+set_tests_properties(wireless_backhaul_pppoe_session_lcp_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[pppoe\\]  PPPoE Session Data \\(session=0x1234\\) -- PPP LCP")
+
+add_test(NAME wireless_backhaul_pppoe_session_pap_cleartext_note
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_wireless_backhaul.pcap")
+set_tests_properties(wireless_backhaul_pppoe_session_pap_cleartext_note PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[pppoe\\]  PPPoE Session Data \\(session=0x1234\\) -- PPP PAP.*\n.*note: PAP \\(Password Authentication Protocol\\) observed")
+
+add_test(NAME wireless_backhaul_pppoe_session_ip_recognized
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_wireless_backhaul.pcap")
+set_tests_properties(wireless_backhaul_pppoe_session_ip_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[pppoe\\]  PPPoE Session Data \\(session=0x1234\\) -- PPP IP")
+
+add_test(NAME wireless_backhaul_pppoe_malformed_falls_to_non_ip_ethertype_name
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_wireless_backhaul.pcap")
+set_tests_properties(wireless_backhaul_pppoe_malformed_falls_to_non_ip_ethertype_name PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[non-ip\\]  Ethernet frame with ethertype 0x8864 \\(PPPoE Session\\) \\(not IPv4\\)")
+
+add_test(NAME wireless_backhaul_stats_counted
+  COMMAND conduitscope decode --format text --stats --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_wireless_backhaul.pcap")
+set_tests_properties(wireless_backhaul_stats_counted PROPERTIES
+  PASS_REGULAR_EXPRESSION "capwap-control +4\n *capwap-data +3\n *gtp-u +3\n *lwapp-control +1\n *lwapp-data +1\n *non-ip +1\n *pppoe +9\n *udp +1")
+
+add_test(NAME wireless_backhaul_protocol_filter_isolates_port_based_family
+  COMMAND conduitscope decode --format text --protocol wireless-backhaul --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_wireless_backhaul.pcap")
+set_tests_properties(wireless_backhaul_protocol_filter_isolates_port_based_family PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[capwap-control\\].*\\[capwap-control\\].*\\[capwap-control\\].*\\[capwap-control\\].*\\[capwap-data\\].*\\[capwap-data\\].*\\[capwap-data\\].*\\[lwapp-control\\].*\\[lwapp-data\\].*\\[gtp-u\\].*\\[gtp-u\\].*\\[gtp-u\\]"
+  FAIL_REGULAR_EXPRESSION "\\[pppoe\\]")
+
+add_test(NAME wireless_backhaul_pppoe_protocol_filter_isolates_pppoe_only
+  COMMAND conduitscope decode --format text --protocol pppoe --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_wireless_backhaul.pcap")
+set_tests_properties(wireless_backhaul_pppoe_protocol_filter_isolates_pppoe_only PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[pppoe\\].*\\[pppoe\\].*\\[pppoe\\].*\\[pppoe\\].*\\[pppoe\\].*\\[pppoe\\].*\\[pppoe\\].*\\[pppoe\\].*\\[pppoe\\]"
+  FAIL_REGULAR_EXPRESSION "\\[capwap-control\\]|\\[capwap-data\\]|\\[lwapp-control\\]|\\[lwapp-data\\]|\\[gtp-u\\]")
 
 # ---------------------------------------------------------------------------------------------
 # Live capture (live_capture.hpp/cpp) -- an optional, build-time-detected libpcap (Linux) / Npcap

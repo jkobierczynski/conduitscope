@@ -18,7 +18,10 @@ tier of the IT protocols an OT auditor flags -- plus SMB, SSH, HTTP, HTTPS,
 SNMPv1/v2c, Telnet, FTP, and TFTP, the "lateral-movement and
 credential-harvesting" tier of the same family, plus NTP, DHCP, LDAP,
 LDAPS, RADIUS, TACACS+, and IEEE 802.1X/EAPOL, the "does the OT side
-blindly trust enterprise IT" tier of the same family,
+blindly trust enterprise IT" tier of the same family, plus CAPWAP
+control/data, LWAPP control/data, GTP-U, and PPPoE, the "wireless
+access-point control/data planes and cellular backhaul" tier of the same
+family,
 traffic from offline
 pcap/pcapng captures, and checks it
 against a zone/conduit segmentation policy. It's an OT/ICS conduit-auditing tool: `decode`/`info` give you reliable
@@ -887,6 +890,26 @@ Groundwork / v0.1.0. What works right now:
   the six port-based protocols; `--enterprise-trust-port` widens their
   shared expected-port set. See docs/MANUAL.md's PROTOCOL COVERAGE "Tier 3
   enterprise-trust-boundary protocol recognition" section
+- Tier 4 of the same family: CAPWAP control/data, LWAPP control/data,
+  GTP-U, and PPPoE -- "wireless access-point control/data planes and
+  cellular backhaul," where an AP or wireless LAN controller reachable
+  from an OT zone is itself a finding, independent of whatever rides
+  inside its tunnel. CAPWAP control/data (RFC 5415) share a modest but
+  genuine Preamble/HLEN structural check, with CAPWAP control additionally
+  naming its own Message Type when resolvable; LWAPP control/data (CAPWAP's
+  never-standardized Cisco-proprietary predecessor) are recognized by port
+  number alone; GTP-U (3GPP TS 29.281) has a genuine Version/PT structural
+  signature and surfaces its own TEID without ever unwrapping the tunneled
+  G-PDU's inner IP packet. PPPoE rides raw Ethernet (EtherType `0x8863`
+  Discovery / `0x8864` Session, no port at all, like EAPOL) and gets its
+  own dedicated `--protocol pppoe` value; a Session-stage frame's
+  encapsulated PPP Protocol field is named, and a PAP frame earns a
+  cleartext-credential note. `--protocol wireless-backhaul` isolates the
+  five port-based protocols; `--wireless-backhaul-port` widens their shared
+  expected-port set (and, unlike Tier 3, always gates detection itself,
+  since none of this tier's checks are strong enough to run
+  port-independently). See docs/MANUAL.md's PROTOCOL COVERAGE "Tier 4
+  wireless-backhaul-and-cellular protocol recognition" section
 - Name resolution, shared by `decode` and `policy validate` alike: OUI/MAC-
   vendor lookup against a built-in IEEE-registry-derived table (on by
   default, `--no-oui` disables it), hostname resolution from an explicitly-

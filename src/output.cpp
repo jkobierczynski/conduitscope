@@ -148,6 +148,20 @@ constexpr const char* kDimRed = "\033[2;31m";
 constexpr const char* kDimGreen = "\033[2;32m";
 constexpr const char* kDimYellow = "\033[2;33m";
 
+// Tier 4 "IT protocols an OT auditor flags" round (CAPWAP control/data, LWAPP control/data, GTP-U,
+// PPPoE -- see it_protocols.hpp/pppoe.hpp): six new tags, so rather than spending three of Tier 3's
+// own unused kDim{Blue,Magenta,Cyan} slots and still needing three more from somewhere else, this
+// introduces underline+italic as a wholly fresh dimension of its own -- the same "one tier, one new
+// combination" pattern Tier 1's own bold+underline established -- and fills all six standard hues in
+// one shot, the same way bold+italic took two tiers (Tier 2's FTP/TFTP, then Tier 3's NTP/DHCP/LDAP/
+// LDAPS) to fill.
+constexpr const char* kUnderlineItalicRed = "\033[4;3;31m";
+constexpr const char* kUnderlineItalicGreen = "\033[4;3;32m";
+constexpr const char* kUnderlineItalicYellow = "\033[4;3;33m";
+constexpr const char* kUnderlineItalicBlue = "\033[4;3;34m";
+constexpr const char* kUnderlineItalicMagenta = "\033[4;3;35m";
+constexpr const char* kUnderlineItalicCyan = "\033[4;3;36m";
+
 // Color for a packet's "[protocol]" tag -- picked so a mixed-protocol capture scans quickly by
 // eye, not for any deeper meaning. parse-error is the one exception: it gets the same "something
 // is wrong here" red as a Modbus exception response, rather than a plain identification color,
@@ -264,6 +278,12 @@ const char* protocol_tag_color(const std::string& protocol) {
     if (protocol == "radius") return kDimRed;
     if (protocol == "tacacs-plus") return kDimGreen;
     if (protocol == "eapol") return kDimYellow;
+    if (protocol == "capwap-control") return kUnderlineItalicCyan;
+    if (protocol == "capwap-data") return kUnderlineItalicBlue;
+    if (protocol == "lwapp-control") return kUnderlineItalicMagenta;
+    if (protocol == "lwapp-data") return kUnderlineItalicYellow;
+    if (protocol == "gtp-u") return kUnderlineItalicGreen;
+    if (protocol == "pppoe") return kUnderlineItalicRed;
     if (protocol == "parse-error") return kBoldRed;
     return kDim;  // tcp / udp / non-tcp / non-ip / unsupported-link: recognized, nothing OT-specific
 }

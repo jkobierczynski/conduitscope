@@ -188,6 +188,64 @@
 //     TACACS+ body encryption "obfuscation" at best, so an unencrypted session is a real finding, not
 //     just a protocol-naming curiosity), a 4-byte Session ID, and a 4-byte body Length. Gated to port
 //     49, the same "not self-describing enough on its own" reasoning as RADIUS/NTP above.
+//
+// ---------------------------------------------------------------------------------------------
+// Tier 4 -- "wireless access-point control/data planes and cellular backhaul" (ROADMAP item 18's
+// own wording): an AP or wireless LAN controller reachable from (or inside) an OT zone is itself a
+// finding, independent of whatever rides inside its tunnel -- CAPWAP control/data, its older,
+// Cisco-proprietary predecessor LWAPP, and the cellular-backhaul-specific GTP-U -- five `protocol`
+// values sharing one `ProtocolFilter::WirelessBackhaulOnly` toggle and one
+// `extra_wireless_backhaul_ports` list, the same "one feature toggle, several sub-protocols"
+// grouping Tiers 1-3 already established (see decoder.hpp). PPPoE, ALSO Tier 4 but EtherType-keyed
+// (0x8863/0x8864, no port at all -- the same shape EAPOL has in Tier 3), is NOT in this file -- see
+// pppoe.hpp and decoder.hpp's own ProtocolFilter::PppoeOnly comment for why.
+//   - CAPWAP control (UDP port 5246, RFC 5415) has a genuine, if modest, structural signature: the
+//     1-byte Preamble (Version, always 0 -- the only value RFC 5415 ever defines -- and Type, 0 for
+//     a plaintext CAPWAP header or 1 for a CAPWAP-over-DTLS header) plus, for a plaintext header,
+//     the CAPWAP Transport Header's own HLEN field (the header's declared length in 4-byte words,
+//     RFC 5415 section 4.3), sanity-checked against the captured payload. This file does NOT attempt
+//     a bit-perfect decode of every transport-header field (RID/WBID and the six flag bits are left
+//     unparsed) -- HLEN alone is enough to locate the Control Header that follows, whose own Message
+//     Type (a 4-byte enumerated field, RFC 5415 section 4.5 / IANA's "CAPWAP Message Types"
+//     registry) is what this file actually names. A CAPWAP-over-DTLS header (Type 1) is recognized
+//     by its Preamble alone -- everything past it is an opaque DTLS record, so no Message Type is
+//     ever available for that case. Gated to port 5246 -- the Preamble's own Version/Type nibbles
+//     are a much looser gate than GOOSE/SV's own single-byte outer BER tag (see eapol.hpp's
+//     "structural detection gate" paragraph for the same reasoning applied there), so this stays
+//     port-gated rather than checked opportunistically the way DHCP's magic cookie is in Tier 3.
+//   - CAPWAP data (UDP port 5247) shares the identical Preamble/Transport-Header shape as CAPWAP
+//     control above -- checked the same way -- but its own payload past the header is the actual
+//     bridged wireless client frame (802.11, tunneled to the controller for centralized forwarding)
+//     rather than a Control Header with a Message Type, so this file names it "capwap-data" and goes
+//     no further: per ROADMAP item 18's own framing, the control/data plane's mere PRESENCE is the
+//     finding here, independent of whatever client traffic rides inside the tunnel -- decoding the
+//     inner 802.11 frame would also require trusting the AP/controller pairing this item is itself
+//     questioning.
+//   - LWAPP control (UDP port 12222) and LWAPP data (UDP port 12223) are the older, Cisco-
+//     proprietary protocol CAPWAP was directly modeled on (and superseded -- RFC 5415's own
+//     Introduction) -- unlike CAPWAP, LWAPP was never published as a standards-track RFC (its own
+//     IETF draft, draft-ietf-capwap-lwapp, expired unadopted), so this file has no authoritative
+//     public wire-format specification to check a structural signature against. Both are recognized
+//     by port number ALONE -- the same weakest-gate treatment TeamViewer/AnyDesk/Zoom get in Tier 1
+//     (see this file's own Tier 1 paragraph above) -- every match this produces for LWAPP says so
+//     explicitly.
+//   - GTP-U (UDP port 2152, 3GPP TS 29.281) has a genuine structural signature in its mandatory
+//     8-byte header: the first byte's top 4 bits are always Version(3 bits)=1 concatenated with
+//     PT(1 bit)=1 for GTP (as opposed to GTP', an unrelated charging protocol sharing the same
+//     Version field) -- i.e. always 0x3 -- followed by an enumerated Message Type (1 byte -- 255 =
+//     G-PDU, the actual tunneled user-plane packet, is by far the most common in practice; 1/2 =
+//     Echo Request/Response are the other frequent ones; the rest are named from TS 29.281's own
+//     registry), a Length field (2 bytes, the payload's length AFTER this 8-byte mandatory header,
+//     not strictly re-validated against the captured payload -- the same lenient "declares more than
+//     was actually captured -- almost always snaplen truncation" tolerance GOOSE/SV/EtherCAT's own
+//     declared-length checks already have), and a 4-byte TEID (Tunnel Endpoint Identifier) this file
+//     surfaces but does not attempt to correlate across packets. Gated to port 2152, the same "not
+//     self-describing enough on its own" reasoning RADIUS/TACACS+/NTP get above, even though the
+//     Version/PT check is a real structural signature. Per ROADMAP item 18's own framing ("a
+//     well-known way SCADA traffic leaves a site entirely outside any on-prem firewall's view"),
+//     this file deliberately does NOT attempt to decode a G-PDU's own inner IP packet -- naming the
+//     tunnel itself, and its TEID, is the audit-relevant finding; unwrapping the inner packet would
+//     cross into a second decode pass this ROADMAP item's own name-only posture doesn't call for.
 #pragma once
 
 #include <cstdint>
@@ -356,5 +414,34 @@ std::optional<ItEnterpriseTrustMatch> try_recognize_it_enterprise_trust(ByteSpan
 // the full reasoning; true when `payload` matches this file's own LDAP BER structural check (the
 // same one try_recognize_it_enterprise_trust itself uses).
 bool looks_like_ldap_ber(ByteSpan payload);
+
+// ---------------------------------------------------------------------------------------------
+// Tier 4 -- see this file's own header comment above for the full per-protocol confidence writeup.
+// PPPoE (also Tier 4) is NOT declared here -- see pppoe.hpp's own try_parse_pppoe.
+
+constexpr uint16_t CAPWAP_CONTROL_PORT = 5246;  // UDP -- RFC 5415, IANA-registered "capwap-control"
+constexpr uint16_t CAPWAP_DATA_PORT = 5247;     // UDP -- RFC 5415, IANA-registered "capwap-data"
+
+// Cisco-proprietary, no authoritative public RFC -- see this file's own header comment.
+constexpr uint16_t LWAPP_CONTROL_PORT = 12222;  // UDP
+constexpr uint16_t LWAPP_DATA_PORT = 12223;     // UDP
+
+constexpr uint16_t GTP_U_PORT = 2152;  // UDP -- 3GPP TS 29.281, IANA-registered "gtp-u"
+
+struct ItWirelessBackhaulMatch {
+    std::string protocol;  // "capwap-control" / "capwap-data" / "lwapp-control" / "lwapp-data" / "gtp-u"
+    std::string summary;
+    std::vector<std::string> notes;
+};
+
+// Returns std::nullopt if `payload` and the `src_port`/`dst_port` pair don't match any of the five
+// Tier 4 protocols this file recognizes. Unlike every earlier tier in this file, all five are
+// UDP-only by spec, so there is no `is_tcp` parameter at all -- see decoder.cpp's own call site,
+// which only ever reaches this function from the UDP dispatch path. `extra_ports` extends every one
+// of this file's own default ports, one shared list across all five -- the same "one feature toggle"
+// grouping Tiers 1-3 already established, not five independent option lists.
+std::optional<ItWirelessBackhaulMatch> try_recognize_it_wireless_backhaul(ByteSpan payload, uint16_t src_port,
+                                                                            uint16_t dst_port,
+                                                                            const std::vector<uint16_t>& extra_ports);
 
 }  // namespace conduitscope

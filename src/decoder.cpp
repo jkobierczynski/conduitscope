@@ -1153,6 +1153,36 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                     }
                 }
 
+                // PPPoE (EtherType 0x8863 Discovery / 0x8864 Session) -- ROADMAP item 18's Tier 4,
+                // same EtherType-keyed rationale/pattern as PROFINET RT/GOOSE/SV/EtherCAT/EAPOL
+                // above, except PPPoE has its own dedicated ProtocolFilter::PppoeOnly rather than
+                // sharing Tier 4's port-based WirelessBackhaulOnly filter -- see decoder.hpp's own
+                // comment on both and pppoe.hpp's file header comment for the full reasoning. Two
+                // EtherTypes share one dispatch: try_parse_pppoe itself decides which Code values
+                // are valid based on which stage its own `is_session_ethertype` argument names.
+                bool want_pppoe = options_.protocol_filter == ProtocolFilter::Auto ||
+                                    options_.protocol_filter == ProtocolFilter::PppoeOnly;
+                if (want_pppoe && (eth.ethertype == ETHERTYPE_PPPOE_DISCOVERY ||
+                                    eth.ethertype == ETHERTYPE_PPPOE_SESSION)) {
+                    bool is_session_ethertype = (eth.ethertype == ETHERTYPE_PPPOE_SESSION);
+                    if (auto pp = try_parse_pppoe(eth.payload, is_session_ethertype)) {
+                        out.protocol = "pppoe";
+                        out.summary = pp->summary;
+                        out.pppoe_version = pp->version;
+                        out.pppoe_type = pp->type;
+                        out.pppoe_code = pp->code;
+                        out.pppoe_code_name = pp->code_name;
+                        out.pppoe_session_id = pp->session_id;
+                        out.pppoe_length = pp->length;
+                        out.pppoe_is_session = pp->is_session;
+                        out.pppoe_has_ppp_protocol = pp->has_ppp_protocol;
+                        out.pppoe_ppp_protocol = pp->ppp_protocol;
+                        out.pppoe_ppp_protocol_name = pp->ppp_protocol_name;
+                        for (const auto& n : pp->notes) out.notes.push_back(n);
+                        return out;
+                    }
+                }
+
                 // STP (classic IEEE 802.3 LLC framing -- NOT any EtherType at all, see
                 // link_layer.hpp's file header comment). Every branch above is EtherType-keyed
                 // (ethertype >= 0x0800); a length-framed frame (eth.is_llc_length) can never match
@@ -1795,6 +1825,24 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                 if (auto m = try_recognize_it_enterprise_trust(udp.payload, udp.src_port, udp.dst_port,
                                                                   /*is_tcp=*/false,
                                                                   options_.extra_enterprise_trust_ports)) {
+                    out.protocol = m->protocol;
+                    out.summary = m->summary;
+                    for (const auto& n : m->notes) out.notes.push_back(n);
+                    return out;
+                }
+            }
+
+            // Tier 4 "IT protocols an OT auditor flags" recognition -- see it_protocols.hpp. All
+            // five of this tier's port-based protocols (CAPWAP control/data, LWAPP control/data,
+            // GTP-U) are UDP-only by spec, so unlike Tiers 1-3 there is no matching TCP-side call
+            // site anywhere in this file -- see try_recognize_it_wireless_backhaul's own comment for
+            // why it takes no `is_tcp` parameter at all. PPPoE, the sixth Tier 4 protocol, is
+            // dispatched separately, in the EtherType-keyed region above -- see pppoe.hpp.
+            bool want_wireless_backhaul_udp = options_.protocol_filter == ProtocolFilter::Auto ||
+                                               options_.protocol_filter == ProtocolFilter::WirelessBackhaulOnly;
+            if (want_wireless_backhaul_udp) {
+                if (auto m = try_recognize_it_wireless_backhaul(udp.payload, udp.src_port, udp.dst_port,
+                                                                  options_.extra_wireless_backhaul_ports)) {
                     out.protocol = m->protocol;
                     out.summary = m->summary;
                     for (const auto& n : m->notes) out.notes.push_back(n);

@@ -11,7 +11,7 @@ conduitscope [-q|--quiet] [--no-color|--color] [--log-file FILE] [--version] [-h
 
 conduitscope decode (-r FILE | -i INTERFACE) [-o FILE] [-f text|json|csv] [--protocol NAME]
                      [--modbus-port PORT]... [--dnp3-port PORT]... [--s7comm-port PORT]... [--iec104-port PORT]...
-                     [--enip-port PORT]... [--enip-io-port PORT]... [--bacnet-port PORT]... [--hartip-port PORT]... [--opcua-port PORT]... [--mqtt-port PORT]... [--ffhse-port PORT]... [--remote-access-port PORT]... [--lateral-movement-port PORT]... [--enterprise-trust-port PORT]...
+                     [--enip-port PORT]... [--enip-io-port PORT]... [--bacnet-port PORT]... [--hartip-port PORT]... [--opcua-port PORT]... [--mqtt-port PORT]... [--ffhse-port PORT]... [--remote-access-port PORT]... [--lateral-movement-port PORT]... [--enterprise-trust-port PORT]... [--wireless-backhaul-port PORT]...
                      [--max-packets N] [--stats] [--strict]
                      [--filter BPF] [--duration SECONDS] [--snaplen BYTES] [--no-promiscuous]
 
@@ -167,7 +167,7 @@ conduitscope decode (-r FILE | -i INTERFACE) [options]
 | `--no-promiscuous` | off (i.e. promiscuous by default) | With `-i`, don't put the interface into promiscuous mode. Promiscuous is the default because the main live-capture use case -- watching a mirrored/SPAN switch port for zone/conduit traffic -- needs to see traffic that isn't addressed to the capturing host at all. |
 | `-o, --output FILE` | stdout | Write decoded output here instead of stdout. |
 | `-f, --format {text,json,csv}` | `text` | Output format. See OUTPUT FORMATS below. |
-| `--protocol NAME` | `auto` | Restrict decoding to one protocol. See PROTOCOL COVERAGE below for the full, current list of valid protocol names (one per subsection there). `auto` opportunistically tries OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, S7comm/COTP, S7comm-Plus, MMS, HART-IP, MQTT, and FF-HSE detection on every TCP payload (in that order -- FF-HSE last of all, even after MQTT, see PROTOCOL DETECTION), CIP I/O, BACnet/IP, HART-IP, and FF-HSE detection on every UDP payload (FF-HSE last there too), PROFINET RT (DCP/cyclic) detection on every non-IPv4 Ethernet frame carrying EtherType `0x8892`, GOOSE detection on every non-IPv4 Ethernet frame carrying EtherType `0x88B8`, Sampled Values detection on every non-IPv4 Ethernet frame carrying EtherType `0x88BA`, EtherCAT detection on every non-IPv4 Ethernet frame carrying EtherType `0x88A4`, regardless of port, and Spanning Tree Protocol (STP/RSTP/MSTP) detection on every classic IEEE 802.3 length-framed Ethernet frame whose LLC header is DSAP=SSAP=`0x42` -- a structurally separate dispatch path from every EtherType-keyed protocol above, so there's no ordering/collision question between them (see PROTOCOL DETECTION below). `enip` covers both EtherNet/IP explicit messaging (TCP) and CIP I/O implicit messaging (UDP). `mms` is IEC 61850 MMS (Manufacturing Message Specification, ISO 9506) -- shares S7comm's exact TPKT/COTP transport and TCP port 102, but is a distinct application protocol; see `--s7comm-port` below and PROTOCOL COVERAGE's MMS section. `s7comm-plus` is S7comm-Plus (TIA Portal / S7-1200/1500) -- shares the same TPKT/COTP transport and TCP port 102, disambiguated by its own protocol id byte; see `--s7comm-port` below and PROTOCOL COVERAGE's S7comm-Plus section. `mqtt` is MQTT (v3.1/v3.1.1/v5.0) plus Sparkplug B -- see `--mqtt-port` below and PROTOCOL COVERAGE's MQTT section. `profinet` covers both DCP and cyclic real-time IO. `sv` is IEC 61850-9-2 Sampled Values. `ethercat` is EtherCAT. `bacnet` is BACnet/IP. `hartip` is HART-IP (covers both UDP and TCP). `opcua` is OPC UA Binary (UA-TCP/Secure Conversation, TCP only). `ff-hse` is FOUNDATION Fieldbus HSE (covers FDA/SM/FMS/LAN Redundancy, on both TCP and UDP) -- see `--ffhse-port` below and PROTOCOL COVERAGE's FOUNDATION Fieldbus HSE section. `stp` is Spanning Tree Protocol (STP/RSTP/MSTP) -- no port option, matching GOOSE/SV/EtherCAT/PROFINET's own no-port precedent for a protocol with no port at all; see PROTOCOL COVERAGE's Spanning Tree Protocol section. `devicenet` is DeviceNet (CAN-bus CIP) -- no port option either, the same no-port precedent, but unlike every other value in this list it isn't reached through Ethernet at all: it's gated on the capture's own pcap link type being `LINKTYPE_CAN_SOCKETCAN` (227, standard Linux SocketCAN capture framing -- what `candump -l`/`tcpdump -i can0`/Wireshark itself write capturing a CAN bus), checked before any protocol filter, so `--protocol devicenet` against an ordinary Ethernet-linktype capture simply decodes nothing (every packet still parses at the link layer, just with no application-layer match) rather than erroring; see PROTOCOL COVERAGE's DeviceNet section. `remote-access` covers Tier 1 of the "IT protocols an OT auditor flags" family (RDP/VNC/TeamViewer/AnyDesk/Zoom, each its own `protocol` value even under this one filter name) -- see `--remote-access-port` below and PROTOCOL COVERAGE's "Tier 1 remote-access protocol recognition" section. `lateral-movement` covers Tier 2 of the same family (SMB/SSH/HTTP/HTTPS/SNMPv1v2c/Telnet/FTP/TFTP, again each its own `protocol` value under this one filter name) -- see `--lateral-movement-port` below and PROTOCOL COVERAGE's "Tier 2 lateral-movement protocol recognition" section. `enterprise-trust` covers the six port-based protocols of Tier 3 of the same family (NTP/DHCP/LDAP/LDAPS/RADIUS/TACACS+, again each its own `protocol` value under this one filter name) -- see `--enterprise-trust-port` below and PROTOCOL COVERAGE's "Tier 3 enterprise-trust-boundary protocol recognition" section. `eapol` is Tier 3's seventh protocol, IEEE 802.1X/EAPOL -- EtherType-keyed, no port at all, so it has its own dedicated filter value rather than sharing `enterprise-trust`, the same split GOOSE/SV/EtherCAT/PROFINET's own EtherType-keyed filters already have from every port-based one; no port option exists for it. |
+| `--protocol NAME` | `auto` | Restrict decoding to one protocol. See PROTOCOL COVERAGE below for the full, current list of valid protocol names (one per subsection there). `auto` opportunistically tries OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, S7comm/COTP, S7comm-Plus, MMS, HART-IP, MQTT, and FF-HSE detection on every TCP payload (in that order -- FF-HSE last of all, even after MQTT, see PROTOCOL DETECTION), CIP I/O, BACnet/IP, HART-IP, and FF-HSE detection on every UDP payload (FF-HSE last there too), PROFINET RT (DCP/cyclic) detection on every non-IPv4 Ethernet frame carrying EtherType `0x8892`, GOOSE detection on every non-IPv4 Ethernet frame carrying EtherType `0x88B8`, Sampled Values detection on every non-IPv4 Ethernet frame carrying EtherType `0x88BA`, EtherCAT detection on every non-IPv4 Ethernet frame carrying EtherType `0x88A4`, regardless of port, and Spanning Tree Protocol (STP/RSTP/MSTP) detection on every classic IEEE 802.3 length-framed Ethernet frame whose LLC header is DSAP=SSAP=`0x42` -- a structurally separate dispatch path from every EtherType-keyed protocol above, so there's no ordering/collision question between them (see PROTOCOL DETECTION below). `enip` covers both EtherNet/IP explicit messaging (TCP) and CIP I/O implicit messaging (UDP). `mms` is IEC 61850 MMS (Manufacturing Message Specification, ISO 9506) -- shares S7comm's exact TPKT/COTP transport and TCP port 102, but is a distinct application protocol; see `--s7comm-port` below and PROTOCOL COVERAGE's MMS section. `s7comm-plus` is S7comm-Plus (TIA Portal / S7-1200/1500) -- shares the same TPKT/COTP transport and TCP port 102, disambiguated by its own protocol id byte; see `--s7comm-port` below and PROTOCOL COVERAGE's S7comm-Plus section. `mqtt` is MQTT (v3.1/v3.1.1/v5.0) plus Sparkplug B -- see `--mqtt-port` below and PROTOCOL COVERAGE's MQTT section. `profinet` covers both DCP and cyclic real-time IO. `sv` is IEC 61850-9-2 Sampled Values. `ethercat` is EtherCAT. `bacnet` is BACnet/IP. `hartip` is HART-IP (covers both UDP and TCP). `opcua` is OPC UA Binary (UA-TCP/Secure Conversation, TCP only). `ff-hse` is FOUNDATION Fieldbus HSE (covers FDA/SM/FMS/LAN Redundancy, on both TCP and UDP) -- see `--ffhse-port` below and PROTOCOL COVERAGE's FOUNDATION Fieldbus HSE section. `stp` is Spanning Tree Protocol (STP/RSTP/MSTP) -- no port option, matching GOOSE/SV/EtherCAT/PROFINET's own no-port precedent for a protocol with no port at all; see PROTOCOL COVERAGE's Spanning Tree Protocol section. `devicenet` is DeviceNet (CAN-bus CIP) -- no port option either, the same no-port precedent, but unlike every other value in this list it isn't reached through Ethernet at all: it's gated on the capture's own pcap link type being `LINKTYPE_CAN_SOCKETCAN` (227, standard Linux SocketCAN capture framing -- what `candump -l`/`tcpdump -i can0`/Wireshark itself write capturing a CAN bus), checked before any protocol filter, so `--protocol devicenet` against an ordinary Ethernet-linktype capture simply decodes nothing (every packet still parses at the link layer, just with no application-layer match) rather than erroring; see PROTOCOL COVERAGE's DeviceNet section. `remote-access` covers Tier 1 of the "IT protocols an OT auditor flags" family (RDP/VNC/TeamViewer/AnyDesk/Zoom, each its own `protocol` value even under this one filter name) -- see `--remote-access-port` below and PROTOCOL COVERAGE's "Tier 1 remote-access protocol recognition" section. `lateral-movement` covers Tier 2 of the same family (SMB/SSH/HTTP/HTTPS/SNMPv1v2c/Telnet/FTP/TFTP, again each its own `protocol` value under this one filter name) -- see `--lateral-movement-port` below and PROTOCOL COVERAGE's "Tier 2 lateral-movement protocol recognition" section. `enterprise-trust` covers the six port-based protocols of Tier 3 of the same family (NTP/DHCP/LDAP/LDAPS/RADIUS/TACACS+, again each its own `protocol` value under this one filter name) -- see `--enterprise-trust-port` below and PROTOCOL COVERAGE's "Tier 3 enterprise-trust-boundary protocol recognition" section. `eapol` is Tier 3's seventh protocol, IEEE 802.1X/EAPOL -- EtherType-keyed, no port at all, so it has its own dedicated filter value rather than sharing `enterprise-trust`, the same split GOOSE/SV/EtherCAT/PROFINET's own EtherType-keyed filters already have from every port-based one; no port option exists for it. `wireless-backhaul` covers the five port-based protocols of Tier 4 of the same family (CAPWAP control/data, LWAPP control/data, GTP-U, again each its own `protocol` value under this one filter name) -- see `--wireless-backhaul-port` below and PROTOCOL COVERAGE's "Tier 4 wireless-backhaul-and-cellular protocol recognition" section. `pppoe` is Tier 4's sixth protocol, PPPoE -- EtherType-keyed, no port at all, the same split `eapol` has from `enterprise-trust`; no port option exists for it either. |
 | `--modbus-port PORT` | *(502 built in)* | Additional TCP port to treat as "expected" for Modbus. Repeatable. Does **not** gate detection -- it only changes whether a decoded Modbus frame is annotated as appearing on an unexpected port, which is itself a useful signal when auditing a conduit. |
 | `--dnp3-port PORT` | *(20000 built in)* | Same as `--modbus-port`, for DNP3. Repeatable. |
 | `--s7comm-port PORT` | *(102 built in)* | Same as `--modbus-port`, for COTP/S7comm. Repeatable. There is no separate `--mms-port` -- MMS rides the identical TPKT/COTP transport on the identical TCP port 102 S7comm uses (see `mms.hpp`'s file header), so this same option's "expected port" annotation also governs MMS traffic. |
@@ -1976,6 +1976,27 @@ layer at all), dispatched purely by that EtherType, and reached only via
 enterprise-trust` or `--enterprise-trust-port`, the same split
 GOOSE/SV/EtherCAT/PROFINET's own EtherType-keyed filters already have from
 every port-based protocol filter in this list.
+
+**CAPWAP control/data, LWAPP control/data, and GTP-U (Tier 4's five
+port-based protocols) are ALL port-gated in `--protocol auto`, with no
+exceptions**, widened by one shared `--wireless-backhaul-port` option
+(`extra_wireless_backhaul_ports` in `decoder.hpp`) -- see PROTOCOL
+COVERAGE's "Tier 4 wireless-backhaul-and-cellular protocol recognition"
+section for the per-protocol reasoning. Unlike Tier 3, no protocol in this
+tier has a signature strong enough to check port-independently the way
+DHCP's magic cookie or LDAPS's ClientHello do -- CAPWAP/CAPWAP data's own
+Preamble check and GTP-U's own Version/PT check are both genuine but
+modest, and LWAPP has no structural check at all -- so `--wireless-
+backhaul-port` always gates detection itself for all five, not just the
+"expected port" annotation. `--protocol wireless-backhaul` skips every
+port gate in this tier at once, same as `--protocol enterprise-trust`/
+`--protocol lateral-movement`/`--protocol remote-access` above. **PPPoE
+needs no port gate or option at all**: like EAPOL above, it rides directly
+on Ethernet (EtherType `0x8863`/`0x8864`, no IP/TCP/UDP layer at all),
+dispatched purely by that EtherType, and reached only via `--protocol
+pppoe` or Auto mode -- it is not covered by `--protocol wireless-backhaul`
+or `--wireless-backhaul-port`, the same split EAPOL already has from
+`--protocol enterprise-trust`/`--enterprise-trust-port`.
 
 ## OUTPUT FORMATS
 
@@ -7971,6 +7992,139 @@ groundwork pass -- what matters for a name-only recognizer is that the
 port/structural gate itself is correct, which the synthetic fixture
 confirms directly.
 
+### Tier 4 wireless-backhaul-and-cellular protocol recognition (CAPWAP, LWAPP, GTP-U, PPPoE)
+
+The fourth tier of ROADMAP item 18's "IT protocols an OT auditor flags"
+family: "wireless access-point control/data planes and cellular
+backhaul" -- an AP or wireless LAN controller reachable from (or inside)
+an OT zone is itself a finding, independent of whatever rides inside its
+tunnel, and PPPoE/GTP-U name the cellular-backhaul-specific case: "a
+well-known way SCADA traffic leaves a site entirely outside any on-prem
+firewall's view, the usual signature of an RTU or 4G/5G router phoning
+out through a vendor's 'cloud gateway' SIM." See
+`include/conduitscope/it_protocols.hpp`'s own file header comment (the
+Tier 4 half) and `include/conduitscope/pppoe.hpp`'s own file header
+comment for the full confidence-tier reasoning summarized here.
+
+Five of this tier's six protocols are identified from a port, reported as
+their own `protocol` value (`capwap-control`/`capwap-data`/
+`lwapp-control`/`lwapp-data`/`gtp-u`) with a one-line `summary`; the
+sixth, PPPoE, rides raw Ethernet (EtherType `0x8863` Discovery /
+`0x8864` Session) rather than any TCP/UDP port at all, and is covered
+separately below. Confidence varies, and every summary/note says so
+honestly:
+
+- **CAPWAP control** (UDP port 5246, RFC 5415) is identified from a
+  modest, genuine structural signature: the 1-byte Preamble (Version,
+  always 0 -- the only value RFC 5415 defines -- and Type, 0 for a
+  plaintext header or 1 for a CAPWAP-over-DTLS header) plus, for a
+  plaintext header, the Transport Header's own HLEN field (RFC 5415
+  section 4.3), sanity-checked against the captured payload. This decoder
+  does **not** attempt a bit-perfect decode of every transport-header
+  field (RID/WBID and the six flag bits are left unparsed) -- HLEN alone
+  is enough to locate the Control Header that follows, whose own Message
+  Type (RFC 5415 section 4.5 / IANA's "CAPWAP Message Types" registry --
+  Discovery/Join/Configuration Status/Configuration Update/WTP Event/
+  Change State Event/Echo/Image Data/Reset/Primary Discovery/Data
+  Transfer/Clear Configuration Request-Response pairs, plus Station
+  Configuration Request/Response) is what's actually named. A
+  CAPWAP-over-DTLS header is recognized by its Preamble alone -- past it
+  is an opaque DTLS record, so no Message Type is ever available for that
+  case. Gated to port 5246, the same "not self-describing enough alone"
+  reasoning NTP/RADIUS/TACACS+ already earn in Tier 3 -- the Preamble's
+  Version/Type nibbles are a much looser gate than GOOSE/SV's own
+  single-byte outer BER tag.
+- **CAPWAP data** (UDP port 5247) shares the identical Preamble/
+  Transport-Header shape as CAPWAP control above, checked the same way --
+  but its own payload past the header is the actual bridged wireless
+  client frame (802.11, tunneled to the controller for centralized
+  forwarding) rather than a Control Header with a Message Type, so this
+  decoder names it `capwap-data` and goes no further: per this item's own
+  framing, the control/data plane's mere presence is the finding here,
+  independent of whatever client traffic rides inside the tunnel --
+  decoding the inner 802.11 frame would also require trusting the
+  AP/controller pairing this item is itself questioning.
+- **LWAPP control** (UDP port 12222) and **LWAPP data** (UDP port 12223)
+  are the older, Cisco-proprietary protocol CAPWAP was directly modeled
+  on (and superseded -- RFC 5415's own Introduction). Unlike CAPWAP,
+  LWAPP was never published as a standards-track RFC (its own IETF draft
+  expired unadopted), so this decoder has no authoritative public
+  wire-format specification to check a structural signature against.
+  Both are recognized by **port number alone** -- the same weakest-gate
+  treatment TeamViewer/AnyDesk/Zoom get in Tier 1 -- every match says so
+  explicitly.
+- **GTP-U** (UDP port 2152, 3GPP TS 29.281) is identified from a genuine
+  structural signature in its mandatory 8-byte header: the first byte's
+  top 4 bits are always Version(3 bits)=1 concatenated with PT(1 bit)=1
+  for GTP (as opposed to GTP', an unrelated charging protocol sharing the
+  same Version field) -- i.e. always `0x3` -- followed by an enumerated
+  Message Type (255 = G-PDU, the actual tunneled user-plane packet, is by
+  far the most common in practice; 1/2 = Echo Request/Response are the
+  other frequent ones; 26 = Error Indication, 31 = Supported Extension
+  Headers Notification, 254 = End Marker round out the rest of this
+  decoder's own curated subset), a Length field (not strictly
+  re-validated against the captured payload, the same lenient tolerance
+  GOOSE/SV/EtherCAT's own declared-length checks already have), and a
+  4-byte TEID (Tunnel Endpoint Identifier) this decoder surfaces but does
+  not correlate across packets. Gated to port 2152, same reasoning as
+  CAPWAP control above. Per this item's own framing, this decoder
+  deliberately does **not** attempt to decode a G-PDU's own inner IP
+  packet -- naming the tunnel itself, and its TEID, is the audit-relevant
+  finding; unwrapping the inner packet would cross into a second decode
+  pass this whole item's name-only posture doesn't call for.
+- **PPPoE** (RFC 2516, EtherType `0x8863` Discovery / `0x8864` Session,
+  `pppoe.hpp`) is architecturally different from the other five: no
+  TCP/UDP port, no IP layer at all -- the same shape EAPOL has in Tier 3,
+  dispatched from the same EtherType-keyed region of `decoder.cpp`, with
+  its own dedicated `--protocol pppoe` value rather than folding into
+  `--protocol wireless-backhaul`. ROADMAP item 18's own wording groups
+  PPPoE with GTP-U as "cellular-backhaul-specific": a site's RTU or 4G/5G
+  router commonly terminates its own WAN uplink over a PPP session, and
+  PPPoE is the most common way that session is carried across the last
+  hop to whatever media converter or ONT/modem actually reaches the
+  carrier. The 6-byte PPPoE header (Ver=1, Type=1, Code, Session ID,
+  Length) is parsed in full; for the Session stage, a further, shallow
+  look at the encapsulated PPP frame's own leading Protocol field (RFC
+  1661 section 2) names it (IP, IPv6, IPCP, IPv6CP, LCP, PAP, LQR, CHAP,
+  EAP) without parsing anything past that field. PAP (Password
+  Authentication Protocol) earns its own note: RFC 1334's
+  Authenticate-Request carries the username/password pair in cleartext,
+  the same "worth a note but not credential extraction" treatment LDAP's
+  own bindRequest gets in Tier 3 -- the credential itself is never
+  inspected. This decoder does **not** unwrap a PPPoE Session frame's own
+  PPP payload to feed it back through IPv4/TCP/UDP dispatch -- the same
+  "name the tunnel, don't follow it" posture GTP-U's own G-PDU takes
+  above.
+
+`--protocol wireless-backhaul` isolates the five port-based protocols
+from the CLI (PPPoE is reached only via its own `--protocol pppoe`, or in
+Auto mode alongside everything else); `--wireless-backhaul-port`
+(repeatable) widens what counts as an "expected" port for those five at
+once (one shared option, the same grouping `--enterprise-trust-port`
+already established for Tier 3) -- unlike Tier 3, none of this tier's own
+structural checks are strong enough to run port-independently, so this
+option always gates detection itself, not just the "expected port"
+annotation (see OPTIONS). PPPoE needs no port option at all, matching
+EAPOL's own no-port precedent.
+
+Validated against `tests/sample_wireless_backhaul.pcap` (23 packets,
+hand-built with scapy): CAPWAP control Discovery Request plus a
+DTLS-protected variant, a too-short-for-HLEN weak fallback, and a
+port-only fallback; CAPWAP data plaintext and DTLS-protected variants
+plus a port-only fallback; LWAPP control/data port-only matches; GTP-U
+G-PDU (with its tunneled-user-plane-packet note) and Echo Request plus a
+port-only fallback; a CAPWAP control packet on a deliberately
+non-standard port demonstrating both the "not recognized without
+widening" case and the fix once `--wireless-backhaul-port` widens its
+expected-port set; all five PPPoE Discovery codes (PADI/PADO/PADR/PADS/
+PADT); Session-stage frames carrying LCP, PAP (with its cleartext-
+credential note), and IP; a mid-session PADT; and a malformed PPPoE
+header that correctly falls through to the generic `non-ip` fallback,
+named by its EtherType rather than decoded. As with Tiers 1-3, no real
+capture of any of these six was sought for this groundwork pass -- what
+matters for a name-only recognizer is that the port/structural gate
+itself is correct, which the synthetic fixture confirms directly.
+
 ### Link/IP-layer plumbing: non-IPv4 Ethernet, and non-TCP IPv4 (including UDP)
 
 Every protocol above rides on Ethernet + IPv4 + TCP. Traffic outside that --
@@ -7987,13 +8141,14 @@ protocol number registry (not reverse-engineered from a single capture):
   recognize the inner ethertype" -- it's now named as such instead of a bare
   `0x8100`) are named but not decoded further. PROFINET RT (`0x8892`),
   IEC 61850-8-1 GOOSE (`0x88B8`), IEC 61850-9-2 Sampled Values (`0x88BA`),
-  EtherCAT (`0x88A4`), and IEEE 802.1X/EAPOL (`0x888E`) are also named
-  here, but, like CIP I/O below, a frame that actually looks like DCP/
-  cyclic IO data, a GOOSE APDU, a SavPdu, an EtherCAT frame header, or an
-  EAPOL header is decoded and reported as
-  `profinet`/`goose`/`sv`/`ethercat`/`eapol`, not `non-ip` -- see PROTOCOL
-  COVERAGE's PROFINET RT, GOOSE, Sampled Values, EtherCAT, and Tier 3
-  enterprise-trust-boundary sections.
+  EtherCAT (`0x88A4`), IEEE 802.1X/EAPOL (`0x888E`), and PPPoE Discovery/
+  Session (`0x8863`/`0x8864`) are also named here, but, like CIP I/O below,
+  a frame that actually looks like DCP/cyclic IO data, a GOOSE APDU, a
+  SavPdu, an EtherCAT frame header, an EAPOL header, or a PPPoE header is
+  decoded and reported as `profinet`/`goose`/`sv`/`ethercat`/`eapol`/
+  `pppoe`, not `non-ip` -- see PROTOCOL COVERAGE's PROFINET RT, GOOSE,
+  Sampled Values, EtherCAT, Tier 3 enterprise-trust-boundary, and Tier 4
+  wireless-backhaul-and-cellular sections.
 - **IPv4 protocol numbers** (`ipv4.hpp`'s `ip_protocol_name`): ICMP,
   IPv6-in-IPv4, GRE, ESP, AH, ICMPv6, SCTP are named but not decoded
   further. IGMP, VRRP, IGRP, PIM, EIGRP, and OSPF (protocol numbers 2, 112,
@@ -9025,12 +9180,14 @@ These are current, not aspirational -- each has a corresponding ROADMAP item.
   remote-access protocol recognition" section and `decoder.cpp`'s own
   comment at that call site.
 - **None of RDP/VNC/TeamViewer/AnyDesk/Zoom/SMB/SSH/HTTP/HTTPS/SNMP/
-  Telnet/FTP/TFTP/NTP/DHCP/LDAP/LDAPS/RADIUS/TACACS+/EAPOL are wired into
-  the `policy validate` conduit-matching engine yet** -- this groundwork
-  pass only recognizes and names them in `decode` output; a conduit naming
-  `rdp`/`vnc`/`smb`/`ssh`/`ntp`/`ldap`/`eapol`/etc. in its `protocols` list
-  is not yet a supported value (see ROADMAP item 18's own "modeling gap"
-  paragraph for what a future pass would need).
+  Telnet/FTP/TFTP/NTP/DHCP/LDAP/LDAPS/RADIUS/TACACS+/EAPOL/CAPWAP control/
+  CAPWAP data/LWAPP control/LWAPP data/GTP-U/PPPoE are wired into the
+  `policy validate` conduit-matching engine yet** -- this groundwork pass
+  only recognizes and names them in `decode` output; a conduit naming
+  `rdp`/`vnc`/`smb`/`ssh`/`ntp`/`ldap`/`eapol`/`capwap-control`/`gtp-u`/
+  `pppoe`/etc. in its `protocols` list is not yet a supported value (see
+  ROADMAP item 18's own "modeling gap" paragraph for what a future pass
+  would need).
 - **TeamViewer, AnyDesk, Zoom, and (in Tier 2) SNMP/Telnet/FTP/TFTP's own
   port-only fallbacks are all recognized by port number alone**, the
   weakest identification gate in this codebase -- a completely unrelated
@@ -9089,6 +9246,37 @@ These are current, not aspirational -- each has a corresponding ROADMAP item.
   the equivalent caveat elsewhere in this item, since EAPOL's own audit
   framing is inverted (its *absence* is often the finding) -- see PROTOCOL
   COVERAGE's Tier 3 section.
+- **LWAPP control/data are recognized by port number alone (12222/12223),
+  the same weakest identification gate as TeamViewer/AnyDesk/Zoom** --
+  LWAPP was never published as a standards-track RFC (its own IETF draft
+  expired unadopted), so this decoder has no authoritative wire-format
+  specification to check any structural signature against; a completely
+  unrelated service happening to run on either port would be misidentified
+  with total confidence. See PROTOCOL COVERAGE's Tier 4 section.
+- **CAPWAP control/data's own structural check only fires on their own
+  configured port (5246/5247, or a configured `--wireless-backhaul-port`),
+  and does not attempt a bit-perfect decode of the Transport Header** --
+  the Preamble's Version/Type nibbles and the HLEN sanity bound are a much
+  looser gate than GOOSE/SV/EtherCAT's own single-byte structural checks,
+  and RID/WBID/the six flag bits are left entirely unparsed; only HLEN
+  itself (needed to locate the Control Header) and, for CAPWAP control, the
+  resulting Message Type are actually read. See PROTOCOL COVERAGE's Tier 4
+  section.
+- **GTP-U's own G-PDU (the actual tunneled user-plane packet) is never
+  unwrapped** -- this decoder names the tunnel and surfaces its TEID, but
+  does not feed the inner IP packet back through IPv4/TCP/UDP dispatch;
+  whatever OT protocol (or anything else) rides inside a G-PDU is entirely
+  invisible to every other decoder in this tool. The same is true of
+  PPPoE's own Session-stage PPP payload once the link comes up -- only the
+  PPP frame's own leading Protocol field is named, never its content. See
+  PROTOCOL COVERAGE's Tier 4 section.
+- **PPPoE's Session-stage recognition requires Code to be exactly 0x00
+  (or 0xA7 for a mid-session PADT)** -- a Session-stage frame with any
+  other Code value is not a confident PPPoE match and falls through to the
+  generic `non-ip` fallback instead, named only by its EtherType (see
+  PROTOCOL COVERAGE's Tier 4 section and `pppoe.hpp`'s own "structural
+  detection gate" paragraph for why the EtherType itself, not Code, is
+  what actually carries most of the confidence here).
 
 ## EXIT STATUS
 
@@ -10214,7 +10402,8 @@ anything else on this list.
     this item: its *absence* on an OT switch port is often the finding,
     since it means anything can plug in and reach the segment
     unauthenticated)~~ -- **done**: see this item's own "Tier 3 -- done"
-    paragraph below for what was actually built; (4) wireless access-point control/data planes and
+    paragraph below for what was actually built; ~~(4) wireless access-point
+    control/data planes and
     cellular backhaul -- an AP or wireless LAN controller reachable from (or
     inside) an OT zone is itself a finding, independent of whatever rides
     inside its tunnel: CAPWAP control (UDP 5246, RFC 5415) and data
@@ -10224,7 +10413,8 @@ anything else on this list.
     protocols like PPPoE and GTP-U (UDP 2152 -- a well-known way SCADA
     traffic leaves a site entirely outside any on-prem firewall's view, the
     usual signature of an RTU or 4G/5G router phoning out through a
-    vendor's "cloud gateway" SIM); and (5) generic tunnel/VPN encapsulation
+    vendor's "cloud gateway" SIM)~~ -- **done**: see this item's own "Tier 4
+    -- done" paragraph below for what was actually built; and (5) generic tunnel/VPN encapsulation
     -- the broader problem CAPWAP/GTP-U above are specific instances of: an
     inner VLAN, Modbus session, or entire plant subnet is invisible to
     every decoder and to `policy validate`'s own flow model alike until the
@@ -10438,7 +10628,54 @@ anything else on this list.
     MQTT until that specific port is added via `--enterprise-trust-port`;
     this is an accepted, documented trade-off of this item's "port-gated
     where the structural signature alone is too common elsewhere" design,
-    not an oversight. Tiers 4-5 remain open.
+    not an oversight.
+
+    **Tier 4 -- done**, and see PROTOCOL COVERAGE's own "Tier 4
+    wireless-backhaul-and-cellular protocol recognition" section for the
+    full writeup: `decode` now also recognizes CAPWAP control, CAPWAP data,
+    LWAPP control, LWAPP data, GTP-U, and PPPoE -- six more `protocol`
+    values (`"capwap-control"`/`"capwap-data"`/`"lwapp-control"`/
+    `"lwapp-data"`/`"gtp-u"`/`"pppoe"`), the same fix to this item's own
+    "modeling gap" paragraph below Tiers 1-3 already made, now covering the
+    family this item frames as "an AP or wireless LAN controller reachable
+    from (or inside) an OT zone is itself a finding, independent of
+    whatever rides inside its tunnel." CAPWAP control/data (RFC 5415) share
+    a modest but genuine structural signature (a Preamble byte plus the
+    Transport Header's own HLEN field, sanity-checked, without a
+    bit-perfect decode of every transport-header field); CAPWAP control
+    additionally names its own Control Header Message Type when resolvable,
+    while CAPWAP data deliberately goes no further than naming the tunnel
+    itself, since the bridged 802.11 client frame it carries is exactly the
+    content this item's own framing says doesn't need decoding to be a
+    finding. LWAPP control/data -- CAPWAP's Cisco-proprietary predecessor,
+    never published as a standards-track RFC -- are recognized by port
+    number alone, the same weakest-gate treatment TeamViewer/AnyDesk/Zoom
+    get in Tier 1, honestly reflected in every match. GTP-U (3GPP TS
+    29.281) has a genuine structural signature (a Version/PT nibble check
+    plus an enumerated Message Type) and surfaces its own TEID without
+    attempting to decode a G-PDU's inner IP packet, the same "name the
+    tunnel, don't follow it" posture this item's own wording calls for.
+    IEEE 802.1X/EAPOL's own architectural exception from Tier 3 repeats
+    here: PPPoE rides raw Ethernet (EtherType `0x8863`/`0x8864`), not any
+    port at all, so it gets its own dedicated `--protocol pppoe` value (not
+    folded into `--protocol wireless-backhaul`, which covers only the five
+    port-based protocols) and its own dedicated `pppoe.hpp`/`pppoe.cpp`,
+    dispatched from the same EtherType-keyed region of `decoder.cpp`
+    PROFINET/GOOSE/SV/EtherCAT/EAPOL already use. `--protocol
+    wireless-backhaul` isolates the five port-based protocols (PPPoE is
+    reached only via its own `--protocol pppoe`, or in Auto mode alongside
+    everything else), and `--wireless-backhaul-port` widens the five's
+    shared "expected port" set (one option across all five, the same
+    grouping `--enterprise-trust-port` already established for Tier 3) --
+    unlike Tier 3, none of this tier's own structural checks are strong
+    enough to run port-independently, so this option always gates
+    detection itself; EAPOL's own no-port precedent extends to PPPoE
+    needing no port option at all -- see OPTIONS. Unlike Tiers 1-3, this
+    tier hit no real protocol-collision wrinkle worth recording: none of
+    CAPWAP/LWAPP/GTP-U's own ports (5246/5247/12222/12223/2152) or PPPoE's
+    own EtherTypes overlap any other protocol this decoder already
+    dispatches on, so no MQTT-style carve-out was needed. Tier 5 remains
+    open.
 
     Scoped honestly, this is name-only recognition (port plus a minimal
     structural signature), not full protocol decoding -- the same

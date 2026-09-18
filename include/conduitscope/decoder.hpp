@@ -37,6 +37,7 @@
 #include "conduitscope/ospf.hpp"
 #include "conduitscope/pcap_reader.hpp"
 #include "conduitscope/pim.hpp"
+#include "conduitscope/pppoe.hpp"
 #include "conduitscope/profinet.hpp"
 #include "conduitscope/rip.hpp"
 #include "conduitscope/s7commplus.hpp"
@@ -99,6 +100,15 @@ enum class ProtocolFilter {
                            // EapolOnly below, the same split GOOSE/SV/EtherCAT/PROFINET's own
                            // EtherType-keyed filters already have from every port-based one.
     EapolOnly,             // only attempt IEEE 802.1X/EAPOL decoding -- see eapol.hpp
+    WirelessBackhaulOnly,  // only attempt the Tier 4 "IT protocols an OT auditor flags" recognition
+                           // (CAPWAP control/data, LWAPP control/data, GTP-U) -- see it_protocols.hpp.
+                           // One filter value covers all five port-based protocols, the same grouping
+                           // RemoteAccessOnly/LateralMovementOnly/EnterpriseTrustOnly above already
+                           // established for Tiers 1-3. PPPoE (also Tier 4, but EtherType-keyed, no
+                           // port at all -- see pppoe.hpp) is NOT covered by this filter value; it
+                           // has its own PppoeOnly below, the same split EapolOnly above already has
+                           // from EnterpriseTrustOnly.
+    PppoeOnly,             // only attempt PPPoE decoding -- see pppoe.hpp
 };
 
 struct DecodeOptions {
@@ -186,6 +196,16 @@ struct DecodeOptions {
     // even in Auto mode, the same "structural signature overrides the port gate" treatment VNC/SMB/
     // SSH/HTTP already have in Tiers 1-2.
     std::vector<uint16_t> extra_enterprise_trust_ports;
+    // One shared list across all five port-based Tier 4 "IT protocols an OT auditor flags"
+    // protocols (CAPWAP control/data, LWAPP control/data, GTP-U -- see it_protocols.hpp), the same
+    // grouping extra_remote_access_ports/extra_lateral_movement_ports/extra_enterprise_trust_ports
+    // above already established for Tiers 1-3. PPPoE has no port at all (EtherType-keyed, see
+    // pppoe.hpp) so it is not covered by this list. All five ARE port-gated even for their own
+    // structural checks (join the same detection-gating group as extra_dns_ports/extra_rip_ports/
+    // etc. above) -- unlike DHCP's magic cookie or LDAP-over-TLS's ClientHello in Tier 3, none of
+    // CAPWAP/LWAPP/GTP-U's own signals are strong enough to check opportunistically on every UDP
+    // port (see it_protocols.hpp's own Tier 4 comment for the full per-protocol reasoning).
+    std::vector<uint16_t> extra_wireless_backhaul_ports;
     // If true, a parse failure at the Ethernet/IPv4/TCP layer is rethrown to
     // the caller instead of being recorded as a per-packet "parse-error"
     // result. Off by default so one malformed packet doesn't abort decoding
@@ -585,6 +605,23 @@ struct DecodedPacket {
     bool eapol_has_key_descriptor = false;
     uint8_t eapol_key_descriptor_type = 0;
     std::string eapol_key_descriptor_type_name;
+
+    // Only set when protocol == "pppoe" -- see try_parse_pppoe in pppoe.hpp. Like EAPOL above,
+    // PPPoE rides raw Ethernet (EtherType 0x8863 Discovery / 0x8864 Session), not IP -- has_ethernet
+    // stays true, has_ip stays false. The five port-based Tier 4 protocols (CAPWAP/LWAPP/GTP-U) have
+    // no fields of their own here -- like every port-based Tier 1-3 protocol, they only ever set
+    // protocol/summary/notes, see decoder.cpp's own Tier 4 UDP dispatch.
+    uint8_t pppoe_version = 0;  // always 1
+    uint8_t pppoe_type = 0;     // always 1
+    uint8_t pppoe_code = 0;
+    std::string pppoe_code_name;  // "PADI"/"PADO"/"PADR"/"PADS"/"PADT"/"Session Data"
+    uint16_t pppoe_session_id = 0;
+    uint16_t pppoe_length = 0;    // PPPoE's own declared payload length
+    bool pppoe_is_session = false;  // true for EtherType 0x8864 (Session stage)
+    // Set only when pppoe_is_session && the payload carried at least PPP's own 2-byte Protocol field.
+    bool pppoe_has_ppp_protocol = false;
+    uint16_t pppoe_ppp_protocol = 0;
+    std::string pppoe_ppp_protocol_name;
 
     // Only set when protocol == "stp" -- see try_parse_stp in stp.hpp. Unlike every EtherType-keyed
     // raw-Ethernet protocol above, STP rides classic IEEE 802.3 LLC framing (has_ethernet stays
