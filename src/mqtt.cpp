@@ -676,7 +676,7 @@ std::string render_sparkplug_metric(const SparkplugMetricRaw& m) {
                 break;
             case 17:  // Bytes
             case 18:  // File
-                s << " value=<" << (m.bytes_value_length ? std::to_string(*m.bytes_value_length) : size_t{0})
+                s << " value=<" << (m.bytes_value_length ? *m.bytes_value_length : size_t{0})
                   << " byte(s), not decoded further>";
                 break;
             case 16:  // DataSet

@@ -61,7 +61,7 @@ LLMNR (UDP ports 53/5353/5355, one shared RFC 1035-derived wire format) and
 NetBIOS Name Service/NBT-NS (UDP port 137, RFC 1002) traffic, port-gated
 detection in \fBauto\fR mode (the only protocols here that are, since none
 has a self-describing wire-format signal strong enough for this tool's
-usual port-independent posture -- see \fBdocs/MANUAL.md\fR's PROTOCOL
+usual port-independent posture -- see \fBdocs/USER_GUIDE.md\fR's PROTOCOL
 DETECTION section), plus DNS-over-HTTPS (DoH) detection (TCP port 443,
 also port-gated) via a TLS ClientHello's plaintext SNI matched against a
 curated table of known public DoH resolvers -- detection only, since DoH's
@@ -90,7 +90,7 @@ zone-and-conduit segmentation policy (IEC 62443 / NIS2 style work) via
 Both classic pcap (what tcpdump writes by default) and pcapng (what
 \fBdumpcap\fR/current Wireshark default to) are read transparently --
 auto-detected from the file itself, nothing to specify on the command
-line. See \fBdocs/MANUAL.md\fR's "pcap vs. pcapng" section for exactly
+line. See \fBdocs/USER_GUIDE.md\fR's "pcap vs. pcapng" section for exactly
 which pcapng block types are understood.
 .SH COMMANDS
 .TP
@@ -113,14 +113,14 @@ when the policy declares any VLAN zone, also into PROFINET RT/GOOSE/Sampled
 Values/EtherCAT "Ethernet flows" keyed by protocol and MAC pair (for
 VLAN-zone conduits), and checks each against the
 zones/conduits declared in the policy file (a restricted, dependency-free
-YAML subset -- see \fBdocs/MANUAL.md\fR's POLICY FILE FORMAT section). A
+YAML subset -- see \fBdocs/USER_GUIDE.md\fR's POLICY FILE FORMAT section). A
 zone is either a set of IPv4 CIDR blocks or a set of VLAN IDs
 (\fBvlans:\fR), never both; a conduit may optionally narrow itself to
 specific named functions/services
 within its one protocol via \fBfunctions:\fR (e.g. Modbus reads but not
 writes, IPv4-zone conduits only) -- matched, flow-wide and strict-all, against the exact
 function/service name strings that protocol's decoder emits; see
-\fBdocs/MANUAL.md\fR's "Function-level restrictions" subsection for the
+\fBdocs/USER_GUIDE.md\fR's "Function-level restrictions" subsection for the
 schema, the one-protocol-only rule, and the EtherNet/IP ambiguous-name
 limitation. Prints a compliant/non-compliant report; see \fBOPTIONS (policy
 validate)\fR and \fBEXIT STATUS\fR below.
@@ -137,7 +137,7 @@ and infers conduits from the matrix. Can render a Mermaid or Graphviz
 \fB.dot\fR diagram (\fB\-\-diagram\fR) and/or write the inferred model as a
 \fBpolicy\fR\-format YAML file directly loadable by \fBpolicy validate\fR
 (\fB\-\-policy\-out\fR \-\- closing the loop: discover, then enforce). See
-\fBOPTIONS (inventory)\fR below and \fBdocs/MANUAL.md\fR's \fBinventory\fR
+\fBOPTIONS (inventory)\fR below and \fBdocs/USER_GUIDE.md\fR's \fBinventory\fR
 section for a worked example.
 .TP
 .B version
@@ -201,13 +201,12 @@ S7comm and MMS, disambiguated by its own protocol id byte (0x72 vs S7comm's
 tried immediately after (same TPKT/COTP framing, same TCP port
 102, S7comm's own stronger single-byte protocol-id gate tried first) using
 its own separate structural gate (a plausible Session SPDU type, a "bare
-MMS" PDU tag, or "bare Presentation" bytes -- see \fBdocs/MANUAL.md\fR's
-PROTOCOL COVERAGE MMS section), and
+MMS" PDU tag, or "bare Presentation" bytes -- see \fBdocs/PROTOCOL_COVERAGE.md\fR's MMS section), and
 HART-IP is tried third-to-last, on both TCP and UDP, since its own 8-byte
 header check was the weakest structural gate of any protocol here and is
 known to collide with Modbus/TCP's own detection on TCP (never resolved by
 reordering -- see
-\fBdocs/MANUAL.md\fR's PROTOCOL DETECTION section), MQTT is tried
+\fBdocs/DEVELOPMENT.md\fR's PROTOCOL DETECTION section), MQTT is tried
 second-to-last: it has no fixed magic number or length field of its own, so
 it only gets a turn once every other protocol except FF-HSE (HART-IP
 included) has already
@@ -217,11 +216,11 @@ coincidentally satisfied Modbus/TCP's own \fIprotocol_id==0\fR tell (fixed
 with a length-plausibility cap in Modbus's TCP parser) and small MQTT
 packet identifiers that coincidentally satisfied HART-IP's own weak gate
 (worked around on the test-fixture side, deliberately without weakening
-HART-IP's own gate) -- see \fBdocs/MANUAL.md\fR's PROTOCOL DETECTION
+HART-IP's own gate) -- see \fBdocs/DEVELOPMENT.md\fR's PROTOCOL DETECTION
 section, and FF-HSE is tried dead LAST of all, on both TCP and UDP: its own
 structural gate is a SINGLE byte at header offset 2 landing on one of 12
 valid values out of 256, honestly the weakest gate in this whole codebase,
-weaker even than MQTT's own -- see \fBdocs/MANUAL.md\fR's PROTOCOL
+weaker even than MQTT's own -- see \fBdocs/USER_GUIDE.md\fR's PROTOCOL
 DETECTION section's "Why FF-HSE is tried last of all". \fBenip\fR covers both
 EtherNet/IP explicit messaging (TCP) and CIP I/O implicit messaging (UDP).
 \fBmms\fR is IEC 61850 MMS -- shares S7comm's exact transport/port but is a
@@ -268,19 +267,19 @@ ride directly on IP with no UDP/TCP header, dispatched purely by their own
 IANA-exclusive IP protocol number. \fBigrp\fR, \fBpim\fR, \fBeigrp\fR, and
 \fBospf\fR are a follow-up batch alongside rip/igmp/vrrp/hsrp above; BGP
 (which rides over TCP port 179 instead) is deliberately not yet covered and
-planned for a later round \-\- see \fBdocs/MANUAL.md\fR's ROADMAP section.
+planned for a later round \-\- see \fBdocs/DEVELOPMENT.md\fR's ROADMAP section.
 \fBtunnel\-vpn\fR covers the fourteen port/IP-protocol-number-based
 protocols of Tier 5 of the "IT protocols an OT auditor flags" family (GRE/
 NVGRE/EoIP, ESP, AH, IP-in-IP, 6in4, L2TP, IKE, VXLAN, Geneve, WireGuard,
 OpenVPN, dtls\-tunnel, STT \-\- each its own \fBprotocol\fR value under this
 one filter name); see \fB\-\-tunnel\-vpn\-port\fR below and
-\fBdocs/MANUAL.md\fR's PROTOCOL COVERAGE "Tier 5 generic tunnel/VPN
+\fBdocs/PROTOCOL_COVERAGE.md\fR's "Tier 5 generic tunnel/VPN
 encapsulation recognition" section. \fBmpls\fR is Tier 5's sixteenth
 protocol, MPLS \-\- EtherType-keyed, no port at all, the same split
 \fBeapol\fR/\fBpppoe\fR have from \fBenterprise\-trust\fR/
 \fBwireless\-backhaul\fR; no port option exists for it either.
-See \fBdocs/MANUAL.md\fR's PROTOCOL DETECTION and PROTOCOL COVERAGE sections
-for the full detail.
+See \fBdocs/DEVELOPMENT.md\fR's PROTOCOL DETECTION section and
+\fBdocs/PROTOCOL_COVERAGE.md\fR for the full detail.
 .TP
 .B \-\-modbus\-port \fIPORT\fR
 Additional TCP port to treat as expected for Modbus. Repeatable. Does not
@@ -329,7 +328,7 @@ signaled in-band by the header, not by port.
 Additional UDP port to treat as expected for DNS (built\-in default: 53).
 Repeatable. \fBUNLIKE\fR every \fB\-\-*\-port\fR option above, this DOES
 widen detection in \fBauto\fR mode, not just whether the port is flagged as
-unexpected \-\- see \fB\-\-protocol\fR above and \fBdocs/MANUAL.md\fR's
+unexpected \-\- see \fB\-\-protocol\fR above and \fBdocs/DEVELOPMENT.md\fR's
 PROTOCOL DETECTION section for why DNS/mDNS/LLMNR/NBT-NS/DoH are
 port-gated in the first place.
 .TP
@@ -426,12 +425,12 @@ Abort on the first malformed packet instead of warning and continuing.
 .TP
 .B \-\-no\-vlan
 Disable display of the 802.1Q VLAN ID for a VLAN-tagged packet. On by
-default. See \fBdocs/MANUAL.md\fR's OUTPUT FORMATS section.
+default. See \fBdocs/USER_GUIDE.md\fR's OUTPUT FORMATS section.
 .TP
 .B \-\-no\-oui
 Disable OUI (MAC vendor) resolution against the built-in table (IEEE MA-L/
 MA-M/MA-S registry data via nmap's nmap-mac-prefixes redistribution, see
-\fBtools/generate_oui_table.py\fR). On by default. See \fBdocs/MANUAL.md\fR's
+\fBtools/generate_oui_table.py\fR). On by default. See \fBdocs/USER_GUIDE.md\fR's
 OUTPUT FORMATS "Name resolution" subsection.
 .TP
 .B \-\-resolve
@@ -476,7 +475,7 @@ Maximum bytes captured per packet with \fB\-i\fR. Default: 65535.
 Same meaning as \fBdecode\fR's \fB\-\-no\-promiscuous\fR.
 .TP
 .B \-\-policy \fIFILE\fR
-Zone/conduit policy file. Required. See \fBdocs/MANUAL.md\fR's POLICY FILE
+Zone/conduit policy file. Required. See \fBdocs/USER_GUIDE.md\fR's POLICY FILE
 FORMAT section for the schema, including the optional per-conduit
 \fBfunctions:\fR (singular alias \fBfunction:\fR) allow-list restricting a
 conduit to specific named functions/services within its one protocol.
@@ -493,7 +492,7 @@ Abort on the first malformed packet instead of warning and continuing.
 .B \-\-no\-oui
 Same meaning as \fBdecode\fR's \fB\-\-no\-oui\fR: disable OUI (MAC vendor)
 resolution against the built-in table, applied to the report's flow MAC
-addresses. On by default. See \fBdocs/MANUAL.md\fR's OUTPUT FORMATS "Name
+addresses. On by default. See \fBdocs/USER_GUIDE.md\fR's OUTPUT FORMATS "Name
 resolution" subsection.
 .TP
 .B \-\-resolve
@@ -608,7 +607,7 @@ addressed to the capturing host at all.
 On Windows, install the Npcap SDK to build with live-capture support, and
 the separate Npcap runtime/driver on whatever machine actually runs a
 conduitscope binary built with it -- these are two different installs. See
-\fBdocs/MANUAL.md\fR's LIVE CAPTURE section for the full reference,
+\fBdocs/USER_GUIDE.md\fR's LIVE CAPTURE section for the full reference,
 including why this has only been validated on Linux so far.
 .SH GLOBAL OPTIONS
 .TP
@@ -662,7 +661,7 @@ DeviceNet (a genuinely new hue -- DeviceNet is the only protocol here that
 isn't Ethernet-based at all, so a mixed-protocol capture containing it is
 structurally impossible, no collision risk to reason about either way),
 plain white shared by DNS/mDNS/LLMNR (the exact same wire format, see
-\fBdocs/MANUAL.md\fR's PROTOCOL COVERAGE section -- the \fB[protocol]\fR tag
+\fBdocs/PROTOCOL_COVERAGE.md\fR's section -- the \fB[protocol]\fR tag
 text itself is what disambiguates them, not the color), gray for NBT-NS (a
 fresh hue, since NBT-NS traffic routinely coexists with DNS-family and
 everything else in a real mixed IT/OT capture), and bold yellow for DoH
@@ -740,8 +739,8 @@ specifically when the request path addresses a Rockwell Logix5000 named
 tag (not a class/instance path), the Symbol-object tag services -- a
 class/instance-addressed request reusing one of those same service codes
 is shown structurally instead, and NOP (command 0x0000) is deliberately
-not recognized as a command at all (see \fBdocs/MANUAL.md\fR's LIMITATIONS
-and PROTOCOL COVERAGE); EtherNet/IP CIP I/O (implicit messaging, UDP port
+not recognized as a command at all (see \fBdocs/USER_GUIDE.md\fR's LIMITATIONS
+and \fBdocs/PROTOCOL_COVERAGE.md\fR); EtherNet/IP CIP I/O (implicit messaging, UDP port
 2222) is now decoded too, but only its Sequenced Address Item (connection
 ID + sequence number) is value-decoded -- the Connected Data Item's actual
 I/O data is shown only as raw hex, never value-decoded (no generic
@@ -833,7 +832,7 @@ not value-decoded; and validation is against both a comprehensive synthetic
 fixture and a genuine 116-frame real capture, but that real capture only
 exercises 9 of the roughly 20 decoded commands, no Error/NAK messages, no
 BACK frame type, and no non-Success response codes (see
-\fBdocs/MANUAL.md\fR's LIMITATIONS section and
+\fBdocs/USER_GUIDE.md\fR's LIMITATIONS section and
 \fBtests/real_captures/hartip/ATTRIBUTION.md\fR for the full detail); OPC UA
 Binary (TCP port 4840, UA-TCP transport / OPC UA Secure Conversation, tried
 FIRST of all protocols due to its own strong, collision-free structural
@@ -868,7 +867,7 @@ structurally-invalid NodeId, or a well-formed (non-fuzzed) Read/Write/Call
 exchange -- both real CallRequest bodies in that capture turn out to be
 genuinely malformed Achilles-Satellite fuzz-test payloads, which this
 decoder's own bounds-checked reads now correctly reject (see
-\fBdocs/MANUAL.md\fR's LIMITATIONS section
+\fBdocs/USER_GUIDE.md\fR's LIMITATIONS section
 and \fBtests/real_captures/opcua/ATTRIBUTION.md\fR for the full detail);
 MQTT (v3.1/v3.1.1/v5.0, conventionally TCP port 1883) and, layered on top
 of it, Sparkplug B are also now decoded \-\- but MQTT's own structural
@@ -897,7 +896,7 @@ immediately surfaced a real bug \-\- MQTT 3.1's own session-version
 tracking was silently never learned at all, only 3.1.1/5.0 were \-\- found
 and fixed; despite a genuine search, no real Sparkplug B capture was
 found, so Sparkplug B decoding is validated only against a hand-built
-synthetic fixture (see \fBdocs/MANUAL.md\fR's LIMITATIONS section and
+synthetic fixture (see \fBdocs/USER_GUIDE.md\fR's LIMITATIONS section and
 \fBtests/real_captures/mqtt/ATTRIBUTION.md\fR for the full detail);
 FOUNDATION Fieldbus HSE (FF-HSE, ports 1089/1090/1091/3622, TCP and UDP) is
 also now decoded \-\- the 12-byte common header, its Options/trailer
@@ -922,8 +921,7 @@ decoder's own inference, never asserted as fact; Network Management
 (FF-803) and full HSE Redundancy beyond basic LAN Redundancy Get/Put/
 Diagnostic are entirely out of scope; and despite a genuine multi-source
 search, no real FF-HSE capture was found anywhere, so validation is
-against a hand-built synthetic fixture only (see \fBdocs/MANUAL.md\fR's
-PROTOCOL COVERAGE FOUNDATION Fieldbus HSE section and LIMITATIONS section
+against a hand-built synthetic fixture only (see \fBdocs/PROTOCOL_COVERAGE.md\fR's FOUNDATION Fieldbus HSE section and LIMITATIONS section
 for the full detail);
 IEEE Spanning Tree Protocol (STP/RSTP/MSTP, no port at all \-\- classic
 IEEE 802.3 length-framed Ethernet, LLC DSAP=SSAP=0x42) is also now decoded
@@ -940,7 +938,7 @@ structural check; validated against two real captures (42 classic
 Configuration BPDUs, 12 real RSTP RST BPDUs), but neither exercises a TCN,
 MSTP, SPB, the Proposal/Agreement flags, or a non-Designated Port Role on
 real bytes \-\- those paths are validated only against the synthetic
-\fBtests/sample_stp.pcap\fR fixture (see \fBdocs/MANUAL.md\fR's PROTOCOL
+\fBtests/sample_stp.pcap\fR fixture (see \fBdocs/USER_GUIDE.md\fR's PROTOCOL
 COVERAGE Spanning Tree Protocol section and
 \fBtests/real_captures/stp/ATTRIBUTION.md\fR for the full detail);
 DeviceNet (CAN-bus CIP, a wholly separate pcap link type from Ethernet \-\-
@@ -956,7 +954,7 @@ reassembled, matching Wireshark's own \fBpacket-devicenet.c\fR's own
 unimplemented TODO, not a gap unique to this port; no real public
 DeviceNet/CAN-bus capture could be found anywhere, so validation is
 against the synthetic \fBtests/sample_devicenet.pcap\fR fixture only (see
-\fBdocs/MANUAL.md\fR's PROTOCOL COVERAGE DeviceNet section); ControlNet,
+\fBdocs/PROTOCOL_COVERAGE.md\fR's DeviceNet section); ControlNet,
 the other CIP-family network, is out of reach of this or any pcap-based
 tool entirely (proprietary Manchester-coded coax physical layer, no
 Wireshark dissector, no pcap link type \-\- see that same section's "Why
@@ -977,7 +975,7 @@ VLAN IDs (\fBvlans:\fR) rather than IPv4 CIDR blocks, and a conduit
 referencing only VLAN zones IS evaluated against PROFINET RT/GOOSE/Sampled
 Values/EtherCAT traffic (the four protocols with no IP layer at all),
 classified by whether the frame's own 802.1Q tag falls within a declared
-VLAN zone \-\- see \fBdocs/MANUAL.md\fR's POLICY FILE FORMAT "Addressing
+VLAN zone \-\- see \fBdocs/USER_GUIDE.md\fR's POLICY FILE FORMAT "Addressing
 scope" section. A VLAN-zone conduit's \fBfrom\fR/\fBto\fR must name the
 exact same zone set (a single frame carries at most one VLAN tag, so
 there's no separate source/destination zone), and it can't use
@@ -1016,7 +1014,7 @@ from COTP's own EOT bit) is detected and reported but not reassembled; an
 array of Struct values is a real but rare shape this decoder deliberately
 refuses to decode rather than risk silent misalignment; validated against
 two real S7-1511 captures with zero per-item decode errors -- see
-\fBdocs/MANUAL.md\fR's PROTOCOL COVERAGE S7comm-Plus section and
+\fBdocs/PROTOCOL_COVERAGE.md\fR's S7comm-Plus section and
 \fBtests/real_captures/s7comm/ATTRIBUTION.md\fR's own S7comm-Plus addendum;
 IEC 61850 MMS (TCP port 102, shares S7comm's own TPKT/COTP transport) is
 also now decoded \-\- the full Session/Presentation/ACSE/MMS layer stack,
@@ -1045,7 +1043,7 @@ assumption, not a guarantee; and validation is against three small genuine
 real-world captures plus a 224-frame capture this project generated itself
 against a real independent stack (\fBmz-automation/libiec61850\fR),
 117 of 224 frames recognized, zero parse warnings (see
-\fBdocs/MANUAL.md\fR's PROTOCOL COVERAGE MMS section and
+\fBdocs/PROTOCOL_COVERAGE.md\fR's MMS section and
 \fBtests/real_captures/mms/ATTRIBUTION.md\fR for the full detail, including
 two genuine structural-detection-gate bugs this validation pass caught and
 fixed);
@@ -1056,9 +1054,9 @@ against loopback traffic;
 \fBpolicy validate\fR's zones are IPv4 CIDR-only and its client/server
 (initiator) determination falls back to a port-number heuristic when no
 SYN/SYN-ACK was captured for a flow. See the
-"LIMITATIONS" and "ROADMAP" sections of
-\fBdocs/MANUAL.md\fR in the source tree for the full, current detail and
-what's planned next.
+"LIMITATIONS" section of \fBdocs/USER_GUIDE.md\fR and the "ROADMAP"
+section of \fBdocs/DEVELOPMENT.md\fR in the source tree for the full,
+current detail and what's planned next.
 .SH EXAMPLES
 .PP
 Decode a capture as text:
@@ -1313,7 +1311,7 @@ conduitscope policy validate \-i eth0 \-\-policy policy.yaml
 .EE
 .RE
 .SH SEE ALSO
-Full reference: \fBdocs/MANUAL.md\fR in the conduitscope source tree.
+Full reference: \fBdocs/USER_GUIDE.md\fR in the conduitscope source tree.
 .SH AUTHOR
 Jurgen Kobierczynski
 .SH LICENSE

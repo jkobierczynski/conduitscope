@@ -1,0 +1,89 @@
+name: CI
+
+# Build + full CTest suite across compilers and build types. Deliberately does
+# NOT run ASan/UBSan or any fuzzing yet -- that's the next planned step, not
+# this one; see docs/DEVELOPMENT.md's "External code review and engineering
+# priorities" section for the reasoning and the adopted order (CI first,
+# sanitizers/fuzzing next, the decoder registration-model refactor after
+# that).
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.compiler }} / ${{ matrix.build_type }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+        build_type: [Debug, Release]
+        include:
+          - compiler: gcc
+            cxx: g++
+          - compiler: clang
+            cxx: clang++
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      # libpcap-dev is the only external dependency this project has (CLI11
+      # is vendored under third_party/, and the YAML policy-file parser is
+      # hand-rolled in src/yaml_mini.cpp) -- installing it builds the live
+      # capture path (CONDUITSCOPE_HAVE_PCAP=1) in addition to the
+      # offline-pcap path every job exercises regardless.
+      - name: Install libpcap
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libpcap-dev
+
+      - name: Configure
+        run: >
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+          -DCMAKE_CXX_COMPILER=${{ matrix.cxx }}
+
+      - name: Build
+        run: cmake --build build -j"$(nproc)"
+
+      - name: Test
+        working-directory: build
+        run: ctest -j"$(nproc)" --output-on-failure
+
+  build-without-libpcap:
+    # A second, smaller leg with live capture explicitly disabled, so the
+    # "libpcap/Npcap not found" stub path (live_capture.cpp's #else branch,
+    # and the CTest cases gated on `NOT CONDUITSCOPE_HAVE_PCAP`) gets
+    # exercised too, not just the common case every matrix leg above already
+    # covers.
+    name: gcc / Release (live capture disabled)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Configure (live capture explicitly disabled)
+        run: >
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=Release
+          -DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF
+
+      - name: Build
+        run: cmake --build build -j"$(nproc)"
+
+      - name: Test
+        working-directory: build
+        run: ctest -j"$(nproc)" --output-on-failure

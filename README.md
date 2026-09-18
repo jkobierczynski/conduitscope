@@ -38,7 +38,7 @@ first-draft zone/conduit model from what it actually sees (Modbus, DNP3, S7comm,
 EtherNet/IP, and BACnet/IP talkers) -- an asset list, a communication matrix, a
 Mermaid/Graphviz diagram, and a `policy`-format YAML file directly loadable by
 `policy validate`, closing the loop from passive discovery to active enforcement.
-See [docs/MANUAL.md](docs/MANUAL.md)'s POLICY FILE FORMAT section for the schema
+See [docs/USER_GUIDE.md](docs/USER_GUIDE.md)'s POLICY FILE FORMAT section for the schema
 and its `inventory` subsection for a worked example.
 
 Offline capture files are still the primary, always-available way in: no libpcap
@@ -53,7 +53,7 @@ exception to that zero-dependency design: it's an *optional*, build-time-detecte
 dependency on libpcap (Linux) / the Npcap SDK (Windows) -- if CMake finds it, `-i`
 and `conduitscope interfaces` work; if it doesn't, the build is exactly as
 dependency-free as before, and those two just report that clearly at runtime
-instead of not existing. See [docs/MANUAL.md](docs/MANUAL.md)'s LIVE CAPTURE
+instead of not existing. See [docs/USER_GUIDE.md](docs/USER_GUIDE.md)'s LIVE CAPTURE
 section.
 
 ## Why not just use tshark?
@@ -109,7 +109,7 @@ Groundwork / v0.1.0. What works right now:
 - Classic pcap and pcapng file reading, auto-detected (Ethernet and raw-IP
   link types; IPv4; TCP, with PDU/frame-level reassembly across TCP segments
   for Modbus, DNP3 data-link frames, IEC 104 APDUs, EtherNet/IP encapsulation
-  messages, and TPKT/COTP -- see below and docs/MANUAL.md)
+  messages, and TPKT/COTP -- see below and docs/USER_GUIDE.md)
 - Full Modbus/TCP decoding for the read (1-4), write-single (5-6), and
   write-multiple (15-16) function code families, plus exception responses.
   Every response also gets authoritative (MBAP transaction-ID + TCP-session,
@@ -118,7 +118,7 @@ Groundwork / v0.1.0. What works right now:
   write-single's inherent shape ambiguity (request and response are
   byte-for-byte identical per spec). Validated against both synthetic
   fixtures and a real Modbus capture's request/response session; see
-  docs/MANUAL.md.
+  docs/USER_GUIDE.md.
 - Full DNP3 decoding through the application layer for a single-data-link-frame
   fragment (the large majority of real traffic): data-link header
   (source/destination addresses -- 16-bit DNP3 station addresses, exposed as
@@ -138,7 +138,7 @@ Groundwork / v0.1.0. What works right now:
   -- a mismatch is flagged (`dnp3_link_crc_valid`/`dnp3_header_crc_valid`/
   `dnp3_block_count`/`dnp3_block_crc_failures` plus a specific `notes` entry)
   without ever stopping decoding, diagnostic only (not yet wired into
-  `policy validate`); see docs/MANUAL.md. A group/variation outside that table still gets its object data
+  `policy validate`); see docs/USER_GUIDE.md. A group/variation outside that table still gets its object data
   located and skipped by computed length, just not value-decoded. Multiple
   complete DNP3 data-link frames coalesced into one TCP segment (common,
   since DNP3 frames are small) are all found and decoded, not just the first.
@@ -147,10 +147,10 @@ Groundwork / v0.1.0. What works right now:
   segments/packets it takes, per TCP flow, and its application layer decoded
   once complete -- this path has no real-capture validation yet (every real
   DNP3 capture checked so far used only complete single-frame fragments),
-  only the synthetic fixture in tests/sample_dnp3.pcap; see docs/MANUAL.md.
+  only the synthetic fixture in tests/sample_dnp3.pcap; see docs/USER_GUIDE.md.
   A single data-link frame's own header/blocks split across TCP segments IS
   now reassembled too, via a separate, lower-level TCP-segment reassembler
-  that also covers Modbus and TPKT/COTP (see below and docs/MANUAL.md).
+  that also covers Modbus and TPKT/COTP (see below and docs/USER_GUIDE.md).
   Validated against a large real 4SICS ICS-lab capture and a
   set of real (not synthetic) DNP3 captures from independent DNP3 stacks --
   real CROB Select/Operate sequences (including a rejected operate), a real
@@ -181,7 +181,7 @@ Groundwork / v0.1.0. What works right now:
   transparent (several independent devices precede real responses with a
   content-free "priming" fragment), though genuine multi-frame *content*
   splitting is validated only by a synthetic fixture so far; see
-  docs/MANUAL.md. Validated against real 4SICS ICS-lab captures -- including two much
+  docs/USER_GUIDE.md. Validated against real 4SICS ICS-lab captures -- including two much
   larger ones (1.25M and 2.27M packets) that turned out to be
   overwhelmingly S7comm traffic, which is exactly the case item-level
   addressing was built for. The `0xB2` reconstruction's single validated
@@ -206,7 +206,7 @@ Groundwork / v0.1.0. What works right now:
   clock sync, reset process, test command, and parameter loading/activation.
   Deliberately not decoded: protection-equipment event types, packed
   single-point with status change detection, and file transfer -- see
-  docs/MANUAL.md's PROTOCOL COVERAGE for why. Unlike DNP3, one I-format
+  docs/PROTOCOL_COVERAGE.md for why. Unlike DNP3, one I-format
   APDU always carries exactly one
   complete ASDU, so no cross-frame application-fragment reassembly is
   needed -- only the same TCP-segment-level PDU reassembly every protocol
@@ -214,7 +214,7 @@ Groundwork / v0.1.0. What works right now:
   Auto-mode dispatch: an I-format APDU with N(S)=N(R)=0 (the very first
   data frame of any session) would otherwise coincidentally satisfy
   Modbus/TCP's own protocol-id==0 tell, a real collision risk found while
-  scoping this feature (see docs/MANUAL.md's PROTOCOL DETECTION section).
+  scoping this feature (see docs/DEVELOPMENT.md's PROTOCOL DETECTION section).
   Validated against three independent real IEC 104 stacks' actual wire
   encodings, including the public Industroyer2 capture (real, attributed
   nation-state ICS malware traffic against a live RTU) -- see
@@ -259,7 +259,7 @@ Groundwork / v0.1.0. What works right now:
   generic self-describing wire-level type and this decoder doesn't track a
   connection's negotiated transport class (which would be needed to know
   whether a leading 16-bit CIP sequence count is present in it or not) --
-  see docs/MANUAL.md. This is the first protocol conduitscope decodes over
+  see docs/USER_GUIDE.md. This is the first protocol conduitscope decodes over
   UDP; `--protocol enip` covers both explicit and implicit messaging. No real
   CIP I/O capture was found while building this decoder (searched across
   several public pcap collections, including the ones that supplied the two
@@ -647,7 +647,7 @@ Groundwork / v0.1.0. What works right now:
   (the usual ICS pcap collections predate it or don't cover it, and a
   small synthetic capture referenced in a Wireshark GitLab bug report
   could not be retrieved either) -- this decoder is therefore validated
-  only against its own synthetic fixture. See docs/MANUAL.md's FOUNDATION
+  only against its own synthetic fixture. See docs/USER_GUIDE.md's FOUNDATION
   Fieldbus HSE section and include/conduitscope/ffhse.hpp for the full
   wire-format details.
 - IEEE Spanning Tree Protocol (STP/RSTP/MSTP): the first protocol this tool
@@ -704,7 +704,7 @@ Groundwork / v0.1.0. What works right now:
   Wireshark included, which has no ControlNet dissector at all -- can ever
   capture; the only real way to observe it is Rockwell's own proprietary
   ControlNet Traffic Analyzer, which produces no pcap-compatible output.
-  See docs/MANUAL.md's DeviceNet section and
+  See docs/USER_GUIDE.md's DeviceNet section and
   include/conduitscope/devicenet.hpp for the full writeup.
 - DNS, mDNS, LLMNR, NetBIOS Name Service (NBT-NS), and DNS-over-HTTPS (DoH)
   detection: the first name-resolution protocols decoded here, and the
@@ -736,7 +736,7 @@ Groundwork / v0.1.0. What works right now:
   wiring any of these five into `policy validate`'s conduit `protocols`
   classification. Validated against hand-built fixtures cross-checked
   against their governing RFCs, including deliberate negative-control
-  packets for every detection gate -- see docs/MANUAL.md's PROTOCOL
+  packets for every detection gate -- see docs/USER_GUIDE.md's PROTOCOL
   COVERAGE and LIMITATIONS.
 - Non-IPv4 Ethernet frames and non-TCP IPv4 payloads (including UDP) are now
   recognized and named, not just reported as a bare hex/number and dropped:
@@ -760,8 +760,7 @@ Groundwork / v0.1.0. What works right now:
   it's a real, confirmed visibility gap this closes: re-running
   conduitscope's own real-capture test set after adding this surfaced
   genuine ARP and UDP (DNS,
-  NetBIOS) traffic that was previously invisible. See docs/MANUAL.md's
-  PROTOCOL COVERAGE and ROADMAP.
+  NetBIOS) traffic that was previously invisible. See docs/PROTOCOL_COVERAGE.md and docs/DEVELOPMENT.md's ROADMAP section.
 - RIP (v1/v2), IGMP (v1/v2/v3), VRRP (v2/v3), and HSRP (v1/v2) decoding: the
   first batch of a broader routing/redundancy-protocol addition (IGRP, PIM,
   EIGRP, and OSPF now also done -- see the bullet below; BGP planned for a
@@ -788,8 +787,9 @@ Groundwork / v0.1.0. What works right now:
   `tests/real_captures/igmp/ATTRIBUTION.md`); a 498-file search across three
   public ICS pcap collections for the same effort found no RIP, VRRP, or
   HSRP traffic anywhere, so those three remain synthetic-only, the same
-  accepted gap already documented for FF-HSE/DeviceNet. See docs/MANUAL.md's
-  PROTOCOL COVERAGE, PROTOCOL DETECTION, and LIMITATIONS.
+  accepted gap already documented for FF-HSE/DeviceNet. See
+  docs/PROTOCOL_COVERAGE.md, docs/DEVELOPMENT.md's PROTOCOL DETECTION
+  section, and docs/USER_GUIDE.md's LIMITATIONS section.
 - IGRP, PIM v2 (PIM-SM/PIM-DM), EIGRP (now RFC 7868), and OSPFv2 (RFC 2328)
   decoding: the second batch of the routing/redundancy-protocol addition
   begun above. All four ride directly on IP (protocol numbers 9, 103, 88,
@@ -814,8 +814,8 @@ Groundwork / v0.1.0. What works right now:
   the same 1,020-file search across three public ICS pcap collections that
   found no RIP/VRRP/HSRP traffic found none of these four either, so all
   four remain synthetic-only, the same accepted gap already documented
-  above. See docs/MANUAL.md's PROTOCOL COVERAGE, PROTOCOL DETECTION, and
-  LIMITATIONS.
+  above. See docs/PROTOCOL_COVERAGE.md, docs/DEVELOPMENT.md's PROTOCOL
+  DETECTION section, and docs/USER_GUIDE.md's LIMITATIONS section.
 - IPv4 payload is clamped to the header's own `total_length` field, so
   Ethernet's minimum-frame-size padding on short packets (bare ACKs, mostly)
   never gets misreported as phantom TCP payload -- found and fixed against a
@@ -837,7 +837,7 @@ Groundwork / v0.1.0. What works right now:
   segments respectively, reassembled and decoded correctly -- and against 6
   synthetic scenarios covering the happy path plus gaps,
   full-duplicate retransmits, and partial-overlap retransmits; see
-  docs/MANUAL.md's LIMITATIONS for exact scope. Modbus request/response
+  docs/USER_GUIDE.md's LIMITATIONS for exact scope. Modbus request/response
   pairing and multi-frame S7comm chaining are separate mechanisms, described
   above, not part of this one
 - Text, JSON, and CSV output; a `--stats` summary mode; an `info` command for
@@ -861,7 +861,7 @@ Groundwork / v0.1.0. What works right now:
   recognized by port number alone, the weakest identification gate in this
   codebase. `--protocol remote-access` isolates the family;
   `--remote-access-port` widens its expected-port set. See
-  docs/MANUAL.md's PROTOCOL COVERAGE "Tier 1 remote-access protocol
+  docs/PROTOCOL_COVERAGE.md "Tier 1 remote-access protocol
   recognition" section
 - Tier 2 of the same family: SMB, SSH, HTTP, HTTPS, SNMPv1/v2c, Telnet,
   FTP, and TFTP -- the lateral-movement/credential-harvesting protocols
@@ -874,7 +874,7 @@ Groundwork / v0.1.0. What works right now:
   the whole audit finding; Telnet/FTP/TFTP each have a narrower,
   port-gated signal. `--protocol lateral-movement` isolates the family;
   `--lateral-movement-port` widens its expected-port set. See
-  docs/MANUAL.md's PROTOCOL COVERAGE "Tier 2 lateral-movement protocol
+  docs/PROTOCOL_COVERAGE.md "Tier 2 lateral-movement protocol
   recognition" section
 - Tier 3 of the same family: NTP, DHCP, LDAP, LDAPS, RADIUS, TACACS+, and
   IEEE 802.1X/EAPOL -- protocols "individually unremarkable in limited
@@ -891,7 +891,7 @@ Groundwork / v0.1.0. What works right now:
   is often the actual finding, the one protocol in this whole family
   where that polarity is reversed. `--protocol enterprise-trust` isolates
   the six port-based protocols; `--enterprise-trust-port` widens their
-  shared expected-port set. See docs/MANUAL.md's PROTOCOL COVERAGE "Tier 3
+  shared expected-port set. See docs/PROTOCOL_COVERAGE.md "Tier 3
   enterprise-trust-boundary protocol recognition" section
 - Tier 4 of the same family: CAPWAP control/data, LWAPP control/data,
   GTP-U, and PPPoE -- "wireless access-point control/data planes and
@@ -911,7 +911,7 @@ Groundwork / v0.1.0. What works right now:
   five port-based protocols; `--wireless-backhaul-port` widens their shared
   expected-port set (and, unlike Tier 3, always gates detection itself,
   since none of this tier's checks are strong enough to run
-  port-independently). See docs/MANUAL.md's PROTOCOL COVERAGE "Tier 4
+  port-independently). See docs/PROTOCOL_COVERAGE.md "Tier 4
   wireless-backhaul-and-cellular protocol recognition" section
 - Tier 5 of the same family, and the last: GRE (and its NVGRE/Mikrotik
   EoIP sub-cases), IPsec ESP/AH, IP-in-IP, 6in4, L2TP/L2TPv3, IKE, VXLAN,
@@ -937,7 +937,7 @@ Groundwork / v0.1.0. What works right now:
   its own dedicated `--protocol mpls` value, with its full label stack
   genuinely parsed. `--protocol tunnel-vpn` isolates the fourteen
   port/IP-protocol-number-based protocols; `--tunnel-vpn-port` widens
-  their shared expected-port set. See docs/MANUAL.md's PROTOCOL COVERAGE
+  their shared expected-port set. See docs/PROTOCOL_COVERAGE.md
   "Tier 5 generic tunnel/VPN encapsulation recognition" section
 - Name resolution, shared by `decode` and `policy validate` alike: OUI/MAC-
   vendor lookup against a built-in IEEE-registry-derived table (on by
@@ -946,7 +946,7 @@ Groundwork / v0.1.0. What works right now:
   any circumstance), and port->service-name lookup from a small curated
   built-in table plus an optional `--services` file (`--nn` disables it).
   Every annotation is additive next to the raw MAC/IP/port already decoded,
-  never a replacement for it -- see docs/MANUAL.md's OUTPUT FORMATS "Name
+  never a replacement for it -- see docs/USER_GUIDE.md's OUTPUT FORMATS "Name
   resolution" subsection
 - `policy validate`: a zone/conduit policy engine. A policy file (a
   deliberately restricted, dependency-free YAML subset -- no vendored YAML
@@ -966,7 +966,7 @@ Groundwork / v0.1.0. What works right now:
   though `bacnet` can never actually match (this decoder only recognizes
   BACnet/IP over UDP, and IPv4-zone conduits are TCP-only), and
   `functions:` is only supported so far for the first five (see
-  docs/MANUAL.md's "Addressing scope" and "Function-level restrictions"
+  docs/USER_GUIDE.md's "Addressing scope" and "Function-level restrictions"
   subsections). Every decoded TCP flow in the capture is classified into a
   zone pair, checked against the policy's conduits (and, for a
   `functions`-restricted conduit, checked flow-wide against every distinct
@@ -988,7 +988,7 @@ Groundwork / v0.1.0. What works right now:
   decoded DNP3 point values, Modbus address+quantity decoding, authoritative
   Modbus request/response pairing, and the already-decoded generic 802.1Q
   tag are exactly the concrete facts this checks policy against) rather
-  than duplicating any of its parsing. See docs/MANUAL.md's POLICY FILE
+  than duplicating any of its parsing. See docs/USER_GUIDE.md's POLICY FILE
   FORMAT section (including its "Function-level restrictions" and
   "Addressing scope" subsections) for the full schema and LIMITATIONS for
   exactly what it does and doesn't check (e.g. the SYN-based
@@ -1013,22 +1013,24 @@ Groundwork / v0.1.0. What works right now:
   discover, then enforce (a generated file round-trips cleanly against the
   same capture, with the UDP-based conduits correctly reported as
   "never exercised" since `policy validate` is TCP-only today -- see
-  LIMITATIONS). See docs/MANUAL.md's `inventory` subsection for a worked
+  LIMITATIONS). See docs/USER_GUIDE.md's `inventory` subsection for a worked
   example.
 - Live capture (`decode -i`/`policy validate -i`/`inventory -i`, plus `conduitscope interfaces`
   to list interfaces): an optional, build-time-detected libpcap (Linux) / Npcap
-  (Windows) dependency -- see above and docs/MANUAL.md's LIVE CAPTURE section.
+  (Windows) dependency -- see above and docs/USER_GUIDE.md's LIVE CAPTURE section.
   `--duration`, `--filter` (BPF syntax), `--snaplen`, and Ctrl+C all stop a
   capture cleanly, still producing whatever decode output or policy report was
   captured so far. Validated end-to-end against real loopback traffic on Linux;
   the Windows/Npcap path is implemented against the same documented API but not
-  yet run on a real Windows machine -- see docs/MANUAL.md's LIMITATIONS.
+  yet run on a real Windows machine -- see docs/USER_GUIDE.md's LIMITATIONS.
 - A `decode`/`info`/`interfaces`/`policy validate`/`inventory`/`version`
   command surface with full `--help` at every level
 
-See [docs/MANUAL.md](docs/MANUAL.md) for the complete option reference,
-output-format examples, exit codes, and the honest list of current limitations
-and what's planned next.
+See [docs/USER_GUIDE.md](docs/USER_GUIDE.md) for the complete option reference,
+output-format examples, exit codes, and the honest list of current limitations,
+[docs/PROTOCOL_COVERAGE.md](docs/PROTOCOL_COVERAGE.md) for what each protocol
+decoder actually surfaces and how confidently, and
+[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for what's planned next.
 
 ## Building
 
@@ -1039,7 +1041,7 @@ CMake picks it up automatically and live capture (`-i/--interface`) is built in;
 if not, the build is unaffected except that `-i` reports it isn't available. Pass
 `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF` to skip that search entirely and
 guarantee a dependency-free build regardless of what's installed. See
-docs/MANUAL.md's LIVE CAPTURE section for the runtime-vs-build-time distinction
+docs/USER_GUIDE.md's LIVE CAPTURE section for the runtime-vs-build-time distinction
 on Windows (the Npcap *SDK* is build-time only; running a live capture also needs
 the separate Npcap *driver/service* installed).
 
@@ -1102,7 +1104,7 @@ build/conduitscope decode -r tests/sample_modbus.pcap --format json
 build/conduitscope info -r tests/sample_modbus.pcap
 
 # Check a capture against a zone/conduit policy (see tests/policies/*.yaml for more examples,
-# and docs/MANUAL.md's POLICY FILE FORMAT section for the schema):
+# and docs/USER_GUIDE.md's POLICY FILE FORMAT section for the schema):
 build/conduitscope policy validate -r tests/sample_modbus.pcap --policy tests/policies/compliant.yaml
 
 # Same, but for a VLAN-membership zone/conduit policy covering PROFINET RT/GOOSE/SV/EtherCAT:
