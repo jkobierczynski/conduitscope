@@ -130,6 +130,23 @@ constexpr const char* kItalicMagenta = "\033[3;35m";
 constexpr const char* kItalicCyan = "\033[3;36m";
 constexpr const char* kBoldItalicRed = "\033[1;3;31m";
 constexpr const char* kBoldItalicGreen = "\033[1;3;32m";
+// Tier 3 "IT protocols an OT auditor flags" round (NTP/DHCP/LDAP/LDAPS/RADIUS/TACACS+/EAPOL -- see
+// it_protocols.hpp/eapol.hpp): rounds out the bold+italic combination Tier 2's own FTP/TFTP tags
+// started (only red/green used there) with its remaining four standard hues.
+constexpr const char* kBoldItalicYellow = "\033[1;3;33m";
+constexpr const char* kBoldItalicBlue = "\033[1;3;34m";
+constexpr const char* kBoldItalicMagenta = "\033[1;3;35m";
+constexpr const char* kBoldItalicCyan = "\033[1;3;36m";
+// That still leaves three of Tier 3's seven new tags (RADIUS/TACACS+/EAPOL) with no combination left
+// in plain/bright/bold/underline/bold+underline/italic/bold+italic -- every one of those seven
+// dimensions is now fully spoken for. `kDim` itself has existed in this file from the start, but
+// only ever bare (for notes/eth-line prefixes and the generic tcp/udp/non-ip/non-tcp fallback below),
+// never paired with a hue -- pairing it with a color here is a genuinely fresh dimension, not a
+// reuse of dim's own existing bare meaning (nothing below uses bare kDim for a *recognized* protocol
+// tag, only for "nothing OT-specific to say" and structural/prefix text).
+constexpr const char* kDimRed = "\033[2;31m";
+constexpr const char* kDimGreen = "\033[2;32m";
+constexpr const char* kDimYellow = "\033[2;33m";
 
 // Color for a packet's "[protocol]" tag -- picked so a mixed-protocol capture scans quickly by
 // eye, not for any deeper meaning. parse-error is the one exception: it gets the same "something
@@ -240,6 +257,13 @@ const char* protocol_tag_color(const std::string& protocol) {
                                                            // same reasoning as smb's own plain-italic
                                                            // red just above
     if (protocol == "tftp") return kBoldItalicGreen;
+    if (protocol == "ntp") return kBoldItalicYellow;
+    if (protocol == "dhcp") return kBoldItalicBlue;
+    if (protocol == "ldap") return kBoldItalicMagenta;
+    if (protocol == "ldaps") return kBoldItalicCyan;
+    if (protocol == "radius") return kDimRed;
+    if (protocol == "tacacs-plus") return kDimGreen;
+    if (protocol == "eapol") return kDimYellow;
     if (protocol == "parse-error") return kBoldRed;
     return kDim;  // tcp / udp / non-tcp / non-ip / unsupported-link: recognized, nothing OT-specific
 }

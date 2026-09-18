@@ -17,6 +17,7 @@
 #include "conduitscope/devicenet.hpp"
 #include "conduitscope/dnp3.hpp"
 #include "conduitscope/dns.hpp"
+#include "conduitscope/eapol.hpp"
 #include "conduitscope/enip.hpp"
 #include "conduitscope/eigrp.hpp"
 #include "conduitscope/ethercat.hpp"
@@ -89,6 +90,15 @@ enum class ProtocolFilter {
                            // (SMB/SSH/HTTP/HTTPS/SNMPv1v2c/Telnet/FTP/TFTP) -- see it_protocols.hpp.
                            // One filter value covers all eight, the same grouping RemoteAccessOnly
                            // above already established for Tier 1.
+    EnterpriseTrustOnly,   // only attempt the Tier 3 "IT protocols an OT auditor flags" recognition
+                           // (NTP/DHCP/LDAP/LDAPS/RADIUS/TACACS+) -- see it_protocols.hpp. One
+                           // filter value covers all six port-based protocols, the same grouping
+                           // RemoteAccessOnly/LateralMovementOnly above already established for
+                           // Tiers 1-2. EAPOL (also Tier 3, but EtherType-keyed, no port at all --
+                           // see eapol.hpp) is NOT covered by this filter value; it has its own
+                           // EapolOnly below, the same split GOOSE/SV/EtherCAT/PROFINET's own
+                           // EtherType-keyed filters already have from every port-based one.
+    EapolOnly,             // only attempt IEEE 802.1X/EAPOL decoding -- see eapol.hpp
 };
 
 struct DecodeOptions {
@@ -165,6 +175,17 @@ struct DecodeOptions {
     // gets above) -- this list still extends what counts as each one's own "expected" port for the
     // purposes of the "seen on a non-standard port" note, just never gates those three's detection.
     std::vector<uint16_t> extra_lateral_movement_ports;
+    // One shared list across all six port-based Tier 3 "IT protocols an OT auditor flags"
+    // protocols (NTP/DHCP/LDAP/LDAPS/RADIUS/TACACS+ -- see it_protocols.hpp), the same grouping
+    // extra_remote_access_ports/extra_lateral_movement_ports above already established for
+    // Tiers 1-2. EAPOL has no port at all (EtherType-keyed, see eapol.hpp) so it is not covered by
+    // this list. NTP/RADIUS/TACACS+/LDAP are all port-gated even for their own structural checks
+    // (join the same detection-gating group as extra_dns_ports/extra_rip_ports/etc. above) --
+    // DHCP's magic cookie and LDAP over TLS's own ClientHello (layered into the existing HTTPS/DoH
+    // early-detection call site, see decoder.cpp) are the two exceptions checked port-independently
+    // even in Auto mode, the same "structural signature overrides the port gate" treatment VNC/SMB/
+    // SSH/HTTP already have in Tiers 1-2.
+    std::vector<uint16_t> extra_enterprise_trust_ports;
     // If true, a parse failure at the Ethernet/IPv4/TCP layer is rethrown to
     // the caller instead of being recorded as a per-packet "parse-error"
     // result. Off by default so one malformed packet doesn't abort decoding
@@ -539,6 +560,31 @@ struct DecodedPacket {
     // One summary string per decoded datagram (e.g. "APRD idx=2 adp=0x0000 ado=0x0130 len=2
     // wkc=1"), capped at 50 entries for the same reason as sv_asdus/goose_all_data.
     std::vector<std::string> ethercat_datagrams;
+
+    // Only set when protocol == "eapol" -- see try_parse_eapol in eapol.hpp. Like PROFINET/EtherCAT/
+    // GOOSE/SV above, EAPOL rides raw Ethernet (EtherType 0x888E), not IP -- has_ethernet stays true,
+    // has_ip stays false.
+    uint8_t eapol_version = 0;
+    std::string eapol_version_name;
+    uint8_t eapol_type = 0;
+    std::string eapol_type_name;
+    uint16_t eapol_length = 0;  // EAPOL's own declared body length
+    // Set only when eapol_type == 0 (EAP-Packet) and the body carried RFC 3748's Code/Identifier/
+    // Length header.
+    bool eapol_has_eap = false;
+    uint8_t eapol_eap_code = 0;
+    std::string eapol_eap_code_name;
+    uint8_t eapol_eap_identifier = 0;
+    uint16_t eapol_eap_declared_length = 0;
+    // Set only when eapol_has_eap && eapol_eap_code is Request(1)/Response(2) and a further Type
+    // byte was present.
+    bool eapol_has_eap_type = false;
+    uint8_t eapol_eap_type = 0;
+    std::string eapol_eap_type_name;
+    // Set only when eapol_type == 3 (EAPOL-Key) and the body carried at least a Descriptor Type byte.
+    bool eapol_has_key_descriptor = false;
+    uint8_t eapol_key_descriptor_type = 0;
+    std::string eapol_key_descriptor_type_name;
 
     // Only set when protocol == "stp" -- see try_parse_stp in stp.hpp. Unlike every EtherType-keyed
     // raw-Ethernet protocol above, STP rides classic IEEE 802.3 LLC framing (has_ethernet stays

@@ -16,7 +16,9 @@ plus detects DNS-over-HTTPS
 RDP, VNC, TeamViewer, AnyDesk, and Zoom -- the "interactive remote control"
 tier of the IT protocols an OT auditor flags -- plus SMB, SSH, HTTP, HTTPS,
 SNMPv1/v2c, Telnet, FTP, and TFTP, the "lateral-movement and
-credential-harvesting" tier of the same family,
+credential-harvesting" tier of the same family, plus NTP, DHCP, LDAP,
+LDAPS, RADIUS, TACACS+, and IEEE 802.1X/EAPOL, the "does the OT side
+blindly trust enterprise IT" tier of the same family,
 traffic from offline
 pcap/pcapng captures, and checks it
 against a zone/conduit segmentation policy. It's an OT/ICS conduit-auditing tool: `decode`/`info` give you reliable
@@ -868,6 +870,23 @@ Groundwork / v0.1.0. What works right now:
   `--lateral-movement-port` widens its expected-port set. See
   docs/MANUAL.md's PROTOCOL COVERAGE "Tier 2 lateral-movement protocol
   recognition" section
+- Tier 3 of the same family: NTP, DHCP, LDAP, LDAPS, RADIUS, TACACS+, and
+  IEEE 802.1X/EAPOL -- protocols "individually unremarkable in limited
+  form but worth an auditor's attention for where they terminate and
+  whether the OT side blindly trusts enterprise IT for them." DHCP's own
+  magic cookie and LDAPS's TLS ClientHello (the latter layered into the
+  same early call site HTTPS's own uses) are genuine, port-independent
+  structural signatures; NTP/LDAP/RADIUS/TACACS+ each have a genuine but
+  narrower, port-gated signal; TACACS+'s own unencrypted-body flag is
+  surfaced as its own note when set. EAPOL rides raw Ethernet (EtherType
+  `0x888E`, no port at all, like PROFINET/GOOSE/SV/EtherCAT) and gets its
+  own dedicated `--protocol eapol` value -- its presence on an OT switch
+  port is reassuring (the device had to authenticate), so its *absence*
+  is often the actual finding, the one protocol in this whole family
+  where that polarity is reversed. `--protocol enterprise-trust` isolates
+  the six port-based protocols; `--enterprise-trust-port` widens their
+  shared expected-port set. See docs/MANUAL.md's PROTOCOL COVERAGE "Tier 3
+  enterprise-trust-boundary protocol recognition" section
 - Name resolution, shared by `decode` and `policy validate` alike: OUI/MAC-
   vendor lookup against a built-in IEEE-registry-derived table (on by
   default, `--no-oui` disables it), hostname resolution from an explicitly-

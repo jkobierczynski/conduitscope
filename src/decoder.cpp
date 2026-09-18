@@ -736,7 +736,20 @@ bool Decoder::reassemble_tcp_payload(const TcpSegment& tcp, const std::string& f
         (port_in(tcp.src_port, FTP_CONTROL_PORT, options_.extra_lateral_movement_ports) ||
          port_in(tcp.dst_port, FTP_CONTROL_PORT, options_.extra_lateral_movement_ports)) &&
         looks_like_ftp_control_line(candidate);
-    if (!declared && want_mqtt && !candidate_is_ftp_control) {
+    // The SAME shape of collision, found while implementing Tier 3: LDAP's own SEQUENCE tag byte
+    // (0x30) is bit-for-bit identical to a valid MQTT PUBLISH control-packet-type/flags byte -- see
+    // it_protocols.hpp's own looks_like_ldap_ber comment for the full reasoning. Resolved the same
+    // way, by port.
+    bool want_enterprise_trust_reassembly = options_.protocol_filter == ProtocolFilter::Auto ||
+                                             options_.protocol_filter == ProtocolFilter::EnterpriseTrustOnly;
+    bool candidate_is_ldap =
+        want_enterprise_trust_reassembly &&
+        (port_in(tcp.src_port, LDAP_PORT, options_.extra_enterprise_trust_ports) ||
+         port_in(tcp.dst_port, LDAP_PORT, options_.extra_enterprise_trust_ports) ||
+         port_in(tcp.src_port, LDAP_GC_PORT, options_.extra_enterprise_trust_ports) ||
+         port_in(tcp.dst_port, LDAP_GC_PORT, options_.extra_enterprise_trust_ports)) &&
+        looks_like_ldap_ber(candidate);
+    if (!declared && want_mqtt && !candidate_is_ftp_control && !candidate_is_ldap) {
         if (auto d = mqtt_declared_length(candidate)) {
             declared = d;
             which = "MQTT packet";
@@ -1104,6 +1117,38 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                             if (dgram.circulating) a << " circulating";
                             out.ethercat_datagrams.push_back(a.str());
                         }
+                        return out;
+                    }
+                }
+
+                // IEEE 802.1X/EAPOL (EtherType 0x888E) -- ROADMAP item 18's Tier 3, same
+                // EtherType-keyed rationale/pattern as PROFINET RT/GOOSE/SV/EtherCAT above, except
+                // EAPOL has its own dedicated ProtocolFilter::EapolOnly rather than sharing Tier 3's
+                // port-based EnterpriseTrustOnly filter -- see decoder.hpp's own comment on both and
+                // eapol.hpp's file header comment for the full reasoning.
+                bool want_eapol = options_.protocol_filter == ProtocolFilter::Auto ||
+                                    options_.protocol_filter == ProtocolFilter::EapolOnly;
+                if (want_eapol && eth.ethertype == ETHERTYPE_EAPOL) {
+                    if (auto ea = try_parse_eapol(eth.payload)) {
+                        out.protocol = "eapol";
+                        out.summary = ea->summary;
+                        out.eapol_version = ea->version;
+                        out.eapol_version_name = ea->version_name;
+                        out.eapol_type = ea->type;
+                        out.eapol_type_name = ea->type_name;
+                        out.eapol_length = ea->length;
+                        out.eapol_has_eap = ea->has_eap;
+                        out.eapol_eap_code = ea->eap_code;
+                        out.eapol_eap_code_name = ea->eap_code_name;
+                        out.eapol_eap_identifier = ea->eap_identifier;
+                        out.eapol_eap_declared_length = ea->eap_declared_length;
+                        out.eapol_has_eap_type = ea->has_eap_type;
+                        out.eapol_eap_type = ea->eap_type;
+                        out.eapol_eap_type_name = ea->eap_type_name;
+                        out.eapol_has_key_descriptor = ea->has_eapol_key_descriptor;
+                        out.eapol_key_descriptor_type = ea->eapol_key_descriptor_type;
+                        out.eapol_key_descriptor_type_name = ea->eapol_key_descriptor_type_name;
+                        for (const auto& n : ea->notes) out.notes.push_back(n);
                         return out;
                     }
                 }
@@ -1738,6 +1783,25 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                 }
             }
 
+            // Tier 3 "IT protocols an OT auditor flags" recognition -- see it_protocols.hpp and the
+            // matching comment on the TCP side of this dispatch for why this is tried last. Only
+            // NTP, DHCP, and RADIUS are reachable here (LDAP/LDAPS/TACACS+ are all TCP-only by spec,
+            // so is_tcp=false short-circuits their own checks inside
+            // try_recognize_it_enterprise_trust immediately). EAPOL, the seventh Tier 3 protocol, is
+            // dispatched separately, in the EtherType-keyed region above -- see eapol.hpp.
+            bool want_enterprise_trust_udp = options_.protocol_filter == ProtocolFilter::Auto ||
+                                              options_.protocol_filter == ProtocolFilter::EnterpriseTrustOnly;
+            if (want_enterprise_trust_udp) {
+                if (auto m = try_recognize_it_enterprise_trust(udp.payload, udp.src_port, udp.dst_port,
+                                                                  /*is_tcp=*/false,
+                                                                  options_.extra_enterprise_trust_ports)) {
+                    out.protocol = m->protocol;
+                    out.summary = m->summary;
+                    for (const auto& n : m->notes) out.notes.push_back(n);
+                    return out;
+                }
+            }
+
             // Groundwork plumbing beyond this point: the UDP header/payload split is recognized
             // and reported (src/dst port, byte count), but no other application-layer protocol
             // riding on UDP is decoded -- see udp.hpp's file header comment and docs/MANUAL.md's
@@ -1910,42 +1974,73 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
         // that, a standard HTTPS port (443/8443, or a configured extra port) is treated as good
         // enough corroboration to still call it "https", but says so honestly in a note rather than
         // implying a confidence neither signal actually backs up.
+        // LDAPS (LDAP-over-TLS, port 636/3269) is layered into this SAME ClientHello call site --
+        // see it_protocols.hpp's own LDAPS paragraph. When ALPN doesn't already confirm HTTP and the
+        // port is specifically 636/3269 (an Active Directory Global Catalog-over-TLS port is never
+        // legitimately also an HTTPS port), the more specific "ldaps" tag wins over generic "https".
         bool want_lateral_movement_early = options_.protocol_filter == ProtocolFilter::Auto ||
                                             options_.protocol_filter == ProtocolFilter::LateralMovementOnly;
-        if (want_lateral_movement_early) {
+        bool want_enterprise_trust_early = options_.protocol_filter == ProtocolFilter::Auto ||
+                                            options_.protocol_filter == ProtocolFilter::EnterpriseTrustOnly;
+        if (want_lateral_movement_early || want_enterprise_trust_early) {
             if (auto hello = try_parse_tls_client_hello(tcp.payload)) {
                 bool alpn_confirms_http =
                     std::find(hello->alpn_protocols.begin(), hello->alpn_protocols.end(), "http/1.1") !=
                         hello->alpn_protocols.end() ||
                     std::find(hello->alpn_protocols.begin(), hello->alpn_protocols.end(), "h2") !=
                         hello->alpn_protocols.end();
-                bool port_match = port_in(tcp.src_port, HTTPS_PORT_443, options_.extra_lateral_movement_ports) ||
-                                   port_in(tcp.dst_port, HTTPS_PORT_443, options_.extra_lateral_movement_ports) ||
-                                   port_in(tcp.src_port, HTTPS_PORT_8443, options_.extra_lateral_movement_ports) ||
-                                   port_in(tcp.dst_port, HTTPS_PORT_8443, options_.extra_lateral_movement_ports);
-                out.protocol = "https";
-                std::ostringstream s;
-                s << "HTTPS/TLS ClientHello";
-                if (!hello->sni.empty()) s << " (SNI: " << hello->sni << ")";
-                out.summary = s.str();
-                if (alpn_confirms_http) {
-                    out.notes.push_back("ALPN offered \"http/1.1\" or \"h2\", confirming this is "
-                                         "specifically HTTP-over-TLS rather than some other TLS-"
-                                         "wrapped protocol");
-                } else if (port_match) {
-                    out.notes.push_back("TLS ClientHello on a standard/configured HTTPS port, but "
-                                         "ALPN did not confirm HTTP specifically -- most likely HTTPS, "
-                                         "but any other TLS-wrapped protocol sharing this port would "
-                                         "look identical at this layer");
-                } else {
-                    out.notes.push_back("seen on TCP port " + std::to_string(tcp.src_port) + "->" +
-                                         std::to_string(tcp.dst_port) +
-                                         ", which is not a configured/standard HTTPS port (443/8443), "
-                                         "and ALPN did not confirm HTTP specifically -- a genuine TLS "
-                                         "ClientHello was observed, but this could be any TLS-wrapped "
-                                         "protocol using this port, not necessarily HTTPS");
+                bool https_port_match = port_in(tcp.src_port, HTTPS_PORT_443, options_.extra_lateral_movement_ports) ||
+                                         port_in(tcp.dst_port, HTTPS_PORT_443, options_.extra_lateral_movement_ports) ||
+                                         port_in(tcp.src_port, HTTPS_PORT_8443, options_.extra_lateral_movement_ports) ||
+                                         port_in(tcp.dst_port, HTTPS_PORT_8443, options_.extra_lateral_movement_ports);
+                bool ldaps_port_match = port_in(tcp.src_port, LDAPS_PORT, options_.extra_enterprise_trust_ports) ||
+                                         port_in(tcp.dst_port, LDAPS_PORT, options_.extra_enterprise_trust_ports) ||
+                                         port_in(tcp.src_port, LDAPS_GC_PORT, options_.extra_enterprise_trust_ports) ||
+                                         port_in(tcp.dst_port, LDAPS_GC_PORT, options_.extra_enterprise_trust_ports);
+
+                if (want_enterprise_trust_early && !alpn_confirms_http && ldaps_port_match &&
+                    !(want_lateral_movement_early && https_port_match)) {
+                    out.protocol = "ldaps";
+                    std::ostringstream s;
+                    s << "LDAPS/TLS ClientHello (Active Directory Global Catalog-over-TLS port, if 3269)";
+                    if (!hello->sni.empty()) s << " (SNI: " << hello->sni << ")";
+                    out.summary = s.str();
+                    out.notes.push_back("TLS ClientHello on a standard/configured LDAPS port (636/3269), "
+                                         "and ALPN did not confirm HTTP -- most likely LDAP-over-TLS, but "
+                                         "any other TLS-wrapped protocol sharing this port would look "
+                                         "identical at this layer");
+                    return out;
                 }
-                return out;
+
+                if (!want_lateral_movement_early) {
+                    // Only EnterpriseTrustOnly was requested and this ClientHello wasn't tagged
+                    // "ldaps" above -- fall through without claiming generic "https", which belongs
+                    // to Tier 2's own filter value.
+                } else {
+                    out.protocol = "https";
+                    std::ostringstream s;
+                    s << "HTTPS/TLS ClientHello";
+                    if (!hello->sni.empty()) s << " (SNI: " << hello->sni << ")";
+                    out.summary = s.str();
+                    if (alpn_confirms_http) {
+                        out.notes.push_back("ALPN offered \"http/1.1\" or \"h2\", confirming this is "
+                                             "specifically HTTP-over-TLS rather than some other TLS-"
+                                             "wrapped protocol");
+                    } else if (https_port_match) {
+                        out.notes.push_back("TLS ClientHello on a standard/configured HTTPS port, but "
+                                             "ALPN did not confirm HTTP specifically -- most likely HTTPS, "
+                                             "but any other TLS-wrapped protocol sharing this port would "
+                                             "look identical at this layer");
+                    } else {
+                        out.notes.push_back("seen on TCP port " + std::to_string(tcp.src_port) + "->" +
+                                             std::to_string(tcp.dst_port) +
+                                             ", which is not a configured/standard HTTPS port (443/8443), "
+                                             "and ALPN did not confirm HTTP specifically -- a genuine TLS "
+                                             "ClientHello was observed, but this could be any TLS-wrapped "
+                                             "protocol using this port, not necessarily HTTPS");
+                    }
+                    return out;
+                }
             }
         }
 
@@ -2688,7 +2783,19 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
             (port_in(tcp.src_port, FTP_CONTROL_PORT, options_.extra_lateral_movement_ports) ||
              port_in(tcp.dst_port, FTP_CONTROL_PORT, options_.extra_lateral_movement_ports)) &&
             looks_like_ftp_control_line(effective_payload);
-        if (want_mqtt && !effective_payload_is_ftp_control) {
+        // The SAME LDAP-vs-MQTT collision reassemble_tcp_payload's own declared-length probe above
+        // already excludes (see that comment, and it_protocols.hpp's own looks_like_ldap_ber
+        // comment, for the full reasoning) applies here too, to MQTT's own full message parse.
+        bool want_enterprise_trust_mqtt_carveout = options_.protocol_filter == ProtocolFilter::Auto ||
+                                                    options_.protocol_filter == ProtocolFilter::EnterpriseTrustOnly;
+        bool effective_payload_is_ldap =
+            want_enterprise_trust_mqtt_carveout &&
+            (port_in(tcp.src_port, LDAP_PORT, options_.extra_enterprise_trust_ports) ||
+             port_in(tcp.dst_port, LDAP_PORT, options_.extra_enterprise_trust_ports) ||
+             port_in(tcp.src_port, LDAP_GC_PORT, options_.extra_enterprise_trust_ports) ||
+             port_in(tcp.dst_port, LDAP_GC_PORT, options_.extra_enterprise_trust_ports)) &&
+            looks_like_ldap_ber(effective_payload);
+        if (want_mqtt && !effective_payload_is_ftp_control && !effective_payload_is_ldap) {
             std::string mqtt_session_key = tcp_session_key(out.src_ip, tcp.src_port, out.dst_ip, tcp.dst_port);
             auto session_it = mqtt_session_version_.find(mqtt_session_key);
             uint8_t session_hint = session_it != mqtt_session_version_.end() ? session_it->second : 0;
@@ -2914,13 +3021,32 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
             }
         }
 
+        // Tier 3 "IT protocols an OT auditor flags" recognition -- see it_protocols.hpp. Tried LAST,
+        // same "weakest signals last" reasoning Tiers 1-2 just above document. LDAPS's own strong
+        // ClientHello check already ran much earlier (layered into the same early call site as
+        // HTTPS's own -- see that call site's own comment); what reaches this point for "ldaps" is
+        // only ever its port-only fallback, handled inside try_recognize_it_enterprise_trust below
+        // exactly like every other Tier 3 protocol's own weak fallback.
+        bool want_enterprise_trust = options_.protocol_filter == ProtocolFilter::Auto ||
+                                      options_.protocol_filter == ProtocolFilter::EnterpriseTrustOnly;
+        if (want_enterprise_trust) {
+            if (auto m = try_recognize_it_enterprise_trust(effective_payload, tcp.src_port, tcp.dst_port,
+                                                              /*is_tcp=*/true, options_.extra_enterprise_trust_ports)) {
+                out.protocol = m->protocol;
+                out.summary = m->summary;
+                for (const auto& n : m->notes) out.notes.push_back(n);
+                return out;
+            }
+        }
+
         out.protocol = "tcp";
         std::ostringstream s;
         s << "TCP payload of " << effective_payload.size() << " byte(s) on port " << tcp.src_port << "->"
           << tcp.dst_port
           << " did not match OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, COTP/S7comm/MMS, HART-IP, "
-             "MQTT, FF-HSE, the RDP/VNC/TeamViewer/AnyDesk/Zoom remote-access family, or the SMB/SSH/"
-             "HTTP/HTTPS/Telnet/FTP lateral-movement family";
+             "MQTT, FF-HSE, the RDP/VNC/TeamViewer/AnyDesk/Zoom remote-access family, the SMB/SSH/"
+             "HTTP/HTTPS/Telnet/FTP lateral-movement family, or the LDAP/LDAPS/TACACS+ enterprise-"
+             "trust family";
         out.summary = s.str();
         return out;
 

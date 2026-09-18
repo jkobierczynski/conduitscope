@@ -75,6 +75,7 @@ constexpr uint16_t ETHERTYPE_PROFINET = 0x8892;   // PROFINET RT (Siemens), raw 
 constexpr uint16_t ETHERTYPE_ETHERCAT = 0x88A4;   // EtherCAT, raw Ethernet, no IP
 constexpr uint16_t ETHERTYPE_IEC61850_GOOSE = 0x88B8;  // IEC 61850-8-1 GOOSE, raw Ethernet, no IP
 constexpr uint16_t ETHERTYPE_IEC61850_SV = 0x88BA;     // IEC 61850-9-2 Sampled Values, raw Ethernet, no IP
+constexpr uint16_t ETHERTYPE_EAPOL = 0x888E;      // IEEE 802.1X/EAPOL, raw Ethernet, no IP -- see eapol.hpp
 constexpr uint16_t ETHERTYPE_LLDP = 0x88CC;
 constexpr uint16_t ETHERTYPE_PTP = 0x88F7;        // IEEE 1588 Precision Time Protocol
 constexpr uint16_t ETHERTYPE_MPLS_UNICAST = 0x8847;

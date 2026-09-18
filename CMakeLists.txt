@@ -59,6 +59,7 @@ add_library(conduitscope_core STATIC
   src/eigrp.cpp
   src/ospf.cpp
   src/it_protocols.cpp
+  src/eapol.cpp
   src/decoder.cpp
   src/resolver.cpp
   src/output.cpp
@@ -907,7 +908,7 @@ set_tests_properties(enip_unregister_session_decoded PROPERTIES
 add_test(NAME enip_nop_not_detected
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enip_nop_precedence.pcap" --format text)
 set_tests_properties(enip_nop_not_detected PROPERTIES
-  PASS_REGULAR_EXPRESSION "\\[tcp\\]  TCP payload of 24 byte\\(s\\) on port 52001->44818 did not match OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, COTP/S7comm/MMS, HART-IP, MQTT, FF-HSE, the RDP/VNC/TeamViewer/AnyDesk/Zoom remote-access family, or the SMB/SSH/HTTP/HTTPS/Telnet/FTP lateral-movement family")
+  PASS_REGULAR_EXPRESSION "\\[tcp\\]  TCP payload of 24 byte\\(s\\) on port 52001->44818 did not match OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, COTP/S7comm/MMS, HART-IP, MQTT, FF-HSE, the RDP/VNC/TeamViewer/AnyDesk/Zoom remote-access family, the SMB/SSH/HTTP/HTTPS/Telnet/FTP lateral-movement family, or the LDAP/LDAPS/TACACS\\+ enterprise-trust family")
 
 # --------------------------------------------------------------------------
 # EtherNet/IP CIP STRING/SHORT_STRING and Structured Data Type (UDT/array-of-UDT tag) value
@@ -3749,7 +3750,7 @@ set_tests_properties(mqtt_invalid_qos_and_truncated_body_notes PROPERTIES
 add_test(NAME mqtt_bogus_connect_protocol_name_rejected
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mqtt.pcap" --format text)
 set_tests_properties(mqtt_bogus_connect_protocol_name_rejected PROPERTIES
-  PASS_REGULAR_EXPRESSION "\\[tcp\\]  TCP payload of 16 byte\\(s\\) on port 55020->1883 did not match OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, COTP/S7comm/MMS, HART-IP, MQTT, FF-HSE, the RDP/VNC/TeamViewer/AnyDesk/Zoom remote-access family, or the SMB/SSH/HTTP/HTTPS/Telnet/FTP lateral-movement family")
+  PASS_REGULAR_EXPRESSION "\\[tcp\\]  TCP payload of 16 byte\\(s\\) on port 55020->1883 did not match OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, COTP/S7comm/MMS, HART-IP, MQTT, FF-HSE, the RDP/VNC/TeamViewer/AnyDesk/Zoom remote-access family, the SMB/SSH/HTTP/HTTPS/Telnet/FTP lateral-movement family, or the LDAP/LDAPS/TACACS\\+ enterprise-trust family")
 
 # A genuinely truncated/incomplete final packet on its own flow -- declares more Remaining Length
 # than actually follows, with nothing more ever arriving in this capture -- the TCP-reassembly
@@ -6045,7 +6046,7 @@ set_tests_properties(remote_access_extra_port_widens_expected_range PROPERTIES
 add_test(NAME remote_access_falls_through_to_generic_tcp_summary
   COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mqtt.pcap")
 set_tests_properties(remote_access_falls_through_to_generic_tcp_summary PROPERTIES
-  PASS_REGULAR_EXPRESSION "did not match OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, COTP/S7comm/MMS, HART-IP, MQTT, FF-HSE, the RDP/VNC/TeamViewer/AnyDesk/Zoom remote-access family, or the SMB/SSH/HTTP/HTTPS/Telnet/FTP lateral-movement family")
+  PASS_REGULAR_EXPRESSION "did not match OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, COTP/S7comm/MMS, HART-IP, MQTT, FF-HSE, the RDP/VNC/TeamViewer/AnyDesk/Zoom remote-access family, the SMB/SSH/HTTP/HTTPS/Telnet/FTP lateral-movement family, or the LDAP/LDAPS/TACACS\\+ enterprise-trust family")
 
 add_test(NAME remote_access_rdp_carve_out_does_not_affect_real_s7comm
   COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm.pcap")
@@ -6221,6 +6222,215 @@ add_test(NAME lateral_movement_https_early_detection_does_not_affect_doh
   COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_doh.pcap")
 set_tests_properties(lateral_movement_https_early_detection_does_not_affect_doh PROPERTIES
   PASS_REGULAR_EXPRESSION "\\[doh\\]  likely DNS-over-HTTPS")
+
+# ---------------------------------------------------------------------------------------------
+# Tier 3 "IT protocols an OT auditor flags" recognition (NTP/DHCP/LDAP/LDAPS/RADIUS/TACACS+/EAPOL --
+# see it_protocols.hpp's/eapol.hpp's own Tier 3 file header comments and docs/MANUAL.md's ROADMAP
+# item 18). Fixture built by a scapy script (not itself checked in as a generator -- see tests/
+# sample_lateral_movement.pcap's own precedent from Tier 2), 26 packets:
+#    1  UDP 52500->123   NTPv4 client (VN=4 Mode=3)                          -> ntp
+#    2  UDP 123->52500   NTPv4 server (VN=4 Mode=4)                          -> ntp
+#    3  UDP 52501->123   3 bytes, too short to be a plausible NTP header     -> ntp (weak fallback)
+#    4  UDP 68->67       DHCP DISCOVER (op=1, option 53=1)                  -> dhcp
+#    5  UDP 67->68       DHCP OFFER (op=2, option 53=2)                     -> dhcp
+#    6  UDP 15067->15068 DHCP REQUEST, non-standard port pair               -> dhcp (noted)
+#    7  TCP 52502->389   LDAP bindRequest                                    -> ldap (noted)
+#    8  TCP 52503->3268  LDAP searchRequest, Global Catalog port            -> ldap
+#    9  TCP 52504->389   3 bytes, not a recognizable LDAPMessage shape       -> ldap (weak fallback)
+#   10  TCP 52520->5000  LDAP bindRequest on an arbitrary, non-configured
+#                        port -- misdetected as mqtt (LDAP is deliberately
+#                        port-gated, see it_protocols.hpp's own LDAP
+#                        paragraph); fixed by --enterprise-trust-port below   -> mqtt
+#   11  TCP 52505->636   LDAPS ClientHello, no ALPN, standard port           -> ldaps
+#   12  TCP 52506->3269  LDAPS ClientHello, no ALPN, Global Catalog-over-TLS -> ldaps
+#   13  TCP 52507->636   opaque byte, no ClientHello                        -> ldaps (weak fallback)
+#   14  TCP 52521->636   ClientHello WITH ALPN http/1.1 on the LDAPS port    -> https (ALPN wins)
+#   15  UDP 52508->1812  RADIUS Access-Request, current standard port        -> radius
+#   16  UDP 1813->52509  RADIUS Accounting-Response, current standard port   -> radius
+#   17  UDP 52510->1645  RADIUS Access-Request, legacy port                  -> radius
+#   18  UDP 52511->1812  3 bytes, not a plausible Code/Length header         -> radius (weak fallback)
+#   19  TCP 52512->49    TACACS+ Authentication, unencrypted flag set        -> tacacs-plus (noted)
+#   20  TCP 52513->49    TACACS+ Authorization                               -> tacacs-plus
+#   21  TCP 52514->49    invalid version byte                                -> tacacs-plus (weak fallback)
+#   22  EAPOL            EAPOL-Start (Type 1, Length 0)                      -> eapol
+#   23  EAPOL            EAP-Request/Identity (Type 0)                       -> eapol
+#   24  EAPOL            EAP-Response/Identity (Type 0)                      -> eapol
+#   25  EAPOL            EAPOL-Key, RSN/WPA2 Key Descriptor Type (Type 3)    -> eapol
+#   26  EAPOL            EAPOL-Logoff (Type 2, Length 0)                     -> eapol
+add_test(NAME enterprise_trust_ntp_client_recognized
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enterprise_trust.pcap")
+set_tests_properties(enterprise_trust_ntp_client_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[ntp\\]  NTPv4 client \\(UDP port 123\\)")
+
+add_test(NAME enterprise_trust_ntp_server_recognized
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enterprise_trust.pcap")
+set_tests_properties(enterprise_trust_ntp_server_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[ntp\\]  NTPv4 server \\(UDP port 123\\)")
+
+add_test(NAME enterprise_trust_ntp_port_only_fallback
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enterprise_trust.pcap")
+set_tests_properties(enterprise_trust_ntp_port_only_fallback PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[ntp\\]  NTP \\(UDP port 123\\) -- port match only, not a plausible NTP LI/VN/Mode header")
+
+add_test(NAME enterprise_trust_dhcp_discover_recognized
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enterprise_trust.pcap")
+set_tests_properties(enterprise_trust_dhcp_discover_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[dhcp\\]  DHCP BOOTREQUEST \\(DISCOVER\\)")
+
+add_test(NAME enterprise_trust_dhcp_offer_recognized
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enterprise_trust.pcap")
+set_tests_properties(enterprise_trust_dhcp_offer_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[dhcp\\]  DHCP BOOTREPLY \\(OFFER\\)")
+
+add_test(NAME enterprise_trust_dhcp_nonstandard_port_noted
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enterprise_trust.pcap")
+set_tests_properties(enterprise_trust_dhcp_nonstandard_port_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "DHCP BOOTREQUEST \\(REQUEST\\).*\n.*note: seen on UDP port 15067->15068, which is not the standard DHCP port pair")
+
+add_test(NAME enterprise_trust_ldap_bind_request_cleartext_note
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enterprise_trust.pcap")
+set_tests_properties(enterprise_trust_ldap_bind_request_cleartext_note PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[ldap\\]  LDAP bindRequest \\(TCP port 389/3268\\).*\n.*note: bindRequest observed -- if this is a simple bind")
+
+add_test(NAME enterprise_trust_ldap_search_request_global_catalog_recognized
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enterprise_trust.pcap")
+set_tests_properties(enterprise_trust_ldap_search_request_global_catalog_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[ldap\\]  LDAP searchRequest \\(TCP port 389/3268\\)")
+
+add_test(NAME enterprise_trust_ldap_port_only_fallback
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enterprise_trust.pcap")
+set_tests_properties(enterprise_trust_ldap_port_only_fallback PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[ldap\\]  LDAP \\(TCP port 389/3268\\) -- port match only, not a recognizable LDAPMessage")
+
+add_test(NAME enterprise_trust_ldap_arbitrary_port_falls_to_mqtt_without_widening
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enterprise_trust.pcap")
+set_tests_properties(enterprise_trust_ldap_arbitrary_port_falls_to_mqtt_without_widening PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"src_port\": 52520,\n *\"dst_port\": 5000,.*\n *\"protocol\": \"mqtt\"")
+
+add_test(NAME enterprise_trust_extra_port_widens_ldap_and_resolves_mqtt_collision
+  COMMAND conduitscope decode --format json --enterprise-trust-port 5000 --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enterprise_trust.pcap")
+set_tests_properties(enterprise_trust_extra_port_widens_ldap_and_resolves_mqtt_collision PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"src_port\": 52520,\n *\"dst_port\": 5000,.*\n *\"protocol\": \"ldap\",\n *\"summary\": \"LDAP bindRequest \\(TCP port 389/3268\\)\"")
+
+add_test(NAME enterprise_trust_ldaps_clienthello_standard_port_recognized
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enterprise_trust.pcap")
+set_tests_properties(enterprise_trust_ldaps_clienthello_standard_port_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.50:52505 -> 192\\.168\\.1\\.10:636  \\[ldaps\\]  LDAPS/TLS ClientHello.*SNI: dc1\\.corp\\.example\\.com")
+
+add_test(NAME enterprise_trust_ldaps_clienthello_global_catalog_port_recognized
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enterprise_trust.pcap")
+set_tests_properties(enterprise_trust_ldaps_clienthello_global_catalog_port_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.50:52506 -> 192\\.168\\.1\\.10:3269  \\[ldaps\\]  LDAPS/TLS ClientHello")
+
+add_test(NAME enterprise_trust_ldaps_port_only_fallback
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enterprise_trust.pcap")
+set_tests_properties(enterprise_trust_ldaps_port_only_fallback PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[ldaps\\]  LDAPS/TLS \\(TCP port 636/3269\\) -- port match only, no TLS ClientHello")
+
+add_test(NAME enterprise_trust_https_alpn_wins_over_ldaps_port
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enterprise_trust.pcap")
+set_tests_properties(enterprise_trust_https_alpn_wins_over_ldaps_port PROPERTIES
+  PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.50:52521 -> 192\\.168\\.1\\.10:636  \\[https\\]  HTTPS/TLS ClientHello \\(SNI: odd-web-ui\\.example\\.com\\).*\n.*note: ALPN offered")
+
+add_test(NAME enterprise_trust_radius_access_request_recognized
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enterprise_trust.pcap")
+set_tests_properties(enterprise_trust_radius_access_request_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[radius\\]  RADIUS Access-Request \\(id=7, declared length 20\\)")
+
+add_test(NAME enterprise_trust_radius_accounting_response_recognized
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enterprise_trust.pcap")
+set_tests_properties(enterprise_trust_radius_accounting_response_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[radius\\]  RADIUS Accounting-Response \\(id=7, declared length 20\\)")
+
+add_test(NAME enterprise_trust_radius_legacy_port_recognized
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enterprise_trust.pcap")
+set_tests_properties(enterprise_trust_radius_legacy_port_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.50:52510 -> 192\\.168\\.1\\.10:1645  \\[radius\\]  RADIUS Access-Request \\(id=8, declared length 20\\)")
+
+add_test(NAME enterprise_trust_radius_port_only_fallback
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enterprise_trust.pcap")
+set_tests_properties(enterprise_trust_radius_port_only_fallback PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[radius\\]  RADIUS \\(UDP port 1812/1813/1645/1646\\) -- port match only, not a plausible Code/Identifier/Length header")
+
+add_test(NAME enterprise_trust_tacacs_plus_authentication_unencrypted_noted
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enterprise_trust.pcap")
+set_tests_properties(enterprise_trust_tacacs_plus_authentication_unencrypted_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[tacacs-plus\\]  TACACS\\+ Authentication \\(v12\\.1\\).*\n.*note: TAC_PLUS_UNENCRYPTED_FLAG set")
+
+add_test(NAME enterprise_trust_tacacs_plus_authorization_recognized
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enterprise_trust.pcap")
+set_tests_properties(enterprise_trust_tacacs_plus_authorization_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"protocol\": \"tacacs-plus\",\n *\"summary\": \"TACACS\\+ Authorization \\(v12\\.1\\)\",\n *\"notes\": \\[\\]")
+
+add_test(NAME enterprise_trust_tacacs_plus_port_only_fallback
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enterprise_trust.pcap")
+set_tests_properties(enterprise_trust_tacacs_plus_port_only_fallback PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[tacacs-plus\\]  TACACS\\+ \\(TCP port 49\\) -- port match only, not a plausible version/type header")
+
+add_test(NAME enterprise_trust_eapol_start_recognized
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enterprise_trust.pcap")
+set_tests_properties(enterprise_trust_eapol_start_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[eapol\\]  EAPOL v2 \\(802\\.1X-2004\\) EAPOL-Start \\(length=0\\)")
+
+add_test(NAME enterprise_trust_eapol_eap_request_identity_recognized
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enterprise_trust.pcap")
+set_tests_properties(enterprise_trust_eapol_eap_request_identity_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[eapol\\]  EAPOL v2 \\(802\\.1X-2004\\) EAP-Packet -- EAP Request id=1, type=Identity")
+
+add_test(NAME enterprise_trust_eapol_eap_response_identity_recognized
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enterprise_trust.pcap")
+set_tests_properties(enterprise_trust_eapol_eap_response_identity_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[eapol\\]  EAPOL v2 \\(802\\.1X-2004\\) EAP-Packet -- EAP Response id=1, type=Identity")
+
+add_test(NAME enterprise_trust_eapol_key_rsn_descriptor_recognized
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enterprise_trust.pcap")
+set_tests_properties(enterprise_trust_eapol_key_rsn_descriptor_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[eapol\\]  EAPOL v2 \\(802\\.1X-2004\\) EAPOL-Key -- IEEE 802\\.11 Key Descriptor \\(RSN/WPA2\\) descriptor")
+
+add_test(NAME enterprise_trust_eapol_logoff_recognized
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enterprise_trust.pcap")
+set_tests_properties(enterprise_trust_eapol_logoff_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[eapol\\]  EAPOL v2 \\(802\\.1X-2004\\) EAPOL-Logoff \\(length=0\\)")
+
+add_test(NAME enterprise_trust_stats_counted
+  COMMAND conduitscope decode --format text --stats --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enterprise_trust.pcap")
+set_tests_properties(enterprise_trust_stats_counted PROPERTIES
+  PASS_REGULAR_EXPRESSION "dhcp +3\n *eapol +5\n *https +1\n *ldap +3\n *ldaps +3\n *mqtt +1\n *ntp +3\n *radius +4\n *tacacs-plus +3")
+
+add_test(NAME enterprise_trust_protocol_filter_isolates_port_based_family
+  COMMAND conduitscope decode --format text --protocol enterprise-trust --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enterprise_trust.pcap")
+set_tests_properties(enterprise_trust_protocol_filter_isolates_port_based_family PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[ntp\\].*\\[ntp\\].*\\[ntp\\].*\\[dhcp\\].*\\[dhcp\\].*\\[dhcp\\].*\\[ldap\\].*\\[ldap\\].*\\[ldap\\].*\\[ldaps\\].*\\[ldaps\\].*\\[ldaps\\].*\\[radius\\].*\\[radius\\].*\\[radius\\].*\\[radius\\].*\\[tacacs-plus\\].*\\[tacacs-plus\\].*\\[tacacs-plus\\]"
+  FAIL_REGULAR_EXPRESSION "\\[eapol\\]|\\[mqtt\\]|\\[https\\]")
+
+add_test(NAME enterprise_trust_eapol_protocol_filter_isolates_eapol_only
+  COMMAND conduitscope decode --format text --protocol eapol --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enterprise_trust.pcap")
+set_tests_properties(enterprise_trust_eapol_protocol_filter_isolates_eapol_only PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[eapol\\].*\\[eapol\\].*\\[eapol\\].*\\[eapol\\].*\\[eapol\\]"
+  FAIL_REGULAR_EXPRESSION "\\[ntp\\]|\\[dhcp\\]|\\[ldap\\]|\\[ldaps\\]|\\[radius\\]|\\[tacacs-plus\\]")
+
+add_test(NAME enterprise_trust_falls_through_to_generic_tcp_summary
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mqtt.pcap")
+set_tests_properties(enterprise_trust_falls_through_to_generic_tcp_summary PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[mqtt\\]")
+
+add_test(NAME enterprise_trust_ldap_mqtt_carveout_does_not_affect_real_mqtt
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mqtt.pcap")
+set_tests_properties(enterprise_trust_ldap_mqtt_carveout_does_not_affect_real_mqtt PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[mqtt\\]"
+  FAIL_REGULAR_EXPRESSION "\\[ldap\\]")
+
+add_test(NAME enterprise_trust_ldaps_early_detection_does_not_affect_doh
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_doh.pcap")
+set_tests_properties(enterprise_trust_ldaps_early_detection_does_not_affect_doh PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[doh\\]  likely DNS-over-HTTPS"
+  FAIL_REGULAR_EXPRESSION "\\[ldaps\\]")
+
+add_test(NAME enterprise_trust_early_detection_does_not_affect_lateral_movement_https
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_lateral_movement.pcap")
+set_tests_properties(enterprise_trust_early_detection_does_not_affect_lateral_movement_https PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[https\\]  HTTPS/TLS ClientHello \\(SNI: plc-web\\.example\\.com\\)"
+  FAIL_REGULAR_EXPRESSION "\\[ldaps\\]")
 
 # ---------------------------------------------------------------------------------------------
 # Live capture (live_capture.hpp/cpp) -- an optional, build-time-detected libpcap (Linux) / Npcap

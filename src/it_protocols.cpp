@@ -2,6 +2,7 @@
 #include "conduitscope/it_protocols.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <sstream>
 #include <utility>
@@ -398,6 +399,364 @@ std::optional<std::string> match_tftp_request(ByteSpan payload) {
 }  // namespace
 
 bool looks_like_ftp_control_line(ByteSpan payload) { return match_ftp(payload).has_value(); }
+
+// ---------------------------------------------------------------------------------------------
+// Tier 3 -- see it_protocols.hpp's own header comment for the full per-protocol confidence writeup.
+
+namespace {
+
+// RFC 5905 section 7.3's first byte: LI(2 bits)/VN(3 bits)/Mode(3 bits), plus the minimum 48-byte
+// NTPv3/v4 fixed header. Returns a short Mode name on a match.
+std::optional<std::string> match_ntp(ByteSpan payload) {
+    if (payload.size() < 48) return std::nullopt;
+    uint8_t b0 = payload.at(0);
+    uint8_t vn = (b0 >> 3) & 0x07;
+    uint8_t mode = b0 & 0x07;
+    if (vn < 1 || vn > 4) return std::nullopt;
+    std::string mode_name;
+    switch (mode) {
+        case 1: mode_name = "symmetric active"; break;
+        case 2: mode_name = "symmetric passive"; break;
+        case 3: mode_name = "client"; break;
+        case 4: mode_name = "server"; break;
+        case 5: mode_name = "broadcast"; break;
+        case 6: mode_name = "NTP control message"; break;
+        default: return std::nullopt;  // 0 and 7 are reserved -- not a plausible real packet
+    }
+    return "NTPv" + std::to_string(static_cast<unsigned>(vn)) + " " + mode_name;
+}
+
+// RFC 2132 section 9.6 (DHCP Message Type, option 53) name lookup.
+std::string dhcp_message_type_name(uint8_t t) {
+    switch (t) {
+        case 1: return "DISCOVER";
+        case 2: return "OFFER";
+        case 3: return "REQUEST";
+        case 4: return "DECLINE";
+        case 5: return "ACK";
+        case 6: return "NAK";
+        case 7: return "RELEASE";
+        case 8: return "INFORM";
+        case 9: return "FORCERENEW";     // RFC 3203
+        case 10: return "LEASEQUERY";    // RFC 4388
+        case 11: return "LEASEUNASSIGNED";
+        case 12: return "LEASEUNKNOWN";
+        case 13: return "LEASEACTIVE";
+        default: return "";
+    }
+}
+
+struct DhcpMatch {
+    uint8_t op = 0;               // 1 = BOOTREQUEST, 2 = BOOTREPLY
+    bool has_message_type = false;
+    uint8_t message_type = 0;
+    std::string message_type_name;
+};
+
+// RFC 2131's fixed 236-byte BOOTP-derived header followed by RFC 1497/2131 section 3's own 4-byte
+// magic cookie (0x63825363) -- see it_protocols.hpp's own header comment for why this is checked
+// port-independently. Also scans the TLV options that follow for option 53 (DHCP Message Type,
+// RFC 2132 section 9.6), stopping at End (0xFF) or if the options run out.
+std::optional<DhcpMatch> match_dhcp(ByteSpan payload) {
+    static constexpr size_t kFixedHeaderLen = 236;
+    static constexpr std::array<uint8_t, 4> kMagicCookie = {0x63, 0x82, 0x53, 0x63};
+    if (payload.size() < kFixedHeaderLen + 4) return std::nullopt;
+    for (size_t i = 0; i < 4; ++i) {
+        if (payload.at(kFixedHeaderLen + i) != kMagicCookie[i]) return std::nullopt;
+    }
+    uint8_t op = payload.at(0);
+    if (op != 1 && op != 2) return std::nullopt;
+
+    DhcpMatch m;
+    m.op = op;
+
+    size_t pos = kFixedHeaderLen + 4;
+    while (pos < payload.size()) {
+        uint8_t code = payload.at(pos);
+        if (code == 0xFF) break;   // End
+        if (code == 0x00) { ++pos; continue; }  // Pad
+        if (pos + 1 >= payload.size()) break;
+        uint8_t opt_len = payload.at(pos + 1);
+        if (pos + 2 + opt_len > payload.size()) break;  // truncated option -- stop scanning
+        if (code == 53 && opt_len == 1) {
+            m.has_message_type = true;
+            m.message_type = payload.at(pos + 2);
+            m.message_type_name = dhcp_message_type_name(m.message_type);
+        }
+        pos += 2 + opt_len;
+    }
+    return m;
+}
+
+// RFC 4511 section 4.1's LDAPMessage envelope: SEQUENCE { INTEGER messageID, protocolOp [APPLICATION
+// n], ... }. Returns the protocolOp's name and its raw application-tag number on a match.
+std::string ldap_protocol_op_name(uint8_t op_num) {
+    switch (op_num) {
+        case 0: return "bindRequest";
+        case 1: return "bindResponse";
+        case 2: return "unbindRequest";
+        case 3: return "searchRequest";
+        case 4: return "searchResEntry";
+        case 5: return "searchResDone";
+        case 6: return "modifyRequest";
+        case 7: return "modifyResponse";
+        case 8: return "addRequest";
+        case 9: return "addResponse";
+        case 10: return "delRequest";
+        case 11: return "delResponse";
+        case 12: return "modDNRequest";
+        case 13: return "modDNResponse";
+        case 14: return "compareRequest";
+        case 15: return "compareResponse";
+        case 16: return "abandonRequest";
+        case 19: return "searchResRef";
+        case 23: return "extendedReq";
+        case 24: return "extendedResp";
+        case 25: return "intermediateResponse";
+        default: return "";
+    }
+}
+
+struct LdapMatch {
+    std::string op_name;
+    uint8_t op_num = 0;
+};
+
+std::optional<LdapMatch> match_ldap_ber(ByteSpan payload) {
+    if (payload.size() < 7 || payload.at(0) != 0x30) return std::nullopt;  // SEQUENCE
+    auto seq_len = ber_length(payload, 1);
+    if (!seq_len) return std::nullopt;
+    size_t pos = 1 + seq_len->second;
+
+    if (pos >= payload.size() || payload.at(pos) != 0x02) return std::nullopt;  // INTEGER messageID
+    auto int_len = ber_length(payload, pos + 1);
+    if (!int_len || int_len->first < 1 || int_len->first > 4) return std::nullopt;
+    pos = pos + 1 + int_len->second;
+    if (pos + int_len->first > payload.size()) return std::nullopt;
+    pos += int_len->first;
+
+    if (pos >= payload.size()) return std::nullopt;
+    uint8_t op_tag = payload.at(pos);
+    if ((op_tag & 0xC0) != 0x40) return std::nullopt;  // must be [APPLICATION n]
+    uint8_t op_num = op_tag & 0x1F;
+    std::string name = ldap_protocol_op_name(op_num);
+    if (name.empty()) return std::nullopt;
+
+    LdapMatch m;
+    m.op_name = name;
+    m.op_num = op_num;
+    return m;
+}
+
+// RFC 2865 section 3's own enumerated Code values (plus RFC 5176's Dynamic Authorization extension).
+std::string radius_code_name(uint8_t code) {
+    switch (code) {
+        case 1: return "Access-Request";
+        case 2: return "Access-Accept";
+        case 3: return "Access-Reject";
+        case 4: return "Accounting-Request";
+        case 5: return "Accounting-Response";
+        case 11: return "Access-Challenge";
+        case 12: return "Status-Server";
+        case 13: return "Status-Client";
+        case 40: return "Disconnect-Request";
+        case 41: return "Disconnect-ACK";
+        case 42: return "Disconnect-NAK";
+        case 43: return "CoA-Request";
+        case 44: return "CoA-ACK";
+        case 45: return "CoA-NAK";
+        default: return "";
+    }
+}
+
+struct RadiusMatch {
+    std::string code_name;
+    uint8_t identifier = 0;
+    uint16_t declared_length = 0;
+};
+
+// RFC 2865 section 3's fixed 20-byte header: Code(1) + Identifier(1) + Length(2, big-endian,
+// "20 <= Length <= 4096") + a 16-byte Authenticator this file never inspects.
+std::optional<RadiusMatch> match_radius(ByteSpan payload) {
+    if (payload.size() < 20) return std::nullopt;
+    uint8_t code = payload.at(0);
+    std::string name = radius_code_name(code);
+    if (name.empty()) return std::nullopt;
+    uint16_t length = static_cast<uint16_t>((payload.at(2) << 8) | payload.at(3));
+    if (length < 20 || length > 4096) return std::nullopt;
+
+    RadiusMatch m;
+    m.code_name = name;
+    m.identifier = payload.at(1);
+    m.declared_length = length;
+    return m;
+}
+
+std::string tacacs_type_name(uint8_t t) {
+    switch (t) {
+        case 1: return "Authentication";
+        case 2: return "Authorization";
+        case 3: return "Accounting";
+        default: return "";
+    }
+}
+
+struct TacacsMatch {
+    uint8_t major_version = 0;
+    uint8_t minor_version = 0;
+    std::string type_name;
+    bool unencrypted = false;
+};
+
+// RFC 8907's 12-byte fixed header: version(1) + type(1) + seq_no(1) + flags(1) + session_id(4) +
+// length(4, big-endian body length, not re-validated against payload size here -- TACACS+ TCP
+// streams routinely span multiple segments, unlike this file's other, single-datagram UDP checks).
+std::optional<TacacsMatch> match_tacacs_plus(ByteSpan payload) {
+    if (payload.size() < 12) return std::nullopt;
+    uint8_t version = payload.at(0);
+    uint8_t major = (version >> 4) & 0x0F;
+    uint8_t minor = version & 0x0F;
+    if (major != 0x0C) return std::nullopt;
+    if (minor != 0x00 && minor != 0x01) return std::nullopt;
+
+    uint8_t type = payload.at(1);
+    std::string type_name = tacacs_type_name(type);
+    if (type_name.empty()) return std::nullopt;
+
+    TacacsMatch m;
+    m.major_version = major;
+    m.minor_version = minor;
+    m.type_name = type_name;
+    m.unencrypted = (payload.at(3) & 0x01) != 0;  // TAC_PLUS_UNENCRYPTED_FLAG
+    return m;
+}
+
+}  // namespace
+
+bool looks_like_ldap_ber(ByteSpan payload) { return match_ldap_ber(payload).has_value(); }
+
+std::optional<ItEnterpriseTrustMatch> try_recognize_it_enterprise_trust(ByteSpan payload, uint16_t src_port,
+                                                                          uint16_t dst_port, bool is_tcp,
+                                                                          const std::vector<uint16_t>& extra_ports) {
+    if (!is_tcp) {
+        // 1. NTP -- gated to port 123 (see file header comment for why, unlike DHCP's magic cookie
+        // below).
+        if (port_in(src_port, NTP_PORT, extra_ports) || port_in(dst_port, NTP_PORT, extra_ports)) {
+            ItEnterpriseTrustMatch m;
+            m.protocol = "ntp";
+            if (auto n = match_ntp(payload)) {
+                m.summary = *n + " (UDP port " + std::to_string(NTP_PORT) + ")";
+            } else {
+                m.summary = "NTP (UDP port " + std::to_string(NTP_PORT) +
+                             ") -- port match only, not a plausible NTP LI/VN/Mode header in this "
+                             "packet (could be malformed, or NTP extension/MAC fields this file "
+                             "doesn't parse further)";
+            }
+            return m;
+        }
+        // 2. DHCP -- magic cookie checked port-independently, same treatment VNC/SMB/SSH/HTTP get in
+        // Tiers 1-2 (see file header comment).
+        if (auto d = match_dhcp(payload)) {
+            ItEnterpriseTrustMatch m;
+            m.protocol = "dhcp";
+            std::string op_name = (d->op == 1) ? "BOOTREQUEST" : "BOOTREPLY";
+            std::ostringstream s;
+            s << "DHCP " << op_name;
+            if (d->has_message_type) {
+                if (!d->message_type_name.empty()) {
+                    s << " (" << d->message_type_name << ")";
+                } else {
+                    s << " (message type " << static_cast<unsigned>(d->message_type) << ", unrecognized)";
+                }
+            }
+            m.summary = s.str();
+            if (!port_in(src_port, DHCP_SERVER_PORT, extra_ports) && !port_in(dst_port, DHCP_SERVER_PORT, extra_ports) &&
+                !port_in(src_port, DHCP_CLIENT_PORT, extra_ports) && !port_in(dst_port, DHCP_CLIENT_PORT, extra_ports)) {
+                m.notes.push_back("seen on UDP port " + std::to_string(src_port) + "->" +
+                                   std::to_string(dst_port) +
+                                   ", which is not the standard DHCP port pair (67/68) -- a rogue or "
+                                   "misconfigured DHCP server answering on an unexpected port is "
+                                   "exactly what this port-independent check is meant to catch");
+            }
+            return m;
+        }
+        // 3. RADIUS -- gated to port 1812/1813 (current) or 1645/1646 (legacy); Code alone is not
+        // self-describing enough to check opportunistically (see file header comment).
+        if (port_in(src_port, RADIUS_AUTH_PORT, extra_ports) || port_in(dst_port, RADIUS_AUTH_PORT, extra_ports) ||
+            port_in(src_port, RADIUS_ACCT_PORT, extra_ports) || port_in(dst_port, RADIUS_ACCT_PORT, extra_ports) ||
+            port_in(src_port, RADIUS_AUTH_PORT_LEGACY, extra_ports) || port_in(dst_port, RADIUS_AUTH_PORT_LEGACY, extra_ports) ||
+            port_in(src_port, RADIUS_ACCT_PORT_LEGACY, extra_ports) || port_in(dst_port, RADIUS_ACCT_PORT_LEGACY, extra_ports)) {
+            ItEnterpriseTrustMatch m;
+            m.protocol = "radius";
+            if (auto r = match_radius(payload)) {
+                m.summary = "RADIUS " + r->code_name + " (id=" + std::to_string(static_cast<unsigned>(r->identifier)) +
+                             ", declared length " + std::to_string(r->declared_length) + ")";
+            } else {
+                m.summary = "RADIUS (UDP port 1812/1813/1645/1646) -- port match only, not a "
+                             "plausible Code/Identifier/Length header in this packet";
+            }
+            return m;
+        }
+    } else {
+        // 1. LDAP -- gated to port 389/3268 (see file header comment for why, same caution as SNMP's
+        // own ASN.1 check in Tier 2).
+        if (port_in(src_port, LDAP_PORT, extra_ports) || port_in(dst_port, LDAP_PORT, extra_ports) ||
+            port_in(src_port, LDAP_GC_PORT, extra_ports) || port_in(dst_port, LDAP_GC_PORT, extra_ports)) {
+            ItEnterpriseTrustMatch m;
+            m.protocol = "ldap";
+            if (auto l = match_ldap_ber(payload)) {
+                m.summary = "LDAP " + l->op_name + " (TCP port 389/3268)";
+                if (l->op_num == 0) {
+                    m.notes.push_back("bindRequest observed -- if this is a simple bind (not SASL), "
+                                       "the credential is sent in cleartext unless the session was "
+                                       "already upgraded via StartTLS; this decoder does not inspect "
+                                       "the credential itself");
+                }
+            } else {
+                m.summary = "LDAP (TCP port 389/3268) -- port match only, not a recognizable "
+                             "LDAPMessage SEQUENCE/messageID/protocolOp shape in this packet "
+                             "(could be a continuation of a multi-segment message)";
+            }
+            return m;
+        }
+        // 2. TACACS+ -- gated to port 49, same "not self-describing enough on its own" reasoning as
+        // RADIUS/NTP above.
+        if (port_in(src_port, TACACS_PLUS_PORT, extra_ports) || port_in(dst_port, TACACS_PLUS_PORT, extra_ports)) {
+            ItEnterpriseTrustMatch m;
+            m.protocol = "tacacs-plus";
+            if (auto t = match_tacacs_plus(payload)) {
+                std::ostringstream s;
+                s << "TACACS+ " << t->type_name << " (v" << static_cast<unsigned>(t->major_version) << "."
+                  << static_cast<unsigned>(t->minor_version) << ")";
+                m.summary = s.str();
+                if (t->unencrypted) {
+                    m.notes.push_back("TAC_PLUS_UNENCRYPTED_FLAG set -- this session's body is sent "
+                                       "in cleartext (RFC 8907 calls TACACS+'s own body \"encryption\" "
+                                       "obfuscation at best even when this flag is clear)");
+                }
+            } else {
+                m.summary = "TACACS+ (TCP port 49) -- port match only, not a plausible version/type "
+                             "header in this packet (could be a continuation of a multi-segment "
+                             "session)";
+            }
+            return m;
+        }
+        // 3. LDAPS port-only fallback -- the actual ClientHello structural check runs earlier in
+        // decoder.cpp, reusing tls_sni.hpp (see it_protocols.hpp's own file header comment for why);
+        // this only covers an already-established, fully-encrypted session on a configured LDAPS
+        // port with no visible ClientHello in this particular packet.
+        if (port_in(src_port, LDAPS_PORT, extra_ports) || port_in(dst_port, LDAPS_PORT, extra_ports) ||
+            port_in(src_port, LDAPS_GC_PORT, extra_ports) || port_in(dst_port, LDAPS_GC_PORT, extra_ports)) {
+            ItEnterpriseTrustMatch m;
+            m.protocol = "ldaps";
+            m.summary = "LDAPS/TLS (TCP port 636/3269) -- port match only, no TLS ClientHello in "
+                         "this packet (an already-established, encrypted session looks like this)";
+            return m;
+        }
+    }
+
+    return std::nullopt;
+}
 
 std::optional<ItLateralMovementMatch> try_recognize_it_lateral_movement(ByteSpan payload, uint16_t src_port,
                                                                           uint16_t dst_port, bool is_tcp,

@@ -108,6 +108,86 @@
 //     ACK (4), and ERROR (5) -- the rest of a transfer, once under way -- have no comparable
 //     signature (a 2-byte opcode plus a 2-byte block number/error code is far too generic to check
 //     opportunistically), so those fall to the port-only match, explicitly noted as such.
+//
+// ---------------------------------------------------------------------------------------------
+// Tier 3 -- "individually unremarkable in limited form but worth an auditor's attention for where
+// they terminate and whether the OT side blindly trusts enterprise IT for them" (ROADMAP item 18's
+// own wording): NTP, DHCP, LDAP/LDAPS, RADIUS, and TACACS+ -- six `protocol` values sharing one
+// `ProtocolFilter::EnterpriseTrustOnly` toggle and one `extra_enterprise_trust_ports` list, the same
+// "one feature toggle, several sub-protocols" grouping Tiers 1-2 already established (see
+// decoder.hpp). IEEE 802.1X/EAPOL is ALSO Tier 3 but, having no port at all (EtherType 0x888E), is
+// NOT in this file -- see eapol.hpp and decoder.hpp's own ProtocolFilter::EapolOnly comment for why.
+// DNS/Active Directory's DNS component needs no new code here either: DNS itself is already decoded
+// in full (see this file's own PROTOCOL COVERAGE cross-reference in docs/MANUAL.md) -- this tier is
+// about correlating where an OT segment's DNS queries actually terminate (an enterprise domain
+// controller vs. a local/isolated resolver), which is a policy/zone-conduit question for
+// docs/MANUAL.md and `policy validate` to eventually answer, not a decoding gap.
+//   - NTP (UDP port 123 -- gated, unlike VNC/SSH/SMB/HTTP above: NTP's own header has no self-
+//     describing byte shape strong enough to check opportunistically on every UDP port, see below)
+//     has a genuine, if modest, structural signature in its very first byte: RFC 5905 section 7.3's
+//     LI (2 bits, leap indicator) / VN (3 bits, version number, 1-4 for every version actually seen
+//     on the wire) / Mode (3 bits, 1-5 for symmetric-active/symmetric-passive/client/server/broadcast,
+//     6 for an NTP control message, RFC 1119/5905) fields, plus a minimum 48-byte packet size (the
+//     fixed NTPv3/v4 header). This is a much weaker gate than VNC's RFB banner or SSH's version
+//     string -- a handful of small integers, not a multi-byte ASCII match -- so it stays port-gated.
+//     An OT auditor's actual interest here (per ROADMAP item 18) is less "is this NTP" and more
+//     "which server does the OT segment sync its clock against" -- this file only names the protocol
+//     and its Mode, it does not attempt to extract/report the actual timestamp fields.
+//   - DHCP (UDP port 67 server / 68 client) has a genuine, strong, cleartext structural signature:
+//     RFC 2131's fixed 236-byte BOOTP-derived header is ALWAYS followed by a 4-byte magic cookie,
+//     `0x63 0x82 0x53 0x63` (RFC 1497/2131 section 3), before the first DHCP option. Checked port-
+//     independently, the same "structural signature overrides the port gate" treatment VNC/SMB/SSH/
+//     HTTP get above -- a rogue or misconfigured DHCP server answering on an unexpected port is
+//     exactly the kind of thing worth catching regardless. When present, option 53 (DHCP Message
+//     Type, RFC 2132 section 9.6) is additionally decoded by name (DISCOVER/OFFER/REQUEST/DECLINE/
+//     ACK/NAK/RELEASE/INFORM and the RFC 3203/4388 extensions) -- every other DHCP option is left
+//     entirely unparsed.
+//   - LDAP (TCP port 389, or 3268 for Global Catalog) has a genuine cleartext structural signature at
+//     the LDAPMessage level (RFC 4511 section 4.1): a BER SEQUENCE wrapping an INTEGER messageID
+//     followed immediately by a protocolOp tagged [APPLICATION n] (bindRequest=0, bindResponse=1,
+//     unbindRequest=2, searchRequest=3, searchResEntry=4, searchResDone=5, modifyRequest=6,
+//     modifyResponse=7, addRequest=8, addResponse=9, delRequest=10, delResponse=11, modDNRequest=12,
+//     modDNResponse=13, compareRequest=14, compareResponse=15, abandonRequest=16, searchResRef=19,
+//     extendedReq=23, extendedResp=24, intermediateResponse=25). Gated to port 389/3268 (or a
+//     configured extra port) even though the check is structurally about as strong as SNMP's own
+//     SEQUENCE/INTEGER check above -- the same "ASN.1 tag bytes are common enough elsewhere" caution
+//     that keeps SNMP port-gated applies here too. An unencrypted LDAP bind (bindRequest, op 0) is
+//     independently worth its own note: it is the one case where this file's "name-only" posture
+//     still surfaces something the auditor should look at, a cleartext-credential bind (LDAP simple
+//     bind sends the password as plaintext unless started over TLS/StartTLS), without decoding the
+//     credential itself.
+//   - LDAPS (LDAP-over-TLS, port 636, or 3269 for Global Catalog) reuses this project's own TLS
+//     ClientHello parser (tls_sni.hpp, already layered under HTTPS/DoH detection -- see this file's
+//     own HTTPS paragraph above) rather than a second TLS implementation: decoder.cpp's existing
+//     early ClientHello call site gets one more port-based branch, tagging a ClientHello on port
+//     636/3269 "ldaps" instead of generic "https" when ALPN doesn't already confirm HTTP. That check
+//     is NOT in this file, exactly like HTTPS's own strong check -- this file only supplies LDAPS's
+//     port-only fallback, for an already-established, fully-encrypted session with no visible
+//     ClientHello in this particular packet.
+//   - RADIUS (UDP port 1812/1813, the RFC 2865/2866-standardized Access/Accounting pair, plus the
+//     legacy, still commonly seen 1645/1646 pre-standardization ports) has a genuine structural
+//     signature: a 20-byte fixed header (RFC 2865 section 3) -- Code (1 byte, a small enumerated set:
+//     1 Access-Request, 2 Access-Accept, 3 Access-Reject, 4 Accounting-Request, 5 Accounting-Response,
+//     11 Access-Challenge, 12 Status-Server, 13 Status-Client, 40-45 the RFC 5176 Dynamic
+//     Authorization Disconnect-Request/ACK/NAK and CoA-Request/ACK/NAK) -- Identifier (1 byte),
+//     Length (2 bytes big-endian, RFC 2865's own "20 <= Length <= 4096" bound), and a 16-byte
+//     Authenticator this file never inspects. Gated to port (RADIUS's Code byte alone, one enumerated
+//     value out of 256, is not self-describing enough to check opportunistically, the same reasoning
+//     TACACS+ and NTP get below). Per ROADMAP item 18's own wording ("cleartext-by-default attribute
+//     encoding for anything past the shared secret"), this file deliberately does NOT attempt to walk
+//     RADIUS's own Attribute-Value pairs past the fixed header -- User-Name/User-Password/etc. are
+//     genuinely present in some of those AVPs, and decoding them would cross this whole ROADMAP
+//     item's own "name-only" line (SNMP's community string is the one deliberate, narrow exception
+//     already made, and it stays that way).
+//   - TACACS+ (TCP port 49 -- used almost exclusively for network-device-administration AAA, RFC
+//     8907, formerly a Cisco proprietary protocol) has a genuine structural signature in its 12-byte
+//     fixed header: a version byte whose upper nibble is always `0xC` (TAC_PLUS_MAJOR_VERSION) and
+//     whose lower nibble is 0x0 or 0x1 (TAC_PLUS_MINOR_VERSION_DEFAULT/_ONE), a Type byte (1
+//     Authentication, 2 Authorization, 3 Accounting), a Sequence Number and Flags byte (bit 0x01,
+//     TAC_PLUS_UNENCRYPTED_FLAG, is itself worth surfacing -- RFC 8907 section 4.5 calls cleartext
+//     TACACS+ body encryption "obfuscation" at best, so an unencrypted session is a real finding, not
+//     just a protocol-naming curiosity), a 4-byte Session ID, and a 4-byte body Length. Gated to port
+//     49, the same "not self-describing enough on its own" reasoning as RADIUS/NTP above.
 #pragma once
 
 #include <cstdint>
@@ -222,5 +302,59 @@ std::optional<ItLateralMovementMatch> try_recognize_it_lateral_movement(ByteSpan
 // `payload` matches this file's own FTP reply-code/command-verb structural check (the same one
 // try_recognize_it_lateral_movement itself uses).
 bool looks_like_ftp_control_line(ByteSpan payload);
+
+// ---------------------------------------------------------------------------------------------
+// Tier 3 -- see this file's own header comment above for the full per-protocol confidence writeup.
+// EAPOL (also Tier 3) is NOT declared here -- see eapol.hpp's own try_parse_eapol.
+
+constexpr uint16_t NTP_PORT = 123;  // UDP -- IANA-registered "ntp"
+
+constexpr uint16_t DHCP_SERVER_PORT = 67;  // UDP -- IANA-registered "bootps"
+constexpr uint16_t DHCP_CLIENT_PORT = 68;  // UDP -- IANA-registered "bootpc"
+
+constexpr uint16_t LDAP_PORT = 389;      // TCP -- IANA-registered "ldap"
+constexpr uint16_t LDAP_GC_PORT = 3268;  // TCP -- Active Directory Global Catalog, plaintext
+
+// LDAPS's own ClientHello structural check lives in decoder.cpp (see this file's header comment) --
+// these two are only this file's own port-only fallback gate.
+constexpr uint16_t LDAPS_PORT = 636;      // TCP -- IANA-registered "ldaps"
+constexpr uint16_t LDAPS_GC_PORT = 3269;  // TCP -- Active Directory Global Catalog over TLS
+
+constexpr uint16_t RADIUS_AUTH_PORT = 1812;         // UDP -- RFC 2865, current IANA-registered port
+constexpr uint16_t RADIUS_ACCT_PORT = 1813;         // UDP -- RFC 2866, current IANA-registered port
+constexpr uint16_t RADIUS_AUTH_PORT_LEGACY = 1645;  // UDP -- pre-standardization, still common
+constexpr uint16_t RADIUS_ACCT_PORT_LEGACY = 1646;  // UDP -- pre-standardization, still common
+
+constexpr uint16_t TACACS_PLUS_PORT = 49;  // TCP -- IANA-registered "tacacs"
+
+struct ItEnterpriseTrustMatch {
+    std::string protocol;  // "ntp" / "dhcp" / "ldap" / "ldaps" / "radius" / "tacacs-plus"
+    std::string summary;
+    std::vector<std::string> notes;
+};
+
+// Returns std::nullopt if `payload` and the `src_port`/`dst_port` pair don't match any of the six
+// port-based Tier 3 protocols this file recognizes (EAPOL, the seventh Tier 3 protocol, has no port
+// at all -- see eapol.hpp). Like try_recognize_it_lateral_movement above, every one of these six has
+// a FIXED transport (NTP/DHCP/RADIUS are UDP-only, LDAP/LDAPS/TACACS+ are TCP-only) so `is_tcp`
+// selects which half of this function even attempts a match. `extra_ports` extends every one of this
+// file's own default ports, one shared list across all six -- the same "one feature toggle" grouping
+// Tiers 1-2 already established, not six independent option lists.
+std::optional<ItEnterpriseTrustMatch> try_recognize_it_enterprise_trust(ByteSpan payload, uint16_t src_port,
+                                                                          uint16_t dst_port, bool is_tcp,
+                                                                          const std::vector<uint16_t>& extra_ports);
+
+// Exposed narrowly for decoder.cpp's own reassemble_tcp_payload, to resolve a real collision found
+// while implementing this: LDAP's own LDAPMessage envelope always begins with a BER SEQUENCE tag,
+// byte value 0x30 -- which is bit-for-bit identical to a valid MQTT control-packet-type/flags byte
+// (control packet type 3 = PUBLISH, flags all clear), so MQTT's own single-byte opportunistic,
+// port-independent declared-length gate (mqtt.hpp) matches every genuine LDAP message purely by
+// chance, the same shape of collision Tier 2's own looks_like_ftp_control_line already resolves for
+// FTP vs. MQTT (see that function's own comment) -- MQTT's own reassembly probe (tried before this
+// file's own Tier 3 dispatch, which only runs once reassembly completes) would otherwise buffer real
+// LDAP traffic forever waiting for bytes that will never arrive. See decoder.cpp's own call site for
+// the full reasoning; true when `payload` matches this file's own LDAP BER structural check (the
+// same one try_recognize_it_enterprise_trust itself uses).
+bool looks_like_ldap_ber(ByteSpan payload);
 
 }  // namespace conduitscope

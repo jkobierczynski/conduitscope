@@ -11,7 +11,7 @@ conduitscope [-q|--quiet] [--no-color|--color] [--log-file FILE] [--version] [-h
 
 conduitscope decode (-r FILE | -i INTERFACE) [-o FILE] [-f text|json|csv] [--protocol NAME]
                      [--modbus-port PORT]... [--dnp3-port PORT]... [--s7comm-port PORT]... [--iec104-port PORT]...
-                     [--enip-port PORT]... [--enip-io-port PORT]... [--bacnet-port PORT]... [--hartip-port PORT]... [--opcua-port PORT]... [--mqtt-port PORT]... [--ffhse-port PORT]... [--remote-access-port PORT]... [--lateral-movement-port PORT]...
+                     [--enip-port PORT]... [--enip-io-port PORT]... [--bacnet-port PORT]... [--hartip-port PORT]... [--opcua-port PORT]... [--mqtt-port PORT]... [--ffhse-port PORT]... [--remote-access-port PORT]... [--lateral-movement-port PORT]... [--enterprise-trust-port PORT]...
                      [--max-packets N] [--stats] [--strict]
                      [--filter BPF] [--duration SECONDS] [--snaplen BYTES] [--no-promiscuous]
 
@@ -167,7 +167,7 @@ conduitscope decode (-r FILE | -i INTERFACE) [options]
 | `--no-promiscuous` | off (i.e. promiscuous by default) | With `-i`, don't put the interface into promiscuous mode. Promiscuous is the default because the main live-capture use case -- watching a mirrored/SPAN switch port for zone/conduit traffic -- needs to see traffic that isn't addressed to the capturing host at all. |
 | `-o, --output FILE` | stdout | Write decoded output here instead of stdout. |
 | `-f, --format {text,json,csv}` | `text` | Output format. See OUTPUT FORMATS below. |
-| `--protocol NAME` | `auto` | Restrict decoding to one protocol. See PROTOCOL COVERAGE below for the full, current list of valid protocol names (one per subsection there). `auto` opportunistically tries OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, S7comm/COTP, S7comm-Plus, MMS, HART-IP, MQTT, and FF-HSE detection on every TCP payload (in that order -- FF-HSE last of all, even after MQTT, see PROTOCOL DETECTION), CIP I/O, BACnet/IP, HART-IP, and FF-HSE detection on every UDP payload (FF-HSE last there too), PROFINET RT (DCP/cyclic) detection on every non-IPv4 Ethernet frame carrying EtherType `0x8892`, GOOSE detection on every non-IPv4 Ethernet frame carrying EtherType `0x88B8`, Sampled Values detection on every non-IPv4 Ethernet frame carrying EtherType `0x88BA`, EtherCAT detection on every non-IPv4 Ethernet frame carrying EtherType `0x88A4`, regardless of port, and Spanning Tree Protocol (STP/RSTP/MSTP) detection on every classic IEEE 802.3 length-framed Ethernet frame whose LLC header is DSAP=SSAP=`0x42` -- a structurally separate dispatch path from every EtherType-keyed protocol above, so there's no ordering/collision question between them (see PROTOCOL DETECTION below). `enip` covers both EtherNet/IP explicit messaging (TCP) and CIP I/O implicit messaging (UDP). `mms` is IEC 61850 MMS (Manufacturing Message Specification, ISO 9506) -- shares S7comm's exact TPKT/COTP transport and TCP port 102, but is a distinct application protocol; see `--s7comm-port` below and PROTOCOL COVERAGE's MMS section. `s7comm-plus` is S7comm-Plus (TIA Portal / S7-1200/1500) -- shares the same TPKT/COTP transport and TCP port 102, disambiguated by its own protocol id byte; see `--s7comm-port` below and PROTOCOL COVERAGE's S7comm-Plus section. `mqtt` is MQTT (v3.1/v3.1.1/v5.0) plus Sparkplug B -- see `--mqtt-port` below and PROTOCOL COVERAGE's MQTT section. `profinet` covers both DCP and cyclic real-time IO. `sv` is IEC 61850-9-2 Sampled Values. `ethercat` is EtherCAT. `bacnet` is BACnet/IP. `hartip` is HART-IP (covers both UDP and TCP). `opcua` is OPC UA Binary (UA-TCP/Secure Conversation, TCP only). `ff-hse` is FOUNDATION Fieldbus HSE (covers FDA/SM/FMS/LAN Redundancy, on both TCP and UDP) -- see `--ffhse-port` below and PROTOCOL COVERAGE's FOUNDATION Fieldbus HSE section. `stp` is Spanning Tree Protocol (STP/RSTP/MSTP) -- no port option, matching GOOSE/SV/EtherCAT/PROFINET's own no-port precedent for a protocol with no port at all; see PROTOCOL COVERAGE's Spanning Tree Protocol section. `devicenet` is DeviceNet (CAN-bus CIP) -- no port option either, the same no-port precedent, but unlike every other value in this list it isn't reached through Ethernet at all: it's gated on the capture's own pcap link type being `LINKTYPE_CAN_SOCKETCAN` (227, standard Linux SocketCAN capture framing -- what `candump -l`/`tcpdump -i can0`/Wireshark itself write capturing a CAN bus), checked before any protocol filter, so `--protocol devicenet` against an ordinary Ethernet-linktype capture simply decodes nothing (every packet still parses at the link layer, just with no application-layer match) rather than erroring; see PROTOCOL COVERAGE's DeviceNet section. `remote-access` covers Tier 1 of the "IT protocols an OT auditor flags" family (RDP/VNC/TeamViewer/AnyDesk/Zoom, each its own `protocol` value even under this one filter name) -- see `--remote-access-port` below and PROTOCOL COVERAGE's "Tier 1 remote-access protocol recognition" section. `lateral-movement` covers Tier 2 of the same family (SMB/SSH/HTTP/HTTPS/SNMPv1v2c/Telnet/FTP/TFTP, again each its own `protocol` value under this one filter name) -- see `--lateral-movement-port` below and PROTOCOL COVERAGE's "Tier 2 lateral-movement protocol recognition" section. |
+| `--protocol NAME` | `auto` | Restrict decoding to one protocol. See PROTOCOL COVERAGE below for the full, current list of valid protocol names (one per subsection there). `auto` opportunistically tries OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, S7comm/COTP, S7comm-Plus, MMS, HART-IP, MQTT, and FF-HSE detection on every TCP payload (in that order -- FF-HSE last of all, even after MQTT, see PROTOCOL DETECTION), CIP I/O, BACnet/IP, HART-IP, and FF-HSE detection on every UDP payload (FF-HSE last there too), PROFINET RT (DCP/cyclic) detection on every non-IPv4 Ethernet frame carrying EtherType `0x8892`, GOOSE detection on every non-IPv4 Ethernet frame carrying EtherType `0x88B8`, Sampled Values detection on every non-IPv4 Ethernet frame carrying EtherType `0x88BA`, EtherCAT detection on every non-IPv4 Ethernet frame carrying EtherType `0x88A4`, regardless of port, and Spanning Tree Protocol (STP/RSTP/MSTP) detection on every classic IEEE 802.3 length-framed Ethernet frame whose LLC header is DSAP=SSAP=`0x42` -- a structurally separate dispatch path from every EtherType-keyed protocol above, so there's no ordering/collision question between them (see PROTOCOL DETECTION below). `enip` covers both EtherNet/IP explicit messaging (TCP) and CIP I/O implicit messaging (UDP). `mms` is IEC 61850 MMS (Manufacturing Message Specification, ISO 9506) -- shares S7comm's exact TPKT/COTP transport and TCP port 102, but is a distinct application protocol; see `--s7comm-port` below and PROTOCOL COVERAGE's MMS section. `s7comm-plus` is S7comm-Plus (TIA Portal / S7-1200/1500) -- shares the same TPKT/COTP transport and TCP port 102, disambiguated by its own protocol id byte; see `--s7comm-port` below and PROTOCOL COVERAGE's S7comm-Plus section. `mqtt` is MQTT (v3.1/v3.1.1/v5.0) plus Sparkplug B -- see `--mqtt-port` below and PROTOCOL COVERAGE's MQTT section. `profinet` covers both DCP and cyclic real-time IO. `sv` is IEC 61850-9-2 Sampled Values. `ethercat` is EtherCAT. `bacnet` is BACnet/IP. `hartip` is HART-IP (covers both UDP and TCP). `opcua` is OPC UA Binary (UA-TCP/Secure Conversation, TCP only). `ff-hse` is FOUNDATION Fieldbus HSE (covers FDA/SM/FMS/LAN Redundancy, on both TCP and UDP) -- see `--ffhse-port` below and PROTOCOL COVERAGE's FOUNDATION Fieldbus HSE section. `stp` is Spanning Tree Protocol (STP/RSTP/MSTP) -- no port option, matching GOOSE/SV/EtherCAT/PROFINET's own no-port precedent for a protocol with no port at all; see PROTOCOL COVERAGE's Spanning Tree Protocol section. `devicenet` is DeviceNet (CAN-bus CIP) -- no port option either, the same no-port precedent, but unlike every other value in this list it isn't reached through Ethernet at all: it's gated on the capture's own pcap link type being `LINKTYPE_CAN_SOCKETCAN` (227, standard Linux SocketCAN capture framing -- what `candump -l`/`tcpdump -i can0`/Wireshark itself write capturing a CAN bus), checked before any protocol filter, so `--protocol devicenet` against an ordinary Ethernet-linktype capture simply decodes nothing (every packet still parses at the link layer, just with no application-layer match) rather than erroring; see PROTOCOL COVERAGE's DeviceNet section. `remote-access` covers Tier 1 of the "IT protocols an OT auditor flags" family (RDP/VNC/TeamViewer/AnyDesk/Zoom, each its own `protocol` value even under this one filter name) -- see `--remote-access-port` below and PROTOCOL COVERAGE's "Tier 1 remote-access protocol recognition" section. `lateral-movement` covers Tier 2 of the same family (SMB/SSH/HTTP/HTTPS/SNMPv1v2c/Telnet/FTP/TFTP, again each its own `protocol` value under this one filter name) -- see `--lateral-movement-port` below and PROTOCOL COVERAGE's "Tier 2 lateral-movement protocol recognition" section. `enterprise-trust` covers the six port-based protocols of Tier 3 of the same family (NTP/DHCP/LDAP/LDAPS/RADIUS/TACACS+, again each its own `protocol` value under this one filter name) -- see `--enterprise-trust-port` below and PROTOCOL COVERAGE's "Tier 3 enterprise-trust-boundary protocol recognition" section. `eapol` is Tier 3's seventh protocol, IEEE 802.1X/EAPOL -- EtherType-keyed, no port at all, so it has its own dedicated filter value rather than sharing `enterprise-trust`, the same split GOOSE/SV/EtherCAT/PROFINET's own EtherType-keyed filters already have from every port-based one; no port option exists for it. |
 | `--modbus-port PORT` | *(502 built in)* | Additional TCP port to treat as "expected" for Modbus. Repeatable. Does **not** gate detection -- it only changes whether a decoded Modbus frame is annotated as appearing on an unexpected port, which is itself a useful signal when auditing a conduit. |
 | `--dnp3-port PORT` | *(20000 built in)* | Same as `--modbus-port`, for DNP3. Repeatable. |
 | `--s7comm-port PORT` | *(102 built in)* | Same as `--modbus-port`, for COTP/S7comm. Repeatable. There is no separate `--mms-port` -- MMS rides the identical TPKT/COTP transport on the identical TCP port 102 S7comm uses (see `mms.hpp`'s file header), so this same option's "expected port" annotation also governs MMS traffic. |
@@ -1952,6 +1952,30 @@ too, for the same reason, but is layered directly into the DoH detection
 call site rather than gated by this option at all -- see PROTOCOL
 COVERAGE's Tier 2 section. `--protocol lateral-movement` skips every port
 gate in this tier at once, same as `--protocol remote-access` above.
+
+**NTP, LDAP, RADIUS, and TACACS+ (Tier 3's six port-based protocols, minus
+DHCP and LDAPS) are also port-gated in `--protocol auto`**, widened by the
+one shared `--enterprise-trust-port` option (`extra_enterprise_trust_ports`
+in `decoder.hpp`) -- see PROTOCOL COVERAGE's "Tier 3
+enterprise-trust-boundary protocol recognition" section for the
+per-protocol reasoning. **DHCP and LDAPS are the exceptions in this
+tier**: DHCP's own magic-cookie header and LDAPS's own TLS ClientHello are
+both checked port-independently even in Auto mode, the identical
+"structural signature overrides the port gate" treatment SMB/SSH/HTTP get
+in Tier 2 -- `--enterprise-trust-port` still widens what counts as DHCP's
+own "expected" port for the "seen on a non-standard port" note, and LDAPS's
+own "expected" port for its ClientHello call site (layered into the same
+early call site HTTPS's own uses, see PROTOCOL COVERAGE's Tier 3 section),
+it just never gates whether either check itself runs. `--protocol
+enterprise-trust` skips every port gate in this tier at once, same as
+`--protocol lateral-movement`/`--protocol remote-access` above. **EAPOL
+needs no port gate or option at all**: like IGMP/VRRP/IGRP/PIM/EIGRP/OSPF
+above, it rides directly on Ethernet (EtherType `0x888E`, no IP/TCP/UDP
+layer at all), dispatched purely by that EtherType, and reached only via
+`--protocol eapol` or Auto mode -- it is not covered by `--protocol
+enterprise-trust` or `--enterprise-trust-port`, the same split
+GOOSE/SV/EtherCAT/PROFINET's own EtherType-keyed filters already have from
+every port-based protocol filter in this list.
 
 ## OUTPUT FORMATS
 
@@ -7777,6 +7801,176 @@ of any of these eight was sought for this groundwork pass -- what matters
 for a name-only recognizer is that the port/structural gate itself is
 correct, which the synthetic fixture confirms directly.
 
+### Tier 3 enterprise-trust-boundary protocol recognition (NTP, DHCP, LDAP, LDAPS, RADIUS, TACACS+, EAPOL)
+
+The third tier of ROADMAP item 18's "IT protocols an OT auditor flags"
+family: protocols that are "individually unremarkable in limited form but
+worth an auditor's attention for where they terminate and whether the OT
+side blindly trusts enterprise IT for them" -- a different question from
+Tier 1's interactive-session risk or Tier 2's lateral-movement risk. See
+`include/conduitscope/it_protocols.hpp`'s own file header comment (the
+Tier 3 half) and `include/conduitscope/eapol.hpp`'s own file header
+comment for the full confidence-tier reasoning summarized here.
+
+DNS/Active Directory needed no new decode work: DNS itself is already
+fully decoded (see PROTOCOL COVERAGE's DNS section above) -- this tier is
+about correlating where an OT segment's DNS queries actually terminate,
+which is a policy/zone-conduit question left open for future work, not a
+decoding gap.
+
+Six of this tier's seven protocols are identified from a port and a
+structural signature, reported as their own `protocol` value (`ntp`/
+`dhcp`/`ldap`/`ldaps`/`radius`/`tacacs-plus`) with a one-line `summary`;
+the seventh, EAPOL, rides raw Ethernet (EtherType `0x888E`) rather than
+any TCP/UDP port at all, and is covered separately below. Confidence
+varies, and every summary/note says so honestly:
+
+- **NTP** (UDP port 123, IANA `ntp`) is identified from RFC 5905 section
+  7.3's LI/VN/Mode first byte (Version 1-4, Mode 1-6) plus a minimum
+  48-byte NTPv3/v4 header -- a modest structural signature, much weaker
+  than VNC's or SSH's own banners, so it stays **port-gated** even for
+  this check, the same caution RIP/HSRP/SNMP already earn elsewhere in
+  this codebase. This decoder only names the protocol and its Mode; it
+  does not extract the actual timestamp fields (an auditor's real interest
+  here -- which server the OT segment syncs its clock against -- is a
+  policy question, not a decoding one).
+- **DHCP** (UDP port 67 server / 68 client) is identified from RFC 1497/
+  2131's own 4-byte magic cookie (`0x63 0x82 0x53 0x63`), immediately
+  after the fixed 236-byte BOOTP-derived header -- a genuine, strong,
+  cleartext structural signature, checked **port-independently** even in
+  Auto mode (the same treatment SMB/SSH/HTTP get in Tiers 1-2): a rogue or
+  misconfigured DHCP server answering on an unexpected port is exactly
+  what this check is meant to catch. Option 53 (DHCP Message Type, RFC
+  2132) is additionally decoded by name when present (DISCOVER/OFFER/
+  REQUEST/DECLINE/ACK/NAK/RELEASE/INFORM and the RFC 3203/4388
+  extensions); every other DHCP option is left unparsed.
+- **LDAP** (TCP port 389, or 3268 for Active Directory's Global Catalog)
+  is identified from RFC 4511 section 4.1's own LDAPMessage envelope -- a
+  BER `SEQUENCE` wrapping an `INTEGER` messageID followed by a protocolOp
+  tagged `[APPLICATION n]` (bindRequest/bindResponse/unbindRequest/
+  searchRequest/searchResEntry/searchResDone/modifyRequest/
+  modifyResponse/addRequest/addResponse/delRequest/delResponse/
+  modDNRequest/modDNResponse/compareRequest/compareResponse/
+  abandonRequest/searchResRef/extendedReq/extendedResp/
+  intermediateResponse). Gated to port 389/3268, the same "ASN.1 tag bytes
+  are common enough elsewhere" caution SNMP's own BER check earns in
+  Tier 2. An observed `bindRequest` (op 0) gets its own note: if it's a
+  simple (non-SASL) bind, the credential is sent in cleartext unless the
+  session was already upgraded via StartTLS -- the credential itself is
+  never inspected, staying within this whole item's name-only posture.
+- **LDAPS** (LDAP-over-TLS, port 636, or 3269 for Global Catalog-over-TLS)
+  reuses this project's own TLS ClientHello parser (`tls_sni.hpp`, already
+  built for DoH detection, and already reused for Tier 2's own HTTPS --
+  see that section above) rather than a second TLS implementation.
+  Layered into that SAME early ClientHello call site: a ClientHello on
+  port 636/3269 is tagged `ldaps` instead of generic `https`, *unless*
+  ALPN itself already confirms HTTP (`http/1.1`/`h2`), in which case the
+  more specific ALPN signal wins regardless of port -- a TLS-wrapped
+  vendor web UI that happens to reuse the LDAPS port is still correctly
+  called `https`, not `ldaps`. An already-established, fully-encrypted
+  session with no visible ClientHello in a given packet gets the weakest,
+  port-only fallback, same treatment HTTPS's own gets in Tier 2.
+- **RADIUS** (UDP port 1812/1813, the RFC 2865/2866-standardized Access/
+  Accounting pair, plus the legacy, still commonly seen 1645/1646
+  pre-standardization ports) is identified from RFC 2865 section 3's own
+  fixed 20-byte header: a small enumerated Code (Access-Request/Accept/
+  Reject, Accounting-Request/Response, Access-Challenge, Status-Server/
+  Client, and the RFC 5176 Disconnect-Request/ACK/NAK and CoA-Request/
+  ACK/NAK values), an Identifier, and a `20 <= Length <= 4096` bound. Per
+  this item's own wording ("cleartext-by-default attribute encoding for
+  anything past the shared secret"), this decoder deliberately does
+  **not** walk RADIUS's own Attribute-Value pairs past the fixed header --
+  doing so would cross this whole item's name-only line the way SNMP's
+  community string is the one, narrow, deliberate exception to (see
+  Tier 2). Gated to port, the same "not self-describing enough alone"
+  reasoning as NTP/TACACS+.
+- **TACACS+** (TCP port 49, RFC 8907, used almost exclusively for
+  network-device-administration AAA) is identified from its own 12-byte
+  fixed header: a version byte whose upper nibble is always `0xC`
+  (`TAC_PLUS_MAJOR_VERSION`) and whose lower nibble is 0 or 1, a Type byte
+  (Authentication/Authorization/Accounting), a Sequence Number, a Flags
+  byte, a Session ID, and a body Length. The Flags byte's own
+  `TAC_PLUS_UNENCRYPTED_FLAG` (bit `0x01`) is additionally surfaced as its
+  own note when set, since RFC 8907 itself calls TACACS+'s body
+  "encryption" obfuscation at best even when that flag is clear. Gated to
+  port 49, same reasoning as NTP/RADIUS above.
+- **IEEE 802.1X/EAPOL** (EtherType `0x888E`, `eapol.hpp`) is
+  architecturally different from the other six: no TCP/UDP port, no IP
+  layer at all -- the same shape PROFINET RT/GOOSE/Sampled Values/
+  EtherCAT already have in this codebase, dispatched from the same
+  EtherType-keyed region of `decoder.cpp`, with its own dedicated
+  `--protocol eapol` value rather than folding into `--protocol
+  enterprise-trust`. The 4-byte EAPOL header (Version 1-3, Type 0-8,
+  Length) is parsed in full; two of the nine Types get a shallow further
+  look -- an encapsulated EAP packet (Type 0: RFC 3748's own Code/
+  Identifier/Length, plus, for Request/Response, a curated EAP Method Type
+  name such as Identity/MD5-Challenge/EAP-TLS/EAP-TTLS/PEAP/EAP-FAST) and
+  an EAPOL-Key frame (Type 3: just the Descriptor Type byte -- RC4/legacy,
+  IEEE 802.11 RSN/WPA2, or WPA/pre-RSN). Nothing past those points is
+  parsed (no EAP-TLS handshake content, no EAPOL-Key nonce/MIC/key data,
+  no EAPOL-MKA or Announcement TLV bodies). EAPOL's own audit framing cuts
+  the *opposite* way from every other protocol in this item: its
+  **presence** on an OT switch port is reassuring (the device had to
+  authenticate onto the network before passing any other traffic at all),
+  so its **absence** is often the real finding -- this decoder can only
+  ever report "802.1X traffic was or wasn't captured here," not "802.1X
+  is configured but idle," an inherent limit of passive capture rather
+  than a shortcut taken here.
+
+`--protocol enterprise-trust` isolates the six port-based protocols from
+the CLI (EAPOL is reached only via its own `--protocol eapol`, or in Auto
+mode alongside everything else); `--enterprise-trust-port` (repeatable)
+widens what counts as an "expected" port for those six at once (one
+shared option, the same grouping `--lateral-movement-port` already
+established for Tier 2) -- DHCP's magic cookie and LDAPS's own ClientHello
+check are never port-gated regardless of this option, for the same reason
+SMB/SSH/HTTP aren't in Tiers 1-2 (see OPTIONS). EAPOL needs no port option
+at all, matching PROFINET/GOOSE/SV/EtherCAT/STP's own no-port precedent.
+
+One real implementation wrinkle, in the same spirit as Tier 2's own
+FTP/MQTT one: LDAP's own leading BER `SEQUENCE` tag byte (`0x30`) is
+bit-for-bit identical to a valid MQTT PUBLISH control-packet-type/flags
+byte, so MQTT's own opportunistic, port-independent detection gate
+(`mqtt.hpp`) matches every genuine LDAP message purely by coincidence --
+confirmed empirically while building this tier's own test fixture, the
+exact same shape of collision as Tier 2's FTP-vs-MQTT one, resolved the
+same way: LDAP traffic on its own configured port (389/3268, or a
+configured `--enterprise-trust-port`) that structurally matches an
+LDAPMessage envelope is excluded from MQTT's own opportunistic detection
+entirely (both its declared-length reassembly probe and its full message
+parse), since no real MQTT broker runs on port 389 -- see `decoder.cpp`'s
+own comments at both call sites. Worth being explicit about the one
+direct consequence: an LDAP message on a genuinely arbitrary, unconfigured
+port is **not** rescued by this carve-out (LDAP, unlike SMB/SSH/HTTP in
+Tiers 1-2, is deliberately kept port-gated, per its own paragraph above)
+and is still misidentified as `mqtt` until that specific port is added via
+`--enterprise-trust-port` -- an accepted, documented trade-off of this
+tier's "port-gated where the structural signature alone is too common
+elsewhere" design, not an oversight; the test fixture below exercises both
+the collision and the fix.
+
+Validated against `tests/sample_enterprise_trust.pcap` (26 packets,
+hand-built with scapy): NTP client/server Mode plus a too-short port-only
+fallback; DHCPDISCOVER/DHCPOFFER plus a non-standard-port DHCPREQUEST
+(port-independent, noted); LDAP bindRequest (with its cleartext-bind note)
+and searchRequest (standard and Global Catalog ports) plus a port-only
+fallback; an LDAP message on an unconfigured port demonstrating the
+MQTT-collision trade-off above, and the same message recognized correctly
+once `--enterprise-trust-port` widens LDAP's own port; LDAPS ClientHellos
+on both the standard and Global Catalog-over-TLS ports plus the port-only
+fallback, and a dedicated edge case proving ALPN-confirmed HTTPS still
+wins over the LDAPS port when both signals are present in the same
+packet; RADIUS Access-Request/Accounting-Response on the current standard
+ports, an Access-Request on the legacy port, and a port-only fallback;
+TACACS+ Authentication (with its unencrypted-flag note) and Authorization,
+plus a port-only fallback; and all five distinct EAPOL frame shapes this
+decoder recognizes (EAPOL-Start, EAP-Request/Identity, EAP-Response/
+Identity, an EAPOL-Key RSN/WPA2 frame, and EAPOL-Logoff). As with Tiers 1
+and 2, no real capture of any of these seven was sought for this
+groundwork pass -- what matters for a name-only recognizer is that the
+port/structural gate itself is correct, which the synthetic fixture
+confirms directly.
+
 ### Link/IP-layer plumbing: non-IPv4 Ethernet, and non-TCP IPv4 (including UDP)
 
 Every protocol above rides on Ethernet + IPv4 + TCP. Traffic outside that --
@@ -7793,11 +7987,13 @@ protocol number registry (not reverse-engineered from a single capture):
   recognize the inner ethertype" -- it's now named as such instead of a bare
   `0x8100`) are named but not decoded further. PROFINET RT (`0x8892`),
   IEC 61850-8-1 GOOSE (`0x88B8`), IEC 61850-9-2 Sampled Values (`0x88BA`),
-  and EtherCAT (`0x88A4`) are also named here, but, like CIP I/O below, a
-  frame that actually looks like DCP/cyclic IO data, a GOOSE APDU, a SavPdu,
-  or an EtherCAT frame header is decoded and reported as
-  `profinet`/`goose`/`sv`/`ethercat`, not `non-ip` -- see PROTOCOL COVERAGE's
-  PROFINET RT, GOOSE, Sampled Values, and EtherCAT sections.
+  EtherCAT (`0x88A4`), and IEEE 802.1X/EAPOL (`0x888E`) are also named
+  here, but, like CIP I/O below, a frame that actually looks like DCP/
+  cyclic IO data, a GOOSE APDU, a SavPdu, an EtherCAT frame header, or an
+  EAPOL header is decoded and reported as
+  `profinet`/`goose`/`sv`/`ethercat`/`eapol`, not `non-ip` -- see PROTOCOL
+  COVERAGE's PROFINET RT, GOOSE, Sampled Values, EtherCAT, and Tier 3
+  enterprise-trust-boundary sections.
 - **IPv4 protocol numbers** (`ipv4.hpp`'s `ip_protocol_name`): ICMP,
   IPv6-in-IPv4, GRE, ESP, AH, ICMPv6, SCTP are named but not decoded
   further. IGMP, VRRP, IGRP, PIM, EIGRP, and OSPF (protocol numbers 2, 112,
@@ -8829,24 +9025,32 @@ These are current, not aspirational -- each has a corresponding ROADMAP item.
   remote-access protocol recognition" section and `decoder.cpp`'s own
   comment at that call site.
 - **None of RDP/VNC/TeamViewer/AnyDesk/Zoom/SMB/SSH/HTTP/HTTPS/SNMP/
-  Telnet/FTP/TFTP are wired into the `policy validate` conduit-matching
-  engine yet** -- this groundwork pass only recognizes and names them in
-  `decode` output; a conduit naming `rdp`/`vnc`/`smb`/`ssh`/etc. in its
-  `protocols` list is not yet a supported value (see ROADMAP item 18's own
-  "modeling gap" paragraph for what a future pass would need).
+  Telnet/FTP/TFTP/NTP/DHCP/LDAP/LDAPS/RADIUS/TACACS+/EAPOL are wired into
+  the `policy validate` conduit-matching engine yet** -- this groundwork
+  pass only recognizes and names them in `decode` output; a conduit naming
+  `rdp`/`vnc`/`smb`/`ssh`/`ntp`/`ldap`/`eapol`/etc. in its `protocols` list
+  is not yet a supported value (see ROADMAP item 18's own "modeling gap"
+  paragraph for what a future pass would need).
 - **TeamViewer, AnyDesk, Zoom, and (in Tier 2) SNMP/Telnet/FTP/TFTP's own
   port-only fallbacks are all recognized by port number alone**, the
   weakest identification gate in this codebase -- a completely unrelated
   service happening to run on one of these ports would be misidentified
   with total confidence; see PROTOCOL COVERAGE's Tier 1/Tier 2 sections for
   which of each tier's protocols have a genuine structural signature
-  (SMB/SSH/HTTP/HTTPS/VNC/RDP's own handshake) versus which don't.
+  (SMB/SSH/HTTP/HTTPS/VNC/RDP's own handshake) versus which don't. Tier 3's
+  NTP/RADIUS/TACACS+ each have a genuine, if modest, structural signature
+  (see PROTOCOL COVERAGE's Tier 3 section) so their own port-only fallbacks
+  are a step above TeamViewer/AnyDesk/Zoom's total absence of one, but
+  still weaker than SMB/SSH/HTTP/DHCP's port-independent checks.
 - **HTTPS recognition cannot distinguish genuine HTTP-over-TLS from any
   other TLS-wrapped protocol sharing the same ClientHello framing** (MQTT-
-  over-TLS, OPC UA over TLS, and similar) unless ALPN explicitly offers
-  `http/1.1`/`h2` -- absent that, a standard port is treated as good-enough
-  corroboration, but the note says so honestly. See PROTOCOL COVERAGE's
-  Tier 2 section.
+  over-TLS, OPC UA over TLS, LDAPS, and similar) unless ALPN explicitly
+  offers `http/1.1`/`h2` -- absent that, a standard port is treated as
+  good-enough corroboration, but the note says so honestly. The same is
+  true in reverse for LDAPS: a ClientHello on port 636/3269 with no ALPN
+  confirmation is called `ldaps` on port alone, and could in principle be
+  any other TLS-wrapped protocol someone deliberately ran on that port.
+  See PROTOCOL COVERAGE's Tier 2/Tier 3 sections.
 - **SNMPv3 is not recognized at all** -- its USM-authenticated, optionally
   encrypted framing has no fixed cleartext community string to extract,
   which is this whole check's only signal; a v3 PDU on port 161/162 falls
@@ -8863,6 +9067,28 @@ These are current, not aspirational -- each has a corresponding ROADMAP item.
   since their own structural tells (a single `0xFF` byte, a 3-digit
   number, a 2-byte opcode) are too common a shape in arbitrary binary
   traffic to try opportunistically without real false-positive risk.
+- **NTP/LDAP/RADIUS/TACACS+'s own structural checks only fire on their own
+  configured port (123/389+3268/1812+1813+1645+1646/49, or a configured
+  `--enterprise-trust-port`)**, the same reasoning as Telnet/FTP/TFTP
+  above -- unlike DHCP's magic cookie or LDAPS's ClientHello, none of these
+  four have a signature strong enough to check opportunistically without
+  real false-positive risk. One concrete consequence, specific to LDAP: a
+  genuine LDAP message on a port this tool doesn't already know about
+  (neither 389/3268 nor a configured `--enterprise-trust-port`) is
+  misidentified as `mqtt` instead of falling through to a generic `tcp`
+  summary, because LDAP's own leading BER `SEQUENCE` tag byte (`0x30`) is
+  bit-for-bit identical to a valid MQTT PUBLISH control-packet-type/flags
+  byte -- see PROTOCOL COVERAGE's Tier 3 section for the full reasoning and
+  the fix once the port is known.
+- **EAPOL recognition can only ever report "802.1X traffic was or wasn't
+  captured on this link," never "802.1X is configured on this switch port
+  but idle."** A passive capture simply has no way to observe the latter
+  -- an OT switch port with 802.1X enabled but no fresh authentication
+  event during the capture window looks identical, at this decoder's
+  level, to one with 802.1X not configured at all. This matters more than
+  the equivalent caveat elsewhere in this item, since EAPOL's own audit
+  framing is inverted (its *absence* is often the finding) -- see PROTOCOL
+  COVERAGE's Tier 3 section.
 
 ## EXIT STATUS
 
@@ -9968,7 +10194,7 @@ anything else on this list.
     community string sniffed once maps every SNMP-speaking device on the
     segment), and Telnet/FTP/TFTP (all three move credentials, and often
     firmware/config files, in cleartext)~~ -- **done**: see this item's own
-    "Tier 2 -- done" paragraph below for what was actually built; (3) protocols that are
+    "Tier 2 -- done" paragraph below for what was actually built; ~~(3) protocols that are
     individually unremarkable in limited form but worth an auditor's
     attention for where they terminate and whether the OT side blindly
     trusts enterprise IT for them -- NTP, DHCP, LDAP/Active Directory (DNS
@@ -9987,7 +10213,8 @@ anything else on this list.
     to authenticate onto the network, which cuts the other way from most of
     this item: its *absence* on an OT switch port is often the finding,
     since it means anything can plug in and reach the segment
-    unauthenticated); (4) wireless access-point control/data planes and
+    unauthenticated)~~ -- **done**: see this item's own "Tier 3 -- done"
+    paragraph below for what was actually built; (4) wireless access-point control/data planes and
     cellular backhaul -- an AP or wireless LAN controller reachable from (or
     inside) an OT zone is itself a finding, independent of whatever rides
     inside its tunnel: CAPWAP control (UDP 5246, RFC 5415) and data
@@ -10121,7 +10348,97 @@ anything else on this list.
     excluded from MQTT's own opportunistic detection (both its declared-
     length reassembly probe and its full message parse), since no real
     MQTT broker runs on port 21 -- see `decoder.cpp`'s own comments at both
-    call sites for the full reasoning. Tiers 3-5 remain open.
+    call sites for the full reasoning.
+
+    **Tier 3 -- done**, and see PROTOCOL COVERAGE's own "Tier 3
+    enterprise-trust-boundary protocol recognition" section for the full
+    writeup: `decode` now also recognizes NTP, DHCP, LDAP, LDAPS, RADIUS,
+    TACACS+, and IEEE 802.1X/EAPOL -- seven more `protocol` values
+    (`"ntp"`/`"dhcp"`/`"ldap"`/`"ldaps"`/`"radius"`/`"tacacs-plus"`/
+    `"eapol"`), the same fix to this item's own "modeling gap" paragraph
+    below Tiers 1-2 already made, now covering the family this item frames
+    as "individually unremarkable in limited form but worth an auditor's
+    attention for where they terminate and whether the OT side blindly
+    trusts enterprise IT for them." DNS/Active Directory needed no new
+    decode work at all, exactly as this item's own wording anticipated:
+    DNS is already fully decoded (see PROTOCOL COVERAGE's DNS section), so
+    this tier is about correlating where an OT segment's DNS queries
+    actually terminate (an enterprise domain controller vs. a local/
+    isolated resolver), a policy/zone-conduit question left for a future
+    `policy validate` enhancement, not a decoder change. DHCP's RFC 1497/
+    2131 magic cookie (`0x63 0x82 0x53 0x63`, immediately after the fixed
+    236-byte BOOTP-derived header) is a genuine, strong, cleartext
+    structural signature, checked port-independently even in Auto mode --
+    the same treatment SMB/SSH/HTTP get in Tiers 1-2, since a rogue or
+    misconfigured DHCP server answering on an unexpected port is exactly
+    what this item's own framing cares about; option 53 (DHCP Message
+    Type) is additionally decoded by name when present. LDAP's own
+    LDAPMessage envelope (RFC 4511: a BER SEQUENCE wrapping an INTEGER
+    messageID and an `[APPLICATION n]`-tagged protocolOp) is a genuine, if
+    ASN.1-common-enough-elsewhere-to-stay-port-gated, structural
+    signature, the same caution SNMP's own BER check earns in Tier 2 --
+    and an observed `bindRequest` (a simple, non-SASL bind) earns its own
+    note, since that's a cleartext-credential exchange unless the session
+    was already upgraded via StartTLS (the credential itself is never
+    inspected, staying within this whole item's name-only posture). LDAPS
+    is layered into the SAME early TLS-ClientHello call site HTTPS's own
+    strong check already uses (reusing `tls_sni.hpp`, not a second TLS
+    implementation): a ClientHello on port 636/3269 (the Active Directory
+    Global Catalog-over-TLS port) is tagged `"ldaps"` instead of generic
+    `"https"`, unless ALPN itself already confirms HTTP, in which case the
+    more specific ALPN signal wins regardless of port. RADIUS's RFC 2865
+    fixed 20-byte header (a small enumerated Code, plus a
+    `20 <= Length <= 4096` bound) and TACACS+'s RFC 8907 fixed 12-byte
+    header (a version byte whose upper nibble is always `0xC`, plus a
+    3-value Type) are each genuine but modest structural signatures,
+    gated to their own well-known ports for the same "not self-describing
+    enough on its own" reasoning Telnet/FTP/TFTP already established in
+    Tier 2; TACACS+'s own `TAC_PLUS_UNENCRYPTED_FLAG` is additionally
+    surfaced as its own note when set, since RFC 8907 itself calls
+    TACACS+'s body "encryption" obfuscation at best even when that flag is
+    clear. IEEE 802.1X/EAPOL is architecturally different from the other
+    six: it rides raw Ethernet (EtherType `0x888E`), not any TCP/UDP port
+    at all, the same shape PROFINET RT/GOOSE/Sampled Values/EtherCAT
+    already have in this codebase, so it gets its own dedicated
+    `--protocol eapol` value (not folded into `--protocol
+    enterprise-trust`, which covers only the six port-based protocols) and
+    its own dedicated `eapol.hpp`/`eapol.cpp`, dispatched from the same
+    EtherType-keyed region of `decoder.cpp` PROFINET/GOOSE/SV/EtherCAT
+    already use. EAPOL's own audit framing is the one place in this whole
+    item that cuts the opposite way from every other protocol here:
+    seeing EAPOL on an OT switch port is *reassuring* (the device had to
+    authenticate onto the network before passing any other traffic at
+    all), so its *absence* is often the actual finding -- this decoder can
+    only ever report "802.1X traffic was or wasn't captured here," not
+    "802.1X is configured but idle," which is an inherent limit of passive
+    capture, not a shortcut taken here. `--protocol enterprise-trust`
+    isolates the six port-based protocols (EAPOL is reached only via its
+    own `--protocol eapol`, or in Auto mode alongside everything else), and
+    `--enterprise-trust-port` widens the six's shared "expected port" set
+    (one option across all six, the same grouping `--lateral-movement-port`
+    already established for Tier 2; EAPOL needs no port option at all,
+    matching PROFINET/GOOSE/SV/EtherCAT/STP's own no-port precedent) -- see
+    OPTIONS. One real implementation wrinkle worth recording, in the same
+    spirit as Tier 2's own FTP/MQTT one: LDAP's own leading BER SEQUENCE
+    tag byte (`0x30`) is bit-for-bit identical to a valid MQTT PUBLISH
+    control-packet-type/flags byte, so MQTT's own opportunistic,
+    port-independent detection gate (`mqtt.hpp`) matches every genuine LDAP
+    message purely by coincidence -- confirmed empirically while building
+    this tier's own test fixture, the exact same shape of collision as
+    Tier 2's FTP-vs-MQTT one, and resolved the same way: LDAP traffic on
+    its own configured port (389/3268, or a configured
+    `--enterprise-trust-port`) that structurally matches an LDAPMessage
+    envelope is excluded from MQTT's own opportunistic detection (both its
+    declared-length reassembly probe and its full message parse) -- see
+    `decoder.cpp`'s own comments at both call sites for the full reasoning.
+    One direct consequence worth being explicit about: an LDAP message on
+    a genuinely arbitrary, unconfigured port is NOT rescued by this
+    carve-out (LDAP, unlike SMB/SSH/HTTP in Tiers 1-2, is deliberately kept
+    port-gated -- see PROTOCOL COVERAGE) and is still misidentified as
+    MQTT until that specific port is added via `--enterprise-trust-port`;
+    this is an accepted, documented trade-off of this item's "port-gated
+    where the structural signature alone is too common elsewhere" design,
+    not an oversight. Tiers 4-5 remain open.
 
     Scoped honestly, this is name-only recognition (port plus a minimal
     structural signature), not full protocol decoding -- the same
