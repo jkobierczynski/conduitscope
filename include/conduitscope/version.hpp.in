@@ -4,7 +4,7 @@
 
 namespace conduitscope {
 
-constexpr const char* kVersion = "@PROJECT_VERSION@";
+constexpr const char* kVersion = "@CONDUITSCOPE_REPORTED_VERSION@";
 constexpr const char* kBuildType = "@CMAKE_BUILD_TYPE@";
 constexpr const char* kCompilerId = "@CMAKE_CXX_COMPILER_ID@ @CMAKE_CXX_COMPILER_VERSION@";
 constexpr const char* kSystemName = "@CMAKE_SYSTEM_NAME@";

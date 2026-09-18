@@ -173,6 +173,72 @@ endif()
 
 enable_testing()
 
+# --------------------------------------------------------------------------------------------
+# Optional libFuzzer harnesses (fuzz/) -- see fuzz/README.md and docs/DEVELOPMENT.md's "External
+# code review and engineering priorities" section for which five parsers these target and why.
+# Off by default: libFuzzer is a Clang/compiler-rt feature (GCC cannot build -fsanitize=fuzzer),
+# and the fuzzer/sanitizer runtime is a separate OS package from the compiler itself on most
+# distros (e.g. libclang-rt-<version>-dev on Debian/Ubuntu) that most builds/builders won't have
+# installed -- opting in explicitly avoids failing an ordinary configure for a builder who just
+# wants the CLI tool.
+# --------------------------------------------------------------------------------------------
+option(CONDUITSCOPE_ENABLE_FUZZING
+  "Build libFuzzer harnesses under fuzz/ (requires Clang + compiler-rt fuzzer/ASan/UBSan runtime)"
+  OFF)
+
+if(CONDUITSCOPE_ENABLE_FUZZING)
+  if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    message(FATAL_ERROR
+      "CONDUITSCOPE_ENABLE_FUZZING requires Clang (libFuzzer is a Clang/compiler-rt feature) -- "
+      "reconfigure with -DCMAKE_CXX_COMPILER=clang++")
+  endif()
+
+  # The bugs this pass exists to find mostly live INSIDE conduitscope_core's own parsing code
+  # (decoder.cpp, dnp3.cpp, cotp.cpp, s7comm.cpp, mqtt.cpp, ...), not in a fuzz harness's few
+  # lines -- ASan/UBSan only instrument the translation units they're applied to, so the library
+  # itself needs these flags too, not just the fuzz_* executables below. This is also, for free,
+  # exactly the "ASan/UBSan folded into the same CI matrix" half of docs/DEVELOPMENT.md's adopted
+  # plan: any CTest case (not only the fuzz_*_corpus_regression ones added below) run against a
+  # CONDUITSCOPE_ENABLE_FUZZING=ON build -- including the `conduitscope` CLI binary itself, which
+  # also links conduitscope_core and therefore also carries this instrumentation in this
+  # configuration -- is already running under ASan/UBSan. PUBLIC on the link options so they
+  # propagate to every consumer of conduitscope_core (the CLI executable and every fuzz_*
+  # target), since each of those is a separate final link that also needs the sanitizer runtime.
+  target_compile_options(conduitscope_core PRIVATE -fsanitize=address,undefined -g -O1)
+  target_link_options(conduitscope_core PUBLIC -fsanitize=address,undefined)
+
+  # Every harness below is one .cpp defining LLVMFuzzerTestOneInput, linked straight against the
+  # same (now sanitizer-instrumented) conduitscope_core the real CLI links against -- no parsing
+  # logic is duplicated in fuzz/. -fsanitize=fuzzer adds libFuzzer's own main() and coverage
+  # instrumentation on top, for this target's one small harness file.
+  function(add_conduitscope_fuzzer name)
+    set(target "fuzz_${name}")
+    add_executable(${target} "fuzz/fuzz_${name}.cpp")
+    target_link_libraries(${target} PRIVATE conduitscope_core)
+    target_compile_options(${target} PRIVATE -fsanitize=fuzzer,address,undefined -g -O1)
+    target_link_options(${target} PRIVATE -fsanitize=fuzzer,address,undefined)
+
+    set(corpus_dir "${CMAKE_CURRENT_SOURCE_DIR}/fuzz/corpus/${name}")
+    if(EXISTS "${corpus_dir}")
+      # A short, bounded run over this target's own seed corpus -- a regression check ("a fuzz
+      # corpus catching regressions", per docs/DEVELOPMENT.md), not a real fuzzing campaign. For
+      # an actual campaign, run the built binary directly with -max_total_time/-jobs -- see
+      # fuzz/README.md.
+      add_test(NAME "fuzz_${name}_corpus_regression"
+        COMMAND ${target} "${corpus_dir}" -max_total_time=10 -max_len=8192)
+      set_tests_properties("fuzz_${name}_corpus_regression" PROPERTIES
+        TIMEOUT 60
+        LABELS "fuzz")
+    endif()
+  endfunction()
+
+  add_conduitscope_fuzzer(pcap_reader)
+  add_conduitscope_fuzzer(packet_decode)
+  add_conduitscope_fuzzer(dnp3)
+  add_conduitscope_fuzzer(cotp_s7comm)
+  add_conduitscope_fuzzer(mqtt)
+endif()
+
 add_test(NAME decode_modbus_sample
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --format json)
 set_tests_properties(decode_modbus_sample PROPERTIES

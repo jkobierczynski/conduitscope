@@ -190,12 +190,39 @@ Discussed and adopted, in this order:
    `PROJECT_VERSION` was also bumped to 0.1.1 to match, but the override
    is what makes this correct going forward even if a future tag is cut
    without remembering that step.
-2. **Sanitizers and fuzzing next** (not yet started): ASan/UBSan folded
-   into the same CI matrix, then small libFuzzer harnesses targeting the
-   parsers with the most hand-rolled length/state-machine logic --
-   `pcap_reader`, TCP reassembly (`Decoder::reassemble_tcp_payload`), DNP3,
-   COTP/S7comm, and MQTT foremost, matching the review's own Phase 1
-   priority list.
+2. **Sanitizers and fuzzing** ([fuzz/](../fuzz/), harnesses written; CI
+   wiring not yet done): five libFuzzer harnesses, matching the priority
+   list above exactly -- `fuzz_pcap_reader` (classic pcap + pcapng
+   file-format parsing), `fuzz_packet_decode` (the full
+   `Decoder::decode()` pipeline, fed a *sequence* of packets extracted from
+   one fuzzer input into a single `Decoder` instance -- this is the one
+   that actually reaches `Decoder::reassemble_tcp_payload` and every other
+   cross-packet/per-flow state, since a single-packet input structurally
+   can't), `fuzz_dnp3`, `fuzz_cotp_s7comm`, and `fuzz_mqtt` (these three
+   call each protocol's own standalone `try_parse_*` entry point directly
+   on raw bytes, no Ethernet/IPv4/TCP framing needed, for faster/deeper
+   single-payload coverage than routing through `decode()` would give).
+   Each harness is a thin wrapper with no parsing logic duplicated from
+   `conduitscope_core`; seed corpora (`fuzz/corpus/*/`) were extracted from
+   this repo's own `tests/sample_*.pcap` fixtures. `CONDUITSCOPE_ENABLE_FUZZING`
+   (CMake option, off by default, Clang-only) builds these AND compiles
+   `conduitscope_core` itself with `-fsanitize=address,undefined` -- ASan/UBSan
+   instrument the library's own code, not just the five harness files, and
+   because link options propagate to every consumer of the library, the
+   `conduitscope` CLI binary built in this configuration is sanitized too.
+   That got the "ASan/UBSan folded into the same CI matrix" half of this
+   item's plan verified locally as a side effect, ahead of actually wiring
+   it into `ci.yml`: the full existing 1,093-test CTest suite (1,088
+   regression tests plus the 5 new `fuzz_*_corpus_regression` smoke tests
+   this option also registers, each a short bounded libFuzzer run over its
+   own seed corpus) passes clean under this instrumented build, and each
+   harness ran on the order of 10^5-10^6 executions in a 15-second smoke
+   run with no ASan/UBSan report. Not yet done: folding
+   `CONDUITSCOPE_ENABLE_FUZZING`/ASan/UBSan into `ci.yml`'s own matrix (the
+   fuzzer/sanitizer compiler-rt runtime -- `libclang-rt-<version>-dev` on
+   Debian/Ubuntu -- isn't installed on the CI image yet) and a scheduled
+   (not per-push) longer fuzzing job; see [fuzz/README.md](../fuzz/README.md)
+   for how to build and run these locally in the meantime.
 3. **The registration-model decoder refactor, after that** (not yet
    started, no committed timeline): a `ProtocolDecoder` interface plus
    registry, replacing the `ProtocolFilter` enum / ordered dispatch chain
