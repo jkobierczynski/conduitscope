@@ -59,6 +59,24 @@ jobs:
       - name: Build
         run: cmake --build build -j"$(nproc)"
 
+      # Opening a live capture (pcap_activate) needs CAP_NET_RAW even on
+      # loopback, and the GitHub-hosted runner doesn't run as root, so the
+      # 4 live_capture_* tests that actually open "lo" (as opposed to just
+      # validating arguments or enumerating interfaces) fail with "You
+      # don't have permission to perform this capture on that device"
+      # otherwise. Granting the built binary the specific capability it
+      # needs -- rather than running the whole test suite under sudo --
+      # keeps everything else at normal privilege. This mirrors what a
+      # real deployment would do (setcap once, or run under a service
+      # account with that capability) instead of requiring root/sudo for
+      # every invocation, which is the same fix for a local dev machine
+      # that needs sudo for these tests today.
+      - name: Grant the capture binary CAP_NET_RAW/CAP_NET_ADMIN
+        run: |
+          sudo apt-get install -y libcap2-bin
+          sudo setcap cap_net_raw,cap_net_admin=eip build/conduitscope
+          getcap build/conduitscope
+
       - name: Test
         working-directory: build
         run: ctest -j"$(nproc)" --output-on-failure

@@ -151,6 +151,22 @@ Discussed and adopted, in this order:
    all four GCC/Clang × Debug/Release combinations, and 1,084/1,084 on
    the live-capture-disabled leg (4 tests fewer -- the ones that require
    libpcap to be present don't register at all on that leg).
+
+   A second, separate finding surfaced once this workflow actually ran on
+   a GitHub-hosted runner rather than a privileged local sandbox: opening
+   a live capture (`pcap_activate`) needs `CAP_NET_RAW` even against
+   loopback, and the runner's default user has neither that capability
+   nor root, so the 4 `live_capture_*` tests that actually open `lo` (as
+   opposed to validating arguments or enumerating interfaces) failed with
+   "You don't have permission to perform this capture on that device" --
+   the same reason these tests need `sudo` to pass on an ordinary
+   Debian/Ubuntu dev machine today. Fixed in the workflow by granting the
+   built binary `cap_net_raw,cap_net_admin=eip` via `setcap` right after
+   the build step, rather than running the whole test suite under `sudo`
+   -- confirmed by reproducing the failure and the fix locally as an
+   unprivileged user before pushing. The same `setcap` invocation is the
+   recommended fix for the local-dev-machine version of this (once, on
+   the built binary) instead of prefixing every test run with `sudo`.
 2. **Sanitizers and fuzzing next** (not yet started): ASan/UBSan folded
    into the same CI matrix, then small libFuzzer harnesses targeting the
    parsers with the most hand-rolled length/state-machine logic --
