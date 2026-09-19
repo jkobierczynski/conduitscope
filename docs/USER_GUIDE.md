@@ -206,9 +206,10 @@ conduitscope decode (-r FILE | -i INTERFACE) [options]
 | `--mqtt-port PORT` | *(1883 built in)* | Same as `--modbus-port`, for MQTT. Repeatable. TCP only. |
 | `--ffhse-port PORT` | *(1089/1090/1091/3622 built in)* | Same as `--modbus-port`, for FOUNDATION Fieldbus HSE. Repeatable. Applies to both TCP and UDP, and shared across FDA/SM/FMS/LAN Redundancy -- the sub-protocol is signaled in-band by the header, not by port. |
 | `--max-packets N` | `0` (unlimited) | Stop after decoding this many packets. With `-i`, this also bounds a live capture (in addition to `--duration` and Ctrl+C). |
-| `--stats` | off | Print an aggregate summary (protocol counts, Modbus function-code histogram, exception count, capture time span) instead of one line per packet. Ignores `--format`. |
+| `--stats` | off | Print an aggregate summary (protocol counts, a cross-protocol TCP-flow direction-tier breakdown, Modbus function-code histogram, exception count, capture time span) instead of one line per packet. Ignores `--format`. |
 | `--strict` | off | Abort with a nonzero exit status on the first packet that fails to parse at the Ethernet/IPv4/TCP layer, instead of reporting a per-packet warning and continuing. Does not affect Modbus/DNP3-level ambiguity, which is always handled by heuristic + note rather than error. |
 | `--no-vlan` | off (i.e. VLAN ID display on by default) | Disable display of the 802.1Q VLAN ID for a VLAN-tagged packet. See OUTPUT FORMATS below. |
+| `--no-direction` | off (i.e. TCP flow direction display on by default) | Disable display of per-packet TCP flow direction (client/server determination and which tier decided it -- handshake/content/port-heuristic). Does not affect `decode --stats`'s own direction-tier breakdown, which has no display toggles of its own (the same way `--no-vlan`/`--no-oui` don't affect it either). See OUTPUT FORMATS below. |
 | `--no-oui` | off (i.e. OUI/MAC-vendor resolution on by default) | Disable OUI (MAC vendor) resolution against the built-in table. See OUTPUT FORMATS' "Name resolution" subsection below. |
 | `--resolve` | off | Enable hostname resolution from an explicitly-supplied `--hosts` file. **Never performs live DNS, under any circumstance** -- file-only. See OUTPUT FORMATS' "Name resolution" subsection below. |
 | `--hosts FILE` | *(none)* | Unix `/etc/hosts`-style file to resolve IP addresses from, for `--resolve`. Must exist. |
@@ -1444,25 +1445,36 @@ planned.
 ### text (default)
 
 One line per packet: index, timestamp, source and destination `ip:port`,
-`[protocol]`, and a summary. Any additional notes (heuristic explanations,
-port-mismatch warnings, malformed-field warnings) are printed indented below
-the packet line, followed, for an Ethernet-linktype packet, by an `eth`
-line showing the raw source/destination MAC addresses and then, for a TCP
-packet, a `direction` line -- which side of this flow `decode`'s own
-per-flow tracking (`FlowDirectionTracker`, independent of `policy
-validate`/`inventory`'s own direction tracking) currently believes is the
-client (initiator), and whether that came from an observed TCP handshake or
-only a port-based guess. See the `json` output's own `direction_source`/
-`direction_client_ip` fields below for the two machine-readable values this
-line renders, and docs/DEVELOPMENT.md's ROADMAP item 19 for the full design
-record.
+`[protocol]`, a summary, and, for a TCP packet, which side of this flow
+`decode`'s own per-flow tracking (`FlowDirectionTracker`, independent of
+`policy validate`/`inventory`'s own direction tracking) currently believes
+is the client (initiator) and whether that came from an observed TCP
+handshake or only a port-based guess -- folded into the packet's own head
+line itself (`(client <ip> -- <tier>)`, appended last) rather than a
+separate line, so it reads alongside the endpoints/protocol/summary it
+describes. `--no-direction` suppresses it; it never appears for a UDP/
+non-IP/parse-error packet regardless of the flag, since only a TCP flow has
+a client/server side to determine in the first place. Any additional notes
+(heuristic explanations, port-mismatch warnings, malformed-field warnings)
+are printed indented below the packet line, followed, for an
+Ethernet-linktype packet, by an `eth` line showing the raw source/
+destination MAC addresses. See the `json` output's own `direction_source`/
+`direction_client_ip` fields below for the two machine-readable values the
+head line's `(client ... -- ...)` annotation renders, and
+docs/DEVELOPMENT.md's ROADMAP item 19 for the full design record.
 
 ```
-#1  1700000000.000000  192.168.1.50:51000 -> 192.168.1.10:502  [modbus]  Read Holding Registers: request: read 10 holding register(s) starting at address 0
+#1  1700000000.000000  192.168.1.50:51000 -> 192.168.1.10:502  [modbus]  Read Holding Registers: request: read 10 holding register(s) starting at address 0  (client 192.168.1.50 -- port-heuristic)
         note: classified as a request because the PDU is exactly 4 bytes (address+quantity); this is a heuristic, not stream tracking
         eth aa:bb:cc:11:22:33 -> aa:bb:cc:44:55:66
-        direction: port-heuristic (client: 192.168.1.50)
 ```
+
+When color is on (see "Color" below), the `(client ... -- ...)` annotation
+is colored yellow for the `port-heuristic` tier specifically -- the only one
+that can actually be wrong -- and dim (like every other secondary
+annotation on the line) for the two authoritative tiers, `handshake` and
+`content`. The tier name itself is always printed regardless of color/
+`--no-color`, so nothing here is color-only information.
 
 When a packet is 802.1Q VLAN-encapsulated, its VLAN ID is appended to the
 `eth` line (`vlan <id>`), on by default -- `--no-vlan` suppresses it:
@@ -1493,7 +1505,9 @@ HART-IP, dim for everything else recognized
 but not OT-specific (`tcp`/`udp`/`non-tcp`/`non-ip`/`unsupported-link`). A Modbus
 exception response's summary, and a `parse-error` packet's entire line, are
 bold red -- both mean "look at this one" over everything else in a long
-decode. Notes are printed dim.
+decode. Notes are printed dim. The head line's trailing `(client ... -- ...)`
+direction annotation (see above) is yellow for the `port-heuristic` tier and
+dim for `handshake`/`content`.
 
 Color is used only when actually writing to an interactive terminal by
 default (never into a file via `-o`, and never when piped, e.g. into `less`
@@ -1529,7 +1543,10 @@ lower-port-number guess was used instead, which CAN be wrong -- see
 LIMITATIONS below). Both are `null` for a non-TCP packet -- this tracking
 (`FlowDirectionTracker`, a separate layer built on top of `decode`'s own
 already-public output, the same way `policy validate`/`inventory` each
-track direction for themselves) never runs on one. See
+track direction for themselves) never runs on one. `--no-direction` omits
+both fields entirely (never just `null`) on every packet, the same "omit
+outright" convention `--no-vlan` already sets for `has_vlan_tag`/`vlan_id`
+above. See
 docs/DEVELOPMENT.md's ROADMAP item 19 for the full three-tier design record
 and the industry precedent researched before adding this (`"content"`, the
 third tier, never appears here -- it only applies to BACnet, which is
@@ -2623,7 +2640,11 @@ rather than next to `timestamp` for the same "never shift an existing
 column" reasoning. `direction_source`/`direction_client_ip` are now the
 trailing two columns, added after `time` for the same reason -- see the
 `json` output's own paragraph above for what the two values mean (both
-empty here, rather than JSON's `null`, for a non-TCP packet) and
+empty here, rather than JSON's `null`, for a non-TCP packet). The column
+header pair always exists (CSV can't omit a column conditionally the way
+JSON omits a field pair) but both values are also empty, on every packet,
+whenever `--no-direction` disables display -- the same "column always
+exists, value empty" precedent `vlan_id` already sets above. See
 docs/DEVELOPMENT.md's ROADMAP item 19 for the full design record.
 
 ### Timestamps

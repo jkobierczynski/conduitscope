@@ -356,6 +356,26 @@ void TextWriter::write_packet(const DecodedPacket& p) {
     if (color_ && severe) head << kBoldRed;
     head << p.summary;
     if (color_ && severe) head << kReset;
+    // How this TCP flow's client (initiator) side was determined -- see DirectionSource's own
+    // comment (decoder.hpp) and docs/MANUAL.md's ROADMAP item 19. Folded into the head line itself
+    // (appended after the summary, purely additive -- notes/eth/etc. below are unaffected) rather
+    // than its own separate line, so it reads alongside the endpoints/protocol/summary it
+    // describes instead of requiring a second line to connect back to them. Colored yellow for
+    // DirectionSource::PortHeuristic specifically -- the only tier that can actually be wrong, per
+    // ROADMAP item 19's own precedent survey -- and dim (like every other secondary annotation on
+    // this line) for the two authoritative tiers, handshake and content; the tier name itself is
+    // always printed regardless of color/--no-color, so nothing here is color-only information.
+    // --no-direction (show_direction_, cli_main.cpp) suppresses this outright; has_direction is
+    // only ever true for a has_tcp packet (FlowDirectionTracker's scope, see flow_direction.hpp),
+    // so this never appears for a UDP/non-IP/parse-error packet regardless of the flag.
+    if (show_direction_ && p.has_direction) {
+        bool uncertain = p.direction_source == DirectionSource::PortHeuristic;
+        head << "  ";
+        if (color_) head << (uncertain ? kYellow : kDim);
+        head << "(client " << (p.direction_client_is_src ? p.src_ip : p.dst_ip) << " -- "
+             << direction_source_name(p.direction_source) << ")";
+        if (color_) head << kReset;
+    }
     out_ << head.str() << "\n";
 
     for (const auto& note : p.notes) {
@@ -387,21 +407,6 @@ void TextWriter::write_packet(const DecodedPacket& p) {
         // VLAN tag is unwrapped from the Ethernet header itself -- see link_layer.cpp), so nesting
         // this inside the existing p.has_ethernet block is always safe.
         if (show_vlan_ && p.has_vlan_tag) out_ << "  vlan " << p.vlan_id;
-        if (color_) out_ << kReset;
-        out_ << "\n";
-    }
-
-    // How this TCP flow's client (initiator) side was determined -- see DirectionSource's own
-    // comment (decoder.hpp) and docs/MANUAL.md's ROADMAP item 19. Printed after the eth line (not
-    // folded into the head line above), the same "purely additive at the end of this packet's
-    // block" placement the eth line's own comment documents for itself -- has_direction is only
-    // ever true for a has_tcp packet (FlowDirectionTracker's scope, see flow_direction.hpp), so
-    // this line never appears for a UDP/non-IP/parse-error packet.
-    if (p.has_direction) {
-        out_ << "        ";
-        if (color_) out_ << kDim;
-        out_ << "direction: " << direction_source_name(p.direction_source) << " (client: "
-             << (p.direction_client_is_src ? p.src_ip : p.dst_ip) << ")";
         if (color_) out_ << kReset;
         out_ << "\n";
     }
@@ -1486,7 +1491,7 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
     // dst_mac_vendor/etc. already follow here (see this class's own file header comment) for the
     // same reason: several tests match fields by exact adjacency. --time-format/--time-offset
     // (cli_main.cpp) control how this is rendered; see time_format.hpp.
-    out_ << "    \"time\": \"" << json_escape(time_.format(p.timestamp)) << "\",\n";
+    out_ << "    \"time\": \"" << json_escape(time_.format(p.timestamp)) << "\"";
     // How this TCP flow's client (initiator) side was determined -- "handshake"/"port-heuristic",
     // never "content" here (FlowDirectionTracker only tracks TCP flows, see flow_direction.hpp's
     // own file header) -- see DirectionSource's own comment (decoder.hpp) and docs/MANUAL.md's
@@ -1496,8 +1501,19 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
     // follow in this same object -- unlike a resolver *_vendor/*_hostname/*_service annotation,
     // which is omitted entirely on a miss (see this class's own comment above); these two aren't
     // annotations, they're base decoded values that simply don't exist for a non-TCP packet.
-    out_ << "    \"direction_source\": " << (p.has_direction ? ("\"" + std::string(direction_source_name(p.direction_source)) + "\"") : "null") << ",\n";
-    out_ << "    \"direction_client_ip\": " << (p.has_direction ? ("\"" + json_escape(p.direction_client_is_src ? p.src_ip : p.dst_ip) + "\"") : "null") << "\n";
+    // --no-direction (show_direction_) omits both fields entirely, not just a value -- the same
+    // "omit outright" convention show_vlan_ already sets for has_vlan_tag/vlan_id above -- which is
+    // why "time"'s own trailing comma moved here instead of staying on "time" unconditionally: with
+    // show_direction_ false, "time" is the object's last field and must not have a dangling comma.
+    if (show_direction_) {
+        out_ << ",\n    \"direction_source\": "
+             << (p.has_direction ? ("\"" + std::string(direction_source_name(p.direction_source)) + "\"") : "null")
+             << ",\n    \"direction_client_ip\": "
+             << (p.has_direction ? ("\"" + json_escape(p.direction_client_is_src ? p.src_ip : p.dst_ip) + "\"") : "null")
+             << "\n";
+    } else {
+        out_ << "\n";
+    }
     out_ << "  }";
 }
 
@@ -1522,8 +1538,9 @@ void CsvWriter::begin() {
     // columns, for the same append-only reason -- see DirectionSource's own comment (decoder.hpp)
     // and docs/MANUAL.md's ROADMAP item 19. Both are empty for a non-TCP packet (has_direction
     // false -- FlowDirectionTracker's scope matches PolicyEngine::observe's own: TCP flows only,
-    // see flow_direction.hpp), the same "empty, not a placeholder, on a field that doesn't apply"
-    // convention src_ip/src_port/vlan_id already follow in this same header.
+    // see flow_direction.hpp) and, same as vlan_id above, also empty outright when --no-direction
+    // suppresses display (show_direction_) regardless of has_direction -- this column's header
+    // always exists either way, so the row shape never changes based on the flag.
     out_ << "index,timestamp,src_mac,dst_mac,src_mac_vendor,dst_mac_vendor,src_ip,src_hostname,"
             "src_port,src_port_service,dst_ip,dst_hostname,dst_port,dst_port_service,protocol,"
             "summary,notes,vlan_id,time,direction_source,direction_client_ip\n";
@@ -1568,13 +1585,22 @@ void CsvWriter::write_packet(const DecodedPacket& p) {
          << csv_escape(p.summary) << ',' << csv_escape(notes.str()) << ','
          << ((show_vlan_ && p.has_vlan_tag) ? std::to_string(p.vlan_id) : "") << ','
          << csv_escape(time_.format(p.timestamp)) << ','
-         << (p.has_direction ? direction_source_name(p.direction_source) : "") << ','
-         << (p.has_direction ? csv_escape(p.direction_client_is_src ? p.src_ip : p.dst_ip) : "") << "\n";
+         << ((show_direction_ && p.has_direction) ? direction_source_name(p.direction_source) : "") << ','
+         << ((show_direction_ && p.has_direction) ? csv_escape(p.direction_client_is_src ? p.src_ip : p.dst_ip)
+                                                    : "")
+         << "\n";
 }
 
 void StatsWriter::write_packet(const DecodedPacket& p) {
     total_packets_++;
     protocol_counts_[p.protocol]++;
+    // Cross-protocol, not gated on p.protocol like the maps below -- see this member's own
+    // comment (output.hpp). Not gated on `decode`'s --no-direction either: --stats has no display
+    // toggles of its own (--no-vlan/--no-oui don't affect it), it's an aggregate view independent
+    // of them, consistent with that precedent.
+    if (p.has_direction) {
+        direction_source_counts_[direction_source_name(p.direction_source)]++;
+    }
     if (p.protocol == "modbus") {
         modbus_function_counts_[p.modbus_function_name]++;
         if (p.modbus_is_exception) modbus_exceptions_++;
@@ -1723,6 +1749,16 @@ void StatsWriter::print_summary(std::ostream& out) const {
     out << "protocols:\n";
     for (const auto& [name, count] : protocol_counts_) {
         out << "  " << std::left << std::setw(16) << name << count << "\n";
+    }
+    // Cross-protocol breakdown, printed right after the protocols histogram it complements rather
+    // than down among the protocol-specific sections below -- see direction_source_counts_'s own
+    // comment (output.hpp). Never populated (so never printed) for `info`, which never runs
+    // FlowDirectionTracker.
+    if (!direction_source_counts_.empty()) {
+        out << "direction sources (tcp flows only):\n";
+        for (const auto& [name, count] : direction_source_counts_) {
+            out << "  " << std::left << std::setw(16) << name << count << "\n";
+        }
     }
     if (!modbus_function_counts_.empty()) {
         out << "modbus function codes:\n";

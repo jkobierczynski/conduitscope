@@ -2435,6 +2435,45 @@ unlike any of the eight routing/redundancy protocols decoded so far.
     `flow_direction.cpp` are a third, independent copy, not calls into
     either engine's own.
 
+    *Follow-up: how `decode`'s own per-packet display presents this.* The
+    paragraphs above cover computing and exposing `direction_source` on all
+    three surfaces; a second, separate round then revisited specifically how
+    `decode`'s own text/JSON/CSV/`--stats` output *presents* it, once real
+    usage made the original separate `direction: <tier> (client: <ip>)`
+    text line feel disconnected from the packet line it described. Five
+    presentation options were weighed (color the tier by trustworthiness;
+    fold it into the head line instead of a separate line; show both
+    endpoints with role rather than just the client; make display
+    opt-in/opt-out; aggregate a tier breakdown into `--stats`) and four were
+    adopted -- color, head-line folding, an opt-out flag, and `--stats`
+    aggregation -- deliberately not the both-endpoints-with-role option,
+    which was left for a future round if real usage asks for it. Concretely:
+    `TextWriter::write_packet` now appends `(client <ip> -- <tier>)` to the
+    end of the packet's own head line (after the summary, before the
+    line's terminating newline) instead of printing a separate `direction:`
+    line after the `eth` line -- colored yellow for `port-heuristic`
+    specifically (the only tier that can actually be wrong, per this item's
+    own precedent survey above) and dim for the two authoritative tiers,
+    matching every other secondary annotation on that line; a new
+    `--no-direction` flag (`decode_show_direction` in `cli_main.cpp`,
+    mirroring `--no-vlan`'s own `!--no-vlan` CLI11 negation-flag pattern)
+    suppresses it in text, and makes JSON omit `direction_source`/
+    `direction_client_ip` entirely (never just `null`, the same convention
+    `--no-vlan` already set for `has_vlan_tag`/`vlan_id`) and CSV blank both
+    trailing columns while still emitting them (the same "column always
+    exists, value empty" precedent `vlan_id` already set); and
+    `StatsWriter` gained a new `direction_source_counts_` map, printed as a
+    "direction sources (tcp flows only):" block right after the `protocols:`
+    histogram it complements, counted cross-protocol rather than gated on
+    `p.protocol` like the per-protocol maps below it, and -- consistent with
+    how `--stats` already ignores `--no-vlan`/`--no-oui` -- deliberately
+    *not* gated on `--no-direction` either, since it's a pure aggregate view
+    independent of any per-packet display toggle. All of this is `decode`
+    -specific: `policy validate`'s and `inventory`'s own `direction: <tier>`
+    report lines (`docs/USER_GUIDE.md`'s `policy validate`/`inventory`
+    sections) are untouched, since they're each that command's own separate,
+    already-established report format, not `TextWriter`'s.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

@@ -192,7 +192,7 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
                 bool oui_enabled, bool resolve_hostnames, const std::string& hosts_path,
                 bool service_names_enabled, const std::string& services_path, bool show_vlan,
                 const std::string& time_format, const std::string& time_offset,
-                std::ostream& diag) {
+                std::ostream& diag, bool show_direction) {
     std::ofstream file_out;
     std::ostream* out = &std::cout;
     bool writing_to_stdout = output.empty();
@@ -323,13 +323,13 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
         if (!stats) {
             if (format == "json") {
                 writer = std::make_unique<JsonWriter>(*out, resolver, show_vlan, *parsed_time_format,
-                                                        *parsed_time_offset);
+                                                        *parsed_time_offset, show_direction);
             } else if (format == "csv") {
                 writer = std::make_unique<CsvWriter>(*out, resolver, show_vlan, *parsed_time_format,
-                                                       *parsed_time_offset);
+                                                       *parsed_time_offset, show_direction);
             } else {
                 writer = std::make_unique<TextWriter>(*out, color, resolver, show_vlan, *parsed_time_format,
-                                                        *parsed_time_offset);
+                                                        *parsed_time_offset, show_direction);
             }
             writer->begin();
         }
@@ -690,6 +690,7 @@ int main(int argc, char** argv) {
     bool decode_stats = false, decode_strict = false;
     bool decode_oui = true, decode_resolve = false, decode_service_names = true;
     bool decode_show_vlan = true;
+    bool decode_show_direction = true;
     std::string decode_time_format = "e", decode_time_offset = "utc";
     std::string decode_hosts_file, decode_services_file;
 
@@ -873,6 +874,12 @@ int main(int argc, char** argv) {
     decode_cmd->add_flag("!--no-vlan", decode_show_vlan,
                           "Disable display of the 802.1Q VLAN ID for VLAN-tagged packets, on by "
                           "default -- see docs/MANUAL.md's OUTPUT FORMATS section");
+    decode_cmd->add_flag(
+        "!--no-direction", decode_show_direction,
+        "Disable display of per-packet TCP flow direction (client/server determination and which "
+        "tier decided it -- handshake/content/port-heuristic), on by default -- see docs/MANUAL.md's "
+        "OUTPUT FORMATS section and ROADMAP item 19. Does not affect `decode --stats`'s own "
+        "direction-tier breakdown, which has no display toggles of its own");
     decode_cmd->add_flag("!--no-oui", decode_oui,
                           "Disable OUI (MAC vendor) resolution, on by default -- see docs/"
                           "MANUAL.md's OUTPUT FORMATS section");
@@ -1113,7 +1120,7 @@ int main(int argc, char** argv) {
                            decode_max_packets, decode_stats, decode_strict,
                            quiet, no_color, force_color, decode_oui, decode_resolve, decode_hosts_file,
                            decode_service_names, decode_services_file, decode_show_vlan,
-                           decode_time_format, decode_time_offset, *diag);
+                           decode_time_format, decode_time_offset, *diag, decode_show_direction);
     }
     if (info_cmd->parsed()) {
         return run_info(info_input, std::cout);

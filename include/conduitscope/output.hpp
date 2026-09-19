@@ -39,6 +39,20 @@ public:
 // `--no-vlan` flag (cli_main.cpp) wires straight into this constructor parameter instead of going
 // through Resolver, the same "pure display toggle" precedent TextWriter's own `color` parameter
 // already set.
+// `show_direction` (default true, every constructor below) is the same kind of pure display
+// toggle as `show_vlan` just above, for DecodedPacket::has_direction/direction_client_is_src/
+// direction_source (FlowDirectionTracker, see flow_direction.hpp -- populated by `decode`'s own
+// run_decode loop before a packet ever reaches a writer, same as VLAN unwrapping happens before
+// this class ever sees the packet) -- `decode`'s `--no-direction` flag (cli_main.cpp) wires
+// straight into this constructor parameter. TextWriter folds it into the packet's head line
+// itself (see write_packet's own comment) rather than a separate line, colored by
+// DirectionSource::PortHeuristic vs. the other two tiers -- see DirectionSource's own comment
+// (decoder.hpp) for why only that tier can actually be wrong. JsonWriter omits both fields
+// entirely when false (never just null), the same "omit outright, not just a value" convention
+// `show_vlan` already set for has_vlan_tag/vlan_id above; CsvWriter's direction_source/
+// direction_client_ip columns always exist (CSV can't omit a column conditionally) but render
+// empty, the same "column always exists" precedent `show_vlan`'s own comment already documents
+// for its own vlan_id column just below.
 // `time_format`/`time_offset` (default TimeFormat::Epoch/TimeOffset{}, every constructor below)
 // govern how each packet's timestamp is rendered -- see time_format.hpp's file header comment for
 // what each value does. Epoch reproduces today's original raw-seconds-since-epoch rendering
@@ -48,8 +62,10 @@ public:
 class TextWriter : public OutputWriter {
 public:
     explicit TextWriter(std::ostream& out, bool color, const Resolver& resolver, bool show_vlan = true,
-                         TimeFormat time_format = TimeFormat::Epoch, TimeOffset time_offset = TimeOffset{})
-        : out_(out), color_(color), resolver_(resolver), show_vlan_(show_vlan), time_(time_format, time_offset) {}
+                         TimeFormat time_format = TimeFormat::Epoch, TimeOffset time_offset = TimeOffset{},
+                         bool show_direction = true)
+        : out_(out), color_(color), resolver_(resolver), show_vlan_(show_vlan),
+          time_(time_format, time_offset), show_direction_(show_direction) {}
     void write_packet(const DecodedPacket& packet) override;
 
 private:
@@ -58,13 +74,16 @@ private:
     const Resolver& resolver_;
     bool show_vlan_;
     TimeFormatter time_;
+    bool show_direction_;
 };
 
 class JsonWriter : public OutputWriter {
 public:
     explicit JsonWriter(std::ostream& out, const Resolver& resolver, bool show_vlan = true,
-                         TimeFormat time_format = TimeFormat::Epoch, TimeOffset time_offset = TimeOffset{})
-        : out_(out), resolver_(resolver), show_vlan_(show_vlan), time_(time_format, time_offset) {}
+                         TimeFormat time_format = TimeFormat::Epoch, TimeOffset time_offset = TimeOffset{},
+                         bool show_direction = true)
+        : out_(out), resolver_(resolver), show_vlan_(show_vlan), time_(time_format, time_offset),
+          show_direction_(show_direction) {}
     void begin() override;
     void write_packet(const DecodedPacket& packet) override;
     void end() override;
@@ -75,13 +94,16 @@ private:
     const Resolver& resolver_;
     bool show_vlan_;
     TimeFormatter time_;
+    bool show_direction_;
 };
 
 class CsvWriter : public OutputWriter {
 public:
     explicit CsvWriter(std::ostream& out, const Resolver& resolver, bool show_vlan = true,
-                        TimeFormat time_format = TimeFormat::Epoch, TimeOffset time_offset = TimeOffset{})
-        : out_(out), resolver_(resolver), show_vlan_(show_vlan), time_(time_format, time_offset) {}
+                        TimeFormat time_format = TimeFormat::Epoch, TimeOffset time_offset = TimeOffset{},
+                        bool show_direction = true)
+        : out_(out), resolver_(resolver), show_vlan_(show_vlan), time_(time_format, time_offset),
+          show_direction_(show_direction) {}
     void begin() override;
     void write_packet(const DecodedPacket& packet) override;
 
@@ -90,6 +112,7 @@ private:
     const Resolver& resolver_;
     bool show_vlan_;
     TimeFormatter time_;
+    bool show_direction_;
 };
 
 // Accumulates counts instead of printing per packet; call begin()/write_packet()
@@ -106,6 +129,13 @@ public:
 private:
     size_t total_packets_ = 0;
     std::map<std::string, size_t> protocol_counts_;
+    // Keyed by direction_source_name ("handshake"/"content"/"port-heuristic") -- counted whenever
+    // has_direction is true, i.e. TCP flows only (FlowDirectionTracker's own scope, see
+    // flow_direction.hpp), across every protocol at once rather than gated on p.protocol like the
+    // per-protocol maps below, since direction determination is cross-cutting, not
+    // protocol-specific -- see DirectionSource's own comment (decoder.hpp). Empty (and so never
+    // printed, see print_summary) for `info`, which never runs FlowDirectionTracker at all.
+    std::map<std::string, size_t> direction_source_counts_;
     std::map<std::string, size_t> modbus_function_counts_;
     size_t modbus_exceptions_ = 0;
     // Count of responses authoritatively paired (by MBAP transaction ID + TCP session, not the

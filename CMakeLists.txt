@@ -471,7 +471,7 @@ set_tests_properties(dnp3_multiblock_response_crc_valid_two_blocks PROPERTIES
 add_test(NAME dnp3_bad_header_crc_noted_and_still_decoded
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text)
 set_tests_properties(dnp3_bad_header_crc_noted_and_still_decoded PROPERTIES
-  PASS_REGULAR_EXPRESSION "function=Read \\(0x01\\) objects: \\[g60v1\\]\n *note: header CRC mismatch: calculated 0x[0-9a-f][0-9a-f][0-9a-f][0-9a-f], frame declares 0x[0-9a-f][0-9a-f][0-9a-f][0-9a-f]")
+  PASS_REGULAR_EXPRESSION "function=Read \\(0x01\\) objects: \\[g60v1\\][^\n]*\n *note: header CRC mismatch: calculated 0x[0-9a-f][0-9a-f][0-9a-f][0-9a-f], frame declares 0x[0-9a-f][0-9a-f][0-9a-f][0-9a-f]")
 
 add_test(NAME dnp3_bad_header_crc_fields_in_json
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format json)
@@ -2874,7 +2874,7 @@ set_tests_properties(hartip_invalid_message_type_falls_back_to_udp PROPERTIES
 add_test(NAME hartip_modbus_collision_known_limitation
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap" --format text)
 set_tests_properties(hartip_modbus_collision_known_limitation PROPERTIES
-  PASS_REGULAR_EXPRESSION "52010->5094: 13 of 106 declared byte\\(s\\) seen so far across 1 segment\\(s\\) on this flow, waiting for more\n.*5094->52010: 13 of 106 declared byte\\(s\\) seen so far across 1 segment\\(s\\) on this flow, waiting for more\n.*52010->5094: 29 of 106 declared byte\\(s\\) seen so far across 2 segment\\(s\\) on this flow, waiting for more")
+  PASS_REGULAR_EXPRESSION "52010->5094: 13 of 106 declared byte\\(s\\) seen so far across 1 segment\\(s\\) on this flow, waiting for more[^\n]*\n.*5094->52010: 13 of 106 declared byte\\(s\\) seen so far across 1 segment\\(s\\) on this flow, waiting for more[^\n]*\n.*52010->5094: 29 of 106 declared byte\\(s\\) seen so far across 2 segment\\(s\\) on this flow, waiting for more")
 
 add_test(NAME hartip_modbus_collision_never_reports_hartip_protocol
   COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap")
@@ -2884,17 +2884,17 @@ set_tests_properties(hartip_modbus_collision_never_reports_hartip_protocol PROPE
 add_test(NAME hartip_tcp_pass_through_non_standard_port_decoded
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap" --format text)
 set_tests_properties(hartip_tcp_pass_through_non_standard_port_decoded PROPERTIES
-  PASS_REGULAR_EXPRESSION "192.168.1.50:52099 -> 192.168.1.10:15094  \\[hartip\\]  Request Pass Through STX command=1 \\(Read Primary Variable\\)\n *note: seen on TCP port 52099->15094, which is not a configured/standard HART-IP port \\(5094\\)\n.*192.168.1.10:15094 -> 192.168.1.50:52099  \\[hartip\\]  Response Pass Through ACK command=1 \\(Read Primary Variable\\) response-code=0 \\(Success\\) \\[pv-units=1 \\+1 more\\]\n *note: seen on TCP port 15094->52099, which is not a configured/standard HART-IP port \\(5094\\)")
+  PASS_REGULAR_EXPRESSION "192.168.1.50:52099 -> 192.168.1.10:15094  \\[hartip\\]  Request Pass Through STX command=1 \\(Read Primary Variable\\)[^\n]*\n *note: seen on TCP port 52099->15094, which is not a configured/standard HART-IP port \\(5094\\)[^\n]*\n.*192.168.1.10:15094 -> 192.168.1.50:52099  \\[hartip\\]  Response Pass Through ACK command=1 \\(Read Primary Variable\\) response-code=0 \\(Success\\) \\[pv-units=1 \\+1 more\\][^\n]*\n *note: seen on TCP port 15094->52099, which is not a configured/standard HART-IP port \\(5094\\)")
 
 add_test(NAME hartip_tcp_coalesced_keep_alive_decoded
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap" --format text)
 set_tests_properties(hartip_tcp_coalesced_keep_alive_decoded PROPERTIES
-  PASS_REGULAR_EXPRESSION "192.168.1.50:52150 -> 192.168.1.10:5094 \\(hart-ip\\)  \\[hartip\\]  Request Keep Alive\n *note: additional HART-IP message 2 found in the same TCP payload at byte offset 8 \\(coalesced by the sender/OS\\): Request Keep Alive")
+  PASS_REGULAR_EXPRESSION "192.168.1.50:52150 -> 192.168.1.10:5094 \\(hart-ip\\)  \\[hartip\\]  Request Keep Alive[^\n]*\n *note: additional HART-IP message 2 found in the same TCP payload at byte offset 8 \\(coalesced by the sender/OS\\): Request Keep Alive")
 
 add_test(NAME hartip_stats_counted
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap" --stats)
 set_tests_properties(hartip_stats_counted PROPERTIES
-  PASS_REGULAR_EXPRESSION "packets: +67[^\n]*\n[^\n]*\nprotocols:\n *hartip +62\n *tcp +3\n *udp +2\nhartip message types:\n *Error +3\n *NAK +1\n *Request +17\n *Response +41\nhartip pass-through commands:\n")
+  PASS_REGULAR_EXPRESSION "packets: +67[^\n]*\n[^\n]*\nprotocols:\n *hartip +62\n *tcp +3\n *udp +2.*\nhartip message types:\n *Error +3\n *NAK +1\n *Request +17\n *Response +41\nhartip pass-through commands:\n")
 
 # --------------------------------------------------------------------------
 # Real-world HART-IP capture -- see tests/real_captures/hartip/ATTRIBUTION.md for provenance: a
@@ -3140,7 +3140,7 @@ set_tests_properties(opcua_protocol_filter_excludes_other_protocols PROPERTIES
 add_test(NAME opcua_stats_counted
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_opcua.pcap" --stats)
 set_tests_properties(opcua_stats_counted PROPERTIES
-  PASS_REGULAR_EXPRESSION "packets: +33[^\n]*\n[^\n]*\nprotocols:\n *opcua +32\n *tcp +1\nopcua message types:\n *Acknowledge +1\n *CloseSecureChannel +1\n *Error +1\n *Hello +3\n *Message +23\n *OpenSecureChannel +2\n *ReverseHello +1\nopcua services:\n *ActivateSessionRequest +2\n *ActivateSessionResponse +2\n *CallRequest +1\n *CallResponse +1\n")
+  PASS_REGULAR_EXPRESSION "packets: +33[^\n]*\n[^\n]*\nprotocols:\n *opcua +32\n *tcp +1.*\nopcua message types:\n *Acknowledge +1\n *CloseSecureChannel +1\n *Error +1\n *Hello +3\n *Message +23\n *OpenSecureChannel +2\n *ReverseHello +1\nopcua services:\n *ActivateSessionRequest +2\n *ActivateSessionResponse +2\n *CallRequest +1\n *CallResponse +1\n")
 
 # --------------------------------------------------------------------------
 # Real-world OPC UA capture -- see tests/real_captures/opcua/ATTRIBUTION.md for provenance: two
@@ -3166,12 +3166,12 @@ set_tests_properties(real_opcua_stats_summary PROPERTIES
   # checked reads now correctly throw and this decoder honestly falls back to "not in this decoder's
   # dispatch table" for them, rather than the old Tier-2 behavior of labeling them "CallRequest"
   # without ever having attempted to parse their bodies at all -- see the tests below this one.
-  PASS_REGULAR_EXPRESSION "packets: +90[^\n]*\n[^\n]*\nprotocols:\n *opcua +24\n *tcp +66\nopcua message types:\n *Acknowledge +2\n *Error +2\n *Hello +2\n *Message +14\n *OpenSecureChannel +4\nopcua services:\n *ActivateSessionRequest +2\n *ActivateSessionResponse +2\n *CreateSessionRequest +2\n *CreateSessionResponse +2\n *GetEndpointsRequest +2\n *GetEndpointsResponse +2\n *OpenSecureChannelRequest +2\n *OpenSecureChannelResponse +2")
+  PASS_REGULAR_EXPRESSION "packets: +90[^\n]*\n[^\n]*\nprotocols:\n *opcua +24\n *tcp +66.*\nopcua message types:\n *Acknowledge +2\n *Error +2\n *Hello +2\n *Message +14\n *OpenSecureChannel +4\nopcua services:\n *ActivateSessionRequest +2\n *ActivateSessionResponse +2\n *CreateSessionRequest +2\n *CreateSessionResponse +2\n *GetEndpointsRequest +2\n *GetEndpointsResponse +2\n *OpenSecureChannelRequest +2\n *OpenSecureChannelResponse +2")
 
 add_test(NAME real_opcua_port_independent_detection_on_nonstandard_port
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/opcua/opc-ua-ap-method-wireshark-freeze.pcap" --format text)
 set_tests_properties(real_opcua_port_independent_detection_on_nonstandard_port PROPERTIES
-  PASS_REGULAR_EXPRESSION "192.168.41.176:58674 -> 192.168.41.212:12001  \\[opcua\\]  Hello protocol-version=0 receive-buffer-size=65535 send-buffer-size=65535 max-message-size=4000 max-chunk-count=0 endpoint-url=opc.tcp://vm-xp-steven:12001/UA/StackTestServer\n *note: seen on TCP port 58674->12001, which is not a configured/standard OPC UA port \\(4840\\)")
+  PASS_REGULAR_EXPRESSION "192.168.41.176:58674 -> 192.168.41.212:12001  \\[opcua\\]  Hello protocol-version=0 receive-buffer-size=65535 send-buffer-size=65535 max-message-size=4000 max-chunk-count=0 endpoint-url=opc.tcp://vm-xp-steven:12001/UA/StackTestServer[^\n]*\n *note: seen on TCP port 58674->12001, which is not a configured/standard OPC UA port \\(4840\\)")
 
 add_test(NAME real_opcua_get_endpoints_response_five_endpoints_matches_wireshark
   COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/opcua/opc-ua-ap-method-wireshark-freeze.pcap")
@@ -3216,12 +3216,12 @@ set_tests_properties(real_opcua_call_request_second_session_body_rejected_as_mal
 add_test(NAME real_opcua_malformed_call_request_gets_error_not_response_first_session
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/opcua/opc-ua-ap-method-wireshark-freeze.pcap" --format text)
 set_tests_properties(real_opcua_malformed_call_request_gets_error_not_response_first_session PROPERTIES
-  PASS_REGULAR_EXPRESSION "\\[opcua\\]  Message channel=6495 token=1 \\(service type-id 712, ns=0 -- not in this decoder's dispatch table\\)\n.*\\[opcua\\]  Error error=Bad \\(0x80020000\\) reason=")
+  PASS_REGULAR_EXPRESSION "\\[opcua\\]  Message channel=6495 token=1 \\(service type-id 712, ns=0 -- not in this decoder's dispatch table\\)[^\n]*\n.*\\[opcua\\]  Error error=Bad \\(0x80020000\\) reason=")
 
 add_test(NAME real_opcua_malformed_call_request_gets_error_not_response_second_session
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/opcua/opc-ua-ap-method-wireshark-freeze.pcap" --format text)
 set_tests_properties(real_opcua_malformed_call_request_gets_error_not_response_second_session PROPERTIES
-  PASS_REGULAR_EXPRESSION "\\[opcua\\]  Message channel=6496 token=1 \\(service type-id 712, ns=0 -- not in this decoder's dispatch table\\)\n.*\\[opcua\\]  Error error=Bad \\(0x80070000\\) reason=")
+  PASS_REGULAR_EXPRESSION "\\[opcua\\]  Message channel=6496 token=1 \\(service type-id 712, ns=0 -- not in this decoder's dispatch table\\)[^\n]*\n.*\\[opcua\\]  Error error=Bad \\(0x80070000\\) reason=")
 
 add_test(NAME real_opcua_security_policy_none_both_sessions
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/opcua/opc-ua-ap-method-wireshark-freeze.pcap" --format text)
@@ -3323,7 +3323,7 @@ set_tests_properties(real_s7comm_plus_db3_var1_hmi_setmultivar_response_ok PROPE
 add_test(NAME real_s7comm_plus_db3_var1_hmi_connect_recognized_not_decoded
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/s7comm/s7comm_plus_1511_db3_var1_hmi.pcap" --format text)
 set_tests_properties(real_s7comm_plus_db3_var1_hmi_connect_recognized_not_decoded PROPERTIES
-  PASS_REGULAR_EXPRESSION "\\[s7comm-plus\\]  Connect\n *note: Connect PDU \\(session establishment handshake\\) is recognized but not decoded")
+  PASS_REGULAR_EXPRESSION "\\[s7comm-plus\\]  Connect[^\n]*\n *note: Connect PDU \\(session establishment handshake\\) is recognized but not decoded")
 
 add_test(NAME real_s7comm_plus_db3_var1_hmi_getvarsubstreamed_recognized_not_decoded
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/s7comm/s7comm_plus_1511_db3_var1_hmi.pcap" --format text)
@@ -3388,12 +3388,12 @@ add_test(NAME mms_does_not_crash
 add_test(NAME mms_stats_counted
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --stats)
 set_tests_properties(mms_stats_counted PROPERTIES
-  PASS_REGULAR_EXPRESSION "packets: +69[^\n]*\n[^\n]*\nprotocols:\n *cotp +7\n *mms +61\n *tcp +1\nmms pdu types:\n *cancel-ErrorPDU +1\n *cancel-RequestPDU +3\n *cancel-ResponsePDU +1\n *conclude-ErrorPDU +1\n *conclude-RequestPDU +4\n *conclude-ResponsePDU +1\n *confirmed-ErrorPDU +1\n *confirmed-RequestPDU +22\n *confirmed-ResponsePDU +23\n *initiate-RequestPDU +1\n *initiate-ResponsePDU +1\n *rejectPDU +1\n *unconfirmed-PDU \\(informationReport\\) +1\nmms services:\n *defineNamedVariableList +2\n *deleteNamedVariableList +2\n *fileClose +2\n *fileDelete +2\n *fileDirectory +2\n *fileOpen +2\n *fileRead +2\n *fileRename +2\n *getCapabilityList +3\n *getDomainAttributes +2\n *getNameList +3\n *getNamedVariableListAttributes +2\n *getVariableAccessAttributes +2\n *identify +4\n *informationReport +1\n *obtainFile +2\n *read +3\n *status +2\n *takeControl +2\n *write +2")
+  PASS_REGULAR_EXPRESSION "packets: +69[^\n]*\n[^\n]*\nprotocols:\n *cotp +7\n *mms +61\n *tcp +1.*\nmms pdu types:\n *cancel-ErrorPDU +1\n *cancel-RequestPDU +3\n *cancel-ResponsePDU +1\n *conclude-ErrorPDU +1\n *conclude-RequestPDU +4\n *conclude-ResponsePDU +1\n *confirmed-ErrorPDU +1\n *confirmed-RequestPDU +22\n *confirmed-ResponsePDU +23\n *initiate-RequestPDU +1\n *initiate-ResponsePDU +1\n *rejectPDU +1\n *unconfirmed-PDU \\(informationReport\\) +1\nmms services:\n *defineNamedVariableList +2\n *deleteNamedVariableList +2\n *fileClose +2\n *fileDelete +2\n *fileDirectory +2\n *fileOpen +2\n *fileRead +2\n *fileRename +2\n *getCapabilityList +3\n *getDomainAttributes +2\n *getNameList +3\n *getNamedVariableListAttributes +2\n *getVariableAccessAttributes +2\n *identify +4\n *informationReport +1\n *obtainFile +2\n *read +3\n *status +2\n *takeControl +2\n *write +2")
 
 add_test(NAME mms_association_aarq_aare
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format text)
 set_tests_properties(mms_association_aarq_aare PROPERTIES
-  PASS_REGULAR_EXPRESSION "\\[mms\\]  MMS/CONNECT \\(CN\\) AARQ initiate-RequestPDU\n.*\\[mms\\]  MMS/ACCEPT \\(AC\\) AARE \\(accepted\\) initiate-ResponsePDU")
+  PASS_REGULAR_EXPRESSION "\\[mms\\]  MMS/CONNECT \\(CN\\) AARQ initiate-RequestPDU[^\n]*\n.*\\[mms\\]  MMS/ACCEPT \\(AC\\) AARE \\(accepted\\) initiate-ResponsePDU")
 
 # Presentation context-definition-list (the "1=ACSE / 3=MMS" convention -- see mms.hpp) and the
 # negotiated Initiate parameters, both from the AARQ frame.
@@ -3479,7 +3479,7 @@ set_tests_properties(mms_fileread_request_and_response_values PROPERTIES
 add_test(NAME mms_fileclose_request_and_null_response
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format text)
 set_tests_properties(mms_fileclose_request_and_null_response PROPERTIES
-  PASS_REGULAR_EXPRESSION "confirmed-RequestPDU fileClose invokeID=14\n.*confirmed-ResponsePDU fileClose invokeID=14")
+  PASS_REGULAR_EXPRESSION "confirmed-RequestPDU fileClose invokeID=14[^\n]*\n.*confirmed-ResponsePDU fileClose invokeID=14")
 
 add_test(NAME mms_filerename_request_values
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format json)
@@ -3517,7 +3517,7 @@ set_tests_properties(mms_tier2_takecontrol_shown_as_hex PROPERTIES
 add_test(NAME mms_serviceerror_note
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format text)
 set_tests_properties(mms_serviceerror_note PROPERTIES
-  PASS_REGULAR_EXPRESSION "\\[mms\\]  MMS/DATA TRANSFER / GIVE TOKENS confirmed-ErrorPDU invokeID=19 error=resource\\(1\\)\n *note: additionalDescription=variable not found")
+  PASS_REGULAR_EXPRESSION "\\[mms\\]  MMS/DATA TRANSFER / GIVE TOKENS confirmed-ErrorPDU invokeID=19 error=resource\\(1\\)[^\n]*\n *note: additionalDescription=variable not found")
 
 add_test(NAME mms_rejectpdu_text
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format text)
@@ -3527,7 +3527,7 @@ set_tests_properties(mms_rejectpdu_text PROPERTIES
 add_test(NAME mms_cancel_request_response_and_error
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format text)
 set_tests_properties(mms_cancel_request_response_and_error PROPERTIES
-  PASS_REGULAR_EXPRESSION "cancel-RequestPDU invokeID=5\n.*cancel-ResponsePDU invokeID=5\n.*cancel-RequestPDU invokeID=99\n.*cancel-ErrorPDU invokeID=99 error=cancel\\(1\\)")
+  PASS_REGULAR_EXPRESSION "cancel-RequestPDU invokeID=5[^\n]*\n.*cancel-ResponsePDU invokeID=5[^\n]*\n.*cancel-RequestPDU invokeID=99[^\n]*\n.*cancel-ErrorPDU invokeID=99 error=cancel\\(1\\)")
 
 # Malformed/truncated confirmedServiceRequest/Response -- invokeID present, service field missing
 # entirely. Mirrors the real, genuinely truncated frame 18 of
@@ -3535,25 +3535,25 @@ set_tests_properties(mms_cancel_request_response_and_error PROPERTIES
 add_test(NAME mms_malformed_confirmed_request_and_response_notes
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format text)
 set_tests_properties(mms_malformed_confirmed_request_and_response_notes PROPERTIES
-  PASS_REGULAR_EXPRESSION "confirmed-RequestPDU invokeID=77\n *note: confirmedServiceRequest field missing \\(malformed or truncated PDU\\)\n.*confirmed-ResponsePDU invokeID=78\n *note: confirmedServiceResponse field missing \\(malformed or truncated PDU\\)")
+  PASS_REGULAR_EXPRESSION "confirmed-RequestPDU invokeID=77[^\n]*\n *note: confirmedServiceRequest field missing \\(malformed or truncated PDU\\)[^\n]*\n.*confirmed-ResponsePDU invokeID=78[^\n]*\n *note: confirmedServiceResponse field missing \\(malformed or truncated PDU\\)")
 
 add_test(NAME mms_conclude_request_response_and_error
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format text)
 set_tests_properties(mms_conclude_request_response_and_error PROPERTIES
-  PASS_REGULAR_EXPRESSION "conclude-RequestPDU\n.*conclude-ResponsePDU\n.*conclude-RequestPDU\n.*conclude-ErrorPDU error=conclude\\(2\\)")
+  PASS_REGULAR_EXPRESSION "conclude-RequestPDU[^\n]*\n.*conclude-ResponsePDU[^\n]*\n.*conclude-RequestPDU[^\n]*\n.*conclude-ErrorPDU error=conclude\\(2\\)")
 
 # Bare MMS -- no Session/Presentation/ACSE at all (see mms.hpp's own "Bare MMS" section).
 add_test(NAME mms_bare_mms_frames
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format text)
 set_tests_properties(mms_bare_mms_frames PROPERTIES
-  PASS_REGULAR_EXPRESSION "\\[mms\\]  MMS \\(bare\\) confirmed-RequestPDU identify invokeID=1\n.*\\[mms\\]  MMS \\(bare\\) confirmed-ResponsePDU identify invokeID=1\n.*\\[mms\\]  MMS \\(bare\\) cancel-RequestPDU invokeID=1\n.*\\[mms\\]  MMS \\(bare\\) conclude-RequestPDU")
+  PASS_REGULAR_EXPRESSION "\\[mms\\]  MMS \\(bare\\) confirmed-RequestPDU identify invokeID=1[^\n]*\n.*\\[mms\\]  MMS \\(bare\\) confirmed-ResponsePDU identify invokeID=1[^\n]*\n.*\\[mms\\]  MMS \\(bare\\) cancel-RequestPDU invokeID=1[^\n]*\n.*\\[mms\\]  MMS \\(bare\\) conclude-RequestPDU")
 
 # Bare-Presentation ongoing message -- Session omitted entirely (a real shape this decoder's own
 # validation found -- see mms.cpp's looks_like_bare_presentation and its ATTRIBUTION.md citation).
 add_test(NAME mms_bare_presentation_no_session
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format text)
 set_tests_properties(mms_bare_presentation_no_session PROPERTIES
-  PASS_REGULAR_EXPRESSION "\\[mms\\]  MMS/\\(no Session layer\\) confirmed-RequestPDU status invokeID=1\n.*\\[mms\\]  MMS/\\(no Session layer\\) confirmed-ResponsePDU status invokeID=1")
+  PASS_REGULAR_EXPRESSION "\\[mms\\]  MMS/\\(no Session layer\\) confirmed-RequestPDU status invokeID=1[^\n]*\n.*\\[mms\\]  MMS/\\(no Session layer\\) confirmed-ResponsePDU status invokeID=1")
 
 # A single TPKT/session/presentation/MMS frame split mid-frame across two raw TCP segments --
 # Decoder::reassemble_tcp_payload (the same general per-flow mechanism
@@ -3561,7 +3561,7 @@ set_tests_properties(mms_bare_presentation_no_session PROPERTIES
 add_test(NAME mms_tcp_split_reassembly
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format text)
 set_tests_properties(mms_tcp_split_reassembly PROPERTIES
-  PASS_REGULAR_EXPRESSION "buffering a TPKT/COTP PDU/frame split across TCP segments 102->49303.*waiting for more\n.*confirmed-ResponsePDU getCapabilityList invokeID=20\n *note: reassembled a TPKT/COTP PDU/frame from 63 byte\\(s\\) spanning 2 TCP segments on this flow")
+  PASS_REGULAR_EXPRESSION "buffering a TPKT/COTP PDU/frame split across TCP segments 102->49303.*waiting for more[^\n]*\n.*confirmed-ResponsePDU getCapabilityList invokeID=20[^\n]*\n *note: reassembled a TPKT/COTP PDU/frame from 63 byte\\(s\\) spanning 2 TCP segments on this flow")
 
 add_test(NAME mms_tcp_split_reassembled_result_decoded
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format json)
@@ -3575,7 +3575,7 @@ set_tests_properties(mms_tcp_split_reassembled_result_decoded PROPERTIES
 add_test(NAME mms_cotp_eot_chaining
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format text)
 set_tests_properties(mms_cotp_eot_chaining PROPERTIES
-  PASS_REGULAR_EXPRESSION "beginning a COTP/S7comm message fragmented across multiple complete TPKT/COTP frames.*40 user-data byte\\(s\\) buffered.*waiting for the final.*\n.*confirmed-ResponsePDU getNameList invokeID=21\n *note: reassembled a COTP/S7comm message from 80 user-data byte\\(s\\) chained across 2 complete TPKT/COTP frames")
+  PASS_REGULAR_EXPRESSION "beginning a COTP/S7comm message fragmented across multiple complete TPKT/COTP frames.*40 user-data byte\\(s\\) buffered.*waiting for the final.*\n.*confirmed-ResponsePDU getNameList invokeID=21[^\n]*\n *note: reassembled a COTP/S7comm message from 80 user-data byte\\(s\\) chained across 2 complete TPKT/COTP frames")
 
 add_test(NAME mms_cotp_eot_chained_result_decoded
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format json)
@@ -3618,7 +3618,7 @@ endforeach()
 add_test(NAME real_mms_iec61850_read_association_and_read
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/mms/iec61850_read.pcap" --format text)
 set_tests_properties(real_mms_iec61850_read_association_and_read PROPERTIES
-  PASS_REGULAR_EXPRESSION "\\[mms\\]  MMS/CONNECT \\(CN\\) AARQ initiate-RequestPDU\n.*confirmed-RequestPDU read invokeID=0\n.*confirmed-ResponsePDU read invokeID=0\n.*conclude-RequestPDU")
+  PASS_REGULAR_EXPRESSION "\\[mms\\]  MMS/CONNECT \\(CN\\) AARQ initiate-RequestPDU[^\n]*\n.*confirmed-RequestPDU read invokeID=0[^\n]*\n.*confirmed-ResponsePDU read invokeID=0[^\n]*\n.*conclude-RequestPDU")
 
 # Frame 18 is a real, genuinely truncated confirmed-ResponsePDU (invokeID only, 7 bytes total on
 # the wire) -- this decoder degrades to an honest note rather than guessing or crashing (see
@@ -3626,7 +3626,7 @@ set_tests_properties(real_mms_iec61850_read_association_and_read PROPERTIES
 add_test(NAME real_mms_iec61850_read_truncated_response_note
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/mms/iec61850_read.pcap" --format text)
 set_tests_properties(real_mms_iec61850_read_truncated_response_note PROPERTIES
-  PASS_REGULAR_EXPRESSION "confirmed-ResponsePDU invokeID=0\n *note: confirmedServiceResponse field missing \\(malformed or truncated PDU\\)")
+  PASS_REGULAR_EXPRESSION "confirmed-ResponsePDU invokeID=0[^\n]*\n *note: confirmedServiceResponse field missing \\(malformed or truncated PDU\\)")
 
 # Both real bare-MMS captures: entirely bare (no Session/Presentation/ACSE) real traffic, and the
 # specific real fix this decoder's own validation found -- cancel-RequestPDU/conclude-RequestPDU
@@ -3635,12 +3635,12 @@ set_tests_properties(real_mms_iec61850_read_truncated_response_note PROPERTIES
 add_test(NAME real_mms_takecontrol_bare_sequence
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/mms/mms-takeControl.pcap" --format text)
 set_tests_properties(real_mms_takecontrol_bare_sequence PROPERTIES
-  PASS_REGULAR_EXPRESSION "\\[mms\\]  MMS \\(bare\\) initiate-RequestPDU\n.*confirmed-RequestPDU takeControl invokeID=1\n.*confirmed-RequestPDU relinquishControl invokeID=1\n.*\\[mms\\]  MMS \\(bare\\) conclude-RequestPDU")
+  PASS_REGULAR_EXPRESSION "\\[mms\\]  MMS \\(bare\\) initiate-RequestPDU[^\n]*\n.*confirmed-RequestPDU takeControl invokeID=1[^\n]*\n.*confirmed-RequestPDU relinquishControl invokeID=1[^\n]*\n.*\\[mms\\]  MMS \\(bare\\) conclude-RequestPDU")
 
 add_test(NAME real_mms_cancelrequest_bare_sequence
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/mms/mms-cancelRequest.pcap" --format text)
 set_tests_properties(real_mms_cancelrequest_bare_sequence PROPERTIES
-  PASS_REGULAR_EXPRESSION "\\[mms\\]  MMS \\(bare\\) initiate-RequestPDU\n.*cancel-RequestPDU invokeID=1\n.*\\[mms\\]  MMS \\(bare\\) conclude-RequestPDU")
+  PASS_REGULAR_EXPRESSION "\\[mms\\]  MMS \\(bare\\) initiate-RequestPDU[^\n]*\n.*cancel-RequestPDU invokeID=1[^\n]*\n.*\\[mms\\]  MMS \\(bare\\) conclude-RequestPDU")
 
 # Independent-stack validation traffic (mz-automation/libiec61850, 224 frames): 117 recognized as
 # mms, zero parse warnings -- see ATTRIBUTION.md's own "Independent-stack validation traffic"
@@ -3649,7 +3649,7 @@ set_tests_properties(real_mms_cancelrequest_bare_sequence PROPERTIES
 add_test(NAME real_mms_libiec61850_loopback_stats
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/mms/libiec61850_loopback_capture.pcap" --stats)
 set_tests_properties(real_mms_libiec61850_loopback_stats PROPERTIES
-  PASS_REGULAR_EXPRESSION "packets: +224[^\n]*\n[^\n]*\nprotocols:\n *cotp +16\n *mms +117\n *tcp +91\nmms pdu types:\n *confirmed-RequestPDU +42\n *confirmed-ResponsePDU +42\n *initiate-RequestPDU +8\n *initiate-ResponsePDU +8\n *unconfirmed-PDU \\(informationReport\\) +17\nmms services:\n *getNameList +6\n *getVariableAccessAttributes +8\n *identify +2\n *informationReport +17\n *read +44\n *write +24")
+  PASS_REGULAR_EXPRESSION "packets: +224[^\n]*\n[^\n]*\nprotocols:\n *cotp +16\n *mms +117\n *tcp +91.*\nmms pdu types:\n *confirmed-RequestPDU +42\n *confirmed-ResponsePDU +42\n *initiate-RequestPDU +8\n *initiate-ResponsePDU +8\n *unconfirmed-PDU \\(informationReport\\) +17\nmms services:\n *getNameList +6\n *getVariableAccessAttributes +8\n *identify +2\n *informationReport +17\n *read +44\n *write +24")
 
 add_test(NAME real_mms_libiec61850_loopback_no_parse_warnings
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/mms/libiec61850_loopback_capture.pcap" --format json)
@@ -3669,13 +3669,13 @@ add_test(NAME mqtt_does_not_crash
 add_test(NAME mqtt_stats_counted
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mqtt.pcap" --stats)
 set_tests_properties(mqtt_stats_counted PROPERTIES
-  PASS_REGULAR_EXPRESSION "packets: +55[^\n]*\n[^\n]*\nprotocols:\n *mqtt +52\n *tcp +3\nmqtt packet types:\n *AUTH +2\n *CONNACK +4\n *CONNECT +4\n *DISCONNECT +2\n *PINGREQ +3\n *PINGRESP +2\n *PUBACK +2\n *PUBCOMP +1\n *PUBLISH +14\n *PUBREC +1\n *PUBREL +1\n *SUBACK +4\n *SUBSCRIBE +4\n *UNSUBACK +4\n *UNSUBSCRIBE +4\nmqtt sparkplug b publishes: 8\nmqtt sparkplug b message types:\n *DBIRTH +1\n *DDATA +1\n *DDEATH +1\n *NBIRTH +1\n *NDATA +3\n *STATE +1")
+  PASS_REGULAR_EXPRESSION "packets: +55[^\n]*\n[^\n]*\nprotocols:\n *mqtt +52\n *tcp +3.*\nmqtt packet types:\n *AUTH +2\n *CONNACK +4\n *CONNECT +4\n *DISCONNECT +2\n *PINGREQ +3\n *PINGRESP +2\n *PUBACK +2\n *PUBCOMP +1\n *PUBLISH +14\n *PUBREC +1\n *PUBREL +1\n *SUBACK +4\n *SUBSCRIBE +4\n *UNSUBACK +4\n *UNSUBSCRIBE +4\nmqtt sparkplug b publishes: 8\nmqtt sparkplug b message types:\n *DBIRTH +1\n *DDATA +1\n *DDEATH +1\n *NBIRTH +1\n *NDATA +3\n *STATE +1")
 
 # Flow A: full MQTT 3.1.1 lifecycle, port 61000.
 add_test(NAME mqtt_v311_full_lifecycle_text
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mqtt.pcap" --format text)
 set_tests_properties(mqtt_v311_full_lifecycle_text PROPERTIES
-  PASS_REGULAR_EXPRESSION "\\[mqtt\\]  CONNECT \\(MQTT 3.1.1\\)\n.*\\[mqtt\\]  CONNACK \\(MQTT 3.1.1\\)\n.*qos=0 retain payload=6 byte\\(s\\)\n.*qos=1 id=1 payload=4 byte\\(s\\)\n.*\\[mqtt\\]  PUBACK id=1\n.*qos=2 id=2 payload=13 byte\\(s\\)\n.*\\[mqtt\\]  PUBREC id=2\n.*\\[mqtt\\]  PUBREL id=2\n.*\\[mqtt\\]  PUBCOMP id=2\n.*SUBSCRIBE \\(MQTT 3.1.1\\) id=3\n.*SUBACK \\(MQTT 3.1.1\\) id=3\n.*UNSUBSCRIBE \\(MQTT 3.1.1\\) id=4\n.*UNSUBACK \\(MQTT 3.1.1\\) id=4\n.*\\[mqtt\\]  PINGREQ\n.*\\[mqtt\\]  PINGRESP\n.*\\[mqtt\\]  DISCONNECT")
+  PASS_REGULAR_EXPRESSION "\\[mqtt\\]  CONNECT \\(MQTT 3.1.1\\)[^\n]*\n.*\\[mqtt\\]  CONNACK \\(MQTT 3.1.1\\)[^\n]*\n.*qos=0 retain payload=6 byte\\(s\\)[^\n]*\n.*qos=1 id=1 payload=4 byte\\(s\\)[^\n]*\n.*\\[mqtt\\]  PUBACK id=1[^\n]*\n.*qos=2 id=2 payload=13 byte\\(s\\)[^\n]*\n.*\\[mqtt\\]  PUBREC id=2[^\n]*\n.*\\[mqtt\\]  PUBREL id=2[^\n]*\n.*\\[mqtt\\]  PUBCOMP id=2[^\n]*\n.*SUBSCRIBE \\(MQTT 3.1.1\\) id=3[^\n]*\n.*SUBACK \\(MQTT 3.1.1\\) id=3[^\n]*\n.*UNSUBSCRIBE \\(MQTT 3.1.1\\) id=4[^\n]*\n.*UNSUBACK \\(MQTT 3.1.1\\) id=4[^\n]*\n.*\\[mqtt\\]  PINGREQ[^\n]*\n.*\\[mqtt\\]  PINGRESP[^\n]*\n.*\\[mqtt\\]  DISCONNECT")
 
 # CONNECT's own cleartext Username/Password decode (a deliberate design choice -- see mqtt.cpp's
 # decode_connect comment) plus the Will fields.
@@ -3700,7 +3700,7 @@ set_tests_properties(mqtt_v311_subscribe_suback_session_tracked PROPERTIES
 add_test(NAME mqtt_v5_full_lifecycle_text
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mqtt.pcap" --format text)
 set_tests_properties(mqtt_v5_full_lifecycle_text PROPERTIES
-  PASS_REGULAR_EXPRESSION "\\[mqtt\\]  CONNECT \\(MQTT 5.0\\)\n.*\\[mqtt\\]  CONNACK \\(MQTT 5.0\\)\n.*PUBLISH \\(MQTT 5.0\\).*qos=1 id=1 payload=4 byte\\(s\\)\n.*PUBACK \\(MQTT 5.0\\) id=1\n.*SUBSCRIBE \\(MQTT 5.0\\) id=2\n.*SUBACK \\(MQTT 5.0\\) id=2\n.*UNSUBSCRIBE \\(MQTT 5.0\\) id=3\n.*UNSUBACK \\(MQTT 5.0\\) id=3\n.*\\[mqtt\\]  AUTH \\(MQTT 5.0\\)\n.*\\[mqtt\\]  AUTH \\(MQTT 5.0\\)\n.*\\[mqtt\\]  DISCONNECT \\(MQTT 5.0\\)")
+  PASS_REGULAR_EXPRESSION "\\[mqtt\\]  CONNECT \\(MQTT 5.0\\)[^\n]*\n.*\\[mqtt\\]  CONNACK \\(MQTT 5.0\\)[^\n]*\n.*PUBLISH \\(MQTT 5.0\\).*qos=1 id=1 payload=4 byte\\(s\\)[^\n]*\n.*PUBACK \\(MQTT 5.0\\) id=1[^\n]*\n.*SUBSCRIBE \\(MQTT 5.0\\) id=2[^\n]*\n.*SUBACK \\(MQTT 5.0\\) id=2[^\n]*\n.*UNSUBSCRIBE \\(MQTT 5.0\\) id=3[^\n]*\n.*UNSUBACK \\(MQTT 5.0\\) id=3[^\n]*\n.*\\[mqtt\\]  AUTH \\(MQTT 5.0\\)[^\n]*\n.*\\[mqtt\\]  AUTH \\(MQTT 5.0\\)[^\n]*\n.*\\[mqtt\\]  DISCONNECT \\(MQTT 5.0\\)")
 
 # CONNECT v5's Properties block (SessionExpiryInterval/ReceiveMaximum/UserProperty on the CONNECT
 # itself, WillDelayInterval inside the Will Properties) -- also regression-tests the earlier
@@ -3826,7 +3826,7 @@ set_tests_properties(mqtt_version_heuristic_suback_weakest_evidence PROPERTIES
 add_test(NAME mqtt_tcp_split_reassembly
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mqtt.pcap" --format text)
 set_tests_properties(mqtt_tcp_split_reassembly PROPERTIES
-  PASS_REGULAR_EXPRESSION "buffering a MQTT packet PDU/frame split across TCP segments 65000->1883: 115 of 230 declared byte\\(s\\).*waiting for more\n.*topic=\"devices/plc1/split-test\" qos=1 id=9 payload=200 byte\\(s\\)\n *note: reassembled a MQTT packet PDU/frame from 230 byte\\(s\\) spanning 2 TCP segments on this flow\n *note: MQTT protocol version for this TCP session is not known \\(no CONNECT seen on it in this capture\\)")
+  PASS_REGULAR_EXPRESSION "buffering a MQTT packet PDU/frame split across TCP segments 65000->1883: 115 of 230 declared byte\\(s\\).*waiting for more[^\n]*\n.*topic=\"devices/plc1/split-test\" qos=1 id=9 payload=200 byte\\(s\\)[^\n]*\n *note: reassembled a MQTT packet PDU/frame from 230 byte\\(s\\) spanning 2 TCP segments on this flow[^\n]*\n *note: MQTT protocol version for this TCP session is not known \\(no CONNECT seen on it in this capture\\)")
 
 # Flow F: PINGREQ + PUBACK + PINGREQ coalesced by the sender/OS into ONE TCP segment -- the
 # wire_length-driven "additional MQTT packet" loop in decoder.cpp.
@@ -3914,7 +3914,7 @@ set_tests_properties(real_mqtt_paho_v31_connect PROPERTIES
 add_test(NAME real_mqtt_v31_session_version_tracked_not_heuristic
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/mqtt/mqtt_packets_tcpdump.pcap" --format text)
 set_tests_properties(real_mqtt_v31_session_version_tracked_not_heuristic PROPERTIES
-  PASS_REGULAR_EXPRESSION "SUBSCRIBE \\(MQTT 3.1.1\\) id=1\n *note: MQTT version for this SUBSCRIBE determined via this TCP session's own CONNECT \\(tracked\\)\n.*SUBACK \\(MQTT 3.1.1\\) id=1\n *note: MQTT version for this SUBACK determined via this TCP session's own CONNECT \\(tracked\\)"
+  PASS_REGULAR_EXPRESSION "SUBSCRIBE \\(MQTT 3.1.1\\) id=1[^\n]*\n *note: MQTT version for this SUBSCRIBE determined via this TCP session's own CONNECT \\(tracked\\)[^\n]*\n.*SUBACK \\(MQTT 3.1.1\\) id=1[^\n]*\n *note: MQTT version for this SUBACK determined via this TCP session's own CONNECT \\(tracked\\)"
   FAIL_REGULAR_EXPRESSION "version for this SUBACK determined via heuristic|version for this TCP session is not known")
 
 # Real client payload ("Hello from the Paho blocking client") and the retain flag on it.
@@ -4132,7 +4132,7 @@ set_tests_properties(s7comm_pi_control_delete_block_text PROPERTIES
 add_test(NAME s7comm_pi_control_pprogram_empty_argument_text
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_pi_control.pcap" --format text)
 set_tests_properties(s7comm_pi_control_pprogram_empty_argument_text PROPERTIES
-  PASS_REGULAR_EXPRESSION "Job: PLC Control \\(P_PROGRAM - PLC Start / Stop\\)\n")
+  PASS_REGULAR_EXPRESSION "Job: PLC Control \\(P_PROGRAM - PLC Start / Stop\\)[^\n]*\n")
 
 add_test(NAME s7comm_pi_control_pprogram_argument_text
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_pi_control.pcap" --format text)
@@ -4149,7 +4149,7 @@ set_tests_properties(s7comm_pi_control_pprogram_argument_in_json PROPERTIES
 add_test(NAME s7comm_pi_control_sinumerik_name_lookup_only_text
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_pi_control.pcap" --format text)
 set_tests_properties(s7comm_pi_control_sinumerik_name_lookup_only_text PROPERTIES
-  PASS_REGULAR_EXPRESSION "Job: PLC Control \\(_N_F_XFER - Selects file for uploading\\)\n *note: PLC Control PI service \"_N_F_XFER\" \\(Selects file for uploading\\) has a 4-byte parameter block that is not decoded -- Sinumerik/CNC-specific")
+  PASS_REGULAR_EXPRESSION "Job: PLC Control \\(_N_F_XFER - Selects file for uploading\\)[^\n]*\n *note: PLC Control PI service \"_N_F_XFER\" \\(Selects file for uploading\\) has a 4-byte parameter block that is not decoded -- Sinumerik/CNC-specific")
 
 add_test(NAME s7comm_pi_control_non_numeric_block_number_noted
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_pi_control.pcap" --format text)
@@ -4285,17 +4285,17 @@ set_tests_properties(s7commplus_deleteobject_request_response PROPERTIES
 add_test(NAME s7commplus_connect_both_directions_not_decoded
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7commplus.pcap" --format text)
 set_tests_properties(s7commplus_connect_both_directions_not_decoded PROPERTIES
-  PASS_REGULAR_EXPRESSION "\\[s7comm-plus\\]  Connect\n *note: Connect PDU.*\\[s7comm-plus\\]  Connect\n *note: Connect PDU")
+  PASS_REGULAR_EXPRESSION "\\[s7comm-plus\\]  Connect[^\n]*\n *note: Connect PDU.*\\[s7comm-plus\\]  Connect[^\n]*\n *note: Connect PDU")
 
 add_test(NAME s7commplus_notification_not_decoded
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7commplus.pcap" --format text)
 set_tests_properties(s7commplus_notification_not_decoded PROPERTIES
-  PASS_REGULAR_EXPRESSION "Data: Notification\n *note: Notification body \\(subscribed/cyclic variable updates\\) is recognized but not decoded")
+  PASS_REGULAR_EXPRESSION "Data: Notification[^\n]*\n *note: Notification body \\(subscribed/cyclic variable updates\\) is recognized but not decoded")
 
 add_test(NAME s7commplus_datafw1_5_header_only
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7commplus.pcap" --format text)
 set_tests_properties(s7commplus_datafw1_5_header_only PROPERTIES
-  PASS_REGULAR_EXPRESSION "DataFW1_5 \\(24 byte\\(s\\) data, not decoded\\)\n *note: DataFW1_5 PDU \\(firmware >= V1.5\\) moves its Integrity part")
+  PASS_REGULAR_EXPRESSION "DataFW1_5 \\(24 byte\\(s\\) data, not decoded\\)[^\n]*\n *note: DataFW1_5 PDU \\(firmware >= V1.5\\) moves its Integrity part")
 
 add_test(NAME s7commplus_other_function_code_not_decoded
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7commplus.pcap" --format text)
@@ -4326,7 +4326,7 @@ set_tests_properties(s7commplus_unrecognized_datatype_s7string_rejected PROPERTI
 add_test(NAME s7commplus_missing_trailer_fragment_noted
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7commplus.pcap" --format text)
 set_tests_properties(s7commplus_missing_trailer_fragment_noted PROPERTIES
-  PASS_REGULAR_EXPRESSION "Data \\(fragment, awaiting further data\\)\n *note: S7comm-Plus telegram has no trailer in this frame -- it continues in a further TPKT/COTP frame")
+  PASS_REGULAR_EXPRESSION "Data \\(fragment, awaiting further data\\)[^\n]*\n *note: S7comm-Plus telegram has no trailer in this frame -- it continues in a further TPKT/COTP frame")
 
 # A telegram too short even for the fixed 4-byte header -- surfaced via the decoder's outer
 # catch(ParseError) as protocol=parse-error, not a partial/guessed S7comm-Plus decode.
@@ -4359,7 +4359,7 @@ set_tests_properties(s7commplus_stats_counted PROPERTIES
 add_test(NAME s7commplus_protocol_filter
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7commplus.pcap" --protocol s7comm-plus --stats)
 set_tests_properties(s7commplus_protocol_filter PROPERTIES
-  PASS_REGULAR_EXPRESSION "protocols:\n *cotp +2\n *parse-error +1\n *s7comm-plus +23\ns7comm-plus pdu types:\n *Connect +2\n *Data +18\n *DataFW1_5 +1\n *Keep Alive +2\ns7comm-plus functions:\n *DeleteObject +2\n *Explore +2\n *GetMultiVariables +6\n *SetMultiVariables +4\n *SetVariable +2\ns7comm-plus function bodies fully decoded \\(Tier 1\\): 12")
+  PASS_REGULAR_EXPRESSION "protocols:\n *cotp +2\n *parse-error +1\n *s7comm-plus +23.*\ns7comm-plus pdu types:\n *Connect +2\n *Data +18\n *DataFW1_5 +1\n *Keep Alive +2\ns7comm-plus functions:\n *DeleteObject +2\n *Explore +2\n *GetMultiVariables +6\n *SetMultiVariables +4\n *SetVariable +2\ns7comm-plus function bodies fully decoded \\(Tier 1\\): 12")
 
 # Regression guard for a real false positive: non-Modbus traffic (here, bytes that also happen
 # to satisfy DNP3's 0x05 0x64 start) whose first four bytes look like transaction_id + a valid
@@ -4633,7 +4633,7 @@ set_tests_properties(ffhse_tcp_round_trip PROPERTIES
 add_test(NAME ffhse_tcp_segment_split_reassembly
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ffhse.pcap" --format text)
 set_tests_properties(ffhse_tcp_segment_split_reassembly PROPERTIES
-  PASS_REGULAR_EXPRESSION "\\[tcp\\]  buffering a FF-HSE PDU PDU/frame split across TCP segments 52310->1090: 20 of 64 declared byte\\(s\\) seen so far across 1 segment\\(s\\) on this flow, waiting for more.*\\[ffhse\\]  FDA Open Session Req \\[session-index=1 \\+7 more\\]\n *note: reassembled a FF-HSE PDU PDU/frame from 64 byte\\(s\\) spanning 2 TCP segments on this flow")
+  PASS_REGULAR_EXPRESSION "\\[tcp\\]  buffering a FF-HSE PDU PDU/frame split across TCP segments 52310->1090: 20 of 64 declared byte\\(s\\) seen so far across 1 segment\\(s\\) on this flow, waiting for more.*\\[ffhse\\]  FDA Open Session Req \\[session-index=1 \\+7 more\\][^\n]*\n *note: reassembled a FF-HSE PDU PDU/frame from 64 byte\\(s\\) spanning 2 TCP segments on this flow")
 
 # Two SM Clear Assignment Info Rsp messages coalesced into ONE TCP segment (sender/OS coalescing)
 # -- exercises the wire_length-driven "additional FF-HSE message" loop for TCP.
@@ -6173,7 +6173,7 @@ set_tests_properties(remote_access_vnc_rfb_banner_recognized_standard_port PROPE
 add_test(NAME remote_access_vnc_rfb_banner_recognized_nonstandard_port
   COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_remote_access.pcap")
 set_tests_properties(remote_access_vnc_rfb_banner_recognized_nonstandard_port PROPERTIES
-  PASS_REGULAR_EXPRESSION "\\[vnc\\]  VNC \\(RFB\\) server protocol-version banner \"RFB 003.889\"\n *note: seen on TCP port 59001->52201, which is not a configured/standard VNC port \\(5900-5906\\)")
+  PASS_REGULAR_EXPRESSION "\\[vnc\\]  VNC \\(RFB\\) server protocol-version banner \"RFB 003.889\"[^\n]*\n *note: seen on TCP port 59001->52201, which is not a configured/standard VNC port \\(5900-5906\\)")
 
 add_test(NAME remote_access_teamviewer_port_only_recognized
   COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_remote_access.pcap")
@@ -6209,8 +6209,8 @@ set_tests_properties(remote_access_protocol_filter_isolates_family PROPERTIES
 add_test(NAME remote_access_extra_port_widens_expected_range
   COMMAND conduitscope decode --format text --remote-access-port 59001 --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_remote_access.pcap")
 set_tests_properties(remote_access_extra_port_widens_expected_range PROPERTIES
-  PASS_REGULAR_EXPRESSION "\\[vnc\\]  VNC \\(RFB\\) server protocol-version banner \"RFB 003.889\"\n *eth "
-  FAIL_REGULAR_EXPRESSION "RFB 003.889\"\n *note: seen on TCP port")
+  PASS_REGULAR_EXPRESSION "\\[vnc\\]  VNC \\(RFB\\) server protocol-version banner \"RFB 003.889\"[^\n]*\n *eth "
+  FAIL_REGULAR_EXPRESSION "RFB 003.889\"[^\n]*\n *note: seen on TCP port")
 
 add_test(NAME remote_access_falls_through_to_generic_tcp_summary
   COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mqtt.pcap")
@@ -7006,7 +7006,9 @@ set_tests_properties(decode_direction_source_absent_for_non_tcp_json PROPERTIES
 add_test(NAME decode_direction_line_shown_in_text
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_policy_engine.pcap" --format text)
 set_tests_properties(decode_direction_line_shown_in_text PROPERTIES
-  PASS_REGULAR_EXPRESSION "direction: handshake \\(client: 192\\.168\\.1\\.50\\)")
+  # Direction info is folded into the packet's own head line (see TextWriter::write_packet's
+  # comment, output.cpp) rather than printed as its own separate line.
+  PASS_REGULAR_EXPRESSION "\\(client 192\\.168\\.1\\.50 -- handshake\\)")
 
 add_test(NAME decode_direction_columns_shown_in_csv
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_policy_engine.pcap" --format csv)
