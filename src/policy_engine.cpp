@@ -164,11 +164,14 @@ void PolicyEngine::observe(const DecodedPacket& dp) {
         if (is_syn) {
             src_is_client = true;
             fs.initiator_known = true;
+            fs.direction_source = DirectionSource::Handshake;
         } else if (is_syn_ack) {
             src_is_client = false;
             fs.initiator_known = true;
+            fs.direction_source = DirectionSource::Handshake;
         } else {
             src_is_client = src_is_client_by_port(dp.src_port, dp.dst_port);
+            fs.direction_source = DirectionSource::PortHeuristic;
         }
         fs.client_ip = src_is_client ? dp.src_ip : dp.dst_ip;
         fs.server_ip = src_is_client ? dp.dst_ip : dp.src_ip;
@@ -196,6 +199,7 @@ void PolicyEngine::observe(const DecodedPacket& dp) {
             it->second.server_mac = src_is_client ? dp.dst_mac : dp.src_mac;
         }
         it->second.initiator_known = true;
+        it->second.direction_source = DirectionSource::Handshake;
     }
 
     FlowState& fs = it->second;
@@ -286,6 +290,7 @@ PolicyReport PolicyEngine::finish() const {
         fr.has_mac = fs.has_mac;
         fr.client_mac = fs.client_mac;
         fr.server_mac = fs.server_mac;
+        fr.direction_source = fs.direction_source;
 
         auto client_ip_u32 = parse_ipv4_string(fs.client_ip);
         auto server_ip_u32 = parse_ipv4_string(fs.server_ip);
@@ -475,7 +480,7 @@ void write_flow_group_text(std::ostream& out, const std::vector<const FlowReport
         if (f.verdict == FlowVerdict::Allowed) {
             out << ", matched conduit \"" << f.matched_conduit << "\"";
         }
-        out << "\n";
+        out << "\n      direction: " << direction_source_name(f.direction_source) << "\n";
         // MAC addressing (with OUI vendor annotations), as its own line -- absent entirely when this
         // flow's link type isn't Ethernet (f.has_mac false; see FlowReport::has_mac's own comment).
         // Mirrors decode's own TextWriter, which prints its "eth ..." line the same way, after the
@@ -713,7 +718,12 @@ void write_policy_report_json(std::ostream& out, const PolicyReport& report, con
         out << "      \"packet_count\": " << f.packet_count << ",\n";
         out << "      \"verdict\": \"" << verdict_name(f.verdict) << "\",\n";
         out << "      \"matched_conduit\": " << (f.matched_conduit.empty() ? "null" : ("\"" + json_escape(f.matched_conduit) + "\"")) << ",\n";
-        out << "      \"reason\": " << (f.reason.empty() ? "null" : ("\"" + json_escape(f.reason) + "\"")) << "\n";
+        out << "      \"reason\": " << (f.reason.empty() ? "null" : ("\"" + json_escape(f.reason) + "\"")) << ",\n";
+        // How client_ip/server_ip above were decided -- "handshake"/"content"/"port-heuristic", see
+        // DirectionSource's own comment (decoder.hpp) and docs/MANUAL.md's ROADMAP item 19. Appended
+        // last, after every pre-existing field, so no established JSON-shape test anchored on an
+        // earlier field's position in this object needs to change.
+        out << "      \"direction_source\": \"" << direction_source_name(f.direction_source) << "\"\n";
         out << "    }" << (i + 1 < report.flows.size() ? "," : "") << "\n";
     }
     out << "  ],\n";

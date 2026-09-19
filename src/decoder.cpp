@@ -39,6 +39,15 @@
 
 namespace conduitscope {
 
+const char* direction_source_name(DirectionSource source) {
+    switch (source) {
+        case DirectionSource::Handshake: return "handshake";
+        case DirectionSource::Content: return "content";
+        case DirectionSource::PortHeuristic: return "port-heuristic";
+    }
+    return "port-heuristic";
+}
+
 namespace {
 
 bool port_in(uint16_t port, uint16_t default_port, const std::vector<uint16_t>& extra) {

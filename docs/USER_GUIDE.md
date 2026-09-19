@@ -330,6 +330,7 @@ UNCLASSIFIED TRAFFIC (0):
 ALLOWED (1):
   [1] 192.168.1.50 -> 192.168.1.10:502 (modbus)  (modbus, 3 packet(s))
       zones: hmi_zone -> plc_zone, matched conduit "HMI polls PLC via Modbus"
+      direction: port-heuristic
       mac: 00:0c:29:11:22:33 (VMware) -> 00:0c:29:aa:bb:cc (VMware)
 
 Conduits never exercised by this capture (2):
@@ -342,6 +343,13 @@ same OUI/service-name resolution `decode` has, on by default -- see OUTPUT
 FORMATS' "Name resolution" subsection and the option table above. Add
 `--resolve --hosts FILE` to also annotate `192.168.1.50`/`192.168.1.10`
 with a hostname, exactly as `decode` would.
+
+The `direction:` line is `port-heuristic` here because this sample capture
+starts mid-session (no SYN/SYN-ACK was ever captured for it) -- see
+LIMITATIONS below for exactly what that means and when it can be wrong, and
+docs/DEVELOPMENT.md's ROADMAP item 19 for the full three-tier design
+record. A flow whose handshake WAS captured shows `direction: handshake`
+instead.
 
 ### `inventory` -- passive OT asset inventory: pcap -> zones and conduits
 
@@ -455,9 +463,10 @@ ASSETS (9):
   ...
 
 COMMUNICATIONS (5):
-  192.168.1.50 -> 192.168.1.10:502 (modbus)  modbus  [Read Holding Registers]  (2 packet(s))
-  10.0.5.21 -> 192.168.1.11:20000 (dnp3)  dnp3  [Read, Response]  (2 packet(s))
+  192.168.1.50 -> 192.168.1.10:502 (modbus)  modbus  [Read Holding Registers]  (2 packet(s), direction: port-heuristic)
+  10.0.5.21 -> 192.168.1.11:20000 (dnp3)  dnp3  [Read, Response]  (2 packet(s), direction: port-heuristic)
   ...
+  192.168.1.14 -> 192.168.1.15:47808  bacnet  [readProperty]  (2 packet(s), direction: content)
 
 INFERRED ZONES (2, grouped by observed /24 subnet):
   zone_10_0_5_0_24 (10.0.5.0/24): 10.0.5.21, 10.0.5.22
@@ -470,6 +479,17 @@ INFERRED CONDUITS (5):
   zone_192_168_1_0_24 -> zone_192_168_1_0_24  (bacnet/47808)  1 edge(s), 2 packet(s)
   zone_192_168_1_0_24 -> zone_192_168_1_0_24  (modbus/502)  1 edge(s), 2 packet(s)
 ```
+
+Each COMMUNICATIONS line's trailing `direction: <tier>` is the same
+three-tier `direction_source` `policy validate`'s own report carries (see
+its own JSON report schema section above), with one addition: `content`
+appears here too, for the BACnet edge -- BACnet's client and server both
+conventionally listen on the same UDP port, so its direction is decided by
+APDU type (request vs. response) instead of a port guess, unlike every
+other edge above (`policy validate` never evaluates BACnet at all -- UDP-only,
+see LIMITATIONS -- so `content` never appears in *its* report). See
+docs/DEVELOPMENT.md's ROADMAP item 19 for the full three-tier design
+record and the industry precedent researched before adding this field.
 
 #### Closing the loop
 
@@ -1171,7 +1191,8 @@ an array depending on how the policy file happened to write it:
       "packet_count": 3,
       "verdict": "allowed",
       "matched_conduit": "HMI polls PLC via Modbus",
-      "reason": null
+      "reason": null,
+      "direction_source": "handshake"
     }
   ],
   "ethernet_flows": [],
@@ -1184,6 +1205,18 @@ an array depending on how the policy file happened to write it:
 is only non-`null` otherwise (a short, human-readable explanation, the same
 text the `text` report shows). Same for `ethernet_flows[]`'s own `verdict`/
 `matched_conduit`/`reason` below.
+
+**`direction_source`** (per flow, appended last -- docs/DEVELOPMENT.md's
+ROADMAP item 19) -- which tier decided `client_ip`/`server_ip` above:
+`"handshake"` (a SYN and matching SYN-ACK were both observed for this flow
+-- authoritative) or `"port-heuristic"` (no handshake was captured, so a
+known-service-port/lower-port-number guess was used instead, which CAN be
+wrong -- see LIMITATIONS' own discussion of exactly when). Never
+`"content"` here -- that tier only applies to BACnet, which `policy
+validate` never evaluates at all (UDP-only, see "Addressing scope" below).
+`ethernet_flows[]` has no `direction_source` of its own: those protocols
+have no client/server concept to begin with (see its own comment just
+below).
 
 **Resolver annotations** (`--no-oui`/`--resolve`/`--hosts`/`--nn`/
 `--services` -- see the option table above and OUTPUT FORMATS' "Name
@@ -1414,12 +1447,21 @@ One line per packet: index, timestamp, source and destination `ip:port`,
 `[protocol]`, and a summary. Any additional notes (heuristic explanations,
 port-mismatch warnings, malformed-field warnings) are printed indented below
 the packet line, followed, for an Ethernet-linktype packet, by an `eth`
-line showing the raw source/destination MAC addresses.
+line showing the raw source/destination MAC addresses and then, for a TCP
+packet, a `direction` line -- which side of this flow `decode`'s own
+per-flow tracking (`FlowDirectionTracker`, independent of `policy
+validate`/`inventory`'s own direction tracking) currently believes is the
+client (initiator), and whether that came from an observed TCP handshake or
+only a port-based guess. See the `json` output's own `direction_source`/
+`direction_client_ip` fields below for the two machine-readable values this
+line renders, and docs/DEVELOPMENT.md's ROADMAP item 19 for the full design
+record.
 
 ```
 #1  1700000000.000000  192.168.1.50:51000 -> 192.168.1.10:502  [modbus]  Read Holding Registers: request: read 10 holding register(s) starting at address 0
         note: classified as a request because the PDU is exactly 4 bytes (address+quantity); this is a heuristic, not stream tracking
         eth aa:bb:cc:11:22:33 -> aa:bb:cc:44:55:66
+        direction: port-heuristic (client: 192.168.1.50)
 ```
 
 When a packet is 802.1Q VLAN-encapsulated, its VLAN ID is appended to the
@@ -1477,6 +1519,22 @@ Every object also carries a trailing `time` field (always a string): with
 raw-epoch value as text; any other `-t` value changes only `time`, leaving
 `timestamp` untouched, so an existing `jq` pipeline reading `timestamp`
 never needs to change. See OUTPUT FORMATS' "Timestamps" subsection below.
+
+After `time`, every object also carries `direction_source` and
+`direction_client_ip` -- which side of this packet's TCP flow is the client
+(initiator), and how that was decided: `"handshake"` (a SYN and matching
+SYN-ACK were both observed for this flow -- authoritative), or
+`"port-heuristic"` (no handshake was captured, so a known-service-port/
+lower-port-number guess was used instead, which CAN be wrong -- see
+LIMITATIONS below). Both are `null` for a non-TCP packet -- this tracking
+(`FlowDirectionTracker`, a separate layer built on top of `decode`'s own
+already-public output, the same way `policy validate`/`inventory` each
+track direction for themselves) never runs on one. See
+docs/DEVELOPMENT.md's ROADMAP item 19 for the full three-tier design record
+and the industry precedent researched before adding this (`"content"`, the
+third tier, never appears here -- it only applies to BACnet, which is
+UDP-only and stays out of `decode`'s own per-packet direction tracking, see
+the `inventory` section below for where it does appear).
 
 Over a hundred fields are only present (omitted entirely, not `null`) on
 packets where they apply:
@@ -2545,7 +2603,7 @@ The following fields appear only when `protocol` is `mms`:
 ### csv
 
 Header row followed by one row per packet:
-`index,timestamp,src_mac,dst_mac,src_mac_vendor,dst_mac_vendor,src_ip,src_hostname,src_port,src_port_service,dst_ip,dst_hostname,dst_port,dst_port_service,protocol,summary,notes,vlan_id,time`.
+`index,timestamp,src_mac,dst_mac,src_mac_vendor,dst_mac_vendor,src_ip,src_hostname,src_port,src_port_service,dst_ip,dst_hostname,dst_port,dst_port_service,protocol,summary,notes,vlan_id,time,direction_source,direction_client_ip`.
 Fields are quoted per standard CSV rules when they contain a comma, quote, or
 newline; multiple notes are joined with ` | ` inside the single `notes` field.
 `src_mac`/`dst_mac` are empty for a non-Ethernet-linktype capture, exactly
@@ -2558,11 +2616,15 @@ shifts any other column's position) is likewise an empty field both for an
 untagged packet and, regardless of whether the packet is tagged, whenever
 `--no-vlan` disables display -- CSV has no way to distinguish "no VLAN tag"
 from "not shown" the way JSON's `has_vlan_tag` can, so the column's header
-always exists but its value is empty in both cases. `time` is the trailing
-column (`-t`/`--time-format`'s own rendering of the same timestamp
-`timestamp` already carries raw -- see "Timestamps" below), added after
-`vlan_id` rather than next to `timestamp` for the same "never shift an
-existing column" reasoning.
+always exists but its value is empty in both cases. `time` is next
+(`-t`/`--time-format`'s own rendering of the same timestamp `timestamp`
+already carries raw -- see "Timestamps" below), added after `vlan_id`
+rather than next to `timestamp` for the same "never shift an existing
+column" reasoning. `direction_source`/`direction_client_ip` are now the
+trailing two columns, added after `time` for the same reason -- see the
+`json` output's own paragraph above for what the two values mean (both
+empty here, rather than JSON's `null`, for a non-TCP packet) and
+docs/DEVELOPMENT.md's ROADMAP item 19 for the full design record.
 
 ### Timestamps
 
@@ -3391,22 +3453,26 @@ These are current, not aspirational -- each has a corresponding docs/DEVELOPMENT
   heuristic below can't even be attempted -- see `inventory` above); (3)
   **port-heuristic** -- neither of the above, so the known-OT-port/
   lower-port-number guess described in the bullet above is used, and this
-  is the only tier that can actually be wrong. Today this tiering exists
-  only as unlabeled logic scattered across `PolicyEngine::observe` and
-  `AssetInventoryEngine::observe` -- the report output doesn't say which
-  tier produced a given flow's direction, only the direction itself.
-  Industry precedent was surveyed before settling on how to name this
-  (Zeek, Suricata, Wireshark): none of the three actually expose a labeled
-  confidence/provenance field for this. Wireshark is the closest precedent,
-  and not a reassuring one -- its own Conversations table orders endpoints
-  by the same "lower port number is probably the server" guess this tool
-  falls back to, with a long-open community feature request asking it to
-  prefer the handshake's actual direction instead when one was captured.
-  Labeling each flow with which tier produced its direction (a
-  `direction_source` field, mechanism-based -- `handshake`/`content`/
-  `port-heuristic` -- rather than a vaguer "confidence" scale) is designed
-  but not yet implemented -- see docs/DEVELOPMENT.md's ROADMAP item 19 for
-  the full design record and sourcing.
+  is the only tier that can actually be wrong. This tiering is labeled, not
+  just applied silently: `decode` (per packet), `policy validate` (per
+  `FlowReport`), and `inventory` (per `InventoryEdge`) each carry a
+  `direction_source` field (`"handshake"`/`"content"`/`"port-heuristic"`) --
+  `decode`'s own copy of this tracking is `FlowDirectionTracker`
+  (`flow_direction.hpp`), a third, independent implementation alongside
+  `PolicyEngine::observe`'s and `AssetInventoryEngine::observe`'s own --
+  see each command's own OUTPUT FORMATS/JSON report schema entry above for
+  the exact field and docs/DEVELOPMENT.md's ROADMAP item 19 for the full
+  design record. Industry precedent was surveyed before settling on how to
+  name this (Zeek, Suricata, Wireshark): none of the three actually expose
+  a labeled confidence/provenance field for this. Wireshark is the closest
+  precedent, and not a reassuring one -- its own Conversations table orders
+  endpoints by the same "lower port number is probably the server" guess
+  this tool falls back to, with a long-open community feature request
+  asking it to prefer the handshake's actual direction instead when one
+  was captured. `direction_source` is mechanism-based, not
+  confidence-based, deliberately -- see ROADMAP item 19 for why a graded
+  "confidence" scale (the kind threat-intel writing commonly uses) was
+  considered and rejected for this.
 - **A conduit's direction is TCP-connection-initiator-based, not
   per-packet-flow-based** -- see POLICY FILE FORMAT's "Conduits" section for
   exactly what `from`/`to`/`bidirectional` mean. There's no way to permit,

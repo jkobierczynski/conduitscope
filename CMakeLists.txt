@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 cmake_minimum_required(VERSION 3.16)
-project(conduitscope VERSION 0.1.6 LANGUAGES CXX)
+project(conduitscope VERSION 0.1.4 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -82,6 +82,7 @@ add_library(conduitscope_core STATIC
   src/policy.cpp
   src/policy_engine.cpp
   src/asset_inventory.cpp
+  src/flow_direction.cpp
   src/live_capture.cpp
 )
 target_include_directories(conduitscope_core PUBLIC
@@ -2614,9 +2615,10 @@ set_tests_properties(hartip_cmd1_request_and_response_decoded PROPERTIES
   # "notes": [] followed by the closing "}," anchors this as the end of the *first* packet object
   # (Command 1 request) so the greedy .* that follows can't jump ahead into some later packet's
   # own "hartip_values" instead -- since -t/--time-format's own `time` field (time_format.hpp) now
-  # renders directly after "notes" (see output.cpp's JsonWriter), that anchor has to match through
-  # it too.
-  PASS_REGULAR_EXPRESSION "\"hartip_command\": 1,.*\"hartip_command_name\": \"Read Primary Variable\",.*\"notes\": \\[\\],\n *\"time\": \"[^\"]*\"\n *\\},.*\"hartip_values\": \\[\"pv-units=1\", \"pv=72.500000\"\\]")
+  # renders directly after "notes", followed in turn by direction_source/direction_client_ip (see
+  # output.cpp's JsonWriter and docs/MANUAL.md's ROADMAP item 19), that anchor has to match
+  # through all three.
+  PASS_REGULAR_EXPRESSION "\"hartip_command\": 1,.*\"hartip_command_name\": \"Read Primary Variable\",.*\"notes\": \\[\\],\n *\"time\": \"[^\"]*\",\n *\"direction_source\":[^\n]*\n *\"direction_client_ip\":[^\n]*\n *\\},.*\"hartip_values\": \\[\"pv-units=1\", \"pv=72.500000\"\\]")
 
 add_test(NAME hartip_cmd2_response_decoded
   COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap")
@@ -2722,15 +2724,15 @@ add_test(NAME hartip_cmd38_request_and_response_decoded
   COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap")
 set_tests_properties(hartip_cmd38_request_and_response_decoded PROPERTIES
   # Same "notes"+closing-brace anchor as hartip_cmd1_request_and_response_decoded above, updated
-  # the same way for the trailing `time` field.
-  PASS_REGULAR_EXPRESSION "\"hartip_command\": 38,.*\"hartip_command_name\": \"Reset Configuration Changed Flag\",.*\"notes\": \\[\\],\n *\"time\": \"[^\"]*\"\n *\\},.*\"hartip_command\": 38,.*\"hartip_command_name\": \"Reset Configuration Changed Flag\",.*\"hartip_response_code\": 0,.*\"hartip_values\": \\[\"configuration-change-counter=42\"\\]")
+  # the same way for the trailing `time`/direction_source/direction_client_ip fields.
+  PASS_REGULAR_EXPRESSION "\"hartip_command\": 38,.*\"hartip_command_name\": \"Reset Configuration Changed Flag\",.*\"notes\": \\[\\],\n *\"time\": \"[^\"]*\",\n *\"direction_source\":[^\n]*\n *\"direction_client_ip\":[^\n]*\n *\\},.*\"hartip_command\": 38,.*\"hartip_command_name\": \"Reset Configuration Changed Flag\",.*\"hartip_response_code\": 0,.*\"hartip_values\": \\[\"configuration-change-counter=42\"\\]")
 
 add_test(NAME hartip_cmd48_minimal_and_extended_decoded
   COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap")
 set_tests_properties(hartip_cmd48_minimal_and_extended_decoded PROPERTIES
   # Same "notes"+closing-brace anchor as hartip_cmd1_request_and_response_decoded above, updated
-  # the same way for the trailing `time` field.
-  PASS_REGULAR_EXPRESSION "\"hartip_command\": 48,.*\"hartip_command_name\": \"Read Additional Device Status\",.*\"hartip_values\": \\[\"device-specific-status=000000000000\"\\],.*\"notes\": \\[\\],\n *\"time\": \"[^\"]*\"\n *\\},.*\"device-specific-status=000000000000\", \"extended-device-status=0x00\", \"device-operating-mode=0x01\", \"standardized-status-0=0x00\", \"standardized-status-1=0x00\", \"standardized-status-2=0x00\", \"standardized-status-3=0x00\", \"analog-channel-saturated=0x00\", \"analog-channel-fixed=0x00\"\\]")
+  # the same way for the trailing `time`/direction_source/direction_client_ip fields.
+  PASS_REGULAR_EXPRESSION "\"hartip_command\": 48,.*\"hartip_command_name\": \"Read Additional Device Status\",.*\"hartip_values\": \\[\"device-specific-status=000000000000\"\\],.*\"notes\": \\[\\],\n *\"time\": \"[^\"]*\",\n *\"direction_source\":[^\n]*\n *\"direction_client_ip\":[^\n]*\n *\\},.*\"device-specific-status=000000000000\", \"extended-device-status=0x00\", \"device-operating-mode=0x01\", \"standardized-status-0=0x00\", \"standardized-status-1=0x00\", \"standardized-status-2=0x00\", \"standardized-status-3=0x00\", \"analog-channel-saturated=0x00\", \"analog-channel-fixed=0x00\"\\]")
 
 add_test(NAME hartip_cmd77_response_short_address_embedded_command_decoded
   COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap")
@@ -5374,8 +5376,11 @@ set_tests_properties(no_vlan_suppresses_display_csv PROPERTIES
   # (see time_format.hpp/output.cpp's `-t`/--time-format/--time-offset) -- epoch's default rendering
   # reproduces the raw `timestamp` field byte-for-byte, so this pcap's first packet's fixed
   # 1700020000.000000 stamp is asserted literally here, same "hardcode this sample's known value"
-  # style vlan_id_shown_by_default_csv above already uses for its own trailing column.
-  PASS_REGULAR_EXPRESSION "profinet,\"Cyclic RT IO data \\(RT_CLASS_1, unicast\\): 8 byte\\(s\\) IO data, cycle_counter=4660 data_status=\\[Primary,Valid,Run,Ok\\] transfer_status=OK\",,,1700020000\\.000000\n"
+  # style vlan_id_shown_by_default_csv above already uses for its own trailing column. `time` is no
+  # longer the row's last column -- direction_source/direction_client_ip (empty here: this is a raw
+  # PROFINET RT frame, not TCP, so FlowDirectionTracker never touches it -- see
+  # CsvWriter::write_packet) now follow it, hence the two trailing empty fields before the newline.
+  PASS_REGULAR_EXPRESSION "profinet,\"Cyclic RT IO data \\(RT_CLASS_1, unicast\\): 8 byte\\(s\\) IO data, cycle_counter=4660 data_status=\\[Primary,Valid,Run,Ok\\] transfer_status=OK\",,,1700020000\\.000000,,\n"
   FAIL_REGULAR_EXPRESSION "transfer_status=OK\",,100")
 
 # --no-oui and --no-vlan are independent toggles -- suppressing one must not affect the other.
@@ -6965,6 +6970,81 @@ add_test(NAME tunnel_vpn_hartip_explicit_filter_still_reaches_port_4500_and_4789
   COMMAND conduitscope decode --format text --protocol hartip --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tunnel_vpn.pcap")
 set_tests_properties(tunnel_vpn_hartip_explicit_filter_still_reaches_port_4500_and_4789 PROPERTIES
   PASS_REGULAR_EXPRESSION "\\[hartip\\].*\\[hartip\\]")
+
+# ---------------------------------------------------------------------------------------------
+# direction_source: which tier (handshake/content/port-heuristic) decided a flow's client/server
+# side, across all three surfaces that make that call -- `decode` (FlowDirectionTracker, see
+# flow_direction.hpp), `policy validate` (PolicyEngine::FlowReport), and `inventory`
+# (AssetInventoryEngine::InventoryEdge). See DirectionSource's own comment (decoder.hpp) and
+# docs/MANUAL.md's ROADMAP item 19 for the full three-tier design record. sample_policy_engine.pcap
+# supplies both a captured-handshake flow and a mid-capture (no-handshake) flow in one fixture (see
+# its own use above under "sample_policy_engine.pcap: client/server (initiator) determination and
+# cotp->s7comm folding"); sample_modbus.pcap starts mid-session, giving a pure port-heuristic case;
+# sample_inventory.pcap's BACnet edge is this codebase's only content-based case.
+# ---------------------------------------------------------------------------------------------
+
+add_test(NAME decode_direction_source_handshake_json
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_policy_engine.pcap" --format json)
+set_tests_properties(decode_direction_source_handshake_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"tcp_flags\": \"SYN\",[^}]*\"direction_source\": \"handshake\",\n *\"direction_client_ip\": \"192.168.1.50\"")
+
+add_test(NAME decode_direction_source_port_heuristic_json
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --format json)
+set_tests_properties(decode_direction_source_port_heuristic_json PROPERTIES
+  # sample_modbus.pcap's session starts mid-capture (no SYN ever seen), so every packet on it falls
+  # back to the known-port/lower-port-number guess -- server_port 502 is Modbus's registered port,
+  # so 192.168.1.50 (the other, unrecognized-port side) is (correctly, here) assumed to be the client.
+  PASS_REGULAR_EXPRESSION "\"direction_source\": \"port-heuristic\",\n *\"direction_client_ip\": \"192.168.1.50\"")
+
+add_test(NAME decode_direction_source_absent_for_non_tcp_json
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_igmp.pcap" --format json)
+set_tests_properties(decode_direction_source_absent_for_non_tcp_json PROPERTIES
+  # FlowDirectionTracker only tracks TCP flows (matching PolicyEngine::observe's own scope) -- a
+  # non-TCP packet's direction_source/direction_client_ip are both null, never a guessed value.
+  PASS_REGULAR_EXPRESSION "\"direction_source\": null,\n *\"direction_client_ip\": null")
+
+add_test(NAME decode_direction_line_shown_in_text
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_policy_engine.pcap" --format text)
+set_tests_properties(decode_direction_line_shown_in_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "direction: handshake \\(client: 192\\.168\\.1\\.50\\)")
+
+add_test(NAME decode_direction_columns_shown_in_csv
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_policy_engine.pcap" --format csv)
+set_tests_properties(decode_direction_columns_shown_in_csv PROPERTIES
+  PASS_REGULAR_EXPRESSION "direction_source,direction_client_ip\n.*,handshake,192\\.168\\.1\\.50\n")
+
+add_test(NAME policy_validate_direction_source_handshake_json
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_policy_engine.pcap" --policy "${POLICY_DIR}/policy_engine_sample.yaml" --format json)
+set_tests_properties(policy_validate_direction_source_handshake_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"client_ip\": \"192.168.1.50\",[^}]*\"server_port\": 502,[^}]*\"direction_source\": \"handshake\"")
+
+add_test(NAME policy_validate_direction_source_port_heuristic_json
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_policy_engine.pcap" --policy "${POLICY_DIR}/policy_engine_sample.yaml" --format json)
+set_tests_properties(policy_validate_direction_source_port_heuristic_json PROPERTIES
+  # The same cotp/s7comm-on-102 flow policy_engine_cotp_only_session_counts_as_s7comm above already
+  # exercises -- this session's own handshake was never captured, so it's decided by the
+  # known-service-port guess (102 is COTP/S7comm's registered port) alone.
+  PASS_REGULAR_EXPRESSION "\"server_port\": 102,[^}]*\"direction_source\": \"port-heuristic\"")
+
+add_test(NAME policy_validate_direction_line_shown_in_text
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_policy_engine.pcap" --policy "${POLICY_DIR}/policy_engine_sample.yaml")
+set_tests_properties(policy_validate_direction_line_shown_in_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "zones: hmi_zone -> plc_zone\n *direction: handshake")
+
+add_test(NAME inventory_direction_source_content_for_bacnet_json
+  COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_inventory.pcap" --format json)
+set_tests_properties(inventory_direction_source_content_for_bacnet_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"protocol\": \"bacnet\",[^}]*\"direction_source\": \"content\"")
+
+add_test(NAME inventory_direction_source_port_heuristic_for_modbus_json
+  COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_inventory.pcap" --format json)
+set_tests_properties(inventory_direction_source_port_heuristic_for_modbus_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"protocol\": \"modbus\",[^}]*\"direction_source\": \"port-heuristic\"")
+
+add_test(NAME inventory_direction_shown_in_text
+  COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_inventory.pcap")
+set_tests_properties(inventory_direction_shown_in_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "bacnet  \\[readProperty\\]  \\(2 packet\\(s\\), direction: content\\)")
 
 # ---------------------------------------------------------------------------------------------
 # Live capture (live_capture.hpp/cpp) -- an optional, build-time-detected libpcap (Linux) / Npcap

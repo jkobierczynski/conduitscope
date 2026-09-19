@@ -390,6 +390,21 @@ void TextWriter::write_packet(const DecodedPacket& p) {
         if (color_) out_ << kReset;
         out_ << "\n";
     }
+
+    // How this TCP flow's client (initiator) side was determined -- see DirectionSource's own
+    // comment (decoder.hpp) and docs/MANUAL.md's ROADMAP item 19. Printed after the eth line (not
+    // folded into the head line above), the same "purely additive at the end of this packet's
+    // block" placement the eth line's own comment documents for itself -- has_direction is only
+    // ever true for a has_tcp packet (FlowDirectionTracker's scope, see flow_direction.hpp), so
+    // this line never appears for a UDP/non-IP/parse-error packet.
+    if (p.has_direction) {
+        out_ << "        ";
+        if (color_) out_ << kDim;
+        out_ << "direction: " << direction_source_name(p.direction_source) << " (client: "
+             << (p.direction_client_is_src ? p.src_ip : p.dst_ip) << ")";
+        if (color_) out_ << kReset;
+        out_ << "\n";
+    }
 }
 
 void JsonWriter::begin() { out_ << "[\n"; }
@@ -1471,7 +1486,18 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
     // dst_mac_vendor/etc. already follow here (see this class's own file header comment) for the
     // same reason: several tests match fields by exact adjacency. --time-format/--time-offset
     // (cli_main.cpp) control how this is rendered; see time_format.hpp.
-    out_ << "    \"time\": \"" << json_escape(time_.format(p.timestamp)) << "\"\n";
+    out_ << "    \"time\": \"" << json_escape(time_.format(p.timestamp)) << "\",\n";
+    // How this TCP flow's client (initiator) side was determined -- "handshake"/"port-heuristic",
+    // never "content" here (FlowDirectionTracker only tracks TCP flows, see flow_direction.hpp's
+    // own file header) -- see DirectionSource's own comment (decoder.hpp) and docs/MANUAL.md's
+    // ROADMAP item 19. Appended last, after "time" (now the new last field before these), for the
+    // same append-only reason as every field above. Both null for a non-TCP packet, the same
+    // "null, not omitted, when the base field doesn't apply" convention src_ip/src_port already
+    // follow in this same object -- unlike a resolver *_vendor/*_hostname/*_service annotation,
+    // which is omitted entirely on a miss (see this class's own comment above); these two aren't
+    // annotations, they're base decoded values that simply don't exist for a non-TCP packet.
+    out_ << "    \"direction_source\": " << (p.has_direction ? ("\"" + std::string(direction_source_name(p.direction_source)) + "\"") : "null") << ",\n";
+    out_ << "    \"direction_client_ip\": " << (p.has_direction ? ("\"" + json_escape(p.direction_client_is_src ? p.src_ip : p.dst_ip) + "\"") : "null") << "\n";
     out_ << "  }";
 }
 
@@ -1491,9 +1517,16 @@ void CsvWriter::begin() {
     // position of any existing one; see this file's src_mac_vendor/dst_mac_vendor comment just
     // above for the same "append-only" discipline and why it matters here. --time-format/
     // --time-offset (cli_main.cpp) control how it's rendered; see time_format.hpp.
+    //
+    // direction_source/direction_client_ip are appended after `time`, now the new last two
+    // columns, for the same append-only reason -- see DirectionSource's own comment (decoder.hpp)
+    // and docs/MANUAL.md's ROADMAP item 19. Both are empty for a non-TCP packet (has_direction
+    // false -- FlowDirectionTracker's scope matches PolicyEngine::observe's own: TCP flows only,
+    // see flow_direction.hpp), the same "empty, not a placeholder, on a field that doesn't apply"
+    // convention src_ip/src_port/vlan_id already follow in this same header.
     out_ << "index,timestamp,src_mac,dst_mac,src_mac_vendor,dst_mac_vendor,src_ip,src_hostname,"
             "src_port,src_port_service,dst_ip,dst_hostname,dst_port,dst_port_service,protocol,"
-            "summary,notes,vlan_id,time\n";
+            "summary,notes,vlan_id,time,direction_source,direction_client_ip\n";
 }
 
 void CsvWriter::write_packet(const DecodedPacket& p) {
@@ -1534,7 +1567,9 @@ void CsvWriter::write_packet(const DecodedPacket& p) {
          << csv_escape(dst_port_service) << ',' << csv_escape(p.protocol) << ','
          << csv_escape(p.summary) << ',' << csv_escape(notes.str()) << ','
          << ((show_vlan_ && p.has_vlan_tag) ? std::to_string(p.vlan_id) : "") << ','
-         << csv_escape(time_.format(p.timestamp)) << "\n";
+         << csv_escape(time_.format(p.timestamp)) << ','
+         << (p.has_direction ? direction_source_name(p.direction_source) : "") << ','
+         << (p.has_direction ? csv_escape(p.direction_client_is_src ? p.src_ip : p.dst_ip) : "") << "\n";
 }
 
 void StatsWriter::write_packet(const DecodedPacket& p) {

@@ -62,6 +62,30 @@ bool src_is_client_by_port(uint16_t src_port, uint16_t dst_port, bool is_tcp) {
     return src_port > dst_port;
 }
 
+// Authority ranking for DirectionSource, lowest (most authoritative) first -- Handshake, then
+// Content, then PortHeuristic. Used only to merge an InventoryEdge's own direction_source across
+// however many distinct TCP sessions (or, for BACnet, individual packets) contribute to it: unlike
+// PolicyEngine's FlowReport (one 4-tuple, one FlowState, one direction decision that only ever
+// upgrades toward Handshake), one InventoryEdge deliberately aggregates every session between the
+// same client/server pair (see InventoryEdge's own comment) -- e.g. a client that reconnects with a
+// new ephemeral port mid-capture may have its first session's direction settled by a captured
+// SYN/SYN-ACK and a later reconnect's direction only ever settled by the port-heuristic fallback
+// (its own handshake never captured). Keeping the most authoritative tier ever observed across all
+// of them, never downgrading once a stronger one is seen, mirrors FlowState's own "never downgrade"
+// upgrade rule at the per-edge level. Handshake and Content never actually compete for the same
+// edge in this codebase today (Content only ever arises for BACnet, which is UDP-only and so never
+// shares an edge with a Handshake-eligible TCP session), but the full three-way ranking is kept
+// here rather than a two-way PortHeuristic/other check, matching DirectionSource's own "in order of
+// authority" definition (decoder.hpp) exactly rather than only the cases that happen to matter yet.
+int direction_source_rank(DirectionSource s) {
+    switch (s) {
+        case DirectionSource::Handshake: return 0;
+        case DirectionSource::Content: return 1;
+        case DirectionSource::PortHeuristic: return 2;
+    }
+    return 2;
+}
+
 // A deliberately pragmatic, NOT subnet-mask-aware heuristic for "this address is not a real device
 // to inventory, it's a broadcast/multicast destination" -- see AssetInventoryEngine::observe's own
 // doc comment (asset_inventory.hpp) for why this matters (BACnet's Who-Is/I-Am discovery traffic is
@@ -195,6 +219,7 @@ void AssetInventoryEngine::observe(const DecodedPacket& dp) {
 
     std::string client_ip, server_ip;
     uint16_t server_port = 0;
+    DirectionSource direction_source = DirectionSource::PortHeuristic;
 
     if (dp.has_tcp) {
         std::string skey = tcp_session_key(dp.src_ip, dp.src_port, dp.dst_ip, dp.dst_port);
@@ -208,11 +233,14 @@ void AssetInventoryEngine::observe(const DecodedPacket& dp) {
             if (is_syn) {
                 src_is_client = true;
                 st.initiator_known = true;
+                st.direction_source = DirectionSource::Handshake;
             } else if (is_syn_ack) {
                 src_is_client = false;
                 st.initiator_known = true;
+                st.direction_source = DirectionSource::Handshake;
             } else {
                 src_is_client = src_is_client_by_port(dp.src_port, dp.dst_port, /*is_tcp=*/true);
+                st.direction_source = DirectionSource::PortHeuristic;
             }
             st.client_ip = src_is_client ? dp.src_ip : dp.dst_ip;
             st.server_ip = src_is_client ? dp.dst_ip : dp.src_ip;
@@ -224,18 +252,22 @@ void AssetInventoryEngine::observe(const DecodedPacket& dp) {
             it->second.server_ip = src_is_client ? dp.dst_ip : dp.src_ip;
             it->second.server_port = src_is_client ? dp.dst_port : dp.src_port;
             it->second.initiator_known = true;
+            it->second.direction_source = DirectionSource::Handshake;
         }
         client_ip = it->second.client_ip;
         server_ip = it->second.server_ip;
         server_port = it->second.server_port;
+        direction_source = it->second.direction_source;
     } else {
         // UDP: no session, no handshake -- see observe()'s own doc comment (asset_inventory.hpp)
         // for the full per-protocol reasoning.
         bool src_is_client;
         if (protocol == "bacnet" && dp.bacnet_has_apdu && !dp.bacnet_apdu_type.empty()) {
             src_is_client = dp.bacnet_apdu_type == "Confirmed-Request" || dp.bacnet_apdu_type == "Unconfirmed-Request";
+            direction_source = DirectionSource::Content;
         } else {
             src_is_client = src_is_client_by_port(dp.src_port, dp.dst_port, /*is_tcp=*/false);
+            direction_source = DirectionSource::PortHeuristic;
         }
         client_ip = src_is_client ? dp.src_ip : dp.dst_ip;
         server_ip = src_is_client ? dp.dst_ip : dp.src_ip;
@@ -289,8 +321,15 @@ void AssetInventoryEngine::observe(const DecodedPacket& dp) {
         es.server_ip = server_ip;
         es.protocol = protocol;
         es.server_port = server_port;
+        es.direction_source = direction_source;
         edge_order_.push_back(ekey);
         eit = edges_.emplace(ekey, std::move(es)).first;
+    } else if (direction_source_rank(direction_source) < direction_source_rank(eit->second.direction_source)) {
+        // A more authoritative tier than whatever this edge was already tagged with -- e.g. an
+        // earlier-contributing session's handshake was never captured (port-heuristic only), but
+        // this packet's own session did capture one. See direction_source_rank's own comment above
+        // for why this never downgrades.
+        eit->second.direction_source = direction_source;
     }
     ++eit->second.packet_count;
     if (!function_name.empty()) eit->second.functions.insert(function_name);
@@ -338,6 +377,7 @@ AssetInventoryReport AssetInventoryEngine::finish() const {
         ie.observed_functions.assign(es.functions.begin(), es.functions.end());
         std::sort(ie.observed_functions.begin(), ie.observed_functions.end());
         ie.packet_count = es.packet_count;
+        ie.direction_source = es.direction_source;
         report.edges.push_back(std::move(ie));
     }
 
@@ -469,7 +509,8 @@ void write_inventory_report_text(std::ostream& out, const AssetInventoryReport& 
         if (auto s = resolver.service_name(e.server_port, "tcp")) out << " (" << *s << ")";
         out << "  " << e.protocol;
         if (!e.observed_functions.empty()) out << "  [" << protocol_list_text(e.observed_functions) << "]";
-        out << "  (" << e.packet_count << " packet(s))\n";
+        out << "  (" << e.packet_count << " packet(s), direction: " << direction_source_name(e.direction_source)
+            << ")\n";
     }
     out << "\n";
 
@@ -546,7 +587,15 @@ void write_inventory_report_json(std::ostream& out, const AssetInventoryReport& 
             out << "\"" << json_escape(e.observed_functions[j]) << "\"";
         }
         out << "],\n";
-        out << "      \"packet_count\": " << e.packet_count << "\n";
+        out << "      \"packet_count\": " << e.packet_count << ",\n";
+        // How client_ip/server_ip above were decided -- "handshake"/"content"/"port-heuristic", see
+        // DirectionSource's own comment (decoder.hpp) and docs/MANUAL.md's ROADMAP item 19.
+        // Appended last, after every pre-existing field (packet_count was the prior last field), so
+        // no established JSON-shape test anchored on an earlier field's position needs to change --
+        // see CMakeLists.txt's inventory_json_report_shape and
+        // inventory_json_bacnet_edge_has_no_server_port_service tests in particular, both of which
+        // only match fields up through packet_count's predecessors.
+        out << "      \"direction_source\": \"" << direction_source_name(e.direction_source) << "\"\n";
         out << "    }" << (i + 1 < report.edges.size() ? "," : "") << "\n";
     }
     out << "  ],\n";

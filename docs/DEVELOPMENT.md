@@ -988,13 +988,6 @@ serial-to-IP DNP3 gateway multiplexing several outstations behind one IP
 is a routine real-world topology this tool currently can't zone/
 conduit-model at all.
 
-**Item 19's `direction_source` field** is fully designed (three tiers,
-field name, industry precedent researched and cited) but not yet
-implemented across `decode`/`policy validate`/`inventory` -- unlike the
-"protocol-specific deepening" items below, this one is cross-cutting (touches
-all three commands' output schemas at once) and worth doing as its own
-focused pass rather than folded into unrelated work.
-
 **Everything else is protocol-specific deepening, lower urgency**: item
 2's `0xB2` symbolic-addressing confirmation (blocked on access to real
 PLC/TIA Portal authority, not on effort); item 3's S7comm-Plus Tier 2
@@ -2345,11 +2338,12 @@ and locating/verifying EIGRP's and OSPF's own authentication digests (same
 gap as RIP's Keyed MD5) -- see docs/USER_GUIDE.md's LIMITATIONS for both. **BGP is the next
 routing protocol planned** -- it will need TCP port-179 stream reassembly,
 unlike any of the eight routing/redundancy protocols decoded so far.
-19. **Label *how* a flow's client/server direction was determined -- not
-    just what it is -- across `decode`, `policy validate`, and `inventory`.**
-    Every direction call this codebase makes already falls into one of three
-    tiers, but only the code path that made the call knows which one fired;
-    the output itself doesn't say. Worth naming precisely, since
+19. ~~**Label *how* a flow's client/server direction was determined -- not
+    just what it is -- across `decode`, `policy validate`, and `inventory`.**~~
+    **Done.** Every direction call this codebase makes already fell into one
+    of three tiers before this item; only the code path that made the call
+    knew which one fired, and the output itself didn't say. Worth naming
+    precisely, since
     "approximately" (as used informally in docs/USER_GUIDE.md's LIMITATIONS)
     has one specific meaning here: *not backed by an observed TCP
     handshake*, nothing vaguer. The three tiers, in order of authority:
@@ -2403,31 +2397,43 @@ unlike any of the eight routing/redundancy protocols decoded so far.
     Given that, the field name and value set settled on: `direction_source`,
     with the exact values `handshake` / `content` / `port-heuristic` above
     -- mechanism-based, not confidence-based, since every flow's tier is a
-    fact about which code path fired, not a probability estimate. Scoped to
-    all three surfaces that already make a client/server call: `decode`'s
-    per-packet output (needs a new, small tracking layer of its own --
-    `Decoder`/`DecodedPacket` today carry no cross-packet direction state at
-    all, by design, see `decoder.hpp`'s own "NOTE ON STATEFULNESS" comment;
-    this would be built as a separate class on top of already-public
-    `DecodedPacket` output, the same "doesn't change how packets are
-    decoded" boundary `PolicyEngine`'s own file header already describes for
-    itself), `policy validate`'s `FlowReport` (`PolicyEngine::FlowState`
-    already carries the exact SYN/SYN-ACK/port-heuristic branching needed --
-    just needs the tier threaded through as a field), and `inventory`'s
-    `InventoryEdge` (`AssetInventoryEngine::EdgeState`, the same shape, plus
-    the BACnet content-based branch). Not yet implemented -- this item
-    records the design and its sourcing, not the code.
+    fact about which code path fired, not a probability estimate. Now
+    implemented on all three surfaces that already make a client/server
+    call: `decode`'s per-packet output, via a new, small tracking layer of
+    its own -- `FlowDirectionTracker` (`flow_direction.hpp`/`.cpp`),
+    invoked from `cli_main.cpp`'s `run_decode` loop right after
+    `Decoder::decode()` returns, filling in `DecodedPacket`'s new
+    `has_direction`/`direction_client_is_src`/`direction_source` fields in
+    place (`Decoder`/`DecodedPacket` themselves still carry no cross-packet
+    direction state of their own, by design -- see `decoder.hpp`'s own
+    "NOTE ON STATEFULNESS" comment -- this stays a separate class on top of
+    already-public `DecodedPacket` output, the same "doesn't change how
+    packets are decoded" boundary `PolicyEngine`'s own file header already
+    describes for itself); `policy validate`'s `FlowReport`
+    (`PolicyEngine::FlowState` already carried the exact SYN/SYN-ACK/
+    port-heuristic branching needed -- just had the tier threaded through as
+    a field); and `inventory`'s `InventoryEdge` (`AssetInventoryEngine::
+    EdgeState`, the same shape, plus the BACnet content-based branch, merged
+    across however many sessions/packets one coarser `InventoryEdge`
+    aggregates by always keeping the most-authoritative tier ever observed
+    -- see `direction_source_rank`'s own comment in `asset_inventory.cpp`).
+    All three are documented in docs/USER_GUIDE.md's own OUTPUT FORMATS/JSON
+    report schema sections and worked examples, and covered by CMakeLists.txt's
+    own `direction_source`-prefixed test block (one handshake case, one
+    port-heuristic case, and inventory's BACnet content case, per surface).
 
-    *Why two copies, not one shared implementation*: `PolicyEngine` and
-    `AssetInventoryEngine` each already maintain their own independent
+    *Why two copies, not one shared implementation* (now three): `PolicyEngine`
+    and `AssetInventoryEngine` each already maintained their own independent
     SYN/SYN-ACK-plus-port-heuristic direction logic (`policy_engine.cpp`'s
     `is_known_service_port`/`src_is_client_by_port` vs. `asset_inventory.
     cpp`'s `is_known_target_port`/`src_is_client_by_port`) rather than
     sharing one implementation -- consistent with each engine's own stated
     design of staying a self-contained layer built on top of `Decoder`'s
     already-public output, never reaching into or depending on the other
-    engine. The new `decode`-side tracking layer would follow the same
-    convention: a third, independent copy, not a shared one.
+    engine. `FlowDirectionTracker` follows the same convention: its own
+    `session_key`/`is_known_service_port`/`src_is_client_by_port` in
+    `flow_direction.cpp` are a third, independent copy, not calls into
+    either engine's own.
 
 ### Protocols not covered at all
 

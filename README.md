@@ -1,5 +1,9 @@
 # conduitscope
 
+<p align="center">
+  <img src="assets/logo.jpg" alt="conduitscope logo: an amber warning-sign triangle with a shark whose eyes fire laser beams" width="220">
+</p>
+
 `conduitscope` decodes Modbus/TCP, DNP3, IEC 60870-5-104, S7comm/COTP (Siemens S7 PLC
 protocol) and S7comm-Plus (Siemens TIA Portal / S7-1200/1500's newer protocol),
 EtherNet/IP (CIP explicit and implicit messaging), PROFINET RT (DCP device

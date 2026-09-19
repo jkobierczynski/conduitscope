@@ -76,6 +76,14 @@ struct FlowReport {
     std::string matched_conduit;  // set (non-empty) only when verdict == Allowed
     std::string reason;           // set (non-empty) when verdict != Allowed: why, for the report
 
+    // Which tier decided client_ip/server_ip above -- see DirectionSource's own comment
+    // (decoder.hpp) for the full three-tier definition and docs/MANUAL.md's ROADMAP item 19 for
+    // the design record. Set from PolicyEngine::observe's own SYN/SYN-ACK/port-heuristic branching
+    // (this flow's protocols are always TCP-based here, so Content never occurs in a FlowReport --
+    // BACnet, the only Content case in this codebase, is UDP-only and never reaches PolicyEngine at
+    // all, see observe()'s own comment).
+    DirectionSource direction_source = DirectionSource::PortHeuristic;
+
     // client_mac/server_mac: the same Ethernet source addressing decode's own DecodedPacket::
     // src_mac/dst_mac carries, attributed to whichever side PolicyEngine decided is the client/
     // server (see PolicyEngine::observe's doc comment) -- has_mac is false, and both strings stay
@@ -185,6 +193,13 @@ public:
     // LATER packet on the same flow that does carry a SYN/SYN-ACK still upgrades the flow's
     // client/server assignment to the authoritative answer -- (3) is a first-packet fallback, not
     // a decision this engine sticks with once it can do better.
+    //
+    // FlowState::direction_source (and FlowReport::direction_source in the final report) records
+    // which of the three steps above actually decided it: DirectionSource::Handshake for (1)/(2),
+    // DirectionSource::PortHeuristic for (3) -- upgraded to Handshake too, the moment a later
+    // SYN/SYN-ACK is seen, exactly when client_ip/server_ip themselves are upgraded. See
+    // DirectionSource's own comment (decoder.hpp) for the full three-tier definition shared with
+    // `decode` and `inventory`, and docs/MANUAL.md's ROADMAP item 19 for the design record.
     void observe(const DecodedPacket& packet);
 
     // Produces the final report from everything observed so far. Safe to call more than once (e.g.
@@ -201,6 +216,10 @@ private:
         // FlowReport::observed_functions' comment for exactly which DecodedPacket field feeds this
         // per protocol.
         std::unordered_set<std::string> functions;
+        // See FlowReport::direction_source's own comment -- mirrored here verbatim, set/refreshed
+        // exactly where client_ip/server_ip are (both the initial-packet guess and the later-SYN
+        // upgrade, see PolicyEngine::observe).
+        DirectionSource direction_source = DirectionSource::PortHeuristic;
         size_t packet_count = 0;
         // See FlowReport::has_mac/client_mac/server_mac's own comment -- mirrored here verbatim,
         // set/refreshed exactly where client_ip/server_ip are (both the initial-packet guess and the

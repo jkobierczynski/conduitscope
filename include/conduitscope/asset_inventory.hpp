@@ -120,6 +120,12 @@ struct InventoryEdge {
     // feature's five protocols.
     std::vector<std::string> observed_functions;
     size_t packet_count = 0;
+    // Which tier decided client_ip/server_ip above, the most authoritative ever observed across
+    // every session (or, for BACnet, packet) this edge aggregates -- see DirectionSource's own
+    // comment (decoder.hpp), docs/MANUAL.md's ROADMAP item 19, and direction_source_rank's own
+    // comment (asset_inventory.cpp) for exactly how "most authoritative" is decided when more than
+    // one contributes.
+    DirectionSource direction_source = DirectionSource::PortHeuristic;
 };
 
 // One inferred zone: every observed asset IP that falls in the same `network` (a
@@ -217,6 +223,14 @@ public:
     //     specifically, since it can't actually distinguish anything when both ports are 47808; see
     //     docs/MANUAL.md's LIMITATIONS for this honestly-documented gap.
     //
+    // Each edge's own InventoryEdge::direction_source records which of the above tiers
+    // (DirectionSource::Handshake for a captured SYN/SYN-ACK, ::Content for BACnet's APDU-type
+    // determination, ::PortHeuristic for the known-port/lower-port-number fallback) actually
+    // produced its client_ip/server_ip -- the most authoritative one ever observed across every
+    // session/packet the edge aggregates, never downgraded once a stronger one is seen. See
+    // DirectionSource's own comment (decoder.hpp) and docs/MANUAL.md's ROADMAP item 19 for the full
+    // three-tier design record shared with `decode` and `policy validate`.
+    //
     // A destination address that looks like an IPv4 broadcast or multicast address (see
     // looks_like_broadcast_or_multicast in asset_inventory.cpp) is never turned into an asset or an
     // edge's server_ip -- BACnet's Who-Is/I-Am discovery traffic in particular is routinely
@@ -244,6 +258,8 @@ private:
         uint16_t server_port = 0;
         std::unordered_set<std::string> functions;
         size_t packet_count = 0;
+        // See InventoryEdge::direction_source's own comment -- mirrored here verbatim.
+        DirectionSource direction_source = DirectionSource::PortHeuristic;
     };
 
     // TCP-session-level state, exactly mirroring PolicyEngine::FlowState's client/server-only
@@ -253,6 +269,9 @@ private:
         std::string client_ip, server_ip;
         uint16_t server_port = 0;
         bool initiator_known = false;
+        // See InventoryEdge::direction_source's own comment -- this session's own tier, before
+        // whatever merging observe() does across sessions when folding into EdgeState.
+        DirectionSource direction_source = DirectionSource::PortHeuristic;
     };
 
     void update_asset(const std::string& ip, const DecodedPacket& dp, const std::string& protocol,

@@ -239,6 +239,36 @@ struct DecodeOptions {
     bool strict = false;
 };
 
+// How a TCP flow's client (initiator) vs. server side was determined -- shared by `decode`'s own
+// per-packet direction tracking (FlowDirectionTracker, see flow_direction.hpp), PolicyEngine's
+// FlowReport (policy_engine.hpp), and AssetInventoryEngine's InventoryEdge (asset_inventory.hpp).
+// Each of those three keeps its own independent direction-determination logic (deliberately not
+// shared -- see docs/MANUAL.md's ROADMAP item 19, "Why two copies, not one shared implementation",
+// which the same reasoning now also covers for a third, decode-side copy), but all three report
+// which of these tiers produced their answer using this one shared enum/name pair. "Approximately"
+// (as used informally in docs/MANUAL.md's LIMITATIONS) means exactly one specific thing throughout
+// this codebase: PortHeuristic below, not backed by an observed TCP handshake -- nothing vaguer.
+// See docs/MANUAL.md's ROADMAP item 19 for the full three-tier design record and the industry
+// precedent (Zeek/Suricata/Wireshark) researched before settling on these three values.
+enum class DirectionSource {
+    Handshake,      // a SYN and a matching SYN-ACK were both observed for this TCP flow (on any
+                    // packet, not just the first) -- the only tier this project calls unambiguous:
+                    // TCP's own three-way handshake is authoritative by construction, the initiator
+                    // is whoever sent the SYN.
+    Content,        // no handshake was observed (or the protocol has none at all, e.g. UDP), but the
+                    // protocol's own application-layer semantics settle it without guessing -- e.g.
+                    // BACnet's Confirmed-Request/Unconfirmed-Request source is definitionally the
+                    // client, since BACnet client and server both conventionally listen on the same
+                    // UDP port and the port heuristic below can't even be attempted.
+    PortHeuristic,  // neither of the above: falls back to a known-service-port-then-lower-port-number
+                    // guess that CAN be wrong -- the only tier that is ever actually a guess, not a
+                    // determination.
+};
+
+// Renders a DirectionSource as the exact lowercase, hyphenated string used in every text/JSON/CSV
+// report this codebase produces for it: "handshake" / "content" / "port-heuristic".
+const char* direction_source_name(DirectionSource source);
+
 struct DecodedPacket {
     size_t index = 0;           // 1-based position in the capture file
     double timestamp = 0.0;     // seconds since the Unix epoch, from the pcap record header
@@ -1210,6 +1240,26 @@ struct DecodedPacket {
     bool ospf_ls_update_lsas_truncated = false;
     std::vector<std::string> ospf_ls_ack_headers;     // LS Ack only. Capped at 50.
     bool ospf_ls_ack_headers_truncated = false;
+
+    // Appended last, after every other field above, so this addition never shifts the position of
+    // any existing one -- the same append-only discipline this struct's own writers already follow
+    // for src_mac_vendor/vlan_id/time (see output.cpp's own comments). Set only by
+    // FlowDirectionTracker::observe (flow_direction.hpp), called from cli_main.cpp's run_decode
+    // loop right after Decoder::decode() returns -- Decoder/decode() itself has no knowledge of
+    // this, the same "separate layer on top of already-public output" boundary PolicyEngine
+    // (policy_engine.hpp) and AssetInventoryEngine (asset_inventory.hpp) each already keep for
+    // themselves (FlowDirectionTracker is `decode`'s own third, independent copy of the same
+    // per-TCP-flow direction logic -- see docs/MANUAL.md's ROADMAP item 19). has_direction is true
+    // only for a has_tcp packet (FlowDirectionTracker's scope matches PolicyEngine::observe's own:
+    // TCP flows only, so direction_source here is always Handshake or PortHeuristic, never Content
+    // -- content-based direction, i.e. BACnet, is UDP-only and stays out of `decode`'s own per-
+    // packet direction tracking, unlike `inventory`'s InventoryEdge). direction_client_is_src is
+    // which side of THIS packet (src, not dst) FlowDirectionTracker's per-flow tracking currently
+    // believes is the client (initiator); direction_source is which tier decided it -- see
+    // DirectionSource's own comment above for the full three-tier definition.
+    bool has_direction = false;
+    bool direction_client_is_src = false;  // meaningful only when has_direction
+    DirectionSource direction_source = DirectionSource::PortHeuristic;  // meaningful only when has_direction
 };
 
 // Cross-packet DNP3 fragment-reassembly state for one directional TCP flow (src ip:port -> dst

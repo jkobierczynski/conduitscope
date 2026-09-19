@@ -28,6 +28,7 @@
 #include "conduitscope/asset_inventory.hpp"
 #include "conduitscope/byteio.hpp"
 #include "conduitscope/decoder.hpp"
+#include "conduitscope/flow_direction.hpp"
 #include "conduitscope/live_capture.hpp"
 #include "conduitscope/output.hpp"
 #include "conduitscope/pcap_reader.hpp"
@@ -333,11 +334,20 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
             writer->begin();
         }
 
+        // Separate layer on top of Decoder's already-public output (see flow_direction.hpp's own
+        // file header) -- fills in each TCP packet's has_direction/direction_client_is_src/
+        // direction_source fields (decoder.hpp) in place, right after decode() and before the
+        // packet reaches any writer, mirroring how PolicyEngine/AssetInventoryEngine each track
+        // direction for `policy validate`/`inventory`. One instance per `decode` invocation, fed in
+        // strict capture order, the same discipline `decoder` itself follows.
+        FlowDirectionTracker direction_tracker;
+
         PcapPacket pkt;
         size_t index = 0, decoded_count = 0, warnings = 0;
         while (source.next(pkt)) {
             ++index;
             DecodedPacket dp = decoder.decode(pkt, source.linktype(), index);
+            direction_tracker.observe(dp);
             if (dp.protocol == "parse-error") {
                 ++warnings;
                 if (!quiet) diag << "warning: packet " << index << ": " << dp.summary << "\n";
