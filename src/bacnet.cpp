@@ -276,9 +276,15 @@ std::optional<uint64_t> read_unsigned64(ByteSpan span, size_t offset, uint32_t l
 // first byte actually present (two's complement, per clause 20.2.5).
 std::optional<int64_t> read_signed64(ByteSpan span, size_t offset, uint32_t lvt) {
     if (lvt < 1 || lvt > 8 || offset + lvt > span.size()) return std::nullopt;
-    int64_t v = (span.at(offset) & 0x80) ? -1 : 0;  // sign-extend seed
+    // Do the shifting in uint64_t -- left-shifting a negative signed value (the seed is -1 when the
+    // top bit is set) is undefined behavior, even though the intent here is a well-defined two's-
+    // complement bit shift (found by fuzz_packet_decode; see
+    // fuzz/corpus/packet_decode/regress_bacnet_signed_leftshift.bin). Shifting as uint64_t instead
+    // produces the exact same bit pattern with no UB, then a single cast back to int64_t at the end
+    // reinterprets it as signed.
+    uint64_t v = (span.at(offset) & 0x80) ? ~static_cast<uint64_t>(0) : 0;  // sign-extend seed
     for (uint32_t i = 0; i < lvt; ++i) v = (v << 8) | span.at(offset + i);
-    return v;
+    return static_cast<int64_t>(v);
 }
 
 // Character-set encoding byte (first byte of a Character-String's value, before the string

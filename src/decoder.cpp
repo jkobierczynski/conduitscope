@@ -563,7 +563,12 @@ bool Decoder::reassemble_tcp_payload(const TcpSegment& tcp, const std::string& f
             candidate = ByteSpan(storage.data(), storage.size());
             combined = true;
         } else if (delta < 0) {
-            size_t overlap = static_cast<size_t>(-delta);
+            // Widen to int64_t before negating -- delta == INT32_MIN (-2147483648) has no positive
+            // int32_t representation, so negating it directly is undefined behavior (found by
+            // fuzz_packet_decode; see fuzz/corpus/packet_decode/regress_decoder_int32min_negate.bin).
+            // int64_t has ample room for -delta regardless of delta's sign, so this cast is always
+            // exact and never overflows.
+            size_t overlap = static_cast<size_t>(-static_cast<int64_t>(delta));
             if (overlap >= tcp.payload.size()) {
                 // Entirely already-seen bytes (a full retransmission) -- nothing new to add, and
                 // nothing wrong with what's already buffered either. Ignore it and keep waiting.
