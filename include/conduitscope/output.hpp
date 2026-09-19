@@ -10,6 +10,7 @@
 
 #include "conduitscope/decoder.hpp"
 #include "conduitscope/resolver.hpp"
+#include "conduitscope/time_format.hpp"
 
 namespace conduitscope {
 
@@ -38,10 +39,17 @@ public:
 // `--no-vlan` flag (cli_main.cpp) wires straight into this constructor parameter instead of going
 // through Resolver, the same "pure display toggle" precedent TextWriter's own `color` parameter
 // already set.
+// `time_format`/`time_offset` (default TimeFormat::Epoch/TimeOffset{}, every constructor below)
+// govern how each packet's timestamp is rendered -- see time_format.hpp's file header comment for
+// what each value does. Epoch reproduces today's original raw-seconds-since-epoch rendering
+// byte-for-byte, so a writer constructed without passing these two (or with them left at their
+// defaults) behaves exactly as before `decode`'s own `-t`/--time-format/--time-offset flags
+// (cli_main.cpp) existed at all.
 class TextWriter : public OutputWriter {
 public:
-    explicit TextWriter(std::ostream& out, bool color, const Resolver& resolver, bool show_vlan = true)
-        : out_(out), color_(color), resolver_(resolver), show_vlan_(show_vlan) {}
+    explicit TextWriter(std::ostream& out, bool color, const Resolver& resolver, bool show_vlan = true,
+                         TimeFormat time_format = TimeFormat::Epoch, TimeOffset time_offset = TimeOffset{})
+        : out_(out), color_(color), resolver_(resolver), show_vlan_(show_vlan), time_(time_format, time_offset) {}
     void write_packet(const DecodedPacket& packet) override;
 
 private:
@@ -49,12 +57,14 @@ private:
     bool color_;
     const Resolver& resolver_;
     bool show_vlan_;
+    TimeFormatter time_;
 };
 
 class JsonWriter : public OutputWriter {
 public:
-    explicit JsonWriter(std::ostream& out, const Resolver& resolver, bool show_vlan = true)
-        : out_(out), resolver_(resolver), show_vlan_(show_vlan) {}
+    explicit JsonWriter(std::ostream& out, const Resolver& resolver, bool show_vlan = true,
+                         TimeFormat time_format = TimeFormat::Epoch, TimeOffset time_offset = TimeOffset{})
+        : out_(out), resolver_(resolver), show_vlan_(show_vlan), time_(time_format, time_offset) {}
     void begin() override;
     void write_packet(const DecodedPacket& packet) override;
     void end() override;
@@ -64,12 +74,14 @@ private:
     bool wrote_any_ = false;
     const Resolver& resolver_;
     bool show_vlan_;
+    TimeFormatter time_;
 };
 
 class CsvWriter : public OutputWriter {
 public:
-    explicit CsvWriter(std::ostream& out, const Resolver& resolver, bool show_vlan = true)
-        : out_(out), resolver_(resolver), show_vlan_(show_vlan) {}
+    explicit CsvWriter(std::ostream& out, const Resolver& resolver, bool show_vlan = true,
+                        TimeFormat time_format = TimeFormat::Epoch, TimeOffset time_offset = TimeOffset{})
+        : out_(out), resolver_(resolver), show_vlan_(show_vlan), time_(time_format, time_offset) {}
     void begin() override;
     void write_packet(const DecodedPacket& packet) override;
 
@@ -77,6 +89,7 @@ private:
     std::ostream& out_;
     const Resolver& resolver_;
     bool show_vlan_;
+    TimeFormatter time_;
 };
 
 // Accumulates counts instead of printing per packet; call begin()/write_packet()

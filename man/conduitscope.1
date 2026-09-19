@@ -173,6 +173,22 @@ Write output here instead of stdout.
 .BR \-f ", " \-\-format " " {text,json,csv}
 Output format. Default: text.
 .TP
+.BR \-t ", " \-\-time\-format " " {e,epoch,r,relative,d,delta,a,absolute,ad,absolute\-date}
+How to render each packet's timestamp. Default: e (raw seconds since the
+Unix epoch, unchanged from every prior release). Mirrors tshark's own
+\fB\-t\fR mnemonics rather than tcpdump's stacking \fB\-t\fR/\fB\-tt\fR/
+\fB\-ttt\fR convention. See \fBdocs/USER_GUIDE.md\fR's OUTPUT FORMATS
+"Timestamps" subsection.
+.TP
+.BR \-\-time\-offset " " {utc,local,+HH:MM,\-HH:MM}
+Timezone for \fB\-\-time\-format\fR=absolute/absolute\-date; ignored by
+every other \fB\-\-time\-format\fR value. Default: utc. \fBlocal\fR uses
+this machine's own system timezone; a fixed offset (e.g. \fB+02:00\fR,
+\fB\-0530\fR) reads a capture in the timezone of the site it came from
+regardless of where it's being analyzed \-\- an extension beyond what
+tshark/tcpdump themselves offer. See \fBdocs/USER_GUIDE.md\fR's OUTPUT
+FORMATS "Timestamps" subsection.
+.TP
 .B \-\-protocol {auto,modbus,dnp3,iec104,s7comm,s7comm\-plus,mms,enip,profinet,goose,sv,ethercat,stp,devicenet,bacnet,hartip,opcua,mqtt,ff\-hse,dns,mdns,llmnr,nbns,doh,rip,igmp,vrrp,hsrp,igrp,pim,eigrp,ospf,remote\-access,lateral\-movement,enterprise\-trust,eapol,wireless\-backhaul,pppoe,tunnel\-vpn,mpls}
 Restrict decoding to one protocol. Default: auto (tries all eleven TCP
 protocols, independent of port number, plus CIP I/O, BACnet/IP, HART-IP, and

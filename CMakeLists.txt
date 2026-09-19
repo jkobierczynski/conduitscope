@@ -76,6 +76,7 @@ add_library(conduitscope_core STATIC
   src/mpls.cpp
   src/decoder.cpp
   src/resolver.cpp
+  src/time_format.cpp
   src/output.cpp
   src/yaml_mini.cpp
   src/policy.cpp
@@ -2599,7 +2600,12 @@ set_tests_properties(hartip_cmd21_response_long_address_decoded PROPERTIES
 add_test(NAME hartip_cmd1_request_and_response_decoded
   COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap")
 set_tests_properties(hartip_cmd1_request_and_response_decoded PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"hartip_command\": 1,.*\"hartip_command_name\": \"Read Primary Variable\",.*\"notes\": \\[\\]\n *\\},.*\"hartip_values\": \\[\"pv-units=1\", \"pv=72.500000\"\\]")
+  # "notes": [] followed by the closing "}," anchors this as the end of the *first* packet object
+  # (Command 1 request) so the greedy .* that follows can't jump ahead into some later packet's
+  # own "hartip_values" instead -- since -t/--time-format's own `time` field (time_format.hpp) now
+  # renders directly after "notes" (see output.cpp's JsonWriter), that anchor has to match through
+  # it too.
+  PASS_REGULAR_EXPRESSION "\"hartip_command\": 1,.*\"hartip_command_name\": \"Read Primary Variable\",.*\"notes\": \\[\\],\n *\"time\": \"[^\"]*\"\n *\\},.*\"hartip_values\": \\[\"pv-units=1\", \"pv=72.500000\"\\]")
 
 add_test(NAME hartip_cmd2_response_decoded
   COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap")
@@ -2704,12 +2710,16 @@ set_tests_properties(hartip_cmd33_response_decoded PROPERTIES
 add_test(NAME hartip_cmd38_request_and_response_decoded
   COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap")
 set_tests_properties(hartip_cmd38_request_and_response_decoded PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"hartip_command\": 38,.*\"hartip_command_name\": \"Reset Configuration Changed Flag\",.*\"notes\": \\[\\]\n *\\},.*\"hartip_command\": 38,.*\"hartip_command_name\": \"Reset Configuration Changed Flag\",.*\"hartip_response_code\": 0,.*\"hartip_values\": \\[\"configuration-change-counter=42\"\\]")
+  # Same "notes"+closing-brace anchor as hartip_cmd1_request_and_response_decoded above, updated
+  # the same way for the trailing `time` field.
+  PASS_REGULAR_EXPRESSION "\"hartip_command\": 38,.*\"hartip_command_name\": \"Reset Configuration Changed Flag\",.*\"notes\": \\[\\],\n *\"time\": \"[^\"]*\"\n *\\},.*\"hartip_command\": 38,.*\"hartip_command_name\": \"Reset Configuration Changed Flag\",.*\"hartip_response_code\": 0,.*\"hartip_values\": \\[\"configuration-change-counter=42\"\\]")
 
 add_test(NAME hartip_cmd48_minimal_and_extended_decoded
   COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap")
 set_tests_properties(hartip_cmd48_minimal_and_extended_decoded PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"hartip_command\": 48,.*\"hartip_command_name\": \"Read Additional Device Status\",.*\"hartip_values\": \\[\"device-specific-status=000000000000\"\\],.*\"notes\": \\[\\]\n *\\},.*\"device-specific-status=000000000000\", \"extended-device-status=0x00\", \"device-operating-mode=0x01\", \"standardized-status-0=0x00\", \"standardized-status-1=0x00\", \"standardized-status-2=0x00\", \"standardized-status-3=0x00\", \"analog-channel-saturated=0x00\", \"analog-channel-fixed=0x00\"\\]")
+  # Same "notes"+closing-brace anchor as hartip_cmd1_request_and_response_decoded above, updated
+  # the same way for the trailing `time` field.
+  PASS_REGULAR_EXPRESSION "\"hartip_command\": 48,.*\"hartip_command_name\": \"Read Additional Device Status\",.*\"hartip_values\": \\[\"device-specific-status=000000000000\"\\],.*\"notes\": \\[\\],\n *\"time\": \"[^\"]*\"\n *\\},.*\"device-specific-status=000000000000\", \"extended-device-status=0x00\", \"device-operating-mode=0x01\", \"standardized-status-0=0x00\", \"standardized-status-1=0x00\", \"standardized-status-2=0x00\", \"standardized-status-3=0x00\", \"analog-channel-saturated=0x00\", \"analog-channel-fixed=0x00\"\\]")
 
 add_test(NAME hartip_cmd77_response_short_address_embedded_command_decoded
   COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap")
@@ -5349,7 +5359,12 @@ set_tests_properties(no_vlan_suppresses_display_json PROPERTIES
 add_test(NAME no_vlan_suppresses_display_csv
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_vlan_zones.pcap" --format csv --no-vlan)
 set_tests_properties(no_vlan_suppresses_display_csv PROPERTIES
-  PASS_REGULAR_EXPRESSION "profinet,\"Cyclic RT IO data \\(RT_CLASS_1, unicast\\): 8 byte\\(s\\) IO data, cycle_counter=4660 data_status=\\[Primary,Valid,Run,Ok\\] transfer_status=OK\",,\n"
+  # vlan_id (empty, suppressed by --no-vlan) is immediately followed by the trailing `time` column
+  # (see time_format.hpp/output.cpp's `-t`/--time-format/--time-offset) -- epoch's default rendering
+  # reproduces the raw `timestamp` field byte-for-byte, so this pcap's first packet's fixed
+  # 1700020000.000000 stamp is asserted literally here, same "hardcode this sample's known value"
+  # style vlan_id_shown_by_default_csv above already uses for its own trailing column.
+  PASS_REGULAR_EXPRESSION "profinet,\"Cyclic RT IO data \\(RT_CLASS_1, unicast\\): 8 byte\\(s\\) IO data, cycle_counter=4660 data_status=\\[Primary,Valid,Run,Ok\\] transfer_status=OK\",,,1700020000\\.000000\n"
   FAIL_REGULAR_EXPRESSION "transfer_status=OK\",,100")
 
 # --no-oui and --no-vlan are independent toggles -- suppressing one must not affect the other.

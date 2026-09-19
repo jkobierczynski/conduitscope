@@ -347,7 +347,7 @@ void TextWriter::write_packet(const DecodedPacket& p) {
     bool severe = p.protocol == "parse-error" || (p.protocol == "modbus" && p.modbus_is_exception);
 
     std::ostringstream head;
-    head << "#" << p.index << "  " << std::fixed << std::setprecision(6) << p.timestamp << "  "
+    head << "#" << p.index << "  " << time_.format(p.timestamp) << "  "
          << endpoint(p, true, resolver_) << " -> " << endpoint(p, false, resolver_) << "  ";
     if (color_) head << protocol_tag_color(p.protocol);
     head << "[" << p.protocol << "]";
@@ -1464,7 +1464,14 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
         if (i != 0) out_ << ", ";
         out_ << "\"" << json_escape(p.notes[i]) << "\"";
     }
-    out_ << "]\n";
+    out_ << "],\n";
+    // Appended last, after every other field -- not next to "timestamp" (the raw epoch double
+    // above, kept exactly as-is for machine parseability) -- specifically so this addition never
+    // shifts the position of any existing field, the same "append-only" discipline src_mac_vendor/
+    // dst_mac_vendor/etc. already follow here (see this class's own file header comment) for the
+    // same reason: several tests match fields by exact adjacency. --time-format/--time-offset
+    // (cli_main.cpp) control how this is rendered; see time_format.hpp.
+    out_ << "    \"time\": \"" << json_escape(time_.format(p.timestamp)) << "\"\n";
     out_ << "  }";
 }
 
@@ -1479,9 +1486,14 @@ void CsvWriter::begin() {
     // immediately follow dst_mac). Empty both when the packet carries no VLAN tag and when
     // --no-vlan suppresses display -- CSV has no null, and this column's header always exists
     // regardless of the flag, so the row shape never changes based on it.
+    // "time" is appended last, after vlan_id -- not next to "timestamp" (the raw epoch value,
+    // kept exactly as-is for machine parseability) -- so this new column never shifts the
+    // position of any existing one; see this file's src_mac_vendor/dst_mac_vendor comment just
+    // above for the same "append-only" discipline and why it matters here. --time-format/
+    // --time-offset (cli_main.cpp) control how it's rendered; see time_format.hpp.
     out_ << "index,timestamp,src_mac,dst_mac,src_mac_vendor,dst_mac_vendor,src_ip,src_hostname,"
             "src_port,src_port_service,dst_ip,dst_hostname,dst_port,dst_port_service,protocol,"
-            "summary,notes,vlan_id\n";
+            "summary,notes,vlan_id,time\n";
 }
 
 void CsvWriter::write_packet(const DecodedPacket& p) {
@@ -1521,7 +1533,8 @@ void CsvWriter::write_packet(const DecodedPacket& p) {
          << csv_escape(dst_hostname) << ',' << (has_port ? std::to_string(p.dst_port) : "") << ','
          << csv_escape(dst_port_service) << ',' << csv_escape(p.protocol) << ','
          << csv_escape(p.summary) << ',' << csv_escape(notes.str()) << ','
-         << ((show_vlan_ && p.has_vlan_tag) ? std::to_string(p.vlan_id) : "") << "\n";
+         << ((show_vlan_ && p.has_vlan_tag) ? std::to_string(p.vlan_id) : "") << ','
+         << csv_escape(time_.format(p.timestamp)) << "\n";
 }
 
 void StatsWriter::write_packet(const DecodedPacket& p) {

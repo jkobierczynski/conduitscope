@@ -34,6 +34,7 @@
 #include "conduitscope/policy.hpp"
 #include "conduitscope/policy_engine.hpp"
 #include "conduitscope/resolver.hpp"
+#include "conduitscope/time_format.hpp"
 #include "conduitscope/version.hpp"
 
 namespace {
@@ -189,6 +190,7 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
                 bool no_color, bool force_color,
                 bool oui_enabled, bool resolve_hostnames, const std::string& hosts_path,
                 bool service_names_enabled, const std::string& services_path, bool show_vlan,
+                const std::string& time_format, const std::string& time_offset,
                 std::ostream& diag) {
     std::ofstream file_out;
     std::ostream* out = &std::cout;
@@ -208,6 +210,26 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
     // color is used only when actually writing to an interactive terminal -- never into a file
     // (-o) or a pipe, so ANSI escapes don't end up littering saved/piped output by default.
     bool color = force_color || (!no_color && writing_to_stdout && stdout_is_terminal());
+
+    // Both already validated for a legal *set of values* by CLI11 -- -t/--time-format via
+    // CLI::IsMember, so parse_time_format below can never actually see an unrecognized mnemonic --
+    // but --time-offset's "+HH:MM"/"-HHMM"/bare-hour syntax is open-ended and CLI11 has no
+    // validator for it, so parse_time_offset's std::nullopt is the only place a malformed
+    // --time-offset value is ever caught. Parsed once, up front, before opening the packet source
+    // or resolver -- same "fail fast on bad setup" posture the Resolver construction below already
+    // follows -- so a typo like --time-offset=+25:00 is reported immediately rather than after
+    // capture has already started.
+    std::optional<TimeFormat> parsed_time_format = parse_time_format(time_format);
+    if (!parsed_time_format) {
+        std::cerr << "error: invalid --time-format value '" << time_format << "'\n";
+        return 1;
+    }
+    std::optional<TimeOffset> parsed_time_offset = parse_time_offset(time_offset);
+    if (!parsed_time_offset) {
+        std::cerr << "error: invalid --time-offset value '" << time_offset
+                   << "' (expected 'utc', 'local', or a fixed offset like '+02:00'/'-0530')\n";
+        return 1;
+    }
 
     DecodeOptions options;
     options.strict = strict;
@@ -298,9 +320,16 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
         std::unique_ptr<OutputWriter> writer;
         StatsWriter stats_writer;
         if (!stats) {
-            if (format == "json") writer = std::make_unique<JsonWriter>(*out, resolver, show_vlan);
-            else if (format == "csv") writer = std::make_unique<CsvWriter>(*out, resolver, show_vlan);
-            else writer = std::make_unique<TextWriter>(*out, color, resolver, show_vlan);
+            if (format == "json") {
+                writer = std::make_unique<JsonWriter>(*out, resolver, show_vlan, *parsed_time_format,
+                                                        *parsed_time_offset);
+            } else if (format == "csv") {
+                writer = std::make_unique<CsvWriter>(*out, resolver, show_vlan, *parsed_time_format,
+                                                       *parsed_time_offset);
+            } else {
+                writer = std::make_unique<TextWriter>(*out, color, resolver, show_vlan, *parsed_time_format,
+                                                        *parsed_time_offset);
+            }
             writer->begin();
         }
 
@@ -651,6 +680,7 @@ int main(int argc, char** argv) {
     bool decode_stats = false, decode_strict = false;
     bool decode_oui = true, decode_resolve = false, decode_service_names = true;
     bool decode_show_vlan = true;
+    std::string decode_time_format = "e", decode_time_offset = "utc";
     std::string decode_hosts_file, decode_services_file;
 
     auto* decode_input_opt =
@@ -680,6 +710,26 @@ int main(int argc, char** argv) {
     decode_cmd->add_option("-o,--output", decode_output, "Write output here instead of stdout");
     decode_cmd->add_option("-f,--format", decode_format, "Output format: text, json, or csv")
         ->transform(CLI::IsMember({"text", "json", "csv"}))
+        ->capture_default_str();
+    decode_cmd
+        ->add_option("-t,--time-format", decode_time_format,
+                      "How to render each packet's timestamp -- mirrors tshark's own -t mnemonics: "
+                      "e/epoch (raw seconds since the Unix epoch, the default), r/relative (elapsed "
+                      "since the first packet), d/delta (elapsed since the previous packet), "
+                      "a/absolute (HH:MM:SS.ffffff), ad/absolute-date (YYYY-MM-DD HH:MM:SS.ffffff) "
+                      "-- see --time-offset for absolute/absolute-date's timezone, and docs/"
+                      "MANUAL.md's OUTPUT FORMATS section")
+        ->transform(CLI::IsMember({"e", "epoch", "r", "relative", "d", "delta", "a", "absolute", "ad",
+                                    "absolute-date"}))
+        ->capture_default_str();
+    decode_cmd
+        ->add_option("--time-offset", decode_time_offset,
+                      "Timezone for --time-format=absolute/absolute-date: \"utc\" (the default), "
+                      "\"local\" (this machine's own system timezone), or a fixed \"+HH:MM\"/\"-HH:MM\" "
+                      "offset -- e.g. to read a capture in the timezone of the site it came from "
+                      "regardless of where you're analyzing it; neither tshark nor tcpdump offers this "
+                      "beyond UTC-vs-local, so this is conduitscope's own extension -- ignored by every "
+                      "other --time-format value")
         ->capture_default_str();
     decode_cmd
         ->add_option("--protocol", decode_protocol,
@@ -1052,7 +1102,8 @@ int main(int argc, char** argv) {
                            decode_wireless_backhaul_ports, decode_tunnel_vpn_ports,
                            decode_max_packets, decode_stats, decode_strict,
                            quiet, no_color, force_color, decode_oui, decode_resolve, decode_hosts_file,
-                           decode_service_names, decode_services_file, decode_show_vlan, *diag);
+                           decode_service_names, decode_services_file, decode_show_vlan,
+                           decode_time_format, decode_time_offset, *diag);
     }
     if (info_cmd->parsed()) {
         return run_info(info_input, std::cout);

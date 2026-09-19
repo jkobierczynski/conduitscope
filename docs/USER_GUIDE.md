@@ -191,6 +191,8 @@ conduitscope decode (-r FILE | -i INTERFACE) [options]
 | `--no-promiscuous` | off (i.e. promiscuous by default) | With `-i`, don't put the interface into promiscuous mode. Promiscuous is the default because the main live-capture use case -- watching a mirrored/SPAN switch port for zone/conduit traffic -- needs to see traffic that isn't addressed to the capturing host at all. |
 | `-o, --output FILE` | stdout | Write decoded output here instead of stdout. |
 | `-f, --format {text,json,csv}` | `text` | Output format. See OUTPUT FORMATS below. |
+| `-t, --time-format {e,epoch,r,relative,d,delta,a,absolute,ad,absolute-date}` | `e` | How to render each packet's timestamp. Mirrors tshark's own `-t` mnemonics rather than tcpdump's stacking `-t`/`-tt`/`-ttt` convention. See OUTPUT FORMATS' "Timestamps" subsection below. |
+| `--time-offset {utc,local,+HH:MM,-HH:MM}` | `utc` | Timezone used to render `--time-format=absolute`/`absolute-date`; ignored by every other `--time-format` value. See OUTPUT FORMATS' "Timestamps" subsection below. |
 | `--protocol NAME` | `auto` | Restrict decoding to one protocol. See docs/PROTOCOL_COVERAGE.md below for the full, current list of valid protocol names (one per subsection there). `auto` opportunistically tries OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, S7comm/COTP, S7comm-Plus, MMS, HART-IP, MQTT, and FF-HSE detection on every TCP payload (in that order -- FF-HSE last of all, even after MQTT, see docs/DEVELOPMENT.md's PROTOCOL DETECTION), CIP I/O, BACnet/IP, HART-IP, and FF-HSE detection on every UDP payload (FF-HSE last there too), PROFINET RT (DCP/cyclic) detection on every non-IPv4 Ethernet frame carrying EtherType `0x8892`, GOOSE detection on every non-IPv4 Ethernet frame carrying EtherType `0x88B8`, Sampled Values detection on every non-IPv4 Ethernet frame carrying EtherType `0x88BA`, EtherCAT detection on every non-IPv4 Ethernet frame carrying EtherType `0x88A4`, regardless of port, and Spanning Tree Protocol (STP/RSTP/MSTP) detection on every classic IEEE 802.3 length-framed Ethernet frame whose LLC header is DSAP=SSAP=`0x42` -- a structurally separate dispatch path from every EtherType-keyed protocol above, so there's no ordering/collision question between them (see docs/DEVELOPMENT.md's PROTOCOL DETECTION below). `enip` covers both EtherNet/IP explicit messaging (TCP) and CIP I/O implicit messaging (UDP). `mms` is IEC 61850 MMS (Manufacturing Message Specification, ISO 9506) -- shares S7comm's exact TPKT/COTP transport and TCP port 102, but is a distinct application protocol; see `--s7comm-port` below and docs/PROTOCOL_COVERAGE.md's MMS section. `s7comm-plus` is S7comm-Plus (TIA Portal / S7-1200/1500) -- shares the same TPKT/COTP transport and TCP port 102, disambiguated by its own protocol id byte; see `--s7comm-port` below and docs/PROTOCOL_COVERAGE.md's S7comm-Plus section. `mqtt` is MQTT (v3.1/v3.1.1/v5.0) plus Sparkplug B -- see `--mqtt-port` below and docs/PROTOCOL_COVERAGE.md's MQTT section. `profinet` covers both DCP and cyclic real-time IO. `sv` is IEC 61850-9-2 Sampled Values. `ethercat` is EtherCAT. `bacnet` is BACnet/IP. `hartip` is HART-IP (covers both UDP and TCP). `opcua` is OPC UA Binary (UA-TCP/Secure Conversation, TCP only). `ff-hse` is FOUNDATION Fieldbus HSE (covers FDA/SM/FMS/LAN Redundancy, on both TCP and UDP) -- see `--ffhse-port` below and docs/PROTOCOL_COVERAGE.md's FOUNDATION Fieldbus HSE section. `stp` is Spanning Tree Protocol (STP/RSTP/MSTP) -- no port option, matching GOOSE/SV/EtherCAT/PROFINET's own no-port precedent for a protocol with no port at all; see docs/PROTOCOL_COVERAGE.md's Spanning Tree Protocol section. `devicenet` is DeviceNet (CAN-bus CIP) -- no port option either, the same no-port precedent, but unlike every other value in this list it isn't reached through Ethernet at all: it's gated on the capture's own pcap link type being `LINKTYPE_CAN_SOCKETCAN` (227, standard Linux SocketCAN capture framing -- what `candump -l`/`tcpdump -i can0`/Wireshark itself write capturing a CAN bus), checked before any protocol filter, so `--protocol devicenet` against an ordinary Ethernet-linktype capture simply decodes nothing (every packet still parses at the link layer, just with no application-layer match) rather than erroring; see docs/PROTOCOL_COVERAGE.md's DeviceNet section. `remote-access` covers Tier 1 of the "IT protocols an OT auditor flags" family (RDP/VNC/TeamViewer/AnyDesk/Zoom, each its own `protocol` value even under this one filter name) -- see `--remote-access-port` below and docs/PROTOCOL_COVERAGE.md's "Tier 1 remote-access protocol recognition" section. `lateral-movement` covers Tier 2 of the same family (SMB/SSH/HTTP/HTTPS/SNMPv1v2c/Telnet/FTP/TFTP, again each its own `protocol` value under this one filter name) -- see `--lateral-movement-port` below and docs/PROTOCOL_COVERAGE.md's "Tier 2 lateral-movement protocol recognition" section. `enterprise-trust` covers the six port-based protocols of Tier 3 of the same family (NTP/DHCP/LDAP/LDAPS/RADIUS/TACACS+, again each its own `protocol` value under this one filter name) -- see `--enterprise-trust-port` below and docs/PROTOCOL_COVERAGE.md's "Tier 3 enterprise-trust-boundary protocol recognition" section. `eapol` is Tier 3's seventh protocol, IEEE 802.1X/EAPOL -- EtherType-keyed, no port at all, so it has its own dedicated filter value rather than sharing `enterprise-trust`, the same split GOOSE/SV/EtherCAT/PROFINET's own EtherType-keyed filters already have from every port-based one; no port option exists for it. `wireless-backhaul` covers the five port-based protocols of Tier 4 of the same family (CAPWAP control/data, LWAPP control/data, GTP-U, again each its own `protocol` value under this one filter name) -- see `--wireless-backhaul-port` below and docs/PROTOCOL_COVERAGE.md's "Tier 4 wireless-backhaul-and-cellular protocol recognition" section. `pppoe` is Tier 4's sixth protocol, PPPoE -- EtherType-keyed, no port at all, the same split `eapol` has from `enterprise-trust`; no port option exists for it either. `tunnel-vpn` covers the fourteen port/IP-protocol-number-based protocols of Tier 5 of the same family (GRE/NVGRE/EoIP, ESP, AH, IP-in-IP, 6in4, L2TP, IKE, VXLAN, Geneve, WireGuard, OpenVPN, dtls-tunnel, STT, again each its own `protocol` value under this one filter name) -- see `--tunnel-vpn-port` below and docs/PROTOCOL_COVERAGE.md's "Tier 5 generic tunnel/VPN encapsulation recognition" section. `mpls` is Tier 5's sixteenth protocol, MPLS -- EtherType-keyed, no port at all, the same split `eapol`/`pppoe` have from `enterprise-trust`/`wireless-backhaul`; no port option exists for it either. |
 | `--modbus-port PORT` | *(502 built in)* | Additional TCP port to treat as "expected" for Modbus. Repeatable. Does **not** gate detection -- it only changes whether a decoded Modbus frame is annotated as appearing on an unexpected port, which is itself a useful signal when auditing a conduit. |
 | `--dnp3-port PORT` | *(20000 built in)* | Same as `--modbus-port`, for DNP3. Repeatable. |
@@ -1455,6 +1457,12 @@ for a non-IP frame, or `src_mac`/`dst_mac` for a non-Ethernet-linktype
 capture) are `null`. Intended to be piped into `jq` or read by a future
 policy-evaluation layer.
 
+Every object also carries a trailing `time` field (always a string): with
+`-t`/`--time-format` left at its default, this reproduces `timestamp`'s own
+raw-epoch value as text; any other `-t` value changes only `time`, leaving
+`timestamp` untouched, so an existing `jq` pipeline reading `timestamp`
+never needs to change. See OUTPUT FORMATS' "Timestamps" subsection below.
+
 Over a hundred fields are only present (omitted entirely, not `null`) on
 packets where they apply:
 
@@ -2522,21 +2530,76 @@ The following fields appear only when `protocol` is `mms`:
 ### csv
 
 Header row followed by one row per packet:
-`index,timestamp,src_mac,dst_mac,src_mac_vendor,dst_mac_vendor,src_ip,src_hostname,src_port,src_port_service,dst_ip,dst_hostname,dst_port,dst_port_service,protocol,summary,notes,vlan_id`.
+`index,timestamp,src_mac,dst_mac,src_mac_vendor,dst_mac_vendor,src_ip,src_hostname,src_port,src_port_service,dst_ip,dst_hostname,dst_port,dst_port_service,protocol,summary,notes,vlan_id,time`.
 Fields are quoted per standard CSV rules when they contain a comma, quote, or
 newline; multiple notes are joined with ` | ` inside the single `notes` field.
 `src_mac`/`dst_mac` are empty for a non-Ethernet-linktype capture, exactly
 like `src_ip`/`dst_ip` are empty for a non-IP packet; every
 `*_vendor`/`*_hostname`/`*_service` annotation column is an empty field on a
 lookup miss or when that resolution is disabled (never a placeholder like
-`"unknown"`) -- see "Name resolution" below. `vlan_id` (deliberately the
-trailing column, not next to `src_mac`/`dst_mac` where it's conceptually
-closest, so it never shifts any other column's position) is likewise an
-empty field both for an untagged packet and, regardless of whether the
-packet is tagged, whenever `--no-vlan` disables display -- CSV has no way to
-distinguish "no VLAN tag" from "not shown" the way JSON's `has_vlan_tag`
-can, so the column's header always exists but its value is empty in both
-cases.
+`"unknown"`) -- see "Name resolution" below. `vlan_id` (deliberately not
+next to `src_mac`/`dst_mac` where it's conceptually closest, so it never
+shifts any other column's position) is likewise an empty field both for an
+untagged packet and, regardless of whether the packet is tagged, whenever
+`--no-vlan` disables display -- CSV has no way to distinguish "no VLAN tag"
+from "not shown" the way JSON's `has_vlan_tag` can, so the column's header
+always exists but its value is empty in both cases. `time` is the trailing
+column (`-t`/`--time-format`'s own rendering of the same timestamp
+`timestamp` already carries raw -- see "Timestamps" below), added after
+`vlan_id` rather than next to `timestamp` for the same "never shift an
+existing column" reasoning.
+
+### Timestamps
+
+`decode`'s `-t`/`--time-format` controls how each packet's timestamp is
+rendered, in all three output formats -- mirroring tshark's own `-t
+<mnemonic>` flag rather than tcpdump's stacking `-t`/`-tt`/`-ttt`/`-tttt`/
+`-ttttt` convention, since a single flag with a value fits this tool's
+existing CLI11-based option style better than a run of same-named repeated
+flags:
+
+| Value | Meaning |
+|---|---|
+| `e` / `epoch` (default) | Raw seconds since the Unix epoch, `%s.ffffff` -- byte-for-byte the same rendering `decode` has always used, so leaving `-t` unset changes nothing about existing output or scripts built against it. |
+| `r` / `relative` | Seconds elapsed since the *first* packet in this decode (`0.000000` for that first packet). |
+| `d` / `delta` | Seconds elapsed since the *previous* packet in this decode (`0.000000` for the first packet, since it has no previous one). |
+| `a` / `absolute` | Wall-clock time of day, `HH:MM:SS.ffffff`. |
+| `ad` / `absolute-date` | Wall-clock date and time, `YYYY-MM-DD HH:MM:SS.ffffff`. |
+
+`--time-offset` selects the timezone `absolute`/`absolute-date` render in
+(ignored by every other `-t` value): `utc` (the default) appends a literal
+`Z` suffix; `local` uses this machine's own system timezone and appends no
+suffix at all, deliberately unlabeled, the same way tshark/tcpdump's own
+local-time rendering doesn't print a zone name either, since "the analysis
+machine's local clock" isn't a fixed value worth printing; or a fixed
+`+HH:MM`/`-HH:MM` offset (`+0200`, `-05:30`, and a bare `+2`/`-9` hour count
+are all accepted too), which appends that same signed offset as its suffix
+-- useful for reading a capture in the timezone of the site it came from,
+regardless of where the analysis is actually being run. This offset option
+goes beyond what tshark or tcpdump themselves offer (both are UTC-vs-local
+only); a malformed `--time-offset` value (out-of-range hours/minutes, a
+missing sign, extra characters) is rejected with an error naming the value,
+before the capture is even opened.
+
+In `text` output, the timestamp is simply rendered in whichever format was
+selected, in the same leading position it has always occupied. In `json`,
+selecting anything other than the default `e`/`epoch` does not change the
+existing raw-epoch `timestamp` field -- it adds a second field, `time`
+(always a string, holding whatever `-t` selected), so a `jq` pipeline or any
+other consumer already reading `timestamp` keeps working unmodified. In
+`csv`, the same rendered value is appended as a new trailing `time` column,
+after `vlan_id` -- deliberately last, not next to `timestamp` where it's
+conceptually closest, so it never shifts any other column's position, the
+same reasoning `vlan_id` itself already follows (see the `csv` section
+above).
+
+A `ts` too far in the past or future for this platform's calendar
+representation to compute falls back, for `absolute`/`absolute-date` only,
+to the same raw-epoch rendering `epoch` always produces, suffixed with `(raw
+epoch value -- out of range for calendar display)` -- `decode` never
+fabricates a calendar date it can't actually compute, the same "annotate,
+never invent" posture the OUI/hostname/service-name resolver below already
+follows.
 
 ### Name resolution (OUI / hostname / service name)
 
