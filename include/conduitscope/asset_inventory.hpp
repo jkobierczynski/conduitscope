@@ -5,17 +5,34 @@
 // wire. See the `inventory` subcommand (cli_main.cpp) and docs/MANUAL.md's ROADMAP item 17 for the
 // full rationale and prior art (NSA's abandoned GRASSMARLIN, CISA's much heavier Malcolm).
 //
-// Scope, deliberately narrow for this first pass (ROADMAP item 17 names exactly these five):
-// Modbus, DNP3, S7comm (a COTP-only session with no S7comm payload still counts, same "cotp folds
-// into s7comm" convention PolicyEngine::observe uses -- see AssetInventoryEngine::observe's own
-// comment), EtherNet/IP (both explicit messaging over TCP and CIP I/O implicit messaging over UDP/
-// 2222 -- decoder.cpp promotes both to protocol=="enip", see decoder.hpp), and BACnet/IP. Every
-// other protocol this project decodes (IEC 104, MMS, HART-IP, OPC UA, MQTT, FF-HSE, PROFINET RT,
-// GOOSE, Sampled Values, EtherCAT, STP, DeviceNet, and the whole DNS/routing-protocol family) is
-// simply not counted here -- widening this list is future work (see docs/MANUAL.md's ROADMAP),
-// deliberately deferred so this first pass's deterministic pcap-to-model pipeline stands on its own
-// before anything else (including an LLM-assisted zone-naming suggestion, also explicitly out of
-// scope for this pass) is layered on top.
+// Scope: originally just five protocols (ROADMAP item 17's first pass), widened to match every
+// protocol PolicyEngine::observe itself evaluates over TCP -- ten in total: Modbus, DNP3, S7comm (a
+// COTP-only session with no S7comm payload still counts, same "cotp folds into s7comm" convention
+// PolicyEngine::observe uses -- see AssetInventoryEngine::observe's own comment), EtherNet/IP (both
+// explicit messaging over TCP and CIP I/O implicit messaging over UDP/2222 -- decoder.cpp promotes
+// both to protocol=="enip", see decoder.hpp), BACnet/IP, IEC 104, HART-IP, OPC UA, MMS, MQTT, and
+// FF-HSE.
+//
+// TWO of those ten (HART-IP, FF-HSE) are deliberately narrower here than what decoder.cpp itself can
+// recognize: both protocols can appear over UDP on the wire (HART-IP conventionally; FF-HSE almost
+// always, see ffhse.hpp), but PolicyEngine::observe only ever evaluates has_tcp packets into a
+// FlowReport -- a UDP HART-IP/FF-HSE conduit inferred here could never actually be checked by
+// `policy validate`. Unlike BACnet and CIP I/O (both UDP-only protocols, counted here anyway with an
+// explicit "cannot be exercised" caveat in write_inventory_policy_yaml's generated comment -- see
+// that function's own doc comment below), HART-IP and FF-HSE packets are simply skipped (folded into
+// skipped_packets, same as any other unrecognized packet) unless dp.has_tcp -- see
+// AssetInventoryEngine::observe's own comment for exactly where this guard sits. In practice this
+// means FF-HSE will almost never show up in an inventory report at all (real FF-HSE traffic is
+// UDP), and only genuinely TCP-carried HART-IP traffic will.
+//
+// Every other protocol this project decodes (PROFINET RT, GOOSE, Sampled Values, EtherCAT, STP,
+// DeviceNet, and the whole DNS/routing-protocol family) is still not counted here -- none of those
+// are in PolicyEngine's own ten-protocol IP-flow list either (PROFINET RT/GOOSE/SV/EtherCAT are
+// evaluated by VLAN zone instead, a completely different mechanism this feature doesn't model at
+// all). Widening further, or adding VLAN-zone-style inventory, is future work (see
+// docs/MANUAL.md's ROADMAP), deliberately deferred so this pass's deterministic pcap-to-model
+// pipeline stands on its own before anything else (including an LLM-assisted zone-naming suggestion,
+// also explicitly out of scope for this pass) is layered on top.
 //
 // Pipeline, mirroring PolicyEngine's own three-stage shape (observe per packet, finish() once,
 // render):
@@ -59,7 +76,7 @@ class Resolver;
 constexpr uint8_t kDefaultInventoryZonePrefixLen = 24;
 
 // One asset: a distinct IP address that appeared in at least one packet of one of this feature's
-// five recognized protocols. AssetInventoryEngine::finish sorts these numerically by address for a
+// ten recognized protocols. AssetInventoryEngine::finish sorts these numerically by address for a
 // report that's deterministic independent of capture order.
 struct InventoryAsset {
     std::string ip;
@@ -72,7 +89,10 @@ struct InventoryAsset {
     // simple choice, not an attempt to detect or reconcile such a change.
     bool has_mac = false;
     std::string mac;
-    std::vector<std::string> protocols;  // sorted, distinct: "modbus"/"dnp3"/"s7comm"/"enip"/"bacnet"
+    // sorted, distinct: "modbus"/"dnp3"/"s7comm"/"enip"/"bacnet"/"iec104"/"hartip"/"opcua"/"mms"/
+    // "mqtt"/"ffhse" -- see this file's own header comment for the two (hartip/ffhse) that are
+    // TCP-only here despite also being decodable over UDP.
+    std::vector<std::string> protocols;
     bool ever_client = false;  // acted as the initiator on at least one observed exchange
     bool ever_server = false;  // acted as the responder on at least one observed exchange
     size_t packet_count = 0;   // total packets (either direction) this IP appeared in
@@ -86,13 +106,14 @@ struct InventoryAsset {
 // protocol P at all," not "how many separate sessions did X open to Y," which is the session-level
 // question `policy validate` already answers. See AssetInventoryEngine::observe's own comment for
 // exactly how client/server is decided per protocol: a TCP handshake (SYN/SYN-ACK, falling back to
-// a known-port heuristic, same priority order as PolicyEngine::observe) for the four TCP-based
-// protocols, and, for BACnet specifically, the request/response APDU type -- BACnet's client and
+// a known-port heuristic, same priority order as PolicyEngine::observe) for every TCP-based
+// protocol here (modbus/dnp3/s7comm/enip explicit messaging/iec104/hartip/opcua/mms/mqtt/ffhse), and,
+// for BACnet specifically, the request/response APDU type -- BACnet's client and
 // server both conventionally listen on the SAME port (47808), so the usual "known port vs.
 // ephemeral port" heuristic can't distinguish them at all; see observe()'s own comment.
 struct InventoryEdge {
     std::string client_ip, server_ip;
-    std::string protocol;  // "modbus"/"dnp3"/"s7comm"/"enip"/"bacnet"
+    std::string protocol;  // "modbus"/"dnp3"/"s7comm"/"enip"/"bacnet"/"iec104"/"hartip"/"opcua"/"mms"/"mqtt"/"ffhse"
     uint16_t server_port = 0;
     // Distinct, non-empty function/service names observed on this edge, sorted -- the same source
     // fields FlowReport::observed_functions documents (policy_engine.hpp), restricted to this
@@ -140,8 +161,9 @@ struct AssetInventoryReport {
     // empty and there is no InventoryZone::network to read it from instead.
     uint8_t zone_prefix_len = kDefaultInventoryZonePrefixLen;
     size_t total_packets = 0;
-    // Packets that were not one of the five recognized protocols, or had no IPv4 layer at all --
-    // never part of any asset/edge above. Mirrors PolicyReport::skipped_non_tcp's own role, though
+    // Packets that were not one of the ten recognized protocols, had no IPv4 layer at all, or were
+    // a HART-IP/FF-HSE packet seen over UDP (deliberately excluded -- see this file's own header
+    // comment) -- never part of any asset/edge above. Mirrors PolicyReport::skipped_non_tcp's own role, though
     // the two aren't computed the same way: policy validate only ever looks at TCP; this counts a
     // recognized BACnet/CIP-I/O UDP packet as NOT skipped, unlike PolicyReport::skipped_non_tcp,
     // which would count that same packet as skipped (`policy validate` doesn't evaluate any UDP
@@ -159,19 +181,25 @@ public:
 
     // Folds one already-decoded packet into this engine's asset/edge state. Call once per packet,
     // in capture order (same discipline as Decoder::decode/PolicyEngine::observe). A packet whose
-    // protocol isn't one of this feature's five recognized ones, or that has no IPv4 layer at all,
-    // only increments skipped_packets -- see AssetInventoryReport::skipped_packets' own comment.
+    // protocol isn't one of this feature's ten recognized ones, that has no IPv4 layer at all, or
+    // that is a HART-IP/FF-HSE packet seen over UDP (see this file's own header comment), only
+    // increments skipped_packets -- see AssetInventoryReport::skipped_packets' own comment.
     //
     // Client (initiator) vs. server, per protocol:
-    //   - modbus/dnp3/s7comm (including a COTP-only session)/enip explicit messaging (all TCP):
-    //     exactly PolicyEngine::observe's own priority order -- a pure SYN packet authoritatively
-    //     marks its source as the client, a SYN-ACK authoritatively marks its DESTINATION as the
-    //     client, and otherwise whichever endpoint's port is one of this feature's five known
-    //     protocol ports (502/20000/102/44818/47808) is assumed to be the server, falling back to
-    //     "lower port number is the server" when neither or both are known -- and a later SYN/
-    //     SYN-ACK on the same TCP session still upgrades an earlier port-guess to the authoritative
-    //     answer, the same "(3) is a first-packet fallback, not a decision stuck with once the
-    //     engine can do better" rule PolicyEngine::observe documents.
+    //   - modbus/dnp3/s7comm (including a COTP-only session)/enip explicit messaging/iec104/hartip
+    //     (TCP only)/opcua/mms/mqtt/ffhse (TCP only) -- every TCP-based protocol here: exactly
+    //     PolicyEngine::observe's own priority order -- a pure SYN packet authoritatively marks its
+    //     source as the client, a SYN-ACK authoritatively marks its DESTINATION as the client, and
+    //     otherwise whichever endpoint's port is one of this feature's known protocol ports
+    //     (502/20000/102/44818/2404) is assumed to be the server, falling back to "lower port number
+    //     is the server" when neither or both are known -- and a later SYN/SYN-ACK on the same TCP
+    //     session still upgrades an earlier port-guess to the authoritative answer, the same "(3) is
+    //     a first-packet fallback, not a decision stuck with once the engine can do better" rule
+    //     PolicyEngine::observe documents. Note that HART-IP/OPC UA/MMS/MQTT/FF-HSE's own
+    //     conventional ports (5094/4840/102-shared-with-S7comm/1883/1089-91+3622) are deliberately
+    //     NOT part of the known-port set -- mirroring PolicyEngine::observe's own is_known_service_
+    //     port, which doesn't recognize them either, so this heuristic's answer stays identical
+    //     between the two engines for the same flow.
     //   - enip CIP I/O implicit messaging (UDP/2222): no handshake exists at all for a cyclic
     //     producer/consumer datagram, so every packet is decided independently by the same
     //     known-port heuristic alone (falling back to "lower port is the server" when both or

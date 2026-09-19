@@ -1344,19 +1344,40 @@ anything else on this list.
 17. ~~**Passive OT asset inventory: pcap -> zones and conduits.**~~ A new
     subcommand that runs the opposite direction from `policy validate` --
     instead of checking observed traffic against a hand-written zone/
-    conduit policy, it infers a first-draft one from a capture -- **done**:
-    the `inventory` subcommand (see COMMANDS) identifies Modbus, DNP3,
-    S7comm (including a COTP-only session with no S7comm payload, the same
-    "cotp folds into s7comm" convention `PolicyEngine::observe` uses),
-    EtherNet/IP (both explicit messaging over TCP and CIP I/O implicit
-    messaging over UDP/2222), and BACnet/IP talkers (all already decoded
-    by this project -- see docs/PROTOCOL_COVERAGE.md), builds an asset list (IP/
-    MAC, OUI vendor guess, protocols spoken, client-vs-server role inferred
-    from who initiates -- a TCP handshake for the four TCP-based protocols,
-    the request/response APDU type for BACnet specifically, since its
-    client and server both conventionally listen on the same port 47808
-    and so can't be told apart by the usual known-port-vs-ephemeral-port
-    heuristic) and a communication matrix (`InventoryEdge`: who talks to
+    conduit policy, it infers a first-draft one from a capture -- **done**,
+    and since widened: the `inventory` subcommand (see COMMANDS) originally
+    identified only five protocols (Modbus, DNP3, S7comm, EtherNet/IP,
+    BACnet/IP); it now identifies the same TEN protocols `PolicyEngine::
+    observe` itself evaluates over TCP -- those five plus IEC 104, HART-IP,
+    OPC UA, MMS, and MQTT, and FF-HSE (all already decoded by this project
+    -- see docs/PROTOCOL_COVERAGE.md) -- closing a real gap a user hit in
+    practice: `inventory`'s generated policy, fed straight back into
+    `policy validate` against the same capture, was reporting a huge
+    violation/unclassified count for any of those five newly-added
+    protocols' traffic (MQTT in particular) even between two correctly
+    zone-classified endpoints, simply because `inventory` never had the
+    ability to infer a permitting conduit for them at all. Two of the ten
+    (HART-IP, FF-HSE) are counted only over TCP, even though decoder.cpp
+    can recognize both over UDP too (HART-IP conventionally; FF-HSE almost
+    always in real deployments) -- `policy validate` only ever evaluates
+    TCP flows, so a UDP-carried HART-IP/FF-HSE conduit inferred here could
+    never actually be exercised, which would just reproduce the exact gap
+    this widening closes for a sixth protocol; see asset_inventory.hpp's
+    own header comment for the full reasoning (and why this means FF-HSE
+    will rarely appear in a report at all, since real FF-HSE is UDP). S7comm
+    (including a COTP-only session with no S7comm payload, the same "cotp
+    folds into s7comm" convention `PolicyEngine::observe` uses) and MMS
+    share the identical TCP/102 COTP transport but stay distinct conduits
+    (`InventoryEdge`'s own key includes protocol, so a COTP-control-only
+    packet and a real MMS PDU on the same session become two separate
+    edges, not one clobbering the other). `inventory` builds an asset list
+    (IP/MAC, OUI vendor guess, protocols spoken, client-vs-server role
+    inferred from who initiates -- a TCP handshake for every TCP-based
+    protocol now covered, the request/response APDU type for BACnet
+    specifically, since its client and server both conventionally listen
+    on the same port 47808 and so can't be told apart by the usual
+    known-port-vs-ephemeral-port heuristic) and a communication matrix
+    (`InventoryEdge`: who talks to
     whom, over which protocol/port, aggregated across every TCP session
     between that client/server/protocol/port tuple -- deliberately coarser
     than `PolicyEngine::observe`'s own per-session `FlowReport`, since an

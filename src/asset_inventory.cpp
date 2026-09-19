@@ -12,6 +12,7 @@
 #include "conduitscope/cotp.hpp"
 #include "conduitscope/dnp3.hpp"
 #include "conduitscope/enip.hpp"
+#include "conduitscope/iec104.hpp"
 #include "conduitscope/ipv4.hpp"
 #include "conduitscope/modbus.hpp"
 #include "conduitscope/resolver.hpp"
@@ -34,14 +35,17 @@ std::string edge_key(const std::string& protocol, const std::string& client_ip, 
     return protocol + "|" + client_ip + "->" + server_ip + ":" + std::to_string(server_port);
 }
 
-// The five known ports this feature's five protocols conventionally use -- see
-// AssetInventoryEngine::observe's own doc comment (asset_inventory.hpp) for the full priority order
-// this feeds into. Deliberately NOT policy_engine.cpp's own is_known_service_port (that one covers
-// IEC104_TCP_PORT too, out of scope here, and is TCP-only -- this feature also needs the two UDP
-// ports, BACNET_UDP_PORT/ENIP_IO_UDP_PORT).
+// The known ports this feature's TCP-based protocols conventionally use, PLUS the two UDP ports
+// (BACNET_UDP_PORT/ENIP_IO_UDP_PORT) -- see AssetInventoryEngine::observe's own doc comment
+// (asset_inventory.hpp) for the full priority order this feeds into. On the TCP side this is now
+// deliberately IDENTICAL to policy_engine.cpp's own is_known_service_port (MODBUS/DNP3/COTP/
+// IEC104/ENIP) -- HART-IP/OPC UA/MMS/MQTT/FF-HSE's own conventional ports are intentionally left
+// out, matching that same set, so this engine's client/server guess for a flow always agrees with
+// PolicyEngine's own guess for the identical flow (see observe()'s own doc comment in the header).
 bool is_known_target_port(uint16_t port, bool is_tcp) {
     if (is_tcp) {
-        return port == MODBUS_TCP_PORT || port == DNP3_TCP_PORT || port == COTP_TCP_PORT || port == ENIP_TCP_PORT;
+        return port == MODBUS_TCP_PORT || port == DNP3_TCP_PORT || port == COTP_TCP_PORT ||
+               port == IEC104_TCP_PORT || port == ENIP_TCP_PORT;
     }
     return port == BACNET_UDP_PORT || port == ENIP_IO_UDP_PORT;
 }
@@ -159,7 +163,32 @@ void AssetInventoryEngine::observe(const DecodedPacket& dp) {
     else if (dp.protocol == "s7comm" || dp.protocol == "cotp") protocol = "s7comm";
     else if (dp.protocol == "enip") protocol = "enip";
     else if (dp.protocol == "bacnet") protocol = "bacnet";
-    else {
+    else if (dp.protocol == "iec104") protocol = "iec104";
+    else if (dp.protocol == "hartip") {
+        // HART-IP rides over either TCP or UDP at the same conventional port (hartip.hpp) -- but
+        // PolicyEngine::observe only ever evaluates has_tcp packets, so a UDP HART-IP conduit
+        // inferred here could never be checked by `policy validate`. See this file's own header
+        // comment for the full rationale; a UDP HART-IP packet is simply skipped, same as any other
+        // unrecognized packet.
+        if (!dp.has_tcp) {
+            ++skipped_packets_;
+            return;
+        }
+        protocol = "hartip";
+    } else if (dp.protocol == "opcua") protocol = "opcua";
+    else if (dp.protocol == "mms") protocol = "mms";
+    else if (dp.protocol == "mqtt") protocol = "mqtt";
+    else if (dp.protocol == "ffhse") {
+        // Same reasoning as hartip above -- FF-HSE is decodable over TCP (decoder.cpp's own
+        // opportunistic Auto-mode dispatch tries it there too) but is, in real deployments,
+        // fundamentally a UDP protocol (ffhse.hpp), and PolicyEngine::observe never evaluates UDP.
+        // In practice this means FF-HSE will almost never appear in an inventory report at all.
+        if (!dp.has_tcp) {
+            ++skipped_packets_;
+            return;
+        }
+        protocol = "ffhse";
+    } else {
         ++skipped_packets_;
         return;
     }
@@ -225,6 +254,21 @@ void AssetInventoryEngine::observe(const DecodedPacket& dp) {
         function_name = dp.enip_cip_service_name;
     } else if (protocol == "bacnet" && dp.bacnet_has_apdu && !dp.bacnet_service_name.empty()) {
         function_name = dp.bacnet_service_name;
+    } else if (protocol == "iec104" && dp.iec104_has_asdu && !dp.iec104_asdu_type_short_name.empty()) {
+        function_name = dp.iec104_asdu_type_short_name;
+    } else if (protocol == "hartip" && !dp.hartip_message_type.empty()) {
+        // hartip_message_type ("Request"/"Response"/"Publish"/"Error"/"NAK") is always set when
+        // protocol == "hartip" -- see decoder.hpp -- same "no separate guard needed" shape
+        // PolicyEngine::observe documents for this same field.
+        function_name = dp.hartip_message_type;
+    } else if (protocol == "opcua" && dp.opcua_service_recognized && !dp.opcua_service_name.empty()) {
+        function_name = dp.opcua_service_name;
+    } else if (protocol == "mms" && dp.mms_service_recognized && !dp.mms_service_name.empty()) {
+        function_name = dp.mms_service_name;
+    } else if (protocol == "mqtt" && !dp.mqtt_packet_type_name.empty()) {
+        function_name = dp.mqtt_packet_type_name;
+    } else if (protocol == "ffhse" && !dp.ffhse_message_name.empty()) {
+        function_name = dp.ffhse_message_name;
     }
 
     // See looks_like_broadcast_or_multicast's own comment, and observe()'s doc comment in
@@ -386,12 +430,15 @@ void write_inventory_report_text(std::ostream& out, const AssetInventoryReport& 
                                   const std::string& capture_path, const Resolver& resolver) {
     out << "OT asset inventory\n";
     out << "  capture: " << capture_path << "\n";
-    out << "  scope:   Modbus, DNP3, S7comm, EtherNet/IP, and BACnet/IP only -- see "
-           "docs/MANUAL.md's ROADMAP item 17\n\n";
+    out << "  scope:   Modbus, DNP3, S7comm, EtherNet/IP, BACnet/IP, IEC 104, HART-IP (TCP only),\n";
+    out << "           OPC UA, MMS, and MQTT -- plus FF-HSE (TCP only; rarely applicable, since\n";
+    out << "           FF-HSE is fundamentally a UDP protocol) -- see docs/MANUAL.md's ROADMAP "
+           "item 17\n\n";
 
     out << report.assets.size() << " asset(s) observed, " << report.total_packets
         << " total packet(s) in capture, " << report.skipped_packets
-        << " skipped (not one of the five recognized protocols, or no IPv4 layer)\n\n";
+        << " skipped (not one of the ten recognized protocols, no IPv4 layer, or HART-IP/FF-HSE "
+           "seen over UDP)\n\n";
 
     out << "ASSETS (" << report.assets.size() << "):\n";
     if (report.assets.empty()) {
@@ -581,10 +628,13 @@ void write_inventory_policy_yaml(std::ostream& out, const AssetInventoryReport& 
         // and no 'zones:'/'conduits:' keys, makes that obvious rather than emitting a file that
         // LOOKS like a policy but fails to load with a confusing error.
         out << "#\n";
-        out << "# No asset was observed in this capture (0 packets of Modbus/DNP3/S7comm/"
-               "EtherNet-IP/BACnet-IP\n";
-        out << "# traffic), so there is nothing to infer even one zone from -- this file "
-               "intentionally has no\n";
+        out << "# No asset was observed in this capture (0 packets of any of the ten recognized "
+               "protocols --\n";
+        out << "# Modbus/DNP3/S7comm/EtherNet-IP/BACnet-IP/IEC104/HART-IP/OPC UA/MMS/MQTT/FF-HSE, "
+               "see\n";
+        out << "# docs/MANUAL.md's ROADMAP item 17), so there is nothing to infer even one zone "
+               "from -- this\n";
+        out << "# file intentionally has no\n";
         out << "# 'zones:'/'conduits:' keys and is NOT a loadable policy file as-is.\n";
         return;
     }

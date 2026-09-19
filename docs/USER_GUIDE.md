@@ -379,19 +379,32 @@ doesn't cover).
 Like `policy validate`, `inventory` decodes the capture exactly as `decode`
 would and does not change or duplicate any decoding logic -- see
 `AssetInventoryEngine` (`asset_inventory.hpp`/`.cpp`), built on the same
-already-public `DecodedPacket` output. Only five protocols are ever counted
-here, the same set `policy validate`'s own protocol enum eventually grew to
-recognize first: **Modbus**, **DNP3**, **S7comm** (a COTP-only session with
-no S7comm payload still counts, the same "cotp folds into s7comm"
+already-public `DecodedPacket` output. Ten protocols are counted here --
+the SAME ten `PolicyEngine::observe` itself evaluates over TCP for
+`policy validate`: **Modbus**, **DNP3**, **S7comm** (a COTP-only session
+with no S7comm payload still counts, the same "cotp folds into s7comm"
 convention `PolicyEngine::observe` uses), **EtherNet/IP** (both explicit
-messaging over TCP and CIP I/O implicit messaging over UDP/2222), and
-**BACnet/IP**. Every other packet -- including every other protocol this
+messaging over TCP and CIP I/O implicit messaging over UDP/2222),
+**BACnet/IP**, **IEC 104**, **HART-IP**, **OPC UA**, **MMS**, **MQTT**, and
+**FF-HSE**. Every other packet -- including every other protocol this
 project decodes -- is counted only in the report's `skipped_packets` total,
 never as an asset or an edge.
 
+Two of those ten -- **HART-IP** and **FF-HSE** -- are counted here ONLY
+when carried over TCP, even though both can also appear over UDP (HART-IP
+conventionally; FF-HSE almost always, in real deployments). `policy
+validate` only ever evaluates TCP flows, so a conduit inferred from a UDP
+HART-IP or FF-HSE packet could never actually be checked -- unlike BACnet
+and CIP I/O (both UDP-only, still counted, with an explicit "cannot be
+exercised" note baked into the generated policy YAML, see "Closing the
+loop" below), HART-IP/FF-HSE traffic seen over UDP is simply skipped here,
+folding into `skipped_packets` like any other unrecognized packet. In
+practice this means FF-HSE will rarely, if ever, show up in an inventory
+report at all, since real FF-HSE traffic is UDP.
+
 For each recognized packet, `inventory` determines which side is the
 client (initiator) and which is the server, exactly as `PolicyEngine::
-observe` does for the four TCP-based protocols (SYN/SYN-ACK, falling back
+observe` does for every TCP-based protocol here (SYN/SYN-ACK, falling back
 to a known-port heuristic) -- except for BACnet, whose client and server
 both conventionally listen on the same UDP port (47808), so the usual
 known-port-vs-ephemeral-port heuristic can't tell them apart at all;
@@ -429,9 +442,11 @@ cross-zone conduit inference -- see that fixture's own comment in
 $ conduitscope inventory -r tests/sample_inventory.pcap
 OT asset inventory
   capture: tests/sample_inventory.pcap
-  scope:   Modbus, DNP3, S7comm, EtherNet/IP, and BACnet/IP only -- see docs/MANUAL.md's ROADMAP item 17
+  scope:   Modbus, DNP3, S7comm, EtherNet/IP, BACnet/IP, IEC 104, HART-IP (TCP only),
+           OPC UA, MMS, and MQTT -- plus FF-HSE (TCP only; rarely applicable, since
+           FF-HSE is fundamentally a UDP protocol) -- see docs/MANUAL.md's ROADMAP item 17
 
-9 asset(s) observed, 14 total packet(s) in capture, 0 skipped (not one of the five recognized protocols, or no IPv4 layer)
+9 asset(s) observed, 14 total packet(s) in capture, 0 skipped (not one of the ten recognized protocols, no IPv4 layer, or HART-IP/FF-HSE seen over UDP)
 
 ASSETS (9):
   10.0.5.21  00:0c:29:de:ad:01 (VMware)  [client]  dnp3, s7comm  (6 packet(s))
@@ -482,7 +497,7 @@ matching UDP traffic the capture actually has -- not a bug in either
 command, just the current, documented edge of `policy validate`'s own
 scope (see docs/DEVELOPMENT.md's ROADMAP item 9).
 
-If the capture carries no traffic from any of the five recognized
+If the capture carries no traffic from any of the ten recognized
 protocols at all, there is nothing to infer even one zone from --
 `--policy-out`'s file then contains only explanatory comments, no
 `zones:`/`conduits:` keys at all (deliberately not a validly-loadable

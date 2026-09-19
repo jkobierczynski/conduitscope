@@ -6075,6 +6075,64 @@ set_tests_properties(inventory_resolver_bad_hosts_path_rejected PROPERTIES
   WILL_FAIL TRUE)
 
 # ---------------------------------------------------------------------------------------------
+# Widened protocol scope (asset_inventory.hpp/cpp) -- `inventory` originally only recognized five
+# protocols (modbus/dnp3/s7comm/enip/bacnet); it now recognizes the same ten PolicyEngine::observe
+# itself evaluates over TCP, adding iec104/hartip/opcua/mms/mqtt/ffhse -- see asset_inventory.hpp's
+# own header comment for the full rationale, and why HART-IP/FF-HSE are deliberately TCP-only here
+# even though decoder.cpp can also recognize both over UDP (a UDP conduit for either could never be
+# exercised by `policy validate`, which only ever evaluates TCP flows).
+# ---------------------------------------------------------------------------------------------
+
+add_test(NAME inventory_iec104_recognized
+  COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_iec104.pcap")
+set_tests_properties(inventory_iec104_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.50 .*\\[client\\]  iec104.*192\\.168\\.1\\.50 -> 192\\.168\\.1\\.10:2404 \\(iec104\\)  iec104.*zone_192_168_1_0_24 -> zone_192_168_1_0_24  \\(iec104/2404\\)  1 edge\\(s\\)")
+
+# Closes the discover-then-enforce loop for real, for one of the newly-widened protocols -- the same
+# "generate a policy from this capture, then validate the same capture against it" round trip the
+# existing inventory_diagram_and_policy_out_smoke test already proves for the original five
+# protocols (modbus/dnp3/s7comm/enip/bacnet), now proven for iec104 too.
+add_test(NAME inventory_iec104_policy_out_round_trips_compliant
+  COMMAND bash -c "'$<TARGET_FILE:conduitscope>' inventory --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_iec104.pcap' --policy-out '${CMAKE_CURRENT_BINARY_DIR}/iec104_inferred.yaml' --output /dev/null && '$<TARGET_FILE:conduitscope>' policy validate --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_iec104.pcap' --policy '${CMAKE_CURRENT_BINARY_DIR}/iec104_inferred.yaml'")
+set_tests_properties(inventory_iec104_policy_out_round_trips_compliant PROPERTIES
+  PASS_REGULAR_EXPRESSION "Result: COMPLIANT\n\nFlows evaluated: 1 \\(1 allowed, 0 violation\\(s\\), 0 unclassified\\)")
+
+# HART-IP rides over both TCP and UDP in this fixture (67 total packets, only 3 of them TCP-carried
+# hartip) -- proves BOTH halves of the TCP-only carve-out at once: the TCP-carried packets ARE
+# counted (as an asset/edge), and the UDP-carried majority fold into skipped_packets instead of
+# silently producing an inferred conduit `policy validate` could never check.
+add_test(NAME inventory_hartip_recognized_tcp_only_udp_skipped
+  COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap")
+set_tests_properties(inventory_hartip_recognized_tcp_only_udp_skipped PROPERTIES
+  PASS_REGULAR_EXPRESSION "2 asset\\(s\\) observed, 67 total packet\\(s\\) in capture, 64 skipped.*192\\.168\\.1\\.10 .*\\[server\\]  hartip  \\(3 packet\\(s\\)\\)")
+
+add_test(NAME inventory_opcua_recognized
+  COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_opcua.pcap")
+set_tests_properties(inventory_opcua_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.10 .*\\[server\\]  opcua.*192\\.168\\.1\\.50 -> 192\\.168\\.1\\.10:4840 \\(opcua\\)  opcua")
+
+# A COTP-only control packet on this same session still folds into "s7comm" (same convention
+# PolicyEngine::observe uses -- see this feature's own header comment), while the actual MMS PDUs
+# become their own separate "mms" edge on the identical client/server/port tuple -- proving the two
+# coexist as distinct edges (edge_key includes protocol) rather than one clobbering the other.
+add_test(NAME inventory_mms_recognized_coexists_with_s7comm_fold
+  COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap")
+set_tests_properties(inventory_mms_recognized_coexists_with_s7comm_fold PROPERTIES
+  PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.10 .*\\[server\\]  mms, s7comm.*192\\.168\\.1\\.50 -> 192\\.168\\.1\\.10:102 \\(mms\\)  s7comm.*192\\.168\\.1\\.50 -> 192\\.168\\.1\\.10:102 \\(mms\\)  mms")
+
+add_test(NAME inventory_mqtt_recognized
+  COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mqtt.pcap")
+set_tests_properties(inventory_mqtt_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.10 .*\\[client\\+server\\]  mqtt.*192\\.168\\.1\\.50 -> 192\\.168\\.1\\.10:1883 \\(mqtt\\)  mqtt")
+
+# FF-HSE, like HART-IP above, rides over both TCP and UDP in this fixture (68 total packets, only 4
+# of them TCP-carried ffhse) -- same TCP-only carve-out, same reasoning, proven the same way.
+add_test(NAME inventory_ffhse_recognized_tcp_only_udp_skipped
+  COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ffhse.pcap")
+set_tests_properties(inventory_ffhse_recognized_tcp_only_udp_skipped PROPERTIES
+  PASS_REGULAR_EXPRESSION "2 asset\\(s\\) observed, 68 total packet\\(s\\) in capture, 64 skipped.*192\\.168\\.1\\.10 .*\\[server\\]  ffhse  \\(4 packet\\(s\\)\\)")
+
+# ---------------------------------------------------------------------------------------------
 # Tier 1 "IT protocols an OT auditor flags" recognition (it_protocols.hpp/cpp) -- RDP, VNC,
 # TeamViewer, AnyDesk, and Zoom. See docs/MANUAL.md's ROADMAP item 18 for the full "why this
 # matters to an OT auditor" framing. Name-only recognition, deliberately: no decoding past
