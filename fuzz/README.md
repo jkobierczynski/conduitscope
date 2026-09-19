@@ -1,11 +1,19 @@
 # Fuzzing
 
 libFuzzer harnesses for the parsers with the most hand-rolled length/state-machine
-logic in this codebase -- see docs/DEVELOPMENT.md's "External code review and
-engineering priorities" section for why these five specifically (pcap_reader, TCP
-reassembly, DNP3, COTP/S7comm, MQTT) were picked first. Each harness is a thin
-`LLVMFuzzerTestOneInput` wrapper around a small piece of real production code from
-`conduitscope_core` -- no parsing logic is duplicated here.
+logic in this codebase. The original five (pcap_reader, TCP reassembly, DNP3,
+COTP/S7comm, MQTT) -- see docs/DEVELOPMENT.md's "External code review and
+engineering priorities" section for why these were picked first -- were joined by
+a second wave of four (BACnet/IP, IEC 104, EtherNet/IP+CIP, S7comm-Plus): the next
+highest hand-rolled-parsing-complexity OT/ICS protocols in this codebase, added
+once every protocol gained its own standalone `try_parse_*` entry point taking a
+`ByteSpan`, making a dedicated harness for any of them a small, mechanical
+addition. BACnet in particular already had a confirmed payoff before it got its
+own harness: `fuzz_packet_decode` found a real signed-left-shift undefined-behavior
+bug in `bacnet.cpp`, fixed before this dedicated, faster-reaching harness existed.
+Each harness is a thin `LLVMFuzzerTestOneInput` wrapper around a small piece of
+real production code from `conduitscope_core` -- no parsing logic is duplicated
+here.
 
 ## Building
 
@@ -26,7 +34,10 @@ cmake -S . -B build-fuzz \
 cmake --build build-fuzz -j"$(nproc)"
 ```
 
-This builds five executables in `build-fuzz/fuzz/`:
+This builds nine executables directly in `build-fuzz/` (not a `fuzz/` subdirectory
+of it -- despite the name, these targets have no `RUNTIME_OUTPUT_DIRECTORY`
+override in `CMakeLists.txt`, so they land wherever every other target in this
+build tree does):
 
 | Binary                       | Fuzzes                                                              | Seed corpus                  |
 |-------------------------------|----------------------------------------------------------------------|-------------------------------|
@@ -35,6 +46,10 @@ This builds five executables in `build-fuzz/fuzz/`:
 | `fuzz_dnp3`                    | `try_parse_dnp3_link_layer` + `try_parse_dnp3_transport_and_application` (single-TCP-payload DNP3 link/transport/application parsing) | `fuzz/corpus/dnp3/`           |
 | `fuzz_cotp_s7comm`             | `try_parse_tpkt_cotp` + `try_parse_s7comm` (TPKT/COTP framing, then S7comm on its user data) | `fuzz/corpus/cotp_s7comm/`    |
 | `fuzz_mqtt`                     | `try_parse_mqtt_message` (MQTT v3.1/v3.1.1/v5, including Sparkplug B) | `fuzz/corpus/mqtt/`           |
+| `fuzz_bacnet`                  | `try_parse_bacnet` (BVLC Annex J framing + the self-describing application-layer TLV tag encoding, ASHRAE 135 clause 20.2.1) | `fuzz/corpus/bacnet/`         |
+| `fuzz_iec104`                  | `try_parse_iec104_apci` + `decode_iec104_asdu` (the fixed 6-byte APCI, then an I-format frame's type-keyed ASDU object table) | `fuzz/corpus/iec104/`         |
+| `fuzz_enip`                    | `try_parse_enip` + `try_parse_cip_io` (EtherNet/IP encapsulation + CIP explicit messaging with EPATH/service-code recursion, and CIP I/O implicit messaging, both in one harness since they're independent entry points over two different transports) | `fuzz/corpus/enip/`           |
+| `fuzz_s7comm_plus`             | `try_parse_tpkt_cotp` + `try_parse_s7comm_plus` (TPKT/COTP framing, then S7comm-Plus's object-oriented, unofficial/community-reverse-engineered application layer on its user data) | `fuzz/corpus/s7comm_plus/`    |
 
 ## Running
 
@@ -42,7 +57,7 @@ Each binary is a standalone libFuzzer executable -- point it at its own corpus
 directory and let it run:
 
 ```sh
-./build-fuzz/fuzz/fuzz_dnp3 fuzz/corpus/dnp3/ -max_total_time=300
+./build-fuzz/fuzz_dnp3 fuzz/corpus/dnp3/ -max_total_time=300
 ```
 
 Useful flags: `-max_total_time=N` (seconds), `-jobs=N -workers=N` (parallel fuzzing,

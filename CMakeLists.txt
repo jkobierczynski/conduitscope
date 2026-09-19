@@ -238,6 +238,17 @@ if(CONDUITSCOPE_ENABLE_FUZZING)
   add_conduitscope_fuzzer(dnp3)
   add_conduitscope_fuzzer(cotp_s7comm)
   add_conduitscope_fuzzer(mqtt)
+  # Second wave, added after the original five-target plan: the next four highest hand-rolled-
+  # parsing-complexity OT/ICS protocols -- see each fuzz_*.cpp's own file header for why. bacnet
+  # already has a confirmed track record (fuzz_packet_decode found a real signed-left-shift UB in
+  # bacnet.cpp before this dedicated harness existed); iec104/enip/s7comm_plus are the next-most
+  # structurally complex parsers in this codebase (self-describing per-type ASDU objects, CIP
+  # EPATH/service-code recursion, and an unofficial, community-reverse-engineered object model,
+  # respectively).
+  add_conduitscope_fuzzer(bacnet)
+  add_conduitscope_fuzzer(iec104)
+  add_conduitscope_fuzzer(enip)
+  add_conduitscope_fuzzer(s7comm_plus)
 endif()
 
 add_test(NAME decode_modbus_sample

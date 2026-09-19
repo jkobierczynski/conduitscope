@@ -223,6 +223,37 @@ Discussed and adopted, in this order:
    Debian/Ubuntu -- isn't installed on the CI image yet) and a scheduled
    (not per-push) longer fuzzing job; see [fuzz/README.md](../fuzz/README.md)
    for how to build and run these locally in the meantime.
+
+   **Second wave (four more targets, added once the original five had
+   already run enough to prove the approach):** `fuzz_bacnet`,
+   `fuzz_iec104`, `fuzz_enip`, and `fuzz_s7comm_plus` -- the next four
+   highest hand-rolled-parsing-complexity OT/ICS protocols in this
+   codebase, added once every protocol decoder had gained its own
+   standalone `try_parse_*(ByteSpan)` entry point, which made a dedicated
+   harness for any of them a small, mechanical addition following the
+   exact same shape as the original five. BACnet is the strongest of this
+   batch on its own merits: `fuzz_packet_decode` had already found a real
+   signed-left-shift undefined-behavior bug in `bacnet.cpp`'s
+   `read_signed64` (fixed) before this faster, more-targeted harness
+   existed, which is itself a concrete demonstration of why a dedicated
+   harness per parser is worth the small duplication of harness
+   boilerplate. `fuzz_iec104` covers the fixed 6-byte APCI plus an
+   I-format frame's type-keyed ASDU object table; `fuzz_enip` covers both
+   CIP explicit messaging (with its EPATH/service-code recursion through
+   Multiple_Service_Packet/Unconnected_Send) and CIP I/O implicit
+   messaging in one harness, since they're independent entry points over
+   two different transports that share no state; `fuzz_s7comm_plus`
+   mirrors `fuzz_cotp_s7comm`'s own TPKT/COTP-then-application-layer
+   shape, but reaches S7comm-Plus's own protocol id (0x72) instead of
+   classic S7comm's (0x32) -- a completely different, and (per
+   `s7commplus.hpp`'s own file header) never officially published,
+   application layer the original harness's mutations essentially never
+   reach. Seed corpora (`fuzz/corpus/bacnet,iec104,enip,s7comm_plus/`)
+   were extracted the same way as the original five, from this repo's own
+   `tests/sample_*.pcap` fixtures. All four ran clean (zero ASan/UBSan
+   reports) over both their own seed corpora and a 60-second mutation
+   burst each, on the order of 10^6-10^7 executions per target, before
+   being committed.
 3. **The registration-model decoder refactor, after that** (not yet
    started, no committed timeline): a `ProtocolDecoder` interface plus
    registry, replacing the `ProtocolFilter` enum / ordered dispatch chain
