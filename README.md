@@ -1,10 +1,10 @@
-# conduitscope
+# Conduitscope
 
 <p align="center">
   <img src="assets/logo.jpg" alt="conduitscope logo: an amber warning-sign triangle with a shark whose eyes fire laser beams" width="220">
 </p>
 
-`conduitscope` decodes Modbus/TCP, DNP3, IEC 60870-5-104, S7comm/COTP (Siemens S7 PLC
+`Conduitscope` decodes Modbus/TCP, DNP3, IEC 60870-5-104, S7comm/COTP (Siemens S7 PLC
 protocol) and S7comm-Plus (Siemens TIA Portal / S7-1200/1500's newer protocol),
 EtherNet/IP (CIP explicit and implicit messaging), PROFINET RT (DCP device
 discovery/configuration and cyclic real-time I/O data), IEC 61850-8-1 GOOSE,
@@ -108,7 +108,7 @@ traffic match what the segmentation policy says it should" question.
 
 ## Status
 
-Groundwork / v0.1.0. What works right now:
+Groundwork / v0.1.7. What works right now:
 
 - Classic pcap and pcapng file reading, auto-detected (Ethernet and raw-IP
   link types; IPv4; TCP, with PDU/frame-level reassembly across TCP segments
