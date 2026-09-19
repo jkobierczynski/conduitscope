@@ -270,6 +270,54 @@ Discussed and adopted, in this order:
    making the existing ~60 detections trustworthy under adversarial input
    matters more than adding a 61st.
 
+A follow-up review
+([docs/reviews/2026-09-chatgpt-security-review.md](reviews/2026-09-chatgpt-security-review.md),
+conducted against GitHub's web UI rather than the actual source, so most of
+its "I'd want you to have X" list was already true by the time it was
+written -- the bounds-checked `Cursor`/`ByteSpan` primitive, the fuzzing
+harnesses above including a combined full-pipeline target, the real-world
+capture corpus, and `DirectionSource`'s evidence-level tiering all predate
+it) raised four points genuinely not covered by 1-5 above, folded in here
+at the same priority tier as the items they extend:
+
+6. **Fold `CONDUITSCOPE_ENABLE_FUZZING`/ASan/UBSan into `ci.yml` itself,
+   plus a scheduled longer fuzz job** -- this is the specific "not yet
+   done" half of item 2 above, called out here as its own tracked item
+   because the review is right that CI without sanitizers wired in mostly
+   proves the code still compiles, not that it's memory-safe. Needs the
+   fuzzer/sanitizer compiler-rt runtime (`libclang-rt-<version>-dev`)
+   available on the CI image; the scheduled job should run each existing
+   harness against its growing corpus for materially longer than the
+   per-push smoke tests can afford (minutes to hours, not seconds), on a
+   cron trigger separate from the per-push matrix.
+7. **Make the hardcoded resource-exhaustion limits CLI-configurable.**
+   `kMaxBufferedBytes` (decoder.cpp, TCP/COTP reassembly), the various
+   `kMaxDataRecursionDepth`/`kMaxCipRecursionDepth`/`kMaxMplsLabelDepth`-
+   style recursion caps, and `kMaxDecodedObjects`/`kMaxList`-style object
+   caps scattered across the protocol files are all real, already-present
+   protections -- the review's concern that this class of DoS is
+   unaddressed isn't accurate at review time -- but they're all
+   compile-time constants today, not something a user can tighten (for a
+   more paranoid audit of untrusted captures) or loosen (for a capture
+   that legitimately needs more headroom) without a rebuild. Worth an
+   audit for which of these are worth exposing as `decode`/`policy
+   validate`/`inventory` flags, following the same "documented default,
+   explicit override" pattern `--modbus-port` and friends already
+   establish for expected-port lists.
+8. **Document the vendored CLI11's provenance and update procedure.**
+   `third_party/CLI11/CLI11.hpp` states its own version (2.4.2) and license
+   inline in the header, but there's no separate note recording the
+   upstream commit/tag it was pulled from or a procedure for noticing when
+   it falls behind upstream. A short `third_party/CLI11/README.md` (or a
+   paragraph here) covering version, upstream repo, license, and "how to
+   update" closes this cheaply.
+9. **Enable GitHub's code scanning, dependency alerts, secret scanning,
+   and push protection** for the repository -- these are free,
+   configuration-only GitHub features (not something conduitscope's own
+   code or CI needs to implement) and the review is right to treat them as
+   part of the security baseline for a public repository rather than
+   optional decoration.
+
 
 ## PROTOCOL DETECTION
 
