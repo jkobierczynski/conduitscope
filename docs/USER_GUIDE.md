@@ -3373,6 +3373,40 @@ These are current, not aspirational -- each has a corresponding docs/DEVELOPMENT
   attributed backwards if the true server happens to use the higher port
   number. This heuristic layer is separate from, and doesn't affect, Modbus
   protocol decoding's own request/response classification (see above).
+  `inventory`'s own client/server determination (see above) uses the exact
+  same fallback, for the exact same reason.
+- **Direction/initiator determination is, in general, only ever as good as
+  the evidence available for a given flow -- it can't always be established
+  with certainty, only approximately.** "Approximately" has one precise
+  meaning throughout this codebase: *not backed by an observed TCP
+  handshake*. Every direction call this tool makes falls into one of three
+  tiers, most authoritative first: (1) **handshake** -- a SYN and matching
+  SYN-ACK were both seen for the flow, which is unambiguous by construction
+  (TCP's own three-way handshake defines the initiator); (2) **content** --
+  no handshake was seen, but the protocol's own application-layer semantics
+  settle it without guessing (BACnet is the only case today: a
+  Confirmed-Request/Unconfirmed-Request's source is definitionally the
+  client, and a response's destination is, since BACnet client and server
+  both conventionally listen on the same UDP port 47808 and the port
+  heuristic below can't even be attempted -- see `inventory` above); (3)
+  **port-heuristic** -- neither of the above, so the known-OT-port/
+  lower-port-number guess described in the bullet above is used, and this
+  is the only tier that can actually be wrong. Today this tiering exists
+  only as unlabeled logic scattered across `PolicyEngine::observe` and
+  `AssetInventoryEngine::observe` -- the report output doesn't say which
+  tier produced a given flow's direction, only the direction itself.
+  Industry precedent was surveyed before settling on how to name this
+  (Zeek, Suricata, Wireshark): none of the three actually expose a labeled
+  confidence/provenance field for this. Wireshark is the closest precedent,
+  and not a reassuring one -- its own Conversations table orders endpoints
+  by the same "lower port number is probably the server" guess this tool
+  falls back to, with a long-open community feature request asking it to
+  prefer the handshake's actual direction instead when one was captured.
+  Labeling each flow with which tier produced its direction (a
+  `direction_source` field, mechanism-based -- `handshake`/`content`/
+  `port-heuristic` -- rather than a vaguer "confidence" scale) is designed
+  but not yet implemented -- see docs/DEVELOPMENT.md's ROADMAP item 19 for
+  the full design record and sourcing.
 - **A conduit's direction is TCP-connection-initiator-based, not
   per-packet-flow-based** -- see POLICY FILE FORMAT's "Conduits" section for
   exactly what `from`/`to`/`bidirectional` mean. There's no way to permit,

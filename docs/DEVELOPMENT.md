@@ -988,6 +988,13 @@ serial-to-IP DNP3 gateway multiplexing several outstations behind one IP
 is a routine real-world topology this tool currently can't zone/
 conduit-model at all.
 
+**Item 19's `direction_source` field** is fully designed (three tiers,
+field name, industry precedent researched and cited) but not yet
+implemented across `decode`/`policy validate`/`inventory` -- unlike the
+"protocol-specific deepening" items below, this one is cross-cutting (touches
+all three commands' output schemas at once) and worth doing as its own
+focused pass rather than folded into unrelated work.
+
 **Everything else is protocol-specific deepening, lower urgency**: item
 2's `0xB2` symbolic-addressing confirmation (blocked on access to real
 PLC/TIA Portal authority, not on effort); item 3's S7comm-Plus Tier 2
@@ -2338,6 +2345,89 @@ and locating/verifying EIGRP's and OSPF's own authentication digests (same
 gap as RIP's Keyed MD5) -- see docs/USER_GUIDE.md's LIMITATIONS for both. **BGP is the next
 routing protocol planned** -- it will need TCP port-179 stream reassembly,
 unlike any of the eight routing/redundancy protocols decoded so far.
+19. **Label *how* a flow's client/server direction was determined -- not
+    just what it is -- across `decode`, `policy validate`, and `inventory`.**
+    Every direction call this codebase makes already falls into one of three
+    tiers, but only the code path that made the call knows which one fired;
+    the output itself doesn't say. Worth naming precisely, since
+    "approximately" (as used informally in docs/USER_GUIDE.md's LIMITATIONS)
+    has one specific meaning here: *not backed by an observed TCP
+    handshake*, nothing vaguer. The three tiers, in order of authority:
+    - **Handshake** -- a SYN and a matching SYN-ACK were both observed for
+      this TCP flow (on any packet, not just the first -- see
+      `PolicyEngine::observe`'s own doc comment in `policy_engine.hpp`).
+      The only tier this project can call unambiguous: TCP's own three-way
+      handshake is authoritative by construction, the initiator is whoever
+      sent the SYN.
+    - **Content** -- no handshake was observed (or the protocol has none at
+      all, e.g. UDP), but the protocol's own application-layer semantics
+      settle it without guessing. BACnet is the only case in this codebase
+      today: a Confirmed-Request/Unconfirmed-Request's source is
+      definitionally the client, and a Simple-ACK/Complex-ACK/Segment-ACK/
+      Error/Reject/Abort's *destination* is, because BACnet client and
+      server both conventionally listen on the same UDP port (47808), so
+      the port heuristic below can't even be attempted (see
+      docs/USER_GUIDE.md's `inventory` section).
+    - **Port-heuristic** -- neither of the above: no handshake captured,
+      and no protocol semantics to fall back on, so `is_known_service_port`/
+      `is_known_target_port` (`PolicyEngine`'s and `AssetInventoryEngine`'s
+      own separate copies of this logic -- see "Why two copies, not one
+      shared implementation" below) guesses from the IANA-registered OT
+      port for that protocol, and failing that, assumes the lower port
+      number is the server. This is the *only* tier that can actually be
+      wrong: a real server running on a high or nonstandard port, observed
+      mid-session with no handshake, gets attributed backwards.
+
+    Industry precedent was researched before designing this. None of Zeek,
+    Suricata, or Wireshark actually expose this as a labeled field. Zeek's
+    own docs describe "the first packet's source is the originator" as the
+    general rule for connectionless protocols, with no confidence/
+    provenance value carried into `conn.log`. Suricata's flow-keyword docs
+    describe TCP's three-way handshake as what establishes a connection and,
+    separately, "traffic from both sides" as the bar for non-TCP flows --
+    again, no uncertainty language exposed either way. Wireshark is the most
+    directly relevant precedent, because it has almost exactly this
+    codebase's own bug: its Conversations table orders endpoints A/B by
+    `if (src_port > dst_port) ... else ...` -- the same "lower port number
+    is probably the server" guess `is_known_service_port` falls back to --
+    and has a long-open community feature request asking it to prefer the
+    TCP handshake's actual direction instead of the port guess when one was
+    captured. No tool surveyed frames this with a graded "confidence" scale
+    either -- the ICD-203-derived High/Moderate/Low-Confidence language
+    common in threat-intel writing (e.g. Secureworks CTU's own published
+    confidence-assessment framework) was considered and deliberately not
+    borrowed here: that vocabulary is built for genuinely continuous,
+    corroboration-based judgment calls, not a deterministic three-way code
+    branch that always resolves to exactly one of three known mechanisms.
+
+    Given that, the field name and value set settled on: `direction_source`,
+    with the exact values `handshake` / `content` / `port-heuristic` above
+    -- mechanism-based, not confidence-based, since every flow's tier is a
+    fact about which code path fired, not a probability estimate. Scoped to
+    all three surfaces that already make a client/server call: `decode`'s
+    per-packet output (needs a new, small tracking layer of its own --
+    `Decoder`/`DecodedPacket` today carry no cross-packet direction state at
+    all, by design, see `decoder.hpp`'s own "NOTE ON STATEFULNESS" comment;
+    this would be built as a separate class on top of already-public
+    `DecodedPacket` output, the same "doesn't change how packets are
+    decoded" boundary `PolicyEngine`'s own file header already describes for
+    itself), `policy validate`'s `FlowReport` (`PolicyEngine::FlowState`
+    already carries the exact SYN/SYN-ACK/port-heuristic branching needed --
+    just needs the tier threaded through as a field), and `inventory`'s
+    `InventoryEdge` (`AssetInventoryEngine::EdgeState`, the same shape, plus
+    the BACnet content-based branch). Not yet implemented -- this item
+    records the design and its sourcing, not the code.
+
+    *Why two copies, not one shared implementation*: `PolicyEngine` and
+    `AssetInventoryEngine` each already maintain their own independent
+    SYN/SYN-ACK-plus-port-heuristic direction logic (`policy_engine.cpp`'s
+    `is_known_service_port`/`src_is_client_by_port` vs. `asset_inventory.
+    cpp`'s `is_known_target_port`/`src_is_client_by_port`) rather than
+    sharing one implementation -- consistent with each engine's own stated
+    design of staying a self-contained layer built on top of `Decoder`'s
+    already-public output, never reaching into or depending on the other
+    engine. The new `decode`-side tracking layer would follow the same
+    convention: a third, independent copy, not a shared one.
 
 ### Protocols not covered at all
 
