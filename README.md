@@ -1,7 +1,7 @@
 # Conduitscope
 
 <p align="center">
-  <img src="assets/logo.jpg" alt="conduitscope logo: an amber warning-sign triangle with a shark whose eyes fire laser beams" width="220">
+  <img src="assets/logo.jpg" alt="conduitscope logo: an amber warning-sign triangle with a shark whose eyes fire laser beams" width="280">
 </p>
 
 `Conduitscope` decodes Modbus/TCP, DNP3, IEC 60870-5-104, S7comm/COTP (Siemens S7 PLC
