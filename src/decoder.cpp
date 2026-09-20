@@ -609,6 +609,50 @@ bool Decoder::reassemble_tcp_payload(const TcpSegment& tcp, const std::string& f
         }
     }
 
+    // Safety cap against a pathological/malformed capture -- or a protocol's own declared-length
+    // field claiming far more data than any real deployment would ever send -- growing this
+    // flow's buffer without bound while segments keep trickling in. Unlike DNP3 fragment
+    // reassembly (process_dnp3_frame's own kMaxBufferedBytes=65536) and COTP TSDU reassembly
+    // (reassemble_cotp_data_frame's own kMaxBufferedBytes=1<<20), this general path -- shared by
+    // every one of Modbus/TCP, IEC 104, EtherNet/IP, TPKT/S7comm/S7comm-Plus/MMS, HART-IP, OPC
+    // UA, MQTT, and FF-HSE -- had no cap of its own: it buffered up to whatever each protocol's
+    // own `*_declared_length()` returned. Most of those are already naturally or explicitly
+    // bounded (Modbus/TCP's MBAP length against modbus.cpp's kMaxPlausibleMbapLength=300;
+    // EtherNet/IP's and TPKT's against their own 16-bit length fields, ~64KB), but OPC UA's and
+    // FF-HSE's declared-length fields are raw, uncapped 32-bit values -- confirmed against the
+    // real CLI: a single 66-byte OPC UA segment can make this flow "buffer" towards a declared
+    // ~4 GiB, exactly the "thousands of flows each announcing 4 GB of data coming" resource-
+    // exhaustion scenario docs/reviews/2026-09-chatgpt-security-review.md's own §3 describes. See
+    // docs/DEVELOPMENT.md's "Correction to item 7" for the full writeup. Fixed two ways: this cap
+    // here (defense in depth for every protocol on this path, not just the two with no bound of
+    // their own), and a matching plausibility ceiling added directly to
+    // opcua_declared_length()/ffhse_declared_length() (opcua.cpp/ffhse.cpp) so those two stop
+    // claiming an implausible length in the first place. Checked here, right after combining,
+    // rather than only where buffering is (re-)committed below, so it applies uniformly to both
+    // the delta==0 and delta<0 growth paths above before anything else -- including this
+    // function's own declared-length dispatch chain immediately below -- sees the over-grown
+    // candidate. Mirrors DNP3/COTP's own byte-count + segment-count shape, and reuses the same
+    // "16 MiB is implausible for anything real" ceiling pcap_reader.cpp's own
+    // kMaxPlausiblePacketBytes/kMaxPlausibleBlockBytes already established for this codebase,
+    // rather than inventing a third magic number. The segment-count cap is sized so a legitimate
+    // ~16 MiB reassembly over realistic (~1460-byte MSS) segments -- roughly 11,500 of them --
+    // comfortably completes before it fires; it exists to catch a pathological *many-tiny-
+    // segments* capture well before the byte cap alone would.
+    if (combined) {
+        constexpr size_t kMaxBufferedBytes = 16u * 1024u * 1024u;  // 16 MiB
+        constexpr size_t kMaxSegmentsPerReassembly = 20000;
+        size_t next_segment_count = fb.segment_count + 1;
+        if (candidate.size() > kMaxBufferedBytes || next_segment_count > kMaxSegmentsPerReassembly) {
+            out.notes.push_back(
+                "TCP segment reassembly on this flow exceeded its safety cap (" +
+                std::to_string(candidate.size()) + " byte(s) across " + std::to_string(next_segment_count) +
+                " segment(s)) -- abandoning it; this segment's own payload is tried fresh instead");
+            fb = TcpFlowBuffer{};
+            candidate = tcp.payload;
+            combined = false;
+        }
+    }
+
     bool want_iec104 = options_.protocol_filter == ProtocolFilter::Auto ||
                         options_.protocol_filter == ProtocolFilter::Iec104Only;
     bool want_enip = options_.protocol_filter == ProtocolFilter::Auto ||

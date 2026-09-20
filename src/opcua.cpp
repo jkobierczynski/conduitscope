@@ -1152,6 +1152,20 @@ std::optional<size_t> opcua_declared_length(ByteSpan payload) {
                     (static_cast<uint32_t>(payload.at(6)) << 16) |
                     (static_cast<uint32_t>(payload.at(7)) << 24);
     if (size < 8) return std::nullopt;
+    // Plausibility ceiling -- see docs/DEVELOPMENT.md's "Correction to item 7": this 32-bit
+    // MessageSize field has no ceiling of its own in the OPC UA wire format, so an implausible
+    // value here would otherwise tell Decoder::reassemble_tcp_payload to keep buffering this flow
+    // towards that declared size indefinitely (decoder.cpp now also has its own cap as defense in
+    // depth, but rejecting an implausible declared length here -- the same way
+    // modbus_tcp_declared_length rejects an implausible MBAP length -- is the more precise fix:
+    // this candidate then simply isn't treated as a length-declaring OPC UA message at all,
+    // rather than being accepted and only later abandoned). Reuses the same "16 MiB is
+    // implausible for anything real" ceiling pcap_reader.cpp's own
+    // kMaxPlausiblePacketBytes/kMaxPlausibleBlockBytes already established for this codebase.
+    // try_parse_opcua_message itself was never at risk from this -- it already clamps its own
+    // read to std::min(declared_size, payload.size()) regardless of what MessageSize claims.
+    constexpr uint32_t kMaxPlausibleMessageSize = 16u * 1024u * 1024u;
+    if (size > kMaxPlausibleMessageSize) return std::nullopt;
     return size;
 }
 

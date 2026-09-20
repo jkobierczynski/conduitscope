@@ -1284,6 +1284,18 @@ std::optional<size_t> ffhse_declared_length(ByteSpan payload) {
     if (type > 2) return std::nullopt;
     uint32_t message_length = be32(payload, 8);
     if (message_length < 12) return std::nullopt;
+    // Plausibility ceiling -- see docs/DEVELOPMENT.md's "Correction to item 7": this 32-bit
+    // Message Length field has no ceiling of its own in the FF-HSE wire format, so an implausible
+    // value here would otherwise tell Decoder::reassemble_tcp_payload to keep buffering this flow
+    // towards that declared size indefinitely (decoder.cpp now also has its own cap as defense in
+    // depth, but rejecting an implausible declared length here -- the same way
+    // modbus_tcp_declared_length rejects an implausible MBAP length -- is the more precise fix).
+    // Reuses the same "16 MiB is implausible for anything real" ceiling pcap_reader.cpp's own
+    // kMaxPlausiblePacketBytes/kMaxPlausibleBlockBytes already established for this codebase.
+    // try_parse_ffhse itself was never at risk from this -- it already clamps its own read to
+    // std::min(message_length, payload.size()) regardless of what Message Length claims.
+    constexpr uint32_t kMaxPlausibleMessageLength = 16u * 1024u * 1024u;
+    if (message_length > kMaxPlausibleMessageLength) return std::nullopt;
     return static_cast<size_t>(message_length);
 }
 

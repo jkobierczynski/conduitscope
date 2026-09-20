@@ -318,6 +318,70 @@ at the same priority tier as the items they extend:
    part of the security baseline for a public repository rather than
    optional decoration.
 
+**Correction to item 7, found while extending the fuzzing corpus
+(`fuzz/corpus/packet_decode/`, `fuzz/corpus/pcap_reader/`) for
+`fuzz_packet_decode` -- the harness that reaches
+`Decoder::reassemble_tcp_payload` -- and confirmed against the real CLI,
+not just the fuzz harness:** item 7 above states "`kMaxBufferedBytes`
+(decoder.cpp, TCP/COTP reassembly)... [is] already a real, already-present
+protection." That's true for DNP3 fragment reassembly (`process_dnp3_frame`,
+`kMaxBufferedBytes = 65536`) and COTP TSDU reassembly
+(`reassemble_cotp_data_frame`, `kMaxBufferedBytes = 1 << 20`), but
+**`reassemble_tcp_payload` itself -- the general cross-segment buffering path
+every one of Modbus/TCP, IEC 104, EtherNet/IP, TPKT/S7comm/S7comm-Plus/MMS,
+HART-IP, OPC UA, MQTT, and FF-HSE goes through -- has no analogous cap of its
+own.** It buffers `fb.bytes` up to whatever each protocol's own
+`*_declared_length()` function returns, with no independent ceiling. Most of
+those functions ARE naturally or explicitly bounded -- Modbus/TCP's MBAP
+length is checked against `kMaxPlausibleMbapLength = 300`
+(`modbus.cpp`), EtherNet/IP's and TPKT's declared lengths come from 16-bit
+fields (~64KB ceiling), IEC 104's and HART-IP's are similarly field-width-
+bounded -- but **`opcua_declared_length()` (`opcua.cpp`) and
+`ffhse_declared_length()` (`ffhse.cpp`) read a raw 32-bit length field with
+only a `>= 8` / `>= 12` floor and no ceiling at all**, and
+`mqtt_declared_length()`'s variable-byte-integer `remaining_length` can reach
+~256MB, far above every other protocol's own bound here. Confirmed against
+the actual `conduitscope` CLI, not just the fuzz harness: a single 66-byte
+OPC UA TCP segment (`fuzz/corpus/packet_decode/`'s
+`resource_exhaustion_opcua_huge_declared_size` seed) produces `buffering a
+OPC UA message PDU/frame split across TCP segments 51000->4840: 12 of
+4294967280 declared byte(s) seen so far ... waiting for more` -- i.e. this
+flow's `TcpFlowBuffer` will keep growing, unbounded by anything in
+`reassemble_tcp_payload` itself, for as long as segments keep arriving,
+exactly the "PCAP containing thousands of flows that each announce 'I have
+another 4 GB of data coming'" scenario the review's own §3 describes. The
+audit item 7 already calls for should specifically include adding a
+`kMaxBufferedBytes`-style cap to `reassemble_tcp_payload` (matching the
+pattern already established for DNP3/COTP) and a plausibility ceiling on
+`opcua_declared_length()`/`ffhse_declared_length()`, not only making the
+*existing* caps configurable -- the general TCP path and these two
+protocols' declared-length fields have no cap yet to make configurable.
+`fuzz/corpus/packet_decode/`'s new `resource_exhaustion_*` seeds and
+`tcp_reassembly_*`/`tcp_*` seeds (overlap, retransmission, sequence-number
+wraparound, out-of-order gap-abandon, many simultaneous flows, FIN/RST
+mid-reassembly, single-byte and zero-length segments) are regression
+fixtures for this area once it's addressed, and a useful mutation-diversity
+base for `fuzz_packet_decode` in the meantime.
+
+**Update: implemented.** `reassemble_tcp_payload` (`decoder.cpp`) now caps
+per-flow buffering at 16MiB / 20,000 segments -- reusing the same "16MiB is
+implausible for anything real" ceiling `pcap_reader.cpp`'s own
+`kMaxPlausiblePacketBytes`/`kMaxPlausibleBlockBytes` already established,
+rather than inventing a third magic number -- and mirrors DNP3/COTP's own
+byte-count + segment-count shape; when the cap fires, the in-progress
+reassembly is abandoned and the segment's own payload is tried fresh, same
+as the existing sequence-gap-abandon behavior. `opcua_declared_length()` and
+`ffhse_declared_length()` now also reject an implausible (>16MiB) declared
+size outright, the same way `modbus_tcp_declared_length()` already rejects
+an implausible MBAP length -- the more precise fix, since the flow then
+never enters buffering in the first place. Verified: the original
+repro now decodes the 66-byte OPC UA segment immediately as a one-shot
+truncated message instead of buffering towards ~4GB; a legitimate 2-segment
+OPC UA reassembly still reassembles correctly; full CTest suite (1106/1106)
+and all 9 `fuzz_*_corpus_regression` tests pass under the sanitizer build;
+fresh 60-second ASan/UBSan mutation bursts on `fuzz_packet_decode` and
+`fuzz_pcap_reader` (the two harnesses that exercise this code) found nothing.
+
 
 ## PROTOCOL DETECTION
 
