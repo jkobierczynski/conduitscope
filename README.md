@@ -1,10 +1,10 @@
-# Conduitscope
+# conduitscope
 
 <p align="center">
-  <img src="assets/logo.jpg" alt="conduitscope logo: an amber warning-sign triangle with a shark whose eyes fire laser beams" width="280">
+  <img src="assets/logo.jpg" alt="conduitscope logo: an amber warning-sign triangle with a shark whose eyes fire laser beams" width="220">
 </p>
 
-`Conduitscope` decodes Modbus/TCP, DNP3, IEC 60870-5-104, S7comm/COTP (Siemens S7 PLC
+`conduitscope` decodes Modbus/TCP, DNP3, IEC 60870-5-104, S7comm/COTP (Siemens S7 PLC
 protocol) and S7comm-Plus (Siemens TIA Portal / S7-1200/1500's newer protocol),
 EtherNet/IP (CIP explicit and implicit messaging), PROFINET RT (DCP device
 discovery/configuration and cyclic real-time I/O data), IEC 61850-8-1 GOOSE,
@@ -108,7 +108,7 @@ traffic match what the segmentation policy says it should" question.
 
 ## Status
 
-Groundwork / v0.1.7. What works right now:
+Groundwork / v0.1.0. What works right now:
 
 - Classic pcap and pcapng file reading, auto-detected (Ethernet and raw-IP
   link types; IPv4; TCP, with PDU/frame-level reassembly across TCP segments
@@ -587,10 +587,12 @@ Groundwork / v0.1.7. What works right now:
   not just a synthetic fixture). Connect (session handshake), Notification
   (the cyclic/subscribed-variable feed), CreateObject, Explore, GetLink,
   BeginSequence/EndSequence, Invoke, and GetVarSubStreamed are all
-  recognized and named but not body-decoded; DataFW1_5 (firmware >= V1.5)
-  gets header-only decode, a deliberately more conservative scope cut after
-  this decoder could not independently confirm the reference plugin's own
-  byte-accounting for where that variant's body actually starts. Checksums/
+  recognized and named but not body-decoded; DataFW1_5 (firmware >= V1.5),
+  by contrast, is fully Tier-1 decoded -- confirmed against a real S7-1212C
+  capture that its own Integrity value just moves to the front of the Data
+  part (same shape, no length-prefix byte), after which the same
+  GetMultiVariables/SetMultiVariables/SetVariable/DeleteObject/CreateObject
+  handling applies. Checksums/
   digests (the Integrity part's SHA-256-sized value) are surfaced, never
   verified (DNP3's data-link CRCs and HART-IP's own Data-Link Checksum, by
   contrast, are now genuinely validated -- see below). Two real S7-1511

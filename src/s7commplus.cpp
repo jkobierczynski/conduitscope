@@ -718,6 +718,32 @@ void decode_integrity(Cursor& c, S7CommPlusFrame& frame) {
     }
 }
 
+// DataFW1_5's own Integrity shape, at the FRONT of the Data part rather than the end: a
+// varuint32 id (same as decode_integrity above) directly followed by a fixed 32-byte digest,
+// with NO length-prefix byte in between -- unlike decode_integrity's shape, where that length
+// byte is present and is normally 32 anyway. Confirmed against a real capture from a physical
+// S7-1212C (firmware version not visible on the wire) driven by a genuine Siemens KTP 400 Basic
+// HMI panel: consuming exactly id + 32 bytes here reliably realigns the remainder of the Data
+// part onto a valid opcode byte (0x31/0x32/0x33), and the function bodies that then decode are
+// internally consistent -- matching request/response sequence numbers, and, for the repeated
+// SetVariable telegrams an HMI panel sends to report its own health back to the CPU (object id
+// 0x70400002, well-known variable id 1053, "Cyclic variables number of automatic sent
+// telegrams"), a value that climbs monotonically in lock-step with the sequence number across
+// hundreds of consecutive telegrams. That is real device evidence, not a byte-layout guess, so
+// this decode is Tier 1 (not experimental) -- see the DataFW1_5 paragraph in s7commplus.hpp,
+// which this finding corrects (the reference plugin's own comments describe a shorter, id-only
+// shape with no digest bytes for DataFW1_5; that either describes different firmware or was
+// misread previously -- either way, this device's own wire behavior now governs here).
+void decode_integrity_fw1_5(Cursor& c, S7CommPlusFrame& frame) {
+    frame.has_integrity = true;
+    read_varuint32(c);  // integrity id -- see decode_integrity above
+    frame.integrity_digest_length = 32;
+    if (c.remaining() >= 32) {
+        c.bytes(32);  // digest bytes themselves are not verified -- see hpp file header
+        frame.integrity_digest_present = true;
+    }
+}
+
 }  // namespace
 
 std::optional<S7CommPlusFrame> try_parse_s7comm_plus(ByteSpan data) {
@@ -766,12 +792,6 @@ std::optional<S7CommPlusFrame> try_parse_s7comm_plus(ByteSpan data) {
         frame.notes.push_back("Connect PDU (session establishment handshake) is recognized but "
                                "not decoded in this release -- see LIMITATIONS in docs/MANUAL.md");
         frame.summary = "Connect";
-    } else if (frame.is_fw1_5) {
-        frame.notes.push_back("DataFW1_5 PDU (firmware >= V1.5) moves its Integrity part to a "
-                               "position this decoder does not model with confidence -- its Data "
-                               "part is not decoded in this release, see LIMITATIONS in "
-                               "docs/MANUAL.md");
-        frame.summary = "DataFW1_5 (" + std::to_string(data_length) + " byte(s) data, not decoded)";
     } else {
         // PDU type Data (0x02) -- the Tier-1 target. Any ParseError anywhere below (a truncated
         // capture, or hitting an unrecognized value datatype -- see decode_value_element) is
@@ -779,6 +799,13 @@ std::optional<S7CommPlusFrame> try_parse_s7comm_plus(ByteSpan data) {
         try {
             Cursor dc(data_part);
             frame.has_data_part = true;
+
+            if (frame.is_fw1_5) {
+                // DataFW1_5 moves its Integrity value to the front of the Data part -- see
+                // decode_integrity_fw1_5 above for what confirms this and its exact shape. The
+                // ordinary Data(0x02) opcode-led body layout resumes immediately after it.
+                decode_integrity_fw1_5(dc, frame);
+            }
             frame.opcode = dc.u8();
             frame.opcode_name = s7commplus_opcode_name(frame.opcode);
 
@@ -859,7 +886,8 @@ std::optional<S7CommPlusFrame> try_parse_s7comm_plus(ByteSpan data) {
             // Integrity part: only attempted for the shapes this file understands (Tier-1
             // function bodies just decoded above); left alone otherwise since a Tier-2 body's
             // own undecoded length means the integrity part's true position isn't known.
-            if (frame.body_decoded && dc.remaining() >= 32) {
+            // (DataFW1_5's integrity was already consumed at the front, above.)
+            if (!frame.is_fw1_5 && frame.body_decoded && dc.remaining() >= 32) {
                 decode_integrity(dc, frame);
             }
         } catch (const ParseError& e) {

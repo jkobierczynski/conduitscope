@@ -4178,6 +4178,14 @@ def s7p_integrity(integrity_id: int = 1, digest_len: int = 32) -> bytes:
     return out
 
 
+def s7p_integrity_fw1_5(integrity_id: int = 1) -> bytes:
+    """DataFW1_5's own Integrity shape, at the FRONT of the Data part rather than the end: the
+    same varuint32 id + 32-byte digest as s7p_integrity() above, but with NO length-prefix byte
+    in between -- confirmed against a real S7-1212C capture, see decode_integrity_fw1_5 in
+    src/s7commplus.cpp."""
+    return vlq_u(integrity_id) + bytes((i * 5 + 11) % 256 for i in range(32))  # arbitrary filler
+
+
 def s7p_envelope(opcode: int, function_code: int, seq: int, body: bytes, session_id: int = 0,
                   integrity: bool = True) -> bytes:
     out = bytearray([opcode])
@@ -4224,9 +4232,12 @@ def build_s7commplus_sample():
     response covering nearly every datatype (including a genuinely nested Struct-of-Struct, an
     Array, an Addressarray, and a Sparsearray) plus a per-item error entry; SetMultiVariables in
     both its marker==0 (native symbolic item-address) and marker!=0 (object-ID) request shapes,
-    responses with per-item errors; SetVariable and DeleteObject request/response pairs. Then the
-    Tier-2 (named, not body-decoded) shapes: Connect, Notification, DataFW1_5, and one
-    representative "other" function code (Explore) neither direction decodes. Then a Keep Alive
+    responses with per-item errors; SetVariable and DeleteObject request/response pairs; and a
+    DataFW1_5-framed GetMultiVariables request (Tier 1, same body decode as PDU type Data, just
+    with its own Integrity value at the front of the Data part instead of the end -- confirmed
+    against a real S7-1212C capture, see decode_integrity_fw1_5 in src/s7commplus.cpp). Then the
+    Tier-2 (named, not body-decoded) shapes: Connect, Notification, and one representative
+    "other" function code (Explore) neither direction decodes. Then a Keep Alive
     PDU (its own distinct 4-byte-header-only framing). Then two deliberate edge cases: a value with
     an array-of-Struct (the one shape this decoder deliberately refuses to decode, throwing
     ParseError rather than risk silent misalignment -- see s7commplus.hpp/decode_value's own
@@ -4368,11 +4379,14 @@ def build_s7commplus_sample():
     notif_body = bytes([S7P_OPCODE_NOTIFICATION]) + bytes(range(30))
     add(False, dt(s7p_frame(S7P_PDUTYPE_DATA, notif_body)))
 
-    # 18) DataFW1_5 (Tier-2: header only -- PDU type/Data Length/trailer decoded, entire Data part
-    #     left raw, see s7commplus.hpp on why).
-    fw15_data = s7p_envelope(S7P_OPCODE_REQUEST, S7P_FC_GETMULTIVAR, 7,
-                              s7p_getmultivar_request([s7p_item_symbolic(0x1, 0x52)]),
-                              session_id=0x1001, integrity=False)
+    # 18) DataFW1_5 (Tier 1, same as PDU type Data -- its own Integrity value just sits at the
+    #     FRONT of the Data part instead of the end, confirmed against a real S7-1212C capture,
+    #     see decode_integrity_fw1_5 in src/s7commplus.cpp). Once that's consumed, the rest is an
+    #     ordinary GetMultiVariables request, decoded the same way PDU type Data's own is.
+    fw15_data = s7p_integrity_fw1_5() + s7p_envelope(
+        S7P_OPCODE_REQUEST, S7P_FC_GETMULTIVAR, 7,
+        s7p_getmultivar_request([s7p_item_symbolic(0x1, 0x52)]),
+        session_id=0x1001, integrity=False)
     add(True, dt(s7p_frame(S7P_PDUTYPE_DATAFW1_5, fw15_data)))
 
     # 19) & 20) Explore (Tier-2: an "other" function code neither direction decodes).

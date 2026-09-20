@@ -437,8 +437,9 @@ struct DecodedPacket {
     // Same 50-entry cap.
     std::vector<std::string> s7plus_item_errors;
     bool s7plus_has_integrity = false;
-    bool s7plus_integrity_digest_present = false;  // false for the DataFW1_5 id-only shape (not
-                                                      // decoded in this release) or a short digest
+    bool s7plus_integrity_digest_present = false;  // false when the digest bytes weren't there
+                                                      // to consume (a truncated capture) or,
+                                                      // pre-DataFW1_5-fix, a digest_len != 32
     uint8_t s7plus_integrity_digest_length = 0;      // expected 32; digest bytes never verified
     bool s7plus_has_trailer = false;
 

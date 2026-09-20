@@ -255,25 +255,25 @@ Discussed and adopted, in this order:
    burst each, on the order of 10^6-10^7 executions per target, before
    being committed.
 
-**Fuzzing campaign log.** Corpus provenance and hand-crafted expansion status for the nine
-harnesses in [fuzz/](../fuzz/), plus every dedicated real-time (not just the short commit-time
-smoke burst) campaign run against them so far -- kept up to date as further runs happen:
+   **Fuzzing campaign log.** Corpus provenance and hand-crafted expansion status for the nine
+   harnesses in [fuzz/](../fuzz/), plus every dedicated real-time (not just the short commit-time
+   smoke burst) campaign run against them so far -- kept up to date as further runs happen:
 
-| Harness | Seed corpus | Hand-crafted expansion | Dedicated fuzzing campaign(s) run | Findings |
-|---|---|---|---|---|
-| `fuzz_pcap_reader` | `tests/sample_*.pcap` extracts | +24 seeds (classic pcap/pcapng: truncated headers, `incl_len` over/under the plausibility ceiling, byte-order/section-switch variety, block-length mismatches) | 16 workers x 2 hours: 345.4M executions across the 15 workers that ran to completion, `cov:40 ft:85` (plateaued); the 16th worker hit a libFuzzer timeout (1528s, over the 1200s cap) inside `PcapReader::next`'s buffer allocation -- replaying that same code path at its 16MB cap standalone takes 85ms, so this looks like host contention from running 16 workers at once rather than an algorithmic bug, but isn't fully ruled out without the original crashing input | -- |
-| `fuzz_packet_decode` | `tests/sample_*.pcap` extracts | +14 seeds (TCP reassembly: overlap/retransmission, sequence-number wraparound, out-of-order gap-abandon, many simultaneous flows, FIN/RST mid-reassembly, single-byte/zero-length segments; plus the resource-exhaustion probes that found the finding at right) | 8 workers x 1 hour: 203.1M executions, 0 crashes, `cov:597 ft:3463` (plateaued); corpus grew 5->7,803 files from organic finds | Found the `reassemble_tcp_payload`/`opcua_declared_length`/`ffhse_declared_length` unbounded-buffering gap -- see "Correction to item 7" and "Update: implemented" above (fixed); this same log also shows the INT32_MIN-negation UB in `reassemble_tcp_payload` (decoder.cpp) and the signed-left-shift UB in `bacnet.cpp`'s `read_signed64` noted in the `fuzz_bacnet` row below -- both already fixed, with regression seeds in this harness's own corpus |
-| `fuzz_dnp3` | `tests/sample_*.pcap` extracts | none yet | 8 workers x 1 hour: 903.6M executions, 0 crashes, `cov:78 ft:295` (plateaued) | -- |
-| `fuzz_cotp_s7comm` | `tests/sample_*.pcap` extracts | none yet | 8 workers x 1 hour: 546.0M executions, 0 crashes, `cov:120 ft:322-326` (plateaued); corpus grew 132->306 files from organic finds | -- |
-| `fuzz_mqtt` | `tests/sample_*.pcap` extracts | none yet | 8 workers x 1 hour: 1.03B executions, 0 crashes, `cov:66 ft:190` (plateaued) | -- |
-| `fuzz_bacnet` | `tests/sample_*.pcap` extracts | +67 seeds | 8 workers x 1 hour: 2.63B executions, 0 crashes, `cov:83 ft:182` (plateaued) | Signed-left-shift UB in `bacnet.cpp`'s `read_signed64`, originally found via `fuzz_packet_decode` before this dedicated harness existed (fixed) |
-| `fuzz_iec104` | `tests/sample_*.pcap` extracts | none yet | 8 workers, ~3.12B executions total, 0 crashes, `cov:132 ft:536-537` -- the run's `-max-total-time=3600` flag has a typo (libFuzzer wants `-max_total_time`, with an underscore); libFuzzer warned and ignored it, so all 8 workers ran uncapped until manually interrupted rather than stopping at 1 hour | -- |
-| `fuzz_enip` | `tests/sample_*.pcap` extracts | +165 seeds (encapsulation commands, EPATH/CIP recursion to and past `kMaxCipRecursionDepth`, every CIP elementary type, CPF item variety, CIP I/O) | 8 workers x 1 hour: 229.4M executions, 0 crashes, `cov:70 ft:326` (up from `ft:321` at init); corpus grew 310->372 files from organic finds; an earlier 8 workers x 1 hour run against a smaller, pre-expansion 85-seed corpus logged 816.0M executions, 0 crashes, `cov:70 ft:322` | -- |
-| `fuzz_s7comm_plus` | `tests/sample_*.pcap` extracts | +98 seeds (every PDU type/opcode, both Tier-1 function directions, every value datatype, Struct nesting to and past `kMaxStructDepth`, the Integrity part, VLQ edge cases) | 8 workers x 1 hour: 601.9M executions, 0 crashes, `cov:126 ft:465` (plateaued); a later 8 workers x 1 hour run against the grown 350-seed corpus: 482.9M executions, 0 crashes, `cov:134 ft:480` | -- |
+   | Harness | Seed corpus | Hand-crafted expansion | Dedicated fuzzing campaign(s) run | Findings |
+   |---|---|---|---|---|
+   | `fuzz_pcap_reader` | `tests/sample_*.pcap` extracts | +24 seeds (classic pcap/pcapng: truncated headers, `incl_len` over/under the plausibility ceiling, byte-order/section-switch variety, block-length mismatches) | 16 workers x 2 hours: 345.4M executions across the 15 workers that ran to completion, `cov:40 ft:85` (plateaued); the 16th worker hit a libFuzzer timeout (1528s, over the 1200s cap) inside `PcapReader::next`'s buffer allocation -- replaying that same code path at its 16MB cap standalone takes 85ms, so this looks like host contention from running 16 workers at once rather than an algorithmic bug, but isn't fully ruled out without the original crashing input | -- |
+   | `fuzz_packet_decode` | `tests/sample_*.pcap` extracts | +14 seeds (TCP reassembly: overlap/retransmission, sequence-number wraparound, out-of-order gap-abandon, many simultaneous flows, FIN/RST mid-reassembly, single-byte/zero-length segments; plus the resource-exhaustion probes that found the finding at right) | 8 workers x 1 hour: 203.1M executions, 0 crashes, `cov:597 ft:3463` (plateaued); corpus grew 5->7,803 files from organic finds | Found the `reassemble_tcp_payload`/`opcua_declared_length`/`ffhse_declared_length` unbounded-buffering gap -- see "Correction to item 7" and "Update: implemented" above (fixed); this same log also shows the INT32_MIN-negation UB in `reassemble_tcp_payload` (decoder.cpp) and the signed-left-shift UB in `bacnet.cpp`'s `read_signed64` noted in the `fuzz_bacnet` row below -- both already fixed, with regression seeds in this harness's own corpus |
+   | `fuzz_dnp3` | `tests/sample_*.pcap` extracts | none yet | 8 workers x 1 hour: 903.6M executions, 0 crashes, `cov:78 ft:295` (plateaued) | -- |
+   | `fuzz_cotp_s7comm` | `tests/sample_*.pcap` extracts | none yet | 8 workers x 1 hour: 546.0M executions, 0 crashes, `cov:120 ft:322-326` (plateaued); corpus grew 132->306 files from organic finds | -- |
+   | `fuzz_mqtt` | `tests/sample_*.pcap` extracts | none yet | 8 workers x 1 hour: 1.03B executions, 0 crashes, `cov:66 ft:190` (plateaued) | -- |
+   | `fuzz_bacnet` | `tests/sample_*.pcap` extracts | +67 seeds | 8 workers x 1 hour: 2.63B executions, 0 crashes, `cov:83 ft:182` (plateaued) | Signed-left-shift UB in `bacnet.cpp`'s `read_signed64`, originally found via `fuzz_packet_decode` before this dedicated harness existed (fixed) |
+   | `fuzz_iec104` | `tests/sample_*.pcap` extracts | none yet | 8 workers, ~3.12B executions total, 0 crashes, `cov:132 ft:536-537` -- the run's `-max-total-time=3600` flag has a typo (libFuzzer wants `-max_total_time`, with an underscore); libFuzzer warned and ignored it, so all 8 workers ran uncapped until manually interrupted rather than stopping at 1 hour | -- |
+   | `fuzz_enip` | `tests/sample_*.pcap` extracts | +165 seeds (encapsulation commands, EPATH/CIP recursion to and past `kMaxCipRecursionDepth`, every CIP elementary type, CPF item variety, CIP I/O) | 8 workers x 1 hour: 229.4M executions, 0 crashes, `cov:70 ft:326` (up from `ft:321` at init); corpus grew 310->372 files from organic finds; an earlier 8 workers x 1 hour run against a smaller, pre-expansion 85-seed corpus logged 816.0M executions, 0 crashes, `cov:70 ft:322` | -- |
+   | `fuzz_s7comm_plus` | `tests/sample_*.pcap` extracts | +98 seeds (every PDU type/opcode, both Tier-1 function directions, every value datatype, Struct nesting to and past `kMaxStructDepth`, the Integrity part, VLQ edge cases), plus 31 real-device seeds extracted from a genuine S7-1212C + Siemens KTP 400 Basic HMI capture (see `tests/real_captures/s7comm/ATTRIBUTION.md`'s DataFW1_5 addendum) | 8 workers x 1 hour: 601.9M executions, 0 crashes, `cov:126 ft:465` (plateaued); a later 8 workers x 1 hour run against the grown 350-seed corpus: 482.9M executions, 0 crashes, `cov:134 ft:480`; a further 4 workers x 60s burst after the DataFW1_5 fix and real-device seed addition: ~1.8M executions, 0 crashes, `cov:128 ft:371-372` | -- |
 
-All nine also pass a short (10^5-10^7 execution) ASan/UBSan mutation burst as part of committing
-their harness/corpus in the first place, per item 2's own text above -- the campaign column here
-is specifically for longer, dedicated runs beyond that commit-time smoke bar.
+   All nine also pass a short (10^5-10^7 execution) ASan/UBSan mutation burst as part of committing
+   their harness/corpus in the first place, per item 2's own text above -- the campaign column here
+   is specifically for longer, dedicated runs beyond that commit-time smoke bar.
 
 3. **The registration-model decoder refactor, after that** (not yet
    started, no committed timeline): a `ProtocolDecoder` interface plus
@@ -1154,7 +1154,10 @@ anything else on this list.
    standing on its own now that the PLC Control/Stop half above is done:
    extending S7comm-Plus's own Tier-2 functions (CreateObject, Explore,
    GetLink, BeginSequence/EndSequence, Invoke, GetVarSubStreamed,
-   Notification, Connect, and DataFW1_5's Data part) to Tier 1, plus
+   Notification, Connect) to Tier 1 -- **DataFW1_5 itself is done**: confirmed
+   against a real S7-1212C + Siemens KTP 400 Basic HMI capture and promoted to
+   Tier 1, see docs/PROTOCOL_COVERAGE.md's S7comm-Plus section and
+   `tests/real_captures/s7comm/ATTRIBUTION.md`'s DataFW1_5 addendum -- plus
    S7comm-Plus's own above-COTP, trailer-based reassembly (currently
    detected and reported, not reassembled -- see docs/PROTOCOL_COVERAGE.md's
    S7comm-Plus section, `include/conduitscope/s7commplus.hpp`'s file header,
@@ -2606,6 +2609,66 @@ unlike any of the eight routing/redundancy protocols decoded so far.
     report lines (`docs/USER_GUIDE.md`'s `policy validate`/`inventory`
     sections) are untouched, since they're each that command's own separate,
     already-established report format, not `TextWriter`'s.
+
+20. **Beckhoff TwinCAT / ADS (Automation Device Specification).** Jurgen
+    asked for this directly; deliberately **not started yet** -- it's a new
+    protocol, and the "External code review and engineering priorities"
+    section's own item 5 above says no new protocols until items 1-3 there
+    (CI-wired sanitizers/fuzzing, the registration-model decoder refactor)
+    are substantially underway. Recorded here, at Tier 1 depth (full field
+    decoding, matching most of this codebase's other protocols, not just
+    port/shape recognition), so the research already done isn't lost:
+    - **Transport**: AMS/TCP, TCP port 48898 (0xBF02), no dedicated UDP
+      framing to worry about for a first pass (AMS also rides UDP/serial in
+      some Beckhoff setups, but TCP is the common industrial-network case
+      and where every other protocol here starts too).
+    - **Framing**: a 6-byte AMS/TCP header (2 reserved bytes + a 4-byte
+      little-endian Data Length) directly precedes the AMS header itself --
+      structurally the same "fixed small header, length-prefixed payload"
+      shape TPKT/COTP and MBAP already are in this codebase, so the
+      existing `Cursor`/`ByteSpan` bounds-checked-read pattern applies
+      directly with no new primitive needed.
+    - **AMS header** (32 bytes, all fields little-endian except the two
+      AmsNetId fields which are just raw 6-byte address bytes): target
+      AmsNetId (6) + target AMS port (2) + source AmsNetId (6) + source AMS
+      port (2) + Command ID (2) + State Flags (2, bit 0 = request/response,
+      bit 2 = TCP vs. UDP -- see Beckhoff's own AMS Header spec page) + Data
+      Length (4) + Error Code (4) + Invoke ID (4), then the command-specific
+      payload.
+    - **Command IDs** (2-byte field, the natural `enum class` + name-lookup
+      this codebase already does for every other protocol's PDU-type byte):
+      `0x0001` ReadDeviceInfo, `0x0002` Read, `0x0003` Write, `0x0004`
+      ReadState, `0x0005` WriteControl, `0x0006` AddDeviceNotification,
+      `0x0007` DeleteDeviceNotification, `0x0008` DeviceNotification,
+      `0x0009` ReadWrite.
+    - **Detection gate candidate**: State Flags' low bits constrain it to a
+      handful of valid combinations (request/response x TCP/UDP), Command
+      ID must be one of the nine values above, and Data Length must
+      plausibly fit the remaining TCP payload -- likely comparable in
+      strength to EtherNet/IP's own multi-field encapsulation-header gate
+      (docs/DEVELOPMENT.md's PROTOCOL DETECTION section), stronger than
+      Modbus's single protocol-id==0 check. Worth explicitly researching
+      for collisions against this codebase's other ~60 detections before
+      committing to an ordering, the same survey OPC UA/EtherNet/IP/HART-IP
+      each got in PROTOCOL DETECTION below.
+    - **Read/Write payload addressing**: an IndexGroup (4 bytes) + IndexOffset
+      (4 bytes) pair addresses the target PLC symbol/variable -- conceptually
+      similar to S7comm's DB/offset item addressing already in this
+      codebase, so `s7comm_items`-style rendering is a reasonable template.
+    - **Symbolic name resolution** (mapping a human-readable PLC variable
+      name to an IndexGroup/IndexOffset pair, via ADS's own
+      `ADSIGRP_SYM_HNDBYNAME`/symbol-table reads) is real depth beyond the
+      raw IndexGroup/IndexOffset numbers and should probably be its own
+      follow-up once basic Read/Write decoding is solid, the same
+      "port-heuristic now, tighten later" progression other protocols here
+      already followed.
+    - Primary source: Beckhoff's own public ADS/AMS specification
+      (infosys.beckhoff.com, "TwinCAT ADS/AMS - Specification" and "AMS
+      Header" pages) -- no real-capture corpus for this yet, so
+      `tests/real_captures/` coverage (this codebase's usual validation bar
+      for a protocol this consequential) would need to be sourced or
+      synthesized before this is considered done to the same standard as
+      the rest of PROTOCOL_COVERAGE.md.
 
 ### Protocols not covered at all
 

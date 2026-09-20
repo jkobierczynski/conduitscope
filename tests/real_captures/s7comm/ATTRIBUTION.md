@@ -166,9 +166,76 @@ decoded against it -- see the commit history / development notes for that.
 **What these two files do *not* exercise**, and so remain validated only
 against the synthetic fixture (`tools/make_sample_pcap.py`'s
 `build_s7commplus_sample()`) rather than real traffic: `KeepAlive` PDUs,
-`DataFW1_5` (PDU type `0x03`, deliberately left undecoded in this release --
-see LIMITATIONS), `Notification` (opcode `0x33`), `CreateObject`, `Explore`,
+`Notification` (opcode `0x33`), `CreateObject`, `Explore`,
 `GetLink`, `BeginSequence`/`EndSequence`, `Invoke`, a `DeleteObject`
 *response*, array-of-struct (deliberately unsupported -- throws `ParseError`
 rather than risk silent misalignment), and a `SparseArray`-encoded value.
-None of these happened to appear in either real capture.
+None of these happened to appear in either real capture. (`DataFW1_5` used to
+be on this list too -- see the addendum immediately below for why it no
+longer is.)
+
+## S7comm-Plus addendum: DataFW1_5, confirmed against a real S7-1212C
+
+The capture behind this addendum (`s5comm_S71200-1212.pcapng`, not checked
+into this repository -- see the note at the end of this section) was
+originally collected for a different purpose entirely: confirming or fixing
+the classic-S7comm `0xB2` "symbolic addressing" decode discussed above, using
+a real S7-1200 (a 1212C CPU) driven by a genuine Siemens KTP 400 Basic HMI
+panel, captured over a managed switch's SPAN/mirror port. It turned out this
+pairing doesn't exercise `0xB2` at all: a KTP 400 Basic talking to an
+S7-1200/1500 CPU through TIA Portal's own configuration uses **S7comm-Plus**,
+not classic S7comm -- the very first payload byte on every telegram is `0x72`,
+not `0x32`. So this capture is not real-world validation for `0xB2` (that
+question is still open -- see LIMITATIONS -- and would need a client that
+deliberately speaks classic S7comm symbolic addressing to an S7-1200/1500,
+such as Snap7 or node-s7, rather than a TIA-Portal-ecosystem HMI).
+
+What it turned out to validate instead was more valuable: ~197 seconds and
+1,708 S7comm-Plus telegrams, of which **1,660 (97%) were `DataFW1_5`** (PDU
+type `0x03`) -- the HMI panel's firmware sends almost none of its
+`GetMultiVariables`/`SetMultiVariables`/`SetVariable` traffic as plain PDU
+type `Data` (`0x02`). Before this capture, `DataFW1_5` was believed, per the
+reference plugin's own source comments, to carry a shorter, id-only Integrity
+value with no digest bytes, and was deliberately left undecoded (Tier 2) on
+that basis. Reconstructing the wire bytes directly from this real traffic
+(stripping TPKT/COTP headers, locating the S7comm-Plus header, then hand-
+aligning on the next valid opcode byte -- `0x31`/`0x32`/`0x33`/`0x02`) showed
+a consistent, different shape across every sample: DataFW1_5's own Integrity
+value sits at the very *front* of the Data part rather than the end, as the
+same varuint32 id followed directly by a fixed 32-byte digest -- the same
+shape PDU type Data's own trailing Integrity uses, just relocated, and with
+no length-prefix byte this time (unlike the trailing form, which has an
+explicit `digest_len` byte, normally `32`). See `decode_integrity_fw1_5` in
+`src/s7commplus.cpp` for the implementation and the same writeup in code.
+
+This is now a Tier-1 (not experimental) decode, on real-device evidence, not
+a byte-layout guess: consuming exactly `id + 32 bytes` at the front of every
+DataFW1_5 Data part reliably realigned the remainder onto a valid opcode
+byte and a body that decoded consistently across all 1,660 real frames --
+**zero per-item decode errors and zero `ParseError`-triggered fallbacks** in
+the whole capture. Two independent semantic-coherence checks back this up
+beyond "it didn't crash": request/response pairs correctly correlate by
+`s7plus_sequence_number` with plausible decoded values throughout, and the
+HMI panel's own repeated `SetVariable` telegrams reporting its health back to
+the CPU (well-known object id `0x70400002`, variable id `1053`, "Cyclic
+variables number of automatic sent telegrams") show a value that climbs
+monotonically in lock-step with the telegram sequence number across hundreds
+of consecutive samples -- exactly the behavior a genuine live counter would
+produce, not something a misaligned decode would coincidentally reproduce.
+
+Once this relocated Integrity block is consumed, DataFW1_5's Data part has
+the identical opcode-led body layout as ordinary PDU type Data, so every
+Tier-1 function this decoder already knew (`GetMultiVariables`,
+`SetMultiVariables`, `SetVariable`, `CreateObject`, `DeleteObject`) decodes
+DataFW1_5 traffic the same way, with no separate per-function work needed.
+This capture is real-world validation for all of those, plus `Notification`
+(recognized, still correctly left undecoded), all riding on DataFW1_5.
+
+This third capture is not checked into this repository the way the two
+`s7comm_plus_1511_*.pcap` files above are -- unlike those, it was supplied
+directly during development rather than sourced from a redistributable public
+collection, so it's kept only as the private evidence behind this finding
+and the synthetic fixture update (`tools/make_sample_pcap.py`'s DataFW1_5
+packet now prepends a realistic leading integrity block, and
+`tests/sample_s7commplus.pcap`/the `s7commplus_datafw1_5_*` CTest cases were
+updated to match), not reproduced here byte-for-byte.

@@ -2327,8 +2327,9 @@ The following fields appear only when `protocol` is `mms`:
 - `s7plus_keepalive_seq`: the Keep Alive PDU's own 1-byte sequence number,
   present only when `s7plus_pdu_type` is `"Keep Alive"`.
 - `s7plus_opcode`: `"Request"`/`"Response"`/`"Notification"`/`"Response2"`,
-  present when `s7plus_pdu_type` is `"Data"` (or `"DataFW1_5"`'s own -- no,
-  DataFW1_5's Data part is not decoded, so this is present only for `"Data"`)
+  present when `s7plus_pdu_type` is `"Data"` or `"DataFW1_5"` (DataFW1_5's own
+  relocated Integrity part is consumed first -- see docs/PROTOCOL_COVERAGE.md
+  -- then the rest of its Data part is opcode-led exactly like plain `"Data"`)
   and an opcode byte was reached.
 - `s7plus_function`: the function code's name (e.g. `"GetMultiVariables"`,
   `"Unknown (0xNNNN)"` for an unrecognized code), present when a
@@ -3342,11 +3343,13 @@ These are current, not aspirational -- each has a corresponding docs/DEVELOPMENT
   GetMultiVariables/SetMultiVariables/SetVariable/DeleteObject.** Every other
   function -- CreateObject, Explore, GetLink, BeginSequence/EndSequence,
   Invoke, GetVarSubStreamed -- and the Notification/Connect PDU shapes are
-  recognized (named) but not body-decoded (Tier 2). `DataFW1_5` (firmware >=
-  V1.5) gets header-only decode; its entire Data part is shown as raw hex,
-  since this decoder could not independently confirm the reference plugin's
-  own byte-accounting for where that variant's function-specific body
-  actually starts -- see docs/PROTOCOL_COVERAGE.md's S7comm-Plus section.
+  recognized (named) but not body-decoded (Tier 2). This applies equally
+  whether the function arrives in an ordinary PDU type Data (`0x02`) telegram
+  or a DataFW1_5 (`0x03`) one: DataFW1_5's own relocated Integrity part
+  (confirmed against a real S7-1212C capture -- see
+  docs/PROTOCOL_COVERAGE.md's S7comm-Plus section) is consumed first, and the
+  Tier-1/Tier-2 split above then applies to its Data part exactly as it does
+  for plain Data.
 - **S7comm-Plus's own above-COTP fragmentation (a telegram split across
   multiple TPKT/COTP frames, signalled by the ABSENCE of the trailer, not
   COTP's own EOT bit) is detected and reported but not reassembled.** A

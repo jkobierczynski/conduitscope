@@ -4280,8 +4280,8 @@ add_test(NAME s7commplus_deleteobject_request_response
 set_tests_properties(s7commplus_deleteobject_request_response PROPERTIES
   PASS_REGULAR_EXPRESSION "\"summary\": \"Data: Request DeleteObject \\(seq=6\\) \\(1 item\\(s\\)\\)\",.*\"s7plus_items\": \\[\"Delete Object Id=0x0000039a\"\\].*\"summary\": \"Data: Response DeleteObject \\(seq=6\\) \\(1 item\\(s\\)\\)\",.*\"s7plus_return_code_name\": \"OK\",.*\"s7plus_items\": \\[\"Delete Object Id=0x0000039a\"\\]")
 
-# Tier-2 (named, not body-decoded) shapes: Connect (both directions), Notification, DataFW1_5
-# (header-only decode), and an "other" function code (Explore) neither direction decodes.
+# Tier-2 (named, not body-decoded) shapes: Connect (both directions), Notification, and an
+# "other" function code (Explore) neither direction decodes.
 add_test(NAME s7commplus_connect_both_directions_not_decoded
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7commplus.pcap" --format text)
 set_tests_properties(s7commplus_connect_both_directions_not_decoded PROPERTIES
@@ -4292,10 +4292,19 @@ add_test(NAME s7commplus_notification_not_decoded
 set_tests_properties(s7commplus_notification_not_decoded PROPERTIES
   PASS_REGULAR_EXPRESSION "Data: Notification[^\n]*\n *note: Notification body \\(subscribed/cyclic variable updates\\) is recognized but not decoded")
 
-add_test(NAME s7commplus_datafw1_5_header_only
+# DataFW1_5 is Tier 1, same as PDU type Data -- its own Integrity value just sits at the front of
+# the Data part instead of the end (confirmed against a real S7-1212C capture, see
+# decode_integrity_fw1_5 in src/s7commplus.cpp). This is a regression guard for that fix: once the
+# leading integrity block is consumed, the GetMultiVariables body behind it must decode normally.
+add_test(NAME s7commplus_datafw1_5_getmultivar_decoded
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7commplus.pcap" --format text)
-set_tests_properties(s7commplus_datafw1_5_header_only PROPERTIES
-  PASS_REGULAR_EXPRESSION "DataFW1_5 \\(24 byte\\(s\\) data, not decoded\\)[^\n]*\n *note: DataFW1_5 PDU \\(firmware >= V1.5\\) moves its Integrity part")
+set_tests_properties(s7commplus_datafw1_5_getmultivar_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[s7comm-plus\\]  DataFW1_5: Request GetMultiVariables \\(seq=7\\) \\(1 item\\(s\\)\\)")
+
+add_test(NAME s7commplus_datafw1_5_getmultivar_item_json
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7commplus.pcap" --format json)
+set_tests_properties(s7commplus_datafw1_5_getmultivar_item_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"s7plus_pdu_type\": \"DataFW1_5\",.*\"s7plus_items\": \\[\"SYM-CRC=00000001, LID=M\"\\],.*\"s7plus_integrity_digest_present\": true")
 
 add_test(NAME s7commplus_other_function_code_not_decoded
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7commplus.pcap" --format text)
@@ -4359,7 +4368,7 @@ set_tests_properties(s7commplus_stats_counted PROPERTIES
 add_test(NAME s7commplus_protocol_filter
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7commplus.pcap" --protocol s7comm-plus --stats)
 set_tests_properties(s7commplus_protocol_filter PROPERTIES
-  PASS_REGULAR_EXPRESSION "protocols:\n *cotp +2\n *parse-error +1\n *s7comm-plus +23.*\ns7comm-plus pdu types:\n *Connect +2\n *Data +18\n *DataFW1_5 +1\n *Keep Alive +2\ns7comm-plus functions:\n *DeleteObject +2\n *Explore +2\n *GetMultiVariables +6\n *SetMultiVariables +4\n *SetVariable +2\ns7comm-plus function bodies fully decoded \\(Tier 1\\): 12")
+  PASS_REGULAR_EXPRESSION "protocols:\n *cotp +2\n *parse-error +1\n *s7comm-plus +23.*\ns7comm-plus pdu types:\n *Connect +2\n *Data +18\n *DataFW1_5 +1\n *Keep Alive +2\ns7comm-plus functions:\n *DeleteObject +2\n *Explore +2\n *GetMultiVariables +7\n *SetMultiVariables +4\n *SetVariable +2\ns7comm-plus function bodies fully decoded \\(Tier 1\\): 13")
 
 # Regression guard for a real false positive: non-Modbus traffic (here, bytes that also happen
 # to satisfy DNP3's 0x05 0x64 start) whose first four bytes look like transaction_id + a valid

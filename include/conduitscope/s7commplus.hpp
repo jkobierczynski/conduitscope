@@ -47,8 +47,9 @@
 //     an Integrity part near the end of most Data/Response bodies (an id plus what is presumed to
 //       be a SHA-256-sized digest -- 32 bytes -- of the telegram, surfaced but never verified,
 //       same posture this codebase already takes toward DNP3/HART-IP checksums) -- DataFW1_5
-//       (firmware >= V1.5) moves a shorter, id-only integrity value to a different position and
-//       omits the digest bytes entirely, per the plugin's own comments;
+//       (firmware >= V1.5) moves this SAME id+32-byte-digest shape to the very FRONT of the Data
+//       part instead, with no length-prefix byte this time (see decode_integrity_fw1_5 in
+//       s7commplus.cpp for what confirms this against a real device);
 //   Trailer (4 bytes): protocol id (0x72) + PDU type + Data Length, mirroring the header -- a
 //     COMPLETE S7comm-Plus telegram always ends with one. A telegram can be split across several
 //     TPKT/COTP frames (a large CreateObject upload or Explore response, mainly); per the
@@ -66,7 +67,13 @@
 //
 // Function-specific bodies this file fully decodes (Tier 1, matching this codebase's usual
 // "the dominant real-world operations get full item/value decode" standard -- see e.g. MMS's own
-// 11-of-78-services split, or OPC UA's Tier 1/Tier 2 split):
+// 11-of-78-services split, or OPC UA's Tier 1/Tier 2 split). This applies equally to PDU type
+// Data (0x02) and DataFW1_5 (0x03) -- once DataFW1_5's own relocated Integrity part (see the
+// wire-structure section above) is consumed, the rest of its Data part has the identical
+// opcode-led body layout, so every function below is decoded the same way regardless of which
+// of the two PDU types carried it. In real traffic DataFW1_5 is in fact the dominant one -- a
+// genuine S7-1212C driven by a Siemens KTP 400 Basic HMI panel sent essentially none of its
+// GetMultiVariables/SetMultiVariables/SetVariable traffic as plain PDU type Data:
 //   - GetMultiVariables / SetMultiVariables (0x054c / 0x0542): the actual variable read/write
 //     traffic that dominates real S7comm-Plus captures, TIA Portal's functional replacement for
 //     classic S7comm's Read Var/Write Var. Item addresses are S7comm-Plus's own native symbolic
@@ -126,16 +133,6 @@
 //     for later per-message integrity, and, on TIA Portal V13+/firmware-encrypted sessions, a
 //     Diffie-Hellman-style key exchange this decoder makes no attempt to parse. Recognized (PDU
 //     type named) but not decoded.
-//   - DataFW1_5 (PDU type 0x03, used by firmware >= V1.5): per the reference plugin's own source
-//     comments (preserved in s7commplus.cpp), this variant moves the Integrity part from the end
-//     of the Data part to a different position near the front, in a shape the plugin's own
-//     author describes as awkward to place in its output tree -- and, critically, the plugin's
-//     own byte-accounting for where the function-specific body then starts is not something this
-//     file could independently confirm with confidence. Rather than risk a wrong offset silently
-//     producing a plausible-looking but incorrect decode, this file decodes ONLY the outer header
-//     (PDU type, Data Length, trailer presence) for DataFW1_5 and shows its entire Data part as
-//     raw hex -- a deliberately more conservative scope cut than PDU type Data's own Tier 1/Tier 2
-//     split above. See LIMITATIONS in docs/MANUAL.md.
 //
 // Variable-Length Quantity ("varuint"/"varint") encoding: NOT the same bit layout as MQTT's own
 // Remaining Length VLQ (mqtt.hpp) -- this one is big-endian/MSB-first (matches the general VLQ

@@ -461,11 +461,14 @@ Data part              (Connect/Data/DataFW1_5 only -- absent for Keep Alive)
   reserved(2) + function code (2 bytes BE) + reserved(2) + sequence number (2 bytes BE)
   Request only: session id (4 bytes) + 1 reserved byte; Response/Response2: 1 reserved byte
   function-specific body
-  Integrity part       near the end of most Data/Response bodies: an id plus what is presumed
-                         to be a SHA-256-sized digest (32 bytes) of the telegram -- surfaced,
-                         never verified, same posture this codebase already takes toward
-                         HART-IP's own checksum (DNP3's data-link CRCs, by contrast, ARE
-                         validated -- see PROTOCOL COVERAGE's DNP3 section)
+  Integrity part       an id plus what is presumed to be a SHA-256-sized digest (32 bytes) of
+                         the telegram -- surfaced, never verified, same posture this codebase
+                         already takes toward HART-IP's own checksum (DNP3's data-link CRCs, by
+                         contrast, ARE validated -- see PROTOCOL COVERAGE's DNP3 section).
+                         Near the END of most Data/Response bodies for PDU type Data (0x02);
+                         for DataFW1_5 (0x03), this SAME id+digest shape (no length-prefix byte
+                         this time) sits at the very FRONT of the Data part instead, ahead of
+                         the opcode -- see the DataFW1_5 note under Tier 1 below
 Trailer (4 bytes)      protocol id + PDU type + Data Length, mirroring the header
 ```
 
@@ -492,6 +495,23 @@ and OPC UA (Tier 1/Tier 2):
 
 **Tier 1 -- fully decoded, both directions:**
 
+- **DataFW1_5 (PDU type `0x03`, firmware >= V1.5)** -- moves the Integrity part described above
+  to the front of the Data part instead of the end; once that's consumed, the rest of the Data
+  part has the identical opcode-led body layout as PDU type Data, so every function below is
+  decoded from it the same way. Confirmed against a real capture from a physical S7-1212C driven
+  by a genuine Siemens KTP 400 Basic HMI panel: consuming exactly id+32-byte-digest at the front
+  reliably realigns the remainder onto a valid opcode byte, and the function bodies that then
+  decode are internally consistent -- matching request/response sequence numbers, and a
+  monotonically climbing value (the HMI panel's own "Cyclic variables number of automatic sent
+  telegrams" health counter, object id `0x70400002` variable id `1053`) that tracks the sequence
+  number in lock-step across hundreds of consecutive telegrams. In that capture, DataFW1_5 was in
+  fact the dominant PDU type -- essentially all real GetMultiVariables/SetMultiVariables/
+  SetVariable traffic arrived this way, not as plain PDU type Data. This decode corrects an
+  earlier reading of the reference plugin's own comments (which describe DataFW1_5's integrity
+  value as shorter and id-only, with no digest bytes) -- either that describes a different
+  firmware generation, or the earlier reading was mistaken; either way, this device's own wire
+  behavior now governs here, and it's Tier 1, not experimental, on that basis. See
+  `tests/real_captures/s7comm/ATTRIBUTION.md`'s S7comm-Plus addendum for the full writeup.
 - **GetMultiVariables (`0x054c`) / SetMultiVariables (`0x0542`)** -- the
   actual variable read/write traffic that dominates real S7comm-Plus
   captures, TIA Portal's functional replacement for classic S7comm's Read
@@ -559,18 +579,6 @@ decoded, Integrity/Trailer still decoded) but body not decoded:**
   random-nonce/session-id exchange and, on TIA Portal V13+/
   firmware-encrypted sessions, a Diffie-Hellman-style key exchange this
   decoder makes no attempt to parse.
-- **DataFW1_5 (PDU type `0x03`, firmware >= V1.5)** -- per the reference
-  plugin's own source comments, this variant moves the Integrity part from
-  the end of the Data part to a different position near the front, in a
-  shape the plugin's own author describes as awkward to place in its own
-  output tree -- and, critically, the plugin's own byte-accounting for
-  where the function-specific body then starts is not something this
-  decoder could independently confirm with confidence. Rather than risk a
-  wrong offset silently producing a plausible-looking but incorrect decode,
-  this decoder decodes ONLY the outer header (PDU type, Data Length,
-  trailer presence) for DataFW1_5 and shows its entire Data part as raw
-  hex -- a deliberately more conservative scope cut than PDU type Data's
-  own Tier 1/Tier 2 split above.
 
 #### Real-world validation
 
@@ -588,14 +596,25 @@ DETECTION on real traffic (every SetMultiVariables request here arrives
 split across 2 TPKT/COTP frames). `opc_request_all_types` lives up to its
 name: a single 40-item GetMultiVariables request/response pair walks nearly
 every datatype this decoder knows in one call. **Zero per-item decode
-errors, zero `ParseError`-triggered fallbacks, in either file.** See
-`tests/real_captures/s7comm/ATTRIBUTION.md`'s own S7comm-Plus addendum for
-the full writeup, including which shapes (KeepAlive, DataFW1_5,
-Notification, CreateObject, Explore, GetLink, BeginSequence/EndSequence,
-Invoke, a DeleteObject response, array-of-Struct, Sparsearray) remain
-validated only against the synthetic fixture (`tests/sample_s7commplus.pcap`,
-built by `tools/make_sample_pcap.py`'s own `build_s7commplus_sample()`) since
-neither real capture happened to exercise them.
+errors, zero `ParseError`-triggered fallbacks, in either file.**
+
+A third real capture, from a physical S7-1212C driven by a genuine Siemens
+KTP 400 Basic HMI panel over a SPAN-mirrored switch port, is what confirmed
+the DataFW1_5 decode described under Tier 1 above -- ~197 seconds, 1,708
+S7comm-Plus telegrams, 1,660 of them DataFW1_5. **Zero per-item decode
+errors, zero `ParseError`-triggered fallbacks** across the whole capture,
+and the request/response sequence-number and system-health-counter
+consistency described above. This capture is real-world validation for
+DataFW1_5, GetMultiVariables, SetMultiVariables, SetVariable, CreateObject,
+DeleteObject, and Notification (recognized, still correctly left
+undecoded) all at once.
+
+See `tests/real_captures/s7comm/ATTRIBUTION.md`'s own S7comm-Plus addendum
+for the full writeup, including which shapes (KeepAlive, Explore, GetLink,
+BeginSequence/EndSequence, Invoke, a DeleteObject response, array-of-Struct,
+Sparsearray) remain validated only against the synthetic fixture
+(`tests/sample_s7commplus.pcap`, built by `tools/make_sample_pcap.py`'s own
+`build_s7commplus_sample()`) since no real capture has exercised them yet.
 
 This project's own code review -- not real-capture validation -- caught two
 genuine correctness bugs before this decoder was ever built or tested: the
