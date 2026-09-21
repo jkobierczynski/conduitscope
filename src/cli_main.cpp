@@ -86,6 +86,11 @@ private:
 };
 
 std::atomic<LiveCapture*> g_active_capture{nullptr};
+// Whether the run currently under a SigintGuard has ANSI color output enabled -- set by
+// SigintGuard's constructor from `decode`'s own `color` (see run_decode), so handle_sigint below
+// knows whether it needs to restore the terminal's default colors. Only `decode` ever passes
+// true here; `policy validate`/`inventory` have no colorized text output to restore.
+std::atomic<bool> g_color_active{false};
 // Counts SIGINT handler invocations currently in progress (0 or 1 on POSIX, since a signal only
 // ever interrupts the thread it was delivered to and can't re-enter while already running there;
 // see below for why it can briefly be more on Windows). SigintGuard's destructor spin-waits on
@@ -95,6 +100,22 @@ std::atomic<int> g_handler_in_flight{0};
 
 extern "C" void handle_sigint(int) {
     g_handler_in_flight.fetch_add(1, std::memory_order_acquire);
+    // Restore the terminal's default colors FIRST, before anything else: without this, Ctrl+C
+    // during a colorized live `decode` leaves the terminal showing whatever ANSI color the most
+    // recently printed line happened to end in (e.g. a yellow "note" or red "malformed" line) --
+    // that state then bleeds into the shell prompt and everything typed afterward, until the user
+    // notices and runs `reset`/`tput sgr0` themselves. write()/_write() (not std::cout) is used
+    // deliberately: it's the low-level, essentially-immediate primitive, not buffered C++ iostream
+    // state that a signal arriving mid-write could otherwise corrupt or race with.
+    if (g_color_active.load(std::memory_order_acquire)) {
+        static const char kResetSequence[] = "\033[0m";
+#ifdef _WIN32
+        _write(_fileno(stdout), kResetSequence, sizeof(kResetSequence) - 1);
+#else
+        ssize_t written = ::write(STDOUT_FILENO, kResetSequence, sizeof(kResetSequence) - 1);
+        (void)written;  // Best-effort: nothing meaningful to do with a short/failed write here.
+#endif
+    }
     LiveCapture* capture = g_active_capture.load();
     if (capture != nullptr) capture->stop();
     g_handler_in_flight.fetch_sub(1, std::memory_order_release);
@@ -118,9 +139,13 @@ extern "C" void handle_sigint(int) {
 // with this destructor) and closes the real race on Windows.
 class SigintGuard {
 public:
-    explicit SigintGuard(LiveCapture* capture) : active_(capture != nullptr) {
+    // `color` should be whatever this run already resolved for its own colorized output (e.g.
+    // run_decode's `color` local) -- default false covers callers (policy validate, inventory)
+    // that have no colorized text output for handle_sigint to need to reset.
+    explicit SigintGuard(LiveCapture* capture, bool color = false) : active_(capture != nullptr) {
         if (active_) {
             g_active_capture.store(capture);
+            g_color_active.store(color, std::memory_order_release);
             previous_handler_ = std::signal(SIGINT, handle_sigint);
         }
     }
@@ -128,6 +153,7 @@ public:
         if (active_) {
             std::signal(SIGINT, previous_handler_);
             g_active_capture.store(nullptr);
+            g_color_active.store(false, std::memory_order_release);
             while (g_handler_in_flight.load(std::memory_order_acquire) > 0) {
                 std::this_thread::yield();
             }
@@ -316,7 +342,9 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
 
         PacketSource source = open_packet_source(input, interface_name, snaplen, promiscuous, filter,
                                                    duration_seconds, max_packets);
-        SigintGuard sigint_guard(source.live_ptr());
+        // `color` here (not a literal false) is what makes handle_sigint restore the terminal's
+        // default colors on Ctrl+C -- see SigintGuard's own comment.
+        SigintGuard sigint_guard(source.live_ptr(), color);
         Decoder decoder(options);
 
         std::unique_ptr<OutputWriter> writer;

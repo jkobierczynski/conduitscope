@@ -1076,6 +1076,24 @@ Groundwork / v0.1.0. What works right now:
   X->Y`), dropping a long, ever-growing list of every protocol name this
   decoder had already tried and ruled out -- noise on ordinary, unremarkable
   traffic, not information.
+- Windows release binaries now delay-load `wpcap.dll` (the Npcap *runtime*,
+  separate from the SDK linked at build time) instead of requiring it at
+  process startup -- found via a real Windows CI hang where every offline
+  `decode` test failed to even start on a runner with the SDK but no runtime
+  installed. `-i`/`interfaces` now fail with a clear "install the Npcap
+  runtime" message if it's genuinely missing, instead of the whole binary
+  refusing to launch; see docs/USER_GUIDE.md's "Windows / Npcap notes".
+- Ctrl+C during a colorized live capture (`decode -i`, color on by default on
+  an interactive terminal) now resets the terminal's ANSI colors immediately,
+  before anything else -- previously the terminal (and everything typed
+  afterward) could be left stuck showing whatever color the most recently
+  printed line happened to use.
+- CI now also runs an ASan/UBSan-instrumented build plus all 9 fuzz
+  harnesses' own corpus-regression checks on every push/PR, and a nightly
+  scheduled job runs a longer, dedicated campaign against each harness's
+  corpus (uploading any crash reproducer found). Previously these harnesses
+  existed but were only ever run by hand locally; see
+  docs/DEVELOPMENT.md's ROADMAP item 6.
 
 See [docs/USER_GUIDE.md](docs/USER_GUIDE.md) for the complete option reference,
 output-format examples, exit codes, and the honest list of current limitations,

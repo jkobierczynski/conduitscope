@@ -217,12 +217,10 @@ Discussed and adopted, in this order:
    this option also registers, each a short bounded libFuzzer run over its
    own seed corpus) passes clean under this instrumented build, and each
    harness ran on the order of 10^5-10^6 executions in a 15-second smoke
-   run with no ASan/UBSan report. Not yet done: folding
-   `CONDUITSCOPE_ENABLE_FUZZING`/ASan/UBSan into `ci.yml`'s own matrix (the
-   fuzzer/sanitizer compiler-rt runtime -- `libclang-rt-<version>-dev` on
-   Debian/Ubuntu -- isn't installed on the CI image yet) and a scheduled
-   (not per-push) longer fuzzing job; see [fuzz/README.md](../fuzz/README.md)
-   for how to build and run these locally in the meantime.
+   run with no ASan/UBSan report. **Update: folded into `ci.yml` itself**
+   (see item 6 below for the details -- this line is kept for the "verified
+   locally as a side effect, ahead of actually wiring it into `ci.yml`"
+   history it originally recorded).
 
    **Second wave (four more targets, added once the original five had
    already run enough to prove the approach):** `fuzz_bacnet`,
@@ -301,16 +299,29 @@ capture corpus, and `DirectionSource`'s evidence-level tiering all predate
 it) raised four points genuinely not covered by 1-5 above, folded in here
 at the same priority tier as the items they extend:
 
-6. **Fold `CONDUITSCOPE_ENABLE_FUZZING`/ASan/UBSan into `ci.yml` itself,
-   plus a scheduled longer fuzz job** -- this is the specific "not yet
-   done" half of item 2 above, called out here as its own tracked item
-   because the review is right that CI without sanitizers wired in mostly
-   proves the code still compiles, not that it's memory-safe. Needs the
-   fuzzer/sanitizer compiler-rt runtime (`libclang-rt-<version>-dev`)
-   available on the CI image; the scheduled job should run each existing
-   harness against its growing corpus for materially longer than the
-   per-push smoke tests can afford (minutes to hours, not seconds), on a
-   cron trigger separate from the per-push matrix.
+6. **Done: `CONDUITSCOPE_ENABLE_FUZZING`/ASan/UBSan folded into `ci.yml`
+   itself, plus a scheduled longer fuzz job**
+   ([.github/workflows/ci.yml](../.github/workflows/ci.yml)'s `sanitizers`
+   and `scheduled-fuzz` jobs). `sanitizers` runs on every push/PR, same as
+   `build-and-test`: Clang, `-DCONDUITSCOPE_ENABLE_FUZZING=ON`
+   (ASan/UBSan-instrumented `conduitscope_core`, and therefore the CLI
+   binary too), the full CTest suite including all 9
+   `fuzz_*_corpus_regression` smoke tests. The Clang sanitizer/fuzzer
+   runtime is installed via the `libclang-rt-dev` metapackage (tracks
+   whatever compiler-rt build matches the runner image's default Clang,
+   rather than hardcoding a versioned package name like `libclang-rt-18-dev`
+   that would go stale the next time the image's default Clang bumps).
+   `scheduled-fuzz` is a 9-way matrix job (one leg per harness), gated to
+   the workflow's new nightly `schedule:` trigger (plus manual
+   `workflow_dispatch`) rather than every push, each running a 10-minute
+   single-worker campaign against that harness's own committed corpus
+   (`fuzz/corpus/<name>/`) and uploading any crash reproducer as a build
+   artifact on failure -- a regular, automated floor under the longer,
+   multi-worker, by-hand campaigns the "Fuzzing campaign log" table above
+   records, not a replacement for them. `build-and-test` and
+   `build-without-libpcap` were given `if: github.event_name != 'schedule'`
+   guards so the new nightly trigger only drives `scheduled-fuzz`, not a
+   redundant re-run of everything else.
 7. **Make the hardcoded resource-exhaustion limits CLI-configurable.**
    `kMaxBufferedBytes` (decoder.cpp, TCP/COTP reassembly), the various
    `kMaxDataRecursionDepth`/`kMaxCipRecursionDepth`/`kMaxMplsLabelDepth`-

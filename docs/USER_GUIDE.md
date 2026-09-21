@@ -566,7 +566,11 @@ decoded/reported, on any of:
   (finishing whatever output/report was in progress), not to kill the process
   outright -- so `decode -i eth0` with no `--duration`/`--max-packets` at all is
   a reasonable way to capture "until I say stop", the same way `tcpdump` with no
-  `-c`/duration option is.
+  `-c`/duration option is. If colorized output is active (`decode`'s default
+  when writing to an interactive terminal, or `--color`), Ctrl+C also resets
+  the terminal's colors immediately, before anything else -- so it can't leave
+  your terminal (and everything you type next) stuck in whatever ANSI color
+  the most recently printed line happened to use.
 
 ### Promiscuous mode
 
