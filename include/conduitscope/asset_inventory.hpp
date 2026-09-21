@@ -156,6 +156,47 @@ struct InventoryConduit {
     size_t packet_count = 0;  // total packets across every one of those edges
 };
 
+// One aggregated observation of a Tier 1-5 "IT protocol an OT auditor flags" (ROADMAP item 18;
+// notable_it_protocols.hpp names the exact 42 protocol values and their tier) -- completely separate
+// from, and never counted toward, this engine's own ten-protocol asset/edge model above: none of
+// these 42 protocols are among the ten AssetInventoryEngine::observe otherwise recognizes, so a
+// packet that produces one of these also still increments AssetInventoryReport::skipped_packets
+// exactly as it always has -- this is a strictly additive finding, not a widening of what counts as
+// a "recognized" packet for the rest of this report. See AssetInventoryEngine::observe's own comment
+// for exactly when this is recorded, and policy_engine.hpp's own, independently-computed
+// NotableProtocolFinding (this feature's twin in `policy validate`) for the analogous struct there --
+// kept separate rather than shared, the same "each engine stays self-contained" convention this
+// file's own header comment and tcp_session_key (asset_inventory.cpp) already establish.
+//
+// Unlike InventoryEdge, client_ip/server_ip here is always the SAME plain "lower port number is the
+// server" heuristic src_is_client_by_port already provides for this exact shape (this engine's own
+// UDP-based protocols, e.g. BACnet, get a real handshake- or content-based direction when they can --
+// none of that per-protocol machinery is reused here, since building an equivalent for 42 more
+// protocols this file otherwise never decodes at all is far more machinery than a "name the presence"
+// finding calls for) -- so it's always a best-effort guess, never upgraded, even for a TCP-based
+// notable protocol (rdp/vnc/smb/ssh/http/https/ldap/ldaps/tacacs-plus/openvpn/stt) that a real SYN/
+// SYN-ACK could in principle have resolved authoritatively. Render/consume accordingly.
+struct InventoryNotableProtocol {
+    std::string protocol;  // one of notable_it_protocols.hpp's 42 values, e.g. "rdp"/"ssh"/"gre"
+    std::string tier;      // "remote-access"/"lateral-movement"/"enterprise-trust"/
+                            // "wireless-backhaul"/"tunnel-vpn"
+    bool has_ip = true;    // false only for eapol/pppoe/mpls (EtherType-keyed, no IP layer at all --
+                            // see mac_a/mac_b below instead of client_ip/server_ip)
+    std::string client_ip, server_ip;  // meaningful only when has_ip -- see this struct's own header
+                                        // comment for why this is always the port-heuristic guess,
+                                        // never a confirmed direction
+    std::string mac_a, mac_b;  // meaningful only when !has_ip -- canonical order (mac_a < mac_b),
+                                // the same no-direction convention this file's own InventoryEdge
+                                // doesn't need (every one of ITS ten protocols has a real client/
+                                // server concept) but PolicyEngine's EthernetFlowReport::mac_a/mac_b
+                                // already establishes for PROFINET/GOOSE/SV/EtherCAT
+    bool has_port = false;  // false only for an IP-protocol-number-keyed Tier 5 tunnel (gre/esp/ah/
+                             // ip-in-ip/6in4/l2tp's direct-IP form) and for eapol/pppoe/mpls
+    bool is_tcp = false;     // meaningful only when has_port
+    uint16_t port = 0;      // meaningful only when has_port
+    size_t packet_count = 0;
+};
+
 struct AssetInventoryReport {
     std::vector<InventoryAsset> assets;      // sorted by IP address
     std::vector<InventoryEdge> edges;        // first-seen order
@@ -175,6 +216,13 @@ struct AssetInventoryReport {
     // which would count that same packet as skipped (`policy validate` doesn't evaluate any UDP
     // traffic yet -- see docs/MANUAL.md's LIMITATIONS).
     size_t skipped_packets = 0;
+
+    // "IT protocols an OT auditor flags" (ROADMAP item 18), one entry per distinct (protocol,
+    // client/server or MAC pair, port) combination observed, in first-seen order -- ALWAYS
+    // populated, independent of everything above (see InventoryNotableProtocol's own comment for why
+    // this never changes what `skipped_packets` counts, or anything else in `assets`/`edges`/`zones`/
+    // `conduits`).
+    std::vector<InventoryNotableProtocol> notable_protocols;
 };
 
 class AssetInventoryEngine {
@@ -237,6 +285,13 @@ public:
     // broadcast, and a broadcast address is not a device to inventory. The packet's other,
     // non-broadcast endpoint is still recorded as an asset (with the role -- client or server --
     // this same direction logic assigned it) even when no edge can be formed for the broadcast side.
+    //
+    // Independent of all of the above: a packet whose protocol is one of notable_it_protocols.hpp's
+    // 42 "IT protocols an OT auditor flags" (ROADMAP item 18) is ALSO recorded into
+    // AssetInventoryReport::notable_protocols -- see InventoryNotableProtocol's own comment for why
+    // this never disturbs `skipped_packets` or this engine's own ten-protocol asset/edge model, and
+    // policy_engine.hpp's own NotableProtocolFinding for the analogous (independently implemented)
+    // finding in `policy validate`.
     void observe(const DecodedPacket& packet);
 
     // Produces the final report from everything observed so far. Safe to call more than once (e.g.
@@ -277,12 +332,32 @@ private:
     void update_asset(const std::string& ip, const DecodedPacket& dp, const std::string& protocol,
                        bool is_client_role);
 
+    // Aggregated state for one InventoryNotableProtocol -- see that struct's own comment. Folds one
+    // observation into notable_protocols_/notable_protocol_order_, keyed by `key` (already
+    // canonicalized by the caller -- see observe()'s own three call sites in asset_inventory.cpp).
+    struct NotableProtocolState {
+        std::string protocol, tier;
+        bool has_ip = true;
+        std::string client_ip, server_ip;
+        std::string mac_a, mac_b;
+        bool has_port = false;
+        bool is_tcp = false;
+        uint16_t port = 0;
+        size_t packet_count = 0;
+    };
+    void record_notable_protocol(const std::string& key, const std::string& protocol, const std::string& tier,
+                                  bool has_ip, const std::string& client_ip, const std::string& server_ip,
+                                  const std::string& mac_a, const std::string& mac_b, bool has_port, bool is_tcp,
+                                  uint16_t port);
+
     uint8_t zone_prefix_len_;
     std::unordered_map<std::string, AssetState> assets_;
     std::vector<std::string> asset_order_;
     std::unordered_map<std::string, EdgeState> edges_;
     std::vector<std::string> edge_order_;
     std::unordered_map<std::string, TcpSessionState> tcp_sessions_;  // keyed by canonical 4-tuple
+    std::unordered_map<std::string, NotableProtocolState> notable_protocols_;
+    std::vector<std::string> notable_protocol_order_;
     size_t total_packets_ = 0;
     size_t skipped_packets_ = 0;
 };

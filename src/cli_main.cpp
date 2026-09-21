@@ -644,7 +644,7 @@ constexpr int kExitPolicyNonCompliant = 3;
 int run_policy_validate(const std::string& input, const std::string& interface_name,
                          const std::string& filter, int duration_seconds, int snaplen, bool promiscuous,
                          const std::string& policy_path, const std::string& output, const std::string& format,
-                         bool strict, bool quiet,
+                         bool strict, bool strict_it_protocols, bool quiet,
                          bool oui_enabled, bool resolve_hostnames, const std::string& hosts_path,
                          bool service_names_enabled, const std::string& services_path, std::ostream& diag) {
     std::ofstream file_out;
@@ -714,7 +714,14 @@ int run_policy_validate(const std::string& input, const std::string& interface_n
                  << " packet(s) had parse warnings (shown above); rerun with --strict to stop at "
                     "the first one, or -q to silence this message\n";
         }
-        return report.compliant() ? 0 : kExitPolicyNonCompliant;
+        // report.compliant() is, and stays, completely independent of notable_protocols (see
+        // PolicyReport::notable_protocols' own comment) -- --strict-it-protocols is the explicit,
+        // opt-in way a non-empty notable_protocols list ALSO fails this exit code, applied here at
+        // the CLI layer rather than inside compliant() itself, so a caller of PolicyReport directly
+        // (or the JSON report's own "compliant" field) always sees the same protocol/port/conduit-
+        // allow-list-only verdict this engine has always computed.
+        bool ok = report.compliant() && (!strict_it_protocols || report.notable_protocols.empty());
+        return ok ? 0 : kExitPolicyNonCompliant;
     } catch (const PolicyError& e) {
         // e.what() is already "<policy_path>:<line>: <message>" (see policy.cpp's fail()) --
         // no need to prefix the path again here.
@@ -906,7 +913,7 @@ int main(int argc, char** argv) {
         decode_wireless_backhaul_ports, decode_tunnel_vpn_ports;
     size_t decode_max_packets = 0;
     bool decode_stats = false, decode_strict = false;
-    bool decode_oui = false, decode_resolve = false, decode_service_names = true;
+    bool decode_mac_vendor = false, decode_resolve = false, decode_service_names = true;
     bool decode_show_vlan = true;
     bool decode_show_direction = true;
     bool decode_show_mac = false;
@@ -940,7 +947,12 @@ int main(int argc, char** argv) {
                           "With -i, don't put the interface into promiscuous mode (by default it "
                           "is, since the main use case -- watching a mirrored/SPAN switch port -- "
                           "needs traffic not addressed to this host)");
-    decode_cmd->add_option("-o,--output", decode_output, "Write output here instead of stdout");
+    decode_cmd->add_option("-o,--output", decode_output,
+                            "Write output here instead of stdout. Caution: a single-dash "
+                            "long-option typo glues onto this flag (e.g. a typo of a double-dash "
+                            "long option, typed with only one dash, is parsed as -o followed by "
+                            "the rest of that typo as this flag's own filename value) -- always "
+                            "use the double dash for a long option name");
     decode_cmd->add_option("-f,--format", decode_format, "Output format: text, json, or csv")
         ->transform(CLI::IsMember({"text", "json", "csv"}))
         ->capture_default_str();
@@ -1104,15 +1116,22 @@ int main(int argc, char** argv) {
         "direction-tier breakdown, which has no display toggles of its own");
     decode_cmd->add_flag(
         "-e,--ether", decode_show_mac,
-        "Show the Ethernet header (source/destination MAC address, VLAN tag) for each packet in "
-        "text output -- mirrors tcpdump's own -e. Off by default to keep output compact; implied "
-        "by --oui (there'd be nothing to attach a vendor name to otherwise). Only affects text "
-        "output -- JSON/CSV always include src_mac/dst_mac as base fields, same as src_ip/dst_ip "
-        "-- see docs/MANUAL.md's OUTPUT FORMATS section");
-    decode_cmd->add_flag("--oui", decode_oui,
+        "For a packet with an IP layer, show its Ethernet header (source/destination MAC "
+        "address, VLAN tag) below the packet line in text output -- mirrors tcpdump's own -e. "
+        "Off by default to keep output compact; implied by --mac-vendor (there'd be nothing to "
+        "attach a vendor name to otherwise). A no-op for a packet with no IP layer at all (ARP/"
+        "LLDP/EAPOL/PPPoE/MPLS/etc.), since its MAC address pair is already shown on its own "
+        "head line unconditionally. Only affects text output -- JSON/CSV always include "
+        "src_mac/dst_mac as base fields, same as src_ip/dst_ip -- see docs/MANUAL.md's OUTPUT "
+        "FORMATS section");
+    decode_cmd->add_flag("--mac-vendor", decode_mac_vendor,
                           "Enable OUI (MAC vendor) resolution and show it next to each MAC "
                           "address; off by default to keep output compact. Implies -e/--ether -- "
-                          "see docs/MANUAL.md's OUTPUT FORMATS section");
+                          "see docs/MANUAL.md's OUTPUT FORMATS section. (Named --mac-vendor, "
+                          "not --oui, specifically so a single-dash typo of this flag reports a "
+                          "clean \"argument not expected\" error instead of silently gluing onto "
+                          "-o/--output the way a single-dash -oui used to -- see -o's own help "
+                          "text and docs/DEVELOPMENT.md's ROADMAP for the full story)");
     decode_cmd->add_flag(
         "--resolve", decode_resolve,
         "Enable hostname resolution from an explicitly-supplied hosts file (--hosts); off by "
@@ -1155,7 +1174,8 @@ int main(int argc, char** argv) {
     bool policy_promiscuous = true;
     std::string policy_format = "text";
     bool policy_strict = false;
-    bool policy_oui = false, policy_resolve = false, policy_service_names = true;
+    bool policy_strict_it_protocols = false;
+    bool policy_mac_vendor = false, policy_resolve = false, policy_service_names = true;
     std::string policy_hosts_file, policy_services_file;
     auto* policy_input_opt =
         policy_validate_cmd->add_option("-r,--read", policy_input,
@@ -1190,16 +1210,29 @@ int main(int argc, char** argv) {
                       "POLICY FILE FORMAT section)")
         ->required()
         ->check(CLI::ExistingFile);
-    policy_validate_cmd->add_option("-o,--output", policy_output, "Write the report here instead of stdout");
+    policy_validate_cmd->add_option(
+        "-o,--output", policy_output,
+        "Write the report here instead of stdout. Caution: a single-dash long-option typo "
+        "glues onto this flag -- always use the double dash for a long option name");
     policy_validate_cmd->add_option("-f,--format", policy_format, "Report format: text or json")
         ->transform(CLI::IsMember({"text", "json"}))
         ->capture_default_str();
     policy_validate_cmd->add_flag("--strict", policy_strict,
                                    "Abort on the first malformed packet instead of reporting it and continuing");
-    policy_validate_cmd->add_flag("--oui", policy_oui,
+    policy_validate_cmd->add_flag(
+        "--strict-it-protocols", policy_strict_it_protocols,
+        "Also fail compliance (non-zero exit code) when any \"IT protocol an OT auditor flags\" "
+        "(RDP/VNC/SMB/SSH/HTTP(S)/SNMP/GRE/... -- see docs/MANUAL.md's ROADMAP item 18, and the "
+        "report's own \"notable protocols\" section) was observed, even on an otherwise COMPLIANT "
+        "capture -- off by default: the \"notable protocols\" section is always populated regardless "
+        "of this flag, so nothing is hidden without it; this flag only controls whether that finding "
+        "additionally affects the exit code, for a CI/audit pipeline that wants to gate on it");
+    policy_validate_cmd->add_flag("--mac-vendor", policy_mac_vendor,
                                    "Enable OUI (MAC vendor) resolution in the report; off by "
                                    "default to keep output compact -- see docs/MANUAL.md's "
-                                   "OUTPUT FORMATS section");
+                                   "OUTPUT FORMATS section. (Named --mac-vendor, not --oui, so a "
+                                   "single-dash typo errors cleanly instead of silently gluing "
+                                   "onto -o/--output -- see decode's --mac-vendor help text)");
     policy_validate_cmd->add_flag(
         "--resolve", policy_resolve,
         "Enable hostname resolution from an explicitly-supplied hosts file (--hosts) in the report; "
@@ -1234,7 +1267,7 @@ int main(int argc, char** argv) {
     std::string inventory_diagram_file;
     std::string inventory_diagram_format = "mermaid";
     std::string inventory_policy_out;
-    bool inventory_oui = false, inventory_resolve = false, inventory_service_names = true;
+    bool inventory_mac_vendor = false, inventory_resolve = false, inventory_service_names = true;
     std::string inventory_hosts_file, inventory_services_file;
 
     auto* inventory_input_opt =
@@ -1264,7 +1297,10 @@ int main(int argc, char** argv) {
         "!--no-promiscuous", inventory_promiscuous,
         "With -i, don't put the interface into promiscuous mode (by default it is, since the main "
         "use case -- watching a mirrored/SPAN switch port -- needs traffic not addressed to this host)");
-    inventory_cmd->add_option("-o,--output", inventory_output, "Write the report here instead of stdout");
+    inventory_cmd->add_option(
+        "-o,--output", inventory_output,
+        "Write the report here instead of stdout. Caution: a single-dash long-option typo "
+        "glues onto this flag -- always use the double dash for a long option name");
     inventory_cmd->add_option("-f,--format", inventory_format, "Report format: text or json")
         ->transform(CLI::IsMember({"text", "json"}))
         ->capture_default_str();
@@ -1287,9 +1323,12 @@ int main(int argc, char** argv) {
         "--policy-out", inventory_policy_out,
         "Also write the inferred zone/conduit model as a policy YAML file here, directly loadable "
         "by 'policy validate --policy' -- closes the discover-then-enforce loop");
-    inventory_cmd->add_flag("--oui", inventory_oui,
+    inventory_cmd->add_flag("--mac-vendor", inventory_mac_vendor,
                              "Enable OUI (MAC vendor) resolution in the report; off by default to "
-                             "keep output compact -- see docs/MANUAL.md's OUTPUT FORMATS section");
+                             "keep output compact -- see docs/MANUAL.md's OUTPUT FORMATS section. "
+                             "(Named --mac-vendor, not --oui, so a single-dash typo errors cleanly "
+                             "instead of silently gluing onto -o/--output -- see decode's "
+                             "--mac-vendor help text)");
     inventory_cmd->add_flag(
         "--resolve", inventory_resolve,
         "Enable hostname resolution from an explicitly-supplied hosts file (--hosts) in the report; "
@@ -1347,7 +1386,7 @@ int main(int argc, char** argv) {
     if (decode_cmd->parsed()) {
         // --oui implies -e/--ether: without it there'd be no eth line to attach a vendor name to.
         // -e alone (no --oui) shows the MAC pair with no vendor annotation.
-        decode_show_mac = decode_show_mac || decode_oui;
+        decode_show_mac = decode_show_mac || decode_mac_vendor;
         return run_decode(decode_input, decode_interface, decode_filter, decode_duration, decode_snaplen,
                            decode_promiscuous, decode_output, decode_format, decode_protocol,
                            decode_modbus_ports, decode_dnp3_ports, decode_s7comm_ports, decode_iec104_ports,
@@ -1358,7 +1397,7 @@ int main(int argc, char** argv) {
                            decode_lateral_movement_ports, decode_enterprise_trust_ports,
                            decode_wireless_backhaul_ports, decode_tunnel_vpn_ports,
                            decode_max_packets, decode_stats, decode_strict,
-                           quiet, no_color, force_color, decode_oui, decode_resolve, decode_hosts_file,
+                           quiet, no_color, force_color, decode_mac_vendor, decode_resolve, decode_hosts_file,
                            decode_service_names, decode_services_file, decode_show_vlan,
                            decode_time_format, decode_time_offset, *diag, decode_show_direction,
                            decode_show_mac);
@@ -1372,8 +1411,8 @@ int main(int argc, char** argv) {
     if (policy_validate_cmd->parsed()) {
         return run_policy_validate(policy_input, policy_interface, policy_filter, policy_duration, policy_snaplen,
                                     policy_promiscuous, policy_file, policy_output, policy_format, policy_strict,
-                                    quiet, policy_oui, policy_resolve, policy_hosts_file, policy_service_names,
-                                    policy_services_file, *diag);
+                                    policy_strict_it_protocols, quiet, policy_mac_vendor, policy_resolve, policy_hosts_file,
+                                    policy_service_names, policy_services_file, *diag);
     }
     if (policy_cmd->parsed()) {
         std::cerr << "error: 'policy' needs a subcommand (currently only 'validate' exists)\n";
@@ -1384,7 +1423,7 @@ int main(int argc, char** argv) {
                               inventory_snaplen, inventory_promiscuous, inventory_output, inventory_format,
                               inventory_strict, quiet, static_cast<uint8_t>(inventory_zone_prefix),
                               inventory_diagram_file, inventory_diagram_format, inventory_policy_out,
-                              inventory_oui, inventory_resolve, inventory_hosts_file, inventory_service_names,
+                              inventory_mac_vendor, inventory_resolve, inventory_hosts_file, inventory_service_names,
                               inventory_services_file, *diag);
     }
     std::cout << "conduitscope " << version_string() << "\n";

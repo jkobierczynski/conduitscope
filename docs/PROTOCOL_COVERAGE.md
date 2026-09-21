@@ -5246,6 +5246,27 @@ synthetic fixture confirms directly, including the HART-IP collision
 avoidance described above (both the NAT-T-marker and VXLAN packets are
 directly asserted to reach their own Tier 5 name rather than `hartip`).
 
+**All five tiers now feed a "notable IT protocols" finding in `policy
+validate` and `inventory`, not just `decode`.** This is the second and
+final half of ROADMAP item 18: every `protocol` value named across Tiers
+1-5 above (42 in total) is, when observed, surfaced as its own finding by
+both reports -- `notable_protocols` in JSON, a "NOTABLE IT PROTOCOLS"
+section in text -- completely independent of and never affecting either
+report's existing compliance/zone-conduit verdict. This is deliberately a
+presence finding, not a policy-matching one: it reuses whatever direction
+information each engine already has for a given transport shape (a TCP
+flow's own tracked session state; a lower-port-is-server heuristic for
+UDP and the handful of IP-protocol-number-keyed Tier 5 tunnels that carry
+a port at all; a canonical MAC pair, no direction, for the three
+EtherType-keyed protocols -- EAPOL, PPPoE, MPLS -- that have neither IP
+nor port at all) rather than adding new session-tracking machinery of its
+own. See `include/conduitscope/notable_it_protocols.hpp`'s own file
+header comment for the shared lookup table this is built on,
+docs/DEVELOPMENT.md's ROADMAP item 18 for the full design writeup, and
+docs/USER_GUIDE.md's "Notable IT protocols" subsections (under `policy
+validate` and `inventory`) for the exact field-by-field output shape and
+the opt-in `--strict-it-protocols` flag.
+
 ### Link/IP-layer plumbing: non-IPv4 Ethernet, and non-TCP IPv4 (including UDP)
 
 Every protocol above rides on Ethernet + IPv4 + TCP. Traffic outside that --

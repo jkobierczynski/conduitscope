@@ -13,6 +13,7 @@
 #include "conduitscope/iec104.hpp"
 #include "conduitscope/ipv4.hpp"
 #include "conduitscope/modbus.hpp"
+#include "conduitscope/notable_it_protocols.hpp"
 #include "conduitscope/resolver.hpp"
 
 namespace conduitscope {
@@ -125,8 +126,59 @@ std::string json_escape(const std::string& s) {
 
 }  // namespace
 
+void PolicyEngine::record_notable_protocol(const std::string& key, const std::string& protocol,
+                                            const std::string& tier, bool has_ip, bool direction_known,
+                                            const std::string& client_ip, const std::string& server_ip,
+                                            const std::string& mac_a, const std::string& mac_b, bool has_port,
+                                            bool is_tcp, uint16_t port) {
+    auto it = notable_protocols_.find(key);
+    if (it == notable_protocols_.end()) {
+        NotableProtocolState st;
+        st.protocol = protocol;
+        st.tier = tier;
+        st.has_ip = has_ip;
+        st.direction_known = direction_known;
+        st.client_ip = client_ip;
+        st.server_ip = server_ip;
+        st.mac_a = mac_a;
+        st.mac_b = mac_b;
+        st.has_port = has_port;
+        st.is_tcp = is_tcp;
+        st.port = port;
+        notable_protocol_order_.push_back(key);
+        it = notable_protocols_.emplace(key, std::move(st)).first;
+    } else if (direction_known && !it->second.direction_known) {
+        // A later TCP packet on this same flow captured the SYN/SYN-ACK an earlier one didn't --
+        // upgrade from the port-heuristic guess to the authoritative answer, mirroring FlowState's
+        // own upgrade rule (PolicyEngine::observe) at this coarser, session-state-free granularity.
+        it->second.direction_known = true;
+        it->second.client_ip = client_ip;
+        it->second.server_ip = server_ip;
+    }
+    ++it->second.packet_count;
+}
+
 void PolicyEngine::observe(const DecodedPacket& dp) {
     ++total_packets_;
+
+    // "IT protocols an OT auditor flags" (ROADMAP item 18) -- see observe()'s own doc comment
+    // (policy_engine.hpp) for why this is checked first, unconditionally, before every branch below.
+    auto notable_tier = notable_it_protocol_tier(dp.protocol);
+
+    if (notable_tier && !dp.has_ip) {
+        // eapol/pppoe/mpls -- the three EtherType-keyed protocols in this family -- are the only
+        // ones with has_ip==false (every other notable protocol rides IP, even the IP-protocol-
+        // number-keyed Tier 5 tunnels below); keyed by canonical MAC pair, the same no-direction
+        // convention EthernetFlowReport::mac_a/mac_b already uses for PROFINET/GOOSE/SV/EtherCAT.
+        if (dp.has_ethernet) {
+            std::string mac_a = (dp.src_mac < dp.dst_mac) ? dp.src_mac : dp.dst_mac;
+            std::string mac_b = (dp.src_mac < dp.dst_mac) ? dp.dst_mac : dp.src_mac;
+            std::string key = "eth:" + ethernet_flow_key(dp.protocol, dp.src_mac, dp.dst_mac);
+            record_notable_protocol(key, dp.protocol, *notable_tier, /*has_ip=*/false,
+                                     /*direction_known=*/false, "", "", mac_a, mac_b, /*has_port=*/false,
+                                     /*is_tcp=*/false, 0);
+        }
+    }
 
     if (is_vlan_zone_eligible_protocol(dp.protocol) && any_vlan_zone_) {
         // See this function's own doc comment (policy_engine.hpp) for why this branch only exists
@@ -149,6 +201,35 @@ void PolicyEngine::observe(const DecodedPacket& dp) {
     }
 
     if (!dp.has_ip || !dp.has_tcp) {
+        if (notable_tier && dp.has_ip) {
+            // UDP (dp.has_udp), or an IP-protocol-number-keyed Tier 5 tunnel (dp.has_udp is also
+            // false there -- gre/esp/ah/ip-in-ip/6in4/l2tp's own direct-IP form, see decoder.cpp's
+            // own ip.protocol dispatch, all of which leave src_port/dst_port at 0). Neither shape has
+            // a session/handshake to decide direction from, so this reuses src_is_client_by_port --
+            // this file's own existing TCP-flow port-heuristic fallback -- which, since none of this
+            // feature's 42 ports are ever in is_known_service_port's OT-only list, always reduces to
+            // "lower port number is the server" for every one of them; for the port-protocol-number
+            // shape (src_port == dst_port == 0) that's a meaningless tie-break, so has_port/direction
+            // are both left false there and only the canonical address pair is recorded.
+            bool has_port = dp.has_udp;
+            std::string client_ip, server_ip;
+            uint16_t server_port = 0;
+            if (has_port) {
+                bool src_is_client = src_is_client_by_port(dp.src_port, dp.dst_port);
+                client_ip = src_is_client ? dp.src_ip : dp.dst_ip;
+                server_ip = src_is_client ? dp.dst_ip : dp.src_ip;
+                server_port = src_is_client ? dp.dst_port : dp.src_port;
+            } else {
+                client_ip = (dp.src_ip < dp.dst_ip) ? dp.src_ip : dp.dst_ip;
+                server_ip = (dp.src_ip < dp.dst_ip) ? dp.dst_ip : dp.src_ip;
+            }
+            std::string notable_key = "ip:" + *notable_tier + ":" + dp.protocol + ":" +
+                                       session_key(dp.src_ip, has_port ? dp.src_port : 0, dp.dst_ip,
+                                                    has_port ? dp.dst_port : 0);
+            record_notable_protocol(notable_key, dp.protocol, *notable_tier, /*has_ip=*/true,
+                                     /*direction_known=*/false, client_ip, server_ip, "", "", has_port,
+                                     /*is_tcp=*/false, server_port);
+        }
         ++skipped_non_tcp_;
         return;
     }
@@ -204,6 +285,23 @@ void PolicyEngine::observe(const DecodedPacket& dp) {
 
     FlowState& fs = it->second;
     ++fs.packet_count;
+
+    if (notable_tier) {
+        // A TCP-based notable protocol (rdp/vnc/smb/ssh/http/https/ldap/ldaps/tacacs-plus/openvpn/
+        // stt) reuses this flow's OWN client_ip/server_ip/direction_source -- already decided above,
+        // by the same SYN/SYN-ACK-first priority order every other TCP flow gets -- rather than a
+        // separate, weaker per-packet guess, so this finding's direction is exactly as authoritative
+        // as its own FlowReport's. Keyed by (protocol, session key), NOT the notable protocol alone,
+        // so distinct sessions between the same host pair (e.g. two separate SSH connections) still
+        // fold into one finding per session the same way flows_ itself does, while a genuinely
+        // different notable protocol on an unrelated port between the same two hosts gets its own
+        // entry.
+        std::string notable_key = "tcp:" + *notable_tier + ":" + dp.protocol + ":" + key;
+        record_notable_protocol(notable_key, dp.protocol, *notable_tier, /*has_ip=*/true,
+                                 fs.direction_source == DirectionSource::Handshake, fs.client_ip, fs.server_ip, "",
+                                 "", /*has_port=*/true, /*is_tcp=*/true, fs.server_port);
+    }
+
     // Each protocol contributes its own already-decoded function/service name field (never more
     // than one of these is ever populated for a given packet, since a packet has exactly one
     // decoded protocol) -- see FlowReport::observed_functions' comment for the full list, and
@@ -430,6 +528,24 @@ PolicyReport PolicyEngine::finish() const {
         if (!exercised_conduits.count(c.name)) report.unexercised_conduits.push_back(c.name);
     }
 
+    for (const auto& key : notable_protocol_order_) {
+        const NotableProtocolState& ns = notable_protocols_.at(key);
+        NotableProtocolFinding nf;
+        nf.protocol = ns.protocol;
+        nf.tier = ns.tier;
+        nf.has_ip = ns.has_ip;
+        nf.direction_known = ns.direction_known;
+        nf.client_ip = ns.client_ip;
+        nf.server_ip = ns.server_ip;
+        nf.mac_a = ns.mac_a;
+        nf.mac_b = ns.mac_b;
+        nf.has_port = ns.has_port;
+        nf.is_tcp = ns.is_tcp;
+        nf.port = ns.port;
+        nf.packet_count = ns.packet_count;
+        report.notable_protocols.push_back(std::move(nf));
+    }
+
     return report;
 }
 
@@ -528,6 +644,41 @@ void write_ethernet_flow_group_text(std::ostream& out, const std::vector<const E
     }
 }
 
+// Renders PolicyReport::notable_protocols -- see that field's own comment for why this is always
+// printed (never grouped by, or gated on, Allowed/Violation/Unclassified the way write_flow_group_
+// text's three groups are) and NotableProtocolFinding's own comment for exactly what each field
+// means for each of the four transport shapes rendered here.
+void write_notable_protocols_text(std::ostream& out, const PolicyReport& report, const Resolver& resolver) {
+    out << "NOTABLE IT PROTOCOLS (" << report.notable_protocols.size() << "):\n";
+    out << "  Protocols an OT auditor would flag as worth attention on their own, independent of\n";
+    out << "  whether a conduit permits them -- see docs/MANUAL.md's ROADMAP item 18.\n";
+    if (report.notable_protocols.empty()) {
+        out << "  (none)\n";
+        return;
+    }
+    for (size_t i = 0; i < report.notable_protocols.size(); ++i) {
+        const NotableProtocolFinding& f = report.notable_protocols[i];
+        out << "  [" << (i + 1) << "] " << f.protocol << "  (" << f.tier << ")  ";
+        if (f.has_ip) {
+            out << f.client_ip;
+            if (auto h = resolver.hostname(f.client_ip)) out << " (" << *h << ")";
+            out << (f.direction_known ? " -> " : " <-> ") << f.server_ip;
+            if (auto h = resolver.hostname(f.server_ip)) out << " (" << *h << ")";
+            if (f.has_port) {
+                out << ":" << f.port;
+                if (auto s = resolver.service_name(f.port, f.is_tcp ? "tcp" : "udp")) out << " (" << *s << ")";
+            }
+            if (!f.direction_known) out << "  (direction: port heuristic)";
+        } else {
+            out << f.mac_a;
+            if (auto v = resolver.oui_vendor(f.mac_a)) out << " (" << *v << ")";
+            out << " <-> " << f.mac_b;
+            if (auto v = resolver.oui_vendor(f.mac_b)) out << " (" << *v << ")";
+        }
+        out << "  (" << f.packet_count << " packet(s))\n";
+    }
+}
+
 }  // namespace
 
 void write_policy_report_text(std::ostream& out, const PolicyReport& report, const Policy& policy,
@@ -611,6 +762,9 @@ void write_policy_report_text(std::ostream& out, const PolicyReport& report, con
             out << "  - " << name << "\n";
         }
     }
+    out << "\n";
+
+    write_notable_protocols_text(out, report, resolver);
 }
 
 void write_policy_report_json(std::ostream& out, const PolicyReport& report, const Policy& policy,
@@ -740,7 +894,7 @@ void write_policy_report_json(std::ostream& out, const PolicyReport& report, con
         out << "      \"mac_b\": \"" << json_escape(f.mac_b) << "\",\n";
         // OUI vendor annotations only -- no IP/port exists on an L2 flow, so no hostname/service-name
         // equivalent applies here (see write_ethernet_flow_group_text's own comment). Omitted
-        // entirely on a lookup miss or --no-oui, never emitted as null, same convention as above.
+        // entirely on a lookup miss or when --oui was not given, never emitted as null, same convention as above.
         if (auto v = resolver.oui_vendor(f.mac_a)) {
             out << "      \"mac_a_vendor\": \"" << json_escape(*v) << "\",\n";
         }
@@ -763,7 +917,51 @@ void write_policy_report_json(std::ostream& out, const PolicyReport& report, con
         if (i) out << ", ";
         out << "\"" << json_escape(report.unexercised_conduits[i]) << "\"";
     }
-    out << "]\n";
+    out << "],\n";
+
+    // "IT protocols an OT auditor flags" (ROADMAP item 18) -- see PolicyReport::notable_protocols'
+    // own comment for why this is always populated, independent of "compliant"/every verdict above.
+    // Appended last, after every pre-existing field (unexercised_conduits was the prior last field),
+    // the same "no established JSON-shape test anchored on an earlier field needs to change"
+    // convention every earlier addition to this schema already followed (see direction_source's own
+    // comment above, and asset_inventory.cpp's write_inventory_report_json for the identical rule
+    // applied there for this same feature).
+    out << "  \"notable_protocols\": [\n";
+    for (size_t i = 0; i < report.notable_protocols.size(); ++i) {
+        const NotableProtocolFinding& f = report.notable_protocols[i];
+        out << "    {\n";
+        out << "      \"protocol\": \"" << json_escape(f.protocol) << "\",\n";
+        out << "      \"tier\": \"" << json_escape(f.tier) << "\",\n";
+        if (f.has_ip) {
+            out << "      \"client_ip\": \"" << json_escape(f.client_ip) << "\",\n";
+            out << "      \"server_ip\": \"" << json_escape(f.server_ip) << "\",\n";
+            if (auto h = resolver.hostname(f.client_ip)) {
+                out << "      \"client_hostname\": \"" << json_escape(*h) << "\",\n";
+            }
+            if (auto h = resolver.hostname(f.server_ip)) {
+                out << "      \"server_hostname\": \"" << json_escape(*h) << "\",\n";
+            }
+        } else {
+            out << "      \"mac_a\": \"" << json_escape(f.mac_a) << "\",\n";
+            out << "      \"mac_b\": \"" << json_escape(f.mac_b) << "\",\n";
+            if (auto v = resolver.oui_vendor(f.mac_a)) {
+                out << "      \"mac_a_vendor\": \"" << json_escape(*v) << "\",\n";
+            }
+            if (auto v = resolver.oui_vendor(f.mac_b)) {
+                out << "      \"mac_b_vendor\": \"" << json_escape(*v) << "\",\n";
+            }
+        }
+        out << "      \"port\": " << (f.has_port ? std::to_string(f.port) : std::string("null")) << ",\n";
+        if (f.has_port) {
+            if (auto s = resolver.service_name(f.port, f.is_tcp ? "tcp" : "udp")) {
+                out << "      \"port_service\": \"" << json_escape(*s) << "\",\n";
+            }
+        }
+        out << "      \"direction_known\": " << (f.direction_known ? "true" : "false") << ",\n";
+        out << "      \"packet_count\": " << f.packet_count << "\n";
+        out << "    }" << (i + 1 < report.notable_protocols.size() ? "," : "") << "\n";
+    }
+    out << "  ]\n";
     out << "}\n";
 }
 

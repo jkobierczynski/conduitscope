@@ -48,7 +48,23 @@ namespace {
 // no "(unknown)" placeholder -- matching this codebase's existing convention of omitting a field
 // entirely on a negative result rather than noting every miss.
 std::string endpoint(const DecodedPacket& p, bool src, const Resolver& resolver) {
-    if (!p.has_ip) return "-";
+    if (!p.has_ip) {
+        // No IP layer at all (ARP/LLDP/EAPOL/PPPoE/MPLS, PROFINET RT/GOOSE/SV/EtherCAT/STP, or the
+        // generic non-ip/non-tcp fallback) -- every one of these still carries a real src_mac/
+        // dst_mac (decoder.cpp's Decoder::decode populates it for every Ethernet-linktype packet
+        // regardless of protocol), so fall back to that instead of a bare "-" placeholder with
+        // literally no addressing information on the line at all. With --oui enabled, the vendor
+        // name is appended the same way it always is elsewhere -- Resolver::oui_vendor() is
+        // already self-gated on --oui (returns std::nullopt when disabled), so this is safe to
+        // call unconditionally, the same convention the JSON/CSV writers already follow. This
+        // fallback fires regardless of -e/--ether: unlike the "eth <src> -> <dst>" line below
+        // (which write_packet now skips for exactly this case -- see its own comment), there is no
+        // separate opt-in needed to see a non-IP packet's own addresses on its headline.
+        if (!p.has_ethernet) return "-";
+        std::string mac = src ? p.src_mac : p.dst_mac;
+        if (auto v = resolver.oui_vendor(mac)) mac += " (" + *v + ")";
+        return mac;
+    }
     std::string ip = src ? p.src_ip : p.dst_ip;
     std::string rendered = ip;
     if (auto host = resolver.hostname(ip)) rendered += " (" + *host + ")";
@@ -411,10 +427,19 @@ void TextWriter::write_packet(const DecodedPacket& p) {
     // adjacent to it; this line is purely additive at the end of this packet's block.
     if (p.has_ethernet) {
         bool show_vlan_here = show_vlan_ && p.has_vlan_tag;
-        if (show_mac_ || show_vlan_here) {
+        // For a packet with no IP layer, the headline above already rendered src_mac/dst_mac (plus
+        // any --oui vendor name) in place of the usual "-" placeholder -- see endpoint()'s own
+        // comment -- so repeating that same pair on an "eth <mac> -> <mac>" line here would just be
+        // noise, regardless of -e/--ether or --oui: show_mac_here is forced off in that case. A
+        // VLAN tag (PROFINET RT/GOOSE/SV/EtherCAT commonly carry one) still gets its own bare
+        // "vlan <id>" line exactly as it always has, same as the untagged/-e-off case already
+        // produces below. For an IP-bearing packet nothing here changes: the headline shows IP
+        // addresses, not MAC, so -e/--ether's own line is still the only place to see it.
+        bool show_mac_here = show_mac_ && p.has_ip;
+        if (show_mac_here || show_vlan_here) {
             out_ << "        ";
             if (color_) out_ << kDim;
-            if (show_mac_) {
+            if (show_mac_here) {
                 out_ << "eth " << p.src_mac;
                 if (auto v = resolver_.oui_vendor(p.src_mac)) out_ << " (" << *v << ")";
                 out_ << " -> " << p.dst_mac;

@@ -119,6 +119,54 @@ struct EthernetFlowReport {
     std::string reason;           // set (non-empty) when verdict != Allowed: why, for the report
 };
 
+// One aggregated observation of a Tier 1-5 "IT protocol an OT auditor flags" (ROADMAP item 18;
+// notable_it_protocols.hpp names the exact 42 protocol values and their tier) -- recorded
+// independent of, and never affecting, this flow/L2-flow's own Allowed/Violation/Unclassified
+// verdict above: an interactive-access or tunneling protocol reaching an OT zone is itself worth
+// flagging even inside a technically "compliant" policy that happened to allow it (this item's own
+// framing) -- see PolicyEngine::observe's own comment for exactly when this is recorded, and
+// PolicyReport::notable_protocols for the aggregation key.
+//
+// Unlike FlowReport, this needs no per-session state to compute client_ip/server_ip: every one of
+// these 42 protocols' own ports are guaranteed to never be "known" to this file's own
+// is_known_service_port (that list is exclusively the five core OT protocol ports), so the same
+// SYN/SYN-ACK-first, lower-port-number-otherwise priority order PolicyEngine::observe already uses
+// for an ordinary TCP flow degenerates, for these protocols, to exactly the same "lower port is
+// assumed the server" heuristic asset_inventory.cpp's own src_is_client_by_port independently
+// documents for this exact shape -- reused here rather than reimplemented, and, for a TCP-based
+// notable protocol, actually computed from the SAME per-session FlowState PolicyEngine::observe was
+// going to compute anyway (so a TCP notable protocol's direction is exactly as authoritative as its
+// own FlowReport's -- SYN/SYN-ACK when captured, the port heuristic otherwise).
+struct NotableProtocolFinding {
+    std::string protocol;  // one of notable_it_protocols.hpp's 42 values, e.g. "rdp"/"ssh"/"gre"
+    std::string tier;      // "remote-access"/"lateral-movement"/"enterprise-trust"/
+                            // "wireless-backhaul"/"tunnel-vpn" -- see notable_it_protocol_tier
+    bool has_ip = true;    // false only for eapol/pppoe/mpls (EtherType-keyed, no IP layer at all --
+                            // see mac_a/mac_b below instead of client_ip/server_ip)
+    bool direction_known = false;  // true only for a TCP-based protocol whose flow captured an
+                                    // actual SYN/SYN-ACK (DirectionSource::Handshake) -- see
+                                    // client_ip/server_ip's own comment for what this means when
+                                    // false
+    std::string client_ip, server_ip;  // meaningful only when has_ip. When direction_known is
+                                        // false, these are still a best-effort client/server guess
+                                        // (the lower-port-number heuristic above), not a confirmed
+                                        // direction -- render/consume accordingly (see
+                                        // write_policy_report_text/_json's own "(port heuristic)"
+                                        // annotation for exactly how this is surfaced)
+    std::string mac_a, mac_b;  // meaningful only when !has_ip (eapol/pppoe/mpls) -- canonical order
+                                // (mac_a < mac_b), the same no-direction convention
+                                // EthernetFlowReport::mac_a/mac_b already uses for these same three
+                                // protocols' architectural siblings (PROFINET/GOOSE/SV/EtherCAT)
+    bool has_port = false;  // false only for an IP-protocol-number-keyed Tier 5 tunnel (gre/esp/ah/
+                             // ip-in-ip/6in4/l2tp's direct-IP form) and for eapol/pppoe/mpls, none of
+                             // which have a port at all
+    bool is_tcp = false;     // meaningful only when has_port -- which transport `port` was observed
+                              // over, so a hostname/service-name annotation (write_policy_report_text/
+                              // _json) queries the Resolver with the right protocol string
+    uint16_t port = 0;      // meaningful only when has_port
+    size_t packet_count = 0;
+};
+
 struct PolicyReport {
     std::vector<FlowReport> flows;  // one per observed TCP flow, in first-seen order
     // One per observed raw-Ethernet L2 flow (PROFINET RT/GOOSE/SV/EtherCAT), in first-seen order --
@@ -138,6 +186,22 @@ struct PolicyReport {
                                   // zone at all: not part of any evaluated flow -- see
                                   // PolicyEngine::observe
     size_t total_packets = 0;
+
+    // "IT protocols an OT auditor flags" (ROADMAP item 18), one entry per distinct (protocol,
+    // client/server or MAC pair, port) combination observed, in first-seen order -- ALWAYS
+    // populated, spanning every transport shape these 42 protocols use (ordinary TCP flows already
+    // counted in `flows` above, UDP, an IP-protocol-number directly on IP, or raw Ethernet by
+    // EtherType), and completely independent of `flows`/`ethernet_flows`/`compliant()` above: a
+    // notable protocol observed on an otherwise Allowed, Violation, or Unclassified flow is recorded
+    // here exactly the same way regardless of that flow's own verdict, and this list's own
+    // population never changes that verdict. See NotableProtocolFinding's own comment for the
+    // aggregation, and cli_main.cpp's `--strict-it-protocols` flag (policy validate only) for the
+    // opt-in way a non-empty list here CAN additionally affect the process exit code, without ever
+    // touching compliant() itself -- deliberately kept out of compliant() so a caller of this struct
+    // directly (or the JSON report's own "compliant" field) always sees the same protocol/port/
+    // conduit-allow-list-only verdict this engine has always computed, per Jurgen's own explicit
+    // "always flag, independent of compliance" design choice for this item.
+    std::vector<NotableProtocolFinding> notable_protocols;
 
     // Every count below spans both `flows` and `ethernet_flows` -- an L2 flow's verdict counts
     // exactly like a TCP flow's for compliance purposes; there is no separate "ethernet compliant"
@@ -178,6 +242,19 @@ public:
     // flow either and is only counted toward PolicyReport::skipped_non_tcp -- this tool only ever
     // checks TCP-based OT protocols (plus, now, VLAN-zoned raw-Ethernet OT protocols) against a
     // policy's conduits, so there's nothing further to evaluate for them yet.
+    //
+    // Independent of all of the above: a packet whose protocol is one of notable_it_protocols.hpp's
+    // 42 "IT protocols an OT auditor flags" (ROADMAP item 18) is ALSO recorded into
+    // PolicyReport::notable_protocols, regardless of which branch above it falls into -- a TCP-based
+    // one (rdp/vnc/smb/ssh/http/https/ldap/ldaps/tacacs-plus/openvpn/stt) is both folded into this
+    // flow's own FlowState exactly as before (still Unclassified there today, see finish()'s
+    // fs.protocols.empty() branch) AND recorded as its own NotableProtocolFinding; a UDP/IP-protocol-
+    // number/EtherType-keyed one (every other tier-1-5 protocol, none of which this engine's TCP-flow
+    // model evaluates at all) is recorded ONLY as a NotableProtocolFinding, with
+    // PolicyReport::skipped_non_tcp still incremented for it exactly as before this feature existed
+    // -- this is a strictly additive observation, never a change to what skipped_non_tcp/FlowState/
+    // EthernetFlowState count. See NotableProtocolFinding's own comment for how client_ip/server_ip
+    // (or mac_a/mac_b) get decided for each of these transport shapes.
     //
     // Client (initiator) vs. server is decided, per TCP flow, the first time that flow is seen able
     // to decide it:
@@ -238,12 +315,43 @@ private:
         size_t packet_count = 0;
     };
 
+    // Aggregated state for one NotableProtocolFinding -- see that struct's own comment (this is its
+    // mutable, still-accumulating counterpart, the same "State suffix while observing, Report/Finding
+    // suffix once finish() copies it out" convention FlowState/EthernetFlowState already establish).
+    struct NotableProtocolState {
+        std::string protocol, tier;
+        bool has_ip = true;
+        bool direction_known = false;
+        std::string client_ip, server_ip;
+        std::string mac_a, mac_b;
+        bool has_port = false;
+        bool is_tcp = false;
+        uint16_t port = 0;
+        size_t packet_count = 0;
+    };
+
+    // Folds one notable-protocol observation into notable_protocols_/notable_protocol_order_, keyed
+    // by `key` (already canonicalized by the caller -- see observe()'s own three call sites in
+    // policy_engine.cpp for exactly how `key` and every other parameter here are computed for each
+    // of the TCP/UDP/IP-protocol-number/EtherType transport shapes). Every field except
+    // packet_count is fixed at first-insert (mirrors EdgeState's own "decided once, from the first
+    // packet that creates this entry" convention in asset_inventory.cpp, rather than FlowState's own
+    // "can still be upgraded by a later SYN/SYN-ACK" one -- a plain per-packet heuristic, not a
+    // per-session one, has nothing to upgrade from).
+    void record_notable_protocol(const std::string& key, const std::string& protocol, const std::string& tier,
+                                  bool has_ip, bool direction_known, const std::string& client_ip,
+                                  const std::string& server_ip, const std::string& mac_a, const std::string& mac_b,
+                                  bool has_port, bool is_tcp, uint16_t port);
+
     const Policy& policy_;
     bool any_vlan_zone_;  // cached Policy::has_vlan_zone() -- see observe()'s own comment
     std::unordered_map<std::string, FlowState> flows_;  // keyed by canonical session key
     std::vector<std::string> flow_order_;                // session keys, first-seen order
     std::unordered_map<std::string, EthernetFlowState> ethernet_flows_;  // keyed by canonical L2 flow key
     std::vector<std::string> ethernet_flow_order_;                        // L2 flow keys, first-seen order
+    std::unordered_map<std::string, NotableProtocolState> notable_protocols_;  // keyed by observe()'s
+                                                                                 // own per-shape key
+    std::vector<std::string> notable_protocol_order_;  // notable_protocols_ keys, first-seen order
     size_t skipped_non_tcp_ = 0;
     size_t total_packets_ = 0;
 };
@@ -258,7 +366,7 @@ private:
 // or an EthernetFlowReport's mac_a/mac_b get an OUI-vendor annotation, all rendered inline right
 // after the raw value exactly like decode's own convention: never a replacement, and a lookup miss
 // (or a disabled lookup) adds nothing. Pass a default-constructed-equivalent Resolver (all three
-// lookups left at their CLI defaults, or all disabled via --no-oui/--nn with no --resolve) for a
+// lookups left at their CLI defaults, or all disabled via not passing --oui/--nn with no --resolve) for a
 // caller that wants the byte-for-byte pre-annotation report; there is no separate unannotated
 // overload, matching decode's own writers, which always take a Resolver too.
 void write_policy_report_text(std::ostream& out, const PolicyReport& report, const Policy& policy,

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 cmake_minimum_required(VERSION 3.16)
-project(conduitscope VERSION 0.1.8 LANGUAGES CXX)
+project(conduitscope VERSION 0.1.7 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -95,6 +95,7 @@ add_library(conduitscope_core STATIC
   src/output.cpp
   src/yaml_mini.cpp
   src/policy.cpp
+  src/notable_it_protocols.cpp
   src/policy_engine.cpp
   src/asset_inventory.cpp
   src/flow_direction.cpp
@@ -1507,10 +1508,17 @@ set_tests_properties(sv_truncated_header_falls_back_to_non_ip PROPERTIES
 # A full 8-byte header but the byte immediately after it is not 0x60 -- must NOT be misdetected as
 # SV; both this packet and the truncated-header one above fall back to the same "non-ip" report,
 # so this asserts there are exactly two such lines in the whole file (no false positive elsewhere).
+# A non-IP packet's src_mac/dst_mac are now shown directly on its own headline (see output.cpp's
+# endpoint()) rather than needing a separate "eth ..." line below it -- write_packet() suppresses
+# that line outright for a packet with no IP layer, since it would just repeat the same pair (see
+# write_packet's own comment); -e/--ether is kept on this test only to prove that suppression, not
+# because it still adds anything here. Two consecutive #10/#11 non-ip lines, each carrying its own
+# MAC pair inline, is what pins that down.
 add_test(NAME sv_wrong_outer_tag_falls_back_to_non_ip
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_sv.pcap" -e --format text)
 set_tests_properties(sv_wrong_outer_tag_falls_back_to_non_ip PROPERTIES
-  PASS_REGULAR_EXPRESSION "non-ip\\][^\n]*\n *eth [^\n]*\n#11[^\n]*non-ip\\]")
+  PASS_REGULAR_EXPRESSION "#10  .*non-ip\\][^\n]*\n#11  .*00:0c:29:11:22:33 -> 00:0c:29:aa:bb:cc[^\n]*non-ip\\]"
+  FAIL_REGULAR_EXPRESSION "\n *eth ")
 
 add_test(NAME sv_bogus_length_field_falls_back_to_available_bytes
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_sv.pcap" --format text)
@@ -1860,10 +1868,14 @@ set_tests_properties(stp_spb_version4_named_only_not_decoded PROPERTIES
 # 21-22) STP's own LLC DSAP/SSAP/Control (0x42/0x42/0x03) present, but the payload itself doesn't
 # structurally parse as STP (bad Protocol Identifier; unrecognized BPDU Type) -- falls back to
 # reporting the frame as a generic, unrecognized LLC frame rather than guessing.
+# Same "no separate eth line for a non-IP packet" behavior sv_wrong_outer_tag_falls_back_to_non_ip
+# above pins down -- -e is kept here only to prove the suppression, not because it still adds an
+# "eth ..." line between these two.
 add_test(NAME stp_bad_protocol_identifier_and_bad_bpdu_type_fall_back_to_llc
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_stp.pcap" -e --format text)
 set_tests_properties(stp_bad_protocol_identifier_and_bad_bpdu_type_fall_back_to_llc PROPERTIES
-  PASS_REGULAR_EXPRESSION "#21  .*\\[non-ip\\]  IEEE 802.3 LLC frame, DSAP=0x42 SSAP=0x42 Control=0x3 \\(length=38\\)\n *eth [^\n]*\n#22  .*\\[non-ip\\]  IEEE 802.3 LLC frame, DSAP=0x42 SSAP=0x42 Control=0x3 \\(length=38\\)")
+  PASS_REGULAR_EXPRESSION "#21  .*00:0c:29:11:22:33 -> 01:80:c2:00:00:00[^\n]*\\[non-ip\\]  IEEE 802.3 LLC frame, DSAP=0x42 SSAP=0x42 Control=0x3 \\(length=38\\)\n#22  .*\\[non-ip\\]  IEEE 802.3 LLC frame, DSAP=0x42 SSAP=0x42 Control=0x3 \\(length=38\\)"
+  FAIL_REGULAR_EXPRESSION "#21[^\n]*\n *eth ")
 
 # 23) Truncated before the common Configuration/RST BPDU body -- reported as truncated with an
 # explanatory note, not decoded further.
@@ -5294,7 +5306,7 @@ set_tests_properties(pcapng_simple_packet_block_decodes PROPERTIES
   PASS_REGULAR_EXPRESSION "Read Holding Registers")
 
 # ---------------------------------------------------------------------------------------------
-# Resolver (resolver.hpp/resolver.cpp): OUI (MAC vendor) resolution (off by default, --oui, to
+# Resolver (resolver.hpp/resolver.cpp): OUI (MAC vendor) resolution (off by default, --mac-vendor, to
 # keep output compact), hostname resolution (off by default, --resolve/--hosts, file-only --
 # never live DNS), and service name resolution (on by default, --nn/--services) -- see
 # decoder.cpp's src_mac/dst_mac gap-fix and output.cpp's TextWriter/JsonWriter/CsvWriter for how
@@ -5305,10 +5317,10 @@ set_tests_properties(pcapng_simple_packet_block_decodes PROPERTIES
 #
 # In TEXT output specifically, the entire "eth <src> -> <dst>" line is itself gated behind
 # -e/--ether (off by default, mirrors tcpdump's own -e -- see output.hpp/output.cpp's show_mac_).
-# --oui implies -e (cli_main.cpp: there'd be nothing to attach a vendor name to otherwise), so
-# --oui alone still shows the full "eth <mac> (<vendor>) -> <mac> (<vendor>)" line. -e alone shows
+# --mac-vendor implies -e (cli_main.cpp: there'd be nothing to attach a vendor name to otherwise), so
+# --mac-vendor alone still shows the full "eth <mac> (<vendor>) -> <mac> (<vendor>)" line. -e alone shows
 # the MAC pair with no vendor annotation. JSON/CSV are NOT gated by -e at all -- src_mac/dst_mac
-# stay unconditional base fields there (like src_ip/dst_ip) regardless of -e; --oui only ever
+# stay unconditional base fields there (like src_ip/dst_ip) regardless of -e; --mac-vendor only ever
 # controls their *_mac_vendor annotation fields, in every format.
 # ---------------------------------------------------------------------------------------------
 
@@ -5335,7 +5347,7 @@ set_tests_properties(resolver_ether_long_flag_same_as_e_text PROPERTIES
   PASS_REGULAR_EXPRESSION "eth 00:0c:29:11:22:33 -> 00:0c:29:aa:bb:cc\n"
   FAIL_REGULAR_EXPRESSION "VMware")
 
-# --- OUI (MAC vendor) vendor annotation, off by default, --oui opts in (and implies -e) -----
+# --- OUI (MAC vendor) vendor annotation, off by default, --mac-vendor opts in (and implies -e) -----
 
 add_test(NAME resolver_oui_vendor_hidden_by_default_json
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --format json)
@@ -5344,18 +5356,18 @@ set_tests_properties(resolver_oui_vendor_hidden_by_default_json PROPERTIES
   FAIL_REGULAR_EXPRESSION "_mac_vendor")
 
 add_test(NAME resolver_oui_flag_shows_vendor_text
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --oui --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --mac-vendor --format text)
 set_tests_properties(resolver_oui_flag_shows_vendor_text PROPERTIES
   PASS_REGULAR_EXPRESSION "eth 00:0c:29:11:22:33 \\(VMware\\) -> 00:0c:29:aa:bb:cc \\(VMware\\)")
 
-# --oui alone (no explicit -e) must still show the eth line -- --oui implies -e (cli_main.cpp).
+# --mac-vendor alone (no explicit -e) must still show the eth line -- --mac-vendor implies -e (cli_main.cpp).
 add_test(NAME resolver_oui_flag_alone_implies_ether_text
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --oui --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --mac-vendor --format text)
 set_tests_properties(resolver_oui_flag_alone_implies_ether_text PROPERTIES
   PASS_REGULAR_EXPRESSION "eth 00:0c:29:11:22:33")
 
 add_test(NAME resolver_oui_flag_shows_vendor_json
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --oui --format json)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --mac-vendor --format json)
 set_tests_properties(resolver_oui_flag_shows_vendor_json PROPERTIES
   PASS_REGULAR_EXPRESSION "\"src_mac\": \"00:0c:29:11:22:33\",\n *\"dst_mac\": \"00:0c:29:aa:bb:cc\",\n *\"src_mac_vendor\": \"VMware\",\n *\"dst_mac_vendor\": \"VMware\",")
 
@@ -5431,9 +5443,9 @@ set_tests_properties(resolver_nn_suppresses_service_name_json PROPERTIES
   FAIL_REGULAR_EXPRESSION "_port_service")
 
 # --nn only disables service names -- OUI vendor annotations (an independent lookup, explicitly
-# enabled here via --oui) must still appear alongside it.
+# enabled here via --mac-vendor) must still appear alongside it.
 add_test(NAME resolver_nn_does_not_affect_oui
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --nn --oui --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --nn --mac-vendor --format text)
 set_tests_properties(resolver_nn_does_not_affect_oui PROPERTIES
   PASS_REGULAR_EXPRESSION "eth 00:0c:29:11:22:33 \\(VMware\\)")
 
@@ -5459,12 +5471,12 @@ set_tests_properties(resolver_services_given_with_nn_is_unused_and_noted PROPERT
 # --- Combined: every resolution enabled at once, across all three formats --------------------
 
 add_test(NAME resolver_all_enabled_together_text
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --oui --resolve --hosts "${RESOLVER_HOSTS}" --services "${RESOLVER_SERVICES}" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --mac-vendor --resolve --hosts "${RESOLVER_HOSTS}" --services "${RESOLVER_SERVICES}" --format text)
 set_tests_properties(resolver_all_enabled_together_text PROPERTIES
   PASS_REGULAR_EXPRESSION "192.168.1.50 \\(hmi-01\\):51000 \\(hmi-modbus-client\\) -> 192.168.1.10 \\(plc-01\\):502 \\(custom-modbus\\)")
 
 add_test(NAME resolver_all_enabled_together_json
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --oui --resolve --hosts "${RESOLVER_HOSTS}" --services "${RESOLVER_SERVICES}" --format json)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --mac-vendor --resolve --hosts "${RESOLVER_HOSTS}" --services "${RESOLVER_SERVICES}" --format json)
 set_tests_properties(resolver_all_enabled_together_json PROPERTIES
   PASS_REGULAR_EXPRESSION "\"src_mac_vendor\": \"VMware\",.*\"src_hostname\": \"hmi-01\",.*\"dst_hostname\": \"plc-01\",.*\"src_port_service\": \"hmi-modbus-client\",.*\"dst_port_service\": \"custom-modbus\"")
 
@@ -5504,36 +5516,47 @@ set_tests_properties(resolver_mac_shown_for_plain_ip_protocol_not_just_raw_ether
 # ---------------------------------------------------------------------------------------------
 
 # VLAN display is independent of -e/--ether (show_mac_) -- see output.hpp/output.cpp's own
-# comments -- so a VLAN-tagged packet still gets its own "vlan <id>" line by default, just without
-# an "eth <mac> -> <mac>" prefix ahead of it (that prefix needs -e/--oui, tested separately below).
+# comments -- so a VLAN-tagged packet still gets its own "vlan <id>" line by default. Every packet
+# in this fixture is non-IP (PROFINET RT/GOOSE/SV/EtherCAT), so its src_mac/dst_mac already appear
+# directly on the headline itself (output.cpp's endpoint() -- see that function's own comment) with
+# no -e/--mac-vendor needed at all; there is deliberately no separate "eth <mac> -> <mac>" prefix line for
+# a non-IP packet any more (write_packet() suppresses it there specifically, since it would just
+# repeat what the headline already shows), so this fixture no longer has one to test.
 add_test(NAME vlan_id_shown_by_default_text
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_vlan_zones.pcap" --format text)
 set_tests_properties(vlan_id_shown_by_default_text PROPERTIES
-  PASS_REGULAR_EXPRESSION "vlan 100"
+  PASS_REGULAR_EXPRESSION "00:0c:29:11:22:33 -> 00:0c:29:aa:bb:cc[^\n]*\\[profinet\\][^\n]*\n *vlan 100"
+  FAIL_REGULAR_EXPRESSION "\n *eth ")
+
+# -e is now a no-op for this fixture (every packet is non-IP, so show_mac_'s own separate line
+# never applies here regardless -- see this section's own header comment) -- kept as an explicit
+# regression check that -e doesn't reintroduce a combined "eth ... vlan ..." line for a non-IP
+# packet the way it did before this behavior changed.
+add_test(NAME vlan_id_stays_on_own_line_with_ether_for_non_ip_text
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_vlan_zones.pcap" -e --format text)
+set_tests_properties(vlan_id_stays_on_own_line_with_ether_for_non_ip_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "00:0c:29:11:22:33 -> 00:0c:29:aa:bb:cc[^\n]*\\[profinet\\][^\n]*\n *vlan 100"
   FAIL_REGULAR_EXPRESSION "eth 00:0c:29")
 
-# With -e also given, the VLAN ID is appended to the same "eth ..." line as before, rather than
-# standing alone.
-add_test(NAME vlan_id_shown_on_same_line_as_mac_with_ether_text
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_vlan_zones.pcap" -e --format text)
-set_tests_properties(vlan_id_shown_on_same_line_as_mac_with_ether_text PROPERTIES
-  PASS_REGULAR_EXPRESSION "eth 00:0c:29:11:22:33 -> 00:0c:29:aa:bb:cc  vlan 100")
-
 # The untagged flow (mac pair 00:0c:29:cc:55:66 -> 00:0c:29:dd:77:88) must never get a "vlan ..."
-# suffix at all -- has_vlan_tag is false, not vlan_id == 0. Needs -e here: the untagged packet has
-# neither a VLAN tag nor (without -e) an eth line at all, so there'd be nothing to assert against
-# otherwise.
+# suffix at all -- has_vlan_tag is false, not vlan_id == 0. No -e needed any more: the untagged
+# packet's own MAC pair is already on its headline by default (see this section's own header
+# comment), same as every other packet in this fixture.
 add_test(NAME vlan_id_omitted_for_untagged_packet_text
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_vlan_zones.pcap" -e --format text)
-set_tests_properties(vlan_id_omitted_for_untagged_packet_text PROPERTIES
-  PASS_REGULAR_EXPRESSION "eth 00:0c:29:cc:55:66 -> 00:0c:29:dd:77:88\n")
-
-# Neither -e nor a VLAN tag: no eth/vlan line at all for the untagged flow, not even a bare "vlan"
-# line or an empty one -- the whole block is skipped outright (see output.cpp's write_packet).
-add_test(NAME no_ether_and_untagged_produces_no_eth_line_at_all_text
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_vlan_zones.pcap" --format text)
-set_tests_properties(no_ether_and_untagged_produces_no_eth_line_at_all_text PROPERTIES
-  FAIL_REGULAR_EXPRESSION "00:0c:29:cc:55:66")
+set_tests_properties(vlan_id_omitted_for_untagged_packet_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "00:0c:29:cc:55:66 -> 00:0c:29:dd:77:88[^\n]*\\[ethercat\\]"
+  FAIL_REGULAR_EXPRESSION "00:0c:29:cc:55:66 -> 00:0c:29:dd:77:88[^\n]*\n *vlan")
+
+# The MAC pair fallback itself needs neither -e/--ether nor --mac-vendor -- it's unconditional for any
+# non-IP packet (see endpoint()'s own comment) -- but the vendor-name annotation next to it still
+# needs --mac-vendor explicitly (Resolver::oui_vendor() self-gates on that flag). Confirms neither flag is
+# now accidentally implied by MAC display working out of the box.
+add_test(NAME non_ip_mac_shown_by_default_without_vendor_text
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_vlan_zones.pcap" --format text)
+set_tests_properties(non_ip_mac_shown_by_default_without_vendor_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "00:0c:29:cc:55:66 -> 00:0c:29:dd:77:88"
+  FAIL_REGULAR_EXPRESSION "eth 00:0c:29|VMware")
 
 add_test(NAME vlan_id_shown_by_default_json
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_vlan_zones.pcap" --format json)
@@ -5554,20 +5577,20 @@ add_test(NAME vlan_id_shown_by_default_csv
 set_tests_properties(vlan_id_shown_by_default_csv PROPERTIES
   PASS_REGULAR_EXPRESSION "profinet,\"Cyclic RT IO data \\(RT_CLASS_1, unicast\\): 8 byte\\(s\\) IO data, cycle_counter=4660 data_status=\\[Primary,Valid,Run,Ok\\] transfer_status=OK\",,100")
 
-# -e here so the eth line still renders (default off) with something to assert --no-vlan actually
-# suppressed the "  vlan 100" suffix it would otherwise carry, per
-# vlan_id_shown_on_same_line_as_mac_with_ether_text just above.
+# --no-vlan suppresses the "  vlan 100" suffix; the headline's own MAC pair (unconditional for a
+# non-IP packet, see this section's own header comment) is unaffected either way. -e is included
+# here purely as a regression check that it still doesn't reintroduce anything.
 add_test(NAME no_vlan_suppresses_display_text
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_vlan_zones.pcap" --format text --no-vlan -e)
 set_tests_properties(no_vlan_suppresses_display_text PROPERTIES
-  PASS_REGULAR_EXPRESSION "eth 00:0c:29:11:22:33 -> 00:0c:29:aa:bb:cc\n"
-  FAIL_REGULAR_EXPRESSION "vlan 100")
+  PASS_REGULAR_EXPRESSION "00:0c:29:11:22:33 -> 00:0c:29:aa:bb:cc[^\n]*\\[profinet\\]"
+  FAIL_REGULAR_EXPRESSION "vlan 100|eth 00:0c:29")
 
-# Neither -e nor VLAN display enabled: the whole eth/vlan block disappears, not just the vlan
-# suffix.
+# Same, without -e: the whole vlan line disappears, the MAC pair stays exactly as it was.
 add_test(NAME no_vlan_and_no_ether_suppresses_entire_eth_line_text
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_vlan_zones.pcap" --format text --no-vlan)
 set_tests_properties(no_vlan_and_no_ether_suppresses_entire_eth_line_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "00:0c:29:11:22:33 -> 00:0c:29:aa:bb:cc"
   FAIL_REGULAR_EXPRESSION "eth 00:0c:29|vlan 100")
 
 add_test(NAME no_vlan_suppresses_display_json
@@ -5589,12 +5612,15 @@ set_tests_properties(no_vlan_suppresses_display_csv PROPERTIES
   PASS_REGULAR_EXPRESSION "profinet,\"Cyclic RT IO data \\(RT_CLASS_1, unicast\\): 8 byte\\(s\\) IO data, cycle_counter=4660 data_status=\\[Primary,Valid,Run,Ok\\] transfer_status=OK\",,,0\\.000000,,\n"
   FAIL_REGULAR_EXPRESSION "transfer_status=OK\",,100")
 
-# --oui (left at its off-by-default posture here) and --no-vlan are independent toggles --
-# suppressing VLAN display must not affect the base MAC display either way.
+# --mac-vendor and --no-vlan are independent toggles -- suppressing VLAN display must not affect the
+# vendor annotation either way. --mac-vendor alone (no -e) is enough here: the vendor name attaches
+# directly to the headline's own MAC pair for a non-IP packet like this one, no separate eth line
+# involved any more -- see this section's own header comment.
 add_test(NAME no_vlan_does_not_affect_oui
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_vlan_zones.pcap" --format text --no-vlan --oui)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_vlan_zones.pcap" --format text --no-vlan --mac-vendor)
 set_tests_properties(no_vlan_does_not_affect_oui PROPERTIES
-  PASS_REGULAR_EXPRESSION "eth 00:0c:29:11:22:33 \\(VMware\\) -> 00:0c:29:aa:bb:cc \\(VMware\\)")
+  PASS_REGULAR_EXPRESSION "00:0c:29:11:22:33 \\(VMware\\) -> 00:0c:29:aa:bb:cc \\(VMware\\)"
+  FAIL_REGULAR_EXPRESSION "eth 00:0c:29|vlan 100")
 
 # ---------------------------------------------------------------------------------------------
 # `-t`/`--time-format` mnemonics (time_format.hpp/time_format.cpp; TextWriter's leading "#<index>
@@ -6126,7 +6152,7 @@ set_tests_properties(policy_vlan_zone_json_format PROPERTIES
 # annotations exercised earlier (see this file's own "Resolver" section, above the resolver_*
 # `decode` tests) now applied to FlowReport's client_ip/server_ip/server_port (and its
 # client_mac/server_mac base-value gap-fix) and EthernetFlowReport's mac_a/mac_b.
-# `policy validate` takes the identical --oui/--resolve/--hosts/--nn/--services flags (see
+# `policy validate` takes the identical --mac-vendor/--resolve/--hosts/--nn/--services flags (see
 # cli_main.cpp's policy_validate_cmd) against the same tests/hosts_sample.txt/
 # tests/services_sample.txt fixtures used by `decode`'s own resolver tests (RESOLVER_HOSTS/
 # RESOLVER_SERVICES, set once, above). resolver.hpp's file header previously documented this as
@@ -6147,15 +6173,15 @@ set_tests_properties(policy_resolver_oui_vendor_hidden_by_default_json PROPERTIE
   FAIL_REGULAR_EXPRESSION "_mac_vendor")
 
 add_test(NAME policy_resolver_oui_flag_shows_vendor_text
-  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/compliant.yaml" --oui)
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/compliant.yaml" --mac-vendor)
 set_tests_properties(policy_resolver_oui_flag_shows_vendor_text PROPERTIES
   PASS_REGULAR_EXPRESSION "mac: 00:0c:29:11:22:33 \\(VMware\\) -> 00:0c:29:aa:bb:cc \\(VMware\\)")
 
-# client_mac/server_mac themselves (the base gap-fix) stay present in JSON regardless of --oui --
+# client_mac/server_mac themselves (the base gap-fix) stay present in JSON regardless of --mac-vendor --
 # only the *_vendor annotation depends on it, same "base value vs. annotation" distinction as
 # decode's own resolver_base_src_dst_mac_always_present_regardless_of_oui_default test.
 add_test(NAME policy_resolver_oui_flag_shows_vendor_json
-  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/compliant.yaml" --oui --format json)
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/compliant.yaml" --mac-vendor --format json)
 set_tests_properties(policy_resolver_oui_flag_shows_vendor_json PROPERTIES
   PASS_REGULAR_EXPRESSION "\"client_mac\": \"00:0c:29:11:22:33\",\n *\"server_mac\": \"00:0c:29:aa:bb:cc\",\n *\"client_mac_vendor\": \"VMware\",\n *\"server_mac_vendor\": \"VMware\",")
 
@@ -6191,9 +6217,9 @@ set_tests_properties(policy_resolver_nn_suppresses_service_name_json PROPERTIES
   FAIL_REGULAR_EXPRESSION "_port_service")
 
 # --nn only disables service names -- OUI vendor annotation (an independent lookup, explicitly
-# enabled here via --oui) must still appear alongside it.
+# enabled here via --mac-vendor) must still appear alongside it.
 add_test(NAME policy_resolver_nn_does_not_affect_oui
-  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/compliant.yaml" --nn --oui)
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/compliant.yaml" --nn --mac-vendor)
 set_tests_properties(policy_resolver_nn_does_not_affect_oui PROPERTIES
   PASS_REGULAR_EXPRESSION "mac: 00:0c:29:11:22:33 \\(VMware\\)")
 
@@ -6207,12 +6233,12 @@ set_tests_properties(policy_resolver_services_file_overrides_builtin_table_text 
   FAIL_REGULAR_EXPRESSION "\\(modbus\\)")
 
 add_test(NAME policy_resolver_all_enabled_together_text
-  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/compliant.yaml" --oui --resolve --hosts "${RESOLVER_HOSTS}" --services "${RESOLVER_SERVICES}")
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/compliant.yaml" --mac-vendor --resolve --hosts "${RESOLVER_HOSTS}" --services "${RESOLVER_SERVICES}")
 set_tests_properties(policy_resolver_all_enabled_together_text PROPERTIES
   PASS_REGULAR_EXPRESSION "192.168.1.50 \\(hmi-01\\) -> 192.168.1.10 \\(plc-01\\):502 \\(custom-modbus\\).*mac: 00:0c:29:11:22:33 \\(VMware\\) -> 00:0c:29:aa:bb:cc \\(VMware\\)")
 
 add_test(NAME policy_resolver_all_enabled_together_json
-  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/compliant.yaml" --oui --resolve --hosts "${RESOLVER_HOSTS}" --services "${RESOLVER_SERVICES}" --format json)
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/compliant.yaml" --mac-vendor --resolve --hosts "${RESOLVER_HOSTS}" --services "${RESOLVER_SERVICES}" --format json)
 set_tests_properties(policy_resolver_all_enabled_together_json PROPERTIES
   PASS_REGULAR_EXPRESSION "\"client_mac_vendor\": \"VMware\",[^}]*\"server_mac_vendor\": \"VMware\",[^}]*\"client_hostname\": \"hmi-01\",[^}]*\"server_hostname\": \"plc-01\",[^}]*\"server_port_service\": \"custom-modbus\",")
 
@@ -6237,7 +6263,7 @@ set_tests_properties(policy_resolver_ethernet_flow_oui_vendor_hidden_by_default_
   FAIL_REGULAR_EXPRESSION "VMware")
 
 add_test(NAME policy_resolver_ethernet_flow_oui_flag_shows_vendor_text
-  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_vlan_zones.pcap" --policy "${POLICY_DIR}/vlan_zone_mixed_results.yaml" --oui)
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_vlan_zones.pcap" --policy "${POLICY_DIR}/vlan_zone_mixed_results.yaml" --mac-vendor)
 set_tests_properties(policy_resolver_ethernet_flow_oui_flag_shows_vendor_text PROPERTIES
   PASS_REGULAR_EXPRESSION "00:0c:29:11:22:33 \\(VMware\\) <-> 00:0c:29:aa:bb:cc \\(VMware\\)  \\(profinet")
 
@@ -6248,7 +6274,7 @@ set_tests_properties(policy_resolver_ethernet_flow_oui_vendor_hidden_by_default_
   FAIL_REGULAR_EXPRESSION "mac_._vendor")
 
 add_test(NAME policy_resolver_ethernet_flow_oui_flag_shows_vendor_json
-  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_vlan_zones.pcap" --policy "${POLICY_DIR}/vlan_zone_mixed_results.yaml" --oui --format json)
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_vlan_zones.pcap" --policy "${POLICY_DIR}/vlan_zone_mixed_results.yaml" --mac-vendor --format json)
 set_tests_properties(policy_resolver_ethernet_flow_oui_flag_shows_vendor_json PROPERTIES
   PASS_REGULAR_EXPRESSION "\"mac_a\": \"00:0c:29:11:22:33\",\n *\"mac_b\": \"00:0c:29:aa:bb:cc\",\n *\"mac_a_vendor\": \"VMware\",\n *\"mac_b_vendor\": \"VMware\",")
 
@@ -6330,7 +6356,7 @@ add_test(NAME inventory_policy_out_empty_capture_note_on_stderr
 set_tests_properties(inventory_policy_out_empty_capture_note_on_stderr PROPERTIES
   PASS_REGULAR_EXPRESSION "note: no asset was observed, so .*inventory_empty_policy_note_check\\.yaml.* has no 'zones:'/'conduits:' keys and is not a loadable policy file as-is")
 
-# --- Resolver, wired into `inventory` the same way as `decode`/`policy validate` (--oui/---------
+# --- Resolver, wired into `inventory` the same way as `decode`/`policy validate` (--mac-vendor/---------
 # --- --resolve/--hosts/--nn/--services) -- reuses sample_modbus.pcap and the same fixtures -------
 
 add_test(NAME inventory_resolver_oui_vendor_hidden_by_default_text
@@ -6340,7 +6366,7 @@ set_tests_properties(inventory_resolver_oui_vendor_hidden_by_default_text PROPER
   FAIL_REGULAR_EXPRESSION "VMware")
 
 add_test(NAME inventory_resolver_oui_flag_shows_vendor_text
-  COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --oui)
+  COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --mac-vendor)
 set_tests_properties(inventory_resolver_oui_flag_shows_vendor_text PROPERTIES
   PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.10  00:0c:29:aa:bb:cc \\(VMware\\)")
 
@@ -7535,3 +7561,128 @@ else()
       TIMEOUT 20)
   endif()
 endif()
+
+# ---------------------------------------------------------------------------------------------
+# ROADMAP item 18, second half: `policy validate`/`inventory` surfacing the mere PRESENCE of any
+# of the 42 "IT protocols an OT auditor flags" (notable_it_protocols.hpp) as their own finding --
+# PolicyReport::notable_protocols / AssetInventoryReport::notable_protocols -- independent of, and
+# never changing, either report's existing Allowed/Violation/Unclassified verdicts or skipped-
+# packet counts. The naming/recognition half of this item (all 42 protocol values themselves) has
+# its own extensive test coverage already, under each tier's own decode section above; these tests
+# are only for the NEW finding this adds on top, reusing those same five fixture pcaps
+# (sample_remote_access/lateral_movement/enterprise_trust/wireless_backhaul/tunnel_vpn.pcap),
+# which until now were only ever exercised by `decode` tests.
+# ---------------------------------------------------------------------------------------------
+
+# Tier 1 (remote-access): all 8 packets in this fixture are one of the five Tier 1 protocols, so
+# every one becomes its own notable_protocols entry -- proves the text report's own section header,
+# a representative line for each of the five protocol names, and that this section renders even
+# though every flow above it is Unclassified (no conduit in compliant.yaml even mentions "rdp").
+add_test(NAME notable_protocols_remote_access_text
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_remote_access.pcap"
+          --policy "${POLICY_DIR}/compliant.yaml")
+set_tests_properties(notable_protocols_remote_access_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "NOTABLE IT PROTOCOLS \\(8\\):\n.*\\[1\\] rdp  \\(remote-access\\).*vnc  \\(remote-access\\).*teamviewer  \\(remote-access\\).*anydesk  \\(remote-access\\).*zoom  \\(remote-access\\)")
+
+add_test(NAME notable_protocols_remote_access_json
+  COMMAND conduitscope policy validate --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_remote_access.pcap"
+          --policy "${POLICY_DIR}/compliant.yaml")
+set_tests_properties(notable_protocols_remote_access_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"notable_protocols\": \\[\n    \\{\n      \"protocol\": \"rdp\",\n      \"tier\": \"remote-access\",\n      \"client_ip\"")
+
+# Tier 2 (lateral-movement), 20 of this fixture's packets recognized as one of the eight Tier 2
+# protocols -- the rest of the 26-packet fixture is negative-control/collision-check traffic (see
+# this tier's own decode section above) that correctly produces no notable_protocols entry. The
+# text report's own "NOTABLE IT PROTOCOLS (N):" header count IS the assertion that exactly 20 were
+# found (the same "let the tool's own printed count do the counting" convention every other
+# cardinality assertion in this file already uses, e.g. "8 asset(s) observed" above) -- every line
+# in the fixture is Tier 2, so this also confirms no other tier's protocol leaked in.
+add_test(NAME notable_protocols_lateral_movement_count
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_lateral_movement.pcap"
+          --policy "${POLICY_DIR}/compliant.yaml")
+set_tests_properties(notable_protocols_lateral_movement_count PROPERTIES
+  PASS_REGULAR_EXPRESSION "NOTABLE IT PROTOCOLS \\(20\\):"
+  FAIL_REGULAR_EXPRESSION "\\(remote-access\\)|\\(enterprise-trust\\)|\\(wireless-backhaul\\)|\\(tunnel-vpn\\)")
+
+# Tier 3 (enterprise-trust): the one tier whose fixture also contains a Tier-2 "https" packet (a
+# deliberate negative control proving LDAPS-vs-HTTPS ALPN disambiguation -- see this tier's own
+# decode section above), so this is the one fixture that proves notable_protocols spans more than
+# one tier in a single report, and its own EAPOL packets (no IP layer at all) render by MAC pair
+# rather than IP.
+add_test(NAME notable_protocols_enterprise_trust_multi_tier_and_eapol_mac
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enterprise_trust.pcap"
+          --policy "${POLICY_DIR}/compliant.yaml")
+set_tests_properties(notable_protocols_enterprise_trust_multi_tier_and_eapol_mac PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[[0-9]+\\] https  \\(lateral-movement\\).*\\[[0-9]+\\] eapol  \\(enterprise-trust\\)  00:0c:29:11:22:33 <-> 01:80:c2:00:00:03  \\([0-9]+ packet\\(s\\)\\)")
+
+# Tier 4 (wireless-backhaul): all five of this tier's own protocols (capwap-control/-data, lwapp-
+# control/-data, gtp-u) are UDP-only, and PPPoE (also this tier) is EtherType-keyed -- so this
+# fixture's own flows/ethernet_flows are BOTH empty (0 TCP flows, no VLAN-zoned L2 traffic either),
+# making compliant.yaml's own verdict trivially COMPLIANT -- exactly the case that proves
+# `--strict-it-protocols` is what's deciding the exit code below, not this report's own existing
+# compliance logic (which never changes -- see PolicyReport::notable_protocols' own comment).
+add_test(NAME notable_protocols_wireless_backhaul_baseline_compliant
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_wireless_backhaul.pcap"
+          --policy "${POLICY_DIR}/compliant.yaml")
+set_tests_properties(notable_protocols_wireless_backhaul_baseline_compliant PROPERTIES
+  PASS_REGULAR_EXPRESSION "Result: COMPLIANT\n\nFlows evaluated: 0 .*NOTABLE IT PROTOCOLS \\(14\\):")
+
+# WILL_FAIL alone (no PASS_REGULAR_EXPRESSION alongside it -- CTest inverts a regex match's
+# contribution to pass/fail together with the exit code when both are set on the same test, which
+# would make this assert the OPPOSITE of what it means to check; the sibling test above already
+# pins this exact command's "Result: COMPLIANT" text, this one only needs the exit code).
+add_test(NAME notable_protocols_strict_it_protocols_flips_exit_code
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_wireless_backhaul.pcap"
+          --policy "${POLICY_DIR}/compliant.yaml" --strict-it-protocols)
+set_tests_properties(notable_protocols_strict_it_protocols_flips_exit_code PROPERTIES
+  WILL_FAIL TRUE)
+
+# Without --strict-it-protocols, the exact same capture/policy pair still exits 0 (COMPLIANT) --
+# proves the new flag is opt-in, not a behavior change to the existing default.
+add_test(NAME notable_protocols_without_strict_flag_stays_compliant
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_wireless_backhaul.pcap"
+          --policy "${POLICY_DIR}/compliant.yaml")
+set_tests_properties(notable_protocols_without_strict_flag_stays_compliant PROPERTIES
+  PASS_REGULAR_EXPRESSION "Result: COMPLIANT")
+
+# Tier 5 (tunnel-vpn): the one tier with an IP-protocol-number-keyed shape (gre/esp/ah/ip-in-ip/
+# 6in4/l2tp's direct-IP form -- no port at all) alongside its UDP- and TCP-based protocols and its
+# own EtherType-keyed MPLS -- proves has_port is correctly false (rendered as JSON null) for that
+# shape specifically.
+add_test(NAME notable_protocols_tunnel_vpn_ip_proto_has_no_port
+  COMMAND conduitscope policy validate --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tunnel_vpn.pcap"
+          --policy "${POLICY_DIR}/compliant.yaml")
+set_tests_properties(notable_protocols_tunnel_vpn_ip_proto_has_no_port PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"protocol\": \"gre\",\n      \"tier\": \"tunnel-vpn\",\n      \"client_ip\": \"[0-9.]+\",\n      \"server_ip\": \"[0-9.]+\",\n      \"port\": null")
+
+# This feature's own pinned regression guard: the ORIGINAL "widened protocol scope"
+# link_transport_layers_all_skipped_by_policy_engine test (above) already proves skipped_non_tcp
+# stays exactly 7 for a fixture with no notable protocols in it at all; this proves the converse --
+# a fixture with only ordinary OT protocol traffic (sample_modbus.pcap) still reports an EMPTY
+# notable_protocols array, not a widened one.
+add_test(NAME notable_protocols_empty_for_ordinary_ot_traffic
+  COMMAND conduitscope policy validate --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap"
+          --policy "${POLICY_DIR}/compliant.yaml")
+set_tests_properties(notable_protocols_empty_for_ordinary_ot_traffic PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"notable_protocols\": \\[.*\\]")
+
+# --- inventory: the same finding, surfaced in `inventory` instead -- see AssetInventoryReport::
+# notable_protocols' own comment. Unlike policy validate, there is no compliance concept here at
+# all, so no --strict-it-protocols equivalent flag exists for this command.
+add_test(NAME inventory_notable_protocols_text
+  COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_remote_access.pcap")
+set_tests_properties(inventory_notable_protocols_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "0 asset\\(s\\) observed, 8 total packet\\(s\\) in capture, 8 skipped.*NOTABLE IT PROTOCOLS \\(8\\):")
+
+add_test(NAME inventory_notable_protocols_json_eapol_mac_pair
+  COMMAND conduitscope inventory --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enterprise_trust.pcap")
+set_tests_properties(inventory_notable_protocols_json_eapol_mac_pair PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"protocol\": \"eapol\",\n      \"tier\": \"enterprise-trust\",\n      \"mac_a\": \"00:0c:29:11:22:33\",\n      \"mac_b\": \"01:80:c2:00:00:03\"")
+
+# Regression guard, inventory side: a fixture with only ordinary (ten-protocol) OT traffic still
+# reports an empty notable_protocols array, and skipped_packets is unaffected by this feature --
+# same pairing as notable_protocols_empty_for_ordinary_ot_traffic above, for `inventory`.
+add_test(NAME inventory_notable_protocols_empty_for_ordinary_ot_traffic
+  COMMAND conduitscope inventory --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap")
+set_tests_properties(inventory_notable_protocols_empty_for_ordinary_ot_traffic PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"skipped_packets\": 0,.*\"notable_protocols\": \\[.*\\]")

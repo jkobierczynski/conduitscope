@@ -1314,13 +1314,18 @@ anything else on this list.
    four bytes written. Also re-ran the full verification bar after this
    third fix: Linux CTest (1148/1148 default, 1138/1138 with
    `CONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF`) and a clean MinGW-w64
-   cross-compile. **The live-capture Ctrl+C fix is now confirmed on real
-   Windows hardware; the offline-decode fix is not yet** -- it was found
-   and fixed in this same round based on Jurgen's report and the A/B
-   evidence above, but hasn't itself had a live Windows confirmation yet.
-   Also still open: a real OT/mirrored-switch-port network capture --
-   what's been run so far is ordinary client traffic (ICMP, UDP/443
-   QUIC/TLS), not industrial protocol traffic on a real mirrored port.
+   cross-compile. **Both the live-capture and offline-decode Ctrl+C fixes
+   are now confirmed on real Windows hardware** -- Jurgen reported 50/50
+   clean live-capture runs (with a hex dump backing it up) after the second
+   fix, and a working offline-decode Ctrl+C after this third one, closing
+   out what turned out to be a three-part investigation: a real
+   `SetConsoleCtrlHandler`-vs-`signal()` gap, a genuine cross-thread
+   ordering race specific to live capture, and -- the actual cause of the
+   most persistent symptom -- `SigintGuard` never installing a handler at
+   all for an offline `-r` read. **Still open**: a real
+   OT/mirrored-switch-port network capture -- what's been run so far is
+   ordinary client traffic (ICMP, UDP/443 QUIC/TLS), not industrial
+   protocol traffic on a real mirrored port.
 2. **Confirm or replace the EXPERIMENTAL `0xB2` (S7-1200/1500 "symbolic"
    addressing) decode** against a source with real authority -- a PLC or
    TIA Portal project under your own control, ideally, rather than more
@@ -1637,7 +1642,7 @@ anything else on this list.
     taken on.
 16. ~~Extend `policy validate`'s report with the same OUI/hostname/service-
     name annotations `decode` now has~~ -- **done**: `policy validate` now
-    takes the identical `--oui`/`--resolve`/`--hosts`/`--nn`/`--services`
+    takes the identical `--mac-vendor`/`--resolve`/`--hosts`/`--nn`/`--services`
     flags `decode` does (see OUTPUT FORMATS' "Name resolution" subsection),
     and its own report -- still the separate, IP/zone-centric format
     described in POLICY FILE FORMAT, not a per-packet `DecodedPacket`
@@ -1733,7 +1738,13 @@ anything else on this list.
     capture actually has.
 18. **Recognize the "IT protocols an OT auditor flags" family, and let
     `policy validate`/`inventory` call out their mere presence as its own
-    finding.** These give an attacker a session, not just a register write
+    finding.** -- **fully done**, both halves: every one of this family's 42
+    protocol values (5+8+7+6+16 across Tiers 1-5) is named by `decode`, and
+    `policy validate`/`inventory` now both surface each one's mere presence
+    as its own "notable protocols" finding, independent of policy
+    compliance -- see this item's own "notable protocols finding -- done"
+    paragraph below, after the five tiers' own writeups, for exactly what
+    was built. These give an attacker a session, not just a register write
     -- categorically more dangerous than anything Modbus/DNP3/S7comm's own
     read/write transactions can represent, since none of those model "an
     interactive shell" at all. Five tiers, roughly by severity: ~~(1)
@@ -2187,22 +2198,111 @@ anything else on this list.
     inventory that has zero tolerance for a protocol existing inside an OT
     zone at all doesn't need to look inside it to register the finding.
 
-    This also names a real modeling gap in `policy validate`'s current
-    allow-list design worth calling out up front: today, any TCP flow this
-    decoder doesn't recognize the protocol of already falls into
-    "Unclassified" (see POLICY FILE FORMAT's "Validation errors" and
-    OUTPUT FORMATS), which is correct but generic -- it can't distinguish
-    "this is SSH, which per NCSC's rule of thumb should never be here" from
-    "this is some protocol conduitscope simply hasn't been taught yet."
-    Recognizing these protocols by name turns that generic bucket into a
-    specific, actionable one ("SSH traffic observed on the plant-floor
-    VLAN, no conduit permits it" reads very differently from "unclassified
-    traffic"), and would let a future `policy validate`/`inventory` flag
-    call these out as their own severity tier independent of whether a
-    conduit happens to (wrongly) permit them -- per the rule of thumb
-    above, an interactive-access protocol reaching an OT zone is itself
-    worth flagging even inside a technically "compliant" policy that
-    happened to allow it.
+    This also named a real modeling gap in `policy validate`'s original
+    allow-list design worth calling out: before this item's second half
+    below, any TCP flow this decoder doesn't recognize the protocol of
+    already fell into "Unclassified" (see POLICY FILE FORMAT's "Validation
+    errors" and OUTPUT FORMATS), which was correct but generic -- it
+    couldn't distinguish "this is SSH, which per NCSC's rule of thumb
+    should never be here" from "this is some protocol conduitscope simply
+    hasn't been taught yet." Recognizing these protocols by name turned
+    that generic bucket into a specific, actionable one ("SSH traffic
+    observed on the plant-floor VLAN, no conduit permits it" reads very
+    differently from "unclassified traffic"), which is exactly what this
+    item's second half, below, now builds on.
+
+    **Notable-protocols finding -- done**: `policy validate` and
+    `inventory` both now call out every one of this family's 42 protocols'
+    mere PRESENCE as its own finding, independent of whether a conduit
+    happens to (wrongly) permit it -- per the rule of thumb above, an
+    interactive-access protocol reaching an OT zone is itself worth
+    flagging even inside a technically "compliant" policy that happened to
+    allow it. `notable_it_protocols.hpp` is the single shared lookup both
+    engines call (`notable_it_protocol_tier`), mapping each of the 42
+    protocol values to its tier ("remote-access"/"lateral-movement"/
+    "enterprise-trust"/"wireless-backhaul"/"tunnel-vpn") -- deliberately
+    just a name -> tier table, no decoding of its own, since every one of
+    these values is already fully named by `decode`'s own dispatch (Tiers
+    1-5 above) before a packet ever reaches either engine.
+
+    Scope is the FULL 42, not just the 13 that happen to be TCP-based:
+    `PolicyEngine::observe`/`AssetInventoryEngine::observe` both check
+    `notable_it_protocol_tier` first, unconditionally, before either
+    engine's own existing dispatch -- so a UDP-based protocol (ntp/dhcp/
+    snmp/tftp/radius/capwap-control/capwap-data/lwapp-control/lwapp-data/
+    gtp-u/ike/l2tp/vxlan/geneve/wireguard/dtls-tunnel), an IP-protocol-
+    number-keyed Tier 5 tunnel with no port at all (gre/esp/ah/ip-in-ip/
+    6in4/l2tp's direct-IP form), or an EtherType-keyed protocol with no IP
+    layer at all (eapol/pppoe/mpls) is recorded exactly the same as a
+    TCP-based one (rdp/vnc/smb/ssh/http/https/ldap/ldaps/tacacs-plus/
+    teamviewer/anydesk/zoom/openvpn/stt), none of which
+    `PolicyEngine::observe` evaluated against any conduit before this
+    (widening that TCP-only `policy validate` limitation for THIS one
+    finding only -- the underlying flow/L2-flow model this item's first
+    half already documented as TCP-and-VLAN-zone-only is otherwise
+    unchanged, see LIMITATIONS).
+
+    This is a strictly ADDITIVE observation, never a change to what either
+    engine already counted: a TCP-based notable protocol is both folded
+    into its own flow exactly as before (still "Unclassified" there,
+    unless a conduit happens to list its exact protocol name) AND recorded
+    as its own separate finding; every other shape was, and still is,
+    folded into `PolicyReport::skipped_non_tcp`/`AssetInventoryReport::
+    skipped_packets` exactly as it always was -- the pinned
+    `link_transport_layers_all_skipped_by_policy_engine` test's own exact
+    `"skipped_non_tcp": 7` count (CMakeLists.txt) is unchanged by this
+    feature, and a fixture with no notable-protocol traffic in it renders
+    an explicitly empty `notable_protocols` array (see
+    `notable_protocols_empty_for_ordinary_ot_traffic` and
+    `inventory_notable_protocols_empty_for_ordinary_ot_traffic`).
+
+    Direction (client/server) is computed differently in each engine, and
+    honestly labeled either way: a TCP-based finding in `policy validate`
+    reuses that SAME flow's own SYN/SYN-ACK-first, port-heuristic-otherwise
+    direction (`PolicyEngine::observe` already computed it for the flow
+    itself) via `NotableProtocolFinding::direction_known`; every other
+    shape in `policy validate` (UDP, since none of these 42 ports are ever
+    "known" to this file's own `is_known_service_port`), and EVERY shape in
+    `inventory` (which has no equivalent per-session state for these 42
+    protocols the way it does for its own ten recognized ones -- building
+    that would be real scope creep for a "name the presence" finding), is
+    always the plain "lower port number is the server" heuristic each
+    engine already established for its own port-based fallback --
+    `direction_known: false`/the text report's own "(direction: port
+    heuristic)" annotation says so explicitly rather than presenting it as
+    confirmed. An IP-protocol-number-keyed Tier 5 tunnel (no port at all)
+    and eapol/pppoe/mpls (no IP layer, keyed by canonical MAC pair instead,
+    the same no-direction convention `EthernetFlowReport::mac_a/mac_b`
+    already established for PROFINET/GOOSE/SV/EtherCAT) don't even attempt
+    a client/server guess -- just a canonical pair.
+
+    Rendered as its own "NOTABLE IT PROTOCOLS (N):" section in both
+    commands' text reports (always last), and a `"notable_protocols"`
+    array in both JSON reports (appended last, after every pre-existing
+    field, so no established JSON-shape test anchored on an earlier field
+    needs to change -- the same convention `direction_source`'s own
+    addition to `policy validate`'s JSON schema already established).
+    `PolicyReport::compliant()` is, and stays, completely UNAFFECTED by
+    `notable_protocols` -- Jurgen's own explicit "always flag, independent
+    of compliance" design choice for this item, so an existing policy's
+    COMPLIANT/NON-COMPLIANT verdict, and the JSON report's own "compliant"
+    field, can never silently change just because this feature shipped.
+    The new `--strict-it-protocols` flag (`policy validate` only --
+    `inventory` has no compliance concept at all to opt into) is the
+    explicit, separate opt-in for a stricter audit posture: applied at the
+    CLI layer, in `run_policy_validate`'s own exit-code computation, not
+    inside `compliant()` itself, it fails the process exit code
+    (`kExitPolicyNonCompliant`, the same code an ordinary Violation/
+    Unclassified flow already uses) whenever `notable_protocols` is
+    non-empty, even on an otherwise COMPLIANT capture -- proven by
+    `notable_protocols_wireless_backhaul_baseline_compliant` (exit 0,
+    "Result: COMPLIANT") and `notable_protocols_strict_it_protocols_
+    flips_exit_code` (same command plus the flag, non-zero exit) both
+    running the identical `sample_wireless_backhaul.pcap` capture, whose
+    own five protocols are ALL non-TCP (so it has zero flows at all, and is
+    trivially COMPLIANT before this flag is even considered) -- the
+    cleanest possible proof that the flag, not this report's own existing
+    verdict logic, is what's deciding the exit code.
 
     Tier 5 (tunnels) deliberately stops at naming the outer protocol, not
     decapsulating it -- actually stripping a GRE/IPsec/VXLAN/L2TP header
@@ -2785,7 +2885,7 @@ unlike any of the eight routing/redundancy protocols decoded so far.
     "direction sources (tcp flows only):" block right after the `protocols:`
     histogram it complements, counted cross-protocol rather than gated on
     `p.protocol` like the per-protocol maps below it, and -- consistent with
-    how `--stats` already ignores `--no-vlan`/`--oui` -- deliberately
+    how `--stats` already ignores `--no-vlan`/`--mac-vendor` -- deliberately
     *not* gated on `--no-direction` either, since it's a pure aggregate view
     independent of any per-packet display toggle. All of this is `decode`
     -specific: `policy validate`'s and `inventory`'s own `direction: <tier>`
@@ -2862,7 +2962,7 @@ unlike any of the eight routing/redundancy protocols decoded so far.
       bundled OUI table. For a busy capture this made every line
       noticeably longer for information most invocations don't need. The
       negating `--no-oui` flag (default true, opt out) is gone; there's now
-      a plain opt-in `--oui` flag (default false) on all three subcommands.
+      a plain opt-in `--mac-vendor` flag (default false) on all three subcommands.
       `--nn` (hostname resolution) is unaffected and independent, as
       before. **Revised after this item's first pass** (`decode` only, the
       other two subcommands unaffected by this revision -- their MAC
@@ -2873,7 +2973,7 @@ unlike any of the eight routing/redundancy protocols decoded so far.
       should never gate a base decoded value. Jurgen asked for the whole
       `eth <src> -> <dst>` line to be off by default too, with a
       tcpdump-style toggle -- so `decode` gained `-e`/`--ether` (off by
-      default, mirrors tcpdump's own `-e`), and `--oui` now implies it
+      default, mirrors tcpdump's own `-e`), and `--mac-vendor` now implies it
       (there'd be nothing to attach a vendor name to otherwise). This
       applies to **text output only**: JSON/CSV still always include
       `src_mac`/`dst_mac` as base fields (like `src_ip`/`dst_ip`),
@@ -2887,6 +2987,32 @@ unlike any of the eight routing/redundancy protocols decoded so far.
       802.1Q membership isn't specifically a MAC-address fact -- see
       `output.hpp`/`output.cpp`'s own comments for exactly how the two
       combine on one line when both apply.
+      **Revised again**: Jurgen pointed out that a non-IP packet's own
+      headline (`decode`'s text output) was wasting its endpoint fields on
+      a bare `- -> -` placeholder -- see `endpoint()`'s own old behavior in
+      `output.cpp` -- with genuinely no addressing information shown at all
+      unless `-e`/`--mac-vendor` was also given, and even then only as a second,
+      separate line below rather than on the headline itself. Since every
+      Ethernet-linktype packet already carries a real `src_mac`/`dst_mac`
+      regardless of protocol (the base gap-fix described above), and a
+      packet with no IP layer has no IP address to put on its headline in
+      the first place, `endpoint()` now falls back to that MAC address (with
+      a `--mac-vendor` vendor name attached, the same way it is everywhere else)
+      for exactly this case -- unconditionally, no `-e`/`--ether` needed.
+      `write_packet()` correspondingly suppresses the separate `eth <src> ->
+      <dst>` line for a non-IP packet specifically (`show_mac_ && p.has_ip`,
+      not `show_mac_` alone), since it would otherwise just repeat the same
+      pair now already on the headline; a VLAN-tagged non-IP packet still
+      gets its own bare `vlan <id>` line exactly as before. An IP-bearing
+      packet is completely unaffected either way -- its headline already
+      showed `ip:port`, and `-e`/`--mac-vendor` still work exactly as this item's
+      first revision above describes. Several existing tests exercising
+      `tests/sample_vlan_zones.pcap` (all-non-IP PROFINET RT/GOOSE/SV/
+      EtherCAT traffic) and the `-e`-gated fallback assertions in
+      `tests/sample_sv.pcap`/`tests/sample_stp.pcap` needed updating to
+      match -- see CMakeLists.txt's own comments at those tests (e.g.
+      `vlan_id_shown_by_default_text`, `non_ip_mac_shown_by_default_without_vendor_text`)
+      for exactly what changed and why.
     - **`-t/--time-format` default flipped from `e`/epoch to `r`/relative.**
       Raw Unix epoch timestamps (`1700000000.000000`) aren't very readable
       at a glance; seconds-elapsed-since-first-packet is what most other

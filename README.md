@@ -948,13 +948,13 @@ Groundwork / v0.1.0. What works right now:
   "Tier 5 generic tunnel/VPN encapsulation recognition" section
 - Name resolution, shared by `decode` and `policy validate` alike: OUI/MAC-
   vendor lookup against a built-in IEEE-registry-derived table (off by
-  default to keep output compact, `--oui` enables it), hostname resolution
+  default to keep output compact, `--mac-vendor` enables it), hostname resolution
   from an explicitly-supplied `--hosts` file (`--resolve`, file-only --
   never live DNS, under any circumstance), and port->service-name lookup
   from a small curated built-in table plus an optional `--services` file
   (`--nn` disables it). In `decode`'s text output, the MAC-address line
   itself (`eth <src> -> <dst>`) is a further off-by-default toggle, `-e`/
-  `--ether` (mirrors tcpdump's own `-e`; `--oui` implies it) -- JSON/CSV
+  `--ether` (mirrors tcpdump's own `-e`; `--mac-vendor` implies it) -- JSON/CSV
   always include `src_mac`/`dst_mac` regardless.
   Every annotation is additive next to the raw MAC/IP/port already decoded,
   never a replacement for it -- see docs/USER_GUIDE.md's OUTPUT FORMATS "Name
@@ -1141,6 +1141,46 @@ Groundwork / v0.1.0. What works right now:
   corpus (uploading any crash reproducer found). Previously these harnesses
   existed but were only ever run by hand locally; see
   docs/DEVELOPMENT.md's ROADMAP item 6.
+- ROADMAP item 18 is now fully done: `policy validate` and `inventory` both
+  surface a "notable IT protocols" finding, listing every observed instance
+  of one of the 42 protocols named across the five tiers above (RDP/VNC/
+  TeamViewer/AnyDesk/Zoom; SMB/SSH/HTTP/HTTPS/SNMP/Telnet/FTP/TFTP; NTP/
+  DHCP/LDAP/LDAPS/RADIUS/TACACS+/EAPOL; CAPWAP/LWAPP/GTP-U/PPPoE; GRE/NVGRE/
+  EoIP/ESP/AH/IP-in-IP/6in4/L2TP/IKE/VXLAN/Geneve/WireGuard/OpenVPN/DTLS-
+  tunnel/STT/MPLS) -- previously these protocols were only named in `decode`
+  output; now their mere presence is called out as its own finding,
+  completely independent of and never affecting either report's existing
+  compliance/verdict logic (an OT auditor cares that RDP showed up at all,
+  not just whether a policy conduit happened to permit it). Covers all
+  three transport shapes this family spans: ordinary TCP flows (direction
+  reused from each engine's own already-tracked session state), UDP and
+  IP-protocol-number-keyed tunnels with no session concept (direction, when
+  a port exists, from each engine's existing lower-port-is-server
+  heuristic; no direction attempted for the no-port IP-protocol-number
+  case), and EtherType-keyed protocols with no IP layer at all (EAPOL/
+  PPPoE/MPLS, reported by canonical MAC pair, the same no-direction
+  convention PROFINET/GOOSE/SV/EtherCAT already use). Text and JSON output
+  for both commands (`notable_protocols` in JSON, appended after each
+  report's existing fields so no established JSON shape changes); a new
+  opt-in `policy validate --strict-it-protocols` flag additionally fails
+  the exit code (though never the printed/JSON `compliant` field itself)
+  when any notable protocol is observed, for a CI/audit pipeline that wants
+  to gate on it. See docs/USER_GUIDE.md's "Notable IT protocols" subsections
+  (under `policy validate` and `inventory`) and docs/DEVELOPMENT.md's
+  ROADMAP item 18.
+- `decode`'s text output no longer wastes a non-IP packet's own headline on
+  a bare, information-free `- -> -` placeholder (ARP, LLDP, EAPOL, PPPoE,
+  MPLS, PROFINET RT/GOOSE/Sampled Values/EtherCAT/STP, and the generic
+  `non-ip`/`non-tcp` fallback are all affected): its src_mac/dst_mac --
+  always genuinely decoded, just not previously shown there -- now render
+  directly in that spot instead, unconditionally, no `-e`/`--ether` needed,
+  with `--mac-vendor`'s vendor name attached the same way it is everywhere else.
+  The separate `eth <src> -> <dst>` line `-e`/`--ether`/`--mac-vendor` normally add
+  is suppressed for exactly this case, since it would just repeat the same
+  pair now already on the headline -- an IP-bearing packet is completely
+  unaffected either way, still needing `-e`/`--mac-vendor` for that line same as
+  before. See docs/USER_GUIDE.md's OUTPUT FORMATS "Name resolution"
+  subsection.
 
 See [docs/USER_GUIDE.md](docs/USER_GUIDE.md) for the complete option reference,
 output-format examples, exit codes, and the honest list of current limitations,

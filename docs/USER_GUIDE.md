@@ -209,9 +209,9 @@ conduitscope decode (-r FILE | -i INTERFACE) [options]
 | `--stats` | off | Print an aggregate summary (protocol counts, a cross-protocol TCP-flow direction-tier breakdown, Modbus function-code histogram, exception count, capture time span) instead of one line per packet. Ignores `--format`. |
 | `--strict` | off | Abort with a nonzero exit status on the first packet that fails to parse at the Ethernet/IPv4/TCP layer, instead of reporting a per-packet warning and continuing. Does not affect Modbus/DNP3-level ambiguity, which is always handled by heuristic + note rather than error. |
 | `--no-vlan` | off (i.e. VLAN ID display on by default) | Disable display of the 802.1Q VLAN ID for a VLAN-tagged packet. See OUTPUT FORMATS below. |
-| `--no-direction` | off (i.e. TCP flow direction display on by default) | Disable display of per-packet TCP flow direction (client/server determination and which tier decided it -- handshake/content/port-heuristic). Does not affect `decode --stats`'s own direction-tier breakdown, which has no display toggles of its own (the same way `--no-vlan`/`--oui` don't affect it either). See OUTPUT FORMATS below. |
-| `-e`, `--ether` | off (i.e. the Ethernet header display off by default, to keep output compact) | Show the Ethernet header (source/destination MAC address, VLAN tag) for each packet in **text** output -- mirrors tcpdump's own `-e`. Implied by `--oui` (there'd be nothing to attach a vendor name to otherwise). Does not affect JSON/CSV output, which always include `src_mac`/`dst_mac` as base fields, same as `src_ip`/`dst_ip`. See OUTPUT FORMATS' "Name resolution" subsection below. |
-| `--oui` | off (i.e. OUI/MAC-vendor resolution off by default, to keep output compact) | Enable OUI (MAC vendor) resolution against the built-in table, and show it next to each MAC address. Implies `-e`/`--ether`. See OUTPUT FORMATS' "Name resolution" subsection below. |
+| `--no-direction` | off (i.e. TCP flow direction display on by default) | Disable display of per-packet TCP flow direction (client/server determination and which tier decided it -- handshake/content/port-heuristic). Does not affect `decode --stats`'s own direction-tier breakdown, which has no display toggles of its own (the same way `--no-vlan`/`--mac-vendor` don't affect it either). See OUTPUT FORMATS below. |
+| `-e`, `--ether` | off (i.e. the Ethernet header display off by default, to keep output compact) | For a packet with an IP layer, show its Ethernet header (source/destination MAC address, VLAN tag) below the packet line in **text** output -- mirrors tcpdump's own `-e`. Implied by `--mac-vendor` (there'd be nothing to attach a vendor name to otherwise). A no-op for a packet with no IP layer at all (ARP/LLDP/EAPOL/PPPoE/MPLS/PROFINET RT/GOOSE/Sampled Values/EtherCAT/STP/etc.), since that packet's MAC address pair is already shown on its own head line unconditionally, `-e` or not. Does not affect JSON/CSV output, which always include `src_mac`/`dst_mac` as base fields, same as `src_ip`/`dst_ip`. See OUTPUT FORMATS' "Name resolution" subsection below. |
+| `--mac-vendor` | off (i.e. OUI/MAC-vendor resolution off by default, to keep output compact) | Enable OUI (MAC vendor) resolution against the built-in table, and show it next to each MAC address. Implies `-e`/`--ether`. See OUTPUT FORMATS' "Name resolution" subsection below. |
 | `--resolve` | off | Enable hostname resolution from an explicitly-supplied `--hosts` file. **Never performs live DNS, under any circumstance** -- file-only. See OUTPUT FORMATS' "Name resolution" subsection below. |
 | `--hosts FILE` | *(none)* | Unix `/etc/hosts`-style file to resolve IP addresses from, for `--resolve`. Must exist. |
 | `--nn` | off (i.e. service-name resolution on by default) | Disable service name (port -> name) resolution, from the built-in table and `--services` alike. Named after the `nc`/`nmap`/`tcpdump`-family `-n`/`-nn` "don't resolve names" convention. See OUTPUT FORMATS' "Name resolution" subsection below. |
@@ -266,7 +266,8 @@ conduitscope policy validate (-r FILE | -i INTERFACE) --policy POLICY_FILE [opti
 | `-o, --output FILE` | stdout | Write the report here instead of stdout. |
 | `-f, --format {text,json}` | `text` | Report format. `text` is the human-readable report shown throughout this section; `json` is meant for scripting an audit pipeline -- see POLICY FILE FORMAT's "JSON report schema" below. |
 | `--strict` | off | Same meaning as `decode --strict`: abort on the first packet that fails to parse at the Ethernet/IPv4/TCP layer, instead of reporting a warning and continuing to evaluate the rest of the capture. |
-| `--oui` | off (i.e. OUI/MAC-vendor resolution off by default) | Same meaning as `decode --oui`: enable OUI (MAC vendor) resolution against the built-in table, applied to the report's flow MAC addresses. See OUTPUT FORMATS' "Name resolution" subsection. |
+| `--strict-it-protocols` | off | Also fail compliance (non-zero exit code) when the report's own "notable protocols" finding (see POLICY FILE FORMAT's "Notable IT protocols" subsection below) is non-empty, even on an otherwise COMPLIANT capture. Off by default: the finding itself is always reported regardless of this flag, so nothing is hidden without it -- this only controls whether it additionally affects the exit code, for a CI/audit pipeline that wants to gate on it. Never affects the report's own `Result: COMPLIANT`/`NON-COMPLIANT` text or its JSON `"compliant"` field, which stay computed exactly as before this flag existed. |
+| `--mac-vendor` | off (i.e. OUI/MAC-vendor resolution off by default) | Same meaning as `decode --mac-vendor`: enable OUI (MAC vendor) resolution against the built-in table, applied to the report's flow MAC addresses. See OUTPUT FORMATS' "Name resolution" subsection. |
 | `--resolve` | off | Same meaning as `decode --resolve`: enable hostname resolution from an explicitly-supplied `--hosts` file, applied to the report's flow IP addresses. **Never performs live DNS** -- file-only. |
 | `--hosts FILE` | *(none)* | Same meaning as `decode --hosts`: Unix `/etc/hosts`-style file to resolve IP addresses from, for `--resolve`. Must exist. |
 | `--nn` | off (i.e. service-name resolution on by default) | Same meaning as `decode --nn`: disable service name (port -> name) resolution, applied to the report's flow server port. |
@@ -380,7 +381,7 @@ doesn't cover).
 | `--diagram FILE` | *(none)* | Also write a zone/conduit diagram to this file. Format controlled by `--diagram-format`. |
 | `--diagram-format {mermaid,dot}` | `mermaid` | Diagram syntax for `--diagram`: a Mermaid `graph LR` block, or a Graphviz `.dot` `digraph`. |
 | `--policy-out FILE` | *(none)* | Also write the inferred zone/conduit model as a `policy`-format YAML file, directly loadable by `policy validate --policy` -- closing the loop: discover, then enforce. See "Closing the loop" below. |
-| `--oui` | off (i.e. OUI/MAC-vendor resolution off by default) | Same meaning as `decode --oui`, applied to the report's asset/edge MAC addresses. |
+| `--mac-vendor` | off (i.e. OUI/MAC-vendor resolution off by default) | Same meaning as `decode --mac-vendor`, applied to the report's asset/edge MAC addresses. |
 | `--resolve` | off | Same meaning as `decode --resolve`: enable hostname resolution from an explicitly-supplied `--hosts` file. **Never performs live DNS** -- file-only. |
 | `--hosts FILE` | *(none)* | Same meaning as `decode --hosts`: Unix `/etc/hosts`-style file to resolve IP addresses from, for `--resolve`. Must exist. |
 | `--nn` | off (i.e. service-name resolution on by default) | Same meaning as `decode --nn`: disable service name (port -> name) resolution, applied to each edge's server port. |
@@ -398,7 +399,9 @@ messaging over TCP and CIP I/O implicit messaging over UDP/2222),
 **BACnet/IP**, **IEC 104**, **HART-IP**, **OPC UA**, **MMS**, **MQTT**, and
 **FF-HSE**. Every other packet -- including every other protocol this
 project decodes -- is counted only in the report's `skipped_packets` total,
-never as an asset or an edge.
+never as an asset or an edge. One family of "every other protocol" is
+additionally surfaced as its own, separate finding regardless: see "Notable
+IT protocols" below.
 
 Two of those ten -- **HART-IP** and **FF-HSE** -- are counted here ONLY
 when carried over TCP, even though both can also appear over UDP (HART-IP
@@ -524,6 +527,30 @@ protocols at all, there is nothing to infer even one zone from --
 `--policy-out`'s file then contains only explanatory comments, no
 `zones:`/`conduits:` keys at all (deliberately not a validly-loadable
 policy file), and `inventory` prints a note to that effect.
+
+#### Notable IT protocols (docs/DEVELOPMENT.md's ROADMAP item 18)
+
+Independent of, and never counted toward, the ten-protocol asset/edge model
+above: `inventory` also surfaces every one of the 42 "IT protocols an OT
+auditor flags" (RDP/VNC/TeamViewer/AnyDesk/Zoom; SMB/SSH/HTTP/HTTPS/SNMP/
+Telnet/FTP/TFTP; NTP/DHCP/LDAP/LDAPS/RADIUS/TACACS+/EAPOL; CAPWAP
+control+data/LWAPP control+data/GTP-U/PPPoE; GRE/NVGRE/EoIP/ESP/AH/IP-in-IP/
+6in4/L2TP/IKE/VXLAN/Geneve/WireGuard/OpenVPN/a generic DTLS-tunnel check/
+STT/MPLS) as its own "NOTABLE IT PROTOCOLS" section in the text report, and
+a `notable_protocols[]` array in the JSON report (appended last, same shape
+as `policy validate`'s own array of the same name -- see POLICY FILE
+FORMAT's "Notable IT protocols" subsection for the full field-by-field
+writeup, which applies here verbatim except that `inventory` has no
+`direction_known` field: unlike `policy validate`, it has no per-session
+handshake state for these 42 protocols to draw a confirmed direction from,
+so `client_ip`/`server_ip` here are always the same "lower port number is
+the server" heuristic guess). A packet that produces a `notable_protocols`
+entry still counts toward `skipped_packets` exactly as it always did --
+this is a strictly additive finding, not a widening of the ten-protocol
+scope above. `inventory` has no compliance concept at all, so there is no
+`--strict-it-protocols`-equivalent flag here; the finding is always
+reported and never affects this command's own (always-zero-on-success)
+exit code.
 
 ### `version` -- print version and build information
 
@@ -1258,7 +1285,8 @@ an array depending on how the policy file happened to write it:
     }
   ],
   "ethernet_flows": [],
-  "unexercised_conduits": []
+  "unexercised_conduits": [],
+  "notable_protocols": []
 }
 ```
 
@@ -1280,7 +1308,7 @@ validate` never evaluates at all (UDP-only, see "Addressing scope" below).
 have no client/server concept to begin with (see its own comment just
 below).
 
-**Resolver annotations** (`--oui`/`--resolve`/`--hosts`/`--nn`/
+**Resolver annotations** (`--mac-vendor`/`--resolve`/`--hosts`/`--nn`/
 `--services` -- see the option table above and OUTPUT FORMATS' "Name
 resolution" subsection): `client_mac`/`server_mac` are a base-value
 addition, present as a string whenever this flow's link type is Ethernet
@@ -1326,7 +1354,7 @@ these protocols have neither):
 
 `mac_a_vendor`/`mac_b_vendor` are the same OUI-vendor annotation as
 `flows[]`'s own `client_mac_vendor`/`server_mac_vendor` above, omitted
-entirely (never `null`) on a lookup miss or when `--oui` wasn't given -- an L2 flow has no
+entirely (never `null`) on a lookup miss or when `--mac-vendor` wasn't given -- an L2 flow has no
 IP or port at all, so there's no hostname/service-name equivalent here.
 
 `vlan_id` is `null` when `has_vlan_tag` is `false` (the frame carried no
@@ -1354,6 +1382,77 @@ and appear on every report regardless of whether any conduit actually uses
   `functions` -- purely informational when it doesn't, and exactly what a
   `functions`-restricted conduit's match (or violation reason) was
   computed from when it does.
+
+### Notable IT protocols (docs/DEVELOPMENT.md's ROADMAP item 18)
+
+**`notable_protocols[]`** -- appended last, after every other field (the
+same "no established JSON-shape test anchored on an earlier field needs to
+change" convention `direction_source`'s own addition above followed) --
+always present, one entry per distinct (protocol, client/server or MAC
+pair, port) combination of one of the 42 "IT protocols an OT auditor
+flags" (RDP/VNC/TeamViewer/AnyDesk/Zoom; SMB/SSH/HTTP/HTTPS/SNMP/Telnet/
+FTP/TFTP; NTP/DHCP/LDAP/LDAPS/RADIUS/TACACS+/EAPOL; CAPWAP control+data/
+LWAPP control+data/GTP-U/PPPoE; GRE/NVGRE/EoIP/ESP/AH/IP-in-IP/6in4/L2TP/
+IKE/VXLAN/Geneve/WireGuard/OpenVPN/a generic DTLS-tunnel check/STT/MPLS --
+see docs/PROTOCOL_COVERAGE.md's own Tier 1-5 sections for what identifies
+each one) actually observed in the capture:
+
+```json
+{
+  "protocol": "ssh",
+  "tier": "lateral-movement",
+  "client_ip": "192.168.1.50",
+  "server_ip": "192.168.1.10",
+  "client_hostname": "hmi01.plant.example",
+  "port": 22,
+  "port_service": "ssh",
+  "direction_known": false,
+  "packet_count": 4
+}
+```
+
+An EtherType-keyed protocol with no IP layer at all (EAPOL/PPPoE/MPLS)
+carries `mac_a`/`mac_b` (canonical order, plus `mac_a_vendor`/`mac_b_vendor`
+when `--mac-vendor` finds a match) instead of `client_ip`/`server_ip`/`port`,
+mirroring `ethernet_flows[]`'s own `mac_a`/`mac_b` convention above. An
+IP-protocol-number-keyed Tier 5 tunnel (GRE/ESP/AH/IP-in-IP/6in4/L2TP's
+direct-IP form -- no port at all) carries `client_ip`/`server_ip` but
+`"port": null` and no `port_service`.
+
+**This is the ONE finding in this report that is completely independent of
+`compliant`/`verdict`/every conduit in the policy**: a notable protocol on
+an otherwise `"allowed"` flow, an `"unclassified"` one, or traffic
+`policy validate` doesn't evaluate against any conduit at all (every
+non-TCP shape above, which only ever counted toward `skipped_non_tcp`
+before and after this feature) is recorded here exactly the same way. Per
+docs/DEVELOPMENT.md's ROADMAP item 18: an interactive-access or tunneling
+protocol reaching an OT zone is itself worth flagging even inside a
+technically COMPLIANT policy that happened to permit it -- so
+`notable_protocols` being non-empty never changes `compliant`, and the
+converse also holds: a completely empty `notable_protocols: []` (as in the
+example JSON above) is what an ordinary OT-only capture always renders,
+same as before this feature existed.
+
+`direction_known` is `true` only for a TCP-based protocol whose own flow
+captured an actual SYN/SYN-ACK (the same authoritative handshake tier
+`direction_source: "handshake"` means above) -- `false` means `client_ip`/
+`server_ip` are a best-effort "lower port number is the server" guess
+instead (the text report's own `(direction: port heuristic)` annotation
+says so explicitly), which is the case for every UDP-based protocol here
+(none of these 42 ports are ever "known" the way Modbus/DNP3/S7comm/IEC104/
+EtherNet-IP's own five ports are) and for a TCP-based one whose own flow
+never captured a handshake either.
+
+The `--strict-it-protocols` flag (option table above) is the only way this
+array's contents can ALSO affect the process exit code and is off by
+default -- see EXIT STATUS.
+
+`inventory`'s own JSON report carries an equivalent `notable_protocols[]`
+array with the same per-entry shape (minus `direction_known`, since that
+command has no equivalent per-session handshake state for these 42
+protocols to draw a confirmed direction from -- every entry there is the
+same port-heuristic guess) -- see the `inventory` section's own "Notable IT
+protocols" subsection below.
 
 ### Addressing scope: what a zone can (and can't yet) be built from
 
@@ -1518,10 +1617,18 @@ non-IP/parse-error packet regardless of the flag, since only a TCP flow has
 a client/server side to determine in the first place. Any additional notes
 (heuristic explanations, port-mismatch warnings, malformed-field warnings)
 are printed indented below the packet line, followed, for an
-Ethernet-linktype packet, by an `eth` line showing the raw source/
-destination MAC addresses -- **only when `-e`/`--ether` is given, off by
-default to keep output compact** (mirrors tcpdump's own `-e`; see "Name
-resolution" below for exactly how `-e` and `--oui` interact). See the
+Ethernet-linktype packet that also has an IP layer, by an `eth` line
+showing the raw source/destination MAC addresses -- **only when
+`-e`/`--ether` is given, off by default to keep output compact** (mirrors
+tcpdump's own `-e`; see "Name resolution" below for exactly how `-e` and
+`--mac-vendor` interact). A packet with **no** IP layer at all (ARP, LLDP, EAPOL,
+PPPoE, MPLS, PROFINET RT/GOOSE/Sampled Values/EtherCAT/STP, or the generic
+`non-ip`/`non-tcp` fallback) has no IP address to show on its own head
+line in the first place, so its MAC address pair is shown there directly
+instead -- unconditionally, no `-e`/`--ether` needed -- with a `--mac-vendor`
+vendor name attached the same way it would be anywhere else; no separate
+`eth` line is printed for that same pair in this case, since it would just
+repeat what the head line already shows. See the
 `json` output's own `direction_source`/`direction_client_ip` fields below
 for the two machine-readable values the head line's `(client ... -- ...)`
 annotation renders, and docs/DEVELOPMENT.md's ROADMAP item 19 for the full
@@ -1547,29 +1654,38 @@ annotation on the line) for the two authoritative tiers, `handshake` and
 `content`. The tier name itself is always printed regardless of color/
 `--no-color`, so nothing here is color-only information.
 
-When a packet is 802.1Q VLAN-encapsulated, its VLAN ID is shown by default
-(`vlan <id>`) even without `-e` -- 802.1Q membership isn't specifically a
-MAC-address fact, so it has its own independent, on-by-default toggle,
-`--no-vlan`:
+A GOOSE frame (like every other packet with no IP layer at all) has no IP
+address for its head line to show, so it shows its MAC address pair there
+directly instead -- unconditionally, no `-e`/`--ether` needed (see this
+subsection's own note above and "Name resolution" below for the full
+reasoning). When it's also 802.1Q VLAN-encapsulated, its VLAN ID is shown
+by default (`vlan <id>`) on its own line below that, regardless of
+`-e`/`--mac-vendor` -- 802.1Q membership isn't specifically a MAC-address fact, so
+it has its own independent, on-by-default toggle, `--no-vlan`:
 
 ```
-#1  0.000000  - -> -  [goose]  GOOSE IED1/LLN0$GO$gcb01 stNum=1 sqNum=1 confRev=1
+#1  0.000000  aa:bb:cc:11:22:33 -> aa:bb:cc:44:55:66  [goose]  GOOSE IED1/LLN0$GO$gcb01 stNum=1 sqNum=1 confRev=1
         vlan 100
 ```
 
-With `-e` also given, the VLAN ID is appended to the same `eth` line
-instead of standing alone:
+`-e`/`--ether` adds nothing further here -- there's no separate `eth` line
+for a packet whose MAC pair is already on the head line, since it would
+just repeat it. `--mac-vendor`'s vendor name, when enabled, attaches right there
+on the head line instead:
 
 ```
-#1  0.000000  - -> -  [goose]  GOOSE IED1/LLN0$GO$gcb01 stNum=1 sqNum=1 confRev=1
-        eth aa:bb:cc:11:22:33 -> aa:bb:cc:44:55:66  vlan 100
+#1  0.000000  aa:bb:cc:11:22:33 (Example Vendor, Inc.) -> aa:bb:cc:44:55:66 (Another Vendor Corp.)  [goose]  GOOSE IED1/LLN0$GO$gcb01 stNum=1 sqNum=1 confRev=1
+        vlan 100
 ```
 
-When name resolution is enabled (see "Name resolution" below), a hostname
-and/or a service name are appended in parentheses right after the raw IP or
-port they annotate, and a MAC vendor right after each `eth` line's address
-(`--oui`, which implies `-e` -- there'd be nothing to attach a vendor name
-to otherwise) -- the raw value itself is always shown too, never replaced:
+For an IP-bearing packet, none of this changes: the head line shows
+`ip:port`, not a MAC address, so `-e`/`--ether` (or `--mac-vendor`, which implies
+it -- there'd be nothing to attach a vendor name to otherwise) is still
+what shows the MAC pair, on its own line below. When name resolution is
+enabled (see "Name resolution" below), a hostname and/or a service name are
+appended in parentheses right after the raw IP or port they annotate, and a
+MAC vendor right after each `eth` line's address -- the raw value itself is
+always shown too, never replaced:
 
 ```
 #1  0.000000  192.168.1.50 (hmi-01):51000 (hmi-modbus-client) -> 192.168.1.10 (plc-01):502 (custom-modbus)  [modbus]  Read Holding Registers: request: read 10 holding register(s) starting at address 0
@@ -1641,8 +1757,8 @@ Over a hundred fields are only present (omitted entirely, not `null`) on
 packets where they apply:
 
 - `src_mac_vendor` / `dst_mac_vendor`: the OUI (MAC vendor) name for
-  `src_mac`/`dst_mac`, from the built-in OUI table (`--oui` enables this
-  lookup, off by default). Present only when `has_ethernet`, `--oui` was
+  `src_mac`/`dst_mac`, from the built-in OUI table (`--mac-vendor` enables this
+  lookup, off by default). Present only when `has_ethernet`, `--mac-vendor` was
   given, and the lookup found a match -- see OUTPUT FORMATS' "Name
   resolution" subsection below.
 - `has_vlan_tag` / `vlan_id`: whether this packet is 802.1Q VLAN-encapsulated
@@ -2800,7 +2916,7 @@ default:
 - **OUI / MAC vendor** (`src_mac_vendor`/`dst_mac_vendor` in JSON, the
   `(vendor)` annotation on `decode`'s text-format `eth` line and CSV's
   `src_mac_vendor`/`dst_mac_vendor` columns) -- **off by default, to keep
-  output compact**, enabled with `--oui`. Looked up against a large table
+  output compact**, enabled with `--mac-vendor`. Looked up against a large table
   built into the
   `conduitscope` binary itself; no external file, network access, or extra
   flag is needed. This table is generated ahead of time by
@@ -2812,19 +2928,34 @@ default:
   live at build time or run time; refreshing it against a newer IEEE
   registry snapshot is a manual, offline step (rerun that script, commit the
   regenerated `include/conduitscope/oui_table.gen.hpp`).
-  In `decode`'s **text** output specifically, the whole `eth <src> -> <dst>`
-  line this vendor name attaches to is itself a separate, also-off-by-default
-  toggle: `-e`/`--ether` (mirrors tcpdump's own `-e`). `--oui` implies
-  `-e` -- there'd be nothing to attach a vendor name to otherwise -- so
-  `--oui` alone still shows the full `eth <mac> (<vendor>) -> <mac>
-  (<vendor>)` line; `-e` alone shows the MAC pair with no vendor name. A
-  VLAN-tagged packet's `vlan <id>` still appears on its own regardless of
-  `-e` (see "VLAN" further below) -- 802.1Q membership isn't a MAC-address
-  fact, so `--no-vlan` is what controls it, independent of `-e`/`--oui`.
-  This `-e` toggle is text-output-only: JSON/CSV always include
-  `src_mac`/`dst_mac` as base fields (like `src_ip`/`dst_ip`), regardless of
-  `-e` -- only the `*_mac_vendor` annotation depends on `--oui`, in every
-  format.
+  In `decode`'s **text** output specifically, where the vendor name renders
+  depends on whether the packet has an IP layer at all:
+  - **With an IP layer** (the head line shows `ip:port`, not a MAC address):
+    the whole `eth <src> -> <dst>` line this vendor name attaches to is
+    itself a separate, also-off-by-default toggle: `-e`/`--ether` (mirrors
+    tcpdump's own `-e`). `--mac-vendor` implies `-e` -- there'd be nothing to
+    attach a vendor name to otherwise -- so `--mac-vendor` alone still shows the
+    full `eth <mac> (<vendor>) -> <mac> (<vendor>)` line; `-e` alone shows
+    the MAC pair with no vendor name.
+  - **With no IP layer at all** (ARP, LLDP, EAPOL, PPPoE, MPLS, PROFINET
+    RT/GOOSE/Sampled Values/EtherCAT/STP, or the generic `non-ip`/`non-tcp`
+    fallback): the head line has no IP address to show, so it shows the MAC
+    address pair directly instead, unconditionally -- no `-e`/`--ether`
+    needed. `--mac-vendor`'s vendor name attaches right there, on the head line
+    itself (`<mac> (<vendor>) -> <mac> (<vendor>)`); there is no separate
+    `eth` line for this case, since it would just repeat the same pair the
+    head line already shows -- `-e`/`--ether` is a no-op for a packet like
+    this (mirroring tcpdump's own `-e`, which likewise has nothing further
+    to add once the link layer's addresses are already the only addresses a
+    frame has).
+
+  A VLAN-tagged packet's `vlan <id>` still appears on its own regardless of
+  `-e`/`--mac-vendor` either way (see "VLAN" further below) -- 802.1Q membership
+  isn't a MAC-address fact, so `--no-vlan` is what controls it.
+  `-e`/`--mac-vendor`'s reach is text-output-only: JSON/CSV always include
+  `src_mac`/`dst_mac` as base fields (like `src_ip`/`dst_ip`) for every
+  Ethernet-linktype packet regardless of whether it has an IP layer -- only
+  the `*_mac_vendor` annotation depends on `--mac-vendor`, in every format.
 - **Hostname** (`src_hostname`/`dst_hostname` in JSON and CSV, the
   `(hostname)` annotation after an IP on `decode`'s text-format summary
   line) -- **off by default**, enabled with `--resolve`. **File-only: this
@@ -2886,7 +3017,7 @@ default:
   extend or override it for anything this table doesn't cover.
 
 Scope: `decode` and `policy validate` share the exact same three lookups and
-CLI flags. `policy validate` takes the identical `--oui`/`--resolve`/
+CLI flags. `policy validate` takes the identical `--mac-vendor`/`--resolve`/
 `--hosts`/`--nn`/`--services` options and annotates its own report the same
 way -- see POLICY FILE FORMAT's "`policy validate`" section for exactly
 which report fields get which annotation.
@@ -4069,7 +4200,7 @@ These are current, not aspirational -- each has a corresponding docs/DEVELOPMENT
 | 0 | Success. For `policy validate`: the capture is COMPLIANT (every observed flow was explicitly allowed by a conduit). For `inventory`: the capture was read and a report was produced -- `inventory` has no compliance concept (there's no hand-written policy to be compliant *against*), so it returns 0 on any successful run, even one that observed zero assets. |
 | 1 | A fatal error occurred -- bad arguments, the input file could not be opened, the file is not a recognized capture format (classic pcap or pcapng) or is corrupt, (with `--strict`) a packet failed to parse, or (for `policy validate`) the policy file couldn't be opened or failed validation (see POLICY FILE FORMAT's "Validation errors"). |
 | 2 | *(currently unused)* Reserved rather than reused: an earlier groundwork release used this for `policy validate` while it was still a documented stub with no evaluation engine behind it. Nothing returns it now that `policy validate` is fully implemented, but the value is left unclaimed in case a future documented-stub command needs it again. |
-| 3 | `policy validate` only: the capture and policy file were both readable and valid, but the capture is NON-COMPLIANT -- `PolicyReport::compliant()` is false (at least one violation and/or unclassified flow was found). Distinct from 1 specifically so a script can tell "ran fine, found problems" apart from "couldn't even run". Never returned by `inventory` (see code 0 above). |
+| 3 | `policy validate` only: the capture and policy file were both readable and valid, but the capture is NON-COMPLIANT -- `PolicyReport::compliant()` is false (at least one violation and/or unclassified flow was found), OR `--strict-it-protocols` was given and the report's `notable_protocols` finding is non-empty (see POLICY FILE FORMAT's "Notable IT protocols" subsection -- `compliant()` itself is never affected by that finding; this exit code is the only place `--strict-it-protocols` has any effect). Distinct from 1 specifically so a script can tell "ran fine, found problems" apart from "couldn't even run". Never returned by `inventory` (see code 0 above). |
 
 Non-fatal per-packet parse issues (without `--strict`) do not affect the exit
 status; they are reported as warnings (to stderr, or `--log-file`) and as
@@ -4087,10 +4218,10 @@ conduitscope decode -r capture.pcap
 
 See the Ethernet header (source/destination MAC, VLAN tag) alongside each
 packet, with vendor names looked up against the built-in OUI table --
-`--oui` alone is enough, since it implies `-e`/`--ether`:
+`--mac-vendor` alone is enough, since it implies `-e`/`--ether`:
 
 ```sh
-conduitscope decode -r capture.pcap --oui
+conduitscope decode -r capture.pcap --mac-vendor
 ```
 
 Get just the aggregate picture of what's in a large capture before deciding

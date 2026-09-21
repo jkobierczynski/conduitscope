@@ -14,14 +14,17 @@
 // Three independent, independently-toggled lookups, each with its own default posture chosen
 // deliberately:
 //
-//   1. OUI (MAC vendor) resolution -- ON by default, `--no-oui` disables it. Uses a large,
+//   1. OUI (MAC vendor) resolution -- OFF by default, `--oui` enables it. Uses a large,
 //      built-in, generated table (oui_table.gen.hpp -- see its own file header for provenance;
 //      it's public IEEE registry data, not creative content, the same "facts extracted, re-
 //      expressed in this codebase's own structures" sourcing convention as bacnet.hpp's/
-//      ffhse.hpp's own transcribed Wireshark tables). This is the one lookup that needs no
-//      external input at all and carries no network-touching or privacy concern -- an OUI is a
-//      manufacturer identity baked into the MAC itself, not a network's own configuration -- hence
-//      on by default.
+//      ffhse.hpp's own transcribed Wireshark tables). This lookup needs no external input at all
+//      and carries no network-touching or privacy concern -- an OUI is a manufacturer identity
+//      baked into the MAC itself, not a network's own configuration -- but defaults to off anyway,
+//      alongside the others below, to keep output compact by default: the vendor name adds real
+//      value on demand (identifying unknown OT gear on a segment) but doubles the width of every
+//      MAC-bearing line/field when left on unconditionally, which is exactly what `--oui` opts
+//      into rather than requires.
 //
 //   2. Hostname resolution -- OFF by default, `--resolve` enables it. FILE-ONLY: this deliberately
 //      NEVER performs live DNS resolution of any kind, under any flag combination -- not a missing
@@ -52,18 +55,19 @@
 //      overrides the built-in table; entries the file doesn't cover still fall back to the
 //      built-in table as long as service names are enabled at all.
 //
-// Naming note: the feature request that produced this file asked for `--nooui`; this codebase's
-// own established convention for negating a default-true flag is hyphenated, via CLI11's `!`-
-// prefix trick (see cli_main.cpp's existing `--no-promiscuous`/`--no-color`) -- so this is
-// `--no-oui`, not `--nooui`, for consistency with those two. `--resolve`/`--hosts`/`--nn`/
-// `--services` are exactly as requested.
+// Naming note: OUI resolution originally shipped ON by default with a negating `--no-oui` flag
+// (CLI11's `!`-prefix trick, the same convention as `--no-promiscuous`/`--no-color`), matching
+// the feature request that produced this file. A later change flipped the default to off (to
+// keep output compact by default -- see item 1 above) and renamed the flag to the plain, positive
+// `--oui`, since a negating flag makes no sense once the thing it negates is already the default.
+// `--resolve`/`--hosts`/`--nn`/`--services` are unchanged.
 //
 // Scope: originally used only by `decode`'s three per-packet output writers
 // (TextWriter/JsonWriter/CsvWriter in output.cpp), wired up in cli_main.cpp's run_decode. A
 // follow-up feature (see docs/MANUAL.md's ROADMAP history) later wired the same Resolver into
 // `policy validate`'s own report too -- write_policy_report_text/write_policy_report_json in
 // policy_engine.cpp, wired up in cli_main.cpp's run_policy_validate, taking the identical
-// --no-oui/--resolve/--hosts/--nn/--services flags. That report has its own IP/zone-centric
+// --oui/--resolve/--hosts/--nn/--services flags. That report has its own IP/zone-centric
 // conventions (see policy_engine.hpp's own comments on FlowReport/EthernetFlowReport), but the
 // same three lookups and the same "annotation, never a replacement; a miss adds nothing" rule
 // from this file apply there unchanged -- see write_policy_report_text/write_policy_report_json's
@@ -113,7 +117,7 @@ public:
 // searches, hostname lookup is a hash-map probe -- none of this does any I/O after construction.
 class Resolver {
 public:
-    // oui_enabled: --no-oui inverted (true = attempt OUI lookups against the built-in table).
+    // oui_enabled: --oui exactly as given (true = attempt OUI lookups against the built-in table).
     // resolve_hostnames: --resolve exactly as given (true = the flag was passed).
     // hosts_path: --hosts value; empty when not given. Only ever consulted when resolve_hostnames
     //   is true. Must already exist and be readable (CLI11's ->check(CLI::ExistingFile) enforces
@@ -135,7 +139,7 @@ public:
     // `mac` is expected in format_mac's own output format ("aa:bb:cc:dd:ee:ff", lowercase, colon-
     // separated -- see link_layer.hpp/link_layer.cpp) -- every caller in this codebase already
     // produces MAC strings that way (DecodedPacket::src_mac/dst_mac). Returns nullopt when OUI
-    // resolution is disabled (--no-oui), `mac` doesn't parse as six colon-separated hex octets, or
+    // resolution isn't enabled (--oui not given), `mac` doesn't parse as six colon-separated hex octets, or
     // no table entry matches.
     std::optional<std::string> oui_vendor(const std::string& mac) const;
 

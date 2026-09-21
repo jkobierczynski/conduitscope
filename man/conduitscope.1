@@ -1,4 +1,4 @@
-.TH CONDUITSCOPE 1 "2026" "conduitscope 0.1.8" "User Commands"
+.TH CONDUITSCOPE 1 "2026" "conduitscope 0.1.7" "User Commands"
 .SH NAME
 conduitscope \- decode Modbus/TCP, DNP3, IEC 60870-5-104, S7comm/COTP, S7comm-Plus (Siemens TIA Portal / S7-1200/1500), IEC 61850 MMS (Manufacturing Message Specification, ISO 9506), EtherNet/IP (CIP explicit and implicit messaging), PROFINET RT (DCP and cyclic real-time IO), IEC 61850-8-1 GOOSE, IEC 61850-9-2 Sampled Values, EtherCAT, BACnet/IP, HART-IP, OPC UA Binary, MQTT (v3.1/v3.1.1/v5.0, including Sparkplug B), FOUNDATION Fieldbus HSE (FDA/SM/FMS/LAN Redundancy), IEEE Spanning Tree Protocol (STP/RSTP/MSTP), DeviceNet (CAN-bus CIP, via SocketCAN pcap captures), DNS, mDNS, LLMNR, and NetBIOS Name Service (NBT-NS), RIP, IGMP, VRRP, HSRP, IGRP, PIM, EIGRP, and OSPFv2, plus detect DNS-over-HTTPS (DoH) via TLS SNI matching, plus recognize (by name only, not full decode) RDP, VNC, TeamViewer, AnyDesk, and Zoom, plus recognize (by name only, and for SNMP also its cleartext community string) SMB, SSH, HTTP, HTTPS, SNMPv1/v2c, Telnet, FTP, and TFTP, plus recognize (by name only, and for DHCP also its message type) NTP, DHCP, LDAP, LDAPS, RADIUS, TACACS+, and IEEE 802.1X/EAPOL, plus recognize (by name only, and for CAPWAP control and GTP-U also their message type) CAPWAP control/data, LWAPP control/data, GTP-U, and PPPoE, plus recognize (by name only, except for IP-in-IP's own inner src/dst addresses) GRE (and its NVGRE/Mikrotik EoIP sub-cases), IPsec ESP/AH, IP-in-IP, 6in4, L2TP/L2TPv3, IKE, VXLAN, Geneve, WireGuard, OpenVPN, a generic DTLS-tunnel structural check, STT, and MPLS, from offline pcap/pcapng captures
 .SH SYNOPSIS
@@ -171,7 +171,11 @@ With \fB\-i\fR, don't put the interface into promiscuous mode. Promiscuous
 is the default (see \fBLIVE CAPTURE\fR for why).
 .TP
 .BR \-o ", " \-\-output " " \fIFILE\fR
-Write output here instead of stdout.
+Write output here instead of stdout. Caution: a single-dash typo of a
+double-dash long option name glues onto this flag's own short form
+(parsed as \fB\-o\fR followed by the rest of the typo as this flag's own
+filename value) instead of erroring -- always use the double dash for a
+long option name.
 .TP
 .BR \-f ", " \-\-format " " {text,json,csv}
 Output format. Default: text.
@@ -448,19 +452,29 @@ Disable display of the 802.1Q VLAN ID for a VLAN-tagged packet. On by
 default. See \fBdocs/USER_GUIDE.md\fR's OUTPUT FORMATS section.
 .TP
 .BR \-e ", " \-\-ether
-Show the Ethernet header (source/destination MAC address, VLAN tag) for
-each packet in text output \-\- mirrors tcpdump's own \fB\-e\fR. Off by
-default, to keep output compact; implied by \fB\-\-oui\fR (there'd be
-nothing to attach a vendor name to otherwise). Only affects text output \-\-
+For a packet with an IP layer, show its Ethernet header (source/destination
+MAC address, VLAN tag) below the packet line in text output \-\- mirrors
+tcpdump's own \fB\-e\fR. Off by default, to keep output compact; implied by
+\fB\-\-mac\-vendor\fR (there'd be nothing to attach a vendor name to otherwise). A
+no-op for a packet with no IP layer at all (ARP/LLDP/EAPOL/PPPoE/MPLS/
+PROFINET RT/GOOSE/Sampled Values/EtherCAT/STP/etc.), since that packet's
+MAC address pair is already shown directly on its own head line
+unconditionally, regardless of this flag. Only affects text output \-\-
 JSON/CSV always include \fBsrc_mac\fR/\fBdst_mac\fR as base fields, same as
 \fBsrc_ip\fR/\fBdst_ip\fR. See \fBdocs/USER_GUIDE.md\fR's OUTPUT FORMATS
 "Name resolution" subsection.
 .TP
-.B \-\-oui
+.B \-\-mac\-vendor
 Enable OUI (MAC vendor) resolution against the built-in table (IEEE MA-L/
 MA-M/MA-S registry data via nmap's nmap-mac-prefixes redistribution, see
 \fBtools/generate_oui_table.py\fR). Off by default, to keep output compact.
-Implies \fB\-e\fR/\fB\-\-ether\fR.
+Implies \fB\-e\fR/\fB\-\-ether\fR. Named
+.B \-\-mac\-vendor
+rather than
+.B \-\-oui
+specifically so a single-dash typo of this flag reports a clean error
+instead of silently gluing onto \fB\-o\fR/\fB\-\-output\fR the way a
+single-dash \fB\-oui\fR used to.
 See \fBdocs/USER_GUIDE.md\fR's OUTPUT FORMATS "Name resolution" subsection.
 .TP
 .B \-\-resolve
@@ -512,7 +526,9 @@ FORMAT section for the schema, including the optional per-conduit
 conduit to specific named functions/services within its one protocol.
 .TP
 .BR \-o ", " \-\-output " " \fIFILE\fR
-Write the report here instead of stdout.
+Write the report here instead of stdout. Caution: a single-dash typo of a
+double-dash long option name glues onto this flag's own short form instead
+of erroring -- always use the double dash for a long option name.
 .TP
 .BR \-f ", " \-\-format " " {text,json}
 Report format. Default: text.
@@ -520,8 +536,17 @@ Report format. Default: text.
 .B \-\-strict
 Abort on the first malformed packet instead of warning and continuing.
 .TP
-.B \-\-oui
-Same meaning as \fBdecode\fR's \fB\-\-oui\fR: enable OUI (MAC vendor)
+.B \-\-strict\-it\-protocols
+Also fail compliance (non\-zero exit code) when the report's own "notable
+protocols" finding (see \fBdocs/USER_GUIDE.md\fR's POLICY FILE FORMAT
+"Notable IT protocols" subsection) is non\-empty, even on an otherwise
+COMPLIANT capture. Off by default \-\- the finding is always reported
+regardless of this flag; it only controls whether it additionally affects
+the exit code. Never affects the report's own COMPLIANT/NON\-COMPLIANT text
+or JSON \fBcompliant\fR field.
+.TP
+.B \-\-mac\-vendor
+Same meaning as \fBdecode\fR's \fB\-\-mac\-vendor\fR: enable OUI (MAC vendor)
 resolution against the built-in table, applied to the report's flow MAC
 addresses. Off by default. See \fBdocs/USER_GUIDE.md\fR's OUTPUT FORMATS "Name
 resolution" subsection.
@@ -568,7 +593,9 @@ Maximum bytes captured per packet with \fB\-i\fR. Default: 65535.
 Same meaning as \fBdecode\fR's \fB\-\-no\-promiscuous\fR.
 .TP
 .BR \-o ", " \-\-output " " \fIFILE\fR
-Write the report here instead of stdout.
+Write the report here instead of stdout. Caution: a single-dash typo of a
+double-dash long option name glues onto this flag's own short form instead
+of erroring -- always use the double dash for a long option name.
 .TP
 .BR \-f ", " \-\-format " " {text,json}
 Report format. Default: text.
@@ -596,8 +623,8 @@ loop: discover, then enforce. If no asset was observed at all, the file
 contains only explanatory comments, no \fBzones:\fR/\fBconduits:\fR keys
 (not a validly-loadable policy as-is), and a note is printed saying so.
 .TP
-.B \-\-oui
-Same meaning as \fBdecode\fR's \fB\-\-oui\fR, applied to the report's
+.B \-\-mac\-vendor
+Same meaning as \fBdecode\fR's \fB\-\-mac\-vendor\fR, applied to the report's
 asset/edge MAC addresses. Off by default.
 .TP
 .B \-\-resolve
@@ -745,8 +772,9 @@ for \fBpolicy validate\fR while it was still a documented stub.
 .TP
 .B 3
 \fBpolicy validate\fR only: the capture and policy were both valid, but the
-capture is NON-COMPLIANT (at least one violation and/or unclassified flow).
-Never returned by \fBinventory\fR.
+capture is NON-COMPLIANT (at least one violation and/or unclassified flow),
+OR \fB\-\-strict\-it\-protocols\fR was given and the report's "notable
+protocols" finding is non\-empty. Never returned by \fBinventory\fR.
 .SH LIMITATIONS
 A handful of rare/obsolete pcapng block types (the pre-2000s "Packet Block",
 Interface Statistics Blocks, Name Resolution Blocks, Decryption Secrets

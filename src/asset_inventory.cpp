@@ -15,6 +15,7 @@
 #include "conduitscope/iec104.hpp"
 #include "conduitscope/ipv4.hpp"
 #include "conduitscope/modbus.hpp"
+#include "conduitscope/notable_it_protocols.hpp"
 #include "conduitscope/resolver.hpp"
 
 namespace conduitscope {
@@ -170,10 +171,69 @@ void AssetInventoryEngine::update_asset(const std::string& ip, const DecodedPack
     }
 }
 
+void AssetInventoryEngine::record_notable_protocol(const std::string& key, const std::string& protocol,
+                                                     const std::string& tier, bool has_ip,
+                                                     const std::string& client_ip, const std::string& server_ip,
+                                                     const std::string& mac_a, const std::string& mac_b,
+                                                     bool has_port, bool is_tcp, uint16_t port) {
+    auto it = notable_protocols_.find(key);
+    if (it == notable_protocols_.end()) {
+        NotableProtocolState st;
+        st.protocol = protocol;
+        st.tier = tier;
+        st.has_ip = has_ip;
+        st.client_ip = client_ip;
+        st.server_ip = server_ip;
+        st.mac_a = mac_a;
+        st.mac_b = mac_b;
+        st.has_port = has_port;
+        st.is_tcp = is_tcp;
+        st.port = port;
+        notable_protocol_order_.push_back(key);
+        it = notable_protocols_.emplace(key, std::move(st)).first;
+    }
+    ++it->second.packet_count;
+}
+
 void AssetInventoryEngine::observe(const DecodedPacket& dp) {
     ++total_packets_;
 
+    // "IT protocols an OT auditor flags" (ROADMAP item 18) -- checked first, unconditionally,
+    // mirroring PolicyEngine::observe's own identical placement -- see this method's own doc comment
+    // (asset_inventory.hpp) for why this never disturbs skipped_packets_ or the ten-protocol asset/
+    // edge model below.
+    auto notable_tier = notable_it_protocol_tier(dp.protocol);
+
     if (!dp.has_ip || (!dp.has_tcp && !dp.has_udp)) {
+        if (notable_tier) {
+            if (!dp.has_ip) {
+                // eapol/pppoe/mpls -- the three EtherType-keyed protocols in this family -- keyed by
+                // canonical MAC pair, the same no-direction convention
+                // PolicyEngine::EthernetFlowReport::mac_a/mac_b already uses for PROFINET/GOOSE/SV/
+                // EtherCAT.
+                if (dp.has_ethernet) {
+                    std::string mac_a = (dp.src_mac < dp.dst_mac) ? dp.src_mac : dp.dst_mac;
+                    std::string mac_b = (dp.src_mac < dp.dst_mac) ? dp.dst_mac : dp.src_mac;
+                    std::string key = "eth:" + *notable_tier + ":" + dp.protocol + ":" +
+                                       ((dp.src_mac < dp.dst_mac) ? (dp.src_mac + "<->" + dp.dst_mac)
+                                                                    : (dp.dst_mac + "<->" + dp.src_mac));
+                    record_notable_protocol(key, dp.protocol, *notable_tier, /*has_ip=*/false, "", "", mac_a, mac_b,
+                                             /*has_port=*/false, /*is_tcp=*/false, 0);
+                }
+            } else {
+                // An IP-protocol-number-keyed Tier 5 tunnel (gre/esp/ah/ip-in-ip/6in4/l2tp's direct-
+                // IP form) -- has_ip but neither has_tcp nor has_udp, so there's no port and no
+                // session/handshake to decide direction from; recorded as a canonical (smaller-
+                // address-first) pair rather than a client/server guess, same reasoning
+                // NotableProtocolFinding's own comment gives for this identical shape in
+                // policy_engine.cpp.
+                std::string a = (dp.src_ip < dp.dst_ip) ? dp.src_ip : dp.dst_ip;
+                std::string b = (dp.src_ip < dp.dst_ip) ? dp.dst_ip : dp.src_ip;
+                std::string key = "ip:" + *notable_tier + ":" + dp.protocol + ":" + a + "<->" + b;
+                record_notable_protocol(key, dp.protocol, *notable_tier, /*has_ip=*/true, a, b, "", "",
+                                         /*has_port=*/false, /*is_tcp=*/false, 0);
+            }
+        }
         ++skipped_packets_;
         return;
     }
@@ -213,6 +273,22 @@ void AssetInventoryEngine::observe(const DecodedPacket& dp) {
         }
         protocol = "ffhse";
     } else {
+        if (notable_tier) {
+            // A TCP- or UDP-based notable protocol (every one of this family except eapol/pppoe/mpls/
+            // the IP-protocol-number-keyed Tier 5 tunnels, both handled above) -- direction is always
+            // the plain port-number heuristic (see InventoryNotableProtocol's own comment for why),
+            // reusing this file's own src_is_client_by_port rather than the session/handshake-based
+            // tcp_sessions_ machinery below, which only ever tracks this feature's own ten recognized
+            // protocols.
+            bool src_is_client = src_is_client_by_port(dp.src_port, dp.dst_port, dp.has_tcp);
+            std::string client_ip = src_is_client ? dp.src_ip : dp.dst_ip;
+            std::string server_ip = src_is_client ? dp.dst_ip : dp.src_ip;
+            uint16_t server_port = src_is_client ? dp.dst_port : dp.src_port;
+            std::string key = "port:" + *notable_tier + ":" + dp.protocol + ":" +
+                               tcp_session_key(dp.src_ip, dp.src_port, dp.dst_ip, dp.dst_port);
+            record_notable_protocol(key, dp.protocol, *notable_tier, /*has_ip=*/true, client_ip, server_ip, "", "",
+                                     /*has_port=*/true, dp.has_tcp, server_port);
+        }
         ++skipped_packets_;
         return;
     }
@@ -444,6 +520,23 @@ AssetInventoryReport AssetInventoryEngine::finish() const {
         report.conduits.push_back(std::move(ic));
     }
 
+    for (const auto& key : notable_protocol_order_) {
+        const NotableProtocolState& ns = notable_protocols_.at(key);
+        InventoryNotableProtocol nf;
+        nf.protocol = ns.protocol;
+        nf.tier = ns.tier;
+        nf.has_ip = ns.has_ip;
+        nf.client_ip = ns.client_ip;
+        nf.server_ip = ns.server_ip;
+        nf.mac_a = ns.mac_a;
+        nf.mac_b = ns.mac_b;
+        nf.has_port = ns.has_port;
+        nf.is_tcp = ns.is_tcp;
+        nf.port = ns.port;
+        nf.packet_count = ns.packet_count;
+        report.notable_protocols.push_back(std::move(nf));
+    }
+
     return report;
 }
 
@@ -462,6 +555,47 @@ std::string protocol_list_text(const std::vector<std::string>& protocols) {
         out += protocols[i];
     }
     return out;
+}
+
+// Renders AssetInventoryReport::notable_protocols -- see that field's own comment for why this is
+// always printed, independent of everything else in this report, and InventoryNotableProtocol's own
+// comment for exactly what each field means and why client_ip/server_ip here is always a
+// best-effort, port-heuristic guess (this file's own write_inventory_report_text's equivalent
+// section for `policy validate`, write_notable_protocols_text in policy_engine.cpp, additionally
+// distinguishes a handshake-confirmed direction from a heuristic one -- this engine has no
+// equivalent per-session state for these 42 protocols to draw that distinction from, so every entry
+// here is annotated the same way).
+void write_notable_protocols_text(std::ostream& out, const AssetInventoryReport& report, const Resolver& resolver) {
+    out << "NOTABLE IT PROTOCOLS (" << report.notable_protocols.size() << "):\n";
+    out << "  Protocols an OT auditor would flag as worth attention on their own -- see "
+           "docs/MANUAL.md's\n";
+    out << "  ROADMAP item 18. Not part of the ten-protocol scope above; does not count toward "
+           "skipped_packets.\n";
+    if (report.notable_protocols.empty()) {
+        out << "  (none)\n";
+        return;
+    }
+    for (size_t i = 0; i < report.notable_protocols.size(); ++i) {
+        const InventoryNotableProtocol& f = report.notable_protocols[i];
+        out << "  [" << (i + 1) << "] " << f.protocol << "  (" << f.tier << ")  ";
+        if (f.has_ip) {
+            out << f.client_ip;
+            if (auto h = resolver.hostname(f.client_ip)) out << " (" << *h << ")";
+            out << " <-> " << f.server_ip;
+            if (auto h = resolver.hostname(f.server_ip)) out << " (" << *h << ")";
+            if (f.has_port) {
+                out << ":" << f.port;
+                if (auto s = resolver.service_name(f.port, f.is_tcp ? "tcp" : "udp")) out << " (" << *s << ")";
+                out << "  (direction: port heuristic)";
+            }
+        } else {
+            out << f.mac_a;
+            if (auto v = resolver.oui_vendor(f.mac_a)) out << " (" << *v << ")";
+            out << " <-> " << f.mac_b;
+            if (auto v = resolver.oui_vendor(f.mac_b)) out << " (" << *v << ")";
+        }
+        out << "  (" << f.packet_count << " packet(s))\n";
+    }
 }
 
 }  // namespace
@@ -537,6 +671,9 @@ void write_inventory_report_text(std::ostream& out, const AssetInventoryReport& 
         out << "  " << c.from_zone << " -> " << c.to_zone << "  (" << c.protocol << "/" << c.port << ")  "
             << c.edge_count << " edge(s), " << c.packet_count << " packet(s)\n";
     }
+    out << "\n";
+
+    write_notable_protocols_text(out, report, resolver);
 }
 
 void write_inventory_report_json(std::ostream& out, const AssetInventoryReport& report,
@@ -628,6 +765,47 @@ void write_inventory_report_json(std::ostream& out, const AssetInventoryReport& 
         out << "      \"edge_count\": " << c.edge_count << ",\n";
         out << "      \"packet_count\": " << c.packet_count << "\n";
         out << "    }" << (i + 1 < report.conduits.size() ? "," : "") << "\n";
+    }
+    out << "  ],\n";
+
+    // "IT protocols an OT auditor flags" (ROADMAP item 18) -- see AssetInventoryReport::
+    // notable_protocols' own comment for why this is always populated, independent of everything
+    // above. Appended last, after every pre-existing field (conduits was the prior last field), the
+    // same "no established JSON-shape test anchored on an earlier field needs to change" convention
+    // policy_engine.cpp's own write_policy_report_json follows for this identical addition there.
+    out << "  \"notable_protocols\": [\n";
+    for (size_t i = 0; i < report.notable_protocols.size(); ++i) {
+        const InventoryNotableProtocol& f = report.notable_protocols[i];
+        out << "    {\n";
+        out << "      \"protocol\": \"" << json_escape(f.protocol) << "\",\n";
+        out << "      \"tier\": \"" << json_escape(f.tier) << "\",\n";
+        if (f.has_ip) {
+            out << "      \"client_ip\": \"" << json_escape(f.client_ip) << "\",\n";
+            out << "      \"server_ip\": \"" << json_escape(f.server_ip) << "\",\n";
+            if (auto h = resolver.hostname(f.client_ip)) {
+                out << "      \"client_hostname\": \"" << json_escape(*h) << "\",\n";
+            }
+            if (auto h = resolver.hostname(f.server_ip)) {
+                out << "      \"server_hostname\": \"" << json_escape(*h) << "\",\n";
+            }
+        } else {
+            out << "      \"mac_a\": \"" << json_escape(f.mac_a) << "\",\n";
+            out << "      \"mac_b\": \"" << json_escape(f.mac_b) << "\",\n";
+            if (auto v = resolver.oui_vendor(f.mac_a)) {
+                out << "      \"mac_a_vendor\": \"" << json_escape(*v) << "\",\n";
+            }
+            if (auto v = resolver.oui_vendor(f.mac_b)) {
+                out << "      \"mac_b_vendor\": \"" << json_escape(*v) << "\",\n";
+            }
+        }
+        out << "      \"port\": " << (f.has_port ? std::to_string(f.port) : std::string("null")) << ",\n";
+        if (f.has_port) {
+            if (auto s = resolver.service_name(f.port, f.is_tcp ? "tcp" : "udp")) {
+                out << "      \"port_service\": \"" << json_escape(*s) << "\",\n";
+            }
+        }
+        out << "      \"packet_count\": " << f.packet_count << "\n";
+        out << "    }" << (i + 1 < report.notable_protocols.size() ? "," : "") << "\n";
     }
     out << "  ]\n";
     out << "}\n";
