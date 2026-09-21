@@ -28,6 +28,22 @@ bool live_capture_available() {
 #endif
 }
 
+#ifdef CONDUITSCOPE_HAVE_PCAP
+#ifdef _WIN32
+// See live_capture.hpp's own doc comment on pcap_runtime_available() for the full "why" -- this is
+// the actual LoadLibraryA probe, shared by both of that function's call sites (this file's own
+// ensure_pcap_runtime_available() below, and bpf_filter.cpp's identical guard before pcap_compile()).
+bool pcap_runtime_available() {
+    HMODULE probe = ::LoadLibraryA("wpcap.dll");
+    if (probe == nullptr) return false;
+    ::FreeLibrary(probe);
+    return true;
+}
+#else
+bool pcap_runtime_available() { return true; }
+#endif
+#endif  // CONDUITSCOPE_HAVE_PCAP
+
 #ifndef CONDUITSCOPE_HAVE_PCAP
 
 // --- No libpcap/Npcap SDK found at configure time: every entry point throws a clear, actionable
@@ -63,31 +79,27 @@ void LiveCapture::stop() {}
 // --- Real libpcap/Npcap-backed implementation. ---------------------------------------------
 
 namespace {
-#ifdef _WIN32
 // On Windows this binary links against wpcap.lib -- the Npcap SDK's *build-time* import library
 // (see CMakeLists.txt) -- but is delay-loaded against the actual wpcap.dll (/DELAYLOAD:wpcap.dll,
 // also in CMakeLists.txt) specifically so that ordinary offline use (decode/policy validate on a
-// .pcap file, `version`, ...) never requires the separate Npcap RUNTIME installer to have been
-// run at all -- only live capture does; the SDK and the runtime are genuinely different things,
-// see docs/MANUAL.md's LIVE CAPTURE section. Without this check, a machine that has the SDK's
-// import library baked into conduitscope.exe but not the Npcap runtime installed would instead
-// fail deep inside the first pcap_*() call below with a raw, unfriendly delay-load structured
-// exception -- this turns that into the same clear, actionable CaptureError every other
-// "capture isn't available" case in this file already gives.
+// .pcap file with no --filter, `version`, ...) never requires the separate Npcap RUNTIME
+// installer to have been run at all -- only live capture, and (see bpf_filter.cpp) BPF filter
+// compilation, do; the SDK and the runtime are genuinely different things, see docs/MANUAL.md's
+// LIVE CAPTURE section. Without this check, a machine that has the SDK's import library baked
+// into conduitscope.exe but not the Npcap runtime installed would instead fail deep inside the
+// first pcap_*() call below with a raw, unfriendly delay-load structured exception -- this turns
+// that into the same clear, actionable CaptureError every other "capture isn't available" case in
+// this file already gives. pcap_runtime_available() itself (the actual probe) is shared with
+// bpf_filter.cpp's own identical guard -- see live_capture.hpp's doc comment on it.
 void ensure_pcap_runtime_available() {
-    HMODULE probe = ::LoadLibraryA("wpcap.dll");
-    if (probe == nullptr) {
+    if (!pcap_runtime_available()) {
         throw CaptureError(
             "live capture requires the Npcap RUNTIME to be installed -- this binary was built "
             "against the separate Npcap SDK, which is build-time-only. Install Npcap from "
             "https://npcap.com/#download, then retry. 'decode' / 'policy validate' on an offline "
-            ".pcap file do not need this.");
+            ".pcap file with no --filter do not need this.");
     }
-    ::FreeLibrary(probe);
 }
-#else
-inline void ensure_pcap_runtime_available() {}
-#endif
 }  // namespace
 
 std::vector<InterfaceInfo> list_interfaces() {

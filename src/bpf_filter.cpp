@@ -32,6 +32,24 @@ namespace {
 constexpr uint32_t kFallbackSnaplen = 262144;
 
 bpf_program compile_or_throw(const std::string& filter, uint32_t linktype, uint32_t snaplen) {
+    // On Windows, wpcap.dll is delay-loaded (see CMakeLists.txt's /DELAYLOAD:wpcap.dll comment)
+    // specifically so ordinary offline use never requires the separate Npcap RUNTIME installer --
+    // but pcap_open_dead()/pcap_compile() just below are themselves wpcap.dll exports like any
+    // other pcap_*() call, so compiling a BPF filter for an OFFLINE read (-r ... --filter) is, a
+    // little non-obviously, just as dependent on that runtime being installed as opening a live
+    // interface is (see live_capture.cpp's own ensure_pcap_runtime_available, which this mirrors).
+    // Skipping this check doesn't skip the dependency, it just moves the failure from here (a
+    // clean, catchable CaptureError) to a raw Windows delay-load structured exception the first
+    // time pcap_open_dead() below is actually called -- which tears down the whole process instead
+    // of being reported as an ordinary "invalid filter"-shaped error.
+    if (!pcap_runtime_available()) {
+        throw CaptureError(
+            "BPF filtering (--filter) requires the Npcap RUNTIME to be installed, even when "
+            "reading an offline .pcap file (-r) rather than capturing live -- libpcap's BPF "
+            "compiler is itself part of wpcap.dll, which this build resolves lazily. Install "
+            "Npcap from https://npcap.com/#download, then retry, or omit --filter and read the "
+            "file without it.");
+    }
     // pcap_open_dead() gives a "fake" pcap_t bound to a linktype/snaplen with no real capture
     // behind it, purely so pcap_compile() has something to compile against -- the maintained
     // replacement for the deprecated pcap_compile_nopcap() (which did the same thing internally,

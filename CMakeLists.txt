@@ -96,6 +96,10 @@ add_library(conduitscope_core STATIC
   src/yaml_mini.cpp
   src/policy.cpp
   src/notable_it_protocols.cpp
+  src/sha256.cpp
+  src/hkdf.cpp
+  src/aes128.cpp
+  src/aes128_gcm.cpp
   src/policy_engine.cpp
   src/asset_inventory.cpp
   src/flow_direction.cpp
@@ -205,7 +209,19 @@ if(UNIX)
   install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/man/conduitscope.1" DESTINATION share/man/man1)
 endif()
 
+# --------------------------------------------------------------------------------------------
+# Crypto primitives self-tests (sha256.*, hkdf.*, aes128.*, aes128_gcm.*) -- see
+# tools/crypto_selftest.cpp's own file header for why this exists and why it is always built
+# (not gated behind CONDUITSCOPE_ENABLE_FUZZING or any other opt-in flag, unlike the libFuzzer
+# harnesses below): quic.cpp's Initial-packet decryption depends on every one of these being
+# correct, and a subtle bug here would silently corrupt QUIC decryption rather than crash loudly.
+# --------------------------------------------------------------------------------------------
+add_executable(crypto_selftest tools/crypto_selftest.cpp)
+target_link_libraries(crypto_selftest PRIVATE conduitscope_core)
+
 enable_testing()
+
+add_test(NAME crypto_primitives_self_test COMMAND crypto_selftest)
 
 # --------------------------------------------------------------------------------------------
 # Optional libFuzzer harnesses (fuzz/) -- see fuzz/README.md and docs/DEVELOPMENT.md's "External
@@ -7471,17 +7487,40 @@ else()
   # -i tests below, this needs no real interface at all, just libpcap linked in for its BPF
   # compiler -- see bpf_filter.cpp's own file header for why an offline read needs libpcap the
   # same way live capture does, despite PcapReader itself having no such dependency).
+  #
+  # Every PASS_REGULAR_EXPRESSION below also accepts bpf_filter.cpp's own "Npcap RUNTIME" error
+  # text, the same dual-acceptance pattern live_capture_bad_interface_name_reports_clearly above
+  # already established for the identical situation: on Windows CI (SDK only, no Npcap runtime
+  # actually installed -- see bpf_filter.cpp's own pcap_runtime_available() guard, added after
+  # these 7 tests were first found crashing the release-windows job outright with a raw Windows
+  # delay-load structured exception, 0xc06d007e, instead of failing cleanly), compiling ANY BPF
+  # filter -- even just to read an offline file, even one that would otherwise match nothing --
+  # now fails fast with that clear CaptureError before ever reaching pcap_open_dead(). A machine
+  # that genuinely has the runtime (every Linux CI leg, or a real Windows box with Npcap
+  # installed) still exercises the real filtering behavior each test's own regex checks for;
+  # bpf_filter_read_invalid_syntax_reports_clearly's own invalid-syntax message is simply never
+  # reached in the runtime-missing case (the missing-runtime check fires first, regardless of
+  # whether the filter text itself is valid), which is why its own PASS_REGULAR_EXPRESSION needs
+  # the same alternation despite testing a specifically DIFFERENT failure mode.
   # -----------------------------------------------------------------------------------------
 
   add_test(NAME bpf_filter_read_matches_all_three_packets
     COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --filter "tcp port 502" --format text)
   set_tests_properties(bpf_filter_read_matches_all_three_packets PROPERTIES
-    PASS_REGULAR_EXPRESSION "#1 .*\n.*#2 .*\n.*#3 "
+    PASS_REGULAR_EXPRESSION "(#1 .*\n.*#2 .*\n.*#3 |Npcap RUNTIME)"
     FAIL_REGULAR_EXPRESSION "#4 ")
 
+  # No PASS_REGULAR_EXPRESSION originally (a real "0 packets matched" run produces zero bytes of
+  # output, exit 0 -- nothing positive to match against) -- but once a second, alternate "correct"
+  # outcome (the Npcap RUNTIME error, exit nonzero) also needs accepting, CTest's exit-code-based
+  # pass/fail check has to be replaced entirely (setting PASS_REGULAR_EXPRESSION at all disables
+  # it -- see this section's own header comment), not merely supplemented. "^$" anchors to
+  # genuinely empty output specifically, rather than a blanket "match anything" pattern that would
+  # silently stop this test from ever being able to fail on the exit-code axis again.
   add_test(NAME bpf_filter_read_matches_no_packets
     COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --filter "tcp port 9999" --format text)
   set_tests_properties(bpf_filter_read_matches_no_packets PROPERTIES
+    PASS_REGULAR_EXPRESSION "(^$|Npcap RUNTIME)"
     FAIL_REGULAR_EXPRESSION "#1 ")
 
   # src host narrows to just the HMI's own request (#1) -- proves the filter genuinely inspects
@@ -7489,7 +7528,7 @@ else()
   add_test(NAME bpf_filter_read_src_host_narrows_correctly
     COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --filter "src host 192.168.1.50" --format text)
   set_tests_properties(bpf_filter_read_src_host_narrows_correctly PROPERTIES
-    PASS_REGULAR_EXPRESSION "#1 "
+    PASS_REGULAR_EXPRESSION "(#1 |Npcap RUNTIME)"
     FAIL_REGULAR_EXPRESSION "#2 |#3 ")
 
   # dst host narrows to the PLC's two responses, not the HMI's request -- the complementary
@@ -7500,7 +7539,7 @@ else()
   add_test(NAME bpf_filter_read_dst_host_narrows_correctly
     COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --filter "dst host 192.168.1.50" --format text)
   set_tests_properties(bpf_filter_read_dst_host_narrows_correctly PROPERTIES
-    PASS_REGULAR_EXPRESSION "response: 20 data byte\\(s\\).*\n.*\n.*\n.*exception response"
+    PASS_REGULAR_EXPRESSION "(response: 20 data byte\\(s\\).*\n.*\n.*\n.*exception response|Npcap RUNTIME)"
     FAIL_REGULAR_EXPRESSION "request: read 10 holding register")
 
   # An invalid filter expression is reported clearly and fails the run, exactly like the existing
@@ -7509,19 +7548,24 @@ else()
   add_test(NAME bpf_filter_read_invalid_syntax_reports_clearly
     COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --filter "this is not valid bpf syntax {{{")
   set_tests_properties(bpf_filter_read_invalid_syntax_reports_clearly PROPERTIES
-    PASS_REGULAR_EXPRESSION "invalid capture filter")
+    PASS_REGULAR_EXPRESSION "(invalid capture filter|Npcap RUNTIME)")
 
   # `--filter` is wired identically into `policy validate -r` and `inventory -r` (both funnel
   # through cli_main.cpp's own open_packet_source, same as decode -- see its own file comment).
+  # "Flows evaluated" is printed on every real (runtime-present) run regardless of how many flows
+  # the filter actually leaves -- unlike decode's own text format, `policy validate` always has a
+  # non-empty report to match against, so this can stay PASS_REGULAR_EXPRESSION-based without
+  # `bpf_filter_read_matches_no_packets`'s own "empty output" wrinkle.
   add_test(NAME bpf_filter_policy_validate_read_narrows_flows
     COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/compliant.yaml" --filter "tcp port 9999")
   set_tests_properties(bpf_filter_policy_validate_read_narrows_flows PROPERTIES
+    PASS_REGULAR_EXPRESSION "(Flows evaluated|Npcap RUNTIME)"
     FAIL_REGULAR_EXPRESSION "192\\.168\\.1\\.10")
 
   add_test(NAME bpf_filter_inventory_read_narrows_assets
     COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --filter "tcp port 9999")
   set_tests_properties(bpf_filter_inventory_read_narrows_assets PROPERTIES
-    PASS_REGULAR_EXPRESSION "0 asset\\(s\\) observed")
+    PASS_REGULAR_EXPRESSION "(0 asset\\(s\\) observed|Npcap RUNTIME)")
 
   if(UNIX)
     # None of these depend on any traffic actually existing on "lo" during the run (--duration

@@ -33,6 +33,27 @@ namespace conduitscope {
 // fail to open for plenty of other reasons too).
 bool live_capture_available();
 
+// True when the underlying pcap RUNTIME -- as opposed to the SDK/import library this binary was
+// merely built against -- can actually be loaded on this machine right now. Only Windows draws a
+// real distinction here: wpcap.dll is delay-loaded (see CMakeLists.txt's /DELAYLOAD:wpcap.dll
+// comment) specifically so a machine with this binary but WITHOUT the separate Npcap runtime
+// installer having been run can still use every offline (non---filter) code path with zero extra
+// dependency -- but that means the first genuine call into a wpcap.dll export, on such a machine,
+// would otherwise hit a raw, unfriendly Windows delay-load structured exception instead of an
+// ordinary C++ exception. On every other platform (or once CONDUITSCOPE_HAVE_PCAP itself is
+// unset, where neither caller below is even compiled) this is unconditionally true -- Linux/macOS
+// link libpcap normally, with no build-time/run-time split to check.
+//
+// Exposed here (rather than staying a live_capture.cpp implementation detail, which is where this
+// check originated) because it has TWO call sites needing the identical guard before THEIR own
+// first pcap_*() call: LiveCapture's own constructor/list_interfaces here, and BpfFilter's own
+// compile_or_throw in bpf_filter.cpp -- BPF filter compilation (--filter on an offline -r read)
+// is, perhaps non-obviously, just as dependent on wpcap.dll as opening a live interface is, since
+// pcap_compile() is itself one of wpcap.dll's exports. Each call site throws its own
+// CaptureError with wording specific to what IT was trying to do, rather than sharing one
+// generic message that would be misleading for the other.
+bool pcap_runtime_available();
+
 class CaptureError : public std::runtime_error {
 public:
     explicit CaptureError(const std::string& message) : std::runtime_error(message) {}
