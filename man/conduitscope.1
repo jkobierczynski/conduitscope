@@ -154,7 +154,10 @@ unless \fB\-r\fR is given; mutually exclusive with it. Requires this build to
 have libpcap/Npcap support -- see \fBLIVE CAPTURE\fR.
 .TP
 .B \-\-filter \fIBPF\fR
-BPF capture filter (tcpdump syntax). Only meaningful with \fB\-i\fR.
+BPF filter (tcpdump syntax). Works with both \fB\-i\fR (applied by libpcap
+at capture time) and \fB\-r\fR (applied per-packet after reading the file,
+same filter syntax either way); either one requires this build to have
+libpcap/Npcap support -- see \fBLIVE CAPTURE\fR.
 .TP
 .B \-\-duration \fISECONDS\fR
 Stop a live capture (\fB\-i\fR) after this many seconds. Default: 0
@@ -174,11 +177,12 @@ Write output here instead of stdout.
 Output format. Default: text.
 .TP
 .BR \-t ", " \-\-time\-format " " {e,epoch,r,relative,d,delta,a,absolute,ad,absolute\-date}
-How to render each packet's timestamp. Default: e (raw seconds since the
-Unix epoch, unchanged from every prior release). Mirrors tshark's own
-\fB\-t\fR mnemonics rather than tcpdump's stacking \fB\-t\fR/\fB\-tt\fR/
-\fB\-ttt\fR convention. See \fBdocs/USER_GUIDE.md\fR's OUTPUT FORMATS
-"Timestamps" subsection.
+How to render each packet's timestamp. Default: r (seconds elapsed since
+the first packet in this decode). Mirrors tshark's own \fB\-t\fR mnemonics
+rather than tcpdump's stacking \fB\-t\fR/\fB\-tt\fR/\fB\-ttt\fR convention.
+The raw-epoch rendering (\fB\-t epoch\fR) is one flag away, and the raw
+epoch \fItimestamp\fR JSON field is unaffected by \fB\-t\fR regardless. See
+\fBdocs/USER_GUIDE.md\fR's OUTPUT FORMATS "Timestamps" subsection.
 .TP
 .BR \-\-time\-offset " " {utc,local,+HH:MM,\-HH:MM}
 Timezone for \fB\-\-time\-format\fR=absolute/absolute\-date; ignored by
@@ -443,11 +447,21 @@ Abort on the first malformed packet instead of warning and continuing.
 Disable display of the 802.1Q VLAN ID for a VLAN-tagged packet. On by
 default. See \fBdocs/USER_GUIDE.md\fR's OUTPUT FORMATS section.
 .TP
-.B \-\-no\-oui
-Disable OUI (MAC vendor) resolution against the built-in table (IEEE MA-L/
+.BR \-e ", " \-\-ether
+Show the Ethernet header (source/destination MAC address, VLAN tag) for
+each packet in text output \-\- mirrors tcpdump's own \fB\-e\fR. Off by
+default, to keep output compact; implied by \fB\-\-oui\fR (there'd be
+nothing to attach a vendor name to otherwise). Only affects text output \-\-
+JSON/CSV always include \fBsrc_mac\fR/\fBdst_mac\fR as base fields, same as
+\fBsrc_ip\fR/\fBdst_ip\fR. See \fBdocs/USER_GUIDE.md\fR's OUTPUT FORMATS
+"Name resolution" subsection.
+.TP
+.B \-\-oui
+Enable OUI (MAC vendor) resolution against the built-in table (IEEE MA-L/
 MA-M/MA-S registry data via nmap's nmap-mac-prefixes redistribution, see
-\fBtools/generate_oui_table.py\fR). On by default. See \fBdocs/USER_GUIDE.md\fR's
-OUTPUT FORMATS "Name resolution" subsection.
+\fBtools/generate_oui_table.py\fR). Off by default, to keep output compact.
+Implies \fB\-e\fR/\fB\-\-ether\fR.
+See \fBdocs/USER_GUIDE.md\fR's OUTPUT FORMATS "Name resolution" subsection.
 .TP
 .B \-\-resolve
 Enable hostname resolution from an explicitly-supplied \fB\-\-hosts\fR file.
@@ -478,7 +492,8 @@ Required unless \fB\-r\fR is given; mutually exclusive with it. No
 \fB\-\-max\-packets\fR equivalent here -- use \fB\-\-duration\fR and/or Ctrl+C.
 .TP
 .B \-\-filter \fIBPF\fR
-BPF capture filter (tcpdump syntax). Only meaningful with \fB\-i\fR.
+BPF filter (tcpdump syntax). Works with both \fB\-i\fR and \fB\-r\fR; see
+\fBdecode\fR's own \fB\-\-filter\fR above.
 .TP
 .B \-\-duration \fISECONDS\fR
 Stop a live capture (\fB\-i\fR) after this many seconds. Default: 0
@@ -505,10 +520,10 @@ Report format. Default: text.
 .B \-\-strict
 Abort on the first malformed packet instead of warning and continuing.
 .TP
-.B \-\-no\-oui
-Same meaning as \fBdecode\fR's \fB\-\-no\-oui\fR: disable OUI (MAC vendor)
+.B \-\-oui
+Same meaning as \fBdecode\fR's \fB\-\-oui\fR: enable OUI (MAC vendor)
 resolution against the built-in table, applied to the report's flow MAC
-addresses. On by default. See \fBdocs/USER_GUIDE.md\fR's OUTPUT FORMATS "Name
+addresses. Off by default. See \fBdocs/USER_GUIDE.md\fR's OUTPUT FORMATS "Name
 resolution" subsection.
 .TP
 .B \-\-resolve
@@ -539,7 +554,8 @@ Build the inventory from live traffic on this network interface instead of
 reading a file. Required unless \fB\-r\fR is given; mutually exclusive with it.
 .TP
 .B \-\-filter \fIBPF\fR
-BPF capture filter (tcpdump syntax). Only meaningful with \fB\-i\fR.
+BPF filter (tcpdump syntax). Works with both \fB\-i\fR and \fB\-r\fR; see
+\fBdecode\fR's own \fB\-\-filter\fR above.
 .TP
 .B \-\-duration \fISECONDS\fR
 Stop a live capture (\fB\-i\fR) after this many seconds. Default: 0
@@ -580,9 +596,9 @@ loop: discover, then enforce. If no asset was observed at all, the file
 contains only explanatory comments, no \fBzones:\fR/\fBconduits:\fR keys
 (not a validly-loadable policy as-is), and a note is printed saying so.
 .TP
-.B \-\-no\-oui
-Same meaning as \fBdecode\fR's \fB\-\-no\-oui\fR, applied to the report's
-asset/edge MAC addresses. On by default.
+.B \-\-oui
+Same meaning as \fBdecode\fR's \fB\-\-oui\fR, applied to the report's
+asset/edge MAC addresses. Off by default.
 .TP
 .B \-\-resolve
 Same meaning as \fBdecode\fR's \fB\-\-resolve\fR: enable hostname resolution
@@ -612,8 +628,28 @@ runtime instead of not existing.
 A live capture stops -- decoding/reporting whatever was captured so far,
 same as reaching the end of an offline file -- on \fB\-\-duration\fR
 elapsing, \fB\-\-max\-packets\fR being reached (\fBdecode\fR only), or
-Ctrl+C (SIGINT), which is caught and used to stop cleanly rather than
-killing the process outright.
+Ctrl+C (SIGINT on Linux; a console Ctrl+C event via
+\fBSetConsoleCtrlHandler\fR on Windows, not the portable
+\fBsignal(SIGINT, ...)\fR API, which isn't reliable enough there for this),
+which is caught and used to stop cleanly rather than killing the process
+outright. If colorized output is active, the terminal's colors are reset
+twice on the way out, regardless of which of the three conditions above
+stopped the capture: immediately from the Ctrl+C handler itself, as a
+best-effort backstop in case the process is killed before exiting normally;
+and again, authoritatively, right before \fBdecode\fR actually exits, which
+is the one guaranteed to be the last byte written. The immediate reset alone
+isn't enough on Windows, where the Ctrl+C handler runs on its own
+Windows-spawned thread genuinely concurrently with the thread still decoding
+and printing packets -- a capture can legitimately hand back one more
+already-buffered packet after Ctrl+C, and that packet's buffered colored
+output can reach the terminal after the handler's own reset, undoing it.
+The authoritative end-of-run reset has no such race on any platform.
+.PP
+Ctrl+C during \fB\-r\fR (an offline file, not \fB\-i\fR) is caught the same
+way and for the same reason -- colorized output needs the same clean reset
+regardless of which kind of packet source is being read -- and it now also
+actually stops the read early, the same as it does for a live capture,
+rather than continuing to the end of the file regardless.
 .PP
 Promiscuous mode is on by default (\fB\-\-no\-promiscuous\fR turns it off)
 because the primary use case -- watching a mirrored/SPAN switch port for

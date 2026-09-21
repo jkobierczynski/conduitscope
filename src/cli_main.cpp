@@ -20,12 +20,24 @@
 #include <vector>
 
 #ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX  // Keep windows.h from defining min()/max() macros that would shadow std::min/max
+                   // in every header included below -- none of them use it today, but this is the
+                   // standard defensive guard for pulling windows.h into a project that wasn't
+                   // written expecting it, same reasoning live_capture.cpp already has for its own
+                   // (unguarded, since it's the only Windows-specific header it needs) windows.h use.
+#endif
 #include <io.h>
+#include <windows.h>  // SetConsoleCtrlHandler -- see SigintGuard's own comment for why
 #else
 #include <unistd.h>
 #endif
 
 #include "conduitscope/asset_inventory.hpp"
+#include "conduitscope/bpf_filter.hpp"
 #include "conduitscope/byteio.hpp"
 #include "conduitscope/decoder.hpp"
 #include "conduitscope/flow_direction.hpp"
@@ -74,7 +86,26 @@ public:
     PacketSource(PacketSource&&) = default;
     PacketSource& operator=(PacketSource&&) = default;
 
-    bool next(PcapPacket& out) { return reader_ ? reader_->next(out) : capture_->next(out); }
+    // Only ever set for an offline PcapReader source (see open_packet_source below) -- a live
+    // capture already has its own BPF filter applied by libpcap at capture time, via
+    // pcap_setfilter() inside LiveCapture's own constructor, so there's nothing left to filter
+    // here even if this were called for one (and open_packet_source never does).
+    void set_file_filter(std::unique_ptr<BpfFilter> filter) { file_filter_ = std::move(filter); }
+
+    // For a filtered offline source, skips non-matching packets transparently -- callers see
+    // exactly the same "false at EOF" contract either way, they just see fewer packets in
+    // between. reader_->info().linktype is re-read fresh per packet (not cached once before the
+    // loop) for the same multi-interface-pcapng reason pcap_reader.hpp's own file header already
+    // documents for every other call site that reads it.
+    bool next(PcapPacket& out) {
+        if (reader_) {
+            while (reader_->next(out)) {
+                if (!file_filter_ || file_filter_->matches(out, reader_->info().linktype)) return true;
+            }
+            return false;
+        }
+        return capture_->next(out);
+    }
     uint32_t linktype() const { return reader_ ? reader_->info().linktype : capture_->info().linktype; }
     // Non-null only when this source is a live capture; used by SigintGuard below. Never call
     // anything on it except stop() from a signal handler.
@@ -83,6 +114,7 @@ public:
 private:
     std::unique_ptr<PcapReader> reader_;
     std::unique_ptr<LiveCapture> capture_;
+    std::unique_ptr<BpfFilter> file_filter_;
 };
 
 std::atomic<LiveCapture*> g_active_capture{nullptr};
@@ -91,6 +123,18 @@ std::atomic<LiveCapture*> g_active_capture{nullptr};
 // knows whether it needs to restore the terminal's default colors. Only `decode` ever passes
 // true here; `policy validate`/`inventory` have no colorized text output to restore.
 std::atomic<bool> g_color_active{false};
+// Set by run_sigint_cleanup, checked at the top of run_decode/run_policy_validate/
+// run_inventory's own `while (source.next(pkt))` loop, alongside LiveCapture's own internal
+// stop_requested (live_capture.cpp) rather than instead of it. The two aren't redundant:
+// LiveCapture::next() can block *inside* a single call (waiting on pcap_next_ex()), so it needs
+// its own internal flag to unblock promptly; but PcapReader (an offline `-r` file read) has no
+// such per-call blocking and no stop flag of its own at all -- reading a large file is simply a
+// tight loop with nothing to interrupt it early. Without this, a run reading from a file just
+// keeps reading to EOF regardless of Ctrl+C -- harmless for `decode`'s own color reset (which
+// still happens either way, from this same handler's immediate write and/or the authoritative
+// end-of-run one below), but means Ctrl+C doesn't actually shorten a long offline read the way it
+// does a live capture, which isn't what "stop cleanly on Ctrl+C" ought to mean for either source.
+std::atomic<bool> g_stop_requested{false};
 // Counts SIGINT handler invocations currently in progress (0 or 1 on POSIX, since a signal only
 // ever interrupts the thread it was delivered to and can't re-enter while already running there;
 // see below for why it can briefly be more on Windows). SigintGuard's destructor spin-waits on
@@ -98,62 +142,156 @@ std::atomic<bool> g_color_active{false};
 // matters.
 std::atomic<int> g_handler_in_flight{0};
 
-extern "C" void handle_sigint(int) {
-    g_handler_in_flight.fetch_add(1, std::memory_order_acquire);
-    // Restore the terminal's default colors FIRST, before anything else: without this, Ctrl+C
-    // during a colorized live `decode` leaves the terminal showing whatever ANSI color the most
-    // recently printed line happened to end in (e.g. a yellow "note" or red "malformed" line) --
-    // that state then bleeds into the shell prompt and everything typed afterward, until the user
-    // notices and runs `reset`/`tput sgr0` themselves. write()/_write() (not std::cout) is used
-    // deliberately: it's the low-level, essentially-immediate primitive, not buffered C++ iostream
-    // state that a signal arriving mid-write could otherwise corrupt or race with.
-    if (g_color_active.load(std::memory_order_acquire)) {
-        static const char kResetSequence[] = "\033[0m";
+// Writes the ANSI "reset all attributes" sequence directly to stdout's file descriptor -- NOT via
+// std::cout -- and used everywhere this program resets the terminal's colors on exit, both from
+// run_sigint_cleanup below and from run_decode's own end-of-run reset. Deliberately low-level for
+// two independent reasons, one per caller:
+//
+// - run_sigint_cleanup calls this from a signal/console-ctrl handler that can run concurrently
+//   with main() (see SigintGuard's own comment) -- std::cout's buffered iostream state is not
+//   something a concurrently-running handler can safely touch, so a raw write()/_write() is used
+//   instead: a essentially-immediate primitive with no shared buffering state to race with.
+// - run_decode's own end-of-run reset calls this instead of `*out << "\033[0m"` for a different
+//   reason: a large decode (especially an offline file read start-to-finish, which -- unlike live
+//   capture -- has no natural per-packet pacing and can print its entire output in one enormous
+//   burst) can leave a very large amount of text sitting in std::cout's own buffer, all flushed in
+//   a single big write. Windows consoles are documented to sometimes mishandle a single very large
+//   WriteConsole call (silently short/truncated), and losing exactly the last few bytes of that
+//   one big write would lose our reset specifically -- something a real report of the terminal
+//   occasionally still being left colored after an ordinary (non-interrupted) offline decode
+//   pointed at. Flushing whatever's already buffered in `out` FIRST, then writing this reset as
+//   its own small, separate, unbuffered write, keeps it decoupled from that risk regardless of how
+//   much came before it.
+void write_raw_color_reset_to_stdout() {
+    static const char kResetSequence[] = "\033[0m";
 #ifdef _WIN32
-        _write(_fileno(stdout), kResetSequence, sizeof(kResetSequence) - 1);
+    _write(_fileno(stdout), kResetSequence, sizeof(kResetSequence) - 1);
 #else
-        ssize_t written = ::write(STDOUT_FILENO, kResetSequence, sizeof(kResetSequence) - 1);
-        (void)written;  // Best-effort: nothing meaningful to do with a short/failed write here.
+    ssize_t written = ::write(STDOUT_FILENO, kResetSequence, sizeof(kResetSequence) - 1);
+    (void)written;  // Best-effort: nothing meaningful to do with a short/failed write here.
 #endif
-    }
-    LiveCapture* capture = g_active_capture.load();
-    if (capture != nullptr) capture->stop();
-    g_handler_in_flight.fetch_sub(1, std::memory_order_release);
 }
 
-// RAII guard: while alive, redirects SIGINT (Ctrl+C) to LiveCapture::stop() on `capture` instead
-// of the platform default (immediate process termination), so a live capture stops cleanly and
-// still prints whatever report/summary it had. A no-op when `capture` is null (offline-file mode
-// doesn't need this -- EOF already stops the loop on its own).
+// Shared body for both platforms' entry points below: restores the terminal's default colors (if
+// this run had any active) and stops whatever live capture is currently guarded. Split out on its
+// own so POSIX's handle_sigint and Windows' console_ctrl_handler -- two entry points with
+// different signatures and different registration mechanisms, see SigintGuard's own comment for
+// why Windows needs its own -- don't duplicate the actual cleanup logic.
 //
-// Safety note (why this is more than just std::signal() + a flag): on POSIX, a signal handler
-// only ever interrupts the same thread that was running when it was delivered -- it can't run
-// concurrently with anything else in the process, so restoring the old handler and clearing
-// g_active_capture before this guard's LiveCapture is destroyed is enough on its own. Windows'
-// console Ctrl+C handling does NOT give that guarantee: per Microsoft's own documentation, a
-// CTRL+C interrupt is delivered by spinning up a *new thread* to run the handler, which can
-// therefore execute genuinely concurrently with the main thread -- including with this
-// destructor tearing down the very LiveCapture the handler is about to call stop() on, which
-// would be a real use-after-free race without the g_handler_in_flight wait below. The wait is
-// harmless on POSIX (it can only ever see 0, since nothing there can be "in flight" concurrently
-// with this destructor) and closes the real race on Windows.
+// Restoring color is done FIRST, before anything else: without this, Ctrl+C during a colorized
+// live `decode` leaves the terminal showing whatever ANSI color the most recently printed line
+// happened to end in (e.g. a yellow "note" or red "malformed" line) -- that state then bleeds into
+// the shell prompt and everything typed afterward, until the user notices and runs `reset`/`tput
+// sgr0` themselves.
+void run_sigint_cleanup() {
+    if (g_color_active.load(std::memory_order_acquire)) {
+        write_raw_color_reset_to_stdout();
+    }
+    // Always set, regardless of source kind -- LiveCapture::stop() below already handles the live
+    // case (and can unblock a call already in progress inside LiveCapture::next()); this is what
+    // an offline `-r` read's packet loop checks instead, since PcapReader has no stop of its own.
+    g_stop_requested.store(true, std::memory_order_release);
+    LiveCapture* capture = g_active_capture.load();
+    if (capture != nullptr) capture->stop();
+}
+
+#ifdef _WIN32
+// Windows' own console control handler (SetConsoleCtrlHandler), NOT std::signal(SIGINT, ...) --
+// see SigintGuard's own comment for why the portable signal() API isn't good enough here. Runs on
+// a Windows-spawned handler thread, same as the CRT's own SIGINT translation would, so the same
+// g_handler_in_flight bookkeeping SigintGuard's destructor waits on still applies.
+BOOL WINAPI console_ctrl_handler(DWORD ctrl_type) {
+    g_handler_in_flight.fetch_add(1, std::memory_order_acquire);
+    run_sigint_cleanup();
+    g_handler_in_flight.fetch_sub(1, std::memory_order_release);
+    if (ctrl_type == CTRL_C_EVENT || ctrl_type == CTRL_BREAK_EVENT) {
+        // TRUE: this event is fully handled -- stops Windows from running any further handler in
+        // the chain (there are none here) and, critically, from falling back to ITS OWN default
+        // action of terminating the process. That default-action fallback is exactly the failure
+        // mode std::signal(SIGINT, ...) can't reliably prevent on Windows (see SigintGuard's own
+        // comment), so returning TRUE here -- and staying registered for as long as this guard is
+        // alive, unlike a one-shot signal() handler -- is what actually fixes it.
+        return TRUE;
+    }
+    // CTRL_CLOSE_EVENT/CTRL_LOGOFF_EVENT/CTRL_SHUTDOWN_EVENT: the console window is closing, the
+    // user is logging off, or the system is shutting down -- Windows gives every registered
+    // handler only a few seconds (historically ~5s, sometimes less) before terminating the process
+    // regardless of what any handler returns. The best-effort cleanup above still ran; returning
+    // FALSE here lets Windows' own default handling (and any other process in the same console's
+    // handler chain) proceed too, rather than this process claiming an event it can't meaningfully
+    // stop.
+    return FALSE;
+}
+#else
+extern "C" void handle_sigint(int) {
+    g_handler_in_flight.fetch_add(1, std::memory_order_acquire);
+    run_sigint_cleanup();
+    g_handler_in_flight.fetch_sub(1, std::memory_order_release);
+}
+#endif
+
+// RAII guard: while alive, redirects Ctrl+C to LiveCapture::stop() on `capture` instead of the
+// platform default (immediate process termination), so a live capture stops cleanly and still
+// prints whatever report/summary it had. A no-op when `capture` is null (offline-file mode doesn't
+// need this -- EOF already stops the loop on its own).
+//
+// POSIX uses std::signal(SIGINT, ...); Windows uses SetConsoleCtrlHandler, NOT std::signal --
+// deliberately, after a real report that the color-restore above wasn't taking effect reliably on
+// Windows. Two distinct, well-documented Windows gotchas motivate this, both from Microsoft's own
+// documentation of console Ctrl+C handling: (1) a CTRL+C interrupt is delivered by spinning up a
+// *new thread* to run whatever's registered, which can therefore execute genuinely concurrently
+// with the main thread -- including with this destructor tearing down the very LiveCapture the
+// handler is about to call stop() on, which would be a real use-after-free race without the
+// g_handler_in_flight wait below (harmless on POSIX, where a signal handler only ever interrupts
+// the same thread it was delivered to and can't run concurrently with anything else in the
+// process, so this can only ever see 0 there); this part std::signal() + a flag already handled
+// correctly on both platforms. (2) What std::signal()-registered handlers on Windows do NOT
+// reliably guarantee is that the OS's own default action (killing the process) stays suppressed
+// for as long as our handler is installed -- SetConsoleCtrlHandler's HandlerRoutine returning TRUE
+// is the actual, durable way to prevent that, is the mechanism Microsoft's own docs recommend for
+// exactly this "clean up terminal state before a Ctrl+C-driven exit" scenario, and is what
+// console_ctrl_handler above does.
 class SigintGuard {
 public:
     // `color` should be whatever this run already resolved for its own colorized output (e.g.
     // run_decode's `color` local) -- default false covers callers (policy validate, inventory)
-    // that have no colorized text output for handle_sigint to need to reset.
-    explicit SigintGuard(LiveCapture* capture, bool color = false) : active_(capture != nullptr) {
+    // that have no colorized text output for the cleanup above to need to reset.
+    //
+    // Active -- i.e. actually installs a handler at all -- whenever EITHER `capture` is non-null
+    // (there's a live capture that needs stopping cleanly) OR `color` is true (there's colored
+    // output that needs resetting cleanly), not just the first. A real report caught the gap this
+    // closes: for an offline `-r` decode, `capture` is always null (there's no LiveCapture at all
+    // to guard -- see open_packet_source), so with the OLD `active_(capture != nullptr)` this
+    // guard installed NO handler whatsoever, on any platform, for that case. Ctrl+C during a
+    // colorized offline decode therefore fell straight through to the OS's own default
+    // Ctrl+C-kills-the-process action, with none of the cleanup below ever running -- explaining
+    // why the terminal was still left colored even after both the SetConsoleCtrlHandler switch and
+    // the end-of-run reset in run_decode below, neither of which matters if no handler is even
+    // registered to reach them. `run_sigint_cleanup`'s own `capture != nullptr` null check already
+    // makes it safe to call with a null `g_active_capture` (nothing to stop, just the color reset).
+    explicit SigintGuard(LiveCapture* capture, bool color = false)
+        : active_(capture != nullptr || color) {
         if (active_) {
             g_active_capture.store(capture);
             g_color_active.store(color, std::memory_order_release);
+            g_stop_requested.store(false, std::memory_order_release);
+#ifdef _WIN32
+            ::SetConsoleCtrlHandler(console_ctrl_handler, TRUE);
+#else
             previous_handler_ = std::signal(SIGINT, handle_sigint);
+#endif
         }
     }
     ~SigintGuard() {
         if (active_) {
+#ifdef _WIN32
+            ::SetConsoleCtrlHandler(console_ctrl_handler, FALSE);
+#else
             std::signal(SIGINT, previous_handler_);
+#endif
             g_active_capture.store(nullptr);
             g_color_active.store(false, std::memory_order_release);
+            g_stop_requested.store(false, std::memory_order_release);
             while (g_handler_in_flight.load(std::memory_order_acquire) > 0) {
                 std::this_thread::yield();
             }
@@ -164,14 +302,24 @@ public:
 
 private:
     bool active_;
+#ifndef _WIN32
     void (*previous_handler_)(int) = SIG_DFL;
+#endif
 };
 
-// Shared by run_decode/run_policy_validate: exactly one of `input` (offline pcap file, already
-// validated to exist by CLI11's ->check(CLI::ExistingFile)) or `interface_name` (live capture) is
-// expected to be non-empty -- enforced in main() before either run_* function is called, via
-// ->excludes() plus the post-parse "exactly one" check. Throws whatever PcapReader's constructor /
-// LiveCapture's constructor throws (ParseError / CaptureError respectively) on failure.
+// Shared by run_decode/run_policy_validate/run_inventory: exactly one of `input` (offline pcap
+// file, already validated to exist by CLI11's ->check(CLI::ExistingFile)) or `interface_name`
+// (live capture) is expected to be non-empty -- enforced in main() before any run_* function is
+// called, via ->excludes() plus the post-parse "exactly one" check. Throws whatever PcapReader's
+// constructor / LiveCapture's constructor / BpfFilter's constructor throws (ParseError /
+// CaptureError / CaptureError respectively) on failure.
+//
+// `filter` is meaningful for BOTH source kinds, not just -i: for -i it's handed to LiveCapture,
+// which applies it via libpcap's pcap_setfilter() at capture time (see live_capture.cpp); for -r
+// it's compiled once here (BpfFilter, bpf_filter.hpp) and applied to each packet PcapReader reads
+// off disk, since an offline file has no equivalent "at capture time" hook of its own. Either
+// way, `filter` given but this build having no libpcap/Npcap support surfaces the same clear
+// CaptureError -- for -i via LiveCapture's own stub, for -r via BpfFilter's own stub.
 PacketSource open_packet_source(const std::string& input, const std::string& interface_name,
                                  int snaplen, bool promiscuous, const std::string& filter,
                                  int duration_seconds, size_t max_packets) {
@@ -179,7 +327,14 @@ PacketSource open_packet_source(const std::string& input, const std::string& int
         return PacketSource(std::make_unique<LiveCapture>(interface_name, snaplen, promiscuous,
                                                             filter, duration_seconds, max_packets));
     }
-    return PacketSource(std::make_unique<PcapReader>(input));
+    auto reader = std::make_unique<PcapReader>(input);
+    uint32_t reader_linktype = reader->info().linktype;
+    uint32_t reader_snaplen = reader->info().snaplen;
+    PacketSource source(std::move(reader));
+    if (!filter.empty()) {
+        source.set_file_filter(std::make_unique<BpfFilter>(filter, reader_linktype, reader_snaplen));
+    }
+    return source;
 }
 
 std::string link_type_name(uint32_t linktype) {
@@ -218,7 +373,7 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
                 bool oui_enabled, bool resolve_hostnames, const std::string& hosts_path,
                 bool service_names_enabled, const std::string& services_path, bool show_vlan,
                 const std::string& time_format, const std::string& time_offset,
-                std::ostream& diag, bool show_direction) {
+                std::ostream& diag, bool show_direction, bool show_mac) {
     std::ofstream file_out;
     std::ostream* out = &std::cout;
     bool writing_to_stdout = output.empty();
@@ -358,7 +513,7 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
                                                        *parsed_time_offset, show_direction);
             } else {
                 writer = std::make_unique<TextWriter>(*out, color, resolver, show_vlan, *parsed_time_format,
-                                                        *parsed_time_offset, show_direction);
+                                                        *parsed_time_offset, show_direction, show_mac);
             }
             writer->begin();
         }
@@ -373,7 +528,7 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
 
         PcapPacket pkt;
         size_t index = 0, decoded_count = 0, warnings = 0;
-        while (source.next(pkt)) {
+        while (!g_stop_requested.load(std::memory_order_acquire) && source.next(pkt)) {
             ++index;
             DecodedPacket dp = decoder.decode(pkt, source.linktype(), index);
             direction_tracker.observe(dp);
@@ -389,6 +544,40 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
 
         if (stats) stats_writer.print_summary(*out);
         else writer->end();
+
+        // Authoritative color reset -- belt-and-braces alongside run_sigint_cleanup's own
+        // immediate raw-fd write (see its comment above). That handler-thread write is a
+        // best-effort backstop for the case this process gets killed before reaching here; it
+        // can't be the ONLY reset, because on Windows the handler runs on a separate,
+        // genuinely-concurrent thread (see SigintGuard's own comment), while LiveCapture::next()
+        // (live_capture.cpp) only checks stop_requested at the TOP of its retry loop -- once
+        // pcap_next_ex() has already returned a packet, next() hands it back even if
+        // stop_requested was just set. So this main thread can legitimately decode and print one
+        // or more MORE colored packets after the handler's own reset write already ran, via
+        // ordinary buffered std::cout output that can reach the console AFTER that raw write,
+        // undoing it -- that race is what left the terminal colored even with the
+        // SetConsoleCtrlHandler fix in place. Doing the reset here instead, on this same thread,
+        // strictly after every packet this run will ever print -- regardless of whether the loop
+        // above ended via EOF, --duration, --max-packets, or Ctrl+C -- has no such race: nothing
+        // this run's colored output ever writes can land after it.
+        //
+        // Written via write_raw_color_reset_to_stdout() (a small, separate, unbuffered write),
+        // not `*out << "\033[0m"`, when writing to stdout specifically -- see that function's own
+        // comment: an offline decode has no natural per-packet pacing the way live capture does,
+        // so it can flush its entire output in one very large write, and a large single write to a
+        // Windows console is documented to sometimes come back short/truncated. Flushing `out`
+        // first, then writing the reset as its own small separate call, keeps it decoupled from
+        // that risk regardless of how much output came before it. `-o FILE` writes through `*out`
+        // as before -- an ordinary file has no such quirk, and the raw write is stdout-specific.
+        if (color) {
+            out->flush();
+            if (writing_to_stdout) {
+                write_raw_color_reset_to_stdout();
+            } else {
+                *out << "\033[0m";
+                out->flush();
+            }
+        }
 
         if (!interface_name.empty() && !quiet) {
             diag << "capture on '" << interface_name << "' stopped (" << decoded_count
@@ -496,7 +685,7 @@ int run_policy_validate(const std::string& input, const std::string& interface_n
 
         PcapPacket pkt;
         size_t index = 0, warnings = 0;
-        while (source.next(pkt)) {
+        while (!g_stop_requested.load(std::memory_order_acquire) && source.next(pkt)) {
             ++index;
             DecodedPacket dp = decoder.decode(pkt, source.linktype(), index);
             if (dp.protocol == "parse-error") {
@@ -585,7 +774,7 @@ int run_inventory(const std::string& input, const std::string& interface_name, c
 
         PcapPacket pkt;
         size_t index = 0, warnings = 0;
-        while (source.next(pkt)) {
+        while (!g_stop_requested.load(std::memory_order_acquire) && source.next(pkt)) {
             ++index;
             DecodedPacket dp = decoder.decode(pkt, source.linktype(), index);
             if (dp.protocol == "parse-error") {
@@ -717,10 +906,11 @@ int main(int argc, char** argv) {
         decode_wireless_backhaul_ports, decode_tunnel_vpn_ports;
     size_t decode_max_packets = 0;
     bool decode_stats = false, decode_strict = false;
-    bool decode_oui = true, decode_resolve = false, decode_service_names = true;
+    bool decode_oui = false, decode_resolve = false, decode_service_names = true;
     bool decode_show_vlan = true;
     bool decode_show_direction = true;
-    std::string decode_time_format = "e", decode_time_offset = "utc";
+    bool decode_show_mac = false;
+    std::string decode_time_format = "r", decode_time_offset = "utc";
     std::string decode_hosts_file, decode_services_file;
 
     auto* decode_input_opt =
@@ -735,7 +925,10 @@ int main(int argc, char** argv) {
     decode_input_opt->excludes(decode_interface_opt);
     decode_interface_opt->excludes(decode_input_opt);
     decode_cmd->add_option("--filter", decode_filter,
-                            "BPF capture filter (tcpdump syntax), only meaningful with -i");
+                            "BPF filter (tcpdump syntax) -- with -i, applied by libpcap at capture time; with -r, "
+                            "applied per-packet after reading the file (same filter syntax either way); "
+                            "requires this build to have been compiled with libpcap/Npcap support in "
+                            "both cases");
     decode_cmd->add_option("--duration", decode_duration,
                             "Stop a live capture (-i) after this many seconds (0 = unlimited; stop "
                             "with Ctrl+C or --max-packets instead)")
@@ -754,8 +947,8 @@ int main(int argc, char** argv) {
     decode_cmd
         ->add_option("-t,--time-format", decode_time_format,
                       "How to render each packet's timestamp -- mirrors tshark's own -t mnemonics: "
-                      "e/epoch (raw seconds since the Unix epoch, the default), r/relative (elapsed "
-                      "since the first packet), d/delta (elapsed since the previous packet), "
+                      "r/relative (elapsed since the first packet, the default), e/epoch (raw "
+                      "seconds since the Unix epoch), d/delta (elapsed since the previous packet), "
                       "a/absolute (HH:MM:SS.ffffff), ad/absolute-date (YYYY-MM-DD HH:MM:SS.ffffff) "
                       "-- see --time-offset for absolute/absolute-date's timezone, and docs/"
                       "MANUAL.md's OUTPUT FORMATS section")
@@ -909,9 +1102,17 @@ int main(int argc, char** argv) {
         "tier decided it -- handshake/content/port-heuristic), on by default -- see docs/MANUAL.md's "
         "OUTPUT FORMATS section and ROADMAP item 19. Does not affect `decode --stats`'s own "
         "direction-tier breakdown, which has no display toggles of its own");
-    decode_cmd->add_flag("!--no-oui", decode_oui,
-                          "Disable OUI (MAC vendor) resolution, on by default -- see docs/"
-                          "MANUAL.md's OUTPUT FORMATS section");
+    decode_cmd->add_flag(
+        "-e,--ether", decode_show_mac,
+        "Show the Ethernet header (source/destination MAC address, VLAN tag) for each packet in "
+        "text output -- mirrors tcpdump's own -e. Off by default to keep output compact; implied "
+        "by --oui (there'd be nothing to attach a vendor name to otherwise). Only affects text "
+        "output -- JSON/CSV always include src_mac/dst_mac as base fields, same as src_ip/dst_ip "
+        "-- see docs/MANUAL.md's OUTPUT FORMATS section");
+    decode_cmd->add_flag("--oui", decode_oui,
+                          "Enable OUI (MAC vendor) resolution and show it next to each MAC "
+                          "address; off by default to keep output compact. Implies -e/--ether -- "
+                          "see docs/MANUAL.md's OUTPUT FORMATS section");
     decode_cmd->add_flag(
         "--resolve", decode_resolve,
         "Enable hostname resolution from an explicitly-supplied hosts file (--hosts); off by "
@@ -954,7 +1155,7 @@ int main(int argc, char** argv) {
     bool policy_promiscuous = true;
     std::string policy_format = "text";
     bool policy_strict = false;
-    bool policy_oui = true, policy_resolve = false, policy_service_names = true;
+    bool policy_oui = false, policy_resolve = false, policy_service_names = true;
     std::string policy_hosts_file, policy_services_file;
     auto* policy_input_opt =
         policy_validate_cmd->add_option("-r,--read", policy_input,
@@ -968,7 +1169,10 @@ int main(int argc, char** argv) {
     policy_input_opt->excludes(policy_interface_opt);
     policy_interface_opt->excludes(policy_input_opt);
     policy_validate_cmd->add_option("--filter", policy_filter,
-                                     "BPF capture filter (tcpdump syntax), only meaningful with -i");
+                                     "BPF filter (tcpdump syntax) -- with -i, applied by libpcap at capture time; "
+                                     "with -r, applied per-packet after reading the file (same filter syntax "
+                                     "either way); requires this build to have been compiled with libpcap/Npcap "
+                                     "support in both cases");
     policy_validate_cmd
         ->add_option("--duration", policy_duration,
                       "Stop a live capture (-i) after this many seconds (0 = unlimited; stop with "
@@ -992,9 +1196,10 @@ int main(int argc, char** argv) {
         ->capture_default_str();
     policy_validate_cmd->add_flag("--strict", policy_strict,
                                    "Abort on the first malformed packet instead of reporting it and continuing");
-    policy_validate_cmd->add_flag("!--no-oui", policy_oui,
-                                   "Disable OUI (MAC vendor) resolution in the report, on by default -- "
-                                   "see docs/MANUAL.md's OUTPUT FORMATS section");
+    policy_validate_cmd->add_flag("--oui", policy_oui,
+                                   "Enable OUI (MAC vendor) resolution in the report; off by "
+                                   "default to keep output compact -- see docs/MANUAL.md's "
+                                   "OUTPUT FORMATS section");
     policy_validate_cmd->add_flag(
         "--resolve", policy_resolve,
         "Enable hostname resolution from an explicitly-supplied hosts file (--hosts) in the report; "
@@ -1029,7 +1234,7 @@ int main(int argc, char** argv) {
     std::string inventory_diagram_file;
     std::string inventory_diagram_format = "mermaid";
     std::string inventory_policy_out;
-    bool inventory_oui = true, inventory_resolve = false, inventory_service_names = true;
+    bool inventory_oui = false, inventory_resolve = false, inventory_service_names = true;
     std::string inventory_hosts_file, inventory_services_file;
 
     auto* inventory_input_opt =
@@ -1044,7 +1249,10 @@ int main(int argc, char** argv) {
     inventory_input_opt->excludes(inventory_interface_opt);
     inventory_interface_opt->excludes(inventory_input_opt);
     inventory_cmd->add_option("--filter", inventory_filter,
-                               "BPF capture filter (tcpdump syntax), only meaningful with -i");
+                               "BPF filter (tcpdump syntax) -- with -i, applied by libpcap at capture time; "
+                               "with -r, applied per-packet after reading the file (same filter syntax "
+                               "either way); requires this build to have been compiled with libpcap/Npcap "
+                               "support in both cases");
     inventory_cmd
         ->add_option("--duration", inventory_duration,
                       "Stop a live capture (-i) after this many seconds (0 = unlimited; stop with "
@@ -1079,9 +1287,9 @@ int main(int argc, char** argv) {
         "--policy-out", inventory_policy_out,
         "Also write the inferred zone/conduit model as a policy YAML file here, directly loadable "
         "by 'policy validate --policy' -- closes the discover-then-enforce loop");
-    inventory_cmd->add_flag("!--no-oui", inventory_oui,
-                             "Disable OUI (MAC vendor) resolution in the report, on by default -- "
-                             "see docs/MANUAL.md's OUTPUT FORMATS section");
+    inventory_cmd->add_flag("--oui", inventory_oui,
+                             "Enable OUI (MAC vendor) resolution in the report; off by default to "
+                             "keep output compact -- see docs/MANUAL.md's OUTPUT FORMATS section");
     inventory_cmd->add_flag(
         "--resolve", inventory_resolve,
         "Enable hostname resolution from an explicitly-supplied hosts file (--hosts) in the report; "
@@ -1137,6 +1345,9 @@ int main(int argc, char** argv) {
     }
 
     if (decode_cmd->parsed()) {
+        // --oui implies -e/--ether: without it there'd be no eth line to attach a vendor name to.
+        // -e alone (no --oui) shows the MAC pair with no vendor annotation.
+        decode_show_mac = decode_show_mac || decode_oui;
         return run_decode(decode_input, decode_interface, decode_filter, decode_duration, decode_snaplen,
                            decode_promiscuous, decode_output, decode_format, decode_protocol,
                            decode_modbus_ports, decode_dnp3_ports, decode_s7comm_ports, decode_iec104_ports,
@@ -1149,7 +1360,8 @@ int main(int argc, char** argv) {
                            decode_max_packets, decode_stats, decode_strict,
                            quiet, no_color, force_color, decode_oui, decode_resolve, decode_hosts_file,
                            decode_service_names, decode_services_file, decode_show_vlan,
-                           decode_time_format, decode_time_offset, *diag, decode_show_direction);
+                           decode_time_format, decode_time_offset, *diag, decode_show_direction,
+                           decode_show_mac);
     }
     if (info_cmd->parsed()) {
         return run_info(info_input, std::cout);

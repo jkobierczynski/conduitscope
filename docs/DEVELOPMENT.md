@@ -322,6 +322,49 @@ at the same priority tier as the items they extend:
    `build-without-libpcap` were given `if: github.event_name != 'schedule'`
    guards so the new nightly trigger only drives `scheduled-fuzz`, not a
    redundant re-run of everything else.
+
+   **LeakSanitizer/`setcap` fix.** The first real CI run of `sanitizers`
+   crashed with "LeakSanitizer has encountered a fatal error" / "does not
+   work under ptrace" on a test with nothing to do with live capture
+   (`decode_modbus_sample`) -- because `build-and-test`'s own `setcap
+   cap_net_raw,cap_net_admin=eip` step (needed so the 4 `live_capture_*`
+   tests that actually open `lo` can do so without running the whole suite
+   under `sudo` -- see item 1 above) makes the kernel treat the resulting
+   process as non-dumpable, the same restriction a setuid binary gets, and
+   LeakSanitizer's exit-time leak check needs ptrace-based self-inspection
+   that restriction blocks. A first fix attempt split the `sanitizers` Test
+   step in two around `setcap`, with `ASAN_OPTIONS=detect_leaks=0` set via
+   the step's `env:` block for the post-`setcap` slice -- this looked right
+   locally but a second real CI run showed 2 of the 4 post-`setcap` tests
+   still hitting the identical crash intermittently. Root cause, confirmed
+   against [google/sanitizers#784](https://github.com/google/sanitizers/issues/784)
+   and reproduced directly (an unprivileged test user running a `setcap`'d
+   binary genuinely cannot read that process's own `/proc/<pid>/environ`,
+   confirmed `-r-------- root root`, `Permission denied` for that same
+   user): AddressSanitizer doesn't read `ASAN_OPTIONS` via a normal
+   environment lookup, it reads `/proc/self/environ` directly, and
+   `setcap`'s non-dumpable transition makes that file root-owned, mode
+   `0400` -- unreadable even by the process's own launching user. The
+   `env:` override was therefore being silently dropped, and LeakSanitizer
+   ran with its compiled-in default (`detect_leaks=1`) regardless, which is
+   why the crash was intermittent rather than eliminated. Fixed by not
+   relying on `setcap` + an environment override reaching a non-dumpable
+   process at all for this slice: the `sanitizers` job no longer runs
+   `setcap` itself. Everything that doesn't need `CAP_NET_RAW` runs first,
+   as the normal unprivileged runner user, with full leak detection
+   genuinely intact (nothing there is non-dumpable). Only the 4 tests that
+   need it run afterward under `sudo --preserve-env=ASAN_OPTIONS` -- root
+   bypasses the same DAC check that blocks everyone else, so it can always
+   read its own `/proc/self/environ` regardless of ownership/mode, and root
+   has every capability implicitly anyway, so no separate `setcap` step is
+   needed in this job at all. Verified: reproduced the exact permission
+   mechanism locally (unprivileged user + `setcap`'d binary -> confirmed
+   unreadable `/proc/<pid>/environ`), then confirmed the fix directly the
+   same way with `sudo --preserve-env` in the loop -> the file is still
+   root-owned/`0400` but root's own read of it succeeds and
+   `ASAN_OPTIONS=detect_leaks=0` is visible inside it. `build-and-test`
+   itself was never affected -- it has no LeakSanitizer running to conflict
+   with `setcap`'s non-dumpable flag in the first place.
 7. **Make the hardcoded resource-exhaustion limits CLI-configurable.**
    `kMaxBufferedBytes` (decoder.cpp, TCP/COTP reassembly), the various
    `kMaxDataRecursionDepth`/`kMaxCipRecursionDepth`/`kMaxMplsLabelDepth`-
@@ -1182,10 +1225,102 @@ anything else on this list.
    interfaces` correctly enumerating real adapters, and a real capture
    decoded end to end (which is what surfaced both the `version` multi-
    config build-type bug and the FF-HSE false-positive fix documented
-   elsewhere in this file, plus the addition of full ICMP decoding). Still
-   open: a real OT/mirrored-switch-port network capture -- what's been run
-   so far is ordinary client traffic (ICMP, UDP/443 QUIC/TLS), not
-   industrial protocol traffic on a real mirrored port.
+   elsewhere in this file, plus the addition of full ICMP decoding). This
+   real usage also surfaced a Ctrl+C-specific bug: `SigintGuard`
+   (cli_main.cpp) restored the terminal's ANSI colors on interrupt via a
+   portable `std::signal(SIGINT, ...)` handler on every platform, but on
+   Windows that handler isn't guaranteed to stay installed for the whole
+   run and can't reliably suppress the OS's own default
+   Ctrl+C-kills-the-process action -- two well-documented Windows CRT
+   `signal()` gotchas that don't apply on Linux/macOS, where a signal
+   handler installed once stays installed and does suppress the default
+   action. Fixed by switching `SigintGuard` to `SetConsoleCtrlHandler`
+   (the Win32-native mechanism Microsoft's own docs recommend for this
+   exact case) on Windows specifically, keeping `signal(SIGINT, ...)` on
+   POSIX unchanged; verified by cross-compiling with MinGW-w64 and
+   confirming `SetConsoleCtrlHandler` is correctly imported in the
+   resulting binary. **That fix turned out to be necessary but not
+   sufficient** -- Jurgen's own follow-up report showed colors still not
+   resetting on Windows even with `SetConsoleCtrlHandler` in place. Root
+   cause, once actually diagnosed: `SetConsoleCtrlHandler`'s handler runs
+   on a separate thread Windows spawns for it, genuinely concurrently with
+   the main thread still decoding and printing packets (this is documented
+   Windows behavior, not a bug in the handler itself), and `LiveCapture::
+   next()` (live_capture.cpp) only checks its `stop_requested` flag at the
+   *top* of its retry loop -- once `pcap_next_ex()` has already returned a
+   packet, `next()` hands it back regardless of whether `stop_requested`
+   was just set. So the main thread can legitimately decode and print one
+   or more MORE colored packets after the handler's own immediate
+   raw-`_write()` reset already ran; that packet's ordinary, iostream-
+   buffered output can reach the console *after* the handler's reset,
+   undoing it. This race is Windows-specific -- on POSIX a signal handler
+   runs synchronously on the very thread it interrupts, so there's no
+   "the interrupted thread keeps producing more output concurrently"
+   scenario -- which is consistent with `SetConsoleCtrlHandler` alone
+   (a real, correct fix for a different gap) not touching the actual
+   symptom. Fixed properly by adding a second, authoritative color reset
+   in `run_decode` (cli_main.cpp) on the main thread itself, positioned
+   right after the packet loop ends and after `writer->end()`/
+   `stats_writer.print_summary()` -- guaranteed to run after every packet
+   this run will ever print, on every platform, regardless of which
+   condition stopped the loop (EOF, `--duration`, `--max-packets`, or
+   Ctrl+C), since it's synchronous and strictly last on the one thread that
+   produces all of this run's real output. The original handler-side reset
+   is kept as a best-effort immediate backstop for the case the process is
+   killed before reaching normal exit -- a redundant ANSI reset is
+   harmless. Re-verified after this second fix: full Linux CTest suite
+   (1148/1148 default, 1138/1138 with `CONDUITSCOPE_ENABLE_LIVE_CAPTURE=
+   OFF`) and a clean MinGW-w64 cross-compile, plus a manual Linux smoke
+   test confirming the end-of-run reset fires exactly once on normal exit
+   and is appended (harmlessly redundant) after the handler's own reset on
+   Ctrl+C. This second fix DID hold up under real testing -- Jurgen
+   confirmed 50/50 clean live-capture Ctrl+C runs on real Windows hardware,
+   the first hard live-Windows confirmation either fix got, and a hex dump
+   of an interrupted run's raw output bytes confirmed `\033[0m` really is
+   the literal last four bytes written. **But a third report, from the same
+   round of testing, found a completely different gap**: Ctrl+C during an
+   *offline* `decode -r` (no `-i` at all) could still leave the terminal
+   colored -- something neither of the first two fixes touched, since both
+   were about *how* an already-installed Ctrl+C handler behaves, not
+   whether one gets installed at all. Root cause, this time genuinely
+   confirmed by an A/B test (see below), not just reasoned about: `SigintGuard`
+   only installed a handler at all when given a live capture to stop --
+   `active_(capture != nullptr)`. For `-r`, that pointer is always null (see
+   `open_packet_source`), so the entire `if (active_) { ... }` block --
+   `SetConsoleCtrlHandler`/`signal(SIGINT, ...)` included -- was skipped
+   outright, on every platform, regardless of color. Ctrl+C during an
+   offline decode fell straight through to whatever the OS's own default
+   handling was, with zero cleanup ever running -- both of the previous
+   fixes are irrelevant if no handler is registered to reach them at all.
+   Fixed by activating the guard whenever there's *either* a live capture to
+   stop *or* color to reset (`active_(capture != nullptr || color)`). Doing
+   so surfaced a second, related gap in the same testing pass: with the
+   handler now installed, Ctrl+C during `-r` correctly reset color, but the
+   read itself just kept going to EOF regardless, since `PcapReader` (unlike
+   `LiveCapture`) had no stop flag of its own for the packet loop to check.
+   Fixed alongside it by adding a general `g_stop_requested` atomic, set by
+   the same cleanup routine and checked in `run_decode`/
+   `run_policy_validate`/`run_inventory`'s own `while (source.next(pkt))`
+   loop condition, alongside (not instead of) `LiveCapture`'s own internal
+   stop flag, which is still needed to unblock a `next()` call already
+   blocked inside `pcap_next_ex()`. Verified with an A/B test on Linux that
+   sidesteps this sandbox's total lack of real interface traffic: a
+   synthetic 300,000-packet offline pcap (built locally, ~1.7s to decode in
+   full) interrupted via `timeout -s INT 0.3 ...` -- built against the
+   pre-fix logic, this reliably produced truncated output with **no**
+   trailing reset at all (process killed outright, matching the reported
+   symptom exactly); built against the fix, the same test now reliably
+   stops in ~0.3s (not the full 1.7s) with the reset correctly as the last
+   four bytes written. Also re-ran the full verification bar after this
+   third fix: Linux CTest (1148/1148 default, 1138/1138 with
+   `CONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF`) and a clean MinGW-w64
+   cross-compile. **The live-capture Ctrl+C fix is now confirmed on real
+   Windows hardware; the offline-decode fix is not yet** -- it was found
+   and fixed in this same round based on Jurgen's report and the A/B
+   evidence above, but hasn't itself had a live Windows confirmation yet.
+   Also still open: a real OT/mirrored-switch-port network capture --
+   what's been run so far is ordinary client traffic (ICMP, UDP/443
+   QUIC/TLS), not industrial protocol traffic on a real mirrored port.
 2. **Confirm or replace the EXPERIMENTAL `0xB2` (S7-1200/1500 "symbolic"
    addressing) decode** against a source with real authority -- a PLC or
    TIA Portal project under your own control, ideally, rather than more
@@ -1502,7 +1637,7 @@ anything else on this list.
     taken on.
 16. ~~Extend `policy validate`'s report with the same OUI/hostname/service-
     name annotations `decode` now has~~ -- **done**: `policy validate` now
-    takes the identical `--no-oui`/`--resolve`/`--hosts`/`--nn`/`--services`
+    takes the identical `--oui`/`--resolve`/`--hosts`/`--nn`/`--services`
     flags `decode` does (see OUTPUT FORMATS' "Name resolution" subsection),
     and its own report -- still the separate, IP/zone-centric format
     described in POLICY FILE FORMAT, not a per-packet `DecodedPacket`
@@ -2650,7 +2785,7 @@ unlike any of the eight routing/redundancy protocols decoded so far.
     "direction sources (tcp flows only):" block right after the `protocols:`
     histogram it complements, counted cross-protocol rather than gated on
     `p.protocol` like the per-protocol maps below it, and -- consistent with
-    how `--stats` already ignores `--no-vlan`/`--no-oui` -- deliberately
+    how `--stats` already ignores `--no-vlan`/`--oui` -- deliberately
     *not* gated on `--no-direction` either, since it's a pure aggregate view
     independent of any per-packet display toggle. All of this is `decode`
     -specific: `policy validate`'s and `inventory`'s own `direction: <tier>`
@@ -2717,6 +2852,76 @@ unlike any of the eight routing/redundancy protocols decoded so far.
       for a protocol this consequential) would need to be sourced or
       synthesized before this is considered done to the same standard as
       the rest of PROTOCOL_COVERAGE.md.
+
+21. **CLI output defaults for compactness, and offline BPF filtering** --
+    **done**. Three related CLI/UX changes, all landed together:
+    - **OUI (MAC vendor) resolution flipped from on-by-default to
+      off-by-default.** `decode`, `policy validate`, and `inventory` all
+      used to print `src_mac_vendor`/`dst_mac_vendor` (or the equivalent
+      text-output `(Vendor Name)` annotation) unconditionally, using the
+      bundled OUI table. For a busy capture this made every line
+      noticeably longer for information most invocations don't need. The
+      negating `--no-oui` flag (default true, opt out) is gone; there's now
+      a plain opt-in `--oui` flag (default false) on all three subcommands.
+      `--nn` (hostname resolution) is unaffected and independent, as
+      before. **Revised after this item's first pass** (`decode` only, the
+      other two subcommands unaffected by this revision -- their MAC
+      display is structural report content, not a compactness add-on, so it
+      stays unconditional): the base `src_mac`/`dst_mac` fact itself was
+      initially left always-on in `decode`'s text output (only the vendor
+      annotation was gated), on the theory that a resolver annotation
+      should never gate a base decoded value. Jurgen asked for the whole
+      `eth <src> -> <dst>` line to be off by default too, with a
+      tcpdump-style toggle -- so `decode` gained `-e`/`--ether` (off by
+      default, mirrors tcpdump's own `-e`), and `--oui` now implies it
+      (there'd be nothing to attach a vendor name to otherwise). This
+      applies to **text output only**: JSON/CSV still always include
+      `src_mac`/`dst_mac` as base fields (like `src_ip`/`dst_ip`),
+      unaffected by `-e`, on the original "a resolver annotation can omit
+      itself on a miss or when disabled, but a machine-readable format
+      shouldn't lose a base decoded fact just to make a human-facing dump
+      more compact" reasoning -- that reasoning turned out to still hold,
+      just scoped to JSON/CSV instead of every format. VLAN ID display
+      (`--no-vlan`, on by default) is independent of `-e`: a VLAN-tagged
+      packet still gets a `vlan <id>` line with no MAC display, since
+      802.1Q membership isn't specifically a MAC-address fact -- see
+      `output.hpp`/`output.cpp`'s own comments for exactly how the two
+      combine on one line when both apply.
+    - **`-t/--time-format` default flipped from `e`/epoch to `r`/relative.**
+      Raw Unix epoch timestamps (`1700000000.000000`) aren't very readable
+      at a glance; seconds-elapsed-since-first-packet is what most other
+      packet-analysis tools default to as well, and is what most people
+      actually want when eyeballing a capture interactively. The raw epoch
+      value remains one flag away (`-t epoch`), and the JSON `timestamp`
+      field is unaffected by `-t` regardless of format, so nothing about
+      machine-readable output changed.
+    - **`--filter` (BPF) now works with `-r` (offline file reads), not just
+      `-i` (live capture).** Previously the BPF filter was wired only into
+      `LiveCapture`, via libpcap's normal live-handle `pcap_compile()` +
+      per-packet kernel-level filtering; reading a saved pcap/pcapng file
+      with `-r` had no filtering at all short of piping through an external
+      `tcpdump -r ... -w -`. New `BpfFilter` class
+      ([include/conduitscope/bpf_filter.hpp](../include/conduitscope/bpf_filter.hpp),
+      [src/bpf_filter.cpp](../src/bpf_filter.cpp)) compiles the same
+      tcpdump-syntax filter against a `pcap_open_dead()` "fake" handle
+      bound to the file's own linktype/snaplen (the modern, non-deprecated
+      replacement for `pcap_compile_nopcap()`), then applies libpcap's
+      `bpf_filter()` per packet after `PcapReader` decodes it -- same
+      filter syntax, same `CaptureError` message shape, as the live-capture
+      path. Follows `live_capture.hpp`'s established optional-dependency
+      pattern: the source file always compiles, and on a
+      `CONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF`/no-libpcap build, the
+      constructor throws a clear "requires libpcap/Npcap support" error
+      instead of silently no-op'ing. A multi-interface pcapng file that
+      changes linktype mid-stream is handled by recompiling only when the
+      linktype actually changes (`PacketSource`/`BpfFilter::matches()`),
+      not on every packet.
+
+    All three are covered by CTest (27 pre-existing OUI/VLAN tests updated
+    for the new OUI default; 8 more updated and 6 new ones added for the
+    `-e`/`--ether` revision above; 11 new `-t`/`--time-format` tests; 8 new
+    `--filter`-on-`-r` tests including the no-libpcap stub path) and
+    verified clean under ASan/UBSan (1148/1148 on the default build).
 
 ### Protocols not covered at all
 

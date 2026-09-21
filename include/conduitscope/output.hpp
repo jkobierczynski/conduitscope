@@ -26,7 +26,7 @@ public:
 // cli_main.cpp's run_decode constructs exactly one Resolver per `decode` invocation, on the stack,
 // before constructing whichever OutputWriter the requested --format needs, and destroys it only
 // after that writer is done. Every accessor on Resolver already returns std::nullopt when its own
-// lookup is disabled (--no-oui/--nn) or has nothing to resolve against (--resolve with no
+// lookup is n't enabled (no --oui/--nn given) or has nothing to resolve against (--resolve with no
 // --hosts), so a writer never needs to ask "is this lookup even enabled" itself -- it just calls
 // resolver_.oui_vendor()/hostname()/service_name() unconditionally and renders whatever comes
 // back, or nothing at all on a miss. See resolver.hpp's own file header for the full "annotation,
@@ -63,9 +63,9 @@ class TextWriter : public OutputWriter {
 public:
     explicit TextWriter(std::ostream& out, bool color, const Resolver& resolver, bool show_vlan = true,
                          TimeFormat time_format = TimeFormat::Epoch, TimeOffset time_offset = TimeOffset{},
-                         bool show_direction = true)
+                         bool show_direction = true, bool show_mac = true)
         : out_(out), color_(color), resolver_(resolver), show_vlan_(show_vlan),
-          time_(time_format, time_offset), show_direction_(show_direction) {}
+          time_(time_format, time_offset), show_direction_(show_direction), show_mac_(show_mac) {}
     void write_packet(const DecodedPacket& packet) override;
 
 private:
@@ -75,6 +75,19 @@ private:
     bool show_vlan_;
     TimeFormatter time_;
     bool show_direction_;
+    // `show_mac` (default true, matching every other toggle above so a caller that doesn't pass it
+    // keeps this class's original always-on behavior) governs whether the "eth <src> -> <dst>" line
+    // (DecodedPacket::src_mac/dst_mac, plus any OUI vendor annotation Resolver supplies and the VLAN
+    // ID show_vlan_ already governs) is shown at all -- decode's -e/--ether flag (cli_main.cpp,
+    // defaulting to false there, mirroring tcpdump's own -e) wires straight into this constructor
+    // parameter, the same "pure display toggle" precedent show_vlan/show_direction already set. Only
+    // TextWriter gets this: JsonWriter/CsvWriter always include src_mac/dst_mac as base fields (like
+    // src_ip/dst_ip), by design -- see this file's own header comment -- so machine-readable output
+    // never loses data just to make a human-facing dump more compact. VLAN display is independent of
+    // this: a VLAN-tagged packet still shows "vlan <id>" (on its own line) when show_mac_ is false,
+    // since 802.1Q membership isn't specifically a MAC-address fact and show_vlan_ already has its
+    // own default-on toggle -- see write_packet's own comment for exactly how the two combine.
+    bool show_mac_;
 };
 
 class JsonWriter : public OutputWriter {

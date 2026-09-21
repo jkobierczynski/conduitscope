@@ -99,6 +99,7 @@ add_library(conduitscope_core STATIC
   src/asset_inventory.cpp
   src/flow_direction.cpp
   src/live_capture.cpp
+  src/bpf_filter.cpp
 )
 target_include_directories(conduitscope_core PUBLIC
   "${CMAKE_CURRENT_SOURCE_DIR}/include"
@@ -1507,7 +1508,7 @@ set_tests_properties(sv_truncated_header_falls_back_to_non_ip PROPERTIES
 # SV; both this packet and the truncated-header one above fall back to the same "non-ip" report,
 # so this asserts there are exactly two such lines in the whole file (no false positive elsewhere).
 add_test(NAME sv_wrong_outer_tag_falls_back_to_non_ip
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_sv.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_sv.pcap" -e --format text)
 set_tests_properties(sv_wrong_outer_tag_falls_back_to_non_ip PROPERTIES
   PASS_REGULAR_EXPRESSION "non-ip\\][^\n]*\n *eth [^\n]*\n#11[^\n]*non-ip\\]")
 
@@ -1860,7 +1861,7 @@ set_tests_properties(stp_spb_version4_named_only_not_decoded PROPERTIES
 # structurally parse as STP (bad Protocol Identifier; unrecognized BPDU Type) -- falls back to
 # reporting the frame as a generic, unrecognized LLC frame rather than guessing.
 add_test(NAME stp_bad_protocol_identifier_and_bad_bpdu_type_fall_back_to_llc
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_stp.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_stp.pcap" -e --format text)
 set_tests_properties(stp_bad_protocol_identifier_and_bad_bpdu_type_fall_back_to_llc PROPERTIES
   PASS_REGULAR_EXPRESSION "#21  .*\\[non-ip\\]  IEEE 802.3 LLC frame, DSAP=0x42 SSAP=0x42 Control=0x3 \\(length=38\\)\n *eth [^\n]*\n#22  .*\\[non-ip\\]  IEEE 802.3 LLC frame, DSAP=0x42 SSAP=0x42 Control=0x3 \\(length=38\\)")
 
@@ -2863,7 +2864,7 @@ set_tests_properties(hartip_checksum_mismatch_noted_text PROPERTIES
   PASS_REGULAR_EXPRESSION "\\[hartip\\]  Response Pass Through ACK command=1 \\(Read Primary Variable\\) response-code=0 \\(Success\\) \\[pv-units=1 \\+1 more\\]\n *note: longitudinal \\(XOR\\) checksum mismatch: calculated 0xD5, frame declares 0x2A")
 
 add_test(NAME hartip_checksum_valid_does_not_note_anything_text
-  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip_checksum.pcap")
+  COMMAND conduitscope decode --format text -e --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip_checksum.pcap")
 set_tests_properties(hartip_checksum_valid_does_not_note_anything_text PROPERTIES
   PASS_REGULAR_EXPRESSION "\\[hartip\\]  Request Pass Through STX command=1 \\(Read Primary Variable\\)\n *eth "
   FAIL_REGULAR_EXPRESSION "Request Pass Through STX command=1[^\n]*\n *note:")
@@ -5293,49 +5294,79 @@ set_tests_properties(pcapng_simple_packet_block_decodes PROPERTIES
   PASS_REGULAR_EXPRESSION "Read Holding Registers")
 
 # ---------------------------------------------------------------------------------------------
-# Resolver (resolver.hpp/resolver.cpp): OUI (MAC vendor) resolution (on by default, --no-oui),
-# hostname resolution (off by default, --resolve/--hosts, file-only -- never live DNS), and
-# service name resolution (on by default, --nn/--services) -- see decoder.cpp's src_mac/dst_mac
-# gap-fix and output.cpp's TextWriter/JsonWriter/CsvWriter for how these are rendered. All tests
-# below use tests/sample_modbus.pcap, whose two endpoints' MACs (00:0c:29:11:22:33/
-# 00:0c:29:aa:bb:cc) are both in oui_table.gen.hpp's MA-L table as "VMware", and
-# tests/hosts_sample.txt / tests/services_sample.txt (see their own file headers) as the
+# Resolver (resolver.hpp/resolver.cpp): OUI (MAC vendor) resolution (off by default, --oui, to
+# keep output compact), hostname resolution (off by default, --resolve/--hosts, file-only --
+# never live DNS), and service name resolution (on by default, --nn/--services) -- see
+# decoder.cpp's src_mac/dst_mac gap-fix and output.cpp's TextWriter/JsonWriter/CsvWriter for how
+# these are rendered. All tests below use tests/sample_modbus.pcap, whose two endpoints' MACs
+# (00:0c:29:11:22:33/00:0c:29:aa:bb:cc) are both in oui_table.gen.hpp's MA-L table as "VMware",
+# and tests/hosts_sample.txt / tests/services_sample.txt (see their own file headers) as the
 # --hosts/--services fixtures.
+#
+# In TEXT output specifically, the entire "eth <src> -> <dst>" line is itself gated behind
+# -e/--ether (off by default, mirrors tcpdump's own -e -- see output.hpp/output.cpp's show_mac_).
+# --oui implies -e (cli_main.cpp: there'd be nothing to attach a vendor name to otherwise), so
+# --oui alone still shows the full "eth <mac> (<vendor>) -> <mac> (<vendor>)" line. -e alone shows
+# the MAC pair with no vendor annotation. JSON/CSV are NOT gated by -e at all -- src_mac/dst_mac
+# stay unconditional base fields there (like src_ip/dst_ip) regardless of -e; --oui only ever
+# controls their *_mac_vendor annotation fields, in every format.
 # ---------------------------------------------------------------------------------------------
 
 set(RESOLVER_HOSTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/hosts_sample.txt")
 set(RESOLVER_SERVICES "${CMAKE_CURRENT_SOURCE_DIR}/tests/services_sample.txt")
 
-# --- OUI (MAC vendor), on by default --------------------------------------------------------
+# --- -e/--ether (the eth line itself), off by default, text-output only ---------------------
 
-add_test(NAME resolver_oui_vendor_shown_by_default_text
+add_test(NAME resolver_mac_and_vendor_hidden_by_default_text
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --format text)
-set_tests_properties(resolver_oui_vendor_shown_by_default_text PROPERTIES
-  PASS_REGULAR_EXPRESSION "eth 00:0c:29:11:22:33 \\(VMware\\) -> 00:0c:29:aa:bb:cc \\(VMware\\)")
+set_tests_properties(resolver_mac_and_vendor_hidden_by_default_text PROPERTIES
+  FAIL_REGULAR_EXPRESSION "eth 00:0c:29|VMware")
 
-add_test(NAME resolver_oui_vendor_shown_by_default_json
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --format json)
-set_tests_properties(resolver_oui_vendor_shown_by_default_json PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"src_mac\": \"00:0c:29:11:22:33\",\n *\"dst_mac\": \"00:0c:29:aa:bb:cc\",\n *\"src_mac_vendor\": \"VMware\",\n *\"dst_mac_vendor\": \"VMware\",")
-
-add_test(NAME resolver_no_oui_suppresses_vendor_text
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --no-oui --format text)
-set_tests_properties(resolver_no_oui_suppresses_vendor_text PROPERTIES
+add_test(NAME resolver_ether_flag_shows_mac_without_vendor_text
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" -e --format text)
+set_tests_properties(resolver_ether_flag_shows_mac_without_vendor_text PROPERTIES
   PASS_REGULAR_EXPRESSION "eth 00:0c:29:11:22:33 -> 00:0c:29:aa:bb:cc\n"
   FAIL_REGULAR_EXPRESSION "VMware")
 
-add_test(NAME resolver_no_oui_suppresses_vendor_json
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --no-oui --format json)
-set_tests_properties(resolver_no_oui_suppresses_vendor_json PROPERTIES
+# --ether is the long form of -e; same behavior, just the spelled-out flag name.
+add_test(NAME resolver_ether_long_flag_same_as_e_text
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --ether --format text)
+set_tests_properties(resolver_ether_long_flag_same_as_e_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "eth 00:0c:29:11:22:33 -> 00:0c:29:aa:bb:cc\n"
+  FAIL_REGULAR_EXPRESSION "VMware")
+
+# --- OUI (MAC vendor) vendor annotation, off by default, --oui opts in (and implies -e) -----
+
+add_test(NAME resolver_oui_vendor_hidden_by_default_json
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --format json)
+set_tests_properties(resolver_oui_vendor_hidden_by_default_json PROPERTIES
   PASS_REGULAR_EXPRESSION "\"src_mac\": \"00:0c:29:11:22:33\","
   FAIL_REGULAR_EXPRESSION "_mac_vendor")
 
-# src_mac/dst_mac themselves (the base gap-fix, independent of OUI resolution) are always present
-# for an Ethernet-linktype capture, even with --no-oui -- this is the actual base value, not an
-# annotation, so --no-oui only ever suppresses the vendor name, never the MAC itself.
-add_test(NAME resolver_base_src_dst_mac_always_present_regardless_of_no_oui
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --no-oui --format csv)
-set_tests_properties(resolver_base_src_dst_mac_always_present_regardless_of_no_oui PROPERTIES
+add_test(NAME resolver_oui_flag_shows_vendor_text
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --oui --format text)
+set_tests_properties(resolver_oui_flag_shows_vendor_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "eth 00:0c:29:11:22:33 \\(VMware\\) -> 00:0c:29:aa:bb:cc \\(VMware\\)")
+
+# --oui alone (no explicit -e) must still show the eth line -- --oui implies -e (cli_main.cpp).
+add_test(NAME resolver_oui_flag_alone_implies_ether_text
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --oui --format text)
+set_tests_properties(resolver_oui_flag_alone_implies_ether_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "eth 00:0c:29:11:22:33")
+
+add_test(NAME resolver_oui_flag_shows_vendor_json
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --oui --format json)
+set_tests_properties(resolver_oui_flag_shows_vendor_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"src_mac\": \"00:0c:29:11:22:33\",\n *\"dst_mac\": \"00:0c:29:aa:bb:cc\",\n *\"src_mac_vendor\": \"VMware\",\n *\"dst_mac_vendor\": \"VMware\",")
+
+# src_mac/dst_mac themselves (the base gap-fix, independent of OUI resolution and of -e/--ether)
+# are always present for an Ethernet-linktype capture in JSON/CSV, even with OUI resolution left
+# at its off-by-default posture -- this is the actual base value, not an annotation, so OUI
+# resolution only ever adds a vendor name, never gates the MAC itself. -e/--ether only affects
+# TEXT output (see this section's own header comment above) -- CSV keeps showing it regardless.
+add_test(NAME resolver_base_src_dst_mac_always_present_in_csv_regardless_of_oui_or_ether
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --format csv)
+set_tests_properties(resolver_base_src_dst_mac_always_present_in_csv_regardless_of_oui_or_ether PROPERTIES
   PASS_REGULAR_EXPRESSION "00:0c:29:11:22:33,00:0c:29:aa:bb:cc,,,")
 
 # --- Hostname resolution, off by default, file-only ------------------------------------------
@@ -5399,10 +5430,10 @@ add_test(NAME resolver_nn_suppresses_service_name_json
 set_tests_properties(resolver_nn_suppresses_service_name_json PROPERTIES
   FAIL_REGULAR_EXPRESSION "_port_service")
 
-# --nn only disables service names -- OUI vendor annotations (an independent, still-default-on
-# lookup) must still appear.
+# --nn only disables service names -- OUI vendor annotations (an independent lookup, explicitly
+# enabled here via --oui) must still appear alongside it.
 add_test(NAME resolver_nn_does_not_affect_oui
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --nn --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --nn --oui --format text)
 set_tests_properties(resolver_nn_does_not_affect_oui PROPERTIES
   PASS_REGULAR_EXPRESSION "eth 00:0c:29:11:22:33 \\(VMware\\)")
 
@@ -5428,12 +5459,12 @@ set_tests_properties(resolver_services_given_with_nn_is_unused_and_noted PROPERT
 # --- Combined: every resolution enabled at once, across all three formats --------------------
 
 add_test(NAME resolver_all_enabled_together_text
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --resolve --hosts "${RESOLVER_HOSTS}" --services "${RESOLVER_SERVICES}" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --oui --resolve --hosts "${RESOLVER_HOSTS}" --services "${RESOLVER_SERVICES}" --format text)
 set_tests_properties(resolver_all_enabled_together_text PROPERTIES
   PASS_REGULAR_EXPRESSION "192.168.1.50 \\(hmi-01\\):51000 \\(hmi-modbus-client\\) -> 192.168.1.10 \\(plc-01\\):502 \\(custom-modbus\\)")
 
 add_test(NAME resolver_all_enabled_together_json
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --resolve --hosts "${RESOLVER_HOSTS}" --services "${RESOLVER_SERVICES}" --format json)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --oui --resolve --hosts "${RESOLVER_HOSTS}" --services "${RESOLVER_SERVICES}" --format json)
 set_tests_properties(resolver_all_enabled_together_json PROPERTIES
   PASS_REGULAR_EXPRESSION "\"src_mac_vendor\": \"VMware\",.*\"src_hostname\": \"hmi-01\",.*\"dst_hostname\": \"plc-01\",.*\"src_port_service\": \"hmi-modbus-client\",.*\"dst_port_service\": \"custom-modbus\"")
 
@@ -5459,9 +5490,9 @@ set_tests_properties(resolver_bad_services_path_rejected PROPERTIES
 # --------------------------------------------------------------------------------------------
 
 add_test(NAME resolver_mac_shown_for_plain_ip_protocol_not_just_raw_ethernet
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enip.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enip.pcap" -e --format text)
 set_tests_properties(resolver_mac_shown_for_plain_ip_protocol_not_just_raw_ethernet PROPERTIES
-  PASS_REGULAR_EXPRESSION "\\[enip\\].*\n *eth 00:0c:29:11:22:33 \\(VMware\\) -> 00:0c:29:aa:bb:cc \\(VMware\\)")
+  PASS_REGULAR_EXPRESSION "\\[enip\\].*\n *eth 00:0c:29:11:22:33 -> 00:0c:29:aa:bb:cc")
 
 # ---------------------------------------------------------------------------------------------
 # VLAN ID display (output.cpp's TextWriter/JsonWriter/CsvWriter show_vlan_; --no-vlan in
@@ -5472,22 +5503,42 @@ set_tests_properties(resolver_mac_shown_for_plain_ip_protocol_not_just_raw_ether
 # untagged flow, so it exercises both "tagged" and "untagged" in the same capture.
 # ---------------------------------------------------------------------------------------------
 
+# VLAN display is independent of -e/--ether (show_mac_) -- see output.hpp/output.cpp's own
+# comments -- so a VLAN-tagged packet still gets its own "vlan <id>" line by default, just without
+# an "eth <mac> -> <mac>" prefix ahead of it (that prefix needs -e/--oui, tested separately below).
 add_test(NAME vlan_id_shown_by_default_text
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_vlan_zones.pcap" --format text)
 set_tests_properties(vlan_id_shown_by_default_text PROPERTIES
-  PASS_REGULAR_EXPRESSION "eth 00:0c:29:11:22:33 \\(VMware\\) -> 00:0c:29:aa:bb:cc \\(VMware\\)  vlan 100")
+  PASS_REGULAR_EXPRESSION "vlan 100"
+  FAIL_REGULAR_EXPRESSION "eth 00:0c:29")
+
+# With -e also given, the VLAN ID is appended to the same "eth ..." line as before, rather than
+# standing alone.
+add_test(NAME vlan_id_shown_on_same_line_as_mac_with_ether_text
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_vlan_zones.pcap" -e --format text)
+set_tests_properties(vlan_id_shown_on_same_line_as_mac_with_ether_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "eth 00:0c:29:11:22:33 -> 00:0c:29:aa:bb:cc  vlan 100")
 
 # The untagged flow (mac pair 00:0c:29:cc:55:66 -> 00:0c:29:dd:77:88) must never get a "vlan ..."
-# suffix at all -- has_vlan_tag is false, not vlan_id == 0.
+# suffix at all -- has_vlan_tag is false, not vlan_id == 0. Needs -e here: the untagged packet has
+# neither a VLAN tag nor (without -e) an eth line at all, so there'd be nothing to assert against
+# otherwise.
 add_test(NAME vlan_id_omitted_for_untagged_packet_text
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_vlan_zones.pcap" --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_vlan_zones.pcap" -e --format text)
 set_tests_properties(vlan_id_omitted_for_untagged_packet_text PROPERTIES
-  PASS_REGULAR_EXPRESSION "eth 00:0c:29:cc:55:66 \\(VMware\\) -> 00:0c:29:dd:77:88 \\(VMware\\)\n")
+  PASS_REGULAR_EXPRESSION "eth 00:0c:29:cc:55:66 -> 00:0c:29:dd:77:88\n")
+
+# Neither -e nor a VLAN tag: no eth/vlan line at all for the untagged flow, not even a bare "vlan"
+# line or an empty one -- the whole block is skipped outright (see output.cpp's write_packet).
+add_test(NAME no_ether_and_untagged_produces_no_eth_line_at_all_text
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_vlan_zones.pcap" --format text)
+set_tests_properties(no_ether_and_untagged_produces_no_eth_line_at_all_text PROPERTIES
+  FAIL_REGULAR_EXPRESSION "00:0c:29:cc:55:66")
 
 add_test(NAME vlan_id_shown_by_default_json
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_vlan_zones.pcap" --format json)
 set_tests_properties(vlan_id_shown_by_default_json PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"dst_mac_vendor\": \"VMware\",\n *\"has_vlan_tag\": true,\n *\"vlan_id\": 100,")
+  PASS_REGULAR_EXPRESSION "\"dst_mac\": \"00:0c:29:aa:bb:cc\",\n *\"has_vlan_tag\": true,\n *\"vlan_id\": 100,")
 
 # The untagged flow gets has_vlan_tag: false / vlan_id: null, never omitted entirely -- unlike an
 # annotation, has_vlan_tag/vlan_id are always both present together when the flag is on, regardless
@@ -5503,11 +5554,21 @@ add_test(NAME vlan_id_shown_by_default_csv
 set_tests_properties(vlan_id_shown_by_default_csv PROPERTIES
   PASS_REGULAR_EXPRESSION "profinet,\"Cyclic RT IO data \\(RT_CLASS_1, unicast\\): 8 byte\\(s\\) IO data, cycle_counter=4660 data_status=\\[Primary,Valid,Run,Ok\\] transfer_status=OK\",,100")
 
+# -e here so the eth line still renders (default off) with something to assert --no-vlan actually
+# suppressed the "  vlan 100" suffix it would otherwise carry, per
+# vlan_id_shown_on_same_line_as_mac_with_ether_text just above.
 add_test(NAME no_vlan_suppresses_display_text
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_vlan_zones.pcap" --format text --no-vlan)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_vlan_zones.pcap" --format text --no-vlan -e)
 set_tests_properties(no_vlan_suppresses_display_text PROPERTIES
-  PASS_REGULAR_EXPRESSION "eth 00:0c:29:11:22:33 \\(VMware\\) -> 00:0c:29:aa:bb:cc \\(VMware\\)\n"
+  PASS_REGULAR_EXPRESSION "eth 00:0c:29:11:22:33 -> 00:0c:29:aa:bb:cc\n"
   FAIL_REGULAR_EXPRESSION "vlan 100")
+
+# Neither -e nor VLAN display enabled: the whole eth/vlan block disappears, not just the vlan
+# suffix.
+add_test(NAME no_vlan_and_no_ether_suppresses_entire_eth_line_text
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_vlan_zones.pcap" --format text --no-vlan)
+set_tests_properties(no_vlan_and_no_ether_suppresses_entire_eth_line_text PROPERTIES
+  FAIL_REGULAR_EXPRESSION "eth 00:0c:29|vlan 100")
 
 add_test(NAME no_vlan_suppresses_display_json
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_vlan_zones.pcap" --format json --no-vlan)
@@ -5518,21 +5579,107 @@ add_test(NAME no_vlan_suppresses_display_csv
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_vlan_zones.pcap" --format csv --no-vlan)
 set_tests_properties(no_vlan_suppresses_display_csv PROPERTIES
   # vlan_id (empty, suppressed by --no-vlan) is immediately followed by the trailing `time` column
-  # (see time_format.hpp/output.cpp's `-t`/--time-format/--time-offset) -- epoch's default rendering
-  # reproduces the raw `timestamp` field byte-for-byte, so this pcap's first packet's fixed
-  # 1700020000.000000 stamp is asserted literally here, same "hardcode this sample's known value"
-  # style vlan_id_shown_by_default_csv above already uses for its own trailing column. `time` is no
-  # longer the row's last column -- direction_source/direction_client_ip (empty here: this is a raw
-  # PROFINET RT frame, not TCP, so FlowDirectionTracker never touches it -- see
-  # CsvWriter::write_packet) now follow it, hence the two trailing empty fields before the newline.
-  PASS_REGULAR_EXPRESSION "profinet,\"Cyclic RT IO data \\(RT_CLASS_1, unicast\\): 8 byte\\(s\\) IO data, cycle_counter=4660 data_status=\\[Primary,Valid,Run,Ok\\] transfer_status=OK\",,,1700020000\\.000000,,\n"
+  # (see time_format.hpp/output.cpp's `-t`/--time-format/--time-offset) -- relative's default
+  # rendering is elapsed-since-first-packet, so this pcap's first packet is asserted literally as
+  # 0.000000 here, same "hardcode this sample's known value" style vlan_id_shown_by_default_csv
+  # above already uses for its own trailing column. `time` is no longer the row's last column --
+  # direction_source/direction_client_ip (empty here: this is a raw PROFINET RT frame, not TCP, so
+  # FlowDirectionTracker never touches it -- see CsvWriter::write_packet) now follow it, hence the
+  # two trailing empty fields before the newline.
+  PASS_REGULAR_EXPRESSION "profinet,\"Cyclic RT IO data \\(RT_CLASS_1, unicast\\): 8 byte\\(s\\) IO data, cycle_counter=4660 data_status=\\[Primary,Valid,Run,Ok\\] transfer_status=OK\",,,0\\.000000,,\n"
   FAIL_REGULAR_EXPRESSION "transfer_status=OK\",,100")
 
-# --no-oui and --no-vlan are independent toggles -- suppressing one must not affect the other.
+# --oui (left at its off-by-default posture here) and --no-vlan are independent toggles --
+# suppressing VLAN display must not affect the base MAC display either way.
 add_test(NAME no_vlan_does_not_affect_oui
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_vlan_zones.pcap" --format text --no-vlan)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_vlan_zones.pcap" --format text --no-vlan --oui)
 set_tests_properties(no_vlan_does_not_affect_oui PROPERTIES
   PASS_REGULAR_EXPRESSION "eth 00:0c:29:11:22:33 \\(VMware\\) -> 00:0c:29:aa:bb:cc \\(VMware\\)")
+
+# ---------------------------------------------------------------------------------------------
+# `-t`/`--time-format` mnemonics (time_format.hpp/time_format.cpp; TextWriter's leading "#<index>
+# <time>" header -- see output.cpp's own use of TimeRenderer). sample_modbus.pcap's own 3 packets
+# (see tools/make_sample_pcap.py's build_modbus_sample) have known, fixed timestamps: 1700000000
+# .000000, 1700000001.001000, 1700000002.002000 -- exactly 1.001s / 1.001s apart -- deliberately
+# uneven spacing so relative/delta/epoch are all distinguishable from each other in the assertions
+# below, not just from zero. This section previously had no dedicated coverage at all (only one
+# CSV test elsewhere incidentally hardcoded the epoch-format value of a different pcap's first
+# packet) -- added here as part of flipping the default from epoch to relative, so the default
+# this project now actually ships is verified, not just the explicit mnemonics.
+# ---------------------------------------------------------------------------------------------
+
+# r/relative, the default: elapsed since the first packet, so packet 1 is always 0.000000
+# regardless of its raw epoch value.
+add_test(NAME time_format_relative_is_the_default
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --format text)
+set_tests_properties(time_format_relative_is_the_default PROPERTIES
+  PASS_REGULAR_EXPRESSION "#1  0\\.000000  .*\n.*#2  1\\.001000  .*\n.*#3  2\\.002000  ")
+
+add_test(NAME time_format_r_mnemonic_same_as_relative
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --format text -t r)
+set_tests_properties(time_format_r_mnemonic_same_as_relative PROPERTIES
+  PASS_REGULAR_EXPRESSION "#1  0\\.000000  ")
+
+# e/epoch: raw seconds since the Unix epoch, unchanged from the pcap's own timestamp field.
+add_test(NAME time_format_epoch_explicit_text
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --format text -t epoch)
+set_tests_properties(time_format_epoch_explicit_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "#1  1700000000\\.000000  .*\n.*#2  1700000001\\.001000  ")
+
+add_test(NAME time_format_e_mnemonic_same_as_epoch
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --format text -t e)
+set_tests_properties(time_format_e_mnemonic_same_as_epoch PROPERTIES
+  PASS_REGULAR_EXPRESSION "#1  1700000000\\.000000  ")
+
+# The raw "timestamp" JSON field is always the epoch double, regardless of -t -- only the "time"
+# field it sits alongside is affected. Asserted here with the default (relative) -t left in place,
+# to prove -t's default change doesn't leak into the machine-parseable raw field.
+add_test(NAME time_format_does_not_affect_raw_timestamp_json_field
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --format json)
+set_tests_properties(time_format_does_not_affect_raw_timestamp_json_field PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"timestamp\": 1700000000\\.000000,.*\"time\": \"0\\.000000\"")
+
+# d/delta: elapsed since the previous packet -- packet 1 has no previous packet, so it's 0.000000
+# same as relative; packets 2 and 3 are both 1.001000 apart despite different relative offsets,
+# which is exactly what distinguishes delta from relative.
+add_test(NAME time_format_delta_text
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --format text -t delta)
+set_tests_properties(time_format_delta_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "#1  0\\.000000  .*\n.*#2  1\\.001000  .*\n.*#3  1\\.001000  ")
+
+# a/absolute (HH:MM:SS.ffffff) and ad/absolute-date (YYYY-MM-DD HH:MM:SS.ffffff), UTC by default
+# (--time-offset) -- 1700000000 is 2023-11-14 22:13:20 UTC.
+add_test(NAME time_format_absolute_utc_text
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --format text -t absolute)
+set_tests_properties(time_format_absolute_utc_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "#1  22:13:20\\.000000Z  ")
+
+add_test(NAME time_format_absolute_date_utc_text
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --format text -t ad)
+set_tests_properties(time_format_absolute_date_utc_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "#1  2023-11-14 22:13:20\\.000000Z  ")
+
+# --time-offset with a fixed "+HH:MM" shifts absolute/absolute-date's rendered wall-clock time and
+# suffix; +02:00 turns 22:13:20 UTC into 00:13:20 the next calendar day.
+add_test(NAME time_format_absolute_date_fixed_offset_text
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --format text -t ad --time-offset +02:00)
+set_tests_properties(time_format_absolute_date_fixed_offset_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "#1  2023-11-15 00:13:20\\.000000\\+02:00  ")
+
+# --time-offset is meaningless for relative/delta/epoch (only absolute/absolute-date consult it)
+# -- given anyway, it's silently ignored rather than rejected, since the flags are independent and
+# nothing about the combination is actually invalid.
+add_test(NAME time_offset_ignored_for_relative
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --format text -t relative --time-offset +02:00)
+set_tests_properties(time_offset_ignored_for_relative PROPERTIES
+  PASS_REGULAR_EXPRESSION "#1  0\\.000000  ")
+
+# An unrecognized -t value is rejected at CLI-parse time (CLI::IsMember), same convention as
+# --format's own bad-value handling.
+add_test(NAME time_format_bad_value_rejected
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --format text -t bogus)
+set_tests_properties(time_format_bad_value_rejected PROPERTIES
+  WILL_FAIL TRUE)
 
 # ---------------------------------------------------------------------------------------------
 # Colorized text output (output.cpp's TextWriter color_ path; --color/--no-color in cli_main.cpp).
@@ -5979,7 +6126,7 @@ set_tests_properties(policy_vlan_zone_json_format PROPERTIES
 # annotations exercised earlier (see this file's own "Resolver" section, above the resolver_*
 # `decode` tests) now applied to FlowReport's client_ip/server_ip/server_port (and its
 # client_mac/server_mac base-value gap-fix) and EthernetFlowReport's mac_a/mac_b.
-# `policy validate` takes the identical --no-oui/--resolve/--hosts/--nn/--services flags (see
+# `policy validate` takes the identical --oui/--resolve/--hosts/--nn/--services flags (see
 # cli_main.cpp's policy_validate_cmd) against the same tests/hosts_sample.txt/
 # tests/services_sample.txt fixtures used by `decode`'s own resolver tests (RESOLVER_HOSTS/
 # RESOLVER_SERVICES, set once, above). resolver.hpp's file header previously documented this as
@@ -5987,30 +6134,30 @@ set_tests_properties(policy_vlan_zone_json_format PROPERTIES
 # section is that follow-up.
 # ---------------------------------------------------------------------------------------------
 
-add_test(NAME policy_resolver_oui_vendor_shown_by_default_text
+add_test(NAME policy_resolver_oui_vendor_hidden_by_default_text
   COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/compliant.yaml")
-set_tests_properties(policy_resolver_oui_vendor_shown_by_default_text PROPERTIES
-  PASS_REGULAR_EXPRESSION "mac: 00:0c:29:11:22:33 \\(VMware\\) -> 00:0c:29:aa:bb:cc \\(VMware\\)")
-
-add_test(NAME policy_resolver_oui_vendor_shown_by_default_json
-  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/compliant.yaml" --format json)
-set_tests_properties(policy_resolver_oui_vendor_shown_by_default_json PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"client_mac\": \"00:0c:29:11:22:33\",\n *\"server_mac\": \"00:0c:29:aa:bb:cc\",\n *\"client_mac_vendor\": \"VMware\",\n *\"server_mac_vendor\": \"VMware\",")
-
-add_test(NAME policy_resolver_no_oui_suppresses_vendor_text
-  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/compliant.yaml" --no-oui)
-set_tests_properties(policy_resolver_no_oui_suppresses_vendor_text PROPERTIES
+set_tests_properties(policy_resolver_oui_vendor_hidden_by_default_text PROPERTIES
   PASS_REGULAR_EXPRESSION "mac: 00:0c:29:11:22:33 -> 00:0c:29:aa:bb:cc\n"
   FAIL_REGULAR_EXPRESSION "VMware")
 
-# client_mac/server_mac themselves (the base gap-fix) stay present in JSON even with --no-oui --
-# only the *_vendor annotation is suppressed, same "base value vs. annotation" distinction as
-# decode's own resolver_base_src_dst_mac_always_present_regardless_of_no_oui test.
-add_test(NAME policy_resolver_no_oui_suppresses_vendor_json
-  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/compliant.yaml" --no-oui --format json)
-set_tests_properties(policy_resolver_no_oui_suppresses_vendor_json PROPERTIES
+add_test(NAME policy_resolver_oui_vendor_hidden_by_default_json
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/compliant.yaml" --format json)
+set_tests_properties(policy_resolver_oui_vendor_hidden_by_default_json PROPERTIES
   PASS_REGULAR_EXPRESSION "\"client_mac\": \"00:0c:29:11:22:33\","
   FAIL_REGULAR_EXPRESSION "_mac_vendor")
+
+add_test(NAME policy_resolver_oui_flag_shows_vendor_text
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/compliant.yaml" --oui)
+set_tests_properties(policy_resolver_oui_flag_shows_vendor_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "mac: 00:0c:29:11:22:33 \\(VMware\\) -> 00:0c:29:aa:bb:cc \\(VMware\\)")
+
+# client_mac/server_mac themselves (the base gap-fix) stay present in JSON regardless of --oui --
+# only the *_vendor annotation depends on it, same "base value vs. annotation" distinction as
+# decode's own resolver_base_src_dst_mac_always_present_regardless_of_oui_default test.
+add_test(NAME policy_resolver_oui_flag_shows_vendor_json
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/compliant.yaml" --oui --format json)
+set_tests_properties(policy_resolver_oui_flag_shows_vendor_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"client_mac\": \"00:0c:29:11:22:33\",\n *\"server_mac\": \"00:0c:29:aa:bb:cc\",\n *\"client_mac_vendor\": \"VMware\",\n *\"server_mac_vendor\": \"VMware\",")
 
 add_test(NAME policy_resolver_hostname_off_by_default
   COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/compliant.yaml")
@@ -6043,10 +6190,10 @@ add_test(NAME policy_resolver_nn_suppresses_service_name_json
 set_tests_properties(policy_resolver_nn_suppresses_service_name_json PROPERTIES
   FAIL_REGULAR_EXPRESSION "_port_service")
 
-# --nn only disables service names -- OUI vendor annotation (an independent, still-default-on
-# lookup) must still appear.
+# --nn only disables service names -- OUI vendor annotation (an independent lookup, explicitly
+# enabled here via --oui) must still appear alongside it.
 add_test(NAME policy_resolver_nn_does_not_affect_oui
-  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/compliant.yaml" --nn)
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/compliant.yaml" --nn --oui)
 set_tests_properties(policy_resolver_nn_does_not_affect_oui PROPERTIES
   PASS_REGULAR_EXPRESSION "mac: 00:0c:29:11:22:33 \\(VMware\\)")
 
@@ -6060,12 +6207,12 @@ set_tests_properties(policy_resolver_services_file_overrides_builtin_table_text 
   FAIL_REGULAR_EXPRESSION "\\(modbus\\)")
 
 add_test(NAME policy_resolver_all_enabled_together_text
-  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/compliant.yaml" --resolve --hosts "${RESOLVER_HOSTS}" --services "${RESOLVER_SERVICES}")
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/compliant.yaml" --oui --resolve --hosts "${RESOLVER_HOSTS}" --services "${RESOLVER_SERVICES}")
 set_tests_properties(policy_resolver_all_enabled_together_text PROPERTIES
   PASS_REGULAR_EXPRESSION "192.168.1.50 \\(hmi-01\\) -> 192.168.1.10 \\(plc-01\\):502 \\(custom-modbus\\).*mac: 00:0c:29:11:22:33 \\(VMware\\) -> 00:0c:29:aa:bb:cc \\(VMware\\)")
 
 add_test(NAME policy_resolver_all_enabled_together_json
-  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/compliant.yaml" --resolve --hosts "${RESOLVER_HOSTS}" --services "${RESOLVER_SERVICES}" --format json)
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/compliant.yaml" --oui --resolve --hosts "${RESOLVER_HOSTS}" --services "${RESOLVER_SERVICES}" --format json)
 set_tests_properties(policy_resolver_all_enabled_together_json PROPERTIES
   PASS_REGULAR_EXPRESSION "\"client_mac_vendor\": \"VMware\",[^}]*\"server_mac_vendor\": \"VMware\",[^}]*\"client_hostname\": \"hmi-01\",[^}]*\"server_hostname\": \"plc-01\",[^}]*\"server_port_service\": \"custom-modbus\",")
 
@@ -6083,27 +6230,27 @@ set_tests_properties(policy_resolver_bad_services_path_rejected PROPERTIES
 
 # --- EthernetFlowReport (VLAN-zone L2 flows): OUI vendor annotation only -- no IP/port exists ---
 
-add_test(NAME policy_resolver_ethernet_flow_oui_vendor_shown_by_default_text
+add_test(NAME policy_resolver_ethernet_flow_oui_vendor_hidden_by_default_text
   COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_vlan_zones.pcap" --policy "${POLICY_DIR}/vlan_zone_mixed_results.yaml")
-set_tests_properties(policy_resolver_ethernet_flow_oui_vendor_shown_by_default_text PROPERTIES
-  PASS_REGULAR_EXPRESSION "00:0c:29:11:22:33 \\(VMware\\) <-> 00:0c:29:aa:bb:cc \\(VMware\\)  \\(profinet")
-
-add_test(NAME policy_resolver_ethernet_flow_no_oui_suppresses_vendor_text
-  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_vlan_zones.pcap" --policy "${POLICY_DIR}/vlan_zone_mixed_results.yaml" --no-oui)
-set_tests_properties(policy_resolver_ethernet_flow_no_oui_suppresses_vendor_text PROPERTIES
+set_tests_properties(policy_resolver_ethernet_flow_oui_vendor_hidden_by_default_text PROPERTIES
   PASS_REGULAR_EXPRESSION "00:0c:29:11:22:33 <-> 00:0c:29:aa:bb:cc  \\(profinet"
   FAIL_REGULAR_EXPRESSION "VMware")
 
-add_test(NAME policy_resolver_ethernet_flow_oui_vendor_json
-  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_vlan_zones.pcap" --policy "${POLICY_DIR}/vlan_zone_mixed_results.yaml" --format json)
-set_tests_properties(policy_resolver_ethernet_flow_oui_vendor_json PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"mac_a\": \"00:0c:29:11:22:33\",\n *\"mac_b\": \"00:0c:29:aa:bb:cc\",\n *\"mac_a_vendor\": \"VMware\",\n *\"mac_b_vendor\": \"VMware\",")
+add_test(NAME policy_resolver_ethernet_flow_oui_flag_shows_vendor_text
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_vlan_zones.pcap" --policy "${POLICY_DIR}/vlan_zone_mixed_results.yaml" --oui)
+set_tests_properties(policy_resolver_ethernet_flow_oui_flag_shows_vendor_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "00:0c:29:11:22:33 \\(VMware\\) <-> 00:0c:29:aa:bb:cc \\(VMware\\)  \\(profinet")
 
-add_test(NAME policy_resolver_ethernet_flow_no_oui_suppresses_vendor_json
-  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_vlan_zones.pcap" --policy "${POLICY_DIR}/vlan_zone_mixed_results.yaml" --no-oui --format json)
-set_tests_properties(policy_resolver_ethernet_flow_no_oui_suppresses_vendor_json PROPERTIES
+add_test(NAME policy_resolver_ethernet_flow_oui_vendor_hidden_by_default_json
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_vlan_zones.pcap" --policy "${POLICY_DIR}/vlan_zone_mixed_results.yaml" --format json)
+set_tests_properties(policy_resolver_ethernet_flow_oui_vendor_hidden_by_default_json PROPERTIES
   PASS_REGULAR_EXPRESSION "\"mac_a\": \"00:0c:29:11:22:33\","
   FAIL_REGULAR_EXPRESSION "mac_._vendor")
+
+add_test(NAME policy_resolver_ethernet_flow_oui_flag_shows_vendor_json
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_vlan_zones.pcap" --policy "${POLICY_DIR}/vlan_zone_mixed_results.yaml" --oui --format json)
+set_tests_properties(policy_resolver_ethernet_flow_oui_flag_shows_vendor_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"mac_a\": \"00:0c:29:11:22:33\",\n *\"mac_b\": \"00:0c:29:aa:bb:cc\",\n *\"mac_a_vendor\": \"VMware\",\n *\"mac_b_vendor\": \"VMware\",")
 
 # ---------------------------------------------------------------------------------------------
 # `inventory` (asset_inventory.hpp/cpp) -- passive OT asset inventory: pcap -> zones and conduits,
@@ -6183,19 +6330,19 @@ add_test(NAME inventory_policy_out_empty_capture_note_on_stderr
 set_tests_properties(inventory_policy_out_empty_capture_note_on_stderr PROPERTIES
   PASS_REGULAR_EXPRESSION "note: no asset was observed, so .*inventory_empty_policy_note_check\\.yaml.* has no 'zones:'/'conduits:' keys and is not a loadable policy file as-is")
 
-# --- Resolver, wired into `inventory` the same way as `decode`/`policy validate` (--no-oui/------
+# --- Resolver, wired into `inventory` the same way as `decode`/`policy validate` (--oui/---------
 # --- --resolve/--hosts/--nn/--services) -- reuses sample_modbus.pcap and the same fixtures -------
 
-add_test(NAME inventory_resolver_oui_vendor_shown_by_default_text
+add_test(NAME inventory_resolver_oui_vendor_hidden_by_default_text
   COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap")
-set_tests_properties(inventory_resolver_oui_vendor_shown_by_default_text PROPERTIES
-  PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.10  00:0c:29:aa:bb:cc \\(VMware\\)")
-
-add_test(NAME inventory_resolver_no_oui_suppresses_vendor_text
-  COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --no-oui)
-set_tests_properties(inventory_resolver_no_oui_suppresses_vendor_text PROPERTIES
+set_tests_properties(inventory_resolver_oui_vendor_hidden_by_default_text PROPERTIES
   PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.10  00:0c:29:aa:bb:cc  \\[server\\]"
   FAIL_REGULAR_EXPRESSION "VMware")
+
+add_test(NAME inventory_resolver_oui_flag_shows_vendor_text
+  COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --oui)
+set_tests_properties(inventory_resolver_oui_flag_shows_vendor_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.10  00:0c:29:aa:bb:cc \\(VMware\\)")
 
 add_test(NAME inventory_resolver_hostname_off_by_default
   COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap")
@@ -6352,7 +6499,7 @@ set_tests_properties(remote_access_protocol_filter_isolates_family PROPERTIES
   FAIL_REGULAR_EXPRESSION "\\[tcp\\]|\\[udp\\]|\\[cotp\\]")
 
 add_test(NAME remote_access_extra_port_widens_expected_range
-  COMMAND conduitscope decode --format text --remote-access-port 59001 --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_remote_access.pcap")
+  COMMAND conduitscope decode --format text -e --remote-access-port 59001 --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_remote_access.pcap")
 set_tests_properties(remote_access_extra_port_widens_expected_range PROPERTIES
   PASS_REGULAR_EXPRESSION "\\[vnc\\]  VNC \\(RFB\\) server protocol-version banner \"RFB 003.889\"[^\n]*\n *eth "
   FAIL_REGULAR_EXPRESSION "RFB 003.889\"[^\n]*\n *note: seen on TCP port")
@@ -7261,6 +7408,14 @@ if(NOT CONDUITSCOPE_HAVE_PCAP)
     COMMAND conduitscope decode --interface lo --duration 1)
   set_tests_properties(live_capture_unavailable_decode_interface PROPERTIES
     PASS_REGULAR_EXPRESSION "live capture is not available.*libpcap.*Npcap")
+
+  # --filter on an offline read (-r) needs libpcap/Npcap too (bpf_filter.hpp/cpp's own stub path,
+  # same posture as live_capture.cpp's) -- confirm that's also a clear, actionable error here,
+  # not a crash or a silent no-op that quietly ignores the filter.
+  add_test(NAME bpf_filter_unavailable_decode_read
+    COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --filter "tcp port 502")
+  set_tests_properties(bpf_filter_unavailable_decode_read PROPERTIES
+    PASS_REGULAR_EXPRESSION "BPF filtering .*requires this build to have been compiled with libpcap/Npcap")
 else()
   # This build actually found libpcap/Npcap. A bad/nonexistent interface name is portable (no real
   # interface needs to exist on either platform for this to fail the way it's supposed to), so it
@@ -7279,6 +7434,68 @@ else()
   # one is the correct, actionable error for its environment.
   set_tests_properties(live_capture_bad_interface_name_reports_clearly PROPERTIES
     PASS_REGULAR_EXPRESSION "(cannot (open|activate) .*this_interface_does_not_exist|live capture requires the Npcap RUNTIME to be installed)")
+
+  # -----------------------------------------------------------------------------------------
+  # --filter on an offline read (-r), not just live capture (-i) -- bpf_filter.hpp/bpf_filter.cpp.
+  # sample_modbus.pcap's 3 packets (see build_modbus_sample, tools/make_sample_pcap.py):
+  #   #1 192.168.1.50:51000 -> 192.168.1.10:502  (HMI's request)
+  #   #2 192.168.1.10:502 -> 192.168.1.50:51000  (PLC's response)
+  #   #3 192.168.1.10:502 -> 192.168.1.50:51000  (PLC's exception response)
+  # Runs on every platform this whole `else()` branch already runs on (unlike the `if(UNIX)` live
+  # -i tests below, this needs no real interface at all, just libpcap linked in for its BPF
+  # compiler -- see bpf_filter.cpp's own file header for why an offline read needs libpcap the
+  # same way live capture does, despite PcapReader itself having no such dependency).
+  # -----------------------------------------------------------------------------------------
+
+  add_test(NAME bpf_filter_read_matches_all_three_packets
+    COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --filter "tcp port 502" --format text)
+  set_tests_properties(bpf_filter_read_matches_all_three_packets PROPERTIES
+    PASS_REGULAR_EXPRESSION "#1 .*\n.*#2 .*\n.*#3 "
+    FAIL_REGULAR_EXPRESSION "#4 ")
+
+  add_test(NAME bpf_filter_read_matches_no_packets
+    COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --filter "tcp port 9999" --format text)
+  set_tests_properties(bpf_filter_read_matches_no_packets PROPERTIES
+    FAIL_REGULAR_EXPRESSION "#1 ")
+
+  # src host narrows to just the HMI's own request (#1) -- proves the filter genuinely inspects
+  # packet content (source IP), not just "matches everything/matches nothing".
+  add_test(NAME bpf_filter_read_src_host_narrows_correctly
+    COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --filter "src host 192.168.1.50" --format text)
+  set_tests_properties(bpf_filter_read_src_host_narrows_correctly PROPERTIES
+    PASS_REGULAR_EXPRESSION "#1 "
+    FAIL_REGULAR_EXPRESSION "#2 |#3 ")
+
+  # dst host narrows to the PLC's two responses, not the HMI's request -- the complementary
+  # direction from the src-host test above. Matched against the two response summaries directly
+  # rather than "#N" packet indices: those renumber from 1 within whatever the filter actually
+  # let through (the same convention live capture's own packet numbering already follows), so a
+  # filtered-out packet's original position isn't preserved in the index either way.
+  add_test(NAME bpf_filter_read_dst_host_narrows_correctly
+    COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --filter "dst host 192.168.1.50" --format text)
+  set_tests_properties(bpf_filter_read_dst_host_narrows_correctly PROPERTIES
+    PASS_REGULAR_EXPRESSION "response: 20 data byte\\(s\\).*\n.*\n.*\n.*exception response"
+    FAIL_REGULAR_EXPRESSION "request: read 10 holding register")
+
+  # An invalid filter expression is reported clearly and fails the run, exactly like the existing
+  # live-capture equivalent (live_capture_invalid_filter_reports_clearly below) -- same error
+  # message shape, since bpf_filter.cpp's own error text deliberately mirrors live_capture.cpp's.
+  add_test(NAME bpf_filter_read_invalid_syntax_reports_clearly
+    COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --filter "this is not valid bpf syntax {{{")
+  set_tests_properties(bpf_filter_read_invalid_syntax_reports_clearly PROPERTIES
+    PASS_REGULAR_EXPRESSION "invalid capture filter")
+
+  # `--filter` is wired identically into `policy validate -r` and `inventory -r` (both funnel
+  # through cli_main.cpp's own open_packet_source, same as decode -- see its own file comment).
+  add_test(NAME bpf_filter_policy_validate_read_narrows_flows
+    COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/compliant.yaml" --filter "tcp port 9999")
+  set_tests_properties(bpf_filter_policy_validate_read_narrows_flows PROPERTIES
+    FAIL_REGULAR_EXPRESSION "192\\.168\\.1\\.10")
+
+  add_test(NAME bpf_filter_inventory_read_narrows_assets
+    COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --filter "tcp port 9999")
+  set_tests_properties(bpf_filter_inventory_read_narrows_assets PROPERTIES
+    PASS_REGULAR_EXPRESSION "0 asset\\(s\\) observed")
 
   if(UNIX)
     # None of these depend on any traffic actually existing on "lo" during the run (--duration

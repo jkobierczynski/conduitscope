@@ -947,11 +947,15 @@ Groundwork / v0.1.0. What works right now:
   their shared expected-port set. See docs/PROTOCOL_COVERAGE.md
   "Tier 5 generic tunnel/VPN encapsulation recognition" section
 - Name resolution, shared by `decode` and `policy validate` alike: OUI/MAC-
-  vendor lookup against a built-in IEEE-registry-derived table (on by
-  default, `--no-oui` disables it), hostname resolution from an explicitly-
-  supplied `--hosts` file (`--resolve`, file-only -- never live DNS, under
-  any circumstance), and port->service-name lookup from a small curated
-  built-in table plus an optional `--services` file (`--nn` disables it).
+  vendor lookup against a built-in IEEE-registry-derived table (off by
+  default to keep output compact, `--oui` enables it), hostname resolution
+  from an explicitly-supplied `--hosts` file (`--resolve`, file-only --
+  never live DNS, under any circumstance), and port->service-name lookup
+  from a small curated built-in table plus an optional `--services` file
+  (`--nn` disables it). In `decode`'s text output, the MAC-address line
+  itself (`eth <src> -> <dst>`) is a further off-by-default toggle, `-e`/
+  `--ether` (mirrors tcpdump's own `-e`; `--oui` implies it) -- JSON/CSV
+  always include `src_mac`/`dst_mac` regardless.
   Every annotation is additive next to the raw MAC/IP/port already decoded,
   never a replacement for it -- see docs/USER_GUIDE.md's OUTPUT FORMATS "Name
   resolution" subsection
@@ -1027,10 +1031,14 @@ Groundwork / v0.1.0. What works right now:
   (Windows) dependency -- see above and docs/USER_GUIDE.md's LIVE CAPTURE section.
   `--duration`, `--filter` (BPF syntax), `--snaplen`, and Ctrl+C all stop a
   capture cleanly, still producing whatever decode output or policy report was
-  captured so far. Validated end-to-end against real loopback traffic on Linux,
-  and now also against a real Windows/Npcap build (MSVC/Visual Studio, CMake's
-  multi-config generator support) with `interfaces` correctly enumerating real
-  adapters -- see below for the multi-config `version`-string fix that build
+  captured so far. `--filter` also works when reading a saved capture with
+  `-r` -- same tcpdump-syntax filter, applied per-packet after the file is
+  parsed rather than by libpcap at capture time -- see docs/USER_GUIDE.md's
+  `--filter` (BPF) subsection. Validated end-to-end against real loopback
+  traffic on Linux, and now also against a real Windows/Npcap build
+  (MSVC/Visual Studio, CMake's multi-config generator support) with
+  `interfaces` correctly enumerating real adapters -- see below for the
+  multi-config `version`-string fix that build
   surfaced.
 - A `decode`/`info`/`interfaces`/`policy validate`/`inventory`/`version`
   command surface with full `--help` at every level
@@ -1084,10 +1092,49 @@ Groundwork / v0.1.0. What works right now:
   runtime" message if it's genuinely missing, instead of the whole binary
   refusing to launch; see docs/USER_GUIDE.md's "Windows / Npcap notes".
 - Ctrl+C during a colorized live capture (`decode -i`, color on by default on
-  an interactive terminal) now resets the terminal's ANSI colors immediately,
-  before anything else -- previously the terminal (and everything typed
-  afterward) could be left stuck showing whatever color the most recently
-  printed line happened to use.
+  an interactive terminal) now resets the terminal's ANSI colors before
+  `decode` exits -- previously the terminal (and everything typed afterward)
+  could be left stuck showing whatever color the most recently printed line
+  happened to use. This turned out to need two fixes, not one:
+  - On Windows, Ctrl+C is now caught via `SetConsoleCtrlHandler` rather than
+    the portable `signal(SIGINT, ...)` -- a first report that the reset
+    wasn't taking effect reliably there traced to two well-documented Windows
+    CRT gotchas `SetConsoleCtrlHandler` doesn't have: a `signal()`-registered
+    handler isn't guaranteed to stay installed for the whole run, and can't
+    reliably stop Windows' own default Ctrl+C-kills-the-process action the
+    way returning `TRUE` from a `SetConsoleCtrlHandler` routine does.
+  - That alone still wasn't sufficient -- a follow-up report showed colors
+    still not resetting on Windows even with `SetConsoleCtrlHandler` in
+    place. Root cause: its handler runs on a separate, Windows-spawned
+    thread, genuinely concurrently with the thread still decoding and
+    printing packets, and a capture can legitimately hand back one more
+    already-buffered packet after Ctrl+C is pressed -- that packet's
+    (buffered) colored output could reach the terminal *after* the handler's
+    own immediate reset write, undoing it. Fixed by adding a second,
+    authoritative reset on the main thread itself, right after the capture
+    loop actually stops (any of `--duration`/`--max-packets`/EOF/Ctrl+C) --
+    guaranteed to be the last thing this run ever writes, on every platform,
+    since it's synchronous with (and strictly after) all of this run's own
+    packet output. The original handler-side reset is kept as a best-effort
+    immediate backstop for the case the process is killed before reaching
+    normal exit. Linux/macOS are unaffected by either Windows-specific gap,
+    still using ordinary `signal(SIGINT, ...)`, but get the same
+    authoritative end-of-run reset regardless.
+  - Even that turned out to be incomplete -- a third report caught colors
+    left stuck after Ctrl+C during an *offline* `decode -r` (no `-i` at
+    all), something the two fixes above never touched. Root cause: the
+    guard that installs the Ctrl+C handler in the first place only did so
+    when given a live capture to stop (`SigintGuard`'s `active_(capture !=
+    nullptr)`) -- for `-r`, that pointer is always null, so no handler was
+    ever installed, on any platform, regardless of color. Ctrl+C during an
+    offline decode fell straight through to the OS's own default handling
+    with zero cleanup. Fixed by activating the guard whenever there's
+    *either* a live capture to stop *or* color to reset (`capture !=
+    nullptr || color`), and by adding a general stop flag that an offline
+    read's own packet loop now checks (`PcapReader` has no stop of its own
+    the way `LiveCapture` does) -- so Ctrl+C during `-r` now both resets
+    color and actually stops the read early, the same as it already did
+    for `-i`.
 - CI now also runs an ASan/UBSan-instrumented build plus all 9 fuzz
   harnesses' own corpus-regression checks on every push/PR, and a nightly
   scheduled job runs a longer, dedicated campaign against each harness's

@@ -399,26 +399,33 @@ void TextWriter::write_packet(const DecodedPacket& p) {
     // Every Ethernet-linktype packet carries src_mac/dst_mac regardless of protocol (see
     // decoder.cpp's Decoder::decode) -- shown here, with OUI vendor annotations, for every
     // protocol alike, not just the raw-Ethernet ones (GOOSE/SV/EtherCAT/PROFINET/STP) that already
-    // fold their own MAC fields into stp_root_mac/etc. This was a real gap fixed as part of this
-    // feature: OUI resolution is meaningless without first showing the MAC address it annotates.
-    // Printed AFTER any notes (rather than between the summary line and them) so a packet's own
-    // notes -- often matched in tests immediately against the summary line right above them --
-    // stay exactly adjacent to it; this line is purely additive at the end of this packet's block.
+    // fold their own MAC fields into stp_root_mac/etc. Gated behind show_mac_ (decode's -e/--ether,
+    // off by default, implied by --oui -- see output.hpp's own comment): mirrors tcpdump's own -e,
+    // a pure display toggle for the human-facing text dump, not a resolver lookup -- JSON/CSV keep
+    // showing src_mac/dst_mac unconditionally regardless of this flag, see output.hpp. VLAN ID
+    // (show_vlan_, --no-vlan, on by default) is independent of show_mac_ -- 802.1Q membership isn't
+    // specifically a MAC-address fact -- so a VLAN-tagged packet still gets a line here even with
+    // show_mac_ false, just without the "eth <mac> -> <mac>" prefix ahead of it. Printed AFTER any
+    // notes (rather than between the summary line and them) so a packet's own notes -- often
+    // matched in tests immediately against the summary line right above them -- stay exactly
+    // adjacent to it; this line is purely additive at the end of this packet's block.
     if (p.has_ethernet) {
-        out_ << "        ";
-        if (color_) out_ << kDim;
-        out_ << "eth " << p.src_mac;
-        if (auto v = resolver_.oui_vendor(p.src_mac)) out_ << " (" << *v << ")";
-        out_ << " -> " << p.dst_mac;
-        if (auto v = resolver_.oui_vendor(p.dst_mac)) out_ << " (" << *v << ")";
-        // VLAN ID, shown by default (--no-vlan suppresses it) -- appended to the same eth line
-        // rather than its own, since it's a property of this one Ethernet frame just like the MAC
-        // pair right before it. has_vlan_tag is only ever true when has_ethernet is also true (a
-        // VLAN tag is unwrapped from the Ethernet header itself -- see link_layer.cpp), so nesting
-        // this inside the existing p.has_ethernet block is always safe.
-        if (show_vlan_ && p.has_vlan_tag) out_ << "  vlan " << p.vlan_id;
-        if (color_) out_ << kReset;
-        out_ << "\n";
+        bool show_vlan_here = show_vlan_ && p.has_vlan_tag;
+        if (show_mac_ || show_vlan_here) {
+            out_ << "        ";
+            if (color_) out_ << kDim;
+            if (show_mac_) {
+                out_ << "eth " << p.src_mac;
+                if (auto v = resolver_.oui_vendor(p.src_mac)) out_ << " (" << *v << ")";
+                out_ << " -> " << p.dst_mac;
+                if (auto v = resolver_.oui_vendor(p.dst_mac)) out_ << " (" << *v << ")";
+                if (show_vlan_here) out_ << "  vlan " << p.vlan_id;
+            } else {
+                out_ << "vlan " << p.vlan_id;
+            }
+            if (color_) out_ << kReset;
+            out_ << "\n";
+        }
     }
 }
 
@@ -1650,7 +1657,7 @@ void StatsWriter::write_packet(const DecodedPacket& p) {
     protocol_counts_[p.protocol]++;
     // Cross-protocol, not gated on p.protocol like the maps below -- see this member's own
     // comment (output.hpp). Not gated on `decode`'s --no-direction either: --stats has no display
-    // toggles of its own (--no-vlan/--no-oui don't affect it), it's an aggregate view independent
+    // toggles of its own (--no-vlan/--oui don't affect it), it's an aggregate view independent
     // of them, consistent with that precedent.
     if (p.has_direction) {
         direction_source_counts_[direction_source_name(p.direction_source)]++;

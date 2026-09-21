@@ -185,13 +185,13 @@ conduitscope decode (-r FILE | -i INTERFACE) [options]
 |---|---|---|
 | `-r, --read FILE` | *(required unless `-i` given)* | Input capture file. Must exist; classic pcap or pcapng, auto-detected. Mutually exclusive with `-i`. |
 | `-i, --interface NAME` | *(required unless `-r` given)* | Capture live from this network interface instead of reading a file -- see LIVE CAPTURE below and `conduitscope interfaces`. Requires libpcap/Npcap support to have been built in. Mutually exclusive with `-r`. |
-| `--filter BPF` | *(none)* | BPF capture filter (tcpdump syntax, e.g. `"port 502 or port 102"`). Only meaningful with `-i`. |
+| `--filter BPF` | *(none)* | BPF filter (tcpdump syntax, e.g. `"port 502 or port 102"`). Works with both `-i` (applied by libpcap at capture time) and `-r` (applied per-packet after reading the file); see LIVE CAPTURE's own `--filter` subsection below. |
 | `--duration SECONDS` | `0` (unlimited) | Stop a live capture (`-i`) after this many seconds. `0` means rely on `--max-packets` and/or Ctrl+C instead. |
 | `--snaplen BYTES` | `65535` | Maximum bytes captured per packet with `-i`. |
 | `--no-promiscuous` | off (i.e. promiscuous by default) | With `-i`, don't put the interface into promiscuous mode. Promiscuous is the default because the main live-capture use case -- watching a mirrored/SPAN switch port for zone/conduit traffic -- needs to see traffic that isn't addressed to the capturing host at all. |
 | `-o, --output FILE` | stdout | Write decoded output here instead of stdout. |
 | `-f, --format {text,json,csv}` | `text` | Output format. See OUTPUT FORMATS below. |
-| `-t, --time-format {e,epoch,r,relative,d,delta,a,absolute,ad,absolute-date}` | `e` | How to render each packet's timestamp. Mirrors tshark's own `-t` mnemonics rather than tcpdump's stacking `-t`/`-tt`/`-ttt` convention. See OUTPUT FORMATS' "Timestamps" subsection below. |
+| `-t, --time-format {e,epoch,r,relative,d,delta,a,absolute,ad,absolute-date}` | `r` | How to render each packet's timestamp. Mirrors tshark's own `-t` mnemonics rather than tcpdump's stacking `-t`/`-tt`/`-ttt` convention. See OUTPUT FORMATS' "Timestamps" subsection below. |
 | `--time-offset {utc,local,+HH:MM,-HH:MM}` | `utc` | Timezone used to render `--time-format=absolute`/`absolute-date`; ignored by every other `--time-format` value. See OUTPUT FORMATS' "Timestamps" subsection below. |
 | `--protocol NAME` | `auto` | Restrict decoding to one protocol. See docs/PROTOCOL_COVERAGE.md below for the full, current list of valid protocol names (one per subsection there). `auto` opportunistically tries OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, S7comm/COTP, S7comm-Plus, MMS, HART-IP, MQTT, and FF-HSE detection on every TCP payload (in that order -- FF-HSE last of all, even after MQTT, see docs/DEVELOPMENT.md's PROTOCOL DETECTION), CIP I/O, BACnet/IP, HART-IP, and FF-HSE detection on every UDP payload (FF-HSE last there too), PROFINET RT (DCP/cyclic) detection on every non-IPv4 Ethernet frame carrying EtherType `0x8892`, GOOSE detection on every non-IPv4 Ethernet frame carrying EtherType `0x88B8`, Sampled Values detection on every non-IPv4 Ethernet frame carrying EtherType `0x88BA`, EtherCAT detection on every non-IPv4 Ethernet frame carrying EtherType `0x88A4`, regardless of port, and Spanning Tree Protocol (STP/RSTP/MSTP) detection on every classic IEEE 802.3 length-framed Ethernet frame whose LLC header is DSAP=SSAP=`0x42` -- a structurally separate dispatch path from every EtherType-keyed protocol above, so there's no ordering/collision question between them (see docs/DEVELOPMENT.md's PROTOCOL DETECTION below). `enip` covers both EtherNet/IP explicit messaging (TCP) and CIP I/O implicit messaging (UDP). `mms` is IEC 61850 MMS (Manufacturing Message Specification, ISO 9506) -- shares S7comm's exact TPKT/COTP transport and TCP port 102, but is a distinct application protocol; see `--s7comm-port` below and docs/PROTOCOL_COVERAGE.md's MMS section. `s7comm-plus` is S7comm-Plus (TIA Portal / S7-1200/1500) -- shares the same TPKT/COTP transport and TCP port 102, disambiguated by its own protocol id byte; see `--s7comm-port` below and docs/PROTOCOL_COVERAGE.md's S7comm-Plus section. `mqtt` is MQTT (v3.1/v3.1.1/v5.0) plus Sparkplug B -- see `--mqtt-port` below and docs/PROTOCOL_COVERAGE.md's MQTT section. `profinet` covers both DCP and cyclic real-time IO. `sv` is IEC 61850-9-2 Sampled Values. `ethercat` is EtherCAT. `bacnet` is BACnet/IP. `hartip` is HART-IP (covers both UDP and TCP). `opcua` is OPC UA Binary (UA-TCP/Secure Conversation, TCP only). `ff-hse` is FOUNDATION Fieldbus HSE (covers FDA/SM/FMS/LAN Redundancy, on both TCP and UDP) -- see `--ffhse-port` below and docs/PROTOCOL_COVERAGE.md's FOUNDATION Fieldbus HSE section. `stp` is Spanning Tree Protocol (STP/RSTP/MSTP) -- no port option, matching GOOSE/SV/EtherCAT/PROFINET's own no-port precedent for a protocol with no port at all; see docs/PROTOCOL_COVERAGE.md's Spanning Tree Protocol section. `devicenet` is DeviceNet (CAN-bus CIP) -- no port option either, the same no-port precedent, but unlike every other value in this list it isn't reached through Ethernet at all: it's gated on the capture's own pcap link type being `LINKTYPE_CAN_SOCKETCAN` (227, standard Linux SocketCAN capture framing -- what `candump -l`/`tcpdump -i can0`/Wireshark itself write capturing a CAN bus), checked before any protocol filter, so `--protocol devicenet` against an ordinary Ethernet-linktype capture simply decodes nothing (every packet still parses at the link layer, just with no application-layer match) rather than erroring; see docs/PROTOCOL_COVERAGE.md's DeviceNet section. `remote-access` covers Tier 1 of the "IT protocols an OT auditor flags" family (RDP/VNC/TeamViewer/AnyDesk/Zoom, each its own `protocol` value even under this one filter name) -- see `--remote-access-port` below and docs/PROTOCOL_COVERAGE.md's "Tier 1 remote-access protocol recognition" section. `lateral-movement` covers Tier 2 of the same family (SMB/SSH/HTTP/HTTPS/SNMPv1v2c/Telnet/FTP/TFTP, again each its own `protocol` value under this one filter name) -- see `--lateral-movement-port` below and docs/PROTOCOL_COVERAGE.md's "Tier 2 lateral-movement protocol recognition" section. `enterprise-trust` covers the six port-based protocols of Tier 3 of the same family (NTP/DHCP/LDAP/LDAPS/RADIUS/TACACS+, again each its own `protocol` value under this one filter name) -- see `--enterprise-trust-port` below and docs/PROTOCOL_COVERAGE.md's "Tier 3 enterprise-trust-boundary protocol recognition" section. `eapol` is Tier 3's seventh protocol, IEEE 802.1X/EAPOL -- EtherType-keyed, no port at all, so it has its own dedicated filter value rather than sharing `enterprise-trust`, the same split GOOSE/SV/EtherCAT/PROFINET's own EtherType-keyed filters already have from every port-based one; no port option exists for it. `wireless-backhaul` covers the five port-based protocols of Tier 4 of the same family (CAPWAP control/data, LWAPP control/data, GTP-U, again each its own `protocol` value under this one filter name) -- see `--wireless-backhaul-port` below and docs/PROTOCOL_COVERAGE.md's "Tier 4 wireless-backhaul-and-cellular protocol recognition" section. `pppoe` is Tier 4's sixth protocol, PPPoE -- EtherType-keyed, no port at all, the same split `eapol` has from `enterprise-trust`; no port option exists for it either. `tunnel-vpn` covers the fourteen port/IP-protocol-number-based protocols of Tier 5 of the same family (GRE/NVGRE/EoIP, ESP, AH, IP-in-IP, 6in4, L2TP, IKE, VXLAN, Geneve, WireGuard, OpenVPN, dtls-tunnel, STT, again each its own `protocol` value under this one filter name) -- see `--tunnel-vpn-port` below and docs/PROTOCOL_COVERAGE.md's "Tier 5 generic tunnel/VPN encapsulation recognition" section. `mpls` is Tier 5's sixteenth protocol, MPLS -- EtherType-keyed, no port at all, the same split `eapol`/`pppoe` have from `enterprise-trust`/`wireless-backhaul`; no port option exists for it either. |
 | `--modbus-port PORT` | *(502 built in)* | Additional TCP port to treat as "expected" for Modbus. Repeatable. Does **not** gate detection -- it only changes whether a decoded Modbus frame is annotated as appearing on an unexpected port, which is itself a useful signal when auditing a conduit. |
@@ -209,8 +209,9 @@ conduitscope decode (-r FILE | -i INTERFACE) [options]
 | `--stats` | off | Print an aggregate summary (protocol counts, a cross-protocol TCP-flow direction-tier breakdown, Modbus function-code histogram, exception count, capture time span) instead of one line per packet. Ignores `--format`. |
 | `--strict` | off | Abort with a nonzero exit status on the first packet that fails to parse at the Ethernet/IPv4/TCP layer, instead of reporting a per-packet warning and continuing. Does not affect Modbus/DNP3-level ambiguity, which is always handled by heuristic + note rather than error. |
 | `--no-vlan` | off (i.e. VLAN ID display on by default) | Disable display of the 802.1Q VLAN ID for a VLAN-tagged packet. See OUTPUT FORMATS below. |
-| `--no-direction` | off (i.e. TCP flow direction display on by default) | Disable display of per-packet TCP flow direction (client/server determination and which tier decided it -- handshake/content/port-heuristic). Does not affect `decode --stats`'s own direction-tier breakdown, which has no display toggles of its own (the same way `--no-vlan`/`--no-oui` don't affect it either). See OUTPUT FORMATS below. |
-| `--no-oui` | off (i.e. OUI/MAC-vendor resolution on by default) | Disable OUI (MAC vendor) resolution against the built-in table. See OUTPUT FORMATS' "Name resolution" subsection below. |
+| `--no-direction` | off (i.e. TCP flow direction display on by default) | Disable display of per-packet TCP flow direction (client/server determination and which tier decided it -- handshake/content/port-heuristic). Does not affect `decode --stats`'s own direction-tier breakdown, which has no display toggles of its own (the same way `--no-vlan`/`--oui` don't affect it either). See OUTPUT FORMATS below. |
+| `-e`, `--ether` | off (i.e. the Ethernet header display off by default, to keep output compact) | Show the Ethernet header (source/destination MAC address, VLAN tag) for each packet in **text** output -- mirrors tcpdump's own `-e`. Implied by `--oui` (there'd be nothing to attach a vendor name to otherwise). Does not affect JSON/CSV output, which always include `src_mac`/`dst_mac` as base fields, same as `src_ip`/`dst_ip`. See OUTPUT FORMATS' "Name resolution" subsection below. |
+| `--oui` | off (i.e. OUI/MAC-vendor resolution off by default, to keep output compact) | Enable OUI (MAC vendor) resolution against the built-in table, and show it next to each MAC address. Implies `-e`/`--ether`. See OUTPUT FORMATS' "Name resolution" subsection below. |
 | `--resolve` | off | Enable hostname resolution from an explicitly-supplied `--hosts` file. **Never performs live DNS, under any circumstance** -- file-only. See OUTPUT FORMATS' "Name resolution" subsection below. |
 | `--hosts FILE` | *(none)* | Unix `/etc/hosts`-style file to resolve IP addresses from, for `--resolve`. Must exist. |
 | `--nn` | off (i.e. service-name resolution on by default) | Disable service name (port -> name) resolution, from the built-in table and `--services` alike. Named after the `nc`/`nmap`/`tcpdump`-family `-n`/`-nn` "don't resolve names" convention. See OUTPUT FORMATS' "Name resolution" subsection below. |
@@ -257,7 +258,7 @@ conduitscope policy validate (-r FILE | -i INTERFACE) --policy POLICY_FILE [opti
 |---|---|---|
 | `-r, --read FILE` | *(required unless `-i` given)* | Input capture file. Must exist; classic pcap or pcapng, auto-detected. Mutually exclusive with `-i`. |
 | `-i, --interface NAME` | *(required unless `-r` given)* | Check live traffic from this network interface instead of reading a file -- see LIVE CAPTURE below. Requires libpcap/Npcap support to have been built in. Mutually exclusive with `-r`. There's no `--max-packets` here (matching this command's offline-file surface, which never had one either); a live run relies on `--duration` and/or Ctrl+C to stop. |
-| `--filter BPF` | *(none)* | BPF capture filter (tcpdump syntax). Only meaningful with `-i`. |
+| `--filter BPF` | *(none)* | BPF filter (tcpdump syntax). Works with both `-i` and `-r`; see LIVE CAPTURE's own `--filter` subsection below. |
 | `--duration SECONDS` | `0` (unlimited) | Stop a live capture (`-i`) after this many seconds; `0` means rely on Ctrl+C instead. |
 | `--snaplen BYTES` | `65535` | Maximum bytes captured per packet with `-i`. |
 | `--no-promiscuous` | off (i.e. promiscuous by default) | Same meaning as `decode --no-promiscuous`. |
@@ -265,7 +266,7 @@ conduitscope policy validate (-r FILE | -i INTERFACE) --policy POLICY_FILE [opti
 | `-o, --output FILE` | stdout | Write the report here instead of stdout. |
 | `-f, --format {text,json}` | `text` | Report format. `text` is the human-readable report shown throughout this section; `json` is meant for scripting an audit pipeline -- see POLICY FILE FORMAT's "JSON report schema" below. |
 | `--strict` | off | Same meaning as `decode --strict`: abort on the first packet that fails to parse at the Ethernet/IPv4/TCP layer, instead of reporting a warning and continuing to evaluate the rest of the capture. |
-| `--no-oui` | off (i.e. OUI/MAC-vendor resolution on by default) | Same meaning as `decode --no-oui`: disable OUI (MAC vendor) resolution against the built-in table, applied to the report's flow MAC addresses. See OUTPUT FORMATS' "Name resolution" subsection. |
+| `--oui` | off (i.e. OUI/MAC-vendor resolution off by default) | Same meaning as `decode --oui`: enable OUI (MAC vendor) resolution against the built-in table, applied to the report's flow MAC addresses. See OUTPUT FORMATS' "Name resolution" subsection. |
 | `--resolve` | off | Same meaning as `decode --resolve`: enable hostname resolution from an explicitly-supplied `--hosts` file, applied to the report's flow IP addresses. **Never performs live DNS** -- file-only. |
 | `--hosts FILE` | *(none)* | Same meaning as `decode --hosts`: Unix `/etc/hosts`-style file to resolve IP addresses from, for `--resolve`. Must exist. |
 | `--nn` | off (i.e. service-name resolution on by default) | Same meaning as `decode --nn`: disable service name (port -> name) resolution, applied to the report's flow server port. |
@@ -368,7 +369,7 @@ doesn't cover).
 |---|---|---|
 | `-r, --read FILE` | *(required unless `-i` given)* | Input capture file. Must exist; classic pcap or pcapng, auto-detected. Mutually exclusive with `-i`. |
 | `-i, --interface NAME` | *(required unless `-r` given)* | Build the inventory from live traffic on this network interface instead of reading a file -- see LIVE CAPTURE below. Requires libpcap/Npcap support to have been built in. Mutually exclusive with `-r`. |
-| `--filter BPF` | *(none)* | BPF capture filter (tcpdump syntax). Only meaningful with `-i`. |
+| `--filter BPF` | *(none)* | BPF filter (tcpdump syntax). Works with both `-i` and `-r`; see LIVE CAPTURE's own `--filter` subsection below. |
 | `--duration SECONDS` | `0` (unlimited) | Stop a live capture (`-i`) after this many seconds; `0` means rely on Ctrl+C instead. |
 | `--snaplen BYTES` | `65535` | Maximum bytes captured per packet with `-i`. |
 | `--no-promiscuous` | off (i.e. promiscuous by default) | Same meaning as `decode --no-promiscuous`. |
@@ -379,7 +380,7 @@ doesn't cover).
 | `--diagram FILE` | *(none)* | Also write a zone/conduit diagram to this file. Format controlled by `--diagram-format`. |
 | `--diagram-format {mermaid,dot}` | `mermaid` | Diagram syntax for `--diagram`: a Mermaid `graph LR` block, or a Graphviz `.dot` `digraph`. |
 | `--policy-out FILE` | *(none)* | Also write the inferred zone/conduit model as a `policy`-format YAML file, directly loadable by `policy validate --policy` -- closing the loop: discover, then enforce. See "Closing the loop" below. |
-| `--no-oui` | off (i.e. OUI/MAC-vendor resolution on by default) | Same meaning as `decode --no-oui`, applied to the report's asset/edge MAC addresses. |
+| `--oui` | off (i.e. OUI/MAC-vendor resolution off by default) | Same meaning as `decode --oui`, applied to the report's asset/edge MAC addresses. |
 | `--resolve` | off | Same meaning as `decode --resolve`: enable hostname resolution from an explicitly-supplied `--hosts` file. **Never performs live DNS** -- file-only. |
 | `--hosts FILE` | *(none)* | Same meaning as `decode --hosts`: Unix `/etc/hosts`-style file to resolve IP addresses from, for `--resolve`. Must exist. |
 | `--nn` | off (i.e. service-name resolution on by default) | Same meaning as `decode --nn`: disable service name (port -> name) resolution, applied to each edge's server port. |
@@ -562,15 +563,50 @@ decoded/reported, on any of:
 - `--duration SECONDS` elapsing (both commands).
 - `--max-packets N` being reached (`decode` only; `policy validate` has no
   packet-count option -- see its own option table above).
-- **Ctrl+C** (SIGINT). This is caught and used to stop the capture cleanly
-  (finishing whatever output/report was in progress), not to kill the process
-  outright -- so `decode -i eth0` with no `--duration`/`--max-packets` at all is
-  a reasonable way to capture "until I say stop", the same way `tcpdump` with no
+- **Ctrl+C** (SIGINT on Linux; a console Ctrl+C event on Windows -- see
+  below). This is caught and used to stop the capture cleanly (finishing
+  whatever output/report was in progress), not to kill the process outright --
+  so `decode -i eth0` with no `--duration`/`--max-packets` at all is a
+  reasonable way to capture "until I say stop", the same way `tcpdump` with no
   `-c`/duration option is. If colorized output is active (`decode`'s default
-  when writing to an interactive terminal, or `--color`), Ctrl+C also resets
-  the terminal's colors immediately, before anything else -- so it can't leave
-  your terminal (and everything you type next) stuck in whatever ANSI color
-  the most recently printed line happened to use.
+  when writing to an interactive terminal, or `--color`), stopping the capture
+  -- by any of the three means above, Ctrl+C included -- also resets the
+  terminal's colors before `decode` exits, so it can't leave your terminal
+  (and everything you type next) stuck in whatever ANSI color the most
+  recently printed line happened to use. This reset happens twice, for two
+  different reasons:
+    - **Immediately**, from the Ctrl+C handler itself, as a best-effort
+      backstop in case the process is killed before it can exit normally. On
+      Windows this handler is installed via `SetConsoleCtrlHandler` rather
+      than the portable `signal(SIGINT, ...)` API: `signal()`'s handler on
+      Windows isn't guaranteed to stay installed across the run and can't
+      reliably suppress the OS's own default Ctrl+C-kills-the-process action,
+      both of which `SetConsoleCtrlHandler` handles correctly -- Linux/macOS
+      keep using ordinary `signal(SIGINT, ...)`, where neither gap applies.
+    - **Authoritatively**, once decoding actually stops, right before
+      `decode` exits -- this is the reset that's actually guaranteed to be
+      the last thing written. The immediate handler-side reset above isn't
+      enough by itself on Windows: a Ctrl+C handler installed via
+      `SetConsoleCtrlHandler` runs on a separate thread that Windows spawns
+      for it, genuinely concurrently with the thread still decoding and
+      printing packets, and a capture can legitimately still hand back one
+      more already-buffered packet after Ctrl+C is pressed. That packet's
+      (buffered) colored output can therefore reach the terminal *after* the
+      handler's own immediate reset, undoing it -- which is what caused
+      colors to keep not resetting on Windows even after the
+      `SetConsoleCtrlHandler` switch above. POSIX signal handling doesn't
+      have this gap (a signal handler there runs synchronously on the same
+      thread it interrupts), but the authoritative reset applies on every
+      platform regardless, since it costs nothing extra and removes any
+      dependence on that distinction.
+
+  Ctrl+C during `-r` (reading an offline file, not `-i`) is caught the same
+  way, for the same reason: colorized text output (`decode`'s default on an
+  interactive terminal, or `--color`) needs the same clean reset regardless
+  of which kind of packet source is being read. It also actually stops the
+  read early, the same as it does for a live capture -- an offline read of a
+  large file otherwise has no natural stopping point until it reaches the
+  end of the file.
 
 ### Promiscuous mode
 
@@ -589,13 +625,31 @@ rather than requiring an opt-in.
 
 `--filter` takes a Berkeley Packet Filter expression -- the same syntax
 `tcpdump`'s own filter argument uses (e.g. `"host 192.168.1.10 and port
-502"`). It's applied by libpcap/Npcap itself, before a packet ever reaches
-conduitscope's own decoding, so it's a performance/focus tool (capture only
-what you care about) rather than a substitute for `--protocol` or the
-`--modbus-port`/`--dnp3-port`/`--s7comm-port`/`--iec104-port` options, which operate on
-already-captured traffic instead. An invalid filter expression is reported
-clearly (`error: invalid capture filter '...'`) and the process exits without
-opening the interface.
+502"`). With `-i`, it's applied by libpcap/Npcap itself, before a packet ever
+reaches conduitscope's own decoding, so it's a performance/focus tool
+(capture only what you care about) rather than a substitute for `--protocol`
+or the `--modbus-port`/`--dnp3-port`/`--s7comm-port`/`--iec104-port` options,
+which operate on already-captured traffic instead. An invalid filter
+expression is reported clearly (`error: invalid capture filter '...'`) and
+the process exits without opening the interface.
+
+**`--filter` also works with `-r`**, against an already-captured file, using
+the identical BPF syntax and the same libpcap compiler/matcher -- so a filter
+expression that works for a live `-i` capture works unchanged against `-r`
+on the resulting pcap, and vice versa. This exists for the same reason it
+exists for `-i`: focus and performance on a capture with far more traffic in
+it than you actually want to look at right now, without maintaining a
+separate `--modbus-port`/`--dnp3-port`/etc. combination to approximate it.
+Unlike live capture, this still needs libpcap/Npcap *linked into the
+binary* even though it's reading an offline file -- `PcapReader` itself
+(the offline pcap/pcapng parser) has no such dependency and never will (see
+its own file header), but the BPF compiler/matcher this borrows is
+libpcap's, so a build with `CONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF` or that
+simply didn't find libpcap/Npcap at configure time reports `--filter` given
+with `-r` the same clear, actionable error `-i` already gives in that case,
+rather than silently ignoring it. A capture file with no traffic matching
+the filter decodes to zero packets, not an error -- the same as a live
+capture that simply never saw anything match.
 
 ### Windows / Npcap notes
 
@@ -1226,7 +1280,7 @@ validate` never evaluates at all (UDP-only, see "Addressing scope" below).
 have no client/server concept to begin with (see its own comment just
 below).
 
-**Resolver annotations** (`--no-oui`/`--resolve`/`--hosts`/`--nn`/
+**Resolver annotations** (`--oui`/`--resolve`/`--hosts`/`--nn`/
 `--services` -- see the option table above and OUTPUT FORMATS' "Name
 resolution" subsection): `client_mac`/`server_mac` are a base-value
 addition, present as a string whenever this flow's link type is Ethernet
@@ -1238,7 +1292,7 @@ given), and `server_port_service` (service-name lookup; `FlowReport` only
 ever carries the server's port, not the client's -- see its own comment in
 `policy_engine.hpp`) are each OMITTED ENTIRELY, never emitted as `null`, on
 a lookup miss or a
-disabled lookup (`--no-oui`/`--nn`, or `--resolve` with no matching
+disabled lookup (OUI/`--nn` left at their off-by-default posture, or `--resolve` with no matching
 `--hosts` entry). Same convention `decode`'s own JSON output uses for its
 `src_mac_vendor`/`dst_mac_vendor`/`src_hostname`/`dst_hostname`/
 `src_port_service`/`dst_port_service` fields.
@@ -1272,7 +1326,7 @@ these protocols have neither):
 
 `mac_a_vendor`/`mac_b_vendor` are the same OUI-vendor annotation as
 `flows[]`'s own `client_mac_vendor`/`server_mac_vendor` above, omitted
-entirely (never `null`) on a lookup miss or `--no-oui` -- an L2 flow has no
+entirely (never `null`) on a lookup miss or when `--oui` wasn't given -- an L2 flow has no
 IP or port at all, so there's no hostname/service-name equivalent here.
 
 `vlan_id` is `null` when `has_vlan_tag` is `false` (the frame carried no
@@ -1465,13 +1519,23 @@ a client/server side to determine in the first place. Any additional notes
 (heuristic explanations, port-mismatch warnings, malformed-field warnings)
 are printed indented below the packet line, followed, for an
 Ethernet-linktype packet, by an `eth` line showing the raw source/
-destination MAC addresses. See the `json` output's own `direction_source`/
-`direction_client_ip` fields below for the two machine-readable values the
-head line's `(client ... -- ...)` annotation renders, and
-docs/DEVELOPMENT.md's ROADMAP item 19 for the full design record.
+destination MAC addresses -- **only when `-e`/`--ether` is given, off by
+default to keep output compact** (mirrors tcpdump's own `-e`; see "Name
+resolution" below for exactly how `-e` and `--oui` interact). See the
+`json` output's own `direction_source`/`direction_client_ip` fields below
+for the two machine-readable values the head line's `(client ... -- ...)`
+annotation renders, and docs/DEVELOPMENT.md's ROADMAP item 19 for the full
+design record.
 
 ```
-#1  1700000000.000000  192.168.1.50:51000 -> 192.168.1.10:502  [modbus]  Read Holding Registers: request: read 10 holding register(s) starting at address 0  (client 192.168.1.50 -- port-heuristic)
+#1  0.000000  192.168.1.50:51000 -> 192.168.1.10:502  [modbus]  Read Holding Registers: request: read 10 holding register(s) starting at address 0  (client 192.168.1.50 -- port-heuristic)
+        note: classified as a request because the PDU is exactly 4 bytes (address+quantity); this is a heuristic, not stream tracking
+```
+
+With `-e`, the same packet also gets its `eth` line:
+
+```
+#1  0.000000  192.168.1.50:51000 -> 192.168.1.10:502  [modbus]  Read Holding Registers: request: read 10 holding register(s) starting at address 0  (client 192.168.1.50 -- port-heuristic)
         note: classified as a request because the PDU is exactly 4 bytes (address+quantity); this is a heuristic, not stream tracking
         eth aa:bb:cc:11:22:33 -> aa:bb:cc:44:55:66
 ```
@@ -1483,21 +1547,32 @@ annotation on the line) for the two authoritative tiers, `handshake` and
 `content`. The tier name itself is always printed regardless of color/
 `--no-color`, so nothing here is color-only information.
 
-When a packet is 802.1Q VLAN-encapsulated, its VLAN ID is appended to the
-`eth` line (`vlan <id>`), on by default -- `--no-vlan` suppresses it:
+When a packet is 802.1Q VLAN-encapsulated, its VLAN ID is shown by default
+(`vlan <id>`) even without `-e` -- 802.1Q membership isn't specifically a
+MAC-address fact, so it has its own independent, on-by-default toggle,
+`--no-vlan`:
 
 ```
-#1  1700000000.000000  - -> -  [goose]  GOOSE IED1/LLN0$GO$gcb01 stNum=1 sqNum=1 confRev=1
+#1  0.000000  - -> -  [goose]  GOOSE IED1/LLN0$GO$gcb01 stNum=1 sqNum=1 confRev=1
+        vlan 100
+```
+
+With `-e` also given, the VLAN ID is appended to the same `eth` line
+instead of standing alone:
+
+```
+#1  0.000000  - -> -  [goose]  GOOSE IED1/LLN0$GO$gcb01 stNum=1 sqNum=1 confRev=1
         eth aa:bb:cc:11:22:33 -> aa:bb:cc:44:55:66  vlan 100
 ```
 
 When name resolution is enabled (see "Name resolution" below), a hostname
 and/or a service name are appended in parentheses right after the raw IP or
-port they annotate, and a MAC vendor right after each `eth` line's address --
-the raw value itself is always shown too, never replaced:
+port they annotate, and a MAC vendor right after each `eth` line's address
+(`--oui`, which implies `-e` -- there'd be nothing to attach a vendor name
+to otherwise) -- the raw value itself is always shown too, never replaced:
 
 ```
-#1  1700000000.000000  192.168.1.50 (hmi-01):51000 (hmi-modbus-client) -> 192.168.1.10 (plc-01):502 (custom-modbus)  [modbus]  Read Holding Registers: request: read 10 holding register(s) starting at address 0
+#1  0.000000  192.168.1.50 (hmi-01):51000 (hmi-modbus-client) -> 192.168.1.10 (plc-01):502 (custom-modbus)  [modbus]  Read Holding Registers: request: read 10 holding register(s) starting at address 0
         eth aa:bb:cc:11:22:33 (Example Vendor, Inc.) -> aa:bb:cc:44:55:66 (Another Vendor Corp.)
 ```
 
@@ -1535,11 +1610,13 @@ for a non-IP frame, or `src_mac`/`dst_mac` for a non-Ethernet-linktype
 capture) are `null`. Intended to be piped into `jq` or read by a future
 policy-evaluation layer.
 
-Every object also carries a trailing `time` field (always a string): with
-`-t`/`--time-format` left at its default, this reproduces `timestamp`'s own
-raw-epoch value as text; any other `-t` value changes only `time`, leaving
-`timestamp` untouched, so an existing `jq` pipeline reading `timestamp`
-never needs to change. See OUTPUT FORMATS' "Timestamps" subsection below.
+Every object also carries a trailing `time` field (always a string), a
+separately rendered form of `timestamp` controlled by `-t`/`--time-format`
+(elapsed-since-first-packet by default -- see OUTPUT FORMATS' "Timestamps"
+subsection below for every value `-t` accepts). Whatever `-t` selects only
+ever changes `time`, never `timestamp` itself, so an existing `jq` pipeline
+reading `timestamp` for the raw epoch value never needs to change regardless
+of `-t`.
 
 After `time`, every object also carries `direction_source` and
 `direction_client_ip` -- which side of this packet's TCP flow is the client
@@ -1564,9 +1641,10 @@ Over a hundred fields are only present (omitted entirely, not `null`) on
 packets where they apply:
 
 - `src_mac_vendor` / `dst_mac_vendor`: the OUI (MAC vendor) name for
-  `src_mac`/`dst_mac`, from the built-in OUI table (`--no-oui` disables this
-  lookup). Present only when `has_ethernet` and the lookup found a match --
-  see OUTPUT FORMATS' "Name resolution" subsection below.
+  `src_mac`/`dst_mac`, from the built-in OUI table (`--oui` enables this
+  lookup, off by default). Present only when `has_ethernet`, `--oui` was
+  given, and the lookup found a match -- see OUTPUT FORMATS' "Name
+  resolution" subsection below.
 - `has_vlan_tag` / `vlan_id`: whether this packet is 802.1Q VLAN-encapsulated
   and, if so, its VLAN ID. Unlike the resolver annotations below, these two
   fields aren't omitted individually on a "miss" -- they're present as a pair
@@ -2666,8 +2744,8 @@ flags:
 
 | Value | Meaning |
 |---|---|
-| `e` / `epoch` (default) | Raw seconds since the Unix epoch, `%s.ffffff` -- byte-for-byte the same rendering `decode` has always used, so leaving `-t` unset changes nothing about existing output or scripts built against it. |
-| `r` / `relative` | Seconds elapsed since the *first* packet in this decode (`0.000000` for that first packet). |
+| `r` / `relative` (default) | Seconds elapsed since the *first* packet in this decode (`0.000000` for that first packet) -- the most readable default for a human scanning a capture, same as tshark/Wireshark's own default. |
+| `e` / `epoch` | Raw seconds since the Unix epoch, `%s.ffffff` -- the rendering `decode` always used before `r`/`relative` became the default; still one flag away (`-t epoch`), and the raw-epoch `timestamp` JSON field is unaffected by `-t` regardless (see below). |
 | `d` / `delta` | Seconds elapsed since the *previous* packet in this decode (`0.000000` for the first packet, since it has no previous one). |
 | `a` / `absolute` | Wall-clock time of day, `HH:MM:SS.ffffff`. |
 | `ad` / `absolute-date` | Wall-clock date and time, `YYYY-MM-DD HH:MM:SS.ffffff`. |
@@ -2689,23 +2767,23 @@ before the capture is even opened.
 
 In `text` output, the timestamp is simply rendered in whichever format was
 selected, in the same leading position it has always occupied. In `json`,
-selecting anything other than the default `e`/`epoch` does not change the
-existing raw-epoch `timestamp` field -- it adds a second field, `time`
-(always a string, holding whatever `-t` selected), so a `jq` pipeline or any
-other consumer already reading `timestamp` keeps working unmodified. In
-`csv`, the same rendered value is appended as a new trailing `time` column,
-after `vlan_id` -- deliberately last, not next to `timestamp` where it's
-conceptually closest, so it never shifts any other column's position, the
-same reasoning `vlan_id` itself already follows (see the `csv` section
-above).
+`-t`'s selected rendering never changes the existing raw-epoch `timestamp`
+field, whatever `-t` value is in effect (including the default, `r`/
+`relative`) -- it's a second, separate field, `time` (always a string,
+holding whatever `-t` selected), so a `jq` pipeline or any other consumer
+that reads `timestamp` for the raw epoch value keeps working unmodified
+regardless of `-t`. In `csv`, the same rendered value is appended as a new
+trailing `time` column, after `vlan_id` -- deliberately last, not next to
+`timestamp` where it's conceptually closest, so it never shifts any other
+column's position, the same reasoning `vlan_id` itself already follows (see
+the `csv` section above).
 
 A `ts` too far in the past or future for this platform's calendar
 representation to compute falls back, for `absolute`/`absolute-date` only,
-to the same raw-epoch rendering `epoch` always produces, suffixed with `(raw
-epoch value -- out of range for calendar display)` -- `decode` never
-fabricates a calendar date it can't actually compute, the same "annotate,
-never invent" posture the OUI/hostname/service-name resolver below already
-follows.
+to the same raw-epoch rendering `epoch` produces, suffixed with `(raw epoch
+value -- out of range for calendar display)` -- `decode` never fabricates a
+calendar date it can't actually compute, the same "annotate, never invent"
+posture the OUI/hostname/service-name resolver below already follows.
 
 ### Name resolution (OUI / hostname / service name)
 
@@ -2721,8 +2799,9 @@ default:
 
 - **OUI / MAC vendor** (`src_mac_vendor`/`dst_mac_vendor` in JSON, the
   `(vendor)` annotation on `decode`'s text-format `eth` line and CSV's
-  `src_mac_vendor`/`dst_mac_vendor` columns) -- **on by default**, disabled
-  with `--no-oui`. Looked up against a large table built into the
+  `src_mac_vendor`/`dst_mac_vendor` columns) -- **off by default, to keep
+  output compact**, enabled with `--oui`. Looked up against a large table
+  built into the
   `conduitscope` binary itself; no external file, network access, or extra
   flag is needed. This table is generated ahead of time by
   `tools/generate_oui_table.py` from a fetched copy of the nmap project's
@@ -2733,6 +2812,19 @@ default:
   live at build time or run time; refreshing it against a newer IEEE
   registry snapshot is a manual, offline step (rerun that script, commit the
   regenerated `include/conduitscope/oui_table.gen.hpp`).
+  In `decode`'s **text** output specifically, the whole `eth <src> -> <dst>`
+  line this vendor name attaches to is itself a separate, also-off-by-default
+  toggle: `-e`/`--ether` (mirrors tcpdump's own `-e`). `--oui` implies
+  `-e` -- there'd be nothing to attach a vendor name to otherwise -- so
+  `--oui` alone still shows the full `eth <mac> (<vendor>) -> <mac>
+  (<vendor>)` line; `-e` alone shows the MAC pair with no vendor name. A
+  VLAN-tagged packet's `vlan <id>` still appears on its own regardless of
+  `-e` (see "VLAN" further below) -- 802.1Q membership isn't a MAC-address
+  fact, so `--no-vlan` is what controls it, independent of `-e`/`--oui`.
+  This `-e` toggle is text-output-only: JSON/CSV always include
+  `src_mac`/`dst_mac` as base fields (like `src_ip`/`dst_ip`), regardless of
+  `-e` -- only the `*_mac_vendor` annotation depends on `--oui`, in every
+  format.
 - **Hostname** (`src_hostname`/`dst_hostname` in JSON and CSV, the
   `(hostname)` annotation after an IP on `decode`'s text-format summary
   line) -- **off by default**, enabled with `--resolve`. **File-only: this
@@ -2794,7 +2886,7 @@ default:
   extend or override it for anything this table doesn't cover.
 
 Scope: `decode` and `policy validate` share the exact same three lookups and
-CLI flags. `policy validate` takes the identical `--no-oui`/`--resolve`/
+CLI flags. `policy validate` takes the identical `--oui`/`--resolve`/
 `--hosts`/`--nn`/`--services` options and annotates its own report the same
 way -- see POLICY FILE FORMAT's "`policy validate`" section for exactly
 which report fields get which annotation.
@@ -3993,6 +4085,14 @@ Decode a capture as human-readable text:
 conduitscope decode -r capture.pcap
 ```
 
+See the Ethernet header (source/destination MAC, VLAN tag) alongside each
+packet, with vendor names looked up against the built-in OUI table --
+`--oui` alone is enough, since it implies `-e`/`--ether`:
+
+```sh
+conduitscope decode -r capture.pcap --oui
+```
+
 Get just the aggregate picture of what's in a large capture before deciding
 how to filter it:
 
@@ -4018,6 +4118,15 @@ Stop early on a very large capture while you're iterating on a filter:
 
 ```sh
 conduitscope decode -r capture.pcap --max-packets 500
+```
+
+Narrow a large capture to just one conversation before decoding it, using
+the same BPF syntax `-i`'s own `--filter` takes -- applied per-packet after
+reading the file, so it works against an already-captured pcap just as well
+as it works at live-capture time:
+
+```sh
+conduitscope decode -r capture.pcap --filter "host 192.168.1.10 and port 502"
 ```
 
 See which S7 sessions get established and what function codes flow over
