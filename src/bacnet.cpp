@@ -1263,4 +1263,15 @@ std::optional<BacnetFrame> try_parse_bacnet(ByteSpan udp_payload) {
     }
 }
 
+std::optional<ProtocolResult> BacnetDecoder::decode(ByteSpan payload, DecodeContext& /*ctx*/) const {
+    auto frame = try_parse_bacnet(payload);
+    if (!frame) return std::nullopt;
+    return ProtocolResult::make<BacnetFrame>("bacnet", std::move(*frame));
+}
+
+const ProtocolDecoder& bacnet_decoder() {
+    static const BacnetDecoder instance;
+    return instance;
+}
+
 }  // namespace conduitscope

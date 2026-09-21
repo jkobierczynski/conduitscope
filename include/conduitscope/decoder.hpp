@@ -1404,15 +1404,10 @@ private:
     // reason as tcp_reassembly_ above -- cross-packet state accumulated across decode() calls.
     mutable FlowStateMap registry_flow_state_;
 
-    // MQTT protocol version (0=unknown, 4=v3.1.1, 5=v5.0) learned from a CONNECT packet seen
-    // earlier on this TCP SESSION (both directions -- keyed the same way as modbus_pending_'s outer
-    // key, via the session_key helper in decoder.cpp, since a later SUBSCRIBE/SUBACK/UNSUBSCRIBE
-    // needing this hint can arrive in either direction relative to the CONNECT itself). Used only to
-    // disambiguate the handful of MQTT packet types whose own wire shape is genuinely ambiguous
-    // between v3.1.1 and v5 without it -- see mqtt.hpp's "Version disambiguation" section; every
-    // other MQTT packet type is self-describing and never consults this map. `mutable` for the same
-    // reason as tcp_reassembly_ above.
-    mutable std::unordered_map<std::string, uint8_t> mqtt_session_version_;
+    // MQTT's own per-session learned protocol version used to live here as a bespoke
+    // mqtt_session_version_ map -- migration batch 2 (Stage 11) moved it into MqttFlowState,
+    // reached via registry_flow_state_ above (DecodeContext::flow_state<T>(), session-keyed, the
+    // same generalization Stage 2 already did for modbus_pending_) -- see mqtt.hpp.
 
     // Determines the bytes protocol detection (Modbus/DNP3-link-layer/TPKT) should run against
     // for this packet: either `tcp.payload` unchanged, or a buffer combining it with bytes carried

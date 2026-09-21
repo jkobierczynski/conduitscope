@@ -1225,4 +1225,85 @@ std::optional<CipIoFrame> try_parse_cip_io(ByteSpan udp_payload) {
     }
 }
 
+// --- Migration batch 2: EnipTcpDecoder/EnipUdpDecoder (registration-model interface) -----------
+//
+// decode() is an exact behavioral transplant of the removed decoder.cpp `if (want_enip) { ... }`
+// (TCP) call site's body -- the same-payload multi-message coalescing loop (it's normal for a
+// sender/OS to coalesce several small encapsulation messages into one TCP segment before
+// flushing, like IEC104/DNP3's own APDUs/frames) plus the merge-CIP-fields logic, both moved here
+// unchanged, INCLUDING the legacy asymmetry noted in EnipResult's own comment: only the first
+// message's top-level `notes` are folded in, every message's `cip.notes` are. `ctx` is unused:
+// EtherNet/IP explicit messaging is purely stateless, unlike Dnp3Decoder/CotpDecoder.
+std::optional<ProtocolResult> EnipTcpDecoder::decode(ByteSpan payload, DecodeContext& /*ctx*/) const {
+    auto frame = try_parse_enip(payload);
+    if (!frame) {
+        return std::nullopt;
+    }
+
+    EnipResult result;
+    result.summary = frame->summary;
+    for (const auto& n : frame->notes) result.notes.push_back(n);
+
+    constexpr size_t kMaxCipValues = 50;
+    std::vector<std::string> merged_values;
+    auto merge_cip = [&](const EnipFrame& f) {
+        if (!f.has_cip) return;
+        for (const auto& n : f.cip.notes) result.notes.push_back(n);
+        for (const auto& v : f.cip.values) {
+            if (merged_values.size() >= kMaxCipValues) break;
+            merged_values.push_back(v);
+        }
+    };
+    merge_cip(*frame);
+
+    // Like IEC104/DNP3, one encapsulation message is small and it's normal for a sender or the OS
+    // to coalesce several into one TCP segment before flushing.
+    constexpr size_t kMaxEnipMessagesPerPayload = 50;
+    size_t offset = frame->wire_length;
+    size_t message_count = 1;
+    while (offset < payload.size() && message_count < kMaxEnipMessagesPerPayload) {
+        ByteSpan rest = payload.from(offset);
+        auto next = try_parse_enip(rest);
+        if (!next) break;  // remaining bytes aren't another EtherNet/IP message -- stop, don't guess
+        ++message_count;
+        std::string note = "additional EtherNet/IP message " + std::to_string(message_count) +
+                            " found in the same TCP payload at byte offset " + std::to_string(offset) +
+                            " (coalesced by the sender/OS): " + next->summary;
+        result.notes.push_back(note);
+        merge_cip(*next);
+        offset += next->wire_length;
+    }
+    if (message_count >= kMaxEnipMessagesPerPayload) {
+        result.notes.push_back("stopped after " + std::to_string(kMaxEnipMessagesPerPayload) +
+                                " EtherNet/IP message(s) in this one TCP payload, more may remain "
+                                "(safety cap)");
+    }
+
+    result.first = *frame;
+    result.first.cip.values = merged_values;  // cumulative across every coalesced message, capped
+
+    return ProtocolResult::make<EnipResult>("enip", std::move(result));
+}
+
+// CIP I/O (UDP) needs no coalescing or per-field merging of its own -- see this class's own
+// comment in enip.hpp -- so decode() is a direct pass-through onto try_parse_cip_io. `ctx` is
+// unused for the same reason EnipTcpDecoder's is.
+std::optional<ProtocolResult> EnipUdpDecoder::decode(ByteSpan payload, DecodeContext& /*ctx*/) const {
+    auto io = try_parse_cip_io(payload);
+    if (!io) {
+        return std::nullopt;
+    }
+    return ProtocolResult::make<CipIoFrame>("enip", std::move(*io));
+}
+
+const ProtocolDecoder& enip_tcp_decoder() {
+    static const EnipTcpDecoder instance;
+    return instance;
+}
+
+const ProtocolDecoder& enip_udp_decoder() {
+    static const EnipUdpDecoder instance;
+    return instance;
+}
+
 }  // namespace conduitscope

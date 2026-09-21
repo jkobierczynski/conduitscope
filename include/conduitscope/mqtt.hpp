@@ -176,6 +176,7 @@
 #include <vector>
 
 #include "conduitscope/byteio.hpp"
+#include "conduitscope/protocol_decoder.hpp"
 
 namespace conduitscope {
 
@@ -307,5 +308,52 @@ std::optional<size_t> mqtt_declared_length(ByteSpan payload);
 // (the same graceful-degradation posture opcua.cpp's own try_parse_opcua_message already
 // establishes), rather than discarding the whole packet.
 std::optional<MqttMessage> try_parse_mqtt_message(ByteSpan payload, uint8_t session_version_hint = 0);
+
+// Migration batch 2 (MQTT, Stage 11 -- the last of this batch) -- this protocol's own per-SESSION
+// learned version hint (0=unknown, 4=v3.1.1, 5=v5.0; see "Version disambiguation" above), moved
+// from the bespoke Decoder::mqtt_session_version_ map into the generic registration-model flow-
+// state mechanism, the same generalization Stage 2 (Modbus) already did for
+// Decoder::modbus_pending_. Unlike COTP/DNP3 (FlowStateKeying::DirectionalFlow -- see cotp.hpp/
+// dnp3.hpp's own comments for why those two genuinely need per-direction state), MQTT's version
+// hint is correctly SESSION-scoped: a CONNECT and a later SUBSCRIBE/SUBACK/UNSUBSCRIBE needing
+// this hint can travel in either direction relative to each other, so this uses
+// DecodeContext::flow_state<T>()'s unchanged default (FlowStateKeying::Session), the same choice
+// ModbusFlowState/TwinCatFlowState already made.
+class MqttFlowState : public DecoderFlowState {
+public:
+    uint8_t version_hint = 0;
+};
+
+// One decoded MQTT packet, wrapped for the ProtocolDecoder interface. `first` reuses MqttMessage
+// verbatim (mirrors EnipResult/HartIpResult's own "first" convention) -- it already carries every
+// field the legacy call site dual-wrote, no reduction needed. `notes` accumulates every coalesced
+// packet's own notes (see MqttDecoder::decode); `summary` is always the FIRST packet's summary.
+struct MqttResult {
+    std::string summary;
+    std::vector<std::string> notes;
+    MqttMessage first;
+};
+
+// MQTT over TCP -- id()=="mqtt", GateKind::TcpPortIndependent, tcp_declared_length() drives this
+// codebase's usual PDU/frame-level TCP stream reassembly (mirrors opcua_declared_length/
+// hartip_declared_length/enip_declared_length). decode() reproduces the legacy `if (want_mqtt)`
+// call site's own session-version-hint lookup/learning and same-payload multi-packet coalescing
+// loop (small control packets like PINGREQ/PUBACK/SUBACK are commonly coalesced by the sender/OS,
+// capped at 50 -- the same shape DNP3/IEC104/OPC UA/EtherNet-IP/HART-IP all already have). The
+// FTP-control-line/LDAP-BER port carve-outs stay exactly where they are today -- call-site
+// pre-checks deciding *whether* to invoke this decoder at all (see decoder.cpp's own
+// `effective_payload_is_ftp_control`/`effective_payload_is_ldap`), not part of this decoder's own
+// parsing.
+class MqttDecoder : public ProtocolDecoder {
+public:
+    std::string_view id() const override { return "mqtt"; }
+    GateKind gate_kind() const override { return GateKind::TcpPortIndependent; }
+    std::optional<size_t> tcp_declared_length(ByteSpan candidate) const override {
+        return mqtt_declared_length(candidate);
+    }
+    std::optional<ProtocolResult> decode(ByteSpan payload, DecodeContext& ctx) const override;
+};
+
+const ProtocolDecoder& mqtt_decoder();
 
 }  // namespace conduitscope

@@ -1073,6 +1073,20 @@ Both versions of the wire format predating OASIS standardization are handled: MQ
 original Eclipse/IBM-era "MQIsdp" protocol name, ProtocolLevel 3), MQTT 3.1.1 (OASIS, "MQTT",
 level 4), and MQTT 5.0 (OASIS, level 5).
 
+**Migration batch 2** (the last protocol in this batch): built on the registration-model
+`ProtocolDecoder` interface (`MqttDecoder`, `mqtt.hpp`/`mqtt.cpp`) -- see `docs/DEVELOPMENT.md`'s
+"registration-model decoder refactor" entry. Detection/decode logic and output are unchanged
+(still dual-writing into this same `DecodedPacket` struct, same same-TCP-payload multi-packet
+coalescing); this is an internal dispatch change only. The one piece of cross-packet state this
+decoder needs -- its per-session learned protocol version, used only to disambiguate SUBSCRIBE/
+SUBACK/UNSUBSCRIBE's genuinely ambiguous v3.1.1-vs-v5 wire shape (see below) -- moved from the
+bespoke `Decoder::mqtt_session_version_` map into `MqttFlowState`, reached via the unchanged,
+session-keyed `DecodeContext::flow_state<T>()` every other session-scoped stateful decoder in this
+codebase already uses (the same generalization Modbus's own `ModbusFlowState` did for
+`modbus_pending_`). Unlike COTP/DNP3's fragment reassembly, this state is correctly
+session-scoped, not per-direction, since a CONNECT and the SUBSCRIBE/SUBACK/UNSUBSCRIBE that needs
+its learned version can travel in either direction relative to each other.
+
 #### Structural detection gate: honestly the weakest in this codebase
 
 MQTT's fixed header is one byte (top nibble = Control Packet Type 1-15, bottom nibble = flags) plus
@@ -1221,6 +1235,13 @@ analogous to DNP3's transport FIR/FIN chaining an application fragment across
 several data-link frames, so this decoder needs no cross-frame reassembly
 state at all -- only the same TCP-segment-level PDU reassembly every protocol
 here gets (see docs/USER_GUIDE.md's LIMITATIONS).
+
+**Migration batch 2**: built on the registration-model `ProtocolDecoder` interface
+(`Iec104Decoder`, `iec104.hpp`/`iec104.cpp`) -- see `docs/DEVELOPMENT.md`'s "registration-model
+decoder refactor" entry. Detection/decode logic and output are unchanged (still dual-writing into
+this same `DecodedPacket` struct, same same-TCP-payload multi-APDU coalescing); this is an internal
+dispatch change only -- and, being purely stateless (no cross-frame reassembly, as above), a
+simpler one than DNP3's or COTP's: `Iec104Decoder` needs no `DecoderFlowState` subclass at all.
 
 **APCI** is fully decoded for all three frame formats: **I-format**
 (numbered information transfer -- the 15-bit send/receive sequence numbers
@@ -1414,6 +1435,17 @@ Like DNP3/IEC 104's small frames, it's normal for several encapsulation
 messages to be coalesced into one TCP segment; conduitscope finds and
 decodes every complete one present, not just the first, the same way it
 does for those two protocols.
+
+**Migration batch 2**: both sides are built on the registration-model `ProtocolDecoder` interface
+-- explicit messaging (TCP) as `EnipTcpDecoder` and implicit/I/O messaging (UDP) as
+`EnipUdpDecoder` (both `enip.hpp`/`enip.cpp`) -- see `docs/DEVELOPMENT.md`'s "registration-model
+decoder refactor" entry. Detection/decode logic and output are unchanged (still dual-writing into
+this same `DecodedPacket` struct, same same-TCP-payload multi-message coalescing on the TCP side);
+this is an internal dispatch change only. Both sides are purely stateless, needing no
+`DecoderFlowState` subclass. This is also the first case in this codebase's registration-model
+decoders of two separate decoder instances sharing one `id()` ("enip") -- safe because every
+output writer already dispatches on the plain `DecodedPacket::protocol` string, never on a
+registry lookup requiring `id()` uniqueness.
 
 **ListIdentity** responses get their identity item decoded into
 device-fingerprinting fields: vendor ID, device type, product code,
@@ -2134,6 +2166,16 @@ decode) -- byte offset by byte offset. Three layers are decoded: BVLC (the
 UDP framing header), NPDU (the network layer), and APDU (the application
 layer, where BACnet's actual services live).
 
+**Migration batch 2**: built on the registration-model `ProtocolDecoder` interface
+(`BacnetDecoder`, `bacnet.hpp`/`bacnet.cpp`) -- see `docs/DEVELOPMENT.md`'s "registration-model
+decoder refactor" entry. Detection/decode logic and output are unchanged (still dual-writing into
+this same `DecodedPacket` struct); this is an internal dispatch change only. Purely stateless, and
+unlike EtherNet/IP's CIP I/O and HART-IP's own UDP path, needs no wrapper result type at all --
+`BacnetFrame` already carried every field the legacy call site dual-wrote, so `decode()` returns
+it unwrapped, the same "no new result type" shape `EnipUdpDecoder` has. Its own `id()`
+("bacnet"), not shared with anything else -- the simpler of this batch's two
+`GateKind::UdpPortIndependent` additions.
+
 #### BVLC (4-byte fixed header, ASHRAE 135 Annex J.2)
 
 | Field | Size | Notes |
@@ -2382,6 +2424,19 @@ others establish a long-lived TCP session first. Detection is the same
 both TCP and UDP (see docs/DEVELOPMENT.md's PROTOCOL DETECTION above for the exact gate and the
 TCP-only Modbus collision it doesn't resolve). Every multi-byte field is
 big-endian.
+
+**Migration batch 2**: both sides are built on the registration-model `ProtocolDecoder` interface
+-- `HartIpTcpDecoder` and `HartIpUdpDecoder` (both `hartip.hpp`/`hartip.cpp`), reusing
+EtherNet/IP's own two-decoder-instances-sharing-one-`id()` pattern (`"hartip"`), since HART-IP
+rides over EITHER transport using the SAME wire format and the SAME `try_parse_hartip` function
+rather than EtherNet/IP's two genuinely separate TCP/UDP functions -- see
+`docs/DEVELOPMENT.md`'s "registration-model decoder refactor" entry. Detection/decode logic and
+output are unchanged (still dual-writing into this same `DecodedPacket` struct, same
+same-TCP-payload multi-message coalescing on the TCP side); this is an internal dispatch change
+only. Both sides are purely stateless, needing no `DecoderFlowState` subclass. The IKE-NAT-T
+(port 4500)/VXLAN (port 4789) UDP exclusion described above moved from an inline check at
+decoder.cpp's old UDP call site into a small `hartip_udp_excluded_port(uint16_t)` helper next to
+the parser in `hartip.hpp`, same exclusion, same RFC 3948/RFC 7348 rationale.
 
 #### The 8-byte fixed header
 
@@ -2640,6 +2695,15 @@ and named StatusCode this section asserts, and python-opcua's own
 machine-generated protocol bindings (`github.com/FreeOpcUa/python-opcua`,
 generated directly from the OPC Foundation's schema) as an independent
 cross-check on field order and type.
+
+**Migration batch 2**: built on the registration-model `ProtocolDecoder` interface
+(`OpcUaDecoder`, `opcua.hpp`/`opcua.cpp`) -- see `docs/DEVELOPMENT.md`'s "registration-model
+decoder refactor" entry. Detection/decode logic and output are unchanged (still dual-writing into
+this same `DecodedPacket` struct, same same-TCP-payload multi-chunk coalescing); this is an internal
+dispatch change only -- and, being purely stateless (SecureConversation chunking is handled
+entirely within `try_parse_opcua_message`/`OpcUaMessage::wire_length`, with no cross-packet
+reassembly of its own), a simpler one than DNP3's or COTP's: `OpcUaDecoder` needs no
+`DecoderFlowState` subclass at all.
 
 #### The 8-byte UA-TCP common header
 

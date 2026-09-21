@@ -1314,4 +1314,54 @@ std::optional<OpcUaMessage> try_parse_opcua_message(ByteSpan payload) {
     return msg;
 }
 
+// --- Migration batch 2: OpcUaDecoder (registration-model interface) ---------------------------
+//
+// decode() is an exact behavioral transplant of the removed decoder.cpp `if (want_opcua) { ... }`
+// call site's body -- the same-payload multi-chunk coalescing loop (it's normal for a sender/OS to
+// coalesce several OPC UA chunks into one TCP segment before flushing, like EtherNet/IP's/
+// HART-IP's own small messages) plus the note-merging logic, both moved here unchanged so
+// decoder.cpp's own call site can shrink to gate+call+dual-write. `ctx` is unused: OPC UA is
+// purely stateless (see this file's own opening comment), unlike Dnp3Decoder/CotpDecoder.
+std::optional<ProtocolResult> OpcUaDecoder::decode(ByteSpan payload, DecodeContext& /*ctx*/) const {
+    auto msg = try_parse_opcua_message(payload);
+    if (!msg) {
+        return std::nullopt;
+    }
+
+    OpcUaResult result;
+    result.summary = msg->summary;
+    result.first = *msg;
+    for (const auto& n : msg->notes) result.notes.push_back(n);
+
+    // Like EtherNet/IP/HART-IP's own small messages, it's normal for a sender or the OS to
+    // coalesce several OPC UA chunks into one TCP segment before flushing.
+    constexpr size_t kMaxOpcUaMessagesPerPayload = 50;
+    size_t offset = msg->wire_length;
+    size_t message_count = 1;
+    while (offset < payload.size() && message_count < kMaxOpcUaMessagesPerPayload) {
+        ByteSpan rest = payload.from(offset);
+        auto next = try_parse_opcua_message(rest);
+        if (!next) break;  // remaining bytes aren't another OPC UA message -- stop, don't guess
+        ++message_count;
+        std::string note = "additional OPC UA message " + std::to_string(message_count) +
+                            " found in the same TCP payload at byte offset " + std::to_string(offset) +
+                            " (coalesced by the sender/OS): " + next->summary;
+        result.notes.push_back(note);
+        for (const auto& n : next->notes) result.notes.push_back(n);
+        offset += next->wire_length;
+    }
+    if (message_count >= kMaxOpcUaMessagesPerPayload) {
+        result.notes.push_back("stopped after " + std::to_string(kMaxOpcUaMessagesPerPayload) +
+                                " OPC UA message(s) in this one TCP payload, more may remain "
+                                "(safety cap)");
+    }
+
+    return ProtocolResult::make<OpcUaResult>("opcua", std::move(result));
+}
+
+const ProtocolDecoder& opcua_decoder() {
+    static const OpcUaDecoder instance;
+    return instance;
+}
+
 }  // namespace conduitscope

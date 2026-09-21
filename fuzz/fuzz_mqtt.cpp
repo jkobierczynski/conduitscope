@@ -14,7 +14,8 @@
 // Ethernet/IPv4/TCP framing needed, since it already takes a ByteSpan over what would be a TCP
 // payload. `session_version_hint` is exercised at both its defined values (0 = unknown, and 5 =
 // MQTT v5) across separate runs of this same input, rather than picked once, since decoder.cpp
-// threads a per-session learned hint through this parameter (see Decoder::mqtt_session_version_)
+// threads a per-session learned hint through this parameter (see MqttFlowState, mqtt.hpp --
+// migration batch 2 moved this out of the earlier Decoder::mqtt_session_version_ bespoke map)
 // and the hint measurably changes how certain ambiguous packet types are parsed -- both are real,
 // reachable values for the exact same wire bytes depending on what a CONNECT packet earlier in
 // the session declared.

@@ -334,6 +334,7 @@
 #include <vector>
 
 #include "conduitscope/byteio.hpp"
+#include "conduitscope/protocol_decoder.hpp"
 
 namespace conduitscope {
 
@@ -441,5 +442,68 @@ std::optional<size_t> hartip_declared_length(ByteSpan payload);
 // {0,1,2,3}, or when MsgLength is implausibly small (< 8) -- see this file's header comment's
 // "structural detection gate" paragraph.
 std::optional<HartIpFrame> try_parse_hartip(ByteSpan payload);
+
+// Migration batch 2 (HART-IP, Stage 9): true when `port` is one of the two UDP ports whose own
+// spec-mandated wire formats SYSTEMATICALLY (not coincidentally) satisfy HART-IP's own
+// MessageType/MessageID structural detection gate -- RFC 3948's IKE NAT-Traversal non-ESP marker
+// (port 4500, an all-zero 4-byte prefix by definition) and RFC 7348's VXLAN header (port 4789, an
+// all-zero Reserved field at that same byte range by definition). Used by decoder.cpp's UDP
+// dispatch to exclude these two ports from HART-IP's otherwise port-independent Auto-mode attempt
+// entirely (not merely deprioritize them, the way Modbus/S7comm/DNP3 outrank HART-IP on TCP) --
+// without this exclusion, genuine NAT-T IKE/VXLAN traffic would ALWAYS misclassify as "hartip"
+// rather than only occasionally. Moved here (previously computed inline at the UDP call site) so
+// the exclusion and its documented RFC rationale live next to the parser it protects; see
+// hartip.hpp's file header comment and tunnel_vpn.hpp's own IKE/VXLAN paragraphs for the Tier 5
+// side of this collision. Only consulted in Auto mode -- an explicit `--protocol hartip` still
+// attempts every port, same as every other explicit protocol filter in this codebase.
+bool hartip_udp_excluded_port(uint16_t port);
+
+// One decoded HART-IP message, wrapped for the ProtocolDecoder interface (protocol_decoder.hpp).
+// `first` reuses HartIpFrame verbatim (mirrors EnipResult's own "first" convention in enip.hpp) --
+// it already carries everything the legacy call sites dual-wrote, no reduction needed. `notes`
+// accumulates every coalesced message's own notes (TCP only -- see HartIpTcpDecoder::decode);
+// `summary` is always the FIRST message's summary, matching the legacy call sites' behavior.
+struct HartIpResult {
+    std::string summary;
+    std::vector<std::string> notes;
+    HartIpFrame first;
+};
+
+// HART-IP over TCP -- id()=="hartip", GateKind::TcpPortIndependent, tcp_declared_length() drives
+// this codebase's usual PDU/frame-level TCP stream reassembly (mirrors EnipTcpDecoder). decode()
+// reproduces the legacy `if (want_hartip)` TCP call site's own same-payload multi-message
+// coalescing loop (several small HART-IP messages coalesced by the sender/OS into one TCP
+// segment, capped at 50 -- see enip.hpp's EnipTcpDecoder for the identical shape).
+class HartIpTcpDecoder : public ProtocolDecoder {
+public:
+    std::string_view id() const override { return "hartip"; }
+    GateKind gate_kind() const override { return GateKind::TcpPortIndependent; }
+    std::optional<size_t> tcp_declared_length(ByteSpan candidate) const override {
+        return hartip_declared_length(candidate);
+    }
+    std::optional<ProtocolResult> decode(ByteSpan payload, DecodeContext& ctx) const override;
+};
+
+// HART-IP over UDP -- id()=="hartip" (deliberately shared with HartIpTcpDecoder above, the same
+// two-instance-shared-id() pattern EnipTcpDecoder/EnipUdpDecoder established first -- see that
+// pair's own comments in enip.hpp for why sharing one id() is safe: every output writer dispatches
+// on the plain DecodedPacket::protocol string, never on registry id() uniqueness), unlike
+// EtherNet/IP's separate TCP/UDP wire formats HART-IP rides over EITHER transport using the SAME
+// try_parse_hartip function -- this decoder is a thin, stateless wrapper around it.
+// GateKind::UdpPortIndependent (tried opportunistically regardless of port, the same posture
+// EnipUdpDecoder/BacnetDecoder-to-be have) -- but see hartip_udp_excluded_port above: decoder.cpp's
+// own UDP call site still excludes ports 4500/4789 from even attempting this decoder in Auto mode,
+// a call-site-level pre-check (mirroring FTP-vs-MQTT's own looks_like_* carve-outs elsewhere in
+// this codebase), not something decode() itself needs to know about. No tcp_declared_length()
+// override -- UDP has no equivalent declared-length reassembly step.
+class HartIpUdpDecoder : public ProtocolDecoder {
+public:
+    std::string_view id() const override { return "hartip"; }
+    GateKind gate_kind() const override { return GateKind::UdpPortIndependent; }
+    std::optional<ProtocolResult> decode(ByteSpan payload, DecodeContext& ctx) const override;
+};
+
+const ProtocolDecoder& hartip_tcp_decoder();
+const ProtocolDecoder& hartip_udp_decoder();
 
 }  // namespace conduitscope

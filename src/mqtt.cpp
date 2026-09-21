@@ -1276,4 +1276,70 @@ std::optional<MqttMessage> try_parse_mqtt_message(ByteSpan payload, uint8_t sess
     return msg;
 }
 
+std::optional<ProtocolResult> MqttDecoder::decode(ByteSpan payload, DecodeContext& ctx) const {
+    auto& state = ctx.flow_state<MqttFlowState>();
+    uint8_t session_hint = state.version_hint;
+
+    auto first = try_parse_mqtt_message(payload, session_hint);
+    if (!first) return std::nullopt;
+
+    MqttResult result;
+    result.summary = first->summary;
+    for (const auto& n : first->notes) result.notes.push_back(n);
+    result.first = *first;
+
+    // A CONNECT anywhere in this payload updates this session's tracked version for every later
+    // packet on it (including any further coalesced packets in this very same TCP payload, handled
+    // via `running_hint` below) -- see mqtt.hpp's "Version disambiguation" section and
+    // MqttFlowState's own comment.
+    uint8_t running_hint = session_hint;
+    auto maybe_learn_version = [&](const MqttMessage& m) {
+        if (m.packet_type != 1) return;
+        if (m.connect_discovered_version == 5) {
+            running_hint = 5;
+            state.version_hint = running_hint;
+        } else if (m.connect_discovered_version == 4 || m.connect_discovered_version == 3) {
+            // Level 3 is the pre-OASIS "MQTT 3.1" CONNECT (ProtocolName "MQIsdp") -- seen in real
+            // traffic (e.g. older Paho clients). Its SUBSCRIBE/SUBACK/UNSUBSCRIBE/PUBLISH wire
+            // shapes are identical to 3.1.1's (no unconditional Properties section), so it's
+            // tracked under the same "4" hint value rather than left to fall back on the weaker
+            // per-packet heuristic.
+            running_hint = 4;
+            state.version_hint = running_hint;
+        }
+    };
+    maybe_learn_version(*first);
+
+    // Small control packets (PINGREQ/PUBACK/SUBACK/...) are common and it's normal for a sender or
+    // the OS to coalesce several into one TCP segment before flushing, the same pattern as every
+    // other small-message protocol in this codebase.
+    constexpr size_t kMaxMqttMessagesPerPayload = 50;
+    size_t offset = first->wire_length;
+    size_t message_count = 1;
+    while (offset < payload.size() && message_count < kMaxMqttMessagesPerPayload) {
+        ByteSpan rest = payload.from(offset);
+        auto next = try_parse_mqtt_message(rest, running_hint);
+        if (!next) break;  // remaining bytes aren't another MQTT packet -- stop, don't guess
+        ++message_count;
+        std::string note = "additional MQTT packet " + std::to_string(message_count) +
+                            " found in the same TCP payload at byte offset " + std::to_string(offset) +
+                            " (coalesced by the sender/OS): " + next->summary;
+        result.notes.push_back(note);
+        for (const auto& n : next->notes) result.notes.push_back(n);
+        maybe_learn_version(*next);
+        offset += next->wire_length;
+    }
+    if (message_count >= kMaxMqttMessagesPerPayload) {
+        result.notes.push_back("stopped after " + std::to_string(kMaxMqttMessagesPerPayload) +
+                                " MQTT packet(s) in this one TCP payload, more may remain (safety cap)");
+    }
+
+    return ProtocolResult::make<MqttResult>("mqtt", std::move(result));
+}
+
+const ProtocolDecoder& mqtt_decoder() {
+    static const MqttDecoder instance;
+    return instance;
+}
+
 }  // namespace conduitscope

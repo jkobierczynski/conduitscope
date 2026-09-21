@@ -11,7 +11,8 @@
 // Dnp3Decoder::process_frame (DecodeContext::flow_state<Dnp3ReassemblyState>, dnp3.hpp),
 // CotpDecoder::decode (DecodeContext::flow_state<CotpReassemblyState>, cotp.hpp),
 // ModbusDecoder::decode's transaction pairing (DecodeContext::flow_state<ModbusFlowState>,
-// modbus.hpp), and MQTT's session-version hint (Decoder::mqtt_session_version_) are ALL
+// modbus.hpp), and MqttDecoder::decode's session-version hint
+// (DecodeContext::flow_state<MqttFlowState>, mqtt.hpp) are ALL
 // cross-packet, per-flow state that only misbehaves across more than one decode() call on the
 // same flow -- a single-packet fuzz input structurally cannot reach most of what this method
 // exists to protect. Every packet here carries the same synthetic source/destination so they

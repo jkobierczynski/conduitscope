@@ -98,6 +98,7 @@
 #include <vector>
 
 #include "conduitscope/byteio.hpp"
+#include "conduitscope/protocol_decoder.hpp"
 
 namespace conduitscope {
 
@@ -288,5 +289,55 @@ std::string cip_service_name(uint8_t base, bool have_path, bool is_symbolic, boo
 // Order is stable across calls (the order these combinations are tried in, first-seen, deduplicated)
 // but not alphabetized.
 std::vector<std::string> enip_known_cip_service_names();
+
+// Migration batch 2 (see protocol_decoder.hpp/protocol_registry.hpp): everything decoder.cpp's
+// EtherNet/IP TCP call site dual-writes into DecodedPacket, gathered from however many
+// encapsulation messages were coalesced in one TCP payload (see EnipTcpDecoder::decode below) --
+// mirrors exactly what the pre-migration call site computed locally, INCLUDING its one asymmetry:
+// only the first coalesced message's own top-level EnipFrame::notes are folded in (via `notes`
+// below); every message's CIP-level notes (EnipFrame::cip.notes) are folded in regardless. `first`
+// is that first message's full EnipFrame, unmodified, since the legacy call site's per-field
+// dual-write was already a straight field-by-field copy (command_name, and, when has_cip, the
+// cip.* fields) with no reduction of its own worth re-deriving here.
+struct EnipResult {
+    std::string summary;
+    std::vector<std::string> notes;
+    EnipFrame first;
+};
+
+// id() == "enip", gate_kind() == TcpPortIndependent. Wraps try_parse_enip plus the same-TCP-
+// payload multi-message-coalescing loop that used to live directly in decoder.cpp's
+// `if (want_enip)` call site -- EtherNet/IP explicit messaging is purely stateless, so unlike
+// Dnp3Decoder/CotpDecoder there is no per-flow reassembly state here at all. See EnipUdpDecoder
+// below for the CIP implicit (I/O) messaging counterpart -- the two share this same id() (the
+// first intentionally-shared id() in this codebase's registration-model decoders: both render
+// identically as protocol "enip" in every output writer, which all already dispatch on the plain
+// DecodedPacket::protocol string rather than on any registry lookup requiring id() uniqueness).
+class EnipTcpDecoder : public ProtocolDecoder {
+public:
+    std::string_view id() const override { return "enip"; }
+    GateKind gate_kind() const override { return GateKind::TcpPortIndependent; }
+    std::optional<size_t> tcp_declared_length(ByteSpan candidate) const override {
+        return enip_declared_length(candidate);
+    }
+    std::optional<ProtocolResult> decode(ByteSpan payload, DecodeContext& ctx) const override;
+};
+
+// id() == "enip" (see EnipTcpDecoder's own comment for why this is shared, deliberately),
+// gate_kind() == UdpPortIndependent. Thin wrapper around try_parse_cip_io -- CIP I/O is a single,
+// already-complete UDP datagram with no coalescing or cross-packet state of its own (unlike
+// EtherNet/IP explicit messaging's TCP side above), so decode() is a direct pass-through: the
+// returned ProtocolResult's payload IS the CipIoFrame itself, unwrapped, since it already carries
+// everything decoder.cpp's call site dual-writes (connection_id, sequence_number, io data,
+// summary, notes) with no merging/aggregation step needed.
+class EnipUdpDecoder : public ProtocolDecoder {
+public:
+    std::string_view id() const override { return "enip"; }
+    GateKind gate_kind() const override { return GateKind::UdpPortIndependent; }
+    std::optional<ProtocolResult> decode(ByteSpan payload, DecodeContext& ctx) const override;
+};
+
+const ProtocolDecoder& enip_tcp_decoder();
+const ProtocolDecoder& enip_udp_decoder();
 
 }  // namespace conduitscope

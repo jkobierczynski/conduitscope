@@ -260,6 +260,7 @@
 #include <vector>
 
 #include "conduitscope/byteio.hpp"
+#include "conduitscope/protocol_decoder.hpp"
 
 namespace conduitscope {
 
@@ -399,5 +400,22 @@ struct BacnetFrame {
 // isn't 0x81, or when Function isn't one of the 13 values 0x00-0x0C the spec defines -- see this
 // file's header comment's "structural detection gate" paragraph.
 std::optional<BacnetFrame> try_parse_bacnet(ByteSpan udp_payload);
+
+// Migration batch 2 (BACnet/IP, Stage 10) -- id()=="bacnet", GateKind::UdpPortIndependent (tried
+// opportunistically regardless of port, the same posture EnipUdpDecoder/HartIpUdpDecoder have --
+// see either's own comment in enip.hpp/hartip.hpp). Purely stateless and, unlike EtherNet/IP's
+// CIP I/O and HART-IP's own UDP path, needs no wrapper result type at all: BacnetFrame already
+// carries everything the legacy call site dual-wrote, so decode() is a direct pass-through onto
+// try_parse_bacnet, mirroring EnipUdpDecoder's own "no new result type" shape in enip.hpp/
+// enip.cpp. The second, simpler UdpPortIndependent use in this batch -- no shared id(), no
+// port-exclusion helper, no coalescing loop.
+class BacnetDecoder : public ProtocolDecoder {
+public:
+    std::string_view id() const override { return "bacnet"; }
+    GateKind gate_kind() const override { return GateKind::UdpPortIndependent; }
+    std::optional<ProtocolResult> decode(ByteSpan payload, DecodeContext& ctx) const override;
+};
+
+const ProtocolDecoder& bacnet_decoder();
 
 }  // namespace conduitscope

@@ -334,7 +334,7 @@ Discussed and adopted, in this order:
    interface remains there to introduce if/when a second protocol needs
    protocol-specific rendering of its own.
 
-   **Update: migration batch 2 under way.** With the pilot proven and
+   **Update: migration batch 2 complete.** With the pilot proven and
    TwinCAT tested clean against real captures, Jurgen asked to keep
    migrating -- prioritizing highest-traffic OT protocols, in individually-
    verified stages. Research surfaced a real complication: S7comm,
@@ -431,13 +431,233 @@ Discussed and adopted, in this order:
    alongside `CotpPayload` when COTP/S7comm landed, but remains unused by
    any decoder until one of those three stages actually needs it.
 
-   Remaining in this batch, not yet started: IEC 104, OPC UA, EtherNet/IP
-   (TCP and UDP), HART-IP (TCP and UDP), BACnet/IP, MQTT.
+   IEC 104 is also now done: `Iec104Decoder` (`iec104.hpp`/`iec104.cpp`)
+   reproduces the existing same-TCP-payload multi-APDU coalescing loop and
+   ASDU-merging logic that used to live directly in `decoder.cpp`'s
+   `if (want_iec104)` call site. Unlike DNP3/COTP, IEC 104 needed no
+   `FlowStateKeying` extension and no `DecoderFlowState` subclass at all --
+   an I-format APDU always carries exactly one complete ASDU on the wire, so
+   the whole decoder is purely stateless (see `iec104.hpp`'s own file header
+   comment); `Iec104Decoder::decode` takes a `DecodeContext&` only because
+   `ProtocolDecoder::decode`'s signature requires one, and never reads or
+   writes it. `decoder.cpp`'s two dispatch cascades (declared-length probe
+   and full decode) both sit exactly where the old `if (want_iec104)` blocks
+   always did -- immediately after (still-legacy) OPC UA/EtherNet-IP, before
+   Modbus, preserving the real collision-avoidance ordering documented in
+   PROTOCOL DETECTION (an I-format APDU with N(S)=N(R)=0 can otherwise
+   coincidentally read as a plausible Modbus/TCP MBAP header) regardless of
+   which of the two has migrated. `protocol_registry.cpp`'s
+   `tcp_port_independent_registry()` now lists IEC104 before Modbus to match
+   that real order, rather than by migration date. Verified: full CTest
+   suite (1,197 tests, all passing, no changed expectations) across all
+   three established configs, plus a manual JSON smoke-test over every
+   existing IEC 104 fixture -- including the Modbus-precedence collision
+   fixture (still correctly resolving as `iec104`, not `modbus`) and the
+   real Industroyer2 malware captures -- confirming correct APCI/ASDU
+   decoding and multi-APDU coalescing end to end; no new fixtures were
+   needed.
+
+   OPC UA is also now done: `OpcUaDecoder` (`opcua.hpp`/`opcua.cpp`)
+   reproduces the existing same-TCP-payload multi-chunk coalescing loop and
+   per-field dual-write that used to live directly in `decoder.cpp`'s
+   `if (want_opcua)` call site. Like IEC 104 (and unlike DNP3/COTP), OPC UA
+   needed no `FlowStateKeying` extension and no `DecoderFlowState` subclass
+   -- SecureConversation chunking is entirely self-contained within
+   `try_parse_opcua_message`/`OpcUaMessage::wire_length`, with no
+   cross-packet reassembly of its own, so the decoder is purely stateless;
+   `OpcUaDecoder::decode` takes a `DecodeContext&` only because
+   `ProtocolDecoder::decode`'s signature requires one. `decoder.cpp`'s two
+   dispatch cascades (declared-length probe and full decode) both sit
+   exactly where the old `if (want_opcua)` blocks always did -- tried first
+   of the whole TCP-port-independent cascade, ahead of everything else
+   (including the other two now-migrated protocols above), matching
+   `protocol_registry.cpp`'s `tcp_port_independent_registry()`, which now
+   lists it first for the same reason. Since `OpcUaMessage` already carried
+   every field the legacy call site dual-wrote with no reduction of its
+   own, `OpcUaResult` (`opcua.hpp`) just wraps the first coalesced chunk's
+   full `OpcUaMessage` alongside the merged summary/notes, rather than
+   re-declaring ~25 fields a second time. Verified: full CTest suite (1,197
+   tests, all passing, no changed expectations) across all three
+   established configs, plus a manual JSON smoke-test over both existing
+   OPC UA fixtures -- including the real Wireshark-bug-repro capture --
+   confirming correct Hello/Acknowledge/OpenSecureChannel/Message decoding,
+   Tier 1 service bodies (e.g. `GetEndpointsResponse`'s full endpoint list),
+   and multi-chunk coalescing end to end; no new fixtures were needed.
+
+   EtherNet/IP is also now done, both sides: `EnipTcpDecoder` (explicit
+   messaging, TCP port 44818) reproduces the existing same-TCP-payload
+   multi-message coalescing loop and merge-CIP-fields logic that used to
+   live directly in `decoder.cpp`'s `if (want_enip)` call site, including
+   its one legacy asymmetry -- only the first coalesced message's own
+   top-level `EnipFrame::notes` are folded into the result, while every
+   message's `cip.notes` are (see `EnipResult`'s own comment in `enip.hpp`
+   for why this is preserved rather than "fixed": the job here is an exact
+   behavioral transplant, not a bug hunt). `EnipUdpDecoder` (CIP I/O
+   implicit/real-time messaging, UDP port 2222) needed no coalescing logic
+   of its own -- one UDP datagram is one complete, self-delimited CIP I/O
+   message -- so its `decode()` is a direct pass-through onto
+   `try_parse_cip_io`, returning the existing `CipIoFrame` unwrapped rather
+   than a new result type. Both are purely stateless, like IEC 104/OPC UA
+   above. This is also this codebase's first case of two registration-model
+   decoder instances sharing one `id()` ("enip") -- confirmed safe because
+   every output writer (`output.cpp`) already dispatches on the plain
+   `DecodedPacket::protocol` string, never on a registry lookup requiring
+   `id()` uniqueness. `decoder.cpp`'s three dispatch call sites (TCP
+   declared-length probe, TCP full decode, UDP full decode) all sit exactly
+   where the old `if (want_enip)`/`if (want_enip_io)` blocks always did;
+   `protocol_registry.cpp`'s `tcp_port_independent_registry()` now lists
+   `EnipTcpDecoder` right after OPC UA (matching real dispatch order), and
+   `udp_port_independent_registry()` -- previously empty since this batch's
+   `GateKind::UdpPortIndependent` addition had no user yet -- now lists
+   `EnipUdpDecoder` first, its first real use. Verified: full CTest suite
+   (1,197 tests, all passing, no changed expectations) across all three
+   established configs, plus a manual JSON smoke-test over every existing
+   EtherNet/IP fixture (TCP: RegisterSession/ListIdentity/SendRRData/
+   SendUnitData, Read_Tag/Write_Tag, `Multiple_Service_Packet` recursion,
+   including a 450-packet real capture with 319 EtherNet/IP messages; UDP:
+   CIP I/O connection IDs/sequence numbers/data) confirming correct
+   decoding, coalescing, and CIP value dual-write end to end; no new
+   fixtures were needed.
+
+   HART-IP is also now done, both sides: `HartIpTcpDecoder` and
+   `HartIpUdpDecoder` (both `hartip.hpp`/`hartip.cpp`) reuse EtherNet/IP's
+   own two-registration-model-decoder-instances-sharing-one-`id()` pattern
+   (`"hartip"`), but unlike EtherNet/IP's genuinely separate TCP/UDP wire
+   formats, HART-IP rides over EITHER transport using the exact SAME
+   message shape and the SAME `try_parse_hartip` function, so both decoder
+   classes are thin wrappers around one shared parser rather than each
+   owning its own. `HartIpTcpDecoder::decode` reproduces the existing
+   same-TCP-payload multi-message coalescing loop that used to live
+   directly in `decoder.cpp`'s `if (want_hartip)` TCP call site (capped at
+   50 messages, same as EtherNet/IP/DNP3/IEC104/OPC UA); `HartIpUdpDecoder`
+   needs no coalescing of its own -- one UDP datagram is one complete
+   message -- so its `decode()` is a direct pass-through, wrapped in the
+   same `HartIpResult` type both sides share (`first` reuses `HartIpFrame`
+   verbatim, mirroring `EnipResult`'s own "first" convention, since
+   `HartIpFrame` already carried every field the legacy call sites
+   dual-wrote with no reduction of its own). Both are purely stateless.
+   The one piece of logic that moved rather than transplanted unchanged:
+   the IKE-NAT-T (port 4500)/VXLAN (port 4789) UDP exclusion, previously
+   computed inline at `decoder.cpp`'s old UDP call site, is now a small
+   `hartip_udp_excluded_port(uint16_t)` helper in `hartip.hpp` itself --
+   same two ports, same RFC 3948/RFC 7348 rationale, just living next to
+   the parser it protects instead of at the call site; it remains a
+   call-site-level pre-check deciding whether `HartIpUdpDecoder::decode` is
+   even attempted in Auto mode, not something `decode()` itself tests. The
+   accepted, documented HART-IP-Session-Initiate-vs-Modbus/TCP collision on
+   the TCP side is unchanged and, per its own comment history, deliberately
+   NOT re-litigated here -- reordering HART-IP ahead of Modbus was already
+   tried and measurably regressed the Modbus/S7comm corpus before this
+   batch began. `decoder.cpp`'s three dispatch call sites (TCP
+   declared-length probe, TCP full decode, UDP full decode) all sit exactly
+   where the old `if (want_hartip)` blocks always did;
+   `protocol_registry.cpp`'s `tcp_port_independent_registry()` now lists
+   `HartIpTcpDecoder` right after COTP (tried last of that whole cascade,
+   matching real dispatch order), and `udp_port_independent_registry()`
+   now lists `HartIpUdpDecoder` right after `EnipUdpDecoder`, its second
+   real use (BACnet/IP's own UDP slot in between is skipped, still
+   legacy). Verified: full CTest suite (1,197 tests, all passing, no
+   changed expectations) across all three established configs, plus a
+   manual JSON smoke-test over every existing HART-IP fixture --
+   `sample_hartip.pcap` (55 messages: Session Initiate/Close/Keep
+   Alive/Error/NAK plus every dispatched Pass-Through command, mixing TCP
+   and UDP traffic, several deliberately coalesced into shared payloads),
+   `sample_hartip_checksum.pcap` (valid/invalid longitudinal-checksum
+   pair), and a 46-message real TCP capture (`hart_ip.pcapng`) -- all
+   decoding and dual-writing identically to before migration; no new
+   fixtures were needed.
+
+   BACnet/IP is also now done: `BacnetDecoder` (`bacnet.hpp`/`bacnet.cpp`)
+   is the simpler of this batch's two `GateKind::UdpPortIndependent`
+   additions -- its own `id()` ("bacnet"), not shared with anything, and
+   (unlike EtherNet/IP's CIP I/O and HART-IP's own UDP path) no new
+   wrapper result type at all: `try_parse_bacnet`'s existing `BacnetFrame`
+   already carried every field the legacy `if (want_bacnet)` call site
+   dual-wrote, so `BacnetDecoder::decode` is a direct pass-through
+   returning it unwrapped, the same "no new result type" shape
+   `EnipUdpDecoder` has. Purely stateless, one UDP datagram in, one
+   complete BVLC/NPDU/APDU decode out, no coalescing logic needed.
+   `decoder.cpp`'s single dispatch call site sits exactly where the old
+   `if (want_bacnet)` block always did; `protocol_registry.cpp`'s
+   `udp_port_independent_registry()` now lists `BacnetDecoder` between
+   `EnipUdpDecoder` and `HartIpUdpDecoder`, matching real UDP dispatch
+   order (CIP I/O, then BACnet/IP, then HART-IP) -- this fills what was
+   previously a documented gap in that vector (BACnet's own slot, left
+   empty while it was still legacy). Verified: full CTest suite (1,197
+   tests, all passing, no changed expectations) across all three
+   established configs, plus a manual JSON smoke-test over both existing
+   BACnet fixtures -- `sample_bacnet.pcap` (every BVLC function, NPDU
+   DEST/SRC/Network-Layer-Message combination, and every "first pass"
+   APDU service/PDU-type this decoder value-decodes) and the 54-frame real
+   capture (`ICS-OT-Network-001-bacnet-excerpt.pcap`, 27
+   Confirmed-Request/Complex-ACK ReadProperty pairs against trend-log
+   objects) -- all decoding and dual-writing identically to before
+   migration; no new fixtures were needed.
+
+   With this, every `GateKind::UdpPortIndependent` protocol this codebase
+   has is now migrated -- `udp_port_independent_registry()` is fully
+   populated for the first time.
+
+   MQTT is also now done -- the eleventh and last protocol in this batch:
+   `MqttDecoder` (`mqtt.hpp`/`mqtt.cpp`) reproduces the existing session-
+   version-hint lookup/learning and same-TCP-payload multi-packet
+   coalescing loop that used to live directly in `decoder.cpp`'s
+   `if (want_mqtt)` call site (small control packets like PINGREQ/PUBACK/
+   SUBACK are commonly coalesced, capped at 50, the same shape DNP3/
+   IEC104/OPC UA/EtherNet-IP/HART-IP all already have). The one piece of
+   cross-packet state MQTT needs -- its per-session learned protocol
+   version (0=unknown, 4=v3.1.1, 5=v5.0), used only to disambiguate
+   SUBSCRIBE/SUBACK/UNSUBSCRIBE's genuinely ambiguous v3.1.1-vs-v5 wire
+   shape -- moved from the bespoke `Decoder::mqtt_session_version_` map
+   into `MqttFlowState`, reached via `DecodeContext::flow_state<T>()`'s
+   unchanged, session-keyed default (`FlowStateKeying::Session`), the same
+   generalization Stage 2 (Modbus) already did for `modbus_pending_`.
+   Unlike COTP/DNP3's own `FlowStateKeying::DirectionalFlow` extension,
+   MQTT's version hint is correctly session-scoped, not per-direction: a
+   CONNECT and a later SUBSCRIBE/SUBACK/UNSUBSCRIBE needing this hint can
+   travel in either direction relative to each other. This confirms
+   `flow_state<T>()`'s unchanged default still has a live, non-trivial
+   user after this batch's two `DirectionalFlow` additions, not just the
+   pilot's own Modbus/TwinCAT usage. `decoder.cpp`'s two dispatch cascades
+   (declared-length probe and full decode) both sit exactly where the old
+   `if (want_mqtt)` blocks always did -- tried last of the whole
+   TCP-port-independent cascade, ahead of only still-legacy FF-HSE, the
+   same position its own honestly-weak single-leading-byte gate has always
+   earned it; `protocol_registry.cpp`'s `tcp_port_independent_registry()`
+   now lists `MqttDecoder` last, matching real dispatch order. The
+   FTP-control-line/LDAP-BER port carve-outs (both pre-existing,
+   documented collisions with MQTT's own weak gate) stay exactly where
+   they were -- call-site pre-checks deciding whether to invoke this
+   decoder at all, untouched by the migration. Verified: full CTest suite
+   (1,197 tests, all passing, no changed expectations) across all three
+   established configs, plus a manual JSON smoke-test over every existing
+   MQTT fixture -- `sample_mqtt.pcap` (55 packets: every packet type
+   across v3.1.1/v5.0, coalesced control packets, all three genuinely
+   ambiguous types exercising both the session-tracked and per-packet-
+   heuristic disambiguation paths, and Sparkplug B NBIRTH/DBIRTH/NDATA/
+   DDATA/DDEATH/STATE decode) and both real captures
+   (`mqtt_packets_tcpdump.pcap`/`mqtt_packets.pcapng`, 19 messages each) --
+   all decoding and dual-writing identically to before migration; no new
+   fixtures were needed.
+
+   **This completes migration batch 2** -- all eleven protocols planned
+   (COTP, S7comm, S7comm-Plus, MMS, DNP3, IEC104, OPC UA, EtherNet/IP,
+   HART-IP, BACnet/IP, MQTT) are now built on the registration-model
+   `ProtocolDecoder` interface, alongside the pilot's own EIGRP/Modbus/
+   GOOSE and TwinCAT. Every `GateKind` this codebase defines
+   (`EtherType`/`IpProtocol`/`TcpPortIndependent`/`UdpPort`/
+   `UdpPortIndependent`/`CotpPayload`) now has at least one real user, and
+   both `FlowStateKeying` values (`Session`/`DirectionalFlow`) have
+   multiple independent users each. The only protocol left un-migrated in
+   the four gate cascades this batch touched is FF-HSE (TcpPortIndependent
+   -- tried last of that whole cascade, its own honestly weak gate earning
+   it that position the same way MQTT's does); `UdpPort` remains reserved
+   and empty, as it always has been (see its own doc comment in
+   `protocol_registry.hpp`).
 
    Still explicitly out of scope, not silently dropped: migrating the
-   remaining ~43 legacy protocols onto the new interface (down from ~48 at
-   the start of this batch, once IEC104/OPC UA/EtherNet-IP/HART-IP/BACnet/
-   MQTT above are also done); migrating
+   remaining ~37 legacy protocols onto the new interface (down from ~48 at
+   the start of this batch); migrating
    `output.cpp`'s rendering for the three *pilot* protocols themselves
    (EIGRP/Modbus/GOOSE keep dual-writing into their flat fields, unlike
    TwinCAT); having the registry vectors in `protocol_registry.cpp`

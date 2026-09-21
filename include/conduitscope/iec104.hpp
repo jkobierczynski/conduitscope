@@ -59,6 +59,7 @@
 #include <vector>
 
 #include "conduitscope/byteio.hpp"
+#include "conduitscope/protocol_decoder.hpp"
 
 namespace conduitscope {
 
@@ -194,5 +195,43 @@ std::string iec104_type_short_name(uint8_t type_id);
 // DecodedPacket::iec104_asdu_type_short_name can actually hold. Order is stable across calls (the
 // table's own declaration order) but not alphabetized.
 std::vector<std::string> iec104_known_asdu_short_names();
+
+// Migration batch 2 (see protocol_decoder.hpp/protocol_registry.hpp): everything decoder.cpp's
+// IEC 104 call site dual-writes into DecodedPacket, gathered from however many APDUs were
+// coalesced in one TCP payload (see Iec104Decoder::decode below) -- mirrors exactly what the
+// pre-migration call site computed locally. `summary`/`notes` are the fully-assembled headline
+// summary (APCI + first I-format APDU's ASDU, if any) and note list, in the same order the legacy
+// call site produced them; the five iec104_* fields reflect only the FIRST I-format APDU found in
+// the payload (same "first APDU only" convention DecodedPacket's own dnp3_has_function-style
+// fields use), and iec104_object_values is the same cumulative-across-every-APDU-in-the-payload
+// list the legacy call site built, capped at 50 entries exactly as before.
+struct Iec104Result {
+    std::string summary;
+    std::vector<std::string> notes;
+
+    bool iec104_has_asdu = false;
+    std::string iec104_asdu_type_name;
+    std::string iec104_asdu_type_short_name;
+    std::string iec104_cot_name;
+    uint16_t iec104_common_address = 0;
+    std::vector<std::string> iec104_object_values;
+};
+
+// id() == "iec104", gate_kind() == TcpPortIndependent. Wraps try_parse_iec104_apci/
+// decode_iec104_asdu plus the same-TCP-payload multi-APDU-coalescing loop that used to live
+// directly in decoder.cpp's `if (want_iec104)` call site -- IEC 104 is purely stateless (see this
+// file's own opening comment), so unlike Dnp3Decoder/CotpDecoder there is no per-flow reassembly
+// state here at all; decode() just gates, decodes, and merges every APDU it finds into one result.
+class Iec104Decoder : public ProtocolDecoder {
+public:
+    std::string_view id() const override { return "iec104"; }
+    GateKind gate_kind() const override { return GateKind::TcpPortIndependent; }
+    std::optional<size_t> tcp_declared_length(ByteSpan candidate) const override {
+        return iec104_apdu_declared_length(candidate);
+    }
+    std::optional<ProtocolResult> decode(ByteSpan payload, DecodeContext& ctx) const override;
+};
+
+const ProtocolDecoder& iec104_decoder();
 
 }  // namespace conduitscope

@@ -1,12 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "conduitscope/protocol_registry.hpp"
 
+#include "conduitscope/bacnet.hpp"
 #include "conduitscope/cotp.hpp"
 #include "conduitscope/dnp3.hpp"
 #include "conduitscope/eigrp.hpp"
+#include "conduitscope/enip.hpp"
 #include "conduitscope/goose.hpp"
+#include "conduitscope/hartip.hpp"
+#include "conduitscope/iec104.hpp"
 #include "conduitscope/mms.hpp"
 #include "conduitscope/modbus.hpp"
+#include "conduitscope/mqtt.hpp"
+#include "conduitscope/opcua.hpp"
 #include "conduitscope/s7comm.hpp"
 #include "conduitscope/s7commplus.hpp"
 #include "conduitscope/twincat.hpp"
@@ -35,12 +41,41 @@ const std::vector<const ProtocolDecoder*>& ip_protocol_registry() {
 
 const std::vector<const ProtocolDecoder*>& tcp_port_independent_registry() {
     static const std::vector<const ProtocolDecoder*> order = {
+        &opcua_decoder(),    // Migration batch 2 -- sits exactly where the old `if (want_opcua)`
+                              // block always did: tried first of all in this cascade, ahead of
+                              // EtherNet/IP (still legacy) and everything after it. See
+                              // decoder.cpp's own call site comment (and the matching comment in
+                              // Decoder::reassemble_tcp_payload) for why OPC UA's own magic-string
+                              // detection gate is strong and non-colliding enough that trying it
+                              // first costs nothing.
+        &enip_tcp_decoder(), // Migration batch 2 -- sits exactly where the old `if (want_enip)`
+                              // block always did: after OPC UA (migrated above, in this same
+                              // batch), before IEC104. See decoder.cpp's own call site comment
+                              // (and the matching comment in Decoder::reassemble_tcp_payload) for
+                              // why EtherNet/IP's own three-independent-structural-checks gate is
+                              // strong enough that trying it next costs nothing. First protocol in
+                              // this codebase to share its id() ("enip") with a second decoder
+                              // instance -- see enip_udp_decoder() in udp_port_independent_registry
+                              // below, and EnipTcpDecoder's own comment in enip.hpp for why that's
+                              // safe (every output writer already dispatches on the plain
+                              // DecodedPacket::protocol string, never on registry id() lookup).
+        &iec104_decoder(),   // Migration batch 2 -- sits exactly where the old `if (want_iec104)`
+                              // block always did: after OPC UA/EtherNet-IP (both migrated above,
+                              // in this same batch), before Modbus. See docs/DEVELOPMENT.md's
+                              // PROTOCOL DETECTION section for why that position resolves the real
+                              // IEC104-vs-Modbus collision found during development (an I-format
+                              // APDU with N(S)=N(R)=0 can otherwise coincidentally read as a
+                              // plausible Modbus/TCP MBAP header) -- IEC104 must keep running
+                              // before Modbus regardless of which of the two has migrated, which
+                              // is exactly what decoder.cpp's own linear call-site order
+                              // (unaffected by migration, see protocol_decoder.hpp's COEXISTENCE
+                              // RULE) already guarantees; this vector's own ordering just mirrors
+                              // that for its audit-trail role, see this file's own header comment.
         &modbus_decoder(),   // Stage 2 of the pilot -- decoder.cpp's call site sits exactly where
                               // Modbus's old `if (want_modbus)` block always did: after OPC UA/
-                              // EtherNet/IP/IEC104 (all three still legacy), before DNP3 (also
-                              // still legacy) -- see docs/DEVELOPMENT.md's PROTOCOL DETECTION
-                              // section for why that position resolves the real IEC104-vs-Modbus
-                              // collision found during development.
+                              // EtherNet-IP/IEC104 (all three migrated above, in this same batch),
+                              // before TwinCAT/DNP3/COTP (see IEC104's own entry above for the
+                              // collision this relative order resolves).
         &twincat_decoder(),  // Added directly after Modbus, before DNP3/S7comm family/HART-IP/
                               // MQTT/FF-HSE -- see decoder.cpp's TwinCAT call site comment for the
                               // full collision survey this position is based on (AMS/TCP's own
@@ -55,9 +90,32 @@ const std::vector<const ProtocolDecoder*>& tcp_port_independent_registry() {
                               // don't collide with anything else in this cascade.
         &cotp_decoder(),     // Migration batch 2 -- sits exactly where the old, single
                               // `if (want_s7comm || want_mms || want_s7commplus)` block always did:
-                              // after DNP3 (migrated above, in this same batch), before HART-IP/
-                              // MQTT/FF-HSE (still legacy). See decoder.cpp's own call site
-                              // comment for the RDP CR/CC carve-out this position sits right after.
+                              // after DNP3 (migrated above, in this same batch), before HART-IP
+                              // (also migrated in this same batch, immediately below) and MQTT/
+                              // FF-HSE (still legacy). See decoder.cpp's own call site comment for
+                              // the RDP CR/CC carve-out this position sits right after.
+        &hartip_tcp_decoder(),  // Migration batch 2 -- sits exactly where the old `if (want_hartip)`
+                              // TCP block always did: after COTP (migrated above, in this same
+                              // batch), before MQTT (migrated below, in this same batch too), ahead
+                              // of only still-legacy FF-HSE. See decoder.cpp's own call site
+                              // comment for the accepted, documented
+                              // HART-IP-Session-Initiate-vs-Modbus/TCP collision this position
+                              // deliberately does NOT resolve (reordering HART-IP earlier was tried
+                              // while scoping this feature and measurably regressed the Modbus/
+                              // S7comm test corpus). First TCP-side use of the same "two instances,
+                              // one id()" pattern EnipTcpDecoder/EnipUdpDecoder established first --
+                              // see hartip_udp_decoder() in udp_port_independent_registry() below,
+                              // and HartIpTcpDecoder's own comment in hartip.hpp for why that's
+                              // safe.
+        &mqtt_decoder(),      // Migration batch 2 -- sits exactly where the old `if (want_mqtt)`
+                              // block always did: tried LAST of this whole cascade (after HART-IP,
+                              // migrated above in this same batch), ahead of only still-legacy
+                              // FF-HSE. See mqtt.hpp's own "structural detection gate" paragraph
+                              // for why MQTT's honestly weak single-leading-byte gate earns it the
+                              // lowest priority of every migrated protocol in this vector. Its own
+                              // per-session learned version hint (MqttFlowState) replaces the
+                              // bespoke Decoder::mqtt_session_version_ map, the same generalization
+                              // Modbus's own ModbusFlowState already did for modbus_pending_.
     };
     return order;
 }
@@ -68,7 +126,35 @@ const std::vector<const ProtocolDecoder*>& udp_port_registry() {
 }
 
 const std::vector<const ProtocolDecoder*>& udp_port_independent_registry() {
-    static const std::vector<const ProtocolDecoder*> order = {};
+    static const std::vector<const ProtocolDecoder*> order = {
+        &enip_udp_decoder(),  // Migration batch 2 -- sits exactly where the old CIP I/O
+                                // `if (want_enip_io)` block always did: tried first of the UDP
+                                // port-independent cascade (ahead of BACnet, still legacy), same
+                                // rationale as its TCP sibling above -- try_parse_cip_io's own
+                                // structural check (an exact CPF item type + exact length) is
+                                // strong enough to run unconditionally in Auto mode. Shares its
+                                // "enip" id() with enip_tcp_decoder() in
+                                // tcp_port_independent_registry above -- see that entry's own
+                                // comment.
+        &bacnet_decoder(),    // Migration batch 2 -- sits exactly where the old `if (want_bacnet)`
+                                // UDP block always did: after CIP I/O (migrated above, in this same
+                                // batch), before HART-IP (migrated below, in this same batch too).
+                                // try_parse_bacnet's own structural check (BVLC Type==0x81 +
+                                // Function in a 13-value range) is strong enough to run
+                                // unconditionally in Auto mode, the same posture as its neighbors.
+                                // Its own id() ("bacnet"), not shared with anything -- the second,
+                                // simpler UdpPortIndependent use in this batch, unlike its two
+                                // shared-id() neighbors.
+        &hartip_udp_decoder(),  // Migration batch 2 -- sits exactly where the old
+                                // `if (want_hartip)` UDP block always did: after CIP I/O and BACnet/
+                                // IP (both migrated above, in this same batch), tried last among
+                                // these three. Excludes ports 4500 (IKE NAT-T) and 4789 (VXLAN)
+                                // from even being attempted -- see hartip_udp_excluded_port in
+                                // hartip.hpp for why that's a hard exclusion rather than a mere
+                                // deprioritization. Shares its "hartip" id() with hartip_tcp_decoder()
+                                // in tcp_port_independent_registry above -- see that entry's own
+                                // comment.
+    };
     return order;
 }
 

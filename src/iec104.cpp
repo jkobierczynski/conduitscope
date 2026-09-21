@@ -783,4 +783,99 @@ Iec104Asdu decode_iec104_asdu(ByteSpan asdu_bytes) {
     return asdu;
 }
 
+// --- Migration batch 2: Iec104Decoder (registration-model interface) --------------------------
+//
+// decode() is an exact behavioral transplant of the removed decoder.cpp `if (want_iec104) { ... }`
+// call site's body -- the same-payload multi-APDU coalescing loop (APDUs are small and it's normal
+// for a sender/OS to flush several into one TCP segment, S-format acks/U-format handshakes
+// especially) plus the merge-ASDU-fields-into-the-result logic, both moved here unchanged so
+// decoder.cpp's own call site can shrink to gate+call+dual-write. `ctx` is unused: IEC 104 is
+// purely stateless (see this file's own opening comment), unlike Dnp3Decoder/CotpDecoder.
+std::optional<ProtocolResult> Iec104Decoder::decode(ByteSpan payload, DecodeContext& /*ctx*/) const {
+    auto apci = try_parse_iec104_apci(payload);
+    if (!apci) {
+        return std::nullopt;
+    }
+
+    Iec104Result result;
+    result.summary = apci->summary;
+
+    constexpr size_t kMaxObjectValues = 50;
+    auto merge_asdu = [&](const Iec104Asdu& asdu, bool is_first_apdu) {
+        if (is_first_apdu) {
+            result.summary += "; " + asdu.summary;
+            result.iec104_has_asdu = true;
+            result.iec104_asdu_type_name = asdu.type_name;
+            result.iec104_asdu_type_short_name = asdu.type_short_name;
+            result.iec104_cot_name = asdu.cot_name;
+            result.iec104_common_address = asdu.common_address;
+        }
+        for (const auto& n : asdu.notes) result.notes.push_back(n);
+        for (const auto& obj : asdu.objects) {
+            if (result.iec104_object_values.size() >= kMaxObjectValues) break;
+            std::string entry = "ioa=" + std::to_string(obj.ioa) + ": " + obj.value;
+            if (!obj.flags.empty()) {
+                entry += " [";
+                for (size_t f = 0; f < obj.flags.size(); ++f) {
+                    if (f != 0) entry += ",";
+                    entry += obj.flags[f];
+                }
+                entry += "]";
+            }
+            result.iec104_object_values.push_back(entry);
+        }
+    };
+
+    if (apci->frame_type == Iec104FrameType::I) {
+        ByteSpan asdu_bytes = payload.subspan(6, apci->asdu_length);
+        Iec104Asdu asdu = decode_iec104_asdu(asdu_bytes);
+        merge_asdu(asdu, /*is_first_apdu=*/true);
+    }
+
+    // Like DNP3, an APDU is small and it's normal for a sender or the OS to coalesce several into
+    // one TCP segment before flushing (S-format acks and U-format STARTDT/TESTFR handshakes are
+    // especially likely to arrive alongside an I-format APDU). Keep looking for more, immediately
+    // after the first APDU's own wire bytes, rather than silently stopping at the first one.
+    constexpr size_t kMaxApdusPerPayload = 50;
+    size_t offset = apci->wire_length;
+    size_t apdu_count = 1;
+    while (offset < payload.size() && apdu_count < kMaxApdusPerPayload) {
+        ByteSpan rest = payload.from(offset);
+        auto next = try_parse_iec104_apci(rest);
+        if (!next) break;  // remaining bytes aren't another APDU -- stop, don't guess
+        ++apdu_count;
+        std::string note = "additional IEC 104 APDU " + std::to_string(apdu_count) +
+                            " found in the same TCP payload at byte offset " + std::to_string(offset) +
+                            " (coalesced by the sender/OS): " + next->summary;
+        if (next->frame_type == Iec104FrameType::I) {
+            ByteSpan next_asdu_bytes = rest.subspan(6, next->asdu_length);
+            Iec104Asdu next_asdu = decode_iec104_asdu(next_asdu_bytes);
+            note += " | " + next_asdu.summary;
+            if (apdu_count == 2) {
+                note += " -- only the first I-format APDU's ASDU is reflected in the "
+                        "summary line above and the iec104_asdu_type_name/iec104_cot_name "
+                        "fields; every APDU's own ASDU is still fully decoded and included "
+                        "here and in iec104_object_values";
+            }
+            result.notes.push_back(note);
+            merge_asdu(next_asdu, /*is_first_apdu=*/false);
+        } else {
+            result.notes.push_back(note);
+        }
+        offset += next->wire_length;
+    }
+    if (apdu_count >= kMaxApdusPerPayload) {
+        result.notes.push_back("stopped after " + std::to_string(kMaxApdusPerPayload) +
+                                " IEC 104 APDU(s) in this one TCP payload, more may remain "
+                                "(safety cap)");
+    }
+
+    return ProtocolResult::make<Iec104Result>("iec104", std::move(result));
+}
+
+const ProtocolDecoder& iec104_decoder() {
+    static const Iec104Decoder instance;
+    return instance;
+}
+
 }  // namespace conduitscope

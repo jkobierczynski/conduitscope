@@ -7,6 +7,8 @@
 #include <sstream>
 #include <utility>
 
+#include "conduitscope/tunnel_vpn.hpp"  // IKE_NATT_PORT/VXLAN_PORT -- see hartip_udp_excluded_port
+
 namespace conduitscope {
 
 namespace {
@@ -1207,6 +1209,67 @@ std::optional<HartIpFrame> try_parse_hartip(ByteSpan payload) {
         // bacnet.cpp/goose.cpp/sv.cpp/profinet.cpp/ethercat.cpp all take.
         return std::nullopt;
     }
+}
+
+bool hartip_udp_excluded_port(uint16_t port) {
+    return port == IKE_NATT_PORT || port == VXLAN_PORT;
+}
+
+std::optional<ProtocolResult> HartIpTcpDecoder::decode(ByteSpan payload, DecodeContext& /*ctx*/) const {
+    auto frame = try_parse_hartip(payload);
+    if (!frame) return std::nullopt;
+
+    HartIpResult result;
+    result.summary = frame->summary;
+    for (const auto& n : frame->notes) result.notes.push_back(n);
+    result.first = *frame;
+
+    // Like EtherNet/IP's own encapsulation messages, one HART-IP message is small and it's normal
+    // for a sender or the OS to coalesce several into one TCP segment -- exact transplant of the
+    // legacy `if (want_hartip)` TCP call site's own coalescing loop.
+    constexpr size_t kMaxHartIpMessagesPerPayload = 50;
+    size_t offset = frame->wire_length;
+    size_t message_count = 1;
+    while (offset < payload.size() && message_count < kMaxHartIpMessagesPerPayload) {
+        ByteSpan rest = payload.from(offset);
+        auto next = try_parse_hartip(rest);
+        if (!next) break;  // remaining bytes aren't another HART-IP message -- stop, don't guess
+        ++message_count;
+        std::string note = "additional HART-IP message " + std::to_string(message_count) +
+                            " found in the same TCP payload at byte offset " + std::to_string(offset) +
+                            " (coalesced by the sender/OS): " + next->summary;
+        result.notes.push_back(note);
+        for (const auto& n : next->notes) result.notes.push_back(n);
+        offset += next->wire_length;
+    }
+    if (message_count >= kMaxHartIpMessagesPerPayload) {
+        result.notes.push_back("stopped after " + std::to_string(kMaxHartIpMessagesPerPayload) +
+                                " HART-IP message(s) in this one TCP payload, more may remain "
+                                "(safety cap)");
+    }
+
+    return ProtocolResult::make<HartIpResult>("hartip", std::move(result));
+}
+
+std::optional<ProtocolResult> HartIpUdpDecoder::decode(ByteSpan payload, DecodeContext& /*ctx*/) const {
+    auto frame = try_parse_hartip(payload);
+    if (!frame) return std::nullopt;
+
+    HartIpResult result;
+    result.summary = frame->summary;
+    for (const auto& n : frame->notes) result.notes.push_back(n);
+    result.first = *frame;
+    return ProtocolResult::make<HartIpResult>("hartip", std::move(result));
+}
+
+const ProtocolDecoder& hartip_tcp_decoder() {
+    static const HartIpTcpDecoder instance;
+    return instance;
+}
+
+const ProtocolDecoder& hartip_udp_decoder() {
+    static const HartIpUdpDecoder instance;
+    return instance;
 }
 
 }  // namespace conduitscope

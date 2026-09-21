@@ -69,8 +69,9 @@ std::string well_known_udp_port_name(uint16_t /*port*/) {
 }
 
 // Canonicalizes both directions of one TCP 4-tuple into a single, direction-independent session
-// key, so Decoder::modbus_pending_/mqtt_session_version_ can track state per SESSION (a request and
-// its response, or a CONNECT and a later SUBSCRIBE, can travel in opposite directions) rather than
+// key, so Decoder::modbus_pending_ and (via ctx.session_key) session-keyed registration-model
+// state like ModbusFlowState/MqttFlowState can track state per SESSION (a request and its
+// response, or a CONNECT and a later SUBSCRIBE, can travel in opposite directions) rather than
 // per directional flow -- unlike flow_key (used by tcp_reassembly_ and, via
 // FlowStateKeying::DirectionalFlow, CotpReassemblyState/Dnp3ReassemblyState -- see cotp.hpp/
 // dnp3.hpp -- which genuinely are per-direction). "<->" is used as the join delimiter
@@ -589,19 +590,28 @@ bool Decoder::reassemble_tcp_payload(const TcpSegment& tcp, const std::string& f
     std::optional<size_t> declared;
     std::string which;
     if (want_opcua) {
-        if (auto d = opcua_declared_length(candidate)) {
+        // Migration batch 2: opcua_declared_length is now reached through
+        // OpcUaDecoder::tcp_declared_length rather than called directly -- same function, same
+        // semantics, see opcua.hpp.
+        if (auto d = opcua_decoder().tcp_declared_length(candidate)) {
             declared = d;
             which = "OPC UA message";
         }
     }
     if (!declared && want_enip) {
-        if (auto d = enip_declared_length(candidate)) {
+        // Migration batch 2: enip_declared_length is now reached through
+        // EnipTcpDecoder::tcp_declared_length rather than called directly -- same function, same
+        // semantics, see enip.hpp.
+        if (auto d = enip_tcp_decoder().tcp_declared_length(candidate)) {
             declared = d;
             which = "EtherNet/IP encapsulation message";
         }
     }
     if (!declared && want_iec104) {
-        if (auto d = iec104_apdu_declared_length(candidate)) {
+        // Migration batch 2: iec104_apdu_declared_length is now reached through
+        // Iec104Decoder::tcp_declared_length rather than called directly -- same function, same
+        // semantics, see iec104.hpp.
+        if (auto d = iec104_decoder().tcp_declared_length(candidate)) {
             declared = d;
             which = "IEC 104 APDU";
         }
@@ -660,7 +670,9 @@ bool Decoder::reassemble_tcp_payload(const TcpSegment& tcp, const std::string& f
     // hartip.hpp's LIMITATIONS-relevant note for the honest, documented scope of this gap. HART-IP
     // over UDP is entirely unaffected (UDP has no equivalent declared-length pre-check at all).
     if (!declared && want_hartip) {
-        if (auto d = hartip_declared_length(candidate)) {
+        // Migration batch 2: hartip_declared_length is now reached through
+        // HartIpTcpDecoder::tcp_declared_length -- same function, same semantics, see hartip.hpp.
+        if (auto d = hartip_tcp_decoder().tcp_declared_length(candidate)) {
             declared = d;
             which = "HART-IP message";
         }
@@ -710,7 +722,9 @@ bool Decoder::reassemble_tcp_payload(const TcpSegment& tcp, const std::string& f
          port_in(tcp.dst_port, LDAP_GC_PORT, options_.extra_enterprise_trust_ports)) &&
         looks_like_ldap_ber(candidate);
     if (!declared && want_mqtt && !candidate_is_ftp_control && !candidate_is_ldap) {
-        if (auto d = mqtt_declared_length(candidate)) {
+        // Migration batch 2: mqtt_declared_length is now reached through
+        // MqttDecoder::tcp_declared_length -- same function, same semantics, see mqtt.hpp.
+        if (auto d = mqtt_decoder().tcp_declared_length(candidate)) {
             declared = d;
             which = "MQTT packet";
         }
@@ -1322,16 +1336,28 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
             bool want_enip_io = options_.protocol_filter == ProtocolFilter::Auto ||
                                  options_.protocol_filter == ProtocolFilter::EnipOnly;
             if (want_enip_io) {
-                if (auto io = try_parse_cip_io(udp.payload)) {
+                // Migration batch 2: try_parse_cip_io is now reached through
+                // EnipUdpDecoder::decode -- CIP I/O needs no coalescing/merging of its own, so
+                // decode() is a direct pass-through and the returned ProtocolResult's payload IS
+                // the CipIoFrame itself. See enip.hpp/enip.cpp. This shares its "enip" id() with
+                // EnipTcpDecoder above (the TCP explicit-messaging side) -- first intentionally-
+                // shared id() in this codebase's registration-model decoders, see EnipTcpDecoder's
+                // own comment for why that's safe.
+                DecodeContext enip_io_ctx;
+                enip_io_ctx.packet_index = index;
+                enip_io_ctx.protocol_id = "enip";
+                enip_io_ctx.flow_states = &registry_flow_state_;
+                if (auto io_result = enip_udp_decoder().decode(udp.payload, enip_io_ctx)) {
+                    const CipIoFrame& io = io_result->as<CipIoFrame>();
                     out.protocol = "enip";
-                    out.summary = io->summary;
+                    out.summary = io.summary;
                     out.enip_has_io = true;
-                    out.enip_io_connection_id = io->connection_id;
-                    out.enip_io_sequence_number = io->sequence_number;
-                    out.enip_io_has_data = io->has_io_data;
-                    out.enip_io_data_hex = io->io_data_hex;
-                    out.enip_io_data_length = io->io_data_length;
-                    for (const auto& n : io->notes) out.notes.push_back(n);
+                    out.enip_io_connection_id = io.connection_id;
+                    out.enip_io_sequence_number = io.sequence_number;
+                    out.enip_io_has_data = io.has_io_data;
+                    out.enip_io_data_hex = io.io_data_hex;
+                    out.enip_io_data_length = io.io_data_length;
+                    for (const auto& n : io.notes) out.notes.push_back(n);
 
                     bool expected_port = port_in(udp.src_port, ENIP_IO_UDP_PORT, options_.extra_enip_io_ports) ||
                                           port_in(udp.dst_port, ENIP_IO_UDP_PORT, options_.extra_enip_io_ports);
@@ -1352,14 +1378,25 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
             bool want_bacnet = options_.protocol_filter == ProtocolFilter::Auto ||
                                 options_.protocol_filter == ProtocolFilter::BacnetOnly;
             if (want_bacnet) {
-                if (auto bacnet = try_parse_bacnet(udp.payload)) {
+                // Migration batch 2: try_parse_bacnet is now reached through BacnetDecoder::decode
+                // -- BACnet/IP is purely stateless, so ctx is passed only because
+                // ProtocolDecoder::decode's signature requires one. Unlike EtherNet/IP's CIP I/O
+                // and HART-IP's own UDP path, no new result-wrapper type was needed -- BacnetFrame
+                // already carries everything this call site dual-writes, so decode() returns it
+                // unwrapped. See bacnet.hpp/bacnet.cpp.
+                DecodeContext bacnet_ctx;
+                bacnet_ctx.packet_index = index;
+                bacnet_ctx.protocol_id = "bacnet";
+                bacnet_ctx.flow_states = &registry_flow_state_;
+                if (auto bacnet = bacnet_decoder().decode(udp.payload, bacnet_ctx)) {
+                    const BacnetFrame& bf = bacnet->as<BacnetFrame>();
                     out.protocol = "bacnet";
-                    out.summary = bacnet->summary;
-                    out.bacnet_bvlc_function = bacnet->bvlc_function_name;
-                    out.bacnet_has_npdu = bacnet->has_npdu;
-                    for (const auto& n : bacnet->notes) out.notes.push_back(n);
-                    if (bacnet->has_npdu) {
-                        const BacnetNpdu& npdu = bacnet->npdu;
+                    out.summary = bf.summary;
+                    out.bacnet_bvlc_function = bf.bvlc_function_name;
+                    out.bacnet_has_npdu = bf.has_npdu;
+                    for (const auto& n : bf.notes) out.notes.push_back(n);
+                    if (bf.has_npdu) {
+                        const BacnetNpdu& npdu = bf.npdu;
                         out.bacnet_npdu_version = npdu.version;
                         out.bacnet_npdu_is_network_layer_message = npdu.is_network_layer_message;
                         out.bacnet_npdu_expecting_reply = npdu.expecting_reply;
@@ -1447,33 +1484,48 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
             // opportunistic-detection caveats.
             bool want_hartip =
                 options_.protocol_filter == ProtocolFilter::HartIpOnly ||
-                (options_.protocol_filter == ProtocolFilter::Auto && udp.dst_port != IKE_NATT_PORT &&
-                 udp.src_port != IKE_NATT_PORT && udp.dst_port != VXLAN_PORT &&
-                 udp.src_port != VXLAN_PORT);
+                (options_.protocol_filter == ProtocolFilter::Auto &&
+                 !hartip_udp_excluded_port(udp.dst_port) && !hartip_udp_excluded_port(udp.src_port));
             if (want_hartip) {
-                if (auto frame = try_parse_hartip(udp.payload)) {
+                // Migration batch 2: try_parse_hartip is now reached through
+                // HartIpUdpDecoder::decode -- HART-IP over UDP is purely stateless (a single
+                // datagram, no coalescing), so decode() is a direct pass-through and the returned
+                // ProtocolResult's payload IS one HartIpResult wrapping the one HartIpFrame. See
+                // hartip.hpp/hartip.cpp. Shares its "hartip" id() with HartIpTcpDecoder below --
+                // the same two-instance-shared-id() pattern EnipTcpDecoder/EnipUdpDecoder
+                // established first, see either pair's own comments for why that's safe. The
+                // IKE-NAT-T/VXLAN port exclusion above (want_hartip's own computation) is now
+                // hartip_udp_excluded_port -- same two ports, same rationale, moved into
+                // hartip.hpp alongside the parser it protects.
+                DecodeContext ctx;
+                ctx.packet_index = index;
+                ctx.protocol_id = "hartip";
+                ctx.flow_states = &registry_flow_state_;
+                if (auto hartip_result = hartip_udp_decoder().decode(udp.payload, ctx)) {
+                    const HartIpResult& hr = hartip_result->as<HartIpResult>();
+                    const HartIpFrame& frame = hr.first;
                     out.protocol = "hartip";
-                    out.summary = frame->summary;
-                    for (const auto& n : frame->notes) out.notes.push_back(n);
-                    out.hartip_version = frame->version;
-                    out.hartip_message_type = frame->message_type_name;
-                    out.hartip_message_id = frame->message_id_name;
-                    out.hartip_status = frame->status;
-                    out.hartip_transaction_id = frame->transaction_id;
-                    out.hartip_msg_length = frame->msg_length;
-                    out.hartip_has_session_init = frame->has_session_init;
-                    if (frame->has_session_init) {
-                        out.hartip_host_type_name = frame->session_init.host_type_name;
-                        out.hartip_inactivity_close_timer = frame->session_init.inactivity_close_timer;
+                    out.summary = hr.summary;
+                    for (const auto& n : hr.notes) out.notes.push_back(n);
+                    out.hartip_version = frame.version;
+                    out.hartip_message_type = frame.message_type_name;
+                    out.hartip_message_id = frame.message_id_name;
+                    out.hartip_status = frame.status;
+                    out.hartip_transaction_id = frame.transaction_id;
+                    out.hartip_msg_length = frame.msg_length;
+                    out.hartip_has_session_init = frame.has_session_init;
+                    if (frame.has_session_init) {
+                        out.hartip_host_type_name = frame.session_init.host_type_name;
+                        out.hartip_inactivity_close_timer = frame.session_init.inactivity_close_timer;
                     }
-                    out.hartip_has_error = frame->has_error;
-                    if (frame->has_error) {
-                        out.hartip_error_code = frame->error_code;
-                        out.hartip_error_code_name = frame->error_code_name;
+                    out.hartip_has_error = frame.has_error;
+                    if (frame.has_error) {
+                        out.hartip_error_code = frame.error_code;
+                        out.hartip_error_code_name = frame.error_code_name;
                     }
-                    out.hartip_has_pass_through = frame->has_pass_through;
-                    if (frame->has_pass_through) {
-                        const HartIpPassThrough& pt = frame->pass_through;
+                    out.hartip_has_pass_through = frame.has_pass_through;
+                    if (frame.has_pass_through) {
+                        const HartIpPassThrough& pt = frame.pass_through;
                         out.hartip_frame_type = pt.frame_type_name;
                         out.hartip_is_response = pt.is_response;
                         out.hartip_is_long_address = pt.is_long_address;
@@ -2155,75 +2207,58 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
         // for why OPC UA's own magic-string detection gate is strong enough, and non-colliding
         // enough with every other protocol below, that trying it first costs nothing.
         if (want_opcua) {
-            if (auto msg = try_parse_opcua_message(effective_payload)) {
+            // Migration batch 2: the same-payload multi-chunk coalescing loop and the per-field
+            // dual-write that used to live directly in this call site are now reached through
+            // OpcUaDecoder::decode -- OPC UA is purely stateless, so ctx is passed only because
+            // ProtocolDecoder::decode's signature requires one. See opcua.hpp/opcua.cpp.
+            DecodeContext opcua_ctx;
+            opcua_ctx.packet_index = index;
+            opcua_ctx.protocol_id = "opcua";
+            opcua_ctx.flow_states = &registry_flow_state_;
+            if (auto opcua_result = opcua_decoder().decode(effective_payload, opcua_ctx)) {
+                const OpcUaResult& oua = opcua_result->as<OpcUaResult>();
+                const OpcUaMessage& m = oua.first;
                 out.protocol = "opcua";
-                out.summary = msg->summary;
+                out.summary = oua.summary;
+                for (const auto& n : oua.notes) out.notes.push_back(n);
 
-                auto merge_opcua = [&](const OpcUaMessage& m, bool is_first_message) {
-                    for (const auto& n : m.notes) out.notes.push_back(n);
-                    if (!is_first_message) return;
-                    out.opcua_message_type = m.message_type;
-                    out.opcua_chunk_type = m.chunk_type;
-                    out.opcua_message_size = m.message_size;
-                    out.opcua_has_secure_channel = m.has_secure_channel;
-                    if (m.has_secure_channel) {
-                        out.opcua_secure_channel_id = m.secure_channel_id;
-                        out.opcua_is_asymmetric = m.is_asymmetric;
-                        if (m.is_asymmetric) {
-                            out.opcua_security_policy_uri = m.security_policy_uri;
-                            out.opcua_has_sender_certificate = m.has_sender_certificate;
-                            out.opcua_sender_certificate_length = m.sender_certificate_length;
-                            out.opcua_has_receiver_certificate_thumbprint =
-                                m.has_receiver_certificate_thumbprint;
-                        } else {
-                            out.opcua_token_id = m.token_id;
-                        }
-                        out.opcua_sequence_number = m.sequence_number;
-                        out.opcua_request_id = m.request_id;
+                out.opcua_message_type = m.message_type;
+                out.opcua_chunk_type = m.chunk_type;
+                out.opcua_message_size = m.message_size;
+                out.opcua_has_secure_channel = m.has_secure_channel;
+                if (m.has_secure_channel) {
+                    out.opcua_secure_channel_id = m.secure_channel_id;
+                    out.opcua_is_asymmetric = m.is_asymmetric;
+                    if (m.is_asymmetric) {
+                        out.opcua_security_policy_uri = m.security_policy_uri;
+                        out.opcua_has_sender_certificate = m.has_sender_certificate;
+                        out.opcua_sender_certificate_length = m.sender_certificate_length;
+                        out.opcua_has_receiver_certificate_thumbprint =
+                            m.has_receiver_certificate_thumbprint;
+                    } else {
+                        out.opcua_token_id = m.token_id;
                     }
-                    out.opcua_service_recognized = m.service_recognized;
-                    out.opcua_service_name = m.service_name;
-                    out.opcua_service_namespace = m.service_namespace;
-                    out.opcua_service_type_id = m.service_type_id;
-                    out.opcua_service_body_decoded = m.service_body_decoded;
-                    out.opcua_has_header = m.has_header;
-                    if (m.has_header) {
-                        out.opcua_request_handle = m.header.request_handle;
-                        out.opcua_is_response = m.header.is_response;
-                        out.opcua_status_code = m.header.status_code;
-                        out.opcua_status_code_name = m.header.status_code_name;
-                        out.opcua_status_is_good = m.header.status_is_good;
-                    }
-                    out.opcua_values = m.values;
-                    out.opcua_body_shown_as_hex = m.body_shown_as_hex;
-                    if (m.body_shown_as_hex) {
-                        out.opcua_body_hex = m.body_hex;
-                        out.opcua_body_length = m.body_length;
-                    }
-                };
-                merge_opcua(*msg, /*is_first_message=*/true);
-
-                // Like EtherNet/IP/HART-IP's own small messages, it's normal for a sender or the
-                // OS to coalesce several OPC UA chunks into one TCP segment before flushing.
-                constexpr size_t kMaxOpcUaMessagesPerPayload = 50;
-                size_t offset = msg->wire_length;
-                size_t message_count = 1;
-                while (offset < effective_payload.size() && message_count < kMaxOpcUaMessagesPerPayload) {
-                    ByteSpan rest = effective_payload.from(offset);
-                    auto next = try_parse_opcua_message(rest);
-                    if (!next) break;  // remaining bytes aren't another OPC UA message -- stop, don't guess
-                    ++message_count;
-                    std::string note = "additional OPC UA message " + std::to_string(message_count) +
-                                        " found in the same TCP payload at byte offset " + std::to_string(offset) +
-                                        " (coalesced by the sender/OS): " + next->summary;
-                    out.notes.push_back(note);
-                    merge_opcua(*next, /*is_first_message=*/false);
-                    offset += next->wire_length;
+                    out.opcua_sequence_number = m.sequence_number;
+                    out.opcua_request_id = m.request_id;
                 }
-                if (message_count >= kMaxOpcUaMessagesPerPayload) {
-                    out.notes.push_back("stopped after " + std::to_string(kMaxOpcUaMessagesPerPayload) +
-                                         " OPC UA message(s) in this one TCP payload, more may remain "
-                                         "(safety cap)");
+                out.opcua_service_recognized = m.service_recognized;
+                out.opcua_service_name = m.service_name;
+                out.opcua_service_namespace = m.service_namespace;
+                out.opcua_service_type_id = m.service_type_id;
+                out.opcua_service_body_decoded = m.service_body_decoded;
+                out.opcua_has_header = m.has_header;
+                if (m.has_header) {
+                    out.opcua_request_handle = m.header.request_handle;
+                    out.opcua_is_response = m.header.is_response;
+                    out.opcua_status_code = m.header.status_code;
+                    out.opcua_status_code_name = m.header.status_code_name;
+                    out.opcua_status_is_good = m.header.status_is_good;
+                }
+                out.opcua_values = m.values;
+                out.opcua_body_shown_as_hex = m.body_shown_as_hex;
+                if (m.body_shown_as_hex) {
+                    out.opcua_body_hex = m.body_hex;
+                    out.opcua_body_length = m.body_length;
                 }
 
                 bool expected_port = port_in(tcp.src_port, OPCUA_PORT, options_.extra_opcua_ports) ||
@@ -2241,51 +2276,31 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
         // EtherNet/IP's own structural checks are strong enough that dispatch order doesn't
         // matter for it the way it does for IEC104-vs-Modbus, but trying it early costs nothing.
         if (want_enip) {
-            if (auto frame = try_parse_enip(effective_payload)) {
+            // Migration batch 2: the same-payload multi-message coalescing loop and the merge-CIP-
+            // fields logic that used to live directly in this call site are now reached through
+            // EnipTcpDecoder::decode -- EtherNet/IP explicit messaging is purely stateless, so ctx
+            // is passed only because ProtocolDecoder::decode's signature requires one. See
+            // enip.hpp/enip.cpp. This is the TCP side only -- CIP I/O (UDP) is a separate decoder
+            // instance sharing this same "enip" id(), reached from the UDP dispatch below.
+            DecodeContext enip_ctx;
+            enip_ctx.packet_index = index;
+            enip_ctx.protocol_id = "enip";
+            enip_ctx.flow_states = &registry_flow_state_;
+            if (auto enip_result = enip_tcp_decoder().decode(effective_payload, enip_ctx)) {
+                const EnipResult& er = enip_result->as<EnipResult>();
+                const EnipFrame& frame = er.first;
                 out.protocol = "enip";
-                out.summary = frame->summary;
-                out.enip_command_name = frame->header.command_name;
-                for (const auto& n : frame->notes) out.notes.push_back(n);
+                out.summary = er.summary;
+                out.enip_command_name = frame.header.command_name;
+                for (const auto& n : er.notes) out.notes.push_back(n);
 
-                constexpr size_t kMaxCipValues = 50;
-                auto merge_cip = [&](const EnipFrame& f, bool is_first_message) {
-                    if (!f.has_cip) return;
-                    if (is_first_message) {
-                        out.enip_has_cip = true;
-                        out.enip_cip_is_response = f.cip.is_response;
-                        out.enip_cip_service_name = f.cip.service_name;
-                        out.enip_cip_path = f.cip.path.summary;
-                        out.enip_cip_status_name = f.cip.status_name;
-                    }
-                    for (const auto& n : f.cip.notes) out.notes.push_back(n);
-                    for (const auto& v : f.cip.values) {
-                        if (out.enip_cip_values.size() >= kMaxCipValues) break;
-                        out.enip_cip_values.push_back(v);
-                    }
-                };
-                merge_cip(*frame, /*is_first_message=*/true);
-
-                // Like IEC104/DNP3, one encapsulation message is small and it's normal for a
-                // sender or the OS to coalesce several into one TCP segment before flushing.
-                constexpr size_t kMaxEnipMessagesPerPayload = 50;
-                size_t offset = frame->wire_length;
-                size_t message_count = 1;
-                while (offset < effective_payload.size() && message_count < kMaxEnipMessagesPerPayload) {
-                    ByteSpan rest = effective_payload.from(offset);
-                    auto next = try_parse_enip(rest);
-                    if (!next) break;  // remaining bytes aren't another EtherNet/IP message -- stop, don't guess
-                    ++message_count;
-                    std::string note = "additional EtherNet/IP message " + std::to_string(message_count) +
-                                        " found in the same TCP payload at byte offset " + std::to_string(offset) +
-                                        " (coalesced by the sender/OS): " + next->summary;
-                    out.notes.push_back(note);
-                    merge_cip(*next, /*is_first_message=*/false);
-                    offset += next->wire_length;
-                }
-                if (message_count >= kMaxEnipMessagesPerPayload) {
-                    out.notes.push_back("stopped after " + std::to_string(kMaxEnipMessagesPerPayload) +
-                                         " EtherNet/IP message(s) in this one TCP payload, more may remain "
-                                         "(safety cap)");
+                if (frame.has_cip) {
+                    out.enip_has_cip = true;
+                    out.enip_cip_is_response = frame.cip.is_response;
+                    out.enip_cip_service_name = frame.cip.service_name;
+                    out.enip_cip_path = frame.cip.path.summary;
+                    out.enip_cip_status_name = frame.cip.status_name;
+                    out.enip_cip_values = frame.cip.values;
                 }
 
                 bool expected_port = port_in(tcp.src_port, ENIP_TCP_PORT, options_.extra_enip_ports) ||
@@ -2300,81 +2315,26 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
         }
 
         if (want_iec104) {
-            if (auto apci = try_parse_iec104_apci(effective_payload)) {
+            // Migration batch 2: the same-payload multi-APDU coalescing loop and ASDU-merging
+            // logic that used to live directly in this call site are now reached through
+            // Iec104Decoder::decode -- IEC 104 is purely stateless (no per-flow reassembly, unlike
+            // DNP3/COTP), so there is no DecodeContext flow-state involved at all; ctx is passed
+            // only because ProtocolDecoder::decode's signature requires one. See iec104.hpp/.cpp.
+            DecodeContext iec104_ctx;
+            iec104_ctx.packet_index = index;
+            iec104_ctx.protocol_id = "iec104";
+            iec104_ctx.flow_states = &registry_flow_state_;
+            if (auto iec104_result = iec104_decoder().decode(effective_payload, iec104_ctx)) {
+                const Iec104Result& ir = iec104_result->as<Iec104Result>();
                 out.protocol = "iec104";
-                out.summary = apci->summary;
-
-                constexpr size_t kMaxObjectValues = 50;
-                auto merge_asdu = [&](const Iec104Asdu& asdu, bool is_first_apdu) {
-                    if (is_first_apdu) {
-                        out.summary += "; " + asdu.summary;
-                        out.iec104_has_asdu = true;
-                        out.iec104_asdu_type_name = asdu.type_name;
-                        out.iec104_asdu_type_short_name = asdu.type_short_name;
-                        out.iec104_cot_name = asdu.cot_name;
-                        out.iec104_common_address = asdu.common_address;
-                    }
-                    for (const auto& n : asdu.notes) out.notes.push_back(n);
-                    for (const auto& obj : asdu.objects) {
-                        if (out.iec104_object_values.size() >= kMaxObjectValues) break;
-                        std::string entry = "ioa=" + std::to_string(obj.ioa) + ": " + obj.value;
-                        if (!obj.flags.empty()) {
-                            entry += " [";
-                            for (size_t f = 0; f < obj.flags.size(); ++f) {
-                                if (f != 0) entry += ",";
-                                entry += obj.flags[f];
-                            }
-                            entry += "]";
-                        }
-                        out.iec104_object_values.push_back(entry);
-                    }
-                };
-
-                if (apci->frame_type == Iec104FrameType::I) {
-                    ByteSpan asdu_bytes = effective_payload.subspan(6, apci->asdu_length);
-                    Iec104Asdu asdu = decode_iec104_asdu(asdu_bytes);
-                    merge_asdu(asdu, /*is_first_apdu=*/true);
-                }
-
-                // Like DNP3, an APDU is small and it's normal for a sender or the OS to coalesce
-                // several into one TCP segment before flushing (S-format acks and U-format
-                // STARTDT/TESTFR handshakes are especially likely to arrive alongside an I-format
-                // APDU). Keep looking for more, immediately after the first APDU's own wire
-                // bytes, rather than silently stopping at the first one.
-                constexpr size_t kMaxApdusPerPayload = 50;
-                size_t offset = apci->wire_length;
-                size_t apdu_count = 1;
-                while (offset < effective_payload.size() && apdu_count < kMaxApdusPerPayload) {
-                    ByteSpan rest = effective_payload.from(offset);
-                    auto next = try_parse_iec104_apci(rest);
-                    if (!next) break;  // remaining bytes aren't another APDU -- stop, don't guess
-                    ++apdu_count;
-                    std::string note = "additional IEC 104 APDU " + std::to_string(apdu_count) +
-                                        " found in the same TCP payload at byte offset " +
-                                        std::to_string(offset) + " (coalesced by the sender/OS): " +
-                                        next->summary;
-                    if (next->frame_type == Iec104FrameType::I) {
-                        ByteSpan next_asdu_bytes = rest.subspan(6, next->asdu_length);
-                        Iec104Asdu next_asdu = decode_iec104_asdu(next_asdu_bytes);
-                        note += " | " + next_asdu.summary;
-                        if (apdu_count == 2) {
-                            note += " -- only the first I-format APDU's ASDU is reflected in the "
-                                    "summary line above and the iec104_asdu_type_name/iec104_cot_name "
-                                    "fields; every APDU's own ASDU is still fully decoded and included "
-                                    "here and in iec104_object_values";
-                        }
-                        out.notes.push_back(note);
-                        merge_asdu(next_asdu, /*is_first_apdu=*/false);
-                    } else {
-                        out.notes.push_back(note);
-                    }
-                    offset += next->wire_length;
-                }
-                if (apdu_count >= kMaxApdusPerPayload) {
-                    out.notes.push_back("stopped after " + std::to_string(kMaxApdusPerPayload) +
-                                         " IEC 104 APDU(s) in this one TCP payload, more may remain "
-                                         "(safety cap)");
-                }
+                out.summary = ir.summary;
+                for (const auto& n : ir.notes) out.notes.push_back(n);
+                out.iec104_has_asdu = ir.iec104_has_asdu;
+                out.iec104_asdu_type_name = ir.iec104_asdu_type_name;
+                out.iec104_asdu_type_short_name = ir.iec104_asdu_type_short_name;
+                out.iec104_cot_name = ir.iec104_cot_name;
+                out.iec104_common_address = ir.iec104_common_address;
+                out.iec104_object_values = ir.iec104_object_values;
 
                 bool expected_port = port_in(tcp.src_port, IEC104_TCP_PORT, options_.extra_iec104_ports) ||
                                       port_in(tcp.dst_port, IEC104_TCP_PORT, options_.extra_iec104_ports);
@@ -2745,81 +2705,66 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
         // collision (HART-IP Session Initiate over TCP misclassifying as Modbus/TCP) this ordering
         // does NOT resolve.
         if (want_hartip) {
-            if (auto frame = try_parse_hartip(effective_payload)) {
+            // Migration batch 2: the same-payload multi-message coalescing loop and the merge-
+            // fields logic that used to live directly in this call site are now reached through
+            // HartIpTcpDecoder::decode -- HART-IP over TCP is purely stateless, so ctx is passed
+            // only because ProtocolDecoder::decode's signature requires one. See
+            // hartip.hpp/hartip.cpp. This is the TCP side only -- HART-IP's own UDP path is a
+            // separate decoder instance sharing this same "hartip" id(), reached from the UDP
+            // dispatch above.
+            DecodeContext ctx;
+            ctx.packet_index = index;
+            ctx.protocol_id = "hartip";
+            ctx.flow_states = &registry_flow_state_;
+            if (auto hartip_result = hartip_tcp_decoder().decode(effective_payload, ctx)) {
+                const HartIpResult& hr = hartip_result->as<HartIpResult>();
+                const HartIpFrame& frame = hr.first;
                 out.protocol = "hartip";
-                out.summary = frame->summary;
-
-                auto merge_hartip = [&](const HartIpFrame& f, bool is_first_message) {
-                    for (const auto& n : f.notes) out.notes.push_back(n);
-                    if (!is_first_message) return;
-                    out.hartip_version = f.version;
-                    out.hartip_message_type = f.message_type_name;
-                    out.hartip_message_id = f.message_id_name;
-                    out.hartip_status = f.status;
-                    out.hartip_transaction_id = f.transaction_id;
-                    out.hartip_msg_length = f.msg_length;
-                    out.hartip_has_session_init = f.has_session_init;
-                    if (f.has_session_init) {
-                        out.hartip_host_type_name = f.session_init.host_type_name;
-                        out.hartip_inactivity_close_timer = f.session_init.inactivity_close_timer;
-                    }
-                    out.hartip_has_error = f.has_error;
-                    if (f.has_error) {
-                        out.hartip_error_code = f.error_code;
-                        out.hartip_error_code_name = f.error_code_name;
-                    }
-                    out.hartip_has_pass_through = f.has_pass_through;
-                    if (f.has_pass_through) {
-                        const HartIpPassThrough& pt = f.pass_through;
-                        out.hartip_frame_type = pt.frame_type_name;
-                        out.hartip_is_response = pt.is_response;
-                        out.hartip_is_long_address = pt.is_long_address;
-                        if (pt.is_long_address) {
-                            out.hartip_address_hex = pt.long_address_hex;
-                        } else {
-                            std::ostringstream a;
-                            a << std::hex << std::uppercase << std::setfill('0') << std::setw(2)
-                              << static_cast<unsigned>(pt.short_address);
-                            out.hartip_address_hex = a.str();
-                        }
-                        out.hartip_command = pt.command;
-                        out.hartip_command_name = pt.command_name;
-                        if (pt.is_response) {
-                            out.hartip_response_code = pt.response_code;
-                            out.hartip_response_is_comm_error = pt.response_is_comm_error;
-                            out.hartip_response_code_name = pt.response_code_name;
-                            out.hartip_comm_error_flags = pt.comm_error_flags;
-                            out.hartip_device_status = pt.device_status;
-                            out.hartip_device_status_flags = pt.device_status_flags;
-                        }
-                        out.hartip_values = pt.values;
-                        out.hartip_checksum = pt.checksum;
-                        out.hartip_checksum_valid = pt.checksum_valid;
-                    }
-                };
-                merge_hartip(*frame, /*is_first_message=*/true);
-
-                // Like EtherNet/IP's own encapsulation messages, one HART-IP message is small and
-                // it's normal for a sender or the OS to coalesce several into one TCP segment.
-                constexpr size_t kMaxHartIpMessagesPerPayload = 50;
-                size_t offset = frame->wire_length;
-                size_t message_count = 1;
-                while (offset < effective_payload.size() && message_count < kMaxHartIpMessagesPerPayload) {
-                    ByteSpan rest = effective_payload.from(offset);
-                    auto next = try_parse_hartip(rest);
-                    if (!next) break;  // remaining bytes aren't another HART-IP message -- stop, don't guess
-                    ++message_count;
-                    std::string note = "additional HART-IP message " + std::to_string(message_count) +
-                                        " found in the same TCP payload at byte offset " + std::to_string(offset) +
-                                        " (coalesced by the sender/OS): " + next->summary;
-                    out.notes.push_back(note);
-                    merge_hartip(*next, /*is_first_message=*/false);
-                    offset += next->wire_length;
+                out.summary = hr.summary;
+                for (const auto& n : hr.notes) out.notes.push_back(n);
+                out.hartip_version = frame.version;
+                out.hartip_message_type = frame.message_type_name;
+                out.hartip_message_id = frame.message_id_name;
+                out.hartip_status = frame.status;
+                out.hartip_transaction_id = frame.transaction_id;
+                out.hartip_msg_length = frame.msg_length;
+                out.hartip_has_session_init = frame.has_session_init;
+                if (frame.has_session_init) {
+                    out.hartip_host_type_name = frame.session_init.host_type_name;
+                    out.hartip_inactivity_close_timer = frame.session_init.inactivity_close_timer;
                 }
-                if (message_count >= kMaxHartIpMessagesPerPayload) {
-                    out.notes.push_back("stopped after " + std::to_string(kMaxHartIpMessagesPerPayload) +
-                                         " HART-IP message(s) in this one TCP payload, more may remain "
-                                         "(safety cap)");
+                out.hartip_has_error = frame.has_error;
+                if (frame.has_error) {
+                    out.hartip_error_code = frame.error_code;
+                    out.hartip_error_code_name = frame.error_code_name;
+                }
+                out.hartip_has_pass_through = frame.has_pass_through;
+                if (frame.has_pass_through) {
+                    const HartIpPassThrough& pt = frame.pass_through;
+                    out.hartip_frame_type = pt.frame_type_name;
+                    out.hartip_is_response = pt.is_response;
+                    out.hartip_is_long_address = pt.is_long_address;
+                    if (pt.is_long_address) {
+                        out.hartip_address_hex = pt.long_address_hex;
+                    } else {
+                        std::ostringstream a;
+                        a << std::hex << std::uppercase << std::setfill('0') << std::setw(2)
+                          << static_cast<unsigned>(pt.short_address);
+                        out.hartip_address_hex = a.str();
+                    }
+                    out.hartip_command = pt.command;
+                    out.hartip_command_name = pt.command_name;
+                    if (pt.is_response) {
+                        out.hartip_response_code = pt.response_code;
+                        out.hartip_response_is_comm_error = pt.response_is_comm_error;
+                        out.hartip_response_code_name = pt.response_code_name;
+                        out.hartip_comm_error_flags = pt.comm_error_flags;
+                        out.hartip_device_status = pt.device_status;
+                        out.hartip_device_status_flags = pt.device_status_flags;
+                    }
+                    out.hartip_values = pt.values;
+                    out.hartip_checksum = pt.checksum;
+                    out.hartip_checksum_valid = pt.checksum_valid;
                 }
 
                 bool expected_port = port_in(tcp.src_port, HARTIP_PORT, options_.extra_hartip_ports) ||
@@ -2861,102 +2806,60 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
              port_in(tcp.dst_port, LDAP_GC_PORT, options_.extra_enterprise_trust_ports)) &&
             looks_like_ldap_ber(effective_payload);
         if (want_mqtt && !effective_payload_is_ftp_control && !effective_payload_is_ldap) {
+            // Migration batch 2: the session-version-hint lookup/learning and the same-payload
+            // multi-message coalescing loop that used to live directly in this call site are now
+            // reached through MqttDecoder::decode -- Decoder::mqtt_session_version_'s own bespoke
+            // map is retired in favor of MqttFlowState, reached via the same
+            // DecodeContext::flow_state<T>() (session-keyed, the unchanged default) every other
+            // session-scoped stateful decoder in this codebase already uses. See mqtt.hpp/mqtt.cpp.
             std::string mqtt_session_key = tcp_session_key(out.src_ip, tcp.src_port, out.dst_ip, tcp.dst_port);
-            auto session_it = mqtt_session_version_.find(mqtt_session_key);
-            uint8_t session_hint = session_it != mqtt_session_version_.end() ? session_it->second : 0;
-
-            if (auto first = try_parse_mqtt_message(effective_payload, session_hint)) {
+            DecodeContext ctx;
+            ctx.session_key = mqtt_session_key;
+            ctx.packet_index = index;
+            ctx.protocol_id = "mqtt";
+            ctx.flow_states = &registry_flow_state_;
+            if (auto mqtt_result = mqtt_decoder().decode(effective_payload, ctx)) {
+                const MqttResult& mr = mqtt_result->as<MqttResult>();
+                const MqttMessage& m = mr.first;
                 out.protocol = "mqtt";
-                out.summary = first->summary;
-
-                auto merge_mqtt = [&](const MqttMessage& m, bool is_first_message) {
-                    for (const auto& n : m.notes) out.notes.push_back(n);
-                    if (!is_first_message) return;
-                    out.mqtt_packet_type_name = m.packet_type_name;
-                    out.mqtt_remaining_length = m.remaining_length;
-                    out.mqtt_dup = m.dup;
-                    out.mqtt_retain = m.retain;
-                    out.mqtt_qos = m.qos;
-                    out.mqtt_has_packet_id = m.has_packet_id;
-                    out.mqtt_packet_id = m.packet_id;
-                    out.mqtt_topic = m.topic;
-                    out.mqtt_has_payload = m.has_payload;
-                    out.mqtt_payload_length = m.payload_length;
-                    out.mqtt_payload_hex = m.payload_hex;
-                    out.mqtt_protocol_version_name = m.protocol_version_name;
-                    out.mqtt_values = m.values;
-                    out.mqtt_is_sparkplug = m.is_sparkplug;
-                    if (m.is_sparkplug) {
-                        out.mqtt_sparkplug_group_id = m.sparkplug_group_id;
-                        out.mqtt_sparkplug_message_type = m.sparkplug_message_type;
-                        out.mqtt_sparkplug_edge_node_id = m.sparkplug_edge_node_id;
-                        out.mqtt_sparkplug_device_id = m.sparkplug_device_id;
-                        out.mqtt_sparkplug_is_state = m.sparkplug_is_state;
-                        if (m.sparkplug_is_state) {
-                            out.mqtt_sparkplug_state_host_id = m.sparkplug_state_host_id;
-                            out.mqtt_sparkplug_state_text = m.sparkplug_state_text;
-                        } else {
-                            out.mqtt_sparkplug_payload_decoded = m.sparkplug_payload.parse_ok;
-                            out.mqtt_sparkplug_has_timestamp = m.sparkplug_payload.has_timestamp;
-                            out.mqtt_sparkplug_timestamp = m.sparkplug_payload.timestamp;
-                            out.mqtt_sparkplug_has_seq = m.sparkplug_payload.has_seq;
-                            out.mqtt_sparkplug_seq = m.sparkplug_payload.seq;
-                            out.mqtt_sparkplug_has_uuid = m.sparkplug_payload.has_uuid;
-                            out.mqtt_sparkplug_uuid = m.sparkplug_payload.uuid;
-                            out.mqtt_sparkplug_has_body = m.sparkplug_payload.has_body;
-                            out.mqtt_sparkplug_body_length = m.sparkplug_payload.body_length;
-                            out.mqtt_sparkplug_metric_count = m.sparkplug_payload.metric_count;
-                            out.mqtt_sparkplug_metrics = m.sparkplug_payload.metrics;
-                        }
+                out.summary = mr.summary;
+                for (const auto& n : mr.notes) out.notes.push_back(n);
+                out.mqtt_packet_type_name = m.packet_type_name;
+                out.mqtt_remaining_length = m.remaining_length;
+                out.mqtt_dup = m.dup;
+                out.mqtt_retain = m.retain;
+                out.mqtt_qos = m.qos;
+                out.mqtt_has_packet_id = m.has_packet_id;
+                out.mqtt_packet_id = m.packet_id;
+                out.mqtt_topic = m.topic;
+                out.mqtt_has_payload = m.has_payload;
+                out.mqtt_payload_length = m.payload_length;
+                out.mqtt_payload_hex = m.payload_hex;
+                out.mqtt_protocol_version_name = m.protocol_version_name;
+                out.mqtt_values = m.values;
+                out.mqtt_is_sparkplug = m.is_sparkplug;
+                if (m.is_sparkplug) {
+                    out.mqtt_sparkplug_group_id = m.sparkplug_group_id;
+                    out.mqtt_sparkplug_message_type = m.sparkplug_message_type;
+                    out.mqtt_sparkplug_edge_node_id = m.sparkplug_edge_node_id;
+                    out.mqtt_sparkplug_device_id = m.sparkplug_device_id;
+                    out.mqtt_sparkplug_is_state = m.sparkplug_is_state;
+                    if (m.sparkplug_is_state) {
+                        out.mqtt_sparkplug_state_host_id = m.sparkplug_state_host_id;
+                        out.mqtt_sparkplug_state_text = m.sparkplug_state_text;
+                    } else {
+                        out.mqtt_sparkplug_payload_decoded = m.sparkplug_payload.parse_ok;
+                        out.mqtt_sparkplug_has_timestamp = m.sparkplug_payload.has_timestamp;
+                        out.mqtt_sparkplug_timestamp = m.sparkplug_payload.timestamp;
+                        out.mqtt_sparkplug_has_seq = m.sparkplug_payload.has_seq;
+                        out.mqtt_sparkplug_seq = m.sparkplug_payload.seq;
+                        out.mqtt_sparkplug_has_uuid = m.sparkplug_payload.has_uuid;
+                        out.mqtt_sparkplug_uuid = m.sparkplug_payload.uuid;
+                        out.mqtt_sparkplug_has_body = m.sparkplug_payload.has_body;
+                        out.mqtt_sparkplug_body_length = m.sparkplug_payload.body_length;
+                        out.mqtt_sparkplug_metric_count = m.sparkplug_payload.metric_count;
+                        out.mqtt_sparkplug_metrics = m.sparkplug_payload.metrics;
                     }
-                };
-                merge_mqtt(*first, /*is_first_message=*/true);
-
-                // A CONNECT anywhere in this payload updates this session's tracked version for
-                // every later packet on it (including any further coalesced packets in this very
-                // same TCP payload, handled via `running_hint` below) -- see mqtt.hpp's "Version
-                // disambiguation" section and mqtt_session_version_'s own declaration in
-                // decoder.hpp.
-                uint8_t running_hint = session_hint;
-                auto maybe_learn_version = [&](const MqttMessage& m) {
-                    if (m.packet_type != 1) return;
-                    if (m.connect_discovered_version == 5) {
-                        running_hint = 5;
-                        mqtt_session_version_[mqtt_session_key] = running_hint;
-                    } else if (m.connect_discovered_version == 4 || m.connect_discovered_version == 3) {
-                        // Level 3 is the pre-OASIS "MQTT 3.1" CONNECT (ProtocolName "MQIsdp") --
-                        // seen in real traffic (e.g. older Paho clients). Its SUBSCRIBE/SUBACK/
-                        // UNSUBSCRIBE/PUBLISH wire shapes are identical to 3.1.1's (no unconditional
-                        // Properties section), so it's tracked under the same "4" hint value rather
-                        // than left to fall back on the weaker per-packet heuristic.
-                        running_hint = 4;
-                        mqtt_session_version_[mqtt_session_key] = running_hint;
-                    }
-                };
-                maybe_learn_version(*first);
-
-                // Small control packets (PINGREQ/PUBACK/SUBACK/...) are common and it's normal for
-                // a sender or the OS to coalesce several into one TCP segment before flushing, the
-                // same pattern as every other small-message protocol in this codebase.
-                constexpr size_t kMaxMqttMessagesPerPayload = 50;
-                size_t offset = first->wire_length;
-                size_t message_count = 1;
-                while (offset < effective_payload.size() && message_count < kMaxMqttMessagesPerPayload) {
-                    ByteSpan rest = effective_payload.from(offset);
-                    auto next = try_parse_mqtt_message(rest, running_hint);
-                    if (!next) break;  // remaining bytes aren't another MQTT packet -- stop, don't guess
-                    ++message_count;
-                    std::string note = "additional MQTT packet " + std::to_string(message_count) +
-                                        " found in the same TCP payload at byte offset " + std::to_string(offset) +
-                                        " (coalesced by the sender/OS): " + next->summary;
-                    out.notes.push_back(note);
-                    merge_mqtt(*next, /*is_first_message=*/false);
-                    maybe_learn_version(*next);
-                    offset += next->wire_length;
-                }
-                if (message_count >= kMaxMqttMessagesPerPayload) {
-                    out.notes.push_back("stopped after " + std::to_string(kMaxMqttMessagesPerPayload) +
-                                         " MQTT packet(s) in this one TCP payload, more may remain (safety cap)");
                 }
 
                 bool expected_port = port_in(tcp.src_port, MQTT_PORT, options_.extra_mqtt_ports) ||

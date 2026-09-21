@@ -369,6 +369,7 @@
 #include <vector>
 
 #include "conduitscope/byteio.hpp"
+#include "conduitscope/protocol_decoder.hpp"
 
 namespace conduitscope {
 
@@ -446,5 +447,37 @@ std::optional<size_t> opcua_declared_length(ByteSpan payload);
 // strings, when ChunkType isn't 'F'/'C'/'A', or when MessageSize is implausibly small (< 8) -- see
 // this file's header comment's "structural detection gate" paragraph.
 std::optional<OpcUaMessage> try_parse_opcua_message(ByteSpan payload);
+
+// Migration batch 2 (see protocol_decoder.hpp/protocol_registry.hpp): everything decoder.cpp's
+// OPC UA call site dual-writes into DecodedPacket, gathered from however many chunks were
+// coalesced in one TCP payload (see OpcUaDecoder::decode below) -- mirrors exactly what the
+// pre-migration call site computed locally. `summary`/`notes` are the fully-assembled headline
+// summary and note list, in the same order the legacy call site produced them (every coalesced
+// chunk contributes a note, but only the first chunk's own fields feed the rest of
+// DecodedPacket); `first` is that first chunk's full OpcUaMessage, unmodified, since the legacy
+// call site's per-field dual-write was already a straight field-by-field copy with no reduction
+// of its own worth re-deriving here.
+struct OpcUaResult {
+    std::string summary;
+    std::vector<std::string> notes;
+    OpcUaMessage first;
+};
+
+// id() == "opcua", gate_kind() == TcpPortIndependent. Wraps try_parse_opcua_message plus the
+// same-TCP-payload multi-chunk-coalescing loop that used to live directly in decoder.cpp's
+// `if (want_opcua)` call site -- OPC UA is purely stateless (no fragment reassembly of its own;
+// SecureConversation chunking is handled entirely within try_parse_opcua_message/wire_length), so
+// unlike Dnp3Decoder/CotpDecoder there is no per-flow reassembly state here at all.
+class OpcUaDecoder : public ProtocolDecoder {
+public:
+    std::string_view id() const override { return "opcua"; }
+    GateKind gate_kind() const override { return GateKind::TcpPortIndependent; }
+    std::optional<size_t> tcp_declared_length(ByteSpan candidate) const override {
+        return opcua_declared_length(candidate);
+    }
+    std::optional<ProtocolResult> decode(ByteSpan payload, DecodeContext& ctx) const override;
+};
+
+const ProtocolDecoder& opcua_decoder();
 
 }  // namespace conduitscope
