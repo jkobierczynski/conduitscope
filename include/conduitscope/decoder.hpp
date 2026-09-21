@@ -25,6 +25,7 @@
 #include "conduitscope/goose.hpp"
 #include "conduitscope/hartip.hpp"
 #include "conduitscope/hsrp.hpp"
+#include "conduitscope/icmp.hpp"
 #include "conduitscope/iec104.hpp"
 #include "conduitscope/igmp.hpp"
 #include "conduitscope/igrp.hpp"
@@ -78,6 +79,7 @@ enum class ProtocolFilter {
     NbnsOnly,     // only attempt NetBIOS Name Service (NBT-NS) decoding
     DohOnly,      // only attempt DNS-over-HTTPS detection (TLS ClientHello SNI only -- see tls_sni.hpp)
     RipOnly,      // only attempt RIP v1/v2 decoding
+    IcmpOnly,     // only attempt ICMP decoding -- see icmp.hpp
     IgmpOnly,     // only attempt IGMP v1/v2/v3 decoding
     VrrpOnly,     // only attempt VRRP v2/v3 decoding
     HsrpOnly,     // only attempt HSRP v1/v2 decoding
@@ -299,7 +301,8 @@ struct DecodedPacket {
     // "tcp" (recognized transport, no app-layer match), "udp" (recognized transport, no app-layer
     // protocol decoded -- see udp.hpp; UDP/2222 CIP I/O traffic that try_parse_cip_io actually
     // recognizes is promoted to "enip" instead -- see enip_has_io below), "non-tcp" (a non-TCP,
-    // non-UDP IPv4 payload, e.g. ICMP), "non-ip" (a non-IPv4 Ethernet frame, e.g. ARP, or a
+    // non-UDP, non-ICMP/IGMP/VRRP/IGRP/PIM/EIGRP/OSPF IPv4 payload -- see the icmp/igmp/vrrp/igrp/
+    // pim/eigrp/ospf paragraph below for what's promoted out of this fallback), "non-ip" (a non-IPv4 Ethernet frame, e.g. ARP, or a
     // PROFINET RT frame whose FrameID try_parse_profinet doesn't recognize, or a GOOSE frame
     // whose outer APDU tag try_parse_goose doesn't recognize, or an SV frame whose outer APDU tag
     // try_parse_sv doesn't recognize, or an EtherCAT frame whose header Type field
@@ -331,7 +334,12 @@ struct DecodedPacket {
     // "doh" (a TCP/443 flow whose TLS ClientHello SNI matches a known DNS-over-HTTPS resolver --
     // detection only, see doh_* fields below and tls_sni.hpp). Also "rip" (a UDP payload on port
     // 520, or any port with --protocol rip, that try_parse_rip recognizes -- see rip_* fields
-    // below and rip.hpp), "igmp" (an IP payload with IP protocol number 2, dispatched regardless
+    // below and rip.hpp), "icmp" (an IP payload with IP protocol number 1, dispatched regardless
+    // of port since ICMP has none, that try_parse_icmp recognizes -- see icmp_* fields below and
+    // icmp.hpp; unlike igmp/vrrp/igrp/pim/eigrp/ospf below, try_parse_icmp accepts virtually any
+    // 4+ byte payload -- ICMP's Type byte alone gives no useful structural filter -- so it is the
+    // IP-protocol-number match itself, not a shape match, doing the real work here), "igmp" (an IP
+    // payload with IP protocol number 2, dispatched regardless
     // of port since IGMP has none, that try_parse_igmp recognizes -- see igmp_* fields below and
     // igmp.hpp; a non-IGMP-shaped IP-protocol-2 payload still falls through to "non-tcp"), "vrrp"
     // (an IP payload with IP protocol number 112 that try_parse_vrrp recognizes -- see vrrp_*
@@ -1128,6 +1136,31 @@ struct DecodedPacket {
     // entry. Capped at 50 entries, same convention as s7comm_item_tags above.
     std::vector<std::string> rip_routes;
     bool rip_routes_truncated = false;  // more than 50 route table entries were present
+
+    // Only set when protocol == "icmp" -- see try_parse_icmp in icmp.hpp.
+    std::string icmp_type_name;
+    std::string icmp_code_name;  // empty when this type has no named codes
+    uint8_t icmp_type = 0;
+    uint8_t icmp_code = 0;
+    bool icmp_checksum_valid = false;
+    uint16_t icmp_echo_identifier = 0;      // Echo/Timestamp/Address Mask Request/Reply only
+    uint16_t icmp_echo_sequence = 0;        // Echo/Timestamp/Address Mask Request/Reply only
+    // "src->dst (protocol[ port->port])" -- Destination Unreachable/Redirect/Time Exceeded/
+    // Parameter Problem only, and only when enough of the embedded original datagram was present
+    // and well-formed to summarize (see icmp.hpp's file header for why this can be absent).
+    std::string icmp_embedded_datagram;
+    std::string icmp_address_mask;   // Address Mask Request/Reply only
+    std::string icmp_redirect_gateway;  // Redirect only
+    uint16_t icmp_next_hop_mtu = 0;     // Destination Unreachable code 4 (RFC 1191) only
+    uint8_t icmp_parameter_pointer = 0; // Parameter Problem only
+    // One "address (preference)" entry per Router Advertisement entry (type 9). Capped at 50.
+    std::vector<std::string> icmp_router_addresses;
+    bool icmp_router_addresses_truncated = false;
+    // Timestamp Request/Reply (type 13/14) only -- milliseconds since UTC midnight (RFC 792 has
+    // no date component), not a full timestamp.
+    uint32_t icmp_originate_timestamp_ms = 0;
+    uint32_t icmp_receive_timestamp_ms = 0;
+    uint32_t icmp_transmit_timestamp_ms = 0;
 
     // Only set when protocol == "igmp" -- see try_parse_igmp in igmp.hpp.
     int igmp_version = 0;

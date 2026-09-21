@@ -10,6 +10,20 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE Release)
 endif()
 
+# `conduitscope version`'s own reported build type -- see version.hpp.in below. CMAKE_BUILD_TYPE
+# is meaningless for a multi-config generator (Visual Studio, Xcode: CMAKE_CONFIGURATION_TYPES is
+# set instead, and the actual configuration is picked at BUILD time via --config, not here at
+# configure time), so it's always empty in that case -- confirmed on a real Windows/MSVC build,
+# which without this fallback reports "conduitscope 0.1.7  [MSVC ..., Windows,  build, ...]" (note
+# the double space where an empty CMAKE_BUILD_TYPE left a hole). "multi-config" is honest about why
+# no single value is available here, rather than guessing a config that may not be the one actually
+# built.
+if(CMAKE_CONFIGURATION_TYPES)
+  set(CONDUITSCOPE_REPORTED_BUILD_TYPE "multi-config")
+else()
+  set(CONDUITSCOPE_REPORTED_BUILD_TYPE "${CMAKE_BUILD_TYPE}")
+endif()
+
 # The version `conduitscope version` reports is PROJECT_VERSION above by
 # default (bumped by hand alongside each release), but the release CI job
 # (.github/workflows/ci.yml's `release` job) overrides it explicitly from
@@ -62,6 +76,7 @@ add_library(conduitscope_core STATIC
   src/nbns.cpp
   src/tls_sni.cpp
   src/rip.cpp
+  src/icmp.cpp
   src/igmp.cpp
   src/vrrp.cpp
   src/hsrp.cpp
@@ -703,10 +718,10 @@ add_test(NAME link_layer_unrecognized_ethertype_stays_unnamed
 set_tests_properties(link_layer_unrecognized_ethertype_stays_unnamed PROPERTIES
   PASS_REGULAR_EXPRESSION "\\[non-ip\\]  Ethernet frame with ethertype 0x9999 \\(not IPv4\\)")
 
-add_test(NAME ip_layer_icmp_protocol_number_named
+add_test(NAME ip_layer_icmpv6_protocol_number_named
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_link_transport_layers.pcap" --format text)
-set_tests_properties(ip_layer_icmp_protocol_number_named PROPERTIES
-  PASS_REGULAR_EXPRESSION "\\[non-tcp\\]  IPv4 protocol number 1 \\(ICMP\\) \\(not TCP\\)")
+set_tests_properties(ip_layer_icmpv6_protocol_number_named PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[non-tcp\\]  IPv4 protocol number 58 \\(ICMPv6\\) \\(not TCP\\)")
 
 # Arbitrary, too-short bytes on EtherNet/IP's own CIP I/O port (2222) must NOT be misdetected as
 # CIP I/O -- try_parse_cip_io's structural gate (see its header comment in enip.hpp) correctly
@@ -1001,7 +1016,7 @@ set_tests_properties(enip_unregister_session_decoded PROPERTIES
 add_test(NAME enip_nop_not_detected
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enip_nop_precedence.pcap" --format text)
 set_tests_properties(enip_nop_not_detected PROPERTIES
-  PASS_REGULAR_EXPRESSION "\\[tcp\\]  TCP payload of 24 byte\\(s\\) on port 52001->44818 did not match OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, COTP/S7comm/MMS, HART-IP, MQTT, FF-HSE, the RDP/VNC/TeamViewer/AnyDesk/Zoom remote-access family, the SMB/SSH/HTTP/HTTPS/Telnet/FTP lateral-movement family, the LDAP/LDAPS/TACACS\\+ enterprise-trust family, or the OpenVPN/STT tunnel-VPN family")
+  PASS_REGULAR_EXPRESSION "\\[tcp\\]  TCP payload of 24 byte\\(s\\) on port 52001->44818")
 
 # --------------------------------------------------------------------------
 # EtherNet/IP CIP STRING/SHORT_STRING and Structured Data Type (UDT/array-of-UDT tag) value
@@ -2912,7 +2927,11 @@ add_test(NAME real_hartip_does_not_crash
 add_test(NAME real_hartip_stats_summary
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/hartip/hart_ip.pcapng" --stats)
 set_tests_properties(real_hartip_stats_summary PROPERTIES
-  PASS_REGULAR_EXPRESSION "packets: +116[^\n]*\n[^\n]*\nprotocols:\n *hartip +46\n *modbus +2\n *non-ip +4\n *non-tcp +1\n *tcp +63\n.*hartip message types:\n *Request +23\n *Response +23\nhartip pass-through commands:\n")
+  # This capture's one non-TCP/non-modbus/non-hartip packet is a genuine ICMP Destination
+  # Unreachable -- previously shown only as an opaque "non-tcp" count before try_parse_icmp
+  # existed (see icmp.hpp/icmp.cpp); now decoded and broken out as its own "icmp" protocol line
+  # plus an "icmp types:" breakdown, confirmed against this real capture.
+  PASS_REGULAR_EXPRESSION "packets: +116[^\n]*\n[^\n]*\nprotocols:\n *hartip +46\n *icmp +1\n *modbus +2\n *non-ip +4\n *tcp +63\n.*hartip message types:\n *Request +23\n *Response +23\nhartip pass-through commands:\n.*icmp types:\n *Destination Unreachable +1")
 
 add_test(NAME real_hartip_command_coverage_json
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/hartip/hart_ip.pcapng" --stats)
@@ -3849,11 +3868,11 @@ set_tests_properties(mqtt_invalid_qos_and_truncated_body_notes PROPERTIES
 # A CONNECT-shaped byte sequence whose Protocol Name is neither "MQTT" nor "MQIsdp" -- this MUST be
 # rejected outright by the structural detection gate (the stronger CONNECT-specific check in
 # try_parse_mqtt_message), not decoded as MQTT at all, and must fall all the way through to the
-# generic "did not match any protocol" fallback.
+# generic "no protocol claimed this payload" fallback.
 add_test(NAME mqtt_bogus_connect_protocol_name_rejected
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mqtt.pcap" --format text)
 set_tests_properties(mqtt_bogus_connect_protocol_name_rejected PROPERTIES
-  PASS_REGULAR_EXPRESSION "\\[tcp\\]  TCP payload of 16 byte\\(s\\) on port 55020->1883 did not match OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, COTP/S7comm/MMS, HART-IP, MQTT, FF-HSE, the RDP/VNC/TeamViewer/AnyDesk/Zoom remote-access family, the SMB/SSH/HTTP/HTTPS/Telnet/FTP lateral-movement family, the LDAP/LDAPS/TACACS\\+ enterprise-trust family, or the OpenVPN/STT tunnel-VPN family")
+  PASS_REGULAR_EXPRESSION "\\[tcp\\]  TCP payload of 16 byte\\(s\\) on port 55020->1883")
 
 # A genuinely truncated/incomplete final packet on its own flow -- declares more Remaining Length
 # than actually follows, with nothing more ever arriving in this capture -- the TCP-reassembly
@@ -4628,6 +4647,16 @@ add_test(NAME ffhse_unexpected_port_noted
 set_tests_properties(ffhse_unexpected_port_noted PROPERTIES
   PASS_REGULAR_EXPRESSION "\"ffhse_message_name\": \"SM Identify Req\",.*seen on UDP port 52200->40000, which is not a configured/standard FF-HSE port \\(1089/1090/1091/3622\\)")
 
+# False-positive regression: an otherwise structurally-valid ProtocolAndType byte, but a Message
+# Length (4237566479) far beyond the 16 MiB plausibility ceiling (kMaxPlausibleMessageLength,
+# ffhse.cpp) -- must fall through to the generic "udp" protocol, NOT be detected as ffhse. Mirrors
+# a real false positive found on a genuine capture: a UDP/443 QUIC/TLS response's essentially-
+# random bytes matched this decoder's own weak structural gate before this ceiling existed.
+add_test(NAME ffhse_implausible_message_length_not_misdetected
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ffhse.pcap" --format json)
+set_tests_properties(ffhse_implausible_message_length_not_misdetected PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"src_port\": 443,\n *\"dst_port\": 58201,\n *\"tcp_flags\": null,\n *\"protocol\": \"udp\"")
+
 # FF-HSE over TCP: the same 4 ports serve both transports -- a genuine FMS Initiate
 # request/response round trip.
 add_test(NAME ffhse_tcp_round_trip
@@ -4847,6 +4876,98 @@ add_test(NAME stats_mode_igmp
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_igmp.pcap" --stats)
 set_tests_properties(stats_mode_igmp PROPERTIES
   PASS_REGULAR_EXPRESSION "igmp types:.*Membership Query")
+
+# --------------------------------------------------------------------------
+# ICMP (synthetic, tests/sample_icmp.pcap) -- rides directly on IP protocol 1, same dispatch shape
+# as IGMP/VRRP above -- see icmp.hpp's file header and tools/make_sample_pcap.py's
+# build_icmp_sample for the exact byte layout of each packet referenced below.
+# --------------------------------------------------------------------------
+add_test(NAME icmp_echo_request_and_reply_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_icmp.pcap" --format text)
+set_tests_properties(icmp_echo_request_and_reply_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[icmp\\]  ICMP Echo Request, id=4660 seq=1, 32 byte\\(s\\) of data.*\\[icmp\\]  ICMP Echo Reply, id=4660 seq=1, 32 byte\\(s\\) of data")
+
+add_test(NAME icmp_destination_unreachable_port_unreachable_embedded_udp_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_icmp.pcap" --format json)
+set_tests_properties(icmp_destination_unreachable_port_unreachable_embedded_udp_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"icmp_type\": 3,\n *\"icmp_code\": 3,\n *\"icmp_type_name\": \"Destination Unreachable\",\n *\"icmp_code_name\": \"Port Unreachable\",\n *\"icmp_checksum_valid\": true,\n *\"icmp_embedded_datagram\": \"192.168.1.50->192.168.1.10 \\(UDP 51000->502\\)\"")
+
+add_test(NAME icmp_destination_unreachable_fragmentation_needed_next_hop_mtu_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_icmp.pcap" --format text)
+set_tests_properties(icmp_destination_unreachable_fragmentation_needed_next_hop_mtu_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "ICMP Destination Unreachable \\(Fragmentation Needed and Don't Fragment was Set\\), next-hop MTU 1400 -- original datagram 192.168.1.50->192.168.1.10 \\(TCP 51001->502\\)")
+
+# Too little follows the fixed header to attempt an embedded-datagram parse at all (see
+# decode_embedded_datagram's own >=20-byte gate) -- summary must stop right after the code name,
+# no "-- original datagram" fragment, and the JSON must omit icmp_embedded_datagram entirely
+# (conditional emission, same convention as every other optional field in output.cpp).
+add_test(NAME icmp_destination_unreachable_no_embedded_datagram_when_too_short
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_icmp.pcap" --format json)
+set_tests_properties(icmp_destination_unreachable_no_embedded_datagram_when_too_short PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"summary\": \"ICMP Destination Unreachable \\(Host Unreachable\\)\",\n *\"icmp_type\": 3,\n *\"icmp_code\": 1,\n *\"icmp_type_name\": \"Destination Unreachable\",\n *\"icmp_code_name\": \"Host Unreachable\",\n *\"icmp_checksum_valid\": true,\n *\"notes\": \\[\\]")
+
+add_test(NAME icmp_redirect_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_icmp.pcap" --format text)
+set_tests_properties(icmp_redirect_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "ICMP Redirect \\(Redirect Datagram for the Host\\), gateway 192.168.1.1 -- original datagram 192.168.1.50->192.168.1.99 \\(TCP 51002->502\\)")
+
+add_test(NAME icmp_time_exceeded_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_icmp.pcap" --format text)
+set_tests_properties(icmp_time_exceeded_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "ICMP Time Exceeded \\(Time to Live Exceeded in Transit\\) -- original datagram 192.168.1.50->8.8.8.8 \\(UDP 51003->33434\\)")
+
+add_test(NAME icmp_parameter_problem_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_icmp.pcap" --format text)
+set_tests_properties(icmp_parameter_problem_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "ICMP Parameter Problem \\(Pointer Indicates the Error\\), pointer=0 -- original datagram 192.168.1.50->192.168.1.10 \\(TCP 51004->502\\)")
+
+add_test(NAME icmp_timestamp_request_and_reply_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_icmp.pcap" --format text)
+set_tests_properties(icmp_timestamp_request_and_reply_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "ICMP Timestamp Request, id=22136 seq=1, originate=3600000ms.*ICMP Timestamp Reply, id=22136 seq=1, originate=3600000ms")
+
+add_test(NAME icmp_address_mask_request_and_reply_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_icmp.pcap" --format text)
+set_tests_properties(icmp_address_mask_request_and_reply_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "ICMP Address Mask Request, id=39612 seq=1, mask 0.0.0.0.*ICMP Address Mask Reply, id=39612 seq=1, mask 255.255.255.0")
+
+add_test(NAME icmp_router_advertisement_addresses_and_preferences_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_icmp.pcap" --format json)
+set_tests_properties(icmp_router_advertisement_addresses_and_preferences_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"icmp_router_addresses\": \\[\"192.168.1.1 \\(0\\)\", \"192.168.1.2 \\(-1\\)\"\\],\n *\"icmp_router_addresses_truncated\": false")
+
+add_test(NAME icmp_router_solicitation_named_only
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_icmp.pcap" --format text)
+set_tests_properties(icmp_router_solicitation_named_only PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[icmp\\]  ICMP Router Solicitation\n")
+
+add_test(NAME icmp_unassigned_type_rendered_as_unknown_n
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_icmp.pcap" --format text)
+set_tests_properties(icmp_unassigned_type_rendered_as_unknown_n PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[icmp\\]  ICMP Unknown \\(40\\)\n")
+
+add_test(NAME icmp_checksum_mismatch_noted_and_invalid
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_icmp.pcap" --format json)
+set_tests_properties(icmp_checksum_mismatch_noted_and_invalid PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"icmp_checksum_valid\": false,.*\"notes\": \\[\"ICMP checksum mismatch \\(packet declares 0x0\\) -- either a truncated capture or a crafted/corrupted packet\"\\]")
+
+# Fewer than the fixed 4-byte Type+Code+Checksum header -- try_parse_icmp's own documented
+# nullopt condition (see icmp.hpp) -- must fall through to the generic "non-tcp" fallback, not be
+# (mis)claimed as ICMP.
+add_test(NAME icmp_too_short_falls_back_to_non_tcp
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_icmp.pcap" --format text)
+set_tests_properties(icmp_too_short_falls_back_to_non_tcp PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[non-tcp\\]  IPv4 protocol number 1 \\(ICMP\\) \\(not TCP\\)")
+
+add_test(NAME protocol_filter_icmp_only
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_icmp.pcap" --protocol icmp --format text)
+set_tests_properties(protocol_filter_icmp_only PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[icmp\\]  ICMP Echo Request")
+
+add_test(NAME stats_mode_icmp
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_icmp.pcap" --stats)
+set_tests_properties(stats_mode_icmp PROPERTIES
+  PASS_REGULAR_EXPRESSION "icmp types:\n *Address Mask Reply +1\n *Address Mask Request +1\n *Destination Unreachable +3\n *Echo Reply +1\n *Echo Request +2\n *Parameter Problem +1\n *Redirect +1\n *Router Advertisement +1\n *Router Solicitation +1\n *Time Exceeded +1\n *Timestamp Reply +1\n *Timestamp Request +1\n *Unknown \\(40\\) +1")
 
 # --------------------------------------------------------------------------
 # Real-world IGMP capture -- see tests/real_captures/igmp/ATTRIBUTION.md for provenance (also
@@ -6144,7 +6265,7 @@ set_tests_properties(inventory_mqtt_recognized PROPERTIES
 add_test(NAME inventory_ffhse_recognized_tcp_only_udp_skipped
   COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ffhse.pcap")
 set_tests_properties(inventory_ffhse_recognized_tcp_only_udp_skipped PROPERTIES
-  PASS_REGULAR_EXPRESSION "2 asset\\(s\\) observed, 68 total packet\\(s\\) in capture, 64 skipped.*192\\.168\\.1\\.10 .*\\[server\\]  ffhse  \\(4 packet\\(s\\)\\)")
+  PASS_REGULAR_EXPRESSION "2 asset\\(s\\) observed, 69 total packet\\(s\\) in capture, 65 skipped.*192\\.168\\.1\\.10 .*\\[server\\]  ffhse  \\(4 packet\\(s\\)\\)")
 
 # ---------------------------------------------------------------------------------------------
 # Tier 1 "IT protocols an OT auditor flags" recognition (it_protocols.hpp/cpp) -- RDP, VNC,
@@ -6224,7 +6345,8 @@ set_tests_properties(remote_access_extra_port_widens_expected_range PROPERTIES
 add_test(NAME remote_access_falls_through_to_generic_tcp_summary
   COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mqtt.pcap")
 set_tests_properties(remote_access_falls_through_to_generic_tcp_summary PROPERTIES
-  PASS_REGULAR_EXPRESSION "did not match OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, COTP/S7comm/MMS, HART-IP, MQTT, FF-HSE, the RDP/VNC/TeamViewer/AnyDesk/Zoom remote-access family, the SMB/SSH/HTTP/HTTPS/Telnet/FTP lateral-movement family, the LDAP/LDAPS/TACACS\\+ enterprise-trust family, or the OpenVPN/STT tunnel-VPN family")
+  PASS_REGULAR_EXPRESSION "\\[tcp\\]  TCP payload of 16 byte\\(s\\) on port 55020->1883"
+  FAIL_REGULAR_EXPRESSION "\\[(rdp|vnc|teamviewer|anydesk|zoom)\\]")
 
 add_test(NAME remote_access_rdp_carve_out_does_not_affect_real_s7comm
   COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm.pcap")

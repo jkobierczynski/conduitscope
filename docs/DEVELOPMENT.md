@@ -684,6 +684,27 @@ either. See `include/conduitscope/ffhse.hpp`'s own "Structural detection
 gate" paragraph and `src/decoder.cpp`'s own dispatch-order comment for the
 full detail.
 
+**Confirmed in the field.** The prediction two paragraphs above -- that
+this gate's own weakness meant a real collision was plausible, not just
+theoretical -- happened on a real Windows/Npcap live capture: a UDP/443
+QUIC/TLS response's essentially-random bytes matched the ProtocolAndType
+byte and decoded a Message Length of 4237566479, misdetected as a badly
+truncated FF-HSE message (`[ffhse]  SM confirmed service 8`, with two
+truncation notes and a deficit figure north of 4 billion "bytes"). Dispatch
+order alone caught this correctly in the sense that nothing else claimed
+the packet first, but the length check that "all but the smallest 12
+possible 32-bit values already satisfy" (per this section's own text
+above) did nothing to stop it. Fixed by giving `try_parse_ffhse` itself the
+same 16 MiB plausibility ceiling `ffhse_declared_length` already had for
+TCP reassembly purposes (see `kMaxPlausibleMessageLength` in `ffhse.cpp`)
+-- this rejects the large majority of random-noise collisions (values
+below 16 MiB are ~0.4% of the 32-bit range) without narrowing this
+decoder's ability to recognize a real, truncated FF-HSE message, since a
+legitimate Message Length is never remotely close to 16 MiB. This does
+NOT close the underlying gate's own weakness (the ProtocolAndType byte
+alone is still a 12-in-256 chance) -- dispatch-order-last remains the
+primary mitigation, exactly as before.
+
 `--protocol modbus`, `--protocol dnp3`, `--protocol s7comm`, `--protocol
 mms`, `--protocol mqtt`, `--protocol iec104`, `--protocol enip`,
 `--protocol profinet`, `--protocol goose`, `--protocol sv`, `--protocol
@@ -952,12 +973,19 @@ building this feature, to satisfy FF-HSE's own weaker structural gate and
 get misdetected as truncated FF-HSE traffic when tried in FF-HSE's usual
 lowest-priority position; once RIP's/HSRP's own port gate has already
 matched, that is a stronger signal than FF-HSE's port-independent one, so it
-runs first. **IGMP, VRRP, IGRP, PIM, EIGRP, and OSPF need no port gate or
-option at all**: all six ride directly on IP with no UDP/TCP header, and are
-dispatched purely by their own IANA-exclusive IP protocol number (2, 112, 9,
+runs first. **ICMP, IGMP, VRRP, IGRP, PIM, EIGRP, and OSPF need no port gate or
+option at all**: all seven ride directly on IP with no UDP/TCP header, and are
+dispatched purely by their own IANA-exclusive IP protocol number (1, 2, 112, 9,
 103, 88, and 89 respectively) -- a signal with no port concept to widen or
-restrict in the first place. See docs/PROTOCOL_COVERAGE.md's "RIP / IGMP / VRRP /
-HSRP" and "IGRP / PIM / EIGRP / OSPF" sections for the full wire formats.
+restrict in the first place. ICMP is the one structurally weaker case in this
+group, worth calling out on its own: its Type byte gives almost no useful
+filter of its own (nearly every 0-255 value is either a real registered type
+or renders as `Unknown (N)`), so unlike its six siblings here, it's the IP
+protocol number match alone -- not any shape match inside the message --
+doing essentially all of the detection work; see icmp.hpp's own file header
+and docs/PROTOCOL_COVERAGE.md's ICMP section. See docs/PROTOCOL_COVERAGE.md's
+"RIP / IGMP / VRRP / HSRP" and "IGRP / PIM / EIGRP / OSPF" sections for the
+full wire formats of the other six.
 
 **RDP, TeamViewer, AnyDesk, and Zoom (Tier 1 of the "IT protocols an OT
 auditor flags" family) are also port-gated in `--protocol auto`**, widened
@@ -1138,6 +1166,15 @@ anything else on this list.
 1. **Validate live capture against a real Windows/Npcap install and a real
    OT/mirrored-switch-port network**, not just Linux loopback -- see LIVE
    CAPTURE's "Windows / Npcap notes" and docs/USER_GUIDE.md's LIMITATIONS.
+   **Partially done:** the Windows/Npcap half is now validated -- a clean
+   MSVC/Visual Studio build with live capture enabled, `conduitscope.exe
+   interfaces` correctly enumerating real adapters, and a real capture
+   decoded end to end (which is what surfaced both the `version` multi-
+   config build-type bug and the FF-HSE false-positive fix documented
+   elsewhere in this file, plus the addition of full ICMP decoding). Still
+   open: a real OT/mirrored-switch-port network capture -- what's been run
+   so far is ordinary client traffic (ICMP, UDP/443 QUIC/TLS), not
+   industrial protocol traffic on a real mirrored port.
 2. **Confirm or replace the EXPERIMENTAL `0xB2` (S7-1200/1500 "symbolic"
    addressing) decode** against a source with real authority -- a PLC or
    TIA Portal project under your own control, ideally, rather than more

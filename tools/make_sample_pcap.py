@@ -878,10 +878,14 @@ def build_link_and_transport_layer_sample():
     add_eth(0x88B8, bytes([0xBB] * 20))            # IEC 61850-8-1 GOOSE -- content arbitrary, not parsed
     add_eth(0x9999, bytes([0xCC] * 10))            # unrecognized ethertype -- must stay unnamed
 
-    # A non-TCP, non-UDP IPv4 payload -- ICMP echo request (type=8, code=0, checksum=0, arbitrary
-    # rest), named via ip_protocol_name.
-    icmp = struct.pack("!BBH", 8, 0, 0) + bytes([0x01, 0x02, 0x03, 0x04])
-    add_ip(1, icmp)
+    # A non-TCP, non-UDP IPv4 payload that this tool names but still does not further decode --
+    # ICMPv6 (IP protocol 58), arbitrary content, named via ip_protocol_name. IP protocol 1
+    # (plain ICMP) used to be the example here, but try_parse_icmp now genuinely decodes it (see
+    # icmp.hpp/icmp.cpp and tests/sample_icmp.pcap for that dedicated coverage) -- ICMPv6 keeps
+    # this packet actually exercising the "recognized-but-not-decoded" fallback path it's meant
+    # to test, rather than silently starting to test something else.
+    icmpv6 = bytes([0x80, 0x00, 0x00, 0x00]) + bytes([0x01, 0x02, 0x03, 0x04])
+    add_ip(58, icmpv6)
 
     # UDP on EtherNet/IP's own CIP I/O port (2222) -- but only 4 bytes of arbitrary content, far
     # too short to be a genuine Sequenced Address Item (see enip.hpp), so try_parse_cip_io
@@ -5255,13 +5259,22 @@ def pack_ascii(text: str) -> bytes:
 
 def pass_through_body(frame_type: int, command: int, data: bytes = b"", is_long_address: bool = False,
                        address=0x01, expansion: bytes = b"", is_response=None, response_code: int = 0,
-                       device_status: int = 0, preamble_count: int = 2, checksum: int = 0x00,
+                       device_status: int = 0, preamble_count: int = 2, checksum="auto",
                        byte_count_override: int = None) -> bytes:
     """One tunneled classic-HART token-passing Data-Link PDU -- see hartip.hpp's Pass-Through
     section. `is_response` defaults to the same is_rsp derivation hartip.cpp uses (frame_type 6=ACK
     or 1=BACK); pass it explicitly only for a deliberately-inconsistent fixture. `address`, for a
     long address, must be exactly 5 bytes; for a short address, an int (masked to 0x3F on decode,
-    so the raw byte doesn't need to be pre-masked here)."""
+    so the raw byte doesn't need to be pre-masked here). `checksum` defaults to "auto", which
+    computes the real longitudinal (XOR) checksum over Delimiter..Data inclusive -- exactly
+    hartip.cpp's own decode_pass_through algorithm (see its "checksum_span_start" comment) -- so
+    every packet built here decodes with hartip_checksum_valid=true unless a test wants otherwise.
+    Pass an explicit int to force a specific (possibly deliberately wrong) byte, or None to omit
+    the trailing Checksum byte entirely for a deliberately-truncated frame. A dedicated fixture,
+    tests/sample_hartip_checksum.pcap, covers the valid/mismatch cases explicitly instead of any
+    packet in this function's caller (build_hartip_sample) -- see CMakeLists.txt's own comment on
+    hartip_checksum_valid_json for why: perturbing a checksum in this large, widely-shared fixture
+    would ripple into many other tests' unrelated "notes": [] assertions."""
     if is_response is None:
         is_response = frame_type in (1, 6)
     delimiter = (frame_type & 0x07) | ((len(expansion) & 0x03) << 5) | (0x80 if is_long_address else 0x00)
@@ -5274,6 +5287,11 @@ def pass_through_body(frame_type: int, command: int, data: bytes = b"", is_long_
     payload = (bytes([response_code, device_status]) + data) if is_response else data
     byte_count = byte_count_override if byte_count_override is not None else len(payload)
     body = header + bytes([byte_count & 0xFF]) + payload
+    if checksum == "auto":
+        computed = 0
+        for b in body:
+            computed ^= b
+        checksum = computed
     if checksum is not None:
         body += bytes([checksum & 0xFF])
     return bytes([0xFF] * preamble_count) + body
@@ -6971,8 +6989,9 @@ def build_ffhse_sample():
     Report family; Abort; Tier-2 FMS Event Notification and Get OD; LAN Redundancy Get/Put Info,
     Get Statistics, and Diagnostic (with its 4 parallel interface-status lists); unrecognized
     service ids on every sub-protocol/confirmed-flag combination; a concatenated multi-PDU-per-
-    UDP-datagram case; an unexpected-port case; a malformed/truncated case; and, over TCP, a
-    genuine request/response round trip, a TCP-segment-split PDU, and two PDUs coalesced into one
+    UDP-datagram case; an unexpected-port case; a malformed/truncated case; an implausible-Message-
+    Length false-positive regression (see kMaxPlausibleMessageLength in ffhse.cpp); and, over TCP,
+    a genuine request/response round trip, a TCP-segment-split PDU, and two PDUs coalesced into one
     TCP segment."""
     packets = []
 
@@ -7200,6 +7219,17 @@ def build_ffhse_sample():
     #     FF-HSE port" note.
     add(ffhse_pdu(FFHSE_SM, FFHSE_REQ, 3, True), dport=40000)
 
+    # 64) False-positive regression: ProtocolAndType matches a valid combo (this decoder's own
+    #     weakest structural gate -- see ffhse.hpp's "Structural detection gate" paragraph), but
+    #     Message Length is far beyond any real FF-HSE message -- must be rejected outright, not
+    #     "detected" as a badly truncated FF-HSE message. Mirrors a real false positive found on a
+    #     genuine capture: a UDP/443 QUIC/TLS response's essentially-random bytes happened to match
+    #     this gate and decoded a Message Length of 4237566479, which this decoder then "explained"
+    #     as truncated instead of rejecting -- see kMaxPlausibleMessageLength's own comment in
+    #     ffhse.cpp. Same port pairing (server:443 -> client) as that real capture.
+    add(ffhse_pdu(FFHSE_SM, FFHSE_REQ, 3, True, bytes(range(40, 60)),
+                  msg_length_override=4237566479), dport=443, sport=58201, from_client=False)
+
     # --- FF-HSE over TCP: the same 4 ports serve both transports -- see ffhse.hpp. ---
     client_seq = [5000]
     server_seq = [6000]
@@ -7221,12 +7251,12 @@ def build_ffhse_sample():
         ip = ipv4_header(src_ip, dst_ip, 6, len(tcp), 0x7500 + len(packets)) + tcp
         packets.append(eth_header(dst_mac, src_mac, 0x0800) + ip)
 
-    # 64) & 65) A genuine FMS Initiate request/response round trip over TCP.
+    # 65) & 66) A genuine FMS Initiate request/response round trip over TCP.
     add_tcp(True, ffhse_pdu(FFHSE_FMS, FFHSE_REQ, 96, True,
                              fms_initiate_req_body(1, 0x00, 0x0000, 1, 1, "PT-101")))
     add_tcp(False, ffhse_pdu(FFHSE_FMS, FFHSE_RSP, 96, True, fms_initiate_rsp_body(1, 1)))
 
-    # 66) & 67) One FDA Open Session Req PDU split across TWO TCP segments -- the FIRST segment
+    # 67) & 68) One FDA Open Session Req PDU split across TWO TCP segments -- the FIRST segment
     #     carries only the 12-byte header plus a few body bytes; the SECOND carries the rest.
     #     Exercises ffhse_declared_length-driven cross-segment reassembly (mirrors
     #     hartip_declared_length's own TCP reassembly test).
@@ -7235,7 +7265,7 @@ def build_ffhse_sample():
     add_tcp(True, split_pdu[:split_point], sport=52310)
     add_tcp(True, split_pdu[split_point:], sport=52310)
 
-    # 68) Two SM Clear Assignment Info Rsp messages coalesced into ONE TCP segment (sender/OS
+    # 69) Two SM Clear Assignment Info Rsp messages coalesced into ONE TCP segment (sender/OS
     #     coalescing) -- exercises the wire_length-driven "additional FF-HSE message" loop for TCP.
     add_tcp(True, ffhse_pdu(FFHSE_SM, FFHSE_RSP, 15, True) + ffhse_pdu(FFHSE_SM, FFHSE_RSP, 15, True),
             sport=52320, dport=FFHSE_PORT_SM)
@@ -7710,6 +7740,7 @@ def build_vlan_zones_sample():
 
 RIP_PORT = 520
 HSRP_PORT = 1985
+ICMP_IP_PROTOCOL = 1
 IGMP_IP_PROTOCOL = 2
 VRRP_IP_PROTOCOL = 112
 IGRP_IP_PROTOCOL = 9
@@ -7731,9 +7762,56 @@ def udp_ip_eth_frame(payload: bytes, sport: int, dport: int, src_ip: str, dst_ip
 
 def ip_eth_frame(payload: bytes, protocol: int, src_ip: str, dst_ip: str, src_mac: bytes,
                   dst_mac: bytes, ident: int = 0x9000) -> bytes:
-    """For IGMP/VRRP: no UDP/TCP header at all -- `payload` rides directly on IP."""
+    """For IGMP/VRRP/ICMP: no UDP/TCP header at all -- `payload` rides directly on IP."""
     ip = ipv4_header(src_ip, dst_ip, protocol, len(payload), ident)
     return eth_header(dst_mac, src_mac, 0x0800) + ip + payload
+
+
+def rfc1071_checksum(data: bytes) -> int:
+    """The classic 16-bit one's-complement Internet checksum (RFC 1071) -- the same algorithm
+    IPv4/TCP/UDP/ICMP all use. Sums 16-bit big-endian words (an odd trailing byte is padded with a
+    trailing zero byte), folds carries back in, and returns the one's complement -- i.e. the value
+    that, written into the checksum field and summed back in, makes the whole message fold to
+    0xFFFF. Mirrors icmp.cpp's own verify_checksum exactly, just computing the field instead of
+    checking it."""
+    if len(data) % 2:
+        data = data + b"\x00"
+    total = 0
+    for i in range(0, len(data), 2):
+        total += (data[i] << 8) | data[i + 1]
+    while total >> 16:
+        total = (total & 0xFFFF) + (total >> 16)
+    return (~total) & 0xFFFF
+
+
+def icmp_message(icmp_type: int, code: int, body: bytes, checksum_override: int = None) -> bytes:
+    """Type(1) + Code(1) + Checksum(2) + `body` -- see icmp.hpp's file header for the wire format.
+    Checksum defaults to the real, correctly computed RFC 1071 value (over the whole message,
+    checksum field included as the value being solved for) so a freshly generated packet decodes
+    with icmp_checksum_valid=true -- same "compute the real value by default" convention this file
+    uses for HART-IP's own longitudinal checksum (see pass_through_body's own `checksum`
+    parameter). Pass an explicit int to deliberately produce a mismatch instead."""
+    if checksum_override is not None:
+        return struct.pack("!BBH", icmp_type, code, checksum_override) + body
+    checksum = rfc1071_checksum(struct.pack("!BBH", icmp_type, code, 0) + body)
+    return struct.pack("!BBH", icmp_type, code, checksum) + body
+
+
+def icmp_embedded_datagram(src_ip: str, dst_ip: str, protocol: int, src_port: int = None,
+                            dst_port: int = None, extra: bytes = b"") -> bytes:
+    """The "original datagram" an ICMP error message (Destination Unreachable/Redirect/Time
+    Exceeded/Parameter Problem) quotes -- a full 20-byte, no-options IPv4 header (parse_ipv4 trusts
+    it exactly like a real one -- header checksum not validated, see ipv4.cpp) followed by just
+    enough transport payload to recover the ports (4 bytes: src port + dst port, the same layout
+    for TCP and UDP) plus `extra`, mirroring RFC 792's "first 8 bytes of the original payload"
+    guarantee -- see icmp.hpp's file header. `src_port=None` omits the transport payload entirely,
+    for a quote with no port info to recover."""
+    if src_port is not None:
+        transport = struct.pack("!HH", src_port, dst_port) + extra
+    else:
+        transport = extra
+    ip = ipv4_header(src_ip, dst_ip, protocol, len(transport), 0xA000)
+    return ip + transport
 
 
 def rip_rte(afi: int, route_tag: int, address: str, mask: str, next_hop: str, metric: int) -> bytes:
@@ -7891,6 +7969,103 @@ def build_igmp_sample():
     for i, pkt in enumerate(packets):
         data += pcap_record(pkt, 1_700_031_000 + i, i * 1000)
     (TESTS_DIR / "sample_igmp.pcap").write_bytes(data)
+
+
+def build_icmp_sample():
+    """ICMP (RFC 792, plus RFC 1191/1256 extensions) -- rides directly on IP protocol 1, the same
+    "no port, dispatched purely by IP protocol number" shape as IGMP/VRRP/PIM/EIGRP/OSPF (see
+    icmp.hpp's file header). Covers every Tier 1 message type this decoder fully decodes (Echo,
+    Destination Unreachable including the RFC 1191 Next-Hop MTU case and the no-embedded-quote
+    case, Redirect, Time Exceeded, Parameter Problem, Timestamp, Address Mask, Router
+    Advertisement), a Tier 2 type left named-only (Router Solicitation), an unassigned/reserved
+    type ("Unknown (N)"), a checksum mismatch, and the fewer-than-4-byte-payload edge that must
+    fall through to the generic "non-tcp" fallback rather than being (mis)claimed as ICMP -- see
+    try_parse_icmp's own documented nullopt condition in icmp.hpp."""
+    packets = []
+
+    def add(payload: bytes, from_hmi: bool = True):
+        if from_hmi:
+            packets.append(ip_eth_frame(payload, ICMP_IP_PROTOCOL, HMI_IP, PLC_IP, HMI_MAC, PLC_MAC))
+        else:
+            packets.append(ip_eth_frame(payload, ICMP_IP_PROTOCOL, PLC_IP, HMI_IP, PLC_MAC, HMI_MAC))
+
+    # 1) & 2) Echo Request/Reply -- a plain ping, 32 bytes of data (the common default payload
+    #    size on both Windows' and Linux's ping tools).
+    ping_data = bytes((0x61 + i) & 0xFF for i in range(32))  # arbitrary, fixed content
+    add(icmp_message(8, 0, struct.pack("!HH", 0x1234, 1) + ping_data))
+    add(icmp_message(0, 0, struct.pack("!HH", 0x1234, 1) + ping_data), from_hmi=False)
+
+    # 3) Destination Unreachable, code 3 (Port Unreachable) -- the classic "nothing is listening"
+    #    response, embedding the original UDP datagram.
+    embedded_udp = icmp_embedded_datagram(HMI_IP, PLC_IP, 17, src_port=51000, dst_port=502)
+    add(icmp_message(3, 3, struct.pack("!I", 0) + embedded_udp), from_hmi=False)
+
+    # 4) Destination Unreachable, code 4 (Fragmentation Needed, RFC 1191) -- Next-Hop MTU field
+    #    populated (1400, a typical VPN/tunnel-constrained MTU), embedding the original Modbus/TCP
+    #    (port 502) segment.
+    embedded_tcp = icmp_embedded_datagram(HMI_IP, PLC_IP, 6, src_port=51001, dst_port=502)
+    add(icmp_message(3, 4, struct.pack("!HH", 0, 1400) + embedded_tcp), from_hmi=False)
+
+    # 5) Destination Unreachable, code 1 (Host Unreachable) -- deliberately too little follows the
+    #    fixed header (2 bytes) to attempt an embedded-datagram parse at all (decode_embedded_datagram
+    #    requires >=20 bytes), exercising the "absent embedded_datagram" path distinctly from #3/#4.
+    add(icmp_message(3, 1, struct.pack("!I", 0) + bytes([0x01, 0x02])), from_hmi=False)
+
+    # 6) Redirect, code 1 (Redirect Datagram for the Host) -- gateway address + embedded TCP quote.
+    embedded_tcp2 = icmp_embedded_datagram(HMI_IP, "192.168.1.99", 6, src_port=51002, dst_port=502)
+    add(icmp_message(5, 1, ip_bytes4("192.168.1.1") + embedded_tcp2), from_hmi=False)
+
+    # 7) Time Exceeded, code 0 (TTL Exceeded in Transit) -- a traceroute-style hop response,
+    #    embedding the original UDP probe (a high, ephemeral destination port -- traceroute's own
+    #    classic tell).
+    embedded_udp2 = icmp_embedded_datagram(HMI_IP, "8.8.8.8", 17, src_port=51003, dst_port=33434)
+    add(icmp_message(11, 0, struct.pack("!I", 0) + embedded_udp2))
+
+    # 8) Parameter Problem, code 0 (Pointer Indicates the Error) -- pointer byte set to 0 (the IP
+    #    Version/IHL byte itself), embedding the offending datagram.
+    embedded_bad = icmp_embedded_datagram(HMI_IP, PLC_IP, 6, src_port=51004, dst_port=502)
+    add(icmp_message(12, 0, bytes([0]) + bytes(3) + embedded_bad), from_hmi=False)
+
+    # 9) & 10) Timestamp Request/Reply -- id/seq + originate/receive/transmit (milliseconds since
+    #    UTC midnight per RFC 792 -- NOT a real epoch time, see icmp.hpp).
+    add(icmp_message(13, 0, struct.pack("!HH", 0x5678, 1) + struct.pack("!III", 3_600_000, 0, 0)))
+    add(icmp_message(14, 0, struct.pack("!HH", 0x5678, 1) +
+                      struct.pack("!III", 3_600_000, 3_600_050, 3_600_075)), from_hmi=False)
+
+    # 11) & 12) Address Mask Request/Reply.
+    add(icmp_message(17, 0, struct.pack("!HH", 0x9ABC, 1) + ip_bytes4("0.0.0.0")))
+    add(icmp_message(18, 0, struct.pack("!HH", 0x9ABC, 1) + ip_bytes4("255.255.255.0")), from_hmi=False)
+
+    # 13) Router Advertisement (RFC 1256) -- two router addresses at the standard 2-word entry
+    #     size, distinct preferences (the second deliberately negative, RFC 1256's own
+    #     "least preferred" marker).
+    ra_body = struct.pack("!BBH", 2, 2, 1800)
+    ra_body += ip_bytes4("192.168.1.1") + struct.pack("!i", 0)
+    ra_body += ip_bytes4("192.168.1.2") + struct.pack("!i", -1)
+    add(icmp_message(9, 0, ra_body), from_hmi=False)
+
+    # 14) Router Solicitation (RFC 1256) -- Tier 2, named only, no further field decode (the fixed
+    #     4-byte Reserved field is all that follows Type/Code/Checksum).
+    add(icmp_message(10, 0, bytes(4)))
+
+    # 15) An unassigned/reserved ICMP type (40 -- Photuris, formally registered but essentially
+    #     never seen in real OT traffic) -- must render as "Unknown (40)", never a guess.
+    add(icmp_message(40, 0, bytes(4)))
+
+    # 16) Checksum mismatch -- an explicitly wrong checksum byte on an otherwise well-formed Echo
+    #     Request, so icmp_checksum_valid comes back false with a note, same "one dedicated
+    #     mismatch case" convention as tests/sample_hartip_checksum.pcap's own pair.
+    add(icmp_message(8, 0, struct.pack("!HH", 0xDEAD, 1) + bytes(4), checksum_override=0x0000))
+
+    # 17) Deliberately too short to be ICMP at all -- fewer than the fixed 4-byte Type+Code+
+    #     Checksum header -- try_parse_icmp's own documented nullopt condition (see icmp.hpp), so
+    #     this must fall through to the generic "non-tcp" fallback, not be (mis)claimed as ICMP.
+    add(bytes([0x08, 0x00]))
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_040_000 + i, i * 1000)
+    (TESTS_DIR / "sample_icmp.pcap").write_bytes(data)
 
 
 def vrrp_message_v2(vrid: int, priority: int, addrs: list, auth_type: int = 0,
@@ -8560,6 +8735,7 @@ if __name__ == "__main__":
     build_vlan_zones_sample()
     build_rip_sample()
     build_igmp_sample()
+    build_icmp_sample()
     build_vrrp_sample()
     build_hsrp_sample()
     build_igrp_sample()

@@ -3160,12 +3160,20 @@ message).
 see docs/DEVELOPMENT.md's PROTOCOL DETECTION's "Why FF-HSE is tried last of all": accept a buffer
 as FF-HSE when there are at least 12 bytes, `ProtocolAndType & 0xfc` is one
 of the 4 valid protocol values, `ProtocolAndType & 0x03` is one of the 3
-valid type values, and Message Length is at least 12. That is a single byte
-at offset 2 landing on one of 12 valid values out of 256 possible, plus a
-length check that is barely a constraint at all -- honestly weaker even
-than HART-IP's own two-adjacent-byte gate, which is itself already this
-codebase's previous weakest. FF-HSE is therefore dispatched LAST of all
-protocols in Auto mode, on both TCP and UDP, after even HART-IP and MQTT.
+valid type values, and Message Length is between 12 and 16 MiB inclusive.
+That is a single byte at offset 2 landing on one of 12 valid values out of
+256 possible, plus a length check that -- even with the 16 MiB ceiling --
+is barely a constraint at all -- honestly weaker even than HART-IP's own
+two-adjacent-byte gate, which is itself already this codebase's previous
+weakest. FF-HSE is therefore dispatched LAST of all protocols in Auto
+mode, on both TCP and UDP, after even HART-IP and MQTT. The 16 MiB ceiling
+itself was added after a real false positive: a UDP/443 QUIC/TLS response's
+essentially-random bytes, on a genuine capture, happened to match the
+ProtocolAndType byte and decoded a Message Length of 4237566479 -- without
+a ceiling this was "detected" as a badly truncated FF-HSE message instead
+of correctly falling through to the generic `udp` protocol. See
+`kMaxPlausibleMessageLength`'s own comment in `ffhse.cpp` and the
+`ffhse_implausible_message_length_not_misdetected` regression test.
 
 **Options byte**: `0x80`=Message-Number-present (4-byte trailer field),
 `0x40`=Invoke-Id-present (4-byte trailer field), `0x20`=Time-Stamp-present
@@ -4010,6 +4018,87 @@ message, an LLMNR message with nonzero reserved Z bits, a malformed NBT-NS
 name whose length byte isn't `0x20`, a ClientHello to an ordinary (non-DoH)
 hostname, and a non-TLS TCP/443 payload -- every one of which must fall
 through to the generic `udp`/`tcp` report rather than being misdetected.
+
+### ICMP (RFC 792, plus RFC 1191/1256 extensions), IP protocol 1
+
+ICMP rides directly on IP (protocol number 1) -- no UDP or TCP header, and
+therefore no port at all. Dispatch in `--protocol auto` is keyed purely on
+that protocol number, same shape as IGMP/VRRP/PIM/EIGRP/OSPF below, but with
+one real difference worth calling out: ICMP's own Type byte gives almost no
+useful structural filter on its own (nearly every 0-255 value is either a
+real registered type or renders as `Unknown (N)`), so unlike those other
+protocols it is IP protocol number 1 alone -- IANA-exclusive to ICMP -- that
+is doing essentially all of the detection work here, not any shape match
+within the message itself.
+
+Every ICMP message starts with the same 4-byte fixed header --
+Type(1)+Code(1)+Checksum(2) -- decoded and named for every IANA-registered
+type. Nine message types get full (Tier 1) field decoding, chosen for OT
+network diagnostics and security-review relevance:
+
+- **Echo Reply/Request** (`0`/`8`) -- Identifier, Sequence Number, and the
+  length of whatever data follows (the actual bytes are not echoed back in
+  the summary, just their count).
+- **Destination Unreachable** (`3`) -- all 16 IANA-registered codes named
+  (Net/Host/Protocol/Port Unreachable, Fragmentation Needed, Source Route
+  Failed, the four Administratively Prohibited variants, and the rest);
+  code `4` (Fragmentation Needed and Don't Fragment was Set, RFC 1191) also
+  decodes the Next-Hop MTU field a Path MTU Discovery implementation reads
+  to shrink its packets.
+- **Redirect** (`5`) -- all 4 codes named, plus the Gateway Internet Address
+  the sender is being redirected to.
+- **Time Exceeded** (`11`) -- both codes named (TTL Exceeded in Transit;
+  Fragment Reassembly Time Exceeded).
+- **Parameter Problem** (`12`) -- all 3 codes named, plus the Pointer byte
+  identifying which offset in the original datagram's header was bad.
+- **Timestamp Request/Reply** (`13`/`14`) -- Identifier, Sequence Number,
+  and the Originate/Receive/Transmit timestamps. These are milliseconds
+  since UTC midnight per RFC 792 -- there is no date component on the wire
+  at all, so this is never rendered as a real epoch time.
+- **Address Mask Request/Reply** (`17`/`18`) -- Identifier, Sequence Number,
+  and the 4-byte subnet mask itself.
+- **Router Advertisement** (`9`, RFC 1256) -- Lifetime plus every
+  address/preference pair (capped at 50 entries, this codebase's usual
+  convention, with a note when a packet declared more).
+
+Every other IANA-registered type (`1`, `2`, `6`, Router Solicitation `10`,
+Information Request/Reply `15`/`16`, Traceroute `30`, and any genuinely
+unassigned value) is named -- Tier 2 -- but not decoded further; most of
+these are formally deprecated (RFC 6918: Source Quench, Information
+Request/Reply, and Redirect codes 2/3) or rare enough in real OT traffic
+that full decoding wasn't judged worth the added surface yet.
+
+**Embedded datagram.** Destination Unreachable, Redirect, Time Exceeded, and
+Parameter Problem messages all quote the original offending datagram --
+RFC 792 guarantees at least the IP header plus the first 8 bytes of its
+payload. This decoder reuses its own IPv4 parser directly against that
+quoted region and reads the first 4 bytes of whatever transport payload
+follows (source port + destination port -- the same layout for TCP and UDP,
+so this works without needing to know which one it is), surfaced as a
+one-line `-- original datagram A->B (protocol[ port->port])` summary
+addition. A capture can legitimately truncate this quote further still
+(snaplen, or some devices embed more per RFC 4884, not decoded here), so a
+short or malformed quote degrades to a shorter summary -- or no embedded-
+datagram summary at all -- never a decode failure for the ICMP message
+itself.
+
+**Checksum: verified, not just surfaced.** Unlike IPv4's own header checksum
+(explicitly *not* validated anywhere in this codebase -- see the Link/IP-
+layer plumbing section below), ICMP's checksum genuinely is checked against
+the standard RFC 1071 16-bit one's-complement algorithm, and a mismatch is
+surfaced as a note (`icmp_checksum_valid: false` in JSON). A mismatch can
+mean either a truncated capture or a crafted/corrupted packet -- this
+decoder cannot always tell the two apart, so it reports the discrepancy
+either way rather than guessing which.
+
+**Security context:** ICMP has no authentication of any kind. A Redirect
+can silently retarget a host's next-hop for a destination, and any host on
+the local segment can send Destination Unreachable/Time Exceeded messages
+that most stacks (and some middleboxes) will act on without verifying the
+sender actually saw the offending traffic -- both are long-standing
+MITM/DoS primitives, more consequential on a flat OT network than a
+segmented, ICMP-filtered IT one. A verified-invalid checksum on a Redirect
+or Destination Unreachable message is itself worth flagging in an audit.
 
 ### RIP / IGMP / VRRP / HSRP
 
@@ -5181,13 +5270,19 @@ protocol number registry (not reverse-engineered from a single capture):
   `pppoe`, not `non-ip` -- see PROTOCOL COVERAGE's PROFINET RT, GOOSE,
   Sampled Values, EtherCAT, Tier 3 enterprise-trust-boundary, and Tier 4
   wireless-backhaul-and-cellular sections.
-- **IPv4 protocol numbers** (`ipv4.hpp`'s `ip_protocol_name`): ICMP,
-  IPv6-in-IPv4, GRE, ESP, AH, ICMPv6, SCTP are named but not decoded
-  further. IGMP, VRRP, IGRP, PIM, EIGRP, and OSPF (protocol numbers 2, 112,
-  9, 103, 88, and 89) get their own dedicated handling instead of just a
-  name -- see PROTOCOL COVERAGE's "RIP / IGMP / VRRP / HSRP" and "IGRP /
-  PIM / EIGRP / OSPF" sections -- as do TCP and UDP (below and elsewhere in
-  this document).
+- **IPv4 protocol numbers** (`ipv4.hpp`'s `ip_protocol_name`): IPv6-in-IPv4,
+  GRE, ESP, AH, ICMPv6, SCTP are named but not decoded further (`tests/
+  sample_link_transport_layers.pcap`'s own "recognized-but-not-decoded"
+  example packet uses ICMPv6, protocol 58, for exactly this reason -- see
+  below). ICMP (protocol 1), IGMP, VRRP, IGRP, PIM, EIGRP, and OSPF
+  (protocol numbers 1, 2, 112, 9, 103, 88, and 89) get their own dedicated
+  handling instead of just a name -- see PROTOCOL COVERAGE's "ICMP", "RIP /
+  IGMP / VRRP / HSRP", and "IGRP / PIM / EIGRP / OSPF" sections -- as do TCP
+  and UDP (below and elsewhere in this document). ICMP was originally in
+  this named-but-undecoded group too; full ICMP decoding was added later
+  (see the dedicated ICMP section above), at which point the fixture
+  example here switched to ICMPv6, the nearest still-undecoded analogue, so
+  this "named but not decoded" case keeps being exercised at all.
 - **UDP** (`udp.hpp`, protocol `udp`): the 8-byte UDP header itself
   (source/destination port, declared length, clamped to what was actually
   captured the same way `parse_ipv4` already clamps to IPv4's own

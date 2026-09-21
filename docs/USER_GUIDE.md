@@ -4551,6 +4551,21 @@ conduitscope decode -r capture.pcap --protocol igmp -f json \
            "\(.src_ip): \(.igmp_type) \(.igmp_group_address)"'
 ```
 
+Surface ICMP Redirect and Destination Unreachable traffic with an invalid
+checksum -- either a truncated capture or, more interestingly, crafted/
+corrupted traffic, since both message types are long-standing gateway-
+spoofing/MITM and DoS primitives on a flat OT network with no ICMP
+filtering (see docs/PROTOCOL_COVERAGE.md's ICMP Security context notes):
+
+```sh
+conduitscope decode -r capture.pcap -f json \
+  | jq -r '.[] | select(.protocol == "icmp" and
+                         (.icmp_type_name == "Redirect" or
+                          .icmp_type_name == "Destination Unreachable") and
+                         .icmp_checksum_valid == false) |
+           "\(.src_ip) -> \(.dst_ip): \(.summary)"'
+```
+
 Flag VRRP/HSRP traffic that looks like a first-hop-gateway takeover
 attempt in progress -- a Priority-0 VRRP "master is stopping" Advertisement
 or an HSRP Coup, either of which a legitimate failover can produce but

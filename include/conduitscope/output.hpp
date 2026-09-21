@@ -210,6 +210,7 @@ private:
     std::map<std::string, size_t> nbns_opcode_counts_;
     std::map<std::string, size_t> doh_provider_counts_;  // keyed by doh_matched_provider
     std::map<std::string, size_t> rip_command_counts_;   // keyed by rip_command_name
+    std::map<std::string, size_t> icmp_type_counts_;     // keyed by icmp_type_name
     std::map<std::string, size_t> igmp_type_counts_;     // keyed by igmp_type_name
     std::map<std::string, size_t> vrrp_version_counts_;  // "VRRPv2"/"VRRPv3"
     std::map<std::string, size_t> hsrp_version_counts_;  // "HSRPv1"/"HSRPv2"

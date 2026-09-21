@@ -35,6 +35,26 @@ uint64_t be64(ByteSpan s, size_t off) {
     return v;
 }
 
+// Plausibility ceiling for the header's own 32-bit Message Length field -- see
+// docs/DEVELOPMENT.md's "Correction to item 7". FF-HSE's wire format puts no ceiling of its own on
+// this field, so it does double duty: ffhse_declared_length (below) uses it to keep
+// Decoder::reassemble_tcp_payload from buffering a TCP flow towards an implausible declared size,
+// and try_parse_ffhse (below) uses the SAME constant as an extra structural-detection check.
+// That second use matters more than it might look: FF-HSE's own detection gate is already the
+// weakest in this codebase (12 valid ProtocolAndType byte values out of 256 -- see ffhse.hpp's own
+// "Structural detection gate" paragraph), and without this ceiling a message_length field with no
+// bound at all meant essentially ANY random noise that happened to match that one byte -- e.g. a
+// UDP/443 QUIC/TLS datagram landing on FF-HSE's Auto-mode dispatch after every other protocol had
+// already declined it -- would misdetect as FF-HSE. Confirmed against exactly that on a real
+// capture: a UDP/443 response byte pattern matched the ProtocolAndType gate and decoded a
+// Message Length of 4237566479 (essentially random 32-bit noise, not a real length), which this
+// decoder then dutifully "explained" as a badly truncated FF-HSE message instead of being rejected
+// outright. Since values below this ceiling are a small fraction of the full 32-bit range (roughly
+// 0.4%), adding it here removes the great majority of that false-positive class without weakening
+// this decoder's ability to recognize a real, truncated FF-HSE message -- a legitimate capture's
+// Message Length is never anywhere near 16 MiB in practice.
+constexpr uint32_t kMaxPlausibleMessageLength = 16u * 1024u * 1024u;
+
 std::string ascii_field(ByteSpan s) { return std::string(reinterpret_cast<const char*>(s.data()), s.size()); }
 
 // Trims trailing NUL (0x00) bytes -- used only for the Error body's AdditionalDescription field,
@@ -1284,17 +1304,8 @@ std::optional<size_t> ffhse_declared_length(ByteSpan payload) {
     if (type > 2) return std::nullopt;
     uint32_t message_length = be32(payload, 8);
     if (message_length < 12) return std::nullopt;
-    // Plausibility ceiling -- see docs/DEVELOPMENT.md's "Correction to item 7": this 32-bit
-    // Message Length field has no ceiling of its own in the FF-HSE wire format, so an implausible
-    // value here would otherwise tell Decoder::reassemble_tcp_payload to keep buffering this flow
-    // towards that declared size indefinitely (decoder.cpp now also has its own cap as defense in
-    // depth, but rejecting an implausible declared length here -- the same way
-    // modbus_tcp_declared_length rejects an implausible MBAP length -- is the more precise fix).
-    // Reuses the same "16 MiB is implausible for anything real" ceiling pcap_reader.cpp's own
-    // kMaxPlausiblePacketBytes/kMaxPlausibleBlockBytes already established for this codebase.
-    // try_parse_ffhse itself was never at risk from this -- it already clamps its own read to
-    // std::min(message_length, payload.size()) regardless of what Message Length claims.
-    constexpr uint32_t kMaxPlausibleMessageLength = 16u * 1024u * 1024u;
+    // See kMaxPlausibleMessageLength's own comment above (top of this anonymous namespace) for why
+    // this ceiling exists and why try_parse_ffhse below now applies it too.
     if (message_length > kMaxPlausibleMessageLength) return std::nullopt;
     return static_cast<size_t>(message_length);
 }
@@ -1309,6 +1320,12 @@ std::optional<FfhseFrame> try_parse_ffhse(ByteSpan payload) {
         if (type > 2) return std::nullopt;
         uint32_t message_length = be32(payload, 8);
         if (message_length < 12) return std::nullopt;
+        // Structural-detection plausibility ceiling -- see kMaxPlausibleMessageLength's own comment
+        // above. Without this, an implausible Message Length (essentially random noise on a
+        // non-FF-HSE payload that happened to match the weak ProtocolAndType byte gate) would still
+        // be "detected" as FF-HSE and produce a nonsensical, confusing truncation report instead of
+        // correctly falling through to another protocol / the generic udp/non-tcp fallback.
+        if (message_length > kMaxPlausibleMessageLength) return std::nullopt;
 
         FfhseFrame frame;
         FfhseHeader& h = frame.header;

@@ -13,8 +13,8 @@ IEC 61850-9-2 Sampled Values, EtherCAT, BACnet/IP, HART-IP, OPC UA Binary
 ISO 9506), MQTT (v3.1/v3.1.1/v5.0, including Sparkplug B), FOUNDATION
 Fieldbus HSE (FDA/SM/FMS/LAN Redundancy), IEEE Spanning Tree Protocol
 (STP/RSTP/MSTP), DeviceNet (CAN-bus CIP, via SocketCAN pcap captures), DNS,
-mDNS, LLMNR, and NetBIOS Name Service (NBT-NS), RIP, IGMP, VRRP, HSRP, IGRP,
-PIM, EIGRP, and OSPFv2,
+mDNS, LLMNR, and NetBIOS Name Service (NBT-NS), ICMP, RIP, IGMP, VRRP, HSRP,
+IGRP, PIM, EIGRP, and OSPFv2,
 plus detects DNS-over-HTTPS
 (DoH) via TLS SNI matching, and recognizes (by name only, not full decode)
 RDP, VNC, TeamViewer, AnyDesk, and Zoom -- the "interactive remote control"
@@ -746,19 +746,20 @@ Groundwork / v0.1.0. What works right now:
   COVERAGE and LIMITATIONS.
 - Non-IPv4 Ethernet frames and non-TCP IPv4 payloads (including UDP) are now
   recognized and named, not just reported as a bare hex/number and dropped:
-  ARP, LLDP, PTP, MPLS, and stacked-VLAN (802.1ad/QinQ) EtherTypes; ICMP,
-  GRE, ESP, AH, and SCTP IP protocol numbers; and the UDP header
-  itself (source/destination port, byte count) -- EtherNet/IP's own UDP port
-  (2222) is decoded, not just named, when the traffic on it actually looks
-  like CIP I/O (see above), PROFINET RT's EtherType is decoded, not just
-  named, when the FrameID looks like DCP or cyclic IO data (see above), and
-  IEC 61850-8-1 GOOSE's, IEC 61850-9-2 Sampled Values', and EtherCAT's own
-  EtherTypes are all decoded, not just named, when their own structural gate
-  matches (see above). IGMP (IP protocol 2), VRRP (IP protocol 112), IGRP
-  (IP protocol 9), PIM (IP protocol 103), EIGRP (IP protocol 88), and OSPF
-  (IP protocol 89) are likewise decoded, not just named, when their own
-  structural gate matches -- see the RIP/IGMP/VRRP/HSRP and IGRP/PIM/EIGRP/
-  OSPF bullets below. This is otherwise groundwork
+  ARP, LLDP, PTP, MPLS, and stacked-VLAN (802.1ad/QinQ) EtherTypes;
+  IPv6-in-IPv4, GRE, ESP, AH, ICMPv6, and SCTP IP protocol numbers; and the
+  UDP header itself (source/destination port, byte count) -- EtherNet/IP's
+  own UDP port (2222) is decoded, not just named, when the traffic on it
+  actually looks like CIP I/O (see above), PROFINET RT's EtherType is
+  decoded, not just named, when the FrameID looks like DCP or cyclic IO data
+  (see above), and IEC 61850-8-1 GOOSE's, IEC 61850-9-2 Sampled Values', and
+  EtherCAT's own EtherTypes are all decoded, not just named, when their own
+  structural gate matches (see above). ICMP (IP protocol 1), IGMP (IP
+  protocol 2), VRRP (IP protocol 112), IGRP (IP protocol 9), PIM (IP
+  protocol 103), EIGRP (IP protocol 88), and OSPF (IP protocol 89) are
+  likewise decoded, not just named, when their own structural gate matches
+  -- see the ICMP, RIP/IGMP/VRRP/HSRP, and IGRP/PIM/EIGRP/OSPF bullets
+  below/above. This is otherwise groundwork
   plumbing, not a new protocol decoder -- none of the remaining
   named-but-not-decoded protocols' own framing is parsed any further yet,
   and `policy validate` does not yet evaluate any non-TCP traffic against
@@ -1026,11 +1027,55 @@ Groundwork / v0.1.0. What works right now:
   (Windows) dependency -- see above and docs/USER_GUIDE.md's LIVE CAPTURE section.
   `--duration`, `--filter` (BPF syntax), `--snaplen`, and Ctrl+C all stop a
   capture cleanly, still producing whatever decode output or policy report was
-  captured so far. Validated end-to-end against real loopback traffic on Linux;
-  the Windows/Npcap path is implemented against the same documented API but not
-  yet run on a real Windows machine -- see docs/USER_GUIDE.md's LIMITATIONS.
+  captured so far. Validated end-to-end against real loopback traffic on Linux,
+  and now also against a real Windows/Npcap build (MSVC/Visual Studio, CMake's
+  multi-config generator support) with `interfaces` correctly enumerating real
+  adapters -- see below for the multi-config `version`-string fix that build
+  surfaced.
 - A `decode`/`info`/`interfaces`/`policy validate`/`inventory`/`version`
   command surface with full `--help` at every level
+- A cosmetic multi-config-generator bug fix: `conduitscope version`'s reported
+  build type came from `CMAKE_BUILD_TYPE`, which is meaningless (always empty)
+  for a multi-config CMake generator (Visual Studio, Xcode -- the actual
+  configuration is chosen at *build* time via `--config`, not at configure
+  time), found via a real first Windows/MSVC build reporting a stray double
+  space (`Windows,  build`). Now falls back to reporting `multi-config`
+  instead of guessing a configuration that may not be the one actually built;
+  single-config generators (the Linux build) are unaffected.
+- Full ICMP (RFC 792, plus RFC 1191/1256 extensions) decoding, found missing
+  when a real Windows/Npcap capture's own ICMP traffic showed up only as an
+  opaque `[non-tcp]  IPv4 protocol number 1 (ICMP) (not TCP)` line. Rides
+  directly on IP (protocol 1, IANA-exclusive), same dispatch shape as IGMP/
+  VRRP/IGRP/PIM/EIGRP/OSPF above. Nine message types get full field decoding
+  -- Echo Reply/Request, Destination Unreachable (all 16 codes, plus the RFC
+  1191 Next-Hop MTU case), Redirect, Time Exceeded, Parameter Problem,
+  Timestamp Request/Reply, Address Mask Request/Reply, and Router
+  Advertisement -- with every other IANA-registered type named but not
+  decoded further. Destination Unreachable/Redirect/Time Exceeded/Parameter
+  Problem messages also get a one-line summary of the embedded original
+  datagram they quote (RFC 792 guarantees the IP header plus the first 8
+  bytes of payload, enough to recover TCP/UDP ports). Unlike IPv4's own
+  header checksum (never validated anywhere in this codebase), ICMP's
+  checksum genuinely is verified (RFC 1071), since a mismatch on a Redirect
+  or Destination Unreachable is itself a meaningful spoofing signal on a flat
+  OT network. See docs/PROTOCOL_COVERAGE.md's ICMP section.
+- A real false-positive protocol misdetection, found on the same real
+  Windows/Npcap capture: a UDP/443 QUIC/TLS response's essentially-random
+  bytes happened to satisfy FF-HSE's own documented-weakest structural gate
+  and decoded an implausible Message Length (over 4 billion), which this
+  decoder then "explained" as a truncation instead of rejecting outright --
+  confirming a risk this project's own documentation had previously flagged
+  as theoretical (see docs/DEVELOPMENT.md's "Why FF-HSE is tried last of
+  all"). Fixed by applying FF-HSE's existing 16 MiB plausibility ceiling
+  (already used for TCP-reassembly bookkeeping) to its own detection gate
+  too, so an implausible Message Length is rejected rather than "detected"
+  -- narrows this exposure but does not close the underlying gate's own
+  weakness; dispatch-order-last remains the primary mitigation.
+- The generic "no protocol claimed this TCP payload" fallback summary is now
+  as terse as the equivalent UDP one (`TCP payload of N byte(s) on port
+  X->Y`), dropping a long, ever-growing list of every protocol name this
+  decoder had already tried and ruled out -- noise on ordinary, unremarkable
+  traffic, not information.
 
 See [docs/USER_GUIDE.md](docs/USER_GUIDE.md) for the complete option reference,
 output-format examples, exit codes, and the honest list of current limitations,

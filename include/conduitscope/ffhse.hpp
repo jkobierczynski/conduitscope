@@ -82,19 +82,25 @@
 //
 // Structural detection gate: accept a buffer as FF-HSE when (a) there are at least 12 bytes, (b)
 // (ProtocolAndType & 0xfc) is one of the 4 valid protocol values {0x04, 0x08, 0x0c, 0x10}, (c)
-// (ProtocolAndType & 0x03) is one of the 3 valid type values {0, 1, 2}, and (d) Message Length is
-// at least 12 (it must at least cover its own header). (a)-(c) mirror exactly what a byte-for-byte
-// reading of the reference dissector's own dispatch (dissect_ff's own switch on
+// (ProtocolAndType & 0x03) is one of the 3 valid type values {0, 1, 2}, (d) Message Length is at
+// least 12 (it must at least cover its own header), and (e) Message Length is at most 16 MiB (see
+// kMaxPlausibleMessageLength in ffhse.cpp). (a)-(c) mirror exactly what a byte-for-byte reading of
+// the reference dissector's own dispatch (dissect_ff's own switch on
 // proto_and_type & PROTOCOL_MASK, then & TYPE_MASK) requires to identify the protocol at all; (d)
-// is this decoder's own extra, modest plausibility check, in the same "cheap extra insurance"
-// spirit as HART-IP's own MsgLength >= 8 check (see hartip.hpp) -- beyond what the reference
-// dissector itself requires for identification. HONESTLY, this single-byte-at-offset-2 gate (12
-// valid values out of 256 possible) is a WEAKER structural anchor than HART-IP's own two-byte gate
-// (see hartip.hpp's own comparison), which is itself already this codebase's weakest -- see
-// decoder.cpp's own dispatch-order comment for where in this codebase's opportunistic Auto-mode
-// chain FF-HSE is deliberately placed as a result (last, after even HART-IP and MQTT), and for
-// what that means for FF-HSE-over-TCP's own collision exposure with every earlier-tried protocol's
-// gate.
+// and (e) are this decoder's own extra, modest plausibility checks, in the same "cheap extra
+// insurance" spirit as HART-IP's own MsgLength >= 8 check (see hartip.hpp) -- beyond what the
+// reference dissector itself requires for identification. (e) specifically earns its place from a
+// real false positive: without it, a UDP/443 QUIC/TLS datagram's essentially-random bytes matched
+// this gate on a real capture (see kMaxPlausibleMessageLength's own comment in ffhse.cpp for the
+// exact numbers) and were misdetected as a badly truncated FF-HSE message. HONESTLY, this
+// single-byte-at-offset-2 gate (12 valid values out of 256 possible) is still a WEAKER structural
+// anchor than HART-IP's own two-byte gate (see hartip.hpp's own comparison), which is itself
+// already this codebase's weakest -- see decoder.cpp's own dispatch-order comment for where in
+// this codebase's opportunistic Auto-mode chain FF-HSE is deliberately placed as a result (last,
+// after even HART-IP and MQTT), and for what that means for FF-HSE-over-TCP's own collision
+// exposure with every earlier-tried protocol's gate. (e) meaningfully narrows the residual
+// exposure (a legitimate message_length is never anywhere near 16 MiB) but does not eliminate it --
+// dispatch order remains the primary mitigation.
 //
 // Options byte bitmasks: 0x80=Message-Number-present (4-byte trailer field), 0x40=Invoke-Id-
 // present (4-byte trailer field), 0x20=Time-Stamp-present (8-byte trailer field), 0x10=reserved

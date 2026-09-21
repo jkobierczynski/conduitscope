@@ -188,6 +188,15 @@ constexpr const char* kStrikeBlue = "\033[9;34m";
 constexpr const char* kStrikeMagenta = "\033[9;35m";
 constexpr const char* kStrikeCyan = "\033[9;36m";
 constexpr const char* kStrikeWhite = "\033[9;37m";
+// ICMP: every plain/bright/bold/underline/italic/dim/strike hue combination above is already
+// spoken for, and ICMP -- unlike IGMP/VRRP/HSRP/IGRP/PIM/EIGRP/OSPF, which it otherwise shares a
+// dispatch shape with (see decoder.cpp's own "rides directly on IP" comment) -- is common enough
+// in ordinary traffic (routing diagnostics, path MTU discovery, plain pings) that reusing one of
+// those rarer protocols' own colors risked real visual confusion in a mixed capture, unlike e.g.
+// ffhse/opcua's reuse (both genuinely rare together in practice). Dim+underline is a fresh
+// combination, following the same "invent one new escape-code family member" pattern IGMP/OSPF/
+// MPLS above each used when their own current dimension ran out.
+constexpr const char* kDimUnderlineCyan = "\033[2;4;36m";
 
 // Color for a packet's "[protocol]" tag -- picked so a mixed-protocol capture scans quickly by
 // eye, not for any deeper meaning. parse-error is the one exception: it gets the same "something
@@ -261,6 +270,7 @@ const char* protocol_tag_color(const std::string& protocol) {
                                                         // see its own comment above; plain cyan is
                                                         // already Modbus's, but the two never share
                                                         // a transport (RIP is UDP/520 only)
+    if (protocol == "icmp") return kDimUnderlineCyan;
     if (protocol == "igmp") return kUnderlineGreen;
     if (protocol == "vrrp") return kUnderlineMagenta;
     if (protocol == "hsrp") return kUnderlineYellow;
@@ -1268,6 +1278,50 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
         }
         out_ << "    \"rip_routes_truncated\": " << (p.rip_routes_truncated ? "true" : "false") << ",\n";
     }
+    if (p.protocol == "icmp") {
+        out_ << "    \"icmp_type\": " << static_cast<unsigned>(p.icmp_type) << ",\n";
+        out_ << "    \"icmp_code\": " << static_cast<unsigned>(p.icmp_code) << ",\n";
+        out_ << "    \"icmp_type_name\": \"" << json_escape(p.icmp_type_name) << "\",\n";
+        if (!p.icmp_code_name.empty()) {
+            out_ << "    \"icmp_code_name\": \"" << json_escape(p.icmp_code_name) << "\",\n";
+        }
+        out_ << "    \"icmp_checksum_valid\": " << (p.icmp_checksum_valid ? "true" : "false") << ",\n";
+        if (p.icmp_type == 0 || p.icmp_type == 8) {  // Echo Reply/Request
+            out_ << "    \"icmp_echo_identifier\": " << p.icmp_echo_identifier << ",\n";
+            out_ << "    \"icmp_echo_sequence\": " << p.icmp_echo_sequence << ",\n";
+        }
+        if (p.icmp_type == 13 || p.icmp_type == 14) {  // Timestamp Request/Reply
+            out_ << "    \"icmp_echo_identifier\": " << p.icmp_echo_identifier << ",\n";
+            out_ << "    \"icmp_echo_sequence\": " << p.icmp_echo_sequence << ",\n";
+            out_ << "    \"icmp_originate_timestamp_ms\": " << p.icmp_originate_timestamp_ms << ",\n";
+            out_ << "    \"icmp_receive_timestamp_ms\": " << p.icmp_receive_timestamp_ms << ",\n";
+            out_ << "    \"icmp_transmit_timestamp_ms\": " << p.icmp_transmit_timestamp_ms << ",\n";
+        }
+        if (p.icmp_next_hop_mtu != 0) {
+            out_ << "    \"icmp_next_hop_mtu\": " << p.icmp_next_hop_mtu << ",\n";
+        }
+        if (!p.icmp_redirect_gateway.empty()) {
+            out_ << "    \"icmp_redirect_gateway\": \"" << json_escape(p.icmp_redirect_gateway) << "\",\n";
+        }
+        if (p.icmp_type == 12) {  // Parameter Problem
+            out_ << "    \"icmp_parameter_pointer\": " << static_cast<unsigned>(p.icmp_parameter_pointer) << ",\n";
+        }
+        if (!p.icmp_address_mask.empty()) {
+            out_ << "    \"icmp_address_mask\": \"" << json_escape(p.icmp_address_mask) << "\",\n";
+        }
+        if (!p.icmp_embedded_datagram.empty()) {
+            out_ << "    \"icmp_embedded_datagram\": \"" << json_escape(p.icmp_embedded_datagram) << "\",\n";
+        }
+        if (!p.icmp_router_addresses.empty()) {
+            out_ << "    \"icmp_router_addresses\": [";
+            for (size_t i = 0; i < p.icmp_router_addresses.size(); ++i) {
+                if (i != 0) out_ << ", ";
+                out_ << "\"" << json_escape(p.icmp_router_addresses[i]) << "\"";
+            }
+            out_ << "],\n";
+            out_ << "    \"icmp_router_addresses_truncated\": " << (p.icmp_router_addresses_truncated ? "true" : "false") << ",\n";
+        }
+    }
     if (p.protocol == "igmp") {
         out_ << "    \"igmp_version\": " << p.igmp_version << ",\n";
         out_ << "    \"igmp_type\": \"" << json_escape(p.igmp_type_name) << "\",\n";
@@ -1710,6 +1764,9 @@ void StatsWriter::write_packet(const DecodedPacket& p) {
     if (p.protocol == "rip") {
         rip_command_counts_[p.rip_command_name]++;
     }
+    if (p.protocol == "icmp") {
+        icmp_type_counts_[p.icmp_type_name]++;
+    }
     if (p.protocol == "igmp") {
         igmp_type_counts_[p.igmp_type_name]++;
     }
@@ -1959,6 +2016,12 @@ void StatsWriter::print_summary(std::ostream& out) const {
     if (!rip_command_counts_.empty()) {
         out << "rip commands:\n";
         for (const auto& [name, count] : rip_command_counts_) {
+            out << "  " << std::left << std::setw(40) << name << count << "\n";
+        }
+    }
+    if (!icmp_type_counts_.empty()) {
+        out << "icmp types:\n";
+        for (const auto& [name, count] : icmp_type_counts_) {
             out << "  " << std::left << std::setw(40) << name << count << "\n";
         }
     }

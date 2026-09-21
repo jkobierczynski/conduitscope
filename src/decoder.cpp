@@ -156,6 +156,48 @@ void fill_rip_fields(DecodedPacket& out, const RipMessage& msg) {
     for (const auto& r : msg.routes) out.rip_routes.push_back(rip_route_summary(r));
 }
 
+// Renders one IcmpRouterAddress as a single line for DecodedPacket::icmp_router_addresses.
+std::string icmp_router_address_summary(const IcmpRouterAddress& ra) {
+    std::ostringstream s;
+    s << ra.address << " (" << ra.preference << ")";
+    return s.str();
+}
+
+// Flattens a parsed IcmpMessage (see icmp.hpp) into DecodedPacket's icmp_* fields.
+void fill_icmp_fields(DecodedPacket& out, const IcmpMessage& msg) {
+    out.summary = msg.summary;
+    for (const auto& n : msg.notes) out.notes.push_back(n);
+    out.icmp_type = msg.type;
+    out.icmp_code = msg.code;
+    out.icmp_type_name = msg.type_name;
+    out.icmp_code_name = msg.code_name;
+    out.icmp_checksum_valid = msg.checksum_valid;
+    out.icmp_echo_identifier = msg.echo_identifier;
+    out.icmp_echo_sequence = msg.echo_sequence;
+    out.icmp_next_hop_mtu = msg.next_hop_mtu;
+    out.icmp_redirect_gateway = msg.redirect_gateway;
+    out.icmp_parameter_pointer = msg.parameter_pointer;
+    out.icmp_address_mask = msg.address_mask;
+    out.icmp_originate_timestamp_ms = msg.originate_timestamp_ms;
+    out.icmp_receive_timestamp_ms = msg.receive_timestamp_ms;
+    out.icmp_transmit_timestamp_ms = msg.transmit_timestamp_ms;
+    out.icmp_router_addresses_truncated = msg.router_addresses_truncated;
+    for (const auto& ra : msg.router_addresses) out.icmp_router_addresses.push_back(icmp_router_address_summary(ra));
+    if (msg.embedded_datagram) {
+        const auto& ed = *msg.embedded_datagram;
+        std::ostringstream s;
+        s << ed.src_addr << "->" << ed.dst_addr;
+        if (!ed.protocol_name.empty()) {
+            s << " (" << ed.protocol_name;
+            if (ed.has_ports) s << " " << ed.src_port << "->" << ed.dst_port;
+            s << ")";
+        } else {
+            s << " (IP protocol " << static_cast<unsigned>(ed.protocol) << ")";
+        }
+        out.icmp_embedded_datagram = s.str();
+    }
+}
+
 // Renders one IgmpGroupRecord as a single line for DecodedPacket::igmp_group_records.
 std::string igmp_group_record_summary(const IgmpGroupRecord& rec) {
     std::ostringstream s;
@@ -2007,13 +2049,26 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
             return out;
         }
 
-        // IGMP, VRRP, IGRP, PIM, EIGRP, and OSPF each ride directly on IP (no UDP/TCP header),
-        // dispatched purely by their own IANA-exclusive IP protocol number rather than any port --
-        // see igmp.hpp's/vrrp.hpp's/igrp.hpp's/pim.hpp's/eigrp.hpp's/ospf.hpp's own file header
-        // comments. All six are tried unconditionally (in Auto mode, or their own --protocol
-        // filter) since that protocol number alone is already a strong, exclusive signal; a
-        // payload that doesn't structurally match still falls through to "non-tcp" below rather
-        // than being forced into one of these six protocols.
+        // ICMP, IGMP, VRRP, IGRP, PIM, EIGRP, and OSPF each ride directly on IP (no UDP/TCP
+        // header), dispatched purely by their own IANA-exclusive IP protocol number rather than
+        // any port -- see icmp.hpp's/igmp.hpp's/vrrp.hpp's/igrp.hpp's/pim.hpp's/eigrp.hpp's/
+        // ospf.hpp's own file header comments. All seven are tried unconditionally (in Auto mode,
+        // or their own --protocol filter) since that protocol number alone is already a strong,
+        // exclusive signal. Unlike the other six, ICMP's own try_parse_icmp accepts virtually any
+        // 4+ byte payload on protocol number 1 (see icmp.hpp) -- so, uniquely among this group, an
+        // ICMP-protocol-number payload essentially never falls through to "non-tcp" below.
+        if (ip.protocol == ICMP_IP_PROTOCOL) {
+            bool want_icmp = options_.protocol_filter == ProtocolFilter::Auto ||
+                              options_.protocol_filter == ProtocolFilter::IcmpOnly;
+            if (want_icmp) {
+                if (auto msg = try_parse_icmp(ip.payload)) {
+                    out.protocol = "icmp";
+                    fill_icmp_fields(out, *msg);
+                    return out;
+                }
+            }
+        }
+
         if (ip.protocol == IGMP_IP_PROTOCOL) {
             bool want_igmp = options_.protocol_filter == ProtocolFilter::Auto ||
                               options_.protocol_filter == ProtocolFilter::IgmpOnly;
@@ -3263,14 +3318,16 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
             }
         }
 
+        // Generic "no protocol claimed this payload" fallback -- deliberately as terse as the
+        // "udp" fallback just above (see udp_header's own summary a few hundred lines up): every
+        // protocol this decoder knows was already tried by the time execution reaches here (Tiers
+        // 1-5, in the order this function's own comments document), so spelling that whole list
+        // out on every single unmatched TCP payload just added noise without adding information --
+        // a user asked for this to be shortened after seeing it on ordinary, unremarkable traffic.
         out.protocol = "tcp";
         std::ostringstream s;
         s << "TCP payload of " << effective_payload.size() << " byte(s) on port " << tcp.src_port << "->"
-          << tcp.dst_port
-          << " did not match OPC UA, EtherNet/IP, IEC 104, Modbus, DNP3, COTP/S7comm/MMS, HART-IP, "
-             "MQTT, FF-HSE, the RDP/VNC/TeamViewer/AnyDesk/Zoom remote-access family, the SMB/SSH/"
-             "HTTP/HTTPS/Telnet/FTP lateral-movement family, the LDAP/LDAPS/TACACS+ enterprise-trust "
-             "family, or the OpenVPN/STT tunnel-VPN family";
+          << tcp.dst_port;
         out.summary = s.str();
         return out;
 

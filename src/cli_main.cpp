@@ -258,6 +258,7 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
                                : (protocol == "nbns")   ? ProtocolFilter::NbnsOnly
                                : (protocol == "doh")    ? ProtocolFilter::DohOnly
                                : (protocol == "rip")    ? ProtocolFilter::RipOnly
+                               : (protocol == "icmp")   ? ProtocolFilter::IcmpOnly
                                : (protocol == "igmp")   ? ProtocolFilter::IgmpOnly
                                : (protocol == "vrrp")   ? ProtocolFilter::VrrpOnly
                                : (protocol == "hsrp")   ? ProtocolFilter::HsrpOnly
@@ -745,7 +746,7 @@ int main(int argc, char** argv) {
     decode_cmd
         ->add_option("--protocol", decode_protocol,
                       "Restrict decoding to one protocol instead of auto-detecting all of them")
-        ->transform(CLI::IsMember({"auto", "modbus", "dnp3", "s7comm", "mms", "iec104", "enip", "profinet", "goose", "sv", "ethercat", "stp", "devicenet", "bacnet", "hartip", "opcua", "mqtt", "s7comm-plus", "ff-hse", "dns", "mdns", "llmnr", "nbns", "doh", "rip", "igmp", "vrrp", "hsrp", "igrp", "pim", "eigrp", "ospf", "remote-access", "lateral-movement", "enterprise-trust", "eapol", "wireless-backhaul", "pppoe", "tunnel-vpn", "mpls"}))
+        ->transform(CLI::IsMember({"auto", "modbus", "dnp3", "s7comm", "mms", "iec104", "enip", "profinet", "goose", "sv", "ethercat", "stp", "devicenet", "bacnet", "hartip", "opcua", "mqtt", "s7comm-plus", "ff-hse", "dns", "mdns", "llmnr", "nbns", "doh", "rip", "icmp", "igmp", "vrrp", "hsrp", "igrp", "pim", "eigrp", "ospf", "remote-access", "lateral-movement", "enterprise-trust", "eapol", "wireless-backhaul", "pppoe", "tunnel-vpn", "mpls"}))
         ->capture_default_str();
     decode_cmd->add_option("--modbus-port", decode_modbus_ports,
                             "Additional TCP port to treat as expected for Modbus (repeatable); "
