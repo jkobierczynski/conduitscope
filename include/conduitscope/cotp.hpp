@@ -17,9 +17,11 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "conduitscope/byteio.hpp"
+#include "conduitscope/protocol_decoder.hpp"
 
 namespace conduitscope {
 
@@ -87,5 +89,81 @@ std::optional<CotpFrame> try_parse_tpkt_cotp(ByteSpan tcp_payload);
 // frame truncated across a TCP segment boundary -- see Decoder::reassemble_tcp_payload in
 // decoder.cpp.
 std::optional<size_t> tpkt_declared_length(ByteSpan payload);
+
+// registration-model migration batch 2 (see protocol_decoder.hpp/protocol_registry.hpp). Cross-
+// packet COTP/S7comm fragment-reassembly state for one DIRECTIONAL TCP flow -- replaces
+// decoder.hpp's old (now removed) `Decoder::cotp_reassembly_`/`CotpFragmentReassembly`: same map,
+// same fields, just reached generically through
+// DecodeContext::flow_state<CotpReassemblyState>(FlowStateKeying::DirectionalFlow) instead of a
+// Decoder member dedicated to COTP alone. A single S7comm/S7comm-Plus/MMS message can be chained
+// across more than one COTP Data (DT) frame when it doesn't fit the negotiated PDU length: every DT
+// frame but the last has EOT=0, and the last has EOT=1 (ISO 8073's own TSDU fragmentation signal --
+// COTP has no separate FIR-equivalent bit, so "in_progress" alone distinguishes a fresh start from
+// a continuation). DirectionalFlow keying (not Session, unlike ModbusFlowState/TwinCatFlowState) is
+// required here: each TCP direction reassembles independently, and a session-keyed buffer would
+// corrupt reassembly the moment both directions had an in-progress fragment at once.
+class CotpReassemblyState : public DecoderFlowState {
+public:
+    bool in_progress = false;
+    std::vector<uint8_t> buffered_user_data;  // concatenated COTP Data frame user_data so far
+    size_t frame_count = 0;                    // complete TPKT/COTP DT frames contributed so far
+};
+
+// Everything decoder.cpp's COTP/S7comm-family call site needs from one packet's TPKT/COTP framing
+// plus whatever cross-packet fragment reassembly it triggers, fused into one
+// CotpDecoder::decode() call -- replaces decoder.hpp's old (now removed)
+// `Decoder::reassemble_cotp_data_frame` (which needed direct access to `Decoder::cotp_reassembly_`
+// and `DecodedPacket& out`, neither of which a ProtocolDecoder::decode() has).
+struct CotpDecodeResult {
+    CotpFrame frame;
+
+    // True for a Data (DT) frame that is not yet complete (EOT=0, still waiting for the final
+    // fragment) or whose flow just hit the reassembly safety cap (see cotp.cpp) and had its
+    // in-progress fragment abandoned. `buffering_summary` is the message decoder.cpp should show
+    // (out.protocol = "cotp", out.summary = buffering_summary, matching the pre-migration
+    // behavior); s7_candidate() must not be called in this case.
+    bool still_buffering = false;
+    std::string buffering_summary;
+
+    // Ordered exactly the way decoder.cpp's legacy call site always produced this sequence: an
+    // abandoned-reassembly note (non-Data frame arriving mid-fragment) or a completed-reassembly
+    // note (Data frame finishing a multi-frame chain), if either applies, THEN this frame's own
+    // frame.notes. Callers should use this instead of frame.notes directly to get that ordering.
+    std::vector<std::string> notes;
+
+    // Backs s7_candidate() when reassembly concatenated more than one frame's user data; empty
+    // (and unused) otherwise, in which case s7_candidate() reads directly from frame.user_data.
+    std::vector<uint8_t> s7_candidate_storage;
+    bool s7_candidate_from_storage = false;
+
+    // The bytes S7comm/S7comm-Plus/MMS should be tried against -- only meaningful when
+    // frame.kind == CotpPduKind::Data && !still_buffering. Valid for exactly as long as the
+    // ProtocolResult holding this CotpDecodeResult (and the original payload passed to
+    // CotpDecoder::decode) stays alive -- the same "caller keeps it alive as a same-scope local"
+    // contract every ByteSpan-returning helper in this codebase already has.
+    ByteSpan s7_candidate() const {
+        if (s7_candidate_from_storage) {
+            return ByteSpan(s7_candidate_storage.data(), s7_candidate_storage.size());
+        }
+        return frame.user_data;
+    }
+};
+
+// Thin ProtocolDecoder wrapper: framing still goes through try_parse_tpkt_cotp/tpkt_declared_length
+// above, unchanged; decode() additionally performs the non-Data-abandons-reassembly and Data-frame
+// EOT-chaining logic CotpReassemblyState/CotpDecodeResult describe, using
+// DecodeContext::flow_state<CotpReassemblyState>(FlowStateKeying::DirectionalFlow) in place of the
+// old bespoke Decoder::cotp_reassembly_ member. See cotp.cpp.
+class CotpDecoder : public ProtocolDecoder {
+public:
+    std::string_view id() const override { return "cotp"; }
+    GateKind gate_kind() const override { return GateKind::TcpPortIndependent; }
+    std::optional<size_t> tcp_declared_length(ByteSpan candidate) const override {
+        return tpkt_declared_length(candidate);
+    }
+    std::optional<ProtocolResult> decode(ByteSpan payload, DecodeContext& ctx) const override;
+};
+
+const ProtocolDecoder& cotp_decoder();
 
 }  // namespace conduitscope

@@ -71,8 +71,9 @@ std::string well_known_udp_port_name(uint16_t /*port*/) {
 // Canonicalizes both directions of one TCP 4-tuple into a single, direction-independent session
 // key, so Decoder::modbus_pending_/mqtt_session_version_ can track state per SESSION (a request and
 // its response, or a CONNECT and a later SUBSCRIBE, can travel in opposite directions) rather than
-// per directional flow -- unlike flow_key (used by dnp3_reassembly_/tcp_reassembly_/
-// cotp_reassembly_, which genuinely are per-direction). "<->" is used as the join delimiter
+// per directional flow -- unlike flow_key (used by tcp_reassembly_ and, via
+// FlowStateKeying::DirectionalFlow, CotpReassemblyState/Dnp3ReassemblyState -- see cotp.hpp/
+// dnp3.hpp -- which genuinely are per-direction). "<->" is used as the join delimiter
 // specifically so this can never collide with a directional flow_key string (which always uses
 // "->"), even though the two happen to key different maps.
 std::string tcp_session_key(const std::string& ip_a, uint16_t port_a, const std::string& ip_b,
@@ -436,166 +437,6 @@ void fill_ospf_fields(DecodedPacket& out, const OspfMessage& msg) {
 
 }  // namespace
 
-std::optional<Dnp3ApplicationFragment> Decoder::process_dnp3_frame(Dnp3LinkFrame& link, ByteSpan tcp_payload,
-                                                                     const std::string& flow_key) const {
-    if (link.user_data_bytes == 0) {
-        return std::nullopt;
-    }
-
-    Dnp3ApplicationFragment frag;
-    std::vector<uint8_t> logical = reassemble_dnp3_user_data(link, tcp_payload, frag.notes);
-
-    if (logical.empty()) {
-        frag.notes.push_back("no transport-layer byte could be recovered for this fragment");
-        frag.summary = "transport/application layer not decoded (no data recovered)";
-        return frag;
-    }
-
-    // --- Transport header: 1 byte, bit7=FIR, bit6=FIN, bits5-0=SEQ. Same as
-    // try_parse_dnp3_transport_and_application; the difference starts below, in what happens for
-    // a fragment that isn't complete in this one data-link frame. ---
-    uint8_t transport_byte = logical[0];
-    frag.has_transport = true;
-    frag.transport_fir = (transport_byte & 0x80) != 0;
-    frag.transport_fin = (transport_byte & 0x40) != 0;
-    frag.transport_seq = transport_byte & 0x3F;
-
-    std::ostringstream summary;
-    summary << "transport: FIR=" << (frag.transport_fir ? 1 : 0) << " FIN=" << (frag.transport_fin ? 1 : 0)
-            << " SEQ=" << static_cast<unsigned>(frag.transport_seq);
-
-    ByteSpan app_bytes_this_frame =
-        logical.size() > 1 ? ByteSpan(logical.data() + 1, logical.size() - 1) : ByteSpan();
-    Dnp3FragmentReassembly& state = dnp3_reassembly_[flow_key];
-
-    if (frag.transport_fir && frag.transport_fin) {
-        // Complete, single-data-link-frame fragment -- the large majority of real traffic. Any
-        // reassembly left in progress for this flow is now stale (its FIN=1 will never come from
-        // the frame that was supposed to send it -- a fragment that arrived complete on its own
-        // took its place instead), so it's abandoned with a note rather than silently forgotten.
-        if (state.in_progress) {
-            frag.notes.push_back(
-                "a complete single-frame DNP3 fragment (FIR=1, FIN=1) arrived on this TCP flow "
-                "while a previous multi-frame fragment reassembly was still in progress (" +
-                std::to_string(state.buffered_app_bytes.size()) + " byte(s) buffered across " +
-                std::to_string(state.frame_count) +
-                " frame(s)) -- the earlier, incomplete fragment is abandoned");
-            state = Dnp3FragmentReassembly{};
-        }
-        decode_dnp3_application_layer(app_bytes_this_frame, frag);
-        if (!frag.summary.empty()) {
-            summary << " | " << frag.summary;
-        }
-        frag.summary = summary.str();
-        return frag;
-    }
-
-    if (frag.transport_fir) {
-        // Begins a fragment that continues in a later data-link frame -- possibly in a later TCP
-        // segment/packet entirely. Buffer it per-flow and wait for a continuation; nothing to
-        // decode yet.
-        if (state.in_progress) {
-            frag.notes.push_back(
-                "a new DNP3 fragment (FIR=1, FIN=0, SEQ=" + std::to_string(frag.transport_seq) +
-                ") began on this TCP flow while a previous fragment reassembly was still in "
-                "progress (" + std::to_string(state.buffered_app_bytes.size()) +
-                " byte(s) buffered across " + std::to_string(state.frame_count) +
-                " frame(s)) -- the earlier, incomplete fragment is abandoned");
-        }
-        state = Dnp3FragmentReassembly{};
-        state.in_progress = true;
-        state.buffered_app_bytes.assign(app_bytes_this_frame.data(),
-                                         app_bytes_this_frame.data() + app_bytes_this_frame.size());
-        state.last_seq = frag.transport_seq;
-        state.frame_count = 1;
-        frag.notes.push_back(
-            "beginning a DNP3 fragment that spans multiple data-link frames (FIR=1, FIN=0, SEQ=" +
-            std::to_string(frag.transport_seq) + ") -- " +
-            std::to_string(state.buffered_app_bytes.size()) +
-            " application-layer byte(s) buffered so far for this TCP flow; the application layer "
-            "will be decoded once a continuation frame with FIN=1 is seen on the same flow "
-            "(reassembly assumes packets are processed in capture order, which conduitscope's "
-            "single sequential decode pass guarantees)");
-        frag.summary = summary.str();  // transport-only, same rendering as before this fragment began
-        return frag;
-    }
-
-    // frag.transport_fir is false: a continuation frame.
-    if (!state.in_progress) {
-        frag.notes.push_back(
-            "continuation DNP3 data-link frame (FIR=0, SEQ=" + std::to_string(frag.transport_seq) +
-            ") with no fragment reassembly in progress on this TCP flow -- the frame that began it "
-            "was never seen (capture may start mid-fragment) or the reassembly was already "
-            "completed/abandoned; application layer not decoded");
-        frag.summary = summary.str();
-        return frag;
-    }
-
-    uint8_t expected_seq = (state.last_seq + 1) & 0x3F;
-    if (frag.transport_seq != expected_seq) {
-        frag.notes.push_back(
-            "continuation DNP3 data-link frame's sequence number (" + std::to_string(frag.transport_seq) +
-            ") does not follow the previous frame's (expected " + std::to_string(expected_seq) +
-            ") -- discarding " + std::to_string(state.buffered_app_bytes.size()) +
-            " already-buffered byte(s) and abandoning this fragment reassembly; application layer "
-            "not decoded");
-        state = Dnp3FragmentReassembly{};
-        frag.summary = summary.str();
-        return frag;
-    }
-
-    // Safety caps against a pathological/malformed capture stalling a fragment open forever and
-    // growing dnp3_reassembly_ without bound -- a real fragment is nowhere near either limit.
-    constexpr size_t kMaxBufferedBytes = 65536;
-    constexpr size_t kMaxFramesPerFragment = 500;
-
-    state.buffered_app_bytes.insert(state.buffered_app_bytes.end(), app_bytes_this_frame.data(),
-                                     app_bytes_this_frame.data() + app_bytes_this_frame.size());
-    state.last_seq = frag.transport_seq;
-    ++state.frame_count;
-
-    if (state.buffered_app_bytes.size() > kMaxBufferedBytes || state.frame_count > kMaxFramesPerFragment) {
-        frag.notes.push_back(
-            "DNP3 fragment reassembly on this TCP flow exceeded its safety cap (" +
-            std::to_string(state.buffered_app_bytes.size()) + " byte(s) across " +
-            std::to_string(state.frame_count) +
-            " frame(s)) -- abandoning it; application layer not decoded");
-        state = Dnp3FragmentReassembly{};
-        frag.summary = summary.str();
-        return frag;
-    }
-
-    if (!frag.transport_fin) {
-        frag.notes.push_back(
-            "continuing a DNP3 fragment reassembly on this TCP flow (SEQ=" +
-            std::to_string(frag.transport_seq) + "): " + std::to_string(state.buffered_app_bytes.size()) +
-            " application-layer byte(s) buffered across " + std::to_string(state.frame_count) +
-            " frame(s) so far, still waiting for FIN=1");
-        frag.summary = summary.str();
-        return frag;
-    }
-
-    // FIN=1: the fragment is complete. Decode the concatenated application-layer bytes, then
-    // clear the flow's reassembly state -- it's spent either way, whether decoding succeeds or
-    // turns up something malformed.
-    size_t total_bytes = state.buffered_app_bytes.size();
-    size_t total_frames = state.frame_count;
-    frag.notes.push_back("completed a " + std::to_string(total_frames) +
-                          "-data-link-frame DNP3 fragment reassembled across separate TCP segments (" +
-                          std::to_string(total_bytes) + " application-layer byte(s) total)");
-    ByteSpan reassembled(state.buffered_app_bytes.data(), state.buffered_app_bytes.size());
-    decode_dnp3_application_layer(reassembled, frag);
-    state = Dnp3FragmentReassembly{};
-
-    summary << " (fragment reassembled across " << total_frames << " data-link frame(s), " << total_bytes
-            << " application-layer byte(s) total)";
-    if (!frag.summary.empty()) {
-        summary << " | " << frag.summary;
-    }
-    frag.summary = summary.str();
-    return frag;
-}
-
 bool Decoder::reassemble_tcp_payload(const TcpSegment& tcp, const std::string& flow_key, DecodedPacket& out,
                                       std::vector<uint8_t>& storage, ByteSpan& effective_payload) const {
     TcpFlowBuffer& fb = tcp_reassembly_[flow_key];
@@ -654,8 +495,8 @@ bool Decoder::reassemble_tcp_payload(const TcpSegment& tcp, const std::string& f
     // Safety cap against a pathological/malformed capture -- or a protocol's own declared-length
     // field claiming far more data than any real deployment would ever send -- growing this
     // flow's buffer without bound while segments keep trickling in. Unlike DNP3 fragment
-    // reassembly (process_dnp3_frame's own kMaxBufferedBytes=65536) and COTP TSDU reassembly
-    // (reassemble_cotp_data_frame's own kMaxBufferedBytes=1<<20), this general path -- shared by
+    // reassembly (Dnp3Decoder::process_frame's own kMaxBufferedBytes=65536, dnp3.cpp) and COTP TSDU reassembly
+    // (CotpDecoder::decode's own kMaxBufferedBytes=1<<20, cotp.cpp), this general path -- shared by
     // every one of Modbus/TCP, IEC 104, EtherNet/IP, TPKT/S7comm/S7comm-Plus/MMS, HART-IP, OPC
     // UA, MQTT, and FF-HSE -- had no cap of its own: it buffered up to whatever each protocol's
     // own `*_declared_length()` returned. Most of those are already naturally or explicitly
@@ -783,13 +624,19 @@ bool Decoder::reassemble_tcp_payload(const TcpSegment& tcp, const std::string& f
         }
     }
     if (!declared && want_dnp3) {
-        if (auto d = dnp3_link_frame_declared_length(candidate)) {
+        // Migration batch 2: dnp3_link_frame_declared_length is now reached through
+        // Dnp3Decoder::tcp_declared_length rather than called directly -- same function, same
+        // semantics, see dnp3.hpp.
+        if (auto d = dnp3_decoder().tcp_declared_length(candidate)) {
             declared = d;
             which = "DNP3 data-link";
         }
     }
     if (!declared && (want_s7comm || want_mms || want_s7commplus)) {
-        if (auto d = tpkt_declared_length(candidate)) {
+        // Registration-model migration batch 2: tpkt_declared_length is now reached through
+        // CotpDecoder::tcp_declared_length rather than called directly -- same function, same
+        // semantics, see cotp.hpp.
+        if (auto d = cotp_decoder().tcp_declared_length(candidate)) {
             declared = d;
             which = "TPKT/COTP";
         }
@@ -914,65 +761,14 @@ bool Decoder::reassemble_tcp_payload(const TcpSegment& tcp, const std::string& f
 // Decoder::pair_modbus_transaction used to live here. It moved to ModbusDecoder::decode
 // (modbus.cpp) as part of the registration-model decoder refactor's pilot (Stage 2) -- see
 // modbus.hpp's ModbusPendingRequest/ModbusFlowState and protocol_decoder.hpp's DecodeContext.
-
-bool Decoder::reassemble_cotp_data_frame(const CotpFrame& cotp, const std::string& flow_key, DecodedPacket& out,
-                                          std::vector<uint8_t>& storage, ByteSpan& s7_candidate) const {
-    CotpFragmentReassembly& state = cotp_reassembly_[flow_key];
-
-    if (!cotp.eot) {
-        // Begins or continues a TSDU fragmented across multiple complete TPKT/COTP frames -- buffer
-        // this frame's user data and wait for the final (EOT=1) frame. COTP has no FIR-equivalent
-        // bit, so "nothing in progress yet on this flow" is what distinguishes a fresh start from a
-        // continuation, not any field on this frame itself.
-        bool starting = !state.in_progress;
-        state.in_progress = true;
-        state.buffered_user_data.insert(state.buffered_user_data.end(), cotp.user_data.data(),
-                                         cotp.user_data.data() + cotp.user_data.size());
-        ++state.frame_count;
-
-        // Safety caps against a pathological/malformed capture stalling a fragment open forever --
-        // sized generously above real S7 block-transfer scenarios (large DB/program-block
-        // uploads/downloads), which is what genuine multi-frame chaining is for.
-        constexpr size_t kMaxBufferedBytes = 1 << 20;  // 1 MiB
-        constexpr size_t kMaxFramesPerFragment = 2000;
-        if (state.buffered_user_data.size() > kMaxBufferedBytes || state.frame_count > kMaxFramesPerFragment) {
-            out.protocol = "cotp";
-            out.summary = "COTP/S7comm fragment reassembly on this TCP flow exceeded its safety cap (" +
-                           std::to_string(state.buffered_user_data.size()) + " byte(s) across " +
-                           std::to_string(state.frame_count) + " frame(s)) -- abandoning it";
-            state = CotpFragmentReassembly{};
-            return false;
-        }
-
-        out.protocol = "cotp";
-        std::ostringstream s;
-        s << (starting ? "beginning" : "continuing")
-          << " a COTP/S7comm message fragmented across multiple complete TPKT/COTP frames on this TCP "
-             "flow (EOT=0): "
-          << state.buffered_user_data.size() << " user-data byte(s) buffered across " << state.frame_count
-          << " frame(s) so far, waiting for the final (EOT=1) frame";
-        out.summary = s.str();
-        return false;
-    }
-
-    // cotp.eot: this frame completes a TSDU -- either the common case (nothing was in progress, so
-    // this frame's own user data IS the whole message, exactly as before this feature existed) or
-    // the final fragment of a reassembly that began on an earlier frame on this flow.
-    if (!state.in_progress) {
-        s7_candidate = cotp.user_data;
-        return true;
-    }
-
-    storage = state.buffered_user_data;
-    storage.insert(storage.end(), cotp.user_data.data(), cotp.user_data.data() + cotp.user_data.size());
-    s7_candidate = ByteSpan(storage.data(), storage.size());
-    size_t total_frames = state.frame_count + 1;
-    out.notes.push_back("reassembled a COTP/S7comm message from " + std::to_string(s7_candidate.size()) +
-                         " user-data byte(s) chained across " + std::to_string(total_frames) +
-                         " complete TPKT/COTP frames on this TCP flow (EOT=0 on all but the last)");
-    state = CotpFragmentReassembly{};
-    return true;
-}
+//
+// Decoder::reassemble_cotp_data_frame used to live here too. It moved to CotpDecoder::decode
+// (cotp.cpp) as part of migration batch 2 -- see cotp.hpp's CotpReassemblyState/CotpDecodeResult
+// and protocol_decoder.hpp's DecodeContext::flow_state<T>(FlowStateKeying::DirectionalFlow).
+//
+// Decoder::process_dnp3_frame used to live here too. It moved to Dnp3Decoder::process_frame
+// (dnp3.cpp), also as part of migration batch 2 -- see dnp3.hpp's Dnp3ReassemblyState/Dnp3Result
+// and the same DecodeContext::flow_state<T>(FlowStateKeying::DirectionalFlow) extension.
 
 DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size_t index) const {
     DecodedPacket out;
@@ -2311,8 +2107,9 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
         }
 
         // Directional TCP flow identity, reused below both for cross-TCP-segment PDU/frame
-        // reassembly (tcp_reassembly_) and DNP3 cross-packet application-fragment reassembly
-        // (dnp3_reassembly_) -- see reassemble_tcp_payload/process_dnp3_frame.
+        // reassembly (tcp_reassembly_) and, via DecodeContext::flow_key, registration-model
+        // decoders' own directional-flow-keyed state (Dnp3ReassemblyState/CotpReassemblyState --
+        // see reassemble_tcp_payload and dnp3.hpp/cotp.hpp).
         std::string flow_key =
             out.src_ip + ":" + std::to_string(tcp.src_port) + "->" + out.dst_ip + ":" + std::to_string(tcp.dst_port);
 
@@ -2659,97 +2456,33 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
         }
 
         if (want_dnp3) {
-            if (auto d = try_parse_dnp3_link_layer(effective_payload, out.notes)) {
+            // Migration batch 2: the same-payload multi-data-link-frame coalescing loop and the
+            // cross-packet application-fragment reassembly (reading/writing
+            // Decoder::dnp3_reassembly_ and calling Decoder::process_dnp3_frame) that used to
+            // live directly in this call site are now both reached through Dnp3Decoder::decode --
+            // same algorithm, same Dnp3ReassemblyState shape, just via
+            // DecodeContext::flow_state<Dnp3ReassemblyState>(FlowStateKeying::DirectionalFlow)
+            // instead of a Decoder member dedicated to DNP3 alone. See dnp3.hpp/dnp3.cpp.
+            DecodeContext dnp3_ctx;
+            dnp3_ctx.flow_key = flow_key;
+            dnp3_ctx.packet_index = index;
+            dnp3_ctx.protocol_id = "dnp3";
+            dnp3_ctx.flow_states = &registry_flow_state_;
+            if (auto dnp3_result = dnp3_decoder().decode(effective_payload, dnp3_ctx)) {
+                const Dnp3Result& dr = dnp3_result->as<Dnp3Result>();
                 out.protocol = "dnp3";
-                out.summary = d->summary;
-
-                // Object headers/point values are capped cumulatively across every data link
-                // frame found in this TCP payload, not per frame -- same caps as before, just
-                // now shared across however many frames turned up.
-                constexpr size_t kMaxObjHeaders = 50;
-                constexpr size_t kMaxPointValues = 50;
-                auto merge_application_layer = [&](const Dnp3ApplicationFragment& app, bool is_first_frame) {
-                    if (is_first_frame) {
-                        out.summary += "; " + app.summary;
-                        out.dnp3_has_function = app.has_function;
-                        out.dnp3_function_name = app.function_name;
-                    }
-                    for (const auto& n : app.notes) out.notes.push_back(n);
-                    for (size_t i = 0; i < app.objects.size() && out.dnp3_object_headers.size() < kMaxObjHeaders;
-                         ++i) {
-                        const auto& oh = app.objects[i];
-                        out.dnp3_object_headers.push_back("g" + std::to_string(oh.group) + "v" +
-                                                           std::to_string(oh.variation) + " (" +
-                                                           oh.group_name + ")");
-                    }
-                    for (const auto& oh : app.objects) {
-                        if (out.dnp3_point_values.size() >= kMaxPointValues) break;
-                        std::string tag = "g" + std::to_string(oh.group) + "v" + std::to_string(oh.variation);
-                        for (const auto& pv : oh.values) {
-                            if (out.dnp3_point_values.size() >= kMaxPointValues) break;
-                            std::string entry = tag + " idx=" + std::to_string(pv.index) + ": " + pv.value;
-                            if (!pv.flags.empty()) {
-                                entry += " [";
-                                for (size_t f = 0; f < pv.flags.size(); ++f) {
-                                    if (f != 0) entry += ",";
-                                    entry += pv.flags[f];
-                                }
-                                entry += "]";
-                            }
-                            out.dnp3_point_values.push_back(entry);
-                        }
-                    }
-                };
-
-                if (auto app = process_dnp3_frame(*d, effective_payload, flow_key)) {
-                    merge_application_layer(*app, /*is_first_frame=*/true);
-                }
-                // Read AFTER process_dnp3_frame: that call (when it runs -- it doesn't for a
-                // link-layer-only control frame with no user data, see its own doc comment) is
-                // what finalizes block_count/block_crc_failures/crc_validated on top of the header
-                // result try_parse_dnp3_link_layer already set -- see Dnp3LinkFrame's own comment
-                // in dnp3.hpp for why. Either way, by this point d's crc fields are final.
-                out.dnp3_link_crc_valid = d->crc_validated;
-                out.dnp3_header_crc_valid = d->header_crc_valid;
-                out.dnp3_block_count = d->block_count;
-                out.dnp3_block_crc_failures = d->block_crc_failures;
-                out.dnp3_source_address = d->source;
-                out.dnp3_destination_address = d->destination;
-
-                // DNP3 frames are small (<=255 bytes on the wire) and it's normal for a sender
-                // or the OS to coalesce several into one TCP segment before flushing. Keep
-                // looking for more, immediately after the first frame's own wire bytes, rather
-                // than silently stopping at the first one -- previously anything past it in the
-                // same payload was dropped with no warning at all.
-                constexpr size_t kMaxDnp3FramesPerPayload = 50;
-                size_t offset = dnp3_frame_wire_length(*d);
-                size_t frame_count = 1;
-                while (offset < effective_payload.size() && frame_count < kMaxDnp3FramesPerPayload) {
-                    ByteSpan rest = effective_payload.from(offset);
-                    auto next = try_parse_dnp3_link_layer(rest, out.notes);
-                    if (!next) break;  // remaining bytes aren't another DNP3 frame -- stop, don't guess
-                    ++frame_count;
-                    std::string note = "additional DNP3 data link frame " + std::to_string(frame_count) +
-                                        " found in the same TCP payload at byte offset " +
-                                        std::to_string(offset) + " (coalesced by the sender/OS): " +
-                                        next->summary;
-                    if (frame_count == 2) {
-                        note +=
-                            " -- only the first frame's function code is reflected in the summary line "
-                            "above and the dnp3_function field; every frame's own function/objects/values "
-                            "are still fully decoded and included here and in dnp3_objects/dnp3_values";
-                    }
-                    out.notes.push_back(note);
-                    if (auto next_app = process_dnp3_frame(*next, rest, flow_key)) {
-                        merge_application_layer(*next_app, /*is_first_frame=*/false);
-                    }
-                    offset += dnp3_frame_wire_length(*next);
-                }
-                if (frame_count >= kMaxDnp3FramesPerPayload) {
-                    out.notes.push_back("stopped after " + std::to_string(kMaxDnp3FramesPerPayload) +
-                                         " DNP3 data link frame(s) in this one TCP payload, more may remain "
-                                         "(safety cap)");
-                }
+                out.summary = dr.summary;
+                for (const auto& n : dr.notes) out.notes.push_back(n);
+                out.dnp3_has_function = dr.dnp3_has_function;
+                out.dnp3_function_name = dr.dnp3_function_name;
+                out.dnp3_object_headers = dr.dnp3_object_headers;
+                out.dnp3_point_values = dr.dnp3_point_values;
+                out.dnp3_link_crc_valid = dr.link_crc_valid;
+                out.dnp3_header_crc_valid = dr.header_crc_valid;
+                out.dnp3_block_count = dr.block_count;
+                out.dnp3_block_crc_failures = dr.block_crc_failures;
+                out.dnp3_source_address = dr.source_address;
+                out.dnp3_destination_address = dr.destination_address;
 
                 bool expected_port = port_in(tcp.src_port, DNP3_TCP_PORT, options_.extra_dnp3_ports) ||
                                       port_in(tcp.dst_port, DNP3_TCP_PORT, options_.extra_dnp3_ports);
@@ -2790,7 +2523,31 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
         }
 
         if (want_s7comm || want_mms || want_s7commplus) {
-            if (auto cotp = try_parse_tpkt_cotp(effective_payload)) {
+            // Registration-model migration batch 2: TPKT/COTP framing plus the non-Data-abandons-
+            // reassembly and Data-frame EOT-chaining logic that used to live directly in this call
+            // site (reading/writing Decoder::cotp_reassembly_ and calling
+            // Decoder::reassemble_cotp_data_frame) are now both reached through CotpDecoder::decode
+            // -- same algorithm, same CotpReassemblyState shape, just via
+            // DecodeContext::flow_state<CotpReassemblyState>(FlowStateKeying::DirectionalFlow)
+            // instead of a Decoder member dedicated to COTP alone. See cotp.hpp/cotp.cpp.
+            //
+            // S7comm/S7comm-Plus/MMS themselves are ALSO migrated (S7CommDecoder/S7CommPlusDecoder/
+            // MmsDecoder, gate_kind() == CotpPayload -- protocol_decoder.hpp), but this call site
+            // still tries each of the three explicitly, in the same fixed order, rather than
+            // iterating cotp_payload_registry() generically: their dual-write blocks below differ
+            // too much (different DecodedPacket fields entirely) to generalize into one loop
+            // without real loss of clarity. cotp_payload_registry() exists purely as this gate
+            // group's own audit trail, the same "data, not control flow" role every other registry
+            // vector has during this project's staged migration -- see protocol_registry.hpp.
+            std::string cotp_session = tcp_session_key(out.src_ip, tcp.src_port, out.dst_ip, tcp.dst_port);
+            DecodeContext cotp_ctx;
+            cotp_ctx.flow_key = flow_key;
+            cotp_ctx.session_key = cotp_session;
+            cotp_ctx.packet_index = index;
+            cotp_ctx.protocol_id = "cotp";
+            cotp_ctx.flow_states = &registry_flow_state_;
+            if (auto cotp_result = cotp_decoder().decode(effective_payload, cotp_ctx)) {
+                const CotpDecodeResult& cr = cotp_result->as<CotpDecodeResult>();
                 bool expected_port = port_in(tcp.src_port, COTP_TCP_PORT, options_.extra_s7comm_ports) ||
                                       port_in(tcp.dst_port, COTP_TCP_PORT, options_.extra_s7comm_ports);
                 auto annotate_port = [&]() {
@@ -2801,58 +2558,48 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                     }
                 };
 
-                if (cotp->kind != CotpPduKind::Data) {
-                    // A non-Data COTP frame (connection setup/teardown) on this flow means any
-                    // COTP/S7comm fragment reassembly still in progress here is stale -- the
-                    // continuation it was waiting for will never come from this frame, and a new
-                    // session/teardown starting means whatever was buffered no longer applies.
-                    auto it = cotp_reassembly_.find(flow_key);
-                    if (it != cotp_reassembly_.end() && it->second.in_progress) {
-                        out.notes.push_back(
-                            "a " + cotp->pdu_type_name + " frame arrived on this TCP flow while a "
-                            "COTP/S7comm fragment reassembly was still in progress (" +
-                            std::to_string(it->second.buffered_user_data.size()) + " byte(s) buffered across " +
-                            std::to_string(it->second.frame_count) +
-                            " frame(s)) -- the earlier, incomplete fragment is abandoned");
-                        cotp_reassembly_.erase(it);
-                    }
+                if (cr.still_buffering) {
+                    // Still buffering (EOT=0, waiting for the final fragment) or the flow's safety
+                    // cap was hit -- CotpDecoder::decode has already filled in cr.buffering_summary.
+                    out.protocol = "cotp";
+                    out.summary = cr.buffering_summary;
+                    for (const auto& n : cr.notes) out.notes.push_back(n);
+                    annotate_port();
+                    return out;
                 }
 
-                if (cotp->kind == CotpPduKind::Data) {
-                    std::vector<uint8_t> cotp_storage;
-                    ByteSpan s7_candidate;
-                    if (!reassemble_cotp_data_frame(*cotp, flow_key, out, cotp_storage, s7_candidate)) {
-                        // Still buffering (EOT=0, waiting for the final fragment) or the flow's
-                        // safety cap was hit -- reassemble_cotp_data_frame has already filled in
-                        // `out`'s protocol/summary.
-                        for (const auto& n : cotp->notes) out.notes.push_back(n);
-                        annotate_port();
-                        return out;
-                    }
+                if (cr.frame.kind == CotpPduKind::Data) {
+                    DecodeContext rider_ctx;
+                    rider_ctx.flow_key = flow_key;
+                    rider_ctx.session_key = cotp_session;
+                    rider_ctx.packet_index = index;
+                    rider_ctx.flow_states = &registry_flow_state_;
 
-                    // try_parse_s7comm already returns std::nullopt (never throws) for an empty
-                    // payload, so no separate emptiness check is needed here -- s7_candidate can
-                    // legitimately be empty (e.g. every buffered fragment plus the final one all
+                    // s7comm_decoder().decode already returns std::nullopt (never throws) for an
+                    // empty payload, so no separate emptiness check is needed here -- cr.s7_candidate()
+                    // can legitimately be empty (e.g. every buffered fragment plus the final one all
                     // carried zero bytes of user data, seen in real captures -- see
                     // tests/real_captures/s7comm/ATTRIBUTION.md).
                     if (want_s7comm) {
-                        if (auto s7 = try_parse_s7comm(s7_candidate)) {
+                        rider_ctx.protocol_id = "s7comm";
+                        if (auto result = s7comm_decoder().decode(cr.s7_candidate(), rider_ctx)) {
+                            const S7CommFrame& s7 = result->as<S7CommFrame>();
                             out.protocol = "s7comm";
-                            out.summary = s7->summary;
-                            for (const auto& n : s7->notes) out.notes.push_back(n);
-                            out.s7comm_has_function = s7->has_function;
-                            out.s7comm_function_name = s7->function_name;
+                            out.summary = s7.summary;
+                            for (const auto& n : s7.notes) out.notes.push_back(n);
+                            out.s7comm_has_function = s7.has_function;
+                            out.s7comm_function_name = s7.function_name;
                             constexpr size_t kMaxTags = 50;
-                            for (size_t i = 0; i < s7->items.size() && i < kMaxTags; ++i) {
-                                const auto& it = s7->items[i];
+                            for (size_t i = 0; i < s7.items.size() && i < kMaxTags; ++i) {
+                                const auto& it = s7.items[i];
                                 std::string display_tag = !it.tag.empty() ? it.tag : it.area_name;
                                 // A consumer parsing this array as trusted addresses must not mistake an
                                 // unverified reconstruction for the well-established S7ANY decode.
                                 if (it.is_experimental) display_tag += " [EXPERIMENTAL]";
                                 out.s7comm_item_tags.push_back(display_tag);
                             }
-                            for (size_t i = 0; i < s7->data_items.size() && i < kMaxTags; ++i) {
-                                const auto& di = s7->data_items[i];
+                            for (size_t i = 0; i < s7.data_items.size() && i < kMaxTags; ++i) {
+                                const auto& di = s7.data_items[i];
                                 // return_code_name is only set for items that carry a return code on
                                 // the wire (Read Var / Write Var responses); a Write Var request's
                                 // value item has none, so this falls straight through to the value.
@@ -2868,18 +2615,18 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                                     out.s7comm_value_summaries.push_back("");
                                 }
                             }
-                            out.s7comm_plc_stop_message = s7->plc_stop_message;
-                            out.s7comm_has_pi_service = s7->has_pi_service;
-                            out.s7comm_pi_service_name = s7->pi_service_name;
-                            out.s7comm_pi_service_description = s7->pi_service_description;
-                            out.s7comm_pi_control_argument = s7->pi_control_argument;
-                            for (size_t i = 0; i < s7->pi_control_blocks.size() && i < kMaxTags; ++i) {
-                                out.s7comm_pi_control_blocks.push_back(s7->pi_control_blocks[i]);
+                            out.s7comm_plc_stop_message = s7.plc_stop_message;
+                            out.s7comm_has_pi_service = s7.has_pi_service;
+                            out.s7comm_pi_service_name = s7.pi_service_name;
+                            out.s7comm_pi_service_description = s7.pi_service_description;
+                            out.s7comm_pi_control_argument = s7.pi_control_argument;
+                            for (size_t i = 0; i < s7.pi_control_blocks.size() && i < kMaxTags; ++i) {
+                                out.s7comm_pi_control_blocks.push_back(s7.pi_control_blocks[i]);
                             }
-                            out.s7comm_has_pi_control_status = s7->has_pi_control_status;
-                            out.s7comm_pi_control_has_more_data = s7->pi_control_has_more_data;
-                            out.s7comm_pi_control_has_error = s7->pi_control_has_error;
-                            for (const auto& n : cotp->notes) out.notes.push_back(n);
+                            out.s7comm_has_pi_control_status = s7.has_pi_control_status;
+                            out.s7comm_pi_control_has_more_data = s7.pi_control_has_more_data;
+                            out.s7comm_pi_control_has_error = s7.pi_control_has_error;
+                            for (const auto& n : cr.notes) out.notes.push_back(n);
                             annotate_port();
                             return out;
                         }
@@ -2893,42 +2640,44 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                     // conceptually "the same vendor's two generations", not because of any
                     // detection-strength ordering need -- see s7commplus.hpp).
                     if (want_s7commplus) {
-                        if (auto s7p = try_parse_s7comm_plus(s7_candidate)) {
+                        rider_ctx.protocol_id = "s7comm-plus";
+                        if (auto result = s7comm_plus_decoder().decode(cr.s7_candidate(), rider_ctx)) {
+                            const S7CommPlusFrame& s7p = result->as<S7CommPlusFrame>();
                             out.protocol = "s7comm-plus";
-                            out.summary = s7p->summary;
-                            for (const auto& n : s7p->notes) out.notes.push_back(n);
-                            out.s7plus_pdu_type_name = s7p->pdu_type_name;
-                            out.s7plus_is_keepalive = s7p->is_keepalive;
-                            out.s7plus_keepalive_seq = s7p->keepalive_seq;
-                            out.s7plus_has_opcode = s7p->has_data_part && !s7p->is_notification &&
-                                                     !s7p->opcode_name.empty();
-                            out.s7plus_opcode_name = s7p->opcode_name;
-                            out.s7plus_has_function = s7p->has_function;
-                            out.s7plus_function_code = s7p->function_code;
-                            out.s7plus_function_name = s7p->function_name;
-                            out.s7plus_has_sequence_number = s7p->has_sequence_number;
-                            out.s7plus_sequence_number = s7p->sequence_number;
-                            out.s7plus_has_session_id = s7p->has_session_id;
-                            out.s7plus_session_id = s7p->session_id;
-                            out.s7plus_body_decoded = s7p->body_decoded;
-                            out.s7plus_has_return_value = s7p->has_return_value;
-                            out.s7plus_return_code = s7p->return_code;
-                            out.s7plus_return_code_name = s7p->return_code_name;
+                            out.summary = s7p.summary;
+                            for (const auto& n : s7p.notes) out.notes.push_back(n);
+                            out.s7plus_pdu_type_name = s7p.pdu_type_name;
+                            out.s7plus_is_keepalive = s7p.is_keepalive;
+                            out.s7plus_keepalive_seq = s7p.keepalive_seq;
+                            out.s7plus_has_opcode = s7p.has_data_part && !s7p.is_notification &&
+                                                     !s7p.opcode_name.empty();
+                            out.s7plus_opcode_name = s7p.opcode_name;
+                            out.s7plus_has_function = s7p.has_function;
+                            out.s7plus_function_code = s7p.function_code;
+                            out.s7plus_function_name = s7p.function_name;
+                            out.s7plus_has_sequence_number = s7p.has_sequence_number;
+                            out.s7plus_sequence_number = s7p.sequence_number;
+                            out.s7plus_has_session_id = s7p.has_session_id;
+                            out.s7plus_session_id = s7p.session_id;
+                            out.s7plus_body_decoded = s7p.body_decoded;
+                            out.s7plus_has_return_value = s7p.has_return_value;
+                            out.s7plus_return_code = s7p.return_code;
+                            out.s7plus_return_code_name = s7p.return_code_name;
                             constexpr size_t kMaxTags = 50;
-                            for (size_t i = 0; i < s7p->item_addresses.size() && i < kMaxTags; ++i) {
-                                out.s7plus_item_tags.push_back(s7p->item_addresses[i].tag);
+                            for (size_t i = 0; i < s7p.item_addresses.size() && i < kMaxTags; ++i) {
+                                out.s7plus_item_tags.push_back(s7p.item_addresses[i].tag);
                             }
-                            for (size_t i = 0; i < s7p->id_values.size() && i < kMaxTags; ++i) {
-                                out.s7plus_value_summaries.push_back(s7p->id_values[i].rendered);
+                            for (size_t i = 0; i < s7p.id_values.size() && i < kMaxTags; ++i) {
+                                out.s7plus_value_summaries.push_back(s7p.id_values[i].rendered);
                             }
-                            for (size_t i = 0; i < s7p->item_errors.size() && i < kMaxTags; ++i) {
-                                out.s7plus_item_errors.push_back(s7p->item_errors[i].rendered);
+                            for (size_t i = 0; i < s7p.item_errors.size() && i < kMaxTags; ++i) {
+                                out.s7plus_item_errors.push_back(s7p.item_errors[i].rendered);
                             }
-                            out.s7plus_has_integrity = s7p->has_integrity;
-                            out.s7plus_integrity_digest_present = s7p->integrity_digest_present;
-                            out.s7plus_integrity_digest_length = s7p->integrity_digest_length;
-                            out.s7plus_has_trailer = s7p->has_trailer;
-                            for (const auto& n : cotp->notes) out.notes.push_back(n);
+                            out.s7plus_has_integrity = s7p.has_integrity;
+                            out.s7plus_integrity_digest_present = s7p.integrity_digest_present;
+                            out.s7plus_integrity_digest_length = s7p.integrity_digest_length;
+                            out.s7plus_has_trailer = s7p.has_trailer;
+                            for (const auto& n : cr.notes) out.notes.push_back(n);
                             annotate_port();
                             return out;
                         }
@@ -2939,41 +2688,43 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                     // protocol-id gate is tried first (above) since it is materially stronger and
                     // cheaper; this is only reached once that has already failed.
                     if (want_mms) {
-                        if (auto mms = try_parse_mms(s7_candidate)) {
+                        rider_ctx.protocol_id = "mms";
+                        if (auto result = mms_decoder().decode(cr.s7_candidate(), rider_ctx)) {
+                            const MmsFrame& mms = result->as<MmsFrame>();
                             out.protocol = "mms";
-                            out.summary = mms->summary;
-                            for (const auto& n : mms->notes) out.notes.push_back(n);
-                            out.mms_is_bare = mms->is_bare;
-                            out.mms_session_spdu_type = mms->session_spdu_type;
-                            out.mms_session_pdu_name = mms->session_pdu_name;
-                            out.mms_has_presentation = mms->has_presentation;
-                            out.mms_presentation_context_list = mms->presentation_context_list;
-                            out.mms_presentation_context_id = mms->presentation_context_id;
-                            out.mms_presentation_context_is_acse = mms->presentation_context_is_acse;
-                            out.mms_has_acse = mms->has_acse;
-                            out.mms_acse_pdu_name = mms->acse_pdu_name;
-                            out.mms_acse_application_context_name = mms->acse_application_context_name;
-                            out.mms_acse_has_result = mms->acse_has_result;
-                            out.mms_acse_result_name = mms->acse_result_name;
-                            out.mms_acse_values = mms->acse_values;
-                            out.mms_has_pdu = mms->has_pdu;
-                            out.mms_pdu_name = mms->pdu_name;
-                            out.mms_has_invoke_id = mms->has_invoke_id;
-                            out.mms_invoke_id = mms->invoke_id;
-                            out.mms_service_recognized = mms->service_recognized;
-                            out.mms_service_name = mms->service_name;
-                            out.mms_service_body_decoded = mms->service_body_decoded;
-                            out.mms_is_response = mms->is_response;
-                            out.mms_has_error = mms->has_error;
-                            out.mms_error_name = mms->error_name;
+                            out.summary = mms.summary;
+                            for (const auto& n : mms.notes) out.notes.push_back(n);
+                            out.mms_is_bare = mms.is_bare;
+                            out.mms_session_spdu_type = mms.session_spdu_type;
+                            out.mms_session_pdu_name = mms.session_pdu_name;
+                            out.mms_has_presentation = mms.has_presentation;
+                            out.mms_presentation_context_list = mms.presentation_context_list;
+                            out.mms_presentation_context_id = mms.presentation_context_id;
+                            out.mms_presentation_context_is_acse = mms.presentation_context_is_acse;
+                            out.mms_has_acse = mms.has_acse;
+                            out.mms_acse_pdu_name = mms.acse_pdu_name;
+                            out.mms_acse_application_context_name = mms.acse_application_context_name;
+                            out.mms_acse_has_result = mms.acse_has_result;
+                            out.mms_acse_result_name = mms.acse_result_name;
+                            out.mms_acse_values = mms.acse_values;
+                            out.mms_has_pdu = mms.has_pdu;
+                            out.mms_pdu_name = mms.pdu_name;
+                            out.mms_has_invoke_id = mms.has_invoke_id;
+                            out.mms_invoke_id = mms.invoke_id;
+                            out.mms_service_recognized = mms.service_recognized;
+                            out.mms_service_name = mms.service_name;
+                            out.mms_service_body_decoded = mms.service_body_decoded;
+                            out.mms_is_response = mms.is_response;
+                            out.mms_has_error = mms.has_error;
+                            out.mms_error_name = mms.error_name;
                             constexpr size_t kMaxMmsValues = 50;
-                            for (size_t i = 0; i < mms->values.size() && i < kMaxMmsValues; ++i) {
-                                out.mms_values.push_back(mms->values[i]);
+                            for (size_t i = 0; i < mms.values.size() && i < kMaxMmsValues; ++i) {
+                                out.mms_values.push_back(mms.values[i]);
                             }
-                            out.mms_body_shown_as_hex = mms->body_shown_as_hex;
-                            out.mms_body_hex = mms->body_hex;
-                            out.mms_body_length = mms->body_length;
-                            for (const auto& n : cotp->notes) out.notes.push_back(n);
+                            out.mms_body_shown_as_hex = mms.body_shown_as_hex;
+                            out.mms_body_hex = mms.body_hex;
+                            out.mms_body_length = mms.body_length;
+                            for (const auto& n : cr.notes) out.notes.push_back(n);
                             annotate_port();
                             return out;
                         }
@@ -2981,8 +2732,8 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                 }
 
                 out.protocol = "cotp";
-                out.summary = cotp->summary;
-                for (const auto& n : cotp->notes) out.notes.push_back(n);
+                out.summary = cr.frame.summary;
+                for (const auto& n : cr.notes) out.notes.push_back(n);
                 annotate_port();
                 return out;
             }

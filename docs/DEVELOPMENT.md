@@ -334,8 +334,110 @@ Discussed and adopted, in this order:
    interface remains there to introduce if/when a second protocol needs
    protocol-specific rendering of its own.
 
+   **Update: migration batch 2 under way.** With the pilot proven and
+   TwinCAT tested clean against real captures, Jurgen asked to keep
+   migrating -- prioritizing highest-traffic OT protocols, in individually-
+   verified stages. Research surfaced a real complication: S7comm,
+   S7comm-Plus, and MMS all share ONE transport layer (TPKT/COTP), so none
+   of the three could migrate independently without COTP itself moving
+   first. Jurgen chose to migrate COTP as shared plumbing plus all three
+   riders together rather than deferring the S7 family, so this batch grew
+   past the original "5-8 protocol" estimate -- flagged here rather than
+   silently expanding scope.
+
+   COTP/S7comm/S7comm-Plus/MMS are now done: `CotpDecoder` (`cotp.hpp`/
+   `cotp.cpp`) does TPKT/COTP framing and cross-packet TSDU-fragment
+   reassembly (the non-Data-abandons-reassembly and Data-frame EOT-chaining
+   logic that used to live directly in `decoder.cpp`'s COTP/S7comm-family
+   call site, reading/writing a bespoke `Decoder::cotp_reassembly_`
+   member -- both retired); `S7CommDecoder`/`S7CommPlusDecoder`/
+   `MmsDecoder` are thin wrappers around the existing `try_parse_s7comm`/
+   `try_parse_s7comm_plus`/`try_parse_mms`, all stateless. This required
+   one small, backward-compatible interface extension:
+   `DecodeContext::flow_state<T>()` previously keyed unconditionally on
+   `session_key` (right for Modbus's/TwinCAT's own request/response
+   pairing, which can legitimately be answered from either TCP direction);
+   COTP fragment reassembly is per-*direction*, not per-session, so a new
+   `FlowStateKeying` enum (`Session`/`DirectionalFlow`) and a
+   `flow_state<T>(FlowStateKeying)` overload were added -- every existing
+   caller keeps compiling unchanged via the original no-arg overload, which
+   now just defaults to `Session`. A new `GateKind::CotpPayload` was also
+   added for S7comm/S7comm-Plus/MMS's own gate shape (never gated against
+   raw TCP bytes directly, only ever invoked with bytes `CotpDecoder` has
+   already framed/reassembled) -- these three are registered in a new
+   `cotp_payload_registry()`, but unlike every other populated registry
+   vector this one is audit-trail data ONLY: `decoder.cpp`'s call site
+   still tries each of the three explicitly in the same fixed order (their
+   dual-write blocks differ too much to generalize into one loop without
+   real loss of clarity), rather than iterating it. `decoder.cpp`'s two
+   dispatch cascades (declared-length probe and full decode) both sit
+   exactly where the old `if (want_s7comm || want_mms || want_s7commplus)`
+   blocks always did. Verified: full CTest suite (1,197 tests, all
+   passing, no changed expectations) across all three established configs,
+   plus a manual JSON smoke-test over every existing S7comm/S7comm-Plus/
+   MMS/COTP fixture confirming correct reassembly/buffering/pairing
+   behavior end to end.
+
+   Also folded into this same pass, since S7comm/S7comm-Plus were already
+   being touched: Jurgen asked for TwinCAT's `[protocol]` text-output tag
+   (previously uncolored -- a pre-existing gap from when TwinCAT was built
+   on the renderer path, falling through to the generic dim default) to
+   use Beckhoff's own brand red, and S7comm's/S7comm-Plus's tags to use
+   Siemens' own official brand teal ("Viridian Green"/Petrol, `#009999`,
+   their brand color since 1991) instead of their previous plain blue/bold
+   magenta. `output.cpp`'s `protocol_tag_color()` picks every OTHER tag's
+   color purely for at-a-glance mixed-capture disambiguation, never for
+   brand-matching, so these three are a deliberate, narrowly-scoped
+   exception using 24-bit truecolor SGR escapes rather than the file's
+   usual 16-standard-ANSI-color convention -- MMS was deliberately left at
+   its existing bold blue (not requested, and it's a distinct IEC 61850
+   protocol, not one of Siemens' own S7 product line). `man/
+   conduitscope.1`'s and `docs/USER_GUIDE.md`'s own color-scheme
+   descriptions were updated to match.
+
+   DNP3 is also now done: `Dnp3Decoder` (`dnp3.hpp`/`dnp3.cpp`) reproduces
+   the existing same-TCP-payload multi-data-link-frame coalescing loop and
+   the cross-packet application-fragment reassembly that used to live
+   directly in `decoder.cpp`'s `if (want_dnp3)` call site and its
+   `Decoder::process_dnp3_frame` method (reading/writing a bespoke
+   `Decoder::dnp3_reassembly_` member -- both retired). This is the second,
+   independent use of the `FlowStateKeying::DirectionalFlow` extension COTP
+   needed first: DNP3's application-fragment reassembly is per-direction
+   for the same reason COTP's TSDU reassembly is (nothing stops a DNP3
+   session from having outstation->master and master->outstation fragments
+   in flight at once), reached via
+   `DecodeContext::flow_state<Dnp3ReassemblyState>(FlowStateKeying::DirectionalFlow)`.
+   No interface novelty beyond that -- `Dnp3Decoder::decode` gathers
+   everything the legacy call site dual-wrote into one `Dnp3Result`
+   (`dnp3.hpp`), so `decoder.cpp`'s own call site shrinks to gate, call,
+   dual-write, same as COTP's. `decoder.cpp`'s two dispatch cascades
+   (declared-length probe and full decode) both sit exactly where the old
+   `if (want_dnp3)` blocks always did -- immediately after TwinCAT, before
+   the COTP/S7comm family, matching the position `protocol_registry.cpp`'s
+   `tcp_port_independent_registry()` now also records it at. Verified: full
+   CTest suite (1,197 tests, all passing, no changed expectations) across
+   all three established configs, plus a manual JSON smoke-test over every
+   existing DNP3 fixture -- including the 181-packet and 198-packet real
+   captures (`dnp3_test_data_part1.pcap`, `dnp3_malformed.pcap`) -- confirming
+   correct transport/application decoding, fragment reassembly (begin/
+   abandon/complete), and graceful degradation on malformed input end to
+   end; no new fixtures were needed since the existing corpus (particularly
+   `sample_dnp3.pcap`'s packets 8-12) already exercises cross-packet
+   reassembly directly.
+
+   `GateKind::UdpPortIndependent` (the UDP-side mirror of
+   `TcpPortIndependent`, needed for BACnet/IP, HART-IP's UDP path, and
+   EtherNet/IP's own CIP I/O UDP path) was already added to the enum
+   alongside `CotpPayload` when COTP/S7comm landed, but remains unused by
+   any decoder until one of those three stages actually needs it.
+
+   Remaining in this batch, not yet started: IEC 104, OPC UA, EtherNet/IP
+   (TCP and UDP), HART-IP (TCP and UDP), BACnet/IP, MQTT.
+
    Still explicitly out of scope, not silently dropped: migrating the
-   remaining ~48 legacy protocols onto the new interface; migrating
+   remaining ~43 legacy protocols onto the new interface (down from ~48 at
+   the start of this batch, once IEC104/OPC UA/EtherNet-IP/HART-IP/BACnet/
+   MQTT above are also done); migrating
    `output.cpp`'s rendering for the three *pilot* protocols themselves
    (EIGRP/Modbus/GOOSE keep dual-writing into their flat fields, unlike
    TwinCAT); having the registry vectors in `protocol_registry.cpp`

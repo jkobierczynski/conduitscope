@@ -11,8 +11,8 @@
 // potentially arriving in its own separate TCP segment/packet) genuinely
 // needs state that outlives a single frame -- which flow it belongs to, the
 // bytes buffered so far, the next expected sequence number -- and that
-// state lives in Decoder (decoder.hpp/.cpp), not here: see
-// Decoder::process_dnp3_frame and its dnp3_reassembly_ member. This file
+// state lives in Dnp3Decoder (this file's own registration-model class,
+// migration batch 2 -- see Dnp3ReassemblyState/Dnp3Decoder below). This file
 // exposes the two pieces that state machine is built from:
 // try_parse_dnp3_link_layer (data link header), reassemble_dnp3_user_data
 // (per-frame block-CRC reassembly), and decode_dnp3_application_layer
@@ -21,8 +21,9 @@
 // convenience wrapper try_parse_dnp3_transport_and_application below uses
 // all three for the common case (a complete fragment in one data-link
 // frame) and, for the multi-frame case, only decodes the transport header
-// and stops -- it has no flow to buffer against, by design; only Decoder
-// does the cross-packet buffering. A single data-link frame that is itself
+// and stops -- it has no flow to buffer against, by design; only
+// Dnp3Decoder does the cross-packet buffering. A single data-link frame
+// that is itself
 // a complete fragment (FIR=1,FIN=1 -- the large majority of real traffic,
 // especially requests) gets full application-layer decoding: function code,
 // IIN (for responses), and every object header (group/variation/qualifier/
@@ -68,6 +69,7 @@
 #include <vector>
 
 #include "conduitscope/byteio.hpp"
+#include "conduitscope/protocol_decoder.hpp"
 
 namespace conduitscope {
 
@@ -278,10 +280,10 @@ struct Dnp3ApplicationFragment {
 //
 // This is the single-frame convenience path: for a fragment spanning more than one data-link
 // frame (transport_fir && !transport_fin), it decodes only the transport header and stops, same
-// as always -- it has no per-flow state to buffer the rest against. Decoder uses the two functions
-// above/below directly, with its own per-TCP-flow buffering, to reassemble and decode that case
-// (see decoder.hpp's Decoder::process_dnp3_frame) -- that is the only thing that actually performs
-// cross-packet reassembly in this codebase.
+// as always -- it has no per-flow state to buffer the rest against. Dnp3Decoder (below) uses the
+// two functions above/below directly, with its own per-TCP-flow buffering, to reassemble and
+// decode that case -- that is the only thing that actually performs cross-packet reassembly in
+// this codebase.
 std::optional<Dnp3ApplicationFragment> try_parse_dnp3_transport_and_application(Dnp3LinkFrame& link,
                                                                                  ByteSpan tcp_payload);
 
@@ -297,5 +299,79 @@ std::optional<Dnp3ApplicationFragment> try_parse_dnp3_transport_and_application(
 // transport header with nothing after it) by recording that in `frag.notes` and leaving
 // application_decoded false, same as every other malformed-application-layer case. Never throws.
 void decode_dnp3_application_layer(ByteSpan app_bytes, Dnp3ApplicationFragment& frag);
+
+// Migration batch 2 (see protocol_decoder.hpp/protocol_registry.hpp): cross-packet DNP3
+// application-fragment reassembly state for one directional TCP flow, replacing what used to live
+// as decoder.hpp's Dnp3FragmentReassembly struct / Decoder::dnp3_reassembly_ member. Reached via
+// DecodeContext::flow_state<Dnp3ReassemblyState>(FlowStateKeying::DirectionalFlow) -- directional,
+// not session-keyed, because each TCP direction reassembles its own fragment independently (see
+// FlowStateKeying's own comment in protocol_decoder.hpp for why that matters: nothing stops a DNP3
+// session from having client->outstation and outstation->client fragments in flight at once).
+class Dnp3ReassemblyState : public DecoderFlowState {
+public:
+    bool in_progress = false;
+    std::vector<uint8_t> buffered_app_bytes;  // concatenated post-transport-byte bytes so far
+    uint8_t last_seq = 0;                     // transport SEQ of the most recently buffered frame
+    size_t frame_count = 0;                   // data-link frames contributed so far
+};
+
+// Everything decoder.cpp's DNP3 call site dual-writes into DecodedPacket, gathered from however
+// many data-link frames were coalesced in one TCP payload (see Dnp3Decoder::decode below) --
+// mirrors exactly what the pre-migration call site computed locally before this batch. `summary`
+// and `notes` are the fully-assembled headline summary (data-link + first frame's application
+// layer) and note list, in the same order the legacy call site produced them; the four crc/address
+// fields reflect only the FIRST data-link frame found in the payload (same "first frame only"
+// convention DecodedPacket::dnp3_link_crc_valid's own comment documents), the object-header/point-
+// value lists are the same cumulative-across-every-frame-in-the-payload lists the legacy call site
+// built, capped at 50 entries each exactly as before.
+struct Dnp3Result {
+    std::string summary;
+    std::vector<std::string> notes;
+
+    bool dnp3_has_function = false;
+    std::string dnp3_function_name;
+    std::vector<std::string> dnp3_object_headers;
+    std::vector<std::string> dnp3_point_values;
+
+    bool link_crc_valid = false;
+    bool header_crc_valid = false;
+    size_t block_count = 0;
+    size_t block_crc_failures = 0;
+    uint16_t source_address = 0;
+    uint16_t destination_address = 0;
+};
+
+// id() == "dnp3", gate_kind() == TcpPortIndependent. Wraps try_parse_dnp3_link_layer plus ALL the
+// cross-packet fragment-reassembly logic that used to live in decoder.cpp's
+// Decoder::process_dnp3_frame (now removed) and the same-payload multi-frame-coalescing loop that
+// used to live directly in decoder.cpp's `if (want_dnp3)` call site -- both folded into decode()
+// below, so decoder.cpp's own call site is now just: gate, call, dual-write. Returns std::nullopt
+// exactly when try_parse_dnp3_link_layer itself would (payload doesn't start with a recognized
+// DNP3 data-link header) -- a link-layer-only control frame with no user data still returns a
+// result (matching the legacy call site's behavior: it always set out.protocol = "dnp3" once the
+// data-link header parsed, regardless of whether there was any user data above it).
+class Dnp3Decoder : public ProtocolDecoder {
+public:
+    std::string_view id() const override { return "dnp3"; }
+    GateKind gate_kind() const override { return GateKind::TcpPortIndependent; }
+    std::optional<size_t> tcp_declared_length(ByteSpan candidate) const override {
+        return dnp3_link_frame_declared_length(candidate);
+    }
+    std::optional<ProtocolResult> decode(ByteSpan payload, DecodeContext& ctx) const override;
+
+private:
+    // One data-link frame's transport header and, once its fragment is complete, application
+    // layer -- buffering across packets via ctx.flow_state<Dnp3ReassemblyState>(DirectionalFlow)
+    // when the fragment spans more than one data-link frame (transport FIR=1,FIN=0 on an earlier
+    // frame). Exact behavioral transplant of the removed Decoder::process_dnp3_frame -- see
+    // dnp3.cpp for the full reassembly state machine and its comments. Same nullopt contract as
+    // try_parse_dnp3_transport_and_application: only when link.user_data_bytes == 0. `link` is
+    // non-const: this is where link.block_count/block_crc_failures/crc_validated get their final
+    // values (see reassemble_dnp3_user_data/Dnp3LinkFrame's own comments above).
+    std::optional<Dnp3ApplicationFragment> process_frame(Dnp3LinkFrame& link, ByteSpan tcp_payload,
+                                                           DecodeContext& ctx) const;
+};
+
+const ProtocolDecoder& dnp3_decoder();
 
 }  // namespace conduitscope

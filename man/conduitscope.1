@@ -739,12 +739,20 @@ Applies to \fBdecode\fR's \fBtext\fR format only (not \fBjson\fR/\fBcsv\fR,
 and not \fBpolicy validate\fR's report, which stays plain text by design --
 it's meant to be diffed/archived/piped as an audit artifact). The
 \fB[protocol]\fR tag is colored per protocol: cyan for Modbus, magenta for
-DNP3, green for IEC 104, blue for S7comm/COTP, bold blue for MMS
-(deliberately close to S7comm's plain blue \-\- they share the same
-TPKT/COTP transport/port, bold distinguishes MMS at a glance), bold magenta
-for S7comm\-Plus (same reasoning \-\- shares the identical transport/port
-with S7comm and MMS, bold magenta keeps it visually distinct from both
-while still grouped with the S7 family), yellow for
+DNP3, green for IEC 104, blue for the generic recognized\-but\-not\-decoded
+COTP fallback (a TPKT/COTP frame that isn't S7comm/S7comm\-Plus/MMS
+underneath \-\- e.g. connection setup/teardown), Siemens' own official brand
+teal (\fB#009999\fR, "Viridian Green"/Petrol, Pantone 7716 C, RAL 5018,
+their brand color since 1991) for S7comm, the same teal but bold for
+S7comm\-Plus (the "same vendor's two generations" relationship this
+tool's color scheme already expressed between plain S7comm and bold MMS,
+just now with S7comm/S7comm\-Plus sharing the teal family instead), and
+bold blue for MMS (kept at its own established hue rather than following
+S7comm into teal \-\- MMS is a distinct IEC 61850 application protocol, not
+one of Siemens' own S7 product line, despite sharing S7comm's exact
+TPKT/COTP transport/port), Beckhoff's own brand red (\fB#E2001A\fR, a
+reasonable approximation \-\- no single authoritative digital hex value was
+found for it) for TwinCAT/ADS, yellow for
 EtherNet/IP,
 bright cyan for PROFINET RT, bright green for GOOSE, bright magenta for
 Sampled Values, bright yellow for EtherCAT, plain magenta for STP
@@ -777,6 +785,12 @@ Color is used only when writing directly to an interactive terminal by
 default \-\- never into a file via \fB\-o\fR, and never when piped. Force it
 on with \fB\-\-color\fR (e.g. to pipe into \fBless \-R\fR) or off with
 \fB\-\-no\-color\fR; the two are mutually exclusive.
+.PP
+Every tag color above is one of the 16 standard ANSI colors except S7comm's,
+S7comm\-Plus's, and TwinCAT/ADS's own teal/red, which use 24\-bit "truecolor"
+escape codes to match their vendors' actual brand colors -- a terminal
+without truecolor support may render these three as the nearest color it
+has, or not at all, rather than the intended hue.
 .SH EXIT STATUS
 .TP
 .B 0

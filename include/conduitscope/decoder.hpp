@@ -1319,30 +1319,23 @@ struct DecodedPacket {
     DirectionSource direction_source = DirectionSource::PortHeuristic;  // meaningful only when has_direction
 };
 
-// Cross-packet DNP3 fragment-reassembly state for one directional TCP flow (src ip:port -> dst
-// ip:port) -- see Decoder::dnp3_reassembly_ and Decoder::process_dnp3_frame. A DNP3 fragment can
-// span more than one data-link frame (transport FIR=1 on the first, FIN=1 on the last), and each
-// of those frames can arrive in its own separate TCP segment/packet -- reassembling that requires
-// remembering, per flow, the application-layer bytes buffered so far and the next sequence number
-// expected, across however many Decoder::decode() calls it takes for the rest to show up. Not
-// meant for use outside Decoder; exposed here only because it's a plain-data member type.
-struct Dnp3FragmentReassembly {
-    bool in_progress = false;
-    std::vector<uint8_t> buffered_app_bytes;  // concatenated post-transport-byte bytes so far
-    uint8_t last_seq = 0;                     // transport SEQ of the most recently buffered frame
-    size_t frame_count = 0;                   // data-link frames contributed so far
-};
+// Cross-packet DNP3 application-fragment reassembly state used to live here as
+// Dnp3FragmentReassembly/Decoder::dnp3_reassembly_/Decoder::process_dnp3_frame (a bespoke struct
+// and member dedicated to DNP3 alone). It's now Dnp3ReassemblyState/Dnp3Decoder in dnp3.hpp
+// (migration batch 2 -- see protocol_decoder.hpp/protocol_registry.hpp), reached generically
+// through Decoder::registry_flow_state_ below.
 
 // Generic per-directional-TCP-flow byte buffer for a Modbus MBAP message, a DNP3 data-link
 // frame, or a TPKT/COTP frame whose OWN declared length exceeds what has arrived in the TCP
 // segments seen so far for that flow -- see Decoder::tcp_reassembly_ and
-// Decoder::reassemble_tcp_payload. This is a different (and lower) layer than
-// Dnp3FragmentReassembly above: that one reassembles a DNP3 *application* fragment across several
-// already-complete data-link frames; this one reassembles a single PDU/frame's own bytes when one
-// TCP segment doesn't contain all of them. The two compose without conflict -- a data-link frame
-// can be completed here, across TCP segments, and then Decoder's existing frame-coalescing loop
-// and Dnp3FragmentReassembly both still operate on it exactly as before, since by the time they
-// run they're just looking at a complete (however it got assembled) buffer.
+// Decoder::reassemble_tcp_payload. This is a different (and lower) layer than DNP3's own
+// application-fragment reassembly (Dnp3ReassemblyState, dnp3.hpp): that one reassembles a DNP3
+// *application* fragment across several already-complete data-link frames; this one reassembles a
+// single PDU/frame's own bytes when one TCP segment doesn't contain all of them. The two compose
+// without conflict -- a data-link frame can be completed here, across TCP segments, and then
+// Decoder's existing frame-coalescing loop and Dnp3ReassemblyState both still operate on it
+// exactly as before, since by the time they run they're just looking at a complete (however it
+// got assembled) buffer.
 struct TcpFlowBuffer {
     bool active = false;
     std::vector<uint8_t> bytes;  // bytes buffered so far for the in-progress PDU/frame
@@ -1356,20 +1349,22 @@ struct TcpFlowBuffer {
 // Decoder::registry_flow_state_ below -- see protocol_decoder.hpp/protocol_registry.hpp for why
 // (registration-model decoder refactor, Stage 2 of the pilot).
 
-// Cross-packet COTP/S7comm reassembly state for one directional TCP flow -- see
-// Decoder::cotp_reassembly_ and Decoder::reassemble_cotp_data_frame. A single S7comm message can
-// be chained across more than one COTP Data (DT) frame when it doesn't fit the negotiated PDU
-// length: every DT frame but the last has EOT=0, and the last has EOT=1 (ISO 8073's own TSDU
-// fragmentation signal -- unlike DNP3, COTP has no separate FIR-equivalent bit, so "in_progress"
-// alone distinguishes a fresh start from a continuation). This is a different layer from
-// TcpFlowBuffer above: that one reassembles one TPKT/COTP frame's own bytes across TCP segments;
-// this one chains several already-complete TPKT/COTP frames' user data together into one logical
-// S7comm message.
-struct CotpFragmentReassembly {
-    bool in_progress = false;
-    std::vector<uint8_t> buffered_user_data;  // concatenated COTP Data frame user_data so far
-    size_t frame_count = 0;                    // complete TPKT/COTP DT frames contributed so far
-};
+// Cross-packet COTP/S7comm reassembly state used to live here as CotpFragmentReassembly/
+// Decoder::cotp_reassembly_/Decoder::reassemble_cotp_data_frame (a bespoke member dedicated to
+// COTP alone). It's now CotpReassemblyState/CotpDecoder in cotp.hpp (migration batch 2 -- see
+// protocol_decoder.hpp/protocol_registry.hpp), reached generically through
+// Decoder::registry_flow_state_ below via
+// DecodeContext::flow_state<CotpReassemblyState>(FlowStateKeying::DirectionalFlow), the same
+// generalization Stage 2 of the pilot already did for Decoder::modbus_pending_ above.
+
+// Cross-packet DNP3 application-fragment reassembly state used to live here as
+// Dnp3FragmentReassembly/Decoder::dnp3_reassembly_/Decoder::process_dnp3_frame (a bespoke member
+// dedicated to DNP3 alone). It's now Dnp3ReassemblyState/Dnp3Decoder in dnp3.hpp (migration batch
+// 2 -- see protocol_decoder.hpp/protocol_registry.hpp), reached generically through
+// Decoder::registry_flow_state_ below via
+// DecodeContext::flow_state<Dnp3ReassemblyState>(FlowStateKeying::DirectionalFlow) -- the same
+// generalization COTP above just went through, and Stage 2 of the pilot did for
+// Decoder::modbus_pending_ before that.
 
 class Decoder {
 public:
@@ -1381,40 +1376,33 @@ public:
     //
     // NOTE ON STATEFULNESS: this method is `const` in the sense that every DecodedPacket it
     // returns is still produced deterministically from (a) the packet passed in and (b) whatever
-    // DNP3 fragment-reassembly state (dnp3_reassembly_) earlier calls on THIS Decoder instance
-    // left behind -- it is not const/pure in the stronger sense of depending only on its
-    // arguments. That only means anything if packets are decoded through one Decoder instance, in
-    // strict capture-file order, one at a time -- which is exactly what cli_main.cpp does (a
-    // single Decoder per file-decode pass, one sequential while-loop, no concurrency). Decoding
-    // the same packet twice on a fresh Decoder, or out of order, will not reproduce reassembly
-    // that depended on packets decoded earlier in the file.
+    // cross-packet reassembly state (registry_flow_state_, tcp_reassembly_, ...) earlier calls on
+    // THIS Decoder instance left behind -- it is not const/pure in the stronger sense of depending
+    // only on its arguments. That only means anything if packets are decoded through one Decoder
+    // instance, in strict capture-file order, one at a time -- which is exactly what cli_main.cpp
+    // does (a single Decoder per file-decode pass, one sequential while-loop, no concurrency).
+    // Decoding the same packet twice on a fresh Decoder, or out of order, will not reproduce
+    // reassembly that depended on packets decoded earlier in the file.
     DecodedPacket decode(const PcapPacket& packet, uint32_t link_type, size_t index) const;
 
 private:
     DecodeOptions options_;
 
-    // See Dnp3FragmentReassembly above. Keyed by "src_ip:src_port->dst_ip:dst_port" (one entry
-    // per directional TCP flow that has ever carried an in-progress DNP3 fragment). `mutable`
+    // See TcpFlowBuffer above. Keyed by "src_ip:src_port->dst_ip:dst_port" (one entry per
+    // directional TCP flow that has ever needed cross-segment PDU/frame reassembly). `mutable`
     // because it is cross-packet state accumulated across decode() calls, not a function of the
     // current packet alone -- see the NOTE ON STATEFULNESS above for why that is safe here.
-    mutable std::unordered_map<std::string, Dnp3FragmentReassembly> dnp3_reassembly_;
-
-    // See TcpFlowBuffer above. Keyed the same way as dnp3_reassembly_ (same flow_key string, same
-    // map-per-flow shape; a separate map because the two track different layers and there's no
-    // reason to conflate them). `mutable` for the same reason as dnp3_reassembly_.
     mutable std::unordered_map<std::string, TcpFlowBuffer> tcp_reassembly_;
 
     // registration-model decoder refactor (see protocol_decoder.hpp/protocol_registry.hpp): one
     // generic per-migrated-protocol flow-state map, replacing what used to require a bespoke
     // Decoder member per stateful protocol (this generalizes the old Decoder::modbus_pending_,
-    // which is now ModbusFlowState, reached via DecodeContext::flow_state<T>() -- see modbus.hpp).
-    // Outer key is FlowStateMap's own protocol_id; `mutable` for the same reason as
-    // dnp3_reassembly_ above -- cross-packet state accumulated across decode() calls.
+    // which is now ModbusFlowState, reached via DecodeContext::flow_state<T>() -- see modbus.hpp;
+    // migration batch 2 generalized Decoder::cotp_reassembly_/Decoder::dnp3_reassembly_ into it
+    // the same way, via DecodeContext::flow_state<T>(FlowStateKeying::DirectionalFlow) -- see
+    // cotp.hpp/dnp3.hpp). Outer key is FlowStateMap's own protocol_id; `mutable` for the same
+    // reason as tcp_reassembly_ above -- cross-packet state accumulated across decode() calls.
     mutable FlowStateMap registry_flow_state_;
-
-    // See CotpFragmentReassembly above. Keyed by directional flow_key, same shape as
-    // dnp3_reassembly_/tcp_reassembly_. `mutable` for the same reason as dnp3_reassembly_.
-    mutable std::unordered_map<std::string, CotpFragmentReassembly> cotp_reassembly_;
 
     // MQTT protocol version (0=unknown, 4=v3.1.1, 5=v5.0) learned from a CONNECT packet seen
     // earlier on this TCP SESSION (both directions -- keyed the same way as modbus_pending_'s outer
@@ -1423,20 +1411,8 @@ private:
     // disambiguate the handful of MQTT packet types whose own wire shape is genuinely ambiguous
     // between v3.1.1 and v5 without it -- see mqtt.hpp's "Version disambiguation" section; every
     // other MQTT packet type is self-describing and never consults this map. `mutable` for the same
-    // reason as dnp3_reassembly_ above.
+    // reason as tcp_reassembly_ above.
     mutable std::unordered_map<std::string, uint8_t> mqtt_session_version_;
-
-    // Decodes one DNP3 data-link frame's transport header and, once its fragment is complete,
-    // application layer -- buffering across packets via dnp3_reassembly_[flow_key] when the
-    // fragment spans more than one data-link frame (transport FIR=1,FIN=0 on an earlier frame).
-    // `link`/`tcp_payload` are the same as try_parse_dnp3_transport_and_application's, which this
-    // supersedes as decoder.cpp's call site precisely because that function has no flow to buffer
-    // against. Same nullopt contract: only when link.user_data_bytes == 0. See dnp3.hpp for the
-    // reassemble_dnp3_user_data/decode_dnp3_application_layer primitives this is built from.
-    // `link` is non-const: this is where link.block_count/block_crc_failures/crc_validated get
-    // their final values (see reassemble_dnp3_user_data/Dnp3LinkFrame's own comments in dnp3.hpp).
-    std::optional<Dnp3ApplicationFragment> process_dnp3_frame(Dnp3LinkFrame& link, ByteSpan tcp_payload,
-                                                                const std::string& flow_key) const;
 
     // Determines the bytes protocol detection (Modbus/DNP3-link-layer/TPKT) should run against
     // for this packet: either `tcp.payload` unchanged, or a buffer combining it with bytes carried
@@ -1465,25 +1441,6 @@ private:
     // `effective_payload`'s use -- the caller keeps it alive as a same-scope local in decode().
     bool reassemble_tcp_payload(const TcpSegment& tcp, const std::string& flow_key, DecodedPacket& out,
                                  std::vector<uint8_t>& storage, ByteSpan& effective_payload) const;
-
-    // Determines the bytes S7comm detection should run against for a COTP Data (DT) frame `cotp`
-    // already parsed from this packet: either `cotp.user_data` unchanged (the common, fast path --
-    // this frame's own EOT=1 with nothing in progress, behaving exactly as before this feature
-    // existed) or the concatenation of this and every earlier buffered fragment's user data on this
-    // flow (EOT=1 completing a reassembly that an earlier EOT=0 frame began) -- see
-    // CotpFragmentReassembly/cotp_reassembly_ above for why EOT alone, not a FIR-equivalent bit, is
-    // what COTP gives us to detect a fresh start vs. a continuation.
-    //
-    // On true, `s7_candidate` is set to those bytes; `storage` backs it when concatenation was
-    // needed (an empty vector otherwise) and must outlive `s7_candidate`'s use -- the caller keeps
-    // it alive as a same-scope local in decode(), same contract as reassemble_tcp_payload.
-    //
-    // On false, `cotp.eot` is false: this frame's own bytes were buffered (or the flow's safety cap
-    // was hit and the in-progress reassembly abandoned) -- `out`'s protocol/summary have already
-    // been filled in (a "buffering..." or cap-abandonment report) and decode() must return `out`
-    // immediately without attempting S7comm/COTP-only output for it.
-    bool reassemble_cotp_data_frame(const CotpFrame& cotp, const std::string& flow_key, DecodedPacket& out,
-                                     std::vector<uint8_t>& storage, ByteSpan& s7_candidate) const;
 };
 
 }  // namespace conduitscope

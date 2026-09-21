@@ -49,11 +49,25 @@ namespace conduitscope {
 enum class GateKind {
     EtherType,          // e.g. GOOSE, SV, PROFINET, EtherCAT, STP, EAPOL, PPPoE, MPLS
     IpProtocol,          // e.g. ICMP, IGMP, VRRP, IGRP, PIM, EIGRP, OSPF -- gated by ip.protocol
-    TcpPortIndependent,  // e.g. OPC UA, EtherNet/IP, IEC104, Modbus, DNP3, S7comm family, HART-IP,
+    TcpPortIndependent,  // e.g. OPC UA, EtherNet/IP, IEC104, Modbus, DNP3, COTP, HART-IP,
                          // MQTT, FF-HSE -- tried opportunistically regardless of port, per
                          // docs/DEVELOPMENT.md's PROTOCOL DETECTION section
     UdpPort,             // e.g. DNS/mDNS/LLMNR/NBT-NS/HSRP/RIP -- the few protocols this codebase
                          // gates by port because they lack self-describing bytes of their own
+    // Migration batch 2 additions (see docs/DEVELOPMENT.md's "registration-model decoder refactor"
+    // entry for the batch this landed in):
+    UdpPortIndependent,  // the UDP-side mirror of TcpPortIndependent above -- e.g. BACnet/IP,
+                         // HART-IP's own UDP path, EtherNet/IP's own CIP I/O UDP path -- tried
+                         // opportunistically regardless of port, unlike UdpPort's own
+                         // gates-by-port-because-there's-no-self-describing-signal protocols.
+    CotpPayload,         // S7comm, S7comm-Plus, MMS -- NOT gated against raw TCP bytes at all.
+                         // Only ever invoked with the bytes a CotpDecoder (gate_kind() ==
+                         // TcpPortIndependent, see cotp.hpp) has already framed and cross-packet-
+                         // reassembled. A CotpPayload decoder is meaningless in isolation; it is
+                         // always reached through decoder.cpp's own COTP/S7comm-family call site,
+                         // never through a generic TcpPortIndependent iteration -- see
+                         // protocol_registry.hpp's cotp_payload_registry() for why this is its own
+                         // gate kind rather than being (mis)categorized as TcpPortIndependent.
 };
 
 // Base class for a protocol's own cross-packet state (Modbus's outstanding-transaction table,
@@ -63,6 +77,17 @@ class DecoderFlowState {
 public:
     virtual ~DecoderFlowState() = default;
 };
+
+// Migration batch 2 addition: which of DecodeContext's two keys (below) a stateful decoder's state
+// is scoped to. Session is right for request/response pairing that can legitimately be answered
+// from either direction of one TCP session (Modbus's transaction ID, TwinCAT's Invoke ID, MQTT's
+// learned protocol version -- every existing DecodeContext::flow_state<T>() caller before this
+// batch). DirectionalFlow is for state that is NOT session-wide -- COTP/TPKT fragment reassembly
+// and DNP3 application-fragment reassembly each reassemble ONE DIRECTION's bytes independently;
+// conflating both directions into one session-keyed buffer would corrupt reassembly the moment both
+// directions had an in-progress fragment at once (nothing stops a COTP session from having
+// client->server and server->client fragments in flight simultaneously).
+enum class FlowStateKeying { Session, DirectionalFlow };
 
 // Owned by Decoder (see decoder.hpp's Decoder::registry_flow_state_); one generic map replacing
 // what used to require a bespoke `unordered_map<...> x_pending_` member on Decoder for every
@@ -90,12 +115,18 @@ struct DecodeContext {
     // (e.g. ModbusDecoder), which alone knows T -- see modbus.cpp/twincat.cpp for the pattern this
     // replaces (a bespoke `Decoder::x_pending_[session_key]` lookup).
     template <typename T>
-    T& flow_state() const {
+    T& flow_state() const { return flow_state<T>(FlowStateKeying::Session); }
+
+    // Migration batch 2 addition: same lookup, but explicit about which key (see FlowStateKeying's
+    // own comment above) this decoder's state is scoped to.
+    template <typename T>
+    T& flow_state(FlowStateKeying keying) const {
         static_assert(std::is_base_of<DecoderFlowState, T>::value, "T must derive from DecoderFlowState");
+        const std::string& key = (keying == FlowStateKeying::Session) ? session_key : flow_key;
         auto& per_key = (*flow_states)[protocol_id];
-        auto it = per_key.find(session_key);
+        auto it = per_key.find(key);
         if (it == per_key.end()) {
-            it = per_key.emplace(session_key, std::make_unique<T>()).first;
+            it = per_key.emplace(key, std::make_unique<T>()).first;
         }
         return static_cast<T&>(*it->second);
     }

@@ -67,6 +67,7 @@
 #include <vector>
 
 #include "conduitscope/byteio.hpp"
+#include "conduitscope/protocol_decoder.hpp"
 
 namespace conduitscope {
 
@@ -228,5 +229,20 @@ std::vector<std::string> s7comm_known_function_names();
 // Once the protocol id is confirmed, a header that's too short to hold the fixed fields throws
 // ParseError rather than silently returning a partial result.
 std::optional<S7CommFrame> try_parse_s7comm(ByteSpan cotp_user_data);
+
+// registration-model migration batch 2 (see protocol_decoder.hpp/protocol_registry.hpp). Thin
+// ProtocolDecoder wrapper: detection+decode still goes through try_parse_s7comm above, unchanged --
+// S7comm is stateless (no request/response pairing across packets), so decode() needs no flow
+// state at all. gate_kind() is CotpPayload: this decoder is never gated against raw TCP bytes
+// itself, only ever invoked by decoder.cpp's COTP/S7comm-family call site with the bytes a
+// CotpDecoder (cotp.hpp) has already framed and cross-packet-reassembled.
+class S7CommDecoder : public ProtocolDecoder {
+public:
+    std::string_view id() const override { return "s7comm"; }
+    GateKind gate_kind() const override { return GateKind::CotpPayload; }
+    std::optional<ProtocolResult> decode(ByteSpan payload, DecodeContext& ctx) const override;
+};
+
+const ProtocolDecoder& s7comm_decoder();
 
 }  // namespace conduitscope

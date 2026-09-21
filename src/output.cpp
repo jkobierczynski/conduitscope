@@ -222,6 +222,29 @@ constexpr const char* kStrikeWhite = "\033[9;37m";
 // MPLS above each used when their own current dimension ran out.
 constexpr const char* kDimUnderlineCyan = "\033[2;4;36m";
 
+// TWO DELIBERATE EXCEPTIONS TO THIS FILE'S "16 standard ANSI colors only" CONVENTION, both from
+// migration batch 2: Jurgen asked for TwinCAT's and S7comm/S7comm-Plus's tags to match their real
+// vendors' actual brand colors (Beckhoff red, Siemens' official "Viridian Green"/Petrol teal),
+// which the 16-color palette above cannot reproduce. Every OTHER tag's color in this function is
+// picked purely for at-a-glance mixed-capture disambiguation, never for brand-matching -- these
+// three 24-bit truecolor SGR escapes (\033[38;2;r;g;bm) are used ONLY for the tags below that
+// specifically need an external hex value, not as a new general-purpose color dimension for future
+// protocols. A terminal without truecolor support may render these as the nearest color it has (or
+// ignore the escape) rather than the intended hue -- everywhere else in this file that's a non-
+// issue since the 16 standard colors are universally supported.
+constexpr const char* kBeckhoffRed = "\033[38;2;226;0;26m";   // #E2001A -- a reasonable, clearly-
+                                     // labeled approximation of Beckhoff's own brand/logo red; no
+                                     // single authoritative digital hex value was found for it,
+                                     // unlike Siemens' own color below
+constexpr const char* kSiemensTeal = "\033[38;2;0;153;153m";  // #009999 -- Siemens' own official
+                                     // brand color since 1991 ("Viridian Green"/Petrol, Pantone
+                                     // 7716 C, RAL 5018) -- confirmed via brandpalettes.com/
+                                     // siemens-colors and schemecolor.com/siemens-logo-colors.php
+constexpr const char* kSiemensTealBold = "\033[1;38;2;0;153;153m";  // s7comm-plus's own shade --
+                                     // mirrors the s7comm-plain/mms-bold weight convention this
+                                     // function already used to keep same-family tags visually
+                                     // distinguishable (see mms's own comment below)
+
 // Color for a packet's "[protocol]" tag -- picked so a mixed-protocol capture scans quickly by
 // eye, not for any deeper meaning. parse-error is the one exception: it gets the same "something
 // is wrong here" red as a Modbus exception response, rather than a plain identification color,
@@ -229,7 +252,12 @@ constexpr const char* kDimUnderlineCyan = "\033[2;4;36m";
 const char* protocol_tag_color(const std::string& protocol) {
     if (protocol == "modbus") return kCyan;
     if (protocol == "dnp3") return kMagenta;
-    if (protocol == "s7comm") return kBlue;
+    if (protocol == "s7comm") return kSiemensTeal;  // Siemens' own brand teal, per Jurgen's
+                                                       // request -- see kSiemensTeal's own comment
+                                                       // above. NOT extended to "cotp" below (the
+                                                       // family's generic recognized-but-not-S7comm
+                                                       // fallback tag), which was not part of that
+                                                       // request and stays plain blue.
     if (protocol == "cotp") return kBlue;  // recognized TPKT/COTP framing, no S7comm inside yet
     if (protocol == "iec104") return kGreen;
     if (protocol == "enip") return kYellow;
@@ -247,19 +275,29 @@ const char* protocol_tag_color(const std::string& protocol) {
     if (protocol == "bacnet") return kBrightBlue;
     if (protocol == "hartip") return kBrightWhite;
     if (protocol == "opcua") return kBrightRed;
-    if (protocol == "mms") return kBoldBlue;  // deliberately close to s7comm's plain blue -- they
-                                                // share the same TPKT/COTP transport/port, bold
-                                                // distinguishes MMS at a glance
-    if (protocol == "s7comm-plus") return kBoldMagenta;  // deliberately NOT a third shade of blue
-                                                            // alongside s7comm's plain blue/mms's
-                                                            // bold blue (despite sharing their
-                                                            // exact TPKT/COTP transport/port) --
-                                                            // S7comm-Plus is a wholly different,
-                                                            // independent application protocol
-                                                            // from classic S7comm (see
-                                                            // s7commplus.hpp), and bold magenta
-                                                            // stays visually distinct from DNP3's
-                                                            // own plain magenta too
+    if (protocol == "twincat") return kBeckhoffRed;  // Beckhoff's own brand red, per Jurgen's
+                                                        // request -- see kBeckhoffRed's own comment
+                                                        // above. Pre-existing gap fix: TwinCAT was
+                                                        // built on the registration-model
+                                                        // ProtocolDecoder/renderer path from the
+                                                        // start (see decoder.cpp's TwinCAT call
+                                                        // site) but never had a tag-color entry
+                                                        // here at all -- it silently fell through
+                                                        // to the generic kDim default below.
+    if (protocol == "mms") return kBoldBlue;  // kept at plain bold blue rather than following
+                                                // s7comm into the new Siemens-teal family below
+                                                // (not requested) -- MMS is a distinct IEC 61850
+                                                // application protocol, not one of Siemens' own S7
+                                                // product line, despite sharing their exact
+                                                // TPKT/COTP transport/port
+    if (protocol == "s7comm-plus") return kSiemensTealBold;  // Siemens' own brand teal, bold --
+                                                                // per Jurgen's request, the same
+                                                                // "same vendor's two generations"
+                                                                // relationship this function
+                                                                // already expressed between plain
+                                                                // s7comm and bold mms, just now
+                                                                // with s7comm/s7comm-plus sharing
+                                                                // the teal family instead
     if (protocol == "mqtt") return kBoldCyan;  // bold, vs. Modbus's plain cyan -- deliberately
                                                  // distinct from every other tag color, no shared
                                                  // transport/port with any other decoded protocol

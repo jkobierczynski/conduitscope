@@ -1696,12 +1696,18 @@ always shown too, never replaced:
 #### Color
 
 The `[protocol]` tag is colored per protocol (so a mixed-protocol capture
-scans quickly by eye): cyan for Modbus, magenta for DNP3, blue for S7comm and
-COTP-without-S7comm, green for IEC 104, yellow for EtherNet/IP, bright cyan
-for PROFINET RT, bright green for GOOSE, bright magenta for Sampled Values,
-bright yellow for EtherCAT, bright blue for BACnet/IP, bright white for
-HART-IP, dim for everything else recognized
-but not OT-specific (`tcp`/`udp`/`non-tcp`/`non-ip`/`unsupported-link`). A Modbus
+scans quickly by eye): cyan for Modbus, magenta for DNP3, Siemens' own brand
+teal for S7comm (and the same teal, bold, for S7comm-Plus), blue for
+COTP-without-S7comm-underneath and bold blue for MMS, green for IEC 104,
+yellow for EtherNet/IP, bright cyan for PROFINET RT, bright green for GOOSE,
+bright magenta for Sampled Values, bright yellow for EtherCAT, bright blue
+for BACnet/IP, bright white for HART-IP, Beckhoff's own brand red for
+TwinCAT/ADS, dim for everything else recognized
+but not OT-specific (`tcp`/`udp`/`non-tcp`/`non-ip`/`unsupported-link`). S7comm's,
+S7comm-Plus's, and TwinCAT/ADS's colors are 24-bit truecolor matching their
+vendors' actual brand hues, rather than one of the other 16 standard ANSI
+colors every other tag above uses -- see `man/conduitscope.1`'s COLORIZED
+OUTPUT section for the full color list and each choice's rationale. A Modbus
 exception response's summary, and a `parse-error` packet's entire line, are
 bold red -- both mean "look at this one" over everything else in a long
 decode. Notes are printed dim. The head line's trailing `(client ... -- ...)`

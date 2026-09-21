@@ -163,4 +163,99 @@ std::optional<CotpFrame> try_parse_tpkt_cotp(ByteSpan tcp_payload) {
     return frame;
 }
 
+std::optional<ProtocolResult> CotpDecoder::decode(ByteSpan payload, DecodeContext& ctx) const {
+    auto cotp = try_parse_tpkt_cotp(payload);
+    if (!cotp) return std::nullopt;
+
+    CotpDecodeResult result;
+    result.frame = *cotp;
+
+    if (cotp->kind != CotpPduKind::Data) {
+        // A non-Data COTP frame (connection setup/teardown) on this flow means any COTP/S7comm
+        // fragment reassembly still in progress here is stale -- the continuation it was waiting
+        // for will never come from this frame, and a new session/teardown starting means whatever
+        // was buffered no longer applies. Same logic decoder.cpp's own call site used to run
+        // directly against Decoder::cotp_reassembly_ before this migration.
+        CotpReassemblyState& state = ctx.flow_state<CotpReassemblyState>(FlowStateKeying::DirectionalFlow);
+        if (state.in_progress) {
+            result.notes.push_back(
+                "a " + cotp->pdu_type_name + " frame arrived on this TCP flow while a "
+                "COTP/S7comm fragment reassembly was still in progress (" +
+                std::to_string(state.buffered_user_data.size()) + " byte(s) buffered across " +
+                std::to_string(state.frame_count) +
+                " frame(s)) -- the earlier, incomplete fragment is abandoned");
+            state = CotpReassemblyState{};
+        }
+        for (const auto& n : cotp->notes) result.notes.push_back(n);
+        return ProtocolResult::make<CotpDecodeResult>("cotp", std::move(result));
+    }
+
+    // Data (DT) frame.
+    CotpReassemblyState& state = ctx.flow_state<CotpReassemblyState>(FlowStateKeying::DirectionalFlow);
+
+    if (!cotp->eot) {
+        // Begins or continues a TSDU fragmented across multiple complete TPKT/COTP frames -- buffer
+        // this frame's user data and wait for the final (EOT=1) frame.
+        bool starting = !state.in_progress;
+        state.in_progress = true;
+        state.buffered_user_data.insert(state.buffered_user_data.end(), cotp->user_data.data(),
+                                         cotp->user_data.data() + cotp->user_data.size());
+        ++state.frame_count;
+
+        // Safety caps against a pathological/malformed capture stalling a fragment open forever --
+        // sized generously above real S7 block-transfer scenarios (large DB/program-block
+        // uploads/downloads), which is what genuine multi-frame chaining is for. Same values as the
+        // pre-migration Decoder::reassemble_cotp_data_frame.
+        constexpr size_t kMaxBufferedBytes = 1 << 20;  // 1 MiB
+        constexpr size_t kMaxFramesPerFragment = 2000;
+        if (state.buffered_user_data.size() > kMaxBufferedBytes || state.frame_count > kMaxFramesPerFragment) {
+            result.still_buffering = true;
+            result.buffering_summary =
+                "COTP/S7comm fragment reassembly on this TCP flow exceeded its safety cap (" +
+                std::to_string(state.buffered_user_data.size()) + " byte(s) across " +
+                std::to_string(state.frame_count) + " frame(s)) -- abandoning it";
+            state = CotpReassemblyState{};
+            for (const auto& n : cotp->notes) result.notes.push_back(n);
+            return ProtocolResult::make<CotpDecodeResult>("cotp", std::move(result));
+        }
+
+        result.still_buffering = true;
+        std::ostringstream s;
+        s << (starting ? "beginning" : "continuing")
+          << " a COTP/S7comm message fragmented across multiple complete TPKT/COTP frames on this TCP "
+             "flow (EOT=0): "
+          << state.buffered_user_data.size() << " user-data byte(s) buffered across " << state.frame_count
+          << " frame(s) so far, waiting for the final (EOT=1) frame";
+        result.buffering_summary = s.str();
+        for (const auto& n : cotp->notes) result.notes.push_back(n);
+        return ProtocolResult::make<CotpDecodeResult>("cotp", std::move(result));
+    }
+
+    // cotp->eot: this frame completes a TSDU -- either the common case (nothing was in progress, so
+    // this frame's own user data IS the whole message, exactly as before this feature existed) or
+    // the final fragment of a reassembly that began on an earlier frame on this flow.
+    if (!state.in_progress) {
+        for (const auto& n : cotp->notes) result.notes.push_back(n);
+        return ProtocolResult::make<CotpDecodeResult>("cotp", std::move(result));
+    }
+
+    result.s7_candidate_storage = state.buffered_user_data;
+    result.s7_candidate_storage.insert(result.s7_candidate_storage.end(), cotp->user_data.data(),
+                                        cotp->user_data.data() + cotp->user_data.size());
+    result.s7_candidate_from_storage = true;
+    size_t total_frames = state.frame_count + 1;
+    result.notes.push_back("reassembled a COTP/S7comm message from " +
+                            std::to_string(result.s7_candidate_storage.size()) +
+                            " user-data byte(s) chained across " + std::to_string(total_frames) +
+                            " complete TPKT/COTP frames on this TCP flow (EOT=0 on all but the last)");
+    state = CotpReassemblyState{};
+    for (const auto& n : cotp->notes) result.notes.push_back(n);
+    return ProtocolResult::make<CotpDecodeResult>("cotp", std::move(result));
+}
+
+const ProtocolDecoder& cotp_decoder() {
+    static const CotpDecoder instance;
+    return instance;
+}
+
 }  // namespace conduitscope

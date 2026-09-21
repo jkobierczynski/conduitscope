@@ -925,4 +925,15 @@ std::optional<S7CommPlusFrame> try_parse_s7comm_plus(ByteSpan data) {
     return frame;
 }
 
+std::optional<ProtocolResult> S7CommPlusDecoder::decode(ByteSpan payload, DecodeContext& /*ctx*/) const {
+    auto parsed = try_parse_s7comm_plus(payload);
+    if (!parsed) return std::nullopt;
+    return ProtocolResult::make<S7CommPlusFrame>("s7comm-plus", std::move(*parsed));
+}
+
+const ProtocolDecoder& s7comm_plus_decoder() {
+    static const S7CommPlusDecoder instance;
+    return instance;
+}
+
 }  // namespace conduitscope

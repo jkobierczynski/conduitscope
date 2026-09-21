@@ -8,14 +8,15 @@
 // Unlike fuzz_dnp3/fuzz_cotp_s7comm/fuzz_mqtt (which call one protocol's standalone parser
 // directly on a single buffer), this harness feeds a *sequence* of packets, extracted from one
 // fuzzer input, to ONE Decoder instance in order -- because reassemble_tcp_payload,
-// process_dnp3_frame (Decoder::dnp3_reassembly_), reassemble_cotp_data_frame
-// (Decoder::cotp_reassembly_), pair_modbus_transaction (Decoder::modbus_pending_), and MQTT's
-// session-version hint (Decoder::mqtt_session_version_) are ALL cross-packet, per-flow state that
-// only misbehaves across more than one decode() call on the same flow -- a single-packet fuzz
-// input structurally cannot reach most of what this method exists to protect. Every packet here
-// carries the same synthetic source/destination so they land in the same directional flow (see
-// below), maximizing the chance consecutive extracted packets actually exercise that shared
-// state rather than each starting a fresh, unrelated flow.
+// Dnp3Decoder::process_frame (DecodeContext::flow_state<Dnp3ReassemblyState>, dnp3.hpp),
+// CotpDecoder::decode (DecodeContext::flow_state<CotpReassemblyState>, cotp.hpp),
+// ModbusDecoder::decode's transaction pairing (DecodeContext::flow_state<ModbusFlowState>,
+// modbus.hpp), and MQTT's session-version hint (Decoder::mqtt_session_version_) are ALL
+// cross-packet, per-flow state that only misbehaves across more than one decode() call on the
+// same flow -- a single-packet fuzz input structurally cannot reach most of what this method
+// exists to protect. Every packet here carries the same synthetic source/destination so they
+// land in the same directional flow (see below), maximizing the chance consecutive extracted
+// packets actually exercise that shared state rather than each starting a fresh, unrelated flow.
 //
 // Input framing (deliberately simple/fast to parse so libFuzzer's own mutations remain the
 // bottleneck, not this harness): a sequence of records, each a 2-byte little-endian length N

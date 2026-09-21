@@ -1851,4 +1851,15 @@ std::optional<MmsFrame> try_parse_mms(ByteSpan cotp_user_data) {
     return frame;
 }
 
+std::optional<ProtocolResult> MmsDecoder::decode(ByteSpan payload, DecodeContext& /*ctx*/) const {
+    auto parsed = try_parse_mms(payload);
+    if (!parsed) return std::nullopt;
+    return ProtocolResult::make<MmsFrame>("mms", std::move(*parsed));
+}
+
+const ProtocolDecoder& mms_decoder() {
+    static const MmsDecoder instance;
+    return instance;
+}
+
 }  // namespace conduitscope

@@ -55,6 +55,14 @@ transport/application-layer byte count), plus the header CRC-16, which is
 now genuinely calculated and validated against the on-the-wire value (see
 "Data-link CRC-16 validation" below).
 
+**Migration batch 2**: built on the registration-model `ProtocolDecoder` interface (`Dnp3Decoder`,
+`dnp3.hpp`/`dnp3.cpp`) -- see `docs/DEVELOPMENT.md`'s "registration-model decoder refactor" entry.
+Detection/decode logic and output are unchanged (still dual-writing into this same `DecodedPacket`
+struct, same same-TCP-payload multi-frame coalescing, same cross-packet application-fragment
+reassembly); this is an internal dispatch/state-management change only -- the reassembly state
+that used to live as `Decoder::dnp3_reassembly_` is now `Dnp3ReassemblyState`, reached via
+`DecodeContext::flow_state<Dnp3ReassemblyState>(FlowStateKeying::DirectionalFlow)`.
+
 On top of the data link layer, conduitscope reassembles the user data (data
 link frames split it into <=16-byte blocks, each with its own CRC-16, now
 also genuinely calculated and validated per block, not just located and
@@ -253,8 +261,14 @@ TSAP session-setup parameters rather than S7comm itself -- the calling and
 called TSAP values. A packet that parses at this level but doesn't turn out
 to carry S7comm is reported as protocol `cotp` rather than `s7comm`.
 
+**Migration batch 2**: TPKT/COTP framing (`CotpDecoder`, `cotp.hpp`/`cotp.cpp`) and S7comm/
+S7comm-Plus/MMS themselves (`S7CommDecoder`/`S7CommPlusDecoder`/`MmsDecoder`) are now built on the
+registration-model `ProtocolDecoder` interface -- see `docs/DEVELOPMENT.md`'s "registration-model
+decoder refactor" entry. Detection/decode logic and output are unchanged (still dual-writing into
+this same `DecodedPacket` struct); this is an internal dispatch/state-management change only.
+
 A COTP Data (DT) frame's own EOT (end-of-TSDU) bit is also tracked per TCP
-flow (`Decoder::reassemble_cotp_data_frame`, `decoder.cpp`): a single S7comm
+flow (`CotpDecoder::decode`, `cotp.cpp`): a single S7comm
 message that doesn't fit one negotiated PDU length gets chained across
 several *complete* TPKT/COTP frames -- every frame but the last has EOT=0,
 the last has EOT=1 -- and this decoder concatenates their user data into one
@@ -419,6 +433,11 @@ authoritative transaction-ID pairing (see docs/DEVELOPMENT.md's PROTOCOL DETECTI
 request/response session, not just the synthetic fixtures.
 
 ### S7comm-Plus (Siemens TIA Portal / S7-1200/1500's newer protocol, TCP port 102, shares TPKT/COTP transport with S7comm)
+
+**Migration batch 2**: built on the registration-model `ProtocolDecoder` interface
+(`S7CommPlusDecoder`, `s7commplus.hpp`/`s7commplus.cpp`) -- see the S7comm/COTP section above and
+`docs/DEVELOPMENT.md`'s "registration-model decoder refactor" entry. Detection/decode logic and
+output are unchanged.
 
 S7comm-Plus rides inside a COTP Data (DT) frame's user data -- the SAME
 TCP port 102, TPKT/COTP transport classic S7comm and MMS share -- but it is
@@ -625,6 +644,10 @@ truncated-frame length calculation (`data.size() - kHeaderLen` when
 `available_after_header`/`data_take` pattern used elsewhere in `s7comm.cpp`).
 
 ### IEC 61850 MMS (Manufacturing Message Specification, ISO 9506, TCP port 102, shares TPKT/COTP transport with S7comm)
+
+**Migration batch 2**: built on the registration-model `ProtocolDecoder` interface (`MmsDecoder`,
+`mms.hpp`/`mms.cpp`) -- see the S7comm/COTP section above and `docs/DEVELOPMENT.md`'s
+"registration-model decoder refactor" entry. Detection/decode logic and output are unchanged.
 
 MMS always rides inside a COTP Data (DT) frame's own user data on TCP port
 102 -- the SAME transport and port S7comm uses -- but it is not S7comm: it

@@ -11,8 +11,8 @@
 // exactly the bytes a TCP payload would contain. This is deliberately narrower than
 // fuzz_packet_decode: it reaches DNP3's own parsing logic in far fewer libFuzzer iterations
 // because no unrelated Ethernet/IP/TCP header bytes need to happen to parse first. It does not
-// cover cross-packet fragment reassembly (Decoder::process_dnp3_frame / dnp3_reassembly_, which
-// require a live Decoder and flow key) -- that multi-packet path is covered by
+// cover cross-packet fragment reassembly (Dnp3Decoder::process_frame / Dnp3ReassemblyState, which
+// require a live DecodeContext and flow key) -- that multi-packet path is covered by
 // fuzz_packet_decode instead.
 #include <cstdint>
 #include <cstddef>

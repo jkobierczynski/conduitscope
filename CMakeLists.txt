@@ -417,8 +417,10 @@ set_tests_properties(dnp3_coalesced_frames_merged_in_json PROPERTIES
 # --------------------------------------------------------------------------
 # Cross-packet DNP3 fragment reassembly (packets 8-12 of sample_dnp3.pcap): a fragment split
 # across multiple data-link frames arriving in SEPARATE TCP segments/pcap packets, requiring the
-# per-TCP-flow state Decoder::process_dnp3_frame maintains across decode() calls -- distinct from
-# the same-TCP-payload frame coalescing (Problem A) tested above.
+# per-TCP-flow state Dnp3Decoder::process_frame maintains (via
+# DecodeContext::flow_state<Dnp3ReassemblyState>(FlowStateKeying::DirectionalFlow), migration
+# batch 2 -- see dnp3.hpp) across decode() calls -- distinct from the same-TCP-payload frame
+# coalescing (Problem A) tested above.
 # --------------------------------------------------------------------------
 
 # The FIR=1,FIN=0 starting frame (packet 8) must show only its own transport header -- nothing
@@ -554,8 +556,8 @@ set_tests_properties(real_dnp3_read_link_crc_valid PROPERTIES
 
 # Same, but for a link-layer-only control frame (Request Link Status carries no user data) --
 # regression guard for the "no user data" path specifically, since that's the one case where
-# process_dnp3_frame is never called at all (see decoder.cpp) and the crc fields must still be
-# populated correctly from try_parse_dnp3_link_layer alone.
+# Dnp3Decoder::process_frame is never called at all (see dnp3.cpp) and the crc fields must still
+# be populated correctly from try_parse_dnp3_link_layer alone.
 add_test(NAME real_dnp3_request_link_status_crc_valid_with_no_user_data
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/dnp3/dnp3_request_link_status.pcap" --format json)
 set_tests_properties(real_dnp3_request_link_status_crc_valid_with_no_user_data PROPERTIES

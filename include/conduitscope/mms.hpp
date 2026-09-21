@@ -331,6 +331,7 @@
 #include <vector>
 
 #include "conduitscope/byteio.hpp"
+#include "conduitscope/protocol_decoder.hpp"
 
 namespace conduitscope {
 
@@ -406,5 +407,20 @@ struct MmsFrame {
 // claims throws ParseError rather than silently returning a partial result, the same posture
 // every other parser in this codebase takes.
 std::optional<MmsFrame> try_parse_mms(ByteSpan cotp_user_data);
+
+// registration-model migration batch 2 (see protocol_decoder.hpp/protocol_registry.hpp). Thin
+// ProtocolDecoder wrapper: detection+decode still goes through try_parse_mms above, unchanged --
+// MMS is stateless, so decode() needs no flow state at all. gate_kind() is CotpPayload: this
+// decoder is never gated against raw TCP bytes itself, only ever invoked by decoder.cpp's
+// COTP/S7comm-family call site with the bytes a CotpDecoder (cotp.hpp) has already framed and
+// cross-packet-reassembled.
+class MmsDecoder : public ProtocolDecoder {
+public:
+    std::string_view id() const override { return "mms"; }
+    GateKind gate_kind() const override { return GateKind::CotpPayload; }
+    std::optional<ProtocolResult> decode(ByteSpan payload, DecodeContext& ctx) const override;
+};
+
+const ProtocolDecoder& mms_decoder();
 
 }  // namespace conduitscope

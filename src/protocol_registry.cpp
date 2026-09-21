@@ -1,9 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "conduitscope/protocol_registry.hpp"
 
+#include "conduitscope/cotp.hpp"
+#include "conduitscope/dnp3.hpp"
 #include "conduitscope/eigrp.hpp"
 #include "conduitscope/goose.hpp"
+#include "conduitscope/mms.hpp"
 #include "conduitscope/modbus.hpp"
+#include "conduitscope/s7comm.hpp"
+#include "conduitscope/s7commplus.hpp"
 #include "conduitscope/twincat.hpp"
 
 namespace conduitscope {
@@ -42,12 +47,44 @@ const std::vector<const ProtocolDecoder*>& tcp_port_independent_registry() {
                               // multi-field State-Flags/Command-ID/Data-Length gate is stronger
                               // than Modbus's single protocol-id==0 tell, so trying it right after
                               // Modbus costs nothing and cannot be weakened by anything below it).
+        &dnp3_decoder(),     // Migration batch 2 -- sits exactly where the old `if (want_dnp3)`
+                              // block always did: after Modbus/TwinCAT (both above), before the
+                              // COTP/S7comm family below (also still true after COTP's own
+                              // migration in this same batch). No ordering rationale beyond
+                              // position preservation -- DNP3's data-link magic bytes (0x05 0x64)
+                              // don't collide with anything else in this cascade.
+        &cotp_decoder(),     // Migration batch 2 -- sits exactly where the old, single
+                              // `if (want_s7comm || want_mms || want_s7commplus)` block always did:
+                              // after DNP3 (migrated above, in this same batch), before HART-IP/
+                              // MQTT/FF-HSE (still legacy). See decoder.cpp's own call site
+                              // comment for the RDP CR/CC carve-out this position sits right after.
     };
     return order;
 }
 
 const std::vector<const ProtocolDecoder*>& udp_port_registry() {
     static const std::vector<const ProtocolDecoder*> order = {};
+    return order;
+}
+
+const std::vector<const ProtocolDecoder*>& udp_port_independent_registry() {
+    static const std::vector<const ProtocolDecoder*> order = {};
+    return order;
+}
+
+const std::vector<const ProtocolDecoder*>& cotp_payload_registry() {
+    static const std::vector<const ProtocolDecoder*> order = {
+        &s7comm_decoder(),       // Tried first -- classic S7comm's own protocol-id byte (0x32) is
+                                   // this whole family's strongest, cheapest single-byte gate.
+        &s7comm_plus_decoder(),  // Tried next, purely for file-organization reasons (S7comm and
+                                   // S7comm-Plus are conceptually "the same vendor's two
+                                   // generations") -- disambiguated from S7comm by its own,
+                                   // different protocol-id byte (0x72), so there is no detection-
+                                   // strength reason it couldn't run first instead.
+        &mms_decoder(),          // Tried last -- S7comm's single-byte protocol-id gate is tried
+                                   // first since it is materially stronger and cheaper; this is
+                                   // only reached once that (and S7comm-Plus's) has already failed.
+    };
     return order;
 }
 

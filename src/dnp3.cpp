@@ -690,8 +690,8 @@ std::optional<Dnp3ApplicationFragment> try_parse_dnp3_transport_and_application(
             " FIN=" + std::to_string(frag.transport_fin ? 1 : 0) +
             " -- it is not a complete single-data-link-frame fragment, and this single-frame "
             "convenience function does not itself buffer bytes across packets, so the application "
-            "layer is not decoded here; Decoder does perform that cross-packet reassembly (see "
-            "Decoder::process_dnp3_frame in decoder.hpp) and is what the CLI actually uses");
+            "layer is not decoded here; Dnp3Decoder does perform that cross-packet reassembly (see "
+            "Dnp3Decoder::process_frame in dnp3.hpp) and is what the CLI actually uses");
         frag.summary = summary.str();
         return frag;
     }
@@ -1016,6 +1016,276 @@ void decode_dnp3_application_layer(ByteSpan app_bytes, Dnp3ApplicationFragment& 
     }
 
     frag.summary = summary.str();
+}
+
+// --- Migration batch 2: Dnp3Decoder (registration-model interface) ---------------------------
+//
+// process_frame below is an exact behavioral transplant of the removed Decoder::process_dnp3_frame
+// (decoder.cpp), with dnp3_reassembly_[flow_key] replaced by
+// ctx.flow_state<Dnp3ReassemblyState>(FlowStateKeying::DirectionalFlow) -- same state shape, same
+// state machine, same notes wording, just reached generically instead of through a Decoder member
+// dedicated to DNP3 alone.
+std::optional<Dnp3ApplicationFragment> Dnp3Decoder::process_frame(Dnp3LinkFrame& link, ByteSpan tcp_payload,
+                                                                    DecodeContext& ctx) const {
+    if (link.user_data_bytes == 0) {
+        return std::nullopt;
+    }
+
+    Dnp3ApplicationFragment frag;
+    std::vector<uint8_t> logical = reassemble_dnp3_user_data(link, tcp_payload, frag.notes);
+
+    if (logical.empty()) {
+        frag.notes.push_back("no transport-layer byte could be recovered for this fragment");
+        frag.summary = "transport/application layer not decoded (no data recovered)";
+        return frag;
+    }
+
+    // --- Transport header: 1 byte, bit7=FIR, bit6=FIN, bits5-0=SEQ. Same as
+    // try_parse_dnp3_transport_and_application; the difference starts below, in what happens for
+    // a fragment that isn't complete in this one data-link frame. ---
+    uint8_t transport_byte = logical[0];
+    frag.has_transport = true;
+    frag.transport_fir = (transport_byte & 0x80) != 0;
+    frag.transport_fin = (transport_byte & 0x40) != 0;
+    frag.transport_seq = transport_byte & 0x3F;
+
+    std::ostringstream summary;
+    summary << "transport: FIR=" << (frag.transport_fir ? 1 : 0) << " FIN=" << (frag.transport_fin ? 1 : 0)
+            << " SEQ=" << static_cast<unsigned>(frag.transport_seq);
+
+    ByteSpan app_bytes_this_frame =
+        logical.size() > 1 ? ByteSpan(logical.data() + 1, logical.size() - 1) : ByteSpan();
+    Dnp3ReassemblyState& state = ctx.flow_state<Dnp3ReassemblyState>(FlowStateKeying::DirectionalFlow);
+
+    if (frag.transport_fir && frag.transport_fin) {
+        // Complete, single-data-link-frame fragment -- the large majority of real traffic. Any
+        // reassembly left in progress for this flow is now stale (its FIN=1 will never come from
+        // the frame that was supposed to send it -- a fragment that arrived complete on its own
+        // took its place instead), so it's abandoned with a note rather than silently forgotten.
+        if (state.in_progress) {
+            frag.notes.push_back(
+                "a complete single-frame DNP3 fragment (FIR=1, FIN=1) arrived on this TCP flow "
+                "while a previous multi-frame fragment reassembly was still in progress (" +
+                std::to_string(state.buffered_app_bytes.size()) + " byte(s) buffered across " +
+                std::to_string(state.frame_count) +
+                " frame(s)) -- the earlier, incomplete fragment is abandoned");
+            state = Dnp3ReassemblyState{};
+        }
+        decode_dnp3_application_layer(app_bytes_this_frame, frag);
+        if (!frag.summary.empty()) {
+            summary << " | " << frag.summary;
+        }
+        frag.summary = summary.str();
+        return frag;
+    }
+
+    if (frag.transport_fir) {
+        // Begins a fragment that continues in a later data-link frame -- possibly in a later TCP
+        // segment/packet entirely. Buffer it per-flow and wait for a continuation; nothing to
+        // decode yet.
+        if (state.in_progress) {
+            frag.notes.push_back(
+                "a new DNP3 fragment (FIR=1, FIN=0, SEQ=" + std::to_string(frag.transport_seq) +
+                ") began on this TCP flow while a previous fragment reassembly was still in "
+                "progress (" + std::to_string(state.buffered_app_bytes.size()) +
+                " byte(s) buffered across " + std::to_string(state.frame_count) +
+                " frame(s)) -- the earlier, incomplete fragment is abandoned");
+        }
+        state = Dnp3ReassemblyState{};
+        state.in_progress = true;
+        state.buffered_app_bytes.assign(app_bytes_this_frame.data(),
+                                         app_bytes_this_frame.data() + app_bytes_this_frame.size());
+        state.last_seq = frag.transport_seq;
+        state.frame_count = 1;
+        frag.notes.push_back(
+            "beginning a DNP3 fragment that spans multiple data-link frames (FIR=1, FIN=0, SEQ=" +
+            std::to_string(frag.transport_seq) + ") -- " +
+            std::to_string(state.buffered_app_bytes.size()) +
+            " application-layer byte(s) buffered so far for this TCP flow; the application layer "
+            "will be decoded once a continuation frame with FIN=1 is seen on the same flow "
+            "(reassembly assumes packets are processed in capture order, which conduitscope's "
+            "single sequential decode pass guarantees)");
+        frag.summary = summary.str();  // transport-only, same rendering as before this fragment began
+        return frag;
+    }
+
+    // frag.transport_fir is false: a continuation frame.
+    if (!state.in_progress) {
+        frag.notes.push_back(
+            "continuation DNP3 data-link frame (FIR=0, SEQ=" + std::to_string(frag.transport_seq) +
+            ") with no fragment reassembly in progress on this TCP flow -- the frame that began it "
+            "was never seen (capture may start mid-fragment) or the reassembly was already "
+            "completed/abandoned; application layer not decoded");
+        frag.summary = summary.str();
+        return frag;
+    }
+
+    uint8_t expected_seq = (state.last_seq + 1) & 0x3F;
+    if (frag.transport_seq != expected_seq) {
+        frag.notes.push_back(
+            "continuation DNP3 data-link frame's sequence number (" + std::to_string(frag.transport_seq) +
+            ") does not follow the previous frame's (expected " + std::to_string(expected_seq) +
+            ") -- discarding " + std::to_string(state.buffered_app_bytes.size()) +
+            " already-buffered byte(s) and abandoning this fragment reassembly; application layer "
+            "not decoded");
+        state = Dnp3ReassemblyState{};
+        frag.summary = summary.str();
+        return frag;
+    }
+
+    // Safety caps against a pathological/malformed capture stalling a fragment open forever and
+    // growing this flow's reassembly state without bound -- a real fragment is nowhere near either
+    // limit.
+    constexpr size_t kMaxBufferedBytes = 65536;
+    constexpr size_t kMaxFramesPerFragment = 500;
+
+    state.buffered_app_bytes.insert(state.buffered_app_bytes.end(), app_bytes_this_frame.data(),
+                                     app_bytes_this_frame.data() + app_bytes_this_frame.size());
+    state.last_seq = frag.transport_seq;
+    ++state.frame_count;
+
+    if (state.buffered_app_bytes.size() > kMaxBufferedBytes || state.frame_count > kMaxFramesPerFragment) {
+        frag.notes.push_back(
+            "DNP3 fragment reassembly on this TCP flow exceeded its safety cap (" +
+            std::to_string(state.buffered_app_bytes.size()) + " byte(s) across " +
+            std::to_string(state.frame_count) +
+            " frame(s)) -- abandoning it; application layer not decoded");
+        state = Dnp3ReassemblyState{};
+        frag.summary = summary.str();
+        return frag;
+    }
+
+    if (!frag.transport_fin) {
+        frag.notes.push_back(
+            "continuing a DNP3 fragment reassembly on this TCP flow (SEQ=" +
+            std::to_string(frag.transport_seq) + "): " + std::to_string(state.buffered_app_bytes.size()) +
+            " application-layer byte(s) buffered across " + std::to_string(state.frame_count) +
+            " frame(s) so far, still waiting for FIN=1");
+        frag.summary = summary.str();
+        return frag;
+    }
+
+    // FIN=1: the fragment is complete. Decode the concatenated application-layer bytes, then
+    // clear the flow's reassembly state -- it's spent either way, whether decoding succeeds or
+    // turns up something malformed.
+    size_t total_bytes = state.buffered_app_bytes.size();
+    size_t total_frames = state.frame_count;
+    frag.notes.push_back("completed a " + std::to_string(total_frames) +
+                          "-data-link-frame DNP3 fragment reassembled across separate TCP segments (" +
+                          std::to_string(total_bytes) + " application-layer byte(s) total)");
+    ByteSpan reassembled(state.buffered_app_bytes.data(), state.buffered_app_bytes.size());
+    decode_dnp3_application_layer(reassembled, frag);
+    state = Dnp3ReassemblyState{};
+
+    summary << " (fragment reassembled across " << total_frames << " data-link frame(s), " << total_bytes
+            << " application-layer byte(s) total)";
+    if (!frag.summary.empty()) {
+        summary << " | " << frag.summary;
+    }
+    frag.summary = summary.str();
+    return frag;
+}
+
+// decode() is an exact behavioral transplant of the removed decoder.cpp `if (want_dnp3) { ... }`
+// call site's body -- the same-payload multi-data-link-frame coalescing loop (DNP3 frames are
+// small, <=255 bytes on the wire, and it's normal for a sender/OS to flush several into one TCP
+// segment) plus the merge-application-layer-fields-into-the-result logic, both moved here
+// unchanged so decoder.cpp's own call site can shrink to gate+call+dual-write.
+std::optional<ProtocolResult> Dnp3Decoder::decode(ByteSpan payload, DecodeContext& ctx) const {
+    Dnp3Result result;
+    auto d = try_parse_dnp3_link_layer(payload, result.notes);
+    if (!d) {
+        return std::nullopt;
+    }
+
+    result.summary = d->summary;
+
+    // Object headers/point values are capped cumulatively across every data link frame found in
+    // this TCP payload, not per frame -- same caps as before, just now shared across however many
+    // frames turned up.
+    constexpr size_t kMaxObjHeaders = 50;
+    constexpr size_t kMaxPointValues = 50;
+    auto merge_application_layer = [&](const Dnp3ApplicationFragment& app, bool is_first_frame) {
+        if (is_first_frame) {
+            result.summary += "; " + app.summary;
+            result.dnp3_has_function = app.has_function;
+            result.dnp3_function_name = app.function_name;
+        }
+        for (const auto& n : app.notes) result.notes.push_back(n);
+        for (size_t i = 0; i < app.objects.size() && result.dnp3_object_headers.size() < kMaxObjHeaders; ++i) {
+            const auto& oh = app.objects[i];
+            result.dnp3_object_headers.push_back("g" + std::to_string(oh.group) + "v" +
+                                                  std::to_string(oh.variation) + " (" + oh.group_name + ")");
+        }
+        for (const auto& oh : app.objects) {
+            if (result.dnp3_point_values.size() >= kMaxPointValues) break;
+            std::string tag = "g" + std::to_string(oh.group) + "v" + std::to_string(oh.variation);
+            for (const auto& pv : oh.values) {
+                if (result.dnp3_point_values.size() >= kMaxPointValues) break;
+                std::string entry = tag + " idx=" + std::to_string(pv.index) + ": " + pv.value;
+                if (!pv.flags.empty()) {
+                    entry += " [";
+                    for (size_t f = 0; f < pv.flags.size(); ++f) {
+                        if (f != 0) entry += ",";
+                        entry += pv.flags[f];
+                    }
+                    entry += "]";
+                }
+                result.dnp3_point_values.push_back(entry);
+            }
+        }
+    };
+
+    if (auto app = process_frame(*d, payload, ctx)) {
+        merge_application_layer(*app, /*is_first_frame=*/true);
+    }
+    // Read AFTER process_frame: that call (when it runs -- it doesn't for a link-layer-only
+    // control frame with no user data, see its own doc comment) is what finalizes block_count/
+    // block_crc_failures/crc_validated on top of the header result try_parse_dnp3_link_layer
+    // already set -- see Dnp3LinkFrame's own comment in dnp3.hpp for why. Either way, by this
+    // point d's crc fields are final.
+    result.link_crc_valid = d->crc_validated;
+    result.header_crc_valid = d->header_crc_valid;
+    result.block_count = d->block_count;
+    result.block_crc_failures = d->block_crc_failures;
+    result.source_address = d->source;
+    result.destination_address = d->destination;
+
+    constexpr size_t kMaxDnp3FramesPerPayload = 50;
+    size_t offset = dnp3_frame_wire_length(*d);
+    size_t frame_count = 1;
+    while (offset < payload.size() && frame_count < kMaxDnp3FramesPerPayload) {
+        ByteSpan rest = payload.from(offset);
+        auto next = try_parse_dnp3_link_layer(rest, result.notes);
+        if (!next) break;  // remaining bytes aren't another DNP3 frame -- stop, don't guess
+        ++frame_count;
+        std::string note = "additional DNP3 data link frame " + std::to_string(frame_count) +
+                            " found in the same TCP payload at byte offset " + std::to_string(offset) +
+                            " (coalesced by the sender/OS): " + next->summary;
+        if (frame_count == 2) {
+            note +=
+                " -- only the first frame's function code is reflected in the summary line "
+                "above and the dnp3_function field; every frame's own function/objects/values "
+                "are still fully decoded and included here and in dnp3_objects/dnp3_values";
+        }
+        result.notes.push_back(note);
+        if (auto next_app = process_frame(*next, rest, ctx)) {
+            merge_application_layer(*next_app, /*is_first_frame=*/false);
+        }
+        offset += dnp3_frame_wire_length(*next);
+    }
+    if (frame_count >= kMaxDnp3FramesPerPayload) {
+        result.notes.push_back("stopped after " + std::to_string(kMaxDnp3FramesPerPayload) +
+                                " DNP3 data link frame(s) in this one TCP payload, more may remain "
+                                "(safety cap)");
+    }
+
+    return ProtocolResult::make<Dnp3Result>("dnp3", std::move(result));
+}
+
+const ProtocolDecoder& dnp3_decoder() {
+    static const Dnp3Decoder instance;
+    return instance;
 }
 
 }  // namespace conduitscope

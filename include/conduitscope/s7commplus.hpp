@@ -56,8 +56,8 @@
 //     reference plugin's own reassembly state machine, that split is signalled by the ABSENCE of
 //     this trailer, NOT by COTP's own End-of-TSDU bit -- i.e. a captured COTP Data frame can be a
 //     complete, EOT=1 COTP PDU while still carrying only an incomplete S7comm-Plus telegram (no
-//     trailer yet). This decoder's usual COTP-level reassembly (decoder.cpp's
-//     reassemble_cotp_data_frame, shared with classic S7comm/MMS, keyed on COTP's own EOT bit) is
+//     trailer yet). This decoder's usual COTP-level reassembly (CotpDecoder::decode, cotp.hpp/
+//     cotp.cpp -- shared with classic S7comm/MMS, keyed on COTP's own EOT bit) is
 //     therefore NOT sufficient by itself for S7comm-Plus, and this file does not additionally
 //     implement S7comm-Plus's own above-COTP, trailer-based reassembly (a genuinely separate,
 //     TCP-session-keyed state machine in the reference plugin) -- a telegram missing its trailer
@@ -153,6 +153,7 @@
 #include <vector>
 
 #include "conduitscope/byteio.hpp"
+#include "conduitscope/protocol_decoder.hpp"
 
 namespace conduitscope {
 
@@ -305,5 +306,20 @@ std::string s7commplus_datatype_name(uint8_t datatype);
 // rather than silently returning a partial result; a Tier-2 (named-but-not-decoded) function's
 // body is simply left undecoded rather than treated as an error.
 std::optional<S7CommPlusFrame> try_parse_s7comm_plus(ByteSpan cotp_user_data);
+
+// registration-model migration batch 2 (see protocol_decoder.hpp/protocol_registry.hpp). Thin
+// ProtocolDecoder wrapper: detection+decode still goes through try_parse_s7comm_plus above,
+// unchanged -- S7comm-Plus is stateless, so decode() needs no flow state at all. gate_kind() is
+// CotpPayload: this decoder is never gated against raw TCP bytes itself, only ever invoked by
+// decoder.cpp's COTP/S7comm-family call site with the bytes a CotpDecoder (cotp.hpp) has already
+// framed and cross-packet-reassembled.
+class S7CommPlusDecoder : public ProtocolDecoder {
+public:
+    std::string_view id() const override { return "s7comm-plus"; }
+    GateKind gate_kind() const override { return GateKind::CotpPayload; }
+    std::optional<ProtocolResult> decode(ByteSpan payload, DecodeContext& ctx) const override;
+};
+
+const ProtocolDecoder& s7comm_plus_decoder();
 
 }  // namespace conduitscope
