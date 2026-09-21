@@ -150,40 +150,45 @@ jobs:
       - name: Build
         run: cmake --build build -j"$(nproc)"
 
-      # Split around the setcap step below, deliberately -- confirmed with a real run: granting a
-      # binary Linux capabilities via setcap makes the kernel treat the resulting process as
-      # non-dumpable (the same restriction a setuid binary gets), which blocks the ptrace-based
-      # self-inspection LeakSanitizer's stop-the-world leak check needs at process exit. The
-      # symptom is exactly what showed up in CI: decode_modbus_sample -- nothing to do with live
-      # capture -- failed with "LeakSanitizer has encountered a fatal error" / "does not work under
-      # ptrace", because by the time it ran, setcap had already been applied to the very binary
-      # every test in the suite uses, not just the live_capture_* ones. build-and-test's plain
-      # (non-ASan) binary never hit this, since there's no LeakSanitizer there to conflict with the
-      # non-dumpable flag. Fix: run everything that doesn't need CAP_NET_RAW first, before setcap,
-      # with full leak detection intact; only the narrow set of tests that genuinely need it
-      # (live_capture_invalid_filter_reports_clearly and the 3 below it -- see their own comment in
-      # CMakeLists.txt for exactly which "actually open lo") run afterward, with leak detection
-      # explicitly turned off for just that slice via ASAN_OPTIONS.
+      # Split around a privilege boundary, deliberately -- root-caused with a real CI run plus
+      # digging into how AddressSanitizer actually reads ASAN_OPTIONS. The first attempt here used
+      # setcap (build-and-test's own approach) plus ASAN_OPTIONS=detect_leaks=0 for just the
+      # CAP_NET_RAW-needing slice, on the theory that setcap's non-dumpable side effect was
+      # blocking LeakSanitizer's own ptrace-based stop-the-world. That was directionally right but
+      # incomplete: ASan doesn't read ASAN_OPTIONS via a normal environment lookup, it reads
+      # /proc/self/environ -- and setcap's non-dumpable transition makes THAT file root-owned,
+      # mode 0400 (a deliberate kernel protection against a privileged process leaking its
+      # environment to whoever invoked it), which an unprivileged runner user can't read even for
+      # its OWN process. So ASAN_OPTIONS=detect_leaks=0 was being silently dropped -- confirmed via
+      # google/sanitizers#784, a known report of exactly this -- and LeakSanitizer ran with its
+      # default (detect_leaks=1) regardless, hence the still-intermittent crash on the very tests
+      # that setcap'd override was supposed to fix (it depended on how much each test had exited by
+      # the time LSan's exit hook fired, not on the override actually working).
+      #
+      # Fix: don't rely on setcap + an environment override reaching a non-dumpable process at all
+      # for this narrow slice. Everything that doesn't need CAP_NET_RAW runs first, as the normal
+      # unprivileged user, with full leak detection genuinely intact (confirmed reachable this
+      # time, since nothing here is non-dumpable). Only the 4 tests that genuinely need it (see
+      # CMakeLists.txt's own comment for exactly which "actually open lo") run afterward under
+      # `sudo --preserve-env`, not setcap -- root can always read its own /proc/self/environ
+      # (root bypasses the same DAC check that blocks everyone else), so ASAN_OPTIONS reliably
+      # reaches the process this way, and root has every capability implicitly anyway, so no
+      # separate setcap step is needed for this job at all (build-and-test's own setcap'd,
+      # non-ASan run already covers "does this work for an ordinary capability-holding,
+      # non-root process", which is unaffected by any of this since it has no LeakSanitizer to
+      # conflict with).
       - name: Test everything that doesn't need CAP_NET_RAW (full leak detection)
         working-directory: build
         run: >
           ctest -j"$(nproc)" --output-on-failure
           -E "^(live_capture_invalid_filter_reports_clearly|live_capture_duration_stops_cleanly_with_no_traffic|live_capture_policy_validate_duration_stops_cleanly|live_capture_max_packets_stops_capture_early_with_real_traffic)$"
 
-      # Same reasoning as build-and-test's own identically-named step above: the live_capture_*
-      # tests that actually open "lo" need CAP_NET_RAW, which this runner's unprivileged user
-      # doesn't have by default.
-      - name: Grant the capture binary CAP_NET_RAW/CAP_NET_ADMIN
-        run: |
-          sudo apt-get install -y libcap2-bin
-          sudo setcap cap_net_raw,cap_net_admin=eip build/conduitscope
-          getcap build/conduitscope
-
-      - name: Test the CAP_NET_RAW-needing live-capture tests (leak detection off -- see above)
+      - name: Test the CAP_NET_RAW-needing live-capture tests (under sudo -- see above)
         working-directory: build
         env:
           ASAN_OPTIONS: detect_leaks=0
         run: >
+          sudo --preserve-env=ASAN_OPTIONS
           ctest -j"$(nproc)" --output-on-failure
           -R "^(live_capture_invalid_filter_reports_clearly|live_capture_duration_stops_cleanly_with_no_traffic|live_capture_policy_validate_duration_stops_cleanly|live_capture_max_packets_stops_capture_early_with_real_traffic)$"
 
