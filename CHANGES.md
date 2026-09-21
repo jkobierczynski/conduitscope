@@ -117,3 +117,84 @@ fuzz/corpus/packet_decode/*                        -- 2 new seeds (ICMP, link/tr
 
 Verified: full CTest suite 1124/1124 passing; 60s/4-worker ASan/UBSan
 `fuzz_packet_decode` smoke burst, 0 crashes.
+
+# Windows release CI hang -- root cause and fix
+
+## What was actually happening
+
+Not a "never-ending capture" -- the 4 stuck tests (`decode_modbus_sample`,
+`decode_dnp3_sample`, `dnp3_no_user_data_stays_link_only`,
+`dnp3_transport_and_read_class0_decoded`) are plain offline `decode --read
+some.pcap` commands. They never touch a network interface or any pcap
+function at all. (Every test that *does* open a live interface is gated
+`if(UNIX)` in CMakeLists.txt, so on Windows there weren't even any of those
+in the suite yet -- ruled that out early.)
+
+Root cause: `conduitscope.exe` links against `wpcap.lib` (the Npcap SDK's
+*build-time* import library) so it can call `pcap_*()` when live capture is
+actually used. But the CI job only ever downloaded and extracted the Npcap
+**SDK** zip -- it never installed the separate Npcap **runtime** (the
+driver/service that provides the actual `wpcap.dll`). On Windows, a normal
+(non-delay-loaded) DLL import is resolved by the OS loader before your
+program's `main()` even runs -- so with `wpcap.dll` nowhere on the runner,
+*every single invocation* of `conduitscope.exe` failed at process-load time,
+including ones like `decode_modbus_sample` that never call a single pcap
+function. Each `ctest` worker slot was just waiting on a process that could
+never actually start; `--output-on-failure` had nothing to report because
+nothing ever finished (or FAILED) in the normal sense.
+
+This also would have been a real problem for actual users: anyone who
+downloaded the released Windows binary just to run `conduitscope decode` on
+a .pcap file, with no interest in live capture, would have needed to install
+the full Npcap runtime first -- which the SDK-only build-time dependency
+never should have required.
+
+## The fix
+
+1. **`CMakeLists.txt`**: on Windows/MSVC, link with `/DELAYLOAD:wpcap.dll`
+   (+ `delayimp.lib`). This defers resolving `wpcap.dll` until the first
+   actual `pcap_*()` call instead of at process startup, so the binary now
+   starts and runs fine with zero Npcap runtime installed -- only
+   `-i/--interface` and `conduitscope interfaces` need it.
+2. **`src/live_capture.cpp`**: added `ensure_pcap_runtime_available()`,
+   called at the top of `list_interfaces()` and the `LiveCapture`
+   constructor (the only two real pcap entry points) on Windows. It does a
+   `LoadLibraryA("wpcap.dll")` probe and throws the same kind of clear,
+   actionable `CaptureError` this file already throws for "not built with
+   pcap support" -- pointing the user at https://npcap.com/#download --
+   instead of letting a missing-DLL delay-load failure surface as a raw,
+   unfriendly structured exception deep inside `pcap_create`/
+   `pcap_findalldevs`.
+3. **`.github/workflows/ci.yml`**: added `--timeout 120` to the `ctest`
+   invocation in `release-windows` as a safety net, independent of this
+   specific root cause -- so any future genuine hang fails fast and loud
+   instead of eating the whole job's time budget.
+4. **`docs/USER_GUIDE.md`**: corrected the "Windows / Npcap notes" section,
+   which previously (incorrectly) claimed a live-capture-enabled binary
+   "still runs fine on a machine with no Npcap runtime installed at all" --
+   that was aspirational, not yet true, until this fix. Updated to describe
+   the actual delay-load mechanism.
+
+## Verified
+
+- Reconfigured and rebuilt clean on Linux (this fix is Windows-only code
+  behind `#ifdef _WIN32`, but exercises the new no-op stub path on Linux).
+- Full CTest suite: **1124/1124 passing**, including
+  `live_capture_interfaces_command_lists_loopback` and friends.
+- `.github/workflows/ci.yml`: valid YAML (`yaml.safe_load`) and clean
+  `actionlint` (v1.7.12) run.
+
+I can't run an actual `pwsh`/MSVC toolchain here to build-verify the
+`/DELAYLOAD` linker flag itself -- that only gets a real check on your next
+tag push. If it does fail to link (unlikely; `/DELAYLOAD` + `delayimp.lib`
+is the standard, decades-old MSVC pattern for this), the error will be a
+normal, clear linker error rather than another silent hang.
+
+## Files in this drop
+
+```
+CMakeLists.txt                  -- /DELAYLOAD:wpcap.dll wiring (Windows/MSVC only)
+src/live_capture.cpp            -- ensure_pcap_runtime_available() friendly-error check
+.github/workflows/ci.yml        -- ctest --timeout 120 safety net
+docs/USER_GUIDE.md              -- Windows/Npcap notes corrected
+```

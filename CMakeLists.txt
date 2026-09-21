@@ -160,6 +160,21 @@ if(CONDUITSCOPE_ENABLE_LIVE_CAPTURE)
     target_compile_definitions(conduitscope_core PUBLIC CONDUITSCOPE_HAVE_PCAP=1)
     target_include_directories(conduitscope_core PRIVATE "${PCAP_INCLUDE_DIR}")
     target_link_libraries(conduitscope_core PUBLIC "${PCAP_LIBRARY}")
+    if(WIN32 AND MSVC)
+      # wpcap.lib above is the Npcap SDK's *build-time* import library -- the actual wpcap.dll
+      # (the Npcap RUNTIME) is a separate, user-installed component (see docs/MANUAL.md's LIVE
+      # CAPTURE section). Without delay-loading it, the OS loader would refuse to start
+      # conduitscope.exe AT ALL -- even for a plain offline `decode` that never touches a single
+      # pcap function -- on any Windows machine that has this binary but not the Npcap runtime
+      # installed (this is also what was hanging the release-windows CI job's ctest step: every
+      # test process, including ones with nothing to do with live capture, failed to start).
+      # /DELAYLOAD defers resolving wpcap.dll until the first actual pcap_*() call -- i.e. only
+      # when live capture is genuinely used (see live_capture.cpp's ensure_pcap_runtime_available
+      # for the friendly error if it's missing at that point) -- so everything else keeps working
+      # with zero extra runtime dependency.
+      target_link_libraries(conduitscope_core PUBLIC delayimp.lib)
+      target_link_options(conduitscope_core PUBLIC "/DELAYLOAD:wpcap.dll")
+    endif()
     message(STATUS "conduitscope: live capture ENABLED (found ${PCAP_LIBRARY})")
   else()
     message(STATUS "conduitscope: live capture DISABLED (libpcap/Npcap SDK not found -- "

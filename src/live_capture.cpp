@@ -14,6 +14,10 @@
 #include <pcap/pcap.h>
 #endif
 
+#if defined(CONDUITSCOPE_HAVE_PCAP) && defined(_WIN32)
+#include <windows.h>
+#endif
+
 namespace conduitscope {
 
 bool live_capture_available() {
@@ -58,7 +62,36 @@ void LiveCapture::stop() {}
 
 // --- Real libpcap/Npcap-backed implementation. ---------------------------------------------
 
+namespace {
+#ifdef _WIN32
+// On Windows this binary links against wpcap.lib -- the Npcap SDK's *build-time* import library
+// (see CMakeLists.txt) -- but is delay-loaded against the actual wpcap.dll (/DELAYLOAD:wpcap.dll,
+// also in CMakeLists.txt) specifically so that ordinary offline use (decode/policy validate on a
+// .pcap file, `version`, ...) never requires the separate Npcap RUNTIME installer to have been
+// run at all -- only live capture does; the SDK and the runtime are genuinely different things,
+// see docs/MANUAL.md's LIVE CAPTURE section. Without this check, a machine that has the SDK's
+// import library baked into conduitscope.exe but not the Npcap runtime installed would instead
+// fail deep inside the first pcap_*() call below with a raw, unfriendly delay-load structured
+// exception -- this turns that into the same clear, actionable CaptureError every other
+// "capture isn't available" case in this file already gives.
+void ensure_pcap_runtime_available() {
+    HMODULE probe = ::LoadLibraryA("wpcap.dll");
+    if (probe == nullptr) {
+        throw CaptureError(
+            "live capture requires the Npcap RUNTIME to be installed -- this binary was built "
+            "against the separate Npcap SDK, which is build-time-only. Install Npcap from "
+            "https://npcap.com/#download, then retry. 'decode' / 'policy validate' on an offline "
+            ".pcap file do not need this.");
+    }
+    ::FreeLibrary(probe);
+}
+#else
+inline void ensure_pcap_runtime_available() {}
+#endif
+}  // namespace
+
 std::vector<InterfaceInfo> list_interfaces() {
+    ensure_pcap_runtime_available();
     char errbuf[PCAP_ERRBUF_SIZE] = {0};
     pcap_if_t* all = nullptr;
     if (pcap_findalldevs(&all, errbuf) == -1) {
@@ -99,6 +132,7 @@ struct LiveCapture::Impl {
 LiveCapture::LiveCapture(const std::string& interface_name, int snaplen, bool promiscuous,
                           const std::string& filter, int duration_seconds, size_t max_packets)
     : impl_(std::make_unique<Impl>()) {
+    ensure_pcap_runtime_available();
     char errbuf[PCAP_ERRBUF_SIZE] = {0};
     pcap_t* handle = pcap_create(interface_name.c_str(), errbuf);
     if (handle == nullptr) {

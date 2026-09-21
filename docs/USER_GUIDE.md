@@ -605,12 +605,15 @@ installation. Two things worth knowing going in:
 - **Build time vs. run time** are two separate Npcap pieces. The *Npcap SDK*
   (headers + import libraries) is what CMake needs to find to build live
   capture support in at all -- see BUILDING. The *Npcap runtime* (the actual
-  driver/service) is a completely separate install, needed on whatever machine
-  actually *runs* a conduitscope binary built with live-capture support, even
-  if that's the same machine it was built on. A binary built with live-capture
-  support still runs fine on a machine with no Npcap runtime installed at
-  all -- `-i`/`interfaces` will just fail to open/enumerate anything, the same
-  as any other capture-permission failure.
+  driver/service, including `wpcap.dll`) is a completely separate install,
+  needed on whatever machine actually *runs* a conduitscope binary built with
+  live-capture support, even if that's the same machine it was built on. The
+  official Windows release binary delay-loads `wpcap.dll` (see CMakeLists.txt)
+  specifically so this distinction can't take the whole binary down: it runs
+  fine on a machine with no Npcap runtime installed at all, including every
+  offline `decode`/`policy validate`/`version` use -- only `-i`/`interfaces`
+  need the runtime, and if it's missing they fail with a clear message telling
+  you to install it, rather than the whole process refusing to start.
 - **Interface names** on Windows (via Npcap) are not simple names like `eth0`
   -- `conduitscope interfaces` is the way to get the exact string to pass to
   `-i` rather than guessing one.
