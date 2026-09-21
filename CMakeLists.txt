@@ -100,6 +100,7 @@ add_library(conduitscope_core STATIC
   src/hkdf.cpp
   src/aes128.cpp
   src/aes128_gcm.cpp
+  src/quic.cpp
   src/policy_engine.cpp
   src/asset_inventory.cpp
   src/flow_direction.cpp
@@ -4830,6 +4831,85 @@ set_tests_properties(doh_non_tls_tcp443_not_misdetected PROPERTIES
   # for, since that fallback gap is exactly what Tier 2 fixes.
   PASS_REGULAR_EXPRESSION "\\[https\\]  HTTPS/TLS \\(TCP port 443/8443\\) -- port match only")
 
+# ---------------------------------------------------------------------------------------------
+# QUIC -- Tier 2, joining HTTPS (see quic.hpp's own file header comment and notable_it_protocols.hpp
+# for why). tests/sample_quic.pcap (tools/make_quic_sample_pcap.py) has 9 packets: #1 a genuine
+# client Initial, decrypted end to end with its ClientHello SNI extracted; #2 Version Negotiation;
+# #3-5 Handshake/0-RTT/Retry, each name-only; #6 a short-header (1-RTT) packet, the weakest,
+# port-only fallback; #7 an Initial whose AEAD tag doesn't verify (simulating a server's own Initial,
+# which this decoder can never decrypt -- see quic.hpp's file header comment); #8 non-QUIC junk on
+# QUIC's own default port, proving no false positive; #9 a short-header packet on a non-standard
+# port, proving that fallback's own internal port gate. See decoder.cpp's own dispatch-ordering
+# comment (just above its HART-IP UDP check) for why QUIC's recognition call had to move ahead of
+# HART-IP's: QUIC v1's Version field lands on the exact same two payload bytes HART-IP's own
+# MessageType/MessageID gate reads, and is SYSTEMATICALLY 0x00/0x00 there for every long-header
+# packet type this fixture exercises -- a guaranteed collision, not a coincidental one.
+# ---------------------------------------------------------------------------------------------
+
+add_test(NAME quic_client_initial_decrypted_sni
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_quic.pcap" --format json)
+set_tests_properties(quic_client_initial_decrypted_sni PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"protocol\": \"quic\",\n +\"summary\": \"QUIC Initial packet, decrypted \\(RFC 9001 publicly-derivable keys\\) -- ClientHello SNI: scada-vendor-cloud\\.example\\.com\"")
+
+add_test(NAME quic_version_negotiation_counts_offered_versions
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_quic.pcap" --format text)
+set_tests_properties(quic_version_negotiation_counts_offered_versions PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[quic\\]  QUIC Version Negotiation packet \\(2 supported version\\(s\\) offered\\)")
+
+add_test(NAME quic_handshake_0rtt_retry_name_only
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_quic.pcap" --format text)
+set_tests_properties(quic_handshake_0rtt_retry_name_only PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[quic\\]  QUIC Handshake packet \\(encrypted under Handshake-level keys\\).*\\[quic\\]  QUIC 0-RTT packet \\(encrypted under session resumption keys\\).*\\[quic\\]  QUIC Retry packet")
+
+add_test(NAME quic_short_header_default_port_weakest_gate
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_quic.pcap" --format text)
+set_tests_properties(quic_short_header_default_port_weakest_gate PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[quic\\]  QUIC short-header \\(1-RTT\\) packet.*\n *note: recognized by port alone")
+
+add_test(NAME quic_initial_aead_mismatch_falls_back_gracefully
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_quic.pcap" --format text)
+set_tests_properties(quic_initial_aead_mismatch_falls_back_gracefully PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[quic\\]  QUIC Initial packet \\(AEAD tag did not verify -- most likely a server response")
+
+add_test(NAME quic_non_quic_junk_on_default_port_not_misdetected
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_quic.pcap" --format text)
+set_tests_properties(quic_non_quic_junk_on_default_port_not_misdetected PROPERTIES
+  # Also proves the HART-IP dispatch-ordering fix doesn't over-correct: this packet's own bytes are
+  # deliberately chosen to not coincidentally satisfy HART-IP's weak gate either (see the fixture
+  # script's own comment) -- port 54107->443 falls all the way through to the generic udp tag.
+  PASS_REGULAR_EXPRESSION "\\[udp\\]  UDP payload of 16 byte\\(s\\) on port 54107->443"
+  FAIL_REGULAR_EXPRESSION "\\[hartip\\]")
+
+add_test(NAME quic_short_header_off_port_not_matched_by_default
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_quic.pcap" --format text)
+set_tests_properties(quic_short_header_off_port_not_matched_by_default PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[udp\\]  UDP payload of 21 byte\\(s\\) on port 54108->34567"
+  FAIL_REGULAR_EXPRESSION "\\[hartip\\]")
+
+add_test(NAME quic_extra_port_widens_short_header_match
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_quic.pcap" --format text --lateral-movement-port 34567)
+set_tests_properties(quic_extra_port_widens_short_header_match PROPERTIES
+  PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.10:34567  \\[quic\\]  QUIC short-header \\(1-RTT\\) packet")
+
+add_test(NAME quic_protocol_filter_isolates_family
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_quic.pcap" --protocol lateral-movement --format text)
+set_tests_properties(quic_protocol_filter_isolates_family PROPERTIES
+  # Every one of packets #1-7 is quic under this filter (nothing else in this fixture is Tier 2), and
+  # since HART-IP's own dispatch is entirely disabled by --protocol lateral-movement (not just
+  # reordered), packets #8/#9 fall straight through to generic udp with no [hartip] tag at all.
+  PASS_REGULAR_EXPRESSION "\\[quic\\].*\\[quic\\].*\\[quic\\].*\\[quic\\].*\\[quic\\].*\\[quic\\].*\\[quic\\]"
+  FAIL_REGULAR_EXPRESSION "\\[hartip\\]")
+
+add_test(NAME quic_stats_counted_in_lateral_movement_tier
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_quic.pcap" --format text --stats)
+set_tests_properties(quic_stats_counted_in_lateral_movement_tier PROPERTIES
+  PASS_REGULAR_EXPRESSION "quic +7\n *udp +2")
+
+add_test(NAME quic_inventory_notable_protocols
+  COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_quic.pcap")
+set_tests_properties(quic_inventory_notable_protocols PROPERTIES
+  PASS_REGULAR_EXPRESSION "NOTABLE IT PROTOCOLS \\(7\\):\n(.*\n)*.*\\[1\\] quic  \\(lateral-movement\\)")
+
 add_test(NAME protocol_filter_dns_only
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dns.pcap" --protocol dns --format text)
 set_tests_properties(protocol_filter_dns_only PROPERTIES
@@ -7647,6 +7727,16 @@ add_test(NAME notable_protocols_lateral_movement_count
 set_tests_properties(notable_protocols_lateral_movement_count PROPERTIES
   PASS_REGULAR_EXPRESSION "NOTABLE IT PROTOCOLS \\(20\\):"
   FAIL_REGULAR_EXPRESSION "\\(remote-access\\)|\\(enterprise-trust\\)|\\(wireless-backhaul\\)|\\(tunnel-vpn\\)")
+
+# QUIC's own fixture (tests/sample_quic.pcap) is exercised separately from sample_lateral_movement.pcap
+# above -- see this tier's own decode section for why it needed its own dedicated pcap -- so it gets
+# its own notable_protocols check here too: 7 quic packets (#1-7) become entries; #8/#9 (generic udp,
+# deliberate negative controls) do not.
+add_test(NAME quic_notable_protocols_lateral_movement_tier
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_quic.pcap"
+          --policy "${POLICY_DIR}/compliant.yaml")
+set_tests_properties(quic_notable_protocols_lateral_movement_tier PROPERTIES
+  PASS_REGULAR_EXPRESSION "NOTABLE IT PROTOCOLS \\(7\\):\n(.*\n)*.*\\[1\\] quic  \\(lateral-movement\\)")
 
 # Tier 3 (enterprise-trust): the one tier whose fixture also contains a Tier-2 "https" packet (a
 # deliberate negative control proving LDAPS-vs-HTTPS ALPN disambiguation -- see this tier's own

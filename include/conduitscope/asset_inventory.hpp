@@ -157,9 +157,9 @@ struct InventoryConduit {
 };
 
 // One aggregated observation of a Tier 1-5 "IT protocol an OT auditor flags" (ROADMAP item 18;
-// notable_it_protocols.hpp names the exact 42 protocol values and their tier) -- completely separate
+// notable_it_protocols.hpp names the exact 43 protocol values and their tier) -- completely separate
 // from, and never counted toward, this engine's own ten-protocol asset/edge model above: none of
-// these 42 protocols are among the ten AssetInventoryEngine::observe otherwise recognizes, so a
+// these 43 protocols are among the ten AssetInventoryEngine::observe otherwise recognizes, so a
 // packet that produces one of these also still increments AssetInventoryReport::skipped_packets
 // exactly as it always has -- this is a strictly additive finding, not a widening of what counts as
 // a "recognized" packet for the rest of this report. See AssetInventoryEngine::observe's own comment
@@ -171,13 +171,13 @@ struct InventoryConduit {
 // Unlike InventoryEdge, client_ip/server_ip here is always the SAME plain "lower port number is the
 // server" heuristic src_is_client_by_port already provides for this exact shape (this engine's own
 // UDP-based protocols, e.g. BACnet, get a real handshake- or content-based direction when they can --
-// none of that per-protocol machinery is reused here, since building an equivalent for 42 more
+// none of that per-protocol machinery is reused here, since building an equivalent for 43 more
 // protocols this file otherwise never decodes at all is far more machinery than a "name the presence"
 // finding calls for) -- so it's always a best-effort guess, never upgraded, even for a TCP-based
 // notable protocol (rdp/vnc/smb/ssh/http/https/ldap/ldaps/tacacs-plus/openvpn/stt) that a real SYN/
 // SYN-ACK could in principle have resolved authoritatively. Render/consume accordingly.
 struct InventoryNotableProtocol {
-    std::string protocol;  // one of notable_it_protocols.hpp's 42 values, e.g. "rdp"/"ssh"/"gre"
+    std::string protocol;  // one of notable_it_protocols.hpp's 43 values, e.g. "rdp"/"ssh"/"gre"
     std::string tier;      // "remote-access"/"lateral-movement"/"enterprise-trust"/
                             // "wireless-backhaul"/"tunnel-vpn"
     bool has_ip = true;    // false only for eapol/pppoe/mpls (EtherType-keyed, no IP layer at all --
@@ -287,7 +287,7 @@ public:
     // this same direction logic assigned it) even when no edge can be formed for the broadcast side.
     //
     // Independent of all of the above: a packet whose protocol is one of notable_it_protocols.hpp's
-    // 42 "IT protocols an OT auditor flags" (ROADMAP item 18) is ALSO recorded into
+    // 43 "IT protocols an OT auditor flags" (ROADMAP item 18) is ALSO recorded into
     // AssetInventoryReport::notable_protocols -- see InventoryNotableProtocol's own comment for why
     // this never disturbs `skipped_packets` or this engine's own ten-protocol asset/edge model, and
     // policy_engine.hpp's own NotableProtocolFinding for the analogous (independently implemented)

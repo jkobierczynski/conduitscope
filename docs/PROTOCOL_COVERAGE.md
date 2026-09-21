@@ -4579,7 +4579,7 @@ inside of; what matters for a name-only recognizer is that the port/
 structural gate itself is correct, which the synthetic fixture confirms
 directly.
 
-### Tier 2 lateral-movement protocol recognition (SMB, SSH, HTTP, HTTPS, SNMPv1/v2c, Telnet, FTP, TFTP)
+### Tier 2 lateral-movement protocol recognition (SMB, SSH, HTTP, HTTPS, SNMPv1/v2c, Telnet, FTP, TFTP, QUIC)
 
 The second tier of docs/DEVELOPMENT.md's ROADMAP item 18's "IT protocols an OT auditor flags"
 family: protocols that "should be absent from a production OT segment
@@ -4589,10 +4589,10 @@ tools like Tier 1's own RDP/VNC/TeamViewer/AnyDesk/Zoom. See
 `include/conduitscope/it_protocols.hpp`'s own file header comment (the Tier
 2 half) for the full confidence-tier reasoning summarized here.
 
-Same deliberately name-only posture as Tier 1: each of these eight is
-identified from its port and (for six of the eight) a structural signature,
+Same deliberately name-only posture as Tier 1: each of these nine is
+identified from its port and (for most of the nine) a structural signature,
 reported as its own `protocol` value (`smb`/`ssh`/`http`/`https`/`snmp`/
-`telnet`/`ftp`/`tftp`) with a one-line `summary` -- nothing about the
+`telnet`/`ftp`/`tftp`/`quic`) with a one-line `summary` -- nothing about the
 traffic past that point is parsed, with one narrow, deliberate exception
 (SNMP's community string, below). Confidence again varies sharply and every
 summary/note says so honestly:
@@ -4668,6 +4668,41 @@ summary/note says so honestly:
   `octet`/`mail`, RFC 1350) -- validated in full. DATA/ACK/ERROR (the rest
   of a transfer, once under way) have no comparable signature and fall to
   the port-only match, explicitly noted as such.
+- **QUIC** (UDP 443/8443 by default, RFC 9000/9001) joins this tier
+  alongside HTTPS rather than getting its own tier, the same "encrypted
+  transport carrying a web/API session" reasoning HTTPS itself is here for
+  -- see `include/conduitscope/quic.hpp`'s own file header comment for the
+  full writeup. Every long-header packet (RFC 9000 §17.2 -- Header Form bit
+  set, `0x80`) is checked **port-independently**, a genuinely strong
+  structural signal (Fixed Bit, Long Packet Type, an exact version match);
+  a **client** Initial packet (long type 0, version 1) is decrypted in
+  full using RFC 9001 §5's publicly-derivable Initial keys (HKDF-Extract/
+  Expand over the packet's own Destination Connection ID and a public,
+  per-version salt -- no external key material needed, since these keys
+  protect the handshake's confidentiality against passive network
+  observers, not against anyone who can also read RFC 9001) far enough to
+  remove header protection (AES-128-ECB, §5.4) and AEAD-decrypt the
+  payload (AES-128-GCM, §5.3), then extracts the ClientHello's SNI from
+  the resulting CRYPTO frame the same way the TCP-carried HTTPS check
+  above does. This only ever succeeds for the **client's own** first
+  Initial packet: a server's reply Initial packet is encrypted under keys
+  derived from the client's SCID, a value this decoder doesn't track
+  cross-packet, so its AEAD tag simply won't verify -- reported plainly as
+  "AEAD tag did not verify", not as an error, since that's the expected,
+  unavoidable outcome for exactly half of all Initial-packet traffic.
+  Version Negotiation (RFC 9000 §17.2.1, Version field `== 0`, no Fixed
+  Bit requirement) is named only, with the count of offered versions
+  parsed from its trailing list of 4-byte entries (also this codebase's
+  structural guard against a false match: a payload with a zero version
+  field but no valid trailing entries is rejected, not reported as Version
+  Negotiation). Handshake, 0-RTT, and Retry long-header packets are named
+  only -- each is encrypted under key material (Handshake-level keys,
+  session resumption secrets, or nothing decryptable at all for Retry)
+  this decoder has no way to derive. A short-header (1-RTT) packet, once a
+  session is fully established, carries no version or type field at all
+  -- the **only** remaining signal is the required Fixed Bit, so this
+  falls back to the weakest, port-only match this codebase uses (the same
+  treatment TeamViewer/AnyDesk/LWAPP get), explicitly noted as such.
 
 `--protocol lateral-movement` isolates this family from the CLI, the same
 as every other `--protocol` value; `--lateral-movement-port` (repeatable)
@@ -5249,7 +5284,7 @@ directly asserted to reach their own Tier 5 name rather than `hartip`).
 **All five tiers now feed a "notable IT protocols" finding in `policy
 validate` and `inventory`, not just `decode`.** This is the second and
 final half of ROADMAP item 18: every `protocol` value named across Tiers
-1-5 above (42 in total) is, when observed, surfaced as its own finding by
+1-5 above (43 in total) is, when observed, surfaced as its own finding by
 both reports -- `notable_protocols` in JSON, a "NOTABLE IT PROTOCOLS"
 section in text -- completely independent of and never affecting either
 report's existing compliance/zone-conduit verdict. This is deliberately a

@@ -1071,8 +1071,14 @@ port" note, it just never gates whether the check itself runs. HTTPS's own
 strong signal (a genuine TLS ClientHello) is checked port-independently
 too, for the same reason, but is layered directly into the DoH detection
 call site rather than gated by this option at all -- see PROTOCOL
-COVERAGE's Tier 2 section. `--protocol lateral-movement` skips every port
-gate in this tier at once, same as `--protocol remote-access` above.
+COVERAGE's Tier 2 section. **QUIC is a partial exception**: its
+long-header packets (Initial/0-RTT/Handshake/Retry/Version Negotiation)
+are checked port-independently even in Auto mode, the same strong-signal
+treatment HTTPS's ClientHello gets, but its short-header (1-RTT) fallback
+-- the weakest gate this codebase uses, port alone -- IS gated by
+`--lateral-movement-port` the same way SNMP/Telnet/FTP/TFTP's own checks
+are. `--protocol lateral-movement` skips every port gate in this tier at
+once, same as `--protocol remote-access` above.
 
 **NTP, LDAP, RADIUS, and TACACS+ (Tier 3's six port-based protocols, minus
 DHCP and LDAPS) are also port-gated in `--protocol auto`**, widened by the
@@ -1738,8 +1744,10 @@ anything else on this list.
     capture actually has.
 18. **Recognize the "IT protocols an OT auditor flags" family, and let
     `policy validate`/`inventory` call out their mere presence as its own
-    finding.** -- **fully done**, both halves: every one of this family's 42
-    protocol values (5+8+7+6+16 across Tiers 1-5) is named by `decode`, and
+    finding.** -- **fully done**, both halves: every one of this family's 43
+    protocol values (5+9+7+6+16 across Tiers 1-5, Tier 2's own nine now
+    including QUIC alongside HTTPS -- see quic.hpp's own file header
+    comment for why) is named by `decode`, and
     `policy validate`/`inventory` now both surface each one's mere presence
     as its own "notable protocols" finding, independent of policy
     compliance -- see this item's own "notable protocols finding -- done"
@@ -1871,8 +1879,10 @@ anything else on this list.
     **Tier 2 -- done**, and see docs/PROTOCOL_COVERAGE.md's own "Tier 2
     lateral-movement protocol recognition" section for the full writeup:
     `decode` now also recognizes SMB, SSH, HTTP, HTTPS, SNMPv1/v2c, Telnet,
-    FTP, and TFTP -- eight more `protocol` values (`"smb"`/`"ssh"`/`"http"`/
-    `"https"`/`"snmp"`/`"telnet"`/`"ftp"`/`"tftp"`), the same fix to this
+    FTP, TFTP, and QUIC -- nine more `protocol` values (`"smb"`/`"ssh"`/
+    `"http"`/`"https"`/`"snmp"`/`"telnet"`/`"ftp"`/`"tftp"`/`"quic"`; QUIC
+    joined later, alongside HTTPS -- see `quic.hpp`'s own file header
+    comment for why), the same fix to this
     item's own "modeling gap" paragraph below Tier 1 already made, now
     covering the family the ROADMAP calls out as most worth an auditor's
     attention: protocols that "should be absent from a production OT
@@ -2212,20 +2222,21 @@ anything else on this list.
     item's second half, below, now builds on.
 
     **Notable-protocols finding -- done**: `policy validate` and
-    `inventory` both now call out every one of this family's 42 protocols'
+    `inventory` both now call out every one of this family's 43 protocols'
     mere PRESENCE as its own finding, independent of whether a conduit
     happens to (wrongly) permit it -- per the rule of thumb above, an
     interactive-access protocol reaching an OT zone is itself worth
     flagging even inside a technically "compliant" policy that happened to
     allow it. `notable_it_protocols.hpp` is the single shared lookup both
-    engines call (`notable_it_protocol_tier`), mapping each of the 42
+    engines call (`notable_it_protocol_tier`), mapping each of the 43
     protocol values to its tier ("remote-access"/"lateral-movement"/
     "enterprise-trust"/"wireless-backhaul"/"tunnel-vpn") -- deliberately
     just a name -> tier table, no decoding of its own, since every one of
     these values is already fully named by `decode`'s own dispatch (Tiers
     1-5 above) before a packet ever reaches either engine.
 
-    Scope is the FULL 42, not just the 13 that happen to be TCP-based:
+    Scope is the FULL 43, not just the 13 that happen to be TCP-based
+    (QUIC is UDP-only, so it doesn't add to this count):
     `PolicyEngine::observe`/`AssetInventoryEngine::observe` both check
     `notable_it_protocol_tier` first, unconditionally, before either
     engine's own existing dispatch -- so a UDP-based protocol (ntp/dhcp/
@@ -2261,9 +2272,9 @@ anything else on this list.
     reuses that SAME flow's own SYN/SYN-ACK-first, port-heuristic-otherwise
     direction (`PolicyEngine::observe` already computed it for the flow
     itself) via `NotableProtocolFinding::direction_known`; every other
-    shape in `policy validate` (UDP, since none of these 42 ports are ever
+    shape in `policy validate` (UDP, since none of these 43 ports are ever
     "known" to this file's own `is_known_service_port`), and EVERY shape in
-    `inventory` (which has no equivalent per-session state for these 42
+    `inventory` (which has no equivalent per-session state for these 43
     protocols the way it does for its own ten recognized ones -- building
     that would be real scope creep for a "name the presence" finding), is
     always the plain "lower port number is the server" heuristic each

@@ -1634,6 +1634,41 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                 }
             }
 
+            // QUIC -- Tier 2, joining HTTPS (see quic.hpp's own file header comment for why, and
+            // try_recognize_quic's own doc comment for why it gets its own dedicated call site
+            // rather than folding into try_recognize_it_lateral_movement below, the same "own call
+            // site" shape HTTPS's own early TLS ClientHello check has on the TCP side of this
+            // dispatch): long-header QUIC packets are checked port-independently even in Auto mode
+            // (a genuinely strong, self-describing structural signal, the Header Form/Fixed Bit/
+            // exact version match), while try_recognize_quic's own short-header fallback stays
+            // port-gated internally -- see that function's own doc comment. Tried here, BEFORE
+            // HART-IP's own weak gate just below, rather than down among the rest of Tier 2's UDP
+            // checks (SNMP/TFTP) where it originally lived: HART-IP's gate is MessageType/MessageID
+            // at payload bytes 1/2 both landing on small enumerated values (0/0/1/2/3/15), and QUIC
+            // v1's own Version field -- present at that SAME byte range on every long-header packet
+            // (Initial/0-RTT/Handshake/Retry all carry version 0x00000001; Version Negotiation
+            // carries 0x00000000) -- SYSTEMATICALLY supplies exactly 0x00/0x00 there, i.e. always a
+            // valid MessageType (0, "Request") and MessageID (0, "Session Initiate"). That is the
+            // exact same shape of guaranteed, spec-mandated collision as the IKE NAT-T/VXLAN one
+            // HART-IP's own port exclusion just below already documents (not a low-probability
+            // coincidence), except here it isn't confined to one or two fixed ports -- QUIC has no
+            // single standard port -- so a port exclusion can't fix it the same way; running QUIC's
+            // much stronger, self-describing check first (and returning immediately on a match)
+            // does instead, the same "stronger signal wins the collision" resolution FTP-vs-MQTT and
+            // LDAP-vs-MQTT use elsewhere in this file, just expressed as ordering rather than a
+            // looks_like_* carveout since there's no shared candidate-buffer here to gate.
+            bool want_lateral_movement_udp = options_.protocol_filter == ProtocolFilter::Auto ||
+                                              options_.protocol_filter == ProtocolFilter::LateralMovementOnly;
+            if (want_lateral_movement_udp) {
+                if (auto m = try_recognize_quic(udp.payload, udp.src_port, udp.dst_port,
+                                                 options_.extra_lateral_movement_ports)) {
+                    out.protocol = "quic";
+                    out.summary = m->summary;
+                    for (const auto& n : m->notes) out.notes.push_back(n);
+                    return out;
+                }
+            }
+
             // Tried last among these UDP checks, port-independently -- see the matching comment in
             // reassemble_tcp_payload above for why HART-IP's own weaker structural detection gate
             // is deliberately given the lowest priority in this decoder's opportunistic dispatch.
@@ -1957,9 +1992,10 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
             // matching comment on the TCP side of this dispatch for why this is tried last. Only
             // SNMP and TFTP are reachable here (SMB/SSH/HTTP/HTTPS/Telnet/FTP are all TCP-only by
             // spec, so is_tcp=false short-circuits their own checks inside
-            // try_recognize_it_lateral_movement immediately).
-            bool want_lateral_movement_udp = options_.protocol_filter == ProtocolFilter::Auto ||
-                                              options_.protocol_filter == ProtocolFilter::LateralMovementOnly;
+            // try_recognize_it_lateral_movement immediately). QUIC -- also Tier 2, joining HTTPS --
+            // is handled separately, well above (before HART-IP's own dispatch): see the comment
+            // there for why it needed to move, and `want_lateral_movement_udp` (declared there,
+            // still in scope here) is reused as-is for SNMP/TFTP below.
             if (want_lateral_movement_udp) {
                 if (auto m = try_recognize_it_lateral_movement(udp.payload, udp.src_port, udp.dst_port,
                                                                  /*is_tcp=*/false,

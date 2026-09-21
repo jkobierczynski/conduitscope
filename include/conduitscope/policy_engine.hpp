@@ -120,7 +120,7 @@ struct EthernetFlowReport {
 };
 
 // One aggregated observation of a Tier 1-5 "IT protocol an OT auditor flags" (ROADMAP item 18;
-// notable_it_protocols.hpp names the exact 42 protocol values and their tier) -- recorded
+// notable_it_protocols.hpp names the exact 43 protocol values and their tier) -- recorded
 // independent of, and never affecting, this flow/L2-flow's own Allowed/Violation/Unclassified
 // verdict above: an interactive-access or tunneling protocol reaching an OT zone is itself worth
 // flagging even inside a technically "compliant" policy that happened to allow it (this item's own
@@ -128,7 +128,7 @@ struct EthernetFlowReport {
 // PolicyReport::notable_protocols for the aggregation key.
 //
 // Unlike FlowReport, this needs no per-session state to compute client_ip/server_ip: every one of
-// these 42 protocols' own ports are guaranteed to never be "known" to this file's own
+// these 43 protocols' own ports are guaranteed to never be "known" to this file's own
 // is_known_service_port (that list is exclusively the five core OT protocol ports), so the same
 // SYN/SYN-ACK-first, lower-port-number-otherwise priority order PolicyEngine::observe already uses
 // for an ordinary TCP flow degenerates, for these protocols, to exactly the same "lower port is
@@ -138,7 +138,7 @@ struct EthernetFlowReport {
 // going to compute anyway (so a TCP notable protocol's direction is exactly as authoritative as its
 // own FlowReport's -- SYN/SYN-ACK when captured, the port heuristic otherwise).
 struct NotableProtocolFinding {
-    std::string protocol;  // one of notable_it_protocols.hpp's 42 values, e.g. "rdp"/"ssh"/"gre"
+    std::string protocol;  // one of notable_it_protocols.hpp's 43 values, e.g. "rdp"/"ssh"/"gre"
     std::string tier;      // "remote-access"/"lateral-movement"/"enterprise-trust"/
                             // "wireless-backhaul"/"tunnel-vpn" -- see notable_it_protocol_tier
     bool has_ip = true;    // false only for eapol/pppoe/mpls (EtherType-keyed, no IP layer at all --
@@ -189,7 +189,7 @@ struct PolicyReport {
 
     // "IT protocols an OT auditor flags" (ROADMAP item 18), one entry per distinct (protocol,
     // client/server or MAC pair, port) combination observed, in first-seen order -- ALWAYS
-    // populated, spanning every transport shape these 42 protocols use (ordinary TCP flows already
+    // populated, spanning every transport shape these 43 protocols use (ordinary TCP flows already
     // counted in `flows` above, UDP, an IP-protocol-number directly on IP, or raw Ethernet by
     // EtherType), and completely independent of `flows`/`ethernet_flows`/`compliant()` above: a
     // notable protocol observed on an otherwise Allowed, Violation, or Unclassified flow is recorded
@@ -244,7 +244,7 @@ public:
     // policy's conduits, so there's nothing further to evaluate for them yet.
     //
     // Independent of all of the above: a packet whose protocol is one of notable_it_protocols.hpp's
-    // 42 "IT protocols an OT auditor flags" (ROADMAP item 18) is ALSO recorded into
+    // 43 "IT protocols an OT auditor flags" (ROADMAP item 18) is ALSO recorded into
     // PolicyReport::notable_protocols, regardless of which branch above it falls into -- a TCP-based
     // one (rdp/vnc/smb/ssh/http/https/ldap/ldaps/tacacs-plus/openvpn/stt) is both folded into this
     // flow's own FlowState exactly as before (still Unclassified there today, see finish()'s

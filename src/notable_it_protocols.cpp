@@ -26,6 +26,8 @@ const std::unordered_map<std::string, std::string>& tier_by_protocol() {
         {"telnet", "lateral-movement"},
         {"ftp", "lateral-movement"},
         {"tftp", "lateral-movement"},
+        {"quic", "lateral-movement"},  // quic.hpp -- joins Tier 2 alongside HTTPS, see that file's
+                                        // own file header comment for why
 
         // Tier 3 -- enterprise-trust-boundary (it_protocols.hpp: ItEnterpriseTrustMatch::protocol),
         // plus EAPOL (eapol.hpp), which is architecturally EtherType-keyed but the same ROADMAP tier.

@@ -207,7 +207,7 @@ void PolicyEngine::observe(const DecodedPacket& dp) {
             // own ip.protocol dispatch, all of which leave src_port/dst_port at 0). Neither shape has
             // a session/handshake to decide direction from, so this reuses src_is_client_by_port --
             // this file's own existing TCP-flow port-heuristic fallback -- which, since none of this
-            // feature's 42 ports are ever in is_known_service_port's OT-only list, always reduces to
+            // feature's 43 ports are ever in is_known_service_port's OT-only list, always reduces to
             // "lower port number is the server" for every one of them; for the port-protocol-number
             // shape (src_port == dst_port == 0) that's a meaningless tie-break, so has_port/direction
             // are both left false there and only the canonical address pair is recorded.

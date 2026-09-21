@@ -1143,8 +1143,8 @@ Groundwork / v0.1.0. What works right now:
   docs/DEVELOPMENT.md's ROADMAP item 6.
 - ROADMAP item 18 is now fully done: `policy validate` and `inventory` both
   surface a "notable IT protocols" finding, listing every observed instance
-  of one of the 42 protocols named across the five tiers above (RDP/VNC/
-  TeamViewer/AnyDesk/Zoom; SMB/SSH/HTTP/HTTPS/SNMP/Telnet/FTP/TFTP; NTP/
+  of one of the 43 protocols named across the five tiers above (RDP/VNC/
+  TeamViewer/AnyDesk/Zoom; SMB/SSH/HTTP/HTTPS/SNMP/Telnet/FTP/TFTP/QUIC; NTP/
   DHCP/LDAP/LDAPS/RADIUS/TACACS+/EAPOL; CAPWAP/LWAPP/GTP-U/PPPoE; GRE/NVGRE/
   EoIP/ESP/AH/IP-in-IP/6in4/L2TP/IKE/VXLAN/Geneve/WireGuard/OpenVPN/DTLS-
   tunnel/STT/MPLS) -- previously these protocols were only named in `decode`

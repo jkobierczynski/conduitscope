@@ -393,12 +393,14 @@ never port\-gated regardless.
 .B \-\-lateral\-movement\-port \fIPORT\fR
 Additional TCP or UDP port to treat as expected for the Tier 2 "IT
 protocols an OT auditor flags" family (SMB/SSH/HTTP/HTTPS/SNMPv1v2c/
-Telnet/FTP/TFTP; built\-in defaults: 445, 139, 22, 80/8080/8000, 443/8443,
-161, 162, 23, 21, 69). Repeatable. One shared option across all eight.
-Widens detection in \fBauto\fR mode for SNMP/Telnet/FTP/TFTP's own
-port\-gated checks and HTTPS's port\-only fallback \-\- SMB's direct\-hosting
-magic, SSH's version\-exchange banner, and HTTP's request\-line/status\-line
-are never port\-gated regardless.
+Telnet/FTP/TFTP/QUIC; built\-in defaults: 445, 139, 22, 80/8080/8000,
+443/8443, 161, 162, 23, 21, 69; QUIC shares HTTPS's own 443/8443 defaults).
+Repeatable. One shared option across all nine. Widens detection in
+\fBauto\fR mode for SNMP/Telnet/FTP/
+TFTP's own port\-gated checks, HTTPS's port\-only fallback, and QUIC's own
+short\-header (1\-RTT) port\-only fallback \-\- SMB's direct\-hosting magic,
+SSH's version\-exchange banner, HTTP's request\-line/status\-line, and
+QUIC's long\-header structural check are never port\-gated regardless.
 .TP
 .B \-\-enterprise\-trust\-port \fIPORT\fR
 Additional TCP or UDP port to treat as expected for the Tier 3 "IT

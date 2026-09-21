@@ -67,72 +67,75 @@ std::optional<std::string> doh_provider_for_hostname(const std::string& hostname
 
 }  // namespace
 
-std::optional<TlsClientHelloInfo> try_parse_tls_client_hello(ByteSpan payload) {
-    if (payload.size() < 9) return std::nullopt;
+std::optional<TlsClientHelloInfo> try_parse_tls_handshake_client_hello(ByteSpan handshake_msg) {
+    if (handshake_msg.size() < 4) return std::nullopt;
     try {
-        if (payload.at(0) != 0x16) return std::nullopt;  // ContentType: Handshake
-        if (payload.at(1) != 0x03) return std::nullopt;  // legacy_record_version major, always 0x03
-        uint16_t record_length = static_cast<uint16_t>((payload.at(3) << 8) | payload.at(4));
-        if (5 + static_cast<size_t>(record_length) > payload.size()) return std::nullopt;
-
-        size_t pos = 5;
-        if (payload.at(pos) != 0x01) return std::nullopt;  // HandshakeType: ClientHello
-        uint32_t hs_length = (static_cast<uint32_t>(payload.at(pos + 1)) << 16) |
-                              (static_cast<uint32_t>(payload.at(pos + 2)) << 8) | payload.at(pos + 3);
+        size_t pos = 0;
+        if (handshake_msg.at(pos) != 0x01) return std::nullopt;  // HandshakeType: ClientHello
+        uint32_t hs_length = (static_cast<uint32_t>(handshake_msg.at(pos + 1)) << 16) |
+                              (static_cast<uint32_t>(handshake_msg.at(pos + 2)) << 8) | handshake_msg.at(pos + 3);
         pos += 4;
         size_t hs_end = pos + hs_length;
-        if (hs_end > payload.size()) return std::nullopt;
+        if (hs_end > handshake_msg.size()) return std::nullopt;
 
         if (pos + 2 + 32 > hs_end) return std::nullopt;
         pos += 2 + 32;  // legacy_version + random
 
         if (pos >= hs_end) return std::nullopt;
-        uint8_t session_id_len = payload.at(pos);
+        uint8_t session_id_len = handshake_msg.at(pos);
         pos += 1 + session_id_len;
         if (pos > hs_end) return std::nullopt;
 
         if (pos + 2 > hs_end) return std::nullopt;
-        uint16_t cipher_suites_len = static_cast<uint16_t>((payload.at(pos) << 8) | payload.at(pos + 1));
+        uint16_t cipher_suites_len =
+            static_cast<uint16_t>((handshake_msg.at(pos) << 8) | handshake_msg.at(pos + 1));
         pos += 2 + cipher_suites_len;
         if (pos > hs_end) return std::nullopt;
 
         if (pos + 1 > hs_end) return std::nullopt;
-        uint8_t compression_len = payload.at(pos);
+        uint8_t compression_len = handshake_msg.at(pos);
         pos += 1 + compression_len;
         if (pos > hs_end) return std::nullopt;
 
         TlsClientHelloInfo info;
         if (pos + 2 <= hs_end) {  // extensions block is optional (RFC 8446 4.1.2)
-            uint16_t extensions_len = static_cast<uint16_t>((payload.at(pos) << 8) | payload.at(pos + 1));
+            uint16_t extensions_len =
+                static_cast<uint16_t>((handshake_msg.at(pos) << 8) | handshake_msg.at(pos + 1));
             pos += 2;
             size_t ext_end = pos + extensions_len;
             if (ext_end > hs_end) return std::nullopt;
             while (pos + 4 <= ext_end) {
-                uint16_t ext_type = static_cast<uint16_t>((payload.at(pos) << 8) | payload.at(pos + 1));
-                uint16_t ext_len = static_cast<uint16_t>((payload.at(pos + 2) << 8) | payload.at(pos + 3));
+                uint16_t ext_type = static_cast<uint16_t>((handshake_msg.at(pos) << 8) | handshake_msg.at(pos + 1));
+                uint16_t ext_len =
+                    static_cast<uint16_t>((handshake_msg.at(pos + 2) << 8) | handshake_msg.at(pos + 3));
                 pos += 4;
                 if (pos + ext_len > ext_end) return std::nullopt;
                 if (ext_type == 0x0000 && ext_len >= 2) {  // server_name (RFC 6066 3)
-                    uint16_t list_len = static_cast<uint16_t>((payload.at(pos) << 8) | payload.at(pos + 1));
+                    uint16_t list_len =
+                        static_cast<uint16_t>((handshake_msg.at(pos) << 8) | handshake_msg.at(pos + 1));
                     size_t p = pos + 2;
                     size_t list_end = std::min<size_t>(pos + 2 + list_len, pos + ext_len);
                     if (p + 3 <= list_end) {
-                        uint8_t name_type = payload.at(p);
-                        uint16_t name_len = static_cast<uint16_t>((payload.at(p + 1) << 8) | payload.at(p + 2));
+                        uint8_t name_type = handshake_msg.at(p);
+                        uint16_t name_len =
+                            static_cast<uint16_t>((handshake_msg.at(p + 1) << 8) | handshake_msg.at(p + 2));
                         p += 3;
                         if (name_type == 0 && p + name_len <= list_end) {
-                            info.sni = std::string(reinterpret_cast<const char*>(payload.data() + p), name_len);
+                            info.sni =
+                                std::string(reinterpret_cast<const char*>(handshake_msg.data() + p), name_len);
                         }
                     }
                 } else if (ext_type == 0x0010 && ext_len >= 2) {  // ALPN (RFC 7301)
-                    uint16_t list_len = static_cast<uint16_t>((payload.at(pos) << 8) | payload.at(pos + 1));
+                    uint16_t list_len =
+                        static_cast<uint16_t>((handshake_msg.at(pos) << 8) | handshake_msg.at(pos + 1));
                     size_t p = pos + 2;
                     size_t list_end = std::min<size_t>(pos + 2 + list_len, pos + ext_len);
                     while (p < list_end) {
-                        uint8_t proto_len = payload.at(p);
+                        uint8_t proto_len = handshake_msg.at(p);
                         p += 1;
                         if (p + proto_len > list_end) break;
-                        info.alpn_protocols.emplace_back(reinterpret_cast<const char*>(payload.data() + p), proto_len);
+                        info.alpn_protocols.emplace_back(reinterpret_cast<const char*>(handshake_msg.data() + p),
+                                                          proto_len);
                         p += proto_len;
                     }
                 }
@@ -140,6 +143,19 @@ std::optional<TlsClientHelloInfo> try_parse_tls_client_hello(ByteSpan payload) {
             }
         }
         return info;
+    } catch (const ParseError&) {
+        return std::nullopt;
+    }
+}
+
+std::optional<TlsClientHelloInfo> try_parse_tls_client_hello(ByteSpan payload) {
+    if (payload.size() < 9) return std::nullopt;
+    try {
+        if (payload.at(0) != 0x16) return std::nullopt;  // ContentType: Handshake
+        if (payload.at(1) != 0x03) return std::nullopt;  // legacy_record_version major, always 0x03
+        uint16_t record_length = static_cast<uint16_t>((payload.at(3) << 8) | payload.at(4));
+        if (5 + static_cast<size_t>(record_length) > payload.size()) return std::nullopt;
+        return try_parse_tls_handshake_client_hello(payload.from(5));
     } catch (const ParseError&) {
         return std::nullopt;
     }

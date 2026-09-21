@@ -144,6 +144,14 @@ constexpr const char* kItalicYellow = "\033[3;33m";
 constexpr const char* kItalicBlue = "\033[3;34m";
 constexpr const char* kItalicMagenta = "\033[3;35m";
 constexpr const char* kItalicCyan = "\033[3;36m";
+// QUIC (added well after the rest of this tier -- see quic.hpp) is Tier 2's one outlier: every
+// other protocol here is named/recognized from a port or a cleartext structural signature alone,
+// while QUIC's own detection genuinely DECRYPTS an Initial packet (RFC 9001's publicly-derivable
+// keys) to surface its ClientHello SNI. Plain (not bold) italic white -- the one hue/weight
+// combination the rest of this six-hue italic family (red/green/yellow/blue/magenta/cyan, see
+// just above) never used -- the same "spend an unused weight+hue combination on this tier's own
+// outlier" reasoning mpls.hpp's own strikethrough-white choice documents for Tier 5.
+constexpr const char* kItalicWhite = "\033[3;37m";
 constexpr const char* kBoldItalicRed = "\033[1;3;31m";
 constexpr const char* kBoldItalicGreen = "\033[1;3;32m";
 // Tier 3 "IT protocols an OT auditor flags" round (NTP/DHCP/LDAP/LDAPS/RADIUS/TACACS+/EAPOL -- see
@@ -318,6 +326,7 @@ const char* protocol_tag_color(const std::string& protocol) {
     if (protocol == "ssh") return kItalicGreen;
     if (protocol == "http") return kItalicYellow;
     if (protocol == "https") return kItalicBlue;
+    if (protocol == "quic") return kItalicWhite;  // see kItalicWhite's own comment above
     if (protocol == "snmp") return kItalicMagenta;
     if (protocol == "telnet") return kItalicCyan;
     if (protocol == "ftp") return kBoldItalicRed;       // also a mild "cleartext credentials" cue,

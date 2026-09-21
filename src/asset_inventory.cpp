@@ -563,7 +563,7 @@ std::string protocol_list_text(const std::vector<std::string>& protocols) {
 // best-effort, port-heuristic guess (this file's own write_inventory_report_text's equivalent
 // section for `policy validate`, write_notable_protocols_text in policy_engine.cpp, additionally
 // distinguishes a handshake-confirmed direction from a heuristic one -- this engine has no
-// equivalent per-session state for these 42 protocols to draw that distinction from, so every entry
+// equivalent per-session state for these 43 protocols to draw that distinction from, so every entry
 // here is annotated the same way).
 void write_notable_protocols_text(std::ostream& out, const AssetInventoryReport& report, const Resolver& resolver) {
     out << "NOTABLE IT PROTOCOLS (" << report.notable_protocols.size() << "):\n";

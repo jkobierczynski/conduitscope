@@ -41,6 +41,7 @@
 #include "conduitscope/pim.hpp"
 #include "conduitscope/pppoe.hpp"
 #include "conduitscope/profinet.hpp"
+#include "conduitscope/quic.hpp"
 #include "conduitscope/rip.hpp"
 #include "conduitscope/s7commplus.hpp"
 #include "conduitscope/stp.hpp"
