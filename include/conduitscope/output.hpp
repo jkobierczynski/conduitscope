@@ -154,6 +154,13 @@ private:
     // Count of responses authoritatively paired (by MBAP transaction ID + TCP session, not the
     // payload-shape heuristic) to a specific earlier request -- see Decoder::pair_modbus_transaction.
     size_t modbus_paired_responses_ = 0;
+    // registration-model decoder refactor (see decoder.hpp's DecodedPacket::result): TwinCAT's own
+    // Command ID breakdown, read from DecodedPacket::result rather than a twincat_* flat field --
+    // see write_packet's own p.protocol == "twincat" block (output.cpp) and twincat.hpp's file
+    // header comment for why this protocol has no flat fields at all.
+    std::map<std::string, size_t> twincat_command_counts_;
+    size_t twincat_paired_responses_ = 0;  // authoritatively paired by Invoke ID, not a heuristic
+                                             // -- TwinCAT's analog of modbus_paired_responses_ above
     std::map<std::string, size_t> s7comm_function_counts_;
     std::map<std::string, size_t> dnp3_function_counts_;
     std::map<std::string, size_t> iec104_asdu_type_counts_;

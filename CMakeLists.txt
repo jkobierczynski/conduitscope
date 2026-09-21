@@ -14,7 +14,7 @@ endif()
 # is meaningless for a multi-config generator (Visual Studio, Xcode: CMAKE_CONFIGURATION_TYPES is
 # set instead, and the actual configuration is picked at BUILD time via --config, not here at
 # configure time), so it's always empty in that case -- confirmed on a real Windows/MSVC build,
-# which without this fallback reports "conduitscope 0.1.7  [MSVC ..., Windows,  build, ...]" (note
+# which without this fallback reports "conduitscope 0.2.0  [MSVC ..., Windows,  build, ...]" (note
 # the double space where an empty CMAKE_BUILD_TYPE left a hole). "multi-config" is honest about why
 # no single value is available here, rather than guessing a config that may not be the one actually
 # built.
@@ -89,6 +89,8 @@ add_library(conduitscope_core STATIC
   src/pppoe.cpp
   src/tunnel_vpn.cpp
   src/mpls.cpp
+  src/twincat.cpp
+  src/protocol_registry.cpp
   src/decoder.cpp
   src/resolver.cpp
   src/time_format.cpp
@@ -4732,6 +4734,120 @@ set_tests_properties(stats_mode_ffhse PROPERTIES
   PASS_REGULAR_EXPRESSION "ffhse sub-protocols:.*FDA Session Management.*FMS.*LAN Redundancy.*SM.*ffhse messages:.*ffhse message bodies fully decoded \\(Tier 1\\): [0-9]+")
 
 # ---------------------------------------------------------------------------------------------
+# Beckhoff TwinCAT / ADS over AMS/TCP (TCP port 48898) -- see twincat.hpp's file header comment
+# for the exact wire format each assertion below exercises, and tools/make_sample_pcap.py's
+# build_twincat_sample for the exact byte layout. TwinCAT is the first protocol in this codebase
+# built entirely on the ProtocolDecoder interface (protocol_decoder.hpp) -- see
+# docs/DEVELOPMENT.md's "registration-model decoder refactor" entry. Fixture:
+# tests/sample_twincat.pcap.
+# ---------------------------------------------------------------------------------------------
+
+add_test(NAME twincat_read_device_info_paired
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_twincat.pcap" --format text)
+set_tests_properties(twincat_read_device_info_paired PROPERTIES
+  PASS_REGULAR_EXPRESSION "note: authoritative pairing: response to Invoke ID 1 -- matches the request seen in packet #1 \\(ReadDeviceInfo: ReadDeviceInfo request \\(no payload\\)\\)")
+
+add_test(NAME twincat_read_write_readwrite_index_addressing_in_json
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_twincat.pcap" --format json)
+set_tests_properties(twincat_read_write_readwrite_index_addressing_in_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"twincat_command\": \"Read\",\n *\"twincat_is_response\": false,\n *\"twincat_invoke_id\": 2,.*\"twincat_index_group\": 16416,\n *\"twincat_index_offset\": 257")
+
+add_test(NAME twincat_write_and_readwrite_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_twincat.pcap" --format text)
+set_tests_properties(twincat_write_and_readwrite_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[twincat\\]  Write request: group=0x4020 offset=0x101, writing 4 byte\\(s\\).*\\[twincat\\]  Write response: result=0x0.*\\[twincat\\]  ReadWrite request: group=0xf080 offset=0x0, reading 8 byte\\(s\\), writing 4 byte\\(s\\).*\\[twincat\\]  ReadWrite response: result=0x0, 8 byte\\(s\\) of data")
+
+add_test(NAME twincat_readstate_and_writecontrol_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_twincat.pcap" --format text)
+set_tests_properties(twincat_readstate_and_writecontrol_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[twincat\\]  ReadState response: result=0x0, ADS state 5, device state 0.*\\[twincat\\]  WriteControl request: requested ADS state 5, device state 0, 0 byte\\(s\\) of associated data")
+
+add_test(NAME twincat_add_and_delete_device_notification_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_twincat.pcap" --format text)
+set_tests_properties(twincat_add_and_delete_device_notification_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[twincat\\]  AddDeviceNotification request: group=0x4020 offset=0x101, 4 byte\\(s\\), mode 3, max delay 0 \\(100ns units\\), cycle time 200000 \\(100ns units\\).*\\[twincat\\]  AddDeviceNotification response: result=0x0 handle=0xabcd1234.*\\[twincat\\]  DeleteDeviceNotification request: handle=0xabcd1234.*\\[twincat\\]  DeleteDeviceNotification response: result=0x0")
+
+# DeviceNotification is an unsolicited push -- excluded from Invoke-ID pairing entirely (no
+# "authoritative pairing"/"no outstanding request" note at all), decoded structurally
+# (stamp/sample counts) but not per-sample, with an explicit note saying so.
+add_test(NAME twincat_device_notification_structural_only_not_paired
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_twincat.pcap" --format text)
+set_tests_properties(twincat_device_notification_structural_only_not_paired PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[twincat\\]  DeviceNotification request: 36 byte\\(s\\), 1 stamp\\(s\\), 2 sample\\(s\\) total \\(values not decoded, see twincat\\.hpp\\)[^\n]*\n *note: DeviceNotification sample values are not decoded"
+  FAIL_REGULAR_EXPRESSION "\\[twincat\\]  DeviceNotification[^\n]*\n *note: (authoritative pairing|no outstanding request)")
+
+# Invoke ID reused on the same direction before its first request was ever paired -- must not be
+# silently overwritten, and the eventual response must pair to the SECOND (most recently
+# outstanding) request, not the first, mirroring modbus_pairing's own scenario B.
+add_test(NAME twincat_invoke_id_reused_pairs_to_most_recent_request
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_twincat.pcap" --format text)
+set_tests_properties(twincat_invoke_id_reused_pairs_to_most_recent_request PROPERTIES
+  PASS_REGULAR_EXPRESSION "note: Invoke ID 9 reused on this AMS session before its previous outstanding request \\(packet #18\\) was matched with a response.*\\[twincat\\]  Read response: result=0x0, 2 byte\\(s\\) of data[^\n]*\n *note: authoritative pairing: response to Invoke ID 9 -- matches the request seen in packet #19")
+
+add_test(NAME twincat_orphan_response_no_outstanding_request_noted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_twincat.pcap" --format text)
+set_tests_properties(twincat_orphan_response_no_outstanding_request_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "note: no outstanding request found on this AMS session for Invoke ID 999")
+
+# A ReadState response payload too short for its own command's expected shape (decode_payload's
+# own internal ParseError catch, distinct from try_parse_twincat's outer structural gate) --
+# reported as a note, the frame itself still recognized as TwinCAT (the AMS header decoded fine).
+add_test(NAME twincat_payload_truncated_relative_to_command_shape_noted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_twincat.pcap" --format text)
+set_tests_properties(twincat_payload_truncated_relative_to_command_shape_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[twincat\\]  ReadState response \\(payload shorter than this command's expected shape -- not fully decoded\\)\n *note: payload truncated or malformed relative to ReadState's expected shape; only the AMS header was decoded")
+
+# Structural detection gate rejections: an unrecognized Command ID, a missing ADS command State
+# Flags bit, and an AMS/TCP-vs-AMS-header Data Length cross-check mismatch must each be rejected
+# outright (never misdetected as twincat), falling through to generic "tcp" -- see twincat.hpp's
+# STRUCTURAL DETECTION GATE paragraph.
+add_test(NAME twincat_unrecognized_command_id_not_misdetected
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_twincat.pcap" --format text)
+set_tests_properties(twincat_unrecognized_command_id_not_misdetected PROPERTIES
+  PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.50:53000 -> 192\\.168\\.1\\.10:48898  \\[tcp\\]  TCP payload of 42 byte\\(s\\)")
+
+add_test(NAME twincat_missing_ads_command_flag_not_misdetected
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_twincat.pcap" --format text)
+set_tests_properties(twincat_missing_ads_command_flag_not_misdetected PROPERTIES
+  PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.50:53000 -> 192\\.168\\.1\\.10:48898  \\[tcp\\]  TCP payload of 38 byte\\(s\\)")
+
+add_test(NAME twincat_data_length_cross_check_mismatch_not_misdetected
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_twincat.pcap" --format text)
+set_tests_properties(twincat_data_length_cross_check_mismatch_not_misdetected PROPERTIES
+  PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.50:53000 -> 192\\.168\\.1\\.10:48898  \\[tcp\\]  TCP payload of 42 byte\\(s\\)")
+
+add_test(NAME twincat_non_standard_port_noted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_twincat.pcap" --format text)
+set_tests_properties(twincat_non_standard_port_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.50:53500 -> 192\\.168\\.1\\.10:3000  \\[twincat\\]  ReadDeviceInfo request \\(no payload\\)[^\n]*\n *note: seen on TCP port 53500->3000, which is not a configured/standard TwinCAT/AMS port \\(48898\\)")
+
+# One AMS/TCP frame split across two TCP segments, the split point deliberately after the full
+# 38-byte AMS/TCP+AMS header (see build_twincat_sample's own comment on why) -- exercises
+# TwinCatDecoder::tcp_declared_length via Decoder::reassemble_tcp_payload, the same split/rejoin
+# shape build_tcp_reassembly_sample already covers for Modbus/DNP3/TPKT, and confirms Invoke-ID
+# pairing still resolves correctly once the response is fully reassembled.
+add_test(NAME twincat_tcp_segment_split_reassembly_still_pairs
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_twincat.pcap" --format text)
+set_tests_properties(twincat_tcp_segment_split_reassembly_still_pairs PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[tcp\\]  buffering a AMS/TCP \\(TwinCAT/ADS\\) PDU/frame split across TCP segments 48898->53000: 40 of 54 declared byte\\(s\\) seen so far across 1 segment\\(s\\) on this flow, waiting for more.*\\[twincat\\]  Read response: result=0x0, 8 byte\\(s\\) of data[^\n]*\n *note: reassembled a AMS/TCP \\(TwinCAT/ADS\\) PDU/frame from 54 byte\\(s\\) spanning 2 TCP segments on this flow\n *note: authoritative pairing: response to Invoke ID 15")
+
+add_test(NAME twincat_stats_counted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_twincat.pcap" --stats)
+set_tests_properties(twincat_stats_counted PROPERTIES
+  PASS_REGULAR_EXPRESSION "protocols:\n *tcp +4\n *twincat +25.*twincat/ads command ids:\n *AddDeviceNotification +2\n *DeleteDeviceNotification +2\n *DeviceNotification +1\n *Read +8\n *ReadDeviceInfo +3\n *ReadState +3\n *ReadWrite +2\n *Write +2\n *WriteControl +2\ntwincat responses authoritatively paired \\(invoke id, not heuristic\\): 10")
+
+add_test(NAME twincat_protocol_filter_excludes_other_protocols
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --protocol twincat --format text)
+set_tests_properties(twincat_protocol_filter_excludes_other_protocols PROPERTIES
+  FAIL_REGULAR_EXPRESSION "\\[modbus\\]")
+
+add_test(NAME twincat_protocol_filter_includes_only_twincat
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_twincat.pcap" --protocol twincat --format text)
+set_tests_properties(twincat_protocol_filter_includes_only_twincat PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[twincat\\]  ReadDeviceInfo request \\(no payload\\)"
+  FAIL_REGULAR_EXPRESSION "\\[modbus\\]")
+
+# ---------------------------------------------------------------------------------------------
 # DNS / mDNS / LLMNR / NetBIOS Name Service (NBT-NS) decoding, and DNS-over-HTTPS detection --
 # see dns.hpp/nbns.hpp/tls_sni.hpp's own file header comments. Fixtures generated by
 # tools/make_sample_pcap.py's build_dns_sample()/build_mdns_sample()/build_llmnr_sample()/
@@ -5879,6 +5995,66 @@ add_test(NAME policy_unclassified_endpoint_reported
   COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/unclassified_zone.yaml")
 set_tests_properties(policy_unclassified_endpoint_reported PROPERTIES
   PASS_REGULAR_EXPRESSION "Result: NON-COMPLIANT \\(0 violation\\(s\\), 1 unclassified flow\\(s\\)\\).*no declared zone contains 192.168.1.10")
+
+# ---------------------------------------------------------------------------------------------
+# --summarize-unclassified (policy_engine.cpp's summarize_unclassified_flows/
+# write_unclassified_flow_group_summarized_text) -- added after a real, busy capture produced a
+# 37MB/567K-line text report, almost entirely from UNCLASSIFIED TRAFFIC entries for host pairs
+# reconnecting thousands of times (a new TCP flow, and so a new report entry, on every reconnect).
+# tests/sample_summarize_unclassified.pcap (tools/make_sample_pcap.py's
+# build_summarize_unclassified_sample) has three flow patterns: A (3 flows, same client/server/
+# port, both zone-classified -- the "no recognized protocol" unclassified reason), B (2 flows, same
+# client/server as A but a DIFFERENT port, proving the grouping key includes port), and C (2 flows,
+# to an address outside every declared zone -- the OTHER unclassified reason, "no declared zone
+# contains ..."). See tests/policies/summarize_unclassified.yaml's own header comment for the zones.
+# ---------------------------------------------------------------------------------------------
+
+add_test(NAME summarize_unclassified_off_by_default
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_summarize_unclassified.pcap" --policy "${POLICY_DIR}/summarize_unclassified.yaml")
+set_tests_properties(summarize_unclassified_off_by_default PROPERTIES
+  # Without the flag, all 7 flows are still listed individually -- proves the flag is opt-in and
+  # nothing about the default report changed by adding this feature.
+  PASS_REGULAR_EXPRESSION "UNCLASSIFIED TRAFFIC \\(7\\):\n(  \\[[0-9]+\\].*\n)+"
+  FAIL_REGULAR_EXPRESSION "summarized into")
+
+add_test(NAME summarize_unclassified_collapses_into_three_groups
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_summarize_unclassified.pcap" --policy "${POLICY_DIR}/summarize_unclassified.yaml" --summarize-unclassified)
+set_tests_properties(summarize_unclassified_collapses_into_three_groups PROPERTIES
+  PASS_REGULAR_EXPRESSION "UNCLASSIFIED TRAFFIC \\(7 flow\\(s\\), summarized into 3 distinct pattern\\(s\\)")
+
+add_test(NAME summarize_unclassified_pattern_a_flow_and_packet_counts
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_summarize_unclassified.pcap" --policy "${POLICY_DIR}/summarize_unclassified.yaml" --summarize-unclassified)
+set_tests_properties(summarize_unclassified_pattern_a_flow_and_packet_counts PROPERTIES
+  PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.50 -> 192\\.168\\.1\\.10:9999  -- 3 flow\\(s\\), 6 packet\\(s\\) total\n *zones: hmi_zone -> plc_zone\n *mac: [0-9a-f:]+ -> [0-9a-f:]+\n *no recognized OT protocol traffic was found on any of these flows")
+
+add_test(NAME summarize_unclassified_pattern_b_kept_separate_by_port
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_summarize_unclassified.pcap" --policy "${POLICY_DIR}/summarize_unclassified.yaml" --summarize-unclassified)
+set_tests_properties(summarize_unclassified_pattern_b_kept_separate_by_port PROPERTIES
+  # Same client/server IPs as pattern A, but port 8888 not 9999 -- must be its own group (2 flows,
+  # 4 packets), not folded into pattern A's.
+  PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.50 -> 192\\.168\\.1\\.10:8888  -- 2 flow\\(s\\), 4 packet\\(s\\) total")
+
+add_test(NAME summarize_unclassified_pattern_c_zone_reason_reused
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_summarize_unclassified.pcap" --policy "${POLICY_DIR}/summarize_unclassified.yaml" --summarize-unclassified)
+set_tests_properties(summarize_unclassified_pattern_c_zone_reason_reused PROPERTIES
+  PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.50 -> 10\\.0\\.0\\.5:7777  -- 2 flow\\(s\\), 4 packet\\(s\\) total\n *zones: hmi_zone -> unclassified\n *mac: [0-9a-f:]+ -> [0-9a-f:]+\n *no declared zone contains 10\\.0\\.0\\.5")
+
+add_test(NAME summarize_unclassified_does_not_affect_violations_or_allowed
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/wrong_port.yaml" --summarize-unclassified)
+set_tests_properties(summarize_unclassified_does_not_affect_violations_or_allowed PROPERTIES
+  # This fixture/policy combination has 1 violation and 0 unclassified flows (see
+  # policy_wrong_port_is_a_violation above) -- VIOLATIONS renders exactly as it always does,
+  # completely unaffected by this flag, which only ever changes the UNCLASSIFIED TRAFFIC section.
+  PASS_REGULAR_EXPRESSION "Result: NON-COMPLIANT \\(1 violation\\(s\\), 0 unclassified flow\\(s\\)\\).*a conduit exists between zone 'hmi_zone' and zone 'plc_zone', but none permits modbus traffic on port 502")
+
+add_test(NAME summarize_unclassified_ignored_by_json_format
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_summarize_unclassified.pcap" --policy "${POLICY_DIR}/summarize_unclassified.yaml" --format json --summarize-unclassified)
+set_tests_properties(summarize_unclassified_ignored_by_json_format PROPERTIES
+  # The JSON report has no equivalent of this flag at all (see write_policy_report_text's own doc
+  # comment, policy_engine.hpp) -- unclassified_count is still 7, not collapsed to 3, proving every
+  # flow is still listed individually.
+  PASS_REGULAR_EXPRESSION "\"unclassified_count\": 7"
+  FAIL_REGULAR_EXPRESSION "summarized")
 
 add_test(NAME policy_bidirectional_conduit_matches_reverse_direction
   COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bidirectional.yaml")

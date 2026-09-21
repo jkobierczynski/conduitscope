@@ -701,6 +701,8 @@ bool Decoder::reassemble_tcp_payload(const TcpSegment& tcp, const std::string& f
                       options_.protocol_filter == ProtocolFilter::EnipOnly;
     bool want_modbus = options_.protocol_filter == ProtocolFilter::Auto ||
                         options_.protocol_filter == ProtocolFilter::ModbusOnly;
+    bool want_twincat = options_.protocol_filter == ProtocolFilter::Auto ||
+                         options_.protocol_filter == ProtocolFilter::TwinCatOnly;
     bool want_dnp3 = options_.protocol_filter == ProtocolFilter::Auto ||
                       options_.protocol_filter == ProtocolFilter::Dnp3Only;
     bool want_s7comm = options_.protocol_filter == ProtocolFilter::Auto ||
@@ -764,9 +766,20 @@ bool Decoder::reassemble_tcp_payload(const TcpSegment& tcp, const std::string& f
         }
     }
     if (!declared && want_modbus) {
-        if (auto d = modbus_tcp_declared_length(candidate)) {
+        // Registration-model pilot (Stage 2): modbus_tcp_declared_length is now reached through
+        // ModbusDecoder::tcp_declared_length rather than called directly -- same function, same
+        // semantics, see modbus.hpp.
+        if (auto d = modbus_decoder().tcp_declared_length(candidate)) {
             declared = d;
             which = "Modbus/TCP";
+        }
+    }
+    // TwinCAT/ADS (AMS/TCP), tried right after Modbus -- see twincat.hpp's file header comment
+    // and protocol_registry.hpp for the full collision survey/ordering rationale.
+    if (!declared && want_twincat) {
+        if (auto d = twincat_decoder().tcp_declared_length(candidate)) {
+            declared = d;
+            which = "AMS/TCP (TwinCAT/ADS)";
         }
     }
     if (!declared && want_dnp3) {
@@ -898,65 +911,9 @@ bool Decoder::reassemble_tcp_payload(const TcpSegment& tcp, const std::string& f
     return true;
 }
 
-void Decoder::pair_modbus_transaction(const ModbusFrame& mb, const std::string& flow_key,
-                                       const std::string& session_key, size_t packet_index,
-                                       DecodedPacket& out) const {
-    auto& pending_for_session = modbus_pending_[session_key];
-    auto it = pending_for_session.find(mb.transaction_id);
-
-    if (it != pending_for_session.end()) {
-        ModbusPendingRequest& pending = it->second;
-        if (pending.flow_key != flow_key) {
-            // Opposite direction: authoritatively the response to that specific request.
-            out.modbus_is_paired_response = true;
-            out.modbus_paired_request_index = pending.packet_index;
-            std::ostringstream s;
-            s << "authoritative pairing: response to transaction id " << mb.transaction_id << " (unit "
-              << static_cast<unsigned>(mb.unit_id) << ") -- matches the request seen in packet #"
-              << pending.packet_index << " (" << pending.function_name << ": " << pending.request_summary
-              << "), paired by TCP session + transaction ID, not the payload-shape heuristic above";
-            if (pending.unit_id != mb.unit_id) {
-                s << " [unit id mismatch: request was unit " << static_cast<unsigned>(pending.unit_id) << "]";
-            }
-            out.notes.push_back(s.str());
-            pending_for_session.erase(it);
-            return;
-        }
-        // Same direction: transaction ID reused before its previous request was ever paired.
-        out.notes.push_back("transaction id " + std::to_string(mb.transaction_id) +
-                             " reused on this TCP flow before its previous outstanding request (packet #" +
-                             std::to_string(pending.packet_index) +
-                             ") was matched with a response -- possibly a retry, an orphaned request, or "
-                             "out-of-order capture; treating this as a new outstanding request");
-        pending = ModbusPendingRequest{packet_index, flow_key, mb.function_name, mb.summary, mb.unit_id};
-        return;
-    }
-
-    // No outstanding request found for this transaction ID on this session. If the payload-shape
-    // heuristic already called this packet a response, it's an orphan -- nothing to pair it
-    // against, most likely because its request was sent before this capture began (or used a
-    // different transaction ID/session). Otherwise, record it as newly outstanding so a later
-    // opposite-direction packet with the same transaction ID can pair against it.
-    bool looks_like_response = mb.is_exception || mb.summary.rfind("response:", 0) == 0;
-    if (looks_like_response) {
-        out.notes.push_back("no outstanding request found on this TCP session for transaction id " +
-                             std::to_string(mb.transaction_id) +
-                             " -- the payload-shape heuristic above classified this packet as a response, "
-                             "but its request was never seen on this session (capture may have started "
-                             "after it was sent, or it used a different transaction ID/session)");
-        return;
-    }
-
-    // Capacity guard against a pathological/malformed capture leaking memory -- a real session
-    // realistically never has anywhere near this many transactions outstanding at once, so hitting
-    // this just means new requests stop being recorded until earlier ones are paired off.
-    constexpr size_t kMaxTrackedTransactionsPerSession = 2000;
-    if (pending_for_session.size() >= kMaxTrackedTransactionsPerSession) {
-        return;
-    }
-    pending_for_session[mb.transaction_id] =
-        ModbusPendingRequest{packet_index, flow_key, mb.function_name, mb.summary, mb.unit_id};
-}
+// Decoder::pair_modbus_transaction used to live here. It moved to ModbusDecoder::decode
+// (modbus.cpp) as part of the registration-model decoder refactor's pilot (Stage 2) -- see
+// modbus.hpp's ModbusPendingRequest/ModbusFlowState and protocol_decoder.hpp's DecodeContext.
 
 bool Decoder::reassemble_cotp_data_frame(const CotpFrame& cotp, const std::string& flow_key, DecodedPacket& out,
                                           std::vector<uint8_t>& storage, ByteSpan& s7_candidate) const {
@@ -1085,25 +1042,31 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                 bool want_goose = options_.protocol_filter == ProtocolFilter::Auto ||
                                    options_.protocol_filter == ProtocolFilter::GooseOnly;
                 if (want_goose && eth.ethertype == ETHERTYPE_IEC61850_GOOSE) {
-                    if (auto gs = try_parse_goose(eth.payload)) {
+                    // Registration-model pilot (Stage 3): try_parse_goose is now reached through
+                    // GooseDecoder::decode rather than called directly -- same function, same
+                    // semantics, see goose.hpp. The dual-write below is unchanged.
+                    DecodeContext ctx;
+                    ctx.protocol_id = "goose";
+                    if (auto result = goose_decoder().decode(eth.payload, ctx)) {
+                        const GooseFrame& gs = result->as<GooseFrame>();
                         out.protocol = "goose";
-                        out.summary = gs->summary;
-                        out.goose_appid = gs->appid;
-                        out.goose_is_gse_management = gs->is_gse_management;
-                        out.goose_has_pdu = gs->has_pdu;
-                        for (const auto& n : gs->notes) out.notes.push_back(n);
+                        out.summary = gs.summary;
+                        out.goose_appid = gs.appid;
+                        out.goose_is_gse_management = gs.is_gse_management;
+                        out.goose_has_pdu = gs.has_pdu;
+                        for (const auto& n : gs.notes) out.notes.push_back(n);
 
-                        if (gs->has_pdu) {
-                            out.goose_simulated = gs->header_simulated || (gs->simulation && *gs->simulation);
-                            out.goose_gocb_ref = gs->gocb_ref;
-                            out.goose_dat_set = gs->dat_set;
-                            if (gs->go_id) out.goose_go_id = *gs->go_id;
-                            out.goose_st_num = gs->st_num;
-                            out.goose_sq_num = gs->sq_num;
-                            out.goose_conf_rev = gs->conf_rev;
-                            out.goose_num_dat_set_entries = gs->num_dat_set_entries;
+                        if (gs.has_pdu) {
+                            out.goose_simulated = gs.header_simulated || (gs.simulation && *gs.simulation);
+                            out.goose_gocb_ref = gs.gocb_ref;
+                            out.goose_dat_set = gs.dat_set;
+                            if (gs.go_id) out.goose_go_id = *gs.go_id;
+                            out.goose_st_num = gs.st_num;
+                            out.goose_sq_num = gs.sq_num;
+                            out.goose_conf_rev = gs.conf_rev;
+                            out.goose_num_dat_set_entries = gs.num_dat_set_entries;
                             constexpr size_t kMaxGooseDataValueEntries = 50;
-                            for (const auto& v : gs->all_data) {
+                            for (const auto& v : gs.all_data) {
                                 if (out.goose_all_data.size() >= kMaxGooseDataValueEntries) break;
                                 std::string label = !v.type_name.empty() ? v.type_name : "raw";
                                 out.goose_all_data.push_back(v.path + ": " + label + "=" + v.value);
@@ -2157,9 +2120,14 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
             bool want_eigrp = options_.protocol_filter == ProtocolFilter::Auto ||
                                options_.protocol_filter == ProtocolFilter::EigrpOnly;
             if (want_eigrp) {
-                if (auto msg = try_parse_eigrp(ip.payload)) {
+                // Registration-model pilot (Stage 1): try_parse_eigrp is now reached through
+                // EigrpDecoder::decode rather than called directly -- same function, same
+                // semantics, see eigrp.hpp. fill_eigrp_fields is unchanged.
+                DecodeContext ctx;
+                ctx.protocol_id = "eigrp";
+                if (auto result = eigrp_decoder().decode(ip.payload, ctx)) {
                     out.protocol = "eigrp";
-                    fill_eigrp_fields(out, *msg);
+                    fill_eigrp_fields(out, result->as<EigrpMessage>());
                     return out;
                 }
             }
@@ -2367,6 +2335,8 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                           options_.protocol_filter == ProtocolFilter::EnipOnly;
         bool want_modbus = options_.protocol_filter == ProtocolFilter::Auto ||
                             options_.protocol_filter == ProtocolFilter::ModbusOnly;
+        bool want_twincat = options_.protocol_filter == ProtocolFilter::Auto ||
+                             options_.protocol_filter == ProtocolFilter::TwinCatOnly;
         bool want_dnp3 = options_.protocol_filter == ProtocolFilter::Auto ||
                           options_.protocol_filter == ProtocolFilter::Dnp3Only;
         bool want_s7comm = options_.protocol_filter == ProtocolFilter::Auto ||
@@ -2621,15 +2591,26 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
         }
 
         if (want_modbus) {
-            if (auto mb = try_parse_modbus_tcp(effective_payload)) {
+            // Registration-model pilot (Stage 2): try_parse_modbus_tcp + the transaction-pairing
+            // logic that used to be Decoder::pair_modbus_transaction are now both reached through
+            // ModbusDecoder::decode -- same functions, same semantics, see modbus.hpp/modbus.cpp.
+            // The dual-write below (mb.* -> out.modbus_*) is unchanged.
+            std::string session = tcp_session_key(out.src_ip, tcp.src_port, out.dst_ip, tcp.dst_port);
+            DecodeContext ctx;
+            ctx.flow_key = flow_key;
+            ctx.session_key = session;
+            ctx.packet_index = index;
+            ctx.protocol_id = "modbus";
+            ctx.flow_states = &registry_flow_state_;
+            if (auto result = modbus_decoder().decode(effective_payload, ctx)) {
+                const ModbusFrame& mb = result->as<ModbusFrame>();
                 out.protocol = "modbus";
-                out.modbus_is_exception = mb->is_exception;
-                out.modbus_function_name = mb->function_name;
-                out.summary = mb->function_name + ": " + mb->summary;
-                for (const auto& n : mb->notes) out.notes.push_back(n);
-
-                std::string session = tcp_session_key(out.src_ip, tcp.src_port, out.dst_ip, tcp.dst_port);
-                pair_modbus_transaction(*mb, flow_key, session, index, out);
+                out.modbus_is_exception = mb.is_exception;
+                out.modbus_function_name = mb.function_name;
+                out.summary = mb.function_name + ": " + mb.summary;
+                for (const auto& n : mb.notes) out.notes.push_back(n);
+                out.modbus_is_paired_response = mb.paired_response;
+                out.modbus_paired_request_index = mb.paired_request_index;
 
                 bool expected_port = port_in(tcp.src_port, MODBUS_TCP_PORT, options_.extra_modbus_ports) ||
                                       port_in(tcp.dst_port, MODBUS_TCP_PORT, options_.extra_modbus_ports);
@@ -2637,6 +2618,41 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                     out.notes.push_back("seen on TCP port " + std::to_string(tcp.src_port) + "->" +
                                          std::to_string(tcp.dst_port) +
                                          ", which is not a configured/standard Modbus port (502)");
+                }
+                return out;
+            }
+        }
+
+        if (want_twincat) {
+            // TwinCAT/ADS (AMS/TCP) -- the first protocol built entirely on the ProtocolDecoder
+            // interface (protocol_decoder.hpp); see twincat.hpp's file header comment for the wire
+            // format and the collision survey behind this decoder's position here, right after
+            // Modbus. Unlike every protocol above, there is no twincat_* dual-write into
+            // DecodedPacket's own fields: out.result carries the full TwinCatFrame for JsonWriter's
+            // own registry-based rendering (output.cpp), and out.protocol/summary/notes below are
+            // all TextWriter/CsvWriter need, since both already render generically from those three
+            // fields for every protocol (see output.cpp's own file header comment).
+            std::string session = tcp_session_key(out.src_ip, tcp.src_port, out.dst_ip, tcp.dst_port);
+            DecodeContext ctx;
+            ctx.flow_key = flow_key;
+            ctx.session_key = session;
+            ctx.packet_index = index;
+            ctx.protocol_id = "twincat";
+            ctx.flow_states = &registry_flow_state_;
+            if (auto result = twincat_decoder().decode(effective_payload, ctx)) {
+                const TwinCatFrame& tc = result->as<TwinCatFrame>();
+                out.protocol = "twincat";
+                out.summary = tc.summary;
+                for (const auto& n : tc.notes) out.notes.push_back(n);
+                out.result = *result;
+
+                bool expected_port =
+                    port_in(tcp.src_port, TWINCAT_AMS_TCP_PORT, options_.extra_twincat_ports) ||
+                    port_in(tcp.dst_port, TWINCAT_AMS_TCP_PORT, options_.extra_twincat_ports);
+                if (!expected_port) {
+                    out.notes.push_back("seen on TCP port " + std::to_string(tcp.src_port) + "->" +
+                                         std::to_string(tcp.dst_port) +
+                                         ", which is not a configured/standard TwinCAT/AMS port (48898)");
                 }
                 return out;
             }

@@ -25,9 +25,11 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "conduitscope/byteio.hpp"
+#include "conduitscope/protocol_decoder.hpp"
 
 namespace conduitscope {
 
@@ -47,6 +49,15 @@ struct ModbusFrame {
     std::string summary;          // one-line human-readable summary
     std::vector<std::string> notes;  // extra detail lines (warnings, heuristics used, etc.)
     ByteSpan raw_pdu_data;         // the PDU bytes after the function code, for hex fallback/JSON
+
+    // Only set by ModbusDecoder::decode (registration-model pilot, Stage 2 -- see
+    // protocol_decoder.hpp) once it has run the same authoritative MBAP-transaction-ID pairing
+    // decoder.cpp's own (now removed) Decoder::pair_modbus_transaction used to perform directly.
+    // Mirrors DecodedPacket::modbus_is_paired_response/modbus_paired_request_index exactly -- the
+    // decoder.cpp call site just copies these two straight across after unwrapping the
+    // ProtocolResult, the same dual-write every other migrated pilot protocol does.
+    bool paired_response = false;
+    size_t paired_request_index = 0;
 };
 
 // Attempts to interpret `tcp_payload` as a Modbus/TCP MBAP frame. Returns
@@ -91,5 +102,50 @@ std::string modbus_exception_name(uint8_t exception_code);
 // table in modbus.cpp -- rather than a second, separately-maintained list. Order is stable across
 // calls (the table's own declaration order) but not alphabetized.
 std::vector<std::string> modbus_known_function_names();
+
+// registration-model pilot (Stage 2 -- see protocol_decoder.hpp/protocol_registry.hpp). One
+// outstanding Modbus request, tracked per TCP SESSION (both directions -- see ModbusFlowState
+// below) and keyed further by its MBAP transaction ID, so a later packet on the SAME session
+// carrying the SAME transaction ID from the OPPOSITE direction can be authoritatively paired to it
+// -- see ModbusDecoder::decode (modbus.cpp). `flow_key` is the *directional* flow the request
+// itself was seen on (src->dst), kept so a same-direction repeat of the same transaction ID
+// (reused before any response arrived) can be told apart from a genuine opposite-direction reply.
+// Replaces decoder.hpp's old (now removed) struct of the same name/shape -- moved here because
+// this state now belongs to ModbusFlowState/ModbusDecoder, not to Decoder directly.
+struct ModbusPendingRequest {
+    size_t packet_index = 0;
+    std::string flow_key;
+    std::string function_name;
+    std::string request_summary;  // the request packet's ModbusFrame::summary, for the response's note
+    uint8_t unit_id = 0;
+};
+
+// Cross-packet Modbus transaction-pairing state for one TCP SESSION (both directions of one 4-tuple
+// -- see DecodeContext::session_key). Replaces decoder.hpp's old (now removed)
+// `Decoder::modbus_pending_` bespoke member: this is the same map, just reached generically through
+// DecodeContext::flow_state<ModbusFlowState>() (protocol_decoder.hpp) instead of a Decoder member
+// dedicated to Modbus alone -- see protocol_registry.hpp's own header comment for why.
+class ModbusFlowState : public DecoderFlowState {
+public:
+    std::unordered_map<uint16_t, ModbusPendingRequest> pending;
+};
+
+// Thin ProtocolDecoder wrapper: detection+decode still goes through try_parse_modbus_tcp/
+// modbus_tcp_declared_length above, unchanged; decode() additionally performs the transaction
+// pairing ModbusPendingRequest/ModbusFlowState describe, writing the outcome into the returned
+// ModbusFrame's own paired_response/paired_request_index/notes (the caller -- decoder.cpp -- copies
+// those into DecodedPacket exactly as it always has, it just no longer computes them itself). See
+// modbus.cpp.
+class ModbusDecoder : public ProtocolDecoder {
+public:
+    std::string_view id() const override { return "modbus"; }
+    GateKind gate_kind() const override { return GateKind::TcpPortIndependent; }
+    std::optional<size_t> tcp_declared_length(ByteSpan candidate) const override {
+        return modbus_tcp_declared_length(candidate);
+    }
+    std::optional<ProtocolResult> decode(ByteSpan payload, DecodeContext& ctx) const override;
+};
+
+const ProtocolDecoder& modbus_decoder();
 
 }  // namespace conduitscope

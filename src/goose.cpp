@@ -504,4 +504,16 @@ std::optional<GooseFrame> try_parse_goose(ByteSpan eth_payload) {
     }
 }
 
+std::optional<ProtocolResult> GooseDecoder::decode(ByteSpan payload, DecodeContext& /*ctx*/) const {
+    if (auto gs = try_parse_goose(payload)) {
+        return ProtocolResult::make<GooseFrame>("goose", std::move(*gs));
+    }
+    return std::nullopt;
+}
+
+const ProtocolDecoder& goose_decoder() {
+    static const GooseDecoder instance;
+    return instance;
+}
+
 }  // namespace conduitscope

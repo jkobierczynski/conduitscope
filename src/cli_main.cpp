@@ -455,6 +455,7 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
                                : (protocol == "pppoe")  ? ProtocolFilter::PppoeOnly
                                : (protocol == "tunnel-vpn") ? ProtocolFilter::TunnelVpnOnly
                                : (protocol == "mpls")   ? ProtocolFilter::MplsOnly
+                               : (protocol == "twincat") ? ProtocolFilter::TwinCatOnly
                                                         : ProtocolFilter::Auto;
     for (int p : modbus_ports) options.extra_modbus_ports.push_back(static_cast<uint16_t>(p));
     for (int p : dnp3_ports) options.extra_dnp3_ports.push_back(static_cast<uint16_t>(p));
@@ -644,7 +645,7 @@ constexpr int kExitPolicyNonCompliant = 3;
 int run_policy_validate(const std::string& input, const std::string& interface_name,
                          const std::string& filter, int duration_seconds, int snaplen, bool promiscuous,
                          const std::string& policy_path, const std::string& output, const std::string& format,
-                         bool strict, bool strict_it_protocols, bool quiet,
+                         bool strict, bool strict_it_protocols, bool summarize_unclassified, bool quiet,
                          bool oui_enabled, bool resolve_hostnames, const std::string& hosts_path,
                          bool service_names_enabled, const std::string& services_path, std::ostream& diag) {
     std::ofstream file_out;
@@ -703,7 +704,7 @@ int run_policy_validate(const std::string& input, const std::string& interface_n
         if (format == "json") {
             write_policy_report_json(*out, report, policy, capture_label, policy_path, resolver);
         } else {
-            write_policy_report_text(*out, report, policy, capture_label, policy_path, resolver);
+            write_policy_report_text(*out, report, policy, capture_label, policy_path, resolver, summarize_unclassified);
         }
 
         if (!interface_name.empty() && !quiet) {
@@ -979,7 +980,7 @@ int main(int argc, char** argv) {
     decode_cmd
         ->add_option("--protocol", decode_protocol,
                       "Restrict decoding to one protocol instead of auto-detecting all of them")
-        ->transform(CLI::IsMember({"auto", "modbus", "dnp3", "s7comm", "mms", "iec104", "enip", "profinet", "goose", "sv", "ethercat", "stp", "devicenet", "bacnet", "hartip", "opcua", "mqtt", "s7comm-plus", "ff-hse", "dns", "mdns", "llmnr", "nbns", "doh", "rip", "icmp", "igmp", "vrrp", "hsrp", "igrp", "pim", "eigrp", "ospf", "remote-access", "lateral-movement", "enterprise-trust", "eapol", "wireless-backhaul", "pppoe", "tunnel-vpn", "mpls"}))
+        ->transform(CLI::IsMember({"auto", "modbus", "dnp3", "s7comm", "mms", "iec104", "enip", "profinet", "goose", "sv", "ethercat", "stp", "devicenet", "bacnet", "hartip", "opcua", "mqtt", "s7comm-plus", "ff-hse", "dns", "mdns", "llmnr", "nbns", "doh", "rip", "icmp", "igmp", "vrrp", "hsrp", "igrp", "pim", "eigrp", "ospf", "remote-access", "lateral-movement", "enterprise-trust", "eapol", "wireless-backhaul", "pppoe", "tunnel-vpn", "mpls", "twincat"}))
         ->capture_default_str();
     decode_cmd->add_option("--modbus-port", decode_modbus_ports,
                             "Additional TCP port to treat as expected for Modbus (repeatable); "
@@ -1175,6 +1176,7 @@ int main(int argc, char** argv) {
     std::string policy_format = "text";
     bool policy_strict = false;
     bool policy_strict_it_protocols = false;
+    bool policy_summarize_unclassified = false;
     bool policy_mac_vendor = false, policy_resolve = false, policy_service_names = true;
     std::string policy_hosts_file, policy_services_file;
     auto* policy_input_opt =
@@ -1227,6 +1229,18 @@ int main(int argc, char** argv) {
         "capture -- off by default: the \"notable protocols\" section is always populated regardless "
         "of this flag, so nothing is hidden without it; this flag only controls whether that finding "
         "additionally affects the exit code, for a CI/audit pipeline that wants to gate on it");
+    policy_validate_cmd->add_flag(
+        "--summarize-unclassified", policy_summarize_unclassified,
+        "Collapse UNCLASSIFIED TRAFFIC (and, if present, ETHERNET UNCLASSIFIED TRAFFIC) entries that "
+        "share the same endpoints/port/protocol(s)/zones into one summary line with a flow count and "
+        "total packet count, instead of one block per individual flow. Off by default -- the "
+        "unsummarized, one-block-per-flow report is unchanged unless this is given. Aimed at a busy "
+        "capture with far more distinct TCP flows (a new source port on every reconnect) than "
+        "distinct (client, server, port) patterns actually worth reviewing, where that can otherwise "
+        "make a text report unnecessarily huge; VIOLATIONS and ALLOWED are never summarized, only "
+        "the unclassified groups. Only affects --format text -- the JSON report always lists every "
+        "flow individually, since it's already structured data a script can group/deduplicate on its "
+        "own with more precision than any one fixed grouping key here could offer");
     policy_validate_cmd->add_flag("--mac-vendor", policy_mac_vendor,
                                    "Enable OUI (MAC vendor) resolution in the report; off by "
                                    "default to keep output compact -- see docs/MANUAL.md's "
@@ -1411,7 +1425,8 @@ int main(int argc, char** argv) {
     if (policy_validate_cmd->parsed()) {
         return run_policy_validate(policy_input, policy_interface, policy_filter, policy_duration, policy_snaplen,
                                     policy_promiscuous, policy_file, policy_output, policy_format, policy_strict,
-                                    policy_strict_it_protocols, quiet, policy_mac_vendor, policy_resolve, policy_hosts_file,
+                                    policy_strict_it_protocols, policy_summarize_unclassified, quiet,
+                                    policy_mac_vendor, policy_resolve, policy_hosts_file,
                                     policy_service_names, policy_services_file, *diag);
     }
     if (policy_cmd->parsed()) {

@@ -41,6 +41,7 @@
 #include "conduitscope/pim.hpp"
 #include "conduitscope/pppoe.hpp"
 #include "conduitscope/profinet.hpp"
+#include "conduitscope/protocol_decoder.hpp"
 #include "conduitscope/quic.hpp"
 #include "conduitscope/rip.hpp"
 #include "conduitscope/s7commplus.hpp"
@@ -49,6 +50,7 @@
 #include "conduitscope/tcp.hpp"
 #include "conduitscope/tls_sni.hpp"
 #include "conduitscope/tunnel_vpn.hpp"
+#include "conduitscope/twincat.hpp"
 #include "conduitscope/vrrp.hpp"
 
 namespace conduitscope {
@@ -125,6 +127,11 @@ enum class ProtocolFilter {
                            // same split EapolOnly/PppoeOnly above already have from their own port-
                            // based tiers.
     MplsOnly,              // only attempt MPLS label-stack decoding -- see mpls.hpp
+    TwinCatOnly,           // only attempt Beckhoff TwinCAT/ADS (AMS/TCP) decoding -- see
+                           // twincat.hpp. The first protocol built entirely on the
+                           // registration-model ProtocolDecoder interface (protocol_decoder.hpp)
+                           // -- see docs/DEVELOPMENT.md's "registration-model decoder refactor"
+                           // entry.
 };
 
 struct DecodeOptions {
@@ -138,6 +145,12 @@ struct DecodeOptions {
     // which is itself a useful signal when auditing a conduit against a
     // zone policy.
     std::vector<uint16_t> extra_modbus_ports;
+    std::vector<uint16_t> extra_twincat_ports;  // no --extra-twincat-ports CLI flag yet (unlike
+                                                  // every other protocol's own extra_*_ports here)
+                                                  // -- deliberately deferred; see docs/DEVELOPMENT.md's
+                                                  // TwinCAT/ADS entry. Always empty for now, so
+                                                  // TWINCAT_AMS_TCP_PORT (48898) is the only port
+                                                  // ever treated as "expected."
     std::vector<uint16_t> extra_dnp3_ports;
     std::vector<uint16_t> extra_s7comm_ports;  // also governs S7comm-Plus and MMS "expected port"
                                                  // annotations -- all three share TCP port 102
@@ -357,13 +370,22 @@ struct DecodedPacket {
     std::string summary;
     std::vector<std::string> notes;
 
+    // registration-model decoder refactor (see protocol_decoder.hpp): set only by a protocol built
+    // on the new ProtocolDecoder interface that chooses to carry its own structured result forward
+    // for a renderer to read (today: only TwinCAT/"twincat" -- see decoder.cpp's TwinCAT call
+    // site), rather than flattening its fields onto this struct the way every protocol below does.
+    // Every protocol-prefixed field below this point is untouched by the refactor; this is
+    // strictly additive.
+    std::optional<ProtocolResult> result;
+
     // Only set when protocol == "modbus"; useful for downstream JSON consumers.
     bool modbus_is_exception = false;
     std::string modbus_function_name;
-    // Only set when protocol == "modbus" and Decoder::pair_modbus_transaction authoritatively
-    // (by MBAP transaction ID + TCP session, not the payload-shape heuristic modbus.cpp always
-    // applies) determined this packet is the response to a specific earlier request on the same
-    // TCP session. modbus_paired_request_index is that request's DecodedPacket::index.
+    // Only set when protocol == "modbus" and ModbusDecoder::decode (modbus.hpp/.cpp -- see
+    // ModbusFlowState) authoritatively (by MBAP transaction ID + TCP session, not the payload-shape
+    // heuristic modbus.cpp always applies) determined this packet is the response to a specific
+    // earlier request on the same TCP session. modbus_paired_request_index is that request's
+    // DecodedPacket::index.
     bool modbus_is_paired_response = false;
     size_t modbus_paired_request_index = 0;
 
@@ -1328,19 +1350,11 @@ struct TcpFlowBuffer {
     size_t segment_count = 0;    // TCP segments contributed to `bytes` so far
 };
 
-// One outstanding Modbus request, tracked per TCP session (both directions -- see
-// Decoder::modbus_pending_) and keyed further by its MBAP transaction ID, so a later packet on the
-// SAME session carrying the SAME transaction ID from the OPPOSITE direction can be authoritatively
-// paired to it -- see Decoder::pair_modbus_transaction. `flow_key` is the *directional* flow the
-// request itself was seen on (src->dst), kept so a same-direction repeat of the same transaction ID
-// (reused before any response arrived) can be told apart from a genuine opposite-direction reply.
-struct ModbusPendingRequest {
-    size_t packet_index = 0;
-    std::string flow_key;
-    std::string function_name;
-    std::string request_summary;  // the request packet's ModbusFrame::summary, for the response's note
-    uint8_t unit_id = 0;
-};
+// Cross-packet Modbus transaction-pairing state used to live here as ModbusPendingRequest/
+// Decoder::modbus_pending_ (a bespoke member dedicated to Modbus alone). It's now
+// ModbusPendingRequest/ModbusFlowState in modbus.hpp, reached generically through
+// Decoder::registry_flow_state_ below -- see protocol_decoder.hpp/protocol_registry.hpp for why
+// (registration-model decoder refactor, Stage 2 of the pilot).
 
 // Cross-packet COTP/S7comm reassembly state for one directional TCP flow -- see
 // Decoder::cotp_reassembly_ and Decoder::reassemble_cotp_data_frame. A single S7comm message can
@@ -1390,11 +1404,13 @@ private:
     // reason to conflate them). `mutable` for the same reason as dnp3_reassembly_.
     mutable std::unordered_map<std::string, TcpFlowBuffer> tcp_reassembly_;
 
-    // See ModbusPendingRequest above. Outer key is a *session* key (both directions of one TCP
-    // 4-tuple canonicalized into one string -- see the session_key helper in decoder.cpp; NOT the
-    // same shape as the directional flow_key used by dnp3_reassembly_/tcp_reassembly_ above),
-    // inner key is the MBAP transaction ID. `mutable` for the same reason as dnp3_reassembly_.
-    mutable std::unordered_map<std::string, std::unordered_map<uint16_t, ModbusPendingRequest>> modbus_pending_;
+    // registration-model decoder refactor (see protocol_decoder.hpp/protocol_registry.hpp): one
+    // generic per-migrated-protocol flow-state map, replacing what used to require a bespoke
+    // Decoder member per stateful protocol (this generalizes the old Decoder::modbus_pending_,
+    // which is now ModbusFlowState, reached via DecodeContext::flow_state<T>() -- see modbus.hpp).
+    // Outer key is FlowStateMap's own protocol_id; `mutable` for the same reason as
+    // dnp3_reassembly_ above -- cross-packet state accumulated across decode() calls.
+    mutable FlowStateMap registry_flow_state_;
 
     // See CotpFragmentReassembly above. Keyed by directional flow_key, same shape as
     // dnp3_reassembly_/tcp_reassembly_. `mutable` for the same reason as dnp3_reassembly_.
@@ -1449,34 +1465,6 @@ private:
     // `effective_payload`'s use -- the caller keeps it alive as a same-scope local in decode().
     bool reassemble_tcp_payload(const TcpSegment& tcp, const std::string& flow_key, DecodedPacket& out,
                                  std::vector<uint8_t>& storage, ByteSpan& effective_payload) const;
-
-    // Attempts authoritative (MBAP transaction-ID + TCP-session, non-heuristic) Modbus
-    // request/response pairing for `mb`, seen in the current packet (`packet_index`) on directional
-    // flow `flow_key`, part of TCP session `session_key` (see the session_key helper in
-    // decoder.cpp, which canonicalizes both directions of one TCP 4-tuple into one string). This
-    // runs unconditionally alongside -- never instead of -- modbus.cpp's own payload-shape
-    // heuristic (still applied first, into mb.summary/mb.notes, exactly as before this feature):
-    //   - If `mb`'s transaction ID matches an outstanding request recorded earlier on this session
-    //     from the OPPOSITE flow direction, this packet IS that request's response, authoritatively
-    //     -- appends a note naming the matched request's packet index and sets
-    //     out.modbus_is_paired_response/out.modbus_paired_request_index accordingly, regardless of
-    //     what the shape heuristic guessed (this is exactly what resolves Write Single Coil/
-    //     Register's inherent shape ambiguity -- request and response share the identical 4-byte
-    //     shape per spec, per modbus.cpp -- since transaction ID + direction doesn't need the shape
-    //     to differ).
-    //   - If the transaction ID matches an outstanding request from the SAME direction instead, it
-    //     was reused before ever being paired (a retry, an orphaned request, or out-of-order
-    //     capture) -- notes this and starts tracking `mb` as the new outstanding request for that ID.
-    //   - Otherwise, if the shape heuristic already called `mb` a response, there is no outstanding
-    //     request to pair it to on this session -- notes it as an orphan (most likely its request
-    //     was sent before this capture began) rather than silently accepting the heuristic's guess
-    //     as the last word. Otherwise, records `mb` as newly outstanding so a later opposite-
-    //     direction packet with the same transaction ID can pair against it.
-    // Bounded per session by a capacity cap against a pathological/malformed capture leaking memory
-    // (see decoder.cpp); past the cap, new requests simply stop being recorded until earlier ones
-    // are paired off -- a capacity guard, not something worth a note on every packet past it.
-    void pair_modbus_transaction(const ModbusFrame& mb, const std::string& flow_key,
-                                  const std::string& session_key, size_t packet_index, DecodedPacket& out) const;
 
     // Determines the bytes S7comm detection should run against for a COTP Data (DT) frame `cotp`
     // already parsed from this packet: either `cotp.user_data` unchanged (the common, fast path --

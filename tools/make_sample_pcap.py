@@ -4894,6 +4894,67 @@ def build_policy_engine_sample():
     (TESTS_DIR / "sample_policy_engine.pcap").write_bytes(data)
 
 
+def build_summarize_unclassified_sample():
+    """Exercises `policy validate --summarize-unclassified` (policy_engine.cpp's
+    summarize_unclassified_flows/write_unclassified_flow_group_summarized_text) -- a feature added
+    after a real capture (a busy conference-network pcap) produced a 37MB/567K-line text report,
+    almost entirely because one reconnecting host pair alone contributed 16,378 separate
+    near-identical UNCLASSIFIED TRAFFIC entries (a new TCP flow, and so a new report entry, on every
+    reconnect). None of the other sample fixtures repeat the exact same (client, server, port)
+    pattern across multiple distinct TCP flows -- every one of them was built to exercise a single
+    flow's own decoding, not this multi-flow-of-the-same-pattern shape -- so this is a dedicated,
+    minimal fixture: bare SYN/SYN-ACK-only handshakes (no payload, so no protocol is ever recognized
+    -- the "protocol-recognition-gap" unclassified reason), on three distinct (client, server, port)
+    patterns, with the first two repeated across multiple flows (different source ports each time,
+    since PolicyEngine keys a flow by the full 4-tuple) and the third going to an address outside
+    every declared zone (the OTHER unclassified reason, "no declared zone contains ...") so both of
+    FlowReport's two possible unclassified-reason shapes are covered:
+
+      Pattern A: HMI_IP -> PLC_IP:9999, 3 separate flows (source ports 51940-51942), both zone-
+                 classified, no payload -> "no recognized OT protocol traffic ..." reason.
+      Pattern B: HMI_IP -> PLC_IP:8888, 2 separate flows (source ports 51950-51951), same reason as
+                 A but a different server port, proving the summarizer keys by (client, server,
+                 port), not just (client, server) -- these must NOT collapse into pattern A's group.
+      Pattern C: HMI_IP -> 10.0.0.5:7777 (10.0.0.5 outside every zone tests/policies/
+                 summarize_unclassified.yaml declares), 2 separate flows (source ports 51960-51961)
+                 -> "no declared zone contains 10.0.0.5" reason instead.
+
+    7 total unclassified flows (3+2+2), 14 total packets (2 per flow, SYN+SYN-ACK) -- summarizing
+    should collapse these into exactly 3 groups, with each group's own flow-count/packet-total
+    computed correctly (see CMakeLists.txt's summarize_unclassified_* tests)."""
+    packets = []
+
+    def full_packet(src_ip, dst_ip, tcp_bytes, ident, from_plc):
+        ip = ipv4_header(src_ip, dst_ip, 6, len(tcp_bytes), ident) + tcp_bytes
+        eth_src, eth_dst = (PLC_MAC, HMI_MAC) if from_plc else (HMI_MAC, PLC_MAC)
+        return eth_header(eth_dst, eth_src, 0x0800) + ip
+
+    def bare_handshake(client_ip, client_port, server_ip, server_port, ident_base, server_is_plc):
+        syn = tcp_header(client_port, server_port, 100, 0, TCP_SYN, 0)
+        packets.append(full_packet(client_ip, server_ip, syn, ident_base, from_plc=False))
+        synack = tcp_header(server_port, client_port, 200, 101, TCP_SYN | TCP_ACK, 0)
+        packets.append(full_packet(server_ip, client_ip, synack, ident_base + 1, from_plc=server_is_plc))
+
+    ident = 0x7100
+    # Pattern A: three separate flows, same (client, server, port).
+    for client_port in (51940, 51941, 51942):
+        bare_handshake(HMI_IP, client_port, PLC_IP, 9999, ident, server_is_plc=True)
+        ident += 2
+    # Pattern B: two separate flows, same (client, server) as A but a different port.
+    for client_port in (51950, 51951):
+        bare_handshake(HMI_IP, client_port, PLC_IP, 8888, ident, server_is_plc=True)
+        ident += 2
+    # Pattern C: two separate flows to an address outside every declared zone.
+    for client_port in (51960, 51961):
+        bare_handshake(HMI_IP, client_port, "10.0.0.5", 7777, ident, server_is_plc=False)
+        ident += 2
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_000_800 + i, i * 1000)
+    (TESTS_DIR / "sample_summarize_unclassified.pcap").write_bytes(data)
+
+
 def build_inventory_sample():
     """Feeds the `inventory` subcommand (asset_inventory.cpp/hpp) a capture that spans TWO distinct
     /24 subnets -- every other sample fixture in this file uses only 192.168.1.0/24, which would
@@ -7277,6 +7338,198 @@ def build_ffhse_sample():
 
 
 # ---------------------------------------------------------------------------------------------
+# Beckhoff TwinCAT / ADS over AMS/TCP (TCP port 48898) -- see twincat.hpp's file header comment
+# for the exact wire format each packet below exercises. TwinCAT is the first protocol in this
+# codebase built entirely on the ProtocolDecoder interface (protocol_decoder.hpp); this fixture
+# doubles as that interface's own proof, alongside the registration-model refactor's differential
+# checks against its EIGRP/Modbus/GOOSE pilot migrations (see docs/DEVELOPMENT.md).
+
+AMS_ADS_COMMAND_FLAG = 0x0004
+AMS_RESPONSE_FLAG = 0x0001
+
+TWINCAT_PLC_NET_ID = bytes([5, 62, 196, 212, 1, 1])
+TWINCAT_HMI_NET_ID = bytes([5, 62, 196, 211, 1, 1])
+TWINCAT_PLC_AMS_PORT = 851    # TwinCAT 3 "TC3 PLC1" runtime port
+TWINCAT_HMI_AMS_PORT = 32000  # a typical ADS client's own ephemeral AMS port
+
+
+def ams_frame(*, command_id: int, is_response: bool, invoke_id: int, body: bytes = b"",
+              target_net_id: bytes = TWINCAT_PLC_NET_ID, target_port: int = TWINCAT_PLC_AMS_PORT,
+              source_net_id: bytes = TWINCAT_HMI_NET_ID, source_port: int = TWINCAT_HMI_AMS_PORT,
+              error_code: int = 0, ads_command_flag: bool = True) -> bytes:
+    """One complete AMS/TCP-framed ADS message: the 6-byte AMS/TCP header (2 reserved bytes + a
+    4-byte LE Data Length, always honestly derived from `body`'s own length here) followed by the
+    32-byte AMS header and `body` -- see twincat.hpp's file header comment for the exact field
+    layout/order this mirrors byte-for-byte."""
+    state_flags = (AMS_ADS_COMMAND_FLAG if ads_command_flag else 0) | (AMS_RESPONSE_FLAG if is_response else 0)
+    ams_header = (target_net_id + struct.pack("<H", target_port) +
+                  source_net_id + struct.pack("<H", source_port) +
+                  struct.pack("<HHIII", command_id, state_flags, len(body), error_code, invoke_id))
+    ams_message = ams_header + body
+    return struct.pack("<HI", 0, len(ams_message)) + ams_message
+
+
+def build_twincat_sample():
+    """Covers all 9 ADS Command IDs (request+response shapes), authoritative Invoke-ID pairing
+    (opposite-direction match, same-direction reuse, and an orphan response), a DeviceNotification
+    push (deliberately excluded from pairing), a payload truncated relative to its own command's
+    expected shape, three structural-gate rejections (unrecognized Command ID, missing ADS command
+    State Flags bit, and a Data-Length cross-check mismatch -- see twincat.hpp's detection-gate
+    paragraph), a non-standard AMS/TCP port, and a frame split across two TCP segments (exercising
+    TwinCatDecoder::tcp_declared_length via Decoder::reassemble_tcp_payload, the same split/rejoin
+    shape build_tcp_reassembly_sample already covers for Modbus/DNP3/TPKT)."""
+    packets = []
+
+    def add(src_port, dst_port, seq, ack, payload, ident, from_plc):
+        tcp = tcp_header(src_port, dst_port, seq, ack, TCP_PSH | TCP_ACK, len(payload)) + payload
+        src_ip, dst_ip = (PLC_IP, HMI_IP) if from_plc else (HMI_IP, PLC_IP)
+        src_mac, dst_mac = (PLC_MAC, HMI_MAC) if from_plc else (HMI_MAC, PLC_MAC)
+        ip = ipv4_header(src_ip, dst_ip, 6, len(tcp), ident) + tcp
+        packets.append(eth_header(dst_mac, src_mac, 0x0800) + ip)
+
+    seq_c, seq_s = 1000, 5000
+    ident = 0x1000
+
+    def client(payload):
+        nonlocal seq_c, ident
+        add(53000, 48898, seq_c, seq_s, payload, ident, from_plc=False)
+        seq_c += len(payload)
+        ident += 1
+
+    def server(payload):
+        nonlocal seq_s, ident
+        add(48898, 53000, seq_s, seq_c, payload, ident, from_plc=True)
+        seq_s += len(payload)
+        ident += 1
+
+    # 1) & 2) ReadDeviceInfo request (no payload) / response (result=0, version 3.1 build 4024,
+    #    device name "Plan1") -- Invoke ID 1, authoritative opposite-direction pairing.
+    client(ams_frame(command_id=1, is_response=False, invoke_id=1))
+    dev_name = b"Plan1" + b"\x00" * (16 - len(b"Plan1"))
+    server(ams_frame(command_id=1, is_response=True, invoke_id=1,
+                      body=struct.pack("<IBBH", 0, 3, 1, 4024) + dev_name))
+
+    # 3) & 4) Read request (IndexGroup 0x4020, IndexOffset 0x101, 4 bytes) / response (result=0,
+    #    4 bytes of data) -- Invoke ID 2.
+    client(ams_frame(command_id=2, is_response=False, invoke_id=2, body=struct.pack("<III", 0x4020, 0x101, 4)))
+    server(ams_frame(command_id=2, is_response=True, invoke_id=2,
+                      body=struct.pack("<II", 0, 4) + struct.pack("<I", 0xDEADBEEF)))
+
+    # 5) & 6) Write request (same address, 4 bytes) / response (result=0) -- Invoke ID 3.
+    client(ams_frame(command_id=3, is_response=False, invoke_id=3,
+                      body=struct.pack("<III", 0x4020, 0x101, 4) + struct.pack("<I", 100)))
+    server(ams_frame(command_id=3, is_response=True, invoke_id=3, body=struct.pack("<I", 0)))
+
+    # 7) & 8) ReadWrite request (SumRead-style: read 8 bytes back while writing 4) / response
+    #    (result=0, 8 bytes of data) -- Invoke ID 4.
+    client(ams_frame(command_id=9, is_response=False, invoke_id=4,
+                      body=struct.pack("<IIII", 0xF080, 0, 8, 4) + struct.pack("<I", 1)))
+    server(ams_frame(command_id=9, is_response=True, invoke_id=4,
+                      body=struct.pack("<II", 0, 8) + struct.pack("<Q", 0x1122334455667788)))
+
+    # 9) & 10) ReadState request (no payload) / response (result=0, ADS state 5 == Run, device
+    #    state 0) -- Invoke ID 5.
+    client(ams_frame(command_id=4, is_response=False, invoke_id=5))
+    server(ams_frame(command_id=4, is_response=True, invoke_id=5, body=struct.pack("<IHH", 0, 5, 0)))
+
+    # 11) & 12) WriteControl request (requesting ADS state 5 == Run, device state 0, no associated
+    #     data) / response (result=0) -- Invoke ID 6.
+    client(ams_frame(command_id=5, is_response=False, invoke_id=6, body=struct.pack("<HHI", 5, 0, 0)))
+    server(ams_frame(command_id=5, is_response=True, invoke_id=6, body=struct.pack("<I", 0)))
+
+    # 13) & 14) AddDeviceNotification request (IndexGroup 0x4020, IndexOffset 0x101, 4 bytes,
+    #     cyclic mode 3, max delay 0, cycle time 200000 (100ns units == 20ms)) / response (result=0,
+    #     handle 0xABCD1234) -- Invoke ID 7.
+    client(ams_frame(command_id=6, is_response=False, invoke_id=7,
+                      body=struct.pack("<IIIIII", 0x4020, 0x101, 4, 3, 0, 200000)))
+    server(ams_frame(command_id=6, is_response=True, invoke_id=7, body=struct.pack("<II", 0, 0xABCD1234)))
+
+    # 15) & 16) DeleteDeviceNotification request (handle 0xABCD1234, from #14) / response
+    #     (result=0) -- Invoke ID 8.
+    client(ams_frame(command_id=7, is_response=False, invoke_id=8, body=struct.pack("<I", 0xABCD1234)))
+    server(ams_frame(command_id=7, is_response=True, invoke_id=8, body=struct.pack("<I", 0)))
+
+    # 17) DeviceNotification -- unsolicited push (server -> client), no Invoke ID pairing at all
+    #     (Command ID 8 is deliberately excluded from pairing -- see TwinCatDecoder::decode). One
+    #     stamp, two samples.
+    sample1 = struct.pack("<II", 0xABCD1234, 4) + struct.pack("<I", 42)
+    sample2 = struct.pack("<II", 0xABCD1234, 4) + struct.pack("<I", 43)
+    stamp = struct.pack("<Q", 132_000_000_000_000_000) + struct.pack("<I", 2) + sample1 + sample2
+    server(ams_frame(command_id=8, is_response=False, invoke_id=0, body=struct.pack("<II", len(stamp), 1) + stamp))
+
+    # 18) & 19) Invoke ID reused on the SAME direction before its first request (Invoke ID 9) was
+    #     ever paired with a response, then a response arrives for it -- exercises the "reused"
+    #     note, mirroring build_modbus_pairing_sample's own scenario B.
+    client(ams_frame(command_id=2, is_response=False, invoke_id=9, body=struct.pack("<III", 0x4020, 0x200, 2)))
+    client(ams_frame(command_id=2, is_response=False, invoke_id=9, body=struct.pack("<III", 0x4020, 0x300, 2)))
+    server(ams_frame(command_id=2, is_response=True, invoke_id=9,
+                      body=struct.pack("<II", 0, 2) + struct.pack("<H", 7)))
+
+    # 20) Orphan response: Invoke ID 999, no matching request ever seen on this session.
+    server(ams_frame(command_id=2, is_response=True, invoke_id=999, body=struct.pack("<II", 0, 0)))
+
+    # 21) Truncated payload relative to its own command's expected shape: a ReadState response
+    #     whose AMS Data Length (4) is honestly declared and consistent with the AMS/TCP header (so
+    #     the frame itself is accepted), but is too short for ReadState's own response shape
+    #     (result + ADS state + device state == 8 bytes) -- exercises decode_payload's own internal
+    #     ParseError catch, distinct from try_parse_twincat's outer structural gate.
+    server(ams_frame(command_id=4, is_response=True, invoke_id=10, body=struct.pack("<I", 0)))
+
+    # 22) Unrecognized Command ID (99), otherwise-valid AMS/TCP framing (correct length cross-check,
+    #     ADS command State Flags bit set) -- must still be rejected outright by
+    #     twincat_command_name's own allowlist, not misdetected as TwinCAT.
+    client(ams_frame(command_id=99, is_response=False, invoke_id=11, body=bytes([1, 2, 3, 4])))
+
+    # 23) ADS command State Flags bit (0x0004) NOT set -- an AMS router-internal message shape this
+    #     decoder deliberately doesn't recognize (see twincat.hpp's State Flags paragraph) -- must
+    #     not be misdetected as ADS traffic even though Command ID/length are otherwise plausible.
+    client(ams_frame(command_id=1, is_response=False, invoke_id=12, ads_command_flag=False))
+
+    # 24) AMS/TCP Data Length vs. the AMS header's own Data Length cross-check mismatch -- the AMS
+    #     header honestly declares a 4-byte body, but the AMS/TCP prefix's own Data Length is
+    #     inflated by 4 beyond what that implies -- a direct contradiction, this decoder's strongest
+    #     structural signal, and must be rejected outright.
+    mismatched = bytearray(ams_frame(command_id=2, is_response=False, invoke_id=13, body=bytes(4)))
+    struct.pack_into("<I", mismatched, 2, struct.unpack_from("<I", mismatched, 2)[0] + 4)
+    add(53000, 48898, seq_c, seq_s, bytes(mismatched), ident, from_plc=False)
+    seq_c += len(mismatched)
+    ident += 1
+
+    # 25) Non-standard AMS/TCP port (TCP port 3000, not 48898) -- still structurally valid AMS/TCP
+    #     (the gate is entirely port-independent -- see twincat.hpp), so it's still decoded, but
+    #     gets the "not a configured/standard TwinCAT/AMS port" note, mirroring every other
+    #     TCP-port-independent protocol's own such-note test.
+    add(53500, 3000, seq_c, seq_s, ams_frame(command_id=1, is_response=False, invoke_id=14), ident, from_plc=False)
+    seq_c += len(ams_frame(command_id=1, is_response=False, invoke_id=14))
+    ident += 1
+
+    # 26), 27) & 28) TCP-segment-split reassembly: a Read request (Invoke ID 15, whole in one
+    #     segment) followed by its response, whose own AMS/TCP frame is split across two TCP
+    #     segments -- exercises TwinCatDecoder::tcp_declared_length via Decoder::
+    #     reassemble_tcp_payload (the same split/rejoin shape build_tcp_reassembly_sample already
+    #     covers for Modbus/DNP3/TPKT), together with Invoke-ID pairing still resolving correctly
+    #     once the response is fully reassembled. The split point (40) is deliberately chosen to
+    #     fall AFTER the complete 38-byte AMS/TCP+AMS header (not mid-header) -- twincat_declared_
+    #     length can only recognize a frame that needs buffering once that whole header has
+    #     arrived (see its own comment in twincat.cpp for the documented, narrower gap this leaves).
+    client(ams_frame(command_id=2, is_response=False, invoke_id=15, body=struct.pack("<III", 0x4020, 0x400, 8)))
+    split_frame = ams_frame(command_id=2, is_response=True, invoke_id=15,
+                             body=struct.pack("<II", 0, 8) + struct.pack("<Q", 0xAABBCCDDEEFF0011))
+    split_at = 40
+    add(48898, 53000, seq_s, seq_c, split_frame[:split_at], ident, from_plc=True)
+    seq_s += split_at
+    ident += 1
+    add(48898, 53000, seq_s, seq_c, split_frame[split_at:], ident, from_plc=True)
+    seq_s += len(split_frame) - split_at
+    ident += 1
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_008_000 + i, i * 1000)
+    (TESTS_DIR / "sample_twincat.pcap").write_bytes(data)
+
+
+# ---------------------------------------------------------------------------------------------
 # DNS / mDNS / LLMNR / NBT-NS / DoH-detection (ROADMAP: "Add DNS, DoH, NBT-NS name resolution
 # decode") -- see dns.hpp/nbns.hpp/tls_sni.hpp's own file header comments for the wire formats
 # these fixtures exercise.
@@ -8718,7 +8971,9 @@ if __name__ == "__main__":
     build_mms_sample()
     build_mqtt_sample()
     build_ffhse_sample()
+    build_twincat_sample()
     build_policy_engine_sample()
+    build_summarize_unclassified_sample()
     build_inventory_sample()
     build_tcp_reassembly_sample()
     build_padded_ack_sample()

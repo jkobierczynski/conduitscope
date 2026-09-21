@@ -395,4 +395,16 @@ std::optional<EigrpMessage> try_parse_eigrp(ByteSpan ip_payload) {
     return msg;
 }
 
+std::optional<ProtocolResult> EigrpDecoder::decode(ByteSpan payload, DecodeContext& /*ctx*/) const {
+    if (auto msg = try_parse_eigrp(payload)) {
+        return ProtocolResult::make<EigrpMessage>("eigrp", std::move(*msg));
+    }
+    return std::nullopt;
+}
+
+const ProtocolDecoder& eigrp_decoder() {
+    static const EigrpDecoder instance;
+    return instance;
+}
+
 }  // namespace conduitscope

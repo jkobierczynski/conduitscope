@@ -282,12 +282,96 @@ Discussed and adopted, in this order:
    pass rather than precede it -- a fuzz corpus catching regressions makes
    a structural refactor of this size much safer to attempt than doing it
    the other way around.
+
+   **Update: a staged pilot is now implemented**, ahead of a full
+   migration, deliberately scoped down from "all ~51 protocols" to three
+   chosen to cover this codebase's three structural dispatch shapes:
+   EIGRP (IP-protocol-number-gated, stateless), Modbus (TCP-port-
+   independent, stateful with cross-packet transaction pairing and TCP
+   reassembly), and GOOSE (EtherType-gated). `include/conduitscope/
+   protocol_decoder.hpp` defines the interface (`ProtocolDecoder`,
+   `ProtocolResult` -- a type-erased holder replacing what a `std::variant`
+   would otherwise need extending for every migrated protocol --
+   `DecodeContext`, and a generic `FlowStateMap` replacing the old
+   one-bespoke-member-per-stateful-protocol pattern, e.g.
+   `Decoder::modbus_pending_`, with a single `Decoder::registry_flow_
+   state_` map keyed by protocol id); `protocol_registry.{hpp,cpp}` holds
+   one hand-maintained, heavily commented registry vector per dispatch
+   cascade (EtherType/IP-protocol/TCP-port-independent/UDP-port) -- audit-
+   trail data during this pilot, not yet what actually drives dispatch
+   order (see below). Each of the three pilot protocols still dual-writes
+   into its existing `DecodedPacket` flat fields (`eigrp_*`/`modbus_*`/
+   `goose_*`), so `output.cpp`'s existing renderers needed zero changes for
+   them, and each migrated protocol's `decoder.cpp` call site sits at
+   EXACTLY the same textual position its old `if` block occupied -- 
+   migrating changes WHAT runs there, never WHICH LINE -- which preserves
+   every documented collision-avoidance ordering guarantee (e.g. "IEC104
+   before Modbus", see PROTOCOL DETECTION below) by construction, whether
+   or not the protocol on either side of it has migrated yet. Verification
+   at every stage: the full CTest suite (now 1,197 tests, all passing) with
+   NO changed `PASS_REGULAR_EXPRESSION` expectations for any of the three
+   pilot protocols -- proof of byte-identical output pre/post migration --
+   plus zero-warning builds across all three established configs (default
+   Linux+libpcap, `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF`, MinGW cross-
+   compile). TwinCAT/ADS (item 20 below) is the pilot's proof of the actual
+   payoff: the first protocol built entirely on `ProtocolDecoder`, with NO
+   `DecodedPacket` flat fields of its own at all -- see its own entry
+   below and `include/conduitscope/twincat.hpp`'s file header.
+
+   One pragmatic deviation from this refactor's original design, flagged
+   rather than silently substituted: the design called for a
+   `ProtocolRenderer` virtual class so `output.cpp`'s 4 writer classes
+   could each get one early branch for a migrated protocol's own
+   rendering. Once actually implemented, only `JsonWriter` and
+   `StatsWriter` turned out to need protocol-specific TwinCAT rendering at
+   all -- `TextWriter`/`CsvWriter` already render generically from
+   `DecodedPacket::protocol`/`summary`/`notes` for every protocol and
+   needed no changes for TwinCAT either. With exactly one implementer, a
+   virtual interface would have been premature abstraction, so TwinCAT's
+   JSON rendering is a plain free function (`write_twincat_json_fields` in
+   `output.cpp`) instead. This still satisfies the refactor's actual
+   constraint (`DecodedPacket` untouched by TwinCAT); a `ProtocolRenderer`
+   interface remains there to introduce if/when a second protocol needs
+   protocol-specific rendering of its own.
+
+   Still explicitly out of scope, not silently dropped: migrating the
+   remaining ~48 legacy protocols onto the new interface; migrating
+   `output.cpp`'s rendering for the three *pilot* protocols themselves
+   (EIGRP/Modbus/GOOSE keep dual-writing into their flat fields, unlike
+   TwinCAT); having the registry vectors in `protocol_registry.cpp`
+   actually drive dispatch order during this pilot, rather than being
+   audit-trail data kept in sync with the real `decoder.cpp` call sites by
+   hand; a differential pre/post-migration JSON-output diff (this
+   environment has no git history to build a genuine "before" binary from,
+   so the full regression suite's unchanged `PASS_REGULAR_EXPRESSION`
+   assertions are the substitute evidence -- any drift in EIGRP/Modbus/
+   GOOSE's own output would have failed one of those hardcoded-exact-text
+   tests); and deduplicating `policy_engine.cpp`'s/`asset_inventory.cpp`'s
+   independently-forked protocol-classification chains (unaffected either
+   way by this pilot -- both still read `DecodedPacket::protocol` as a
+   plain string, which every migrated protocol, including TwinCAT, keeps
+   populating).
 4. **Comment-density trim: acknowledged, not scheduled.** Real cost, no
    plan yet to act on it -- lower priority than the three items above.
 5. **No new protocols until 1-3 above are substantially underway,** per
    the review's own §17 -- the protocol surface is broad enough for now;
    making the existing ~60 detections trustworthy under adversarial input
    matters more than adding a 61st.
+
+   **Update:** Jurgen asked for Beckhoff TwinCAT/ADS (item 20) directly;
+   told this conflicted with his own adopted priority order above, he
+   chose to have the registration-model pilot (item 3's "Update" above)
+   done first and TwinCAT built on top of it, rather than either
+   proceeding immediately or deferring TwinCAT further. That both
+   satisfies this item's own spirit (a new protocol didn't jump the queue
+   ahead of the refactor) and turns TwinCAT into the refactor's own live
+   proof, rather than the two staying separate, unrelated pieces of work.
+   Items 1-2 above are done; item 3 now has a working pilot (not yet a
+   full migration); this item's bar for "substantially underway" is
+   judged met for the one new protocol actually requested, not as a
+   blanket reopening of new-protocol work -- the ~48 unmigrated legacy
+   protocols and the full registry-driven-dispatch migration remain real,
+   unscheduled follow-on work.
 
 A follow-up review
 ([docs/reviews/2026-09-chatgpt-security-review.md](reviews/2026-09-chatgpt-security-review.md),
@@ -461,7 +545,7 @@ fresh 60-second ASan/UBSan mutation bursts on `fuzz_packet_decode` and
 ## PROTOCOL DETECTION
 
 In `--protocol auto` (the default), every non-empty TCP payload is tested
-against all eleven TCP-capable protocols, independent of port number. **OPC UA is tried
+against all twelve TCP-capable protocols, independent of port number. **OPC UA is tried
 first of all, then EtherNet/IP, then IEC 104**, before Modbus/TCP, and
 **HART-IP is tried third-to-last, MQTT second-to-last, with FF-HSE tried
 last of all**, after S7comm/COTP, S7comm-Plus, and MMS -- see the notes at
@@ -548,6 +632,33 @@ which protocols are tried:
   what this does and doesn't cover. This pairing is a separate thing from
   PDU/frame reassembly across TCP segments, which conduitscope also does --
   see docs/USER_GUIDE.md's LIMITATIONS' "General TCP stream reassembly" entry.
+- **TwinCAT/ADS**: recognized by a five-part structural gate over its
+  6-byte AMS/TCP header (2 reserved bytes + a 4-byte little-endian Data
+  Length) plus the 32-byte AMS header that follows it: at least 38 bytes
+  present; the AMS/TCP Data Length field must equal 32 plus the AMS
+  header's own (separate) Data Length field -- a cross-check between two
+  independently present length fields, this decoder's strongest signal;
+  State Flags bit 2 (`0x0004`, "ADS command") must be set; Command ID must
+  be one of nine recognized values; and Data Length must not be
+  implausibly large (capped at 64 KiB, mirroring Modbus's own plausibility
+  ceiling). Surveyed against every protocol above and below it in this
+  dispatch order before picking a position: OPC UA's leading bytes must be
+  one of 7 fixed ASCII strings (AMS/TCP's own leading bytes are
+  conventionally zero, never ASCII); IEC 104 requires start byte `0x68`;
+  DNP3 requires sync bytes `0x05 0x64`; Modbus/TCP's protocol-id==0 check
+  reads what, for an AMS/TCP frame, are the low 16 bits of the Data Length
+  field -- nonzero for any realistic ADS payload size, so Modbus's own
+  gate correctly rejects real TwinCAT traffic; TPKT requires version byte
+  `0x03`. None collide, so this decoder is registered directly after
+  Modbus, the same "no collision found, try it as early as its own gate
+  strength justifies" reasoning OPC UA/EtherNet/IP's own positions
+  established. Like Modbus, every request/response pair also gets
+  authoritative (Invoke ID + AMS/TCP-session, non-heuristic) pairing --
+  see docs/PROTOCOL_COVERAGE.md's TwinCAT / ADS section for the full
+  writeup, including a real collision this decoder's own TCP-reassembly
+  probe had to be tightened against after an initial, weaker version of it
+  (checking only the 6-byte AMS/TCP prefix, not this full five-part gate)
+  was found mis-buffering MQTT/FF-HSE/SMB/TACACS+/OpenVPN traffic.
 - **DNP3**: recognized by the data-link-layer start bytes `0x05 0x64`, which
   DNP3 always begins with.
 - **S7comm/COTP**: recognized by the TPKT signature (`0x03 0x00` followed by
@@ -2517,6 +2628,22 @@ artifact, meant to be diffed/archived/piped without ANSI noise) -- that
 remains a considered choice, not an oversight, unless a real use case for
 coloring it turns up.
 
+**`policy validate`'s `--summarize-unclassified` flag** is also now done: a
+real-world large public capture (4SICS-GeekLounge-151021.pcap, 1.25M
+packets, mostly general IT/web traffic against an OT-focused inferred
+policy) produced a 37MB/567K-line text report, almost entirely UNCLASSIFIED
+blocks -- 112,871 flows but only 844 distinct (client, server, port,
+protocol(s), zones) patterns underneath them, one MMS host pair alone
+contributing 16,378 flows via constant reconnection. The flag (text format
+only; `--format json` is unaffected, since it's already structured data a
+script can group/deduplicate itself with more precision than any one fixed
+grouping key here could offer) groups `UNCLASSIFIED TRAFFIC`/`ETHERNET
+UNCLASSIFIED TRAFFIC` entries sharing that key into one line each, carrying
+a flow count and total packet count, while leaving `VIOLATIONS`/`ALLOWED`
+(and their Ethernet equivalents) completely untouched. See
+`summarize_unclassified_flows`/`summarize_unclassified_ethernet_flows` in
+`policy_engine.cpp`.
+
 All of what was originally tracked here as "general TCP stream reassembly"
 is now done: PDU/frame-level reassembly across TCP segments
 (`Decoder::reassemble_tcp_payload`, covering Modbus, DNP3, IEC 104,
@@ -2963,6 +3090,41 @@ unlike any of the eight routing/redundancy protocols decoded so far.
       for a protocol this consequential) would need to be sourced or
       synthesized before this is considered done to the same standard as
       the rest of PROTOCOL_COVERAGE.md.
+
+    **Update: implemented**, all nine Command IDs at Tier 1 depth (both
+    request and response shapes, IndexGroup/IndexOffset addressing for
+    Read/Write/ReadWrite/AddDeviceNotification, DeviceNotification decoded
+    structurally -- stamp/sample counts -- but not per-sample), plus
+    authoritative Invoke-ID + AMS-session request/response pairing
+    (mirroring Modbus's own MBAP-transaction-ID pairing exactly). Also the
+    registration-model decoder refactor's own pilot proof (item 3 above,
+    "External code review and engineering priorities" section): TwinCAT is
+    the first protocol in this codebase built entirely on the
+    `ProtocolDecoder` interface, with no `DecodedPacket` flat fields of its
+    own at all. See `include/conduitscope/twincat.hpp`'s file header for
+    the full writeup (wire format, collision survey, and what's still
+    deliberately not implemented -- symbolic name resolution,
+    per-sample DeviceNotification decoding) and docs/PROTOCOL_COVERAGE.md's
+    TwinCAT / ADS section for the user-facing reference. As anticipated
+    above, the structural detection gate did need a real collision fix
+    once implemented: an initial version of the TCP-reassembly probe
+    (`twincat_declared_length`) checked only the 6-byte AMS/TCP prefix, not
+    the full five-part gate `try_parse_twincat` itself uses -- caught by
+    the full regression suite (it was mis-buffering MQTT/FF-HSE/SMB/
+    TACACS+/OpenVPN traffic as candidate AMS/TCP frames), fixed by
+    requiring the complete 38-byte header before declaring a length at all
+    and re-applying the same three structural checks the full decoder
+    uses. **Still not done**, same as several other protocols in this
+    document: no real-world capture corpus (validated by construction
+    against a synthetic fixture only -- see PROTOCOL_COVERAGE.md's
+    Validation subsection); no `policy validate`/`inventory` integration
+    (both degrade gracefully on TwinCAT traffic today -- flows show as "no
+    recognized OT protocol traffic" / get skipped, rather than crashing or
+    misclassifying -- but neither engine's own independently-forked
+    protocol-classification chain recognizes `twincat` as a name yet, so a
+    conduit can't be written against it); symbolic name resolution; and
+    per-sample DeviceNotification decoding (both explicitly deferred, see
+    above).
 
 21. **CLI output defaults for compactness, and offline BPF filtering** --
     **done**. Three related CLI/UX changes, all landed together:

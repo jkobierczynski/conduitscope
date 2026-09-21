@@ -369,9 +369,29 @@ private:
 // lookups left at their CLI defaults, or all disabled via not passing --oui/--nn with no --resolve) for a
 // caller that wants the byte-for-byte pre-annotation report; there is no separate unannotated
 // overload, matching decode's own writers, which always take a Resolver too.
+//
+// `summarize_unclassified` (default false, `--summarize-unclassified` at the CLI layer): when
+// true, UNCLASSIFIED TRAFFIC (and, if present, ETHERNET UNCLASSIFIED TRAFFIC) is collapsed --
+// flows/L2 flows sharing the same endpoints, port, protocol(s), and zones are grouped into one
+// summary line carrying a flow count and total packet count, instead of one full block per
+// individual flow. Added after a real, busy capture (a conference-network pcap with well over
+// 100,000 distinct TCP flows) produced a text report tens of megabytes and over half a million
+// lines long, almost entirely from one reconnecting host pair alone contributing over 16,000
+// near-identical entries -- a new TCP flow (and so a new report entry) on every single reconnect,
+// even though the underlying PATTERN worth an auditor's attention was the same one repeated. Off by
+// default, so nothing about the existing, unsummarized report changes unless this is explicitly
+// asked for. VIOLATIONS/ALLOWED (and ETHERNET VIOLATIONS/ETHERNET ALLOWED) are never summarized --
+// only the unclassified groups, which is where an uncurated capture's flow count runs away; a
+// violation is rare and specific enough that collapsing it would hide, not help. See
+// write_unclassified_flow_group_summarized_text's own comment (policy_engine.cpp) for exactly how
+// flows are grouped and how each of the two possible unclassified reasons is rendered once grouped.
+// Only affects this text renderer -- write_policy_report_json below has no equivalent parameter and
+// always lists every flow individually, since JSON output is already structured data a consuming
+// script can group/deduplicate itself far more precisely than any fixed grouping key this function
+// could choose on its behalf.
 void write_policy_report_text(std::ostream& out, const PolicyReport& report, const Policy& policy,
                                const std::string& capture_path, const std::string& policy_path,
-                               const Resolver& resolver);
+                               const Resolver& resolver, bool summarize_unclassified = false);
 
 // Renders `report` as JSON to `out`, for scripting/automation (e.g. feeding a NIS2/IEC 62443 audit
 // pipeline). See docs/MANUAL.md's POLICY FILE FORMAT section for the exact schema.

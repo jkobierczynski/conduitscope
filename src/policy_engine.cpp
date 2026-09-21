@@ -570,6 +570,102 @@ size_t PolicyReport::unclassified_count() const {
 
 namespace {
 
+// One collapsed group of UNCLASSIFIED FlowReport entries that share the same (client_ip,
+// server_ip, server_port, protocols, client_zone, server_zone, MAC pair) -- see
+// summarize_unclassified_flows below for exactly how the key is built and why those fields (and
+// only those) are what defines "the same pattern" for this feature's purposes.
+struct UnclassifiedFlowGroup {
+    const FlowReport* first = nullptr;  // representative flow, for every field this group's members
+                                         // all share (client/server ip/port/zones/protocols/mac) --
+                                         // NOT representative of packet_count, which is per-member
+    size_t flow_count = 0;
+    size_t packet_total = 0;
+};
+
+// Groups `group` (already-filtered to FlowVerdict::Unclassified, in first-seen order -- the same
+// input write_flow_group_text takes for this same list) by (client_ip, server_ip, server_port,
+// protocols, client_zone, server_zone, MAC pair), preserving first-seen GROUP order (not first-seen
+// flow order -- irrelevant here, since every member of a group is, by definition, "the same
+// pattern"). Two flows between the same hosts on DIFFERENT ports are deliberately kept as separate
+// groups (server_port is part of the key) -- see build_summarize_unclassified_sample's own "Pattern
+// B" comment (tools/make_sample_pcap.py) for why that distinction matters to an auditor even when
+// the client/server pair is identical. MAC pair is included in the key purely for correctness (two
+// flows between the same IPs could in principle arrive over different MACs, e.g. after a NIC
+// change) even though in practice every member of a real group almost always shares one.
+//
+// Deliberately does NOT key on FlowReport::reason: exactly one of the two possible reasons a flow
+// is Unclassified (see PolicyEngine::finish's own comment on FlowReport::reason) embeds that FLOW's
+// own packet count in its text ("no recognized OT protocol traffic was found on this flow (N
+// unrecognized/handshake packet(s) only)") -- keying on the literal reason string would silently
+// split what should be one group into as many groups as there are distinct packet counts among its
+// members. write_unclassified_flow_group_summarized_text below instead re-derives which of the two
+// reasons applies (from whether client_zone/server_zone is "unclassified", cheaply, no string
+// parsing) and renders a group-safe version of it once per group.
+std::vector<UnclassifiedFlowGroup> summarize_unclassified_flows(const std::vector<const FlowReport*>& group) {
+    std::vector<UnclassifiedFlowGroup> result;
+    std::unordered_map<std::string, size_t> index_of_key;  // key -> position in result
+    result.reserve(group.size());
+    for (const FlowReport* f : group) {
+        std::string key = f->client_ip + ":" + f->server_ip + ":" + std::to_string(f->server_port) + ":" +
+                           protocol_list_text(f->protocols) + ":" + f->client_zone + ":" + f->server_zone + ":" +
+                           (f->has_mac ? f->client_mac + ">" + f->server_mac : std::string());
+        auto it = index_of_key.find(key);
+        if (it == index_of_key.end()) {
+            index_of_key.emplace(key, result.size());
+            result.push_back(UnclassifiedFlowGroup{f, 1, f->packet_count});
+        } else {
+            UnclassifiedFlowGroup& g = result[it->second];
+            ++g.flow_count;
+            g.packet_total += f->packet_count;
+        }
+    }
+    return result;
+}
+
+// The --summarize-unclassified rendering for UNCLASSIFIED TRAFFIC -- see write_policy_report_text's
+// own doc comment (policy_engine.hpp) for when this is used instead of write_flow_group_text, and
+// summarize_unclassified_flows above for exactly how `group` is collapsed first.
+void write_unclassified_flow_group_summarized_text(std::ostream& out, const std::vector<const FlowReport*>& group,
+                                                     const Resolver& resolver) {
+    std::vector<UnclassifiedFlowGroup> groups = summarize_unclassified_flows(group);
+    out << "UNCLASSIFIED TRAFFIC (" << group.size() << " flow(s), summarized into " << groups.size()
+        << " distinct pattern(s) -- rerun without --summarize-unclassified, or with --format json, "
+           "for the full per-flow listing):\n";
+    if (groups.empty()) {
+        out << "  (none)\n";
+        return;
+    }
+    for (size_t i = 0; i < groups.size(); ++i) {
+        const UnclassifiedFlowGroup& g = groups[i];
+        const FlowReport& f = *g.first;
+        out << "  [" << (i + 1) << "] " << f.client_ip;
+        if (auto h = resolver.hostname(f.client_ip)) out << " (" << *h << ")";
+        out << " -> " << f.server_ip;
+        if (auto h = resolver.hostname(f.server_ip)) out << " (" << *h << ")";
+        out << ":" << f.server_port;
+        if (auto s = resolver.service_name(f.server_port, "tcp")) out << " (" << *s << ")";
+        if (!f.protocols.empty()) out << "  (" << protocol_list_text(f.protocols) << ")";
+        out << "  -- " << g.flow_count << " flow(s), " << g.packet_total << " packet(s) total\n";
+        out << "      zones: " << f.client_zone << " -> " << f.server_zone << "\n";
+        if (f.has_mac) {
+            out << "      mac: " << f.client_mac;
+            if (auto v = resolver.oui_vendor(f.client_mac)) out << " (" << *v << ")";
+            out << " -> " << f.server_mac;
+            if (auto v = resolver.oui_vendor(f.server_mac)) out << " (" << *v << ")";
+            out << "\n";
+        }
+        // Re-derived, group-safe reason -- see summarize_unclassified_flows's own comment above for
+        // why this can't just reuse f.reason verbatim for BOTH possible unclassified reasons (only
+        // the zone one is safe to reuse as-is; it never embeds a per-flow packet count).
+        bool zone_reason = (f.client_zone == "unclassified" || f.server_zone == "unclassified");
+        if (zone_reason) {
+            out << "      " << f.reason << "\n";
+        } else {
+            out << "      no recognized OT protocol traffic was found on any of these flows\n";
+        }
+    }
+}
+
 void write_flow_group_text(std::ostream& out, const std::vector<const FlowReport*>& group, const char* label,
                             const Resolver& resolver) {
     out << label << " (" << group.size() << "):\n";
@@ -644,6 +740,68 @@ void write_ethernet_flow_group_text(std::ostream& out, const std::vector<const E
     }
 }
 
+// Ethernet-side analog of UnclassifiedFlowGroup/summarize_unclassified_flows above -- one collapsed
+// group of UNCLASSIFIED EthernetFlowReport entries sharing the same (mac_a, mac_b, protocol,
+// has_vlan_tag, vlan_id, vlan_zone). Unlike the TCP-flow case, EthernetFlowReport::reason is ALWAYS
+// safe to reuse verbatim once grouped: neither of its two possible Unclassified reasons ("no
+// declared VLAN zone contains VLAN N" / "frame carries no 802.1Q VLAN tag at all" -- see
+// PolicyEngine::finish's own comment) ever embeds a per-flow packet count, so there's no equivalent
+// of write_unclassified_flow_group_summarized_text's own "re-derive a group-safe reason" step here.
+struct UnclassifiedEthernetGroup {
+    const EthernetFlowReport* first = nullptr;
+    size_t flow_count = 0;
+    size_t packet_total = 0;
+};
+
+std::vector<UnclassifiedEthernetGroup> summarize_unclassified_ethernet_flows(
+    const std::vector<const EthernetFlowReport*>& group) {
+    std::vector<UnclassifiedEthernetGroup> result;
+    std::unordered_map<std::string, size_t> index_of_key;
+    result.reserve(group.size());
+    for (const EthernetFlowReport* f : group) {
+        std::string key = f->mac_a + ":" + f->mac_b + ":" + f->protocol + ":" +
+                           (f->has_vlan_tag ? std::to_string(f->vlan_id) : std::string("untagged")) + ":" +
+                           f->vlan_zone;
+        auto it = index_of_key.find(key);
+        if (it == index_of_key.end()) {
+            index_of_key.emplace(key, result.size());
+            result.push_back(UnclassifiedEthernetGroup{f, 1, f->packet_count});
+        } else {
+            UnclassifiedEthernetGroup& g = result[it->second];
+            ++g.flow_count;
+            g.packet_total += f->packet_count;
+        }
+    }
+    return result;
+}
+
+void write_unclassified_ethernet_flow_group_summarized_text(std::ostream& out,
+                                                              const std::vector<const EthernetFlowReport*>& group,
+                                                              const Resolver& resolver) {
+    std::vector<UnclassifiedEthernetGroup> groups = summarize_unclassified_ethernet_flows(group);
+    out << "ETHERNET UNCLASSIFIED TRAFFIC (" << group.size() << " flow(s), summarized into " << groups.size()
+        << " distinct pattern(s) -- rerun without --summarize-unclassified, or with --format json, "
+           "for the full per-flow listing):\n";
+    if (groups.empty()) {
+        out << "  (none)\n";
+        return;
+    }
+    for (size_t i = 0; i < groups.size(); ++i) {
+        const UnclassifiedEthernetGroup& g = groups[i];
+        const EthernetFlowReport& f = *g.first;
+        out << "  [" << (i + 1) << "] " << f.mac_a;
+        if (auto v = resolver.oui_vendor(f.mac_a)) out << " (" << *v << ")";
+        out << " <-> " << f.mac_b;
+        if (auto v = resolver.oui_vendor(f.mac_b)) out << " (" << *v << ")";
+        out << "  (" << f.protocol << ")  -- " << g.flow_count << " flow(s), " << g.packet_total << " packet(s) total\n";
+        out << "      vlan: " << (f.has_vlan_tag ? std::to_string(f.vlan_id) : std::string("(untagged)"))
+            << ", zone: " << f.vlan_zone << "\n";
+        if (!f.reason.empty()) {
+            out << "      " << f.reason << "\n";
+        }
+    }
+}
+
 // Renders PolicyReport::notable_protocols -- see that field's own comment for why this is always
 // printed (never grouped by, or gated on, Allowed/Violation/Unclassified the way write_flow_group_
 // text's three groups are) and NotableProtocolFinding's own comment for exactly what each field
@@ -683,7 +841,7 @@ void write_notable_protocols_text(std::ostream& out, const PolicyReport& report,
 
 void write_policy_report_text(std::ostream& out, const PolicyReport& report, const Policy& policy,
                                const std::string& capture_path, const std::string& policy_path,
-                               const Resolver& resolver) {
+                               const Resolver& resolver, bool summarize_unclassified) {
     out << "Zone/conduit policy validation\n";
     out << "  capture: " << capture_path << "\n";
     out << "  policy:  " << policy_path << " (" << policy.zones.size() << " zone(s), " << policy.conduits.size()
@@ -716,7 +874,11 @@ void write_policy_report_text(std::ostream& out, const PolicyReport& report, con
 
     write_flow_group_text(out, violations, "VIOLATIONS", resolver);
     out << "\n";
-    write_flow_group_text(out, unclassified, "UNCLASSIFIED TRAFFIC", resolver);
+    if (summarize_unclassified) {
+        write_unclassified_flow_group_summarized_text(out, unclassified, resolver);
+    } else {
+        write_flow_group_text(out, unclassified, "UNCLASSIFIED TRAFFIC", resolver);
+    }
     out << "\n";
     write_flow_group_text(out, allowed, "ALLOWED", resolver);
     out << "\n";
@@ -748,7 +910,11 @@ void write_policy_report_text(std::ostream& out, const PolicyReport& report, con
 
         write_ethernet_flow_group_text(out, eth_violations, "ETHERNET VIOLATIONS", resolver);
         out << "\n";
-        write_ethernet_flow_group_text(out, eth_unclassified_list, "ETHERNET UNCLASSIFIED TRAFFIC", resolver);
+        if (summarize_unclassified) {
+            write_unclassified_ethernet_flow_group_summarized_text(out, eth_unclassified_list, resolver);
+        } else {
+            write_ethernet_flow_group_text(out, eth_unclassified_list, "ETHERNET UNCLASSIFIED TRAFFIC", resolver);
+        }
         out << "\n";
         write_ethernet_flow_group_text(out, eth_allowed_list, "ETHERNET ALLOWED", resolver);
         out << "\n";

@@ -1,4 +1,4 @@
-.TH CONDUITSCOPE 1 "2026" "conduitscope 0.2.0" "User Commands"
+.TH CONDUITSCOPE 1 "2026" "conduitscope 0.1.7" "User Commands"
 .SH NAME
 conduitscope \- decode Modbus/TCP, DNP3, IEC 60870-5-104, S7comm/COTP, S7comm-Plus (Siemens TIA Portal / S7-1200/1500), IEC 61850 MMS (Manufacturing Message Specification, ISO 9506), EtherNet/IP (CIP explicit and implicit messaging), PROFINET RT (DCP and cyclic real-time IO), IEC 61850-8-1 GOOSE, IEC 61850-9-2 Sampled Values, EtherCAT, BACnet/IP, HART-IP, OPC UA Binary, MQTT (v3.1/v3.1.1/v5.0, including Sparkplug B), FOUNDATION Fieldbus HSE (FDA/SM/FMS/LAN Redundancy), IEEE Spanning Tree Protocol (STP/RSTP/MSTP), DeviceNet (CAN-bus CIP, via SocketCAN pcap captures), DNS, mDNS, LLMNR, and NetBIOS Name Service (NBT-NS), RIP, IGMP, VRRP, HSRP, IGRP, PIM, EIGRP, and OSPFv2, plus detect DNS-over-HTTPS (DoH) via TLS SNI matching, plus recognize (by name only, not full decode) RDP, VNC, TeamViewer, AnyDesk, and Zoom, plus recognize (by name only, and for SNMP also its cleartext community string) SMB, SSH, HTTP, HTTPS, SNMPv1/v2c, Telnet, FTP, and TFTP, plus recognize (by name only, and for DHCP also its message type) NTP, DHCP, LDAP, LDAPS, RADIUS, TACACS+, and IEEE 802.1X/EAPOL, plus recognize (by name only, and for CAPWAP control and GTP-U also their message type) CAPWAP control/data, LWAPP control/data, GTP-U, and PPPoE, plus recognize (by name only, except for IP-in-IP's own inner src/dst addresses) GRE (and its NVGRE/Mikrotik EoIP sub-cases), IPsec ESP/AH, IP-in-IP, 6in4, L2TP/L2TPv3, IKE, VXLAN, Geneve, WireGuard, OpenVPN, a generic DTLS-tunnel structural check, STT, and MPLS, from offline pcap/pcapng captures
 .SH SYNOPSIS
@@ -23,6 +23,9 @@ structural gate, tried once S7comm's own gate has already failed), and
 EtherNet/IP (CIP explicit messaging, TCP port
 44818) traffic found inside its TCP streams, plus EtherNet/IP CIP I/O
 (implicit messaging, UDP port 2222) traffic found inside its UDP streams,
+plus Beckhoff TwinCAT/ADS (AMS/TCP, TCP port 48898, tried right after
+Modbus using a five-part structural gate -- see \fBdocs/PROTOCOL_COVERAGE.md\fR's TwinCAT / ADS
+section) traffic found inside its TCP streams,
 plus PROFINET RT (EtherType 0x8892, DCP device discovery/configuration and
 cyclic real-time IO), IEC 61850-8-1 GOOSE (EtherType 0x88B8, ASN.1
 BER-encoded GOOSE PDU), IEC 61850-9-2 Sampled Values (EtherType 0x88BA,
@@ -197,8 +200,8 @@ regardless of where it's being analyzed \-\- an extension beyond what
 tshark/tcpdump themselves offer. See \fBdocs/USER_GUIDE.md\fR's OUTPUT
 FORMATS "Timestamps" subsection.
 .TP
-.B \-\-protocol {auto,modbus,dnp3,iec104,s7comm,s7comm\-plus,mms,enip,profinet,goose,sv,ethercat,stp,devicenet,bacnet,hartip,opcua,mqtt,ff\-hse,dns,mdns,llmnr,nbns,doh,rip,igmp,vrrp,hsrp,igrp,pim,eigrp,ospf,remote\-access,lateral\-movement,enterprise\-trust,eapol,wireless\-backhaul,pppoe,tunnel\-vpn,mpls}
-Restrict decoding to one protocol. Default: auto (tries all eleven TCP
+.B \-\-protocol {auto,modbus,dnp3,iec104,s7comm,s7comm\-plus,mms,enip,twincat,profinet,goose,sv,ethercat,stp,devicenet,bacnet,hartip,opcua,mqtt,ff\-hse,dns,mdns,llmnr,nbns,doh,rip,igmp,vrrp,hsrp,igrp,pim,eigrp,ospf,remote\-access,lateral\-movement,enterprise\-trust,eapol,wireless\-backhaul,pppoe,tunnel\-vpn,mpls}
+Restrict decoding to one protocol. Default: auto (tries all twelve TCP
 protocols, independent of port number, plus CIP I/O, BACnet/IP, HART-IP, and
 FF-HSE on every
 UDP payload,
@@ -219,6 +222,12 @@ OPN/CLO/MSG) has zero collision risk against any other protocol's own
 detection gate; EtherNet/IP is tried next, then IEC 104 before Modbus, since an
 IEC 104 I-format APDU with sequence numbers 0/0 -- universal at session
 start -- coincidentally also matches Modbus's MBAP-header detection,
+TwinCAT/ADS (AMS/TCP, TCP port 48898) is tried right after Modbus, using
+its own five-part structural gate (a Data-Length cross-check between two
+independently present length fields, the ADS command State Flags bit, and
+a nine-value Command ID enum -- see \fBdocs/PROTOCOL_COVERAGE.md\fR's
+TwinCAT / ADS section), with no collision found against any protocol
+above or below it in this dispatch order,
 S7comm\-Plus is tried on the same TPKT/COTP framing and TCP port 102 as
 S7comm and MMS, disambiguated by its own protocol id byte (0x72 vs S7comm's
 0x32, so no collision risk with either), and MMS is
@@ -546,6 +555,18 @@ COMPLIANT capture. Off by default \-\- the finding is always reported
 regardless of this flag; it only controls whether it additionally affects
 the exit code. Never affects the report's own COMPLIANT/NON\-COMPLIANT text
 or JSON \fBcompliant\fR field.
+.TP
+.B \-\-summarize\-unclassified
+Collapse UNCLASSIFIED TRAFFIC (and, if present, ETHERNET UNCLASSIFIED
+TRAFFIC) entries that share the same endpoints/port/protocol(s)/zones into
+one summary line carrying a flow count and total packet count, instead of
+one full block per individual flow. Off by default. Aimed at a busy
+capture with far more distinct TCP flows (a new source port on every
+reconnect) than distinct (client, server, port) patterns actually worth
+reviewing. VIOLATIONS/ALLOWED (and their Ethernet equivalents) are never
+summarized, only the unclassified groups. Only affects \fB\-\-format
+text\fR \-\- JSON always lists every flow individually regardless of this
+flag.
 .TP
 .B \-\-mac\-vendor
 Same meaning as \fBdecode\fR's \fB\-\-mac\-vendor\fR: enable OUI (MAC vendor)

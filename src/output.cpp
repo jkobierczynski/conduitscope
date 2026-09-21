@@ -465,6 +465,42 @@ void TextWriter::write_packet(const DecodedPacket& p) {
 
 void JsonWriter::begin() { out_ << "[\n"; }
 
+namespace {
+
+// registration-model decoder refactor (see protocol_decoder.hpp/decoder.hpp's DecodedPacket::result):
+// the JSON-rendering analog of every `if (p.protocol == "x") { ... }` block above this point in
+// JsonWriter::write_packet, for a protocol whose own fields were never flattened onto DecodedPacket
+// in the first place (today, only TwinCAT -- see twincat.hpp's file header comment for why).
+// Deliberately a plain free function, not a virtual ProtocolRenderer hierarchy: with exactly one
+// protocol using this path so far, a full interface would be premature abstraction for no present
+// benefit; TextWriter/CsvWriter need no equivalent at all, since both already render generically
+// from DecodedPacket::protocol/summary/notes (already correctly populated for TwinCAT -- see
+// decoder.cpp's TwinCAT call site) for every protocol, migrated or not.
+void write_twincat_json_fields(std::ostream& out, const TwinCatFrame& tc) {
+    out << "    \"twincat_command\": \"" << json_escape(tc.command_name) << "\",\n";
+    out << "    \"twincat_is_response\": " << (tc.is_response ? "true" : "false") << ",\n";
+    out << "    \"twincat_invoke_id\": " << tc.invoke_id << ",\n";
+    out << "    \"twincat_target_ams_net_id\": \"" << json_escape(tc.target_ams_net_id) << "\",\n";
+    out << "    \"twincat_target_ams_port\": " << tc.target_ams_port << ",\n";
+    out << "    \"twincat_source_ams_net_id\": \"" << json_escape(tc.source_ams_net_id) << "\",\n";
+    out << "    \"twincat_source_ams_port\": " << tc.source_ams_port << ",\n";
+    if (tc.error_code != 0) {
+        out << "    \"twincat_error_code\": " << tc.error_code << ",\n";
+    }
+    if (tc.has_index_addressing) {
+        out << "    \"twincat_index_group\": " << tc.index_group << ",\n";
+        out << "    \"twincat_index_offset\": " << tc.index_offset << ",\n";
+    }
+    if (tc.has_ads_result) {
+        out << "    \"twincat_ads_result\": " << tc.ads_result << ",\n";
+    }
+    if (tc.paired_response) {
+        out << "    \"twincat_paired_request_index\": " << tc.paired_request_index << ",\n";
+    }
+}
+
+}  // namespace
+
 void JsonWriter::write_packet(const DecodedPacket& p) {
     if (wrote_any_) out_ << ",\n";
     wrote_any_ = true;
@@ -1574,6 +1610,9 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
             out_ << "    \"ospf_ls_ack_headers_truncated\": " << (p.ospf_ls_ack_headers_truncated ? "true" : "false") << ",\n";
         }
     }
+    if (p.protocol == "twincat" && p.result) {
+        write_twincat_json_fields(out_, p.result->as<TwinCatFrame>());
+    }
     out_ << "    \"notes\": [";
     for (size_t i = 0; i < p.notes.size(); ++i) {
         if (i != 0) out_ << ", ";
@@ -1700,6 +1739,11 @@ void StatsWriter::write_packet(const DecodedPacket& p) {
         modbus_function_counts_[p.modbus_function_name]++;
         if (p.modbus_is_exception) modbus_exceptions_++;
         if (p.modbus_is_paired_response) modbus_paired_responses_++;
+    }
+    if (p.protocol == "twincat" && p.result) {
+        const TwinCatFrame& tc = p.result->as<TwinCatFrame>();
+        twincat_command_counts_[tc.command_name]++;
+        if (tc.paired_response) twincat_paired_responses_++;
     }
     if (p.protocol == "s7comm" && p.s7comm_has_function) {
         s7comm_function_counts_[p.s7comm_function_name]++;
@@ -1866,6 +1910,14 @@ void StatsWriter::print_summary(std::ostream& out) const {
         out << "modbus exception responses: " << modbus_exceptions_ << "\n";
         out << "modbus responses authoritatively paired (transaction ID, not heuristic): "
             << modbus_paired_responses_ << "\n";
+    }
+    if (!twincat_command_counts_.empty()) {
+        out << "twincat/ads command ids:\n";
+        for (const auto& [name, count] : twincat_command_counts_) {
+            out << "  " << std::left << std::setw(40) << name << count << "\n";
+        }
+        out << "twincat responses authoritatively paired (invoke id, not heuristic): "
+            << twincat_paired_responses_ << "\n";
     }
     if (!s7comm_function_counts_.empty()) {
         out << "s7comm function codes:\n";

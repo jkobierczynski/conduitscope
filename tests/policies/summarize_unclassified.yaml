@@ -1,0 +1,23 @@
+# Matches tests/sample_summarize_unclassified.pcap (see tools/make_sample_pcap.py's
+# build_summarize_unclassified_sample for what each of its three flow patterns is for). The one
+# conduit below is a placeholder that never matches anything (same convention
+# unclassified_zone.yaml's own placeholder conduit uses) -- every flow in that fixture is a bare
+# SYN/SYN-ACK handshake with no payload, so no protocol is ever recognized and every flow lands in
+# FlowVerdict::Unclassified regardless of what any conduit would have permitted
+# (PolicyEngine::finish checks fs.protocols.empty() before it ever consults the conduit list -- see
+# that function's own comment); a policy file just needs at least one conduit declared to parse at
+# all (policy.cpp rejects an empty 'conduits' list outright). hmi_zone/plc_zone cover only the two
+# hosts patterns A/B actually use; 10.0.0.5 (pattern C's destination) is deliberately left outside
+# every declared zone, so that flow is unclassified for the OTHER reason ("no declared zone contains
+# ...") instead of the "no recognized protocol" one patterns A/B hit.
+zones:
+  hmi_zone:
+    networks: [192.168.1.50/32]
+  plc_zone:
+    networks: [192.168.1.10/32]
+
+conduits:
+  - name: "placeholder (never matched by these fixtures -- every flow here is protocol-less)"
+    from: hmi_zone
+    to: plc_zone
+    protocols: [any]

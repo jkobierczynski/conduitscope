@@ -205,6 +205,8 @@
 #include <vector>
 
 #include "conduitscope/byteio.hpp"
+#include "conduitscope/link_layer.hpp"
+#include "conduitscope/protocol_decoder.hpp"
 
 namespace conduitscope {
 
@@ -262,5 +264,20 @@ struct GooseFrame {
 // decoder recognizes (0x61 goosePdu or 0xA0 gseMngtPdu -- see this file's header comment for why
 // this is a narrow, high-specificity gate, not a generic length-looks-plausible heuristic).
 std::optional<GooseFrame> try_parse_goose(ByteSpan eth_payload);
+
+// registration-model pilot (Stage 3 -- see protocol_decoder.hpp/protocol_registry.hpp): thin
+// ProtocolDecoder wrapper around try_parse_goose above, unchanged. GOOSE is the pilot's
+// EtherType-gated case -- no port/IP-protocol-number concept applies, and (like EIGRP) it has no
+// cross-packet state -- so, like EigrpDecoder, this needs nothing beyond
+// id()/gate_kind()/ethertype()/decode(); see goose.cpp.
+class GooseDecoder : public ProtocolDecoder {
+public:
+    std::string_view id() const override { return "goose"; }
+    GateKind gate_kind() const override { return GateKind::EtherType; }
+    std::optional<uint16_t> ethertype() const override { return ETHERTYPE_IEC61850_GOOSE; }
+    std::optional<ProtocolResult> decode(ByteSpan payload, DecodeContext& ctx) const override;
+};
+
+const ProtocolDecoder& goose_decoder();
 
 }  // namespace conduitscope

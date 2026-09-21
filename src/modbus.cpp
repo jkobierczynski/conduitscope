@@ -294,4 +294,71 @@ std::optional<ModbusFrame> try_parse_modbus_tcp(ByteSpan tcp_payload) {
     return frame;
 }
 
+std::optional<ProtocolResult> ModbusDecoder::decode(ByteSpan payload, DecodeContext& ctx) const {
+    auto parsed = try_parse_modbus_tcp(payload);
+    if (!parsed) return std::nullopt;
+    ModbusFrame mb = std::move(*parsed);
+
+    // Same algorithm as decoder.cpp's old (now removed) Decoder::pair_modbus_transaction, moved
+    // here verbatim and adapted to read/write ModbusFlowState via ctx instead of a Decoder member
+    // -- see modbus.hpp's own comments on ModbusPendingRequest/ModbusFlowState for why.
+    ModbusFlowState& state = ctx.flow_state<ModbusFlowState>();
+    auto it = state.pending.find(mb.transaction_id);
+    if (it != state.pending.end()) {
+        ModbusPendingRequest& pending = it->second;
+        if (pending.flow_key != ctx.flow_key) {
+            // Opposite direction: authoritatively the response to that specific request.
+            mb.paired_response = true;
+            mb.paired_request_index = pending.packet_index;
+            std::ostringstream s;
+            s << "authoritative pairing: response to transaction id " << mb.transaction_id << " (unit "
+              << static_cast<unsigned>(mb.unit_id) << ") -- matches the request seen in packet #"
+              << pending.packet_index << " (" << pending.function_name << ": " << pending.request_summary
+              << "), paired by TCP session + transaction ID, not the payload-shape heuristic above";
+            if (pending.unit_id != mb.unit_id) {
+                s << " [unit id mismatch: request was unit " << static_cast<unsigned>(pending.unit_id) << "]";
+            }
+            mb.notes.push_back(s.str());
+            state.pending.erase(it);
+        } else {
+            // Same direction: transaction ID reused before its previous request was ever paired.
+            mb.notes.push_back(
+                "transaction id " + std::to_string(mb.transaction_id) +
+                " reused on this TCP flow before its previous outstanding request (packet #" +
+                std::to_string(pending.packet_index) +
+                ") was matched with a response -- possibly a retry, an orphaned request, or "
+                "out-of-order capture; treating this as a new outstanding request");
+            pending = ModbusPendingRequest{ctx.packet_index, ctx.flow_key, mb.function_name, mb.summary,
+                                            mb.unit_id};
+        }
+    } else {
+        bool looks_like_response = mb.is_exception || mb.summary.rfind("response:", 0) == 0;
+        if (looks_like_response) {
+            mb.notes.push_back(
+                "no outstanding request found on this TCP session for transaction id " +
+                std::to_string(mb.transaction_id) +
+                " -- the payload-shape heuristic above classified this packet as a response, "
+                "but its request was never seen on this session (capture may have started "
+                "after it was sent, or it used a different transaction ID/session)");
+        } else {
+            // Capacity guard against a pathological/malformed capture leaking memory -- same
+            // kMaxTrackedTransactionsPerSession=2000 cap decoder.cpp's own removed
+            // pair_modbus_transaction always applied.
+            constexpr size_t kMaxTrackedTransactionsPerSession = 2000;
+            if (state.pending.size() < kMaxTrackedTransactionsPerSession) {
+                state.pending[mb.transaction_id] =
+                    ModbusPendingRequest{ctx.packet_index, ctx.flow_key, mb.function_name, mb.summary,
+                                          mb.unit_id};
+            }
+        }
+    }
+
+    return ProtocolResult::make<ModbusFrame>("modbus", std::move(mb));
+}
+
+const ProtocolDecoder& modbus_decoder() {
+    static const ModbusDecoder instance;
+    return instance;
+}
+
 }  // namespace conduitscope

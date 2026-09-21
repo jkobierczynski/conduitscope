@@ -5377,3 +5377,188 @@ several previously-invisible ARP frames and real UDP traffic (DNS on port
 53, NetBIOS on port 138) that used to disappear into an undifferentiated
 `non-ip`/`non-tcp` bucket.
 
+### TwinCAT / ADS (TCP port 48898/0xBF02, Beckhoff's Automation Device Specification over AMS/TCP)
+
+**The first protocol in this codebase built entirely on the
+`ProtocolDecoder` interface**, not the older free-`try_parse_x`-function-
+plus-hand-written-`decoder.cpp`-block-plus-flat-`DecodedPacket`-fields
+pattern every other protocol above still uses -- see
+docs/DEVELOPMENT.md's "registration-model decoder refactor" entry for why,
+and `include/conduitscope/protocol_decoder.hpp`/`protocol_registry.hpp` for
+the interface itself. One concrete, visible consequence: `twincat_*` JSON
+fields (below) are rendered by a small dedicated function in `output.cpp`
+reading `DecodedPacket::result` (a type-erased `ProtocolResult`), not by a
+30-branch `if (p.protocol == "twincat")` chain reading dozens of flat
+`DecodedPacket` fields the way `modbus_*`/`dnp3_*`/etc. are -- there are no
+`twincat_*` fields on `DecodedPacket` at all.
+
+TwinCAT is Beckhoff's PLC runtime family; ADS (Automation Device
+Specification) is its native RPC-style protocol for reading/writing PLC
+variables, querying/controlling device state, and subscribing to cyclic
+variable-change notifications, carried over **AMS/TCP** (TCP port 48898).
+AMS also rides UDP and serial transports in some Beckhoff setups, but TCP
+is the common industrial-network case and the only one this decoder
+attempts, matching where every other TCP-based protocol in this codebase
+starts too.
+
+#### Wire format
+
+A 6-byte AMS/TCP header -- 2 reserved bytes (conventionally zero on the
+wire) plus a 4-byte little-endian **AMS/TCP Data Length** -- directly
+precedes the 32-byte AMS header itself:
+
+```
+Target AmsNetId(6) + Target AMS port(2) + Source AmsNetId(6) + Source AMS port(2) +
+Command ID(2) + State Flags(2) + Data Length(4) + Error Code(4) + Invoke ID(4)
+```
+
+followed by exactly Data Length more bytes of command-specific payload.
+Every multi-byte field is little-endian except the two AmsNetId fields,
+which are just 6 raw address bytes rendered dotted-decimal like an IPv4
+address with two extra octets (e.g. `5.62.196.212.1.1`). AMS/TCP Data
+Length is the byte count of everything that follows (the 32-byte AMS
+header plus its own payload), so it must always equal 32 plus the AMS
+header's own Data Length field -- this cross-check between two
+independently present length fields is this decoder's strongest
+structural signal.
+
+**State Flags**: bit 2 (`0x0004`) is the "ADS command" flag, set on every
+ordinary ADS request/response this decoder recognizes (distinguishing it
+from a handful of rarer, undocumented-here AMS router-internal message
+shapes that don't set it -- rejected, not guessed at); bit 0 (`0x0001`) is
+Response (set) vs. Request (clear).
+
+**Command ID** (2-byte field), all nine fully decoded (request AND
+response shapes): `0x0001` ReadDeviceInfo, `0x0002` Read, `0x0003` Write,
+`0x0004` ReadState, `0x0005` WriteControl, `0x0006` AddDeviceNotification,
+`0x0007` DeleteDeviceNotification, `0x0008` DeviceNotification, `0x0009`
+ReadWrite. Every other value is rejected outright by this decoder's own
+structural gate, not guessed at.
+
+Read/Write/ReadWrite request payloads address a PLC symbol/variable by an
+IndexGroup (4 bytes) + IndexOffset (4 bytes) pair -- conceptually similar
+to this codebase's own S7comm DB/offset item addressing -- rendered the
+same "group:offset" style. DeviceNotification (the unsolicited push a PLC
+sends for a subscription set up via AddDeviceNotification) is decoded
+**structurally only**: stamp count, per-stamp sample count, and total
+sample count, never per-sample values -- the same "recognized but not
+decoded further" posture this codebase already takes for Modbus's rare
+function codes and S7comm-Plus's Tier 2 services (see DELIBERATELY NOT
+IMPLEMENTED below for why).
+
+#### Structural detection gate
+
+(a) at least 38 bytes present (6-byte AMS/TCP header + 32-byte AMS
+header); (b) AMS/TCP Data Length == 32 + the AMS header's own Data Length
+(the cross-check above); (c) State Flags bit 2 (`0x0004`, "ADS command")
+set; (d) Command ID is one of the nine values above; (e) Data Length is
+not implausibly large for a real ADS payload (capped at 64 KiB, mirroring
+Modbus's own `mbap_length<=300`-style plausibility ceiling). Every check
+must pass before anything is trusted as real AMS/TCP.
+
+Surveyed against every other TCP-port-independent protocol this codebase
+already tries opportunistically before picking this decoder's registry
+position: OPC UA's leading 3 bytes must be one of 7 fixed ASCII
+MessageType strings -- AMS/TCP's own leading 2 bytes are conventionally
+zero, never ASCII, so no collision. IEC104 requires its first byte to be
+the fixed start byte `0x68` -- ruled out by AMS/TCP's conventionally-zero
+leading bytes. DNP3's data-link layer requires its first two bytes to be
+the fixed sync `0x0564` -- same reasoning, no collision. Modbus/TCP's
+protocol-id==0 check reads what, for an AMS/TCP frame, are the low 16 bits
+of the 4-byte AMS/TCP Data Length field -- for any realistic ADS payload
+size (tens to low thousands of bytes, never an exact multiple of 65536)
+those 16 bits are nonzero, so Modbus's own gate correctly rejects real
+TwinCAT traffic. TPKT (the S7comm/MMS/S7comm-Plus family's shared framing)
+requires its first byte to be version==3 -- again ruled out by AMS/TCP's
+conventionally-zero leading bytes. HART-IP/MQTT/FF-HSE are all tried well
+after this decoder's own registry position specifically because their own
+gates are weaker than this one's five-part check. Registered directly
+after Modbus in the TCP-port-independent dispatch order -- costs nothing
+to try there, the same "no collision found, so try it as early as its own
+gate strength justifies" reasoning OPC UA/EtherNet/IP's own positions
+already established.
+
+One implementation note this codebase's own reassembly probe (the
+lightweight check that decides whether a TCP segment needs buffering
+before the full decode runs) had to get right the hard way: an earlier,
+weaker version of that probe checked only the 6-byte AMS/TCP prefix
+(reserved + Data Length, range-capped), not the full five-part gate above
+-- and that weaker check turned out to be a coincidentally-plausible match
+for a wide range of unrelated TCP traffic, confirmed empirically as a real
+regression (it was mis-buffering MQTT, FF-HSE, SMB, TACACS+, and OpenVPN
+test traffic as candidate AMS/TCP frames, starving their own real dispatch
+of the bytes it needed). The probe now requires the complete 38-byte
+header before declaring a length at all, and re-applies the same three
+structural checks the full decoder uses. The accepted cost: a TwinCAT
+frame whose 38-byte header is itself split across TCP segments won't be
+recognized as needing buffering (a real AMS/TCP frame's full header
+realistically always arrives in one TCP segment -- the whole thing is 38
+bytes, far under any real MTU -- so this is a narrow, documented gap, not
+an open collision).
+
+#### Authoritative request/response pairing
+
+Every request/response pair is paired by Invoke ID plus AMS/TCP-over-TCP
+session (both directions), the same authoritative, non-heuristic pairing
+Modbus's own MBAP-transaction-ID pairing established -- proving the
+registration-model interface's generic flow-state mechanism
+(`DecodeContext::flow_state<T>()`) generalizes to a second,
+independently-designed stateful protocol, not just Modbus's own specific
+shape. A reused Invoke ID before its previous request was ever answered is
+noted, not silently overwritten, and pairs to the most recently
+outstanding request. An orphan response (no matching request seen on this
+session) is noted, not misattributed. DeviceNotification is deliberately
+excluded from pairing entirely -- it's an unsolicited push, not a reply to
+a specific request.
+
+#### DELIBERATELY NOT IMPLEMENTED in this pass
+
+**Symbolic name resolution**: mapping a human-readable PLC variable name
+to an IndexGroup/IndexOffset pair via ADS's own
+`ADSIGRP_SYM_HNDBYNAME`/symbol-table reads -- real depth beyond the raw
+IndexGroup/IndexOffset numbers this decoder already renders, and a
+reasonable follow-up of its own once this base decode is validated
+against real traffic, the same "port-heuristic now, tighten later"
+progression several other protocols here already followed.
+**Per-sample DeviceNotification payload decoding**: a sample's own bytes
+have no fixed shape without knowing which symbol's data type they
+represent, which is exactly what symbolic name resolution would provide
+-- so this pass decodes DeviceNotification's own envelope (stamp/sample
+counts) but not the sample payloads themselves.
+
+#### JSON output fields
+
+Rendered only when `protocol == "twincat"`: `twincat_command` (the Command
+ID's canonical name), `twincat_is_response`, `twincat_invoke_id`,
+`twincat_target_ams_net_id` / `twincat_target_ams_port`,
+`twincat_source_ams_net_id` / `twincat_source_ams_port`,
+`twincat_error_code` (only when nonzero), `twincat_index_group` /
+`twincat_index_offset` (only for Read/Write/ReadWrite/
+AddDeviceNotification, which carry IndexGroup/IndexOffset addressing),
+`twincat_ads_result` (only on a response carrying an ADS Result code --
+every response shape except DeviceNotification, which carries no Result
+at all), and `twincat_paired_request_index` (only on an authoritatively
+paired response).
+
+#### Validation
+
+No public real-world TwinCAT/ADS capture was identified while building
+this decoder (the same honest gap already documented for FF-HSE and
+several other protocols above); validated by construction against a
+synthetic `tests/sample_twincat.pcap` fixture (see
+`tools/make_sample_pcap.py`'s `build_twincat_sample()`), covering all nine
+Command IDs in both request and response shapes, authoritative Invoke-ID
+pairing (opposite-direction match, same-direction reuse pairing to the
+most recent outstanding request, and an orphan response), a
+DeviceNotification push excluded from pairing, a payload truncated
+relative to its own command's expected shape, all three structural-gate
+rejections (unrecognized Command ID, missing ADS command State Flags bit,
+and a Data-Length cross-check mismatch), a non-standard AMS/TCP port, and
+a frame split across two TCP segments (confirming Invoke-ID pairing still
+resolves correctly once the response is fully reassembled). If a real
+TwinCAT/ADS capture becomes available later, it should be added and this
+section updated accordingly, the same way this project has handled every
+other protocol where independent traffic was eventually found after an
+earlier empty search. See `include/conduitscope/twincat.hpp`'s file header
+for the full writeup.
+

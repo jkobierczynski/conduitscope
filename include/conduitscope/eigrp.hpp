@@ -54,6 +54,7 @@
 #include <vector>
 
 #include "conduitscope/byteio.hpp"
+#include "conduitscope/protocol_decoder.hpp"
 
 namespace conduitscope {
 
@@ -189,5 +190,22 @@ struct EigrpMessage {
 // Dispatch in decoder.cpp only ever calls this for IP protocol number 88, which is IANA-exclusive
 // to EIGRP, so no further port-style gating is applied.
 std::optional<EigrpMessage> try_parse_eigrp(ByteSpan ip_payload);
+
+// registration-model pilot (Stage 1 -- see protocol_decoder.hpp/protocol_registry.hpp): thin
+// ProtocolDecoder wrapper around try_parse_eigrp above, unchanged. EIGRP is the simplest of the
+// three pilot protocols -- IP-protocol-number gated, no cross-packet state at all -- so this
+// decoder needs nothing beyond id()/gate_kind()/ip_protocol()/decode(); see eigrp.cpp.
+class EigrpDecoder : public ProtocolDecoder {
+public:
+    std::string_view id() const override { return "eigrp"; }
+    GateKind gate_kind() const override { return GateKind::IpProtocol; }
+    std::optional<uint8_t> ip_protocol() const override { return EIGRP_IP_PROTOCOL; }
+    std::optional<ProtocolResult> decode(ByteSpan payload, DecodeContext& ctx) const override;
+};
+
+// Function-local static instance (lazily initialized on first call, so no static-init-order risk
+// across translation units -- see protocol_registry.hpp's own header comment for why this codebase
+// deliberately avoids self-registering globals).
+const ProtocolDecoder& eigrp_decoder();
 
 }  // namespace conduitscope
