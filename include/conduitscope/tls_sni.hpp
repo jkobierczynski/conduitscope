@@ -78,12 +78,20 @@ struct TlsClientHelloInfo {
     std::vector<std::string> alpn_protocols;  // empty when no ALPN extension was present
 };
 
+// The inner half of try_parse_tls_client_hello below, split out so quic.cpp can reuse it directly:
+// `handshake_msg` starts at the Handshake header itself (HandshakeType(1) + length(3) + body), NOT
+// a full TLS record -- exactly the shape a QUIC CRYPTO frame's payload has (QUIC carries TLS
+// Handshake messages directly, with no 5-byte record-layer wrapper at all, since record framing is
+// a TCP-era artifact QUIC's own frame layer already supersedes -- RFC 9001 section 4). Returns
+// std::nullopt (never throws) when HandshakeType != ClientHello or the body is truncated within
+// `handshake_msg`.
+std::optional<TlsClientHelloInfo> try_parse_tls_handshake_client_hello(ByteSpan handshake_msg);
+
 // Attempts to interpret `tcp_payload` (a single TCP segment -- see tls_sni.hpp's file header
 // comment for why reassembly isn't attempted) as one TLS ClientHello. Returns std::nullopt (never
-// throws) when the record/handshake headers don't match (ContentType != Handshake,
-// HandshakeType != ClientHello), or the ClientHello body is truncated within this segment. A
-// successful parse does NOT by itself mean "this is DoH" -- see try_detect_doh below, which is
-// what decoder.cpp actually calls.
+// throws) when the record header doesn't match (ContentType != Handshake), or delegates the rest
+// to try_parse_tls_handshake_client_hello above. A successful parse does NOT by itself mean "this
+// is DoH" -- see try_detect_doh below, which is what decoder.cpp actually calls.
 std::optional<TlsClientHelloInfo> try_parse_tls_client_hello(ByteSpan tcp_payload);
 
 // One "likely DoH" detection -- see tls_sni.hpp's file header comment for exactly what this does
