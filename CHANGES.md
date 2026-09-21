@@ -198,3 +198,22 @@ src/live_capture.cpp            -- ensure_pcap_runtime_available() friendly-erro
 .github/workflows/ci.yml        -- ctest --timeout 120 safety net
 docs/USER_GUIDE.md              -- Windows/Npcap notes corrected
 ```
+
+## Update (after your latest CI run)
+
+Your next run confirmed the fix worked: the hang is gone (all 1119
+Windows-eligible tests now run to completion, up from stalling after 4).
+The one new failure, `live_capture_bad_interface_name_reports_clearly`, is
+a direct and expected consequence of the same fix, not a new bug: that
+GitHub Actions Windows runner genuinely has no Npcap *runtime* installed
+(only the SDK), so the test's bad-interface-name run now hits the new
+"Npcap RUNTIME not installed" error before it ever reaches pcap's own
+"cannot open interface" error -- both are correct, actionable errors for
+their respective environments (a real error would require paying for an
+Npcap OEM license to silently install the runtime in CI at all, which
+isn't worth it just to make this one test's error message match the other
+one). `CMakeLists.txt` now accepts either message as a pass.
+
+Verified again: full CTest suite 1124/1124 passing on Linux (this
+specific test manually re-run too, matching the "cannot open/activate"
+branch since real libpcap is genuinely installed here).

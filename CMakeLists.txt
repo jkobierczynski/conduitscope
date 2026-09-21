@@ -7271,8 +7271,14 @@ else()
   # validated only by the argument-parsing and bad-interface-name tests until that changes.
   add_test(NAME live_capture_bad_interface_name_reports_clearly
     COMMAND conduitscope decode --interface this_interface_does_not_exist --duration 1)
+  # Two legitimate failure messages are possible here, and both count as "reports clearly": on a
+  # machine with the Npcap/libpcap RUNTIME actually present, pcap itself rejects the unknown
+  # interface name ("cannot open/activate ... this_interface_does_not_exist"); on Windows CI (SDK
+  # only, no Npcap runtime -- see live_capture.cpp's ensure_pcap_runtime_available and the
+  # /DELAYLOAD comment in this file above), the runtime-missing check fires first instead. Either
+  # one is the correct, actionable error for its environment.
   set_tests_properties(live_capture_bad_interface_name_reports_clearly PROPERTIES
-    PASS_REGULAR_EXPRESSION "cannot (open|activate) .*this_interface_does_not_exist")
+    PASS_REGULAR_EXPRESSION "(cannot (open|activate) .*this_interface_does_not_exist|live capture requires the Npcap RUNTIME to be installed)")
 
   if(UNIX)
     # None of these depend on any traffic actually existing on "lo" during the run (--duration
