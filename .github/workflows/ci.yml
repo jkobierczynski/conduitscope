@@ -1,11 +1,12 @@
 name: CI
 
-# Build + full CTest suite across compilers and build types. Deliberately does
-# NOT run ASan/UBSan or any fuzzing yet -- that's the next planned step, not
-# this one; see docs/DEVELOPMENT.md's "External code review and engineering
-# priorities" section for the reasoning and the adopted order (CI first,
-# sanitizers/fuzzing next, the decoder registration-model refactor after
-# that).
+# Build + full CTest suite across compilers and build types, PLUS (see the `sanitizers` job) an
+# ASan/UBSan-instrumented build running the same suite plus every fuzz harness's own bounded
+# corpus-regression check on every push/PR, and (see `scheduled-fuzz`) materially longer, dedicated
+# per-harness fuzzing campaigns on a nightly schedule. See docs/DEVELOPMENT.md's "External code
+# review and engineering priorities" section (ROADMAP items 2 and 6) for the reasoning and the
+# adopted order (CI first, sanitizers/fuzzing next -- this workflow -- the decoder
+# registration-model refactor after that).
 
 on:
   push:
@@ -23,6 +24,12 @@ on:
   pull_request:
     branches: ["**"]
   workflow_dispatch:
+  schedule:
+    # Drives the scheduled-fuzz job below only (every other job here is gated to push/pull_request/
+    # workflow_dispatch and simply doesn't run on this trigger) -- an arbitrary off-peak time, not
+    # the top of the hour, per GitHub's own guidance that top-of-hour schedules see the most queuing
+    # delay from every other repository's workflow all requesting the same minute.
+    - cron: "17 3 * * *"
 
 permissions:
   contents: read
@@ -45,6 +52,10 @@ jobs:
   build-and-test:
     name: ${{ matrix.compiler }} / ${{ matrix.build_type }}
     runs-on: ubuntu-latest
+    # The nightly schedule trigger above exists only to drive scheduled-fuzz below -- this job
+    # already runs on every push/PR, so re-running it nightly too would just be redundant runner
+    # time for zero new signal.
+    if: github.event_name != 'schedule'
     strategy:
       fail-fast: false
       matrix:
@@ -98,6 +109,57 @@ jobs:
           getcap build/conduitscope
 
       - name: Test
+        working-directory: build
+        run: ctest -j"$(nproc)" --output-on-failure
+
+  sanitizers:
+    # The "folded into the same CI matrix" half of docs/DEVELOPMENT.md's ROADMAP item 6: an
+    # ASan/UBSan-instrumented build of conduitscope_core (and therefore the conduitscope CLI binary
+    # itself, which links it -- see CMakeLists.txt's CONDUITSCOPE_ENABLE_FUZZING block for why),
+    # running the SAME full CTest suite build-and-test does, plus the 9 fuzz_*_corpus_regression
+    # tests CMakeLists.txt also registers in this configuration -- each a short (10s), bounded
+    # libFuzzer run over that harness's own committed seed corpus, not a real fuzzing campaign (see
+    # scheduled-fuzz below for that). This runs on every push/PR specifically because CI without
+    # sanitizers wired in mostly proves the code still compiles, not that it's memory-safe -- see
+    # this workflow's own top comment and docs/DEVELOPMENT.md's "the one gap weighted more heavily
+    # here than in the review's own ordering" section for why this was judged the sharper near-term
+    # risk versus polish, for a tool whose entire input surface is attacker-reachable capture bytes.
+    name: Clang / ASan+UBSan + fuzz corpus regression
+    runs-on: ubuntu-latest
+    if: github.event_name != 'schedule'
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      # libclang-rt-dev is the metapackage that tracks whatever compiler-rt build matches this
+      # runner image's default `clang`/`clang++` (avoids hardcoding a versioned package name like
+      # libclang-rt-18-dev that would go stale the next time the runner image's default Clang
+      # bumps) -- it provides both the ASan/UBSan runtime and libFuzzer itself.
+      - name: Install libpcap and the Clang sanitizer/fuzzer runtime
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libpcap-dev libclang-rt-dev
+
+      - name: Configure
+        run: >
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=Debug
+          -DCMAKE_CXX_COMPILER=clang++
+          -DCONDUITSCOPE_ENABLE_FUZZING=ON
+
+      - name: Build
+        run: cmake --build build -j"$(nproc)"
+
+      # Same reasoning as build-and-test's own identically-named step above: the live_capture_*
+      # tests that actually open "lo" need CAP_NET_RAW, which this runner's unprivileged user
+      # doesn't have by default.
+      - name: Grant the capture binary CAP_NET_RAW/CAP_NET_ADMIN
+        run: |
+          sudo apt-get install -y libcap2-bin
+          sudo setcap cap_net_raw,cap_net_admin=eip build/conduitscope
+          getcap build/conduitscope
+
+      - name: Test (regression suite + fuzz corpus regression, under ASan/UBSan)
         working-directory: build
         run: ctest -j"$(nproc)" --output-on-failure
 
@@ -179,7 +241,11 @@ jobs:
 
       - name: Test
         working-directory: build
-        run: ctest -C Release -j 4 --output-on-failure
+        # --timeout is a safety net, not the fix for the missing-Npcap-runtime hang this job used
+        # to have (see live_capture.cpp's ensure_pcap_runtime_available and the /DELAYLOAD comment
+        # in CMakeLists.txt for that): if any test ever does genuinely wedge, this converts it into
+        # a fast, clearly-attributed failure instead of silently eating the whole job's time budget.
+        run: ctest -C Release -j 4 --output-on-failure --timeout 120
 
       - name: Verify reported version matches the tag
         run: |
@@ -331,6 +397,9 @@ jobs:
     # covers.
     name: gcc / Release (live capture disabled)
     runs-on: ubuntu-latest
+    # See build-and-test's own identical guard -- the nightly schedule trigger only exists to
+    # drive scheduled-fuzz below.
+    if: github.event_name != 'schedule'
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -347,3 +416,88 @@ jobs:
       - name: Test
         working-directory: build
         run: ctest -j"$(nproc)" --output-on-failure
+
+  scheduled-fuzz:
+    # The other half of docs/DEVELOPMENT.md's ROADMAP item 6: materially longer, dedicated
+    # campaigns against each harness's OWN growing seed corpus (fuzz/corpus/<name>/), as opposed to
+    # the sanitizers job's few-seconds-per-harness smoke regression on every push/PR above. Runs on
+    # the nightly cron trigger (see this workflow's own `on:` block) rather than per-push, since
+    # minutes-per-harness doesn't belong gating an ordinary push/PR -- also manually triggerable via
+    # workflow_dispatch, e.g. right after hand-extending a corpus per docs/fuzz/README.md.
+    name: Scheduled fuzz campaign / ${{ matrix.harness }}
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    # actions/upload-artifact (for a crash reproducer, below) needs `actions: write` once the
+    # workflow-level `permissions:` block has switched every job to the restrictive model -- same
+    # reasoning as release-windows' own identical addition.
+    permissions:
+      contents: read
+      actions: write
+    # A separate, ref-agnostic concurrency group from the workflow-level default (keyed on
+    # github.ref, cancel-in-progress: true): that default would cancel an in-progress scheduled
+    # campaign the moment anyone pushes to the same branch while it's running, which defeats the
+    # point of a dedicated longer run. This group is per-harness instead, so ordinary pushes never
+    # touch it, and cancel-in-progress: false means two overlapping runs of the SAME harness (e.g.
+    # a manual workflow_dispatch landing during the nightly cron) queue rather than clobber each
+    # other.
+    concurrency:
+      group: scheduled-fuzz-${{ matrix.harness }}
+      cancel-in-progress: false
+    strategy:
+      fail-fast: false
+      matrix:
+        # The full set of harnesses under fuzz/ -- see docs/DEVELOPMENT.md's "Fuzzing campaign log"
+        # table for what each one covers and its dedicated-campaign history so far.
+        harness:
+          - pcap_reader
+          - packet_decode
+          - dnp3
+          - cotp_s7comm
+          - mqtt
+          - bacnet
+          - iec104
+          - enip
+          - s7comm_plus
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install libpcap and the Clang sanitizer/fuzzer runtime
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libpcap-dev libclang-rt-dev
+
+      - name: Configure
+        run: >
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=Debug
+          -DCMAKE_CXX_COMPILER=clang++
+          -DCONDUITSCOPE_ENABLE_FUZZING=ON
+
+      - name: Build fuzz_${{ matrix.harness }}
+        run: cmake --build build -j"$(nproc)" --target "fuzz_${{ matrix.harness }}"
+
+      # 10 minutes, single worker, per harness (9 harnesses run in parallel matrix legs, not 9x
+      # sequentially): proportionate to a nightly CI-hosted campaign without either starving other
+      # GitHub Actions usage on this repository or ballooning this job's own wall-clock time. Not a
+      # substitute for the longer, multi-worker, by-hand campaigns docs/DEVELOPMENT.md's own
+      # "Fuzzing campaign log" table records -- this is a regular, automated floor under those, not
+      # a replacement for them.
+      - name: Run a 10-minute campaign against this harness's own corpus
+        working-directory: build
+        run: |
+          "./fuzz_${{ matrix.harness }}" "../fuzz/corpus/${{ matrix.harness }}" \
+            -max_total_time=600 -max_len=8192 -print_final_stats=1
+
+      # libFuzzer writes a crash-<sha1> reproducer file into the working directory the moment it
+      # finds one, and exits non-zero -- which is what actually fails the step above. Uploading it
+      # here means a finding is downloadable straight from the failed run instead of needing to be
+      # re-found by re-running the campaign locally.
+      - name: Upload crash reproducer, if any
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-${{ matrix.harness }}-crash
+          path: build/crash-*
+          if-no-files-found: ignore
+          retention-days: 30

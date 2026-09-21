@@ -1,3 +1,100 @@
+# CI hardening: fuzzing/ASan wired in, Ctrl+C color fix, Windows hang fix
+
+Drop this into your checkout (overwrites the same relative paths), reconfigure/rebuild, and
+re-run `ctest`. Verified on this end: full 1124/1124 CTest suite passing, `.github/workflows/ci.yml`
+valid YAML + clean `actionlint`, and every new CI command exercised locally (not just written and
+hoped for -- see "Verified" at the bottom).
+
+## 1. Fuzzing/ASan/UBSan wired into CI (your requested next step)
+
+Two new jobs in `.github/workflows/ci.yml`, closing out `docs/DEVELOPMENT.md`'s ROADMAP item 6:
+
+- **`sanitizers`** -- runs on every push/PR, same as `build-and-test`. Clang,
+  `-DCONDUITSCOPE_ENABLE_FUZZING=ON` (ASan/UBSan-instrumented `conduitscope_core`, and therefore
+  the CLI binary too, since it links that library), full CTest suite including all 9
+  `fuzz_*_corpus_regression` smoke tests (a few seconds each, bounded by `-max_total_time=10` --
+  not a real campaign). The Clang sanitizer/fuzzer runtime comes from the `libclang-rt-dev`
+  metapackage, which tracks whatever compiler-rt build matches the runner image's default Clang,
+  rather than hardcoding a versioned package name (`libclang-rt-18-dev` today) that would go stale
+  the next time the image's default Clang version bumps.
+- **`scheduled-fuzz`** -- a 9-way matrix job (one leg per harness: `pcap_reader`, `packet_decode`,
+  `dnp3`, `cotp_s7comm`, `mqtt`, `bacnet`, `iec104`, `enip`, `s7comm_plus`), gated to a new nightly
+  `schedule:` cron trigger (03:17 UTC, an arbitrary off-peak minute) plus manual
+  `workflow_dispatch`, NOT every push -- minutes-per-harness doesn't belong gating an ordinary
+  push/PR. Each leg runs a 10-minute single-worker campaign against that harness's own committed
+  corpus (`fuzz/corpus/<name>/`) and uploads any crash reproducer as a downloadable build artifact
+  on failure. This job gets its own concurrency group (per-harness, not per-ref) so an ordinary
+  push to the branch it's running against doesn't cancel it out from under itself -- the
+  workflow's existing top-level concurrency group would otherwise do exactly that.
+- `build-and-test` and `build-without-libpcap` both got `if: github.event_name != 'schedule'`
+  guards, so the new nightly trigger only drives `scheduled-fuzz`, not a redundant nightly re-run
+  of everything the per-push matrix already covers.
+
+`docs/DEVELOPMENT.md`'s ROADMAP item 6 (and item 2's "not yet done" note) updated to reflect this
+is now done, matching how the rest of that document tracks status.
+
+## 2. Ctrl+C now restores the terminal's normal colors (your request)
+
+Previously, hitting Ctrl+C during a colorized live `decode -i` could leave the terminal (and
+everything typed afterward) stuck showing whatever ANSI color the most recently printed line
+happened to end in. `src/cli_main.cpp`'s SIGINT handler now writes the ANSI reset sequence
+(`\033[0m`) directly to stdout via a raw `write()`/`_write()` call -- not `std::cout`, deliberately,
+since that's the low-level, essentially-immediate primitive rather than buffered C++ iostream state
+a signal arriving mid-write could otherwise race with -- as the very first thing it does, before
+anything else (including stopping the capture itself). Only fires when this run actually has color
+enabled (tracked via a new `g_color_active` atomic, set/cleared by `SigintGuard`); `policy
+validate`/`inventory` have no colorized text output, so they're unaffected.
+
+Verified functionally, not just built: captured real loopback traffic through a pty, sent a real
+SIGINT mid-capture, and confirmed the reset sequence appears in the raw output at the point of
+interrupt.
+
+## 3. Windows release CI hang -- the fix from earlier, now finalized
+
+(Already delivered separately, included again here since this drop is meant to be a complete,
+self-contained update.) `conduitscope.exe` on Windows now delay-loads `wpcap.dll` (`/DELAYLOAD` in
+`CMakeLists.txt`) instead of requiring the Npcap *runtime* at process startup -- only the Npcap
+*SDK* is needed to build. `src/live_capture.cpp` added a `LoadLibraryA("wpcap.dll")` probe
+(`ensure_pcap_runtime_available`) so `-i`/`interfaces` fail with a clear "install Npcap" message if
+the runtime is genuinely missing, instead of the whole binary refusing to launch. The
+`live_capture_bad_interface_name_reports_clearly` CTest case now accepts either of the two
+legitimate error messages this can produce, depending on whether the runtime is actually installed
+on the machine running the test. `.github/workflows/ci.yml`'s Windows `ctest` step also got a
+`--timeout 120` safety net, independent of this specific root cause.
+
+`docs/USER_GUIDE.md`'s "Windows / Npcap notes" section corrected to describe this delay-load
+mechanism (it previously claimed a live-capture-enabled binary "still runs fine on a machine with
+no Npcap runtime installed at all", which was aspirational until this fix actually landed).
+
+## Files in this drop
+
+```
+CMakeLists.txt                      -- /DELAYLOAD wiring, bad-interface-name test regex fix
+src/live_capture.cpp                -- ensure_pcap_runtime_available() friendly-error check
+src/cli_main.cpp                    -- Ctrl+C terminal-color restore
+.github/workflows/ci.yml            -- sanitizers + scheduled-fuzz jobs, Windows ctest --timeout
+docs/USER_GUIDE.md                  -- Windows/Npcap notes corrected, Ctrl+C color note added
+docs/DEVELOPMENT.md                 -- ROADMAP item 6 marked done
+README.md                           -- Status bullets for all of the above
+```
+
+## Verified
+
+- Full CTest suite: 1124/1124 passing (plain Release build).
+- ASan/UBSan + fuzzing build (`-DCONDUITSCOPE_ENABLE_FUZZING=ON`, Clang): builds clean, full suite
+  including all 9 `fuzz_*_corpus_regression` tests: 1133/1133 passing.
+- Ran the exact `scheduled-fuzz` command (`fuzz_dnp3` against its own corpus,
+  `-max_total_time`/`-max_len`/`-print_final_stats`) locally: ~878K executions in 31s, 0 crashes.
+- `libclang-rt-dev` metapackage installs cleanly and provides a working ASan/UBSan/libFuzzer
+  runtime for this runner's default Clang (18.1.3 here).
+- `.github/workflows/ci.yml`: valid YAML (`yaml.safe_load`) and clean `actionlint` (v1.7.12).
+- Ctrl+C color reset: functionally exercised against real loopback traffic through a pty, not just
+  built -- confirmed the reset sequence lands at the interrupt point in the raw captured output.
+
+I can't actually run this on GitHub's own runners from here, so the very next tag push is still the
+first real-infrastructure check, same as last time -- but every command each new job runs has now
+been run for real, not just written.
+
 # conduitscope -- ICMP decoding, FF-HSE false-positive fix, generic-TCP-fallback cleanup
 
 Drop this into your existing checkout (it overwrites the same relative
