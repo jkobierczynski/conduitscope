@@ -31,6 +31,16 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # The Npcap SDK (distinct from the Npcap runtime installer end users need to actually run a
+  # live capture -- see docs/USER_GUIDE.md's "Build time vs. run time" note) has no package-
+  # manager distribution, so the Windows release job below downloads this exact version's zip
+  # directly from npcap.com. Bump this deliberately, not automatically -- npcap.com doesn't
+  # version-pin old releases at a stable URL indefinitely, so an untested bump here can silently
+  # break the next tagged release's Windows leg. 1.16 is confirmed working (this project's own
+  # first real Windows/MSVC build, with live capture enabled, was done against it).
+  NPCAP_SDK_VERSION: "1.16"
+
 jobs:
   build-and-test:
     name: ${{ matrix.compiler }} / ${{ matrix.build_type }}
@@ -91,23 +101,147 @@ jobs:
         working-directory: build
         run: ctest -j"$(nproc)" --output-on-failure
 
+  release-windows:
+    # Windows counterpart to build-and-test/build-without-libpcap above, but scoped to tag pushes
+    # only (see NPCAP_SDK_VERSION's own comment for why this doesn't run on every ordinary push --
+    # it's a deliberate scope decision, not an oversight, since the SDK download and a second full
+    # CTest run add real runner time that only matters when a release is actually being cut).
+    # Combines what the Linux side keeps as two separate jobs (build-and-test's matrix, and
+    # release's own fresh version-overridden build) into one, since here they'd otherwise rebuild
+    # and re-download the SDK twice for no benefit: this job both gates the release (the full
+    # CTest suite must pass -- Windows has never had CI coverage before this) AND produces the
+    # exact binary that gets packaged and attached to the release, built once under
+    # CONDUITSCOPE_VERSION_OVERRIDE so the tested binary and the shipped binary are the same
+    # artifact, not two separate builds that could in principle drift.
+    #
+    # No `-G`/generator is pinned deliberately: this project's own first real Windows build this
+    # session hit a generator-name mismatch (a machine with only Visual Studio 2026 installed
+    # rejected the hardcoded "Visual Studio 17 2022" name) -- letting CMake auto-detect whichever
+    # single VS install the windows-latest image actually ships avoids re-hardcoding a version
+    # that will eventually go stale the same way.
+    name: Windows (Release, live capture)
+    runs-on: windows-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    # actions/upload-artifact needs `actions: write` on the job token once the workflow-level
+    # `permissions:` block above has switched every job to the restrictive "unlisted scopes are
+    # none" model (see the `release` job's own `permissions:` block below for the download-side
+    # counterpart, `actions: read`).
+    permissions:
+      contents: read
+      actions: write
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Derive version from tag
+        id: version
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          "version=$($tag.TrimStart('v'))" >> $env:GITHUB_OUTPUT
+
+      - name: Download and extract the Npcap SDK
+        run: |
+          $ErrorActionPreference = "Stop"
+          $url = "https://npcap.com/dist/npcap-sdk-${env:NPCAP_SDK_VERSION}.zip"
+          Invoke-WebRequest -Uri $url -OutFile npcap-sdk.zip
+          Expand-Archive -Path npcap-sdk.zip -DestinationPath npcap-sdk
+          "NPCAP_SDK_DIR=$(Resolve-Path npcap-sdk)" >> $env:GITHUB_ENV
+
+      # Same override this repo's own version.hpp.in documents (see CMakeLists.txt) -- the
+      # published binary's `conduitscope version` output always matches the tag it shipped
+      # under. -A x64 pins the target architecture explicitly since the runner's default CMake
+      # generator choice doesn't otherwise guarantee which platform it defaults to.
+      - name: Configure
+        run: >
+          cmake -S . -B build
+          -A x64
+          -DCMAKE_BUILD_TYPE=Release
+          -DCONDUITSCOPE_VERSION_OVERRIDE=${{ steps.version.outputs.version }}
+          -DNPCAP_SDK_DIR="${env:NPCAP_SDK_DIR}"
+
+      # A hard failure, not a warning: this job's whole point is a live-capture-enabled Windows
+      # binary (see the job name), so a silently pcap-less build here would ship a release
+      # artifact that quietly doesn't do what it says -- worse than failing loudly and fixing the
+      # SDK download/NPCAP_SDK_DIR wiring above.
+      - name: Confirm live capture was actually detected
+        run: |
+          $config = Get-Content build/CMakeCache.txt -Raw
+          if ((Select-String -InputObject $config -Pattern "wpcap" -Quiet) -eq $false) {
+            throw "wpcap.lib not found in CMakeCache.txt -- live capture was NOT enabled for this build (see the Configure step's own log above)"
+          }
+
+      - name: Build
+        run: cmake --build build --config Release -j 4
+
+      - name: Test
+        working-directory: build
+        run: ctest -C Release -j 4 --output-on-failure
+
+      - name: Verify reported version matches the tag
+        run: |
+          $reported = & build\Release\conduitscope.exe version
+          Write-Host $reported
+          if ($reported -notmatch "conduitscope ${{ steps.version.outputs.version }} ") {
+            throw "version output did not match the tag"
+          }
+
+      - name: Package
+        id: package
+        run: |
+          $ErrorActionPreference = "Stop"
+          $name = "conduitscope-${{ steps.version.outputs.version }}-windows-x86_64"
+          $staging = "staging\${name}"
+          New-Item -ItemType Directory -Path $staging -Force | Out-Null
+          Copy-Item build\Release\conduitscope.exe "$staging\"
+          Copy-Item README.md, LICENSE "$staging\"
+          Copy-Item docs "$staging\docs" -Recurse
+          Compress-Archive -Path $staging -DestinationPath "${name}.zip"
+          $hash = (Get-FileHash "${name}.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  ${name}.zip" | Out-File -Encoding ascii "${name}.zip.sha256"
+          "archive=${name}.zip" >> $env:GITHUB_OUTPUT
+          "checksum=${name}.zip.sha256" >> $env:GITHUB_OUTPUT
+
+      # Handed off to the `release` job below rather than published directly from here, so there
+      # is exactly one place (`release`) that decides whether a Release gets created/updated for
+      # this tag -- same reasoning as the existing linux-release/windows-release split avoiding
+      # two independent `gh release create` calls racing each other.
+      - name: Upload packaged binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-release-binary
+          path: |
+            ${{ steps.package.outputs.archive }}
+            ${{ steps.package.outputs.checksum }}
+          if-no-files-found: error
+          retention-days: 7
+
   release:
     # Only for a version-tag push (v0.1.1, v1.2.3, ...), and only once every
-    # leg of build-and-test / build-without-libpcap has already passed for
-    # this exact commit -- a release is never published from code CI hasn't
-    # verified. Builds a fresh Release binary (not reused from the matrix
-    # above -- simpler and more obviously reproducible than downloading one
-    # matrix leg's artifact), packages it with the docs/README/LICENSE/man
-    # page (this is an OT-audit tool, and the people running it are often on
-    # an air-gapped or restricted network without a browser open to GitHub,
-    # so the docs travel with the binary rather than staying link-only), and
-    # publishes a GitHub Release for the tag with that tarball attached.
+    # leg of build-and-test / build-without-libpcap / release-windows has
+    # already passed for this exact commit -- a release is never published
+    # from code CI hasn't verified. Builds a fresh Linux Release binary (not
+    # reused from the matrix above -- simpler and more obviously
+    # reproducible than downloading one matrix leg's artifact), packages it
+    # with the docs/README/LICENSE/man page (this is an OT-audit tool, and
+    # the people running it are often on an air-gapped or restricted network
+    # without a browser open to GitHub, so the docs travel with the binary
+    # rather than staying link-only), downloads the Windows binary
+    # release-windows already built and packaged, and publishes ONE GitHub
+    # Release for the tag with both platforms' archives attached.
     name: Publish release
-    needs: [build-and-test, build-without-libpcap]
+    needs: [build-and-test, build-without-libpcap, release-windows]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    # `actions: read` is needed for actions/download-artifact below, on top of the `contents:
+    # write` this job already needed to publish the Release itself -- see release-windows' own
+    # permissions comment for the upload-side counterpart.
     permissions:
       contents: write
+      actions: read
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -158,6 +292,12 @@ jobs:
           echo "archive=${name}.tar.gz" >> "$GITHUB_OUTPUT"
           echo "checksum=${name}.tar.gz.sha256" >> "$GITHUB_OUTPUT"
 
+      - name: Download Windows binary
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-release-binary
+          path: windows-release-binary
+
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -179,6 +319,7 @@ jobs:
           gh release create "${tag}" \
             "${{ steps.package.outputs.archive }}" \
             "${{ steps.package.outputs.checksum }}" \
+            windows-release-binary/* \
             --title "conduitscope ${{ steps.version.outputs.version }}" \
             --generate-notes
 
