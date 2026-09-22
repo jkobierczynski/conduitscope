@@ -155,13 +155,35 @@ def client_initial_plaintext(sni_hostname: str, *, pad_to: int = 1160) -> bytes:
 
 def minimal_long_header(long_type_bits: int, dcid: bytes, scid: bytes, version: int = 1,
                          trailer: bytes = b"") -> bytes:
-    """A long-header packet with nothing beyond DCID/SCID that quic.cpp's own name-only paths
-    (Handshake/0-RTT/Retry) need -- see quic.cpp's own try_recognize_quic: those three types are
-    named immediately after the Long Packet Type field is read, before any Length/Packet Number
-    parsing is even attempted."""
+    """A long-header packet with nothing beyond DCID/SCID/trailer -- the caller supplies whatever
+    per-type trailing structure quic.cpp's own try_recognize_quic now requires before it will name
+    a 0-RTT/Handshake/Retry packet (see 0rtt_handshake_trailer()/retry_trailer() below): the same
+    post-fix-bug structural cross-check every other long-header type already had (Version
+    Negotiation's own whole-number-of-versions check; Initial's own Length-field/captured-bytes
+    cross-check)."""
     byte0 = 0xC0 | (long_type_bits << 4) | 0x00  # form=1, fixed=1, type bits, reserved/pnlen=0000
     return (bytes([byte0]) + struct.pack("!I", version) +
             bytes([len(dcid)]) + dcid + bytes([len(scid)]) + scid + trailer)
+
+
+def zero_rtt_or_handshake_trailer(payload_and_tag_len: int = 16) -> bytes:
+    """A structurally self-consistent trailer for a 0-RTT/Handshake long-header packet: Length
+    (a 1-byte QUIC varint, RFC 9000 section 16 -- values 0-63 fit in one byte with the top two bits
+    clear) covering a 1-byte Packet Number plus `payload_and_tag_len` more bytes standing in for
+    the (never-decrypted, so content doesn't matter) protected payload+tag -- Length must total at
+    least 17 (1-byte Packet Number + 16-byte AEAD tag minimum) to pass quic.cpp's own check."""
+    pn_length = 1
+    length_value = pn_length + payload_and_tag_len
+    assert length_value < 64, "keep this fixture's Length field a 1-byte varint for simplicity"
+    return bytes([length_value]) + bytes(length_value)  # Length varint, then PN + payload/tag bytes
+
+
+def retry_trailer(token_len: int = 4) -> bytes:
+    """A structurally self-consistent trailer for a Retry long-header packet: an arbitrary-length
+    Retry Token followed by the mandatory 16-byte Retry Integrity Tag (RFC 9000 section 17.2.5) --
+    quic.cpp's own check only requires at least 16 trailing bytes total, so the split between
+    "token" and "tag" bytes below is illustrative, not itself checked."""
+    return bytes(token_len) + bytes(16)
 
 
 def version_negotiation_packet(dcid: bytes, scid: bytes, versions: list) -> bytes:
@@ -191,14 +213,17 @@ def build_quic_sample():
     add_udp(version_negotiation_packet(dcid, scid, [1, 0x6B3343CF]), sport=54101)
 
     # 3) Handshake packet (long_type=2) -- named only (ServerHello onward; never another
-    #    ClientHello, and encrypted under Handshake-level keys this decoder never has).
-    add_udp(minimal_long_header(0b10, dcid, scid, trailer=bytes(4)), sport=54102)
+    #    ClientHello, and encrypted under Handshake-level keys this decoder never has). Needs a
+    #    structurally self-consistent Length field (see the post-fix-bug comment on
+    #    zero_rtt_or_handshake_trailer/try_recognize_quic's own comment in quic.cpp).
+    add_udp(minimal_long_header(0b10, dcid, scid, trailer=zero_rtt_or_handshake_trailer()), sport=54102)
 
     # 4) 0-RTT packet (long_type=1) -- named only (needs the connection's own resumption secret).
-    add_udp(minimal_long_header(0b01, dcid, scid, trailer=bytes(4)), sport=54103)
+    add_udp(minimal_long_header(0b01, dcid, scid, trailer=zero_rtt_or_handshake_trailer()), sport=54103)
 
     # 5) Retry packet (long_type=3) -- named only (no protected payload at all in a real Retry).
-    add_udp(minimal_long_header(0b11, dcid, scid, trailer=bytes(4)), sport=54104)
+    #    Needs the mandatory 16-byte Retry Integrity Tag (see retry_trailer()'s own comment).
+    add_udp(minimal_long_header(0b11, dcid, scid, trailer=retry_trailer()), sport=54104)
 
     # 6) Short-header (1-RTT) packet on the default QUIC port -- the weakest-gate, port-only
     #    fallback (Fixed Bit set, nothing else checkable once the handshake has completed).
@@ -235,6 +260,27 @@ def build_quic_sample():
     #    dispatch-ordering comment -- so on a port QUIC doesn't structurally out-prioritize, this
     #    fixture must simply avoid the coincidence rather than rely on ordering to resolve it).
     add_udp(bytes([0x40, 0x99]) + bytes(range(2, 21)), sport=54108, dport=34567)
+
+    # 10) Regression fixture for the bug fix above (see quic.cpp's own comment on
+    #     try_recognize_quic): a 0-RTT-shaped long-header packet whose byte0 satisfies Header
+    #     Form/Fixed Bit/type bits -- exactly what this decoder used to accept unconditionally --
+    #     but whose trailer is the SAME too-short, structurally-inconsistent shape packets #3/#4
+    #     used before this fix (just 4 zero bytes, no self-consistent Length field). This is the
+    #     general shape of collision a real capture surfaced in the wild: a busy NBT-NS (UDP port
+    #     137) broadcast segment's own 2-byte Transaction ID landing on byte0/byte1 here just as
+    #     easily as any other arbitrary UDP traffic's leading bytes could. Must now fall through to
+    #     the generic "udp" tag rather than being misdetected as [quic] -- and, since this packet is
+    #     specifically designed to fall all the way through QUIC's own check, it uses a version
+    #     value (0x12345678, arbitrary and deliberately non-QUIC-v1) whose first byte (0x12) is NOT
+    #     one of HART-IP's own 5 valid MessageType values {0,1,2,3,15} -- avoiding the SAME
+    #     documented, systematic QUIC/HART-IP byte-position collision this section's own header
+    #     comment describes for QUIC v1's Version field specifically (0x00000001's first two bytes,
+    #     0x00/0x00, are themselves both valid MessageType/MessageID values) -- a real QUIC v1
+    #     packet never reaches this fall-through path at all (recognized by QUIC first), but a
+    #     deliberately-QUIC-v1-shaped negative-control fixture like this one otherwise would, which
+    #     would test the wrong thing (HART-IP's own already-documented collision hazard, not this
+    #     bug fix).
+    add_udp(minimal_long_header(0b01, dcid, scid, version=0x12345678, trailer=bytes(4)), sport=54109)
 
     data = msp.pcap_global_header()
     for i, pkt in enumerate(packets):

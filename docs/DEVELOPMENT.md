@@ -2699,6 +2699,51 @@ useful, none blocking anything else on this list.
     MQTT broker runs on port 21 -- see `decoder.cpp`'s own comments at both
     call sites for the full reasoning.
 
+    **Follow-up fix (post-release, Jurgen's own report)**: QUIC's own
+    Handshake/0-RTT/Retry long-header recognition (see `quic.hpp`'s file
+    header comment for why QUIC joined this tier later, alongside HTTPS)
+    misdetected a large fraction of a busy NBT-NS (UDP port 137)
+    broadcast segment's traffic as `[quic]`, confirmed against a real
+    capture. Root cause: those three packet types were accepted on
+    nothing more than byte0's Header Form bit, Fixed Bit, and 2-bit type
+    field -- 4 bits total, true of roughly 1 in 4 arbitrary UDP payloads
+    port-independently (QUIC's long-header recognition runs
+    port-independently by design, the same "structural signature
+    overrides the port gate" treatment this tier's own HTTP/SMB/SSH
+    checks already get) -- with no check at all on any *other* field, let
+    alone one actually cross-checked for self-consistency against the
+    packet's own declared structure the way this file's other paths
+    already did (Version Negotiation's own whole-number-of-4-byte-
+    versions check; Initial's own Length-field/captured-bytes check).
+    NBT-NS's own 2-byte Transaction ID landing on that same byte0/byte1
+    position, effectively random from this decoder's point of view, hit
+    that weak pattern often enough to be a real, visible source of false
+    positives in a security-auditing tool's own Tier 2 "should be absent
+    from a production OT segment" finding -- exactly the kind of finding
+    an auditor needs to trust. Fixed in `try_recognize_quic` (`quic.cpp`):
+    0-RTT/Handshake now read their own Length field (RFC 9000
+    17.2.3/17.2.4) and require it to describe a byte count that actually
+    fits within what was captured and is large enough for a 1-byte Packet
+    Number plus a 16-byte AEAD tag (the identical check the Initial path
+    already had, just missing from these two); Retry now requires its own
+    mandatory 16-byte Retry Integrity Tag (RFC 9000 17.2.5) to actually be
+    present. Unlike Initial's own truncated-capture tolerance, a failure
+    of either check on these three types now returns "not a match"
+    outright rather than a lenient fallback -- none of the three are ever
+    decrypted regardless of how much was captured, so there was no
+    analytical payoff to weigh against fully closing the false-positive
+    gap. Verified: a new regression fixture and test
+    (`quic_0rtt_type_bits_alone_not_misdetected`, `tests/sample_quic.pcap`
+    packet #10 via `tools/make_quic_sample_pcap.py`) reproduces the
+    general shape of the real collision (byte0 alone satisfying the old
+    gate, no self-consistent trailer) and confirms it now falls through
+    to the generic `"udp"` tag; the full CTest suite (1301 tests, up from
+    1300 -- every existing QUIC assertion passing unchanged, proof this
+    didn't regress a single legitimately-decoded case) stayed 100%
+    passing; zero-warning clean rebuilds across all three established
+    configs (default+libpcap, `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF`,
+    MinGW cross-compile).
+
     **Tier 3 -- done**, and see docs/PROTOCOL_COVERAGE.md's own "Tier 3
     enterprise-trust-boundary protocol recognition" section for the full
     writeup: `decode` now also recognizes NTP, DHCP, LDAP, LDAPS, RADIUS,

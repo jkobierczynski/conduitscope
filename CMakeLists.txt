@@ -5674,17 +5674,36 @@ set_tests_properties(doh_non_tls_tcp443_not_misdetected PROPERTIES
 
 # ---------------------------------------------------------------------------------------------
 # QUIC -- Tier 2, joining HTTPS (see quic.hpp's own file header comment and notable_it_protocols.hpp
-# for why). tests/sample_quic.pcap (tools/make_quic_sample_pcap.py) has 9 packets: #1 a genuine
+# for why). tests/sample_quic.pcap (tools/make_quic_sample_pcap.py) has 10 packets: #1 a genuine
 # client Initial, decrypted end to end with its ClientHello SNI extracted; #2 Version Negotiation;
-# #3-5 Handshake/0-RTT/Retry, each name-only; #6 a short-header (1-RTT) packet, the weakest,
-# port-only fallback; #7 an Initial whose AEAD tag doesn't verify (simulating a server's own Initial,
-# which this decoder can never decrypt -- see quic.hpp's file header comment); #8 non-QUIC junk on
-# QUIC's own default port, proving no false positive; #9 a short-header packet on a non-standard
-# port, proving that fallback's own internal port gate. See decoder.cpp's own dispatch-ordering
-# comment (just above its HART-IP UDP check) for why QUIC's recognition call had to move ahead of
-# HART-IP's: QUIC v1's Version field lands on the exact same two payload bytes HART-IP's own
-# MessageType/MessageID gate reads, and is SYSTEMATICALLY 0x00/0x00 there for every long-header
-# packet type this fixture exercises -- a guaranteed collision, not a coincidental one.
+# #3-5 Handshake/0-RTT/Retry, each name-only but each now requiring the per-type structural
+# cross-check described below; #6 a short-header (1-RTT) packet, the weakest, port-only fallback;
+# #7 an Initial whose AEAD tag doesn't verify (simulating a server's own Initial, which this decoder
+# can never decrypt -- see quic.hpp's file header comment); #8 non-QUIC junk on QUIC's own default
+# port, proving no false positive; #9 a short-header packet on a non-standard port, proving that
+# fallback's own internal port gate; #10 (bug fix regression, see below) a 0-RTT-shaped packet whose
+# byte0 satisfies Header Form/Fixed Bit/type bits but whose trailer is NOT structurally
+# self-consistent, proving it now falls through to generic "udp" rather than being misdetected. See
+# decoder.cpp's own dispatch-ordering comment (just above its HART-IP UDP check) for why QUIC's
+# recognition call had to move ahead of HART-IP's: QUIC v1's Version field lands on the exact same
+# two payload bytes HART-IP's own MessageType/MessageID gate reads, and is SYSTEMATICALLY 0x00/0x00
+# there for every long-header packet type this fixture exercises -- a guaranteed collision, not a
+# coincidental one.
+#
+# Bug fix (post-release, Jurgen's own report): packets #3-5's own Handshake/0-RTT/Retry recognition
+# originally accepted ANY long-header packet whose byte0 had the Header Form bit, Fixed Bit, and a
+# non-Initial type value set -- only 4 bits of the whole packet, true of roughly 1 in 4 arbitrary
+# UDP payloads port-independently. A real capture proved this too weak: a busy NBT-NS (UDP port 137)
+# broadcast segment's own 2-byte Transaction ID landed on byte0/byte1 often enough to misdetect a
+# large fraction of that segment's non-NBT-NS-parsing traffic as QUIC 0-RTT/Handshake packets. Fixed
+# by requiring the same kind of self-consistent structural cross-check every other long-header type
+# already had (Version Negotiation's own whole-number-of-4-byte-versions check; Initial's own
+# Length-field/captured-bytes cross-check): 0-RTT/Handshake now read their own Length field (RFC
+# 9000 17.2.3/17.2.4) and require it to describe a byte count that actually fits within what was
+# captured and is at least large enough for a 1-byte Packet Number plus a 16-byte AEAD tag; Retry
+# now requires its own mandatory 16-byte Retry Integrity Tag (RFC 9000 17.2.5) to actually be
+# present. See try_recognize_quic's own comment in quic.cpp for the full writeup, and packet #10
+# above/quic_0rtt_type_bits_alone_not_misdetected below for the regression test.
 # ---------------------------------------------------------------------------------------------
 
 add_test(NAME quic_client_initial_decrypted_sni
@@ -5744,12 +5763,24 @@ set_tests_properties(quic_protocol_filter_isolates_family PROPERTIES
 add_test(NAME quic_stats_counted_in_lateral_movement_tier
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_quic.pcap" --format text --stats)
 set_tests_properties(quic_stats_counted_in_lateral_movement_tier PROPERTIES
-  PASS_REGULAR_EXPRESSION "quic +7\n *udp +2")
+  # udp +3, not +2, now that packet #10 (the bug-fix regression fixture) correctly falls through
+  # to generic udp too, alongside pre-existing packets #8/#9.
+  PASS_REGULAR_EXPRESSION "quic +7\n *udp +3")
 
 add_test(NAME quic_inventory_notable_protocols
   COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_quic.pcap")
 set_tests_properties(quic_inventory_notable_protocols PROPERTIES
   PASS_REGULAR_EXPRESSION "NOTABLE IT PROTOCOLS \\(7\\):\n(.*\n)*.*\\[1\\] quic  \\(lateral-movement\\)")
+
+add_test(NAME quic_0rtt_type_bits_alone_not_misdetected
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_quic.pcap" --format text)
+set_tests_properties(quic_0rtt_type_bits_alone_not_misdetected PROPERTIES
+  # Bug fix regression test (see this section's own header comment and quic.cpp's comment on
+  # try_recognize_quic): packet #10's byte0 alone satisfies Header Form/Fixed Bit/type bits -- the
+  # exact shape that used to be misdetected as [quic] -- but its trailer has no self-consistent
+  # Length field, so it must now fall through to the generic udp tag instead.
+  PASS_REGULAR_EXPRESSION "\\[udp\\]  UDP payload of 27 byte\\(s\\) on port 54109->443"
+  FAIL_REGULAR_EXPRESSION "54109->443  \\[quic\\]")
 
 add_test(NAME protocol_filter_dns_only
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dns.pcap" --protocol dns --format text)

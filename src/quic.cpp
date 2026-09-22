@@ -253,9 +253,48 @@ std::optional<QuicMatch> try_recognize_quic(ByteSpan udp_payload, uint16_t src_p
         if ((byte0 & 0x40) == 0) return std::nullopt;  // Fixed Bit must be 1 for every other long-header type
 
         uint8_t long_type = (byte0 >> 4) & 0x03;  // RFC 9000 17.2 Table 5: 0=Initial,1=0-RTT,2=Handshake,3=Retry
-        if (long_type == 3) return name_only_match("Retry packet");
-        if (long_type == 1) return name_only_match("0-RTT packet (encrypted under session resumption keys)");
-        if (long_type == 2) return name_only_match("Handshake packet (encrypted under Handshake-level keys)");
+
+        // Bug fix (post-release, Jurgen's own report): Header Form + Fixed Bit + long_type alone
+        // is NOT a strong enough signal to accept unconditionally, despite this file's own header
+        // comment originally claiming otherwise -- those are only 4 bits of byte0 (2 fixed values
+        // plus a 2-bit type field), true of roughly 1 in 4 arbitrary UDP payloads whose first byte
+        // happens to land that way, port-independently. Confirmed against a real capture: a busy
+        // NBT-NS (UDP port 137) broadcast segment, whose 2-byte Transaction ID becomes byte0/
+        // byte1 here, was misdetected as QUIC 0-RTT/Handshake packets on a large fraction of the
+        // NBT-NS traffic that didn't itself parse as valid NBT-NS. Every OTHER structural gate in
+        // this file requires an actual cross-checked, self-consistent field (Version Negotiation's
+        // own whole-number-of-4-byte-versions check above; Initial's own Length-field/captured-
+        // bytes cross-check below) -- 0-RTT/Handshake/Retry were the one place that check was
+        // missing, despite RFC 9000 giving each of them a field to check it against. Fixed by
+        // requiring the same kind of self-consistency the other three paths already require:
+        //   - 0-RTT (17.2.3) / Handshake (17.2.4) share Initial's own trailing shape minus the
+        //     Token field: Length (varint) + Packet Number + protected Payload+Tag. Reading that
+        //     Length field and cross-checking `header_end + Length` against what was actually
+        //     captured (and that Length is at least large enough for a 1-byte Packet Number plus a
+        //     16-byte AEAD tag) is the identical check the Initial branch below already performs --
+        //     unlike Initial, a failure here is treated as "not a match" outright rather than a
+        //     tolerant "truncated capture" fallback: these two types are never decrypted regardless
+        //     of how much was captured, so there is no analytical payoff to weigh against closing
+        //     the false-positive gap completely.
+        //   - Retry (17.2.5) has no Length/Packet-Number field at all -- what follows SCID is a
+        //     variable-length Retry Token immediately followed by a fixed 16-byte Retry Integrity
+        //     Tag, nothing else. Requiring at least those 16 trailing bytes is the analogous check.
+        // Random bytes satisfying byte0's 4-bit pattern essentially never also satisfy one of these
+        // numeric relationships by coincidence, which is what actually rejects the NBT-NS collision
+        // (confirmed against the real capture that surfaced this bug -- see
+        // quic_0rtt_handshake_reject_non_quic_on_shared_port in CMakeLists.txt).
+        if (long_type == 3) {
+            if (udp_payload.size() < hdr->header_end + 16) return std::nullopt;
+            return name_only_match("Retry packet");
+        }
+        if (long_type == 1 || long_type == 2) {
+            Cursor len_cur(udp_payload.from(hdr->header_end));
+            uint64_t length_field = read_varint(len_cur);
+            size_t pn_offset = hdr->header_end + len_cur.position();
+            if (pn_offset + length_field > udp_payload.size() || length_field < 17) return std::nullopt;
+            return name_only_match(long_type == 1 ? "0-RTT packet (encrypted under session resumption keys)"
+                                                    : "Handshake packet (encrypted under Handshake-level keys)");
+        }
 
         // long_type == 0: Initial.
         Cursor cur(udp_payload.from(hdr->header_end));

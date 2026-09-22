@@ -72,7 +72,15 @@
 //     the per-type handling below) -- none of these carry anything this decoder could usefully
 //     decrypt even in principle (0-RTT/1-RTT need the connection's own negotiated secrets, which
 //     this decoder never has; Retry carries no protected payload at all; Handshake packets carry
-//     ServerHello/Certificate/Finished, never another ClientHello).
+//     ServerHello/Certificate/Finished, never another ClientHello). Bug fix (post-release, Jurgen's
+//     own report): "framing alone" still means a real structural cross-check for each type (the
+//     Length field's own value against how many bytes were actually captured, for 0-RTT/
+//     Handshake; the mandatory 16-byte Retry Integrity Tag, for Retry) -- NOT just byte0's Header
+//     Form/Fixed Bit/type bits in isolation, which this file originally (incorrectly) treated as
+//     sufficient on its own and which a real capture proved is not: those 4 bits alone match
+//     roughly 1 in 4 arbitrary UDP payloads port-independently, and were observed misdetecting a
+//     large fraction of a busy NBT-NS (UDP port 137) broadcast segment's traffic as QUIC. See
+//     try_recognize_quic's own comment in quic.cpp for the fix.
 //   - Short-header (1-RTT) packets get the weakest-gate, port-only treatment TeamViewer/AnyDesk/
 //     LWAPP already have in this same family (it_protocols.hpp's own Tier 1/Tier 4 comments):
 //     once the handshake completes, a QUIC packet's own header carries no version or type field
@@ -109,8 +117,12 @@ struct QuicMatch {
 // all. Long-header packets (Initial/0-RTT/Handshake/Retry/Version-Negotiation) are recognized by
 // their own framing, checked port-independently even in Auto mode -- the same "structural
 // signature overrides the port gate" treatment TLS ClientHello framing already gets for HTTPS
-// (it_protocols.hpp), since the Header Form bit + Fixed Bit + an exact QUIC version match is a
-// strong, self-describing signal, not a coincidence. Short-header (1-RTT) packets are the one
+// (it_protocols.hpp), since the Header Form bit + Fixed Bit + a per-type structural cross-check
+// (the Length field's own value against the captured byte count for Initial/0-RTT/Handshake, the
+// mandatory 16-byte Integrity Tag for Retry, a whole number of 4-byte version entries for Version
+// Negotiation) together are a strong, self-describing signal, not a coincidence -- byte0's Header
+// Form/Fixed Bit/type bits ALONE are not (see this file's Scope section, the Handshake/0-RTT/Retry
+// bullet, for the real-world collision that proved it). Short-header (1-RTT) packets are the one
 // exception -- see this file's own header comment for why those stay port-gated.
 // `extra_ports` extends the default port set the same way every other "IT protocols an OT
 // auditor flags" file's own extra_*_ports list does -- here, extra_lateral_movement_ports, since
