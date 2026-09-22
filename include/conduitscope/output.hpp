@@ -175,6 +175,13 @@ private:
     // above), keyed by status_name ("STATUS_LOGON_FAILURE", or "0xNNNNNNNN" for an unnamed code),
     // read from DecodedPacket::result the same way ldap_result_code_counts_ is above.
     std::map<std::string, size_t> smb_status_counts_;
+    // Netlogon opnum counts (netlogon.hpp), the Netlogon-side analog of smb_status_counts_ above
+    // -- keyed by netlogon_opnum_name() (e.g. "NetrServerAuthenticate3", or "opnum N" for an
+    // uncurated one), incremented once per decoded NetlogonCall REQUEST (not per response, so a
+    // request/response pair counts once, the same "count the request side" convention
+    // kerberos_error_counts_'s own sibling counters don't need but this one does to avoid
+    // double-counting a call twice).
+    std::map<std::string, size_t> netlogon_opnum_counts_;
     std::map<std::string, size_t> s7comm_function_counts_;
     std::map<std::string, size_t> dnp3_function_counts_;
     std::map<std::string, size_t> iec104_asdu_type_counts_;

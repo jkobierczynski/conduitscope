@@ -8725,6 +8725,734 @@ def build_smb_sample():
 
 
 # ---------------------------------------------------------------------------------------------
+# Netlogon/DCE-RPC (MS-NRPC/MS-RPCE), the fourth and final Windows AD-suite protocol -- see
+# netlogon.hpp's/dcerpc.hpp's own file header comments for the wire format. Every byte offset
+# below matches those two files' own parsers exactly (smb2_create/write/read/ioctl/close_*_body
+# match smb.cpp's own CREATE/WRITE/READ/IOCTL/CLOSE handling added alongside this phase; the
+# dcerpc_*/ndr_* helpers match dcerpc.cpp/netlogon.cpp field-for-field), deliberately using plain
+# struct.pack rather than a third-party NDR/RPC library -- impacket was a one-time empirical
+# verification aid during planning only, never a dependency of this fixture generator.
+
+NETLOGON_INTERFACE_UUID = "12345678-1234-abcd-ef00-01234567cffb"
+NDR32_TRANSFER_SYNTAX_UUID = "8a885d04-1ceb-11c9-9fe8-08002b104860"
+FSCTL_PIPE_TRANSCEIVE = 0x0011C017
+RPC_C_AUTHN_LEVEL_PKT_PRIVACY = 6
+
+
+def smb2_create_req_body(name: str) -> bytes:
+    header_len = 56
+    name_bytes = name.encode("utf-16-le")
+    name_offset = 64 + header_len
+    b = struct.pack("<H", 57)                  # StructureSize
+    b += struct.pack("<B", 0)                  # SecurityFlags
+    b += struct.pack("<B", 0)                  # RequestedOplockLevel
+    b += struct.pack("<I", 2)                  # ImpersonationLevel
+    b += struct.pack("<Q", 0)                  # SmbCreateFlags
+    b += struct.pack("<Q", 0)                  # Reserved
+    b += struct.pack("<I", 0x001F01FF)         # DesiredAccess
+    b += struct.pack("<I", 0)                  # FileAttributes
+    b += struct.pack("<I", 0x00000007)         # ShareAccess
+    b += struct.pack("<I", 1)                  # CreateDisposition (FILE_OPEN)
+    b += struct.pack("<I", 0)                  # CreateOptions
+    b += struct.pack("<H", name_offset)        # NameOffset
+    b += struct.pack("<H", len(name_bytes))    # NameLength
+    b += struct.pack("<I", 0)                  # CreateContextsOffset
+    b += struct.pack("<I", 0)                  # CreateContextsLength
+    assert len(b) == header_len
+    return b + name_bytes
+
+
+def smb2_create_resp_body(file_id: bytes, create_action=1) -> bytes:
+    assert len(file_id) == 16
+    b = struct.pack("<H", 89)      # StructureSize
+    b += struct.pack("<B", 0)      # OplockLevel
+    b += struct.pack("<B", 0)      # Flags
+    b += struct.pack("<I", create_action)  # CreateAction
+    b += b"\x00" * (8 * 6)          # CreationTime/LastAccessTime/LastWriteTime/ChangeTime/
+                                     # AllocationSize/EndofFile
+    b += struct.pack("<I", 0)      # FileAttributes
+    b += struct.pack("<I", 0)      # Reserved2
+    b += file_id                    # FileId (offset 64, 16 bytes)
+    b += struct.pack("<I", 0)      # CreateContextsOffset
+    b += struct.pack("<I", 0)      # CreateContextsLength
+    assert len(b) == 88
+    return b
+
+
+def smb2_write_req_body(file_id: bytes, data: bytes, offset=0) -> bytes:
+    header_len = 48
+    data_offset = 64 + header_len
+    b = struct.pack("<H", 49)              # StructureSize
+    b += struct.pack("<H", data_offset)    # DataOffset
+    b += struct.pack("<I", len(data))      # Length
+    b += struct.pack("<Q", offset)         # Offset
+    b += file_id                            # FileId
+    b += struct.pack("<I", 0)              # Channel
+    b += struct.pack("<I", 0)              # RemainingBytes
+    b += struct.pack("<H", 0)              # WriteChannelInfoOffset
+    b += struct.pack("<H", 0)              # WriteChannelInfoLength
+    b += struct.pack("<I", 0)              # Flags
+    assert len(b) == header_len
+    return b + data
+
+
+def smb2_write_resp_body(count: int) -> bytes:
+    b = struct.pack("<H", 17)  # StructureSize
+    b += struct.pack("<H", 0)  # Reserved
+    b += struct.pack("<I", count)  # Count
+    b += struct.pack("<I", 0)  # Remaining
+    b += struct.pack("<H", 0)  # WriteChannelInfoOffset
+    b += struct.pack("<H", 0)  # WriteChannelInfoLength
+    assert len(b) == 16
+    return b
+
+
+def smb2_read_req_body(file_id: bytes, length=4096, offset=0) -> bytes:
+    b = struct.pack("<H", 49)      # StructureSize
+    b += struct.pack("<B", 0)      # Padding
+    b += struct.pack("<B", 0)      # Flags
+    b += struct.pack("<I", length)  # Length
+    b += struct.pack("<Q", offset)  # Offset
+    b += file_id                    # FileId
+    b += struct.pack("<I", 1)      # MinimumCount
+    b += struct.pack("<I", 0)      # Channel
+    b += struct.pack("<I", 0)      # RemainingBytes
+    b += struct.pack("<H", 0)      # ReadChannelInfoOffset
+    b += struct.pack("<H", 0)      # ReadChannelInfoLength
+    b += b"\x00"                    # Buffer (1-byte padding, StructureSize documents 49)
+    assert len(b) == 49
+    return b
+
+
+def smb2_read_resp_body(data: bytes) -> bytes:
+    header_len = 16
+    data_offset = 64 + header_len
+    b = struct.pack("<H", 17)              # StructureSize
+    b += struct.pack("<B", data_offset)    # DataOffset (1 byte -- fits, 80 < 256)
+    b += struct.pack("<B", 0)              # Reserved
+    b += struct.pack("<I", len(data))      # DataLength
+    b += struct.pack("<I", 0)              # DataRemaining
+    b += struct.pack("<I", 0)              # Reserved2
+    assert len(b) == header_len
+    return b + data
+
+
+def smb2_ioctl_req_body(file_id: bytes, ctl_code: int, input_data: bytes) -> bytes:
+    header_len = 56
+    input_offset = (64 + header_len) if input_data else 0
+    b = struct.pack("<H", 57)                  # StructureSize
+    b += struct.pack("<H", 0)                  # Reserved
+    b += struct.pack("<I", ctl_code)           # CtlCode
+    b += file_id                                # FileId
+    b += struct.pack("<I", input_offset)       # InputOffset
+    b += struct.pack("<I", len(input_data))    # InputCount
+    b += struct.pack("<I", 0)                  # MaxInputResponse
+    b += struct.pack("<I", 0)                  # OutputOffset
+    b += struct.pack("<I", 0)                  # OutputCount
+    b += struct.pack("<I", 4096)               # MaxOutputResponse
+    b += struct.pack("<I", 0)                  # Flags
+    b += struct.pack("<I", 0)                  # Reserved2
+    assert len(b) == header_len
+    return b + input_data
+
+
+def smb2_ioctl_resp_body(file_id: bytes, ctl_code: int, output_data: bytes) -> bytes:
+    header_len = 48
+    output_offset = (64 + header_len) if output_data else 0
+    b = struct.pack("<H", 49)                   # StructureSize
+    b += struct.pack("<H", 0)                   # Reserved
+    b += struct.pack("<I", ctl_code)            # CtlCode
+    b += file_id                                 # FileId
+    b += struct.pack("<I", 0)                   # InputOffset
+    b += struct.pack("<I", 0)                   # InputCount
+    b += struct.pack("<I", output_offset)       # OutputOffset
+    b += struct.pack("<I", len(output_data))    # OutputCount
+    b += struct.pack("<I", 0)                   # Flags
+    b += struct.pack("<I", 0)                   # Reserved2
+    assert len(b) == header_len
+    return b + output_data
+
+
+def smb2_close_req_body(file_id: bytes) -> bytes:
+    b = struct.pack("<H", 24)  # StructureSize
+    b += struct.pack("<H", 0)  # Flags
+    b += struct.pack("<I", 0)  # Reserved
+    b += file_id
+    assert len(b) == 24
+    return b
+
+
+def smb2_close_resp_body() -> bytes:
+    b = struct.pack("<H", 60)  # StructureSize
+    b += struct.pack("<H", 0)  # Flags
+    b += struct.pack("<I", 0)  # Reserved
+    b += b"\x00" * (8 * 6)      # CreationTime/LastAccessTime/LastWriteTime/ChangeTime/
+                                 # AllocationSize/EndofFile
+    b += struct.pack("<I", 0)  # FileAttributes
+    return b
+
+
+def uuid_to_wire(u: str) -> bytes:
+    """The inverse of dcerpc.cpp's own guid_to_string: Data1 4 bytes LE, Data2 2 bytes LE, Data3 2
+    bytes LE, Data4 8 bytes byte-order-preserved."""
+    p1, p2, p3, p4, p5 = u.split("-")
+    data4 = bytes.fromhex(p4 + p5)
+    assert len(data4) == 8
+    return struct.pack("<IHH", int(p1, 16), int(p2, 16), int(p3, 16)) + data4
+
+
+class NdrBuf:
+    """Builds one DCE/RPC stub's own bytes, matching netlogon.cpp's own read_ndr_string/
+    read_ndr_unique_string/align4 exactly: only ref_string/unique_string self-align (a conformant
+    array's own MaxCount is a 4-byte field) -- u16/u32/raw never auto-pad, since netlogon.cpp
+    itself never pads before a plain scalar read, only before a string."""
+
+    def __init__(self):
+        self.buf = bytearray()
+
+    def _pad4(self):
+        pad = (-len(self.buf)) % 4
+        self.buf += b"\x00" * pad
+
+    def u16(self, v):
+        self.buf += struct.pack("<H", v)
+
+    def u32(self, v):
+        self.buf += struct.pack("<I", v)
+
+    def raw(self, b: bytes):
+        self.buf += bytes(b)
+
+    def ref_string(self, s: str):
+        self._pad4()
+        chars = (s + "\x00").encode("utf-16-le")
+        actual_count = len(chars) // 2
+        self.buf += struct.pack("<III", actual_count, 0, actual_count)
+        self.buf += chars
+        self._pad4()
+
+    def unique_string(self, s):
+        self._pad4()
+        if s is None:
+            self.buf += struct.pack("<I", 0)  # NULL referent -- no string data follows
+        else:
+            self.buf += struct.pack("<I", 0x00020000)  # any nonzero referent id
+            self.ref_string(s)
+
+    def get(self) -> bytes:
+        return bytes(self.buf)
+
+
+def netlogon_req_challenge_request_stub(primary_name, computer_name, client_challenge: bytes) -> bytes:
+    assert len(client_challenge) == 8
+    b = NdrBuf()
+    b.unique_string(primary_name)
+    b.ref_string(computer_name)
+    b.raw(client_challenge)
+    return b.get()
+
+
+def netlogon_req_challenge_response_stub(server_challenge: bytes, status=0) -> bytes:
+    assert len(server_challenge) == 8
+    b = NdrBuf()
+    b.raw(server_challenge)
+    b.u32(status)
+    return b.get()
+
+
+def netlogon_authenticate_request_stub(opnum, primary_name, account_name, secure_channel_type,
+                                        computer_name, client_credential: bytes, negotiate_flags=0):
+    assert len(client_credential) == 8
+    b = NdrBuf()
+    b.unique_string(primary_name)
+    b.ref_string(account_name)
+    b.u16(secure_channel_type)
+    b.ref_string(computer_name)
+    b.raw(client_credential)
+    if opnum != 5:
+        b.u32(negotiate_flags)
+    return b.get()
+
+
+def netlogon_authenticate_response_stub(opnum, server_credential: bytes, negotiate_flags=0,
+                                         account_rid=0, status=0):
+    assert len(server_credential) == 8
+    b = NdrBuf()
+    b.raw(server_credential)
+    if opnum != 5:
+        b.u32(negotiate_flags)
+    if opnum == 26:
+        b.u32(account_rid)
+    b.u32(status)
+    return b.get()
+
+
+def netlogon_password_set2_request_stub(primary_name, account_name, secure_channel_type,
+                                         computer_name, include_authenticator=True,
+                                         include_new_password=True, new_password_length=0):
+    b = NdrBuf()
+    b.unique_string(primary_name)
+    b.ref_string(account_name)
+    b.u16(secure_channel_type)
+    b.ref_string(computer_name)
+    if include_authenticator:
+        b.raw(b"\x00" * 8)  # NETLOGON_AUTHENTICATOR.Credential
+        b.u32(0)             # NETLOGON_AUTHENTICATOR.Timestamp
+    if include_new_password:
+        b.raw(b"\x00" * 512)  # NL_TRUST_PASSWORD's own opaque buffer
+        b.u32(new_password_length)
+    return b.get()
+
+
+def dcerpc_context_element(context_id, abstract_uuid, abstract_ver_major=1, abstract_ver_minor=0,
+                            transfer_uuid=NDR32_TRANSFER_SYNTAX_UUID, transfer_ver_major=2,
+                            transfer_ver_minor=0):
+    e = struct.pack("<H", context_id)
+    e += struct.pack("<B", 1)  # n_transfer_syn
+    e += struct.pack("<B", 0)  # reserved
+    e += uuid_to_wire(abstract_uuid)
+    e += struct.pack("<HH", abstract_ver_major, abstract_ver_minor)
+    e += uuid_to_wire(transfer_uuid)
+    e += struct.pack("<HH", transfer_ver_major, transfer_ver_minor)
+    return e
+
+
+def dcerpc_context_result(result_value, transfer_uuid=NDR32_TRANSFER_SYNTAX_UUID,
+                           transfer_ver_major=2, transfer_ver_minor=0, reason=0):
+    r = struct.pack("<HH", result_value, reason)
+    r += uuid_to_wire(transfer_uuid)
+    r += struct.pack("<HH", transfer_ver_major, transfer_ver_minor)
+    assert len(r) == 24
+    return r
+
+
+def dcerpc_bind_body(context_elements, max_xmit=4280, max_recv=4280, assoc_group=0):
+    b = struct.pack("<HH", max_xmit, max_recv)
+    b += struct.pack("<I", assoc_group)
+    b += struct.pack("<B", len(context_elements))  # n_context_elem
+    b += b"\x00" * 3                                # reserved/reserved2
+    for e in context_elements:
+        b += e
+    return b
+
+
+def dcerpc_bind_ack_body(results, sec_addr: bytes = b"", max_xmit=4280, max_recv=4280,
+                          assoc_group=0x00012345):
+    b = struct.pack("<HH", max_xmit, max_recv)
+    b += struct.pack("<I", assoc_group)
+    b += struct.pack("<H", len(sec_addr))
+    b += sec_addr
+    pad = (-(16 + len(b))) % 4  # pad2, 4-byte-aligned relative to the PDU's own start
+    b += b"\x00" * pad
+    b += struct.pack("<B", len(results))  # n_results
+    b += b"\x00" * 3                       # reserved
+    for r in results:
+        b += r
+    return b
+
+
+def dcerpc_request_body(context_id, opnum, stub: bytes) -> bytes:
+    b = struct.pack("<I", len(stub))  # alloc_hint
+    b += struct.pack("<H", context_id)
+    b += struct.pack("<H", opnum)
+    return b + stub
+
+
+def dcerpc_response_body(context_id, stub: bytes) -> bytes:
+    b = struct.pack("<I", len(stub))  # alloc_hint
+    b += struct.pack("<H", context_id)
+    b += struct.pack("<B", 0)  # cancel_count
+    b += struct.pack("<B", 0)  # reserved
+    return b + stub
+
+
+def dcerpc_fault_body(context_id, fault_status) -> bytes:
+    b = struct.pack("<I", 0)  # alloc_hint
+    b += struct.pack("<H", context_id)
+    b += struct.pack("<B", 0)  # cancel_count
+    b += struct.pack("<B", 0)  # reserved
+    b += struct.pack("<I", fault_status)
+    b += struct.pack("<I", 0)  # reserved2
+    return b
+
+
+def dcerpc_pdu(ptype, call_id, body: bytes, pfc_flags=0x03, auth=None) -> bytes:
+    """`auth`, if given, is (auth_type, auth_level, auth_value_bytes) -- the sec_trailer's own
+    8-byte fixed header (auth_type/auth_level/auth_pad_length=0/reserved=0/auth_context_id=0) is
+    built here; `auth_length` in the common header is auth_value's own length, per MS-RPCE (NOT
+    including the 8-byte trailer header itself) -- see dcerpc.cpp's own trailer_start computation."""
+    if auth:
+        auth_type, auth_level, auth_value = auth
+        trailer = struct.pack("<BBBB", auth_type, auth_level, 0, 0) + struct.pack("<I", 0) + auth_value
+        auth_length = len(auth_value)
+    else:
+        trailer = b""
+        auth_length = 0
+    frag_length = 16 + len(body) + len(trailer)
+    h = struct.pack("<BBBB", 5, 0, ptype, pfc_flags)  # rpc_vers, rpc_vers_minor, ptype, pfc_flags
+    h += b"\x10\x00\x00\x00"  # packed_drep -- little-endian integers, ASCII chars
+    h += struct.pack("<HH", frag_length, auth_length)
+    h += struct.pack("<I", call_id)
+    pdu = h + body + trailer
+    assert len(pdu) == frag_length
+    return pdu
+
+
+def build_netlogon_sample():
+    """Netlogon/DCE-RPC (MS-NRPC/MS-RPCE), the fourth and final Windows AD-suite protocol -- see
+    netlogon.hpp's/dcerpc.hpp's own file header comments for the wire format and smb.hpp's own
+    STATE/CORRELATION section for exactly how a WRITE/READ/IOCTL message's own FileId gets tracked
+    as the "netlogon" named pipe. Every flow below opens with a TREE_CONNECT to "\\\\SERVER\\IPC$"
+    (ShareType pipe) then a CREATE of "\\PIPE\\netlogon", so smb.cpp's own pipe_shares/netlogon_pipes
+    tracking is exercised on every flow, not assumed. Flows, each its own TCP session:
+      A: ReqChallenge (non-zero challenge) + NetrServerAuthenticate3 (non-zero credential,
+         status=SUCCESS) over WRITE+READ -- note 1 positive ("established"), note 2's own negative
+         control (must NOT fire).
+      B: ReqChallenge with an all-zero ClientChallenge -- note 2 positive (the Zerologon pattern).
+      C: NetrServerAuthenticate2 (opnum 15, non-zero credential) -- note 3 positive (legacy method).
+      D: NetrServerAuthenticate3 with SecureChannelType=WorkstationSecureChannel and AccountName
+         "WORKSTATION1" (no trailing "$") -- note 4 positive; the same call with AccountName
+         "WORKSTATION1$" is note 4's own negative control, on a second FileId in the same session.
+      E: NetrServerPasswordSet2 -- note 5 (fires every time, not sticky).
+      F: a sealed (auth_level=PKT_PRIVACY) NetrServerPasswordSet2 call on an already-bound
+         Netlogon context -- exercises the "sealed, N bytes, not decoded" fallback (no field decode
+         at all, no note 5).
+      G: a bind whose only offered context names a NON-Netlogon interface UUID on a
+         "netlogon"-named pipe -- the request that follows must stay structural-only (no
+         netlogon_calls), the defensive "bind confirmed something else" edge case.
+      H: the same ReqChallenge+Authenticate3 exchange as flow A, but against a "lsarpc"-named pipe
+         instead of "netlogon" -- the negative control proving only "netlogon" is ever tracked.
+      I: the same ReqChallenge+Authenticate3 exchange as flow A, but carried over
+         IOCTL(FSCTL_PIPE_TRANSCEIVE) request/response pairs instead of separate WRITE/READ --
+         the other real-world named-pipe transport shape.
+    Every byte offset and note-trigger condition here was independently smoke-tested against a
+    hand-built synthetic exchange, decoded and inspected in both --format text and --format json,
+    BEFORE this fixture (and the CMakeLists.txt tests reading it) were written -- the same
+    verification discipline every prior phase's own fixture was held to."""
+    packets = []
+    ident = [0xD000]
+    port = [53001]
+    file_id_counter = [1]
+    call_id_counter = [1]
+
+    def next_file_id() -> bytes:
+        file_id_counter[0] += 1
+        return struct.pack("<QQ", file_id_counter[0], 0xF00D0000 + file_id_counter[0])
+
+    def next_call_id() -> int:
+        call_id_counter[0] += 1
+        return call_id_counter[0]
+
+    def make_flow():
+        sport = port[0]
+        port[0] += 1
+        state = {"cseq": 20000, "sseq": 30000}
+
+        def add(from_client: bool, payload: bytes):
+            if from_client:
+                s_port, d_port = sport, 445
+                s_ip, d_ip = HMI_IP, PLC_IP
+                s_mac, d_mac = HMI_MAC, PLC_MAC
+                seq, ack = state["cseq"], state["sseq"]
+                state["cseq"] += len(payload)
+            else:
+                s_port, d_port = 445, sport
+                s_ip, d_ip = PLC_IP, HMI_IP
+                s_mac, d_mac = PLC_MAC, HMI_MAC
+                seq, ack = state["sseq"], state["cseq"]
+                state["sseq"] += len(payload)
+            tcp = tcp_header(s_port, d_port, seq, ack, TCP_PSH | TCP_ACK, len(payload)) + payload
+            ip = ipv4_header(s_ip, d_ip, 6, len(tcp), ident[0] & 0xFFFF) + tcp
+            ident[0] += 1
+            packets.append(eth_header(d_mac, s_mac, 0x0800) + ip)
+
+        return add
+
+    mid = [200]
+
+    def next_mid():
+        mid[0] += 1
+        return mid[0]
+
+    def open_pipe(fx, session_id, tree_id, pipe_name="netlogon"):
+        """TREE_CONNECT to an IPC$-style pipe share, then CREATE of \\PIPE\\<pipe_name>. Returns the
+        16-byte FileId the CREATE Response reports."""
+        m_tc = next_mid()
+        fx(True, smb_with_prefix(smb2_message(0x03, False, smb2_tree_connect_req_body("\\\\SERVER\\IPC$"),
+                                               message_id=m_tc, session_id=session_id)))
+        fx(False, smb_with_prefix(smb2_message(
+            0x03, True, smb2_tree_connect_resp_body(SMB_SHARE_TYPE_PIPE), message_id=m_tc,
+            status=SMB_STATUS_SUCCESS, session_id=session_id, tree_id=tree_id)))
+
+        file_id = next_file_id()
+        m_cr = next_mid()
+        fx(True, smb_with_prefix(smb2_message(0x05, False, smb2_create_req_body("\\PIPE\\" + pipe_name),
+                                               message_id=m_cr, session_id=session_id, tree_id=tree_id)))
+        fx(False, smb_with_prefix(smb2_message(
+            0x05, True, smb2_create_resp_body(file_id), message_id=m_cr, status=SMB_STATUS_SUCCESS,
+            session_id=session_id, tree_id=tree_id)))
+        return file_id
+
+    def close_pipe(fx, session_id, tree_id, file_id):
+        m_cl = next_mid()
+        fx(True, smb_with_prefix(smb2_message(0x06, False, smb2_close_req_body(file_id),
+                                               message_id=m_cl, session_id=session_id, tree_id=tree_id)))
+        fx(False, smb_with_prefix(smb2_message(
+            0x06, True, smb2_close_resp_body(), message_id=m_cl, status=SMB_STATUS_SUCCESS,
+            session_id=session_id, tree_id=tree_id)))
+
+    pending_read_mid = [None]  # shared between write_read/read_response, see read_response's own
+                                 # doc comment -- SMB2 request/response correlation is by MessageId,
+                                 # so the READ Response below MUST reuse the matching READ Request's
+                                 # own MessageId, not mint a fresh one.
+
+    def write_read(fx, session_id, tree_id, file_id, pdu_bytes: bytes):
+        """The WRITE(request)+READ(response) named-pipe transport shape. The READ Request's own
+        MessageId is stashed in pending_read_mid for read_response (below) to reuse."""
+        m_w = next_mid()
+        fx(True, smb_with_prefix(smb2_message(0x09, False, smb2_write_req_body(file_id, pdu_bytes),
+                                               message_id=m_w, session_id=session_id, tree_id=tree_id)))
+        fx(False, smb_with_prefix(smb2_message(
+            0x09, True, smb2_write_resp_body(len(pdu_bytes)), message_id=m_w, status=SMB_STATUS_SUCCESS,
+            session_id=session_id, tree_id=tree_id)))
+        m_r = next_mid()
+        fx(True, smb_with_prefix(smb2_message(0x08, False, smb2_read_req_body(file_id),
+                                               message_id=m_r, session_id=session_id, tree_id=tree_id)))
+        pending_read_mid[0] = m_r
+
+    def read_response(fx, session_id, tree_id, pdu_bytes: bytes):
+        """Sends the READ Response matching the most recent write_read's own READ Request -- MUST
+        reuse that request's MessageId (SMB2's own request/response correlation key), not a fresh
+        one, or smb.cpp's own pending_requests map (keyed by MessageId) never finds the match and
+        this response is never decoded as DCE/RPC at all."""
+        m_r = pending_read_mid[0]
+        assert m_r is not None, "read_response called without a preceding write_read"
+        fx(False, smb_with_prefix(smb2_message(
+            0x08, True, smb2_read_resp_body(pdu_bytes), message_id=m_r, status=SMB_STATUS_SUCCESS,
+            session_id=session_id, tree_id=tree_id)))
+        pending_read_mid[0] = None
+
+    def ioctl_pipe_transceive(fx, session_id, tree_id, file_id, request_pdu: bytes, response_pdu: bytes):
+        """The IOCTL(FSCTL_PIPE_TRANSCEIVE) write-then-read-in-one-call transport shape."""
+        m_i = next_mid()
+        fx(True, smb_with_prefix(smb2_message(
+            0x0B, False, smb2_ioctl_req_body(file_id, FSCTL_PIPE_TRANSCEIVE, request_pdu),
+            message_id=m_i, session_id=session_id, tree_id=tree_id)))
+        fx(False, smb_with_prefix(smb2_message(
+            0x0B, True, smb2_ioctl_resp_body(file_id, FSCTL_PIPE_TRANSCEIVE, response_pdu),
+            message_id=m_i, status=SMB_STATUS_SUCCESS, session_id=session_id, tree_id=tree_id)))
+
+    def bind_and_ack(fx, session_id, tree_id, file_id, call_id, abstract_uuid=NETLOGON_INTERFACE_UUID,
+                      result=0):
+        bind_pdu = dcerpc_pdu(11, call_id, dcerpc_bind_body(
+            [dcerpc_context_element(0, abstract_uuid)]))
+        bind_ack_pdu = dcerpc_pdu(12, call_id, dcerpc_bind_ack_body([dcerpc_context_result(result)]))
+        write_read(fx, session_id, tree_id, file_id, bind_pdu)
+        read_response(fx, session_id, tree_id, bind_ack_pdu)
+
+    # ---------------------------------------------------------------------------------------------
+    # Flow A: normal ReqChallenge -> NetrServerAuthenticate3 handshake -- note 1 positive, note 2
+    # negative control.
+    # ---------------------------------------------------------------------------------------------
+    fa = make_flow()
+    sess_a, tree_a = 0xA000000000000001, 1
+    fid_a = open_pipe(fa, sess_a, tree_a)
+    bind_and_ack(fa, sess_a, tree_a, fid_a, next_call_id())
+
+    call_id = next_call_id()
+    req_stub = netlogon_req_challenge_request_stub("DC1", "WIN10-PC", b"\x11\x22\x33\x44\x55\x66\x77\x88")
+    write_read(fa, sess_a, tree_a, fid_a, dcerpc_pdu(0, call_id, dcerpc_request_body(0, 4, req_stub)))
+    resp_stub = netlogon_req_challenge_response_stub(b"\x99\xAA\xBB\xCC\xDD\xEE\xFF\x00", status=0)
+    read_response(fa, sess_a, tree_a, dcerpc_pdu(2, call_id, dcerpc_response_body(0, resp_stub)))
+
+    call_id = next_call_id()
+    auth_req_stub = netlogon_authenticate_request_stub(
+        26, "DC1", "WIN10-PC$", 2, "WIN10-PC", b"\x12\x34\x56\x78\x9A\xBC\xDE\xF0",
+        negotiate_flags=0x612FFFFF)
+    write_read(fa, sess_a, tree_a, fid_a,
+               dcerpc_pdu(0, call_id, dcerpc_request_body(0, 26, auth_req_stub)))
+    auth_resp_stub = netlogon_authenticate_response_stub(
+        26, b"\x0F\x1E\x2D\x3C\x4B\x5A\x69\x78", negotiate_flags=0x612FFFFF, account_rid=1105, status=0)
+    read_response(fa, sess_a, tree_a, dcerpc_pdu(2, call_id, dcerpc_response_body(0, auth_resp_stub)))
+    close_pipe(fa, sess_a, tree_a, fid_a)
+
+    # ---------------------------------------------------------------------------------------------
+    # Flow B: all-zero ClientChallenge -- note 2 positive (Zerologon pattern).
+    # ---------------------------------------------------------------------------------------------
+    fb = make_flow()
+    sess_b, tree_b = 0xB000000000000001, 1
+    fid_b = open_pipe(fb, sess_b, tree_b)
+    bind_and_ack(fb, sess_b, tree_b, fid_b, next_call_id())
+    call_id = next_call_id()
+    zero_req_stub = netlogon_req_challenge_request_stub("DC1", "ATTACKER-PC", b"\x00" * 8)
+    write_read(fb, sess_b, tree_b, fid_b, dcerpc_pdu(0, call_id, dcerpc_request_body(0, 4, zero_req_stub)))
+    zero_resp_stub = netlogon_req_challenge_response_stub(b"\x01" * 8, status=0)
+    read_response(fb, sess_b, tree_b, dcerpc_pdu(2, call_id, dcerpc_response_body(0, zero_resp_stub)))
+    close_pipe(fb, sess_b, tree_b, fid_b)
+
+    # ---------------------------------------------------------------------------------------------
+    # Flow C: NetrServerAuthenticate2 (opnum 15) -- note 3 positive (legacy/downgraded method).
+    # ---------------------------------------------------------------------------------------------
+    fc = make_flow()
+    sess_c, tree_c = 0xC000000000000001, 1
+    fid_c = open_pipe(fc, sess_c, tree_c)
+    bind_and_ack(fc, sess_c, tree_c, fid_c, next_call_id())
+    call_id = next_call_id()
+    auth2_req_stub = netlogon_authenticate_request_stub(
+        15, "DC1", "LEGACY-PC$", 2, "LEGACY-PC", b"\xAA\xBB\xCC\xDD\xEE\xFF\x11\x22",
+        negotiate_flags=0x000001FF)
+    write_read(fc, sess_c, tree_c, fid_c,
+               dcerpc_pdu(0, call_id, dcerpc_request_body(0, 15, auth2_req_stub)))
+    auth2_resp_stub = netlogon_authenticate_response_stub(
+        15, b"\x33\x44\x55\x66\x77\x88\x99\xAA", negotiate_flags=0x000001FF, status=0)
+    read_response(fc, sess_c, tree_c, dcerpc_pdu(2, call_id, dcerpc_response_body(0, auth2_resp_stub)))
+    close_pipe(fc, sess_c, tree_c, fid_c)
+
+    # ---------------------------------------------------------------------------------------------
+    # Flow D: WorkstationSecureChannel with an AccountName not ending in "$" -- note 4 positive --
+    # followed, on a second FileId in the SAME session, by one that DOES end in "$" -- note 4's own
+    # negative control.
+    # ---------------------------------------------------------------------------------------------
+    fd = make_flow()
+    sess_d, tree_d = 0xD000000000000001, 1
+    fid_d1 = open_pipe(fd, sess_d, tree_d)
+    bind_and_ack(fd, sess_d, tree_d, fid_d1, next_call_id())
+    call_id = next_call_id()
+    mismatch_stub = netlogon_authenticate_request_stub(
+        26, "DC1", "WORKSTATION1", 2, "WORKSTATION1", b"\x01\x02\x03\x04\x05\x06\x07\x08",
+        negotiate_flags=0x612FFFFF)
+    write_read(fd, sess_d, tree_d, fid_d1,
+               dcerpc_pdu(0, call_id, dcerpc_request_body(0, 26, mismatch_stub)))
+    mismatch_resp = netlogon_authenticate_response_stub(
+        26, b"\x08\x07\x06\x05\x04\x03\x02\x01", negotiate_flags=0x612FFFFF, account_rid=1106, status=0)
+    read_response(fd, sess_d, tree_d, dcerpc_pdu(2, call_id, dcerpc_response_body(0, mismatch_resp)))
+    close_pipe(fd, sess_d, tree_d, fid_d1)
+
+    fid_d2 = open_pipe(fd, sess_d, tree_d)
+    bind_and_ack(fd, sess_d, tree_d, fid_d2, next_call_id())
+    call_id = next_call_id()
+    ok_stub = netlogon_authenticate_request_stub(
+        26, "DC1", "WORKSTATION1$", 2, "WORKSTATION1", b"\x11\x12\x13\x14\x15\x16\x17\x18",
+        negotiate_flags=0x612FFFFF)
+    write_read(fd, sess_d, tree_d, fid_d2,
+               dcerpc_pdu(0, call_id, dcerpc_request_body(0, 26, ok_stub)))
+    ok_resp = netlogon_authenticate_response_stub(
+        26, b"\x18\x17\x16\x15\x14\x13\x12\x11", negotiate_flags=0x612FFFFF, account_rid=1107, status=0)
+    read_response(fd, sess_d, tree_d, dcerpc_pdu(2, call_id, dcerpc_response_body(0, ok_resp)))
+    close_pipe(fd, sess_d, tree_d, fid_d2)
+
+    # ---------------------------------------------------------------------------------------------
+    # Flow E: NetrServerPasswordSet2 -- note 5 (not sticky, fires on every occurrence).
+    # ---------------------------------------------------------------------------------------------
+    fe = make_flow()
+    sess_e, tree_e = 0xE000000000000001, 1
+    fid_e = open_pipe(fe, sess_e, tree_e)
+    bind_and_ack(fe, sess_e, tree_e, fid_e, next_call_id())
+    call_id = next_call_id()
+    pwset_stub = netlogon_password_set2_request_stub(
+        "DC1", "WIN10-PC$", 2, "WIN10-PC", new_password_length=516)
+    write_read(fe, sess_e, tree_e, fid_e,
+               dcerpc_pdu(0, call_id, dcerpc_request_body(0, 30, pwset_stub)))
+    pwset_resp_stub = b"\x00" * 12 + struct.pack("<I", 0)  # ReturnAuthenticator + status=SUCCESS
+    read_response(fe, sess_e, tree_e, dcerpc_pdu(2, call_id, dcerpc_response_body(0, pwset_resp_stub)))
+    close_pipe(fe, sess_e, tree_e, fid_e)
+
+    # ---------------------------------------------------------------------------------------------
+    # Flow F: a sealed NetrServerPasswordSet2 call on an already-bound Netlogon context -- exercises
+    # the "sealed, N bytes, not decoded" fallback. The bind/bind_ack themselves are never sealed
+    # (nothing to seal with yet -- see netlogon.hpp's own SEALING paragraph), only the request/
+    # response that follows.
+    # ---------------------------------------------------------------------------------------------
+    ff = make_flow()
+    sess_f, tree_f = 0xF000000000000001, 1
+    fid_f = open_pipe(ff, sess_f, tree_f)
+    bind_and_ack(ff, sess_f, tree_f, fid_f, next_call_id())
+    call_id = next_call_id()
+    sealed_ciphertext = b"\xDE\xAD\xBE\xEF" * 8  # opaque -- this codebase holds no key to decrypt it
+    sealed_req = dcerpc_pdu(0, call_id, dcerpc_request_body(0, 30, sealed_ciphertext),
+                             auth=(0x0A, RPC_C_AUTHN_LEVEL_PKT_PRIVACY, b"\x00" * 16))
+    write_read(ff, sess_f, tree_f, fid_f, sealed_req)
+    sealed_resp = dcerpc_pdu(2, call_id, dcerpc_response_body(0, sealed_ciphertext),
+                              auth=(0x0A, RPC_C_AUTHN_LEVEL_PKT_PRIVACY, b"\x00" * 16))
+    read_response(ff, sess_f, tree_f, sealed_resp)
+    close_pipe(ff, sess_f, tree_f, fid_f)
+
+    # ---------------------------------------------------------------------------------------------
+    # Flow G: a bind whose only offered context names a NON-Netlogon interface UUID, on a
+    # "netlogon"-named pipe -- the request that follows must stay structural-only (dcerpc_messages
+    # populated, netlogon_calls empty), the defensive "bind confirmed something else" edge case.
+    # ---------------------------------------------------------------------------------------------
+    fg = make_flow()
+    sess_g, tree_g = 0x7000000000000001, 1
+    fid_g = open_pipe(fg, sess_g, tree_g)
+    other_interface_uuid = "367abb81-9844-35f1-ad32-98f038001003"  # SCM/svcctl, an arbitrary non-
+                                                                     # Netlogon well-known interface
+    bind_and_ack(fg, sess_g, tree_g, fid_g, next_call_id(), abstract_uuid=other_interface_uuid)
+    call_id = next_call_id()
+    other_req_stub = b"\x00" * 32  # opaque -- never interpreted as Netlogon, no context is bound
+    write_read(fg, sess_g, tree_g, fid_g,
+               dcerpc_pdu(0, call_id, dcerpc_request_body(0, 4, other_req_stub)))
+    other_resp_stub = b"\x00" * 12
+    read_response(fg, sess_g, tree_g, dcerpc_pdu(2, call_id, dcerpc_response_body(0, other_resp_stub)))
+    close_pipe(fg, sess_g, tree_g, fid_g)
+
+    # ---------------------------------------------------------------------------------------------
+    # Flow H: the same ReqChallenge+Authenticate3 exchange as flow A, but against a "lsarpc"-named
+    # pipe -- the negative control proving only a "netlogon"-named pipe is ever tracked (no
+    # dcerpc_messages/netlogon_calls at all, on either message).
+    # ---------------------------------------------------------------------------------------------
+    fh = make_flow()
+    sess_h, tree_h = 0x8000000000000001, 1
+    fid_h = open_pipe(fh, sess_h, tree_h, pipe_name="lsarpc")
+    bind_and_ack(fh, sess_h, tree_h, fid_h, next_call_id())
+    call_id = next_call_id()
+    lsarpc_req_stub = netlogon_req_challenge_request_stub("DC1", "WIN10-PC",
+                                                           b"\x11\x22\x33\x44\x55\x66\x77\x88")
+    write_read(fh, sess_h, tree_h, fid_h,
+               dcerpc_pdu(0, call_id, dcerpc_request_body(0, 4, lsarpc_req_stub)))
+    lsarpc_resp_stub = netlogon_req_challenge_response_stub(b"\x99\xAA\xBB\xCC\xDD\xEE\xFF\x00", status=0)
+    read_response(fh, sess_h, tree_h, dcerpc_pdu(2, call_id, dcerpc_response_body(0, lsarpc_resp_stub)))
+    close_pipe(fh, sess_h, tree_h, fid_h)
+
+    # ---------------------------------------------------------------------------------------------
+    # Flow I: the same ReqChallenge+Authenticate3 exchange as flow A, but carried entirely over
+    # IOCTL(FSCTL_PIPE_TRANSCEIVE) request/response pairs -- the other real-world named-pipe
+    # transport shape (write-then-read in one call, rather than a separate WRITE and READ).
+    # ---------------------------------------------------------------------------------------------
+    fi = make_flow()
+    sess_i, tree_i = 0x9000000000000001, 1
+    fid_i = open_pipe(fi, sess_i, tree_i)
+    bind_call_id_i = next_call_id()
+    bind_pdu_i = dcerpc_pdu(11, bind_call_id_i, dcerpc_bind_body(
+        [dcerpc_context_element(0, NETLOGON_INTERFACE_UUID)]))
+    bind_ack_pdu_i = dcerpc_pdu(12, bind_call_id_i, dcerpc_bind_ack_body([dcerpc_context_result(0)]))
+    ioctl_pipe_transceive(fi, sess_i, tree_i, fid_i, bind_pdu_i, bind_ack_pdu_i)
+
+    call_id = next_call_id()
+    req_stub_i = netlogon_req_challenge_request_stub("DC1", "WIN10-PC", b"\x21\x22\x23\x24\x25\x26\x27\x28")
+    resp_stub_i = netlogon_req_challenge_response_stub(b"\x91\x92\x93\x94\x95\x96\x97\x98", status=0)
+    ioctl_pipe_transceive(fi, sess_i, tree_i, fid_i,
+                           dcerpc_pdu(0, call_id, dcerpc_request_body(0, 4, req_stub_i)),
+                           dcerpc_pdu(2, call_id, dcerpc_response_body(0, resp_stub_i)))
+
+    call_id = next_call_id()
+    auth_req_i = netlogon_authenticate_request_stub(
+        26, "DC1", "WIN10-PC$", 2, "WIN10-PC", b"\x31\x32\x33\x34\x35\x36\x37\x38",
+        negotiate_flags=0x612FFFFF)
+    auth_resp_i = netlogon_authenticate_response_stub(
+        26, b"\x41\x42\x43\x44\x45\x46\x47\x48", negotiate_flags=0x612FFFFF, account_rid=1108, status=0)
+    ioctl_pipe_transceive(fi, sess_i, tree_i, fid_i,
+                           dcerpc_pdu(0, call_id, dcerpc_request_body(0, 26, auth_req_i)),
+                           dcerpc_pdu(2, call_id, dcerpc_response_body(0, auth_resp_i)))
+    close_pipe(fi, sess_i, tree_i, fid_i)
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_050_000 + i, i * 1000)
+    (TESTS_DIR / "sample_netlogon.pcap").write_bytes(data)
+
+
+# ---------------------------------------------------------------------------------------------
 # DNS / mDNS / LLMNR / NBT-NS / DoH-detection (ROADMAP: "Add DNS, DoH, NBT-NS name resolution
 # decode") -- see dns.hpp/nbns.hpp/tls_sni.hpp's own file header comments for the wire formats
 # these fixtures exercise.
@@ -10170,6 +10898,7 @@ if __name__ == "__main__":
     build_kerberos_sample()
     build_ldap_sample()
     build_smb_sample()
+    build_netlogon_sample()
     build_policy_engine_sample()
     build_summarize_unclassified_sample()
     build_inventory_sample()

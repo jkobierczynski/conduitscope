@@ -112,17 +112,39 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
 #include "conduitscope/byteio.hpp"
+#include "conduitscope/dcerpc.hpp"
 #include "conduitscope/it_protocols.hpp"  // SMB_PORT_445/SMB_NETBIOS_SESSION_PORT_139, match_smb_magic
+#include "conduitscope/netlogon.hpp"
 #include "conduitscope/ntlm.hpp"
 #include "conduitscope/protocol_decoder.hpp"
 
 namespace conduitscope {
+
+// One SMB2 FileId (MS-SMB2 2.2.14.1: Persistent + Volatile, 8 bytes each) -- the handle-scoped
+// correlation key WRITE/READ/IOCTL/CLOSE all reference back to the CREATE that opened it. A
+// plain, fully-owned, hashable value type (not a ByteSpan) so it can key SmbFlowState's own
+// netlogon_pipes map below -- the same "no borrowed spans in a long-lived structure" rule
+// dcerpc.hpp's own stub_offset/stub_length design already follows.
+struct SmbFileId {
+    uint64_t persistent = 0;
+    uint64_t volatile_id = 0;
+    bool operator==(const SmbFileId& other) const {
+        return persistent == other.persistent && volatile_id == other.volatile_id;
+    }
+};
+struct SmbFileIdHash {
+    size_t operator()(const SmbFileId& id) const {
+        return std::hash<uint64_t>()(id.persistent) ^
+               (std::hash<uint64_t>()(id.volatile_id) * 0x9E3779B97F4A7C15ULL);
+    }
+};
 
 // One SMB2 sub-message (almost always the only one -- see this file's own COMPOUNDING paragraph for
 // when there is more than one). Fields not meaningful for a given command are left at their default
@@ -182,6 +204,42 @@ struct SmbMessage {
     std::vector<std::string> share_flags;
     std::vector<std::string> share_capabilities;
 
+    // CREATE Request -- the Name field, prefix-stripped of a leading "\"/"PIPE\"/"\PIPE\"
+    // (case-insensitively) and lowercased -- see smb.cpp's own strip_pipe_prefix_lower. Empty
+    // when Name was absent/empty or this codebase simply didn't need to look at it further (only
+    // a "netlogon"-named pipe is ever tracked past this point -- see this file's own
+    // STATE/CORRELATION section).
+    bool has_create_request = false;
+    std::string create_name;
+
+    // CREATE Response.
+    bool has_create_response = false;
+
+    // FileId -- carried by CREATE's own Response and by every WRITE/READ/IOCTL/CLOSE request
+    // that references an already-open handle (READ's own RESPONSE carries no FileId of its own,
+    // per MS-SMB2 -- see smb.cpp's own READ handling for how that response is still correlated
+    // back to its FileId). has_file_id is set whenever any of those decoded one.
+    bool has_file_id = false;
+    SmbFileId file_id;
+
+    // DCE/RPC-over-named-pipe raw payload bytes -- INTERNAL ONLY, never rendered to JSON/text
+    // output (see output.cpp). Populated by parse_one_smb2_message (smb.cpp) for a WRITE
+    // request, READ response, or IOCTL(FSCTL_PIPE_TRANSCEIVE) request/response, then consumed
+    // and cleared by decode_with_correlation (smb.cpp) once it has resolved which FileId (and
+    // therefore which, if any, tracked NetlogonPipeState) this message belongs to -- the
+    // stateless parse layer owns the bytes, the stateful correlation layer decides what they
+    // mean, the same split this file's other correlation-derived fields already follow.
+    std::vector<uint8_t> dcerpc_raw_payload;
+
+    // DCE/RPC PDUs found in dcerpc_raw_payload (populated by decode_with_correlation) -- empty
+    // unless this message targeted a FileId tracked as the "netlogon" named pipe.
+    std::vector<DceRpcMessage> dcerpc_messages;
+    // Netlogon-level decode of dcerpc_messages, ONLY for a PDU whose own context was confirmed
+    // bound to the Netlogon interface (see this file's own STATE/CORRELATION section) -- a
+    // bind/bind_ack/fault PDU, or a request/response on a non-Netlogon context, has no
+    // corresponding entry here; correlate by NetlogonCall::call_id, not by index.
+    std::vector<NetlogonCall> netlogon_calls;
+
     // Correlation-derived -- filled by SmbTcpDecoder::decode, not try_parse_smb2_chain.
     bool correlated_request_seen = false;
     size_t correlated_request_index = 0;
@@ -206,10 +264,60 @@ struct SmbFrame {
                                         // (e.g. curated note 1, SMB1 traffic present)
 };
 
+// One outstanding DCE/RPC bind or request PDU on a tracked netlogon pipe, keyed by call_id --
+// DCE/RPC's own wire-mandated correlation field (dcerpc.hpp's own DceRpcMessage::call_id), the
+// same "genuine correlation field, not a heuristic" bar SMB2's MessageId and LDAP's messageID
+// already met. Does double duty for the two kinds of pending pairing this one pipe conversation
+// needs (see NetlogonPipeState's own doc comment for which is which at any given moment):
+// context_id is meaningful for a bind PDU awaiting its own bind_ack (the candidate Netlogon
+// context_id offered, not yet confirmed accepted); opnum is meaningful for a request PDU
+// awaiting its own response/fault (so the response side, which carries no opnum of its own, can
+// still be decoded with the right one).
+struct PendingDceRpcCall {
+    uint16_t opnum = 0;
+    uint16_t context_id = 0;
+};
+
+// Per-FileId state for a tracked "netlogon" named pipe -- see this file's own STATE/CORRELATION
+// section for why this is a genuinely new, two-layer correlation shape (SMB2 handle -> DCE/RPC
+// bind -> DCE/RPC call) relative to every prior phase's own state. Created at CREATE response
+// only when the request's own TreeId was already confirmed a pipe share AND the CREATE request's
+// own Name (prefix-stripped) equals "netlogon"; erased on the matching CLOSE request.
+struct NetlogonPipeState {
+    // Short-lived: immediate bind<->bind_ack and request<->response/fault PDU pairing on this
+    // pipe's own DCE/RPC calls, keyed by call_id -- see PendingDceRpcCall's own doc comment.
+    std::unordered_map<uint32_t, PendingDceRpcCall> pending_calls;
+
+    // Longer-lived, sticky for this pipe conversation's own lifetime.
+    bool bound_context_is_netlogon = false;  // true once a bind_ack accepted a context whose own
+                                                // bind negotiated the Netlogon interface UUID
+    uint16_t netlogon_context_id = 0;          // that context's own context_id, once known
+    std::string last_primary_name;
+    std::string last_account_name;
+    std::string last_computer_name;
+    bool zero_challenge_seen = false;          // curated note 2's own sticky flag (ReqChallenge)
+    bool zero_credential_seen = false;         // curated note 2's own sticky flag (Authenticate*)
+    bool legacy_authenticate_seen = false;     // curated note 3's own sticky flag
+    bool account_name_mismatch_seen = false;   // curated note 4's own sticky flag
+    // Curated note 5 (NetrServerPasswordSet2 observed) is deliberately NOT sticky -- each
+    // occurrence is its own meaningful event, see smb.cpp's own decode_dcerpc_and_netlogon.
+};
+
 // Attempts to interpret `payload` -- which must start with the 4-byte Zero+StreamProtocolLength
 // prefix (see this file's own FRAMING paragraph) -- as one SMB frame. Returns std::nullopt (never
 // throws) if match_smb_magic doesn't recognize the 4 bytes following that prefix.
-std::optional<SmbFrame> try_parse_smb(ByteSpan payload);
+//
+// `tracked_netlogon_pipes`, when non-null, is a read-only view of the calling SmbFlowState's own
+// netlogon_pipes map (below) -- consulted only to decide whether a WRITE/READ/IOCTL message's own
+// FileId is worth copying dcerpc_raw_payload for at all (see SmbMessage's own doc comment on that
+// field); nothing here mutates it or interprets its contents -- that is decode_with_correlation's
+// own job, once try_parse_smb has returned. Omitted (nullptr), no WRITE/READ/IOCTL message ever
+// gets a populated dcerpc_raw_payload, which is exactly correct for any caller (e.g. a future
+// direct/test caller) that isn't tracking netlogon pipes at all.
+std::optional<SmbFrame> try_parse_smb(
+    ByteSpan payload,
+    const std::unordered_map<SmbFileId, NetlogonPipeState, SmbFileIdHash>* tracked_netlogon_pipes =
+        nullptr);
 
 // Returns the total on-the-wire byte count one SMB frame declares (4-byte prefix + its own declared
 // StreamProtocolLength) -- mirrors kerberos_tcp_declared_length's/ldap_tcp_declared_length's own
@@ -227,6 +335,17 @@ struct SmbPendingRequest {
                                       // shape (a "$"-suffixed path whose response ShareType == pipe)
                                       // without re-deriving the path from the response alone, which
                                       // doesn't carry it
+    std::string create_name;        // set only for a pending CREATE request, and only when its own
+                                      // TreeId was already confirmed a pipe share -- "" otherwise,
+                                      // including when the request targeted a non-pipe share; lets
+                                      // the matching response's own FileId be tracked as the
+                                      // netlogon pipe without re-deriving the name, which the
+                                      // response alone doesn't carry
+    bool has_file_id = false;       // set only for a pending READ request -- READ's own response
+                                      // carries no FileId of its own (MS-SMB2), so it is threaded
+                                      // through here instead, the same "carry forward what the
+                                      // response alone won't have" shape create_name above uses
+    SmbFileId file_id;
 };
 
 // One outstanding multi-leg NTLM handshake, tracked per SMB SESSION, keyed by SessionId -- see this
@@ -244,6 +363,11 @@ public:
     bool smb1_seen = false;  // curated note 1's own sticky flag -- fires once per session
     std::unordered_map<uint64_t, SmbPendingRequest> pending_requests;         // keyed by MessageId
     std::unordered_map<uint64_t, PendingNtlmHandshake> pending_ntlm_handshakes;  // keyed by SessionId
+    std::unordered_map<uint64_t, bool> pipe_shares;  // TreeId -> is_pipe_share, set at TREE_CONNECT
+                                                        // response from its own already-computed
+                                                        // ShareType, simply persisted per-TreeId
+    std::unordered_map<SmbFileId, NetlogonPipeState, SmbFileIdHash> netlogon_pipes;  // keyed by
+                                                                                        // FileId
 };
 
 // SMB over TCP/445 (direct hosting) and TCP/139 (NetBIOS Session Service) -- id()=="smb",

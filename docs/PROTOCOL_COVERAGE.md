@@ -6464,3 +6464,279 @@ handshake becomes available later, it should be added and this section
 updated accordingly. See `include/conduitscope/smb.hpp`'s and
 `include/conduitscope/ntlm.hpp`'s file headers for the full writeup.
 
+### Netlogon/DCE-RPC (MS-NRPC, MS-RPCE; carried inside SMB2 WRITE/READ/IOCTL) -- Windows Active Directory suite, phase 4 of 4
+
+**The fourth and final Windows Active Directory protocol in this
+codebase, closing out the suite Kerberos (phase 1) started.** SMB2/NTLM's
+own plan explicitly deferred DCE/RPC-over-named-pipe traffic -- "Netlogon
+chief among it" -- to this phase, because that traffic only exists as
+bytes *inside* an SMB2 WRITE/READ/IOCTL body, on a `TreeId` already
+confirmed `IPC$` via `TREE_CONNECT` and a `FileId` already opened via
+`CREATE` against a specific pipe name; phase 3 left that payload
+structural-only on purpose. This is where CVE-2020-1472 ("Zerologon")
+lives: an attacker who sends an all-zero `ClientChallenge`/
+`ClientCredential` can forge a Netlogon Secure Channel to a domain
+controller's own computer account and, from there, blank its machine
+password. **No new `ProtocolDecoder`, no independent wire gate** --
+unlike every prior AD-suite phase, Netlogon/DCE-RPC has no signature or
+port of its own to register in `tcp_port_independent_registry()`; it
+rides on whatever port SMB used, recognized only structurally (a tracked
+`FileId`), the same "sub-parser invoked from `smb.cpp`, no gate of its
+own" shape NTLM's own embedding already established, just one correlation
+layer deeper (SMB2 `FileId` -> DCE/RPC `bind` -> DCE/RPC `call_id`,
+versus NTLM's own `SessionId`-keyed two-leg handshake).
+
+Two new modules, split the same way `smb.hpp`/`ntlm.hpp` are split
+(envelope vs. embedded protocol), so a future lsarpc/samr/srvsvc pass
+(explicitly out of scope here) can reuse the envelope:
+`include/conduitscope/dcerpc.hpp`/`src/dcerpc.cpp` (a generic DCE/RPC
+connection-oriented PDU reader, reusable by any interface) and
+`include/conduitscope/netlogon.hpp`/`src/netlogon.cpp` (the Netlogon
+interface UUID, opnum table, and field decoders). lsarpc, samr, srvsvc,
+wkssvc, and every other RPC interface that can also ride over `IPC$`
+remain unimplemented -- Netlogon only.
+
+#### Wire format
+
+**The generic DCE/RPC PDU** ([MS-RPCE] 2.2.1, the Open Group's DCE 1.1
+RPC chapters): a 16-byte common header (`rpc_vers`/`rpc_vers_minor`/
+`ptype` (named -- `bind`/`bind_ack`/`request`/`response`/`fault`/
+`alter_context`/`alter_context_resp`, etc.)/`pfc_flags` (named:
+`PFC_FIRST_FRAG`/`PFC_LAST_FRAG`)/`packed_drep` (4 bytes, read, never
+rendered)/`frag_length`/`auth_length`/`call_id` -- the wire-mandated
+correlation key for `bind`<->`bind_ack` and `request`<->`response`/
+`fault` pairing, the same genuine-correlation-field pattern SMB2's
+`MessageId` and LDAP's `messageID` already established). `bind`/
+`bind_ack` context negotiation: `p_cont_id`, abstract syntax UUID+version
+(named "Netlogon" when it equals the interface UUID
+`12345678-1234-abcd-ef00-01234567cffb` v1.0, otherwise shown raw),
+transfer syntax UUID+version (named "NDR" for the well-known
+`8a885d04-1ceb-11c9-9fe8-08002b104860` v2.0 constant), and `bind_ack`'s
+per-context `Result` (named: acceptance/user_rejection/
+provider_rejection/negotiate_ack) -- the gate for whether later
+`request`/`response` pairs on that `context_id` are trusted as Netlogon
+at all; an accepted context whose negotiated abstract syntax isn't the
+Netlogon UUID leaves later calls on that context structural-only (opnum
+numeric, never guessed at). `request`/`response`/`fault` body headers
+(`alloc_hint`/`context_id`/`opnum` or `cancel_count`/`fault_status`). The
+`sec_trailer` (present iff `auth_length > 0`, located at
+`frag_length - auth_length - 8`): `auth_type`/`auth_level`/
+`auth_pad_length` read structurally, `auth_value` presence+length only,
+never decoded -- it's either a signature or the key material behind one.
+
+**A genuinely new wrinkle: RPC-layer sealing.** Windows enforces "Full
+Secure Channel" for Netlogon -- `NetrServerReqChallenge` and
+`NetrServerAuthenticate*` (the calls that *establish* the session key)
+run over an unauthenticated bind (`auth_length == 0`), but later calls on
+the same pipe (`NetrServerPasswordSet2`, the `NetrLogonSamLogon*` family)
+are normally sent **sealed** (`auth_level == RPC_C_AUTHN_LEVEL_PKT_PRIVACY`,
+value 6), meaning their stub data is ciphertext this codebase holds no
+key for -- the same "never decrypt a cipher this codebase doesn't hold
+the key for" limit already applied to TLS/IPsec/WireGuard/SMB3-transform
+elsewhere. `auth_level` is read from the trailer's own unencrypted 8-byte
+fixed header (never itself sealed) and is the one piece of `sec_trailer`
+data this decoder actually branches on: a sealed call gets an honest
+"sealed, N bytes, not decoded" fallback (opnum still named -- it's in the
+cleartext header) rather than an attempt to parse ciphertext as plaintext
+NDR.
+
+**NDR conformant-varying strings** (`PrimaryName`/`AccountName`/
+`ComputerName` throughout): `MaxCount`(4)/`Offset`(4)/`ActualCount`(4)
+followed by `ActualCount*2` bytes of UTF-16LE (decoded via the shared
+`utf16le_to_utf8` codec, trailing NUL popped). A top-level `[unique]`
+pointer (`PrimaryName`) is a 4-byte referent ID followed by the string
+(or nothing, if the referent ID is zero); a top-level `[ref]` pointer
+(`AccountName`/`ComputerName`) is the string with no referent ID at all
+-- confirmed empirically (installing `impacket` and inspecting its own
+marshalled bytes during planning) that a bare `wchar_t*` parameter
+defaults to `[ref]` even under `pointer_default(unique)`. Both string
+readers self-align to a 4-byte boundary before reading their own
+`MaxCount`/referent-ID field (`align4`, `netlogon.cpp`) -- a real
+correctness fix caught by first-principles review before any fixture was
+written: `SecureChannelType` is a 16-bit field immediately followed by a
+4-byte-aligned string in both `NetrServerAuthenticate*` and
+`NetrServerPasswordSet2`, so an unaligned reader misparses by 2 bytes at
+exactly that point.
+
+**Message/opnum coverage.** Full field decode, request and response,
+every value empirically verified against `impacket`'s own marshalling
+during planning:
+
+- **`NetrServerReqChallenge`** (opnum 4): request's `PrimaryName`,
+  `ComputerName`, `ClientChallenge` (`NETLOGON_CREDENTIAL`, 8 raw bytes --
+  never rendered beyond `client_credential_all_zero`, the direct input to
+  curated note 2); response's `ServerChallenge` (presence only) + status.
+- **`NetrServerAuthenticate`/`NetrServerAuthenticate2`/
+  `NetrServerAuthenticate3`** (opnums 5/15/26, decoded uniformly): request's
+  `PrimaryName`, `AccountName` (checked against `SecureChannelType` for
+  note 4), `SecureChannelType` (a **16-bit** NDR enum -- confirmed
+  empirically, not the 32-bit width a casual IDL reading might suggest --
+  named via the 8-value `NETLOGON_SECURE_CHANNEL_TYPE` table:
+  `NullSecureChannel`=0, `MsvApSecureChannel`=1,
+  `WorkstationSecureChannel`=2, `TrustedDnsDomainSecureChannel`=3,
+  `TrustedDomainSecureChannel`=4, `UasServerSecureChannel`=5,
+  `ServerSecureChannel`=6, `CdcServerSecureChannel`=7), `ComputerName`,
+  `ClientCredential` (8 raw bytes -- same never-rendered-beyond-a-boolean
+  posture as `ClientChallenge`), and (opnum 15/26 only) `NegotiateFlags`;
+  response's `ServerCredential` (presence only), (opnum 15/26 only)
+  `NegotiateFlags`, (opnum 26 only) `AccountRid`, plus status.
+- **`NetrServerPasswordSet2`** (opnum 30) -- header-level decode only,
+  credential material never rendered (mirrors NTLM's own
+  `LmChallengeResponse`/`NtChallengeResponse` posture exactly):
+  `PrimaryName`/`AccountName`/`SecureChannelType`/`ComputerName` decoded
+  when unsealed; `Authenticator` (`NETLOGON_AUTHENTICATOR`, 12 bytes)
+  presence only (`authenticator_present`); `ClearNewPassword` (the
+  encrypted new password blob -- the literal proof-of-possession material,
+  the entire point of this call) presence + declared length only
+  (`clear_new_password_length`), never its bytes.
+- **Structural-only**, opnum named from a verified curated table, nothing
+  else decoded: `NetrLogonUasLogon`=0, `NetrLogonUasLogoff`=1,
+  `NetrLogonSamLogon`=2, `NetrServerPasswordSet`=6 (the legacy pre-`Set2`
+  variant), `NetrLogonGetCapabilities`=21, `NetrLogonGetDomainInfo`=29,
+  `NetrServerPasswordGet`=31, `NetrLogonSamLogonEx`=39,
+  `NetrServerTrustPasswordsGet`=42, `NetrLogonSamLogonWithFlags`=45,
+  `NetrServerAuthenticateKerberos`=59 (a modern addition superseding the
+  Zerologon-era key-exchange flow). Any opnum outside this table is
+  reported numerically, never guessed at -- the same posture unknown SMB
+  `Status` values got.
+
+One value could not be independently confirmed and is deliberately not
+name-mapped: the numeric `auth_type` for `RPC_C_AUTHN_NETLOGON` (a
+Microsoft Learn fetch during planning returned "10," which collides with
+the well-known `RPC_C_AUTHN_WINNT` value and is very likely wrong) --
+`auth_type` is reported numerically only, the same "flag it, don't guess"
+treatment `STATUS_ACCOUNT_LOCKED_OUT` got in phase 3.
+
+#### Curated attack/monitoring detection
+
+Every note carries the same explicit false-positive caveat every prior
+phase's notes have -- these are wire-level mechanisms, never assertions
+of detected intent.
+
+1. **Netlogon secure channel established/failed** -- a closing
+   correlation note on the terminal `NetrServerAuthenticate*` response for
+   a tracked pipe conversation, naming the account (preferred) or computer
+   and success/failure -- the direct Netlogon-side analog of phase 3's own
+   NTLM-handshake-correlation note, and the anchor the other four notes
+   hang off of.
+2. **Zerologon-pattern all-zero client challenge/credential** -- the
+   single highest-value note in this phase, the direct wire signature of
+   CVE-2020-1472: `NetrServerReqChallenge`'s `ClientChallenge` or any
+   `NetrServerAuthenticate*`'s `ClientCredential` equal to 8 zero bytes. A
+   real challenge/credential is an 8-byte random/derived value, so an
+   all-zero one essentially never occurs in benign traffic -- a very low
+   false-positive-rate note, still explicitly caveated that presence alone
+   is not proof of a completed compromise. Tracked as two independent
+   sticky flags (`zero_challenge_seen`/`zero_credential_seen`).
+3. **Legacy/downgraded Netlogon authentication method** --
+   `NetrServerAuthenticate` (opnum 5) or `NetrServerAuthenticate2` (opnum
+   15) used instead of the modern `NetrServerAuthenticate3` (opnum 26),
+   the Netlogon-side analog of phase 3's own SMB1-present and
+   NTLM-negotiated notes.
+4. **Machine-account naming mismatch** -- `SecureChannelType` claims
+   `WorkstationSecureChannel`/`ServerSecureChannel` but `AccountName` does
+   not end in `$` (the standard machine-account naming convention), a
+   wire-visible impersonation-adjacent anomaly.
+5. **Machine account password reset via Netlogon** -- `NetrServerPasswordSet2`
+   observed on this pipe, naming the account, never the password material
+   -- the literal next step in a real Zerologon exploitation chain (forge
+   a channel, then blank the DC's own machine password), and this suite's
+   final "this is how the earlier phases' targets get used" beat. **The
+   one note in this phase that is deliberately NOT sticky** -- it fires on
+   every occurrence, unlike notes 2-4.
+
+#### State/correlation design -- the deepest correlation shape in this codebase
+
+Extends `SmbFlowState` (still keyed by `FlowStateKeying::Session`) with
+two pieces of state phase 3 has none of: a `TreeId`-keyed
+`unordered_map<uint64_t, bool>` (`pipe_shares`, populated at
+`TREE_CONNECT` response from the already-computed `ShareType`, simply
+persisted per-`TreeId` instead of only transiently), and a
+`FileId`-keyed `unordered_map<SmbFileId, NetlogonPipeState, SmbFileIdHash>`
+(`netlogon_pipes`) -- created at `CREATE` response only when the
+request's `TreeId` was a pipe share **and** the `CREATE` request's `Name`
+(decoded for the first time this phase, offset 44/46 in the fixed
+structure, the same `bounded()`+`utf16le_to_utf8` pattern `TREE_CONNECT`'s
+path already used), after stripping a leading `\`/`PIPE\`/`\PIPE\` prefix
+case-insensitively, equals `"netlogon"` -- every other pipe name (lsarpc,
+samr, srvsvc, ...) is deliberately never tracked, keeping this map small
+and the scope honest, and proven by the strongest possible negative
+control: an untracked pipe's WRITE/READ never even reach the DCE/RPC
+parser at all (zero `dcerpc_messages` emitted), not merely a suppressed
+Netlogon-level interpretation. Erased on the matching `CLOSE` request.
+`NetlogonPipeState` holds two tiers, because this phase's correlation
+genuinely has one more layer than any prior phase (SMB2 file handle ->
+DCE/RPC bind -> DCE/RPC call, versus SMB3's own two-layer
+SESSION_SETUP-embeds-NTLM shape): a short-lived `call_id`-keyed map for
+immediate PDU pairing (`bind`<->`bind_ack`, `request`<->`response`/
+`fault`), and longer-lived, per-pipe-conversation sticky fields
+(`bound_context_is_netlogon`, `last_primary_name`/`account_name`/
+`computer_name`, and the four sticky note flags) that persist for the
+pipe's lifetime. Both the FileId map and each pipe's `call_id` sub-map
+are capped by `resource_limits().max_decoded_objects`, the same guard
+every prior phase's pending-request maps use.
+
+#### DELIBERATELY NOT IMPLEMENTED in this pass
+
+lsarpc, samr, srvsvc, wkssvc, or any RPC interface other than Netlogon,
+even over the same `IPC$` share. DCE/RPC PDU **fragmentation reassembly**
+across multiple WRITE/READ pairs (`PFC_FIRST_FRAG`/`PFC_LAST_FRAG` are
+read and named, but a fragmented call is left structural -- first-pass
+scope is single-fragment calls, which covers every opnum this phase
+decodes in practice). Actual Netlogon Secure Channel **cryptographic
+verification** (session-key derivation, the AES-CFB8 credential-chain
+computation, signature/seal verification) -- only the *wire pattern*
+(all-zero bytes) is recognized, the same "never verify a signature/MAC
+this codebase doesn't hold the key for" limit applied everywhere else.
+Decoding **sealed** stub data. The `sec_trailer`'s `auth_value` bytes
+themselves.
+
+#### JSON output fields
+
+Rendered inside each `smb_messages` entry, gated the same `has_*`/
+non-empty-optional way the rest of `smb.hpp` already uses: `create_name`
+(`CREATE` request only); `file_id` (hex `persistent:volatile`, `CREATE`
+response and any WRITE/READ/IOCTL against a resolved `FileId`);
+`dcerpc_messages[]` (only on a message where at least one DCE/RPC PDU was
+parsed -- `ptype`/`call_id`/`pfc_flags`/`bind_contexts[]` (bind only, with
+`is_netlogon`)/`bind_ack_results[]` (bind_ack only)/`opnum` (request
+only)/`fault_status` (fault only)/`auth_level`+`sealed` (only when
+sealed)/`summary`); `netlogon_calls[]` (only on a message where at least
+one PDU was interpreted at the Netlogon level -- `opnum`/`call_id`/
+`is_response`/`sealed` (sealed fallback only)/`primary_name`/
+`account_name`/`computer_name`/`secure_channel_type`/
+`client_credential_all_zero`/`negotiate_flags`/`authenticator_present`/
+`clear_new_password_length`/`account_rid`/`status_name`/`summary`, each
+field present only when that opnum's own decode populates it). `--stats`
+gains a `netlogon opnum counts:` block (`netlogon_opnum_counts_` in
+`output.hpp`, incremented per decoded request, the same
+`std::map<std::string, size_t>` triple `smb_status_counts_` already uses).
+
+#### Validation
+
+No public real-world Netlogon capture was incorporated in this pass;
+validated by construction against synthetic `tests/sample_netlogon.pcap`
+(TCP, 142 packets across 9 independent flows A-I --
+`tools/make_sample_pcap.py`'s `build_netlogon_sample()`, hand-rolled
+`struct.pack`, no third-party RPC/NDR library dependency in the shipped
+tool), covering: a normal `NetrServerReqChallenge`->`NetrServerAuthenticate3`
+handshake (note 1 positive, notes 2-4 negative controls); an all-zero
+`ClientChallenge` (note 2 positive, the Zerologon wire signature);
+`NetrServerAuthenticate2` (note 3 positive); an `AccountName` not ending
+in `$` under a `WorkstationSecureChannel` type (note 4 positive) alongside
+one that does (note 4 negative control); `NetrServerPasswordSet2` (note 5
+positive); the same call sent sealed (the "sealed, N bytes, not decoded"
+fallback, no notes); a bind to a non-Netlogon interface UUID on a
+netlogon-named pipe (the bind-interface-confirmation gate, structural-only,
+no notes); a non-`netlogon` pipe name (`lsarpc`, the never-tracked
+negative control -- zero `dcerpc_messages` emitted at all); and both the
+WRITE+READ and IOCTL/`FSCTL_PIPE_TRANSCEIVE` transport shapes carrying
+the identical handshake. Every byte offset (including the `align4` NDR
+alignment fix) and note-trigger condition was independently smoke-tested
+against the hand-built fixture, decoded and inspected in `--format text`,
+`--format json`, and `--stats`, BEFORE the `CMakeLists.txt` `netlogon_*`
+test family reading it was written -- the same verification discipline
+every prior AD-suite phase's delivery was held to. See
+`include/conduitscope/dcerpc.hpp`'s and
+`include/conduitscope/netlogon.hpp`'s file headers for the full writeup.
+

@@ -2,6 +2,7 @@
 #include "conduitscope/smb.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <sstream>
 
 #include "conduitscope/resource_limits.hpp"
@@ -199,12 +200,55 @@ std::optional<NtlmMessage> scan_for_ntlm(ByteSpan buffer) {
     return std::nullopt;
 }
 
+// True iff `hay`'s first `needle.size()` bytes equal `needle`, byte-by-byte, ASCII-case-
+// insensitively -- pipe names are ASCII by construction (they're Win32 device-namespace names),
+// so no locale/Unicode-aware comparison is needed.
+bool starts_with_ci(const std::string& hay, const char* needle) {
+    size_t n = std::char_traits<char>::length(needle);
+    if (hay.size() < n) return false;
+    for (size_t i = 0; i < n; ++i) {
+        if (std::tolower(static_cast<unsigned char>(hay[i])) !=
+            std::tolower(static_cast<unsigned char>(needle[i]))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Normalizes a CREATE request's own decoded Name field into a bare, lowercase pipe name for
+// comparison against "netlogon" -- strips one leading "\PIPE\", "PIPE\", or "\" prefix
+// (case-insensitively, in that priority order so "\PIPE\netlogon" isn't left with a stray "PIPE\"
+// after only the leading "\" is stripped), then lowercases the remainder. Named-pipe opens
+// arrive with one of these prefixes depending on the client; a plain file path (no prefix at all)
+// simply won't match "netlogon" after normalization, which is exactly the desired behavior -- see
+// smb.hpp's own STATE/CORRELATION section for why only this one exact pipe name is ever tracked.
+std::string strip_pipe_prefix_lower(const std::string& name) {
+    std::string s = name;
+    if (starts_with_ci(s, "\\PIPE\\")) {
+        s = s.substr(6);
+    } else if (starts_with_ci(s, "PIPE\\")) {
+        s = s.substr(5);
+    } else if (starts_with_ci(s, "\\")) {
+        s = s.substr(1);
+    }
+    for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return s;
+}
+
 // Parses one SMB2 sub-message starting at offset 0 of `sub` (a view already narrowed to exactly
 // this sub-message's own bytes -- see parse_smb2_chain below for how compounding narrows this).
 // Never throws past its own boundary; a malformed sub-message still yields a header-only
 // SmbMessage rather than aborting the whole chain, the same per-item leniency this codebase's other
 // bounded-repeat decodes already use.
-SmbMessage parse_one_smb2_message(ByteSpan sub) {
+//
+// `tracked_netlogon_pipes` -- see try_parse_smb's own doc comment (smb.hpp) for what this pointer
+// is and, more importantly, is NOT: a read-only lookup used solely to decide whether a WRITE/
+// READ/IOCTL message's own payload is worth copying into dcerpc_raw_payload at all. This function
+// never mutates it and never itself decides what the bytes mean -- that's decode_with_correlation's
+// job, once this whole chain has returned.
+SmbMessage parse_one_smb2_message(
+    ByteSpan sub,
+    const std::unordered_map<SmbFileId, NetlogonPipeState, SmbFileIdHash>* tracked_netlogon_pipes) {
     SmbMessage m;
     Cursor c(sub);
     c.skip(4);  // ProtocolId -- already verified by the caller's own gate
@@ -377,6 +421,139 @@ SmbMessage parse_one_smb2_message(ByteSpan sub) {
                 }
                 break;
             }
+            case 0x05: {  // CREATE
+                if (!m.is_response) {
+                    Cursor bc(body);
+                    if (bc.remaining() >= 48) {
+                        bc.skip(44);  // jump to NameOffset (structure offset 44, body-relative)
+                        uint16_t name_offset = bc.u16le();
+                        uint16_t name_length = bc.u16le();
+                        ByteSpan name_bytes = bounded(sub, name_offset, name_length);
+                        m.create_name = strip_pipe_prefix_lower(utf16le_to_utf8(name_bytes));
+                        m.has_create_request = true;
+                    }
+                } else {
+                    Cursor bc(body);
+                    if (bc.remaining() >= 80) {
+                        bc.skip(64);  // jump to FileId (structure offset 64, body-relative)
+                        uint64_t persistent = bc.u64le();
+                        uint64_t vol = bc.u64le();
+                        m.file_id = SmbFileId{persistent, vol};
+                        m.has_file_id = true;
+                        m.has_create_response = true;
+                    }
+                }
+                if (!m.is_response && !m.create_name.empty()) {
+                    summary << " (" << m.create_name << ")";
+                }
+                break;
+            }
+            case 0x06: {  // CLOSE
+                if (!m.is_response) {
+                    Cursor bc(body);
+                    if (bc.remaining() >= 24) {
+                        bc.skip(8);  // StructureSize/Flags/Reserved
+                        uint64_t persistent = bc.u64le();
+                        uint64_t vol = bc.u64le();
+                        m.file_id = SmbFileId{persistent, vol};
+                        m.has_file_id = true;
+                    }
+                }
+                break;
+            }
+            case 0x08: {  // READ
+                if (!m.is_response) {
+                    Cursor bc(body);
+                    if (bc.remaining() >= 32) {
+                        bc.skip(16);  // StructureSize/Padding/Flags/Length/Offset
+                        uint64_t persistent = bc.u64le();
+                        uint64_t vol = bc.u64le();
+                        m.file_id = SmbFileId{persistent, vol};
+                        m.has_file_id = true;
+                    }
+                } else {
+                    Cursor bc(body);
+                    if (bc.remaining() >= 8) {
+                        bc.u16le();  // StructureSize
+                        uint8_t data_offset = bc.u8();
+                        bc.u8();  // Reserved
+                        uint32_t data_length = bc.u32le();
+                        // READ's own Response carries no FileId of its own (MS-SMB2) -- unlike
+                        // WRITE/IOCTL below, this function has no way to gate this copy by FileId
+                        // at all; decode_with_correlation resolves the FileId (via the matching
+                        // READ request's own MessageId) and drops this again immediately if it
+                        // turns out not to be a tracked pipe -- see smb.hpp's own doc comment on
+                        // dcerpc_raw_payload. Gated coarsely here on "is any netlogon pipe tracked
+                        // in this session at all", to avoid the copy entirely for the overwhelmingly
+                        // common case of a session with no netlogon pipe open.
+                        if (tracked_netlogon_pipes != nullptr && !tracked_netlogon_pipes->empty()) {
+                            ByteSpan payload_bytes = bounded(sub, data_offset, data_length);
+                            m.dcerpc_raw_payload = payload_bytes.to_vector();
+                        }
+                    }
+                }
+                break;
+            }
+            case 0x09: {  // WRITE
+                if (!m.is_response) {
+                    Cursor bc(body);
+                    if (bc.remaining() >= 32) {
+                        bc.u16le();  // StructureSize
+                        uint16_t data_offset = bc.u16le();
+                        uint32_t length = bc.u32le();
+                        bc.skip(8);  // Offset
+                        uint64_t persistent = bc.u64le();
+                        uint64_t vol = bc.u64le();
+                        m.file_id = SmbFileId{persistent, vol};
+                        m.has_file_id = true;
+                        if (tracked_netlogon_pipes != nullptr &&
+                            tracked_netlogon_pipes->count(m.file_id) != 0) {
+                            ByteSpan payload_bytes = bounded(sub, data_offset, length);
+                            m.dcerpc_raw_payload = payload_bytes.to_vector();
+                        }
+                    }
+                }
+                // WRITE Response carries no payload of its own interest -- Count/Remaining only.
+                break;
+            }
+            case 0x0B: {  // IOCTL
+                Cursor bc(body);
+                if (bc.remaining() >= 32) {
+                    bc.u16le();  // StructureSize
+                    bc.u16le();  // Reserved
+                    uint32_t ctl_code = bc.u32le();
+                    uint64_t persistent = bc.u64le();
+                    uint64_t vol = bc.u64le();
+                    m.file_id = SmbFileId{persistent, vol};
+                    m.has_file_id = true;
+                    uint32_t input_offset = bc.u32le();
+                    uint32_t input_count = bc.u32le();
+                    bool is_pipe_transceive = (ctl_code == 0x0011C017);  // FSCTL_PIPE_TRANSCEIVE
+                    bool tracked = tracked_netlogon_pipes != nullptr &&
+                                    tracked_netlogon_pipes->count(m.file_id) != 0;
+                    if (!m.is_response) {
+                        if (bc.remaining() >= 12) {
+                            bc.u32le();  // MaxInputResponse
+                            bc.u32le();  // OutputOffset -- the caller's own output buffer size
+                            bc.u32le();  // OutputCount    hint, not a payload location; unused here
+                        }
+                        if (is_pipe_transceive && tracked) {
+                            ByteSpan payload_bytes = bounded(sub, input_offset, input_count);
+                            m.dcerpc_raw_payload = payload_bytes.to_vector();
+                        }
+                    } else {
+                        if (bc.remaining() >= 8) {
+                            uint32_t output_offset = bc.u32le();
+                            uint32_t output_count = bc.u32le();
+                            if (is_pipe_transceive && tracked) {
+                                ByteSpan payload_bytes = bounded(sub, output_offset, output_count);
+                                m.dcerpc_raw_payload = payload_bytes.to_vector();
+                            }
+                        }
+                    }
+                }
+                break;
+            }
             default:
                 // Structural-only -- see smb.hpp's own STRUCTURAL-ONLY list. Command already named
                 // in the summary above; nothing else to decode.
@@ -406,7 +583,11 @@ uint32_t peek_next_command(ByteSpan sub) {
 // everything after the 4-byte TCP prefix. Capped both by the available bytes running out and by a
 // hard limit on the number of sub-messages, so a malformed/hostile NextCommand chain (e.g. one that
 // doesn't advance, or advances by less than a header's worth of bytes) can't loop unboundedly.
-std::vector<SmbMessage> parse_smb2_chain(ByteSpan smb2_area) {
+// `tracked_netlogon_pipes` is threaded straight through to parse_one_smb2_message -- see that
+// function's own doc comment.
+std::vector<SmbMessage> parse_smb2_chain(
+    ByteSpan smb2_area,
+    const std::unordered_map<SmbFileId, NetlogonPipeState, SmbFileIdHash>* tracked_netlogon_pipes) {
     std::vector<SmbMessage> messages;
     const size_t kMaxCompounded = resource_limits().max_decoded_objects.value_or(64);
     size_t offset = 0;
@@ -436,7 +617,7 @@ std::vector<SmbMessage> parse_smb2_chain(ByteSpan smb2_area) {
         }
 
         ByteSpan sub = smb2_area.subspan(offset, this_extent);
-        messages.push_back(parse_one_smb2_message(sub));
+        messages.push_back(parse_one_smb2_message(sub, tracked_netlogon_pipes));
 
         if (is_last) break;
         offset += next_command;
@@ -448,7 +629,9 @@ bool ends_with_dollar(const std::string& s) { return !s.empty() && s.back() == '
 
 }  // namespace
 
-std::optional<SmbFrame> try_parse_smb(ByteSpan payload) {
+std::optional<SmbFrame> try_parse_smb(
+    ByteSpan payload,
+    const std::unordered_map<SmbFileId, NetlogonPipeState, SmbFileIdHash>* tracked_netlogon_pipes) {
     try {
         if (payload.size() < 8) return std::nullopt;
         if (payload.at(0) != 0x00) return std::nullopt;  // Zero byte of the 4-byte prefix
@@ -470,7 +653,7 @@ std::optional<SmbFrame> try_parse_smb(ByteSpan payload) {
         }
 
         frame.envelope_kind = "SMB2";
-        frame.messages = parse_smb2_chain(smb2_area);
+        frame.messages = parse_smb2_chain(smb2_area, tracked_netlogon_pipes);
         if (frame.messages.empty()) return std::nullopt;
 
         std::ostringstream s;
@@ -502,15 +685,161 @@ std::optional<size_t> smb_tcp_declared_length(ByteSpan candidate) {
 
 namespace {
 
+// Applies dcerpc.hpp's own PDU-chain parse to `raw_payload`, then netlogon.hpp's own opnum decode
+// for any PDU whose own context is confirmed bound to the Netlogon interface (per `pipe_state`'s
+// own sticky state) -- populates m.dcerpc_messages/m.netlogon_calls and folds curated notes 1-5
+// into `m.notes` as they fire. See smb.hpp's own STATE/CORRELATION section for the two-layer
+// (bind<->bind_ack, then request<->response/fault) correlation this performs, both keyed by
+// DCE/RPC's own wire-mandated call_id (dcerpc.hpp's own DceRpcMessage::call_id).
+void decode_dcerpc_and_netlogon(SmbMessage& m, NetlogonPipeState& pipe_state,
+                                 const std::vector<uint8_t>& raw_payload) {
+    if (raw_payload.empty()) return;
+    ByteSpan payload_span(raw_payload.data(), raw_payload.size());
+    m.dcerpc_messages = parse_dcerpc_chain(payload_span);
+
+    for (const DceRpcMessage& dm : m.dcerpc_messages) {
+        try {
+            if (dm.has_bind) {
+                for (const DceRpcContextElement& ctx_elem : dm.bind_contexts) {
+                    if (is_netlogon_interface_uuid(ctx_elem.abstract_syntax_uuid)) {
+                        pipe_state.pending_calls[dm.call_id] = PendingDceRpcCall{0, ctx_elem.context_id};
+                        break;
+                    }
+                }
+            } else if (dm.has_bind_ack) {
+                auto it = pipe_state.pending_calls.find(dm.call_id);
+                if (it != pipe_state.pending_calls.end()) {
+                    uint16_t candidate_context_id = it->second.context_id;
+                    for (const DceRpcContextResult& result : dm.bind_ack_results) {
+                        if (result.result_name == "acceptance") {
+                            pipe_state.bound_context_is_netlogon = true;
+                            pipe_state.netlogon_context_id = candidate_context_id;
+                            break;
+                        }
+                    }
+                    pipe_state.pending_calls.erase(it);
+                }
+            } else if (dm.has_request) {
+                if (pipe_state.bound_context_is_netlogon &&
+                    dm.request_context_id == pipe_state.netlogon_context_id) {
+                    ByteSpan stub = payload_span.subspan(dm.stub_offset, dm.stub_length);
+                    NetlogonCall call = try_parse_netlogon_request(dm.call_id, dm.opnum, dm.sealed, stub);
+                    pipe_state.pending_calls[dm.call_id] = PendingDceRpcCall{dm.opnum, 0};
+                    m.netlogon_calls.push_back(std::move(call));
+                }
+            } else if (dm.has_response) {
+                auto it = pipe_state.pending_calls.find(dm.call_id);
+                if (it != pipe_state.pending_calls.end()) {
+                    uint16_t opnum = it->second.opnum;
+                    ByteSpan stub = payload_span.subspan(dm.stub_offset, dm.stub_length);
+                    NetlogonCall call = try_parse_netlogon_response(dm.call_id, opnum, dm.sealed, stub);
+                    m.netlogon_calls.push_back(std::move(call));
+                    pipe_state.pending_calls.erase(it);
+                }
+            } else if (dm.has_fault) {
+                pipe_state.pending_calls.erase(dm.call_id);
+            }
+        } catch (const ParseError&) {
+            // A malformed stub for this one PDU doesn't invalidate the rest of the chain -- the
+            // same per-item leniency parse_one_smb2_message's own command bodies already use.
+        }
+    }
+
+    for (const NetlogonCall& call : m.netlogon_calls) {
+        if (!call.is_response && call.has_request_fields) {
+            if (!call.primary_name.empty()) pipe_state.last_primary_name = call.primary_name;
+            if (!call.account_name.empty()) pipe_state.last_account_name = call.account_name;
+            if (!call.computer_name.empty()) pipe_state.last_computer_name = call.computer_name;
+
+            // Curated note 2 -- Zerologon-pattern all-zero client challenge/credential. The single
+            // highest-value note in this file: a real challenge/credential is an 8-byte random
+            // nonce, so an all-zero value essentially never occurs in benign traffic. Presence
+            // alone is not proof of a completed compromise.
+            if (call.client_credential_is_all_zero && call.opnum == 4 &&
+                !pipe_state.zero_challenge_seen) {
+                pipe_state.zero_challenge_seen = true;
+                m.notes.push_back(
+                    "Netlogon ClientChallenge is all-zero bytes -- the wire signature of "
+                    "CVE-2020-1472 (\"Zerologon\"); a real challenge is an 8-byte random nonce, so "
+                    "this essentially never occurs in benign traffic, though presence alone does "
+                    "not prove a completed compromise");
+            }
+            if (call.client_credential_is_all_zero &&
+                (call.opnum == 5 || call.opnum == 15 || call.opnum == 26) &&
+                !pipe_state.zero_credential_seen) {
+                pipe_state.zero_credential_seen = true;
+                m.notes.push_back(
+                    "Netlogon ClientCredential is all-zero bytes -- the wire signature of "
+                    "CVE-2020-1472 (\"Zerologon\"); a real credential is derived from an 8-byte "
+                    "random nonce, so this essentially never occurs in benign traffic, though "
+                    "presence alone does not prove a completed compromise");
+            }
+
+            // Curated note 3 -- legacy/downgraded Netlogon authentication method.
+            if ((call.opnum == 5 || call.opnum == 15) && !pipe_state.legacy_authenticate_seen) {
+                pipe_state.legacy_authenticate_seen = true;
+                m.notes.push_back(
+                    "legacy Netlogon authentication method used (" + call.opnum_name +
+                    ") instead of the modern NetrServerAuthenticate3 -- often just a legacy client "
+                    "or a downlevel trust, but also the method some downgrade-style attacks "
+                    "deliberately force");
+            }
+
+            // Curated note 4 -- machine-account naming mismatch.
+            if (call.has_secure_channel_type &&
+                (call.secure_channel_type_value == 2 /* WorkstationSecureChannel */ ||
+                 call.secure_channel_type_value == 6 /* ServerSecureChannel */) &&
+                !call.account_name.empty() && call.account_name.back() != '$' &&
+                !pipe_state.account_name_mismatch_seen) {
+                pipe_state.account_name_mismatch_seen = true;
+                m.notes.push_back(
+                    "Netlogon AccountName \"" + call.account_name +
+                    "\" does not end in \"$\" despite claiming a machine secure channel type (" +
+                    call.secure_channel_type_name +
+                    ") -- machine accounts conventionally end in \"$\"; a wire-visible anomaly "
+                    "worth investigating, not proof of impersonation on its own");
+            }
+
+            // Curated note 5 -- machine account password reset via Netlogon. Deliberately not
+            // sticky, see NetlogonPipeState's own doc comment -- each occurrence is meaningful.
+            if (call.opnum == 30) {
+                m.notes.push_back(
+                    "NetrServerPasswordSet2 observed on this pipe for account \"" +
+                    call.account_name +
+                    "\" -- resets that machine account's own password; the literal next step "
+                    "after a forged Netlogon secure channel (e.g. following a Zerologon-style "
+                    "attack), though also routine periodic machine-password rotation in benign "
+                    "traffic");
+            }
+        }
+
+        // Curated note 1 -- Netlogon secure channel established/failed, a closing correlation
+        // note on the terminal Authenticate* response, the direct Netlogon-side analog of this
+        // file's own NTLM-handshake-correlation note.
+        if (call.is_response && call.has_status &&
+            (call.opnum == 5 || call.opnum == 15 || call.opnum == 26)) {
+            bool succeeded = (call.status == 0);
+            const std::string& who = !pipe_state.last_account_name.empty()
+                                          ? pipe_state.last_account_name
+                                          : pipe_state.last_computer_name;
+            std::ostringstream note;
+            note << "Netlogon secure channel " << (succeeded ? "established" : "failed");
+            if (!who.empty()) note << " for " << who;
+            note << " (" << call.opnum_name << ", status=" << call.status_name << ")";
+            m.notes.push_back(note.str());
+        }
+    }
+}
+
 // Shared correlation layer, applied on top of a successfully try_parse_smb'd frame -- the same
 // "try_parse_X then XDecoder::decode applies flow-state" split kerberos.cpp's/ldap.cpp's own
 // decode_with_correlation established. See smb.hpp's header comment's STATE/CORRELATION section.
 std::optional<ProtocolResult> decode_with_correlation(ByteSpan payload, DecodeContext& ctx) {
-    auto parsed = try_parse_smb(payload);
+    SmbFlowState& state = ctx.flow_state<SmbFlowState>();
+    auto parsed = try_parse_smb(payload, &state.netlogon_pipes);
     if (!parsed) return std::nullopt;
     SmbFrame frame = std::move(*parsed);
 
-    SmbFlowState& state = ctx.flow_state<SmbFlowState>();
     const size_t kMaxTrackedPerSession = resource_limits().max_decoded_objects.value_or(2000);
 
     if (frame.envelope_kind == "SMB1") {
@@ -549,8 +878,10 @@ std::optional<ProtocolResult> decode_with_correlation(ByteSpan payload, DecodeCo
                 }
                 if (!m.is_response) {
                     if (state.pending_requests.size() < kMaxTrackedPerSession) {
-                        state.pending_requests[m.message_id] =
-                            SmbPendingRequest{ctx.packet_index, m.command_value, ""};
+                        SmbPendingRequest pending;
+                        pending.packet_index = ctx.packet_index;
+                        pending.command_value = m.command_value;
+                        state.pending_requests[m.message_id] = pending;
                     }
                 } else {
                     auto it = state.pending_requests.find(m.message_id);
@@ -628,10 +959,20 @@ std::optional<ProtocolResult> decode_with_correlation(ByteSpan payload, DecodeCo
                                            "routinely too, this does not by itself indicate an attack");
                     }
                     if (state.pending_requests.size() < kMaxTrackedPerSession) {
-                        state.pending_requests[m.message_id] =
-                            SmbPendingRequest{ctx.packet_index, m.command_value, m.tree_connect_path};
+                        SmbPendingRequest pending;
+                        pending.packet_index = ctx.packet_index;
+                        pending.command_value = m.command_value;
+                        pending.tree_connect_path = m.tree_connect_path;
+                        state.pending_requests[m.message_id] = pending;
                     }
                 } else if (m.is_response) {
+                    // TreeId -> is_pipe_share, persisted per-session -- see smb.hpp's own
+                    // STATE/CORRELATION section; this is what lets a later CREATE on this same
+                    // TreeId (a separate packet, possibly much later) know whether its own Name
+                    // is even worth checking against "netlogon" at all.
+                    if (m.has_tree_connect_response && state.pipe_shares.size() < kMaxTrackedPerSession) {
+                        state.pipe_shares[m.tree_id] = (m.share_type == "pipe");
+                    }
                     auto it = state.pending_requests.find(m.message_id);
                     if (it != state.pending_requests.end() && it->second.command_value == m.command_value) {
                         m.correlated_request_seen = true;
@@ -650,12 +991,101 @@ std::optional<ProtocolResult> decode_with_correlation(ByteSpan payload, DecodeCo
                 break;
             }
 
+            case 0x05: {  // CREATE
+                if (!m.is_response && m.has_create_request) {
+                    bool is_pipe = false;
+                    auto pit = state.pipe_shares.find(m.tree_id);
+                    if (pit != state.pipe_shares.end()) is_pipe = pit->second;
+                    if (state.pending_requests.size() < kMaxTrackedPerSession) {
+                        SmbPendingRequest pending;
+                        pending.packet_index = ctx.packet_index;
+                        pending.command_value = m.command_value;
+                        pending.create_name = is_pipe ? m.create_name : "";
+                        state.pending_requests[m.message_id] = pending;
+                    }
+                } else if (m.is_response && m.has_create_response && m.has_file_id) {
+                    auto it = state.pending_requests.find(m.message_id);
+                    if (it != state.pending_requests.end() && it->second.command_value == m.command_value) {
+                        m.correlated_request_seen = true;
+                        m.correlated_request_index = it->second.packet_index;
+                        if (it->second.create_name == "netlogon" &&
+                            state.netlogon_pipes.size() < kMaxTrackedPerSession) {
+                            state.netlogon_pipes[m.file_id] = NetlogonPipeState{};
+                        }
+                        state.pending_requests.erase(it);
+                    }
+                }
+                break;
+            }
+
+            case 0x06: {  // CLOSE
+                if (!m.is_response && m.has_file_id) {
+                    state.netlogon_pipes.erase(m.file_id);
+                }
+                break;
+            }
+
+            case 0x08: {  // READ
+                if (!m.is_response && m.has_file_id) {
+                    if (state.pending_requests.size() < kMaxTrackedPerSession) {
+                        SmbPendingRequest pending;
+                        pending.packet_index = ctx.packet_index;
+                        pending.command_value = m.command_value;
+                        pending.has_file_id = true;
+                        pending.file_id = m.file_id;
+                        state.pending_requests[m.message_id] = pending;
+                    }
+                } else if (m.is_response) {
+                    auto it = state.pending_requests.find(m.message_id);
+                    if (it != state.pending_requests.end() && it->second.command_value == m.command_value) {
+                        m.correlated_request_seen = true;
+                        m.correlated_request_index = it->second.packet_index;
+                        if (it->second.has_file_id) {
+                            auto pit = state.netlogon_pipes.find(it->second.file_id);
+                            if (pit != state.netlogon_pipes.end()) {
+                                decode_dcerpc_and_netlogon(m, pit->second, m.dcerpc_raw_payload);
+                            }
+                        }
+                        state.pending_requests.erase(it);
+                    }
+                }
+                m.dcerpc_raw_payload.clear();
+                m.dcerpc_raw_payload.shrink_to_fit();
+                break;
+            }
+
+            case 0x09: {  // WRITE
+                if (!m.is_response && m.has_file_id) {
+                    auto it = state.netlogon_pipes.find(m.file_id);
+                    if (it != state.netlogon_pipes.end()) {
+                        decode_dcerpc_and_netlogon(m, it->second, m.dcerpc_raw_payload);
+                    }
+                }
+                m.dcerpc_raw_payload.clear();
+                m.dcerpc_raw_payload.shrink_to_fit();
+                break;
+            }
+
+            case 0x0B: {  // IOCTL
+                if (m.has_file_id) {
+                    auto it = state.netlogon_pipes.find(m.file_id);
+                    if (it != state.netlogon_pipes.end()) {
+                        decode_dcerpc_and_netlogon(m, it->second, m.dcerpc_raw_payload);
+                    }
+                }
+                m.dcerpc_raw_payload.clear();
+                m.dcerpc_raw_payload.shrink_to_fit();
+                break;
+            }
+
             case 0x02:    // LOGOFF
             case 0x04: {  // TREE_DISCONNECT
                 if (!m.is_response) {
                     if (state.pending_requests.size() < kMaxTrackedPerSession) {
-                        state.pending_requests[m.message_id] =
-                            SmbPendingRequest{ctx.packet_index, m.command_value, ""};
+                        SmbPendingRequest pending;
+                        pending.packet_index = ctx.packet_index;
+                        pending.command_value = m.command_value;
+                        state.pending_requests[m.message_id] = pending;
                     }
                 } else {
                     auto it = state.pending_requests.find(m.message_id);

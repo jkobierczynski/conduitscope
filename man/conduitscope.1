@@ -1,4 +1,4 @@
-.TH CONDUITSCOPE 1 "2026" "conduitscope 0.1.7" "User Commands"
+.TH CONDUITSCOPE 1 "2026" "conduitscope 0.2.1" "User Commands"
 .SH NAME
 conduitscope \- decode Modbus/TCP, DNP3, IEC 60870-5-104, S7comm/COTP, S7comm-Plus (Siemens TIA Portal / S7-1200/1500), IEC 61850 MMS (Manufacturing Message Specification, ISO 9506), EtherNet/IP (CIP explicit and implicit messaging), PROFINET RT (DCP and cyclic real-time IO), IEC 61850-8-1 GOOSE, IEC 61850-9-2 Sampled Values, EtherCAT, BACnet/IP, HART-IP, OPC UA Binary, MQTT (v3.1/v3.1.1/v5.0, including Sparkplug B), FOUNDATION Fieldbus HSE (FDA/SM/FMS/LAN Redundancy), IEEE Spanning Tree Protocol (STP/RSTP/MSTP), DeviceNet (CAN-bus CIP, via SocketCAN pcap captures), Kerberos, LDAP, SMB2/NTLM (the Windows Active Directory suite), DNS, mDNS, LLMNR, and NetBIOS Name Service (NBT-NS), RIP, IGMP, VRRP, HSRP, IGRP, PIM, EIGRP, and OSPFv2, plus detect DNS-over-HTTPS (DoH) via TLS SNI matching, plus recognize (by name only, not full decode) RDP, VNC, TeamViewer, AnyDesk, and Zoom, plus recognize (by name only, and for SNMP also its cleartext community string) SSH, HTTP, HTTPS, SNMPv1/v2c, Telnet, FTP, and TFTP, plus recognize (by name only, and for DHCP also its message type) NTP, DHCP, LDAPS, RADIUS, TACACS+, and IEEE 802.1X/EAPOL, plus recognize (by name only, and for CAPWAP control and GTP-U also their message type) CAPWAP control/data, LWAPP control/data, GTP-U, and PPPoE, plus recognize (by name only, except for IP-in-IP's own inner src/dst addresses) GRE (and its NVGRE/Mikrotik EoIP sub-cases), IPsec ESP/AH, IP-in-IP, 6in4, L2TP/L2TPv3, IKE, VXLAN, Geneve, WireGuard, OpenVPN, a generic DTLS-tunnel structural check, STT, and MPLS, from offline pcap/pcapng captures
 .SH SYNOPSIS
@@ -52,7 +52,15 @@ signing-not-required/NTLM-in-use/anonymous-or-guest-session/
 administrative-share-access/repeated-logon-failure attack-monitoring
 notes; replaces the shallow, name-only SMB recognition \fB\-\-protocol
 lateral\-movement\fR used to provide) traffic found inside its TCP
-streams,
+streams, plus Netlogon/DCE-RPC (MS-NRPC/MS-RPCE, no independent wire
+gate or port/flag of its own -- recognized structurally, inside SMB2
+WRITE/READ/IOCTL against a tracked \fB\\PIPE\\netlogon\fR named-pipe
+handle -- see \fBdocs/PROTOCOL_COVERAGE.md\fR's Netlogon/DCE-RPC section
+for the wire format and its curated secure-channel-established/
+all-zero-challenge-or-credential (the CVE-2020-1472 "Zerologon" wire
+signature)/legacy-authentication-method/machine-account-naming-mismatch/
+password-reset attack-monitoring notes) traffic found inside those SMB2
+messages,
 plus PROFINET RT (EtherType 0x8892, DCP device discovery/configuration and
 cyclic real-time IO), IEC 61850-8-1 GOOSE (EtherType 0x88B8, ASN.1
 BER-encoded GOOSE PDU), IEC 61850-9-2 Sampled Values (EtherType 0x88BA,
@@ -280,6 +288,12 @@ Zero+StreamProtocolLength Direct-TCP/NBSS prefix on both ports -- already
 proven collision-free in this cascade before this decoder existed, so no
 new collision survey was needed -- see \fBdocs/PROTOCOL_COVERAGE.md\fR's
 SMB2/NTLM section for the full writeup,
+Netlogon/DCE-RPC (MS-NRPC/MS-RPCE) has no dispatch-order entry or wire
+gate of its own at all -- it is recognized purely structurally, via a
+SMB2 \fBFileId\fR already opened against a pipe named \fBnetlogon\fR, so
+it adds nothing to this collision survey -- see
+\fBdocs/PROTOCOL_COVERAGE.md\fR's Netlogon/DCE-RPC section for the full
+writeup,
 S7comm\-Plus is tried on the same TPKT/COTP framing and TCP port 102 as
 S7comm and MMS, disambiguated by its own protocol id byte (0x72 vs S7comm's
 0x32, so no collision risk with either), and MMS is

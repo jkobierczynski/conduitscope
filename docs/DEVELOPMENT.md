@@ -4331,10 +4331,10 @@ unlike any of the eight routing/redundancy protocols decoded so far.
     `real_hartip_smb_traffic_now_correctly_decoded` test covers it -- see
     `tests/real_captures/hartip/ATTRIBUTION.md`'s updated section.
 
-    **Still not done**: Netlogon/DCE-RPC (the fourth and final protocol
-    of the planned AD suite -- a separate future item, riding inside SMB
-    named-pipe I/O this decoder deliberately leaves structural-only);
-    SMB1/CIFS's own full command set (recognized via curated note 1, not
+    **Still not done**: Netlogon/DCE-RPC, riding inside the SMB named-pipe
+    I/O this decoder deliberately leaves structural-only -- see item 28,
+    the fourth and final protocol of the planned AD suite, which closes
+    this gap. SMB1/CIFS's own full command set (recognized via curated note 1, not
     decoded further); NBSS session-establishment (named NetBIOS computer
     names, no authentication/recon value); SMB 3.x signing verification
     and encryption (same limit as every other encrypted protocol this
@@ -4357,6 +4357,137 @@ unlike any of the eight routing/redundancy protocols decoded so far.
     `lateral_movement_*`/`notable_protocols_*`/`real_hartip_*` tests for
     the fixture-behavior changes above -- full existing suite (1275
     tests) stays 100% passing, zero-warning build.
+
+28. **Netlogon/DCE-RPC (MS-NRPC, MS-RPCE) -- phase 4 of 4, closing out the
+    Windows Active Directory suite, with curated attack/monitoring
+    detection headlined by CVE-2020-1472 ("Zerologon").** The natural
+    completion of item 27's own deferral: DCE/RPC-over-named-pipe traffic
+    (Netlogon chief among it) rides inside SMB2 CREATE/WRITE/READ/IOCTL
+    against an `IPC$`-hosted named pipe, which item 27 left
+    structural-only on purpose. This is where a domain-joined machine (or
+    an attacker impersonating one) establishes and uses a "Netlogon Secure
+    Channel" with a domain controller -- and where Zerologon lives: an
+    attacker who sends an all-zero `ClientChallenge`/`ClientCredential`
+    can forge that channel to a DC's own computer account and blank its
+    machine password from there. lsarpc/samr/srvsvc and every other RPC
+    interface that can also ride over `IPC$` remain out of scope --
+    Netlogon only.
+
+    **Done.** **No new `ProtocolDecoder`, no independent wire gate** --
+    unlike every prior AD-suite item, this traffic has no signature or
+    port of its own to register; it's recognized only structurally, via a
+    tracked SMB2 `FileId` whose `CREATE` `Name` (stripped of any `\PIPE\`
+    prefix) equals `"netlogon"`, the same "sub-parser invoked from
+    `smb.cpp`, no gate of its own" shape item 27's own NTLM embedding
+    already established. Two new modules, split envelope-vs-protocol the
+    same way `smb.hpp`/`ntlm.hpp` are: `dcerpc.hpp`/`dcerpc.cpp` (a
+    generic DCE/RPC connection-oriented PDU reader -- the 16-byte common
+    header, `bind`/`bind_ack` context negotiation, `request`/`response`/
+    `fault` bodies, `sec_trailer` -- reusable by a future lsarpc/samr/
+    srvsvc pass, not built now) and `netlogon.hpp`/`netlogon.cpp` (the
+    Netlogon interface UUID, opnum table, NDR field decoders). A
+    genuinely new wrinkle neither item 27 nor any earlier AD-suite item
+    had: **RPC-layer sealing** (`RPC_C_AUTHN_LEVEL_PKT_PRIVACY`) --
+    Windows sends `NetrServerPasswordSet2` and similar post-channel-
+    establishment calls encrypted, so this decoder reads `auth_level` from
+    the trailer's own unencrypted fixed header and falls back to an honest
+    "sealed, N bytes, not decoded" summary rather than attempting to parse
+    ciphertext as plaintext NDR -- the same "never decrypt a cipher this
+    codebase doesn't hold the key for" limit applied everywhere else, and
+    good news for scope: the calls that establish the channel (the ones
+    with the highest curated-note value) are exactly the ones that arrive
+    in the clear.
+
+    `NetrServerReqChallenge`/`NetrServerAuthenticate`/
+    `NetrServerAuthenticate2`/`NetrServerAuthenticate3` fully field-decoded
+    (`PrimaryName`/`AccountName`/`ComputerName` via NDR conformant-varying
+    strings, `SecureChannelType` -- a 16-bit NDR enum, confirmed
+    empirically against `impacket`'s own marshalling during planning, not
+    the 32-bit width a casual IDL reading might suggest --
+    `ClientChallenge`/`ClientCredential` never rendered beyond a boolean,
+    `NegotiateFlags`, `AccountRid`); `NetrServerPasswordSet2` header-level
+    only, `Authenticator`/`ClearNewPassword` presence+length-only, the
+    same posture item 27's own `LmChallengeResponse`/`NtChallengeResponse`
+    established; every other opnum structural-only, named from a verified
+    curated table. A real correctness bug was caught by first-principles
+    NDR review before any fixture was written, not by a compiler or a
+    test: `SecureChannelType` (16-bit) is immediately followed by a
+    4-byte-aligned conformant string in two different call shapes, so the
+    original string readers needed an explicit `align4()` self-alignment
+    step they were missing -- fixed before the fixture generator was
+    written, so the fixture exercises the corrected parser rather than
+    baking in a workaround for a buggy one.
+
+    Five curated notes: Netlogon secure channel established/failed
+    (closing correlation, the anchor the rest hang off of), **all-zero
+    ClientChallenge/ClientCredential -- the Zerologon wire signature and
+    this item's single highest-value note**, legacy authentication method
+    (opnum 5/15 instead of the modern 26), machine-account naming mismatch
+    (`SecureChannelType` claims a machine channel but `AccountName` lacks
+    the conventional `$` suffix), and `NetrServerPasswordSet2` observed
+    (the literal next step after a forged channel in a real Zerologon
+    chain -- deliberately the one note in this phase that is NOT sticky,
+    unlike the other four).
+
+    State/correlation (`SmbFlowState`, still keyed by
+    `FlowStateKeying::Session`) is **the deepest correlation shape in this
+    codebase**: SMB2 `FileId` (handle) -> DCE/RPC `bind` (interface
+    confirmation) -> DCE/RPC `call_id` (request/response pairing), one
+    genuine layer deeper than item 27's own `SessionId`-keyed two-leg NTLM
+    handshake. A `TreeId`-keyed map persists `ShareType` past
+    `TREE_CONNECT`; a `FileId`-keyed map (created only for a confirmed
+    `netlogon`-named pipe, erased on `CLOSE`) holds both a short-lived
+    `call_id` sub-map for immediate PDU pairing and longer-lived sticky
+    fields driving the closing correlation note and the fire-once notes.
+
+    Manually smoke-tested against a 9-flow hand-built synthetic Netlogon/
+    DCE-RPC exchange (every curated note's positive AND negative case, the
+    sealed-call fallback, the non-Netlogon-interface-bind edge case, the
+    never-tracked-pipe-name negative control, and both the WRITE+READ and
+    IOCTL/`FSCTL_PIPE_TRANSCEIVE` transport shapes) BEFORE any
+    CMakeLists.txt test was written against it -- the same discipline that
+    caught item 22's Kerberoasting field-mixup bug and item 23's
+    messageID-correlation bug; this time it caught the `align4` NDR
+    alignment bug above (during first-principles review, before fixture
+    generation) and a fixture-generator bug (the READ Response helper was
+    independently minting its own `MessageId` instead of reusing the
+    matching READ Request's, silently breaking SMB2's own wire-level
+    request/response correlation for every WRITE+READ flow -- fixed by
+    threading the assigned `MessageId` through a shared mutable cell). 24
+    new `netlogon_*` CTest tests (every decoded opnum, all five curated
+    notes with an explicit negative case each, the bind-interface-
+    confirmation gate, the sealed-call fallback, `--stats` opnum counts,
+    JSON field checks including a password-material-never-rendered test
+    mirroring item 27's own NTLM credential test, and both transport
+    shapes) -- full suite (1299 tests) stays 100% passing, zero-warning
+    build across all three established configs (default+libpcap,
+    no-libpcap, MinGW cross-compile). See `include/conduitscope/dcerpc.hpp`'s
+    and `include/conduitscope/netlogon.hpp`'s file headers for the full
+    writeup and docs/PROTOCOL_COVERAGE.md's Netlogon/DCE-RPC section for
+    the user-facing reference.
+
+    **PROTOCOL DETECTION note**: unlike every prior AD-suite item, this
+    one adds no new detection bullet to any "how is protocol X
+    recognized" summary elsewhere in this document -- Netlogon/DCE-RPC has
+    no independent wire gate at all (see above), so there is nothing to
+    add to `tcp_port_independent_registry()` or any port/signature table;
+    it is reached purely through SMB2's own already-established detection
+    plus this item's own FileId-tracking state.
+
+    **Still not done**: lsarpc, samr, srvsvc, wkssvc, or any RPC interface
+    other than Netlogon, even over the same `IPC$` share (explicitly out
+    of scope, a possible future item); DCE/RPC PDU fragmentation
+    reassembly across multiple WRITE/READ pairs (first-pass scope is
+    single-fragment calls, which covers every opnum this item decodes in
+    practice); actual Netlogon Secure Channel cryptographic verification
+    (only the all-zero wire pattern is recognized, never session-key
+    derivation or signature/seal verification); decoding sealed stub data;
+    no `policy validate`/`inventory` integration (degrades gracefully, the
+    same posture items 20/22/23/27 are still in); and no real-world
+    capture -- validated by construction only, against synthetic
+    `tests/sample_netlogon.pcap` (TCP, 142 packets across 9 independent
+    flows); if one becomes available later it should be added and
+    PROTOCOL_COVERAGE.md's Validation subsection updated accordingly.
 
 ### Protocols not covered at all
 

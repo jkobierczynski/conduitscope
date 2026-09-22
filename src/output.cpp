@@ -718,6 +718,106 @@ void write_ldap_json_fields(std::ostream& out, const LdapMessage& lm) {
     }
 }
 
+// Renders one DceRpcMessage (dcerpc.hpp) as a JSON object's inner fields -- called from within
+// write_one_smb_message_json_fields's own "dcerpc_messages" array below. auth_value/stub bytes
+// are never rendered (dcerpc.hpp itself never decodes them into anything but offset/length) --
+// see dcerpc.hpp's own file header comment.
+void write_dcerpc_message_json_fields(std::ostream& out, const DceRpcMessage& dm) {
+    out << "            \"ptype\": \"" << json_escape(dm.ptype_name) << "\",\n";
+    out << "            \"call_id\": " << dm.call_id << ",\n";
+    if (!dm.pfc_flags.empty()) {
+        out << "            \"pfc_flags\": [";
+        for (size_t i = 0; i < dm.pfc_flags.size(); ++i) {
+            if (i != 0) out << ", ";
+            out << "\"" << json_escape(dm.pfc_flags[i]) << "\"";
+        }
+        out << "],\n";
+    }
+    if (dm.has_bind) {
+        out << "            \"bind_contexts\": [";
+        for (size_t i = 0; i < dm.bind_contexts.size(); ++i) {
+            const DceRpcContextElement& c = dm.bind_contexts[i];
+            if (i != 0) out << ", ";
+            out << "{\"context_id\": " << c.context_id << ", \"abstract_syntax_uuid\": \""
+                << json_escape(c.abstract_syntax_uuid) << "\", \"is_netlogon\": "
+                << (is_netlogon_interface_uuid(c.abstract_syntax_uuid) ? "true" : "false") << "}";
+        }
+        out << "],\n";
+    }
+    if (dm.has_bind_ack) {
+        out << "            \"bind_ack_results\": [";
+        for (size_t i = 0; i < dm.bind_ack_results.size(); ++i) {
+            const DceRpcContextResult& r = dm.bind_ack_results[i];
+            if (i != 0) out << ", ";
+            out << "\"" << json_escape(r.result_name) << "\"";
+        }
+        out << "],\n";
+    }
+    if (dm.has_request) {
+        out << "            \"opnum\": " << dm.opnum << ",\n";
+    }
+    if (dm.has_fault) {
+        out << "            \"fault_status\": " << dm.fault_status << ",\n";
+    }
+    if (dm.has_sec_trailer) {
+        out << "            \"auth_level\": \"" << json_escape(dm.auth_level_name) << "\",\n";
+        out << "            \"sealed\": " << (dm.sealed ? "true" : "false") << ",\n";
+    }
+    out << "            \"summary\": \"" << json_escape(dm.summary) << "\"\n";
+}
+
+// Renders one NetlogonCall (netlogon.hpp) as a JSON object's inner fields -- called from within
+// write_one_smb_message_json_fields's own "netlogon_calls" array below. ClearNewPassword and
+// Authenticator are deliberately never rendered beyond presence/length -- see netlogon.hpp's own
+// file header comment and NetlogonCall's own doc comment; this function has no field to leak them
+// through even if it wanted to, since NetlogonCall itself never carries their bytes.
+void write_netlogon_call_json_fields(std::ostream& out, const NetlogonCall& nc) {
+    out << "            \"opnum\": \"" << json_escape(nc.opnum_name) << "\",\n";
+    out << "            \"call_id\": " << nc.call_id << ",\n";
+    out << "            \"is_response\": " << (nc.is_response ? "true" : "false") << ",\n";
+    if (nc.sealed) {
+        out << "            \"sealed\": true,\n";
+    }
+    if (nc.has_request_fields) {
+        if (!nc.primary_name.empty()) {
+            out << "            \"primary_name\": \"" << json_escape(nc.primary_name) << "\",\n";
+        }
+        if (!nc.account_name.empty()) {
+            out << "            \"account_name\": \"" << json_escape(nc.account_name) << "\",\n";
+        }
+        if (!nc.computer_name.empty()) {
+            out << "            \"computer_name\": \"" << json_escape(nc.computer_name) << "\",\n";
+        }
+        if (nc.has_secure_channel_type) {
+            out << "            \"secure_channel_type\": \""
+                << json_escape(nc.secure_channel_type_name) << "\",\n";
+        }
+        if (nc.has_client_credential) {
+            out << "            \"client_credential_all_zero\": "
+                << (nc.client_credential_is_all_zero ? "true" : "false") << ",\n";
+        }
+        if (nc.has_negotiate_flags) {
+            out << "            \"negotiate_flags\": " << nc.negotiate_flags << ",\n";
+        }
+        if (nc.has_authenticator) {
+            out << "            \"authenticator_present\": true,\n";
+        }
+        if (nc.has_clear_new_password) {
+            out << "            \"clear_new_password_length\": " << nc.clear_new_password_length
+                << ",\n";
+        }
+    }
+    if (nc.has_response_fields) {
+        if (nc.has_account_rid) {
+            out << "            \"account_rid\": " << nc.account_rid << ",\n";
+        }
+        if (nc.has_status) {
+            out << "            \"status_name\": \"" << json_escape(nc.status_name) << "\",\n";
+        }
+    }
+    out << "            \"summary\": \"" << json_escape(nc.summary) << "\"\n";
+}
+
 // Renders one SmbMessage (smb.hpp) as a JSON object's inner fields, indented for use inside
 // write_smb_json_fields's own "smb_messages" array below -- one call per sub-message in a
 // (possibly compounded, see smb.hpp's own COMPOUNDING paragraph) SmbFrame. Every field not
@@ -815,6 +915,33 @@ void write_one_smb_message_json_fields(std::ostream& out, const SmbMessage& m) {
             }
             out << "],\n";
         }
+    }
+    if (m.has_create_request && !m.create_name.empty()) {
+        out << "        \"create_name\": \"" << json_escape(m.create_name) << "\",\n";
+    }
+    if (m.has_file_id) {
+        std::ostringstream fid;
+        fid << std::hex << std::setfill('0') << std::setw(16) << m.file_id.persistent << ":"
+            << std::setw(16) << m.file_id.volatile_id;
+        out << "        \"file_id\": \"" << fid.str() << "\",\n";
+    }
+    if (!m.dcerpc_messages.empty()) {
+        out << "        \"dcerpc_messages\": [\n";
+        for (size_t i = 0; i < m.dcerpc_messages.size(); ++i) {
+            out << "          {\n";
+            write_dcerpc_message_json_fields(out, m.dcerpc_messages[i]);
+            out << "          }" << (i + 1 < m.dcerpc_messages.size() ? "," : "") << "\n";
+        }
+        out << "        ],\n";
+    }
+    if (!m.netlogon_calls.empty()) {
+        out << "        \"netlogon_calls\": [\n";
+        for (size_t i = 0; i < m.netlogon_calls.size(); ++i) {
+            out << "          {\n";
+            write_netlogon_call_json_fields(out, m.netlogon_calls[i]);
+            out << "          }" << (i + 1 < m.netlogon_calls.size() ? "," : "") << "\n";
+        }
+        out << "        ],\n";
     }
     if (m.ntlm_handshake_closed) {
         out << "        \"ntlm_handshake_summary\": \"" << json_escape(m.ntlm_handshake_summary) << "\",\n";
@@ -2136,6 +2263,9 @@ void StatsWriter::write_packet(const DecodedPacket& p) {
             if (m.command_value == 0x01 /* SESSION_SETUP */ && m.is_response) {
                 smb_status_counts_[m.status_name]++;
             }
+            for (const NetlogonCall& nc : m.netlogon_calls) {
+                if (!nc.is_response) netlogon_opnum_counts_[nc.opnum_name]++;
+            }
         }
     }
     if (p.protocol == "s7comm" && p.s7comm_has_function) {
@@ -2327,6 +2457,12 @@ void StatsWriter::print_summary(std::ostream& out) const {
     if (!smb_status_counts_.empty()) {
         out << "smb session_setup status counts:\n";
         for (const auto& [name, count] : smb_status_counts_) {
+            out << "  " << std::left << std::setw(40) << name << count << "\n";
+        }
+    }
+    if (!netlogon_opnum_counts_.empty()) {
+        out << "netlogon opnum counts:\n";
+        for (const auto& [name, count] : netlogon_opnum_counts_) {
             out << "  " << std::left << std::setw(40) << name << count << "\n";
         }
     }

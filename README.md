@@ -21,7 +21,12 @@ attack/monitoring notes -- the second protocol of that same suite), SMB2/NTLM
 (MS-SMB2/MS-NLMP, with curated SMB1-present, signing-not-required,
 NTLM-in-use, anonymous-or-guest-session, administrative-share-access, and
 repeated-logon-failure attack/monitoring notes -- the third protocol of
-that same suite),
+that same suite), Netlogon/DCE-RPC (MS-NRPC/MS-RPCE, carried inside SMB2
+named-pipe I/O with no independent wire gate or CLI flag of its own, with
+curated secure-channel-established, all-zero-challenge-or-credential (the
+CVE-2020-1472 "Zerologon" wire signature), legacy-authentication-method,
+machine-account-naming-mismatch, and password-reset attack/monitoring
+notes -- the fourth and final protocol of that same suite),
 IEEE Spanning Tree Protocol
 (STP/RSTP/MSTP), DeviceNet (CAN-bus CIP, via SocketCAN pcap captures), DNS,
 mDNS, LLMNR, and NetBIOS Name Service (NBT-NS), ICMP, RIP, IGMP, VRRP, HSRP,
