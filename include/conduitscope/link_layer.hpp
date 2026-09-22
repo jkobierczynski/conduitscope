@@ -83,6 +83,8 @@ constexpr uint16_t ETHERTYPE_PTP = 0x88F7;        // IEEE 1588 Precision Time Pr
 constexpr uint16_t ETHERTYPE_MPLS_UNICAST = 0x8847;
 constexpr uint16_t ETHERTYPE_MPLS_MULTICAST = 0x8848;  // RFC 3032 -- raw Ethernet, no IP -- see mpls.hpp
 constexpr uint16_t ETHERTYPE_8021AD = 0x88A8;     // 802.1ad "provider bridging" / stacked (QinQ) VLAN tag
+constexpr uint16_t ETHERTYPE_SLOW_PROTOCOLS = 0x8809;  // IEEE 802.3 "Slow Protocols" (LACP/Marker/
+                                                        // OAM) -- raw Ethernet, no IP -- see slow_protocols.hpp
 
 // Returns a short human-readable name for a handful of EtherTypes worth calling out by name
 // (see the constants above), or an empty string for anything else -- used when reporting a

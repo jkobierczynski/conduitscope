@@ -5287,6 +5287,94 @@ IP/UDP-based routing/redundancy protocols above.
     capture confirmed against (validated by construction only, against
     synthetic `tests/sample_bgp.pcap`).
 
+34. **IEEE 802.3 "Slow Protocols" (LACP/Marker/OAM), EtherType `0x8809`.**
+    **Done.** Added right after the three-stage ARP/LLDP/BGP plan above, at
+    Jurgen's own request -- before this, EtherType `0x8809` traffic fell
+    straight through to the generic `[non-ip] Ethernet frame with ethertype
+    0x8809 (...)` line, like any other named-but-undecoded EtherType. Built
+    entirely on the `ProtocolDecoder` registration-model interface from
+    inception, right after LLDP (item 32) and before STP in the dispatch
+    order, `include/conduitscope/slow_protocols.hpp`/`slow_protocols.cpp`.
+
+    Architecturally closer to BGP (item 33) than to ARP/LLDP: this one
+    EtherType is **Subtype-multiplexed**, a single Subtype byte
+    telling apart three genuinely distinct link-layer control protocols --
+    LACP (subtype `0x01`), Marker Protocol (subtype `0x02`), and 802.3 OAM/
+    EFM (subtype `0x03`) -- matching BGP's own "one gate, several message
+    shapes" precedent rather than ARP's/LLDP's own "one gate, one message
+    shape" precedent. Following that same TwinCAT/BGP precedent (not ARP's/
+    LLDP's own flat dual-write), the decoded message is carried whole in
+    `out.result` and rendered via a dedicated `write_slow_protocols_json_
+    fields` free function in `output.cpp`, since OAM's own sub-message
+    (Local/Remote Information TLVs, a list of Event TLVs) nests too deeply
+    for a flat dual-write to stay legible.
+
+    LACP's own structural gate is the strongest of the three: the Actor,
+    Partner, and Collector Information TLVs, plus the Terminator TLV, must
+    each match a fixed type AND length exactly (comparably strong to
+    LLDP's own mandatory-triple gate). Marker Protocol's gate is a TLV
+    type match (`0x01` Information / `0x02` Response Information) plus a
+    minimum-length check, using the TLV's own declared Length to skip
+    trailing Pad/Reserved bytes it could not independently confirm an
+    exact byte count for (see the HONESTY NOTE below). OAM's own gate is
+    the weakest of the three -- a Code-value match against six defined
+    values -- since OAM's own framing has less redundancy to check than
+    LACP's combined TLV-type+length gate; an unrecognized Subtype (e.g.
+    ESMC/G.8264's `0x0A`, MEF E-LMI's `0x0B`) or a structural-gate failure
+    within a recognized one both decline cleanly back to the generic
+    `non-ip` EtherType fallback, exactly like every other structural-gate
+    failure in this codebase.
+
+    **HONESTY NOTE** (mirrors IEC 61850-9-2's own "no real capture found"
+    note and BGP's own "never claims authenticated or unauthenticated"
+    framing): every offset/bitmask/TLV-type constant here was confirmed
+    against Wireshark's own `packet-slowprotocols.c` (`LACPDU_*`,
+    `OAMPDU_*`, `marker_vals[]`), fetched from a GitHub mirror since
+    wireshark/wireshark's own trees were unreachable from this
+    environment -- but two fields could NOT be independently verified
+    against a primary source despite repeated attempts (the IEEE 802.3
+    standard text itself, and a second-source mirror of
+    `packet-oampdu.c` beyond the one already confirmed against, were both
+    unreachable): the Information TLV's own State byte's Parser-Action/
+    Multiplexer-Action bit split, and the exact reserved-bit layout of the
+    2-byte OAMPDU_Configuration/"Max OAMPDU Size" field. Both are shown as
+    their raw wire value only (`state_raw`, not surfaced in JSON at all
+    since nothing about it could be confidently named; `oampdu_config_raw`,
+    surfaced as `oam_*_info_max_oampdu_size`), not bit-decoded -- the same
+    choice this codebase makes whenever it can name a field but not
+    confidently assert everything inside it. Similarly, the Marker(-
+    Response) Information TLV's own exact total-length convention beyond
+    its fixed 12-byte Requester Port/System/Transaction ID prefix could not
+    be independently confirmed, so this decoder reads the TLV's own
+    declared Length to skip any trailing bytes rather than assuming a
+    fixed total size.
+
+    14 new `slow_protocols_*` CTest tests (a well-formed LACPDU with Actor
+    and Partner both fully in sync; the same LACPDU with the Actor's
+    Synchronization bit cleared, the Out of Sync note; a corrupted-
+    Actor-TLV-length negative control falling back to `non-ip`; Marker
+    Information and Marker Response Information; an OAM Information OAMPDU
+    with the Dying Gasp flag and both Local/Remote Information TLVs, in
+    JSON; an OAM Event Notification OAMPDU with one Errored Frame Event, in
+    JSON; an OAM Loopback Control Enable; an unsupported-Subtype negative
+    control also falling back to `non-ip`; `--stats` counting;
+    `--protocol slow-protocols` isolation; and a JSON structural check for
+    `slow_protocols_subtype_name` across all three subtypes) -- full suite
+    stays 100% passing (1387 -> 1401 tests), zero-warning build across all
+    three established configs (default, `CONDUITSCOPE_ENABLE_LIVE_CAPTURE=
+    OFF`, MinGW-w64 cross-compile). See
+    `include/conduitscope/slow_protocols.hpp`'s file header for the full
+    writeup and docs/PROTOCOL_COVERAGE.md's new IEEE 802.3 Slow Protocols
+    section for the user-facing reference. **Still not done**: CFM
+    (`0x8902`, a different EtherType entirely), ESMC/G.8264 (subtype
+    `0x0A`), and MEF E-LMI (subtype `0x0B`) -- all named only, not decoded;
+    OAM's own Variable Request/Response sub-structure (named only, see
+    above); the two raw-value-only fields the HONESTY NOTE above names; no
+    `policy validate`/`inventory` integration (degrades gracefully, the
+    same posture several other protocols are still in); no real-world
+    capture confirmed against (validated by construction only, against
+    synthetic `tests/sample_slow_protocols.pcap`).
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

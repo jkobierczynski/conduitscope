@@ -36,6 +36,7 @@
 #include "conduitscope/rip.hpp"
 #include "conduitscope/s7comm.hpp"
 #include "conduitscope/s7commplus.hpp"
+#include "conduitscope/slow_protocols.hpp"
 #include "conduitscope/smb.hpp"
 #include "conduitscope/stp.hpp"
 #include "conduitscope/sv.hpp"
@@ -127,6 +128,11 @@ const std::vector<const ProtocolDecoder*>& ethertype_registry() {
                             // lldp.hpp's file header comment). EtherType 0x88CC is exclusive to LLDP,
                             // no collision risk with anything else in this vector; position here is
                             // purely "appended after ARP, not reasoned about relative to the others".
+        &slow_protocols_decoder(),  // Added after the three-stage ARP/LLDP/BGP plan, at Jurgen's
+                            // request -- same posture as ARP/LLDP above, a brand-new protocol built
+                            // directly on ProtocolDecoder from inception (see slow_protocols.hpp's
+                            // file header comment). EtherType 0x8809 is exclusive to it, no
+                            // collision risk with anything else in this vector.
     };
     return order;
 }

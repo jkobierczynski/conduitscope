@@ -53,6 +53,7 @@
 #include "conduitscope/resource_limits.hpp"
 #include "conduitscope/rip.hpp"
 #include "conduitscope/s7commplus.hpp"
+#include "conduitscope/slow_protocols.hpp"
 #include "conduitscope/smb.hpp"
 #include "conduitscope/stp.hpp"
 #include "conduitscope/sv.hpp"
@@ -197,6 +198,13 @@ enum class ProtocolFilter {
                            // coalescing loop over the reassembled payload (same pattern OPC UA's own
                            // decode() already established) AND genuine session-scoped state
                            // (BgpFlowState -- whether 4-octet AS numbers were negotiated).
+    SlowProtocolsOnly,     // only attempt IEEE 802.3 Slow Protocols (LACP/Marker/OAM, EtherType
+                           // 0x8809) decoding -- see slow_protocols.hpp. A brand-new protocol, same
+                           // EtherType-gated/stateless shape as ARP/LLDP, but subtype-multiplexed
+                           // (one EtherType, three distinct message shapes told apart by a Subtype
+                           // byte) -- so, like TwinCAT/BGP and unlike ARP/LLDP, it carries its
+                           // result via DecodedPacket::result rather than a dedicated dual-written
+                           // field block, given how deeply nested its OAM sub-message is.
 };
 
 struct DecodeOptions {

@@ -258,7 +258,7 @@ regardless of where it's being analyzed \-\- an extension beyond what
 tshark/tcpdump themselves offer. See \fBdocs/USER_GUIDE.md\fR's OUTPUT
 FORMATS "Timestamps" subsection.
 .TP
-.B \-\-protocol {auto,modbus,dnp3,iec104,s7comm,s7comm\-plus,mms,enip,twincat,melsec,fins,bgp,kerberos,ldap,smb,profinet,goose,sv,ethercat,stp,devicenet,bacnet,hartip,opcua,mqtt,ff\-hse,dns,mdns,llmnr,nbns,doh,rip,igmp,vrrp,hsrp,igrp,pim,eigrp,ospf,remote\-access,lateral\-movement,enterprise\-trust,eapol,wireless\-backhaul,pppoe,tunnel\-vpn,mpls,arp,lldp}
+.B \-\-protocol {auto,modbus,dnp3,iec104,s7comm,s7comm\-plus,mms,enip,twincat,melsec,fins,bgp,kerberos,ldap,smb,profinet,goose,sv,ethercat,stp,devicenet,bacnet,hartip,opcua,mqtt,ff\-hse,dns,mdns,llmnr,nbns,doh,rip,igmp,vrrp,hsrp,igrp,pim,eigrp,ospf,remote\-access,lateral\-movement,enterprise\-trust,eapol,wireless\-backhaul,pppoe,tunnel\-vpn,mpls,arp,lldp,slow\-protocols}
 Restrict decoding to one protocol. Default: auto (tries all fourteen TCP
 protocols, independent of port number, plus CIP I/O, BACnet/IP, HART-IP, and
 FF-HSE on every
@@ -273,7 +273,10 @@ carrying EtherType 0x8863 (Discovery) or 0x8864 (Session), plus MPLS on
 every non-IPv4 Ethernet frame carrying EtherType 0x8847 (unicast) or
 0x8848 (multicast), plus ARP on every non-IPv4 Ethernet frame carrying
 EtherType 0x0806, plus LLDP on every non-IPv4 Ethernet frame carrying
-EtherType 0x88CC, plus STP/RSTP/MSTP on every classic IEEE 802.3
+EtherType 0x88CC, plus IEEE 802.3 Slow Protocols (LACP, Marker Protocol,
+802.3 OAM/EFM \-\- told apart by a Subtype byte) on every non-IPv4 Ethernet
+frame carrying EtherType 0x8809, tried right after LLDP and before STP,
+plus STP/RSTP/MSTP on every classic IEEE 802.3
 length-framed Ethernet frame whose LLC header is DSAP=SSAP=0x42 \-\- a
 structurally separate dispatch path from every EtherType-keyed protocol
 above, so there is no ordering/collision question between them; OPC UA is tried first of all, ahead of every other TCP

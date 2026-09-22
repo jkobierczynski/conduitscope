@@ -11781,6 +11781,142 @@ def build_bgp_sample():
     (TESTS_DIR / "sample_bgp.pcap").write_bytes(data)
 
 
+def build_slow_protocols_sample():
+    """IEEE 802.3 "Slow Protocols" (EtherType 0x8809) -- rides directly on raw Ethernet, no IP
+    layer, the same "no port, no IP layer" shape ARP/LLDP already have (see slow_protocols.hpp's
+    file header comment), but subtype-multiplexed: a single Subtype byte right after the EtherType
+    tells apart three genuinely distinct link-layer control protocols -- LACP (subtype 0x01),
+    Marker Protocol (subtype 0x02), and 802.3 OAM/EFM (subtype 0x03). Frames are built directly
+    with eth_header() + a hand-packed body, per slow_protocols.hpp's own wire-format comment; no
+    extra outer-frame-header helper is needed, the same posture ARP/LLDP already take.
+
+    Covers: (1) a well-formed LACPDU with both Actor and Partner fully in sync (Activity/Timeout/
+    Aggregation/Sync/Collecting/Distributing all set, no Out-of-Sync note); (2) the same LACPDU
+    shape but with the Actor's Synchronization bit cleared, exercising the "LACP Out of Sync
+    reported" note; (3) a negative control -- an otherwise well-formed LACPDU whose Actor
+    Information TLV declares Length=19 instead of the fixed 20, breaking parse_lacp's own
+    structural gate, so this frame must fall through to the generic ethertype-name "[non-ip]"
+    fallback, NOT "[slow-protocols]" (the equivalent of ARP's/LLDP's own unknown-opcode/wrong-
+    order negative-control coverage); (4) a Marker Information (request) TLV; (5) a Marker
+    Response Information TLV echoing the same requester fields back, as a real Marker Responder
+    does; (6) an OAM Information OAMPDU with the Dying Gasp flag set, carrying both a Local
+    Information TLV (Mode Active, all four capability bits set) and a Remote Information TLV
+    (Mode Passive, no capability bits set), each with its own OUI; (7) an OAM Event Notification
+    OAMPDU carrying one Errored Frame Event TLV (type 0x02); (8) an OAM Loopback Control OAMPDU
+    requesting Enable; (9) a second negative control -- an unsupported Subtype (0x0A, ESMC/
+    G.8264), which try_parse_slow_protocols declines outright, also falling back to "[non-ip]"."""
+    packets = []
+    SLOW_PROTOCOLS_MULTICAST_MAC = mac("01:80:c2:00:00:02")  # IEEE "Slow Protocols Multicast" address
+    ACTOR_SYS_MAC = mac("00:0c:29:aa:bb:cc")
+    PARTNER_SYS_MAC = mac("00:0c:29:11:22:33")
+
+    def add(dst_mac: bytes, src_mac: bytes, body: bytes):
+        packets.append(eth_header(dst_mac, src_mac, 0x8809) + body)
+
+    def lacp_pdu(actor_state: int, partner_state: int, actor_len: int = 20) -> bytes:
+        actor_tlv = (
+            struct.pack("!BBH", 0x01, actor_len, 32768) + ACTOR_SYS_MAC
+            + struct.pack("!HHHB", 1, 32768, 1, actor_state) + b"\x00" * 3
+        )
+        partner_tlv = (
+            struct.pack("!BBH", 0x02, 20, 32768) + PARTNER_SYS_MAC
+            + struct.pack("!HHHB", 1, 32768, 1, partner_state) + b"\x00" * 3
+        )
+        collector_tlv = struct.pack("!BBH", 0x03, 16, 0) + b"\x00" * 12
+        terminator_tlv = struct.pack("!BB", 0x00, 0x00)
+        return struct.pack("!BB", 0x01, 0x01) + actor_tlv + partner_tlv + collector_tlv + terminator_tlv
+
+    # 1) Well-formed LACPDU, Actor and Partner both fully in sync (state=0x3F: Activity|Timeout|
+    #    Aggregation|Synchronization|Collecting|Distributing set, Defaulted/Expired clear).
+    add(SLOW_PROTOCOLS_MULTICAST_MAC, HMI_MAC, lacp_pdu(0x3F, 0x3F))
+
+    # 2) Same shape, but Actor's Synchronization bit (0x08) cleared -- exercises the "LACP Out of
+    #    Sync reported" note.
+    add(SLOW_PROTOCOLS_MULTICAST_MAC, HMI_MAC, lacp_pdu(0x37, 0x3F))
+
+    # 3) Negative control: Actor Information TLV's own declared Length is 19, not the fixed 20 --
+    #    breaks parse_lacp's structural gate (type+length match required for all four TLVs), so
+    #    this must decline and fall back to the generic "[non-ip]" ethertype-name-only report.
+    add(SLOW_PROTOCOLS_MULTICAST_MAC, HMI_MAC, lacp_pdu(0x3F, 0x3F, actor_len=19))
+
+    def marker_pdu(tlv_type: int) -> bytes:
+        marker_tlv = (
+            struct.pack("!BB", tlv_type, 14)  # 2-byte header + 12-byte value, no pad
+            + struct.pack("!H", 5) + ACTOR_SYS_MAC + struct.pack("!I", 0xDEADBEEF)
+        )
+        terminator_tlv = struct.pack("!BB", 0x00, 0x00)
+        return struct.pack("!BB", 0x02, 0x01) + marker_tlv + terminator_tlv
+
+    # 4) Marker Information (request): TLV type 0x01.
+    add(SLOW_PROTOCOLS_MULTICAST_MAC, PLC_MAC, marker_pdu(0x01))
+
+    # 5) Marker Response Information: TLV type 0x02, same requester fields echoed back, as a real
+    #    Marker Responder does. A plausible response direction (HMI -> PLC).
+    add(PLC_MAC, HMI_MAC, marker_pdu(0x02))
+
+    # 6) OAM Information OAMPDU with the Dying Gasp flag (0x0002) set -- Local Information TLV
+    #    (Mode Active, all four capability bits set) and Remote Information TLV (Mode Passive, no
+    #    capability bits set), each its own 14-byte value + distinct OUI.
+    def oam_info_tlv(tlv_type: int, config: int, oui_hex: str) -> bytes:
+        value = (
+            struct.pack("!BHBB", 1, 0, 0x00, config)  # oam_version=1, revision=0, state=0, config
+            + struct.pack("!H", 1518)                  # oampdu_config ("Max OAMPDU Size") = 1518
+            + bytes.fromhex(oui_hex)                    # OUI (3 bytes)
+            + b"\x00\x00\x00\x00"                       # vendor specific (4 bytes)
+        )
+        assert len(value) == 14
+        return struct.pack("!BB", tlv_type, 2 + len(value)) + value
+
+    oam_info_body = (
+        struct.pack("!B", 0x03)               # subtype=3
+        + struct.pack("!H", 0x0002)            # flags: Dying Gasp
+        + struct.pack("!B", 0x00)              # code=0x00 Information
+        + oam_info_tlv(0x01, 0x1F, "000c29")   # Local Info: Mode Active + all 4 capability bits
+        + oam_info_tlv(0x02, 0x00, "000c30")   # Remote Info: Passive, no capability bits
+        + struct.pack("!BB", 0x00, 0x00)       # terminator
+    )
+    add(SLOW_PROTOCOLS_MULTICAST_MAC, PLC_MAC, oam_info_body)
+
+    # 7) OAM Event Notification OAMPDU with one Errored Frame Event (type 0x02): timestamp=100,
+    #    window=1000, threshold=10, errors=15, error_running_total=0, event_running_total=3.
+    errored_frame_event = (
+        struct.pack("!BB", 0x02, 26)   # Event TLV: type=2, length=26 (2 hdr + 24 value)
+        + struct.pack("!H", 100)        # timestamp
+        + struct.pack("!H", 1000)       # window
+        + struct.pack("!I", 10)         # threshold
+        + struct.pack("!I", 15)         # errors
+        + struct.pack("!Q", 0)          # error_running_total
+        + struct.pack("!I", 3)          # event_running_total
+    )
+    oam_event_body = (
+        struct.pack("!B", 0x03)         # subtype=3
+        + struct.pack("!H", 0x0000)      # flags: none set
+        + struct.pack("!B", 0x01)        # code=0x01 Event Notification
+        + struct.pack("!H", 42)          # sequence number
+        + errored_frame_event
+        + struct.pack("!B", 0x00)        # end marker
+    )
+    add(SLOW_PROTOCOLS_MULTICAST_MAC, PLC_MAC, oam_event_body)
+
+    # 8) OAM Loopback Control OAMPDU requesting Enable (command byte 0x01).
+    oam_loopback_body = (
+        struct.pack("!B", 0x03) + struct.pack("!H", 0x0000) + struct.pack("!B", 0x04)
+        + struct.pack("!B", 0x01)
+    )
+    add(SLOW_PROTOCOLS_MULTICAST_MAC, PLC_MAC, oam_loopback_body)
+
+    # 9) Negative control: unsupported subtype 0x0A (ESMC/G.8264) -- try_parse_slow_protocols
+    #    declines outright (see slow_protocols.hpp's own "deliberately out of scope" paragraph),
+    #    falling back to the generic "[non-ip]" ethertype-name-only report, same as (3) above.
+    esmc_body = struct.pack("!B", 0x0A) + b"\x01\x00\x00\x00\x00\x00"
+    add(SLOW_PROTOCOLS_MULTICAST_MAC, PLC_MAC, esmc_body)
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_090_000 + i, i * 1000)
+    (TESTS_DIR / "sample_slow_protocols.pcap").write_bytes(data)
+
+
 if __name__ == "__main__":
     TESTS_DIR.mkdir(exist_ok=True)
     build_modbus_sample()
@@ -11850,4 +11986,5 @@ if __name__ == "__main__":
     build_arp_sample()
     build_lldp_sample()
     build_bgp_sample()
+    build_slow_protocols_sample()
     print("wrote sample fixtures to", TESTS_DIR)

@@ -42,10 +42,13 @@ mDNS, LLMNR, and NetBIOS Name Service (NBT-NS), ICMP, RIP, IGMP, VRRP, HSRP,
 IGRP, PIM, EIGRP, OSPFv2, ARP (RFC 826, with curated gratuitous-ARP/
 ARP-Probe/ARP-Announcement notes), LLDP (IEEE 802.1AB, Link Layer
 Discovery Protocol, with curated System Capabilities/Management Address
-rendering and a TTL=0 "shutting down" note), and BGP-4 (RFC 4271, TCP port
+rendering and a TTL=0 "shutting down" note), BGP-4 (RFC 4271, TCP port
 179, with declared-length TCP reassembly, a KEEPALIVE-coalescing loop, and
 curated OPEN/UPDATE/NOTIFICATION rendering including RFC 8203 shutdown
-communication text),
+communication text), and IEEE 802.3 Slow Protocols (LACP/Marker/OAM,
+EtherType 0x8809, Subtype-multiplexed into Link Aggregation Control
+Protocol with curated Out-of-Sync/Defaulted notes, the Marker Protocol,
+and 802.3 OAM/EFM with a curated Dying Gasp note),
 plus detects DNS-over-HTTPS
 (DoH) via TLS SNI matching, and recognizes (by name only, not full decode)
 RDP, VNC, TeamViewer, AnyDesk, and Zoom -- the "interactive remote control"
@@ -218,7 +221,7 @@ the separate Npcap *driver/service* installed).
 sudo apt install libpcap-dev   # optional, only needed for live capture (-i)
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
-sudo apt install -y libcap2-bin
+sudo apt install -y libcap2-bin   # optional, see below				
 sudo setcap cap_net_raw,cap_net_admin=eip build/conduitscope   # optional, see below
 ctest --test-dir build --output-on-failure   # optional, runs the fixture-based smoke tests
 ```

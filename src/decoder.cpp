@@ -1343,6 +1343,29 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                     }
                 }
 
+                // IEEE 802.3 Slow Protocols (EtherType 0x8809: LACP/Marker/802.3 OAM) -- added
+                // after the three-stage ARP/LLDP/BGP plan, at Jurgen's request. Same EtherType-
+                // gated, stateless shape as ARP/LLDP just above, but subtype-multiplexed (one gate,
+                // three message shapes -- see slow_protocols.hpp), so this follows TwinCAT's/BGP's
+                // own "no dual-write, out.result carries the full SlowProtocolsMessage" posture
+                // instead of ARP's/LLDP's own flat dual-write -- see slow_protocols.hpp's own file
+                // header comment for the wire format and JsonWriter's own registry-based rendering
+                // (output.cpp) for how it's exposed.
+                bool want_slow_protocols = options_.protocol_filter == ProtocolFilter::Auto ||
+                                             options_.protocol_filter == ProtocolFilter::SlowProtocolsOnly;
+                if (want_slow_protocols && eth.ethertype == ETHERTYPE_SLOW_PROTOCOLS) {
+                    DecodeContext ctx;
+                    ctx.protocol_id = "slow-protocols";
+                    if (auto result = slow_protocols_decoder().decode(eth.payload, ctx)) {
+                        const SlowProtocolsMessage& sp = result->as<SlowProtocolsMessage>();
+                        out.protocol = "slow-protocols";
+                        out.summary = sp.summary;
+                        for (const auto& n : sp.notes) out.notes.push_back(n);
+                        out.result = *result;
+                        return out;
+                    }
+                }
+
                 // STP (classic IEEE 802.3 LLC framing -- NOT any EtherType at all, see
                 // link_layer.hpp's file header comment). Every branch above is EtherType-keyed
                 // (ethertype >= 0x0800); a length-framed frame (eth.is_llc_length) can never match

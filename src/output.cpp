@@ -235,6 +235,9 @@ constexpr const char* kDimUnderlineGreen = "\033[2;4;32m";
 // (red/yellow/blue/magenta) remain unclaimed by the time BGP was added, so this just picks the
 // next one (yellow) rather than opening yet another modifier dimension for a single new tag.
 constexpr const char* kDimUnderlineYellow = "\033[2;4;33m";
+// Slow Protocols (LACP/Marker/OAM): same dim+underline family -- blue/magenta remain unclaimed by
+// the time this was added, so this picks blue.
+constexpr const char* kDimUnderlineBlue = "\033[2;4;34m";
 
 // TWO DELIBERATE EXCEPTIONS TO THIS FILE'S "16 standard ANSI colors only" CONVENTION, both from
 // migration batch 2: Jurgen asked for TwinCAT's and S7comm/S7comm-Plus's tags to match their real
@@ -438,6 +441,7 @@ const char* protocol_tag_color(const std::string& protocol) {
     if (protocol == "bgp") return kDimUnderlineYellow;        // next fresh hue in the dim+underline
                                                                  // family (see kDimUnderlineYellow's
                                                                  // own comment above)
+    if (protocol == "slow-protocols") return kDimUnderlineBlue;  // see kDimUnderlineBlue's own comment above
     if (protocol == "parse-error") return kBoldRed;
     return kDim;  // tcp / udp / non-tcp / non-ip / unsupported-link: recognized, nothing OT-specific
 }
@@ -672,6 +676,80 @@ void write_bgp_json_fields(std::ostream& out, const BgpResult& r) {
     } else if (m.is_route_refresh) {
         out << "    \"bgp_route_refresh_afi\": " << m.route_refresh.afi << ",\n";
         out << "    \"bgp_route_refresh_safi\": " << static_cast<int>(m.route_refresh.safi) << ",\n";
+    }
+}
+
+// The Slow Protocols analog of write_twincat_json_fields/write_bgp_json_fields above -- same
+// rationale (SlowProtocolsMessage's OAM sub-message nests two optional OamInformationTlv structs
+// and a variable-length event list, deep enough to follow BGP's own "no dual-write" posture rather
+// than ARP's/LLDP's flat one -- see slow_protocols.hpp's file header comment).
+void write_slow_protocols_json_fields(std::ostream& out, const SlowProtocolsMessage& sp) {
+    out << "    \"slow_protocols_subtype\": " << static_cast<int>(sp.subtype) << ",\n";
+    out << "    \"slow_protocols_subtype_name\": \"" << json_escape(sp.subtype_name) << "\",\n";
+
+    if (sp.is_lacp) {
+        const LacpMessage& l = *sp.lacp;
+        out << "    \"lacp_version\": " << static_cast<int>(l.version) << ",\n";
+        out << "    \"lacp_actor_system\": \"" << json_escape(l.actor_system) << "\",\n";
+        out << "    \"lacp_actor_system_priority\": " << l.actor_system_priority << ",\n";
+        out << "    \"lacp_actor_key\": " << l.actor_key << ",\n";
+        out << "    \"lacp_actor_port\": " << l.actor_port << ",\n";
+        out << "    \"lacp_actor_port_priority\": " << l.actor_port_priority << ",\n";
+        out << "    \"lacp_actor_state\": \"" << json_escape(l.actor_state.rendered) << "\",\n";
+        out << "    \"lacp_partner_system\": \"" << json_escape(l.partner_system) << "\",\n";
+        out << "    \"lacp_partner_system_priority\": " << l.partner_system_priority << ",\n";
+        out << "    \"lacp_partner_key\": " << l.partner_key << ",\n";
+        out << "    \"lacp_partner_port\": " << l.partner_port << ",\n";
+        out << "    \"lacp_partner_port_priority\": " << l.partner_port_priority << ",\n";
+        out << "    \"lacp_partner_state\": \"" << json_escape(l.partner_state.rendered) << "\",\n";
+        out << "    \"lacp_collector_max_delay\": " << l.collector_max_delay << ",\n";
+    } else if (sp.is_marker) {
+        const MarkerMessage& mk = *sp.marker;
+        out << "    \"marker_is_response\": " << (mk.is_response ? "true" : "false") << ",\n";
+        out << "    \"marker_requester_port\": " << mk.requester_port << ",\n";
+        out << "    \"marker_requester_system\": \"" << json_escape(mk.requester_system) << "\",\n";
+        out << "    \"marker_requester_transaction_id\": " << mk.requester_transaction_id << ",\n";
+    } else if (sp.is_oam) {
+        const OamMessage& o = *sp.oam;
+        out << "    \"oam_flags\": " << o.flags_raw << ",\n";
+        out << "    \"oam_flag_link_fault\": " << (o.flag_link_fault ? "true" : "false") << ",\n";
+        out << "    \"oam_flag_dying_gasp\": " << (o.flag_dying_gasp ? "true" : "false") << ",\n";
+        out << "    \"oam_flag_critical_event\": " << (o.flag_critical_event ? "true" : "false") << ",\n";
+        out << "    \"oam_flag_local_evaluating\": " << (o.flag_local_evaluating ? "true" : "false") << ",\n";
+        out << "    \"oam_flag_local_stable\": " << (o.flag_local_stable ? "true" : "false") << ",\n";
+        out << "    \"oam_flag_remote_evaluating\": " << (o.flag_remote_evaluating ? "true" : "false") << ",\n";
+        out << "    \"oam_flag_remote_stable\": " << (o.flag_remote_stable ? "true" : "false") << ",\n";
+        out << "    \"oam_code\": " << static_cast<int>(o.code) << ",\n";
+        out << "    \"oam_code_name\": \"" << json_escape(o.code_name) << "\",\n";
+
+        auto write_info_tlv = [&out](const char* prefix, const OamInformationTlv& t) {
+            out << "    \"" << prefix << "_version\": " << static_cast<int>(t.oam_version) << ",\n";
+            out << "    \"" << prefix << "_revision\": " << t.revision << ",\n";
+            out << "    \"" << prefix << "_config_mode_active\": " << (t.config_mode_active ? "true" : "false") << ",\n";
+            out << "    \"" << prefix << "_config_unidirectional\": " << (t.config_unidirectional ? "true" : "false") << ",\n";
+            out << "    \"" << prefix << "_config_remote_loopback\": " << (t.config_remote_loopback ? "true" : "false") << ",\n";
+            out << "    \"" << prefix << "_config_link_events\": " << (t.config_link_events ? "true" : "false") << ",\n";
+            out << "    \"" << prefix << "_config_variable_retrieval\": " << (t.config_variable_retrieval ? "true" : "false") << ",\n";
+            out << "    \"" << prefix << "_max_oampdu_size\": " << t.oampdu_config_raw << ",\n";
+            out << "    \"" << prefix << "_oui\": \"" << json_escape(t.oui_hex) << "\",\n";
+        };
+        if (o.local_info) write_info_tlv("oam_local_info", *o.local_info);
+        if (o.remote_info) write_info_tlv("oam_remote_info", *o.remote_info);
+
+        if (o.is_event_notification) {
+            out << "    \"oam_event_sequence\": " << o.event_sequence << ",\n";
+            if (!o.events.empty()) {
+                out << "    \"oam_events\": [";
+                for (size_t i = 0; i < o.events.size(); ++i) {
+                    if (i != 0) out << ", ";
+                    out << "\"" << json_escape(o.events[i].rendered) << "\"";
+                }
+                out << "],\n";
+            }
+        }
+        if (o.is_loopback_control && o.loopback_enable) {
+            out << "    \"oam_loopback_enable\": " << (*o.loopback_enable ? "true" : "false") << ",\n";
+        }
     }
 }
 
@@ -2454,6 +2532,9 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
     }
     if (p.protocol == "bgp" && p.result) {
         write_bgp_json_fields(out_, p.result->as<BgpResult>());
+    }
+    if (p.protocol == "slow-protocols" && p.result) {
+        write_slow_protocols_json_fields(out_, p.result->as<SlowProtocolsMessage>());
     }
     if (p.protocol == "melsec" && p.result) {
         write_melsec_json_fields(out_, p.result->as<MelsecFrame>());

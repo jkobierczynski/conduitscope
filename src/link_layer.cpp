@@ -88,6 +88,7 @@ std::string ethertype_name(uint16_t ethertype) {
         case ETHERTYPE_PTP: return "IEEE 1588 PTP";
         case ETHERTYPE_MPLS_UNICAST: return "MPLS unicast";
         case ETHERTYPE_MPLS_MULTICAST: return "MPLS multicast";
+        case ETHERTYPE_SLOW_PROTOCOLS: return "IEEE 802.3 Slow Protocols (LACP/Marker/OAM)";
         default: return "";
     }
 }

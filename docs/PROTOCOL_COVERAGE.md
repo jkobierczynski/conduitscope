@@ -5403,11 +5403,12 @@ protocol number registry (not reverse-engineered from a single capture):
   (IEEE 1588), MPLS unicast, and 802.1ad/stacked-VLAN (the QinQ case
   `parse_ethernet`'s own comment already documented as "will simply fail to
   recognize the inner ethertype" -- it's now named as such instead of a bare
-  `0x8100`) are named but not decoded further. ARP (`0x0806`) and LLDP
-  (`0x88CC`) used to be in this same "named but not decoded further" list
-  too, until this decoder's own ARP addition and, right after it, its own
-  LLDP addition (see the ARP and LLDP sections above) took them both out of
-  it. PROFINET RT
+  `0x8100`) are named but not decoded further. ARP (`0x0806`), LLDP
+  (`0x88CC`), and IEEE 802.3 Slow Protocols (`0x8809`) used to be in this
+  same "named but not decoded further" list too, until this decoder's own
+  ARP addition, right after it its own LLDP addition, and later its own
+  Slow Protocols addition (see the ARP, LLDP, and IEEE 802.3 Slow Protocols
+  sections above) took all three out of it. PROFINET RT
   (`0x8892`), IEC 61850-8-1 GOOSE (`0x88B8`), IEC 61850-9-2 Sampled Values
   (`0x88BA`), EtherCAT (`0x88A4`), IEEE 802.1X/EAPOL (`0x888E`), and PPPoE
   Discovery/Session (`0x8863`/`0x8864`) are also named here, but, like CIP
@@ -5427,7 +5428,14 @@ protocol number registry (not reverse-engineered from a single capture):
   section above) is decoded and reported as `lldp`, not `non-ip`; an
   LLDP-EtherType frame this decoder's own structural gate declines (wrong
   TLV order, or a mandatory TLV that doesn't fit) still falls through to
-  `non-ip`, named as LLDP the same as before this decoder existed.
+  `non-ip`, named as LLDP the same as before this decoder existed. Likewise
+  once more, a Slow-Protocols-shaped frame (a recognized Subtype -- `0x01`
+  LACP, `0x02` Marker, `0x03` OAM -- whose own TLV/Code structural gate also
+  passes, per the IEEE 802.3 Slow Protocols section above) is decoded and
+  reported as `slow-protocols`, not `non-ip`; a Slow-Protocols-EtherType
+  frame this decoder declines (an unrecognized Subtype, or a structural-gate
+  failure within a recognized one) still falls through to `non-ip`, named as
+  IEEE 802.3 Slow Protocols the same as before this decoder existed.
 - **IPv4 protocol numbers** (`ipv4.hpp`'s `ip_protocol_name`): IPv6-in-IPv4,
   GRE, ESP, AH, ICMPv6, SCTP are named but not decoded further (`tests/
   sample_link_transport_layers.pcap`'s own "recognized-but-not-decoded"
@@ -7657,3 +7665,186 @@ inspected in `--format text`, `--format json`, `--format csv`, and
 written, the same verification discipline every prior protocol addition in
 this codebase has been held to. See `include/conduitscope/bgp.hpp`'s file
 header for the full writeup.
+
+### IEEE 802.3 Slow Protocols (LACP/Marker/OAM, EtherType `0x8809`)
+
+Added right after the three-stage ARP/LLDP/BGP plan, at Jurgen's request --
+before this, EtherType `0x8809` was only ever named by `link_layer.hpp`'s
+`ethertype_name` and left otherwise undecoded (see the Link/IP-layer
+plumbing section above). Built entirely on the `ProtocolDecoder`
+registration-model interface from inception,
+`include/conduitscope/slow_protocols.hpp`/`slow_protocols.cpp`, with its own
+dedicated `--protocol slow-protocols` value.
+
+Architecturally, Slow Protocols has no transport layer and no IP layer of
+its own -- it rides directly on raw Ethernet, the same "no port, no IP
+layer" shape ARP/LLDP/PROFINET RT/GOOSE/Sampled Values/EtherCAT/EAPOL/
+PPPoE/MPLS already have in this codebase. Unlike ARP and LLDP, though, this
+one EtherType is **Subtype-multiplexed**: a single Subtype byte right after
+the EtherType tells apart three genuinely distinct link-layer control
+protocols -- matching this codebase's "one gate, several message shapes"
+precedent (BGP's own OPEN/UPDATE/NOTIFICATION/KEEPALIVE/ROUTE-REFRESH)
+rather than ARP's/LLDP's own "one gate, one message shape" precedent. Like
+TwinCAT/BGP (and unlike ARP's/LLDP's own flat dual-write), the decoded
+message is carried whole in `out.result` and rendered via a dedicated
+`write_slow_protocols_json_fields` free function in `output.cpp` -- OAM's
+own sub-message nests too deeply (Local/Remote Information TLVs, a list of
+Event TLVs) for a flat dual-write to stay legible.
+
+#### Subtype 1 -- LACP (Link Aggregation Control Protocol, IEEE 802.1AX
+clause 6, originally 802.3ad clause 43)
+
+A LACPDU exchanged every 1-30s between two link-aggregation-capable ports
+to negotiate and maintain which physical links bundle into one logical
+channel ("port channel"/"EtherChannel"/"bond"). Every offset/bitmask
+constant was cross-checked against Wireshark's own
+`packet-slowprotocols.c` (`LACPDU_*` #defines) byte-exact, not reconstructed
+from a written spec description. The wire format is Subtype(1)=`0x01` +
+Version(1), then three fixed-size, fixed-position TLVs -- unlike LLDP's
+variable-order TLV stream, a real LACPDU always places these at exactly the
+same offsets: **Actor Information** (Type=`0x01`, Length=`20`, System
+Priority, System (a MAC), Key, Port Priority, Port, an 8-bit State bitmap),
+**Partner Information** (Type=`0x02`, Length=`20`, identical shape), and
+**Collector Information** (Type=`0x03`, Length=`16`, Max Delay), followed by
+a Terminator TLV (Type=`0x00`, Length=`0`). This decoder's structural gate
+requires every one of those four TLVs' type AND length to match exactly --
+any mismatch means this isn't really a LACPDU, so the frame is declined
+rather than guessed at.
+
+The Actor/Partner State bitmap (IEEE 802.1AX Table 6-16) is fully decoded:
+Activity (Active/Passive), Timeout (Short/Long), Aggregation
+(Aggregatable/Individual), Synchronization (In Sync/Out of Sync),
+Collecting, Distributing, Defaulted (this side is using default, not
+LACPDU-learned, partner information), and Expired. Either side's
+Synchronization bit being clear fires a note (a link that stays Out of Sync
+is not joining its aggregate, usually a mismatched Key/Port-Priority or an
+admin-down member port); either side's Defaulted bit fires a separate note.
+
+#### Subtype 2 -- Marker Protocol (IEEE 802.1AX clause 6.5, "Marker
+Responder")
+
+Used to verify, during a load-balancing re-hash across an aggregated
+link's member ports, that no frames are still in flight on the old port
+before conversations move to a new one: a Marker (TLV type `0x01`, "Marker
+Information") sent down a port is safe to treat as "drained" once the
+corresponding Marker Response (TLV type `0x02`, "Marker Response
+Information", identical body, echoed back) is seen. Wireshark's own
+`marker_vals[]` table confirms these two TLV type values and the
+Terminator TLV (type `0x00`) that follows either one. Unlike LACP's own
+Actor/Partner Information TLVs, this codebase could not independently
+confirm an exact byte-offset table for the Marker(-Response) Information
+TLV's own internal fields (Wireshark's own dissector computes them inline
+rather than via named offset constants) -- this decoder stays honest about
+that gap by decoding the three fields every real implementation agrees on
+(Requester Port, Requester System, Requester Transaction ID) from the
+TLV's own fixed 12-byte prefix, then uses the TLV's own self-describing
+Length to skip any trailing Pad/Reserved bytes rather than assuming their
+exact count.
+
+#### Subtype 3 -- 802.3 OAM / "Ethernet in the First Mile" (IEEE 802.3
+clause 57, originally 802.3ah)
+
+A passive listener on an EFM-OAM-enabled link segment gets, for free and in
+cleartext, a continuously-refreshed picture of that link's health
+(fault/dying-gasp/critical flags, negotiated capabilities, vendor OUI) --
+the same "unsolicited broadcast device fingerprint" angle this codebase
+already frames LLDP around, though OAM is a point-to-point discovery/
+keepalive exchange rather than a broadcast. Confirmed byte-exact against
+Wireshark's own `OAMPDU_*` #defines. The wire format is Subtype(1)=`0x03` +
+Flags(2, a 7-bit bitmap: Link Fault, Dying Gasp, Critical Event, Local/
+Remote Evaluating, Local/Remote Stable) + Code(1), then a Code-specific
+body:
+
+- **Code `0x00` Information**: a TLV stream -- Local Information TLV (type
+  `0x01`) and/or Remote Information TLV (type `0x02`), each a 14-byte value
+  (OAM Version, Revision, State, a 5-bit OAM Configuration bitmap --- Mode
+  Active/Passive, Unidirectional/Remote Loopback/Link Events/Variable
+  Retrieval support --, a 16-bit "Max OAMPDU Size", a 3-byte OUI, 4 bytes of
+  vendor-specific data), an Organization Specific Information TLV (type
+  `0xFE`, raw hex only), and a terminator (type `0x00`).
+- **Code `0x01` Event Notification**: a Sequence Number, then one or more
+  Event TLVs, each Type+Length+Timestamp+type-specific counters. Four
+  curated, fully-decoded event types (Wireshark's own
+  `OAMPDU_EVENT_TYPE_*` -- note these are NOT the same as the PDU's own
+  Link-Fault/Dying-Gasp/Critical-Event Flags bits above; those are
+  always-present urgent status flags, these are separate
+  threshold-crossing counter events): Errored Symbol Period Event, Errored
+  Frame Event, Errored Frame Period Event, Errored Frame Seconds Summary
+  Event -- each with its own field-width layout for Window/Threshold/
+  Errors/Error Running Total/Event Running Total -- plus Organization
+  Specific Event (raw hex only).
+- **Code `0x02`/`0x03` Variable Request/Response**: named only -- this
+  decoder does not walk the Variable Descriptor Branch/Object/Package/
+  Attribute/Binding structure, low real-world diagnostic value for an
+  OT/ICS capture review, the same "recognized but not exhaustively
+  decoded" posture this codebase already applies to BGP's own uncurated
+  path attributes and FINS's flag words.
+- **Code `0x04` Loopback Control**: a single command byte, `0x01`=Enable /
+  `0x02`=Disable (confirmed via Wireshark's own
+  `OAMPDU_LPBK_ENABLE`/`OAMPDU_LPBK_DISABLE` #defines).
+- **Code `0xFE` Organization Specific**: named only, raw hex.
+
+A Dying Gasp flag fires a dedicated note (the sending device reporting an
+imminent, uncontrolled loss of power -- e.g. a UPS-backed access device
+transmitting its last gasp before going dark); Link Fault and Critical
+Event each fire their own note too.
+
+**HONESTY NOTE on what this decoder deliberately does NOT assert**,
+matching this codebase's own established practice of naming a gap rather
+than guessing past it (see e.g. IEC 61850-9-2's own "no real capture found"
+note, BGP's own "never claims authenticated or unauthenticated" framing):
+repeated attempts to independently verify (a) the Information TLV's own
+State byte's Parser-Action/Multiplexer-Action bit split and (b) the exact
+reserved-bit layout of the 2-byte OAMPDU_Configuration/"Max OAMPDU Size"
+field, against a primary source, were not successful in this environment
+(the IEEE 802.3 standard text itself, and a second-source mirror of
+Wireshark's `packet-oampdu.c` beyond the one this file's other constants
+were confirmed against, were both unreachable). Both are therefore shown as
+their raw wire value only, not bit-decoded, in both the State byte's
+`state_raw`/JSON's implicit omission and the `oampdu_config_raw`/JSON's
+`oam_*_info_max_oampdu_size` field -- the same choice this codebase makes
+whenever it can name a field but not confidently assert everything inside
+it.
+
+#### Explicitly out of scope
+
+IEEE 802.1ag/Y.1731 Connectivity Fault Management (CFM) uses its own
+EtherType (`0x8902`), not `0x8809`, and is not covered here; ESMC/G.8264
+(Slow Protocols subtype `0x0A`) and MEF E-LMI (subtype `0x0B`) are
+recognized as distinct possible subtypes but not decoded by this file -- an
+unrecognized subtype simply declines (falls back to the existing generic
+"recognized ethertype, not decoded" `non-ip` fallback), exactly like every
+other structural-gate failure in this codebase. Within OAM, Variable
+Request/Response's own sub-structure (named only, see above) and the
+Information TLV's State byte / OAMPDU_Configuration's reserved-bit layout
+(raw value only, see the HONESTY NOTE above).
+
+**Security/audit context:** like LLDP, both LACP and OAM are broadcast (or
+point-to-point multicast) completely unauthenticated, on a fixed clock --
+LACP roughly every 1-30s, OAM continuously while the link is up -- so a
+passive listener gets a free, continuously-refreshed picture of link
+aggregation membership/state and link health (including a Dying Gasp
+signal, a real-time power-loss indicator) with zero interaction required,
+similar audit framing to LLDP's own passive-inventory signal above.
+
+`--protocol slow-protocols` isolates Slow Protocols from the CLI; needs no
+port option at all, matching ARP/LLDP/PROFINET/GOOSE/SV/EtherCAT/EAPOL/
+PPPoE/MPLS/STP's own no-port precedent. Validated against
+`tests/sample_slow_protocols.pcap`
+(`tools/make_sample_pcap.py`'s `build_slow_protocols_sample()`): a
+well-formed LACPDU with Actor and Partner both fully in sync; the same
+LACPDU with the Actor's Synchronization bit cleared (the Out of Sync note);
+a negative control with a corrupted Actor Information TLV length (falls
+back to `non-ip`, not `slow-protocols`); a Marker Information (request); a
+Marker Response Information (echoing the same requester fields back); an
+OAM Information OAMPDU with the Dying Gasp flag set and both a Local (Mode
+Active, all four capability bits set) and Remote (Mode Passive, no
+capability bits set) Information TLV, each its own OUI; an OAM Event
+Notification OAMPDU with one Errored Frame Event; an OAM Loopback Control
+OAMPDU requesting Enable; and a second negative control -- an unsupported
+Subtype (`0x0A`, ESMC/G.8264) that also falls back to `non-ip`. Every case
+was decoded and inspected in `--format text` and `--format json` BEFORE the
+`CMakeLists.txt` `slow_protocols_*` test family reading it was written, the
+same verification discipline every prior protocol addition in this
+codebase has been held to. See `include/conduitscope/slow_protocols.hpp`'s
+file header for the full writeup.
