@@ -1005,6 +1005,35 @@ CLI-representable value, since `0` means "unset/default," not "a cap of
 zero"; manual smoke test of each flag's actual effect against a real/
 synthetic fixture, plus `--help` output on all three subcommands.
 
+**Update: item 8 itself (documenting vendored CLI11's provenance/update
+procedure) implemented.** Added `third_party/CLI11/README.md`, covering
+exactly what item 8 asked for: the version vendored (2.4.2, released
+2024-05-04) and upstream repository/tag
+(<https://github.com/CLIUtils/CLI11>, `v2.4.2`), how that single-include file
+is itself produced upstream (CLI11's own `scripts/MakeSingleHeader.py`,
+generating it from the normal multi-header `include/CLI/` source -- the
+vendored file already states this inline in its own header comment, this new
+README just gives it a permanent home outside that comment), the license (3-
+clause BSD, embedded verbatim in the file and compatible with conduitscope's
+own Apache-2.0), a concrete "how to check if this has fallen behind
+upstream" step (compare against <https://github.com/CLIUtils/CLI11/releases>
+-- noted there that `v2.5.0` is upstream's current latest, newer than the
+`v2.4.2` vendored here, with no standing obligation to chase every release
+given how narrow a slice of CLI11's API conduitscope actually exercises),
+and a concrete update procedure (pull the new release's own pre-built
+single-include asset, or build one locally with `-DCLI11_SINGLE_FILE=ON`;
+replace this file; verify the new file's own header comment states the
+expected version; rebuild across all three established configs and run the
+full CTest suite, since that -- not an assumption from CLI11's own
+changelog -- is what actually confirms conduitscope's own narrow usage
+still behaves; update the version/tag/date recorded in the README in the
+same commit). No separate `NOTICE` file entry was needed: the existing
+repository-root `LICENSE` covers conduitscope's own Apache-2.0 terms, and
+CLI11's BSD-3-Clause terms are fully self-contained in its own vendored
+header comment already, same as before this item -- this new README is a
+discoverability/procedure document, not a license-compliance gap-filler for
+a gap that didn't exist.
+
 
 ## PROTOCOL DETECTION
 

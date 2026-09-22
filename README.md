@@ -1192,7 +1192,9 @@ decoder actually surfaces and how confidently, and
 ## Building
 
 Requires a C++17 compiler and CMake >= 3.16. No other dependencies are *required*
--- CLI11 is vendored as a single header under `third_party/`. If `libpcap-dev`
+-- CLI11 is vendored as a single header under `third_party/`
+(see `third_party/CLI11/README.md` for its version, upstream source, license,
+and update procedure). If `libpcap-dev`
 (Linux) or the Npcap SDK (Windows) happens to be installed and discoverable,
 CMake picks it up automatically and live capture (`-i/--interface`) is built in;
 if not, the build is unaffected except that `-i` reports it isn't available. Pass
