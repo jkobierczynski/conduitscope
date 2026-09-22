@@ -103,7 +103,10 @@ constexpr const char* kBoldYellow = "\033[1;33m";
 // by an existing protocol tag by the time RIP/IGMP/VRRP/HSRP were added -- underline is a fresh
 // modifier dimension rather than another documented-reuse case like ffhse/opcua or mms/s7comm-plus
 // above (those needed to justify sharing a hue; there simply isn't a hue left to share from that
-// wouldn't require its own equally-long justification).
+// wouldn't require its own equally-long justification). One exception found later: kBoldMagenta
+// (declared alongside kBoldBlue/kBoldCyan/kBoldGreen/kBoldRed/kBoldYellow above) was never actually
+// claimed by any tag -- ARP's own entry below is the first to use it, completing the plain-bold
+// family rather than opening a new dimension for a single new tag.
 constexpr const char* kUnderlineCyan = "\033[4;36m";
 constexpr const char* kUnderlineGreen = "\033[4;32m";
 constexpr const char* kUnderlineMagenta = "\033[4;35m";
@@ -221,6 +224,17 @@ constexpr const char* kStrikeWhite = "\033[9;37m";
 // combination, following the same "invent one new escape-code family member" pattern IGMP/OSPF/
 // MPLS above each used when their own current dimension ran out.
 constexpr const char* kDimUnderlineCyan = "\033[2;4;36m";
+// LLDP: by the time this decoder was added, every plain/bright/bold/underline/italic/bold+underline/
+// bold+italic/underline+italic/dim/bold+dim/strike hue combination above is already spoken for, and
+// ARP's own addition just before this one already spent the last unclaimed plain-bold slot (see
+// arp's own comment below) -- so this reuses the same dim+underline dimension ICMP introduced above,
+// picking the next fresh hue in that family rather than inventing yet another modifier combination
+// for a single new tag.
+constexpr const char* kDimUnderlineGreen = "\033[2;4;32m";
+// BGP: same dim+underline family ICMP/LLDP already established above -- four of its six hues
+// (red/yellow/blue/magenta) remain unclaimed by the time BGP was added, so this just picks the
+// next one (yellow) rather than opening yet another modifier dimension for a single new tag.
+constexpr const char* kDimUnderlineYellow = "\033[2;4;33m";
 
 // TWO DELIBERATE EXCEPTIONS TO THIS FILE'S "16 standard ANSI colors only" CONVENTION, both from
 // migration batch 2: Jurgen asked for TwinCAT's and S7comm/S7comm-Plus's tags to match their real
@@ -409,6 +423,21 @@ const char* protocol_tag_color(const std::string& protocol) {
                                                               // IP layer, EtherType-keyed), so white
                                                               // doubles as a visual "different shape"
                                                               // cue too
+    if (protocol == "arp") return kBoldMagenta;             // the one previously-unclaimed plain-bold
+                                                              // hue -- see this function's own "Every
+                                                              // plain/bright/bold combination... is
+                                                              // already spoken for" comment above for
+                                                              // why this, not a new dimension, is the
+                                                              // right pick for a single new tag
+    if (protocol == "lldp") return kDimUnderlineGreen;       // next fresh hue in the dim+underline
+                                                              // family ICMP introduced -- every other
+                                                              // combination, including plain-bold
+                                                              // (arp just above spent the last one),
+                                                              // is now fully claimed -- see
+                                                              // kDimUnderlineGreen's own comment above
+    if (protocol == "bgp") return kDimUnderlineYellow;        // next fresh hue in the dim+underline
+                                                                 // family (see kDimUnderlineYellow's
+                                                                 // own comment above)
     if (protocol == "parse-error") return kBoldRed;
     return kDim;  // tcp / udp / non-tcp / non-ip / unsupported-link: recognized, nothing OT-specific
 }
@@ -534,6 +563,115 @@ void write_twincat_json_fields(std::ostream& out, const TwinCatFrame& tc) {
     }
     if (tc.paired_response) {
         out << "    \"twincat_paired_request_index\": " << tc.paired_request_index << ",\n";
+    }
+}
+
+// The BGP analog of write_twincat_json_fields above -- same rationale (a plain free function, not a
+// ProtocolRenderer interface). BgpResult (bgp.hpp) wraps one fully-decoded message (`first`) plus,
+// when BgpDecoder::decode's own coalescing loop found more, a `coalesced_message_count` > 1 (every
+// message past the first is summarized only as a note, not a full second set of fields here -- same
+// "one full struct, extra ones as notes" posture OPC UA's own coalescing already established).
+void write_bgp_json_fields(std::ostream& out, const BgpResult& r) {
+    const BgpMessage& m = r.first;
+    out << "    \"bgp_type\": \"" << json_escape(m.type_name) << "\",\n";
+    out << "    \"bgp_length\": " << m.length << ",\n";
+    if (r.coalesced_message_count > 1) {
+        out << "    \"bgp_coalesced_message_count\": " << r.coalesced_message_count << ",\n";
+    }
+
+    if (m.is_open) {
+        const BgpOpenMessage& o = m.open;
+        out << "    \"bgp_open_version\": " << static_cast<int>(o.version) << ",\n";
+        out << "    \"bgp_open_my_as\": " << o.my_as << ",\n";
+        out << "    \"bgp_open_hold_time\": " << o.hold_time << ",\n";
+        out << "    \"bgp_open_identifier\": \"" << json_escape(o.bgp_identifier) << "\",\n";
+        out << "    \"bgp_open_four_octet_as_capable\": "
+            << (o.has_four_octet_as_capability ? "true" : "false") << ",\n";
+        if (!o.capabilities.empty()) {
+            out << "    \"bgp_open_capabilities\": [";
+            for (size_t i = 0; i < o.capabilities.size(); ++i) {
+                if (i != 0) out << ", ";
+                const BgpCapability& c = o.capabilities[i];
+                std::string name = c.code_name.empty() ? ("code " + std::to_string(c.code)) : c.code_name;
+                std::ostringstream one;
+                one << name;
+                if (c.is_multiprotocol) {
+                    one << " (AFI=" << c.mp_afi << " SAFI=" << static_cast<int>(c.mp_safi) << ")";
+                } else if (c.is_four_octet_as) {
+                    one << " (" << c.four_octet_as << ")";
+                }
+                out << "\"" << json_escape(one.str()) << "\"";
+            }
+            out << "],\n";
+        }
+    } else if (m.is_update) {
+        const BgpUpdateMessage& u = m.update;
+        auto write_prefix_array = [&out](const char* key, const std::vector<BgpPrefix>& prefixes) {
+            out << "    \"" << key << "\": [";
+            for (size_t i = 0; i < prefixes.size(); ++i) {
+                if (i != 0) out << ", ";
+                out << "\"" << prefixes[i].address << "/" << static_cast<int>(prefixes[i].prefix_length_bits)
+                    << "\"";
+            }
+            out << "],\n";
+        };
+        write_prefix_array("bgp_update_withdrawn_routes", u.withdrawn_routes);
+        out << "    \"bgp_update_withdrawn_routes_truncated\": "
+            << (u.withdrawn_routes_truncated ? "true" : "false") << ",\n";
+        write_prefix_array("bgp_update_nlri", u.nlri);
+        out << "    \"bgp_update_nlri_truncated\": " << (u.nlri_truncated ? "true" : "false") << ",\n";
+        if (!u.path_attributes.empty()) {
+            out << "    \"bgp_update_path_attributes\": [";
+            for (size_t i = 0; i < u.path_attributes.size(); ++i) {
+                if (i != 0) out << ", ";
+                const BgpPathAttribute& a = u.path_attributes[i];
+                std::string name = a.type_name.empty() ? ("type " + std::to_string(a.type_code)) : a.type_name;
+                std::string value = a.rendered.empty() ? a.raw_hex : a.rendered;
+                out << "\"" << json_escape(name + ": " + value) << "\"";
+            }
+            out << "],\n";
+        }
+        if (u.has_origin) out << "    \"bgp_update_origin\": \"" << json_escape(u.origin_name) << "\",\n";
+        if (u.has_as_path) {
+            std::ostringstream ap;
+            for (size_t i = 0; i < u.as_path.size(); ++i) {
+                if (i != 0) ap << " ";
+                for (size_t j = 0; j < u.as_path[i].as_numbers.size(); ++j) {
+                    if (j != 0) ap << " ";
+                    ap << u.as_path[i].as_numbers[j];
+                }
+            }
+            out << "    \"bgp_update_as_path\": \"" << json_escape(ap.str()) << "\",\n";
+            out << "    \"bgp_update_as_path_authoritative\": "
+                << (u.as_path_width_authoritative ? "true" : "false") << ",\n";
+        }
+        if (u.has_next_hop) out << "    \"bgp_update_next_hop\": \"" << json_escape(u.next_hop) << "\",\n";
+        if (u.has_communities) {
+            out << "    \"bgp_update_communities\": [";
+            for (size_t i = 0; i < u.community_names.size(); ++i) {
+                if (i != 0) out << ", ";
+                out << "\"" << json_escape(u.community_names[i]) << "\"";
+            }
+            out << "],\n";
+        }
+    } else if (m.is_notification) {
+        const BgpNotificationMessage& n = m.notification;
+        out << "    \"bgp_notification_error_code\": " << static_cast<int>(n.error_code) << ",\n";
+        if (!n.error_code_name.empty()) {
+            out << "    \"bgp_notification_error_code_name\": \"" << json_escape(n.error_code_name) << "\",\n";
+        }
+        out << "    \"bgp_notification_error_subcode\": " << static_cast<int>(n.error_subcode) << ",\n";
+        if (!n.error_subcode_name.empty()) {
+            out << "    \"bgp_notification_error_subcode_name\": \"" << json_escape(n.error_subcode_name)
+                << "\",\n";
+        }
+        if (n.has_shutdown_communication) {
+            out << "    \"bgp_notification_shutdown_communication\": \""
+                << json_escape(n.shutdown_communication) << "\",\n";
+        }
+    } else if (m.is_route_refresh) {
+        out << "    \"bgp_route_refresh_afi\": " << m.route_refresh.afi << ",\n";
+        out << "    \"bgp_route_refresh_safi\": " << static_cast<int>(m.route_refresh.safi) << ",\n";
     }
 }
 
@@ -2313,6 +2451,9 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
     }
     if (p.protocol == "twincat" && p.result) {
         write_twincat_json_fields(out_, p.result->as<TwinCatFrame>());
+    }
+    if (p.protocol == "bgp" && p.result) {
+        write_bgp_json_fields(out_, p.result->as<BgpResult>());
     }
     if (p.protocol == "melsec" && p.result) {
         write_melsec_json_fields(out_, p.result->as<MelsecFrame>());

@@ -136,4 +136,16 @@ std::optional<IgrpMessage> try_parse_igrp(ByteSpan ip_payload, uint32_t src_ip) 
     return msg;
 }
 
+std::optional<ProtocolResult> IgrpDecoder::decode(ByteSpan payload, DecodeContext& ctx) const {
+    if (auto msg = try_parse_igrp(payload, ctx.ip_src_addr)) {
+        return ProtocolResult::make<IgrpMessage>("igrp", std::move(*msg));
+    }
+    return std::nullopt;
+}
+
+const ProtocolDecoder& igrp_decoder() {
+    static const IgrpDecoder instance;
+    return instance;
+}
+
 }  // namespace conduitscope

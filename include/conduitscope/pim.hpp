@@ -57,6 +57,7 @@
 #include <vector>
 
 #include "conduitscope/byteio.hpp"
+#include "conduitscope/protocol_decoder.hpp"
 
 namespace conduitscope {
 
@@ -149,5 +150,18 @@ struct PimMessage {
 // in decoder.cpp only ever calls this for IP protocol number 103, which is IANA-exclusive to PIM,
 // so no further port-style gating is applied.
 std::optional<PimMessage> try_parse_pim(ByteSpan ip_payload);
+
+// Migration batch 5 (see protocol_decoder.hpp/protocol_registry.hpp): thin ProtocolDecoder wrapper
+// around try_parse_pim above, unchanged -- same shape as EigrpDecoder (eigrp.hpp), the original
+// GateKind::IpProtocol pilot. Stateless, no tcp_declared_length()/FlowStateKeying needed.
+class PimDecoder : public ProtocolDecoder {
+public:
+    std::string_view id() const override { return "pim"; }
+    GateKind gate_kind() const override { return GateKind::IpProtocol; }
+    std::optional<uint8_t> ip_protocol() const override { return PIM_IP_PROTOCOL; }
+    std::optional<ProtocolResult> decode(ByteSpan payload, DecodeContext& ctx) const override;
+};
+
+const ProtocolDecoder& pim_decoder();
 
 }  // namespace conduitscope

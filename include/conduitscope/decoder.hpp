@@ -10,7 +10,9 @@
 #include <unordered_map>
 #include <vector>
 
+#include "conduitscope/arp.hpp"
 #include "conduitscope/bacnet.hpp"
+#include "conduitscope/bgp.hpp"
 #include "conduitscope/byteio.hpp"
 #include "conduitscope/can_socketcan.hpp"
 #include "conduitscope/cotp.hpp"
@@ -33,6 +35,7 @@
 #include "conduitscope/it_protocols.hpp"
 #include "conduitscope/kerberos.hpp"
 #include "conduitscope/ldap.hpp"
+#include "conduitscope/lldp.hpp"
 #include "conduitscope/melsec.hpp"
 #include "conduitscope/mms.hpp"
 #include "conduitscope/modbus.hpp"
@@ -135,6 +138,16 @@ enum class ProtocolFilter {
                            // same split EapolOnly/PppoeOnly above already have from their own port-
                            // based tiers.
     MplsOnly,              // only attempt MPLS label-stack decoding -- see mpls.hpp
+    ArpOnly,               // only attempt ARP decoding -- see arp.hpp. A brand-new protocol (not a
+                           // migration -- ARP had no decode logic of any kind before this, only the
+                           // generic ethertype-name fallback), EtherType-gated (0x0806) with no port
+                           // at all, the same posture EAPOL/PPPoE/MPLS already established for their
+                           // own dedicated filter values.
+    LldpOnly,              // only attempt LLDP decoding -- see lldp.hpp. A brand-new protocol (not a
+                           // migration -- LLDP had no decode logic of any kind before this, only the
+                           // generic ethertype-name fallback), EtherType-gated (0x88CC) with no port
+                           // at all, the same posture ARP/EAPOL/PPPoE/MPLS already established for
+                           // their own dedicated filter values.
     TwinCatOnly,           // only attempt Beckhoff TwinCAT/ADS (AMS/TCP) decoding -- see
                            // twincat.hpp. The first protocol built entirely on the
                            // registration-model ProtocolDecoder interface (protocol_decoder.hpp)
@@ -176,6 +189,14 @@ enum class ProtocolFilter {
                            // session-pending-request state machine is needed to decode response
                            // fields (FinsFlowState here is lighter-weight, matching only for a
                            // "matched to packet #N" note).
+    BgpOnly,               // only attempt BGP-4 (RFC 4271, TCP port 179) decoding -- see bgp.hpp. A
+                           // brand-new protocol built entirely on the ProtocolDecoder interface from
+                           // the start, like TwinCAT/MELSEC/FINS -- but the first of those to need
+                           // declared-length TCP reassembly (its own Length field, same role
+                           // Modbus's/MELSEC's/FINS's own Length fields already play) AND a
+                           // coalescing loop over the reassembled payload (same pattern OPC UA's own
+                           // decode() already established) AND genuine session-scoped state
+                           // (BgpFlowState -- whether 4-octet AS numbers were negotiated).
 };
 
 struct DecodeOptions {
@@ -224,6 +245,11 @@ struct DecodeOptions {
                                                    // both transports, the same SHARED-port-number
                                                    // shape extra_hartip_ports/extra_kerberos_ports
                                                    // already have (unlike MELSEC's own split ports).
+    std::vector<uint16_t> extra_bgp_ports;      // TCP only -- see BGP_PORT (179, bgp.hpp). Unlike
+                                                  // extra_twincat_ports (deliberately deferred, no
+                                                  // CLI flag), BGP follows the ordinary Modbus-style
+                                                  // pattern: a well-known, always-negotiated port,
+                                                  // so a --bgp-port flag makes sense from the start.
     std::vector<uint16_t> extra_opcua_ports;    // TCP only -- see OPCUA_PORT (4840)
     std::vector<uint16_t> extra_mqtt_ports;     // TCP only -- see MQTT_PORT (1883)
     std::vector<uint16_t> extra_ffhse_ports;    // TCP AND UDP -- see FFHSE_PORT_ANNUNC/_FMS/_SM/_LAN
@@ -803,6 +829,60 @@ struct DecodedPacket {
     uint8_t mpls_top_ttl = 0;
     bool mpls_stack_truncated = false;
     bool mpls_stack_too_deep = false;
+
+    // ARP (EtherType 0x0806, arp.hpp) -- Stage 2 new-protocol work, not a migration.
+    uint16_t arp_htype = 0;
+    std::string arp_htype_name;
+    uint16_t arp_ptype = 0;
+    std::string arp_ptype_name;
+    uint8_t arp_hlen = 0;
+    uint8_t arp_plen = 0;
+    uint16_t arp_oper = 0;
+    std::string arp_oper_name;
+    // True only for the well-formed htype==1(Ethernet)/ptype==0x0800(IPv4)/hlen==6/plen==4 case --
+    // only then are arp_sha_mac/arp_spa_ip/arp_tha_mac/arp_tpa_ip populated; otherwise
+    // arp_sha_hex/arp_spa_hex/arp_tha_hex/arp_tpa_hex hold the same HLEN/PLEN-driven raw bytes as hex.
+    bool arp_is_ethernet_ipv4 = false;
+    std::string arp_sha_mac;
+    std::string arp_spa_ip;
+    std::string arp_tha_mac;
+    std::string arp_tpa_ip;
+    std::string arp_sha_hex;
+    std::string arp_spa_hex;
+    std::string arp_tha_hex;
+    std::string arp_tpa_hex;
+    bool arp_is_gratuitous = false;
+    bool arp_is_probe = false;
+    bool arp_is_announcement = false;
+
+    // LLDP (EtherType 0x88CC, lldp.hpp) -- Stage 2 new-protocol work, not a migration.
+    uint8_t lldp_chassis_id_subtype = 0;
+    std::string lldp_chassis_id_subtype_name;
+    std::string lldp_chassis_id_value;
+    uint8_t lldp_port_id_subtype = 0;
+    std::string lldp_port_id_subtype_name;
+    std::string lldp_port_id_value;
+    uint16_t lldp_ttl_seconds = 0;
+    bool lldp_has_port_description = false;
+    std::string lldp_port_description;
+    bool lldp_has_system_name = false;
+    std::string lldp_system_name;
+    bool lldp_has_system_description = false;
+    std::string lldp_system_description;
+    bool lldp_has_system_capabilities = false;
+    uint16_t lldp_system_capabilities = 0;
+    uint16_t lldp_enabled_capabilities = 0;
+    std::vector<std::string> lldp_system_capabilities_names;
+    std::vector<std::string> lldp_enabled_capabilities_names;
+    bool lldp_has_management_address = false;
+    uint8_t lldp_management_address_subtype = 0;
+    std::string lldp_management_address_subtype_name;
+    std::string lldp_management_address;
+    size_t lldp_tlv_count = 0;
+    bool lldp_tlvs_truncated = false;
+    // One rendered summary line per TLV seen, in wire order -- same "vector<string> summary per
+    // repeated element" convention as ethercat_datagrams/mpls_labels/sv_asdus.
+    std::vector<std::string> lldp_tlvs;
 
     // Only set when protocol == "stp" -- see try_parse_stp in stp.hpp. Unlike every EtherType-keyed
     // raw-Ethernet protocol above, STP rides classic IEEE 802.3 LLC framing (has_ethernet stays

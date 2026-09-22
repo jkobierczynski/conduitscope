@@ -39,7 +39,13 @@ notes -- the fourth and final protocol of that same suite),
 IEEE Spanning Tree Protocol
 (STP/RSTP/MSTP), DeviceNet (CAN-bus CIP, via SocketCAN pcap captures), DNS,
 mDNS, LLMNR, and NetBIOS Name Service (NBT-NS), ICMP, RIP, IGMP, VRRP, HSRP,
-IGRP, PIM, EIGRP, and OSPFv2,
+IGRP, PIM, EIGRP, OSPFv2, ARP (RFC 826, with curated gratuitous-ARP/
+ARP-Probe/ARP-Announcement notes), LLDP (IEEE 802.1AB, Link Layer
+Discovery Protocol, with curated System Capabilities/Management Address
+rendering and a TTL=0 "shutting down" note), and BGP-4 (RFC 4271, TCP port
+179, with declared-length TCP reassembly, a KEEPALIVE-coalescing loop, and
+curated OPEN/UPDATE/NOTIFICATION rendering including RFC 8203 shutdown
+communication text),
 plus detects DNS-over-HTTPS
 (DoH) via TLS SNI matching, and recognizes (by name only, not full decode)
 RDP, VNC, TeamViewer, AnyDesk, and Zoom -- the "interactive remote control"

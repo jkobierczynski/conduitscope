@@ -18,6 +18,7 @@
 #include "conduitscope/goose.hpp"
 #include "conduitscope/hartip.hpp"
 #include "conduitscope/hsrp.hpp"
+#include "conduitscope/icmp.hpp"
 #include "conduitscope/opcua.hpp"
 #include "conduitscope/iec104.hpp"
 #include "conduitscope/igmp.hpp"
@@ -574,6 +575,8 @@ bool Decoder::reassemble_tcp_payload(const TcpSegment& tcp, const std::string& f
                        options_.protocol_filter == ProtocolFilter::FfHseOnly;
     bool want_fins = options_.protocol_filter == ProtocolFilter::Auto ||
                       options_.protocol_filter == ProtocolFilter::FinsOnly;
+    bool want_bgp = options_.protocol_filter == ProtocolFilter::Auto ||
+                     options_.protocol_filter == ProtocolFilter::BgpOnly;
 
     // OPC UA is checked first of all: its own structural detection gate (the leading 3 bytes must
     // be one of exactly 7 fixed ASCII MessageType strings -- "HEL"/"ACK"/"ERR"/"RHE"/"OPN"/"CLO"/
@@ -691,7 +694,19 @@ bool Decoder::reassemble_tcp_payload(const TcpSegment& tcp, const std::string& f
             which = "AMS/TCP (TwinCAT/ADS)";
         }
     }
-    // Kerberos/TCP, tried right after TwinCAT (itself right after Modbus, right after MELSEC --
+    // BGP-4 (RFC 4271, TCP port 179), tried right after TwinCAT -- see bgp.hpp's file header
+    // comment for the full wire format. No ordering rationale is actually needed here: BGP's own
+    // structural gate (a 128-bit Marker that MUST be all-0xFF, RFC 4271 section 4.1) is the
+    // strongest in this whole codebase -- stronger even than OPC UA's own 3-byte ASCII magic tried
+    // first of all above -- so it cannot collide with anything else in this cascade regardless of
+    // where it's tried.
+    if (!declared && want_bgp) {
+        if (auto d = bgp_decoder().tcp_declared_length(candidate)) {
+            declared = d;
+            which = "BGP-4 message";
+        }
+    }
+    // Kerberos/TCP, tried right after BGP (itself right after TwinCAT, right after Modbus, right after MELSEC --
     // see MELSEC's own call site above for why it moved ahead of Modbus) -- see kerberos.hpp's file
     // header comment for the full collision survey/ordering rationale. kerberos_tcp_declared_length's
     // own gate (4-byte length prefix, then a peek at one of 7 recognized ASN.1 APPLICATION tag bytes)
@@ -1234,6 +1249,96 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                             out.mpls_labels.push_back(ls.str());
                         }
                         for (const auto& n : mp.notes) out.notes.push_back(n);
+                        return out;
+                    }
+                }
+
+                // ARP (EtherType 0x0806) -- Stage 2 new-protocol work (not a migration -- ARP had no
+                // prior decode logic of any kind, only the generic ethertype-name fallback). Built
+                // directly on ProtocolDecoder from inception, the same posture TwinCAT/MELSEC/FINS
+                // established for GateKind::TcpPortIndependent -- see arp.hpp's file header comment.
+                bool want_arp = options_.protocol_filter == ProtocolFilter::Auto ||
+                                 options_.protocol_filter == ProtocolFilter::ArpOnly;
+                if (want_arp && eth.ethertype == ETHERTYPE_ARP) {
+                    DecodeContext ctx;
+                    ctx.protocol_id = "arp";
+                    if (auto result = arp_decoder().decode(eth.payload, ctx)) {
+                        const ArpMessage& arp = result->as<ArpMessage>();
+                        out.protocol = "arp";
+                        out.summary = arp.summary;
+                        out.arp_htype = arp.htype;
+                        out.arp_htype_name = arp.htype_name;
+                        out.arp_ptype = arp.ptype;
+                        out.arp_ptype_name = arp.ptype_name;
+                        out.arp_hlen = arp.hlen;
+                        out.arp_plen = arp.plen;
+                        out.arp_oper = arp.oper;
+                        out.arp_oper_name = arp.oper_name;
+                        out.arp_is_ethernet_ipv4 = arp.is_ethernet_ipv4;
+                        out.arp_sha_mac = arp.sha_mac;
+                        out.arp_spa_ip = arp.spa_ip;
+                        out.arp_tha_mac = arp.tha_mac;
+                        out.arp_tpa_ip = arp.tpa_ip;
+                        out.arp_sha_hex = arp.sha_hex;
+                        out.arp_spa_hex = arp.spa_hex;
+                        out.arp_tha_hex = arp.tha_hex;
+                        out.arp_tpa_hex = arp.tpa_hex;
+                        out.arp_is_gratuitous = arp.is_gratuitous;
+                        out.arp_is_probe = arp.is_probe;
+                        out.arp_is_announcement = arp.is_announcement;
+                        for (const auto& n : arp.notes) out.notes.push_back(n);
+                        return out;
+                    }
+                }
+
+                // LLDP (EtherType 0x88CC) -- Stage 2 new-protocol work (not a migration -- LLDP had
+                // no prior decode logic of any kind, only the generic ethertype-name fallback). Built
+                // directly on ProtocolDecoder from inception, same posture as ARP just above.
+                bool want_lldp = options_.protocol_filter == ProtocolFilter::Auto ||
+                                  options_.protocol_filter == ProtocolFilter::LldpOnly;
+                if (want_lldp && eth.ethertype == ETHERTYPE_LLDP) {
+                    DecodeContext ctx;
+                    ctx.protocol_id = "lldp";
+                    if (auto result = lldp_decoder().decode(eth.payload, ctx)) {
+                        const LldpMessage& lldp = result->as<LldpMessage>();
+                        out.protocol = "lldp";
+                        out.summary = lldp.summary;
+                        out.lldp_chassis_id_subtype = lldp.chassis_id_subtype;
+                        out.lldp_chassis_id_subtype_name = lldp.chassis_id_subtype_name;
+                        out.lldp_chassis_id_value = lldp.chassis_id_value;
+                        out.lldp_port_id_subtype = lldp.port_id_subtype;
+                        out.lldp_port_id_subtype_name = lldp.port_id_subtype_name;
+                        out.lldp_port_id_value = lldp.port_id_value;
+                        out.lldp_ttl_seconds = lldp.ttl_seconds;
+                        out.lldp_has_port_description = lldp.has_port_description;
+                        out.lldp_port_description = lldp.port_description;
+                        out.lldp_has_system_name = lldp.has_system_name;
+                        out.lldp_system_name = lldp.system_name;
+                        out.lldp_has_system_description = lldp.has_system_description;
+                        out.lldp_system_description = lldp.system_description;
+                        out.lldp_has_system_capabilities = lldp.has_system_capabilities;
+                        out.lldp_system_capabilities = lldp.system_capabilities;
+                        out.lldp_enabled_capabilities = lldp.enabled_capabilities;
+                        out.lldp_system_capabilities_names = lldp.system_capabilities_names;
+                        out.lldp_enabled_capabilities_names = lldp.enabled_capabilities_names;
+                        out.lldp_has_management_address = lldp.has_management_address;
+                        out.lldp_management_address_subtype = lldp.management_address_subtype;
+                        out.lldp_management_address_subtype_name = lldp.management_address_subtype_name;
+                        out.lldp_management_address = lldp.management_address;
+                        out.lldp_tlv_count = lldp.tlvs.size();
+                        out.lldp_tlvs_truncated = lldp.tlvs_truncated;
+                        const size_t kMaxLldpTlvSummaries = resource_limits().max_decoded_objects.value_or(50);
+                        for (const auto& t : lldp.tlvs) {
+                            if (out.lldp_tlvs.size() >= kMaxLldpTlvSummaries) break;
+                            std::ostringstream ts;
+                            ts << (t.type_name.empty() ? ("type " + std::to_string(static_cast<unsigned>(t.type)))
+                                                        : t.type_name);
+                            ts << " (" << t.length << " byte(s))";
+                            if (!t.rendered.empty()) ts << ": " << t.rendered;
+                            else if (!t.raw_hex.empty()) ts << ": " << t.raw_hex;
+                            out.lldp_tlvs.push_back(ts.str());
+                        }
+                        for (const auto& n : lldp.notes) out.notes.push_back(n);
                         return out;
                     }
                 }
@@ -2222,13 +2327,23 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
         // exclusive signal. Unlike the other six, ICMP's own try_parse_icmp accepts virtually any
         // 4+ byte payload on protocol number 1 (see icmp.hpp) -- so, uniquely among this group, an
         // ICMP-protocol-number payload essentially never falls through to "non-tcp" below.
+        // Migration batch 5: all seven are now on the ProtocolDecoder interface (EIGRP was already
+        // the GateKind::IpProtocol pilot; this batch migrated the other six) -- each call site below
+        // now reaches its try_parse_x through x_decoder().decode() instead of calling it directly,
+        // at the exact same textual position it always occupied; nothing about detection order or
+        // behavior changed. See protocol_registry.cpp's ip_protocol_registry().
         if (ip.protocol == ICMP_IP_PROTOCOL) {
             bool want_icmp = options_.protocol_filter == ProtocolFilter::Auto ||
                               options_.protocol_filter == ProtocolFilter::IcmpOnly;
             if (want_icmp) {
-                if (auto msg = try_parse_icmp(ip.payload)) {
+                // Migration batch 5: try_parse_icmp is now reached through IcmpDecoder::decode
+                // rather than called directly -- same function, same semantics, see icmp.hpp.
+                // fill_icmp_fields is unchanged.
+                DecodeContext ctx;
+                ctx.protocol_id = "icmp";
+                if (auto result = icmp_decoder().decode(ip.payload, ctx)) {
                     out.protocol = "icmp";
-                    fill_icmp_fields(out, *msg);
+                    fill_icmp_fields(out, result->as<IcmpMessage>());
                     return out;
                 }
             }
@@ -2238,9 +2353,14 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
             bool want_igmp = options_.protocol_filter == ProtocolFilter::Auto ||
                               options_.protocol_filter == ProtocolFilter::IgmpOnly;
             if (want_igmp) {
-                if (auto msg = try_parse_igmp(ip.payload)) {
+                // Migration batch 5: try_parse_igmp is now reached through IgmpDecoder::decode
+                // rather than called directly -- same function, same semantics, see igmp.hpp.
+                // fill_igmp_fields is unchanged.
+                DecodeContext ctx;
+                ctx.protocol_id = "igmp";
+                if (auto result = igmp_decoder().decode(ip.payload, ctx)) {
                     out.protocol = "igmp";
-                    fill_igmp_fields(out, *msg);
+                    fill_igmp_fields(out, result->as<IgmpMessage>());
                     return out;
                 }
             }
@@ -2250,9 +2370,14 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
             bool want_vrrp = options_.protocol_filter == ProtocolFilter::Auto ||
                               options_.protocol_filter == ProtocolFilter::VrrpOnly;
             if (want_vrrp) {
-                if (auto msg = try_parse_vrrp(ip.payload)) {
+                // Migration batch 5: try_parse_vrrp is now reached through VrrpDecoder::decode
+                // rather than called directly -- same function, same semantics, see vrrp.hpp.
+                // fill_vrrp_fields is unchanged.
+                DecodeContext ctx;
+                ctx.protocol_id = "vrrp";
+                if (auto result = vrrp_decoder().decode(ip.payload, ctx)) {
                     out.protocol = "vrrp";
-                    fill_vrrp_fields(out, *msg);
+                    fill_vrrp_fields(out, result->as<VrrpMessage>());
                     return out;
                 }
             }
@@ -2262,9 +2387,19 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
             bool want_igrp = options_.protocol_filter == ProtocolFilter::Auto ||
                               options_.protocol_filter == ProtocolFilter::IgrpOnly;
             if (want_igrp) {
-                if (auto msg = try_parse_igrp(ip.payload, ip.src_addr)) {
+                // Migration batch 5: try_parse_igrp is now reached through IgrpDecoder::decode
+                // rather than called directly -- same function, same semantics, see igrp.hpp.
+                // IGRP is the one protocol in this batch that needs more than the payload bytes
+                // (its classful Network field needs the packet's own IP source address to
+                // reconstruct the missing high octet -- see igrp.hpp's file header), so ctx.
+                // ip_src_addr (protocol_decoder.hpp) is populated here, unlike every other call
+                // site in this batch. fill_igrp_fields is unchanged.
+                DecodeContext ctx;
+                ctx.protocol_id = "igrp";
+                ctx.ip_src_addr = ip.src_addr;
+                if (auto result = igrp_decoder().decode(ip.payload, ctx)) {
                     out.protocol = "igrp";
-                    fill_igrp_fields(out, *msg);
+                    fill_igrp_fields(out, result->as<IgrpMessage>());
                     return out;
                 }
             }
@@ -2274,9 +2409,14 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
             bool want_pim = options_.protocol_filter == ProtocolFilter::Auto ||
                              options_.protocol_filter == ProtocolFilter::PimOnly;
             if (want_pim) {
-                if (auto msg = try_parse_pim(ip.payload)) {
+                // Migration batch 5: try_parse_pim is now reached through PimDecoder::decode
+                // rather than called directly -- same function, same semantics, see pim.hpp.
+                // fill_pim_fields is unchanged.
+                DecodeContext ctx;
+                ctx.protocol_id = "pim";
+                if (auto result = pim_decoder().decode(ip.payload, ctx)) {
                     out.protocol = "pim";
-                    fill_pim_fields(out, *msg);
+                    fill_pim_fields(out, result->as<PimMessage>());
                     return out;
                 }
             }
@@ -2303,9 +2443,17 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
             bool want_ospf = options_.protocol_filter == ProtocolFilter::Auto ||
                               options_.protocol_filter == ProtocolFilter::OspfOnly;
             if (want_ospf) {
-                if (auto msg = try_parse_ospf(ip.payload)) {
+                // Migration batch 5: try_parse_ospf is now reached through OspfDecoder::decode
+                // rather than called directly -- same function, same semantics, see ospf.hpp.
+                // fill_ospf_fields is unchanged. This completes migration batch 5: every protocol
+                // in decoder.cpp's IP-protocol-number-gated cascade (ICMP, IGMP, VRRP, IGRP, PIM,
+                // EIGRP, OSPF) is now on the ProtocolDecoder interface -- the fifth of six GateKinds
+                // to reach that state (see protocol_registry.cpp's ip_protocol_registry()).
+                DecodeContext ctx;
+                ctx.protocol_id = "ospf";
+                if (auto result = ospf_decoder().decode(ip.payload, ctx)) {
                     out.protocol = "ospf";
-                    fill_ospf_fields(out, *msg);
+                    fill_ospf_fields(out, result->as<OspfMessage>());
                     return out;
                 }
             }
@@ -2530,6 +2678,8 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                            options_.protocol_filter == ProtocolFilter::FfHseOnly;
         bool want_fins = options_.protocol_filter == ProtocolFilter::Auto ||
                           options_.protocol_filter == ProtocolFilter::FinsOnly;
+        bool want_bgp = options_.protocol_filter == ProtocolFilter::Auto ||
+                         options_.protocol_filter == ProtocolFilter::BgpOnly;
 
         // Tried first of all -- see the matching, fuller comment in reassemble_tcp_payload above
         // for why OPC UA's own magic-string detection gate is strong enough, and non-colliding
@@ -2819,6 +2969,41 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                     out.notes.push_back("seen on TCP port " + std::to_string(tcp.src_port) + "->" +
                                          std::to_string(tcp.dst_port) +
                                          ", which is not a configured/standard TwinCAT/AMS port (48898)");
+                }
+                return out;
+            }
+        }
+
+        if (want_bgp) {
+            // BGP-4 (RFC 4271, TCP port 179) -- the last piece of the three-stage plan that also
+            // added ARP and LLDP. Unlike those two, BGP is TCP-port-independent and needs declared-
+            // length reassembly (handled above, in reassemble_tcp_payload) plus its own coalescing
+            // loop (inside BgpDecoder::decode itself, see bgp.hpp's file header comment) and
+            // session-scoped state (BgpFlowState, tracking whether 4-octet AS numbers were
+            // negotiated) -- same "no dual-write into DecodedPacket's own fields" posture TwinCAT
+            // established just above: out.result carries the full BgpResult for JsonWriter's own
+            // registry-based rendering (output.cpp's write_bgp_json_fields), and
+            // out.protocol/summary/notes below are all TextWriter/CsvWriter need.
+            std::string session = tcp_session_key(out.src_ip, tcp.src_port, out.dst_ip, tcp.dst_port);
+            DecodeContext ctx;
+            ctx.flow_key = flow_key;
+            ctx.session_key = session;
+            ctx.packet_index = index;
+            ctx.protocol_id = "bgp";
+            ctx.flow_states = &registry_flow_state_;
+            if (auto result = bgp_decoder().decode(effective_payload, ctx)) {
+                const BgpResult& br = result->as<BgpResult>();
+                out.protocol = "bgp";
+                out.summary = br.summary;
+                for (const auto& n : br.notes) out.notes.push_back(n);
+                out.result = *result;
+
+                bool expected_port = port_in(tcp.src_port, BGP_PORT, options_.extra_bgp_ports) ||
+                                      port_in(tcp.dst_port, BGP_PORT, options_.extra_bgp_ports);
+                if (!expected_port) {
+                    out.notes.push_back("seen on TCP port " + std::to_string(tcp.src_port) + "->" +
+                                         std::to_string(tcp.dst_port) +
+                                         ", which is not a configured/standard BGP port (179)");
                 }
                 return out;
             }

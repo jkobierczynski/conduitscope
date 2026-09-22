@@ -379,4 +379,16 @@ std::optional<OspfMessage> try_parse_ospf(ByteSpan ip_payload) {
     return msg;
 }
 
+std::optional<ProtocolResult> OspfDecoder::decode(ByteSpan payload, DecodeContext& /*ctx*/) const {
+    if (auto msg = try_parse_ospf(payload)) {
+        return ProtocolResult::make<OspfMessage>("ospf", std::move(*msg));
+    }
+    return std::nullopt;
+}
+
+const ProtocolDecoder& ospf_decoder() {
+    static const OspfDecoder instance;
+    return instance;
+}
+
 }  // namespace conduitscope

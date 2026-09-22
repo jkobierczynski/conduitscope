@@ -54,6 +54,7 @@
 #include <vector>
 
 #include "conduitscope/byteio.hpp"
+#include "conduitscope/protocol_decoder.hpp"
 
 namespace conduitscope {
 
@@ -140,5 +141,18 @@ struct IcmpMessage {
 // number 1 (IANA-exclusive to ICMP) that actually keeps this from mis-firing, same posture as
 // EIGRP's/OSPF's own file header comments describe for themselves.
 std::optional<IcmpMessage> try_parse_icmp(ByteSpan ip_payload);
+
+// Migration batch 5 (see protocol_decoder.hpp/protocol_registry.hpp): thin ProtocolDecoder wrapper
+// around try_parse_icmp above, unchanged -- same shape as EigrpDecoder (eigrp.hpp), the original
+// GateKind::IpProtocol pilot. Stateless, no tcp_declared_length()/FlowStateKeying needed.
+class IcmpDecoder : public ProtocolDecoder {
+public:
+    std::string_view id() const override { return "icmp"; }
+    GateKind gate_kind() const override { return GateKind::IpProtocol; }
+    std::optional<uint8_t> ip_protocol() const override { return ICMP_IP_PROTOCOL; }
+    std::optional<ProtocolResult> decode(ByteSpan payload, DecodeContext& ctx) const override;
+};
+
+const ProtocolDecoder& icmp_decoder();
 
 }  // namespace conduitscope

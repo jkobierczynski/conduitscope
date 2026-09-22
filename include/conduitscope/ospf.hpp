@@ -57,6 +57,7 @@
 #include <vector>
 
 #include "conduitscope/byteio.hpp"
+#include "conduitscope/protocol_decoder.hpp"
 
 namespace conduitscope {
 
@@ -211,5 +212,18 @@ struct OspfMessage {
 // RIP/EIGRP/PIM. Dispatch in decoder.cpp only ever calls this for IP protocol number 89, which is
 // IANA-exclusive to OSPF, so no further port-style gating is applied.
 std::optional<OspfMessage> try_parse_ospf(ByteSpan ip_payload);
+
+// Migration batch 5 (see protocol_decoder.hpp/protocol_registry.hpp): thin ProtocolDecoder wrapper
+// around try_parse_ospf above, unchanged -- same shape as EigrpDecoder (eigrp.hpp), the original
+// GateKind::IpProtocol pilot. Stateless, no tcp_declared_length()/FlowStateKeying needed.
+class OspfDecoder : public ProtocolDecoder {
+public:
+    std::string_view id() const override { return "ospf"; }
+    GateKind gate_kind() const override { return GateKind::IpProtocol; }
+    std::optional<uint8_t> ip_protocol() const override { return OSPF_IP_PROTOCOL; }
+    std::optional<ProtocolResult> decode(ByteSpan payload, DecodeContext& ctx) const override;
+};
+
+const ProtocolDecoder& ospf_decoder();
 
 }  // namespace conduitscope

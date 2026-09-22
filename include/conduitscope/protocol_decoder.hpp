@@ -110,6 +110,16 @@ struct DecodeContext {
     std::string protocol_id;
     FlowStateMap* flow_states = nullptr;  // non-null whenever a stateful decoder might be called
 
+    // Migration batch 5 addition: the packet's own IPv4 source address, in host byte order -- IGRP's
+    // only user (see igrp.hpp's file header comment: IGRP's 3-byte classful Network field needs the
+    // missing high octet reconstructed from the carrying packet's own source address, a genuinely
+    // different need from every other GateKind::IpProtocol decoder, all of which parse purely from
+    // the IP payload with no header context). Left at 0 (a real, if unlikely, address -- callers that
+    // don't populate this simply never asked a decoder that reads it) for every other decoder; only
+    // decoder.cpp's IGRP call site ever sets it. Same category of small, narrowly-scoped interface
+    // extension as FlowStateKeying/udp_port() were for their own one-time needs.
+    uint32_t ip_src_addr = 0;
+
     // Returns this protocol's flow state for `session_key`, default-constructing a fresh T the
     // first time a given session is seen. Only ever called by a stateful decoder's own decode()
     // (e.g. ModbusDecoder), which alone knows T -- see modbus.cpp/twincat.cpp for the pattern this

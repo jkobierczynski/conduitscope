@@ -465,4 +465,16 @@ std::optional<PimMessage> try_parse_pim(ByteSpan ip_payload) {
     return msg;
 }
 
+std::optional<ProtocolResult> PimDecoder::decode(ByteSpan payload, DecodeContext& /*ctx*/) const {
+    if (auto msg = try_parse_pim(payload)) {
+        return ProtocolResult::make<PimMessage>("pim", std::move(*msg));
+    }
+    return std::nullopt;
+}
+
+const ProtocolDecoder& pim_decoder() {
+    static const PimDecoder instance;
+    return instance;
+}
+
 }  // namespace conduitscope

@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "conduitscope/protocol_registry.hpp"
 
+#include "conduitscope/arp.hpp"
 #include "conduitscope/bacnet.hpp"
+#include "conduitscope/bgp.hpp"
 #include "conduitscope/cotp.hpp"
 #include "conduitscope/dnp3.hpp"
 #include "conduitscope/dns.hpp"
@@ -13,9 +15,13 @@
 #include "conduitscope/goose.hpp"
 #include "conduitscope/hartip.hpp"
 #include "conduitscope/hsrp.hpp"
+#include "conduitscope/icmp.hpp"
 #include "conduitscope/iec104.hpp"
+#include "conduitscope/igmp.hpp"
+#include "conduitscope/igrp.hpp"
 #include "conduitscope/kerberos.hpp"
 #include "conduitscope/ldap.hpp"
+#include "conduitscope/lldp.hpp"
 #include "conduitscope/melsec.hpp"
 #include "conduitscope/mms.hpp"
 #include "conduitscope/modbus.hpp"
@@ -23,6 +29,8 @@
 #include "conduitscope/mqtt.hpp"
 #include "conduitscope/nbns.hpp"
 #include "conduitscope/opcua.hpp"
+#include "conduitscope/ospf.hpp"
+#include "conduitscope/pim.hpp"
 #include "conduitscope/pppoe.hpp"
 #include "conduitscope/profinet.hpp"
 #include "conduitscope/rip.hpp"
@@ -32,6 +40,7 @@
 #include "conduitscope/stp.hpp"
 #include "conduitscope/sv.hpp"
 #include "conduitscope/twincat.hpp"
+#include "conduitscope/vrrp.hpp"
 
 namespace conduitscope {
 
@@ -106,15 +115,56 @@ const std::vector<const ProtocolDecoder*>& ethertype_registry() {
                             // every EtherType-framed candidate above must have already failed to
                             // match before an LLC-framed one is even structurally possible" (see
                             // decoder.cpp's own call site comment).
+        &arp_decoder(),    // Added after STP, NOT part of migration batch 3 (or any migration) --
+                            // ARP is a brand-new protocol added to this cascade afterward, built
+                            // directly on ProtocolDecoder from inception (see arp.hpp's file header
+                            // comment). EtherType 0x0806 is exclusive to ARP, no collision risk with
+                            // anything else in this vector; position here is purely "appended after
+                            // the batch, not reasoned about relative to the others" -- see this
+                            // vector's own doc comment in protocol_registry.hpp.
+        &lldp_decoder(),   // Added after ARP, same posture -- a brand-new protocol, not part of any
+                            // migration, built directly on ProtocolDecoder from inception (see
+                            // lldp.hpp's file header comment). EtherType 0x88CC is exclusive to LLDP,
+                            // no collision risk with anything else in this vector; position here is
+                            // purely "appended after ARP, not reasoned about relative to the others".
     };
     return order;
 }
 
 const std::vector<const ProtocolDecoder*>& ip_protocol_registry() {
     static const std::vector<const ProtocolDecoder*> order = {
+        &icmp_decoder(),   // Migration batch 5 -- sits exactly where the old `if (want_icmp)` block
+                            // always did: tried first of this whole cascade. No ordering rationale
+                            // beyond position preservation needed -- IP protocol number 1 is
+                            // IANA-exclusive to ICMP, no collision possible with any other
+                            // IP-protocol-number-keyed protocol, migrated or not.
+        &igmp_decoder(),   // Migration batch 5 -- sits exactly where the old `if (want_igmp)` block
+                            // always did: after ICMP (migrated above, in this same batch), before
+                            // VRRP/IGRP/PIM/EIGRP/OSPF. IP protocol number 2 is IANA-exclusive to
+                            // IGMP -- no collision rationale needed, same reasoning as ICMP above.
+        &vrrp_decoder(),   // Migration batch 5 -- sits exactly where the old `if (want_vrrp)` block
+                            // always did: after ICMP/IGMP (migrated above), before IGRP/PIM/EIGRP/
+                            // OSPF. IP protocol number 112 is IANA-exclusive to VRRP.
+        &igrp_decoder(),   // Migration batch 5 -- sits exactly where the old `if (want_igrp)` block
+                            // always did: after ICMP/IGMP/VRRP (migrated above), before PIM/EIGRP/
+                            // OSPF. IP protocol number 9 is IANA-exclusive to IGRP. The one protocol
+                            // in this batch whose decode() needs more than the payload bytes -- see
+                            // DecodeContext::ip_src_addr's own comment (protocol_decoder.hpp) and
+                            // igrp.hpp's file header for why.
+        &pim_decoder(),    // Migration batch 5 -- sits exactly where the old `if (want_pim)` block
+                            // always did: after ICMP/IGMP/VRRP/IGRP (migrated above), before EIGRP/
+                            // OSPF. IP protocol number 103 is IANA-exclusive to PIM.
         &eigrp_decoder(),  // Stage 1 of the pilot -- IP protocol number 88 is IANA-exclusive to
                             // EIGRP, no ordering rationale needed for the same reason GOOSE above
                             // needs none.
+        &ospf_decoder(),   // Migration batch 5 -- sits exactly where the old `if (want_ospf)` block
+                            // always did: tried last of this whole cascade, after every
+                            // IP-protocol-number-keyed protocol above (all seven now migrated, in
+                            // this and the pilot's own batches). This completes migration batch 5 --
+                            // the IP-protocol-number gate cascade is now fully populated, the fifth
+                            // GateKind (after EtherType/TcpPortIndependent/UdpPortIndependent/
+                            // CotpPayload) to reach that state. IP protocol number 89 is
+                            // IANA-exclusive to OSPF.
     };
     return order;
 }
@@ -251,6 +301,18 @@ const std::vector<const ProtocolDecoder*>& tcp_port_independent_registry() {
                               // per-session learned version hint (MqttFlowState) replaces the
                               // bespoke Decoder::mqtt_session_version_ map, the same generalization
                               // Modbus's own ModbusFlowState already did for modbus_pending_.
+        &bgp_decoder(),      // Added after MQTT, NOT part of any migration batch -- a brand-new
+                              // protocol added to this cascade afterward, built directly on
+                              // ProtocolDecoder from inception (see bgp.hpp's file header comment),
+                              // the same "new addition, not a migration" posture ARP/LLDP
+                              // established for ethertype_registry() above. decoder.cpp's own call
+                              // site sits right after TwinCAT (before Kerberos), not at the end of
+                              // this cascade -- this vector's own append-at-the-end position is
+                              // purely its audit-trail convention (see this vector's own doc
+                              // comment in protocol_registry.hpp), not a claim about dispatch
+                              // order. BGP's own structural gate (a 128-bit Marker that MUST be
+                              // all-0xFF) is the strongest in this whole codebase, so it cannot
+                              // collide with anything else in this cascade regardless of position.
     };
     return order;
 }

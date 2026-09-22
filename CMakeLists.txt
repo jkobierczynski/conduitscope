@@ -89,6 +89,9 @@ add_library(conduitscope_core STATIC
   src/pppoe.cpp
   src/tunnel_vpn.cpp
   src/mpls.cpp
+  src/arp.cpp
+  src/lldp.cpp
+  src/bgp.cpp
   src/twincat.cpp
   src/melsec.cpp
   src/fins.cpp
@@ -2992,7 +2995,12 @@ set_tests_properties(real_hartip_stats_summary PROPERTIES
   # tcp is 62, not 63: one of this capture's background TCP connections (port 445) is genuine SMB1
   # traffic, now correctly recognized and decoded as "smb" by smb.hpp -- see
   # real_hartip_smb_traffic_now_correctly_decoded below and ATTRIBUTION.md's own updated note.
-  PASS_REGULAR_EXPRESSION "packets: +116[^\n]*\n[^\n]*\nprotocols:\n *hartip +46\n *icmp +1\n *modbus +2\n *non-ip +4\n *smb +1\n *tcp +62\n.*hartip message types:\n *Request +23\n *Response +23\nhartip pass-through commands:\n.*icmp types:\n *Destination Unreachable +1")
+  # arp is 4, not "non-ip" 4: this capture's four non-IPv4 Ethernet frames are genuine ARP traffic
+  # (OPER a recognized opcode) -- previously shown only as an opaque "non-ip" count before
+  # try_parse_arp existed (see arp.hpp/arp.cpp), now decoded and broken out as its own "arp"
+  # protocol line, the same "real feature, real capture, count moves from the generic fallback to
+  # the new specific protocol" pattern the icmp/smb notes above already document.
+  PASS_REGULAR_EXPRESSION "packets: +116[^\n]*\n[^\n]*\nprotocols:\n *arp +4\n *hartip +46\n *icmp +1\n *modbus +2\n *smb +1\n *tcp +62\n.*hartip message types:\n *Request +23\n *Response +23\nhartip pass-through commands:\n.*icmp types:\n *Destination Unreachable +1")
 
 add_test(NAME real_hartip_command_coverage_json
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/hartip/hart_ip.pcapng" --stats)
@@ -9297,3 +9305,250 @@ add_test(NAME resource_limit_flags_present_in_inventory_help
   COMMAND conduitscope inventory --help)
 set_tests_properties(resource_limit_flags_present_in_inventory_help PROPERTIES
   PASS_REGULAR_EXPRESSION "--max-reassembly-bytes[^\n]*\n.*--max-reassembly-segments[^\n]*\n.*--max-recursion-depth[^\n]*\n.*--max-decoded-objects[^\n]*\n.*--max-coalesced-messages")
+
+# --------------------------------------------------------------------------
+# ARP (RFC 826, EtherType 0x0806, arp.hpp) -- Stage 2 new-protocol work, not a migration (see
+# decoder.hpp's own comment on ProtocolFilter::ArpOnly). tests/sample_arp.pcap
+# (tools/make_sample_pcap.py's own build_arp_sample) covers an ARP Request, an ARP Reply, a
+# gratuitous ARP (Reply with SPA==TPA), an ARP Probe (RFC 5227), an ARP Announcement (RFC 5227,
+# wire-identical to a gratuitous Request, so both notes fire), and a non-Ethernet/non-IPv4 HTYPE
+# case (HTYPE=6, raw-hex SHA/SPA/THA/TPA fallback). NOT to be confused with
+# tests/sample_link_transport_layers.pcap's own ARP frame (link_layer_arp_ethertype_named above)
+# -- that one's OPER reads as 0x0000, an unrecognized opcode, so try_parse_arp's own structural
+# gate declines it and it correctly stays "[non-ip]"; the two fixtures are deliberately
+# independent and neither one's coverage substitutes for the other's.
+# --------------------------------------------------------------------------
+add_test(NAME arp_request_decoded
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_arp.pcap")
+set_tests_properties(arp_request_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[arp\\]  ARP Request -- who has 192\\.168\\.1\\.10\\? tell 192\\.168\\.1\\.50 \\(00:0c:29:11:22:33\\)")
+
+add_test(NAME arp_reply_decoded
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_arp.pcap")
+set_tests_properties(arp_reply_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[arp\\]  ARP Reply -- 192\\.168\\.1\\.10 is at 00:0c:29:aa:bb:cc\n")
+
+add_test(NAME arp_gratuitous_reply_decoded
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_arp.pcap")
+set_tests_properties(arp_gratuitous_reply_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[arp\\]  ARP Reply -- 192\\.168\\.1\\.10 is at 00:0c:29:aa:bb:cc \\[gratuitous\\]\n *note: Gratuitous ARP \\(sender and target protocol address match\\)")
+
+add_test(NAME arp_probe_decoded
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_arp.pcap")
+set_tests_properties(arp_probe_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[arp\\]  ARP Request -- who has 192\\.168\\.1\\.99\\? tell 0\\.0\\.0\\.0 \\(00:0c:29:de:ad:99\\) \\[probe\\]\n *note: ARP Probe \\(RFC 5227\\): sender protocol address is 0\\.0\\.0\\.0")
+
+add_test(NAME arp_announcement_decoded_with_both_notes
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_arp.pcap")
+set_tests_properties(arp_announcement_decoded_with_both_notes PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[arp\\]  ARP Request -- who has 192\\.168\\.1\\.99\\? tell 192\\.168\\.1\\.99 \\(00:0c:29:de:ad:99\\) \\[announcement\\]\n *note: Gratuitous ARP \\(sender and target protocol address match\\)[^\n]*\n *note: ARP Announcement \\(RFC 5227\\): sender and target protocol address both name the newly-claimed address")
+
+# HTYPE=6 ("IEEE 802 Networks") is not HTYPE==1 (Ethernet), so is_ethernet_ipv4 stays false
+# despite PTYPE==0x0800 (still named "IPv4") -- SHA/SPA/THA/TPA are shown as raw hex (via the
+# parenthetical htype/ptype/hlen/plen summary), never guessed at as a MAC/dotted-quad, per
+# arp.hpp's own "structural detection gate"/is_ethernet_ipv4 comment.
+add_test(NAME arp_non_ethernet_htype_raw_hex_fallback
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_arp.pcap")
+set_tests_properties(arp_non_ethernet_htype_raw_hex_fallback PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[arp\\]  ARP Reply \\(htype=6, ptype=0x800 \\(IPv4\\), hlen=6, plen=4\\)")
+
+# --protocol arp isolation: every one of the six frames in sample_arp.pcap must still decode as
+# arp (ArpOnly is EtherType-gated same as Auto mode here, no port to restrict), and none may fall
+# through to "non-ip"/"parse-error" -- confirms ProtocolFilter::ArpOnly's own decoder.cpp wiring
+# doesn't accidentally decline a frame Auto mode would otherwise accept.
+add_test(NAME arp_protocol_filter_isolates_arp_only
+  COMMAND conduitscope decode --format text --protocol arp --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_arp.pcap")
+set_tests_properties(arp_protocol_filter_isolates_arp_only PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[arp\\].*\\[arp\\].*\\[arp\\].*\\[arp\\].*\\[arp\\].*\\[arp\\]"
+  FAIL_REGULAR_EXPRESSION "\\[non-ip\\]|\\[parse-error\\]")
+
+add_test(NAME arp_stats_counted
+  COMMAND conduitscope decode --format text --stats --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_arp.pcap")
+set_tests_properties(arp_stats_counted PROPERTIES
+  PASS_REGULAR_EXPRESSION "packets: +6[^\n]*\n.*protocols:\n *arp +6")
+
+# --------------------------------------------------------------------------
+# LLDP (IEEE 802.1AB, EtherType 0x88CC, lldp.hpp) -- Stage 2 new-protocol work, not a migration
+# (see decoder.hpp's own comment on ProtocolFilter::LldpOnly), added right after ARP. tests/
+# sample_lldp.pcap (tools/make_sample_pcap.py's own build_lldp_sample) covers: a well-formed PDU
+# with the mandatory Chassis ID (MAC)/Port ID (interface name)/TTL triple plus a System Name and a
+# System Capabilities TLV; a PDU adding Port Description/System Description/Management Address
+# (IPv4); a Chassis ID using the "Locally assigned" subtype (raw-string rendering); an
+# Organizationally Specific TLV using the recognized IEEE 802.3 OUI; a TTL=0 PDU; a
+# malformed/truncated trailing TLV (graceful truncation, not a whole-PDU decline); and a
+# wrong-TLV-order negative control (Port ID before Chassis ID) that must fall through to
+# "[non-ip]", never "[lldp]" -- the LLDP equivalent of ARP's own unknown-opcode-declines coverage.
+# --------------------------------------------------------------------------
+add_test(NAME lldp_mandatory_triple_with_name_and_capabilities_decoded
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_lldp.pcap")
+set_tests_properties(lldp_mandatory_triple_with_name_and_capabilities_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[lldp\\]  LLDP chassis=00:0c:29:aa:bb:cc port=eth0 ttl=120s name=\"plc-01\"")
+
+add_test(NAME lldp_port_description_system_description_management_address_decoded
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_lldp.pcap")
+set_tests_properties(lldp_port_description_system_description_management_address_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[lldp\\]  LLDP chassis=00:0c:29:11:22:33 port=eth1 ttl=60s")
+
+# Chassis ID subtype 7 ("Locally assigned") -- exercises the raw-string rendering path, not
+# MAC/network address -- see lldp.hpp's own "non-parallel subtype table" paragraph.
+add_test(NAME lldp_locally_assigned_chassis_id_raw_string_rendered
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_lldp.pcap")
+set_tests_properties(lldp_locally_assigned_chassis_id_raw_string_rendered PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[lldp\\]  LLDP chassis=rack3-lldp-id port=Gi0/1 ttl=90s")
+
+add_test(NAME lldp_org_specific_tlv_decoded
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_lldp.pcap")
+set_tests_properties(lldp_org_specific_tlv_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "#4  .*\\[lldp\\]  LLDP chassis=00:0c:29:aa:bb:cc port=eth0 ttl=120s\n")
+
+add_test(NAME lldp_ttl_zero_shutting_down_note
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_lldp.pcap")
+set_tests_properties(lldp_ttl_zero_shutting_down_note PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[lldp\\]  LLDP chassis=00:0c:29:11:22:33 port=eth0 ttl=0s\n *note: TTL is 0 -- this is LLDP's own \"shutting down\" signal")
+
+# A trailing TLV (after the mandatory 3, which decode fine) declares a 10-byte value but only 3
+# bytes actually follow -- graceful truncation, not a whole-PDU decline, mirroring what
+# try_parse_lldp's own standalone unit harness already covered directly.
+add_test(NAME lldp_truncated_trailing_tlv_graceful_fallback
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_lldp.pcap")
+set_tests_properties(lldp_truncated_trailing_tlv_graceful_fallback PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[lldp\\]  LLDP chassis=00:0c:29:aa:bb:cc port=eth0 ttl=120s\n *note: a TLV at byte offset 20 declares a 10-byte value but only 3 byte\\(s\\) remain -- stopped decoding further TLVs")
+
+# Wrong TLV order (Port ID before Chassis ID) -- the structural detection gate declines the whole
+# frame, which must fall through to the generic ethertype-name "[non-ip]" fallback, NOT "[lldp]".
+add_test(NAME lldp_wrong_tlv_order_declines_to_non_ip
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_lldp.pcap")
+set_tests_properties(lldp_wrong_tlv_order_declines_to_non_ip PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[non-ip\\]  Ethernet frame with ethertype 0x88cc \\(LLDP\\) \\(not IPv4\\)")
+
+# --protocol lldp isolation: every decodable frame in sample_lldp.pcap must still decode as lldp
+# (LldpOnly is EtherType-gated same as Auto mode here, no port to restrict); the one
+# structurally-declined frame (wrong TLV order) still falls through to "[non-ip]" even under this
+# filter, the same posture ArpOnly's own isolation test already established.
+add_test(NAME lldp_protocol_filter_isolates_lldp_only
+  COMMAND conduitscope decode --format text --protocol lldp --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_lldp.pcap")
+set_tests_properties(lldp_protocol_filter_isolates_lldp_only PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[lldp\\].*\\[lldp\\].*\\[lldp\\].*\\[lldp\\].*\\[lldp\\].*\\[lldp\\].*\\[non-ip\\]"
+  FAIL_REGULAR_EXPRESSION "\\[parse-error\\]")
+
+add_test(NAME lldp_stats_counted
+  COMMAND conduitscope decode --format text --stats --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_lldp.pcap")
+set_tests_properties(lldp_stats_counted PROPERTIES
+  PASS_REGULAR_EXPRESSION "packets: +7[^\n]*\n.*protocols:\n *lldp +6\n *non-ip +1")
+
+# ---------------------------------------------------------------------------------------------
+# BGP-4 (RFC 4271, TCP port 179, bgp.hpp) -- the last piece of the three-stage plan that also
+# added ARP and LLDP. Unlike those two, BGP is TCP-port-independent and needs declared-length TCP
+# reassembly, a message-coalescing loop, and session-scoped state (BgpFlowState) -- see bgp.hpp's
+# own file header comment for the full wire format and docs/PROTOCOL_COVERAGE.md for the audit
+# framing. Fixture generated by tools/make_sample_pcap.py's build_bgp_sample -- tests/sample_bgp.pcap
+# (10 packets: an OPEN exchange between two peers -- one 4-octet-AS capable, one not -- an UPDATE
+# with ORIGIN/AS_PATH/NEXT_HOP/COMMUNITY/MP_REACH_NLRI, a pure-withdrawal UPDATE, 3 KEEPALIVEs
+# coalesced into one TCP segment, an RFC 8203 shutdown NOTIFICATION, one UPDATE split across two
+# TCP segments, a ROUTE-REFRESH on a non-standard port, and a non-BGP-shaped negative control on
+# BGP's own standard port).
+# ---------------------------------------------------------------------------------------------
+
+add_test(NAME bgp_open_exchange_four_octet_as_capability_asymmetric
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bgp.pcap")
+set_tests_properties(bgp_open_exchange_four_octet_as_capability_asymmetric PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[bgp\\]  BGP OPEN version=4 my_as=23456 hold_time=180 identifier=10\\.0\\.0\\.1 \\[4-octet-AS capable\\].*\\[bgp\\]  BGP OPEN version=4 my_as=65002 hold_time=180 identifier=10\\.0\\.0\\.2  \\(client")
+
+# Peer B's OPEN (no 4-octet AS capability) was processed second on this same session, so
+# BgpFlowState's own AS-number width is authoritatively 2-byte by the time the later UPDATE's
+# AS_PATH attribute is decoded -- confirmed via the JSON-only "authoritative" field (see
+# bgp.hpp's own AS_PATH paragraph for exactly why this is session-scoped, not per-direction).
+add_test(NAME bgp_as_path_authoritative_two_byte_width_after_non_capable_open
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bgp.pcap")
+set_tests_properties(bgp_as_path_authoritative_two_byte_width_after_non_capable_open PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"bgp_update_as_path\": \"65001 65002 65003\",\n *\"bgp_update_as_path_authoritative\": true")
+
+add_test(NAME bgp_update_origin_as_path_next_hop_decoded
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bgp.pcap")
+set_tests_properties(bgp_update_origin_as_path_next_hop_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[bgp\\]  BGP UPDATE withdrawn=0 nlri=0 attrs=5 as_path=\\[65001 65002 65003\\] next_hop=10\\.0\\.0\\.1")
+
+# COMMUNITY (a recognized well-known value plus an uncurated raw-hex one) and MP_REACH_NLRI
+# (AFI=1/SAFI=1, next hop, two IPv4 NLRI prefixes) -- both only surfaced in full by JSON's own
+# bgp_update_path_attributes array (see output.cpp's write_bgp_json_fields).
+add_test(NAME bgp_update_communities_and_mp_reach_nlri_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bgp.pcap")
+set_tests_properties(bgp_update_communities_and_mp_reach_nlri_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"COMMUNITY: NO_EXPORT, 0x1E0064\".*\"MP_REACH_NLRI: AFI=1 SAFI=1 nexthop=10\\.0\\.0\\.1 nlri=\\[203\\.0\\.113\\.0/24, 198\\.51\\.0\\.0/16\\]\"")
+
+add_test(NAME bgp_update_withdrawn_routes_decoded
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bgp.pcap")
+set_tests_properties(bgp_update_withdrawn_routes_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[bgp\\]  BGP UPDATE withdrawn=2 nlri=0 attrs=0")
+
+add_test(NAME bgp_update_withdrawn_routes_prefixes_in_json
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bgp.pcap")
+set_tests_properties(bgp_update_withdrawn_routes_prefixes_in_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"bgp_update_withdrawn_routes\": \\[\"203\\.0\\.113\\.0/24\", \"203\\.0\\.114\\.0/24\"\\]")
+
+# Three KEEPALIVEs coalesced into a single TCP segment -- exercises BgpDecoder::decode's own
+# coalescing loop (see bgp.hpp/bgp.cpp).
+add_test(NAME bgp_coalesced_keepalives_in_one_tcp_segment
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bgp.pcap")
+set_tests_properties(bgp_coalesced_keepalives_in_one_tcp_segment PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[bgp\\]  BGP KEEPALIVE[^\n]*\n *note: additional BGP message 2 found in the same TCP payload at byte offset 19 \\(coalesced by the sender/OS\\): BGP KEEPALIVE\n *note: additional BGP message 3 found in the same TCP payload at byte offset 38 \\(coalesced by the sender/OS\\): BGP KEEPALIVE")
+
+add_test(NAME bgp_coalesced_message_count_in_json
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bgp.pcap")
+set_tests_properties(bgp_coalesced_message_count_in_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"bgp_type\": \"KEEPALIVE\",\n *\"bgp_length\": 19,\n *\"bgp_coalesced_message_count\": 3")
+
+# RFC 8203 shutdown communication (Cease/Administrative Shutdown).
+add_test(NAME bgp_notification_rfc8203_shutdown_communication_decoded
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bgp.pcap")
+set_tests_properties(bgp_notification_rfc8203_shutdown_communication_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[bgp\\]  BGP NOTIFICATION Cease/Administrative Shutdown -- \"Scheduled maintenance window\"")
+
+# One UPDATE split across two TCP segments, the split point deliberately after the complete
+# 19-byte header (not mid-header, see build_bgp_sample's own comment on why) -- exercises
+# BgpDecoder::tcp_declared_length via Decoder::reassemble_tcp_payload, the same split/rejoin shape
+# build_tcp_reassembly_sample/build_twincat_sample already cover.
+add_test(NAME bgp_tcp_segment_split_reassembly
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bgp.pcap")
+set_tests_properties(bgp_tcp_segment_split_reassembly PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[tcp\\]  buffering a BGP-4 message PDU/frame split across TCP segments 52000->179: 25 of 38 declared byte\\(s\\) seen so far across 1 segment\\(s\\) on this flow, waiting for more.*\\[bgp\\]  BGP UPDATE withdrawn=0 nlri=1 attrs=2 next_hop=10\\.0\\.0\\.1[^\n]*\n *note: reassembled a BGP-4 message PDU/frame from 38 byte\\(s\\) spanning 2 TCP segments on this flow")
+
+# A ROUTE-REFRESH on a non-standard BGP port (1179, not 179) -- BGP's own detection gate is
+# entirely port-independent, so this still decodes, but gets the "not a configured/standard BGP
+# port" note.
+add_test(NAME bgp_non_standard_port_noted
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bgp.pcap")
+set_tests_properties(bgp_non_standard_port_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.10:55000 -> 192\\.168\\.1\\.50:1179  \\[bgp\\]  BGP ROUTE-REFRESH AFI=1 SAFI=1[^\n]*\n *note: seen on TCP port 55000->1179, which is not a configured/standard BGP port \\(179\\)")
+
+# --bgp-port 1179 suppresses that same note (mirrors Modbus's/TwinCAT's own --*-port precedent).
+add_test(NAME bgp_extra_port_flag_suppresses_non_standard_port_note
+  COMMAND conduitscope decode --format text --bgp-port 1179 --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bgp.pcap")
+set_tests_properties(bgp_extra_port_flag_suppresses_non_standard_port_note PROPERTIES
+  PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.10:55000 -> 192\\.168\\.1\\.50:1179  \\[bgp\\]  BGP ROUTE-REFRESH AFI=1 SAFI=1  \\(client"
+  FAIL_REGULAR_EXPRESSION "not a configured/standard BGP port")
+
+# Negative control: a TCP/179 payload whose leading 16 bytes are NOT all 0xFF -- BGP's own Marker
+# gate (the strongest structural gate in this codebase) must decline this outright, falling back
+# to the generic "tcp" protocol tag, never a crash or a false positive.
+add_test(NAME bgp_negative_control_non_marker_payload_falls_back_to_tcp
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bgp.pcap")
+set_tests_properties(bgp_negative_control_non_marker_payload_falls_back_to_tcp PROPERTIES
+  PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.10:56000 -> 192\\.168\\.1\\.50:179  \\[tcp\\]  TCP payload of 31 byte\\(s\\) on port 56000->179"
+  FAIL_REGULAR_EXPRESSION "192\\.168\\.1\\.10:56000 -> 192\\.168\\.1\\.50:179  \\[bgp\\]")
+
+add_test(NAME bgp_stats_counted
+  COMMAND conduitscope decode --format text --stats --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bgp.pcap")
+set_tests_properties(bgp_stats_counted PROPERTIES
+  PASS_REGULAR_EXPRESSION "packets: +10[^\n]*\n.*protocols:\n *bgp +8\n *tcp +2")
+
+add_test(NAME bgp_protocol_filter_excludes_other_protocols
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --protocol bgp --format text)
+set_tests_properties(bgp_protocol_filter_excludes_other_protocols PROPERTIES
+  FAIL_REGULAR_EXPRESSION "\\[modbus\\]")
+
+add_test(NAME bgp_protocol_filter_includes_only_bgp
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bgp.pcap" --protocol bgp --format text)
+set_tests_properties(bgp_protocol_filter_includes_only_bgp PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[bgp\\]  BGP OPEN version=4 my_as=23456"
+  FAIL_REGULAR_EXPRESSION "\\[modbus\\]")

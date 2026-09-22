@@ -11394,6 +11394,393 @@ def build_ospf_sample():
     (TESTS_DIR / "sample_ospf.pcap").write_bytes(data)
 
 
+def build_arp_sample():
+    """ARP (RFC 826, EtherType 0x0806) -- rides directly on raw Ethernet, no IP layer, the same
+    "no port, no IP layer" shape PROFINET RT/GOOSE/SV/EtherCAT/EAPOL/PPPoE/MPLS already have (see
+    arp.hpp's file header comment). Frames are built directly with eth_header() + a hand-packed
+    ARP body -- HTYPE(2,BE) + PTYPE(2,BE) + HLEN(1) + PLEN(1) + OPER(2,BE), then SHA(HLEN) +
+    SPA(PLEN) + THA(HLEN) + TPA(PLEN) back to back, per arp.hpp's own wire-format comment -- ARP
+    needs no extra outer-frame-header helper the way PROFINET/GOOSE do.
+
+    Covers: an ARP Request, an ARP Reply, a gratuitous ARP (Reply with SPA==TPA), an ARP Probe
+    (RFC 5227), an ARP Announcement (RFC 5227, wire-identical to a gratuitous Request), and a
+    non-Ethernet/non-IPv4 HTYPE/PTYPE case (HTYPE=6 "IEEE 802 Networks", raw-hex SHA/SPA/THA/TPA
+    fallback -- see try_parse_arp's own is_ethernet_ipv4 gate)."""
+    packets = []
+    BROADCAST_MAC = mac("ff:ff:ff:ff:ff:ff")
+    ZERO_MAC = mac("00:00:00:00:00:00")
+    NEW_HOST_MAC = mac("00:0c:29:de:ad:99")
+    NEW_HOST_IP = "192.168.1.99"
+
+    def arp_body(htype: int, ptype: int, hlen: int, plen: int, oper: int,
+                 sha: bytes, spa: bytes, tha: bytes, tpa: bytes) -> bytes:
+        assert len(sha) == hlen and len(tha) == hlen
+        assert len(spa) == plen and len(tpa) == plen
+        return struct.pack("!HHBBH", htype, ptype, hlen, plen, oper) + sha + spa + tha + tpa
+
+    def ip4(addr: str) -> bytes:
+        return bytes(int(o) for o in addr.split("."))
+
+    def add(dst_mac: bytes, src_mac: bytes, body: bytes):
+        packets.append(eth_header(dst_mac, src_mac, 0x0806) + body)
+
+    # 1) ARP Request: HMI asking who has PLC_IP -- broadcast, THA unknown (all-zero).
+    add(BROADCAST_MAC, HMI_MAC,
+        arp_body(1, 0x0800, 6, 4, 1, HMI_MAC, ip4(HMI_IP), ZERO_MAC, ip4(PLC_IP)))
+
+    # 2) ARP Reply: PLC answering, unicast back to HMI.
+    add(HMI_MAC, PLC_MAC,
+        arp_body(1, 0x0800, 6, 4, 2, PLC_MAC, ip4(PLC_IP), HMI_MAC, ip4(HMI_IP)))
+
+    # 3) Gratuitous ARP: a Reply with SPA==TPA (both PLC_IP), broadcast -- the standard
+    #    "IP moved to this MAC" announcement, per arp.hpp's own Gratuitous ARP paragraph.
+    add(BROADCAST_MAC, PLC_MAC,
+        arp_body(1, 0x0800, 6, 4, 2, PLC_MAC, ip4(PLC_IP), BROADCAST_MAC, ip4(PLC_IP)))
+
+    # 4) ARP Probe (RFC 5227 section 1.1): Request, SPA==0.0.0.0, TPA==the address NEW_HOST_MAC
+    #    is about to claim -- checking whether anyone else already holds it.
+    add(BROADCAST_MAC, NEW_HOST_MAC,
+        arp_body(1, 0x0800, 6, 4, 1, NEW_HOST_MAC, ip4("0.0.0.0"), ZERO_MAC, ip4(NEW_HOST_IP)))
+
+    # 5) ARP Announcement (RFC 5227 section 2.4): Request, SPA==TPA==the newly-claimed address --
+    #    wire-identical to a gratuitous Request, so both notes fire on this one frame (see
+    #    arp.hpp's own Announcement paragraph).
+    add(BROADCAST_MAC, NEW_HOST_MAC,
+        arp_body(1, 0x0800, 6, 4, 1, NEW_HOST_MAC, ip4(NEW_HOST_IP), ZERO_MAC, ip4(NEW_HOST_IP)))
+
+    # 6) Non-Ethernet/non-IPv4 HTYPE: HTYPE=6 ("IEEE 802 Networks", named only for HTYPE==1, so
+    #    shown as a bare number here), PTYPE=0x0800 (still named "IPv4") -- is_ethernet_ipv4 stays
+    #    false because HTYPE != 1, so SHA/SPA/THA/TPA render as raw hex, not a MAC/dotted-quad.
+    add(BROADCAST_MAC, PLC_MAC,
+        arp_body(6, 0x0800, 6, 4, 2, PLC_MAC, ip4(PLC_IP), HMI_MAC, ip4(HMI_IP)))
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_060_000 + i, i * 1000)
+    (TESTS_DIR / "sample_arp.pcap").write_bytes(data)
+
+
+def build_lldp_sample():
+    """LLDP (IEEE 802.1AB, EtherType 0x88CC) -- rides directly on raw Ethernet, no IP layer, the
+    same "no port, no IP layer" shape ARP/EAPOL/PPPoE/MPLS already have (see lldp.hpp's file header
+    comment). Frames are built directly with eth_header() + a hand-packed sequence of TLVs -- each
+    TLV a single 2-byte big-endian header packed as `(type << 9) | length` (NOT a byte-split
+    type/length the way most other TLV formats in this script work -- both fields share one 16-bit
+    word, per lldp.hpp's own wire-format comment), followed by `length` bytes of value.
+
+    Covers: a well-formed PDU with just the 3 mandatory TLVs (Chassis ID as MAC, Port ID as
+    interface name, TTL) plus a System Name and a System Capabilities TLV; a PDU adding Port
+    Description/System Description/Management Address (IPv4); a PDU using a non-MAC/non-network-
+    address Chassis ID subtype ("Locally assigned") to exercise the raw-string rendering path --
+    subtype 7 happens to mean the same thing in both of LLDP's two independent Chassis-ID/Port-ID
+    subtype tables (see lldp.hpp's own "non-parallel" paragraph for the subtypes that don't, e.g.
+    4 = "MAC address" for Chassis ID but "Network address" for Port ID); an Organizationally
+    Specific TLV using the recognized IEEE 802.3 OUI; a TTL=0 PDU (exercises the "shutting down"
+    note); a malformed/truncated case (a TLV after the mandatory 3 that declares more bytes than
+    are actually present -- exercises the graceful truncation fallback, not a whole-PDU decline);
+    and a wrong-TLV-order negative control (Port ID before Chassis ID -- confirms this frame falls
+    through to the generic ethertype-name fallback, NOT "[lldp]", the equivalent of ARP's own
+    unknown-opcode-declines coverage)."""
+    packets = []
+    SWITCH_MGMT_IP = "192.168.1.1"
+    # 01:80:c2:00:00:0e -- the standard "Nearest Bridge" LLDP multicast destination (IEEE 802.1AB
+    # Table 7-1). Ethernet-II-framed (ethertype 0x88CC >= 0x0600), so this never collides with
+    # stp.hpp's own LLC-framed GARP-range destination-MAC check (that check only ever runs for
+    # eth.is_llc_length frames, which an EtherType >= 0x0600 frame like this one never is).
+    LLDP_MULTICAST_MAC = mac("01:80:c2:00:00:0e")
+
+    def tlv(type_: int, value: bytes) -> bytes:
+        header = (type_ << 9) | len(value)
+        assert 0 <= len(value) <= 0x1FF
+        return struct.pack("!H", header) + value
+
+    def add(dst_mac: bytes, src_mac: bytes, body: bytes):
+        packets.append(eth_header(dst_mac, src_mac, 0x88CC) + body)
+
+    # 1) Well-formed PDU: mandatory Chassis ID (MAC)/Port ID (interface name)/TTL, plus a System
+    #    Name TLV and a System Capabilities TLV (capable=[MAC Bridge, Router], enabled=[MAC Bridge]).
+    chassis1 = tlv(1, bytes([4]) + PLC_MAC)          # subtype 4 = MAC address
+    port1 = tlv(2, bytes([5]) + b"eth0")              # subtype 5 = Interface name
+    ttl1 = tlv(3, struct.pack("!H", 120))
+    sysname1 = tlv(5, b"plc-01")
+    syscap1 = tlv(7, struct.pack("!HH", 0x0014, 0x0004))  # capable=MAC Bridge|Router, enabled=MAC Bridge
+    add(LLDP_MULTICAST_MAC, PLC_MAC, chassis1 + port1 + ttl1 + sysname1 + syscap1)
+
+    # 2) Adds Port Description, System Description, and a Management Address (IPv4) TLV -- Address
+    #    Subtype 1 (IPv4), Interface Numbering Subtype 2 (ifIndex), no OID.
+    chassis2 = tlv(1, bytes([4]) + HMI_MAC)
+    port2 = tlv(2, bytes([5]) + b"eth1")
+    ttl2 = tlv(3, struct.pack("!H", 60))
+    portdesc2 = tlv(4, b"Uplink to switch")
+    sysdesc2 = tlv(6, b"Acme HMI Firmware 3.2")
+    mgmt_addr_value = (
+        bytes([5])                       # Management Address String Length: subtype(1)+addr(4)
+        + bytes([1])                     # Address Subtype 1 = IPv4
+        + ip4(SWITCH_MGMT_IP)             # Management Address
+        + bytes([2])                     # Interface Numbering Subtype 2 = ifIndex
+        + struct.pack("!I", 5)            # Interface Number
+        + bytes([0])                     # OID String Length = 0 (no OID)
+    )
+    mgmtaddr2 = tlv(8, mgmt_addr_value)
+    add(LLDP_MULTICAST_MAC, HMI_MAC, chassis2 + port2 + ttl2 + portdesc2 + sysdesc2 + mgmtaddr2)
+
+    # 3) Chassis ID subtype 7 ("Locally assigned") -- raw-string rendering path, not MAC/network
+    #    address.
+    chassis3 = tlv(1, bytes([7]) + b"rack3-lldp-id")
+    port3 = tlv(2, bytes([5]) + b"Gi0/1")
+    ttl3 = tlv(3, struct.pack("!H", 90))
+    add(LLDP_MULTICAST_MAC, PLC_MAC, chassis3 + port3 + ttl3)
+
+    # 4) Organizationally Specific TLV, recognized IEEE 802.3 OUI (00:12:0F), arbitrary subtype/data.
+    chassis4 = tlv(1, bytes([4]) + PLC_MAC)
+    port4 = tlv(2, bytes([5]) + b"eth0")
+    ttl4 = tlv(3, struct.pack("!H", 120))
+    orgspecific4 = tlv(127, bytes([0x00, 0x12, 0x0F, 0x01]) + bytes([0xAA, 0xBB, 0xCC]))
+    add(LLDP_MULTICAST_MAC, PLC_MAC, chassis4 + port4 + ttl4 + orgspecific4)
+
+    # 5) TTL=0 -- LLDP's own "shutting down" signal.
+    chassis5 = tlv(1, bytes([4]) + HMI_MAC)
+    port5 = tlv(2, bytes([5]) + b"eth0")
+    ttl5 = tlv(3, struct.pack("!H", 0))
+    add(LLDP_MULTICAST_MAC, HMI_MAC, chassis5 + port5 + ttl5)
+
+    # 6) Malformed/truncated: the 3 mandatory TLVs decode fine, then a trailing TLV declares a
+    #    10-byte value but only 3 bytes actually follow -- graceful truncation, not a whole-PDU
+    #    decline (mirrors what try_parse_lldp's own standalone unit harness already covered).
+    chassis6 = tlv(1, bytes([4]) + PLC_MAC)
+    port6 = tlv(2, bytes([5]) + b"eth0")
+    ttl6 = tlv(3, struct.pack("!H", 120))
+    broken_header = struct.pack("!H", (5 << 9) | 10)  # declares 10 bytes of System Name...
+    broken_data = b"abc"                              # ...but only 3 are actually present
+    add(LLDP_MULTICAST_MAC, PLC_MAC, chassis6 + port6 + ttl6 + broken_header + broken_data)
+
+    # 7) Wrong TLV order (Port ID before Chassis ID) -- the structural detection gate declines the
+    #    whole frame, which must fall through to the generic ethertype-name "[non-ip]" fallback,
+    #    NOT "[lldp]" -- see lldp.hpp's own "structural detection gate" paragraph.
+    chassis7 = tlv(1, bytes([4]) + PLC_MAC)
+    port7 = tlv(2, bytes([5]) + b"eth0")
+    ttl7 = tlv(3, struct.pack("!H", 120))
+    add(LLDP_MULTICAST_MAC, PLC_MAC, port7 + chassis7 + ttl7)
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_070_000 + i, i * 1000)
+    (TESTS_DIR / "sample_lldp.pcap").write_bytes(data)
+
+
+# --- BGP-4 (RFC 4271) wire-format helpers -----------------------------------------------
+# See bgp.hpp's own file header comment for the exact wire format each of these mirrors.
+
+def bgp_header(total_length: int, msg_type: int) -> bytes:
+    return b"\xFF" * 16 + struct.pack("!HB", total_length, msg_type)
+
+
+def bgp_capability(code: int, value: bytes) -> bytes:
+    return struct.pack("!BB", code, len(value)) + value
+
+
+def bgp_open(version: int, my_as: int, hold_time: int, identifier: str, capabilities) -> bytes:
+    cap_bytes = b"".join(capabilities)
+    opt_param = (struct.pack("!BB", 2, len(cap_bytes)) + cap_bytes) if cap_bytes else b""
+    body = (
+        struct.pack("!B", version)
+        + struct.pack("!H", my_as)
+        + struct.pack("!H", hold_time)
+        + ip4(identifier)
+        + struct.pack("!B", len(opt_param))
+        + opt_param
+    )
+    return bgp_header(19 + len(body), 1) + body
+
+
+def bgp_path_attr(flags: int, type_code: int, value: bytes) -> bytes:
+    assert len(value) <= 255  # non-extended-length form only -- fine for this fixture
+    return struct.pack("!BBB", flags, type_code, len(value)) + value
+
+
+def bgp_prefix(prefix_len_bits: int, addr: str) -> bytes:
+    nbytes = (prefix_len_bits + 7) // 8
+    return struct.pack("!B", prefix_len_bits) + ip4(addr)[:nbytes]
+
+
+def bgp_update(withdrawn: bytes, path_attrs: bytes, nlri: bytes) -> bytes:
+    body = struct.pack("!H", len(withdrawn)) + withdrawn + struct.pack("!H", len(path_attrs)) + path_attrs + nlri
+    return bgp_header(19 + len(body), 2) + body
+
+
+def bgp_notification(error_code: int, error_subcode: int, data: bytes) -> bytes:
+    body = struct.pack("!BB", error_code, error_subcode) + data
+    return bgp_header(19 + len(body), 3) + body
+
+
+def bgp_keepalive() -> bytes:
+    return bgp_header(19, 4)
+
+
+def bgp_route_refresh(afi: int, safi: int) -> bytes:
+    body = struct.pack("!HBB", afi, 0, safi)
+    return bgp_header(19 + len(body), 5) + body
+
+
+def bgp_as_path_value(segments, four_byte: bool) -> bytes:
+    """`segments` is a list of (segment_type, [as_numbers]) tuples -- see bgp.hpp's own AS_PATH
+    paragraph. `four_byte` picks the 2-vs-4-byte-per-AS-number encoding."""
+    fmt = "!I" if four_byte else "!H"
+    out = b""
+    for stype, as_list in segments:
+        out += struct.pack("!BB", stype, len(as_list))
+        for as_num in as_list:
+            out += struct.pack(fmt, as_num)
+    return out
+
+
+def bgp_community_value(values) -> bytes:
+    return b"".join(struct.pack("!I", v) for v in values)
+
+
+def bgp_mp_reach_value(afi: int, safi: int, next_hop: str, nlri_bytes: bytes) -> bytes:
+    nh = ip4(next_hop)
+    return struct.pack("!HB", afi, safi) + struct.pack("!B", len(nh)) + nh + b"\x00" + nlri_bytes
+
+
+def build_bgp_sample():
+    """BGP-4 (RFC 4271, TCP port 179) -- the last piece of the three-stage plan that also added
+    ARP and LLDP. Unlike those two, BGP needs full Ethernet+IPv4+TCP framing with real
+    sequence-number tracking (see peer_a()/peer_b() below, directly modeled on
+    build_twincat_sample's own client()/server() closures), since it rides on TCP and needs
+    declared-length reassembly plus a coalescing loop -- see bgp.hpp's file header comment.
+
+    All packets below share one TCP session between two BGP routers (peer A = PLC_IP/PLC_MAC,
+    peer B = HMI_IP/HMI_MAC, reusing this script's existing host constants the same way
+    build_twincat_sample already does for two ordinary hosts) on TCP port 179, except where noted.
+
+    Covers, in order: (1)-(2) an OPEN exchange -- peer A's OPEN advertises both Multiprotocol
+    Extensions and the 4-octet AS Number capability (RFC 6793), peer B's OPEN advertises only
+    Multiprotocol Extensions (no 4-octet AS support) -- since BgpFlowState is session-scoped, not
+    per-direction, processing B's (non-capable) OPEN second means the session's own AS-number
+    width becomes authoritatively 2-byte from that point on, the same "session downgrades when
+    either side lacks 4-octet AS support" real-world behavior RFC 6793 itself describes; (3) an
+    UPDATE carrying ORIGIN/AS_PATH/NEXT_HOP/COMMUNITY/MP_REACH_NLRI in one message -- its AS_PATH
+    is the "later AS_PATH attribute" that must decode using the authoritative 2-byte width
+    established by (2); (4) an UPDATE that withdraws routes (WithdrawnRoutes only, no path
+    attributes or NLRI); (5) three KEEPALIVEs coalesced into a single TCP segment/payload,
+    exercising BgpDecoder::decode's own coalescing loop; (6) a NOTIFICATION with an RFC 8203
+    shutdown communication string (Cease/Administrative Shutdown); (7)-(8) one UPDATE split across
+    two TCP segments, the split point deliberately chosen AFTER the complete 19-byte header (not
+    mid-header, mirroring build_twincat_sample's own precedent -- bgp_declared_length can only
+    recognize a message once its own full header has arrived). Then two more TCP sessions, each
+    with its own fresh BgpFlowState: (9) a ROUTE-REFRESH on a non-standard BGP port (1179, not
+    179) -- exercises the "not a configured/standard BGP port" note and --bgp-port; (10) a
+    negative control -- a TCP/179 payload whose leading 16 bytes are NOT all 0xFF, so BGP's own
+    Marker gate declines it outright and it falls back to the generic "tcp" protocol tag."""
+    packets = []
+
+    def add(src_port, dst_port, seq, ack, payload, ident, from_a):
+        tcp = tcp_header(src_port, dst_port, seq, ack, TCP_PSH | TCP_ACK, len(payload)) + payload
+        src_ip, dst_ip = (PLC_IP, HMI_IP) if from_a else (HMI_IP, PLC_IP)
+        src_mac, dst_mac = (PLC_MAC, HMI_MAC) if from_a else (HMI_MAC, PLC_MAC)
+        ip = ipv4_header(src_ip, dst_ip, 6, len(tcp), ident) + tcp
+        packets.append(eth_header(dst_mac, src_mac, 0x0800) + ip)
+
+    seq_a, seq_b = 1000, 5000
+    ident = 0x3000
+
+    def peer_a(payload):
+        nonlocal seq_a, ident
+        add(52000, 179, seq_a, seq_b, payload, ident, from_a=True)
+        seq_a += len(payload)
+        ident += 1
+
+    def peer_b(payload):
+        nonlocal seq_b, ident
+        add(179, 52000, seq_b, seq_a, payload, ident, from_a=False)
+        seq_b += len(payload)
+        ident += 1
+
+    # 1) Peer A's OPEN -- AS 65001 advertised via the 4-octet AS capability (my_as itself carries
+    #    the RFC 6793 AS_TRANS placeholder, 23456, as real 4-octet-AS-capable implementations do),
+    #    plus Multiprotocol Extensions (AFI=1/IPv4, SAFI=1/Unicast).
+    open_a = bgp_open(
+        version=4, my_as=23456, hold_time=180, identifier="10.0.0.1",
+        capabilities=[
+            bgp_capability(1, struct.pack("!HBB", 1, 0, 1)),
+            bgp_capability(65, struct.pack("!I", 65001)),
+        ],
+    )
+    peer_a(open_a)
+
+    # 2) Peer B's OPEN -- AS 65002, Multiprotocol Extensions only, NO 4-octet AS capability.
+    #    Processed after (1) on this same session, so BgpFlowState's own AS-number width becomes
+    #    authoritatively 2-byte from here on (see this function's own docstring).
+    open_b = bgp_open(
+        version=4, my_as=65002, hold_time=180, identifier="10.0.0.2",
+        capabilities=[bgp_capability(1, struct.pack("!HBB", 1, 0, 1))],
+    )
+    peer_b(open_b)
+
+    # 3) UPDATE (peer A -> peer B): ORIGIN=IGP, AS_PATH=AS_SEQUENCE{65001,65002,65003} (2-byte
+    #    AS numbers -- must decode authoritatively at 2-byte width, per (2) above), NEXT_HOP,
+    #    COMMUNITY (NO_EXPORT + one uncurated raw-hex value), MP_REACH_NLRI (AFI=1/SAFI=1, two
+    #    IPv4 NLRI prefixes).
+    as_path_val = bgp_as_path_value([(2, [65001, 65002, 65003])], four_byte=False)
+    community_val = bgp_community_value([0xFFFFFF01, 0x001E0064])
+    mp_reach_val = bgp_mp_reach_value(
+        1, 1, "10.0.0.1", bgp_prefix(24, "203.0.113.0") + bgp_prefix(16, "198.51.0.0"))
+    path_attrs = (
+        bgp_path_attr(0x40, 1, bytes([0]))            # ORIGIN = IGP
+        + bgp_path_attr(0x40, 2, as_path_val)          # AS_PATH
+        + bgp_path_attr(0x40, 3, ip4("10.0.0.1"))      # NEXT_HOP
+        + bgp_path_attr(0xC0, 8, community_val)        # COMMUNITY
+        + bgp_path_attr(0x80, 14, mp_reach_val)        # MP_REACH_NLRI
+    )
+    peer_a(bgp_update(withdrawn=b"", path_attrs=path_attrs, nlri=b""))
+
+    # 4) UPDATE (peer B -> peer A): a pure withdrawal -- WithdrawnRoutes only, no path attributes,
+    #    no NLRI.
+    withdrawn_bytes = bgp_prefix(24, "203.0.113.0") + bgp_prefix(24, "203.0.114.0")
+    peer_b(bgp_update(withdrawn=withdrawn_bytes, path_attrs=b"", nlri=b""))
+
+    # 5) Three KEEPALIVEs coalesced into a single TCP segment (peer A -> peer B) -- exercises
+    #    BgpDecoder::decode's own coalescing loop (bgp.hpp/bgp.cpp).
+    peer_a(bgp_keepalive() * 3)
+
+    # 6) NOTIFICATION (peer B -> peer A): Cease(6)/Administrative Shutdown(2), with an RFC 8203
+    #    shutdown communication string.
+    shutdown_text = b"Scheduled maintenance window"
+    peer_b(bgp_notification(6, 2, struct.pack("!B", len(shutdown_text)) + shutdown_text))
+
+    # 7) & 8) One UPDATE (peer A -> peer B) split across two TCP segments -- exercises
+    #    BgpDecoder::tcp_declared_length via Decoder::reassemble_tcp_payload, the same split/rejoin
+    #    shape build_twincat_sample already covers. The split point (25) is deliberately chosen to
+    #    fall AFTER the complete 19-byte header (not mid-header) -- bgp_declared_length can only
+    #    recognize a message that needs buffering once that whole header has arrived (see
+    #    bgp_declared_length's own comment in bgp.cpp).
+    split_attrs = bgp_path_attr(0x40, 1, bytes([0])) + bgp_path_attr(0x40, 3, ip4("10.0.0.1"))
+    split_msg = bgp_update(withdrawn=b"", path_attrs=split_attrs, nlri=bgp_prefix(24, "192.0.2.0"))
+    split_at = 25
+    assert split_at > 19
+    peer_a(split_msg[:split_at])
+    peer_a(split_msg[split_at:])
+
+    # 9) A second, independent TCP session (its own fresh BgpFlowState) on a non-standard BGP port
+    #    (1179, not 179) -- a single ROUTE-REFRESH (AFI=1/SAFI=1). BGP's own detection gate is
+    #    entirely port-independent (see bgp.hpp), so this still decodes, but gets the "not a
+    #    configured/standard BGP port" note.
+    add(55000, 1179, 2000, 0, bgp_route_refresh(1, 1), 0x3100, from_a=True)
+
+    # 10) A third, independent TCP session on the standard BGP port (179) whose payload is NOT
+    #     BGP-shaped at all (leading 16 bytes aren't all 0xFF) -- negative control: BGP's own
+    #     Marker gate must decline this outright, falling back to the generic "tcp" protocol tag,
+    #     not a crash or a false positive.
+    not_bgp = b"NOT-BGP-PAYLOAD-DATA-1234567890"
+    add(56000, 179, 3000, 0, not_bgp, 0x3200, from_a=True)
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_080_000 + i, i * 1000)
+    (TESTS_DIR / "sample_bgp.pcap").write_bytes(data)
+
+
 if __name__ == "__main__":
     TESTS_DIR.mkdir(exist_ok=True)
     build_modbus_sample()
@@ -11460,4 +11847,7 @@ if __name__ == "__main__":
     build_eigrp_sample()
     build_ospf_sample()
     build_goose_deep_nesting_sample()
+    build_arp_sample()
+    build_lldp_sample()
+    build_bgp_sample()
     print("wrote sample fixtures to", TESTS_DIR)

@@ -5399,20 +5399,35 @@ deliberately small, OT-relevant set of values, cross-checked against
 Wireshark's own `epan/etypes.h` (EtherTypes) and the long-stable IANA IP
 protocol number registry (not reverse-engineered from a single capture):
 
-- **EtherTypes** (`link_layer.hpp`'s `ethertype_name`): ARP, IPv6, LLDP, PTP
+- **EtherTypes** (`link_layer.hpp`'s `ethertype_name`): IPv6, PTP
   (IEEE 1588), MPLS unicast, and 802.1ad/stacked-VLAN (the QinQ case
   `parse_ethernet`'s own comment already documented as "will simply fail to
   recognize the inner ethertype" -- it's now named as such instead of a bare
-  `0x8100`) are named but not decoded further. PROFINET RT (`0x8892`),
-  IEC 61850-8-1 GOOSE (`0x88B8`), IEC 61850-9-2 Sampled Values (`0x88BA`),
-  EtherCAT (`0x88A4`), IEEE 802.1X/EAPOL (`0x888E`), and PPPoE Discovery/
-  Session (`0x8863`/`0x8864`) are also named here, but, like CIP I/O below,
-  a frame that actually looks like DCP/cyclic IO data, a GOOSE APDU, a
-  SavPdu, an EtherCAT frame header, an EAPOL header, or a PPPoE header is
-  decoded and reported as `profinet`/`goose`/`sv`/`ethercat`/`eapol`/
-  `pppoe`, not `non-ip` -- see PROTOCOL COVERAGE's PROFINET RT, GOOSE,
-  Sampled Values, EtherCAT, Tier 3 enterprise-trust-boundary, and Tier 4
-  wireless-backhaul-and-cellular sections.
+  `0x8100`) are named but not decoded further. ARP (`0x0806`) and LLDP
+  (`0x88CC`) used to be in this same "named but not decoded further" list
+  too, until this decoder's own ARP addition and, right after it, its own
+  LLDP addition (see the ARP and LLDP sections above) took them both out of
+  it. PROFINET RT
+  (`0x8892`), IEC 61850-8-1 GOOSE (`0x88B8`), IEC 61850-9-2 Sampled Values
+  (`0x88BA`), EtherCAT (`0x88A4`), IEEE 802.1X/EAPOL (`0x888E`), and PPPoE
+  Discovery/Session (`0x8863`/`0x8864`) are also named here, but, like CIP
+  I/O below, a frame that actually looks like DCP/cyclic IO data, a GOOSE
+  APDU, a SavPdu, an EtherCAT frame header, an EAPOL header, or a PPPoE
+  header is decoded and reported as `profinet`/`goose`/`sv`/`ethercat`/
+  `eapol`/`pppoe`, not `non-ip` -- see PROTOCOL COVERAGE's PROFINET RT,
+  GOOSE, Sampled Values, EtherCAT, Tier 3 enterprise-trust-boundary, and
+  Tier 4 wireless-backhaul-and-cellular sections. Likewise, an ARP-shaped
+  frame (a recognized OPER value, per the ARP section above) is decoded and
+  reported as `arp`, not `non-ip`; an ARP-EtherType frame this decoder's
+  own structural gate declines (an unrecognized OPER value, or too short)
+  still falls through to `non-ip`, named as ARP the same as before this
+  decoder existed -- see `tests/sample_link_transport_layers.pcap`'s own
+  `link_layer_arp_ethertype_named` test. Likewise again, an LLDP-shaped
+  frame (its first three TLVs exactly Chassis ID/Port ID/TTL, per the LLDP
+  section above) is decoded and reported as `lldp`, not `non-ip`; an
+  LLDP-EtherType frame this decoder's own structural gate declines (wrong
+  TLV order, or a mandatory TLV that doesn't fit) still falls through to
+  `non-ip`, named as LLDP the same as before this decoder existed.
 - **IPv4 protocol numbers** (`ipv4.hpp`'s `ip_protocol_name`): IPv6-in-IPv4,
   GRE, ESP, AH, ICMPv6, SCTP are named but not decoded further (`tests/
   sample_link_transport_layers.pcap`'s own "recognized-but-not-decoded"
@@ -7297,3 +7312,348 @@ was decoded and inspected in `--format text`, `--format json`,
 family reading it was written -- the same verification discipline every
 prior protocol addition in this codebase has been held to. See
 `include/conduitscope/fins.hpp`'s file header for the full writeup.
+
+### ARP (RFC 826, EtherType `0x0806`)
+
+A brand-new protocol addition, not a migration -- before this, ARP traffic
+was only ever named by `link_layer.hpp`'s `ethertype_name` and left
+otherwise undecoded (see the Link/IP-layer plumbing section above). Built
+entirely on the `ProtocolDecoder` registration-model interface from
+inception, `include/conduitscope/arp.hpp`/`arp.cpp`, with its own dedicated
+`--protocol arp` value.
+
+Architecturally, ARP has no transport layer and no IP layer of its own --
+it rides directly on raw Ethernet, the same "no port, no IP layer" shape
+PROFINET RT/GOOSE/Sampled Values/EtherCAT/EAPOL/PPPoE/MPLS already have in
+this codebase. The base RFC 826 layout is a fixed 8-byte header --
+HTYPE(2, big-endian) + PTYPE(2, big-endian) + HLEN(1) + PLEN(1) + OPER(2,
+big-endian) -- followed by SHA(HLEN) + SPA(PLEN) + THA(HLEN) + TPA(PLEN)
+back to back, with no further padding. HTYPE `1` (Ethernet) and PTYPE
+`0x0800` (IPv4) are the only values this decoder names; anything else is
+shown as a bare number. OPER is looked up against a curated opcode table
+covering RFC 826's own Request/Reply plus the RFC 903 (RARP), RFC 1931
+(DRARP), RFC 2390 (InARP), and RFC 2225 (ATMARP NAK) extensions, plus
+IANA's MARS/MAPOS/Experimental values -- an OPER value outside that table
+is treated as "not really ARP" and the whole frame is declined, which
+doubles as this decoder's primary structural detection gate (comparably
+strong to EtherCAT's/EAPOL's own EtherType-carries-most-of-the-confidence
+posture, since EtherType `0x0806` itself has no collision risk with any
+other protocol this tool decodes).
+
+SHA/SPA/THA/TPA are only ever rendered as a MAC address / dotted-quad IPv4
+address for the well-formed, overwhelmingly common case -- HTYPE `1`
+(Ethernet) AND HLEN `6` AND PTYPE `0x0800` (IPv4) AND PLEN `4` all
+together; any other HTYPE/PTYPE/HLEN/PLEN combination still gets its
+header fields decoded and named where possible, but SHA/SPA/THA/TPA are
+shown as raw hex instead of guessing at an address format they don't
+actually have.
+
+On top of the base RFC 826 layout, three conditions are curated, matching
+Wireshark's own `packet-arp.c` logic for each: **Gratuitous ARP** (OPER is
+Request or Reply, AND SPA == TPA) -- framed the same way this codebase
+already frames VRRP/HSRP failover events, since a gratuitous ARP Reply is
+the standard mechanism a host uses to announce "an IP address moved to a
+new MAC" after a failover; **ARP Probe** (RFC 5227 §1.1: OPER == Request,
+SPA == `0.0.0.0`) -- a host checking whether another host already holds an
+address before claiming it; and **ARP Announcement** (RFC 5227 §2.4: OPER
+== Request, SPA == TPA, the newly-claimed address) -- wire-identical to a
+gratuitous ARP Request, so the two notes are not mutually exclusive and
+commonly appear together on the same frame.
+
+**Explicitly out of scope:** ARP spoofing / duplicate-IP detection, which
+needs cross-packet IP-to-MAC history this codebase doesn't track for any
+protocol, not even VRRP/HSRP's own "unexpected master" case; RARP/DRARP/
+InARP/ATMARP/MARS/MAPOS opcodes' own reply-body semantics beyond the
+shared SHA/SPA/THA/TPA layout (named by opcode only, not decoded further);
+a non-Ethernet/non-IPv4 HTYPE/PTYPE's SHA/SPA/THA/TPA content (raw hex
+only, per above).
+
+**Security/audit context:** ARP is completely unauthenticated broadcast
+traffic -- any host on the segment can claim any IP-to-MAC mapping, with
+nothing on the wire to stop it. Passively observing gratuitous ARP/Probes/
+Announcements is a free device-inventory and IP-change-tracking signal
+(new host joins broadcast a Probe/Announcement pair; a relocated service
+broadcasts a gratuitous Reply), similar audit framing to how this document
+already frames VRRP/HSRP failover visibility above -- the traffic itself is
+routine, but its presence, timing, and the identities it names are worth
+an auditor's attention.
+
+`--protocol arp` isolates ARP from the CLI; needs no port option at all,
+matching PROFINET/GOOSE/SV/EtherCAT/EAPOL/PPPoE/MPLS/STP's own no-port
+precedent. Validated against `tests/sample_arp.pcap`
+(`tools/make_sample_pcap.py`'s `build_arp_sample()`): an ARP Request, an
+ARP Reply, a gratuitous ARP (Reply with SPA==TPA), an ARP Probe, an ARP
+Announcement (both its own note and the gratuitous note firing on the
+same frame), and a non-Ethernet HTYPE (`6`, "IEEE 802 Networks") exercising
+the raw-hex SHA/SPA/THA/TPA fallback. Every case was decoded and inspected
+in `--format text`, `--format json`, `--format csv`, and `--stats` BEFORE
+the `CMakeLists.txt` `arp_*` test family reading it was written, the same
+verification discipline every prior protocol addition in this codebase has
+been held to. See `include/conduitscope/arp.hpp`'s file header for the
+full writeup.
+
+### LLDP (IEEE 802.1AB, EtherType `0x88CC`)
+
+A brand-new protocol addition, not a migration -- before this, LLDP traffic
+was only ever named by `link_layer.hpp`'s `ethertype_name` and left
+otherwise undecoded (see the Link/IP-layer plumbing section above). Built
+entirely on the `ProtocolDecoder` registration-model interface from
+inception, `include/conduitscope/lldp.hpp`/`lldp.cpp`, right after ARP's own
+addition, with its own dedicated `--protocol lldp` value.
+
+Architecturally, LLDP has no transport layer and no IP layer of its own --
+it rides directly on raw Ethernet, the same "no port, no IP layer" shape
+ARP/PROFINET RT/GOOSE/Sampled Values/EtherCAT/EAPOL/PPPoE/MPLS already have
+in this codebase. The wire format is a sequence of Type-Length-Value
+elements ("TLVs"), each a single 2-byte big-endian header packed as
+`type = header >> 9` (top 7 bits) and `length = header & 0x1FF` (bottom 9
+bits) followed by exactly `length` bytes of value -- one 16-bit word shared
+by both fields, not a byte-split type/length the way most other TLV formats
+in this codebase work. The sequence ends at an End-of-LLDPDU TLV (type 0,
+length 0) or at payload exhaustion.
+
+The mandatory first three TLVs are Chassis ID (type 1), Port ID (type 2),
+and a fixed 2-byte TTL (type 3), in that exact order -- this decoder's own
+structural detection gate, the strongest of any raw-Ethernet protocol in
+this codebase (stronger than EAPOL's/EtherCAT's own EtherType-carries-most-
+of-the-confidence posture): any deviation (wrong type in one of the first
+three slots, or a TLV whose declared length doesn't fit the remaining
+payload) declines the whole frame back to the generic EtherType fallback
+rather than guessing. Once that gate passes, a later TLV whose declared
+length doesn't fit what remains ends the TLV loop gracefully (a truncation
+note is added, the mandatory TLVs and everything decoded before the
+truncation point are kept) rather than rejecting the whole PDU, the same
+graceful-degradation posture this codebase's other multi-element formats
+(IGRP's routes, EtherCAT's datagrams) already have.
+
+Chassis ID and Port ID each carry their own leading subtype byte, then a
+value whose rendering depends on that subtype -- and, worth calling out
+explicitly, these are **two independent subtype tables, not the same table
+reused**: subtype `4` is "MAC address" for Chassis ID but "Network address"
+for Port ID; subtype `3` is "Port component" for Chassis ID but "MAC
+address" for Port ID. This decoder keeps the two lookup tables (and the two
+render call sites) entirely separate rather than sharing one, specifically
+to avoid that trap. "MAC address" renders as a MAC; "Network address"
+renders as a dotted-quad for IPv4 (any other address family shown as raw
+hex); every other subtype (Interface alias/name, Port/Chassis component,
+Locally assigned, Agent circuit ID) renders its remaining bytes as a raw
+string, the same protocol-declared-ASCII convention PROFINET's own
+NameOfStation handling already uses. TTL `0` is itself meaningful -- LLDP's
+own "shutting down" signal telling neighbors to invalidate this device's
+info -- and is noted, not just decoded.
+
+On top of the mandatory triple, the optional TLVs this decoder curates onto
+its own top-level fields (every TLV, mandatory or optional, still appears in
+the raw per-TLV list too): Port Description, System Name, System
+Description (all raw-string); **System Capabilities** (a 2-byte "capable"
+bitmap plus a 2-byte "enabled" bitmap, both named against IEEE 802.1AB
+Table 8-4 -- Repeater, MAC Bridge, WLAN Access Point, Router, Telephone,
+DOCSIS Cable Device, Station Only, C-VLAN/S-VLAN Component, Two-Port MAC
+Relay, plus "Other" and a bare bit number for anything beyond); and
+**Management Address** (Address Subtype 1/2/6 named as IPv4/IPv6/802-MAC,
+IPv4 rendered dotted-quad, everything else raw hex -- only the *first*
+Management Address TLV seen is curated onto the top-level fields, though
+every one seen still appears in the raw TLV list). Organizationally
+Specific TLVs (type 127) have their OUI named when recognized (IEEE 802.1,
+IEEE 802.3, TIA-1057/LLDP-MED, and PROFINET's own OUI, since this codebase
+already decodes PROFINET DCP) plus their own Subtype byte, with the
+remaining vendor-defined payload shown as raw hex -- no vendor extension's
+own sub-TLV structure is decoded.
+
+**Explicitly out of scope:** vendor-specific Organizationally-Specific
+sub-TLV bodies beyond OUI-plus-subtype naming (shown as raw hex only, per
+above); translating a Management Address TLV's Object Identifier into
+dotted notation (shown as raw hex, this decoder does not implement an
+OID-to-dotted-notation translator).
+
+**Security/audit context:** LLDP is broadcast completely unauthenticated,
+unsolicited, roughly every 30 seconds -- unlike PROFINET DCP (an active
+Identify Request/Response an engineering tool has to send), any passive
+listener on the segment gets a continuously-refreshed device inventory
+(System Name/Description, Chassis/Port identity, Management Address) for
+free, with zero interaction required at all. This is the strongest passive
+asset-inventory signal of any protocol in this codebase -- stronger than
+ARP's own gratuitous/Probe/Announcement inventory signal above, which still
+needs a host to actually change or claim an address before it says
+anything; LLDP says everything, unprompted, on a fixed clock.
+
+`--protocol lldp` isolates LLDP from the CLI; needs no port option at all,
+matching ARP/PROFINET/GOOSE/SV/EtherCAT/EAPOL/PPPoE/MPLS/STP's own no-port
+precedent. Validated against `tests/sample_lldp.pcap`
+(`tools/make_sample_pcap.py`'s `build_lldp_sample()`): a well-formed PDU
+with the mandatory Chassis ID (MAC)/Port ID (interface name)/TTL triple
+plus a System Name and a System Capabilities TLV; a PDU adding Port
+Description/System Description/Management Address (IPv4); a Chassis ID
+using the "Locally assigned" subtype (raw-string rendering, not MAC/network
+address); an Organizationally Specific TLV using the recognized IEEE 802.3
+OUI; a TTL=0 PDU (the "shutting down" note); a malformed/truncated PDU (a
+trailing TLV that declares more bytes than actually follow -- the mandatory
+three still decode, then the truncation note fires, matching the graceful
+fallback the file header's own standalone unit harness already exercised
+directly against `try_parse_lldp`); and a wrong-TLV-order negative control
+(Port ID before Chassis ID) confirming the frame falls through to `non-ip`,
+not `lldp`. Every case was decoded and inspected in `--format text`,
+`--format json`, `--format csv`, and `--stats` BEFORE the `CMakeLists.txt`
+`lldp_*` test family reading it was written, the same verification
+discipline every prior protocol addition in this codebase has been held to.
+See `include/conduitscope/lldp.hpp`'s file header for the full writeup.
+
+### BGP-4 (RFC 4271, TCP port 179)
+
+The last piece of the three-stage plan that also added ARP and LLDP above --
+see the IGRP/PIM/EIGRP/OSPF section's own note on why BGP was deliberately
+deferred out of that earlier routing-protocol batch: unlike IGRP/PIM/EIGRP/
+OSPF, which all ride directly on IP with no port concept at all, BGP rides
+over **TCP port 179** and needs full TCP stream reassembly. Built entirely
+on the `ProtocolDecoder` registration-model interface from inception (like
+TwinCAT/MELSEC/FINS above), `include/conduitscope/bgp.hpp`/`bgp.cpp`, with
+its own dedicated `--protocol bgp` value and a `--bgp-port` option following
+Modbus's own ordinary "gets a CLI flag" pattern.
+
+Architecturally, BGP is the most involved TCP-port-independent protocol this
+codebase decodes: it needs **declared-length TCP reassembly** (its own
+19-byte header carries a Length field playing the same role Modbus's
+MBAP/MELSEC's/FINS's own Length fields already do), a **message-coalescing
+loop** over the reassembled payload (real BGP sessions send frequent small
+KEEPALIVEs that Nagle/OS buffering routinely merges with neighboring
+messages into one TCP segment -- the same posture OPC UA's own `decode()`
+already handles), and genuine **session-scoped state** (`BgpFlowState`,
+tracking whether 4-octet AS numbers, RFC 6793, were negotiated on this
+session).
+
+#### Wire format
+
+Every message shares a 19-byte header: a 16-byte **Marker** (MUST be all-
+`0xFF` in every real deployment -- the strongest structural detection gate
+in this whole codebase, a 128-bit fixed match, stronger even than OPC UA's
+own 3-byte ASCII magic or GOOSE/SV's single-byte outer BER tag), a 2-byte
+big-endian **Length** (total message length INCLUDING this header -- drives
+`bgp_declared_length()`, the same role Modbus's/MELSEC's/FINS's own
+declared-length functions play), and a 1-byte **Type**: `1` OPEN, `2`
+UPDATE, `3` NOTIFICATION, `4` KEEPALIVE, `5` ROUTE-REFRESH (RFC 2918/7313).
+KEEPALIVE's own Length MUST be exactly 19 (no body); every other type must
+be in `[19, 65535]` (this decoder deliberately accepts the full RFC 8654
+Extended Messages range for every type rather than tracking whether
+Extended Messages was actually negotiated for a given session -- a
+documented, deliberate imprecision, the same category as this codebase's
+existing unverified-auth-digest posture for RIP/EIGRP/OSPF above).
+
+All five message types are decoded:
+
+- **OPEN**: Version + My Autonomous System + Hold Time + BGP Identifier
+  (rendered dotted-quad like an IPv4 address) + a list of Optional
+  Parameters. Only Capabilities (RFC 5492) parameters are decoded further;
+  within those, two capability codes get their value decoded -- code `1`
+  Multiprotocol Extensions (RFC 4760, AFI/SAFI, full decode for AFI=1/
+  SAFI=1 IPv4 Unicast, name-only otherwise) and code `65` Support for
+  4-octet AS Number (RFC 6793, the 4-byte AS number itself, and the one
+  that feeds `BgpFlowState`). Every other capability code is named from a
+  curated table but its value not further decoded; every other Optional
+  Parameter type is named by its numeric type only.
+- **UPDATE**: Withdrawn Routes + Path Attributes + NLRI, all VLSM-compressed
+  (Length-in-bits + only the significant prefix bytes, the same mental
+  model this codebase's own EIGRP route TLVs already use, though not shared
+  code). Each Path Attribute is Flags + Type Code + Length + Value; the
+  type codes this decoder decodes the value of are ORIGIN, AS_PATH,
+  NEXT_HOP, MULTI_EXIT_DISC, LOCAL_PREF, ATOMIC_AGGREGATE, AGGREGATOR,
+  COMMUNITY (RFC 1997, a short curated table of well-known values --
+  NO_EXPORT/NO_ADVERTISE/NO_EXPORT_SUBCONFED/NOPEER/BLACKHOLE -- everything
+  else shown as raw hex rather than risk a wrong name for a less-certain
+  newer registry value), ORIGINATOR_ID/CLUSTER_LIST (RFC 4456),
+  MP_REACH_NLRI/MP_UNREACH_NLRI (RFC 4760, AFI=1/SAFI=1 fully, others
+  named only), AS4_PATH/AS4_AGGREGATOR (RFC 6793), and OTC (RFC 9234).
+  Every other type code is named from a curated table with its raw value
+  shown as hex, not decoded, the same "recognized but not exhaustively
+  decoded" posture already applied to FINS's flag words and IEC 104's
+  protection-equipment events.
+  - **AS_PATH width -- authoritative vs. heuristic:** each AS number in an
+    AS_PATH segment is either 2 or 4 bytes wide, depending on whether
+    4-octet AS support was negotiated on this session. When this session's
+    own OPEN capability 65 was already seen by this decoder,
+    `BgpFlowState` makes that width **authoritative**; otherwise this
+    decoder falls back to Wireshark's own heuristic (try 2-byte width
+    first, accept it only if every segment's declared AS count exactly
+    consumes the attribute's own declared length, otherwise assume
+    4-byte) and flags the result as non-authoritative. Because
+    `BgpFlowState` is session-scoped, not per-direction, a two-peer OPEN
+    exchange where one side is 4-octet-AS-capable and the other is not
+    ends with the session's own width authoritatively following whichever
+    OPEN this decoder processed *last* -- the same "session downgrades
+    when either side lacks 4-octet AS support" behavior RFC 6793 itself
+    describes for real BGP sessions.
+- **NOTIFICATION**: Error Code + Error Subcode + Data, both code and
+  subcode named from curated tables cross-checked against RFC 4271/RFC
+  6608 (FSM)/RFC 4486 (Cease)/RFC 7313 (ROUTE-REFRESH)/RFC 9234 (Role
+  Mismatch). RFC 8203's shutdown communication is decoded as a special
+  case (Error Code Cease(6), Error Subcode Administrative Shutdown(2) or
+  Administrative Reset(4)): Data begins with a 1-byte length followed by
+  that many bytes of UTF-8 shutdown-reason text -- a genuinely useful "why
+  this session dropped" string no other protocol in this codebase
+  currently surfaces.
+- **KEEPALIVE**: header only, no body.
+- **ROUTE-REFRESH** (RFC 2918/7313): AFI + Reserved + SAFI, decoded in
+  full.
+
+#### Structural detection gate
+
+(a) the 16-byte Marker is exactly all-`0xFF`; (b) Type is one of the five
+defined values; (c) Length satisfies that type's own bound (exactly 19 for
+KEEPALIVE, `[19, 65535]` for every other type). This is the whole gate --
+nothing else in `try_parse_bgp_message` ever declines an otherwise
+gate-passing message, matching this codebase's usual "decode what's there,
+note what's odd" style once a protocol's own structural gate has passed. A
+non-BGP TCP/179 payload (or an arbitrary payload that happens to land on
+this port) has essentially no chance of passing this gate by coincidence,
+so BGP is tried right after TwinCAT in the TCP-port-independent dispatch
+cascade with no ordering rationale needed at all (see
+`docs/DEVELOPMENT.md`'s PROTOCOL DETECTION section).
+
+#### Explicitly out of scope
+
+Any attribute/capability/notification-subcode value this file's own curated
+tables don't cover -- named by raw numeric value only, never guessed at.
+**No BGP authentication visibility at all** -- and this is a genuinely
+different posture from RIP's/OSPF's/EIGRP's own "digest present but
+unverified" framing above (those protocols at least locate an
+authentication field and show that it's there, just without verifying it).
+Real-world BGP authentication (RFC 2385 TCP-MD5, RFC 5925 TCP-AO) lives
+entirely **outside the BGP message body**, at the TCP layer -- invisible to
+a passive capture at the BGP layer entirely, not merely unverified. The
+honest posture here is that a decodable BGP session says nothing at all
+about whether it's authenticated, not that it's unauthenticated (this
+decoder never claims either).
+
+**Security/audit context:** a genuine BGP session observed on a segment
+that shouldn't have one is the strongest version of the "unexpected
+routing protocol" finding this codebase's OSPF/EIGRP/PIM sections above
+already establish, since BGP is an *inter-domain* routing protocol -- its
+mere presence implies an actual routing-policy boundary (an AS edge) where
+none was expected, a stronger claim than an unexpected IGP session makes.
+Every OPEN leaks the peer's router ID and AS number in cleartext; every
+UPDATE additionally leaks, via AS_PATH, the upstream AS-level topology
+route reachability travels through -- a network-mapping signal any passive
+observer gets for free, with zero interaction required.
+
+`--protocol bgp` isolates BGP from the CLI; `--bgp-port` adds an additional
+TCP port to treat as expected (repeatable, does not change detection, only
+whether the port is flagged as unexpected), the same pattern
+`--modbus-port` established. Validated against `tests/sample_bgp.pcap`
+(`tools/make_sample_pcap.py`'s `build_bgp_sample()`): an OPEN exchange
+between two peers (one 4-octet-AS capable, one not, confirming the
+authoritative-width-follows-the-session's-own-state behavior described
+above); an UPDATE carrying ORIGIN/AS_PATH/NEXT_HOP/COMMUNITY/
+MP_REACH_NLRI in one message; a pure-withdrawal UPDATE; three KEEPALIVEs
+coalesced into a single TCP segment (exercising the coalescing loop); a
+NOTIFICATION with an RFC 8203 shutdown communication string; one UPDATE
+split across two TCP segments (exercising `BgpDecoder::tcp_declared_length`
+via `Decoder::reassemble_tcp_payload`, the split point deliberately chosen
+after the complete 19-byte header, never mid-header); a ROUTE-REFRESH on a
+non-standard port (the `--bgp-port`/"not a configured/standard BGP port"
+note); and a negative control (a TCP/179 payload whose leading 16 bytes
+are not all `0xFF`, confirming clean fallback to the generic `tcp`
+protocol tag, not a crash or a false positive). Every case was decoded and
+inspected in `--format text`, `--format json`, `--format csv`, and
+`--stats` BEFORE the `CMakeLists.txt` `bgp_*` test family reading it was
+written, the same verification discipline every prior protocol addition in
+this codebase has been held to. See `include/conduitscope/bgp.hpp`'s file
+header for the full writeup.

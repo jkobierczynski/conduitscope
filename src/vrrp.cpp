@@ -126,4 +126,16 @@ std::optional<VrrpMessage> try_parse_vrrp(ByteSpan ip_payload) {
     return msg;
 }
 
+std::optional<ProtocolResult> VrrpDecoder::decode(ByteSpan payload, DecodeContext& /*ctx*/) const {
+    if (auto msg = try_parse_vrrp(payload)) {
+        return ProtocolResult::make<VrrpMessage>("vrrp", std::move(*msg));
+    }
+    return std::nullopt;
+}
+
+const ProtocolDecoder& vrrp_decoder() {
+    static const VrrpDecoder instance;
+    return instance;
+}
+
 }  // namespace conduitscope

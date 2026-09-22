@@ -59,6 +59,7 @@
 #include <vector>
 
 #include "conduitscope/byteio.hpp"
+#include "conduitscope/protocol_decoder.hpp"
 
 namespace conduitscope {
 
@@ -123,5 +124,22 @@ struct IgrpMessage {
 // further port-style gating is applied -- IGRP's own header fields (a small Opcode value, a
 // plausible route-count/byte-length relationship) are the only structural check performed.
 std::optional<IgrpMessage> try_parse_igrp(ByteSpan ip_payload, uint32_t src_ip);
+
+// Migration batch 5 (see protocol_decoder.hpp/protocol_registry.hpp): thin ProtocolDecoder wrapper
+// around try_parse_igrp above, unchanged. IGRP is the one wrinkle in this batch: try_parse_igrp
+// needs the packet's own IPv4 source address (see this file's header comment), which decode()'s
+// ByteSpan payload alone doesn't carry -- decoder.cpp's IGRP call site populates the new
+// DecodeContext::ip_src_addr field (protocol_decoder.hpp) right before calling decode(), and this
+// wrapper reads it from there. Otherwise identical in shape to every other GateKind::IpProtocol
+// decoder in this batch -- stateless, no tcp_declared_length()/FlowStateKeying needed.
+class IgrpDecoder : public ProtocolDecoder {
+public:
+    std::string_view id() const override { return "igrp"; }
+    GateKind gate_kind() const override { return GateKind::IpProtocol; }
+    std::optional<uint8_t> ip_protocol() const override { return IGRP_IP_PROTOCOL; }
+    std::optional<ProtocolResult> decode(ByteSpan payload, DecodeContext& ctx) const override;
+};
+
+const ProtocolDecoder& igrp_decoder();
 
 }  // namespace conduitscope

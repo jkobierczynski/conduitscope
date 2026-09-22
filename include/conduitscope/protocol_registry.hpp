@@ -27,11 +27,20 @@ namespace conduitscope {
 // file header comment), EtherCAT, EAPOL, PPPoE (two EtherTypes, one id(), see pppoe.hpp), MPLS
 // (likewise two EtherTypes, one id(), see mpls.hpp), STP (no EtherType of its own at all -- LLC-
 // framed, see stp.hpp's own comment on its ProtocolDecoder wrapper). Every protocol here migrated
-// in migration batch 3 except GOOSE itself (the pilot).
+// in migration batch 3 except GOOSE itself (the pilot). ARP was added to this vector afterward,
+// NOT as part of migration batch 3 or any other migration -- it is a brand-new protocol built
+// directly on ProtocolDecoder from inception (see arp.hpp), the same "new addition, not a
+// migration" posture TwinCAT/MELSEC/FINS established for their own cascades. LLDP was added right
+// after ARP, same posture (see lldp.hpp).
 const std::vector<const ProtocolDecoder*>& ethertype_registry();
 
-// Migrated IP-protocol-number-gated protocols. Populated: EIGRP (Stage 1). Not migrated: ICMP,
-// IGMP, VRRP, IGRP, PIM, OSPF.
+// Migrated IP-protocol-number-gated protocols, in the order their decoder.cpp call sites run. Fully
+// populated as of migration batch 5 -- the fifth of the six GateKinds to reach that state (see
+// ethertype_registry() above for the fourth, EtherType, and udp_port_independent_registry()/
+// cotp_payload_registry() below for the other two batch-2-completed ones): ICMP, IGMP, VRRP, IGRP,
+// PIM, EIGRP (Stage 1 of the pilot), OSPF. IGRP is the one protocol in this list whose decode()
+// needs more than the payload bytes -- see DecodeContext::ip_src_addr's own comment
+// (protocol_decoder.hpp) and igrp.hpp's file header for why.
 const std::vector<const ProtocolDecoder*>& ip_protocol_registry();
 
 // Migrated TCP-port-independent protocols, in the order their decoder.cpp call sites run.
@@ -52,8 +61,13 @@ const std::vector<const ProtocolDecoder*>& ip_protocol_registry();
 // IEC104, DNP3, COTP, HART-IP (TCP side only -- see udp_port_independent_registry() below for its
 // UDP sibling, sharing this same id()), MQTT (migration batch 2 -- see decoder.cpp's call site
 // comment for exactly why each sits where it does relative to Modbus and to the still-legacy
-// protocols around it). Not migrated: FF-HSE -- the only protocol left in this whole cascade,
-// tried last of all (see decoder.cpp's own dispatch-order comment), out of scope for this batch.
+// protocols around it). BGP was added to this vector afterward, NOT as part of any migration
+// batch -- like ARP/LLDP in ethertype_registry() above, it's a brand-new protocol built directly
+// on ProtocolDecoder from inception (see bgp.hpp), appended after Modbus/TwinCAT (see
+// decoder.cpp's own BGP call site comment for why its Marker-based structural gate needs no
+// ordering rationale at all). Not migrated: FF-HSE -- the only protocol left in this whole
+// cascade, tried last of all (see decoder.cpp's own dispatch-order comment), out of scope for
+// this batch.
 const std::vector<const ProtocolDecoder*>& tcp_port_independent_registry();
 
 // Migrated UDP-port-gated protocols, in the order their decoder.cpp call sites run. This GateKind

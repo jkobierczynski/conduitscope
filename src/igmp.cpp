@@ -222,4 +222,16 @@ std::optional<IgmpMessage> try_parse_igmp(ByteSpan ip_payload) {
     return msg;
 }
 
+std::optional<ProtocolResult> IgmpDecoder::decode(ByteSpan payload, DecodeContext& /*ctx*/) const {
+    if (auto msg = try_parse_igmp(payload)) {
+        return ProtocolResult::make<IgmpMessage>("igmp", std::move(*msg));
+    }
+    return std::nullopt;
+}
+
+const ProtocolDecoder& igmp_decoder() {
+    static const IgmpDecoder instance;
+    return instance;
+}
+
 }  // namespace conduitscope

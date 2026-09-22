@@ -44,6 +44,7 @@
 #include <vector>
 
 #include "conduitscope/byteio.hpp"
+#include "conduitscope/protocol_decoder.hpp"
 
 namespace conduitscope {
 
@@ -88,5 +89,18 @@ struct VrrpMessage {
 // dispatch in decoder.cpp only ever calls this for IP protocol number 112 in the first place,
 // which is IANA-exclusive to VRRP -- see this file's own VRRP_IP_PROTOCOL).
 std::optional<VrrpMessage> try_parse_vrrp(ByteSpan ip_payload);
+
+// Migration batch 5 (see protocol_decoder.hpp/protocol_registry.hpp): thin ProtocolDecoder wrapper
+// around try_parse_vrrp above, unchanged -- same shape as EigrpDecoder (eigrp.hpp), the original
+// GateKind::IpProtocol pilot. Stateless, no tcp_declared_length()/FlowStateKeying needed.
+class VrrpDecoder : public ProtocolDecoder {
+public:
+    std::string_view id() const override { return "vrrp"; }
+    GateKind gate_kind() const override { return GateKind::IpProtocol; }
+    std::optional<uint8_t> ip_protocol() const override { return VRRP_IP_PROTOCOL; }
+    std::optional<ProtocolResult> decode(ByteSpan payload, DecodeContext& ctx) const override;
+};
+
+const ProtocolDecoder& vrrp_decoder();
 
 }  // namespace conduitscope
