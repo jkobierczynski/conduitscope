@@ -9,6 +9,7 @@
 #include "conduitscope/goose.hpp"
 #include "conduitscope/hartip.hpp"
 #include "conduitscope/iec104.hpp"
+#include "conduitscope/kerberos.hpp"
 #include "conduitscope/mms.hpp"
 #include "conduitscope/modbus.hpp"
 #include "conduitscope/mqtt.hpp"
@@ -82,6 +83,12 @@ const std::vector<const ProtocolDecoder*>& tcp_port_independent_registry() {
                               // multi-field State-Flags/Command-ID/Data-Length gate is stronger
                               // than Modbus's single protocol-id==0 tell, so trying it right after
                               // Modbus costs nothing and cannot be weakened by anything below it).
+        &kerberos_tcp_decoder(),  // Added directly after TwinCAT -- the first Windows AD-suite
+                              // protocol (see kerberos.hpp's file header comment). Its own gate
+                              // (a 4-byte length prefix plus one of 7 recognized ASN.1
+                              // APPLICATION tag bytes, then a pvno==5/msg-type cross-check on full
+                              // decode) doesn't collide with anything above it -- see kerberos.hpp's
+                              // COLLISION SURVEY paragraph for the full writeup.
         &dnp3_decoder(),     // Migration batch 2 -- sits exactly where the old `if (want_dnp3)`
                               // block always did: after Modbus/TwinCAT (both above), before the
                               // COTP/S7comm family below (also still true after COTP's own
@@ -154,6 +161,10 @@ const std::vector<const ProtocolDecoder*>& udp_port_independent_registry() {
                                 // deprioritization. Shares its "hartip" id() with hartip_tcp_decoder()
                                 // in tcp_port_independent_registry above -- see that entry's own
                                 // comment.
+        &kerberos_udp_decoder(),  // Added after HART-IP -- Kerberos's own UDP path, see
+                                // kerberos.hpp's file header comment. Shares its "kerberos" id()
+                                // with kerberos_tcp_decoder() in tcp_port_independent_registry
+                                // above.
     };
     return order;
 }

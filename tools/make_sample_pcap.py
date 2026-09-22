@@ -7553,6 +7553,293 @@ def build_twincat_sample():
 
 
 # ---------------------------------------------------------------------------------------------
+# Kerberos (RFC 4120), TCP and UDP port 88 -- the first Windows AD-suite protocol (see
+# kerberos.hpp's file header comment for the full wire format, structural detection gate, and the
+# curated attack/monitoring notes each packet group below is designed to exercise). Built with the
+# same generic ctx_c/app_c/uni_p/uni_c/ber_int/ber_tlv ASN.1 BER/DER helpers the MMS section above
+# already established (ber_tag_bytes and friends, ~line 3431) -- Kerberos needs nothing those
+# don't already provide (every tag it ever uses fits the low-tag-number, definite-length-only BER
+# subset those helpers cover).
+
+KERBEROS_PORT = 88
+
+
+def kb_seq(content: bytes = b"") -> bytes:
+    return uni_c(16, content)  # SEQUENCE, universal tag 16
+
+
+def kb_int(value: int) -> bytes:
+    return uni_p(2, ber_int(value))  # INTEGER, universal tag 2
+
+
+def kb_str(s: str) -> bytes:
+    return uni_p(0x1B, s.encode("ascii"))  # GeneralString, universal tag 27
+
+
+def kb_time(yyyymmddhhmmss: str) -> bytes:
+    return uni_p(0x18, (yyyymmddhhmmss + "Z").encode("ascii"))  # GeneralizedTime, universal tag 24
+
+
+def kb_bitstring(flag_bits: list) -> bytes:
+    """BIT STRING content for KDCOptions/APOptions: an unused-bits count byte (always 0 here,
+    since every flag this fixture sets falls on a byte boundary already) followed by 4 bytes with
+    the given 0-indexed bit numbers set, matching kdc_option_flag_name/ap_option_flag_name's own
+    numbering in kerberos.cpp."""
+    bits = 0
+    for b in flag_bits:
+        bits |= 1 << (31 - b)
+    return uni_p(0x03, b"\x00" + struct.pack("!I", bits))
+
+
+def kb_principal_name(name_type: int, components: list) -> bytes:
+    return kb_seq(ctx_c(0, kb_int(name_type)) + ctx_c(1, kb_seq(b"".join(kb_str(c) for c in components))))
+
+
+def kb_encrypted_data(etype: int, cipher: bytes = b"\xAA\xBB\xCC\xDD") -> bytes:
+    return kb_seq(ctx_c(0, kb_int(etype)) + ctx_c(2, uni_p(0x04, cipher)))
+
+
+def kb_ticket(realm: str, sname: list, etype: int) -> bytes:
+    """`Ticket ::= [APPLICATION 1] SEQUENCE {...}` -- note this carries its OWN APPLICATION tag
+    even when embedded inside a context-tagged `ticket [5] Ticket` field elsewhere (the double-peel
+    kerberos.cpp's decode_ticket documents)."""
+    inner = kb_seq(ctx_c(0, kb_int(5)) + ctx_c(1, kb_str(realm)) + ctx_c(2, kb_principal_name(2, sname)) +
+                    ctx_c(3, kb_encrypted_data(etype)))
+    return app_c(1, inner)
+
+
+def kb_as_req(*, cname: list, sname: list, etypes: list, realm: str = "EXAMPLE.COM",
+              padata_present: bool = True, kdc_option_bits: list = (), additional_ticket=None,
+              nonce: int = 12345) -> bytes:
+    pvno = ctx_c(1, kb_int(5))
+    msg_type = ctx_c(2, kb_int(10))
+    parts = pvno + msg_type
+    if padata_present:
+        # PA-ENC-TIMESTAMP (2) -- padata-value content is opaque ciphertext, not decoded, so its
+        # exact bytes don't matter here.
+        padata_entry = kb_seq(ctx_c(1, kb_int(2)) + ctx_c(2, uni_p(0x04, b"\x30\x03\x01\x01\xff")))
+        parts += ctx_c(3, kb_seq(padata_entry))
+    body = (ctx_c(0, kb_bitstring(list(kdc_option_bits))) + ctx_c(1, kb_principal_name(1, cname)) +
+            ctx_c(2, kb_str(realm)) + ctx_c(3, kb_principal_name(2, sname)) +
+            ctx_c(5, kb_time("20370101000000")) + ctx_c(7, kb_int(nonce)) +
+            ctx_c(8, kb_seq(b"".join(kb_int(e) for e in etypes))))
+    if additional_ticket is not None:
+        body += ctx_c(11, kb_seq(additional_ticket))
+    inner = kb_seq(parts + ctx_c(4, kb_seq(body)))
+    return app_c(10, inner)
+
+
+def kb_tgs_req(*, sname: list, etypes: list, realm: str = "EXAMPLE.COM", nonce: int = 54321) -> bytes:
+    pvno = ctx_c(1, kb_int(5))
+    msg_type = ctx_c(2, kb_int(12))
+    # PA-TGS-REQ (1) -- padata-value would normally be an AP-REQ authenticating to the TGS; its
+    # exact bytes are opaque/not decoded here either, same as PA-ENC-TIMESTAMP above.
+    padata_entry = kb_seq(ctx_c(1, kb_int(1)) + ctx_c(2, uni_p(0x04, b"\x30\x05\xa0\x03\x02\x01\x05")))
+    padata = ctx_c(3, kb_seq(padata_entry))
+    body = (ctx_c(0, kb_bitstring([])) + ctx_c(2, kb_str(realm)) + ctx_c(3, kb_principal_name(2, sname)) +
+            ctx_c(5, kb_time("20370101000000")) + ctx_c(7, kb_int(nonce)) +
+            ctx_c(8, kb_seq(b"".join(kb_int(e) for e in etypes))))
+    inner = kb_seq(pvno + msg_type + padata + ctx_c(4, kb_seq(body)))
+    return app_c(12, inner)
+
+
+def kb_kdc_rep(*, is_tgs: bool, crealm: str, cname: list, ticket_sname: list, ticket_etype: int,
+               enc_part_etype: int) -> bytes:
+    msg_tag, msg_type_val = (13, 13) if is_tgs else (11, 11)
+    pvno = ctx_c(0, kb_int(5))
+    msg_type = ctx_c(1, kb_int(msg_type_val))
+    crealm_f = ctx_c(3, kb_str(crealm))
+    cname_f = ctx_c(4, kb_principal_name(1, cname))
+    ticket_f = ctx_c(5, kb_ticket(crealm, ticket_sname, ticket_etype))
+    enc_part_f = ctx_c(6, kb_encrypted_data(enc_part_etype))
+    inner = kb_seq(pvno + msg_type + crealm_f + cname_f + ticket_f + enc_part_f)
+    return app_c(msg_tag, inner)
+
+
+def kb_krb_error(*, error_code: int, realm: str = "EXAMPLE.COM", sname: list = ("krbtgt", "EXAMPLE.COM"),
+                  e_text: str = None) -> bytes:
+    pvno = ctx_c(0, kb_int(5))
+    msg_type = ctx_c(1, kb_int(30))
+    stime = ctx_c(4, kb_time("20260922000000"))
+    susec = ctx_c(5, kb_int(0))
+    error_code_f = ctx_c(6, kb_int(error_code))
+    realm_f = ctx_c(9, kb_str(realm))
+    sname_f = ctx_c(10, kb_principal_name(2, list(sname)))
+    parts = pvno + msg_type + stime + susec + error_code_f + realm_f + sname_f
+    if e_text is not None:
+        parts += ctx_c(11, kb_str(e_text))
+    return app_c(30, kb_seq(parts))
+
+
+def kb_ap_req(*, realm: str = "EXAMPLE.COM", sname: list = ("cifs", "fileserver.example.com"),
+              ticket_etype: int = 18, ap_option_bits: list = ()) -> bytes:
+    pvno = ctx_c(0, kb_int(5))
+    msg_type = ctx_c(1, kb_int(14))
+    ap_options = ctx_c(2, kb_bitstring(list(ap_option_bits)))
+    ticket_f = ctx_c(3, kb_ticket(realm, list(sname), ticket_etype))
+    authenticator = ctx_c(4, kb_encrypted_data(18, cipher=b"\x11\x22\x33"))
+    inner = kb_seq(pvno + msg_type + ap_options + ticket_f + authenticator)
+    return app_c(14, inner)
+
+
+def kb_ap_rep() -> bytes:
+    pvno = ctx_c(0, kb_int(5))
+    msg_type = ctx_c(1, kb_int(15))
+    enc_part = ctx_c(2, kb_encrypted_data(18, cipher=b"\x44\x55\x66"))
+    return app_c(15, kb_seq(pvno + msg_type + enc_part))
+
+
+def build_kerberos_sample():
+    """Covers all 6 fully/structurally-decoded Kerberos message types, both flagship curated
+    detections with an explicit negative case each (proving the curated-not-noisy bar is actually
+    met, not just the positive cases -- see kerberos.hpp's file header comment), the always-on
+    downgrade note, the delegation-shape structural note, a KRB-ERROR on a non-standard UDP port,
+    and a TCP-framed message both whole and split across two segments (exercising
+    KerberosTcpDecoder::tcp_declared_length via Decoder::reassemble_tcp_payload, the same
+    split/rejoin shape build_twincat_sample already covers for AMS/TCP)."""
+    packets = []
+    ident = [0xD000]
+
+    def add_udp(src_port, dst_port, payload, from_client):
+        udp = udp_header(src_port, dst_port, payload)
+        src_ip, dst_ip = (HMI_IP, PLC_IP) if from_client else (PLC_IP, HMI_IP)
+        src_mac, dst_mac = (HMI_MAC, PLC_MAC) if from_client else (PLC_MAC, HMI_MAC)
+        ip = ipv4_header(src_ip, dst_ip, 17, len(udp), ident[0]) + udp
+        ident[0] += 1
+        packets.append(eth_header(dst_mac, src_mac, 0x0800) + ip)
+
+    # 1) & 2) AS-REQ with no PA-ENC-TIMESTAMP (the roast-style request shape -- standing note),
+    #    answered by a successful AS-REP whose enc-part uses RC4 -- correlates to #1 by cname and
+    #    triggers the AS-REP-Roasting FLAGSHIP note (packet #2 only, not #1).
+    add_udp(51000, KERBEROS_PORT,
+            kb_as_req(cname=["alice"], sname=["krbtgt", "EXAMPLE.COM"], etypes=[18, 17, 23],
+                      padata_present=False),
+            from_client=True)
+    add_udp(KERBEROS_PORT, 51000,
+            kb_kdc_rep(is_tgs=False, crealm="EXAMPLE.COM", cname=["alice"],
+                       ticket_sname=["krbtgt", "EXAMPLE.COM"], ticket_etype=18, enc_part_etype=23),
+            from_client=False)
+
+    # 3) & 4) TGS-REQ for a specific SPN, answered by a TGS-REP whose Ticket's OWN enc-part uses
+    #    RC4 -- correlates to #3 by sname and triggers the Kerberoasting FLAGSHIP note. Note this
+    #    keys off the Ticket's enc-part etype (encrypted to the target SERVICE account's key), not
+    #    the response's own outer enc-part etype (encrypted to the requesting CLIENT's session
+    #    key, here deliberately left AES to prove the two are checked independently).
+    add_udp(51000, KERBEROS_PORT,
+            kb_tgs_req(sname=["cifs", "fileserver.example.com"], etypes=[18, 17, 23]),
+            from_client=True)
+    add_udp(KERBEROS_PORT, 51000,
+            kb_kdc_rep(is_tgs=True, crealm="EXAMPLE.COM", cname=["alice"],
+                       ticket_sname=["cifs", "fileserver.example.com"], ticket_etype=23,
+                       enc_part_etype=18),
+            from_client=False)
+
+    # 5) Kerberoasting exclusion: a TGS-REP for a krbtgt sname (an ordinary TGT re-request, e.g. a
+    #    renewal) with an RC4 ticket enc-part must NOT be flagged -- see kerberos.cpp's own
+    #    "krbtgt tickets are excluded" comment. No preceding TGS-REQ needed; this only exercises
+    #    the sname-prefix exclusion on the response side.
+    add_udp(KERBEROS_PORT, 51000,
+            kb_kdc_rep(is_tgs=True, crealm="EXAMPLE.COM", cname=["alice"],
+                       ticket_sname=["krbtgt", "EXAMPLE.COM"], ticket_etype=23, enc_part_etype=18),
+            from_client=False)
+
+    # 6) Kerberoasting negative control: a TGS-REP for a real (non-krbtgt) SPN whose ticket enc-
+    #    part is AES -- a "healthy", fully-patched-domain answer that must NOT be flagged either.
+    add_udp(KERBEROS_PORT, 51000,
+            kb_kdc_rep(is_tgs=True, crealm="EXAMPLE.COM", cname=["alice"],
+                       ticket_sname=["ldap", "dc1.example.com"], ticket_etype=18, enc_part_etype=18),
+            from_client=False)
+
+    # 7)-10) AS-REP-Roasting negative case: ordinary Windows-style behavior is an AS-REQ with no
+    #    preauth, a KDC_ERR_PREAUTH_REQUIRED KRB-ERROR, then a RETRY that DOES include
+    #    PA-ENC-TIMESTAMP, finally answered by a successful AS-REP -- this must NOT trigger the
+    #    flagship note, proving the correlation tracks the MOST RECENT request for a given cname
+    #    (see kerberos.cpp's KerberosFlowState::pending_as_req, keyed by cname, overwritten on the
+    #    retry) rather than latching onto the first, no-preauth attempt.
+    add_udp(52000, KERBEROS_PORT,
+            kb_as_req(cname=["bob"], sname=["krbtgt", "EXAMPLE.COM"], etypes=[18, 17],
+                      padata_present=False, nonce=1001),
+            from_client=True)
+    add_udp(KERBEROS_PORT, 52000, kb_krb_error(error_code=25, sname=["krbtgt", "EXAMPLE.COM"]),
+            from_client=False)
+    add_udp(52000, KERBEROS_PORT,
+            kb_as_req(cname=["bob"], sname=["krbtgt", "EXAMPLE.COM"], etypes=[18, 17],
+                      padata_present=True, nonce=1002),
+            from_client=True)
+    add_udp(KERBEROS_PORT, 52000,
+            kb_kdc_rep(is_tgs=False, crealm="EXAMPLE.COM", cname=["bob"],
+                       ticket_sname=["krbtgt", "EXAMPLE.COM"], ticket_etype=18, enc_part_etype=18),
+            from_client=False)
+
+    # 11) A second, distinct KRB-ERROR code (KDC_ERR_C_PRINCIPAL_UNKNOWN) -- gives --stats'
+    #    kerberos_error_counts_ more than one bucket to aggregate, and exercises the named-table
+    #    lookup for a code other than PREAUTH_REQUIRED.
+    add_udp(KERBEROS_PORT, 51000, kb_krb_error(error_code=6, sname=["nosuchuser", "EXAMPLE.COM"]),
+            from_client=False)
+
+    # 12) AP-REQ / 13) AP-REP -- structural-only coverage (ap-options flags, the embedded Ticket's
+    #    visible realm/sname/enc-part etype; the Authenticator/AP-REP enc-part ciphertext itself is
+    #    opaque without keys, deliberately not decoded -- see kerberos.hpp's DELIBERATELY NOT
+    #    IMPLEMENTED list).
+    add_udp(51500, KERBEROS_PORT,
+            kb_ap_req(sname=["cifs", "fileserver.example.com"], ticket_etype=18,
+                      ap_option_bits=[2]),  # mutual-required
+            from_client=True)
+    add_udp(KERBEROS_PORT, 51500, kb_ap_rep(), from_client=False)
+
+    # 14) Downgrade note: an AS-REQ offering only DES/RC4 (no AES type at all) -- always-on, lower
+    #    severity, standalone exposure visibility independent of the roasting flagship note.
+    add_udp(53000, KERBEROS_PORT,
+            kb_as_req(cname=["legacy-svc"], sname=["krbtgt", "EXAMPLE.COM"], etypes=[3, 23],
+                      nonce=2001),
+            from_client=True)
+
+    # 15) Delegation-shape structural note: forwardable(1)+proxiable(3) KDCOptions flags plus
+    #    additional-tickets present (the S4U2Proxy/constrained-delegation shape) -- surfaced, never
+    #    asserted as abuse. Also placed on a non-standard UDP port (4088, not 88) to exercise the
+    #    "not a configured/standard Kerberos port" note alongside it.
+    dummy_additional_ticket = kb_ticket("EXAMPLE.COM", ["svc1", "EXAMPLE.COM"], 18)
+    delegation_req = kb_as_req(cname=["svc1"], sname=["krbtgt", "EXAMPLE.COM"], etypes=[18, 23],
+                                kdc_option_bits=[1, 3], additional_ticket=dummy_additional_ticket,
+                                nonce=2002)
+    udp = udp_header(53001, 4088, delegation_req)
+    ip = ipv4_header(HMI_IP, PLC_IP, 17, len(udp), ident[0]) + udp
+    ident[0] += 1
+    packets.append(eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip)
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_009_000 + i, i * 1000)
+    (TESTS_DIR / "sample_kerberos.pcap").write_bytes(data)
+
+    # --- TCP: one whole-frame AS-REQ, and the same message split across two TCP segments --------
+    tcp_packets = []
+    tcp_as_req = kb_as_req(cname=["carol"], sname=["krbtgt", "EXAMPLE.COM"], etypes=[18, 17, 23],
+                            padata_present=False, nonce=3001)
+    framed = struct.pack("!I", len(tcp_as_req)) + tcp_as_req
+
+    def add_tcp(src_port, dst_port, seq, ack, payload, ident_val, from_client):
+        tcp = tcp_header(src_port, dst_port, seq, ack, TCP_PSH | TCP_ACK, len(payload)) + payload
+        src_ip, dst_ip = (HMI_IP, PLC_IP) if from_client else (PLC_IP, HMI_IP)
+        src_mac, dst_mac = (HMI_MAC, PLC_MAC) if from_client else (PLC_MAC, HMI_MAC)
+        ip = ipv4_header(src_ip, dst_ip, 6, len(tcp), ident_val) + tcp
+        tcp_packets.append(eth_header(dst_mac, src_mac, 0x0800) + ip)
+
+    # Whole frame, one TCP segment.
+    add_tcp(51600, KERBEROS_PORT, 1000, 2000, framed, 0xE000, from_client=True)
+
+    # The same message again, on a different source port, split across two TCP segments.
+    split_at = 60
+    add_tcp(51601, KERBEROS_PORT, 3000, 4000, framed[:split_at], 0xE001, from_client=True)
+    add_tcp(51601, KERBEROS_PORT, 3000 + split_at, 4000, framed[split_at:], 0xE002, from_client=True)
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(tcp_packets):
+        data += pcap_record(pkt, 1_700_009_100 + i, i * 1000)
+    (TESTS_DIR / "sample_kerberos_tcp.pcap").write_bytes(data)
+
+
+# ---------------------------------------------------------------------------------------------
 # DNS / mDNS / LLMNR / NBT-NS / DoH-detection (ROADMAP: "Add DNS, DoH, NBT-NS name resolution
 # decode") -- see dns.hpp/nbns.hpp/tls_sni.hpp's own file header comments for the wire formats
 # these fixtures exercise.
@@ -8995,6 +9282,7 @@ if __name__ == "__main__":
     build_mqtt_sample()
     build_ffhse_sample()
     build_twincat_sample()
+    build_kerberos_sample()
     build_policy_engine_sample()
     build_summarize_unclassified_sample()
     build_inventory_sample()

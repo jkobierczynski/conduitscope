@@ -5649,3 +5649,249 @@ other protocol where independent traffic was eventually found after an
 earlier empty search. See `include/conduitscope/twincat.hpp`'s file header
 for the full writeup.
 
+### Kerberos (RFC 4120, TCP and UDP port 88) -- Windows Active Directory suite, phase 1 of 4
+
+**The first Windows Active Directory protocol in this codebase**, and the
+first of a planned four-part AD suite (Kerberos, LDAP, SMB/NTLM,
+Netlogon/DCE-RPC -- delivered one protocol at a time; LDAP/SMB-NTLM/Netlogon
+are separate future deliveries, not present here). Built entirely on the
+`ProtocolDecoder` interface TwinCAT pioneered (see that section above): two
+decoder instances, `KerberosTcpDecoder`/`KerberosUdpDecoder`, sharing one
+`id() == "kerberos"`, the same "one protocol, one id(), two `GateKind`
+instances" split HART-IP established. No `kerberos_*` fields exist on
+`DecodedPacket` -- everything rides `DecodedPacket::result` as a
+`KerberosMessage`, rendered by `write_kerberos_json_fields` in `output.cpp`.
+
+AD compromise is a standard pivot point into OT environments (AD-joined
+engineering workstations, jump hosts), and Kerberos's own message exchange
+carries the wire-level shape of two of the most common AD attack
+techniques (Kerberoasting, AS-REP Roasting) directly -- no packet capture
+of the actual cryptographic attack itself is needed, only visibility into
+what the KDC exchange looks like when it's happening. This is the
+motivation for this feature's curated attack/monitoring notes (below), a
+deliberately narrow, precisely-documented set rather than broad
+best-effort anomaly tagging.
+
+#### Wire format
+
+ASN.1 DER (a definite-length-only BER subset), the same encoding family
+MMS already established a BER/TLV reader for in this codebase (reused
+here as `kerberos.cpp`'s own, self-contained walker -- see this
+codebase's established convention of each protocol keeping its own BER
+walker rather than sharing one, already documented for
+`asset_inventory.cpp`/`policy_engine.cpp`'s own `session_key`
+duplication). Every Kerberos message is `[APPLICATION n] SEQUENCE {...}`,
+explicitly tagged throughout (every context-tagged field wraps one
+fully-tagged nested TLV -- there is no implicit tagging anywhere in this
+protocol's ASN.1 module). Over TCP, each message is preceded by a 4-byte
+big-endian length prefix (RFC 4120 SS7.2.2); over UDP, the message is the
+whole datagram payload with no such prefix.
+
+Seven message types, keyed by the outer APPLICATION tag byte
+(`0x60 | msg-type`): **AS-REQ** (10, `0x6A`) / **TGS-REQ** (12, `0x6C`) --
+fully decoded: `pvno` (must be 5), `msg-type` (cross-checked against the
+outer tag), `padata` (named subset: PA-ENC-TIMESTAMP(2),
+PA-ETYPE-INFO(11)/PA-ETYPE-INFO2(19), PA-PAC-REQUEST(128),
+PA-FOR-USER(129, S4U2Self shape), else `"padata-type N"`), and
+`req-body`'s `kdc-options` (BIT STRING -> named flags: forwardable,
+forwarded, proxiable, proxy, allow-postdate, postdated, renewable,
+canonicalize, disable-transited-check, renewable-ok, enc-tkt-in-skey,
+renew, validate), `cname`/`realm` (AS-REQ only -- TGS-REQ authenticates
+via its embedded AP-REQ inside `padata`, not a plaintext `cname`, per RFC
+4120's own comment), `sname`, `till` (KerberosTime, rendered ISO-8601),
+`nonce`, the offered `etype` list (named subset: des-cbc-crc(1)/
+des-cbc-md5(3)/rc4-hmac(23)/rc4-hmac-exp(24)/
+aes128-cts-hmac-sha1-96(17)/aes256-cts-hmac-sha1-96(18), else
+`"etype N"`), and `additional-tickets` presence (the S4U2Proxy/
+constrained-delegation shape). **AS-REP** (11, `0x6B`) / **TGS-REP** (13,
+`0x6D`) -- fully decoded: `crealm`/`cname`, the embedded `Ticket`'s own
+visible fields (`realm`/`sname`, and its `enc-part`'s `etype` -- NOT the
+ciphertext, which needs keys), and the response's own outer `enc-part`
+`etype` (also unencrypted on the wire -- this is what actually reveals
+RC4-vs-AES for the curated notes below). **KRB-ERROR** (30, `0x7E`) --
+fully decoded: `error-code` (named table: KDC_ERR_C_PRINCIPAL_UNKNOWN(6),
+KDC_ERR_S_PRINCIPAL_UNKNOWN(7), KDC_ERR_ETYPE_NOSUPP(14),
+KDC_ERR_CLIENT_REVOKED(18), KDC_ERR_PREAUTH_FAILED(24),
+KDC_ERR_PREAUTH_REQUIRED(25), KRB_AP_ERR_SKEW(37), else `"error N"`),
+`cname`/`sname`/`realm` when present, `e-text` when present. **AP-REQ**
+(14, `0x6E`) / **AP-REP** (15, `0x6F`) -- structural only: `ap-options`
+(BIT STRING -> use-session-key, mutual-required) and, for AP-REQ, the
+embedded `Ticket`'s visible `realm`/`sname`/`enc-part` `etype` (the same
+downgrade-visibility value as above, and the field a forged/Golden-ticket
+`enc-part` etype would show up in); the `Authenticator`/AP-REP `enc-part`
+ciphertext itself is opaque without keys and is not decoded (see
+DELIBERATELY NOT IMPLEMENTED below).
+
+#### Structural detection gate and collision survey
+
+Outer tag byte must be one of `{0x6A, 0x6B, 0x6C, 0x6D, 0x6E, 0x6F,
+0x7E}` (constructed APPLICATION 10/11/12/13/14/15/30 -- Kerberos never
+needs tag numbers past 30, so only the ASN.1 low-tag-number form is ever
+handled; a high-tag-number form is rejected outright, not mishandled);
+the outer SEQUENCE's BER length must fit within the available bytes;
+then, on full decode, `pvno` (context `[0]` or `[1]` depending on
+message shape -- see `try_parse_kerberos`'s own comment for the exact
+position table) must equal 5 **and** `msg-type` must equal the value
+implied by the outer APPLICATION tag -- this two-field cross-check, not
+just a leading magic byte, is the strong signal, the same "more than one
+independent structural check" rigor OPC UA/EtherNet-IP/TwinCAT already
+established. `KerberosTcpDecoder::tcp_declared_length()` reads the 4-byte
+length prefix **and** peeks at the following byte for one of the same
+seven tag values before returning a declared length, so the TCP
+reassembly probe is nearly as selective as the full decode gate, not
+merely "4+ bytes present."
+
+Surveyed against every protocol already tried port-independently on TCP
+and UDP, per this codebase's own convention (see TwinCAT's own survey
+above for the shape this follows): OPC UA's 7 fixed ASCII MessageType
+strings (none start with the ASCII characters `j`/`k`/`l`/`m`/`n`/`o`
+that a `0x6A`-`0x6F` tag byte would render as, if it were ever
+misinterpreted as ASCII, which it structurally cannot be here in the
+first place); IEC104's fixed `0x68` start byte; DNP3's fixed `0x0564`
+sync; Modbus's protocol-id==0 field; TwinCAT's conventionally-zero AMS/TCP
+reserved bytes; TPKT's version==3 byte. None collide with a
+`0x6A`-`0x6F`/`0x7E` leading tag byte on TCP, or with CIP I/O's exact
+CPF-item-type-plus-length check or BACnet's BVLC Type==`0x81` check on
+UDP. Registered directly after TwinCAT in the TCP-port-independent chain
+(TCP) and directly after HART-IP in the UDP-port-independent chain (UDP)
+-- see `protocol_registry.cpp`'s own inline comments for both.
+
+#### Curated attack/monitoring detection
+
+A deliberately narrow set of named findings, each with its own heuristic
+and false-positive caveat spelled out in its own note text -- not broad
+best-effort tagging (see this feature's own header comment for the
+Jurgen's-own-scoping-decision context). Every note surfaces a wire-level
+fact and is explicitly worded to avoid asserting detected intent, the
+same honest framing S7comm's `plc_stop_message` and TwinCAT's own
+deferred-feature notes already use:
+
+1. **AS-REP Roasting** -- two-tier. A **standing, low-severity note** on
+   any AS-REQ whose `padata` includes no PA-ENC-TIMESTAMP entry: this
+   alone is NOT anomalous (every real Windows client's very first AS-REQ
+   in an exchange looks exactly like this, and normally gets
+   `KDC_ERR_PREAUTH_REQUIRED` back). The **flagship flag** fires only on
+   a **successful** AS-REP (never a KRB-ERROR) that correlates, on the
+   same session, to an AS-REQ that had no PA-ENC-TIMESTAMP -- see
+   State/correlation below for exactly how that correlation works, and
+   its documented limitation.
+2. **Kerberoasting** -- on a TGS-REP whose embedded **Ticket's own**
+   `enc-part` `etype` is RC4 (23) for an `sname` that isn't `krbtgt`.
+   Deliberately keyed off the Ticket's OWN enc-part etype (encrypted to
+   the target SERVICE account's long-term key -- the material
+   Kerberoasting actually cracks offline), never the response's own
+   outer `enc-part` etype (encrypted to the requesting CLIENT's session
+   key, which says nothing about the target account and is checked
+   separately by the downgrade note below). `krbtgt` tickets are
+   excluded -- a normal TGT (re-)request, not a service ticket; flagging
+   every RC4 TGT on a mixed-etype domain would be noisy and isn't what
+   Kerberoasting targets.
+3. **Weak-encryption/downgrade note** (always-on, lower severity, not
+   itself attack-specific): on any AS-REQ/TGS-REQ whose offered `etype`
+   list includes DES/RC4 with no AES type offered at all -- general
+   exposure visibility, useful on its own for an audit even with no
+   active exploitation in the capture.
+4. **Delegation-shape surfacing** (structural, not an assertion of
+   abuse): `kdc-options` flags relevant to delegation
+   (forwardable/proxiable/proxy) and `additional-tickets` presence (the
+   S4U2Proxy/constrained-delegation shape) rendered as a note --
+   surfaces the wire-level shape unconstrained/constrained delegation
+   relies on, nothing more.
+5. **KRB-ERROR code naming plus `--stats` aggregation** -- not a
+   per-packet flag but a passive monitoring aid: named error-code counts
+   aggregated across the whole capture (`StatsWriter::kerberos_error_counts_`,
+   mirroring `twincat_command_counts_`'s own pattern), so a burst of
+   `KDC_ERR_PREAUTH_FAILED`/`KDC_ERR_C_PRINCIPAL_UNKNOWN` -- a
+   password-spray/account-enumeration signal -- is visible in `--stats`
+   output with no per-session correlation needed at all.
+
+#### State/correlation design and its documented limitation
+
+`KerberosFlowState`, keyed by `FlowStateKeying::Session` (built via
+`tcp_session_key(...)`, confirmed transport-agnostic and reused as-is for
+both the TCP and UDP call sites -- no new helper needed). Two small maps:
+outstanding AS-REQs keyed by `cname` (visible in AS-REQ, unlike TGS-REQ),
+and outstanding TGS-REQs keyed by the requested `sname` (more directly
+useful for the Kerberoasting correlation than any client-identity key,
+since TGS-REQ often omits `cname` entirely). A later request for the same
+key overwrites the earlier pending entry -- so a retry (e.g. the ordinary
+no-preauth-then-`PREAUTH_REQUIRED`-then-retry-with-preauth sequence a
+real Windows client produces) correctly updates what the eventual
+response correlates against, rather than latching onto the first
+attempt.
+
+**Honest limitation, stated plainly**: this correlates by
+session+cname/sname, **not** the `nonce` field RFC 4120 itself defines
+for exactly this purpose -- because the nonce echo lives inside the
+response's encrypted part and is unreadable without keys from a passive
+capture. This is sufficient for realistic single-exchange-at-a-time KDC
+traffic; it could misattribute only if the same client had two genuinely
+overlapping, unanswered requests on one session, which is rare in
+practice.
+
+#### DELIBERATELY NOT IMPLEMENTED in this pass
+
+**KRB-SAFE(20)/KRB-PRIV(21)/KRB-CRED(22)**: rare outside app-level
+Kerberos usage (kpasswd and similar), not part of the core AD auth
+exchange. **PAC contents**: embedded in the Ticket's encrypted part,
+unreadable without the target account's or `krbtgt`'s key from a passive
+capture -- no SID/group extraction, no PAC signature validation, ever,
+the same honest limit any passive-capture Kerberos analysis has
+(Wireshark's own dissector can't decrypt these either without keys).
+**The Authenticator (AP-REQ) and AP-REP's own `enc-part` ciphertext**:
+opaque without keys, same reasoning. **Symbolic ASN.1 CHOICE
+alternatives beyond the padata-type/etype/error-code tables above**:
+render as their raw numeric form (`"padata-type N"`/`"etype N"`/
+`"error N"`), the same graceful-fallback posture as every existing
+named-enum-with-fallback table in this codebase (DNP3's point-format
+table, TwinCAT's command-name table). **LDAP, SMB/NTLM,
+Netlogon/DCE-RPC**: the remaining three protocols of the planned
+four-part AD suite -- separate future deliveries, not present here.
+
+#### JSON output fields
+
+Rendered only when `protocol == "kerberos"`: `kerberos_message_type` /
+`kerberos_msg_type_value` / `kerberos_is_response` / `kerberos_pvno`
+(always present); `kerberos_padata_types` (array) plus
+`kerberos_has_pa_enc_timestamp` (only when `padata` is present);
+`kerberos_kdc_options` (array, only when non-empty);
+`kerberos_cname`/`kerberos_realm`/`kerberos_sname`/`kerberos_till` (only
+when set -- see the wire-format section above for which message types
+set which); `kerberos_nonce` (AS-REQ/TGS-REQ only);
+`kerberos_etypes` (array, only when non-empty);
+`kerberos_has_additional_tickets` (only when true);
+`kerberos_crealm` (only when set); `kerberos_ticket_tkt_vno` /
+`kerberos_ticket_realm` / `kerberos_ticket_sname` /
+`kerberos_ticket_enc_part_etype` (only when an embedded Ticket was
+decoded); `kerberos_enc_part_etype` (only when the response's own outer
+`enc-part` was decoded); `kerberos_error_code` / `kerberos_error_name` /
+`kerberos_error_text` (KRB-ERROR only, `error_text` only when present);
+`kerberos_ap_options` (array, only when non-empty); and
+`kerberos_correlated_request_index` (only on a response authoritatively
+correlated to an earlier request -- see State/correlation above).
+
+#### Validation
+
+No public real-world Kerberos capture was incorporated in this pass (the
+same honest gap already documented for TwinCAT and several other
+protocols above); validated by construction against synthetic
+`tests/sample_kerberos.pcap` (UDP, 15 packets --
+`tools/make_sample_pcap.py`'s `build_kerberos_sample()`) and
+`tests/sample_kerberos_tcp.pcap` (TCP, 3 packets), covering all six
+message types, both curated flagship notes with an explicit correlated
+positive case each, three explicit negative cases proving the
+curated-not-noisy bar is actually met (a krbtgt-sname TGS-REP excluded
+from the Kerberoasting note despite an RC4 ticket, an AES-only TGS-REP
+negative control, and the ordinary no-preauth-then-`PREAUTH_REQUIRED`-
+then-retry-with-preauth AS-REQ/KRB-ERROR/AS-REQ/AS-REP sequence that must
+NOT trigger the AS-REP-Roasting flagship note), the always-on downgrade
+note, the delegation-shape structural note, two named KRB-ERROR codes (for
+`--stats` aggregation), a non-standard UDP port note, and a TCP frame
+both whole and split across two TCP segments (confirming
+`KerberosTcpDecoder::tcp_declared_length` reassembly). If a real Kerberos
+capture becomes available later, it should be added and this section
+updated accordingly, the same way this project has handled every other
+protocol where independent traffic was eventually found after an earlier
+empty search. See `include/conduitscope/kerberos.hpp`'s file header for
+the full writeup.
+

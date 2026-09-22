@@ -1152,6 +1152,34 @@ which protocols are tried:
   probe had to be tightened against after an initial, weaker version of it
   (checking only the 6-byte AMS/TCP prefix, not this full five-part gate)
   was found mis-buffering MQTT/FF-HSE/SMB/TACACS+/OpenVPN traffic.
+- **Kerberos** (RFC 4120, TCP and UDP port 88): recognized by its outer
+  ASN.1 APPLICATION tag byte, which must be one of exactly 7 values
+  (`0x6A`-`0x6F`, `0x7E` -- constructed APPLICATION 10-15 and 30, the seven
+  Kerberos message types), followed by a plausible BER SEQUENCE length,
+  then, on full decode, a two-field cross-check (`pvno == 5` **and**
+  `msg-type` equal to the value the outer tag implies) rather than just a
+  leading magic byte. Surveyed against every protocol already tried
+  port-independently on TCP and UDP: OPC UA's leading bytes must be one of
+  7 fixed ASCII MessageType strings (none render as the ASCII characters a
+  `0x6A`-`0x6F` tag byte would be, if it were ever misread as ASCII, which
+  it structurally cannot be here); IEC 104 requires start byte `0x68`;
+  DNP3 requires sync bytes `0x05 0x64`; Modbus/TCP's protocol-id==0 check;
+  TwinCAT's conventionally-zero AMS/TCP reserved bytes; TPKT's version==3
+  byte; on UDP, CIP I/O's exact CPF-item-type-plus-length check and
+  BACnet's BVLC Type==`0x81` check. None collide, so this decoder is
+  registered directly after TwinCAT in the TCP-port-independent chain and
+  directly after HART-IP in the UDP-port-independent chain -- the same "no
+  collision found, try it as early as its own gate strength justifies"
+  reasoning every protocol above follows.
+  `KerberosTcpDecoder::tcp_declared_length()` reads the 4-byte TCP length
+  prefix *and* peeks at the following byte for one of the same 7 tag
+  values before declaring a length, so the TCP-reassembly probe is nearly
+  as selective as the full decode gate, not merely "4+ bytes present" --
+  see docs/DEVELOPMENT.md's item 22 (ROADMAP) for TwinCAT's own weaker-probe
+  lesson this decoder was written to avoid from the start. See
+  docs/PROTOCOL_COVERAGE.md's Kerberos section for the full writeup,
+  including the curated AS-REP-Roasting/Kerberoasting attack-monitoring
+  notes this decoder also carries.
 - **DNP3**: recognized by the data-link-layer start bytes `0x05 0x64`, which
   DNP3 always begins with.
 - **S7comm/COTP**: recognized by the TPKT signature (`0x03 0x00` followed by
@@ -3714,6 +3742,110 @@ unlike any of the eight routing/redundancy protocols decoded so far.
     `-e`/`--ether` revision above; 11 new `-t`/`--time-format` tests; 8 new
     `--filter`-on-`-r` tests including the no-libpcap stub path) and
     verified clean under ASan/UBSan (1148/1148 on the default build).
+
+22. **Kerberos (RFC 4120) -- phase 1 of a 4-part Windows Active Directory
+    suite, with curated attack/monitoring detection.** Jurgen asked for
+    "more extensive Windows Active Directory protocol dissectors, with a
+    special focus on penetration testing and monitoring attacks." A real
+    scope expansion -- nothing in this codebase before this item touched
+    the Windows auth/directory stack at all -- but a well-motivated one:
+    AD compromise is a standard pivot point into OT environments (AD-joined
+    engineering workstations, jump hosts), so visibility into it fits this
+    project's NIS2/IEC 62443 audit angle directly. Scoped via three
+    clarifying questions before any code was written: the full AD suite is
+    the eventual target (Kerberos, LDAP, SMB/NTLM, Netlogon/DCE-RPC), but
+    delivered **one protocol at a time** (this item is Kerberos only --
+    LDAP/SMB-NTLM/Netlogon are separate future items, not started); and
+    attack detection as a **curated flagship set** (a handful of
+    precisely-documented, low-noise named findings, each with its own
+    heuristic and false-positive caveat spelled out) rather than broad
+    best-effort anomaly tagging.
+
+    **Done.** Built entirely on the `ProtocolDecoder` interface (item 3
+    above) -- the second protocol in this codebase to use it, after
+    TwinCAT (item 20) -- as two decoder instances,
+    `KerberosTcpDecoder`/`KerberosUdpDecoder`, sharing one `id() ==
+    "kerberos"`, the same "one protocol, one id(), two GateKind instances"
+    split HART-IP established. All 6 message types decoded (AS-REQ/AS-REP/
+    TGS-REQ/TGS-REP fully, KRB-ERROR fully, AP-REQ/AP-REP structurally --
+    their `Authenticator`/`enc-part` ciphertext is opaque without keys from
+    a passive capture, the same honest limit any Kerberos dissector has).
+    Five curated notes: a standing note on any preauth-less AS-REQ, the
+    AS-REP-Roasting flagship flag (correlated, session-scoped, fires only
+    on a matching successful AS-REP), the Kerberoasting flagship flag
+    (keyed off the embedded Ticket's own `enc-part` etype, `krbtgt` snames
+    excluded), an always-on DES/RC4-without-AES downgrade note, a
+    delegation-shape structural note (forwardable/proxiable/
+    additional-tickets), and named KRB-ERROR code counts in `--stats`
+    (password-spray/enumeration visibility with no per-session correlation
+    needed). See `include/conduitscope/kerberos.hpp`'s file header for the
+    full writeup (wire format, structural detection gate, collision
+    survey, curated-note design) and docs/PROTOCOL_COVERAGE.md's Kerberos
+    section for the user-facing reference; PROTOCOL DETECTION below has
+    this item's own collision-survey summary.
+
+    One real correctness bug was caught and fixed during this item's own
+    build-and-smoke-test pass (before any test was written against it, so
+    no regression seed exists for it -- caught by manually constructing a
+    TGS-REP with the Ticket's own etype and the response's own outer etype
+    deliberately set to *different* values and observing the Kerberoasting
+    note fire on the wrong one): the Kerberoasting check was initially
+    keyed off `enc_part_etype` (the response's own outer enc-part, which
+    is encrypted to the *requesting client's* session key and reveals
+    nothing about the target service account) instead of
+    `ticket_enc_part_etype` (the embedded Ticket's own enc-part, encrypted
+    to the *target service's* long-term key -- the actual material
+    Kerberoasting cracks offline). Both false negatives (a real
+    Kerberoastable RC4 service ticket answered with an AES outer enc-part,
+    the common case, went unflagged) and false positives (a client whose
+    own session key happened to be RC4 got flagged regardless of the
+    target account's own etype) were possible before the fix. Fixed by
+    switching the condition and the `has_ticket` guard to the Ticket's own
+    field; `tests/sample_kerberos.pcap` packet #4 (`kerberos_kerberoasting_
+    flagship_note_correlated`) now specifically exercises this -- ticket
+    etype RC4, outer etype AES, deliberately different, to keep this from
+    regressing silently.
+
+    Session/correlation state (`KerberosFlowState`, keyed by
+    `FlowStateKeying::Session`) uses `cname` (AS-REQ) and `sname`
+    (TGS-REQ/TGS-REP) rather than RFC 4120's own `nonce` field for
+    request/response correlation, since the nonce echo lives inside the
+    response's encrypted part and is unreadable without keys from a
+    passive capture -- an honest, documented limitation (see
+    kerberos.hpp's STATE/CORRELATION section and PROTOCOL_COVERAGE.md's
+    own paragraph on it), not a bug: sufficient for realistic
+    single-exchange-at-a-time KDC traffic, could misattribute only if the
+    same client had two genuinely overlapping unanswered requests on one
+    session at once, which is rare in practice.
+
+    **Still not done**: LDAP, SMB/NTLM, and Netlogon/DCE-RPC (the
+    remaining three protocols of the planned AD suite -- separate future
+    items); PAC contents (SID/group extraction, PAC signature validation --
+    unreadable without keys from a passive capture, same limit as the
+    Authenticator/AP-REP ciphertext above); KRB-SAFE/KRB-PRIV/KRB-CRED
+    (rare outside app-level Kerberos usage like kpasswd, not part of the
+    core AD auth exchange); no `policy validate`/`inventory` integration
+    (both degrade gracefully on Kerberos traffic today, the same "flows as
+    unrecognized rather than misclassified" posture TwinCAT's own item 20
+    is still in); and no real-world capture corpus -- validated by
+    construction only, against synthetic `tests/sample_kerberos.pcap`
+    (UDP, 15 packets) and `tests/sample_kerberos_tcp.pcap` (TCP, 3
+    packets, including a TCP-segment-split reassembly case) --
+    `wiki.wireshark.org`'s own public SampleCaptures page was identified
+    during planning as a plausible source (`krb-816.zip`,
+    `kerberos-Delegation.zip`, `constained-delegation.zip`) but wasn't
+    reachable from this environment's network egress policy to actually
+    fetch and inspect; if a real Kerberos capture becomes available later
+    it should be added and PROTOCOL_COVERAGE.md's Validation subsection
+    updated accordingly, the same way this project has handled every other
+    protocol where independent traffic was eventually found after an
+    earlier empty search. 19 new CTest tests (all 6 message types, both
+    flagship notes with a correlated positive case each, three explicit
+    negative cases proving the curated-not-noisy bar is actually met, the
+    downgrade/delegation notes, `--stats` KRB-ERROR counts, `--protocol
+    kerberos`/`--kerberos-port`, non-standard-port note, and the TCP
+    whole-frame/split-segment cases) -- full existing suite (1205 tests)
+    stays 100% passing, zero-warning build.
 
 ### Protocols not covered at all
 

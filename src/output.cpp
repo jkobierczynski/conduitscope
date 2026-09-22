@@ -537,6 +537,82 @@ void write_twincat_json_fields(std::ostream& out, const TwinCatFrame& tc) {
     }
 }
 
+// The Kerberos analog of write_twincat_json_fields above -- same rationale (a plain free
+// function, not a ProtocolRenderer interface, still premature with only two users of this
+// result-object path). Every field is either always-set (message_type/msg_type_value/
+// is_response/pvno) or conditioned on the same has_*/non-empty check KerberosMessage's own
+// fields document -- see kerberos.hpp's struct comment for which fields apply to which message
+// type; a field left at its default (empty string/vector, false) for a given message type is
+// omitted here exactly like TwinCAT's own has_index_addressing/has_ads_result convention above,
+// never emitted as an empty/zero placeholder.
+void write_kerberos_json_fields(std::ostream& out, const KerberosMessage& km) {
+    out << "    \"kerberos_message_type\": \"" << json_escape(km.message_type) << "\",\n";
+    out << "    \"kerberos_msg_type_value\": " << static_cast<int>(km.msg_type_value) << ",\n";
+    out << "    \"kerberos_is_response\": " << (km.is_response ? "true" : "false") << ",\n";
+    out << "    \"kerberos_pvno\": " << static_cast<int>(km.pvno) << ",\n";
+    if (!km.padata_types.empty()) {
+        out << "    \"kerberos_padata_types\": [";
+        for (size_t i = 0; i < km.padata_types.size(); ++i) {
+            if (i != 0) out << ", ";
+            out << "\"" << json_escape(km.padata_types[i]) << "\"";
+        }
+        out << "],\n";
+        out << "    \"kerberos_has_pa_enc_timestamp\": " << (km.has_pa_enc_timestamp ? "true" : "false") << ",\n";
+    }
+    if (!km.kdc_options.empty()) {
+        out << "    \"kerberos_kdc_options\": [";
+        for (size_t i = 0; i < km.kdc_options.size(); ++i) {
+            if (i != 0) out << ", ";
+            out << "\"" << json_escape(km.kdc_options[i]) << "\"";
+        }
+        out << "],\n";
+    }
+    if (!km.cname.empty()) out << "    \"kerberos_cname\": \"" << json_escape(km.cname) << "\",\n";
+    if (!km.realm.empty()) out << "    \"kerberos_realm\": \"" << json_escape(km.realm) << "\",\n";
+    if (!km.sname.empty()) out << "    \"kerberos_sname\": \"" << json_escape(km.sname) << "\",\n";
+    if (!km.till.empty()) out << "    \"kerberos_till\": \"" << json_escape(km.till) << "\",\n";
+    if (km.message_type == "AS-REQ" || km.message_type == "TGS-REQ") {
+        out << "    \"kerberos_nonce\": " << km.nonce << ",\n";
+    }
+    if (!km.etypes.empty()) {
+        out << "    \"kerberos_etypes\": [";
+        for (size_t i = 0; i < km.etypes.size(); ++i) {
+            if (i != 0) out << ", ";
+            out << "\"" << json_escape(km.etypes[i]) << "\"";
+        }
+        out << "],\n";
+    }
+    if (km.has_additional_tickets) out << "    \"kerberos_has_additional_tickets\": true,\n";
+    if (!km.crealm.empty()) out << "    \"kerberos_crealm\": \"" << json_escape(km.crealm) << "\",\n";
+    if (km.has_ticket) {
+        out << "    \"kerberos_ticket_tkt_vno\": " << static_cast<int>(km.ticket_tkt_vno) << ",\n";
+        out << "    \"kerberos_ticket_realm\": \"" << json_escape(km.ticket_realm) << "\",\n";
+        out << "    \"kerberos_ticket_sname\": \"" << json_escape(km.ticket_sname) << "\",\n";
+        out << "    \"kerberos_ticket_enc_part_etype\": \"" << json_escape(km.ticket_enc_part_etype) << "\",\n";
+    }
+    if (km.has_enc_part) {
+        out << "    \"kerberos_enc_part_etype\": \"" << json_escape(km.enc_part_etype) << "\",\n";
+    }
+    if (km.message_type == "KRB-ERROR") {
+        out << "    \"kerberos_error_code\": " << km.error_code << ",\n";
+        out << "    \"kerberos_error_name\": \"" << json_escape(km.error_name) << "\",\n";
+        if (!km.error_text.empty()) {
+            out << "    \"kerberos_error_text\": \"" << json_escape(km.error_text) << "\",\n";
+        }
+    }
+    if (!km.ap_options.empty()) {
+        out << "    \"kerberos_ap_options\": [";
+        for (size_t i = 0; i < km.ap_options.size(); ++i) {
+            if (i != 0) out << ", ";
+            out << "\"" << json_escape(km.ap_options[i]) << "\"";
+        }
+        out << "],\n";
+    }
+    if (km.correlated_request_seen) {
+        out << "    \"kerberos_correlated_request_index\": " << km.correlated_request_index << ",\n";
+    }
+}
+
 }  // namespace
 
 void JsonWriter::write_packet(const DecodedPacket& p) {
@@ -1651,6 +1727,9 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
     if (p.protocol == "twincat" && p.result) {
         write_twincat_json_fields(out_, p.result->as<TwinCatFrame>());
     }
+    if (p.protocol == "kerberos" && p.result) {
+        write_kerberos_json_fields(out_, p.result->as<KerberosMessage>());
+    }
     out_ << "    \"notes\": [";
     for (size_t i = 0; i < p.notes.size(); ++i) {
         if (i != 0) out_ << ", ";
@@ -1782,6 +1861,17 @@ void StatsWriter::write_packet(const DecodedPacket& p) {
         const TwinCatFrame& tc = p.result->as<TwinCatFrame>();
         twincat_command_counts_[tc.command_name]++;
         if (tc.paired_response) twincat_paired_responses_++;
+    }
+    // Curated Note 5 (kerberos.hpp's file header comment) -- passive burst/enumeration
+    // visibility: named KRB-ERROR error-code counts, aggregated across the whole capture, with
+    // no per-session correlation needed at all. A burst of KDC_ERR_PREAUTH_FAILED/
+    // KDC_ERR_C_PRINCIPAL_UNKNOWN is a password-spray/account-enumeration signal visible here
+    // even when the flagship per-packet notes (which do need correlation) don't fire.
+    if (p.protocol == "kerberos" && p.result) {
+        const KerberosMessage& km = p.result->as<KerberosMessage>();
+        if (km.message_type == "KRB-ERROR") {
+            kerberos_error_counts_[km.error_name]++;
+        }
     }
     if (p.protocol == "s7comm" && p.s7comm_has_function) {
         s7comm_function_counts_[p.s7comm_function_name]++;
@@ -1956,6 +2046,12 @@ void StatsWriter::print_summary(std::ostream& out) const {
         }
         out << "twincat responses authoritatively paired (invoke id, not heuristic): "
             << twincat_paired_responses_ << "\n";
+    }
+    if (!kerberos_error_counts_.empty()) {
+        out << "kerberos krb-error codes:\n";
+        for (const auto& [name, count] : kerberos_error_counts_) {
+            out << "  " << std::left << std::setw(40) << name << count << "\n";
+        }
     }
     if (!s7comm_function_counts_.empty()) {
         out << "s7comm function codes:\n";

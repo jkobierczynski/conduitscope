@@ -31,7 +31,9 @@ const std::vector<const ProtocolDecoder*>& ethertype_registry();
 const std::vector<const ProtocolDecoder*>& ip_protocol_registry();
 
 // Migrated TCP-port-independent protocols, in the order their decoder.cpp call sites run.
-// Populated: Modbus (Stage 2 of the pilot), TwinCAT, OPC UA, EtherNet/IP (TCP side only -- see
+// Populated: Modbus (Stage 2 of the pilot), TwinCAT, Kerberos (TCP side only -- see
+// udp_port_independent_registry() below for its UDP sibling, sharing this same id() -- the first
+// Windows AD-suite protocol, see kerberos.hpp), OPC UA, EtherNet/IP (TCP side only -- see
 // udp_port_independent_registry() below for its UDP CIP I/O sibling, sharing this same id()),
 // IEC104, DNP3, COTP, HART-IP (TCP side only -- see udp_port_independent_registry() below for its
 // UDP sibling, sharing this same id()), MQTT (migration batch 2 -- see decoder.cpp's call site
@@ -56,8 +58,9 @@ const std::vector<const ProtocolDecoder*>& udp_port_registry();
 // in tcp_port_independent_registry() above, the same pattern EnipUdpDecoder/EnipTcpDecoder
 // established first). Lists all three in decoder.cpp's real UDP dispatch order (CIP I/O, then
 // BACnet/IP, then HART-IP), matching tcp_port_independent_registry()'s own "keep migrated entries
-// in real relative order" convention. Not migrated by this batch: none -- this batch migrates
-// every UdpPortIndependent protocol this codebase has.
+// in real relative order" convention. Also populated: Kerberos's own UDP path
+// (KerberosUdpDecoder, kerberos.hpp -- shares its "kerberos" id() with kerberos_tcp_decoder() in
+// tcp_port_independent_registry() above, the same shared-id() pattern), registered after HART-IP.
 const std::vector<const ProtocolDecoder*>& udp_port_independent_registry();
 
 // Migration batch 2 addition: S7comm/S7comm-Plus/MMS (GateKind::CotpPayload -- see

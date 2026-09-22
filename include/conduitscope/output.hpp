@@ -161,6 +161,10 @@ private:
     std::map<std::string, size_t> twincat_command_counts_;
     size_t twincat_paired_responses_ = 0;  // authoritatively paired by Invoke ID, not a heuristic
                                              // -- TwinCAT's analog of modbus_paired_responses_ above
+    // Curated Note 5 (kerberos.hpp's file header comment) -- named KRB-ERROR error-code counts,
+    // keyed by error_name ("KDC_ERR_PREAUTH_REQUIRED", or "error N" for an unnamed code), read
+    // from DecodedPacket::result the same way twincat_command_counts_ is above.
+    std::map<std::string, size_t> kerberos_error_counts_;
     std::map<std::string, size_t> s7comm_function_counts_;
     std::map<std::string, size_t> dnp3_function_counts_;
     std::map<std::string, size_t> iec104_asdu_type_counts_;

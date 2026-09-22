@@ -30,6 +30,7 @@
 #include "conduitscope/igmp.hpp"
 #include "conduitscope/igrp.hpp"
 #include "conduitscope/it_protocols.hpp"
+#include "conduitscope/kerberos.hpp"
 #include "conduitscope/mms.hpp"
 #include "conduitscope/modbus.hpp"
 #include "conduitscope/mpls.hpp"
@@ -133,6 +134,10 @@ enum class ProtocolFilter {
                            // registration-model ProtocolDecoder interface (protocol_decoder.hpp)
                            // -- see docs/DEVELOPMENT.md's "registration-model decoder refactor"
                            // entry.
+    KerberosOnly,          // only attempt Kerberos (RFC 4120, UDP/88 and TCP/88) decoding -- see
+                           // kerberos.hpp. The first protocol in the Windows Active Directory
+                           // suite (Kerberos, then LDAP, then SMB/NTLM, then Netlogon/DCE-RPC --
+                           // delivered one at a time).
 };
 
 struct DecodeOptions {
@@ -160,6 +165,7 @@ struct DecodeOptions {
     std::vector<uint16_t> extra_enip_io_ports;  // UDP, unlike extra_enip_ports (TCP) -- see ENIP_IO_UDP_PORT
     std::vector<uint16_t> extra_bacnet_ports;   // UDP -- see BACNET_UDP_PORT (47808/0xBAC0)
     std::vector<uint16_t> extra_hartip_ports;   // TCP AND UDP -- see HARTIP_PORT (5094, same for both)
+    std::vector<uint16_t> extra_kerberos_ports;  // TCP AND UDP -- see KERBEROS_PORT (88, same for both)
     std::vector<uint16_t> extra_opcua_ports;    // TCP only -- see OPCUA_PORT (4840)
     std::vector<uint16_t> extra_mqtt_ports;     // TCP only -- see MQTT_PORT (1883)
     std::vector<uint16_t> extra_ffhse_ports;    // TCP AND UDP -- see FFHSE_PORT_ANNUNC/_FMS/_SM/_LAN

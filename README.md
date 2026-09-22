@@ -12,7 +12,9 @@ IEC 61850-9-2 Sampled Values, EtherCAT, BACnet/IP, HART-IP, OPC UA Binary
 (UA-TCP/Secure Conversation), IEC 61850 MMS (Manufacturing Message Specification,
 ISO 9506), MQTT (v3.1/v3.1.1/v5.0, including Sparkplug B), FOUNDATION
 Fieldbus HSE (FDA/SM/FMS/LAN Redundancy), Beckhoff TwinCAT/ADS (over
-AMS/TCP), IEEE Spanning Tree Protocol
+AMS/TCP), Kerberos (RFC 4120, with curated AS-REP-Roasting and
+Kerberoasting attack/monitoring notes -- the first of a planned Windows
+Active Directory protocol suite), IEEE Spanning Tree Protocol
 (STP/RSTP/MSTP), DeviceNet (CAN-bus CIP, via SocketCAN pcap captures), DNS,
 mDNS, LLMNR, and NetBIOS Name Service (NBT-NS), ICMP, RIP, IGMP, VRRP, HSRP,
 IGRP, PIM, EIGRP, and OSPFv2,

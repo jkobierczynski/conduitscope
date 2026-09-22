@@ -548,6 +548,8 @@ bool Decoder::reassemble_tcp_payload(const TcpSegment& tcp, const std::string& f
                         options_.protocol_filter == ProtocolFilter::ModbusOnly;
     bool want_twincat = options_.protocol_filter == ProtocolFilter::Auto ||
                          options_.protocol_filter == ProtocolFilter::TwinCatOnly;
+    bool want_kerberos = options_.protocol_filter == ProtocolFilter::Auto ||
+                          options_.protocol_filter == ProtocolFilter::KerberosOnly;
     bool want_dnp3 = options_.protocol_filter == ProtocolFilter::Auto ||
                       options_.protocol_filter == ProtocolFilter::Dnp3Only;
     bool want_s7comm = options_.protocol_filter == ProtocolFilter::Auto ||
@@ -634,6 +636,16 @@ bool Decoder::reassemble_tcp_payload(const TcpSegment& tcp, const std::string& f
         if (auto d = twincat_decoder().tcp_declared_length(candidate)) {
             declared = d;
             which = "AMS/TCP (TwinCAT/ADS)";
+        }
+    }
+    // Kerberos/TCP, tried right after TwinCAT -- see kerberos.hpp's file header comment for the
+    // full collision survey/ordering rationale. kerberos_tcp_declared_length's own gate (4-byte
+    // length prefix, then a peek at one of 7 recognized ASN.1 APPLICATION tag bytes) is nearly as
+    // selective as the full decode gate, not merely "4+ bytes present".
+    if (!declared && want_kerberos) {
+        if (auto d = kerberos_tcp_decoder().tcp_declared_length(candidate)) {
+            declared = d;
+            which = "Kerberos message (RFC 4120)";
         }
     }
     if (!declared && want_dnp3) {
@@ -1566,6 +1578,42 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                 }
             }
 
+            // Kerberos over UDP/88, tried right after HART-IP -- the first Windows AD-suite
+            // protocol (see kerberos.hpp's file header comment). Purely stateless as far as
+            // per-datagram parsing goes (a single UDP datagram carries exactly one Kerberos
+            // message, no coalescing), so decode() is a direct pass-through into
+            // try_parse_kerberos plus the session-scoped AS-REQ/TGS-REQ correlation layer -- see
+            // kerberos.cpp.
+            bool want_kerberos = options_.protocol_filter == ProtocolFilter::Auto ||
+                                  options_.protocol_filter == ProtocolFilter::KerberosOnly;
+            if (want_kerberos) {
+                std::string udp_session =
+                    tcp_session_key(out.src_ip, udp.src_port, out.dst_ip, udp.dst_port);
+                DecodeContext ctx;
+                ctx.flow_key = out.src_ip + ":" + std::to_string(udp.src_port) + "->" + out.dst_ip +
+                               ":" + std::to_string(udp.dst_port);
+                ctx.session_key = udp_session;
+                ctx.packet_index = index;
+                ctx.protocol_id = "kerberos";
+                ctx.flow_states = &registry_flow_state_;
+                if (auto result = kerberos_udp_decoder().decode(udp.payload, ctx)) {
+                    const KerberosMessage& km = result->as<KerberosMessage>();
+                    out.protocol = "kerberos";
+                    out.summary = km.summary;
+                    for (const auto& n : km.notes) out.notes.push_back(n);
+                    out.result = *result;
+
+                    bool expected_port = port_in(udp.src_port, KERBEROS_PORT, options_.extra_kerberos_ports) ||
+                                          port_in(udp.dst_port, KERBEROS_PORT, options_.extra_kerberos_ports);
+                    if (!expected_port) {
+                        out.notes.push_back("seen on UDP port " + std::to_string(udp.src_port) + "->" +
+                                             std::to_string(udp.dst_port) +
+                                             ", which is not a configured/standard Kerberos port (88)");
+                    }
+                    return out;
+                }
+            }
+
             // RIP and HSRP, UNLIKE every opportunistic check above (CIP I/O/BACnet/HART-IP/FF-HSE),
             // are port-GATED in Auto mode -- see extra_rip_ports/extra_hsrp_ports in decoder.hpp:
             // try_parse_rip's and try_parse_hsrp's own structural checks are too weak (a handful of
@@ -2189,6 +2237,8 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                             options_.protocol_filter == ProtocolFilter::ModbusOnly;
         bool want_twincat = options_.protocol_filter == ProtocolFilter::Auto ||
                              options_.protocol_filter == ProtocolFilter::TwinCatOnly;
+        bool want_kerberos = options_.protocol_filter == ProtocolFilter::Auto ||
+                              options_.protocol_filter == ProtocolFilter::KerberosOnly;
         bool want_dnp3 = options_.protocol_filter == ProtocolFilter::Auto ||
                           options_.protocol_filter == ProtocolFilter::Dnp3Only;
         bool want_s7comm = options_.protocol_filter == ProtocolFilter::Auto ||
@@ -2413,6 +2463,39 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                     out.notes.push_back("seen on TCP port " + std::to_string(tcp.src_port) + "->" +
                                          std::to_string(tcp.dst_port) +
                                          ", which is not a configured/standard TwinCAT/AMS port (48898)");
+                }
+                return out;
+            }
+        }
+
+        if (want_kerberos) {
+            // Kerberos over TCP/88 -- the first Windows AD-suite protocol (see kerberos.hpp's
+            // file header comment). Same out.result-only shape TwinCAT established just above --
+            // no kerberos_* DecodedPacket fields exist, JsonWriter renders from out.result
+            // (output.cpp's write_kerberos_json_fields), TextWriter/CsvWriter from
+            // out.summary/out.notes generically. KerberosTcpDecoder::decode strips the 4-byte
+            // length prefix itself (see kerberos.cpp) -- effective_payload here still carries it,
+            // matching what kerberos_tcp_declared_length measured against.
+            std::string session = tcp_session_key(out.src_ip, tcp.src_port, out.dst_ip, tcp.dst_port);
+            DecodeContext ctx;
+            ctx.flow_key = flow_key;
+            ctx.session_key = session;
+            ctx.packet_index = index;
+            ctx.protocol_id = "kerberos";
+            ctx.flow_states = &registry_flow_state_;
+            if (auto result = kerberos_tcp_decoder().decode(effective_payload, ctx)) {
+                const KerberosMessage& km = result->as<KerberosMessage>();
+                out.protocol = "kerberos";
+                out.summary = km.summary;
+                for (const auto& n : km.notes) out.notes.push_back(n);
+                out.result = *result;
+
+                bool expected_port = port_in(tcp.src_port, KERBEROS_PORT, options_.extra_kerberos_ports) ||
+                                      port_in(tcp.dst_port, KERBEROS_PORT, options_.extra_kerberos_ports);
+                if (!expected_port) {
+                    out.notes.push_back("seen on TCP port " + std::to_string(tcp.src_port) + "->" +
+                                         std::to_string(tcp.dst_port) +
+                                         ", which is not a configured/standard Kerberos port (88)");
                 }
                 return out;
             }
