@@ -35,12 +35,14 @@ const std::vector<const ProtocolDecoder*>& ethertype_registry();
 const std::vector<const ProtocolDecoder*>& ip_protocol_registry();
 
 // Migrated TCP-port-independent protocols, in the order their decoder.cpp call sites run.
-// Populated: Modbus (Stage 2 of the pilot), TwinCAT, Kerberos (TCP side only -- see
-// udp_port_independent_registry() below for its UDP sibling, sharing this same id() -- the first
-// Windows AD-suite protocol, see kerberos.hpp), LDAP (the second Windows AD-suite protocol, no UDP
-// sibling -- see ldap.hpp), SMB (the third Windows AD-suite protocol, no UDP sibling -- see
-// smb.hpp; its own NTLM sub-decode, ntlm.hpp, has no ProtocolDecoder or registry entry of its own,
-// see that file's header comment), OPC UA, EtherNet/IP (TCP side only -- see
+// Populated: Modbus (Stage 2 of the pilot), TwinCAT, MELSEC (TCP side only -- see
+// udp_port_independent_registry() below for its UDP sibling, sharing this same id() -- a brand-new
+// protocol built entirely on this interface from inception, like TwinCAT, see melsec.hpp), Kerberos
+// (TCP side only -- see udp_port_independent_registry() below for its UDP sibling, sharing this
+// same id() -- the first Windows AD-suite protocol, see kerberos.hpp), LDAP (the second Windows
+// AD-suite protocol, no UDP sibling -- see ldap.hpp), SMB (the third Windows AD-suite protocol, no
+// UDP sibling -- see smb.hpp; its own NTLM sub-decode, ntlm.hpp, has no ProtocolDecoder or registry
+// entry of its own, see that file's header comment), OPC UA, EtherNet/IP (TCP side only -- see
 // udp_port_independent_registry() below for its UDP CIP I/O sibling, sharing this same id()),
 // IEC104, DNP3, COTP, HART-IP (TCP side only -- see udp_port_independent_registry() below for its
 // UDP sibling, sharing this same id()), MQTT (migration batch 2 -- see decoder.cpp's call site
@@ -62,14 +64,22 @@ const std::vector<const ProtocolDecoder*>& udp_port_registry();
 // -- see protocol_decoder.hpp), the UDP-side mirror of tcp_port_independent_registry() above.
 // Populated: EtherNet/IP's own CIP I/O UDP path (EnipUdpDecoder, enip.hpp -- shares its "enip"
 // id() with enip_tcp_decoder() in tcp_port_independent_registry() above; see that entry's own
-// comment for why), BACnet/IP (BacnetDecoder, bacnet.hpp -- its own id(), no sharing), HART-IP's
-// own UDP path (HartIpUdpDecoder, hartip.hpp -- shares its "hartip" id() with hartip_tcp_decoder()
-// in tcp_port_independent_registry() above, the same pattern EnipUdpDecoder/EnipTcpDecoder
-// established first). Lists all three in decoder.cpp's real UDP dispatch order (CIP I/O, then
-// BACnet/IP, then HART-IP), matching tcp_port_independent_registry()'s own "keep migrated entries
-// in real relative order" convention. Also populated: Kerberos's own UDP path
+// comment for why), BACnet/IP (BacnetDecoder, bacnet.hpp -- its own id(), no sharing), MELSEC's own
+// UDP path (MelsecUdpDecoder, melsec.hpp -- shares its "melsec" id() with melsec_tcp_decoder() in
+// tcp_port_independent_registry() above), HART-IP's own UDP path (HartIpUdpDecoder, hartip.hpp --
+// shares its "hartip" id() with hartip_tcp_decoder() in tcp_port_independent_registry() above, the
+// same pattern EnipUdpDecoder/EnipTcpDecoder established first), and Kerberos's own UDP path
 // (KerberosUdpDecoder, kerberos.hpp -- shares its "kerberos" id() with kerberos_tcp_decoder() in
-// tcp_port_independent_registry() above, the same shared-id() pattern), registered after HART-IP.
+// tcp_port_independent_registry() above, the same shared-id() pattern). Lists all five in
+// decoder.cpp's real UDP dispatch order (CIP I/O, then BACnet/IP, then MELSEC, then HART-IP, then
+// Kerberos), matching tcp_port_independent_registry()'s own "keep migrated entries in real relative
+// order" convention. MELSEC is deliberately tried BEFORE HART-IP despite being added later --
+// HART-IP's own weak UDP structural gate (MessageType/MessageID at payload bytes 1/2 both small
+// enumerated values, MsgLength >= 8) is incidentally satisfied by real MELSEC 3E/4E traffic often
+// enough to matter, so MELSEC's own much stronger two-part gate (exact subheader magic + exact
+// declared-length cross-check) must run first -- see melsec.hpp/melsec.cpp and the matching
+// decoder.cpp call-site comment for the full collision analysis, discovered via this protocol's own
+// required manual smoke test.
 const std::vector<const ProtocolDecoder*>& udp_port_independent_registry();
 
 // Migration batch 2 addition: S7comm/S7comm-Plus/MMS (GateKind::CotpPayload -- see

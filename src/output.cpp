@@ -613,6 +613,86 @@ void write_kerberos_json_fields(std::ostream& out, const KerberosMessage& km) {
     }
 }
 
+// The MELSEC analog of write_twincat_json_fields/write_kerberos_json_fields above -- same
+// rationale (plain free function, not a ProtocolRenderer interface). Devices/values render as
+// parallel JSON arrays (melsec_devices lines up index-for-index with melsec_word_values/
+// melsec_bit_values/melsec_dword_values, whichever is populated) -- see melsec.hpp's MelsecFrame
+// comment for which vector(s) a given command/subcommand combination fills.
+void write_melsec_json_fields(std::ostream& out, const MelsecFrame& mf) {
+    out << "    \"melsec_frame_type\": \"" << (mf.is_4e_frame ? "4E" : "3E") << "\",\n";
+    if (mf.is_4e_frame) {
+        out << "    \"melsec_serial_number\": " << mf.serial_number << ",\n";
+    }
+    out << "    \"melsec_is_response\": " << (mf.is_response ? "true" : "false") << ",\n";
+    out << "    \"melsec_network_no\": " << static_cast<int>(mf.network_no) << ",\n";
+    out << "    \"melsec_pc_no\": " << static_cast<int>(mf.pc_no) << ",\n";
+    out << "    \"melsec_command_name\": \"" << json_escape(mf.command_name) << "\",\n";
+    if (mf.has_command) {
+        out << "    \"melsec_command\": " << mf.command << ",\n";
+        out << "    \"melsec_subcommand\": " << mf.subcommand << ",\n";
+    }
+    if (mf.has_end_code) {
+        out << "    \"melsec_end_code\": " << mf.end_code << ",\n";
+        out << "    \"melsec_end_code_name\": \"" << json_escape(mf.end_code_name) << "\",\n";
+    }
+    if (!mf.devices.empty()) {
+        out << "    \"melsec_devices\": [";
+        for (size_t i = 0; i < mf.devices.size(); ++i) {
+            if (i != 0) out << ", ";
+            out << "\"" << json_escape(mf.devices[i].device_text) << "\"";
+        }
+        out << "],\n";
+    }
+    if (mf.has_point_count) {
+        out << "    \"melsec_point_count\": " << mf.point_count << ",\n";
+    }
+    if (!mf.word_values.empty()) {
+        out << "    \"melsec_word_values\": [";
+        for (size_t i = 0; i < mf.word_values.size(); ++i) {
+            if (i != 0) out << ", ";
+            out << mf.word_values[i];
+        }
+        out << "],\n";
+    }
+    if (!mf.dword_values.empty()) {
+        out << "    \"melsec_dword_values\": [";
+        for (size_t i = 0; i < mf.dword_values.size(); ++i) {
+            if (i != 0) out << ", ";
+            out << mf.dword_values[i];
+        }
+        out << "],\n";
+    }
+    if (!mf.bit_values.empty()) {
+        out << "    \"melsec_bit_values\": [";
+        for (size_t i = 0; i < mf.bit_values.size(); ++i) {
+            if (i != 0) out << ", ";
+            out << static_cast<int>(mf.bit_values[i]);
+        }
+        out << "],\n";
+    }
+    if (mf.has_undecoded_response_bytes) {
+        out << "    \"melsec_undecoded_response_bytes\": " << mf.undecoded_response_byte_count << ",\n";
+    }
+    if (mf.has_remote_mode) {
+        out << "    \"melsec_remote_mode\": \"" << json_escape(mf.remote_mode_name) << "\",\n";
+    }
+    if (mf.has_clear_mode) {
+        out << "    \"melsec_clear_mode\": \"" << json_escape(mf.clear_mode_name) << "\",\n";
+    }
+    if (mf.has_remote_password) {
+        // Per Jurgen's own decision: the password value is never rendered, only its length -- see
+        // melsec.hpp's file header comment.
+        out << "    \"melsec_remote_password_length\": " << mf.remote_password_length << ",\n";
+    }
+    if (mf.has_cpu_type) {
+        out << "    \"melsec_cpu_type\": \"" << json_escape(mf.cpu_type_name) << "\",\n";
+        out << "    \"melsec_cpu_code\": " << mf.cpu_code << ",\n";
+    }
+    if (mf.has_echo_data) {
+        out << "    \"melsec_echo_data\": \"" << json_escape(mf.echo_data) << "\",\n";
+    }
+}
+
 // The LDAP analog of write_kerberos_json_fields above -- same rationale, same "always-set fields
 // unconditional, everything else conditioned on the same has_*/non-empty check LdapMessage's own
 // fields document" posture -- see ldap.hpp's struct comment for which fields apply to which message
@@ -2090,6 +2170,9 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
     if (p.protocol == "twincat" && p.result) {
         write_twincat_json_fields(out_, p.result->as<TwinCatFrame>());
     }
+    if (p.protocol == "melsec" && p.result) {
+        write_melsec_json_fields(out_, p.result->as<MelsecFrame>());
+    }
     if (p.protocol == "kerberos" && p.result) {
         write_kerberos_json_fields(out_, p.result->as<KerberosMessage>());
     }
@@ -2230,6 +2313,11 @@ void StatsWriter::write_packet(const DecodedPacket& p) {
         const TwinCatFrame& tc = p.result->as<TwinCatFrame>();
         twincat_command_counts_[tc.command_name]++;
         if (tc.paired_response) twincat_paired_responses_++;
+    }
+    if (p.protocol == "melsec" && p.result) {
+        const MelsecFrame& mf = p.result->as<MelsecFrame>();
+        melsec_command_counts_[mf.command_name]++;
+        if (mf.is_response && mf.has_command) melsec_matched_responses_++;
     }
     // Curated Note 5 (kerberos.hpp's file header comment) -- passive burst/enumeration
     // visibility: named KRB-ERROR error-code counts, aggregated across the whole capture, with
@@ -2441,6 +2529,15 @@ void StatsWriter::print_summary(std::ostream& out) const {
         }
         out << "twincat responses authoritatively paired (invoke id, not heuristic): "
             << twincat_paired_responses_ << "\n";
+    }
+    if (!melsec_command_counts_.empty()) {
+        out << "melsec/mc protocol command names:\n";
+        for (const auto& [name, count] : melsec_command_counts_) {
+            out << "  " << std::left << std::setw(40) << name << count << "\n";
+        }
+        out << "melsec responses matched to their own session's outstanding request (not "
+               "authoritative -- no unique transaction ID on the wire): "
+            << melsec_matched_responses_ << "\n";
     }
     if (!kerberos_error_counts_.empty()) {
         out << "kerberos krb-error codes:\n";

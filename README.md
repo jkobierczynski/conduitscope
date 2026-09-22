@@ -12,7 +12,12 @@ IEC 61850-9-2 Sampled Values, EtherCAT, BACnet/IP, HART-IP, OPC UA Binary
 (UA-TCP/Secure Conversation), IEC 61850 MMS (Manufacturing Message Specification,
 ISO 9506), MQTT (v3.1/v3.1.1/v5.0, including Sparkplug B), FOUNDATION
 Fieldbus HSE (FDA/SM/FMS/LAN Redundancy), Beckhoff TwinCAT/ADS (over
-AMS/TCP), Kerberos (RFC 4120, with curated AS-REP-Roasting and
+AMS/TCP), MELSEC Communication Protocol (MC Protocol / SLMP, Mitsubishi
+Electric, TCP port 5001 and UDP port 5000, with curated
+unauthenticated-CPU-control, cleartext-password-field, and
+arbitrary-memory-access attack/monitoring notes -- the cleartext Remote
+Password field's own value is never rendered, only its length),
+Kerberos (RFC 4120, with curated AS-REP-Roasting and
 Kerberoasting attack/monitoring notes -- the first of a planned Windows
 Active Directory protocol suite), LDAP (RFC 4511, with curated
 anonymous-bind, cleartext-credential, AD-reconnaissance,
@@ -1282,6 +1287,7 @@ build/conduitscope decode -r tests/sample_bacnet.pcap
 build/conduitscope decode -r tests/sample_hartip.pcap
 build/conduitscope decode -r tests/sample_opcua.pcap
 build/conduitscope decode -r tests/sample_mms.pcap --stats
+build/conduitscope decode -r tests/sample_melsec.pcap --stats
 build/conduitscope decode -r tests/sample_modbus.pcap --format json
 build/conduitscope info -r tests/sample_modbus.pcap
 

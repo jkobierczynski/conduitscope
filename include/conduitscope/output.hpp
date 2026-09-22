@@ -161,6 +161,17 @@ private:
     std::map<std::string, size_t> twincat_command_counts_;
     size_t twincat_paired_responses_ = 0;  // authoritatively paired by Invoke ID, not a heuristic
                                              // -- TwinCAT's analog of modbus_paired_responses_ above
+    // MELSEC's own command-name breakdown (melsec.hpp), read from DecodedPacket::result the same
+    // way twincat_command_counts_ is above. Keyed by MelsecFrame::command_name -- "response" for an
+    // unmatched response whose own command couldn't be determined (see melsec.hpp's "RESPONSE
+    // DECODING NEEDS SESSION CONTEXT" paragraph), never double-counted against the matched name a
+    // later-arriving response might otherwise also claim.
+    std::map<std::string, size_t> melsec_command_counts_;
+    // Session-scoped matches (see melsec.hpp/melsec.cpp) -- NOT authoritative pairing like
+    // twincat_paired_responses_ above (there's no unique per-request ID on the wire to make it
+    // authoritative), just "a response was matched to its most recently sent, not-yet-answered
+    // request on the same session."
+    size_t melsec_matched_responses_ = 0;
     // Curated Note 5 (kerberos.hpp's file header comment) -- named KRB-ERROR error-code counts,
     // keyed by error_name ("KDC_ERR_PREAUTH_REQUIRED", or "error N" for an unnamed code), read
     // from DecodedPacket::result the same way twincat_command_counts_ is above.

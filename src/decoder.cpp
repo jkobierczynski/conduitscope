@@ -548,6 +548,8 @@ bool Decoder::reassemble_tcp_payload(const TcpSegment& tcp, const std::string& f
                         options_.protocol_filter == ProtocolFilter::ModbusOnly;
     bool want_twincat = options_.protocol_filter == ProtocolFilter::Auto ||
                          options_.protocol_filter == ProtocolFilter::TwinCatOnly;
+    bool want_melsec = options_.protocol_filter == ProtocolFilter::Auto ||
+                        options_.protocol_filter == ProtocolFilter::MelsecOnly;
     bool want_kerberos = options_.protocol_filter == ProtocolFilter::Auto ||
                           options_.protocol_filter == ProtocolFilter::KerberosOnly;
     bool want_ldap = options_.protocol_filter == ProtocolFilter::Auto ||
@@ -642,7 +644,19 @@ bool Decoder::reassemble_tcp_payload(const TcpSegment& tcp, const std::string& f
             which = "AMS/TCP (TwinCAT/ADS)";
         }
     }
-    // Kerberos/TCP, tried right after TwinCAT -- see kerberos.hpp's file header comment for the
+    // MELSEC (MC Protocol/SLMP), tried right after TwinCAT -- see melsec.hpp's file header comment
+    // for the full wire format. Both have comparably strong multi-field structural gates (subheader
+    // magic + a declared-length cross-check, the same strength class as TwinCAT's own Data-Length
+    // cross-check), and TwinCAT already established "no collision found against anything above or
+    // below it" at this position -- see protocol_registry.hpp's tcp_port_independent_registry() for
+    // the collision survey against every other protocol in this cascade.
+    if (!declared && want_melsec) {
+        if (auto d = melsec_tcp_decoder().tcp_declared_length(candidate)) {
+            declared = d;
+            which = "MELSEC (MC Protocol/SLMP)";
+        }
+    }
+    // Kerberos/TCP, tried right after MELSEC -- see kerberos.hpp's file header comment for the
     // full collision survey/ordering rationale. kerberos_tcp_declared_length's own gate (4-byte
     // length prefix, then a peek at one of 7 recognized ASN.1 APPLICATION tag bytes) is nearly as
     // selective as the full decode gate, not merely "4+ bytes present".
@@ -1529,6 +1543,56 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                 }
             }
 
+            // MELSEC (MC Protocol/SLMP) over UDP, tried right after BACnet and CIP I/O -- see
+            // melsec.hpp's file header comment for the wire format. Same session-scoped
+            // request/command tracking (MelsecFlowState) as the TCP side, not authoritative
+            // pairing (no unique transaction ID on the wire) -- see melsec.hpp/melsec.cpp for why
+            // a response needs it anyway (MELSEC responses carry no command field of their own at
+            // all). Deliberately placed BEFORE HART-IP's own weaker structural gate further down:
+            // HART-IP's UDP check only requires payload byte[1] (MessageType) in {0,1,2,3,15},
+            // byte[2] (MessageID) in {0,1,2,3}, and bytes[6:8] read big-endian (MsgLength) >= 8 --
+            // a real MELSEC 3E/4E request or response routinely satisfies all three incidentally
+            // (e.g. subheader 0x5000's low byte 0x00 is a valid MessageType, a Network No. of 0 is
+            // a valid MessageID, and any Batch/Random Read-Write's declared length is very
+            // commonly >= 8), so if HART-IP's weaker check ran first it would silently steal
+            // genuine MELSEC traffic. MELSEC's own two-part gate (exact 16-bit subheader magic +
+            // exact declared-length cross-check) is far stronger and has no realistic reverse
+            // collision risk against real HART-IP traffic (whose Version byte is small, not one of
+            // 0x50/0xD0/0x54/0xD4), so trying MELSEC first is the correct "stronger gate wins"
+            // resolution -- the same principle IEC104-before-Modbus and QUIC-before-HART-IP (just
+            // above) already establish in this cascade. Confirmed empirically during this
+            // protocol's own manual smoke test, which is what caught the collision in the first
+            // place.
+            bool want_melsec = options_.protocol_filter == ProtocolFilter::Auto ||
+                                options_.protocol_filter == ProtocolFilter::MelsecOnly;
+            if (want_melsec) {
+                std::string udp_session =
+                    tcp_session_key(out.src_ip, udp.src_port, out.dst_ip, udp.dst_port);
+                DecodeContext ctx;
+                ctx.flow_key = out.src_ip + ":" + std::to_string(udp.src_port) + "->" + out.dst_ip +
+                               ":" + std::to_string(udp.dst_port);
+                ctx.session_key = udp_session;
+                ctx.packet_index = index;
+                ctx.protocol_id = "melsec";
+                ctx.flow_states = &registry_flow_state_;
+                if (auto result = melsec_udp_decoder().decode(udp.payload, ctx)) {
+                    const MelsecFrame& mf = result->as<MelsecFrame>();
+                    out.protocol = "melsec";
+                    out.summary = mf.summary;
+                    for (const auto& n : mf.notes) out.notes.push_back(n);
+                    out.result = *result;
+
+                    bool expected_port = port_in(udp.src_port, MELSEC_UDP_PORT, options_.extra_melsec_ports) ||
+                                          port_in(udp.dst_port, MELSEC_UDP_PORT, options_.extra_melsec_ports);
+                    if (!expected_port) {
+                        out.notes.push_back("seen on UDP port " + std::to_string(udp.src_port) + "->" +
+                                             std::to_string(udp.dst_port) +
+                                             ", which is not a configured/standard MELSEC port (5000)");
+                    }
+                    return out;
+                }
+            }
+
             // QUIC -- Tier 2, joining HTTPS (see quic.hpp's own file header comment for why, and
             // try_recognize_quic's own doc comment for why it gets its own dedicated call site
             // rather than folding into try_recognize_it_lateral_movement below, the same "own call
@@ -1662,8 +1726,9 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                 }
             }
 
-            // Kerberos over UDP/88, tried right after HART-IP -- the first Windows AD-suite
-            // protocol (see kerberos.hpp's file header comment). Purely stateless as far as
+            // Kerberos over UDP/88, tried right after HART-IP -- the
+            // first Windows AD-suite protocol (see kerberos.hpp's file header comment). Purely
+            // stateless as far as
             // per-datagram parsing goes (a single UDP datagram carries exactly one Kerberos
             // message, no coalescing), so decode() is a direct pass-through into
             // try_parse_kerberos plus the session-scoped AS-REQ/TGS-REQ correlation layer -- see
@@ -2357,6 +2422,8 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                             options_.protocol_filter == ProtocolFilter::ModbusOnly;
         bool want_twincat = options_.protocol_filter == ProtocolFilter::Auto ||
                              options_.protocol_filter == ProtocolFilter::TwinCatOnly;
+        bool want_melsec = options_.protocol_filter == ProtocolFilter::Auto ||
+                            options_.protocol_filter == ProtocolFilter::MelsecOnly;
         bool want_kerberos = options_.protocol_filter == ProtocolFilter::Auto ||
                               options_.protocol_filter == ProtocolFilter::KerberosOnly;
         bool want_ldap = options_.protocol_filter == ProtocolFilter::Auto ||
@@ -2587,6 +2654,41 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                     out.notes.push_back("seen on TCP port " + std::to_string(tcp.src_port) + "->" +
                                          std::to_string(tcp.dst_port) +
                                          ", which is not a configured/standard TwinCAT/AMS port (48898)");
+                }
+                return out;
+            }
+        }
+
+        if (want_melsec) {
+            // MELSEC Communication Protocol (MC Protocol/SLMP), tried right after TwinCAT -- see
+            // melsec.hpp's file header comment for the wire format and the collision survey behind
+            // this decoder's position here. Same out.result-only shape TwinCAT established above --
+            // no melsec_* DecodedPacket fields exist, JsonWriter renders from out.result (output.cpp's
+            // write_melsec_json_fields), TextWriter/CsvWriter from out.summary/out.notes generically.
+            // Unlike TwinCAT, this decoder DOES use session-scoped state (MelsecFlowState) -- not for
+            // authoritative pairing (there's no unique transaction ID on the wire, see melsec.hpp),
+            // but because a MELSEC response carries no command field of its own at all, so decoding
+            // its body command-specifically requires knowing the matching request.
+            std::string session = tcp_session_key(out.src_ip, tcp.src_port, out.dst_ip, tcp.dst_port);
+            DecodeContext ctx;
+            ctx.flow_key = flow_key;
+            ctx.session_key = session;
+            ctx.packet_index = index;
+            ctx.protocol_id = "melsec";
+            ctx.flow_states = &registry_flow_state_;
+            if (auto result = melsec_tcp_decoder().decode(effective_payload, ctx)) {
+                const MelsecFrame& mf = result->as<MelsecFrame>();
+                out.protocol = "melsec";
+                out.summary = mf.summary;
+                for (const auto& n : mf.notes) out.notes.push_back(n);
+                out.result = *result;
+
+                bool expected_port = port_in(tcp.src_port, MELSEC_TCP_PORT, options_.extra_melsec_ports) ||
+                                      port_in(tcp.dst_port, MELSEC_TCP_PORT, options_.extra_melsec_ports);
+                if (!expected_port) {
+                    out.notes.push_back("seen on TCP port " + std::to_string(tcp.src_port) + "->" +
+                                         std::to_string(tcp.dst_port) +
+                                         ", which is not a configured/standard MELSEC port (5001)");
                 }
                 return out;
             }

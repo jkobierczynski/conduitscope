@@ -4759,6 +4759,97 @@ unlike any of the eight routing/redundancy protocols decoded so far.
     flows); if one becomes available later it should be added and
     PROTOCOL_COVERAGE.md's Validation subsection updated accordingly.
 
+29. **MELSEC Communication Protocol (MC Protocol / SLMP), Mitsubishi
+    Electric -- TCP port 5001, UDP port 5000.** Jurgen asked for this
+    directly. **Done.** Mitsubishi's own PLC communication protocol --
+    functionally the direct Mitsubishi analogue of Modbus/S7comm (device
+    memory read/write, remote CPU RUN/STOP/PAUSE/RESET, normally with no
+    protocol-level authentication). Built entirely on the
+    `ProtocolDecoder` registration-model interface from inception, joining
+    TwinCAT (item 20) and Kerberos (item 22) on that path, and the first
+    protocol on it with a genuine dual TCP+UDP transport built from
+    scratch rather than migrated (TwinCAT is TCP-only; HART-IP/EtherNet-
+    IP's own TCP+UDP splits predate the interface).
+
+    Every byte-level field was verified two ways during planning: against
+    Mitsubishi's own official SLMP Reference Manual plus second-source
+    vendor manuals (Kepware/PTC's and Pro-face's own Mitsubishi Ethernet
+    driver manuals), and empirically, by reading `pymcprotocol`'s (a
+    small, actively-maintained pure-Python implementation) own frame-
+    building source directly -- which caught a real transcription error
+    an LLM-summarized PDF fetch alone had introduced (a claimed 1-byte
+    subheader/command field with device code `D`=0x44, versus the real
+    2-byte subheader/command fields with device code `D`=0xA8). Jurgen
+    also pointed at the `ITI/ICS-Security-Tools` GitHub repository's
+    `pcaps/` collection as a possible source of real MELSEC traffic;
+    investigated directly (that repo, and its linked `automayt/ICS-pcap`
+    collection, list MELSEC only as a still-wanted, not-yet-contributed
+    protocol) -- no real capture was found, but this incidentally
+    corroborated the port convention from a third independent source.
+
+    13 commands fully field-decoded (request AND response): Batch Read/
+    Write, Random Read/Write, Remote RUN/STOP/PAUSE/LATCH CLEAR/RESET,
+    Read CPU Type, Remote Password UNLOCK/LOCK, and Echo/Loopback Test --
+    both the "standard" and "extended"/iQ-R device-addressing shapes, and
+    both 3E and 4E binary framing (ASCII-mode framing and the legacy 1E
+    frame are named but out of scope). Per an explicit design decision,
+    Remote Password UNLOCK/LOCK's cleartext password value is never
+    rendered in any output format -- only its length -- mirroring NTLM's
+    own credential-redaction posture (item 27) rather than RIP/HSRP's more
+    permissive one.
+
+    A real architectural wrinkle, not fully anticipated before
+    implementation: **a MELSEC response carries no command field of its
+    own on the wire at all** (unlike Modbus/TwinCAT/S7comm, which all
+    repeat their function code/command ID on both request and response),
+    so decoding a response's own command-specific body requires knowing
+    which request it answers. Solved with a single session-scoped
+    pending-request slot (`MelsecFlowState::pending`) -- deliberately
+    *not* authoritative pairing like Modbus's transaction ID or TwinCAT's
+    Invoke ID (3E frames carry no transaction identifier at all, and the
+    4E frame's own Serial No. is deliberately not used for this, matching
+    S7comm's own "stateless" precedent for a field this pass doesn't
+    trust is reliably unique in real captures); reported as "matched to
+    the request seen in packet #N," never "authoritatively paired."
+
+    **A real, live collision was caught by this item's own required
+    manual smoke test**, the discipline that has now caught a real bug in
+    nearly every protocol addition in this codebase's history: HART-IP's
+    own deliberately weak UDP structural gate (item -- see
+    PROTOCOL_COVERAGE.md's HART-IP section -- MessageType/MessageID at
+    payload bytes 1/2 both small enumerated values, MsgLength >= 8, no
+    magic bytes, no exact-length check) was incidentally satisfied by real
+    MELSEC UDP traffic often enough to matter, silently stealing MELSEC
+    packets before MELSEC's own much stronger two-part gate (exact
+    subheader magic + exact declared-length cross-check) ever ran. Fixed
+    by reordering MELSEC's UDP dispatch to run BEFORE HART-IP's in
+    `decoder.cpp`'s Auto-mode cascade -- the same "stronger gate wins"
+    resolution IEC104-before-Modbus and QUIC-before-HART-IP already
+    establish elsewhere in that same cascade -- verified with no reverse-
+    collision risk (real HART-IP traffic's Version byte is never one of
+    MELSEC's four exact subheader values). See PROTOCOL_COVERAGE.md's new
+    MELSEC section for the full collision-survey writeup.
+
+    24 new `melsec_*` CTest tests (every decoded command, the bit-units
+    nibble-packing quirk, the 4E Serial No. field, the redacted-password
+    proof across text/JSON/CSV, both named End Codes, the unknown-command
+    structural fallback, a gate-rejection negative control, a TCP segment-
+    split reassembly, UDP coverage including a non-standard-port note and
+    a declared-length-mismatch negative control, the HART-IP collision
+    regression proof specifically, `--stats` command-name counts, and
+    protocol-filter/extra-port CLI options) -- full suite (1328 tests)
+    stays 100% passing, zero-warning build across all three established
+    configs. See `include/conduitscope/melsec.hpp`'s file header for the
+    full writeup and docs/PROTOCOL_COVERAGE.md's new MELSEC / MC Protocol
+    section for the user-facing reference. **Still not done**: ASCII-mode
+    framing; the legacy 1E frame; any command/subcommand pair outside the
+    13 verified ones (shown numerically only); 4E Serial No.-based
+    cross-packet pairing; any session-state model of PLC password-lock
+    state; no `policy validate`/`inventory` integration (degrades
+    gracefully, the same posture several other protocols are still in);
+    and no real-world capture (validated by construction only, against
+    synthetic `tests/sample_melsec.pcap`, 39 packets).
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

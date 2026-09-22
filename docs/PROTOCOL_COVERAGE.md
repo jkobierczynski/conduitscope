@@ -6740,3 +6740,231 @@ every prior AD-suite phase's delivery was held to. See
 `include/conduitscope/dcerpc.hpp`'s and
 `include/conduitscope/netlogon.hpp`'s file headers for the full writeup.
 
+
+### MELSEC / MC Protocol (SLMP, Mitsubishi Electric) -- TCP port 5001, UDP port 5000
+
+Mitsubishi Electric's PLC communication protocol -- MELSEC is Mitsubishi's
+own name for its PLC family, MC Protocol ("MELSEC Communication Protocol")
+is the wire protocol's vendor name, and SLMP ("Seamless Message Protocol")
+is Mitsubishi's newer, protocol-neutral name for the exact same wire
+format. Functionally the direct Mitsubishi analogue of Modbus/S7comm: a
+client reads/writes PLC device memory (inputs, outputs, internal relays,
+data registers, timers, counters) and can remotely RUN/STOP/PAUSE/RESET
+the CPU, all normally with no protocol-level authentication. Built
+entirely on the `ProtocolDecoder` registration-model interface from
+inception, the same "no flat `DecodedPacket` fields, a dedicated
+`write_melsec_json_fields` function in `output.cpp` instead" pattern
+TwinCAT established first -- see that section above for what this implies
+about JSON rendering. MELSEC is the first protocol on this interface with
+a genuine dual TCP+UDP transport built from scratch (TwinCAT is TCP-only;
+HART-IP/EtherNet-IP's own TCP+UDP splits predate the interface and were
+migrated onto it, not native).
+
+Every byte-level structure below was verified two ways: against
+Mitsubishi's own official SLMP Reference Manual plus second-source vendor
+manuals (Kepware/PTC's and Pro-face's own Mitsubishi Ethernet driver
+manuals), and empirically, by reading `pymcprotocol`'s (a small, widely-
+used, actively-maintained pure-Python implementation) own frame-building
+source code directly -- see `include/conduitscope/melsec.hpp`'s file
+header for the full provenance writeup, including the real transcription
+error this second, empirical check caught during planning (an LLM-
+summarized PDF fetch claimed a 1-byte subheader and 1-byte command field
+with device code `D`=0x44; the real wire format, confirmed against
+`pymcprotocol`'s own source, is a 2-byte subheader and 2-byte
+command/subcommand fields with device code `D`=0xA8).
+
+#### Wire format
+
+**Framing scope, this pass: 3E and 4E frame, binary mode only.** ASCII-
+mode framing (every field re-encoded as hex-digit ASCII text) and the
+legacy 1E frame (no network/PC-number addressing) are named but not
+decoded -- out of scope, not silently skipped.
+
+**Subheader** (2 bytes, big-endian): `5000`H = 3E request, `D000`H = 3E
+response, `5400`H = 4E request, `D400`H = 4E response -- this decoder's
+primary structural gate, a 4-value match out of 65536 possible 16-bit
+values. 4E frames only carry a 2-byte little-endian Serial No.
+immediately after the subheader (decoded and shown, deliberately not used
+for cross-packet pairing -- see below).
+
+**Common header** (both 3E and 4E): Network No.(1) + PC No.(1) + Request
+Destination Module I/O No.(2, little-endian) + Request Destination Module
+Station No.(1) = 5 bytes, decoded and shown but not otherwise validated.
+
+**Request tail**: Request Data Length(2, LE) + Monitoring Timer(2, LE) +
+Command(2, LE) + Subcommand(2, LE) + Request Data. **Response tail**:
+Response Data Length(2, LE) + End Code(2, LE, `0000`H = success) +
+Response Data.
+
+**Structural gate, part two -- declared-length cross-check**, on par with
+Modbus's own MBAP length field and QUIC's own Length fields already get in
+this codebase: `payload.size()` must equal exactly `(bytes before the
+data-length field) + 2 + declared_length`, with `declared_length >= 6` for
+a request (the floor even for a zero-argument command) and `>= 2` for a
+response. A random payload satisfying the 2-byte subheader magic almost
+never also satisfies this exact accounting.
+
+**Device specification**: a device number plus a device code, in one of
+two wire shapes disambiguated by the subcommand value itself (a genuinely
+self-describing signal, not a guess): "standard" (subcommand `0000`/
+`0001`): 3-byte little-endian device number + 1-byte device code;
+"extended"/iQ-R (subcommand `0002`/`0003`): 4-byte little-endian device
+number + 2-byte little-endian device code. The device number is always a
+plain little-endian binary integer, never BCD. Full device code table (36
+entries, all confirmed via `pymcprotocol`) is in `melsec.hpp`'s file
+header and `src/melsec.cpp`'s `device_code_table()`.
+
+**Bit-units value packing** (Batch Read/Write bit units): two bit values
+packed per byte, the even-indexed value in bit 4, the odd-indexed value
+in bit 0 of the same byte -- a distinctive quirk, different from e.g.
+Modbus's LSB-first coil packing.
+
+#### Commands decoded (13, all empirically verified byte-for-byte against `pymcprotocol`)
+
+Full request AND response decode for: Batch Read (`0401`/`0000` word,
+`/0001` bit, extended `0002`/`0003`), Batch Write (`1401`, same
+subcommand shapes), Random Read (`0403`/`0000`, extended `0002`), Random
+Write (`1402`, same subcommand shapes), Remote RUN (`1001`/`0000`),
+Remote STOP (`1002`/`0000`), Remote PAUSE (`1003`/`0000`), Remote LATCH
+CLEAR (`1005`/`0000`), Remote RESET (`1006`/`0000`), Read CPU Type
+(`0101`/`0000`), Remote Password UNLOCK (`1630`/`0000`) / LOCK
+(`1631`/`0000`), Echo/Loopback Test (`0619`/`0000`). Any other
+command/subcommand pair is shown numerically only (`Unknown command
+0xXXXX/0xXXXX`), never guessed at -- the same posture unknown SMB
+`Status`/DCE-RPC opnum values already get elsewhere in this codebase.
+
+**End Code naming**: `0000`H = "Normal completion"; `C059`H =
+"Unsupported command" (the one error code `pymcprotocol`'s own error
+module names explicitly); every other non-zero value shown as raw hex
+only ("Error 0xXXXX, not independently verified against Mitsubishi's own
+error-code appendix") -- deliberately not transcribing a fuller
+error-code table from a source class that already proved unreliable for
+basic field sizes during this protocol's own planning.
+
+**The cleartext password field is deliberately never rendered.** Remote
+Password UNLOCK/LOCK's request carries the password as plain ASCII on the
+wire; per an explicit design decision, only `remote_password_length` is
+exposed in this decoder's output (text, JSON, and CSV alike) -- the
+password's own bytes are never read into any field, summary, or note,
+mirroring NTLM's own `LmChallengeResponse`/`NtChallengeResponse` posture
+exactly (not RIP/HSRP's more permissive one).
+
+#### Structural detection gate and collision survey
+
+Two-part gate: (a) exact subheader magic match (one of the 4 values
+above); (b) exact declared-length cross-check. Combined, on par with
+TwinCAT's/HART-IP's own structural gates.
+
+Surveyed against every other `TcpPortIndependent`/`UdpPortIndependent`
+protocol sharing MELSEC's own dispatch cascades: none of OPC UA (fixed
+3-byte ASCII MessageType), EtherNet/IP's CIP I/O (exact CPF item type +
+length), IEC104 (fixed start byte `0x68`), Modbus (protocol-id==0 read
+from a byte range MELSEC's own declared-length field almost never leaves
+zero), DNP3 (fixed sync `0x0564`), TwinCAT (conventionally-zero leading
+AMS/TCP bytes), Kerberos, LDAP, SMB, BACnet/IP (fixed `0x81` BVLC Type),
+or COTP hardcode `0x50`/`0xD0`/`0x54`/`0xD4` as a detection anchor --
+confirmed both by grepping each one's own detection code for those
+byte values (none found) and empirically, via this protocol's own manual
+smoke test decoding every command against a synthetic fixture with no
+false-positive misdetections on the TCP side.
+
+**HART-IP's own UDP path is the one real, confirmed collision, and it
+required a registry-ordering fix, not a gate change.** HART-IP's UDP
+structural gate (see that section above) is deliberately weak -- payload
+byte[1] (MessageType) in {0,1,2,3,15}, byte[2] (MessageID) in {0,1,2,3},
+and bytes[6:8] read big-endian (MsgLength) >= 8, with no magic bytes and
+no exact-length cross-check. A real MELSEC 3E/4E UDP packet satisfies all
+three of those conditions often enough to matter in practice (subheader
+`5000`H's low byte 0x00 is a valid MessageType, a Network No. of 0 is a
+valid MessageID, and any Batch/Random Read-Write's declared length is
+very commonly >= 8) -- discovered empirically during this protocol's own
+required manual smoke test, which caught HART-IP silently stealing a
+MELSEC UDP request. The fix: MELSEC's own UDP dispatch runs BEFORE
+HART-IP's in `decoder.cpp`'s Auto-mode cascade (right after BACnet/IP and
+CIP I/O, ahead of HART-IP), the same "stronger gate wins" resolution
+IEC104-before-Modbus and QUIC-before-HART-IP already establish elsewhere
+in this same cascade. Verified with no reverse collision risk: real
+HART-IP traffic's Version byte (payload byte[0]) is small (typically 1),
+never one of MELSEC's four exact subheader-high-byte values
+(0x50/0xD0/0x54/0xD4).
+
+#### Session-scoped response matching (not authoritative pairing)
+
+Unlike Modbus/TwinCAT/S7comm, a MELSEC **response frame carries no
+command field of its own on the wire at all** -- just End Code plus raw
+response data. Decoding a response's own command-specific body (word/bit
+values, CPU type, echoed data, Random Read's word/dword split, etc.)
+therefore requires knowing which request it answers. This decoder tracks
+a single session-scoped pending-request slot (`MelsecFlowState::pending`,
+a `DecoderFlowState` subclass, keyed the same way TwinCAT's/Kerberos's own
+flow state is) -- **not** authoritative pairing like Modbus's MBAP
+transaction ID or TwinCAT's Invoke ID, since 3E frames carry no
+transaction identifier at all and the 4E frame's own Serial No. is
+deliberately not used for this (no confidence it's reliably unique in
+real captures, matching S7comm's own "stateless" precedent for a field
+this pass doesn't trust). A response is reported as "matched to the
+request seen in packet #N," never "authoritatively paired." Reusing the
+pending slot before it's answered, and an orphan response with no
+outstanding request, are both noted rather than silently mishandled or
+misattributed, mirroring TwinCAT's own note style for the analogous
+situations.
+
+#### Explicitly not implemented in this pass
+
+ASCII-mode framing; the legacy 1E frame; any command/subcommand pair
+outside the 13 verified above (shown numerically only); Monitor
+Registration/Execution, Multiple-Block Batch Read, Memory Read/Write,
+Extended Unit Read/Write, and any other MC-protocol command family
+outside the verified set; cross-packet pairing via the 4E frame's own
+Serial No. (decoded and shown, not used for correlation); any session-
+state model of whether a PLC is currently password-locked.
+
+#### JSON output fields
+
+Rendered only when `protocol == "melsec"`, via `write_melsec_json_fields`
+in `output.cpp`: `melsec_frame_type` (3E/4E), `melsec_serial_number` (4E
+only), `melsec_is_response`, `melsec_network_no`, `melsec_pc_no`,
+`melsec_command_name`, `melsec_command`/`melsec_subcommand` (only once a
+command is known -- request always, response only once matched),
+`melsec_end_code`/`melsec_end_code_name` (response only),
+`melsec_devices` (array of formatted device text), `melsec_point_count`,
+`melsec_word_values`/`melsec_dword_values`/`melsec_bit_values` (arrays),
+`melsec_undecoded_response_bytes`, `melsec_remote_mode`,
+`melsec_clear_mode`, `melsec_remote_password_length` (the value itself is
+never rendered, in any format), `melsec_cpu_type`/`melsec_cpu_code`,
+`melsec_echo_data`. `--stats` gains a `melsec/mc protocol command names:`
+breakdown plus a matched-responses count line, mirroring TwinCAT's own
+`--stats` block.
+
+#### Validation
+
+No real-world MELSEC/Mitsubishi capture was found; the user's own pointer
+to the `ITI/ICS-Security-Tools` GitHub repository's `pcaps/` collection
+(and its linked, more comprehensive `automayt/ICS-pcap` collection) was
+investigated directly during planning and confirmed to list MELSEC only
+as a still-wanted, not-yet-contributed protocol in `AdditionalNotes.txt`
+-- no `MELSEC/`/`Mitsubishi/` capture folder exists there. This
+incidentally corroborated the 5000/udp + 5001/tcp port convention (not
+IANA-registered, always user-configured on the PLC's own Ethernet module)
+from a third independent source, folded into `melsec.hpp`'s own port
+documentation. Validated by construction against a synthetic
+`tests/sample_melsec.pcap` fixture (39 packets --
+`tools/make_sample_pcap.py`'s `build_melsec_sample()`), covering: all 13
+commands in both request and response shapes; the bit-units nibble-
+packing quirk; a 4E-frame variant proving the Serial No. field; the
+redacted-password proof (length present, value absent, in text, JSON,
+AND CSV output); both named End Codes (`C059` and the raw-hex fallback);
+an unrecognized command/subcommand pair (structural-only fallback); a
+gate-rejection negative control (non-matching subheader, falls through to
+generic `tcp`); a TCP segment-split reassembly (a Batch Read response
+split across two segments, still correctly matched); UDP coverage on the
+standard port, a non-standard port pair (annotated, not misdetected), and
+a UDP declared-length-mismatch negative control (falls through to generic
+`udp`, proving the structural gate's collision resistance). Every case
+was decoded and inspected in `--format text`, `--format json`, `--format
+csv`, and `--stats` BEFORE the `CMakeLists.txt` `melsec_*` test family
+reading it was written -- the same verification discipline every prior
+protocol addition in this codebase has been held to, and the discipline
+that this time caught a real, live collision with HART-IP's own UDP gate
+(see the collision-survey subsection above) before delivery. See
+`include/conduitscope/melsec.hpp`'s file header for the full writeup.

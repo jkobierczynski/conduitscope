@@ -32,6 +32,7 @@
 #include "conduitscope/it_protocols.hpp"
 #include "conduitscope/kerberos.hpp"
 #include "conduitscope/ldap.hpp"
+#include "conduitscope/melsec.hpp"
 #include "conduitscope/mms.hpp"
 #include "conduitscope/modbus.hpp"
 #include "conduitscope/mpls.hpp"
@@ -156,6 +157,14 @@ enum class ProtocolFilter {
                            // recognition (it_protocols.hpp); it moved here once it was upgraded to
                            // a full ProtocolDecoder, the same split LdapOnly already has from
                            // EnterpriseTrustOnly.
+    MelsecOnly,            // only attempt MELSEC Communication Protocol (MC Protocol / SLMP,
+                           // Mitsubishi Electric; TCP port 5001 / UDP port 5000, both
+                           // port-independent) decoding -- see melsec.hpp. A brand-new protocol
+                           // (not a migration), built entirely on the ProtocolDecoder interface
+                           // from the start like TwinCAT, and the first protocol on that interface
+                           // with a genuine dual TCP+UDP transport built from scratch (TwinCAT is
+                           // TCP-only; Kerberos's own TCP+UDP split shares the same "two instances,
+                           // one id()" pattern reused here).
 };
 
 struct DecodeOptions {
@@ -189,6 +198,16 @@ struct DecodeOptions {
     std::vector<uint16_t> extra_smb_ports;       // TCP only -- see SMB_PORT_445/
                                                    // SMB_NETBIOS_SESSION_PORT_139 (445/139,
                                                    // it_protocols.hpp)
+    std::vector<uint16_t> extra_melsec_ports;    // TCP AND UDP -- see MELSEC_TCP_PORT/
+                                                   // MELSEC_UDP_PORT (5001/5000, melsec.hpp) -- a
+                                                   // single list covers both transports, the same
+                                                   // "one list, two ports, different defaults"
+                                                   // shape extra_enip_io_ports/extra_bacnet_ports
+                                                   // don't need (single port) but extra_hartip_ports/
+                                                   // extra_kerberos_ports also don't need (single
+                                                   // SHARED port number for both transports) --
+                                                   // MELSEC is the first protocol here whose TCP and
+                                                   // UDP conventional ports genuinely differ.
     std::vector<uint16_t> extra_opcua_ports;    // TCP only -- see OPCUA_PORT (4840)
     std::vector<uint16_t> extra_mqtt_ports;     // TCP only -- see MQTT_PORT (1883)
     std::vector<uint16_t> extra_ffhse_ports;    // TCP AND UDP -- see FFHSE_PORT_ANNUNC/_FMS/_SM/_LAN

@@ -7553,6 +7553,239 @@ def build_twincat_sample():
 
 
 # ---------------------------------------------------------------------------------------------
+# MELSEC Communication Protocol (MC Protocol / SLMP), TCP port 5001 / UDP port 5000 -- see
+# melsec.hpp's file header comment for the full wire format, structural detection gate, and the
+# session-scoped request/response matching each packet group below is designed to exercise.
+
+MELSEC_TCP_PORT = 5001
+MELSEC_UDP_PORT = 5000
+
+MELSEC_DEVICE_CODE = {
+    "D": 0xA8, "M": 0x90, "X": 0x9C, "Y": 0x9D, "W": 0xB4, "B": 0xA0,
+}
+
+
+def melsec_device(letter: str, number: int, extended: bool = False) -> bytes:
+    """One device spec -- see melsec.hpp's file header comment (device number is plain
+    little-endian binary, NOT BCD; device code is 1 byte standard / 2 bytes little-endian
+    extended)."""
+    code = MELSEC_DEVICE_CODE[letter]
+    num_bytes = struct.pack("<I", number)[: 4 if extended else 3]
+    return num_bytes + (struct.pack("<H", code) if extended else struct.pack("<B", code))
+
+
+def melsec_request(command: int, subcommand: int, body: bytes = b"", monitor_timer: int = 0,
+                    network_no: int = 0, pc_no: int = 0xFF, io_no: int = 0x03FF, station_no: int = 0,
+                    is_4e: bool = False, serial: int = 1, length_override: int = None) -> bytes:
+    """One 3E- or 4E-framed binary MC Protocol/SLMP REQUEST -- see melsec.hpp's file header comment.
+    `length_override`, when given, writes a deliberately wrong Request Data Length (for the
+    declared-length-mismatch negative control) instead of the correct 6 + len(body)."""
+    tail = struct.pack("<HHH", monitor_timer, command, subcommand) + body
+    declared = length_override if length_override is not None else len(tail)
+    header = struct.pack(">H", 0x5400 if is_4e else 0x5000)
+    if is_4e:
+        header += struct.pack("<H", serial)
+    header += struct.pack("<BBHB", network_no, pc_no, io_no, station_no)
+    header += struct.pack("<H", declared)
+    return header + tail
+
+
+def melsec_response(end_code: int = 0, body: bytes = b"", is_4e: bool = False, serial: int = 1,
+                     network_no: int = 0, pc_no: int = 0xFF, io_no: int = 0x03FF, station_no: int = 0,
+                     length_override: int = None) -> bytes:
+    """One 3E- or 4E-framed binary MC Protocol/SLMP RESPONSE."""
+    tail = struct.pack("<H", end_code) + body
+    declared = length_override if length_override is not None else len(tail)
+    header = struct.pack(">H", 0xD400 if is_4e else 0xD000)
+    if is_4e:
+        header += struct.pack("<H", serial)
+    header += struct.pack("<BBHB", network_no, pc_no, io_no, station_no)
+    header += struct.pack("<H", declared)
+    return header + tail
+
+
+def melsec_udp_frame(payload: bytes, sport: int = MELSEC_UDP_PORT, dport: int = MELSEC_UDP_PORT,
+                      from_plc: bool = False) -> bytes:
+    src_ip, dst_ip = (PLC_IP, HMI_IP) if from_plc else (HMI_IP, PLC_IP)
+    src_mac, dst_mac = (PLC_MAC, HMI_MAC) if from_plc else (HMI_MAC, PLC_MAC)
+    udp = udp_header(sport, dport, payload)
+    ip = ipv4_header(src_ip, dst_ip, 17, len(udp), 0x7400)
+    return eth_header(dst_mac, src_mac, 0x0800) + ip + udp
+
+
+def build_melsec_sample():
+    """Covers every command this decoder verified against pymcprotocol (see melsec.hpp's file
+    header comment): Batch Read word+bit units, Batch Write word units, Random Read (word+dword
+    mixed, matched response splitting correctly via session state), Remote RUN/STOP/PAUSE/LATCH
+    CLEAR/RESET, Read CPU Type, Remote Password UNLOCK (proving the password value never appears in
+    output, only its length), Echo Test, a 4E-frame variant (Serial No. field), an unknown
+    command/subcommand (structural fallback, numeric-only), a non-zero End Code response (both the
+    named 0xC059 "Unsupported command" path and a raw-hex fallback), a declared-length mismatch
+    negative control (subheader magic matches but the length accounting doesn't), a payload whose
+    leading bytes don't match any of the 4 subheader values at all (pure gate rejection), a frame
+    split across two TCP segments (exercising MelsecTcpDecoder::tcp_declared_length via
+    Decoder::reassemble_tcp_payload), and both transports (TCP port 5001, UDP port 5000)."""
+    packets = []
+
+    # --- TCP: one continuous session (port 53400 -> 5001), commands exercised strictly one
+    # request/response pair at a time so the single-pending-slot session state (MelsecFlowState)
+    # always has an unambiguous match -- see melsec.hpp's "RESPONSE DECODING NEEDS SESSION CONTEXT"
+    # paragraph for why that's the realistic case this fixture is built around.
+    seq_c, seq_s = 1000, 5000
+    ident = 0x2000
+
+    def add(src_port, dst_port, seq, ack, payload, from_plc):
+        nonlocal ident
+        tcp = tcp_header(src_port, dst_port, seq, ack, TCP_PSH | TCP_ACK, len(payload)) + payload
+        src_ip, dst_ip = (PLC_IP, HMI_IP) if from_plc else (HMI_IP, PLC_IP)
+        src_mac, dst_mac = (PLC_MAC, HMI_MAC) if from_plc else (HMI_MAC, PLC_MAC)
+        ip = ipv4_header(src_ip, dst_ip, 6, len(tcp), ident) + tcp
+        packets.append(eth_header(dst_mac, src_mac, 0x0800) + ip)
+        ident += 1
+
+    def client(payload):
+        nonlocal seq_c
+        add(53400, MELSEC_TCP_PORT, seq_c, seq_s, payload, from_plc=False)
+        seq_c += len(payload)
+
+    def server(payload):
+        nonlocal seq_s
+        add(MELSEC_TCP_PORT, 53400, seq_s, seq_c, payload, from_plc=True)
+        seq_s += len(payload)
+
+    # 1) & 2) Batch Read, word units (subcommand 0x0000): D1000, 3 points.
+    client(melsec_request(0x0401, 0x0000, melsec_device("D", 1000) + struct.pack("<H", 3)))
+    server(melsec_response(body=struct.pack("<3h", 100, -1, 32767)))
+
+    # 3) & 4) Batch Read, bit units (subcommand 0x0001): M100, 5 points -- exercises the
+    #    even-index-bit4/odd-index-bit0 packing quirk (values 1,0,1,1,0 -> 0x10, 0x11, 0x00).
+    client(melsec_request(0x0401, 0x0001, melsec_device("M", 100) + struct.pack("<H", 5)))
+    server(melsec_response(body=bytes([0x10, 0x11, 0x00])))
+
+    # 5) & 6) Batch Write, word units: D2000, 2 points, values [1234, -1] -- response has no data
+    #    beyond the end code.
+    client(melsec_request(0x1401, 0x0000,
+                           melsec_device("D", 2000) + struct.pack("<H", 2) + struct.pack("<2h", 1234, -1)))
+    server(melsec_response())
+
+    # 7) & 8) Random Read (word+dword mixed, subcommand 0x0000): 2 word devices (D100, D200) + 1
+    #    dword device (D300) -- the response carries no counts of its own on the wire, so this
+    #    proves MelsecPendingRequest's own random_read_word_count/dword_count carry-forward works.
+    client(melsec_request(0x0403, 0x0000,
+                           bytes([2, 1]) + melsec_device("D", 100) + melsec_device("D", 200) +
+                           melsec_device("D", 300)))
+    server(melsec_response(body=struct.pack("<2h", 111, 222) + struct.pack("<i", 333333)))
+
+    # 9) & 10) Remote RUN, force execution + clear all.
+    client(melsec_request(0x1001, 0x0000, struct.pack("<HBB", 0x0003, 2, 0)))
+    server(melsec_response())
+
+    # 11) & 12) Remote STOP.
+    client(melsec_request(0x1002, 0x0000, struct.pack("<H", 1)))
+    server(melsec_response())
+
+    # 13) & 14) Remote PAUSE, normal mode.
+    client(melsec_request(0x1003, 0x0000, struct.pack("<H", 0x0001)))
+    server(melsec_response())
+
+    # 15) & 16) Remote LATCH CLEAR.
+    client(melsec_request(0x1005, 0x0000, struct.pack("<H", 1)))
+    server(melsec_response())
+
+    # 17) & 18) Remote RESET.
+    client(melsec_request(0x1006, 0x0000, struct.pack("<H", 1)))
+    server(melsec_response())
+
+    # 19) & 20) Read CPU Type -- request has no data; response is a 16-byte space-padded ASCII name
+    #     ("Q06UDVCPU" here) plus a 2-byte CPU code.
+    client(melsec_request(0x0101, 0x0000))
+    cpu_name = b"Q06UDVCPU".ljust(16, b" ")
+    server(melsec_response(body=cpu_name + struct.pack("<H", 0x0500)))
+
+    # 21) & 22) Remote Password UNLOCK -- per Jurgen's own decision, the password value itself must
+    #     never appear in this decoder's output, only its length (8 here). The CMakeLists.txt test
+    #     for this packet asserts "remote_password_length" is present AND the literal string
+    #     "S3cr3t!!" is absent from every output format.
+    client(melsec_request(0x1630, 0x0000, struct.pack("<H", 8) + b"S3cr3t!!"))
+    server(melsec_response())
+
+    # 23) & 24) Echo/Loopback Test -- response echoes the same shape back.
+    client(melsec_request(0x0619, 0x0000, struct.pack("<H", 5) + b"HELLO"))
+    server(melsec_response(body=struct.pack("<H", 5) + b"HELLO"))
+
+    # 25) & 26) Unknown command/subcommand (structural fallback, numeric-only -- never guessed at)
+    #     paired with an End Code 0xC059 ("Unsupported command", the one error code pymcprotocol's
+    #     own source names explicitly) response -- proves both the unknown-command fallback AND the
+    #     named End Code path in one exchange, since a real PLC would plausibly answer an
+    #     unrecognized command this way.
+    client(melsec_request(0x9999, 0x0000, bytes([0xAA, 0xBB])))
+    server(melsec_response(end_code=0xC059))
+
+    # 27) & 28) A recognized command (Batch Read, word units) answered with an arbitrary non-zero
+    #     End Code (0x4031) that ISN'T 0xC059 -- proves the raw-hex fallback naming path
+    #     ("Error 0x4031 (not independently verified...)").
+    client(melsec_request(0x0401, 0x0000, melsec_device("D", 500) + struct.pack("<H", 1)))
+    server(melsec_response(end_code=0x4031))
+
+    # 29) & 30) 4E frame variant (Serial No. 0x002A) -- Batch Read, word units, D1500, 1 point.
+    client(melsec_request(0x0401, 0x0000, melsec_device("D", 1500) + struct.pack("<H", 1),
+                           is_4e=True, serial=0x002A))
+    server(melsec_response(body=struct.pack("<h", 42), is_4e=True, serial=0x002A))
+
+    # 31) Pure gate rejection (TCP) -- leading bytes don't match any of the 4 recognized subheader
+    #     values at all (0x1234 instead of 0x5000/0xD000/0x5400/0xD400). Rejected at peek_header,
+    #     before any length-based reassembly slicing even begins -- must NOT be recognized as melsec.
+    client(struct.pack(">H", 0x1234) + b"\x00" * 10)
+
+    # 32) & 33) A Batch Read response (D1600, 1 point, value 7) split across TWO TCP segments --
+    #     exercises MelsecTcpDecoder::tcp_declared_length via Decoder::reassemble_tcp_payload, the
+    #     same split/rejoin shape build_tcp_reassembly_sample already covers for Modbus/DNP3/TPKT
+    #     and build_twincat_sample covers for AMS/TCP.
+    client(melsec_request(0x0401, 0x0000, melsec_device("D", 1600) + struct.pack("<H", 1)))
+    split_frame = melsec_response(body=struct.pack("<h", 7))
+    split_at = 9
+    add(MELSEC_TCP_PORT, 53400, seq_s, seq_c, split_frame[:split_at], from_plc=True)
+    seq_s += split_at
+    add(MELSEC_TCP_PORT, 53400, seq_s, seq_c, split_frame[split_at:], from_plc=True)
+    seq_s += len(split_frame) - split_at
+
+    # --- UDP: a separate 4-tuple (port 53500 -> 5000), same session-scoped matching mechanism.
+    # 34) & 35) Batch Read, word units: D1700, 1 point.
+    packets.append(melsec_udp_frame(melsec_request(0x0401, 0x0000, melsec_device("D", 1700) +
+                                                     struct.pack("<H", 1)), sport=53500))
+    packets.append(melsec_udp_frame(melsec_response(body=struct.pack("<h", 999)),
+                                     sport=MELSEC_UDP_PORT, dport=53500, from_plc=True))
+
+    # 36) & 37) Same UDP flow, non-standard port pair (53501 -> 15000) -- exercises the "not a
+    #     configured/standard MELSEC port" note on the UDP path (mirrors packet #23/#24 in
+    #     build_hartip_sample's own TCP-side non-standard-port coverage).
+    packets.append(melsec_udp_frame(melsec_request(0x1002, 0x0000, struct.pack("<H", 1)),
+                                     sport=53501, dport=15000))
+    packets.append(melsec_udp_frame(melsec_response(), sport=15000, dport=53501, from_plc=True))
+
+    # 38) Declared-length mismatch negative control (UDP -- see build_melsec_sample's own docstring
+    #     for why this must be a single self-contained datagram, not a TCP segment: over TCP, the
+    #     reassembly cascade trusts the declared length and slices the buffer down to it, so a
+    #     TRUNCATED slice re-checked in isolation would appear internally self-consistent again; a
+    #     UDP datagram has no such slicing step, so this checks the real thing -- subheader magic
+    #     (0x5000) matches, but the Request Data Length field is deliberately wrong (declares 6 when
+    #     the real tail is 6 + 3-byte device number + 1-byte device code + 2-byte point count = 12
+    #     bytes), so payload.size() can never equal bytes_before_length_field + 2 + declared_length).
+    #     Must NOT be recognized as melsec at all (falls through to generic "udp" recognition) -- the
+    #     same collision-resistance proof this session's own QUIC investigation demonstrated the
+    #     value of.
+    packets.append(melsec_udp_frame(
+        melsec_request(0x0401, 0x0000, melsec_device("D", 999) + struct.pack("<H", 1),
+                        length_override=6),
+        sport=53502))
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_009_000 + i, i * 1000)
+    (TESTS_DIR / "sample_melsec.pcap").write_bytes(data)
+
+
+# ---------------------------------------------------------------------------------------------
 # Kerberos (RFC 4120), TCP and UDP port 88 -- the first Windows AD-suite protocol (see
 # kerberos.hpp's file header comment for the full wire format, structural detection gate, and the
 # curated attack/monitoring notes each packet group below is designed to exercise). Built with the
@@ -10895,6 +11128,7 @@ if __name__ == "__main__":
     build_mqtt_sample()
     build_ffhse_sample()
     build_twincat_sample()
+    build_melsec_sample()
     build_kerberos_sample()
     build_ldap_sample()
     build_smb_sample()

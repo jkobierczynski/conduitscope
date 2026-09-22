@@ -26,6 +26,17 @@ EtherNet/IP (CIP explicit messaging, TCP port
 plus Beckhoff TwinCAT/ADS (AMS/TCP, TCP port 48898, tried right after
 Modbus using a five-part structural gate -- see \fBdocs/PROTOCOL_COVERAGE.md\fR's TwinCAT / ADS
 section) traffic found inside its TCP streams,
+plus MELSEC Communication Protocol (MC Protocol / SLMP, Mitsubishi
+Electric, TCP port 5001 and UDP port 5000, tried right after TwinCAT on
+TCP and right after BACnet/IP and EtherNet/IP CIP I/O but BEFORE HART-IP
+on UDP -- a two-part structural gate, exact 3E/4E subheader magic plus an
+exact declared-length cross-check -- see \fBdocs/PROTOCOL_COVERAGE.md\fR's
+MELSEC / MC Protocol section for the wire format, the collision survey
+against HART-IP's own weaker UDP gate, and its curated unauthenticated-
+CPU-control/cleartext-password-field/arbitrary-memory-access attack-
+monitoring notes; the cleartext Remote Password field's own value is
+never rendered, only its length) traffic found inside its TCP and UDP
+streams,
 plus Kerberos (RFC 4120, TCP and UDP port 88, tried right after TwinCAT on
 TCP and right after HART-IP on UDP, recognized by its outer ASN.1
 APPLICATION tag byte plus a pvno/msg-type cross-check on full decode --
@@ -235,7 +246,7 @@ regardless of where it's being analyzed \-\- an extension beyond what
 tshark/tcpdump themselves offer. See \fBdocs/USER_GUIDE.md\fR's OUTPUT
 FORMATS "Timestamps" subsection.
 .TP
-.B \-\-protocol {auto,modbus,dnp3,iec104,s7comm,s7comm\-plus,mms,enip,twincat,kerberos,ldap,smb,profinet,goose,sv,ethercat,stp,devicenet,bacnet,hartip,opcua,mqtt,ff\-hse,dns,mdns,llmnr,nbns,doh,rip,igmp,vrrp,hsrp,igrp,pim,eigrp,ospf,remote\-access,lateral\-movement,enterprise\-trust,eapol,wireless\-backhaul,pppoe,tunnel\-vpn,mpls}
+.B \-\-protocol {auto,modbus,dnp3,iec104,s7comm,s7comm\-plus,mms,enip,twincat,melsec,kerberos,ldap,smb,profinet,goose,sv,ethercat,stp,devicenet,bacnet,hartip,opcua,mqtt,ff\-hse,dns,mdns,llmnr,nbns,doh,rip,igmp,vrrp,hsrp,igrp,pim,eigrp,ospf,remote\-access,lateral\-movement,enterprise\-trust,eapol,wireless\-backhaul,pppoe,tunnel\-vpn,mpls}
 Restrict decoding to one protocol. Default: auto (tries all fourteen TCP
 protocols, independent of port number, plus CIP I/O, BACnet/IP, HART-IP, and
 FF-HSE on every
@@ -263,6 +274,18 @@ independently present length fields, the ADS command State Flags bit, and
 a nine-value Command ID enum -- see \fBdocs/PROTOCOL_COVERAGE.md\fR's
 TwinCAT / ADS section), with no collision found against any protocol
 above or below it in this dispatch order,
+MELSEC / MC Protocol (SLMP, Mitsubishi Electric, TCP port 5001, UDP port
+5000) is tried right after TwinCAT on TCP, using its own two-part
+structural gate (an exact 3E/4E subheader magic match plus an exact
+declared-length cross-check -- see \fBdocs/PROTOCOL_COVERAGE.md\fR's
+MELSEC / MC Protocol section), with no collision found against any TCP
+protocol above or below it; on UDP it is tried right after BACnet/IP and
+EtherNet/IP CIP I/O but deliberately BEFORE HART-IP, since HART-IP's own
+weaker UDP gate (MessageType/MessageID both small enumerated values,
+MsgLength >= 8, no magic bytes) is incidentally satisfied by real MELSEC
+traffic often enough to matter \-\- discovered during this decoder's own
+required manual smoke test and fixed by this ordering, the same
+"stronger gate wins" resolution IEC104-before-Modbus above already uses,
 Kerberos (RFC 4120, TCP and UDP port 88) is tried right after TwinCAT on
 TCP and right after HART-IP on UDP, using its outer ASN.1 APPLICATION tag
 byte (one of 7 fixed values) plus, on full decode, a pvno/msg-type
