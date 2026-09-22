@@ -112,11 +112,20 @@
 // ---------------------------------------------------------------------------------------------
 // Tier 3 -- "individually unremarkable in limited form but worth an auditor's attention for where
 // they terminate and whether the OT side blindly trusts enterprise IT for them" (ROADMAP item 18's
-// own wording): NTP, DHCP, LDAP/LDAPS, RADIUS, and TACACS+ -- six `protocol` values sharing one
+// own wording): NTP, DHCP, LDAPS, RADIUS, and TACACS+ -- five `protocol` values sharing one
 // `ProtocolFilter::EnterpriseTrustOnly` toggle and one `extra_enterprise_trust_ports` list, the same
 // "one feature toggle, several sub-protocols" grouping Tiers 1-2 already established (see
 // decoder.hpp). IEEE 802.1X/EAPOL is ALSO Tier 3 but, having no port at all (EtherType 0x888E), is
 // NOT in this file -- see eapol.hpp and decoder.hpp's own ProtocolFilter::EapolOnly comment for why.
+// Plaintext LDAP is ALSO Tier 3 in spirit but, since the Windows AD suite (see kerberos.hpp's file
+// header comment) needed it upgraded to a full ProtocolDecoder with curated attack/monitoring
+// detection, it was pulled out into its own dedicated ldap.hpp/`--protocol ldap`, the same "pull one
+// protocol out of a shared tier into its own dedicated decoder/CLI surface" move this codebase
+// already made once for EAPOL. Only `match_ldap_ber`/`looks_like_ldap_ber` (below) still live here --
+// ldap.hpp's own structural gate reuses them rather than duplicating a second BER-envelope reader,
+// and decoder.cpp's MQTT-collision carve-out (see `looks_like_ldap_ber`'s own comment) still needs
+// them too. LDAPS (LDAP-over-TLS) is UNCHANGED and stays in this file -- it was never more than a
+// port-only ClientHello/fallback tag to begin with, see its own bullet below.
 // DNS/Active Directory's DNS component needs no new code here either: DNS itself is already decoded
 // in full (see this file's own PROTOCOL COVERAGE cross-reference in docs/MANUAL.md) -- this tier is
 // about correlating where an OT segment's DNS queries actually terminate (an enterprise domain
@@ -142,20 +151,10 @@
 //     Type, RFC 2132 section 9.6) is additionally decoded by name (DISCOVER/OFFER/REQUEST/DECLINE/
 //     ACK/NAK/RELEASE/INFORM and the RFC 3203/4388 extensions) -- every other DHCP option is left
 //     entirely unparsed.
-//   - LDAP (TCP port 389, or 3268 for Global Catalog) has a genuine cleartext structural signature at
-//     the LDAPMessage level (RFC 4511 section 4.1): a BER SEQUENCE wrapping an INTEGER messageID
-//     followed immediately by a protocolOp tagged [APPLICATION n] (bindRequest=0, bindResponse=1,
-//     unbindRequest=2, searchRequest=3, searchResEntry=4, searchResDone=5, modifyRequest=6,
-//     modifyResponse=7, addRequest=8, addResponse=9, delRequest=10, delResponse=11, modDNRequest=12,
-//     modDNResponse=13, compareRequest=14, compareResponse=15, abandonRequest=16, searchResRef=19,
-//     extendedReq=23, extendedResp=24, intermediateResponse=25). Gated to port 389/3268 (or a
-//     configured extra port) even though the check is structurally about as strong as SNMP's own
-//     SEQUENCE/INTEGER check above -- the same "ASN.1 tag bytes are common enough elsewhere" caution
-//     that keeps SNMP port-gated applies here too. An unencrypted LDAP bind (bindRequest, op 0) is
-//     independently worth its own note: it is the one case where this file's "name-only" posture
-//     still surfaces something the auditor should look at, a cleartext-credential bind (LDAP simple
-//     bind sends the password as plaintext unless started over TLS/StartTLS), without decoding the
-//     credential itself.
+//   - Plain LDAP (TCP port 389, or 3268 for Global Catalog) is NOT recognized by this file anymore --
+//     see this file's own header comment above for why it moved to its own dedicated ldap.hpp/
+//     `--protocol ldap` (full field decode, curated AD-recon/AS-REP-Roasting/delegation-discovery
+//     detection, session correlation), not just name-only recognition.
 //   - LDAPS (LDAP-over-TLS, port 636, or 3269 for Global Catalog) reuses this project's own TLS
 //     ClientHello parser (tls_sni.hpp, already layered under HTTPS/DoH detection -- see this file's
 //     own HTTPS paragraph above) rather than a second TLS implementation: decoder.cpp's existing
@@ -386,33 +385,38 @@ constexpr uint16_t RADIUS_ACCT_PORT_LEGACY = 1646;  // UDP -- pre-standardizatio
 constexpr uint16_t TACACS_PLUS_PORT = 49;  // TCP -- IANA-registered "tacacs"
 
 struct ItEnterpriseTrustMatch {
-    std::string protocol;  // "ntp" / "dhcp" / "ldap" / "ldaps" / "radius" / "tacacs-plus"
+    std::string protocol;  // "ntp" / "dhcp" / "ldaps" / "radius" / "tacacs-plus" -- plain "ldap" moved
+                            // to its own dedicated ldap.hpp, see this file's own header comment
     std::string summary;
     std::vector<std::string> notes;
 };
 
-// Returns std::nullopt if `payload` and the `src_port`/`dst_port` pair don't match any of the six
+// Returns std::nullopt if `payload` and the `src_port`/`dst_port` pair don't match any of the five
 // port-based Tier 3 protocols this file recognizes (EAPOL, the seventh Tier 3 protocol, has no port
-// at all -- see eapol.hpp). Like try_recognize_it_lateral_movement above, every one of these six has
-// a FIXED transport (NTP/DHCP/RADIUS are UDP-only, LDAP/LDAPS/TACACS+ are TCP-only) so `is_tcp`
+// at all -- see eapol.hpp; plain LDAP, no longer recognized here at all -- see ldap.hpp and this
+// file's own header comment). Like try_recognize_it_lateral_movement above, every one of these five
+// has a FIXED transport (NTP/DHCP/RADIUS are UDP-only, LDAPS/TACACS+ are TCP-only) so `is_tcp`
 // selects which half of this function even attempts a match. `extra_ports` extends every one of this
-// file's own default ports, one shared list across all six -- the same "one feature toggle" grouping
-// Tiers 1-2 already established, not six independent option lists.
+// file's own default ports, one shared list across all five -- the same "one feature toggle" grouping
+// Tiers 1-2 already established, not five independent option lists.
 std::optional<ItEnterpriseTrustMatch> try_recognize_it_enterprise_trust(ByteSpan payload, uint16_t src_port,
                                                                           uint16_t dst_port, bool is_tcp,
                                                                           const std::vector<uint16_t>& extra_ports);
 
-// Exposed narrowly for decoder.cpp's own reassemble_tcp_payload, to resolve a real collision found
-// while implementing this: LDAP's own LDAPMessage envelope always begins with a BER SEQUENCE tag,
-// byte value 0x30 -- which is bit-for-bit identical to a valid MQTT control-packet-type/flags byte
+// Exposed for two callers now (both narrow, both structural-gate-only uses of this file's own LDAP
+// BER envelope check, kept here rather than duplicated a third time -- see this file's own header
+// comment): (1) decoder.cpp's reassemble_tcp_payload, to resolve a real collision found while this
+// file was first implemented -- LDAP's own LDAPMessage envelope always begins with a BER SEQUENCE
+// tag, byte value 0x30 -- bit-for-bit identical to a valid MQTT control-packet-type/flags byte
 // (control packet type 3 = PUBLISH, flags all clear), so MQTT's own single-byte opportunistic,
 // port-independent declared-length gate (mqtt.hpp) matches every genuine LDAP message purely by
 // chance, the same shape of collision Tier 2's own looks_like_ftp_control_line already resolves for
-// FTP vs. MQTT (see that function's own comment) -- MQTT's own reassembly probe (tried before this
-// file's own Tier 3 dispatch, which only runs once reassembly completes) would otherwise buffer real
-// LDAP traffic forever waiting for bytes that will never arrive. See decoder.cpp's own call site for
-// the full reasoning; true when `payload` matches this file's own LDAP BER structural check (the
-// same one try_recognize_it_enterprise_trust itself uses).
+// FTP vs. MQTT (see that function's own comment) -- MQTT's own reassembly probe would otherwise
+// buffer real LDAP traffic forever waiting for bytes that will never arrive; and (2) ldap.hpp's own
+// LdapTcpDecoder structural gate/tcp_declared_length, reusing this exact three-part check
+// (SEQUENCE+length / INTEGER messageID / APPLICATION-class protocolOp) rather than a second,
+// duplicated BER-envelope reader -- see ldap.hpp's own file header comment for the full collision
+// survey against Kerberos and everything else in the TCP-port-independent cascade.
 bool looks_like_ldap_ber(ByteSpan payload);
 
 // ---------------------------------------------------------------------------------------------

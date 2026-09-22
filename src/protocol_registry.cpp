@@ -10,6 +10,7 @@
 #include "conduitscope/hartip.hpp"
 #include "conduitscope/iec104.hpp"
 #include "conduitscope/kerberos.hpp"
+#include "conduitscope/ldap.hpp"
 #include "conduitscope/mms.hpp"
 #include "conduitscope/modbus.hpp"
 #include "conduitscope/mqtt.hpp"
@@ -89,6 +90,15 @@ const std::vector<const ProtocolDecoder*>& tcp_port_independent_registry() {
                               // APPLICATION tag bytes, then a pvno==5/msg-type cross-check on full
                               // decode) doesn't collide with anything above it -- see kerberos.hpp's
                               // COLLISION SURVEY paragraph for the full writeup.
+        &ldap_tcp_decoder(),  // Added directly after Kerberos -- the second Windows AD-suite
+                              // protocol (see ldap.hpp's file header comment), no UDP sibling. Its
+                              // own gate (the outer SEQUENCE/messageID/protocolOp structural check,
+                              // reused from it_protocols.hpp's match_ldap_ber, PLUS a per-op
+                              // constructed-bit cross-check on full decode) doesn't collide with
+                              // Kerberos immediately above it despite 5 numerically-overlapping
+                              // APPLICATION tags -- see ldap.hpp's own COLLISION SURVEY paragraph
+                              // for the full writeup (Kerberos's gate reads the whole payload's own
+                              // leading byte, LDAP's own protocolOp tags never appear there).
         &dnp3_decoder(),     // Migration batch 2 -- sits exactly where the old `if (want_dnp3)`
                               // block always did: after Modbus/TwinCAT (both above), before the
                               // COTP/S7comm family below (also still true after COTP's own

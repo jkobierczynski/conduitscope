@@ -428,6 +428,7 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
                 const std::vector<int>& iec104_ports, const std::vector<int>& enip_ports,
                 const std::vector<int>& enip_io_ports, const std::vector<int>& bacnet_ports,
                 const std::vector<int>& hartip_ports, const std::vector<int>& kerberos_ports,
+                const std::vector<int>& ldap_ports,
                 const std::vector<int>& opcua_ports,
                 const std::vector<int>& mqtt_ports, const std::vector<int>& ffhse_ports,
                 const std::vector<int>& dns_ports, const std::vector<int>& mdns_ports,
@@ -530,6 +531,7 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
                                : (protocol == "mpls")   ? ProtocolFilter::MplsOnly
                                : (protocol == "twincat") ? ProtocolFilter::TwinCatOnly
                                : (protocol == "kerberos") ? ProtocolFilter::KerberosOnly
+                               : (protocol == "ldap")   ? ProtocolFilter::LdapOnly
                                                         : ProtocolFilter::Auto;
     for (int p : modbus_ports) options.extra_modbus_ports.push_back(static_cast<uint16_t>(p));
     for (int p : dnp3_ports) options.extra_dnp3_ports.push_back(static_cast<uint16_t>(p));
@@ -540,6 +542,7 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
     for (int p : bacnet_ports) options.extra_bacnet_ports.push_back(static_cast<uint16_t>(p));
     for (int p : hartip_ports) options.extra_hartip_ports.push_back(static_cast<uint16_t>(p));
     for (int p : kerberos_ports) options.extra_kerberos_ports.push_back(static_cast<uint16_t>(p));
+    for (int p : ldap_ports) options.extra_ldap_ports.push_back(static_cast<uint16_t>(p));
     for (int p : opcua_ports) options.extra_opcua_ports.push_back(static_cast<uint16_t>(p));
     for (int p : mqtt_ports) options.extra_mqtt_ports.push_back(static_cast<uint16_t>(p));
     for (int p : ffhse_ports) options.extra_ffhse_ports.push_back(static_cast<uint16_t>(p));
@@ -987,7 +990,7 @@ int main(int argc, char** argv) {
     std::string decode_protocol = "auto";
     std::vector<int> decode_modbus_ports, decode_dnp3_ports, decode_s7comm_ports, decode_iec104_ports,
         decode_enip_ports, decode_enip_io_ports, decode_bacnet_ports, decode_hartip_ports,
-        decode_kerberos_ports,
+        decode_kerberos_ports, decode_ldap_ports,
         decode_opcua_ports, decode_mqtt_ports, decode_ffhse_ports, decode_dns_ports, decode_mdns_ports,
         decode_llmnr_ports, decode_nbns_ports, decode_doh_ports, decode_rip_ports, decode_hsrp_ports,
         decode_remote_access_ports, decode_lateral_movement_ports, decode_enterprise_trust_ports,
@@ -1061,7 +1064,7 @@ int main(int argc, char** argv) {
     decode_cmd
         ->add_option("--protocol", decode_protocol,
                       "Restrict decoding to one protocol instead of auto-detecting all of them")
-        ->transform(CLI::IsMember({"auto", "modbus", "dnp3", "s7comm", "mms", "iec104", "enip", "profinet", "goose", "sv", "ethercat", "stp", "devicenet", "bacnet", "hartip", "opcua", "mqtt", "s7comm-plus", "ff-hse", "dns", "mdns", "llmnr", "nbns", "doh", "rip", "icmp", "igmp", "vrrp", "hsrp", "igrp", "pim", "eigrp", "ospf", "remote-access", "lateral-movement", "enterprise-trust", "eapol", "wireless-backhaul", "pppoe", "tunnel-vpn", "mpls", "twincat", "kerberos"}))
+        ->transform(CLI::IsMember({"auto", "modbus", "dnp3", "s7comm", "mms", "iec104", "enip", "profinet", "goose", "sv", "ethercat", "stp", "devicenet", "bacnet", "hartip", "opcua", "mqtt", "s7comm-plus", "ff-hse", "dns", "mdns", "llmnr", "nbns", "doh", "rip", "icmp", "igmp", "vrrp", "hsrp", "igrp", "pim", "eigrp", "ospf", "remote-access", "lateral-movement", "enterprise-trust", "eapol", "wireless-backhaul", "pppoe", "tunnel-vpn", "mpls", "twincat", "kerberos", "ldap"}))
         ->capture_default_str();
     decode_cmd->add_option("--modbus-port", decode_modbus_ports,
                             "Additional TCP port to treat as expected for Modbus (repeatable); "
@@ -1097,6 +1100,9 @@ int main(int argc, char** argv) {
                             "Additional TCP or UDP port to treat as expected for Kerberos "
                             "(repeatable); does not change detection, only whether the port is "
                             "flagged as unexpected");
+    decode_cmd->add_option("--ldap-port", decode_ldap_ports,
+                            "Additional TCP port to treat as expected for LDAP (repeatable); does "
+                            "not change detection, only whether the port is flagged as unexpected");
     decode_cmd->add_option("--opcua-port", decode_opcua_ports,
                             "Additional TCP port to treat as expected for OPC UA (repeatable); "
                             "does not change detection, only whether the port is flagged as "
@@ -1495,7 +1501,7 @@ int main(int argc, char** argv) {
                            decode_promiscuous, decode_output, decode_format, decode_protocol,
                            decode_modbus_ports, decode_dnp3_ports, decode_s7comm_ports, decode_iec104_ports,
                            decode_enip_ports, decode_enip_io_ports, decode_bacnet_ports, decode_hartip_ports,
-                           decode_kerberos_ports,
+                           decode_kerberos_ports, decode_ldap_ports,
                            decode_opcua_ports, decode_mqtt_ports, decode_ffhse_ports, decode_dns_ports,
                            decode_mdns_ports, decode_llmnr_ports, decode_nbns_ports, decode_doh_ports,
                            decode_rip_ports, decode_hsrp_ports, decode_remote_access_ports,

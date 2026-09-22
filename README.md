@@ -14,7 +14,11 @@ ISO 9506), MQTT (v3.1/v3.1.1/v5.0, including Sparkplug B), FOUNDATION
 Fieldbus HSE (FDA/SM/FMS/LAN Redundancy), Beckhoff TwinCAT/ADS (over
 AMS/TCP), Kerberos (RFC 4120, with curated AS-REP-Roasting and
 Kerberoasting attack/monitoring notes -- the first of a planned Windows
-Active Directory protocol suite), IEEE Spanning Tree Protocol
+Active Directory protocol suite), LDAP (RFC 4511, with curated
+anonymous-bind, cleartext-credential, AD-reconnaissance,
+AS-REP-Roasting-target-discovery, and delegation-discovery
+attack/monitoring notes -- the second protocol of that same suite),
+IEEE Spanning Tree Protocol
 (STP/RSTP/MSTP), DeviceNet (CAN-bus CIP, via SocketCAN pcap captures), DNS,
 mDNS, LLMNR, and NetBIOS Name Service (NBT-NS), ICMP, RIP, IGMP, VRRP, HSRP,
 IGRP, PIM, EIGRP, and OSPFv2,
@@ -23,7 +27,7 @@ plus detects DNS-over-HTTPS
 RDP, VNC, TeamViewer, AnyDesk, and Zoom -- the "interactive remote control"
 tier of the IT protocols an OT auditor flags -- plus SMB, SSH, HTTP, HTTPS,
 SNMPv1/v2c, Telnet, FTP, and TFTP, the "lateral-movement and
-credential-harvesting" tier of the same family, plus NTP, DHCP, LDAP,
+credential-harvesting" tier of the same family, plus NTP, DHCP,
 LDAPS, RADIUS, TACACS+, and IEEE 802.1X/EAPOL, the "does the OT side
 blindly trust enterprise IT" tier of the same family, plus CAPWAP
 control/data, LWAPP control/data, GTP-U, and PPPoE, the "wireless
@@ -886,21 +890,25 @@ Groundwork / v0.1.0. What works right now:
   `--lateral-movement-port` widens its expected-port set. See
   docs/PROTOCOL_COVERAGE.md "Tier 2 lateral-movement protocol
   recognition" section
-- Tier 3 of the same family: NTP, DHCP, LDAP, LDAPS, RADIUS, TACACS+, and
+- Tier 3 of the same family: NTP, DHCP, LDAPS, RADIUS, TACACS+, and
   IEEE 802.1X/EAPOL -- protocols "individually unremarkable in limited
   form but worth an auditor's attention for where they terminate and
   whether the OT side blindly trusts enterprise IT for them." DHCP's own
   magic cookie and LDAPS's TLS ClientHello (the latter layered into the
   same early call site HTTPS's own uses) are genuine, port-independent
-  structural signatures; NTP/LDAP/RADIUS/TACACS+ each have a genuine but
+  structural signatures; NTP/RADIUS/TACACS+ each have a genuine but
   narrower, port-gated signal; TACACS+'s own unencrypted-body flag is
   surfaced as its own note when set. EAPOL rides raw Ethernet (EtherType
   `0x888E`, no port at all, like PROFINET/GOOSE/SV/EtherCAT) and gets its
   own dedicated `--protocol eapol` value -- its presence on an OT switch
   port is reassuring (the device had to authenticate), so its *absence*
   is often the actual finding, the one protocol in this whole family
-  where that polarity is reversed. `--protocol enterprise-trust` isolates
-  the six port-based protocols; `--enterprise-trust-port` widens their
+  where that polarity is reversed. Plain LDAP itself was pulled out of
+  this shallow, name-only tier into its own full `ProtocolDecoder` (see
+  the Kerberos/LDAP paragraph above) -- the same move EAPOL got earlier;
+  LDAPS (TLS-wrapped, needs keys for anything beyond the ClientHello)
+  stays in this tier. `--protocol enterprise-trust` isolates the five
+  remaining port-based protocols; `--enterprise-trust-port` widens their
   shared expected-port set. See docs/PROTOCOL_COVERAGE.md "Tier 3
   enterprise-trust-boundary protocol recognition" section
 - Tier 4 of the same family: CAPWAP control/data, LWAPP control/data,

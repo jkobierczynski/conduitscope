@@ -1180,6 +1180,39 @@ which protocols are tried:
   docs/PROTOCOL_COVERAGE.md's Kerberos section for the full writeup,
   including the curated AS-REP-Roasting/Kerberoasting attack-monitoring
   notes this decoder also carries.
+- **LDAP** (RFC 4511, TCP/389 and TCP/3268 Global Catalog): recognized by
+  the same three-part structural check `it_protocols.hpp`'s own
+  `match_ldap_ber`/`looks_like_ldap_ber` already established (outer tag
+  `0x30` SEQUENCE with a plausible BER length, an INTEGER `messageID`
+  immediately inside, and a `protocolOp` APPLICATION tag whose number is
+  one of the 21 valid values), reused as-is rather than duplicated, plus a
+  STRONGER per-field check this decoder's own full parse adds: the
+  `protocolOp` tag's constructed bit must also match that specific op
+  number's own underlying-type shape (RFC 4511 is `IMPLICIT TAGS`, so the
+  bit isn't uniform -- see docs/PROTOCOL_COVERAGE.md's LDAP section for
+  the full per-op table). A real collision WAS found and resolved during
+  this decoder's own planning: Kerberos's own AS-REP/TGS-REQ/TGS-REP/
+  AP-REQ/AP-REP tags (`0x6B`/`0x6C`/`0x6D`/`0x6E`/`0x6F`) are
+  byte-identical to five of LDAP's own APPLICATION tags
+  (delResponse/modDNRequest/modDNResponse/compareRequest/
+  compareResponse) -- this does NOT collide at the dispatch-gate level
+  because Kerberos's gate reads the outer tag of the ENTIRE de-framed
+  payload (byte 0), while LDAP's byte 0 is ALWAYS the fixed envelope tag
+  `0x30`; the overlapping tags only ever appear several bytes INSIDE an
+  LDAP message, never as its leading byte. Also unaffected by the
+  pre-existing, already-solved LDAP-vs-MQTT collision (`0x30` is also a
+  valid MQTT PUBLISH control-packet-type/flags byte) -- the same
+  `looks_like_ldap_ber` carve-out `decoder.cpp`'s MQTT call site already
+  used, reused as-is. No collision found against any other protocol in
+  the TCP-port-independent cascade. Unlike Kerberos, there is deliberately
+  no UDP sibling (CLDAP is obsolete). Registered directly after Kerberos
+  in the TCP-port-independent chain. LDAP-over-TCP has no length-prefix
+  framing of its own -- each `LDAPMessage`'s own outer BER SEQUENCE length
+  IS the framing, unlike Kerberos's 4-byte prefix. See
+  docs/PROTOCOL_COVERAGE.md's LDAP section for the full writeup, including
+  the six curated attack/monitoring notes this decoder carries (several of
+  which point directly at Kerberos's own AS-REP-Roasting/Kerberoasting
+  findings, since LDAP recon is how a real attacker finds those targets).
 - **DNP3**: recognized by the data-link-layer start bytes `0x05 0x64`, which
   DNP3 always begins with.
 - **S7comm/COTP**: recognized by the TPKT signature (`0x03 0x00` followed by
@@ -3818,9 +3851,10 @@ unlike any of the eight routing/redundancy protocols decoded so far.
     same client had two genuinely overlapping unanswered requests on one
     session at once, which is rare in practice.
 
-    **Still not done**: LDAP, SMB/NTLM, and Netlogon/DCE-RPC (the
-    remaining three protocols of the planned AD suite -- separate future
-    items); PAC contents (SID/group extraction, PAC signature validation --
+    **Still not done** (as of this item -- LDAP followed as item 23, see
+    below): SMB/NTLM and Netlogon/DCE-RPC (the remaining two protocols of
+    the planned AD suite -- separate future items); PAC contents
+    (SID/group extraction, PAC signature validation --
     unreadable without keys from a passive capture, same limit as the
     Authenticator/AP-REP ciphertext above); KRB-SAFE/KRB-PRIV/KRB-CRED
     (rare outside app-level Kerberos usage like kpasswd, not part of the
@@ -3846,6 +3880,144 @@ unlike any of the eight routing/redundancy protocols decoded so far.
     kerberos`/`--kerberos-port`, non-standard-port note, and the TCP
     whole-frame/split-segment cases) -- full existing suite (1205 tests)
     stays 100% passing, zero-warning build.
+
+23. **LDAP (RFC 4511) -- phase 2 of the 4-part Windows Active Directory
+    suite, with curated attack/monitoring detection.** The natural next
+    step after Kerberos (item 22): LDAP reconnaissance (SPN sweeps,
+    `userAccountControl` bit queries) is literally how a real attacker
+    *finds* the AS-REP-Roasting/Kerberoasting targets item 22's own
+    curated notes already flag, so this item completes that story rather
+    than starting a new one. LDAP already had shallow, name-only
+    recognition in this codebase before this item (Tier 3's
+    "enterprise-trust" family) -- **that recognition is removed** in favor
+    of a full decoder, the same "pull one protocol out of a shared tier
+    into its own dedicated decoder/CLI surface" move this codebase already
+    made once for EAPOL; NTP/DHCP/RADIUS/TACACS+/LDAPS stay exactly as they
+    were in the legacy `it_protocols.cpp` path, untouched.
+
+    **Done.** Built on the `ProtocolDecoder` interface (item 3), the third
+    protocol in this codebase to use it, as one decoder instance,
+    `LdapTcpDecoder`, `id() == "ldap"`, `GateKind::TcpPortIndependent` --
+    unlike Kerberos, deliberately **no UDP sibling** (CLDAP, RFC 1798, is
+    obsolete/deprecated and not part of mainstream AD traffic). A real
+    collision was found and resolved **during planning**, not left for
+    implementation to discover: RFC 4511's ASN.1 module is `DEFINITIONS
+    IMPLICIT TAGS`, the opposite of Kerberos's (RFC 4120) `EXPLICIT TAGS`
+    convention -- confirmed by reading RFC 4511's actual ASN.1 module text,
+    not recalled from training -- which means Kerberos's own AS-REP/
+    TGS-REQ/TGS-REP/AP-REQ/AP-REP APPLICATION tags (`0x6B`/`0x6C`/`0x6D`/
+    `0x6E`/`0x6F`) are byte-identical to five of LDAP's own operation tags.
+    This does NOT actually collide at the dispatch-gate level (Kerberos's
+    gate reads the outer tag of the whole de-framed payload; LDAP's byte 0
+    is always the fixed envelope tag `0x30`, the overlapping tags only
+    ever appear several bytes inside an LDAP message) -- see PROTOCOL
+    DETECTION above for the full writeup, and
+    `include/conduitscope/ldap.hpp`'s own header comment for the complete
+    per-field IMPLICIT-tagging wire-format table this collision analysis
+    depends on.
+
+    All 21 `protocolOp` values recognized; 11 message types fully
+    field-decoded (BindRequest/BindResponse, UnbindRequest, SearchRequest
+    -- including full recursive `Filter` CHOICE decoding rendered in
+    `ldapsearch`-style syntax, SearchResultEntry/SearchResultDone/
+    SearchResultReference, CompareRequest/CompareResponse, AbandonRequest,
+    ExtendedRequest/ExtendedResponse), the remaining 9 (AddRequest/
+    AddResponse, ModifyRequest/ModifyResponse, DelRequest/DelResponse,
+    ModifyDNRequest/ModifyDNResponse, IntermediateResponse) structural-only
+    -- the same "not every message type needs the same depth" discipline
+    AP-REQ/AP-REP got in item 22. Six curated notes: anonymous/
+    unauthenticated bind (standing), cleartext-credential-without-StartTLS
+    (session-tracked via `LdapFlowState::starttls_seen`, covers both
+    `simple` and SASL PLAIN binds), AD reconnaissance filter shapes
+    (servicePrincipalName/adminCount), AS-REP-Roasting target discovery
+    (the AD-specific bitwise-AND matching rule, `1.2.840.113556.1.4.803`,
+    against `userAccountControl`'s `DONT_REQ_PREAUTH` bit -- both OIDs/bit
+    values independently verified against Microsoft's own MS-ADTS spec and
+    troubleshooting docs, not recalled from training alone), delegation
+    discovery (the same bitwise mechanism against `TRUSTED_FOR_DELEGATION`,
+    or a bare `msDS-AllowedToDelegateTo` reference), and named `resultCode`
+    counts in `--stats` (the password-spray signature -- LDAP's own analog
+    of item 22's KRB-ERROR count aggregation). See
+    `include/conduitscope/ldap.hpp`'s file header for the full writeup
+    (wire format, structural detection gate, collision survey, curated-note
+    design) and docs/PROTOCOL_COVERAGE.md's LDAP section for the
+    user-facing reference; PROTOCOL DETECTION above has this item's own
+    collision-survey summary.
+
+    Session/correlation state (`LdapFlowState`, keyed by
+    `FlowStateKeying::Session`) is a genuine **improvement** over item 22's
+    own documented limitation, not another instance of it: LDAP's
+    `messageID` is the RFC-mandated, always-visible-on-the-wire correlation
+    key (RFC 4511 section 4.1.1.1 requires it unique among a connection's
+    outstanding requests), unlike Kerberos's real `nonce` field, which is
+    unreadably encrypted. The pending-search map also introduces a shape
+    Kerberos never needed: created on `SearchRequest`, **not** erased on
+    each `SearchResultEntry` (only the running entry count is incremented),
+    erased with a final "N entries returned" note only on the terminal
+    `SearchResultDone` -- "keep state across many responses, close on the
+    terminal one," since one `SearchRequest` can have arbitrarily many
+    `SearchResultEntry` responses before its one `SearchResultDone`.
+
+    One correctness bug was caught during this item's own build-and-
+    smoke-test pass, before any CMakeLists.txt test was written against it
+    (the same "verify before trusting the test suite alone" discipline
+    that caught item 22's own Kerberoasting field-mixup bug): the fixture
+    generator (`tools/make_sample_pcap.py`'s `build_ldap_sample()`)
+    initially gave each `SearchResultEntry`/`SearchResultDone` message its
+    own incrementing envelope `messageID`, rather than reusing the SAME
+    `messageID` as the `SearchRequest` that produced them -- while RFC
+    4511 section 4.1.1.1 requires a response to echo its request's own
+    `messageID`. This silently defeated `LdapFlowState::pending_searches`'
+    own correlation (the entry-count note never fired), caught immediately
+    by running the built binary against the fixture and noticing the
+    expected note was simply absent from the output, not by a failing
+    test. Fixed by reusing the request's own `messageID` across every
+    response tied to it, the same way real LDAP traffic does; every
+    `ldap_*` CMakeLists.txt test was then written from the corrected
+    binary's own verified output, not hand-computed.
+
+    Removing LDAP from `try_recognize_it_enterprise_trust()`'s shallow
+    Tier-3 recognition changed the decoded behavior of several packets in
+    the pre-existing, shared `tests/sample_enterprise_trust.pcap` fixture
+    (no generator script exists for this fixture -- confirmed via
+    exhaustive grep across `tools/*.py` -- so its bytes could not be
+    regenerated, only the CMakeLists.txt test *expectations* about its
+    output could change). Rather than guessing at the new expectations,
+    the built binary was run directly against this fixture in several
+    modes (`--format text`/`--stats`/`--protocol enterprise-trust`/
+    `--protocol ldap`/`--ldap-port`/`--format json`) and the 5 affected
+    `enterprise_trust_ldap_*` tests (plus `enterprise_trust_stats_counted`
+    and `enterprise_trust_protocol_filter_isolates_port_based_family`)
+    were rewritten to match the observed ground truth -- including one
+    genuinely surprising change: a 9-byte packet that satisfied the old
+    shallow op-tag-only check is no longer recognized as `ldap` at all,
+    since the new full decoder's `SearchRequest` requires all 8 mandatory
+    fields to be present and throws a `ParseError` otherwise.
+
+    **Still not done**: SMB/NTLM and Netlogon/DCE-RPC (the remaining two
+    protocols of the planned AD suite -- separate future items); CLDAP
+    (UDP, obsolete, no decoder instance at all); SASL/`simple` credential
+    *contents* (never decrypted/decoded, only presence+length, by design);
+    Controls' `controlValue` payloads (OID named, value bytes not
+    decoded); LDAPS full decode (needs keys, same limit as TLS everywhere
+    else); no `policy validate`/`inventory` integration (degrades
+    gracefully on LDAP traffic today, the same posture item 22 is still
+    in); and no real-world capture corpus -- validated by construction
+    only, against synthetic `tests/sample_ldap.pcap` (TCP, 62 packets
+    across 17 independent sessions/flows) and
+    `tests/sample_ldap_tcp_split.pcap` (TCP, 2 packets, a TCP-segment-split
+    reassembly case); if a real LDAP capture becomes available later it
+    should be added and PROTOCOL_COVERAGE.md's Validation subsection
+    updated accordingly, the same way this project has handled every other
+    protocol where independent traffic was eventually found after an
+    earlier empty search. 29 new `ldap_*` CTest tests (every message type,
+    all six curated notes with an explicit negative case each, the "many
+    SearchResultEntry, one SearchResultDone" correlation, binary-attribute
+    rendering, control_oids, `--stats` resultCode counts, `--protocol
+    ldap`/`--ldap-port`, non-standard-port note, and TCP-segment-split
+    reassembly) plus 5 rewritten `enterprise_trust_ldap_*` tests and 2
+    updated `enterprise_trust_*` tests for the fixture-behavior change
+    above -- full existing suite stays 100% passing, zero-warning build.
 
 ### Protocols not covered at all
 

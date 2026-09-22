@@ -165,6 +165,10 @@ private:
     // keyed by error_name ("KDC_ERR_PREAUTH_REQUIRED", or "error N" for an unnamed code), read
     // from DecodedPacket::result the same way twincat_command_counts_ is above.
     std::map<std::string, size_t> kerberos_error_counts_;
+    // Curated Note 6 (ldap.hpp's file header comment) -- named LDAP resultCode counts, keyed by
+    // result_code_name ("invalidCredentials", or "resultCode N" for an unnamed code), read from
+    // DecodedPacket::result the same way kerberos_error_counts_ is above.
+    std::map<std::string, size_t> ldap_result_code_counts_;
     std::map<std::string, size_t> s7comm_function_counts_;
     std::map<std::string, size_t> dnp3_function_counts_;
     std::map<std::string, size_t> iec104_asdu_type_counts_;

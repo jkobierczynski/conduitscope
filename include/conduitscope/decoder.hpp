@@ -31,6 +31,7 @@
 #include "conduitscope/igrp.hpp"
 #include "conduitscope/it_protocols.hpp"
 #include "conduitscope/kerberos.hpp"
+#include "conduitscope/ldap.hpp"
 #include "conduitscope/mms.hpp"
 #include "conduitscope/modbus.hpp"
 #include "conduitscope/mpls.hpp"
@@ -101,13 +102,15 @@ enum class ProtocolFilter {
                            // One filter value covers all eight, the same grouping RemoteAccessOnly
                            // above already established for Tier 1.
     EnterpriseTrustOnly,   // only attempt the Tier 3 "IT protocols an OT auditor flags" recognition
-                           // (NTP/DHCP/LDAP/LDAPS/RADIUS/TACACS+) -- see it_protocols.hpp. One
-                           // filter value covers all six port-based protocols, the same grouping
+                           // (NTP/DHCP/LDAPS/RADIUS/TACACS+) -- see it_protocols.hpp. One filter
+                           // value covers all five port-based protocols, the same grouping
                            // RemoteAccessOnly/LateralMovementOnly above already established for
                            // Tiers 1-2. EAPOL (also Tier 3, but EtherType-keyed, no port at all --
                            // see eapol.hpp) is NOT covered by this filter value; it has its own
                            // EapolOnly below, the same split GOOSE/SV/EtherCAT/PROFINET's own
-                           // EtherType-keyed filters already have from every port-based one.
+                           // EtherType-keyed filters already have from every port-based one. Plain
+                           // LDAP is ALSO no longer covered by this filter value -- it has its own
+                           // dedicated LdapOnly below, see that value's own comment.
     EapolOnly,             // only attempt IEEE 802.1X/EAPOL decoding -- see eapol.hpp
     WirelessBackhaulOnly,  // only attempt the Tier 4 "IT protocols an OT auditor flags" recognition
                            // (CAPWAP control/data, LWAPP control/data, GTP-U) -- see it_protocols.hpp.
@@ -138,6 +141,13 @@ enum class ProtocolFilter {
                            // kerberos.hpp. The first protocol in the Windows Active Directory
                            // suite (Kerberos, then LDAP, then SMB/NTLM, then Netlogon/DCE-RPC --
                            // delivered one at a time).
+    LdapOnly,              // only attempt LDAP (RFC 4511, TCP/389 and TCP/3268) decoding -- see
+                           // ldap.hpp. The second protocol in the Windows Active Directory suite,
+                           // no UDP sibling (CLDAP is deliberately out of scope). Plain LDAP was
+                           // previously part of EnterpriseTrustOnly's own name-only Tier 3
+                           // recognition (it_protocols.hpp); it moved here once it was upgraded to
+                           // a full ProtocolDecoder, the same split EapolOnly already has from
+                           // EnterpriseTrustOnly.
 };
 
 struct DecodeOptions {
@@ -166,6 +176,8 @@ struct DecodeOptions {
     std::vector<uint16_t> extra_bacnet_ports;   // UDP -- see BACNET_UDP_PORT (47808/0xBAC0)
     std::vector<uint16_t> extra_hartip_ports;   // TCP AND UDP -- see HARTIP_PORT (5094, same for both)
     std::vector<uint16_t> extra_kerberos_ports;  // TCP AND UDP -- see KERBEROS_PORT (88, same for both)
+    std::vector<uint16_t> extra_ldap_ports;      // TCP only -- see LDAP_PORT/LDAP_GC_PORT (389/3268,
+                                                   // it_protocols.hpp)
     std::vector<uint16_t> extra_opcua_ports;    // TCP only -- see OPCUA_PORT (4840)
     std::vector<uint16_t> extra_mqtt_ports;     // TCP only -- see MQTT_PORT (1883)
     std::vector<uint16_t> extra_ffhse_ports;    // TCP AND UDP -- see FFHSE_PORT_ANNUNC/_FMS/_SM/_LAN
@@ -221,16 +233,18 @@ struct DecodeOptions {
     // gets above) -- this list still extends what counts as each one's own "expected" port for the
     // purposes of the "seen on a non-standard port" note, just never gates those three's detection.
     std::vector<uint16_t> extra_lateral_movement_ports;
-    // One shared list across all six port-based Tier 3 "IT protocols an OT auditor flags"
-    // protocols (NTP/DHCP/LDAP/LDAPS/RADIUS/TACACS+ -- see it_protocols.hpp), the same grouping
+    // One shared list across all five port-based Tier 3 "IT protocols an OT auditor flags"
+    // protocols (NTP/DHCP/LDAPS/RADIUS/TACACS+ -- see it_protocols.hpp), the same grouping
     // extra_remote_access_ports/extra_lateral_movement_ports above already established for
     // Tiers 1-2. EAPOL has no port at all (EtherType-keyed, see eapol.hpp) so it is not covered by
-    // this list. NTP/RADIUS/TACACS+/LDAP are all port-gated even for their own structural checks
-    // (join the same detection-gating group as extra_dns_ports/extra_rip_ports/etc. above) --
-    // DHCP's magic cookie and LDAP over TLS's own ClientHello (layered into the existing HTTPS/DoH
-    // early-detection call site, see decoder.cpp) are the two exceptions checked port-independently
-    // even in Auto mode, the same "structural signature overrides the port gate" treatment VNC/SMB/
-    // SSH/HTTP already have in Tiers 1-2.
+    // this list; plain LDAP is ALSO no longer covered by this list -- it has its own dedicated
+    // extra_ldap_ports above, since it is now a full ProtocolDecoder (see ldap.hpp) rather than a
+    // Tier 3 name-only recognition. NTP/RADIUS/TACACS+ are all port-gated even for their own
+    // structural checks (join the same detection-gating group as extra_dns_ports/extra_rip_ports/
+    // etc. above) -- DHCP's magic cookie and LDAP over TLS's own ClientHello (layered into the
+    // existing HTTPS/DoH early-detection call site, see decoder.cpp) are the two exceptions checked
+    // port-independently even in Auto mode, the same "structural signature overrides the port gate"
+    // treatment VNC/SMB/SSH/HTTP already have in Tiers 1-2.
     std::vector<uint16_t> extra_enterprise_trust_ports;
     // One shared list across all five port-based Tier 4 "IT protocols an OT auditor flags"
     // protocols (CAPWAP control/data, LWAPP control/data, GTP-U -- see it_protocols.hpp), the same

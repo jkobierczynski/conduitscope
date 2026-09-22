@@ -33,7 +33,8 @@ const std::vector<const ProtocolDecoder*>& ip_protocol_registry();
 // Migrated TCP-port-independent protocols, in the order their decoder.cpp call sites run.
 // Populated: Modbus (Stage 2 of the pilot), TwinCAT, Kerberos (TCP side only -- see
 // udp_port_independent_registry() below for its UDP sibling, sharing this same id() -- the first
-// Windows AD-suite protocol, see kerberos.hpp), OPC UA, EtherNet/IP (TCP side only -- see
+// Windows AD-suite protocol, see kerberos.hpp), LDAP (the second Windows AD-suite protocol, no UDP
+// sibling -- see ldap.hpp), OPC UA, EtherNet/IP (TCP side only -- see
 // udp_port_independent_registry() below for its UDP CIP I/O sibling, sharing this same id()),
 // IEC104, DNP3, COTP, HART-IP (TCP side only -- see udp_port_independent_registry() below for its
 // UDP sibling, sharing this same id()), MQTT (migration batch 2 -- see decoder.cpp's call site

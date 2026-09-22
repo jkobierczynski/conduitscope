@@ -613,6 +613,111 @@ void write_kerberos_json_fields(std::ostream& out, const KerberosMessage& km) {
     }
 }
 
+// The LDAP analog of write_kerberos_json_fields above -- same rationale, same "always-set fields
+// unconditional, everything else conditioned on the same has_*/non-empty check LdapMessage's own
+// fields document" posture -- see ldap.hpp's struct comment for which fields apply to which message
+// type.
+void write_ldap_json_fields(std::ostream& out, const LdapMessage& lm) {
+    out << "    \"ldap_message_id\": " << lm.message_id << ",\n";
+    out << "    \"ldap_message_type\": \"" << json_escape(lm.message_type) << "\",\n";
+    out << "    \"ldap_op_num\": " << static_cast<int>(lm.op_num) << ",\n";
+    out << "    \"ldap_is_response\": " << (lm.is_response ? "true" : "false") << ",\n";
+    if (lm.message_type == "BindRequest") {
+        out << "    \"ldap_bind_version\": " << static_cast<int>(lm.bind_version) << ",\n";
+        out << "    \"ldap_bind_dn\": \"" << json_escape(lm.bind_dn) << "\",\n";
+        out << "    \"ldap_bind_is_sasl\": " << (lm.bind_is_sasl ? "true" : "false") << ",\n";
+        if (!lm.bind_auth_mechanism.empty()) {
+            out << "    \"ldap_bind_auth_mechanism\": \"" << json_escape(lm.bind_auth_mechanism) << "\",\n";
+        }
+        out << "    \"ldap_bind_credential_present\": " << (lm.bind_credential_present ? "true" : "false") << ",\n";
+        if (lm.bind_credential_present) {
+            out << "    \"ldap_bind_credential_length\": " << lm.bind_credential_length << ",\n";
+        }
+    }
+    if (lm.has_result) {
+        out << "    \"ldap_result_code\": " << lm.result_code << ",\n";
+        out << "    \"ldap_result_code_name\": \"" << json_escape(lm.result_code_name) << "\",\n";
+        if (!lm.matched_dn.empty()) out << "    \"ldap_matched_dn\": \"" << json_escape(lm.matched_dn) << "\",\n";
+        if (!lm.diagnostic_message.empty()) {
+            out << "    \"ldap_diagnostic_message\": \"" << json_escape(lm.diagnostic_message) << "\",\n";
+        }
+    }
+    if (!lm.referral_uris.empty()) {
+        out << "    \"ldap_referral_uris\": [";
+        for (size_t i = 0; i < lm.referral_uris.size(); ++i) {
+            if (i != 0) out << ", ";
+            out << "\"" << json_escape(lm.referral_uris[i]) << "\"";
+        }
+        out << "],\n";
+    }
+    if (lm.message_type == "SearchRequest") {
+        out << "    \"ldap_search_base_object\": \"" << json_escape(lm.search_base_object) << "\",\n";
+        out << "    \"ldap_search_scope\": \"" << json_escape(lm.search_scope) << "\",\n";
+        out << "    \"ldap_search_deref_aliases\": \"" << json_escape(lm.search_deref_aliases) << "\",\n";
+        out << "    \"ldap_search_size_limit\": " << lm.search_size_limit << ",\n";
+        out << "    \"ldap_search_time_limit\": " << lm.search_time_limit << ",\n";
+        out << "    \"ldap_search_types_only\": " << (lm.search_types_only ? "true" : "false") << ",\n";
+        out << "    \"ldap_search_filter\": \"" << json_escape(lm.search_filter) << "\",\n";
+        if (!lm.search_attributes.empty()) {
+            out << "    \"ldap_search_attributes\": [";
+            for (size_t i = 0; i < lm.search_attributes.size(); ++i) {
+                if (i != 0) out << ", ";
+                out << "\"" << json_escape(lm.search_attributes[i]) << "\"";
+            }
+            out << "],\n";
+        }
+    }
+    if (lm.message_type == "SearchResultEntry") {
+        out << "    \"ldap_search_result_object_name\": \"" << json_escape(lm.search_result_object_name) << "\",\n";
+        if (!lm.search_result_attributes.empty()) {
+            out << "    \"ldap_search_result_attributes\": [";
+            for (size_t i = 0; i < lm.search_result_attributes.size(); ++i) {
+                if (i != 0) out << ", ";
+                out << "\"" << json_escape(lm.search_result_attributes[i]) << "\"";
+            }
+            out << "],\n";
+        }
+    }
+    if (lm.message_type == "SearchResultDone" && lm.correlated_request_seen) {
+        out << "    \"ldap_search_entry_count\": " << lm.search_entry_count << ",\n";
+    }
+    if (lm.message_type == "CompareRequest") {
+        out << "    \"ldap_compare_entry\": \"" << json_escape(lm.compare_entry) << "\",\n";
+        out << "    \"ldap_compare_attribute\": \"" << json_escape(lm.compare_attribute) << "\",\n";
+        out << "    \"ldap_compare_value\": \"" << json_escape(lm.compare_value) << "\",\n";
+    }
+    if (lm.message_type == "AbandonRequest") {
+        out << "    \"ldap_abandon_message_id\": " << lm.abandon_message_id << ",\n";
+    }
+    if (lm.message_type == "ExtendedRequest" || lm.message_type == "ExtendedResponse") {
+        if (!lm.extended_request_name.empty()) {
+            out << "    \"ldap_extended_request_name\": \"" << json_escape(lm.extended_request_name) << "\",\n";
+        }
+        if (!lm.extended_request_name_known.empty()) {
+            out << "    \"ldap_extended_request_name_known\": \"" << json_escape(lm.extended_request_name_known)
+                << "\",\n";
+        }
+        if (!lm.extended_response_name.empty()) {
+            out << "    \"ldap_extended_response_name\": \"" << json_escape(lm.extended_response_name) << "\",\n";
+        }
+        out << "    \"ldap_extended_value_present\": " << (lm.extended_value_present ? "true" : "false") << ",\n";
+        if (lm.extended_value_present) {
+            out << "    \"ldap_extended_value_length\": " << lm.extended_value_length << ",\n";
+        }
+    }
+    if (!lm.control_oids.empty()) {
+        out << "    \"ldap_control_oids\": [";
+        for (size_t i = 0; i < lm.control_oids.size(); ++i) {
+            if (i != 0) out << ", ";
+            out << "\"" << json_escape(lm.control_oids[i]) << "\"";
+        }
+        out << "],\n";
+    }
+    if (lm.correlated_request_seen) {
+        out << "    \"ldap_correlated_request_index\": " << lm.correlated_request_index << ",\n";
+    }
+}
+
 }  // namespace
 
 void JsonWriter::write_packet(const DecodedPacket& p) {
@@ -1730,6 +1835,9 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
     if (p.protocol == "kerberos" && p.result) {
         write_kerberos_json_fields(out_, p.result->as<KerberosMessage>());
     }
+    if (p.protocol == "ldap" && p.result) {
+        write_ldap_json_fields(out_, p.result->as<LdapMessage>());
+    }
     out_ << "    \"notes\": [";
     for (size_t i = 0; i < p.notes.size(); ++i) {
         if (i != 0) out_ << ", ";
@@ -1871,6 +1979,16 @@ void StatsWriter::write_packet(const DecodedPacket& p) {
         const KerberosMessage& km = p.result->as<KerberosMessage>();
         if (km.message_type == "KRB-ERROR") {
             kerberos_error_counts_[km.error_name]++;
+        }
+    }
+    // Curated Note 6 (ldap.hpp's file header comment) -- the LDAP-native analog of Kerberos's own
+    // KRB-ERROR count aggregation just above: named resultCode counts across every LDAPResult-
+    // shaped message in the capture, so a burst of invalidCredentials (a password spray across many
+    // distinct bind DNs) is visible with no per-request correlation needed at all.
+    if (p.protocol == "ldap" && p.result) {
+        const LdapMessage& lm = p.result->as<LdapMessage>();
+        if (lm.has_result) {
+            ldap_result_code_counts_[lm.result_code_name]++;
         }
     }
     if (p.protocol == "s7comm" && p.s7comm_has_function) {
@@ -2050,6 +2168,12 @@ void StatsWriter::print_summary(std::ostream& out) const {
     if (!kerberos_error_counts_.empty()) {
         out << "kerberos krb-error codes:\n";
         for (const auto& [name, count] : kerberos_error_counts_) {
+            out << "  " << std::left << std::setw(40) << name << count << "\n";
+        }
+    }
+    if (!ldap_result_code_counts_.empty()) {
+        out << "ldap resultcode counts:\n";
+        for (const auto& [name, count] : ldap_result_code_counts_) {
             out << "  " << std::left << std::setw(40) << name << count << "\n";
         }
     }

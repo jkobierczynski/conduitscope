@@ -699,29 +699,10 @@ std::optional<ItEnterpriseTrustMatch> try_recognize_it_enterprise_trust(ByteSpan
             return m;
         }
     } else {
-        // 1. LDAP -- gated to port 389/3268 (see file header comment for why, same caution as SNMP's
-        // own ASN.1 check in Tier 2).
-        if (port_in(src_port, LDAP_PORT, extra_ports) || port_in(dst_port, LDAP_PORT, extra_ports) ||
-            port_in(src_port, LDAP_GC_PORT, extra_ports) || port_in(dst_port, LDAP_GC_PORT, extra_ports)) {
-            ItEnterpriseTrustMatch m;
-            m.protocol = "ldap";
-            if (auto l = match_ldap_ber(payload)) {
-                m.summary = "LDAP " + l->op_name + " (TCP port 389/3268)";
-                if (l->op_num == 0) {
-                    m.notes.push_back("bindRequest observed -- if this is a simple bind (not SASL), "
-                                       "the credential is sent in cleartext unless the session was "
-                                       "already upgraded via StartTLS; this decoder does not inspect "
-                                       "the credential itself");
-                }
-            } else {
-                m.summary = "LDAP (TCP port 389/3268) -- port match only, not a recognizable "
-                             "LDAPMessage SEQUENCE/messageID/protocolOp shape in this packet "
-                             "(could be a continuation of a multi-segment message)";
-            }
-            return m;
-        }
-        // 2. TACACS+ -- gated to port 49, same "not self-describing enough on its own" reasoning as
-        // RADIUS/NTP above.
+        // 1. TACACS+ -- gated to port 49, same "not self-describing enough on its own" reasoning as
+        // RADIUS/NTP above. Plain LDAP (formerly "1." here) moved to its own dedicated ldap.hpp full
+        // ProtocolDecoder -- see this file's own header comment; match_ldap_ber/looks_like_ldap_ber
+        // below are still used by it and by decoder.cpp's own MQTT-collision carve-out.
         if (port_in(src_port, TACACS_PLUS_PORT, extra_ports) || port_in(dst_port, TACACS_PLUS_PORT, extra_ports)) {
             ItEnterpriseTrustMatch m;
             m.protocol = "tacacs-plus";
@@ -742,7 +723,7 @@ std::optional<ItEnterpriseTrustMatch> try_recognize_it_enterprise_trust(ByteSpan
             }
             return m;
         }
-        // 3. LDAPS port-only fallback -- the actual ClientHello structural check runs earlier in
+        // 2. LDAPS port-only fallback -- the actual ClientHello structural check runs earlier in
         // decoder.cpp, reusing tls_sni.hpp (see it_protocols.hpp's own file header comment for why);
         // this only covers an already-established, fully-encrypted session on a configured LDAPS
         // port with no visible ClientHello in this particular packet.

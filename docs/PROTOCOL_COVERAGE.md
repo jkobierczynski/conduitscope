@@ -5653,8 +5653,9 @@ for the full writeup.
 
 **The first Windows Active Directory protocol in this codebase**, and the
 first of a planned four-part AD suite (Kerberos, LDAP, SMB/NTLM,
-Netlogon/DCE-RPC -- delivered one protocol at a time; LDAP/SMB-NTLM/Netlogon
-are separate future deliveries, not present here). Built entirely on the
+Netlogon/DCE-RPC -- delivered one protocol at a time; LDAP is phase 2, see
+its own section below; SMB/NTLM and Netlogon/DCE-RPC remain separate
+future deliveries, not present here). Built entirely on the
 `ProtocolDecoder` interface TwinCAT pioneered (see that section above): two
 decoder instances, `KerberosTcpDecoder`/`KerberosUdpDecoder`, sharing one
 `id() == "kerberos"`, the same "one protocol, one id(), two `GateKind`
@@ -5844,9 +5845,10 @@ alternatives beyond the padata-type/etype/error-code tables above**:
 render as their raw numeric form (`"padata-type N"`/`"etype N"`/
 `"error N"`), the same graceful-fallback posture as every existing
 named-enum-with-fallback table in this codebase (DNP3's point-format
-table, TwinCAT's command-name table). **LDAP, SMB/NTLM,
-Netlogon/DCE-RPC**: the remaining three protocols of the planned
-four-part AD suite -- separate future deliveries, not present here.
+table, TwinCAT's command-name table). **LDAP** is now implemented -- see
+its own section below. **SMB/NTLM, Netlogon/DCE-RPC**: the remaining two
+protocols of the planned four-part AD suite -- separate future
+deliveries, not present here.
 
 #### JSON output fields
 
@@ -5894,4 +5896,263 @@ updated accordingly, the same way this project has handled every other
 protocol where independent traffic was eventually found after an earlier
 empty search. See `include/conduitscope/kerberos.hpp`'s file header for
 the full writeup.
+
+### LDAP (RFC 4511, TCP/389 and TCP/3268 Global Catalog) -- Windows Active Directory suite, phase 2 of 4
+
+**The second Windows Active Directory protocol in this codebase.** LDAP
+already had shallow, name-only recognition (Tier 3's "enterprise-trust"
+family, `it_protocols.hpp`/`.cpp`) before this decoder existed; that
+recognition is now removed in favor of this full decoder, the same "pull
+one protocol out of a shared tier into its own dedicated decoder/CLI
+surface" move this codebase already made once for EAPOL --
+`match_ldap_ber`/`looks_like_ldap_ber` (`it_protocols.hpp`) are the one
+piece kept from that old code, reused as-is by this decoder's own
+structural gate rather than duplicated. Built entirely on the
+`ProtocolDecoder` interface TwinCAT/Kerberos already use: one decoder
+instance, `LdapTcpDecoder`, `id() == "ldap"`, `GateKind::TcpPortIndependent`
+-- unlike Kerberos, there is deliberately **no UDP sibling** (CLDAP, RFC
+1798, is obsolete/deprecated and not part of mainstream AD traffic). No
+`ldap_*` fields exist on `DecodedPacket` -- everything rides
+`DecodedPacket::result` as an `LdapMessage`, rendered by
+`write_ldap_json_fields` in `output.cpp`.
+
+LDAP reconnaissance (SPN sweeps, `userAccountControl` bit queries) is
+literally how a real attacker *finds* the AS-REP-Roasting/Kerberoasting
+targets `kerberos.hpp`'s own curated notes already flag, so this phase
+completes that story rather than starting a new one -- see the curated
+notes below, several of which explicitly point back at the Kerberos
+decoder's own findings.
+
+#### Wire format
+
+RFC 4511's ASN.1 module is `DEFINITIONS IMPLICIT TAGS` -- the **opposite**
+of Kerberos's (RFC 4120) `EXPLICIT TAGS` convention (confirmed against
+the actual ASN.1 module text, not recalled from training). Concretely: a
+context/APPLICATION tag **replaces** the underlying type's own tag rather
+than wrapping a separately-tagged inner TLV -- there is no "peel one
+layer" step anywhere in this decoder's own BER reader (`ldap.cpp`), unlike
+`kerberos.cpp`'s own `explicit_child()`. For example, `bindRequest
+[APPLICATION 0] BindRequest` where `BindRequest ::= [APPLICATION 0]
+SEQUENCE {...}` wire-encodes as ONE tag byte `0x60` whose content bytes
+are `version`/`name`/`authentication` directly -- not `0x60` wrapping a
+nested `0x30`. The constructed-vs-primitive bit of a tagged field is
+likewise NOT uniform -- it depends on the underlying type, checked
+per-field (`ldap.cpp`'s own `ldap_op_shape` table): e.g. `AbandonRequest
+::= [APPLICATION 16] MessageID` (INTEGER, primitive) wire-encodes as
+`0x50`, not `0x70`; `DelRequest ::= [APPLICATION 10] LDAPDN` (OCTET
+STRING, primitive) wire-encodes as `0x4A`; `UnbindRequest ::= [APPLICATION
+2] NULL` wire-encodes as `0x42`, zero-length content. Every other
+`protocolOp` alternative is SEQUENCE- or LDAPResult(SEQUENCE)-typed, hence
+constructed. The same rule applies recursively inside `SearchRequest`'s
+`Filter` CHOICE (RFC 4511 section 4.5.1) -- see `ldap.cpp`'s own
+`decode_filter` for the full per-alternative tag/shape table. LDAP-over-TCP
+has no separate length-prefix framing (unlike Kerberos's own 4-byte
+prefix): each `LDAPMessage`'s own outer `SEQUENCE`'s BER length **is** the
+framing.
+
+Full field decode, scoped to the operations most relevant to
+authentication/reconnaissance (matching `kerberos.hpp`'s own "not every
+message type needs the same depth" discipline):
+
+- **BindRequest**/**BindResponse**: `version`, `name` (bind DN),
+  `authentication` (`simple` -- presence + byte length only, the
+  credential bytes themselves are NEVER rendered; `sasl` -- mechanism name
+  decoded, credentials presence/length only, same never-rendered
+  treatment, since SASL PLAIN carries an `authzid\0authcid\0password`
+  triple in that same field). `BindResponse`: `resultCode` (named, full
+  RFC 4511 section 4.1.9 table), `matchedDN`, `diagnosticMessage`.
+- **UnbindRequest**: presence only (NULL body).
+- **SearchRequest**: `baseObject`, `scope`/`derefAliases` (named),
+  `sizeLimit`, `timeLimit`, `typesOnly`, `attributes`, and `filter` --
+  decoded recursively and rendered in conventional `ldapsearch`-style
+  syntax (e.g. `(&(objectClass=user)(servicePrincipalName=*))`).
+  Recursion depth capped via `max_ldap_filter_depth()` (wraps
+  `resource_limits().max_recursion_depth`, the `mms.cpp`/`goose.cpp`
+  pattern).
+- **SearchResultEntry**: `objectName`, and its attribute type=value list
+  -- values rendered as strings, capped in length, with binary-looking
+  values shown as `"(N bytes, binary)"` rather than a guessed string
+  decode (this codebase's existing "don't guess at unstructured binary"
+  posture).
+- **SearchResultDone**/**SearchResultReference**: `resultCode`/
+  `matchedDN`/`diagnosticMessage`; referral URIs.
+- **CompareRequest**/**CompareResponse**: `entry`, the attribute+value
+  compared, and the boolean result.
+- **AbandonRequest**: the `messageID` being abandoned.
+- **ExtendedRequest**/**ExtendedResponse**: `requestName`/`responseName`
+  OID (named for well-known OIDs where confidently known, e.g. StartTLS =
+  `1.3.6.1.4.1.1466.20037`); `requestValue`/`responseValue`
+  presence/length only, never decoded (opaque per-extension payload).
+
+**STRUCTURAL-ONLY** (recognized, message type + `messageID` named, not
+field-decoded): AddRequest/AddResponse, ModifyRequest/ModifyResponse,
+DelRequest/DelResponse, ModifyDNRequest/ModifyDNResponse,
+IntermediateResponse -- write operations and the rarer response type,
+lower pentest/monitoring value for a first pass.
+
+#### Structural detection gate and collision survey
+
+Reused from `it_protocols.hpp`'s own `match_ldap_ber`/`looks_like_ldap_ber`,
+not duplicated: (a) outer tag `0x30` (SEQUENCE) with a BER length that
+plausibly fits the available bytes; (b) `messageID` INTEGER (1-4 bytes)
+immediately inside; (c) `protocolOp`'s own tag byte matches APPLICATION
+class (`tag & 0xC0 == 0x40`), tag number one of the 21 valid values
+`{0..16, 19, 23, 24, 25}`. `try_parse_ldap` (`ldap.cpp`) adds the
+**stronger** per-field check `match_ldap_ber` doesn't: the constructed bit
+must ALSO match that specific op number's own underlying-type shape (see
+the Wire format section above) -- not a blanket "any APPLICATION tag
+passes" check.
+
+**Collision survey**: a real collision was found and resolved during this
+decoder's own planning, not left for implementation to discover --
+Kerberos's outer APPLICATION tag bytes for AS-REP/TGS-REQ/TGS-REP/AP-REQ/
+AP-REP (`0x6B`/`0x6C`/`0x6D`/`0x6E`/`0x6F`) are byte-identical to LDAP's
+own `delResponse`/`modDNRequest`/`modDNResponse`/`compareRequest`/
+`compareResponse` APPLICATION tags (RFC 4511's module is IMPLICIT TAGS, so
+those five LDAP operations -- all LDAPResult- or SEQUENCE-typed, hence
+constructed -- produce the exact same tag byte class+number as five of
+Kerberos's seven message types). This does NOT actually collide at the
+dispatch-gate level: Kerberos's structural gate reads the outer tag of
+the ENTIRE de-framed payload (its own message-type tag IS byte 0 there,
+after its own 4-byte TCP length prefix is stripped), while every
+LDAPMessage's byte 0 is ALWAYS the fixed envelope SEQUENCE tag `0x30` --
+LDAP's own per-operation APPLICATION tags only appear several bytes
+INSIDE the envelope, as the `protocolOp` field, never as the leading byte
+either decoder's own gate inspects. Also unaffected by the pre-existing,
+already-solved LDAP-vs-MQTT collision (`0x30` is also a valid MQTT
+PUBLISH control-packet-type/flags byte) -- see `it_protocols.hpp`'s
+`looks_like_ldap_ber` comment for that carve-out, reused as-is by
+`decoder.cpp`'s MQTT call site. No collision found against any other
+protocol in the TCP-port-independent cascade (OPC UA/EtherNet-IP/IEC104/
+Modbus/TwinCAT/DNP3/COTP/HART-IP/FF-HSE) -- none of their own fixed
+leading-byte/magic-string checks match `0x30`. Registered directly after
+Kerberos in `tcp_port_independent_registry()`.
+
+#### Curated attack/monitoring detection
+
+Every note is framed as surfacing a wire-level mechanism or shape, never
+as an assertion of detected intent -- legitimate directory tooling uses
+several of these same filter shapes too:
+
+1. **Anonymous/unauthenticated bind** -- standing note, unconditional:
+   simple authentication with no password (RFC 4513 section 5.1.2's own
+   anonymous/unauthenticated bind shapes).
+2. **Cleartext credential exposure without prior StartTLS** -- a simple
+   bind with a non-empty password, or a SASL PLAIN bind, is flagged only
+   when no `ExtendedRequest` naming the StartTLS OID has been observed
+   earlier on this same TCP session (`LdapFlowState::starttls_seen`). The
+   password itself is never rendered.
+3. **AD reconnaissance filter shapes** -- a `SearchRequest` filter
+   referencing `servicePrincipalName` is the standard Kerberoasting
+   target-discovery step (directly upstream of `kerberos.hpp`'s own
+   Kerberoasting note); a filter referencing `adminCount` is the standard
+   privileged-account sweep.
+4. **AS-REP-Roasting target discovery** -- a filter using
+   `userAccountControl` with a bitwise `extensibleMatch` (the AD-specific
+   `LDAP_MATCHING_RULE_BIT_AND` OID, `1.2.840.113556.1.4.803` -- confirmed
+   via Microsoft's own MS-ADTS spec) against the `DONT_REQ_PREAUTH` bit
+   (`0x400000` -- confirmed via Microsoft's own troubleshooting doc),
+   directly upstream of `kerberos.hpp`'s own AS-REP-Roasting note.
+5. **Delegation discovery** -- the same bitwise-match mechanism against
+   the `TRUSTED_FOR_DELEGATION` bit (`0x80000`) or a filter referencing
+   `msDS-AllowedToDelegateTo` -- the LDAP-side complement of the
+   delegation-shape note `kerberos.hpp` already surfaces on the wire.
+6. **Bind result-code naming plus `--stats` aggregation** -- the
+   LDAP-native analog of Kerberos's own KRB-ERROR count aggregation: named
+   `resultCode` counts (`invalidCredentials(49)` above all) aggregated
+   across the capture, so a burst of failed binds across many distinct
+   bind DNs -- the password-spray signature -- is visible with no
+   per-request correlation needed.
+
+#### State/correlation design
+
+`LdapFlowState`, keyed by `FlowStateKeying::Session` (`tcp_session_key`,
+reused as-is). Three pieces of state: `starttls_seen` (set on an
+`ExtendedRequest` naming the StartTLS OID, never cleared -- a session
+doesn't un-upgrade); a pending-bind map (created on `BindRequest`,
+matched-and-erased on `BindResponse`, keyed by `messageID`); a
+pending-search map (created on `SearchRequest`, **NOT erased** on each
+`SearchResultEntry` -- only the running entry count is incremented --
+erased with a final "N entries returned" correlation note on
+`SearchResultDone`). This last shape -- "keep state across many
+responses, close on the terminal one" -- is genuinely new relative to
+`kerberos.hpp`'s own 1:1 request/response pairing, since one
+`SearchRequest` can have arbitrarily many `SearchResultEntry` responses
+before its one `SearchResultDone`.
+
+Worth stating as a genuine **improvement** over Kerberos's own documented
+limitation, not another instance of it: LDAP's `messageID` is the
+RFC-mandated, always-visible-on-the-wire correlation key (RFC 4511
+section 4.1.1.1 requires it to be unique among a connection's outstanding
+requests) -- unlike Kerberos, where the real `nonce` correlation field is
+unreadably encrypted and `cname`/`sname` had to be used as an honest
+substitute.
+
+#### DELIBERATELY NOT IMPLEMENTED in this pass
+
+**CLDAP** (UDP, RFC 1798, obsolete) -- no UDP decoder instance at all.
+**SASL/`simple` credential contents** -- never decrypted/decoded, only
+presence+length, by design, not a depth gap to close later. **Controls'
+`controlValue` payloads** -- OID named when a control is present (e.g.
+the well-known Paged Results Control), value bytes not decoded. **LDAPS
+full decode** -- needs keys, same limit as TLS everywhere else in this
+codebase (see `it_protocols.hpp`'s own LDAPS handling, unaffected by this
+decoder). **SMB/NTLM, Netlogon/DCE-RPC**: the remaining two protocols of
+the planned four-part AD suite -- separate future deliveries.
+
+#### JSON output fields
+
+Rendered only when `protocol == "ldap"`: `ldap_message_id` /
+`ldap_message_type` / `ldap_op_num` / `ldap_is_response` (always
+present); `ldap_bind_version` / `ldap_bind_dn` / `ldap_bind_is_sasl` /
+`ldap_bind_auth_mechanism` / `ldap_bind_credential_present` /
+`ldap_bind_credential_length` (BindRequest only, `credential_length` only
+when a credential is present); `ldap_result_code` /
+`ldap_result_code_name` / `ldap_matched_dn` (only when set) /
+`ldap_diagnostic_message` (only when set) / `ldap_referral_uris` (only
+when non-empty) (BindResponse/SearchResultDone/CompareResponse/
+ExtendedResponse); `ldap_search_base_object` / `ldap_search_scope` /
+`ldap_search_deref_aliases` / `ldap_search_size_limit` /
+`ldap_search_time_limit` / `ldap_search_types_only` /
+`ldap_search_filter` / `ldap_search_attributes` (SearchRequest);
+`ldap_search_result_object_name` / `ldap_search_result_attributes`
+(SearchResultEntry); `ldap_search_entry_count` (SearchResultDone only, see
+State/correlation above); `ldap_compare_entry` / `ldap_compare_attribute`
+/ `ldap_compare_value` (CompareRequest); `ldap_abandon_message_id`
+(AbandonRequest); `ldap_extended_request_name` /
+`ldap_extended_request_name_known` (only when a recognized OID) /
+`ldap_extended_response_name` / `ldap_extended_value_present` /
+`ldap_extended_value_length` (only when a value is present)
+(ExtendedRequest/ExtendedResponse); `ldap_control_oids` (only when
+non-empty); and `ldap_correlated_request_index` (only on a message
+authoritatively correlated to an earlier request -- see State/correlation
+above).
+
+#### Validation
+
+No public real-world LDAP capture was incorporated in this pass (the same
+honest gap already documented for Kerberos and several other protocols
+above); validated by construction against synthetic
+`tests/sample_ldap.pcap` (TCP, 62 packets across 17 independent
+sessions/flows -- `tools/make_sample_pcap.py`'s `build_ldap_sample()`)
+and `tests/sample_ldap_tcp_split.pcap` (TCP, 2 packets: one SearchRequest
+split across two segments), covering every message type (full and
+structural-only), all six curated notes with an explicit negative case
+each (a StartTLS-then-cleartext-bind session proving note 2's suppression,
+a SASL GSSAPI bind proving note 2 never fires on a non-PLAIN mechanism, a
+bitwise filter against an unrelated `userAccountControl` bit proving
+notes 4/5 stay silent, and a deliberately ordinary AND/OR/NOT/equality/
+present/approxMatch/greaterOrEqual/lessOrEqual/substrings filter proving
+notes 3-5 stay silent on traffic that doesn't touch their trigger
+attributes/bits), the "many SearchResultEntry, one SearchResultDone"
+correlation with its own entry-count note, a binary-looking attribute
+value rendered `"(N bytes, binary)"`, a Paged Results control
+(`control_oids` coverage), `--stats` resultCode aggregation (note 6), a
+non-standard TCP port (with `--ldap-port` suppressing just the note, not
+detection), and a TCP-segment-split reassembly case. All expectations in
+`CMakeLists.txt`'s `ldap_*` test family were captured from the actual
+built binary's output against these fixtures, not hand-computed. If a
+real LDAP capture becomes available later, it should be added and this
+section updated accordingly. See `include/conduitscope/ldap.hpp`'s file
+header for the full writeup.
 

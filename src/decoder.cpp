@@ -550,6 +550,8 @@ bool Decoder::reassemble_tcp_payload(const TcpSegment& tcp, const std::string& f
                          options_.protocol_filter == ProtocolFilter::TwinCatOnly;
     bool want_kerberos = options_.protocol_filter == ProtocolFilter::Auto ||
                           options_.protocol_filter == ProtocolFilter::KerberosOnly;
+    bool want_ldap = options_.protocol_filter == ProtocolFilter::Auto ||
+                      options_.protocol_filter == ProtocolFilter::LdapOnly;
     bool want_dnp3 = options_.protocol_filter == ProtocolFilter::Auto ||
                       options_.protocol_filter == ProtocolFilter::Dnp3Only;
     bool want_s7comm = options_.protocol_filter == ProtocolFilter::Auto ||
@@ -648,6 +650,17 @@ bool Decoder::reassemble_tcp_payload(const TcpSegment& tcp, const std::string& f
             which = "Kerberos message (RFC 4120)";
         }
     }
+    // LDAP/TCP, tried right after Kerberos -- see ldap.hpp's file header comment for the full
+    // collision survey/ordering rationale. ldap_tcp_declared_length's own gate reuses
+    // it_protocols.hpp's match_ldap_ber (outer SEQUENCE/length, INTEGER messageID, APPLICATION-class
+    // protocolOp with a recognized op number) -- nearly as selective as the full decode gate, not
+    // merely "7+ bytes present".
+    if (!declared && want_ldap) {
+        if (auto d = ldap_tcp_decoder().tcp_declared_length(candidate)) {
+            declared = d;
+            which = "LDAP message (RFC 4511)";
+        }
+    }
     if (!declared && want_dnp3) {
         // Migration batch 2: dnp3_link_frame_declared_length is now reached through
         // Dnp3Decoder::tcp_declared_length rather than called directly -- same function, same
@@ -725,16 +738,22 @@ bool Decoder::reassemble_tcp_payload(const TcpSegment& tcp, const std::string& f
         looks_like_ftp_control_line(candidate);
     // The SAME shape of collision, found while implementing Tier 3: LDAP's own SEQUENCE tag byte
     // (0x30) is bit-for-bit identical to a valid MQTT PUBLISH control-packet-type/flags byte -- see
-    // it_protocols.hpp's own looks_like_ldap_ber comment for the full reasoning. Resolved the same
-    // way, by port.
+    // it_protocols.hpp's own looks_like_ldap_ber comment for the full reasoning. In practice this is
+    // now moot for any genuine LDAP message reaching this point: LDAP has its own full
+    // TcpPortIndependent decoder (ldap.hpp), tried well above MQTT in this same cascade (right after
+    // Kerberos), so a real LDAP candidate is already claimed by `declared`/`which` above and never
+    // falls through to here at all. This carve-out is kept anyway, unchanged, as a safety net for
+    // ProtocolFilter combinations where LDAP's own probe didn't run (e.g. --protocol mqtt alone) --
+    // same defense-in-depth posture as everywhere else in this cascade.
     bool want_enterprise_trust_reassembly = options_.protocol_filter == ProtocolFilter::Auto ||
-                                             options_.protocol_filter == ProtocolFilter::EnterpriseTrustOnly;
+                                             options_.protocol_filter == ProtocolFilter::EnterpriseTrustOnly ||
+                                             options_.protocol_filter == ProtocolFilter::LdapOnly;
     bool candidate_is_ldap =
         want_enterprise_trust_reassembly &&
-        (port_in(tcp.src_port, LDAP_PORT, options_.extra_enterprise_trust_ports) ||
-         port_in(tcp.dst_port, LDAP_PORT, options_.extra_enterprise_trust_ports) ||
-         port_in(tcp.src_port, LDAP_GC_PORT, options_.extra_enterprise_trust_ports) ||
-         port_in(tcp.dst_port, LDAP_GC_PORT, options_.extra_enterprise_trust_ports)) &&
+        (port_in(tcp.src_port, LDAP_PORT, options_.extra_ldap_ports) ||
+         port_in(tcp.dst_port, LDAP_PORT, options_.extra_ldap_ports) ||
+         port_in(tcp.src_port, LDAP_GC_PORT, options_.extra_ldap_ports) ||
+         port_in(tcp.dst_port, LDAP_GC_PORT, options_.extra_ldap_ports)) &&
         looks_like_ldap_ber(candidate);
     if (!declared && want_mqtt && !candidate_is_ftp_control && !candidate_is_ldap) {
         // Migration batch 2: mqtt_declared_length is now reached through
@@ -2239,6 +2258,8 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                              options_.protocol_filter == ProtocolFilter::TwinCatOnly;
         bool want_kerberos = options_.protocol_filter == ProtocolFilter::Auto ||
                               options_.protocol_filter == ProtocolFilter::KerberosOnly;
+        bool want_ldap = options_.protocol_filter == ProtocolFilter::Auto ||
+                          options_.protocol_filter == ProtocolFilter::LdapOnly;
         bool want_dnp3 = options_.protocol_filter == ProtocolFilter::Auto ||
                           options_.protocol_filter == ProtocolFilter::Dnp3Only;
         bool want_s7comm = options_.protocol_filter == ProtocolFilter::Auto ||
@@ -2496,6 +2517,41 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                     out.notes.push_back("seen on TCP port " + std::to_string(tcp.src_port) + "->" +
                                          std::to_string(tcp.dst_port) +
                                          ", which is not a configured/standard Kerberos port (88)");
+                }
+                return out;
+            }
+        }
+
+        if (want_ldap) {
+            // LDAP over TCP/389 (and TCP/3268, Global Catalog) -- the second Windows AD-suite
+            // protocol (see ldap.hpp's file header comment). Same out.result-only shape Kerberos/
+            // TwinCAT established just above -- no ldap_* DecodedPacket fields exist, JsonWriter
+            // renders from out.result (output.cpp's write_ldap_json_fields), TextWriter/CsvWriter
+            // from out.summary/out.notes generically. LDAP-over-TCP has no length-prefix framing of
+            // its own to strip (unlike Kerberos's 4-byte prefix) -- effective_payload here IS the
+            // LDAPMessage bytes LdapTcpDecoder::decode expects directly.
+            std::string session = tcp_session_key(out.src_ip, tcp.src_port, out.dst_ip, tcp.dst_port);
+            DecodeContext ctx;
+            ctx.flow_key = flow_key;
+            ctx.session_key = session;
+            ctx.packet_index = index;
+            ctx.protocol_id = "ldap";
+            ctx.flow_states = &registry_flow_state_;
+            if (auto result = ldap_tcp_decoder().decode(effective_payload, ctx)) {
+                const LdapMessage& lm = result->as<LdapMessage>();
+                out.protocol = "ldap";
+                out.summary = lm.summary;
+                for (const auto& n : lm.notes) out.notes.push_back(n);
+                out.result = *result;
+
+                bool expected_port = port_in(tcp.src_port, LDAP_PORT, options_.extra_ldap_ports) ||
+                                      port_in(tcp.dst_port, LDAP_PORT, options_.extra_ldap_ports) ||
+                                      port_in(tcp.src_port, LDAP_GC_PORT, options_.extra_ldap_ports) ||
+                                      port_in(tcp.dst_port, LDAP_GC_PORT, options_.extra_ldap_ports);
+                if (!expected_port) {
+                    out.notes.push_back("seen on TCP port " + std::to_string(tcp.src_port) + "->" +
+                                         std::to_string(tcp.dst_port) +
+                                         ", which is not a configured/standard LDAP port (389/3268)");
                 }
                 return out;
             }

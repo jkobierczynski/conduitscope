@@ -7839,6 +7839,443 @@ def build_kerberos_sample():
     (TESTS_DIR / "sample_kerberos_tcp.pcap").write_bytes(data)
 
 
+def build_ldap_sample():
+    """LDAP (RFC 4511), the second Windows AD-suite protocol -- see ldap.hpp's own file header
+    comment for the wire format (IMPLICIT tagging, NOT Kerberos's own EXPLICIT convention) and the
+    six curated attack/monitoring notes this fixture exercises with an explicit negative case each:
+    an anonymous BindRequest (note 1); a cleartext-credential simple bind with no prior StartTLS
+    (note 2 positive), the same shape preceded by a StartTLS ExtendedRequest on the same session
+    (note 2 negative -- must NOT fire), a SASL GSSAPI bind (note 2 negative -- non-PLAIN mechanism
+    is never flagged), and a SASL PLAIN bind with no StartTLS (note 2 positive via SASL); a
+    SearchRequest filter referencing servicePrincipalName (note 3) and one referencing adminCount on
+    the Global Catalog port 3268 (note 3, other technique); a userAccountControl bitwise-extensible-
+    match filter against DONT_REQ_PREAUTH (note 4 positive) and the same shape against an unrelated
+    bit (note 4/5 negative control); the same bitwise mechanism against TRUSTED_FOR_DELEGATION (note
+    5 positive) and a second, independent path to note 5 via a bare msDS-AllowedToDelegateTo
+    presence filter; one deliberately "ordinary" filter nesting AND/OR/NOT/equality/present/approx/
+    greaterOrEqual/lessOrEqual/substrings all in one query -- exercising decode_filter's full
+    rendering surface while proving notes 3-5 stay silent on a filter that doesn't touch any of
+    their trigger attributes/bits (the "curated, not noisy" bar Kerberos's own fixture already
+    proved); the "many SearchResultEntry, one SearchResultDone" correlation shape (with one binary-
+    looking attribute value, rendered "(N bytes, binary)" rather than guessed); a CompareRequest/
+    CompareResponse pair (compareTrue and compareFalse); an AbandonRequest; a BindRequest/
+    BindResponse pair followed by an UnbindRequest; a SearchResultReference (referral URIs) followed
+    by a SearchResultDone with resultCode=referral; every structural-only op (AddRequest/AddResponse,
+    ModifyRequest/ModifyResponse, DelRequest/DelResponse, ModifyDNRequest/ModifyDNResponse,
+    IntermediateResponse); a burst of failed binds (invalidCredentials) across distinct bind DNs
+    followed by one successful bind -- note 6's --stats resultCode-aggregation, the password-spray
+    signature; a BindRequest on a non-standard TCP port (5000, not 389/3268) -- LDAP is
+    GateKind::TcpPortIndependent, so this must still be recognized as ldap, with a "not a
+    configured/standard LDAP port" note that --ldap-port 5000 suppresses; and one SearchRequest split
+    across two TCP segments (LdapTcpDecoder::tcp_declared_length via Decoder::reassemble_tcp_payload
+    -- unlike Kerberos's own split test, LDAP has no 4-byte length prefix to account for, the
+    message's own outer BER SEQUENCE length IS the framing). One Controls[0] (a Paged Results OID) is
+    also attached to one SearchRequest, exercising control_oids."""
+    packets = []
+    ident = [0xB000]
+
+    def make_flow(sport, dport=389, src_ip=HMI_IP, dst_ip=PLC_IP, src_mac=HMI_MAC, dst_mac=PLC_MAC):
+        state = {"cseq": 10000, "sseq": 20000}
+
+        def add(from_client: bool, payload: bytes):
+            if from_client:
+                s_port, d_port = sport, dport
+                s_ip, d_ip = src_ip, dst_ip
+                s_mac, d_mac = src_mac, dst_mac
+                seq, ack = state["cseq"], state["sseq"]
+                state["cseq"] += len(payload)
+            else:
+                s_port, d_port = dport, sport
+                s_ip, d_ip = dst_ip, src_ip
+                s_mac, d_mac = dst_mac, src_mac
+                seq, ack = state["sseq"], state["cseq"]
+                state["sseq"] += len(payload)
+            tcp = tcp_header(s_port, d_port, seq, ack, TCP_PSH | TCP_ACK, len(payload)) + payload
+            ip = ipv4_header(s_ip, d_ip, 6, len(tcp), ident[0] & 0xFFFF) + tcp
+            ident[0] += 1
+            packets.append(eth_header(d_mac, s_mac, 0x0800) + ip)
+
+        return add
+
+    # --- BER/LDAP wire-format helpers -- IMPLICIT tagging throughout, see ldap.hpp/ldap.cpp's own
+    # header comments for the exact per-field tag/shape table each of these matches. -------------
+    def L_id(n): return uni_p(2, ber_int(n))          # messageID INTEGER
+    def L_dn(s): return uni_p(4, s.encode("utf-8"))    # LDAPDN / LDAPString -- OCTET STRING
+    def L_enum(n): return uni_p(10, ber_int(n))        # ENUMERATED
+    def L_bool(b): return uni_p(1, b"\x01" if b else b"\x00")
+    def L_int(n): return uni_p(2, ber_int(n))
+
+    def L_msg(message_id, op_bytes, controls_bytes=b""):
+        return uni_c(16, L_id(message_id) + op_bytes + controls_bytes)  # LDAPMessage's own SEQUENCE
+
+    def L_result(result_code, matched_dn="", diagnostic_message="", referrals=None):
+        parts = L_enum(result_code) + L_dn(matched_dn) + L_dn(diagnostic_message)
+        if referrals:
+            parts += ctx_c(3, b"".join(L_dn(r) for r in referrals))  # referral [3]
+        return parts
+
+    def L_bind_req(version, dn, password=None, sasl_mechanism=None, sasl_credentials=None):
+        parts = L_int(version) + L_dn(dn)
+        if sasl_mechanism is not None:
+            sasl_content = L_dn(sasl_mechanism)
+            if sasl_credentials is not None:
+                sasl_content += uni_p(4, sasl_credentials)
+            parts += ctx_c(3, sasl_content)  # sasl [3] SaslCredentials
+        else:
+            # simple [0] OCTET STRING -- context-PRIMITIVE, the password bytes directly, no wrapper
+            # tag (see ldap.hpp/ldap.cpp's own comment on exactly this field).
+            parts += ctx_p(0, (password or "").encode("utf-8"))
+        return app_c(0, parts)
+
+    def L_bind_resp(result_code, matched_dn="", diagnostic_message=""):
+        return app_c(1, L_result(result_code, matched_dn, diagnostic_message))
+
+    def L_unbind_req():
+        return app_p(2, b"")  # NULL body
+
+    # --- SearchRequest's own recursive Filter CHOICE (RFC 4511 section 4.5.1). ------------------
+    def F_and(*filters): return ctx_c(0, b"".join(filters))
+    def F_or(*filters): return ctx_c(1, b"".join(filters))
+    def F_not(f): return ctx_c(2, f)
+
+    def F_eq(attr, val): return ctx_c(3, L_dn(attr) + uni_p(4, val.encode() if isinstance(val, str) else val))
+
+    def F_substrings(attr, initial="", any_parts=(), final_part=""):
+        subs = b""
+        if initial: subs += ctx_p(0, initial.encode())
+        for a in any_parts: subs += ctx_p(1, a.encode())
+        if final_part: subs += ctx_p(2, final_part.encode())
+        return ctx_c(4, L_dn(attr) + uni_c(16, subs))
+
+    def F_ge(attr, val): return ctx_c(5, L_dn(attr) + uni_p(4, val.encode()))
+    def F_le(attr, val): return ctx_c(6, L_dn(attr) + uni_p(4, val.encode()))
+    def F_present(attr): return ctx_p(7, attr.encode())  # context-PRIMITIVE, raw attribute name bytes
+    def F_approx(attr, val): return ctx_c(8, L_dn(attr) + uni_p(4, val.encode()))
+
+    def F_extensible(matching_rule=None, type_=None, match_value="", dn_attrs=False):
+        parts = b""
+        if matching_rule: parts += ctx_p(1, matching_rule.encode())
+        if type_: parts += ctx_p(2, type_.encode())
+        parts += ctx_p(3, match_value.encode() if isinstance(match_value, str) else match_value)
+        if dn_attrs: parts += ctx_p(4, b"\x01")
+        return ctx_c(9, parts)
+
+    def L_search_req(base, scope, deref, size_limit, time_limit, types_only, filter_bytes, attributes):
+        parts = (L_dn(base) + L_enum(scope) + L_enum(deref) + L_int(size_limit) + L_int(time_limit) +
+                 L_bool(types_only) + filter_bytes + uni_c(16, b"".join(L_dn(a) for a in attributes)))
+        return app_c(3, parts)
+
+    def L_search_result_entry(object_name, attrs):
+        attr_parts = b""
+        for attr_type, values in attrs.items():
+            vals_bytes = b""
+            for v in values:
+                vb = v if isinstance(v, bytes) else v.encode("utf-8")
+                vals_bytes += uni_p(4, vb)
+            attr_parts += uni_c(16, L_dn(attr_type) + uni_c(17, vals_bytes))  # PartialAttribute
+        return app_c(4, L_dn(object_name) + uni_c(16, attr_parts))
+
+    def L_search_result_done(result_code, matched_dn="", diagnostic_message="", referrals=None):
+        return app_c(5, L_result(result_code, matched_dn, diagnostic_message, referrals))
+
+    def L_modify_req(entry): return app_c(6, L_dn(entry) + uni_c(16, b""))
+    def L_modify_resp(result_code=0): return app_c(7, L_result(result_code))
+    def L_add_req(entry): return app_c(8, L_dn(entry) + uni_c(16, b""))
+    def L_add_resp(result_code=0): return app_c(9, L_result(result_code))
+    def L_del_req(entry): return app_p(10, entry.encode("utf-8"))  # [APPLICATION 10] LDAPDN, primitive
+    def L_del_resp(result_code=0): return app_c(11, L_result(result_code))
+
+    def L_moddn_req(entry, new_rdn, delete_old_rdn=True):
+        return app_c(12, L_dn(entry) + L_dn(new_rdn) + L_bool(delete_old_rdn))
+
+    def L_moddn_resp(result_code=0): return app_c(13, L_result(result_code))
+
+    def L_compare_req(entry, attr, value):
+        return app_c(14, L_dn(entry) + uni_c(16, L_dn(attr) + L_dn(value)))
+
+    def L_compare_resp(result_code): return app_c(15, L_result(result_code))
+
+    def L_abandon_req(target_message_id):
+        return app_p(16, ber_int(target_message_id))  # [APPLICATION 16] MessageID, primitive INTEGER
+
+    def L_search_result_reference(uris):
+        return app_c(19, b"".join(L_dn(u) for u in uris))
+
+    def L_extended_req(name_oid, value=None):
+        parts = ctx_p(0, name_oid.encode())
+        if value is not None:
+            parts += ctx_p(1, value)
+        return app_c(23, parts)
+
+    def L_extended_resp(result_code, matched_dn="", diagnostic_message="", response_name=None,
+                         response_value=None):
+        parts = L_result(result_code, matched_dn, diagnostic_message)
+        if response_name is not None:
+            parts += ctx_p(10, response_name.encode())
+        if response_value is not None:
+            parts += ctx_p(11, response_value)
+        return app_c(24, parts)
+
+    def L_intermediate_resp(): return app_c(25, b"")
+
+    STARTTLS_OID = "1.3.6.1.4.1.1466.20037"
+    AD_BITWISE_AND_OID = "1.2.840.113556.1.4.803"
+    UAC_DONT_REQ_PREAUTH = 0x400000
+    UAC_TRUSTED_FOR_DELEGATION = 0x80000
+    UAC_ACCOUNTDISABLE = 0x2  # unrelated bit -- the note 4/5 negative control
+
+    # ---------------------------------------------------------------------------------------------
+    # Flow A (port 50101->389): SPN-sweep SearchRequest (note 3), a Paged Results control attached
+    # (control_oids coverage), 2 SearchResultEntry (one carrying a binary-looking attribute value --
+    # "(N bytes, binary)" rendering) then SearchResultDone -- the "many responses, one request"
+    # correlation with its own entry-count note.
+    # ---------------------------------------------------------------------------------------------
+    fa = make_flow(50101)
+    spn_filter = F_and(F_eq("objectClass", "user"), F_present("servicePrincipalName"))
+    paged_results_control = ctx_c(0, uni_c(16, L_dn("1.2.840.113556.1.4.319")))
+    fa(True, L_msg(1, L_search_req("dc=example,dc=com", 2, 0, 0, 0, False, spn_filter,
+                                    ["cn", "servicePrincipalName", "objectGUID"]),
+                   controls_bytes=paged_results_control))
+    # NOTE: a SearchResultEntry/SearchResultDone shares the SAME messageID as its own SearchRequest
+    # (RFC 4511 section 4.1.1.1) -- unlike a fresh packet-sequence counter, this is what
+    # LdapFlowState::pending_searches actually correlates on.
+    fa(False, L_msg(1, L_search_result_entry(
+        "cn=svc-sql,ou=Service Accounts,dc=example,dc=com",
+        {"cn": ["svc-sql"], "servicePrincipalName": ["MSSQLSvc/db1.example.com:1433"]})))
+    fa(False, L_msg(1, L_search_result_entry(
+        "cn=svc-web,ou=Service Accounts,dc=example,dc=com",
+        {"cn": ["svc-web"], "servicePrincipalName": ["HTTP/web1.example.com"],
+         "objectGUID": [bytes(range(16))]})))
+    fa(False, L_msg(1, L_search_result_done(0)))
+
+    # ---------------------------------------------------------------------------------------------
+    # Flow B (port 50102->389): anonymous bind -- note 1, correlated BindRequest/BindResponse.
+    # ---------------------------------------------------------------------------------------------
+    fb = make_flow(50102)
+    fb(True, L_msg(1, L_bind_req(3, "")))
+    fb(False, L_msg(1, L_bind_resp(0)))
+
+    # ---------------------------------------------------------------------------------------------
+    # Flow C (port 50103->389): cleartext simple bind, no StartTLS on this session -- note 2
+    # positive.
+    # ---------------------------------------------------------------------------------------------
+    fc = make_flow(50103)
+    fc(True, L_msg(1, L_bind_req(3, "cn=admin,dc=example,dc=com", password="Sup3rSecret!")))
+    fc(False, L_msg(1, L_bind_resp(0)))
+
+    # ---------------------------------------------------------------------------------------------
+    # Flow D (port 50104->389): StartTLS ExtendedRequest/Response, THEN a cleartext simple bind on
+    # the SAME session -- note 2 NEGATIVE control (must NOT fire, proving starttls_seen suppresses
+    # it). Also exercises ExtendedRequest/ExtendedResponse's own StartTLS-name recognition.
+    # ---------------------------------------------------------------------------------------------
+    fd = make_flow(50104)
+    fd(True, L_msg(1, L_extended_req(STARTTLS_OID)))
+    fd(False, L_msg(1, L_extended_resp(0, response_name=STARTTLS_OID)))
+    fd(True, L_msg(2, L_bind_req(3, "cn=admin,dc=example,dc=com", password="Sup3rSecret!")))
+    fd(False, L_msg(2, L_bind_resp(0)))
+
+    # ---------------------------------------------------------------------------------------------
+    # Flow E (port 50105->389): SASL GSSAPI bind, no StartTLS -- note 2 NEGATIVE control (a
+    # negotiated, non-cleartext SASL mechanism other than PLAIN is never flagged).
+    # ---------------------------------------------------------------------------------------------
+    fe = make_flow(50105)
+    fe(True, L_msg(1, L_bind_req(3, "", sasl_mechanism="GSSAPI", sasl_credentials=bytes(range(20)))))
+    fe(False, L_msg(1, L_bind_resp(14)))  # saslBindInProgress
+
+    # ---------------------------------------------------------------------------------------------
+    # Flow F (port 50106->389): SASL PLAIN bind, no StartTLS -- note 2 positive via the SASL path
+    # (PLAIN carries an authzid\0authcid\0password triple in the same credentials field).
+    # ---------------------------------------------------------------------------------------------
+    ff = make_flow(50106)
+    ff(True, L_msg(1, L_bind_req(3, "", sasl_mechanism="PLAIN",
+                                  sasl_credentials=b"\x00admin\x00Sup3rSecret!")))
+    ff(False, L_msg(1, L_bind_resp(0)))
+
+    # ---------------------------------------------------------------------------------------------
+    # Flow G (port 50107->3268, Global Catalog): adminCount SearchRequest -- note 3's other
+    # technique (privileged-account enumeration sweep).
+    # ---------------------------------------------------------------------------------------------
+    fg = make_flow(50107, dport=3268)
+    fg(True, L_msg(1, L_search_req("dc=example,dc=com", 2, 0, 0, 0, False, F_eq("adminCount", "1"),
+                                    ["cn", "adminCount"])))
+    fg(False, L_msg(1, L_search_result_done(0)))
+
+    # ---------------------------------------------------------------------------------------------
+    # Flow H (port 50108->389): AS-REP-Roasting target-discovery filter (note 4 positive, the AD
+    # bitwise-AND matching rule against userAccountControl's DONT_REQ_PREAUTH bit), then a second
+    # SearchRequest on the SAME session using the same bitwise mechanism against an UNRELATED bit --
+    # note 4/5 NEGATIVE control.
+    # ---------------------------------------------------------------------------------------------
+    fh = make_flow(50108)
+    roast_filter = F_extensible(matching_rule=AD_BITWISE_AND_OID, type_="userAccountControl",
+                                 match_value=str(UAC_DONT_REQ_PREAUTH))
+    fh(True, L_msg(1, L_search_req("dc=example,dc=com", 2, 0, 0, 0, False, roast_filter,
+                                    ["cn", "userAccountControl"])))
+    fh(False, L_msg(1, L_search_result_done(0)))
+    unrelated_bit_filter = F_extensible(matching_rule=AD_BITWISE_AND_OID, type_="userAccountControl",
+                                         match_value=str(UAC_ACCOUNTDISABLE))
+    fh(True, L_msg(2, L_search_req("dc=example,dc=com", 2, 0, 0, 0, False, unrelated_bit_filter,
+                                    ["cn", "userAccountControl"])))
+    fh(False, L_msg(2, L_search_result_done(0)))
+
+    # ---------------------------------------------------------------------------------------------
+    # Flow I (port 50109->389): delegation discovery via the bitwise TRUSTED_FOR_DELEGATION bit --
+    # note 5 positive, path 1.
+    # ---------------------------------------------------------------------------------------------
+    fi = make_flow(50109)
+    delegation_bit_filter = F_extensible(matching_rule=AD_BITWISE_AND_OID, type_="userAccountControl",
+                                          match_value=str(UAC_TRUSTED_FOR_DELEGATION))
+    fi(True, L_msg(1, L_search_req("dc=example,dc=com", 2, 0, 0, 0, False, delegation_bit_filter,
+                                    ["cn", "userAccountControl"])))
+    fi(False, L_msg(1, L_search_result_done(0)))
+
+    # ---------------------------------------------------------------------------------------------
+    # Flow I2 (port 50110->389): delegation discovery via a bare msDS-AllowedToDelegateTo presence
+    # filter -- note 5 positive, path 2 (independent of the bitwise mechanism above).
+    # ---------------------------------------------------------------------------------------------
+    fi2 = make_flow(50110)
+    fi2(True, L_msg(1, L_search_req("dc=example,dc=com", 2, 0, 0, 0, False,
+                                     F_present("msDS-AllowedToDelegateTo"), ["cn"])))
+    fi2(False, L_msg(1, L_search_result_done(0)))
+
+    # ---------------------------------------------------------------------------------------------
+    # Flow J (port 50111->389): a deliberately ORDINARY filter -- AND/OR/NOT/equality/present/
+    # approxMatch/greaterOrEqual/lessOrEqual/substrings all in one query, touching none of notes
+    # 3-5's trigger attributes/bits -- proving the curated notes stay silent on ordinary traffic
+    # while exercising decode_filter's full rendering surface.
+    # ---------------------------------------------------------------------------------------------
+    fj = make_flow(50111)
+    ordinary_filter = F_and(
+        F_eq("objectClass", "user"),
+        F_or(F_eq("cn", "alice"), F_eq("cn", "bob")),
+        F_not(F_eq("cn", "disabled")),
+        F_present("mail"),
+        F_approx("sn", "Smith"),
+        F_ge("givenName", "A"),
+        F_le("uid", "zzz"),
+        F_substrings("description", initial="foo", any_parts=["bar"], final_part="baz"),
+    )
+    fj(True, L_msg(1, L_search_req("ou=Users,dc=example,dc=com", 1, 0, 100, 30, True, ordinary_filter,
+                                    ["cn", "mail"])))
+    fj(False, L_msg(1, L_search_result_entry("cn=alice,ou=Users,dc=example,dc=com",
+                                              {"cn": ["alice"], "mail": ["alice@example.com"]})))
+    fj(False, L_msg(1, L_search_result_done(0)))
+
+    # ---------------------------------------------------------------------------------------------
+    # Flow K (port 50112->389): CompareRequest/CompareResponse -- compareTrue then compareFalse.
+    # ---------------------------------------------------------------------------------------------
+    fk = make_flow(50112)
+    fk(True, L_msg(1, L_compare_req("cn=alice,dc=example,dc=com", "mail", "alice@example.com")))
+    fk(False, L_msg(1, L_compare_resp(6)))  # compareTrue
+    fk(True, L_msg(2, L_compare_req("cn=alice,dc=example,dc=com", "mail", "nobody@example.com")))
+    fk(False, L_msg(2, L_compare_resp(5)))  # compareFalse
+
+    # ---------------------------------------------------------------------------------------------
+    # Flow L (port 50113->389): SearchRequest followed by an AbandonRequest targeting it (abandon
+    # itself has no response, per RFC 4511 section 4.11).
+    # ---------------------------------------------------------------------------------------------
+    fl = make_flow(50113)
+    fl(True, L_msg(1, L_search_req("dc=example,dc=com", 2, 0, 0, 0, False, F_eq("objectClass", "user"),
+                                    [])))
+    fl(True, L_msg(2, L_abandon_req(1)))
+
+    # ---------------------------------------------------------------------------------------------
+    # Flow M (port 50114->389): ordinary bind/unbind lifecycle -- UnbindRequest coverage.
+    # ---------------------------------------------------------------------------------------------
+    fm = make_flow(50114)
+    fm(True, L_msg(1, L_bind_req(3, "cn=svc-reader,dc=example,dc=com", password="ReaderPass1")))
+    fm(False, L_msg(1, L_bind_resp(0)))
+    fm(True, L_msg(2, L_unbind_req()))
+
+    # ---------------------------------------------------------------------------------------------
+    # Flow N (port 50115->389): SearchResultReference (2 referral URIs) followed by a
+    # SearchResultDone with resultCode=referral.
+    # ---------------------------------------------------------------------------------------------
+    fn = make_flow(50115)
+    fn(True, L_msg(1, L_search_req("dc=example,dc=com", 2, 0, 0, 0, False, F_eq("objectClass", "user"),
+                                    [])))
+    fn(False, L_msg(1, L_search_result_reference(
+        ["ldap://dc2.example.com/dc=example,dc=com", "ldap://dc3.example.com/dc=example,dc=com"])))
+    fn(False, L_msg(1, L_search_result_done(10)))  # referral
+
+    # ---------------------------------------------------------------------------------------------
+    # Flow O (port 50116->389): every structural-only op (AddRequest/AddResponse,
+    # ModifyRequest/ModifyResponse, DelRequest/DelResponse, ModifyDNRequest/ModifyDNResponse,
+    # IntermediateResponse) -- recognized/named, not field-decoded, see ldap.hpp's own
+    # STRUCTURAL-ONLY list.
+    # ---------------------------------------------------------------------------------------------
+    fo = make_flow(50116)
+    fo(True, L_msg(1, L_add_req("cn=newuser,ou=Users,dc=example,dc=com")))
+    fo(False, L_msg(1, L_add_resp(0)))
+    fo(True, L_msg(2, L_modify_req("cn=newuser,ou=Users,dc=example,dc=com")))
+    fo(False, L_msg(2, L_modify_resp(0)))
+    fo(True, L_msg(3, L_del_req("cn=olduser,ou=Users,dc=example,dc=com")))
+    fo(False, L_msg(3, L_del_resp(0)))
+    fo(True, L_msg(4, L_moddn_req("cn=newuser,ou=Users,dc=example,dc=com", "cn=renameduser")))
+    fo(False, L_msg(4, L_moddn_resp(0)))
+    fo(False, L_msg(5, L_intermediate_resp()))
+
+    # ---------------------------------------------------------------------------------------------
+    # Flow P (port 50117->389): note 6 -- a burst of failed binds (invalidCredentials) across
+    # distinct bind DNs (the password-spray signature), then one successful bind, all aggregated by
+    # --stats' ldap_result_code_counts_ with no per-request correlation needed.
+    # ---------------------------------------------------------------------------------------------
+    fp = make_flow(50117)
+    spray_targets = [
+        ("cn=admin,dc=example,dc=com", "wrongpass1"),
+        ("cn=svc-backup,dc=example,dc=com", "wrongpass2"),
+        ("cn=jdoe,dc=example,dc=com", "wrongpass3"),
+        ("cn=svc-backup,dc=example,dc=com", "wrongpass2b"),
+    ]
+    mid = 1
+    for dn, pw in spray_targets:
+        fp(True, L_msg(mid, L_bind_req(3, dn, password=pw)))
+        fp(False, L_msg(mid, L_bind_resp(49)))  # invalidCredentials
+        mid += 1
+    fp(True, L_msg(mid, L_bind_req(3, "cn=administrator,dc=example,dc=com", password="CorrectHorse1")))
+    fp(False, L_msg(mid, L_bind_resp(0)))
+
+    # ---------------------------------------------------------------------------------------------
+    # Flow Q (port 50118->5000, a non-standard/non-configured TCP port): anonymous BindRequest --
+    # LDAP is GateKind::TcpPortIndependent, so this must still be recognized as ldap, with a
+    # "seen on TCP port ..., which is not a configured/standard LDAP port (389/3268)" note that
+    # --ldap-port 5000 suppresses.
+    # ---------------------------------------------------------------------------------------------
+    fq = make_flow(50118, dport=5000)
+    fq(True, L_msg(1, L_bind_req(3, "")))
+    fq(False, L_msg(1, L_bind_resp(0)))
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_030_000 + i, i * 1000)
+    (TESTS_DIR / "sample_ldap.pcap").write_bytes(data)
+
+    # ---------------------------------------------------------------------------------------------
+    # TCP segment-split reassembly, in its own file -- a SearchRequest split across two TCP
+    # segments, exercising LdapTcpDecoder::tcp_declared_length via Decoder::reassemble_tcp_payload.
+    # Unlike Kerberos's own split test, LDAP has no 4-byte length prefix to strip first -- the
+    # message's own outer BER SEQUENCE length IS the framing (ldap_tcp_declared_length).
+    # ---------------------------------------------------------------------------------------------
+    split_msg = L_msg(1, L_search_req("dc=example,dc=com", 2, 0, 0, 0, False,
+                                       F_present("servicePrincipalName"),
+                                       ["cn", "servicePrincipalName", "sAMAccountName", "memberOf"]))
+    split_at = 40
+    split_packets = []
+    tcp1 = tcp_header(51410, 389, 5000, 6000, TCP_PSH | TCP_ACK, len(split_msg[:split_at])) + \
+        split_msg[:split_at]
+    ip1 = ipv4_header(HMI_IP, PLC_IP, 6, len(tcp1), 0xB100) + tcp1
+    split_packets.append(eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip1)
+    tcp2 = tcp_header(51410, 389, 5000 + split_at, 6000, TCP_PSH | TCP_ACK,
+                       len(split_msg[split_at:])) + split_msg[split_at:]
+    ip2 = ipv4_header(HMI_IP, PLC_IP, 6, len(tcp2), 0xB101) + tcp2
+    split_packets.append(eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip2)
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(split_packets):
+        data += pcap_record(pkt, 1_700_030_100 + i, i * 1000)
+    (TESTS_DIR / "sample_ldap_tcp_split.pcap").write_bytes(data)
+
+
 # ---------------------------------------------------------------------------------------------
 # DNS / mDNS / LLMNR / NBT-NS / DoH-detection (ROADMAP: "Add DNS, DoH, NBT-NS name resolution
 # decode") -- see dns.hpp/nbns.hpp/tls_sni.hpp's own file header comments for the wire formats
@@ -9283,6 +9720,7 @@ if __name__ == "__main__":
     build_ffhse_sample()
     build_twincat_sample()
     build_kerberos_sample()
+    build_ldap_sample()
     build_policy_engine_sample()
     build_summarize_unclassified_sample()
     build_inventory_sample()
