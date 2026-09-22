@@ -8564,16 +8564,32 @@ else()
     PASS_REGULAR_EXPRESSION "(#1 |Npcap RUNTIME)"
     FAIL_REGULAR_EXPRESSION "#2 |#3 ")
 
-  # dst host narrows to the PLC's two responses, not the HMI's request -- the complementary
-  # direction from the src-host test above. Matched against the two response summaries directly
-  # rather than "#N" packet indices: those renumber from 1 within whatever the filter actually
-  # let through (the same convention live capture's own packet numbering already follows), so a
-  # filtered-out packet's original position isn't preserved in the index either way.
+  # dst host narrows to the PLC's two responses (packets #2 and #3 in the unfiltered file), not
+  # the HMI's request (#1) -- the complementary direction from the src-host test above. Also
+  # doubles as the first half of the "preserve original packet numbering" check below: the PASS
+  # regex pins the two surviving packets to their real "#2"/"#3" file positions, not a renumbering
+  # to "#1"/"#2" -- see bpf_filter_read_preserves_original_packet_numbering's own comment for why
+  # that distinction matters and PacketSource::next()'s own comment (cli_main.cpp) for the fix.
   add_test(NAME bpf_filter_read_dst_host_narrows_correctly
     COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --filter "dst host 192.168.1.50" --format text)
   set_tests_properties(bpf_filter_read_dst_host_narrows_correctly PROPERTIES
-    PASS_REGULAR_EXPRESSION "(response: 20 data byte\\(s\\).*\n.*\n.*\n.*exception response|Npcap RUNTIME)"
-    FAIL_REGULAR_EXPRESSION "request: read 10 holding register")
+    PASS_REGULAR_EXPRESSION "(#2 .*response: 20 data byte\\(s\\).*\n.*\n.*\n#3 .*exception response|Npcap RUNTIME)"
+    FAIL_REGULAR_EXPRESSION "request: read 10 holding register|^#1 ")
+
+  # Dedicated regression test for the fix itself: a `--filter`ed offline (`-r`) read must report
+  # each surviving packet under its own position in the UNFILTERED file -- the same convention
+  # Wireshark's own display filter follows (frame numbers are stable positions in the capture) --
+  # not renumber sequentially from 1 within just the matches, which is what this tool used to do
+  # (and what a real capture-filter, or this tool's own `-i`/`--filter` live-capture path, still
+  # does -- there, the discarded packets were genuinely never captured at all, so there is no
+  # original position to preserve). "src host" alone matches only packet #1, unaffected either
+  # way; "dst host" is the case that actually distinguishes the two conventions, since packets #2
+  # and #3 would collapse to #1/#2 under the old, buggy renumbering-from-1 behavior.
+  add_test(NAME bpf_filter_read_preserves_original_packet_numbering
+    COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --filter "dst host 192.168.1.50" --format text)
+  set_tests_properties(bpf_filter_read_preserves_original_packet_numbering PROPERTIES
+    PASS_REGULAR_EXPRESSION "(^#2 |Npcap RUNTIME)"
+    FAIL_REGULAR_EXPRESSION "^#1 ")
 
   # An invalid filter expression is reported clearly and fails the run, exactly like the existing
   # live-capture equivalent (live_capture_invalid_filter_reports_clearly below) -- same error

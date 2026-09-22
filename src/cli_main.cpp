@@ -97,15 +97,40 @@ public:
     // between. reader_->info().linktype is re-read fresh per packet (not cached once before the
     // loop) for the same multi-interface-pcapng reason pcap_reader.hpp's own file header already
     // documents for every other call site that reads it.
+    //
+    // `index_` is set here, on every packet this call returns true for, to that packet's actual
+    // position in the underlying source -- for an offline file, its 1-based position in the FILE
+    // (`file_position_`, incremented for every packet read off disk, matched or not), not the
+    // count of packets that have passed the filter so far. This is what makes a filtered `-r`
+    // read behave like Wireshark's own display filter (frame numbers are stable positions in the
+    // capture) rather than a capture filter (which renumbers from 1, because the discarded
+    // packets were genuinely never captured at all) -- an earlier version of this class did the
+    // latter, which made cross-referencing a filtered run's "#N" packets back against the same
+    // file opened unfiltered (or in Wireshark) needlessly hard, since the same packet could carry
+    // two different numbers depending only on which filter, if any, was given. Live capture keeps
+    // the old "count what was actually received" numbering (`live_position_`) -- and rightly so:
+    // libpcap's own pcap_setfilter() already discards non-matching packets before this process
+    // ever sees them, so there is no "original position" to preserve even in principle, the same
+    // reason Wireshark's own capture-filter (-f) numbering renumbers too.
     bool next(PcapPacket& out) {
         if (reader_) {
             while (reader_->next(out)) {
-                if (!file_filter_ || file_filter_->matches(out, reader_->info().linktype)) return true;
+                ++file_position_;
+                if (!file_filter_ || file_filter_->matches(out, reader_->info().linktype)) {
+                    index_ = file_position_;
+                    return true;
+                }
             }
             return false;
         }
-        return capture_->next(out);
+        if (!capture_->next(out)) return false;
+        index_ = ++live_position_;
+        return true;
     }
+    // The index the most recent successful next() should be decoded/reported under -- see next()'s
+    // own comment for what this means for a filtered offline read specifically. 0 until the first
+    // next() call succeeds.
+    size_t index() const { return index_; }
     uint32_t linktype() const { return reader_ ? reader_->info().linktype : capture_->info().linktype; }
     // Non-null only when this source is a live capture; used by SigintGuard below. Never call
     // anything on it except stop() from a signal handler.
@@ -113,6 +138,9 @@ public:
 
 private:
     std::unique_ptr<PcapReader> reader_;
+    size_t file_position_ = 0;
+    size_t live_position_ = 0;
+    size_t index_ = 0;
     std::unique_ptr<LiveCapture> capture_;
     std::unique_ptr<BpfFilter> file_filter_;
 };
@@ -608,9 +636,13 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
         FlowDirectionTracker direction_tracker;
 
         PcapPacket pkt;
-        size_t index = 0, decoded_count = 0, warnings = 0;
+        size_t decoded_count = 0, warnings = 0;
         while (!g_stop_requested.load(std::memory_order_acquire) && source.next(pkt)) {
-            ++index;
+            // source.index() -- not a locally incremented counter -- so a `--filter`ed offline
+            // read reports each surviving packet under its real position in the file (matching
+            // Wireshark's own display-filter numbering), rather than renumbering from 1 within
+            // just the matches; see PacketSource::next()'s own comment.
+            size_t index = source.index();
             DecodedPacket dp = decoder.decode(pkt, source.linktype(), index);
             direction_tracker.observe(dp);
             if (dp.protocol == "parse-error") {
@@ -769,7 +801,9 @@ int run_policy_validate(const std::string& input, const std::string& interface_n
         PcapPacket pkt;
         size_t index = 0, warnings = 0;
         while (!g_stop_requested.load(std::memory_order_acquire) && source.next(pkt)) {
-            ++index;
+            // See run_decode's own comment on source.index() -- same "preserve the file position,
+            // don't renumber from 1" fix applies here.
+            index = source.index();
             DecodedPacket dp = decoder.decode(pkt, source.linktype(), index);
             if (dp.protocol == "parse-error") {
                 ++warnings;
@@ -867,7 +901,9 @@ int run_inventory(const std::string& input, const std::string& interface_name, c
         PcapPacket pkt;
         size_t index = 0, warnings = 0;
         while (!g_stop_requested.load(std::memory_order_acquire) && source.next(pkt)) {
-            ++index;
+            // See run_decode's own comment on source.index() -- same "preserve the file position,
+            // don't renumber from 1" fix applies here.
+            index = source.index();
             DecodedPacket dp = decoder.decode(pkt, source.linktype(), index);
             if (dp.protocol == "parse-error") {
                 ++warnings;

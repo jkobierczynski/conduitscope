@@ -3805,6 +3805,37 @@ unlike any of the eight routing/redundancy protocols decoded so far.
     `--filter`-on-`-r` tests including the no-libpcap stub path) and
     verified clean under ASan/UBSan (1148/1148 on the default build).
 
+    **Follow-up fix (post-release, Jurgen's own report)**: applying
+    `--filter` to an offline `-r` read renumbered the surviving packets
+    sequentially from `#1` within just the matches, instead of preserving
+    each one's real position in the unfiltered file -- e.g. filtering a
+    capture to `udp port 53` turned the file's own `#8`/`#10`/`#11` into
+    `#1`/`#2`/`#3`, making it needlessly hard to cross-reference a filtered
+    packet back against the same file opened unfiltered (or in Wireshark,
+    whose own display-filter numbering keeps frame numbers stable). This
+    was originally treated as the deliberate, "same convention live
+    capture already follows" behavior (see this item's own `PacketSource`
+    design above) -- but live capture's renumbering is unavoidable (the
+    non-matching packets were never captured at all, via libpcap's
+    `pcap_setfilter()`), while an offline read has the whole file already
+    on disk and no reason to throw that positional information away.
+    Fixed in `PacketSource::next()` (`cli_main.cpp`): a new
+    `file_position_` counter advances on every packet actually read off
+    disk, matched or not, and `index()` reports that position rather than
+    a locally-incremented "packets returned so far" count -- `run_decode`/
+    `run_policy_validate`/`run_inventory` all now read the packet's index
+    from `source.index()` instead of maintaining their own counter. Live
+    capture's own numbering (`live_position_`) is unchanged -- there is no
+    "original position" to preserve there in the first place. One
+    dedicated regression test added
+    (`bpf_filter_read_preserves_original_packet_numbering`, `CMakeLists.txt`)
+    plus a tightened `bpf_filter_read_dst_host_narrows_correctly` (now
+    pins the two surviving packets to their real `#2`/`#3` file positions
+    rather than merely checking their content) -- both against the
+    existing `tests/sample_modbus.pcap` fixture, no new fixture needed.
+    Full suite (1300 tests) passes, zero-warning build across all three
+    established configs.
+
 22. **Kerberos (RFC 4120) -- phase 1 of a 4-part Windows Active Directory
     suite, with curated attack/monitoring detection.** Jurgen asked for
     "more extensive Windows Active Directory protocol dissectors, with a
