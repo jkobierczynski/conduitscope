@@ -5674,36 +5674,52 @@ set_tests_properties(doh_non_tls_tcp443_not_misdetected PROPERTIES
 
 # ---------------------------------------------------------------------------------------------
 # QUIC -- Tier 2, joining HTTPS (see quic.hpp's own file header comment and notable_it_protocols.hpp
-# for why). tests/sample_quic.pcap (tools/make_quic_sample_pcap.py) has 10 packets: #1 a genuine
+# for why). tests/sample_quic.pcap (tools/make_quic_sample_pcap.py) has 13 packets: #1 a genuine
 # client Initial, decrypted end to end with its ClientHello SNI extracted; #2 Version Negotiation;
 # #3-5 Handshake/0-RTT/Retry, each name-only but each now requiring the per-type structural
 # cross-check described below; #6 a short-header (1-RTT) packet, the weakest, port-only fallback;
 # #7 an Initial whose AEAD tag doesn't verify (simulating a server's own Initial, which this decoder
 # can never decrypt -- see quic.hpp's file header comment); #8 non-QUIC junk on QUIC's own default
 # port, proving no false positive; #9 a short-header packet on a non-standard port, proving that
-# fallback's own internal port gate; #10 (bug fix regression, see below) a 0-RTT-shaped packet whose
-# byte0 satisfies Header Form/Fixed Bit/type bits but whose trailer is NOT structurally
-# self-consistent, proving it now falls through to generic "udp" rather than being misdetected. See
+# fallback's own internal port gate; #10 (round-one bug fix regression, see below) a 0-RTT-shaped
+# packet whose byte0 satisfies Header Form/Fixed Bit/type bits but whose trailer is NOT structurally
+# self-consistent, proving it now falls through to generic "udp" rather than being misdetected;
+# #11-12 (round-two bug fix regression, see below) an Initial-shaped packet whose Token-Length/
+# Length-field pair both decode to 0, and a Retry-shaped packet whose Version isn't QUIC v1 --
+# proving both now fall through to generic "udp" too; #13 (round-two positive control) a genuinely
+# truncated real v1 Initial packet (a plausible, large Length field, but far fewer bytes actually
+# captured), proving round two's fix didn't also reject legitimate truncated captures. See
 # decoder.cpp's own dispatch-ordering comment (just above its HART-IP UDP check) for why QUIC's
 # recognition call had to move ahead of HART-IP's: QUIC v1's Version field lands on the exact same
 # two payload bytes HART-IP's own MessageType/MessageID gate reads, and is SYSTEMATICALLY 0x00/0x00
 # there for every long-header packet type this fixture exercises -- a guaranteed collision, not a
 # coincidental one.
 #
-# Bug fix (post-release, Jurgen's own report): packets #3-5's own Handshake/0-RTT/Retry recognition
-# originally accepted ANY long-header packet whose byte0 had the Header Form bit, Fixed Bit, and a
-# non-Initial type value set -- only 4 bits of the whole packet, true of roughly 1 in 4 arbitrary
-# UDP payloads port-independently. A real capture proved this too weak: a busy NBT-NS (UDP port 137)
-# broadcast segment's own 2-byte Transaction ID landed on byte0/byte1 often enough to misdetect a
-# large fraction of that segment's non-NBT-NS-parsing traffic as QUIC 0-RTT/Handshake packets. Fixed
-# by requiring the same kind of self-consistent structural cross-check every other long-header type
-# already had (Version Negotiation's own whole-number-of-4-byte-versions check; Initial's own
-# Length-field/captured-bytes cross-check): 0-RTT/Handshake now read their own Length field (RFC
-# 9000 17.2.3/17.2.4) and require it to describe a byte count that actually fits within what was
-# captured and is at least large enough for a 1-byte Packet Number plus a 16-byte AEAD tag; Retry
-# now requires its own mandatory 16-byte Retry Integrity Tag (RFC 9000 17.2.5) to actually be
+# Bug fix, round one (post-release, Jurgen's own report): packets #3-5's own Handshake/0-RTT/Retry
+# recognition originally accepted ANY long-header packet whose byte0 had the Header Form bit, Fixed
+# Bit, and a non-Initial type value set -- only 4 bits of the whole packet, true of roughly 1 in 4
+# arbitrary UDP payloads port-independently. A real capture proved this too weak: a busy NBT-NS
+# (UDP port 137) broadcast segment's own 2-byte Transaction ID landed on byte0/byte1 often enough to
+# misdetect a large fraction of that segment's non-NBT-NS-parsing traffic as QUIC 0-RTT/Handshake
+# packets. Fixed by requiring the same kind of self-consistent structural cross-check every other
+# long-header type already had (Version Negotiation's own whole-number-of-4-byte-versions check;
+# Initial's own Length-field/captured-bytes cross-check): 0-RTT/Handshake now read their own Length
+# field (RFC 9000 17.2.3/17.2.4) and require it to describe a byte count that actually fits within
+# what was captured and is at least large enough for a 1-byte Packet Number plus a 16-byte AEAD tag;
+# Retry now requires its own mandatory 16-byte Retry Integrity Tag (RFC 9000 17.2.5) to actually be
 # present. See try_recognize_quic's own comment in quic.cpp for the full writeup, and packet #10
 # above/quic_0rtt_type_bits_alone_not_misdetected below for the regression test.
+#
+# Bug fix, round two (post-release, Jurgen's own SECOND report, against the same real NBT-NS
+# capture): round one's own checks were each individually still too weak. Retry's "16 trailing bytes
+# exist" check is true of nearly any ordinary-sized UDP payload (Retry has no Length field to
+# cross-check at all -- see quic.cpp's own comment for why not), so it now also requires an exact
+# QUIC-v1 Version match. Initial's pre-existing Length-field check conflated two different failure
+# modes into one tolerant "truncated capture" fallback: `length_field < 17` (structurally impossible
+# for a real Initial packet, any capture length) was treated the same as `pn_offset + length_field >
+# captured size` (a plausible field that just wasn't fully captured -- genuine truncation); only the
+# second one still gets the tolerant match now. See try_recognize_quic's own comment in quic.cpp for
+# the full writeup, and packets #11-13 above / the three quic_*_round_two_* tests below.
 # ---------------------------------------------------------------------------------------------
 
 add_test(NAME quic_client_initial_decrypted_sni
@@ -5754,23 +5770,26 @@ set_tests_properties(quic_extra_port_widens_short_header_match PROPERTIES
 add_test(NAME quic_protocol_filter_isolates_family
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_quic.pcap" --protocol lateral-movement --format text)
 set_tests_properties(quic_protocol_filter_isolates_family PROPERTIES
-  # Every one of packets #1-7 is quic under this filter (nothing else in this fixture is Tier 2), and
-  # since HART-IP's own dispatch is entirely disabled by --protocol lateral-movement (not just
-  # reordered), packets #8/#9 fall straight through to generic udp with no [hartip] tag at all.
-  PASS_REGULAR_EXPRESSION "\\[quic\\].*\\[quic\\].*\\[quic\\].*\\[quic\\].*\\[quic\\].*\\[quic\\].*\\[quic\\]"
+  # Packets #1-7 plus #13 (round two's positive truncated-capture control) are quic under this
+  # filter -- 8 total, nothing else in this fixture is Tier 2 -- and since HART-IP's own dispatch is
+  # entirely disabled by --protocol lateral-movement (not just reordered), packets #8/#9/#11/#12 fall
+  # straight through to generic udp with no [hartip] tag at all.
+  PASS_REGULAR_EXPRESSION "\\[quic\\].*\\[quic\\].*\\[quic\\].*\\[quic\\].*\\[quic\\].*\\[quic\\].*\\[quic\\].*\\[quic\\]"
   FAIL_REGULAR_EXPRESSION "\\[hartip\\]")
 
 add_test(NAME quic_stats_counted_in_lateral_movement_tier
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_quic.pcap" --format text --stats)
 set_tests_properties(quic_stats_counted_in_lateral_movement_tier PROPERTIES
-  # udp +3, not +2, now that packet #10 (the bug-fix regression fixture) correctly falls through
-  # to generic udp too, alongside pre-existing packets #8/#9.
-  PASS_REGULAR_EXPRESSION "quic +7\n *udp +3")
+  # quic +8 (packet #13, round two's positive truncated-capture control, is the 8th quic match);
+  # udp +5, not +3, now that packets #11/#12 (round two's own negative-control regression fixtures)
+  # correctly fall through to generic udp too, alongside pre-existing packets #8/#9/#10.
+  PASS_REGULAR_EXPRESSION "quic +8\n *udp +5")
 
 add_test(NAME quic_inventory_notable_protocols
   COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_quic.pcap")
 set_tests_properties(quic_inventory_notable_protocols PROPERTIES
-  PASS_REGULAR_EXPRESSION "NOTABLE IT PROTOCOLS \\(7\\):\n(.*\n)*.*\\[1\\] quic  \\(lateral-movement\\)")
+  # 8, not 7, now that packet #13 (round two's positive truncated-capture control) is also quic.
+  PASS_REGULAR_EXPRESSION "NOTABLE IT PROTOCOLS \\(8\\):\n(.*\n)*.*\\[1\\] quic  \\(lateral-movement\\)")
 
 add_test(NAME quic_0rtt_type_bits_alone_not_misdetected
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_quic.pcap" --format text)
@@ -5781,6 +5800,35 @@ set_tests_properties(quic_0rtt_type_bits_alone_not_misdetected PROPERTIES
   # Length field, so it must now fall through to the generic udp tag instead.
   PASS_REGULAR_EXPRESSION "\\[udp\\]  UDP payload of 27 byte\\(s\\) on port 54109->443"
   FAIL_REGULAR_EXPRESSION "54109->443  \\[quic\\]")
+
+add_test(NAME quic_initial_zero_length_field_not_misdetected
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_quic.pcap" --format text)
+set_tests_properties(quic_initial_zero_length_field_not_misdetected PROPERTIES
+  # Bug fix regression test, round two (see this section's own header comment and quic.cpp's comment
+  # on try_recognize_quic): packet #11's Token-Length/Length-field pair both decode to 0 -- the exact
+  # shape the old combined check used to wave through as "truncated capture" -- so it must now fall
+  # through to the generic udp tag instead, the same "not a match" treatment a structurally
+  # implausible field already gets on the 0-RTT/Handshake paths.
+  PASS_REGULAR_EXPRESSION "\\[udp\\]  UDP payload of 25 byte\\(s\\) on port 54110->443"
+  FAIL_REGULAR_EXPRESSION "54110 -> 192\\.168\\.1\\.10:443  \\[quic\\]")
+
+add_test(NAME quic_retry_wrong_version_not_misdetected
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_quic.pcap" --format text)
+set_tests_properties(quic_retry_wrong_version_not_misdetected PROPERTIES
+  # Bug fix regression test, round two: packet #12 has a fully self-consistent 16-byte trailer --
+  # everything round one's own Retry check required -- but a Version field that isn't QUIC v1, so it
+  # must now fall through to the generic udp tag instead of being misdetected as [quic] Retry.
+  PASS_REGULAR_EXPRESSION "\\[udp\\]  UDP payload of 43 byte\\(s\\) on port 54111->443"
+  FAIL_REGULAR_EXPRESSION "54111 -> 192\\.168\\.1\\.10:443  \\[quic\\]")
+
+add_test(NAME quic_initial_genuinely_truncated_still_matches
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_quic.pcap" --format text)
+set_tests_properties(quic_initial_genuinely_truncated_still_matches PROPERTIES
+  # Positive control, round two: packet #13 is a real QUIC v1 Initial packet whose Length field
+  # declares a large, entirely plausible value (1200) that simply wasn't fully captured -- proving
+  # round two's fix didn't overcorrect and reject a genuinely truncated capture along with the
+  # implausible-length-field case packets #11/#12 above exercise.
+  PASS_REGULAR_EXPRESSION "54112 -> 192\\.168\\.1\\.10:443  \\[quic\\]  QUIC Initial packet \\(truncated capture -- not decrypted\\)")
 
 add_test(NAME protocol_filter_dns_only
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dns.pcap" --protocol dns --format text)
@@ -8742,7 +8790,8 @@ add_test(NAME quic_notable_protocols_lateral_movement_tier
   COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_quic.pcap"
           --policy "${POLICY_DIR}/compliant.yaml")
 set_tests_properties(quic_notable_protocols_lateral_movement_tier PROPERTIES
-  PASS_REGULAR_EXPRESSION "NOTABLE IT PROTOCOLS \\(7\\):\n(.*\n)*.*\\[1\\] quic  \\(lateral-movement\\)")
+  # 8, not 7, now that packet #13 (round two's positive truncated-capture control) is also quic.
+  PASS_REGULAR_EXPRESSION "NOTABLE IT PROTOCOLS \\(8\\):\n(.*\n)*.*\\[1\\] quic  \\(lateral-movement\\)")
 
 # Tier 3 (enterprise-trust): the one tier whose fixture also contains a Tier-2 "https" packet (a
 # deliberate negative control proving LDAPS-vs-HTTPS ALPN disambiguation -- see this tier's own

@@ -73,14 +73,20 @@
 //     decrypt even in principle (0-RTT/1-RTT need the connection's own negotiated secrets, which
 //     this decoder never has; Retry carries no protected payload at all; Handshake packets carry
 //     ServerHello/Certificate/Finished, never another ClientHello). Bug fix (post-release, Jurgen's
-//     own report): "framing alone" still means a real structural cross-check for each type (the
-//     Length field's own value against how many bytes were actually captured, for 0-RTT/
-//     Handshake; the mandatory 16-byte Retry Integrity Tag, for Retry) -- NOT just byte0's Header
-//     Form/Fixed Bit/type bits in isolation, which this file originally (incorrectly) treated as
-//     sufficient on its own and which a real capture proved is not: those 4 bits alone match
-//     roughly 1 in 4 arbitrary UDP payloads port-independently, and were observed misdetecting a
-//     large fraction of a busy NBT-NS (UDP port 137) broadcast segment's traffic as QUIC. See
-//     try_recognize_quic's own comment in quic.cpp for the fix.
+//     own report, two rounds against the same real NBT-NS capture): "framing alone" still means a
+//     real structural cross-check for each type -- NOT just byte0's Header Form/Fixed Bit/type bits
+//     in isolation, which this file originally (incorrectly) treated as sufficient on its own and
+//     which a real capture proved is not: those 4 bits alone match roughly 1 in 4 arbitrary UDP
+//     payloads port-independently, and were observed misdetecting a large fraction of a busy NBT-NS
+//     (UDP port 137) broadcast segment's traffic as QUIC. Round one added the Length field's own
+//     value cross-checked against how many bytes were actually captured, for 0-RTT/Handshake (the
+//     same cross-check Initial already had). Round two found that round one's own Retry check (just
+//     "16 trailing bytes exist," with no Length field to cross-check against at all -- see this
+//     file's own Retry-specific note below) was still nowhere near strong enough on its own, and
+//     added an exact QUIC-v1 Version match for Retry specifically. See try_recognize_quic's own
+//     comment in quic.cpp for both rounds' full rationale, including why Retry can't get the same
+//     kind of field cross-check the other long-header types can (it would need the original
+//     connection's own Destination Connection ID, which isn't present in the Retry packet itself).
 //   - Short-header (1-RTT) packets get the weakest-gate, port-only treatment TeamViewer/AnyDesk/
 //     LWAPP already have in this same family (it_protocols.hpp's own Tier 1/Tier 4 comments):
 //     once the handshake completes, a QUIC packet's own header carries no version or type field
@@ -118,12 +124,13 @@ struct QuicMatch {
 // their own framing, checked port-independently even in Auto mode -- the same "structural
 // signature overrides the port gate" treatment TLS ClientHello framing already gets for HTTPS
 // (it_protocols.hpp), since the Header Form bit + Fixed Bit + a per-type structural cross-check
-// (the Length field's own value against the captured byte count for Initial/0-RTT/Handshake, the
-// mandatory 16-byte Integrity Tag for Retry, a whole number of 4-byte version entries for Version
-// Negotiation) together are a strong, self-describing signal, not a coincidence -- byte0's Header
-// Form/Fixed Bit/type bits ALONE are not (see this file's Scope section, the Handshake/0-RTT/Retry
-// bullet, for the real-world collision that proved it). Short-header (1-RTT) packets are the one
-// exception -- see this file's own header comment for why those stay port-gated.
+// (the Length field's own value against the captured byte count for Initial/0-RTT/Handshake, an
+// exact QUIC-v1 Version match plus the mandatory 16-byte Integrity Tag for Retry, a whole number of
+// 4-byte version entries for Version Negotiation) together are a strong, self-describing signal,
+// not a coincidence -- byte0's Header Form/Fixed Bit/type bits ALONE are not (see this file's Scope
+// section, the Handshake/0-RTT/Retry bullet, for the real-world collision that proved it, twice).
+// Short-header (1-RTT) packets are the one exception -- see this file's own header comment for why
+// those stay port-gated.
 // `extra_ports` extends the default port set the same way every other "IT protocols an OT
 // auditor flags" file's own extra_*_ports list does -- here, extra_lateral_movement_ports, since
 // QUIC joins Tier 2 alongside HTTPS rather than getting its own feature toggle.

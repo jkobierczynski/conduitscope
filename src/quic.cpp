@@ -283,7 +283,38 @@ std::optional<QuicMatch> try_recognize_quic(ByteSpan udp_payload, uint16_t src_p
         // numeric relationships by coincidence, which is what actually rejects the NBT-NS collision
         // (confirmed against the real capture that surfaced this bug -- see
         // quic_0rtt_handshake_reject_non_quic_on_shared_port in CMakeLists.txt).
+        // Bug fix, round two (post-release, Jurgen's own second report): the fix above closed
+        // 0-RTT/Handshake but left two gaps in the very same real NBT-NS capture that surfaced it --
+        // both fixed the same way, by turning an existing tolerant check into a genuine reject:
+        //   - Retry (below) had NO structural check at all beyond "16 trailing bytes exist," which
+        //     is true of nearly any UDP payload of ordinary size -- not a meaningful check. Retry has
+        //     no Length/Packet-Number field to self-check the way 0-RTT/Handshake/Initial do (RFC
+        //     9000 17.2.5's Retry Token is unlength-prefixed; only the trailing 16-byte Retry
+        //     Integrity Tag is fixed-size), and verifying that tag cryptographically needs the
+        //     original connection's own Destination Connection ID, which isn't present in the Retry
+        //     packet itself and isn't state this single-packet decoder tracks (see this file's own
+        //     "no cross-packet state" scope limit). The one field a Retry packet still carries that
+        //     CAN be checked without any of that is Version: real Retry traffic is, in practice,
+        //     always QUIC v1 (v2, RFC 9369, remains vanishingly rare in deployment), so requiring an
+        //     exact match closes the gap almost completely -- an arbitrary payload's four
+        //     byte0-pattern bits landing right is roughly 1-in-4, but its full 32-bit Version field
+        //     also landing on exactly 0x00000001 by coincidence is not (confirmed against the real
+        //     capture: every misdetected NBT-NS packet's Transaction-ID-derived "version" bytes were
+        //     some arbitrary non-1 value). This does mean a genuine, rare QUIC v2 Retry packet is no
+        //     longer recognized -- an accepted, documented trade-off, the same kind Initial's own
+        //     "only version 1 is decrypted" scope limit already makes elsewhere in this file.
+        //   - Initial (below) had a check, but it conflated two different situations into one
+        //     tolerant fallback: `length_field < 17` (the field is simply too small to ever hold a
+        //     real Initial packet's mandatory 1-byte-minimum Packet Number plus 16-byte AEAD tag --
+        //     not a truncation at all, just an inconsistent field) was treated exactly the same as
+        //     `pn_offset + length_field > udp_payload.size()` (the field IS plausible, it just wasn't
+        //     fully captured -- genuine snaplen truncation). Splitting them so only the second one
+        //     still gets the tolerant "truncated capture" match, while the first is rejected outright
+        //     -- the same treatment the 0-RTT/Handshake branch's identical check already gets -- is
+        //     what actually rejects the NBT-NS collision (its garbage-derived length_field decoded to
+        //     0, which the old combined check let through as "truncated," not what it was).
         if (long_type == 3) {
+            if (hdr->version != kQuicVersion1) return std::nullopt;
             if (udp_payload.size() < hdr->header_end + 16) return std::nullopt;
             return name_only_match("Retry packet");
         }
@@ -302,10 +333,15 @@ std::optional<QuicMatch> try_recognize_quic(ByteSpan udp_payload, uint16_t src_p
         cur.skip(static_cast<size_t>(token_len));
         uint64_t length_field = read_varint(cur);  // covers Packet Number + protected payload + tag
         size_t pn_offset = hdr->header_end + (cur.position());
-        if (pn_offset + length_field > udp_payload.size() || length_field < 17) {
-            // Declares more than was captured (snaplen truncation, same tolerance GOOSE/SV/
-            // EtherCAT's own declared-length checks already have), or too short to possibly hold
-            // even a 1-byte packet number plus a 16-byte AEAD tag.
+        if (length_field < 17) {
+            // Too short to possibly hold even a 1-byte Packet Number plus a 16-byte AEAD tag --
+            // structurally invalid regardless of how much was captured, not a truncated real Initial
+            // packet. Rejected outright (see this branch's own "round two" comment above).
+            return std::nullopt;
+        }
+        if (pn_offset + length_field > udp_payload.size()) {
+            // A plausible (>= 17) length_field that just wasn't fully captured -- genuine snaplen
+            // truncation, same tolerance GOOSE/SV/EtherCAT's own declared-length checks already have.
             return name_only_match("Initial packet (truncated capture -- not decrypted)");
         }
         if (hdr->version != kQuicVersion1) {

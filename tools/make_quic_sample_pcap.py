@@ -282,6 +282,43 @@ def build_quic_sample():
     #     bug fix).
     add_udp(minimal_long_header(0b01, dcid, scid, version=0x12345678, trailer=bytes(4)), sport=54109)
 
+    # 11) Regression fixture, round two (Jurgen's own second report against the same real NBT-NS
+    #     capture): an Initial-shaped long-header packet (byte0 satisfies Header Form/Fixed Bit/
+    #     type==Initial) whose trailer decodes to a Token Length of 0 immediately followed by a
+    #     Length field that ALSO decodes to 0 -- exactly the shape try_recognize_quic's own Initial
+    #     branch used to wave through as "truncated capture" before this round's fix (a length_field
+    #     of 0 can never hold the mandatory 1-byte Packet Number + 16-byte AEAD tag, so it isn't a
+    #     truncated real Initial packet at all, just an inconsistent field -- see quic.cpp's own
+    #     comment). This is the literal shape of one of the two NBT-NS collision groups the real
+    #     capture contained: NBT-NS's own Flags/QDCOUNT bytes, read as this Token-Length/Length-field
+    #     pair, happened to decode to 0/0. Must now fall through to the generic "udp" tag. Same
+    #     HART-IP-collision-avoidance version value as packet #10, for the same reason.
+    add_udp(minimal_long_header(0b00, dcid, scid, version=0x12345678, trailer=bytes([0x00, 0x00])),
+            sport=54110)
+
+    # 12) Regression fixture, round two, the other NBT-NS collision group: a Retry-shaped long-header
+    #     packet (byte0 satisfies Header Form/Fixed Bit/type==Retry) with a fully self-consistent
+    #     16-byte trailer -- exactly what round one's own Retry check required and considered
+    #     sufficient -- but a Version field that is NOT QUIC v1 (0x12345678, arbitrary). Retry has no
+    #     Length field of its own to cross-check (see quic.cpp's own comment on why not), so round
+    #     one's fix left it checking only "are there 16 trailing bytes," true of nearly any
+    #     ordinary-sized UDP payload; round two adds an exact Version match, the one field Retry does
+    #     have that a real capture's NBT-NS traffic never coincidentally lands on. Must now fall
+    #     through to the generic "udp" tag rather than being misdetected as [quic].
+    add_udp(minimal_long_header(0b11, dcid, scid, version=0x12345678, trailer=retry_trailer()),
+            sport=54111)
+
+    # 13) Positive control for round two's Initial fix: a GENUINELY truncated real QUIC v1 Initial
+    #     packet -- Token Length 0, then a Length field that decodes to a large, entirely plausible
+    #     value (1200, comfortably >= the 17-byte minimum), but with only a handful of bytes actually
+    #     following it in the capture (nowhere near the 1200 the Length field declares). Proves round
+    #     two's split of the old combined check didn't overcorrect: a length_field that IS plausible
+    #     but wasn't fully captured must still produce the tolerant "truncated capture" name-only
+    #     match, exactly as it did before this round's fix -- only the previously-conflated
+    #     `length_field < 17` case (packet #11 above) was ever meant to change.
+    _truncated_trailer = quic_varint(0) + quic_varint(1200, force_2byte=True) + bytes(5)
+    add_udp(minimal_long_header(0b00, dcid, scid, trailer=_truncated_trailer), sport=54112)
+
     data = msp.pcap_global_header()
     for i, pkt in enumerate(packets):
         data += msp.pcap_record(pkt, 1_700_038_000 + i, i * 1000)

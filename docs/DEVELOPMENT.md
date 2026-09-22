@@ -2812,6 +2812,57 @@ useful, none blocking anything else on this list.
     configs (default+libpcap, `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF`,
     MinGW cross-compile).
 
+    **Follow-up fix, round two (post-release, Jurgen's own SECOND
+    report)**: the same real NBT-NS capture -- this time with a marked
+    excerpt of the still-misdetected packets attached, isolating two
+    remaining shapes -- showed round one's own fix was incomplete. Root
+    cause, in two parts: (1) Retry's own round-one check ("at least 16
+    trailing bytes exist") is satisfied by nearly any UDP payload of
+    ordinary size, since Retry (RFC 9000 17.2.5) has no Length/Packet-
+    Number field of its own to self-check against at all -- unlike every
+    other long-header type, verifying its actual Retry Integrity Tag
+    cryptographically would need the original connection's own
+    Destination Connection ID, which isn't present in the Retry packet
+    itself and isn't state this single-packet decoder tracks. (2)
+    Initial's own pre-existing check (present since before round one,
+    untouched by it) conflated two different situations into one lenient
+    fallback: a Length field too small to ever hold a real Initial
+    packet's mandatory 1-byte Packet Number plus 16-byte AEAD tag
+    (`length_field < 17`, structurally invalid at any capture length) was
+    treated exactly the same as a Length field that's plausible but
+    wasn't fully captured (genuine snaplen truncation) -- both fell
+    through to the same "truncated capture" name-only match. NBT-NS's own
+    Flags/QDCOUNT bytes, read as Initial's Token-Length/Length fields,
+    happened to decode to 0/0 for one group of packets in the capture,
+    which the old combined check waved through as "truncated" instead of
+    rejecting; a second group's Transaction-ID-derived "Version" field
+    landed on Retry's own byte0 type bits with an arbitrary non-1 value,
+    which round one's weak trailing-bytes-only check never looked at.
+    Fixed in `try_recognize_quic` (`quic.cpp`): Retry now also requires an
+    exact QUIC v1 Version match -- real Retry traffic is, in practice,
+    always v1 (v2, RFC 9369, remains vanishingly rare in deployment), and
+    an arbitrary payload's Version field landing on exactly `0x00000001`
+    by coincidence is a 1-in-4-billion event, versus the 1-in-4 chance of
+    byte0's 4 bits alone matching; Initial's combined check is now split
+    in two, so only "declares more than was captured" (with a plausible
+    `>= 17` Length field) still gets the tolerant "truncated capture"
+    match, while "Length field itself is too small" is rejected outright,
+    the same treatment the 0-RTT/Handshake paths already give the
+    identical check. Verified: three new regression fixtures and tests
+    (`tests/sample_quic.pcap` packets #11-13 via
+    `tools/make_quic_sample_pcap.py`,
+    `quic_initial_zero_length_field_not_misdetected`,
+    `quic_retry_wrong_version_not_misdetected`,
+    `quic_initial_genuinely_truncated_still_matches`) reproduce both
+    collision shapes from the real capture and confirm they now fall
+    through to the generic `"udp"` tag, plus a positive control proving a
+    genuinely truncated real Initial packet still gets its tolerant match
+    -- proof the fix didn't overcorrect; the user's own marked capture,
+    reproduced locally, now decodes every packet as `[nbns]` with zero
+    `[quic]` matches; the full CTest suite (1304 tests, up from 1301 --
+    every existing QUIC assertion passing unchanged) stayed 100% passing;
+    zero-warning clean rebuilds across all three established configs.
+
     **Tier 3 -- done**, and see docs/PROTOCOL_COVERAGE.md's own "Tier 3
     enterprise-trust-boundary protocol recognition" section for the full
     writeup: `decode` now also recognizes NTP, DHCP, LDAP, LDAPS, RADIUS,
