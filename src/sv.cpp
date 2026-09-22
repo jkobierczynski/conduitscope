@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "conduitscope/sv.hpp"
 
+#include "conduitscope/resource_limits.hpp"
+
 #include <iomanip>
 #include <sstream>
 
@@ -23,7 +25,9 @@ std::string hex2(uint8_t v) {
 // Safety cap against a malformed/adversarial capture declaring an implausible number of ASDUs --
 // see sv.hpp's file header comment. There is no per-ASDU nesting (unlike GOOSE's allData), so a
 // single flat cap on the ASDU count is enough.
-constexpr size_t kMaxSvAsdus = 200;
+// CLI-configurable via --max-decoded-objects -- see resource_limits.hpp. 0/unset keeps the
+// literal 200 default.
+size_t max_sv_asdus() { return resource_limits().max_decoded_objects.value_or(200); }
 
 std::string ascii_text(ByteSpan s) {
     std::string text;
@@ -246,7 +250,7 @@ void decode_sav_pdu(ByteSpan pdu_content, SvFrame& frame) {
             }
             case 0xA2: {
                 Cursor sc(content);
-                while (sc.remaining() >= 2 && frame.asdus.size() < kMaxSvAsdus) {
+                while (sc.remaining() >= 2 && frame.asdus.size() < max_sv_asdus()) {
                     uint8_t element_tag = sc.u8();
                     auto element_length = read_ber_length(sc);
                     if (!element_length) {
@@ -267,8 +271,8 @@ void decode_sav_pdu(ByteSpan pdu_content, SvFrame& frame) {
                     }
                     frame.asdus.push_back(decode_asdu(element_content, frame.notes));
                 }
-                if (frame.asdus.size() >= kMaxSvAsdus && sc.remaining() >= 2) {
-                    frame.notes.push_back("seqASDU: stopped after " + std::to_string(kMaxSvAsdus) +
+                if (frame.asdus.size() >= max_sv_asdus() && sc.remaining() >= 2) {
+                    frame.notes.push_back("seqASDU: stopped after " + std::to_string(max_sv_asdus()) +
                                            " ASDU(s) (safety cap)");
                 }
                 break;

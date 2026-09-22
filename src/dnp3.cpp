@@ -9,6 +9,7 @@
 #include <utility>
 
 #include "conduitscope/mqtt.hpp"
+#include "conduitscope/resource_limits.hpp"
 
 namespace conduitscope {
 
@@ -768,7 +769,9 @@ void decode_dnp3_application_layer(ByteSpan app_bytes, Dnp3ApplicationFragment& 
     }
 
     // --- Object headers. ---
-    constexpr size_t kMaxObjectHeaders = 200;  // safety cap against a pathological/malformed fragment
+    // CLI-configurable via --max-decoded-objects -- see resource_limits.hpp. 0/unset keeps the
+    // literal 200 default.
+    const size_t kMaxObjectHeaders = resource_limits().max_decoded_objects.value_or(200);  // safety cap against a pathological/malformed fragment
     size_t header_index = 0;
     while (!ac.at_end() && header_index < kMaxObjectHeaders) {
         if (ac.remaining() < 3) {
@@ -893,7 +896,10 @@ void decode_dnp3_application_layer(ByteSpan app_bytes, Dnp3ApplicationFragment& 
             ByteSpan block = ac.bytes(data_bytes);
             oh.object_data_bytes = data_bytes;
 
-            constexpr uint32_t kMaxDecodedPointsPerHeader = 200;
+            // CLI-configurable via --max-decoded-objects -- see resource_limits.hpp. 0/unset
+            // keeps the literal 200 default.
+            const uint32_t kMaxDecodedPointsPerHeader =
+                static_cast<uint32_t>(resource_limits().max_decoded_objects.value_or(200));
             uint32_t points_to_decode = std::min(oh.point_count, kMaxDecodedPointsPerHeader);
             if (is_packed(bits_per_point)) {
                 uint8_t mask = static_cast<uint8_t>((1u << bits_per_point) - 1);
@@ -958,7 +964,9 @@ void decode_dnp3_application_layer(ByteSpan app_bytes, Dnp3ApplicationFragment& 
     }
 
     // Detailed per-object notes (capped, same pattern as the S7comm item notes).
-    constexpr size_t kMaxDetailedNotes = 20;
+    // CLI-configurable via --max-decoded-objects -- see resource_limits.hpp. 0/unset keeps the
+    // literal 20 default.
+    const size_t kMaxDetailedNotes = resource_limits().max_decoded_objects.value_or(20);
     for (size_t i = 0; i < frag.objects.size() && i < kMaxDetailedNotes; ++i) {
         const auto& oh = frag.objects[i];
         std::ostringstream n;
@@ -974,7 +982,9 @@ void decode_dnp3_application_layer(ByteSpan app_bytes, Dnp3ApplicationFragment& 
         if (oh.decoded) {
             n << " -- " << oh.point_count << " point(s), " << oh.object_data_bytes << " byte(s) of object data";
             if (!oh.values.empty()) {
-                constexpr size_t kMaxBriefValues = 5;
+                // CLI-configurable via --max-decoded-objects -- see resource_limits.hpp.
+                // 0/unset keeps the literal 5 default.
+                const size_t kMaxBriefValues = resource_limits().max_decoded_objects.value_or(5);
                 n << "; values: [";
                 for (size_t v = 0; v < oh.values.size() && v < kMaxBriefValues; ++v) {
                     const auto& pv = oh.values[v];
@@ -1003,7 +1013,9 @@ void decode_dnp3_application_layer(ByteSpan app_bytes, Dnp3ApplicationFragment& 
     // Brief object summary appended to the one-line summary (capped, "+N more" beyond that).
     if (!frag.objects.empty()) {
         summary << " objects: [";
-        constexpr size_t kMaxBrief = 3;
+        // CLI-configurable via --max-decoded-objects -- see resource_limits.hpp. 0/unset keeps
+        // the literal 3 default.
+        const size_t kMaxBrief = resource_limits().max_decoded_objects.value_or(3);
         for (size_t i = 0; i < frag.objects.size() && i < kMaxBrief; ++i) {
             const auto& oh = frag.objects[i];
             if (i != 0) summary << ", ";
@@ -1136,8 +1148,10 @@ std::optional<Dnp3ApplicationFragment> Dnp3Decoder::process_frame(Dnp3LinkFrame&
     // Safety caps against a pathological/malformed capture stalling a fragment open forever and
     // growing this flow's reassembly state without bound -- a real fragment is nowhere near either
     // limit.
-    constexpr size_t kMaxBufferedBytes = 65536;
-    constexpr size_t kMaxFramesPerFragment = 500;
+    // CLI-configurable via --max-reassembly-bytes/--max-reassembly-segments -- see
+    // resource_limits.hpp. 0/unset keeps these two literal defaults.
+    const size_t kMaxBufferedBytes = resource_limits().max_reassembly_bytes.value_or(65536);
+    const size_t kMaxFramesPerFragment = resource_limits().max_reassembly_segments.value_or(500);
 
     state.buffered_app_bytes.insert(state.buffered_app_bytes.end(), app_bytes_this_frame.data(),
                                      app_bytes_this_frame.data() + app_bytes_this_frame.size());
@@ -1203,8 +1217,10 @@ std::optional<ProtocolResult> Dnp3Decoder::decode(ByteSpan payload, DecodeContex
     // Object headers/point values are capped cumulatively across every data link frame found in
     // this TCP payload, not per frame -- same caps as before, just now shared across however many
     // frames turned up.
-    constexpr size_t kMaxObjHeaders = 50;
-    constexpr size_t kMaxPointValues = 50;
+    // CLI-configurable via --max-decoded-objects -- see resource_limits.hpp. 0/unset keeps each
+    // literal 50 default.
+    const size_t kMaxObjHeaders = resource_limits().max_decoded_objects.value_or(50);
+    const size_t kMaxPointValues = resource_limits().max_decoded_objects.value_or(50);
     auto merge_application_layer = [&](const Dnp3ApplicationFragment& app, bool is_first_frame) {
         if (is_first_frame) {
             result.summary += "; " + app.summary;
@@ -1251,7 +1267,12 @@ std::optional<ProtocolResult> Dnp3Decoder::decode(ByteSpan payload, DecodeContex
     result.source_address = d->source;
     result.destination_address = d->destination;
 
-    constexpr size_t kMaxDnp3FramesPerPayload = 50;
+    // CLI-configurable via --max-coalesced-messages -- see resource_limits.hpp (this cap wasn't
+    // in item 7's original inventory -- DNP3/IEC104 turned out to share the exact same "N
+    // application messages coalesced per TCP payload" shape as FF-HSE/HART-IP/MQTT/EtherNet-IP/
+    // OPC UA, so both were folded into this flag too; see docs/DEVELOPMENT.md's item 7 "Update:
+    // implemented" entry). 0/unset keeps the literal 50 default.
+    const size_t kMaxDnp3FramesPerPayload = resource_limits().max_coalesced_messages.value_or(50);
     size_t offset = dnp3_frame_wire_length(*d);
     size_t frame_count = 1;
     while (offset < payload.size() && frame_count < kMaxDnp3FramesPerPayload) {

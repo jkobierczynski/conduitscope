@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "conduitscope/modbus.hpp"
 
+#include "conduitscope/resource_limits.hpp"
+
 #include <sstream>
 
 namespace conduitscope {
@@ -344,7 +346,11 @@ std::optional<ProtocolResult> ModbusDecoder::decode(ByteSpan payload, DecodeCont
             // Capacity guard against a pathological/malformed capture leaking memory -- same
             // kMaxTrackedTransactionsPerSession=2000 cap decoder.cpp's own removed
             // pair_modbus_transaction always applied.
-            constexpr size_t kMaxTrackedTransactionsPerSession = 2000;
+            // CLI-configurable via --max-decoded-objects -- see resource_limits.hpp (folded in
+            // as the closest fit among the five categories for a per-session state-map cap;
+            // see docs/DEVELOPMENT.md's item 7 "Update: implemented" entry). 0/unset keeps the
+            // literal 2000 default.
+            const size_t kMaxTrackedTransactionsPerSession = resource_limits().max_decoded_objects.value_or(2000);
             if (state.pending.size() < kMaxTrackedTransactionsPerSession) {
                 state.pending[mb.transaction_id] =
                     ModbusPendingRequest{ctx.packet_index, ctx.flow_key, mb.function_name, mb.summary,

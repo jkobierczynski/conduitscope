@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "conduitscope/twincat.hpp"
 
+#include "conduitscope/resource_limits.hpp"
+
 #include <iomanip>
 #include <sstream>
 
@@ -353,7 +355,10 @@ std::optional<ProtocolResult> TwinCatDecoder::decode(ByteSpan payload, DecodeCon
         } else {
             // Capacity guard against a pathological/malformed capture leaking memory -- same
             // kMaxTrackedTransactionsPerSession=2000 cap ModbusDecoder::decode applies.
-            constexpr size_t kMaxTrackedInvocationsPerSession = 2000;
+            // CLI-configurable via --max-decoded-objects -- see resource_limits.hpp (same
+            // reasoning as ModbusDecoder::decode's own kMaxTrackedTransactionsPerSession). 0/unset
+            // keeps the literal 2000 default.
+            const size_t kMaxTrackedInvocationsPerSession = resource_limits().max_decoded_objects.value_or(2000);
             if (state.pending.size() < kMaxTrackedInvocationsPerSession) {
                 state.pending[frame.invoke_id] =
                     TwinCatPendingRequest{ctx.packet_index, ctx.flow_key, frame.command_name, frame.summary};

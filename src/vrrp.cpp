@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "conduitscope/vrrp.hpp"
 
+#include "conduitscope/resource_limits.hpp"
+
 #include <algorithm>
 #include <sstream>
 
@@ -10,7 +12,9 @@ namespace conduitscope {
 
 namespace {
 
-constexpr size_t kMaxAddresses = 50;  // capped at 50 entries, same convention as elsewhere.
+// CLI-configurable via --max-decoded-objects -- see resource_limits.hpp. 0/unset keeps
+// the literal 50 default (same convention as elsewhere).
+const size_t kMaxAddresses = resource_limits().max_decoded_objects.value_or(50);
 
 std::string auth_type_name(uint8_t auth_type) {
     switch (auth_type) {

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "conduitscope/mqtt.hpp"
 
+#include "conduitscope/resource_limits.hpp"
+
 #include <algorithm>
 #include <cstring>
 #include <ctime>
@@ -711,7 +713,9 @@ SparkplugPayload decode_sparkplug_payload(ByteSpan payload, std::vector<std::str
     // Safety cap against a pathological/malformed capture claiming an unbounded number of metrics
     // -- generous relative to any real Sparkplug NBIRTH (which enumerates every metric a node will
     // ever report, but real deployments are nowhere near this size).
-    constexpr size_t kMaxMetricsParsed = 2000;
+    // CLI-configurable via --max-decoded-objects -- see resource_limits.hpp. 0/unset keeps the
+    // literal 2000 default.
+    const size_t kMaxMetricsParsed = resource_limits().max_decoded_objects.value_or(2000);
 
     try {
         while (!c.at_end()) {
@@ -765,8 +769,10 @@ SparkplugPayload decode_sparkplug_payload(ByteSpan payload, std::vector<std::str
         notes.push_back("stopped collecting Sparkplug B metrics after " + std::to_string(kMaxMetricsParsed) +
                          ", more may remain in this Payload (safety cap)");
     }
-    constexpr size_t kMaxRenderedMetrics = 50;  // same cap convention as every other "list of
-                                                  // decoded sub-values" field in this codebase
+    // CLI-configurable via --max-decoded-objects -- see resource_limits.hpp. 0/unset keeps the
+    // literal 50 default (same cap convention as every other "list of decoded sub-values" field
+    // in this codebase).
+    const size_t kMaxRenderedMetrics = resource_limits().max_decoded_objects.value_or(50);
     for (size_t i = 0; i < metric_spans.size() && result.metrics.size() < kMaxRenderedMetrics; ++i) {
         try {
             SparkplugMetricRaw raw = parse_sparkplug_metric_fields(metric_spans[i]);
@@ -1313,7 +1319,9 @@ std::optional<ProtocolResult> MqttDecoder::decode(ByteSpan payload, DecodeContex
     // Small control packets (PINGREQ/PUBACK/SUBACK/...) are common and it's normal for a sender or
     // the OS to coalesce several into one TCP segment before flushing, the same pattern as every
     // other small-message protocol in this codebase.
-    constexpr size_t kMaxMqttMessagesPerPayload = 50;
+    // CLI-configurable via --max-coalesced-messages -- see resource_limits.hpp. 0/unset keeps
+    // the literal 50 default.
+    const size_t kMaxMqttMessagesPerPayload = resource_limits().max_coalesced_messages.value_or(50);
     size_t offset = first->wire_length;
     size_t message_count = 1;
     while (offset < payload.size() && message_count < kMaxMqttMessagesPerPayload) {

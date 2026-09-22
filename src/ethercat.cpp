@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "conduitscope/ethercat.hpp"
 
+#include "conduitscope/resource_limits.hpp"
+
 #include <iomanip>
 #include <sstream>
 
@@ -24,7 +26,9 @@ std::string hex8(uint32_t v) {
 // see ethercat.hpp's file header comment's "declared Length" paragraph. The real capture fixture's
 // deepest observed chain is 11 datagrams (see ATTRIBUTION.md); this cap is set well above that,
 // the same margin SV's kMaxSvAsdus gives its own real-world-observed count.
-constexpr size_t kMaxEthercatDatagrams = 200;
+// CLI-configurable via --max-decoded-objects -- see resource_limits.hpp. 0/unset keeps the
+// literal 200 default.
+size_t max_ethercat_datagrams() { return resource_limits().max_decoded_objects.value_or(200); }
 
 // Frame header Type field -- see ethercat.hpp's file header comment's frame header table
 // (cross-checked against packet-ethercat-frame.c's EthercatFrameTypes value_string).
@@ -128,8 +132,8 @@ std::vector<EthercatDatagram> decode_datagram_chain(ByteSpan region, std::vector
     std::vector<EthercatDatagram> datagrams;
     Cursor c(region);
     while (true) {
-        if (datagrams.size() >= kMaxEthercatDatagrams) {
-            notes.push_back("EtherCAT datagram chain: stopped after " + std::to_string(kMaxEthercatDatagrams) +
+        if (datagrams.size() >= max_ethercat_datagrams()) {
+            notes.push_back("EtherCAT datagram chain: stopped after " + std::to_string(max_ethercat_datagrams()) +
                              " datagram(s) (safety cap)");
             break;
         }

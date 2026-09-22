@@ -863,6 +863,148 @@ and all 9 `fuzz_*_corpus_regression` tests pass under the sanitizer build;
 fresh 60-second ASan/UBSan mutation bursts on `fuzz_packet_decode` and
 `fuzz_pcap_reader` (the two harnesses that exercise this code) found nothing.
 
+**Update: item 7 itself (CLI-configurability) implemented.** Jurgen picked
+this up next after migration batch 2 finished, and chose the grouped/tiered
+CLI surface: five new flags, each overriding a whole category of related
+constants at once, rather than 60+ individual flags or exposing only the
+handful of highest-severity ones. `include/conduitscope/resource_limits.hpp`/
+`src/resource_limits.cpp` add a `ResourceLimits` struct (five
+`std::optional<size_t>` fields, one per flag) behind a plain process-wide
+`resource_limits()`/`set_resource_limits()` accessor pair -- a Meyers-
+singleton-style function-local static, the same pattern every `*_decoder()`
+accessor in this codebase already uses, just holding mutable configuration
+instead of an immutable decoder instance. A global accessor rather than a
+parameter threaded through `DecodeContext`/`ProtocolDecoder::
+tcp_declared_length()` was the deliberate choice: many in-scope constants
+live in places with no `DecodeContext` at all -- most of the duplicated
+"50-entry list cap" protocols (EIGRP/OSPF/PIM/IGMP/ICMP/IGRP/RIP/VRRP/HSRP)
+are still plain `try_parse_X(ByteSpan) -> optional<XMessage>` legacy free
+functions with zero extra parameters, and the recursion-depth helpers
+(MMS/CIP/MPLS/S7comm-Plus/GOOSE/DNS) recurse many levels deep carrying only
+a local depth counter -- and because a `ResourceLimits` value is process-run
+CONFIGURATION (parsed once from CLI arguments, then read-only for the rest
+of the process's life), a genuinely different category from
+`FlowStateMap`/`DecodeContext`'s per-packet/per-flow state. `DecodeOptions`
+(`decoder.hpp`) gained a `ResourceLimits limits;` field, and `Decoder`'s
+constructor now calls `set_resource_limits(options_.limits);` as its first
+action, before storing `options_` -- safe under this codebase's actual usage
+pattern (every real entry point, the three CLI subcommands and every fuzz
+harness, constructs exactly one `Decoder` per process). Every in-scope
+`constexpr size_t kMaxX = N;` became `const size_t kMaxX =
+resource_limits().<field>.value_or(N);` (or, where the constant lived at
+namespace scope and was read from more than one function, a small
+non-constexpr accessor function calling the same expression) -- `N` stays
+visibly documented right at the site, `resource_limits()` is the override
+path, and `std::nullopt`/unset (never passing the flag) reproduces today's
+behavior byte-for-byte, which is what keeps every existing test passing
+unchanged with zero new flags in play.
+
+The five flags, each registered identically on `decode`, `policy validate`,
+and `inventory` (unlike the `--modbus-port`-style port-list flags, which
+stay decode-only -- a pre-existing, separate gap, out of scope here) via one
+shared `add_resource_limit_options()` helper in `cli_main.cpp`:
+
+- **`--max-reassembly-bytes`** -- every cross-segment payload-buffering byte
+  cap: `decoder.cpp`'s general TCP reassembly path (16 MiB), `dnp3.cpp`'s
+  fragment reassembly (64 KiB), `cotp.cpp`'s TSDU reassembly (1 MiB), and
+  `opcua.cpp`'s/`ffhse.cpp`'s own declared-length plausibility ceilings
+  (16 MiB each -- the same "16 MiB is implausible" magic number the general
+  TCP cap uses, per this item's own "Correction" above).
+- **`--max-reassembly-segments`** -- the three companion frame/segment-count
+  caps: `decoder.cpp` (20,000), `dnp3.cpp` (500), `cotp.cpp` (2,000).
+- **`--max-recursion-depth`** -- every recursive-decode depth cap: MMS
+  Data-value nesting (32), EtherNet/IP CIP `Multiple_Service_Packet`/
+  `Unconnected_Send` nesting (4), MPLS label-stack depth (16, moved from a
+  namespace-scope `constexpr` in `mpls.hpp` to an `inline` function there,
+  since `mpls.cpp` is its only reader), S7comm-Plus struct/item nesting (16),
+  GOOSE Data ASN.1 nesting (6), and -- folded in during implementation,
+  since it plays the identical role and the flag's whole point is "every
+  cap in this category, uniformly" -- `dns.cpp`'s DNS name-compression
+  pointer-hop guard (128, a loop/decompression-bomb guard rather than true
+  recursion, but the same shape).
+- **`--max-decoded-objects`** -- every per-message decoded-object/value/
+  list-entry cap, the largest and most heterogeneous group: DNP3's object-
+  header/point-value family (`kMaxObjectHeaders`=200,
+  `kMaxDecodedPointsPerHeader`=200, `kMaxDetailedNotes`=20,
+  `kMaxBriefValues`=5, `kMaxBrief`=3, `kMaxObjHeaders`=50,
+  `kMaxPointValues`=50), IEC104 (`kMaxDecodedObjects`=200,
+  `kMaxObjectValues`=50), GOOSE (`kMaxGooseDataValues`=200,
+  `kMaxRenderedBits`=256), EtherNet/IP CIP (`kMaxCipValues`=50,
+  `kMaxEmbeddedMessages`=25, `kMaxCipElements`=25, `kMaxCpfItems`=20,
+  `kMaxCipIoCpfItems`=20), S7comm-Plus (`kMaxRenderedElements`=20,
+  `kMaxRenderedItems`=50, `kMaxBlobDisplay`=64, `kMaxArrayIterations`=10000),
+  classic S7comm's `kMaxDetailedNotes`=20, MQTT (`kMaxMetricsParsed`=2000,
+  `kMaxRenderedMetrics`=50), decoder.cpp's own summary-list family
+  (`kMaxDcpBlockValues`=50, `kMaxGooseDataValueEntries`=50,
+  `kMaxSvAsduSummaries`=50, `kMaxEthercatDatagramSummaries`=50,
+  `kMaxMplsLabelSummaries`=50, `kMaxStpMstiSummaries`=50, `kMaxTags`=50 x2,
+  `kMaxMmsValues`=50), the 9 duplicated "50-entry list" constants
+  (`kMaxList`/`kMaxRepeated`/`kMaxRoutes`/`kMaxAddresses`/`kMaxTlvs` in
+  eigrp/ospf/pim/igmp/icmp/igrp/rip/vrrp/hsrp.cpp), and -- folded in during
+  implementation, for the same "every cap in this category" reason as
+  DNS above -- PROFINET's `kMaxDcpBlocks`=30, EtherCAT's
+  `kMaxEthercatDatagrams`=200, SV's `kMaxSvAsdus`=200, and Modbus's/
+  TwinCAT's own per-session pending-transaction-map caps
+  (`kMaxTrackedTransactionsPerSession`/`kMaxTrackedInvocationsPerSession`,
+  2000 each -- the closest fit among the five categories for a per-session
+  state-map cap, not a per-message one, but no other category fits better).
+- **`--max-coalesced-messages`** -- every "N application-layer messages
+  found coalesced in one TCP/UDP payload" cap, all already 50 by default:
+  FF-HSE (`kMaxFfhseMessagesPerDatagram`/`kMaxFfhseMessagesPerPayload`),
+  HART-IP (`kMaxHartIpMessagesPerPayload`), MQTT
+  (`kMaxMqttMessagesPerPayload`), EtherNet/IP (`kMaxEnipMessagesPerPayload`),
+  OPC UA (`kMaxOpcUaMessagesPerPayload`), and -- folded in during
+  implementation, since both turned out to share this exact shape and the
+  original inventory simply missed them -- DNP3's
+  `kMaxDnp3FramesPerPayload` and IEC104's `kMaxApdusPerPayload`.
+
+**Deliberately excluded, staying compile-time** (not silently dropped --
+each is a genuine protocol-native or different-trust-boundary bound, not an
+open-ended DoS-tuning knob):
+
+- `modbus.cpp`'s `kMaxPlausibleMbapLength` (300) and `twincat.cpp`'s
+  `kMaxPlausibleAdsDataLength` (65536) -- validate a declared length against
+  its own protocol-native field range (a detection-correctness gate on an
+  inherently small, spec-bounded field), not an open-ended ceiling the way
+  OPC UA/FF-HSE's raw 32-bit fields are.
+- `pcap_reader.cpp`'s `kMaxPlausiblePacketBytes`/`kMaxPlausibleBlockBytes`
+  (16 MiB each) -- a different trust boundary: the capture FILE's own
+  record/block-length header, not in-flight payload reassembly of untrusted
+  network bytes.
+- `policy.cpp`'s `kMaxSuggestDistance` (5) -- bounds a policy-file typo-
+  suggestion search over a trusted local file, not attacker-controlled
+  packet bytes.
+- `stp.cpp`'s `kMaxStpMstiMessages` (64) -- not an arbitrary safety margin
+  like every constant above: it's the reference spec's own documented
+  ceiling ("an integral number, from 0 to 64 inclusive, of MSTI
+  Configuration Messages" -- see `packet-bpdu.c`'s comment on
+  `VERSION_3_STATIC_LENGTH`, quoted in `stp.hpp`'s file header). Tightening
+  or loosening it would mean decoding LESS than a spec-compliant BPDU can
+  legally carry, or claiming to support more than the spec allows -- the
+  same reasoning that excludes Modbus's/TwinCAT's field-width bounds above.
+  (`decoder.cpp`'s OWN `kMaxStpMstiSummaries`=50 -- an arbitrary display-
+  truncation cap on top of whatever STP decoded -- is a different constant
+  and IS included in `--max-decoded-objects`; only this file's spec-mandated
+  64 is excluded.)
+- `include/conduitscope/policy.hpp`'s `kMaxVlanId` (4094) -- IEEE 802.1Q's
+  own valid-VLAN-ID range boundary (0 and 4095 are reserved), a protocol
+  validity bound like the Modbus/TwinCAT/STP entries above, not a resource
+  cap at all.
+
+Verified: full CTest suite (1205/1205 default config, 1195/1195 no-libpcap
+config, both 100% pass with every existing `PASS_REGULAR_EXPRESSION`
+unchanged -- confirming unset/0 reproduces today's behavior exactly);
+zero-warning builds across all three established configs (default+libpcap,
+no-libpcap, MinGW cross-compile); 8 new dedicated regression tests (one
+demonstrating each flag's actual effect, plus one per subcommand confirming
+`--help` lists all five) including a new `tests/sample_goose_deep_nesting.pcap`
+fixture (`tools/make_sample_pcap.py`'s `build_goose_deep_nesting_sample()`)
+specifically because every existing GOOSE fixture's `allData` nests at most
+one level deep -- too shallow to demonstrate `--max-recursion-depth` at any
+CLI-representable value, since `0` means "unset/default," not "a cap of
+zero"; manual smoke test of each flag's actual effect against a real/
+synthetic fixture, plus `--help` output on all three subcommands.
+
 
 ## PROTOCOL DETECTION
 

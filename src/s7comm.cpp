@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "conduitscope/s7comm.hpp"
 
+#include "conduitscope/resource_limits.hpp"
+
 #include <algorithm>
 #include <sstream>
 
@@ -499,10 +501,12 @@ std::string brief_value_list(const std::vector<S7DataItem>& items) {
 // Appends one detailed line per item/value to `notes` (capped so a heavily
 // batched real-world request -- e.g. 20 items in one Read Var call, which
 // is common -- doesn't blow up the notes list without bound).
-constexpr size_t kMaxDetailedNotes = 20;
+// CLI-configurable via --max-decoded-objects -- see resource_limits.hpp. 0/unset keeps the
+// literal 20 default.
+size_t max_detailed_notes() { return resource_limits().max_decoded_objects.value_or(20); }
 
 void append_item_notes(const std::vector<S7Item>& items, std::vector<std::string>& notes) {
-    for (size_t i = 0; i < items.size() && i < kMaxDetailedNotes; ++i) {
+    for (size_t i = 0; i < items.size() && i < max_detailed_notes(); ++i) {
         const auto& it = items[i];
         std::ostringstream line;
         line << "item " << i << ": ";
@@ -520,8 +524,8 @@ void append_item_notes(const std::vector<S7Item>& items, std::vector<std::string
         }
         notes.push_back(line.str());
     }
-    if (items.size() > kMaxDetailedNotes) {
-        notes.push_back("... and " + std::to_string(items.size() - kMaxDetailedNotes) +
+    if (items.size() > max_detailed_notes()) {
+        notes.push_back("... and " + std::to_string(items.size() - max_detailed_notes()) +
                          " more item(s) not listed individually");
     }
 }
@@ -655,17 +659,17 @@ void parse_pi_control_blocks(ByteSpan block_span, std::vector<std::string>& out,
 }
 
 void append_pi_control_block_notes(const std::vector<std::string>& blocks, std::vector<std::string>& notes) {
-    for (size_t i = 0; i < blocks.size() && i < kMaxDetailedNotes; ++i) {
+    for (size_t i = 0; i < blocks.size() && i < max_detailed_notes(); ++i) {
         notes.push_back("block " + std::to_string(i) + ": " + blocks[i]);
     }
-    if (blocks.size() > kMaxDetailedNotes) {
-        notes.push_back("... and " + std::to_string(blocks.size() - kMaxDetailedNotes) +
+    if (blocks.size() > max_detailed_notes()) {
+        notes.push_back("... and " + std::to_string(blocks.size() - max_detailed_notes()) +
                          " more block(s) not listed individually");
     }
 }
 
 void append_value_notes(const std::vector<S7DataItem>& items, std::vector<std::string>& notes) {
-    for (size_t i = 0; i < items.size() && i < kMaxDetailedNotes; ++i) {
+    for (size_t i = 0; i < items.size() && i < max_detailed_notes(); ++i) {
         const auto& di = items[i];
         std::ostringstream line;
         line << "value " << i << ": ";
@@ -682,8 +686,8 @@ void append_value_notes(const std::vector<S7DataItem>& items, std::vector<std::s
         if (!wrote_something) line << "(no data)";
         notes.push_back(line.str());
     }
-    if (items.size() > kMaxDetailedNotes) {
-        notes.push_back("... and " + std::to_string(items.size() - kMaxDetailedNotes) +
+    if (items.size() > max_detailed_notes()) {
+        notes.push_back("... and " + std::to_string(items.size() - max_detailed_notes()) +
                          " more value(s) not listed individually");
     }
 }

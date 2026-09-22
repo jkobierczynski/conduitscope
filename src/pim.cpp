@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "conduitscope/pim.hpp"
 
+#include "conduitscope/resource_limits.hpp"
+
 #include <sstream>
 
 #include "conduitscope/ipv4.hpp"
@@ -9,7 +11,9 @@ namespace conduitscope {
 
 namespace {
 
-constexpr size_t kMaxList = 50;  // capped at 50 entries, same convention as elsewhere.
+// CLI-configurable via --max-decoded-objects -- see resource_limits.hpp. 0/unset keeps
+// the literal 50 default (same convention as elsewhere).
+const size_t kMaxList = resource_limits().max_decoded_objects.value_or(50);
 
 constexpr uint8_t kAfIpv4 = 1;
 constexpr uint8_t kEtNative = 0;

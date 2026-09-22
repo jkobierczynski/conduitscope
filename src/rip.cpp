@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "conduitscope/rip.hpp"
 
+#include "conduitscope/resource_limits.hpp"
+
 #include <sstream>
 
 #include "conduitscope/ipv4.hpp"
@@ -10,7 +12,9 @@ namespace conduitscope {
 namespace {
 
 constexpr size_t kRteSize = 20;
-constexpr size_t kMaxRoutes = 50;  // capped at 50 entries, matching the rest of the codebase.
+// CLI-configurable via --max-decoded-objects -- see resource_limits.hpp. 0/unset keeps
+// the literal 50 default (matching the rest of the codebase).
+const size_t kMaxRoutes = resource_limits().max_decoded_objects.value_or(50);
 
 std::string command_name(uint8_t command) {
     switch (command) {

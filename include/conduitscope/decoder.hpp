@@ -43,6 +43,7 @@
 #include "conduitscope/profinet.hpp"
 #include "conduitscope/protocol_decoder.hpp"
 #include "conduitscope/quic.hpp"
+#include "conduitscope/resource_limits.hpp"
 #include "conduitscope/rip.hpp"
 #include "conduitscope/s7commplus.hpp"
 #include "conduitscope/stp.hpp"
@@ -253,6 +254,12 @@ struct DecodeOptions {
     // result. Off by default so one malformed packet doesn't abort decoding
     // an entire capture.
     bool strict = false;
+    // Process-wide overrides for the resource-exhaustion/DoS-protection constants scattered
+    // across decoder.cpp and the individual protocol files -- see resource_limits.hpp for the
+    // full rationale. Default-constructed (every field std::nullopt) means every site keeps its
+    // own compile-time default, byte-identical to this feature's absence. Decoder's constructor
+    // below installs this into the process-wide resource_limits() accessor.
+    ResourceLimits limits;
 };
 
 // How a TCP flow's client (initiator) vs. server side was determined -- shared by `decode`'s own
@@ -1368,7 +1375,15 @@ struct TcpFlowBuffer {
 
 class Decoder {
 public:
-    explicit Decoder(DecodeOptions options) : options_(std::move(options)) {}
+    // Installs options.limits into the process-wide resource_limits() accessor before storing
+    // options_, so every in-scope constant site (many with no DecodeContext/options access at
+    // all -- see resource_limits.hpp) sees the configured overrides from the very first
+    // decode() call. Safe under this codebase's actual usage pattern: every real entry point
+    // (the three CLI subcommands, every fuzz harness) constructs exactly one Decoder per
+    // process -- see resource_limits.hpp's own comment on set_resource_limits.
+    explicit Decoder(DecodeOptions options) : options_(std::move(options)) {
+        set_resource_limits(options_.limits);
+    }
 
     // May throw ParseError only when options.strict is true and an
     // Ethernet/IPv4/TCP-layer parse fails; otherwise failures are captured

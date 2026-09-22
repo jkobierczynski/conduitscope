@@ -6,6 +6,7 @@
 
 #include "conduitscope/ipv4.hpp"
 #include "conduitscope/link_layer.hpp"
+#include "conduitscope/resource_limits.hpp"
 
 namespace conduitscope {
 
@@ -114,7 +115,9 @@ std::string data_status_summary(uint8_t status) {
 
 // --- DCP block decoding --------------------------------------------------------------------------
 
-constexpr size_t kMaxDcpBlocks = 30;  // safety cap, same role as enip.cpp's kMaxCipIoCpfItems
+// CLI-configurable via --max-decoded-objects -- see resource_limits.hpp. 0/unset keeps the
+// literal 30 default -- safety cap, same role as enip.cpp's kMaxCipIoCpfItems.
+size_t max_dcp_blocks() { return resource_limits().max_decoded_objects.value_or(30); }
 
 // Option 0x01 (IP) and Option 0x02 (Device Properties) blocks are prefixed by a 2-byte BlockInfo
 // or BlockQualifier field BEFORE their actual content, but only in specific (ServiceID,
@@ -139,7 +142,7 @@ void decode_dcp_blocks(ByteSpan block_list, uint8_t service_id, bool is_response
     size_t prefix_len = dcp_block_prefix_len(service_id, is_response);
     Cursor c(block_list);
     size_t block_count = 0;
-    while (c.remaining() >= 4 && block_count < kMaxDcpBlocks) {
+    while (c.remaining() >= 4 && block_count < max_dcp_blocks()) {
         uint8_t option = c.u8();
         uint8_t suboption = c.u8();
         uint16_t block_length = c.u16be();
@@ -219,8 +222,8 @@ void decode_dcp_blocks(ByteSpan block_list, uint8_t service_id, bool is_response
             c.u8();  // pad byte, word-alignment (see packet-pn-dcp.c's dissect_PNDCP_Block)
         }
     }
-    if (block_count >= kMaxDcpBlocks) {
-        frame.notes.push_back("stopped after " + std::to_string(kMaxDcpBlocks) + " DCP block(s) (safety cap)");
+    if (block_count >= max_dcp_blocks()) {
+        frame.notes.push_back("stopped after " + std::to_string(max_dcp_blocks()) + " DCP block(s) (safety cap)");
     }
 }
 

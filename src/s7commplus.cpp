@@ -7,6 +7,7 @@
 #include <iomanip>
 #include <sstream>
 
+#include "conduitscope/resource_limits.hpp"
 #include "conduitscope/s7comm.hpp"  // S7COMM_PLUS_PROTOCOL_ID
 
 namespace conduitscope {
@@ -295,13 +296,21 @@ std::string truncate_display(const std::string& s, size_t max_len) {
     return s.substr(0, max_len) + "...(" + std::to_string(s.size()) + " bytes total)";
 }
 
-constexpr int kMaxStructDepth = 16;         // mirrors mms.cpp's own recursion-depth cap posture
-constexpr uint32_t kMaxArrayIterations = 10000;  // defense-in-depth only -- Cursor's own bounds
-                                                   // checks already stop a genuinely-truncated
-                                                   // buffer well before this
-constexpr size_t kMaxRenderedElements = 20;
-constexpr size_t kMaxRenderedItems = 50;    // matches DecodedPacket's own s7comm_item_tags cap
-constexpr size_t kMaxBlobDisplay = 64;
+// CLI-configurable via --max-recursion-depth/--max-decoded-objects -- see resource_limits.hpp.
+// 0/unset keeps each literal default below. Functions rather than constexpr/const namespace-
+// scope values, since they now read process-wide configuration.
+int max_struct_depth() {  // mirrors mms.cpp's own recursion-depth cap posture
+    return static_cast<int>(resource_limits().max_recursion_depth.value_or(16));
+}
+uint32_t max_array_iterations() {  // defense-in-depth only -- Cursor's own bounds checks already
+                                     // stop a genuinely-truncated buffer well before this
+    return static_cast<uint32_t>(resource_limits().max_decoded_objects.value_or(10000));
+}
+size_t max_rendered_elements() { return resource_limits().max_decoded_objects.value_or(20); }
+size_t max_rendered_items() {  // matches DecodedPacket's own s7comm_item_tags cap
+    return resource_limits().max_decoded_objects.value_or(50);
+}
+size_t max_blob_display() { return resource_limits().max_decoded_objects.value_or(64); }
 
 // Forward declarations (decode_value and decode_id_value_list are mutually referenced: a Struct
 // value signals the caller to recurse into decode_id_value_list for its members).
@@ -348,13 +357,13 @@ std::string decode_value_element(Cursor& c, uint8_t datatype, int depth, bool& i
             ByteSpan bytes = c.bytes(std::min<size_t>(len, c.remaining()));
             std::string hex = to_hex(bytes, "");
             if (bytes.size() < len) hex += "...(truncated, " + std::to_string(len) + " bytes declared)";
-            return truncate_display(hex, kMaxBlobDisplay * 2);
+            return truncate_display(hex, max_blob_display() * 2);
         }
         case 0x15: {  // WString: varuint32 length (characters, UTF-8 encoded) + bytes
             uint32_t len = read_varuint32(c);
             ByteSpan bytes = c.bytes(std::min<size_t>(len, c.remaining()));
             std::string text(reinterpret_cast<const char*>(bytes.data()), bytes.size());
-            return "\"" + truncate_display(text, kMaxBlobDisplay) + "\"";
+            return "\"" + truncate_display(text, max_blob_display()) + "\"";
         }
         default:
             throw ParseError("unrecognized S7comm-Plus value datatype 0x" +
@@ -380,13 +389,13 @@ S7CommPlusValue decode_value(Cursor& c, int depth) {
     if (is_array || is_address_array) {
         array_size = read_varuint32(c);
     } else if (is_sparsearray) {
-        array_size = kMaxArrayIterations;  // null-terminated on the wire, see loop below
+        array_size = max_array_iterations();  // null-terminated on the wire, see loop below
     }
     v.array_size = (is_sparsearray ? 0 : array_size);  // filled in as elements are actually found
 
     std::vector<std::string> elements;
     bool saw_struct = false;
-    uint32_t bound = std::min(array_size, kMaxArrayIterations);
+    uint32_t bound = std::min(array_size, max_array_iterations());
     for (uint32_t i = 0; i < bound; ++i) {
         if (is_sparsearray) {
             uint32_t key = read_varuint32(c);
@@ -408,7 +417,7 @@ S7CommPlusValue decode_value(Cursor& c, int depth) {
             }
             saw_struct = true;
         }
-        if (elements.size() < kMaxRenderedElements) elements.push_back(elem);
+        if (elements.size() < max_rendered_elements()) elements.push_back(elem);
         v.datatype_recognized = true;
         if (!(is_array || is_address_array || is_sparsearray)) break;  // scalar: exactly one element
     }
@@ -450,9 +459,9 @@ S7CommPlusValue decode_value(Cursor& c, int depth) {
 
 std::vector<S7CommPlusIdValue> decode_id_value_list(Cursor& c, bool looping, int depth) {
     std::vector<S7CommPlusIdValue> result;
-    if (depth > kMaxStructDepth) {
+    if (depth > max_struct_depth()) {
         throw ParseError("S7comm-Plus id-value-list nesting exceeded the safety depth cap (" +
-                          std::to_string(kMaxStructDepth) + ") -- decoding stops here");
+                          std::to_string(max_struct_depth()) + ") -- decoding stops here");
     }
     do {
         uint32_t id = read_varuint32(c);
@@ -466,7 +475,7 @@ std::vector<S7CommPlusIdValue> decode_id_value_list(Cursor& c, bool looping, int
         if (!name.empty()) s << " (" << name << ")";
         s << ": " << iv.value.rendered;
         iv.rendered = s.str();
-        if (result.size() < kMaxRenderedItems) result.push_back(iv);
+        if (result.size() < max_rendered_items()) result.push_back(iv);
     } while (looping);
     return result;
 }
@@ -532,7 +541,7 @@ S7CommPlusItemAddress decode_item_address(Cursor& c) {
     addr.base_area = field4;
     if (addr.is_object_id_style) tag << ", ID=" << field4;
 
-    for (uint32_t i = 2; i <= addr.lid_nesting_depth && i <= kMaxArrayIterations; ++i) {
+    for (uint32_t i = 2; i <= addr.lid_nesting_depth && i <= max_array_iterations(); ++i) {
         uint32_t v = read_varuint32(c);
         addr.extra_lids.push_back(v);
         if (addr.is_object_id_style) {
@@ -553,7 +562,7 @@ void decode_request_getmultivar(Cursor& c, S7CommPlusFrame& frame) {
         read_varuint32(c);  // "number of fields in complete set" -- not independently surfaced
         for (uint32_t i = 0; i < item_count; ++i) {
             auto addr = decode_item_address(c);
-            if (frame.item_addresses.size() < kMaxRenderedItems) frame.item_addresses.push_back(addr);
+            if (frame.item_addresses.size() < max_rendered_items()) frame.item_addresses.push_back(addr);
         }
     } else {
         uint32_t addr_count = read_varuint32(c);
@@ -563,7 +572,7 @@ void decode_request_getmultivar(Cursor& c, S7CommPlusFrame& frame) {
             a.is_object_id_style = true;
             a.crc_or_rid = 0;
             a.tag = "by subscribed Link-Id=" + std::to_string(link_id) + ", ID=" + std::to_string(id);
-            if (frame.item_addresses.size() < kMaxRenderedItems) frame.item_addresses.push_back(a);
+            if (frame.item_addresses.size() < max_rendered_items()) frame.item_addresses.push_back(a);
         }
     }
 }
@@ -584,7 +593,7 @@ void decode_response_getmultivar(Cursor& c, S7CommPlusFrame& frame) {
         std::ostringstream s;
         s << "item=" << item_number << ": " << iv.value.rendered;
         iv.rendered = s.str();
-        if (frame.id_values.size() < kMaxRenderedItems) frame.id_values.push_back(iv);
+        if (frame.id_values.size() < max_rendered_items()) frame.id_values.push_back(iv);
     } while (true);
 
     // itemnumber-errorvalue-list (looping, terminated by item number 0)
@@ -599,7 +608,7 @@ void decode_response_getmultivar(Cursor& c, S7CommPlusFrame& frame) {
         std::ostringstream s;
         s << "item=" << item_number << ": " << ie.error_code_name << " (" << ie.error_code << ")";
         ie.rendered = s.str();
-        if (frame.item_errors.size() < kMaxRenderedItems) frame.item_errors.push_back(ie);
+        if (frame.item_errors.size() < max_rendered_items()) frame.item_errors.push_back(ie);
     } while (true);
 }
 
@@ -612,7 +621,7 @@ void decode_request_setmultivar(Cursor& c, S7CommPlusFrame& frame) {
         read_varuint32(c);  // "number of fields in complete set"
         for (uint32_t i = 0; i < item_count; ++i) {
             auto addr = decode_item_address(c);
-            if (frame.item_addresses.size() < kMaxRenderedItems) frame.item_addresses.push_back(addr);
+            if (frame.item_addresses.size() < max_rendered_items()) frame.item_addresses.push_back(addr);
         }
     } else {
         item_count = read_varuint32(c);
@@ -622,13 +631,13 @@ void decode_request_setmultivar(Cursor& c, S7CommPlusFrame& frame) {
             S7CommPlusItemAddress a;
             a.is_object_id_style = true;
             a.tag = "in Object Id=" + hex_u32(marker) + ", ID=" + std::to_string(id);
-            if (frame.item_addresses.size() < kMaxRenderedItems) frame.item_addresses.push_back(a);
+            if (frame.item_addresses.size() < max_rendered_items()) frame.item_addresses.push_back(a);
         }
     }
     for (uint32_t i = 0; i < item_count; ++i) {
         auto one = decode_id_value_list(c, /*looping=*/false, 0);
         for (auto& iv : one) {
-            if (frame.id_values.size() < kMaxRenderedItems) frame.id_values.push_back(iv);
+            if (frame.id_values.size() < max_rendered_items()) frame.id_values.push_back(iv);
         }
     }
 }
@@ -649,7 +658,7 @@ void decode_response_setmultivar(Cursor& c, S7CommPlusFrame& frame) {
         std::ostringstream s;
         s << "item=" << item_number << ": " << ie.error_code_name << " (" << ie.error_code << ")";
         ie.rendered = s.str();
-        if (frame.item_errors.size() < kMaxRenderedItems) frame.item_errors.push_back(ie);
+        if (frame.item_errors.size() < max_rendered_items()) frame.item_errors.push_back(ie);
     } while (true);
 }
 
@@ -664,7 +673,7 @@ void decode_request_setvariable(Cursor& c, S7CommPlusFrame& frame) {
     for (uint32_t i = 0; i < item_count; ++i) {
         auto one = decode_id_value_list(c, /*looping=*/false, 0);
         for (auto& iv : one) {
-            if (frame.id_values.size() < kMaxRenderedItems) frame.id_values.push_back(iv);
+            if (frame.id_values.size() < max_rendered_items()) frame.id_values.push_back(iv);
         }
     }
 }

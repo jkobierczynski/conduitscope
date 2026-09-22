@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "conduitscope/igmp.hpp"
 
+#include "conduitscope/resource_limits.hpp"
+
 #include <algorithm>
 #include <sstream>
 
@@ -10,7 +12,9 @@ namespace conduitscope {
 
 namespace {
 
-constexpr size_t kMaxRepeated = 50;  // capped at 50 entries, same convention as elsewhere.
+// CLI-configurable via --max-decoded-objects -- see resource_limits.hpp. 0/unset keeps
+// the literal 50 default (same convention as elsewhere).
+const size_t kMaxRepeated = resource_limits().max_decoded_objects.value_or(50);
 
 enum IgmpType : uint8_t {
     IGMP_MEMBERSHIP_QUERY = 0x11,

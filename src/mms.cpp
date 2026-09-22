@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "conduitscope/mms.hpp"
 
+#include "conduitscope/resource_limits.hpp"
+
 #include <algorithm>
 #include <cstring>
 #include <ctime>
@@ -213,10 +215,15 @@ std::string hex_of(ByteSpan span) { return to_hex(span, ""); }
 // rather than trusting well-formedness.
 namespace {
 
-constexpr int kMaxDataRecursionDepth = 32;
+// CLI-configurable via --max-recursion-depth -- see resource_limits.hpp. 0/unset keeps the
+// literal 32 default. A function rather than a constexpr/const namespace-scope value, since it
+// now reads process-wide configuration; called fresh on each recursive invocation below.
+int max_data_recursion_depth() {
+    return static_cast<int>(resource_limits().max_recursion_depth.value_or(32));
+}
 
 std::string decode_data_value(const BerTlv& tlv, int depth) {
-    if (depth > kMaxDataRecursionDepth) {
+    if (depth > max_data_recursion_depth()) {
         return "<recursion depth limit reached, " + std::to_string(tlv.content.size()) +
                " byte(s) not further decoded: " + hex_of(tlv.content) + ">";
     }

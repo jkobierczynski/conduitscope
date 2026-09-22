@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "conduitscope/ffhse.hpp"
 
+#include "conduitscope/resource_limits.hpp"
+
 #include <algorithm>
 #include <cstdint>
 #include <iomanip>
@@ -53,7 +55,13 @@ uint64_t be64(ByteSpan s, size_t off) {
 // 0.4%), adding it here removes the great majority of that false-positive class without weakening
 // this decoder's ability to recognize a real, truncated FF-HSE message -- a legitimate capture's
 // Message Length is never anywhere near 16 MiB in practice.
-constexpr uint32_t kMaxPlausibleMessageLength = 16u * 1024u * 1024u;
+// CLI-configurable via --max-reassembly-bytes -- see resource_limits.hpp. 0/unset keeps the
+// literal 16 MiB default this constant always had. A function rather than a constexpr/const
+// namespace-scope value, since it now reads process-wide configuration rather than a fixed
+// literal, and both call sites below already call it fresh each time.
+uint32_t max_plausible_message_length() {
+    return static_cast<uint32_t>(resource_limits().max_reassembly_bytes.value_or(16u * 1024u * 1024u));
+}
 
 std::string ascii_field(ByteSpan s) { return std::string(reinterpret_cast<const char*>(s.data()), s.size()); }
 
@@ -66,9 +74,12 @@ std::string trim_trailing_nul(ByteSpan s) {
     return std::string(reinterpret_cast<const char*>(s.data()), n);
 }
 
-constexpr size_t kListCap = 64;  // safety cap on how many list entries this decoder ever renders
-                                   // into `values` for one message -- see the SM Find Tag Reply/SM
-                                   // Identify/LAN Get Statistics/LAN Diagnostic decode functions.
+// Safety cap on how many list entries this decoder ever renders into `values` for one message --
+// see the SM Find Tag Reply/SM Identify/LAN Get Statistics/LAN Diagnostic decode functions.
+// CLI-configurable via --max-decoded-objects -- see resource_limits.hpp. 0/unset keeps the
+// literal 64 default. A function rather than a constexpr/const namespace-scope value, for the
+// same reason as max_plausible_message_length() above.
+size_t list_cap() { return resource_limits().max_decoded_objects.value_or(64); }
 
 // ------------------------------------------------------------------------------------------
 // Shared plumbing every decode_* function below uses -- see ffhse.hpp's own "Message-family/
@@ -659,12 +670,12 @@ bool decode_sm_find_tag_reply_req(ByteSpan body, FfhseFrame& frame) {
                                " are available -- selector list truncated");
         n = static_cast<uint32_t>((body.size() - 100) / 2);
     }
-    for (uint32_t i = 0; i < n && i < kListCap; ++i) {
+    for (uint32_t i = 0; i < n && i < list_cap(); ++i) {
         uint16_t sel = be16(body, 100 + 2 * static_cast<size_t>(i));
         frame.values.push_back("fda-address-selector[" + std::to_string(i) + "]=" + hex16(sel));
     }
-    if (n > kListCap) {
-        frame.notes.push_back("only showing " + std::to_string(kListCap) + " of " + std::to_string(n) +
+    if (n > list_cap()) {
+        frame.notes.push_back("only showing " + std::to_string(list_cap()) + " of " + std::to_string(n) +
                                " FDA Address Selector entries (safety cap)");
     }
     set_remainder(frame, body, 100 + 2 * static_cast<size_t>(n));
@@ -720,7 +731,7 @@ bool decode_sm_identify_like(ByteSpan body, uint16_t link_id, FfhseFrame& frame)
                            (link_id != 0
                                 ? " -- version-number-list decoded as H1NodeAddress+VersionNumber pairs (2 per entry)"
                                 : " -- version-number-list decoded as H1LinkId+Reserved+VersionNumber quads"));
-    for (uint32_t i = 0; i < n && i < kListCap; ++i) {
+    for (uint32_t i = 0; i < n && i < list_cap(); ++i) {
         size_t off = 108 + 4 * static_cast<size_t>(i);
         if (link_id != 0) {
             uint8_t node_a = body.at(off), ver_a = body.at(off + 1);
@@ -736,8 +747,8 @@ bool decode_sm_identify_like(ByteSpan body, uint16_t link_id, FfhseFrame& frame)
                                     " version=" + std::to_string(ver));
         }
     }
-    if (n > kListCap) {
-        frame.notes.push_back("only showing " + std::to_string(kListCap) + " of " + std::to_string(n) +
+    if (n > list_cap()) {
+        frame.notes.push_back("only showing " + std::to_string(list_cap()) + " of " + std::to_string(n) +
                                " version-number-list entries (safety cap)");
     }
     set_remainder(frame, body, 108 + 4 * static_cast<size_t>(n));
@@ -1183,12 +1194,12 @@ bool decode_lan_get_statistics_rsp(ByteSpan body, FfhseFrame& frame) {
                                " are available -- list truncated");
         n = static_cast<uint32_t>((body.size() - 28) / 4);
     }
-    for (uint32_t i = 0; i < n && i < kListCap; ++i) {
+    for (uint32_t i = 0; i < n && i < list_cap(); ++i) {
         uint32_t v = be32(body, 28 + 4 * static_cast<size_t>(i));
         frame.values.push_back("x-cable-stat[" + std::to_string(i) + "]=" + std::to_string(v));
     }
-    if (n > kListCap) {
-        frame.notes.push_back("only showing " + std::to_string(kListCap) + " of " + std::to_string(n) +
+    if (n > list_cap()) {
+        frame.notes.push_back("only showing " + std::to_string(list_cap()) + " of " + std::to_string(n) +
                                " XCableStat entries (safety cap)");
     }
     set_remainder(frame, body, 28 + 4 * static_cast<size_t>(n));
@@ -1229,7 +1240,7 @@ bool decode_lan_diagnostic_req(ByteSpan body, FfhseFrame& frame) {
                                " are available -- interface-status lists truncated");
         n = static_cast<uint32_t>((body.size() - 44) / 16);
     }
-    for (uint32_t i = 0; i < n && i < kListCap; ++i) {
+    for (uint32_t i = 0; i < n && i < list_cap(); ++i) {
         uint32_t a_to_a = be32(body, 44 + 4 * static_cast<size_t>(i));
         uint32_t b_to_a = be32(body, 44 + 4 * static_cast<size_t>(n) + 4 * static_cast<size_t>(i));
         uint32_t a_to_b = be32(body, 44 + 8 * static_cast<size_t>(n) + 4 * static_cast<size_t>(i));
@@ -1239,8 +1250,8 @@ bool decode_lan_diagnostic_req(ByteSpan body, FfhseFrame& frame) {
         frame.values.push_back("if-a-to-b-status[" + std::to_string(i) + "]=" + std::to_string(a_to_b));
         frame.values.push_back("if-b-to-b-status[" + std::to_string(i) + "]=" + std::to_string(b_to_b));
     }
-    if (n > kListCap) {
-        frame.notes.push_back("only showing " + std::to_string(kListCap) + " of " + std::to_string(n) +
+    if (n > list_cap()) {
+        frame.notes.push_back("only showing " + std::to_string(list_cap()) + " of " + std::to_string(n) +
                                " interface-status entries per list (safety cap)");
     }
     set_remainder(frame, body, 44 + 16 * static_cast<size_t>(n));
@@ -1304,9 +1315,9 @@ std::optional<size_t> ffhse_declared_length(ByteSpan payload) {
     if (type > 2) return std::nullopt;
     uint32_t message_length = be32(payload, 8);
     if (message_length < 12) return std::nullopt;
-    // See kMaxPlausibleMessageLength's own comment above (top of this anonymous namespace) for why
+    // See max_plausible_message_length()'s own comment above (top of this anonymous namespace) for why
     // this ceiling exists and why try_parse_ffhse below now applies it too.
-    if (message_length > kMaxPlausibleMessageLength) return std::nullopt;
+    if (message_length > max_plausible_message_length()) return std::nullopt;
     return static_cast<size_t>(message_length);
 }
 
@@ -1320,12 +1331,12 @@ std::optional<FfhseFrame> try_parse_ffhse(ByteSpan payload) {
         if (type > 2) return std::nullopt;
         uint32_t message_length = be32(payload, 8);
         if (message_length < 12) return std::nullopt;
-        // Structural-detection plausibility ceiling -- see kMaxPlausibleMessageLength's own comment
+        // Structural-detection plausibility ceiling -- see max_plausible_message_length()'s own comment
         // above. Without this, an implausible Message Length (essentially random noise on a
         // non-FF-HSE payload that happened to match the weak ProtocolAndType byte gate) would still
         // be "detected" as FF-HSE and produce a nonsensical, confusing truncation report instead of
         // correctly falling through to another protocol / the generic udp/non-tcp fallback.
-        if (message_length > kMaxPlausibleMessageLength) return std::nullopt;
+        if (message_length > max_plausible_message_length()) return std::nullopt;
 
         FfhseFrame frame;
         FfhseHeader& h = frame.header;

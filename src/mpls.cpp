@@ -27,7 +27,7 @@ std::optional<MplsFrame> try_parse_mpls(ByteSpan eth_payload) {
     bool found_bottom = false;
 
     while (offset + 4 <= eth_payload.size()) {
-        if (f.labels.size() >= kMaxMplsLabelDepth) {
+        if (f.labels.size() >= mpls_max_label_depth()) {
             f.stack_too_deep = true;
             break;
         }
@@ -68,7 +68,7 @@ std::optional<MplsFrame> try_parse_mpls(ByteSpan eth_payload) {
     if (f.stack_truncated) {
         s << " -- truncated, no Bottom-of-Stack label found before the captured bytes ran out";
     } else if (f.stack_too_deep) {
-        s << " -- stack exceeds " << kMaxMplsLabelDepth << " labels without a Bottom-of-Stack label, "
+        s << " -- stack exceeds " << mpls_max_label_depth() << " labels without a Bottom-of-Stack label, "
              "capped";
     } else {
         s << ", payload not decoded further (could be IP, an L2VPN/VPLS/pseudowire Ethernet frame, "

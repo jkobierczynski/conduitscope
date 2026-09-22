@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "conduitscope/goose.hpp"
 
+#include "conduitscope/resource_limits.hpp"
+
 #include <cstring>
 #include <iomanip>
 #include <sstream>
@@ -22,13 +24,16 @@ std::string hex4(uint16_t v) {
 }
 
 // Safety caps against a malformed/adversarial capture -- see goose.hpp's file header comment's
-// allData paragraph. kMaxGooseDataDepth bounds array/structure recursion; kMaxGooseDataValues
+// allData paragraph. max_goose_data_depth() bounds array/structure recursion; max_goose_data_values()
 // bounds the total flattened entry count across one allData (decoder.cpp imposes its own,
 // separate 50-entry cap when copying into DecodedPacket::goose_all_data, the same two-tier-cap
 // pattern PROFINET RT's DCP blocks use -- see profinet.cpp's kMaxDcpBlocks vs decoder.cpp's
 // kMaxDcpBlockValues).
-constexpr int kMaxGooseDataDepth = 6;
-constexpr size_t kMaxGooseDataValues = 200;
+// CLI-configurable via --max-recursion-depth/--max-decoded-objects -- see resource_limits.hpp.
+// 0/unset keeps each literal default below. Functions rather than constexpr/const namespace-
+// scope values, since they now read process-wide configuration.
+int max_goose_data_depth() { return static_cast<int>(resource_limits().max_recursion_depth.value_or(6)); }
+size_t max_goose_data_values() { return resource_limits().max_decoded_objects.value_or(200); }
 
 std::string ascii_text(ByteSpan s) {
     std::string text;
@@ -96,7 +101,9 @@ std::string decode_bitstring_str(ByteSpan content) {
         return "(malformed unused-bit count " + hex2(unused) + ") raw=" + to_hex(content);
     }
     size_t total_bits = data_bytes * 8 - unused;
-    constexpr size_t kMaxRenderedBits = 256;
+    // CLI-configurable via --max-decoded-objects -- see resource_limits.hpp. 0/unset keeps the
+    // literal 256 default.
+    const size_t kMaxRenderedBits = resource_limits().max_decoded_objects.value_or(256);
     std::ostringstream s;
     size_t bits_to_render = std::min(total_bits, kMaxRenderedBits);
     for (size_t i = 0; i < bits_to_render; ++i) {
@@ -243,7 +250,7 @@ std::string render_data_value(uint8_t tag, ByteSpan content) {
 // Recursively walks one allData (or nested array/structure) region, appending one flattened
 // GooseDataValue per entry -- see goose.hpp's file header comment's allData paragraph and
 // GooseDataValue's own comment for the dotted `path` scheme. `budget` is shared across the whole
-// recursion (kMaxGooseDataValues) so a deeply-nested or very wide dataset can't blow past it.
+// recursion (max_goose_data_values()) so a deeply-nested or very wide dataset can't blow past it.
 void decode_data_sequence(ByteSpan region, const std::string& path_prefix, int depth,
                             std::vector<GooseDataValue>& out, size_t& budget, std::vector<std::string>& notes) {
     Cursor c(region);
@@ -275,29 +282,29 @@ void decode_data_sequence(ByteSpan region, const std::string& path_prefix, int d
         out.push_back(v);
 
         if (container) {
-            if (depth + 1 <= kMaxGooseDataDepth) {
+            if (depth + 1 <= max_goose_data_depth()) {
                 size_t children_before = out.size();
                 decode_data_sequence(content, path, depth + 1, out, budget, notes);
                 size_t children_added = out.size() - children_before;
                 out[container_index].value = "(" + std::to_string(children_added) + " flattened value(s) follow)";
             } else {
-                out[container_index].value = "(nesting exceeds max depth " + std::to_string(kMaxGooseDataDepth) +
+                out[container_index].value = "(nesting exceeds max depth " + std::to_string(max_goose_data_depth()) +
                                               " -- not decoded further)";
                 notes.push_back("allData[" + path + "]: nesting exceeds max depth (" +
-                                 std::to_string(kMaxGooseDataDepth) + ") -- not decoded further");
+                                 std::to_string(max_goose_data_depth()) + ") -- not decoded further");
             }
         }
         ++index;
     }
     if (budget == 0 && c.remaining() >= 2) {
-        notes.push_back("allData: stopped after " + std::to_string(kMaxGooseDataValues) +
+        notes.push_back("allData: stopped after " + std::to_string(max_goose_data_values()) +
                          " value(s) (safety cap)");
     }
 }
 
 void decode_goose_pdu(ByteSpan pdu_content, GooseFrame& frame) {
     Cursor c(pdu_content);
-    size_t budget = kMaxGooseDataValues;
+    size_t budget = max_goose_data_values();
     while (c.remaining() >= 2) {
         uint8_t tag = c.u8();
         auto length = read_ber_length(c);

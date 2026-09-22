@@ -50,10 +50,15 @@
 #include <vector>
 
 #include "conduitscope/byteio.hpp"
+#include "conduitscope/resource_limits.hpp"
 
 namespace conduitscope {
 
-constexpr size_t kMaxMplsLabelDepth = 16;
+// CLI-configurable via --max-recursion-depth -- see resource_limits.hpp. 0/unset keeps the
+// literal 16 default this constant always had. An inline function rather than a constexpr/const
+// namespace-scope value, since it now reads process-wide configuration; called fresh at each use
+// in mpls.cpp.
+inline size_t mpls_max_label_depth() { return resource_limits().max_recursion_depth.value_or(16); }
 
 struct MplsLabelEntry {
     uint32_t label = 0;

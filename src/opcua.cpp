@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "conduitscope/opcua.hpp"
 
+#include "conduitscope/resource_limits.hpp"
+
 #include <algorithm>
 #include <cstring>
 #include <ctime>
@@ -1164,7 +1166,10 @@ std::optional<size_t> opcua_declared_length(ByteSpan payload) {
     // kMaxPlausiblePacketBytes/kMaxPlausibleBlockBytes already established for this codebase.
     // try_parse_opcua_message itself was never at risk from this -- it already clamps its own
     // read to std::min(declared_size, payload.size()) regardless of what MessageSize claims.
-    constexpr uint32_t kMaxPlausibleMessageSize = 16u * 1024u * 1024u;
+    // CLI-configurable via --max-reassembly-bytes -- see resource_limits.hpp. 0/unset keeps this
+    // literal default.
+    const uint32_t kMaxPlausibleMessageSize =
+        static_cast<uint32_t>(resource_limits().max_reassembly_bytes.value_or(16u * 1024u * 1024u));
     if (size > kMaxPlausibleMessageSize) return std::nullopt;
     return size;
 }
@@ -1335,7 +1340,7 @@ std::optional<ProtocolResult> OpcUaDecoder::decode(ByteSpan payload, DecodeConte
 
     // Like EtherNet/IP/HART-IP's own small messages, it's normal for a sender or the OS to
     // coalesce several OPC UA chunks into one TCP segment before flushing.
-    constexpr size_t kMaxOpcUaMessagesPerPayload = 50;
+    const size_t kMaxOpcUaMessagesPerPayload = resource_limits().max_coalesced_messages.value_or(50);
     size_t offset = msg->wire_length;
     size_t message_count = 1;
     while (offset < payload.size() && message_count < kMaxOpcUaMessagesPerPayload) {

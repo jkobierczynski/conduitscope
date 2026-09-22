@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "conduitscope/enip.hpp"
 
+#include "conduitscope/resource_limits.hpp"
+
 #include <algorithm>
 #include <cstring>
 #include <iomanip>
@@ -347,13 +349,22 @@ CipPath decode_cip_path(Cursor& c, size_t path_len_bytes) {
 
 // --- CIP explicit message decoding ------------------------------------------
 
-constexpr int kMaxCipRecursionDepth = 4;      // Multiple_Service_Packet / Unconnected_Send nesting
-constexpr size_t kMaxEmbeddedMessages = 25;   // per Multiple_Service_Packet
-constexpr size_t kMaxCipElements = 25;        // per Read Tag / Write Tag element array
+// CLI-configurable via --max-recursion-depth/--max-decoded-objects -- see resource_limits.hpp.
+// 0/unset keeps each literal default below. Functions rather than constexpr/const namespace-
+// scope values, since they now read process-wide configuration.
+int max_cip_recursion_depth() {  // Multiple_Service_Packet / Unconnected_Send nesting
+    return static_cast<int>(resource_limits().max_recursion_depth.value_or(4));
+}
+size_t max_embedded_messages() {  // per Multiple_Service_Packet
+    return resource_limits().max_decoded_objects.value_or(25);
+}
+size_t max_cip_elements() {  // per Read Tag / Write Tag element array
+    return resource_limits().max_decoded_objects.value_or(25);
+}
 
 CipMessage decode_cip_message(ByteSpan bytes, int depth);  // forward declaration (mutually recursive)
 
-// Decodes up to kMaxCipElements array elements of `type_code` starting at `c`'s current position,
+// Decodes up to max_cip_elements() array elements of `type_code` starting at `c`'s current position,
 // appending one rendered value per element to msg.values. For a type outside the decoded subset
 // (cip_type_info returns nullopt), shows the remaining bytes as hex instead -- a recognized-but-
 // out-of-scope elementary type (STRING2/STRINGN/STRINGI/EPATH/ENGUNIT-as-a-value/time-family
@@ -374,7 +385,7 @@ void decode_cip_typed_elements(Cursor& c, uint16_t type_code, uint16_t count, Ci
     }
     size_t decoded_count = 0;
     try {
-        for (uint16_t i = 0; i < count && decoded_count < kMaxCipElements; ++i) {
+        for (uint16_t i = 0; i < count && decoded_count < max_cip_elements(); ++i) {
             std::ostringstream s;
             switch (type_code) {
                 case 0xC1: s << (c.u8() != 0 ? "1" : "0"); break;
@@ -397,8 +408,8 @@ void decode_cip_typed_elements(Cursor& c, uint16_t type_code, uint16_t count, Ci
             msg.values.push_back(s.str());
             ++decoded_count;
         }
-        if (count > kMaxCipElements) {
-            msg.notes.push_back("stopped after " + std::to_string(kMaxCipElements) + " of " +
+        if (count > max_cip_elements()) {
+            msg.notes.push_back("stopped after " + std::to_string(max_cip_elements()) + " of " +
                                  std::to_string(count) + " element(s) (safety cap)");
         }
         msg.data_decoded = true;
@@ -420,14 +431,14 @@ void decode_cip_typed_elements(Cursor& c, uint16_t type_code, uint16_t count, Ci
 // decode_write_tag_request), but a Read_Tag(_Fragmented) RESPONSE carries no element count at all
 // (see decode_cip_response_data's own comment on why) -- for that caller, `count` is passed as
 // 0xFFFF, a sentinel meaning "however many fit" rather than a real declared bound, and this simply
-// stops when kMaxCipElements or the available bytes run out (the overwhelmingly common case being
+// stops when max_cip_elements() or the available bytes run out (the overwhelmingly common case being
 // exactly one string).
 void decode_cip_string_elements(Cursor& c, uint16_t type_code, uint16_t count, CipMessage& msg) {
     constexpr uint16_t kUnknownCount = 0xFFFF;
     size_t decoded_count = 0;
     bool truncated = false;
     try {
-        for (uint16_t i = 0; i < count && decoded_count < kMaxCipElements; ++i) {
+        for (uint16_t i = 0; i < count && decoded_count < max_cip_elements(); ++i) {
             if (c.remaining() == 0) break;
             size_t len = (type_code == 0xDA) ? c.u8() : c.u16le();
             if (len > c.remaining()) {
@@ -447,8 +458,8 @@ void decode_cip_string_elements(Cursor& c, uint16_t type_code, uint16_t count, C
         msg.notes.push_back("truncated while decoding " + cip_type_display_name(type_code) + " element " +
                              std::to_string(decoded_count + 1));
     }
-    if (count != kUnknownCount && count > kMaxCipElements) {
-        msg.notes.push_back("stopped after " + std::to_string(kMaxCipElements) + " of " + std::to_string(count) +
+    if (count != kUnknownCount && count > max_cip_elements()) {
+        msg.notes.push_back("stopped after " + std::to_string(max_cip_elements()) + " of " + std::to_string(count) +
                              " element(s) (safety cap)");
     }
     msg.data_decoded = true;
@@ -503,14 +514,14 @@ void decode_multiple_service_members(CipMessage& msg, ByteSpan data, int depth) 
     offsets.reserve(n);
     for (uint16_t i = 0; i < n; ++i) offsets.push_back(c.u16le());
 
-    if (depth >= kMaxCipRecursionDepth) {
+    if (depth >= max_cip_recursion_depth()) {
         msg.notes.push_back("Multiple_Service_Packet nesting depth cap reached -- embedded messages not decoded");
         msg.data_decoded = true;
         return;
     }
 
     size_t decoded = 0;
-    for (uint16_t i = 0; i < n && decoded < kMaxEmbeddedMessages; ++i) {
+    for (uint16_t i = 0; i < n && decoded < max_embedded_messages(); ++i) {
         size_t start = offsets[i];
         size_t seg_end = (static_cast<size_t>(i) + 1 < n) ? offsets[i + 1] : data.size();
         if (start > data.size() || seg_end > data.size() || seg_end < start) {
@@ -525,8 +536,8 @@ void decode_multiple_service_members(CipMessage& msg, ByteSpan data, int depth) 
         }
         ++decoded;
     }
-    if (n > kMaxEmbeddedMessages) {
-        msg.notes.push_back("stopped after " + std::to_string(kMaxEmbeddedMessages) + " of " + std::to_string(n) +
+    if (n > max_embedded_messages()) {
+        msg.notes.push_back("stopped after " + std::to_string(max_embedded_messages()) + " of " + std::to_string(n) +
                              " member(s) (safety cap)");
     }
     msg.data_decoded = true;
@@ -577,7 +588,7 @@ void decode_unconnected_send_request(CipMessage& msg, ByteSpan data, int depth) 
          << " timeout_ticks=" << static_cast<unsigned>(timeout_ticks);
     msg.values.push_back(head.str());
 
-    if (depth < kMaxCipRecursionDepth) {
+    if (depth < max_cip_recursion_depth()) {
         CipMessage embedded_msg = decode_cip_message(embedded, depth + 1);
         msg.values.push_back("embedded: " + embedded_msg.summary);
         for (const auto& note : embedded_msg.notes) {
@@ -880,7 +891,9 @@ void decode_cpf_and_cip(ByteSpan encap_data, EnipFrame& frame) {
     c.u16le();  // timeout -- informational only, not surfaced
     uint16_t item_count = c.u16le();
 
-    constexpr size_t kMaxCpfItems = 20;
+    // CLI-configurable via --max-decoded-objects -- see resource_limits.hpp. 0/unset keeps the
+    // literal 20 default.
+    const size_t kMaxCpfItems = resource_limits().max_decoded_objects.value_or(20);
     ByteSpan cip_bytes;
     bool have_cip_bytes = false;
 
@@ -943,7 +956,9 @@ void decode_cpf_and_cip(ByteSpan encap_data, EnipFrame& frame) {
 
 // --- CIP I/O (implicit messaging) decoding, UDP port 2222 -------------------
 
-constexpr size_t kMaxCipIoCpfItems = 20;  // same cap as decode_cpf_and_cip's kMaxCpfItems
+// CLI-configurable via --max-decoded-objects -- see resource_limits.hpp. 0/unset keeps the
+// literal 20 default (same cap as decode_cpf_and_cip's kMaxCpfItems above).
+size_t max_cip_io_cpf_items() { return resource_limits().max_decoded_objects.value_or(20); }
 
 std::optional<CipIoFrame> try_parse_cip_io_impl(ByteSpan udp_payload) {
     // Item count (2) + first item's type (2) + length (2) + the Sequenced Address Item's own
@@ -970,7 +985,7 @@ std::optional<CipIoFrame> try_parse_cip_io_impl(ByteSpan udp_payload) {
     frame.connection_id = c.u32le();
     frame.sequence_number = c.u32le();
 
-    for (uint16_t i = 1; i < item_count && i < kMaxCipIoCpfItems; ++i) {
+    for (uint16_t i = 1; i < item_count && i < max_cip_io_cpf_items(); ++i) {
         if (c.remaining() < 4) break;
         uint16_t type = c.u16le();
         uint16_t len = c.u16le();
@@ -1001,8 +1016,8 @@ std::optional<CipIoFrame> try_parse_cip_io_impl(ByteSpan udp_payload) {
                 break;
         }
     }
-    if (item_count > kMaxCipIoCpfItems) {
-        frame.notes.push_back("stopped after " + std::to_string(kMaxCipIoCpfItems) + " CPF item(s) (safety cap)");
+    if (item_count > max_cip_io_cpf_items()) {
+        frame.notes.push_back("stopped after " + std::to_string(max_cip_io_cpf_items()) + " CPF item(s) (safety cap)");
     }
 
     std::ostringstream s;
@@ -1244,7 +1259,9 @@ std::optional<ProtocolResult> EnipTcpDecoder::decode(ByteSpan payload, DecodeCon
     result.summary = frame->summary;
     for (const auto& n : frame->notes) result.notes.push_back(n);
 
-    constexpr size_t kMaxCipValues = 50;
+    // CLI-configurable via --max-decoded-objects -- see resource_limits.hpp. 0/unset keeps the
+    // literal 50 default.
+    const size_t kMaxCipValues = resource_limits().max_decoded_objects.value_or(50);
     std::vector<std::string> merged_values;
     auto merge_cip = [&](const EnipFrame& f) {
         if (!f.has_cip) return;
@@ -1258,7 +1275,9 @@ std::optional<ProtocolResult> EnipTcpDecoder::decode(ByteSpan payload, DecodeCon
 
     // Like IEC104/DNP3, one encapsulation message is small and it's normal for a sender or the OS
     // to coalesce several into one TCP segment before flushing.
-    constexpr size_t kMaxEnipMessagesPerPayload = 50;
+    // CLI-configurable via --max-coalesced-messages -- see resource_limits.hpp. 0/unset keeps
+    // the literal 50 default.
+    const size_t kMaxEnipMessagesPerPayload = resource_limits().max_coalesced_messages.value_or(50);
     size_t offset = frame->wire_length;
     size_t message_count = 1;
     while (offset < payload.size() && message_count < kMaxEnipMessagesPerPayload) {

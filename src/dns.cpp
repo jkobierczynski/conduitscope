@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "conduitscope/dns.hpp"
 
+#include "conduitscope/resource_limits.hpp"
+
 #include <cstring>
 #include <iomanip>
 #include <sstream>
@@ -128,7 +130,12 @@ struct DnsNameResult {
     size_t bytes_consumed = 0;
 };
 
-constexpr size_t kMaxNamePointerHops = 128;  // loop/decompression-bomb guard, not itself an RFC value
+// CLI-configurable via --max-recursion-depth -- see resource_limits.hpp (folded in as the
+// closest fit among the five categories for a pointer-following loop guard, the same role a
+// recursion-depth cap plays elsewhere; see docs/DEVELOPMENT.md's item 7 "Update: implemented"
+// entry). 0/unset keeps the literal 128 default -- loop/decompression-bomb guard, not itself an
+// RFC value.
+size_t max_name_pointer_hops() { return resource_limits().max_recursion_depth.value_or(128); }
 
 std::optional<DnsNameResult> read_dns_name(ByteSpan message, size_t offset) {
     std::string name;
@@ -146,7 +153,7 @@ std::optional<DnsNameResult> read_dns_name(ByteSpan message, size_t offset) {
                 consumed = (pos - offset) + 2;
                 jumped = true;
             }
-            if (++hops > kMaxNamePointerHops) return std::nullopt;
+            if (++hops > max_name_pointer_hops()) return std::nullopt;
             if (ptr >= message.size()) return std::nullopt;
             pos = ptr;
             continue;

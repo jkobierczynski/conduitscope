@@ -91,6 +91,7 @@ add_library(conduitscope_core STATIC
   src/mpls.cpp
   src/twincat.cpp
   src/protocol_registry.cpp
+  src/resource_limits.cpp
   src/decoder.cpp
   src/resolver.cpp
   src/time_format.cpp
@@ -7998,3 +7999,76 @@ add_test(NAME inventory_notable_protocols_empty_for_ordinary_ot_traffic
   COMMAND conduitscope inventory --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap")
 set_tests_properties(inventory_notable_protocols_empty_for_ordinary_ot_traffic PROPERTIES
   PASS_REGULAR_EXPRESSION "\"skipped_packets\": 0,.*\"notable_protocols\": \\[.*\\]")
+
+# ============================================================================================
+# CLI-configurable resource-exhaustion limits (docs/DEVELOPMENT.md's "External code review and
+# engineering priorities" item 7 -- see resource_limits.hpp for the full design). Five grouped
+# `--max-*` flags, each overriding a whole category of the ~60-odd individually-named DoS-
+# protection constants scattered across decoder.cpp and the protocol files. 0/unset (never
+# passed) means every site keeps its own compile-time default -- already proven byte-identical
+# to this feature's absence by the fact that every other test in this file above, none of which
+# passes any of these five flags, still passes unchanged. The tests below instead demonstrate
+# each flag's actual effect: set low enough, it visibly and correctly changes decode behavior.
+# ============================================================================================
+
+# --max-reassembly-bytes: sample_tcp_reassembly.pcap's first split (Modbus/TCP, 29 bytes across
+# 2 TCP segments) normally reassembles cleanly (see tcp_reassembly_completes_and_decodes below/
+# above); set low enough, decoder.cpp's general TCP reassembly path now abandons it instead.
+add_test(NAME max_reassembly_bytes_abandons_normally_successful_reassembly
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tcp_reassembly.pcap" --format text --max-reassembly-bytes 5)
+set_tests_properties(max_reassembly_bytes_abandons_normally_successful_reassembly PROPERTIES
+  PASS_REGULAR_EXPRESSION "TCP segment reassembly on this flow exceeded its safety cap \\(29 byte\\(s\\) across 2 segment\\(s\\)\\) -- abandoning it; this segment's own payload is tried fresh instead")
+
+# --max-reassembly-segments: same fixture/flow, same effect via the segment-count half of the
+# same cap instead of the byte-count half -- confirms both halves of decoder.cpp's `if` are
+# independently reachable through their own flag.
+add_test(NAME max_reassembly_segments_abandons_normally_successful_reassembly
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tcp_reassembly.pcap" --format text --max-reassembly-segments 1)
+set_tests_properties(max_reassembly_segments_abandons_normally_successful_reassembly PROPERTIES
+  PASS_REGULAR_EXPRESSION "TCP segment reassembly on this flow exceeded its safety cap \\(29 byte\\(s\\) across 2 segment\\(s\\)\\) -- abandoning it; this segment's own payload is tried fresh instead")
+
+# --max-recursion-depth: tests/sample_goose_deep_nesting.pcap (tools/make_sample_pcap.py's own
+# build_goose_deep_nesting_sample -- see its docstring) is a GOOSE allData structure nested three
+# levels deep specifically so this flag has something to truncate; every other GOOSE fixture's
+# allData is at most one level deep, too shallow to demonstrate this flag at any CLI-
+# representable value (0 means "unset/default", not "a cap of zero").
+add_test(NAME max_recursion_depth_goose_truncates
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_goose_deep_nesting.pcap" --format text --max-recursion-depth 1)
+set_tests_properties(max_recursion_depth_goose_truncates PROPERTIES
+  PASS_REGULAR_EXPRESSION "note: allData\\[0.0\\]: nesting exceeds max depth \\(1\\) -- not decoded further")
+
+# --max-decoded-objects: sample_dnp3.pcap's first Response frame carries two object headers
+# (g1v2 with 3 points, g30v1) -- set low enough, both dnp3.cpp's per-fragment object-header cap
+# and its per-header point-value cap visibly truncate, in the same decoded frame.
+add_test(NAME max_decoded_objects_dnp3_truncates_headers_and_points
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text --max-decoded-objects 1)
+set_tests_properties(max_decoded_objects_dnp3_truncates_headers_and_points PROPERTIES
+  PASS_REGULAR_EXPRESSION "objects: \\[g1v2\\][^\n]*\n *note: object header 0: only the first 1 of 3 point value\\(s\\) were decoded \\(safety cap\\)[^\n]*\n *note: stopped after 1 object header\\(s\\), more may remain \\(safety cap\\)")
+
+# --max-coalesced-messages: sample_hartip.pcap's Keep Alive flow normally decodes 2 HART-IP
+# messages coalesced in one TCP payload (see hartip_tcp_coalesced_keep_alive_decoded above);
+# set to 1, only the first is decoded and the existing "stopped after N" note style fires at the
+# configured N instead of the compile-time default.
+add_test(NAME max_coalesced_messages_hartip_stops_at_one
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap" --format text --max-coalesced-messages 1)
+set_tests_properties(max_coalesced_messages_hartip_stops_at_one PROPERTIES
+  PASS_REGULAR_EXPRESSION "192.168.1.50:52150 -> 192.168.1.10:5094 \\(hart-ip\\)  \\[hartip\\]  Request Keep Alive[^\n]*\n *note: stopped after 1 HART-IP message\\(s\\) in this one TCP payload, more may remain \\(safety cap\\)")
+
+# All five flags are registered identically on all three subcommands (unlike the --modbus-port-
+# style port-list flags, which remain decode-only) -- confirmed here via --help rather than only
+# by cli_main.cpp's own add_resource_limit_options call sites, so a future accidental removal
+# from one subcommand's wiring is actually caught by the test suite.
+add_test(NAME resource_limit_flags_present_in_decode_help
+  COMMAND conduitscope decode --help)
+set_tests_properties(resource_limit_flags_present_in_decode_help PROPERTIES
+  PASS_REGULAR_EXPRESSION "--max-reassembly-bytes[^\n]*\n.*--max-reassembly-segments[^\n]*\n.*--max-recursion-depth[^\n]*\n.*--max-decoded-objects[^\n]*\n.*--max-coalesced-messages")
+
+add_test(NAME resource_limit_flags_present_in_policy_validate_help
+  COMMAND conduitscope policy validate --help)
+set_tests_properties(resource_limit_flags_present_in_policy_validate_help PROPERTIES
+  PASS_REGULAR_EXPRESSION "--max-reassembly-bytes[^\n]*\n.*--max-reassembly-segments[^\n]*\n.*--max-recursion-depth[^\n]*\n.*--max-decoded-objects[^\n]*\n.*--max-coalesced-messages")
+
+add_test(NAME resource_limit_flags_present_in_inventory_help
+  COMMAND conduitscope inventory --help)
+set_tests_properties(resource_limit_flags_present_in_inventory_help PROPERTIES
+  PASS_REGULAR_EXPRESSION "--max-reassembly-bytes[^\n]*\n.*--max-reassembly-segments[^\n]*\n.*--max-recursion-depth[^\n]*\n.*--max-decoded-objects[^\n]*\n.*--max-coalesced-messages")

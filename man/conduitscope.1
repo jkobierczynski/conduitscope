@@ -451,6 +451,44 @@ EtherType\-keyed (0x8847/0x8848) like EAPOL/PPPoE.
 Stop after decoding this many packets. Default: 0 (unlimited). With
 \fB\-i\fR, also bounds a live capture.
 .TP
+.B \-\-max\-reassembly\-bytes \fIN\fR
+Override every cross-segment payload-buffering byte cap at once: the
+general TCP reassembly path (default 16 MiB), DNP3 fragment reassembly
+(default 64 KiB), COTP TSDU reassembly (default 1 MiB), and OPC UA's/
+FF-HSE's own declared-length plausibility ceiling (default 16 MiB each).
+Default: 0 (leave every site at its own default). See
+\fBdocs/DEVELOPMENT.md\fR's "External code review and engineering
+priorities" item 7 for the full constant-by-constant mapping.
+.TP
+.B \-\-max\-reassembly\-segments \fIN\fR
+Override every cross-segment frame/segment-count cap at once: the general
+TCP reassembly path (default 20,000 segments), DNP3 fragment reassembly
+(default 500 frames), and COTP TSDU reassembly (default 2,000 frames).
+Default: 0 (leave every site at its own default).
+.TP
+.B \-\-max\-recursion\-depth \fIN\fR
+Override every recursive-decode depth cap at once: MMS Data-value nesting
+(default 32), EtherNet/IP CIP Multiple_Service_Packet/Unconnected_Send
+nesting (default 4), MPLS label-stack depth (default 16), S7comm-Plus
+struct/item nesting (default 16), GOOSE Data ASN.1 nesting (default 6),
+and DNS name-compression pointer-hop guard (default 128). Default: 0
+(leave every site at its own default).
+.TP
+.B \-\-max\-decoded\-objects \fIN\fR
+Override every per-message decoded-object/value/list-entry cap at once
+(dozens of individually-named constants across DNP3/IEC104/GOOSE/
+EtherNet-IP/S7comm-Plus/MQTT/PROFINET/EtherCAT/Sampled Values/decoder.cpp's
+own summary lists, plus the 9 duplicated 50-entry list caps shared by
+EIGRP/OSPF/PIM/IGMP/ICMP/IGRP/RIP/VRRP/HSRP). Default: 0 (leave every site
+at its own default); too many constants to enumerate here \-\- see
+\fBdocs/DEVELOPMENT.md\fR item 7 for the full mapping.
+.TP
+.B \-\-max\-coalesced\-messages \fIN\fR
+Override every "N application-layer messages found coalesced in one TCP/
+UDP payload" cap at once: FF-HSE, HART-IP, MQTT, EtherNet/IP, OPC UA,
+DNP3, and IEC 104 (all default 50). Default: 0 (leave every site at its
+own default).
+.TP
 .B \-\-stats
 Print an aggregate summary instead of one line per packet. Ignores
 \fB\-\-format\fR.
@@ -547,6 +585,12 @@ Report format. Default: text.
 .B \-\-strict
 Abort on the first malformed packet instead of warning and continuing.
 .TP
+.B \-\-max\-reassembly\-bytes \fIN\fR ", " \-\-max\-reassembly\-segments \fIN\fR ", " \-\-max\-recursion\-depth \fIN\fR ", " \-\-max\-decoded\-objects \fIN\fR ", " \-\-max\-coalesced\-messages \fIN\fR
+Same five resource-exhaustion-limit overrides as \fBdecode\fR's own flags
+of the same name above (see their full description there); apply
+identically here since this command decodes the same traffic. Each
+defaults to 0 (leave every site at its own compile-time default).
+.TP
 .B \-\-strict\-it\-protocols
 Also fail compliance (non\-zero exit code) when the report's own "notable
 protocols" finding (see \fBdocs/USER_GUIDE.md\fR's POLICY FILE FORMAT
@@ -625,6 +669,12 @@ Report format. Default: text.
 .TP
 .B \-\-strict
 Abort on the first malformed packet instead of warning and continuing.
+.TP
+.B \-\-max\-reassembly\-bytes \fIN\fR ", " \-\-max\-reassembly\-segments \fIN\fR ", " \-\-max\-recursion\-depth \fIN\fR ", " \-\-max\-decoded\-objects \fIN\fR ", " \-\-max\-coalesced\-messages \fIN\fR
+Same five resource-exhaustion-limit overrides as \fBdecode\fR's own flags
+of the same name above (see their full description there); apply
+identically here since this command decodes the same traffic. Each
+defaults to 0 (leave every site at its own compile-time default).
 .TP
 .B \-\-zone\-prefix \fIN\fR
 CIDR prefix length (0\-32) inferred zones are grouped by: every observed

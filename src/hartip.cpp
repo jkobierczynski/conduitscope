@@ -7,6 +7,7 @@
 #include <sstream>
 #include <utility>
 
+#include "conduitscope/resource_limits.hpp"
 #include "conduitscope/tunnel_vpn.hpp"  // IKE_NATT_PORT/VXLAN_PORT -- see hartip_udp_excluded_port
 
 namespace conduitscope {
@@ -1227,7 +1228,9 @@ std::optional<ProtocolResult> HartIpTcpDecoder::decode(ByteSpan payload, DecodeC
     // Like EtherNet/IP's own encapsulation messages, one HART-IP message is small and it's normal
     // for a sender or the OS to coalesce several into one TCP segment -- exact transplant of the
     // legacy `if (want_hartip)` TCP call site's own coalescing loop.
-    constexpr size_t kMaxHartIpMessagesPerPayload = 50;
+    // CLI-configurable via --max-coalesced-messages -- see resource_limits.hpp. 0/unset keeps
+    // the literal 50 default.
+    const size_t kMaxHartIpMessagesPerPayload = resource_limits().max_coalesced_messages.value_or(50);
     size_t offset = frame->wire_length;
     size_t message_count = 1;
     while (offset < payload.size() && message_count < kMaxHartIpMessagesPerPayload) {

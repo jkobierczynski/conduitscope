@@ -1263,6 +1263,29 @@ def build_goose_sample():
     (TESTS_DIR / "sample_goose.pcap").write_bytes(data)
 
 
+def build_goose_deep_nesting_sample():
+    """A single GOOSE frame whose allData is a structure nested three levels deep around one
+    boolean leaf (structure > structure > structure > boolean) -- deep enough that
+    --max-recursion-depth 1 visibly truncates it (see resource_limits.hpp/goose.cpp's
+    max_goose_data_depth(), default 6) while every OTHER GOOSE fixture's allData (see
+    build_goose_sample() above, at most one level deep) is too shallow to demonstrate that flag's
+    effect at any CLI-representable value (0 means "unset/default", so a 1-level-deep structure
+    can't be truncated at cap=1 either). Kept as its own tiny, dedicated fixture -- not folded
+    into build_goose_sample() -- so existing GOOSE tests' packet indices/expectations are
+    untouched. See CMakeLists.txt's max_recursion_depth_goose_truncates test, added alongside
+    docs/DEVELOPMENT.md's item 7 "Update: implemented" entry."""
+    ts_field = utctime_bytes(0x386EBBF3, 0x421728, 0x0A)
+    innermost = data_bool(True)
+    level2 = data_structure(innermost)  # depth 2
+    level1 = data_structure(level2)     # depth 1
+    all_data = data_structure(level1)   # depth 0 (top-level allData entry)
+    pdu = goose_pdu("IEDX/LLN0$GO$gcbDeep", 2000, "IEDX/LLN0$GOOSEDeep", None, ts_field,
+                     1, 1, None, 1, None, 1, all_data)
+    frame = goose_frame(0x2001, pdu)
+    data = pcap_global_header() + pcap_record(frame, 0, 0)
+    (TESTS_DIR / "sample_goose_deep_nesting.pcap").write_bytes(data)
+
+
 def sv_asdu(sv_id: str, smp_cnt: int, conf_rev: int, seq_data: bytes, dat_set=None, refr_tm=None,
             smp_synch=None, smp_rate=None, smp_mod=None, gmid=None) -> bytes:
     """Builds one 0x30-tagged (UNIVERSAL SEQUENCE) ASDU element -- ASDU_sequence field order (see
@@ -8997,4 +9020,5 @@ if __name__ == "__main__":
     build_pim_sample()
     build_eigrp_sample()
     build_ospf_sample()
+    build_goose_deep_nesting_sample()
     print("wrote sample fixtures to", TESTS_DIR)

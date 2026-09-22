@@ -351,6 +351,76 @@ std::string version_string() {
            " build, live capture: " + (live_capture_available() ? "libpcap/Npcap" : "not built in") + "]";
 }
 
+// --------------------------------------------------------------------------------------------
+// The five new --max-* resource-limit flags (docs/DEVELOPMENT.md's "External code review and
+// engineering priorities" item 7 -- see resource_limits.hpp for the full rationale). Registered
+// identically on all three of decode_cmd/policy_validate_cmd/inventory_cmd (unlike the
+// --modbus-port-style port-list flags above, which remain decode-only -- a pre-existing,
+// out-of-scope gap, not something this feature inherits), so this one small struct plus the two
+// helpers below keep the five add_option calls and their help text from being tripled by hand.
+//
+// Each field is a plain size_t, default 0 -- the same "(0 = unlimited)" sentinel convention
+// --max-packets already established -- meaning "flag not given, this category keeps every
+// site's own compile-time default." build_resource_limits() below turns that sentinel into
+// std::nullopt.
+struct ResourceLimitCliVars {
+    size_t max_reassembly_bytes = 0;
+    size_t max_reassembly_segments = 0;
+    size_t max_recursion_depth = 0;
+    size_t max_decoded_objects = 0;
+    size_t max_coalesced_messages = 0;
+};
+
+void add_resource_limit_options(CLI::App* cmd, ResourceLimitCliVars& vars) {
+    cmd->add_option(
+           "--max-reassembly-bytes", vars.max_reassembly_bytes,
+           "Override every cross-segment payload-buffering byte cap at once: the general TCP "
+           "reassembly path (default 16 MiB), DNP3 fragment reassembly (default 64 KiB), COTP "
+           "TSDU reassembly (default 1 MiB), and OPC UA's/FF-HSE's own declared-length "
+           "plausibility ceiling (default 16 MiB each). 0 = leave every site at its own default "
+           "(see docs/DEVELOPMENT.md item 7 for the full constant-by-constant mapping)")
+        ->capture_default_str();
+    cmd->add_option(
+           "--max-reassembly-segments", vars.max_reassembly_segments,
+           "Override every cross-segment frame/segment-count cap at once: the general TCP "
+           "reassembly path (default 20,000 segments), DNP3 fragment reassembly (default 500 "
+           "frames), and COTP TSDU reassembly (default 2,000 frames). 0 = leave every site at "
+           "its own default")
+        ->capture_default_str();
+    cmd->add_option(
+           "--max-recursion-depth", vars.max_recursion_depth,
+           "Override every recursive-decode depth cap at once: MMS Data-value nesting (default "
+           "32), EtherNet/IP CIP Multiple_Service_Packet/Unconnected_Send nesting (default 4), "
+           "MPLS label-stack depth (default 16), S7comm-Plus struct/item nesting (default 16), "
+           "and GOOSE Data ASN.1 nesting (default 6). 0 = leave every site at its own default")
+        ->capture_default_str();
+    cmd->add_option(
+           "--max-decoded-objects", vars.max_decoded_objects,
+           "Override every per-message decoded-object/value/list-entry cap at once (~43 "
+           "individually-named constants across DNP3/IEC104/GOOSE/EtherNet-IP/S7comm-Plus/MQTT/"
+           "decoder.cpp's own summary lists, plus the 9 duplicated 50-entry list caps shared by "
+           "EIGRP/OSPF/PIM/IGMP/ICMP/IGRP/RIP/VRRP/HSRP). 0 = leave every site at its own "
+           "default; too many constants to enumerate here -- see docs/DEVELOPMENT.md item 7 for "
+           "the full mapping")
+        ->capture_default_str();
+    cmd->add_option(
+           "--max-coalesced-messages", vars.max_coalesced_messages,
+           "Override every 'N application-layer messages found coalesced in one TCP/UDP "
+           "payload' cap at once: FF-HSE, HART-IP, MQTT, EtherNet/IP, and OPC UA (all default "
+           "50). 0 = leave every site at its own default")
+        ->capture_default_str();
+}
+
+ResourceLimits build_resource_limits(const ResourceLimitCliVars& vars) {
+    ResourceLimits limits;
+    if (vars.max_reassembly_bytes != 0) limits.max_reassembly_bytes = vars.max_reassembly_bytes;
+    if (vars.max_reassembly_segments != 0) limits.max_reassembly_segments = vars.max_reassembly_segments;
+    if (vars.max_recursion_depth != 0) limits.max_recursion_depth = vars.max_recursion_depth;
+    if (vars.max_decoded_objects != 0) limits.max_decoded_objects = vars.max_decoded_objects;
+    if (vars.max_coalesced_messages != 0) limits.max_coalesced_messages = vars.max_coalesced_messages;
+    return limits;
+}
+
 int run_decode(const std::string& input, const std::string& interface_name, const std::string& filter,
                 int duration_seconds, int snaplen, bool promiscuous, const std::string& output,
                 const std::string& format, const std::string& protocol, const std::vector<int>& modbus_ports,
@@ -368,6 +438,7 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
                 const std::vector<int>& wireless_backhaul_ports,
                 const std::vector<int>& tunnel_vpn_ports,
                 size_t max_packets,
+                const ResourceLimitCliVars& limit_vars,
                 bool stats, bool strict, bool quiet,
                 bool no_color, bool force_color,
                 bool oui_enabled, bool resolve_hostnames, const std::string& hosts_path,
@@ -415,6 +486,7 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
 
     DecodeOptions options;
     options.strict = strict;
+    options.limits = build_resource_limits(limit_vars);
     options.protocol_filter = (protocol == "modbus")  ? ProtocolFilter::ModbusOnly
                                : (protocol == "dnp3")  ? ProtocolFilter::Dnp3Only
                                : (protocol == "s7comm") ? ProtocolFilter::S7commOnly
@@ -646,6 +718,7 @@ int run_policy_validate(const std::string& input, const std::string& interface_n
                          const std::string& filter, int duration_seconds, int snaplen, bool promiscuous,
                          const std::string& policy_path, const std::string& output, const std::string& format,
                          bool strict, bool strict_it_protocols, bool summarize_unclassified, bool quiet,
+                         const ResourceLimitCliVars& limit_vars,
                          bool oui_enabled, bool resolve_hostnames, const std::string& hosts_path,
                          bool service_names_enabled, const std::string& services_path, std::ostream& diag) {
     std::ofstream file_out;
@@ -675,6 +748,7 @@ int run_policy_validate(const std::string& input, const std::string& interface_n
 
         DecodeOptions options;
         options.strict = strict;
+        options.limits = build_resource_limits(limit_vars);
         // No --max-packets equivalent for policy validate (matching its existing offline-file
         // CLI surface, which never had one either): a live run here relies on --duration and/or
         // Ctrl+C to stop, same as `decode -i` does when --max-packets is left at its default of 0.
@@ -748,7 +822,8 @@ int run_inventory(const std::string& input, const std::string& interface_name, c
                    int duration_seconds, int snaplen, bool promiscuous, const std::string& output,
                    const std::string& format, bool strict, bool quiet, uint8_t zone_prefix_len,
                    const std::string& diagram_path, const std::string& diagram_format,
-                   const std::string& policy_out_path, bool oui_enabled, bool resolve_hostnames,
+                   const std::string& policy_out_path, const ResourceLimitCliVars& limit_vars,
+                   bool oui_enabled, bool resolve_hostnames,
                    const std::string& hosts_path, bool service_names_enabled, const std::string& services_path,
                    std::ostream& diag) {
     std::ofstream file_out;
@@ -773,6 +848,7 @@ int run_inventory(const std::string& input, const std::string& interface_name, c
 
         DecodeOptions options;
         options.strict = strict;
+        options.limits = build_resource_limits(limit_vars);
         // Same "no --max-packets" posture as run_policy_validate -- see its own comment.
         PacketSource source =
             open_packet_source(input, interface_name, snaplen, promiscuous, filter, duration_seconds, 0);
@@ -913,6 +989,7 @@ int main(int argc, char** argv) {
         decode_remote_access_ports, decode_lateral_movement_ports, decode_enterprise_trust_ports,
         decode_wireless_backhaul_ports, decode_tunnel_vpn_ports;
     size_t decode_max_packets = 0;
+    ResourceLimitCliVars decode_limit_vars;
     bool decode_stats = false, decode_strict = false;
     bool decode_mac_vendor = false, decode_resolve = false, decode_service_names = true;
     bool decode_show_vlan = true;
@@ -1101,6 +1178,7 @@ int main(int argc, char** argv) {
     decode_cmd->add_option("--max-packets", decode_max_packets,
                             "Stop after decoding this many packets (0 = unlimited)")
         ->capture_default_str();
+    add_resource_limit_options(decode_cmd, decode_limit_vars);
     decode_cmd->add_flag("--stats", decode_stats,
                           "Print an aggregate summary (protocol/function-code histogram) instead of "
                           "one line per packet; ignores --format");
@@ -1179,6 +1257,7 @@ int main(int argc, char** argv) {
     bool policy_summarize_unclassified = false;
     bool policy_mac_vendor = false, policy_resolve = false, policy_service_names = true;
     std::string policy_hosts_file, policy_services_file;
+    ResourceLimitCliVars policy_limit_vars;
     auto* policy_input_opt =
         policy_validate_cmd->add_option("-r,--read", policy_input,
                                          "Input capture file (classic pcap or pcapng, auto-detected)")
@@ -1221,6 +1300,7 @@ int main(int argc, char** argv) {
         ->capture_default_str();
     policy_validate_cmd->add_flag("--strict", policy_strict,
                                    "Abort on the first malformed packet instead of reporting it and continuing");
+    add_resource_limit_options(policy_validate_cmd, policy_limit_vars);
     policy_validate_cmd->add_flag(
         "--strict-it-protocols", policy_strict_it_protocols,
         "Also fail compliance (non-zero exit code) when any \"IT protocol an OT auditor flags\" "
@@ -1283,6 +1363,7 @@ int main(int argc, char** argv) {
     std::string inventory_policy_out;
     bool inventory_mac_vendor = false, inventory_resolve = false, inventory_service_names = true;
     std::string inventory_hosts_file, inventory_services_file;
+    ResourceLimitCliVars inventory_limit_vars;
 
     auto* inventory_input_opt =
         inventory_cmd->add_option("-r,--read", inventory_input,
@@ -1320,6 +1401,7 @@ int main(int argc, char** argv) {
         ->capture_default_str();
     inventory_cmd->add_flag("--strict", inventory_strict,
                              "Abort on the first malformed packet instead of reporting it and continuing");
+    add_resource_limit_options(inventory_cmd, inventory_limit_vars);
     inventory_cmd
         ->add_option("--zone-prefix", inventory_zone_prefix,
                       "CIDR prefix length ([0, 32]) used to group observed asset IPs into "
@@ -1410,7 +1492,7 @@ int main(int argc, char** argv) {
                            decode_rip_ports, decode_hsrp_ports, decode_remote_access_ports,
                            decode_lateral_movement_ports, decode_enterprise_trust_ports,
                            decode_wireless_backhaul_ports, decode_tunnel_vpn_ports,
-                           decode_max_packets, decode_stats, decode_strict,
+                           decode_max_packets, decode_limit_vars, decode_stats, decode_strict,
                            quiet, no_color, force_color, decode_mac_vendor, decode_resolve, decode_hosts_file,
                            decode_service_names, decode_services_file, decode_show_vlan,
                            decode_time_format, decode_time_offset, *diag, decode_show_direction,
@@ -1426,6 +1508,7 @@ int main(int argc, char** argv) {
         return run_policy_validate(policy_input, policy_interface, policy_filter, policy_duration, policy_snaplen,
                                     policy_promiscuous, policy_file, policy_output, policy_format, policy_strict,
                                     policy_strict_it_protocols, policy_summarize_unclassified, quiet,
+                                    policy_limit_vars,
                                     policy_mac_vendor, policy_resolve, policy_hosts_file,
                                     policy_service_names, policy_services_file, *diag);
     }
@@ -1438,6 +1521,7 @@ int main(int argc, char** argv) {
                               inventory_snaplen, inventory_promiscuous, inventory_output, inventory_format,
                               inventory_strict, quiet, static_cast<uint8_t>(inventory_zone_prefix),
                               inventory_diagram_file, inventory_diagram_format, inventory_policy_out,
+                              inventory_limit_vars,
                               inventory_mac_vendor, inventory_resolve, inventory_hosts_file, inventory_service_names,
                               inventory_services_file, *diag);
     }

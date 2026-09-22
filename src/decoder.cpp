@@ -523,8 +523,11 @@ bool Decoder::reassemble_tcp_payload(const TcpSegment& tcp, const std::string& f
     // comfortably completes before it fires; it exists to catch a pathological *many-tiny-
     // segments* capture well before the byte cap alone would.
     if (combined) {
-        constexpr size_t kMaxBufferedBytes = 16u * 1024u * 1024u;  // 16 MiB
-        constexpr size_t kMaxSegmentsPerReassembly = 20000;
+        // CLI-configurable via --max-reassembly-bytes/--max-reassembly-segments (all three
+        // subcommands) -- see resource_limits.hpp. 0/unset (the default) keeps these two literal
+        // values, byte-identical to this feature's absence.
+        const size_t kMaxBufferedBytes = resource_limits().max_reassembly_bytes.value_or(16u * 1024u * 1024u);  // 16 MiB
+        const size_t kMaxSegmentsPerReassembly = resource_limits().max_reassembly_segments.value_or(20000);
         size_t next_segment_count = fb.segment_count + 1;
         if (candidate.size() > kMaxBufferedBytes || next_segment_count > kMaxSegmentsPerReassembly) {
             out.notes.push_back(
@@ -825,7 +828,7 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                             out.profinet_has_dcp = true;
                             out.profinet_dcp_service_name = pn->dcp_service_name;
                             out.profinet_dcp_service_type_name = pn->dcp_service_type_name;
-                            constexpr size_t kMaxDcpBlockValues = 50;
+                            const size_t kMaxDcpBlockValues = resource_limits().max_decoded_objects.value_or(50);
                             for (const auto& block : pn->dcp_blocks) {
                                 if (out.profinet_dcp_blocks.size() >= kMaxDcpBlockValues) break;
                                 std::string label = !block.name.empty() ? block.name
@@ -875,7 +878,7 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                             out.goose_sq_num = gs.sq_num;
                             out.goose_conf_rev = gs.conf_rev;
                             out.goose_num_dat_set_entries = gs.num_dat_set_entries;
-                            constexpr size_t kMaxGooseDataValueEntries = 50;
+                            const size_t kMaxGooseDataValueEntries = resource_limits().max_decoded_objects.value_or(50);
                             for (const auto& v : gs.all_data) {
                                 if (out.goose_all_data.size() >= kMaxGooseDataValueEntries) break;
                                 std::string label = !v.type_name.empty() ? v.type_name : "raw";
@@ -915,7 +918,7 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                             out.sv_seq_data_length = first.seq_data_length;
                             if (first.gmid_hex) out.sv_gmid_hex = *first.gmid_hex;
                         }
-                        constexpr size_t kMaxSvAsduSummaries = 50;
+                        const size_t kMaxSvAsduSummaries = resource_limits().max_decoded_objects.value_or(50);
                         for (const auto& asdu : sv->asdus) {
                             if (out.sv_asdus.size() >= kMaxSvAsduSummaries) break;
                             std::ostringstream a;
@@ -965,7 +968,7 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                             out.ethercat_first_irq = first.irq;
                             out.ethercat_first_circulating = first.circulating;
                         }
-                        constexpr size_t kMaxEthercatDatagramSummaries = 50;
+                        const size_t kMaxEthercatDatagramSummaries = resource_limits().max_decoded_objects.value_or(50);
                         for (const auto& dgram : ec->datagrams) {
                             if (out.ethercat_datagrams.size() >= kMaxEthercatDatagramSummaries) break;
                             std::ostringstream a;
@@ -1081,7 +1084,7 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                             out.mpls_top_exp = top.exp;
                             out.mpls_top_ttl = top.ttl;
                         }
-                        constexpr size_t kMaxMplsLabelSummaries = 50;
+                        const size_t kMaxMplsLabelSummaries = resource_limits().max_decoded_objects.value_or(50);
                         for (const auto& entry : mp->labels) {
                             if (out.mpls_labels.size() >= kMaxMplsLabelSummaries) break;
                             std::ostringstream ls;
@@ -1178,7 +1181,7 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                                     out.stp_cist_bridge_mac = format_mac(stp->cist_bridge_id.mac);
                                     out.stp_cist_remaining_hops = stp->cist_remaining_hops;
 
-                                    constexpr size_t kMaxStpMstiSummaries = 50;
+                                    const size_t kMaxStpMstiSummaries = resource_limits().max_decoded_objects.value_or(50);
                                     for (const auto& m : stp->msti_messages) {
                                         if (out.stp_msti_messages.size() >= kMaxStpMstiSummaries) break;
                                         out.stp_msti_messages.push_back(stp_render_msti_summary(m));
@@ -1657,7 +1660,7 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                     };
                     merge_ffhse(*frame, /*is_first_message=*/true);
 
-                    constexpr size_t kMaxFfhseMessagesPerDatagram = 50;
+                    const size_t kMaxFfhseMessagesPerDatagram = resource_limits().max_coalesced_messages.value_or(50);
                     size_t offset = frame->wire_length;
                     size_t message_count = 1;
                     while (offset < udp.payload.size() && message_count < kMaxFfhseMessagesPerDatagram) {
@@ -2549,7 +2552,7 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                             for (const auto& n : s7.notes) out.notes.push_back(n);
                             out.s7comm_has_function = s7.has_function;
                             out.s7comm_function_name = s7.function_name;
-                            constexpr size_t kMaxTags = 50;
+                            const size_t kMaxTags = resource_limits().max_decoded_objects.value_or(50);
                             for (size_t i = 0; i < s7.items.size() && i < kMaxTags; ++i) {
                                 const auto& it = s7.items[i];
                                 std::string display_tag = !it.tag.empty() ? it.tag : it.area_name;
@@ -2623,7 +2626,7 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                             out.s7plus_has_return_value = s7p.has_return_value;
                             out.s7plus_return_code = s7p.return_code;
                             out.s7plus_return_code_name = s7p.return_code_name;
-                            constexpr size_t kMaxTags = 50;
+                            const size_t kMaxTags = resource_limits().max_decoded_objects.value_or(50);
                             for (size_t i = 0; i < s7p.item_addresses.size() && i < kMaxTags; ++i) {
                                 out.s7plus_item_tags.push_back(s7p.item_addresses[i].tag);
                             }
@@ -2677,7 +2680,7 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                             out.mms_is_response = mms.is_response;
                             out.mms_has_error = mms.has_error;
                             out.mms_error_name = mms.error_name;
-                            constexpr size_t kMaxMmsValues = 50;
+                            const size_t kMaxMmsValues = resource_limits().max_decoded_objects.value_or(50);
                             for (size_t i = 0; i < mms.values.size() && i < kMaxMmsValues; ++i) {
                                 out.mms_values.push_back(mms.values[i]);
                             }
@@ -2914,7 +2917,7 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
 
                 // Like HART-IP/EtherNet/IP's own small messages, it's normal for a sender or the OS
                 // to coalesce several FF-HSE PDUs into one TCP segment before flushing.
-                constexpr size_t kMaxFfhseMessagesPerPayload = 50;
+                const size_t kMaxFfhseMessagesPerPayload = resource_limits().max_coalesced_messages.value_or(50);
                 size_t offset = frame->wire_length;
                 size_t message_count = 1;
                 while (offset < effective_payload.size() && message_count < kMaxFfhseMessagesPerPayload) {

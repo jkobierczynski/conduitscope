@@ -3,6 +3,8 @@
 
 #include <sstream>
 
+#include "conduitscope/resource_limits.hpp"
+
 namespace conduitscope {
 
 namespace {
@@ -206,8 +208,10 @@ std::optional<ProtocolResult> CotpDecoder::decode(ByteSpan payload, DecodeContex
         // sized generously above real S7 block-transfer scenarios (large DB/program-block
         // uploads/downloads), which is what genuine multi-frame chaining is for. Same values as the
         // pre-migration Decoder::reassemble_cotp_data_frame.
-        constexpr size_t kMaxBufferedBytes = 1 << 20;  // 1 MiB
-        constexpr size_t kMaxFramesPerFragment = 2000;
+        // CLI-configurable via --max-reassembly-bytes/--max-reassembly-segments -- see
+        // resource_limits.hpp. 0/unset keeps these two literal defaults.
+        const size_t kMaxBufferedBytes = resource_limits().max_reassembly_bytes.value_or(1 << 20);  // 1 MiB
+        const size_t kMaxFramesPerFragment = resource_limits().max_reassembly_segments.value_or(2000);
         if (state.buffered_user_data.size() > kMaxBufferedBytes || state.frame_count > kMaxFramesPerFragment) {
             result.still_buffering = true;
             result.buffering_summary =

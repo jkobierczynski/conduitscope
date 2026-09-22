@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "conduitscope/iec104.hpp"
 
+#include "conduitscope/resource_limits.hpp"
+
 #include <cstring>
 #include <iomanip>
 #include <sstream>
@@ -746,7 +748,9 @@ Iec104Asdu decode_iec104_asdu(ByteSpan asdu_bytes) {
 
     // Safety cap against a pathological/malformed ASDU claiming an enormous object count --
     // same order of magnitude as DNP3's kMaxDecodedPointsPerHeader.
-    constexpr size_t kMaxDecodedObjects = 200;
+    // CLI-configurable via --max-decoded-objects -- see resource_limits.hpp. 0/unset keeps the
+    // literal 200 default.
+    const size_t kMaxDecodedObjects = resource_limits().max_decoded_objects.value_or(200);
 
     try {
         if (asdu.sq) {
@@ -800,7 +804,9 @@ std::optional<ProtocolResult> Iec104Decoder::decode(ByteSpan payload, DecodeCont
     Iec104Result result;
     result.summary = apci->summary;
 
-    constexpr size_t kMaxObjectValues = 50;
+    // CLI-configurable via --max-decoded-objects -- see resource_limits.hpp. 0/unset keeps the
+    // literal 50 default.
+    const size_t kMaxObjectValues = resource_limits().max_decoded_objects.value_or(50);
     auto merge_asdu = [&](const Iec104Asdu& asdu, bool is_first_apdu) {
         if (is_first_apdu) {
             result.summary += "; " + asdu.summary;
@@ -836,7 +842,10 @@ std::optional<ProtocolResult> Iec104Decoder::decode(ByteSpan payload, DecodeCont
     // one TCP segment before flushing (S-format acks and U-format STARTDT/TESTFR handshakes are
     // especially likely to arrive alongside an I-format APDU). Keep looking for more, immediately
     // after the first APDU's own wire bytes, rather than silently stopping at the first one.
-    constexpr size_t kMaxApdusPerPayload = 50;
+    // CLI-configurable via --max-coalesced-messages -- see resource_limits.hpp (folded in
+    // alongside dnp3.cpp's kMaxDnp3FramesPerPayload -- see that constant's own comment). 0/unset
+    // keeps the literal 50 default.
+    const size_t kMaxApdusPerPayload = resource_limits().max_coalesced_messages.value_or(50);
     size_t offset = apci->wire_length;
     size_t apdu_count = 1;
     while (offset < payload.size() && apdu_count < kMaxApdusPerPayload) {
