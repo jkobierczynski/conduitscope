@@ -78,4 +78,28 @@ std::optional<MplsFrame> try_parse_mpls(ByteSpan eth_payload) {
     return f;
 }
 
+std::optional<ProtocolResult> MplsUnicastDecoder::decode(ByteSpan payload, DecodeContext& /*ctx*/) const {
+    if (auto mp = try_parse_mpls(payload)) {
+        return ProtocolResult::make<MplsFrame>("mpls", std::move(*mp));
+    }
+    return std::nullopt;
+}
+
+std::optional<ProtocolResult> MplsMulticastDecoder::decode(ByteSpan payload, DecodeContext& /*ctx*/) const {
+    if (auto mp = try_parse_mpls(payload)) {
+        return ProtocolResult::make<MplsFrame>("mpls", std::move(*mp));
+    }
+    return std::nullopt;
+}
+
+const ProtocolDecoder& mpls_unicast_decoder() {
+    static const MplsUnicastDecoder instance;
+    return instance;
+}
+
+const ProtocolDecoder& mpls_multicast_decoder() {
+    static const MplsMulticastDecoder instance;
+    return instance;
+}
+
 }  // namespace conduitscope

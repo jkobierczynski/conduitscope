@@ -147,4 +147,16 @@ std::optional<EapolFrame> try_parse_eapol(ByteSpan eth_payload) {
     return f;
 }
 
+std::optional<ProtocolResult> EapolDecoder::decode(ByteSpan payload, DecodeContext& /*ctx*/) const {
+    if (auto ea = try_parse_eapol(payload)) {
+        return ProtocolResult::make<EapolFrame>("eapol", std::move(*ea));
+    }
+    return std::nullopt;
+}
+
+const ProtocolDecoder& eapol_decoder() {
+    static const EapolDecoder instance;
+    return instance;
+}
+
 }  // namespace conduitscope

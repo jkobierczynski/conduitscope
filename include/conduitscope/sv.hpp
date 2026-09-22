@@ -145,6 +145,8 @@
 #include <vector>
 
 #include "conduitscope/byteio.hpp"
+#include "conduitscope/link_layer.hpp"
+#include "conduitscope/protocol_decoder.hpp"
 
 namespace conduitscope {
 
@@ -196,5 +198,19 @@ struct SvFrame {
 // this decoder recognizes (0x60 savPdu -- see this file's header comment for why this is a narrow,
 // high-specificity gate, not a generic length-looks-plausible heuristic).
 std::optional<SvFrame> try_parse_sv(ByteSpan eth_payload);
+
+// registration-model migration (batch 3 -- see protocol_decoder.hpp/protocol_registry.hpp): thin
+// ProtocolDecoder wrapper around try_parse_sv above, unchanged. Like GOOSE (its direct sibling,
+// see this file's header comment), SV is EtherType-gated with no cross-packet state, so, like
+// GooseDecoder, this needs nothing beyond id()/gate_kind()/ethertype()/decode(); see sv.cpp.
+class SvDecoder : public ProtocolDecoder {
+public:
+    std::string_view id() const override { return "sv"; }
+    GateKind gate_kind() const override { return GateKind::EtherType; }
+    std::optional<uint16_t> ethertype() const override { return ETHERTYPE_IEC61850_SV; }
+    std::optional<ProtocolResult> decode(ByteSpan payload, DecodeContext& ctx) const override;
+};
+
+const ProtocolDecoder& sv_decoder();
 
 }  // namespace conduitscope

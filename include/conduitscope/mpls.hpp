@@ -50,6 +50,8 @@
 #include <vector>
 
 #include "conduitscope/byteio.hpp"
+#include "conduitscope/link_layer.hpp"
+#include "conduitscope/protocol_decoder.hpp"
 #include "conduitscope/resource_limits.hpp"
 
 namespace conduitscope {
@@ -86,5 +88,34 @@ struct MplsFrame {
 // sub-cases, or IGMP/VRRP's own IP-protocol-number-only gate) the EtherType itself carries all of the
 // confidence that this really is MPLS -- see this file's own header comment.
 std::optional<MplsFrame> try_parse_mpls(ByteSpan eth_payload);
+
+// registration-model migration (batch 3 -- see protocol_decoder.hpp/protocol_registry.hpp): thin
+// ProtocolDecoder wrappers around try_parse_mpls above, unchanged (try_parse_mpls itself doesn't
+// need to know which EtherType matched -- decoder.cpp's own call site derives
+// DecodedPacket::mpls_is_multicast from the EtherType directly, same as before migration). Like
+// PPPoE (see pppoe.hpp), MPLS has two EtherTypes sharing one decode -- the same "two instances,
+// one id()" pattern EnipTcpDecoder/EnipUdpDecoder established first (see enip.hpp), here split by
+// EtherType. Both are EtherType-gated with no cross-packet state, so each needs nothing beyond
+// id()/gate_kind()/ethertype()/decode().
+class MplsUnicastDecoder : public ProtocolDecoder {
+public:
+    std::string_view id() const override { return "mpls"; }
+    GateKind gate_kind() const override { return GateKind::EtherType; }
+    std::optional<uint16_t> ethertype() const override { return ETHERTYPE_MPLS_UNICAST; }
+    std::optional<ProtocolResult> decode(ByteSpan payload, DecodeContext& ctx) const override;
+};
+
+// id() == "mpls" (see MplsUnicastDecoder's own comment for why this is shared, deliberately), same
+// decode() logic, different EtherType.
+class MplsMulticastDecoder : public ProtocolDecoder {
+public:
+    std::string_view id() const override { return "mpls"; }
+    GateKind gate_kind() const override { return GateKind::EtherType; }
+    std::optional<uint16_t> ethertype() const override { return ETHERTYPE_MPLS_MULTICAST; }
+    std::optional<ProtocolResult> decode(ByteSpan payload, DecodeContext& ctx) const override;
+};
+
+const ProtocolDecoder& mpls_unicast_decoder();
+const ProtocolDecoder& mpls_multicast_decoder();
 
 }  // namespace conduitscope

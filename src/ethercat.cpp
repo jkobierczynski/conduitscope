@@ -224,4 +224,16 @@ std::optional<EthercatFrame> try_parse_ethercat(ByteSpan eth_payload) {
     }
 }
 
+std::optional<ProtocolResult> EthercatDecoder::decode(ByteSpan payload, DecodeContext& /*ctx*/) const {
+    if (auto ec = try_parse_ethercat(payload)) {
+        return ProtocolResult::make<EthercatFrame>("ethercat", std::move(*ec));
+    }
+    return std::nullopt;
+}
+
+const ProtocolDecoder& ethercat_decoder() {
+    static const EthercatDecoder instance;
+    return instance;
+}
+
 }  // namespace conduitscope

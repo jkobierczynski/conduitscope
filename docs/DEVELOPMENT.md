@@ -673,6 +673,81 @@ Discussed and adopted, in this order:
    way by this pilot -- both still read `DecodedPacket::protocol` as a
    plain string, which every migrated protocol, including TwinCAT, keeps
    populating).
+
+   **Update: migration batch 3 complete -- the entire OT EtherType fieldbus
+   family, `EtherType` gate cascade now fully populated.** Jurgen asked
+   what should move to the `ProtocolDecoder` interface next; a fresh audit
+   (grepping for `: public ProtocolDecoder` across every header and every
+   `want_X` flag still live in `decoder.cpp`, rather than trusting this
+   document to be current) confirmed batch 2's own count and picked the
+   highest-value remaining group: the OT EtherType fieldbus family still
+   sitting in the legacy `EtherType` if-chain -- IEC 61850-9-2 Sampled
+   Values (SV), PROFINET RT, EtherCAT, EAPOL, STP/RSTP/MSTP, MPLS, PPPoE.
+   Migrating all seven empties that cascade entirely (previously only
+   GOOSE, from the pilot, was migrated there) and carried the highest OT
+   audit value of any remaining group, since it's the same EtherType-
+   gated, no-IP-layer shape GOOSE and TwinCAT already proved out.
+
+   Six of the seven (SV, PROFINET RT, EtherCAT, EAPOL, PPPoE, MPLS) are
+   genuinely EtherType-gated with no cross-packet state, so each got the
+   same minimal treatment: a thin `XDecoder : public ProtocolDecoder`
+   subclass in the protocol's own header/`.cpp` pair, wrapping its
+   existing, unchanged `try_parse_x` exactly the way `GooseDecoder::decode`
+   already wrapped `try_parse_goose`; each `decoder.cpp` call site kept its
+   exact textual position (SV immediately after GOOSE; PROFINET RT tried
+   first of the whole cascade; EtherCAT after SV; EAPOL after EtherCAT;
+   PPPoE after EAPOL; MPLS after PPPoE) and now reaches its `try_parse_x`
+   through `x_decoder().decode()` instead of calling it directly, with the
+   same dual-write into `DecodedPacket`'s existing flat fields as before
+   (none of these six were part of the original three-protocol pilot, so,
+   like every batch 2 protocol, none is a from-inception zero-flat-fields
+   case the way TwinCAT is). PPPoE and MPLS each needed two decoder
+   instances sharing one `id()` rather than one -- PPPoE's Discovery
+   (0x8863) and Session (0x8864) stages, MPLS's unicast (0x8847) and
+   multicast (0x8848) EtherTypes -- the same "two instances, one `id()`"
+   pattern `EnipTcpDecoder`/`EnipUdpDecoder` established first for a
+   TCP/UDP split, here reused for an EtherType split instead (see
+   `pppoe.hpp`/`mpls.hpp`).
+
+   STP, the seventh, is the one genuine exception in this batch: it has no
+   EtherType of its own at all -- it rides classic 802.3 LLC framing (DSAP/
+   SSAP == 0x42, Control == UI), not any EtherType-keyed dispatch, and its
+   own GARP-collision carve-out (disambiguating STP's LLC DSAP/SSAP pair
+   from GVRP/GMRP by destination MAC) depends on the outer Ethernet frame's
+   destination address, which lives outside the `ByteSpan` a `decode()`
+   call receives. `StpDecoder::gate_kind()` is still `GateKind::EtherType`
+   (the same bucket that enum's own doc comment already grouped STP into
+   alongside its EtherType-keyed siblings), but `ethertype()` is left at
+   `ProtocolDecoder`'s own default (`std::nullopt`) rather than overridden,
+   and `decoder.cpp`'s own call site keeps full, unchanged responsibility
+   for STP's actual structural gate (802.3 Length framing, DSAP/SSAP/
+   Control, and the GARP carve-out) before ever reaching `decode()` --
+   nothing about that gating logic moved into the new class.
+
+   Verified the same way every prior migration was, once per protocol as
+   each landed: the full CTest suite (1300 tests throughout -- no
+   `PASS_REGULAR_EXPRESSION` needed editing for any of the seven, proof of
+   byte-identical output at every step) stayed 100% passing, zero-warning
+   clean rebuilds across all three established configs (default+libpcap,
+   `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF`, MinGW cross-compile) after
+   each protocol, and manual CLI smoke tests (`--format text`/`--format
+   json`, plus each protocol's own `--protocol` filter) against every
+   available fixture -- `tests/sample_sv.pcap`, `tests/sample_profinet.pcap`
+   plus the two real PROFINET captures under `tests/real_captures/
+   profinet/`, `tests/sample_ethercat.pcap` plus the real capture under
+   `tests/real_captures/ethercat/`, the EAPOL/PPPoE/MPLS frames inside
+   `tests/sample_enterprise_trust.pcap`/`tests/sample_wireless_backhaul.
+   pcap`/`tests/sample_tunnel_vpn.pcap`, and `tests/sample_stp.pcap` plus
+   the real capture under `tests/real_captures/stp/` -- confirmed every
+   migrated path produces identical output to its pre-migration
+   `try_parse_x` call site.
+
+   This completes migration batch 3: the `EtherType`/LLC gate cascade in
+   `protocol_registry.cpp` is now fully populated (PROFINET RT, GOOSE, SV,
+   EtherCAT, EAPOL, PPPoE, MPLS, STP -- the fourth `GateKind`, after
+   `IpProtocol`/`TcpPortIndependent`/`UdpPortIndependent`, to reach that
+   state), and the `~37` legacy-protocol count in batch 2's own completion
+   note above now reads `~30`.
 4. **Comment-density trim: acknowledged, not scheduled.** Real cost, no
    plan yet to act on it -- lower priority than the three items above.
 5. **No new protocols until 1-3 above are substantially underway,** per

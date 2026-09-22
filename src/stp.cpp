@@ -413,4 +413,16 @@ std::optional<StpFrame> try_parse_stp(ByteSpan llc_payload) {
     }
 }
 
+std::optional<ProtocolResult> StpDecoder::decode(ByteSpan payload, DecodeContext& /*ctx*/) const {
+    if (auto stp = try_parse_stp(payload)) {
+        return ProtocolResult::make<StpFrame>("stp", std::move(*stp));
+    }
+    return std::nullopt;
+}
+
+const ProtocolDecoder& stp_decoder() {
+    static const StpDecoder instance;
+    return instance;
+}
+
 }  // namespace conduitscope

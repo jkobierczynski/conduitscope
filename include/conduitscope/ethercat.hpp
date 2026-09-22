@@ -204,6 +204,8 @@
 #include <vector>
 
 #include "conduitscope/byteio.hpp"
+#include "conduitscope/link_layer.hpp"
+#include "conduitscope/protocol_decoder.hpp"
 
 namespace conduitscope {
 
@@ -256,5 +258,19 @@ struct EthercatFrame {
 // false) -- named, not decoded further, the same "named only" pattern goose.hpp's GSE Management
 // PDU and profinet.hpp's non-DCP/non-cyclic FrameID ranges already use.
 std::optional<EthercatFrame> try_parse_ethercat(ByteSpan eth_payload);
+
+// registration-model migration (batch 3 -- see protocol_decoder.hpp/protocol_registry.hpp): thin
+// ProtocolDecoder wrapper around try_parse_ethercat above, unchanged. Like GOOSE/SV/PROFINET RT,
+// EtherType-gated with no cross-packet state, so this needs nothing beyond
+// id()/gate_kind()/ethertype()/decode(); see ethercat.cpp.
+class EthercatDecoder : public ProtocolDecoder {
+public:
+    std::string_view id() const override { return "ethercat"; }
+    GateKind gate_kind() const override { return GateKind::EtherType; }
+    std::optional<uint16_t> ethertype() const override { return ETHERTYPE_ETHERCAT; }
+    std::optional<ProtocolResult> decode(ByteSpan payload, DecodeContext& ctx) const override;
+};
+
+const ProtocolDecoder& ethercat_decoder();
 
 }  // namespace conduitscope

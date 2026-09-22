@@ -104,4 +104,28 @@ std::optional<PppoeFrame> try_parse_pppoe(ByteSpan eth_payload, bool is_session_
     return f;
 }
 
+std::optional<ProtocolResult> PppoeDiscoveryDecoder::decode(ByteSpan payload, DecodeContext& /*ctx*/) const {
+    if (auto pp = try_parse_pppoe(payload, /*is_session_ethertype=*/false)) {
+        return ProtocolResult::make<PppoeFrame>("pppoe", std::move(*pp));
+    }
+    return std::nullopt;
+}
+
+std::optional<ProtocolResult> PppoeSessionDecoder::decode(ByteSpan payload, DecodeContext& /*ctx*/) const {
+    if (auto pp = try_parse_pppoe(payload, /*is_session_ethertype=*/true)) {
+        return ProtocolResult::make<PppoeFrame>("pppoe", std::move(*pp));
+    }
+    return std::nullopt;
+}
+
+const ProtocolDecoder& pppoe_discovery_decoder() {
+    static const PppoeDiscoveryDecoder instance;
+    return instance;
+}
+
+const ProtocolDecoder& pppoe_session_decoder() {
+    static const PppoeSessionDecoder instance;
+    return instance;
+}
+
 }  // namespace conduitscope

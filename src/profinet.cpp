@@ -355,4 +355,16 @@ std::optional<ProfinetFrame> try_parse_profinet(ByteSpan eth_payload) {
     }
 }
 
+std::optional<ProtocolResult> ProfinetDecoder::decode(ByteSpan payload, DecodeContext& /*ctx*/) const {
+    if (auto pn = try_parse_profinet(payload)) {
+        return ProtocolResult::make<ProfinetFrame>("profinet", std::move(*pn));
+    }
+    return std::nullopt;
+}
+
+const ProtocolDecoder& profinet_decoder() {
+    static const ProfinetDecoder instance;
+    return instance;
+}
+
 }  // namespace conduitscope

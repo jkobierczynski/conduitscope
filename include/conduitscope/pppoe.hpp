@@ -72,6 +72,8 @@
 #include <vector>
 
 #include "conduitscope/byteio.hpp"
+#include "conduitscope/link_layer.hpp"
+#include "conduitscope/protocol_decoder.hpp"
 
 namespace conduitscope {
 
@@ -101,5 +103,33 @@ struct PppoeFrame {
 // itself claims -- see this file's own "structural detection gate" paragraph for why the EtherType
 // carries most of the confidence here, same as EAPOL's own try_parse_eapol.
 std::optional<PppoeFrame> try_parse_pppoe(ByteSpan eth_payload, bool is_session_ethertype);
+
+// registration-model migration (batch 3 -- see protocol_decoder.hpp/protocol_registry.hpp): thin
+// ProtocolDecoder wrappers around try_parse_pppoe above, unchanged. Unlike GOOSE/SV/PROFINET RT/
+// EtherCAT/EAPOL (one EtherType each), PPPoE's two stages share one Code space's worth of decode
+// logic but arrive on two different EtherTypes -- the same "two instances, one id()" pattern
+// EnipTcpDecoder/EnipUdpDecoder established first (see enip.hpp), here split by EtherType instead
+// of by transport. Both are EtherType-gated with no cross-packet state, so each needs nothing
+// beyond id()/gate_kind()/ethertype()/decode().
+class PppoeDiscoveryDecoder : public ProtocolDecoder {
+public:
+    std::string_view id() const override { return "pppoe"; }
+    GateKind gate_kind() const override { return GateKind::EtherType; }
+    std::optional<uint16_t> ethertype() const override { return ETHERTYPE_PPPOE_DISCOVERY; }
+    std::optional<ProtocolResult> decode(ByteSpan payload, DecodeContext& ctx) const override;
+};
+
+// id() == "pppoe" (see PppoeDiscoveryDecoder's own comment for why this is shared, deliberately),
+// same decode() logic (try_parse_pppoe with is_session_ethertype == true), different EtherType.
+class PppoeSessionDecoder : public ProtocolDecoder {
+public:
+    std::string_view id() const override { return "pppoe"; }
+    GateKind gate_kind() const override { return GateKind::EtherType; }
+    std::optional<uint16_t> ethertype() const override { return ETHERTYPE_PPPOE_SESSION; }
+    std::optional<ProtocolResult> decode(ByteSpan payload, DecodeContext& ctx) const override;
+};
+
+const ProtocolDecoder& pppoe_discovery_decoder();
+const ProtocolDecoder& pppoe_session_decoder();
 
 }  // namespace conduitscope

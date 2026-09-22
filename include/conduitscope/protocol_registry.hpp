@@ -21,9 +21,13 @@
 
 namespace conduitscope {
 
-// Migrated EtherType-gated protocols, in the order their decoder.cpp call sites run. Populated:
-// GOOSE (Stage 3 of the pilot). Not migrated (still legacy if-chains, in this relative order):
-// PROFINET RT, SV, EtherCAT, STP, EAPOL, PPPoE, MPLS.
+// Migrated EtherType-gated protocols, in the order their decoder.cpp call sites run. Fully
+// populated as of migration batch 3 -- the only one of the four cascades to reach that state so
+// far: PROFINET RT, GOOSE (Stage 3 of the pilot), SV (GOOSE's own direct sibling, see sv.hpp's
+// file header comment), EtherCAT, EAPOL, PPPoE (two EtherTypes, one id(), see pppoe.hpp), MPLS
+// (likewise two EtherTypes, one id(), see mpls.hpp), STP (no EtherType of its own at all -- LLC-
+// framed, see stp.hpp's own comment on its ProtocolDecoder wrapper). Every protocol here migrated
+// in migration batch 3 except GOOSE itself (the pilot).
 const std::vector<const ProtocolDecoder*>& ethertype_registry();
 
 // Migrated IP-protocol-number-gated protocols. Populated: EIGRP (Stage 1). Not migrated: ICMP,

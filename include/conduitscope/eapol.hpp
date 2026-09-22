@@ -81,6 +81,8 @@
 #include <vector>
 
 #include "conduitscope/byteio.hpp"
+#include "conduitscope/link_layer.hpp"
+#include "conduitscope/protocol_decoder.hpp"
 
 namespace conduitscope {
 
@@ -118,5 +120,19 @@ struct EapolFrame {
 // listed above -- see this file's own "structural detection gate" paragraph for why the EtherType
 // carries most of the confidence here, same as EtherCAT's own try_parse_ethercat.
 std::optional<EapolFrame> try_parse_eapol(ByteSpan eth_payload);
+
+// registration-model migration (batch 3 -- see protocol_decoder.hpp/protocol_registry.hpp): thin
+// ProtocolDecoder wrapper around try_parse_eapol above, unchanged. Like GOOSE/SV/PROFINET RT/
+// EtherCAT, EtherType-gated with no cross-packet state, so this needs nothing beyond
+// id()/gate_kind()/ethertype()/decode(); see eapol.cpp.
+class EapolDecoder : public ProtocolDecoder {
+public:
+    std::string_view id() const override { return "eapol"; }
+    GateKind gate_kind() const override { return GateKind::EtherType; }
+    std::optional<uint16_t> ethertype() const override { return ETHERTYPE_EAPOL; }
+    std::optional<ProtocolResult> decode(ByteSpan payload, DecodeContext& ctx) const override;
+};
+
+const ProtocolDecoder& eapol_decoder();
 
 }  // namespace conduitscope

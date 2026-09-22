@@ -379,4 +379,16 @@ std::optional<SvFrame> try_parse_sv(ByteSpan eth_payload) {
     }
 }
 
+std::optional<ProtocolResult> SvDecoder::decode(ByteSpan payload, DecodeContext& /*ctx*/) const {
+    if (auto sv = try_parse_sv(payload)) {
+        return ProtocolResult::make<SvFrame>("sv", std::move(*sv));
+    }
+    return std::nullopt;
+}
+
+const ProtocolDecoder& sv_decoder() {
+    static const SvDecoder instance;
+    return instance;
+}
+
 }  // namespace conduitscope

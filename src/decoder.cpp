@@ -860,19 +860,26 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                 bool want_profinet = options_.protocol_filter == ProtocolFilter::Auto ||
                                       options_.protocol_filter == ProtocolFilter::ProfinetOnly;
                 if (want_profinet && eth.ethertype == ETHERTYPE_PROFINET) {
-                    if (auto pn = try_parse_profinet(eth.payload)) {
+                    // Registration-model migration (batch 3): try_parse_profinet is now reached
+                    // through ProfinetDecoder::decode rather than called directly -- same
+                    // function, same semantics, see profinet.hpp. The dual-write below is
+                    // unchanged.
+                    DecodeContext ctx;
+                    ctx.protocol_id = "profinet";
+                    if (auto result = profinet_decoder().decode(eth.payload, ctx)) {
+                        const ProfinetFrame& pn = result->as<ProfinetFrame>();
                         out.protocol = "profinet";
-                        out.summary = pn->summary;
-                        out.profinet_frame_id = pn->frame_id;
-                        out.profinet_frame_id_name = pn->frame_id_name;
-                        for (const auto& n : pn->notes) out.notes.push_back(n);
+                        out.summary = pn.summary;
+                        out.profinet_frame_id = pn.frame_id;
+                        out.profinet_frame_id_name = pn.frame_id_name;
+                        for (const auto& n : pn.notes) out.notes.push_back(n);
 
-                        if (pn->has_dcp) {
+                        if (pn.has_dcp) {
                             out.profinet_has_dcp = true;
-                            out.profinet_dcp_service_name = pn->dcp_service_name;
-                            out.profinet_dcp_service_type_name = pn->dcp_service_type_name;
+                            out.profinet_dcp_service_name = pn.dcp_service_name;
+                            out.profinet_dcp_service_type_name = pn.dcp_service_type_name;
                             const size_t kMaxDcpBlockValues = resource_limits().max_decoded_objects.value_or(50);
-                            for (const auto& block : pn->dcp_blocks) {
+                            for (const auto& block : pn.dcp_blocks) {
                                 if (out.profinet_dcp_blocks.size() >= kMaxDcpBlockValues) break;
                                 std::string label = !block.name.empty() ? block.name
                                                                           : ("option=" + std::to_string(block.option) +
@@ -880,13 +887,13 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                                 out.profinet_dcp_blocks.push_back(label + "=" + block.value);
                             }
                         }
-                        if (pn->has_cyclic_data) {
+                        if (pn.has_cyclic_data) {
                             out.profinet_has_cyclic_data = true;
-                            out.profinet_cyclic_io_data_hex = pn->cyclic_io_data_hex;
-                            out.profinet_cyclic_io_data_length = pn->cyclic_io_data_length;
-                            out.profinet_cyclic_cycle_counter = pn->cyclic_cycle_counter;
-                            out.profinet_cyclic_data_status_summary = pn->cyclic_data_status_summary;
-                            out.profinet_cyclic_transfer_status = pn->cyclic_transfer_status;
+                            out.profinet_cyclic_io_data_hex = pn.cyclic_io_data_hex;
+                            out.profinet_cyclic_io_data_length = pn.cyclic_io_data_length;
+                            out.profinet_cyclic_cycle_counter = pn.cyclic_cycle_counter;
+                            out.profinet_cyclic_data_status_summary = pn.cyclic_data_status_summary;
+                            out.profinet_cyclic_transfer_status = pn.cyclic_transfer_status;
                         }
                         return out;
                     }
@@ -939,17 +946,23 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                 bool want_sv = options_.protocol_filter == ProtocolFilter::Auto ||
                                 options_.protocol_filter == ProtocolFilter::SvOnly;
                 if (want_sv && eth.ethertype == ETHERTYPE_IEC61850_SV) {
-                    if (auto sv = try_parse_sv(eth.payload)) {
+                    // Registration-model migration (batch 3): try_parse_sv is now reached through
+                    // SvDecoder::decode rather than called directly -- same function, same
+                    // semantics, see sv.hpp. The dual-write below is unchanged.
+                    DecodeContext ctx;
+                    ctx.protocol_id = "sv";
+                    if (auto result = sv_decoder().decode(eth.payload, ctx)) {
+                        const SvFrame& sv = result->as<SvFrame>();
                         out.protocol = "sv";
-                        out.summary = sv->summary;
-                        out.sv_appid = sv->appid;
-                        out.sv_simulated = sv->header_simulated;
-                        out.sv_no_asdu = sv->no_asdu;
-                        out.sv_asdu_count = sv->asdus.size();
-                        for (const auto& n : sv->notes) out.notes.push_back(n);
+                        out.summary = sv.summary;
+                        out.sv_appid = sv.appid;
+                        out.sv_simulated = sv.header_simulated;
+                        out.sv_no_asdu = sv.no_asdu;
+                        out.sv_asdu_count = sv.asdus.size();
+                        for (const auto& n : sv.notes) out.notes.push_back(n);
 
-                        if (!sv->asdus.empty()) {
-                            const SvAsdu& first = sv->asdus[0];
+                        if (!sv.asdus.empty()) {
+                            const SvAsdu& first = sv.asdus[0];
                             out.sv_id = first.sv_id;
                             if (first.dat_set) out.sv_dat_set = *first.dat_set;
                             out.sv_smp_cnt = first.smp_cnt;
@@ -962,7 +975,7 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                             if (first.gmid_hex) out.sv_gmid_hex = *first.gmid_hex;
                         }
                         const size_t kMaxSvAsduSummaries = resource_limits().max_decoded_objects.value_or(50);
-                        for (const auto& asdu : sv->asdus) {
+                        for (const auto& asdu : sv.asdus) {
                             if (out.sv_asdus.size() >= kMaxSvAsduSummaries) break;
                             std::ostringstream a;
                             a << "svID=\"" << asdu.sv_id << "\"";
@@ -986,18 +999,25 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                 bool want_ethercat = options_.protocol_filter == ProtocolFilter::Auto ||
                                       options_.protocol_filter == ProtocolFilter::EthercatOnly;
                 if (want_ethercat && eth.ethertype == ETHERTYPE_ETHERCAT) {
-                    if (auto ec = try_parse_ethercat(eth.payload)) {
+                    // Registration-model migration (batch 3): try_parse_ethercat is now reached
+                    // through EthercatDecoder::decode rather than called directly -- same
+                    // function, same semantics, see ethercat.hpp. The dual-write below is
+                    // unchanged.
+                    DecodeContext ctx;
+                    ctx.protocol_id = "ethercat";
+                    if (auto result = ethercat_decoder().decode(eth.payload, ctx)) {
+                        const EthercatFrame& ec = result->as<EthercatFrame>();
                         out.protocol = "ethercat";
-                        out.summary = ec->summary;
-                        out.ethercat_frame_type = ec->frame_type;
-                        out.ethercat_frame_type_name = ec->frame_type_name;
-                        out.ethercat_declared_length = ec->declared_length;
-                        out.ethercat_has_datagrams = ec->has_datagrams;
-                        out.ethercat_datagram_count = ec->datagrams.size();
-                        for (const auto& n : ec->notes) out.notes.push_back(n);
+                        out.summary = ec.summary;
+                        out.ethercat_frame_type = ec.frame_type;
+                        out.ethercat_frame_type_name = ec.frame_type_name;
+                        out.ethercat_declared_length = ec.declared_length;
+                        out.ethercat_has_datagrams = ec.has_datagrams;
+                        out.ethercat_datagram_count = ec.datagrams.size();
+                        for (const auto& n : ec.notes) out.notes.push_back(n);
 
-                        if (!ec->datagrams.empty()) {
-                            const EthercatDatagram& first = ec->datagrams[0];
+                        if (!ec.datagrams.empty()) {
+                            const EthercatDatagram& first = ec.datagrams[0];
                             out.ethercat_first_cmd = first.cmd;
                             out.ethercat_first_cmd_name = first.cmd_name;
                             out.ethercat_first_idx = first.idx;
@@ -1012,7 +1032,7 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                             out.ethercat_first_circulating = first.circulating;
                         }
                         const size_t kMaxEthercatDatagramSummaries = resource_limits().max_decoded_objects.value_or(50);
-                        for (const auto& dgram : ec->datagrams) {
+                        for (const auto& dgram : ec.datagrams) {
                             if (out.ethercat_datagrams.size() >= kMaxEthercatDatagramSummaries) break;
                             std::ostringstream a;
                             a << dgram.cmd_name << " idx=" << static_cast<unsigned>(dgram.idx) << " ";
@@ -1048,26 +1068,32 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                 bool want_eapol = options_.protocol_filter == ProtocolFilter::Auto ||
                                     options_.protocol_filter == ProtocolFilter::EapolOnly;
                 if (want_eapol && eth.ethertype == ETHERTYPE_EAPOL) {
-                    if (auto ea = try_parse_eapol(eth.payload)) {
+                    // Registration-model migration (batch 3): try_parse_eapol is now reached
+                    // through EapolDecoder::decode rather than called directly -- same function,
+                    // same semantics, see eapol.hpp. The dual-write below is unchanged.
+                    DecodeContext ctx;
+                    ctx.protocol_id = "eapol";
+                    if (auto result = eapol_decoder().decode(eth.payload, ctx)) {
+                        const EapolFrame& ea = result->as<EapolFrame>();
                         out.protocol = "eapol";
-                        out.summary = ea->summary;
-                        out.eapol_version = ea->version;
-                        out.eapol_version_name = ea->version_name;
-                        out.eapol_type = ea->type;
-                        out.eapol_type_name = ea->type_name;
-                        out.eapol_length = ea->length;
-                        out.eapol_has_eap = ea->has_eap;
-                        out.eapol_eap_code = ea->eap_code;
-                        out.eapol_eap_code_name = ea->eap_code_name;
-                        out.eapol_eap_identifier = ea->eap_identifier;
-                        out.eapol_eap_declared_length = ea->eap_declared_length;
-                        out.eapol_has_eap_type = ea->has_eap_type;
-                        out.eapol_eap_type = ea->eap_type;
-                        out.eapol_eap_type_name = ea->eap_type_name;
-                        out.eapol_has_key_descriptor = ea->has_eapol_key_descriptor;
-                        out.eapol_key_descriptor_type = ea->eapol_key_descriptor_type;
-                        out.eapol_key_descriptor_type_name = ea->eapol_key_descriptor_type_name;
-                        for (const auto& n : ea->notes) out.notes.push_back(n);
+                        out.summary = ea.summary;
+                        out.eapol_version = ea.version;
+                        out.eapol_version_name = ea.version_name;
+                        out.eapol_type = ea.type;
+                        out.eapol_type_name = ea.type_name;
+                        out.eapol_length = ea.length;
+                        out.eapol_has_eap = ea.has_eap;
+                        out.eapol_eap_code = ea.eap_code;
+                        out.eapol_eap_code_name = ea.eap_code_name;
+                        out.eapol_eap_identifier = ea.eap_identifier;
+                        out.eapol_eap_declared_length = ea.eap_declared_length;
+                        out.eapol_has_eap_type = ea.has_eap_type;
+                        out.eapol_eap_type = ea.eap_type;
+                        out.eapol_eap_type_name = ea.eap_type_name;
+                        out.eapol_has_key_descriptor = ea.has_eapol_key_descriptor;
+                        out.eapol_key_descriptor_type = ea.eapol_key_descriptor_type;
+                        out.eapol_key_descriptor_type_name = ea.eapol_key_descriptor_type_name;
+                        for (const auto& n : ea.notes) out.notes.push_back(n);
                         return out;
                     }
                 }
@@ -1083,21 +1109,30 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                                     options_.protocol_filter == ProtocolFilter::PppoeOnly;
                 if (want_pppoe && (eth.ethertype == ETHERTYPE_PPPOE_DISCOVERY ||
                                     eth.ethertype == ETHERTYPE_PPPOE_SESSION)) {
+                    // Registration-model migration (batch 3): try_parse_pppoe is now reached
+                    // through PppoeDiscoveryDecoder/PppoeSessionDecoder::decode rather than called
+                    // directly -- same function, same semantics, see pppoe.hpp. The dual-write
+                    // below is unchanged.
                     bool is_session_ethertype = (eth.ethertype == ETHERTYPE_PPPOE_SESSION);
-                    if (auto pp = try_parse_pppoe(eth.payload, is_session_ethertype)) {
+                    const ProtocolDecoder& pppoe_dec =
+                        is_session_ethertype ? pppoe_session_decoder() : pppoe_discovery_decoder();
+                    DecodeContext ctx;
+                    ctx.protocol_id = "pppoe";
+                    if (auto result = pppoe_dec.decode(eth.payload, ctx)) {
+                        const PppoeFrame& pp = result->as<PppoeFrame>();
                         out.protocol = "pppoe";
-                        out.summary = pp->summary;
-                        out.pppoe_version = pp->version;
-                        out.pppoe_type = pp->type;
-                        out.pppoe_code = pp->code;
-                        out.pppoe_code_name = pp->code_name;
-                        out.pppoe_session_id = pp->session_id;
-                        out.pppoe_length = pp->length;
-                        out.pppoe_is_session = pp->is_session;
-                        out.pppoe_has_ppp_protocol = pp->has_ppp_protocol;
-                        out.pppoe_ppp_protocol = pp->ppp_protocol;
-                        out.pppoe_ppp_protocol_name = pp->ppp_protocol_name;
-                        for (const auto& n : pp->notes) out.notes.push_back(n);
+                        out.summary = pp.summary;
+                        out.pppoe_version = pp.version;
+                        out.pppoe_type = pp.type;
+                        out.pppoe_code = pp.code;
+                        out.pppoe_code_name = pp.code_name;
+                        out.pppoe_session_id = pp.session_id;
+                        out.pppoe_length = pp.length;
+                        out.pppoe_is_session = pp.is_session;
+                        out.pppoe_has_ppp_protocol = pp.has_ppp_protocol;
+                        out.pppoe_ppp_protocol = pp.ppp_protocol;
+                        out.pppoe_ppp_protocol_name = pp.ppp_protocol_name;
+                        for (const auto& n : pp.notes) out.notes.push_back(n);
                         return out;
                     }
                 }
@@ -1114,21 +1149,31 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                                    options_.protocol_filter == ProtocolFilter::MplsOnly;
                 if (want_mpls && (eth.ethertype == ETHERTYPE_MPLS_UNICAST ||
                                     eth.ethertype == ETHERTYPE_MPLS_MULTICAST)) {
-                    if (auto mp = try_parse_mpls(eth.payload)) {
+                    // Registration-model migration (batch 3): try_parse_mpls is now reached
+                    // through MplsUnicastDecoder/MplsMulticastDecoder::decode rather than called
+                    // directly -- same function, same semantics, see mpls.hpp. The dual-write
+                    // below is unchanged.
+                    bool is_multicast = (eth.ethertype == ETHERTYPE_MPLS_MULTICAST);
+                    const ProtocolDecoder& mpls_dec =
+                        is_multicast ? mpls_multicast_decoder() : mpls_unicast_decoder();
+                    DecodeContext ctx;
+                    ctx.protocol_id = "mpls";
+                    if (auto result = mpls_dec.decode(eth.payload, ctx)) {
+                        const MplsFrame& mp = result->as<MplsFrame>();
                         out.protocol = "mpls";
-                        out.summary = mp->summary;
-                        out.mpls_is_multicast = (eth.ethertype == ETHERTYPE_MPLS_MULTICAST);
-                        out.mpls_stack_truncated = mp->stack_truncated;
-                        out.mpls_stack_too_deep = mp->stack_too_deep;
-                        out.mpls_label_count = mp->labels.size();
-                        if (!mp->labels.empty()) {
-                            const MplsLabelEntry& top = mp->labels.front();
+                        out.summary = mp.summary;
+                        out.mpls_is_multicast = is_multicast;
+                        out.mpls_stack_truncated = mp.stack_truncated;
+                        out.mpls_stack_too_deep = mp.stack_too_deep;
+                        out.mpls_label_count = mp.labels.size();
+                        if (!mp.labels.empty()) {
+                            const MplsLabelEntry& top = mp.labels.front();
                             out.mpls_top_label = top.label;
                             out.mpls_top_exp = top.exp;
                             out.mpls_top_ttl = top.ttl;
                         }
                         const size_t kMaxMplsLabelSummaries = resource_limits().max_decoded_objects.value_or(50);
-                        for (const auto& entry : mp->labels) {
+                        for (const auto& entry : mp.labels) {
                             if (out.mpls_labels.size() >= kMaxMplsLabelSummaries) break;
                             std::ostringstream ls;
                             ls << "label=" << entry.label;
@@ -1138,7 +1183,7 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                                << " s=" << (entry.bottom_of_stack ? "true" : "false");
                             out.mpls_labels.push_back(ls.str());
                         }
-                        for (const auto& n : mp->notes) out.notes.push_back(n);
+                        for (const auto& n : mp.notes) out.notes.push_back(n);
                         return out;
                     }
                 }
@@ -1163,10 +1208,18 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
 
                     if (want_stp && eth.llc_dsap == LLC_SAP_BPDU && eth.llc_ssap == LLC_SAP_BPDU &&
                         eth.llc_control == LLC_CONTROL_UI && !is_garp_dst) {
-                        if (auto stp = try_parse_stp(eth.llc_payload)) {
+                        // Registration-model migration (batch 3): try_parse_stp is now reached
+                        // through StpDecoder::decode rather than called directly -- same function,
+                        // same semantics, see stp.hpp. The gating above (DSAP/SSAP/Control/GARP)
+                        // stays right here at the call site, unchanged -- see StpDecoder's own
+                        // comment in stp.hpp for why. The dual-write below is unchanged.
+                        DecodeContext ctx;
+                        ctx.protocol_id = "stp";
+                        if (auto result = stp_decoder().decode(eth.llc_payload, ctx)) {
+                            const StpFrame& stp = result->as<StpFrame>();
                             out.protocol = "stp";
-                            out.summary = stp->summary;
-                            for (const auto& n : stp->notes) out.notes.push_back(n);
+                            out.summary = stp.summary;
+                            for (const auto& n : stp.notes) out.notes.push_back(n);
                             if (eth.llc_trailing_bytes_trimmed > 0) {
                                 out.notes.push_back(
                                     std::to_string(eth.llc_trailing_bytes_trimmed) +
@@ -1175,62 +1228,62 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                                     "minimum-frame-size padding, not real payload)");
                             }
 
-                            out.stp_protocol_version_name = stp->protocol_version_name;
-                            out.stp_protocol_version = stp->protocol_version;
-                            out.stp_bpdu_type_name = stp->bpdu_type_name;
-                            out.stp_bpdu_type = stp->bpdu_type;
-                            out.stp_is_tcn = stp->is_tcn;
-                            out.stp_is_spb = stp->is_spb;
+                            out.stp_protocol_version_name = stp.protocol_version_name;
+                            out.stp_protocol_version = stp.protocol_version;
+                            out.stp_bpdu_type_name = stp.bpdu_type_name;
+                            out.stp_bpdu_type = stp.bpdu_type;
+                            out.stp_is_tcn = stp.is_tcn;
+                            out.stp_is_spb = stp.is_spb;
 
-                            if (stp->has_common_body) {
+                            if (stp.has_common_body) {
                                 out.stp_has_common_body = true;
-                                out.stp_flags = stp->flags;
-                                out.stp_flag_tca = stp->flag_tca;
-                                out.stp_flag_agreement = stp->flag_agreement;
-                                out.stp_flag_forwarding = stp->flag_forwarding;
-                                out.stp_flag_learning = stp->flag_learning;
-                                out.stp_flag_port_role = stp->flag_port_role;
-                                out.stp_flag_port_role_name = stp_port_role_name(stp->flag_port_role);
-                                out.stp_flag_proposal = stp->flag_proposal;
-                                out.stp_flag_tc = stp->flag_tc;
+                                out.stp_flags = stp.flags;
+                                out.stp_flag_tca = stp.flag_tca;
+                                out.stp_flag_agreement = stp.flag_agreement;
+                                out.stp_flag_forwarding = stp.flag_forwarding;
+                                out.stp_flag_learning = stp.flag_learning;
+                                out.stp_flag_port_role = stp.flag_port_role;
+                                out.stp_flag_port_role_name = stp_port_role_name(stp.flag_port_role);
+                                out.stp_flag_proposal = stp.flag_proposal;
+                                out.stp_flag_tc = stp.flag_tc;
 
-                                out.stp_root_priority = stp->root_id.priority;
-                                out.stp_root_sys_id_ext = stp->root_id.ext;
-                                out.stp_root_mac = format_mac(stp->root_id.mac);
-                                out.stp_root_path_cost = stp->root_path_cost;
-                                out.stp_bridge_priority = stp->bridge_id.priority;
-                                out.stp_bridge_sys_id_ext = stp->bridge_id.ext;
-                                out.stp_bridge_mac = format_mac(stp->bridge_id.mac);
-                                out.stp_port_id_raw = stp->port_id_raw;
-                                out.stp_port_priority = stp->port_id_priority;
-                                out.stp_port_number = stp->port_id_number;
-                                out.stp_message_age = stp->message_age;
-                                out.stp_max_age = stp->max_age;
-                                out.stp_hello_time = stp->hello_time;
-                                out.stp_forward_delay = stp->forward_delay;
+                                out.stp_root_priority = stp.root_id.priority;
+                                out.stp_root_sys_id_ext = stp.root_id.ext;
+                                out.stp_root_mac = format_mac(stp.root_id.mac);
+                                out.stp_root_path_cost = stp.root_path_cost;
+                                out.stp_bridge_priority = stp.bridge_id.priority;
+                                out.stp_bridge_sys_id_ext = stp.bridge_id.ext;
+                                out.stp_bridge_mac = format_mac(stp.bridge_id.mac);
+                                out.stp_port_id_raw = stp.port_id_raw;
+                                out.stp_port_priority = stp.port_id_priority;
+                                out.stp_port_number = stp.port_id_number;
+                                out.stp_message_age = stp.message_age;
+                                out.stp_max_age = stp.max_age;
+                                out.stp_hello_time = stp.hello_time;
+                                out.stp_forward_delay = stp.forward_delay;
 
-                                out.stp_has_version1 = stp->has_version1;
-                                out.stp_version_1_length = stp->version_1_length;
+                                out.stp_has_version1 = stp.has_version1;
+                                out.stp_version_1_length = stp.version_1_length;
 
-                                if (stp->is_mstp) {
+                                if (stp.is_mstp) {
                                     out.stp_is_mstp = true;
-                                    out.stp_version_3_length = stp->version_3_length;
-                                    out.stp_mst_config_name = stp->mst_config_name;
-                                    out.stp_mst_config_revision_level = stp->mst_config_revision_level;
-                                    out.stp_mst_config_digest_hex = stp->mst_config_digest_hex;
-                                    out.stp_cist_internal_root_path_cost = stp->cist_internal_root_path_cost;
-                                    out.stp_cist_bridge_priority = stp->cist_bridge_id.priority;
-                                    out.stp_cist_bridge_sys_id_ext = stp->cist_bridge_id.ext;
-                                    out.stp_cist_bridge_mac = format_mac(stp->cist_bridge_id.mac);
-                                    out.stp_cist_remaining_hops = stp->cist_remaining_hops;
+                                    out.stp_version_3_length = stp.version_3_length;
+                                    out.stp_mst_config_name = stp.mst_config_name;
+                                    out.stp_mst_config_revision_level = stp.mst_config_revision_level;
+                                    out.stp_mst_config_digest_hex = stp.mst_config_digest_hex;
+                                    out.stp_cist_internal_root_path_cost = stp.cist_internal_root_path_cost;
+                                    out.stp_cist_bridge_priority = stp.cist_bridge_id.priority;
+                                    out.stp_cist_bridge_sys_id_ext = stp.cist_bridge_id.ext;
+                                    out.stp_cist_bridge_mac = format_mac(stp.cist_bridge_id.mac);
+                                    out.stp_cist_remaining_hops = stp.cist_remaining_hops;
 
                                     const size_t kMaxStpMstiSummaries = resource_limits().max_decoded_objects.value_or(50);
-                                    for (const auto& m : stp->msti_messages) {
+                                    for (const auto& m : stp.msti_messages) {
                                         if (out.stp_msti_messages.size() >= kMaxStpMstiSummaries) break;
                                         out.stp_msti_messages.push_back(stp_render_msti_summary(m));
                                     }
                                 }
-                                out.stp_is_alt_msti_format = stp->is_alt_msti_format;
+                                out.stp_is_alt_msti_format = stp.is_alt_msti_format;
                             }
                             return out;
                         }

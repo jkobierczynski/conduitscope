@@ -4,8 +4,10 @@
 #include "conduitscope/bacnet.hpp"
 #include "conduitscope/cotp.hpp"
 #include "conduitscope/dnp3.hpp"
+#include "conduitscope/eapol.hpp"
 #include "conduitscope/eigrp.hpp"
 #include "conduitscope/enip.hpp"
+#include "conduitscope/ethercat.hpp"
 #include "conduitscope/goose.hpp"
 #include "conduitscope/hartip.hpp"
 #include "conduitscope/iec104.hpp"
@@ -13,22 +15,91 @@
 #include "conduitscope/ldap.hpp"
 #include "conduitscope/mms.hpp"
 #include "conduitscope/modbus.hpp"
+#include "conduitscope/mpls.hpp"
 #include "conduitscope/mqtt.hpp"
 #include "conduitscope/opcua.hpp"
+#include "conduitscope/pppoe.hpp"
+#include "conduitscope/profinet.hpp"
 #include "conduitscope/s7comm.hpp"
 #include "conduitscope/s7commplus.hpp"
 #include "conduitscope/smb.hpp"
+#include "conduitscope/stp.hpp"
+#include "conduitscope/sv.hpp"
 #include "conduitscope/twincat.hpp"
 
 namespace conduitscope {
 
 const std::vector<const ProtocolDecoder*>& ethertype_registry() {
     static const std::vector<const ProtocolDecoder*> order = {
+        &profinet_decoder(),  // Migration batch 3 -- sits exactly where the old
+                            // `if (want_profinet)` block always did: tried FIRST of this whole
+                            // cascade, ahead of GOOSE/SV (both migrated below). No ordering
+                            // rationale beyond position preservation needed -- EtherType 0x8892
+                            // is exclusive to PROFINET RT, no collision possible with any other
+                            // EtherType-keyed protocol, migrated or not (see profinet.hpp's file
+                            // header comment).
         &goose_decoder(),  // Stage 3 of the pilot -- no ordering rationale needed beyond what its
                             // own decoder.cpp call site's comment already documents: EtherType
                             // 0x88B8 is exclusive to GOOSE, no collision possible with any other
                             // EtherType-keyed protocol (PROFINET/SV/EtherCAT/STP/EAPOL/PPPoE/MPLS),
                             // migrated or not.
+        &sv_decoder(),     // Migration batch 3 -- sits exactly where the old `if (want_sv)` block
+                            // always did: immediately after GOOSE (migrated above, in the pilot),
+                            // before PROFINET/EtherCAT/EAPOL/STP/MPLS/PPPoE (still legacy). No
+                            // ordering rationale beyond position preservation needed -- EtherType
+                            // 0x88BA is exclusive to SV, no collision possible with any other
+                            // EtherType-keyed protocol, migrated or not (same reasoning as GOOSE's
+                            // own entry above; SV is its direct sibling, see sv.hpp's file header
+                            // comment).
+        &ethercat_decoder(),  // Migration batch 3 -- sits exactly where the old
+                            // `if (want_ethercat)` block always did: after PROFINET RT/GOOSE/SV
+                            // (all migrated above, in this same batch), before EAPOL/STP/MPLS/
+                            // PPPoE (still legacy). No ordering rationale beyond position
+                            // preservation needed -- EtherType 0x88A4 is exclusive to EtherCAT, no
+                            // collision possible with any other EtherType-keyed protocol,
+                            // migrated or not (see ethercat.hpp's file header comment's
+                            // "structural detection gate" paragraph).
+        &eapol_decoder(),  // Migration batch 3 -- sits exactly where the old `if (want_eapol)`
+                            // block always did: after PROFINET RT/GOOSE/SV/EtherCAT (all migrated
+                            // above, in this same batch), before PPPoE/MPLS/STP (still legacy). No
+                            // ordering rationale beyond position preservation needed -- EtherType
+                            // 0x888E is exclusive to EAPOL, no collision possible with any other
+                            // EtherType-keyed protocol, migrated or not (see eapol.hpp's own
+                            // "structural detection gate" paragraph).
+        &pppoe_discovery_decoder(),  // Migration batch 3 -- sits exactly where the old
+                            // `if (want_pppoe)` block always did: after PROFINET RT/GOOSE/SV/
+                            // EtherCAT/EAPOL (all migrated above, in this same batch), before MPLS
+                            // (migrated below, in this same batch too)/STP (still legacy). No
+                            // ordering rationale beyond position preservation needed -- EtherTypes
+                            // 0x8863/0x8864 are exclusive to PPPoE, no collision possible with any
+                            // other EtherType-keyed protocol, migrated or not. Shares its "pppoe"
+                            // id() with pppoe_session_decoder() immediately below -- see
+                            // PppoeDiscoveryDecoder's own comment in pppoe.hpp for why that's safe.
+        &pppoe_session_decoder(),    // The Session-stage half of the same `if (want_pppoe)` block
+                            // -- see pppoe_discovery_decoder() immediately above.
+        &mpls_unicast_decoder(),  // Migration batch 3 -- sits exactly where the old
+                            // `if (want_mpls)` block always did: after PROFINET RT/GOOSE/SV/
+                            // EtherCAT/EAPOL/PPPoE (all migrated above, in this same batch), before
+                            // STP (still legacy, the last protocol left in this whole cascade). No
+                            // ordering rationale beyond position preservation needed -- EtherTypes
+                            // 0x8847/0x8848 are exclusive to MPLS, no collision possible with any
+                            // other EtherType-keyed protocol, migrated or not. Shares its "mpls"
+                            // id() with mpls_multicast_decoder() immediately below -- see
+                            // MplsUnicastDecoder's own comment in mpls.hpp for why that's safe.
+        &mpls_multicast_decoder(),  // The multicast half of the same `if (want_mpls)` block -- see
+                            // mpls_unicast_decoder() immediately above.
+        &stp_decoder(),    // Migration batch 3 -- sits exactly where the old `if (want_stp)` block
+                            // always did: tried LAST of this whole cascade, after every EtherType-
+                            // keyed protocol above (all seven now migrated, in this and the pilot's
+                            // own batches). This completes migration batch 3 -- the EtherType/LLC
+                            // gate cascade is now fully populated, the fourth GateKind (after
+                            // IpProtocol/TcpPortIndependent/UdpPortIndependent) to reach that
+                            // state. Unlike every entry above, STP has no EtherType of its own at
+                            // all (see stp_decoder()'s own comment in stp.hpp) -- its ordering here
+                            // is purely "last, because it's LLC-framed, not EtherType-framed, and
+                            // every EtherType-framed candidate above must have already failed to
+                            // match before an LLC-framed one is even structurally possible" (see
+                            // decoder.cpp's own call site comment).
     };
     return order;
 }

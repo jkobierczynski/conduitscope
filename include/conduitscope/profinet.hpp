@@ -100,6 +100,8 @@
 #include <vector>
 
 #include "conduitscope/byteio.hpp"
+#include "conduitscope/link_layer.hpp"
+#include "conduitscope/protocol_decoder.hpp"
 
 namespace conduitscope {
 
@@ -158,5 +160,19 @@ struct ProfinetFrame {
 // unrecognized FrameID range is honestly reported as such (falls back to decoder.cpp's generic
 // "non-ip" ethertype-name-only report) rather than guessed at.
 std::optional<ProfinetFrame> try_parse_profinet(ByteSpan eth_payload);
+
+// registration-model migration (batch 3 -- see protocol_decoder.hpp/protocol_registry.hpp): thin
+// ProtocolDecoder wrapper around try_parse_profinet above, unchanged. Like GOOSE/SV,
+// EtherType-gated with no cross-packet state, so this needs nothing beyond
+// id()/gate_kind()/ethertype()/decode(); see profinet.cpp.
+class ProfinetDecoder : public ProtocolDecoder {
+public:
+    std::string_view id() const override { return "profinet"; }
+    GateKind gate_kind() const override { return GateKind::EtherType; }
+    std::optional<uint16_t> ethertype() const override { return ETHERTYPE_PROFINET; }
+    std::optional<ProtocolResult> decode(ByteSpan payload, DecodeContext& ctx) const override;
+};
+
+const ProtocolDecoder& profinet_decoder();
 
 }  // namespace conduitscope

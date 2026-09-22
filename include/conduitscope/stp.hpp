@@ -253,6 +253,7 @@
 #include <vector>
 
 #include "conduitscope/byteio.hpp"
+#include "conduitscope/protocol_decoder.hpp"
 
 namespace conduitscope {
 
@@ -365,5 +366,26 @@ std::string stp_render_msti_summary(const StpMstiMessage& m);
 // BPDU. Returns std::nullopt (never throws) when the structural detection gate described in this
 // file's header comment isn't met.
 std::optional<StpFrame> try_parse_stp(ByteSpan llc_payload);
+
+// registration-model migration (batch 3 -- see protocol_decoder.hpp/protocol_registry.hpp): thin
+// ProtocolDecoder wrapper around try_parse_stp above, unchanged. Unlike every other protocol in
+// this batch (GOOSE/SV/PROFINET RT/EtherCAT/EAPOL/PPPoE/MPLS), STP has no EtherType of its own at
+// all -- it rides classic 802.3 LLC framing (see link_layer.hpp's file header comment and this
+// file's own header comment), so ethertype() is deliberately left at ProtocolDecoder's own
+// std::nullopt default rather than overridden. gate_kind() is still GateKind::EtherType, the same
+// bucket that enum's own doc comment already places STP in alongside its seven EtherType-keyed
+// siblings -- decoder.cpp's own call site retains full responsibility for STP's actual structural
+// gate (802.3 Length framing, DSAP/SSAP/Control, and the GARP destination-MAC carve-out -- see
+// try_parse_stp's own comment above) before ever reaching decode() below, exactly as it did before
+// migration; nothing about that gating logic moves into this class. No cross-packet state, so this
+// needs nothing beyond id()/gate_kind()/decode(); see stp.cpp.
+class StpDecoder : public ProtocolDecoder {
+public:
+    std::string_view id() const override { return "stp"; }
+    GateKind gate_kind() const override { return GateKind::EtherType; }
+    std::optional<ProtocolResult> decode(ByteSpan payload, DecodeContext& ctx) const override;
+};
+
+const ProtocolDecoder& stp_decoder();
 
 }  // namespace conduitscope
