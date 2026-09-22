@@ -713,6 +713,11 @@ grant -- e.g. Linux's `CAP_NET_RAW`, or membership in the `npcap`/
 `wireshark` group on a suitably configured Windows/Npcap install). If
 `interfaces` lists nothing at all, that's more likely a privilege issue than
 an environment with genuinely zero network interfaces; the command says so.
+On Linux, running every capture as root isn't required: granting the built
+binary `CAP_NET_RAW`/`CAP_NET_ADMIN` once via `setcap` (see the README's
+Building section) lets it open interfaces -- including loopback -- as an
+ordinary user from then on; this is also what lets the `live_capture_*`
+tests in this project's own CTest suite pass without `sudo`.
 
 ## POLICY FILE FORMAT
 

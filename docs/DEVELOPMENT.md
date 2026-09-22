@@ -167,7 +167,10 @@ Discussed and adopted, in this order:
    -- confirmed by reproducing the failure and the fix locally as an
    unprivileged user before pushing. The same `setcap` invocation is the
    recommended fix for the local-dev-machine version of this (once, on
-   the built binary) instead of prefixing every test run with `sudo`.
+   the built binary) instead of prefixing every test run with `sudo` --
+   the README's own Building/Linux instructions now include this exact
+   step, verified there the same way: build, `setcap`, then confirm the
+   full `live_capture_*` CTest subset passes as an unprivileged user.
 
    A third addition, once the tag-push trigger above was in place: a
    `release` job that only runs on a `v*` tag push, only after every
@@ -2066,10 +2069,47 @@ useful, none blocking anything else on this list.
    **Partially done:** the Windows/Npcap half is now validated -- a clean
    MSVC/Visual Studio build with live capture enabled, `conduitscope.exe
    interfaces` correctly enumerating real adapters, and a real capture
-   decoded end to end (which is what surfaced both the `version` multi-
-   config build-type bug and the FF-HSE false-positive fix documented
-   elsewhere in this file, plus the addition of full ICMP decoding). This
-   real usage also surfaced a Ctrl+C-specific bug: `SigintGuard`
+   decoded end to end (which is what surfaced the FF-HSE false-positive
+   fix documented elsewhere in this file, plus the addition of full ICMP
+   decoding). That same round of real Windows testing also surfaced two
+   further, unrelated bugs, both fixed:
+   - **`conduitscope version`'s reported build type was wrong on a
+     multi-config CMake generator.** It read `CMAKE_BUILD_TYPE` directly,
+     which is meaningless (always empty) for Visual Studio/Xcode-style
+     multi-config generators -- the actual configuration is chosen at
+     *build* time via `cmake --build ... --config <Config>`, not at
+     configure time the way `CMAKE_BUILD_TYPE` assumes. The real MSVC
+     build surfaced this concretely: the reported string came out as
+     `Windows,  build` (a stray double space where the empty build type
+     used to render), not a guess at the wrong configuration -- which
+     would have been worse, since a build genuinely built `Debug` could
+     have silently claimed `Release`. Fixed by detecting a multi-config
+     generator at CMake configure time (`GENERATOR_IS_MULTI_CONFIG`) and,
+     for that case, baking in a literal `multi-config` string instead of
+     `CMAKE_BUILD_TYPE`'s empty value; single-config generators (the
+     Linux build) are unaffected and still report their real configured
+     build type.
+   - **Windows release binaries required `wpcap.dll` (the Npcap
+     *runtime*) at process startup, even to run `decode -r` on a saved
+     file with no live capture involved.** Found via a real Windows CI
+     hang: a runner with the Npcap *SDK* installed (build-time headers/
+     import libraries) but not the separate Npcap *runtime* installed
+     failed every offline `decode` test too, since the executable
+     wouldn't even start -- `pcap.dll`/`wpcap.dll` was linked as an
+     ordinary load-time dependency, so the OS loader refused to launch
+     the process at all if it was missing, regardless of whether that
+     run ever touched live capture. Fixed by delay-loading `wpcap.dll` on
+     Windows (`/DELAYLOAD:wpcap.dll` plus `delayimp.lib`) instead of
+     linking it as a normal import: the DLL is now only actually loaded
+     the first time code on the live-capture path runs, so offline
+     `decode`/`policy validate`/`inventory` (no `-i`) work on a machine
+     with only the SDK's import library present and no runtime installed
+     at all. `-i`/`interfaces` still need the real runtime, but now fail
+     with a clear "install the Npcap runtime" message at the point of
+     first use instead of the whole binary refusing to launch; see
+     docs/USER_GUIDE.md's "Windows / Npcap notes" for the resulting
+     runtime-vs-build-time distinction. This real usage also surfaced a
+     Ctrl+C-specific bug: `SigintGuard`
    (cli_main.cpp) restored the terminal's ANSI colors on interrupt via a
    portable `std::signal(SIGINT, ...)` handler on every platform, but on
    Windows that handler isn't guaranteed to stay installed for the whole
@@ -4037,11 +4077,23 @@ unlike any of the eight routing/redundancy protocols decoded so far.
       changes linktype mid-stream is handled by recompiling only when the
       linktype actually changes (`PacketSource`/`BpfFilter::matches()`),
       not on every packet.
+    - **The generic "no protocol claimed this TCP payload" fallback summary
+      is now terse instead of an ever-growing list.** It used to name every
+      protocol this decoder had already tried and ruled out on that
+      payload -- a list that only grows as more protocols get added, and
+      is entirely noise on ordinary, unremarkable traffic rather than
+      information an OT auditor can act on. Jurgen asked for this to be
+      shortened after seeing it on ordinary traffic. Replaced with a
+      fixed-shape one-liner, `TCP payload of N byte(s) on port X->Y`
+      (`decoder.cpp`'s final TCP fallback, right after Tier 5's tunnel/VPN
+      check), matching the equivalent UDP-side fallback's own
+      already-terse shape a few hundred lines earlier in the same file.
 
-    All three are covered by CTest (27 pre-existing OUI/VLAN tests updated
+    All four are covered by CTest (27 pre-existing OUI/VLAN tests updated
     for the new OUI default; 8 more updated and 6 new ones added for the
     `-e`/`--ether` revision above; 11 new `-t`/`--time-format` tests; 8 new
-    `--filter`-on-`-r` tests including the no-libpcap stub path) and
+    `--filter`-on-`-r` tests including the no-libpcap stub path; existing
+    fallback-summary tests updated to match the terser wording) and
     verified clean under ASan/UBSan (1148/1148 on the default build).
 
     **Follow-up fix (post-release, Jurgen's own report)**: applying
