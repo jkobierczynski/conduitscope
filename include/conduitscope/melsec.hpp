@@ -130,6 +130,26 @@
 // documented honestly as "conventional, not authoritative, always user-configured on the PLC's own
 // Ethernet module parameters," the same honesty TwinCAT's own "conventional port" framing uses for
 // AMS/TCP 48898.
+//
+// POST-DELIVERY FIX -- MELSEC-VS-MODBUS TCP COLLISION (found during the FINS follow-up feature,
+// reported directly by Jurgen): Modbus/TCP's own structural gate is weak (protocol_id==0 at payload
+// bytes 2-3, a plausible-length check, a nonzero function code -- see modbus.cpp's own comment) and
+// its own decode does NOT hard-reject a declared-length mismatch, only notes it. A genuine MELSEC 3E
+// request's own bytes 2-3 are Network No.(1)+PC No.(1) -- both legitimately 0 (network_no==0 is very
+// common; pc_no==0 is a real, valid MC-protocol station number, not just the 0xFF "own station"
+// convention this decoder's own sample fixture happens to default to) -- and bytes 4-5 (Request
+// Destination Module I/O No., little-endian) can read as a small, plausible Modbus mbap_length when
+// reinterpreted big-endian (e.g. io_no==0x0000, a real I/O number for a module at slot 0, not just
+// the 0x3FF "own station" sentinel). Confirmed with a synthetic decode before this fix: such a
+// request on MELSEC's own TCP port 5001 was silently swallowed by Modbus and shown as "Unknown
+// (0xNN)" -- the exact same collision CLASS as the real MELSEC-vs-HART-IP UDP collision documented
+// throughout this file, just against Modbus on the TCP side instead, and undiscovered until now
+// because this decoder's own sample fixture (tools/make_sample_pcap.py's melsec_request/
+// melsec_response) happens to default to pc_no=0xFF and io_no=0x3FF, both of which avoid it. FIXED
+// by moving MELSEC's own TCP dispatch to run BEFORE Modbus (decoder.cpp/protocol_registry.cpp) --
+// the same "stronger gate wins" resolution already used for IEC104-vs-Modbus and (on the UDP side)
+// MELSEC-vs-HART-IP above -- and covered by a dedicated regression test
+// (melsec_tcp_request_not_misdetected_as_modbus).
 #pragma once
 
 #include <cstdint>

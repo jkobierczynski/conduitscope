@@ -6858,17 +6858,42 @@ TwinCAT's/HART-IP's own structural gates.
 Surveyed against every other `TcpPortIndependent`/`UdpPortIndependent`
 protocol sharing MELSEC's own dispatch cascades: none of OPC UA (fixed
 3-byte ASCII MessageType), EtherNet/IP's CIP I/O (exact CPF item type +
-length), IEC104 (fixed start byte `0x68`), Modbus (protocol-id==0 read
-from a byte range MELSEC's own declared-length field almost never leaves
-zero), DNP3 (fixed sync `0x0564`), TwinCAT (conventionally-zero leading
-AMS/TCP bytes), Kerberos, LDAP, SMB, BACnet/IP (fixed `0x81` BVLC Type),
-or COTP hardcode `0x50`/`0xD0`/`0x54`/`0xD4` as a detection anchor --
-confirmed both by grepping each one's own detection code for those
-byte values (none found) and empirically, via this protocol's own manual
-smoke test decoding every command against a synthetic fixture with no
-false-positive misdetections on the TCP side.
+length), IEC104 (fixed start byte `0x68`), DNP3 (fixed sync `0x0564`),
+TwinCAT (conventionally-zero leading AMS/TCP bytes), Kerberos, LDAP, SMB,
+BACnet/IP (fixed `0x81` BVLC Type), or COTP hardcode
+`0x50`/`0xD0`/`0x54`/`0xD4` as a detection anchor -- confirmed both by
+grepping each one's own detection code for those byte values (none
+found) and empirically, via this protocol's own manual smoke test
+decoding every command against a synthetic fixture with no false-positive
+misdetections on the TCP side.
 
-**HART-IP's own UDP path is the one real, confirmed collision, and it
+**Modbus was NOT actually safe, and this was found post-delivery.**
+The original delivery's own survey above reasoned that MELSEC's
+declared-length field "almost never leaves [Modbus's protocol_id byte
+range at] zero" -- true for `payload[2:4]` in isolation, but that
+reasoning stopped one field short. `payload[2:4]` for a MELSEC frame is
+actually Network No.(1)+PC No.(1), not the declared-length field, and
+BOTH bytes are legitimately 0 in real traffic (network_no==0 is the
+common "local network" convention; pc_no==0 is a real, valid MC-protocol
+station number, not just the 0xFF "own station" convention this
+decoder's own sample fixture happens to default to) -- so
+`protocol_id==0` is satisfied far more often than the original survey
+assumed. Once that holds, `payload[4:6]` (Request Destination Module I/O
+No., little-endian) becomes Modbus's own `mbap_length` when read
+big-endian, and a real, non-"own-station" I/O number (e.g. `0x0000` for
+a module at slot 0, instead of the `0x3FF` sentinel) reads as a small,
+plausible length -- and Modbus's own decode does not hard-reject the
+resulting mismatch, only notes it, so it fully succeeds. Found via
+Jurgen's own direct report and confirmed with a synthetic decode: a
+genuine MELSEC request with `network_no=pc_no=0`, `io_no=0x0000` was
+silently swallowed by Modbus (shown as `Unknown (0xNN)`) even on
+MELSEC's own TCP port 5001. **Fixed** by moving MELSEC's own TCP dispatch
+to run BEFORE Modbus (`decoder.cpp`/`protocol_registry.cpp`) -- the same
+"stronger gate wins" resolution IEC104-before-Modbus already establishes
+-- and covered by a dedicated regression test
+(`melsec_tcp_request_not_misdetected_as_modbus`).
+
+**HART-IP's own UDP path is a second real, confirmed collision, and it
 required a registry-ordering fix, not a gate change.** HART-IP's UDP
 structural gate (see that section above) is deliberately weak -- payload
 byte[1] (MessageType) in {0,1,2,3,15}, byte[2] (MessageID) in {0,1,2,3},
@@ -6938,17 +6963,28 @@ breakdown plus a matched-responses count line, mirroring TwinCAT's own
 
 #### Validation
 
-No real-world MELSEC/Mitsubishi capture was found; the user's own pointer
-to the `ITI/ICS-Security-Tools` GitHub repository's `pcaps/` collection
-(and its linked, more comprehensive `automayt/ICS-pcap` collection) was
-investigated directly during planning and confirmed to list MELSEC only
-as a still-wanted, not-yet-contributed protocol in `AdditionalNotes.txt`
--- no `MELSEC/`/`Mitsubishi/` capture folder exists there. This
-incidentally corroborated the 5000/udp + 5001/tcp port convention (not
-IANA-registered, always user-configured on the PLC's own Ethernet module)
-from a third independent source, folded into `melsec.hpp`'s own port
-documentation. Validated by construction against a synthetic
-`tests/sample_melsec.pcap` fixture (39 packets --
+**CORRECTED POST-DELIVERY:** the original delivery's own real-capture
+corpus check (below, struck through for the record) missed a real
+MELSEC/Mitsubishi capture that DOES exist in the same collection it
+checked -- `ITI/ICS-Security-Tools`'s own `pcaps/MELSEC/
+melsoft_tcp_2_159_pkt.pcap` (159 packets, MELSOFT being Mitsubishi's own
+engineering software suite), found via Jurgen's own direct pointer during
+the FINS follow-up feature. This sandbox's own tooling could not download
+the actual binary (GitHub's `raw`/LFS-style download paths are blocked by
+`robots.txt` here, and the file is too large for this session's
+web-fetch tool to responsibly transcribe as hex), so this decoder's own
+byte-level claims remain unrevalidated against it -- an honest gap, not a
+silent one. ~~No real-world MELSEC/Mitsubishi capture was found; the
+user's own pointer to the `ITI/ICS-Security-Tools` GitHub repository's
+`pcaps/` collection (and its linked, more comprehensive
+`automayt/ICS-pcap` collection) was investigated directly during planning
+and confirmed to list MELSEC only as a still-wanted, not-yet-contributed
+protocol in `AdditionalNotes.txt` -- no `MELSEC/`/`Mitsubishi/` capture
+folder exists there.~~ This incidentally corroborated the 5000/udp +
+5001/tcp port convention (not IANA-registered, always user-configured on
+the PLC's own Ethernet module) from a third independent source, folded
+into `melsec.hpp`'s own port documentation. Validated by construction
+against a synthetic `tests/sample_melsec.pcap` fixture (40 packets --
 `tools/make_sample_pcap.py`'s `build_melsec_sample()`), covering: all 13
 commands in both request and response shapes; the bit-units nibble-
 packing quirk; a 4E-frame variant proving the Serial No. field; the
@@ -6957,14 +6993,307 @@ AND CSV output); both named End Codes (`C059` and the raw-hex fallback);
 an unrecognized command/subcommand pair (structural-only fallback); a
 gate-rejection negative control (non-matching subheader, falls through to
 generic `tcp`); a TCP segment-split reassembly (a Batch Read response
-split across two segments, still correctly matched); UDP coverage on the
-standard port, a non-standard port pair (annotated, not misdetected), and
-a UDP declared-length-mismatch negative control (falls through to generic
-`udp`, proving the structural gate's collision resistance). Every case
-was decoded and inspected in `--format text`, `--format json`, `--format
-csv`, and `--stats` BEFORE the `CMakeLists.txt` `melsec_*` test family
-reading it was written -- the same verification discipline every prior
-protocol addition in this codebase has been held to, and the discipline
-that this time caught a real, live collision with HART-IP's own UDP gate
-(see the collision-survey subsection above) before delivery. See
+split across two segments, still correctly matched); the real
+MELSEC-vs-Modbus TCP collision regression (`network_no=pc_no=0`,
+`io_no=0x0000`, see the collision-survey subsection above); UDP coverage
+on the standard port, a non-standard port pair (annotated, not
+misdetected), and a UDP declared-length-mismatch negative control (falls
+through to generic `udp`, proving the structural gate's collision
+resistance). Every case was decoded and inspected in `--format text`,
+`--format json`, `--format csv`, and `--stats` BEFORE the
+`CMakeLists.txt` `melsec_*` test family reading it was written -- the
+same verification discipline every prior protocol addition in this
+codebase has been held to, and the discipline that caught a real, live
+collision with HART-IP's own UDP gate at original delivery, and a second
+real, live collision with Modbus's own TCP gate in this post-delivery fix
+(see the collision-survey subsection above). See
 `include/conduitscope/melsec.hpp`'s file header for the full writeup.
+
+### FINS (Factory Interface Network Service, Omron) -- TCP port 9600, UDP port 9600
+
+Omron's PLC communication protocol -- the direct Omron analogue of
+Modbus/S7comm/MELSEC: a client reads/writes PLC memory areas (CIO, Work,
+Holding, Auxiliary, DM, Timer/Counter, Expansion DM), can remotely
+RUN/STOP the CPU, force-set/reset individual I/O bits, and read/write the
+PLC's own clock, all normally with no protocol-level authentication.
+Built entirely on the `ProtocolDecoder` registration-model interface from
+inception, the same "no flat `DecodedPacket` fields, a dedicated
+`write_fins_json_fields` function in `output.cpp` instead" pattern
+MELSEC established first -- see that section above for what this implies
+about JSON rendering. The second protocol on this interface with a
+genuine dual TCP+UDP transport built from scratch (MELSEC was the
+first), but unlike MELSEC's own split 5001/tcp + 5000/udp, FINS uses the
+SAME conventional port number (9600) for both transports.
+
+Every byte-level structure was verified against three independent
+sources: `aphyt/omron_fins` (a pure-Python FINS client library),
+`lammertb/libfins` (a multi-platform C library, confirming the same
+10-byte header layout via independently-named `#define`s and supplying a
+much larger end-code table than MELSEC ever had), and Wireshark's own
+`packet-omron-fins.c` dissector (which cites the official "OMRON FINS
+Commands Reference Manual, W227-E1-2" by name and gives exact byte
+offsets for every decoded command). This three-way check caught a real
+error a fetched SEO/content-site summary made -- claiming the FINS/TCP
+Length field is little-endian and that MRC+SRC form one opaque 2-byte
+field; all three primary sources agree the Length field is big-endian and
+MRC/SRC are genuinely two separate 1-byte sub-fields.
+
+**Real-capture corpus check**: the same two repositories MELSEC's own
+planning checked (`ITI/ICS-Security-Tools`'s `pcaps/` collection and its
+linked `automayt/ICS-pcap` collection) were investigated again during
+this feature's own implementation, this time via Jurgen's own direct
+pointer to the `pcaps/` tree. `automayt/ICS-pcap`'s own repository
+does contain an `omron.pcap` capture (found via its own directory
+listing), but this sandbox's tooling could not download its actual bytes
+(git-LFS-stored, and GitHub's `raw`/LFS-style download paths are blocked
+by `robots.txt` here) -- an honest gap, not a silent one, the same class
+of gap MELSEC's own real-capture check ran into with
+`melsoft_tcp_2_159_pkt.pcap`. Real wire-format confirmation was instead
+extracted from that same repository's accompanying `conn.log` and an
+`omrontcp-info.nse` Nmap script embedded in it, which carries a literal
+real FINS/TCP probe against real Omron devices -- this is what surfaced
+two corrections to the plan's own conventional-value assumptions (below).
+Both incidentally corroborate the 9600/tcp+udp port convention (not
+IANA-registered) from a source independent of Wireshark's own
+`#define OMRON_FINS_TCP_PORT 9600`/`#define OMRON_FINS_UDP_PORT 9600`
+(both explicitly commented "Not IANA registered").
+
+**Corrections found via real-world evidence**: the real NSE probe's own
+embedded FINS/TCP frame shows GCT (Gateway Count) as `0x02`, not the
+conventional `0x07` the OMRON manual documents as typical -- this
+decoder's own test fixture and its `fins_frame()` helper default to
+`0x02` for this reason, and `fins.hpp`'s own UDP-vs-HART-IP collision
+survey (below) is written against the real, observed value rather than
+the documented-but-unreliable one. The same probe's own SA2 (source unit
+address) value is `0xEF`, well outside the documented 0-31 range -- so,
+unlike the original implementation plan's own assumption, this decoder's
+UDP structural gate does NOT range-check DA2/SA2 at all; it decodes and
+shows them, and gates purely on ICF's reserved bits, RSV, and the
+command-code allowlist instead.
+
+#### Wire format
+
+**FINS command/response frame** (transport-independent -- the UDP
+payload directly, or the bytes after FINS/TCP's own envelope for a Frame
+Send): a 10-byte header, all single-byte fields: `ICF(1) + RSV(1) +
+GCT(1) + DNA(1) + DA1(1) + DA2(1) + SNA(1) + SA1(1) + SA2(1) + SID(1)`,
+followed by `MRC(1) + SRC(1)` (the 2-byte command code -- genuinely two
+1-byte sub-fields, not one combined value), followed by command-specific
+request data, or (on a response) `EndCode(2, big-endian)` + command-
+specific response data.
+
+**ICF** (Information Control Field) bit layout: bit7 (`0x80`, GWB) =
+gateway-use bit, conventionally 1; bit6 (`0x40`, DTB) = **0=command,
+1=response -- the authoritative command/response discriminator on the
+wire**, used directly for dispatch (the FINS analogue of MELSEC's
+subheader doing double duty); bits 5-1 (`0x3E`) = reserved, must be 0 --
+this decoder's own primary structural gate component; bit0 (`0x01`, RSB)
+= 0=response required, 1=response not required. RSV must be exactly
+`0x00` -- this decoder's own second gate component. DA2/SA2 (unit
+address) are decoded and shown, not range-checked (see "Corrections
+found via real-world evidence" above). SID (Service ID) is
+client-assigned and echoed back on the response, but -- like MELSEC's own
+4E Serial No. -- not trusted as a guaranteed-unique transaction ID (see
+"Session-scoped response matching" below).
+
+**FINS/TCP framing** (the outer envelope, wraps the frame above for TCP
+transport): `Magic("FINS", 4 ASCII bytes, exact) + Length(4, big-endian,
+byte count of everything after this field) + Command(4, BE) +
+ErrorCode(4, BE)`, then command-specific data. TCP declared length = `8 +
+Length`. TCP Command values: `0x00`/`0x01` = Node Address Data Send
+(the handshake, client->server then server->client, 4-byte node
+address(es) follow); `0x02` = **Frame Send** -- the only command whose
+payload this decoder unwraps into the shared FINS-frame parser above;
+`0x03` = Frame Send Error Notification; `0x06` = Connection Confirmation
+(both shown by name only, no further payload shape found in any source).
+
+**A genuine architectural difference from MELSEC**: a FINS response frame
+**self-describes its own command code** at the same offset (10-11) a
+request's own MRC/SRC sit at -- unlike MELSEC, whose response frames
+carry no command field of their own at all. This means `try_parse_fins_
+frame` can fully, context-freely decode 15 of the 17 curated commands'
+own responses. The two exceptions: Memory Area Read (`0101`) and
+Multiple Memory Area Read (`0104`) responses carry raw values with no
+repeated area-code/count information of their own, so decoding *those*
+two specifically still needs the matching request's own device list --
+handled via a narrow, single-purpose `FinsFlowState` (much lighter than
+MELSEC's own, which needed session state for every command).
+
+#### Commands decoded (17, all byte offsets confirmed via Wireshark's dissector)
+
+Full request AND response field decode: Memory Area Read (`0101`),
+Memory Area Write (`0102`), Memory Area Fill (`0103`), Multiple Memory
+Area Read (`0104`), Run (`0401`), Stop (`0402`), Controller Data Read
+(`0501`, the 92/159-byte model+version response variants), Controller
+Status Read (`0601`), Cycle Time Read (`0620`, both the "initialize" and
+"read" response shapes), Clock Read (`0701`), Clock Write (`0702`),
+LOOP-BACK Test (`0801`), Access Right Acquire (`0C01`, both the plain-
+success and already-held-elsewhere response shapes), Access Right Forced
+Acquire (`0C02`), Access Right Release (`0C03`), Error Clear (`2101`),
+Forced Set/Reset (`2301`), Forced Set/Reset Cancel (`2302`). Any
+command/subcommand pair outside this curated set is rejected by the UDP
+structural gate itself (see below) rather than shown as a numeric
+fallback -- an intentional departure from MELSEC's own posture, forced
+by FINS/UDP having no other structural anchor to lean on once the
+command-code allowlist is removed.
+
+**Memory area code table**: the full, cross-verified table from
+Wireshark's own `memory_area_code_cv[]`/`memory_area_code_prefix[]` --
+CIO/Work/Holding/Auxiliary (bit `30/31/32/33`, word `B0/B1/B2/B3`,
+forced-status bit `70/71/72`, forced-status word `F0/F1/F2`), DM (bit
+`02`, word `82`), Timer/Counter (Completion Flag `09`, PV `89`, forced
+`49`), Expansion DM banks E0-EC (bit `20`-`2C`, word `A0`-`AC`),
+Index/Data Register (`DC`/`BC`), Task Flag (`06`/`46`), Clock
+Pulses/Condition Flags (`07`) -- rendered as `<prefix><address>`, or
+`<prefix><address>.<bit>` for a bit-type device with a nonzero bit
+address (e.g. `D1000`, `CIO100`, `CIO10.05`), mirroring MELSEC's own
+`format_device_text()`-equivalent approach; an unrecognized area code
+still renders as `0xNN:<address>` rather than being dropped.
+
+**End code naming**: the full ~79-entry table transcribed verbatim from
+Wireshark's own `response_codes[]` (cross-confirmed against `libfins`'s
+own independently-derived `FINS_RETVAL_*` table -- both agree on every
+code checked), far more complete than MELSEC's own end-code table (which
+had exactly one independently-verified named entry plus a raw-hex
+fallback), because a single authoritative source exists here rather than
+a fallible LLM-summarized PDF fetch. Any code outside this table still
+falls back to raw hex, named honestly as "not independently verified."
+
+#### Structural detection gate and collision survey
+
+**TCP**: exact `"FINS"` magic (4 ASCII bytes) at offset 0 -- as strong a
+gate as any protocol in this codebase, comparable to OPC UA's own 3-byte
+ASCII MessageType magic. No further condition needed for the outer
+envelope; a declared-length cross-check (`8 + Length`) mirrors Modbus's
+own MBAP length field and MELSEC's own declared-length check.
+
+**UDP** (and the inner "Frame Send" TCP payload): FINS has no magic-byte
+signature at all on this side, so the gate is a multi-field structural
+check instead: (a) minimum length -- 12 bytes for a zero-data command
+frame; (b) ICF reserved bits (`0x3E` mask) exactly zero -- only 8 of 256
+ICF byte values pass; (c) RSV byte exactly `0x00`; (d) the command code
+(MRC+SRC) must exactly match one of the 17 curated verified commands --
+unlike MELSEC's "Unknown command 0xNNNN" numeric fallback, an
+unrecognized command code here is rejected outright, not accepted
+structurally, because FINS/UDP has no other anchor to fall back on and
+accepting arbitrary command codes would reopen the same weak-gate
+collision class MELSEC itself was bitten by (see MELSEC's own
+"Modbus was NOT actually safe" paragraph above). Combined, comparable in
+strength to BACnet's Type+Function pair or TwinCAT's five-part check,
+despite having no magic bytes.
+
+Surveyed against every other `TcpPortIndependent`/`UdpPortIndependent`
+protocol sharing FINS's own dispatch cascades, by grepping each one's own
+detection code for the literal `"FINS"` 4-byte anchor (none found) and
+empirically via this protocol's own manual smoke test (no false-positive
+misdetections on either transport).
+
+**HART-IP's own UDP gate has a real, partial overlap with FINS's own byte
+layout, defended against the same way MELSEC's own UDP-vs-HART-IP
+collision was.** HART-IP's UDP gate requires payload byte[1] (MessageType)
+in `{0,1,2,3,15}` and byte[2] (MessageID) in `{0,1,2,3}`. FINS's own
+byte[1] is always RSV=`0x00` (satisfies HART-IP's MessageType==0
+condition on every single FINS packet), and byte[2] is GCT -- which the
+real NSE probe evidence above shows is `0x02` in practice, NOT the
+conventional `0x07` the original implementation plan assumed would avoid
+this collision entirely. GCT=`0x02` DOES satisfy HART-IP's own
+MessageID-in-{0,1,2,3} condition. As a defensive measure given this real
+overlap, FINS's own UDP dispatch is positioned in the same class as
+MELSEC's own fix -- before HART-IP, in both `decoder.cpp` and
+`protocol_registry.cpp` -- and this is covered by a dedicated regression
+test (`fins_udp_request_not_misdetected_as_hartip`) built using GCT=0x02
+specifically, so this collision risk is exercised on every run of the
+suite, not just documented as a theoretical concern the way the original
+plan (written before the real-probe evidence was found) treated it.
+
+#### Session-scoped response matching (lighter than MELSEC's own, not authoritative pairing)
+
+Unlike MELSEC, most FINS responses decode entirely context-free -- a
+response's own MRC/SRC bytes say directly which command it answers (see
+"A genuine architectural difference from MELSEC" above). Only Memory Area
+Read (`0101`) and Multiple Memory Area Read (`0104`) responses need their
+own matching request's device list to split their own raw values by
+type. `FinsFlowState::pending` (a `DecoderFlowState` subclass, the same
+single-slot-per-session shape `MelsecFlowState`/`TwinCatFlowState` use)
+tracks every request generically so every response can still carry a
+"matched to packet #N" note, but only those two commands actually consume
+`pending->devices`. SID (Service ID) is present and echoed on both
+request and response but -- like MELSEC's own 4E Serial No. -- not
+treated as a guaranteed-unique transaction ID (no source states SID
+uniqueness is enforced client-side across concurrent in-flight
+requests), so matching stays session-scoped and non-authoritative, the
+same "matched to the request seen in packet #N," never "authoritatively
+paired," posture MELSEC's own responses carry.
+
+#### Explicitly not implemented in this pass
+
+Any command/subcommand pair outside the 17 curated commands above (UDP:
+rejected by the structural gate itself; TCP: shown numerically only,
+"Unknown command 0xNNNN"); deep bit-level decoding of Controller Status
+Read's own fatal/non-fatal-error/message flag words (shown as raw hex,
+the same "recognized but not exhaustively decoded" posture this codebase
+takes for other deep sub-structures); the 69-byte CPU-Bus-Unit-only
+Controller Data Read response variant's own field layout (shown
+structurally only, no model/version at that offset in that shape);
+SID-based cross-packet correlation beyond the single-slot session state
+described above.
+
+#### JSON output fields
+
+Rendered only when `protocol == "fins"`, via `write_fins_json_fields` in
+`output.cpp`: for the inner FINS frame -- `fins_is_response`, `fins_dna`/
+`fins_da1`/`fins_da2`/`fins_sna`/`fins_sa1`/`fins_sa2`/`fins_sid`,
+`fins_command`, `fins_command_name`, `fins_matched_to_request` (present
+only when true), `fins_end_code`/`fins_end_code_name` (response only),
+`fins_devices`/`fins_device_values` (parallel arrays, the latter present
+only for Multiple Memory Area Read responses), `fins_point_count`,
+`fins_word_values`/`fins_bit_values`, `fins_undecoded_response_bytes`,
+`fins_program_number`, `fins_mode_code`, `fins_controller_model`/
+`fins_controller_version`, `fins_status`/`fins_status_name`/
+`fins_ctrl_mode`/`fins_ctrl_mode_name`/`fins_fatal_error_flags`/
+`fins_non_fatal_error_flags`/`fins_message_flags`/`fins_error_message`,
+`fins_fals_number`, `fins_cycle_parameter`, `fins_cycle_avg_us`/
+`fins_cycle_max_us`/`fins_cycle_min_us`, `fins_clock`, `fins_echo_data`,
+`fins_access_right_unit_address`/`fins_access_right_node_number`/
+`fins_access_right_network_address`, `fins_force_entries`. For a
+FINS/TCP envelope-only message (handshake/error-notification/connection-
+confirmation) instead: `fins_tcp_command`/`fins_tcp_command_name`,
+`fins_tcp_error_code`/`fins_tcp_error_code_name`,
+`fins_handshake_client_node`/`fins_handshake_server_node`. `--stats`
+gains a `fins (omron) command names:` breakdown plus a matched-responses
+count line, mirroring MELSEC's own `--stats` block.
+
+#### Validation
+
+No real Omron/FINS capture's actual bytes could be retrieved through this
+sandbox's own tooling (see "Real-capture corpus check" above) -- an
+honest gap, not a silent one, matching the class of gap MELSEC's own
+post-delivery real-capture check ran into. Real wire-format details
+(GCT's actual observed value, SA2's actual observed range) WERE
+independently confirmed via that same repository's own `conn.log`/NSE
+script content, which this decoder's own test fixture and collision
+survey are built against. Validated by construction against a synthetic
+`tests/sample_fins.pcap` fixture (46 TCP packets plus 7 UDP packets --
+`tools/make_sample_pcap.py`'s `build_fins_sample()`), covering: all 17
+commands in both request and response shapes, including both Controller
+Data Read's model/version variant and Cycle Time Read's two response
+shapes and Access Right Acquire's two response shapes; Multiple Memory
+Area Read's own per-item word/bit type split (proving `FinsFlowState`
+carries the request's own device list forward correctly, the FINS
+analogue of MELSEC's own Random Read proof); the FINS/TCP handshake
+(commands `0x00`/`0x01`), Frame Send Error Notification (`0x03`), and
+Connection Confirmation (`0x06`); a TCP declared-length reassembly split
+(a Memory Area Read request split across two TCP segments); an
+unrecognized command code decoded structurally over TCP (`0x9999`) but
+REJECTED outright over UDP (the deliberate MELSEC-vs-FINS posture
+difference); two UDP structural-gate-rejection negative controls (ICF
+reserved bits set; RSV != 0x00); UDP coverage on the standard port and a
+non-standard port pair (annotated, not misdetected); and the
+FINS-vs-HART-IP UDP collision regression built specifically against the
+real, observed GCT=0x02 value (see the collision-survey subsection
+above), not the documented-but-unreliable conventional value. Every case
+was decoded and inspected in `--format text`, `--format json`,
+`--format csv`, and `--stats` BEFORE the `CMakeLists.txt` `fins_*` test
+family reading it was written -- the same verification discipline every
+prior protocol addition in this codebase has been held to. See
+`include/conduitscope/fins.hpp`'s file header for the full writeup.

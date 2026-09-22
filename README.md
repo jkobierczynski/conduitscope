@@ -17,6 +17,10 @@ Electric, TCP port 5001 and UDP port 5000, with curated
 unauthenticated-CPU-control, cleartext-password-field, and
 arbitrary-memory-access attack/monitoring notes -- the cleartext Remote
 Password field's own value is never rendered, only its length),
+FINS (Factory Interface Network Service, Omron, TCP port 9600 and
+UDP port 9600, with curated unauthenticated-CPU-control,
+arbitrary-memory-access, credential-free access-right-seizure, and
+forced-I/O-override attack/monitoring notes),
 Kerberos (RFC 4120, with curated AS-REP-Roasting and
 Kerberoasting attack/monitoring notes -- the first of a planned Windows
 Active Directory protocol suite), LDAP (RFC 4511, with curated
@@ -1288,6 +1292,7 @@ build/conduitscope decode -r tests/sample_hartip.pcap
 build/conduitscope decode -r tests/sample_opcua.pcap
 build/conduitscope decode -r tests/sample_mms.pcap --stats
 build/conduitscope decode -r tests/sample_melsec.pcap --stats
+build/conduitscope decode -r tests/sample_fins.pcap --stats
 build/conduitscope decode -r tests/sample_modbus.pcap --format json
 build/conduitscope info -r tests/sample_modbus.pcap
 

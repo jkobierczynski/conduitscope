@@ -7624,7 +7624,9 @@ def build_melsec_sample():
     negative control (subheader magic matches but the length accounting doesn't), a payload whose
     leading bytes don't match any of the 4 subheader values at all (pure gate rejection), a frame
     split across two TCP segments (exercising MelsecTcpDecoder::tcp_declared_length via
-    Decoder::reassemble_tcp_payload), and both transports (TCP port 5001, UDP port 5000)."""
+    Decoder::reassemble_tcp_payload), a real MELSEC-vs-Modbus TCP collision regression (Network
+    No.==PC No.==0, a small I/O No. -- see melsec.hpp's own "POST-DELIVERY FIX" paragraph), and both
+    transports (TCP port 5001, UDP port 5000)."""
     packets = []
 
     # --- TCP: one continuous session (port 53400 -> 5001), commands exercised strictly one
@@ -7749,6 +7751,18 @@ def build_melsec_sample():
     add(MELSEC_TCP_PORT, 53400, seq_s, seq_c, split_frame[split_at:], from_plc=True)
     seq_s += len(split_frame) - split_at
 
+    # 34) A real, reproducible MELSEC-vs-Modbus TCP collision (found via Jurgen's own report,
+    #     see melsec.hpp's "POST-DELIVERY FIX" paragraph): Network No.==PC No.==0 (both real, valid
+    #     values -- not just the 0xFF "own station" convention every other request/response in this
+    #     fixture defaults to) and Request Destination Module I/O No.==0x0000 (a real I/O number for
+    #     a module at slot 0 -- not the 0x3FF "own station" sentinel every other request/response
+    #     here also defaults to). Before this fix, Modbus's own weak protocol_id==0 gate swallowed
+    #     this request first (shown as "Unknown (0xNN)") even on MELSEC's own TCP port 5001 -- must
+    #     decode as melsec, never as modbus, standalone (no response needed for this negative-control
+    #     style proof).
+    client(melsec_request(0x0401, 0x0000, melsec_device("D", 1800) + struct.pack("<H", 1),
+                           network_no=0, pc_no=0, io_no=0x0000))
+
     # --- UDP: a separate 4-tuple (port 53500 -> 5000), same session-scoped matching mechanism.
     # 34) & 35) Batch Read, word units: D1700, 1 point.
     packets.append(melsec_udp_frame(melsec_request(0x0401, 0x0000, melsec_device("D", 1700) +
@@ -7783,6 +7797,292 @@ def build_melsec_sample():
     for i, pkt in enumerate(packets):
         data += pcap_record(pkt, 1_700_009_000 + i, i * 1000)
     (TESTS_DIR / "sample_melsec.pcap").write_bytes(data)
+
+
+# ---------------------------------------------------------------------------------------------
+# FINS (Factory Interface Network Service, Omron) -- TCP and UDP, both port 9600 (see fins.hpp's
+# file header comment for the full wire format, structural detection gate, and curated security
+# notes). Built the same way build_melsec_sample() above is: a synthetic fixture, since no real
+# Omron/FINS capture was found in the same corpus checked for MELSEC (see fins.hpp's own
+# "real-capture corpus check" paragraph in its plan).
+
+FINS_TCP_PORT = 9600
+FINS_UDP_PORT = 9600
+
+FINS_AREA = {
+    "D_WORD": 0x82, "D_BIT": 0x02, "CIO_BIT": 0x30, "CIO_WORD": 0xB0, "H_BIT": 0x32,
+}
+
+
+def fins_bcd(v: int) -> int:
+    return ((v // 10) << 4) | (v % 10)
+
+
+def fins_frame(command: int, body: bytes = b"", is_response: bool = False, gct: int = 0x02,
+               dna: int = 0, da1: int = 1, da2: int = 0, sna: int = 0, sa1: int = 1, sa2: int = 0,
+               sid: int = 1, icf_override: int = None, rsv_override: int = None) -> bytes:
+    """One transport-independent FINS command/response frame (10-byte header + MRC/SRC + body) --
+    see fins.hpp's own wire-format paragraph. `gct` defaults to 0x02 (a real probe's own observed
+    value, NOT the conventional-but-unreliable 0x07 -- see fins.hpp's own corrections-from-real-
+    evidence paragraph) deliberately, so this fixture's own FINS/UDP traffic naturally exercises
+    the HART-IP collision risk fins.hpp's UDP gate ordering defends against (GCT=0x02 DOES satisfy
+    HART-IP's own weak MessageID-in-{0,1,2,3} condition) on every packet, not just one dedicated
+    negative control. `icf_override`/`rsv_override` are for the two structural-gate-rejection
+    negative controls (reserved bits set / RSV != 0)."""
+    icf = icf_override if icf_override is not None else (0xC0 if is_response else 0x80)
+    rsv = rsv_override if rsv_override is not None else 0x00
+    mrc = (command >> 8) & 0xFF
+    src = command & 0xFF
+    header = bytes([icf, rsv, gct, dna, da1, da2, sna, sa1, sa2, sid, mrc, src])
+    return header + body
+
+
+def fins_tcp_envelope(command: int, data: bytes = b"", error_code: int = 0) -> bytes:
+    """FINS/TCP's own outer envelope -- Magic("FINS",4) + Length(4,BE) + Command(4,BE) +
+    ErrorCode(4,BE) + data, Length counting everything after itself (8 + Length total bytes) --
+    see fins.hpp's own FINS/TCP framing paragraph."""
+    length = 8 + len(data)
+    return b"FINS" + struct.pack(">I", length) + struct.pack(">II", command, error_code) + data
+
+
+def fins_udp_frame(payload: bytes, sport: int = FINS_UDP_PORT, dport: int = FINS_UDP_PORT,
+                    from_plc: bool = False) -> bytes:
+    src_ip, dst_ip = (PLC_IP, HMI_IP) if from_plc else (HMI_IP, PLC_IP)
+    src_mac, dst_mac = (PLC_MAC, HMI_MAC) if from_plc else (HMI_MAC, PLC_MAC)
+    udp = udp_header(sport, dport, payload)
+    ip = ipv4_header(src_ip, dst_ip, 17, len(udp), 0x8400)
+    return eth_header(dst_mac, src_mac, 0x0800) + ip + udp
+
+
+def build_fins_sample():
+    """Covers every one of the 17 commands this decoder verified (see fins.hpp's file header
+    comment), both directions where applicable: Memory Area Read (word AND bit units), Memory Area
+    Write, Memory Area Fill, Multiple Memory Area Read (mixed word+bit items, matched response
+    splitting correctly via session state -- the same FinsFlowState proof build_melsec_sample's own
+    Random Read packet gives MelsecFlowState), Run (with mode code), Stop, Controller Data Read (the
+    92-byte model/version variant), Controller Status Read, Cycle Time Read (both the
+    "initialize" -- no stats -- and "read" -- with stats -- response shapes), Clock Read, Clock
+    Write, LOOP-BACK Test, Access Right Acquire (both the plain-success and already-held-elsewhere
+    response shapes), Access Right Forced Acquire, Access Right Release, Error Clear, Forced
+    Set/Reset (two entries, one CIO bit set, one H bit reset), Forced Set/Reset Cancel. Also covers
+    the FINS/TCP handshake (commands 0x00/0x01), Frame Send Error Notification (0x03), Connection
+    Confirmation (0x06), a FINS/TCP declared-length reassembly split (exercising
+    FinsTcpDecoder::tcp_declared_length via Decoder::reassemble_tcp_payload, the same split/rejoin
+    shape build_melsec_sample's own packet already covers), a TCP Frame Send carrying an
+    unrecognized command code (structural fallback, numeric-only -- TCP's own outer "FINS" magic is
+    gate enough on its own, unlike UDP), a UDP negative control with that SAME unrecognized command
+    code (must be rejected outright, falling through to generic "udp" -- the deliberate departure
+    from MELSEC's own numeric-fallback posture, see fins.hpp), two UDP structural-gate-rejection
+    negative controls (ICF reserved bits set; RSV != 0x00), a non-standard-port UDP pair, and both
+    transports (TCP port 9600, UDP port 9600 -- the same conventional port number for both, unlike
+    MELSEC's own split 5001/5000)."""
+    packets = []
+
+    # --- TCP: one continuous session (port 53600 -> 9600), commands exercised strictly one
+    # request/response pair at a time so the single-pending-slot session state (FinsFlowState)
+    # always has an unambiguous match -- see fins.hpp's own "A GENUINE ARCHITECTURAL DIFFERENCE
+    # FROM MELSEC" paragraph for why only 2 of these 17 commands' own responses actually need it.
+    seq_c, seq_s = 2000, 8000
+    ident = 0x3000
+
+    def add(src_port, dst_port, seq, ack, payload, from_plc):
+        nonlocal ident
+        tcp = tcp_header(src_port, dst_port, seq, ack, TCP_PSH | TCP_ACK, len(payload)) + payload
+        src_ip, dst_ip = (PLC_IP, HMI_IP) if from_plc else (HMI_IP, PLC_IP)
+        src_mac, dst_mac = (PLC_MAC, HMI_MAC) if from_plc else (HMI_MAC, PLC_MAC)
+        ip = ipv4_header(src_ip, dst_ip, 6, len(tcp), ident) + tcp
+        packets.append(eth_header(dst_mac, src_mac, 0x0800) + ip)
+        ident += 1
+
+    def client(payload):
+        nonlocal seq_c
+        add(53600, FINS_TCP_PORT, seq_c, seq_s, payload, from_plc=False)
+        seq_c += len(payload)
+
+    def server(payload):
+        nonlocal seq_s
+        add(FINS_TCP_PORT, 53600, seq_s, seq_c, payload, from_plc=True)
+        seq_s += len(payload)
+
+    # 1) & 2) FINS/TCP handshake -- Node Address Data Send, client->server then server->client.
+    client(fins_tcp_envelope(0x00, struct.pack(">I", 1)))
+    server(fins_tcp_envelope(0x01, struct.pack(">II", 1, 1)))
+
+    # 3) & 4) Memory Area Read, word units: D1000, 3 items.
+    client(fins_tcp_envelope(0x02, fins_frame(
+        0x0101, bytes([FINS_AREA["D_WORD"]]) + struct.pack(">HB", 1000, 0) + struct.pack(">H", 3))))
+    server(fins_tcp_envelope(0x02, fins_frame(
+        0x0101, struct.pack(">H", 0) + struct.pack(">3h", 100, -1, 32767), is_response=True)))
+
+    # 5) & 6) Memory Area Read, bit units: CIO10.05, 4 items.
+    client(fins_tcp_envelope(0x02, fins_frame(
+        0x0101, bytes([FINS_AREA["CIO_BIT"]]) + struct.pack(">HB", 10, 5) + struct.pack(">H", 4))))
+    server(fins_tcp_envelope(0x02, fins_frame(
+        0x0101, struct.pack(">H", 0) + bytes([1, 0, 1, 1]), is_response=True)))
+
+    # 7) & 8) Memory Area Write, word units: D2000, 2 items, values [111, -1].
+    client(fins_tcp_envelope(0x02, fins_frame(
+        0x0102, bytes([FINS_AREA["D_WORD"]]) + struct.pack(">HB", 2000, 0) + struct.pack(">H", 2) +
+        struct.pack(">2h", 111, -1))))
+    server(fins_tcp_envelope(0x02, fins_frame(0x0102, struct.pack(">H", 0), is_response=True)))
+
+    # 9) & 10) Memory Area Fill: D3000, 5 items, fill value 1234.
+    client(fins_tcp_envelope(0x02, fins_frame(
+        0x0103, bytes([FINS_AREA["D_WORD"]]) + struct.pack(">HB", 3000, 0) + struct.pack(">H", 5) +
+        struct.pack(">h", 1234))))
+    server(fins_tcp_envelope(0x02, fins_frame(0x0103, struct.pack(">H", 0), is_response=True)))
+
+    # 11) & 12) Multiple Memory Area Read: D4000 (word) + CIO20.03 (bit), 2 items -- proves
+    #     FinsFlowState carries the request's own device list forward so the response's own raw
+    #     values split correctly per-item (word vs. bit), the same proof build_melsec_sample's own
+    #     Random Read packet gives MelsecPendingRequest.
+    client(fins_tcp_envelope(0x02, fins_frame(
+        0x0104,
+        bytes([FINS_AREA["D_WORD"]]) + struct.pack(">HB", 4000, 0) +
+        bytes([FINS_AREA["CIO_BIT"]]) + struct.pack(">HB", 20, 3))))
+    server(fins_tcp_envelope(0x02, fins_frame(
+        0x0104, struct.pack(">H", 0) + struct.pack(">h", 4242) + bytes([1]), is_response=True)))
+
+    # 13) & 14) Run: program 0, mode 2 (force execution).
+    client(fins_tcp_envelope(0x02, fins_frame(0x0401, struct.pack(">HB", 0, 2))))
+    server(fins_tcp_envelope(0x02, fins_frame(0x0401, struct.pack(">H", 0), is_response=True)))
+
+    # 15) & 16) Stop.
+    client(fins_tcp_envelope(0x02, fins_frame(0x0402)))
+    server(fins_tcp_envelope(0x02, fins_frame(0x0402, struct.pack(">H", 0), is_response=True)))
+
+    # 17) & 18) Controller Data Read -- request has no data; response is the 92-byte variant
+    #     (20-byte model + 20-byte version + 52 bytes not decoded further).
+    client(fins_tcp_envelope(0x02, fins_frame(0x0501)))
+    model = b"CJ2M-CPU31".ljust(20, b" ")
+    version = b"V2.06".ljust(20, b" ")
+    server(fins_tcp_envelope(0x02, fins_frame(
+        0x0501, struct.pack(">H", 0) + model + version + bytes(52), is_response=True)))
+
+    # 19) & 20) Controller Status Read -- request has no data; response: status=Run, mode=RUN mode,
+    #     FALS number 0x1234, error message "NO ERROR".
+    client(fins_tcp_envelope(0x02, fins_frame(0x0601)))
+    error_msg = b"NO ERROR".ljust(16, b" ")
+    server(fins_tcp_envelope(0x02, fins_frame(
+        0x0601, struct.pack(">H", 0) + bytes([0x01, 0x04]) + struct.pack(">HHH", 0, 0, 0) +
+        struct.pack(">H", 0x1234) + error_msg, is_response=True)))
+
+    # 21) & 22) Cycle Time Read, "initialize" (parameter 0) -- response carries no stats (data
+    #     shorter than 12 bytes beyond the end code).
+    client(fins_tcp_envelope(0x02, fins_frame(0x0620, bytes([0]))))
+    server(fins_tcp_envelope(0x02, fins_frame(0x0620, struct.pack(">H", 0), is_response=True)))
+
+    # 23) & 24) Cycle Time Read, "read" (parameter 1) -- response carries avg/max/min stats.
+    client(fins_tcp_envelope(0x02, fins_frame(0x0620, bytes([1]))))
+    server(fins_tcp_envelope(0x02, fins_frame(
+        0x0620, struct.pack(">H", 0) + struct.pack(">III", 1500, 2500, 800), is_response=True)))
+
+    # 25) & 26) Clock Read -- request has no data; response: 2026-09-22 13:45:30, day=2 (Tuesday).
+    client(fins_tcp_envelope(0x02, fins_frame(0x0701)))
+    clock_body = bytes([fins_bcd(26), fins_bcd(9), fins_bcd(22), fins_bcd(13), fins_bcd(45),
+                         fins_bcd(30), 2])
+    server(fins_tcp_envelope(0x02, fins_frame(
+        0x0701, struct.pack(">H", 0) + clock_body, is_response=True)))
+
+    # 27) & 28) Clock Write -- same date/time (7-byte variant, second+day included).
+    client(fins_tcp_envelope(0x02, fins_frame(0x0702, clock_body)))
+    server(fins_tcp_envelope(0x02, fins_frame(0x0702, struct.pack(">H", 0), is_response=True)))
+
+    # 29) & 30) LOOP-BACK Test -- response echoes the same data back.
+    client(fins_tcp_envelope(0x02, fins_frame(0x0801, b"PING")))
+    server(fins_tcp_envelope(0x02, fins_frame(
+        0x0801, struct.pack(">H", 0) + b"PING", is_response=True)))
+
+    # 31) & 32) Access Right Acquire -- plain success (no data beyond the end code).
+    client(fins_tcp_envelope(0x02, fins_frame(0x0C01, struct.pack(">H", 1))))
+    server(fins_tcp_envelope(0x02, fins_frame(0x0C01, struct.pack(">H", 0), is_response=True)))
+
+    # 33) & 34) Access Right Acquire, retried -- already held elsewhere: network 1, node 5, unit 0.
+    client(fins_tcp_envelope(0x02, fins_frame(0x0C01, struct.pack(">H", 2))))
+    server(fins_tcp_envelope(0x02, fins_frame(
+        0x0C01, struct.pack(">H", 0) + bytes([0x00, 0x05, 0x01]), is_response=True)))
+
+    # 35) & 36) Access Right Forced Acquire -- curated note: no credential check, seizes the right
+    #     from whoever currently holds it.
+    client(fins_tcp_envelope(0x02, fins_frame(0x0C02, struct.pack(">H", 2))))
+    server(fins_tcp_envelope(0x02, fins_frame(0x0C02, struct.pack(">H", 0), is_response=True)))
+
+    # 37) & 38) Access Right Release.
+    client(fins_tcp_envelope(0x02, fins_frame(0x0C03, struct.pack(">H", 2))))
+    server(fins_tcp_envelope(0x02, fins_frame(0x0C03, struct.pack(">H", 0), is_response=True)))
+
+    # 39) & 40) Error Clear -- FALS number 0x1234.
+    client(fins_tcp_envelope(0x02, fins_frame(0x2101, struct.pack(">H", 0x1234))))
+    server(fins_tcp_envelope(0x02, fins_frame(0x2101, struct.pack(">H", 0), is_response=True)))
+
+    # 41) & 42) Forced Set/Reset -- 2 entries: force-set CIO10.05 ON, force-reset H20.03 OFF --
+    #     curated note: overrides live I/O directly, bypassing normal program logic.
+    entry1 = struct.pack(">H", 0x0001) + bytes([FINS_AREA["CIO_BIT"]]) + struct.pack(">I", 10 * 16 + 5)[1:]
+    entry2 = struct.pack(">H", 0x0000) + bytes([FINS_AREA["H_BIT"]]) + struct.pack(">I", 20 * 16 + 3)[1:]
+    client(fins_tcp_envelope(0x02, fins_frame(0x2301, struct.pack(">H", 2) + entry1 + entry2)))
+    server(fins_tcp_envelope(0x02, fins_frame(0x2301, struct.pack(">H", 0), is_response=True)))
+
+    # 43) & 44) Forced Set/Reset Cancel.
+    client(fins_tcp_envelope(0x02, fins_frame(0x2302)))
+    server(fins_tcp_envelope(0x02, fins_frame(0x2302, struct.pack(">H", 0), is_response=True)))
+
+    # 45) & 46) TCP Frame Send Error Notification (command 0x03), then Connection Confirmation
+    #     (command 0x06) -- both envelope-only, no inner FINS command/response frame.
+    client(fins_tcp_envelope(0x03, error_code=0x03))
+    server(fins_tcp_envelope(0x06))
+
+    # 47) TCP Frame Send carrying an unrecognized command code (0x9999) -- unlike UDP's own hard
+    #     rejection, FINS/TCP's outer "FINS" magic is gate enough on its own, so this decodes
+    #     structurally (numeric-only fallback), the same posture MELSEC's own TCP side uses.
+    client(fins_tcp_envelope(0x02, fins_frame(0x9999, b"\x01\x02\x03")))
+
+    # 48) TCP declared-length reassembly split: a Memory Area Read request for D5000 split across
+    #     two TCP segments mid-envelope -- exercises FinsTcpDecoder::tcp_declared_length via
+    #     Decoder::reassemble_tcp_payload, the same split/rejoin shape build_melsec_sample's own
+    #     packet already covers.
+    split_payload = fins_tcp_envelope(0x02, fins_frame(
+        0x0101, bytes([FINS_AREA["D_WORD"]]) + struct.pack(">HB", 5000, 0) + struct.pack(">H", 1)))
+    half = len(split_payload) // 2
+    client(split_payload[:half])
+    client(split_payload[half:])
+    server(fins_tcp_envelope(0x02, fins_frame(
+        0x0101, struct.pack(">H", 0) + struct.pack(">h", 777), is_response=True)))
+
+    # --- UDP: single-datagram request/response pairs (no reassembly on this side).
+
+    # 49) & 50) Memory Area Read, word units, over UDP -- also the packet that most directly proves
+    #     the HART-IP defensive ordering matters: GCT=0x02 (fins_frame's own default) DOES satisfy
+    #     HART-IP's own weak MessageID-in-{0,1,2,3} UDP gate condition, and RSV=0x00 always
+    #     satisfies its MessageType==0 condition too -- this MUST decode as "fins", never "hartip".
+    packets.append(fins_udp_frame(fins_frame(
+        0x0101, bytes([FINS_AREA["D_WORD"]]) + struct.pack(">HB", 6000, 0) + struct.pack(">H", 2))))
+    packets.append(fins_udp_frame(fins_frame(
+        0x0101, struct.pack(">H", 0) + struct.pack(">2h", 55, 66), is_response=True), from_plc=True))
+
+    # 51) & 52) Same UDP flow, non-standard port pair (53601 -> 15001) -- exercises the "not a
+    #     configured/standard FINS port" note on the UDP path.
+    packets.append(fins_udp_frame(fins_frame(0x0402), sport=53601, dport=15001))
+    packets.append(fins_udp_frame(fins_frame(
+        0x0402, struct.pack(">H", 0), is_response=True), sport=15001, dport=53601, from_plc=True))
+
+    # 53) UDP negative control: the SAME unrecognized command code (0x9999) packet #47 already
+    #     proved decodes structurally over TCP -- over UDP it must be REJECTED outright (falls
+    #     through to generic "udp"), the deliberate departure from MELSEC's own numeric-fallback
+    #     posture forced by FINS/UDP having no other structural anchor to lean on (see fins.hpp).
+    packets.append(fins_udp_frame(fins_frame(0x9999, b"\x01\x02\x03"), sport=53602))
+
+    # 54) UDP negative control: ICF reserved bits (0x3E mask) set -- structural gate rejection, must
+    #     NOT be recognized as fins at all.
+    packets.append(fins_udp_frame(fins_frame(0x0402, icf_override=0x82), sport=53603))
+
+    # 55) UDP negative control: RSV != 0x00 -- structural gate rejection, must NOT be recognized as
+    #     fins at all.
+    packets.append(fins_udp_frame(fins_frame(0x0402, rsv_override=0x01), sport=53604))
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_010_000 + i, i * 1000)
+    (TESTS_DIR / "sample_fins.pcap").write_bytes(data)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -11129,6 +11429,7 @@ if __name__ == "__main__":
     build_ffhse_sample()
     build_twincat_sample()
     build_melsec_sample()
+    build_fins_sample()
     build_kerberos_sample()
     build_ldap_sample()
     build_smb_sample()

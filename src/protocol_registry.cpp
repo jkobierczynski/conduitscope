@@ -9,6 +9,7 @@
 #include "conduitscope/eigrp.hpp"
 #include "conduitscope/enip.hpp"
 #include "conduitscope/ethercat.hpp"
+#include "conduitscope/fins.hpp"
 #include "conduitscope/goose.hpp"
 #include "conduitscope/hartip.hpp"
 #include "conduitscope/hsrp.hpp"
@@ -150,9 +151,41 @@ const std::vector<const ProtocolDecoder*>& tcp_port_independent_registry() {
                               // (unaffected by migration, see protocol_decoder.hpp's COEXISTENCE
                               // RULE) already guarantees; this vector's own ordering just mirrors
                               // that for its audit-trail role, see this file's own header comment.
+        &melsec_tcp_decoder(),  // Moved to directly BEFORE Modbus (was originally added directly
+                              // after TwinCAT) -- a real, reproducible MELSEC-vs-Modbus collision
+                              // was found (a genuine MELSEC request with Network No.==PC No.==0 and
+                              // a small Request Destination Module I/O No. reads as a plausible
+                              // Modbus/TCP MBAP header; Modbus's own decode does not hard-reject the
+                              // resulting length mismatch) -- see decoder.cpp's MELSEC call site
+                              // comment for the full writeup. MELSEC's own two-part gate (exact
+                              // subheader magic + exact declared-length cross-check) is stronger
+                              // than Modbus's single protocol-id==0 tell, the same "stronger gate
+                              // wins" principle IEC104's own entry above already establishes. First
+                              // TCP-side use of the "two instances, one id()" pattern for a protocol
+                              // BUILT ENTIRELY on the ProtocolDecoder interface from inception
+                              // (TwinCAT is also on this interface but TCP-only; Kerberos/HART-IP/
+                              // EtherNet-IP's own TCP+UDP splits predate the interface and were
+                              // migrated onto it) -- see melsec_udp_decoder() in
+                              // udp_port_independent_registry() below, and MelsecTcpDecoder's own
+                              // comment in melsec.hpp for why sharing "melsec" is safe.
+        &fins_tcp_decoder(),  // Added directly after MELSEC, before Modbus -- FINS/TCP's own exact
+                              // 4-byte ASCII magic ("FINS", offset 0) is as strong a gate as any
+                              // protocol in this registry (comparable to OPC UA's own magic-string
+                              // gate at the very top), so it cannot collide with Modbus/TCP's own
+                              // weak protocol-id==0 tell -- see fins.hpp's file header comment and
+                              // decoder.cpp's own FINS call site comment for the full collision
+                              // survey. Positioned right after MELSEC purely for locality (both are
+                              // recent additions with adjacent file-header commentary), not because
+                              // of any collision risk with MELSEC's own gate. Second TCP-side use of
+                              // the "two instances, one id()" pattern for a protocol BUILT ENTIRELY
+                              // on the ProtocolDecoder interface from inception (MELSEC was the
+                              // first) -- see fins_udp_decoder() in udp_port_independent_registry()
+                              // below, and FinsTcpDecoder's own comment in fins.hpp for why sharing
+                              // "fins" is safe.
         &modbus_decoder(),   // Stage 2 of the pilot -- decoder.cpp's call site sits exactly where
                               // Modbus's old `if (want_modbus)` block always did: after OPC UA/
-                              // EtherNet-IP/IEC104 (all three migrated above, in this same batch),
+                              // EtherNet-IP/IEC104/MELSEC/FINS (all now migrated above -- MELSEC and
+                              // FINS moved to right before Modbus, see their own entries above),
                               // before TwinCAT/DNP3/COTP (see IEC104's own entry above for the
                               // collision this relative order resolves).
         &twincat_decoder(),  // Added directly after Modbus, before DNP3/S7comm family/HART-IP/
@@ -161,19 +194,8 @@ const std::vector<const ProtocolDecoder*>& tcp_port_independent_registry() {
                               // multi-field State-Flags/Command-ID/Data-Length gate is stronger
                               // than Modbus's single protocol-id==0 tell, so trying it right after
                               // Modbus costs nothing and cannot be weakened by anything below it).
-        &melsec_tcp_decoder(),  // Added directly after TwinCAT -- see decoder.cpp's MELSEC call
-                              // site comment for the full collision-survey rationale (comparably
-                              // strong multi-field structural gate: subheader magic + a
-                              // declared-length cross-check). First TCP-side use of the "two
-                              // instances, one id()" pattern for a protocol BUILT ENTIRELY on the
-                              // ProtocolDecoder interface from inception (TwinCAT is also on this
-                              // interface but TCP-only; Kerberos/HART-IP/EtherNet-IP's own TCP+UDP
-                              // splits predate the interface and were migrated onto it) -- see
-                              // melsec_udp_decoder() in udp_port_independent_registry() below, and
-                              // MelsecTcpDecoder's own comment in melsec.hpp for why sharing "melsec"
-                              // is safe.
-        &kerberos_tcp_decoder(),  // Added directly after MELSEC (itself directly after TwinCAT) --
-                              // the first Windows AD-suite
+        &kerberos_tcp_decoder(),  // Added directly after TwinCAT (itself directly after Modbus,
+                              // itself directly after MELSEC) -- the first Windows AD-suite
                               // protocol (see kerberos.hpp's file header comment). Its own gate
                               // (a 4-byte length prefix plus one of 7 recognized ASN.1
                               // APPLICATION tag bytes, then a pvno==5/msg-type cross-check on full
@@ -292,10 +314,22 @@ const std::vector<const ProtocolDecoder*>& udp_port_independent_registry() {
                                 // test. Shares its "melsec" id() with melsec_tcp_decoder() in
                                 // tcp_port_independent_registry above -- see that entry's own
                                 // comment.
+        &fins_udp_decoder(),  // Added directly after MELSEC, deliberately BEFORE HART-IP -- see
+                                // decoder.cpp's FINS UDP call site comment for why: FINS's own byte[1]
+                                // is always RSV=0x00 (satisfies HART-IP's own MessageType==0
+                                // condition) and byte[2] is GCT, which real devices do not reliably
+                                // keep at the conventional 0x07 (a live probe observed 0x02, which
+                                // DOES satisfy HART-IP's own MessageID-in-{0,1,2,3} condition) -- so,
+                                // like MELSEC just above, FINS's own stronger multi-field gate (no
+                                // magic bytes, but a 17-command allowlist plus four independent
+                                // structural checks) is tried first as a defensive measure, the same
+                                // "stronger gate wins" principle MELSEC's own entry above already
+                                // establishes. Shares its "fins" id() with fins_tcp_decoder() in
+                                // tcp_port_independent_registry above -- see that entry's own comment.
         &hartip_udp_decoder(),  // Migration batch 2 -- originally sat exactly where the old
                                 // `if (want_hartip)` UDP block always did: after CIP I/O and BACnet/
-                                // IP. Now also tried after MELSEC (added later, see that entry's own
-                                // comment for why it had to move ahead of HART-IP here). Excludes
+                                // IP. Now also tried after MELSEC and FINS (both added later, see
+                                // their own entries for why they had to move ahead of HART-IP here). Excludes
                                 // ports 4500 (IKE NAT-T) and 4789 (VXLAN) from even being attempted
                                 // -- see hartip_udp_excluded_port in hartip.hpp for why that's a hard
                                 // exclusion rather than a mere deprioritization. Shares its "hartip"

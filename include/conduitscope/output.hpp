@@ -172,6 +172,17 @@ private:
     // authoritative), just "a response was matched to its most recently sent, not-yet-answered
     // request on the same session."
     size_t melsec_matched_responses_ = 0;
+    // FINS's own command-name breakdown (fins.hpp), read from DecodedPacket::result the same way
+    // melsec_command_counts_ is above. Keyed by FinsFrame::command_name -- unlike MELSEC, a FINS
+    // response self-describes its own command code (see fins.hpp's "A GENUINE ARCHITECTURAL
+    // DIFFERENCE FROM MELSEC" paragraph), so this never falls back to a generic "response" bucket
+    // the way melsec_command_counts_ sometimes must.
+    std::map<std::string, size_t> fins_command_counts_;
+    // Session-scoped matches (see fins.hpp/fins.cpp) -- NOT authoritative pairing, the same
+    // "matched to the most recently sent, not-yet-answered request on this session" posture
+    // melsec_matched_responses_ has above, kept narrower in scope (see FinsFlowState's own comment
+    // -- only Memory Area Read/Multiple Memory Area Read responses actually need it).
+    size_t fins_matched_responses_ = 0;
     // Curated Note 5 (kerberos.hpp's file header comment) -- named KRB-ERROR error-code counts,
     // keyed by error_name ("KDC_ERR_PREAUTH_REQUIRED", or "error N" for an unnamed code), read
     // from DecodedPacket::result the same way twincat_command_counts_ is above.

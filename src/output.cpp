@@ -693,6 +693,150 @@ void write_melsec_json_fields(std::ostream& out, const MelsecFrame& mf) {
     }
 }
 
+// The FINS analog of write_melsec_json_fields above -- same rationale (plain free function, not a
+// ProtocolRenderer interface). UNLIKE MELSEC, a FINS response self-describes its own command code
+// (see fins.hpp's "A GENUINE ARCHITECTURAL DIFFERENCE FROM MELSEC" paragraph), so fins_command_name
+// is always meaningful, never a generic "response" fallback. Devices/values render as parallel JSON
+// arrays (fins_devices lines up index-for-index with fins_word_values/fins_bit_values, whichever is
+// populated) -- see fins.hpp's FinsFrame comment for which vector(s) a given command fills.
+void write_fins_json_fields(std::ostream& out, const FinsFrame& ff) {
+    if (ff.is_tcp_envelope_only) {
+        // FINS/TCP handshake (command 0x00/0x01), Frame Send Error Notification (0x03), or
+        // Connection Confirmation (0x06) -- see fins.hpp's own "FINS/TCP ENVELOPE-ONLY MESSAGES"
+        // paragraph. None of the inner 10-byte-header fields below are meaningful here.
+        out << "    \"fins_tcp_command\": " << ff.tcp_command << ",\n";
+        out << "    \"fins_tcp_command_name\": \"" << json_escape(ff.tcp_command_name) << "\",\n";
+        out << "    \"fins_tcp_error_code\": " << ff.tcp_error_code << ",\n";
+        out << "    \"fins_tcp_error_code_name\": \"" << json_escape(ff.tcp_error_code_name) << "\",\n";
+        if (ff.has_handshake_client_node) {
+            out << "    \"fins_handshake_client_node\": " << ff.handshake_client_node << ",\n";
+        }
+        if (ff.has_handshake_server_node) {
+            out << "    \"fins_handshake_server_node\": " << ff.handshake_server_node << ",\n";
+        }
+        return;
+    }
+    out << "    \"fins_is_response\": " << (ff.is_response ? "true" : "false") << ",\n";
+    out << "    \"fins_dna\": " << static_cast<int>(ff.dna) << ",\n";
+    out << "    \"fins_da1\": " << static_cast<int>(ff.da1) << ",\n";
+    out << "    \"fins_da2\": " << static_cast<int>(ff.da2) << ",\n";
+    out << "    \"fins_sna\": " << static_cast<int>(ff.sna) << ",\n";
+    out << "    \"fins_sa1\": " << static_cast<int>(ff.sa1) << ",\n";
+    out << "    \"fins_sa2\": " << static_cast<int>(ff.sa2) << ",\n";
+    out << "    \"fins_sid\": " << static_cast<int>(ff.sid) << ",\n";
+    out << "    \"fins_command\": " << ff.command << ",\n";
+    out << "    \"fins_command_name\": \"" << json_escape(ff.command_name) << "\",\n";
+    if (ff.matched_to_request) {
+        out << "    \"fins_matched_to_request\": true,\n";
+    }
+    if (ff.has_end_code) {
+        out << "    \"fins_end_code\": " << ff.end_code << ",\n";
+        out << "    \"fins_end_code_name\": \"" << json_escape(ff.end_code_name) << "\",\n";
+    }
+    if (!ff.devices.empty()) {
+        out << "    \"fins_devices\": [";
+        for (size_t i = 0; i < ff.devices.size(); ++i) {
+            if (i != 0) out << ", ";
+            out << "\"" << json_escape(ff.devices[i].device_text) << "\"";
+        }
+        out << "],\n";
+        // Multiple Memory Area Read (0104) response only -- per-item value_text, since items can
+        // differ in type (word vs. bit) -- see FinsMemoryItem's own comment in fins.hpp.
+        bool any_value_text = false;
+        for (const auto& d : ff.devices) {
+            if (!d.value_text.empty()) { any_value_text = true; break; }
+        }
+        if (any_value_text) {
+            out << "    \"fins_device_values\": [";
+            for (size_t i = 0; i < ff.devices.size(); ++i) {
+                if (i != 0) out << ", ";
+                out << "\"" << json_escape(ff.devices[i].value_text) << "\"";
+            }
+            out << "],\n";
+        }
+    }
+    if (ff.has_point_count) {
+        out << "    \"fins_point_count\": " << ff.point_count << ",\n";
+    }
+    if (!ff.word_values.empty()) {
+        out << "    \"fins_word_values\": [";
+        for (size_t i = 0; i < ff.word_values.size(); ++i) {
+            if (i != 0) out << ", ";
+            out << ff.word_values[i];
+        }
+        out << "],\n";
+    }
+    if (!ff.bit_values.empty()) {
+        out << "    \"fins_bit_values\": [";
+        for (size_t i = 0; i < ff.bit_values.size(); ++i) {
+            if (i != 0) out << ", ";
+            out << static_cast<int>(ff.bit_values[i]);
+        }
+        out << "],\n";
+    }
+    if (ff.has_undecoded_response_bytes) {
+        out << "    \"fins_undecoded_response_bytes\": " << ff.undecoded_response_byte_count << ",\n";
+    }
+    if (ff.has_program_number) {
+        out << "    \"fins_program_number\": " << ff.program_number << ",\n";
+    }
+    if (ff.has_mode_code) {
+        out << "    \"fins_mode_code\": " << static_cast<int>(ff.mode_code) << ",\n";
+    }
+    if (ff.has_controller_info) {
+        out << "    \"fins_controller_model\": \"" << json_escape(ff.controller_model) << "\",\n";
+        out << "    \"fins_controller_version\": \"" << json_escape(ff.controller_version) << "\",\n";
+    }
+    if (ff.has_status_info) {
+        out << "    \"fins_status\": " << static_cast<int>(ff.status) << ",\n";
+        out << "    \"fins_status_name\": \"" << json_escape(ff.status_name) << "\",\n";
+        out << "    \"fins_ctrl_mode\": " << static_cast<int>(ff.ctrl_mode) << ",\n";
+        out << "    \"fins_ctrl_mode_name\": \"" << json_escape(ff.ctrl_mode_name) << "\",\n";
+        out << "    \"fins_fatal_error_flags\": " << ff.fatal_error_flags << ",\n";
+        out << "    \"fins_non_fatal_error_flags\": " << ff.non_fatal_error_flags << ",\n";
+        out << "    \"fins_message_flags\": " << ff.message_flags << ",\n";
+        out << "    \"fins_error_message\": \"" << json_escape(ff.error_message) << "\",\n";
+    }
+    if (ff.has_fals_number) {
+        out << "    \"fins_fals_number\": " << ff.fals_number << ",\n";
+    }
+    if (ff.has_cycle_parameter) {
+        out << "    \"fins_cycle_parameter\": " << static_cast<int>(ff.cycle_parameter) << ",\n";
+    }
+    if (ff.has_cycle_stats) {
+        out << "    \"fins_cycle_avg_us\": " << ff.cycle_avg_us << ",\n";
+        out << "    \"fins_cycle_max_us\": " << ff.cycle_max_us << ",\n";
+        out << "    \"fins_cycle_min_us\": " << ff.cycle_min_us << ",\n";
+    }
+    if (ff.has_clock) {
+        std::ostringstream clock;
+        clock << "20" << std::setw(2) << std::setfill('0') << static_cast<int>(ff.clock_year) << "-"
+              << std::setw(2) << std::setfill('0') << static_cast<int>(ff.clock_month) << "-"
+              << std::setw(2) << std::setfill('0') << static_cast<int>(ff.clock_date) << " "
+              << std::setw(2) << std::setfill('0') << static_cast<int>(ff.clock_hour) << ":"
+              << std::setw(2) << std::setfill('0') << static_cast<int>(ff.clock_minute) << ":"
+              << std::setw(2) << std::setfill('0') << static_cast<int>(ff.clock_second);
+        out << "    \"fins_clock\": \"" << clock.str() << "\",\n";
+    }
+    if (ff.has_echo_data) {
+        out << "    \"fins_echo_data\": \"" << json_escape(ff.echo_data) << "\",\n";
+    }
+    if (ff.has_access_right_holder) {
+        out << "    \"fins_access_right_unit_address\": " << static_cast<int>(ff.access_right_unit_address) << ",\n";
+        out << "    \"fins_access_right_node_number\": " << static_cast<int>(ff.access_right_node_number) << ",\n";
+        out << "    \"fins_access_right_network_address\": " << static_cast<int>(ff.access_right_network_address) << ",\n";
+    }
+    if (!ff.force_entries.empty()) {
+        out << "    \"fins_force_entries\": [";
+        for (size_t i = 0; i < ff.force_entries.size(); ++i) {
+            if (i != 0) out << ", ";
+            out << "\"" << json_escape(ff.force_entries[i].specification_name) << " "
+                << json_escape(ff.force_entries[i].device_text) << "\"";
+        }
+        out << "],\n";
+    }
+}
+
 // The LDAP analog of write_kerberos_json_fields above -- same rationale, same "always-set fields
 // unconditional, everything else conditioned on the same has_*/non-empty check LdapMessage's own
 // fields document" posture -- see ldap.hpp's struct comment for which fields apply to which message
@@ -2173,6 +2317,9 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
     if (p.protocol == "melsec" && p.result) {
         write_melsec_json_fields(out_, p.result->as<MelsecFrame>());
     }
+    if (p.protocol == "fins" && p.result) {
+        write_fins_json_fields(out_, p.result->as<FinsFrame>());
+    }
     if (p.protocol == "kerberos" && p.result) {
         write_kerberos_json_fields(out_, p.result->as<KerberosMessage>());
     }
@@ -2318,6 +2465,15 @@ void StatsWriter::write_packet(const DecodedPacket& p) {
         const MelsecFrame& mf = p.result->as<MelsecFrame>();
         melsec_command_counts_[mf.command_name]++;
         if (mf.is_response && mf.has_command) melsec_matched_responses_++;
+    }
+    if (p.protocol == "fins" && p.result) {
+        const FinsFrame& ff = p.result->as<FinsFrame>();
+        if (!ff.is_tcp_envelope_only) {
+            fins_command_counts_[ff.command_name]++;
+        } else {
+            fins_command_counts_[ff.tcp_command_name]++;
+        }
+        if (ff.matched_to_request) fins_matched_responses_++;
     }
     // Curated Note 5 (kerberos.hpp's file header comment) -- passive burst/enumeration
     // visibility: named KRB-ERROR error-code counts, aggregated across the whole capture, with
@@ -2538,6 +2694,15 @@ void StatsWriter::print_summary(std::ostream& out) const {
         out << "melsec responses matched to their own session's outstanding request (not "
                "authoritative -- no unique transaction ID on the wire): "
             << melsec_matched_responses_ << "\n";
+    }
+    if (!fins_command_counts_.empty()) {
+        out << "fins (omron) command names:\n";
+        for (const auto& [name, count] : fins_command_counts_) {
+            out << "  " << std::left << std::setw(40) << name << count << "\n";
+        }
+        out << "fins responses matched to their own session's outstanding request (not "
+               "authoritative -- no unique transaction ID on the wire): "
+            << fins_matched_responses_ << "\n";
     }
     if (!kerberos_error_counts_.empty()) {
         out << "kerberos krb-error codes:\n";

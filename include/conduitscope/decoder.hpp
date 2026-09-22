@@ -22,6 +22,7 @@
 #include "conduitscope/eigrp.hpp"
 #include "conduitscope/ethercat.hpp"
 #include "conduitscope/ffhse.hpp"
+#include "conduitscope/fins.hpp"
 #include "conduitscope/goose.hpp"
 #include "conduitscope/hartip.hpp"
 #include "conduitscope/hsrp.hpp"
@@ -165,6 +166,16 @@ enum class ProtocolFilter {
                            // with a genuine dual TCP+UDP transport built from scratch (TwinCAT is
                            // TCP-only; Kerberos's own TCP+UDP split shares the same "two instances,
                            // one id()" pattern reused here).
+    FinsOnly,              // only attempt Omron FINS (Factory Interface Network Service) decoding --
+                           // see fins.hpp. TCP port 9600 and UDP port 9600 (same conventional port
+                           // number for both transports, unlike MELSEC's split 5001/5000) -- a
+                           // brand-new protocol built entirely on the ProtocolDecoder interface from
+                           // the start, the same "two instances, one id()" dual TCP+UDP transport
+                           // pattern MELSEC just established. Unlike MELSEC, a FINS response frame
+                           // self-describes its own command code, so no MELSEC-style mandatory
+                           // session-pending-request state machine is needed to decode response
+                           // fields (FinsFlowState here is lighter-weight, matching only for a
+                           // "matched to packet #N" note).
 };
 
 struct DecodeOptions {
@@ -208,6 +219,11 @@ struct DecodeOptions {
                                                    // SHARED port number for both transports) --
                                                    // MELSEC is the first protocol here whose TCP and
                                                    // UDP conventional ports genuinely differ.
+    std::vector<uint16_t> extra_fins_ports;      // TCP AND UDP -- see FINS_TCP_PORT/FINS_UDP_PORT
+                                                   // (9600/9600, fins.hpp) -- a single list covers
+                                                   // both transports, the same SHARED-port-number
+                                                   // shape extra_hartip_ports/extra_kerberos_ports
+                                                   // already have (unlike MELSEC's own split ports).
     std::vector<uint16_t> extra_opcua_ports;    // TCP only -- see OPCUA_PORT (4840)
     std::vector<uint16_t> extra_mqtt_ports;     // TCP only -- see MQTT_PORT (1883)
     std::vector<uint16_t> extra_ffhse_ports;    // TCP AND UDP -- see FFHSE_PORT_ANNUNC/_FMS/_SM/_LAN
