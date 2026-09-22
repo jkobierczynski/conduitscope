@@ -145,4 +145,14 @@ private:
 // buffer as lowercase hex, e.g. for unrecognized Modbus PDUs.
 std::string to_hex(ByteSpan span, const char* separator = " ");
 
+// Decodes `span` as UTF-16LE (the encoding SMB2/NTLM use for every string field on the wire --
+// DomainName/UserName/WorkstationName/TargetName in ntlm.hpp, share paths in smb.hpp) into UTF-8,
+// one std::string per Unicode codepoint's worth of UTF-8 bytes. A generic byte-buffer codec, the
+// same class of shared utility to_hex above already is -- not protocol-specific parsing, so it
+// lives here rather than being duplicated in both ntlm.cpp and smb.cpp. Malformed input (an odd
+// byte count, an unpaired surrogate) is handled leniently: a trailing odd byte is dropped, an
+// unpaired surrogate is rendered as the Unicode replacement character (U+FFFD) rather than
+// throwing -- untrusted wire bytes should never abort a decode over a cosmetic string field.
+std::string utf16le_to_utf8(ByteSpan span);
+
 }  // namespace conduitscope

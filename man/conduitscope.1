@@ -1,6 +1,6 @@
-.TH CONDUITSCOPE 1 "2026" "conduitscope 0.2.1" "User Commands"
+.TH CONDUITSCOPE 1 "2026" "conduitscope 0.1.7" "User Commands"
 .SH NAME
-conduitscope \- decode Modbus/TCP, DNP3, IEC 60870-5-104, S7comm/COTP, S7comm-Plus (Siemens TIA Portal / S7-1200/1500), IEC 61850 MMS (Manufacturing Message Specification, ISO 9506), EtherNet/IP (CIP explicit and implicit messaging), PROFINET RT (DCP and cyclic real-time IO), IEC 61850-8-1 GOOSE, IEC 61850-9-2 Sampled Values, EtherCAT, BACnet/IP, HART-IP, OPC UA Binary, MQTT (v3.1/v3.1.1/v5.0, including Sparkplug B), FOUNDATION Fieldbus HSE (FDA/SM/FMS/LAN Redundancy), IEEE Spanning Tree Protocol (STP/RSTP/MSTP), DeviceNet (CAN-bus CIP, via SocketCAN pcap captures), DNS, mDNS, LLMNR, and NetBIOS Name Service (NBT-NS), RIP, IGMP, VRRP, HSRP, IGRP, PIM, EIGRP, and OSPFv2, plus detect DNS-over-HTTPS (DoH) via TLS SNI matching, plus recognize (by name only, not full decode) RDP, VNC, TeamViewer, AnyDesk, and Zoom, plus recognize (by name only, and for SNMP also its cleartext community string) SMB, SSH, HTTP, HTTPS, SNMPv1/v2c, Telnet, FTP, and TFTP, plus recognize (by name only, and for DHCP also its message type) NTP, DHCP, LDAPS, RADIUS, TACACS+, and IEEE 802.1X/EAPOL, plus recognize (by name only, and for CAPWAP control and GTP-U also their message type) CAPWAP control/data, LWAPP control/data, GTP-U, and PPPoE, plus recognize (by name only, except for IP-in-IP's own inner src/dst addresses) GRE (and its NVGRE/Mikrotik EoIP sub-cases), IPsec ESP/AH, IP-in-IP, 6in4, L2TP/L2TPv3, IKE, VXLAN, Geneve, WireGuard, OpenVPN, a generic DTLS-tunnel structural check, STT, and MPLS, from offline pcap/pcapng captures
+conduitscope \- decode Modbus/TCP, DNP3, IEC 60870-5-104, S7comm/COTP, S7comm-Plus (Siemens TIA Portal / S7-1200/1500), IEC 61850 MMS (Manufacturing Message Specification, ISO 9506), EtherNet/IP (CIP explicit and implicit messaging), PROFINET RT (DCP and cyclic real-time IO), IEC 61850-8-1 GOOSE, IEC 61850-9-2 Sampled Values, EtherCAT, BACnet/IP, HART-IP, OPC UA Binary, MQTT (v3.1/v3.1.1/v5.0, including Sparkplug B), FOUNDATION Fieldbus HSE (FDA/SM/FMS/LAN Redundancy), IEEE Spanning Tree Protocol (STP/RSTP/MSTP), DeviceNet (CAN-bus CIP, via SocketCAN pcap captures), Kerberos, LDAP, SMB2/NTLM (the Windows Active Directory suite), DNS, mDNS, LLMNR, and NetBIOS Name Service (NBT-NS), RIP, IGMP, VRRP, HSRP, IGRP, PIM, EIGRP, and OSPFv2, plus detect DNS-over-HTTPS (DoH) via TLS SNI matching, plus recognize (by name only, not full decode) RDP, VNC, TeamViewer, AnyDesk, and Zoom, plus recognize (by name only, and for SNMP also its cleartext community string) SSH, HTTP, HTTPS, SNMPv1/v2c, Telnet, FTP, and TFTP, plus recognize (by name only, and for DHCP also its message type) NTP, DHCP, LDAPS, RADIUS, TACACS+, and IEEE 802.1X/EAPOL, plus recognize (by name only, and for CAPWAP control and GTP-U also their message type) CAPWAP control/data, LWAPP control/data, GTP-U, and PPPoE, plus recognize (by name only, except for IP-in-IP's own inner src/dst addresses) GRE (and its NVGRE/Mikrotik EoIP sub-cases), IPsec ESP/AH, IP-in-IP, 6in4, L2TP/L2TPv3, IKE, VXLAN, Geneve, WireGuard, OpenVPN, a generic DTLS-tunnel structural check, STT, and MPLS, from offline pcap/pcapng captures
 .SH SYNOPSIS
 .B conduitscope
 [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-color\fR|\fB\-\-color\fR] [\fB\-\-log\-file\fR \fIFILE\fR] \fICOMMAND\fR [\fIOPTIONS\fR]
@@ -40,6 +40,19 @@ its curated anonymous-bind/cleartext-credential/AD-reconnaissance/
 AS-REP-Roasting/delegation-discovery attack-monitoring notes; replaces
 the shallow, name-only LDAP recognition \fB\-\-protocol enterprise\-trust\fR
 used to provide) traffic found inside its TCP streams,
+plus SMB2/NTLM (MS-SMB2/MS-NLMP, TCP port 445 and TCP port 139, tried
+right after LDAP on TCP, no UDP sibling -- recognized by the same 4-byte
+\fB0xFF\fR/\fB0xFE\fR/\fB0xFD\fR + "SMB" magic \fB\-\-protocol
+lateral\-movement\fR used to provide, now additionally requiring the
+4-byte Zero+StreamProtocolLength Direct-TCP/NBSS prefix on both ports --
+see \fBdocs/PROTOCOL_COVERAGE.md\fR's SMB2/NTLM section for the wire
+format, NextCommand compounding, the shared NTLM (MS-NLMP)
+negotiate/challenge/authenticate parser, and its curated SMB1-present/
+signing-not-required/NTLM-in-use/anonymous-or-guest-session/
+administrative-share-access/repeated-logon-failure attack-monitoring
+notes; replaces the shallow, name-only SMB recognition \fB\-\-protocol
+lateral\-movement\fR used to provide) traffic found inside its TCP
+streams,
 plus PROFINET RT (EtherType 0x8892, DCP device discovery/configuration and
 cyclic real-time IO), IEC 61850-8-1 GOOSE (EtherType 0x88B8, ASN.1
 BER-encoded GOOSE PDU), IEC 61850-9-2 Sampled Values (EtherType 0x88BA,
@@ -90,8 +103,8 @@ Connection Request/Confirm reusing this tool's own TPKT/COTP parser), VNC
 TeamViewer/AnyDesk/Zoom (recognized by port number alone -- no payload
 signature exists for any of the three, the weakest identification gate in
 this tool), plus recognizes (same name-only posture, Tier 2 of the same
-"IT protocols an OT auditor flags" family) SMB (a direct-hosting or
-NetBIOS-Session-Service-wrapped magic), SSH (an RFC 4253 version-exchange
+"IT protocols an OT auditor flags" family -- SMB has since been promoted
+to a full decoder, see above) SSH (an RFC 4253 version-exchange
 banner), HTTP (a request-line/status-line, checked port-independently so a
 vendor web UI on any port is still caught), HTTPS (a TLS ClientHello,
 reusing the same parser DoH detection above uses), SNMPv1/v2c (UDP ports
@@ -214,8 +227,8 @@ regardless of where it's being analyzed \-\- an extension beyond what
 tshark/tcpdump themselves offer. See \fBdocs/USER_GUIDE.md\fR's OUTPUT
 FORMATS "Timestamps" subsection.
 .TP
-.B \-\-protocol {auto,modbus,dnp3,iec104,s7comm,s7comm\-plus,mms,enip,twincat,kerberos,ldap,profinet,goose,sv,ethercat,stp,devicenet,bacnet,hartip,opcua,mqtt,ff\-hse,dns,mdns,llmnr,nbns,doh,rip,igmp,vrrp,hsrp,igrp,pim,eigrp,ospf,remote\-access,lateral\-movement,enterprise\-trust,eapol,wireless\-backhaul,pppoe,tunnel\-vpn,mpls}
-Restrict decoding to one protocol. Default: auto (tries all twelve TCP
+.B \-\-protocol {auto,modbus,dnp3,iec104,s7comm,s7comm\-plus,mms,enip,twincat,kerberos,ldap,smb,profinet,goose,sv,ethercat,stp,devicenet,bacnet,hartip,opcua,mqtt,ff\-hse,dns,mdns,llmnr,nbns,doh,rip,igmp,vrrp,hsrp,igrp,pim,eigrp,ospf,remote\-access,lateral\-movement,enterprise\-trust,eapol,wireless\-backhaul,pppoe,tunnel\-vpn,mpls}
+Restrict decoding to one protocol. Default: auto (tries all fourteen TCP
 protocols, independent of port number, plus CIP I/O, BACnet/IP, HART-IP, and
 FF-HSE on every
 UDP payload,
@@ -259,6 +272,14 @@ bytes inside a message, never as its leading byte, so it does not
 actually collide with Kerberos's own gate, which reads the leading byte)
 -- see \fBdocs/PROTOCOL_COVERAGE.md\fR's LDAP section for the full
 collision survey,
+SMB2/NTLM (MS-SMB2/MS-NLMP, TCP port 445/139, no UDP sibling) is tried
+right after LDAP on TCP, using the same 4-byte \fB0xFF\fR/\fB0xFE\fR/
+\fB0xFD\fR + "SMB" magic \fB\-\-protocol lateral\-movement\fR's own SMB
+recognition already established, now additionally requiring the 4-byte
+Zero+StreamProtocolLength Direct-TCP/NBSS prefix on both ports -- already
+proven collision-free in this cascade before this decoder existed, so no
+new collision survey was needed -- see \fBdocs/PROTOCOL_COVERAGE.md\fR's
+SMB2/NTLM section for the full writeup,
 S7comm\-Plus is tried on the same TPKT/COTP framing and TCP port 102 as
 S7comm and MMS, disambiguated by its own protocol id byte (0x72 vs S7comm's
 0x32, so no collision risk with either), and MMS is
@@ -386,6 +407,12 @@ Repeatable. TCP only \-\- LDAP has no UDP sibling in this decoder. Does not
 change detection (LDAP is recognized on any TCP port), only whether the
 port is flagged as unexpected.
 .TP
+.B \-\-smb\-port \fIPORT\fR
+Same as \fB\-\-modbus\-port\fR, for SMB (built\-in default: 445 and 139).
+Repeatable. TCP only \-\- SMB has no UDP sibling in this decoder. Does not
+change detection (SMB is recognized on any TCP port), only whether the
+port is flagged as unexpected.
+.TP
 .B \-\-opcua\-port \fIPORT\fR
 Same as \fB\-\-modbus\-port\fR, for OPC UA. Repeatable. TCP only.
 .TP
@@ -443,15 +470,15 @@ never port\-gated regardless.
 .TP
 .B \-\-lateral\-movement\-port \fIPORT\fR
 Additional TCP or UDP port to treat as expected for the Tier 2 "IT
-protocols an OT auditor flags" family (SMB/SSH/HTTP/HTTPS/SNMPv1v2c/
-Telnet/FTP/TFTP/QUIC; built\-in defaults: 445, 139, 22, 80/8080/8000,
-443/8443, 161, 162, 23, 21, 69; QUIC shares HTTPS's own 443/8443 defaults).
-Repeatable. One shared option across all nine. Widens detection in
+protocols an OT auditor flags" family (SSH/HTTP/HTTPS/SNMPv1v2c/
+Telnet/FTP/TFTP \-\- SMB was promoted to its own dedicated decoder, see
+\fB\-\-smb\-port\fR above; built\-in defaults: 22, 80/8080/8000, 443/8443,
+161, 162, 23, 21, 69).
+Repeatable. One shared option across all seven. Widens detection in
 \fBauto\fR mode for SNMP/Telnet/FTP/
-TFTP's own port\-gated checks, HTTPS's port\-only fallback, and QUIC's own
-short\-header (1\-RTT) port\-only fallback \-\- SMB's direct\-hosting magic,
-SSH's version\-exchange banner, HTTP's request\-line/status\-line, and
-QUIC's long\-header structural check are never port\-gated regardless.
+TFTP's own port\-gated checks and HTTPS's port\-only fallback \-\- SSH's
+version\-exchange banner and HTTP's request\-line/status\-line are never
+port\-gated regardless.
 .TP
 .B \-\-enterprise\-trust\-port \fIPORT\fR
 Additional TCP or UDP port to treat as expected for the Tier 3 "IT

@@ -48,6 +48,7 @@
 #include "conduitscope/resource_limits.hpp"
 #include "conduitscope/rip.hpp"
 #include "conduitscope/s7commplus.hpp"
+#include "conduitscope/smb.hpp"
 #include "conduitscope/stp.hpp"
 #include "conduitscope/sv.hpp"
 #include "conduitscope/tcp.hpp"
@@ -148,6 +149,13 @@ enum class ProtocolFilter {
                            // recognition (it_protocols.hpp); it moved here once it was upgraded to
                            // a full ProtocolDecoder, the same split EapolOnly already has from
                            // EnterpriseTrustOnly.
+    SmbOnly,               // only attempt SMB2/SMB3 (MS-SMB2, TCP/445 and TCP/139) decoding, with
+                           // embedded NTLM (MS-NLMP) authentication decoding -- see smb.hpp. The
+                           // third protocol in the Windows Active Directory suite, no UDP sibling.
+                           // SMB was previously part of LateralMovementOnly's own name-only Tier 2
+                           // recognition (it_protocols.hpp); it moved here once it was upgraded to
+                           // a full ProtocolDecoder, the same split LdapOnly already has from
+                           // EnterpriseTrustOnly.
 };
 
 struct DecodeOptions {
@@ -177,6 +185,9 @@ struct DecodeOptions {
     std::vector<uint16_t> extra_hartip_ports;   // TCP AND UDP -- see HARTIP_PORT (5094, same for both)
     std::vector<uint16_t> extra_kerberos_ports;  // TCP AND UDP -- see KERBEROS_PORT (88, same for both)
     std::vector<uint16_t> extra_ldap_ports;      // TCP only -- see LDAP_PORT/LDAP_GC_PORT (389/3268,
+                                                   // it_protocols.hpp)
+    std::vector<uint16_t> extra_smb_ports;       // TCP only -- see SMB_PORT_445/
+                                                   // SMB_NETBIOS_SESSION_PORT_139 (445/139,
                                                    // it_protocols.hpp)
     std::vector<uint16_t> extra_opcua_ports;    // TCP only -- see OPCUA_PORT (4840)
     std::vector<uint16_t> extra_mqtt_ports;     // TCP only -- see MQTT_PORT (1883)
@@ -221,17 +232,20 @@ struct DecodeOptions {
     // opportunistic checks get -- this list still extends what counts as VNC's "expected" port for
     // the purposes of the "seen on a non-standard port" note, just never gates the detection itself.
     std::vector<uint16_t> extra_remote_access_ports;
-    // One shared list across all eight Tier 2 "IT protocols an OT auditor flags" protocols (SMB/
-    // SSH/HTTP/HTTPS/SNMPv1v2c/Telnet/FTP/TFTP -- see it_protocols.hpp), the same one-list grouping
+    // One shared list across all seven Tier 2 "IT protocols an OT auditor flags" protocols (SSH/
+    // HTTP/HTTPS/SNMPv1v2c/Telnet/FTP/TFTP -- see it_protocols.hpp), the same one-list grouping
     // extra_remote_access_ports above already established for Tier 1. Gates detection for the four
     // protocols with no strong port-independent signature (SNMP, Telnet, FTP, TFTP -- joins the
     // same detection-gating group as extra_dns_ports/extra_rip_ports/etc. above) and extends the
-    // "expected port" set for HTTPS's own port-only fallback. SMB/SSH/HTTP are the exceptions: SMB's
-    // direct-hosting magic, SSH's version-exchange banner, and HTTP's request-line/status-line are
-    // all checked port-independently even in Auto mode (each is a genuinely strong, self-describing
-    // signal, the same "structural signature overrides the port gate" treatment VNC's RFB banner
-    // gets above) -- this list still extends what counts as each one's own "expected" port for the
-    // purposes of the "seen on a non-standard port" note, just never gates those three's detection.
+    // "expected port" set for HTTPS's own port-only fallback. SSH/HTTP are the exceptions: SSH's
+    // version-exchange banner and HTTP's request-line/status-line are both checked port-
+    // independently even in Auto mode (each is a genuinely strong, self-describing signal, the same
+    // "structural signature overrides the port gate" treatment VNC's RFB banner gets above) -- this
+    // list still extends what counts as each one's own "expected" port for the purposes of the
+    // "seen on a non-standard port" note, just never gates those two's detection. SMB was an eighth
+    // Tier 2 protocol covered by this list; it now has its own dedicated extra_smb_ports above,
+    // since it is a full ProtocolDecoder (see smb.hpp) rather than a Tier 2 name-only recognition --
+    // the same split extra_ldap_ports already has from extra_enterprise_trust_ports.
     std::vector<uint16_t> extra_lateral_movement_ports;
     // One shared list across all five port-based Tier 3 "IT protocols an OT auditor flags"
     // protocols (NTP/DHCP/LDAPS/RADIUS/TACACS+ -- see it_protocols.hpp), the same grouping

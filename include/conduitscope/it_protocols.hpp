@@ -38,22 +38,17 @@
 //
 // ---------------------------------------------------------------------------------------------
 // Tier 2 -- "lateral-movement and credential-harvesting protocols that should be absent from a
-// production OT segment entirely per most hardening guides" (ROADMAP item 18's own wording): SMB/
-// NetBIOS, SSH, HTTP, HTTPS, SNMPv1/v2c, Telnet, FTP, and TFTP -- eight `protocol` values sharing
-// one `ProtocolFilter::LateralMovementOnly` toggle and one `extra_lateral_movement_ports` list, the
-// same "one feature toggle, several sub-protocols" grouping Tier 1's own RemoteAccessOnly filter
-// established (see decoder.hpp). Confidence again varies sharply, and again every summary/note says
-// so honestly:
-//   - SMB has a genuine cleartext structural signature at connection setup: a 4-byte magic
-//     (0xFF"SMB" for SMB1/CIFS, 0xFE"SMB" for SMB2/3, 0xFD"SMB" for an SMB2/3 Transform/encrypted
-//     header) either directly at the start of a TCP/445 segment (the modern "direct hosting"
-//     convention) or 4 bytes into a NetBIOS Session Service wrapper (RFC 1002 -- a 1-byte message
-//     type + 3-byte length) on TCP/139. Direct-hosting magic is checked port-independently, same
-//     treatment VNC's RFB banner gets, since it is just as self-describing; the NetBIOS-wrapped form
-//     is gated to port 139 (the wrapper's own leading type byte alone is too common a value to check
-//     opportunistically). Past connection setup SMB is either further negotiation (still readable)
-//     or session-key-encrypted (SMB3 with encryption negotiated) -- this file never looks past the
-//     header, so "dialect negotiated" isn't captured, only "this is SMB, some dialect."
+// production OT segment entirely per most hardening guides" (ROADMAP item 18's own wording): SSH,
+// HTTP, HTTPS, SNMPv1/v2c, Telnet, FTP, and TFTP -- seven `protocol` values sharing one
+// `ProtocolFilter::LateralMovementOnly` toggle and one `extra_lateral_movement_ports` list, the same
+// "one feature toggle, several sub-protocols" grouping Tier 1's own RemoteAccessOnly filter
+// established (see decoder.hpp). SMB was an eighth Tier 2 protocol here, name-only via the 4-byte
+// magic check `match_smb_magic` (below) still provides -- it has since been upgraded to a full
+// dedicated decoder (see smb.hpp's own file header comment), the same "pull one protocol out of a
+// shared tier" move already made once for EAPOL and once for LDAP, so it is no longer matched by
+// try_recognize_it_lateral_movement below; `match_smb_magic` itself is kept, exposed, and reused
+// as-is by smb.hpp's own structural gate rather than duplicated. Confidence again varies sharply
+// across the remaining seven, and again every summary/note says so honestly:
 //   - SSH has RFC 4253 section 4.2's own version-exchange banner ("SSH-2.0-OpenSSH_9.6" or similar,
 //     newline-terminated, ALWAYS the first bytes of a real SSH session in cleartext, by design --
 //     this is how client/server negotiate protocol/software versions before any encryption begins).
@@ -331,22 +326,32 @@ constexpr uint16_t FTP_CONTROL_PORT = 21;  // the data channel is explicitly out
 constexpr uint16_t TFTP_PORT = 69;
 
 struct ItLateralMovementMatch {
-    std::string protocol;  // "smb" / "ssh" / "http" / "https" / "snmp" / "telnet" / "ftp" / "tftp"
+    std::string protocol;  // "ssh" / "http" / "https" / "snmp" / "telnet" / "ftp" / "tftp" -- "smb"
+                            // is no longer produced here, see this file's own Tier 2 header comment
     std::string summary;
     std::vector<std::string> notes;
 };
 
-// Returns std::nullopt if `payload` and the `src_port`/`dst_port` pair don't match any of the eight
+// Returns std::nullopt if `payload` and the `src_port`/`dst_port` pair don't match any of the seven
 // Tier 2 protocols this file recognizes. Unlike try_recognize_it_remote_access above, every one of
-// these eight has a FIXED transport (SMB/SSH/HTTP/HTTPS/Telnet/FTP are TCP-only, SNMP/TFTP are UDP-
-// only) rather than legitimately appearing on both, so `is_tcp` selects which half of this function
-// even attempts a match, rather than merely widening a shared port-only fallback the way it does in
+// these seven has a FIXED transport (SSH/HTTP/HTTPS/Telnet/FTP are TCP-only, SNMP/TFTP are UDP-only)
+// rather than legitimately appearing on both, so `is_tcp` selects which half of this function even
+// attempts a match, rather than merely widening a shared port-only fallback the way it does in
 // try_recognize_it_remote_access. `extra_ports` extends every one of this file's own default ports,
-// one shared list across all eight -- the same "one feature toggle" grouping Tier 1's own
-// try_recognize_it_remote_access already established, not eight independent option lists.
+// one shared list across all seven -- the same "one feature toggle" grouping Tier 1's own
+// try_recognize_it_remote_access already established, not seven independent option lists.
 std::optional<ItLateralMovementMatch> try_recognize_it_lateral_movement(ByteSpan payload, uint16_t src_port,
                                                                           uint16_t dst_port, bool is_tcp,
                                                                           const std::vector<uint16_t>& extra_ports);
+
+// Matches the 4-byte SMB magic (0xFF/0xFE/0xFD + "SMB") at `offset` within `payload`. Returns a
+// human-readable label naming which SMB generation/framing it is, or std::nullopt if it doesn't
+// match at all. Exposed for smb.hpp's own SmbTcpDecoder structural gate, the same "shared envelope-
+// check function, reused rather than duplicated" pattern looks_like_ldap_ber below already
+// established for LDAP -- see smb.hpp's own file header comment for the full collision-avoidance
+// writeup (unchanged by SMB's own move to a dedicated decoder; this function's own bytes-matched
+// logic is untouched, only which caller(s) reach it changed).
+std::optional<std::string> match_smb_magic(ByteSpan payload, size_t offset);
 
 // Exposed narrowly for decoder.cpp's own reassemble_tcp_payload, to resolve a real collision found
 // while implementing this: an FTP reply-code line ("220 ...") or command-verb line ("USER ...")

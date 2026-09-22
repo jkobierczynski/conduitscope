@@ -6097,8 +6097,9 @@ presence+length, by design, not a depth gap to close later. **Controls'
 the well-known Paged Results Control), value bytes not decoded. **LDAPS
 full decode** -- needs keys, same limit as TLS everywhere else in this
 codebase (see `it_protocols.hpp`'s own LDAPS handling, unaffected by this
-decoder). **SMB/NTLM, Netlogon/DCE-RPC**: the remaining two protocols of
-the planned four-part AD suite -- separate future deliveries.
+decoder). **SMB/NTLM** now has its own dedicated decoder (see below);
+**Netlogon/DCE-RPC** remains the fourth and final protocol of the planned
+four-part AD suite -- a separate future delivery.
 
 #### JSON output fields
 
@@ -6155,4 +6156,311 @@ built binary's output against these fixtures, not hand-computed. If a
 real LDAP capture becomes available later, it should be added and this
 section updated accordingly. See `include/conduitscope/ldap.hpp`'s file
 header for the full writeup.
+
+### SMB2/NTLM (MS-SMB2, MS-NLMP; TCP/445 and TCP/139) -- Windows Active Directory suite, phase 3 of 4
+
+**The third Windows Active Directory protocol in this codebase.** SMB
+already had shallow, name-only recognition (Tier 2's "lateral-movement"
+family, `it_protocols.hpp`/`.cpp`) before this decoder existed -- a 4-byte
+magic check (`0xFF`/`0xFE`/`0xFD` + `"SMB"`) at offset 0 (direct hosting)
+or offset 4 (NetBIOS-wrapped, port 139), nothing decoded past that; that
+recognition is now removed in favor of this full decoder, the same "pull
+one protocol out of a shared tier into its own dedicated decoder/CLI
+surface" move already made for EAPOL and LDAP -- `match_smb_magic`
+(`it_protocols.hpp`) is the one piece kept from that old code, reused as-is
+by this decoder's own structural gate rather than duplicated. Built on the
+`ProtocolDecoder` interface Kerberos/LDAP already use: one decoder
+instance, `SmbTcpDecoder`, `id() == "smb"`, `GateKind::TcpPortIndependent`
+-- no UDP sibling, SMB has none. NTLM itself (MS-NLMP) has its own small
+shared parser, `include/conduitscope/ntlm.hpp`/`src/ntlm.cpp` -- called
+from `smb.cpp`, no `ProtocolDecoder`/gate/port of its own, since NTLM only
+ever appears embedded inside SMB2's own `SESSION_SETUP` bodies in this
+phase's scope and its wire format is byte-identical wherever it appears
+(unlike Kerberos/LDAP's own duplicated-per-embedding BER readers, which
+exist because those two protocols use genuinely different ASN.1 tagging
+conventions -- NTLM has no such variation, so sharing is the correct
+application of the same underlying principle, not an exception to it). No
+`smb_*`/`ntlm_*` fields exist on `DecodedPacket` -- everything rides
+`DecodedPacket::result` as an `SmbFrame`, rendered by `write_smb_json_fields`
+in `output.cpp`.
+
+A successful NTLM (or Kerberos) authentication over SMB is exactly what an
+attacker does with the credentials Kerberos's/LDAP's own curated notes
+already flag (a Kerberoasted/AS-REP-Roasted ticket cracked offline, or
+credentials harvested via LDAP recon) -- SMB is where those credentials
+get *used*, most often via NTLM relay/pass-the-hash against the
+`ADMIN$`/`C$`/`IPC$` administrative shares for lateral movement. This
+phase completes that story the same way LDAP's own text framed itself as
+completing Kerberos's.
+
+#### Wire format
+
+Fixed-width little-endian fields throughout -- **not** BER/ASN.1 like
+Kerberos/LDAP. Every message, on either port 445 or port 139, is preceded
+by a 4-byte header ([MS-SMB2] section 2.1's "Direct TCP transport packet
+header", structurally identical to RFC 1002 section 4.3.1's NetBIOS
+Session Service *SESSION MESSAGE* header): `Zero` (1 byte, MUST be `0x00`)
++ `StreamProtocolLength` (3 bytes, big-endian, the byte count of the
+following SMB2 message only). `smb_tcp_declared_length` reads these same 4
+bytes on both ports and returns `4 + StreamProtocolLength`. Port 139's own
+NBSS session-establishment handshake (`SESSION REQUEST`/`POSITIVE
+RESPONSE`/`NEGATIVE RESPONSE`, RFC 1002 4.3.2-4.3.4) is deliberately out of
+scope -- the gate simply doesn't fire on those 1-2 handshake packets (their
+magic bytes aren't `SMB`), and decoding starts from the first real SMB2
+message onward.
+
+The **SMB2 Packet Header** (64 bytes fixed, every message): `ProtocolId`
+(the verified `0xFE"SMB"` magic), `StructureSize` (MUST be 64),
+`CreditCharge`, `Status` (response only: NTSTATUS, named via a curated
+subset -- see curated note 6 below), `Command` (named, all 19 values
+`0x00`-`0x12`), `CreditRequest`/`CreditResponse` (read, not rendered),
+`Flags` (named: `SERVER_TO_REDIR`/`ASYNC_COMMAND`/`RELATED_OPERATIONS`/
+`SIGNED`/`PRIORITY_MASK`/`DFS_OPERATIONS`/`REPLAY_OPERATION`),
+`NextCommand` (the compounding chain pointer, see below), `MessageId`
+(the wire-mandated correlation key, echoed identically on the matching
+response -- the same genuine improvement over Kerberos's own honest
+`cname`/`sname` substitute that LDAP's `messageID` already demonstrated),
+`Reserved`+`TreeId` (SYNC) or `AsyncId` (ASYNC), `SessionId`, `Signature`
+(never verified -- no key material available, the same limit this codebase
+applies to every other cryptographic signature/MAC it encounters).
+
+**Compounding** ([MS-SMB2]'s own mechanism for concatenating several SMB2
+messages inside one 4-byte-prefixed unit, chained via each header's own
+`NextCommand` field) is a genuinely new wrinkle neither Kerberos nor LDAP
+had at the wire-format level. `parse_smb2_chain` (`smb.cpp`) walks the
+`NextCommand` chain structurally -- every sub-message's header is read and
+its command named, and a malformed/overrunning `NextCommand` value stops
+the chain (keeping whatever was already parsed) rather than misparsing the
+rest as garbage -- capped by both the available bytes running out and a
+hard limit on the number of sub-messages
+(`resource_limits().max_decoded_objects`).
+
+Full field decode, scoped to authentication/reconnaissance (matching
+`kerberos.hpp`'s/`ldap.hpp`'s own "not every message type needs the same
+depth" discipline):
+
+- **NEGOTIATE Request/Response**: Request's `Dialects[]` array (every
+  offered dialect named -- `0x0202`/`0x0210`/`0x0300`/`0x0302`/`0x0311`,
+  plus the pre-SMB2 multi-protocol-negotiate wildcard `0x02FF`, all
+  verified against [MS-SMB2]) and `SecurityMode`; Response's negotiated
+  `DialectRevision`, `SecurityMode` (named: `SIGNING_ENABLED`/
+  `SIGNING_REQUIRED` -- the direct input to curated note 2), `Capabilities`
+  (named, all 7 flags -- `DFS`/`LEASING`/`LARGE_MTU`/`MULTI_CHANNEL`/
+  `PERSISTENT_HANDLES`/`DIRECTORY_LEASING`/`ENCRYPTION`), `ServerGuid`. The
+  SMB 3.1.1 `NegotiateContextList` is structural-only for this pass
+  (present/length only, matching LDAP's own `controlValue` posture) --
+  it sits in a trailing region of both messages, so skipping it cannot
+  corrupt the rest of the parse.
+- **SESSION_SETUP Request/Response**: Request's `SecurityMode`,
+  `Capabilities`, `PreviousSessionId` (session-binding indicator), and its
+  `Buffer` -- scanned for the 8-byte `"NTLMSSP\0"` signature (a pragmatic
+  substitute for fully implementing SPNEGO/GSS-API's own ASN.1 grammar
+  [RFC 4178] just to unwrap one layer, the same "structural signature, not
+  full grammar" bar this codebase already applies elsewhere); when found,
+  the NTLM message is parsed via `ntlm.hpp`'s shared parser. Response's
+  `SessionFlags` (named: `IS_GUEST`/`IS_NULL`/`ENCRYPT_DATA` -- the direct
+  input to curated note 4) and its own `Buffer`, same NTLM-signature scan
+  (carries the server's CHALLENGE_MESSAGE). `Status`
+  `STATUS_MORE_PROCESSING_REQUIRED` marks a non-terminal leg of a
+  multi-leg handshake (see State/correlation below).
+- **TREE_CONNECT Request/Response**: Request's share path (UTF-16LE,
+  decoded via the shared `utf16le_to_utf8` codec in `byteio.hpp`/`.cpp` --
+  the direct input to curated note 5, a path ending in `$`). Response's
+  `ShareType` (named: disk/pipe/print) and `ShareFlags`/`Capabilities`
+  (named, all values from [MS-SMB2] 2.2.10) -- `ShareType == pipe` plus a
+  `$`-suffixed path identifies `IPC$` specifically, the strongest form of
+  note 5.
+- **LOGOFF**, **TREE_DISCONNECT**: header-only, both directions.
+
+**Structural-only** (recognized, command named, not field-decoded):
+CREATE, CLOSE, FLUSH, READ, WRITE, LOCK, IOCTL, CANCEL, ECHO,
+QUERY_DIRECTORY, CHANGE_NOTIFY, QUERY_INFO, SET_INFO, OPLOCK_BREAK -- the
+file-I/O-heavy commands, lower pentest/monitoring value for a first pass.
+IOCTL is worth calling out explicitly: DCE/RPC-over-named-pipe traffic
+(Netlogon chief among it) rides inside CREATE+WRITE+READ/IOCTL against an
+`IPC$`-hosted named pipe -- decoding that payload is squarely phase 4's
+job, not this one.
+
+##### NTLM message coverage (`ntlm.hpp`/`ntlm.cpp`)
+
+- **NEGOTIATE_MESSAGE** (type 1): `NegotiateFlags` (named, the full 22-bit
+  table), `DomainName`/`WorkstationName` (OEM-encoded, present only when
+  the corresponding `_SUPPLIED` flag is set).
+- **CHALLENGE_MESSAGE** (type 2): `TargetName`, `NegotiateFlags`,
+  `ServerChallenge` (8 raw bytes -- a nonce, not a secret, safe to render,
+  unlike the credential material below), `TargetInfo` decoded as a proper
+  `AV_PAIR` list (every `AvId` named -- `MsvAvEOL`/`MsvAvNbComputerName`/
+  `MsvAvNbDomainName`/`MsvAvDnsComputerName`/`MsvAvDnsDomainName`/
+  `MsvAvDnsTreeName`/`MsvAvFlags`/`MsvAvTimestamp`/`MsvAvSingleHost`/
+  `MsvAvTargetName`/`MsvAvChannelBindings`; string-typed pairs rendered,
+  opaque ones byte-length-only), `Version` when present.
+- **AUTHENTICATE_MESSAGE** (type 3): `NegotiateFlags`, `DomainName`,
+  `UserName`, `WorkstationName` (all UTF-16LE, decoded), `Version`, MIC
+  presence (a best-effort heuristic, see `ntlm.cpp`'s own
+  `detect_mic_present` comment -- MS-NLMP defines no dedicated flag bit for
+  it). **`LmChallengeResponse` and `NtChallengeResponse` are never rendered
+  beyond presence + byte length** -- this is the actual proof-of-possession
+  /hash material (the entire point of an NTLM relay or an offline NTLMv2
+  crack), and rendering it would make this decoder itself a
+  credential-harvesting tool; the same "credential itself is never
+  inspected" posture LDAP's own bind-password handling established now
+  gets its sharpest application yet. `EncryptedRandomSessionKey` is the
+  same: presence/length only. In practice `output.cpp`'s own JSON writer
+  goes further still and never surfaces even the presence/length of these
+  three fields -- only `ntlm_user_name`/`ntlm_domain_name` (identity, not
+  proof-of-possession material) are rendered for an AUTHENTICATE_MESSAGE.
+
+#### Structural detection gate
+
+Reused from `it_protocols.hpp`'s own `match_smb_magic`, not duplicated:
+the 4-byte `0xFF`/`0xFE`/`0xFD` + `"SMB"` signature, already registered
+and proven collision-free in `tcp_port_independent_registry()`. This phase
+only changed what happens *after* the gate fires (full decode instead of
+magic-only recognition), not the gate itself. `try_parse_smb` additionally
+requires the 4-byte Zero+StreamProtocolLength prefix ahead of that magic
+on BOTH ports -- stricter than the old Tier 2 heuristic, which incorrectly
+allowed a magic-at-offset-0 form with no prefix at all (see Validation
+below for a real-world consequence of this fix). Registered directly
+after LDAP in `tcp_port_independent_registry()`.
+
+#### Curated attack/monitoring detection
+
+Every note is framed as surfacing a wire-level mechanism, never an
+assertion of detected intent -- legitimate admin tooling routinely uses
+several of these same shapes too:
+
+1. **SMB1 traffic present** -- standing, fires once per session (a sticky
+   flag, not a per-message repeat): the `0xFF` magic byte, distinct from
+   SMB2/3's `0xFE`. SMB1 is the EternalBlue/WannaCry-class legacy dialect;
+   its mere presence on a network, OT segments especially, is a
+   commonly-checked finding on its own.
+2. **SMB signing not required** -- from the NEGOTIATE Response's
+   `SecurityMode`: `SIGNING_ENABLED` set, `SIGNING_REQUIRED` **not** set.
+   The precondition every NTLM-relay tool (`ntlmrelayx` and equivalents)
+   checks for before attempting a relay attack -- the SMB-side analog of
+   LDAP's own StartTLS-awareness note.
+3. **NTLM negotiated for this session** -- a `SESSION_SETUP` request or
+   response whose `Buffer` contains the `"NTLMSSP\0"` signature. A
+   downgrade/relay-friendly signal on its own (Kerberos is preferred by
+   policy in a well-run AD environment) -- the SMB-side complement of the
+   Kerberos and LDAP decoders' own notes, completing the "this is how the
+   earlier phases' targets get used" story from the introduction above.
+4. **Anonymous or guest session established** -- the `SESSION_SETUP`
+   Response's `SessionFlags`: `IS_GUEST` or `IS_NULL` set. A well-known
+   misconfiguration (null-session enumeration), in the same family as
+   LDAP's own anonymous-bind note.
+5. **Administrative/hidden share access** -- a `TREE_CONNECT` request path
+   ending in `$` (`ADMIN$`, `C$`, and above all `IPC$`), correlated
+   against the response's own `ShareType` once available to confirm
+   `IPC$` specifically via `ShareType == pipe`. `IPC$` access is very
+   often the literal next step after a successful authentication in a
+   real lateral-movement chain (named-pipe-based remote service control --
+   PsExec and equivalents), the SMB-side analog of LDAP's SPN-sweep note's
+   own "the next step after auth" framing.
+6. **Repeated authentication failure across a capture** -- the SMB-side
+   analog of Kerberos's KRB-ERROR counts and LDAP's resultCode counts:
+   named `Status` values from `SESSION_SETUP` responses aggregated in
+   `--stats` -- `STATUS_SUCCESS`, `STATUS_MORE_PROCESSING_REQUIRED`
+   (the non-terminal NTLM handshake leg, counted separately from a true
+   failure), `STATUS_LOGON_FAILURE`, `STATUS_ACCESS_DENIED`,
+   `STATUS_WRONG_PASSWORD`, `STATUS_PASSWORD_EXPIRED`,
+   `STATUS_ACCOUNT_DISABLED`, `STATUS_ACCOUNT_LOCKED_OUT` (`0xC0000234`,
+   independently confirmed at implementation time), with any other
+   `Status` value reported numerically rather than guessed at. A burst of
+   `STATUS_LOGON_FAILURE` across many distinct usernames on one session is
+   the SMB-side password-spray signature.
+
+#### State/correlation design
+
+`SmbFlowState`, keyed by `FlowStateKeying::Session` (`tcp_session_key`,
+reused as-is). Two pieces of state, because this phase introduces a
+correlation shape neither Kerberos nor LDAP needed: a simple
+`MessageId`-keyed `pending_requests` map (1:1 request/response pairing for
+NEGOTIATE, TREE_CONNECT, LOGOFF, and TREE_DISCONNECT -- the plain
+Kerberos-style shape); and a `SessionId`-keyed `pending_ntlm_handshakes`
+map (**genuinely new**: NTLM's own negotiate/challenge/authenticate
+exchange is a multi-leg handshake spanning *two separate* `SESSION_SETUP`
+request/response pairs, each with its own `MessageId`, tied together only
+by the `SessionId` the server assigns in the first response
+(`STATUS_MORE_PROCESSING_REQUIRED`) and the client echoes in the second
+request -- opened on that response, closed with a single coherent "NTLM
+handshake for `domain`, {succeeded|failed}" correlation note on the
+terminal `SESSION_SETUP` response for that `SessionId`). This is the
+SMB-side equivalent of LDAP's own "keep across many responses, close on
+the terminal one" pattern, just keyed by `SessionId` instead of a single
+message's own `messageID`, because the *thing* being correlated here is a
+multi-message handshake rather than a one-to-many search. Both maps capped
+by `resource_limits().max_decoded_objects`, the same guard Kerberos's and
+LDAP's own pending-request maps use.
+
+#### DELIBERATELY NOT IMPLEMENTED in this pass
+
+SMB1/CIFS's own full command set (SMB1 traffic is *recognized* -- curated
+note 1 -- but not decoded past that). NBSS session-establishment (RFC 1002
+4.3.2-4.3.4 -- named NetBIOS computer names, no authentication/recon
+value). SMB 3.x message **signing verification** and **encryption**
+(`0xFD`-prefixed `TRANSFORM_HEADER` messages are recognized and named,
+never decrypted -- the same limit this codebase applies to every encrypted
+protocol it meets). The SMB 3.1.1 `NegotiateContextList`. Full SPNEGO/
+GSS-API ASN.1 decode (the `NTLMSSP\0` signature scan is the deliberate
+substitute -- a Kerberos-mechanism SPNEGO blob is simply not matched by
+that scan). **DCE/RPC-over-named-pipe payloads, Netlogon chief among
+them** -- explicitly phase 4, the final protocol of the planned four-part
+AD suite. Every file-I/O command's own field-level content.
+
+#### JSON output fields
+
+Rendered only when `protocol == "smb"`: `smb_envelope_kind` /
+`smb_compounded` / `smb_messages` (always present, `smb_messages` possibly
+empty for SMB1/SMB2_TRANSFORM traffic). Per message in `smb_messages`:
+`command` / `command_value` / `is_response` / `message_id` / `session_id`
+/ `tree_id` (or `async_id`) (always present); `status` / `status_name`
+(response only); `header_flags` (only when non-empty); `compounded_next`
+(only when this sub-message chains to another); `negotiate_dialects`
+(NEGOTIATE request only); `negotiated_dialect` / `server_guid` /
+`security_mode` / `capabilities` (NEGOTIATE response only);
+`previous_session_id` (SESSION_SETUP request only); `session_flags`
+(SESSION_SETUP response only, when non-empty); `ntlm_message_type` /
+`ntlm_target_name` (when non-empty) / `ntlm_user_name` (when non-empty) /
+`ntlm_domain_name` (when non-empty) (only when NTLM was found in this
+message's own buffer -- see the credential-material note above for what is
+deliberately NOT rendered); `tree_connect_path` (TREE_CONNECT request
+only); `share_type` / `share_flags` (only when non-empty) (TREE_CONNECT
+response only); `ntlm_handshake_summary` (only on the SESSION_SETUP
+response that closes a multi-leg handshake); `correlated_request_index`
+(only on a message authoritatively correlated to an earlier request).
+
+#### Validation
+
+No public real-world SMB2/NTLM capture with a full authentication
+handshake was incorporated in this pass; validated by construction against
+synthetic `tests/sample_smb.pcap` (TCP, 26 packets across 7 independent
+sessions/flows A-G -- `tools/make_sample_pcap.py`'s `build_smb_sample()`)
+and `tests/sample_smb_tcp_split.pcap` (TCP, 2 packets: one NEGOTIATE
+Request split across two segments), covering every message type (full and
+structural-only), all six curated notes with an explicit negative case
+each, the full NTLM negotiate/challenge/authenticate handshake and its own
+multi-leg correlation (both a succeeded and a failed outcome), compounding
+(NEGOTIATE chained to SESSION_SETUP via `NextCommand`), `--stats` Status
+aggregation (note 6), a non-standard TCP port (with `--smb-port`
+suppressing just the note, not detection), and a TCP-segment-split
+reassembly case. Every byte offset and note-trigger condition was first
+independently smoke-tested against a hand-built synthetic exchange,
+decoded and inspected in both `--format text` and `--format json`, BEFORE
+this fixture (and the `CMakeLists.txt` `smb_*` test family reading it)
+were written -- the same verification discipline Kerberos's/LDAP's own
+deliveries were held to.
+
+One genuine real-world data point did emerge as a side effect of this
+decoder's stricter framing check: `tests/real_captures/hartip/hart_ip.pcapng`
+(the HART-IP real-capture fixture) contains an incidental SMB1 connection
+in its background traffic that used to be misreported as an unresolved
+HART-IP weak-gate false positive; it is now correctly recognized and
+decoded as `[smb]` with curated note 1, the first real-world confirmation
+of this decoder's own SMB1 magic-byte detection gate -- see
+`tests/real_captures/hartip/ATTRIBUTION.md`'s own updated section for the
+detail. If a real capture containing a full SMB2/NTLM authentication
+handshake becomes available later, it should be added and this section
+updated accordingly. See `include/conduitscope/smb.hpp`'s and
+`include/conduitscope/ntlm.hpp`'s file headers for the full writeup.
 

@@ -718,6 +718,137 @@ void write_ldap_json_fields(std::ostream& out, const LdapMessage& lm) {
     }
 }
 
+// Renders one SmbMessage (smb.hpp) as a JSON object's inner fields, indented for use inside
+// write_smb_json_fields's own "smb_messages" array below -- one call per sub-message in a
+// (possibly compounded, see smb.hpp's own COMPOUNDING paragraph) SmbFrame. Every field not
+// meaningful for this particular message's own command is simply omitted, the same "always-set
+// vs. has_*/non-empty-gated" convention write_kerberos_json_fields/write_ldap_json_fields above
+// already establish.
+void write_one_smb_message_json_fields(std::ostream& out, const SmbMessage& m) {
+    out << "        \"command\": \"" << json_escape(m.command_name) << "\",\n";
+    out << "        \"command_value\": " << m.command_value << ",\n";
+    out << "        \"is_response\": " << (m.is_response ? "true" : "false") << ",\n";
+    out << "        \"message_id\": " << m.message_id << ",\n";
+    out << "        \"session_id\": " << m.session_id << ",\n";
+    if (m.is_async) {
+        out << "        \"async_id\": " << m.async_id << ",\n";
+    } else {
+        out << "        \"tree_id\": " << m.tree_id << ",\n";
+    }
+    if (m.is_response) {
+        out << "        \"status\": " << m.status << ",\n";
+        out << "        \"status_name\": \"" << json_escape(m.status_name) << "\",\n";
+    }
+    if (!m.header_flags.empty()) {
+        out << "        \"header_flags\": [";
+        for (size_t i = 0; i < m.header_flags.size(); ++i) {
+            if (i != 0) out << ", ";
+            out << "\"" << json_escape(m.header_flags[i]) << "\"";
+        }
+        out << "],\n";
+    }
+    if (m.next_command != 0) {
+        out << "        \"compounded_next\": true,\n";
+    }
+
+    if (!m.negotiate_dialects.empty()) {
+        out << "        \"negotiate_dialects\": [";
+        for (size_t i = 0; i < m.negotiate_dialects.size(); ++i) {
+            if (i != 0) out << ", ";
+            out << "\"" << json_escape(m.negotiate_dialects[i]) << "\"";
+        }
+        out << "],\n";
+    }
+    if (m.has_negotiate_response) {
+        out << "        \"negotiated_dialect\": \"" << json_escape(m.negotiated_dialect) << "\",\n";
+        out << "        \"server_guid\": \"" << json_escape(m.server_guid_hex) << "\",\n";
+        if (!m.negotiate_response_security_mode.empty()) {
+            out << "        \"security_mode\": [";
+            for (size_t i = 0; i < m.negotiate_response_security_mode.size(); ++i) {
+                if (i != 0) out << ", ";
+                out << "\"" << json_escape(m.negotiate_response_security_mode[i]) << "\"";
+            }
+            out << "],\n";
+        }
+        if (!m.negotiate_capabilities.empty()) {
+            out << "        \"capabilities\": [";
+            for (size_t i = 0; i < m.negotiate_capabilities.size(); ++i) {
+                if (i != 0) out << ", ";
+                out << "\"" << json_escape(m.negotiate_capabilities[i]) << "\"";
+            }
+            out << "],\n";
+        }
+    }
+    if (m.has_session_setup_request) {
+        out << "        \"previous_session_id\": " << m.previous_session_id << ",\n";
+    }
+    if (m.has_session_setup_response && !m.session_flags.empty()) {
+        out << "        \"session_flags\": [";
+        for (size_t i = 0; i < m.session_flags.size(); ++i) {
+            if (i != 0) out << ", ";
+            out << "\"" << json_escape(m.session_flags[i]) << "\"";
+        }
+        out << "],\n";
+    }
+    if (m.has_ntlm) {
+        out << "        \"ntlm_message_type\": \"" << json_escape(m.ntlm.message_type) << "\",\n";
+        if (!m.ntlm.target_name.empty()) {
+            out << "        \"ntlm_target_name\": \"" << json_escape(m.ntlm.target_name) << "\",\n";
+        }
+        if (!m.ntlm.user_name.empty()) {
+            out << "        \"ntlm_user_name\": \"" << json_escape(m.ntlm.user_name) << "\",\n";
+        }
+        if (!m.ntlm.auth_domain_name.empty()) {
+            out << "        \"ntlm_domain_name\": \"" << json_escape(m.ntlm.auth_domain_name) << "\",\n";
+        }
+    }
+    if (m.has_tree_connect_request) {
+        out << "        \"tree_connect_path\": \"" << json_escape(m.tree_connect_path) << "\",\n";
+    }
+    if (m.has_tree_connect_response) {
+        out << "        \"share_type\": \"" << json_escape(m.share_type) << "\",\n";
+        if (!m.share_flags.empty()) {
+            out << "        \"share_flags\": [";
+            for (size_t i = 0; i < m.share_flags.size(); ++i) {
+                if (i != 0) out << ", ";
+                out << "\"" << json_escape(m.share_flags[i]) << "\"";
+            }
+            out << "],\n";
+        }
+    }
+    if (m.ntlm_handshake_closed) {
+        out << "        \"ntlm_handshake_summary\": \"" << json_escape(m.ntlm_handshake_summary) << "\",\n";
+    }
+    if (m.correlated_request_seen) {
+        out << "        \"correlated_request_index\": " << m.correlated_request_index << ",\n";
+    }
+    out << "        \"summary\": \"" << json_escape(m.summary) << "\"\n";
+}
+
+// The SMB analog of write_kerberos_json_fields/write_ldap_json_fields above -- SmbFrame (smb.hpp)
+// differs from KerberosMessage/LdapMessage in carrying a whole vector of sub-messages rather than
+// one message, since one SMB2 TCP payload can be a compounded chain (see smb.hpp's own COMPOUNDING
+// paragraph); "smb_messages" is always present (possibly empty, for SMB1/SMB2_TRANSFORM traffic,
+// which this decoder recognizes but doesn't field-decode -- see smb.hpp's own DELIBERATELY NOT
+// IMPLEMENTED list) rather than gated on a has_* flag, so a JSON consumer never has to special-case
+// its absence.
+void write_smb_json_fields(std::ostream& out, const SmbFrame& sf) {
+    out << "    \"smb_envelope_kind\": \"" << json_escape(sf.envelope_kind) << "\",\n";
+    out << "    \"smb_compounded\": " << (sf.messages.size() > 1 ? "true" : "false") << ",\n";
+    out << "    \"smb_messages\": [";
+    if (sf.messages.empty()) {
+        out << "],\n";
+    } else {
+        out << "\n";
+        for (size_t i = 0; i < sf.messages.size(); ++i) {
+            out << "      {\n";
+            write_one_smb_message_json_fields(out, sf.messages[i]);
+            out << "      }" << (i + 1 < sf.messages.size() ? "," : "") << "\n";
+        }
+        out << "    ],\n";
+    }
+}
+
 }  // namespace
 
 void JsonWriter::write_packet(const DecodedPacket& p) {
@@ -1838,6 +1969,9 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
     if (p.protocol == "ldap" && p.result) {
         write_ldap_json_fields(out_, p.result->as<LdapMessage>());
     }
+    if (p.protocol == "smb" && p.result) {
+        write_smb_json_fields(out_, p.result->as<SmbFrame>());
+    }
     out_ << "    \"notes\": [";
     for (size_t i = 0; i < p.notes.size(); ++i) {
         if (i != 0) out_ << ", ";
@@ -1989,6 +2123,19 @@ void StatsWriter::write_packet(const DecodedPacket& p) {
         const LdapMessage& lm = p.result->as<LdapMessage>();
         if (lm.has_result) {
             ldap_result_code_counts_[lm.result_code_name]++;
+        }
+    }
+    // Curated Note 6 (smb.hpp's file header comment) -- the SMB-native analog of Kerberos's/LDAP's
+    // own aggregate count notes just above: named Status counts from SESSION_SETUP responses only
+    // (authentication outcomes specifically, not every SMB2 command's own Status), so a burst of
+    // STATUS_LOGON_FAILURE across many SESSION_SETUP attempts on one session -- the SMB-side
+    // password-spray signature -- is visible with no per-request correlation needed at all.
+    if (p.protocol == "smb" && p.result) {
+        const SmbFrame& sf = p.result->as<SmbFrame>();
+        for (const SmbMessage& m : sf.messages) {
+            if (m.command_value == 0x01 /* SESSION_SETUP */ && m.is_response) {
+                smb_status_counts_[m.status_name]++;
+            }
         }
     }
     if (p.protocol == "s7comm" && p.s7comm_has_function) {
@@ -2174,6 +2321,12 @@ void StatsWriter::print_summary(std::ostream& out) const {
     if (!ldap_result_code_counts_.empty()) {
         out << "ldap resultcode counts:\n";
         for (const auto& [name, count] : ldap_result_code_counts_) {
+            out << "  " << std::left << std::setw(40) << name << count << "\n";
+        }
+    }
+    if (!smb_status_counts_.empty()) {
+        out << "smb session_setup status counts:\n";
+        for (const auto& [name, count] : smb_status_counts_) {
             out << "  " << std::left << std::setw(40) << name << count << "\n";
         }
     }

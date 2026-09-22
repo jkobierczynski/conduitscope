@@ -169,6 +169,12 @@ private:
     // result_code_name ("invalidCredentials", or "resultCode N" for an unnamed code), read from
     // DecodedPacket::result the same way kerberos_error_counts_ is above.
     std::map<std::string, size_t> ldap_result_code_counts_;
+    // Curated Note 6 (smb.hpp's file header comment) -- named SMB Status counts from SESSION_SETUP
+    // responses only (not every SMB2 command's own Status -- this stays focused on authentication
+    // outcomes, the direct SMB-side analog of kerberos_error_counts_/ldap_result_code_counts_
+    // above), keyed by status_name ("STATUS_LOGON_FAILURE", or "0xNNNNNNNN" for an unnamed code),
+    // read from DecodedPacket::result the same way ldap_result_code_counts_ is above.
+    std::map<std::string, size_t> smb_status_counts_;
     std::map<std::string, size_t> s7comm_function_counts_;
     std::map<std::string, size_t> dnp3_function_counts_;
     std::map<std::string, size_t> iec104_asdu_type_counts_;

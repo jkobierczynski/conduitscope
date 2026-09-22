@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 cmake_minimum_required(VERSION 3.16)
-project(conduitscope VERSION 0.2.1 LANGUAGES CXX)
+project(conduitscope VERSION 0.2.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -92,6 +92,8 @@ add_library(conduitscope_core STATIC
   src/twincat.cpp
   src/kerberos.cpp
   src/ldap.cpp
+  src/ntlm.cpp
+  src/smb.cpp
   src/protocol_registry.cpp
   src/resource_limits.cpp
   src/decoder.cpp
@@ -2983,7 +2985,10 @@ set_tests_properties(real_hartip_stats_summary PROPERTIES
   # Unreachable -- previously shown only as an opaque "non-tcp" count before try_parse_icmp
   # existed (see icmp.hpp/icmp.cpp); now decoded and broken out as its own "icmp" protocol line
   # plus an "icmp types:" breakdown, confirmed against this real capture.
-  PASS_REGULAR_EXPRESSION "packets: +116[^\n]*\n[^\n]*\nprotocols:\n *hartip +46\n *icmp +1\n *modbus +2\n *non-ip +4\n *tcp +63\n.*hartip message types:\n *Request +23\n *Response +23\nhartip pass-through commands:\n.*icmp types:\n *Destination Unreachable +1")
+  # tcp is 62, not 63: one of this capture's background TCP connections (port 445) is genuine SMB1
+  # traffic, now correctly recognized and decoded as "smb" by smb.hpp -- see
+  # real_hartip_smb_traffic_now_correctly_decoded below and ATTRIBUTION.md's own updated note.
+  PASS_REGULAR_EXPRESSION "packets: +116[^\n]*\n[^\n]*\nprotocols:\n *hartip +46\n *icmp +1\n *modbus +2\n *non-ip +4\n *smb +1\n *tcp +62\n.*hartip message types:\n *Request +23\n *Response +23\nhartip pass-through commands:\n.*icmp types:\n *Destination Unreachable +1")
 
 add_test(NAME real_hartip_command_coverage_json
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/hartip/hart_ip.pcapng" --stats)
@@ -3033,14 +3038,28 @@ set_tests_properties(real_hartip_modbus_collision_confirmed_on_real_traffic PROP
   PASS_REGULAR_EXPRESSION "192.168.0.101:49559 -> 192.168.0.10:5094 \\(hart-ip\\)  \\[modbus\\]  Unknown \\(0xd\\): Unknown \\(0xd\\)[^\n]*\n.*192.168.0.10:5094 \\(hart-ip\\) -> 192.168.0.101:49559  \\[modbus\\]  Unknown \\(0xd\\): Unknown \\(0xd\\)")
 
 # New (see ATTRIBUTION.md): the weak declared-length gate also false-positives against unrelated
-# background TCP traffic having nothing to do with HART-IP (a TLS connection and an SMB
-# connection elsewhere in this same capture) -- real-world confirmation, beyond the Modbus
-# collision above, that hartip.hpp's own "structural detection gate is genuinely weak" paragraph
-# is not overstated.
+# background TCP traffic having nothing to do with HART-IP (a TLS connection elsewhere in this same
+# capture) -- real-world confirmation, beyond the Modbus collision above, that hartip.hpp's own
+# "structural detection gate is genuinely weak" paragraph is not overstated. This capture's OTHER
+# background connection (port 445) used to be a second instance of this same false positive too --
+# see real_hartip_smb_traffic_now_correctly_decoded below for why that one is now resolved instead
+# (smb.hpp's own decoder is tried earlier in decoder.cpp's cascade and correctly claims it).
 add_test(NAME real_hartip_weak_gate_false_positive_on_unrelated_tcp_traffic
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/hartip/hart_ip.pcapng" --format text)
 set_tests_properties(real_hartip_weak_gate_false_positive_on_unrelated_tcp_traffic PROPERTIES
-  PASS_REGULAR_EXPRESSION "50322->443: 27 of 54734 declared byte\\(s\\) seen so far.*49343->445: 44 of 19778 declared byte\\(s\\) seen so far")
+  PASS_REGULAR_EXPRESSION "50322->443: 27 of 54734 declared byte\\(s\\) seen so far")
+
+# AD suite phase 3 (smb.hpp): this same capture's port-445 background connection -- previously ALSO
+# a HART-IP weak-gate false positive (see above) -- is genuine SMB1 (CIFS) traffic, and is now
+# correctly recognized and decoded as such, curated note 1 included, since smb.hpp's own decoder
+# runs earlier in decoder.cpp's TCP-port-independent cascade than HART-IP's own weak declared-length
+# probe. A real-world confirmation of both this decoder's own detection gate AND of the general
+# "a stronger, earlier gate resolves a weaker, later one's false positive" pattern this codebase
+# already relies on elsewhere (e.g. IEC104-before-Modbus).
+add_test(NAME real_hartip_smb_traffic_now_correctly_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/hartip/hart_ip.pcapng" --format text)
+set_tests_properties(real_hartip_smb_traffic_now_correctly_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "49343 -> 192.168.0.101:445 \\(microsoft-ds\\)  \\[smb\\]  SMB1 \\(CIFS\\) message[^\n]*\n *note: SMB1 \\(CIFS\\) traffic observed on this session")
 
 # --------------------------------------------------------------------------
 # OPC UA Binary (synthetic, tests/sample_opcua.pcap): the UA-TCP connection-protocol handshake
@@ -5186,6 +5205,168 @@ set_tests_properties(ldap_tcp_segment_split_reassembly PROPERTIES
   PASS_REGULAR_EXPRESSION "\\[tcp\\]  buffering a LDAP message \\(RFC 4511\\) PDU/frame split across TCP segments 51410->389: 40 of 117 declared byte\\(s\\) seen so far across 1 segment\\(s\\) on this flow, waiting for more.*\\[ldap\\]  SearchRequest id=1 base=\"dc=example,dc=com\" scope=wholeSubtree filter=\\(servicePrincipalName=\\*\\)[^\n]*\n *note: reassembled a LDAP message \\(RFC 4511\\) PDU/frame from 117 byte\\(s\\) spanning 2 TCP segments on this flow")
 
 # ---------------------------------------------------------------------------------------------
+# SMB2/NTLM (MS-SMB2/MS-NLMP), TCP/445 and TCP/139 -- the third Windows AD-suite protocol (see
+# smb.hpp's/ntlm.hpp's own file header comments for the wire format -- fixed-width little-endian
+# fields, NOT BER like Kerberos/LDAP -- the structural detection gate, compounding, and the six
+# curated attack/monitoring notes). Fixtures generated by tools/make_sample_pcap.py's
+# build_smb_sample() -- tests/sample_smb.pcap (TCP, 26 packets across 7 independent
+# sessions/flows A-G) and tests/sample_smb_tcp_split.pcap (TCP, 2 packets: one NEGOTIATE Request
+# split across two segments). All expectations below were captured from the actual built binary's
+# output against these fixtures -- confirmed first via an independent, hand-built synthetic
+# exchange (the same "manual smoke test BEFORE writing CMakeLists.txt tests" discipline
+# Kerberos's/LDAP's own deliveries used), not hand-computed or guessed at.
+# ---------------------------------------------------------------------------------------------
+
+# NEGOTIATE Request's dialect list (including the 0x02FF multi-protocol wildcard) and Response's
+# negotiated dialect, plus curated note 2 POSITIVE -- SecurityMode SIGNING_ENABLED but NOT
+# SIGNING_REQUIRED, the ntlmrelayx precondition.
+add_test(NAME smb_negotiate_dialects_and_note2_positive
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_smb.pcap" --format text)
+set_tests_properties(smb_negotiate_dialects_and_note2_positive PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[smb\\]  SMB2 NEGOTIATE Request \\(dialects: SMB 2\\.0\\.2, SMB 2\\.1, SMB 3\\.0, SMB 3\\.0\\.2, SMB 3\\.1\\.1, SMB 2\\.\\?\\?\\? \\(multi-protocol negotiate wildcard\\)\\).*SMB2 NEGOTIATE Response \\(SMB 3\\.1\\.1\\) \\[STATUS_SUCCESS\\][^\n]*\n *note: SMB signing is enabled but NOT required on this session -- the precondition every NTLM-relay tool \\(ntlmrelayx and equivalents\\) checks for")
+
+# Curated note 2 NEGATIVE control -- SecurityMode SIGNING_ENABLED|SIGNING_REQUIRED on the SAME
+# NEGOTIATE Response shape (flow D): must NOT fire.
+add_test(NAME smb_negotiate_signing_required_note2_negative_control
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_smb.pcap" --format text)
+set_tests_properties(smb_negotiate_signing_required_note2_negative_control PROPERTIES
+  PASS_REGULAR_EXPRESSION "52504 -> 192\\.168\\.1\\.10:445 \\(microsoft-ds\\)  \\[smb\\]  SMB2 NEGOTIATE Request \\(dialects: SMB 3\\.1\\.1\\)  \\(client"
+  FAIL_REGULAR_EXPRESSION "192\\.168\\.1\\.10:445 \\(microsoft-ds\\) -> 192\\.168\\.1\\.50:52504  \\[smb\\]  SMB2 NEGOTIATE Response \\(SMB 3\\.1\\.1\\) \\[STATUS_SUCCESS\\][^\n]*\n *note: SMB signing")
+
+# Full NTLM negotiate/challenge/authenticate handshake -- curated note 3 fires on EVERY
+# NTLM-bearing message (not just once), and the terminal SESSION_SETUP Response closes the
+# SessionId-keyed multi-leg handshake with a "succeeded" correlation note (the genuinely new
+# correlation shape relative to Kerberos's/LDAP's own 1:1/keep-until-terminal pairings).
+add_test(NAME smb_ntlm_handshake_note3_and_succeeded_correlation
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_smb.pcap" --format text)
+set_tests_properties(smb_ntlm_handshake_note3_and_succeeded_correlation PROPERTIES
+  PASS_REGULAR_EXPRESSION "SMB2 SESSION_SETUP Request \\(NEGOTIATE_MESSAGE\\)[^\n]*\n *note: NTLM authentication in use for this session \\(NEGOTIATE_MESSAGE\\).*SMB2 SESSION_SETUP Response \\(CHALLENGE_MESSAGE\\) \\[STATUS_MORE_PROCESSING_REQUIRED\\][^\n]*\n *note: NTLM authentication in use for this session \\(CHALLENGE_MESSAGE\\).*SMB2 SESSION_SETUP Request \\(AUTHENTICATE_MESSAGE\\)[^\n]*\n *note: NTLM authentication in use for this session \\(AUTHENTICATE_MESSAGE\\).*SMB2 SESSION_SETUP Response \\[STATUS_SUCCESS\\][^\n]*\n *note: NTLM handshake for CORP, succeeded")
+
+# Curated note 5, both forms -- a TREE_CONNECT path ending in "$" is flagged preliminarily on the
+# request, then CONFIRMED specifically as named-pipe (IPC$-style) access once the response's own
+# ShareType==pipe is known.
+add_test(NAME smb_tree_connect_ipc_note5_positive_and_confirmed
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_smb.pcap" --format text)
+set_tests_properties(smb_tree_connect_ipc_note5_positive_and_confirmed PROPERTIES
+  PASS_REGULAR_EXPRESSION "SMB2 TREE_CONNECT Request [^\n]*SERVER[^\n]*IPC\\$[^\n]*\n *note: administrative/hidden share access attempted: [^\n]*SERVER[^\n]*IPC\\$.*SMB2 TREE_CONNECT Response \\(pipe\\) \\[STATUS_SUCCESS\\][^\n]*\n *note: confirmed named-pipe \\(IPC\\$-style\\) access to [^\n]*SERVER[^\n]*IPC\\$")
+
+# Note 5 NEGATIVE control -- an ordinary (non-$) share TREE_CONNECT on the SAME session: must NOT
+# fire, on either the request or the response.
+add_test(NAME smb_tree_connect_ordinary_share_note5_negative_control
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_smb.pcap" --format text)
+set_tests_properties(smb_tree_connect_ordinary_share_note5_negative_control PROPERTIES
+  PASS_REGULAR_EXPRESSION "SMB2 TREE_CONNECT Request [^\n]*SERVER[^\n]*data[^\n]*  \\(client.*SMB2 TREE_CONNECT Response \\(disk\\) \\[STATUS_SUCCESS\\]  \\(client"
+  FAIL_REGULAR_EXPRESSION "SERVER[^\n]*data[^\n]*\n *note:")
+
+# LOGOFF request/response, correlated (the plain MessageId-keyed 1:1 pairing shared with
+# NEGOTIATE/TREE_CONNECT/TREE_DISCONNECT).
+add_test(NAME smb_logoff_request_response_correlated
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_smb.pcap" --format text)
+set_tests_properties(smb_logoff_request_response_correlated PROPERTIES
+  PASS_REGULAR_EXPRESSION "SMB2 LOGOFF Request  \\(client.*SMB2 LOGOFF Response \\[STATUS_SUCCESS\\]  \\(client")
+
+# Curated note 1 -- SMB1 (CIFS) magic on port 139 (NetBIOS Session Service), fires once per
+# session (a sticky flag, see smb.hpp's own STATE/CORRELATION section).
+add_test(NAME smb1_netbios_port139_note1
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_smb.pcap" --format text)
+set_tests_properties(smb1_netbios_port139_note1 PROPERTIES
+  PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.50:52502 -> 192\\.168\\.1\\.10:139  \\[smb\\]  SMB1 \\(CIFS\\) message[^\n]*\n *note: SMB1 \\(CIFS\\) traffic observed on this session -- SMB1 is a legacy dialect with known, serious vulnerabilities")
+
+# Curated note 4 -- a SESSION_SETUP Response with SessionFlags.IS_GUEST set, from a full NTLM
+# handshake whose CHALLENGE_MESSAGE carried no TargetName (the "(unknown target)" correlation
+# fallback).
+add_test(NAME smb_session_setup_guest_note4
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_smb.pcap" --format text)
+set_tests_properties(smb_session_setup_guest_note4 PROPERTIES
+  PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.10:445 \\(microsoft-ds\\) -> 192\\.168\\.1\\.50:52503  \\[smb\\]  SMB2 SESSION_SETUP Response \\[STATUS_SUCCESS\\][^\n]*\n *note: session established as guest -- a well-known misconfiguration \\(null-session enumeration\\)[^\n]*\n *note: NTLM handshake for \\(unknown target\\), succeeded")
+
+# Curated note 6 -- an NTLM handshake failing with STATUS_LOGON_FAILURE, both the correlation
+# note and (below) the --stats aggregation.
+add_test(NAME smb_ntlm_handshake_failed_note6
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_smb.pcap" --format text)
+set_tests_properties(smb_ntlm_handshake_failed_note6 PROPERTIES
+  PASS_REGULAR_EXPRESSION "SMB2 SESSION_SETUP Response \\[STATUS_LOGON_FAILURE\\][^\n]*\n *note: NTLM handshake for CORP, failed \\(STATUS_LOGON_FAILURE\\)")
+
+add_test(NAME smb_stats_status_counts_note6
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_smb.pcap" --stats)
+set_tests_properties(smb_stats_status_counts_note6 PROPERTIES
+  PASS_REGULAR_EXPRESSION "protocols:\n *smb +26.*smb session_setup status counts:\n *STATUS_LOGON_FAILURE +1\n *STATUS_MORE_PROCESSING_REQUIRED +3\n *STATUS_SUCCESS +2")
+
+# Compounding -- a NEGOTIATE Request chained via NextCommand to a SESSION_SETUP Request (NTLM
+# NEGOTIATE_MESSAGE) in one TCP segment; parse_smb2_chain's own walk, exercised structurally.
+add_test(NAME smb_compounded_negotiate_and_session_setup
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_smb.pcap" --format text)
+set_tests_properties(smb_compounded_negotiate_and_session_setup PROPERTIES
+  PASS_REGULAR_EXPRESSION "SMB2 NEGOTIATE Request \\(dialects: SMB 3\\.1\\.1\\) \\+ SMB2 SESSION_SETUP Request \\(NEGOTIATE_MESSAGE\\) \\(compounded\\)")
+
+add_test(NAME smb_json_compounded_flag_and_two_messages
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_smb.pcap" --format json)
+set_tests_properties(smb_json_compounded_flag_and_two_messages PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"smb_compounded\": true,\n *\"smb_messages\": \\[\n *\\{\n *\"command\": \"NEGOTIATE\",.*\\{\n *\"command\": \"SESSION_SETUP\",")
+
+# JSON field naming for a NEGOTIATE Response (negotiated_dialect/server_guid/security_mode/
+# capabilities) -- write_smb_json_fields's own always-set-vs-has_*-gated convention.
+add_test(NAME smb_json_negotiate_response_fields
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_smb.pcap" --format json)
+set_tests_properties(smb_json_negotiate_response_fields PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"negotiated_dialect\": \"SMB 3\\.1\\.1\",\n *\"server_guid\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\n *\"security_mode\": \\[\"SIGNING_ENABLED\"\\],\n *\"capabilities\": \\[\"DFS\", \"LEASING\", \"LARGE_MTU\"\\]")
+
+# JSON field naming for TREE_CONNECT Response (share_type/share_flags) and correlated_request_index.
+add_test(NAME smb_json_tree_connect_response_fields
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_smb.pcap" --format json)
+set_tests_properties(smb_json_tree_connect_response_fields PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"share_type\": \"pipe\",\n *\"share_flags\": \\[\"MANUAL_CACHING\"\\],\n *\"correlated_request_index\": 7,")
+
+# Security rule (smb.hpp's/ntlm.hpp's own file header comment): LmChallengeResponse/
+# NtChallengeResponse/EncryptedRandomSessionKey are NEVER rendered, in any form -- not the raw
+# bytes, not even presence/length -- anywhere in this decoder's JSON output, only
+# ntlm_user_name/ntlm_domain_name (identity, not proof-of-possession material). Checked against
+# the AUTHENTICATE_MESSAGE emitted for flow A's own successful handshake.
+add_test(NAME smb_json_ntlm_credential_material_never_rendered
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_smb.pcap" --format json)
+set_tests_properties(smb_json_ntlm_credential_material_never_rendered PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"ntlm_message_type\": \"AUTHENTICATE_MESSAGE\",\n *\"ntlm_user_name\": \"jdoe\",\n *\"ntlm_domain_name\": \"CORP\","
+  FAIL_REGULAR_EXPRESSION "lm_challenge|nt_challenge|LmChallenge|NtChallenge|session_key|\\\\xAA\\\\xAA|\\\\xBB\\\\xBB")
+
+add_test(NAME smb_protocol_filter_excludes_other_protocols
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --protocol smb --format text)
+set_tests_properties(smb_protocol_filter_excludes_other_protocols PROPERTIES
+  FAIL_REGULAR_EXPRESSION "\\[modbus\\]")
+
+add_test(NAME smb_protocol_filter_includes_only_smb
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_smb.pcap" --protocol smb --format text)
+set_tests_properties(smb_protocol_filter_includes_only_smb PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[smb\\]  SMB2 NEGOTIATE Request"
+  FAIL_REGULAR_EXPRESSION "\\[modbus\\]|\\[tcp\\]")
+
+add_test(NAME smb_help_shows_smb_port_option
+  COMMAND conduitscope decode --help)
+set_tests_properties(smb_help_shows_smb_port_option PROPERTIES
+  PASS_REGULAR_EXPRESSION "--smb-port INT[^\n]*Additional TCP port to treat as expected for SMB")
+
+# SMB is GateKind::TcpPortIndependent -- a NEGOTIATE exchange on an arbitrary, non-configured TCP
+# port (4455, not 445/139) must still be recognized as smb, with a "not a configured/standard SMB
+# port" note on BOTH directions of the session.
+add_test(NAME smb_nonstandard_port_recognized_with_note
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_smb.pcap" --format text)
+set_tests_properties(smb_nonstandard_port_recognized_with_note PROPERTIES
+  PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.50:52507 -> 192\\.168\\.1\\.10:4455  \\[smb\\]  SMB2 NEGOTIATE Request \\(dialects: SMB 3\\.1\\.1\\)[^\n]*\n *note: seen on TCP port 52507->4455, which is not a configured/standard SMB port \\(445/139\\).*192\\.168\\.1\\.10:4455 -> 192\\.168\\.1\\.50:52507  \\[smb\\]  SMB2 NEGOTIATE Response \\(SMB 3\\.1\\.1\\) \\[STATUS_SUCCESS\\][^\n]*\n *note: SMB signing is enabled but NOT required[^\n]*\n *note: seen on TCP port 4455->52507, which is not a configured/standard SMB port \\(445/139\\)")
+
+# --smb-port suppresses just the non-standard-port note, not detection itself.
+add_test(NAME smb_port_option_suppresses_nonstandard_port_note
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_smb.pcap" --smb-port 4455 --format text)
+set_tests_properties(smb_port_option_suppresses_nonstandard_port_note PROPERTIES
+  PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.50:52507 -> 192\\.168\\.1\\.10:4455  \\[smb\\]  SMB2 NEGOTIATE Request"
+  FAIL_REGULAR_EXPRESSION "not a configured/standard SMB port")
+
+# Exercises smb_tcp_declared_length via Decoder::reassemble_tcp_payload -- unlike LDAP's own split
+# test, SMB2 DOES have its own 4-byte length prefix (like Kerberos's).
+add_test(NAME smb_tcp_segment_split_reassembly
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_smb_tcp_split.pcap" --format text)
+set_tests_properties(smb_tcp_segment_split_reassembly PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[tcp\\]  buffering a SMB message \\(MS-SMB2\\) PDU/frame split across TCP segments 51420->445: 57 of 114 declared byte\\(s\\) seen so far across 1 segment\\(s\\) on this flow, waiting for more.*\\[smb\\]  SMB2 NEGOTIATE Request \\(dialects: SMB 2\\.0\\.2, SMB 2\\.1, SMB 3\\.0, SMB 3\\.0\\.2, SMB 3\\.1\\.1\\)[^\n]*\n *note: reassembled a SMB message \\(MS-SMB2\\) PDU/frame from 114 byte\\(s\\) spanning 2 TCP segments on this flow")
+
+# ---------------------------------------------------------------------------------------------
 # DNS / mDNS / LLMNR / NetBIOS Name Service (NBT-NS) decoding, and DNS-over-HTTPS detection --
 # see dns.hpp/nbns.hpp/tls_sni.hpp's own file header comments. Fixtures generated by
 # tools/make_sample_pcap.py's build_dns_sample()/build_mdns_sample()/build_llmnr_sample()/
@@ -7153,12 +7334,25 @@ set_tests_properties(remote_access_rdp_carve_out_does_not_affect_real_s7comm PRO
   FAIL_REGULAR_EXPRESSION "\\[rdp\\]")
 
 # ---------------------------------------------------------------------------------------------
-# Tier 2 "IT protocols an OT auditor flags" recognition (SMB/SSH/HTTP/HTTPS/SNMPv1v2c/Telnet/FTP/
+# Tier 2 "IT protocols an OT auditor flags" recognition (SSH/HTTP/HTTPS/SNMPv1v2c/Telnet/FTP/
 # TFTP -- see it_protocols.hpp's own Tier 2 file header comment and docs/MANUAL.md's ROADMAP item
 # 18). Fixture built by tools/make_sample_pcap.py-style scapy script (not itself checked in as a
-# generator -- see tests/sample_remote_access.pcap's own precedent from Tier 1), 21 packets:
-#   1  TCP 52400->445   SMB direct-hosting magic (0xFE"SMB")                        -> smb
-#   2  TCP 52401->139   SMB over NetBIOS Session Service wrapper (0xFF"SMB")         -> smb
+# generator -- see tests/sample_remote_access.pcap's own precedent from Tier 1), 21 packets. SMB
+# (packets 1-2) was originally an eighth Tier 2 protocol here, recognized only by its own 4-byte
+# magic via it_protocols.hpp's own (now-removed) Tier 2 branches; it has since been upgraded to its
+# own full dedicated decoder (smb.hpp, AD suite phase 3) -- see that file's own file header comment.
+# That decoder enforces the genuine, verified [MS-SMB2]/RFC 1002 wire framing (a mandatory 4-byte
+# Zero+StreamProtocolLength prefix before the magic on EITHER port, see smb.hpp's own FRAMING
+# paragraph) more strictly than the old Tier 2 heuristic ever did, which is what these two packets
+# (built for that older, less strict check, before smb.hpp existed) now expose:
+#   1  TCP 52400->445   SMB2 magic (0xFE"SMB") with NO 4-byte prefix                 -> tcp (no
+#                        longer recognized -- see lateral_movement_smb_missing_prefix_no_longer_
+#                        misdetected below: this packet was never genuine SMB2 wire framing, only
+#                        the old Tier 2 check's own less strict "magic at offset 0" heuristic ever
+#                        accepted it)
+#   2  TCP 52401->139   SMB1 magic (0xFF"SMB") behind a valid-looking 4-byte prefix  -> smb (still
+#                        correctly recognized, now by smb.hpp -- see
+#                        lateral_movement_smb_netbios_wrapper_recognized below)
 #   3  TCP 52402->22    SSH banner, standard port                                    -> ssh
 #   4  TCP 59022->52403 SSH banner, non-standard port                                -> ssh (noted)
 #   5  TCP 52404->8080  HTTP request-line, curated port                              -> http
@@ -7178,15 +7372,20 @@ set_tests_properties(remote_access_rdp_carve_out_does_not_affect_real_s7comm PRO
 #  19  UDP 52418->69    TFTP RRQ "firmware.bin" mode octet                           -> tftp
 #  20  UDP 52419->69    TFTP WRQ "config.cfg" mode netascii                          -> tftp
 #  21  UDP 52420->69    TFTP DATA opcode, no RRQ/WRQ structure                       -> tftp (weak fallback)
-add_test(NAME lateral_movement_smb_direct_hosting_recognized
+# Confirms smb.hpp's own, stricter, wire-verified gate -- not smb_tcp_declared_length's own weaker
+# cousin, since this fixture's packet doesn't reach the declared-length cascade with a plausible
+# length at all -- correctly does NOT misdetect this old Tier 2-era packet (magic at offset 0, no
+# 4-byte Zero+StreamProtocolLength prefix) as SMB, since real [MS-SMB2]/RFC 1002 wire traffic always
+# carries that prefix on both ports. See this fixture's own updated packet-1 comment above.
+add_test(NAME lateral_movement_smb_missing_prefix_no_longer_misdetected
   COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_lateral_movement.pcap")
-set_tests_properties(lateral_movement_smb_direct_hosting_recognized PROPERTIES
-  PASS_REGULAR_EXPRESSION "\\[smb\\]  SMB, direct TCP hosting \\(SMB2/SMB3 header, 0xFE\"SMB\" magic\\)")
+set_tests_properties(lateral_movement_smb_missing_prefix_no_longer_misdetected PROPERTIES
+  PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.50:52400 -> 192\\.168\\.1\\.10:445 \\(microsoft-ds\\)  \\[tcp\\]")
 
 add_test(NAME lateral_movement_smb_netbios_wrapper_recognized
   COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_lateral_movement.pcap")
 set_tests_properties(lateral_movement_smb_netbios_wrapper_recognized PROPERTIES
-  PASS_REGULAR_EXPRESSION "\\[smb\\]  SMB over NetBIOS Session Service \\(RFC 1002 session message wrapper, SMB1 \\(CIFS\\) header, 0xFF\"SMB\" magic\\)")
+  PASS_REGULAR_EXPRESSION "\\[smb\\]  SMB1 \\(CIFS\\) message[^\n]*\n *note: SMB1 \\(CIFS\\) traffic observed on this session")
 
 add_test(NAME lateral_movement_ssh_banner_standard_port_no_note
   COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_lateral_movement.pcap")
@@ -7289,16 +7488,30 @@ add_test(NAME lateral_movement_tftp_port_only_fallback
 set_tests_properties(lateral_movement_tftp_port_only_fallback PROPERTIES
   PASS_REGULAR_EXPRESSION "\\[tftp\\]  TFTP \\(UDP port 69\\) -- port match only, not a recognizable RRQ/WRQ")
 
+# smb is 1, not 2 -- packet 1 no longer decodes as smb at all (see this fixture's own updated
+# packet-1 comment above and lateral_movement_smb_missing_prefix_no_longer_misdetected); it counts
+# under "tcp" here instead, one of the reasons this test no longer tries to assert every line's own
+# protocol tag (that's lateral_movement_protocol_filter_isolates_family's job, immediately below).
 add_test(NAME lateral_movement_stats_counted
   COMMAND conduitscope decode --format text --stats --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_lateral_movement.pcap")
+# "tcp +1" appears between ssh and telnet because packet #1 (port 52400->445, no genuine SMB2
+# Direct-TCP/NBSS 4-byte prefix -- see this fixture's own updated packet-1 comment above) falls
+# through to generic tcp under the new, stricter smb.hpp gate rather than being counted as smb.
 set_tests_properties(lateral_movement_stats_counted PROPERTIES
-  PASS_REGULAR_EXPRESSION "ftp +3\n *http +3\n *https +3\n *smb +2\n *snmp +3\n *ssh +2\n *telnet +2\n *tftp +3")
+  PASS_REGULAR_EXPRESSION "ftp +3\n *http +3\n *https +3\n *smb +1\n *snmp +3\n *ssh +2\n *tcp +1\n *telnet +2\n *tftp +3")
 
+# SMB no longer appears at all under --protocol lateral-movement (it has its own dedicated SmbOnly
+# filter now, see decoder.hpp/smb.hpp) -- both former SMB packets fall to generic "tcp" here instead
+# (packet 1 was never genuine SMB2 framing to begin with, see this fixture's own updated packet-1
+# comment above; packet 2 IS genuine SMB1 traffic, but --protocol lateral-movement's own want_smb
+# gate is simply off). The same "name the excluded protocol, don't blanket-fail on tcp/udp" pattern
+# enterprise_trust_protocol_filter_isolates_port_based_family already established once LDAP made
+# this identical move out of its own tier.
 add_test(NAME lateral_movement_protocol_filter_isolates_family
   COMMAND conduitscope decode --format text --protocol lateral-movement --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_lateral_movement.pcap")
 set_tests_properties(lateral_movement_protocol_filter_isolates_family PROPERTIES
-  PASS_REGULAR_EXPRESSION "\\[smb\\].*\\[smb\\].*\\[ssh\\].*\\[ssh\\].*\\[http\\].*\\[http\\].*\\[http\\].*\\[https\\].*\\[https\\].*\\[https\\].*\\[telnet\\].*\\[telnet\\].*\\[ftp\\].*\\[ftp\\].*\\[ftp\\].*\\[snmp\\].*\\[snmp\\].*\\[snmp\\].*\\[tftp\\].*\\[tftp\\].*\\[tftp\\]"
-  FAIL_REGULAR_EXPRESSION "\\[tcp\\]|\\[udp\\]")
+  PASS_REGULAR_EXPRESSION "\\[ssh\\].*\\[ssh\\].*\\[http\\].*\\[http\\].*\\[http\\].*\\[https\\].*\\[https\\].*\\[https\\].*\\[telnet\\].*\\[telnet\\].*\\[ftp\\].*\\[ftp\\].*\\[ftp\\].*\\[snmp\\].*\\[snmp\\].*\\[snmp\\].*\\[tftp\\].*\\[tftp\\].*\\[tftp\\]"
+  FAIL_REGULAR_EXPRESSION "\\[smb\\]|\\[udp\\]")
 
 add_test(NAME lateral_movement_extra_port_widens_expected_range
   COMMAND conduitscope decode --format json --lateral-movement-port 34567 --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_lateral_movement.pcap")
@@ -8248,18 +8461,24 @@ add_test(NAME notable_protocols_remote_access_json
 set_tests_properties(notable_protocols_remote_access_json PROPERTIES
   PASS_REGULAR_EXPRESSION "\"notable_protocols\": \\[\n    \\{\n      \"protocol\": \"rdp\",\n      \"tier\": \"remote-access\",\n      \"client_ip\"")
 
-# Tier 2 (lateral-movement), 20 of this fixture's packets recognized as one of the eight Tier 2
-# protocols -- the rest of the 26-packet fixture is negative-control/collision-check traffic (see
-# this tier's own decode section above) that correctly produces no notable_protocols entry. The
-# text report's own "NOTABLE IT PROTOCOLS (N):" header count IS the assertion that exactly 20 were
-# found (the same "let the tool's own printed count do the counting" convention every other
-# cardinality assertion in this file already uses, e.g. "8 asset(s) observed" above) -- every line
-# in the fixture is Tier 2, so this also confirms no other tier's protocol leaked in.
+# Tier 2 (lateral-movement), 19 of this fixture's packets recognized as one of the seven Tier 2
+# it_protocols.hpp protocols or smb.hpp's own dedicated SMB decoder (still mapped to the
+# "lateral-movement" tier by notable_it_protocols.cpp regardless of which decoder produced the
+# "smb" protocol tag) -- the rest of the 26-packet fixture is negative-control/collision-check
+# traffic (see this tier's own decode section above) that correctly produces no notable_protocols
+# entry. Was 20 of 21 before smb.hpp's own stricter, wire-verified gate stopped misdetecting this
+# fixture's packet 1 (built for the old, less strict Tier 2 heuristic, never genuine SMB2 framing --
+# see this tier's own decode section's updated packet-1 comment); packet 2's genuine SMB1 traffic is
+# still counted, so this drops by exactly one, not two. The text report's own
+# "NOTABLE IT PROTOCOLS (N):" header count IS the assertion that exactly 19 were found (the same
+# "let the tool's own printed count do the counting" convention every other cardinality assertion in
+# this file already uses, e.g. "8 asset(s) observed" above) -- every line in the fixture is Tier 2,
+# so this also confirms no other tier's protocol leaked in.
 add_test(NAME notable_protocols_lateral_movement_count
   COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_lateral_movement.pcap"
           --policy "${POLICY_DIR}/compliant.yaml")
 set_tests_properties(notable_protocols_lateral_movement_count PROPERTIES
-  PASS_REGULAR_EXPRESSION "NOTABLE IT PROTOCOLS \\(20\\):"
+  PASS_REGULAR_EXPRESSION "NOTABLE IT PROTOCOLS \\(19\\):"
   FAIL_REGULAR_EXPRESSION "\\(remote-access\\)|\\(enterprise-trust\\)|\\(wireless-backhaul\\)|\\(tunnel-vpn\\)")
 
 # QUIC's own fixture (tests/sample_quic.pcap) is exercised separately from sample_lateral_movement.pcap

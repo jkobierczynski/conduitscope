@@ -552,6 +552,8 @@ bool Decoder::reassemble_tcp_payload(const TcpSegment& tcp, const std::string& f
                           options_.protocol_filter == ProtocolFilter::KerberosOnly;
     bool want_ldap = options_.protocol_filter == ProtocolFilter::Auto ||
                       options_.protocol_filter == ProtocolFilter::LdapOnly;
+    bool want_smb = options_.protocol_filter == ProtocolFilter::Auto ||
+                     options_.protocol_filter == ProtocolFilter::SmbOnly;
     bool want_dnp3 = options_.protocol_filter == ProtocolFilter::Auto ||
                       options_.protocol_filter == ProtocolFilter::Dnp3Only;
     bool want_s7comm = options_.protocol_filter == ProtocolFilter::Auto ||
@@ -659,6 +661,16 @@ bool Decoder::reassemble_tcp_payload(const TcpSegment& tcp, const std::string& f
         if (auto d = ldap_tcp_decoder().tcp_declared_length(candidate)) {
             declared = d;
             which = "LDAP message (RFC 4511)";
+        }
+    }
+    // SMB/TCP, tried right after LDAP -- see smb.hpp's file header comment for the full collision
+    // survey/ordering rationale. smb_tcp_declared_length's own gate (4-byte Zero+StreamProtocolLength
+    // prefix, then match_smb_magic on the 4 bytes that follow) is as selective as the full decode
+    // gate itself -- there's no weaker "structural probe" version of the magic check to fall back to.
+    if (!declared && want_smb) {
+        if (auto d = smb_tcp_decoder().tcp_declared_length(candidate)) {
+            declared = d;
+            which = "SMB message (MS-SMB2)";
         }
     }
     if (!declared && want_dnp3) {
@@ -2260,6 +2272,8 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                               options_.protocol_filter == ProtocolFilter::KerberosOnly;
         bool want_ldap = options_.protocol_filter == ProtocolFilter::Auto ||
                           options_.protocol_filter == ProtocolFilter::LdapOnly;
+        bool want_smb = options_.protocol_filter == ProtocolFilter::Auto ||
+                         options_.protocol_filter == ProtocolFilter::SmbOnly;
         bool want_dnp3 = options_.protocol_filter == ProtocolFilter::Auto ||
                           options_.protocol_filter == ProtocolFilter::Dnp3Only;
         bool want_s7comm = options_.protocol_filter == ProtocolFilter::Auto ||
@@ -2552,6 +2566,42 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                     out.notes.push_back("seen on TCP port " + std::to_string(tcp.src_port) + "->" +
                                          std::to_string(tcp.dst_port) +
                                          ", which is not a configured/standard LDAP port (389/3268)");
+                }
+                return out;
+            }
+        }
+
+        if (want_smb) {
+            // SMB over TCP/445 (direct hosting) and TCP/139 (NetBIOS Session Service) -- the third
+            // Windows AD-suite protocol (see smb.hpp's file header comment). Same out.result-only
+            // shape Kerberos/LDAP established just above -- no smb_* DecodedPacket fields exist,
+            // JsonWriter renders from out.result (output.cpp's write_smb_json_fields), TextWriter/
+            // CsvWriter from out.summary/out.notes generically. SmbTcpDecoder::decode strips the
+            // 4-byte Zero+StreamProtocolLength prefix itself (see smb.cpp) -- effective_payload here
+            // still carries it, matching what smb_tcp_declared_length measured against.
+            std::string session = tcp_session_key(out.src_ip, tcp.src_port, out.dst_ip, tcp.dst_port);
+            DecodeContext ctx;
+            ctx.flow_key = flow_key;
+            ctx.session_key = session;
+            ctx.packet_index = index;
+            ctx.protocol_id = "smb";
+            ctx.flow_states = &registry_flow_state_;
+            if (auto result = smb_tcp_decoder().decode(effective_payload, ctx)) {
+                const SmbFrame& sf = result->as<SmbFrame>();
+                out.protocol = "smb";
+                out.summary = sf.summary;
+                for (const auto& n : sf.notes) out.notes.push_back(n);
+                out.result = *result;
+
+                bool expected_port =
+                    port_in(tcp.src_port, SMB_PORT_445, options_.extra_smb_ports) ||
+                    port_in(tcp.dst_port, SMB_PORT_445, options_.extra_smb_ports) ||
+                    port_in(tcp.src_port, SMB_NETBIOS_SESSION_PORT_139, options_.extra_smb_ports) ||
+                    port_in(tcp.dst_port, SMB_NETBIOS_SESSION_PORT_139, options_.extra_smb_ports);
+                if (!expected_port) {
+                    out.notes.push_back("seen on TCP port " + std::to_string(tcp.src_port) + "->" +
+                                         std::to_string(tcp.dst_port) +
+                                         ", which is not a configured/standard SMB port (445/139)");
                 }
                 return out;
             }

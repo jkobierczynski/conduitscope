@@ -149,11 +149,10 @@ std::optional<ItRemoteAccessMatch> try_recognize_it_remote_access(ByteSpan paylo
 // ---------------------------------------------------------------------------------------------
 // Tier 2 -- see it_protocols.hpp's own header comment for the full per-protocol confidence writeup.
 
-namespace {
-
 // Matches the 4-byte SMB magic (0xFF/0xFE/0xFD + "SMB") at `offset` within `payload`. Returns a
 // human-readable label naming which SMB generation/framing it is, or std::nullopt if it doesn't
-// match at all.
+// match at all. Exposed in it_protocols.hpp (moved out of this file's own anonymous namespace) for
+// smb.hpp's own structural gate to reuse -- see that file's header comment.
 std::optional<std::string> match_smb_magic(ByteSpan payload, size_t offset) {
     if (payload.size() < offset + 4) return std::nullopt;
     uint8_t b0 = payload.at(offset);
@@ -165,6 +164,8 @@ std::optional<std::string> match_smb_magic(ByteSpan payload, size_t offset) {
     if (b0 == 0xFE) return std::string("SMB2/SMB3 header, 0xFE\"SMB\" magic");
     return std::string("SMB2/SMB3 Transform (encrypted) header, 0xFD\"SMB\" magic");
 }
+
+namespace {
 
 // RFC 4253 section 4.2's own version-exchange banner: "SSH-" + protoversion + "-" + a software
 // version/comment field, CR- or LF-terminated, max 255 bytes including the terminator. Returns the
@@ -744,34 +745,13 @@ std::optional<ItLateralMovementMatch> try_recognize_it_lateral_movement(ByteSpan
                                                                           uint16_t dst_port, bool is_tcp,
                                                                           const std::vector<uint16_t>& extra_ports) {
     if (is_tcp) {
-        // 1. SMB direct-hosting magic -- port-independent, a genuinely strong signal (see file
-        // header comment), same treatment VNC's RFB banner gets above.
-        if (auto d = match_smb_magic(payload, 0)) {
-            ItLateralMovementMatch m;
-            m.protocol = "smb";
-            m.summary = "SMB, direct TCP hosting (" + *d + ")";
-            if (!port_in(src_port, SMB_PORT_445, extra_ports) && !port_in(dst_port, SMB_PORT_445, extra_ports)) {
-                m.notes.push_back("seen on TCP port " + std::to_string(src_port) + "->" +
-                                   std::to_string(dst_port) +
-                                   ", which is not the configured/standard direct-hosting SMB port (445)");
-            }
-            return m;
-        }
-        // 2. SMB over a NetBIOS Session Service wrapper -- gated to port 139 (the wrapper's own
-        // leading type byte alone is too common a value to check opportunistically, unlike the
-        // direct-hosting magic above).
-        if ((port_in(src_port, SMB_NETBIOS_SESSION_PORT_139, extra_ports) ||
-             port_in(dst_port, SMB_NETBIOS_SESSION_PORT_139, extra_ports)) &&
-            payload.size() >= 8 && payload.at(0) == 0x00) {
-            if (auto d = match_smb_magic(payload, 4)) {
-                ItLateralMovementMatch m;
-                m.protocol = "smb";
-                m.summary = "SMB over NetBIOS Session Service (RFC 1002 session message wrapper, " + *d + ")";
-                return m;
-            }
-        }
-        // 3. SSH version-exchange banner -- port-independent, same reasoning as SMB/VNC above: SSH
-        // deliberately running on a nonstandard port is still worth flagging.
+        // SMB's own two branches (direct-hosting magic at offset 0; NetBIOS-Session-Service-wrapped
+        // at offset 4, gated to port 139) used to live here -- removed now that SMB has its own
+        // dedicated decoder (smb.hpp), see this file's own Tier 2 header comment. match_smb_magic
+        // itself is unchanged and still exposed (it_protocols.hpp) for smb.hpp to reuse.
+        //
+        // 1. SSH version-exchange banner -- port-independent, same reasoning as VNC's own RFB banner
+        // above: SSH deliberately running on a nonstandard port is still worth flagging.
         if (auto banner = match_ssh_banner(payload)) {
             ItLateralMovementMatch m;
             m.protocol = "ssh";
@@ -783,7 +763,7 @@ std::optional<ItLateralMovementMatch> try_recognize_it_lateral_movement(ByteSpan
             }
             return m;
         }
-        // 4. HTTP request-line/status-line -- port-independent by design, since a vendor web UI's
+        // 2. HTTP request-line/status-line -- port-independent by design, since a vendor web UI's
         // whole point is running on whatever port the vendor picked.
         if (auto h = match_http(payload)) {
             ItLateralMovementMatch m;
@@ -800,8 +780,8 @@ std::optional<ItLateralMovementMatch> try_recognize_it_lateral_movement(ByteSpan
             }
             return m;
         }
-        // 5. Telnet IAC negotiation -- gated to port 23 (IAC's 0xFF is too common a byte value in
-        // arbitrary binary traffic to check opportunistically, unlike SMB/SSH/HTTP's own much more
+        // 3. Telnet IAC negotiation -- gated to port 23 (IAC's 0xFF is too common a byte value in
+        // arbitrary binary traffic to check opportunistically, unlike SSH/HTTP's own much more
         // self-describing signatures above).
         if (port_in(src_port, TELNET_PORT, extra_ports) || port_in(dst_port, TELNET_PORT, extra_ports)) {
             ItLateralMovementMatch m;
@@ -816,7 +796,7 @@ std::optional<ItLateralMovementMatch> try_recognize_it_lateral_movement(ByteSpan
             }
             return m;
         }
-        // 6. FTP control channel -- gated to port 21 (the data channel is out of scope, see file
+        // 4. FTP control channel -- gated to port 21 (the data channel is out of scope, see file
         // header comment).
         if (port_in(src_port, FTP_CONTROL_PORT, extra_ports) || port_in(dst_port, FTP_CONTROL_PORT, extra_ports)) {
             ItLateralMovementMatch m;
@@ -829,7 +809,7 @@ std::optional<ItLateralMovementMatch> try_recognize_it_lateral_movement(ByteSpan
             }
             return m;
         }
-        // 7. HTTPS port-only fallback -- the actual ClientHello structural check runs earlier in
+        // 5. HTTPS port-only fallback -- the actual ClientHello structural check runs earlier in
         // decoder.cpp, reusing tls_sni.hpp (see it_protocols.hpp's own file header comment for why);
         // this only covers an already-established, fully-encrypted session on a configured HTTPS
         // port with no visible ClientHello in this particular packet.

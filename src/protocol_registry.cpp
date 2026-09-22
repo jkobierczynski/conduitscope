@@ -17,6 +17,7 @@
 #include "conduitscope/opcua.hpp"
 #include "conduitscope/s7comm.hpp"
 #include "conduitscope/s7commplus.hpp"
+#include "conduitscope/smb.hpp"
 #include "conduitscope/twincat.hpp"
 
 namespace conduitscope {
@@ -99,6 +100,13 @@ const std::vector<const ProtocolDecoder*>& tcp_port_independent_registry() {
                               // APPLICATION tags -- see ldap.hpp's own COLLISION SURVEY paragraph
                               // for the full writeup (Kerberos's gate reads the whole payload's own
                               // leading byte, LDAP's own protocolOp tags never appear there).
+        &smb_tcp_decoder(),  // Added directly after LDAP -- the third Windows AD-suite protocol
+                              // (see smb.hpp's file header comment), no UDP sibling. Its own gate
+                              // (it_protocols.hpp's match_smb_magic, a 4-byte 0xFF/0xFE/0xFD+"SMB"
+                              // signature reused as-is from the legacy Tier 2 lateral-movement
+                              // check it replaces) is already proven collision-free in this exact
+                              // cascade -- no new collision survey needed, see smb.hpp's own
+                              // STRUCTURAL DETECTION GATE paragraph.
         &dnp3_decoder(),     // Migration batch 2 -- sits exactly where the old `if (want_dnp3)`
                               // block always did: after Modbus/TwinCAT (both above), before the
                               // COTP/S7comm family below (also still true after COTP's own

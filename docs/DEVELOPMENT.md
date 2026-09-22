@@ -1038,7 +1038,7 @@ a gap that didn't exist.
 ## PROTOCOL DETECTION
 
 In `--protocol auto` (the default), every non-empty TCP payload is tested
-against all twelve TCP-capable protocols, independent of port number. **OPC UA is tried
+against all fourteen TCP-capable protocols, independent of port number. **OPC UA is tried
 first of all, then EtherNet/IP, then IEC 104**, before Modbus/TCP, and
 **HART-IP is tried third-to-last, MQTT second-to-last, with FF-HSE tried
 last of all**, after S7comm/COTP, S7comm-Plus, and MMS -- see the notes at
@@ -1213,6 +1213,26 @@ which protocols are tried:
   the six curated attack/monitoring notes this decoder carries (several of
   which point directly at Kerberos's own AS-REP-Roasting/Kerberoasting
   findings, since LDAP recon is how a real attacker finds those targets).
+- **SMB2/NTLM** (MS-SMB2/MS-NLMP, TCP/445 and TCP/139): recognized by
+  `it_protocols.hpp`'s own `match_smb_magic` (a 4-byte `0xFF`/`0xFE`/`0xFD`
+  + `"SMB"` signature), reused as-is rather than duplicated -- already
+  proven collision-free in this exact cascade before this decoder existed
+  (it previously gated only Tier 2's shallow, name-only SMB recognition),
+  so no new collision survey was needed, just a stronger post-gate check:
+  `try_parse_smb` additionally requires the 4-byte Zero+StreamProtocolLength
+  Direct-TCP/NBSS prefix [MS-SMB2]/RFC 1002 actually mandate on BOTH ports,
+  which the old Tier 2 heuristic never validated (a magic-at-offset-0 form
+  with no prefix is no longer accepted). Fixed-width little-endian fields
+  throughout, not BER like Kerberos/LDAP; NTLM (MS-NLMP) is parsed by a
+  small **shared** parser (`ntlm.hpp`/`ntlm.cpp`) called from within SMB2's
+  own `SESSION_SETUP` bodies, not a decoder of its own -- it has no wire
+  presence outside that embedding. No UDP sibling. Registered directly
+  after LDAP in the TCP-port-independent chain. See
+  docs/PROTOCOL_COVERAGE.md's SMB2/NTLM section for the full writeup,
+  including the six curated attack/monitoring notes this decoder carries
+  (several of which point directly at Kerberos's/LDAP's own findings,
+  since SMB is where credentials harvested/cracked via those two earlier
+  phases actually get *used*).
 - **DNP3**: recognized by the data-link-layer start bytes `0x05 0x64`, which
   DNP3 always begins with.
 - **S7comm/COTP**: recognized by the TPKT signature (`0x03 0x00` followed by
@@ -1848,6 +1868,13 @@ I/O, HART-IP's UDP form, and FF-HSE's UDP form from ever actually being
 checked against a conduit, and blocking `inventory`'s own UDP-based
 inferred conduits from ever showing anything but "never exercised."
 
+**IPv6 support (item 24, new)** belongs in the same foundational category:
+`decoder.cpp` only ever parses an IPv4 outer header today, so any
+IPv6-over-Ethernet traffic is reported as `non-ip`, invisible to every
+decoder and to `policy validate`'s conduit model alike -- a real gap now
+that dual-stack OT/IT networks are routine, and worth scoping alongside
+the UDP `policy validate` gap above rather than after it.
+
 **Item 18** (the "IT protocols an OT auditor flags" family, just added) is
 comparatively cheap to build and high-value to an auditor: tiers 1-4
 (RDP/VNC/TeamViewer; SMB/SSH/HTTP/SNMP/Telnet/FTP/TFTP; NTP/DHCP/LDAP/
@@ -1884,9 +1911,11 @@ resolution/real-capture-widening work (its HART checksum-verification
 half is now done); item 11's OPC UA chunk reassembly and Browse/subscriptions/
 HistoryRead promotion; item 12's MMS `Address`/`TypeSpecification`
 decoding; item 14's per-protocol `functions` allow-lists; item 15's
-QinQ stacked-VLAN support; and item 17's protocol-grouped zones and
-LLM-assisted zone suggestions. All genuinely useful, none blocking
-anything else on this list.
+QinQ stacked-VLAN support; item 17's protocol-grouped zones and
+LLM-assisted zone suggestions; item 25's VMware vSphere/ESXi link-layer
+frame recognition (EtherType `0x8922`); and item 26's HomePlug AV/devolo
+dLAN powerline-networking recognition (EtherType `0x88E1`). All genuinely
+useful, none blocking anything else on this list.
 
 1. **Validate live capture against a real Windows/Npcap install and a real
    OT/mirrored-switch-port network**, not just Linux loopback -- see LIVE
@@ -3994,7 +4023,8 @@ unlike any of the eight routing/redundancy protocols decoded so far.
     since the new full decoder's `SearchRequest` requires all 8 mandatory
     fields to be present and throws a `ParseError` otherwise.
 
-    **Still not done**: SMB/NTLM and Netlogon/DCE-RPC (the remaining two
+    **Still not done** (as of this item -- SMB/NTLM followed as item 27,
+    see below): SMB/NTLM and Netlogon/DCE-RPC (the remaining two
     protocols of the planned AD suite -- separate future items); CLDAP
     (UDP, obsolete, no decoder instance at all); SASL/`simple` credential
     *contents* (never decrypted/decoded, only presence+length, by design);
@@ -4018,6 +4048,315 @@ unlike any of the eight routing/redundancy protocols decoded so far.
     reassembly) plus 5 rewritten `enterprise_trust_ldap_*` tests and 2
     updated `enterprise_trust_*` tests for the fixture-behavior change
     above -- full existing suite stays 100% passing, zero-warning build.
+
+24. **IPv6 support.** Not yet started -- flagged across several other
+    items and the User Guide's own limitations list as they were written
+    (`ipv4.hpp`'s own header comment, USER_GUIDE.md's "No IPv6" bullet,
+    and the VRRP-for-IPv6/HSRPv2-for-IPv6/PIM-IPv6/6in4-inner-address gaps
+    each call out separately), gathered here into one item rather than
+    left scattered. Today, `decoder.cpp` only ever parses an IPv4 outer
+    header: an IPv6 packet over Ethernet is named at the link layer
+    (`ETHERTYPE_IPV6`, `0x86DD` -- see `link_layer.hpp`) but its own
+    header is never opened, so it is reported as `non-ip`; over a raw-IP
+    link type there is no ethertype field to name it by at all, so it
+    falls through to `parse-error` instead. This means every upper-layer
+    decoder in this codebase -- including ones that dispatch purely on IP
+    protocol number or TCP/UDP port, with no IPv4-specific logic of their
+    own -- is currently unreachable over IPv6, not because each one was
+    individually scoped out, but because nothing ever hands them an IPv6
+    flow to begin with.
+
+    Scope for a first pass: a new `ipv6.hpp`/`ipv6.cpp`, mirroring
+    `ipv4.hpp`/`.cpp`'s own shape (fixed 40-byte base header; RFC 8200's
+    extension-header chain -- Hop-by-Hop/Routing/Fragment/Destination
+    Options/ESP/AH -- walked far enough to reach the real upper-layer
+    protocol, not fully decoded); a new `decoder.cpp` call site alongside
+    the existing IPv4 one; and a shared, canonical (RFC 5952
+    zero-run-compressed) IPv6 address-formatting helper, reused everywhere
+    an address currently only has IPv4 formatting -- `dns.cpp`'s own AAAA
+    handler already does a basic, non-canonical hex-colon rendering
+    (`case 28` in its RR-value decode function) that is a useful reference
+    point but not this shared helper. That one formatter is what unblocks
+    several already-documented gaps at once: VRRPv3/HSRPv2-for-IPv6
+    address-list rendering (`vrrp.hpp`/`hsrp.hpp`'s own "no IPv6 address
+    formatting anywhere in the codebase" notes), PIM's IPv6 Encoded
+    Address support (`pim.hpp`), and 6in4's inner src/dst extraction
+    (`tunnel_vpn.cpp`) -- none of those four need new wire-format logic,
+    only the formatter this item would add.
+
+    Out of scope for a first pass, the same way the IPv4 side draws its
+    own lines today: 4in6/DS-Lite/MAP-E (IPv6-*outer* encapsulations,
+    which need the new `decoder.cpp` call site itself before they're even
+    reachable -- see docs/PROTOCOL_COVERAGE.md's Tier 5 section); wiring
+    IPv6 into `policy validate`'s own conduit/zone model, which should
+    follow the same "widen policy validate" work items 9/14/15/17 already
+    call for on the UDP side rather than duplicate it; and IPsec/ESP's own
+    encrypted payload (opaque regardless of IP version, the same limit ESP
+    already has over IPv4).
+
+25. **VMware vSphere/ESXi link-layer frames (EtherType `0x8922`).** Not
+    yet started. VMware's own registered EtherType, ridden by two related
+    features on an ESXi host's physical uplinks: the older per-NIC
+    "beacon probing" NIC-teaming failover-detection mechanism, and the
+    newer vSphere Distributed Switch (vDS) Health Check (detects VLAN/MTU/
+    teaming-policy mismatches between the virtual and physical switch,
+    sent by default once a minute per uplink). Confirmed from two
+    independent secondary sources (a VMware-networking deep-dive blog and
+    Broadcom's own vDS health-check KB article) plus the actual upstream
+    implementation, `vmware/open-vm-tools`' `eth_public.h`, which is the
+    real wire-format definition rather than a secondhand description of
+    it:
+
+    ```c
+    #define ETH_TYPE_VMWARE         0x8922
+    #define ETH_VMWARE_FRAME_MAGIC  0x026f7564
+    typedef struct Eth_VMWareFrameHeader {
+        uint32 magic;   // ETH_VMWARE_FRAME_MAGIC, always present
+        uint16 lenNBO;  // length of the type-specific payload, network byte order
+        uint8  type;    // ETH_VMWARE_FRAME_TYPE_*
+    } Eth_VMWareFrameHeader;
+    enum {
+        ETH_VMWARE_FRAME_TYPE_INVALID = 0,
+        ETH_VMWARE_FRAME_TYPE_BEACON  = 1,
+        ETH_VMWARE_FRAME_TYPE_COLOR   = 2,
+        ETH_VMWARE_FRAME_TYPE_ECHO    = 3,
+        ETH_VMWARE_FRAME_TYPE_LLC     = 4,
+    };
+    ```
+
+    This is a genuinely strong structural gate -- a 4-byte fixed magic
+    number plus a small closed type enum, the same "structural signature
+    overrides a bare ethertype/port check" bar VNC/SMB/SSH/HTTP/WireGuard/
+    the generic dtls-tunnel check already earn elsewhere in this codebase
+    -- not just naming the ethertype the way `link_layer.cpp`'s own
+    ethertype-naming switch currently would (it has no `case` for `0x8922`
+    at all today). Structurally this belongs with EAPOL/PROFINET RT/
+    EtherCAT/GOOSE/Sampled Values: a link-layer-only protocol dispatched
+    directly off ethertype in `decoder.cpp`, never touching an IP header,
+    so it needs its own new call site there rather than reuse of the
+    IPv4/TCP/UDP path.
+
+    First-pass scope: recognize the magic+length+type envelope and name
+    the `type` field (`beacon`/`color`/`echo`/`llc`, or `invalid`/an
+    unrecognized numeric value honestly reported as such -- this
+    codebase's usual posture for an enum with gaps). The `type`-specific
+    payload beyond the 7-byte header -- one of the two secondary sources
+    above describes a beacon frame's own body as carrying a host UUID, a
+    sequence number, a source virtual-port identifier, and an adapter
+    name, but gives no byte offsets or field sizes, and no byte-level
+    layout for `color`/`echo`/`llc` was found during this scoping pass
+    either -- so **the payload itself should be treated as
+    structural-only (present/length only, not field-decoded) until an
+    authoritative byte-level source, or a real captured sample, is
+    found**, the same "verify before decoding, don't guess a layout" bar
+    this codebase already holds itself to (see e.g. the StartTLS-OID and
+    AD bitwise-match-rule-OID call-outs in item 23). Worth asking when
+    this is picked up: is this actually something an OT auditor should
+    see flagged, or just recognized? The honest case for it is
+    virtualization-infrastructure visibility -- SCADA/HMI/historian
+    servers increasingly run as ESXi guests, and unexpected `0x8922`
+    traffic (or its conspicuous absence where health-check was expected)
+    is a legitimate "what is this box actually doing" signal, the same
+    spirit as the "IT protocols an OT auditor flags" family (item 18) --
+    but any curated note built on top of that framing needs the same
+    "flagship, not broad tagging" scrutiny every other curated note in
+    this document already got, not merely because the traffic is now
+    technically decodable.
+
+26. **HomePlug AV / HomePlug AV2 powerline networking, including devolo's
+    "dLAN" product line (EtherType `0x88E1`).** Not yet started. devolo's
+    "dLAN" branding is not a separate protocol -- devolo is one of the
+    founding HomePlug Powerline Alliance members, and its dLAN adapters
+    (the 200/500/650/1200-series, including the AVmini/AVsmart+ models)
+    are HomePlug AV or HomePlug AV2 devices on the wire; devolo's own
+    "dLAN Cockpit" configuration software, and third-party tools like
+    `faifa` and `dlanlist`/`dlanpasswd`, talk to them using the standard
+    HomePlug AV management protocol, not a devolo-specific one. Confirmed
+    from the HomePlug AV Wireshark dissector's own source
+    (`packet-homeplug-av.c` and the newer standalone `homeplug-av.lua`,
+    both in the public `wireshark`/`serock` GitHub repos) rather than a
+    secondhand description of it. The wire format is a fixed 5-byte MME
+    (Management Message Entry) header immediately after the Ethernet
+    header, no IP layer involved:
+
+    ```text
+    offset 0       MMV      1 byte   Management Message Version
+    offset 1-2     MMTYPE   2 bytes  little-endian; top 3 bits classify the
+                                     message group, bottom 2 bits the
+                                     request/confirm/indication/response kind
+    offset 3       FMI      1 byte   NF_MI (fragment count, high nibble) +
+                                     FN_MI (this fragment's number, low nibble)
+    offset 4       FMSN     1 byte   fragmentation message sequence number
+    offset 5+      --                MME payload, type-specific
+    ```
+
+    Structurally this is the same shape as item 25's VMware frames --
+    link-layer-only, no IP header, dispatched directly off ethertype in
+    `decoder.cpp` alongside EAPOL/PROFINET RT/EtherCAT/GOOSE -- but with a
+    weaker gate: unlike VMware's 4-byte fixed magic number, HomePlug AV's
+    own header has no magic constant, only a version byte and a
+    two-bit-encoded message-kind field, closer to the "port/ethertype
+    plus one plausibility check" tier NTP/DHCP-style name-only recognition
+    already uses elsewhere in this codebase than to a strong multi-field
+    structural signature -- worth being honest about that weaker
+    confidence in whatever text this decoder eventually reports, the same
+    way the L2TPv3 port-only fallback and STT's port-only recognition
+    already are elsewhere in this document.
+
+    First-pass scope, if picked up: name the ethertype and, from MMTYPE,
+    the general message classification (discovery/bridging-info/
+    encryption-key-set/network-stats and so on -- HomePlug AV's own MMTYPE
+    space is large and partly vendor-specific, e.g. distinct Qualcomm/
+    Atheros/Broadcom-chipset extensions the dissector sources above
+    already split into a separate `mmtype_qualcomm` field table -- full
+    enumeration of that space would need its own verification pass, not
+    assumed from this scoping note alone); MME payload fields
+    structural-only until an authoritative field-by-field source is
+    confirmed. Worth asking, like item 25, whether this is genuinely
+    audit-relevant before building a curated note on top of bare
+    recognition: powerline networking is consumer/SOHO-grade equipment,
+    a plausible (if unusual) sighting on an OT network's office/IT segment
+    but with none of vSphere's "virtualization infrastructure underneath
+    the SCADA/HMI stack" framing -- the honest case here is narrower,
+    closer to "what is this consumer-grade gear doing on this network"
+    than a security-relevant protocol behavior in its own right.
+
+27. **SMB2/NTLM (MS-SMB2, MS-NLMP) -- phase 3 of the 4-part Windows Active
+    Directory suite, with curated attack/monitoring detection.** The
+    natural next step after LDAP (item 23): a successful NTLM (or
+    Kerberos) authentication over SMB is exactly what an attacker does
+    with the credentials items 22/23's own curated notes already flag (a
+    Kerberoasted/AS-REP-Roasted ticket cracked offline, or credentials
+    harvested via LDAP recon) -- SMB is where those credentials get
+    *used*, most often via NTLM relay/pass-the-hash against the
+    `ADMIN$`/`C$`/`IPC$` administrative shares for lateral movement. SMB
+    already had shallow, name-only recognition in this codebase before
+    this item (Tier 2's "lateral-movement" family, a 4-byte magic check
+    only) -- **that recognition is removed** in favor of a full decoder,
+    the same "pull one protocol out of a shared tier into its own
+    dedicated decoder/CLI surface" move already made for EAPOL and LDAP;
+    SSH/HTTP/HTTPS/SNMP/Telnet/FTP/TFTP stay exactly as they were in Tier
+    2, untouched.
+
+    **Done.** Built on the `ProtocolDecoder` interface, as one decoder
+    instance, `SmbTcpDecoder`, `id() == "smb"`,
+    `GateKind::TcpPortIndependent` -- no UDP sibling, SMB has none. NTLM
+    itself (MS-NLMP) gets its own small **shared** parser
+    (`ntlm.hpp`/`ntlm.cpp`, called from `smb.cpp`, no `ProtocolDecoder` of
+    its own) rather than being duplicated per-embedding the way Kerberos's
+    and LDAP's own BER readers deliberately are -- NTLM's wire format is
+    byte-identical wherever it appears (unlike those two protocols' own
+    genuinely different ASN.1 tagging conventions), so sharing is the
+    correct application of the same underlying principle, not an
+    exception to it. Fixed-width little-endian fields throughout, not
+    BER/ASN.1 -- a new wire-format shape relative to Kerberos/LDAP -- and
+    a genuinely new wrinkle neither of those two protocols had:
+    **compounding** ([MS-SMB2]'s own mechanism for chaining several SMB2
+    messages inside one TCP segment via each header's own `NextCommand`
+    field), walked structurally by `parse_smb2_chain` rather than
+    misparsed as one message plus trailing garbage.
+
+    NEGOTIATE and SESSION_SETUP and TREE_CONNECT fully field-decoded
+    (including the full NTLM NEGOTIATE_MESSAGE/CHALLENGE_MESSAGE/
+    AUTHENTICATE_MESSAGE trio via the shared parser above), LOGOFF/
+    TREE_DISCONNECT header-only; the file-I/O-heavy commands (CREATE/
+    CLOSE/READ/WRITE/IOCTL and the rest) structural-only for this pass --
+    the same "not every message type needs the same depth" discipline
+    AP-REQ/AP-REP got in item 22 and Add/Modify/Del got in item 23. Six
+    curated notes: SMB1 traffic present (standing), SMB signing not
+    required (the precondition every NTLM-relay tool checks for --
+    arguably this item's single highest-value note), NTLM negotiated for
+    this session (fires on every NTLM-bearing message, the SMB-side
+    complement of items 22/23's own notes), anonymous/guest session
+    established, administrative/hidden share access (`ADMIN$`/`C$`/
+    `IPC$`, confirmed as `IPC$` specifically once the response's own
+    `ShareType == pipe` is known), and named `Status` counts in `--stats`
+    (`STATUS_LOGON_FAILURE` above all -- the SMB-side password-spray
+    signature, the analog of item 22's KRB-ERROR counts and item 23's
+    resultCode counts; `STATUS_ACCOUNT_LOCKED_OUT` = `0xC0000234` was the
+    one value flagged during planning as not independently cross-checked,
+    and was confirmed against multiple independent sources at
+    implementation time). See `include/conduitscope/smb.hpp`'s and
+    `include/conduitscope/ntlm.hpp`'s file headers for the full writeup
+    and docs/PROTOCOL_COVERAGE.md's SMB2/NTLM section for the user-facing
+    reference.
+
+    Session/correlation state (`SmbFlowState`, keyed by
+    `FlowStateKeying::Session`) introduces a shape neither item 22 nor
+    item 23 needed: alongside the plain `MessageId`-keyed 1:1
+    request/response map (NEGOTIATE/TREE_CONNECT/LOGOFF/TREE_DISCONNECT),
+    a `SessionId`-keyed `pending_ntlm_handshakes` map correlates NTLM's own
+    negotiate/challenge/authenticate exchange -- a multi-leg handshake
+    spanning *two separate* SESSION_SETUP request/response pairs, each
+    with its own `MessageId`, tied together only by the `SessionId` the
+    server assigns on the first (non-terminal,
+    `STATUS_MORE_PROCESSING_REQUIRED`) response. This is the SMB-side
+    equivalent of item 23's own "keep state across many responses, close
+    on the terminal one" pattern, just keyed by session instead of a
+    single message's own correlation field, because the *thing* being
+    correlated here is a multi-message handshake rather than a
+    one-to-many search. `MessageId` itself continues item 23's own
+    "genuine improvement over Kerberos's documented limitation" point:
+    it's the RFC-mandated, always-visible-on-the-wire correlation key,
+    unlike Kerberos's real `nonce`, which is unreadably encrypted.
+
+    Manually smoke-tested against a hand-built synthetic SMB2/NTLM
+    exchange (covering all six curated notes and their negative-case
+    controls) BEFORE any CMakeLists.txt test was written against it, the
+    same discipline that caught item 22's own Kerberoasting field-mixup
+    bug and item 23's own messageID-correlation bug -- no correctness bugs
+    were found this time; every `smb_*` CMakeLists.txt test was written
+    from the verified binary's own output afterward, not hand-computed.
+
+    Removing SMB from `try_recognize_it_lateral_movement()`'s shallow
+    Tier-2 magic-only recognition changed the decoded behavior of several
+    packets in pre-existing, shared fixtures: the new decoder's own
+    stricter framing check -- it correctly requires the 4-byte
+    Zero+StreamProtocolLength Direct-TCP/NBSS prefix [MS-SMB2]/RFC 1002
+    actually mandate on BOTH ports, which the old Tier-2 heuristic never
+    validated -- means `tests/sample_lateral_movement.pcap`'s own
+    direct-hosting SMB packet (built for the old, less strict check, with
+    no real prefix) no longer decodes as `smb` at all, falling through to
+    generic `tcp` instead; the 7 affected `lateral_movement_*`/
+    `notable_protocols_*`/`real_hartip_*` tests were updated to match the
+    observed ground truth from the rebuilt binary, following the exact
+    `enterprise_trust_ldap_*` precedent item 23 already established for
+    this kind of "protocol graduates out of a shared tier" fixture
+    change. One genuine real-world side effect also emerged: this same
+    stricter check means `tests/real_captures/hartip/hart_ip.pcapng`'s own
+    incidental background SMB1 connection -- previously an unresolved
+    HART-IP weak-gate false positive -- is now correctly recognized and
+    decoded as `[smb]`, the first real-world confirmation of this
+    decoder's own detection gate; a new
+    `real_hartip_smb_traffic_now_correctly_decoded` test covers it -- see
+    `tests/real_captures/hartip/ATTRIBUTION.md`'s updated section.
+
+    **Still not done**: Netlogon/DCE-RPC (the fourth and final protocol
+    of the planned AD suite -- a separate future item, riding inside SMB
+    named-pipe I/O this decoder deliberately leaves structural-only);
+    SMB1/CIFS's own full command set (recognized via curated note 1, not
+    decoded further); NBSS session-establishment (named NetBIOS computer
+    names, no authentication/recon value); SMB 3.x signing verification
+    and encryption (same limit as every other encrypted protocol this
+    codebase meets); the SMB 3.1.1 `NegotiateContextList`; full SPNEGO/
+    GSS-API ASN.1 decode (the `NTLMSSP\0` signature scan is the deliberate
+    substitute); no `policy validate`/`inventory` integration (degrades
+    gracefully on SMB traffic today, the same posture items 20/22/23 are
+    still in); and no real-world capture with a full authentication
+    handshake -- validated by construction only, against synthetic
+    `tests/sample_smb.pcap` (TCP, 26 packets across 7 independent
+    sessions/flows) and `tests/sample_smb_tcp_split.pcap` (TCP, 2 packets,
+    a TCP-segment-split reassembly case); if one becomes available later
+    it should be added and PROTOCOL_COVERAGE.md's Validation subsection
+    updated accordingly. 21 new `smb_*`/`smb1_*` CTest tests (every
+    message type, all six curated notes with an explicit negative case
+    each, the full NTLM handshake and its own multi-leg correlation
+    -- both succeeded and failed outcomes, compounding, `--stats` Status
+    counts, `--protocol smb`/`--smb-port`, non-standard-port note, and
+    TCP-segment-split reassembly) plus 1 new and 7 updated
+    `lateral_movement_*`/`notable_protocols_*`/`real_hartip_*` tests for
+    the fixture-behavior changes above -- full existing suite (1275
+    tests) stays 100% passing, zero-warning build.
 
 ### Protocols not covered at all
 

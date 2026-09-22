@@ -17,7 +17,11 @@ Kerberoasting attack/monitoring notes -- the first of a planned Windows
 Active Directory protocol suite), LDAP (RFC 4511, with curated
 anonymous-bind, cleartext-credential, AD-reconnaissance,
 AS-REP-Roasting-target-discovery, and delegation-discovery
-attack/monitoring notes -- the second protocol of that same suite),
+attack/monitoring notes -- the second protocol of that same suite), SMB2/NTLM
+(MS-SMB2/MS-NLMP, with curated SMB1-present, signing-not-required,
+NTLM-in-use, anonymous-or-guest-session, administrative-share-access, and
+repeated-logon-failure attack/monitoring notes -- the third protocol of
+that same suite),
 IEEE Spanning Tree Protocol
 (STP/RSTP/MSTP), DeviceNet (CAN-bus CIP, via SocketCAN pcap captures), DNS,
 mDNS, LLMNR, and NetBIOS Name Service (NBT-NS), ICMP, RIP, IGMP, VRRP, HSRP,
@@ -25,8 +29,9 @@ IGRP, PIM, EIGRP, and OSPFv2,
 plus detects DNS-over-HTTPS
 (DoH) via TLS SNI matching, and recognizes (by name only, not full decode)
 RDP, VNC, TeamViewer, AnyDesk, and Zoom -- the "interactive remote control"
-tier of the IT protocols an OT auditor flags -- plus SMB, SSH, HTTP, HTTPS,
-SNMPv1/v2c, Telnet, FTP, and TFTP, the "lateral-movement and
+tier of the IT protocols an OT auditor flags -- plus SSH, HTTP, HTTPS,
+SNMPv1/v2c, Telnet, FTP, and TFTP (SMB has since been promoted to a full
+decoder, see above), the "lateral-movement and
 credential-harvesting" tier of the same family, plus NTP, DHCP,
 LDAPS, RADIUS, TACACS+, and IEEE 802.1X/EAPOL, the "does the OT side
 blindly trust enterprise IT" tier of the same family, plus CAPWAP
@@ -877,16 +882,19 @@ Groundwork / v0.1.0. What works right now:
   `--remote-access-port` widens its expected-port set. See
   docs/PROTOCOL_COVERAGE.md "Tier 1 remote-access protocol
   recognition" section
-- Tier 2 of the same family: SMB, SSH, HTTP, HTTPS, SNMPv1/v2c, Telnet,
+- Tier 2 of the same family: SSH, HTTP, HTTPS, SNMPv1/v2c, Telnet,
   FTP, and TFTP -- the lateral-movement/credential-harvesting protocols
   most hardening guides say shouldn't be on a production OT segment at
-  all. SMB's direct-hosting magic, SSH's version-exchange banner, and
+  all. SSH's version-exchange banner and
   HTTP's own request-line/status-line are genuine, port-independent
   structural signatures; HTTPS reuses this project's own TLS ClientHello
   parser (already built for DoH detection); SNMPv1/v2c genuinely extracts
   and surfaces the cleartext community string itself, since that string is
   the whole audit finding; Telnet/FTP/TFTP each have a narrower,
-  port-gated signal. `--protocol lateral-movement` isolates the family;
+  port-gated signal. SMB itself was pulled out of this shallow, name-only
+  tier into its own full `ProtocolDecoder` (see the Kerberos/LDAP/SMB2
+  paragraph above) -- the same move EAPOL and LDAP got earlier.
+  `--protocol lateral-movement` isolates the family;
   `--lateral-movement-port` widens its expected-port set. See
   docs/PROTOCOL_COVERAGE.md "Tier 2 lateral-movement protocol
   recognition" section

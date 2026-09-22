@@ -8277,6 +8277,454 @@ def build_ldap_sample():
 
 
 # ---------------------------------------------------------------------------------------------
+# SMB2/NTLM (MS-SMB2/MS-NLMP), the third Windows AD-suite protocol -- see smb.hpp's/ntlm.hpp's
+# own file header comments for the wire format (fixed-width little-endian fields throughout, NOT
+# BER like Kerberos/LDAP). Every helper below matches the exact byte offsets smb.cpp/ntlm.cpp
+# themselves read -- verified directly against those two files, not re-derived independently, the
+# same "match the decoder's own documented offsets" discipline this file's other builders use.
+
+def smb2_header(command, is_response, status=0, message_id=0, session_id=0, tree_id=0,
+                 next_command=0, extra_flags=0):
+    flags = extra_flags | (0x00000001 if is_response else 0)
+    h = b"\xFESMB"
+    h += struct.pack("<H", 64)            # StructureSize
+    h += struct.pack("<H", 1)             # CreditCharge
+    h += struct.pack("<I", status)        # Status
+    h += struct.pack("<H", command)       # Command
+    h += struct.pack("<H", 1)             # CreditReqResp
+    h += struct.pack("<I", flags)         # Flags
+    h += struct.pack("<I", next_command)  # NextCommand
+    h += struct.pack("<Q", message_id)    # MessageId
+    h += struct.pack("<I", 0)             # Reserved
+    h += struct.pack("<I", tree_id)       # TreeId
+    h += struct.pack("<Q", session_id)    # SessionId
+    h += b"\x00" * 16                     # Signature -- never verified, see smb.hpp's own list
+    assert len(h) == 64
+    return h
+
+
+def smb2_message(command, is_response, body=b"", **kw):
+    return smb2_header(command, is_response, **kw) + body
+
+
+def smb_with_prefix(smb2_area: bytes) -> bytes:
+    """The 4-byte Zero+StreamProtocolLength Direct-TCP/NBSS prefix, [MS-SMB2] section 2.1 --
+    identical on port 445 and port 139, see smb.hpp's own FRAMING paragraph."""
+    n = len(smb2_area)
+    return bytes([0x00, (n >> 16) & 0xFF, (n >> 8) & 0xFF, n & 0xFF]) + smb2_area
+
+
+def smb2_negotiate_req_body(dialects, security_mode=0x01):
+    b = struct.pack("<H", 36)              # StructureSize
+    b += struct.pack("<H", len(dialects))  # DialectCount
+    b += struct.pack("<H", security_mode)  # SecurityMode
+    b += struct.pack("<H", 0)              # Reserved
+    b += struct.pack("<I", 0)              # Capabilities (client-side, not rendered)
+    b += b"\x00" * 16                       # ClientGuid
+    b += b"\x00" * 8                        # ClientStartTime/NegotiateContextOffset+Count+Rsvd2
+    for d in dialects:
+        b += struct.pack("<H", d)
+    return b
+
+
+def smb2_negotiate_resp_body(security_mode, dialect_revision=0x0311):
+    b = struct.pack("<H", 65)              # StructureSize
+    b += struct.pack("<H", security_mode)  # SecurityMode
+    b += struct.pack("<H", dialect_revision)  # DialectRevision
+    b += struct.pack("<H", 0)              # NegotiateContextCount/Reserved
+    b += b"\xAA" * 16                       # ServerGuid
+    b += struct.pack("<I", 0x00000007)     # Capabilities (DFS|LEASING|LARGE_MTU)
+    b += b"\x00" * 12                       # MaxTransactSize/MaxReadSize/MaxWriteSize
+    b += b"\x00" * 16                       # SystemTime/ServerStartTime
+    b += struct.pack("<H", 0)              # SecurityBufferOffset -- unused by this decoder
+    b += struct.pack("<H", 0)              # SecurityBufferLength
+    b += b"\x00" * 4                        # padding to the documented 64-byte fixed size
+    assert len(b) == 64
+    return b
+
+
+def smb2_session_setup_req_body(ntlm_blob: bytes, security_mode=0x01):
+    header_len = 24
+    buf_offset = 64 + header_len  # header(64) + this fixed body(24) -- offsets are relative to
+                                   # the start of the SMB2 header, per [MS-SMB2], see smb.cpp's
+                                   # own bounded() comment.
+    b = struct.pack("<H", 25)              # StructureSize
+    b += struct.pack("<B", 0)              # Flags (binding, not rendered)
+    b += struct.pack("<B", security_mode)  # SecurityMode
+    b += struct.pack("<I", 0)              # Capabilities
+    b += struct.pack("<I", 0)              # Channel (reserved)
+    b += struct.pack("<H", buf_offset)     # SecurityBufferOffset
+    b += struct.pack("<H", len(ntlm_blob))  # SecurityBufferLength
+    b += struct.pack("<Q", 0)              # PreviousSessionId
+    assert len(b) == header_len
+    return b + ntlm_blob
+
+
+def smb2_session_setup_resp_body(ntlm_blob: bytes, session_flags=0):
+    header_len = 8
+    buf_offset = 64 + header_len
+    b = struct.pack("<H", 9)               # StructureSize
+    b += struct.pack("<H", session_flags)  # SessionFlags
+    b += struct.pack("<H", buf_offset)     # SecurityBufferOffset
+    b += struct.pack("<H", len(ntlm_blob))  # SecurityBufferLength
+    assert len(b) == header_len
+    return b + ntlm_blob
+
+
+def smb2_tree_connect_req_body(path: str):
+    header_len = 8
+    path_bytes = path.encode("utf-16-le")
+    path_offset = 64 + header_len
+    b = struct.pack("<H", 9)               # StructureSize
+    b += struct.pack("<H", 0)              # Flags/Reserved
+    b += struct.pack("<H", path_offset)    # PathOffset
+    b += struct.pack("<H", len(path_bytes))  # PathLength
+    assert len(b) == header_len
+    return b + path_bytes
+
+
+def smb2_tree_connect_resp_body(share_type, share_flags=0, capabilities=0):
+    b = struct.pack("<H", 16)              # StructureSize
+    b += struct.pack("<B", share_type)     # ShareType
+    b += struct.pack("<B", 0)              # Reserved
+    b += struct.pack("<I", share_flags)    # ShareFlags
+    b += struct.pack("<I", capabilities)   # Capabilities
+    b += struct.pack("<I", 0)              # MaximalAccess -- not rendered, no OT-security value
+    assert len(b) == 16
+    return b
+
+
+SMB_SHARE_TYPE_DISK, SMB_SHARE_TYPE_PIPE = 0x01, 0x02
+
+NTLM_SIGNATURE = b"NTLMSSP\x00"
+NTLM_FLAG_UNICODE = 0x00000001
+NTLM_FLAG_REQUEST_TARGET = 0x00000004
+NTLM_FLAG_NTLM = 0x00000200
+NTLM_FLAG_ALWAYS_SIGN = 0x00008000
+NTLM_FLAG_OEM_DOMAIN_SUPPLIED = 0x00001000
+NTLM_FLAG_OEM_WORKSTATION_SUPPLIED = 0x00002000
+NTLM_FLAG_TARGET_TYPE_DOMAIN = 0x00010000
+NTLM_FLAG_EXTENDED_SESSIONSECURITY = 0x00080000
+NTLM_FLAG_TARGET_INFO = 0x00800000
+NTLM_FLAG_128 = 0x20000000
+NTLM_FLAG_56 = 0x80000000
+
+
+def ntlm_field(length, offset):
+    return struct.pack("<HHI", length, length, offset)  # Len, MaxLen (==Len), Offset
+
+
+def ntlm_negotiate_message(domain: str, workstation: str) -> bytes:
+    flags = (NTLM_FLAG_UNICODE | NTLM_FLAG_REQUEST_TARGET | NTLM_FLAG_NTLM | NTLM_FLAG_ALWAYS_SIGN |
+             NTLM_FLAG_OEM_DOMAIN_SUPPLIED | NTLM_FLAG_OEM_WORKSTATION_SUPPLIED |
+             NTLM_FLAG_EXTENDED_SESSIONSECURITY | NTLM_FLAG_128 | NTLM_FLAG_56)
+    domain_b = domain.encode("ascii")
+    workstation_b = workstation.encode("ascii")
+    header_len = 32  # sig(8)+type(4)+flags(4)+domain_field(8)+workstation_field(8)
+    domain_off = header_len
+    workstation_off = domain_off + len(domain_b)
+    h = NTLM_SIGNATURE + struct.pack("<I", 1) + struct.pack("<I", flags)
+    h += ntlm_field(len(domain_b), domain_off)
+    h += ntlm_field(len(workstation_b), workstation_off)
+    assert len(h) == header_len
+    return h + domain_b + workstation_b
+
+
+def ntlm_av_pair(av_id, value: bytes) -> bytes:
+    return struct.pack("<HH", av_id, len(value)) + value
+
+
+def ntlm_challenge_message(target_name: str, domain_name: str, computer_name: str) -> bytes:
+    flags = (NTLM_FLAG_UNICODE | NTLM_FLAG_REQUEST_TARGET | NTLM_FLAG_NTLM |
+             NTLM_FLAG_TARGET_TYPE_DOMAIN | NTLM_FLAG_EXTENDED_SESSIONSECURITY |
+             NTLM_FLAG_TARGET_INFO | NTLM_FLAG_128 | NTLM_FLAG_56)
+    header_len = 48  # sig+type+targetname_field+flags+challenge(8)+reserved(8)+targetinfo_field
+    target_name_b = target_name.encode("utf-16-le")
+    target_info = (ntlm_av_pair(2, domain_name.encode("utf-16-le")) +   # MsvAvNbDomainName
+                   ntlm_av_pair(1, computer_name.encode("utf-16-le")) +  # MsvAvNbComputerName
+                   ntlm_av_pair(7, b"\x00" * 8) +                        # MsvAvTimestamp, opaque
+                   ntlm_av_pair(0, b""))                                 # MsvAvEOL terminator
+    target_name_off = header_len
+    target_info_off = target_name_off + len(target_name_b)
+    h = NTLM_SIGNATURE + struct.pack("<I", 2)
+    h += ntlm_field(len(target_name_b), target_name_off)
+    h += struct.pack("<I", flags)
+    h += b"\x11\x22\x33\x44\x55\x66\x77\x88"  # ServerChallenge -- a nonce, safe to render
+    h += b"\x00" * 8                           # Reserved
+    h += ntlm_field(len(target_info), target_info_off)
+    assert len(h) == header_len
+    return h + target_name_b + target_info
+
+
+def ntlm_authenticate_message(domain: str, user: str, workstation: str, lm_len=24, nt_len=86) -> bytes:
+    flags = (NTLM_FLAG_UNICODE | NTLM_FLAG_REQUEST_TARGET | NTLM_FLAG_NTLM |
+             NTLM_FLAG_TARGET_TYPE_DOMAIN | NTLM_FLAG_EXTENDED_SESSIONSECURITY |
+             NTLM_FLAG_128 | NTLM_FLAG_56)
+    header_len = 64  # sig(8)+type(4)+6 field-descriptors(48)+flags(4)
+    # Credential/keying material -- opaque filler bytes. This decoder deliberately never renders
+    # LmChallengeResponse/NtChallengeResponse/EncryptedRandomSessionKey beyond presence+byte
+    # length (see ntlm.hpp's own file header comment) -- the actual byte content here is
+    # therefore irrelevant to what's being tested, only the lengths are.
+    lm_bytes = b"\xAA" * lm_len
+    nt_bytes = b"\xBB" * nt_len
+    domain_b = domain.encode("utf-16-le")
+    user_b = user.encode("utf-16-le")
+    workstation_b = workstation.encode("utf-16-le")
+    session_key_bytes = b""
+
+    off = header_len
+    lm_off = off; off += len(lm_bytes)
+    nt_off = off; off += len(nt_bytes)
+    domain_off = off; off += len(domain_b)
+    user_off = off; off += len(user_b)
+    workstation_off = off; off += len(workstation_b)
+    session_key_off = off; off += len(session_key_bytes)
+
+    h = NTLM_SIGNATURE + struct.pack("<I", 3)
+    h += ntlm_field(len(lm_bytes), lm_off)
+    h += ntlm_field(len(nt_bytes), nt_off)
+    h += ntlm_field(len(domain_b), domain_off)
+    h += ntlm_field(len(user_b), user_off)
+    h += ntlm_field(len(workstation_b), workstation_off)
+    h += ntlm_field(len(session_key_bytes), session_key_off)
+    h += struct.pack("<I", flags)
+    assert len(h) == header_len
+    return h + lm_bytes + nt_bytes + domain_b + user_b + workstation_b + session_key_bytes
+
+
+SMB_STATUS_SUCCESS = 0x00000000
+SMB_STATUS_MORE_PROCESSING_REQUIRED = 0xC0000016
+SMB_STATUS_LOGON_FAILURE = 0xC000006D
+
+SMB_SESSION_FLAG_IS_GUEST = 0x0001
+SMB_SESSION_FLAG_IS_NULL = 0x0002
+
+
+def build_smb_sample():
+    """SMB2/NTLM (MS-SMB2/MS-NLMP), the third Windows AD-suite protocol -- see smb.hpp's/
+    ntlm.hpp's own file header comments for the wire format and the six curated attack/
+    monitoring notes this fixture exercises with an explicit negative case each: a full
+    NEGOTIATE/SESSION_SETUP(NTLM negotiate/challenge/authenticate)/TREE_CONNECT/LOGOFF exchange
+    on flow A, where the NEGOTIATE Response's SecurityMode is SIGNING_ENABLED-but-not-REQUIRED
+    (note 2 positive), the SESSION_SETUP legs carry NTLM (note 3, on every NTLM-bearing message),
+    the terminal SESSION_SETUP Response closes the multi-leg handshake with a "succeeded"
+    correlation note, and TREE_CONNECT to "\\\\SERVER\\IPC$" is flagged preliminarily on the
+    request and confirmed via ShareType==pipe on the response (note 5, both forms) -- followed
+    on the SAME session by an ordinary "\\\\SERVER\\data" TREE_CONNECT as note 5's own negative
+    control (must NOT fire); flow B is bare SMB1 magic on port 139 (note 1); flow C is a full
+    NTLM handshake ending in a SESSION_SETUP Response with SessionFlags.IS_GUEST set (note 4);
+    flow D is a NEGOTIATE Response with SecurityMode SIGNING_ENABLED|SIGNING_REQUIRED -- note 2's
+    own negative control (must NOT fire); flow E is an NTLM handshake ending in
+    STATUS_LOGON_FAILURE -- note 6's --stats Status-count aggregation and the handshake's own
+    "failed" correlation note; flow F is a compounded request (a NEGOTIATE Request chained via
+    NextCommand to a SESSION_SETUP Request carrying an NTLM NEGOTIATE_MESSAGE, both in one TCP
+    segment), exercising parse_smb2_chain's own compounding walk; flow G is a NEGOTIATE exchange
+    on a non-standard TCP port (4455, not 445/139) -- SmbTcpDecoder is GateKind::TcpPortIndependent,
+    so this must still decode as smb, with a "not a configured/standard SMB port" note that
+    --smb-port 4455 suppresses. A NEGOTIATE Request split across two TCP segments (exercising
+    smb_tcp_declared_length via Decoder::reassemble_tcp_payload) is written to its own file,
+    sample_smb_tcp_split.pcap, mirroring how sample_ldap_tcp_split.pcap is kept separate. Every
+    byte offset and note-trigger condition here was independently smoke-tested against a hand-
+    built synthetic exchange, decoded and inspected in both --format text and --format json,
+    BEFORE this fixture (and the CMakeLists.txt tests reading it) were written -- the same
+    verification discipline Kerberos's/LDAP's own fixtures were held to."""
+    packets = []
+    ident = [0xC000]
+
+    def make_flow(sport, dport=445, src_ip=HMI_IP, dst_ip=PLC_IP, src_mac=HMI_MAC, dst_mac=PLC_MAC):
+        state = {"cseq": 30000, "sseq": 40000}
+
+        def add(from_client: bool, payload: bytes):
+            if from_client:
+                s_port, d_port = sport, dport
+                s_ip, d_ip = src_ip, dst_ip
+                s_mac, d_mac = src_mac, dst_mac
+                seq, ack = state["cseq"], state["sseq"]
+                state["cseq"] += len(payload)
+            else:
+                s_port, d_port = dport, sport
+                s_ip, d_ip = dst_ip, src_ip
+                s_mac, d_mac = dst_mac, src_mac
+                seq, ack = state["sseq"], state["cseq"]
+                state["sseq"] += len(payload)
+            tcp = tcp_header(s_port, d_port, seq, ack, TCP_PSH | TCP_ACK, len(payload)) + payload
+            ip = ipv4_header(s_ip, d_ip, 6, len(tcp), ident[0] & 0xFFFF) + tcp
+            ident[0] += 1
+            packets.append(eth_header(d_mac, s_mac, 0x0800) + ip)
+
+        return add
+
+    mid = [100]
+
+    def next_mid():
+        mid[0] += 1
+        return mid[0]
+
+    # ---------------------------------------------------------------------------------------------
+    # Flow A (port 52501->445): full happy-path exchange.
+    # ---------------------------------------------------------------------------------------------
+    fa = make_flow(52501)
+    sess_id_a = 0xAABBCCDD11223344
+
+    m_negreq = next_mid()
+    fa(True, smb_with_prefix(smb2_message(
+        0x00, False, smb2_negotiate_req_body([0x0202, 0x0210, 0x0300, 0x0302, 0x0311, 0x02FF]),
+        message_id=m_negreq)))
+    fa(False, smb_with_prefix(smb2_message(
+        0x00, True, smb2_negotiate_resp_body(0x01),  # SIGNING_ENABLED only -- note 2 positive
+        message_id=m_negreq, status=SMB_STATUS_SUCCESS)))
+
+    ntlm_neg = ntlm_negotiate_message("CORP", "WIN10-PC")
+    m_ss1 = next_mid()
+    fa(True, smb_with_prefix(smb2_message(0x01, False, smb2_session_setup_req_body(ntlm_neg),
+                                           message_id=m_ss1)))
+
+    ntlm_chal = ntlm_challenge_message("CORP", "CORP", "DC1")
+    fa(False, smb_with_prefix(smb2_message(
+        0x01, True, smb2_session_setup_resp_body(ntlm_chal), message_id=m_ss1,
+        status=SMB_STATUS_MORE_PROCESSING_REQUIRED, session_id=sess_id_a)))
+
+    ntlm_auth = ntlm_authenticate_message("CORP", "jdoe", "WIN10-PC")
+    m_ss2 = next_mid()
+    fa(True, smb_with_prefix(smb2_message(0x01, False, smb2_session_setup_req_body(ntlm_auth),
+                                           message_id=m_ss2, session_id=sess_id_a)))
+    fa(False, smb_with_prefix(smb2_message(
+        0x01, True, smb2_session_setup_resp_body(b"", session_flags=0), message_id=m_ss2,
+        status=SMB_STATUS_SUCCESS, session_id=sess_id_a)))
+
+    m_tc1 = next_mid()
+    fa(True, smb_with_prefix(smb2_message(0x03, False, smb2_tree_connect_req_body("\\\\SERVER\\IPC$"),
+                                           message_id=m_tc1, session_id=sess_id_a)))
+    fa(False, smb_with_prefix(smb2_message(
+        0x03, True, smb2_tree_connect_resp_body(SMB_SHARE_TYPE_PIPE), message_id=m_tc1,
+        status=SMB_STATUS_SUCCESS, session_id=sess_id_a, tree_id=1)))
+
+    m_tc2 = next_mid()
+    fa(True, smb_with_prefix(smb2_message(0x03, False, smb2_tree_connect_req_body("\\\\SERVER\\data"),
+                                           message_id=m_tc2, session_id=sess_id_a)))
+    fa(False, smb_with_prefix(smb2_message(
+        0x03, True, smb2_tree_connect_resp_body(SMB_SHARE_TYPE_DISK), message_id=m_tc2,
+        status=SMB_STATUS_SUCCESS, session_id=sess_id_a, tree_id=2)))
+
+    m_lo = next_mid()
+    fa(True, smb_with_prefix(smb2_message(0x02, False, b"", message_id=m_lo, session_id=sess_id_a)))
+    fa(False, smb_with_prefix(smb2_message(0x02, True, b"", message_id=m_lo, status=SMB_STATUS_SUCCESS,
+                                            session_id=sess_id_a)))
+
+    # ---------------------------------------------------------------------------------------------
+    # Flow B (port 52502->139, NetBIOS Session Service port): SMB1 magic -- note 1.
+    # ---------------------------------------------------------------------------------------------
+    fb = make_flow(52502, dport=139)
+    smb1_body = b"\xFFSMB" + b"\x72" + b"\x00" * 32  # SMB1 header stub (0x72 = Negotiate command)
+    fb(True, smb_with_prefix(smb1_body))
+
+    # ---------------------------------------------------------------------------------------------
+    # Flow C (port 52503->445): NTLM handshake resulting in a GUEST session -- note 4.
+    # ---------------------------------------------------------------------------------------------
+    fc = make_flow(52503)
+    sess_id_c = 0x1111222233334444
+    m_c1 = next_mid()
+    fc(True, smb_with_prefix(smb2_message(0x01, False,
+                                           smb2_session_setup_req_body(ntlm_negotiate_message("", "")),
+                                           message_id=m_c1)))
+    fc(False, smb_with_prefix(smb2_message(
+        0x01, True, smb2_session_setup_resp_body(ntlm_challenge_message("", "", "")),
+        message_id=m_c1, status=SMB_STATUS_MORE_PROCESSING_REQUIRED, session_id=sess_id_c)))
+    m_c2 = next_mid()
+    fc(True, smb_with_prefix(smb2_message(
+        0x01, False, smb2_session_setup_req_body(ntlm_authenticate_message("", "guest", "")),
+        message_id=m_c2, session_id=sess_id_c)))
+    fc(False, smb_with_prefix(smb2_message(
+        0x01, True, smb2_session_setup_resp_body(b"", session_flags=SMB_SESSION_FLAG_IS_GUEST),
+        message_id=m_c2, status=SMB_STATUS_SUCCESS, session_id=sess_id_c)))
+
+    # ---------------------------------------------------------------------------------------------
+    # Flow D (port 52504->445): NEGOTIATE Response with SIGNING_ENABLED|SIGNING_REQUIRED -- note 2
+    # NEGATIVE control (must NOT fire).
+    # ---------------------------------------------------------------------------------------------
+    fd = make_flow(52504)
+    m_d = next_mid()
+    fd(True, smb_with_prefix(smb2_message(0x00, False, smb2_negotiate_req_body([0x0311]), message_id=m_d)))
+    fd(False, smb_with_prefix(smb2_message(0x00, True, smb2_negotiate_resp_body(0x03), message_id=m_d,
+                                            status=SMB_STATUS_SUCCESS)))
+
+    # ---------------------------------------------------------------------------------------------
+    # Flow E (port 52505->445): NTLM handshake FAILING with STATUS_LOGON_FAILURE -- note 6's
+    # --stats aggregation and the handshake's own "failed" correlation note.
+    # ---------------------------------------------------------------------------------------------
+    fe = make_flow(52505)
+    sess_id_e = 0x5555666677778888
+    m_e1 = next_mid()
+    fe(True, smb_with_prefix(smb2_message(
+        0x01, False, smb2_session_setup_req_body(ntlm_negotiate_message("CORP", "ATK")), message_id=m_e1)))
+    fe(False, smb_with_prefix(smb2_message(
+        0x01, True, smb2_session_setup_resp_body(ntlm_challenge_message("CORP", "CORP", "DC1")),
+        message_id=m_e1, status=SMB_STATUS_MORE_PROCESSING_REQUIRED, session_id=sess_id_e)))
+    m_e2 = next_mid()
+    fe(True, smb_with_prefix(smb2_message(
+        0x01, False, smb2_session_setup_req_body(ntlm_authenticate_message("CORP", "attacker", "ATK")),
+        message_id=m_e2, session_id=sess_id_e)))
+    fe(False, smb_with_prefix(smb2_message(
+        0x01, True, smb2_session_setup_resp_body(b""), message_id=m_e2,
+        status=SMB_STATUS_LOGON_FAILURE, session_id=sess_id_e)))
+
+    # ---------------------------------------------------------------------------------------------
+    # Flow F (port 52506->445): a compounded request -- NEGOTIATE Request chained via NextCommand
+    # to a SESSION_SETUP Request (NTLM NEGOTIATE_MESSAGE), both in one TCP segment.
+    # ---------------------------------------------------------------------------------------------
+    ff = make_flow(52506)
+    sub1_body = smb2_negotiate_req_body([0x0311])
+    sub1_len = 64 + len(sub1_body)
+    pad = (-sub1_len) % 8  # pad to an 8-byte boundary, matching real compounding practice
+    sub1 = smb2_message(0x00, False, sub1_body + b"\x00" * pad, message_id=next_mid(),
+                         next_command=sub1_len + pad)
+    sub2 = smb2_message(0x01, False, smb2_session_setup_req_body(ntlm_negotiate_message("CORP", "PAD")),
+                         message_id=next_mid())
+    ff(True, smb_with_prefix(sub1 + sub2))
+
+    # ---------------------------------------------------------------------------------------------
+    # Flow G (port 52507->4455, a non-standard/non-configured SMB port): NEGOTIATE Request/
+    # Response -- SmbTcpDecoder is GateKind::TcpPortIndependent, so this must still decode as smb,
+    # with a "not a configured/standard SMB port (445/139)" note that --smb-port 4455 suppresses.
+    # ---------------------------------------------------------------------------------------------
+    fg = make_flow(52507, dport=4455)
+    m_g = next_mid()
+    fg(True, smb_with_prefix(smb2_message(0x00, False, smb2_negotiate_req_body([0x0311]), message_id=m_g)))
+    fg(False, smb_with_prefix(smb2_message(0x00, True, smb2_negotiate_resp_body(0x01), message_id=m_g,
+                                            status=SMB_STATUS_SUCCESS)))
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_040_000 + i, i * 1000)
+    (TESTS_DIR / "sample_smb.pcap").write_bytes(data)
+
+    # ---------------------------------------------------------------------------------------------
+    # TCP segment-split reassembly, in its own file -- a NEGOTIATE Request split across two TCP
+    # segments, exercising smb_tcp_declared_length via Decoder::reassemble_tcp_payload. Unlike
+    # LDAP's own split test, SMB2 DOES have its own 4-byte length prefix (like Kerberos), so the
+    # split point below is deliberately chosen to fall inside that prefix's own declared-length
+    # cascade, not just inside the SMB2 body.
+    # ---------------------------------------------------------------------------------------------
+    split_full = smb_with_prefix(smb2_message(0x00, False, smb2_negotiate_req_body(
+        [0x0202, 0x0210, 0x0300, 0x0302, 0x0311]), message_id=9999))
+    split_at = len(split_full) // 2
+    split_packets = []
+    tcp1 = tcp_header(51420, 445, 7000, 8000, TCP_PSH | TCP_ACK, len(split_full[:split_at])) + \
+        split_full[:split_at]
+    ip1 = ipv4_header(HMI_IP, PLC_IP, 6, len(tcp1), 0xB200) + tcp1
+    split_packets.append(eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip1)
+    tcp2 = tcp_header(51420, 445, 7000 + split_at, 8000, TCP_PSH | TCP_ACK,
+                       len(split_full[split_at:])) + split_full[split_at:]
+    ip2 = ipv4_header(HMI_IP, PLC_IP, 6, len(tcp2), 0xB201) + tcp2
+    split_packets.append(eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip2)
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(split_packets):
+        data += pcap_record(pkt, 1_700_040_100 + i, i * 1000)
+    (TESTS_DIR / "sample_smb_tcp_split.pcap").write_bytes(data)
+
+
+# ---------------------------------------------------------------------------------------------
 # DNS / mDNS / LLMNR / NBT-NS / DoH-detection (ROADMAP: "Add DNS, DoH, NBT-NS name resolution
 # decode") -- see dns.hpp/nbns.hpp/tls_sni.hpp's own file header comments for the wire formats
 # these fixtures exercise.
@@ -9721,6 +10169,7 @@ if __name__ == "__main__":
     build_twincat_sample()
     build_kerberos_sample()
     build_ldap_sample()
+    build_smb_sample()
     build_policy_engine_sample()
     build_summarize_unclassified_sample()
     build_inventory_sample()

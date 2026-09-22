@@ -110,22 +110,32 @@ traffic on the same flow all decodes correctly as `hartip`, matching the documen
 limitation exactly -- only Session Initiate's own MessageID=0/Status=0 header produces the
 collision.)
 
-### New finding: the weak declared-length gate also produces false positives on unrelated traffic (frames #70, #115)
+### New finding: the weak declared-length gate also produces a false positive on unrelated traffic (frame #70)
 
-Two frames of the capture's incidental, unrelated background TCP traffic -- a TLS connection to
-port 443 (frame #70) and an SMB connection to port 445 (frame #115), neither involving the HART-IP
-devices at all -- get reported as `buffering a HART-IP message PDU/frame split across TCP
-segments`, with implausibly large declared lengths (54734 and 19778 bytes respectively) that will
-never be satisfied. This is the same class of weak-structural-gate false positive `hartip.hpp`'s
-"Structural detection gate" paragraph already characterizes honestly (MessageType/MessageID each
-matching one of a handful of small values, checked before any content-specific validation) -- this
-capture is the first real-world confirmation that the gate is loose enough to also produce
-spurious matches against ordinary, unrelated TCP payloads, not only against the one specific
-Modbus/TCP collision already documented above. Both false positives are harmless in the sense this
-decoder still ultimately reports them under `[tcp]` (the buffering state simply never resolves,
-since no more matching bytes arrive), but they are additional, real confirmation -- beyond the
-Modbus collision -- that this decoder's own honest self-assessment of its HART-IP detection gate's
-weakness is not overstated.
+One frame of the capture's incidental, unrelated background TCP traffic -- a TLS connection to
+port 443 (frame #70), not involving the HART-IP devices at all -- gets reported as `buffering a
+HART-IP message PDU/frame split across TCP segments`, with an implausibly large declared length
+(54734 bytes) that will never be satisfied. This is the same class of weak-structural-gate false
+positive `hartip.hpp`'s "Structural detection gate" paragraph already characterizes honestly
+(MessageType/MessageID each matching one of a handful of small values, checked before any
+content-specific validation) -- this capture is the first real-world confirmation that the gate is
+loose enough to also produce spurious matches against ordinary, unrelated TCP payloads, not only
+against the one specific Modbus/TCP collision already documented above. This false positive is
+harmless in the sense this decoder still ultimately reports it under `[tcp]` (the buffering state
+simply never resolves, since no more matching bytes arrive), but it is additional, real
+confirmation -- beyond the Modbus collision -- that this decoder's own honest self-assessment of
+its HART-IP detection gate's weakness is not overstated.
+
+A second frame of this same background traffic -- an SMB connection to port 445 (frame #115) --
+used to be a second instance of this identical false positive (HART-IP's own weak gate matching it
+before anything else claimed it). It no longer is: as of the SMB2/NTLM decoder (`smb.hpp`, AD suite
+phase 3), that connection's genuine SMB1 (CIFS) traffic is recognized and decoded correctly as
+`[smb]`, curated note 1 included, since `smb.hpp`'s own decoder runs earlier in `decoder.cpp`'s
+TCP-port-independent cascade than HART-IP's own weak declared-length probe -- the same "a stronger,
+earlier gate resolves a weaker, later one's false positive" pattern this codebase already relies on
+elsewhere (e.g. IEC104 tried before Modbus). This capture is accordingly this project's first
+real-world confirmation of `smb.hpp`'s own SMB1 magic-byte detection gate, independent of the
+synthetic fixtures `tools/make_sample_pcap.py` builds for it.
 
 ## Gaps: what this real capture does NOT exercise
 

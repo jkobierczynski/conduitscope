@@ -34,7 +34,9 @@ const std::vector<const ProtocolDecoder*>& ip_protocol_registry();
 // Populated: Modbus (Stage 2 of the pilot), TwinCAT, Kerberos (TCP side only -- see
 // udp_port_independent_registry() below for its UDP sibling, sharing this same id() -- the first
 // Windows AD-suite protocol, see kerberos.hpp), LDAP (the second Windows AD-suite protocol, no UDP
-// sibling -- see ldap.hpp), OPC UA, EtherNet/IP (TCP side only -- see
+// sibling -- see ldap.hpp), SMB (the third Windows AD-suite protocol, no UDP sibling -- see
+// smb.hpp; its own NTLM sub-decode, ntlm.hpp, has no ProtocolDecoder or registry entry of its own,
+// see that file's header comment), OPC UA, EtherNet/IP (TCP side only -- see
 // udp_port_independent_registry() below for its UDP CIP I/O sibling, sharing this same id()),
 // IEC104, DNP3, COTP, HART-IP (TCP side only -- see udp_port_independent_registry() below for its
 // UDP sibling, sharing this same id()), MQTT (migration batch 2 -- see decoder.cpp's call site
