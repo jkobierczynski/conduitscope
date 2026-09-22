@@ -466,4 +466,40 @@ std::optional<DnsMessage> try_parse_dns_message(ByteSpan payload, DnsFlavor flav
     }
 }
 
+std::optional<ProtocolResult> DnsDecoder::decode(ByteSpan payload, DecodeContext& /*ctx*/) const {
+    if (auto msg = try_parse_dns_message(payload, DnsFlavor::Dns)) {
+        return ProtocolResult::make<DnsMessage>("dns", std::move(*msg));
+    }
+    return std::nullopt;
+}
+
+std::optional<ProtocolResult> MdnsDecoder::decode(ByteSpan payload, DecodeContext& /*ctx*/) const {
+    if (auto msg = try_parse_dns_message(payload, DnsFlavor::Mdns)) {
+        return ProtocolResult::make<DnsMessage>("mdns", std::move(*msg));
+    }
+    return std::nullopt;
+}
+
+std::optional<ProtocolResult> LlmnrDecoder::decode(ByteSpan payload, DecodeContext& /*ctx*/) const {
+    if (auto msg = try_parse_dns_message(payload, DnsFlavor::Llmnr)) {
+        return ProtocolResult::make<DnsMessage>("llmnr", std::move(*msg));
+    }
+    return std::nullopt;
+}
+
+const ProtocolDecoder& dns_decoder() {
+    static const DnsDecoder instance;
+    return instance;
+}
+
+const ProtocolDecoder& mdns_decoder() {
+    static const MdnsDecoder instance;
+    return instance;
+}
+
+const ProtocolDecoder& llmnr_decoder() {
+    static const LlmnrDecoder instance;
+    return instance;
+}
+
 }  // namespace conduitscope

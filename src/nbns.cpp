@@ -347,4 +347,16 @@ std::optional<NbnsMessage> try_parse_nbns(ByteSpan payload) {
     }
 }
 
+std::optional<ProtocolResult> NbnsDecoder::decode(ByteSpan payload, DecodeContext& /*ctx*/) const {
+    if (auto msg = try_parse_nbns(payload)) {
+        return ProtocolResult::make<NbnsMessage>("nbns", std::move(*msg));
+    }
+    return std::nullopt;
+}
+
+const ProtocolDecoder& nbns_decoder() {
+    static const NbnsDecoder instance;
+    return instance;
+}
+
 }  // namespace conduitscope

@@ -4,12 +4,14 @@
 #include "conduitscope/bacnet.hpp"
 #include "conduitscope/cotp.hpp"
 #include "conduitscope/dnp3.hpp"
+#include "conduitscope/dns.hpp"
 #include "conduitscope/eapol.hpp"
 #include "conduitscope/eigrp.hpp"
 #include "conduitscope/enip.hpp"
 #include "conduitscope/ethercat.hpp"
 #include "conduitscope/goose.hpp"
 #include "conduitscope/hartip.hpp"
+#include "conduitscope/hsrp.hpp"
 #include "conduitscope/iec104.hpp"
 #include "conduitscope/kerberos.hpp"
 #include "conduitscope/ldap.hpp"
@@ -17,9 +19,11 @@
 #include "conduitscope/modbus.hpp"
 #include "conduitscope/mpls.hpp"
 #include "conduitscope/mqtt.hpp"
+#include "conduitscope/nbns.hpp"
 #include "conduitscope/opcua.hpp"
 #include "conduitscope/pppoe.hpp"
 #include "conduitscope/profinet.hpp"
+#include "conduitscope/rip.hpp"
 #include "conduitscope/s7comm.hpp"
 #include "conduitscope/s7commplus.hpp"
 #include "conduitscope/smb.hpp"
@@ -217,7 +221,30 @@ const std::vector<const ProtocolDecoder*>& tcp_port_independent_registry() {
 }
 
 const std::vector<const ProtocolDecoder*>& udp_port_registry() {
-    static const std::vector<const ProtocolDecoder*> order = {};
+    static const std::vector<const ProtocolDecoder*> order = {
+        &rip_decoder(),    // Migration batch 4 -- this GateKind's first real user (see this
+                            // vector's own doc comment in protocol_registry.hpp). Sits exactly
+                            // where the old `if (want_rip)` block always did: first of this
+                            // cascade, ahead of HSRP/DNS/mDNS/LLMNR/NBT-NS. No ordering rationale
+                            // beyond position preservation needed -- unlike the opportunistic
+                            // TcpPortIndependent/UdpPortIndependent cascades, every decoder here is
+                            // genuinely port-gated (in Auto mode) by its own distinct,
+                            // non-overlapping well-known port, so there is no collision to resolve
+                            // between any two entries in this vector.
+        &hsrp_decoder(),   // Migration batch 4 -- sits exactly where the old `if (want_hsrp)` block
+                            // always did: after RIP, before DNS.
+        &dns_decoder(),    // Migration batch 4 -- sits exactly where the old `if (want_dns)` block
+                            // always did: after HSRP, before mDNS.
+        &mdns_decoder(),   // Migration batch 4 -- sits exactly where the old `if (want_mdns)` block
+                            // always did: after DNS, before LLMNR. Shares DnsDecoder's own
+                            // try_parse_dns_message (a different DnsFlavor, a different id() and
+                            // udp_port()) -- see MdnsDecoder's own comment in dns.hpp.
+        &llmnr_decoder(),  // Migration batch 4 -- sits exactly where the old `if (want_llmnr)`
+                            // block always did: after mDNS, before NBT-NS. Same sharing as mDNS
+                            // above -- see LlmnrDecoder's own comment in dns.hpp.
+        &nbns_decoder(),   // Migration batch 4 -- sits exactly where the old `if (want_nbns)` block
+                            // always did: last of this cascade, after LLMNR.
+    };
     return order;
 }
 

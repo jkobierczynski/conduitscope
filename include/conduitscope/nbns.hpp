@@ -100,6 +100,7 @@
 #include <vector>
 
 #include "conduitscope/byteio.hpp"
+#include "conduitscope/protocol_decoder.hpp"
 
 namespace conduitscope {
 
@@ -190,5 +191,21 @@ struct NbnsMessage {
 // bytes than the payload actually has room for -- see nbns.hpp's file header comment's
 // "Detection" paragraph.
 std::optional<NbnsMessage> try_parse_nbns(ByteSpan udp_payload);
+
+// registration-model migration (batch 4 -- see protocol_decoder.hpp/protocol_registry.hpp): thin
+// ProtocolDecoder wrapper around try_parse_nbns above, unchanged. GateKind::UdpPort's second real
+// user (after DNS/mDNS/LLMNR -- see dns.hpp's own comment). No cross-packet state, so this needs
+// nothing beyond id()/gate_kind()/udp_port()/decode(); see nbns.cpp. Auto mode's own port-gating
+// policy stays at decoder.cpp's own call site, unchanged by migration -- see udp_port()'s own
+// comment in protocol_decoder.hpp for why.
+class NbnsDecoder : public ProtocolDecoder {
+public:
+    std::string_view id() const override { return "nbns"; }
+    GateKind gate_kind() const override { return GateKind::UdpPort; }
+    std::optional<uint16_t> udp_port() const override { return NBNS_PORT; }
+    std::optional<ProtocolResult> decode(ByteSpan payload, DecodeContext& ctx) const override;
+};
+
+const ProtocolDecoder& nbns_decoder();
 
 }  // namespace conduitscope

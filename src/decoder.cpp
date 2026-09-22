@@ -1716,9 +1716,15 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                 bool port_match = port_in(udp.src_port, RIP_PORT, options_.extra_rip_ports) ||
                                    port_in(udp.dst_port, RIP_PORT, options_.extra_rip_ports);
                 if (!require_rip_port || port_match) {
-                    if (auto msg = try_parse_rip(udp.payload)) {
+                    // Registration-model migration (batch 4): try_parse_rip is now reached through
+                    // RipDecoder::decode rather than called directly -- same function, same
+                    // semantics, see rip.hpp. The dual-write (fill_rip_fields) is unchanged.
+                    DecodeContext ctx;
+                    ctx.protocol_id = "rip";
+                    if (auto result = rip_decoder().decode(udp.payload, ctx)) {
+                        const RipMessage& msg = result->as<RipMessage>();
                         out.protocol = "rip";
-                        fill_rip_fields(out, *msg);
+                        fill_rip_fields(out, msg);
                         if (!port_match) {
                             out.notes.push_back("seen on UDP port " + std::to_string(udp.src_port) + "->" +
                                                  std::to_string(udp.dst_port) +
@@ -1736,9 +1742,15 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                 bool port_match = port_in(udp.src_port, HSRP_PORT, options_.extra_hsrp_ports) ||
                                    port_in(udp.dst_port, HSRP_PORT, options_.extra_hsrp_ports);
                 if (!require_hsrp_port || port_match) {
-                    if (auto msg = try_parse_hsrp(udp.payload)) {
+                    // Registration-model migration (batch 4): try_parse_hsrp is now reached
+                    // through HsrpDecoder::decode rather than called directly -- same function,
+                    // same semantics, see hsrp.hpp. The dual-write (fill_hsrp_fields) is unchanged.
+                    DecodeContext ctx;
+                    ctx.protocol_id = "hsrp";
+                    if (auto result = hsrp_decoder().decode(udp.payload, ctx)) {
+                        const HsrpMessage& msg = result->as<HsrpMessage>();
                         out.protocol = "hsrp";
-                        fill_hsrp_fields(out, *msg);
+                        fill_hsrp_fields(out, msg);
                         if (!port_match) {
                             out.notes.push_back("seen on UDP port " + std::to_string(udp.src_port) + "->" +
                                                  std::to_string(udp.dst_port) +
@@ -1841,9 +1853,15 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                 bool port_match = port_in(udp.src_port, DNS_PORT, options_.extra_dns_ports) ||
                                    port_in(udp.dst_port, DNS_PORT, options_.extra_dns_ports);
                 if (!require_dns_port || port_match) {
-                    if (auto msg = try_parse_dns_message(udp.payload, DnsFlavor::Dns)) {
+                    // Registration-model migration (batch 4): try_parse_dns_message is now reached
+                    // through DnsDecoder::decode rather than called directly -- same function,
+                    // same semantics, see dns.hpp. The dual-write (fill_dns_fields) is unchanged.
+                    DecodeContext ctx;
+                    ctx.protocol_id = "dns";
+                    if (auto result = dns_decoder().decode(udp.payload, ctx)) {
+                        const DnsMessage& msg = result->as<DnsMessage>();
                         out.protocol = "dns";
-                        fill_dns_fields(out, *msg);
+                        fill_dns_fields(out, msg);
                         if (!port_match) {
                             out.notes.push_back("seen on UDP port " + std::to_string(udp.src_port) + "->" +
                                                  std::to_string(udp.dst_port) +
@@ -1861,9 +1879,15 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                 bool port_match = port_in(udp.src_port, MDNS_PORT, options_.extra_mdns_ports) ||
                                    port_in(udp.dst_port, MDNS_PORT, options_.extra_mdns_ports);
                 if (!require_mdns_port || port_match) {
-                    if (auto msg = try_parse_dns_message(udp.payload, DnsFlavor::Mdns)) {
+                    // Registration-model migration (batch 4): try_parse_dns_message is now reached
+                    // through MdnsDecoder::decode rather than called directly -- same function,
+                    // same semantics, see dns.hpp. The dual-write (fill_dns_fields) is unchanged.
+                    DecodeContext ctx;
+                    ctx.protocol_id = "mdns";
+                    if (auto result = mdns_decoder().decode(udp.payload, ctx)) {
+                        const DnsMessage& msg = result->as<DnsMessage>();
                         out.protocol = "mdns";
-                        fill_dns_fields(out, *msg);
+                        fill_dns_fields(out, msg);
                         if (!port_match) {
                             out.notes.push_back("seen on UDP port " + std::to_string(udp.src_port) + "->" +
                                                  std::to_string(udp.dst_port) +
@@ -1881,9 +1905,15 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                 bool port_match = port_in(udp.src_port, LLMNR_PORT, options_.extra_llmnr_ports) ||
                                    port_in(udp.dst_port, LLMNR_PORT, options_.extra_llmnr_ports);
                 if (!require_llmnr_port || port_match) {
-                    if (auto msg = try_parse_dns_message(udp.payload, DnsFlavor::Llmnr)) {
+                    // Registration-model migration (batch 4): try_parse_dns_message is now reached
+                    // through LlmnrDecoder::decode rather than called directly -- same function,
+                    // same semantics, see dns.hpp. The dual-write (fill_dns_fields) is unchanged.
+                    DecodeContext ctx;
+                    ctx.protocol_id = "llmnr";
+                    if (auto result = llmnr_decoder().decode(udp.payload, ctx)) {
+                        const DnsMessage& msg = result->as<DnsMessage>();
                         out.protocol = "llmnr";
-                        fill_dns_fields(out, *msg);
+                        fill_dns_fields(out, msg);
                         if (!port_match) {
                             out.notes.push_back("seen on UDP port " + std::to_string(udp.src_port) + "->" +
                                                  std::to_string(udp.dst_port) +
@@ -1901,9 +1931,15 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                 bool port_match = port_in(udp.src_port, NBNS_PORT, options_.extra_nbns_ports) ||
                                    port_in(udp.dst_port, NBNS_PORT, options_.extra_nbns_ports);
                 if (!require_nbns_port || port_match) {
-                    if (auto msg = try_parse_nbns(udp.payload)) {
+                    // Registration-model migration (batch 4): try_parse_nbns is now reached
+                    // through NbnsDecoder::decode rather than called directly -- same function,
+                    // same semantics, see nbns.hpp. The dual-write (fill_nbns_fields) is unchanged.
+                    DecodeContext ctx;
+                    ctx.protocol_id = "nbns";
+                    if (auto result = nbns_decoder().decode(udp.payload, ctx)) {
+                        const NbnsMessage& msg = result->as<NbnsMessage>();
                         out.protocol = "nbns";
-                        fill_nbns_fields(out, *msg);
+                        fill_nbns_fields(out, msg);
                         if (!port_match) {
                             out.notes.push_back("seen on UDP port " + std::to_string(udp.src_port) + "->" +
                                                  std::to_string(udp.dst_port) +

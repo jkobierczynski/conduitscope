@@ -93,6 +93,7 @@
 #include <vector>
 
 #include "conduitscope/byteio.hpp"
+#include "conduitscope/protocol_decoder.hpp"
 
 namespace conduitscope {
 
@@ -191,5 +192,47 @@ struct DnsMessage {
 // exists and how it's used (port-gated in Auto mode, port-independent only when the protocol is
 // named explicitly).
 std::optional<DnsMessage> try_parse_dns_message(ByteSpan udp_payload, DnsFlavor flavor);
+
+// registration-model migration (batch 4 -- see protocol_decoder.hpp/protocol_registry.hpp): thin
+// ProtocolDecoder wrappers around try_parse_dns_message above, unchanged. The first real users of
+// GateKind::UdpPort (udp_port_registry() was reserved, empty, until this batch -- see that
+// function's own doc comment) and of ProtocolDecoder::udp_port() (also new in this batch). All
+// three flavors share one parser (try_parse_dns_message's own `flavor` argument), so each class
+// below differs only in id()/udp_port()/which DnsFlavor it passes -- no cross-packet state, so
+// each needs nothing beyond id()/gate_kind()/udp_port()/decode(). Auto mode's own port-gating
+// policy (require the port match unless the protocol is named explicitly via --protocol) stays at
+// decoder.cpp's own call site, unchanged by migration -- see udp_port()'s own comment in
+// protocol_decoder.hpp for why.
+class DnsDecoder : public ProtocolDecoder {
+public:
+    std::string_view id() const override { return "dns"; }
+    GateKind gate_kind() const override { return GateKind::UdpPort; }
+    std::optional<uint16_t> udp_port() const override { return DNS_PORT; }
+    std::optional<ProtocolResult> decode(ByteSpan payload, DecodeContext& ctx) const override;
+};
+
+// id() == "mdns", udp_port() == MDNS_PORT, otherwise identical to DnsDecoder -- see its own
+// comment above.
+class MdnsDecoder : public ProtocolDecoder {
+public:
+    std::string_view id() const override { return "mdns"; }
+    GateKind gate_kind() const override { return GateKind::UdpPort; }
+    std::optional<uint16_t> udp_port() const override { return MDNS_PORT; }
+    std::optional<ProtocolResult> decode(ByteSpan payload, DecodeContext& ctx) const override;
+};
+
+// id() == "llmnr", udp_port() == LLMNR_PORT, otherwise identical to DnsDecoder -- see its own
+// comment above.
+class LlmnrDecoder : public ProtocolDecoder {
+public:
+    std::string_view id() const override { return "llmnr"; }
+    GateKind gate_kind() const override { return GateKind::UdpPort; }
+    std::optional<uint16_t> udp_port() const override { return LLMNR_PORT; }
+    std::optional<ProtocolResult> decode(ByteSpan payload, DecodeContext& ctx) const override;
+};
+
+const ProtocolDecoder& dns_decoder();
+const ProtocolDecoder& mdns_decoder();
+const ProtocolDecoder& llmnr_decoder();
 
 }  // namespace conduitscope

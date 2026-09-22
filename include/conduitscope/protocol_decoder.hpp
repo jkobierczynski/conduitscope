@@ -170,9 +170,19 @@ public:
     virtual std::string_view id() const = 0;
     virtual GateKind gate_kind() const = 0;
 
-    // Only one of these two is ever meaningful for a given decoder, matching its gate_kind().
+    // Only one of these three is ever meaningful for a given decoder, matching its gate_kind().
     virtual std::optional<uint16_t> ethertype() const { return std::nullopt; }
     virtual std::optional<uint8_t> ip_protocol() const { return std::nullopt; }
+    // Migration batch 4 addition: a GateKind::UdpPort decoder's own default/well-known port (e.g.
+    // DNS_PORT for DnsDecoder) -- the accessor UdpPort never needed until it had a real user (see
+    // udp_port_registry()'s own doc comment in protocol_registry.hpp). Like ethertype()/
+    // ip_protocol() above, this is audit-trail documentation, not what drives the actual port
+    // check at decoder.cpp's own call site: Auto mode's "only port-gate when Auto, not when the
+    // protocol is named explicitly via --protocol" policy depends on CLI state (ProtocolFilter)
+    // this interface's decode() call has no access to, so that decision -- and any
+    // --extra-X-ports widening -- stays at the call site exactly as it did before migration, the
+    // same "gating logic doesn't move into the class" posture StpDecoder's own comment documents.
+    virtual std::optional<uint16_t> udp_port() const { return std::nullopt; }
 
     // Only overridden by TcpPortIndependent decoders that participate in decoder.cpp's generic TCP
     // reassembly cascade (Decoder::reassemble_tcp_payload) -- the registry-based equivalent of

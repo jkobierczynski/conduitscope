@@ -49,11 +49,13 @@ const std::vector<const ProtocolDecoder*>& ip_protocol_registry();
 // tried last of all (see decoder.cpp's own dispatch-order comment), out of scope for this batch.
 const std::vector<const ProtocolDecoder*>& tcp_port_independent_registry();
 
-// Reserved for a future migrated UDP-port-gated protocol (DNS/mDNS/LLMNR/NBT-NS/HSRP/RIP today).
-// No protocol in this gate group is migrated by the pilot or by TwinCAT (TwinCAT is
-// TcpPortIndependent) -- kept here, empty, for the same reason the other three are populated
-// early: so a later addition to this group has an obvious, already-named place to register into,
-// rather than inventing the fourth vector at that point.
+// Migrated UDP-port-gated protocols, in the order their decoder.cpp call sites run. This GateKind
+// went unpopulated by the pilot and by every batch through batch 3 (TwinCAT is
+// TcpPortIndependent; batches 1-3 never touched a port-only-gated protocol at all) -- migration
+// batch 4 is this vector's first real user, and ProtocolDecoder::udp_port()'s first real use too
+// (added in that same batch). Fully populated in true call-site order: RIP, HSRP, DNS, mDNS,
+// LLMNR, NBT-NS. DNS/mDNS/LLMNR share one parser, try_parse_dns_message -- see DnsDecoder's own
+// comment in dns.hpp for why that's three classes, not one.
 const std::vector<const ProtocolDecoder*>& udp_port_registry();
 
 // Migration batch 2 addition: migrated UDP-port-INDEPENDENT protocols (GateKind::UdpPortIndependent

@@ -208,4 +208,16 @@ std::optional<HsrpMessage> try_parse_hsrp(ByteSpan udp_payload) {
     return std::nullopt;
 }
 
+std::optional<ProtocolResult> HsrpDecoder::decode(ByteSpan payload, DecodeContext& /*ctx*/) const {
+    if (auto msg = try_parse_hsrp(payload)) {
+        return ProtocolResult::make<HsrpMessage>("hsrp", std::move(*msg));
+    }
+    return std::nullopt;
+}
+
+const ProtocolDecoder& hsrp_decoder() {
+    static const HsrpDecoder instance;
+    return instance;
+}
+
 }  // namespace conduitscope

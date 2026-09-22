@@ -192,4 +192,16 @@ std::optional<RipMessage> try_parse_rip(ByteSpan udp_payload) {
     return msg;
 }
 
+std::optional<ProtocolResult> RipDecoder::decode(ByteSpan payload, DecodeContext& /*ctx*/) const {
+    if (auto msg = try_parse_rip(payload)) {
+        return ProtocolResult::make<RipMessage>("rip", std::move(*msg));
+    }
+    return std::nullopt;
+}
+
+const ProtocolDecoder& rip_decoder() {
+    static const RipDecoder instance;
+    return instance;
+}
+
 }  // namespace conduitscope

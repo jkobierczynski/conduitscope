@@ -44,6 +44,7 @@
 #include <vector>
 
 #include "conduitscope/byteio.hpp"
+#include "conduitscope/protocol_decoder.hpp"
 
 namespace conduitscope {
 
@@ -118,5 +119,20 @@ struct HsrpMessage {
 // --protocol hsrp bypasses the port gate, same convention as RIP -- see decoder.hpp's
 // DecodeOptions::extra_hsrp_ports).
 std::optional<HsrpMessage> try_parse_hsrp(ByteSpan udp_payload);
+
+// registration-model migration (batch 4 -- see protocol_decoder.hpp/protocol_registry.hpp): thin
+// ProtocolDecoder wrapper around try_parse_hsrp above, unchanged. No cross-packet state, so this
+// needs nothing beyond id()/gate_kind()/udp_port()/decode(); see hsrp.cpp. Auto mode's own
+// port-gating policy stays at decoder.cpp's own call site, unchanged by migration -- see
+// udp_port()'s own comment in protocol_decoder.hpp for why.
+class HsrpDecoder : public ProtocolDecoder {
+public:
+    std::string_view id() const override { return "hsrp"; }
+    GateKind gate_kind() const override { return GateKind::UdpPort; }
+    std::optional<uint16_t> udp_port() const override { return HSRP_PORT; }
+    std::optional<ProtocolResult> decode(ByteSpan payload, DecodeContext& ctx) const override;
+};
+
+const ProtocolDecoder& hsrp_decoder();
 
 }  // namespace conduitscope

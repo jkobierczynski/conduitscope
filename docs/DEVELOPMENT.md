@@ -748,6 +748,74 @@ Discussed and adopted, in this order:
    `IpProtocol`/`TcpPortIndependent`/`UdpPortIndependent`, to reach that
    state), and the `~37` legacy-protocol count in batch 2's own completion
    note above now reads `~30`.
+
+   **Update: migration batch 4 complete -- the UDP-port family, `UdpPort`
+   gate cascade populated for the first time.** Asked what to migrate
+   next, offered the remaining groups still sitting in `decoder.cpp`'s
+   legacy if-chains; Jurgen picked the UDP-port-gated family: DNS, mDNS,
+   LLMNR, NBT-NS, HSRP, RIP. Unlike every prior batch, this was
+   `GateKind::UdpPort`'s first real use anywhere in the codebase --
+   `ProtocolDecoder::udp_port()` itself did not exist before this batch
+   (added alongside `ethertype()`/`ip_protocol()`, following the exact
+   same "audit-trail documentation, not what drives the actual gate"
+   posture those two already established: Auto mode's own "only
+   port-gate when the protocol wasn't named explicitly via `--protocol`"
+   policy depends on CLI state (`ProtocolFilter`) a `decode()` call has
+   no access to, so that decision, and any `--extra-X-ports` widening,
+   stays at `decoder.cpp`'s own call site exactly as it did before
+   migration -- the same posture `StpDecoder`'s own comment already
+   documented for a different reason).
+
+   All six protocols got the same minimal treatment as batch 3's six
+   simple EtherType migrations: a thin `XDecoder : public ProtocolDecoder`
+   subclass wrapping each protocol's existing, unchanged `try_parse_x`,
+   with `decoder.cpp`'s call site kept at its exact textual position and
+   now reaching `try_parse_x` through `x_decoder().decode()` instead of
+   calling it directly. DNS, mDNS, and LLMNR are a variant of PPPoE/MPLS's
+   own "two instances, one `id()`" pattern from batch 3 -- except here it's
+   *three* instances (`DnsDecoder`/`MdnsDecoder`/`LlmnrDecoder`) sharing
+   not just a parser but a single function, `try_parse_dns_message`,
+   differentiated only by a `DnsFlavor` enum argument (`Dns`/`Mdns`/
+   `Llmnr`) the shared RFC-1035-derived wire structure never itself
+   needed disambiguating; each class supplies its own `id()`/`udp_port()`
+   (`DNS_PORT`/`MDNS_PORT`/`LLMNR_PORT`) and a one-line `decode()` that
+   just picks the flavor (see `dns.hpp`'s own comment). NBT-NS, HSRP, and
+   RIP each got an ordinary single-instance wrapper.
+
+   The true call-site order -- confirmed by grepping `decoder.cpp` for
+   `bool want_X` rather than assumed -- is RIP, then HSRP, then DNS, then
+   mDNS, then LLMNR, then NBT-NS; `udp_port_registry()` in
+   `protocol_registry.cpp` lists the six in exactly that order (an
+   earlier draft of this batch had DNS listed first, on the mistaken
+   assumption it was the cascade's head -- caught and corrected before
+   this batch shipped, by the same grep-the-real-call-sites discipline
+   rather than trusting an assumption).
+
+   Verified the same way every prior migration was: the full CTest suite
+   (1301 tests -- no `PASS_REGULAR_EXPRESSION` needed editing for any of
+   the six, proof of byte-identical output at every step) stayed 100%
+   passing, zero-warning clean rebuilds across all three established
+   configs (default+libpcap, `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF`,
+   MinGW cross-compile), and manual CLI smoke tests (`--format text`)
+   against every available fixture -- `tests/sample_dns.pcap`,
+   `tests/sample_mdns.pcap`, `tests/sample_llmnr.pcap`,
+   `tests/sample_nbns.pcap`, `tests/sample_hsrp.pcap`,
+   `tests/sample_rip.pcap` -- confirmed every migrated path produces
+   identical output to its pre-migration `try_parse_x` call site,
+   including each protocol's own curated notes (e.g. RIPv2's cleartext
+   Simple Password note, HSRPv1's own cleartext-authentication note) and
+   the port-mismatch fallback to generic `[udp]` (LLMNR's and NBT-NS's
+   own off-port packets in their sample fixtures still fall through
+   exactly as before).
+
+   This completes migration batch 4: the `UdpPort` gate cascade in
+   `protocol_registry.cpp` is now fully populated (RIP, HSRP, DNS, mDNS,
+   LLMNR, NBT-NS) -- the last of the six `GateKind` values to get a real
+   entry (`EtherType`/`IpProtocol`/`TcpPortIndependent`/
+   `UdpPortIndependent`/`CotpPayload` were already populated by the pilot
+   and batches 2-3), so every registry vector in `protocol_registry.cpp`
+   now holds at least one real decoder. The `~30` legacy-protocol count in
+   batch 3's own completion note above now reads `~24`.
 4. **Comment-density trim: acknowledged, not scheduled.** Real cost, no
    plan yet to act on it -- lower priority than the three items above.
 5. **No new protocols until 1-3 above are substantially underway,** per

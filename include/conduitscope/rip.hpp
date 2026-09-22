@@ -33,6 +33,7 @@
 #include <vector>
 
 #include "conduitscope/byteio.hpp"
+#include "conduitscope/protocol_decoder.hpp"
 
 namespace conduitscope {
 
@@ -101,5 +102,20 @@ struct RipMessage {
 // (every complete 20-byte RTE found), with the leftover bytes noted as truncation rather than
 // rejecting the whole message.
 std::optional<RipMessage> try_parse_rip(ByteSpan udp_payload);
+
+// registration-model migration (batch 4 -- see protocol_decoder.hpp/protocol_registry.hpp): thin
+// ProtocolDecoder wrapper around try_parse_rip above, unchanged. No cross-packet state, so this
+// needs nothing beyond id()/gate_kind()/udp_port()/decode(); see rip.cpp. Auto mode's own
+// port-gating policy stays at decoder.cpp's own call site, unchanged by migration -- see
+// udp_port()'s own comment in protocol_decoder.hpp for why.
+class RipDecoder : public ProtocolDecoder {
+public:
+    std::string_view id() const override { return "rip"; }
+    GateKind gate_kind() const override { return GateKind::UdpPort; }
+    std::optional<uint16_t> udp_port() const override { return RIP_PORT; }
+    std::optional<ProtocolResult> decode(ByteSpan payload, DecodeContext& ctx) const override;
+};
+
+const ProtocolDecoder& rip_decoder();
 
 }  // namespace conduitscope
