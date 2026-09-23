@@ -78,6 +78,32 @@ public:
     virtual ~DecoderFlowState() = default;
 };
 
+// Fixed placeholder substituted for a decoded cleartext secret when redaction is active -- see
+// DecodeContext::redact_secrets below and DecodeOptions::redact_secrets's own comment
+// (decoder.hpp) for the full rationale and decode's own --redact/--no-redact CLI flag. The literal
+// string a JSON/CSV/text consumer should read as "a secret was here, --no-redact to see it", not
+// as a real credential value that happens to be short.
+inline constexpr const char* kRedactedSecretPlaceholder = "[REDACTED]";
+
+// Replaces every occurrence of `secret` inside `text` with kRedactedSecretPlaceholder. Used by
+// every decoder that places a literal cleartext credential into its own summary/notes text (HSRP's/
+// VRRP's own plaintext routing-protocol authentication fields -- see hsrp.hpp/vrrp.hpp) once
+// redaction is active, since the same value sometimes appears in more than one place (e.g. a note
+// that names it as well as the summary line). A precise substring replacement, not a general-
+// purpose secret-scrubbing heuristic -- the exact value is already known at every call site (it IS
+// the value that was just decoded), so there is nothing to guess at. A no-op for an empty secret
+// (nothing was ever decoded, so nothing to find).
+inline std::string redact_secret_occurrences(std::string text, const std::string& secret) {
+    if (secret.empty()) return text;
+    const std::string placeholder = kRedactedSecretPlaceholder;
+    size_t pos = 0;
+    while ((pos = text.find(secret, pos)) != std::string::npos) {
+        text.replace(pos, secret.size(), placeholder);
+        pos += placeholder.size();
+    }
+    return text;
+}
+
 // Migration batch 2 addition: which of DecodeContext's two keys (below) a stateful decoder's state
 // is scoped to. Session is right for request/response pairing that can legitimately be answered
 // from either direction of one TCP session (Modbus's transaction ID, TwinCAT's Invoke ID, MQTT's
@@ -119,6 +145,18 @@ struct DecodeContext {
     // decoder.cpp's IGRP call site ever sets it. Same category of small, narrowly-scoped interface
     // extension as FlowStateKeying/udp_port() were for their own one-time needs.
     uint32_t ip_src_addr = 0;
+
+    // Whether this decode() call should mask a cleartext secret (a plaintext authentication field,
+    // a password) with a fixed placeholder rather than including its literal value -- see
+    // DecodeOptions::redact_secrets's own comment (decoder.hpp) for the full rationale and
+    // decode's own --redact/--no-redact CLI flag. Defaults to true (redact), matching that
+    // option's own default, so a decode() call built without wiring this up at all -- true for
+    // every protocol except the handful that actually place a literal secret on the wire -- stays
+    // safe by construction rather than silently unredacted. Only decoder.cpp's HSRP/VRRP/OPC UA/
+    // MQTT call sites ever read or override it from the real DecodeOptions; every other decoder's
+    // DecodeContext just carries the unused default, the same "only the one real user populates
+    // it" shape ip_src_addr above already established for IGRP.
+    bool redact_secrets = true;
 
     // Returns this protocol's flow state for `session_key`, default-constructing a fresh T the
     // first time a given session is seen. Only ever called by a stateful decoder's own decode()

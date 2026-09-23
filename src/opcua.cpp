@@ -790,7 +790,7 @@ constexpr uint32_t kX509IdentityToken = 327;
 constexpr uint32_t kIssuedIdentityToken = 940;
 
 void decode_activate_session_request_params(Cursor& c, std::vector<std::string>& values,
-                                             std::vector<std::string>& notes) {
+                                             std::vector<std::string>& notes, bool redact) {
     skip_signature_data(c);  // ClientSignature
     int32_t n_cert = read_array_count(c);
     for (int32_t i = 0; i < n_cert; ++i) skip_signed_software_certificate(c);
@@ -817,8 +817,18 @@ void decode_activate_session_request_params(Cursor& c, std::vector<std::string>&
             values.push_back("username=" + username.value_or(""));
             bool cleartext = !enc_alg.has_value() || enc_alg->empty();
             if (cleartext && password.present && password.length > 0) {
-                std::string pw(reinterpret_cast<const char*>(password.data.data()), password.data.size());
-                values.push_back("password=" + pw);
+                // --redact (on by default -- see DecodeOptions::redact_secrets's own comment,
+                // decoder.hpp) masks this literal value with a fixed placeholder rather than
+                // never decoding it at all -- the SECURITY FINDING note below (which names no
+                // value) is itself the actionable finding, independent of the literal password;
+                // --no-redact shows the real value, for parity with e.g. tshark's own
+                // packet-opcua.c dissector.
+                if (redact) {
+                    values.push_back(std::string("password=") + kRedactedSecretPlaceholder);
+                } else {
+                    std::string pw(reinterpret_cast<const char*>(password.data.data()), password.data.size());
+                    values.push_back("password=" + pw);
+                }
                 notes.push_back(
                     "SECURITY FINDING: UserNameIdentityToken's own EncryptionAlgorithm field is "
                     "empty, meaning the password above was placed on the wire UNENCRYPTED -- see "
@@ -1073,7 +1083,7 @@ const ServiceInfo* lookup_service(uint32_t id) {
 // RequestHeader/ResponseHeader (confirmed against python-opcua's own generated bindings -- see
 // this file's header comment), so they fall through with nothing further to decode.
 void call_tier1_decoder(const std::string& name, Cursor& c, std::vector<std::string>& values,
-                         std::vector<std::string>& notes) {
+                         std::vector<std::string>& notes, bool redact) {
     if (name == "OpenSecureChannelRequest") decode_open_secure_channel_request_params(c, values);
     else if (name == "OpenSecureChannelResponse") decode_open_secure_channel_response_params(c, values);
     else if (name == "GetEndpointsRequest") decode_get_endpoints_request_params(c, values);
@@ -1082,7 +1092,7 @@ void call_tier1_decoder(const std::string& name, Cursor& c, std::vector<std::str
     else if (name == "FindServersResponse") decode_find_servers_response_params(c, values);
     else if (name == "CreateSessionRequest") decode_create_session_request_params(c, values);
     else if (name == "CreateSessionResponse") decode_create_session_response_params(c, values);
-    else if (name == "ActivateSessionRequest") decode_activate_session_request_params(c, values, notes);
+    else if (name == "ActivateSessionRequest") decode_activate_session_request_params(c, values, notes, redact);
     else if (name == "ActivateSessionResponse") decode_activate_session_response_params(c, values);
     else if (name == "CloseSessionRequest") decode_close_session_request_params(c, values);
     else if (name == "ReadRequest") decode_read_request_params(c, values);
@@ -1174,7 +1184,7 @@ std::optional<size_t> opcua_declared_length(ByteSpan payload) {
     return size;
 }
 
-std::optional<OpcUaMessage> try_parse_opcua_message(ByteSpan payload) {
+std::optional<OpcUaMessage> try_parse_opcua_message(ByteSpan payload, bool redact) {
     if (payload.size() < 8) return std::nullopt;
     MessageTypeInfo mt = message_type_from_bytes(payload);
     if (!mt.valid) return std::nullopt;
@@ -1275,7 +1285,7 @@ std::optional<OpcUaMessage> try_parse_opcua_message(ByteSpan payload) {
                                                        : read_request_header(bc, msg.values);
                         if (svc->full_decode) {
                             msg.service_body_decoded = true;
-                            call_tier1_decoder(msg.service_name, bc, msg.values, msg.notes);
+                            call_tier1_decoder(msg.service_name, bc, msg.values, msg.notes, redact);
                             if (bc.remaining() > 0) {
                                 msg.notes.push_back(std::to_string(bc.remaining()) +
                                                      " trailing byte(s) after this service's own "
@@ -1325,10 +1335,13 @@ std::optional<OpcUaMessage> try_parse_opcua_message(ByteSpan payload) {
 // call site's body -- the same-payload multi-chunk coalescing loop (it's normal for a sender/OS to
 // coalesce several OPC UA chunks into one TCP segment before flushing, like EtherNet/IP's/
 // HART-IP's own small messages) plus the note-merging logic, both moved here unchanged so
-// decoder.cpp's own call site can shrink to gate+call+dual-write. `ctx` is unused: OPC UA is
-// purely stateless (see this file's own opening comment), unlike Dnp3Decoder/CotpDecoder.
-std::optional<ProtocolResult> OpcUaDecoder::decode(ByteSpan payload, DecodeContext& /*ctx*/) const {
-    auto msg = try_parse_opcua_message(payload);
+// decoder.cpp's own call site can shrink to gate+call+dual-write. OPC UA is otherwise purely
+// stateless (see this file's own opening comment), unlike Dnp3Decoder/CotpDecoder -- ctx is read
+// only for redact_secrets (see DecodeContext's own comment, protocol_decoder.hpp), threaded down
+// into decode_activate_session_request_params, the one place this decoder ever places a literal
+// cleartext credential into its own output.
+std::optional<ProtocolResult> OpcUaDecoder::decode(ByteSpan payload, DecodeContext& ctx) const {
+    auto msg = try_parse_opcua_message(payload, ctx.redact_secrets);
     if (!msg) {
         return std::nullopt;
     }
@@ -1345,7 +1358,7 @@ std::optional<ProtocolResult> OpcUaDecoder::decode(ByteSpan payload, DecodeConte
     size_t message_count = 1;
     while (offset < payload.size() && message_count < kMaxOpcUaMessagesPerPayload) {
         ByteSpan rest = payload.from(offset);
-        auto next = try_parse_opcua_message(rest);
+        auto next = try_parse_opcua_message(rest, ctx.redact_secrets);
         if (!next) break;  // remaining bytes aren't another OPC UA message -- stop, don't guess
         ++message_count;
         std::string note = "additional OPC UA message " + std::to_string(message_count) +

@@ -209,6 +209,8 @@ conduitscope decode (-r FILE | -i INTERFACE) [options]
 | `-c, --max-packets N` | `0` (unlimited) | Stop after decoding this many packets. With `-i`, this also bounds a live capture (in addition to `--duration` and Ctrl+C). `-c` mirrors tshark's own `-c`. |
 | `--stats` | off | Print an aggregate summary (protocol counts, a cross-protocol TCP-flow direction-tier breakdown, Modbus function-code histogram, exception count, capture time span) instead of one line per packet. Ignores `--format`. |
 | `--strict` | off | Abort with a nonzero exit status on the first packet that fails to parse at the Ethernet/IPv4/TCP layer, instead of reporting a per-packet warning and continuing. Does not affect Modbus/DNP3-level ambiguity, which is always handled by heuristic + note rather than error. |
+| `-v, --verbose` | off | Show per-packet notes (longer-form contextual/security observations) and the trailing `(client X -- tier)` direction-source suffix; both are suppressed by default to keep default output readable, since on a busy capture the notes in particular can swamp the per-packet lines. Text output only (`-T text`, the default) -- JSON/CSV always include notes/direction fields unconditionally. `--no-direction` still suppresses the direction suffix even under `-v`. See OUTPUT FORMATS below. |
+| `--redact` / `--no-redact` | on (i.e. cleartext secrets redacted by default) | Mask cleartext authentication secrets found while decoding (HSRP/VRRP authentication data, OPC UA `ActivateSessionRequest` passwords, MQTT `CONNECT` passwords) with `[REDACTED]` wherever they would otherwise appear -- summary/notes text and JSON value fields alike -- so output can be shared safely by default. `--no-redact` shows the real cleartext values. Usernames are never redacted, only passwords/authentication data. See OUTPUT FORMATS below. |
 | `--no-vlan` | off (i.e. VLAN ID display on by default) | Disable display of the 802.1Q VLAN ID for a VLAN-tagged packet. See OUTPUT FORMATS below. |
 | `--no-direction` | off (i.e. TCP flow direction display on by default) | Disable display of per-packet TCP flow direction (client/server determination and which tier decided it -- handshake/content/port-heuristic). Does not affect `decode --stats`'s own direction-tier breakdown, which has no display toggles of its own (the same way `--no-vlan`/`--mac-vendor` don't affect it either). See OUTPUT FORMATS below. |
 | `--ether` | off (i.e. the Ethernet header display off by default, to keep output compact) | For a packet with an IP layer, show its Ethernet header (source/destination MAC address, VLAN tag) below the packet line in **text** output -- mirrors tcpdump's own `-e` (long-form only in this codebase -- `-e` itself is reserved for `--field` below, tshark's own convention). Implied by `--mac-vendor` (there'd be nothing to attach a vendor name to otherwise). A no-op for a packet with no IP layer at all (ARP/LLDP/EAPOL/PPPoE/MPLS/PROFINET RT/GOOSE/Sampled Values/EtherCAT/STP/etc.), since that packet's MAC address pair is already shown on its own head line unconditionally, `--ether` or not. Does not affect JSON/CSV output, which always include `src_mac`/`dst_mac` as base fields, same as `src_ip`/`dst_ip`. See OUTPUT FORMATS' "Name resolution" subsection below. |
@@ -1622,9 +1624,14 @@ is the client (initiator) and whether that came from an observed TCP
 handshake or only a port-based guess -- folded into the packet's own head
 line itself (`(client <ip> -- <tier>)`, appended last) rather than a
 separate line, so it reads alongside the endpoints/protocol/summary it
-describes. `--no-direction` suppresses it; it never appears for a UDP/
-non-IP/parse-error packet regardless of the flag, since only a TCP flow has
-a client/server side to determine in the first place. Any additional notes
+describes. **Both the `(client ... -- ...)` suffix and any additional
+notes below the packet line are shown only with `-v`/`--verbose`** (off by
+default, to keep default output readable on a busy capture -- see
+"Verbosity (`-v`/`--verbose`)" further below); `--no-direction` suppresses
+the suffix even under `-v`, and it never appears for a UDP/non-IP/
+parse-error packet regardless of either flag, since only a TCP flow has a
+client/server side to determine in the first place. Under `-v`, any
+additional notes
 (heuristic explanations, port-mismatch warnings, malformed-field warnings)
 are printed indented below the packet line, followed, for an
 Ethernet-linktype packet that also has an IP layer, by an `eth` line
@@ -1645,6 +1652,13 @@ repeat what the head line already shows. See the
 for the two machine-readable values the head line's `(client ... -- ...)`
 annotation renders, and docs/DEVELOPMENT.md's ROADMAP item 19 for the full
 design record.
+
+```
+#1  0.000000  192.168.1.50:51000 -> 192.168.1.10:502  [modbus]  Read Holding Registers: request: read 10 holding register(s) starting at address 0
+```
+
+That's the default. With `-v`/`--verbose`, the same packet also gets the
+direction suffix and its note:
 
 ```
 #1  0.000000  192.168.1.50:51000 -> 192.168.1.10:502  [modbus]  Read Holding Registers: request: read 10 holding register(s) starting at address 0  (client 192.168.1.50 -- port-heuristic)
@@ -1733,6 +1747,51 @@ pipe into a pager that understands color, like `less -R`); `--no-color`
 forces it off. The two are mutually exclusive. None of this applies to
 `json`/`csv` output, or to `policy validate`'s text report, which stays
 plain text.
+
+#### Verbosity (`-v`/`--verbose`)
+
+Off by default. Text output only (`-T text`, the default) -- see above for
+exactly what it reveals (per-packet notes, the `(client ... -- ...)`
+direction suffix). JSON/CSV/fields output is unaffected either way: it
+already includes notes and direction fields unconditionally, same as
+every other field, since a script or SIEM consuming structured output
+isn't the audience the default-verbosity tradeoff is about.
+
+#### Redaction (`--redact`/`--no-redact`)
+
+On by default, across every output format (not just text). A handful of
+protocols this tool decodes carry a cleartext authentication secret on the
+wire, by protocol design, not by any fault of this tool's own: HSRP v1 and
+VRRP v2's "Simple Text Password" authentication, OPC UA's
+`ActivateSessionRequest` username/password authentication, and MQTT
+`CONNECT`'s own username/password fields. By default, the secret's real
+value is replaced with the literal text `[REDACTED]` wherever it would
+otherwise appear -- inline in the text-format summary/notes, and in the
+`values`/`_values` string arrays in `json`/`fields` output -- so a capture
+containing one of these protocols can be shared (a bug report, a support
+ticket, a training example) without leaking a real credential by accident.
+The corresponding *username*, where the protocol has one (OPC UA, MQTT),
+is never redacted -- it's an identifier, not a secret, the same
+distinction this tool already draws for Kerberos/LDAP/SMB/Netlogon
+principal names elsewhere in this section.
+
+```
+$ conduitscope decode -r hsrp_capture.pcap -T text
+#1  0.000000  192.168.1.50:1985 -> 224.0.0.102:1985  [hsrp]  HSRPv1 Hello: group 1, state Active, priority 100, virtual IP 192.168.1.1, auth "[REDACTED]"
+
+$ conduitscope decode -r hsrp_capture.pcap -T text --no-redact
+#1  0.000000  192.168.1.50:1985 -> 224.0.0.102:1985  [hsrp]  HSRPv1 Hello: group 1, state Active, priority 100, virtual IP 192.168.1.1, auth "cisco"
+```
+
+`--no-redact` restores the real value -- appropriate for local triage or
+incident response, where the analyst reviewing the capture is already
+trusted with its contents, but not the default because captures routinely
+travel further than that (attached to a ticket, pasted into a chat,
+included in a report) without anyone re-checking what's inside first.
+Every other protocol this tool decodes carries no in-band cleartext
+secret at all (most either have no authentication field on the wire, or
+carry only a hash/digest that isn't itself the credential), so `--redact`/
+`--no-redact` has no effect on their output.
 
 ### json
 

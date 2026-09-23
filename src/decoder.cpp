@@ -230,6 +230,7 @@ void fill_vrrp_fields(DecodedPacket& out, const VrrpMessage& msg) {
     out.vrrp_priority = msg.priority;
     out.vrrp_ip_addresses = msg.ip_addresses;
     out.vrrp_ip_addresses_truncated = msg.ip_addresses_truncated;
+    out.vrrp_auth_password = msg.auth_simple_password;  // already redacted by VrrpDecoder::decode, if active
 }
 
 // Flattens a parsed HsrpMessage (see hsrp.hpp) into DecodedPacket's hsrp_* fields.
@@ -241,6 +242,7 @@ void fill_hsrp_fields(DecodedPacket& out, const HsrpMessage& msg) {
         out.hsrp_opcode_name = msg.opcode_name;
         out.hsrp_state_name = msg.state_name;
         out.hsrp_virtual_ip = msg.virtual_ip;
+        out.hsrp_auth_data = msg.auth_data;  // already redacted by HsrpDecoder::decode, if active
     } else {
         for (const auto& tlv : msg.tlvs) out.hsrp_tlv_types.push_back(tlv.type_name);
         out.hsrp_tlvs_truncated = msg.tlvs_truncated;
@@ -1953,6 +1955,7 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                     // same semantics, see hsrp.hpp. The dual-write (fill_hsrp_fields) is unchanged.
                     DecodeContext ctx;
                     ctx.protocol_id = "hsrp";
+                    ctx.redact_secrets = options_.redact_secrets;
                     if (auto result = hsrp_decoder().decode(udp.payload, ctx)) {
                         const HsrpMessage& msg = result->as<HsrpMessage>();
                         out.protocol = "hsrp";
@@ -2329,6 +2332,7 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                 // fill_vrrp_fields is unchanged.
                 DecodeContext ctx;
                 ctx.protocol_id = "vrrp";
+                ctx.redact_secrets = options_.redact_secrets;
                 if (auto result = vrrp_decoder().decode(ip.payload, ctx)) {
                     out.protocol = "vrrp";
                     fill_vrrp_fields(out, result->as<VrrpMessage>());
@@ -2647,6 +2651,7 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
             opcua_ctx.packet_index = index;
             opcua_ctx.protocol_id = "opcua";
             opcua_ctx.flow_states = &registry_flow_state_;
+            opcua_ctx.redact_secrets = options_.redact_secrets;
             if (auto opcua_result = opcua_decoder().decode(effective_payload, opcua_ctx)) {
                 const OpcUaResult& oua = opcua_result->as<OpcUaResult>();
                 const OpcUaMessage& m = oua.first;
@@ -3470,6 +3475,7 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
             ctx.packet_index = index;
             ctx.protocol_id = "mqtt";
             ctx.flow_states = &registry_flow_state_;
+            ctx.redact_secrets = options_.redact_secrets;
             if (auto mqtt_result = mqtt_decoder().decode(effective_payload, ctx)) {
                 const MqttResult& mr = mqtt_result->as<MqttResult>();
                 const MqttMessage& m = mr.first;

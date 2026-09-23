@@ -479,7 +479,8 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
                 bool service_names_enabled, const std::string& services_path, bool show_vlan,
                 const std::string& time_format, const std::string& time_offset,
                 std::ostream& diag, bool show_direction, bool show_mac,
-                const std::vector<std::string>& fields, const std::string& write_path, bool hex_dump) {
+                const std::vector<std::string>& fields, const std::string& write_path, bool hex_dump,
+                bool verbose, bool redact) {
     std::ofstream file_out;
     std::ostream* out = &std::cout;
     bool writing_to_stdout = output.empty();
@@ -534,6 +535,7 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
 
     DecodeOptions options;
     options.strict = strict;
+    options.redact_secrets = redact;
     options.limits = build_resource_limits(limit_vars);
     options.protocol_filter = (protocol == "modbus")  ? ProtocolFilter::ModbusOnly
                                : (protocol == "dnp3")  ? ProtocolFilter::Dnp3Only
@@ -652,7 +654,7 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
                                                           *parsed_time_offset, show_direction);
             } else {
                 writer = std::make_unique<TextWriter>(*out, color, resolver, show_vlan, *parsed_time_format,
-                                                        *parsed_time_offset, show_direction, show_mac);
+                                                        *parsed_time_offset, show_direction, show_mac, verbose);
             }
             writer->begin();
         }
@@ -682,30 +684,60 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
 
         PcapPacket pkt;
         size_t decoded_count = 0, warnings = 0;
-        while (!g_stop_requested.load(std::memory_order_acquire) && source.next(pkt)) {
-            // source.index() -- not a locally incremented counter -- so a `--filter`ed offline
-            // read reports each surviving packet under its real position in the file (matching
-            // Wireshark's own display-filter numbering), rather than renumbering from 1 within
-            // just the matches; see PacketSource::next()'s own comment.
-            size_t index = source.index();
-            if (pcap_writer) pcap_writer->write_packet(pkt);
-            DecodedPacket dp = decoder.decode(pkt, source.linktype(), index);
-            direction_tracker.observe(dp);
-            if (dp.protocol == "parse-error") {
-                ++warnings;
-                if (!quiet) diag << "warning: packet " << index << ": " << dp.summary << "\n";
+        try {
+            while (!g_stop_requested.load(std::memory_order_acquire) && source.next(pkt)) {
+                // source.index() -- not a locally incremented counter -- so a `--filter`ed offline
+                // read reports each surviving packet under its real position in the file (matching
+                // Wireshark's own display-filter numbering), rather than renumbering from 1 within
+                // just the matches; see PacketSource::next()'s own comment.
+                size_t index = source.index();
+                if (pcap_writer) pcap_writer->write_packet(pkt);
+                DecodedPacket dp = decoder.decode(pkt, source.linktype(), index);
+                direction_tracker.observe(dp);
+                if (dp.protocol == "parse-error") {
+                    ++warnings;
+                    if (!quiet) diag << "warning: packet " << index << ": " << dp.summary << "\n";
+                }
+                if (stats) stats_writer.write_packet(dp);
+                else writer->write_packet(dp);
+                // -x (mirrors tshark's own -x): a hex+ASCII dump of this packet's raw bytes, printed
+                // alongside the normal decode -- text format only (matching tshark, whose -x is a
+                // human-reading aid, not a structured field), and never under --stats, which has no
+                // per-packet output stream to interleave into.
+                if (hex_dump && !stats && format != "json" && format != "csv" && format != "fields") {
+                    write_hex_ascii_dump(*out, ByteSpan(pkt.data.data(), pkt.data.size()));
+                }
+                ++decoded_count;
+                if (max_packets != 0 && decoded_count >= max_packets) break;
             }
-            if (stats) stats_writer.write_packet(dp);
-            else writer->write_packet(dp);
-            // -x (mirrors tshark's own -x): a hex+ASCII dump of this packet's raw bytes, printed
-            // alongside the normal decode -- text format only (matching tshark, whose -x is a
-            // human-reading aid, not a structured field), and never under --stats, which has no
-            // per-packet output stream to interleave into.
-            if (hex_dump && !stats && format != "json" && format != "csv" && format != "fields") {
-                write_hex_ascii_dump(*out, ByteSpan(pkt.data.data(), pkt.data.size()));
+        } catch (const ParseError& e) {
+            // A fatal parse error partway through an offline read (a corrupt/truncated capture
+            // discovered only after some earlier packets were already decoded and printed) must
+            // still leave whatever structured output format is active (json/csv/fields)
+            // syntactically well-formed -- an exception unwinding straight past this whole
+            // function to main()'s own top-level catch used to skip writer->end() entirely,
+            // leaving (for --format json specifically) an array with no closing ']' on stdout.
+            // Found via an automated tshark-vs-conduitscope comparison
+            // (tools/compare_with_tshark.py) against tests/real_captures/mqtt/
+            // mqtt_packets_RedHat61_tcpdump.pcap, a real, deliberately-corrupt fixture (see its
+            // own ATTRIBUTION.md) that already has a dedicated test for this exact error message
+            // under --format text, where the missing terminator has no effect -- --format json's
+            // own version of the same scenario went untested. Finish the output the same way the
+            // success path below does, THEN report the error and exit nonzero -- the error
+            // message itself is unchanged, only well-formedness of whatever came before it.
+            if (stats) stats_writer.print_summary(*out);
+            else if (writer) writer->end();
+            if (color) {
+                out->flush();
+                if (writing_to_stdout) {
+                    write_raw_color_reset_to_stdout();
+                } else {
+                    *out << "\033[0m";
+                    out->flush();
+                }
             }
-            ++decoded_count;
-            if (max_packets != 0 && decoded_count >= max_packets) break;
+            std::cerr << "error: " << e.what() << "\n";
+            return 1;
         }
 
         if (stats) stats_writer.print_summary(*out);
@@ -1094,6 +1126,8 @@ int main(int argc, char** argv) {
     bool decode_show_vlan = true;
     bool decode_show_direction = true;
     bool decode_show_mac = false;
+    bool decode_verbose = false;
+    bool decode_redact = true;
     std::string decode_time_format = "r", decode_time_offset = "utc";
     std::string decode_hosts_file, decode_services_file;
     std::vector<std::string> decode_fields;
@@ -1336,6 +1370,25 @@ int main(int argc, char** argv) {
         "head line unconditionally. Only affects text output -- JSON/CSV always include "
         "src_mac/dst_mac as base fields, same as src_ip/dst_ip -- see docs/MANUAL.md's OUTPUT "
         "FORMATS section");
+    decode_cmd->add_flag(
+        "-v,--verbose", decode_verbose,
+        "Show per-packet notes (the longer-form contextual/security observations) and the "
+        "trailing (client X -- tier) direction-source suffix; both are suppressed by default "
+        "to keep default output readable, since on a busy capture the notes in particular can "
+        "swamp the per-packet lines. Off by default. Text output only (--format text, the "
+        "default) -- JSON/CSV always include notes/direction fields unconditionally, same as "
+        "every other field; --no-direction still suppresses the direction suffix even under "
+        "-v, since that flag turns off direction detection display entirely rather than just "
+        "its verbosity");
+    decode_cmd->add_flag(
+        "--redact,!--no-redact", decode_redact,
+        "Mask cleartext authentication secrets found while decoding (HSRP/VRRP authentication "
+        "data, OPC UA ActivateSessionRequest passwords, MQTT CONNECT passwords) with "
+        "[REDACTED] wherever they would otherwise appear -- summary/notes text and JSON value "
+        "fields alike -- so output can be shared safely by default. On by default; pass "
+        "--no-redact to see the real cleartext values (useful for local triage/incident "
+        "response where the analyst is already trusted with the capture itself). Usernames "
+        "are never redacted, only passwords/authentication data -- see docs/MANUAL.md");
     decode_cmd->add_option(
         "-e,--field", decode_fields,
         "With -T fields, print this field's value (repeatable, printed in the order given, "
@@ -1652,7 +1705,8 @@ int main(int argc, char** argv) {
                            quiet, no_color, force_color, decode_mac_vendor, decode_resolve, decode_hosts_file,
                            decode_service_names, decode_services_file, decode_show_vlan,
                            decode_time_format, decode_time_offset, *diag, decode_show_direction,
-                           decode_show_mac, decode_fields, decode_write, decode_hex);
+                           decode_show_mac, decode_fields, decode_write, decode_hex,
+                           decode_verbose, decode_redact);
     }
     if (info_cmd->parsed()) {
         return run_info(info_input, std::cout);

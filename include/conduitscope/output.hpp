@@ -66,9 +66,10 @@ class TextWriter : public OutputWriter {
 public:
     explicit TextWriter(std::ostream& out, bool color, const Resolver& resolver, bool show_vlan = true,
                          TimeFormat time_format = TimeFormat::Epoch, TimeOffset time_offset = TimeOffset{},
-                         bool show_direction = true, bool show_mac = true)
+                         bool show_direction = true, bool show_mac = true, bool verbose = true)
         : out_(out), color_(color), resolver_(resolver), show_vlan_(show_vlan),
-          time_(time_format, time_offset), show_direction_(show_direction), show_mac_(show_mac) {}
+          time_(time_format, time_offset), show_direction_(show_direction), show_mac_(show_mac),
+          verbose_(verbose) {}
     void write_packet(const DecodedPacket& packet) override;
 
 private:
@@ -91,6 +92,19 @@ private:
     // since 802.1Q membership isn't specifically a MAC-address fact and show_vlan_ already has its
     // own default-on toggle -- see write_packet's own comment for exactly how the two combine.
     bool show_mac_;
+    // `verbose` (default true here, matching every other toggle above so a caller that doesn't
+    // pass it keeps this class's original always-on behavior) governs whether per-packet notes
+    // ("note: ..." lines) and the "(client X -- handshake/content/port-heuristic)" direction-tier
+    // suffix are shown at all -- decode's own -v/--verbose flag (cli_main.cpp, defaulting to
+    // false there) wires straight into this constructor parameter. Text output only, the same
+    // "pure display toggle" scope show_mac_ already has: JsonWriter/CsvWriter/FieldsWriter are
+    // unaffected (notes are a proper structured field there, not visual clutter on a shared line --
+    // see this file's own header comment) and show_direction_'s own JSON/CSV "direction_source"
+    // field/column keeps working exactly as before regardless of this flag. When true, the
+    // direction suffix still additionally requires show_direction_ -- verbose_ is an extra gate on
+    // top of it, not a replacement, so --no-direction still suppresses it even under -v, and -v
+    // alone does nothing for it if --no-direction was also given -- see write_packet's own comment.
+    bool verbose_;
 };
 
 class JsonWriter : public OutputWriter {

@@ -788,7 +788,7 @@ SparkplugPayload decode_sparkplug_payload(ByteSpan payload, std::vector<std::str
 // Per-packet-type body decoders. See mqtt.hpp's file header comment for the byte layout each of
 // these implements and the version-disambiguation strategy for the three genuinely ambiguous types.
 
-void decode_connect(Cursor& c, MqttMessage& msg) {
+void decode_connect(Cursor& c, MqttMessage& msg, bool redact) {
     std::string proto_name = read_utf8_string(c);
     uint8_t level = c.u8();
     msg.values.push_back("ProtocolName=\"" + proto_name + "\"");
@@ -851,15 +851,23 @@ void decode_connect(Cursor& c, MqttMessage& msg) {
     // Password fields have no encryption option of their own at all -- if this decoder can see a
     // CONNECT on the wire, these bytes ARE plaintext on that wire. A genuine, directly actionable
     // OT-security finding (MQTT broker credentials sent in cleartext), the same reasoning already
-    // documented for OPC UA's own decision.
+    // documented for OPC UA's own decision. Username is never redacted (an identifier, not a
+    // secret, the same distinction OPC UA's own username=/password= pair already draws) -- only
+    // Password is masked when --redact (on by default -- see DecodeOptions::redact_secrets's own
+    // comment, decoder.hpp) is active; --no-redact shows the real value, for parity with e.g.
+    // tshark's own packet-mqtt.c dissector.
     if (username_flag) {
         std::string username = read_utf8_string(c);
         msg.values.push_back("Username=\"" + username + "\"");
     }
     if (password_flag) {
         ByteSpan password = read_binary(c);
-        std::string password_text(reinterpret_cast<const char*>(password.data()), password.size());
-        msg.values.push_back("Password=\"" + password_text + "\"");
+        if (redact) {
+            msg.values.push_back(std::string("Password=\"") + kRedactedSecretPlaceholder + "\"");
+        } else {
+            std::string password_text(reinterpret_cast<const char*>(password.data()), password.size());
+            msg.values.push_back("Password=\"" + password_text + "\"");
+        }
     }
 }
 
@@ -1195,7 +1203,7 @@ std::optional<size_t> mqtt_declared_length(ByteSpan payload) {
     return 1 + vbi_consumed + remaining_length;
 }
 
-std::optional<MqttMessage> try_parse_mqtt_message(ByteSpan payload, uint8_t session_version_hint) {
+std::optional<MqttMessage> try_parse_mqtt_message(ByteSpan payload, uint8_t session_version_hint, bool redact) {
     if (payload.size() < 2) return std::nullopt;
     uint8_t byte0 = payload.at(0);
     uint8_t type = byte0 >> 4;
@@ -1253,7 +1261,7 @@ std::optional<MqttMessage> try_parse_mqtt_message(ByteSpan payload, uint8_t sess
 
     try {
         switch (type) {
-            case 1: decode_connect(bc, msg); break;
+            case 1: decode_connect(bc, msg, redact); break;
             case 2: decode_connack(bc, msg); break;
             case 3: decode_publish(bc, msg, session_version_hint); break;
             case 4: case 5: case 6: case 7: decode_ack_with_optional_reason(bc, msg); break;
@@ -1286,7 +1294,7 @@ std::optional<ProtocolResult> MqttDecoder::decode(ByteSpan payload, DecodeContex
     auto& state = ctx.flow_state<MqttFlowState>();
     uint8_t session_hint = state.version_hint;
 
-    auto first = try_parse_mqtt_message(payload, session_hint);
+    auto first = try_parse_mqtt_message(payload, session_hint, ctx.redact_secrets);
     if (!first) return std::nullopt;
 
     MqttResult result;
@@ -1326,7 +1334,7 @@ std::optional<ProtocolResult> MqttDecoder::decode(ByteSpan payload, DecodeContex
     size_t message_count = 1;
     while (offset < payload.size() && message_count < kMaxMqttMessagesPerPayload) {
         ByteSpan rest = payload.from(offset);
-        auto next = try_parse_mqtt_message(rest, running_hint);
+        auto next = try_parse_mqtt_message(rest, running_hint, ctx.redact_secrets);
         if (!next) break;  // remaining bytes aren't another MQTT packet -- stop, don't guess
         ++message_count;
         std::string note = "additional MQTT packet " + std::to_string(message_count) +

@@ -492,8 +492,13 @@ void TextWriter::write_packet(const DecodedPacket& p) {
     // always printed regardless of color/--no-color, so nothing here is color-only information.
     // --no-direction (show_direction_, cli_main.cpp) suppresses this outright; has_direction is
     // only ever true for a has_tcp packet (FlowDirectionTracker's scope, see flow_direction.hpp),
-    // so this never appears for a UDP/non-IP/parse-error packet regardless of the flag.
-    if (show_direction_ && p.has_direction) {
+    // so this never appears for a UDP/non-IP/parse-error packet regardless of the flag. verbose_
+    // (decode's own -v/--verbose, defaulting to false) is an ADDITIONAL gate on top of
+    // show_direction_, not a replacement for it -- both must be true, so this suffix is hidden by
+    // default (it was reported noisy appearing on every single line) and needs -v to reappear,
+    // while --no-direction still suppresses it outright even under -v -- see verbose_'s own
+    // comment (output.hpp).
+    if (verbose_ && show_direction_ && p.has_direction) {
         bool uncertain = p.direction_source == DirectionSource::PortHeuristic;
         head << "  ";
         if (color_) head << (uncertain ? kYellow : kDim);
@@ -503,12 +508,19 @@ void TextWriter::write_packet(const DecodedPacket& p) {
     }
     out_ << head.str() << "\n";
 
-    for (const auto& note : p.notes) {
-        out_ << "        ";
-        if (color_) out_ << kDim;
-        out_ << "note: " << note;
-        if (color_) out_ << kReset;
-        out_ << "\n";
+    // Suppressed by default (-v/--verbose, defaulting to false, see verbose_'s own comment,
+    // output.hpp) -- a capture with several curated security-finding notes per packet otherwise
+    // swamps the one-line-per-packet view these notes are meant to sit underneath. JSON/CSV/
+    // FieldsWriter are unaffected -- notes are a proper structured field/column there, not visual
+    // clutter on a shared terminal line.
+    if (verbose_) {
+        for (const auto& note : p.notes) {
+            out_ << "        ";
+            if (color_) out_ << kDim;
+            out_ << "note: " << note;
+            if (color_) out_ << kReset;
+            out_ << "\n";
+        }
     }
 
     // Every Ethernet-linktype packet carries src_mac/dst_mac regardless of protocol (see

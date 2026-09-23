@@ -306,8 +306,13 @@ std::optional<size_t> mqtt_declared_length(ByteSpan payload);
 // std::nullopt (never throws) only when the structural detection gate fails; once past the gate, a
 // failure partway through decoding the body falls back to raw hex for whatever remains unparsed
 // (the same graceful-degradation posture opcua.cpp's own try_parse_opcua_message already
-// establishes), rather than discarding the whole packet.
-std::optional<MqttMessage> try_parse_mqtt_message(ByteSpan payload, uint8_t session_version_hint = 0);
+// establishes), rather than discarding the whole packet. `redact` (default true, the same "safe by
+// construction" default DecodeContext::redact_secrets/DecodeOptions::redact_secrets both use --
+// see decoder.hpp) governs whether a CONNECT packet's own cleartext Password is masked with a
+// fixed placeholder or shown as its literal value -- Username is never redacted (an identifier,
+// not a secret) -- see decode_connect's own comment (mqtt.cpp).
+std::optional<MqttMessage> try_parse_mqtt_message(ByteSpan payload, uint8_t session_version_hint = 0,
+                                                    bool redact = true);
 
 // Migration batch 2 (MQTT, Stage 11 -- the last of this batch) -- this protocol's own per-SESSION
 // learned version hint (0=unknown, 4=v3.1.1, 5=v5.0; see "Version disambiguation" above), moved

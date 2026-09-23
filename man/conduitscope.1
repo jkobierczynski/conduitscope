@@ -653,6 +653,27 @@ Print an aggregate summary instead of one line per packet. Ignores
 .B \-\-strict
 Abort on the first malformed packet instead of warning and continuing.
 .TP
+.BR \-v ", " \-\-verbose
+Show per-packet notes (longer-form contextual/security observations) and
+the trailing "(client X \-\- tier)" direction-source suffix; both are
+suppressed by default to keep default output readable, since on a busy
+capture the notes in particular can swamp the per-packet lines. Off by
+default. Text output only (\fB\-T text\fR, the default) \-\- JSON/CSV
+always include notes/direction fields unconditionally, same as every
+other field. \fB\-\-no\-direction\fR still suppresses the direction
+suffix even under \fB\-v\fR.
+.TP
+.BR \-\-redact ", " \-\-no\-redact
+Mask cleartext authentication secrets found while decoding (HSRP/VRRP
+authentication data, OPC UA \fBActivateSessionRequest\fR passwords, MQTT
+\fBCONNECT\fR passwords) with \fB[REDACTED]\fR wherever they would
+otherwise appear \-\- summary/notes text and JSON value fields alike \-\-
+so output can be shared safely by default. On by default;
+\fB\-\-no\-redact\fR shows the real cleartext values (useful for local
+triage/incident response where the analyst is already trusted with the
+capture itself). Usernames are never redacted, only passwords/
+authentication data.
+.TP
 .B \-\-no\-vlan
 Disable display of the 802.1Q VLAN ID for a VLAN-tagged packet. On by
 default. See \fBdocs/USER_GUIDE.md\fR's OUTPUT FORMATS section.

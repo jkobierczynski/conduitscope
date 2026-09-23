@@ -106,6 +106,13 @@ bool try_parse_hsrp_v1(ByteSpan payload, HsrpMessage& msg) {
     out << "HSRPv1 " << msg.opcode_name << ": group " << static_cast<unsigned>(msg.group)
         << ", state " << msg.state_name << ", priority " << static_cast<unsigned>(msg.priority)
         << ", virtual IP " << msg.virtual_ip;
+    // The literal authentication value is folded into the summary itself (not just a separate
+    // field) so it's visible in every output format alike, including the default text dump --
+    // HsrpDecoder::decode masks it here (and in this same summary string) when redaction is
+    // active, see that function's own comment.
+    if (!msg.auth_data.empty()) {
+        out << ", auth \"" << msg.auth_data << "\"";
+    }
     msg.summary = out.str();
     return true;
 }
@@ -208,8 +215,18 @@ std::optional<HsrpMessage> try_parse_hsrp(ByteSpan udp_payload) {
     return std::nullopt;
 }
 
-std::optional<ProtocolResult> HsrpDecoder::decode(ByteSpan payload, DecodeContext& /*ctx*/) const {
+std::optional<ProtocolResult> HsrpDecoder::decode(ByteSpan payload, DecodeContext& ctx) const {
     if (auto msg = try_parse_hsrp(payload)) {
+        // --redact (on by default -- see DecodeOptions::redact_secrets's own comment, decoder.hpp)
+        // masks HSRPv1's own cleartext authentication value with a fixed placeholder in every
+        // output format, rather than never decoding it at all -- the field's presence and length
+        // are themselves a real, actionable OT-security finding (an HSRP group with authentication
+        // "enabled" but no real protection), independent of the literal value. --no-redact shows
+        // the real value, for parity with e.g. tshark's own packet-hsrp.c dissector.
+        if (ctx.redact_secrets && !msg->auth_data.empty()) {
+            msg->summary = redact_secret_occurrences(msg->summary, msg->auth_data);
+            msg->auth_data = kRedactedSecretPlaceholder;
+        }
         return ProtocolResult::make<HsrpMessage>("hsrp", std::move(*msg));
     }
     return std::nullopt;

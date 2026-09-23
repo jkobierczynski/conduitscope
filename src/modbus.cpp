@@ -247,16 +247,33 @@ std::optional<ModbusFrame> try_parse_modbus_tcp(ByteSpan tcp_payload) {
     frame.function_code = c.u8();
     uint8_t raw_fc = frame.function_code;
     uint8_t base_fc = raw_fc & 0x7F;
-    if (base_fc == 0) {
-        // Function code 0 is reserved and never assigned in the Modbus Application Protocol
-        // spec -- no real master or slave ever sends it. Unlike DNP3 (0x05 0x64) or S7comm
+    if (raw_fc == 0x00) {
+        // Function code 0, NON-exception (the raw byte on the wire is exactly 0x00): reserved
+        // and never assigned in the Modbus Application Protocol spec -- no real master or slave
+        // ever sends this as an actual function code. Unlike DNP3 (0x05 0x64) or S7comm
         // (0x32/0x72), Modbus/TCP has no magic bytes of its own; protocol_id==0 is its only
         // wire-level tell, and that alone is weak enough that other protocols' bytes can land
         // on it by coincidence (seen in practice: DNP3 traffic on port 20000 misclassified as
-        // Modbus this way). A payload that decodes to function code 0 essentially never is
-        // Modbus, so bail out here -- the same signal that would otherwise produce a bogus
-        // "Unknown (0x0)" result -- and let the caller fall through to try DNP3/S7comm
+        // Modbus this way). A payload that decodes to raw function-code byte 0x00 essentially
+        // never is Modbus, so bail out here -- the same signal that would otherwise produce a
+        // bogus "Unknown (0x0)" result -- and let the caller fall through to try DNP3/S7comm
         // detection instead.
+        //
+        // Deliberately NOT extended to raw_fc == 0x80 (base_fc == 0 with the exception bit set)
+        // -- an automated tshark-vs-conduitscope comparison across this project's own real-
+        // capture corpus (tools/compare_with_tshark.py) found a genuine real device sending
+        // exactly that byte as an "Illegal Function" exception response (tests/real_captures/
+        // modbus/modbus_test_data_part2.pcap, frames documented in real_modbus_illegal_function_
+        // exception_for_function_zero_decoded below): a slave that received a request it
+        // considered function code 0 and correctly replied with the standard exception
+        // mechanism. tshark's own dissector decodes this the same way ("Unknown Function" /
+        // "Illegal function"). Earlier versions of this gate rejected 0x80 the same as 0x00 (via
+        // a base_fc==0 check that ignored the exception bit), which silently misclassified this
+        // real traffic as HART-IP instead (a coincidental structural-gate collision -- see
+        // hartip.hpp's own "Structural detection gate" section) -- a real conduitscope bug this
+        // gate itself caused, distinct from and not evidence for the DNP3-port-20000 concern
+        // above, which was never observed to produce raw_fc==0x80 specifically. 0x80 is a single
+        // specific byte value, not the same broad "byte reads as 0" collision surface as 0x00.
         return std::nullopt;
     }
     frame.is_exception = (raw_fc & 0x80) != 0;

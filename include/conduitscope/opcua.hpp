@@ -445,8 +445,12 @@ std::optional<size_t> opcua_declared_length(ByteSpan payload);
 // Conversation message (one chunk). Returns std::nullopt (never throws) when there aren't even 8
 // bytes for the header, when the leading 3 bytes aren't one of the 7 recognized MessageType
 // strings, when ChunkType isn't 'F'/'C'/'A', or when MessageSize is implausibly small (< 8) -- see
-// this file's header comment's "structural detection gate" paragraph.
-std::optional<OpcUaMessage> try_parse_opcua_message(ByteSpan payload);
+// this file's header comment's "structural detection gate" paragraph. `redact` (default true, the
+// same "safe by construction" default DecodeContext::redact_secrets/DecodeOptions::redact_secrets
+// both use -- see decoder.hpp) governs whether an ActivateSessionRequest's own cleartext
+// UserNameIdentityToken password is masked with a fixed placeholder or shown as its literal value
+// -- see decode_activate_session_request_params's own comment (opcua.cpp).
+std::optional<OpcUaMessage> try_parse_opcua_message(ByteSpan payload, bool redact = true);
 
 // Migration batch 2 (see protocol_decoder.hpp/protocol_registry.hpp): everything decoder.cpp's
 // OPC UA call site dual-writes into DecodedPacket, gathered from however many chunks were

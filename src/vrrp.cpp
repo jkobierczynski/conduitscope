@@ -121,13 +121,31 @@ std::optional<VrrpMessage> try_parse_vrrp(ByteSpan ip_payload) {
         if (msg.ip_addresses.size() > 1) out << ", ...";
         out << ")";
     }
+    // The literal authentication value is folded into the summary itself (not just a separate
+    // field) so it's visible in every output format alike, including the default text dump --
+    // VrrpDecoder::decode masks it here (and in this same summary string) when redaction is
+    // active, see that function's own comment.
+    if (!msg.auth_simple_password.empty()) {
+        out << ", auth \"" << msg.auth_simple_password << "\"";
+    }
     msg.summary = out.str();
 
     return msg;
 }
 
-std::optional<ProtocolResult> VrrpDecoder::decode(ByteSpan payload, DecodeContext& /*ctx*/) const {
+std::optional<ProtocolResult> VrrpDecoder::decode(ByteSpan payload, DecodeContext& ctx) const {
     if (auto msg = try_parse_vrrp(payload)) {
+        // --redact (on by default -- see DecodeOptions::redact_secrets's own comment, decoder.hpp)
+        // masks VRRPv2's own cleartext Simple Text Password with a fixed placeholder in every
+        // output format, rather than never decoding it at all -- the field's presence and length
+        // are themselves a real, actionable OT-security finding (a VRRP group "protected" by an
+        // authentication scheme with no real security value), independent of the literal value.
+        // --no-redact shows the real value, for parity with e.g. tshark's own packet-vrrp.c
+        // dissector.
+        if (ctx.redact_secrets && !msg->auth_simple_password.empty()) {
+            msg->summary = redact_secret_occurrences(msg->summary, msg->auth_simple_password);
+            msg->auth_simple_password = kRedactedSecretPlaceholder;
+        }
         return ProtocolResult::make<VrrpMessage>("vrrp", std::move(*msg));
     }
     return std::nullopt;

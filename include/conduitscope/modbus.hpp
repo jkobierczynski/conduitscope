@@ -63,11 +63,16 @@ struct ModbusFrame {
 // Attempts to interpret `tcp_payload` as a Modbus/TCP MBAP frame. Returns
 // std::nullopt (never throws) if the payload is too short, its protocol-id
 // field is not zero (the standard signal that this isn't Modbus/TCP at all),
-// or its function code is 0 (reserved/never assigned by the spec -- a
-// stronger signal than protocol-id alone, added after real DNP3 traffic was
-// seen coincidentally satisfying protocol-id==0 and getting mislabeled as
-// Modbus) -- callers use any of these to fall back to "unrecognized" rather
-// than aborting the whole packet.
+// or its raw function-code byte is exactly 0x00, non-exception (reserved/
+// never assigned by the spec -- a stronger signal than protocol-id alone,
+// added after real DNP3 traffic was seen coincidentally satisfying
+// protocol-id==0 and getting mislabeled as Modbus) -- callers use any of
+// these to fall back to "unrecognized" rather than aborting the whole
+// packet. Deliberately does NOT reject 0x80 (an exception response for
+// function code 0, i.e. base function code 0 with the exception bit set) --
+// see try_parse_modbus_tcp's own implementation comment for why: a real
+// device really does send that byte as a legitimate "Illegal Function"
+// exception.
 std::optional<ModbusFrame> try_parse_modbus_tcp(ByteSpan tcp_payload);
 
 // Returns the total on-the-wire byte count a Modbus/TCP MBAP message declares -- its 6-byte

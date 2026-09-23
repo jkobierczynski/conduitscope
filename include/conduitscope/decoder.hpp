@@ -357,6 +357,22 @@ struct DecodeOptions {
     // result. Off by default so one malformed packet doesn't abort decoding
     // an entire capture.
     bool strict = false;
+    // Whether a decoded cleartext secret (HSRP's/VRRP's own plaintext authentication field, OPC
+    // UA's UserNameIdentityToken password, MQTT's CONNECT password) is replaced with a fixed
+    // "[REDACTED]" placeholder in every output format, or shown as the literal value that was on
+    // the wire -- see decode's own --redact/--no-redact flag (cli_main.cpp) and
+    // docs/MANUAL.md's OUTPUT FORMATS section. On by default ("reverting the earlier stance of
+    // simply never decoding these values at all" -- see hsrp.hpp's/vrrp.hpp's own file header
+    // comments -- to "decode them, but mask them by default so a shared capture or report stays
+    // safe without losing the finding itself: THAT a cleartext credential exists here, which
+    // protocol/field it's in, and how many bytes it is, are still real, useful OT-security
+    // findings on their own, independent of the literal value"). Threaded into DecodeContext
+    // (protocol_decoder.hpp)'s own redact_secrets field by decoder.cpp's HSRP/VRRP/OPC UA/MQTT
+    // call sites specifically -- the only protocols in this codebase that ever place a literal
+    // cleartext credential value into their own output at all; every other protocol's DecodeContext
+    // just carries this field's default (true) unused, the same "only the few call sites that need
+    // it ever populate it" precedent DecodeContext::ip_src_addr already set for IGRP.
+    bool redact_secrets = true;
     // Process-wide overrides for the resource-exhaustion/DoS-protection constants scattered
     // across decoder.cpp and the individual protocol files -- see resource_limits.hpp for the
     // full rationale. Default-constructed (every field std::nullopt) means every site keeps its
@@ -1364,12 +1380,23 @@ struct DecodedPacket {
     uint8_t vrrp_priority = 0;
     std::vector<std::string> vrrp_ip_addresses;  // capped at 50 entries
     bool vrrp_ip_addresses_truncated = false;    // more than 50 addresses were declared
+    // auth_type == 1 (Simple Text Password) only -- the literal cleartext value, or
+    // kRedactedSecretPlaceholder when --redact (on by default) is active -- see
+    // DecodeOptions::redact_secrets's own comment and VrrpDecoder::decode (vrrp.cpp). Empty for
+    // every other auth_type, including a declared-but-truncated Simple Text Password (see
+    // vrrp.cpp's own auth_type==1 handling).
+    std::string vrrp_auth_password;
 
     // Only set when protocol == "hsrp" -- see try_parse_hsrp in hsrp.hpp.
     uint8_t hsrp_version = 0;
     std::string hsrp_opcode_name;   // v1 only; empty for v2 (see hsrp_tlv_types instead)
     std::string hsrp_state_name;    // v1 only
     std::string hsrp_virtual_ip;    // v1 only
+    // v1 only -- the literal cleartext authentication value, or kRedactedSecretPlaceholder when
+    // --redact (on by default) is active -- see DecodeOptions::redact_secrets's own comment and
+    // HsrpDecoder::decode (hsrp.cpp). Empty when v1's own 8-byte field was all-NUL (no
+    // authentication configured).
+    std::string hsrp_auth_data;
     std::vector<std::string> hsrp_tlv_types;  // v2 only: one "Group State"/"Interface State"/...
                                                 // entry per TLV, wire order. Capped at 50 entries.
     bool hsrp_tlvs_truncated = false;          // more than 50 TLVs were present

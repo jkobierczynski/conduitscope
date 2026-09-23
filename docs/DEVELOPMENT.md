@@ -5568,6 +5568,161 @@ IP/UDP-based routing/redundancy protocols above.
     capture file (`-w`)", "Hex dump (`-x`)") for the user-facing
     reference.
 
+36. **`-v`/`--verbose` (note/direction-suffix verbosity) and `--redact`/
+    `--no-redact` (cleartext-secret masking).** **Done.** Jurgen ran an
+    informal tshark-vs-conduitscope comparison in another session and came
+    back with two immediate readability/safety issues: at default
+    verbosity, per-packet notes and the trailing `(client X -- tier)`
+    direction-source suffix swamp the output on a busy capture; and this
+    tool prints cleartext authentication secrets it parses (he specifically
+    named HSRP/VRRP passwords, OPC UA credentials, and TACACS+ cleartext),
+    which makes captured output unsafe to share as-is.
+
+    **Verbosity (`-v`/`--verbose`).** A new `bool verbose_` gate on
+    `TextWriter` (`output.hpp`/`output.cpp`), off by default, additional to
+    (not a replacement for) `--no-direction`: `TextWriter::write_packet`'s
+    notes-printing loop and its `(client X -- tier)` direction-suffix line
+    both now only render when `-v` is passed, so `--no-direction` still
+    suppresses the suffix even under `-v`. Text-format only (`--format
+    text`, the default) -- JSON/CSV/fields output was already unconditional
+    for these fields and needed no change, since a script or SIEM
+    consuming structured output was never the audience the "swamps the
+    output" complaint was about.
+
+    **Redaction (`--redact`/`--no-redact`, on by default).** A new
+    `DecodeOptions::redact_secrets`/`DecodeContext::redact_secrets` pair
+    (mirroring the existing `ip_src_addr` precedent for a narrow,
+    single-purpose `DecodeContext` field), threaded down into the four
+    decoders that actually parse a cleartext secret today, plus a shared
+    `redact_secret_occurrences()`/`kRedactedSecretPlaceholder` ("
+    `[REDACTED]`") helper in `protocol_decoder.hpp` (placed in a shared
+    header rather than duplicated per-file, a deliberate exception to this
+    codebase's usual "small helpers stay file-local" convention, justified
+    by security-criticality of getting exact-substring redaction right
+    once rather than four times):
+
+    - **HSRP v1** (`hsrp.cpp`) and **VRRP v2 simple-text auth**
+      (`vrrp.cpp`): both decoders already *parsed* the cleartext
+      authentication field but never rendered it anywhere at all -- not a
+      pre-existing leak, a pre-existing gap. This change is what actually
+      makes the value visible for the first time, in the packet summary
+      (`, auth "..."`), redacted to `[REDACTED]` by default and real under
+      `--no-redact`. Framed to Jurgen as a factual correction: HSRP/VRRP
+      were never printing real passwords before this change, so there was
+      nothing to "revert" there specifically -- but the net request (show
+      the value, safely, opt-in to real) is implemented in full.
+    - **OPC UA** `ActivateSessionRequest` cleartext password
+      (`opcua.cpp`/`opcua.hpp`) and **MQTT CONNECT** password
+      (`mqtt.cpp`/`mqtt.hpp`): these two *did* already leak the real
+      cleartext value into JSON's `values`/`_values` arrays before this
+      change (each already carried its own inline "SECURITY FINDING"
+      comment noting the leak was deliberate/known, not accidental) --
+      both now redact by default, real value still available via
+      `--no-redact`. In both protocols, only the password is redacted;
+      the accompanying username is left alone (it's an identifier, not a
+      secret).
+
+    **Not touched by this change, found during the investigation but
+    deliberately out of scope for this pass:** TACACS+ currently decodes
+    no authentication body/credential at all (there is nothing cleartext
+    to redact there today -- a real future decode gap, not a redaction
+    gap); RIP's `auth_password` and OSPF's `auth_simple_password` have the
+    exact same "parsed but never rendered" shape HSRP/VRRP had before this
+    change; and SNMP's community string already renders in
+    `it_protocols.cpp`'s summary/notes with no redaction at all. All four
+    are reasonable, narrowly-scoped follow-ups in the same shape as this
+    one, flagged to Jurgen rather than folded in silently.
+
+    `CsvWriter` needed no changes at all -- confirmed by inspection that
+    its column set is small and fully generic (no protocol-specific
+    columns of any kind), so there was nothing secret-shaped for it to
+    leak in the first place.
+
+    4 renamed/added CTest tests (two existing OPC UA/MQTT tests renamed to
+    assert the new default-redacted expectation, plus a `--no-redact`
+    companion for each proving the real value is still recoverable on
+    request) plus mechanical `-v`/`--verbose` additions to every
+    pre-existing test whose `PASS_REGULAR_EXPRESSION` asserted on note
+    text or the direction suffix (243 tests, across effectively every
+    protocol family in this suite -- the single largest mechanical sweep
+    any one change has required in this codebase's test suite so far, a
+    direct measure of how pervasively notes/direction-suffix were already
+    being exercised at default verbosity). Full suite: 1412 -> 1414 tests,
+    zero-warning rebuild. See docs/MANUAL.md/docs/USER_GUIDE.md for the
+    user-facing `-v`/`--redact` reference.
+
+37. **Automated tshark-vs-conduitscope comparison (`tools/compare_with_tshark.py`) -- two real
+    decode bugs found and fixed.** **Done.** Jurgen had already run an informal tshark comparison
+    in another session (that's what produced item 36 above); he then asked whether this could be
+    automated and run against the fixture corpus directly, to check for conduitscope's own decoding
+    errors systematically rather than by hand.
+
+    A new script, `tools/compare_with_tshark.py`, runs both tools across every pcap in `tests/`
+    (128 files: 73 synthetic fixtures plus 55 real captures under `tests/real_captures/`) and
+    compares, per packet, tshark's `frame.protocols` leaf dissector name (mapped through a small,
+    explicit translation table onto conduitscope's own `protocol` JSON field) against
+    conduitscope's own classification -- but ONLY for the roughly one-third of conduitscope's own
+    protocol list that tshark also has a dissector for (Modbus, DNP3, S7comm, BACnet, ARP, LLDP,
+    STP, BGP, MQTT, OPC UA, GOOSE/Sampled Values, EtherCAT, Kerberos, LDAP, SMB, DNS and a few
+    more); the large majority of what conduitscope decodes (TwinCAT/ADS, MELSEC, FINS, HART-IP,
+    FOUNDATION Fieldbus HSE, and more) is proprietary OT/ICS protocol tshark has no dissector for
+    at all, so those packets are counted separately (`tshark-blind`) and never treated as a
+    mismatch. See the script's own module docstring for the full methodology and its honest scope
+    limits -- this is coarse-grained triage, not a field-by-field diff.
+
+    First run found 13,624 agreements against only 2 real disagreements and 1 error, across
+    roughly 13,600+ comparable frames -- a strong overall validation of this project's own
+    decoding, and both findings were genuine, previously-undiscovered bugs, not false positives:
+
+    - **Modbus/HART-IP collision, single-packet case (fixed).** A real captured Modbus "Illegal
+      Function" exception response (`tests/real_captures/modbus/modbus_test_data_part2.pcap`
+      frame #9) has raw function-code byte `0x80` (the exception bit set, base function code 0).
+      `try_parse_modbus_tcp` (`modbus.cpp`) used to reject ANY base function code of 0, exception
+      bit or not -- a guard originally added against a real DNP3-on-port-20000 collision, where
+      the raw byte was exactly `0x00`, non-exception. That over-broad rejection let this real
+      9-byte MBAP frame fall through to HART-IP's own looser structural gate, which happened to
+      also accept the same 9 bytes as a plausible "Session Initiate" header -- a misclassification
+      tshark's own dissector does not make (it decodes the same bytes as Modbus, "Illegal
+      function", without complaint). Fixed by narrowing the rejection to raw byte `0x00`
+      specifically (non-exception), leaving `0x80` (exception-for-function-0, a real, if unusual,
+      device response) to decode normally -- see `try_parse_modbus_tcp`'s own updated comment for
+      the full before/after reasoning. New regression test:
+      `real_modbus_illegal_function_exception_for_function_zero_decoded`.
+    - **JSON output left syntactically incomplete on a mid-stream fatal error (fixed).** Reading
+      `tests/real_captures/mqtt/mqtt_packets_RedHat61_tcpdump.pcap` (a real capture that is
+      genuinely corrupt from its very first frame -- already had a dedicated `--format text` test
+      for its own clear error message) under `--format json` left an unterminated JSON array on
+      stdout: the mid-stream `ParseError` this file triggers unwound straight past `writer->end()`
+      to `run_decode`'s own top-level `catch`, so the array's closing `]` was simply never
+      written. A structured-output consumer piping this straight into a JSON parser got a parse
+      error instead of a clean (if short) valid array. Fixed by wrapping `run_decode`'s main
+      packet loop in its own `try`/`catch (const ParseError&)` (`cli_main.cpp`) that finalizes the
+      active writer (and the color-reset sequence) exactly the way the success path already does,
+      THEN reports the same error message and exits nonzero -- the error text itself is
+      unchanged, only the well-formedness of whatever output came before it. New regression test:
+      `real_mqtt_redhat61_corrupt_file_json_output_still_well_formed`.
+
+    **Found but deliberately NOT fixed, flagged instead as a known, documented limitation** (see
+    hartip.hpp's own second "KNOWN, ACCEPTED, DOCUMENTED LIMITATION" section): frame #60 of that
+    same `modbus_test_data_part2.pcap` capture is a deeper, mirror-image instance of the same
+    HART-IP/Modbus collision family. A separate, genuinely malformed Modbus segment earlier in
+    that same TCP flow (frame #6, raw function-code byte `0x00` -- correctly still rejected by the
+    fix above, since it IS the exact `0x00` non-exception case the DNP3-collision guard exists
+    for) triggers HART-IP's OWN TCP declared-length reassembly, which then claims the entire rest
+    of that real Modbus flow for the next 22 segments -- every one of them ordinary Modbus traffic
+    -- before finally "completing" as a nonsensical HART-IP Session Initiate message once its
+    coincidental 256-byte declared length is satisfied. This is not bounded by the general
+    reassembly resource-exhaustion caps (16 MiB / 20,000 segments by default -- both far too large
+    to catch a 256-byte/22-segment false positive) and would need real cross-protocol
+    session-state corroboration to fix properly (e.g. "this flow already showed confirmed Modbus
+    traffic in the other direction") -- a genuine design change, not a quick patch, and explicitly
+    NOT attempted here given this project's own prior history (documented on HART-IP's OTHER,
+    already-existing collision note, directly above the new one) of a similar quick reordering fix
+    in this same collision family measurably regressing the Modbus/S7comm test corpus. Flagged to
+    Jurgen as a real, open design question rather than silently left unexplained.
+
+    Full suite: 1414 -> 1416 tests, zero-warning rebuild.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

@@ -86,6 +86,34 @@
 // Pass-Through messages (MessageID 3) are also unaffected on TCP, since their own MessageID never
 // produces the protocol-id==0 collision.
 //
+// KNOWN, ACCEPTED, DOCUMENTED LIMITATION -- the mirror-image collision, also over TCP: a genuinely
+// malformed Modbus/TCP segment whose raw function-code byte is exactly 0x00 (reserved, correctly
+// rejected by modbus.cpp's own try_parse_modbus_tcp/modbus_tcp_declared_length -- see
+// modbus_function_code_zero_is_not_modbus in CMakeLists.txt, the DNP3-on-port-20000 collision this
+// rejection itself exists to guard against) can ALSO happen to satisfy this decoder's own
+// MessageType/MessageID/MsgLength>=8 gate, since Modbus's leading MBAP bytes (TransID/ProtoID/
+// Length, all frequently small or zero on real traffic) map directly onto HART-IP's own
+// Version/MessageType/MessageID/TransactionID/MsgLength fields. Found via an automated tshark-vs-
+// conduitscope comparison (tools/compare_with_tshark.py) against a real capture: tests/
+// real_captures/modbus/modbus_test_data_part2.pcap frame #6 (a genuinely malformed Modbus segment
+// a real device sent, mid-session) triggers this decoder's TCP declared-length reassembly, which
+// then claims the ENTIRE REST of that real Modbus TCP flow for the next 22 segments (every one of
+// them perfectly ordinary Modbus traffic) before finally "completing" as a nonsensical HART-IP
+// Session Initiate message once the coincidental 256-byte declared length is satisfied (frame
+// #60) -- see real_modbus_illegal_function_exception_for_function_zero_decoded's own comment in
+// CMakeLists.txt for the frame-by-frame trace. Unlike the collision above, this one is NOT bounded
+// to a single misclassified packet: once HART-IP's declared-length reassembly claims a flow, nothing
+// in the current TCP reassembly dispatch (decoder.cpp's reassemble_tcp_payload) reconsiders that
+// claim against emerging evidence (e.g. that every subsequent segment on the flow looks exactly
+// like ordinary Modbus traffic) until the declared length is either satisfied or abandoned by the
+// general resource-exhaustion caps (resource_limits.hpp's max_reassembly_bytes/max_reassembly_
+// segments, both far too large -- 16 MiB/20,000 segments by default -- to bound a 256-byte/22-
+// segment false positive like this one). A real, general fix needs cross-protocol session-state
+// corroboration (e.g. "this flow already showed confirmed Modbus traffic in the other direction,
+// so don't let HART-IP's own weaker gate claim it") -- a genuine design change, not a quick patch,
+// and deliberately not attempted here given this project's own history (immediately above) of a
+// similar quick fix in this same collision family measurably regressing its own test corpus.
+//
 // ---------------------------------------------------------------------------------------------
 // Session Initiate (MessageID 0) body -- ASHRAE... no, FieldComm Group's own HART-IP spec, cross-
 // checked against packet-hartip.c's dissect_session_init -- exactly 5 bytes, ONE shape used for
