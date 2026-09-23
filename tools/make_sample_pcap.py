@@ -9267,6 +9267,8 @@ def build_smb_sample():
 # verification aid during planning only, never a dependency of this fixture generator.
 
 NETLOGON_INTERFACE_UUID = "12345678-1234-abcd-ef00-01234567cffb"
+SAMR_INTERFACE_UUID = "12345778-1234-abcd-ef00-0123456789ac"      # samr.hpp's own kSamrInterfaceUuid
+LSARPC_INTERFACE_UUID = "12345778-1234-abcd-ef00-0123456789ab"    # lsarpc.hpp's own kLsarpcInterfaceUuid
 NDR32_TRANSFER_SYNTAX_UUID = "8a885d04-1ceb-11c9-9fe8-08002b104860"
 FSCTL_PIPE_TRANSCEIVE = 0x0011C017
 RPC_C_AUTHN_LEVEL_PKT_PRIVACY = 6
@@ -9474,6 +9476,286 @@ class NdrBuf:
 
     def get(self) -> bytes:
         return bytes(self.buf)
+
+    # -------------------------------------------------------------------------------------------
+    # SAMR/LSARPC-specific NDR primitives, added for the SAMR/LSARPC phase -- each is the exact
+    # inverse of one shared reader in dcerpc.cpp (read_ndr_sid/read_ndr_sid_pointer_array/
+    # read_ndr_unicode_string_array/read_ndr_ulong_conformant_varying_array/
+    # read_ndr_count_and_ptr_ulong_array), byte-for-byte, per those functions' own doc comments and
+    # samr.cpp's/lsarpc.cpp's own per-opnum field-order comments. `_ref()` mints a small counter of
+    # distinct nonzero referent IDs -- their exact values are never meaningful to the decoder (only
+    # zero vs nonzero is), but distinct values make a hex dump easier to eyeball while debugging.
+    _next_referent = [0x00100000]
+
+    def _ref(self):
+        NdrBuf._next_referent[0] += 1
+        return NdrBuf._next_referent[0]
+
+    def sid(self, sid_str: str):
+        """RPC_SID, embedded by value (no referent of its own) -- read_ndr_sid's own inverse:
+        hoisted MaximumCount(u32) + Revision(u8) + SubAuthorityCount(u8) +
+        IdentifierAuthority(6 bytes, big-endian) + SubAuthority (N x u32 LE)."""
+        parts = sid_str.split("-")
+        assert parts[0] == "S", f"not a SID string: {sid_str!r}"
+        revision = int(parts[1])
+        authority = int(parts[2])
+        subs = [int(p) for p in parts[3:]]
+        self.u32(len(subs))
+        self.buf += struct.pack("<B", revision)
+        self.buf += struct.pack("<B", len(subs))
+        self.buf += authority.to_bytes(6, "big")
+        for s in subs:
+            self.u32(s)
+
+    def sid_pointer_array(self, sids):
+        """The deferred body of a conformant array of pointer-to-RPC_SID -- read_ndr_sid_pointer_
+        array's own inverse: MaximumCount(u32) + N referents(u32 each) + each nonzero referent's own
+        SID, in order. Used both as a top-level embedded array (SamrGetAliasMembership's/LsarLookup-
+        Sids' own SidArray, via sid_array_ptr below) and for LsarEnumerateAccounts' response."""
+        self._pad4()
+        n = len(sids)
+        self.u32(n)
+        refs = [self._ref() for _ in sids]
+        for r in refs:
+            self.u32(r)
+        for sid_str in sids:
+            self.sid(sid_str)
+
+    def sid_array_ptr(self, sids):
+        """SidArray{Count(u32), Sids:pointer-to-conformant-array-of-pointer-to-RPC_SID} -- the shape
+        SamrGetAliasMembership's own request and LsarLookupSids' own request share (see samr.cpp's
+        parse_get_alias_membership_request / lsarpc.cpp's parse_lookup_sids_request)."""
+        self._pad4()
+        self.u32(len(sids))
+        if not sids:
+            self.u32(0)
+            return
+        self.u32(self._ref())
+        self.sid_pointer_array(sids)
+
+    def unicode_string_array(self, names):
+        """A top-level embedded conformant-varying array of RPC_UNICODE_STRING -- read_ndr_unicode_
+        string_array's own inverse: MaxCount(u32)/Offset(u32)/ActualCount(u32), then each element's
+        own fixed part (Length u16, MaximumLength u16, Referent u32) batched, THEN each nonzero
+        referent's own deferred NDR string (ref_string's own shape), batched, in order. Used both as
+        a bare top-level parameter (SamrLookupNamesInDomain's/LsarLookupNames' own request `Names`)
+        and as one pointer's own deferred content (SamrLookupIdsInDomain's response `Names`, via
+        names_ptr_array below)."""
+        self._pad4()
+        n = len(names)
+        self.u32(n)
+        self.u32(0)
+        self.u32(n)
+        refs = []
+        for name in names:
+            blen = len(name) * 2
+            self.u16(blen)
+            self.u16(blen + 2)
+            r = self._ref()
+            refs.append(r)
+            self.u32(r)
+        for name in names:
+            self.ref_string(name)
+
+    def names_ptr_array(self, names):
+        """Names:SAMPR_RETURNED_USTRING_ARRAY{Count(u32), Element:pointer-to-array-of-RPC_UNICODE_
+        STRING} -- SamrLookupIdsInDomain's own response shape (see samr.cpp's
+        parse_lookup_ids_response): Count(u32) + Referent(u32) + [if nonzero: the pointed-to array's
+        own unicode_string_array body]."""
+        self._pad4()
+        self.u32(len(names))
+        if not names:
+            self.u32(0)
+            return
+        self.u32(self._ref())
+        self.unicode_string_array(names)
+
+    def ulong_array(self, values):
+        """A top-level embedded conformant-varying array of plain ULONG -- read_ndr_ulong_
+        conformant_varying_array's own inverse: MaxCount(u32)/Offset(u32)/ActualCount(u32) + N x
+        u32. Used for SamrLookupIdsInDomain's own request `RelativeIds`."""
+        self._pad4()
+        n = len(values)
+        self.u32(n)
+        self.u32(0)
+        self.u32(n)
+        for v in values:
+            self.u32(v)
+
+    def count_and_ptr_ulong_array(self, values):
+        """A SAMPR_ULONG_ARRAY-shaped field -- read_ndr_count_and_ptr_ulong_array's own inverse:
+        Count(u32) + Referent(u32) + [if nonzero: MaximumCount(u32) + N x u32]. Used for
+        SamrLookupNamesInDomain's response RelativeIds/Use and SamrGetAliasMembership's response
+        Membership."""
+        self._pad4()
+        n = len(values)
+        self.u32(n)
+        if n == 0:
+            self.u32(0)
+            return
+        self.u32(self._ref())
+        self.u32(n)
+        for v in values:
+            self.u32(v)
+
+    def trust_info_array(self, entries):
+        """The deferred body of a conformant array of LSAPR_TRUST_INFORMATION{Name, Sid} -- each
+        entry's own fixed part (Name.Length u16, Name.MaximumLength u16, Name.Referent u32,
+        Sid.Referent u32 -- 12 bytes) batched first, THEN each entry's own deferred Name string and
+        Sid, in order (array-of-pointer-containing-elements rule -- see samr.cpp's own header
+        comment). `entries` is a list of (name, sid_str) pairs. Reused both for
+        LsarEnumerateTrustedDomains' own inline EnumerationBuffer.Information array and (with an
+        outer Entries/Domains-pointer/MaxEntries wrapper -- see referenced_domain_list below) for
+        LsarLookupNames'/LsarLookupSids' own ReferencedDomains field, since both share this element
+        shape (lsarpc.cpp's own read_referenced_domain_list doc comment)."""
+        self._pad4()
+        n = len(entries)
+        self.u32(n)
+        refs = []
+        for name, _sid in entries:
+            blen = len(name) * 2
+            self.u16(blen)
+            self.u16(blen + 2)
+            name_ref = self._ref()
+            sid_ref = self._ref()
+            refs.append((name_ref, sid_ref))
+            self.u32(name_ref)
+            self.u32(sid_ref)
+        for (name, sid_str), (name_ref, sid_ref) in zip(entries, refs):
+            if name_ref:
+                self.ref_string(name)
+            if sid_ref:
+                self.sid(sid_str)
+
+    def referenced_domain_list_field(self, entries):
+        """LSAPR_REFERENCED_DOMAIN_LIST, reached via one top-level pointer field (ReferencedDomains)
+        -- read_referenced_domain_list's own inverse: outer Referent(u32) + [if nonzero:
+        Entries(u32) + Domains-Referent(u32) + MaxEntries(u32) + [if Domains-Referent nonzero: the
+        Domains array's own trust_info_array body]]. `entries` is a list of (name, sid_str) pairs;
+        an empty list writes a NULL outer referent (matching read_referenced_domain_list's own
+        early-return-on-null-outer-referent behavior, so nothing else is written for that case)."""
+        self._pad4()
+        if not entries:
+            self.u32(0)
+            return
+        self.u32(self._ref())
+        self.u32(len(entries))
+        self.u32(self._ref())
+        self.u32(len(entries))
+        # Domains' own conformant array header is exactly one MaximumCount field (no Offset/
+        # ActualCount -- read_referenced_domain_list reads `maximum_count` directly), the same body
+        # shape trust_info_array already writes; reuse it (its own leading _pad4() is a no-op here,
+        # position is already a multiple of 4).
+        self.trust_info_array(entries)
+
+    def translated_sids_field(self, rids):
+        """LSA_TRANSLATED_SID array (LsarLookupNames' own response `TranslatedSids`) -- read_
+        translated_sids' own inverse: Entries(u32) + Referent(u32) + [if nonzero: MaximumCount(u32)
+        + N x (Use(u32)=SidTypeUser, RelativeId(u32), DomainIndex(i32)=0) -- no deferred data, every
+        field fixed-size]."""
+        self._pad4()
+        self.u32(len(rids))
+        if not rids:
+            self.u32(0)
+            return
+        self.u32(self._ref())
+        self.u32(len(rids))
+        for rid in rids:
+            self.u32(1)  # Use = SidTypeUser -- discarded by the decoder, any nonzero value will do
+            self.u32(rid)
+            self.u32(0)  # DomainIndex -- discarded
+
+    def translated_names_field(self, names):
+        """LSA_TRANSLATED_NAME array (LsarLookupSids' own response `TranslatedNames`) -- read_
+        translated_names' own inverse: Entries(u32) + Referent(u32) + [if nonzero: MaximumCount(u32)
+        + N x (Use(u32), Name.Length(u16), Name.MaximumLength(u16), Name.Referent(u32),
+        DomainIndex(i32)=0) fixed, THEN each nonzero-referent Name's own deferred string, batched]."""
+        self._pad4()
+        self.u32(len(names))
+        if not names:
+            self.u32(0)
+            return
+        self.u32(self._ref())
+        self.u32(len(names))
+        refs = []
+        for name in names:
+            self.u32(1)  # Use = SidTypeUser
+            blen = len(name) * 2
+            self.u16(blen)
+            self.u16(blen + 2)
+            r = self._ref()
+            refs.append(r)
+            self.u32(r)
+            self.u32(0)  # DomainIndex
+        for name, r in zip(names, refs):
+            if r:
+                self.ref_string(name)
+
+
+def samr_enumerate_response_stub(enumeration_context: int, entries, count_returned: int,
+                                  status: int = 0) -> bytes:
+    """SamrEnumerateUsersInDomain(13)/SamrEnumerateAliasesInDomain(15) response -- see samr.cpp's
+    own parse_enumerate_response doc comment for the exact (eager top-level / nested-batched) field
+    order this mirrors. `entries` is a list of (rid:int, name:str) pairs, or None/[] for a NULL
+    Buffer pointer."""
+    b = NdrBuf()
+    b.u32(enumeration_context)
+    if not entries:
+        b.u32(0)  # Buffer referent NULL
+    else:
+        b.u32(b._ref())  # Buffer referent
+        b.u32(len(entries))  # EntriesRead (nested field, discarded by the decoder)
+        b.u32(b._ref())  # inner (RID+Name array) referent
+        b.u32(len(entries))  # MaximumCount
+        refs = []
+        for rid, name in entries:
+            b.u32(rid)
+            blen = len(name) * 2
+            b.u16(blen)
+            b.u16(blen + 2)
+            r = b._ref()
+            refs.append(r)
+            b.u32(r)
+        for (rid, name), r in zip(entries, refs):
+            if r:
+                b.ref_string(name)
+    b.u32(count_returned)
+    b.u32(status)
+    return b.get()
+
+
+def lsar_enumerate_accounts_response_stub(enumeration_context: int, sids, status: int = 0) -> bytes:
+    """LsarEnumerateAccounts(11) response -- see lsarpc.cpp's own parse_enumerate_accounts_response:
+    EnumerationContext(u32) + EntriesRead(u32, discard) + Information-Referent(u32) + [if nonzero:
+    the Information array's own sid_pointer_array body] + ErrorCode(u32)."""
+    b = NdrBuf()
+    b.u32(enumeration_context)
+    b.u32(len(sids))
+    if not sids:
+        b.u32(0)
+    else:
+        b.u32(b._ref())
+        b.sid_pointer_array(sids)
+    b.u32(status)
+    return b.get()
+
+
+def lsar_enumerate_trusted_domains_response_stub(enumeration_context: int, entries,
+                                                  status: int = 0) -> bytes:
+    """LsarEnumerateTrustedDomains(13) response -- see lsarpc.cpp's own
+    parse_enumerate_trusted_domains_response: EnumerationContext(u32) + EntriesRead(u32, discard) +
+    Information-Referent(u32) + [if nonzero: the Information array's own trust_info_array body] +
+    ErrorCode(u32). `entries` is a list of (name, sid_str) pairs."""
+    b = NdrBuf()
+    b.u32(enumeration_context)
+    b.u32(len(entries))
+    if not entries:
+        b.u32(0)
+    else:
+        b.u32(b._ref())
+        b.trust_info_array(entries)
+    b.u32(status)
+    return b.get()
 
 
 def netlogon_req_challenge_request_stub(primary_name, computer_name, client_challenge: bytes) -> bytes:
@@ -9983,6 +10265,333 @@ def build_netlogon_sample():
     for i, pkt in enumerate(packets):
         data += pcap_record(pkt, 1_700_050_000 + i, i * 1000)
     (TESTS_DIR / "sample_netlogon.pcap").write_bytes(data)
+
+
+def build_samr_lsarpc_sample():
+    """SAMR + LSARPC (MS-SAMR/MS-LSAD/MS-LSAT), phase 1 of the SAMR/LSARPC/SRVSVC/WKSSVC/DRSUAPI
+    batch -- see samr.hpp's/lsarpc.hpp's own file header comments for the wire format, opnum
+    coverage, and the empirically-derived NDR deferred-pointer-ordering rule every full-decode
+    opnum below relies on. Every flow opens with a TREE_CONNECT to "\\\\SERVER\\IPC$" then a CREATE
+    of "\\PIPE\\samr" or "\\PIPE\\lsarpc" (or both), exactly mirroring build_netlogon_sample's own
+    transport-layer conventions (WRITE+READ named-pipe transport throughout). Flows, each its own
+    TCP session:
+      A: SAMR only -- bind + SamrConnect2(57), SamrOpenDomain(7) against a real domain SID,
+         SamrLookupNamesInDomain(17) (one not-found name -- the SAMR enumeration note's own
+         trigger), SamrLookupIdsInDomain(18) (one not-found RID), SamrEnumerateUsersInDomain(13)
+         (STATUS_MORE_ENTRIES, exercising samr_status_name's curated table), SamrEnumerateAliases-
+         InDomain(15), SamrGetAliasMembership(16), SamrOpenUser(34); then SamrChangePasswordUser(38)
+         and SamrSetInformationUser(37) as the structural-only, zero-field-decode, secret-shaped
+         negative controls (no password bytes anywhere in the decoded output).
+      B: LSARPC only -- bind + LsarOpenPolicy2(44) (request stays structural-only by design; the
+         response is decoded), LsarLookupNames(14) (the LSARPC enumeration note's own trigger; one
+         not-found name via TranslatedSids' own RID=0), LsarLookupSids(15) (STATUS_SOME_NOT_MAPPED,
+         exercising lsarpc_status_name's curated table), LsarEnumerateAccounts(11), LsarEnumerate-
+         TrustedDomains(13), LsarClose(0) (structural-only, opnum-name-only).
+      C: SAMR + LSARPC pipes open on the SAME session -- a SamrLookupNamesInDomain(17) recon call
+         fires both the SAMR enumeration note AND (since the lsarpc pipe is already open on this
+         same SmbFlowState) the cross-interface note; a subsequent LsarLookupNames(14) recon call on
+         the second pipe fires LSARPC's own enumeration note but NOT a second cross-interface note
+         (the sticky flag already fired once).
+      D: a full NTLM handshake ending in a GUEST session (SessionFlags.IS_GUEST), followed by a SAMR
+         pipe + SamrEnumerateUsersInDomain(13) recon call -- the SAMR enumeration note must carry the
+         escalated "established as anonymous/guest" wording this session state adds.
+      E: bind SAMR normally, then a SEALED (auth_level=PKT_PRIVACY) SamrOpenUser(34) request/response
+         pair on the already-bound context -- the "sealed, N bytes, not decoded" fallback, no field
+         decode, no enumeration note.
+      F: a bind whose only offered context names a NON-SAMR interface UUID (Netlogon's own) on a
+         "samr"-named pipe -- the request that follows must stay structural (no samr_calls at all),
+         the same defensive negative control build_netlogon_sample's own flow G establishes for
+         Netlogon.
+    Every byte offset and note-trigger condition here was independently smoke-tested against a
+    hand-built synthetic exchange, decoded and inspected in both --format text and --format json,
+    BEFORE this fixture (and the CMakeLists.txt tests reading it) were written -- the same
+    verification discipline every prior phase's own fixture was held to."""
+    packets = []
+    ident = [0xE000]
+    port = [54001]
+    file_id_counter = [1]
+    call_id_counter = [1]
+
+    def next_file_id() -> bytes:
+        file_id_counter[0] += 1
+        return struct.pack("<QQ", file_id_counter[0], 0xBEEF0000 + file_id_counter[0])
+
+    def next_call_id() -> int:
+        call_id_counter[0] += 1
+        return call_id_counter[0]
+
+    def make_flow():
+        sport = port[0]
+        port[0] += 1
+        state = {"cseq": 60000, "sseq": 70000}
+
+        def add(from_client: bool, payload: bytes):
+            if from_client:
+                s_port, d_port = sport, 445
+                s_ip, d_ip = HMI_IP, PLC_IP
+                s_mac, d_mac = HMI_MAC, PLC_MAC
+                seq, ack = state["cseq"], state["sseq"]
+                state["cseq"] += len(payload)
+            else:
+                s_port, d_port = 445, sport
+                s_ip, d_ip = PLC_IP, HMI_IP
+                s_mac, d_mac = PLC_MAC, HMI_MAC
+                seq, ack = state["sseq"], state["cseq"]
+                state["sseq"] += len(payload)
+            tcp = tcp_header(s_port, d_port, seq, ack, TCP_PSH | TCP_ACK, len(payload)) + payload
+            ip = ipv4_header(s_ip, d_ip, 6, len(tcp), ident[0] & 0xFFFF) + tcp
+            ident[0] += 1
+            packets.append(eth_header(d_mac, s_mac, 0x0800) + ip)
+
+        return add
+
+    mid = [400]
+
+    def next_mid():
+        mid[0] += 1
+        return mid[0]
+
+    def open_pipe(fx, session_id, tree_id, pipe_name):
+        m_tc = next_mid()
+        fx(True, smb_with_prefix(smb2_message(0x03, False, smb2_tree_connect_req_body("\\\\SERVER\\IPC$"),
+                                               message_id=m_tc, session_id=session_id)))
+        fx(False, smb_with_prefix(smb2_message(
+            0x03, True, smb2_tree_connect_resp_body(SMB_SHARE_TYPE_PIPE), message_id=m_tc,
+            status=SMB_STATUS_SUCCESS, session_id=session_id, tree_id=tree_id)))
+
+        file_id = next_file_id()
+        m_cr = next_mid()
+        fx(True, smb_with_prefix(smb2_message(0x05, False, smb2_create_req_body("\\PIPE\\" + pipe_name),
+                                               message_id=m_cr, session_id=session_id, tree_id=tree_id)))
+        fx(False, smb_with_prefix(smb2_message(
+            0x05, True, smb2_create_resp_body(file_id), message_id=m_cr, status=SMB_STATUS_SUCCESS,
+            session_id=session_id, tree_id=tree_id)))
+        return file_id
+
+    def close_pipe(fx, session_id, tree_id, file_id):
+        m_cl = next_mid()
+        fx(True, smb_with_prefix(smb2_message(0x06, False, smb2_close_req_body(file_id),
+                                               message_id=m_cl, session_id=session_id, tree_id=tree_id)))
+        fx(False, smb_with_prefix(smb2_message(
+            0x06, True, smb2_close_resp_body(), message_id=m_cl, status=SMB_STATUS_SUCCESS,
+            session_id=session_id, tree_id=tree_id)))
+
+    pending_read_mid = [None]
+
+    def write_read(fx, session_id, tree_id, file_id, pdu_bytes: bytes):
+        m_w = next_mid()
+        fx(True, smb_with_prefix(smb2_message(0x09, False, smb2_write_req_body(file_id, pdu_bytes),
+                                               message_id=m_w, session_id=session_id, tree_id=tree_id)))
+        fx(False, smb_with_prefix(smb2_message(
+            0x09, True, smb2_write_resp_body(len(pdu_bytes)), message_id=m_w, status=SMB_STATUS_SUCCESS,
+            session_id=session_id, tree_id=tree_id)))
+        m_r = next_mid()
+        fx(True, smb_with_prefix(smb2_message(0x08, False, smb2_read_req_body(file_id),
+                                               message_id=m_r, session_id=session_id, tree_id=tree_id)))
+        pending_read_mid[0] = m_r
+
+    def read_response(fx, session_id, tree_id, pdu_bytes: bytes):
+        m_r = pending_read_mid[0]
+        assert m_r is not None, "read_response called without a preceding write_read"
+        fx(False, smb_with_prefix(smb2_message(
+            0x08, True, smb2_read_resp_body(pdu_bytes), message_id=m_r, status=SMB_STATUS_SUCCESS,
+            session_id=session_id, tree_id=tree_id)))
+        pending_read_mid[0] = None
+
+    def bind_and_ack(fx, session_id, tree_id, file_id, call_id, abstract_uuid, result=0):
+        bind_pdu = dcerpc_pdu(11, call_id, dcerpc_bind_body(
+            [dcerpc_context_element(0, abstract_uuid)]))
+        bind_ack_pdu = dcerpc_pdu(12, call_id, dcerpc_bind_ack_body([dcerpc_context_result(result)]))
+        write_read(fx, session_id, tree_id, file_id, bind_pdu)
+        read_response(fx, session_id, tree_id, bind_ack_pdu)
+
+    def call(fx, session_id, tree_id, file_id, opnum, req_stub, resp_stub, auth=None):
+        cid = next_call_id()
+        write_read(fx, session_id, tree_id, file_id,
+                   dcerpc_pdu(0, cid, dcerpc_request_body(0, opnum, req_stub), auth=auth))
+        read_response(fx, session_id, tree_id,
+                      dcerpc_pdu(2, cid, dcerpc_response_body(0, resp_stub), auth=auth))
+
+    DOMAIN_SID = "S-1-5-21-1111111111-2222222222-3333333333"
+    ADMIN_SID = DOMAIN_SID + "-500"
+    JDOE_SID = DOMAIN_SID + "-1105"
+
+    def handle20(pattern: int) -> bytes:
+        return bytes([pattern] * 20)
+
+    # ---------------------------------------------------------------------------------------------
+    # Flow A: SAMR only -- full-decode opnum coverage + the two secret-shaped structural-only
+    # negative controls (SamrChangePasswordUser/SamrSetInformationUser).
+    # ---------------------------------------------------------------------------------------------
+    fa = make_flow()
+    sess_a, tree_a = 0xB000000000000001, 1
+    fid_a = open_pipe(fa, sess_a, tree_a, "samr")
+    bind_and_ack(fa, sess_a, tree_a, fid_a, next_call_id(), SAMR_INTERFACE_UUID)
+
+    server_handle = handle20(0x11)
+    b = NdrBuf(); b.unique_string("\\\\DC1")
+    call(fa, sess_a, tree_a, fid_a, 57, b.get(), server_handle + struct.pack("<I", 0))
+
+    domain_handle = handle20(0x22)
+    b = NdrBuf(); b.raw(server_handle); b.u32(0x02000000); b.sid(DOMAIN_SID)
+    call(fa, sess_a, tree_a, fid_a, 7, b.get(), domain_handle + struct.pack("<I", 0))
+
+    b = NdrBuf(); b.raw(domain_handle); b.u32(3); b.unicode_string_array(["Administrator", "jdoe", "nosuchuser"])
+    rb = NdrBuf(); rb.count_and_ptr_ulong_array([500, 1105, 0]); rb.count_and_ptr_ulong_array([1, 1, 0]); rb.u32(0)
+    call(fa, sess_a, tree_a, fid_a, 17, b.get(), rb.get())
+
+    b = NdrBuf(); b.raw(domain_handle); b.u32(3); b.ulong_array([500, 1105, 9999])
+    rb = NdrBuf(); rb.names_ptr_array(["Administrator", "jdoe", ""]); rb.count_and_ptr_ulong_array([1, 1, 0]); rb.u32(0)
+    call(fa, sess_a, tree_a, fid_a, 18, b.get(), rb.get())
+
+    b = NdrBuf(); b.raw(domain_handle); b.u32(0)
+    resp = samr_enumerate_response_stub(0, [(500, "Administrator"), (1105, "jdoe")], 2, status=0x00000103)
+    call(fa, sess_a, tree_a, fid_a, 13, b.get(), resp)
+
+    b = NdrBuf(); b.raw(domain_handle); b.u32(0)
+    resp = samr_enumerate_response_stub(0, [(544, "Administrators"), (545, "Users")], 2, status=0)
+    call(fa, sess_a, tree_a, fid_a, 15, b.get(), resp)
+
+    b = NdrBuf(); b.raw(domain_handle); b.sid_array_ptr([JDOE_SID])
+    rb = NdrBuf(); rb.count_and_ptr_ulong_array([544, 545]); rb.u32(0)
+    call(fa, sess_a, tree_a, fid_a, 16, b.get(), rb.get())
+
+    user_handle = handle20(0x33)
+    b = NdrBuf(); b.raw(domain_handle); b.u32(0x02000000); b.u32(1105)
+    call(fa, sess_a, tree_a, fid_a, 34, b.get(), user_handle + struct.pack("<I", 0))
+
+    # SamrChangePasswordUser/SamrSetInformationUser -- structural-only by design (see samr.hpp's own
+    # OPNUM COVERAGE note); stub bytes are deliberately non-empty and non-zero to prove they're never
+    # rendered anywhere in the decoded output.
+    call(fa, sess_a, tree_a, fid_a, 38, b"\xAB" * 64, b"\x00" * 4)
+    call(fa, sess_a, tree_a, fid_a, 37, b"\xCD" * 64, b"\x00" * 4)
+
+    close_pipe(fa, sess_a, tree_a, fid_a)
+
+    # ---------------------------------------------------------------------------------------------
+    # Flow B: LSARPC only -- full-decode opnum coverage + LsarOpenPolicy2's own request-side
+    # structural-only posture and LsarClose's opnum-name-only fallback.
+    # ---------------------------------------------------------------------------------------------
+    fb = make_flow()
+    sess_b, tree_b = 0xB000000000000002, 1
+    fid_b = open_pipe(fb, sess_b, tree_b, "lsarpc")
+    bind_and_ack(fb, sess_b, tree_b, fid_b, next_call_id(), LSARPC_INTERFACE_UUID)
+
+    policy_handle = handle20(0x44)
+    call(fb, sess_b, tree_b, fid_b, 44, b"\x00" * 8, policy_handle + struct.pack("<I", 0))
+
+    b = NdrBuf(); b.raw(policy_handle); b.u32(2); b.unicode_string_array(["Administrator", "nosuchuser"])
+    rb = NdrBuf()
+    rb.referenced_domain_list_field([("CORP", DOMAIN_SID)])
+    rb.translated_sids_field([500, 0])
+    rb.u32(2); rb.u32(0)
+    call(fb, sess_b, tree_b, fid_b, 14, b.get(), rb.get())
+
+    b = NdrBuf(); b.raw(policy_handle); b.sid_array_ptr([ADMIN_SID, JDOE_SID])
+    rb = NdrBuf()
+    rb.referenced_domain_list_field([("CORP", DOMAIN_SID)])
+    rb.translated_names_field(["Administrator", "jdoe"])
+    rb.u32(2); rb.u32(0x00000107)
+    call(fb, sess_b, tree_b, fid_b, 15, b.get(), rb.get())
+
+    b = NdrBuf(); b.raw(policy_handle); b.u32(0)
+    resp = lsar_enumerate_accounts_response_stub(0, [ADMIN_SID, JDOE_SID], status=0)
+    call(fb, sess_b, tree_b, fid_b, 11, b.get(), resp)
+
+    b = NdrBuf(); b.raw(policy_handle); b.u32(0)
+    resp = lsar_enumerate_trusted_domains_response_stub(
+        0, [("CHILD.CORP.LOCAL", "S-1-5-21-444444444-555555555-666666666")], status=0)
+    call(fb, sess_b, tree_b, fid_b, 13, b.get(), resp)
+
+    # LsarClose -- structural-only, opnum-name-only fallback (outside this file's own curated table).
+    call(fb, sess_b, tree_b, fid_b, 0, policy_handle, b"\x00" * 4)
+
+    close_pipe(fb, sess_b, tree_b, fid_b)
+
+    # ---------------------------------------------------------------------------------------------
+    # Flow C: SAMR + LSARPC pipes on the SAME session -- the cross-interface note (only possible
+    # because Phase 0 put both maps on one SmbFlowState).
+    # ---------------------------------------------------------------------------------------------
+    fc = make_flow()
+    sess_c, tree_c = 0xB000000000000003, 1
+    fid_c_samr = open_pipe(fc, sess_c, tree_c, "samr")
+    fid_c_lsarpc = open_pipe(fc, sess_c, tree_c, "lsarpc")
+
+    bind_and_ack(fc, sess_c, tree_c, fid_c_samr, next_call_id(), SAMR_INTERFACE_UUID)
+    dh = handle20(0x55)
+    b = NdrBuf(); b.raw(dh); b.u32(1); b.unicode_string_array(["Administrator"])
+    rb = NdrBuf(); rb.count_and_ptr_ulong_array([500]); rb.count_and_ptr_ulong_array([1]); rb.u32(0)
+    call(fc, sess_c, tree_c, fid_c_samr, 17, b.get(), rb.get())
+
+    bind_and_ack(fc, sess_c, tree_c, fid_c_lsarpc, next_call_id(), LSARPC_INTERFACE_UUID)
+    ph = handle20(0x66)
+    b = NdrBuf(); b.raw(ph); b.u32(1); b.unicode_string_array(["Administrator"])
+    rb = NdrBuf()
+    rb.referenced_domain_list_field([("CORP", DOMAIN_SID)])
+    rb.translated_sids_field([500])
+    rb.u32(1); rb.u32(0)
+    call(fc, sess_c, tree_c, fid_c_lsarpc, 14, b.get(), rb.get())
+
+    close_pipe(fc, sess_c, tree_c, fid_c_samr)
+    close_pipe(fc, sess_c, tree_c, fid_c_lsarpc)
+
+    # ---------------------------------------------------------------------------------------------
+    # Flow D: an NTLM handshake ending in a GUEST session, then a SAMR recon call -- the
+    # null/guest-session escalation wording on the SAMR enumeration note.
+    # ---------------------------------------------------------------------------------------------
+    fd = make_flow()
+    sess_d, tree_d = 0xB000000000000004, 1
+    m_d1 = next_mid()
+    fd(True, smb_with_prefix(smb2_message(0x01, False,
+                                           smb2_session_setup_req_body(ntlm_negotiate_message("", "")),
+                                           message_id=m_d1)))
+    fd(False, smb_with_prefix(smb2_message(
+        0x01, True, smb2_session_setup_resp_body(ntlm_challenge_message("", "", "")),
+        message_id=m_d1, status=SMB_STATUS_MORE_PROCESSING_REQUIRED, session_id=sess_d)))
+    m_d2 = next_mid()
+    fd(True, smb_with_prefix(smb2_message(
+        0x01, False, smb2_session_setup_req_body(ntlm_authenticate_message("", "guest", "")),
+        message_id=m_d2, session_id=sess_d)))
+    fd(False, smb_with_prefix(smb2_message(
+        0x01, True, smb2_session_setup_resp_body(b"", session_flags=SMB_SESSION_FLAG_IS_GUEST),
+        message_id=m_d2, status=SMB_STATUS_SUCCESS, session_id=sess_d)))
+
+    fid_d = open_pipe(fd, sess_d, tree_d, "samr")
+    bind_and_ack(fd, sess_d, tree_d, fid_d, next_call_id(), SAMR_INTERFACE_UUID)
+    dh = handle20(0x77)
+    b = NdrBuf(); b.raw(dh); b.u32(0)
+    resp = samr_enumerate_response_stub(0, [(500, "Administrator")], 1, status=0)
+    call(fd, sess_d, tree_d, fid_d, 13, b.get(), resp)
+    close_pipe(fd, sess_d, tree_d, fid_d)
+
+    # ---------------------------------------------------------------------------------------------
+    # Flow E: a SEALED SamrOpenUser request/response pair on an already-bound SAMR context -- the
+    # "sealed, N bytes, not decoded" fallback (no field decode at all, no enumeration note).
+    # ---------------------------------------------------------------------------------------------
+    fe = make_flow()
+    sess_e, tree_e = 0xB000000000000005, 1
+    fid_e = open_pipe(fe, sess_e, tree_e, "samr")
+    bind_and_ack(fe, sess_e, tree_e, fid_e, next_call_id(), SAMR_INTERFACE_UUID)
+    call(fe, sess_e, tree_e, fid_e, 34, b"\xEF" * 28, b"\xFE" * 24,
+         auth=(16, 6, b"\x01\x02\x03\x04\x05\x06\x07\x08"))  # auth_type 16 (SSPI), auth_level 6 (PKT_PRIVACY)
+    close_pipe(fe, sess_e, tree_e, fid_e)
+
+    # ---------------------------------------------------------------------------------------------
+    # Flow F: a bind whose only offered context names Netlogon's OWN interface UUID (not SAMR's) on
+    # a "samr"-named pipe -- the request that follows must stay structural (no samr_calls at all).
+    # ---------------------------------------------------------------------------------------------
+    ff = make_flow()
+    sess_f, tree_f = 0xB000000000000006, 1
+    fid_f = open_pipe(ff, sess_f, tree_f, "samr")
+    bind_and_ack(ff, sess_f, tree_f, fid_f, next_call_id(), NETLOGON_INTERFACE_UUID)
+    b = NdrBuf(); b.raw(handle20(0x88)); b.u32(0x02000000); b.sid(DOMAIN_SID)
+    call(ff, sess_f, tree_f, fid_f, 7, b.get(), handle20(0x99) + struct.pack("<I", 0))
+    close_pipe(ff, sess_f, tree_f, fid_f)
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_060_000 + i, i * 1000)
+    (TESTS_DIR / "sample_samr_lsarpc.pcap").write_bytes(data)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -11957,6 +12566,7 @@ if __name__ == "__main__":
     build_ldap_sample()
     build_smb_sample()
     build_netlogon_sample()
+    build_samr_lsarpc_sample()
     build_policy_engine_sample()
     build_summarize_unclassified_sample()
     build_inventory_sample()

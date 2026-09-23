@@ -241,14 +241,15 @@ std::string strip_pipe_prefix_lower(const std::string& name) {
 // SmbMessage rather than aborting the whole chain, the same per-item leniency this codebase's other
 // bounded-repeat decodes already use.
 //
-// `tracked_netlogon_pipes` -- see try_parse_smb's own doc comment (smb.hpp) for what this pointer
-// is and, more importantly, is NOT: a read-only lookup used solely to decide whether a WRITE/
-// READ/IOCTL message's own payload is worth copying into dcerpc_raw_payload at all. This function
-// never mutates it and never itself decides what the bytes mean -- that's decode_with_correlation's
+// `tracked_rpc_pipe_file_ids` -- see try_parse_smb's own doc comment (smb.hpp) for what this
+// pointer is and, more importantly, is NOT: a read-only lookup used solely to decide whether a
+// WRITE/READ/IOCTL message's own payload is worth copying into dcerpc_raw_payload at all. This
+// function never mutates it and never itself decides what the bytes mean, nor which interface (if
+// any) a tracked FileId belongs to -- that's decode_with_correlation's/dispatch_dcerpc_payload's
 // job, once this whole chain has returned.
 SmbMessage parse_one_smb2_message(
     ByteSpan sub,
-    const std::unordered_map<SmbFileId, NetlogonPipeState, SmbFileIdHash>* tracked_netlogon_pipes) {
+    const std::unordered_set<SmbFileId, SmbFileIdHash>* tracked_rpc_pipe_file_ids) {
     SmbMessage m;
     Cursor c(sub);
     c.skip(4);  // ProtocolId -- already verified by the caller's own gate
@@ -483,10 +484,11 @@ SmbMessage parse_one_smb2_message(
                         // at all; decode_with_correlation resolves the FileId (via the matching
                         // READ request's own MessageId) and drops this again immediately if it
                         // turns out not to be a tracked pipe -- see smb.hpp's own doc comment on
-                        // dcerpc_raw_payload. Gated coarsely here on "is any netlogon pipe tracked
-                        // in this session at all", to avoid the copy entirely for the overwhelmingly
-                        // common case of a session with no netlogon pipe open.
-                        if (tracked_netlogon_pipes != nullptr && !tracked_netlogon_pipes->empty()) {
+                        // dcerpc_raw_payload. Gated coarsely here on "is any RPC pipe tracked in
+                        // this session at all", to avoid the copy entirely for the overwhelmingly
+                        // common case of a session with no tracked pipe open.
+                        if (tracked_rpc_pipe_file_ids != nullptr &&
+                            !tracked_rpc_pipe_file_ids->empty()) {
                             ByteSpan payload_bytes = bounded(sub, data_offset, data_length);
                             m.dcerpc_raw_payload = payload_bytes.to_vector();
                         }
@@ -506,8 +508,8 @@ SmbMessage parse_one_smb2_message(
                         uint64_t vol = bc.u64le();
                         m.file_id = SmbFileId{persistent, vol};
                         m.has_file_id = true;
-                        if (tracked_netlogon_pipes != nullptr &&
-                            tracked_netlogon_pipes->count(m.file_id) != 0) {
+                        if (tracked_rpc_pipe_file_ids != nullptr &&
+                            tracked_rpc_pipe_file_ids->count(m.file_id) != 0) {
                             ByteSpan payload_bytes = bounded(sub, data_offset, length);
                             m.dcerpc_raw_payload = payload_bytes.to_vector();
                         }
@@ -529,8 +531,8 @@ SmbMessage parse_one_smb2_message(
                     uint32_t input_offset = bc.u32le();
                     uint32_t input_count = bc.u32le();
                     bool is_pipe_transceive = (ctl_code == 0x0011C017);  // FSCTL_PIPE_TRANSCEIVE
-                    bool tracked = tracked_netlogon_pipes != nullptr &&
-                                    tracked_netlogon_pipes->count(m.file_id) != 0;
+                    bool tracked = tracked_rpc_pipe_file_ids != nullptr &&
+                                    tracked_rpc_pipe_file_ids->count(m.file_id) != 0;
                     if (!m.is_response) {
                         if (bc.remaining() >= 12) {
                             bc.u32le();  // MaxInputResponse
@@ -583,11 +585,11 @@ uint32_t peek_next_command(ByteSpan sub) {
 // everything after the 4-byte TCP prefix. Capped both by the available bytes running out and by a
 // hard limit on the number of sub-messages, so a malformed/hostile NextCommand chain (e.g. one that
 // doesn't advance, or advances by less than a header's worth of bytes) can't loop unboundedly.
-// `tracked_netlogon_pipes` is threaded straight through to parse_one_smb2_message -- see that
+// `tracked_rpc_pipe_file_ids` is threaded straight through to parse_one_smb2_message -- see that
 // function's own doc comment.
 std::vector<SmbMessage> parse_smb2_chain(
     ByteSpan smb2_area,
-    const std::unordered_map<SmbFileId, NetlogonPipeState, SmbFileIdHash>* tracked_netlogon_pipes) {
+    const std::unordered_set<SmbFileId, SmbFileIdHash>* tracked_rpc_pipe_file_ids) {
     std::vector<SmbMessage> messages;
     const size_t kMaxCompounded = resource_limits().max_decoded_objects.value_or(64);
     size_t offset = 0;
@@ -617,7 +619,7 @@ std::vector<SmbMessage> parse_smb2_chain(
         }
 
         ByteSpan sub = smb2_area.subspan(offset, this_extent);
-        messages.push_back(parse_one_smb2_message(sub, tracked_netlogon_pipes));
+        messages.push_back(parse_one_smb2_message(sub, tracked_rpc_pipe_file_ids));
 
         if (is_last) break;
         offset += next_command;
@@ -631,7 +633,7 @@ bool ends_with_dollar(const std::string& s) { return !s.empty() && s.back() == '
 
 std::optional<SmbFrame> try_parse_smb(
     ByteSpan payload,
-    const std::unordered_map<SmbFileId, NetlogonPipeState, SmbFileIdHash>* tracked_netlogon_pipes) {
+    const std::unordered_set<SmbFileId, SmbFileIdHash>* tracked_rpc_pipe_file_ids) {
     try {
         if (payload.size() < 8) return std::nullopt;
         if (payload.at(0) != 0x00) return std::nullopt;  // Zero byte of the 4-byte prefix
@@ -653,7 +655,7 @@ std::optional<SmbFrame> try_parse_smb(
         }
 
         frame.envelope_kind = "SMB2";
-        frame.messages = parse_smb2_chain(smb2_area, tracked_netlogon_pipes);
+        frame.messages = parse_smb2_chain(smb2_area, tracked_rpc_pipe_file_ids);
         if (frame.messages.empty()) return std::nullopt;
 
         std::ostringstream s;
@@ -831,12 +833,176 @@ void decode_dcerpc_and_netlogon(SmbMessage& m, NetlogonPipeState& pipe_state,
     }
 }
 
+// SAMR's own bind/bind_ack/request/response/fault bookkeeping -- unlike decode_dcerpc_and_netlogon
+// (written before Phase 0's resolve_dcerpc_bind_bookkeeping template existed, and kept exactly as-is
+// per this codebase's own "existing behavior byte-identical" bar), this is the template's first real
+// caller: the mechanical bind/bind_ack/fault half is factored out to dcerpc.hpp, leaving only the
+// SAMR-specific request/response decode and this interface's own curated notes here.
+void decode_dcerpc_and_samr(SmbMessage& m, SamrPipeState& pipe_state, SmbFlowState& state,
+                             const std::vector<uint8_t>& raw_payload) {
+    if (raw_payload.empty()) return;
+    ByteSpan payload_span(raw_payload.data(), raw_payload.size());
+    m.dcerpc_messages = parse_dcerpc_chain(payload_span);
+
+    for (const DceRpcMessage& dm : m.dcerpc_messages) {
+        try {
+            if (resolve_dcerpc_bind_bookkeeping(dm, pipe_state, is_samr_interface_uuid)) {
+                continue;
+            }
+            if (dm.has_request) {
+                if (pipe_state.bound_context_is_interface &&
+                    dm.request_context_id == pipe_state.interface_context_id) {
+                    ByteSpan stub = payload_span.subspan(dm.stub_offset, dm.stub_length);
+                    SamrCall call = try_parse_samr_request(dm.call_id, dm.opnum, dm.sealed, stub);
+                    pipe_state.pending_calls[dm.call_id] = PendingDceRpcCall{dm.opnum, 0};
+                    m.samr_calls.push_back(std::move(call));
+                }
+            } else if (dm.has_response) {
+                auto it = pipe_state.pending_calls.find(dm.call_id);
+                if (it != pipe_state.pending_calls.end()) {
+                    uint16_t opnum = it->second.opnum;
+                    ByteSpan stub = payload_span.subspan(dm.stub_offset, dm.stub_length);
+                    SamrCall call = try_parse_samr_response(dm.call_id, opnum, dm.sealed, stub);
+                    m.samr_calls.push_back(std::move(call));
+                    pipe_state.pending_calls.erase(it);
+                }
+            }
+        } catch (const ParseError&) {
+            // A malformed stub for this one PDU doesn't invalidate the rest of the chain.
+        }
+    }
+
+    // Curated note -- SAMR account/group enumeration observed. Fires once per pipe conversation, on
+    // the request side of the first opnum this file treats as a recon call (SamrEnumerateUsersIn-
+    // Domain/AliasesInDomain, SamrLookupNamesInDomain/LookupIdsInDomain, SamrGetAliasMembership).
+    for (const SamrCall& call : m.samr_calls) {
+        if (call.is_response) continue;
+        bool is_recon_opnum = (call.opnum == 13 || call.opnum == 15 || call.opnum == 16 ||
+                                call.opnum == 17 || call.opnum == 18);
+        if (!is_recon_opnum || pipe_state.enumeration_note_seen) continue;
+        pipe_state.enumeration_note_seen = true;
+        std::string note =
+            "SAMR account/group enumeration observed (" + call.opnum_name +
+            ") -- the wire signature of directory-enumeration tooling (enum4linux, BloodHound's "
+            "SharpHound collector, PowerView, rpcclient); also routine for legitimate AD "
+            "administration and directory-aware applications";
+        if (state.null_or_guest_session_seen) {
+            note += "; this session was established as anonymous/guest -- null-session SAM "
+                    "enumeration, a well-known high-value misconfiguration";
+        }
+        m.notes.push_back(note);
+
+        // Cross-interface note -- SAMR + LSARPC enumeration on the same session, only possible
+        // because Phase 0 put both maps on the same SmbFlowState. Fires once, whichever interface's
+        // own enumeration note happens to fire second.
+        if (!state.lsarpc_pipes.empty() && !state.samr_lsarpc_cross_interface_note_seen) {
+            state.samr_lsarpc_cross_interface_note_seen = true;
+            m.notes.push_back(
+                "SAMR and LSARPC enumeration both observed on this session -- the pattern "
+                "enum4linux/BloodHound-style collectors actually use (RID/name resolution plus SID "
+                "translation together), not two coincidental calls");
+        }
+    }
+}
+
+// LSARPC's own bookkeeping -- same shape as decode_dcerpc_and_samr above.
+void decode_dcerpc_and_lsarpc(SmbMessage& m, LsarpcPipeState& pipe_state, SmbFlowState& state,
+                               const std::vector<uint8_t>& raw_payload) {
+    if (raw_payload.empty()) return;
+    ByteSpan payload_span(raw_payload.data(), raw_payload.size());
+    m.dcerpc_messages = parse_dcerpc_chain(payload_span);
+
+    for (const DceRpcMessage& dm : m.dcerpc_messages) {
+        try {
+            if (resolve_dcerpc_bind_bookkeeping(dm, pipe_state, is_lsarpc_interface_uuid)) {
+                continue;
+            }
+            if (dm.has_request) {
+                if (pipe_state.bound_context_is_interface &&
+                    dm.request_context_id == pipe_state.interface_context_id) {
+                    ByteSpan stub = payload_span.subspan(dm.stub_offset, dm.stub_length);
+                    LsarCall call = try_parse_lsarpc_request(dm.call_id, dm.opnum, dm.sealed, stub);
+                    pipe_state.pending_calls[dm.call_id] = PendingDceRpcCall{dm.opnum, 0};
+                    m.lsarpc_calls.push_back(std::move(call));
+                }
+            } else if (dm.has_response) {
+                auto it = pipe_state.pending_calls.find(dm.call_id);
+                if (it != pipe_state.pending_calls.end()) {
+                    uint16_t opnum = it->second.opnum;
+                    ByteSpan stub = payload_span.subspan(dm.stub_offset, dm.stub_length);
+                    LsarCall call = try_parse_lsarpc_response(dm.call_id, opnum, dm.sealed, stub);
+                    m.lsarpc_calls.push_back(std::move(call));
+                    pipe_state.pending_calls.erase(it);
+                }
+            }
+        } catch (const ParseError&) {
+            // A malformed stub for this one PDU doesn't invalidate the rest of the chain.
+        }
+    }
+
+    // Curated note -- LSARPC SID/name translation or account/trust enumeration observed. Same
+    // sticky-once-per-pipe posture as SAMR's own note above.
+    for (const LsarCall& call : m.lsarpc_calls) {
+        if (call.is_response) continue;
+        bool is_recon_opnum = (call.opnum == 11 || call.opnum == 13 || call.opnum == 14 ||
+                                call.opnum == 15);
+        if (!is_recon_opnum || pipe_state.enumeration_note_seen) continue;
+        pipe_state.enumeration_note_seen = true;
+        std::string note =
+            "LSARPC SID/name translation or enumeration observed (" + call.opnum_name +
+            ") -- the wire signature of directory-enumeration tooling (enum4linux, BloodHound's "
+            "SharpHound collector, rpcclient's own lsalookupsids/lsalookupnames); also routine for "
+            "legitimate AD administration and directory-aware applications";
+        if (state.null_or_guest_session_seen) {
+            note += "; this session was established as anonymous/guest -- null-session LSA "
+                    "enumeration, a well-known high-value misconfiguration";
+        }
+        m.notes.push_back(note);
+
+        if (!state.samr_pipes.empty() && !state.samr_lsarpc_cross_interface_note_seen) {
+            state.samr_lsarpc_cross_interface_note_seen = true;
+            m.notes.push_back(
+                "SAMR and LSARPC enumeration both observed on this session -- the pattern "
+                "enum4linux/BloodHound-style collectors actually use (RID/name resolution plus SID "
+                "translation together), not two coincidental calls");
+        }
+    }
+}
+
+// Dispatches a WRITE request / READ response / IOCTL request-or-response's own dcerpc_raw_payload
+// to whichever per-interface pipe-state map `file_id` is tracked in, if any -- one FileId is
+// tracked in at most one map by construction (the CREATE-response handler below inserts into
+// exactly one arm's map per pipe name), so this is a plain mutually-exclusive dispatch, not a
+// priority order. `file_id` is taken explicitly rather than read off `m` because READ's own
+// Response carries no FileId of its own (MS-SMB2) -- the caller resolves it from the matching
+// READ request instead (see decode_with_correlation's own READ case) without ever setting
+// m.has_file_id/m.file_id on the response message itself, which would otherwise render a
+// "smb_file_id" field in output.cpp that this codebase's prior behavior never emitted for a READ
+// response.
+void dispatch_dcerpc_payload(SmbMessage& m, SmbFlowState& state, const SmbFileId& file_id) {
+    auto nit = state.netlogon_pipes.find(file_id);
+    if (nit != state.netlogon_pipes.end()) {
+        decode_dcerpc_and_netlogon(m, nit->second, m.dcerpc_raw_payload);
+        return;
+    }
+    auto sit = state.samr_pipes.find(file_id);
+    if (sit != state.samr_pipes.end()) {
+        decode_dcerpc_and_samr(m, sit->second, state, m.dcerpc_raw_payload);
+        return;
+    }
+    auto lit = state.lsarpc_pipes.find(file_id);
+    if (lit != state.lsarpc_pipes.end()) {
+        decode_dcerpc_and_lsarpc(m, lit->second, state, m.dcerpc_raw_payload);
+        return;
+    }
+}
+
 // Shared correlation layer, applied on top of a successfully try_parse_smb'd frame -- the same
 // "try_parse_X then XDecoder::decode applies flow-state" split kerberos.cpp's/ldap.cpp's own
 // decode_with_correlation established. See smb.hpp's header comment's STATE/CORRELATION section.
 std::optional<ProtocolResult> decode_with_correlation(ByteSpan payload, DecodeContext& ctx) {
     SmbFlowState& state = ctx.flow_state<SmbFlowState>();
-    auto parsed = try_parse_smb(payload, &state.netlogon_pipes);
+    auto parsed = try_parse_smb(payload, &state.tracked_rpc_pipe_file_ids);
     if (!parsed) return std::nullopt;
     SmbFrame frame = std::move(*parsed);
 
@@ -910,6 +1076,8 @@ std::optional<ProtocolResult> decode_with_correlation(ByteSpan payload, DecodeCo
                         if (f == "IS_NULL") is_null = true;
                     }
                     if (is_guest || is_null) {
+                        state.null_or_guest_session_seen = true;  // consulted by SAMR's/LSARPC's
+                                                                     // own enumeration notes below
                         // Curated note 4.
                         m.notes.push_back(
                             std::string("session established as ") +
@@ -1011,6 +1179,15 @@ std::optional<ProtocolResult> decode_with_correlation(ByteSpan payload, DecodeCo
                         if (it->second.create_name == "netlogon" &&
                             state.netlogon_pipes.size() < kMaxTrackedPerSession) {
                             state.netlogon_pipes[m.file_id] = NetlogonPipeState{};
+                            state.tracked_rpc_pipe_file_ids.insert(m.file_id);
+                        } else if (it->second.create_name == "samr" &&
+                                   state.samr_pipes.size() < kMaxTrackedPerSession) {
+                            state.samr_pipes[m.file_id] = SamrPipeState{};
+                            state.tracked_rpc_pipe_file_ids.insert(m.file_id);
+                        } else if (it->second.create_name == "lsarpc" &&
+                                   state.lsarpc_pipes.size() < kMaxTrackedPerSession) {
+                            state.lsarpc_pipes[m.file_id] = LsarpcPipeState{};
+                            state.tracked_rpc_pipe_file_ids.insert(m.file_id);
                         }
                         state.pending_requests.erase(it);
                     }
@@ -1021,6 +1198,9 @@ std::optional<ProtocolResult> decode_with_correlation(ByteSpan payload, DecodeCo
             case 0x06: {  // CLOSE
                 if (!m.is_response && m.has_file_id) {
                     state.netlogon_pipes.erase(m.file_id);
+                    state.samr_pipes.erase(m.file_id);
+                    state.lsarpc_pipes.erase(m.file_id);
+                    state.tracked_rpc_pipe_file_ids.erase(m.file_id);
                 }
                 break;
             }
@@ -1041,10 +1221,7 @@ std::optional<ProtocolResult> decode_with_correlation(ByteSpan payload, DecodeCo
                         m.correlated_request_seen = true;
                         m.correlated_request_index = it->second.packet_index;
                         if (it->second.has_file_id) {
-                            auto pit = state.netlogon_pipes.find(it->second.file_id);
-                            if (pit != state.netlogon_pipes.end()) {
-                                decode_dcerpc_and_netlogon(m, pit->second, m.dcerpc_raw_payload);
-                            }
+                            dispatch_dcerpc_payload(m, state, it->second.file_id);
                         }
                         state.pending_requests.erase(it);
                     }
@@ -1056,10 +1233,7 @@ std::optional<ProtocolResult> decode_with_correlation(ByteSpan payload, DecodeCo
 
             case 0x09: {  // WRITE
                 if (!m.is_response && m.has_file_id) {
-                    auto it = state.netlogon_pipes.find(m.file_id);
-                    if (it != state.netlogon_pipes.end()) {
-                        decode_dcerpc_and_netlogon(m, it->second, m.dcerpc_raw_payload);
-                    }
+                    dispatch_dcerpc_payload(m, state, m.file_id);
                 }
                 m.dcerpc_raw_payload.clear();
                 m.dcerpc_raw_payload.shrink_to_fit();
@@ -1068,10 +1242,7 @@ std::optional<ProtocolResult> decode_with_correlation(ByteSpan payload, DecodeCo
 
             case 0x0B: {  // IOCTL
                 if (m.has_file_id) {
-                    auto it = state.netlogon_pipes.find(m.file_id);
-                    if (it != state.netlogon_pipes.end()) {
-                        decode_dcerpc_and_netlogon(m, it->second, m.dcerpc_raw_payload);
-                    }
+                    dispatch_dcerpc_payload(m, state, m.file_id);
                 }
                 m.dcerpc_raw_payload.clear();
                 m.dcerpc_raw_payload.shrink_to_fit();

@@ -116,14 +116,17 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "conduitscope/byteio.hpp"
 #include "conduitscope/dcerpc.hpp"
 #include "conduitscope/it_protocols.hpp"  // SMB_PORT_445/SMB_NETBIOS_SESSION_PORT_139, match_smb_magic
+#include "conduitscope/lsarpc.hpp"
 #include "conduitscope/netlogon.hpp"
 #include "conduitscope/ntlm.hpp"
 #include "conduitscope/protocol_decoder.hpp"
+#include "conduitscope/samr.hpp"
 
 namespace conduitscope {
 
@@ -239,6 +242,13 @@ struct SmbMessage {
     // bind/bind_ack/fault PDU, or a request/response on a non-Netlogon context, has no
     // corresponding entry here; correlate by NetlogonCall::call_id, not by index.
     std::vector<NetlogonCall> netlogon_calls;
+    // SAMR-level / LSARPC-level decode of dcerpc_messages, same convention as netlogon_calls above
+    // (only for a PDU whose own context was confirmed bound to that interface -- see this file's own
+    // STATE/CORRELATION section). A given SmbMessage populates at most one of netlogon_calls/
+    // samr_calls/lsarpc_calls, since one FileId is tracked in at most one per-interface pipe-state
+    // map by construction (see dispatch_dcerpc_payload, smb.cpp).
+    std::vector<SamrCall> samr_calls;
+    std::vector<LsarCall> lsarpc_calls;
 
     // Correlation-derived -- filled by SmbTcpDecoder::decode, not try_parse_smb2_chain.
     bool correlated_request_seen = false;
@@ -264,19 +274,13 @@ struct SmbFrame {
                                         // (e.g. curated note 1, SMB1 traffic present)
 };
 
-// One outstanding DCE/RPC bind or request PDU on a tracked netlogon pipe, keyed by call_id --
-// DCE/RPC's own wire-mandated correlation field (dcerpc.hpp's own DceRpcMessage::call_id), the
-// same "genuine correlation field, not a heuristic" bar SMB2's MessageId and LDAP's messageID
-// already met. Does double duty for the two kinds of pending pairing this one pipe conversation
-// needs (see NetlogonPipeState's own doc comment for which is which at any given moment):
-// context_id is meaningful for a bind PDU awaiting its own bind_ack (the candidate Netlogon
-// context_id offered, not yet confirmed accepted); opnum is meaningful for a request PDU
-// awaiting its own response/fault (so the response side, which carries no opnum of its own, can
-// still be decoded with the right one).
-struct PendingDceRpcCall {
-    uint16_t opnum = 0;
-    uint16_t context_id = 0;
-};
+// PendingDceRpcCall (one outstanding DCE/RPC bind or request PDU on a tracked pipe, keyed by
+// call_id) now lives in dcerpc.hpp alongside resolve_dcerpc_bind_bookkeeping -- it was always
+// interface-agnostic wire-format bookkeeping, not netlogon-specific. See that struct's own doc
+// comment there for the full rationale (short version: context_id is meaningful for a bind PDU
+// awaiting its own bind_ack; opnum is meaningful for a request PDU awaiting its own
+// response/fault, so the response side, which carries no opnum of its own, can still be decoded
+// with the right one).
 
 // Per-FileId state for a tracked "netlogon" named pipe -- see this file's own STATE/CORRELATION
 // section for why this is a genuinely new, two-layer correlation shape (SMB2 handle -> DCE/RPC
@@ -303,21 +307,51 @@ struct NetlogonPipeState {
     // occurrence is its own meaningful event, see smb.cpp's own decode_dcerpc_and_netlogon.
 };
 
+// Per-FileId state for a tracked "samr" named pipe -- see NetlogonPipeState's own doc comment for
+// the general shape (created at CREATE response, erased at CLOSE). `pending_calls`/
+// `bound_context_is_interface`/`interface_context_id` follow the exact field-naming contract
+// dcerpc.hpp's own resolve_dcerpc_bind_bookkeeping template requires (see that template's own doc
+// comment) -- unlike NetlogonPipeState (written before that template existed, so it still spells
+// these out as netlogon_context_id/bound_context_is_netlogon), every interface after Netlogon uses
+// this shared template instead of re-deriving the same bind/bind_ack/fault logic per file.
+struct SamrPipeState {
+    std::unordered_map<uint32_t, PendingDceRpcCall> pending_calls;
+    bool bound_context_is_interface = false;
+    uint16_t interface_context_id = 0;
+    // Curated note (SAMR account/group enumeration observed) -- sticky per pipe conversation, the
+    // same "fires once, not once per call" posture NetlogonPipeState's own notes already establish.
+    bool enumeration_note_seen = false;
+};
+
+// Per-FileId state for a tracked "lsarpc" named pipe -- see SamrPipeState's own doc comment; the
+// same shape, same field-naming contract, same sticky-note posture.
+struct LsarpcPipeState {
+    std::unordered_map<uint32_t, PendingDceRpcCall> pending_calls;
+    bool bound_context_is_interface = false;
+    uint16_t interface_context_id = 0;
+    bool enumeration_note_seen = false;
+};
+
 // Attempts to interpret `payload` -- which must start with the 4-byte Zero+StreamProtocolLength
 // prefix (see this file's own FRAMING paragraph) -- as one SMB frame. Returns std::nullopt (never
 // throws) if match_smb_magic doesn't recognize the 4 bytes following that prefix.
 //
-// `tracked_netlogon_pipes`, when non-null, is a read-only view of the calling SmbFlowState's own
-// netlogon_pipes map (below) -- consulted only to decide whether a WRITE/READ/IOCTL message's own
-// FileId is worth copying dcerpc_raw_payload for at all (see SmbMessage's own doc comment on that
-// field); nothing here mutates it or interprets its contents -- that is decode_with_correlation's
-// own job, once try_parse_smb has returned. Omitted (nullptr), no WRITE/READ/IOCTL message ever
-// gets a populated dcerpc_raw_payload, which is exactly correct for any caller (e.g. a future
-// direct/test caller) that isn't tracking netlogon pipes at all.
+// `tracked_rpc_pipe_file_ids`, when non-null, is a read-only view of the calling SmbFlowState's own
+// tracked_rpc_pipe_file_ids set (below) -- the union of every FileId tracked in ANY of its per-
+// interface pipe-state maps (netlogon_pipes today; samr_pipes/lsarpc_pipes/srvsvc_pipes/
+// wkssvc_pipes/drsuapi_pipes as each interface's own phase adds it) -- consulted only to decide
+// whether a WRITE/READ/IOCTL message's own FileId is worth copying dcerpc_raw_payload for at all
+// (see SmbMessage's own doc comment on that field); nothing here mutates it or interprets its
+// contents, nor does it need to know WHICH interface a given FileId belongs to -- that finer-
+// grained dispatch is decode_with_correlation's own job (see dispatch_dcerpc_payload, smb.cpp),
+// once try_parse_smb has returned. A plain set, not a map, since membership is literally all this
+// layer ever needed from it (was a NetlogonPipeState-typed map before more than one interface
+// existed to track). Omitted (nullptr), no WRITE/READ/IOCTL message ever gets a populated
+// dcerpc_raw_payload, which is exactly correct for any caller (e.g. a future direct/test caller)
+// that isn't tracking any RPC pipe at all.
 std::optional<SmbFrame> try_parse_smb(
     ByteSpan payload,
-    const std::unordered_map<SmbFileId, NetlogonPipeState, SmbFileIdHash>* tracked_netlogon_pipes =
-        nullptr);
+    const std::unordered_set<SmbFileId, SmbFileIdHash>* tracked_rpc_pipe_file_ids = nullptr);
 
 // Returns the total on-the-wire byte count one SMB frame declares (4-byte prefix + its own declared
 // StreamProtocolLength) -- mirrors kerberos_tcp_declared_length's/ldap_tcp_declared_length's own
@@ -368,6 +402,32 @@ public:
                                                         // ShareType, simply persisted per-TreeId
     std::unordered_map<SmbFileId, NetlogonPipeState, SmbFileIdHash> netlogon_pipes;  // keyed by
                                                                                         // FileId
+    std::unordered_map<SmbFileId, SamrPipeState, SmbFileIdHash> samr_pipes;
+    std::unordered_map<SmbFileId, LsarpcPipeState, SmbFileIdHash> lsarpc_pipes;
+
+    // The union of every FileId tracked in netlogon_pipes/samr_pipes/lsarpc_pipes above (and, as
+    // each is added, every future per-interface pipe-state map this struct gains -- srvsvc_pipes/
+    // wkssvc_pipes/drsuapi_pipes) -- kept in lockstep by the CREATE-response/CLOSE handlers
+    // (smb.cpp) with whichever per-interface map an insert/erase also touches. try_parse_smb
+    // (smb.hpp) only ever needs membership, not which interface, to decide whether a WRITE/READ/
+    // IOCTL message's payload is worth copying into dcerpc_raw_payload at all -- see
+    // try_parse_smb's own doc comment.
+    std::unordered_set<SmbFileId, SmbFileIdHash> tracked_rpc_pipe_file_ids;
+
+    // Curated-note sticky flags that span more than one per-interface pipe-state map, so they
+    // cannot live on any single one of them -- see smb.cpp's own decode_dcerpc_and_samr/
+    // decode_dcerpc_and_lsarpc for where each fires.
+    bool null_or_guest_session_seen = false;         // set alongside this file's own existing
+                                                        // curated note 4 (SESSION_SETUP response
+                                                        // IS_GUEST/IS_NULL), consulted by SAMR's/
+                                                        // LSARPC's own enumeration notes to add a
+                                                        // "null-session enumeration" escalation
+    bool samr_lsarpc_cross_interface_note_seen = false;  // SAMR + LSARPC enumeration on the same
+                                                            // session -- fires once, the first time
+                                                            // both samr_pipes and lsarpc_pipes are
+                                                            // simultaneously non-empty at the point
+                                                            // either interface's own enumeration
+                                                            // note fires
 };
 
 // SMB over TCP/445 (direct hosting) and TCP/139 (NetBIOS Session Service) -- id()=="smb",

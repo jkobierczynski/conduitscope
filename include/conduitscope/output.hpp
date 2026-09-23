@@ -249,6 +249,10 @@ private:
     // kerberos_error_counts_'s own sibling counters don't need but this one does to avoid
     // double-counting a call twice).
     std::map<std::string, size_t> netlogon_opnum_counts_;
+    // Same convention as netlogon_opnum_counts_ above, one map per Phase-1 interface (samr.hpp/
+    // lsarpc.hpp).
+    std::map<std::string, size_t> samr_opnum_counts_;
+    std::map<std::string, size_t> lsarpc_opnum_counts_;
     std::map<std::string, size_t> s7comm_function_counts_;
     std::map<std::string, size_t> dnp3_function_counts_;
     std::map<std::string, size_t> iec104_asdu_type_counts_;

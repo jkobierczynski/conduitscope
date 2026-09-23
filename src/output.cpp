@@ -2619,6 +2619,194 @@ void write_netlogon_call_json_fields(std::ostream& out, const NetlogonCall& nc) 
     out << "            \"summary\": \"" << json_escape(nc.summary) << "\"\n";
 }
 
+// Renders one SamrCall (samr.hpp) as a JSON object's inner fields -- called from within
+// write_one_smb_message_json_fields's own "samr_calls" array below. Fields not meaningful for this
+// call's own opnum/direction are omitted, the same convention write_netlogon_call_json_fields above
+// already establishes.
+void write_samr_call_json_fields(std::ostream& out, const SamrCall& sc) {
+    out << "            \"opnum\": \"" << json_escape(sc.opnum_name) << "\",\n";
+    out << "            \"call_id\": " << sc.call_id << ",\n";
+    out << "            \"is_response\": " << (sc.is_response ? "true" : "false") << ",\n";
+    if (sc.sealed) {
+        out << "            \"sealed\": true,\n";
+    }
+    if (sc.has_server_name && !sc.server_name.empty()) {
+        out << "            \"server_name\": \"" << json_escape(sc.server_name) << "\",\n";
+    }
+    if (sc.has_handle) {
+        out << "            \"handle\": \"" << json_escape(sc.handle_hex) << "\",\n";
+    }
+    if (sc.has_open_target) {
+        out << "            \"desired_access\": " << sc.desired_access << ",\n";
+        if (!sc.open_domain_sid.empty()) {
+            out << "            \"domain_sid\": \"" << json_escape(sc.open_domain_sid) << "\",\n";
+        }
+        if (sc.has_open_rid) {
+            out << "            \"rid\": " << sc.open_rid << ",\n";
+        }
+    }
+    if (sc.has_enumeration_context) {
+        out << "            \"enumeration_context\": " << sc.enumeration_context << ",\n";
+    }
+    if (!sc.lookup_names.empty()) {
+        out << "            \"names\": [";
+        for (size_t i = 0; i < sc.lookup_names.size(); ++i) {
+            if (i != 0) out << ", ";
+            out << "\"" << json_escape(sc.lookup_names[i]) << "\"";
+        }
+        out << "],\n";
+    }
+    if (!sc.lookup_rids.empty()) {
+        out << "            \"rids\": [";
+        for (size_t i = 0; i < sc.lookup_rids.size(); ++i) {
+            if (i != 0) out << ", ";
+            out << sc.lookup_rids[i];
+        }
+        out << "],\n";
+    }
+    if (!sc.membership_query_sids.empty()) {
+        out << "            \"query_sids\": [";
+        for (size_t i = 0; i < sc.membership_query_sids.size(); ++i) {
+            if (i != 0) out << ", ";
+            out << "\"" << json_escape(sc.membership_query_sids[i]) << "\"";
+        }
+        out << "],\n";
+    }
+    if (sc.has_response_fields) {
+        if (sc.has_result_handle) {
+            out << "            \"result_handle\": \"" << json_escape(sc.result_handle_hex) << "\",\n";
+        }
+        if (!sc.resolved_rids.empty()) {
+            out << "            \"resolved_rids\": [";
+            for (size_t i = 0; i < sc.resolved_rids.size(); ++i) {
+                if (i != 0) out << ", ";
+                out << sc.resolved_rids[i];
+            }
+            out << "],\n";
+        }
+        if (!sc.resolved_names.empty()) {
+            out << "            \"resolved_names\": [";
+            for (size_t i = 0; i < sc.resolved_names.size(); ++i) {
+                if (i != 0) out << ", ";
+                out << "\"" << json_escape(sc.resolved_names[i]) << "\"";
+            }
+            out << "],\n";
+        }
+        if (!sc.enumerated_rids.empty()) {
+            out << "            \"enumerated_rids\": [";
+            for (size_t i = 0; i < sc.enumerated_rids.size(); ++i) {
+                if (i != 0) out << ", ";
+                out << sc.enumerated_rids[i];
+            }
+            out << "],\n";
+            out << "            \"enumerated_names\": [";
+            for (size_t i = 0; i < sc.enumerated_names.size(); ++i) {
+                if (i != 0) out << ", ";
+                out << "\"" << json_escape(sc.enumerated_names[i]) << "\"";
+            }
+            out << "],\n";
+        }
+        if (!sc.membership_rids.empty()) {
+            out << "            \"membership_rids\": [";
+            for (size_t i = 0; i < sc.membership_rids.size(); ++i) {
+                if (i != 0) out << ", ";
+                out << sc.membership_rids[i];
+            }
+            out << "],\n";
+        }
+        if (sc.has_status) {
+            out << "            \"status_name\": \"" << json_escape(sc.status_name) << "\",\n";
+        }
+    }
+    out << "            \"summary\": \"" << json_escape(sc.summary) << "\"\n";
+}
+
+// Renders one LsarCall (lsarpc.hpp) as a JSON object's inner fields -- same conventions as
+// write_samr_call_json_fields above.
+void write_lsarpc_call_json_fields(std::ostream& out, const LsarCall& lc) {
+    out << "            \"opnum\": \"" << json_escape(lc.opnum_name) << "\",\n";
+    out << "            \"call_id\": " << lc.call_id << ",\n";
+    out << "            \"is_response\": " << (lc.is_response ? "true" : "false") << ",\n";
+    if (lc.sealed) {
+        out << "            \"sealed\": true,\n";
+    }
+    if (lc.has_handle) {
+        out << "            \"handle\": \"" << json_escape(lc.handle_hex) << "\",\n";
+    }
+    if (lc.has_enumeration_context) {
+        out << "            \"enumeration_context\": " << lc.enumeration_context << ",\n";
+    }
+    if (!lc.lookup_names.empty()) {
+        out << "            \"names\": [";
+        for (size_t i = 0; i < lc.lookup_names.size(); ++i) {
+            if (i != 0) out << ", ";
+            out << "\"" << json_escape(lc.lookup_names[i]) << "\"";
+        }
+        out << "],\n";
+    }
+    if (!lc.lookup_sids.empty()) {
+        out << "            \"sids\": [";
+        for (size_t i = 0; i < lc.lookup_sids.size(); ++i) {
+            if (i != 0) out << ", ";
+            out << "\"" << json_escape(lc.lookup_sids[i]) << "\"";
+        }
+        out << "],\n";
+    }
+    if (lc.has_response_fields) {
+        if (lc.has_result_handle) {
+            out << "            \"result_handle\": \"" << json_escape(lc.result_handle_hex) << "\",\n";
+        }
+        if (!lc.referenced_domains.empty()) {
+            out << "            \"referenced_domains\": [\n";
+            for (size_t i = 0; i < lc.referenced_domains.size(); ++i) {
+                const LsarDomainEntry& d = lc.referenced_domains[i];
+                out << "              {\"name\": \"" << json_escape(d.name) << "\", \"sid\": \""
+                    << json_escape(d.sid) << "\"}"
+                    << (i + 1 < lc.referenced_domains.size() ? "," : "") << "\n";
+            }
+            out << "            ],\n";
+        }
+        if (!lc.translated_rids.empty()) {
+            out << "            \"translated_rids\": [";
+            for (size_t i = 0; i < lc.translated_rids.size(); ++i) {
+                if (i != 0) out << ", ";
+                out << lc.translated_rids[i];
+            }
+            out << "],\n";
+        }
+        if (!lc.translated_names.empty()) {
+            out << "            \"translated_names\": [";
+            for (size_t i = 0; i < lc.translated_names.size(); ++i) {
+                if (i != 0) out << ", ";
+                out << "\"" << json_escape(lc.translated_names[i]) << "\"";
+            }
+            out << "],\n";
+        }
+        if (!lc.enumerated_sids.empty()) {
+            out << "            \"enumerated_sids\": [";
+            for (size_t i = 0; i < lc.enumerated_sids.size(); ++i) {
+                if (i != 0) out << ", ";
+                out << "\"" << json_escape(lc.enumerated_sids[i]) << "\"";
+            }
+            out << "],\n";
+        }
+        if (!lc.enumerated_trusted_domains.empty()) {
+            out << "            \"enumerated_trusted_domains\": [\n";
+            for (size_t i = 0; i < lc.enumerated_trusted_domains.size(); ++i) {
+                const LsarDomainEntry& d = lc.enumerated_trusted_domains[i];
+                out << "              {\"name\": \"" << json_escape(d.name) << "\", \"sid\": \""
+                    << json_escape(d.sid) << "\"}"
+                    << (i + 1 < lc.enumerated_trusted_domains.size() ? "," : "") << "\n";
+            }
+            out << "            ],\n";
+        }
+        if (lc.has_status) {
+            out << "            \"status_name\": \"" << json_escape(lc.status_name) << "\",\n";
+        }
+    }
+    out << "            \"summary\": \"" << json_escape(lc.summary) << "\"\n";
+}
+
 // Renders one SmbMessage (smb.hpp) as a JSON object's inner fields, indented for use inside
 // write_smb_json_fields's own "smb_messages" array below -- one call per sub-message in a
 // (possibly compounded, see smb.hpp's own COMPOUNDING paragraph) SmbFrame. Every field not
@@ -2741,6 +2929,24 @@ void write_one_smb_message_json_fields(std::ostream& out, const SmbMessage& m) {
             out << "          {\n";
             write_netlogon_call_json_fields(out, m.netlogon_calls[i]);
             out << "          }" << (i + 1 < m.netlogon_calls.size() ? "," : "") << "\n";
+        }
+        out << "        ],\n";
+    }
+    if (!m.samr_calls.empty()) {
+        out << "        \"samr_calls\": [\n";
+        for (size_t i = 0; i < m.samr_calls.size(); ++i) {
+            out << "          {\n";
+            write_samr_call_json_fields(out, m.samr_calls[i]);
+            out << "          }" << (i + 1 < m.samr_calls.size() ? "," : "") << "\n";
+        }
+        out << "        ],\n";
+    }
+    if (!m.lsarpc_calls.empty()) {
+        out << "        \"lsarpc_calls\": [\n";
+        for (size_t i = 0; i < m.lsarpc_calls.size(); ++i) {
+            out << "          {\n";
+            write_lsarpc_call_json_fields(out, m.lsarpc_calls[i]);
+            out << "          }" << (i + 1 < m.lsarpc_calls.size() ? "," : "") << "\n";
         }
         out << "        ],\n";
     }
@@ -3386,6 +3592,12 @@ void StatsWriter::write_packet(const DecodedPacket& p) {
             for (const NetlogonCall& nc : m.netlogon_calls) {
                 if (!nc.is_response) netlogon_opnum_counts_[nc.opnum_name]++;
             }
+            for (const SamrCall& sc : m.samr_calls) {
+                if (!sc.is_response) samr_opnum_counts_[sc.opnum_name]++;
+            }
+            for (const LsarCall& lc : m.lsarpc_calls) {
+                if (!lc.is_response) lsarpc_opnum_counts_[lc.opnum_name]++;
+            }
         }
     }
     if (p.protocol == "s7comm" && p.result) {
@@ -3620,6 +3832,18 @@ void StatsWriter::print_summary(std::ostream& out) const {
     if (!netlogon_opnum_counts_.empty()) {
         out << "netlogon opnum counts:\n";
         for (const auto& [name, count] : netlogon_opnum_counts_) {
+            out << "  " << std::left << std::setw(40) << name << count << "\n";
+        }
+    }
+    if (!samr_opnum_counts_.empty()) {
+        out << "samr opnum counts:\n";
+        for (const auto& [name, count] : samr_opnum_counts_) {
+            out << "  " << std::left << std::setw(40) << name << count << "\n";
+        }
+    }
+    if (!lsarpc_opnum_counts_.empty()) {
+        out << "lsarpc opnum counts:\n";
+        for (const auto& [name, count] : lsarpc_opnum_counts_) {
             out << "  " << std::left << std::setw(40) << name << count << "\n";
         }
     }

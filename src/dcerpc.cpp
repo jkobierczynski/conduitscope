@@ -315,6 +315,125 @@ std::optional<DceRpcMessage> try_parse_dcerpc(ByteSpan pdu) {
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// Shared NDR primitives -- see this file's own header comment (dcerpc.hpp) for provenance. These
+// are byte-for-byte the same implementations netlogon.cpp used locally before more than one
+// interface needed them.
+// ---------------------------------------------------------------------------------------------
+
+void ndr_align4(Cursor& c) {
+    size_t pad = (4 - (c.position() % 4)) % 4;
+    if (pad > 0) c.skip(pad);
+}
+
+std::string read_ndr_string(Cursor& c) {
+    ndr_align4(c);  // a conformant array's own MaxCount is a 4-byte field
+    (void)c.u32le();  // MaxCount -- structurally present, not itself meaningful here
+    (void)c.u32le();  // Offset -- likewise
+    uint32_t actual_count = c.u32le();
+    ByteSpan chars = c.bytes(static_cast<size_t>(actual_count) * 2);
+    std::string s = utf16le_to_utf8(chars);
+    if (!s.empty() && s.back() == '\0') {
+        s.pop_back();
+    }
+    size_t pad = (4 - (c.position() % 4)) % 4;
+    if (pad > 0) {
+        c.skip(pad);
+    }
+    return s;
+}
+
+std::string read_ndr_unique_string(Cursor& c) {
+    ndr_align4(c);  // the referent ID itself is a 4-byte field
+    uint32_t referent_id = c.u32le();
+    if (referent_id == 0) {
+        return std::string();
+    }
+    return read_ndr_string(c);
+}
+
+std::string read_ndr_sid(Cursor& c) {
+    (void)c.u32le();  // hoisted MaximumCount -- structurally present, SubAuthorityCount (below) is
+                       // what this codebase actually trusts for how many sub-authorities follow.
+    uint8_t revision = c.u8();
+    uint8_t sub_authority_count = c.u8();
+    uint64_t identifier_authority = 0;
+    for (int i = 0; i < 6; ++i) {
+        identifier_authority = (identifier_authority << 8) | c.u8();
+    }
+    const size_t kMax = resource_limits().max_decoded_objects.value_or(64);
+    std::ostringstream oss;
+    oss << "S-" << static_cast<unsigned>(revision) << "-" << identifier_authority;
+    for (uint8_t i = 0; i < sub_authority_count && i < kMax; ++i) {
+        oss << "-" << c.u32le();
+    }
+    return oss.str();
+}
+
+std::vector<std::string> read_ndr_sid_pointer_array(Cursor& c) {
+    uint32_t maximum_count = c.u32le();
+    const size_t kMax = resource_limits().max_decoded_objects.value_or(64);
+    std::vector<uint32_t> referents;
+    for (uint32_t i = 0; i < maximum_count && referents.size() < kMax; ++i) {
+        referents.push_back(c.u32le());
+    }
+    std::vector<std::string> sids;
+    sids.reserve(referents.size());
+    for (uint32_t referent : referents) {
+        sids.push_back(referent != 0 ? read_ndr_sid(c) : std::string());
+    }
+    return sids;
+}
+
+std::vector<std::string> read_ndr_unicode_string_array(Cursor& c) {
+    (void)c.u32le();  // MaxCount
+    (void)c.u32le();  // Offset
+    uint32_t actual_count = c.u32le();
+    const size_t kMax = resource_limits().max_decoded_objects.value_or(64);
+    std::vector<uint32_t> referents;
+    referents.reserve(actual_count < kMax ? actual_count : kMax);
+    for (uint32_t i = 0; i < actual_count && referents.size() < kMax; ++i) {
+        (void)c.u16le();  // Length
+        (void)c.u16le();  // MaximumLength
+        referents.push_back(c.u32le());
+    }
+    std::vector<std::string> names;
+    names.reserve(referents.size());
+    for (uint32_t referent : referents) {
+        names.push_back(referent != 0 ? read_ndr_string(c) : std::string());
+    }
+    return names;
+}
+
+std::vector<uint32_t> read_ndr_ulong_conformant_varying_array(Cursor& c) {
+    (void)c.u32le();  // MaxCount
+    (void)c.u32le();  // Offset
+    uint32_t actual_count = c.u32le();
+    const size_t kMax = resource_limits().max_decoded_objects.value_or(64);
+    std::vector<uint32_t> values;
+    values.reserve(actual_count < kMax ? actual_count : kMax);
+    for (uint32_t i = 0; i < actual_count && values.size() < kMax; ++i) {
+        values.push_back(c.u32le());
+    }
+    return values;
+}
+
+std::vector<uint32_t> read_ndr_count_and_ptr_ulong_array(Cursor& c) {
+    (void)c.u32le();  // Count -- self-describing MaximumCount below is trusted instead
+    uint32_t referent = c.u32le();
+    if (referent == 0) {
+        return {};
+    }
+    uint32_t maximum_count = c.u32le();
+    const size_t kMax = resource_limits().max_decoded_objects.value_or(64);
+    std::vector<uint32_t> values;
+    values.reserve(maximum_count < kMax ? maximum_count : kMax);
+    for (uint32_t i = 0; i < maximum_count && values.size() < kMax; ++i) {
+        values.push_back(c.u32le());
+    }
+    return values;
+}
+
 std::vector<DceRpcMessage> parse_dcerpc_chain(ByteSpan payload) {
     std::vector<DceRpcMessage> messages;
     const size_t kMaxChain = resource_limits().max_decoded_objects.value_or(64);

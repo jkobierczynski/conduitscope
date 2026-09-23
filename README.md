@@ -35,7 +35,12 @@ named-pipe I/O with no independent wire gate or CLI flag of its own, with
 curated secure-channel-established, all-zero-challenge-or-credential (the
 CVE-2020-1472 "Zerologon" wire signature), legacy-authentication-method,
 machine-account-naming-mismatch, and password-reset attack/monitoring
-notes -- the fourth and final protocol of that same suite),
+notes -- the fourth protocol of that same suite), SAMR + LSARPC
+(MS-SAMR, MS-LSAD/MS-LSAT, likewise carried inside SMB2 named-pipe I/O
+with no independent wire gate or CLI flag of their own, with curated
+account/group-enumeration, SID/name-translation-or-enumeration,
+cross-interface, and null/guest-session-escalation attack/monitoring
+notes),
 IEEE Spanning Tree Protocol
 (STP/RSTP/MSTP), DeviceNet (CAN-bus CIP, via SocketCAN pcap captures), DNS,
 mDNS, LLMNR, and NetBIOS Name Service (NBT-NS), ICMP, RIP, IGMP, VRRP, HSRP,

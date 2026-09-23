@@ -5430,6 +5430,176 @@ deferred future migration.
     flows); if one becomes available later it should be added and
     PROTOCOL_COVERAGE.md's Validation subsection updated accordingly.
 
+    **Update: lsarpc/samr/srvsvc/wkssvc/drsuapi + WinRM + WMI, phase 0
+    (prerequisite generalization).** Jurgen asked for the remaining
+    Windows RPC interfaces and, separately, WinRM/WMI. Netlogon was the
+    only interface riding `dcerpc.hpp` at the time, and `smb.hpp`/
+    `smb.cpp`'s pipe-tracking/dispatch plumbing was written narrowly
+    around it (a single `NetlogonPipeState`-typed map, three dispatch
+    sites each hardcoded to Netlogon's own decode call). Before writing
+    any new interface module, that plumbing needed to split into
+    interface-agnostic wire bookkeeping (shared) and interface semantics
+    (kept separate per interface, matching this project's own RIP/IGMP/
+    VRRP/IGRP precedent of not unifying structurally-similar-but-
+    semantically-distinct protocols) -- a prerequisite phase with no
+    user-visible output on its own, verified purely by proving Netlogon's
+    existing behavior stays byte-identical.
+
+    `dcerpc.hpp`/`dcerpc.cpp` gained a `resolve_dcerpc_bind_bookkeeping<PipeState>()`
+    template (the bind/bind_ack/fault correlation logic `smb.cpp`'s
+    Netlogon dispatch already did inline, factored out for reuse by every
+    future interface's own pipe-state type) and `PendingDceRpcCall` moved
+    here from `smb.hpp` (it was already interface-agnostic). The three NDR
+    string helpers `netlogon.cpp` had as local, file-private functions
+    (`align4`/`read_ndr_string`/`read_ndr_unique_string`, renamed
+    `ndr_align4` at its new home to avoid colliding with the generic
+    alignment idiom's common name) moved to `dcerpc.hpp`/`dcerpc.cpp` too,
+    to avoid five-way duplication across the interface modules about to
+    be built on top; `netlogon.cpp` now includes `dcerpc.hpp` directly for
+    them (deliberately not added to `netlogon.hpp`, which stays decoupled
+    from `dcerpc.hpp`'s own types by design -- see that header's STUB DATA
+    paragraph). **Netlogon's own decode logic is otherwise untouched.**
+
+    `smb.hpp`'s `try_parse_smb` gate parameter generalized from a
+    `NetlogonPipeState`-typed map to a plain `unordered_set<SmbFileId>`
+    (all it was ever used for -- membership only); `SmbFlowState` gained
+    a unified `tracked_rpc_pipe_file_ids` set kept in lockstep with every
+    per-interface pipe-state map. `smb.cpp`'s three WRITE/READ/IOCTL
+    dispatch sites collapsed into one `dispatch_dcerpc_payload(m, state,
+    file_id)` helper. One correctness risk caught before any test ran:
+    an early draft had the READ-response dispatch site mutate the
+    response message's own `file_id`/`has_file_id` fields (SMB2 READ
+    responses never carry a FileId of their own on the wire, and
+    `output.cpp` renders `"file_id"` whenever `has_file_id` is set) --
+    fixed by threading the FileId through as an explicit parameter
+    (sourced from the pending-request state) instead of ever writing it
+    onto the response message.
+
+    Verified against a fresh from-scratch build in both established
+    configs (default: 1416/1416, zero warnings; `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF`:
+    1404/1404, zero warnings) plus manual `--format json`/`--format text
+    --verbose`/`--stats` smoke tests against `sample_netlogon.pcap`
+    confirming every opnum still decodes correctly (including the
+    ATTACKER-PC/ALL-ZERO negative-control flow) and that READ responses
+    still carry no `file_id` field. No new fixture, `PROTOCOL_COVERAGE.md`
+    entry, or CLI-visible change -- nothing user-facing changes until an
+    interface is actually built on top of this plumbing (lsarpc/samr next).
+
+    **Update: lsarpc/samr, phase 1 (the first two real interfaces).** New
+    `include/conduitscope/samr.hpp`/`src/samr.cpp` and
+    `include/conduitscope/lsarpc.hpp`/`src/lsarpc.cpp`, shaped exactly like
+    `netlogon.hpp`/`.cpp`: an interface UUID constant, `is_<x>_interface_uuid()`,
+    `<x>_opnum_name()`, a fully-typed `<X>Call` struct, `try_parse_<x>_request/
+    _response()`, called directly from two new `smb.cpp` functions
+    (`decode_dcerpc_and_samr`/`decode_dcerpc_and_lsarpc`) that are the first
+    real callers of Phase 0's `resolve_dcerpc_bind_bookkeeping` template.
+    SAMR full-decodes `SamrLookupNamesInDomain(17)`/`SamrLookupIdsInDomain(18)`
+    (RID<->name resolution), `SamrEnumerateUsersInDomain(13)`/
+    `SamrEnumerateAliasesInDomain(15)`, `SamrGetAliasMembership(16)`, and the
+    `SamrConnect` family (0/57/62 -- ServerName only, uniformly; 64/Connect5
+    stays structural, its OutRevisionInfo union not independently verified);
+    header-only for `SamrOpenDomain(7)`/`OpenUser(34)`/`OpenAlias(27)`/
+    `OpenGroup(19)` (the target SID/RID + DesiredAccess, no handle-level state
+    tracked across calls -- same posture Netlogon never needed either);
+    structural-only with ZERO field decode (more conservative than Netlogon's
+    own presence/length-only `NL_TRUST_PASSWORD` precedent) for the three
+    password-shaped opnums `SamrChangePasswordUser(38)`/
+    `SamrOemChangePasswordUser2(54)`/`SamrSetInformationUser(37)`. LSARPC
+    full-decodes `LsarLookupNames(14)`/`LsarLookupSids(15)` and, promoted from
+    the plan's original structural-only tier once the shared array primitives
+    already existed, `LsarEnumerateAccounts(11)`/`LsarEnumerateTrustedDomains(13)`;
+    `LsarOpenPolicy(6)`/`OpenPolicy2(44)` response is decoded (the opened
+    handle + status) but the REQUEST side stays structural-only by design --
+    ObjectAttributes' own SECURITY_QUALITY_OF_SERVICE pointer chain wasn't
+    independently verified to this codebase's own confidence bar, so it's
+    flagged rather than guessed at, the same "disclose the reduction" posture
+    the `_2`/`_3`/`_4` Lookup variants (opnums 57/58/68/76/77) get too
+    (structural-only, their EX array shapes -- an extra Flags field, SID-vs-RID
+    differences -- not independently verified either).
+
+    The single largest technical risk in this phase was NDR's own deferred-
+    pointer-data placement rule, which is genuinely ambiguous from [MS-RPCE]'s
+    prose alone once more than one pointer is in play. Resolved empirically,
+    by installing impacket 0.13.1 in the planning sandbox and round-tripping
+    hand-built bytes through both its marshaller (to see real layouts) and its
+    unmarshaller (`fromString()`, to confirm a hypothesis against bytes this
+    codebase itself constructed) -- with deliberately DISTINCT disambiguating
+    field values (e.g. `EntriesRead=111` vs `CountReturned=222`) after an
+    early test with two equal values produced a result that only looked
+    consistent with a wrong hypothesis. The confirmed rule, now documented in
+    `samr.cpp`'s own header comment and applied consistently everywhere: a DCE/RPC
+    call's own TOP-LEVEL request/response parameters resolve EAGERLY (each
+    field, including full recursive resolution of anything it points to, is
+    completely written before the next top-level field begins); a NESTED
+    constructed type (reached only via pointer indirection) uses the textbook
+    NDR "batched" shape (all of that struct's own fields written first, THEN
+    its own pointers' deferred data, in declared order); an ARRAY always
+    batches its own elements' deferred data after ALL elements' fixed parts,
+    regardless of nesting depth. Five new shared NDR primitives landed in
+    `dcerpc.hpp`/`dcerpc.cpp` for this (`read_ndr_sid`, `read_ndr_sid_pointer_array`,
+    `read_ndr_unicode_string_array`, `read_ndr_ulong_conformant_varying_array`,
+    `read_ndr_count_and_ptr_ulong_array`), each DoS-capped at
+    `resource_limits().max_decoded_objects` like every other array-reading loop
+    in this codebase.
+
+    Two curated notes per interface (SAMR account/group enumeration; LSARPC
+    SID/name translation or enumeration), each sticky once per pipe
+    conversation, escalating their wording when
+    `SmbFlowState::null_or_guest_session_seen` is set (a new sticky flag,
+    populated alongside the pre-existing curated note 4 in the SESSION_SETUP
+    response handler) -- null-session SAM/LSA enumeration is a well-known
+    high-value misconfiguration, not just routine recon. Plus one
+    cross-interface note ("SAMR and LSARPC enumeration both observed on this
+    session"), only possible because Phase 0 put `samr_pipes`/`lsarpc_pipes`
+    on the same `SmbFlowState` -- fires once (a new
+    `samr_lsarpc_cross_interface_note_seen` sticky flag) whichever interface's
+    own enumeration note happens to fire second, the actual enum4linux/
+    BloodHound-style wire pattern (RID/name resolution plus SID translation
+    together on one session) rather than two coincidental calls.
+
+    New fixture: `tools/make_sample_pcap.py`'s `build_samr_lsarpc_sample()`
+    (`tests/sample_samr_lsarpc.pcap`, 6 independent flows A-F), plus new
+    `NdrBuf` methods for every wire shape this phase's opnums need (`sid`,
+    `sid_pointer_array`/`sid_array_ptr`, `unicode_string_array`/
+    `names_ptr_array`, `ulong_array`, `count_and_ptr_ulong_array`,
+    `trust_info_array`/`referenced_domain_list_field`,
+    `translated_sids_field`/`translated_names_field`) and three standalone
+    stub builders for the more complex nested response shapes
+    (`samr_enumerate_response_stub`, `lsar_enumerate_accounts_response_stub`,
+    `lsar_enumerate_trusted_domains_response_stub`) -- each the exact byte-level
+    inverse of one shared reader, verified by round-tripping the fixture
+    through the actual built decoder (not hand-computed) before any
+    CMakeLists.txt test was written. One bug this process caught directly:
+    an early draft of `sid_array_ptr`'s own call sites double-encoded the
+    SidArray's leading `Count` field (once explicitly, once again inside
+    `sid_array_ptr` itself), corrupting every SID that followed -- caught by
+    decoding the fixture and seeing `sids=0` where `sids=1`/`sids=2` was
+    expected, not by code review. 30 new CMakeLists.txt tests cover every
+    full-decode opnum's request/response fields, both interfaces' enumeration
+    notes (positive), the cross-interface note (firing once, not twice), the
+    null/guest-session escalation wording, the sealed-call fallback (no field
+    decode, no note), the secret-shaped opnums' zero-field-decode posture
+    (asserting the fixture's own non-zero stub bytes never appear in decoded
+    output), the bind-interface-confirmation negative control (a non-SAMR
+    bind on a samr-named pipe never produces `samr_calls`), and `--stats`
+    opnum counts for both interfaces.
+
+    Verified against a fresh from-scratch build in both established configs
+    (default: 1445/1445, zero warnings; `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF`:
+    1433/1433, zero warnings) plus manual `--format json`/`--format text
+    --verbose`/`--stats` smoke tests against the new fixture. `smb_lsarpc`'s
+    own CREATE-name gate meant one existing Netlogon test
+    (`netlogon_untracked_pipe_name_never_parsed_json`) needed rewriting: its
+    own premise (an "lsarpc"-named pipe is never tracked) was invalidated by
+    this phase adding LSARPC pipe tracking, so it was renamed and rewritten
+    to assert the new, still-meaningful behavior instead (the envelope now
+    parses -- `dcerpc_messages` appears -- but the bound interface UUID being
+    Netlogon's own, not LSARPC's, still means zero `lsarpc_calls`/`samr_calls`)
+    rather than silently left asserting something now false.
+
+    `docs/PROTOCOL_COVERAGE.md`'s SAMR/LSARPC section, `man/conduitscope.1`,
+    and `README.md` updated in this same phase, not deferred.
+
 29. **MELSEC Communication Protocol (MC Protocol / SLMP), Mitsubishi
     Electric -- TCP port 5001, UDP port 5000.** Jurgen asked for this
     directly. **Done.** Mitsubishi's own PLC communication protocol --

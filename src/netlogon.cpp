@@ -5,75 +5,24 @@
 
 #include <cstdio>
 
+#include "conduitscope/dcerpc.hpp"  // ndr_align4/read_ndr_string/read_ndr_unique_string (shared NDR
+                                    // primitives -- see this file's own NDR string helpers comment
+                                    // below); netlogon.hpp itself deliberately stays decoupled from
+                                    // dcerpc.hpp's types (see netlogon.hpp's own STUB DATA paragraph),
+                                    // so this include lives here in the .cpp, not in the header.
+
 namespace conduitscope {
 
 namespace {
 
-// ---------------------------------------------------------------------------------------------
 // NDR string helpers (conformant-varying wchar_t* strings, MS-RPCE 14.3.4.2 / NDR "string" IDL
-// attribute). Every string field this file decodes is one of these two shapes:
-//   - a [ref] string: no referent ID, the conformant-varying header + chars start immediately.
-//   - a [unique] string: a 4-byte referent ID first (0 == NULL, no string data follows at all;
-//     nonzero == "string data follows", the referent ID's own value is otherwise meaningless here).
-// See netlogon.hpp's own file header comment for the two empirically-confirmed wrinkles this
-// depends on: a top-level wchar_t* without an explicit [unique]/[ref] attribute defaults to [ref]
-// even under pointer_default(unique), and NETLOGON_SECURE_CHANNEL_TYPE is a 16-bit NDR enum.
-// ---------------------------------------------------------------------------------------------
-
-// NDR aligns every scalar/array to its own natural alignment (1 for a byte array, 2 for a 16-bit
-// field, 4 for a 32-bit field or a conformant array's own MaxCount) -- most of this file's own
-// field sequences happen to stay 4-aligned throughout simply because every field is itself a
-// multiple of 4 bytes (a referent ID, a conformant string padded to 4 on its own way out, an
-// 8-byte credential), but NETLOGON_SECURE_CHANNEL_TYPE is a 16-bit field (see this file's own
-// SecureChannelType comment) and is immediately followed, in every opnum this file decodes, by a
-// 4-byte-aligned conformant string (ComputerName) -- align4 re-aligns for exactly that one
-// wrinkle. Called at the start of read_ndr_string/read_ndr_unique_string below (a conformant
-// array's own MaxCount is itself a 4-byte field) rather than after every scalar read, so it's a
-// no-op everywhere the cursor is already aligned and only actually skips bytes at the one place
-// this file's own field sequences need it.
-void align4(Cursor& c) {
-    size_t pad = (4 - (c.position() % 4)) % 4;
-    if (pad > 0) c.skip(pad);
-}
-
-// Reads one NDR conformant-varying string: MaxCount(4)/Offset(4)/ActualCount(4), all u32le, then
-// ActualCount*2 bytes of UTF-16LE character data (the wire's own ActualCount includes the
-// terminating NUL), then pads to the next 4-byte boundary. MaxCount/Offset are structurally
-// required to be present but are never meaningful for this codebase's own read-only decode (every
-// string this file ever sees is a single, unfragmented conformant array), so neither is validated
-// against ActualCount -- a malformed relationship between them still yields whatever ActualCount
-// itself says, and any resulting truncation is caught by the caller's own try/catch the same way
-// every other malformed-field case in this codebase already is.
-std::string read_ndr_string(Cursor& c) {
-    align4(c);  // a conformant array's own MaxCount is a 4-byte field -- see align4's own comment
-    (void)c.u32le();  // MaxCount -- structurally present, not itself meaningful here
-    (void)c.u32le();  // Offset -- likewise
-    uint32_t actual_count = c.u32le();
-    ByteSpan chars = c.bytes(static_cast<size_t>(actual_count) * 2);
-    std::string s = utf16le_to_utf8(chars);
-    if (!s.empty() && s.back() == '\0') {
-        s.pop_back();
-    }
-    size_t pad = (4 - (c.position() % 4)) % 4;
-    if (pad > 0) {
-        c.skip(pad);
-    }
-    return s;
-}
-
-// Reads one NDR [unique] string pointer: a 4-byte referent ID, then (only if nonzero) the same
-// conformant-varying string read_ndr_string reads for a [ref] pointer. Returns an empty string for
-// a NULL pointer (referent ID == 0) -- indistinguishable, at this decode depth, from an empty
-// string that was actually sent; this codebase does not track "was this field present at all"
-// separately from "was it empty," the same posture already taken for optional strings elsewhere.
-std::string read_ndr_unique_string(Cursor& c) {
-    align4(c);  // the referent ID itself is a 4-byte field
-    uint32_t referent_id = c.u32le();
-    if (referent_id == 0) {
-        return std::string();
-    }
-    return read_ndr_string(c);
-}
+// attribute) -- ndr_align4/read_ndr_string/read_ndr_unique_string, used throughout this file, now
+// live in dcerpc.hpp/dcerpc.cpp as shared primitives (see that file's own header comment for why,
+// and for the two empirically-confirmed wrinkles they depend on: a top-level wchar_t* without an
+// explicit [unique]/[ref] attribute defaults to [ref] even under pointer_default(unique), and
+// NETLOGON_SECURE_CHANNEL_TYPE below being a 16-bit NDR enum is why this file's own field
+// sequences need ndr_align4 at all -- most stay 4-aligned throughout simply because every other
+// field is itself a multiple of 4 bytes).
 
 bool all_zero(ByteSpan b) {
     for (size_t i = 0; i < b.size(); ++i) {
