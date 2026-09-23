@@ -317,7 +317,10 @@ void PolicyEngine::observe(const DecodedPacket& dp) {
     // FILE FORMAT "Addressing scope" section for the full explanation.
     if (dp.protocol == "modbus") {
         fs.protocols.insert("modbus");
-        if (!dp.modbus_function_name.empty()) fs.functions.insert(dp.modbus_function_name);
+        if (dp.result) {
+            const std::string& name = dp.result->as<ModbusFrame>().function_name;
+            if (!name.empty()) fs.functions.insert(name);
+        }
     } else if (dp.protocol == "dnp3") {
         fs.protocols.insert("dnp3");
         if (dp.dnp3_has_function && !dp.dnp3_function_name.empty()) fs.functions.insert(dp.dnp3_function_name);

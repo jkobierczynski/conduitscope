@@ -955,6 +955,72 @@ Discussed and adopted, in this order:
    follow `EtherType`'s lead the same way (`CotpPayload` in particular
    already has its own documented reason to possibly stay a manual
    if-chain permanently -- see `cotp_payload_registry()`'s doc comment).
+
+   **Update: the pilot's own leftover -- `output.cpp`'s rendering for
+   EIGRP/Modbus/GOOSE -- is now migrated too, closing the specific gap
+   batch 2's "still explicitly out of scope" note (above) flagged.** All
+   three now carry their full typed result forward via
+   `DecodedPacket::result` (`out.result = *result;`/`out.result = result;`
+   at each call site) instead of dual-writing into their own `eigrp_*`/
+   `modbus_*`/`goose_*` flat fields -- the same zero-flat-field shape
+   TwinCAT/BGP/Slow Protocols/Kerberos/LDAP/SMB/MELSEC/FINS already use.
+   `decoder.cpp`'s now-orphaned `fill_eigrp_fields`/
+   `eigrp_general_tlv_summary` helpers were deleted outright (EIGRP's own
+   call site was the only caller of either); GOOSE's `populate_goose`
+   shrank to the same three-line shape `populate_slow_protocols` already
+   established for the `EthertypeCascadePopulate` loop. Three new free
+   functions in `output.cpp` (`write_eigrp_json_fields`/
+   `write_modbus_json_fields`/`write_goose_json_fields`, mirroring
+   `write_twincat_json_fields`'s own style) render straight from the typed
+   `EigrpMessage`/`ModbusFrame`/`GooseFrame`, called from
+   `JsonWriter::write_packet` only `if (p.protocol == "x" && p.result)` --
+   the exact `TwinCAT` convention -- at each block's own, unmoved textual
+   position; `TextWriter`'s Modbus-exception severity check and
+   `StatsWriter`'s three aggregate blocks were updated the same way.
+   GOOSE's two-tier truncation cap (`goose.cpp`'s own 200-entry cap on
+   `GooseFrame::all_data`, plus a separate, smaller
+   `resource_limits().max_decoded_objects.value_or(50)` cap applied only
+   when rendering `goose_all_data` for JSON -- the same pattern PROFINET
+   RT's DCP blocks use) was reproduced exactly, as was a genuine pre-
+   existing quirk: GOOSE's has-PDU-gated JSON fields were always rendered
+   whenever `GooseFrame::has_pdu` was true, not gated a second time on
+   `protocol == "goose"` -- harmless in practice (`has_pdu` is only ever
+   true on a GOOSE packet) but preserved as-is rather than "fixed" out
+   from under a byte-identical-output verification bar.
+
+   `modbus_function_name` turned out to have two readers outside
+   `decoder.cpp`/`output.cpp` -- `policy_engine.cpp`'s conduit function-
+   list matching and `asset_inventory.cpp`'s per-asset function-name
+   field, both found by exhaustively grepping every flat-field usage site
+   across `src/`/`include/`/`fuzz/` before touching anything, per this
+   project's own established discipline for scoping a dual-write removal
+   (see TwinCAT's own precedent). Both now read
+   `dp.result->as<ModbusFrame>().function_name` instead; EIGRP and GOOSE
+   had exactly two readers each (`decoder.cpp`'s own dual-write and
+   `output.cpp`'s own rendering), so nothing else needed touching for
+   them. All now-unused `eigrp_*`/`goose_*`/`modbus_*` `DecodedPacket`
+   flat-field declarations were removed from `decoder.hpp`, along with the
+   stale doc comments elsewhere (`decoder.hpp`/`modbus.hpp`/`twincat.hpp`)
+   that referenced them by name.
+
+   Verified the same way as every prior migration: the full CTest suite
+   (1,416 tests) stayed 100% passing with zero changed
+   `PASS_REGULAR_EXPRESSION`/`FAIL_REGULAR_EXPRESSION` assertions anywhere
+   (proof of byte-identical output for all three protocols), zero-warning
+   clean rebuilds across both configs checked in this environment
+   (default+libpcap, `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF`), and a
+   manual JSON smoke test against each protocol's own fixture confirming
+   field-for-field identical output to before this change.
+
+   Still explicitly out of scope, not silently dropped: migrating the
+   remaining legacy protocols onto the new interface; having the registry
+   vectors in `protocol_registry.cpp` drive dispatch order for the other
+   five `GateKind`s (unchanged by this update -- see the note directly
+   above); and deduplicating `policy_engine.cpp`'s/`asset_inventory.cpp`'s
+   own independently-forked protocol-classification chains beyond the one
+   Modbus read each needed to keep compiling (both still read
+   `DecodedPacket::protocol` as a plain string for everything else, the
+   same as before).
 4. **Comment-density trim: acknowledged, not scheduled.** Real cost, no
    plan yet to act on it -- lower priority than the three items above.
 5. **No new protocols until 1-3 above are substantially underway,** per

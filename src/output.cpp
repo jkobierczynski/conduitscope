@@ -469,7 +469,8 @@ const char* protocol_tag_color(const std::string& protocol) {
 void TextWriter::write_packet(const DecodedPacket& p) {
     // A parse failure, or a Modbus exception response, is the one piece of a packet line worth
     // drawing the eye to over everything else in a long decode -- both mean "look at this one".
-    bool severe = p.protocol == "parse-error" || (p.protocol == "modbus" && p.modbus_is_exception);
+    bool severe = p.protocol == "parse-error" ||
+                  (p.protocol == "modbus" && p.result && p.result->as<ModbusFrame>().is_exception);
 
     std::ostringstream head;
     head << "#" << p.index << "  " << time_.format(p.timestamp) << "  "
@@ -599,6 +600,103 @@ void write_twincat_json_fields(std::ostream& out, const TwinCatFrame& tc) {
     if (tc.paired_response) {
         out << "    \"twincat_paired_request_index\": " << tc.paired_request_index << ",\n";
     }
+}
+
+// The GOOSE analog of write_twincat_json_fields above -- same rationale (a plain free function,
+// not a ProtocolRenderer interface). Reproduces the exact two-tier truncation cap this always had:
+// goose.cpp itself caps GooseFrame::all_data at max_goose_data_values() (default 200), and this
+// function applies a SEPARATE, smaller cap (resource_limits().max_decoded_objects.value_or(50))
+// when rendering goose_all_data for JSON -- the same pattern PROFINET RT's DCP blocks use
+// (kMaxDcpBlocks vs kMaxDcpBlockValues). Also note goose_is_gse_management/goose_appid are always
+// emitted for a "goose" packet, while the has_pdu-gated fields below were historically populated
+// (and rendered) whenever GooseFrame::has_pdu was true regardless of DecodedPacket::protocol --
+// moot in practice since has_pdu is only ever true on a GOOSE packet, but reproduced here exactly
+// via the same `if (gs.has_pdu)` gate, not a `protocol == "goose"` gate.
+void write_goose_json_fields(std::ostream& out, const GooseFrame& gs) {
+    std::ostringstream appid;
+    appid << "0x" << std::hex << std::uppercase << std::setw(4) << std::setfill('0') << gs.appid;
+    out << "    \"goose_appid\": \"" << appid.str() << "\",\n";
+    out << "    \"goose_is_gse_management\": " << (gs.is_gse_management ? "true" : "false") << ",\n";
+    if (gs.has_pdu) {
+        bool simulated = gs.header_simulated || (gs.simulation && *gs.simulation);
+        out << "    \"goose_simulated\": " << (simulated ? "true" : "false") << ",\n";
+        out << "    \"goose_gocb_ref\": \"" << json_escape(gs.gocb_ref) << "\",\n";
+        out << "    \"goose_dat_set\": \"" << json_escape(gs.dat_set) << "\",\n";
+        if (gs.go_id && !gs.go_id->empty()) {
+            out << "    \"goose_go_id\": \"" << json_escape(*gs.go_id) << "\",\n";
+        }
+        out << "    \"goose_st_num\": " << gs.st_num << ",\n";
+        out << "    \"goose_sq_num\": " << gs.sq_num << ",\n";
+        out << "    \"goose_conf_rev\": " << gs.conf_rev << ",\n";
+        out << "    \"goose_num_dat_set_entries\": " << gs.num_dat_set_entries << ",\n";
+        const size_t kMaxGooseDataValueEntries = resource_limits().max_decoded_objects.value_or(50);
+        std::vector<std::string> rendered;
+        for (const auto& v : gs.all_data) {
+            if (rendered.size() >= kMaxGooseDataValueEntries) break;
+            std::string label = !v.type_name.empty() ? v.type_name : "raw";
+            rendered.push_back(v.path + ": " + label + "=" + v.value);
+        }
+        if (!rendered.empty()) {
+            out << "    \"goose_all_data\": [";
+            for (size_t i = 0; i < rendered.size(); ++i) {
+                if (i != 0) out << ", ";
+                out << "\"" << json_escape(rendered[i]) << "\"";
+            }
+            out << "],\n";
+        }
+    }
+}
+
+// The Modbus analog of write_twincat_json_fields above -- same rationale (a plain free function,
+// not a ProtocolRenderer interface). Modbus's function name and exception flag are already folded
+// into DecodedPacket::protocol/summary (see decoder.cpp's Modbus call site) and need no JSON field
+// of their own; paired_request_index is the one field genuinely only meaningful in JSON.
+void write_modbus_json_fields(std::ostream& out, const ModbusFrame& mb) {
+    if (mb.paired_response) {
+        out << "    \"modbus_paired_request_index\": " << mb.paired_request_index << ",\n";
+    }
+}
+
+// The EIGRP analog of write_twincat_json_fields above -- same rationale (a plain free function, not
+// a ProtocolRenderer interface). Renders one EigrpGeneralTlv as a single line (previously
+// decoder.cpp's own eigrp_general_tlv_summary helper, inlined here now that this is its only
+// caller) and reads EigrpRoute::summary directly (precomputed at parse time in eigrp.cpp).
+void write_eigrp_json_fields(std::ostream& out, const EigrpMessage& msg) {
+    out << "    \"eigrp_opcode\": \"" << json_escape(msg.opcode_name) << "\",\n";
+    out << "    \"eigrp_autonomous_system\": " << msg.autonomous_system << ",\n";
+    std::vector<std::string> flags;
+    if (msg.flag_init) flags.push_back("Init");
+    if (msg.flag_conditional_receive) flags.push_back("Conditional Receive");
+    if (msg.flag_restart) flags.push_back("Restart");
+    if (msg.flag_end_of_table) flags.push_back("End Of Table");
+    if (!flags.empty()) {
+        out << "    \"eigrp_flags\": [";
+        for (size_t i = 0; i < flags.size(); ++i) {
+            if (i != 0) out << ", ";
+            out << "\"" << json_escape(flags[i]) << "\"";
+        }
+        out << "],\n";
+    }
+    if (!msg.general_tlvs.empty()) {
+        out << "    \"eigrp_general_tlvs\": [";
+        for (size_t i = 0; i < msg.general_tlvs.size(); ++i) {
+            if (i != 0) out << ", ";
+            const EigrpGeneralTlv& tlv = msg.general_tlvs[i];
+            std::string line = tlv.value.empty() ? tlv.type_name : tlv.type_name + ": " + tlv.value;
+            out << "\"" << json_escape(line) << "\"";
+        }
+        out << "],\n";
+    }
+    out << "    \"eigrp_general_tlvs_truncated\": " << (msg.general_tlvs_truncated ? "true" : "false") << ",\n";
+    if (!msg.routes.empty()) {
+        out << "    \"eigrp_routes\": [";
+        for (size_t i = 0; i < msg.routes.size(); ++i) {
+            if (i != 0) out << ", ";
+            out << "\"" << json_escape(msg.routes[i].summary) << "\"";
+        }
+        out << "],\n";
+    }
+    out << "    \"eigrp_routes_truncated\": " << (msg.routes_truncated ? "true" : "false") << ",\n";
 }
 
 // The BGP analog of write_twincat_json_fields above -- same rationale (a plain free function, not a
@@ -1514,8 +1612,8 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
     out_ << "    \"tcp_flags\": " << (p.has_tcp ? ("\"" + json_escape(p.tcp_flags) + "\"") : "null") << ",\n";
     out_ << "    \"protocol\": \"" << json_escape(p.protocol) << "\",\n";
     out_ << "    \"summary\": \"" << json_escape(p.summary) << "\",\n";
-    if (p.protocol == "modbus" && p.modbus_is_paired_response) {
-        out_ << "    \"modbus_paired_request_index\": " << p.modbus_paired_request_index << ",\n";
+    if (p.protocol == "modbus" && p.result) {
+        write_modbus_json_fields(out_, p.result->as<ModbusFrame>());
     }
     if (p.protocol == "s7comm" && p.s7comm_has_function) {
         out_ << "    \"s7comm_function\": \"" << json_escape(p.s7comm_function_name) << "\",\n";
@@ -1664,29 +1762,8 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
         out_ << "    \"profinet_cyclic_transfer_status\": " << static_cast<unsigned>(p.profinet_cyclic_transfer_status)
              << ",\n";
     }
-    if (p.protocol == "goose") {
-        std::ostringstream appid;
-        appid << "0x" << std::hex << std::uppercase << std::setw(4) << std::setfill('0') << p.goose_appid;
-        out_ << "    \"goose_appid\": \"" << appid.str() << "\",\n";
-        out_ << "    \"goose_is_gse_management\": " << (p.goose_is_gse_management ? "true" : "false") << ",\n";
-    }
-    if (p.goose_has_pdu) {
-        out_ << "    \"goose_simulated\": " << (p.goose_simulated ? "true" : "false") << ",\n";
-        out_ << "    \"goose_gocb_ref\": \"" << json_escape(p.goose_gocb_ref) << "\",\n";
-        out_ << "    \"goose_dat_set\": \"" << json_escape(p.goose_dat_set) << "\",\n";
-        if (!p.goose_go_id.empty()) out_ << "    \"goose_go_id\": \"" << json_escape(p.goose_go_id) << "\",\n";
-        out_ << "    \"goose_st_num\": " << p.goose_st_num << ",\n";
-        out_ << "    \"goose_sq_num\": " << p.goose_sq_num << ",\n";
-        out_ << "    \"goose_conf_rev\": " << p.goose_conf_rev << ",\n";
-        out_ << "    \"goose_num_dat_set_entries\": " << p.goose_num_dat_set_entries << ",\n";
-        if (!p.goose_all_data.empty()) {
-            out_ << "    \"goose_all_data\": [";
-            for (size_t i = 0; i < p.goose_all_data.size(); ++i) {
-                if (i != 0) out_ << ", ";
-                out_ << "\"" << json_escape(p.goose_all_data[i]) << "\"";
-            }
-            out_ << "],\n";
-        }
+    if (p.protocol == "goose" && p.result) {
+        write_goose_json_fields(out_, p.result->as<GooseFrame>());
     }
     if (p.protocol == "sv") {
         std::ostringstream appid;
@@ -2475,35 +2552,8 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
             out_ << "    \"pim_crp_groups_truncated\": " << (p.pim_crp_groups_truncated ? "true" : "false") << ",\n";
         }
     }
-    if (p.protocol == "eigrp") {
-        out_ << "    \"eigrp_opcode\": \"" << json_escape(p.eigrp_opcode_name) << "\",\n";
-        out_ << "    \"eigrp_autonomous_system\": " << p.eigrp_autonomous_system << ",\n";
-        if (!p.eigrp_flags.empty()) {
-            out_ << "    \"eigrp_flags\": [";
-            for (size_t i = 0; i < p.eigrp_flags.size(); ++i) {
-                if (i != 0) out_ << ", ";
-                out_ << "\"" << json_escape(p.eigrp_flags[i]) << "\"";
-            }
-            out_ << "],\n";
-        }
-        if (!p.eigrp_general_tlvs.empty()) {
-            out_ << "    \"eigrp_general_tlvs\": [";
-            for (size_t i = 0; i < p.eigrp_general_tlvs.size(); ++i) {
-                if (i != 0) out_ << ", ";
-                out_ << "\"" << json_escape(p.eigrp_general_tlvs[i]) << "\"";
-            }
-            out_ << "],\n";
-        }
-        out_ << "    \"eigrp_general_tlvs_truncated\": " << (p.eigrp_general_tlvs_truncated ? "true" : "false") << ",\n";
-        if (!p.eigrp_routes.empty()) {
-            out_ << "    \"eigrp_routes\": [";
-            for (size_t i = 0; i < p.eigrp_routes.size(); ++i) {
-                if (i != 0) out_ << ", ";
-                out_ << "\"" << json_escape(p.eigrp_routes[i]) << "\"";
-            }
-            out_ << "],\n";
-        }
-        out_ << "    \"eigrp_routes_truncated\": " << (p.eigrp_routes_truncated ? "true" : "false") << ",\n";
+    if (p.protocol == "eigrp" && p.result) {
+        write_eigrp_json_fields(out_, p.result->as<EigrpMessage>());
     }
     if (p.protocol == "ospf") {
         out_ << "    \"ospf_type\": \"" << json_escape(p.ospf_type_name) << "\",\n";
@@ -2845,10 +2895,11 @@ void StatsWriter::write_packet(const DecodedPacket& p) {
     if (p.has_direction) {
         direction_source_counts_[direction_source_name(p.direction_source)]++;
     }
-    if (p.protocol == "modbus") {
-        modbus_function_counts_[p.modbus_function_name]++;
-        if (p.modbus_is_exception) modbus_exceptions_++;
-        if (p.modbus_is_paired_response) modbus_paired_responses_++;
+    if (p.protocol == "modbus" && p.result) {
+        const ModbusFrame& mb = p.result->as<ModbusFrame>();
+        modbus_function_counts_[mb.function_name]++;
+        if (mb.is_exception) modbus_exceptions_++;
+        if (mb.paired_response) modbus_paired_responses_++;
     }
     if (p.protocol == "twincat" && p.result) {
         const TwinCatFrame& tc = p.result->as<TwinCatFrame>();
@@ -2925,10 +2976,11 @@ void StatsWriter::write_packet(const DecodedPacket& p) {
         if (p.profinet_has_dcp) profinet_dcp_count_++;
         if (p.profinet_has_cyclic_data) profinet_cyclic_count_++;
     }
-    if (p.protocol == "goose") {
-        if (p.goose_has_pdu) goose_pdu_count_++;
-        if (p.goose_is_gse_management) goose_gse_management_count_++;
-        if (p.goose_simulated) goose_simulated_count_++;
+    if (p.protocol == "goose" && p.result) {
+        const GooseFrame& gs = p.result->as<GooseFrame>();
+        if (gs.has_pdu) goose_pdu_count_++;
+        if (gs.is_gse_management) goose_gse_management_count_++;
+        if (gs.has_pdu && (gs.header_simulated || (gs.simulation && *gs.simulation))) goose_simulated_count_++;
     }
     if (p.protocol == "sv") {
         sv_frame_count_++;
@@ -3028,8 +3080,8 @@ void StatsWriter::write_packet(const DecodedPacket& p) {
     if (p.protocol == "pim") {
         pim_type_counts_[p.pim_type_name]++;
     }
-    if (p.protocol == "eigrp") {
-        eigrp_opcode_counts_[p.eigrp_opcode_name]++;
+    if (p.protocol == "eigrp" && p.result) {
+        eigrp_opcode_counts_[p.result->as<EigrpMessage>().opcode_name]++;
     }
     if (p.protocol == "ospf") {
         ospf_type_counts_[p.ospf_type_name]++;

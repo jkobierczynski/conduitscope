@@ -350,28 +350,6 @@ void fill_pim_fields(DecodedPacket& out, const PimMessage& msg) {
     out.pim_crp_groups = msg.crp_groups;
 }
 
-// Renders one EigrpGeneralTlv as a single line for DecodedPacket::eigrp_general_tlvs.
-std::string eigrp_general_tlv_summary(const EigrpGeneralTlv& tlv) {
-    if (tlv.value.empty()) return tlv.type_name;
-    return tlv.type_name + ": " + tlv.value;
-}
-
-// Flattens a parsed EigrpMessage (see eigrp.hpp) into DecodedPacket's eigrp_* fields.
-void fill_eigrp_fields(DecodedPacket& out, const EigrpMessage& msg) {
-    out.summary = msg.summary;
-    for (const auto& n : msg.notes) out.notes.push_back(n);
-    out.eigrp_opcode_name = msg.opcode_name;
-    out.eigrp_autonomous_system = msg.autonomous_system;
-    if (msg.flag_init) out.eigrp_flags.push_back("Init");
-    if (msg.flag_conditional_receive) out.eigrp_flags.push_back("Conditional Receive");
-    if (msg.flag_restart) out.eigrp_flags.push_back("Restart");
-    if (msg.flag_end_of_table) out.eigrp_flags.push_back("End Of Table");
-    out.eigrp_general_tlvs_truncated = msg.general_tlvs_truncated;
-    for (const auto& tlv : msg.general_tlvs) out.eigrp_general_tlvs.push_back(eigrp_general_tlv_summary(tlv));
-    out.eigrp_routes_truncated = msg.routes_truncated;
-    for (const auto& r : msg.routes) out.eigrp_routes.push_back(r.summary);
-}
-
 // Renders one OspfLsa's header ONLY (no body) as a single line -- used for DB Description and LS
 // Ack, which never carry LSA bodies (see ospf.hpp).
 std::string ospf_lsa_header_summary(const OspfLsa& lsa) {
@@ -509,27 +487,8 @@ void populate_goose(DecodedPacket& out, const ProtocolResult& result, uint16_t /
     const GooseFrame& gs = result.as<GooseFrame>();
     out.protocol = "goose";
     out.summary = gs.summary;
-    out.goose_appid = gs.appid;
-    out.goose_is_gse_management = gs.is_gse_management;
-    out.goose_has_pdu = gs.has_pdu;
     for (const auto& n : gs.notes) out.notes.push_back(n);
-
-    if (gs.has_pdu) {
-        out.goose_simulated = gs.header_simulated || (gs.simulation && *gs.simulation);
-        out.goose_gocb_ref = gs.gocb_ref;
-        out.goose_dat_set = gs.dat_set;
-        if (gs.go_id) out.goose_go_id = *gs.go_id;
-        out.goose_st_num = gs.st_num;
-        out.goose_sq_num = gs.sq_num;
-        out.goose_conf_rev = gs.conf_rev;
-        out.goose_num_dat_set_entries = gs.num_dat_set_entries;
-        const size_t kMaxGooseDataValueEntries = resource_limits().max_decoded_objects.value_or(50);
-        for (const auto& v : gs.all_data) {
-            if (out.goose_all_data.size() >= kMaxGooseDataValueEntries) break;
-            std::string label = !v.type_name.empty() ? v.type_name : "raw";
-            out.goose_all_data.push_back(v.path + ": " + label + "=" + v.value);
-        }
-    }
+    out.result = result;
 }
 
 void populate_sv(DecodedPacket& out, const ProtocolResult& result, uint16_t /*matched_ethertype*/) {
@@ -2386,12 +2345,25 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
             if (want_eigrp) {
                 // Registration-model pilot (Stage 1): try_parse_eigrp is now reached through
                 // EigrpDecoder::decode rather than called directly -- same function, same
-                // semantics, see eigrp.hpp. fill_eigrp_fields is unchanged.
+                // semantics, see eigrp.hpp.
+                //
+                // Update (ROADMAP item 3's own "migrate output.cpp's rendering for the three
+                // pilot protocols" follow-up): EIGRP no longer dual-writes into DecodedPacket's
+                // own eigrp_* flat fields at all -- fill_eigrp_fields is gone, and out.result now
+                // carries the whole EigrpMessage, the same zero-flat-field shape TwinCAT/BGP/
+                // Kerberos/etc. already established. output.cpp's write_eigrp_json_fields reads
+                // straight from it (see output.cpp's own comment on that function for why this
+                // was safe: eigrp_* had exactly two readers in the entire codebase, decoder.cpp's
+                // own dual-write and output.cpp's own rendering -- no third-party consumer like
+                // policy_engine.cpp/asset_inventory.cpp ever read an eigrp_* field).
                 DecodeContext ctx;
                 ctx.protocol_id = "eigrp";
                 if (auto result = eigrp_decoder().decode(ip.payload, ctx)) {
+                    const EigrpMessage& msg = result->as<EigrpMessage>();
                     out.protocol = "eigrp";
-                    fill_eigrp_fields(out, result->as<EigrpMessage>());
+                    out.summary = msg.summary;
+                    for (const auto& n : msg.notes) out.notes.push_back(n);
+                    out.result = *result;
                     return out;
                 }
             }
@@ -2869,7 +2841,14 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
             // Registration-model pilot (Stage 2): try_parse_modbus_tcp + the transaction-pairing
             // logic that used to be Decoder::pair_modbus_transaction are now both reached through
             // ModbusDecoder::decode -- same functions, same semantics, see modbus.hpp/modbus.cpp.
-            // The dual-write below (mb.* -> out.modbus_*) is unchanged.
+            //
+            // Update (ROADMAP item 3's own "migrate output.cpp's rendering for the three pilot
+            // protocols" follow-up): Modbus no longer dual-writes into DecodedPacket's own
+            // modbus_* flat fields -- out.result now carries the whole ModbusFrame, the same
+            // zero-flat-field shape TwinCAT/BGP/EIGRP/etc. already established. output.cpp's
+            // write_modbus_json_fields reads straight from it; policy_engine.cpp/asset_inventory.cpp
+            // (modbus_function_name's only other two readers) now read via
+            // dp.result->as<ModbusFrame>().function_name instead.
             std::string session = tcp_session_key(out.src_ip, tcp.src_port, out.dst_ip, tcp.dst_port);
             DecodeContext ctx;
             ctx.flow_key = flow_key;
@@ -2880,12 +2859,9 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
             if (auto result = modbus_decoder().decode(effective_payload, ctx)) {
                 const ModbusFrame& mb = result->as<ModbusFrame>();
                 out.protocol = "modbus";
-                out.modbus_is_exception = mb.is_exception;
-                out.modbus_function_name = mb.function_name;
                 out.summary = mb.function_name + ": " + mb.summary;
                 for (const auto& n : mb.notes) out.notes.push_back(n);
-                out.modbus_is_paired_response = mb.paired_response;
-                out.modbus_paired_request_index = mb.paired_request_index;
+                out.result = *result;
 
                 bool expected_port = port_in(tcp.src_port, MODBUS_TCP_PORT, options_.extra_modbus_ports) ||
                                       port_in(tcp.dst_port, MODBUS_TCP_PORT, options_.extra_modbus_ports);

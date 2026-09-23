@@ -143,9 +143,9 @@ traffic match what the segmentation policy says it should" question.
 
 ## Status
 
-Groundwork / v0.2.2. Every protocol named above is implemented, decoding real
+Groundwork / v0.2.3. Every protocol named above is implemented, decoding real
 wire-format fields (not just naming the protocol), and covered by the
-automated test suite -- 1354 tests as of this writing, run via `ctest` after
+automated test suite -- 1416 tests as of this writing, run via `ctest` after
 building (see Building below). Where a real capture was available (public
 ICS-lab collections, vendor-attributed samples, or a live device on real
 hardware), the decoder is validated against it, not just a synthetic
@@ -221,7 +221,7 @@ the separate Npcap *driver/service* installed).
 sudo apt install libpcap-dev   # optional, only needed for live capture (-i)
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
-sudo apt install -y libcap2-bin   # optional, see below				
+sudo apt install -y libcap2-bin
 sudo setcap cap_net_raw,cap_net_admin=eip build/conduitscope   # optional, see below
 ctest --test-dir build --output-on-failure   # optional, runs the fixture-based smoke tests
 ```

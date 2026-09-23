@@ -351,8 +351,8 @@ void AssetInventoryEngine::observe(const DecodedPacket& dp) {
     }
 
     std::string function_name;
-    if (protocol == "modbus" && !dp.modbus_function_name.empty()) {
-        function_name = dp.modbus_function_name;
+    if (protocol == "modbus" && dp.result && !dp.result->as<ModbusFrame>().function_name.empty()) {
+        function_name = dp.result->as<ModbusFrame>().function_name;
     } else if (protocol == "dnp3" && dp.dnp3_has_function && !dp.dnp3_function_name.empty()) {
         function_name = dp.dnp3_function_name;
     } else if (protocol == "s7comm" && dp.protocol == "s7comm" && dp.s7comm_has_function &&

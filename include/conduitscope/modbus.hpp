@@ -53,9 +53,9 @@ struct ModbusFrame {
     // Only set by ModbusDecoder::decode (registration-model pilot, Stage 2 -- see
     // protocol_decoder.hpp) once it has run the same authoritative MBAP-transaction-ID pairing
     // decoder.cpp's own (now removed) Decoder::pair_modbus_transaction used to perform directly.
-    // Mirrors DecodedPacket::modbus_is_paired_response/modbus_paired_request_index exactly -- the
-    // decoder.cpp call site just copies these two straight across after unwrapping the
-    // ProtocolResult, the same dual-write every other migrated pilot protocol does.
+    // Modbus is a zero-flat-field migrated protocol (like TwinCAT/BGP/EIGRP/etc.): decoder.cpp's
+    // call site carries the whole ModbusFrame forward via DecodedPacket::result rather than
+    // copying these two fields out -- see output.cpp's write_modbus_json_fields.
     bool paired_response = false;
     size_t paired_request_index = 0;
 };
@@ -102,7 +102,7 @@ std::string modbus_exception_name(uint8_t exception_code);
 // (every case modbus.cpp's internal function-code table defines) -- excluding the dynamic
 // "Unknown (0xNN)" fallback used for a function code outside that table. Used by policy.cpp to
 // validate a policy file's 'functions:' entries for a modbus-restricted conduit against exactly
-// the strings ModbusFrame::function_name/DecodedPacket::modbus_function_name can actually hold, so
+// the strings ModbusFrame::function_name (reached via DecodedPacket::result) can actually hold, so
 // there is exactly one place ("code N means this name") this is asserted -- the function-code
 // table in modbus.cpp -- rather than a second, separately-maintained list. Order is stable across
 // calls (the table's own declaration order) but not alphabetized.

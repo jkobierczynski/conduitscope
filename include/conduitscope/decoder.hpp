@@ -453,8 +453,8 @@ struct DecodedPacket {
     // stp.hpp -- neither is decoded further) -- see link_layer.hpp's ethertype_name; EtherType
     // 0x8892 traffic that try_parse_profinet DOES recognize is promoted to "profinet" instead --
     // see profinet_has_dcp/profinet_has_cyclic_data below; EtherType 0x88B8 traffic that
-    // try_parse_goose DOES recognize is promoted to "goose" instead -- see goose_has_pdu/
-    // goose_is_gse_management below; EtherType 0x88BA traffic that try_parse_sv DOES recognize is
+    // try_parse_goose DOES recognize is promoted to "goose" instead -- see GooseFrame (goose.hpp),
+    // reached via DecodedPacket::result; EtherType 0x88BA traffic that try_parse_sv DOES recognize is
     // promoted to "sv" instead -- see sv_asdu_count below; EtherType 0x88A4 traffic that
     // try_parse_ethercat DOES recognize is promoted to "ethercat" instead -- see
     // ethercat_frame_type below; a UDP payload that try_parse_bacnet recognizes as a BACnet/IP
@@ -488,7 +488,8 @@ struct DecodedPacket {
     // recognizes -- see hsrp_* fields below and hsrp.hpp). Also "igrp" (an IP payload with IP
     // protocol number 9 that try_parse_igrp recognizes -- see igrp_* fields below and igrp.hpp),
     // "pim" (IP protocol number 103, try_parse_pim, see pim_* fields and pim.hpp), "eigrp" (IP
-    // protocol number 88, try_parse_eigrp, see eigrp_* fields and eigrp.hpp), and "ospf" (IP
+    // protocol number 88, EigrpDecoder -- a zero-flat-field migrated protocol, see
+    // DecodedPacket::result and eigrp.hpp), and "ospf" (IP
     // protocol number 89, try_parse_ospf, see ospf_* fields and ospf.hpp) -- all four dispatched
     // regardless of port, the same IP-protocol-number posture as igmp/vrrp above; a non-matching
     // payload on any of these four IP protocol numbers still falls through to "non-tcp".
@@ -498,22 +499,17 @@ struct DecodedPacket {
 
     // registration-model decoder refactor (see protocol_decoder.hpp): set only by a protocol built
     // on the new ProtocolDecoder interface that chooses to carry its own structured result forward
-    // for a renderer to read (today: only TwinCAT/"twincat" -- see decoder.cpp's TwinCAT call
-    // site), rather than flattening its fields onto this struct the way every protocol below does.
-    // Every protocol-prefixed field below this point is untouched by the refactor; this is
-    // strictly additive.
+    // for a renderer to read (TwinCAT, BGP, Slow Protocols, Kerberos, LDAP, SMB, MELSEC, FINS,
+    // EIGRP, and Modbus so far -- see each protocol's own decoder.cpp call site), rather than
+    // flattening its fields onto this struct the way every protocol below still does. Every
+    // protocol-prefixed field below this point is untouched by the refactor; this is strictly
+    // additive.
     std::optional<ProtocolResult> result;
 
-    // Only set when protocol == "modbus"; useful for downstream JSON consumers.
-    bool modbus_is_exception = false;
-    std::string modbus_function_name;
-    // Only set when protocol == "modbus" and ModbusDecoder::decode (modbus.hpp/.cpp -- see
-    // ModbusFlowState) authoritatively (by MBAP transaction ID + TCP session, not the payload-shape
-    // heuristic modbus.cpp always applies) determined this packet is the response to a specific
-    // earlier request on the same TCP session. modbus_paired_request_index is that request's
-    // DecodedPacket::index.
-    bool modbus_is_paired_response = false;
-    size_t modbus_paired_request_index = 0;
+    // Modbus is a zero-flat-field migrated protocol (see ProtocolDecoder/ProtocolResult in
+    // protocol_decoder.hpp): its fields (function name, exception flag, transaction pairing) live
+    // in the ModbusFrame carried by DecodedPacket::result, not here -- see output.cpp's
+    // write_modbus_json_fields.
 
     // Only set when protocol == "s7comm" and a function code was decoded.
     bool s7comm_has_function = false;
@@ -714,26 +710,13 @@ struct DecodedPacket {
     std::string profinet_cyclic_data_status_summary;
     uint8_t profinet_cyclic_transfer_status = 0;
 
-    // Only set when protocol == "goose" -- see try_parse_goose in goose.hpp. Like PROFINET RT
-    // above, GOOSE rides directly on raw Ethernet (EtherType 0x88B8, has_ip stays false), so there
-    // is no src_ip/dst_ip/src_port/dst_port for it -- src_mac/dst_mac (above) are the only
-    // addressing this packet carries. GOOSE traffic is commonly multicast to a well-known MAC
-    // range (01-0C-CD-01-xx-xx) and/or 802.1Q priority-tagged -- see has_vlan_tag/vlan_id above.
-    bool goose_is_gse_management = false;  // outer APDU tag 0xA0 -- named only, fields below unset
-    bool goose_has_pdu = false;            // outer APDU tag 0x61 -- IECGoosePdu decoded, fields below set
-    uint16_t goose_appid = 0;              // always set when protocol == "goose"
-    bool goose_simulated = false;          // header S-bit set, or the PDU's own simulation field true
-    std::string goose_gocb_ref;
-    std::string goose_dat_set;
-    std::string goose_go_id;               // empty when the optional goID field wasn't present
-    uint64_t goose_st_num = 0;
-    uint64_t goose_sq_num = 0;
-    uint64_t goose_conf_rev = 0;
-    uint64_t goose_num_dat_set_entries = 0;
-    // One entry per decoded allData value (e.g. "0: boolean=false", "6.1: bit-string=13-bit
-    // 0b0000000000000"), capped at 50 entries for the same reason as profinet_dcp_blocks/
-    // enip_cip_values -- see goose.hpp's GooseDataValue for the dotted-path scheme.
-    std::vector<std::string> goose_all_data;
+    // GOOSE is a zero-flat-field migrated protocol (see ProtocolDecoder/ProtocolResult in
+    // protocol_decoder.hpp): its fields live in the GooseFrame carried by DecodedPacket::result,
+    // not here -- see output.cpp's write_goose_json_fields. Like PROFINET RT above, GOOSE rides
+    // directly on raw Ethernet (EtherType 0x88B8, has_ip stays false), so there is no
+    // src_ip/dst_ip/src_port/dst_port for it -- src_mac/dst_mac (above) are the only addressing
+    // this packet carries. GOOSE traffic is commonly multicast to a well-known MAC range
+    // (01-0C-CD-01-xx-xx) and/or 802.1Q priority-tagged -- see has_vlan_tag/vlan_id above.
 
     // Only set when protocol == "sv" -- see try_parse_sv in sv.hpp. Like GOOSE and PROFINET RT
     // above, SV rides directly on raw Ethernet (EtherType 0x88BA, has_ip stays false) --
@@ -761,7 +744,7 @@ struct DecodedPacket {
     std::string sv_gmid_hex;     // 8-byte EUI-64 grandmaster identity, raw hex; empty when absent
 
     // One summary string per decoded ASDU (e.g. "svID=\"MU01\" smpCnt=1234 confRev=1"), capped at
-    // 50 entries for the same reason as profinet_dcp_blocks/goose_all_data.
+    // 50 entries for the same reason as profinet_dcp_blocks/GooseFrame::all_data.
     std::vector<std::string> sv_asdus;
 
     // Only set when protocol == "ethercat" -- see try_parse_ethercat in ethercat.hpp. Like
@@ -792,7 +775,7 @@ struct DecodedPacket {
     bool ethercat_first_circulating = false;  // Len word's Circulating bit (0x4000)
 
     // One summary string per decoded datagram (e.g. "APRD idx=2 adp=0x0000 ado=0x0130 len=2
-    // wkc=1"), capped at 50 entries for the same reason as sv_asdus/goose_all_data.
+    // wkc=1"), capped at 50 entries for the same reason as sv_asdus/GooseFrame::all_data.
     std::vector<std::string> ethercat_datagrams;
 
     // Only set when protocol == "eapol" -- see try_parse_eapol in eapol.hpp. Like PROFINET/EtherCAT/
@@ -965,7 +948,7 @@ struct DecodedPacket {
     bool stp_is_alt_msti_format = false;  // legacy/alternative MSTI layout detected, not decoded
 
     // One summary string per decoded MSTI Configuration Message, capped at 50 entries for the same
-    // reason as ethercat_datagrams/goose_all_data.
+    // reason as ethercat_datagrams/GooseFrame::all_data.
     std::vector<std::string> stp_msti_messages;
 
     // Only set when protocol == "devicenet" -- see try_parse_devicenet in devicenet.hpp. Unlike
@@ -1449,20 +1432,9 @@ struct DecodedPacket {
     std::vector<std::string> pim_crp_groups;      // Candidate-RP-Advertisement only. Capped at 50.
     bool pim_crp_groups_truncated = false;
 
-    // Only set when protocol == "eigrp" -- see try_parse_eigrp in eigrp.hpp.
-    std::string eigrp_opcode_name;
-    uint16_t eigrp_autonomous_system = 0;
-    std::vector<std::string> eigrp_flags;  // zero or more of "Init"/"Conditional Receive"/
-                                             // "Restart"/"End Of Table", whichever bits are set
-    // One "TypeName: value" (or bare "TypeName" when not decoded further) entry per general TLV
-    // (Parameters/Authentication/Sequence/Software Version/Next Multicast Sequence/anything
-    // else), wire order. Capped at 50.
-    std::vector<std::string> eigrp_general_tlvs;
-    bool eigrp_general_tlvs_truncated = false;
-    // One EigrpRoute::summary entry per Classic or Wide-Metric IPv4 route TLV, wire order. Capped
-    // at 50.
-    std::vector<std::string> eigrp_routes;
-    bool eigrp_routes_truncated = false;
+    // EIGRP is a zero-flat-field migrated protocol (see ProtocolDecoder/ProtocolResult in
+    // protocol_decoder.hpp): its fields live in the EigrpMessage carried by DecodedPacket::result,
+    // not here -- see output.cpp's write_eigrp_json_fields.
 
     // Only set when protocol == "ospf" -- see try_parse_ospf in ospf.hpp. Which of the fields
     // below are populated depends on ospf_type_name; see ospf.hpp's own OspfMessage for exactly

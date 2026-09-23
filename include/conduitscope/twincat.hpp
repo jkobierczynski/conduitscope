@@ -141,9 +141,9 @@ struct TwinCatFrame {
     uint32_t ads_result = 0;
 
     // Only set by ADS ReadDeviceInfo/AddDeviceNotification/DeleteDeviceNotification pairing (see
-    // TwinCatFlowState below) -- mirrors Modbus's own modbus_is_paired_response/
-    // modbus_paired_request_index (DecodedPacket) exactly, just carried on this protocol's own
-    // result struct instead of a DecodedPacket field, per this file's own header comment on why.
+    // TwinCatFlowState below) -- mirrors ModbusFrame's own paired_response/paired_request_index
+    // (modbus.hpp) exactly, both carried on their own protocol result struct rather than a
+    // DecodedPacket field, per this file's own header comment on why.
     bool paired_response = false;
     size_t paired_request_index = 0;
 
