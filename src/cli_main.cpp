@@ -44,6 +44,7 @@
 #include "conduitscope/live_capture.hpp"
 #include "conduitscope/output.hpp"
 #include "conduitscope/pcap_reader.hpp"
+#include "conduitscope/pcap_writer.hpp"
 #include "conduitscope/policy.hpp"
 #include "conduitscope/policy_engine.hpp"
 #include "conduitscope/resolver.hpp"
@@ -477,7 +478,8 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
                 bool oui_enabled, bool resolve_hostnames, const std::string& hosts_path,
                 bool service_names_enabled, const std::string& services_path, bool show_vlan,
                 const std::string& time_format, const std::string& time_offset,
-                std::ostream& diag, bool show_direction, bool show_mac) {
+                std::ostream& diag, bool show_direction, bool show_mac,
+                const std::vector<std::string>& fields, const std::string& write_path, bool hex_dump) {
     std::ofstream file_out;
     std::ostream* out = &std::cout;
     bool writing_to_stdout = output.empty();
@@ -515,6 +517,19 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
         std::cerr << "error: invalid --time-offset value '" << time_offset
                    << "' (expected 'utc', 'local', or a fixed offset like '+02:00'/'-0530')\n";
         return 1;
+    }
+
+    // -T fields (mirrors tshark's own -T fields/-e) needs at least one -e/--field to have
+    // anything to print -- caught here, before opening the packet source, same "fail fast on bad
+    // setup" posture as the two time-format checks just above. Conversely, -e given without
+    // -T fields is a no-op this codebase would rather flag than silently ignore -- it almost
+    // always means the user meant to also pass -T fields.
+    if (format == "fields" && fields.empty()) {
+        std::cerr << "error: --format fields (-T fields) needs at least one -e/--field\n";
+        return 1;
+    }
+    if (format != "fields" && !fields.empty() && !quiet) {
+        diag << "note: -e/--field only applies with --format fields (-T fields); ignoring\n";
     }
 
     DecodeOptions options;
@@ -632,11 +647,29 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
             } else if (format == "csv") {
                 writer = std::make_unique<CsvWriter>(*out, resolver, show_vlan, *parsed_time_format,
                                                        *parsed_time_offset, show_direction);
+            } else if (format == "fields") {
+                writer = std::make_unique<FieldsWriter>(*out, resolver, fields, show_vlan, *parsed_time_format,
+                                                          *parsed_time_offset, show_direction);
             } else {
                 writer = std::make_unique<TextWriter>(*out, color, resolver, show_vlan, *parsed_time_format,
                                                         *parsed_time_offset, show_direction, show_mac);
             }
             writer->begin();
+        }
+
+        // -w (mirrors tshark/tcpdump's own -w): a real, reopenable classic-pcap file of every raw
+        // packet that reaches this loop -- for a live capture (-i) that's everything seen on the
+        // wire; for an offline read (-r) combined with --filter, --filter already narrowed what
+        // PacketSource::next() hands back, so this naturally captures "the filtered subset" for
+        // free without -w needing to know anything about filtering itself. Built from the loop-local
+        // PcapPacket (raw bytes + real captured/original lengths + real per-packet timestamp), not
+        // from DecodedPacket, which never retains raw bytes -- see pcap_writer.hpp. Opened here, once,
+        // before the main loop -- same "fail fast on bad setup" posture as the Resolver/PacketSource
+        // construction just above -- so a bad -w path (unwritable directory, etc.) is reported before
+        // any capture/read work happens rather than mid-run.
+        std::unique_ptr<PcapWriter> pcap_writer;
+        if (!write_path.empty()) {
+            pcap_writer = std::make_unique<PcapWriter>(write_path, source.linktype());
         }
 
         // Separate layer on top of Decoder's already-public output (see flow_direction.hpp's own
@@ -655,6 +688,7 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
             // Wireshark's own display-filter numbering), rather than renumbering from 1 within
             // just the matches; see PacketSource::next()'s own comment.
             size_t index = source.index();
+            if (pcap_writer) pcap_writer->write_packet(pkt);
             DecodedPacket dp = decoder.decode(pkt, source.linktype(), index);
             direction_tracker.observe(dp);
             if (dp.protocol == "parse-error") {
@@ -663,6 +697,13 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
             }
             if (stats) stats_writer.write_packet(dp);
             else writer->write_packet(dp);
+            // -x (mirrors tshark's own -x): a hex+ASCII dump of this packet's raw bytes, printed
+            // alongside the normal decode -- text format only (matching tshark, whose -x is a
+            // human-reading aid, not a structured field), and never under --stats, which has no
+            // per-packet output stream to interleave into.
+            if (hex_dump && !stats && format != "json" && format != "csv" && format != "fields") {
+                write_hex_ascii_dump(*out, ByteSpan(pkt.data.data(), pkt.data.size()));
+            }
             ++decoded_count;
             if (max_packets != 0 && decoded_count >= max_packets) break;
         }
@@ -1055,6 +1096,9 @@ int main(int argc, char** argv) {
     bool decode_show_mac = false;
     std::string decode_time_format = "r", decode_time_offset = "utc";
     std::string decode_hosts_file, decode_services_file;
+    std::vector<std::string> decode_fields;
+    std::string decode_write;
+    bool decode_hex = false;
 
     auto* decode_input_opt =
         decode_cmd->add_option("-r,--read", decode_input,
@@ -1067,14 +1111,15 @@ int main(int argc, char** argv) {
         "support -- exactly one of -r/-i is required");
     decode_input_opt->excludes(decode_interface_opt);
     decode_interface_opt->excludes(decode_input_opt);
-    decode_cmd->add_option("--filter", decode_filter,
+    decode_cmd->add_option("-f,--filter", decode_filter,
                             "BPF filter (tcpdump syntax) -- with -i, applied by libpcap at capture time; with -r, "
                             "applied per-packet after reading the file (same filter syntax either way); "
                             "requires this build to have been compiled with libpcap/Npcap support in "
-                            "both cases");
-    decode_cmd->add_option("--duration", decode_duration,
+                            "both cases -- mirrors tshark's own -f");
+    decode_cmd->add_option("-a,--duration", decode_duration,
                             "Stop a live capture (-i) after this many seconds (0 = unlimited; stop "
-                            "with Ctrl+C or --max-packets instead)")
+                            "with Ctrl+C or --max-packets instead) -- mirrors tshark's own -a "
+                            "autostop condition, specialized here to duration only")
         ->capture_default_str();
     decode_cmd->add_option("--snaplen", decode_snaplen,
                             "Maximum bytes captured per packet with -i")
@@ -1089,8 +1134,11 @@ int main(int argc, char** argv) {
                             "long option, typed with only one dash, is parsed as -o followed by "
                             "the rest of that typo as this flag's own filename value) -- always "
                             "use the double dash for a long option name");
-    decode_cmd->add_option("-f,--format", decode_format, "Output format: text, json, or csv")
-        ->transform(CLI::IsMember({"text", "json", "csv"}))
+    decode_cmd
+        ->add_option("-T,--format", decode_format,
+                      "Output format: text, json, csv, or fields (fields mirrors tshark's own -T "
+                      "fields -- print only the -e/--field values requested, tab-separated; see -e)")
+        ->transform(CLI::IsMember({"text", "json", "csv", "fields"}))
         ->capture_default_str();
     decode_cmd
         ->add_option("-t,--time-format", decode_time_format,
@@ -1257,8 +1305,9 @@ int main(int argc, char** argv) {
         "DTLS record structural check is never port-gated regardless, same caveat as --dns-port -- "
         "see tunnel_vpn.hpp. GRE/ESP/AH/IP-in-IP/6in4/L2TP's own IP-protocol-number-keyed forms, and "
         "MPLS, need no port option at all -- see docs/MANUAL.md, tunnel_vpn.hpp, and mpls.hpp");
-    decode_cmd->add_option("--max-packets", decode_max_packets,
-                            "Stop after decoding this many packets (0 = unlimited)")
+    decode_cmd->add_option("-c,--max-packets", decode_max_packets,
+                            "Stop after decoding this many packets (0 = unlimited) -- mirrors "
+                            "tshark's own -c")
         ->capture_default_str();
     add_resource_limit_options(decode_cmd, decode_limit_vars);
     decode_cmd->add_flag("--stats", decode_stats,
@@ -1276,18 +1325,40 @@ int main(int argc, char** argv) {
         "OUTPUT FORMATS section and ROADMAP item 19. Does not affect `decode --stats`'s own "
         "direction-tier breakdown, which has no display toggles of its own");
     decode_cmd->add_flag(
-        "-e,--ether", decode_show_mac,
+        "--ether", decode_show_mac,
         "For a packet with an IP layer, show its Ethernet header (source/destination MAC "
-        "address, VLAN tag) below the packet line in text output -- mirrors tcpdump's own -e. "
+        "address, VLAN tag) below the packet line in text output -- mirrors tcpdump's own -e "
+        "(long-form only here: -e is reserved for -T fields' own --field, tshark's convention -- "
+        "see -e/--field below). "
         "Off by default to keep output compact; implied by --mac-vendor (there'd be nothing to "
         "attach a vendor name to otherwise). A no-op for a packet with no IP layer at all (ARP/"
         "LLDP/EAPOL/PPPoE/MPLS/etc.), since its MAC address pair is already shown on its own "
         "head line unconditionally. Only affects text output -- JSON/CSV always include "
         "src_mac/dst_mac as base fields, same as src_ip/dst_ip -- see docs/MANUAL.md's OUTPUT "
         "FORMATS section");
+    decode_cmd->add_option(
+        "-e,--field", decode_fields,
+        "With -T fields, print this field's value (repeatable, printed in the order given, "
+        "tab-separated) -- mirrors tshark's own -e. The field name is whatever key appears in "
+        "this tool's own --format json output for that packet (e.g. src_ip, dst_port, "
+        "modbus_function_code); a field absent for a given packet (wrong protocol, optional "
+        "field not present) prints as an empty column rather than an error. Requires -T fields; "
+        "see --format");
+    decode_cmd->add_option(
+        "-w,--write", decode_write,
+        "Write every packet that reaches this run (after -f/--filter, if given) to this path as "
+        "a new classic-pcap capture file, raw and unmodified -- mirrors tshark/tcpdump's own -w. "
+        "Works identically whether packets come from a live capture (-i) or an offline read "
+        "(-r); does not change or replace the normal --format output, which continues to stdout/"
+        "-o exactly as without -w");
+    decode_cmd->add_flag(
+        "-x,--hex", decode_hex,
+        "Print a hex+ASCII dump of each packet's raw bytes below its normal decode line -- "
+        "mirrors tshark's own -x. Text output only (--format text, the default); ignored under "
+        "--format json/csv/fields and under --stats, which have no per-packet line to attach it to");
     decode_cmd->add_flag("--mac-vendor", decode_mac_vendor,
                           "Enable OUI (MAC vendor) resolution and show it next to each MAC "
-                          "address; off by default to keep output compact. Implies -e/--ether -- "
+                          "address; off by default to keep output compact. Implies --ether -- "
                           "see docs/MANUAL.md's OUTPUT FORMATS section. (Named --mac-vendor, "
                           "not --oui, specifically so a single-dash typo of this flag reports a "
                           "clean \"argument not expected\" error instead of silently gluing onto "
@@ -1351,11 +1422,11 @@ int main(int argc, char** argv) {
         "support -- exactly one of -r/-i is required");
     policy_input_opt->excludes(policy_interface_opt);
     policy_interface_opt->excludes(policy_input_opt);
-    policy_validate_cmd->add_option("--filter", policy_filter,
+    policy_validate_cmd->add_option("-f,--filter", policy_filter,
                                      "BPF filter (tcpdump syntax) -- with -i, applied by libpcap at capture time; "
                                      "with -r, applied per-packet after reading the file (same filter syntax "
                                      "either way); requires this build to have been compiled with libpcap/Npcap "
-                                     "support in both cases");
+                                     "support in both cases -- mirrors tshark's own -f, and `decode`'s -f/--filter");
     policy_validate_cmd
         ->add_option("--duration", policy_duration,
                       "Stop a live capture (-i) after this many seconds (0 = unlimited; stop with "
@@ -1377,7 +1448,7 @@ int main(int argc, char** argv) {
         "-o,--output", policy_output,
         "Write the report here instead of stdout. Caution: a single-dash long-option typo "
         "glues onto this flag -- always use the double dash for a long option name");
-    policy_validate_cmd->add_option("-f,--format", policy_format, "Report format: text or json")
+    policy_validate_cmd->add_option("-T,--format", policy_format, "Report format: text or json")
         ->transform(CLI::IsMember({"text", "json"}))
         ->capture_default_str();
     policy_validate_cmd->add_flag("--strict", policy_strict,
@@ -1458,11 +1529,11 @@ int main(int argc, char** argv) {
         "libpcap/Npcap support -- exactly one of -r/-i is required");
     inventory_input_opt->excludes(inventory_interface_opt);
     inventory_interface_opt->excludes(inventory_input_opt);
-    inventory_cmd->add_option("--filter", inventory_filter,
+    inventory_cmd->add_option("-f,--filter", inventory_filter,
                                "BPF filter (tcpdump syntax) -- with -i, applied by libpcap at capture time; "
                                "with -r, applied per-packet after reading the file (same filter syntax "
                                "either way); requires this build to have been compiled with libpcap/Npcap "
-                               "support in both cases");
+                               "support in both cases -- mirrors tshark's own -f, and `decode`'s -f/--filter");
     inventory_cmd
         ->add_option("--duration", inventory_duration,
                       "Stop a live capture (-i) after this many seconds (0 = unlimited; stop with "
@@ -1478,7 +1549,7 @@ int main(int argc, char** argv) {
         "-o,--output", inventory_output,
         "Write the report here instead of stdout. Caution: a single-dash long-option typo "
         "glues onto this flag -- always use the double dash for a long option name");
-    inventory_cmd->add_option("-f,--format", inventory_format, "Report format: text or json")
+    inventory_cmd->add_option("-T,--format", inventory_format, "Report format: text or json")
         ->transform(CLI::IsMember({"text", "json"}))
         ->capture_default_str();
     inventory_cmd->add_flag("--strict", inventory_strict,
@@ -1562,8 +1633,8 @@ int main(int argc, char** argv) {
     }
 
     if (decode_cmd->parsed()) {
-        // --oui implies -e/--ether: without it there'd be no eth line to attach a vendor name to.
-        // -e alone (no --oui) shows the MAC pair with no vendor annotation.
+        // --oui implies --ether: without it there'd be no eth line to attach a vendor name to.
+        // --ether alone (no --oui) shows the MAC pair with no vendor annotation.
         decode_show_mac = decode_show_mac || decode_mac_vendor;
         return run_decode(decode_input, decode_interface, decode_filter, decode_duration, decode_snaplen,
                            decode_promiscuous, decode_output, decode_format, decode_protocol,
@@ -1581,7 +1652,7 @@ int main(int argc, char** argv) {
                            quiet, no_color, force_color, decode_mac_vendor, decode_resolve, decode_hosts_file,
                            decode_service_names, decode_services_file, decode_show_vlan,
                            decode_time_format, decode_time_offset, *diag, decode_show_direction,
-                           decode_show_mac);
+                           decode_show_mac, decode_fields, decode_write, decode_hex);
     }
     if (info_cmd->parsed()) {
         return run_info(info_input, std::cout);

@@ -5375,6 +5375,119 @@ IP/UDP-based routing/redundancy protocols above.
     capture confirmed against (validated by construction only, against
     synthetic `tests/sample_slow_protocols.pcap`).
 
+35. **tshark-style CLI: `-T fields`/`-e` field selection, `-f`/`-c`/`-a`
+    short aliases, `-w` raw pcap capture, `-x` hex+ASCII dump.** **Done.**
+    Jurgen asked for a set of `decode`-only conveniences directly mirroring
+    tshark's own CLI surface, after the Slow Protocols work above: the
+    ability to select and print only specific JSON-visible fields the way
+    `tshark -T fields -e <field>` does, `-f` as tshark's own short form of
+    `--filter` (this codebase already had `--filter` as a long option with
+    no short alias), `-c`/`-a` as tshark's own short forms of
+    `--max-packets`/`--duration`, `-w` to write a real pcap capture file of
+    whatever packets pass through (live or filtered-offline), and `-x` to
+    print each packet's raw bytes as a hex+ASCII dump.
+
+    Two genuine short-flag collisions surfaced before any code was
+    written: `-f` was already `--format`'s own short alias, and `-e` was
+    already `--ether`'s. Rather than silently picking a resolution or
+    silently changing existing muscle-memory behavior, this was raised
+    with Jurgen directly; he picked "full tshark realignment" -- `--format`
+    moves to `-T` (tshark's own letter for output format, which also
+    gained `fields` as a fourth valid value), `-f` goes to `--filter`
+    (tshark's own convention), `-e` goes to the new `--field`, and
+    `--ether` keeps working but loses its short form entirely (long-form
+    only from here on) since it has no natural letter of its own to
+    reclaim. `-f`/`-T`'s rename was applied consistently across all three
+    subcommands that have a `--format`/`--filter` pair (`decode`,
+    `policy validate`, `inventory`), even though `-c`/`-a`/`-e`/`-w`/`-x`
+    themselves are `decode`-only -- so the same short letter means the
+    same thing everywhere it appears in this tool, rather than `-f`
+    meaning `--filter` in `decode` but still `--format` somewhere else.
+
+    **`-T fields`/`-e` (field selection).** Implemented as a new
+    `FieldsWriter` (`output.hpp`/`output.cpp`), deliberately built by
+    *reusing* `JsonWriter` rather than re-deriving field names/values a
+    second time: with ~90 protocols each carrying many of their own
+    fields, maintaining a second field catalog in parallel with the JSON
+    writer would be a real, ongoing maintenance burden and a place for the
+    two to silently drift. Instead, `FieldsWriter::write_packet` runs a
+    fresh, private `JsonWriter` instance against each packet into an
+    in-memory buffer, then line-parses that packet's own flat JSON object
+    text into a `key -> value` map (confirmed by inspection that this
+    codebase's JSON output is always exactly one field per line and never
+    nested objects, a property this whole approach depends on), and prints
+    only the requested `-e` fields, in the order given, tab-separated. A
+    field absent for that packet's protocol, or present as JSON `null`
+    (e.g. `src_ip` on a raw ARP/LLDP frame), prints as an empty column,
+    not an error and not the literal text `null` -- matching tshark's own
+    `-e` behavior. `-T fields` with no `-e` at all is a caught error
+    (before the packet source even opens); `-e` given under any other
+    `--format` is a one-line advisory note, not an error, since the run
+    can still proceed meaningfully without it.
+
+    **`-w` (write pcap).** A new, minimal `PcapWriter`
+    (`include/conduitscope/pcap_writer.hpp`/`src/pcap_writer.cpp`),
+    classic-pcap only (not pcapng) by deliberate choice -- simpler to
+    write correctly, universally readable by every pcap-consuming tool,
+    and this codebase's own `PcapReader` already treats pcapng as a
+    read-only convenience format it never had to produce itself. Always
+    writes microsecond-resolution timestamps regardless of the source
+    capture's own resolution (converting from nanoseconds when the source
+    is nanosecond-resolution), the simplest correct choice given this
+    project's timestamps are stored as microsecond-or-nanosecond-tagged
+    integers already. `-w` reads its raw bytes and real per-packet
+    metadata from the existing loop-local `PcapPacket` in `run_decode`'s
+    main loop (`cli_main.cpp`) -- not from `DecodedPacket`, which was
+    confirmed via inspection to never retain raw packet bytes at all, only
+    decoded fields -- so no restructuring of the decode pipeline itself
+    was needed; `-w`'s own write call sits directly in that same loop,
+    right alongside decoding, for every source type (`-i` live capture and
+    `-r` offline-plus-`--filter` alike, since both already funnel through
+    the identical `PacketSource::next()` interface). Verified end to end
+    by round-tripping a full capture through `-w` and diffing its
+    `--format json` output against the original file's own `--format
+    json` output -- byte-identical output across all fields for every
+    packet is only possible if `-w` wrote complete, correctly-ordered,
+    unmodified packet records.
+
+    **`-x` (hex dump).** A new free function, `write_hex_ascii_dump`
+    (`output.hpp`/`output.cpp`) -- offset/hex/ASCII columns, 16 bytes per
+    line, the same layout `xxd`/tcpdump's own `-X` use. Reads from the
+    same loop-local `PcapPacket` raw bytes `-w` does, printed directly
+    below each packet's normal decode line; gated to `--format text` (the
+    default) and off under `--stats`, since JSON/CSV/fields have no
+    per-packet text line to attach a dump to and `--stats` has no
+    per-packet output at all.
+
+    12 new CTest tests covering: `-T fields -e` basic multi-field
+    selection (tab-separated, values in the order given, not JSON's own
+    field order); `-T` accepting `fields` as a short-form value; a missing/
+    null field printing an empty column, never the text `null`; `-T
+    fields` with no `-e` erroring cleanly; `-e` without `-T fields`
+    warning-and-continuing rather than erroring; `-c`/`-a` as working
+    aliases for `--max-packets`/`--duration`; `-f` as a working alias for
+    `--filter` (guarded the same "Npcap RUNTIME on Windows CI" way every
+    other `--filter` test in this suite already is, since it's the one
+    piece of this whole feature that touches libpcap); `-x`'s own
+    offset/hex/ASCII layout, and its being ignored under `--format json`;
+    and `-w`'s own round-trip-byte-identical-JSON proof plus a `conduitscope
+    info`-based check that the file it wrote has a genuinely well-formed
+    pcap global header. One pre-existing, now-redundant test
+    (`resolver_ether_long_flag_same_as_e_text`, which specifically existed
+    to prove `-e` and `--ether` were interchangeable) was removed, since
+    `-e` no longer means `--ether` at all; every other pre-existing test
+    that used bare `-e` to mean "show the Ethernet header" (seven of them,
+    scattered across the SV/STP/HART-IP/Modbus/EtherNet-IP/VLAN/remote-
+    access sections) was updated to spell it `--ether` instead, to keep
+    testing what each one always meant to test. Full suite: 1400 -> 1412
+    tests (net +12, after the one removal), zero-warning build across both
+    established local configs (default, `CONDUITSCOPE_ENABLE_LIVE_CAPTURE=
+    OFF`). See `cli_main.cpp`'s own `run_decode` comments for the field-
+    selection/`-w` design rationale inline, and docs/USER_GUIDE.md's
+    OUTPUT FORMATS section ("Field selection (`-T fields`)", "Writing a
+    capture file (`-w`)", "Hex dump (`-x`)") for the user-facing
+    reference.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

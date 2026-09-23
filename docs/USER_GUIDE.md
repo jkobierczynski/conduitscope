@@ -33,27 +33,27 @@ conduitscope -- decode Modbus/TCP, DNP3, IEC 60870-5-104, S7comm/COTP, IEC 61850
 ```
 conduitscope [-q|--quiet] [--no-color|--color] [--log-file FILE] [--version] [-h|--help] <command> [command options]
 
-conduitscope decode (-r FILE | -i INTERFACE) [-o FILE] [-f text|json|csv] [--protocol NAME]
+conduitscope decode (-r FILE | -i INTERFACE) [-o FILE] [-T text|json|csv|fields] [-e FIELD]... [--protocol NAME]
                      [--modbus-port PORT]... [--dnp3-port PORT]... [--s7comm-port PORT]... [--iec104-port PORT]...
                      [--enip-port PORT]... [--enip-io-port PORT]... [--bacnet-port PORT]... [--hartip-port PORT]... [--opcua-port PORT]... [--mqtt-port PORT]... [--ffhse-port PORT]... [--remote-access-port PORT]... [--lateral-movement-port PORT]... [--enterprise-trust-port PORT]... [--wireless-backhaul-port PORT]... [--tunnel-vpn-port PORT]...
-                     [--max-packets N] [--stats] [--strict]
-                     [--filter BPF] [--duration SECONDS] [--snaplen BYTES] [--no-promiscuous]
+                     [-c N] [--stats] [--strict] [-w FILE] [-x]
+                     [-f BPF] [-a SECONDS] [--snaplen BYTES] [--no-promiscuous]
 
 conduitscope info -r FILE
 
 conduitscope interfaces
 
-conduitscope policy validate (-r FILE | -i INTERFACE) --policy FILE [-o FILE] [-f text|json] [--strict]
-                              [--filter BPF] [--duration SECONDS] [--snaplen BYTES] [--no-promiscuous]
+conduitscope policy validate (-r FILE | -i INTERFACE) --policy FILE [-o FILE] [-T text|json] [--strict]
+                              [-f BPF] [--duration SECONDS] [--snaplen BYTES] [--no-promiscuous]
 
-conduitscope inventory (-r FILE | -i INTERFACE) [-o FILE] [-f text|json] [--strict]
+conduitscope inventory (-r FILE | -i INTERFACE) [-o FILE] [-T text|json] [--strict]
                         [--zone-prefix N] [--diagram FILE] [--diagram-format mermaid|dot] [--policy-out FILE]
-                        [--filter BPF] [--duration SECONDS] [--snaplen BYTES] [--no-promiscuous]
+                        [-f BPF] [--duration SECONDS] [--snaplen BYTES] [--no-promiscuous]
 
 conduitscope version
 ```
 
-`-i/--interface`, `conduitscope interfaces`, and the `--filter`/`--duration`/
+`-i/--interface`, `conduitscope interfaces`, and the `-f/--filter`/`--duration`/
 `--snaplen`/`--no-promiscuous` options are live capture: see LIVE CAPTURE below.
 They require this build to have been compiled with libpcap (Linux) / the Npcap
 SDK (Windows) found -- an optional, build-time-detected dependency, the one
@@ -185,12 +185,12 @@ conduitscope decode (-r FILE | -i INTERFACE) [options]
 |---|---|---|
 | `-r, --read FILE` | *(required unless `-i` given)* | Input capture file. Must exist; classic pcap or pcapng, auto-detected. Mutually exclusive with `-i`. |
 | `-i, --interface NAME` | *(required unless `-r` given)* | Capture live from this network interface instead of reading a file -- see LIVE CAPTURE below and `conduitscope interfaces`. Requires libpcap/Npcap support to have been built in. Mutually exclusive with `-r`. |
-| `--filter BPF` | *(none)* | BPF filter (tcpdump syntax, e.g. `"port 502 or port 102"`). Works with both `-i` (applied by libpcap at capture time) and `-r` (applied per-packet after reading the file); see LIVE CAPTURE's own `--filter` subsection below. |
-| `--duration SECONDS` | `0` (unlimited) | Stop a live capture (`-i`) after this many seconds. `0` means rely on `--max-packets` and/or Ctrl+C instead. |
+| `-f, --filter BPF` | *(none)* | BPF filter (tcpdump syntax, e.g. `"port 502 or port 102"`). Works with both `-i` (applied by libpcap at capture time) and `-r` (applied per-packet after reading the file); see LIVE CAPTURE's own `--filter` subsection below. `-f` mirrors tshark's own `-f`. |
+| `-a, --duration SECONDS` | `0` (unlimited) | Stop a live capture (`-i`) after this many seconds. `0` means rely on `--max-packets` and/or Ctrl+C instead. `-a` mirrors tshark's own `-a` autostop condition, specialized here to duration only. |
 | `--snaplen BYTES` | `65535` | Maximum bytes captured per packet with `-i`. |
 | `--no-promiscuous` | off (i.e. promiscuous by default) | With `-i`, don't put the interface into promiscuous mode. Promiscuous is the default because the main live-capture use case -- watching a mirrored/SPAN switch port for zone/conduit traffic -- needs to see traffic that isn't addressed to the capturing host at all. |
 | `-o, --output FILE` | stdout | Write decoded output here instead of stdout. |
-| `-f, --format {text,json,csv}` | `text` | Output format. See OUTPUT FORMATS below. |
+| `-T, --format {text,json,csv,fields}` | `text` | Output format. `fields` mirrors tshark's own `-T fields`: print only the `-e`/`--field` values requested, tab-separated, one line per packet -- see `-e, --field` below. See OUTPUT FORMATS below. `-T` is the short form's own letter, mirroring tshark's own `-T` (this codebase's `-f` is reserved for `--filter` instead, tshark's own convention). |
 | `-t, --time-format {e,epoch,r,relative,d,delta,a,absolute,ad,absolute-date}` | `r` | How to render each packet's timestamp. Mirrors tshark's own `-t` mnemonics rather than tcpdump's stacking `-t`/`-tt`/`-ttt` convention. See OUTPUT FORMATS' "Timestamps" subsection below. |
 | `--time-offset {utc,local,+HH:MM,-HH:MM}` | `utc` | Timezone used to render `--time-format=absolute`/`absolute-date`; ignored by every other `--time-format` value. See OUTPUT FORMATS' "Timestamps" subsection below. |
 | `--protocol NAME` | `auto` | Restrict decoding to one protocol. See docs/PROTOCOL_COVERAGE.md below for the full, current list of valid protocol names (one per subsection there). `auto` opportunistically tries OPC UA, EtherNet/IP, IEC 104, Modbus, TwinCAT/ADS, BGP-4, DNP3, S7comm/COTP, S7comm-Plus, MMS, HART-IP, MQTT, and FF-HSE detection on every TCP payload (in that order -- TwinCAT/ADS right after Modbus, BGP-4 right after TwinCAT/ADS using the strongest structural gate in this whole codebase (a 128-bit Marker that MUST be all-`0xFF`), FF-HSE last of all, even after MQTT, see docs/DEVELOPMENT.md's PROTOCOL DETECTION), CIP I/O, BACnet/IP, HART-IP, and FF-HSE detection on every UDP payload (FF-HSE last there too), PROFINET RT (DCP/cyclic) detection on every non-IPv4 Ethernet frame carrying EtherType `0x8892`, GOOSE detection on every non-IPv4 Ethernet frame carrying EtherType `0x88B8`, Sampled Values detection on every non-IPv4 Ethernet frame carrying EtherType `0x88BA`, EtherCAT detection on every non-IPv4 Ethernet frame carrying EtherType `0x88A4`, regardless of port, and Spanning Tree Protocol (STP/RSTP/MSTP) detection on every classic IEEE 802.3 length-framed Ethernet frame whose LLC header is DSAP=SSAP=`0x42` -- a structurally separate dispatch path from every EtherType-keyed protocol above, so there's no ordering/collision question between them (see docs/DEVELOPMENT.md's PROTOCOL DETECTION below). `enip` covers both EtherNet/IP explicit messaging (TCP) and CIP I/O implicit messaging (UDP). `mms` is IEC 61850 MMS (Manufacturing Message Specification, ISO 9506) -- shares S7comm's exact TPKT/COTP transport and TCP port 102, but is a distinct application protocol; see `--s7comm-port` below and docs/PROTOCOL_COVERAGE.md's MMS section. `s7comm-plus` is S7comm-Plus (TIA Portal / S7-1200/1500) -- shares the same TPKT/COTP transport and TCP port 102, disambiguated by its own protocol id byte; see `--s7comm-port` below and docs/PROTOCOL_COVERAGE.md's S7comm-Plus section. `mqtt` is MQTT (v3.1/v3.1.1/v5.0) plus Sparkplug B -- see `--mqtt-port` below and docs/PROTOCOL_COVERAGE.md's MQTT section. `profinet` covers both DCP and cyclic real-time IO. `sv` is IEC 61850-9-2 Sampled Values. `ethercat` is EtherCAT. `bacnet` is BACnet/IP. `hartip` is HART-IP (covers both UDP and TCP). `opcua` is OPC UA Binary (UA-TCP/Secure Conversation, TCP only). `ff-hse` is FOUNDATION Fieldbus HSE (covers FDA/SM/FMS/LAN Redundancy, on both TCP and UDP) -- see `--ffhse-port` below and docs/PROTOCOL_COVERAGE.md's FOUNDATION Fieldbus HSE section. `twincat` is Beckhoff TwinCAT/ADS over AMS/TCP (TCP port 48898 only; no `--twincat-port` option exists -- a deliberate simplification for this first pass, since AMS/TCP's own structural detection gate is port-independent already, see docs/PROTOCOL_COVERAGE.md's TwinCAT / ADS section) -- see docs/DEVELOPMENT.md's "registration-model decoder refactor" entry for why this is the first protocol built on the newer `ProtocolDecoder` interface. `stp` is Spanning Tree Protocol (STP/RSTP/MSTP) -- no port option, matching GOOSE/SV/EtherCAT/PROFINET's own no-port precedent for a protocol with no port at all; see docs/PROTOCOL_COVERAGE.md's Spanning Tree Protocol section. `devicenet` is DeviceNet (CAN-bus CIP) -- no port option either, the same no-port precedent, but unlike every other value in this list it isn't reached through Ethernet at all: it's gated on the capture's own pcap link type being `LINKTYPE_CAN_SOCKETCAN` (227, standard Linux SocketCAN capture framing -- what `candump -l`/`tcpdump -i can0`/Wireshark itself write capturing a CAN bus), checked before any protocol filter, so `--protocol devicenet` against an ordinary Ethernet-linktype capture simply decodes nothing (every packet still parses at the link layer, just with no application-layer match) rather than erroring; see docs/PROTOCOL_COVERAGE.md's DeviceNet section. `remote-access` covers Tier 1 of the "IT protocols an OT auditor flags" family (RDP/VNC/TeamViewer/AnyDesk/Zoom, each its own `protocol` value even under this one filter name) -- see `--remote-access-port` below and docs/PROTOCOL_COVERAGE.md's "Tier 1 remote-access protocol recognition" section. `lateral-movement` covers Tier 2 of the same family (SMB/SSH/HTTP/HTTPS/SNMPv1v2c/Telnet/FTP/TFTP/QUIC, again each its own `protocol` value under this one filter name) -- see `--lateral-movement-port` below and docs/PROTOCOL_COVERAGE.md's "Tier 2 lateral-movement protocol recognition" section. `enterprise-trust` covers the six port-based protocols of Tier 3 of the same family (NTP/DHCP/LDAP/LDAPS/RADIUS/TACACS+, again each its own `protocol` value under this one filter name) -- see `--enterprise-trust-port` below and docs/PROTOCOL_COVERAGE.md's "Tier 3 enterprise-trust-boundary protocol recognition" section. `eapol` is Tier 3's seventh protocol, IEEE 802.1X/EAPOL -- EtherType-keyed, no port at all, so it has its own dedicated filter value rather than sharing `enterprise-trust`, the same split GOOSE/SV/EtherCAT/PROFINET's own EtherType-keyed filters already have from every port-based one; no port option exists for it. `wireless-backhaul` covers the five port-based protocols of Tier 4 of the same family (CAPWAP control/data, LWAPP control/data, GTP-U, again each its own `protocol` value under this one filter name) -- see `--wireless-backhaul-port` below and docs/PROTOCOL_COVERAGE.md's "Tier 4 wireless-backhaul-and-cellular protocol recognition" section. `pppoe` is Tier 4's sixth protocol, PPPoE -- EtherType-keyed, no port at all, the same split `eapol` has from `enterprise-trust`; no port option exists for it either. `tunnel-vpn` covers the fourteen port/IP-protocol-number-based protocols of Tier 5 of the same family (GRE/NVGRE/EoIP, ESP, AH, IP-in-IP, 6in4, L2TP, IKE, VXLAN, Geneve, WireGuard, OpenVPN, dtls-tunnel, STT, again each its own `protocol` value under this one filter name) -- see `--tunnel-vpn-port` below and docs/PROTOCOL_COVERAGE.md's "Tier 5 generic tunnel/VPN encapsulation recognition" section. `mpls` is Tier 5's sixteenth protocol, MPLS -- EtherType-keyed, no port at all, the same split `eapol`/`pppoe` have from `enterprise-trust`/`wireless-backhaul`; no port option exists for it either. `arp` is ARP (Address Resolution Protocol, RFC 826) -- a brand-new protocol, not part of any Tier family, EtherType-keyed (EtherType `0x0806`), no port at all, the same no-port precedent `stp`/`eapol`/`pppoe`/`mpls` already established; see docs/PROTOCOL_COVERAGE.md's ARP section. `lldp` is LLDP (Link Layer Discovery Protocol, IEEE 802.1AB) -- another brand-new protocol, added right after ARP, not part of any Tier family, EtherType-keyed (EtherType `0x88CC`), no port at all, the same no-port precedent `arp`/`stp`/`eapol`/`pppoe`/`mpls` already established; see docs/PROTOCOL_COVERAGE.md's LLDP section. `bgp` is BGP-4 (RFC 4271, TCP port 179) -- the last piece of the three-stage plan that also added `arp`/`lldp`, but unlike those two it's TCP-port-independent (not EtherType-keyed) and needs TCP stream reassembly plus a message-coalescing loop; see `--bgp-port` above and docs/PROTOCOL_COVERAGE.md's BGP-4 section. `slow-protocols` is IEEE 802.3 "Slow Protocols" (LACP/Marker Protocol/802.3 OAM, told apart by a Subtype byte) -- added right after the three-stage `arp`/`lldp`/`bgp` plan, EtherType-keyed (EtherType `0x8809`), no port at all, the same no-port precedent `arp`/`lldp`/`stp`/`eapol`/`pppoe`/`mpls` already established; see docs/PROTOCOL_COVERAGE.md's IEEE 802.3 Slow Protocols section. |
@@ -206,13 +206,16 @@ conduitscope decode (-r FILE | -i INTERFACE) [options]
 | `--mqtt-port PORT` | *(1883 built in)* | Same as `--modbus-port`, for MQTT. Repeatable. TCP only. |
 | `--bgp-port PORT` | *(179 built in)* | Same as `--modbus-port`, for BGP. Repeatable. TCP only. Does not change detection -- BGP's own Marker-based structural gate is port-independent already -- only whether the port is flagged as unexpected. |
 | `--ffhse-port PORT` | *(1089/1090/1091/3622 built in)* | Same as `--modbus-port`, for FOUNDATION Fieldbus HSE. Repeatable. Applies to both TCP and UDP, and shared across FDA/SM/FMS/LAN Redundancy -- the sub-protocol is signaled in-band by the header, not by port. |
-| `--max-packets N` | `0` (unlimited) | Stop after decoding this many packets. With `-i`, this also bounds a live capture (in addition to `--duration` and Ctrl+C). |
+| `-c, --max-packets N` | `0` (unlimited) | Stop after decoding this many packets. With `-i`, this also bounds a live capture (in addition to `--duration` and Ctrl+C). `-c` mirrors tshark's own `-c`. |
 | `--stats` | off | Print an aggregate summary (protocol counts, a cross-protocol TCP-flow direction-tier breakdown, Modbus function-code histogram, exception count, capture time span) instead of one line per packet. Ignores `--format`. |
 | `--strict` | off | Abort with a nonzero exit status on the first packet that fails to parse at the Ethernet/IPv4/TCP layer, instead of reporting a per-packet warning and continuing. Does not affect Modbus/DNP3-level ambiguity, which is always handled by heuristic + note rather than error. |
 | `--no-vlan` | off (i.e. VLAN ID display on by default) | Disable display of the 802.1Q VLAN ID for a VLAN-tagged packet. See OUTPUT FORMATS below. |
 | `--no-direction` | off (i.e. TCP flow direction display on by default) | Disable display of per-packet TCP flow direction (client/server determination and which tier decided it -- handshake/content/port-heuristic). Does not affect `decode --stats`'s own direction-tier breakdown, which has no display toggles of its own (the same way `--no-vlan`/`--mac-vendor` don't affect it either). See OUTPUT FORMATS below. |
-| `-e`, `--ether` | off (i.e. the Ethernet header display off by default, to keep output compact) | For a packet with an IP layer, show its Ethernet header (source/destination MAC address, VLAN tag) below the packet line in **text** output -- mirrors tcpdump's own `-e`. Implied by `--mac-vendor` (there'd be nothing to attach a vendor name to otherwise). A no-op for a packet with no IP layer at all (ARP/LLDP/EAPOL/PPPoE/MPLS/PROFINET RT/GOOSE/Sampled Values/EtherCAT/STP/etc.), since that packet's MAC address pair is already shown on its own head line unconditionally, `-e` or not. Does not affect JSON/CSV output, which always include `src_mac`/`dst_mac` as base fields, same as `src_ip`/`dst_ip`. See OUTPUT FORMATS' "Name resolution" subsection below. |
-| `--mac-vendor` | off (i.e. OUI/MAC-vendor resolution off by default, to keep output compact) | Enable OUI (MAC vendor) resolution against the built-in table, and show it next to each MAC address. Implies `-e`/`--ether`. See OUTPUT FORMATS' "Name resolution" subsection below. |
+| `--ether` | off (i.e. the Ethernet header display off by default, to keep output compact) | For a packet with an IP layer, show its Ethernet header (source/destination MAC address, VLAN tag) below the packet line in **text** output -- mirrors tcpdump's own `-e` (long-form only in this codebase -- `-e` itself is reserved for `--field` below, tshark's own convention). Implied by `--mac-vendor` (there'd be nothing to attach a vendor name to otherwise). A no-op for a packet with no IP layer at all (ARP/LLDP/EAPOL/PPPoE/MPLS/PROFINET RT/GOOSE/Sampled Values/EtherCAT/STP/etc.), since that packet's MAC address pair is already shown on its own head line unconditionally, `--ether` or not. Does not affect JSON/CSV output, which always include `src_mac`/`dst_mac` as base fields, same as `src_ip`/`dst_ip`. See OUTPUT FORMATS' "Name resolution" subsection below. |
+| `-e, --field FIELD` | *(none)* | With `-T fields`, print this field's value (repeatable, printed in the order given, tab-separated). Mirrors tshark's own `-e`. The field name is whatever key appears in this tool's own `--format json` output for that packet (e.g. `src_ip`, `dst_port`, `modbus_function_code`); a field absent for a given packet (wrong protocol, or an optional field not present) prints as an empty column rather than an error. Requires `-T fields` -- given without it, a one-line advisory note is printed and the field selection is ignored, not treated as an error. See OUTPUT FORMATS' "Field selection (`-T fields`)" subsection below. |
+| `-w, --write FILE` | *(none)* | Write every packet that reaches this run (after `-f`/`--filter`, if given) to this path as a new classic-pcap capture file, raw and unmodified -- mirrors tshark/tcpdump's own `-w`. Works identically whether packets come from a live capture (`-i`) or an offline read (`-r`); does not change or replace the normal `--format` output, which continues to stdout/`-o` exactly as without `-w`. |
+| `-x, --hex` | off | Print a hex+ASCII dump of each packet's raw bytes below its normal decode line -- mirrors tshark's own `-x`. Text output only (`-T text`, the default); ignored under `-T json`/`csv`/`fields` and under `--stats`, which have no per-packet line to attach it to. |
+| `--mac-vendor` | off (i.e. OUI/MAC-vendor resolution off by default, to keep output compact) | Enable OUI (MAC vendor) resolution against the built-in table, and show it next to each MAC address. Implies `--ether`. See OUTPUT FORMATS' "Name resolution" subsection below. |
 | `--resolve` | off | Enable hostname resolution from an explicitly-supplied `--hosts` file. **Never performs live DNS, under any circumstance** -- file-only. See OUTPUT FORMATS' "Name resolution" subsection below. |
 | `--hosts FILE` | *(none)* | Unix `/etc/hosts`-style file to resolve IP addresses from, for `--resolve`. Must exist. |
 | `--nn` | off (i.e. service-name resolution on by default) | Disable service name (port -> name) resolution, from the built-in table and `--services` alike. Named after the `nc`/`nmap`/`tcpdump`-family `-n`/`-nn` "don't resolve names" convention. See OUTPUT FORMATS' "Name resolution" subsection below. |
@@ -259,13 +262,13 @@ conduitscope policy validate (-r FILE | -i INTERFACE) --policy POLICY_FILE [opti
 |---|---|---|
 | `-r, --read FILE` | *(required unless `-i` given)* | Input capture file. Must exist; classic pcap or pcapng, auto-detected. Mutually exclusive with `-i`. |
 | `-i, --interface NAME` | *(required unless `-r` given)* | Check live traffic from this network interface instead of reading a file -- see LIVE CAPTURE below. Requires libpcap/Npcap support to have been built in. Mutually exclusive with `-r`. There's no `--max-packets` here (matching this command's offline-file surface, which never had one either); a live run relies on `--duration` and/or Ctrl+C to stop. |
-| `--filter BPF` | *(none)* | BPF filter (tcpdump syntax). Works with both `-i` and `-r`; see LIVE CAPTURE's own `--filter` subsection below. |
+| `-f, --filter BPF` | *(none)* | BPF filter (tcpdump syntax). Works with both `-i` and `-r`; see LIVE CAPTURE's own `--filter` subsection below. `-f` mirrors tshark's own `-f`, and `decode`'s own `-f`/`--filter`. |
 | `--duration SECONDS` | `0` (unlimited) | Stop a live capture (`-i`) after this many seconds; `0` means rely on Ctrl+C instead. |
 | `--snaplen BYTES` | `65535` | Maximum bytes captured per packet with `-i`. |
 | `--no-promiscuous` | off (i.e. promiscuous by default) | Same meaning as `decode --no-promiscuous`. |
 | `--policy FILE` | *(required)* | Zone/conduit policy file. Must exist. A restricted YAML subset -- see POLICY FILE FORMAT below. |
 | `-o, --output FILE` | stdout | Write the report here instead of stdout. |
-| `-f, --format {text,json}` | `text` | Report format. `text` is the human-readable report shown throughout this section; `json` is meant for scripting an audit pipeline -- see POLICY FILE FORMAT's "JSON report schema" below. |
+| `-T, --format {text,json}` | `text` | Report format. `text` is the human-readable report shown throughout this section; `json` is meant for scripting an audit pipeline -- see POLICY FILE FORMAT's "JSON report schema" below. |
 | `--strict` | off | Same meaning as `decode --strict`: abort on the first packet that fails to parse at the Ethernet/IPv4/TCP layer, instead of reporting a warning and continuing to evaluate the rest of the capture. |
 | `--strict-it-protocols` | off | Also fail compliance (non-zero exit code) when the report's own "notable protocols" finding (see POLICY FILE FORMAT's "Notable IT protocols" subsection below) is non-empty, even on an otherwise COMPLIANT capture. Off by default: the finding itself is always reported regardless of this flag, so nothing is hidden without it -- this only controls whether it additionally affects the exit code, for a CI/audit pipeline that wants to gate on it. Never affects the report's own `Result: COMPLIANT`/`NON-COMPLIANT` text or its JSON `"compliant"` field, which stay computed exactly as before this flag existed. |
 | `--summarize-unclassified` | off | Collapse `UNCLASSIFIED TRAFFIC` (and, if present, `ETHERNET UNCLASSIFIED TRAFFIC`) entries that share the same endpoints/port/protocol(s)/zones into one summary line carrying a flow count and total packet count, instead of one full block per individual flow. Off by default -- the existing, one-block-per-flow report is unchanged unless this is given. Aimed at a busy capture with far more distinct TCP flows (a new source port on every reconnect) than distinct (client, server, port) patterns actually worth reviewing, where the unsummarized report can otherwise run to hundreds of thousands of lines for one repeatedly-reconnecting host pair alone. `VIOLATIONS`/`ALLOWED` (and their Ethernet equivalents) are never summarized, only the unclassified groups. Only affects `--format text` -- the JSON report always lists every flow individually regardless of this flag, since it's already structured data a script can group/deduplicate itself with more precision than any one fixed grouping key here could offer. |
@@ -372,12 +375,12 @@ doesn't cover).
 |---|---|---|
 | `-r, --read FILE` | *(required unless `-i` given)* | Input capture file. Must exist; classic pcap or pcapng, auto-detected. Mutually exclusive with `-i`. |
 | `-i, --interface NAME` | *(required unless `-r` given)* | Build the inventory from live traffic on this network interface instead of reading a file -- see LIVE CAPTURE below. Requires libpcap/Npcap support to have been built in. Mutually exclusive with `-r`. |
-| `--filter BPF` | *(none)* | BPF filter (tcpdump syntax). Works with both `-i` and `-r`; see LIVE CAPTURE's own `--filter` subsection below. |
+| `-f, --filter BPF` | *(none)* | BPF filter (tcpdump syntax). Works with both `-i` and `-r`; see LIVE CAPTURE's own `--filter` subsection below. `-f` mirrors tshark's own `-f`, and `decode`'s own `-f`/`--filter`. |
 | `--duration SECONDS` | `0` (unlimited) | Stop a live capture (`-i`) after this many seconds; `0` means rely on Ctrl+C instead. |
 | `--snaplen BYTES` | `65535` | Maximum bytes captured per packet with `-i`. |
 | `--no-promiscuous` | off (i.e. promiscuous by default) | Same meaning as `decode --no-promiscuous`. |
 | `-o, --output FILE` | stdout | Write the report here instead of stdout. |
-| `-f, --format {text,json}` | `text` | Report format. `text` is the human-readable report shown below; `json` mirrors its structure -- see JSON OUTPUT FIELDS-style output below. |
+| `-T, --format {text,json}` | `text` | Report format. `text` is the human-readable report shown below; `json` mirrors its structure -- see JSON OUTPUT FIELDS-style output below. |
 | `--strict` | off | Same meaning as `decode --strict`: abort on the first packet that fails to parse at the Ethernet/IPv4/TCP layer, instead of reporting a warning and continuing. |
 | `--zone-prefix N` | `24` | CIDR prefix length (`0`-`32`) inferred zones are grouped by: every observed asset IP is masked to this many bits, and one zone is emitted per distinct resulting network. Narrow it (e.g. `16`) to lump a wider address range into fewer, bigger zones; widen it (e.g. `28`) for finer-grained, smaller zones. |
 | `--diagram FILE` | *(none)* | Also write a zone/conduit diagram to this file. Format controlled by `--diagram-format`. |
@@ -650,9 +653,9 @@ interface while it's a party to the traffic (e.g. running conduitscope
 directly on an engineering workstation) doesn't need it, hence the opt-out
 rather than requiring an opt-in.
 
-### `--filter` (BPF)
+### `--filter` / `-f` (BPF)
 
-`--filter` takes a Berkeley Packet Filter expression -- the same syntax
+`--filter` (short alias `-f`, mirroring tshark's own `-f`) takes a Berkeley Packet Filter expression -- the same syntax
 `tcpdump`'s own filter argument uses (e.g. `"host 192.168.1.10 and port
 502"`). With `-i`, it's applied by libpcap/Npcap itself, before a packet ever
 reaches conduitscope's own decoding, so it's a performance/focus tool
@@ -1239,7 +1242,7 @@ anchors and aliases (`&x`, `*x`), tags (`!!str`), multi-document streams
 (`---`, `...`), block scalars (`|`, `>`), flow mappings (`{a: b}`), and tab
 characters used for indentation.
 
-### JSON report schema (`-f json`)
+### JSON report schema (`-T json`)
 
 `from`/`to` are always rendered as JSON arrays of zone names, even when the
 policy file wrote a single zone name for that field -- a conduit's `from`/
@@ -1626,13 +1629,15 @@ a client/server side to determine in the first place. Any additional notes
 are printed indented below the packet line, followed, for an
 Ethernet-linktype packet that also has an IP layer, by an `eth` line
 showing the raw source/destination MAC addresses -- **only when
-`-e`/`--ether` is given, off by default to keep output compact** (mirrors
-tcpdump's own `-e`; see "Name resolution" below for exactly how `-e` and
-`--mac-vendor` interact). A packet with **no** IP layer at all (ARP, LLDP, EAPOL,
+`--ether` is given, off by default to keep output compact** (mirrors
+tcpdump's own `-e`, though this codebase reserves the short `-e` for
+`--field` instead, tshark's own convention -- see "Name resolution" below
+for exactly how `--ether` and `--mac-vendor` interact). A packet with
+**no** IP layer at all (ARP, LLDP, EAPOL,
 PPPoE, MPLS, PROFINET RT/GOOSE/Sampled Values/EtherCAT/STP, or the generic
 `non-ip`/`non-tcp` fallback) has no IP address to show on its own head
 line in the first place, so its MAC address pair is shown there directly
-instead -- unconditionally, no `-e`/`--ether` needed -- with a `--mac-vendor`
+instead -- unconditionally, no `--ether` needed -- with a `--mac-vendor`
 vendor name attached the same way it would be anywhere else; no separate
 `eth` line is printed for that same pair in this case, since it would just
 repeat what the head line already shows. See the
@@ -1646,7 +1651,7 @@ design record.
         note: classified as a request because the PDU is exactly 4 bytes (address+quantity); this is a heuristic, not stream tracking
 ```
 
-With `-e`, the same packet also gets its `eth` line:
+With `--ether`, the same packet also gets its `eth` line:
 
 ```
 #1  0.000000  192.168.1.50:51000 -> 192.168.1.10:502  [modbus]  Read Holding Registers: request: read 10 holding register(s) starting at address 0  (client 192.168.1.50 -- port-heuristic)
@@ -1663,11 +1668,11 @@ annotation on the line) for the two authoritative tiers, `handshake` and
 
 A GOOSE frame (like every other packet with no IP layer at all) has no IP
 address for its head line to show, so it shows its MAC address pair there
-directly instead -- unconditionally, no `-e`/`--ether` needed (see this
+directly instead -- unconditionally, no `--ether` needed (see this
 subsection's own note above and "Name resolution" below for the full
 reasoning). When it's also 802.1Q VLAN-encapsulated, its VLAN ID is shown
 by default (`vlan <id>`) on its own line below that, regardless of
-`-e`/`--mac-vendor` -- 802.1Q membership isn't specifically a MAC-address fact, so
+`--ether`/`--mac-vendor` -- 802.1Q membership isn't specifically a MAC-address fact, so
 it has its own independent, on-by-default toggle, `--no-vlan`:
 
 ```
@@ -1675,7 +1680,7 @@ it has its own independent, on-by-default toggle, `--no-vlan`:
         vlan 100
 ```
 
-`-e`/`--ether` adds nothing further here -- there's no separate `eth` line
+`--ether` adds nothing further here -- there's no separate `eth` line
 for a packet whose MAC pair is already on the head line, since it would
 just repeat it. `--mac-vendor`'s vendor name, when enabled, attaches right there
 on the head line instead:
@@ -1686,7 +1691,7 @@ on the head line instead:
 ```
 
 For an IP-bearing packet, none of this changes: the head line shows
-`ip:port`, not a MAC address, so `-e`/`--ether` (or `--mac-vendor`, which implies
+`ip:port`, not a MAC address, so `--ether` (or `--mac-vendor`, which implies
 it -- there'd be nothing to attach a vendor name to otherwise) is still
 what shows the MAC pair, on its own line below. When name resolution is
 enabled (see "Name resolution" below), a hostname and/or a service name are
@@ -2889,6 +2894,85 @@ whenever `--no-direction` disables display -- the same "column always
 exists, value empty" precedent `vlan_id` already sets above. See
 docs/DEVELOPMENT.md's ROADMAP item 19 for the full design record.
 
+### Field selection (`-T fields`)
+
+`-T fields` (equivalently `--format fields`) mirrors tshark's own `-T
+fields`/`-e` combination: instead of a full text/json/csv record, each
+packet prints only the fields named by one or more `-e`/`--field FIELD`
+options, in the order given, tab-separated, one line per packet -- no
+header row, no packet index prefix beyond whatever field was explicitly
+asked for. `-T fields` with no `-e` at all is an error (`error: --format
+fields (-T fields) needs at least one -e/--field`), caught before the
+packet source even opens, the same "fail fast on bad setup" posture as an
+invalid `--time-offset`; conversely `-e` given under any other `--format`
+is very likely a mistake (the selected fields have nowhere to go), so it's
+flagged with a one-line advisory note (`note: -e/--field only applies with
+--format fields (-T fields); ignoring`) rather than silently doing nothing
+-- the run itself still proceeds normally.
+
+A field's name is exactly the key that would appear in that same packet's
+own `--format json` output (see `json` above) -- `src_ip`, `dst_port`,
+`protocol`, `modbus_function_code`, and so on, including every
+protocol-specific field this tool's JSON writer ever emits for any
+decoded protocol. This is deliberate: rather than maintaining a second,
+separate field catalog, `-T fields` reuses JSON output as its own single
+source of truth for "what fields exist and what they're called" -- the
+same fields visible in `--format json` are, by construction, exactly the
+fields selectable here, with no separate list to keep in sync. A field
+name that doesn't exist for a given packet's protocol, or that exists but
+is JSON `null` for this particular packet (e.g. `src_ip` on a raw ARP or
+LLDP frame, which has no IP layer), prints as an empty column rather than
+an error or the literal text `null` -- exactly like tshark's own `-e`
+behavior for an absent field. An array-valued JSON field (e.g. `notes`)
+renders the same way it would inside a JSON array's own string elements,
+joined the same way CSV already joins multiple notes.
+
+```
+$ conduitscope decode -r capture.pcap -T fields -e index -e src_ip -e dst_ip -e protocol -e summary
+1	192.168.1.50	192.168.1.10	modbus	Read Holding Registers: request: read 10 holding register(s) starting at address 0
+2	192.168.1.10	192.168.1.50	modbus	Read Holding Registers: response: 20 data byte(s)
+```
+
+### Writing a capture file (`-w`)
+
+`-w FILE` (equivalently `--write FILE`) writes every packet that reaches
+this run to a new classic-pcap capture file at that path, raw and
+unmodified -- mirroring tshark/tcpdump's own `-w`. It works identically
+regardless of source: with `-i`, every packet the live capture actually
+receives is written; with `-r`, combined with `-f`/`--filter`, only the
+packets that survive the filter are written (the filter has already
+narrowed what reaches the rest of the run by the time `-w` sees it, so
+`-w` needs no filtering logic of its own). `-w` writes alongside, not
+instead of, the normal `--format` output -- that output continues to
+stdout or `-o` exactly as it would without `-w`; `-w`'s own file is a
+second, independent output stream. The written file is an ordinary
+classic-pcap file (24-byte global header, little-endian, microsecond
+timestamp resolution, the source's own link type and a generous default
+snaplen), reopenable by `conduitscope decode -r`, `conduitscope info -r`,
+Wireshark, tcpdump, or any other pcap-reading tool -- there is no
+proprietary framing here, just a real, complete capture of whatever
+packets this run actually saw.
+
+### Hex dump (`-x`)
+
+`-x` (equivalently `--hex`) prints a hex+ASCII dump of each packet's raw
+bytes directly below its normal decode line -- mirroring tshark's own
+`-x`. Sixteen bytes per line, each line prefixed with its own hex byte
+offset, hex bytes grouped 8-and-8 with an extra space between the two
+halves, and the same 16 bytes rendered as ASCII on the right (a printable
+byte as itself, anything else as `.`) -- the same layout `xxd`/tcpdump's
+own `-X` use. `-x` is text-output only (`-T text`, the default): it's
+ignored under `-T json`/`csv`/`fields` and under `--stats`, none of which
+have a per-packet text line to attach a dump below.
+
+```
+$ conduitscope decode -r capture.pcap -c 1 -x
+#1  0.000000  00:0c:29:11:22:33 -> ff:ff:ff:ff:ff:ff  [arp]  ARP Request -- who has 192.168.1.10? tell 192.168.1.50 (00:0c:29:11:22:33)
+0000  ff ff ff ff ff ff 00 0c  29 11 22 33 08 06 00 01  ........)."3....
+0010  08 00 06 04 00 01 00 0c  29 11 22 33 c0 a8 01 32  ........)."3...2
+0020  00 00 00 00 00 00 c0 a8  01 0a                    ..........
+```
+
 ### Timestamps
 
 `decode`'s `-t`/`--time-format` controls how each packet's timestamp is
@@ -2972,27 +3056,27 @@ default:
   depends on whether the packet has an IP layer at all:
   - **With an IP layer** (the head line shows `ip:port`, not a MAC address):
     the whole `eth <src> -> <dst>` line this vendor name attaches to is
-    itself a separate, also-off-by-default toggle: `-e`/`--ether` (mirrors
-    tcpdump's own `-e`). `--mac-vendor` implies `-e` -- there'd be nothing to
+    itself a separate, also-off-by-default toggle: `--ether` (mirrors
+    tcpdump's own `-e`). `--mac-vendor` implies `--ether` -- there'd be nothing to
     attach a vendor name to otherwise -- so `--mac-vendor` alone still shows the
-    full `eth <mac> (<vendor>) -> <mac> (<vendor>)` line; `-e` alone shows
+    full `eth <mac> (<vendor>) -> <mac> (<vendor>)` line; `--ether` alone shows
     the MAC pair with no vendor name.
   - **With no IP layer at all** (ARP, LLDP, EAPOL, PPPoE, MPLS, PROFINET
     RT/GOOSE/Sampled Values/EtherCAT/STP, or the generic `non-ip`/`non-tcp`
     fallback): the head line has no IP address to show, so it shows the MAC
-    address pair directly instead, unconditionally -- no `-e`/`--ether`
+    address pair directly instead, unconditionally -- no `--ether`
     needed. `--mac-vendor`'s vendor name attaches right there, on the head line
     itself (`<mac> (<vendor>) -> <mac> (<vendor>)`); there is no separate
     `eth` line for this case, since it would just repeat the same pair the
-    head line already shows -- `-e`/`--ether` is a no-op for a packet like
+    head line already shows -- `--ether` is a no-op for a packet like
     this (mirroring tcpdump's own `-e`, which likewise has nothing further
     to add once the link layer's addresses are already the only addresses a
     frame has).
 
   A VLAN-tagged packet's `vlan <id>` still appears on its own regardless of
-  `-e`/`--mac-vendor` either way (see "VLAN" further below) -- 802.1Q membership
+  `--ether`/`--mac-vendor` either way (see "VLAN" further below) -- 802.1Q membership
   isn't a MAC-address fact, so `--no-vlan` is what controls it.
-  `-e`/`--mac-vendor`'s reach is text-output-only: JSON/CSV always include
+  `--ether`/`--mac-vendor`'s reach is text-output-only: JSON/CSV always include
   `src_mac`/`dst_mac` as base fields (like `src_ip`/`dst_ip`) for every
   Ethernet-linktype packet regardless of whether it has an IP layer -- only
   the `*_mac_vendor` annotation depends on `--mac-vendor`, in every format.
@@ -4270,7 +4354,7 @@ conduitscope decode -r capture.pcap
 
 See the Ethernet header (source/destination MAC, VLAN tag) alongside each
 packet, with vendor names looked up against the built-in OUI table --
-`--mac-vendor` alone is enough, since it implies `-e`/`--ether`:
+`--mac-vendor` alone is enough, since it implies `--ether`:
 
 ```sh
 conduitscope decode -r capture.pcap --mac-vendor
@@ -4286,14 +4370,14 @@ conduitscope info -r capture.pcap
 Pull out only the Modbus exception responses, as JSON, using `jq`:
 
 ```sh
-conduitscope decode -r capture.pcap --protocol modbus -f json \
+conduitscope decode -r capture.pcap --protocol modbus -T json \
   | jq '.[] | select(.summary | test("^Read|^Write") | not)'
 ```
 
 Note ports that carry Modbus traffic your zone policy doesn't expect on 502:
 
 ```sh
-conduitscope decode -r capture.pcap --protocol modbus --modbus-port 502 -f text \
+conduitscope decode -r capture.pcap --protocol modbus --modbus-port 502 -T text \
   | grep -A1 "not a configured/standard Modbus port"
 ```
 
@@ -4323,7 +4407,7 @@ See exactly which PLC memory addresses are being read and written -- the
 item tags conduitscope decoded, one line per Read Var / Write Var packet:
 
 ```sh
-conduitscope decode -r capture.pcap --protocol s7comm -f json \
+conduitscope decode -r capture.pcap --protocol s7comm -T json \
   | jq -r '.[] | select(.s7comm_items) | "\(.src_ip) -> \(.dst_ip): \(.s7comm_items | join(", "))"'
 ```
 
@@ -4334,7 +4418,7 @@ remote logic-block push/removal -- genuinely useful for spotting who's
 allowed to issue control commands to a controller on a given conduit:
 
 ```sh
-conduitscope decode -r capture.pcap --protocol s7comm -f json \
+conduitscope decode -r capture.pcap --protocol s7comm -T json \
   | jq -r '.[] | select(.s7comm_plc_stop_message or .s7comm_pi_service_name) |
            "\(.src_ip) -> \(.dst_ip): \(.summary)"'
 ```
@@ -4344,7 +4428,7 @@ shares S7comm's own port 102 -- variable names and their values, one line
 per packet that carries any:
 
 ```sh
-conduitscope decode -r capture.pcap --protocol mms -f json \
+conduitscope decode -r capture.pcap --protocol mms -T json \
   | jq -r '.[] | select(.mms_values) | "\(.src_ip) -> \(.dst_ip): \(.mms_values | join(", "))"'
 ```
 
@@ -4354,7 +4438,7 @@ written, one line per GetMultiVariables/SetMultiVariables/SetVariable packet
 that carries any:
 
 ```sh
-conduitscope decode -r capture.pcap --protocol s7comm-plus -f json \
+conduitscope decode -r capture.pcap --protocol s7comm-plus -T json \
   | jq -r '.[] | select(.s7plus_values) | "\(.src_ip) -> \(.dst_ip): \(.s7plus_values | join(", "))"'
 ```
 
@@ -4373,7 +4457,7 @@ capture, e.g. to spot an unsolicited response or a write/operate/direct
 operate you weren't expecting on a conduit:
 
 ```sh
-conduitscope decode -r capture.pcap --protocol dnp3 -f json \
+conduitscope decode -r capture.pcap --protocol dnp3 -T json \
   | jq -r '.[] | select(.dnp3_function) | "\(.src_ip) -> \(.dst_ip): \(.dnp3_function) \(.dnp3_objects // [] | join(", "))"'
 ```
 
@@ -4381,7 +4465,7 @@ Find every CROB output command in a capture -- who issued it, and exactly
 what it commanded:
 
 ```sh
-conduitscope decode -r capture.pcap --protocol dnp3 -f json \
+conduitscope decode -r capture.pcap --protocol dnp3 -T json \
   | jq -r '.[] | select(.dnp3_values) | .src_ip as $s | .dst_ip as $d |
            (.dnp3_values[] | select(startswith("g12v1"))) | "\($s) -> \($d): \(.)"'
 ```
@@ -4391,7 +4475,7 @@ a serial-to-IP gateway, or possible tampering, worth a closer look either way
 (see docs/PROTOCOL_COVERAGE.md's DNP3 "Data-link CRC-16 validation" section):
 
 ```sh
-conduitscope decode -r capture.pcap --protocol dnp3 -f json \
+conduitscope decode -r capture.pcap --protocol dnp3 -T json \
   | jq -r '.[] | select(.dnp3_link_crc_valid == false) |
            "\(.src_ip) -> \(.dst_ip): header_ok=\(.dnp3_header_crc_valid) blocks=\(.dnp3_block_count) failed=\(.dnp3_block_crc_failures)"'
 ```
@@ -4401,7 +4485,7 @@ capture, e.g. to spot an unexpected command or an interrogation response
 you weren't expecting on a conduit:
 
 ```sh
-conduitscope decode -r capture.pcap --protocol iec104 -f json \
+conduitscope decode -r capture.pcap --protocol iec104 -T json \
   | jq -r '.[] | select(.iec104_asdu_type) | "\(.src_ip) -> \(.dst_ip): \(.iec104_asdu_type) (\(.iec104_cot))"'
 ```
 
@@ -4410,7 +4494,7 @@ Information Object Address, and what it commanded (the kind of query that
 matters most for an Industroyer2-style breaker-manipulation investigation):
 
 ```sh
-conduitscope decode -r capture.pcap --protocol iec104 -f json \
+conduitscope decode -r capture.pcap --protocol iec104 -T json \
   | jq -r '.[] | select(.iec104_asdu_type | test("^C_SC_NA_1|^C_DC_NA_1")?) |
            .src_ip as $s | .dst_ip as $d |
            (.iec104_objects[]) | "\($s) -> \($d): \(.)"'
@@ -4420,7 +4504,7 @@ Fingerprint every EtherNet/IP device that answered a ListIdentity request in
 a capture -- useful for passive OT asset inventory:
 
 ```sh
-conduitscope decode -r capture.pcap --protocol enip -f json \
+conduitscope decode -r capture.pcap --protocol enip -T json \
   | jq -r '.[] | select((.enip_command == "ListIdentity") and (.summary | contains("identity:"))) |
            "\(.src_ip): \(.summary | capture("identity: (?<id>.*)").id)"'
 ```
@@ -4429,7 +4513,7 @@ Find every Rockwell tag write (Write_Tag) in a capture -- who wrote what, to
 which named tag:
 
 ```sh
-conduitscope decode -r capture.pcap --protocol enip -f json \
+conduitscope decode -r capture.pcap --protocol enip -T json \
   | jq -r '.[] | select((.enip_cip_service == "Write_Tag") and (.enip_cip_is_response == false)) |
            "\(.src_ip) -> \(.dst_ip): \(.enip_cip_path) = \(.enip_cip_values | join(" "))"'
 ```
@@ -4440,7 +4524,7 @@ for spotting an active real-time I/O scan a capture wasn't expected to
 contain:
 
 ```sh
-conduitscope decode -r capture.pcap --protocol enip -f json \
+conduitscope decode -r capture.pcap --protocol enip -T json \
   | jq -r '[.[] | select(.enip_io_connection_id != null)] | group_by(.enip_io_connection_id) |
            .[] | "\(.[0].enip_io_connection_id): \(length) datagram(s), \([.[].enip_io_data_length // 0] | add) byte(s) of I/O data"'
 ```
@@ -4450,7 +4534,7 @@ exchange, deduplicated, useful as a first pass at what's actually on a
 PROFINET segment before writing zone/conduit policy for it:
 
 ```sh
-conduitscope decode -r capture.pcap --protocol profinet -f json \
+conduitscope decode -r capture.pcap --protocol profinet -T json \
   | jq -r '[.[] | select(.profinet_dcp_blocks != null) |
            .profinet_dcp_blocks[] | select(startswith("NameOfStation="))] | unique[]'
 ```
@@ -4460,7 +4544,7 @@ how many bytes of IO data each FrameID (effectively, each IO connection)
 carried, and whether any carried a non-OK TransferStatus worth investigating:
 
 ```sh
-conduitscope decode -r capture.pcap --protocol profinet -f json \
+conduitscope decode -r capture.pcap --protocol profinet -T json \
   | jq -r '[.[] | select(.profinet_has_cyclic_data == true)] | group_by(.profinet_frame_id) |
            .[] | "\(.[0].profinet_frame_id): \(length) datagram(s), \([.[].profinet_cyclic_io_data_length // 0] | add) byte(s) of I/O data, \([.[] | select(.profinet_cyclic_transfer_status != 0)] | length) non-OK TransferStatus"'
 ```
@@ -4470,7 +4554,7 @@ pair seen, useful as a first pass at what's actually publishing GOOSE on a
 substation segment before writing zone/conduit policy for it:
 
 ```sh
-conduitscope decode -r capture.pcap --protocol goose -f json \
+conduitscope decode -r capture.pcap --protocol goose -T json \
   | jq -r '[.[] | select(.goose_gocb_ref != null) | "\(.goose_gocb_ref) (\(.goose_dat_set))"] | unique[]'
 ```
 
@@ -4481,7 +4565,7 @@ it; an `stNum` that resets or jumps outside a publisher restart, or a
 signal for this protocol:
 
 ```sh
-conduitscope decode -r capture.pcap --protocol goose -f json \
+conduitscope decode -r capture.pcap --protocol goose -T json \
   | jq -r '[.[] | select(.goose_st_num != null)] | group_by(.goose_gocb_ref) |
            .[] | .[0].goose_gocb_ref as $ref |
            (group_by(.goose_st_num)[] | "\($ref): stNum=\(.[0].goose_st_num) sqNum 1..\([.[].goose_sq_num] | max)")'
@@ -4492,7 +4576,7 @@ seen, alongside its `smpRate`/`smpMod`, useful as a first pass at what's
 actually publishing SV on a substation segment:
 
 ```sh
-conduitscope decode -r capture.pcap --protocol sv -f json \
+conduitscope decode -r capture.pcap --protocol sv -T json \
   | jq -r '[.[] | select(.sv_id != null) | "\(.sv_id) smpRate=\(.sv_smp_rate // "n/a") smpMod=\(.sv_smp_mod // "n/a")"] | unique[]'
 ```
 
@@ -4501,7 +4585,7 @@ consecutive `smpCnt` jump bigger than 1 (accounting for the 0-65535 wrap),
 which can indicate dropped samples or a spoofed/replayed stream:
 
 ```sh
-conduitscope decode -r capture.pcap --protocol sv -f json \
+conduitscope decode -r capture.pcap --protocol sv -T json \
   | jq -r '[.[] | select(.sv_id != null)] | group_by(.sv_id) |
            .[] | .[0].sv_id as $id | [.[].sv_smp_cnt] as $counts |
            range(1; $counts | length) as $i |
@@ -4515,7 +4599,7 @@ the addressed slave(s) didn't respond, alongside the `Cmd`/address that was
 sent:
 
 ```sh
-conduitscope decode -r capture.pcap --protocol ethercat -f json \
+conduitscope decode -r capture.pcap --protocol ethercat -T json \
   | jq -r '.[] | select(.ethercat_first_wkc == 0) |
            "\(.index): \(.ethercat_first_cmd_name) adp=\(.ethercat_first_adp // "n/a") ado=\(.ethercat_first_ado // "n/a") logAddr=\(.ethercat_first_logical_address // "n/a")"'
 ```
@@ -4525,7 +4609,7 @@ seen, useful as a first pass at what an EtherCAT master is actually reading/
 writing on a segment before writing zone/conduit policy for it:
 
 ```sh
-conduitscope decode -r capture.pcap --protocol ethercat -f json \
+conduitscope decode -r capture.pcap --protocol ethercat -T json \
   | jq -r '[.[] | select(.ethercat_first_ado != null) | "\(.ethercat_first_cmd_name) ado=\(.ethercat_first_ado) (decimal)"] | unique[]'
 ```
 
@@ -4534,7 +4618,7 @@ itself via I-Am (unsolicited or in response to a Who-Is sweep), the BACnet
 analog of passively fingerprinting hosts from ARP/DHCP traffic:
 
 ```sh
-conduitscope decode -r capture.pcap --protocol bacnet -f json \
+conduitscope decode -r capture.pcap --protocol bacnet -T json \
   | jq -r '[.[] | select(.bacnet_service_name == "i-Am") | "\(.src_ip): \(.bacnet_values | join(", "))"] | unique[]'
 ```
 
@@ -4544,7 +4628,7 @@ workstation or historian is actually polling before writing zone/conduit
 policy for it:
 
 ```sh
-conduitscope decode -r capture.pcap --protocol bacnet -f json \
+conduitscope decode -r capture.pcap --protocol bacnet -T json \
   | jq -r '.[] | select(.bacnet_service_name | test("^(read|write)Property$")) |
            "\(.src_ip) -> \(.dst_ip): \(.bacnet_service_name) \(.bacnet_values // [] | join(", "))"'
 ```
@@ -4555,7 +4639,7 @@ and revision fields are this protocol's own device-fingerprinting message,
 the HART analog of BACnet's I-Am:
 
 ```sh
-conduitscope decode -r capture.pcap --protocol hartip -f json \
+conduitscope decode -r capture.pcap --protocol hartip -T json \
   | jq -r '[.[] | select(.hartip_command_name == "Read Unique Identifier" and .hartip_is_response == true) |
            "\(.hartip_address): \(.hartip_values | join(", "))"] | unique[]'
 ```
@@ -4567,7 +4651,7 @@ Identifier "device fingerprinting" query, useful for spotting an endpoint
 still accepting SecurityMode "None":
 
 ```sh
-conduitscope decode -r capture.pcap --protocol opcua -f json \
+conduitscope decode -r capture.pcap --protocol opcua -T json \
   | jq -r '[.[] | select(.opcua_service_name == "GetEndpointsResponse") | .opcua_values[] | select(startswith("endpoint["))] | unique[]'
 ```
 
@@ -4578,7 +4662,7 @@ decode" section), worth flagging on any conduit that should be running an
 authenticated, encrypted OPC UA session:
 
 ```sh
-conduitscope decode -r capture.pcap --protocol opcua -f json \
+conduitscope decode -r capture.pcap --protocol opcua -T json \
   | jq -r '.[] | select(.notes // [] | any(startswith("SECURITY FINDING"))) |
            "\(.src_ip):\(.src_port) -> \(.dst_ip):\(.dst_port): \(.opcua_values[] | select(startswith("username=") or startswith("password=")))"'
 ```
@@ -4591,7 +4675,7 @@ HART-IP's own gate; see docs/DEVELOPMENT.md's PROTOCOL DETECTION and LIMITATIONS
 look on a conduit expected to carry HART-IP:
 
 ```sh
-conduitscope decode -r capture.pcap -f json \
+conduitscope decode -r capture.pcap -T json \
   | jq -r '[.[] | select(.summary | test("buffering a (Modbus/TCP PDU|HART-IP message)")) | .summary] | unique[]'
 ```
 
@@ -4601,7 +4685,7 @@ transaction ID than expected (worth a closer look on a conduit that should
 be a simple, complete request/response session):
 
 ```sh
-conduitscope decode -r capture.pcap --protocol modbus -f json \
+conduitscope decode -r capture.pcap --protocol modbus -T json \
   | jq -r '.[] | select(.summary | test("^Write")) | select(.modbus_paired_request_index | not) |
            "\(.index): \(.src_ip):\(.src_port) -> \(.dst_ip):\(.dst_port) \(.summary)"'
 ```
@@ -4624,7 +4708,7 @@ List just the violations, as JSON, for a script that only cares about what's
 wrong:
 
 ```sh
-conduitscope policy validate -r capture.pcap --policy policy.yaml -f json \
+conduitscope policy validate -r capture.pcap --policy policy.yaml -T json \
   | jq -r '.flows[] | select(.verdict == "violation") |
            "\(.client_ip) -> \(.server_ip):\(.server_port) (\(.protocols | join("+"))): \(.reason)"'
 ```
@@ -4712,7 +4796,7 @@ since MQTT's own Username/Password fields carry no confidentiality of their
 own:
 
 ```sh
-conduitscope decode -r capture.pcap --protocol mqtt -f json \
+conduitscope decode -r capture.pcap --protocol mqtt -T json \
   | jq -r '.[] | select(.mqtt_values // [] | any(startswith("Username=") or startswith("Password="))) |
            "\(.src_ip):\(.src_port) -> \(.dst_ip):\(.dst_port): \(.mqtt_values[] | select(startswith("Username=") or startswith("Password=")))"'
 ```
@@ -4721,7 +4805,7 @@ Pull out every decoded Sparkplug B metric across a capture, grouped by
 group/edge-node/device:
 
 ```sh
-conduitscope decode -r capture.pcap --protocol mqtt -f json \
+conduitscope decode -r capture.pcap --protocol mqtt -T json \
   | jq -r '.[] | select(.mqtt_is_sparkplug and (.mqtt_sparkplug_metrics // [] | length > 0)) |
            "\(.mqtt_sparkplug_group_id)/\(.mqtt_sparkplug_edge_node_id)\(.mqtt_sparkplug_device_id // "" | if . == "" then "" else "/" + . end) \(.mqtt_sparkplug_message_type): \(.mqtt_sparkplug_metrics | join(", "))"'
 ```
@@ -4729,7 +4813,7 @@ conduitscope decode -r capture.pcap --protocol mqtt -f json \
 Note MQTT traffic on a port your zone policy doesn't expect on 1883:
 
 ```sh
-conduitscope decode -r capture.pcap --protocol mqtt --mqtt-port 1883 -f text \
+conduitscope decode -r capture.pcap --protocol mqtt --mqtt-port 1883 -T text \
   | grep -B1 "not a configured/standard MQTT port"
 ```
 
@@ -4737,7 +4821,7 @@ Summarize FF-HSE traffic by sub-protocol and message name -- a quick way to
 see which of FDA/SM/FMS/LAN Redundancy dominates a capture:
 
 ```sh
-conduitscope decode -r capture.pcap --protocol ff-hse -f json \
+conduitscope decode -r capture.pcap --protocol ff-hse -T json \
   | jq -r '[.[] | select(.ffhse_protocol != null) | "\(.ffhse_protocol) / \(.ffhse_message_name)"] |
            group_by(.) | map("\(length)x \(.[0])") | .[]'
 ```
@@ -4747,7 +4831,7 @@ traffic, SM device commissioning, or Error bodies), alongside which
 message they came from:
 
 ```sh
-conduitscope decode -r capture.pcap --protocol ff-hse -f json \
+conduitscope decode -r capture.pcap --protocol ff-hse -T json \
   | jq -r '.[] | select(.ffhse_values // [] | length > 0) |
            "\(.src_ip) -> \(.dst_ip): \(.ffhse_message_name): \(.ffhse_values | join(", "))"'
 ```
@@ -4756,7 +4840,7 @@ Find FF-HSE Error responses, grouped by ErrorClass -- useful for spotting a
 device that keeps rejecting a particular class of request:
 
 ```sh
-conduitscope decode -r capture.pcap --protocol ff-hse -f json \
+conduitscope decode -r capture.pcap --protocol ff-hse -T json \
   | jq -r '.[] | select(.ffhse_type == "Error") |
            (.ffhse_values[] | select(startswith("error-class="))) as $ec |
            "\(.ffhse_message_name): \($ec)"' | sort | uniq -c | sort -rn
@@ -4767,7 +4851,7 @@ one line per distinct (Bridge, Root) pair seen, useful for spotting an
 unexpected root-bridge change on a conduit that shouldn't have one:
 
 ```sh
-conduitscope decode -r capture.pcap --protocol stp -f json \
+conduitscope decode -r capture.pcap --protocol stp -T json \
   | jq -r '[.[] | select(.stp_has_common_body) |
            "Bridge=\(.stp_bridge_priority)/\(.stp_bridge_sys_id_ext)/\(.stp_bridge_mac) Root=\(.stp_root_priority)/\(.stp_root_sys_id_ext)/\(.stp_root_mac)"] | unique[]'
 ```
@@ -4776,7 +4860,7 @@ Find every MSTP BPDU and list its MSTI Configuration Messages, e.g. to spot
 which MST instances a region actually carries:
 
 ```sh
-conduitscope decode -r capture.pcap --protocol stp -f json \
+conduitscope decode -r capture.pcap --protocol stp -T json \
   | jq -r '.[] | select(.stp_is_mstp) |
            "\(.src_ip) -> \(.dst_ip): \(.stp_mst_config_name) \(.stp_msti_messages // [] | join(", "))"'
 ```
@@ -4786,7 +4870,7 @@ quick passive traffic inventory off a CAN bus, the same grouping pattern
 the FF-HSE example above uses:
 
 ```sh
-conduitscope decode -r capture.pcap --protocol devicenet -f json \
+conduitscope decode -r capture.pcap --protocol devicenet -T json \
   | jq -r '[.[] | select(.protocol == "devicenet") | "\(.devicenet_group_name) / \(.devicenet_message_type)"] |
            group_by(.) | map("\(length)x \(.[0])") | .[]'
 ```
@@ -4796,7 +4880,7 @@ site's naming, on top of the OUI vendor lookup that's already on by default
 -- never touching live DNS, file-only:
 
 ```sh
-conduitscope decode -r capture.pcap --resolve --hosts myhosts.txt -f json \
+conduitscope decode -r capture.pcap --resolve --hosts myhosts.txt -T json \
   | jq -r '.[] | "\(.src_ip) (\(.src_hostname // "?")) -> \(.dst_ip) (\(.dst_hostname // "?")): \(.protocol)"'
 ```
 
@@ -4805,7 +4889,7 @@ passive asset-inventory pass, without needing `--resolve`/`--hosts` at all
 since OUI resolution is on by default:
 
 ```sh
-conduitscope decode -r capture.pcap -f json \
+conduitscope decode -r capture.pcap -T json \
   | jq -r '[.[] | .src_mac_vendor, .dst_mac_vendor] | map(select(. != null)) | unique[]'
 ```
 
@@ -4815,7 +4899,7 @@ segment -- the fallback-resolution traffic LLMNR/NBT-NS poisoning attacks
 a well-segmented OT network at all:
 
 ```sh
-conduitscope decode -r capture.pcap --protocol llmnr -f json \
+conduitscope decode -r capture.pcap --protocol llmnr -T json \
   | jq -r '.[] | select(.protocol == "llmnr" and (.dns_is_response | not)) |
            "\(.src_ip): \(.dns_records[0] // "?")"'
 ```
@@ -4827,7 +4911,7 @@ deliberate (an engineer's laptop dodging a captive portal) or a sign of
 malware avoiding detection:
 
 ```sh
-conduitscope decode -r capture.pcap --protocol doh -f json \
+conduitscope decode -r capture.pcap --protocol doh -T json \
   | jq -r '.[] | "\(.src_ip) -> \(.dst_ip): \(.doh_matched_provider) (SNI \(.doh_sni))"'
 ```
 
@@ -4835,7 +4919,7 @@ Build a quick routing table inventory from a passive RIP capture -- every
 route advertised, by whom, and at what metric:
 
 ```sh
-conduitscope decode -r capture.pcap --protocol rip -f json \
+conduitscope decode -r capture.pcap --protocol rip -T json \
   | jq -r '.[] | select(.rip_command == "Response") | .src_ip as $s |
            (.rip_routes[] | select(startswith("authentication:") | not)) | "\($s): \(.)"'
 ```
@@ -4845,7 +4929,7 @@ capture -- a passive inventory of who is actually subscribed to
 GOOSE/SV-style multicast traffic:
 
 ```sh
-conduitscope decode -r capture.pcap --protocol igmp -f json \
+conduitscope decode -r capture.pcap --protocol igmp -T json \
   | jq -r '.[] | select(.igmp_type | test("Report|Leave")) |
            "\(.src_ip): \(.igmp_type) \(.igmp_group_address)"'
 ```
@@ -4857,7 +4941,7 @@ spoofing/MITM and DoS primitives on a flat OT network with no ICMP
 filtering (see docs/PROTOCOL_COVERAGE.md's ICMP Security context notes):
 
 ```sh
-conduitscope decode -r capture.pcap -f json \
+conduitscope decode -r capture.pcap -T json \
   | jq -r '.[] | select(.protocol == "icmp" and
                          (.icmp_type_name == "Redirect" or
                           .icmp_type_name == "Destination Unreachable") and
@@ -4872,7 +4956,7 @@ which is also exactly what a gateway-spoofing/MITM attempt looks like on
 the wire (see docs/PROTOCOL_COVERAGE.md's VRRP/HSRP Security context notes):
 
 ```sh
-conduitscope decode -r capture.pcap -f json \
+conduitscope decode -r capture.pcap -T json \
   | jq -r '.[] | select((.protocol == "vrrp" and .vrrp_priority == 0) or
                          (.protocol == "hsrp" and .hsrp_opcode == "Coup")) |
            "\(.src_ip): \(.summary)"'
@@ -4883,7 +4967,7 @@ routes, and how many links each one claims (a rogue OSPF speaker often
 shows up as an unexpected Router ID or an implausible link count):
 
 ```sh
-conduitscope decode -r capture.pcap --protocol ospf -f json \
+conduitscope decode -r capture.pcap --protocol ospf -T json \
   | jq -r '.[] | .ospf_ls_update_lsas[]? | select(startswith("Router")) | .'
 ```
 
@@ -4892,7 +4976,7 @@ present at all on a segment that is supposed to be a flat, switched OT
 network with no routers on it -- seeing any of it is itself a finding:
 
 ```sh
-conduitscope decode -r capture.pcap -f json \
+conduitscope decode -r capture.pcap -T json \
   | jq -r '.[] | select(.protocol | test("^(igrp|eigrp|ospf)$")) |
            "\(.src_ip) -> \(.dst_ip): \(.summary)"'
 ```
@@ -4903,7 +4987,7 @@ POLICY FILE FORMAT's "Conduits" and "Addressing scope" sections), reported
 as JSON so a pipeline can flag anything that isn't `"allowed"`:
 
 ```sh
-conduitscope policy validate -r capture.pcap --policy ot_vlans.yaml -f json \
+conduitscope policy validate -r capture.pcap --policy ot_vlans.yaml -T json \
   | jq -r '.ethernet_flows[] | select(.verdict != "allowed") |
            "\(.mac_a) <-> \(.mac_b) (\(.protocol)): \(.reason)"'
 ```

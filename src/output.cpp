@@ -40,6 +40,25 @@ std::string csv_escape(const std::string& s) {
     return out;
 }
 
+void write_hex_ascii_dump(std::ostream& out, ByteSpan data) {
+    const size_t n = data.size();
+    for (size_t offset = 0; offset < n; offset += 16) {
+        out << std::hex << std::setfill('0') << std::setw(4) << offset << "  " << std::dec;
+        std::string ascii;
+        for (size_t col = 0; col < 16; ++col) {
+            if (offset + col < n) {
+                uint8_t b = data.at(offset + col);
+                out << std::hex << std::setfill('0') << std::setw(2) << static_cast<unsigned>(b) << std::dec << " ";
+                ascii += (b >= 0x20 && b < 0x7f) ? static_cast<char>(b) : '.';
+            } else {
+                out << "   ";
+            }
+            if (col == 7) out << " ";
+        }
+        out << " " << ascii << "\n";
+    }
+}
+
 namespace {
 // Renders one side (src or dst) of a packet's addressing for the text-format headline, with
 // Resolver-provided hostname/service-name annotations appended in parentheses right after the
@@ -2661,6 +2680,147 @@ void CsvWriter::write_packet(const DecodedPacket& p) {
          << ((show_direction_ && p.has_direction) ? csv_escape(p.direction_client_is_src ? p.src_ip : p.dst_ip)
                                                     : "")
          << "\n";
+}
+
+namespace {
+
+// Reverses json_escape's own escaping (this file, above) for one string LITERAL's inner text (the
+// substring between its surrounding quotes, already stripped by the caller) -- the counterpart
+// FieldsWriter needs since it re-parses JsonWriter's own already-escaped output rather than the
+// original DecodedPacket fields. Unrecognized escape sequences (none should ever appear, since
+// json_escape only ever produces the five handled below plus \\uXXXX for control characters --
+// \u is deliberately left un-decoded here, since no field this codebase emits needs it rendered
+// back to a raw control character for -T fields' own tab-separated output) are left as-is rather
+// than guessed at.
+std::string json_unescape_inner(const std::string& inner) {
+    std::string out;
+    out.reserve(inner.size());
+    for (size_t i = 0; i < inner.size(); ++i) {
+        if (inner[i] == '\\' && i + 1 < inner.size()) {
+            char n = inner[i + 1];
+            switch (n) {
+                case '"': out += '"'; ++i; continue;
+                case '\\': out += '\\'; ++i; continue;
+                case '/': out += '/'; ++i; continue;
+                case 'n': out += '\n'; ++i; continue;
+                case 't': out += '\t'; ++i; continue;
+                case 'r': out += '\r'; ++i; continue;
+                default: break;  // \uXXXX or anything else -- fall through, keep the backslash literally
+            }
+        }
+        out += inner[i];
+    }
+    return out;
+}
+
+// Renders a JSON array-of-strings LITERAL (e.g. `["a", "b"]`, `bgp_update_communities`'s own
+// shape) as a comma-joined plain-text list -- every list-valued field this codebase's JsonWriter
+// emits is an array of pre-rendered strings, never a nested object or an array of bare numbers
+// (confirmed by inspection of every write_packet/write_*_json_fields function in this file), so
+// this only needs to handle quoted-string elements.
+std::string render_json_array(const std::string& arr) {
+    std::string inner = arr.size() >= 2 ? arr.substr(1, arr.size() - 2) : std::string();
+    std::vector<std::string> items;
+    size_t i = 0;
+    while (i < inner.size()) {
+        while (i < inner.size() && (inner[i] == ' ' || inner[i] == ',')) ++i;
+        if (i >= inner.size()) break;
+        if (inner[i] == '"') {
+            size_t j = i + 1;
+            std::string item;
+            while (j < inner.size() && inner[j] != '"') {
+                if (inner[j] == '\\' && j + 1 < inner.size()) {
+                    item += inner[j];
+                    item += inner[j + 1];
+                    j += 2;
+                } else {
+                    item += inner[j];
+                    ++j;
+                }
+            }
+            items.push_back(json_unescape_inner(item));
+            i = j + 1;
+        } else {
+            size_t start = i;
+            while (i < inner.size() && inner[i] != ',') ++i;
+            items.push_back(inner.substr(start, i - start));
+        }
+    }
+    std::ostringstream joined;
+    for (size_t k = 0; k < items.size(); ++k) {
+        if (k != 0) joined << ",";
+        joined << items[k];
+    }
+    return joined.str();
+}
+
+// Converts one field's raw JSON-literal text (everything after `"key": ` on its own line, trailing
+// comma already stripped by the caller) into the plain-text form -T fields prints: `null` becomes
+// an empty column (a JSON `null` and an entirely absent field render identically -- see
+// FieldsWriter's own class comment), a quoted string is unescaped and unquoted, an array is
+// rendered by render_json_array above, and anything else (a bare number, `true`/`false`) is passed
+// through verbatim, since it's already exactly the text a tab-separated column should show.
+std::string render_field_value(const std::string& raw) {
+    if (raw.empty() || raw == "null") return "";
+    if (raw.size() >= 2 && raw.front() == '"' && raw.back() == '"') {
+        return json_unescape_inner(raw.substr(1, raw.size() - 2));
+    }
+    if (raw.size() >= 2 && raw.front() == '[' && raw.back() == ']') {
+        return render_json_array(raw);
+    }
+    return raw;
+}
+
+// Parses the flat `{ "key": value, ... }` object JsonWriter::write_packet produces for exactly one
+// packet (see JsonWriter's own file header -- every field lives on its own line, never nested, a
+// deliberate simplicity choice this parser depends on) into a key -> plain-text-value map. Any line
+// that isn't `whitespace "key": ...` (the opening `  {`, a closing `  }`, or a continuation this
+// codebase's JsonWriter never actually produces) is simply skipped, not an error.
+std::map<std::string, std::string> parse_flat_json_object(const std::string& text) {
+    std::map<std::string, std::string> out;
+    std::istringstream iss(text);
+    std::string line;
+    while (std::getline(iss, line)) {
+        size_t p = line.find_first_not_of(" \t");
+        if (p == std::string::npos || line[p] != '"') continue;
+        size_t key_start = p + 1;
+        size_t key_end = line.find('"', key_start);
+        if (key_end == std::string::npos) continue;
+        std::string key = line.substr(key_start, key_end - key_start);
+        size_t colon = line.find(':', key_end);
+        if (colon == std::string::npos) continue;
+        size_t val_start = colon + 1;
+        while (val_start < line.size() && line[val_start] == ' ') ++val_start;
+        size_t last = line.find_last_not_of(" \t\r");
+        if (last == std::string::npos || last < val_start) {
+            out[key] = "";
+            continue;
+        }
+        size_t val_end = (line[last] == ',') ? last : last + 1;
+        if (val_end < val_start) val_end = val_start;
+        out[key] = render_field_value(line.substr(val_start, val_end - val_start));
+    }
+    return out;
+}
+
+}  // namespace
+
+void FieldsWriter::write_packet(const DecodedPacket& packet) {
+    // A fresh JsonWriter per packet, not a reused member -- JsonWriter::write_packet prefixes
+    // every call after its first with ",\n" (see its own definition above), state this class has
+    // no use for and would otherwise have to explicitly reset; constructing one per packet is
+    // cheap and sidesteps that state entirely.
+    std::ostringstream capture;
+    JsonWriter one_shot(capture, resolver_, show_vlan_, time_format_, time_offset_, show_direction_);
+    one_shot.write_packet(packet);
+    std::map<std::string, std::string> values = parse_flat_json_object(capture.str());
+
+    for (size_t i = 0; i < fields_.size(); ++i) {
+        if (i != 0) out_ << "\t";
+        auto it = values.find(fields_[i]);
+        out_ << (it != values.end() ? it->second : "");
+    }
+    out_ << "\n";
 }
 
 void StatsWriter::write_packet(const DecodedPacket& p) {

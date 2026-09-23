@@ -48,6 +48,7 @@ configure_file(
 add_library(conduitscope_core STATIC
   src/byteio.cpp
   src/pcap_reader.cpp
+  src/pcap_writer.cpp
   src/link_layer.cpp
   src/ipv4.cpp
   src/tcp.cpp
@@ -1545,11 +1546,11 @@ set_tests_properties(sv_truncated_header_falls_back_to_non_ip PROPERTIES
 # A non-IP packet's src_mac/dst_mac are now shown directly on its own headline (see output.cpp's
 # endpoint()) rather than needing a separate "eth ..." line below it -- write_packet() suppresses
 # that line outright for a packet with no IP layer, since it would just repeat the same pair (see
-# write_packet's own comment); -e/--ether is kept on this test only to prove that suppression, not
+# write_packet's own comment); --ether is kept on this test only to prove that suppression, not
 # because it still adds anything here. Two consecutive #10/#11 non-ip lines, each carrying its own
 # MAC pair inline, is what pins that down.
 add_test(NAME sv_wrong_outer_tag_falls_back_to_non_ip
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_sv.pcap" -e --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_sv.pcap" --ether --format text)
 set_tests_properties(sv_wrong_outer_tag_falls_back_to_non_ip PROPERTIES
   PASS_REGULAR_EXPRESSION "#10  .*non-ip\\][^\n]*\n#11  .*00:0c:29:11:22:33 -> 00:0c:29:aa:bb:cc[^\n]*non-ip\\]"
   FAIL_REGULAR_EXPRESSION "\n *eth ")
@@ -1903,10 +1904,10 @@ set_tests_properties(stp_spb_version4_named_only_not_decoded PROPERTIES
 # structurally parse as STP (bad Protocol Identifier; unrecognized BPDU Type) -- falls back to
 # reporting the frame as a generic, unrecognized LLC frame rather than guessing.
 # Same "no separate eth line for a non-IP packet" behavior sv_wrong_outer_tag_falls_back_to_non_ip
-# above pins down -- -e is kept here only to prove the suppression, not because it still adds an
+# above pins down -- --ether is kept here only to prove the suppression, not because it still adds an
 # "eth ..." line between these two.
 add_test(NAME stp_bad_protocol_identifier_and_bad_bpdu_type_fall_back_to_llc
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_stp.pcap" -e --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_stp.pcap" --ether --format text)
 set_tests_properties(stp_bad_protocol_identifier_and_bad_bpdu_type_fall_back_to_llc PROPERTIES
   PASS_REGULAR_EXPRESSION "#21  .*00:0c:29:11:22:33 -> 01:80:c2:00:00:00[^\n]*\\[non-ip\\]  IEEE 802.3 LLC frame, DSAP=0x42 SSAP=0x42 Control=0x3 \\(length=38\\)\n#22  .*\\[non-ip\\]  IEEE 802.3 LLC frame, DSAP=0x42 SSAP=0x42 Control=0x3 \\(length=38\\)"
   FAIL_REGULAR_EXPRESSION "#21[^\n]*\n *eth ")
@@ -2910,7 +2911,7 @@ set_tests_properties(hartip_checksum_mismatch_noted_text PROPERTIES
   PASS_REGULAR_EXPRESSION "\\[hartip\\]  Response Pass Through ACK command=1 \\(Read Primary Variable\\) response-code=0 \\(Success\\) \\[pv-units=1 \\+1 more\\]\n *note: longitudinal \\(XOR\\) checksum mismatch: calculated 0xD5, frame declares 0x2A")
 
 add_test(NAME hartip_checksum_valid_does_not_note_anything_text
-  COMMAND conduitscope decode --format text -e --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip_checksum.pcap")
+  COMMAND conduitscope decode --format text --ether --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip_checksum.pcap")
 set_tests_properties(hartip_checksum_valid_does_not_note_anything_text PROPERTIES
   PASS_REGULAR_EXPRESSION "\\[hartip\\]  Request Pass Through STX command=1 \\(Read Primary Variable\\)\n *eth "
   FAIL_REGULAR_EXPRESSION "Request Pass Through STX command=1[^\n]*\n *note:")
@@ -6690,18 +6691,22 @@ set_tests_properties(pcapng_simple_packet_block_decodes PROPERTIES
 # --hosts/--services fixtures.
 #
 # In TEXT output specifically, the entire "eth <src> -> <dst>" line is itself gated behind
-# -e/--ether (off by default, mirrors tcpdump's own -e -- see output.hpp/output.cpp's show_mac_).
-# --mac-vendor implies -e (cli_main.cpp: there'd be nothing to attach a vendor name to otherwise), so
-# --mac-vendor alone still shows the full "eth <mac> (<vendor>) -> <mac> (<vendor>)" line. -e alone shows
-# the MAC pair with no vendor annotation. JSON/CSV are NOT gated by -e at all -- src_mac/dst_mac
-# stay unconditional base fields there (like src_ip/dst_ip) regardless of -e; --mac-vendor only ever
-# controls their *_mac_vendor annotation fields, in every format.
+# --ether (off by default, mirrors tcpdump's own -e -- see output.hpp/output.cpp's show_mac_;
+# --ether has no short alias of its own in this codebase -- -e is reserved for -T fields' own
+# --field, tshark's own convention -- see the "-T fields / -e / -f / -c / -a / -w / -x" section
+# further down).
+# --mac-vendor implies --ether (cli_main.cpp: there'd be nothing to attach a vendor name to
+# otherwise), so --mac-vendor alone still shows the full "eth <mac> (<vendor>) -> <mac> (<vendor>)"
+# line. --ether alone shows the MAC pair with no vendor annotation. JSON/CSV are NOT gated by
+# --ether at all -- src_mac/dst_mac stay unconditional base fields there (like src_ip/dst_ip)
+# regardless of --ether; --mac-vendor only ever controls their *_mac_vendor annotation fields, in
+# every format.
 # ---------------------------------------------------------------------------------------------
 
 set(RESOLVER_HOSTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/hosts_sample.txt")
 set(RESOLVER_SERVICES "${CMAKE_CURRENT_SOURCE_DIR}/tests/services_sample.txt")
 
-# --- -e/--ether (the eth line itself), off by default, text-output only ---------------------
+# --- --ether (the eth line itself), off by default, text-output only ---------------------
 
 add_test(NAME resolver_mac_and_vendor_hidden_by_default_text
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --format text)
@@ -6709,19 +6714,12 @@ set_tests_properties(resolver_mac_and_vendor_hidden_by_default_text PROPERTIES
   FAIL_REGULAR_EXPRESSION "eth 00:0c:29|VMware")
 
 add_test(NAME resolver_ether_flag_shows_mac_without_vendor_text
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" -e --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --ether --format text)
 set_tests_properties(resolver_ether_flag_shows_mac_without_vendor_text PROPERTIES
   PASS_REGULAR_EXPRESSION "eth 00:0c:29:11:22:33 -> 00:0c:29:aa:bb:cc\n"
   FAIL_REGULAR_EXPRESSION "VMware")
 
-# --ether is the long form of -e; same behavior, just the spelled-out flag name.
-add_test(NAME resolver_ether_long_flag_same_as_e_text
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --ether --format text)
-set_tests_properties(resolver_ether_long_flag_same_as_e_text PROPERTIES
-  PASS_REGULAR_EXPRESSION "eth 00:0c:29:11:22:33 -> 00:0c:29:aa:bb:cc\n"
-  FAIL_REGULAR_EXPRESSION "VMware")
-
-# --- OUI (MAC vendor) vendor annotation, off by default, --mac-vendor opts in (and implies -e) -----
+# --- OUI (MAC vendor) vendor annotation, off by default, --mac-vendor opts in (and implies --ether) -----
 
 add_test(NAME resolver_oui_vendor_hidden_by_default_json
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --format json)
@@ -6734,7 +6732,7 @@ add_test(NAME resolver_oui_flag_shows_vendor_text
 set_tests_properties(resolver_oui_flag_shows_vendor_text PROPERTIES
   PASS_REGULAR_EXPRESSION "eth 00:0c:29:11:22:33 \\(VMware\\) -> 00:0c:29:aa:bb:cc \\(VMware\\)")
 
-# --mac-vendor alone (no explicit -e) must still show the eth line -- --mac-vendor implies -e (cli_main.cpp).
+# --mac-vendor alone (no explicit --ether) must still show the eth line -- --mac-vendor implies --ether (cli_main.cpp).
 add_test(NAME resolver_oui_flag_alone_implies_ether_text
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --mac-vendor --format text)
 set_tests_properties(resolver_oui_flag_alone_implies_ether_text PROPERTIES
@@ -6745,10 +6743,10 @@ add_test(NAME resolver_oui_flag_shows_vendor_json
 set_tests_properties(resolver_oui_flag_shows_vendor_json PROPERTIES
   PASS_REGULAR_EXPRESSION "\"src_mac\": \"00:0c:29:11:22:33\",\n *\"dst_mac\": \"00:0c:29:aa:bb:cc\",\n *\"src_mac_vendor\": \"VMware\",\n *\"dst_mac_vendor\": \"VMware\",")
 
-# src_mac/dst_mac themselves (the base gap-fix, independent of OUI resolution and of -e/--ether)
+# src_mac/dst_mac themselves (the base gap-fix, independent of OUI resolution and of --ether)
 # are always present for an Ethernet-linktype capture in JSON/CSV, even with OUI resolution left
 # at its off-by-default posture -- this is the actual base value, not an annotation, so OUI
-# resolution only ever adds a vendor name, never gates the MAC itself. -e/--ether only affects
+# resolution only ever adds a vendor name, never gates the MAC itself. --ether only affects
 # TEXT output (see this section's own header comment above) -- CSV keeps showing it regardless.
 add_test(NAME resolver_base_src_dst_mac_always_present_in_csv_regardless_of_oui_or_ether
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --format csv)
@@ -6876,7 +6874,7 @@ set_tests_properties(resolver_bad_services_path_rejected PROPERTIES
 # --------------------------------------------------------------------------------------------
 
 add_test(NAME resolver_mac_shown_for_plain_ip_protocol_not_just_raw_ethernet
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enip.pcap" -e --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enip.pcap" --ether --format text)
 set_tests_properties(resolver_mac_shown_for_plain_ip_protocol_not_just_raw_ethernet PROPERTIES
   PASS_REGULAR_EXPRESSION "\\[enip\\].*\n *eth 00:0c:29:11:22:33 -> 00:0c:29:aa:bb:cc")
 
@@ -6889,11 +6887,11 @@ set_tests_properties(resolver_mac_shown_for_plain_ip_protocol_not_just_raw_ether
 # untagged flow, so it exercises both "tagged" and "untagged" in the same capture.
 # ---------------------------------------------------------------------------------------------
 
-# VLAN display is independent of -e/--ether (show_mac_) -- see output.hpp/output.cpp's own
+# VLAN display is independent of --ether (show_mac_) -- see output.hpp/output.cpp's own
 # comments -- so a VLAN-tagged packet still gets its own "vlan <id>" line by default. Every packet
 # in this fixture is non-IP (PROFINET RT/GOOSE/SV/EtherCAT), so its src_mac/dst_mac already appear
 # directly on the headline itself (output.cpp's endpoint() -- see that function's own comment) with
-# no -e/--mac-vendor needed at all; there is deliberately no separate "eth <mac> -> <mac>" prefix line for
+# no --ether/--mac-vendor needed at all; there is deliberately no separate "eth <mac> -> <mac>" prefix line for
 # a non-IP packet any more (write_packet() suppresses it there specifically, since it would just
 # repeat what the headline already shows), so this fixture no longer has one to test.
 add_test(NAME vlan_id_shown_by_default_text
@@ -6902,18 +6900,18 @@ set_tests_properties(vlan_id_shown_by_default_text PROPERTIES
   PASS_REGULAR_EXPRESSION "00:0c:29:11:22:33 -> 00:0c:29:aa:bb:cc[^\n]*\\[profinet\\][^\n]*\n *vlan 100"
   FAIL_REGULAR_EXPRESSION "\n *eth ")
 
-# -e is now a no-op for this fixture (every packet is non-IP, so show_mac_'s own separate line
+# --ether is now a no-op for this fixture (every packet is non-IP, so show_mac_'s own separate line
 # never applies here regardless -- see this section's own header comment) -- kept as an explicit
-# regression check that -e doesn't reintroduce a combined "eth ... vlan ..." line for a non-IP
+# regression check that --ether doesn't reintroduce a combined "eth ... vlan ..." line for a non-IP
 # packet the way it did before this behavior changed.
 add_test(NAME vlan_id_stays_on_own_line_with_ether_for_non_ip_text
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_vlan_zones.pcap" -e --format text)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_vlan_zones.pcap" --ether --format text)
 set_tests_properties(vlan_id_stays_on_own_line_with_ether_for_non_ip_text PROPERTIES
   PASS_REGULAR_EXPRESSION "00:0c:29:11:22:33 -> 00:0c:29:aa:bb:cc[^\n]*\\[profinet\\][^\n]*\n *vlan 100"
   FAIL_REGULAR_EXPRESSION "eth 00:0c:29")
 
 # The untagged flow (mac pair 00:0c:29:cc:55:66 -> 00:0c:29:dd:77:88) must never get a "vlan ..."
-# suffix at all -- has_vlan_tag is false, not vlan_id == 0. No -e needed any more: the untagged
+# suffix at all -- has_vlan_tag is false, not vlan_id == 0. No --ether needed any more: the untagged
 # packet's own MAC pair is already on its headline by default (see this section's own header
 # comment), same as every other packet in this fixture.
 add_test(NAME vlan_id_omitted_for_untagged_packet_text
@@ -6922,7 +6920,7 @@ set_tests_properties(vlan_id_omitted_for_untagged_packet_text PROPERTIES
   PASS_REGULAR_EXPRESSION "00:0c:29:cc:55:66 -> 00:0c:29:dd:77:88[^\n]*\\[ethercat\\]"
   FAIL_REGULAR_EXPRESSION "00:0c:29:cc:55:66 -> 00:0c:29:dd:77:88[^\n]*\n *vlan")
 
-# The MAC pair fallback itself needs neither -e/--ether nor --mac-vendor -- it's unconditional for any
+# The MAC pair fallback itself needs neither --ether nor --mac-vendor -- it's unconditional for any
 # non-IP packet (see endpoint()'s own comment) -- but the vendor-name annotation next to it still
 # needs --mac-vendor explicitly (Resolver::oui_vendor() self-gates on that flag). Confirms neither flag is
 # now accidentally implied by MAC display working out of the box.
@@ -6952,15 +6950,15 @@ set_tests_properties(vlan_id_shown_by_default_csv PROPERTIES
   PASS_REGULAR_EXPRESSION "profinet,\"Cyclic RT IO data \\(RT_CLASS_1, unicast\\): 8 byte\\(s\\) IO data, cycle_counter=4660 data_status=\\[Primary,Valid,Run,Ok\\] transfer_status=OK\",,100")
 
 # --no-vlan suppresses the "  vlan 100" suffix; the headline's own MAC pair (unconditional for a
-# non-IP packet, see this section's own header comment) is unaffected either way. -e is included
+# non-IP packet, see this section's own header comment) is unaffected either way. --ether is included
 # here purely as a regression check that it still doesn't reintroduce anything.
 add_test(NAME no_vlan_suppresses_display_text
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_vlan_zones.pcap" --format text --no-vlan -e)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_vlan_zones.pcap" --format text --no-vlan --ether)
 set_tests_properties(no_vlan_suppresses_display_text PROPERTIES
   PASS_REGULAR_EXPRESSION "00:0c:29:11:22:33 -> 00:0c:29:aa:bb:cc[^\n]*\\[profinet\\]"
   FAIL_REGULAR_EXPRESSION "vlan 100|eth 00:0c:29")
 
-# Same, without -e: the whole vlan line disappears, the MAC pair stays exactly as it was.
+# Same, without --ether: the whole vlan line disappears, the MAC pair stays exactly as it was.
 add_test(NAME no_vlan_and_no_ether_suppresses_entire_eth_line_text
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_vlan_zones.pcap" --format text --no-vlan)
 set_tests_properties(no_vlan_and_no_ether_suppresses_entire_eth_line_text PROPERTIES
@@ -6987,7 +6985,7 @@ set_tests_properties(no_vlan_suppresses_display_csv PROPERTIES
   FAIL_REGULAR_EXPRESSION "transfer_status=OK\",,100")
 
 # --mac-vendor and --no-vlan are independent toggles -- suppressing VLAN display must not affect the
-# vendor annotation either way. --mac-vendor alone (no -e) is enough here: the vendor name attaches
+# vendor annotation either way. --mac-vendor alone (no --ether) is enough here: the vendor name attaches
 # directly to the headline's own MAC pair for a non-IP packet like this one, no separate eth line
 # involved any more -- see this section's own header comment.
 add_test(NAME no_vlan_does_not_affect_oui
@@ -7959,7 +7957,7 @@ set_tests_properties(remote_access_protocol_filter_isolates_family PROPERTIES
   FAIL_REGULAR_EXPRESSION "\\[tcp\\]|\\[udp\\]|\\[cotp\\]")
 
 add_test(NAME remote_access_extra_port_widens_expected_range
-  COMMAND conduitscope decode --format text -e --remote-access-port 59001 --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_remote_access.pcap")
+  COMMAND conduitscope decode --format text --ether --remote-access-port 59001 --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_remote_access.pcap")
 set_tests_properties(remote_access_extra_port_widens_expected_range PROPERTIES
   PASS_REGULAR_EXPRESSION "\\[vnc\\]  VNC \\(RFB\\) server protocol-version banner \"RFB 003.889\"[^\n]*\n *eth "
   FAIL_REGULAR_EXPRESSION "RFB 003.889\"[^\n]*\n *note: seen on TCP port")
@@ -9053,6 +9051,16 @@ else()
   set_tests_properties(bpf_filter_inventory_read_narrows_assets PROPERTIES
     PASS_REGULAR_EXPRESSION "(0 asset\\(s\\) observed|Npcap RUNTIME)")
 
+  # -f is `decode`'s own short alias for --filter (mirrors tshark's own -f) -- same
+  # "src host narrows to just packet #1" behavior bpf_filter_read_src_host_narrows_correctly
+  # already proves for the long form, now proven for -f too; same runtime-missing alternation
+  # every other filter test in this block needs, for the same reason.
+  add_test(NAME bpf_filter_dash_f_alias_narrows_correctly
+    COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" -f "src host 192.168.1.50" --format text)
+  set_tests_properties(bpf_filter_dash_f_alias_narrows_correctly PROPERTIES
+    PASS_REGULAR_EXPRESSION "(#1 |Npcap RUNTIME)"
+    FAIL_REGULAR_EXPRESSION "#2 |#3 ")
+
   if(UNIX)
     # None of these depend on any traffic actually existing on "lo" during the run (--duration
     # alone must be enough to stop cleanly), so they don't need a traffic generator and stay
@@ -9671,3 +9679,119 @@ add_test(NAME slow_protocols_subtype_name_json_structural
   COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_slow_protocols.pcap")
 set_tests_properties(slow_protocols_subtype_name_json_structural PROPERTIES
   PASS_REGULAR_EXPRESSION "\"slow_protocols_subtype_name\": \"LACP\".*\"slow_protocols_subtype_name\": \"Marker Protocol\".*\"slow_protocols_subtype_name\": \"802\\.3 OAM \\(EFM\\)\"")
+
+# -------------------------------------------------------------------------------------------
+# tshark-style CLI: -T fields/-e (field selection), -f/-c/-a (short aliases for --filter/
+# --max-packets/--duration), -w (raw pcap capture-to-file), -x (hex+ASCII dump). See
+# cli_main.cpp's own run_decode comment for the design rationale (mirrors tshark's own flags
+# throughout) and output.hpp/output.cpp for FieldsWriter/write_hex_ascii_dump, pcap_writer.hpp/
+# pcap_writer.cpp for PcapWriter. -f/--filter's own dedicated alias test
+# (bpf_filter_dash_f_alias_narrows_correctly) lives up in the CONDUITSCOPE_HAVE_PCAP-guarded
+# block above, alongside every other --filter test, for the same "Npcap RUNTIME on Windows CI"
+# reason; everything else here is offline-read-only and needs no such guard.
+# -------------------------------------------------------------------------------------------
+
+# -T fields -e <field> (repeatable): prints exactly the requested fields, tab-separated, one
+# line per packet, in the order given -- not the field's own position in --format json's output.
+# sample_modbus.pcap's own dst_port varies packet to packet (#1 is the HMI's request to the
+# PLC's port 502; #2/#3 are the PLC's responses back to the HMI's own ephemeral port 51000) --
+# proves real per-packet values are being pulled, not a fixed/cached one.
+add_test(NAME fields_basic_selection_tab_separated
+  COMMAND conduitscope decode --format fields -e index -e protocol -e dst_port --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap")
+set_tests_properties(fields_basic_selection_tab_separated PROPERTIES
+  PASS_REGULAR_EXPRESSION "^1\tmodbus\t502\n2\tmodbus\t51000\n3\tmodbus\t51000\n$")
+
+# -T (short form of --format) accepts "fields" as a value too, exactly like --format does --
+# same output as the long-form test above, just spelled the tshark way.
+add_test(NAME fields_dash_T_short_form_accepts_fields_value
+  COMMAND conduitscope decode -T fields -e protocol -e dst_port --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap")
+set_tests_properties(fields_dash_T_short_form_accepts_fields_value PROPERTIES
+  PASS_REGULAR_EXPRESSION "^modbus\t502\nmodbus\t51000\nmodbus\t51000\n$")
+
+# A field name this packet's own JSON never populates (either because it doesn't exist at all,
+# or -- like src_ip on a raw ARP frame, which has no IP layer -- it's a real JSON key but a
+# `null` value for this particular protocol) prints as an empty column, not an error and not the
+# literal text "null" -- mirrors tshark's own -e behavior for an absent field.
+add_test(NAME fields_missing_field_prints_empty_column
+  COMMAND conduitscope decode --format fields -e protocol -e totally_bogus_field_xyz -e src_ip --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_arp.pcap")
+set_tests_properties(fields_missing_field_prints_empty_column PROPERTIES
+  PASS_REGULAR_EXPRESSION "^arp\t\t\n"
+  FAIL_REGULAR_EXPRESSION "null")
+
+# --format fields with no -e/--field at all has nothing to print -- caught at CLI-parse-adjacent
+# validation time (run_decode, before the packet source even opens), same "fail fast on bad
+# setup" posture as an invalid --time-offset -- not a silent empty run.
+add_test(NAME fields_format_without_any_field_is_an_error
+  COMMAND conduitscope decode --format fields --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap")
+set_tests_properties(fields_format_without_any_field_is_an_error PROPERTIES
+  PASS_REGULAR_EXPRESSION "error: --format fields \\(-T fields\\) needs at least one -e/--field")
+
+# -e/--field given without --format fields is very likely a mistake (the field selection has
+# nowhere to go under text/json/csv), so it's flagged with an explanatory note rather than
+# silently ignored -- but the run itself still proceeds normally (exit 0, ordinary text output),
+# since -e isn't inherently invalid outside -T fields, just a no-op there.
+add_test(NAME fields_dash_e_without_fields_format_notes_and_continues
+  COMMAND conduitscope decode -e protocol --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap")
+set_tests_properties(fields_dash_e_without_fields_format_notes_and_continues PROPERTIES
+  PASS_REGULAR_EXPRESSION "note: -e/--field only applies with --format fields \\(-T fields\\); ignoring.*\\[modbus\\]")
+
+# -c is `decode`'s own short alias for --max-packets (mirrors tshark's own -c): stops after
+# exactly 2 of sample_arp.pcap's 6 packets.
+add_test(NAME dash_c_alias_for_max_packets_stops_early
+  COMMAND conduitscope decode -c 2 --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_arp.pcap")
+set_tests_properties(dash_c_alias_for_max_packets_stops_early PROPERTIES
+  PASS_REGULAR_EXPRESSION "#1 .*\n#2 "
+  FAIL_REGULAR_EXPRESSION "#3 ")
+
+# -a is `decode`'s own short alias for --duration (mirrors tshark's own -a autostop, specialized
+# to duration only here) -- --duration only ever bounds a LIVE capture (-i), so on an offline
+# read (-r) it's simply accepted and has no effect; this just confirms -a parses cleanly as an
+# alias rather than erroring or being mistaken for a positional/other flag.
+add_test(NAME dash_a_alias_parses_cleanly_on_offline_read
+  COMMAND conduitscope decode -a 5 --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_arp.pcap")
+set_tests_properties(dash_a_alias_parses_cleanly_on_offline_read PROPERTIES
+  PASS_REGULAR_EXPRESSION "#1 .*#6 "
+  FAIL_REGULAR_EXPRESSION "error:")
+
+# -x prints a hex+ASCII dump of each packet's raw bytes below its normal decode line -- offset/
+# hex/ASCII columns, 16 bytes per line, matching write_hex_ascii_dump's own layout (output.cpp).
+# sample_arp.pcap's own packet #1 is a 42-byte ARP request broadcast to ff:ff:ff:ff:ff:ff --
+# the dump's first line must show that destination MAC's raw bytes and the printable "." fallback
+# for non-ASCII bytes, and there must be a second (0010) and a short, space-padded third (0020,
+# only 10 bytes) line for a 42-byte frame.
+add_test(NAME hex_dump_dash_x_shows_offset_hex_and_ascii_columns
+  COMMAND conduitscope decode -c 1 -x --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_arp.pcap")
+set_tests_properties(hex_dump_dash_x_shows_offset_hex_and_ascii_columns PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[arp\\][^\n]*\n0000  ff ff ff ff ff ff 00 0c  29 11 22 33 08 06 00 01[^\n]*\n0010 [^\n]*\n0020  00 00 00 00 00 00 c0 a8 +01 0a +")
+
+# -x is ignored (no dump printed) under --format json/csv/fields and under --stats -- none of
+# those have a per-packet text line to attach a hex dump below, mirroring tshark's own -x being a
+# text/pdml-style reading aid rather than a structured field.
+add_test(NAME hex_dump_dash_x_ignored_under_json_format
+  COMMAND conduitscope decode -c 1 -x --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_arp.pcap")
+set_tests_properties(hex_dump_dash_x_ignored_under_json_format PROPERTIES
+  FAIL_REGULAR_EXPRESSION "^0000  ")
+
+# -w writes every packet reaching this run to a new classic-pcap file, raw and unmodified --
+# proven end to end by round-tripping: write sample_arp.pcap's own 6 packets out through -w, then
+# read the written file straight back in and diff its --format json output against the
+# original's own --format json output. Byte-identical JSON (same src_mac/dst_mac/summary/etc.
+# for all 6 packets, in the same order) is only possible if -w genuinely wrote real, complete,
+# correctly-ordered packet records rather than truncating, reordering, or corrupting anything --
+# see pcap_writer.cpp's own file header for the classic-pcap format itself. Uses `diff` (not a
+# PASS_REGULAR_EXPRESSION, which can't compare two command outputs against each other) via the
+# same `bash -c` two-command pattern inventory_iec104_policy_out_round_trips_compliant already
+# established elsewhere in this file for an analogous write-then-reread proof.
+add_test(NAME pcap_write_dash_w_round_trips_byte_identical_json
+  COMMAND bash -c "'$<TARGET_FILE:conduitscope>' decode --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_arp.pcap' --write '${CMAKE_CURRENT_BINARY_DIR}/dash_w_roundtrip.pcap' --output /dev/null && diff <('$<TARGET_FILE:conduitscope>' decode --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_arp.pcap' --format json) <('$<TARGET_FILE:conduitscope>' decode --read '${CMAKE_CURRENT_BINARY_DIR}/dash_w_roundtrip.pcap' --format json)")
+set_tests_properties(pcap_write_dash_w_round_trips_byte_identical_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "^$")
+
+# `info` (its own dedicated summary command, distinct from `decode --stats`) reads the written
+# file's own pcap global header back -- confirms -w wrote a genuinely well-formed 24-byte classic
+# pcap header (correct magic/version, and the right link type/packet count), not just something
+# `conduitscope decode` alone happens to tolerate.
+add_test(NAME pcap_write_dash_w_produces_valid_pcap_header
+  COMMAND bash -c "'$<TARGET_FILE:conduitscope>' decode --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_arp.pcap' -w '${CMAKE_CURRENT_BINARY_DIR}/dash_w_header_check.pcap' --output /dev/null && '$<TARGET_FILE:conduitscope>' info --read '${CMAKE_CURRENT_BINARY_DIR}/dash_w_header_check.pcap'")
+set_tests_properties(pcap_write_dash_w_produces_valid_pcap_header PROPERTIES
+  PASS_REGULAR_EXPRESSION "pcap version: +2\\.4\nlink type: +Ethernet\nsnaplen: .*\npackets: +6")

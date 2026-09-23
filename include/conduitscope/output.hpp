@@ -6,8 +6,11 @@
 
 #include <map>
 #include <ostream>
+#include <sstream>
 #include <string>
+#include <vector>
 
+#include "conduitscope/byteio.hpp"
 #include "conduitscope/decoder.hpp"
 #include "conduitscope/resolver.hpp"
 #include "conduitscope/time_format.hpp"
@@ -125,6 +128,34 @@ private:
     const Resolver& resolver_;
     bool show_vlan_;
     TimeFormatter time_;
+    bool show_direction_;
+};
+
+// `decode -T fields -e <field>` (repeatable), mirroring tshark's own `-T fields`/`-e` -- see
+// output.cpp's own FieldsWriter::write_packet comment for exactly how this is implemented (it
+// reuses JsonWriter's own already-correct, already-comprehensive per-protocol field rendering
+// rather than re-deriving field names/values a second time -- the only way this stays in sync with
+// every one of this codebase's ~90 protocols' own JSON fields without hand-maintaining a second,
+// parallel field list). One tab-separated line per packet, fields in the order `-e` was given;
+// a field name JsonWriter never emits for that packet (wrong protocol, disabled by a flag, etc.)
+// renders as an empty column -- the same "empty, not an error" convention tshark's own `-T fields`
+// has for a field absent from a given packet.
+class FieldsWriter : public OutputWriter {
+public:
+    explicit FieldsWriter(std::ostream& out, const Resolver& resolver, std::vector<std::string> fields,
+                           bool show_vlan = true, TimeFormat time_format = TimeFormat::Epoch,
+                           TimeOffset time_offset = TimeOffset{}, bool show_direction = true)
+        : out_(out), resolver_(resolver), fields_(std::move(fields)), show_vlan_(show_vlan),
+          time_format_(time_format), time_offset_(time_offset), show_direction_(show_direction) {}
+    void write_packet(const DecodedPacket& packet) override;
+
+private:
+    std::ostream& out_;
+    const Resolver& resolver_;
+    std::vector<std::string> fields_;
+    bool show_vlan_;
+    TimeFormat time_format_;
+    TimeOffset time_offset_;
     bool show_direction_;
 };
 
@@ -287,5 +318,13 @@ private:
 
 std::string json_escape(const std::string& s);
 std::string csv_escape(const std::string& s);
+
+// `decode -x/--hex` -- a tcpdump/tshark-style hex+ASCII dump of one packet's raw captured bytes:
+// 16 bytes per line, a 4-hex-digit byte offset, each byte as two hex digits (an extra gap after
+// the 8th byte, the same "two visually separated halves" layout every classic hex dump uses), then
+// the same 16 bytes rendered as ASCII (printable 0x20-0x7e verbatim, anything else as '.'). Text
+// output only -- see cli_main.cpp's own run_decode for where this is called from and why it's
+// gated on --format text.
+void write_hex_ascii_dump(std::ostream& out, ByteSpan data);
 
 }  // namespace conduitscope

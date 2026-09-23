@@ -214,15 +214,18 @@ Capture live from this network interface instead of reading a file. Required
 unless \fB\-r\fR is given; mutually exclusive with it. Requires this build to
 have libpcap/Npcap support -- see \fBLIVE CAPTURE\fR.
 .TP
-.B \-\-filter \fIBPF\fR
+.BR \-f ", " \-\-filter " " \fIBPF\fR
 BPF filter (tcpdump syntax). Works with both \fB\-i\fR (applied by libpcap
 at capture time) and \fB\-r\fR (applied per-packet after reading the file,
 same filter syntax either way); either one requires this build to have
-libpcap/Npcap support -- see \fBLIVE CAPTURE\fR.
+libpcap/Npcap support -- see \fBLIVE CAPTURE\fR. \fB\-f\fR mirrors tshark's
+own \fB\-f\fR.
 .TP
-.B \-\-duration \fISECONDS\fR
+.BR \-a ", " \-\-duration " " \fISECONDS\fR
 Stop a live capture (\fB\-i\fR) after this many seconds. Default: 0
 (unlimited -- rely on \fB\-\-max\-packets\fR and/or Ctrl+C instead).
+\fB\-a\fR mirrors tshark's own \fB\-a\fR autostop condition, specialized
+here to duration only.
 .TP
 .B \-\-snaplen \fIBYTES\fR
 Maximum bytes captured per packet with \fB\-i\fR. Default: 65535.
@@ -238,8 +241,14 @@ double-dash long option name glues onto this flag's own short form
 filename value) instead of erroring -- always use the double dash for a
 long option name.
 .TP
-.BR \-f ", " \-\-format " " {text,json,csv}
-Output format. Default: text.
+.BR \-T ", " \-\-format " " {text,json,csv,fields}
+Output format. Default: text. \fBfields\fR mirrors tshark's own \fB\-T
+fields\fR: print only the \fB\-e\fR/\fB\-\-field\fR values requested,
+tab-separated, one line per packet -- see \fB\-e\fR below and
+\fBdocs/USER_GUIDE.md\fR's OUTPUT FORMATS section. \fB\-T\fR is the short
+form's own letter, mirroring tshark's own \fB\-T\fR (this codebase's
+\fB\-f\fR is reserved for \fB\-\-filter\fR instead, tshark's own
+convention).
 .TP
 .BR \-t ", " \-\-time\-format " " {e,epoch,r,relative,d,delta,a,absolute,ad,absolute\-date}
 How to render each packet's timestamp. Default: r (seconds elapsed since
@@ -594,9 +603,10 @@ The generic dtls\-tunnel check is never port\-gated and is unaffected by
 this option. MPLS needs no port option either \-\- it has no port, being
 EtherType\-keyed (0x8847/0x8848) like EAPOL/PPPoE.
 .TP
-.B \-\-max\-packets \fIN\fR
+.BR \-c ", " \-\-max\-packets " " \fIN\fR
 Stop after decoding this many packets. Default: 0 (unlimited). With
-\fB\-i\fR, also bounds a live capture.
+\fB\-i\fR, also bounds a live capture. \fB\-c\fR mirrors tshark's own
+\fB\-c\fR.
 .TP
 .B \-\-max\-reassembly\-bytes \fIN\fR
 Override every cross-segment payload-buffering byte cap at once: the
@@ -647,12 +657,14 @@ Abort on the first malformed packet instead of warning and continuing.
 Disable display of the 802.1Q VLAN ID for a VLAN-tagged packet. On by
 default. See \fBdocs/USER_GUIDE.md\fR's OUTPUT FORMATS section.
 .TP
-.BR \-e ", " \-\-ether
+.B \-\-ether
 For a packet with an IP layer, show its Ethernet header (source/destination
 MAC address, VLAN tag) below the packet line in text output \-\- mirrors
-tcpdump's own \fB\-e\fR. Off by default, to keep output compact; implied by
-\fB\-\-mac\-vendor\fR (there'd be nothing to attach a vendor name to otherwise). A
-no-op for a packet with no IP layer at all (ARP/LLDP/EAPOL/PPPoE/MPLS/
+tcpdump's own \fB\-e\fR (long-form only in this codebase \-\- \fB\-e\fR
+itself is reserved for \fB\-\-field\fR below, tshark's own convention). Off
+by default, to keep output compact; implied by \fB\-\-mac\-vendor\fR
+(there'd be nothing to attach a vendor name to otherwise). A no-op for a
+packet with no IP layer at all (ARP/LLDP/EAPOL/PPPoE/MPLS/
 PROFINET RT/GOOSE/Sampled Values/EtherCAT/STP/etc.), since that packet's
 MAC address pair is already shown directly on its own head line
 unconditionally, regardless of this flag. Only affects text output \-\-
@@ -660,11 +672,35 @@ JSON/CSV always include \fBsrc_mac\fR/\fBdst_mac\fR as base fields, same as
 \fBsrc_ip\fR/\fBdst_ip\fR. See \fBdocs/USER_GUIDE.md\fR's OUTPUT FORMATS
 "Name resolution" subsection.
 .TP
+.BR \-e ", " \-\-field " " \fIFIELD\fR
+With \fB\-T fields\fR, print this field's value (repeatable, printed in the
+order given, tab-separated). Mirrors tshark's own \fB\-e\fR. The field name
+is whatever key appears in this tool's own \fB\-\-format json\fR output for
+that packet (e.g. \fBsrc_ip\fR, \fBdst_port\fR, \fBmodbus_function_code\fR);
+a field absent for a given packet (wrong protocol, or an optional field not
+present) prints as an empty column rather than an error. Requires
+\fB\-T fields\fR \-\- see \fB\-T\fR/\fB\-\-format\fR above.
+.TP
+.BR \-w ", " \-\-write " " \fIFILE\fR
+Write every packet that reaches this run (after \fB\-f\fR/\fB\-\-filter\fR,
+if given) to this path as a new classic-pcap capture file, raw and
+unmodified \-\- mirrors tshark/tcpdump's own \fB\-w\fR. Works identically
+whether packets come from a live capture (\fB\-i\fR) or an offline read
+(\fB\-r\fR); does not change or replace the normal \fB\-\-format\fR output,
+which continues to stdout/\fB\-o\fR exactly as without \fB\-w\fR.
+.TP
+.BR \-x ", " \-\-hex
+Print a hex+ASCII dump of each packet's raw bytes below its normal decode
+line \-\- mirrors tshark's own \fB\-x\fR. Text output only
+(\fB\-T text\fR, the default); ignored under \fB\-T json\fR/\fBcsv\fR/
+\fBfields\fR and under \fB\-\-stats\fR, which have no per-packet line to
+attach it to.
+.TP
 .B \-\-mac\-vendor
 Enable OUI (MAC vendor) resolution against the built-in table (IEEE MA-L/
 MA-M/MA-S registry data via nmap's nmap-mac-prefixes redistribution, see
 \fBtools/generate_oui_table.py\fR). Off by default, to keep output compact.
-Implies \fB\-e\fR/\fB\-\-ether\fR. Named
+Implies \fB\-\-ether\fR. Named
 .B \-\-mac\-vendor
 rather than
 .B \-\-oui
@@ -701,9 +737,9 @@ Check live traffic from this network interface instead of reading a file.
 Required unless \fB\-r\fR is given; mutually exclusive with it. No
 \fB\-\-max\-packets\fR equivalent here -- use \fB\-\-duration\fR and/or Ctrl+C.
 .TP
-.B \-\-filter \fIBPF\fR
+.BR \-f ", " \-\-filter " " \fIBPF\fR
 BPF filter (tcpdump syntax). Works with both \fB\-i\fR and \fB\-r\fR; see
-\fBdecode\fR's own \fB\-\-filter\fR above.
+\fBdecode\fR's own \fB\-f\fR/\fB\-\-filter\fR above.
 .TP
 .B \-\-duration \fISECONDS\fR
 Stop a live capture (\fB\-i\fR) after this many seconds. Default: 0
@@ -726,7 +762,7 @@ Write the report here instead of stdout. Caution: a single-dash typo of a
 double-dash long option name glues onto this flag's own short form instead
 of erroring -- always use the double dash for a long option name.
 .TP
-.BR \-f ", " \-\-format " " {text,json}
+.BR \-T ", " \-\-format " " {text,json}
 Report format. Default: text.
 .TP
 .B \-\-strict
@@ -792,9 +828,9 @@ Input capture file (classic pcap or pcapng, auto-detected). Required unless \fB\
 Build the inventory from live traffic on this network interface instead of
 reading a file. Required unless \fB\-r\fR is given; mutually exclusive with it.
 .TP
-.B \-\-filter \fIBPF\fR
+.BR \-f ", " \-\-filter " " \fIBPF\fR
 BPF filter (tcpdump syntax). Works with both \fB\-i\fR and \fB\-r\fR; see
-\fBdecode\fR's own \fB\-\-filter\fR above.
+\fBdecode\fR's own \fB\-f\fR/\fB\-\-filter\fR above.
 .TP
 .B \-\-duration \fISECONDS\fR
 Stop a live capture (\fB\-i\fR) after this many seconds. Default: 0
@@ -811,7 +847,7 @@ Write the report here instead of stdout. Caution: a single-dash typo of a
 double-dash long option name glues onto this flag's own short form instead
 of erroring -- always use the double dash for a long option name.
 .TP
-.BR \-f ", " \-\-format " " {text,json}
+.BR \-T ", " \-\-format " " {text,json}
 Report format. Default: text.
 .TP
 .B \-\-strict
