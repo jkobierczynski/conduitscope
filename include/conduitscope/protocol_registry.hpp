@@ -3,16 +3,26 @@
 // onto the ProtocolDecoder interface (protocol_decoder.hpp), one std::vector per decoder.cpp
 // dispatch cascade (EtherType / IP-protocol-number / TCP-port-independent / UDP-port).
 //
-// THIS IS DATA, NOT CONTROL FLOW, AND IT IS NOT WHAT DRIVES DISPATCH ORDER DURING THE PILOT. Each
-// migrated protocol's actual decoder.cpp call site still sits at its own exact former textual
-// position (see protocol_decoder.hpp's "COEXISTENCE RULE"); these vectors exist purely as the
-// audit trail a fully-registry-driven dispatch would eventually read from, kept accurate and
-// ordered from day one so that transition -- if it ever happens for a whole cascade -- is a
-// mechanical "iterate this vector instead of the hand-written if-chain" change, not a rediscovery
-// of what order 44 protocols need to run in. Read docs/DEVELOPMENT.md's PROTOCOL DETECTION section
-// before reordering anything here; every entry's ordering rationale is commented at its own
-// decoder.cpp call site (the actual source of truth while dispatch stays call-site-driven) and,
-// for a genuinely new addition like TwinCAT, restated here too.
+// ethertype_registry() (the GateKind::EtherType cascade) now ACTUALLY DRIVES DISPATCH ORDER:
+// decoder.cpp's own EtherType call site loops over it directly, trying decode() on the first
+// entry whose ethertype() matches the frame's (and whose --protocol filter allows it) -- see that
+// call site's own comment for why this is safe (every EtherType in this cascade is IANA/IEEE-
+// exclusive to its own protocol, so entry order only ever matters for STP, which has no
+// ethertype() at all and stays its own explicit block outside the loop). Every OTHER vector below
+// (ip_protocol_registry(), tcp_port_independent_registry(), udp_port_registry(),
+// udp_port_independent_registry(), cotp_payload_registry()) remains exactly what this file's name
+// always meant: DATA, NOT CONTROL FLOW, NOT (yet) WHAT DRIVES DISPATCH ORDER. Each of those still-
+// audit-trail cascades' migrated protocols keep their actual decoder.cpp call sites at their own
+// exact former textual position (see protocol_decoder.hpp's "COEXISTENCE RULE"); those vectors
+// exist purely as the audit trail a fully-registry-driven dispatch would eventually read from,
+// kept accurate and ordered from day one so that transition -- one cascade at a time, EtherType
+// being the first -- is a mechanical "iterate this vector instead of the hand-written if-chain"
+// change, not a rediscovery of what order dozens of protocols need to run in. Read
+// docs/DEVELOPMENT.md's PROTOCOL DETECTION section before reordering anything here; every entry's
+// ordering rationale is commented at its own decoder.cpp call site (the source of truth for every
+// cascade, loop-driven or not -- for EtherType the loop reads this vector, so this vector's own
+// order is now part of that source of truth too, not merely a mirror of it) and, for a genuinely
+// new addition like TwinCAT, restated here too.
 #pragma once
 
 #include <vector>
@@ -21,17 +31,20 @@
 
 namespace conduitscope {
 
-// Migrated EtherType-gated protocols, in the order their decoder.cpp call sites run. Fully
-// populated as of migration batch 3 -- the only one of the four cascades to reach that state so
-// far: PROFINET RT, GOOSE (Stage 3 of the pilot), SV (GOOSE's own direct sibling, see sv.hpp's
-// file header comment), EtherCAT, EAPOL, PPPoE (two EtherTypes, one id(), see pppoe.hpp), MPLS
-// (likewise two EtherTypes, one id(), see mpls.hpp), STP (no EtherType of its own at all -- LLC-
-// framed, see stp.hpp's own comment on its ProtocolDecoder wrapper). Every protocol here migrated
-// in migration batch 3 except GOOSE itself (the pilot). ARP was added to this vector afterward,
-// NOT as part of migration batch 3 or any other migration -- it is a brand-new protocol built
-// directly on ProtocolDecoder from inception (see arp.hpp), the same "new addition, not a
-// migration" posture TwinCAT/MELSEC/FINS established for their own cascades. LLDP was added right
-// after ARP, same posture (see lldp.hpp).
+// Migrated EtherType-gated protocols. THIS VECTOR NOW DRIVES decoder.cpp's ACTUAL DISPATCH ORDER
+// (see this file's own header comment above) -- decoder.cpp's EtherType call site loops over it
+// directly rather than hand-testing each protocol's ethertype() in its own if-block. Real order:
+// PROFINET RT, GOOSE (Stage 3 of the pilot), SV (GOOSE's own direct sibling, see sv.hpp's file
+// header comment), EtherCAT, EAPOL, PPPoE (two EtherTypes, one id(), see pppoe.hpp), MPLS
+// (likewise two EtherTypes, one id(), see mpls.hpp), ARP, LLDP, Slow Protocols, STP (no EtherType
+// of its own at all -- LLC-framed, see stp.hpp's own comment on its ProtocolDecoder wrapper; it
+// can never match the loop regardless of position, since its ethertype() is nullopt, so it's
+// listed last here purely to keep this vector's own order equal to decoder.cpp's real one). Every
+// protocol here except GOOSE (the pilot) migrated in migration batch 3, EXCEPT ARP/LLDP/Slow
+// Protocols, added to this cascade afterward, NOT as part of migration batch 3 or any other
+// migration -- each a brand-new protocol built directly on ProtocolDecoder from inception (see
+// arp.hpp/lldp.hpp/slow_protocols.hpp), the same "new addition, not a migration" posture
+// TwinCAT/MELSEC/FINS established for their own cascades.
 const std::vector<const ProtocolDecoder*>& ethertype_registry();
 
 // Migrated IP-protocol-number-gated protocols, in the order their decoder.cpp call sites run. Fully

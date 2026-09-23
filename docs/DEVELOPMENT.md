@@ -875,6 +875,86 @@ Discussed and adopted, in this order:
    both been added (items 31 and 32 below); BGP-4 has since been added too
    (item 33 below), completing this three-stage plan (migration batch 5,
    then ARP+LLDP, then BGP-4).
+
+   **Update: the `EtherType` cascade's registry vector now actually drives
+   dispatch order -- the first `GateKind` to close the "audit-trail only"
+   gap flagged all the way back in batch 2's own "still explicitly out of
+   scope" note above.** Jurgen asked directly whether the registry vectors
+   drove dispatch order yet (they didn't -- confirmed by grepping for
+   every `*_registry()` accessor and finding zero non-comment call sites
+   outside `protocol_registry.{hpp,cpp}` itself), then asked for exactly
+   this: replace a cascade's `if`-chain with a loop over its registry
+   vector, calling `decode()` on each entry in order until one matches.
+   Scoped to one cascade first, `EtherType`, since it was the only one of
+   the six already fully populated with a genuinely uniform per-entry gate
+   (every EtherType in this cascade is IANA/IEEE-exclusive to its own
+   protocol, so trying entries in any order that keeps STP last is safe --
+   see below).
+
+   `decoder.cpp`'s EtherType call site now loops over `ethertype_registry()`
+   directly: for each entry, skip it unless its `ethertype()` matches the
+   frame's and the active `--protocol` filter allows it (a new, cascade-
+   local `ethertype_cascade_filter_allows()` helper replaces the ten
+   hand-written `want_x` booleans -- it maps each `id()` to its own
+   `ProtocolFilter` enum value, `Auto` always passing), then call
+   `decode()`; the first result wins, exactly like the old if-chain's
+   first-match-returns behavior. Two structural wrinkles, both resolved
+   without touching the `ProtocolDecoder` interface itself: PPPoE and MPLS
+   each contribute two registry entries sharing one `id()` but different,
+   mutually-exclusive `ethertype()` values (discovery/session,
+   unicast/multicast) -- the loop already tries at most one of each pair
+   per frame, so no special-casing was needed there; MPLS's dual-write
+   needs `is_multicast`, which isn't derivable from the decoded `MplsFrame`
+   alone (see item 3's very first "Update" above for how it used to be
+   computed inline) -- solved by passing the matched EtherType itself into
+   every populate function's signature, unused by all but MPLS's.
+
+   Rather than adding a new virtual method to `ProtocolDecoder` (touching
+   every migrated protocol's own header, all six `GateKind`s, for one
+   cascade's benefit), each protocol's existing dual-write body was
+   extracted verbatim into a `populate_x(DecodedPacket&, const
+   ProtocolResult&, uint16_t matched_ethertype)` free function local to
+   `decoder.cpp` (`resource_limits()`, which several of these call, is
+   itself a free function needing no captured state, so this cost
+   nothing), looked up by `id()` through a small `unordered_map`. STP,
+   having no `ethertype()` at all (LLC-framed, not EtherType-framed -- see
+   `stp.hpp`), can never match this loop regardless of its position in the
+   vector and keeps its own explicit block, unchanged, exactly where it
+   always sat -- right after the loop, gated on `eth.is_llc_length &&
+   eth.has_llc` plus the DSAP/SSAP/Control/GARP checks the loop has no way
+   to express generically.
+
+   One real inconsistency surfaced and fixed while wiring this up:
+   `ethertype_registry()` had STP positioned mid-vector (right after MPLS,
+   before ARP/LLDP/Slow Protocols), left over from when STP genuinely was
+   `decoder.cpp`'s last EtherType-cascade entry -- ARP, LLDP, and Slow
+   Protocols were each appended to `decoder.cpp`'s real call site *after*
+   STP in every case, but the registry vector's own STP entry never moved
+   to match. Harmless while the vector was audit-trail-only (STP's
+   `ethertype()` being `nullopt` means it could never have been reached
+   through a loop in the first place, so this drifted silently), but worth
+   fixing now that the vector is live: STP moved to the actual end of
+   `ethertype_registry()`, matching `decoder.cpp`'s real order exactly.
+
+   Verified the same way as every prior migration: the full CTest suite
+   (1412 tests) stayed 100% passing with zero changed
+   `PASS_REGULAR_EXPRESSION`/`FAIL_REGULAR_EXPRESSION` assertions anywhere
+   (proof of byte-identical output for all ten protocols this cascade
+   covers), zero-warning clean rebuilds across the two configs checked in
+   this environment (default+libpcap, `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF`),
+   and manual smoke tests confirming both auto-mode detection and
+   `--protocol`-filtered output are byte-identical to before this change
+   across the PROFINET/GOOSE/EtherCAT/ARP/LLDP/STP/Slow Protocols
+   fixtures, including each protocol's own malformed-frame fallback path.
+
+   Still explicitly out of scope: the other five `GateKind`s
+   (`IpProtocol`/`TcpPortIndependent`/`UdpPort`/`UdpPortIndependent`/
+   `CotpPayload`) remain audit-trail data only, kept in sync with
+   `decoder.cpp`'s real call sites by hand, not yet driving dispatch --
+   each has its own generalization wrinkles to work through before it can
+   follow `EtherType`'s lead the same way (`CotpPayload` in particular
+   already has its own documented reason to possibly stay a manual
+   if-chain permanently -- see `cotp_payload_registry()`'s doc comment).
 4. **Comment-density trim: acknowledged, not scheduled.** Real cost, no
    plan yet to act on it -- lower priority than the three items above.
 5. **No new protocols until 1-3 above are substantially underway,** per

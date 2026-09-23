@@ -104,19 +104,7 @@ const std::vector<const ProtocolDecoder*>& ethertype_registry() {
                             // MplsUnicastDecoder's own comment in mpls.hpp for why that's safe.
         &mpls_multicast_decoder(),  // The multicast half of the same `if (want_mpls)` block -- see
                             // mpls_unicast_decoder() immediately above.
-        &stp_decoder(),    // Migration batch 3 -- sits exactly where the old `if (want_stp)` block
-                            // always did: tried LAST of this whole cascade, after every EtherType-
-                            // keyed protocol above (all seven now migrated, in this and the pilot's
-                            // own batches). This completes migration batch 3 -- the EtherType/LLC
-                            // gate cascade is now fully populated, the fourth GateKind (after
-                            // IpProtocol/TcpPortIndependent/UdpPortIndependent) to reach that
-                            // state. Unlike every entry above, STP has no EtherType of its own at
-                            // all (see stp_decoder()'s own comment in stp.hpp) -- its ordering here
-                            // is purely "last, because it's LLC-framed, not EtherType-framed, and
-                            // every EtherType-framed candidate above must have already failed to
-                            // match before an LLC-framed one is even structurally possible" (see
-                            // decoder.cpp's own call site comment).
-        &arp_decoder(),    // Added after STP, NOT part of migration batch 3 (or any migration) --
+        &arp_decoder(),    // Added after MPLS, NOT part of migration batch 3 (or any migration) --
                             // ARP is a brand-new protocol added to this cascade afterward, built
                             // directly on ProtocolDecoder from inception (see arp.hpp's file header
                             // comment). EtherType 0x0806 is exclusive to ARP, no collision risk with
@@ -133,6 +121,25 @@ const std::vector<const ProtocolDecoder*>& ethertype_registry() {
                             // directly on ProtocolDecoder from inception (see slow_protocols.hpp's
                             // file header comment). EtherType 0x8809 is exclusive to it, no
                             // collision risk with anything else in this vector.
+        &stp_decoder(),    // Migration batch 3 -- sits exactly where the old `if (want_stp)` block
+                            // always did: tried LAST of this whole cascade, after every EtherType-
+                            // keyed protocol above (ARP/LLDP/Slow Protocols were all added to this
+                            // vector, and to decoder.cpp's own call site, after migration batch 3
+                            // completed -- see their own entries above -- so STP has stayed last
+                            // through every one of those additions too). Unlike every entry above,
+                            // STP has no EtherType of its own at all (see stp_decoder()'s own
+                            // comment in stp.hpp) -- its ordering here is purely "last, because it's
+                            // LLC-framed, not EtherType-framed, and every EtherType-framed candidate
+                            // above must have already failed to match before an LLC-framed one is
+                            // even structurally possible" (see decoder.cpp's own call site comment).
+                            // Since ethertype() returns nullopt for STP, this cascade's own
+                            // registry-driven dispatch loop (decoder.cpp) can never match it via
+                            // that loop regardless of where it sits in this vector -- it's listed
+                            // here, in its real position, purely for this vector's own audit-trail
+                            // completeness (every migrated/added protocol in this GateKind, not just
+                            // the ones the loop itself can reach); STP's own gating (LLC DSAP/SSAP/
+                            // Control, the GARP destination-MAC carve-out) stays its own explicit
+                            // block at decoder.cpp's call site, after the loop, exactly as before.
     };
     return order;
 }

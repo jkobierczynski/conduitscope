@@ -15,3 +15,17 @@ cmake_install.cmake
 Makefile
 __pycache__/
 *.pyc
+
+# libFuzzer scratch output -- raw console logs from ad hoc fuzzing runs
+# (fuzz-0.log style, one per parallel worker) and each target's own corpus/
+# crash-artifact directories. The harness sources under fuzz/*.cpp are real,
+# tracked project content; everything below is disposable output from
+# actually running them and doesn't belong in source control or in a
+# delivered copy of the tool -- see docs/DEVELOPMENT.md ROADMAP item 2.
+fuzz-*.log
+fuzz/corpus/
+fuzz/artifacts/
+crash-*
+leak-*
+timeout-*
+oom-*

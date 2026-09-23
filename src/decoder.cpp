@@ -31,6 +31,7 @@
 #include "conduitscope/ospf.hpp"
 #include "conduitscope/pim.hpp"
 #include "conduitscope/profinet.hpp"
+#include "conduitscope/protocol_registry.hpp"
 #include "conduitscope/rip.hpp"
 #include "conduitscope/s7comm.hpp"
 #include "conduitscope/sv.hpp"
@@ -435,6 +436,354 @@ void fill_ospf_fields(DecodedPacket& out, const OspfMessage& msg) {
 
     out.ospf_ls_ack_headers_truncated = msg.ls_ack_headers_truncated;
     for (const auto& lsa : msg.ls_ack_headers) out.ospf_ls_ack_headers.push_back(ospf_lsa_header_summary(lsa));
+}
+
+}  // namespace
+
+namespace {
+
+// ---------------------------------------------------------------------------------------------
+// GateKind::EtherType cascade -- registration-model-driven dispatch. Decoder::decode's own
+// EtherType block below now loops over ethertype_registry() (protocol_registry.cpp) instead of a
+// hand-maintained if-chain -- see that vector's own doc comment (protocol_registry.hpp) for why
+// this is now safe. Most of this cascade's protocols predate the newer no-dual-write
+// "out.result = *result" pattern (TwinCAT/BGP/Slow Protocols use that one directly), so each
+// matched decode() result still needs its own protocol-specific dual-write into DecodedPacket's
+// flat fields -- extracted here into free functions, local to this translation unit, purely so
+// the dispatch loop has something uniform to call. Every function takes the matched ethertype;
+// only populate_mpls actually uses it (to tell its two registry entries, which share one id(),
+// apart -- see mpls.hpp) but the uniform signature keeps the lookup table below a plain
+// id()-keyed map rather than a special case in the loop itself. STP has no ethertype() at all
+// (it's LLC-framed, see stp.hpp) so it can never match this loop and has no populate_stp here --
+// it stays its own explicit block at decoder.cpp's own EtherType call site, unchanged.
+
+bool ethertype_cascade_filter_allows(ProtocolFilter filter, std::string_view id) {
+    if (filter == ProtocolFilter::Auto) return true;
+    if (id == "profinet") return filter == ProtocolFilter::ProfinetOnly;
+    if (id == "goose") return filter == ProtocolFilter::GooseOnly;
+    if (id == "sv") return filter == ProtocolFilter::SvOnly;
+    if (id == "ethercat") return filter == ProtocolFilter::EthercatOnly;
+    if (id == "eapol") return filter == ProtocolFilter::EapolOnly;
+    if (id == "pppoe") return filter == ProtocolFilter::PppoeOnly;
+    if (id == "mpls") return filter == ProtocolFilter::MplsOnly;
+    if (id == "arp") return filter == ProtocolFilter::ArpOnly;
+    if (id == "lldp") return filter == ProtocolFilter::LldpOnly;
+    if (id == "slow-protocols") return filter == ProtocolFilter::SlowProtocolsOnly;
+    return false;
+}
+
+void populate_profinet(DecodedPacket& out, const ProtocolResult& result, uint16_t /*matched_ethertype*/) {
+    const ProfinetFrame& pn = result.as<ProfinetFrame>();
+    out.protocol = "profinet";
+    out.summary = pn.summary;
+    out.profinet_frame_id = pn.frame_id;
+    out.profinet_frame_id_name = pn.frame_id_name;
+    for (const auto& n : pn.notes) out.notes.push_back(n);
+
+    if (pn.has_dcp) {
+        out.profinet_has_dcp = true;
+        out.profinet_dcp_service_name = pn.dcp_service_name;
+        out.profinet_dcp_service_type_name = pn.dcp_service_type_name;
+        const size_t kMaxDcpBlockValues = resource_limits().max_decoded_objects.value_or(50);
+        for (const auto& block : pn.dcp_blocks) {
+            if (out.profinet_dcp_blocks.size() >= kMaxDcpBlockValues) break;
+            std::string label = !block.name.empty() ? block.name
+                                                      : ("option=" + std::to_string(block.option) +
+                                                         " suboption=" + std::to_string(block.suboption));
+            out.profinet_dcp_blocks.push_back(label + "=" + block.value);
+        }
+    }
+    if (pn.has_cyclic_data) {
+        out.profinet_has_cyclic_data = true;
+        out.profinet_cyclic_io_data_hex = pn.cyclic_io_data_hex;
+        out.profinet_cyclic_io_data_length = pn.cyclic_io_data_length;
+        out.profinet_cyclic_cycle_counter = pn.cyclic_cycle_counter;
+        out.profinet_cyclic_data_status_summary = pn.cyclic_data_status_summary;
+        out.profinet_cyclic_transfer_status = pn.cyclic_transfer_status;
+    }
+}
+
+void populate_goose(DecodedPacket& out, const ProtocolResult& result, uint16_t /*matched_ethertype*/) {
+    const GooseFrame& gs = result.as<GooseFrame>();
+    out.protocol = "goose";
+    out.summary = gs.summary;
+    out.goose_appid = gs.appid;
+    out.goose_is_gse_management = gs.is_gse_management;
+    out.goose_has_pdu = gs.has_pdu;
+    for (const auto& n : gs.notes) out.notes.push_back(n);
+
+    if (gs.has_pdu) {
+        out.goose_simulated = gs.header_simulated || (gs.simulation && *gs.simulation);
+        out.goose_gocb_ref = gs.gocb_ref;
+        out.goose_dat_set = gs.dat_set;
+        if (gs.go_id) out.goose_go_id = *gs.go_id;
+        out.goose_st_num = gs.st_num;
+        out.goose_sq_num = gs.sq_num;
+        out.goose_conf_rev = gs.conf_rev;
+        out.goose_num_dat_set_entries = gs.num_dat_set_entries;
+        const size_t kMaxGooseDataValueEntries = resource_limits().max_decoded_objects.value_or(50);
+        for (const auto& v : gs.all_data) {
+            if (out.goose_all_data.size() >= kMaxGooseDataValueEntries) break;
+            std::string label = !v.type_name.empty() ? v.type_name : "raw";
+            out.goose_all_data.push_back(v.path + ": " + label + "=" + v.value);
+        }
+    }
+}
+
+void populate_sv(DecodedPacket& out, const ProtocolResult& result, uint16_t /*matched_ethertype*/) {
+    const SvFrame& sv = result.as<SvFrame>();
+    out.protocol = "sv";
+    out.summary = sv.summary;
+    out.sv_appid = sv.appid;
+    out.sv_simulated = sv.header_simulated;
+    out.sv_no_asdu = sv.no_asdu;
+    out.sv_asdu_count = sv.asdus.size();
+    for (const auto& n : sv.notes) out.notes.push_back(n);
+
+    if (!sv.asdus.empty()) {
+        const SvAsdu& first = sv.asdus[0];
+        out.sv_id = first.sv_id;
+        if (first.dat_set) out.sv_dat_set = *first.dat_set;
+        out.sv_smp_cnt = first.smp_cnt;
+        out.sv_conf_rev = first.conf_rev;
+        if (first.smp_synch) out.sv_smp_synch = *first.smp_synch;
+        if (first.smp_rate) out.sv_smp_rate = *first.smp_rate;
+        if (first.smp_mod) out.sv_smp_mod = *first.smp_mod;
+        out.sv_seq_data_hex = first.seq_data_hex;
+        out.sv_seq_data_length = first.seq_data_length;
+        if (first.gmid_hex) out.sv_gmid_hex = *first.gmid_hex;
+    }
+    const size_t kMaxSvAsduSummaries = resource_limits().max_decoded_objects.value_or(50);
+    for (const auto& asdu : sv.asdus) {
+        if (out.sv_asdus.size() >= kMaxSvAsduSummaries) break;
+        std::ostringstream a;
+        a << "svID=\"" << asdu.sv_id << "\"";
+        if (asdu.dat_set) a << " datSet=\"" << *asdu.dat_set << "\"";
+        a << " smpCnt=" << asdu.smp_cnt << " confRev=" << asdu.conf_rev;
+        if (asdu.smp_synch) a << " smpSynch=" << *asdu.smp_synch;
+        if (asdu.smp_rate) a << " smpRate=" << *asdu.smp_rate;
+        if (asdu.smp_mod) a << " smpMod=" << *asdu.smp_mod;
+        a << " seqData=" << asdu.seq_data_length << " byte(s)";
+        out.sv_asdus.push_back(a.str());
+    }
+}
+
+void populate_ethercat(DecodedPacket& out, const ProtocolResult& result, uint16_t /*matched_ethertype*/) {
+    const EthercatFrame& ec = result.as<EthercatFrame>();
+    out.protocol = "ethercat";
+    out.summary = ec.summary;
+    out.ethercat_frame_type = ec.frame_type;
+    out.ethercat_frame_type_name = ec.frame_type_name;
+    out.ethercat_declared_length = ec.declared_length;
+    out.ethercat_has_datagrams = ec.has_datagrams;
+    out.ethercat_datagram_count = ec.datagrams.size();
+    for (const auto& n : ec.notes) out.notes.push_back(n);
+
+    if (!ec.datagrams.empty()) {
+        const EthercatDatagram& first = ec.datagrams[0];
+        out.ethercat_first_cmd = first.cmd;
+        out.ethercat_first_cmd_name = first.cmd_name;
+        out.ethercat_first_idx = first.idx;
+        out.ethercat_first_logical_addressing = first.logical_addressing;
+        out.ethercat_first_adp = first.adp;
+        out.ethercat_first_ado = first.ado;
+        out.ethercat_first_logical_address = first.logical_address;
+        out.ethercat_first_data_hex = first.data_hex;
+        out.ethercat_first_data_length = first.data_length;
+        out.ethercat_first_wkc = first.wkc;
+        out.ethercat_first_irq = first.irq;
+        out.ethercat_first_circulating = first.circulating;
+    }
+    const size_t kMaxEthercatDatagramSummaries = resource_limits().max_decoded_objects.value_or(50);
+    for (const auto& dgram : ec.datagrams) {
+        if (out.ethercat_datagrams.size() >= kMaxEthercatDatagramSummaries) break;
+        std::ostringstream a;
+        a << dgram.cmd_name << " idx=" << static_cast<unsigned>(dgram.idx) << " ";
+        if (dgram.logical_addressing) {
+            a << "logAddr=0x" << std::hex << std::uppercase << std::setw(8) << std::setfill('0')
+              << dgram.logical_address << std::dec;
+        } else {
+            a << "adp=0x" << std::hex << std::uppercase << std::setw(4) << std::setfill('0')
+              << dgram.adp << " ado=0x" << std::setw(4) << std::setfill('0') << dgram.ado
+              << std::dec;
+        }
+        a << " len=" << dgram.data_len << " wkc=" << dgram.wkc;
+        if (dgram.irq != 0) {
+            a << " irq=0x" << std::hex << std::uppercase << std::setw(4) << std::setfill('0')
+              << dgram.irq << std::dec;
+        }
+        if (dgram.circulating) a << " circulating";
+        out.ethercat_datagrams.push_back(a.str());
+    }
+}
+
+void populate_eapol(DecodedPacket& out, const ProtocolResult& result, uint16_t /*matched_ethertype*/) {
+    const EapolFrame& ea = result.as<EapolFrame>();
+    out.protocol = "eapol";
+    out.summary = ea.summary;
+    out.eapol_version = ea.version;
+    out.eapol_version_name = ea.version_name;
+    out.eapol_type = ea.type;
+    out.eapol_type_name = ea.type_name;
+    out.eapol_length = ea.length;
+    out.eapol_has_eap = ea.has_eap;
+    out.eapol_eap_code = ea.eap_code;
+    out.eapol_eap_code_name = ea.eap_code_name;
+    out.eapol_eap_identifier = ea.eap_identifier;
+    out.eapol_eap_declared_length = ea.eap_declared_length;
+    out.eapol_has_eap_type = ea.has_eap_type;
+    out.eapol_eap_type = ea.eap_type;
+    out.eapol_eap_type_name = ea.eap_type_name;
+    out.eapol_has_key_descriptor = ea.has_eapol_key_descriptor;
+    out.eapol_key_descriptor_type = ea.eapol_key_descriptor_type;
+    out.eapol_key_descriptor_type_name = ea.eapol_key_descriptor_type_name;
+    for (const auto& n : ea.notes) out.notes.push_back(n);
+}
+
+void populate_pppoe(DecodedPacket& out, const ProtocolResult& result, uint16_t /*matched_ethertype*/) {
+    const PppoeFrame& pp = result.as<PppoeFrame>();
+    out.protocol = "pppoe";
+    out.summary = pp.summary;
+    out.pppoe_version = pp.version;
+    out.pppoe_type = pp.type;
+    out.pppoe_code = pp.code;
+    out.pppoe_code_name = pp.code_name;
+    out.pppoe_session_id = pp.session_id;
+    out.pppoe_length = pp.length;
+    out.pppoe_is_session = pp.is_session;
+    out.pppoe_has_ppp_protocol = pp.has_ppp_protocol;
+    out.pppoe_ppp_protocol = pp.ppp_protocol;
+    out.pppoe_ppp_protocol_name = pp.ppp_protocol_name;
+    for (const auto& n : pp.notes) out.notes.push_back(n);
+}
+
+void populate_mpls(DecodedPacket& out, const ProtocolResult& result, uint16_t matched_ethertype) {
+    const MplsFrame& mp = result.as<MplsFrame>();
+    // The one populate function that needs matched_ethertype -- mpls_unicast_decoder() and
+    // mpls_multicast_decoder() share one id() ("mpls"), so is_multicast can't be read off the
+    // decoded MplsFrame itself; it's derived from which of the two EtherTypes actually matched,
+    // exactly as decoder.cpp's old if-chain used to compute it inline. See mpls.hpp.
+    bool is_multicast = (matched_ethertype == ETHERTYPE_MPLS_MULTICAST);
+    out.protocol = "mpls";
+    out.summary = mp.summary;
+    out.mpls_is_multicast = is_multicast;
+    out.mpls_stack_truncated = mp.stack_truncated;
+    out.mpls_stack_too_deep = mp.stack_too_deep;
+    out.mpls_label_count = mp.labels.size();
+    if (!mp.labels.empty()) {
+        const MplsLabelEntry& top = mp.labels.front();
+        out.mpls_top_label = top.label;
+        out.mpls_top_exp = top.exp;
+        out.mpls_top_ttl = top.ttl;
+    }
+    const size_t kMaxMplsLabelSummaries = resource_limits().max_decoded_objects.value_or(50);
+    for (const auto& entry : mp.labels) {
+        if (out.mpls_labels.size() >= kMaxMplsLabelSummaries) break;
+        std::ostringstream ls;
+        ls << "label=" << entry.label;
+        if (!entry.label_name.empty()) ls << " (" << entry.label_name << ")";
+        ls << " exp=" << static_cast<unsigned>(entry.exp)
+           << " ttl=" << static_cast<unsigned>(entry.ttl)
+           << " s=" << (entry.bottom_of_stack ? "true" : "false");
+        out.mpls_labels.push_back(ls.str());
+    }
+    for (const auto& n : mp.notes) out.notes.push_back(n);
+}
+
+void populate_arp(DecodedPacket& out, const ProtocolResult& result, uint16_t /*matched_ethertype*/) {
+    const ArpMessage& arp = result.as<ArpMessage>();
+    out.protocol = "arp";
+    out.summary = arp.summary;
+    out.arp_htype = arp.htype;
+    out.arp_htype_name = arp.htype_name;
+    out.arp_ptype = arp.ptype;
+    out.arp_ptype_name = arp.ptype_name;
+    out.arp_hlen = arp.hlen;
+    out.arp_plen = arp.plen;
+    out.arp_oper = arp.oper;
+    out.arp_oper_name = arp.oper_name;
+    out.arp_is_ethernet_ipv4 = arp.is_ethernet_ipv4;
+    out.arp_sha_mac = arp.sha_mac;
+    out.arp_spa_ip = arp.spa_ip;
+    out.arp_tha_mac = arp.tha_mac;
+    out.arp_tpa_ip = arp.tpa_ip;
+    out.arp_sha_hex = arp.sha_hex;
+    out.arp_spa_hex = arp.spa_hex;
+    out.arp_tha_hex = arp.tha_hex;
+    out.arp_tpa_hex = arp.tpa_hex;
+    out.arp_is_gratuitous = arp.is_gratuitous;
+    out.arp_is_probe = arp.is_probe;
+    out.arp_is_announcement = arp.is_announcement;
+    for (const auto& n : arp.notes) out.notes.push_back(n);
+}
+
+void populate_lldp(DecodedPacket& out, const ProtocolResult& result, uint16_t /*matched_ethertype*/) {
+    const LldpMessage& lldp = result.as<LldpMessage>();
+    out.protocol = "lldp";
+    out.summary = lldp.summary;
+    out.lldp_chassis_id_subtype = lldp.chassis_id_subtype;
+    out.lldp_chassis_id_subtype_name = lldp.chassis_id_subtype_name;
+    out.lldp_chassis_id_value = lldp.chassis_id_value;
+    out.lldp_port_id_subtype = lldp.port_id_subtype;
+    out.lldp_port_id_subtype_name = lldp.port_id_subtype_name;
+    out.lldp_port_id_value = lldp.port_id_value;
+    out.lldp_ttl_seconds = lldp.ttl_seconds;
+    out.lldp_has_port_description = lldp.has_port_description;
+    out.lldp_port_description = lldp.port_description;
+    out.lldp_has_system_name = lldp.has_system_name;
+    out.lldp_system_name = lldp.system_name;
+    out.lldp_has_system_description = lldp.has_system_description;
+    out.lldp_system_description = lldp.system_description;
+    out.lldp_has_system_capabilities = lldp.has_system_capabilities;
+    out.lldp_system_capabilities = lldp.system_capabilities;
+    out.lldp_enabled_capabilities = lldp.enabled_capabilities;
+    out.lldp_system_capabilities_names = lldp.system_capabilities_names;
+    out.lldp_enabled_capabilities_names = lldp.enabled_capabilities_names;
+    out.lldp_has_management_address = lldp.has_management_address;
+    out.lldp_management_address_subtype = lldp.management_address_subtype;
+    out.lldp_management_address_subtype_name = lldp.management_address_subtype_name;
+    out.lldp_management_address = lldp.management_address;
+    out.lldp_tlv_count = lldp.tlvs.size();
+    out.lldp_tlvs_truncated = lldp.tlvs_truncated;
+    const size_t kMaxLldpTlvSummaries = resource_limits().max_decoded_objects.value_or(50);
+    for (const auto& t : lldp.tlvs) {
+        if (out.lldp_tlvs.size() >= kMaxLldpTlvSummaries) break;
+        std::ostringstream ts;
+        ts << (t.type_name.empty() ? ("type " + std::to_string(static_cast<unsigned>(t.type)))
+                                    : t.type_name);
+        ts << " (" << t.length << " byte(s))";
+        if (!t.rendered.empty()) ts << ": " << t.rendered;
+        else if (!t.raw_hex.empty()) ts << ": " << t.raw_hex;
+        out.lldp_tlvs.push_back(ts.str());
+    }
+    for (const auto& n : lldp.notes) out.notes.push_back(n);
+}
+
+void populate_slow_protocols(DecodedPacket& out, const ProtocolResult& result, uint16_t /*matched_ethertype*/) {
+    const SlowProtocolsMessage& sp = result.as<SlowProtocolsMessage>();
+    out.protocol = "slow-protocols";
+    out.summary = sp.summary;
+    for (const auto& n : sp.notes) out.notes.push_back(n);
+    out.result = result;
+}
+
+using EthertypeCascadePopulate = void (*)(DecodedPacket&, const ProtocolResult&, uint16_t);
+
+const EthertypeCascadePopulate* ethertype_cascade_populate_for(std::string_view id) {
+    static const std::unordered_map<std::string_view, EthertypeCascadePopulate> kPopulate = {
+        {"profinet", &populate_profinet},
+        {"goose", &populate_goose},
+        {"sv", &populate_sv},
+        {"ethercat", &populate_ethercat},
+        {"eapol", &populate_eapol},
+        {"pppoe", &populate_pppoe},
+        {"mpls", &populate_mpls},
+        {"arp", &populate_arp},
+        {"lldp", &populate_lldp},
+        {"slow-protocols", &populate_slow_protocols},
+    };
+    auto it = kPopulate.find(id);
+    return it != kPopulate.end() ? &it->second : nullptr;
 }
 
 }  // namespace
@@ -917,453 +1266,35 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
             out.vlan_id = eth.vlan_id;
 
             if (eth.ethertype != ETHERTYPE_IPV4) {
-                // PROFINET RT (EtherType 0x8892) is tried first, port-independently -- there is
-                // no port at all here, but same rationale as CIP I/O's own UDP dispatch (see
-                // above): try_parse_profinet's FrameID check is this decoder's only structural
-                // gate, and this EtherType has zero collision risk with any other protocol this
-                // tool decodes (see profinet.hpp's file header comment).
-                bool want_profinet = options_.protocol_filter == ProtocolFilter::Auto ||
-                                      options_.protocol_filter == ProtocolFilter::ProfinetOnly;
-                if (want_profinet && eth.ethertype == ETHERTYPE_PROFINET) {
-                    // Registration-model migration (batch 3): try_parse_profinet is now reached
-                    // through ProfinetDecoder::decode rather than called directly -- same
-                    // function, same semantics, see profinet.hpp. The dual-write below is
-                    // unchanged.
+                // Registration-model dispatch (see protocol_registry.hpp's own file header):
+                // ethertype_registry() now DRIVES this cascade's dispatch order, rather than being
+                // audit-trail data kept in sync by hand -- looping over it in order and trying
+                // decode() on the first entry whose ethertype() matches this frame's (and whose
+                // --protocol filter allows it) is exactly equivalent to the former hand-maintained
+                // if-chain (PROFINET RT, GOOSE, SV, EtherCAT, EAPOL, PPPoE, MPLS, ARP, LLDP, Slow
+                // Protocols, in that order -- see this vector's own doc comment for why that order
+                // is safe: every EtherType here is IANA/IEEE-exclusive to its own protocol, so no
+                // two entries can ever both match one frame). Each matched result's protocol-
+                // specific dual-write still runs afterward via the populate_* functions defined
+                // above this method (most of this cascade predates the newer no-dual-write
+                // "out.result = *result" pattern that Slow Protocols already uses). STP has no
+                // ethertype() at all (it's LLC-framed, see stp.hpp) so it can never match this loop
+                // and stays its own explicit block below, unchanged, exactly where it always sat.
+                for (const ProtocolDecoder* decoder : ethertype_registry()) {
+                    std::optional<uint16_t> et = decoder->ethertype();
+                    if (!et || *et != eth.ethertype) continue;
+                    if (!ethertype_cascade_filter_allows(options_.protocol_filter, decoder->id())) continue;
+
                     DecodeContext ctx;
-                    ctx.protocol_id = "profinet";
-                    if (auto result = profinet_decoder().decode(eth.payload, ctx)) {
-                        const ProfinetFrame& pn = result->as<ProfinetFrame>();
-                        out.protocol = "profinet";
-                        out.summary = pn.summary;
-                        out.profinet_frame_id = pn.frame_id;
-                        out.profinet_frame_id_name = pn.frame_id_name;
-                        for (const auto& n : pn.notes) out.notes.push_back(n);
+                    ctx.protocol_id = std::string(decoder->id());
+                    auto result = decoder->decode(eth.payload, ctx);
+                    if (!result) continue;
 
-                        if (pn.has_dcp) {
-                            out.profinet_has_dcp = true;
-                            out.profinet_dcp_service_name = pn.dcp_service_name;
-                            out.profinet_dcp_service_type_name = pn.dcp_service_type_name;
-                            const size_t kMaxDcpBlockValues = resource_limits().max_decoded_objects.value_or(50);
-                            for (const auto& block : pn.dcp_blocks) {
-                                if (out.profinet_dcp_blocks.size() >= kMaxDcpBlockValues) break;
-                                std::string label = !block.name.empty() ? block.name
-                                                                          : ("option=" + std::to_string(block.option) +
-                                                                             " suboption=" + std::to_string(block.suboption));
-                                out.profinet_dcp_blocks.push_back(label + "=" + block.value);
-                            }
-                        }
-                        if (pn.has_cyclic_data) {
-                            out.profinet_has_cyclic_data = true;
-                            out.profinet_cyclic_io_data_hex = pn.cyclic_io_data_hex;
-                            out.profinet_cyclic_io_data_length = pn.cyclic_io_data_length;
-                            out.profinet_cyclic_cycle_counter = pn.cyclic_cycle_counter;
-                            out.profinet_cyclic_data_status_summary = pn.cyclic_data_status_summary;
-                            out.profinet_cyclic_transfer_status = pn.cyclic_transfer_status;
-                        }
-                        return out;
+                    if (const EthertypeCascadePopulate* populate =
+                            ethertype_cascade_populate_for(decoder->id())) {
+                        (*populate)(out, *result, *et);
                     }
-                }
-
-                // IEC 61850-8-1 GOOSE (EtherType 0x88B8), same rationale/pattern as PROFINET RT
-                // above: port-independent, try_parse_goose's own outer-APDU-tag check is this
-                // decoder's structural gate (see goose.hpp's file header comment).
-                bool want_goose = options_.protocol_filter == ProtocolFilter::Auto ||
-                                   options_.protocol_filter == ProtocolFilter::GooseOnly;
-                if (want_goose && eth.ethertype == ETHERTYPE_IEC61850_GOOSE) {
-                    // Registration-model pilot (Stage 3): try_parse_goose is now reached through
-                    // GooseDecoder::decode rather than called directly -- same function, same
-                    // semantics, see goose.hpp. The dual-write below is unchanged.
-                    DecodeContext ctx;
-                    ctx.protocol_id = "goose";
-                    if (auto result = goose_decoder().decode(eth.payload, ctx)) {
-                        const GooseFrame& gs = result->as<GooseFrame>();
-                        out.protocol = "goose";
-                        out.summary = gs.summary;
-                        out.goose_appid = gs.appid;
-                        out.goose_is_gse_management = gs.is_gse_management;
-                        out.goose_has_pdu = gs.has_pdu;
-                        for (const auto& n : gs.notes) out.notes.push_back(n);
-
-                        if (gs.has_pdu) {
-                            out.goose_simulated = gs.header_simulated || (gs.simulation && *gs.simulation);
-                            out.goose_gocb_ref = gs.gocb_ref;
-                            out.goose_dat_set = gs.dat_set;
-                            if (gs.go_id) out.goose_go_id = *gs.go_id;
-                            out.goose_st_num = gs.st_num;
-                            out.goose_sq_num = gs.sq_num;
-                            out.goose_conf_rev = gs.conf_rev;
-                            out.goose_num_dat_set_entries = gs.num_dat_set_entries;
-                            const size_t kMaxGooseDataValueEntries = resource_limits().max_decoded_objects.value_or(50);
-                            for (const auto& v : gs.all_data) {
-                                if (out.goose_all_data.size() >= kMaxGooseDataValueEntries) break;
-                                std::string label = !v.type_name.empty() ? v.type_name : "raw";
-                                out.goose_all_data.push_back(v.path + ": " + label + "=" + v.value);
-                            }
-                        }
-                        return out;
-                    }
-                }
-
-                // IEC 61850-9-2 Sampled Values (EtherType 0x88BA), same rationale/pattern as
-                // GOOSE above -- the two share their entire link-layer header format (see
-                // sv.hpp's file header comment) -- try_parse_sv's own outer-APDU-tag check is
-                // this decoder's structural gate.
-                bool want_sv = options_.protocol_filter == ProtocolFilter::Auto ||
-                                options_.protocol_filter == ProtocolFilter::SvOnly;
-                if (want_sv && eth.ethertype == ETHERTYPE_IEC61850_SV) {
-                    // Registration-model migration (batch 3): try_parse_sv is now reached through
-                    // SvDecoder::decode rather than called directly -- same function, same
-                    // semantics, see sv.hpp. The dual-write below is unchanged.
-                    DecodeContext ctx;
-                    ctx.protocol_id = "sv";
-                    if (auto result = sv_decoder().decode(eth.payload, ctx)) {
-                        const SvFrame& sv = result->as<SvFrame>();
-                        out.protocol = "sv";
-                        out.summary = sv.summary;
-                        out.sv_appid = sv.appid;
-                        out.sv_simulated = sv.header_simulated;
-                        out.sv_no_asdu = sv.no_asdu;
-                        out.sv_asdu_count = sv.asdus.size();
-                        for (const auto& n : sv.notes) out.notes.push_back(n);
-
-                        if (!sv.asdus.empty()) {
-                            const SvAsdu& first = sv.asdus[0];
-                            out.sv_id = first.sv_id;
-                            if (first.dat_set) out.sv_dat_set = *first.dat_set;
-                            out.sv_smp_cnt = first.smp_cnt;
-                            out.sv_conf_rev = first.conf_rev;
-                            if (first.smp_synch) out.sv_smp_synch = *first.smp_synch;
-                            if (first.smp_rate) out.sv_smp_rate = *first.smp_rate;
-                            if (first.smp_mod) out.sv_smp_mod = *first.smp_mod;
-                            out.sv_seq_data_hex = first.seq_data_hex;
-                            out.sv_seq_data_length = first.seq_data_length;
-                            if (first.gmid_hex) out.sv_gmid_hex = *first.gmid_hex;
-                        }
-                        const size_t kMaxSvAsduSummaries = resource_limits().max_decoded_objects.value_or(50);
-                        for (const auto& asdu : sv.asdus) {
-                            if (out.sv_asdus.size() >= kMaxSvAsduSummaries) break;
-                            std::ostringstream a;
-                            a << "svID=\"" << asdu.sv_id << "\"";
-                            if (asdu.dat_set) a << " datSet=\"" << *asdu.dat_set << "\"";
-                            a << " smpCnt=" << asdu.smp_cnt << " confRev=" << asdu.conf_rev;
-                            if (asdu.smp_synch) a << " smpSynch=" << *asdu.smp_synch;
-                            if (asdu.smp_rate) a << " smpRate=" << *asdu.smp_rate;
-                            if (asdu.smp_mod) a << " smpMod=" << *asdu.smp_mod;
-                            a << " seqData=" << asdu.seq_data_length << " byte(s)";
-                            out.sv_asdus.push_back(a.str());
-                        }
-                        return out;
-                    }
-                }
-
-                // EtherCAT (EtherType 0x88A4), same rationale/pattern as PROFINET RT/GOOSE/SV
-                // above -- try_parse_ethercat's own frame-header Type check is this decoder's
-                // structural gate (see ethercat.hpp's file header comment's "structural detection
-                // gate" paragraph for why that gate is weaker than GOOSE/SV/PROFINET's own, and
-                // why the dedicated EtherType still makes this a safe default in Auto mode).
-                bool want_ethercat = options_.protocol_filter == ProtocolFilter::Auto ||
-                                      options_.protocol_filter == ProtocolFilter::EthercatOnly;
-                if (want_ethercat && eth.ethertype == ETHERTYPE_ETHERCAT) {
-                    // Registration-model migration (batch 3): try_parse_ethercat is now reached
-                    // through EthercatDecoder::decode rather than called directly -- same
-                    // function, same semantics, see ethercat.hpp. The dual-write below is
-                    // unchanged.
-                    DecodeContext ctx;
-                    ctx.protocol_id = "ethercat";
-                    if (auto result = ethercat_decoder().decode(eth.payload, ctx)) {
-                        const EthercatFrame& ec = result->as<EthercatFrame>();
-                        out.protocol = "ethercat";
-                        out.summary = ec.summary;
-                        out.ethercat_frame_type = ec.frame_type;
-                        out.ethercat_frame_type_name = ec.frame_type_name;
-                        out.ethercat_declared_length = ec.declared_length;
-                        out.ethercat_has_datagrams = ec.has_datagrams;
-                        out.ethercat_datagram_count = ec.datagrams.size();
-                        for (const auto& n : ec.notes) out.notes.push_back(n);
-
-                        if (!ec.datagrams.empty()) {
-                            const EthercatDatagram& first = ec.datagrams[0];
-                            out.ethercat_first_cmd = first.cmd;
-                            out.ethercat_first_cmd_name = first.cmd_name;
-                            out.ethercat_first_idx = first.idx;
-                            out.ethercat_first_logical_addressing = first.logical_addressing;
-                            out.ethercat_first_adp = first.adp;
-                            out.ethercat_first_ado = first.ado;
-                            out.ethercat_first_logical_address = first.logical_address;
-                            out.ethercat_first_data_hex = first.data_hex;
-                            out.ethercat_first_data_length = first.data_length;
-                            out.ethercat_first_wkc = first.wkc;
-                            out.ethercat_first_irq = first.irq;
-                            out.ethercat_first_circulating = first.circulating;
-                        }
-                        const size_t kMaxEthercatDatagramSummaries = resource_limits().max_decoded_objects.value_or(50);
-                        for (const auto& dgram : ec.datagrams) {
-                            if (out.ethercat_datagrams.size() >= kMaxEthercatDatagramSummaries) break;
-                            std::ostringstream a;
-                            a << dgram.cmd_name << " idx=" << static_cast<unsigned>(dgram.idx) << " ";
-                            if (dgram.logical_addressing) {
-                                a << "logAddr=0x" << std::hex << std::uppercase << std::setw(8) << std::setfill('0')
-                                  << dgram.logical_address << std::dec;
-                            } else {
-                                a << "adp=0x" << std::hex << std::uppercase << std::setw(4) << std::setfill('0')
-                                  << dgram.adp << " ado=0x" << std::setw(4) << std::setfill('0') << dgram.ado
-                                  << std::dec;
-                            }
-                            a << " len=" << dgram.data_len << " wkc=" << dgram.wkc;
-                            // irq/circulating are shown only when notable (irq != 0, circulating
-                            // set) to keep the common case's summary line uncluttered -- the same
-                            // "only when it deviates" posture ethercat.hpp's frame-level notes take
-                            // for the Reserved bit.
-                            if (dgram.irq != 0) {
-                                a << " irq=0x" << std::hex << std::uppercase << std::setw(4) << std::setfill('0')
-                                  << dgram.irq << std::dec;
-                            }
-                            if (dgram.circulating) a << " circulating";
-                            out.ethercat_datagrams.push_back(a.str());
-                        }
-                        return out;
-                    }
-                }
-
-                // IEEE 802.1X/EAPOL (EtherType 0x888E) -- ROADMAP item 18's Tier 3, same
-                // EtherType-keyed rationale/pattern as PROFINET RT/GOOSE/SV/EtherCAT above, except
-                // EAPOL has its own dedicated ProtocolFilter::EapolOnly rather than sharing Tier 3's
-                // port-based EnterpriseTrustOnly filter -- see decoder.hpp's own comment on both and
-                // eapol.hpp's file header comment for the full reasoning.
-                bool want_eapol = options_.protocol_filter == ProtocolFilter::Auto ||
-                                    options_.protocol_filter == ProtocolFilter::EapolOnly;
-                if (want_eapol && eth.ethertype == ETHERTYPE_EAPOL) {
-                    // Registration-model migration (batch 3): try_parse_eapol is now reached
-                    // through EapolDecoder::decode rather than called directly -- same function,
-                    // same semantics, see eapol.hpp. The dual-write below is unchanged.
-                    DecodeContext ctx;
-                    ctx.protocol_id = "eapol";
-                    if (auto result = eapol_decoder().decode(eth.payload, ctx)) {
-                        const EapolFrame& ea = result->as<EapolFrame>();
-                        out.protocol = "eapol";
-                        out.summary = ea.summary;
-                        out.eapol_version = ea.version;
-                        out.eapol_version_name = ea.version_name;
-                        out.eapol_type = ea.type;
-                        out.eapol_type_name = ea.type_name;
-                        out.eapol_length = ea.length;
-                        out.eapol_has_eap = ea.has_eap;
-                        out.eapol_eap_code = ea.eap_code;
-                        out.eapol_eap_code_name = ea.eap_code_name;
-                        out.eapol_eap_identifier = ea.eap_identifier;
-                        out.eapol_eap_declared_length = ea.eap_declared_length;
-                        out.eapol_has_eap_type = ea.has_eap_type;
-                        out.eapol_eap_type = ea.eap_type;
-                        out.eapol_eap_type_name = ea.eap_type_name;
-                        out.eapol_has_key_descriptor = ea.has_eapol_key_descriptor;
-                        out.eapol_key_descriptor_type = ea.eapol_key_descriptor_type;
-                        out.eapol_key_descriptor_type_name = ea.eapol_key_descriptor_type_name;
-                        for (const auto& n : ea.notes) out.notes.push_back(n);
-                        return out;
-                    }
-                }
-
-                // PPPoE (EtherType 0x8863 Discovery / 0x8864 Session) -- ROADMAP item 18's Tier 4,
-                // same EtherType-keyed rationale/pattern as PROFINET RT/GOOSE/SV/EtherCAT/EAPOL
-                // above, except PPPoE has its own dedicated ProtocolFilter::PppoeOnly rather than
-                // sharing Tier 4's port-based WirelessBackhaulOnly filter -- see decoder.hpp's own
-                // comment on both and pppoe.hpp's file header comment for the full reasoning. Two
-                // EtherTypes share one dispatch: try_parse_pppoe itself decides which Code values
-                // are valid based on which stage its own `is_session_ethertype` argument names.
-                bool want_pppoe = options_.protocol_filter == ProtocolFilter::Auto ||
-                                    options_.protocol_filter == ProtocolFilter::PppoeOnly;
-                if (want_pppoe && (eth.ethertype == ETHERTYPE_PPPOE_DISCOVERY ||
-                                    eth.ethertype == ETHERTYPE_PPPOE_SESSION)) {
-                    // Registration-model migration (batch 3): try_parse_pppoe is now reached
-                    // through PppoeDiscoveryDecoder/PppoeSessionDecoder::decode rather than called
-                    // directly -- same function, same semantics, see pppoe.hpp. The dual-write
-                    // below is unchanged.
-                    bool is_session_ethertype = (eth.ethertype == ETHERTYPE_PPPOE_SESSION);
-                    const ProtocolDecoder& pppoe_dec =
-                        is_session_ethertype ? pppoe_session_decoder() : pppoe_discovery_decoder();
-                    DecodeContext ctx;
-                    ctx.protocol_id = "pppoe";
-                    if (auto result = pppoe_dec.decode(eth.payload, ctx)) {
-                        const PppoeFrame& pp = result->as<PppoeFrame>();
-                        out.protocol = "pppoe";
-                        out.summary = pp.summary;
-                        out.pppoe_version = pp.version;
-                        out.pppoe_type = pp.type;
-                        out.pppoe_code = pp.code;
-                        out.pppoe_code_name = pp.code_name;
-                        out.pppoe_session_id = pp.session_id;
-                        out.pppoe_length = pp.length;
-                        out.pppoe_is_session = pp.is_session;
-                        out.pppoe_has_ppp_protocol = pp.has_ppp_protocol;
-                        out.pppoe_ppp_protocol = pp.ppp_protocol;
-                        out.pppoe_ppp_protocol_name = pp.ppp_protocol_name;
-                        for (const auto& n : pp.notes) out.notes.push_back(n);
-                        return out;
-                    }
-                }
-
-                // MPLS (EtherType 0x8847 unicast / 0x8848 multicast) -- ROADMAP item 18's Tier 5,
-                // same EtherType-keyed rationale/pattern as EAPOL/PPPoE above, except MPLS has its
-                // own dedicated ProtocolFilter::MplsOnly rather than sharing Tier 5's port/IP-
-                // protocol-number-based TunnelVpnOnly filter -- see decoder.hpp's own comment on
-                // both and mpls.hpp's file header comment for the full reasoning. There is no
-                // structural gate to fail here (see mpls.hpp's own try_parse_mpls comment) -- the
-                // EtherType alone carries all the confidence, so this always succeeds once at least
-                // 4 bytes are available.
-                bool want_mpls = options_.protocol_filter == ProtocolFilter::Auto ||
-                                   options_.protocol_filter == ProtocolFilter::MplsOnly;
-                if (want_mpls && (eth.ethertype == ETHERTYPE_MPLS_UNICAST ||
-                                    eth.ethertype == ETHERTYPE_MPLS_MULTICAST)) {
-                    // Registration-model migration (batch 3): try_parse_mpls is now reached
-                    // through MplsUnicastDecoder/MplsMulticastDecoder::decode rather than called
-                    // directly -- same function, same semantics, see mpls.hpp. The dual-write
-                    // below is unchanged.
-                    bool is_multicast = (eth.ethertype == ETHERTYPE_MPLS_MULTICAST);
-                    const ProtocolDecoder& mpls_dec =
-                        is_multicast ? mpls_multicast_decoder() : mpls_unicast_decoder();
-                    DecodeContext ctx;
-                    ctx.protocol_id = "mpls";
-                    if (auto result = mpls_dec.decode(eth.payload, ctx)) {
-                        const MplsFrame& mp = result->as<MplsFrame>();
-                        out.protocol = "mpls";
-                        out.summary = mp.summary;
-                        out.mpls_is_multicast = is_multicast;
-                        out.mpls_stack_truncated = mp.stack_truncated;
-                        out.mpls_stack_too_deep = mp.stack_too_deep;
-                        out.mpls_label_count = mp.labels.size();
-                        if (!mp.labels.empty()) {
-                            const MplsLabelEntry& top = mp.labels.front();
-                            out.mpls_top_label = top.label;
-                            out.mpls_top_exp = top.exp;
-                            out.mpls_top_ttl = top.ttl;
-                        }
-                        const size_t kMaxMplsLabelSummaries = resource_limits().max_decoded_objects.value_or(50);
-                        for (const auto& entry : mp.labels) {
-                            if (out.mpls_labels.size() >= kMaxMplsLabelSummaries) break;
-                            std::ostringstream ls;
-                            ls << "label=" << entry.label;
-                            if (!entry.label_name.empty()) ls << " (" << entry.label_name << ")";
-                            ls << " exp=" << static_cast<unsigned>(entry.exp)
-                               << " ttl=" << static_cast<unsigned>(entry.ttl)
-                               << " s=" << (entry.bottom_of_stack ? "true" : "false");
-                            out.mpls_labels.push_back(ls.str());
-                        }
-                        for (const auto& n : mp.notes) out.notes.push_back(n);
-                        return out;
-                    }
-                }
-
-                // ARP (EtherType 0x0806) -- Stage 2 new-protocol work (not a migration -- ARP had no
-                // prior decode logic of any kind, only the generic ethertype-name fallback). Built
-                // directly on ProtocolDecoder from inception, the same posture TwinCAT/MELSEC/FINS
-                // established for GateKind::TcpPortIndependent -- see arp.hpp's file header comment.
-                bool want_arp = options_.protocol_filter == ProtocolFilter::Auto ||
-                                 options_.protocol_filter == ProtocolFilter::ArpOnly;
-                if (want_arp && eth.ethertype == ETHERTYPE_ARP) {
-                    DecodeContext ctx;
-                    ctx.protocol_id = "arp";
-                    if (auto result = arp_decoder().decode(eth.payload, ctx)) {
-                        const ArpMessage& arp = result->as<ArpMessage>();
-                        out.protocol = "arp";
-                        out.summary = arp.summary;
-                        out.arp_htype = arp.htype;
-                        out.arp_htype_name = arp.htype_name;
-                        out.arp_ptype = arp.ptype;
-                        out.arp_ptype_name = arp.ptype_name;
-                        out.arp_hlen = arp.hlen;
-                        out.arp_plen = arp.plen;
-                        out.arp_oper = arp.oper;
-                        out.arp_oper_name = arp.oper_name;
-                        out.arp_is_ethernet_ipv4 = arp.is_ethernet_ipv4;
-                        out.arp_sha_mac = arp.sha_mac;
-                        out.arp_spa_ip = arp.spa_ip;
-                        out.arp_tha_mac = arp.tha_mac;
-                        out.arp_tpa_ip = arp.tpa_ip;
-                        out.arp_sha_hex = arp.sha_hex;
-                        out.arp_spa_hex = arp.spa_hex;
-                        out.arp_tha_hex = arp.tha_hex;
-                        out.arp_tpa_hex = arp.tpa_hex;
-                        out.arp_is_gratuitous = arp.is_gratuitous;
-                        out.arp_is_probe = arp.is_probe;
-                        out.arp_is_announcement = arp.is_announcement;
-                        for (const auto& n : arp.notes) out.notes.push_back(n);
-                        return out;
-                    }
-                }
-
-                // LLDP (EtherType 0x88CC) -- Stage 2 new-protocol work (not a migration -- LLDP had
-                // no prior decode logic of any kind, only the generic ethertype-name fallback). Built
-                // directly on ProtocolDecoder from inception, same posture as ARP just above.
-                bool want_lldp = options_.protocol_filter == ProtocolFilter::Auto ||
-                                  options_.protocol_filter == ProtocolFilter::LldpOnly;
-                if (want_lldp && eth.ethertype == ETHERTYPE_LLDP) {
-                    DecodeContext ctx;
-                    ctx.protocol_id = "lldp";
-                    if (auto result = lldp_decoder().decode(eth.payload, ctx)) {
-                        const LldpMessage& lldp = result->as<LldpMessage>();
-                        out.protocol = "lldp";
-                        out.summary = lldp.summary;
-                        out.lldp_chassis_id_subtype = lldp.chassis_id_subtype;
-                        out.lldp_chassis_id_subtype_name = lldp.chassis_id_subtype_name;
-                        out.lldp_chassis_id_value = lldp.chassis_id_value;
-                        out.lldp_port_id_subtype = lldp.port_id_subtype;
-                        out.lldp_port_id_subtype_name = lldp.port_id_subtype_name;
-                        out.lldp_port_id_value = lldp.port_id_value;
-                        out.lldp_ttl_seconds = lldp.ttl_seconds;
-                        out.lldp_has_port_description = lldp.has_port_description;
-                        out.lldp_port_description = lldp.port_description;
-                        out.lldp_has_system_name = lldp.has_system_name;
-                        out.lldp_system_name = lldp.system_name;
-                        out.lldp_has_system_description = lldp.has_system_description;
-                        out.lldp_system_description = lldp.system_description;
-                        out.lldp_has_system_capabilities = lldp.has_system_capabilities;
-                        out.lldp_system_capabilities = lldp.system_capabilities;
-                        out.lldp_enabled_capabilities = lldp.enabled_capabilities;
-                        out.lldp_system_capabilities_names = lldp.system_capabilities_names;
-                        out.lldp_enabled_capabilities_names = lldp.enabled_capabilities_names;
-                        out.lldp_has_management_address = lldp.has_management_address;
-                        out.lldp_management_address_subtype = lldp.management_address_subtype;
-                        out.lldp_management_address_subtype_name = lldp.management_address_subtype_name;
-                        out.lldp_management_address = lldp.management_address;
-                        out.lldp_tlv_count = lldp.tlvs.size();
-                        out.lldp_tlvs_truncated = lldp.tlvs_truncated;
-                        const size_t kMaxLldpTlvSummaries = resource_limits().max_decoded_objects.value_or(50);
-                        for (const auto& t : lldp.tlvs) {
-                            if (out.lldp_tlvs.size() >= kMaxLldpTlvSummaries) break;
-                            std::ostringstream ts;
-                            ts << (t.type_name.empty() ? ("type " + std::to_string(static_cast<unsigned>(t.type)))
-                                                        : t.type_name);
-                            ts << " (" << t.length << " byte(s))";
-                            if (!t.rendered.empty()) ts << ": " << t.rendered;
-                            else if (!t.raw_hex.empty()) ts << ": " << t.raw_hex;
-                            out.lldp_tlvs.push_back(ts.str());
-                        }
-                        for (const auto& n : lldp.notes) out.notes.push_back(n);
-                        return out;
-                    }
-                }
-
-                // IEEE 802.3 Slow Protocols (EtherType 0x8809: LACP/Marker/802.3 OAM) -- added
-                // after the three-stage ARP/LLDP/BGP plan, at Jurgen's request. Same EtherType-
-                // gated, stateless shape as ARP/LLDP just above, but subtype-multiplexed (one gate,
-                // three message shapes -- see slow_protocols.hpp), so this follows TwinCAT's/BGP's
-                // own "no dual-write, out.result carries the full SlowProtocolsMessage" posture
-                // instead of ARP's/LLDP's own flat dual-write -- see slow_protocols.hpp's own file
-                // header comment for the wire format and JsonWriter's own registry-based rendering
-                // (output.cpp) for how it's exposed.
-                bool want_slow_protocols = options_.protocol_filter == ProtocolFilter::Auto ||
-                                             options_.protocol_filter == ProtocolFilter::SlowProtocolsOnly;
-                if (want_slow_protocols && eth.ethertype == ETHERTYPE_SLOW_PROTOCOLS) {
-                    DecodeContext ctx;
-                    ctx.protocol_id = "slow-protocols";
-                    if (auto result = slow_protocols_decoder().decode(eth.payload, ctx)) {
-                        const SlowProtocolsMessage& sp = result->as<SlowProtocolsMessage>();
-                        out.protocol = "slow-protocols";
-                        out.summary = sp.summary;
-                        for (const auto& n : sp.notes) out.notes.push_back(n);
-                        out.result = *result;
-                        return out;
-                    }
+                    return out;
                 }
 
                 // STP (classic IEEE 802.3 LLC framing -- NOT any EtherType at all, see
