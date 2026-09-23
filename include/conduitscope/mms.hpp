@@ -385,7 +385,7 @@ struct MmsFrame {
 
     // Tier 1 service-specific decoded fields (and Initiate's own capability negotiation, and
     // InformationReport's own variable+value list, and ServiceError/RejectPDU detail), "key=value"
-    // each -- mirrors opcua_values'/hartip_values' scheme.
+    // each -- mirrors OpcUaMessage::values' (opcua.hpp)/HartIpPassThrough::values' (hartip.hpp) scheme.
     std::vector<std::string> values;
 
     bool body_shown_as_hex = false;

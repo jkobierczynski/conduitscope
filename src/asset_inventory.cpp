@@ -17,6 +17,7 @@
 #include "conduitscope/modbus.hpp"
 #include "conduitscope/notable_it_protocols.hpp"
 #include "conduitscope/resolver.hpp"
+#include "conduitscope/s7comm.hpp"
 
 namespace conduitscope {
 
@@ -338,8 +339,15 @@ void AssetInventoryEngine::observe(const DecodedPacket& dp) {
         // UDP: no session, no handshake -- see observe()'s own doc comment (asset_inventory.hpp)
         // for the full per-protocol reasoning.
         bool src_is_client;
-        if (protocol == "bacnet" && dp.bacnet_has_apdu && !dp.bacnet_apdu_type.empty()) {
-            src_is_client = dp.bacnet_apdu_type == "Confirmed-Request" || dp.bacnet_apdu_type == "Unconfirmed-Request";
+        // Zero-flat-field migration (extra-reader batch): dp.bacnet_has_apdu/dp.bacnet_apdu_type
+        // are gone -- read from the BacnetFrame on dp.result instead (dp.result->has_npdu &&
+        // dp.result->npdu.has_apdu is the same condition the old flat dp.bacnet_has_apdu captured
+        // -- see BacnetNpdu::has_apdu's own invariant comment in bacnet.hpp).
+        if (protocol == "bacnet" && dp.result && dp.result->as<BacnetFrame>().has_npdu &&
+            dp.result->as<BacnetFrame>().npdu.has_apdu &&
+            !dp.result->as<BacnetFrame>().npdu.apdu.pdu_type_name.empty()) {
+            const std::string& apdu_type = dp.result->as<BacnetFrame>().npdu.apdu.pdu_type_name;
+            src_is_client = apdu_type == "Confirmed-Request" || apdu_type == "Unconfirmed-Request";
             direction_source = DirectionSource::Content;
         } else {
             src_is_client = src_is_client_by_port(dp.src_port, dp.dst_port, /*is_tcp=*/false);
@@ -353,28 +361,37 @@ void AssetInventoryEngine::observe(const DecodedPacket& dp) {
     std::string function_name;
     if (protocol == "modbus" && dp.result && !dp.result->as<ModbusFrame>().function_name.empty()) {
         function_name = dp.result->as<ModbusFrame>().function_name;
-    } else if (protocol == "dnp3" && dp.dnp3_has_function && !dp.dnp3_function_name.empty()) {
-        function_name = dp.dnp3_function_name;
-    } else if (protocol == "s7comm" && dp.protocol == "s7comm" && dp.s7comm_has_function &&
-               !dp.s7comm_function_name.empty()) {
-        function_name = dp.s7comm_function_name;
-    } else if (protocol == "enip" && dp.enip_has_cip && !dp.enip_cip_service_name.empty()) {
-        function_name = dp.enip_cip_service_name;
-    } else if (protocol == "bacnet" && dp.bacnet_has_apdu && !dp.bacnet_service_name.empty()) {
-        function_name = dp.bacnet_service_name;
-    } else if (protocol == "iec104" && dp.iec104_has_asdu && !dp.iec104_asdu_type_short_name.empty()) {
-        function_name = dp.iec104_asdu_type_short_name;
-    } else if (protocol == "hartip" && !dp.hartip_message_type.empty()) {
-        // hartip_message_type ("Request"/"Response"/"Publish"/"Error"/"NAK") is always set when
-        // protocol == "hartip" -- see decoder.hpp -- same "no separate guard needed" shape
-        // PolicyEngine::observe documents for this same field.
-        function_name = dp.hartip_message_type;
-    } else if (protocol == "opcua" && dp.opcua_service_recognized && !dp.opcua_service_name.empty()) {
-        function_name = dp.opcua_service_name;
-    } else if (protocol == "mms" && dp.mms_service_recognized && !dp.mms_service_name.empty()) {
-        function_name = dp.mms_service_name;
-    } else if (protocol == "mqtt" && !dp.mqtt_packet_type_name.empty()) {
-        function_name = dp.mqtt_packet_type_name;
+    } else if (protocol == "dnp3" && dp.result && dp.result->as<Dnp3Result>().dnp3_has_function &&
+               !dp.result->as<Dnp3Result>().dnp3_function_name.empty()) {
+        function_name = dp.result->as<Dnp3Result>().dnp3_function_name;
+    } else if (protocol == "s7comm" && dp.protocol == "s7comm" && dp.result &&
+               dp.result->as<S7CommResult>().has_function &&
+               !dp.result->as<S7CommResult>().function_name.empty()) {
+        function_name = dp.result->as<S7CommResult>().function_name;
+    } else if (protocol == "enip" && dp.has_tcp && dp.result &&
+               dp.result->as<EnipResult>().first.has_cip &&
+               !dp.result->as<EnipResult>().first.cip.service_name.empty()) {
+        function_name = dp.result->as<EnipResult>().first.cip.service_name;
+    } else if (protocol == "bacnet" && dp.result && dp.result->as<BacnetFrame>().has_npdu &&
+               dp.result->as<BacnetFrame>().npdu.has_apdu &&
+               !dp.result->as<BacnetFrame>().npdu.apdu.service_choice_name.empty()) {
+        function_name = dp.result->as<BacnetFrame>().npdu.apdu.service_choice_name;
+    } else if (protocol == "iec104" && dp.result && dp.result->as<Iec104Result>().iec104_has_asdu &&
+               !dp.result->as<Iec104Result>().iec104_asdu_type_short_name.empty()) {
+        function_name = dp.result->as<Iec104Result>().iec104_asdu_type_short_name;
+    } else if (protocol == "hartip" && dp.result && !dp.result->as<HartIpResult>().first.message_type_name.empty()) {
+        // HartIpFrame::message_type_name ("Request"/"Response"/"Publish"/"Error"/"NAK") is always
+        // set once a "hartip" packet decodes at all -- see hartip.hpp -- same "no separate guard
+        // needed" shape PolicyEngine::observe documents for this same field.
+        function_name = dp.result->as<HartIpResult>().first.message_type_name;
+    } else if (protocol == "opcua" && dp.result && dp.result->as<OpcUaResult>().first.service_recognized &&
+               !dp.result->as<OpcUaResult>().first.service_name.empty()) {
+        function_name = dp.result->as<OpcUaResult>().first.service_name;
+    } else if (protocol == "mms" && dp.result && dp.result->as<MmsFrame>().service_recognized &&
+               !dp.result->as<MmsFrame>().service_name.empty()) {
+        function_name = dp.result->as<MmsFrame>().service_name;
+    } else if (protocol == "mqtt" && dp.result && !dp.result->as<MqttResult>().first.packet_type_name.empty()) {
+        function_name = dp.result->as<MqttResult>().first.packet_type_name;
     } else if (protocol == "ffhse" && dp.result && !dp.result->as<FfhseResult>().first.message_name.empty()) {
         function_name = dp.result->as<FfhseResult>().first.message_name;
     }

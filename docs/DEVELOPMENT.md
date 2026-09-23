@@ -1311,6 +1311,97 @@ Discussed and adopted, in this order:
    MMS, MQTT, OPC UA, S7comm), each of which will need its own
    `policy_engine.cpp`/`asset_inventory.cpp` reader sweep beyond the usual
    `decoder.cpp`/`output.cpp` pair before its own batch can start.
+
+   **Update: zero-flat-field `output.cpp` migration, "extra-reader batch"
+   -- BACnet, DNP3, EtherNet/IP, HART-IP, IEC104, MMS, MQTT, OPC UA,
+   S7comm.** The 9 protocols the mid-size batch's own update above named
+   as the last group standing, each carrying `policy_engine.cpp`/
+   `asset_inventory.cpp` readers beyond the usual `decoder.cpp`/
+   `output.cpp` pair. Sequenced cheapest-first by `decoder.hpp` flat-field
+   count, the same discipline as every earlier batch: S7comm (in progress
+   entering this batch), BACnet, MMS, OPC UA, MQTT, HART-IP, plus DNP3/
+   EtherNet/IP/IEC104 landed earlier under the same effort.
+
+   Every one of the 9 protocol structs was checked for `ByteSpan` fields
+   before writing any code -- the established lifetime-hazard sweep this
+   migration always runs first, since `out.result = *result;` only carries
+   a decode result safely past the packet's own lifetime when nothing in
+   it still points back into the original captured bytes. S7comm is the
+   *only* protocol in this whole 9-protocol batch that fails that check
+   (`S7CommFrame::items`/`data_items` hold `ByteSpan`s) -- resolved with a
+   dedicated `S7CommResult` wrapper (summary/notes/`has_function`/
+   `function_name`/a fully-owned `items` copy/eagerly-computed
+   `value_summaries`/PI-service and PI-control fields), built and verified
+   before this batch's own remaining six protocols. BACnet's `BacnetFrame`,
+   MMS's `MmsFrame`, DNP3's payload struct, IEC104's payload struct, OPC
+   UA's `OpcUaMessage`, MQTT's `MqttMessage`/`SparkplugPayload`, and
+   HART-IP's `HartIpFrame`/`HartIpPassThrough`/`HartIpSessionInit` are all
+   fully self-owned -- safe for the plain `out.result = *result;`
+   carry-forward, no wrapper needed. DNP3 (`Dnp3Result`), EtherNet/IP
+   (`EnipResult`), OPC UA (`OpcUaResult`), MQTT (`MqttResult`), and
+   HART-IP (`HartIpResult`) all reused a pre-existing `{summary; notes;
+   first;}`-shaped wrapper already built for a separate, earlier
+   registration-model interface migration -- this batch's job for those
+   five was "stop flattening, read from the wrapper instead," not new
+   struct design. IEC104 and BACnet needed no wrapper struct at all: their
+   underlying frame types carry `summary`/`notes` directly.
+
+   Two call sites needed a deferred-transform fix, the same shape as the
+   cheap batch's own `MplsFrame::is_multicast` precedent (a value the raw
+   parse can't know, or a transform the old call site applied that the
+   carried-forward struct doesn't compute itself): MMS's `mms_values` used
+   to be capped at `resource_limits().max_decoded_objects` (default 50) at
+   `decoder.cpp`'s own call site, but `MmsFrame::values` itself is
+   uncapped -- confirmed by grep that no other reader depended on the
+   pre-capped vector, so the cap moved into the new
+   `write_mms_json_fields` instead. HART-IP's `hartip_address_hex` used to
+   be formatted (2-hex-digit uppercase for a short address via
+   `std::ostringstream`, pass-through for a long one) at BOTH the TCP and
+   UDP call sites, duplicated -- `HartIpPassThrough` has no such field, so
+   the same formatting moved into `write_hartip_json_fields` once instead
+   of twice. MQTT's own Sparkplug metrics cap was already applied inside
+   `mqtt.cpp` itself, not at the `decoder.cpp` call site, so it needed no
+   equivalent move.
+
+   Two structural invariants were confirmed, not assumed, before
+   simplifying gating logic in the new write functions: BACnet's
+   `BacnetNpdu::has_apdu` is only ever set true when
+   `!is_network_layer_message` (verified directly in
+   `try_parse_bacnet_npdu`'s own early-return), letting
+   `write_bacnet_json_fields` collapse the old `if (is_network_layer_
+   message) {...} else if (npdu.has_apdu) {...}` into a single `if
+   (npdu.has_apdu)` check; and MQTT's Sparkplug B "STATE"-topic shape
+   (`state_host_id`/`state_text`) versus its non-STATE shape
+   (`group_id`/`edge_node_id`/`device_id`/payload-decode fields) are
+   mutually exclusive branches of one `if (m.sparkplug_is_state) {...}
+   else {...}`, preserved exactly rather than merged or independently
+   gated. HART-IP's TCP and UDP decoders share both `id() == "hartip"`
+   AND the same `HartIpResult` payload type -- unlike EtherNet/IP's own
+   TCP/UDP split into different payload types (`EnipResult` wrapping
+   `EnipFrame` vs. `CipIoFrame` directly) -- so no discriminator field was
+   needed for HART-IP's two readers, unlike ENIP's `has_tcp`/`has_udp`.
+
+   All 9 protocols' flat fields removed from `decoder.hpp`; confirmed zero
+   remaining readers anywhere (`decoder.cpp`, `output.cpp`,
+   `policy_engine.cpp`, `asset_inventory.cpp`, `fuzz/`) via the same
+   exhaustive grep sweep every prior dual-write removal has used. This
+   closes out the extra-reader group entirely -- between this batch and
+   the cheap/mid-size batches above, every protocol so far carried on
+   `ProtocolDecoder` has now had its `decoder.hpp` flat fields fully
+   retired in favor of reading through `DecodedPacket::result`.
+
+   Verified the same way as every prior migration: the full CTest suite
+   (1,416 tests) stayed 100% passing with zero changed
+   `PASS_REGULAR_EXPRESSION`/`FAIL_REGULAR_EXPRESSION` assertions anywhere,
+   clean rebuilds with zero warnings in both the default and
+   `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF` configs, and manual `--format
+   json`/`--stats` smoke tests against each protocol's own fixture
+   confirming field-for-field identical output to before this change --
+   including HART-IP's short-address (`'01'`) and long-address
+   (`'82004b0001'`) rendering both still round-tripping correctly through
+   the relocated formatting logic, and its `--stats` message-type/
+   pass-through-command aggregates still tallying correctly through
+   `p.result->as<HartIpResult>()`.
 4. **Comment-density trim: acknowledged, not scheduled.** Real cost, no
    plan yet to act on it -- lower priority than the three items above.
 5. **No new protocols until 1-3 above are substantially underway,** per

@@ -293,7 +293,7 @@ private:
                                                              // opcua_service_recognized
     std::map<std::string, size_t> mms_pdu_counts_;      // "confirmed-RequestPDU"/"initiate-RequestPDU"/...
     std::map<std::string, size_t> mms_service_counts_;  // keyed by service name, only when
-                                                          // mms_service_recognized
+                                                          // MmsFrame::service_recognized (mms.hpp)
     std::map<std::string, size_t> mqtt_packet_type_counts_;  // "CONNECT"/"PUBLISH"/...
     size_t mqtt_sparkplug_count_ = 0;  // PUBLISH packets whose topic matched the spBv1.0 namespace
     std::map<std::string, size_t> mqtt_sparkplug_message_type_counts_;  // "NBIRTH"/.../"STATE",

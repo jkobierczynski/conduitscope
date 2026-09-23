@@ -15,6 +15,7 @@
 #include "conduitscope/modbus.hpp"
 #include "conduitscope/notable_it_protocols.hpp"
 #include "conduitscope/resolver.hpp"
+#include "conduitscope/s7comm.hpp"
 
 namespace conduitscope {
 
@@ -323,7 +324,10 @@ void PolicyEngine::observe(const DecodedPacket& dp) {
         }
     } else if (dp.protocol == "dnp3") {
         fs.protocols.insert("dnp3");
-        if (dp.dnp3_has_function && !dp.dnp3_function_name.empty()) fs.functions.insert(dp.dnp3_function_name);
+        if (dp.result) {
+            const Dnp3Result& dr = dp.result->as<Dnp3Result>();
+            if (dr.dnp3_has_function && !dr.dnp3_function_name.empty()) fs.functions.insert(dr.dnp3_function_name);
+        }
     } else if (dp.protocol == "s7comm" || dp.protocol == "cotp") {
         // "cotp" (TPKT/COTP framing recognized, but not a decoded S7comm message -- e.g. a
         // connection-setup frame) is still legitimately part of an S7comm session on the wire, so
@@ -331,38 +335,75 @@ void PolicyEngine::observe(const DecodedPacket& dp) {
         // a decoded s7comm_function_name of its own, though (dp.protocol == "cotp" means no S7comm
         // message was decoded on this packet at all).
         fs.protocols.insert("s7comm");
-        if (dp.protocol == "s7comm" && dp.s7comm_has_function && !dp.s7comm_function_name.empty()) {
-            fs.functions.insert(dp.s7comm_function_name);
+        // Zero-flat-field migration (extra-reader batch): dp.s7comm_has_function/
+        // dp.s7comm_function_name are gone -- read from the S7CommResult on dp.result instead, same
+        // field names, just no longer flattened onto DecodedPacket itself. dp.result is only ever
+        // populated for dp.protocol == "s7comm" (never "cotp"), so the dp.protocol == "s7comm" check
+        // above continues to double as the dp.result guard here.
+        if (dp.protocol == "s7comm" && dp.result) {
+            const S7CommResult& sr = dp.result->as<S7CommResult>();
+            if (sr.has_function && !sr.function_name.empty()) fs.functions.insert(sr.function_name);
         }
     } else if (dp.protocol == "iec104") {
         fs.protocols.insert("iec104");
-        if (dp.iec104_has_asdu && !dp.iec104_asdu_type_short_name.empty()) {
-            fs.functions.insert(dp.iec104_asdu_type_short_name);
+        // Zero-flat-field migration (extra-reader batch): dp.iec104_has_asdu/
+        // dp.iec104_asdu_type_short_name are gone -- read from the Iec104Result on dp.result
+        // instead, same field names, just no longer flattened onto DecodedPacket itself.
+        if (dp.result) {
+            const Iec104Result& ir = dp.result->as<Iec104Result>();
+            if (ir.iec104_has_asdu && !ir.iec104_asdu_type_short_name.empty()) {
+                fs.functions.insert(ir.iec104_asdu_type_short_name);
+            }
         }
     } else if (dp.protocol == "enip") {
         fs.protocols.insert("enip");
-        if (dp.enip_has_cip && !dp.enip_cip_service_name.empty()) fs.functions.insert(dp.enip_cip_service_name);
+        // dp.result holds an EnipResult (TCP explicit messaging) or a CipIoFrame (UDP CIP I/O)
+        // depending on dp.has_tcp/dp.has_udp -- see write_enip_json_fields's own comment in
+        // output.cpp for why "enip" is the one shared-id() protocol with two different result
+        // types. CIP I/O has no function-name concept of its own, so only the TCP side matters here.
+        if (dp.has_tcp && dp.result) {
+            const EnipFrame& ef = dp.result->as<EnipResult>().first;
+            if (ef.has_cip && !ef.cip.service_name.empty()) fs.functions.insert(ef.cip.service_name);
+        }
     } else if (dp.protocol == "hartip") {
         fs.protocols.insert("hartip");
-        // hartip_message_type ("Request"/"Response"/"Publish"/"Error"/"NAK") is always set when
-        // protocol == "hartip" -- see decoder.hpp -- unlike the others above, no separate "was
-        // anything decoded at all" guard is needed.
-        if (!dp.hartip_message_type.empty()) fs.functions.insert(dp.hartip_message_type);
+        // Zero-flat-field migration (extra-reader batch): dp.hartip_message_type is gone -- read
+        // from HartIpResult::first on dp.result instead. HartIpFrame::message_type_name
+        // ("Request"/"Response"/"Publish"/"Error"/"NAK") is always set once a "hartip" packet
+        // decodes at all -- see hartip.hpp -- unlike the others above, no separate "was anything
+        // decoded at all" guard is needed beyond dp.result itself.
+        if (dp.result) {
+            const std::string& mt = dp.result->as<HartIpResult>().first.message_type_name;
+            if (!mt.empty()) fs.functions.insert(mt);
+        }
     } else if (dp.protocol == "opcua") {
         fs.protocols.insert("opcua");
-        if (dp.opcua_service_recognized && !dp.opcua_service_name.empty()) {
-            fs.functions.insert(dp.opcua_service_name);
+        // Zero-flat-field migration (extra-reader batch): dp.opcua_service_recognized/
+        // dp.opcua_service_name are gone -- read from OpcUaResult::first on dp.result instead, same
+        // field names, just no longer flattened onto DecodedPacket itself.
+        if (dp.result) {
+            const OpcUaMessage& m = dp.result->as<OpcUaResult>().first;
+            if (m.service_recognized && !m.service_name.empty()) fs.functions.insert(m.service_name);
         }
     } else if (dp.protocol == "mms") {
         fs.protocols.insert("mms");
-        if (dp.mms_service_recognized && !dp.mms_service_name.empty()) {
-            fs.functions.insert(dp.mms_service_name);
+        // Zero-flat-field migration (extra-reader batch): dp.mms_service_recognized/
+        // dp.mms_service_name are gone -- read from the MmsFrame on dp.result instead, same field
+        // names, just no longer flattened onto DecodedPacket itself.
+        if (dp.result) {
+            const MmsFrame& mf = dp.result->as<MmsFrame>();
+            if (mf.service_recognized && !mf.service_name.empty()) fs.functions.insert(mf.service_name);
         }
     } else if (dp.protocol == "mqtt") {
         fs.protocols.insert("mqtt");
-        // mqtt_packet_type_name ("CONNECT"/"PUBLISH"/...) is always set when protocol == "mqtt" --
-        // see decoder.hpp -- same "no separate guard needed" shape as hartip_message_type above.
-        if (!dp.mqtt_packet_type_name.empty()) fs.functions.insert(dp.mqtt_packet_type_name);
+        // Zero-flat-field migration (extra-reader batch): dp.mqtt_packet_type_name is gone -- read
+        // from MqttResult::first on dp.result instead. MqttMessage::packet_type_name
+        // ("CONNECT"/"PUBLISH"/...) is always set once a "mqtt" packet decodes at all -- see
+        // mqtt.hpp -- same "no separate guard needed" shape as hartip_message_type above.
+        if (dp.result) {
+            const std::string& pt = dp.result->as<MqttResult>().first.packet_type_name;
+            if (!pt.empty()) fs.functions.insert(pt);
+        }
     } else if (dp.protocol == "ffhse") {
         fs.protocols.insert("ffhse");
         // FfhseFrame::message_name is always set when protocol == "ffhse" -- see ffhse.hpp.

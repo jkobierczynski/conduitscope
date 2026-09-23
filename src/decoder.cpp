@@ -1008,13 +1008,8 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                     const CipIoFrame& io = io_result->as<CipIoFrame>();
                     out.protocol = "enip";
                     out.summary = io.summary;
-                    out.enip_has_io = true;
-                    out.enip_io_connection_id = io.connection_id;
-                    out.enip_io_sequence_number = io.sequence_number;
-                    out.enip_io_has_data = io.has_io_data;
-                    out.enip_io_data_hex = io.io_data_hex;
-                    out.enip_io_data_length = io.io_data_length;
                     for (const auto& n : io.notes) out.notes.push_back(n);
+                    out.result = *io_result;
 
                     bool expected_port = port_in(udp.src_port, ENIP_IO_UDP_PORT, options_.extra_enip_io_ports) ||
                                           port_in(udp.dst_port, ENIP_IO_UDP_PORT, options_.extra_enip_io_ports);
@@ -1049,32 +1044,8 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                     const BacnetFrame& bf = bacnet->as<BacnetFrame>();
                     out.protocol = "bacnet";
                     out.summary = bf.summary;
-                    out.bacnet_bvlc_function = bf.bvlc_function_name;
-                    out.bacnet_has_npdu = bf.has_npdu;
                     for (const auto& n : bf.notes) out.notes.push_back(n);
-                    if (bf.has_npdu) {
-                        const BacnetNpdu& npdu = bf.npdu;
-                        out.bacnet_npdu_version = npdu.version;
-                        out.bacnet_npdu_is_network_layer_message = npdu.is_network_layer_message;
-                        out.bacnet_npdu_expecting_reply = npdu.expecting_reply;
-                        out.bacnet_npdu_priority = npdu.priority;
-                        out.bacnet_npdu_has_dest = npdu.has_dest;
-                        out.bacnet_npdu_dnet = npdu.dnet;
-                        out.bacnet_npdu_has_src = npdu.has_src;
-                        out.bacnet_npdu_snet = npdu.snet;
-                        out.bacnet_npdu_hop_count = npdu.hop_count;
-                        if (npdu.is_network_layer_message) {
-                            out.bacnet_npdu_message_type = npdu.message_type_name;
-                        } else if (npdu.has_apdu) {
-                            const BacnetApdu& apdu = npdu.apdu;
-                            out.bacnet_has_apdu = true;
-                            out.bacnet_apdu_type = apdu.pdu_type_name;
-                            out.bacnet_service_name = apdu.service_choice_name;
-                            out.bacnet_invoke_id = apdu.invoke_id;
-                            out.bacnet_segmented = apdu.segmented;
-                            out.bacnet_values = apdu.values;
-                        }
-                    }
+                    out.result = *bacnet;
 
                     bool expected_port = port_in(udp.src_port, BACNET_UDP_PORT, options_.extra_bacnet_ports) ||
                                           port_in(udp.dst_port, BACNET_UDP_PORT, options_.extra_bacnet_ports);
@@ -1256,54 +1227,10 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                 ctx.flow_states = &registry_flow_state_;
                 if (auto hartip_result = hartip_udp_decoder().decode(udp.payload, ctx)) {
                     const HartIpResult& hr = hartip_result->as<HartIpResult>();
-                    const HartIpFrame& frame = hr.first;
                     out.protocol = "hartip";
                     out.summary = hr.summary;
                     for (const auto& n : hr.notes) out.notes.push_back(n);
-                    out.hartip_version = frame.version;
-                    out.hartip_message_type = frame.message_type_name;
-                    out.hartip_message_id = frame.message_id_name;
-                    out.hartip_status = frame.status;
-                    out.hartip_transaction_id = frame.transaction_id;
-                    out.hartip_msg_length = frame.msg_length;
-                    out.hartip_has_session_init = frame.has_session_init;
-                    if (frame.has_session_init) {
-                        out.hartip_host_type_name = frame.session_init.host_type_name;
-                        out.hartip_inactivity_close_timer = frame.session_init.inactivity_close_timer;
-                    }
-                    out.hartip_has_error = frame.has_error;
-                    if (frame.has_error) {
-                        out.hartip_error_code = frame.error_code;
-                        out.hartip_error_code_name = frame.error_code_name;
-                    }
-                    out.hartip_has_pass_through = frame.has_pass_through;
-                    if (frame.has_pass_through) {
-                        const HartIpPassThrough& pt = frame.pass_through;
-                        out.hartip_frame_type = pt.frame_type_name;
-                        out.hartip_is_response = pt.is_response;
-                        out.hartip_is_long_address = pt.is_long_address;
-                        if (pt.is_long_address) {
-                            out.hartip_address_hex = pt.long_address_hex;
-                        } else {
-                            std::ostringstream a;
-                            a << std::hex << std::uppercase << std::setfill('0') << std::setw(2)
-                              << static_cast<unsigned>(pt.short_address);
-                            out.hartip_address_hex = a.str();
-                        }
-                        out.hartip_command = pt.command;
-                        out.hartip_command_name = pt.command_name;
-                        if (pt.is_response) {
-                            out.hartip_response_code = pt.response_code;
-                            out.hartip_response_is_comm_error = pt.response_is_comm_error;
-                            out.hartip_response_code_name = pt.response_code_name;
-                            out.hartip_comm_error_flags = pt.comm_error_flags;
-                            out.hartip_device_status = pt.device_status;
-                            out.hartip_device_status_flags = pt.device_status_flags;
-                        }
-                        out.hartip_values = pt.values;
-                        out.hartip_checksum = pt.checksum;
-                        out.hartip_checksum_valid = pt.checksum_valid;
-                    }
+                    out.result = *hartip_result;
 
                     bool expected_port = port_in(udp.src_port, HARTIP_PORT, options_.extra_hartip_ports) ||
                                           port_in(udp.dst_port, HARTIP_PORT, options_.extra_hartip_ports);
@@ -2133,49 +2060,10 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
             opcua_ctx.redact_secrets = options_.redact_secrets;
             if (auto opcua_result = opcua_decoder().decode(effective_payload, opcua_ctx)) {
                 const OpcUaResult& oua = opcua_result->as<OpcUaResult>();
-                const OpcUaMessage& m = oua.first;
                 out.protocol = "opcua";
                 out.summary = oua.summary;
                 for (const auto& n : oua.notes) out.notes.push_back(n);
-
-                out.opcua_message_type = m.message_type;
-                out.opcua_chunk_type = m.chunk_type;
-                out.opcua_message_size = m.message_size;
-                out.opcua_has_secure_channel = m.has_secure_channel;
-                if (m.has_secure_channel) {
-                    out.opcua_secure_channel_id = m.secure_channel_id;
-                    out.opcua_is_asymmetric = m.is_asymmetric;
-                    if (m.is_asymmetric) {
-                        out.opcua_security_policy_uri = m.security_policy_uri;
-                        out.opcua_has_sender_certificate = m.has_sender_certificate;
-                        out.opcua_sender_certificate_length = m.sender_certificate_length;
-                        out.opcua_has_receiver_certificate_thumbprint =
-                            m.has_receiver_certificate_thumbprint;
-                    } else {
-                        out.opcua_token_id = m.token_id;
-                    }
-                    out.opcua_sequence_number = m.sequence_number;
-                    out.opcua_request_id = m.request_id;
-                }
-                out.opcua_service_recognized = m.service_recognized;
-                out.opcua_service_name = m.service_name;
-                out.opcua_service_namespace = m.service_namespace;
-                out.opcua_service_type_id = m.service_type_id;
-                out.opcua_service_body_decoded = m.service_body_decoded;
-                out.opcua_has_header = m.has_header;
-                if (m.has_header) {
-                    out.opcua_request_handle = m.header.request_handle;
-                    out.opcua_is_response = m.header.is_response;
-                    out.opcua_status_code = m.header.status_code;
-                    out.opcua_status_code_name = m.header.status_code_name;
-                    out.opcua_status_is_good = m.header.status_is_good;
-                }
-                out.opcua_values = m.values;
-                out.opcua_body_shown_as_hex = m.body_shown_as_hex;
-                if (m.body_shown_as_hex) {
-                    out.opcua_body_hex = m.body_hex;
-                    out.opcua_body_length = m.body_length;
-                }
+                out.result = *opcua_result;
 
                 bool expected_port = port_in(tcp.src_port, OPCUA_PORT, options_.extra_opcua_ports) ||
                                       port_in(tcp.dst_port, OPCUA_PORT, options_.extra_opcua_ports);
@@ -2204,20 +2092,10 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
             enip_ctx.flow_states = &registry_flow_state_;
             if (auto enip_result = enip_tcp_decoder().decode(effective_payload, enip_ctx)) {
                 const EnipResult& er = enip_result->as<EnipResult>();
-                const EnipFrame& frame = er.first;
                 out.protocol = "enip";
                 out.summary = er.summary;
-                out.enip_command_name = frame.header.command_name;
                 for (const auto& n : er.notes) out.notes.push_back(n);
-
-                if (frame.has_cip) {
-                    out.enip_has_cip = true;
-                    out.enip_cip_is_response = frame.cip.is_response;
-                    out.enip_cip_service_name = frame.cip.service_name;
-                    out.enip_cip_path = frame.cip.path.summary;
-                    out.enip_cip_status_name = frame.cip.status_name;
-                    out.enip_cip_values = frame.cip.values;
-                }
+                out.result = *enip_result;
 
                 bool expected_port = port_in(tcp.src_port, ENIP_TCP_PORT, options_.extra_enip_ports) ||
                                       port_in(tcp.dst_port, ENIP_TCP_PORT, options_.extra_enip_ports);
@@ -2245,12 +2123,7 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                 out.protocol = "iec104";
                 out.summary = ir.summary;
                 for (const auto& n : ir.notes) out.notes.push_back(n);
-                out.iec104_has_asdu = ir.iec104_has_asdu;
-                out.iec104_asdu_type_name = ir.iec104_asdu_type_name;
-                out.iec104_asdu_type_short_name = ir.iec104_asdu_type_short_name;
-                out.iec104_cot_name = ir.iec104_cot_name;
-                out.iec104_common_address = ir.iec104_common_address;
-                out.iec104_object_values = ir.iec104_object_values;
+                out.result = *iec104_result;
 
                 bool expected_port = port_in(tcp.src_port, IEC104_TCP_PORT, options_.extra_iec104_ports) ||
                                       port_in(tcp.dst_port, IEC104_TCP_PORT, options_.extra_iec104_ports);
@@ -2573,16 +2446,7 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                 out.protocol = "dnp3";
                 out.summary = dr.summary;
                 for (const auto& n : dr.notes) out.notes.push_back(n);
-                out.dnp3_has_function = dr.dnp3_has_function;
-                out.dnp3_function_name = dr.dnp3_function_name;
-                out.dnp3_object_headers = dr.dnp3_object_headers;
-                out.dnp3_point_values = dr.dnp3_point_values;
-                out.dnp3_link_crc_valid = dr.link_crc_valid;
-                out.dnp3_header_crc_valid = dr.header_crc_valid;
-                out.dnp3_block_count = dr.block_count;
-                out.dnp3_block_crc_failures = dr.block_crc_failures;
-                out.dnp3_source_address = dr.source_address;
-                out.dnp3_destination_address = dr.destination_address;
+                out.result = *dnp3_result;
 
                 bool expected_port = port_in(tcp.src_port, DNP3_TCP_PORT, options_.extra_dnp3_ports) ||
                                       port_in(tcp.dst_port, DNP3_TCP_PORT, options_.extra_dnp3_ports);
@@ -2687,45 +2551,52 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                             out.protocol = "s7comm";
                             out.summary = s7.summary;
                             for (const auto& n : s7.notes) out.notes.push_back(n);
-                            out.s7comm_has_function = s7.has_function;
-                            out.s7comm_function_name = s7.function_name;
+                            S7CommResult sr;
+                            sr.summary = s7.summary;
+                            sr.notes = s7.notes;
+                            sr.has_function = s7.has_function;
+                            sr.function_name = s7.function_name;
                             const size_t kMaxTags = resource_limits().max_decoded_objects.value_or(50);
+                            // `items` carries forward unmodified -- S7Item has no ByteSpan of its own,
+                            // so the display-tag-plus-"[EXPERIMENTAL]" transform (previously done right
+                            // here) is deferred to output.cpp's write_s7comm_json_fields instead. See
+                            // S7CommResult's own comment in s7comm.hpp for why this differs from
+                            // value_summaries below.
                             for (size_t i = 0; i < s7.items.size() && i < kMaxTags; ++i) {
-                                const auto& it = s7.items[i];
-                                std::string display_tag = !it.tag.empty() ? it.tag : it.area_name;
-                                // A consumer parsing this array as trusted addresses must not mistake an
-                                // unverified reconstruction for the well-established S7ANY decode.
-                                if (it.is_experimental) display_tag += " [EXPERIMENTAL]";
-                                out.s7comm_item_tags.push_back(display_tag);
+                                sr.items.push_back(s7.items[i]);
                             }
+                            // value_summaries, unlike items, must be computed EAGERLY here -- di.data is
+                            // a ByteSpan that can point into cr's own s7_candidate_storage, which does not
+                            // outlive this call. See S7CommResult's own comment in s7comm.hpp.
                             for (size_t i = 0; i < s7.data_items.size() && i < kMaxTags; ++i) {
                                 const auto& di = s7.data_items[i];
                                 // return_code_name is only set for items that carry a return code on
                                 // the wire (Read Var / Write Var responses); a Write Var request's
                                 // value item has none, so this falls straight through to the value.
                                 if (!di.return_code_name.empty() && di.return_code != 0xFF) {
-                                    out.s7comm_value_summaries.push_back(di.return_code_name);
+                                    sr.value_summaries.push_back(di.return_code_name);
                                 } else if (di.has_value_fields && di.transport_size == 0x03 && di.data.size() == 1) {
-                                    out.s7comm_value_summaries.push_back(di.data.at(0) != 0 ? "1" : "0");
+                                    sr.value_summaries.push_back(di.data.at(0) != 0 ? "1" : "0");
                                 } else if (di.has_value_fields && !di.data.empty()) {
-                                    out.s7comm_value_summaries.push_back(to_hex(di.data, ""));
+                                    sr.value_summaries.push_back(to_hex(di.data, ""));
                                 } else if (!di.return_code_name.empty()) {
-                                    out.s7comm_value_summaries.push_back("ok");
+                                    sr.value_summaries.push_back("ok");
                                 } else {
-                                    out.s7comm_value_summaries.push_back("");
+                                    sr.value_summaries.push_back("");
                                 }
                             }
-                            out.s7comm_plc_stop_message = s7.plc_stop_message;
-                            out.s7comm_has_pi_service = s7.has_pi_service;
-                            out.s7comm_pi_service_name = s7.pi_service_name;
-                            out.s7comm_pi_service_description = s7.pi_service_description;
-                            out.s7comm_pi_control_argument = s7.pi_control_argument;
+                            sr.plc_stop_message = s7.plc_stop_message;
+                            sr.has_pi_service = s7.has_pi_service;
+                            sr.pi_service_name = s7.pi_service_name;
+                            sr.pi_service_description = s7.pi_service_description;
+                            sr.pi_control_argument = s7.pi_control_argument;
                             for (size_t i = 0; i < s7.pi_control_blocks.size() && i < kMaxTags; ++i) {
-                                out.s7comm_pi_control_blocks.push_back(s7.pi_control_blocks[i]);
+                                sr.pi_control_blocks.push_back(s7.pi_control_blocks[i]);
                             }
-                            out.s7comm_has_pi_control_status = s7.has_pi_control_status;
-                            out.s7comm_pi_control_has_more_data = s7.pi_control_has_more_data;
-                            out.s7comm_pi_control_has_error = s7.pi_control_has_error;
+                            sr.has_pi_control_status = s7.has_pi_control_status;
+                            sr.pi_control_has_more_data = s7.pi_control_has_more_data;
+                            sr.pi_control_has_error = s7.pi_control_has_error;
+                            out.result = ProtocolResult::make<S7CommResult>("s7comm", std::move(sr));
                             for (const auto& n : cr.notes) out.notes.push_back(n);
                             annotate_port();
                             return out;
@@ -2794,36 +2665,13 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                             out.protocol = "mms";
                             out.summary = mms.summary;
                             for (const auto& n : mms.notes) out.notes.push_back(n);
-                            out.mms_is_bare = mms.is_bare;
-                            out.mms_session_spdu_type = mms.session_spdu_type;
-                            out.mms_session_pdu_name = mms.session_pdu_name;
-                            out.mms_has_presentation = mms.has_presentation;
-                            out.mms_presentation_context_list = mms.presentation_context_list;
-                            out.mms_presentation_context_id = mms.presentation_context_id;
-                            out.mms_presentation_context_is_acse = mms.presentation_context_is_acse;
-                            out.mms_has_acse = mms.has_acse;
-                            out.mms_acse_pdu_name = mms.acse_pdu_name;
-                            out.mms_acse_application_context_name = mms.acse_application_context_name;
-                            out.mms_acse_has_result = mms.acse_has_result;
-                            out.mms_acse_result_name = mms.acse_result_name;
-                            out.mms_acse_values = mms.acse_values;
-                            out.mms_has_pdu = mms.has_pdu;
-                            out.mms_pdu_name = mms.pdu_name;
-                            out.mms_has_invoke_id = mms.has_invoke_id;
-                            out.mms_invoke_id = mms.invoke_id;
-                            out.mms_service_recognized = mms.service_recognized;
-                            out.mms_service_name = mms.service_name;
-                            out.mms_service_body_decoded = mms.service_body_decoded;
-                            out.mms_is_response = mms.is_response;
-                            out.mms_has_error = mms.has_error;
-                            out.mms_error_name = mms.error_name;
-                            const size_t kMaxMmsValues = resource_limits().max_decoded_objects.value_or(50);
-                            for (size_t i = 0; i < mms.values.size() && i < kMaxMmsValues; ++i) {
-                                out.mms_values.push_back(mms.values[i]);
-                            }
-                            out.mms_body_shown_as_hex = mms.body_shown_as_hex;
-                            out.mms_body_hex = mms.body_hex;
-                            out.mms_body_length = mms.body_length;
+                            // MmsFrame has no ByteSpan of its own (every field above is an owned
+                            // scalar/string/vector -- see mms.hpp), so it's safe to carry forward
+                            // unmodified, unlike S7comm's own S7CommResult wrapper. The old dual
+                            // write's own 50-entry cap on mms_values is now applied where it's
+                            // rendered instead (output.cpp's write_mms_json_fields), the same
+                            // "defer the transform" shape S7CommResult::items uses.
+                            out.result = *result;
                             for (const auto& n : cr.notes) out.notes.push_back(n);
                             annotate_port();
                             return out;
@@ -2858,54 +2706,10 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
             ctx.flow_states = &registry_flow_state_;
             if (auto hartip_result = hartip_tcp_decoder().decode(effective_payload, ctx)) {
                 const HartIpResult& hr = hartip_result->as<HartIpResult>();
-                const HartIpFrame& frame = hr.first;
                 out.protocol = "hartip";
                 out.summary = hr.summary;
                 for (const auto& n : hr.notes) out.notes.push_back(n);
-                out.hartip_version = frame.version;
-                out.hartip_message_type = frame.message_type_name;
-                out.hartip_message_id = frame.message_id_name;
-                out.hartip_status = frame.status;
-                out.hartip_transaction_id = frame.transaction_id;
-                out.hartip_msg_length = frame.msg_length;
-                out.hartip_has_session_init = frame.has_session_init;
-                if (frame.has_session_init) {
-                    out.hartip_host_type_name = frame.session_init.host_type_name;
-                    out.hartip_inactivity_close_timer = frame.session_init.inactivity_close_timer;
-                }
-                out.hartip_has_error = frame.has_error;
-                if (frame.has_error) {
-                    out.hartip_error_code = frame.error_code;
-                    out.hartip_error_code_name = frame.error_code_name;
-                }
-                out.hartip_has_pass_through = frame.has_pass_through;
-                if (frame.has_pass_through) {
-                    const HartIpPassThrough& pt = frame.pass_through;
-                    out.hartip_frame_type = pt.frame_type_name;
-                    out.hartip_is_response = pt.is_response;
-                    out.hartip_is_long_address = pt.is_long_address;
-                    if (pt.is_long_address) {
-                        out.hartip_address_hex = pt.long_address_hex;
-                    } else {
-                        std::ostringstream a;
-                        a << std::hex << std::uppercase << std::setfill('0') << std::setw(2)
-                          << static_cast<unsigned>(pt.short_address);
-                        out.hartip_address_hex = a.str();
-                    }
-                    out.hartip_command = pt.command;
-                    out.hartip_command_name = pt.command_name;
-                    if (pt.is_response) {
-                        out.hartip_response_code = pt.response_code;
-                        out.hartip_response_is_comm_error = pt.response_is_comm_error;
-                        out.hartip_response_code_name = pt.response_code_name;
-                        out.hartip_comm_error_flags = pt.comm_error_flags;
-                        out.hartip_device_status = pt.device_status;
-                        out.hartip_device_status_flags = pt.device_status_flags;
-                    }
-                    out.hartip_values = pt.values;
-                    out.hartip_checksum = pt.checksum;
-                    out.hartip_checksum_valid = pt.checksum_valid;
-                }
+                out.result = *hartip_result;
 
                 bool expected_port = port_in(tcp.src_port, HARTIP_PORT, options_.extra_hartip_ports) ||
                                       port_in(tcp.dst_port, HARTIP_PORT, options_.extra_hartip_ports);
@@ -2961,47 +2765,10 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
             ctx.redact_secrets = options_.redact_secrets;
             if (auto mqtt_result = mqtt_decoder().decode(effective_payload, ctx)) {
                 const MqttResult& mr = mqtt_result->as<MqttResult>();
-                const MqttMessage& m = mr.first;
                 out.protocol = "mqtt";
                 out.summary = mr.summary;
                 for (const auto& n : mr.notes) out.notes.push_back(n);
-                out.mqtt_packet_type_name = m.packet_type_name;
-                out.mqtt_remaining_length = m.remaining_length;
-                out.mqtt_dup = m.dup;
-                out.mqtt_retain = m.retain;
-                out.mqtt_qos = m.qos;
-                out.mqtt_has_packet_id = m.has_packet_id;
-                out.mqtt_packet_id = m.packet_id;
-                out.mqtt_topic = m.topic;
-                out.mqtt_has_payload = m.has_payload;
-                out.mqtt_payload_length = m.payload_length;
-                out.mqtt_payload_hex = m.payload_hex;
-                out.mqtt_protocol_version_name = m.protocol_version_name;
-                out.mqtt_values = m.values;
-                out.mqtt_is_sparkplug = m.is_sparkplug;
-                if (m.is_sparkplug) {
-                    out.mqtt_sparkplug_group_id = m.sparkplug_group_id;
-                    out.mqtt_sparkplug_message_type = m.sparkplug_message_type;
-                    out.mqtt_sparkplug_edge_node_id = m.sparkplug_edge_node_id;
-                    out.mqtt_sparkplug_device_id = m.sparkplug_device_id;
-                    out.mqtt_sparkplug_is_state = m.sparkplug_is_state;
-                    if (m.sparkplug_is_state) {
-                        out.mqtt_sparkplug_state_host_id = m.sparkplug_state_host_id;
-                        out.mqtt_sparkplug_state_text = m.sparkplug_state_text;
-                    } else {
-                        out.mqtt_sparkplug_payload_decoded = m.sparkplug_payload.parse_ok;
-                        out.mqtt_sparkplug_has_timestamp = m.sparkplug_payload.has_timestamp;
-                        out.mqtt_sparkplug_timestamp = m.sparkplug_payload.timestamp;
-                        out.mqtt_sparkplug_has_seq = m.sparkplug_payload.has_seq;
-                        out.mqtt_sparkplug_seq = m.sparkplug_payload.seq;
-                        out.mqtt_sparkplug_has_uuid = m.sparkplug_payload.has_uuid;
-                        out.mqtt_sparkplug_uuid = m.sparkplug_payload.uuid;
-                        out.mqtt_sparkplug_has_body = m.sparkplug_payload.has_body;
-                        out.mqtt_sparkplug_body_length = m.sparkplug_payload.body_length;
-                        out.mqtt_sparkplug_metric_count = m.sparkplug_payload.metric_count;
-                        out.mqtt_sparkplug_metrics = m.sparkplug_payload.metrics;
-                    }
-                }
+                out.result = *mqtt_result;
 
                 bool expected_port = port_in(tcp.src_port, MQTT_PORT, options_.extra_mqtt_ports) ||
                                       port_in(tcp.dst_port, MQTT_PORT, options_.extra_mqtt_ports);

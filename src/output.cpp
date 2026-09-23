@@ -5,6 +5,8 @@
 #include <iomanip>
 #include <sstream>
 
+#include "conduitscope/s7comm.hpp"
+
 namespace conduitscope {
 
 std::string json_escape(const std::string& s) {
@@ -1659,6 +1661,535 @@ void write_kerberos_json_fields(std::ostream& out, const KerberosMessage& km) {
     }
 }
 
+// Zero-flat-field migration (extra-reader batch): the EtherNet/IP explicit-messaging (TCP) analog
+// of write_goose_json_fields above. EtherNet/IP is the one protocol in this codebase whose id()
+// ("enip") is shared by two decoders with genuinely DIFFERENT ProtocolResult payload types --
+// EnipTcpDecoder's EnipResult (wrapping EnipFrame) here, vs EnipUdpDecoder's CipIoFrame directly
+// in write_enip_io_json_fields below -- unlike MPLS's own shared-id() case (mpls.hpp), where both
+// decoders produce the same MplsFrame type. So, unlike every other write_x_json_fields function in
+// this file, JsonWriter's own call site (below) has to discriminate WHICH of the two to cast
+// `p.result` to before calling either of these -- it does so via p.has_tcp/p.has_udp, since CIP I/O
+// only ever runs on UDP and explicit messaging only ever runs on TCP (see EnipTcpDecoder/
+// EnipUdpDecoder's own gate_kind()s in enip.hpp). Reproduces the exact same three-tier gating the
+// old JsonWriter block had: enip_command prints only when non-empty (empty for -- impossible here,
+// since this overload is only ever called for the TCP/EnipFrame side, but the emptiness check
+// itself is preserved verbatim since a NOP command still decodes with an empty name -- see
+// enip.hpp's file header comment), the cip_* fields print only when ef.has_cip, and cip_values
+// prints independently whenever non-empty.
+void write_enip_json_fields(std::ostream& out, const EnipFrame& ef) {
+    if (!ef.header.command_name.empty()) {
+        out << "    \"enip_command\": \"" << json_escape(ef.header.command_name) << "\",\n";
+    }
+    if (ef.has_cip) {
+        out << "    \"enip_cip_is_response\": " << (ef.cip.is_response ? "true" : "false") << ",\n";
+        out << "    \"enip_cip_service\": \"" << json_escape(ef.cip.service_name) << "\",\n";
+        if (!ef.cip.path.summary.empty()) {
+            out << "    \"enip_cip_path\": \"" << json_escape(ef.cip.path.summary) << "\",\n";
+        }
+        if (!ef.cip.status_name.empty()) {
+            out << "    \"enip_cip_status\": \"" << json_escape(ef.cip.status_name) << "\",\n";
+        }
+    }
+    if (!ef.cip.values.empty()) {
+        out << "    \"enip_cip_values\": [";
+        for (size_t i = 0; i < ef.cip.values.size(); ++i) {
+            if (i != 0) out << ", ";
+            out << "\"" << json_escape(ef.cip.values[i]) << "\"";
+        }
+        out << "],\n";
+    }
+}
+
+// The CIP I/O (implicit messaging, UDP) counterpart to write_enip_json_fields above -- see that
+// function's own comment for why EtherNet/IP needs two write functions instead of the usual one.
+void write_enip_io_json_fields(std::ostream& out, const CipIoFrame& io) {
+    std::ostringstream connid;
+    connid << "0x" << std::hex << std::uppercase << io.connection_id;
+    out << "    \"enip_io_connection_id\": \"" << connid.str() << "\",\n";
+    out << "    \"enip_io_sequence_number\": " << io.sequence_number << ",\n";
+    if (io.has_io_data) {
+        out << "    \"enip_io_data_length\": " << io.io_data_length << ",\n";
+        out << "    \"enip_io_data_hex\": \"" << json_escape(io.io_data_hex) << "\",\n";
+    }
+}
+
+// Zero-flat-field migration (extra-reader batch): the BACnet/IP analog of write_devicenet_json_fields
+// above. Reproduces the exact same nested gating the old JsonWriter block had: bvlc_function/
+// has_npdu print unconditionally for any "bacnet" packet, everything else is nested under
+// bf.has_npdu (dest/src-dependent dnet/snet/hop_count, network-layer-message-only message_type,
+// APDU-only fields), unchanged from before this migration.
+void write_bacnet_json_fields(std::ostream& out, const BacnetFrame& bf) {
+    out << "    \"bacnet_bvlc_function\": \"" << json_escape(bf.bvlc_function_name) << "\",\n";
+    out << "    \"bacnet_has_npdu\": " << (bf.has_npdu ? "true" : "false") << ",\n";
+    if (bf.has_npdu) {
+        const BacnetNpdu& npdu = bf.npdu;
+        out << "    \"bacnet_npdu_version\": " << static_cast<unsigned>(npdu.version) << ",\n";
+        out << "    \"bacnet_npdu_is_network_layer_message\": "
+            << (npdu.is_network_layer_message ? "true" : "false") << ",\n";
+        out << "    \"bacnet_npdu_expecting_reply\": " << (npdu.expecting_reply ? "true" : "false") << ",\n";
+        out << "    \"bacnet_npdu_priority\": " << static_cast<unsigned>(npdu.priority) << ",\n";
+        out << "    \"bacnet_npdu_has_dest\": " << (npdu.has_dest ? "true" : "false") << ",\n";
+        if (npdu.has_dest) out << "    \"bacnet_npdu_dnet\": " << npdu.dnet << ",\n";
+        out << "    \"bacnet_npdu_has_src\": " << (npdu.has_src ? "true" : "false") << ",\n";
+        if (npdu.has_src) out << "    \"bacnet_npdu_snet\": " << npdu.snet << ",\n";
+        if (npdu.has_dest)
+            out << "    \"bacnet_npdu_hop_count\": " << static_cast<unsigned>(npdu.hop_count) << ",\n";
+        if (npdu.is_network_layer_message) {
+            out << "    \"bacnet_npdu_message_type\": \"" << json_escape(npdu.message_type_name) << "\",\n";
+        }
+        out << "    \"bacnet_has_apdu\": " << (npdu.has_apdu ? "true" : "false") << ",\n";
+        if (npdu.has_apdu) {
+            const BacnetApdu& apdu = npdu.apdu;
+            out << "    \"bacnet_apdu_type\": \"" << json_escape(apdu.pdu_type_name) << "\",\n";
+            if (!apdu.service_choice_name.empty())
+                out << "    \"bacnet_service_name\": \"" << json_escape(apdu.service_choice_name) << "\",\n";
+            out << "    \"bacnet_invoke_id\": " << apdu.invoke_id << ",\n";
+            out << "    \"bacnet_segmented\": " << (apdu.segmented ? "true" : "false") << ",\n";
+            if (!apdu.values.empty()) {
+                out << "    \"bacnet_values\": [";
+                for (size_t i = 0; i < apdu.values.size(); ++i) {
+                    if (i != 0) out << ", ";
+                    out << "\"" << json_escape(apdu.values[i]) << "\"";
+                }
+                out << "],\n";
+            }
+        }
+    }
+}
+
+// Zero-flat-field migration (extra-reader batch): the MMS analog of write_bacnet_json_fields
+// above. Reproduces the exact same nested gating the old JsonWriter block had: mms_is_bare prints
+// unconditionally, the session/presentation/ACSE fields are nested under !mf.is_bare (and,
+// further, presentation-specific/ACSE-specific fields nested under their own has_presentation/
+// has_acse), mms_has_pdu prints unconditionally, the PDU-specific fields nested under mf.has_pdu,
+// and mms_values/mms_body_* print unconditionally at the end -- unchanged from before this
+// migration. The one addition: mf.values' old 50-entry cap (previously applied at decoder.cpp's
+// own call site) is applied HERE instead, the same "defer the cap" shape S7CommResult::items'
+// rendering in write_s7comm_json_fields uses -- see decoder.cpp's own comment on this call site.
+void write_mms_json_fields(std::ostream& out, const MmsFrame& mf) {
+    out << "    \"mms_is_bare\": " << (mf.is_bare ? "true" : "false") << ",\n";
+    if (!mf.is_bare) {
+        out << "    \"mms_session_pdu\": \"" << json_escape(mf.session_pdu_name) << "\",\n";
+        out << "    \"mms_has_presentation\": " << (mf.has_presentation ? "true" : "false") << ",\n";
+        if (mf.has_presentation) {
+            if (!mf.presentation_context_list.empty()) {
+                out << "    \"mms_presentation_contexts\": [";
+                for (size_t i = 0; i < mf.presentation_context_list.size(); ++i) {
+                    if (i != 0) out << ", ";
+                    out << "\"" << json_escape(mf.presentation_context_list[i]) << "\"";
+                }
+                out << "],\n";
+            }
+            out << "    \"mms_presentation_context_id\": " << mf.presentation_context_id << ",\n";
+            out << "    \"mms_presentation_context_is_acse\": "
+                << (mf.presentation_context_is_acse ? "true" : "false") << ",\n";
+        }
+        out << "    \"mms_has_acse\": " << (mf.has_acse ? "true" : "false") << ",\n";
+        if (mf.has_acse) {
+            out << "    \"mms_acse_pdu\": \"" << json_escape(mf.acse_pdu_name) << "\",\n";
+            if (!mf.acse_application_context_name.empty()) {
+                out << "    \"mms_acse_application_context_name\": \""
+                    << json_escape(mf.acse_application_context_name) << "\",\n";
+            }
+            if (mf.acse_has_result) {
+                out << "    \"mms_acse_result\": \"" << json_escape(mf.acse_result_name) << "\",\n";
+            }
+            if (!mf.acse_values.empty()) {
+                out << "    \"mms_acse_values\": [";
+                for (size_t i = 0; i < mf.acse_values.size(); ++i) {
+                    if (i != 0) out << ", ";
+                    out << "\"" << json_escape(mf.acse_values[i]) << "\"";
+                }
+                out << "],\n";
+            }
+        }
+    }
+    out << "    \"mms_has_pdu\": " << (mf.has_pdu ? "true" : "false") << ",\n";
+    if (mf.has_pdu) {
+        out << "    \"mms_pdu\": \"" << json_escape(mf.pdu_name) << "\",\n";
+        out << "    \"mms_is_response\": " << (mf.is_response ? "true" : "false") << ",\n";
+        if (mf.has_invoke_id) {
+            out << "    \"mms_invoke_id\": " << mf.invoke_id << ",\n";
+        }
+        out << "    \"mms_service_recognized\": " << (mf.service_recognized ? "true" : "false") << ",\n";
+        if (mf.service_recognized) {
+            out << "    \"mms_service\": \"" << json_escape(mf.service_name) << "\",\n";
+        }
+        if (mf.has_error) {
+            out << "    \"mms_error\": \"" << json_escape(mf.error_name) << "\",\n";
+        }
+    }
+    if (!mf.values.empty()) {
+        const size_t kMaxMmsValues = resource_limits().max_decoded_objects.value_or(50);
+        out << "    \"mms_values\": [";
+        for (size_t i = 0; i < mf.values.size() && i < kMaxMmsValues; ++i) {
+            if (i != 0) out << ", ";
+            out << "\"" << json_escape(mf.values[i]) << "\"";
+        }
+        out << "],\n";
+    }
+    out << "    \"mms_body_shown_as_hex\": " << (mf.body_shown_as_hex ? "true" : "false") << ",\n";
+    if (mf.body_shown_as_hex) {
+        out << "    \"mms_body_length\": " << mf.body_length << ",\n";
+        out << "    \"mms_body_hex\": \"" << json_escape(mf.body_hex) << "\",\n";
+    }
+}
+
+// Zero-flat-field migration (extra-reader batch): the OPC UA analog of write_bacnet_json_fields
+// above -- takes OpcUaResult::first (the first coalesced chunk's OpcUaMessage), mirroring how
+// decoder.cpp's own call site only ever fed the rest of DecodedPacket from oua.first even before
+// this migration (see OpcUaResult's own comment in opcua.hpp). Reproduces the exact same nested
+// gating the old JsonWriter block had: header/chunk/size fields print unconditionally,
+// secure-channel fields nested under m.has_secure_channel (and further split
+// asymmetric-vs-symmetric), service_namespace/service_type_id print whenever recognized OR either
+// is non-zero (an intentional three-way OR, not just !service_recognized), header fields nested
+// under m.has_header (and status fields further nested under m.header.is_response), and
+// values/body_hex print unconditionally at the end -- unchanged from before this migration.
+void write_opcua_json_fields(std::ostream& out, const OpcUaMessage& m) {
+    out << "    \"opcua_message_type\": \"" << json_escape(m.message_type) << "\",\n";
+    out << "    \"opcua_chunk_type\": \"" << std::string(1, m.chunk_type) << "\",\n";
+    out << "    \"opcua_message_size\": " << m.message_size << ",\n";
+    out << "    \"opcua_has_secure_channel\": " << (m.has_secure_channel ? "true" : "false") << ",\n";
+    if (m.has_secure_channel) {
+        out << "    \"opcua_secure_channel_id\": " << m.secure_channel_id << ",\n";
+        out << "    \"opcua_is_asymmetric\": " << (m.is_asymmetric ? "true" : "false") << ",\n";
+        if (m.is_asymmetric) {
+            out << "    \"opcua_security_policy_uri\": \"" << json_escape(m.security_policy_uri) << "\",\n";
+            out << "    \"opcua_has_sender_certificate\": " << (m.has_sender_certificate ? "true" : "false")
+                << ",\n";
+            if (m.has_sender_certificate)
+                out << "    \"opcua_sender_certificate_length\": " << m.sender_certificate_length << ",\n";
+            out << "    \"opcua_has_receiver_certificate_thumbprint\": "
+                << (m.has_receiver_certificate_thumbprint ? "true" : "false") << ",\n";
+        } else {
+            out << "    \"opcua_token_id\": " << m.token_id << ",\n";
+        }
+        out << "    \"opcua_sequence_number\": " << m.sequence_number << ",\n";
+        out << "    \"opcua_request_id\": " << m.request_id << ",\n";
+    }
+    out << "    \"opcua_service_recognized\": " << (m.service_recognized ? "true" : "false") << ",\n";
+    if (m.service_recognized) {
+        out << "    \"opcua_service_name\": \"" << json_escape(m.service_name) << "\",\n";
+    }
+    if (m.service_namespace != 0 || m.service_type_id != 0 || m.service_recognized) {
+        out << "    \"opcua_service_namespace\": " << m.service_namespace << ",\n";
+        out << "    \"opcua_service_type_id\": " << m.service_type_id << ",\n";
+    }
+    out << "    \"opcua_has_header\": " << (m.has_header ? "true" : "false") << ",\n";
+    if (m.has_header) {
+        out << "    \"opcua_request_handle\": " << m.header.request_handle << ",\n";
+        out << "    \"opcua_is_response\": " << (m.header.is_response ? "true" : "false") << ",\n";
+        if (m.header.is_response) {
+            out << "    \"opcua_status_code\": " << m.header.status_code << ",\n";
+            out << "    \"opcua_status_code_name\": \"" << json_escape(m.header.status_code_name) << "\",\n";
+            out << "    \"opcua_status_is_good\": " << (m.header.status_is_good ? "true" : "false") << ",\n";
+        }
+    }
+    if (!m.values.empty()) {
+        out << "    \"opcua_values\": [";
+        for (size_t i = 0; i < m.values.size(); ++i) {
+            if (i != 0) out << ", ";
+            out << "\"" << json_escape(m.values[i]) << "\"";
+        }
+        out << "],\n";
+    }
+    out << "    \"opcua_body_shown_as_hex\": " << (m.body_shown_as_hex ? "true" : "false") << ",\n";
+    if (m.body_shown_as_hex) {
+        out << "    \"opcua_body_length\": " << m.body_length << ",\n";
+        out << "    \"opcua_body_hex\": \"" << json_escape(m.body_hex) << "\",\n";
+    }
+}
+
+// Zero-flat-field migration (extra-reader batch): the MQTT analog of write_opcua_json_fields
+// above -- takes MqttResult::first (the first coalesced packet's MqttMessage), mirroring how
+// decoder.cpp's own call site only ever fed the rest of DecodedPacket from mr.first even before
+// this migration (see MqttResult's own comment in mqtt.hpp). Reproduces the exact same nested
+// gating the old JsonWriter block had, including its one non-obvious detail: sparkplug_group_id/
+// sparkplug_edge_node_id/sparkplug_device_id/payload_decoded/timestamp/seq/uuid/body_length/
+// metric_count/metrics print ONLY in the else-branch of sparkplug_is_state (never alongside
+// state_host_id/state_text) -- unchanged from before this migration.
+void write_mqtt_json_fields(std::ostream& out, const MqttMessage& m) {
+    out << "    \"mqtt_packet_type\": \"" << json_escape(m.packet_type_name) << "\",\n";
+    out << "    \"mqtt_remaining_length\": " << m.remaining_length << ",\n";
+    if (!m.protocol_version_name.empty()) {
+        out << "    \"mqtt_protocol_version\": \"" << json_escape(m.protocol_version_name) << "\",\n";
+    }
+    if (m.packet_type_name == "PUBLISH") {
+        out << "    \"mqtt_dup\": " << (m.dup ? "true" : "false") << ",\n";
+        out << "    \"mqtt_qos\": " << static_cast<unsigned>(m.qos) << ",\n";
+        out << "    \"mqtt_retain\": " << (m.retain ? "true" : "false") << ",\n";
+        out << "    \"mqtt_topic\": \"" << json_escape(m.topic) << "\",\n";
+    }
+    if (m.has_packet_id) {
+        out << "    \"mqtt_packet_id\": " << m.packet_id << ",\n";
+    }
+    if (m.has_payload) {
+        out << "    \"mqtt_payload_length\": " << m.payload_length << ",\n";
+        // Omitted only when a successful Sparkplug B decode cleared it (see mqtt.hpp) -- a
+        // genuinely empty payload still renders an empty hex string, same as m.payload_length == 0.
+        bool hex_cleared_by_sparkplug = m.payload_length > 0 && m.payload_hex.empty();
+        if (!hex_cleared_by_sparkplug) {
+            out << "    \"mqtt_payload_hex\": \"" << json_escape(m.payload_hex) << "\",\n";
+        }
+    }
+    if (!m.values.empty()) {
+        out << "    \"mqtt_values\": [";
+        for (size_t i = 0; i < m.values.size(); ++i) {
+            if (i != 0) out << ", ";
+            out << "\"" << json_escape(m.values[i]) << "\"";
+        }
+        out << "],\n";
+    }
+    out << "    \"mqtt_is_sparkplug\": " << (m.is_sparkplug ? "true" : "false") << ",\n";
+    if (m.is_sparkplug) {
+        out << "    \"mqtt_sparkplug_message_type\": \"" << json_escape(m.sparkplug_message_type) << "\",\n";
+        out << "    \"mqtt_sparkplug_is_state\": " << (m.sparkplug_is_state ? "true" : "false") << ",\n";
+        if (m.sparkplug_is_state) {
+            out << "    \"mqtt_sparkplug_state_host_id\": \"" << json_escape(m.sparkplug_state_host_id)
+                << "\",\n";
+            out << "    \"mqtt_sparkplug_state_text\": \"" << json_escape(m.sparkplug_state_text) << "\",\n";
+        } else {
+            out << "    \"mqtt_sparkplug_group_id\": \"" << json_escape(m.sparkplug_group_id) << "\",\n";
+            out << "    \"mqtt_sparkplug_edge_node_id\": \"" << json_escape(m.sparkplug_edge_node_id)
+                << "\",\n";
+            if (!m.sparkplug_device_id.empty()) {
+                out << "    \"mqtt_sparkplug_device_id\": \"" << json_escape(m.sparkplug_device_id) << "\",\n";
+            }
+            out << "    \"mqtt_sparkplug_payload_decoded\": "
+                << (m.sparkplug_payload.parse_ok ? "true" : "false") << ",\n";
+            if (m.sparkplug_payload.has_timestamp) {
+                out << "    \"mqtt_sparkplug_timestamp\": " << m.sparkplug_payload.timestamp << ",\n";
+            }
+            if (m.sparkplug_payload.has_seq) {
+                out << "    \"mqtt_sparkplug_seq\": " << m.sparkplug_payload.seq << ",\n";
+            }
+            if (m.sparkplug_payload.has_uuid) {
+                out << "    \"mqtt_sparkplug_uuid\": \"" << json_escape(m.sparkplug_payload.uuid) << "\",\n";
+            }
+            if (m.sparkplug_payload.has_body) {
+                out << "    \"mqtt_sparkplug_body_length\": " << m.sparkplug_payload.body_length << ",\n";
+            }
+            out << "    \"mqtt_sparkplug_metric_count\": " << m.sparkplug_payload.metric_count << ",\n";
+            if (!m.sparkplug_payload.metrics.empty()) {
+                out << "    \"mqtt_sparkplug_metrics\": [";
+                for (size_t i = 0; i < m.sparkplug_payload.metrics.size(); ++i) {
+                    if (i != 0) out << ", ";
+                    out << "\"" << json_escape(m.sparkplug_payload.metrics[i]) << "\"";
+                }
+                out << "],\n";
+            }
+        }
+    }
+}
+
+// Zero-flat-field migration (extra-reader batch): the HART-IP analog of write_bacnet_json_fields
+// above -- takes HartIpResult::first (the first coalesced message's HartIpFrame), mirroring how
+// decoder.cpp's own two call sites (TCP and UDP -- see HartIpResult's own comment in hartip.hpp
+// for why both share this one result type, unlike EtherNet/IP's TCP/UDP split) only ever fed the
+// rest of DecodedPacket from hr.first even before this migration. Reproduces the exact same
+// nested gating the old JsonWriter block had, including its one non-obvious detail: the
+// hartip_address rendering (short address formatted as 2 uppercase hex digits, long address
+// passed through as-is) used to be computed once at each decoder.cpp call site and stored in the
+// old flat hartip_address_hex field -- HartIpPassThrough itself carries no such field, only the
+// raw short_address byte plus long_address_hex, so that formatting is now done HERE instead, the
+// same "defer the transform to where it's rendered" shape this batch's other protocols use.
+void write_hartip_json_fields(std::ostream& out, const HartIpFrame& frame) {
+    out << "    \"hartip_version\": " << static_cast<unsigned>(frame.version) << ",\n";
+    out << "    \"hartip_message_type\": \"" << json_escape(frame.message_type_name) << "\",\n";
+    out << "    \"hartip_message_id\": \"" << json_escape(frame.message_id_name) << "\",\n";
+    out << "    \"hartip_status\": " << static_cast<unsigned>(frame.status) << ",\n";
+    out << "    \"hartip_transaction_id\": " << frame.transaction_id << ",\n";
+    out << "    \"hartip_msg_length\": " << frame.msg_length << ",\n";
+    if (frame.has_session_init) {
+        out << "    \"hartip_host_type\": \"" << json_escape(frame.session_init.host_type_name) << "\",\n";
+        out << "    \"hartip_inactivity_close_timer\": " << frame.session_init.inactivity_close_timer
+            << ",\n";
+    }
+    if (frame.has_error) {
+        out << "    \"hartip_error_code\": " << static_cast<unsigned>(frame.error_code) << ",\n";
+        out << "    \"hartip_error_code_name\": \"" << json_escape(frame.error_code_name) << "\",\n";
+    }
+    out << "    \"hartip_has_pass_through\": " << (frame.has_pass_through ? "true" : "false") << ",\n";
+    if (frame.has_pass_through) {
+        const HartIpPassThrough& pt = frame.pass_through;
+        out << "    \"hartip_frame_type\": \"" << json_escape(pt.frame_type_name) << "\",\n";
+        out << "    \"hartip_is_response\": " << (pt.is_response ? "true" : "false") << ",\n";
+        out << "    \"hartip_is_long_address\": " << (pt.is_long_address ? "true" : "false") << ",\n";
+        std::string address_hex;
+        if (pt.is_long_address) {
+            address_hex = pt.long_address_hex;
+        } else {
+            std::ostringstream a;
+            a << std::hex << std::uppercase << std::setfill('0') << std::setw(2)
+              << static_cast<unsigned>(pt.short_address);
+            address_hex = a.str();
+        }
+        out << "    \"hartip_address\": \"" << json_escape(address_hex) << "\",\n";
+        out << "    \"hartip_command\": " << static_cast<unsigned>(pt.command) << ",\n";
+        if (!pt.command_name.empty())
+            out << "    \"hartip_command_name\": \"" << json_escape(pt.command_name) << "\",\n";
+        if (pt.is_response) {
+            out << "    \"hartip_response_code\": " << static_cast<unsigned>(pt.response_code) << ",\n";
+            out << "    \"hartip_response_is_comm_error\": " << (pt.response_is_comm_error ? "true" : "false")
+                << ",\n";
+            if (!pt.response_code_name.empty())
+                out << "    \"hartip_response_code_name\": \"" << json_escape(pt.response_code_name) << "\",\n";
+            if (!pt.comm_error_flags.empty()) {
+                out << "    \"hartip_comm_error_flags\": [";
+                for (size_t i = 0; i < pt.comm_error_flags.size(); ++i) {
+                    if (i != 0) out << ", ";
+                    out << "\"" << json_escape(pt.comm_error_flags[i]) << "\"";
+                }
+                out << "],\n";
+            }
+            out << "    \"hartip_device_status\": " << static_cast<unsigned>(pt.device_status) << ",\n";
+            if (!pt.device_status_flags.empty()) {
+                out << "    \"hartip_device_status_flags\": [";
+                for (size_t i = 0; i < pt.device_status_flags.size(); ++i) {
+                    if (i != 0) out << ", ";
+                    out << "\"" << json_escape(pt.device_status_flags[i]) << "\"";
+                }
+                out << "],\n";
+            }
+        }
+        if (!pt.values.empty()) {
+            out << "    \"hartip_values\": [";
+            for (size_t i = 0; i < pt.values.size(); ++i) {
+                if (i != 0) out << ", ";
+                out << "\"" << json_escape(pt.values[i]) << "\"";
+            }
+            out << "],\n";
+        }
+        // The classic wired-HART longitudinal (XOR) checksum -- unconditionally emitted (unlike
+        // hartip_command_name/hartip_values, which are gated on non-empty) since a zero/false pair
+        // is itself meaningful here: it's exactly what a truncated body (checksum byte never read
+        // at all) also produces, and that truncation already gets its own note -- mirrors
+        // dnp3_header_crc_valid's own "always present" convention.
+        out << "    \"hartip_checksum\": " << static_cast<unsigned>(pt.checksum) << ",\n";
+        out << "    \"hartip_checksum_valid\": " << (pt.checksum_valid ? "true" : "false") << ",\n";
+    }
+}
+
+// Zero-flat-field migration (extra-reader batch): the DNP3 analog of write_goose_json_fields
+// above. Reproduces the exact same four-tier gating the old JsonWriter block had: the link-layer
+// fields (source/destination/crc/block counts) print unconditionally for any "dnp3" packet,
+// dnp3_function prints only when dr.dnp3_has_function, and dnp3_object_headers/dnp3_point_values
+// each print independently whenever non-empty -- unchanged from before this migration.
+void write_dnp3_json_fields(std::ostream& out, const Dnp3Result& dr) {
+    out << "    \"dnp3_source_address\": " << dr.source_address << ",\n";
+    out << "    \"dnp3_destination_address\": " << dr.destination_address << ",\n";
+    out << "    \"dnp3_link_crc_valid\": " << (dr.link_crc_valid ? "true" : "false") << ",\n";
+    out << "    \"dnp3_header_crc_valid\": " << (dr.header_crc_valid ? "true" : "false") << ",\n";
+    out << "    \"dnp3_block_count\": " << dr.block_count << ",\n";
+    out << "    \"dnp3_block_crc_failures\": " << dr.block_crc_failures << ",\n";
+    if (dr.dnp3_has_function) {
+        out << "    \"dnp3_function\": \"" << json_escape(dr.dnp3_function_name) << "\",\n";
+    }
+    if (!dr.dnp3_object_headers.empty()) {
+        out << "    \"dnp3_objects\": [";
+        for (size_t i = 0; i < dr.dnp3_object_headers.size(); ++i) {
+            if (i != 0) out << ", ";
+            out << "\"" << json_escape(dr.dnp3_object_headers[i]) << "\"";
+        }
+        out << "],\n";
+    }
+    if (!dr.dnp3_point_values.empty()) {
+        out << "    \"dnp3_values\": [";
+        for (size_t i = 0; i < dr.dnp3_point_values.size(); ++i) {
+            if (i != 0) out << ", ";
+            out << "\"" << json_escape(dr.dnp3_point_values[i]) << "\"";
+        }
+        out << "],\n";
+    }
+}
+
+// Zero-flat-field migration (extra-reader batch): the IEC 104 analog of write_goose_json_fields
+// above. Reproduces the exact same two-tier gating the old JsonWriter block had: the headline
+// fields print only when iec104_has_asdu, but iec104_object_values prints whenever it's non-empty
+// -- a separate, independent gate (not `if (ir.iec104_has_asdu)`), unchanged from before this
+// migration.
+void write_iec104_json_fields(std::ostream& out, const Iec104Result& ir) {
+    if (ir.iec104_has_asdu) {
+        out << "    \"iec104_asdu_type\": \"" << json_escape(ir.iec104_asdu_type_name) << "\",\n";
+        out << "    \"iec104_asdu_type_short\": \"" << json_escape(ir.iec104_asdu_type_short_name) << "\",\n";
+        out << "    \"iec104_cot\": \"" << json_escape(ir.iec104_cot_name) << "\",\n";
+        out << "    \"iec104_common_address\": " << ir.iec104_common_address << ",\n";
+    }
+    if (!ir.iec104_object_values.empty()) {
+        out << "    \"iec104_objects\": [";
+        for (size_t i = 0; i < ir.iec104_object_values.size(); ++i) {
+            if (i != 0) out << ", ";
+            out << "\"" << json_escape(ir.iec104_object_values[i]) << "\"";
+        }
+        out << "],\n";
+    }
+}
+
+// Zero-flat-field migration (extra-reader batch): the S7comm analog of write_dnp3_json_fields
+// above, with one addition -- the s7comm_items display-tag-plus-"[EXPERIMENTAL]" transform, which
+// used to run at decoder.cpp's own call site, now happens HERE instead (deferred from sr.items,
+// which S7CommResult carries forward unmodified -- see that struct's own comment in s7comm.hpp for
+// why sr.value_summaries, unlike sr.items, could NOT also be deferred this way). Every other field
+// below reproduces the exact same independent per-field gating the old JsonWriter block had: none
+// of these are nested under one shared "has s7comm data" check, each stands alone, unchanged from
+// before this migration.
+void write_s7comm_json_fields(std::ostream& out, const S7CommResult& sr) {
+    if (sr.has_function) {
+        out << "    \"s7comm_function\": \"" << json_escape(sr.function_name) << "\",\n";
+    }
+    if (!sr.items.empty()) {
+        const size_t kMaxTags = resource_limits().max_decoded_objects.value_or(50);
+        out << "    \"s7comm_items\": [";
+        bool first = true;
+        for (size_t i = 0; i < sr.items.size() && i < kMaxTags; ++i) {
+            const auto& it = sr.items[i];
+            std::string display_tag = !it.tag.empty() ? it.tag : it.area_name;
+            // A consumer parsing this array as trusted addresses must not mistake an
+            // unverified reconstruction for the well-established S7ANY decode.
+            if (it.is_experimental) display_tag += " [EXPERIMENTAL]";
+            if (!first) out << ", ";
+            first = false;
+            out << "\"" << json_escape(display_tag) << "\"";
+        }
+        out << "],\n";
+    }
+    if (!sr.value_summaries.empty()) {
+        out << "    \"s7comm_values\": [";
+        for (size_t i = 0; i < sr.value_summaries.size(); ++i) {
+            if (i != 0) out << ", ";
+            out << "\"" << json_escape(sr.value_summaries[i]) << "\"";
+        }
+        out << "],\n";
+    }
+    if (!sr.plc_stop_message.empty()) {
+        out << "    \"s7comm_plc_stop_message\": \"" << json_escape(sr.plc_stop_message) << "\",\n";
+    }
+    if (sr.has_pi_service) {
+        out << "    \"s7comm_pi_service_name\": \"" << json_escape(sr.pi_service_name) << "\",\n";
+        if (!sr.pi_service_description.empty()) {
+            out << "    \"s7comm_pi_service_description\": \"" << json_escape(sr.pi_service_description)
+                << "\",\n";
+        }
+    }
+    if (!sr.pi_control_argument.empty()) {
+        out << "    \"s7comm_pi_control_argument\": \"" << json_escape(sr.pi_control_argument) << "\",\n";
+    }
+    if (!sr.pi_control_blocks.empty()) {
+        out << "    \"s7comm_pi_control_blocks\": [";
+        for (size_t i = 0; i < sr.pi_control_blocks.size(); ++i) {
+            if (i != 0) out << ", ";
+            out << "\"" << json_escape(sr.pi_control_blocks[i]) << "\"";
+        }
+        out << "],\n";
+    }
+    if (sr.has_pi_control_status) {
+        out << "    \"s7comm_pi_control_has_more_data\": "
+            << (sr.pi_control_has_more_data ? "true" : "false") << ",\n";
+        out << "    \"s7comm_pi_control_has_error\": " << (sr.pi_control_has_error ? "true" : "false")
+            << ",\n";
+    }
+}
+
 // The MELSEC analog of write_twincat_json_fields/write_kerberos_json_fields above -- same
 // rationale (plain free function, not a ProtocolRenderer interface). Devices/values render as
 // parallel JSON arrays (melsec_devices lines up index-for-index with melsec_word_values/
@@ -2316,124 +2847,22 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
     if (p.protocol == "modbus" && p.result) {
         write_modbus_json_fields(out_, p.result->as<ModbusFrame>());
     }
-    if (p.protocol == "s7comm" && p.s7comm_has_function) {
-        out_ << "    \"s7comm_function\": \"" << json_escape(p.s7comm_function_name) << "\",\n";
+    if (p.protocol == "s7comm" && p.result) {
+        write_s7comm_json_fields(out_, p.result->as<S7CommResult>());
     }
-    if (!p.s7comm_item_tags.empty()) {
-        out_ << "    \"s7comm_items\": [";
-        for (size_t i = 0; i < p.s7comm_item_tags.size(); ++i) {
-            if (i != 0) out_ << ", ";
-            out_ << "\"" << json_escape(p.s7comm_item_tags[i]) << "\"";
-        }
-        out_ << "],\n";
+    if (p.protocol == "dnp3" && p.result) {
+        write_dnp3_json_fields(out_, p.result->as<Dnp3Result>());
     }
-    if (!p.s7comm_value_summaries.empty()) {
-        out_ << "    \"s7comm_values\": [";
-        for (size_t i = 0; i < p.s7comm_value_summaries.size(); ++i) {
-            if (i != 0) out_ << ", ";
-            out_ << "\"" << json_escape(p.s7comm_value_summaries[i]) << "\"";
-        }
-        out_ << "],\n";
+    if (p.protocol == "iec104" && p.result) {
+        write_iec104_json_fields(out_, p.result->as<Iec104Result>());
     }
-    if (!p.s7comm_plc_stop_message.empty()) {
-        out_ << "    \"s7comm_plc_stop_message\": \"" << json_escape(p.s7comm_plc_stop_message) << "\",\n";
-    }
-    if (p.s7comm_has_pi_service) {
-        out_ << "    \"s7comm_pi_service_name\": \"" << json_escape(p.s7comm_pi_service_name) << "\",\n";
-        if (!p.s7comm_pi_service_description.empty()) {
-            out_ << "    \"s7comm_pi_service_description\": \"" << json_escape(p.s7comm_pi_service_description)
-                 << "\",\n";
-        }
-    }
-    if (!p.s7comm_pi_control_argument.empty()) {
-        out_ << "    \"s7comm_pi_control_argument\": \"" << json_escape(p.s7comm_pi_control_argument) << "\",\n";
-    }
-    if (!p.s7comm_pi_control_blocks.empty()) {
-        out_ << "    \"s7comm_pi_control_blocks\": [";
-        for (size_t i = 0; i < p.s7comm_pi_control_blocks.size(); ++i) {
-            if (i != 0) out_ << ", ";
-            out_ << "\"" << json_escape(p.s7comm_pi_control_blocks[i]) << "\"";
-        }
-        out_ << "],\n";
-    }
-    if (p.s7comm_has_pi_control_status) {
-        out_ << "    \"s7comm_pi_control_has_more_data\": "
-             << (p.s7comm_pi_control_has_more_data ? "true" : "false") << ",\n";
-        out_ << "    \"s7comm_pi_control_has_error\": " << (p.s7comm_pi_control_has_error ? "true" : "false")
-             << ",\n";
-    }
-    if (p.protocol == "dnp3") {
-        out_ << "    \"dnp3_source_address\": " << p.dnp3_source_address << ",\n";
-        out_ << "    \"dnp3_destination_address\": " << p.dnp3_destination_address << ",\n";
-        out_ << "    \"dnp3_link_crc_valid\": " << (p.dnp3_link_crc_valid ? "true" : "false") << ",\n";
-        out_ << "    \"dnp3_header_crc_valid\": " << (p.dnp3_header_crc_valid ? "true" : "false") << ",\n";
-        out_ << "    \"dnp3_block_count\": " << p.dnp3_block_count << ",\n";
-        out_ << "    \"dnp3_block_crc_failures\": " << p.dnp3_block_crc_failures << ",\n";
-    }
-    if (p.protocol == "dnp3" && p.dnp3_has_function) {
-        out_ << "    \"dnp3_function\": \"" << json_escape(p.dnp3_function_name) << "\",\n";
-    }
-    if (!p.dnp3_object_headers.empty()) {
-        out_ << "    \"dnp3_objects\": [";
-        for (size_t i = 0; i < p.dnp3_object_headers.size(); ++i) {
-            if (i != 0) out_ << ", ";
-            out_ << "\"" << json_escape(p.dnp3_object_headers[i]) << "\"";
-        }
-        out_ << "],\n";
-    }
-    if (!p.dnp3_point_values.empty()) {
-        out_ << "    \"dnp3_values\": [";
-        for (size_t i = 0; i < p.dnp3_point_values.size(); ++i) {
-            if (i != 0) out_ << ", ";
-            out_ << "\"" << json_escape(p.dnp3_point_values[i]) << "\"";
-        }
-        out_ << "],\n";
-    }
-    if (p.protocol == "iec104" && p.iec104_has_asdu) {
-        out_ << "    \"iec104_asdu_type\": \"" << json_escape(p.iec104_asdu_type_name) << "\",\n";
-        out_ << "    \"iec104_asdu_type_short\": \"" << json_escape(p.iec104_asdu_type_short_name) << "\",\n";
-        out_ << "    \"iec104_cot\": \"" << json_escape(p.iec104_cot_name) << "\",\n";
-        out_ << "    \"iec104_common_address\": " << p.iec104_common_address << ",\n";
-    }
-    if (!p.iec104_object_values.empty()) {
-        out_ << "    \"iec104_objects\": [";
-        for (size_t i = 0; i < p.iec104_object_values.size(); ++i) {
-            if (i != 0) out_ << ", ";
-            out_ << "\"" << json_escape(p.iec104_object_values[i]) << "\"";
-        }
-        out_ << "],\n";
-    }
-    if (p.protocol == "enip" && !p.enip_command_name.empty()) {
-        // Empty for a CIP I/O (implicit messaging) UDP datagram -- there is no encapsulation
-        // command on the wire for that (see enip_has_io below and enip.hpp's file header comment).
-        out_ << "    \"enip_command\": \"" << json_escape(p.enip_command_name) << "\",\n";
-    }
-    if (p.enip_has_cip) {
-        out_ << "    \"enip_cip_is_response\": " << (p.enip_cip_is_response ? "true" : "false") << ",\n";
-        out_ << "    \"enip_cip_service\": \"" << json_escape(p.enip_cip_service_name) << "\",\n";
-        if (!p.enip_cip_path.empty()) {
-            out_ << "    \"enip_cip_path\": \"" << json_escape(p.enip_cip_path) << "\",\n";
-        }
-        if (!p.enip_cip_status_name.empty()) {
-            out_ << "    \"enip_cip_status\": \"" << json_escape(p.enip_cip_status_name) << "\",\n";
-        }
-    }
-    if (!p.enip_cip_values.empty()) {
-        out_ << "    \"enip_cip_values\": [";
-        for (size_t i = 0; i < p.enip_cip_values.size(); ++i) {
-            if (i != 0) out_ << ", ";
-            out_ << "\"" << json_escape(p.enip_cip_values[i]) << "\"";
-        }
-        out_ << "],\n";
-    }
-    if (p.enip_has_io) {
-        std::ostringstream connid;
-        connid << "0x" << std::hex << std::uppercase << p.enip_io_connection_id;
-        out_ << "    \"enip_io_connection_id\": \"" << connid.str() << "\",\n";
-        out_ << "    \"enip_io_sequence_number\": " << p.enip_io_sequence_number << ",\n";
-        if (p.enip_io_has_data) {
-            out_ << "    \"enip_io_data_length\": " << p.enip_io_data_length << ",\n";
-            out_ << "    \"enip_io_data_hex\": \"" << json_escape(p.enip_io_data_hex) << "\",\n";
+    if (p.protocol == "enip" && p.result) {
+        // See write_enip_json_fields's own comment for why "enip" needs this has_tcp/has_udp
+        // discriminator, unlike every other zero-flat-field protocol in this file.
+        if (p.has_tcp) {
+            write_enip_json_fields(out_, p.result->as<EnipResult>().first);
+        } else if (p.has_udp) {
+            write_enip_io_json_fields(out_, p.result->as<CipIoFrame>());
         }
     }
     if (p.protocol == "profinet" && p.result) {
@@ -2454,316 +2883,20 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
     if (p.protocol == "devicenet" && p.result) {
         write_devicenet_json_fields(out_, p.result->as<DeviceNetFrame>());
     }
-    if (p.protocol == "bacnet") {
-        out_ << "    \"bacnet_bvlc_function\": \"" << json_escape(p.bacnet_bvlc_function) << "\",\n";
-        out_ << "    \"bacnet_has_npdu\": " << (p.bacnet_has_npdu ? "true" : "false") << ",\n";
-        if (p.bacnet_has_npdu) {
-            out_ << "    \"bacnet_npdu_version\": " << static_cast<unsigned>(p.bacnet_npdu_version) << ",\n";
-            out_ << "    \"bacnet_npdu_is_network_layer_message\": "
-                 << (p.bacnet_npdu_is_network_layer_message ? "true" : "false") << ",\n";
-            out_ << "    \"bacnet_npdu_expecting_reply\": " << (p.bacnet_npdu_expecting_reply ? "true" : "false")
-                 << ",\n";
-            out_ << "    \"bacnet_npdu_priority\": " << static_cast<unsigned>(p.bacnet_npdu_priority) << ",\n";
-            out_ << "    \"bacnet_npdu_has_dest\": " << (p.bacnet_npdu_has_dest ? "true" : "false") << ",\n";
-            if (p.bacnet_npdu_has_dest) out_ << "    \"bacnet_npdu_dnet\": " << p.bacnet_npdu_dnet << ",\n";
-            out_ << "    \"bacnet_npdu_has_src\": " << (p.bacnet_npdu_has_src ? "true" : "false") << ",\n";
-            if (p.bacnet_npdu_has_src) out_ << "    \"bacnet_npdu_snet\": " << p.bacnet_npdu_snet << ",\n";
-            if (p.bacnet_npdu_has_dest)
-                out_ << "    \"bacnet_npdu_hop_count\": " << static_cast<unsigned>(p.bacnet_npdu_hop_count)
-                     << ",\n";
-            if (p.bacnet_npdu_is_network_layer_message) {
-                out_ << "    \"bacnet_npdu_message_type\": \"" << json_escape(p.bacnet_npdu_message_type)
-                     << "\",\n";
-            }
-            out_ << "    \"bacnet_has_apdu\": " << (p.bacnet_has_apdu ? "true" : "false") << ",\n";
-            if (p.bacnet_has_apdu) {
-                out_ << "    \"bacnet_apdu_type\": \"" << json_escape(p.bacnet_apdu_type) << "\",\n";
-                if (!p.bacnet_service_name.empty())
-                    out_ << "    \"bacnet_service_name\": \"" << json_escape(p.bacnet_service_name) << "\",\n";
-                out_ << "    \"bacnet_invoke_id\": " << p.bacnet_invoke_id << ",\n";
-                out_ << "    \"bacnet_segmented\": " << (p.bacnet_segmented ? "true" : "false") << ",\n";
-                if (!p.bacnet_values.empty()) {
-                    out_ << "    \"bacnet_values\": [";
-                    for (size_t i = 0; i < p.bacnet_values.size(); ++i) {
-                        if (i != 0) out_ << ", ";
-                        out_ << "\"" << json_escape(p.bacnet_values[i]) << "\"";
-                    }
-                    out_ << "],\n";
-                }
-            }
-        }
+    if (p.protocol == "bacnet" && p.result) {
+        write_bacnet_json_fields(out_, p.result->as<BacnetFrame>());
     }
-    if (p.protocol == "hartip") {
-        out_ << "    \"hartip_version\": " << static_cast<unsigned>(p.hartip_version) << ",\n";
-        out_ << "    \"hartip_message_type\": \"" << json_escape(p.hartip_message_type) << "\",\n";
-        out_ << "    \"hartip_message_id\": \"" << json_escape(p.hartip_message_id) << "\",\n";
-        out_ << "    \"hartip_status\": " << static_cast<unsigned>(p.hartip_status) << ",\n";
-        out_ << "    \"hartip_transaction_id\": " << p.hartip_transaction_id << ",\n";
-        out_ << "    \"hartip_msg_length\": " << p.hartip_msg_length << ",\n";
-        if (p.hartip_has_session_init) {
-            out_ << "    \"hartip_host_type\": \"" << json_escape(p.hartip_host_type_name) << "\",\n";
-            out_ << "    \"hartip_inactivity_close_timer\": " << p.hartip_inactivity_close_timer << ",\n";
-        }
-        if (p.hartip_has_error) {
-            out_ << "    \"hartip_error_code\": " << static_cast<unsigned>(p.hartip_error_code) << ",\n";
-            out_ << "    \"hartip_error_code_name\": \"" << json_escape(p.hartip_error_code_name) << "\",\n";
-        }
-        out_ << "    \"hartip_has_pass_through\": " << (p.hartip_has_pass_through ? "true" : "false") << ",\n";
-        if (p.hartip_has_pass_through) {
-            out_ << "    \"hartip_frame_type\": \"" << json_escape(p.hartip_frame_type) << "\",\n";
-            out_ << "    \"hartip_is_response\": " << (p.hartip_is_response ? "true" : "false") << ",\n";
-            out_ << "    \"hartip_is_long_address\": " << (p.hartip_is_long_address ? "true" : "false") << ",\n";
-            out_ << "    \"hartip_address\": \"" << json_escape(p.hartip_address_hex) << "\",\n";
-            out_ << "    \"hartip_command\": " << static_cast<unsigned>(p.hartip_command) << ",\n";
-            if (!p.hartip_command_name.empty())
-                out_ << "    \"hartip_command_name\": \"" << json_escape(p.hartip_command_name) << "\",\n";
-            if (p.hartip_is_response) {
-                out_ << "    \"hartip_response_code\": " << static_cast<unsigned>(p.hartip_response_code) << ",\n";
-                out_ << "    \"hartip_response_is_comm_error\": "
-                     << (p.hartip_response_is_comm_error ? "true" : "false") << ",\n";
-                if (!p.hartip_response_code_name.empty())
-                    out_ << "    \"hartip_response_code_name\": \"" << json_escape(p.hartip_response_code_name)
-                         << "\",\n";
-                if (!p.hartip_comm_error_flags.empty()) {
-                    out_ << "    \"hartip_comm_error_flags\": [";
-                    for (size_t i = 0; i < p.hartip_comm_error_flags.size(); ++i) {
-                        if (i != 0) out_ << ", ";
-                        out_ << "\"" << json_escape(p.hartip_comm_error_flags[i]) << "\"";
-                    }
-                    out_ << "],\n";
-                }
-                out_ << "    \"hartip_device_status\": " << static_cast<unsigned>(p.hartip_device_status) << ",\n";
-                if (!p.hartip_device_status_flags.empty()) {
-                    out_ << "    \"hartip_device_status_flags\": [";
-                    for (size_t i = 0; i < p.hartip_device_status_flags.size(); ++i) {
-                        if (i != 0) out_ << ", ";
-                        out_ << "\"" << json_escape(p.hartip_device_status_flags[i]) << "\"";
-                    }
-                    out_ << "],\n";
-                }
-            }
-            if (!p.hartip_values.empty()) {
-                out_ << "    \"hartip_values\": [";
-                for (size_t i = 0; i < p.hartip_values.size(); ++i) {
-                    if (i != 0) out_ << ", ";
-                    out_ << "\"" << json_escape(p.hartip_values[i]) << "\"";
-                }
-                out_ << "],\n";
-            }
-            // The classic wired-HART longitudinal (XOR) checksum -- unconditionally emitted
-            // (unlike hartip_command_name/hartip_values, which are gated on non-empty) since a
-            // zero/false pair is itself meaningful here: it's exactly what a truncated body
-            // (checksum byte never read at all) also produces, and that truncation already gets
-            // its own note -- mirrors dnp3_header_crc_valid's own "always present" convention.
-            out_ << "    \"hartip_checksum\": " << static_cast<unsigned>(p.hartip_checksum) << ",\n";
-            out_ << "    \"hartip_checksum_valid\": " << (p.hartip_checksum_valid ? "true" : "false") << ",\n";
-        }
+    if (p.protocol == "hartip" && p.result) {
+        write_hartip_json_fields(out_, p.result->as<HartIpResult>().first);
     }
-    if (p.protocol == "opcua") {
-        out_ << "    \"opcua_message_type\": \"" << json_escape(p.opcua_message_type) << "\",\n";
-        out_ << "    \"opcua_chunk_type\": \"" << std::string(1, p.opcua_chunk_type) << "\",\n";
-        out_ << "    \"opcua_message_size\": " << p.opcua_message_size << ",\n";
-        out_ << "    \"opcua_has_secure_channel\": " << (p.opcua_has_secure_channel ? "true" : "false")
-             << ",\n";
-        if (p.opcua_has_secure_channel) {
-            out_ << "    \"opcua_secure_channel_id\": " << p.opcua_secure_channel_id << ",\n";
-            out_ << "    \"opcua_is_asymmetric\": " << (p.opcua_is_asymmetric ? "true" : "false") << ",\n";
-            if (p.opcua_is_asymmetric) {
-                out_ << "    \"opcua_security_policy_uri\": \"" << json_escape(p.opcua_security_policy_uri)
-                     << "\",\n";
-                out_ << "    \"opcua_has_sender_certificate\": "
-                     << (p.opcua_has_sender_certificate ? "true" : "false") << ",\n";
-                if (p.opcua_has_sender_certificate)
-                    out_ << "    \"opcua_sender_certificate_length\": " << p.opcua_sender_certificate_length
-                         << ",\n";
-                out_ << "    \"opcua_has_receiver_certificate_thumbprint\": "
-                     << (p.opcua_has_receiver_certificate_thumbprint ? "true" : "false") << ",\n";
-            } else {
-                out_ << "    \"opcua_token_id\": " << p.opcua_token_id << ",\n";
-            }
-            out_ << "    \"opcua_sequence_number\": " << p.opcua_sequence_number << ",\n";
-            out_ << "    \"opcua_request_id\": " << p.opcua_request_id << ",\n";
-        }
-        out_ << "    \"opcua_service_recognized\": " << (p.opcua_service_recognized ? "true" : "false")
-             << ",\n";
-        if (p.opcua_service_recognized) {
-            out_ << "    \"opcua_service_name\": \"" << json_escape(p.opcua_service_name) << "\",\n";
-        }
-        if (p.opcua_service_namespace != 0 || p.opcua_service_type_id != 0 || p.opcua_service_recognized) {
-            out_ << "    \"opcua_service_namespace\": " << p.opcua_service_namespace << ",\n";
-            out_ << "    \"opcua_service_type_id\": " << p.opcua_service_type_id << ",\n";
-        }
-        out_ << "    \"opcua_has_header\": " << (p.opcua_has_header ? "true" : "false") << ",\n";
-        if (p.opcua_has_header) {
-            out_ << "    \"opcua_request_handle\": " << p.opcua_request_handle << ",\n";
-            out_ << "    \"opcua_is_response\": " << (p.opcua_is_response ? "true" : "false") << ",\n";
-            if (p.opcua_is_response) {
-                out_ << "    \"opcua_status_code\": " << p.opcua_status_code << ",\n";
-                out_ << "    \"opcua_status_code_name\": \"" << json_escape(p.opcua_status_code_name)
-                     << "\",\n";
-                out_ << "    \"opcua_status_is_good\": " << (p.opcua_status_is_good ? "true" : "false")
-                     << ",\n";
-            }
-        }
-        if (!p.opcua_values.empty()) {
-            out_ << "    \"opcua_values\": [";
-            for (size_t i = 0; i < p.opcua_values.size(); ++i) {
-                if (i != 0) out_ << ", ";
-                out_ << "\"" << json_escape(p.opcua_values[i]) << "\"";
-            }
-            out_ << "],\n";
-        }
-        out_ << "    \"opcua_body_shown_as_hex\": " << (p.opcua_body_shown_as_hex ? "true" : "false")
-             << ",\n";
-        if (p.opcua_body_shown_as_hex) {
-            out_ << "    \"opcua_body_length\": " << p.opcua_body_length << ",\n";
-            out_ << "    \"opcua_body_hex\": \"" << json_escape(p.opcua_body_hex) << "\",\n";
-        }
+    if (p.protocol == "opcua" && p.result) {
+        write_opcua_json_fields(out_, p.result->as<OpcUaResult>().first);
     }
-    if (p.protocol == "mms") {
-        out_ << "    \"mms_is_bare\": " << (p.mms_is_bare ? "true" : "false") << ",\n";
-        if (!p.mms_is_bare) {
-            out_ << "    \"mms_session_pdu\": \"" << json_escape(p.mms_session_pdu_name) << "\",\n";
-            out_ << "    \"mms_has_presentation\": " << (p.mms_has_presentation ? "true" : "false") << ",\n";
-            if (p.mms_has_presentation) {
-                if (!p.mms_presentation_context_list.empty()) {
-                    out_ << "    \"mms_presentation_contexts\": [";
-                    for (size_t i = 0; i < p.mms_presentation_context_list.size(); ++i) {
-                        if (i != 0) out_ << ", ";
-                        out_ << "\"" << json_escape(p.mms_presentation_context_list[i]) << "\"";
-                    }
-                    out_ << "],\n";
-                }
-                out_ << "    \"mms_presentation_context_id\": " << p.mms_presentation_context_id << ",\n";
-                out_ << "    \"mms_presentation_context_is_acse\": "
-                     << (p.mms_presentation_context_is_acse ? "true" : "false") << ",\n";
-            }
-            out_ << "    \"mms_has_acse\": " << (p.mms_has_acse ? "true" : "false") << ",\n";
-            if (p.mms_has_acse) {
-                out_ << "    \"mms_acse_pdu\": \"" << json_escape(p.mms_acse_pdu_name) << "\",\n";
-                if (!p.mms_acse_application_context_name.empty()) {
-                    out_ << "    \"mms_acse_application_context_name\": \""
-                         << json_escape(p.mms_acse_application_context_name) << "\",\n";
-                }
-                if (p.mms_acse_has_result) {
-                    out_ << "    \"mms_acse_result\": \"" << json_escape(p.mms_acse_result_name) << "\",\n";
-                }
-                if (!p.mms_acse_values.empty()) {
-                    out_ << "    \"mms_acse_values\": [";
-                    for (size_t i = 0; i < p.mms_acse_values.size(); ++i) {
-                        if (i != 0) out_ << ", ";
-                        out_ << "\"" << json_escape(p.mms_acse_values[i]) << "\"";
-                    }
-                    out_ << "],\n";
-                }
-            }
-        }
-        out_ << "    \"mms_has_pdu\": " << (p.mms_has_pdu ? "true" : "false") << ",\n";
-        if (p.mms_has_pdu) {
-            out_ << "    \"mms_pdu\": \"" << json_escape(p.mms_pdu_name) << "\",\n";
-            out_ << "    \"mms_is_response\": " << (p.mms_is_response ? "true" : "false") << ",\n";
-            if (p.mms_has_invoke_id) {
-                out_ << "    \"mms_invoke_id\": " << p.mms_invoke_id << ",\n";
-            }
-            out_ << "    \"mms_service_recognized\": " << (p.mms_service_recognized ? "true" : "false")
-                 << ",\n";
-            if (p.mms_service_recognized) {
-                out_ << "    \"mms_service\": \"" << json_escape(p.mms_service_name) << "\",\n";
-            }
-            if (p.mms_has_error) {
-                out_ << "    \"mms_error\": \"" << json_escape(p.mms_error_name) << "\",\n";
-            }
-        }
-        if (!p.mms_values.empty()) {
-            out_ << "    \"mms_values\": [";
-            for (size_t i = 0; i < p.mms_values.size(); ++i) {
-                if (i != 0) out_ << ", ";
-                out_ << "\"" << json_escape(p.mms_values[i]) << "\"";
-            }
-            out_ << "],\n";
-        }
-        out_ << "    \"mms_body_shown_as_hex\": " << (p.mms_body_shown_as_hex ? "true" : "false") << ",\n";
-        if (p.mms_body_shown_as_hex) {
-            out_ << "    \"mms_body_length\": " << p.mms_body_length << ",\n";
-            out_ << "    \"mms_body_hex\": \"" << json_escape(p.mms_body_hex) << "\",\n";
-        }
+    if (p.protocol == "mms" && p.result) {
+        write_mms_json_fields(out_, p.result->as<MmsFrame>());
     }
-    if (p.protocol == "mqtt") {
-        out_ << "    \"mqtt_packet_type\": \"" << json_escape(p.mqtt_packet_type_name) << "\",\n";
-        out_ << "    \"mqtt_remaining_length\": " << p.mqtt_remaining_length << ",\n";
-        if (!p.mqtt_protocol_version_name.empty()) {
-            out_ << "    \"mqtt_protocol_version\": \"" << json_escape(p.mqtt_protocol_version_name) << "\",\n";
-        }
-        if (p.mqtt_packet_type_name == "PUBLISH") {
-            out_ << "    \"mqtt_dup\": " << (p.mqtt_dup ? "true" : "false") << ",\n";
-            out_ << "    \"mqtt_qos\": " << static_cast<unsigned>(p.mqtt_qos) << ",\n";
-            out_ << "    \"mqtt_retain\": " << (p.mqtt_retain ? "true" : "false") << ",\n";
-            out_ << "    \"mqtt_topic\": \"" << json_escape(p.mqtt_topic) << "\",\n";
-        }
-        if (p.mqtt_has_packet_id) {
-            out_ << "    \"mqtt_packet_id\": " << p.mqtt_packet_id << ",\n";
-        }
-        if (p.mqtt_has_payload) {
-            out_ << "    \"mqtt_payload_length\": " << p.mqtt_payload_length << ",\n";
-            // Omitted only when a successful Sparkplug B decode cleared it (see mqtt.hpp) -- a
-            // genuinely empty payload still renders an empty hex string, same as p.mqtt_payload_length == 0.
-            bool hex_cleared_by_sparkplug = p.mqtt_payload_length > 0 && p.mqtt_payload_hex.empty();
-            if (!hex_cleared_by_sparkplug) {
-                out_ << "    \"mqtt_payload_hex\": \"" << json_escape(p.mqtt_payload_hex) << "\",\n";
-            }
-        }
-        if (!p.mqtt_values.empty()) {
-            out_ << "    \"mqtt_values\": [";
-            for (size_t i = 0; i < p.mqtt_values.size(); ++i) {
-                if (i != 0) out_ << ", ";
-                out_ << "\"" << json_escape(p.mqtt_values[i]) << "\"";
-            }
-            out_ << "],\n";
-        }
-        out_ << "    \"mqtt_is_sparkplug\": " << (p.mqtt_is_sparkplug ? "true" : "false") << ",\n";
-        if (p.mqtt_is_sparkplug) {
-            out_ << "    \"mqtt_sparkplug_message_type\": \"" << json_escape(p.mqtt_sparkplug_message_type)
-                 << "\",\n";
-            out_ << "    \"mqtt_sparkplug_is_state\": " << (p.mqtt_sparkplug_is_state ? "true" : "false")
-                 << ",\n";
-            if (p.mqtt_sparkplug_is_state) {
-                out_ << "    \"mqtt_sparkplug_state_host_id\": \"" << json_escape(p.mqtt_sparkplug_state_host_id)
-                     << "\",\n";
-                out_ << "    \"mqtt_sparkplug_state_text\": \"" << json_escape(p.mqtt_sparkplug_state_text)
-                     << "\",\n";
-            } else {
-                out_ << "    \"mqtt_sparkplug_group_id\": \"" << json_escape(p.mqtt_sparkplug_group_id) << "\",\n";
-                out_ << "    \"mqtt_sparkplug_edge_node_id\": \"" << json_escape(p.mqtt_sparkplug_edge_node_id)
-                     << "\",\n";
-                if (!p.mqtt_sparkplug_device_id.empty()) {
-                    out_ << "    \"mqtt_sparkplug_device_id\": \"" << json_escape(p.mqtt_sparkplug_device_id)
-                         << "\",\n";
-                }
-                out_ << "    \"mqtt_sparkplug_payload_decoded\": "
-                     << (p.mqtt_sparkplug_payload_decoded ? "true" : "false") << ",\n";
-                if (p.mqtt_sparkplug_has_timestamp) {
-                    out_ << "    \"mqtt_sparkplug_timestamp\": " << p.mqtt_sparkplug_timestamp << ",\n";
-                }
-                if (p.mqtt_sparkplug_has_seq) {
-                    out_ << "    \"mqtt_sparkplug_seq\": " << p.mqtt_sparkplug_seq << ",\n";
-                }
-                if (p.mqtt_sparkplug_has_uuid) {
-                    out_ << "    \"mqtt_sparkplug_uuid\": \"" << json_escape(p.mqtt_sparkplug_uuid) << "\",\n";
-                }
-                if (p.mqtt_sparkplug_has_body) {
-                    out_ << "    \"mqtt_sparkplug_body_length\": " << p.mqtt_sparkplug_body_length << ",\n";
-                }
-                out_ << "    \"mqtt_sparkplug_metric_count\": " << p.mqtt_sparkplug_metric_count << ",\n";
-                if (!p.mqtt_sparkplug_metrics.empty()) {
-                    out_ << "    \"mqtt_sparkplug_metrics\": [";
-                    for (size_t i = 0; i < p.mqtt_sparkplug_metrics.size(); ++i) {
-                        if (i != 0) out_ << ", ";
-                        out_ << "\"" << json_escape(p.mqtt_sparkplug_metrics[i]) << "\"";
-                    }
-                    out_ << "],\n";
-                }
-            }
-        }
+    if (p.protocol == "mqtt" && p.result) {
+        write_mqtt_json_fields(out_, p.result->as<MqttResult>().first);
     }
     if (p.protocol == "s7comm-plus") {
         out_ << "    \"s7plus_pdu_type\": \"" << json_escape(p.s7plus_pdu_type_name) << "\",\n";
@@ -3255,19 +3388,26 @@ void StatsWriter::write_packet(const DecodedPacket& p) {
             }
         }
     }
-    if (p.protocol == "s7comm" && p.s7comm_has_function) {
-        s7comm_function_counts_[p.s7comm_function_name]++;
+    if (p.protocol == "s7comm" && p.result) {
+        const S7CommResult& sr = p.result->as<S7CommResult>();
+        if (sr.has_function) s7comm_function_counts_[sr.function_name]++;
     }
-    if (p.protocol == "dnp3" && p.dnp3_has_function) {
-        dnp3_function_counts_[p.dnp3_function_name]++;
+    if (p.protocol == "dnp3" && p.result) {
+        const Dnp3Result& dr = p.result->as<Dnp3Result>();
+        if (dr.dnp3_has_function) dnp3_function_counts_[dr.dnp3_function_name]++;
     }
-    if (p.protocol == "iec104" && p.iec104_has_asdu) {
-        iec104_asdu_type_counts_[p.iec104_asdu_type_name]++;
+    if (p.protocol == "iec104" && p.result) {
+        const Iec104Result& ir = p.result->as<Iec104Result>();
+        if (ir.iec104_has_asdu) iec104_asdu_type_counts_[ir.iec104_asdu_type_name]++;
     }
-    if (p.protocol == "enip") {
-        if (!p.enip_command_name.empty()) enip_command_counts_[p.enip_command_name]++;
-        if (p.enip_has_cip) enip_cip_service_counts_[p.enip_cip_service_name]++;
-        if (p.enip_has_io) enip_io_datagram_count_++;
+    if (p.protocol == "enip" && p.result) {
+        if (p.has_tcp) {
+            const EnipFrame& ef = p.result->as<EnipResult>().first;
+            if (!ef.header.command_name.empty()) enip_command_counts_[ef.header.command_name]++;
+            if (ef.has_cip) enip_cip_service_counts_[ef.cip.service_name]++;
+        } else if (p.has_udp) {
+            enip_io_datagram_count_++;
+        }
     }
     if (p.protocol == "profinet" && p.result) {
         const ProfinetFrame& pn = p.result->as<ProfinetFrame>();
@@ -3308,35 +3448,40 @@ void StatsWriter::write_packet(const DecodedPacket& p) {
         if (dn.is_fragmented) devicenet_fragmented_count_++;
         if (dn.fd) devicenet_fd_count_++;
     }
-    if (p.protocol == "bacnet") {
-        bacnet_bvlc_function_counts_[p.bacnet_bvlc_function]++;
-        if (p.bacnet_has_apdu && !p.bacnet_service_name.empty()) {
-            bacnet_service_counts_[p.bacnet_service_name]++;
+    if (p.protocol == "bacnet" && p.result) {
+        const BacnetFrame& bf = p.result->as<BacnetFrame>();
+        bacnet_bvlc_function_counts_[bf.bvlc_function_name]++;
+        if (bf.has_npdu && bf.npdu.has_apdu && !bf.npdu.apdu.service_choice_name.empty()) {
+            bacnet_service_counts_[bf.npdu.apdu.service_choice_name]++;
         }
     }
-    if (p.protocol == "hartip") {
-        hartip_message_type_counts_[p.hartip_message_type]++;
-        if (p.hartip_has_pass_through) {
-            std::string key = std::to_string(static_cast<unsigned>(p.hartip_command));
-            if (!p.hartip_command_name.empty()) key += " (" + p.hartip_command_name + ")";
+    if (p.protocol == "hartip" && p.result) {
+        const HartIpFrame& frame = p.result->as<HartIpResult>().first;
+        hartip_message_type_counts_[frame.message_type_name]++;
+        if (frame.has_pass_through) {
+            std::string key = std::to_string(static_cast<unsigned>(frame.pass_through.command));
+            if (!frame.pass_through.command_name.empty()) key += " (" + frame.pass_through.command_name + ")";
             hartip_command_counts_[key]++;
         }
     }
-    if (p.protocol == "opcua") {
-        opcua_message_type_counts_[p.opcua_message_type]++;
-        if (p.opcua_service_recognized) {
-            opcua_service_counts_[p.opcua_service_name]++;
+    if (p.protocol == "opcua" && p.result) {
+        const OpcUaMessage& m = p.result->as<OpcUaResult>().first;
+        opcua_message_type_counts_[m.message_type]++;
+        if (m.service_recognized) {
+            opcua_service_counts_[m.service_name]++;
         }
     }
-    if (p.protocol == "mms") {
-        if (p.mms_has_pdu) mms_pdu_counts_[p.mms_pdu_name]++;
-        if (p.mms_service_recognized) mms_service_counts_[p.mms_service_name]++;
+    if (p.protocol == "mms" && p.result) {
+        const MmsFrame& mf = p.result->as<MmsFrame>();
+        if (mf.has_pdu) mms_pdu_counts_[mf.pdu_name]++;
+        if (mf.service_recognized) mms_service_counts_[mf.service_name]++;
     }
-    if (p.protocol == "mqtt") {
-        mqtt_packet_type_counts_[p.mqtt_packet_type_name]++;
-        if (p.mqtt_is_sparkplug) {
+    if (p.protocol == "mqtt" && p.result) {
+        const MqttMessage& m = p.result->as<MqttResult>().first;
+        mqtt_packet_type_counts_[m.packet_type_name]++;
+        if (m.is_sparkplug) {
             mqtt_sparkplug_count_++;
-            mqtt_sparkplug_message_type_counts_[p.mqtt_sparkplug_message_type]++;
+            mqtt_sparkplug_message_type_counts_[m.sparkplug_message_type]++;
         }
     }
     if (p.protocol == "s7comm-plus") {

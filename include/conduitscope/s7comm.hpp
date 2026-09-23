@@ -209,6 +209,47 @@ struct S7CommFrame {
     std::vector<std::string> notes;
 };
 
+// Zero-flat-field migration (extra-reader batch): S7comm is the one protocol in this codebase
+// whose result CANNOT simply be an unmodified S7CommFrame carried forward on DecodedPacket::result
+// the way every other migrated protocol's own struct is. S7DataItem::data (above) is a ByteSpan --
+// a non-owning view -- and, when decoder.cpp's own COTP-reassembly call site fed this decoder a
+// multi-TPDU-concatenated payload, that view points into CotpReassemblyResult::s7_candidate_storage
+// (cotp.hpp), a std::vector<uint8_t> local to that call site's own stack frame. That buffer does
+// NOT outlive the decode() call the way every other protocol's own input buffer effectively does,
+// so a ByteSpan into it left inside DecodedPacket::result would dangle by the time output.cpp (or
+// any other later reader) looked at it -- a real, silent use-after-free, not merely a style
+// mismatch with this codebase's usual "just carry the struct forward" migration shape. So this
+// wrapper exists specifically to break that dependency: value_summaries below is computed EAGERLY,
+// right at decoder.cpp's own call site while s7_candidate_storage is still alive, into a plain
+// vector of owned strings -- exactly the same rendering the old dual-write's own
+// DecodedPacket::s7comm_value_summaries computed, just relocated into this struct instead of a
+// flat field. `items` has no ByteSpan of its own (S7Item is entirely owned scalars/strings -- see
+// its own struct above), so unlike data_items it's carried forward unmodified and its own
+// display-tag-plus-"[EXPERIMENTAL]" rendering stays in output.cpp's write_s7comm_json_fields, the
+// same "transform lives in output.cpp" shape every other zero-flat-field protocol here uses.
+struct S7CommResult {
+    std::string summary;
+    std::vector<std::string> notes;
+
+    bool has_function = false;
+    std::string function_name;
+
+    std::vector<S7Item> items;                // safe to defer -- see this struct's own comment
+    std::vector<std::string> value_summaries;  // NOT deferred -- see this struct's own comment
+
+    std::string plc_stop_message;
+
+    bool has_pi_service = false;
+    std::string pi_service_name;
+    std::string pi_service_description;
+    std::string pi_control_argument;
+    std::vector<std::string> pi_control_blocks;
+
+    bool has_pi_control_status = false;
+    bool pi_control_has_more_data = false;
+    bool pi_control_has_error = false;
+};
+
 std::string s7comm_rosctr_name(uint8_t rosctr);
 std::string s7comm_function_name(uint8_t function_code);
 std::string s7comm_return_code_name(uint8_t return_code);

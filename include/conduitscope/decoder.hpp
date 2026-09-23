@@ -458,9 +458,11 @@ struct DecodedPacket {
     // promoted to "sv" instead -- see sv_asdu_count below; EtherType 0x88A4 traffic that
     // try_parse_ethercat DOES recognize is promoted to "ethercat" instead -- see
     // ethercat_frame_type below; a UDP payload that try_parse_bacnet recognizes as a BACnet/IP
-    // BVLC message is promoted to "bacnet" instead -- see bacnet_bvlc_function below; a TCP or UDP
+    // BVLC message is promoted to "bacnet" instead -- see the BacnetFrame carried by
+    // DecodedPacket::result (bacnet.hpp) below; a TCP or UDP
     // payload that try_parse_hartip recognizes as a HART-IP message is promoted to "hartip"
-    // instead -- see hartip_message_type below; a classic-802.3-LLC-framed frame with LLC DSAP==
+    // instead -- see the HartIpResult carried by DecodedPacket::result (hartip.hpp) below; a
+    // classic-802.3-LLC-framed frame with LLC DSAP==
     // SSAP==0x42, Control==0x03, and a destination MAC outside the GARP range that try_parse_stp
     // recognizes is promoted to "stp" instead -- see stp_bpdu_type_name below; on a
     // LINKTYPE_CAN_SOCKETCAN capture, a CAN frame that try_parse_devicenet recognizes (i.e. not an
@@ -513,45 +515,13 @@ struct DecodedPacket {
     // in the ModbusFrame carried by DecodedPacket::result, not here -- see output.cpp's
     // write_modbus_json_fields.
 
-    // Only set when protocol == "s7comm" and a function code was decoded.
-    bool s7comm_has_function = false;
-    std::string s7comm_function_name;
-
-    // Only populated for Read Var / Write Var packets whose item addressing was decoded
-    // (see S7Item::tag in s7comm.hpp) -- Step7-style tags like "DB10.DBW100", "I0.0", "MB50".
-    // Request packets: the addresses being read/written. Response packets: empty (a response's
-    // parameter block doesn't repeat the addresses; see s7comm_value_summaries below for what it
-    // returned instead). Capped at 50 entries so a heavily batched request can't blow up JSON output.
-    std::vector<std::string> s7comm_item_tags;
-    // Only populated for Read Var / Write Var response packets: one short rendering per returned
-    // value or return code (e.g. "0004" for a 2-byte value, "Success", "Object does not exist").
-    // Same 50-entry cap as s7comm_item_tags.
-    std::vector<std::string> s7comm_value_summaries;
-
-    // Only set for function_code == 0x29 (PLC Stop), Job (request) side -- see
-    // S7CommFrame::plc_stop_message in s7comm.hpp for the exact wire layout and what is/isn't
-    // decoded. Security context: this is the wire-level mechanism behind the well-known
-    // unauthenticated ICS attack that halts an S7-300/400 class CPU with no authentication at all.
-    std::string s7comm_plc_stop_message;
-
-    // Only set for function_code == 0x28 (PLC Control / "PI-Service"), Job (request) side, whose
-    // PI service name was decoded -- see S7CommFrame's pi_* fields in s7comm.hpp for the full
-    // wire layout and the deliberate _N_* Sinumerik/CNC scope boundary (name+description lookup
-    // only, no parameter decode).
-    bool s7comm_has_pi_service = false;
-    std::string s7comm_pi_service_name;
-    std::string s7comm_pi_service_description;  // empty when pi_service_name isn't in the known table
-    // _INSE/_INS2/_DELE only -- one "<type><number> (<destination>)" string per block descriptor,
-    // e.g. "DB100 (Passive)", "FC5 (Active)". Capped at 50 entries, same reason as s7comm_item_tags.
-    std::vector<std::string> s7comm_pi_control_blocks;
-    // P_PROGRAM/_MODU/_GARB only, when a non-empty argument was present on the wire.
-    std::string s7comm_pi_control_argument;
-
-    // Only set for function_code == 0x28, Ack_Data (response) side, whose 1-byte status field was
-    // present -- see S7CommFrame::has_pi_control_status in s7comm.hpp.
-    bool s7comm_has_pi_control_status = false;
-    bool s7comm_pi_control_has_more_data = false;  // status bit 0x01
-    bool s7comm_pi_control_has_error = false;      // status bit 0x02
+    // S7comm (classic, function_code-based -- not S7comm-Plus below) is a zero-flat-field migrated
+    // protocol: its fields (function name, item tags/value summaries, PLC Stop message, PI-Service
+    // fields) live in the S7CommResult carried by DecodedPacket::result, not here -- see
+    // output.cpp's write_s7comm_json_fields. Unlike most other zero-flat-field protocols,
+    // S7CommResult is NOT simply the decoder's own raw result type carried forward unmodified: see
+    // S7CommResult's own comment in s7comm.hpp for why (a ByteSpan-into-a-call-site-local-buffer
+    // lifetime hazard specific to S7comm's Read Var/Write Var response values).
 
     // Only set when protocol == "s7comm-plus" -- see s7commplus.hpp/try_parse_s7comm_plus. A
     // DIFFERENT, independent application protocol from classic S7comm above despite the shared
@@ -582,8 +552,9 @@ struct DecodedPacket {
     std::string s7plus_return_code_name;
     // Item addresses (GetMultiVariables/SetMultiVariables requests, SetVariable/DeleteObject) --
     // S7comm-Plus's own native symbolic (CRC+LID) or object-id addressing, see
-    // S7CommPlusItemAddress::tag in s7commplus.hpp. Capped at 50 entries, same reason as
-    // s7comm_item_tags above.
+    // S7CommPlusItemAddress::tag in s7commplus.hpp. Capped at 50 entries so a heavily batched
+    // request can't blow up JSON output (same cap classic S7comm's own item tags used, back when
+    // they were a flat field here too -- see S7CommResult::items in s7comm.hpp now).
     std::vector<std::string> s7plus_item_tags;
     // Decoded {id, value} pairs -- response values (GetMultiVariables), or values being written
     // (SetMultiVariables/SetVariable requests). Same 50-entry cap.
@@ -598,94 +569,38 @@ struct DecodedPacket {
     uint8_t s7plus_integrity_digest_length = 0;      // expected 32; digest bytes never verified
     bool s7plus_has_trailer = false;
 
-    // Only set when protocol == "dnp3" and this fragment's application layer was decoded (see
-    // Dnp3ApplicationFragment::application_decoded in dnp3.hpp -- false for a fragment that spans
-    // multiple data-link frames, which only gets its transport header decoded).
-    bool dnp3_has_function = false;
-    std::string dnp3_function_name;
-    // One entry per object header decoded in this fragment (e.g. "g1v2 (Binary Input)"), capped
-    // at 50 entries for the same reason as s7comm_item_tags.
-    std::vector<std::string> dnp3_object_headers;
-    // One entry per decoded point value across every object header in this fragment (e.g.
-    // "g1v2 idx=0: 1 [ONLINE]"), for the group/variation combinations in the point-format table
-    // (see dnp3.hpp) -- empty for an object header outside that table, or when no object headers
-    // had any points (e.g. a Class 0 poll). Capped at 50 entries, same reason as s7comm_items.
-    std::vector<std::string> dnp3_point_values;
+    // DNP3 is a zero-flat-field migrated protocol (extra-reader batch) -- see
+    // ProtocolDecoder/ProtocolResult in protocol_decoder.hpp: its fields live in the Dnp3Result
+    // carried by DecodedPacket::result, not here -- see output.cpp's write_dnp3_json_fields.
+    // Dnp3Result::dnp3_has_function/dnp3_function_name are set only when this fragment's
+    // application layer was decoded (see Dnp3ApplicationFragment::application_decoded in
+    // dnp3.hpp -- false for a fragment that spans multiple data-link frames, which only gets its
+    // transport header decoded); source_address/destination_address/link_crc_valid/
+    // header_crc_valid/block_count/block_crc_failures mirror only the FIRST DNP3 data-link frame
+    // found in this TCP payload, same "first frame only" convention -- a frame coalesced after the
+    // first one gets its own CRC-mismatch note in `notes` if it has one, same as its
+    // function/objects/values, but isn't reflected in these headline fields.
 
-    // Data-link CRC validation -- see Dnp3LinkFrame::crc_validated/header_crc_valid/block_count/
-    // block_crc_failures in dnp3.hpp for the full semantics. Unlike dnp3_has_function above (which
-    // needs a fully decoded application layer), these mirror the FIRST DNP3 data link frame found
-    // in this TCP payload and are always set whenever protocol == "dnp3" -- a link-layer-only
-    // control frame with no user data at all still has a header CRC to check. A frame coalesced
-    // after the first one (see the coalescing loop in decoder.cpp) gets its own CRC-mismatch note
-    // in `notes` if it has one, same as its function/objects/values, but isn't reflected in these
-    // headline fields, same "first frame only" convention as dnp3_has_function/dnp3_function_name.
-    bool dnp3_link_crc_valid = false;    // header CRC AND every block CRC (if any) validated
-    bool dnp3_header_crc_valid = false;  // header CRC alone -- false means destination/source/
-                                          // control/length on this frame cannot be trusted at all
-    size_t dnp3_block_count = 0;         // <=16-byte user-data blocks this frame had (0 for a
-                                          // link-layer-only control frame with no user data)
-    size_t dnp3_block_crc_failures = 0;  // how many of those blocks' CRCs failed (mismatch or
-                                          // couldn't be read at all, e.g. truncated capture)
-
-    // DNP3 data-link source/destination address (Dnp3LinkFrame::source/destination in dnp3.hpp --
-    // each a 16-bit DNP3 station address, NOT an IP address: the actual outstation/master
-    // identity a serial-to-IP DNP3 gateway multiplexes behind one shared IP, which IP-only
-    // zone/conduit matching (see PolicyEngine/POLICY FILE FORMAT's "Addressing scope" section)
-    // cannot distinguish on its own). Always set whenever protocol == "dnp3" -- unlike
-    // dnp3_has_function above, a link-layer-only control frame with no user data at all still has
-    // a data-link header carrying both addresses -- but, same "first frame only" convention as
-    // dnp3_link_crc_valid/dnp3_header_crc_valid above, mirrors only the FIRST DNP3 data link frame
-    // found in this TCP payload; a coalesced later frame's own source/destination, if different,
-    // is not reflected here. Their reliability tracks dnp3_header_crc_valid: a bad header CRC
-    // means these two values (like control/length on the same frame) cannot be trusted either.
-    uint16_t dnp3_source_address = 0;
-    uint16_t dnp3_destination_address = 0;
-
-    // Only set when protocol == "iec104". Reflects the first APDU found in this TCP payload (an
-    // I-format APDU with a decoded ASDU) -- see the coalescing loop in decoder.cpp for how
-    // additional APDUs coalesced into the same payload are still fully decoded and folded in here,
-    // same pattern as DNP3's multi-frame-per-payload handling.
-    bool iec104_has_asdu = false;
-    std::string iec104_asdu_type_name;
-    // Just the mnemonic half of iec104_asdu_type_name (e.g. "M_SP_NA_1" rather than "M_SP_NA_1
-    // (Single-point information)") -- see iec104_type_short_name's comment in iec104.hpp. This is
+    // IEC 104 is a zero-flat-field migrated protocol (extra-reader batch) -- see
+    // ProtocolDecoder/ProtocolResult in protocol_decoder.hpp: its fields live in the Iec104Result
+    // carried by DecodedPacket::result, not here -- see output.cpp's write_iec104_json_fields.
+    // Reflects the first APDU found in this TCP payload (an I-format APDU with a decoded ASDU) --
+    // see the coalescing loop in iec104.hpp/.cpp for how additional APDUs coalesced into the same
+    // payload are still fully decoded and folded in. Iec104Result::iec104_asdu_type_short_name is
     // the field a policy file's 'functions:' entries for an iec104-restricted conduit are
     // validated/matched against (see policy.cpp/PolicyEngine), since the parenthetical description
     // in iec104_asdu_type_name bundles two independent pieces of information into one string.
-    std::string iec104_asdu_type_short_name;
-    std::string iec104_cot_name;
-    uint16_t iec104_common_address = 0;
-    // One entry per decoded information object across every ASDU found in this TCP payload (e.g.
-    // "ioa=1001: ON [SB]"), capped at 50 entries for the same reason as dnp3_point_values.
-    std::vector<std::string> iec104_object_values;
 
-    // Only set when protocol == "enip". Reflects the first EtherNet/IP encapsulation message
-    // found in this TCP payload (see the coalescing loop in decoder.cpp for how additional
-    // messages coalesced into the same payload are still fully decoded, same pattern as IEC 104/
-    // DNP3's multi-frame-per-payload handling -- their detail is folded into enip_cip_values/notes
-    // but not reflected in these headline fields).
-    std::string enip_command_name;  // always set when protocol == "enip" (NOP/ListIdentity/SendRRData/...)
-    bool enip_has_cip = false;      // true once a CIP explicit message (request or response) was located
-    bool enip_cip_is_response = false;
-    std::string enip_cip_service_name;
-    std::string enip_cip_path;         // request path summary (request only, e.g. "MyTag" or "Class=0x01 (Identity) Instance=1")
-    std::string enip_cip_status_name;  // general status name (response only)
-    // One entry per decoded request/response data item (element values, Multiple_Service_Packet
-    // members, Unconnected_Send's embedded message, ...) -- capped at 50 entries for the same
-    // reason as dnp3_point_values/iec104_object_values.
-    std::vector<std::string> enip_cip_values;
-
-    // Only set when protocol == "enip" AND this packet is a CIP I/O (implicit messaging) UDP
-    // datagram, not an explicit-messaging TCP encapsulation message -- see try_parse_cip_io in
-    // enip.hpp. enip_command_name is left empty in that case (there is no encapsulation command on
-    // the wire for implicit messaging at all -- see enip.hpp's file header comment).
-    bool enip_has_io = false;
-    uint32_t enip_io_connection_id = 0;
-    uint32_t enip_io_sequence_number = 0;
-    bool enip_io_has_data = false;   // true once a Connected Data Item (0x00B1) was located
-    std::string enip_io_data_hex;    // raw hex, deliberately not value-decoded -- see enip.hpp
-    size_t enip_io_data_length = 0;
+    // EtherNet/IP is a zero-flat-field migrated protocol (extra-reader batch) -- see
+    // ProtocolDecoder/ProtocolResult in protocol_decoder.hpp. It's the one protocol in this
+    // codebase whose id() ("enip") is shared by two decoders with genuinely DIFFERENT
+    // ProtocolResult payload types: EnipTcpDecoder's EnipResult (wrapping the first coalesced
+    // EnipFrame, for TCP explicit messaging) vs EnipUdpDecoder's CipIoFrame directly (for UDP CIP
+    // I/O/implicit messaging) -- see write_enip_json_fields/write_enip_io_json_fields's own
+    // comments in output.cpp for how every reader of DecodedPacket::result discriminates between
+    // the two (via has_tcp/has_udp, since CIP I/O only ever runs on UDP and explicit messaging
+    // only ever runs on TCP). enip_command_name/enip_cip_* live in EnipResult::first;
+    // enip_io_* live directly in CipIoFrame.
 
     // PROFINET RT is a zero-flat-field migrated protocol (mid-size batch) -- see
     // ProtocolDecoder/ProtocolResult in protocol_decoder.hpp: its fields live in the ProfinetFrame
@@ -776,245 +691,55 @@ struct DecodedPacket {
     // STP at least still rides Ethernet framing) doesn't quite share -- DeviceNet is the first
     // protocol in this codebase with NEITHER.
 
-    // Only set when protocol == "bacnet" -- see try_parse_bacnet in bacnet.hpp. Unlike EtherCAT/
-    // PROFINET/GOOSE/SV above, BACnet/IP rides on UDP (conventionally port 47808/0xBAC0, has_ip
-    // and has_udp both stay true) -- the same "opportunistic, payload-shape" detection posture as
-    // EtherNet/IP CIP I/O (see enip_has_io above).
-    std::string bacnet_bvlc_function;  // "BVLC-Result"/.../"Original-Unicast-NPDU"/... -- always
-                                         // set when protocol == "bacnet"
-    bool bacnet_has_npdu = false;  // true only for the BVLC functions that carry an NPDU
-                                     // (Forwarded-NPDU/Distribute-Broadcast-To-Network/Original-
-                                     // Unicast-NPDU/Original-Broadcast-NPDU) -- see bacnet.hpp
+    // BACnet/IP is a zero-flat-field migrated protocol (extra-reader batch) -- see
+    // ProtocolDecoder/ProtocolResult in protocol_decoder.hpp: its fields (BVLC function, NPDU,
+    // APDU, decoded service values) live in the BacnetFrame carried by DecodedPacket::result, not
+    // here -- see output.cpp's write_bacnet_json_fields and bacnet.hpp's own BacnetFrame/
+    // BacnetNpdu/BacnetApdu. Unlike EtherCAT/PROFINET/GOOSE/SV above, BACnet/IP rides on UDP
+    // (conventionally port 47808/0xBAC0, has_ip and has_udp both stay true) -- the same
+    // "opportunistic, payload-shape" detection posture as EtherNet/IP CIP I/O (see enip_has_io
+    // above).
 
-    uint8_t bacnet_npdu_version = 0;
-    bool bacnet_npdu_is_network_layer_message = false;  // Control NET bit -- when true, this NPDU
-                                                           // has no APDU at all, see bacnet.hpp
-    bool bacnet_npdu_expecting_reply = false;
-    uint8_t bacnet_npdu_priority = 0;  // 0-3
-    bool bacnet_npdu_has_dest = false;
-    uint16_t bacnet_npdu_dnet = 0;
-    bool bacnet_npdu_has_src = false;
-    uint16_t bacnet_npdu_snet = 0;
-    uint8_t bacnet_npdu_hop_count = 0;       // meaningful only when bacnet_npdu_has_dest
-    std::string bacnet_npdu_message_type;    // set only when bacnet_npdu_is_network_layer_message
-                                                // -- named only, not decoded further, see bacnet.hpp
+    // HART-IP is a zero-flat-field migrated protocol (extra-reader batch) -- see
+    // ProtocolDecoder/ProtocolResult in protocol_decoder.hpp: its fields live in the HartIpResult
+    // carried by DecodedPacket::result, not here -- see output.cpp's write_hartip_json_fields and
+    // hartip.hpp's own HartIpResult/HartIpFrame/HartIpPassThrough. HartIpResult::first is the
+    // first coalesced message's own HartIpFrame -- see HartIpResult's own comment in hartip.hpp
+    // for why only the first message's fields ever fed the rest of DecodedPacket, even before
+    // this migration. Unlike every other protocol above, HART-IP is detected identically on BOTH
+    // has_tcp and has_udp payloads (conventionally port 5094 for both) -- see hartip.hpp's
+    // "structural detection gate" paragraph for why this decoder's own detection anchor here is
+    // honestly weaker than most of this codebase's other opportunistic detectors.
 
-    // Set only when there IS an APDU (bacnet_has_npdu && !bacnet_npdu_is_network_layer_message).
-    bool bacnet_has_apdu = false;
-    std::string bacnet_apdu_type;      // "Confirmed-Request"/"Unconfirmed-Request"/"Simple-ACK"/
-                                          // "Complex-ACK"/"Segment-ACK"/"Error"/"Reject"/"Abort"
-    std::string bacnet_service_name;   // confirmed/unconfirmed service-choice name, when this PDU
-                                          // type carries one -- empty for Segment-ACK/Reject/Abort
-    int32_t bacnet_invoke_id = -1;     // -1 only for Segment-ACK's own separate invoke-id-like
-                                          // field naming (still populated -- see bacnet.hpp), kept
-                                          // signed so "-1" unambiguously means "not present"
-    bool bacnet_segmented = false;     // Confirmed-Request/Complex-ACK's SEG bit -- see bacnet.hpp's
-                                          // segmentation paragraph for why segmented APDUs' service
-                                          // data is never value-decoded
-
-    // Decoded field-by-field summary of the "first pass" services' request/ACK data (Who-Is/
-    // I-Am/Who-Has/I-Have/ReadProperty/WriteProperty/generic-Error) -- see bacnet.hpp. Mirrors
-    // enip_cip_values' scheme. Empty when this PDU's service is outside the first-pass set, or
-    // when segmented.
-    std::vector<std::string> bacnet_values;
-
-    // Only set when protocol == "hartip" -- see try_parse_hartip in hartip.hpp. Unlike every
-    // other protocol above, HART-IP is detected identically on BOTH has_tcp and has_udp payloads
-    // (conventionally port 5094 for both) -- see hartip.hpp's "structural detection gate"
-    // paragraph for why this decoder's own detection anchor here is honestly weaker than most of
-    // this codebase's other opportunistic detectors.
-    uint8_t hartip_version = 0;
-    std::string hartip_message_type;  // "Request"/"Response"/"Publish"/"Error"/"NAK" -- always set
-                                        // when protocol == "hartip"
-    std::string hartip_message_id;    // "Session Initiate"/"Session Close"/"Keep Alive"/
-                                        // "Pass Through" -- always set when protocol == "hartip"
-    uint8_t hartip_status = 0;        // raw byte -- see hartip.hpp, no authoritative bit table found
-    uint16_t hartip_transaction_id = 0;  // "Sequence Number" in Wireshark's own UI text
-    uint16_t hartip_msg_length = 0;      // this message's own declared total length, header included
-
-    // Set only for a Session Initiate (MessageID 0) message with a structurally valid 5-byte body.
-    bool hartip_has_session_init = false;
-    std::string hartip_host_type_name;  // "Secondary Host"/"Primary Host"
-    uint32_t hartip_inactivity_close_timer = 0;  // seconds
-
-    // Set only for an Error (MessageType 3) or NAK (MessageType 15) message with a structurally
-    // valid 1-byte body -- checked BEFORE MessageID, see hartip.hpp.
-    bool hartip_has_error = false;
-    uint8_t hartip_error_code = 0;
-    std::string hartip_error_code_name;
-
-    // Set only for a Pass Through (MessageID 3) message -- the tunneled classic wired-HART
-    // token-passing Data-Link PDU that carries the actual HART command/response traffic. Covers
-    // Request/Response/Publish alike -- see hartip.hpp.
-    bool hartip_has_pass_through = false;
-    std::string hartip_frame_type;  // "STX"/"ACK"/"BACK"/"unknown(N)"
-    bool hartip_is_response = false;
-    bool hartip_is_long_address = false;
-    std::string hartip_address_hex;  // the short (masked 0x3F, rendered as 2 hex digits) or the
-                                       // 5-byte long address, whichever hartip_is_long_address says
-    uint8_t hartip_command = 0;
-    std::string hartip_command_name;  // best-effort name; empty for commands 31/203 -- see hartip.hpp
-
-    // Present only when hartip_is_response.
-    uint8_t hartip_response_code = 0;
-    bool hartip_response_is_comm_error = false;
-    std::string hartip_response_code_name;  // empty when hartip_response_is_comm_error
-    std::vector<std::string> hartip_comm_error_flags;  // set only when hartip_response_is_comm_error
-    uint8_t hartip_device_status = 0;
-    std::vector<std::string> hartip_device_status_flags;
-
-    // Decoded field-by-field summary of this command's request/response data -- see hartip.hpp's
-    // "Command dispatch" section for exactly which command numbers this decoder value-decodes.
-    // Mirrors bacnet_values'/enip_cip_values' scheme. Empty when this command is outside the
-    // first-pass dispatch table (commands 77/178, and any unrecognized command number).
-    std::vector<std::string> hartip_values;
-
-    // The trailing classic wired-HART longitudinal (XOR) checksum byte, and whether this decoder's
-    // own computed checksum (Delimiter..Data inclusive, see hartip.hpp) matched it -- only
-    // meaningful when hartip_has_pass_through; hartip_checksum_valid is false both for a genuine
-    // mismatch AND for a checksum byte that was truncated away entirely (see
-    // HartIpPassThrough::checksum_valid's own doc comment -- an unverifiable checksum is never
-    // treated as valid, mirroring dnp3_header_crc_valid's own convention).
-    uint8_t hartip_checksum = 0;
-    bool hartip_checksum_valid = false;
-
-    // Only set when protocol == "opcua" -- see try_parse_opcua_message in opcua.hpp. OPC UA rides
+    // OPC UA is a zero-flat-field migrated protocol (extra-reader batch) -- see
+    // ProtocolDecoder/ProtocolResult in protocol_decoder.hpp: its fields live in the OpcUaResult
+    // carried by DecodedPacket::result, not here -- see output.cpp's write_opcua_json_fields and
+    // opcua.hpp's own OpcUaResult/OpcUaMessage. OpcUaResult::first is the first coalesced chunk's
+    // own OpcUaMessage -- see OpcUaResult's own comment in opcua.hpp for why only the first
+    // chunk's fields ever fed the rest of DecodedPacket, even before this migration. OPC UA rides
     // TCP only (no UDP mapping in the spec); its own structural detection gate (a 3-byte ASCII
     // MessageType magic string against a 7-member allowlist) is one of the STRONGEST gates in
     // this codebase -- see opcua.hpp's own confidence comparison.
-    std::string opcua_message_type;  // "Hello"/"Acknowledge"/"Error"/"ReverseHello"/
-                                       // "OpenSecureChannel"/"CloseSecureChannel"/"Message"
-    char opcua_chunk_type = 'F';      // 'F'/'C'/'A' -- see opcua.hpp's "Chunking" section
-    uint32_t opcua_message_size = 0;  // this chunk's own declared total length, header included
 
-    // Set only for OpenSecureChannel/CloseSecureChannel/Message (the SecureConversation messages
-    // -- Hello/Acknowledge/Error/ReverseHello have no SecureChannelId of their own).
-    bool opcua_has_secure_channel = false;
-    uint32_t opcua_secure_channel_id = 0;
-    bool opcua_is_asymmetric = false;  // true only for OpenSecureChannel
-    std::string opcua_security_policy_uri;  // asymmetric (OpenSecureChannel) only
-    bool opcua_has_sender_certificate = false;
-    size_t opcua_sender_certificate_length = 0;
-    bool opcua_has_receiver_certificate_thumbprint = false;
-    uint32_t opcua_token_id = 0;  // symmetric (CloseSecureChannel/Message) only
-    uint32_t opcua_sequence_number = 0;
-    uint32_t opcua_request_id = 0;
+    // MMS is a zero-flat-field migrated protocol (extra-reader batch) -- see
+    // ProtocolDecoder/ProtocolResult in protocol_decoder.hpp: its fields (the full four-layer
+    // Session/Presentation/ACSE/MMS decode) live in the MmsFrame carried by
+    // DecodedPacket::result, not here -- see output.cpp's write_mms_json_fields and mms.hpp's own
+    // MmsFrame. MMS rides the exact same TCP port 102 / TPKT+COTP transport as S7comm (see
+    // s7comm.hpp/cotp.hpp) -- S7comm's own single-byte protocol-id gate is always tried first, so
+    // this decoder is only ever reached once that has already failed (see decoder.cpp's own
+    // dispatch-order comment).
 
-    // Set only for Message (MSG) whose leading bytes this decoder could parse as a NodeId -- see
-    // opcua.hpp's "Opportunistic MSG/OPN/CLO body decode" section for why this can fail even on a
-    // structurally valid OPC UA message (an encrypted/signed body).
-    bool opcua_service_recognized = false;  // TypeId matched a name in this decoder's own table
-    std::string opcua_service_name;         // e.g. "OpenSecureChannelRequest" -- empty when !opcua_service_recognized
-    uint16_t opcua_service_namespace = 0;
-    uint32_t opcua_service_type_id = 0;  // the raw numeric identifier
-    bool opcua_service_body_decoded = false;  // true for this decoder's "Tier 1" services (full
-                                                // field decode); false for "Tier 2" (named, header
-                                                // decoded, body shown as raw hex) and for any
-                                                // unrecognized TypeId -- see opcua.hpp
-
-    bool opcua_has_header = false;  // RequestHeader/ResponseHeader was itself decoded
-    uint32_t opcua_request_handle = 0;
-    bool opcua_is_response = false;
-    uint32_t opcua_status_code = 0;       // ResponseHeader's own ServiceResult
-    std::string opcua_status_code_name;   // "Good"/"Uncertain"/"Bad (0xNNNNNNNN)" -- see opcua.hpp
-    bool opcua_status_is_good = false;
-
-    // Decoded field-by-field summary of this Tier-1 service's own request/response fields --
-    // mirrors bacnet_values'/hartip_values' scheme. Empty when opcua_service_body_decoded is
-    // false.
-    std::vector<std::string> opcua_values;
-
-    bool opcua_body_shown_as_hex = false;
-    std::string opcua_body_hex;
-    size_t opcua_body_length = 0;
-
-    // Only set when protocol == "mms" -- see try_parse_mms in mms.hpp. MMS rides the exact same
-    // TCP port 102 / TPKT+COTP transport as S7comm (see s7comm.hpp/cotp.hpp) -- S7comm's own
-    // single-byte protocol-id gate is always tried first, so this decoder is only ever reached
-    // once that has already failed (see decoder.cpp's own dispatch-order comment). Fields below
-    // mirror MmsFrame field-for-field; see mms.hpp for the full four-layer (Session/Presentation/
-    // ACSE/MMS) byte layout and decode scope of each.
-    bool mms_is_bare = false;
-    uint8_t mms_session_spdu_type = 0;
-    std::string mms_session_pdu_name;
-
-    bool mms_has_presentation = false;
-    std::vector<std::string> mms_presentation_context_list;
-    uint32_t mms_presentation_context_id = 0;
-    bool mms_presentation_context_is_acse = false;
-
-    bool mms_has_acse = false;
-    std::string mms_acse_pdu_name;
-    std::string mms_acse_application_context_name;
-    bool mms_acse_has_result = false;
-    std::string mms_acse_result_name;
-    std::vector<std::string> mms_acse_values;
-
-    bool mms_has_pdu = false;
-    std::string mms_pdu_name;
-
-    bool mms_has_invoke_id = false;
-    uint32_t mms_invoke_id = 0;
-
-    bool mms_service_recognized = false;
-    std::string mms_service_name;
-    bool mms_service_body_decoded = false;
-
-    bool mms_is_response = false;
-
-    bool mms_has_error = false;
-    std::string mms_error_name;
-
-    // Tier 1 service-specific decoded fields (and Initiate's own capability negotiation, and
-    // InformationReport's own variable+value list, and ServiceError/RejectPDU detail) --
-    // mirrors opcua_values'/hartip_values' scheme.
-    std::vector<std::string> mms_values;
-
-    bool mms_body_shown_as_hex = false;
-    std::string mms_body_hex;
-    size_t mms_body_length = 0;
-
-    // Only set when protocol == "mqtt" -- see try_parse_mqtt_message in mqtt.hpp. MQTT rides plain
-    // TCP, conventionally port 1883 (this decoder's own structural detection gate is honestly weak
-    // -- see mqtt.hpp's file header comment -- so it is tried LAST in decoder.cpp's opportunistic
-    // TCP dispatch chain, after HART-IP). Fields below mirror MqttMessage field-for-field.
-    std::string mqtt_packet_type_name;  // "CONNECT"/"PUBLISH"/... -- always set when protocol == "mqtt"
-    uint32_t mqtt_remaining_length = 0;
-    bool mqtt_dup = false, mqtt_retain = false;  // PUBLISH only
-    uint8_t mqtt_qos = 0;                         // PUBLISH only
-    bool mqtt_has_packet_id = false;
-    uint16_t mqtt_packet_id = 0;
-    std::string mqtt_topic;  // PUBLISH only
-    bool mqtt_has_payload = false;
-    size_t mqtt_payload_length = 0;
-    std::string mqtt_payload_hex;  // PUBLISH only -- raw application payload, not value-decoded,
-                                     // EXCEPT left empty when Sparkplug B decode below succeeded
-    std::string mqtt_protocol_version_name;  // "3.1.1"/"5.0"/"" (unknown) -- see mqtt.hpp's own
-                                               // "Version disambiguation" section
-    // Every other packet-type-specific field, including every decoded MQTT5 Property -- mirrors
-    // opcua_values'/bacnet_values'/hartip_values' scheme.
-    std::vector<std::string> mqtt_values;
-
-    // Sparkplug B -- PUBLISH only, set only when the topic matched the spBv1.0 namespace.
-    bool mqtt_is_sparkplug = false;
-    std::string mqtt_sparkplug_group_id, mqtt_sparkplug_message_type, mqtt_sparkplug_edge_node_id,
-        mqtt_sparkplug_device_id;
-    bool mqtt_sparkplug_is_state = false;
-    std::string mqtt_sparkplug_state_host_id;  // set only when mqtt_sparkplug_is_state
-    std::string mqtt_sparkplug_state_text;      // set only when mqtt_sparkplug_is_state -- raw JSON
-                                                  // text, unparsed (see mqtt.hpp)
-    bool mqtt_sparkplug_payload_decoded = false;  // protobuf Payload decode succeeded structurally
-                                                    // (only meaningful when !mqtt_sparkplug_is_state)
-    bool mqtt_sparkplug_has_timestamp = false;
-    uint64_t mqtt_sparkplug_timestamp = 0;
-    bool mqtt_sparkplug_has_seq = false;
-    uint64_t mqtt_sparkplug_seq = 0;
-    bool mqtt_sparkplug_has_uuid = false;
-    std::string mqtt_sparkplug_uuid;
-    bool mqtt_sparkplug_has_body = false;
-    size_t mqtt_sparkplug_body_length = 0;
-    size_t mqtt_sparkplug_metric_count = 0;  // every metric found, even past the rendering cap below
-    std::vector<std::string> mqtt_sparkplug_metrics;  // one rendered summary per metric, capped
+    // MQTT is a zero-flat-field migrated protocol (extra-reader batch) -- see
+    // ProtocolDecoder/ProtocolResult in protocol_decoder.hpp: its fields (including the Sparkplug
+    // B decode) live in the MqttResult carried by DecodedPacket::result, not here -- see
+    // output.cpp's write_mqtt_json_fields and mqtt.hpp's own MqttResult/MqttMessage.
+    // MqttResult::first is the first coalesced packet's own MqttMessage -- see MqttResult's own
+    // comment in mqtt.hpp for why only the first packet's fields ever fed the rest of
+    // DecodedPacket, even before this migration. MQTT rides plain TCP, conventionally port 1883
+    // (this decoder's own structural detection gate is honestly weak -- see mqtt.hpp's file header
+    // comment -- so it is tried LAST in decoder.cpp's opportunistic TCP dispatch chain, after
+    // HART-IP).
 
     // FF-HSE is a zero-flat-field migrated protocol (see ProtocolDecoder/ProtocolResult in
     // protocol_decoder.hpp): its fields live in the FfhseFrame carried by
