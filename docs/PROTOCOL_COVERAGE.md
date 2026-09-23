@@ -6773,7 +6773,7 @@ every prior AD-suite phase's delivery was held to. See
 `include/conduitscope/netlogon.hpp`'s file headers for the full writeup.
 
 
-### SAMR + LSARPC (MS-SAMR, MS-LSAD/MS-LSAT; carried inside SMB2 WRITE/READ, same shape as Netlogon) -- phase 1 of a follow-on Windows RPC batch (SAMR/LSARPC/SRVSVC/WKSSVC/DRSUAPI + WinRM/WMI)
+### SAMR + LSARPC (MS-SAMR, MS-LSAD/MS-LSAT; carried inside SMB2 WRITE/READ, same shape as Netlogon) -- phase 1 of a follow-on Windows RPC batch (SAMR/LSARPC/SRVSVC/WKSSVC/DRSUAPI + WinRM/WMI -- all six phases now done, see their own sections below)
 
 Jurgen asked whether more DCE/RPC interfaces could ride the generic
 envelope Netlogon's own phase built (`dcerpc.hpp`) -- SAMR (Security
@@ -6974,8 +6974,9 @@ the two new cross-cutting sticky flags described above.
 
 #### DELIBERATELY NOT IMPLEMENTED in this pass
 
-SRVSVC, WKSSVC, DRSUAPI, WinRM, or WMI (all future phases of the same
-batch). SAMR/LSARPC **handle-level state tracking** -- opening a domain/
+SRVSVC, WKSSVC, DRSUAPI, WinRM, or DCOM/WMI (each its own later phase of
+the same batch -- all now done, see their own sections below). SAMR/LSARPC
+**handle-level state tracking** -- opening a domain/
 user/alias/group/policy handle is decoded per-call, but this file never
 remembers "handle X refers to user RID 1105" for a later call that reuses
 it, the same posture this codebase already accepts for every other
@@ -7033,7 +7034,7 @@ SID that followed -- caught by decoding the fixture and observing
 file headers for the full writeup, including the complete empirically-
 derived NDR deferred-pointer-ordering rule.
 
-### SRVSVC + WKSSVC (MS-SRVS, MS-WKST; carried inside SMB2 WRITE/READ, same shape as Netlogon/SAMR/LSARPC) -- phase 2 of the same follow-on Windows RPC batch (SAMR/LSARPC done, SRVSVC/WKSSVC this section, DRSUAPI and WinRM done (see below), WMI remains future work)
+### SRVSVC + WKSSVC (MS-SRVS, MS-WKST; carried inside SMB2 WRITE/READ, same shape as Netlogon/SAMR/LSARPC) -- phase 2 of the same follow-on Windows RPC batch (SAMR/LSARPC done, SRVSVC/WKSSVC this section, DRSUAPI/WinRM/DCOM all done too, see their own sections below)
 
 SRVSVC (Server Service Remote Protocol) and WKSSVC (Workstation Service
 Remote Protocol) are the interfaces `net view`/`net config workstation`-
@@ -7197,8 +7198,8 @@ equaling `"srvsvc"`/`"wkssvc"` respectively).
 
 #### DELIBERATELY NOT IMPLEMENTED in this pass
 
-DRSUAPI (its own later phase, see below), WinRM, WMI (future phases of
-the same batch). SHARE_INFO/
+DRSUAPI, WinRM, DCOM/WMI (each its own later phase of the same batch --
+all now done, see their own sections below). SHARE_INFO/
 WKSTA_INFO/WKSTA_USER_INFO levels other than the ones named above (see
 Message/opnum coverage). SRVSVC's own three header-only opnums' RESPONSE
 side (their level-dependent per-entry info structs -- `CONNECTION_INFO_0/1`,
@@ -7252,7 +7253,7 @@ smoke-tested against the hand-built fixture, decoded and inspected in
 written. See `include/conduitscope/srvsvc.hpp`'s and
 `include/conduitscope/wkssvc.hpp`'s file headers for the full writeup.
 
-### DRSUAPI (MS-DRSR; carried inside SMB2 WRITE/READ, same shape as Netlogon/SAMR/LSARPC/SRVSVC/WKSSVC) -- phase 3 of the same follow-on Windows RPC batch, alone rather than bundled (SAMR/LSARPC/SRVSVC/WKSSVC done, DRSUAPI this section, WinRM done (see below), WMI remains future work)
+### DRSUAPI (MS-DRSR; carried inside SMB2 WRITE/READ, same shape as Netlogon/SAMR/LSARPC/SRVSVC/WKSSVC) -- phase 3 of the same follow-on Windows RPC batch, alone rather than bundled (SAMR/LSARPC/SRVSVC/WKSSVC done, DRSUAPI this section, WinRM/DCOM done too, see their own sections below)
 
 DRSUAPI (Directory Replication Service Remote Protocol) is the interface
 domain controllers use to replicate directory data to each other.
@@ -7284,10 +7285,13 @@ implementation examined (impacket's own `secretsdump.py` and
 `epm.hept_map(..., protocol='ncacn_ip_tcp')` (the RPC endpoint mapper on
 TCP/135) and binds directly over a DYNAMICALLY NEGOTIATED raw TCP port,
 never touching SMB or a named pipe at all. This codebase has no
-endpoint-mapper decode and no raw-TCP/dynamic-port DCE/RPC framing (that
-territory, if it's ever built, belongs alongside the still-unbuilt
-WMI/DCOM decoder, which faces the identical "dynamically negotiated data
-channel" problem). Jurgen was asked directly how to handle this
+endpoint-mapper decode and no dynamic-port DCE/RPC framing (that
+territory faces the identical "dynamically negotiated data channel"
+problem the later DCOM/WMI phase's own `ResolveOxid`/`ResolveOxid2` scope
+boundary states explicitly -- see that section below; DCOM's own raw-TCP
+DCE/RPC framing, once built, only ever covers its own STATIC TCP/135
+control channel, not a dynamically negotiated port like DRSUAPI's own
+real-world transport needs). Jurgen was asked directly how to handle this
 discovery (ship the SMB-named-pipe version caveated; build genuinely new
 raw-TCP DCE/RPC recognition now; or defer DRSUAPI into the WMI/DCOM
 phase) and chose the first option, matching the original plan's own
@@ -7408,11 +7412,15 @@ synthetic gate name -- see the scope caveat above).
 
 #### DELIBERATELY NOT IMPLEMENTED in this pass
 
-Raw-TCP/dynamic-port DCE/RPC framing and the RPC endpoint-mapper decode
-that would be needed to actually follow DRSUAPI's own default transport
-(see the scope caveat above -- explicitly deferred, not silently
-dropped). WinRM, WMI (future phases of the same batch). `DRS_EXTENSIONS`'
-own capability-flag content (skipped, never rendered). Every DRSUAPI
+The RPC endpoint-mapper decode that would be needed to actually follow
+DRSUAPI's own default transport (see the scope caveat above -- explicitly
+deferred, not silently dropped): the DCOM phase below does add raw-TCP
+DCE/RPC framing (`dcerpc_tcp_declared_length`, `DcomTcpDecoder`), but only
+for DCOM's own STATIC TCP/135 control channel -- DRSUAPI's real-world
+transport still needs a DYNAMICALLY negotiated port learned from an
+endpoint-mapper response this codebase never tracks, a genuinely
+different problem neither phase solves. `DRS_EXTENSIONS`' own
+capability-flag content (skipped, never rendered). Every DRSUAPI
 opnum outside `drsuapi.hpp`'s own curated OPNUM COVERAGE list (MS-DRSR
 defines considerably more than four). DCE/RPC PDU fragmentation
 reassembly (inherited scope limit from `dcerpc.hpp`). Decoding sealed
@@ -7459,7 +7467,7 @@ BEFORE the `CMakeLists.txt` `drsuapi_*` test family reading it was
 written. See `include/conduitscope/drsuapi.hpp`'s own file header for the
 full writeup, including the scope caveat in its most prominent form.
 
-### WinRM (WS-Management, MS-WSMV; TCP port 5985) -- phase 4 of the same follow-on Windows RPC batch (SAMR/LSARPC/SRVSVC/WKSSVC/DRSUAPI done, WinRM this section, WMI remains future work)
+### WinRM (WS-Management, MS-WSMV; TCP port 5985) -- phase 4 of the same follow-on Windows RPC batch (SAMR/LSARPC/SRVSVC/WKSSVC/DRSUAPI done, WinRM this section, DCOM done too, see its own section below)
 
 WinRM is the plain SOAP-over-HTTP/1.1 transport `Invoke-Command`/`winrs`/
 `Enter-PSSession`, and most pentest tooling (evil-winrm's own
@@ -7671,7 +7679,9 @@ outer HTTP layer (method/status/headers/auth scheme) is still reported,
 but `has_envelope` is simply false and no SOAP field is ever populated.
 Any TLS-wrapped session at all (port 5986) -- out of scope for the same
 reason RDP's/HTTPS's own post-handshake traffic is elsewhere in this
-codebase. WMI (a future phase of the same batch).
+codebase. Full CIM/WMI query decode over DCOM -- see the DCOM section
+below for why that stayed out of scope even in its own later phase (real
+CIM/WMI query visibility lives here, in this WinRM section, instead).
 
 #### JSON output fields
 
@@ -7714,6 +7724,220 @@ inspected in `--format text --verbose`, `--format json`, `--format json
 family reading them was written. See `include/conduitscope/winrm.hpp`'s
 own file header for the full writeup, including the empirically-corrected
 wire-format finding in its most prominent form.
+
+### DCOM activation (MS-DCOM; raw DCE/RPC over TCP port 135) -- phase 5, the last, of the same follow-on Windows RPC batch (SAMR/LSARPC/SRVSVC/WKSSVC/DRSUAPI/WinRM done, DCOM this section, closing out the batch)
+
+Scoped down from full `IWbemServices`/CIM decode to structural DCOM
+ACTIVATION recognition only -- which of three well-known interfaces
+(below) a session bound to, and which of their own opnums it called,
+opnum named, never a single field of any request/response BODY decoded
+-- confirmed with Jurgen before this phase began. Full CIM decode would
+need OXID resolution (correlating a control-channel exchange on TCP/135
+against a SEPARATE data channel on a dynamically negotiated port,
+something no decoder in this codebase attempts anywhere else -- every
+existing stateful decoder assumes one statically-portable flow) plus COM
+object-reference marshaling and CIM's own generic property-bag type
+system -- the same "large, generic, no OT-specific structure" shape that
+already got OPC Classic declined elsewhere in this document. Real CIM/WMI
+query visibility instead comes from the WinRM section above
+(`Get-CimInstance`'s modern default transport is WS-Management, not
+DCOM). New, self-contained `include/conduitscope/dcom.hpp`/`src/dcom.cpp`
+-- named `dcom`/`dcom.hpp`, not `wmi`/`wmi.hpp`, as an honest description
+of this reduced scope.
+
+#### Transport: why this phase has its own TCP framing, not SMB pipe dispatch
+
+Every earlier interface in this batch (Netlogon/SAMR/LSARPC/SRVSVC/
+WKSSVC, and DRSUAPI when it happens to ride SMB at all) is carried inside
+an already-decoded SMB2 WRITE/READ/IOCTL body, over a named pipe
+`smb.cpp` itself tracks. DCOM activation traffic is NOT SMB-wrapped:
+[MS-DCOM] places every one of the three interfaces below directly on
+TCP/135 (the RPC endpoint mapper's own well-known port), raw DCE/RPC, no
+named pipe or SMB envelope involved at all. So this phase reuses
+`dcerpc.hpp`'s `try_parse_dcerpc`/`parse_dcerpc_chain` completely
+unchanged -- the same envelope-reuse discipline every earlier interface
+already established -- but needs its own `GateKind::TcpPort` decoder
+(`DcomTcpDecoder`) and its own declared-length TCP-reassembly probe
+(`dcerpc_tcp_declared_length`, `dcerpc.hpp`/`.cpp`, the raw-TCP mirror of
+`smb_tcp_declared_length`'s own role), rather than plugging into
+`smb.hpp`'s pipe-state maps. Port 135 itself IS static and well-known --
+this is NOT DRSUAPI's own "dynamically negotiated port" transport
+problem; what IS dynamically negotiated, and explicitly NOT followed by
+this decoder, is the separate OXID-resolution DATA channel a
+`ResolveOxid`/`ResolveOxid2` call negotiates (see CURATED NOTES below).
+
+`dcerpc_tcp_declared_length()` peeks the common header's own
+`frag_length` field (byte offset 8-9) once >= 10 bytes are available,
+deliberately using the same simple "not enough bytes yet ->
+`std::nullopt`" shape `kerberos_tcp_declared_length` already uses, NOT
+`winrm_tcp_declared_length`'s own "ask for one more byte" trick -- that
+trick exists only for framing whose total length genuinely can't be
+determined until a terminator arrives (HTTP's own header block);
+`frag_length` sits at a small FIXED offset, so nothing open-ended is
+needed here. Only the FIRST PDU's own `frag_length` is ever peeked,
+deliberately: `Decoder::reassemble_tcp_payload` never truncates its
+candidate to the declared length before calling `decode()`, so a
+candidate holding more than one back-to-back PDU (a bind immediately
+followed by a request) still reaches `DcomTcpDecoder::decode()` in full,
+and `parse_dcerpc_chain` walks every remaining PDU from there.
+
+#### A critical, empirically-corrected interface UUID -- read this first
+
+**This batch's own plan recollected the `IObjectExporter` interface UUID
+as `99fcfec4-5260-101b-bc6c-04021c009c02` -- that value is WRONG**, and
+was never independently verified before being written into the plan.
+Caught before any code was written this phase (unlike DRSUAPI's/WinRM's
+own mid-implementation corrections), verified two independent ways:
+impacket's own `dcerpc/v5/dcomrt.py` hardcodes `IID_IObjectExporter` as
+`99fcfec4-5260-101b-bbcb-00aa0021347a` -- the literal value impacket's
+own real DCOM client code binds against -- and an unrelated third-party
+Go DCE/RPC interface package is independently titled/keyed by that same
+corrected UUID string. The plan's own recollected value appears nowhere
+in this decoder -- only the corrected one does, documented prominently in
+`dcom.hpp`'s own file header comment. The other two interface UUIDs
+(`IRemoteSCMActivator`, `IActivation`) matched the plan exactly,
+independently confirmed against the same impacket source. Opnum tables
+for all three interfaces were read directly from impacket's own
+`dcomrt.py` (which itself cites the matching [MS-DCOM] section number in
+an inline comment per opnum), not recalled from training.
+
+#### Known interfaces, opnum-only
+
+No request/response BODY field is decoded for any of the three
+interfaces -- an even narrower structural-only bar than DRSUAPI's own,
+which at least decodes DRSBind's own handle/GUID fields.
+
+- `IObjectExporter` (`99fcfec4-5260-101b-bbcb-00aa0021347a`, version 0.0)
+  -- the OXID Resolver: `ResolveOxid`/`SimplePing`/`ComplexPing`/
+  `ServerAlive`/`ResolveOxid2`/`ServerAlive2`.
+- `IRemoteSCMActivator` (`000001a0-0000-0000-c000-000000000046`, version
+  0.0) -- the modern (DCOM 1.0+) remote activation interface:
+  `RemoteGetClassObject`/`RemoteCreateInstance`.
+- `IActivation` (`4d9f4ab8-7d1c-11cf-861e-0020af6e7c57`, version 0.0) --
+  the legacy (NT4-era) activation interface: `RemoteActivation`.
+
+Any opnum outside these tables, on a recognized interface, is reported as
+`"opnum N"` -- this codebase's usual "flag rather than guess" bar.
+
+#### State/correlation design, and why this phase does not reuse phase 0's single-target template
+
+`dcerpc.hpp`'s own `resolve_dcerpc_bind_bookkeeping` template (factored
+out in phase 0, reused as-is by every interface in phases 1-3) tracks
+bind/bind_ack bookkeeping for exactly ONE target interface per pipe/
+session. DCOM is genuinely different: a real DCOM client routinely binds
+MORE THAN ONE of the three interfaces above on the SAME TCP connection at
+once -- including as separate context elements inside ONE bind PDU -- a
+session-wide, multi-target binding shape the single-target template
+cannot express. `DcomFlowState` therefore tracks its own bookkeeping
+inline, in `dcom.cpp`: `pending_binds` (call_id-keyed) holds a bind PDU's
+own FULL ordered `(context_id, interface_name_or_empty)` list -- every
+offered position, not just recognized ones -- so the eventual bind_ack
+can be correlated POSITIONALLY against it (MS-RPCE's own bind_ack result
+list is positionally parallel to the bind's own context list, not keyed
+by `context_id` -- an unrecognized context element still occupies its own
+position, so positional alignment stays correct even when a bind mixes
+known and unknown interfaces); `bound_interfaces` (`context_id` ->
+`interface_name`) can hold more than one entry at once, unlike every
+earlier interface's single `interface_context_id` field; `pending_calls`
+tracks a request PDU awaiting its own response/fault, the same shared
+`PendingDceRpcCall` shape every earlier interface's own pipe state
+already uses. Session-keyed (`FlowStateKeying::Session`, not
+`DirectionalFlow`) -- bind, bind_ack, request, and response can each
+legitimately travel in either direction of one DCOM TCP session, the same
+reasoning Modbus's/TwinCAT's/MQTT's own session-keyed state already
+established.
+
+#### Curated attack/monitoring detection
+
+DCOM activation/OXID-resolution traffic observed -- fires on every
+recognized-interface REQUEST, naming the interface and the opnum (e.g.
+"DCOM activation: IRemoteSCMActivator RemoteCreateInstance"). An explicit
+`ResolveOxid`/`ResolveOxid2` scope-boundary note -- fires specifically
+when the opnum is `ResolveOxid` (0) or `ResolveOxid2` (4) on
+`IObjectExporter`, stating explicitly that the dynamic data-channel port
+this call negotiates for the object's own later method calls is NOT
+followed by this decoder -- a stated scope boundary, not a silent gap,
+the same posture DRSUAPI's own `DRS_EXTENSIONS`-skipping and WinRM's own
+PSRP-recognized-but-not-decoded note already establish elsewhere in this
+batch.
+
+#### Collision survey
+
+Port 135 had zero pre-existing recognition anywhere in this codebase
+(confirmed by grep across `it_protocols.hpp`/`it_protocols.cpp`/
+`notable_it_protocols.hpp`/`notable_it_protocols.cpp` before this file
+was written) -- unlike WinRM's own genuine collision with Tier 2's
+generic "http" recognition, there was no existing recognizer to race
+against or fix here, only the ordinary `GateKind::TcpPort` port-gating in
+Auto mode DoH/WinRM already establish for this gate kind: DCOM's own
+structural gate (`rpc_vers == 5` plus a plausible `frag_length`) is
+weaker than SMB's own magic check, so it stays port-gated rather than
+tried opportunistically on every TCP payload -- the same reasoning behind
+WinRM's own port gate, applied here for a different underlying reason
+(no existing collision to avoid, just a weak structural signal).
+
+#### DELIBERATELY NOT IMPLEMENTED in this pass
+
+The OXID-resolution data channel `ResolveOxid`/`ResolveOxid2` negotiates
+(see CURATED NOTES above) -- this decoder never follows a dynamically
+negotiated port to a second flow. Any request/response BODY field decode
+for any of the three interfaces' own opnums (contrast DRSUAPI's own
+DRSBind handle/GUID decode). Full `IWbemServices`/CIM query decode -- see
+the introduction above; real CIM/WMI query visibility lives in the WinRM
+section instead. COM object reference (OBJREF/`MInterfacePointer`)
+marshaling -- this file never looks past the DCE/RPC stub boundary at
+all, so no OBJREF this codebase might see is ever parsed.
+
+#### JSON output fields
+
+No top-level `dcom_*` scalar fields (unlike WinRM's own flat
+`winrm_action`/`winrm_shell_id`/etc.) -- instead a `dcom_calls` array,
+present only when at least one recognized-interface call was decoded from
+this message, one object per call: `interface`, `opnum` (the curated
+name), `call_id`, `context_id`, `is_response`, `sealed` (when true), and
+`summary`. Mirrors `drsuapi_calls`' own array shape (nested inside one
+SMB message there; sitting directly under the packet's own top-level JSON
+object here, since DCOM is itself a top-level protocol, not SMB-wrapped).
+`--stats` gains a `dcom activation counts:` block, keyed by `"<interface>
+<opnum_name>"`, requests only -- the same `std::map<std::string,
+size_t>` pattern every prior interface's own counts already established,
+but keyed by interface+opnum together since DCOM (unlike every earlier
+interface in this batch) can have more than one interface bound per
+session.
+
+#### Validation
+
+No public real-world DCOM capture was incorporated in this pass;
+validated by construction against synthetic
+`tests/sample_wmi_dcom_activation.pcap` (TCP, 22 packets --
+`tools/make_sample_pcap.py`'s `build_wmi_dcom_activation_sample()`),
+covering four TCP flows: `IObjectExporter` bound alone (`ServerAlive2`/
+`ResolveOxid2`, the latter triggering both curated notes together, plus a
+`ComplexPing` whose response is a FAULT rather than an ordinary response,
+proving `DcomFlowState`'s own pending-call bookkeeping tolerates a fault
+without producing a spurious call); `IRemoteSCMActivator` +
+`IActivation` bound TOGETHER on one bind PDU (`RemoteGetClassObject`/
+`RemoteCreateInstance`/`RemoteActivation`, each correctly attributed to
+its own interface and context despite sharing one bind); a positional
+bind_ack correlation edge case (an unrecognized interface at context 0,
+REJECTED, alongside `IObjectExporter` at context 1, ACCEPTED, in the same
+bind PDU, proving position 1's acceptance is attributed to the right
+context_id despite position 0 being both unrecognized and rejected,
+followed by a `SimplePing` that decodes normally on the accepted context
+and a request on the never-bound context that falls through gracefully
+with no call and no note); and the same `IObjectExporter` bind on a
+non-standard TCP port (13135, used by the `--dcom-port`/`--protocol dcom`
+CLI tests). A second, separate fixture
+(`tests/sample_wmi_dcom_activation_tcp_split.pcap`) covers the
+two-TCP-segment reassembly case, mirroring `build_winrm_sample()`'s/
+`build_kerberos_sample()`'s own split-fixture precedent. Every scenario
+was independently smoke-tested against the hand-built fixtures, decoded
+and inspected in `--format text --verbose`, `--format json`, and
+`--stats`, BEFORE the `CMakeLists.txt` `dcom_*` test family reading them
+was written. See `include/conduitscope/dcom.hpp`'s own file header for
+the full writeup, including the empirically-corrected UUID finding in its
+most prominent form. This closes out the Windows RPC/remote-management
+batch (SAMR/LSARPC -> SRVSVC/WKSSVC -> DRSUAPI -> WinRM -> WMI/DCOM).
 
 ### MELSEC / MC Protocol (SLMP, Mitsubishi Electric) -- TCP port 5001, UDP port 5000
 

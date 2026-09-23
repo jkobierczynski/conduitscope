@@ -61,7 +61,16 @@ remote-shell-opened, command-executed (redacted by default,
 endpoint, HTTP-Basic-auth-over-plaintext, and SOAP-Fault
 attack/monitoring notes -- **note:** the command line is plain XML text,
 not base64+UTF-16LE, an empirically-corrected finding documented in
-`docs/PROTOCOL_COVERAGE.md`'s WinRM section),
+`docs/PROTOCOL_COVERAGE.md`'s WinRM section), DCOM activation (MS-DCOM,
+raw DCE/RPC directly over TCP port 135, not SMB-wrapped -- structural
+activation/OXID-resolution recognition only: `IObjectExporter`/
+`IRemoteSCMActivator`/`IActivation` named by interface and opnum, no
+request/response body field decoded, with a curated DCOM-activation note
+and an explicit `ResolveOxid`/`ResolveOxid2` scope-boundary note stating
+the dynamically negotiated data-channel port those calls resolve is not
+followed -- **note:** the plan's own recollected `IObjectExporter`
+interface UUID was wrong; see `docs/PROTOCOL_COVERAGE.md`'s DCOM section
+for the empirically-corrected value and the full scope writeup),
 IEEE Spanning Tree Protocol
 (STP/RSTP/MSTP), DeviceNet (CAN-bus CIP, via SocketCAN pcap captures), DNS,
 mDNS, LLMNR, and NetBIOS Name Service (NBT-NS), ICMP, RIP, IGMP, VRRP, HSRP,

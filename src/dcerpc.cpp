@@ -456,4 +456,22 @@ std::vector<DceRpcMessage> parse_dcerpc_chain(ByteSpan payload) {
     return messages;
 }
 
+std::optional<size_t> dcerpc_tcp_declared_length(ByteSpan candidate) {
+    // 10 bytes covers rpc_vers(1)/rpc_vers_minor(1)/PTYPE(1)/pfc_flags(1)/packed_drep(4)/
+    // frag_length(2) -- see this file's own WIRE FORMAT paragraph for the full header layout.
+    if (candidate.size() < 10) return std::nullopt;
+    Cursor c(candidate);
+    uint8_t rpc_vers = c.u8();
+    if (rpc_vers != 5) return std::nullopt;
+    c.skip(1);  // rpc_vers_minor -- not gated on, try_parse_dcerpc itself doesn't gate on it either
+    c.skip(1);  // PTYPE
+    c.skip(1);  // pfc_flags
+    c.skip(4);  // packed_drep
+    uint16_t frag_length = c.u16le();
+    if (frag_length < 16) return std::nullopt;  // same floor try_parse_dcerpc itself applies
+    const size_t kMaxPlausibleDceRpcFragLength = resource_limits().max_reassembly_bytes.value_or(1 << 20);
+    if (frag_length > kMaxPlausibleDceRpcFragLength) return std::nullopt;
+    return static_cast<size_t>(frag_length);
+}
+
 }  // namespace conduitscope

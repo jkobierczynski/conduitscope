@@ -794,6 +794,38 @@ void write_winrm_json_fields(std::ostream& out, const WinRmMessage& w) {
     }
 }
 
+// Renders one DcomCall (dcom.hpp) as a JSON object's inner fields -- same conventions as
+// write_drsuapi_call_json_fields above.
+void write_dcom_call_json_fields(std::ostream& out, const DcomCall& c) {
+    out << "        \"interface\": \"" << json_escape(c.interface_name) << "\",\n";
+    out << "        \"opnum\": \"" << json_escape(c.opnum_name) << "\",\n";
+    out << "        \"call_id\": " << c.call_id << ",\n";
+    out << "        \"context_id\": " << c.context_id << ",\n";
+    out << "        \"is_response\": " << (c.is_response ? "true" : "false") << ",\n";
+    if (c.sealed) {
+        out << "        \"sealed\": true,\n";
+    }
+    out << "        \"summary\": \"" << json_escape(c.summary) << "\"\n";
+}
+
+// The DCOM analog of write_winrm_json_fields above -- reads straight from the DcomMessage carried
+// by DecodedPacket::result. dcom_calls mirrors write_drsuapi_call_json_fields's own array shape
+// (drsuapi_calls, nested inside write_one_smb_message_json_fields below) -- but sits directly under
+// the packet's own top-level JSON object instead of inside another message's own array, since DCOM
+// is itself a top-level protocol (raw TCP/135, not SMB-wrapped -- see dcom.hpp's own TRANSPORT
+// section), the same "top-level result, not a dual-written nested field" shape WinRM established.
+void write_dcom_json_fields(std::ostream& out, const DcomMessage& m) {
+    if (!m.calls.empty()) {
+        out << "    \"dcom_calls\": [\n";
+        for (size_t i = 0; i < m.calls.size(); ++i) {
+            out << "      {\n";
+            write_dcom_call_json_fields(out, m.calls[i]);
+            out << "      }" << (i + 1 < m.calls.size() ? "," : "") << "\n";
+        }
+        out << "    ],\n";
+    }
+}
+
 // Renders one RipRoute as a single line -- see rip.hpp for what each of the three RTE shapes
 // (ordinary route, full-table-request marker, authentication entry) means. Reproduces
 // decoder.cpp's own former rip_route_summary exactly (that copy was retired along with the
@@ -3444,6 +3476,9 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
     if (p.protocol == "winrm" && p.result) {
         write_winrm_json_fields(out_, p.result->as<WinRmMessage>());
     }
+    if (p.protocol == "dcom" && p.result) {
+        write_dcom_json_fields(out_, p.result->as<DcomMessage>());
+    }
     out_ << "    \"notes\": [";
     for (size_t i = 0; i < p.notes.size(); ++i) {
         if (i != 0) out_ << ", ";
@@ -3910,6 +3945,11 @@ void StatsWriter::write_packet(const DecodedPacket& p) {
             winrm_action_counts_[wm.wsa_action_name]++;
         }
     }
+    if (p.protocol == "dcom" && p.result) {
+        for (const DcomCall& dc : p.result->as<DcomMessage>().calls) {
+            if (!dc.is_response) dcom_call_counts_[dc.interface_name + " " + dc.opnum_name]++;
+        }
+    }
     if (p.protocol == "rip" && p.result) {
         rip_command_counts_[p.result->as<RipMessage>().command_name]++;
     }
@@ -4245,6 +4285,12 @@ void StatsWriter::print_summary(std::ostream& out) const {
     if (!winrm_action_counts_.empty()) {
         out << "winrm action counts:\n";
         for (const auto& [name, count] : winrm_action_counts_) {
+            out << "  " << std::left << std::setw(40) << name << count << "\n";
+        }
+    }
+    if (!dcom_call_counts_.empty()) {
+        out << "dcom activation counts:\n";
+        for (const auto& [name, count] : dcom_call_counts_) {
             out << "  " << std::left << std::setw(40) << name << count << "\n";
         }
     }

@@ -472,6 +472,7 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
                 const std::vector<int>& wireless_backhaul_ports,
                 const std::vector<int>& tunnel_vpn_ports,
                 const std::vector<int>& winrm_ports,
+                const std::vector<int>& dcom_ports,
                 size_t max_packets,
                 const ResourceLimitCliVars& limit_vars,
                 bool stats, bool strict, bool quiet,
@@ -589,6 +590,7 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
                                : (protocol == "bgp")    ? ProtocolFilter::BgpOnly
                                : (protocol == "slow-protocols") ? ProtocolFilter::SlowProtocolsOnly
                                : (protocol == "winrm")  ? ProtocolFilter::WinRmOnly
+                               : (protocol == "dcom")   ? ProtocolFilter::DcomOnly
                                                         : ProtocolFilter::Auto;
     for (int p : modbus_ports) options.extra_modbus_ports.push_back(static_cast<uint16_t>(p));
     for (int p : dnp3_ports) options.extra_dnp3_ports.push_back(static_cast<uint16_t>(p));
@@ -620,6 +622,7 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
     for (int p : wireless_backhaul_ports) options.extra_wireless_backhaul_ports.push_back(static_cast<uint16_t>(p));
     for (int p : tunnel_vpn_ports) options.extra_tunnel_vpn_ports.push_back(static_cast<uint16_t>(p));
     for (int p : winrm_ports) options.extra_winrm_ports.push_back(static_cast<uint16_t>(p));
+    for (int p : dcom_ports) options.extra_dcom_ports.push_back(static_cast<uint16_t>(p));
 
     try {
         // Built once per `decode` invocation, before opening the packet source, so a bad --hosts/
@@ -1121,7 +1124,7 @@ int main(int argc, char** argv) {
         decode_opcua_ports, decode_mqtt_ports, decode_ffhse_ports, decode_dns_ports, decode_mdns_ports,
         decode_llmnr_ports, decode_nbns_ports, decode_doh_ports, decode_rip_ports, decode_hsrp_ports,
         decode_remote_access_ports, decode_lateral_movement_ports, decode_enterprise_trust_ports,
-        decode_wireless_backhaul_ports, decode_tunnel_vpn_ports, decode_winrm_ports;
+        decode_wireless_backhaul_ports, decode_tunnel_vpn_ports, decode_winrm_ports, decode_dcom_ports;
     size_t decode_max_packets = 0;
     ResourceLimitCliVars decode_limit_vars;
     bool decode_stats = false, decode_strict = false;
@@ -1200,7 +1203,7 @@ int main(int argc, char** argv) {
     decode_cmd
         ->add_option("--protocol", decode_protocol,
                       "Restrict decoding to one protocol instead of auto-detecting all of them")
-        ->transform(CLI::IsMember({"auto", "modbus", "dnp3", "s7comm", "mms", "iec104", "enip", "profinet", "goose", "sv", "ethercat", "stp", "devicenet", "bacnet", "hartip", "opcua", "mqtt", "s7comm-plus", "ff-hse", "dns", "mdns", "llmnr", "nbns", "doh", "rip", "icmp", "igmp", "vrrp", "hsrp", "igrp", "pim", "eigrp", "ospf", "remote-access", "lateral-movement", "enterprise-trust", "eapol", "wireless-backhaul", "pppoe", "tunnel-vpn", "mpls", "arp", "lldp", "twincat", "kerberos", "ldap", "smb", "melsec", "fins", "bgp", "slow-protocols", "winrm"}))
+        ->transform(CLI::IsMember({"auto", "modbus", "dnp3", "s7comm", "mms", "iec104", "enip", "profinet", "goose", "sv", "ethercat", "stp", "devicenet", "bacnet", "hartip", "opcua", "mqtt", "s7comm-plus", "ff-hse", "dns", "mdns", "llmnr", "nbns", "doh", "rip", "icmp", "igmp", "vrrp", "hsrp", "igrp", "pim", "eigrp", "ospf", "remote-access", "lateral-movement", "enterprise-trust", "eapol", "wireless-backhaul", "pppoe", "tunnel-vpn", "mpls", "arp", "lldp", "twincat", "kerberos", "ldap", "smb", "melsec", "fins", "bgp", "slow-protocols", "winrm", "dcom"}))
         ->capture_default_str();
     decode_cmd->add_option("--modbus-port", decode_modbus_ports,
                             "Additional TCP port to treat as expected for Modbus (repeatable); "
@@ -1297,6 +1300,11 @@ int main(int argc, char** argv) {
                             "(repeatable); widens detection in Auto mode, same caveat as "
                             "--dns-port -- normally only attempted on port 5985 (plaintext; TLS-"
                             "wrapped port 5986 is out of scope, see docs/MANUAL.md)");
+    decode_cmd->add_option("--dcom-port", decode_dcom_ports,
+                            "Additional TCP port to treat as expected for DCOM activation "
+                            "(repeatable); widens detection in Auto mode, same caveat as "
+                            "--dns-port -- normally only attempted on port 135. Structural "
+                            "activation/OXID-resolution recognition only, see docs/MANUAL.md");
     decode_cmd->add_option("--rip-port", decode_rip_ports,
                             "Additional UDP port to treat as expected for RIP (repeatable); widens "
                             "detection in Auto mode, same caveat as --dns-port -- normally only "
@@ -1709,7 +1717,7 @@ int main(int argc, char** argv) {
                            decode_rip_ports, decode_hsrp_ports, decode_remote_access_ports,
                            decode_lateral_movement_ports, decode_enterprise_trust_ports,
                            decode_wireless_backhaul_ports, decode_tunnel_vpn_ports,
-                           decode_winrm_ports,
+                           decode_winrm_ports, decode_dcom_ports,
                            decode_max_packets, decode_limit_vars, decode_stats, decode_strict,
                            quiet, no_color, force_color, decode_mac_vendor, decode_resolve, decode_hosts_file,
                            decode_service_names, decode_services_file, decode_show_vlan,

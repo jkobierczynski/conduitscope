@@ -203,6 +203,34 @@ std::optional<DceRpcMessage> try_parse_dcerpc(ByteSpan pdu);
 // parse_smb2_chain's own kMaxCompounded uses.
 std::vector<DceRpcMessage> parse_dcerpc_chain(ByteSpan payload);
 
+// Returns the total on-the-wire byte count of the FIRST DCE/RPC PDU present in `candidate` --
+// peeked directly from the common header's own frag_length field (byte offset 8-9, see this file's
+// own WIRE FORMAT paragraph), without requiring the full PDU to be present yet. This is the raw-TCP
+// mirror of smb_tcp_declared_length's role (smb.hpp) for interfaces that ride DCE/RPC over a
+// named pipe: DCOM's own activation traffic (dcom.hpp) is NOT SMB-wrapped -- it is DCE/RPC directly
+// over TCP/135 -- so it needs its own declared-length probe for decoder.cpp's generic TCP
+// reassembly cascade, the same role this function plays there.
+//
+// Deliberately uses the same simple "not enough bytes yet -> nullopt" shape kerberos_tcp_declared_
+// length (kerberos.cpp) uses, NOT winrm_tcp_declared_length's own "+1, ask for more" trick: that
+// trick exists only for framing where the total length genuinely can't be determined in principle
+// until a terminator arrives (HTTP's own header block). Here frag_length sits at a small FIXED byte
+// offset -- once >= 10 bytes exist it can always be read directly, so there is nothing open-ended to
+// ask for; a segment splitting mid-10-byte-header essentially never happens in practice, and if it
+// does, the next TCP segment simply lets the SAME reassembly attempt succeed once more bytes arrive
+// (see decoder.cpp's own reassemble_tcp_payload).
+//
+// Only the FIRST PDU's own frag_length is peeked, deliberately -- reassemble_tcp_payload never
+// truncates its candidate to the declared length before calling decode() (see decoder.cpp's own
+// comment on effective_payload), so a candidate that in fact holds more than one back-to-back PDU
+// (e.g. a bind immediately followed by a request) still reaches DcomTcpDecoder::decode() in full;
+// parse_dcerpc_chain walks the rest from there. Returns std::nullopt if fewer than 10 bytes are
+// available yet, rpc_vers isn't 5, or frag_length is implausible (< 16, DCE/RPC's own minimum common-
+// header-only size, per try_parse_dcerpc's own floor; or beyond --max-reassembly-bytes, the same
+// defense-in-depth ceiling every other declared-length probe in this codebase applies against a
+// coincidentally plausible but wildly large value being mistaken for a genuine multi-segment split).
+std::optional<size_t> dcerpc_tcp_declared_length(ByteSpan candidate);
+
 // Renders a 16-byte NDR-marshalled GUID (Data1 4 bytes LE, Data2 2 bytes LE, Data3 2 bytes LE,
 // Data4 8 bytes byte-order-preserved) as the standard dashed lowercase hex string, e.g.
 // "12345678-1234-abcd-ef00-01234567cffb" -- the same mixed-endian convention every Microsoft GUID

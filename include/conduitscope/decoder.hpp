@@ -16,6 +16,7 @@
 #include "conduitscope/byteio.hpp"
 #include "conduitscope/can_socketcan.hpp"
 #include "conduitscope/cotp.hpp"
+#include "conduitscope/dcom.hpp"
 #include "conduitscope/devicenet.hpp"
 #include "conduitscope/dnp3.hpp"
 #include "conduitscope/dns.hpp"
@@ -212,6 +213,12 @@ enum class ProtocolFilter {
                            // WMI); unlike the first three phases, WinRM has no DCE/RPC or SMB
                            // involvement at all -- plain HTTP/1.1 + SOAP, GateKind::TcpPort
                            // (port-gated in Auto mode, like DoH), the second protocol on that gate.
+    DcomOnly,              // only attempt DCOM activation/OXID-resolution (structural-only, no body
+                           // field decode) decoding -- see dcom.hpp. Phase 5 (the last) of the
+                           // Windows RPC/remote-management batch. Raw DCE/RPC over TCP/135
+                           // (GateKind::TcpPort, port-gated in Auto mode, the third protocol on that
+                           // gate, joining DoH/WinRM) -- NOT SMB-wrapped, unlike every earlier
+                           // interface in this batch; see dcom.hpp's own TRANSPORT section.
 };
 
 struct DecodeOptions {
@@ -296,6 +303,16 @@ struct DecodeOptions {
                                                   // benefit, so this stays port-gated deliberately,
                                                   // not because the signal itself is weak. See
                                                   // winrm.hpp's own file header comment.
+    std::vector<uint16_t> extra_dcom_ports;     // TCP -- see DCOM_PORT (135). Joins the same
+                                                  // detection-gating group as extra_doh_ports/
+                                                  // extra_winrm_ports above (GateKind::TcpPort,
+                                                  // port-gated even in Auto mode) -- DCOM's own
+                                                  // structural gate (rpc_vers==5 plus a plausible
+                                                  // frag_length) is weaker than SMB's own magic
+                                                  // check, so, like WinRM, this stays port-gated in
+                                                  // Auto mode rather than tried opportunistically on
+                                                  // every TCP payload. See dcom.hpp's own file
+                                                  // header comment.
     std::vector<uint16_t> extra_rip_ports;      // UDP -- see RIP_PORT (520); joins the same
                                                   // detection-gating group as DNS/mDNS/LLMNR/
                                                   // NBT-NS above, for the same reason: RIP's wire

@@ -11216,6 +11216,7 @@ LLMNR_PORT = 5355
 NBNS_PORT = 137
 DOH_PORT = 443
 WINRM_PORT = 5985
+DCOM_PORT = 135
 
 
 def dns_name(name: str) -> bytes:
@@ -13495,6 +13496,183 @@ def build_winrm_sample():
     (TESTS_DIR / "sample_winrm_tcp_split.pcap").write_bytes(split_data)
 
 
+# The three known DCOM activation interface UUIDs, version 0.0 -- see dcom.hpp's own KNOWN
+# INTERFACES section for the empirical corrections/cross-checks behind each value (IObjectExporter
+# in particular: this codebase's own original plan recollected a WRONG UUID for it, corrected here
+# to the same value dcom.hpp itself uses).
+IOBJECTEXPORTER_UUID = "99fcfec4-5260-101b-bbcb-00aa0021347a"
+IREMOTESCMACTIVATOR_UUID = "000001a0-0000-0000-c000-000000000046"
+IACTIVATION_UUID = "4d9f4ab8-7d1c-11cf-861e-0020af6e7c57"
+
+
+def build_wmi_dcom_activation_sample():
+    """DCOM activation/OXID-resolution, raw DCE/RPC over TCP/135 -- Phase 5 (the last) of the
+    Windows RPC/remote-management batch (SAMR/LSARPC -> SRVSVC/WKSSVC -> DRSUAPI -> WinRM -> WMI/
+    DCOM; see dcom.hpp's own file header comment for the full REDUCED SCOPE/TRANSPORT/STATE
+    rationale). Unlike every earlier interface in this batch, DCOM activation is NOT SMB-wrapped --
+    every flow below is a raw TCP/135 stream (dcerpc_pdu/dcerpc_bind_body/etc. reused directly,
+    exactly as build_drsuapi_sample already reuses them, but wrapped in plain TCP packets via the
+    same `session()` closure pattern build_winrm_sample established, rather than SMB WRITE/READ).
+
+    Three flows, each its own TCP session (client port distinguishes them):
+
+      A: IObjectExporter only -- bind (one context element) + bind_ack (accepted) + ServerAlive2
+         (opnum 5, request/response pair) + ResolveOxid2 (opnum 4, request/response pair, the
+         request triggering BOTH the general activation note and the ResolveOxid/ResolveOxid2
+         scope-boundary note) + ComplexPing (opnum 2) whose RESPONSE is a FAULT instead of an
+         ordinary response -- proves DcomFlowState's own pending_calls bookkeeping tolerates a
+         fault (clears the pending call, produces no spurious DcomCall, doesn't disturb any later
+         PDU on the same session).
+
+      B: IRemoteSCMActivator + IActivation bound TOGETHER on one bind PDU (two context elements,
+         both accepted in one bind_ack) -- the scenario dcom.hpp's own STATE section says
+         resolve_dcerpc_bind_bookkeeping's single-target template cannot express, and the reason
+         DcomFlowState tracks its own multi-target bookkeeping instead. Exercises
+         RemoteGetClassObject (opnum 3) and RemoteCreateInstance (opnum 4) on IRemoteSCMActivator's
+         own context, and RemoteActivation (opnum 0) on IActivation's own context -- three distinct
+         request/response pairs, each correctly attributed to its own interface despite sharing one
+         TCP session and one bind PDU.
+
+      C: a bind PDU offering TWO context elements where only the SECOND is recognized -- context 0
+         names an unrelated, unrecognized interface UUID, context 1 names IObjectExporter -- and
+         the bind_ack REJECTS context 0 (user_rejection) while ACCEPTING context 1. This is the
+         positional-correlation edge case dcom.hpp's own STATE section calls out explicitly: a
+         bind_ack's own result list is positionally parallel to the bind's own context list, not
+         keyed by context_id, so this proves position 1's acceptance is attributed to the right
+         context_id even though position 0 was both unrecognized AND rejected. Followed by: a
+         SimplePing (opnum 1) request/response pair on context 1 (IObjectExporter, decodes
+         normally) and a request on context 0 (never bound at all -- neither recognized nor
+         accepted) that must fall through to a bare structural PDU summary, produce no DcomCall,
+         and fire no note -- this codebase's usual "flag rather than guess" bar applied to a
+         context this decoder was never able to attribute to any interface at all.
+
+      D: the same IObjectExporter bind as Flow A's, but on a non-standard TCP port (13135) --
+         Auto mode must NOT recognize it (DcomTcpDecoder's own port gate declines, and unlike
+         WinRM there's no pre-existing recognizer racing to claim it instead -- see dcom.hpp's own
+         COLLISION SURVEY section); --dcom-port widens Auto-mode detection, --protocol dcom claims
+         it port-independently and adds the "not a configured/standard DCOM port" note.
+
+    Plus a separate TCP-framing fixture file (sample_wmi_dcom_activation_tcp_split.pcap): a bind
+    PDU split across two TCP segments, the split point placed just past the 10-byte prefix
+    dcerpc_tcp_declared_length itself peeks (rpc_vers/rpc_vers_minor/PTYPE/pfc_flags/packed_drep/
+    frag_length) but well before the PDU's own end -- exercises Decoder::reassemble_tcp_payload's
+    buffering path the same way build_winrm_sample's own split fixture does for WinRM/HTTP, and
+    build_kerberos_sample's own does for Kerberos/TCP; must decode identically to a whole-message
+    case once both segments arrive."""
+    packets = []
+    ident = [0xF100]
+
+    def next_ident() -> int:
+        v = ident[0]
+        ident[0] += 1
+        return v
+
+    def session(client_port: int, server_port: int = DCOM_PORT):
+        state = {"cseq": 6000, "sseq": 10000}
+
+        def request(payload: bytes):
+            tcp = tcp_header(client_port, server_port, state["cseq"], state["sseq"], TCP_PSH | TCP_ACK,
+                              len(payload)) + payload
+            ip = ipv4_header(HMI_IP, PLC_IP, 6, len(tcp), next_ident())
+            packets.append(eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip + tcp)
+            state["cseq"] += len(payload)
+
+        def response(payload: bytes):
+            tcp = tcp_header(server_port, client_port, state["sseq"], state["cseq"], TCP_PSH | TCP_ACK,
+                              len(payload)) + payload
+            ip = ipv4_header(PLC_IP, HMI_IP, 6, len(tcp), next_ident())
+            packets.append(eth_header(HMI_MAC, PLC_MAC, 0x0800) + ip + tcp)
+            state["sseq"] += len(payload)
+
+        return request, response
+
+    def dcom_bind(context_elements) -> bytes:
+        return dcerpc_pdu(11, 1, dcerpc_bind_body(context_elements))  # PTYPE 11 == bind, call_id 1
+
+    def dcom_bind_ack(results) -> bytes:
+        return dcerpc_pdu(12, 1, dcerpc_bind_ack_body(results))  # PTYPE 12 == bind_ack, call_id 1
+
+    def dcom_request(call_id: int, context_id: int, opnum: int, stub: bytes = b"") -> bytes:
+        return dcerpc_pdu(0, call_id, dcerpc_request_body(context_id, opnum, stub))  # PTYPE 0 == request
+
+    def dcom_response(call_id: int, context_id: int, stub: bytes = b"") -> bytes:
+        return dcerpc_pdu(2, call_id, dcerpc_response_body(context_id, stub))  # PTYPE 2 == response
+
+    def dcom_fault(call_id: int, context_id: int, fault_status: int = 0x1C010002) -> bytes:
+        return dcerpc_pdu(3, call_id, dcerpc_fault_body(context_id, fault_status))  # PTYPE 3 == fault
+
+    def iface_context(context_id: int, uuid: str) -> bytes:
+        # All three known DCOM interfaces are version 0.0 -- see dcom.hpp's own KNOWN INTERFACES
+        # section.
+        return dcerpc_context_element(context_id, uuid, abstract_ver_major=0, abstract_ver_minor=0)
+
+    # --- Flow A: IObjectExporter only. --------------------------------------------------------
+    a_req, a_resp = session(50100)
+    a_req(dcom_bind([iface_context(0, IOBJECTEXPORTER_UUID)]))
+    a_resp(dcom_bind_ack([dcerpc_context_result(0)]))  # 0 == acceptance
+    a_req(dcom_request(101, 0, 5))   # ServerAlive2
+    a_resp(dcom_response(101, 0))
+    a_req(dcom_request(102, 0, 4))   # ResolveOxid2 -- triggers the scope-boundary note
+    a_resp(dcom_response(102, 0))
+    a_req(dcom_request(103, 0, 2))   # ComplexPing -- answered with a FAULT, not a response
+    a_resp(dcom_fault(103, 0))
+
+    # --- Flow B: IRemoteSCMActivator + IActivation bound together on ONE bind PDU. -----------
+    b_req, b_resp = session(50200)
+    b_req(dcom_bind([iface_context(0, IREMOTESCMACTIVATOR_UUID), iface_context(1, IACTIVATION_UUID)]))
+    b_resp(dcom_bind_ack([dcerpc_context_result(0), dcerpc_context_result(0)]))  # both accepted
+    b_req(dcom_request(201, 0, 3))   # RemoteGetClassObject (IRemoteSCMActivator)
+    b_resp(dcom_response(201, 0))
+    b_req(dcom_request(202, 0, 4))   # RemoteCreateInstance (IRemoteSCMActivator)
+    b_resp(dcom_response(202, 0))
+    b_req(dcom_request(203, 1, 0))   # RemoteActivation (IActivation)
+    b_resp(dcom_response(203, 1))
+
+    # --- Flow C: positional bind_ack correlation with an unrecognized + rejected context 0. ---
+    c_req, c_resp = session(50300)
+    unrecognized_uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"  # not one of this file's three known interfaces
+    c_req(dcom_bind([iface_context(0, unrecognized_uuid), iface_context(1, IOBJECTEXPORTER_UUID)]))
+    c_resp(dcom_bind_ack([dcerpc_context_result(1), dcerpc_context_result(0)]))  # 1 == user_rejection
+    c_req(dcom_request(301, 1, 1))   # SimplePing on context 1 (IObjectExporter) -- decodes normally
+    c_resp(dcom_response(301, 1))
+    c_req(dcom_request(302, 0, 99))  # on context 0 -- never bound to any known interface at all;
+                                      # must fall through to a bare structural summary, no DcomCall,
+                                      # no note (this codebase's "flag rather than guess" bar)
+
+    # --- Flow D: the same IObjectExporter bind as Flow A's, but on a non-standard TCP port
+    #     (13135) -- in Auto mode DcomTcpDecoder's own port gate must decline it (see dcom.hpp's own
+    #     COLLISION SURVEY section: unlike WinRM, there's no existing recognizer racing to claim it
+    #     instead -- it simply goes unrecognized in Auto mode). --dcom-port 13135 widens Auto-mode
+    #     detection so DcomTcpDecoder claims it; --protocol dcom claims it port-independently too,
+    #     additionally adding the "not a configured/standard DCOM port" note.
+    d_req, _d_resp = session(50500, server_port=13135)
+    d_req(dcom_bind([iface_context(0, IOBJECTEXPORTER_UUID)]))
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_200_000 + i, i * 1000)
+    (TESTS_DIR / "sample_wmi_dcom_activation.pcap").write_bytes(data)
+
+    # --- Separate fixture: a bind PDU split across two TCP segments, well past the 10-byte prefix
+    #     dcerpc_tcp_declared_length itself peeks but before the PDU's own end. ------------------
+    split_packets = []
+    split_full = dcom_bind([iface_context(0, IOBJECTEXPORTER_UUID), iface_context(1, IREMOTESCMACTIVATOR_UUID)])
+
+    def add_split_tcp(seq: int, ack: int, payload: bytes, ident_val: int):
+        tcp = tcp_header(50400, DCOM_PORT, seq, ack, TCP_PSH | TCP_ACK, len(payload)) + payload
+        ip = ipv4_header(HMI_IP, PLC_IP, 6, len(tcp), ident_val)
+        split_packets.append(eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip + tcp)
+
+    split_at = 16  # past the 10-byte prefix declared-length itself reads, before the bind body ends
+    add_split_tcp(9000, 11000, split_full[:split_at], next_ident())
+    add_split_tcp(9000 + split_at, 11000, split_full[split_at:], next_ident())
+
+    split_data = pcap_global_header()
+    for i, pkt in enumerate(split_packets):
+        split_data += pcap_record(pkt, 1_700_201_000 + i, i * 1000)
+    (TESTS_DIR / "sample_wmi_dcom_activation_tcp_split.pcap").write_bytes(split_data)
+
+
 if __name__ == "__main__":
     TESTS_DIR.mkdir(exist_ok=True)
     build_modbus_sample()
@@ -13569,4 +13747,5 @@ if __name__ == "__main__":
     build_bgp_sample()
     build_slow_protocols_sample()
     build_winrm_sample()
+    build_wmi_dcom_activation_sample()
     print("wrote sample fixtures to", TESTS_DIR)

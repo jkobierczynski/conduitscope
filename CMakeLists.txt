@@ -109,6 +109,7 @@ add_library(conduitscope_core STATIC
   src/wkssvc.cpp
   src/drsuapi.cpp
   src/winrm.cpp
+  src/dcom.cpp
   src/protocol_registry.cpp
   src/resource_limits.cpp
   src/decoder.cpp
@@ -10425,6 +10426,140 @@ add_test(NAME winrm_tcp_segment_split_reassembly
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_winrm_tcp_split.pcap" --format text --verbose)
 set_tests_properties(winrm_tcp_segment_split_reassembly PROPERTIES
   PASS_REGULAR_EXPRESSION "\\[tcp\\]  buffering a WinRM/HTTP message PDU/frame split across TCP segments 49580->5985: 60 of 61 declared byte\\(s\\) seen so far across 1 segment\\(s\\) on this flow, waiting for more.*\\[winrm\\]  POST /wsman -- WS-Man Command \\(\\[REDACTED\\]\\).*note: reassembled a WinRM/HTTP message PDU/frame from 1333 byte\\(s\\) spanning 2 TCP segments on this flow.*note: command executed: \\[REDACTED\\]")
+
+# DCOM activation, raw DCE/RPC over TCP/135 -- Phase 5 (the last) of the Windows RPC/remote-
+# management batch, see dcom.hpp's own extensive file header comment for the wire format/scope.
+# tests/sample_wmi_dcom_activation.pcap (build_wmi_dcom_activation_sample()) has 22 packets across
+# four TCP flows: A (#1-#8) binds IObjectExporter alone and exercises ServerAlive2/ResolveOxid2/a
+# faulted ComplexPing; B (#9-#16) binds IRemoteSCMActivator+IActivation TOGETHER on one bind PDU
+# and exercises RemoteGetClassObject/RemoteCreateInstance/RemoteActivation; C (#17-#21) binds an
+# unrecognized interface at context 0 (REJECTED) alongside IObjectExporter at context 1 (accepted)
+# on one bind PDU, proving positional bind_ack correlation, then exercises SimplePing on the
+# accepted context and an unbound-context request that must fall through gracefully; D (#22) is the
+# same bind as A's on a non-standard TCP port (13135), declined in Auto mode. A separate 2-packet
+# fixture, sample_wmi_dcom_activation_tcp_split.pcap, splits a bind PDU across two TCP segments.
+
+add_test(NAME dcom_bind_names_recognized_candidate
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_wmi_dcom_activation.pcap" --format text)
+set_tests_properties(dcom_bind_names_recognized_candidate PROPERTIES
+  PASS_REGULAR_EXPRESSION "#1  0\\.000000.*\\[dcom\\]  DCOM bind \\(candidates: IObjectExporter\\)")
+
+add_test(NAME dcom_bind_ack_confirms_binding
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_wmi_dcom_activation.pcap" --format text)
+set_tests_properties(dcom_bind_ack_confirms_binding PROPERTIES
+  PASS_REGULAR_EXPRESSION "#2  1\\.001000.*\\[dcom\\]  DCOM bind_ack \\(bound: IObjectExporter\\)")
+
+# ServerAlive2 request (#3): dcom_calls array fields plus the general activation note -- proves
+# the JSON call-array shape (interface/opnum/call_id/context_id/is_response/summary).
+add_test(NAME dcom_serveralive2_request_call_fields_and_note
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_wmi_dcom_activation.pcap" --format json)
+set_tests_properties(dcom_serveralive2_request_call_fields_and_note PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"summary\": \"IObjectExporter ServerAlive2 request\",\n    \"dcom_calls\": \\[\n      \\{\n        \"interface\": \"IObjectExporter\",\n        \"opnum\": \"ServerAlive2\",\n        \"call_id\": 101,\n        \"context_id\": 0,\n        \"is_response\": false,\n        \"summary\": \"IObjectExporter ServerAlive2 request\"\n      \\}\n    \\],\n    \"notes\": \\[\"DCOM activation/OXID-resolution traffic observed: IObjectExporter ServerAlive2 \\(opnum 5\\)\"\\]")
+
+# ResolveOxid2 request (#5): BOTH the general activation note AND the ResolveOxid/ResolveOxid2
+# scope-boundary note fire together on the same message.
+add_test(NAME dcom_resolveoxid2_request_both_notes_fire
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_wmi_dcom_activation.pcap" --format text --verbose)
+set_tests_properties(dcom_resolveoxid2_request_both_notes_fire PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[dcom\\]  IObjectExporter ResolveOxid2 request.*note: DCOM activation/OXID-resolution traffic observed: IObjectExporter ResolveOxid2 \\(opnum 4\\).*note: ResolveOxid/ResolveOxid2 observed -- this decoder does not follow the dynamically negotiated data-channel port this call resolves")
+
+# ComplexPing's own response (#8) is a FAULT, not an ordinary response -- proves DcomFlowState's
+# pending_calls bookkeeping tolerates a fault: no spurious DcomCall/dcom_calls array, no note.
+add_test(NAME dcom_fault_response_no_spurious_call
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_wmi_dcom_activation.pcap" --format json)
+set_tests_properties(dcom_fault_response_no_spurious_call PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"summary\": \"DCE/RPC fault\",\n    \"notes\": \\[\\]")
+
+# Flow B (#9/#10): IRemoteSCMActivator + IActivation bound TOGETHER on ONE bind PDU -- the scenario
+# dcom.hpp's own STATE section says resolve_dcerpc_bind_bookkeeping's single-target template
+# cannot express, and the reason DcomFlowState tracks its own multi-target bookkeeping instead.
+add_test(NAME dcom_multi_interface_bind_single_pdu
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_wmi_dcom_activation.pcap" --format text)
+set_tests_properties(dcom_multi_interface_bind_single_pdu PROPERTIES
+  PASS_REGULAR_EXPRESSION "#9 .*\\[dcom\\]  DCOM bind \\(candidates: IRemoteSCMActivator, IActivation\\).*#10 .*\\[dcom\\]  DCOM bind_ack \\(bound: IRemoteSCMActivator, IActivation\\)")
+
+# RemoteGetClassObject (#11) and RemoteCreateInstance (#13): two different opnums on the SAME
+# interface/context_id (0), both correctly attributed after the multi-interface bind above.
+add_test(NAME dcom_two_opnums_same_interface_context
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_wmi_dcom_activation.pcap" --format json)
+set_tests_properties(dcom_two_opnums_same_interface_context PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"opnum\": \"RemoteGetClassObject\",\n        \"call_id\": 201,\n        \"context_id\": 0.*\"opnum\": \"RemoteCreateInstance\",\n        \"call_id\": 202,\n        \"context_id\": 0")
+
+# RemoteActivation (#15): the SECOND interface (IActivation) bound in the same bind PDU, on its
+# own context_id (1) -- proves both positions of a multi-interface bind stay independently correct.
+add_test(NAME dcom_remoteactivation_second_bound_context
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_wmi_dcom_activation.pcap" --format json)
+set_tests_properties(dcom_remoteactivation_second_bound_context PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"summary\": \"IActivation RemoteActivation request\",\n    \"dcom_calls\": \\[\n      \\{\n        \"interface\": \"IActivation\",\n        \"opnum\": \"RemoteActivation\",\n        \"call_id\": 203,\n        \"context_id\": 1")
+
+# Flow C (#17/#18): a bind PDU offering an UNRECOGNIZED interface at context 0 and IObjectExporter
+# at context 1, whose bind_ack REJECTS position 0 and ACCEPTS position 1 -- proves bind_ack's own
+# positional (not context_id-keyed) correlation attributes acceptance to the right context_id even
+# though position 0 was both unrecognized and rejected (only the recognized+accepted name appears).
+add_test(NAME dcom_positional_bind_ack_skips_rejected_unrecognized_context
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_wmi_dcom_activation.pcap" --format text)
+set_tests_properties(dcom_positional_bind_ack_skips_rejected_unrecognized_context PROPERTIES
+  PASS_REGULAR_EXPRESSION "#17 .*\\[dcom\\]  DCOM bind \\(candidates: IObjectExporter\\).*#18 .*\\[dcom\\]  DCOM bind_ack \\(bound: IObjectExporter\\)")
+
+# SimplePing (#19) on context 1 -- the accepted position from the bind above -- decodes normally.
+add_test(NAME dcom_simpleping_on_accepted_context_after_rejection
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_wmi_dcom_activation.pcap" --format json)
+set_tests_properties(dcom_simpleping_on_accepted_context_after_rejection PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"summary\": \"IObjectExporter SimplePing request\",\n    \"dcom_calls\": \\[\n      \\{\n        \"interface\": \"IObjectExporter\",\n        \"opnum\": \"SimplePing\",\n        \"call_id\": 301,\n        \"context_id\": 1")
+
+# A request on context 0 (#21) -- never bound to any known interface at all (neither recognized
+# nor accepted) -- must fall through to a bare structural PDU summary: no dcom_calls array, no
+# note, this codebase's usual "flag rather than guess" bar.
+add_test(NAME dcom_unbound_context_falls_back_no_call_no_note
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_wmi_dcom_activation.pcap" --format json)
+set_tests_properties(dcom_unbound_context_falls_back_no_call_no_note PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"summary\": \"DCE/RPC request \\(opnum 99\\)\",\n    \"notes\": \\[\\]")
+
+# Non-standard port (#22), default Auto mode: DcomTcpDecoder's own port gate correctly declines it
+# -- unlike WinRM, there's no pre-existing recognizer racing to claim it instead (see dcom.hpp's
+# own COLLISION SURVEY section), so it simply falls through to generic "[tcp]".
+add_test(NAME dcom_nonstandard_port_not_recognized_in_auto_mode
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_wmi_dcom_activation.pcap" --format text)
+set_tests_properties(dcom_nonstandard_port_not_recognized_in_auto_mode PROPERTIES
+  FAIL_REGULAR_EXPRESSION "192\\.168\\.1\\.50:50500 -> 192\\.168\\.1\\.10:13135  \\[dcom\\]")
+
+# --dcom-port 13135 widens Auto-mode detection so DcomTcpDecoder claims this flow -- and, since the
+# port is now in the configured/widened set, the "not a configured/standard DCOM port" note must
+# NOT fire.
+add_test(NAME dcom_port_widening_with_extra_port_flag
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_wmi_dcom_activation.pcap" --format text --verbose --dcom-port 13135)
+set_tests_properties(dcom_port_widening_with_extra_port_flag PROPERTIES
+  PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.50:50500 -> 192\\.168\\.1\\.10:13135  \\[dcom\\]  DCOM bind \\(candidates: IObjectExporter\\)"
+  FAIL_REGULAR_EXPRESSION "not a configured/standard DCOM port")
+
+# --protocol dcom claims the same flow port-independently too, but here the port genuinely isn't
+# configured for this invocation, so the "not a configured/standard DCOM port" note DOES fire.
+add_test(NAME dcom_protocol_filter_forces_detection_port_independent_with_note
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_wmi_dcom_activation.pcap" --format text --verbose --protocol dcom)
+set_tests_properties(dcom_protocol_filter_forces_detection_port_independent_with_note PROPERTIES
+  PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.50:50500 -> 192\\.168\\.1\\.10:13135  \\[dcom\\]  DCOM bind \\(candidates: IObjectExporter\\).*note: seen on TCP port 50500->13135, which is not a configured/standard DCOM port \\(135\\)")
+
+add_test(NAME dcom_protocol_filter_excludes_other_protocols
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --protocol dcom --format text)
+set_tests_properties(dcom_protocol_filter_excludes_other_protocols PROPERTIES
+  FAIL_REGULAR_EXPRESSION "\\[dcom\\]")
+
+# --stats activation-count aggregation (dcom_call_counts_, keyed by "<interface> <opnum_name>",
+# requests only -- see that field's own comment in output.hpp): every opnum in this fixture appears
+# exactly once except the unbound-context request (#21, opnum 99), which is never counted at all
+# since it never produced a DcomCall in the first place.
+add_test(NAME dcom_stats_activation_counts
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_wmi_dcom_activation.pcap" --format text --stats)
+set_tests_properties(dcom_stats_activation_counts PROPERTIES
+  PASS_REGULAR_EXPRESSION "dcom activation counts:\n *IActivation RemoteActivation *1\n *IObjectExporter ComplexPing *1\n *IObjectExporter ResolveOxid2 *1\n *IObjectExporter ServerAlive2 *1\n *IObjectExporter SimplePing *1\n *IRemoteSCMActivator RemoteCreateInstance *1\n *IRemoteSCMActivator RemoteGetClassObject *1")
+
+# Two-TCP-segment reassembly: a bind PDU split just past the 10-byte prefix
+# dcerpc_tcp_declared_length itself peeks, exercising Decoder::reassemble_tcp_payload's own
+# buffering path -- must decode identically to a whole-message case.
+add_test(NAME dcom_tcp_segment_split_reassembly
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_wmi_dcom_activation_tcp_split.pcap" --format text --verbose)
+set_tests_properties(dcom_tcp_segment_split_reassembly PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[tcp\\]  buffering a DCOM/DCE-RPC message PDU/frame split across TCP segments 50400->135: 16 of 116 declared byte\\(s\\) seen so far across 1 segment\\(s\\) on this flow, waiting for more.*\\[dcom\\]  DCOM bind \\(candidates: IObjectExporter, IRemoteSCMActivator\\).*note: reassembled a DCOM/DCE-RPC message PDU/frame from 116 byte\\(s\\) spanning 2 TCP segments on this flow")
 
 # -------------------------------------------------------------------------------------------
 # tshark-style CLI: -T fields/-e (field selection), -f/-c/-a (short aliases for --filter/

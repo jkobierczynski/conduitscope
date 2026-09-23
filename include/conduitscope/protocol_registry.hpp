@@ -94,8 +94,11 @@ const std::vector<const ProtocolDecoder*>& tcp_port_independent_registry();
 // protocol until WinRM (see winrm.hpp's WinRmTcpDecoder -- Phase 4 of the Windows RPC/remote-
 // management batch, port-gated for the same "structural signal already checked opportunistically
 // elsewhere" reason DoH itself is), added right after it in real call-site order. decoder.cpp's own
-// WinRM call site likewise calls winrm_tcp_decoder() directly. Not migrated: none -- both of this
-// gate's protocols are migrated.
+// WinRM call site likewise calls winrm_tcp_decoder() directly. DCOM (dcom.hpp's DcomTcpDecoder --
+// Phase 5, the last, of that same batch) joins this gate right after WinRM, port-gated for the
+// "weak structural signal" reason dcom.hpp's own COLLISION SURVEY section states; decoder.cpp's own
+// DCOM call site likewise calls dcom_tcp_decoder() directly. Not migrated: none -- all three of
+// this gate's protocols are migrated.
 const std::vector<const ProtocolDecoder*>& tcp_port_registry();
 
 // Migrated UDP-port-gated protocols, in the order their decoder.cpp call sites run. This GateKind

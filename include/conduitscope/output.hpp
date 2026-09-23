@@ -328,6 +328,13 @@ private:
     std::map<std::string, size_t> nbns_opcode_counts_;
     std::map<std::string, size_t> doh_provider_counts_;  // keyed by doh_matched_provider
     std::map<std::string, size_t> winrm_action_counts_;  // keyed by wsa_action_name, requests only
+    std::map<std::string, size_t> dcom_call_counts_;  // keyed by "<interface> <opnum_name>",
+                                                         // requests only -- Phase 5's own analog of
+                                                         // drsuapi_opnum_counts_ above, but keyed by
+                                                         // interface+opnum together since DCOM (unlike
+                                                         // every earlier interface in this batch) can
+                                                         // have more than one interface bound per
+                                                         // session -- see dcom.hpp's own STATE section
     std::map<std::string, size_t> rip_command_counts_;   // keyed by rip_command_name
     std::map<std::string, size_t> icmp_type_counts_;     // keyed by icmp_type_name
     std::map<std::string, size_t> igmp_type_counts_;     // keyed by igmp_type_name

@@ -5,6 +5,7 @@
 #include "conduitscope/bacnet.hpp"
 #include "conduitscope/bgp.hpp"
 #include "conduitscope/cotp.hpp"
+#include "conduitscope/dcom.hpp"
 #include "conduitscope/devicenet.hpp"
 #include "conduitscope/dnp3.hpp"
 #include "conduitscope/dns.hpp"
@@ -354,6 +355,8 @@ const std::vector<const ProtocolDecoder*>& tcp_port_registry() {
                           // returns DOH_PORT (443, tls_sni.hpp).
         &winrm_tcp_decoder(),  // decoder.cpp's own WinRM call site likewise calls it directly.
                                  // tcp_port() returns WINRM_PORT (5985, winrm.hpp).
+        &dcom_tcp_decoder(),  // decoder.cpp's own DCOM call site likewise calls it directly.
+                                // tcp_port() returns DCOM_PORT (135, dcom.hpp).
     };
     return order;
 }

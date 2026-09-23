@@ -437,6 +437,8 @@ bool Decoder::reassemble_tcp_payload(const TcpSegment& tcp, const std::string& f
                      options_.protocol_filter == ProtocolFilter::BgpOnly;
     bool want_winrm = options_.protocol_filter == ProtocolFilter::Auto ||
                        options_.protocol_filter == ProtocolFilter::WinRmOnly;
+    bool want_dcom = options_.protocol_filter == ProtocolFilter::Auto ||
+                      options_.protocol_filter == ProtocolFilter::DcomOnly;
 
     // OPC UA is checked first of all: its own structural detection gate (the leading 3 bytes must
     // be one of exactly 7 fixed ASCII MessageType strings -- "HEL"/"ACK"/"ERR"/"RHE"/"OPN"/"CLO"/
@@ -619,6 +621,26 @@ bool Decoder::reassemble_tcp_payload(const TcpSegment& tcp, const std::string& f
         if (auto d = winrm_tcp_decoder().tcp_declared_length(candidate)) {
             declared = d;
             which = "WinRM/HTTP message";
+        }
+    }
+    // DCOM activation, TCP port 135 -- deliberately PORT-GATED here in Auto mode, the same posture
+    // WinRM just above already establishes for this gate kind: DCOM's own structural gate
+    // (rpc_vers==5 plus a plausible frag_length, dcerpc_tcp_declared_length -- dcerpc.hpp) is
+    // considerably weaker than SMB's own magic-byte check, so trying it opportunistically on every
+    // TCP payload port-independently would risk false-positiving on ordinary binary traffic whose
+    // first byte happens to be 5; gating by port in Auto mode avoids that, at no cost to real DCOM
+    // traffic on its own well-known port (see dcom.hpp's own COLLISION SURVEY section -- port 135
+    // has no existing recognizer to race against anyway, unlike WinRM's genuine HTTP collision, but
+    // the "weak gate, so port-gate in Auto mode" reasoning still applies on its own). An explicit
+    // `--protocol dcom` still tries it port-independently, the same exception every other
+    // GateKind::TcpPort protocol here already has.
+    bool require_dcom_port = options_.protocol_filter == ProtocolFilter::Auto;
+    bool candidate_port_is_dcom = port_in(tcp.src_port, DCOM_PORT, options_.extra_dcom_ports) ||
+                                   port_in(tcp.dst_port, DCOM_PORT, options_.extra_dcom_ports);
+    if (!declared && want_dcom && (!require_dcom_port || candidate_port_is_dcom)) {
+        if (auto d = dcom_tcp_decoder().tcp_declared_length(candidate)) {
+            declared = d;
+            which = "DCOM/DCE-RPC message";
         }
     }
     if (!declared && want_dnp3) {
@@ -2071,6 +2093,8 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                          options_.protocol_filter == ProtocolFilter::BgpOnly;
         bool want_winrm = options_.protocol_filter == ProtocolFilter::Auto ||
                            options_.protocol_filter == ProtocolFilter::WinRmOnly;
+        bool want_dcom = options_.protocol_filter == ProtocolFilter::Auto ||
+                          options_.protocol_filter == ProtocolFilter::DcomOnly;
 
         // Tried first of all -- see the matching, fuller comment in reassemble_tcp_payload above
         // for why OPC UA's own magic-string detection gate is strong enough, and non-colliding
@@ -2491,6 +2515,46 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                     out.notes.push_back("seen on TCP port " + std::to_string(tcp.src_port) + "->" +
                                          std::to_string(tcp.dst_port) +
                                          ", which is not a configured/standard WinRM port (5985)");
+                }
+                return out;
+            }
+        }
+
+        // Re-derived here (reassemble_tcp_payload above is a separate member function -- its own
+        // locals don't carry over). require_dcom_port mirrors require_winrm_port immediately above:
+        // gated by port only in Auto mode (DCOM's own structural gate is weaker than SMB's own magic
+        // check -- see dcom.hpp's own COLLISION SURVEY section); an explicit `--protocol dcom` still
+        // tries it port-independently.
+        bool require_dcom_port = options_.protocol_filter == ProtocolFilter::Auto;
+        bool candidate_port_is_dcom = port_in(tcp.src_port, DCOM_PORT, options_.extra_dcom_ports) ||
+                                       port_in(tcp.dst_port, DCOM_PORT, options_.extra_dcom_ports);
+        if (want_dcom && (!require_dcom_port || candidate_port_is_dcom)) {
+            // DCOM activation, TCP port 135 -- Phase 5 (the last) of the Windows RPC/remote-
+            // management batch (see dcom.hpp's own file header comment for the full REDUCED SCOPE/
+            // TRANSPORT rationale). Same out.result-only shape WinRM/MELSEC/FINS established -- no
+            // dcom_* DecodedPacket fields exist, JsonWriter renders from out.result (output.cpp's
+            // write_dcom_json_fields), TextWriter/CsvWriter from out.summary/out.notes generically.
+            // Unlike WinRmTcpDecoder (stateless), DcomTcpDecoder needs session-scoped state
+            // (DcomFlowState -- a DCOM session can legitimately bind more than one known interface
+            // at once, see dcom.hpp's own STATE section), the same session_key wiring MELSEC's/
+            // FINS's own dispatch sites above already establish for their own flow state.
+            std::string dcom_session = tcp_session_key(out.src_ip, tcp.src_port, out.dst_ip, tcp.dst_port);
+            DecodeContext ctx;
+            ctx.session_key = dcom_session;
+            ctx.packet_index = index;
+            ctx.protocol_id = "dcom";
+            ctx.flow_states = &registry_flow_state_;
+            if (auto result = dcom_tcp_decoder().decode(effective_payload, ctx)) {
+                const DcomMessage& dcm = result->as<DcomMessage>();
+                out.protocol = "dcom";
+                out.summary = dcm.summary;
+                for (const auto& n : dcm.notes) out.notes.push_back(n);
+                out.result = *result;
+
+                if (!candidate_port_is_dcom) {
+                    out.notes.push_back("seen on TCP port " + std::to_string(tcp.src_port) + "->" +
+                                         std::to_string(tcp.dst_port) +
+                                         ", which is not a configured/standard DCOM port (135)");
                 }
                 return out;
             }
