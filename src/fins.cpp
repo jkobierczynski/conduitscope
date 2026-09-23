@@ -48,7 +48,16 @@ const std::unordered_map<uint16_t, const char*>& command_table() {
 // codes (it shows only the full descriptive name for them); everything else's prefix is verbatim
 // from that table.
 struct FinsAreaInfo {
-    const char* prefix;
+    // A real std::string, not a const char* -- see this function's own header comment on why:
+    // this field used to be a raw const char* into a separate `static std::vector<std::string>
+    // keep` the Expansion-DM-bank loop below populated via push_back, and every push_back past
+    // the vector's current capacity reallocates its buffer, silently invalidating every .c_str()
+    // pointer already stored in `t` from an earlier iteration -- a genuine heap-use-after-free
+    // (found by the scheduled fuzz campaign's ASan build; make_item's `s << it->second.prefix`
+    // was where the dangling read actually surfaced, reading whatever unrelated allocation had
+    // since reused that freed address). Owning the string outright removes the hazard instead of
+    // just working around this one call site's symptom.
+    std::string prefix;
     bool is_bit;
 };
 
@@ -69,11 +78,8 @@ const std::unordered_map<uint8_t, FinsAreaInfo>& area_code_table() {
         // via Wireshark's own memory_area_code_prefix[] (full "E0_".."EC_" range on both sides).
         for (int bank = 0; bank <= 0x0C; ++bank) {
             std::string prefix = "E" + std::to_string(bank) + "_";
-            static std::vector<std::string> keep;  // own the strings for the lifetime of this map
-            keep.push_back(prefix);
-            t[static_cast<uint8_t>(0x20 + bank)] = {keep.back().c_str(), true};
-            keep.push_back(prefix);
-            t[static_cast<uint8_t>(0xA0 + bank)] = {keep.back().c_str(), false};
+            t[static_cast<uint8_t>(0x20 + bank)] = {prefix, true};
+            t[static_cast<uint8_t>(0xA0 + bank)] = {prefix, false};
         }
         return t;
     }();

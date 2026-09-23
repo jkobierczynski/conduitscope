@@ -5175,6 +5175,46 @@ IP/UDP-based routing/redundancy protocols above.
     `tests/sample_fins.pcap`; real wire-format details were independently
     confirmed via `conn.log`/NSE-script content, not a raw capture).
 
+    **Update: heap-use-after-free found by the scheduled fuzz campaign,
+    fixed.** `fins.cpp`'s `area_code_table()` builds its Expansion-DM-bank
+    entries (area codes 0x20-0x2C/0xA0-0xAC, "E0_".."EC_") in a loop that
+    used to store each `FinsAreaInfo::prefix` as a raw `const char*` taken
+    from `.c_str()` of a `std::string` freshly `push_back`'d onto a
+    `static std::vector<std::string> keep` meant to own the backing
+    storage for the table's lifetime -- but a `std::vector` reallocates
+    its buffer (and frees the old one) whenever a `push_back` exceeds
+    current capacity, silently invalidating every `.c_str()` pointer
+    already captured from an *earlier* iteration and already stored in
+    the table. With 26 strings pushed and no `reserve()` call, this was
+    essentially guaranteed to happen partway through the loop, leaving
+    most of the Expansion-DM-bank entries' `prefix` pointers dangling for
+    the rest of the process's lifetime (the table is built exactly once,
+    via a function-local `static`). `fuzz_packet_decode`'s scheduled CI
+    ASan campaign caught it as a heap-use-after-free read inside
+    `make_item`'s `s << it->second.prefix` (fins.cpp), reading whatever
+    unrelated allocation had since reused the freed address -- the
+    specific "freed by ~HartIpPassThrough" address history ASan's crash
+    report showed was coincidental (that memory had genuinely been a
+    HART-IP string earlier and was genuinely freed correctly; it just
+    happened to be the address libc's allocator handed back to FINS's own
+    already-broken `keep` vector, or vice versa), not evidence of any
+    actual interaction between the FINS and HART-IP decoders. Fixed by
+    removing the raw-pointer workaround entirely: `FinsAreaInfo::prefix`
+    is now a `std::string` (its only reader, `make_item`, already just
+    streamed it through `operator<<`, so this cost nothing), so each
+    table entry owns its own prefix directly and no cross-iteration
+    pointer stability assumption is needed at all. Verified three ways:
+    the full CTest suite (1,416 tests, including all 25 `fins_*` cases)
+    stayed 100% passing; the exact crashing input from the CI log's own
+    base64 dump, replayed directly against a local Clang+ASan+UBSan
+    `fuzz_packet_decode` build, no longer crashes (clean exit, no
+    sanitizer report); and that input is now committed as
+    `fuzz/corpus/packet_decode/fins_area_code_table_dangling_prefix_uaf`
+    (the first file in that corpus directory in this environment, which
+    had none before), so `CONDUITSCOPE_ENABLE_FUZZING=ON`'s
+    `fuzz_packet_decode_corpus_regression` CTest case now replays it on
+    every future run -- confirmed passing locally.
+
 31. **ARP (RFC 826), EtherType `0x0806`.** **Done.** A brand-new protocol,
     not a migration -- before this, ARP traffic was only ever named by
     `link_layer.hpp`'s `ethertype_name` (`[non-ip] ... ethertype 0x806
