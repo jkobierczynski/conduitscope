@@ -42,6 +42,7 @@
 #include "conduitscope/smb.hpp"
 #include "conduitscope/stp.hpp"
 #include "conduitscope/sv.hpp"
+#include "conduitscope/tls_sni.hpp"
 #include "conduitscope/twincat.hpp"
 #include "conduitscope/vrrp.hpp"
 
@@ -340,6 +341,16 @@ const std::vector<const ProtocolDecoder*>& tcp_port_independent_registry() {
                               // protocol whose UDP sibling ALSO runs its own coalescing loop (see
                               // ffhse_udp_decoder() in udp_port_independent_registry() below, and
                               // FfhseTcpDecoder's/FfhseUdpDecoder's own comments in ffhse.hpp).
+    };
+    return order;
+}
+
+const std::vector<const ProtocolDecoder*>& tcp_port_registry() {
+    static const std::vector<const ProtocolDecoder*> order = {
+        &doh_decoder(),  // This gate's only protocol -- decoder.cpp's own DoH call site calls it
+                          // directly (see protocol_registry.hpp's own doc comment on this vector
+                          // for why that call site doesn't iterate it the way EtherType's does).
+                          // tcp_port() returns DOH_PORT (443, tls_sni.hpp).
     };
     return order;
 }

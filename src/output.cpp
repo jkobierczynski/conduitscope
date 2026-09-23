@@ -728,6 +728,25 @@ void write_devicenet_json_fields(std::ostream& out, const DeviceNetFrame& dn) {
     out << "    \"devicenet_payload_hex\": \"" << json_escape(to_hex(dn.payload, "")) << "\",\n";
 }
 
+// The DoH analog of write_twincat_json_fields above -- same rationale (a plain free function, not
+// a ProtocolRenderer interface). Reads straight from the DohDetection carried by
+// DecodedPacket::result. Reproduces the prior dual-write's exact field set and shape (doh_sni/
+// doh_matched_provider always present, doh_alpn_protocols only when non-empty) -- see tls_sni.hpp's
+// own DohDetection comment; there is deliberately no "doh_query"/"doh_answer" field of any kind,
+// since the DNS message itself is TLS-encrypted and never visible to this decoder.
+void write_doh_json_fields(std::ostream& out, const DohDetection& d) {
+    out << "    \"doh_sni\": \"" << json_escape(d.sni) << "\",\n";
+    out << "    \"doh_matched_provider\": \"" << json_escape(d.matched_provider) << "\",\n";
+    if (!d.alpn_protocols.empty()) {
+        out << "    \"doh_alpn_protocols\": [";
+        for (size_t i = 0; i < d.alpn_protocols.size(); ++i) {
+            if (i != 0) out << ", ";
+            out << "\"" << json_escape(d.alpn_protocols[i]) << "\"";
+        }
+        out << "],\n";
+    }
+}
+
 // The Modbus analog of write_twincat_json_fields above -- same rationale (a plain free function,
 // not a ProtocolRenderer interface). Modbus's function name and exception flag are already folded
 // into DecodedPacket::protocol/summary (see decoder.cpp's Modbus call site) and need no JSON field
@@ -2376,17 +2395,8 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
         }
         out_ << "    \"nbns_records_truncated\": " << (p.nbns_records_truncated ? "true" : "false") << ",\n";
     }
-    if (p.protocol == "doh") {
-        out_ << "    \"doh_sni\": \"" << json_escape(p.doh_sni) << "\",\n";
-        out_ << "    \"doh_matched_provider\": \"" << json_escape(p.doh_matched_provider) << "\",\n";
-        if (!p.doh_alpn_protocols.empty()) {
-            out_ << "    \"doh_alpn_protocols\": [";
-            for (size_t i = 0; i < p.doh_alpn_protocols.size(); ++i) {
-                if (i != 0) out_ << ", ";
-                out_ << "\"" << json_escape(p.doh_alpn_protocols[i]) << "\"";
-            }
-            out_ << "],\n";
-        }
+    if (p.protocol == "doh" && p.result) {
+        write_doh_json_fields(out_, p.result->as<DohDetection>());
     }
     if (p.protocol == "rip") {
         out_ << "    \"rip_version\": " << static_cast<unsigned>(p.rip_version) << ",\n";
@@ -3079,8 +3089,8 @@ void StatsWriter::write_packet(const DecodedPacket& p) {
     if (p.protocol == "nbns") {
         nbns_opcode_counts_[p.nbns_opcode_name]++;
     }
-    if (p.protocol == "doh") {
-        doh_provider_counts_[p.doh_matched_provider]++;
+    if (p.protocol == "doh" && p.result) {
+        doh_provider_counts_[p.result->as<DohDetection>().matched_provider]++;
     }
     if (p.protocol == "rip") {
         rip_command_counts_[p.rip_command_name]++;

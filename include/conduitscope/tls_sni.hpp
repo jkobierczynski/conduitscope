@@ -61,9 +61,11 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "conduitscope/byteio.hpp"
+#include "conduitscope/protocol_decoder.hpp"
 
 namespace conduitscope {
 
@@ -108,5 +110,22 @@ struct DohDetection {
 // tls_sni.cpp) -- see tls_sni.hpp's file header comment for exactly what "matches" means and why
 // a private/enterprise DoH resolver this table doesn't know about is never flagged.
 std::optional<DohDetection> try_detect_doh(ByteSpan tcp_payload);
+
+// Registration-model wrapper around try_detect_doh above -- GateKind::TcpPort's first and so far
+// only user (see protocol_decoder.hpp's own comment on that gate kind for why DoH needed a new
+// one: it's port-gated in Auto mode, like UdpPort's own protocols, but rides TCP). decode() is
+// handed a single TCP segment's payload, never reassembled -- see this file's own header comment
+// for why that's a deliberate scope limit, not an oversight. A zero-flat-field migrated protocol
+// from the start (like TwinCAT/FF-HSE/DeviceNet): DecodedPacket::result carries the whole
+// DohDetection, and output.cpp's write_doh_json_fields reads straight from it.
+class DohDecoder : public ProtocolDecoder {
+public:
+    std::string_view id() const override { return "doh"; }
+    GateKind gate_kind() const override { return GateKind::TcpPort; }
+    std::optional<uint16_t> tcp_port() const override { return DOH_PORT; }
+    std::optional<ProtocolResult> decode(ByteSpan payload, DecodeContext& ctx) const override;
+};
+
+const ProtocolDecoder& doh_decoder();
 
 }  // namespace conduitscope

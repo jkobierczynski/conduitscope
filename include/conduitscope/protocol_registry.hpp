@@ -9,8 +9,9 @@
 // call site's own comment for why this is safe (every EtherType in this cascade is IANA/IEEE-
 // exclusive to its own protocol, so entry order only ever matters for STP, which has no
 // ethertype() at all and stays its own explicit block outside the loop). Every OTHER vector below
-// (ip_protocol_registry(), tcp_port_independent_registry(), udp_port_registry(),
-// udp_port_independent_registry(), cotp_payload_registry(), link_type_registry()) remains exactly
+// (ip_protocol_registry(), tcp_port_independent_registry(), tcp_port_registry(),
+// udp_port_registry(), udp_port_independent_registry(), cotp_payload_registry(),
+// link_type_registry()) remains exactly
 // what this file's name always meant: DATA, NOT CONTROL FLOW, NOT (yet) WHAT DRIVES DISPATCH
 // ORDER. Each of those still-audit-trail cascades' migrated protocols keep their actual
 // decoder.cpp call sites at their own exact former textual position (see protocol_decoder.hpp's
@@ -84,6 +85,14 @@ const std::vector<const ProtocolDecoder*>& ip_protocol_registry();
 // structural detection gate is deliberately given the lowest priority here. This fully populates
 // this GateKind: no protocol remains unmigrated in this cascade.
 const std::vector<const ProtocolDecoder*>& tcp_port_independent_registry();
+
+// Migration batch addition: DoH (GateKind::TcpPort -- see protocol_decoder.hpp's own comment on
+// that gate kind), the TCP-side mirror of udp_port_registry() below. This GateKind went
+// unpopulated until DoH needed it -- see tls_sni.hpp's DohDecoder. THIS VECTOR IS AUDIT-TRAIL
+// DATA ONLY, like every cascade below except EtherType (see this file's own header comment) --
+// decoder.cpp's own DoH call site calls doh_decoder() directly, since DoH is (so far) this gate's
+// only protocol. Not migrated: none -- DoH is this gate's only protocol and it is migrated.
+const std::vector<const ProtocolDecoder*>& tcp_port_registry();
 
 // Migrated UDP-port-gated protocols, in the order their decoder.cpp call sites run. This GateKind
 // went unpopulated by the pilot and by every batch through batch 3 (TwinCAT is

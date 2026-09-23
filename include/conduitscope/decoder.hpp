@@ -473,7 +473,8 @@ struct DecodedPacket {
     // matching port -- 53/5353/5355 -- that try_parse_dns_message recognizes, see dns_* fields
     // below), "nbns" (NetBIOS Name Service/NBT-NS, UDP port 137, see nbns_* fields below), and
     // "doh" (a TCP/443 flow whose TLS ClientHello SNI matches a known DNS-over-HTTPS resolver --
-    // detection only, see doh_* fields below and tls_sni.hpp). Also "rip" (a UDP payload on port
+    // detection only, a zero-flat-field migrated protocol, see DecodedPacket::result and
+    // tls_sni.hpp). Also "rip" (a UDP payload on port
     // 520, or any port with --protocol rip, that try_parse_rip recognizes -- see rip_* fields
     // below and rip.hpp), "icmp" (an IP payload with IP protocol number 1, dispatched regardless
     // of port since ICMP has none, that try_parse_icmp recognizes -- see icmp_* fields below and
@@ -1246,12 +1247,8 @@ struct DecodedPacket {
     std::vector<std::string> nbns_records;  // same section-tagged scheme as dns_records above
     bool nbns_records_truncated = false;
 
-    // Only set when protocol == "doh" -- detection only, see try_detect_doh in tls_sni.hpp. There
-    // is deliberately no "doh_query"/"doh_answer" field of any kind: the DNS message itself is
-    // TLS-encrypted and never visible to this decoder.
-    std::string doh_sni;
-    std::string doh_matched_provider;
-    std::vector<std::string> doh_alpn_protocols;
+    // protocol == "doh" is a zero-flat-field migrated protocol -- see DecodedPacket::result and
+    // tls_sni.hpp's DohDecoder/DohDetection, and output.cpp's write_doh_json_fields for rendering.
 
     // Only set when protocol == "rip" -- see try_parse_rip in rip.hpp.
     uint8_t rip_version = 0;

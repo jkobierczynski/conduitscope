@@ -1100,6 +1100,67 @@ Discussed and adopted, in this order:
    Still explicitly out of scope, not silently dropped: migrating any of
    the remaining legacy protocols; having the registry vectors drive
    dispatch order for any `GateKind` beyond `EtherType`.
+
+   **Update: asked directly whether every migratable protocol had been
+   moved, the answer was no -- DoH detection was a genuine, previously
+   unnoticed gap, and it's now migrated too, closing it.** A systematic
+   census (every `ProtocolDecoder` subclass in the codebase, cross-checked
+   against every protocol-prefixed flat field still in `decoder.hpp`)
+   found exactly one protocol producing real decoded structure
+   (`tls_sni.hpp`'s `DohDetection`: SNI, ALPN protocols, matched provider
+   name) that was still on the legacy dual-write path -- not part of item
+   18's 43 name-only "IT protocols an OT auditor flags" recognitions
+   (that item's own "Architectural scope note" above stays correct: this
+   was a distinct, one-off TLS-ClientHello detector living in
+   `tls_sni.hpp`, never discussed in relation to the registration model at
+   all, simply missed rather than deliberately excluded).
+
+   DoH needed a genuinely new gate: it's port-gated in Auto mode (like
+   `UdpPort`'s own protocols -- no self-describing byte shape strong
+   enough to check opportunistically, despite the ClientHello/SNI check
+   itself being fairly strong once a segment is even attempted), but rides
+   TCP, and none of the six existing `GateKind`s fit that shape --
+   `TcpPortIndependent` is tried opportunistically regardless of port,
+   `UdpPort` is UDP-only. A new `GateKind::TcpPort` (`protocol_decoder.hpp`,
+   plus a matching `tcp_port()` accessor mirroring `udp_port()`'s own
+   "gating logic doesn't move into the class" posture) is `UdpPort`'s
+   direct TCP-side mirror -- `DohDecoder` (`tls_sni.hpp`) is its first and
+   so far only user, wrapping the existing, unchanged `try_detect_doh`.
+   Landed with the full zero-flat-field `output.cpp` treatment from the
+   start, the same posture FF-HSE/DeviceNet just got: `out.result` carries
+   the whole `DohDetection`, a new `write_doh_json_fields` renders it
+   (reproducing the prior dual-write's exact field set and shape:
+   `doh_sni`/`doh_matched_provider` always present, `doh_alpn_protocols`
+   only when non-empty), and `StatsWriter`'s `doh_provider_counts_`
+   aggregate now reads `p.result->as<DohDetection>().matched_provider`.
+   All three `doh_*` flat fields removed from `decoder.hpp`; no extra
+   readers were found outside `decoder.cpp`/`output.cpp` (confirmed by the
+   same exhaustive grep sweep every prior dual-write removal has used).
+   `try_parse_tls_client_hello`/`try_parse_tls_handshake_client_hello`
+   themselves are unchanged and untouched -- both are still shared,
+   directly, by QUIC's own ClientHello reuse (`quic.cpp`) and by the
+   generic HTTPS detection immediately after DoH's own call site (item
+   18's own Tier 2, deliberately still legacy, unaffected by this).
+
+   `protocol_registry.cpp` gained a new `tcp_port_registry()` vector
+   (audit-trail only, like `link_type_registry()` -- `decoder.cpp`'s own
+   call site calls `doh_decoder()` directly rather than looping, since DoH
+   is this gate's only protocol) listing DoH, its sole entry.
+
+   Verified the same way as every prior migration: the full CTest suite
+   (1,416 tests) stayed 100% passing with zero changed
+   `PASS_REGULAR_EXPRESSION`/`FAIL_REGULAR_EXPRESSION` assertions anywhere,
+   a clean rebuild with zero warnings, and a manual `--format json`/
+   `--stats` smoke test against `tests/sample_doh.pcap` confirming
+   field-for-field identical output to before this change (including the
+   still-legacy generic `https` classification sitting right alongside it
+   in the same capture, unaffected).
+
+   With this, every protocol in the codebase that decodes real structure
+   is on `ProtocolDecoder`. What remains on the legacy path is: protocols
+   not yet given the further zero-flat-field `output.cpp` treatment (still
+   tracked above); and the 43 IT-tier name-only recognitions, permanently
+   excluded per this item's own "Architectural scope note".
 4. **Comment-density trim: acknowledged, not scheduled.** Real cost, no
    plan yet to act on it -- lower priority than the three items above.
 5. **No new protocols until 1-3 above are substantially underway,** per
@@ -4039,6 +4100,41 @@ gap as RIP's Keyed MD5) -- see docs/USER_GUIDE.md's LIMITATIONS for both. **BGP-
 done** -- see item 33 further down this ROADMAP -- the one routing protocol of this whole
 batch that needed TCP port-179 stream reassembly, unlike any of the eight
 IP/UDP-based routing/redundancy protocols above.
+
+**Architectural scope note, decided directly: this item's 43 protocols are
+out of scope for the `ProtocolDecoder` registration-model refactor (item 3
+above), not merely unscheduled.** Asked point-blank whether Tiers 1-5
+belong on that interface, the answer is no, and for a structural reason
+rather than a priority one: `ProtocolDecoder` exists to retire *dual-write*
+-- a decoded, typed struct copied into `DecodedPacket`'s own
+protocol-specific flat fields, then re-read by a protocol-specific
+`output.cpp` branch (see `protocol_decoder.hpp`'s own "why a new
+abstraction at all" paragraph). None of this item's five
+`try_recognize_it_*`/`try_recognize_tunnel_vpn_*` functions produce that
+shape at all, by design -- every one of them returns only `{protocol,
+summary, notes}` (`it_protocols.hpp`/`tunnel_vpn.hpp`'s own match structs),
+fields every `DecodedPacket` already carries regardless of protocol, and
+every call site does nothing but `out.protocol = m->protocol; out.summary
+= m->summary; for (notes) out.notes.push_back(n);` -- no
+`it_*`/`tunnel_vpn_*` flat fields exist in `decoder.hpp` to migrate away
+from, and no protocol-specific `output.cpp` branch exists to retire,
+because this item's own file header comment rules out ever decoding these
+protocols structurally ("there is no OT-security value in decoding RDP's
+own bitmap updates or a VNC framebuffer update"). Wrapping these in
+`ProtocolDecoder` subclasses would add ceremony for no such gain -- a
+`GateKind` doesn't cleanly fit either, since most of these tiers are
+checked across TCP *and* UDP from one shared function (`is_tcp` as a
+parameter), unlike every migrated protocol's own single-transport
+`gate_kind()`; splitting one would mean two decoder classes sharing an
+`id()` purely to match the interface's shape, not to solve any real
+problem, for zero reduction in `DecodedPacket` fields or writer branches,
+since there are none to remove. The `~37`-and-counting legacy-protocol
+count item 3's own "Update" paragraphs track (and its
+`ProtocolDecoder`-level `GateKind`/`ProtocolResult` machinery generally)
+was never meant to, and does not, include this item's 43 name-only
+recognitions; they stay exactly as they are, called directly from
+`decoder.cpp`'s dispatch chain via plain functions, indefinitely, not as a
+deferred future migration.
 19. ~~**Label *how* a flow's client/server direction was determined -- not
     just what it is -- across `decode`, `policy validate`, and `inventory`.**~~
     **Done.** Every direction call this codebase makes already fell into one

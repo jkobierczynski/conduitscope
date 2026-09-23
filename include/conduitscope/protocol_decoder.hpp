@@ -9,8 +9,15 @@
 // every protocol keeps working exactly as it did before. Only a handful of protocols (one per
 // structural "gate shape" this codebase has, chosen to prove the interface actually covers all of
 // them, plus Beckhoff TwinCAT/ADS as the first protocol built ONLY on this interface) are wired
-// through it. The other ~48 stay on the legacy path indefinitely, until/unless a future pass
-// migrates them -- there is no timeline commitment for that here.
+// through it. The other ~37 (and shrinking, batch by batch -- see docs/DEVELOPMENT.md's item 3
+// "Update" paragraphs for the running count) stay on the legacy path indefinitely, until/unless a
+// future pass migrates them -- there is no timeline commitment for that here. NOT counted in that
+// figure, and never a migration candidate at all: the 43 name-only "IT protocols an OT auditor
+// flags" recognitions (it_protocols.hpp/tunnel_vpn.hpp/eapol.hpp/pppoe.hpp/mpls.hpp/quic.hpp,
+// ROADMAP item 18) -- decided directly, see that item's own "Architectural scope note" in
+// docs/DEVELOPMENT.md: none of them decode a typed struct into DecodedPacket flat fields in the
+// first place (by design -- they're deliberately recognized, not decoded), so there is no
+// dual-write for this interface to retire there, and nothing to gain by wrapping them in it.
 //
 // WHY A NEW ABSTRACTION AT ALL, GIVEN HOW SMALL ITS FOOTPRINT IS RIGHT NOW: every protocol added
 // to this codebase before TwinCAT required touching ProtocolFilter (decoder.hpp), DecodedPacket
@@ -54,6 +61,18 @@ enum class GateKind {
                          // docs/DEVELOPMENT.md's PROTOCOL DETECTION section
     UdpPort,             // e.g. DNS/mDNS/LLMNR/NBT-NS/HSRP/RIP -- the few protocols this codebase
                          // gates by port because they lack self-describing bytes of their own
+    // Migration batch addition: TcpPort, the TCP-side mirror of UdpPort above, added specifically
+    // because DoH detection needed it and none of the existing six GateKinds fit -- see
+    // tls_sni.hpp's DohDecoder. UNLIKE TcpPortIndependent (tried opportunistically on every TCP
+    // port in Auto mode, relying on a strong structural gate to avoid false positives), a
+    // TcpPort decoder is port-gated in Auto mode, the same "no strong enough self-describing byte
+    // shape to check opportunistically" reasoning UdpPort's own protocols share -- DoH's own gate
+    // (a TLS ClientHello whose SNI matches a curated known-DoH-provider table) is strong on
+    // content but still only checked on the configured HTTPS/DoH port(s) in Auto mode, to avoid
+    // spending a TLS ClientHello parse on every TCP payload in the capture for a feature this
+    // narrow (an explicit `--protocol doh` still tries it port-independently, same override
+    // UdpPort's own protocols already have).
+    TcpPort,
     // Migration batch 2 additions (see docs/DEVELOPMENT.md's "registration-model decoder refactor"
     // entry for the batch this landed in):
     UdpPortIndependent,  // the UDP-side mirror of TcpPortIndependent above -- e.g. BACnet/IP,
@@ -239,6 +258,12 @@ public:
     // --extra-X-ports widening -- stays at the call site exactly as it did before migration, the
     // same "gating logic doesn't move into the class" posture StpDecoder's own comment documents.
     virtual std::optional<uint16_t> udp_port() const { return std::nullopt; }
+
+    // The TcpPort mirror of udp_port() immediately above -- same audit-trail-only posture, same
+    // "gating logic doesn't move into the class" reasoning (Auto-mode port-gating and
+    // --extra-X-ports widening both stay at decoder.cpp's own call site). DohDecoder is this
+    // GateKind's first and so far only user, returning DOH_PORT (tls_sni.hpp).
+    virtual std::optional<uint16_t> tcp_port() const { return std::nullopt; }
 
     // Only overridden by a GateKind::LinkType decoder -- its own expected PcapPacket link_type
     // value (e.g. LINKTYPE_CAN_SOCKETCAN for DeviceNet). A plain uint32_t rather than pcap_

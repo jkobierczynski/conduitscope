@@ -186,4 +186,16 @@ std::optional<DohDetection> try_detect_doh(ByteSpan tcp_payload) {
     return d;
 }
 
+std::optional<ProtocolResult> DohDecoder::decode(ByteSpan payload, DecodeContext& /*ctx*/) const {
+    if (auto d = try_detect_doh(payload)) {
+        return ProtocolResult::make<DohDetection>("doh", std::move(*d));
+    }
+    return std::nullopt;
+}
+
+const ProtocolDecoder& doh_decoder() {
+    static const DohDecoder instance;
+    return instance;
+}
+
 }  // namespace conduitscope

@@ -2401,6 +2401,13 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
         // detected rather than needing its own reassembly machinery for a feature this narrow.
         // Port-gated in Auto mode, same rationale and same exception for an explicit --protocol
         // doh as DNS/mDNS/LLMNR/NBT-NS above -- see tls_sni.hpp's own "Detection" paragraph.
+        //
+        // Registration-model migration: try_detect_doh is now reached through DohDecoder::decode
+        // rather than called directly -- same function, same semantics, see tls_sni.hpp. DoH is a
+        // zero-flat-field migrated protocol from the start (like TwinCAT/FF-HSE/DeviceNet):
+        // out.result carries the whole DohDetection, and output.cpp's write_doh_json_fields reads
+        // straight from it. GateKind::TcpPort's first and so far only user -- see
+        // protocol_decoder.hpp's own comment on that gate kind.
         bool want_doh = options_.protocol_filter == ProtocolFilter::Auto ||
                          options_.protocol_filter == ProtocolFilter::DohOnly;
         bool require_doh_port = options_.protocol_filter == ProtocolFilter::Auto;
@@ -2408,12 +2415,13 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
             bool port_match = port_in(tcp.src_port, DOH_PORT, options_.extra_doh_ports) ||
                                port_in(tcp.dst_port, DOH_PORT, options_.extra_doh_ports);
             if (!require_doh_port || port_match) {
-                if (auto doh = try_detect_doh(tcp.payload)) {
+                DecodeContext ctx;
+                ctx.protocol_id = "doh";
+                if (auto result = doh_decoder().decode(tcp.payload, ctx)) {
+                    const DohDetection& d = result->as<DohDetection>();
                     out.protocol = "doh";
-                    out.summary = doh->summary;
-                    out.doh_sni = doh->sni;
-                    out.doh_matched_provider = doh->matched_provider;
-                    out.doh_alpn_protocols = doh->alpn_protocols;
+                    out.summary = d.summary;
+                    out.result = *result;
                     if (!port_match) {
                         out.notes.push_back("seen on TCP port " + std::to_string(tcp.src_port) + "->" +
                                              std::to_string(tcp.dst_port) +
