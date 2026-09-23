@@ -5175,6 +5175,7 @@ IP/UDP-based routing/redundancy protocols above.
     `tests/sample_fins.pcap`; real wire-format details were independently
     confirmed via `conn.log`/NSE-script content, not a raw capture).
 
+    **Update: heap-use-after-free found by the scheduled fuzz campaign,
 31. **ARP (RFC 826), EtherType `0x0806`.** **Done.** A brand-new protocol,
     not a migration -- before this, ARP traffic was only ever named by
     `link_layer.hpp`'s `ethertype_name` (`[non-ip] ... ethertype 0x806
