@@ -1231,12 +1231,86 @@ Discussed and adopted, in this order:
    `sample_tunnel_vpn.pcap`, PPPoE's own `sample_wireless_backhaul.pcap`)
    confirming field-for-field identical output to before this change.
 
-   Still explicitly out of scope, not silently dropped: the remaining 25
+   **Update: zero-flat-field `output.cpp` migration, "mid-size batch" --
+   ARP, EAPOL, EtherCAT, HSRP, ICMP, LLDP, NBT-NS, PIM, PROFINET, STP, SV,
+   and the DNS family (DNS/mDNS/LLMNR).** The 14-protocol-ID group the
+   cheap batch's own update above named as "next" -- confirmed to still
+   have zero extra readers in `policy_engine.cpp`/`asset_inventory.cpp`
+   before starting, the same check every batch runs first.
+
+   Three protocols (ARP, EAPOL, LLDP -- all `GateKind::EtherType`) turned
+   out to have the same "populated but never rendered" shape MPLS/PPPoE
+   had in the cheap batch: confirmed by grep that `output.cpp` had zero
+   `arp_*`/`eapol_*`/`lldp_*` JSON blocks anywhere, so their
+   `populate_arp`/`populate_eapol`/`populate_lldp` functions collapsed to
+   the `populate_slow_protocols` shape (protocol/summary/notes, then
+   `out.result = result;`) with no new `write_x_json_fields` function
+   needed at all -- JSON output for all three is unchanged.
+
+   The other nine protocol IDs (PROFINET, SV, EtherCAT, STP --
+   `GateKind::EtherType`/LLC-framed; ICMP, PIM -- `GateKind::IpProtocol`;
+   HSRP, NBT-NS, and the DNS family -- `GateKind::UdpPort`) do have real
+   `output.cpp` rendering to preserve, so each got a new
+   `write_x_json_fields` function reproducing the exact prior JSON shape
+   byte-for-byte, including every existing truncation cap
+   (`resource_limits().max_decoded_objects`) and every rendering helper
+   that used to be `decoder.cpp`-local (`icmp_router_address_summary`,
+   `pim_hello_option_summary`/`pim_jp_group_summary`/`pim_bsr_group_summary`
+   -- moved into `output.cpp`, not shared, matching the cheap batch's own
+   precedent for `rip_route_summary`/etc.; `stp_port_role_name`/
+   `stp_render_msti_summary` needed no move since `stp.hpp` already
+   exposed them as public functions). `write_dns_json_fields` is shared by
+   dns/mdns/llmnr the same way `fill_dns_fields` used to be, for the same
+   reason (identical wire format, see `dns.hpp`).
+
+   This batch caught two of its own bugs before they shipped, both from
+   comparing the new functions against the exact prior gating logic
+   rather than trusting a first draft: (1) `SvAsdu`'s `dat_set`/
+   `smp_synch`/`smp_rate`/`smp_mod`/`gmid_hex` are `std::optional`-wrapped,
+   but the old flat fields were plain strings gated on the *flattened
+   string* being non-empty (or, for `smp_rate`, non-zero) -- gating the
+   new function on the optional's mere presence instead would print an
+   empty `"sv_dat_set": ""` in a case the old code never did; fixed to gate
+   on both the optional being engaged and its value being non-empty/
+   non-zero, reproducing the original exactly. (2) The bulk rewrite of
+   `JsonWriter::write_packet`'s PROFINET-through-STP block briefly dropped
+   GOOSE's own `write_goose_json_fields` call site entirely (it sat
+   textually between PROFINET and SV, so a line-range edit swallowed it) --
+   caught by the zero-warning-rebuild step itself, which flagged
+   `write_goose_json_fields` as "defined but not used"; restored.
+
+   Two further "populated but never rendered" fields surfaced within the
+   nine real-rendering protocols themselves, same finding and same
+   resolution as the cheap batch's `vrrp_auth_password`: `HsrpMessage::
+   auth_data` (confirmed no writer ever read the old flat `hsrp_auth_data`)
+   and `StpFrame::port_id_raw` (confirmed no writer ever read the old flat
+   `stp_port_id_raw`) -- both left out of their new write functions,
+   still reachable on the typed result for any future reader.
+
+   All fourteen protocol IDs' flat fields removed from `decoder.hpp`;
+   confirmed zero remaining readers anywhere (`decoder.cpp`, `output.cpp`,
+   `policy_engine.cpp`, `asset_inventory.cpp`, `fuzz/`) via the same
+   exhaustive grep sweep every prior dual-write removal has used.
+
+   Verified the same way as every prior migration: the full CTest suite
+   (1,416 tests) stayed 100% passing with zero changed
+   `PASS_REGULAR_EXPRESSION`/`FAIL_REGULAR_EXPRESSION` assertions anywhere,
+   clean rebuilds with zero warnings in both the default and
+   `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF` configs, and manual
+   `--format json`/`--stats` smoke tests against each protocol's own
+   fixture (`sample_arp.pcap`, `sample_enterprise_trust.pcap` for EAPOL,
+   `sample_ethercat.pcap`, `sample_hsrp.pcap`, `sample_icmp.pcap`,
+   `sample_lldp.pcap`, `sample_nbns.pcap`, `sample_pim.pcap`,
+   `sample_profinet.pcap`, `sample_stp.pcap`, `sample_sv.pcap`,
+   `sample_dns.pcap`/`sample_mdns.pcap`/`sample_llmnr.pcap`) confirming
+   field-for-field identical output to before this change.
+
+   Still explicitly out of scope, not silently dropped: the remaining 9
    protocols on the interface-level migration but not yet zero-flat-field
-   -- the mid-size, no-extra-reader group (ARP, EAPOL, EtherCAT, HSRP,
-   ICMP, LLDP, NBT-NS, PIM, PROFINET, STP, SV, and the DNS family) next,
-   then the 9 with extra readers (BACnet, DNP3, EtherNet/IP, HART-IP,
-   IEC104, MMS, MQTT, OPC UA, S7comm) last.
+   -- the extra-reader group (BACnet, DNP3, EtherNet/IP, HART-IP, IEC104,
+   MMS, MQTT, OPC UA, S7comm), each of which will need its own
+   `policy_engine.cpp`/`asset_inventory.cpp` reader sweep beyond the usual
+   `decoder.cpp`/`output.cpp` pair before its own batch can start.
 4. **Comment-density trim: acknowledged, not scheduled.** Real cost, no
    plan yet to act on it -- lower priority than the three items above.
 5. **No new protocols until 1-3 above are substantially underway,** per

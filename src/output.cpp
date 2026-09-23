@@ -873,6 +873,481 @@ void write_igrp_json_fields(std::ostream& out, const IgrpMessage& msg) {
     out << "    \"igrp_routes_truncated\": " << (msg.routes_truncated ? "true" : "false") << ",\n";
 }
 
+// Zero-flat-field migration (mid-size batch): the PROFINET analog of write_goose_json_fields
+// above. Reproduces the exact same two-tier DCP block truncation decoder.cpp's old populate_profinet
+// applied (kMaxDcpBlockValues == resource_limits().max_decoded_objects.value_or(50)).
+void write_profinet_json_fields(std::ostream& out, const ProfinetFrame& pn) {
+    std::ostringstream fid;
+    fid << "0x" << std::hex << std::uppercase << std::setw(4) << std::setfill('0') << pn.frame_id;
+    out << "    \"profinet_frame_id\": \"" << fid.str() << "\",\n";
+    out << "    \"profinet_frame_id_name\": \"" << json_escape(pn.frame_id_name) << "\",\n";
+    if (pn.has_dcp) {
+        out << "    \"profinet_dcp_service\": \"" << json_escape(pn.dcp_service_name) << "\",\n";
+        out << "    \"profinet_dcp_service_type\": \"" << json_escape(pn.dcp_service_type_name) << "\",\n";
+        const size_t kMaxDcpBlockValues = resource_limits().max_decoded_objects.value_or(50);
+        std::vector<std::string> blocks;
+        for (const auto& block : pn.dcp_blocks) {
+            if (blocks.size() >= kMaxDcpBlockValues) break;
+            std::string label = !block.name.empty() ? block.name
+                                                      : ("option=" + std::to_string(block.option) +
+                                                         " suboption=" + std::to_string(block.suboption));
+            blocks.push_back(label + "=" + block.value);
+        }
+        if (!blocks.empty()) {
+            out << "    \"profinet_dcp_blocks\": [";
+            for (size_t i = 0; i < blocks.size(); ++i) {
+                if (i != 0) out << ", ";
+                out << "\"" << json_escape(blocks[i]) << "\"";
+            }
+            out << "],\n";
+        }
+    }
+    if (pn.has_cyclic_data) {
+        out << "    \"profinet_cyclic_io_data_length\": " << pn.cyclic_io_data_length << ",\n";
+        out << "    \"profinet_cyclic_io_data_hex\": \"" << json_escape(pn.cyclic_io_data_hex) << "\",\n";
+        out << "    \"profinet_cyclic_cycle_counter\": " << pn.cyclic_cycle_counter << ",\n";
+        out << "    \"profinet_cyclic_data_status\": \"" << json_escape(pn.cyclic_data_status_summary) << "\",\n";
+        out << "    \"profinet_cyclic_transfer_status\": " << static_cast<unsigned>(pn.cyclic_transfer_status)
+            << ",\n";
+    }
+}
+
+// Zero-flat-field migration (mid-size batch): the SV (IEC 61850-9-2 Sampled Values) analog of
+// write_goose_json_fields above. Reproduces the exact same asdus summary truncation decoder.cpp's
+// old populate_sv applied (kMaxSvAsduSummaries == resource_limits().max_decoded_objects.value_or(50)).
+void write_sv_json_fields(std::ostream& out, const SvFrame& sv) {
+    std::ostringstream appid;
+    appid << "0x" << std::hex << std::uppercase << std::setw(4) << std::setfill('0') << sv.appid;
+    out << "    \"sv_appid\": \"" << appid.str() << "\",\n";
+    out << "    \"sv_simulated\": " << (sv.header_simulated ? "true" : "false") << ",\n";
+    out << "    \"sv_no_asdu\": " << sv.no_asdu << ",\n";
+    out << "    \"sv_asdu_count\": " << sv.asdus.size() << ",\n";
+    if (!sv.asdus.empty()) {
+        // Gates below reproduce the exact old dual-write's OWN gates exactly: decoder.hpp's now-gone
+        // flat sv_dat_set/sv_smp_synch/sv_smp_mod/sv_gmid_hex fields were plain (non-optional)
+        // std::string members, populated only `if (first.x)`, then output.cpp's old reader gated on
+        // the FLATTENED string being non-empty -- not on the optional itself being engaged. An
+        // optional holding an empty string (were that ever to occur) must therefore still print
+        // nothing here, exactly as it printed nothing before this migration.
+        const SvAsdu& first = sv.asdus[0];
+        out << "    \"sv_id\": \"" << json_escape(first.sv_id) << "\",\n";
+        if (first.dat_set && !first.dat_set->empty()) {
+            out << "    \"sv_dat_set\": \"" << json_escape(*first.dat_set) << "\",\n";
+        }
+        out << "    \"sv_smp_cnt\": " << first.smp_cnt << ",\n";
+        out << "    \"sv_conf_rev\": " << first.conf_rev << ",\n";
+        if (first.smp_synch && !first.smp_synch->empty()) {
+            out << "    \"sv_smp_synch\": \"" << json_escape(*first.smp_synch) << "\",\n";
+        }
+        if (first.smp_rate && *first.smp_rate != 0) out << "    \"sv_smp_rate\": " << *first.smp_rate << ",\n";
+        if (first.smp_mod && !first.smp_mod->empty()) {
+            out << "    \"sv_smp_mod\": \"" << json_escape(*first.smp_mod) << "\",\n";
+        }
+        out << "    \"sv_seq_data_length\": " << first.seq_data_length << ",\n";
+        out << "    \"sv_seq_data_hex\": \"" << json_escape(first.seq_data_hex) << "\",\n";
+        if (first.gmid_hex && !first.gmid_hex->empty()) {
+            out << "    \"sv_gmid_hex\": \"" << json_escape(*first.gmid_hex) << "\",\n";
+        }
+    }
+    const size_t kMaxSvAsduSummaries = resource_limits().max_decoded_objects.value_or(50);
+    std::vector<std::string> asdus;
+    for (const auto& asdu : sv.asdus) {
+        if (asdus.size() >= kMaxSvAsduSummaries) break;
+        std::ostringstream a;
+        a << "svID=\"" << asdu.sv_id << "\"";
+        if (asdu.dat_set) a << " datSet=\"" << *asdu.dat_set << "\"";
+        a << " smpCnt=" << asdu.smp_cnt << " confRev=" << asdu.conf_rev;
+        if (asdu.smp_synch) a << " smpSynch=" << *asdu.smp_synch;
+        if (asdu.smp_rate) a << " smpRate=" << *asdu.smp_rate;
+        if (asdu.smp_mod) a << " smpMod=" << *asdu.smp_mod;
+        a << " seqData=" << asdu.seq_data_length << " byte(s)";
+        asdus.push_back(a.str());
+    }
+    if (!asdus.empty()) {
+        out << "    \"sv_asdus\": [";
+        for (size_t i = 0; i < asdus.size(); ++i) {
+            if (i != 0) out << ", ";
+            out << "\"" << json_escape(asdus[i]) << "\"";
+        }
+        out << "],\n";
+    }
+}
+
+// Zero-flat-field migration (mid-size batch): the EtherCAT analog of write_goose_json_fields above.
+// Reproduces the exact same datagram summary truncation decoder.cpp's old populate_ethercat applied
+// (kMaxEthercatDatagramSummaries == resource_limits().max_decoded_objects.value_or(50)).
+void write_ethercat_json_fields(std::ostream& out, const EthercatFrame& ec) {
+    out << "    \"ethercat_frame_type\": " << static_cast<unsigned>(ec.frame_type) << ",\n";
+    out << "    \"ethercat_frame_type_name\": \"" << json_escape(ec.frame_type_name) << "\",\n";
+    out << "    \"ethercat_declared_length\": " << ec.declared_length << ",\n";
+    out << "    \"ethercat_has_datagrams\": " << (ec.has_datagrams ? "true" : "false") << ",\n";
+    if (ec.has_datagrams) {
+        out << "    \"ethercat_datagram_count\": " << ec.datagrams.size() << ",\n";
+        if (!ec.datagrams.empty()) {
+            const EthercatDatagram& first = ec.datagrams[0];
+            out << "    \"ethercat_first_cmd\": " << static_cast<unsigned>(first.cmd) << ",\n";
+            out << "    \"ethercat_first_cmd_name\": \"" << json_escape(first.cmd_name) << "\",\n";
+            out << "    \"ethercat_first_idx\": " << static_cast<unsigned>(first.idx) << ",\n";
+            if (first.logical_addressing) {
+                out << "    \"ethercat_first_logical_address\": " << first.logical_address << ",\n";
+            } else {
+                out << "    \"ethercat_first_adp\": " << first.adp << ",\n";
+                out << "    \"ethercat_first_ado\": " << first.ado << ",\n";
+            }
+            out << "    \"ethercat_first_data_length\": " << first.data_length << ",\n";
+            out << "    \"ethercat_first_data_hex\": \"" << json_escape(first.data_hex) << "\",\n";
+            out << "    \"ethercat_first_wkc\": " << first.wkc << ",\n";
+            out << "    \"ethercat_first_irq\": " << first.irq << ",\n";
+            out << "    \"ethercat_first_circulating\": " << (first.circulating ? "true" : "false") << ",\n";
+        }
+        const size_t kMaxEthercatDatagramSummaries = resource_limits().max_decoded_objects.value_or(50);
+        std::vector<std::string> datagrams;
+        for (const auto& dgram : ec.datagrams) {
+            if (datagrams.size() >= kMaxEthercatDatagramSummaries) break;
+            std::ostringstream a;
+            a << dgram.cmd_name << " idx=" << static_cast<unsigned>(dgram.idx) << " ";
+            if (dgram.logical_addressing) {
+                a << "logAddr=0x" << std::hex << std::uppercase << std::setw(8) << std::setfill('0')
+                  << dgram.logical_address << std::dec;
+            } else {
+                a << "adp=0x" << std::hex << std::uppercase << std::setw(4) << std::setfill('0')
+                  << dgram.adp << " ado=0x" << std::setw(4) << std::setfill('0') << dgram.ado
+                  << std::dec;
+            }
+            a << " len=" << dgram.data_len << " wkc=" << dgram.wkc;
+            if (dgram.irq != 0) {
+                a << " irq=0x" << std::hex << std::uppercase << std::setw(4) << std::setfill('0')
+                  << dgram.irq << std::dec;
+            }
+            if (dgram.circulating) a << " circulating";
+            datagrams.push_back(a.str());
+        }
+        if (!datagrams.empty()) {
+            out << "    \"ethercat_datagrams\": [";
+            for (size_t i = 0; i < datagrams.size(); ++i) {
+                if (i != 0) out << ", ";
+                out << "\"" << json_escape(datagrams[i]) << "\"";
+            }
+            out << "],\n";
+        }
+    }
+}
+
+// Zero-flat-field migration (mid-size batch): the STP analog of write_goose_json_fields above.
+// stp_port_role_name/stp_render_msti_summary are stp.hpp's own free functions (already public,
+// unlike icmp_router_address_summary/pim_*_summary below which were decoder.cpp-local and had to
+// move here), so this function calls them directly rather than re-deriving anything. Reproduces the
+// exact same MSTI summary truncation decoder.cpp's old inline STP call site applied
+// (kMaxStpMstiSummaries == resource_limits().max_decoded_objects.value_or(50)).
+void write_stp_json_fields(std::ostream& out, const StpFrame& stp) {
+    out << "    \"stp_protocol_version\": " << static_cast<unsigned>(stp.protocol_version) << ",\n";
+    out << "    \"stp_protocol_version_name\": \"" << json_escape(stp.protocol_version_name) << "\",\n";
+    out << "    \"stp_bpdu_type\": " << static_cast<unsigned>(stp.bpdu_type) << ",\n";
+    out << "    \"stp_bpdu_type_name\": \"" << json_escape(stp.bpdu_type_name) << "\",\n";
+    out << "    \"stp_is_tcn\": " << (stp.is_tcn ? "true" : "false") << ",\n";
+    out << "    \"stp_is_spb\": " << (stp.is_spb ? "true" : "false") << ",\n";
+    if (stp.has_common_body) {
+        out << "    \"stp_flags\": " << static_cast<unsigned>(stp.flags) << ",\n";
+        out << "    \"stp_flag_tca\": " << (stp.flag_tca ? "true" : "false") << ",\n";
+        out << "    \"stp_flag_agreement\": " << (stp.flag_agreement ? "true" : "false") << ",\n";
+        out << "    \"stp_flag_forwarding\": " << (stp.flag_forwarding ? "true" : "false") << ",\n";
+        out << "    \"stp_flag_learning\": " << (stp.flag_learning ? "true" : "false") << ",\n";
+        out << "    \"stp_flag_port_role\": \"" << json_escape(stp_port_role_name(stp.flag_port_role)) << "\",\n";
+        out << "    \"stp_flag_proposal\": " << (stp.flag_proposal ? "true" : "false") << ",\n";
+        out << "    \"stp_flag_tc\": " << (stp.flag_tc ? "true" : "false") << ",\n";
+        out << "    \"stp_root_priority\": " << stp.root_id.priority << ",\n";
+        out << "    \"stp_root_sys_id_ext\": " << stp.root_id.ext << ",\n";
+        out << "    \"stp_root_mac\": \"" << json_escape(format_mac(stp.root_id.mac)) << "\",\n";
+        out << "    \"stp_root_path_cost\": " << stp.root_path_cost << ",\n";
+        out << "    \"stp_bridge_priority\": " << stp.bridge_id.priority << ",\n";
+        out << "    \"stp_bridge_sys_id_ext\": " << stp.bridge_id.ext << ",\n";
+        out << "    \"stp_bridge_mac\": \"" << json_escape(format_mac(stp.bridge_id.mac)) << "\",\n";
+        out << "    \"stp_port_priority\": " << stp.port_id_priority << ",\n";
+        out << "    \"stp_port_number\": " << stp.port_id_number << ",\n";
+        out << "    \"stp_message_age\": " << std::fixed << std::setprecision(3) << stp.message_age << ",\n";
+        out << "    \"stp_max_age\": " << std::fixed << std::setprecision(3) << stp.max_age << ",\n";
+        out << "    \"stp_hello_time\": " << std::fixed << std::setprecision(3) << stp.hello_time << ",\n";
+        out << "    \"stp_forward_delay\": " << std::fixed << std::setprecision(3) << stp.forward_delay << ",\n";
+        out << "    \"stp_has_version1\": " << (stp.has_version1 ? "true" : "false") << ",\n";
+        if (stp.has_version1) {
+            out << "    \"stp_version_1_length\": " << static_cast<unsigned>(stp.version_1_length) << ",\n";
+        }
+        out << "    \"stp_is_mstp\": " << (stp.is_mstp ? "true" : "false") << ",\n";
+        if (stp.is_mstp) {
+            out << "    \"stp_version_3_length\": " << stp.version_3_length << ",\n";
+            out << "    \"stp_mst_config_name\": \"" << json_escape(stp.mst_config_name) << "\",\n";
+            out << "    \"stp_mst_config_revision_level\": " << stp.mst_config_revision_level << ",\n";
+            out << "    \"stp_mst_config_digest\": \"" << json_escape(stp.mst_config_digest_hex) << "\",\n";
+            out << "    \"stp_cist_internal_root_path_cost\": " << stp.cist_internal_root_path_cost << ",\n";
+            out << "    \"stp_cist_bridge_priority\": " << stp.cist_bridge_id.priority << ",\n";
+            out << "    \"stp_cist_bridge_sys_id_ext\": " << stp.cist_bridge_id.ext << ",\n";
+            out << "    \"stp_cist_bridge_mac\": \"" << json_escape(format_mac(stp.cist_bridge_id.mac)) << "\",\n";
+            out << "    \"stp_cist_remaining_hops\": " << static_cast<unsigned>(stp.cist_remaining_hops) << ",\n";
+            const size_t kMaxStpMstiSummaries = resource_limits().max_decoded_objects.value_or(50);
+            std::vector<std::string> mstis;
+            for (const auto& m : stp.msti_messages) {
+                if (mstis.size() >= kMaxStpMstiSummaries) break;
+                mstis.push_back(stp_render_msti_summary(m));
+            }
+            if (!mstis.empty()) {
+                out << "    \"stp_msti_messages\": [";
+                for (size_t i = 0; i < mstis.size(); ++i) {
+                    if (i != 0) out << ", ";
+                    out << "\"" << json_escape(mstis[i]) << "\"";
+                }
+                out << "],\n";
+            }
+        }
+        out << "    \"stp_is_alt_msti_format\": " << (stp.is_alt_msti_format ? "true" : "false") << ",\n";
+    }
+}
+
+// Zero-flat-field migration (mid-size batch): the ICMP analog of write_goose_json_fields above.
+// icmp_router_address_summary was decoder.cpp-local (unlike stp_port_role_name above); moved here
+// since it's purely a rendering helper, same as rip_route_summary/igmp_group_record_summary/
+// igrp_route_summary already are in this file.
+std::string icmp_router_address_summary(const IcmpRouterAddress& ra) {
+    std::ostringstream s;
+    s << ra.address << " (" << ra.preference << ")";
+    return s.str();
+}
+
+void write_icmp_json_fields(std::ostream& out, const IcmpMessage& msg) {
+    out << "    \"icmp_type\": " << static_cast<unsigned>(msg.type) << ",\n";
+    out << "    \"icmp_code\": " << static_cast<unsigned>(msg.code) << ",\n";
+    out << "    \"icmp_type_name\": \"" << json_escape(msg.type_name) << "\",\n";
+    if (!msg.code_name.empty()) {
+        out << "    \"icmp_code_name\": \"" << json_escape(msg.code_name) << "\",\n";
+    }
+    out << "    \"icmp_checksum_valid\": " << (msg.checksum_valid ? "true" : "false") << ",\n";
+    if (msg.type == 0 || msg.type == 8) {  // Echo Reply/Request
+        out << "    \"icmp_echo_identifier\": " << msg.echo_identifier << ",\n";
+        out << "    \"icmp_echo_sequence\": " << msg.echo_sequence << ",\n";
+    }
+    if (msg.type == 13 || msg.type == 14) {  // Timestamp Request/Reply
+        out << "    \"icmp_echo_identifier\": " << msg.echo_identifier << ",\n";
+        out << "    \"icmp_echo_sequence\": " << msg.echo_sequence << ",\n";
+        out << "    \"icmp_originate_timestamp_ms\": " << msg.originate_timestamp_ms << ",\n";
+        out << "    \"icmp_receive_timestamp_ms\": " << msg.receive_timestamp_ms << ",\n";
+        out << "    \"icmp_transmit_timestamp_ms\": " << msg.transmit_timestamp_ms << ",\n";
+    }
+    if (msg.next_hop_mtu != 0) {
+        out << "    \"icmp_next_hop_mtu\": " << msg.next_hop_mtu << ",\n";
+    }
+    if (!msg.redirect_gateway.empty()) {
+        out << "    \"icmp_redirect_gateway\": \"" << json_escape(msg.redirect_gateway) << "\",\n";
+    }
+    if (msg.type == 12) {  // Parameter Problem
+        out << "    \"icmp_parameter_pointer\": " << static_cast<unsigned>(msg.parameter_pointer) << ",\n";
+    }
+    if (!msg.address_mask.empty()) {
+        out << "    \"icmp_address_mask\": \"" << json_escape(msg.address_mask) << "\",\n";
+    }
+    if (msg.embedded_datagram) {
+        const auto& ed = *msg.embedded_datagram;
+        std::ostringstream s;
+        s << ed.src_addr << "->" << ed.dst_addr;
+        if (!ed.protocol_name.empty()) {
+            s << " (" << ed.protocol_name;
+            if (ed.has_ports) s << " " << ed.src_port << "->" << ed.dst_port;
+            s << ")";
+        } else {
+            s << " (IP protocol " << static_cast<unsigned>(ed.protocol) << ")";
+        }
+        out << "    \"icmp_embedded_datagram\": \"" << json_escape(s.str()) << "\",\n";
+    }
+    if (!msg.router_addresses.empty()) {
+        out << "    \"icmp_router_addresses\": [";
+        for (size_t i = 0; i < msg.router_addresses.size(); ++i) {
+            if (i != 0) out << ", ";
+            out << "\"" << json_escape(icmp_router_address_summary(msg.router_addresses[i])) << "\"";
+        }
+        out << "],\n";
+        out << "    \"icmp_router_addresses_truncated\": " << (msg.router_addresses_truncated ? "true" : "false")
+            << ",\n";
+    }
+}
+
+// Zero-flat-field migration (mid-size batch): the HSRP analog of write_goose_json_fields above.
+void write_hsrp_json_fields(std::ostream& out, const HsrpMessage& msg) {
+    out << "    \"hsrp_version\": " << static_cast<unsigned>(msg.version) << ",\n";
+    if (msg.version == 1) {
+        out << "    \"hsrp_opcode\": \"" << json_escape(msg.opcode_name) << "\",\n";
+        out << "    \"hsrp_state\": \"" << json_escape(msg.state_name) << "\",\n";
+        out << "    \"hsrp_virtual_ip\": \"" << json_escape(msg.virtual_ip) << "\",\n";
+    } else {
+        if (!msg.tlvs.empty()) {
+            out << "    \"hsrp_tlv_types\": [";
+            for (size_t i = 0; i < msg.tlvs.size(); ++i) {
+                if (i != 0) out << ", ";
+                out << "\"" << json_escape(msg.tlvs[i].type_name) << "\"";
+            }
+            out << "],\n";
+        }
+        out << "    \"hsrp_tlvs_truncated\": " << (msg.tlvs_truncated ? "true" : "false") << ",\n";
+    }
+}
+
+// Zero-flat-field migration (mid-size batch): the PIM analog of write_goose_json_fields above.
+// pim_hello_option_summary/pim_jp_group_summary/pim_bsr_group_summary were decoder.cpp-local
+// rendering helpers (like icmp_router_address_summary above); moved here for the same reason.
+std::string pim_hello_option_summary(const PimHelloOption& opt) {
+    if (!opt.addresses.empty()) {
+        std::ostringstream s;
+        s << opt.option_type_name << " (";
+        for (size_t i = 0; i < opt.addresses.size(); ++i) {
+            if (i != 0) s << ", ";
+            s << opt.addresses[i];
+        }
+        s << ")";
+        return s.str();
+    }
+    if (opt.value.empty()) return opt.option_type_name;
+    return opt.option_type_name + ": " + opt.value;
+}
+
+std::string pim_jp_group_summary(const PimJoinPruneGroup& g) {
+    std::ostringstream s;
+    s << g.group << ": " << g.joins.size() << " join(s), " << g.prunes.size() << " prune(s)";
+    return s.str();
+}
+
+std::string pim_bsr_group_summary(const PimBsrGroupRps& g) {
+    std::ostringstream s;
+    s << g.group << ": " << g.candidate_rps.size() << " candidate-RP(s)";
+    return s.str();
+}
+
+void write_pim_json_fields(std::ostream& out, const PimMessage& msg) {
+    out << "    \"pim_type\": \"" << json_escape(msg.type_name) << "\",\n";
+    if (!msg.hello_options.empty()) {
+        out << "    \"pim_hello_options\": [";
+        for (size_t i = 0; i < msg.hello_options.size(); ++i) {
+            if (i != 0) out << ", ";
+            out << "\"" << json_escape(pim_hello_option_summary(msg.hello_options[i])) << "\"";
+        }
+        out << "],\n";
+        out << "    \"pim_hello_options_truncated\": " << (msg.hello_options_truncated ? "true" : "false") << ",\n";
+    }
+    if (!msg.register_inner_src_ip.empty() || !msg.register_inner_group_ip.empty()) {
+        out << "    \"pim_register_border_bit\": " << (msg.register_border_bit ? "true" : "false") << ",\n";
+        out << "    \"pim_register_null_register_bit\": " << (msg.register_null_register_bit ? "true" : "false")
+            << ",\n";
+        out << "    \"pim_register_inner_src_ip\": \"" << json_escape(msg.register_inner_src_ip) << "\",\n";
+        out << "    \"pim_register_inner_group_ip\": \"" << json_escape(msg.register_inner_group_ip) << "\",\n";
+    }
+    if (!msg.register_stop_group.empty()) {
+        out << "    \"pim_register_stop_group\": \"" << json_escape(msg.register_stop_group) << "\",\n";
+        out << "    \"pim_register_stop_source\": \"" << json_escape(msg.register_stop_source) << "\",\n";
+    }
+    if (!msg.jp_groups.empty() || !msg.jp_upstream_neighbor.empty()) {
+        out << "    \"pim_jp_upstream_neighbor\": \"" << json_escape(msg.jp_upstream_neighbor) << "\",\n";
+        out << "    \"pim_jp_holdtime_sec\": " << msg.jp_holdtime_sec << ",\n";
+        out << "    \"pim_jp_groups\": [";
+        for (size_t i = 0; i < msg.jp_groups.size(); ++i) {
+            if (i != 0) out << ", ";
+            out << "\"" << json_escape(pim_jp_group_summary(msg.jp_groups[i])) << "\"";
+        }
+        out << "],\n";
+        out << "    \"pim_jp_groups_truncated\": " << (msg.jp_groups_truncated ? "true" : "false") << ",\n";
+    }
+    if (!msg.bsr_address.empty()) {
+        out << "    \"pim_bsr_fragment_tag\": " << msg.bsr_fragment_tag << ",\n";
+        out << "    \"pim_bsr_hash_mask_len\": " << static_cast<unsigned>(msg.bsr_hash_mask_len) << ",\n";
+        out << "    \"pim_bsr_priority\": " << static_cast<unsigned>(msg.bsr_priority) << ",\n";
+        out << "    \"pim_bsr_address\": \"" << json_escape(msg.bsr_address) << "\",\n";
+        out << "    \"pim_bsr_groups\": [";
+        for (size_t i = 0; i < msg.bsr_groups.size(); ++i) {
+            if (i != 0) out << ", ";
+            out << "\"" << json_escape(pim_bsr_group_summary(msg.bsr_groups[i])) << "\"";
+        }
+        out << "],\n";
+        out << "    \"pim_bsr_groups_truncated\": " << (msg.bsr_groups_truncated ? "true" : "false") << ",\n";
+    }
+    if (!msg.assert_group.empty()) {
+        out << "    \"pim_assert_group\": \"" << json_escape(msg.assert_group) << "\",\n";
+        out << "    \"pim_assert_source\": \"" << json_escape(msg.assert_source) << "\",\n";
+        out << "    \"pim_assert_rpt_bit\": " << (msg.assert_rpt_bit ? "true" : "false") << ",\n";
+        out << "    \"pim_assert_metric_preference\": " << msg.assert_metric_preference << ",\n";
+        out << "    \"pim_assert_metric\": " << msg.assert_metric << ",\n";
+    }
+    if (!msg.crp_rp_address.empty()) {
+        out << "    \"pim_crp_prefix_count\": " << static_cast<unsigned>(msg.crp_prefix_count) << ",\n";
+        out << "    \"pim_crp_priority\": " << static_cast<unsigned>(msg.crp_priority) << ",\n";
+        out << "    \"pim_crp_holdtime_sec\": " << msg.crp_holdtime_sec << ",\n";
+        out << "    \"pim_crp_rp_address\": \"" << json_escape(msg.crp_rp_address) << "\",\n";
+        out << "    \"pim_crp_groups\": [";
+        for (size_t i = 0; i < msg.crp_groups.size(); ++i) {
+            if (i != 0) out << ", ";
+            out << "\"" << json_escape(msg.crp_groups[i]) << "\"";
+        }
+        out << "],\n";
+        out << "    \"pim_crp_groups_truncated\": " << (msg.crp_groups_truncated ? "true" : "false") << ",\n";
+    }
+}
+
+// Zero-flat-field migration (mid-size batch): the DNS family analog of write_goose_json_fields
+// above -- shared by dns/mdns/llmnr, same as fill_dns_fields used to be shared in decoder.cpp.
+void write_dns_json_fields(std::ostream& out, const DnsMessage& msg) {
+    std::ostringstream txn_id;
+    txn_id << "0x" << std::hex << std::uppercase << std::setw(4) << std::setfill('0') << msg.transaction_id;
+    out << "    \"dns_transaction_id\": \"" << txn_id.str() << "\",\n";
+    out << "    \"dns_is_response\": " << (msg.is_response ? "true" : "false") << ",\n";
+    out << "    \"dns_opcode\": \"" << json_escape(msg.opcode_name) << "\",\n";
+    out << "    \"dns_header_flags\": \"" << json_escape(msg.header_flags) << "\",\n";
+    out << "    \"dns_rcode\": \"" << json_escape(msg.rcode_name) << "\",\n";
+    out << "    \"dns_qdcount\": " << msg.qdcount << ",\n";
+    out << "    \"dns_ancount\": " << msg.ancount << ",\n";
+    out << "    \"dns_nscount\": " << msg.nscount << ",\n";
+    out << "    \"dns_arcount\": " << msg.arcount << ",\n";
+    std::vector<std::string> records;
+    for (const auto& q : msg.questions) records.push_back(q.summary);
+    for (const auto& rr : msg.answers) records.push_back(rr.summary);
+    for (const auto& rr : msg.authorities) records.push_back(rr.summary);
+    for (const auto& rr : msg.additionals) records.push_back(rr.summary);
+    if (!records.empty()) {
+        out << "    \"dns_records\": [";
+        for (size_t i = 0; i < records.size(); ++i) {
+            if (i != 0) out << ", ";
+            out << "\"" << json_escape(records[i]) << "\"";
+        }
+        out << "],\n";
+    }
+    out << "    \"dns_records_truncated\": " << (msg.records_truncated ? "true" : "false") << ",\n";
+}
+
+// Zero-flat-field migration (mid-size batch): the NBT-NS analog of write_dns_json_fields above --
+// NbnsMessage's own shape mirrors DnsMessage's exactly (see nbns.hpp), but is not the same type, so
+// this stays a separate function rather than a template (matching this file's existing convention:
+// no other write_x_json_fields function here is templated either).
+void write_nbns_json_fields(std::ostream& out, const NbnsMessage& msg) {
+    std::ostringstream txn_id;
+    txn_id << "0x" << std::hex << std::uppercase << std::setw(4) << std::setfill('0') << msg.transaction_id;
+    out << "    \"nbns_transaction_id\": \"" << txn_id.str() << "\",\n";
+    out << "    \"nbns_is_response\": " << (msg.is_response ? "true" : "false") << ",\n";
+    out << "    \"nbns_opcode\": \"" << json_escape(msg.opcode_name) << "\",\n";
+    out << "    \"nbns_flags\": \"" << json_escape(msg.flags) << "\",\n";
+    out << "    \"nbns_rcode\": \"" << json_escape(msg.rcode_name) << "\",\n";
+    out << "    \"nbns_qdcount\": " << msg.qdcount << ",\n";
+    out << "    \"nbns_ancount\": " << msg.ancount << ",\n";
+    out << "    \"nbns_nscount\": " << msg.nscount << ",\n";
+    out << "    \"nbns_arcount\": " << msg.arcount << ",\n";
+    std::vector<std::string> records;
+    for (const auto& q : msg.questions) records.push_back(q.summary);
+    for (const auto& rr : msg.answers) records.push_back(rr.summary);
+    for (const auto& rr : msg.authorities) records.push_back(rr.summary);
+    for (const auto& rr : msg.additionals) records.push_back(rr.summary);
+    if (!records.empty()) {
+        out << "    \"nbns_records\": [";
+        for (size_t i = 0; i < records.size(); ++i) {
+            if (i != 0) out << ", ";
+            out << "\"" << json_escape(records[i]) << "\"";
+        }
+        out << "],\n";
+    }
+    out << "    \"nbns_records_truncated\": " << (msg.records_truncated ? "true" : "false") << ",\n";
+}
+
 // The Modbus analog of write_twincat_json_fields above -- same rationale (a plain free function,
 // not a ProtocolRenderer interface). Modbus's function name and exception flag are already folded
 // into DecodedPacket::protocol/summary (see decoder.cpp's Modbus call site) and need no JSON field
@@ -1961,152 +2436,20 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
             out_ << "    \"enip_io_data_hex\": \"" << json_escape(p.enip_io_data_hex) << "\",\n";
         }
     }
-    if (p.protocol == "profinet") {
-        std::ostringstream fid;
-        fid << "0x" << std::hex << std::uppercase << std::setw(4) << std::setfill('0') << p.profinet_frame_id;
-        out_ << "    \"profinet_frame_id\": \"" << fid.str() << "\",\n";
-        out_ << "    \"profinet_frame_id_name\": \"" << json_escape(p.profinet_frame_id_name) << "\",\n";
-    }
-    if (p.profinet_has_dcp) {
-        out_ << "    \"profinet_dcp_service\": \"" << json_escape(p.profinet_dcp_service_name) << "\",\n";
-        out_ << "    \"profinet_dcp_service_type\": \"" << json_escape(p.profinet_dcp_service_type_name) << "\",\n";
-        if (!p.profinet_dcp_blocks.empty()) {
-            out_ << "    \"profinet_dcp_blocks\": [";
-            for (size_t i = 0; i < p.profinet_dcp_blocks.size(); ++i) {
-                if (i != 0) out_ << ", ";
-                out_ << "\"" << json_escape(p.profinet_dcp_blocks[i]) << "\"";
-            }
-            out_ << "],\n";
-        }
-    }
-    if (p.profinet_has_cyclic_data) {
-        out_ << "    \"profinet_cyclic_io_data_length\": " << p.profinet_cyclic_io_data_length << ",\n";
-        out_ << "    \"profinet_cyclic_io_data_hex\": \"" << json_escape(p.profinet_cyclic_io_data_hex) << "\",\n";
-        out_ << "    \"profinet_cyclic_cycle_counter\": " << p.profinet_cyclic_cycle_counter << ",\n";
-        out_ << "    \"profinet_cyclic_data_status\": \"" << json_escape(p.profinet_cyclic_data_status_summary)
-             << "\",\n";
-        out_ << "    \"profinet_cyclic_transfer_status\": " << static_cast<unsigned>(p.profinet_cyclic_transfer_status)
-             << ",\n";
+    if (p.protocol == "profinet" && p.result) {
+        write_profinet_json_fields(out_, p.result->as<ProfinetFrame>());
     }
     if (p.protocol == "goose" && p.result) {
         write_goose_json_fields(out_, p.result->as<GooseFrame>());
     }
-    if (p.protocol == "sv") {
-        std::ostringstream appid;
-        appid << "0x" << std::hex << std::uppercase << std::setw(4) << std::setfill('0') << p.sv_appid;
-        out_ << "    \"sv_appid\": \"" << appid.str() << "\",\n";
-        out_ << "    \"sv_simulated\": " << (p.sv_simulated ? "true" : "false") << ",\n";
-        out_ << "    \"sv_no_asdu\": " << p.sv_no_asdu << ",\n";
-        out_ << "    \"sv_asdu_count\": " << p.sv_asdu_count << ",\n";
-        if (p.sv_asdu_count > 0) {
-            out_ << "    \"sv_id\": \"" << json_escape(p.sv_id) << "\",\n";
-            if (!p.sv_dat_set.empty()) out_ << "    \"sv_dat_set\": \"" << json_escape(p.sv_dat_set) << "\",\n";
-            out_ << "    \"sv_smp_cnt\": " << p.sv_smp_cnt << ",\n";
-            out_ << "    \"sv_conf_rev\": " << p.sv_conf_rev << ",\n";
-            if (!p.sv_smp_synch.empty()) out_ << "    \"sv_smp_synch\": \"" << json_escape(p.sv_smp_synch) << "\",\n";
-            if (p.sv_smp_rate != 0) out_ << "    \"sv_smp_rate\": " << p.sv_smp_rate << ",\n";
-            if (!p.sv_smp_mod.empty()) out_ << "    \"sv_smp_mod\": \"" << json_escape(p.sv_smp_mod) << "\",\n";
-            out_ << "    \"sv_seq_data_length\": " << p.sv_seq_data_length << ",\n";
-            out_ << "    \"sv_seq_data_hex\": \"" << json_escape(p.sv_seq_data_hex) << "\",\n";
-            if (!p.sv_gmid_hex.empty()) out_ << "    \"sv_gmid_hex\": \"" << json_escape(p.sv_gmid_hex) << "\",\n";
-        }
-        if (!p.sv_asdus.empty()) {
-            out_ << "    \"sv_asdus\": [";
-            for (size_t i = 0; i < p.sv_asdus.size(); ++i) {
-                if (i != 0) out_ << ", ";
-                out_ << "\"" << json_escape(p.sv_asdus[i]) << "\"";
-            }
-            out_ << "],\n";
-        }
+    if (p.protocol == "sv" && p.result) {
+        write_sv_json_fields(out_, p.result->as<SvFrame>());
     }
-    if (p.protocol == "ethercat") {
-        out_ << "    \"ethercat_frame_type\": " << static_cast<unsigned>(p.ethercat_frame_type) << ",\n";
-        out_ << "    \"ethercat_frame_type_name\": \"" << json_escape(p.ethercat_frame_type_name) << "\",\n";
-        out_ << "    \"ethercat_declared_length\": " << p.ethercat_declared_length << ",\n";
-        out_ << "    \"ethercat_has_datagrams\": " << (p.ethercat_has_datagrams ? "true" : "false") << ",\n";
-        if (p.ethercat_has_datagrams) {
-            out_ << "    \"ethercat_datagram_count\": " << p.ethercat_datagram_count << ",\n";
-            if (p.ethercat_datagram_count > 0) {
-                out_ << "    \"ethercat_first_cmd\": " << static_cast<unsigned>(p.ethercat_first_cmd) << ",\n";
-                out_ << "    \"ethercat_first_cmd_name\": \"" << json_escape(p.ethercat_first_cmd_name) << "\",\n";
-                out_ << "    \"ethercat_first_idx\": " << static_cast<unsigned>(p.ethercat_first_idx) << ",\n";
-                if (p.ethercat_first_logical_addressing) {
-                    out_ << "    \"ethercat_first_logical_address\": " << p.ethercat_first_logical_address << ",\n";
-                } else {
-                    out_ << "    \"ethercat_first_adp\": " << p.ethercat_first_adp << ",\n";
-                    out_ << "    \"ethercat_first_ado\": " << p.ethercat_first_ado << ",\n";
-                }
-                out_ << "    \"ethercat_first_data_length\": " << p.ethercat_first_data_length << ",\n";
-                out_ << "    \"ethercat_first_data_hex\": \"" << json_escape(p.ethercat_first_data_hex) << "\",\n";
-                out_ << "    \"ethercat_first_wkc\": " << p.ethercat_first_wkc << ",\n";
-                out_ << "    \"ethercat_first_irq\": " << p.ethercat_first_irq << ",\n";
-                out_ << "    \"ethercat_first_circulating\": " << (p.ethercat_first_circulating ? "true" : "false") << ",\n";
-            }
-            if (!p.ethercat_datagrams.empty()) {
-                out_ << "    \"ethercat_datagrams\": [";
-                for (size_t i = 0; i < p.ethercat_datagrams.size(); ++i) {
-                    if (i != 0) out_ << ", ";
-                    out_ << "\"" << json_escape(p.ethercat_datagrams[i]) << "\"";
-                }
-                out_ << "],\n";
-            }
-        }
+    if (p.protocol == "ethercat" && p.result) {
+        write_ethercat_json_fields(out_, p.result->as<EthercatFrame>());
     }
-    if (p.protocol == "stp") {
-        out_ << "    \"stp_protocol_version\": " << static_cast<unsigned>(p.stp_protocol_version) << ",\n";
-        out_ << "    \"stp_protocol_version_name\": \"" << json_escape(p.stp_protocol_version_name) << "\",\n";
-        out_ << "    \"stp_bpdu_type\": " << static_cast<unsigned>(p.stp_bpdu_type) << ",\n";
-        out_ << "    \"stp_bpdu_type_name\": \"" << json_escape(p.stp_bpdu_type_name) << "\",\n";
-        out_ << "    \"stp_is_tcn\": " << (p.stp_is_tcn ? "true" : "false") << ",\n";
-        out_ << "    \"stp_is_spb\": " << (p.stp_is_spb ? "true" : "false") << ",\n";
-        if (p.stp_has_common_body) {
-            out_ << "    \"stp_flags\": " << static_cast<unsigned>(p.stp_flags) << ",\n";
-            out_ << "    \"stp_flag_tca\": " << (p.stp_flag_tca ? "true" : "false") << ",\n";
-            out_ << "    \"stp_flag_agreement\": " << (p.stp_flag_agreement ? "true" : "false") << ",\n";
-            out_ << "    \"stp_flag_forwarding\": " << (p.stp_flag_forwarding ? "true" : "false") << ",\n";
-            out_ << "    \"stp_flag_learning\": " << (p.stp_flag_learning ? "true" : "false") << ",\n";
-            out_ << "    \"stp_flag_port_role\": \"" << json_escape(p.stp_flag_port_role_name) << "\",\n";
-            out_ << "    \"stp_flag_proposal\": " << (p.stp_flag_proposal ? "true" : "false") << ",\n";
-            out_ << "    \"stp_flag_tc\": " << (p.stp_flag_tc ? "true" : "false") << ",\n";
-            out_ << "    \"stp_root_priority\": " << p.stp_root_priority << ",\n";
-            out_ << "    \"stp_root_sys_id_ext\": " << p.stp_root_sys_id_ext << ",\n";
-            out_ << "    \"stp_root_mac\": \"" << json_escape(p.stp_root_mac) << "\",\n";
-            out_ << "    \"stp_root_path_cost\": " << p.stp_root_path_cost << ",\n";
-            out_ << "    \"stp_bridge_priority\": " << p.stp_bridge_priority << ",\n";
-            out_ << "    \"stp_bridge_sys_id_ext\": " << p.stp_bridge_sys_id_ext << ",\n";
-            out_ << "    \"stp_bridge_mac\": \"" << json_escape(p.stp_bridge_mac) << "\",\n";
-            out_ << "    \"stp_port_priority\": " << p.stp_port_priority << ",\n";
-            out_ << "    \"stp_port_number\": " << p.stp_port_number << ",\n";
-            out_ << "    \"stp_message_age\": " << std::fixed << std::setprecision(3) << p.stp_message_age << ",\n";
-            out_ << "    \"stp_max_age\": " << std::fixed << std::setprecision(3) << p.stp_max_age << ",\n";
-            out_ << "    \"stp_hello_time\": " << std::fixed << std::setprecision(3) << p.stp_hello_time << ",\n";
-            out_ << "    \"stp_forward_delay\": " << std::fixed << std::setprecision(3) << p.stp_forward_delay << ",\n";
-            out_ << "    \"stp_has_version1\": " << (p.stp_has_version1 ? "true" : "false") << ",\n";
-            if (p.stp_has_version1) {
-                out_ << "    \"stp_version_1_length\": " << static_cast<unsigned>(p.stp_version_1_length) << ",\n";
-            }
-            out_ << "    \"stp_is_mstp\": " << (p.stp_is_mstp ? "true" : "false") << ",\n";
-            if (p.stp_is_mstp) {
-                out_ << "    \"stp_version_3_length\": " << p.stp_version_3_length << ",\n";
-                out_ << "    \"stp_mst_config_name\": \"" << json_escape(p.stp_mst_config_name) << "\",\n";
-                out_ << "    \"stp_mst_config_revision_level\": " << p.stp_mst_config_revision_level << ",\n";
-                out_ << "    \"stp_mst_config_digest\": \"" << json_escape(p.stp_mst_config_digest_hex) << "\",\n";
-                out_ << "    \"stp_cist_internal_root_path_cost\": " << p.stp_cist_internal_root_path_cost << ",\n";
-                out_ << "    \"stp_cist_bridge_priority\": " << p.stp_cist_bridge_priority << ",\n";
-                out_ << "    \"stp_cist_bridge_sys_id_ext\": " << p.stp_cist_bridge_sys_id_ext << ",\n";
-                out_ << "    \"stp_cist_bridge_mac\": \"" << json_escape(p.stp_cist_bridge_mac) << "\",\n";
-                out_ << "    \"stp_cist_remaining_hops\": " << static_cast<unsigned>(p.stp_cist_remaining_hops) << ",\n";
-                if (!p.stp_msti_messages.empty()) {
-                    out_ << "    \"stp_msti_messages\": [";
-                    for (size_t i = 0; i < p.stp_msti_messages.size(); ++i) {
-                        if (i != 0) out_ << ", ";
-                        out_ << "\"" << json_escape(p.stp_msti_messages[i]) << "\"";
-                    }
-                    out_ << "],\n";
-                }
-            }
-            out_ << "    \"stp_is_alt_msti_format\": " << (p.stp_is_alt_msti_format ? "true" : "false") << ",\n";
-        }
+    if (p.protocol == "stp" && p.result) {
+        write_stp_json_fields(out_, p.result->as<StpFrame>());
     }
     if (p.protocol == "devicenet" && p.result) {
         write_devicenet_json_fields(out_, p.result->as<DeviceNetFrame>());
@@ -2477,49 +2820,11 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
     if (p.protocol == "ffhse" && p.result) {
         write_ffhse_json_fields(out_, p.result->as<FfhseResult>().first);
     }
-    if (p.protocol == "dns" || p.protocol == "mdns" || p.protocol == "llmnr") {
-        std::ostringstream txn_id;
-        txn_id << "0x" << std::hex << std::uppercase << std::setw(4) << std::setfill('0') << p.dns_transaction_id;
-        out_ << "    \"dns_transaction_id\": \"" << txn_id.str() << "\",\n";
-        out_ << "    \"dns_is_response\": " << (p.dns_is_response ? "true" : "false") << ",\n";
-        out_ << "    \"dns_opcode\": \"" << json_escape(p.dns_opcode_name) << "\",\n";
-        out_ << "    \"dns_header_flags\": \"" << json_escape(p.dns_header_flags) << "\",\n";
-        out_ << "    \"dns_rcode\": \"" << json_escape(p.dns_rcode_name) << "\",\n";
-        out_ << "    \"dns_qdcount\": " << p.dns_qdcount << ",\n";
-        out_ << "    \"dns_ancount\": " << p.dns_ancount << ",\n";
-        out_ << "    \"dns_nscount\": " << p.dns_nscount << ",\n";
-        out_ << "    \"dns_arcount\": " << p.dns_arcount << ",\n";
-        if (!p.dns_records.empty()) {
-            out_ << "    \"dns_records\": [";
-            for (size_t i = 0; i < p.dns_records.size(); ++i) {
-                if (i != 0) out_ << ", ";
-                out_ << "\"" << json_escape(p.dns_records[i]) << "\"";
-            }
-            out_ << "],\n";
-        }
-        out_ << "    \"dns_records_truncated\": " << (p.dns_records_truncated ? "true" : "false") << ",\n";
+    if ((p.protocol == "dns" || p.protocol == "mdns" || p.protocol == "llmnr") && p.result) {
+        write_dns_json_fields(out_, p.result->as<DnsMessage>());
     }
-    if (p.protocol == "nbns") {
-        std::ostringstream txn_id;
-        txn_id << "0x" << std::hex << std::uppercase << std::setw(4) << std::setfill('0') << p.nbns_transaction_id;
-        out_ << "    \"nbns_transaction_id\": \"" << txn_id.str() << "\",\n";
-        out_ << "    \"nbns_is_response\": " << (p.nbns_is_response ? "true" : "false") << ",\n";
-        out_ << "    \"nbns_opcode\": \"" << json_escape(p.nbns_opcode_name) << "\",\n";
-        out_ << "    \"nbns_flags\": \"" << json_escape(p.nbns_flags) << "\",\n";
-        out_ << "    \"nbns_rcode\": \"" << json_escape(p.nbns_rcode_name) << "\",\n";
-        out_ << "    \"nbns_qdcount\": " << p.nbns_qdcount << ",\n";
-        out_ << "    \"nbns_ancount\": " << p.nbns_ancount << ",\n";
-        out_ << "    \"nbns_nscount\": " << p.nbns_nscount << ",\n";
-        out_ << "    \"nbns_arcount\": " << p.nbns_arcount << ",\n";
-        if (!p.nbns_records.empty()) {
-            out_ << "    \"nbns_records\": [";
-            for (size_t i = 0; i < p.nbns_records.size(); ++i) {
-                if (i != 0) out_ << ", ";
-                out_ << "\"" << json_escape(p.nbns_records[i]) << "\"";
-            }
-            out_ << "],\n";
-        }
-        out_ << "    \"nbns_records_truncated\": " << (p.nbns_records_truncated ? "true" : "false") << ",\n";
+    if (p.protocol == "nbns" && p.result) {
+        write_nbns_json_fields(out_, p.result->as<NbnsMessage>());
     }
     if (p.protocol == "doh" && p.result) {
         write_doh_json_fields(out_, p.result->as<DohDetection>());
@@ -2527,49 +2832,8 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
     if (p.protocol == "rip" && p.result) {
         write_rip_json_fields(out_, p.result->as<RipMessage>());
     }
-    if (p.protocol == "icmp") {
-        out_ << "    \"icmp_type\": " << static_cast<unsigned>(p.icmp_type) << ",\n";
-        out_ << "    \"icmp_code\": " << static_cast<unsigned>(p.icmp_code) << ",\n";
-        out_ << "    \"icmp_type_name\": \"" << json_escape(p.icmp_type_name) << "\",\n";
-        if (!p.icmp_code_name.empty()) {
-            out_ << "    \"icmp_code_name\": \"" << json_escape(p.icmp_code_name) << "\",\n";
-        }
-        out_ << "    \"icmp_checksum_valid\": " << (p.icmp_checksum_valid ? "true" : "false") << ",\n";
-        if (p.icmp_type == 0 || p.icmp_type == 8) {  // Echo Reply/Request
-            out_ << "    \"icmp_echo_identifier\": " << p.icmp_echo_identifier << ",\n";
-            out_ << "    \"icmp_echo_sequence\": " << p.icmp_echo_sequence << ",\n";
-        }
-        if (p.icmp_type == 13 || p.icmp_type == 14) {  // Timestamp Request/Reply
-            out_ << "    \"icmp_echo_identifier\": " << p.icmp_echo_identifier << ",\n";
-            out_ << "    \"icmp_echo_sequence\": " << p.icmp_echo_sequence << ",\n";
-            out_ << "    \"icmp_originate_timestamp_ms\": " << p.icmp_originate_timestamp_ms << ",\n";
-            out_ << "    \"icmp_receive_timestamp_ms\": " << p.icmp_receive_timestamp_ms << ",\n";
-            out_ << "    \"icmp_transmit_timestamp_ms\": " << p.icmp_transmit_timestamp_ms << ",\n";
-        }
-        if (p.icmp_next_hop_mtu != 0) {
-            out_ << "    \"icmp_next_hop_mtu\": " << p.icmp_next_hop_mtu << ",\n";
-        }
-        if (!p.icmp_redirect_gateway.empty()) {
-            out_ << "    \"icmp_redirect_gateway\": \"" << json_escape(p.icmp_redirect_gateway) << "\",\n";
-        }
-        if (p.icmp_type == 12) {  // Parameter Problem
-            out_ << "    \"icmp_parameter_pointer\": " << static_cast<unsigned>(p.icmp_parameter_pointer) << ",\n";
-        }
-        if (!p.icmp_address_mask.empty()) {
-            out_ << "    \"icmp_address_mask\": \"" << json_escape(p.icmp_address_mask) << "\",\n";
-        }
-        if (!p.icmp_embedded_datagram.empty()) {
-            out_ << "    \"icmp_embedded_datagram\": \"" << json_escape(p.icmp_embedded_datagram) << "\",\n";
-        }
-        if (!p.icmp_router_addresses.empty()) {
-            out_ << "    \"icmp_router_addresses\": [";
-            for (size_t i = 0; i < p.icmp_router_addresses.size(); ++i) {
-                if (i != 0) out_ << ", ";
-                out_ << "\"" << json_escape(p.icmp_router_addresses[i]) << "\"";
-            }
-            out_ << "],\n";
-            out_ << "    \"icmp_router_addresses_truncated\": " << (p.icmp_router_addresses_truncated ? "true" : "false") << ",\n";
-        }
+    if (p.protocol == "icmp" && p.result) {
+        write_icmp_json_fields(out_, p.result->as<IcmpMessage>());
     }
     if (p.protocol == "igmp" && p.result) {
         write_igmp_json_fields(out_, p.result->as<IgmpMessage>());
@@ -2577,92 +2841,14 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
     if (p.protocol == "vrrp" && p.result) {
         write_vrrp_json_fields(out_, p.result->as<VrrpMessage>());
     }
-    if (p.protocol == "hsrp") {
-        out_ << "    \"hsrp_version\": " << static_cast<unsigned>(p.hsrp_version) << ",\n";
-        if (p.hsrp_version == 1) {
-            out_ << "    \"hsrp_opcode\": \"" << json_escape(p.hsrp_opcode_name) << "\",\n";
-            out_ << "    \"hsrp_state\": \"" << json_escape(p.hsrp_state_name) << "\",\n";
-            out_ << "    \"hsrp_virtual_ip\": \"" << json_escape(p.hsrp_virtual_ip) << "\",\n";
-        } else {
-            if (!p.hsrp_tlv_types.empty()) {
-                out_ << "    \"hsrp_tlv_types\": [";
-                for (size_t i = 0; i < p.hsrp_tlv_types.size(); ++i) {
-                    if (i != 0) out_ << ", ";
-                    out_ << "\"" << json_escape(p.hsrp_tlv_types[i]) << "\"";
-                }
-                out_ << "],\n";
-            }
-            out_ << "    \"hsrp_tlvs_truncated\": " << (p.hsrp_tlvs_truncated ? "true" : "false") << ",\n";
-        }
+    if (p.protocol == "hsrp" && p.result) {
+        write_hsrp_json_fields(out_, p.result->as<HsrpMessage>());
     }
     if (p.protocol == "igrp" && p.result) {
         write_igrp_json_fields(out_, p.result->as<IgrpMessage>());
     }
-    if (p.protocol == "pim") {
-        out_ << "    \"pim_type\": \"" << json_escape(p.pim_type_name) << "\",\n";
-        if (!p.pim_hello_options.empty()) {
-            out_ << "    \"pim_hello_options\": [";
-            for (size_t i = 0; i < p.pim_hello_options.size(); ++i) {
-                if (i != 0) out_ << ", ";
-                out_ << "\"" << json_escape(p.pim_hello_options[i]) << "\"";
-            }
-            out_ << "],\n";
-            out_ << "    \"pim_hello_options_truncated\": " << (p.pim_hello_options_truncated ? "true" : "false") << ",\n";
-        }
-        if (!p.pim_register_inner_src_ip.empty() || !p.pim_register_inner_group_ip.empty()) {
-            out_ << "    \"pim_register_border_bit\": " << (p.pim_register_border_bit ? "true" : "false") << ",\n";
-            out_ << "    \"pim_register_null_register_bit\": " << (p.pim_register_null_register_bit ? "true" : "false") << ",\n";
-            out_ << "    \"pim_register_inner_src_ip\": \"" << json_escape(p.pim_register_inner_src_ip) << "\",\n";
-            out_ << "    \"pim_register_inner_group_ip\": \"" << json_escape(p.pim_register_inner_group_ip) << "\",\n";
-        }
-        if (!p.pim_register_stop_group.empty()) {
-            out_ << "    \"pim_register_stop_group\": \"" << json_escape(p.pim_register_stop_group) << "\",\n";
-            out_ << "    \"pim_register_stop_source\": \"" << json_escape(p.pim_register_stop_source) << "\",\n";
-        }
-        if (!p.pim_jp_groups.empty() || !p.pim_jp_upstream_neighbor.empty()) {
-            out_ << "    \"pim_jp_upstream_neighbor\": \"" << json_escape(p.pim_jp_upstream_neighbor) << "\",\n";
-            out_ << "    \"pim_jp_holdtime_sec\": " << p.pim_jp_holdtime_sec << ",\n";
-            out_ << "    \"pim_jp_groups\": [";
-            for (size_t i = 0; i < p.pim_jp_groups.size(); ++i) {
-                if (i != 0) out_ << ", ";
-                out_ << "\"" << json_escape(p.pim_jp_groups[i]) << "\"";
-            }
-            out_ << "],\n";
-            out_ << "    \"pim_jp_groups_truncated\": " << (p.pim_jp_groups_truncated ? "true" : "false") << ",\n";
-        }
-        if (!p.pim_bsr_address.empty()) {
-            out_ << "    \"pim_bsr_fragment_tag\": " << p.pim_bsr_fragment_tag << ",\n";
-            out_ << "    \"pim_bsr_hash_mask_len\": " << static_cast<unsigned>(p.pim_bsr_hash_mask_len) << ",\n";
-            out_ << "    \"pim_bsr_priority\": " << static_cast<unsigned>(p.pim_bsr_priority) << ",\n";
-            out_ << "    \"pim_bsr_address\": \"" << json_escape(p.pim_bsr_address) << "\",\n";
-            out_ << "    \"pim_bsr_groups\": [";
-            for (size_t i = 0; i < p.pim_bsr_groups.size(); ++i) {
-                if (i != 0) out_ << ", ";
-                out_ << "\"" << json_escape(p.pim_bsr_groups[i]) << "\"";
-            }
-            out_ << "],\n";
-            out_ << "    \"pim_bsr_groups_truncated\": " << (p.pim_bsr_groups_truncated ? "true" : "false") << ",\n";
-        }
-        if (!p.pim_assert_group.empty()) {
-            out_ << "    \"pim_assert_group\": \"" << json_escape(p.pim_assert_group) << "\",\n";
-            out_ << "    \"pim_assert_source\": \"" << json_escape(p.pim_assert_source) << "\",\n";
-            out_ << "    \"pim_assert_rpt_bit\": " << (p.pim_assert_rpt_bit ? "true" : "false") << ",\n";
-            out_ << "    \"pim_assert_metric_preference\": " << p.pim_assert_metric_preference << ",\n";
-            out_ << "    \"pim_assert_metric\": " << p.pim_assert_metric << ",\n";
-        }
-        if (!p.pim_crp_rp_address.empty()) {
-            out_ << "    \"pim_crp_prefix_count\": " << static_cast<unsigned>(p.pim_crp_prefix_count) << ",\n";
-            out_ << "    \"pim_crp_priority\": " << static_cast<unsigned>(p.pim_crp_priority) << ",\n";
-            out_ << "    \"pim_crp_holdtime_sec\": " << p.pim_crp_holdtime_sec << ",\n";
-            out_ << "    \"pim_crp_rp_address\": \"" << json_escape(p.pim_crp_rp_address) << "\",\n";
-            out_ << "    \"pim_crp_groups\": [";
-            for (size_t i = 0; i < p.pim_crp_groups.size(); ++i) {
-                if (i != 0) out_ << ", ";
-                out_ << "\"" << json_escape(p.pim_crp_groups[i]) << "\"";
-            }
-            out_ << "],\n";
-            out_ << "    \"pim_crp_groups_truncated\": " << (p.pim_crp_groups_truncated ? "true" : "false") << ",\n";
-        }
+    if (p.protocol == "pim" && p.result) {
+        write_pim_json_fields(out_, p.result->as<PimMessage>());
     }
     if (p.protocol == "eigrp" && p.result) {
         write_eigrp_json_fields(out_, p.result->as<EigrpMessage>());
@@ -3083,10 +3269,11 @@ void StatsWriter::write_packet(const DecodedPacket& p) {
         if (p.enip_has_cip) enip_cip_service_counts_[p.enip_cip_service_name]++;
         if (p.enip_has_io) enip_io_datagram_count_++;
     }
-    if (p.protocol == "profinet") {
-        profinet_frame_id_counts_[p.profinet_frame_id_name]++;
-        if (p.profinet_has_dcp) profinet_dcp_count_++;
-        if (p.profinet_has_cyclic_data) profinet_cyclic_count_++;
+    if (p.protocol == "profinet" && p.result) {
+        const ProfinetFrame& pn = p.result->as<ProfinetFrame>();
+        profinet_frame_id_counts_[pn.frame_id_name]++;
+        if (pn.has_dcp) profinet_dcp_count_++;
+        if (pn.has_cyclic_data) profinet_cyclic_count_++;
     }
     if (p.protocol == "goose" && p.result) {
         const GooseFrame& gs = p.result->as<GooseFrame>();
@@ -3094,22 +3281,25 @@ void StatsWriter::write_packet(const DecodedPacket& p) {
         if (gs.is_gse_management) goose_gse_management_count_++;
         if (gs.has_pdu && (gs.header_simulated || (gs.simulation && *gs.simulation))) goose_simulated_count_++;
     }
-    if (p.protocol == "sv") {
+    if (p.protocol == "sv" && p.result) {
+        const SvFrame& sv = p.result->as<SvFrame>();
         sv_frame_count_++;
-        sv_asdu_total_ += p.sv_asdu_count;
+        sv_asdu_total_ += sv.asdus.size();
     }
-    if (p.protocol == "ethercat") {
-        ethercat_frame_type_counts_[p.ethercat_frame_type_name]++;
-        ethercat_datagram_total_ += p.ethercat_datagram_count;
+    if (p.protocol == "ethercat" && p.result) {
+        const EthercatFrame& ec = p.result->as<EthercatFrame>();
+        ethercat_frame_type_counts_[ec.frame_type_name]++;
+        ethercat_datagram_total_ += ec.datagrams.size();
     }
-    if (p.protocol == "stp") {
-        stp_bpdu_type_counts_[p.stp_bpdu_type_name]++;
-        stp_protocol_version_counts_[p.stp_protocol_version_name]++;
-        if (p.stp_is_mstp) {
+    if (p.protocol == "stp" && p.result) {
+        const StpFrame& stp = p.result->as<StpFrame>();
+        stp_bpdu_type_counts_[stp.bpdu_type_name]++;
+        stp_protocol_version_counts_[stp.protocol_version_name]++;
+        if (stp.is_mstp) {
             stp_mstp_count_++;
-            stp_msti_total_ += p.stp_msti_messages.size();
+            stp_msti_total_ += stp.msti_messages.size();
         }
-        if (p.stp_has_common_body && p.stp_flag_tc) stp_tc_count_++;
+        if (stp.has_common_body && stp.flag_tc) stp_tc_count_++;
     }
     if (p.protocol == "devicenet" && p.result) {
         const DeviceNetFrame& dn = p.result->as<DeviceNetFrame>();
@@ -3164,11 +3354,11 @@ void StatsWriter::write_packet(const DecodedPacket& p) {
             if (f.body_decoded) ffhse_body_decoded_count_++;
         }
     }
-    if (p.protocol == "dns" || p.protocol == "mdns" || p.protocol == "llmnr") {
-        dns_family_opcode_counts_[p.protocol + " " + p.dns_opcode_name]++;
+    if ((p.protocol == "dns" || p.protocol == "mdns" || p.protocol == "llmnr") && p.result) {
+        dns_family_opcode_counts_[p.protocol + " " + p.result->as<DnsMessage>().opcode_name]++;
     }
-    if (p.protocol == "nbns") {
-        nbns_opcode_counts_[p.nbns_opcode_name]++;
+    if (p.protocol == "nbns" && p.result) {
+        nbns_opcode_counts_[p.result->as<NbnsMessage>().opcode_name]++;
     }
     if (p.protocol == "doh" && p.result) {
         doh_provider_counts_[p.result->as<DohDetection>().matched_provider]++;
@@ -3176,8 +3366,8 @@ void StatsWriter::write_packet(const DecodedPacket& p) {
     if (p.protocol == "rip" && p.result) {
         rip_command_counts_[p.result->as<RipMessage>().command_name]++;
     }
-    if (p.protocol == "icmp") {
-        icmp_type_counts_[p.icmp_type_name]++;
+    if (p.protocol == "icmp" && p.result) {
+        icmp_type_counts_[p.result->as<IcmpMessage>().type_name]++;
     }
     if (p.protocol == "igmp" && p.result) {
         igmp_type_counts_[p.result->as<IgmpMessage>().type_name]++;
@@ -3185,14 +3375,14 @@ void StatsWriter::write_packet(const DecodedPacket& p) {
     if (p.protocol == "vrrp" && p.result) {
         vrrp_version_counts_["VRRPv" + std::to_string(p.result->as<VrrpMessage>().version)]++;
     }
-    if (p.protocol == "hsrp") {
-        hsrp_version_counts_["HSRPv" + std::to_string(p.hsrp_version)]++;
+    if (p.protocol == "hsrp" && p.result) {
+        hsrp_version_counts_["HSRPv" + std::to_string(p.result->as<HsrpMessage>().version)]++;
     }
     if (p.protocol == "igrp" && p.result) {
         igrp_opcode_counts_[p.result->as<IgrpMessage>().opcode_name]++;
     }
-    if (p.protocol == "pim") {
-        pim_type_counts_[p.pim_type_name]++;
+    if (p.protocol == "pim" && p.result) {
+        pim_type_counts_[p.result->as<PimMessage>().type_name]++;
     }
     if (p.protocol == "eigrp" && p.result) {
         eigrp_opcode_counts_[p.result->as<EigrpMessage>().opcode_name]++;

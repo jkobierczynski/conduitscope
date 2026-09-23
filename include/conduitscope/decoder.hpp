@@ -687,30 +687,13 @@ struct DecodedPacket {
     std::string enip_io_data_hex;    // raw hex, deliberately not value-decoded -- see enip.hpp
     size_t enip_io_data_length = 0;
 
-    // Only set when protocol == "profinet" -- see try_parse_profinet in profinet.hpp. PROFINET RT
-    // rides directly on raw Ethernet (EtherType 0x8892, has_ip stays false), so unlike every other
-    // protocol above there is no src_ip/dst_ip/src_port/dst_port for it -- src_mac/dst_mac (above)
-    // are the only addressing this packet carries.
-    uint16_t profinet_frame_id = 0;
-    std::string profinet_frame_id_name;  // always set when protocol == "profinet"
-
-    // DCP (Discovery and Configuration Protocol) -- set only when profinet_frame_id is one of the
-    // four DCP FrameIDs (see profinet.hpp).
-    bool profinet_has_dcp = false;
-    std::string profinet_dcp_service_name;       // Hello / Get / Set / Identify
-    std::string profinet_dcp_service_type_name;  // Request / Response-Success / ...
-    // One entry per decoded DCP block (e.g. "NameOfStation=\"plc-01\""), capped at 50 entries for
-    // the same reason as enip_cip_values.
-    std::vector<std::string> profinet_dcp_blocks;
-
-    // Cyclic RT IO data -- set only when profinet_frame_id falls in the cyclic RT FrameID ranges
-    // (see profinet.hpp).
-    bool profinet_has_cyclic_data = false;
-    std::string profinet_cyclic_io_data_hex;  // raw hex, deliberately not value-decoded
-    size_t profinet_cyclic_io_data_length = 0;
-    uint16_t profinet_cyclic_cycle_counter = 0;
-    std::string profinet_cyclic_data_status_summary;
-    uint8_t profinet_cyclic_transfer_status = 0;
+    // PROFINET RT is a zero-flat-field migrated protocol (mid-size batch) -- see
+    // ProtocolDecoder/ProtocolResult in protocol_decoder.hpp: its fields live in the ProfinetFrame
+    // carried by DecodedPacket::result, not here -- see output.cpp's write_profinet_json_fields and
+    // profinet.hpp's own ProfinetFrame. PROFINET RT rides directly on raw Ethernet (EtherType
+    // 0x8892, has_ip stays false), so unlike every other protocol above there is no
+    // src_ip/dst_ip/src_port/dst_port for it -- src_mac/dst_mac (above) are the only addressing
+    // this packet carries.
 
     // GOOSE is a zero-flat-field migrated protocol (see ProtocolDecoder/ProtocolResult in
     // protocol_decoder.hpp): its fields live in the GooseFrame carried by DecodedPacket::result,
@@ -720,90 +703,26 @@ struct DecodedPacket {
     // this packet carries. GOOSE traffic is commonly multicast to a well-known MAC range
     // (01-0C-CD-01-xx-xx) and/or 802.1Q priority-tagged -- see has_vlan_tag/vlan_id above.
 
-    // Only set when protocol == "sv" -- see try_parse_sv in sv.hpp. Like GOOSE and PROFINET RT
-    // above, SV rides directly on raw Ethernet (EtherType 0x88BA, has_ip stays false) --
-    // src_mac/dst_mac (above) are the only addressing this packet carries.
-    uint16_t sv_appid = 0;
-    bool sv_simulated = false;  // header S-bit (Reserved1 0x8000) -- SV has no PDU-level
-                                  // simulation field to cross-check it against, unlike GOOSE
-    uint64_t sv_no_asdu = 0;     // SavPdu's declared noASDU count
-    uint64_t sv_asdu_count = 0;  // how many ASDUs were actually decoded -- a mismatch against
-                                   // sv_no_asdu is noted
+    // SV (IEC 61850-9-2 Sampled Values) is a zero-flat-field migrated protocol (mid-size batch) --
+    // see ProtocolDecoder/ProtocolResult in protocol_decoder.hpp: its fields live in the SvFrame
+    // carried by DecodedPacket::result, not here -- see output.cpp's write_sv_json_fields and
+    // sv.hpp's own SvFrame/SvAsdu. Like GOOSE and PROFINET RT above, SV rides directly on raw
+    // Ethernet (EtherType 0x88BA, has_ip stays false) -- src_mac/dst_mac (above) are the only
+    // addressing this packet carries.
 
-    // The first decoded ASDU's own fields, promoted here for convenience -- the great majority of
-    // real SV traffic carries exactly one ASDU per frame (see sv.hpp's LIMITATIONS-relevant
-    // Validation paragraph). See sv_asdus below for every ASDU when sv_asdu_count > 1. All
-    // empty/0 when sv_asdu_count == 0.
-    std::string sv_id;
-    std::string sv_dat_set;      // empty when the optional datSet field wasn't present
-    uint64_t sv_smp_cnt = 0;
-    uint64_t sv_conf_rev = 0;
-    std::string sv_smp_synch;    // "none"/"local"/"global"/"unknown(N)", empty when absent
-    uint64_t sv_smp_rate = 0;    // 0 when the optional smpRate field wasn't present
-    std::string sv_smp_mod;      // "samplesPerNormalPeriod"/etc, empty when absent
-    std::string sv_seq_data_hex; // raw hex, deliberately not value-decoded -- see sv.hpp
-    size_t sv_seq_data_length = 0;
-    std::string sv_gmid_hex;     // 8-byte EUI-64 grandmaster identity, raw hex; empty when absent
+    // EtherCAT is a zero-flat-field migrated protocol (mid-size batch) -- see
+    // ProtocolDecoder/ProtocolResult in protocol_decoder.hpp: its fields live in the EthercatFrame
+    // carried by DecodedPacket::result, not here -- see output.cpp's write_ethercat_json_fields and
+    // ethercat.hpp's own EthercatFrame/EthercatDatagram. Like PROFINET RT/GOOSE/SV above, EtherCAT
+    // rides directly on raw Ethernet (EtherType 0x88A4, has_ip stays false) -- src_mac/dst_mac
+    // (above) are the only addressing this packet carries.
 
-    // One summary string per decoded ASDU (e.g. "svID=\"MU01\" smpCnt=1234 confRev=1"), capped at
-    // 50 entries for the same reason as profinet_dcp_blocks/GooseFrame::all_data.
-    std::vector<std::string> sv_asdus;
-
-    // Only set when protocol == "ethercat" -- see try_parse_ethercat in ethercat.hpp. Like
-    // PROFINET RT/GOOSE/SV above, EtherCAT rides directly on raw Ethernet (EtherType 0x88A4,
-    // has_ip stays false) -- src_mac/dst_mac (above) are the only addressing this packet carries.
-    uint8_t ethercat_frame_type = 0;    // always set when protocol == "ethercat"
-    std::string ethercat_frame_type_name;  // "EtherCAT command"/"ADS"/"RAW-IO"/"NV"/"Mailbox"
-    uint16_t ethercat_declared_length = 0;  // the frame header's own Length field (11 bits)
-
-    // Set only when ethercat_frame_type == 1 ("EtherCAT command") -- Types 2-5 are named only,
-    // not decoded further, see ethercat.hpp.
-    bool ethercat_has_datagrams = false;
-    uint64_t ethercat_datagram_count = 0;  // how many datagrams were actually decoded
-
-    // The first decoded datagram's own fields, promoted here for convenience -- see sv_id/etc.
-    // above for the same pattern. All 0/empty when ethercat_datagram_count == 0.
-    uint8_t ethercat_first_cmd = 0;
-    std::string ethercat_first_cmd_name;
-    uint8_t ethercat_first_idx = 0;
-    bool ethercat_first_logical_addressing = false;
-    uint16_t ethercat_first_adp = 0;            // meaningful only when !ethercat_first_logical_addressing
-    uint16_t ethercat_first_ado = 0;            // meaningful only when !ethercat_first_logical_addressing
-    uint32_t ethercat_first_logical_address = 0;  // meaningful only when ethercat_first_logical_addressing
-    std::string ethercat_first_data_hex;  // raw hex, deliberately not value-decoded -- see ethercat.hpp
-    size_t ethercat_first_data_length = 0;
-    uint16_t ethercat_first_wkc = 0;  // Working Counter -- see ethercat.hpp's WKC paragraph
-    uint16_t ethercat_first_irq = 0;  // raw interrupt-request bitmask, not decoded further
-    bool ethercat_first_circulating = false;  // Len word's Circulating bit (0x4000)
-
-    // One summary string per decoded datagram (e.g. "APRD idx=2 adp=0x0000 ado=0x0130 len=2
-    // wkc=1"), capped at 50 entries for the same reason as sv_asdus/GooseFrame::all_data.
-    std::vector<std::string> ethercat_datagrams;
-
-    // Only set when protocol == "eapol" -- see try_parse_eapol in eapol.hpp. Like PROFINET/EtherCAT/
-    // GOOSE/SV above, EAPOL rides raw Ethernet (EtherType 0x888E), not IP -- has_ethernet stays true,
-    // has_ip stays false.
-    uint8_t eapol_version = 0;
-    std::string eapol_version_name;
-    uint8_t eapol_type = 0;
-    std::string eapol_type_name;
-    uint16_t eapol_length = 0;  // EAPOL's own declared body length
-    // Set only when eapol_type == 0 (EAP-Packet) and the body carried RFC 3748's Code/Identifier/
-    // Length header.
-    bool eapol_has_eap = false;
-    uint8_t eapol_eap_code = 0;
-    std::string eapol_eap_code_name;
-    uint8_t eapol_eap_identifier = 0;
-    uint16_t eapol_eap_declared_length = 0;
-    // Set only when eapol_has_eap && eapol_eap_code is Request(1)/Response(2) and a further Type
-    // byte was present.
-    bool eapol_has_eap_type = false;
-    uint8_t eapol_eap_type = 0;
-    std::string eapol_eap_type_name;
-    // Set only when eapol_type == 3 (EAPOL-Key) and the body carried at least a Descriptor Type byte.
-    bool eapol_has_key_descriptor = false;
-    uint8_t eapol_key_descriptor_type = 0;
-    std::string eapol_key_descriptor_type_name;
+    // EAPOL is a zero-flat-field migrated protocol (mid-size batch) -- see
+    // ProtocolDecoder/ProtocolResult in protocol_decoder.hpp: its fields live in the EapolFrame
+    // carried by DecodedPacket::result, not here (and were never rendered by any writer even before
+    // this migration -- output.cpp has never had an eapol_* JSON block, the same finding the cheap
+    // batch made for ARP/MPLS/PPPoE). Like PROFINET/EtherCAT/GOOSE/SV above, EAPOL rides raw
+    // Ethernet (EtherType 0x888E), not IP -- has_ethernet stays true, has_ip stays false.
 
     // protocol == "pppoe" is a zero-flat-field migrated protocol (cheap batch) -- see
     // DecodedPacket::result and pppoe.hpp's PppoeFrame. Like EAPOL above, PPPoE rides raw Ethernet
@@ -823,120 +742,27 @@ struct DecodedPacket {
     // port-based Tier 1-4 protocol, they only ever set protocol/summary/notes, see decoder.cpp's
     // own Tier 5 dispatch.
 
-    // ARP (EtherType 0x0806, arp.hpp) -- Stage 2 new-protocol work, not a migration.
-    uint16_t arp_htype = 0;
-    std::string arp_htype_name;
-    uint16_t arp_ptype = 0;
-    std::string arp_ptype_name;
-    uint8_t arp_hlen = 0;
-    uint8_t arp_plen = 0;
-    uint16_t arp_oper = 0;
-    std::string arp_oper_name;
-    // True only for the well-formed htype==1(Ethernet)/ptype==0x0800(IPv4)/hlen==6/plen==4 case --
-    // only then are arp_sha_mac/arp_spa_ip/arp_tha_mac/arp_tpa_ip populated; otherwise
-    // arp_sha_hex/arp_spa_hex/arp_tha_hex/arp_tpa_hex hold the same HLEN/PLEN-driven raw bytes as hex.
-    bool arp_is_ethernet_ipv4 = false;
-    std::string arp_sha_mac;
-    std::string arp_spa_ip;
-    std::string arp_tha_mac;
-    std::string arp_tpa_ip;
-    std::string arp_sha_hex;
-    std::string arp_spa_hex;
-    std::string arp_tha_hex;
-    std::string arp_tpa_hex;
-    bool arp_is_gratuitous = false;
-    bool arp_is_probe = false;
-    bool arp_is_announcement = false;
+    // ARP (EtherType 0x0806, arp.hpp) is a zero-flat-field migrated protocol (mid-size batch) --
+    // see ProtocolDecoder/ProtocolResult in protocol_decoder.hpp: its fields live in the ArpMessage
+    // carried by DecodedPacket::result, not here (and were never rendered by any writer even before
+    // this migration -- output.cpp has never had an arp_* JSON block, the same finding the cheap
+    // batch made for MPLS/PPPoE).
 
-    // LLDP (EtherType 0x88CC, lldp.hpp) -- Stage 2 new-protocol work, not a migration.
-    uint8_t lldp_chassis_id_subtype = 0;
-    std::string lldp_chassis_id_subtype_name;
-    std::string lldp_chassis_id_value;
-    uint8_t lldp_port_id_subtype = 0;
-    std::string lldp_port_id_subtype_name;
-    std::string lldp_port_id_value;
-    uint16_t lldp_ttl_seconds = 0;
-    bool lldp_has_port_description = false;
-    std::string lldp_port_description;
-    bool lldp_has_system_name = false;
-    std::string lldp_system_name;
-    bool lldp_has_system_description = false;
-    std::string lldp_system_description;
-    bool lldp_has_system_capabilities = false;
-    uint16_t lldp_system_capabilities = 0;
-    uint16_t lldp_enabled_capabilities = 0;
-    std::vector<std::string> lldp_system_capabilities_names;
-    std::vector<std::string> lldp_enabled_capabilities_names;
-    bool lldp_has_management_address = false;
-    uint8_t lldp_management_address_subtype = 0;
-    std::string lldp_management_address_subtype_name;
-    std::string lldp_management_address;
-    size_t lldp_tlv_count = 0;
-    bool lldp_tlvs_truncated = false;
-    // One rendered summary line per TLV seen, in wire order -- same "vector<string> summary per
-    // repeated element" convention as ethercat_datagrams/sv_asdus (MPLS's own former mpls_labels
-    // is gone now -- see DecodedPacket::result and mpls.hpp).
-    std::vector<std::string> lldp_tlvs;
+    // LLDP (EtherType 0x88CC, lldp.hpp) is a zero-flat-field migrated protocol (mid-size batch) --
+    // see ProtocolDecoder/ProtocolResult in protocol_decoder.hpp: its fields live in the
+    // LldpMessage carried by DecodedPacket::result, not here (and were never rendered by any writer
+    // even before this migration -- output.cpp has never had an lldp_* JSON block, the same finding
+    // as ARP/EAPOL just above).
 
-    // Only set when protocol == "stp" -- see try_parse_stp in stp.hpp. Unlike every EtherType-keyed
-    // raw-Ethernet protocol above, STP rides classic IEEE 802.3 LLC framing (has_ethernet stays
-    // true, has_ip stays false, src_mac/dst_mac are the only addressing) -- see link_layer.hpp's
-    // file header comment for the length-vs-EtherType plumbing this required.
-    std::string stp_protocol_version_name;  // "STP (802.1D)"/"RSTP (802.1w)"/"MSTP (802.1s)"/
-                                              // "SPB (802.1aq)" -- always set when protocol == "stp"
-    uint8_t stp_protocol_version = 0;        // 0/2/3/4, the raw Protocol Version Identifier byte
-    std::string stp_bpdu_type_name;          // "Configuration"/"Rapid/Multiple Spanning Tree"/
-                                               // "Topology Change Notification"
-    uint8_t stp_bpdu_type = 0;               // 0x00/0x02/0x80
-
-    bool stp_is_tcn = false;  // BPDU Type 0x80 -- nothing else below is ever set
-    bool stp_is_spb = false;  // Protocol Version 4 -- named only, nothing else below is ever set
-
-    // Set when !stp_is_tcn && !stp_is_spb (a Configuration or RST/MST BPDU whose common 35-byte
-    // body -- Flags through Forward Delay -- fit); false only for a truncated frame.
-    bool stp_has_common_body = false;
-    uint8_t stp_flags = 0;
-    bool stp_flag_tca = false, stp_flag_agreement = false, stp_flag_forwarding = false,
-         stp_flag_learning = false;
-    uint8_t stp_flag_port_role = 0;         // 0-3, see stp.hpp's role_vals table
-    std::string stp_flag_port_role_name;    // "Unknown"/"Alternate/Backup"/"Root"/"Designated" --
-                                              // meaningful only for RSTP/MSTP (version >= 2), still
-                                              // populated for version 0 (see stp.hpp)
-    bool stp_flag_proposal = false, stp_flag_tc = false;
-
-    uint16_t stp_root_priority = 0, stp_root_sys_id_ext = 0;
-    std::string stp_root_mac;
-    uint32_t stp_root_path_cost = 0;
-    uint16_t stp_bridge_priority = 0, stp_bridge_sys_id_ext = 0;
-    std::string stp_bridge_mac;
-    uint16_t stp_port_id_raw = 0;
-    uint16_t stp_port_priority = 0, stp_port_number = 0;  // see stp.hpp's "Port Identifier"
-                                                             // paragraph for the priority multiplier
-    double stp_message_age = 0.0, stp_max_age = 0.0, stp_hello_time = 0.0, stp_forward_delay = 0.0;  // seconds
-
-    // Set when stp_bpdu_type == 0x02 (RST/MST-shaped) and at least the Version 1 Length byte fit.
-    bool stp_has_version1 = false;
-    uint8_t stp_version_1_length = 0;
-
-    // Set only when the full three-part MSTP detection gate held (see stp.hpp) -- otherwise a
-    // Protocol Version 3 frame is still reported with stp_protocol_version_name == "MSTP (802.1s)"
-    // but stp_is_mstp stays false (decoded as a plain RST BPDU instead, matching the reference
-    // dissector's own fallback -- see stp.hpp's file header comment).
-    bool stp_is_mstp = false;
-    uint16_t stp_version_3_length = 0;
-    std::string stp_mst_config_name;
-    uint16_t stp_mst_config_revision_level = 0;
-    std::string stp_mst_config_digest_hex;   // 16 bytes, raw hex, never verified
-    uint32_t stp_cist_internal_root_path_cost = 0;
-    uint16_t stp_cist_bridge_priority = 0, stp_cist_bridge_sys_id_ext = 0;
-    std::string stp_cist_bridge_mac;
-    uint8_t stp_cist_remaining_hops = 0;
-
-    bool stp_is_alt_msti_format = false;  // legacy/alternative MSTI layout detected, not decoded
-
-    // One summary string per decoded MSTI Configuration Message, capped at 50 entries for the same
-    // reason as ethercat_datagrams/GooseFrame::all_data.
-    std::vector<std::string> stp_msti_messages;
+    // STP is a zero-flat-field migrated protocol (mid-size batch) -- see
+    // ProtocolDecoder/ProtocolResult in protocol_decoder.hpp: its fields live in the StpFrame
+    // carried by DecodedPacket::result, not here -- see output.cpp's write_stp_json_fields and
+    // stp.hpp's own StpFrame/StpBridgeId/StpMstiMessage. Unlike every EtherType-keyed raw-Ethernet
+    // protocol above, STP rides classic IEEE 802.3 LLC framing (has_ethernet stays true, has_ip
+    // stays false, src_mac/dst_mac are the only addressing) -- see link_layer.hpp's file header
+    // comment for the length-vs-EtherType plumbing this required. StpFrame::port_id_raw is the one
+    // field this migration dropped from ever being rendered -- confirmed, like the cheap batch's
+    // own vrrp_auth_password finding, that no writer ever read the old flat stp_port_id_raw either.
 
     // DeviceNet is a zero-flat-field migrated protocol (see ProtocolDecoder/ProtocolResult in
     // protocol_decoder.hpp): its fields live in the DeviceNetFrame carried by
@@ -1200,37 +1026,17 @@ struct DecodedPacket {
     // decoder's own honest comparison of its structural detection gate against this codebase's
     // other opportunistic detectors (it is weaker than even HART-IP's).
 
-    // Only set when protocol == "dns", "mdns", or "llmnr" -- see try_parse_dns_message in
-    // dns.hpp. All three share this one field family (rather than each getting its own, the way
-    // most other protocols do) because all three are the exact same wire format -- see dns.hpp's
-    // file header comment for exactly what differs between them, which is reflected here only in
-    // dns_header_flags' letters (only meaningful together with `protocol` -- the same bit
-    // position means something different depending on flavor).
-    uint16_t dns_transaction_id = 0;
-    bool dns_is_response = false;
-    std::string dns_opcode_name;
-    std::string dns_header_flags;  // e.g. "AA,RD" (dns/mdns) or "C,T" (llmnr); empty if none set
-    std::string dns_rcode_name;
-    uint16_t dns_qdcount = 0, dns_ancount = 0, dns_nscount = 0, dns_arcount = 0;  // as declared
-    // One "section: name TYPE CLASS ..." entry per question/answer/authority/additional record
-    // actually parsed, in wire order -- mirrors bacnet_values'/ffhse_values' scheme but section-
-    // tagged (e.g. "question: example.com. A IN" / "answer: example.com. A IN ttl=300s ->
-    // address=93.184.216.34") rather than split into parallel per-section arrays, since that's
-    // the order they appear in the message. See dns.hpp's DnsResourceRecordEntry/DnsQuestionEntry
-    // for the structured form this is rendered from.
-    std::vector<std::string> dns_records;
-    bool dns_records_truncated = false;  // declared counts implied more than the payload had room for
+    // protocol == "dns"/"mdns"/"llmnr" is a zero-flat-field migrated protocol family (mid-size
+    // batch) -- see ProtocolDecoder/ProtocolResult in protocol_decoder.hpp: their fields live in
+    // the shared DnsMessage carried by DecodedPacket::result, not here -- see output.cpp's
+    // write_dns_json_fields (shared by all three, the same way fill_dns_fields used to be, and for
+    // the same reason: all three are the exact same wire format, see dns.hpp's file header comment
+    // for exactly what differs between them, reflected only in DnsMessage::header_flags' letters).
 
-    // Only set when protocol == "nbns" (NetBIOS Name Service/NBT-NS) -- see try_parse_nbns in
-    // nbns.hpp.
-    uint16_t nbns_transaction_id = 0;
-    bool nbns_is_response = false;
-    std::string nbns_opcode_name;
-    std::string nbns_flags;  // e.g. "AA,RD,B" -- wire order AA,TC,RD,RA,B
-    std::string nbns_rcode_name;
-    uint16_t nbns_qdcount = 0, nbns_ancount = 0, nbns_nscount = 0, nbns_arcount = 0;
-    std::vector<std::string> nbns_records;  // same section-tagged scheme as dns_records above
-    bool nbns_records_truncated = false;
+    // protocol == "nbns" (NetBIOS Name Service/NBT-NS) is a zero-flat-field migrated protocol
+    // (mid-size batch) -- see ProtocolDecoder/ProtocolResult in protocol_decoder.hpp: its fields
+    // live in the NbnsMessage carried by DecodedPacket::result, not here -- see output.cpp's
+    // write_nbns_json_fields. NbnsMessage's own shape mirrors DnsMessage's exactly (see nbns.hpp).
 
     // protocol == "doh" is a zero-flat-field migrated protocol -- see DecodedPacket::result and
     // tls_sni.hpp's DohDecoder/DohDetection, and output.cpp's write_doh_json_fields for rendering.
@@ -1239,30 +1045,10 @@ struct DecodedPacket {
     // DecodedPacket::result and rip.hpp's RipMessage, and output.cpp's write_rip_json_fields
     // (including rip_route_summary, the former decoder.cpp helper of the same name) for rendering.
 
-    // Only set when protocol == "icmp" -- see try_parse_icmp in icmp.hpp.
-    std::string icmp_type_name;
-    std::string icmp_code_name;  // empty when this type has no named codes
-    uint8_t icmp_type = 0;
-    uint8_t icmp_code = 0;
-    bool icmp_checksum_valid = false;
-    uint16_t icmp_echo_identifier = 0;      // Echo/Timestamp/Address Mask Request/Reply only
-    uint16_t icmp_echo_sequence = 0;        // Echo/Timestamp/Address Mask Request/Reply only
-    // "src->dst (protocol[ port->port])" -- Destination Unreachable/Redirect/Time Exceeded/
-    // Parameter Problem only, and only when enough of the embedded original datagram was present
-    // and well-formed to summarize (see icmp.hpp's file header for why this can be absent).
-    std::string icmp_embedded_datagram;
-    std::string icmp_address_mask;   // Address Mask Request/Reply only
-    std::string icmp_redirect_gateway;  // Redirect only
-    uint16_t icmp_next_hop_mtu = 0;     // Destination Unreachable code 4 (RFC 1191) only
-    uint8_t icmp_parameter_pointer = 0; // Parameter Problem only
-    // One "address (preference)" entry per Router Advertisement entry (type 9). Capped at 50.
-    std::vector<std::string> icmp_router_addresses;
-    bool icmp_router_addresses_truncated = false;
-    // Timestamp Request/Reply (type 13/14) only -- milliseconds since UTC midnight (RFC 792 has
-    // no date component), not a full timestamp.
-    uint32_t icmp_originate_timestamp_ms = 0;
-    uint32_t icmp_receive_timestamp_ms = 0;
-    uint32_t icmp_transmit_timestamp_ms = 0;
+    // protocol == "icmp" is a zero-flat-field migrated protocol (mid-size batch) -- see
+    // ProtocolDecoder/ProtocolResult in protocol_decoder.hpp: its fields live in the IcmpMessage
+    // carried by DecodedPacket::result, not here -- see output.cpp's write_icmp_json_fields
+    // (including icmp_router_address_summary, the former decoder.cpp helper of the same name).
 
     // protocol == "igmp" is a zero-flat-field migrated protocol (cheap batch) -- see
     // DecodedPacket::result and igmp.hpp's IgmpMessage, and output.cpp's write_igmp_json_fields
@@ -1275,61 +1061,25 @@ struct DecodedPacket {
     // rendering (deliberately no "vrrp_auth_password" JSON field -- no writer ever rendered the
     // old flat field either).
 
-    // Only set when protocol == "hsrp" -- see try_parse_hsrp in hsrp.hpp.
-    uint8_t hsrp_version = 0;
-    std::string hsrp_opcode_name;   // v1 only; empty for v2 (see hsrp_tlv_types instead)
-    std::string hsrp_state_name;    // v1 only
-    std::string hsrp_virtual_ip;    // v1 only
-    // v1 only -- the literal cleartext authentication value, or kRedactedSecretPlaceholder when
-    // --redact (on by default) is active -- see DecodeOptions::redact_secrets's own comment and
-    // HsrpDecoder::decode (hsrp.cpp). Empty when v1's own 8-byte field was all-NUL (no
-    // authentication configured).
-    std::string hsrp_auth_data;
-    std::vector<std::string> hsrp_tlv_types;  // v2 only: one "Group State"/"Interface State"/...
-                                                // entry per TLV, wire order. Capped at 50 entries.
-    bool hsrp_tlvs_truncated = false;          // more than 50 TLVs were present
+    // protocol == "hsrp" is a zero-flat-field migrated protocol (mid-size batch) -- see
+    // ProtocolDecoder/ProtocolResult in protocol_decoder.hpp: its fields live in the HsrpMessage
+    // carried by DecodedPacket::result (auth_data, v1 only, already redacted by HsrpDecoder::decode
+    // when --redact is active -- see DecodeOptions::redact_secrets's own comment), not here -- see
+    // output.cpp's write_hsrp_json_fields (deliberately no "hsrp_auth_data" JSON field -- no writer
+    // ever rendered the old flat field either, the same finding the cheap batch made for VRRP's own
+    // auth_simple_password).
 
     // protocol == "igrp" is a zero-flat-field migrated protocol (cheap batch) -- see
     // DecodedPacket::result and igrp.hpp's IgrpMessage, and output.cpp's write_igrp_json_fields
     // (including igrp_route_summary, the former decoder.cpp helper of the same name).
 
-    // Only set when protocol == "pim" -- see try_parse_pim in pim.hpp. Which of the fields below
-    // are populated depends on pim_type_name; see pim.hpp's own PimMessage for exactly which
-    // message type populates which group.
-    std::string pim_type_name;
-    std::vector<std::string> pim_hello_options;  // Hello only: one "TypeName: value" (or
-                                                   // "TypeName (addr1, addr2, ...)" for an Address
-                                                   // List option) entry per option. Capped at 50.
-    bool pim_hello_options_truncated = false;
-    bool pim_register_border_bit = false;         // Register only
-    bool pim_register_null_register_bit = false;  // Register only
-    std::string pim_register_inner_src_ip;        // Register only
-    std::string pim_register_inner_group_ip;      // Register only
-    std::string pim_register_stop_group;          // Register-Stop only
-    std::string pim_register_stop_source;         // Register-Stop only
-    std::string pim_jp_upstream_neighbor;         // Join/Prune, Graft, Graft-Ack only
-    uint16_t pim_jp_holdtime_sec = 0;             // Join/Prune, Graft, Graft-Ack only
-    // One "<group>: N join(s), M prune(s)" entry per group, wire order. Capped at 50.
-    std::vector<std::string> pim_jp_groups;
-    bool pim_jp_groups_truncated = false;
-    uint16_t pim_bsr_fragment_tag = 0;   // Bootstrap only
-    uint8_t pim_bsr_hash_mask_len = 0;   // Bootstrap only
-    uint8_t pim_bsr_priority = 0;        // Bootstrap only
-    std::string pim_bsr_address;         // Bootstrap only
-    std::vector<std::string> pim_bsr_groups;  // Bootstrap only: one "<group>: N candidate-RP(s)"
-                                                // entry per group. Capped at 50.
-    bool pim_bsr_groups_truncated = false;
-    std::string pim_assert_group;                 // Assert only
-    std::string pim_assert_source;                // Assert only
-    bool pim_assert_rpt_bit = false;              // Assert only
-    uint32_t pim_assert_metric_preference = 0;    // Assert only
-    uint32_t pim_assert_metric = 0;               // Assert only
-    uint8_t pim_crp_prefix_count = 0;             // Candidate-RP-Advertisement only
-    uint8_t pim_crp_priority = 0;                 // Candidate-RP-Advertisement only
-    uint16_t pim_crp_holdtime_sec = 0;            // Candidate-RP-Advertisement only
-    std::string pim_crp_rp_address;               // Candidate-RP-Advertisement only
-    std::vector<std::string> pim_crp_groups;      // Candidate-RP-Advertisement only. Capped at 50.
-    bool pim_crp_groups_truncated = false;
+    // protocol == "pim" is a zero-flat-field migrated protocol (mid-size batch) -- see
+    // ProtocolDecoder/ProtocolResult in protocol_decoder.hpp: its fields live in the PimMessage
+    // carried by DecodedPacket::result, not here -- see output.cpp's write_pim_json_fields
+    // (including pim_hello_option_summary/pim_jp_group_summary/pim_bsr_group_summary, the former
+    // decoder.cpp helpers of the same names). Which of PimMessage's own field groups are populated
+    // depends on its type_name; see pim.hpp's own PimMessage for exactly which message type
+    // populates which group.
 
     // EIGRP is a zero-flat-field migrated protocol (see ProtocolDecoder/ProtocolResult in
     // protocol_decoder.hpp): its fields live in the EigrpMessage carried by DecodedPacket::result,

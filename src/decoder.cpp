@@ -86,181 +86,6 @@ std::string tcp_session_key(const std::string& ip_a, uint16_t port_a, const std:
     return (ea < eb) ? (ea + "<->" + eb) : (eb + "<->" + ea);
 }
 
-// Flattens a parsed DnsMessage (shared by "dns"/"mdns"/"llmnr" -- see dns.hpp) into
-// DecodedPacket's dns_* fields, in wire order (questions, then answer/authority/additional).
-void fill_dns_fields(DecodedPacket& out, const DnsMessage& msg) {
-    out.summary = msg.summary;
-    for (const auto& n : msg.notes) out.notes.push_back(n);
-    out.dns_transaction_id = msg.transaction_id;
-    out.dns_is_response = msg.is_response;
-    out.dns_opcode_name = msg.opcode_name;
-    out.dns_header_flags = msg.header_flags;
-    out.dns_rcode_name = msg.rcode_name;
-    out.dns_qdcount = msg.qdcount;
-    out.dns_ancount = msg.ancount;
-    out.dns_nscount = msg.nscount;
-    out.dns_arcount = msg.arcount;
-    out.dns_records_truncated = msg.records_truncated;
-    for (const auto& q : msg.questions) out.dns_records.push_back(q.summary);
-    for (const auto& rr : msg.answers) out.dns_records.push_back(rr.summary);
-    for (const auto& rr : msg.authorities) out.dns_records.push_back(rr.summary);
-    for (const auto& rr : msg.additionals) out.dns_records.push_back(rr.summary);
-}
-
-// Flattens a parsed NbnsMessage (see nbns.hpp) into DecodedPacket's nbns_* fields.
-void fill_nbns_fields(DecodedPacket& out, const NbnsMessage& msg) {
-    out.summary = msg.summary;
-    for (const auto& n : msg.notes) out.notes.push_back(n);
-    out.nbns_transaction_id = msg.transaction_id;
-    out.nbns_is_response = msg.is_response;
-    out.nbns_opcode_name = msg.opcode_name;
-    out.nbns_flags = msg.flags;
-    out.nbns_rcode_name = msg.rcode_name;
-    out.nbns_qdcount = msg.qdcount;
-    out.nbns_ancount = msg.ancount;
-    out.nbns_nscount = msg.nscount;
-    out.nbns_arcount = msg.arcount;
-    out.nbns_records_truncated = msg.records_truncated;
-    for (const auto& q : msg.questions) out.nbns_records.push_back(q.summary);
-    for (const auto& rr : msg.answers) out.nbns_records.push_back(rr.summary);
-    for (const auto& rr : msg.authorities) out.nbns_records.push_back(rr.summary);
-    for (const auto& rr : msg.additionals) out.nbns_records.push_back(rr.summary);
-}
-
-// Renders one IcmpRouterAddress as a single line for DecodedPacket::icmp_router_addresses.
-std::string icmp_router_address_summary(const IcmpRouterAddress& ra) {
-    std::ostringstream s;
-    s << ra.address << " (" << ra.preference << ")";
-    return s.str();
-}
-
-// Flattens a parsed IcmpMessage (see icmp.hpp) into DecodedPacket's icmp_* fields.
-void fill_icmp_fields(DecodedPacket& out, const IcmpMessage& msg) {
-    out.summary = msg.summary;
-    for (const auto& n : msg.notes) out.notes.push_back(n);
-    out.icmp_type = msg.type;
-    out.icmp_code = msg.code;
-    out.icmp_type_name = msg.type_name;
-    out.icmp_code_name = msg.code_name;
-    out.icmp_checksum_valid = msg.checksum_valid;
-    out.icmp_echo_identifier = msg.echo_identifier;
-    out.icmp_echo_sequence = msg.echo_sequence;
-    out.icmp_next_hop_mtu = msg.next_hop_mtu;
-    out.icmp_redirect_gateway = msg.redirect_gateway;
-    out.icmp_parameter_pointer = msg.parameter_pointer;
-    out.icmp_address_mask = msg.address_mask;
-    out.icmp_originate_timestamp_ms = msg.originate_timestamp_ms;
-    out.icmp_receive_timestamp_ms = msg.receive_timestamp_ms;
-    out.icmp_transmit_timestamp_ms = msg.transmit_timestamp_ms;
-    out.icmp_router_addresses_truncated = msg.router_addresses_truncated;
-    for (const auto& ra : msg.router_addresses) out.icmp_router_addresses.push_back(icmp_router_address_summary(ra));
-    if (msg.embedded_datagram) {
-        const auto& ed = *msg.embedded_datagram;
-        std::ostringstream s;
-        s << ed.src_addr << "->" << ed.dst_addr;
-        if (!ed.protocol_name.empty()) {
-            s << " (" << ed.protocol_name;
-            if (ed.has_ports) s << " " << ed.src_port << "->" << ed.dst_port;
-            s << ")";
-        } else {
-            s << " (IP protocol " << static_cast<unsigned>(ed.protocol) << ")";
-        }
-        out.icmp_embedded_datagram = s.str();
-    }
-}
-
-// Flattens a parsed HsrpMessage (see hsrp.hpp) into DecodedPacket's hsrp_* fields.
-void fill_hsrp_fields(DecodedPacket& out, const HsrpMessage& msg) {
-    out.summary = msg.summary;
-    for (const auto& n : msg.notes) out.notes.push_back(n);
-    out.hsrp_version = msg.version;
-    if (msg.version == 1) {
-        out.hsrp_opcode_name = msg.opcode_name;
-        out.hsrp_state_name = msg.state_name;
-        out.hsrp_virtual_ip = msg.virtual_ip;
-        out.hsrp_auth_data = msg.auth_data;  // already redacted by HsrpDecoder::decode, if active
-    } else {
-        for (const auto& tlv : msg.tlvs) out.hsrp_tlv_types.push_back(tlv.type_name);
-        out.hsrp_tlvs_truncated = msg.tlvs_truncated;
-    }
-}
-
-// Renders one PimHelloOption as a single line for DecodedPacket::pim_hello_options.
-std::string pim_hello_option_summary(const PimHelloOption& opt) {
-    if (!opt.addresses.empty()) {
-        std::ostringstream s;
-        s << opt.option_type_name << " (";
-        for (size_t i = 0; i < opt.addresses.size(); ++i) {
-            if (i != 0) s << ", ";
-            s << opt.addresses[i];
-        }
-        s << ")";
-        return s.str();
-    }
-    if (opt.value.empty()) return opt.option_type_name;
-    return opt.option_type_name + ": " + opt.value;
-}
-
-// Renders one PimJoinPruneGroup as a single line for DecodedPacket::pim_jp_groups.
-std::string pim_jp_group_summary(const PimJoinPruneGroup& g) {
-    std::ostringstream s;
-    s << g.group << ": " << g.joins.size() << " join(s), " << g.prunes.size() << " prune(s)";
-    return s.str();
-}
-
-// Renders one PimBsrGroupRps as a single line for DecodedPacket::pim_bsr_groups.
-std::string pim_bsr_group_summary(const PimBsrGroupRps& g) {
-    std::ostringstream s;
-    s << g.group << ": " << g.candidate_rps.size() << " candidate-RP(s)";
-    return s.str();
-}
-
-// Flattens a parsed PimMessage (see pim.hpp) into DecodedPacket's pim_* fields. Which fields end
-// up populated depends entirely on msg.type_name (pim.hpp's PimMessage doc comment says which
-// group belongs to which message type) -- this just copies every group across unconditionally,
-// since the unused ones are simply left at their default (empty/false/0) values.
-void fill_pim_fields(DecodedPacket& out, const PimMessage& msg) {
-    out.summary = msg.summary;
-    for (const auto& n : msg.notes) out.notes.push_back(n);
-    out.pim_type_name = msg.type_name;
-
-    out.pim_hello_options_truncated = msg.hello_options_truncated;
-    for (const auto& opt : msg.hello_options) out.pim_hello_options.push_back(pim_hello_option_summary(opt));
-
-    out.pim_register_border_bit = msg.register_border_bit;
-    out.pim_register_null_register_bit = msg.register_null_register_bit;
-    out.pim_register_inner_src_ip = msg.register_inner_src_ip;
-    out.pim_register_inner_group_ip = msg.register_inner_group_ip;
-
-    out.pim_register_stop_group = msg.register_stop_group;
-    out.pim_register_stop_source = msg.register_stop_source;
-
-    out.pim_jp_upstream_neighbor = msg.jp_upstream_neighbor;
-    out.pim_jp_holdtime_sec = msg.jp_holdtime_sec;
-    out.pim_jp_groups_truncated = msg.jp_groups_truncated;
-    for (const auto& g : msg.jp_groups) out.pim_jp_groups.push_back(pim_jp_group_summary(g));
-
-    out.pim_bsr_fragment_tag = msg.bsr_fragment_tag;
-    out.pim_bsr_hash_mask_len = msg.bsr_hash_mask_len;
-    out.pim_bsr_priority = msg.bsr_priority;
-    out.pim_bsr_address = msg.bsr_address;
-    out.pim_bsr_groups_truncated = msg.bsr_groups_truncated;
-    for (const auto& g : msg.bsr_groups) out.pim_bsr_groups.push_back(pim_bsr_group_summary(g));
-
-    out.pim_assert_group = msg.assert_group;
-    out.pim_assert_source = msg.assert_source;
-    out.pim_assert_rpt_bit = msg.assert_rpt_bit;
-    out.pim_assert_metric_preference = msg.assert_metric_preference;
-    out.pim_assert_metric = msg.assert_metric;
-
-    out.pim_crp_prefix_count = msg.crp_prefix_count;
-    out.pim_crp_priority = msg.crp_priority;
-    out.pim_crp_holdtime_sec = msg.crp_holdtime_sec;
-    out.pim_crp_rp_address = msg.crp_rp_address;
-    out.pim_crp_groups_truncated = msg.crp_groups_truncated;
-    out.pim_crp_groups = msg.crp_groups;
-}
-
 // Renders one OspfLsa's header ONLY (no body) as a single line -- used for DB Description and LS
 // Ack, which never carry LSA bodies (see ospf.hpp).
 std::string ospf_lsa_header_summary(const OspfLsa& lsa) {
@@ -367,31 +192,8 @@ void populate_profinet(DecodedPacket& out, const ProtocolResult& result, uint16_
     const ProfinetFrame& pn = result.as<ProfinetFrame>();
     out.protocol = "profinet";
     out.summary = pn.summary;
-    out.profinet_frame_id = pn.frame_id;
-    out.profinet_frame_id_name = pn.frame_id_name;
     for (const auto& n : pn.notes) out.notes.push_back(n);
-
-    if (pn.has_dcp) {
-        out.profinet_has_dcp = true;
-        out.profinet_dcp_service_name = pn.dcp_service_name;
-        out.profinet_dcp_service_type_name = pn.dcp_service_type_name;
-        const size_t kMaxDcpBlockValues = resource_limits().max_decoded_objects.value_or(50);
-        for (const auto& block : pn.dcp_blocks) {
-            if (out.profinet_dcp_blocks.size() >= kMaxDcpBlockValues) break;
-            std::string label = !block.name.empty() ? block.name
-                                                      : ("option=" + std::to_string(block.option) +
-                                                         " suboption=" + std::to_string(block.suboption));
-            out.profinet_dcp_blocks.push_back(label + "=" + block.value);
-        }
-    }
-    if (pn.has_cyclic_data) {
-        out.profinet_has_cyclic_data = true;
-        out.profinet_cyclic_io_data_hex = pn.cyclic_io_data_hex;
-        out.profinet_cyclic_io_data_length = pn.cyclic_io_data_length;
-        out.profinet_cyclic_cycle_counter = pn.cyclic_cycle_counter;
-        out.profinet_cyclic_data_status_summary = pn.cyclic_data_status_summary;
-        out.profinet_cyclic_transfer_status = pn.cyclic_transfer_status;
-    }
+    out.result = result;
 }
 
 void populate_goose(DecodedPacket& out, const ProtocolResult& result, uint16_t /*matched_ethertype*/) {
@@ -406,110 +208,24 @@ void populate_sv(DecodedPacket& out, const ProtocolResult& result, uint16_t /*ma
     const SvFrame& sv = result.as<SvFrame>();
     out.protocol = "sv";
     out.summary = sv.summary;
-    out.sv_appid = sv.appid;
-    out.sv_simulated = sv.header_simulated;
-    out.sv_no_asdu = sv.no_asdu;
-    out.sv_asdu_count = sv.asdus.size();
     for (const auto& n : sv.notes) out.notes.push_back(n);
-
-    if (!sv.asdus.empty()) {
-        const SvAsdu& first = sv.asdus[0];
-        out.sv_id = first.sv_id;
-        if (first.dat_set) out.sv_dat_set = *first.dat_set;
-        out.sv_smp_cnt = first.smp_cnt;
-        out.sv_conf_rev = first.conf_rev;
-        if (first.smp_synch) out.sv_smp_synch = *first.smp_synch;
-        if (first.smp_rate) out.sv_smp_rate = *first.smp_rate;
-        if (first.smp_mod) out.sv_smp_mod = *first.smp_mod;
-        out.sv_seq_data_hex = first.seq_data_hex;
-        out.sv_seq_data_length = first.seq_data_length;
-        if (first.gmid_hex) out.sv_gmid_hex = *first.gmid_hex;
-    }
-    const size_t kMaxSvAsduSummaries = resource_limits().max_decoded_objects.value_or(50);
-    for (const auto& asdu : sv.asdus) {
-        if (out.sv_asdus.size() >= kMaxSvAsduSummaries) break;
-        std::ostringstream a;
-        a << "svID=\"" << asdu.sv_id << "\"";
-        if (asdu.dat_set) a << " datSet=\"" << *asdu.dat_set << "\"";
-        a << " smpCnt=" << asdu.smp_cnt << " confRev=" << asdu.conf_rev;
-        if (asdu.smp_synch) a << " smpSynch=" << *asdu.smp_synch;
-        if (asdu.smp_rate) a << " smpRate=" << *asdu.smp_rate;
-        if (asdu.smp_mod) a << " smpMod=" << *asdu.smp_mod;
-        a << " seqData=" << asdu.seq_data_length << " byte(s)";
-        out.sv_asdus.push_back(a.str());
-    }
+    out.result = result;
 }
 
 void populate_ethercat(DecodedPacket& out, const ProtocolResult& result, uint16_t /*matched_ethertype*/) {
     const EthercatFrame& ec = result.as<EthercatFrame>();
     out.protocol = "ethercat";
     out.summary = ec.summary;
-    out.ethercat_frame_type = ec.frame_type;
-    out.ethercat_frame_type_name = ec.frame_type_name;
-    out.ethercat_declared_length = ec.declared_length;
-    out.ethercat_has_datagrams = ec.has_datagrams;
-    out.ethercat_datagram_count = ec.datagrams.size();
     for (const auto& n : ec.notes) out.notes.push_back(n);
-
-    if (!ec.datagrams.empty()) {
-        const EthercatDatagram& first = ec.datagrams[0];
-        out.ethercat_first_cmd = first.cmd;
-        out.ethercat_first_cmd_name = first.cmd_name;
-        out.ethercat_first_idx = first.idx;
-        out.ethercat_first_logical_addressing = first.logical_addressing;
-        out.ethercat_first_adp = first.adp;
-        out.ethercat_first_ado = first.ado;
-        out.ethercat_first_logical_address = first.logical_address;
-        out.ethercat_first_data_hex = first.data_hex;
-        out.ethercat_first_data_length = first.data_length;
-        out.ethercat_first_wkc = first.wkc;
-        out.ethercat_first_irq = first.irq;
-        out.ethercat_first_circulating = first.circulating;
-    }
-    const size_t kMaxEthercatDatagramSummaries = resource_limits().max_decoded_objects.value_or(50);
-    for (const auto& dgram : ec.datagrams) {
-        if (out.ethercat_datagrams.size() >= kMaxEthercatDatagramSummaries) break;
-        std::ostringstream a;
-        a << dgram.cmd_name << " idx=" << static_cast<unsigned>(dgram.idx) << " ";
-        if (dgram.logical_addressing) {
-            a << "logAddr=0x" << std::hex << std::uppercase << std::setw(8) << std::setfill('0')
-              << dgram.logical_address << std::dec;
-        } else {
-            a << "adp=0x" << std::hex << std::uppercase << std::setw(4) << std::setfill('0')
-              << dgram.adp << " ado=0x" << std::setw(4) << std::setfill('0') << dgram.ado
-              << std::dec;
-        }
-        a << " len=" << dgram.data_len << " wkc=" << dgram.wkc;
-        if (dgram.irq != 0) {
-            a << " irq=0x" << std::hex << std::uppercase << std::setw(4) << std::setfill('0')
-              << dgram.irq << std::dec;
-        }
-        if (dgram.circulating) a << " circulating";
-        out.ethercat_datagrams.push_back(a.str());
-    }
+    out.result = result;
 }
 
 void populate_eapol(DecodedPacket& out, const ProtocolResult& result, uint16_t /*matched_ethertype*/) {
     const EapolFrame& ea = result.as<EapolFrame>();
     out.protocol = "eapol";
     out.summary = ea.summary;
-    out.eapol_version = ea.version;
-    out.eapol_version_name = ea.version_name;
-    out.eapol_type = ea.type;
-    out.eapol_type_name = ea.type_name;
-    out.eapol_length = ea.length;
-    out.eapol_has_eap = ea.has_eap;
-    out.eapol_eap_code = ea.eap_code;
-    out.eapol_eap_code_name = ea.eap_code_name;
-    out.eapol_eap_identifier = ea.eap_identifier;
-    out.eapol_eap_declared_length = ea.eap_declared_length;
-    out.eapol_has_eap_type = ea.has_eap_type;
-    out.eapol_eap_type = ea.eap_type;
-    out.eapol_eap_type_name = ea.eap_type_name;
-    out.eapol_has_key_descriptor = ea.has_eapol_key_descriptor;
-    out.eapol_key_descriptor_type = ea.eapol_key_descriptor_type;
-    out.eapol_key_descriptor_type_name = ea.eapol_key_descriptor_type_name;
     for (const auto& n : ea.notes) out.notes.push_back(n);
+    out.result = result;
 }
 
 void populate_pppoe(DecodedPacket& out, const ProtocolResult& result, uint16_t /*matched_ethertype*/) {
@@ -540,69 +256,16 @@ void populate_arp(DecodedPacket& out, const ProtocolResult& result, uint16_t /*m
     const ArpMessage& arp = result.as<ArpMessage>();
     out.protocol = "arp";
     out.summary = arp.summary;
-    out.arp_htype = arp.htype;
-    out.arp_htype_name = arp.htype_name;
-    out.arp_ptype = arp.ptype;
-    out.arp_ptype_name = arp.ptype_name;
-    out.arp_hlen = arp.hlen;
-    out.arp_plen = arp.plen;
-    out.arp_oper = arp.oper;
-    out.arp_oper_name = arp.oper_name;
-    out.arp_is_ethernet_ipv4 = arp.is_ethernet_ipv4;
-    out.arp_sha_mac = arp.sha_mac;
-    out.arp_spa_ip = arp.spa_ip;
-    out.arp_tha_mac = arp.tha_mac;
-    out.arp_tpa_ip = arp.tpa_ip;
-    out.arp_sha_hex = arp.sha_hex;
-    out.arp_spa_hex = arp.spa_hex;
-    out.arp_tha_hex = arp.tha_hex;
-    out.arp_tpa_hex = arp.tpa_hex;
-    out.arp_is_gratuitous = arp.is_gratuitous;
-    out.arp_is_probe = arp.is_probe;
-    out.arp_is_announcement = arp.is_announcement;
     for (const auto& n : arp.notes) out.notes.push_back(n);
+    out.result = result;
 }
 
 void populate_lldp(DecodedPacket& out, const ProtocolResult& result, uint16_t /*matched_ethertype*/) {
     const LldpMessage& lldp = result.as<LldpMessage>();
     out.protocol = "lldp";
     out.summary = lldp.summary;
-    out.lldp_chassis_id_subtype = lldp.chassis_id_subtype;
-    out.lldp_chassis_id_subtype_name = lldp.chassis_id_subtype_name;
-    out.lldp_chassis_id_value = lldp.chassis_id_value;
-    out.lldp_port_id_subtype = lldp.port_id_subtype;
-    out.lldp_port_id_subtype_name = lldp.port_id_subtype_name;
-    out.lldp_port_id_value = lldp.port_id_value;
-    out.lldp_ttl_seconds = lldp.ttl_seconds;
-    out.lldp_has_port_description = lldp.has_port_description;
-    out.lldp_port_description = lldp.port_description;
-    out.lldp_has_system_name = lldp.has_system_name;
-    out.lldp_system_name = lldp.system_name;
-    out.lldp_has_system_description = lldp.has_system_description;
-    out.lldp_system_description = lldp.system_description;
-    out.lldp_has_system_capabilities = lldp.has_system_capabilities;
-    out.lldp_system_capabilities = lldp.system_capabilities;
-    out.lldp_enabled_capabilities = lldp.enabled_capabilities;
-    out.lldp_system_capabilities_names = lldp.system_capabilities_names;
-    out.lldp_enabled_capabilities_names = lldp.enabled_capabilities_names;
-    out.lldp_has_management_address = lldp.has_management_address;
-    out.lldp_management_address_subtype = lldp.management_address_subtype;
-    out.lldp_management_address_subtype_name = lldp.management_address_subtype_name;
-    out.lldp_management_address = lldp.management_address;
-    out.lldp_tlv_count = lldp.tlvs.size();
-    out.lldp_tlvs_truncated = lldp.tlvs_truncated;
-    const size_t kMaxLldpTlvSummaries = resource_limits().max_decoded_objects.value_or(50);
-    for (const auto& t : lldp.tlvs) {
-        if (out.lldp_tlvs.size() >= kMaxLldpTlvSummaries) break;
-        std::ostringstream ts;
-        ts << (t.type_name.empty() ? ("type " + std::to_string(static_cast<unsigned>(t.type)))
-                                    : t.type_name);
-        ts << " (" << t.length << " byte(s))";
-        if (!t.rendered.empty()) ts << ": " << t.rendered;
-        else if (!t.raw_hex.empty()) ts << ": " << t.raw_hex;
-        out.lldp_tlvs.push_back(ts.str());
-    }
     for (const auto& n : lldp.notes) out.notes.push_back(n);
+    out.result = result;
 }
 
 void populate_slow_protocols(DecodedPacket& out, const ProtocolResult& result, uint16_t /*matched_ethertype*/) {
@@ -1184,64 +847,7 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                                     "client-data length were trimmed (almost always Ethernet "
                                     "minimum-frame-size padding, not real payload)");
                             }
-
-                            out.stp_protocol_version_name = stp.protocol_version_name;
-                            out.stp_protocol_version = stp.protocol_version;
-                            out.stp_bpdu_type_name = stp.bpdu_type_name;
-                            out.stp_bpdu_type = stp.bpdu_type;
-                            out.stp_is_tcn = stp.is_tcn;
-                            out.stp_is_spb = stp.is_spb;
-
-                            if (stp.has_common_body) {
-                                out.stp_has_common_body = true;
-                                out.stp_flags = stp.flags;
-                                out.stp_flag_tca = stp.flag_tca;
-                                out.stp_flag_agreement = stp.flag_agreement;
-                                out.stp_flag_forwarding = stp.flag_forwarding;
-                                out.stp_flag_learning = stp.flag_learning;
-                                out.stp_flag_port_role = stp.flag_port_role;
-                                out.stp_flag_port_role_name = stp_port_role_name(stp.flag_port_role);
-                                out.stp_flag_proposal = stp.flag_proposal;
-                                out.stp_flag_tc = stp.flag_tc;
-
-                                out.stp_root_priority = stp.root_id.priority;
-                                out.stp_root_sys_id_ext = stp.root_id.ext;
-                                out.stp_root_mac = format_mac(stp.root_id.mac);
-                                out.stp_root_path_cost = stp.root_path_cost;
-                                out.stp_bridge_priority = stp.bridge_id.priority;
-                                out.stp_bridge_sys_id_ext = stp.bridge_id.ext;
-                                out.stp_bridge_mac = format_mac(stp.bridge_id.mac);
-                                out.stp_port_id_raw = stp.port_id_raw;
-                                out.stp_port_priority = stp.port_id_priority;
-                                out.stp_port_number = stp.port_id_number;
-                                out.stp_message_age = stp.message_age;
-                                out.stp_max_age = stp.max_age;
-                                out.stp_hello_time = stp.hello_time;
-                                out.stp_forward_delay = stp.forward_delay;
-
-                                out.stp_has_version1 = stp.has_version1;
-                                out.stp_version_1_length = stp.version_1_length;
-
-                                if (stp.is_mstp) {
-                                    out.stp_is_mstp = true;
-                                    out.stp_version_3_length = stp.version_3_length;
-                                    out.stp_mst_config_name = stp.mst_config_name;
-                                    out.stp_mst_config_revision_level = stp.mst_config_revision_level;
-                                    out.stp_mst_config_digest_hex = stp.mst_config_digest_hex;
-                                    out.stp_cist_internal_root_path_cost = stp.cist_internal_root_path_cost;
-                                    out.stp_cist_bridge_priority = stp.cist_bridge_id.priority;
-                                    out.stp_cist_bridge_sys_id_ext = stp.cist_bridge_id.ext;
-                                    out.stp_cist_bridge_mac = format_mac(stp.cist_bridge_id.mac);
-                                    out.stp_cist_remaining_hops = stp.cist_remaining_hops;
-
-                                    const size_t kMaxStpMstiSummaries = resource_limits().max_decoded_objects.value_or(50);
-                                    for (const auto& m : stp.msti_messages) {
-                                        if (out.stp_msti_messages.size() >= kMaxStpMstiSummaries) break;
-                                        out.stp_msti_messages.push_back(stp_render_msti_summary(m));
-                                    }
-                                }
-                                out.stp_is_alt_msti_format = stp.is_alt_msti_format;
-                            }
+                            out.result = *result;
                             return out;
                         }
                     }
@@ -1797,14 +1403,21 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                 if (!require_hsrp_port || port_match) {
                     // Registration-model migration (batch 4): try_parse_hsrp is now reached
                     // through HsrpDecoder::decode rather than called directly -- same function,
-                    // same semantics, see hsrp.hpp. The dual-write (fill_hsrp_fields) is unchanged.
+                    // same semantics, see hsrp.hpp. Zero-flat-field migration (mid-size batch):
+                    // out.result now carries the whole HsrpMessage (including auth_data, already
+                    // redacted by HsrpDecoder::decode when active), and output.cpp's
+                    // write_hsrp_json_fields reads straight from it -- no output.cpp reader ever
+                    // rendered auth_data, so there is nothing further to preserve there (same
+                    // finding as the cheap batch's vrrp_auth_password).
                     DecodeContext ctx;
                     ctx.protocol_id = "hsrp";
                     ctx.redact_secrets = options_.redact_secrets;
                     if (auto result = hsrp_decoder().decode(udp.payload, ctx)) {
                         const HsrpMessage& msg = result->as<HsrpMessage>();
                         out.protocol = "hsrp";
-                        fill_hsrp_fields(out, msg);
+                        out.summary = msg.summary;
+                        for (const auto& n : msg.notes) out.notes.push_back(n);
+                        out.result = *result;
                         if (!port_match) {
                             out.notes.push_back("seen on UDP port " + std::to_string(udp.src_port) + "->" +
                                                  std::to_string(udp.dst_port) +
@@ -1870,13 +1483,17 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                 if (!require_dns_port || port_match) {
                     // Registration-model migration (batch 4): try_parse_dns_message is now reached
                     // through DnsDecoder::decode rather than called directly -- same function,
-                    // same semantics, see dns.hpp. The dual-write (fill_dns_fields) is unchanged.
+                    // same semantics, see dns.hpp. Zero-flat-field migration (mid-size batch):
+                    // out.result now carries the whole DnsMessage, and output.cpp's
+                    // write_dns_json_fields (shared by dns/mdns/llmnr) reads straight from it.
                     DecodeContext ctx;
                     ctx.protocol_id = "dns";
                     if (auto result = dns_decoder().decode(udp.payload, ctx)) {
                         const DnsMessage& msg = result->as<DnsMessage>();
                         out.protocol = "dns";
-                        fill_dns_fields(out, msg);
+                        out.summary = msg.summary;
+                        for (const auto& n : msg.notes) out.notes.push_back(n);
+                        out.result = *result;
                         if (!port_match) {
                             out.notes.push_back("seen on UDP port " + std::to_string(udp.src_port) + "->" +
                                                  std::to_string(udp.dst_port) +
@@ -1896,13 +1513,17 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                 if (!require_mdns_port || port_match) {
                     // Registration-model migration (batch 4): try_parse_dns_message is now reached
                     // through MdnsDecoder::decode rather than called directly -- same function,
-                    // same semantics, see dns.hpp. The dual-write (fill_dns_fields) is unchanged.
+                    // same semantics, see dns.hpp. Zero-flat-field migration (mid-size batch):
+                    // out.result now carries the whole DnsMessage, and output.cpp's
+                    // write_dns_json_fields (shared by dns/mdns/llmnr) reads straight from it.
                     DecodeContext ctx;
                     ctx.protocol_id = "mdns";
                     if (auto result = mdns_decoder().decode(udp.payload, ctx)) {
                         const DnsMessage& msg = result->as<DnsMessage>();
                         out.protocol = "mdns";
-                        fill_dns_fields(out, msg);
+                        out.summary = msg.summary;
+                        for (const auto& n : msg.notes) out.notes.push_back(n);
+                        out.result = *result;
                         if (!port_match) {
                             out.notes.push_back("seen on UDP port " + std::to_string(udp.src_port) + "->" +
                                                  std::to_string(udp.dst_port) +
@@ -1922,13 +1543,17 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                 if (!require_llmnr_port || port_match) {
                     // Registration-model migration (batch 4): try_parse_dns_message is now reached
                     // through LlmnrDecoder::decode rather than called directly -- same function,
-                    // same semantics, see dns.hpp. The dual-write (fill_dns_fields) is unchanged.
+                    // same semantics, see dns.hpp. Zero-flat-field migration (mid-size batch):
+                    // out.result now carries the whole DnsMessage, and output.cpp's
+                    // write_dns_json_fields (shared by dns/mdns/llmnr) reads straight from it.
                     DecodeContext ctx;
                     ctx.protocol_id = "llmnr";
                     if (auto result = llmnr_decoder().decode(udp.payload, ctx)) {
                         const DnsMessage& msg = result->as<DnsMessage>();
                         out.protocol = "llmnr";
-                        fill_dns_fields(out, msg);
+                        out.summary = msg.summary;
+                        for (const auto& n : msg.notes) out.notes.push_back(n);
+                        out.result = *result;
                         if (!port_match) {
                             out.notes.push_back("seen on UDP port " + std::to_string(udp.src_port) + "->" +
                                                  std::to_string(udp.dst_port) +
@@ -1948,13 +1573,17 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                 if (!require_nbns_port || port_match) {
                     // Registration-model migration (batch 4): try_parse_nbns is now reached
                     // through NbnsDecoder::decode rather than called directly -- same function,
-                    // same semantics, see nbns.hpp. The dual-write (fill_nbns_fields) is unchanged.
+                    // same semantics, see nbns.hpp. Zero-flat-field migration (mid-size batch):
+                    // out.result now carries the whole NbnsMessage, and output.cpp's
+                    // write_nbns_json_fields reads straight from it.
                     DecodeContext ctx;
                     ctx.protocol_id = "nbns";
                     if (auto result = nbns_decoder().decode(udp.payload, ctx)) {
                         const NbnsMessage& msg = result->as<NbnsMessage>();
                         out.protocol = "nbns";
-                        fill_nbns_fields(out, msg);
+                        out.summary = msg.summary;
+                        for (const auto& n : msg.notes) out.notes.push_back(n);
+                        out.result = *result;
                         if (!port_match) {
                             out.notes.push_back("seen on UDP port " + std::to_string(udp.src_port) + "->" +
                                                  std::to_string(udp.dst_port) +
@@ -2101,12 +1730,16 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
             if (want_icmp) {
                 // Migration batch 5: try_parse_icmp is now reached through IcmpDecoder::decode
                 // rather than called directly -- same function, same semantics, see icmp.hpp.
-                // fill_icmp_fields is unchanged.
+                // Zero-flat-field migration (mid-size batch): out.result now carries the whole
+                // IcmpMessage, and output.cpp's write_icmp_json_fields reads straight from it.
                 DecodeContext ctx;
                 ctx.protocol_id = "icmp";
                 if (auto result = icmp_decoder().decode(ip.payload, ctx)) {
+                    const IcmpMessage& msg = result->as<IcmpMessage>();
                     out.protocol = "icmp";
-                    fill_icmp_fields(out, result->as<IcmpMessage>());
+                    out.summary = msg.summary;
+                    for (const auto& n : msg.notes) out.notes.push_back(n);
+                    out.result = *result;
                     return out;
                 }
             }
@@ -2190,12 +1823,16 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
             if (want_pim) {
                 // Migration batch 5: try_parse_pim is now reached through PimDecoder::decode
                 // rather than called directly -- same function, same semantics, see pim.hpp.
-                // fill_pim_fields is unchanged.
+                // Zero-flat-field migration (mid-size batch): out.result now carries the whole
+                // PimMessage, and output.cpp's write_pim_json_fields reads straight from it.
                 DecodeContext ctx;
                 ctx.protocol_id = "pim";
                 if (auto result = pim_decoder().decode(ip.payload, ctx)) {
+                    const PimMessage& msg = result->as<PimMessage>();
                     out.protocol = "pim";
-                    fill_pim_fields(out, result->as<PimMessage>());
+                    out.summary = msg.summary;
+                    for (const auto& n : msg.notes) out.notes.push_back(n);
+                    out.result = *result;
                     return out;
                 }
             }
