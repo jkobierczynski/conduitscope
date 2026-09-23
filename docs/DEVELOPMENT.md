@@ -5600,6 +5600,100 @@ deferred future migration.
     `docs/PROTOCOL_COVERAGE.md`'s SAMR/LSARPC section, `man/conduitscope.1`,
     and `README.md` updated in this same phase, not deferred.
 
+    **Update: srvsvc/wkssvc, phase 2 (bundled for scope parity, no
+    cross-interface note).** New `include/conduitscope/srvsvc.hpp`/
+    `src/srvsvc.cpp` and `include/conduitscope/wkssvc.hpp`/
+    `src/wkssvc.cpp`, the same `netlogon.hpp`-shaped template Phase 1 used,
+    called from two new `smb.cpp` functions (`decode_dcerpc_and_srvsvc`/
+    `decode_dcerpc_and_wkssvc`) that are Phase 0's `resolve_dcerpc_bind_
+    bookkeeping` template's third and fourth callers. Unlike SAMR/LSARPC,
+    these two interfaces have no cross-interface note -- bundled purely for
+    scope-per-phase consistency, not because one call informs the other.
+    SRVSVC full-decodes `NetrShareEnum(15)`/`NetrShareGetInfo(16)`, scoped
+    to LEVEL 1 ONLY (`shi1_netname`/`shi1_type`/`shi1_remark` -- what `net
+    view` itself displays; every other level reported by number only).
+    Header-only on the REQUEST side ONLY for `NetrConnectionEnum(8)`/
+    `NetrFileEnum(9)`/`NetrSessionEnum(12)` (ServerName + Level) -- their
+    RESPONSE side is deliberately structural-only instead, a genuinely new
+    wrinkle relative to Phase 1's own header-only tier: each response's own
+    per-entry array uses a LEVEL-DEPENDENT info struct
+    (CONNECTION_INFO_0/1, FILE_INFO_2/3, SESSION_INFO_0/1/2/10/502) that
+    sits, in the wire's own top-level field order, BEFORE `TotalEntries` --
+    so reaching `TotalEntries` at all would mean walking that array first,
+    and none of those per-level shapes were independently verified, so
+    rather than guess at how many bytes to skip (risking silent
+    misalignment of every field read afterward, including the response's
+    own `ErrorCode`), the response stops at opnum/status only. Opnum-name-
+    only with a curated note firing on every occurrence (not sticky, the
+    same posture Netlogon's own `NetrServerPasswordSet2` note already
+    established) for `NetrShareAdd(14)`/`NetrShareDel(18)`. WKSSVC full-
+    decodes `NetrWkstaGetInfo(0)`, level 100 only
+    (`wki100_platform_id`/`computername`/`langroup`/`ver_major`/
+    `ver_minor`), and `NetrWkstaUserEnum(2)`, level 1 only
+    (`wkui1_username`/`logon_domain`/`oth_domains`/`logon_server` -- who is
+    logged on and from where, the directly recon-relevant field set).
+    Header-only (request side only, same reasoning as SRVSVC's own three)
+    for `NetrWkstaTransportEnum(5)`. Opnum-name-only with a per-occurrence
+    curated note for `NetrJoinDomain2(22)`/`NetrUnjoinDomain2(23)` -- both
+    carry a `PJOINPR_ENCRYPTED_USER_PASSWORD` field never parsed, the same
+    "never decode anything credential/secret-shaped" posture SAMR's own
+    password opnums established, distinguished only by the curated note
+    firing here (a domain join/unjoin is a rarer, higher-signal
+    administrative event worth flagging even without decoding its
+    payload).
+
+    Two SRVSVC-specific NDR facts, confirmed empirically (installing
+    impacket 0.13.1, marshalling real `NetrShareEnum`/`NetrShareGetInfo`
+    request/response objects, hex-dumping the actual bytes -- not recalled
+    from training): `SHARE_ENUM_STRUCT`'s embedded `SHARE_ENUM_UNION`
+    carries its OWN 4-byte tag/discriminant on the wire, immediately after
+    the struct's own `Level` field, even though the two are always equal
+    (a real decoder could infer the tag from `Level` alone -- this codebase
+    reads and discards the duplicate rather than assuming it away); and
+    `SHARE_INFO_1` reached via a single (non-array) pointer -- as
+    `NetrShareGetInfo`'s own response does -- still uses the "nested struct
+    batches its own pointers" shape (netname-referent/type/remark-referent
+    all written first, THEN netname's and remark's own deferred strings),
+    NOT the eager per-field shape a first pass at this file actually got
+    wrong (caught by re-deriving the exact byte layout from the same
+    impacket hex dump before writing any CMakeLists.txt test, not by code
+    review). `WKSTA_INFO_100`/`WKSTA_USER_INFO_1_ARRAY` (WKSSVC's own
+    analogues) were verified the same way and confirmed to follow the
+    identical nested-struct/batched-array rules Phase 1 already documented
+    -- no new deferred-pointer wrinkle this time, just confirmation.
+    `NetrWkstaUserEnum`'s own response `ResumeHandle` is a PLAIN ULONG
+    VALUE, not a pointer -- unlike SRVSVC's own `NetrShareEnum` response,
+    whose `ResumeHandle` IS a pointer -- also confirmed empirically rather
+    than assumed from the two interfaces' otherwise-parallel shapes.
+
+    New fixture: `tools/make_sample_pcap.py`'s `build_srvsvc_wkssvc_
+    sample()` (`tests/sample_srvsvc_wkssvc.pcap`, 4 independent flows
+    A-D), plus four standalone stub builders for the nested response
+    shapes (`srvsvc_share_enum_response_stub`, `srvsvc_share_get_info_
+    response_stub`, `wksta_get_info_response_stub`, `wksta_user_enum_
+    response_stub`) built directly from the existing `NdrBuf` primitives
+    (`unique_string`/`ref_string`/`u32`/`_ref`) with no new `NdrBuf` class
+    methods needed -- every SRVSVC/WKSSVC wire shape this phase needed was
+    already expressible with Phase 1's own building blocks. 27 new
+    CMakeLists.txt tests cover every full-decode opnum's request/response
+    fields (including the STYPE_SPECIAL "(special)" suffix on IPC$'s own
+    share type), every header-only opnum's request-only decode plus its
+    deliberately-structural response, both interfaces' curated notes
+    (share add/delete; domain join/unjoin) firing per-occurrence, the two
+    secret/credential-shaped opnums' zero-field-decode posture (asserting
+    the fixture's own non-zero stub bytes never appear in decoded output),
+    the sealed-call fallback, the bind-interface-confirmation negative
+    control (a non-SRVSVC bind on a srvsvc-named pipe never produces
+    `srvsvc_calls`), and `--stats` opnum counts for both interfaces.
+
+    Verified against a fresh from-scratch build in both established
+    configs (default and `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF`, both
+    zero warnings; full suite 1472/1472) plus manual `--format json`/
+    `--format text --verbose`/`--stats` smoke tests against the new
+    fixture. `docs/PROTOCOL_COVERAGE.md`'s new SRVSVC+WKSSVC section,
+    `man/conduitscope.1`, and `README.md` updated in this same phase, not
+    deferred.
+
 29. **MELSEC Communication Protocol (MC Protocol / SLMP), Mitsubishi
     Electric -- TCP port 5001, UDP port 5000.** Jurgen asked for this
     directly. **Done.** Mitsubishi's own PLC communication protocol --

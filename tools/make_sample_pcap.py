@@ -9269,6 +9269,9 @@ def build_smb_sample():
 NETLOGON_INTERFACE_UUID = "12345678-1234-abcd-ef00-01234567cffb"
 SAMR_INTERFACE_UUID = "12345778-1234-abcd-ef00-0123456789ac"      # samr.hpp's own kSamrInterfaceUuid
 LSARPC_INTERFACE_UUID = "12345778-1234-abcd-ef00-0123456789ab"    # lsarpc.hpp's own kLsarpcInterfaceUuid
+SRVSVC_INTERFACE_UUID = "4b324fc8-1670-01d3-1278-5a47bf6ee188"    # srvsvc.hpp's own kSrvsvcInterfaceUuid
+                                                                     # -- version 3.0, not 1.0
+WKSSVC_INTERFACE_UUID = "6bffd098-a112-3610-9833-46c3f87e345a"    # wkssvc.hpp's own kWkssvcInterfaceUuid
 NDR32_TRANSFER_SYNTAX_UUID = "8a885d04-1ceb-11c9-9fe8-08002b104860"
 FSCTL_PIPE_TRANSCEIVE = 0x0011C017
 RPC_C_AUTHN_LEVEL_PKT_PRIVACY = 6
@@ -9758,6 +9761,132 @@ def lsar_enumerate_trusted_domains_response_stub(enumeration_context: int, entri
     return b.get()
 
 
+def srvsvc_share_enum_response_stub(shares, total_entries: int, status: int = 0) -> bytes:
+    """NetrShareEnum(15) response -- see srvsvc.cpp's own parse_share_enum_response doc comment for
+    the exact field order this mirrors (InfoStruct{Level, ShareInfo:SHARE_ENUM_UNION{tag, Level1:
+    pointer to SHARE_INFO_1_CONTAINER{EntriesRead, Buffer:pointer to SHARE_INFO_1_ARRAY}}},
+    TotalEntries, ResumeHandle, ErrorCode). `shares` is a list of (netname, type, remark) triples,
+    level 1 only, or []/None for a NULL Buffer (in which case SHARE_INFO_1_ARRAY's own per-element
+    "batched" shape -- fixed parts for every element, THEN every element's deferred string data, in
+    order -- was empirically confirmed during planning by marshalling a real two-share response
+    through impacket and hex-dumping the actual bytes; see srvsvc.hpp's own header comment)."""
+    b = NdrBuf()
+    b.u32(1)  # Level
+    b.u32(1)  # ShareInfo.tag -- duplicate of Level, empirically confirmed present on the wire
+    if not shares:
+        b.u32(0)  # Level1 container referent NULL
+    else:
+        b.u32(b._ref())  # container referent
+        b.u32(len(shares))  # EntriesRead (discarded by the decoder -- TotalEntries below is used)
+        b.u32(b._ref())  # array referent
+        b.u32(len(shares))  # MaximumCount
+        refs = []
+        for netname, share_type, remark in shares:
+            nr = b._ref()
+            b.u32(nr)
+            b.u32(share_type)
+            rr = b._ref()
+            b.u32(rr)
+            refs.append((nr, rr))
+        for (netname, _share_type, remark), (nr, rr) in zip(shares, refs):
+            if nr:
+                b.ref_string(netname)
+            if rr:
+                b.ref_string(remark)
+    b.u32(total_entries)
+    b.u32(0)  # ResumeHandle -- NULL pointer
+    b.u32(status)
+    return b.get()
+
+
+def srvsvc_share_get_info_response_stub(entry, status: int = 0) -> bytes:
+    """NetrShareGetInfo(16) response -- see srvsvc.cpp's own parse_share_get_info_response doc
+    comment: SHARE_INFO union{tag, ShareInfo1:pointer to a single (batched-shape, see
+    read_share_info_1's own doc comment) SHARE_INFO_1}, ErrorCode. `entry` is a single (netname,
+    type, remark) triple, or None for a NULL pointer."""
+    b = NdrBuf()
+    b.u32(1)  # tag
+    if entry is None:
+        b.u32(0)  # ShareInfo1 referent NULL
+    else:
+        b.u32(b._ref())  # ShareInfo1 referent
+        netname, share_type, remark = entry
+        nr = b._ref()
+        b.u32(nr)
+        b.u32(share_type)
+        rr = b._ref()
+        b.u32(rr)
+        if nr:
+            b.ref_string(netname)
+        if rr:
+            b.ref_string(remark)
+    b.u32(status)
+    return b.get()
+
+
+def wksta_get_info_response_stub(platform_id: int, computername: str, langroup: str, ver_major: int,
+                                  ver_minor: int, status: int = 0) -> bytes:
+    """NetrWkstaGetInfo(0) response, level 100 only -- see wkssvc.cpp's own parse_get_info_response
+    doc comment: WKSTA_INFO union{tag, WkstaInfo100:pointer to a nested WKSTA_INFO_100 struct (own
+    "batched" shape -- platform_id/computername-referent/langroup-referent/ver_major/ver_minor fixed
+    first, then computername's and langroup's own deferred strings, in that order -- empirically
+    confirmed during planning)}, ErrorCode."""
+    b = NdrBuf()
+    b.u32(100)  # tag
+    b.u32(b._ref())  # WkstaInfo100 referent
+    b.u32(platform_id)
+    cr = b._ref()
+    b.u32(cr)
+    lr = b._ref()
+    b.u32(lr)
+    b.u32(ver_major)
+    b.u32(ver_minor)
+    b.ref_string(computername)
+    b.ref_string(langroup)
+    b.u32(status)
+    return b.get()
+
+
+def wksta_user_enum_response_stub(users, total_entries: int, status: int = 0) -> bytes:
+    """NetrWkstaUserEnum(2) response, level 1 only -- see wkssvc.cpp's own parse_user_enum_response
+    doc comment: UserInfo{Level, WkstaUserInfo:WKSTA_USER_ENUM_UNION{tag, Level1:pointer to
+    WKSTA_USER_INFO_1_CONTAINER{EntriesRead, Buffer:pointer to WKSTA_USER_INFO_1_ARRAY}}},
+    TotalEntries, ResumeHandle (a PLAIN ULONG VALUE here, not a pointer -- empirically confirmed
+    during planning, unlike SRVSVC's own NetrShareEnum response), ErrorCode. `users` is a list of
+    (username, logon_domain, oth_domains, logon_server) 4-tuples, or []/None for a NULL Buffer."""
+    b = NdrBuf()
+    b.u32(1)  # Level
+    b.u32(1)  # WkstaUserInfo.tag -- duplicate of Level
+    if not users:
+        b.u32(0)  # Level1 container referent NULL
+    else:
+        b.u32(b._ref())  # container referent
+        b.u32(len(users))  # EntriesRead (discarded)
+        b.u32(b._ref())  # array referent
+        b.u32(len(users))  # MaximumCount
+        refs = []
+        for _u in users:
+            r1, r2, r3, r4 = b._ref(), b._ref(), b._ref(), b._ref()
+            b.u32(r1)
+            b.u32(r2)
+            b.u32(r3)
+            b.u32(r4)
+            refs.append((r1, r2, r3, r4))
+        for (username, logon_domain, oth_domains, logon_server), (r1, r2, r3, r4) in zip(users, refs):
+            if r1:
+                b.ref_string(username)
+            if r2:
+                b.ref_string(logon_domain)
+            if r3:
+                b.ref_string(oth_domains)
+            if r4:
+                b.ref_string(logon_server)
+    b.u32(total_entries)
+    b.u32(0)  # ResumeHandle -- plain value, not a pointer
+    b.u32(status)
+    return b.get()
+
+
 def netlogon_req_challenge_request_stub(primary_name, computer_name, client_challenge: bytes) -> bytes:
     assert len(client_challenge) == 8
     b = NdrBuf()
@@ -9911,6 +10040,245 @@ def dcerpc_pdu(ptype, call_id, body: bytes, pfc_flags=0x03, auth=None) -> bytes:
     pdu = h + body + trailer
     assert len(pdu) == frag_length
     return pdu
+
+
+def build_srvsvc_wkssvc_sample():
+    """SRVSVC + WKSSVC (MS-SRVS/MS-WKST), phase 2 of the SAMR/LSARPC/SRVSVC/WKSSVC/DRSUAPI batch --
+    see srvsvc.hpp's/wkssvc.hpp's own file header comments for the wire format, opnum coverage, and
+    the empirically-derived NDR facts (SHARE_ENUM_UNION's own duplicate tag, SHARE_INFO_1's/
+    WKSTA_INFO_100's/WKSTA_USER_INFO_1_ARRAY's own batched-pointer shapes) every full-decode opnum
+    below relies on. Same transport-layer conventions as build_samr_lsarpc_sample (TREE_CONNECT to
+    "\\\\SERVER\\IPC$", then CREATE of "\\PIPE\\srvsvc"/"\\PIPE\\wkssvc", WRITE+READ named-pipe
+    transport throughout). Unlike SAMR+LSARPC, these two interfaces have no cross-interface note --
+    bundled purely for scope-per-phase consistency (see srvsvc.hpp's own header comment). Flows, each
+    its own TCP session:
+      A: SRVSVC only -- bind (interface version 3.0, not 1.0) + NetrShareEnum(15) (two shares: an
+         ordinary disk share and IPC$ as an STYPE_IPC|STYPE_SPECIAL admin share, exercising
+         srvsvc_share_type_name's own "(special)" suffix), NetrShareGetInfo(16) (single share),
+         NetrConnectionEnum(8)/NetrFileEnum(9)/NetrSessionEnum(12) (header-only request decode, NO
+         response field decode -- see srvsvc.hpp's own OPNUM COVERAGE note), NetrShareAdd(14)/
+         NetrShareDel(18) (structural-only, each firing its own curated note).
+      B: WKSSVC only -- bind + NetrWkstaGetInfo(0) (level 100), NetrWkstaUserEnum(2) (level 1, two
+         logged-on users), NetrWkstaTransportEnum(5) (header-only, same posture as flow A's own three
+         SRVSVC header-only opnums), NetrJoinDomain2(22)/NetrUnjoinDomain2(23) (structural-only,
+         non-empty non-zero stub bytes to prove the encrypted password material is never rendered,
+         each firing its own curated note).
+      C: a SEALED (auth_level=PKT_PRIVACY) NetrShareGetInfo request/response pair on an already-bound
+         SRVSVC context -- the "sealed, N bytes, not decoded" fallback, no field decode, no note.
+      D: a bind whose only offered context names Netlogon's OWN interface UUID (not SRVSVC's) on a
+         "srvsvc"-named pipe -- the request that follows must stay structural (no srvsvc_calls at
+         all), the same defensive negative control build_samr_lsarpc_sample's own flow F establishes.
+    Every byte offset and note-trigger condition here was independently smoke-tested against a
+    hand-built synthetic exchange, decoded and inspected in both --format text and --format json,
+    BEFORE this fixture (and the CMakeLists.txt tests reading it) were written -- the same
+    verification discipline every prior phase's own fixture was held to."""
+    packets = []
+    ident = [0xF000]
+    port = [55001]
+    file_id_counter = [1]
+    call_id_counter = [1]
+
+    def next_file_id() -> bytes:
+        file_id_counter[0] += 1
+        return struct.pack("<QQ", file_id_counter[0], 0xCAFE0000 + file_id_counter[0])
+
+    def next_call_id() -> int:
+        call_id_counter[0] += 1
+        return call_id_counter[0]
+
+    def make_flow():
+        sport = port[0]
+        port[0] += 1
+        state = {"cseq": 80000, "sseq": 90000}
+
+        def add(from_client: bool, payload: bytes):
+            if from_client:
+                s_port, d_port = sport, 445
+                s_ip, d_ip = HMI_IP, PLC_IP
+                s_mac, d_mac = HMI_MAC, PLC_MAC
+                seq, ack = state["cseq"], state["sseq"]
+                state["cseq"] += len(payload)
+            else:
+                s_port, d_port = 445, sport
+                s_ip, d_ip = PLC_IP, HMI_IP
+                s_mac, d_mac = PLC_MAC, HMI_MAC
+                seq, ack = state["sseq"], state["cseq"]
+                state["sseq"] += len(payload)
+            tcp = tcp_header(s_port, d_port, seq, ack, TCP_PSH | TCP_ACK, len(payload)) + payload
+            ip = ipv4_header(s_ip, d_ip, 6, len(tcp), ident[0] & 0xFFFF) + tcp
+            ident[0] += 1
+            packets.append(eth_header(d_mac, s_mac, 0x0800) + ip)
+
+        return add
+
+    mid = [500]
+
+    def next_mid():
+        mid[0] += 1
+        return mid[0]
+
+    def open_pipe(fx, session_id, tree_id, pipe_name):
+        m_tc = next_mid()
+        fx(True, smb_with_prefix(smb2_message(0x03, False, smb2_tree_connect_req_body("\\\\SERVER\\IPC$"),
+                                               message_id=m_tc, session_id=session_id)))
+        fx(False, smb_with_prefix(smb2_message(
+            0x03, True, smb2_tree_connect_resp_body(SMB_SHARE_TYPE_PIPE), message_id=m_tc,
+            status=SMB_STATUS_SUCCESS, session_id=session_id, tree_id=tree_id)))
+
+        file_id = next_file_id()
+        m_cr = next_mid()
+        fx(True, smb_with_prefix(smb2_message(0x05, False, smb2_create_req_body("\\PIPE\\" + pipe_name),
+                                               message_id=m_cr, session_id=session_id, tree_id=tree_id)))
+        fx(False, smb_with_prefix(smb2_message(
+            0x05, True, smb2_create_resp_body(file_id), message_id=m_cr, status=SMB_STATUS_SUCCESS,
+            session_id=session_id, tree_id=tree_id)))
+        return file_id
+
+    def close_pipe(fx, session_id, tree_id, file_id):
+        m_cl = next_mid()
+        fx(True, smb_with_prefix(smb2_message(0x06, False, smb2_close_req_body(file_id),
+                                               message_id=m_cl, session_id=session_id, tree_id=tree_id)))
+        fx(False, smb_with_prefix(smb2_message(
+            0x06, True, smb2_close_resp_body(), message_id=m_cl, status=SMB_STATUS_SUCCESS,
+            session_id=session_id, tree_id=tree_id)))
+
+    pending_read_mid = [None]
+
+    def write_read(fx, session_id, tree_id, file_id, pdu_bytes: bytes):
+        m_w = next_mid()
+        fx(True, smb_with_prefix(smb2_message(0x09, False, smb2_write_req_body(file_id, pdu_bytes),
+                                               message_id=m_w, session_id=session_id, tree_id=tree_id)))
+        fx(False, smb_with_prefix(smb2_message(
+            0x09, True, smb2_write_resp_body(len(pdu_bytes)), message_id=m_w, status=SMB_STATUS_SUCCESS,
+            session_id=session_id, tree_id=tree_id)))
+        m_r = next_mid()
+        fx(True, smb_with_prefix(smb2_message(0x08, False, smb2_read_req_body(file_id),
+                                               message_id=m_r, session_id=session_id, tree_id=tree_id)))
+        pending_read_mid[0] = m_r
+
+    def read_response(fx, session_id, tree_id, pdu_bytes: bytes):
+        m_r = pending_read_mid[0]
+        assert m_r is not None, "read_response called without a preceding write_read"
+        fx(False, smb_with_prefix(smb2_message(
+            0x08, True, smb2_read_resp_body(pdu_bytes), message_id=m_r, status=SMB_STATUS_SUCCESS,
+            session_id=session_id, tree_id=tree_id)))
+        pending_read_mid[0] = None
+
+    def bind_and_ack(fx, session_id, tree_id, file_id, call_id, abstract_uuid, result=0,
+                      abstract_ver_major=1, abstract_ver_minor=0):
+        bind_pdu = dcerpc_pdu(11, call_id, dcerpc_bind_body(
+            [dcerpc_context_element(0, abstract_uuid, abstract_ver_major=abstract_ver_major,
+                                     abstract_ver_minor=abstract_ver_minor)]))
+        bind_ack_pdu = dcerpc_pdu(12, call_id, dcerpc_bind_ack_body([dcerpc_context_result(result)]))
+        write_read(fx, session_id, tree_id, file_id, bind_pdu)
+        read_response(fx, session_id, tree_id, bind_ack_pdu)
+
+    def call(fx, session_id, tree_id, file_id, opnum, req_stub, resp_stub, auth=None):
+        cid = next_call_id()
+        write_read(fx, session_id, tree_id, file_id,
+                   dcerpc_pdu(0, cid, dcerpc_request_body(0, opnum, req_stub), auth=auth))
+        read_response(fx, session_id, tree_id,
+                      dcerpc_pdu(2, cid, dcerpc_response_body(0, resp_stub), auth=auth))
+
+    # ---------------------------------------------------------------------------------------------
+    # Flow A: SRVSVC only -- full-decode opnum coverage (NetrShareEnum/NetrShareGetInfo), the three
+    # header-only enumeration opnums, and the two opnum-name-only curated-note opnums.
+    # ---------------------------------------------------------------------------------------------
+    fa = make_flow()
+    sess_a, tree_a = 0xC000000000000001, 1
+    fid_a = open_pipe(fa, sess_a, tree_a, "srvsvc")
+    bind_and_ack(fa, sess_a, tree_a, fid_a, next_call_id(), SRVSVC_INTERFACE_UUID,
+                 abstract_ver_major=3, abstract_ver_minor=0)
+
+    b = NdrBuf(); b.unique_string("\\\\SRV1"); b.u32(1); b.u32(1)
+    resp = srvsvc_share_enum_response_stub(
+        [("DATA", 0, "Data share"), ("IPC$", 3 | 0x80000000, "Remote IPC")], total_entries=2, status=0)
+    call(fa, sess_a, tree_a, fid_a, 15, b.get(), resp)
+
+    b = NdrBuf(); b.unique_string("\\\\SRV1"); b.ref_string("DATA"); b.u32(1)
+    resp = srvsvc_share_get_info_response_stub(("DATA", 0, "Data share"), status=0)
+    call(fa, sess_a, tree_a, fid_a, 16, b.get(), resp)
+
+    # NetrConnectionEnum(8) -- ServerName + Qualifier(1 extra unique string) + Level.
+    b = NdrBuf(); b.unique_string("\\\\SRV1"); b.unique_string(None); b.u32(0); b.u32(0)
+    call(fa, sess_a, tree_a, fid_a, 8, b.get(), b"\x00" * 16)
+
+    # NetrFileEnum(9) -- ServerName + BasePath + UserName (2 extra unique strings) + Level.
+    b = NdrBuf(); b.unique_string("\\\\SRV1"); b.unique_string(None); b.unique_string(None); b.u32(3); b.u32(3)
+    call(fa, sess_a, tree_a, fid_a, 9, b.get(), b"\x00" * 16)
+
+    # NetrSessionEnum(12) -- ServerName + ClientName + UserName (2 extra unique strings) + Level.
+    b = NdrBuf(); b.unique_string("\\\\SRV1"); b.unique_string(None); b.unique_string(None); b.u32(10); b.u32(10)
+    call(fa, sess_a, tree_a, fid_a, 12, b.get(), b"\x00" * 16)
+
+    # NetrShareAdd(14)/NetrShareDel(18) -- structural-only by design (see srvsvc.hpp's own OPNUM
+    # COVERAGE note); stub bytes are deliberately non-empty to prove they're never field-decoded.
+    call(fa, sess_a, tree_a, fid_a, 14, b"\xAB" * 40, b"\x00" * 8)
+    call(fa, sess_a, tree_a, fid_a, 18, b"\xCD" * 24, b"\x00" * 4)
+
+    close_pipe(fa, sess_a, tree_a, fid_a)
+
+    # ---------------------------------------------------------------------------------------------
+    # Flow B: WKSSVC only -- full-decode opnum coverage, header-only NetrWkstaTransportEnum, and the
+    # two opnum-name-only curated-note opnums (join/unjoin, encrypted password material never
+    # rendered).
+    # ---------------------------------------------------------------------------------------------
+    fb = make_flow()
+    sess_b, tree_b = 0xC000000000000002, 1
+    fid_b = open_pipe(fb, sess_b, tree_b, "wkssvc")
+    bind_and_ack(fb, sess_b, tree_b, fid_b, next_call_id(), WKSSVC_INTERFACE_UUID)
+
+    b = NdrBuf(); b.unique_string(None); b.u32(100)
+    resp = wksta_get_info_response_stub(500, "WORKSTATION1", "CORP", 10, 0, status=0)
+    call(fb, sess_b, tree_b, fid_b, 0, b.get(), resp)
+
+    b = NdrBuf(); b.unique_string(None); b.u32(1); b.u32(1)
+    resp = wksta_user_enum_response_stub(
+        [("alice", "CORP", "", "\\\\DC1"), ("bob", "CORP", "", "\\\\DC1")], total_entries=2, status=0)
+    call(fb, sess_b, tree_b, fid_b, 2, b.get(), resp)
+
+    # NetrWkstaTransportEnum(5) -- header-only, same posture as flow A's own three SRVSVC
+    # header-only opnums (see wkssvc.hpp's own OPNUM COVERAGE note).
+    b = NdrBuf(); b.unique_string(None); b.u32(0); b.u32(0)
+    call(fb, sess_b, tree_b, fid_b, 5, b.get(), b"\x00" * 16)
+
+    # NetrJoinDomain2(22)/NetrUnjoinDomain2(23) -- structural-only by design; stub bytes are
+    # deliberately non-empty and non-zero to prove the encrypted password material is never rendered.
+    call(fb, sess_b, tree_b, fid_b, 22, b"\xEF" * 48, b"\x00" * 4)
+    call(fb, sess_b, tree_b, fid_b, 23, b"\x12" * 32, b"\x00" * 4)
+
+    close_pipe(fb, sess_b, tree_b, fid_b)
+
+    # ---------------------------------------------------------------------------------------------
+    # Flow C: a SEALED NetrShareGetInfo request/response pair on an already-bound SRVSVC context --
+    # the "sealed, N bytes, not decoded" fallback.
+    # ---------------------------------------------------------------------------------------------
+    fc = make_flow()
+    sess_c, tree_c = 0xC000000000000003, 1
+    fid_c = open_pipe(fc, sess_c, tree_c, "srvsvc")
+    bind_and_ack(fc, sess_c, tree_c, fid_c, next_call_id(), SRVSVC_INTERFACE_UUID,
+                 abstract_ver_major=3, abstract_ver_minor=0)
+    call(fc, sess_c, tree_c, fid_c, 16, b"\x45" * 20, b"\x46" * 16,
+         auth=(16, 6, b"\x01\x02\x03\x04\x05\x06\x07\x08"))  # auth_type 16 (SSPI), auth_level 6 (PKT_PRIVACY)
+    close_pipe(fc, sess_c, tree_c, fid_c)
+
+    # ---------------------------------------------------------------------------------------------
+    # Flow D: a bind whose only offered context names Netlogon's OWN interface UUID (not SRVSVC's) on
+    # a "srvsvc"-named pipe -- the request that follows must stay structural (no srvsvc_calls at
+    # all).
+    # ---------------------------------------------------------------------------------------------
+    fd = make_flow()
+    sess_d, tree_d = 0xC000000000000004, 1
+    fid_d = open_pipe(fd, sess_d, tree_d, "srvsvc")
+    bind_and_ack(fd, sess_d, tree_d, fid_d, next_call_id(), NETLOGON_INTERFACE_UUID)
+    b = NdrBuf(); b.unique_string("\\\\SRV1"); b.u32(1); b.u32(1)
+    call(fd, sess_d, tree_d, fid_d, 15, b.get(), b"\x00" * 16)
+    close_pipe(fd, sess_d, tree_d, fid_d)
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_070_000 + i, i * 1000)
+    (TESTS_DIR / "sample_srvsvc_wkssvc.pcap").write_bytes(data)
 
 
 def build_netlogon_sample():
@@ -12567,6 +12935,7 @@ if __name__ == "__main__":
     build_smb_sample()
     build_netlogon_sample()
     build_samr_lsarpc_sample()
+    build_srvsvc_wkssvc_sample()
     build_policy_engine_sample()
     build_summarize_unclassified_sample()
     build_inventory_sample()

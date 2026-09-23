@@ -969,6 +969,114 @@ void decode_dcerpc_and_lsarpc(SmbMessage& m, LsarpcPipeState& pipe_state, SmbFlo
     }
 }
 
+// SRVSVC's own bind/bind_ack/request/response/fault bookkeeping -- same shape as
+// decode_dcerpc_and_samr above (Phase 0's resolve_dcerpc_bind_bookkeeping template, no cross-interface
+// note -- see srvsvc.hpp's own header comment for why SRVSVC/WKSSVC don't get one the way SAMR/LSARPC
+// do).
+void decode_dcerpc_and_srvsvc(SmbMessage& m, SrvsvcPipeState& pipe_state,
+                               const std::vector<uint8_t>& raw_payload) {
+    if (raw_payload.empty()) return;
+    ByteSpan payload_span(raw_payload.data(), raw_payload.size());
+    m.dcerpc_messages = parse_dcerpc_chain(payload_span);
+
+    for (const DceRpcMessage& dm : m.dcerpc_messages) {
+        try {
+            if (resolve_dcerpc_bind_bookkeeping(dm, pipe_state, is_srvsvc_interface_uuid)) {
+                continue;
+            }
+            if (dm.has_request) {
+                if (pipe_state.bound_context_is_interface &&
+                    dm.request_context_id == pipe_state.interface_context_id) {
+                    ByteSpan stub = payload_span.subspan(dm.stub_offset, dm.stub_length);
+                    SrvsvcCall call = try_parse_srvsvc_request(dm.call_id, dm.opnum, dm.sealed, stub);
+                    pipe_state.pending_calls[dm.call_id] = PendingDceRpcCall{dm.opnum, 0};
+                    m.srvsvc_calls.push_back(std::move(call));
+                }
+            } else if (dm.has_response) {
+                auto it = pipe_state.pending_calls.find(dm.call_id);
+                if (it != pipe_state.pending_calls.end()) {
+                    uint16_t opnum = it->second.opnum;
+                    ByteSpan stub = payload_span.subspan(dm.stub_offset, dm.stub_length);
+                    SrvsvcCall call = try_parse_srvsvc_response(dm.call_id, opnum, dm.sealed, stub);
+                    m.srvsvc_calls.push_back(std::move(call));
+                    pipe_state.pending_calls.erase(it);
+                }
+            }
+        } catch (const ParseError&) {
+            // A malformed stub for this one PDU doesn't invalidate the rest of the chain.
+        }
+    }
+
+    // Curated note -- a share was added or deleted. Fires on every occurrence, not sticky (each
+    // add/delete is its own meaningful event, the same posture netlogon.hpp's own
+    // NetrServerPasswordSet2 note already establishes).
+    for (const SrvsvcCall& call : m.srvsvc_calls) {
+        if (call.is_response) continue;
+        if (call.opnum == 14) {
+            m.notes.push_back(
+                "SRVSVC share created (NetrShareAdd) -- new attack surface potentially opened; also "
+                "routine for legitimate share administration");
+        } else if (call.opnum == 18) {
+            m.notes.push_back(
+                "SRVSVC share deleted (NetrShareDel) -- also routine for legitimate share "
+                "administration");
+        }
+    }
+}
+
+// WKSSVC's own bookkeeping -- same shape as decode_dcerpc_and_srvsvc above.
+void decode_dcerpc_and_wkssvc(SmbMessage& m, WkssvcPipeState& pipe_state,
+                               const std::vector<uint8_t>& raw_payload) {
+    if (raw_payload.empty()) return;
+    ByteSpan payload_span(raw_payload.data(), raw_payload.size());
+    m.dcerpc_messages = parse_dcerpc_chain(payload_span);
+
+    for (const DceRpcMessage& dm : m.dcerpc_messages) {
+        try {
+            if (resolve_dcerpc_bind_bookkeeping(dm, pipe_state, is_wkssvc_interface_uuid)) {
+                continue;
+            }
+            if (dm.has_request) {
+                if (pipe_state.bound_context_is_interface &&
+                    dm.request_context_id == pipe_state.interface_context_id) {
+                    ByteSpan stub = payload_span.subspan(dm.stub_offset, dm.stub_length);
+                    WkssvcCall call = try_parse_wkssvc_request(dm.call_id, dm.opnum, dm.sealed, stub);
+                    pipe_state.pending_calls[dm.call_id] = PendingDceRpcCall{dm.opnum, 0};
+                    m.wkssvc_calls.push_back(std::move(call));
+                }
+            } else if (dm.has_response) {
+                auto it = pipe_state.pending_calls.find(dm.call_id);
+                if (it != pipe_state.pending_calls.end()) {
+                    uint16_t opnum = it->second.opnum;
+                    ByteSpan stub = payload_span.subspan(dm.stub_offset, dm.stub_length);
+                    WkssvcCall call = try_parse_wkssvc_response(dm.call_id, opnum, dm.sealed, stub);
+                    m.wkssvc_calls.push_back(std::move(call));
+                    pipe_state.pending_calls.erase(it);
+                }
+            }
+        } catch (const ParseError&) {
+            // A malformed stub for this one PDU doesn't invalidate the rest of the chain.
+        }
+    }
+
+    // Curated note -- a domain join/unjoin operation was observed. Fires on every occurrence, not
+    // sticky, same posture as SRVSVC's own NetrShareAdd/NetrShareDel notes above.
+    for (const WkssvcCall& call : m.wkssvc_calls) {
+        if (call.is_response) continue;
+        if (call.opnum == 22) {
+            m.notes.push_back(
+                "WKSSVC domain join observed (NetrJoinDomain2) -- carries encrypted domain-join "
+                "credential material, never decoded by this codebase; also routine for legitimate "
+                "machine provisioning");
+        } else if (call.opnum == 23) {
+            m.notes.push_back(
+                "WKSSVC domain unjoin observed (NetrUnjoinDomain2) -- carries encrypted credential "
+                "material, never decoded by this codebase; also routine for legitimate machine "
+                "de-provisioning");
+        }
+    }
+}
+
 // Dispatches a WRITE request / READ response / IOCTL request-or-response's own dcerpc_raw_payload
 // to whichever per-interface pipe-state map `file_id` is tracked in, if any -- one FileId is
 // tracked in at most one map by construction (the CREATE-response handler below inserts into
@@ -993,6 +1101,16 @@ void dispatch_dcerpc_payload(SmbMessage& m, SmbFlowState& state, const SmbFileId
     auto lit = state.lsarpc_pipes.find(file_id);
     if (lit != state.lsarpc_pipes.end()) {
         decode_dcerpc_and_lsarpc(m, lit->second, state, m.dcerpc_raw_payload);
+        return;
+    }
+    auto svit = state.srvsvc_pipes.find(file_id);
+    if (svit != state.srvsvc_pipes.end()) {
+        decode_dcerpc_and_srvsvc(m, svit->second, m.dcerpc_raw_payload);
+        return;
+    }
+    auto wkit = state.wkssvc_pipes.find(file_id);
+    if (wkit != state.wkssvc_pipes.end()) {
+        decode_dcerpc_and_wkssvc(m, wkit->second, m.dcerpc_raw_payload);
         return;
     }
 }
@@ -1188,6 +1306,14 @@ std::optional<ProtocolResult> decode_with_correlation(ByteSpan payload, DecodeCo
                                    state.lsarpc_pipes.size() < kMaxTrackedPerSession) {
                             state.lsarpc_pipes[m.file_id] = LsarpcPipeState{};
                             state.tracked_rpc_pipe_file_ids.insert(m.file_id);
+                        } else if (it->second.create_name == "srvsvc" &&
+                                   state.srvsvc_pipes.size() < kMaxTrackedPerSession) {
+                            state.srvsvc_pipes[m.file_id] = SrvsvcPipeState{};
+                            state.tracked_rpc_pipe_file_ids.insert(m.file_id);
+                        } else if (it->second.create_name == "wkssvc" &&
+                                   state.wkssvc_pipes.size() < kMaxTrackedPerSession) {
+                            state.wkssvc_pipes[m.file_id] = WkssvcPipeState{};
+                            state.tracked_rpc_pipe_file_ids.insert(m.file_id);
                         }
                         state.pending_requests.erase(it);
                     }
@@ -1200,6 +1326,8 @@ std::optional<ProtocolResult> decode_with_correlation(ByteSpan payload, DecodeCo
                     state.netlogon_pipes.erase(m.file_id);
                     state.samr_pipes.erase(m.file_id);
                     state.lsarpc_pipes.erase(m.file_id);
+                    state.srvsvc_pipes.erase(m.file_id);
+                    state.wkssvc_pipes.erase(m.file_id);
                     state.tracked_rpc_pipe_file_ids.erase(m.file_id);
                 }
                 break;

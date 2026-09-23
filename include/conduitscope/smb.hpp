@@ -127,6 +127,8 @@
 #include "conduitscope/ntlm.hpp"
 #include "conduitscope/protocol_decoder.hpp"
 #include "conduitscope/samr.hpp"
+#include "conduitscope/srvsvc.hpp"
+#include "conduitscope/wkssvc.hpp"
 
 namespace conduitscope {
 
@@ -249,6 +251,11 @@ struct SmbMessage {
     // map by construction (see dispatch_dcerpc_payload, smb.cpp).
     std::vector<SamrCall> samr_calls;
     std::vector<LsarCall> lsarpc_calls;
+    // SRVSVC-level / WKSSVC-level decode, same convention as netlogon_calls/samr_calls/lsarpc_calls
+    // above -- phase 2's own two interfaces (see srvsvc.hpp's own header comment for why they're
+    // bundled without a cross-interface note).
+    std::vector<SrvsvcCall> srvsvc_calls;
+    std::vector<WkssvcCall> wkssvc_calls;
 
     // Correlation-derived -- filled by SmbTcpDecoder::decode, not try_parse_smb2_chain.
     bool correlated_request_seen = false;
@@ -332,6 +339,25 @@ struct LsarpcPipeState {
     bool enumeration_note_seen = false;
 };
 
+// Per-FileId state for a tracked "srvsvc" named pipe -- see SamrPipeState's own doc comment; the same
+// shape, same field-naming contract. No sticky enumeration-note flag here (unlike SamrPipeState/
+// LsarpcPipeState) -- srvsvc.hpp's own curated notes (NetrShareAdd/NetrShareDel observed) fire on
+// every occurrence rather than once per pipe conversation, so no sticky state is needed for them.
+struct SrvsvcPipeState {
+    std::unordered_map<uint32_t, PendingDceRpcCall> pending_calls;
+    bool bound_context_is_interface = false;
+    uint16_t interface_context_id = 0;
+};
+
+// Per-FileId state for a tracked "wkssvc" named pipe -- same shape as SrvsvcPipeState above, same
+// "no sticky note flag needed" reasoning (wkssvc.hpp's own NetrJoinDomain2/UnjoinDomain2 note also
+// fires on every occurrence).
+struct WkssvcPipeState {
+    std::unordered_map<uint32_t, PendingDceRpcCall> pending_calls;
+    bool bound_context_is_interface = false;
+    uint16_t interface_context_id = 0;
+};
+
 // Attempts to interpret `payload` -- which must start with the 4-byte Zero+StreamProtocolLength
 // prefix (see this file's own FRAMING paragraph) -- as one SMB frame. Returns std::nullopt (never
 // throws) if match_smb_magic doesn't recognize the 4 bytes following that prefix.
@@ -404,10 +430,12 @@ public:
                                                                                         // FileId
     std::unordered_map<SmbFileId, SamrPipeState, SmbFileIdHash> samr_pipes;
     std::unordered_map<SmbFileId, LsarpcPipeState, SmbFileIdHash> lsarpc_pipes;
+    std::unordered_map<SmbFileId, SrvsvcPipeState, SmbFileIdHash> srvsvc_pipes;
+    std::unordered_map<SmbFileId, WkssvcPipeState, SmbFileIdHash> wkssvc_pipes;
 
-    // The union of every FileId tracked in netlogon_pipes/samr_pipes/lsarpc_pipes above (and, as
-    // each is added, every future per-interface pipe-state map this struct gains -- srvsvc_pipes/
-    // wkssvc_pipes/drsuapi_pipes) -- kept in lockstep by the CREATE-response/CLOSE handlers
+    // The union of every FileId tracked in netlogon_pipes/samr_pipes/lsarpc_pipes/srvsvc_pipes/
+    // wkssvc_pipes above (and, as each is added, every future per-interface pipe-state map this
+    // struct gains -- drsuapi_pipes) -- kept in lockstep by the CREATE-response/CLOSE handlers
     // (smb.cpp) with whichever per-interface map an insert/erase also touches. try_parse_smb
     // (smb.hpp) only ever needs membership, not which interface, to decide whether a WRITE/READ/
     // IOCTL message's payload is worth copying into dcerpc_raw_payload at all -- see

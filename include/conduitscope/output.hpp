@@ -253,6 +253,9 @@ private:
     // lsarpc.hpp).
     std::map<std::string, size_t> samr_opnum_counts_;
     std::map<std::string, size_t> lsarpc_opnum_counts_;
+    // Same convention, phase 2's own two interfaces (srvsvc.hpp/wkssvc.hpp).
+    std::map<std::string, size_t> srvsvc_opnum_counts_;
+    std::map<std::string, size_t> wkssvc_opnum_counts_;
     std::map<std::string, size_t> s7comm_function_counts_;
     std::map<std::string, size_t> dnp3_function_counts_;
     std::map<std::string, size_t> iec104_asdu_type_counts_;

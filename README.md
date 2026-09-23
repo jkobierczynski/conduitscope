@@ -40,7 +40,11 @@ notes -- the fourth protocol of that same suite), SAMR + LSARPC
 with no independent wire gate or CLI flag of their own, with curated
 account/group-enumeration, SID/name-translation-or-enumeration,
 cross-interface, and null/guest-session-escalation attack/monitoring
-notes),
+notes), SRVSVC + WKSSVC (MS-SRVS, MS-WKST, likewise carried inside SMB2
+named-pipe I/O with no independent wire gate or CLI flag of their own,
+with level-1-scoped share-enumeration/workstation-identity/logged-on-user
+decode and curated share-added/deleted and domain-join/unjoin
+attack/monitoring notes),
 IEEE Spanning Tree Protocol
 (STP/RSTP/MSTP), DeviceNet (CAN-bus CIP, via SocketCAN pcap captures), DNS,
 mDNS, LLMNR, and NetBIOS Name Service (NBT-NS), ICMP, RIP, IGMP, VRRP, HSRP,

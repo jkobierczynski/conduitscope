@@ -2807,6 +2807,85 @@ void write_lsarpc_call_json_fields(std::ostream& out, const LsarCall& lc) {
     out << "            \"summary\": \"" << json_escape(lc.summary) << "\"\n";
 }
 
+// Renders one SrvsvcCall (srvsvc.hpp) as a JSON object's inner fields -- same conventions as
+// write_samr_call_json_fields above.
+void write_srvsvc_call_json_fields(std::ostream& out, const SrvsvcCall& sc) {
+    out << "            \"opnum\": \"" << json_escape(sc.opnum_name) << "\",\n";
+    out << "            \"call_id\": " << sc.call_id << ",\n";
+    out << "            \"is_response\": " << (sc.is_response ? "true" : "false") << ",\n";
+    if (sc.sealed) {
+        out << "            \"sealed\": true,\n";
+    }
+    if (sc.has_server_name && !sc.server_name.empty()) {
+        out << "            \"server_name\": \"" << json_escape(sc.server_name) << "\",\n";
+    }
+    if (sc.has_level) {
+        out << "            \"level\": " << sc.level << ",\n";
+    }
+    if (!sc.net_name.empty()) {
+        out << "            \"net_name\": \"" << json_escape(sc.net_name) << "\",\n";
+    }
+    if (!sc.shares.empty()) {
+        out << "            \"shares\": [\n";
+        for (size_t i = 0; i < sc.shares.size(); ++i) {
+            const SrvsvcShareEntry& s = sc.shares[i];
+            out << "              {\"net_name\": \"" << json_escape(s.net_name) << "\", \"type\": \""
+                << json_escape(s.type_name) << "\", \"remark\": \"" << json_escape(s.remark) << "\"}"
+                << (i + 1 < sc.shares.size() ? "," : "") << "\n";
+        }
+        out << "            ],\n";
+    }
+    if (sc.has_total_entries) {
+        out << "            \"total_entries\": " << sc.total_entries << ",\n";
+    }
+    if (sc.has_response_fields && sc.has_status) {
+        out << "            \"status_name\": \"" << json_escape(sc.status_name) << "\",\n";
+    }
+    out << "            \"summary\": \"" << json_escape(sc.summary) << "\"\n";
+}
+
+// Renders one WkssvcCall (wkssvc.hpp) as a JSON object's inner fields -- same conventions as
+// write_samr_call_json_fields above.
+void write_wkssvc_call_json_fields(std::ostream& out, const WkssvcCall& wc) {
+    out << "            \"opnum\": \"" << json_escape(wc.opnum_name) << "\",\n";
+    out << "            \"call_id\": " << wc.call_id << ",\n";
+    out << "            \"is_response\": " << (wc.is_response ? "true" : "false") << ",\n";
+    if (wc.sealed) {
+        out << "            \"sealed\": true,\n";
+    }
+    if (wc.has_server_name && !wc.server_name.empty()) {
+        out << "            \"server_name\": \"" << json_escape(wc.server_name) << "\",\n";
+    }
+    if (wc.has_level) {
+        out << "            \"level\": " << wc.level << ",\n";
+    }
+    if (wc.has_wksta_info) {
+        out << "            \"platform_id\": " << wc.platform_id << ",\n";
+        out << "            \"computername\": \"" << json_escape(wc.computername) << "\",\n";
+        out << "            \"langroup\": \"" << json_escape(wc.langroup) << "\",\n";
+        out << "            \"os_version\": \"" << wc.ver_major << "." << wc.ver_minor << "\",\n";
+    }
+    if (!wc.logged_on_users.empty()) {
+        out << "            \"logged_on_users\": [\n";
+        for (size_t i = 0; i < wc.logged_on_users.size(); ++i) {
+            const WkssvcUserEntry& u = wc.logged_on_users[i];
+            out << "              {\"username\": \"" << json_escape(u.username)
+                << "\", \"logon_domain\": \"" << json_escape(u.logon_domain)
+                << "\", \"oth_domains\": \"" << json_escape(u.oth_domains)
+                << "\", \"logon_server\": \"" << json_escape(u.logon_server) << "\"}"
+                << (i + 1 < wc.logged_on_users.size() ? "," : "") << "\n";
+        }
+        out << "            ],\n";
+    }
+    if (wc.has_total_entries) {
+        out << "            \"total_entries\": " << wc.total_entries << ",\n";
+    }
+    if (wc.has_response_fields && wc.has_status) {
+        out << "            \"status_name\": \"" << json_escape(wc.status_name) << "\",\n";
+    }
+    out << "            \"summary\": \"" << json_escape(wc.summary) << "\"\n";
+}
+
 // Renders one SmbMessage (smb.hpp) as a JSON object's inner fields, indented for use inside
 // write_smb_json_fields's own "smb_messages" array below -- one call per sub-message in a
 // (possibly compounded, see smb.hpp's own COMPOUNDING paragraph) SmbFrame. Every field not
@@ -2947,6 +3026,24 @@ void write_one_smb_message_json_fields(std::ostream& out, const SmbMessage& m) {
             out << "          {\n";
             write_lsarpc_call_json_fields(out, m.lsarpc_calls[i]);
             out << "          }" << (i + 1 < m.lsarpc_calls.size() ? "," : "") << "\n";
+        }
+        out << "        ],\n";
+    }
+    if (!m.srvsvc_calls.empty()) {
+        out << "        \"srvsvc_calls\": [\n";
+        for (size_t i = 0; i < m.srvsvc_calls.size(); ++i) {
+            out << "          {\n";
+            write_srvsvc_call_json_fields(out, m.srvsvc_calls[i]);
+            out << "          }" << (i + 1 < m.srvsvc_calls.size() ? "," : "") << "\n";
+        }
+        out << "        ],\n";
+    }
+    if (!m.wkssvc_calls.empty()) {
+        out << "        \"wkssvc_calls\": [\n";
+        for (size_t i = 0; i < m.wkssvc_calls.size(); ++i) {
+            out << "          {\n";
+            write_wkssvc_call_json_fields(out, m.wkssvc_calls[i]);
+            out << "          }" << (i + 1 < m.wkssvc_calls.size() ? "," : "") << "\n";
         }
         out << "        ],\n";
     }
@@ -3598,6 +3695,12 @@ void StatsWriter::write_packet(const DecodedPacket& p) {
             for (const LsarCall& lc : m.lsarpc_calls) {
                 if (!lc.is_response) lsarpc_opnum_counts_[lc.opnum_name]++;
             }
+            for (const SrvsvcCall& svc : m.srvsvc_calls) {
+                if (!svc.is_response) srvsvc_opnum_counts_[svc.opnum_name]++;
+            }
+            for (const WkssvcCall& wc : m.wkssvc_calls) {
+                if (!wc.is_response) wkssvc_opnum_counts_[wc.opnum_name]++;
+            }
         }
     }
     if (p.protocol == "s7comm" && p.result) {
@@ -3844,6 +3947,18 @@ void StatsWriter::print_summary(std::ostream& out) const {
     if (!lsarpc_opnum_counts_.empty()) {
         out << "lsarpc opnum counts:\n";
         for (const auto& [name, count] : lsarpc_opnum_counts_) {
+            out << "  " << std::left << std::setw(40) << name << count << "\n";
+        }
+    }
+    if (!srvsvc_opnum_counts_.empty()) {
+        out << "srvsvc opnum counts:\n";
+        for (const auto& [name, count] : srvsvc_opnum_counts_) {
+            out << "  " << std::left << std::setw(40) << name << count << "\n";
+        }
+    }
+    if (!wkssvc_opnum_counts_.empty()) {
+        out << "wkssvc opnum counts:\n";
+        for (const auto& [name, count] : wkssvc_opnum_counts_) {
             out << "  " << std::left << std::setw(40) << name << count << "\n";
         }
     }

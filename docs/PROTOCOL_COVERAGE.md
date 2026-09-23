@@ -7033,6 +7033,223 @@ SID that followed -- caught by decoding the fixture and observing
 file headers for the full writeup, including the complete empirically-
 derived NDR deferred-pointer-ordering rule.
 
+### SRVSVC + WKSSVC (MS-SRVS, MS-WKST; carried inside SMB2 WRITE/READ, same shape as Netlogon/SAMR/LSARPC) -- phase 2 of the same follow-on Windows RPC batch (SAMR/LSARPC done, SRVSVC/WKSSVC this section, DRSUAPI + WinRM/WMI remain future work)
+
+SRVSVC (Server Service Remote Protocol) and WKSSVC (Workstation Service
+Remote Protocol) are the interfaces `net view`/`net config workstation`-
+style tooling drives: SRVSVC answers "what shares does this host offer"
+(the direct wire-level signature of share-discovery recon -- the step
+that finds a writable or interesting share before anything else happens),
+WKSSVC answers "what is this machine, and who is logged into it"
+(`NetrWkstaUserEnum` is the direct wire signature of interactive-logon
+reconnaissance). Unlike SAMR+LSARPC, these two interfaces have no
+cross-interface note between them -- bundled purely for scope-per-phase
+consistency, not because one call informs the other. Same envelope-vs-
+interface split as every prior RPC phase: `include/conduitscope/srvsvc.hpp`/
+`src/srvsvc.cpp` and `include/conduitscope/wkssvc.hpp`/`src/wkssvc.cpp`,
+`smb.cpp` gaining two more dispatch functions (`decode_dcerpc_and_srvsvc`/
+`decode_dcerpc_and_wkssvc`) built on Phase 0's shared
+`resolve_dcerpc_bind_bookkeeping` template.
+
+#### Wire format
+
+Interface UUIDs, verified against impacket's own MSRPC UUID constants:
+SRVSVC `4b324fc8-1670-01d3-1278-5a47bf6ee188` -- interface **version
+3.0**, not the 1.0 every other interface in this codebase negotiates (not
+itself validated by any interface module here, only the UUID string is --
+the fixture-building side passes it explicitly for realism); WKSSVC
+`6bffd098-a112-3610-9833-46c3f87e345a`, version 1.0. The generic DCE/RPC
+PDU envelope is identical to Netlogon's/SAMR's/LSARPC's own -- nothing new
+there.
+
+**`ServerName` is NOT a real context handle.** Nearly every opnum on both
+interfaces opens with a `ServerName` parameter (`SRVSVC_HANDLE`/
+`PSRVSVC_HANDLE`, `WKSSVC_IDENTIFY_HANDLE`/`WKSSVC_IMPERSONATE_HANDLE`, or
+-- for WKSSVC's own `NetrJoinDomain2`/`UnjoinDomain2` -- a bare `LPWSTR`)
+that LOOKS like SAMR's/LSARPC's own 20-byte opaque handles but is actually
+just a plain `[unique] wchar_t*` string (the target server's own name, or
+usually NULL since the target is implicit in the already-established SMB
+session) -- the exact same shape Netlogon's own top-level `ComputerName`
+parameter already uses. Decoded with `dcerpc.hpp`'s existing
+`read_ndr_unique_string`, no new primitive needed, and never treated as a
+correlation key.
+
+**Two NDR facts confirmed empirically** (installing impacket 0.13.1 in
+the planning sandbox, marshalling real `NetrShareEnum`/`NetrShareGetInfo`
+request/response objects, hex-dumping the actual bytes -- continuing
+Phase 1's own verification methodology rather than assuming the SAMR/
+LSARPC-derived rules transfer unchanged):
+
+- **`SHARE_ENUM_STRUCT`'s embedded `SHARE_ENUM_UNION` carries its OWN
+  4-byte tag/discriminant on the wire**, immediately after the struct's
+  own `Level` field, even though the two are always equal -- a real
+  decoder could infer the tag from `Level` alone, but this codebase reads
+  (and discards) the duplicate rather than assuming it away.
+  `WKSTA_USER_ENUM_STRUCT`'s own `WKSTA_USER_ENUM_UNION` follows the
+  identical shape.
+- **A struct reached via a SINGLE (non-array) pointer still uses the
+  "nested struct batches its own pointers" shape**, not the eager
+  per-field shape a naive reading of `read_ndr_unique_string`-per-field
+  would suggest: `NetrShareGetInfo`'s own response reaches exactly one
+  `SHARE_INFO_1` via one pointer (not an array), and its own
+  `netname`/`type`/`remark` fields are STILL written batched (both
+  pointer referents first, then both deferred strings) -- caught directly
+  by re-deriving the exact byte layout from the impacket hex dump after
+  an initial implementation got this wrong (read_share_info_1's first
+  draft called `read_ndr_unique_string` sequentially per field, which
+  would have silently misread `shi1_type` as string data), fixed before
+  any `CMakeLists.txt` test was written, not by code review. `WKSTA_INFO_100`
+  (WKSSVC's own single-pointer-reached struct) was verified the same way
+  and confirmed correct on the first attempt. `SHARE_INFO_1_ARRAY`/
+  `WKSTA_USER_INFO_1_ARRAY` (both reached via an array, not a single
+  pointer) follow the ordinary array-batching rule Phase 1 already
+  documented: every element's fixed part first, for every element, THEN
+  every element's own deferred string data, in element order.
+
+One more empirically-confirmed divergence between the two interfaces:
+`NetrShareEnum`'s own response `ResumeHandle` IS a pointer (`LPLONG`),
+while `NetrWkstaUserEnum`'s own response `ResumeHandle` is a PLAIN `ULONG`
+VALUE -- despite the two opnums' otherwise near-identical shape, this was
+not assumed from the parallel and was independently confirmed for each.
+
+#### Message/opnum coverage
+
+**SRVSVC**, full field decode (request + response): `NetrShareEnum`(15)
+(the `net view` enumeration itself -- the single highest-value recon call
+on this interface) and `NetrShareGetInfo`(16), both scoped to **LEVEL 1
+ONLY** (`shi1_netname`/`shi1_type`/`shi1_remark` -- netname, share-type
+flags rendered via `srvsvc_share_type_name` as `"disk"`/`"print_queue"`/
+`"device"`/`"ipc"` plus a `" (special)"` suffix when the `STYPE_SPECIAL`
+top bit is set (the flag marking an administrative/hidden share like
+C$/ADMIN$/IPC$), and the share's own descriptive remark; every other
+level -- 0/2/501/502/503 -- reported by its own numeric level only, since
+those levels carry permissions/path/password/security-descriptor fields
+not independently verified, several of which can carry a share's own
+local filesystem path -- treated with the same caution as a real secret
+even though a path isn't literally one). Header-level decode only, on the
+**REQUEST SIDE ONLY** (`ServerName` + the enumeration's own `Level`; the
+request's own `Qualifier`/`ClientName`/`UserName`/`BasePath` filter fields
+are not decoded): `NetrConnectionEnum`(8), `NetrFileEnum`(9),
+`NetrSessionEnum`(12) -- the RESPONSE side for these three is deliberately
+structural-only instead (see Wire format above for why). Opnum-name-only
+with a curated note firing on every occurrence (not sticky -- each
+add/delete is its own meaningful event, the same posture Netlogon's own
+`NetrServerPasswordSet2` note established): `NetrShareAdd`(14),
+`NetrShareDel`(18). Any opnum outside this table (`NetrFileGetInfo`/
+`Close`, `NetrSessionDel`, `NetrShareSetInfo`/`DelSticky`/`EnumSticky`,
+the `NetrServerX` statistics/transport family, and more) reported as
+`"opnum N"`.
+
+**WKSSVC**, full field decode: `NetrWkstaGetInfo`(0), scoped to **LEVEL
+100 ONLY** (`wki100_platform_id`/`computername`/`langroup`/`ver_major`/
+`ver_minor` -- the basic "what is this machine" identity level; every
+other level -- 101/102/502/1013/1018/1046 -- reported by number only), and
+`NetrWkstaUserEnum`(2), scoped to **LEVEL 1 ONLY**
+(`wkui1_username`/`logon_domain`/`oth_domains`/`logon_server` -- who is
+logged on, from which domain, and via which logon server; level 0,
+`wkui0_username` alone, reported by level number only rather than
+duplicating the decode path for strictly less information). Header-level
+decode only, request side only, same reasoning as SRVSVC's own three
+above: `NetrWkstaTransportEnum`(5). Opnum-name-only with a curated note
+firing on every occurrence: `NetrJoinDomain2`(22)/`NetrUnjoinDomain2`(23)
+-- both carry a `PJOINPR_ENCRYPTED_USER_PASSWORD` field never parsed, the
+same "never decode anything credential/secret-shaped" posture SAMR's own
+`SamrChangePasswordUser`/`SamrSetInformationUser` opnums established,
+distinguished only by the note firing here (a domain join/unjoin is a
+rarer, higher-signal administrative event worth flagging even without
+decoding its payload -- unlike SAMR's fully silent posture for its own
+password opnums). Any opnum outside this table (`NetrWkstaSetInfo`, the
+`NetrUse*` family, `NetrWkstaTransportAdd`, `NetrWorkstationStatisticsGet`,
+`NetrGetJoinInformation`, and more) reported numerically.
+
+#### Curated attack/monitoring detection
+
+Four notes, two per interface, each firing on EVERY occurrence rather
+than being sticky once-per-pipe-conversation (a deliberate departure from
+SAMR's/LSARPC's own enumeration-note posture -- each share add/delete or
+domain join/unjoin is its own meaningful administrative event, the same
+reasoning Netlogon's own `NetrServerPasswordSet2` note already
+established): **SRVSVC share created** (`NetrShareAdd` observed -- new
+attack surface potentially opened) and **SRVSVC share deleted**
+(`NetrShareDel` observed); **WKSSVC domain join observed**
+(`NetrJoinDomain2` -- flags that encrypted domain-join credential
+material is present but never decoded) and **WKSSVC domain unjoin
+observed** (`NetrUnjoinDomain2`, same caveat). All four explicitly caveat
+that the underlying action is also routine for legitimate share/machine
+administration, the same false-positive discipline every prior phase's
+notes carry. No cross-interface note -- SRVSVC and WKSSVC calls together
+on one session are not, by themselves, a more significant signal than
+either alone (unlike SAMR+LSARPC's own RID-resolution-plus-SID-
+translation combination).
+
+#### State/correlation design
+
+`SrvsvcPipeState`/`WkssvcPipeState` (`smb.hpp`) are structurally simpler
+than `SamrPipeState`/`LsarpcPipeState` -- the same `call_id`-keyed
+`pending_calls` map and `bound_context_is_interface`/
+`interface_context_id` pair, but NO `enumeration_note_seen` sticky flag,
+since neither interface's own curated notes are sticky (see Curated
+attack/monitoring detection above). `SmbFlowState` gained
+`srvsvc_pipes`/`wkssvc_pipes` (`unordered_map<SmbFileId, ...PipeState,
+SmbFileIdHash>`, populated at `CREATE` response exactly like the three
+pipe maps before them, gated on the `CREATE` request's own pipe name
+equaling `"srvsvc"`/`"wkssvc"` respectively).
+
+#### DELIBERATELY NOT IMPLEMENTED in this pass
+
+DRSUAPI, WinRM, WMI (future phases of the same batch). SHARE_INFO/
+WKSTA_INFO/WKSTA_USER_INFO levels other than the ones named above (see
+Message/opnum coverage). SRVSVC's own three header-only opnums' RESPONSE
+side (their level-dependent per-entry info structs -- `CONNECTION_INFO_0/1`,
+`FILE_INFO_2/3`, `SESSION_INFO_0/1/2/10/502` -- were not independently
+verified, so the response stops at opnum/status rather than risking a
+silent misalignment reaching `TotalEntries`; see Wire format above).
+Every SRVSVC/WKSSVC opnum outside each file's own curated OPNUM COVERAGE
+list (dozens exist on each interface). DCE/RPC PDU fragmentation
+reassembly (inherited scope limit from `dcerpc.hpp`). Decoding sealed
+stub data. Decoding `NetrJoinDomain2`/`UnjoinDomain2`'s own encrypted
+password material.
+
+#### JSON output fields
+
+`srvsvc_calls[]`/`wkssvc_calls[]` (only on a message where at least one
+PDU was interpreted at that interface's own level), same `has_*`/
+non-empty-optional gating convention as `samr_calls[]`/`lsarpc_calls[]`:
+`opnum`/`call_id`/`is_response`/`sealed` (sealed fallback only)/
+`server_name`/`level`/`net_name`/`shares[]` (`{"net_name":...,
+"type":..., "remark":...}` entries)/`total_entries`/`status_name`/
+`summary` for SRVSVC; `opnum`/`call_id`/`is_response`/`sealed`/
+`server_name`/`level`/`platform_id`/`computername`/`langroup`/
+`os_version`/`logged_on_users[]` (`{"username":..., "logon_domain":...,
+"oth_domains":..., "logon_server":...}` entries)/`total_entries`/
+`status_name`/`summary` for WKSSVC. `--stats` gains `srvsvc opnum
+counts:`/`wkssvc opnum counts:` blocks, the same
+`std::map<std::string, size_t>` pattern every prior interface's own
+counts already established.
+
+#### Validation
+
+No public real-world SRVSVC/WKSSVC capture was incorporated in this pass;
+validated by construction against synthetic
+`tests/sample_srvsvc_wkssvc.pcap` (TCP, 4 independent flows A-D --
+`tools/make_sample_pcap.py`'s `build_srvsvc_wkssvc_sample()`), covering:
+SRVSVC-only full-opnum coverage (two shares including IPC$ as an
+STYPE_IPC|STYPE_SPECIAL admin share) plus the three header-only opnums
+and the two per-occurrence curated-note opnums (flow A); WKSSVC-only full-
+opnum coverage (two logged-on users) plus its own header-only opnum and
+curated-note opnums, with deliberately non-zero/non-empty stub bytes
+proving the encrypted join/unjoin password material is never rendered
+(flow B); a sealed `NetrShareGetInfo` request/response pair on an
+already-bound SRVSVC context, exercising the "sealed, N bytes, not
+decoded" fallback (flow C); a bind offering Netlogon's own interface UUID
+on a `"srvsvc"`-named pipe, the bind-interface-confirmation negative
+control -- the request that follows produces zero `srvsvc_calls` (flow
+D). Every byte offset and note-trigger condition was independently
+smoke-tested against the hand-built fixture, decoded and inspected in
+`--format text`, `--format json`, and `--stats`, BEFORE the
+`CMakeLists.txt` `srvsvc_*`/`wkssvc_*` test family reading it was
+written. See `include/conduitscope/srvsvc.hpp`'s and
+`include/conduitscope/wkssvc.hpp`'s file headers for the full writeup.
 
 ### MELSEC / MC Protocol (SLMP, Mitsubishi Electric) -- TCP port 5001, UDP port 5000
 
