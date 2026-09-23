@@ -121,6 +121,7 @@ std::optional<DeviceNetFrame> try_parse_devicenet(const CanSocketcanFrame& can) 
     f.can_id = static_cast<uint16_t>(can.id & CAN_SFF_MASK);
     f.fd = can.fd;
     f.payload = can.payload;
+    f.payload_truncated = can.truncated;
     for (const auto& n : can.notes) f.notes.push_back(n);
 
     if (f.fd) {
@@ -261,6 +262,21 @@ std::optional<DeviceNetFrame> try_parse_devicenet(const CanSocketcanFrame& can) 
     s << "DeviceNet frame, unclassified CAN ID range: CAN ID=" << hex16(id);
     f.summary = s.str();
     return f;
+}
+
+std::optional<ProtocolResult> DeviceNetDecoder::decode(ByteSpan payload, DecodeContext& /*ctx*/) const {
+    // See devicenet.hpp's own DeviceNetDecoder comment for why this can throw ParseError (exact
+    // transplant of decoder.cpp's own former LINKTYPE_CAN_SOCKETCAN branch, not a new risk).
+    CanSocketcanFrame can = parse_socketcan_frame(payload);
+    if (auto frame = try_parse_devicenet(can)) {
+        return ProtocolResult::make<DeviceNetFrame>("devicenet", std::move(*frame));
+    }
+    return std::nullopt;
+}
+
+const ProtocolDecoder& devicenet_decoder() {
+    static const DeviceNetDecoder instance;
+    return instance;
 }
 
 }  // namespace conduitscope

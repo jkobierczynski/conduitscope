@@ -464,8 +464,9 @@ struct DecodedPacket {
     // SSAP==0x42, Control==0x03, and a destination MAC outside the GARP range that try_parse_stp
     // recognizes is promoted to "stp" instead -- see stp_bpdu_type_name below; on a
     // LINKTYPE_CAN_SOCKETCAN capture, a CAN frame that try_parse_devicenet recognizes (i.e. not an
-    // EFF/RTR/ERR-flagged frame, see can_socketcan.hpp/devicenet.hpp) is "devicenet" -- see
-    // devicenet_can_id below; an EFF/RTR/ERR-flagged frame on that same link type is "non-ip"
+    // EFF/RTR/ERR-flagged frame, see can_socketcan.hpp/devicenet.hpp) is "devicenet" -- a zero-
+    // flat-field migrated protocol, see DecodedPacket::result and devicenet.hpp; an EFF/RTR/ERR-
+    // flagged frame on that same link type is "non-ip"
     // (named structurally by which flag(s) are set, never decoded further -- not a valid DeviceNet
     // frame shape at all)),
     // "unsupported-link", or "parse-error". Also "dns"/"mdns"/"llmnr" (a UDP payload on the
@@ -951,45 +952,17 @@ struct DecodedPacket {
     // reason as ethercat_datagrams/GooseFrame::all_data.
     std::vector<std::string> stp_msti_messages;
 
-    // Only set when protocol == "devicenet" -- see try_parse_devicenet in devicenet.hpp. Unlike
-    // every other protocol this tool decodes, DeviceNet rides a wholly different link layer (CAN,
-    // via SocketCAN pcap framing, LINKTYPE_CAN_SOCKETCAN -- see can_socketcan.hpp) rather than
+    // DeviceNet is a zero-flat-field migrated protocol (see ProtocolDecoder/ProtocolResult in
+    // protocol_decoder.hpp): its fields live in the DeviceNetFrame carried by
+    // DecodedPacket::result, not here -- see output.cpp's write_devicenet_json_fields and
+    // devicenet.hpp's own DeviceNetDecoder (the first GateKind::LinkType protocol). Unlike every
+    // other protocol this tool decodes, DeviceNet rides a wholly different link layer (CAN, via
+    // SocketCAN pcap framing, LINKTYPE_CAN_SOCKETCAN -- see can_socketcan.hpp) rather than
     // Ethernet at all: has_ethernet AND has_ip both stay false for these packets (no MAC addresses,
     // no IP layer -- src_mac/dst_mac/src_ip/dst_ip are all meaningless here), the same "no
     // conventional addressing at all" shape STP's own has_ip==false (but has_ethernet==true, since
     // STP at least still rides Ethernet framing) doesn't quite share -- DeviceNet is the first
     // protocol in this codebase with NEITHER.
-    uint16_t devicenet_can_id = 0;         // the masked 11-bit standard CAN identifier (0-0x7FF)
-    int devicenet_group = 0;               // 1-4, or 0 for the unclassified 0x07F0-0x07FF range
-    std::string devicenet_group_name;      // "Group 1"/"Group 2"/"Group 3"/"Group 4"/
-                                             // "Unclassified (0x07F0-0x07FF)"
-    std::string devicenet_message_type_name;  // per-group named message type, see devicenet.hpp
-
-    bool devicenet_has_source_mac_id = false;  // Groups 1-3 only
-    uint8_t devicenet_source_mac_id = 0;
-
-    bool devicenet_has_group3_header = false;  // Group 3 only -- see devicenet.hpp
-    bool devicenet_is_fragmented = false;
-    bool devicenet_is_xid = false;
-    uint8_t devicenet_dest_mac_id = 0;  // only meaningful when devicenet_has_group3_header
-
-    bool devicenet_has_cip_service = false;  // Group 3, non-fragmented only
-    bool devicenet_cip_is_response = false;
-    uint8_t devicenet_cip_service = 0;       // the 7-bit service code, reply bit already stripped
-    std::string devicenet_cip_service_name;
-
-    bool devicenet_has_dup_mac_id_check = false;  // Group 2, message ID 0x07 only -- see devicenet.hpp
-    bool devicenet_dup_mac_id_is_response = false;
-    uint8_t devicenet_dup_mac_id_physical_port_number = 0;
-    uint16_t devicenet_dup_mac_id_vendor_id = 0;
-    uint32_t devicenet_dup_mac_id_serial_number = 0;
-
-    bool devicenet_fd = false;  // CAN FD frame -- payload not semantically decoded, see devicenet.hpp
-    bool devicenet_payload_truncated = false;  // the underlying SocketCAN record's own payload was
-                                                 // shorter than its declared Payload Length -- see
-                                                 // can_socketcan.hpp
-    std::string devicenet_payload_hex;
-    size_t devicenet_payload_length = 0;
 
     // Only set when protocol == "bacnet" -- see try_parse_bacnet in bacnet.hpp. Unlike EtherCAT/
     // PROFINET/GOOSE/SV above, BACnet/IP rides on UDP (conventionally port 47808/0xBAC0, has_ip
@@ -1231,48 +1204,15 @@ struct DecodedPacket {
     size_t mqtt_sparkplug_metric_count = 0;  // every metric found, even past the rendering cap below
     std::vector<std::string> mqtt_sparkplug_metrics;  // one rendered summary per metric, capped
 
-    // Only set when protocol == "ffhse" -- see try_parse_ffhse in ffhse.hpp. FOUNDATION Fieldbus
-    // HSE rides EITHER TCP or UDP, conventionally ports 1089/1090/1091/3622 depending on
-    // sub-protocol (FDA/SM/FMS/LAN Redundancy), all recorded as "expected port" annotations only
-    // (the sub-protocol is signaled in-band via the header, not by port) -- see ffhse.hpp's file
-    // header comment for this decoder's own honest comparison of its structural detection gate
-    // against this codebase's other opportunistic detectors (it is weaker than even HART-IP's).
-    uint8_t ffhse_version = 0;
-    uint8_t ffhse_options = 0;  // raw Options byte
-    std::string ffhse_protocol_name;  // "FDA Session Management"/"SM"/"FMS"/"LAN Redundancy" --
-                                        // always set when protocol == "ffhse"
-    std::string ffhse_type_name;      // "Request"/"Response"/"Error"
-    bool ffhse_confirmed = false;     // Service byte's own bit 7
-    uint8_t ffhse_service_id = 0;     // Service byte & 0x7f
-    uint32_t ffhse_fda_address = 0;
-    uint16_t ffhse_link_id = 0;       // fda_address >> 16 -- see ffhse.hpp's "LinkId branch"
-    uint32_t ffhse_message_length = 0;
-
-    // Optional trailer fields -- present only when their own Options bit is set.
-    bool ffhse_has_message_number = false;
-    uint32_t ffhse_message_number = 0;
-    bool ffhse_has_invoke_id = false;
-    uint32_t ffhse_invoke_id = 0;
-    bool ffhse_has_time_stamp = false;
-    uint64_t ffhse_time_stamp = 0;
-    bool ffhse_has_extended_control_field = false;
-    uint32_t ffhse_extended_control_field = 0;
-
-    // Best-effort message name, e.g. "FDA Open Session Req", "SM Identify Rsp", "FMS Initiate
-    // Err" -- always set when protocol == "ffhse".
-    std::string ffhse_message_name;
-    bool ffhse_recognized = false;   // this decoder recognized the (protocol,type,confirmed,
-                                       // service id) combination at all (Tier 1 OR Tier 2)
-    bool ffhse_body_decoded = false;  // true only for a Tier-1 message whose body matched this
-                                        // decoder's expected shape -- see ffhse.hpp's Tier-1/Tier-2
-                                        // split
-    // One "field=value" entry per decoded field, wire order -- mirrors hartip_values'/
-    // bacnet_values' scheme. Populated only when ffhse_body_decoded.
-    std::vector<std::string> ffhse_values;
-
-    bool ffhse_body_shown_as_hex = false;
-    std::string ffhse_body_hex;
-    size_t ffhse_body_length = 0;
+    // FF-HSE is a zero-flat-field migrated protocol (see ProtocolDecoder/ProtocolResult in
+    // protocol_decoder.hpp): its fields live in the FfhseFrame carried by
+    // DecodedPacket::result (DecodedPacket::result->as<FfhseResult>().first), not here -- see
+    // output.cpp's write_ffhse_json_fields. FOUNDATION Fieldbus HSE rides EITHER TCP or UDP,
+    // conventionally ports 1089/1090/1091/3622 depending on sub-protocol (FDA/SM/FMS/LAN
+    // Redundancy), all recorded as "expected port" annotations only (the sub-protocol is signaled
+    // in-band via the header, not by port) -- see ffhse.hpp's file header comment for this
+    // decoder's own honest comparison of its structural detection gate against this codebase's
+    // other opportunistic detectors (it is weaker than even HART-IP's).
 
     // Only set when protocol == "dns", "mdns", or "llmnr" -- see try_parse_dns_message in
     // dns.hpp. All three share this one field family (rather than each getting its own, the way

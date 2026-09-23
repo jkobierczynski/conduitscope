@@ -647,6 +647,87 @@ void write_goose_json_fields(std::ostream& out, const GooseFrame& gs) {
     }
 }
 
+// The FF-HSE analog of write_twincat_json_fields above -- same rationale (a plain free function,
+// not a ProtocolRenderer interface). Reads straight from the FIRST coalesced PDU's own
+// FfhseFrame (FfhseResult::first) -- exactly what the legacy call sites' own merge_ffhse lambda
+// used to copy into DecodedPacket's flat fields only for `is_first_message`; every OTHER
+// coalesced PDU (if any) contributes only its own notes (already folded into
+// DecodedPacket::notes at the call site), never a second set of JSON fields, matching BGP's own
+// "one full struct, extra ones as notes" posture for its own coalescing.
+void write_ffhse_json_fields(std::ostream& out, const FfhseFrame& f) {
+    out << "    \"ffhse_version\": " << static_cast<unsigned>(f.header.version) << ",\n";
+    out << "    \"ffhse_options\": " << static_cast<unsigned>(f.header.options) << ",\n";
+    out << "    \"ffhse_protocol\": \"" << json_escape(f.header.protocol_name) << "\",\n";
+    out << "    \"ffhse_type\": \"" << json_escape(f.header.type_name) << "\",\n";
+    out << "    \"ffhse_confirmed\": " << (f.header.confirmed ? "true" : "false") << ",\n";
+    out << "    \"ffhse_service_id\": " << static_cast<unsigned>(f.header.service_id) << ",\n";
+    std::ostringstream fda_addr;
+    fda_addr << "0x" << std::hex << std::uppercase << std::setw(8) << std::setfill('0') << f.header.fda_address;
+    out << "    \"ffhse_fda_address\": \"" << fda_addr.str() << "\",\n";
+    out << "    \"ffhse_link_id\": " << f.header.link_id << ",\n";
+    out << "    \"ffhse_message_length\": " << f.header.message_length << ",\n";
+    if (f.trailer.has_message_number) out << "    \"ffhse_message_number\": " << f.trailer.message_number << ",\n";
+    if (f.trailer.has_invoke_id) out << "    \"ffhse_invoke_id\": " << f.trailer.invoke_id << ",\n";
+    if (f.trailer.has_time_stamp) out << "    \"ffhse_time_stamp\": " << f.trailer.time_stamp << ",\n";
+    if (f.trailer.has_extended_control_field) {
+        out << "    \"ffhse_extended_control_field\": " << f.trailer.extended_control_field << ",\n";
+    }
+    out << "    \"ffhse_message_name\": \"" << json_escape(f.message_name) << "\",\n";
+    out << "    \"ffhse_recognized\": " << (f.recognized ? "true" : "false") << ",\n";
+    out << "    \"ffhse_body_decoded\": " << (f.body_decoded ? "true" : "false") << ",\n";
+    if (!f.values.empty()) {
+        out << "    \"ffhse_values\": [";
+        for (size_t i = 0; i < f.values.size(); ++i) {
+            if (i != 0) out << ", ";
+            out << "\"" << json_escape(f.values[i]) << "\"";
+        }
+        out << "],\n";
+    }
+    out << "    \"ffhse_body_shown_as_hex\": " << (f.body_shown_as_hex ? "true" : "false") << ",\n";
+    if (f.body_shown_as_hex) {
+        out << "    \"ffhse_body_length\": " << f.body_length << ",\n";
+        out << "    \"ffhse_body_hex\": \"" << json_escape(f.body_hex) << "\",\n";
+    }
+}
+
+// The DeviceNet analog of write_twincat_json_fields above -- same rationale (a plain free
+// function, not a ProtocolRenderer interface). Reads straight from the DeviceNetFrame carried by
+// DecodedPacket::result -- see devicenet.hpp's own DeviceNetDecoder comment for why DeviceNet, the
+// first GateKind::LinkType protocol, needed no separate "Result" wrapper struct (unlike FF-HSE/
+// HART-IP/BGP, it has no coalescing concept at all: one CAN frame is always one message).
+void write_devicenet_json_fields(std::ostream& out, const DeviceNetFrame& dn) {
+    std::ostringstream canid;
+    canid << "0x" << std::hex << std::uppercase << std::setw(4) << std::setfill('0') << dn.can_id;
+    out << "    \"devicenet_can_id\": \"" << canid.str() << "\",\n";
+    out << "    \"devicenet_group\": " << dn.group << ",\n";
+    out << "    \"devicenet_group_name\": \"" << json_escape(dn.group_name) << "\",\n";
+    out << "    \"devicenet_message_type\": \"" << json_escape(dn.message_type_name) << "\",\n";
+    if (dn.has_source_mac_id) {
+        out << "    \"devicenet_source_mac_id\": " << static_cast<unsigned>(dn.source_mac_id) << ",\n";
+    }
+    if (dn.has_group3_header) {
+        out << "    \"devicenet_dest_mac_id\": " << static_cast<unsigned>(dn.dest_mac_id) << ",\n";
+        out << "    \"devicenet_is_fragmented\": " << (dn.is_fragmented ? "true" : "false") << ",\n";
+        out << "    \"devicenet_is_xid\": " << (dn.is_xid ? "true" : "false") << ",\n";
+    }
+    if (dn.has_cip_service) {
+        out << "    \"devicenet_cip_is_response\": " << (dn.cip_is_response ? "true" : "false") << ",\n";
+        out << "    \"devicenet_cip_service\": \"" << json_escape(dn.cip_service_name) << "\",\n";
+    }
+    if (dn.has_dup_mac_id_check) {
+        out << "    \"devicenet_dup_mac_id_is_response\": "
+            << (dn.dup_mac_id_is_response ? "true" : "false") << ",\n";
+        out << "    \"devicenet_dup_mac_id_physical_port_number\": "
+            << static_cast<unsigned>(dn.dup_mac_id_physical_port_number) << ",\n";
+        out << "    \"devicenet_dup_mac_id_vendor_id\": " << dn.dup_mac_id_vendor_id << ",\n";
+        out << "    \"devicenet_dup_mac_id_serial_number\": " << dn.dup_mac_id_serial_number << ",\n";
+    }
+    out << "    \"devicenet_fd\": " << (dn.fd ? "true" : "false") << ",\n";
+    out << "    \"devicenet_payload_truncated\": " << (dn.payload_truncated ? "true" : "false") << ",\n";
+    out << "    \"devicenet_payload_length\": " << dn.payload.size() << ",\n";
+    out << "    \"devicenet_payload_hex\": \"" << json_escape(to_hex(dn.payload, "")) << "\",\n";
+}
+
 // The Modbus analog of write_twincat_json_fields above -- same rationale (a plain free function,
 // not a ProtocolRenderer interface). Modbus's function name and exception flag are already folded
 // into DecodedPacket::protocol/summary (see decoder.cpp's Modbus call site) and need no JSON field
@@ -1882,37 +1963,8 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
             out_ << "    \"stp_is_alt_msti_format\": " << (p.stp_is_alt_msti_format ? "true" : "false") << ",\n";
         }
     }
-    if (p.protocol == "devicenet") {
-        std::ostringstream canid;
-        canid << "0x" << std::hex << std::uppercase << std::setw(4) << std::setfill('0') << p.devicenet_can_id;
-        out_ << "    \"devicenet_can_id\": \"" << canid.str() << "\",\n";
-        out_ << "    \"devicenet_group\": " << p.devicenet_group << ",\n";
-        out_ << "    \"devicenet_group_name\": \"" << json_escape(p.devicenet_group_name) << "\",\n";
-        out_ << "    \"devicenet_message_type\": \"" << json_escape(p.devicenet_message_type_name) << "\",\n";
-        if (p.devicenet_has_source_mac_id) {
-            out_ << "    \"devicenet_source_mac_id\": " << static_cast<unsigned>(p.devicenet_source_mac_id) << ",\n";
-        }
-        if (p.devicenet_has_group3_header) {
-            out_ << "    \"devicenet_dest_mac_id\": " << static_cast<unsigned>(p.devicenet_dest_mac_id) << ",\n";
-            out_ << "    \"devicenet_is_fragmented\": " << (p.devicenet_is_fragmented ? "true" : "false") << ",\n";
-            out_ << "    \"devicenet_is_xid\": " << (p.devicenet_is_xid ? "true" : "false") << ",\n";
-        }
-        if (p.devicenet_has_cip_service) {
-            out_ << "    \"devicenet_cip_is_response\": " << (p.devicenet_cip_is_response ? "true" : "false") << ",\n";
-            out_ << "    \"devicenet_cip_service\": \"" << json_escape(p.devicenet_cip_service_name) << "\",\n";
-        }
-        if (p.devicenet_has_dup_mac_id_check) {
-            out_ << "    \"devicenet_dup_mac_id_is_response\": "
-                 << (p.devicenet_dup_mac_id_is_response ? "true" : "false") << ",\n";
-            out_ << "    \"devicenet_dup_mac_id_physical_port_number\": "
-                 << static_cast<unsigned>(p.devicenet_dup_mac_id_physical_port_number) << ",\n";
-            out_ << "    \"devicenet_dup_mac_id_vendor_id\": " << p.devicenet_dup_mac_id_vendor_id << ",\n";
-            out_ << "    \"devicenet_dup_mac_id_serial_number\": " << p.devicenet_dup_mac_id_serial_number << ",\n";
-        }
-        out_ << "    \"devicenet_fd\": " << (p.devicenet_fd ? "true" : "false") << ",\n";
-        out_ << "    \"devicenet_payload_truncated\": " << (p.devicenet_payload_truncated ? "true" : "false") << ",\n";
-        out_ << "    \"devicenet_payload_length\": " << p.devicenet_payload_length << ",\n";
-        out_ << "    \"devicenet_payload_hex\": \"" << json_escape(p.devicenet_payload_hex) << "\",\n";
+    if (p.protocol == "devicenet" && p.result) {
+        write_devicenet_json_fields(out_, p.result->as<DeviceNetFrame>());
     }
     if (p.protocol == "bacnet") {
         out_ << "    \"bacnet_bvlc_function\": \"" << json_escape(p.bacnet_bvlc_function) << "\",\n";
@@ -2277,39 +2329,8 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
         }
         out_ << "    \"s7plus_has_trailer\": " << (p.s7plus_has_trailer ? "true" : "false") << ",\n";
     }
-    if (p.protocol == "ffhse") {
-        out_ << "    \"ffhse_version\": " << static_cast<unsigned>(p.ffhse_version) << ",\n";
-        out_ << "    \"ffhse_options\": " << static_cast<unsigned>(p.ffhse_options) << ",\n";
-        out_ << "    \"ffhse_protocol\": \"" << json_escape(p.ffhse_protocol_name) << "\",\n";
-        out_ << "    \"ffhse_type\": \"" << json_escape(p.ffhse_type_name) << "\",\n";
-        out_ << "    \"ffhse_confirmed\": " << (p.ffhse_confirmed ? "true" : "false") << ",\n";
-        out_ << "    \"ffhse_service_id\": " << static_cast<unsigned>(p.ffhse_service_id) << ",\n";
-        std::ostringstream fda_addr;
-        fda_addr << "0x" << std::hex << std::uppercase << std::setw(8) << std::setfill('0') << p.ffhse_fda_address;
-        out_ << "    \"ffhse_fda_address\": \"" << fda_addr.str() << "\",\n";
-        out_ << "    \"ffhse_link_id\": " << p.ffhse_link_id << ",\n";
-        out_ << "    \"ffhse_message_length\": " << p.ffhse_message_length << ",\n";
-        if (p.ffhse_has_message_number) out_ << "    \"ffhse_message_number\": " << p.ffhse_message_number << ",\n";
-        if (p.ffhse_has_invoke_id) out_ << "    \"ffhse_invoke_id\": " << p.ffhse_invoke_id << ",\n";
-        if (p.ffhse_has_time_stamp) out_ << "    \"ffhse_time_stamp\": " << p.ffhse_time_stamp << ",\n";
-        if (p.ffhse_has_extended_control_field)
-            out_ << "    \"ffhse_extended_control_field\": " << p.ffhse_extended_control_field << ",\n";
-        out_ << "    \"ffhse_message_name\": \"" << json_escape(p.ffhse_message_name) << "\",\n";
-        out_ << "    \"ffhse_recognized\": " << (p.ffhse_recognized ? "true" : "false") << ",\n";
-        out_ << "    \"ffhse_body_decoded\": " << (p.ffhse_body_decoded ? "true" : "false") << ",\n";
-        if (!p.ffhse_values.empty()) {
-            out_ << "    \"ffhse_values\": [";
-            for (size_t i = 0; i < p.ffhse_values.size(); ++i) {
-                if (i != 0) out_ << ", ";
-                out_ << "\"" << json_escape(p.ffhse_values[i]) << "\"";
-            }
-            out_ << "],\n";
-        }
-        out_ << "    \"ffhse_body_shown_as_hex\": " << (p.ffhse_body_shown_as_hex ? "true" : "false") << ",\n";
-        if (p.ffhse_body_shown_as_hex) {
-            out_ << "    \"ffhse_body_length\": " << p.ffhse_body_length << ",\n";
-            out_ << "    \"ffhse_body_hex\": \"" << json_escape(p.ffhse_body_hex) << "\",\n";
-        }
+    if (p.protocol == "ffhse" && p.result) {
+        write_ffhse_json_fields(out_, p.result->as<FfhseResult>().first);
     }
     if (p.protocol == "dns" || p.protocol == "mdns" || p.protocol == "llmnr") {
         std::ostringstream txn_id;
@@ -2999,11 +3020,12 @@ void StatsWriter::write_packet(const DecodedPacket& p) {
         }
         if (p.stp_has_common_body && p.stp_flag_tc) stp_tc_count_++;
     }
-    if (p.protocol == "devicenet") {
-        devicenet_group_counts_[p.devicenet_group_name]++;
-        devicenet_message_type_counts_[p.devicenet_message_type_name]++;
-        if (p.devicenet_is_fragmented) devicenet_fragmented_count_++;
-        if (p.devicenet_fd) devicenet_fd_count_++;
+    if (p.protocol == "devicenet" && p.result) {
+        const DeviceNetFrame& dn = p.result->as<DeviceNetFrame>();
+        devicenet_group_counts_[dn.group_name]++;
+        devicenet_message_type_counts_[dn.message_type_name]++;
+        if (dn.is_fragmented) devicenet_fragmented_count_++;
+        if (dn.fd) devicenet_fd_count_++;
     }
     if (p.protocol == "bacnet") {
         bacnet_bvlc_function_counts_[p.bacnet_bvlc_function]++;
@@ -3043,11 +3065,12 @@ void StatsWriter::write_packet(const DecodedPacket& p) {
             if (p.s7plus_body_decoded) s7plus_body_decoded_count_++;
         }
     }
-    if (p.protocol == "ffhse") {
-        ffhse_protocol_counts_[p.ffhse_protocol_name]++;
-        if (p.ffhse_recognized) {
-            ffhse_message_counts_[p.ffhse_message_name]++;
-            if (p.ffhse_body_decoded) ffhse_body_decoded_count_++;
+    if (p.protocol == "ffhse" && p.result) {
+        const FfhseFrame& f = p.result->as<FfhseResult>().first;
+        ffhse_protocol_counts_[f.header.protocol_name]++;
+        if (f.recognized) {
+            ffhse_message_counts_[f.message_name]++;
+            if (f.body_decoded) ffhse_body_decoded_count_++;
         }
     }
     if (p.protocol == "dns" || p.protocol == "mdns" || p.protocol == "llmnr") {

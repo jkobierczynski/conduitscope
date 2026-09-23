@@ -240,6 +240,7 @@
 #include <vector>
 
 #include "conduitscope/byteio.hpp"
+#include "conduitscope/protocol_decoder.hpp"
 
 namespace conduitscope {
 
@@ -344,5 +345,53 @@ std::optional<size_t> ffhse_declared_length(ByteSpan payload);
 // TCP payload) walks FfhseFrame::wire_length in a loop, the same pattern decoder.cpp already uses
 // for EtherNet/IP's/HART-IP's own coalesced messages -- see this file's own UDP framing paragraph.
 std::optional<FfhseFrame> try_parse_ffhse(ByteSpan payload);
+
+// One decoded FF-HSE PDU, wrapped for the ProtocolDecoder interface (protocol_decoder.hpp).
+// `first` reuses FfhseFrame verbatim (mirrors HartIpResult's/EnipResult's own "first"
+// convention) -- it already carries everything the legacy call sites dual-wrote, no reduction
+// needed. `notes` accumulates every coalesced PDU's own notes -- UNLIKE HartIpResult, where only
+// the TCP side coalesces, FF-HSE's own UDP framing ALSO concatenates more than one PDU per
+// datagram (see this file's "UDP framing" paragraph above), so both FfhseTcpDecoder::decode and
+// FfhseUdpDecoder::decode below populate this the same way. `summary` is always the FIRST PDU's
+// summary, matching the legacy call sites' behavior.
+struct FfhseResult {
+    std::string summary;
+    std::vector<std::string> notes;
+    FfhseFrame first;
+};
+
+// FF-HSE over TCP -- id()=="ffhse", GateKind::TcpPortIndependent, tcp_declared_length() drives
+// this codebase's usual PDU-level TCP stream reassembly (mirrors HartIpTcpDecoder/EnipTcpDecoder).
+// decode() reproduces the legacy `if (want_ffhse)` TCP call site's own same-payload multi-PDU
+// coalescing loop -- exact transplant, see hartip.hpp's HartIpTcpDecoder for the identical shape.
+class FfhseTcpDecoder : public ProtocolDecoder {
+public:
+    std::string_view id() const override { return "ffhse"; }
+    GateKind gate_kind() const override { return GateKind::TcpPortIndependent; }
+    std::optional<size_t> tcp_declared_length(ByteSpan candidate) const override {
+        return ffhse_declared_length(candidate);
+    }
+    std::optional<ProtocolResult> decode(ByteSpan payload, DecodeContext& ctx) const override;
+};
+
+// FF-HSE over UDP -- id()=="ffhse" (deliberately shared with FfhseTcpDecoder above, the same
+// two-instance-shared-id() pattern EnipTcpDecoder/EnipUdpDecoder and HartIpTcpDecoder/
+// HartIpUdpDecoder established first -- see either pair's own comments for why sharing one id()
+// is safe: every output writer dispatches on the plain DecodedPacket::protocol string, never on
+// registry id() uniqueness). GateKind::UdpPortIndependent (tried opportunistically regardless of
+// port, deliberately LAST of every UDP check in decoder.cpp's Auto-mode dispatch -- see this
+// file's own file header comment on why FF-HSE's structural gate is this codebase's weakest).
+// UNLIKE HartIpUdpDecoder, this decode() DOES run its own coalescing loop: a single UDP datagram
+// can carry more than one concatenated FF-HSE PDU back-to-back -- see this file's "UDP framing"
+// paragraph above.
+class FfhseUdpDecoder : public ProtocolDecoder {
+public:
+    std::string_view id() const override { return "ffhse"; }
+    GateKind gate_kind() const override { return GateKind::UdpPortIndependent; }
+    std::optional<ProtocolResult> decode(ByteSpan payload, DecodeContext& ctx) const override;
+};
+
+const ProtocolDecoder& ffhse_tcp_decoder();
+const ProtocolDecoder& ffhse_udp_decoder();
 
 }  // namespace conduitscope

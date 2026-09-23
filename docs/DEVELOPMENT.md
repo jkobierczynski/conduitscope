@@ -1021,6 +1021,85 @@ Discussed and adopted, in this order:
    Modbus read each needed to keep compiling (both still read
    `DecodedPacket::protocol` as a plain string for everything else, the
    same as before).
+
+   **Update: FF-HSE and DeviceNet migrated -- `TcpPortIndependent`'s last
+   legacy holdout is gone, and a brand-new sixth `GateKind` (`LinkType`)
+   exists to carry DeviceNet.** Jurgen asked directly for both. FF-HSE got
+   the full two-part treatment every migration since the pilot's own
+   leftover-fix (above) has used: `FfhseTcpDecoder`/`FfhseUdpDecoder`
+   (`ffhse.hpp`/`ffhse.cpp`) wrap the existing, unchanged `try_parse_ffhse`
+   and its declared-length probe (`tcp_declared_length()`), sharing one
+   `"ffhse"` id() the same way `HartIpTcpDecoder`/`HartIpUdpDecoder` do;
+   `decoder.cpp`'s two call sites (TCP and UDP, both still tried dead last
+   of their own cascades -- see "Why FF-HSE is tried last of all" above,
+   unchanged by this migration) now reach `try_parse_ffhse` through
+   `ffhse_tcp_decoder().decode()`/`ffhse_udp_decoder().decode()` instead of
+   calling it directly, and both keep their own same-payload/same-datagram
+   coalescing loop, now living inside each `decode()` -- FF-HSE is the
+   first protocol in this codebase whose UDP side coalesces multiple PDUs
+   per datagram at all (`HartIpUdpDecoder`/`EnipUdpDecoder` both
+   deliberately do not; FF-HSE's own UDP framing genuinely can carry
+   several concatenated PDUs per datagram, unlike either of those). Landed
+   with the full zero-flat-field `output.cpp` treatment from the start
+   (not dual-write-then-migrate): `out.result` carries the whole
+   `FfhseResult`, a new `write_ffhse_json_fields` renders it, and
+   `policy_engine.cpp`'s/`asset_inventory.cpp`'s own `ffhse_message_name`
+   reads (the only two extra readers found, same discipline as every prior
+   dual-write removal) now go through `dp.result->as<FfhseResult>()`. All
+   `ffhse_*` flat fields removed from `decoder.hpp`.
+
+   DeviceNet needed a genuinely new gate: it dispatches on the pcap
+   capture's own link-layer type (`LINKTYPE_CAN_SOCKETCAN`), not on
+   anything inside the packet's bytes, so none of the five existing
+   `GateKind` values fit -- a new one, `GateKind::LinkType`, was added to
+   `protocol_decoder.hpp` (plus a matching `link_type()` accessor,
+   `nullopt` for every other decoder), the same "add a new gate kind when
+   none fits" precedent `CotpPayload` set first. `try_parse_devicenet`
+   is also the one `try_parse_x` function in this codebase that takes a
+   structured `CanSocketcanFrame` rather than a `ByteSpan`, which doesn't
+   fit `ProtocolDecoder::decode(ByteSpan, DecodeContext&)`'s signature
+   directly -- resolved by having `DeviceNetDecoder::decode()` re-derive
+   the `CanSocketcanFrame` from the raw `ByteSpan` via
+   `parse_socketcan_frame()` internally, exactly mirroring what
+   `decoder.cpp`'s own `LINKTYPE_CAN_SOCKETCAN` branch did directly before
+   this migration. That is a deliberate, explicitly documented exception
+   to `decode()`'s usual "never throws" contract (`parse_socketcan_frame`
+   can throw `ParseError` on a malformed capture record) -- called out in
+   both `devicenet.hpp`'s class comment and `decoder.cpp`'s call-site
+   comment rather than glossed over. One field, `DeviceNetFrame::
+   payload_truncated`, was added (populated from `CanSocketcanFrame::
+   truncated` inside `try_parse_devicenet`) purely so the migrated
+   `decode()` -- which only returns a `DeviceNetFrame`, not the raw
+   `CanSocketcanFrame` -- could still surface that boolean to
+   `write_devicenet_json_fields` without losing it. `protocol_registry.cpp`
+   gained a new `link_type_registry()` vector (audit-trail only, like
+   `cotp_payload_registry()` -- `decoder.cpp`'s own branch calls
+   `devicenet_decoder()` directly rather than looping, since DeviceNet is
+   this gate's only protocol) listing DeviceNet, its sole entry. No extra
+   readers of `devicenet_*` flat fields were found outside
+   `decoder.cpp`/`output.cpp` (confirmed by the same exhaustive grep sweep
+   every prior dual-write removal has used); all were removed from
+   `decoder.hpp`.
+
+   Both protocols' registry entries were appended to
+   `tcp_port_independent_registry()`/`udp_port_independent_registry()`
+   (FF-HSE, tried last of each, matching its real dispatch position) and
+   the new `link_type_registry()` (DeviceNet); the stale "Not migrated:
+   FF-HSE" doc comment on `tcp_port_independent_registry()` is gone --
+   this fully populates `TcpPortIndependent`, the sixth (of what are now
+   six) `GateKind`s to reach that state.
+
+   Verified the same way as every prior migration: the full CTest suite
+   (1,416 tests) stayed 100% passing with zero changed
+   `PASS_REGULAR_EXPRESSION`/`FAIL_REGULAR_EXPRESSION` assertions anywhere
+   (proof of byte-identical output for both protocols), a clean rebuild
+   with zero warnings, and manual `--format json`/`--stats` smoke tests
+   against `tests/sample_ffhse.pcap`/`tests/sample_devicenet.pcap`
+   confirming field-for-field identical output to before this change.
+
+   Still explicitly out of scope, not silently dropped: migrating any of
+   the remaining legacy protocols; having the registry vectors drive
+   dispatch order for any `GateKind` beyond `EtherType`.
 4. **Comment-density trim: acknowledged, not scheduled.** Real cost, no
    plan yet to act on it -- lower priority than the three items above.
 5. **No new protocols until 1-3 above are substantially underway,** per

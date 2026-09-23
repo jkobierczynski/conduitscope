@@ -137,6 +137,8 @@
 
 #include "conduitscope/byteio.hpp"
 #include "conduitscope/can_socketcan.hpp"
+#include "conduitscope/pcap_reader.hpp"
+#include "conduitscope/protocol_decoder.hpp"
 
 namespace conduitscope {
 
@@ -194,6 +196,13 @@ struct DeviceNetFrame {
                         // as hex by decoder.cpp; this decoder never value-decodes it beyond the
                         // Group 3 header/service bytes and Group 2 Duplicate-MAC-ID-Check fields above
 
+    // Mirrors CanSocketcanFrame::truncated -- see can_socketcan.hpp's own "Truncation handling"
+    // paragraph. Kept here too (not just inside the explanatory note already forwarded into
+    // `notes` below) so a structured JSON consumer can check it without string-matching notes --
+    // mirrors payload/fd above, which exist for the same "give ProtocolDecoder consumers the
+    // structured field, not just the prose" reason.
+    bool payload_truncated = false;
+
     std::string summary;
     std::vector<std::string> notes;
 };
@@ -207,5 +216,34 @@ struct DeviceNetFrame {
 // dissector's own behavior of accepting (col_set_str "DeviceNet") any non-EFF/RTR/ERR standard-ID
 // CAN frame on this link, whether or not it recognizes a specific message group within it.
 std::optional<DeviceNetFrame> try_parse_devicenet(const CanSocketcanFrame& can);
+
+// DeviceNet, wrapped for the ProtocolDecoder interface (protocol_decoder.hpp) -- id()=="devicenet",
+// GateKind::LinkType (see that enum's own comment: the first and so far only decoder gated by the
+// capture's own pcap link-layer type rather than by anything inside the packet's bytes).
+// DeviceNetFrame already carries its own summary/notes, so, like EigrpDecoder, no separate
+// "Result" wrapper struct is needed -- ProtocolResult wraps DeviceNetFrame directly. There is no
+// coalescing concept here at all (unlike FF-HSE/HART-IP/EtherNet/IP): one CAN frame is always
+// exactly one DeviceNet message, never more than one concatenated into a single capture record.
+//
+// ONE DELIBERATE DEVIATION from every sibling ProtocolDecoder::decode() in this codebase, flagged
+// here rather than silently: decode() below is NOT guaranteed not to throw. It calls
+// parse_socketcan_frame(payload) itself (mirroring exactly what decoder.cpp's own
+// LINKTYPE_CAN_SOCKETCAN branch used to do directly before this migration), which can throw
+// ParseError on a malformed SocketCAN capture record -- see can_socketcan.hpp's own comment on
+// why that's the deliberate, existing behavior (letting Decoder::decode's outer try/catch handle
+// it, a "fail loudly on a malformed capture, don't half-decode" posture, not something this
+// migration changes). decoder.cpp's own DeviceNet call site still has no per-call try/catch of
+// its own, exactly as it didn't before -- the exception still propagates to the same outer
+// handler it always did, this is purely a textual relocation of the same parse_socketcan_frame
+// call, not a behavior change.
+class DeviceNetDecoder : public ProtocolDecoder {
+public:
+    std::string_view id() const override { return "devicenet"; }
+    GateKind gate_kind() const override { return GateKind::LinkType; }
+    std::optional<uint32_t> link_type() const override { return LINKTYPE_CAN_SOCKETCAN; }
+    std::optional<ProtocolResult> decode(ByteSpan payload, DecodeContext& ctx) const override;
+};
+
+const ProtocolDecoder& devicenet_decoder();
 
 }  // namespace conduitscope

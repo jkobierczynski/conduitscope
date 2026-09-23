@@ -365,8 +365,11 @@ void PolicyEngine::observe(const DecodedPacket& dp) {
         if (!dp.mqtt_packet_type_name.empty()) fs.functions.insert(dp.mqtt_packet_type_name);
     } else if (dp.protocol == "ffhse") {
         fs.protocols.insert("ffhse");
-        // ffhse_message_name is always set when protocol == "ffhse" -- see decoder.hpp.
-        if (!dp.ffhse_message_name.empty()) fs.functions.insert(dp.ffhse_message_name);
+        // FfhseFrame::message_name is always set when protocol == "ffhse" -- see ffhse.hpp.
+        if (dp.result) {
+            const std::string& name = dp.result->as<FfhseResult>().first.message_name;
+            if (!name.empty()) fs.functions.insert(name);
+        }
     }
 }
 

@@ -5,12 +5,14 @@
 #include "conduitscope/bacnet.hpp"
 #include "conduitscope/bgp.hpp"
 #include "conduitscope/cotp.hpp"
+#include "conduitscope/devicenet.hpp"
 #include "conduitscope/dnp3.hpp"
 #include "conduitscope/dns.hpp"
 #include "conduitscope/eapol.hpp"
 #include "conduitscope/eigrp.hpp"
 #include "conduitscope/enip.hpp"
 #include "conduitscope/ethercat.hpp"
+#include "conduitscope/ffhse.hpp"
 #include "conduitscope/fins.hpp"
 #include "conduitscope/goose.hpp"
 #include "conduitscope/hartip.hpp"
@@ -326,6 +328,18 @@ const std::vector<const ProtocolDecoder*>& tcp_port_independent_registry() {
                               // order. BGP's own structural gate (a 128-bit Marker that MUST be
                               // all-0xFF) is the strongest in this whole codebase, so it cannot
                               // collide with anything else in this cascade regardless of position.
+        &ffhse_tcp_decoder(),  // Migrated after BGP -- decoder.cpp's own call site tries it LAST
+                              // of this whole cascade, after MQTT (see that entry's own comment
+                              // above), because FF-HSE's own structural detection gate (declared-
+                              // length framing plus a small enumerated PDU-type byte) is the
+                              // weakest, most collision-prone gate of any protocol in this
+                              // cascade -- see decoder.cpp's own FF-HSE TCP call site comment for
+                              // the full "tried last of all" rationale. This fully populates this
+                              // GateKind: no protocol remains unmigrated in this cascade. First
+                              // TCP-side use of the "two instances, one id()" pattern for a
+                              // protocol whose UDP sibling ALSO runs its own coalescing loop (see
+                              // ffhse_udp_decoder() in udp_port_independent_registry() below, and
+                              // FfhseTcpDecoder's/FfhseUdpDecoder's own comments in ffhse.hpp).
     };
     return order;
 }
@@ -414,6 +428,16 @@ const std::vector<const ProtocolDecoder*>& udp_port_independent_registry() {
                                 // path, see kerberos.hpp's file header comment. Shares its
                                 // "kerberos" id() with kerberos_tcp_decoder() in
                                 // tcp_port_independent_registry above.
+        &ffhse_udp_decoder(),   // Added after Kerberos -- FF-HSE's own UDP path, shares its
+                                // "ffhse" id() with ffhse_tcp_decoder() in
+                                // tcp_port_independent_registry above. Tried LAST of this whole
+                                // cascade (even after HART-IP/Kerberos) -- decoder.cpp's own UDP
+                                // call site comment gives the same "weakest, most collision-prone
+                                // gate in this cascade" rationale its TCP sibling's entry above
+                                // documents. UNLIKE every other UDP-side entry in this vector,
+                                // FfhseUdpDecoder::decode() runs its own multi-PDU coalescing loop
+                                // (FF-HSE's own UDP framing can carry several concatenated PDUs
+                                // per datagram) -- see ffhse.hpp's class comment.
     };
     return order;
 }
@@ -430,6 +454,24 @@ const std::vector<const ProtocolDecoder*>& cotp_payload_registry() {
         &mms_decoder(),          // Tried last -- S7comm's single-byte protocol-id gate is tried
                                    // first since it is materially stronger and cheaper; this is
                                    // only reached once that (and S7comm-Plus's) has already failed.
+    };
+    return order;
+}
+
+const std::vector<const ProtocolDecoder*>& link_type_registry() {
+    static const std::vector<const ProtocolDecoder*> order = {
+        &devicenet_decoder(),  // This gate's only protocol -- decoder.cpp's own
+                                 // LINKTYPE_CAN_SOCKETCAN branch calls it directly (see
+                                 // protocol_registry.hpp's own doc comment on this vector for why
+                                 // that branch doesn't iterate this vector the way EtherType's
+                                 // does). link_type() returns LINKTYPE_CAN_SOCKETCAN (227, see
+                                 // pcap_reader.hpp) -- see devicenet.hpp's own class comment for
+                                 // the deliberate, documented exception to the "decode() never
+                                 // throws" contract this decoder takes (it re-parses the raw
+                                 // ByteSpan into a CanSocketcanFrame internally, which can throw
+                                 // ParseError on a malformed capture record, exactly mirroring
+                                 // what decoder.cpp's own call site did directly before this
+                                 // migration).
     };
     return order;
 }

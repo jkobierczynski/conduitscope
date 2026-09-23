@@ -1461,4 +1461,85 @@ std::optional<FfhseFrame> try_parse_ffhse(ByteSpan payload) {
     }
 }
 
+std::optional<ProtocolResult> FfhseTcpDecoder::decode(ByteSpan payload, DecodeContext& /*ctx*/) const {
+    auto frame = try_parse_ffhse(payload);
+    if (!frame) return std::nullopt;
+
+    FfhseResult result;
+    result.summary = frame->summary;
+    for (const auto& n : frame->notes) result.notes.push_back(n);
+    result.first = *frame;
+
+    // Like HART-IP's/EtherNet/IP's own small messages, it's normal for a sender or the OS to
+    // coalesce several FF-HSE PDUs into one TCP segment before flushing -- exact transplant of
+    // the legacy `if (want_ffhse)` TCP call site's own coalescing loop.
+    const size_t kMaxFfhseMessagesPerPayload = resource_limits().max_coalesced_messages.value_or(50);
+    size_t offset = frame->wire_length;
+    size_t message_count = 1;
+    while (offset < payload.size() && message_count < kMaxFfhseMessagesPerPayload) {
+        ByteSpan rest = payload.from(offset);
+        auto next = try_parse_ffhse(rest);
+        if (!next) break;  // remaining bytes aren't another FF-HSE PDU -- stop, don't guess
+        ++message_count;
+        std::string note = "additional FF-HSE PDU " + std::to_string(message_count) +
+                            " found in the same TCP payload at byte offset " + std::to_string(offset) +
+                            " (coalesced by the sender/OS): " + next->summary;
+        result.notes.push_back(note);
+        for (const auto& n : next->notes) result.notes.push_back(n);
+        offset += next->wire_length;
+    }
+    if (message_count >= kMaxFfhseMessagesPerPayload) {
+        result.notes.push_back("stopped after " + std::to_string(kMaxFfhseMessagesPerPayload) +
+                                " FF-HSE PDU(s) in this one TCP payload, more may remain (safety cap)");
+    }
+
+    return ProtocolResult::make<FfhseResult>("ffhse", std::move(result));
+}
+
+std::optional<ProtocolResult> FfhseUdpDecoder::decode(ByteSpan payload, DecodeContext& /*ctx*/) const {
+    auto frame = try_parse_ffhse(payload);
+    if (!frame) return std::nullopt;
+
+    FfhseResult result;
+    result.summary = frame->summary;
+    for (const auto& n : frame->notes) result.notes.push_back(n);
+    result.first = *frame;
+
+    // UNLIKE HART-IP's own UDP decode (a single datagram, no coalescing), FF-HSE's own UDP
+    // framing can carry more than one concatenated PDU per datagram -- exact transplant of the
+    // legacy `if (want_ffhse)` UDP call site's own coalescing loop, see ffhse.hpp's "UDP framing"
+    // paragraph.
+    const size_t kMaxFfhseMessagesPerDatagram = resource_limits().max_coalesced_messages.value_or(50);
+    size_t offset = frame->wire_length;
+    size_t message_count = 1;
+    while (offset < payload.size() && message_count < kMaxFfhseMessagesPerDatagram) {
+        ByteSpan rest = payload.from(offset);
+        auto next = try_parse_ffhse(rest);
+        if (!next) break;  // remaining bytes aren't another FF-HSE PDU -- stop, don't guess
+        ++message_count;
+        std::string note = "additional FF-HSE PDU " + std::to_string(message_count) +
+                            " found in the same UDP datagram at byte offset " + std::to_string(offset) +
+                            ": " + next->summary;
+        result.notes.push_back(note);
+        for (const auto& n : next->notes) result.notes.push_back(n);
+        offset += next->wire_length;
+    }
+    if (message_count >= kMaxFfhseMessagesPerDatagram) {
+        result.notes.push_back("stopped after " + std::to_string(kMaxFfhseMessagesPerDatagram) +
+                                " FF-HSE PDU(s) in this one UDP datagram, more may remain (safety cap)");
+    }
+
+    return ProtocolResult::make<FfhseResult>("ffhse", std::move(result));
+}
+
+const ProtocolDecoder& ffhse_tcp_decoder() {
+    static const FfhseTcpDecoder instance;
+    return instance;
+}
+
+const ProtocolDecoder& ffhse_udp_decoder() {
+    static const FfhseUdpDecoder instance;
+    return instance;
+}
+
 }  // namespace conduitscope

@@ -68,6 +68,14 @@ enum class GateKind {
                          // never through a generic TcpPortIndependent iteration -- see
                          // protocol_registry.hpp's cotp_payload_registry() for why this is its own
                          // gate kind rather than being (mis)categorized as TcpPortIndependent.
+    // Migration batch addition: gated by the pcap capture's own link-layer type (PcapPacket's
+    // `link_type`, see pcap_reader.hpp's LINKTYPE_* constants), not by anything inside the
+    // packet's own bytes -- a genuinely different dispatch shape from every kind above, all four
+    // of which assume an Ethernet/IP/TCP/UDP frame already exists to gate against. DeviceNet (CAN-
+    // bus CIP, see devicenet.hpp) is this kind's first and so far only user: it is reached only
+    // for LINKTYPE_CAN_SOCKETCAN captures, which have no MAC addresses, no IP layer, no ports at
+    // all -- see decoder.cpp's own LINKTYPE_CAN_SOCKETCAN branch.
+    LinkType,
 };
 
 // Base class for a protocol's own cross-packet state (Modbus's outstanding-transaction table,
@@ -231,6 +239,12 @@ public:
     // --extra-X-ports widening -- stays at the call site exactly as it did before migration, the
     // same "gating logic doesn't move into the class" posture StpDecoder's own comment documents.
     virtual std::optional<uint16_t> udp_port() const { return std::nullopt; }
+
+    // Only overridden by a GateKind::LinkType decoder -- its own expected PcapPacket link_type
+    // value (e.g. LINKTYPE_CAN_SOCKETCAN for DeviceNet). A plain uint32_t rather than pcap_
+    // reader.hpp's own LinkType enum, the same "audit-trail documentation, not a new enum
+    // dependency" posture ip_protocol()/udp_port() above already take with uint8_t/uint16_t.
+    virtual std::optional<uint32_t> link_type() const { return std::nullopt; }
 
     // Only overridden by TcpPortIndependent decoders that participate in decoder.cpp's generic TCP
     // reassembly cascade (Decoder::reassemble_tcp_payload) -- the registry-based equivalent of

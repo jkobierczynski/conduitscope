@@ -375,8 +375,8 @@ void AssetInventoryEngine::observe(const DecodedPacket& dp) {
         function_name = dp.mms_service_name;
     } else if (protocol == "mqtt" && !dp.mqtt_packet_type_name.empty()) {
         function_name = dp.mqtt_packet_type_name;
-    } else if (protocol == "ffhse" && !dp.ffhse_message_name.empty()) {
-        function_name = dp.ffhse_message_name;
+    } else if (protocol == "ffhse" && dp.result && !dp.result->as<FfhseResult>().first.message_name.empty()) {
+        function_name = dp.result->as<FfhseResult>().first.message_name;
     }
 
     // See looks_like_broadcast_or_multicast's own comment, and observe()'s doc comment in

@@ -10,19 +10,19 @@
 // exclusive to its own protocol, so entry order only ever matters for STP, which has no
 // ethertype() at all and stays its own explicit block outside the loop). Every OTHER vector below
 // (ip_protocol_registry(), tcp_port_independent_registry(), udp_port_registry(),
-// udp_port_independent_registry(), cotp_payload_registry()) remains exactly what this file's name
-// always meant: DATA, NOT CONTROL FLOW, NOT (yet) WHAT DRIVES DISPATCH ORDER. Each of those still-
-// audit-trail cascades' migrated protocols keep their actual decoder.cpp call sites at their own
-// exact former textual position (see protocol_decoder.hpp's "COEXISTENCE RULE"); those vectors
-// exist purely as the audit trail a fully-registry-driven dispatch would eventually read from,
-// kept accurate and ordered from day one so that transition -- one cascade at a time, EtherType
-// being the first -- is a mechanical "iterate this vector instead of the hand-written if-chain"
-// change, not a rediscovery of what order dozens of protocols need to run in. Read
-// docs/DEVELOPMENT.md's PROTOCOL DETECTION section before reordering anything here; every entry's
-// ordering rationale is commented at its own decoder.cpp call site (the source of truth for every
-// cascade, loop-driven or not -- for EtherType the loop reads this vector, so this vector's own
-// order is now part of that source of truth too, not merely a mirror of it) and, for a genuinely
-// new addition like TwinCAT, restated here too.
+// udp_port_independent_registry(), cotp_payload_registry(), link_type_registry()) remains exactly
+// what this file's name always meant: DATA, NOT CONTROL FLOW, NOT (yet) WHAT DRIVES DISPATCH
+// ORDER. Each of those still-audit-trail cascades' migrated protocols keep their actual
+// decoder.cpp call sites at their own exact former textual position (see protocol_decoder.hpp's
+// "COEXISTENCE RULE"); those vectors exist purely as the audit trail a fully-registry-driven
+// dispatch would eventually read from, kept accurate and ordered from day one so that transition
+// -- one cascade at a time, EtherType being the first -- is a mechanical "iterate this vector
+// instead of the hand-written if-chain" change, not a rediscovery of what order dozens of
+// protocols need to run in. Read docs/DEVELOPMENT.md's PROTOCOL DETECTION section before
+// reordering anything here; every entry's ordering rationale is commented at its own decoder.cpp
+// call site (the source of truth for every cascade, loop-driven or not -- for EtherType the loop
+// reads this vector, so this vector's own order is now part of that source of truth too, not
+// merely a mirror of it) and, for a genuinely new addition like TwinCAT, restated here too.
 #pragma once
 
 #include <vector>
@@ -78,9 +78,11 @@ const std::vector<const ProtocolDecoder*>& ip_protocol_registry();
 // batch -- like ARP/LLDP in ethertype_registry() above, it's a brand-new protocol built directly
 // on ProtocolDecoder from inception (see bgp.hpp), appended after Modbus/TwinCAT (see
 // decoder.cpp's own BGP call site comment for why its Marker-based structural gate needs no
-// ordering rationale at all). Not migrated: FF-HSE -- the only protocol left in this whole
-// cascade, tried last of all (see decoder.cpp's own dispatch-order comment), out of scope for
-// this batch.
+// ordering rationale at all). FF-HSE (TCP side -- see udp_port_independent_registry() below for
+// its UDP sibling, sharing this same id()) was migrated after BGP, tried LAST of this whole
+// cascade (after MQTT) -- see decoder.cpp's own FF-HSE call site comment for why its own
+// structural detection gate is deliberately given the lowest priority here. This fully populates
+// this GateKind: no protocol remains unmigrated in this cascade.
 const std::vector<const ProtocolDecoder*>& tcp_port_independent_registry();
 
 // Migrated UDP-port-gated protocols, in the order their decoder.cpp call sites run. This GateKind
@@ -113,7 +115,14 @@ const std::vector<const ProtocolDecoder*>& udp_port_registry();
 // byte-layout overlap with FINS's own RSV/GCT bytes too (see fins.hpp's own collision survey), so
 // both protocols' own much stronger gates must run first -- see melsec.hpp/melsec.cpp and
 // fins.hpp/fins.cpp plus the matching decoder.cpp call-site comments for the full collision
-// analysis, discovered via each protocol's own required manual smoke test.
+// analysis, discovered via each protocol's own required manual smoke test. FF-HSE's own UDP path
+// (FfhseUdpDecoder, ffhse.hpp -- shares its "ffhse" id() with ffhse_tcp_decoder() in
+// tcp_port_independent_registry() above) was appended last, after Kerberos -- tried last of this
+// whole cascade (even after HART-IP/Kerberos), the same lowest-priority posture its TCP sibling
+// has in tcp_port_independent_registry() above, and for the same reason (see decoder.cpp's own
+// FF-HSE UDP call site comment). Unlike its TCP sibling, FfhseUdpDecoder::decode() runs its own
+// coalescing loop directly (FF-HSE's own UDP framing can carry multiple concatenated PDUs per
+// datagram) -- see ffhse.hpp's class comment.
 const std::vector<const ProtocolDecoder*>& udp_port_independent_registry();
 
 // Migration batch 2 addition: S7comm/S7comm-Plus/MMS (GateKind::CotpPayload -- see
@@ -125,5 +134,18 @@ const std::vector<const ProtocolDecoder*>& udp_port_independent_registry();
 // Kept here anyway so this gate group has the same audit trail every other one does. Not migrated:
 // none -- this batch migrates all three.
 const std::vector<const ProtocolDecoder*>& cotp_payload_registry();
+
+// Migration batch addition: DeviceNet (GateKind::LinkType -- see protocol_decoder.hpp's own
+// comment on that gate kind, added specifically because DeviceNet's dispatch is gated by the
+// pcap capture's own link-layer type, LINKTYPE_CAN_SOCKETCAN, rather than by anything inside the
+// packet's own bytes -- a genuinely different dispatch shape from every other GateKind, all of
+// which key off EtherType/IP-protocol-number/TCP-or-UDP-port/COTP-payload). THIS VECTOR IS
+// AUDIT-TRAIL DATA ONLY like cotp_payload_registry() above -- decoder.cpp's own
+// LINKTYPE_CAN_SOCKETCAN branch does not iterate it, since DeviceNet is (so far) the only
+// protocol on this link type; the branch calls devicenet_decoder().decode() directly. Kept here
+// anyway so this gate group has the same audit trail every other one does, and so a second
+// LinkType-gated protocol (should one ever be added) has a documented, iterable home to land in.
+// Not migrated: none -- DeviceNet is this gate's only protocol and it is migrated.
+const std::vector<const ProtocolDecoder*>& link_type_registry();
 
 }  // namespace conduitscope

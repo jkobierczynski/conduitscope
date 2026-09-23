@@ -1161,7 +1161,9 @@ bool Decoder::reassemble_tcp_payload(const TcpSegment& tcp, const std::string& f
     // favor, not FF-HSE's -- the same "weaker signal, lower priority" principle already established
     // for HART-IP and MQTT above.
     if (!declared && want_ffhse) {
-        if (auto d = ffhse_declared_length(candidate)) {
+        // Registration-model migration: ffhse_declared_length is now reached through
+        // FfhseTcpDecoder::tcp_declared_length -- same function, same semantics, see ffhse.hpp.
+        if (auto d = ffhse_tcp_decoder().tcp_declared_length(candidate)) {
             declared = d;
             which = "FF-HSE PDU";
         }
@@ -1421,34 +1423,29 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
             bool want_devicenet = options_.protocol_filter == ProtocolFilter::Auto ||
                                    options_.protocol_filter == ProtocolFilter::DevicenetOnly;
             if (want_devicenet) {
-                if (auto dn = try_parse_devicenet(can)) {
+                // Registration-model migration: try_parse_devicenet is now reached through
+                // DeviceNetDecoder::decode -- the first GateKind::LinkType decoder (see
+                // protocol_decoder.hpp's own comment on that gate kind). DeviceNet is a
+                // zero-flat-field migrated protocol (like TwinCAT/HART-IP/etc.): out.result
+                // carries the whole DeviceNetFrame, and output.cpp's write_devicenet_json_fields
+                // reads straight from it. decode() re-parses the same SocketCAN header `can`
+                // above already did (harmless -- parse_socketcan_frame is a handful of cheap
+                // fixed-offset reads with no allocation on the non-truncated path) rather than
+                // taking a CanSocketcanFrame directly, so it fits ProtocolDecoder::decode's shared
+                // ByteSpan signature the same way every other migrated protocol's decode() does;
+                // `can` itself stays needed here regardless, for the not-DeviceNet fallback
+                // classification below. See devicenet.hpp's own DeviceNetDecoder comment for the
+                // one deliberate deviation this call makes from every sibling decode(): it can
+                // throw ParseError, exactly as this line always could before migration.
+                DecodeContext ctx;
+                ctx.packet_index = index;
+                ctx.protocol_id = "devicenet";
+                if (auto result = devicenet_decoder().decode(frame, ctx)) {
+                    const DeviceNetFrame& dn = result->as<DeviceNetFrame>();
                     out.protocol = "devicenet";
-                    out.summary = dn->summary;
-                    for (const auto& n : dn->notes) out.notes.push_back(n);
-
-                    out.devicenet_can_id = dn->can_id;
-                    out.devicenet_group = dn->group;
-                    out.devicenet_group_name = dn->group_name;
-                    out.devicenet_message_type_name = dn->message_type_name;
-                    out.devicenet_has_source_mac_id = dn->has_source_mac_id;
-                    out.devicenet_source_mac_id = dn->source_mac_id;
-                    out.devicenet_has_group3_header = dn->has_group3_header;
-                    out.devicenet_is_fragmented = dn->is_fragmented;
-                    out.devicenet_is_xid = dn->is_xid;
-                    out.devicenet_dest_mac_id = dn->dest_mac_id;
-                    out.devicenet_has_cip_service = dn->has_cip_service;
-                    out.devicenet_cip_is_response = dn->cip_is_response;
-                    out.devicenet_cip_service = dn->cip_service;
-                    out.devicenet_cip_service_name = dn->cip_service_name;
-                    out.devicenet_has_dup_mac_id_check = dn->has_dup_mac_id_check;
-                    out.devicenet_dup_mac_id_is_response = dn->dup_mac_id_is_response;
-                    out.devicenet_dup_mac_id_physical_port_number = dn->dup_mac_id_physical_port_number;
-                    out.devicenet_dup_mac_id_vendor_id = dn->dup_mac_id_vendor_id;
-                    out.devicenet_dup_mac_id_serial_number = dn->dup_mac_id_serial_number;
-                    out.devicenet_fd = dn->fd;
-                    out.devicenet_payload_truncated = can.truncated;
-                    out.devicenet_payload_hex = to_hex(dn->payload, "");
-                    out.devicenet_payload_length = dn->payload.size();
+                    out.summary = dn.summary;
+                    for (const auto& n : dn.notes) out.notes.push_back(n);
+                    out.result = *result;
                     return out;
                 }
             }
@@ -1932,65 +1929,26 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
             // Tried last among these UDP checks, port-independently, even after HART-IP -- see the
             // matching comment in reassemble_tcp_payload for why FF-HSE's own structural detection
             // gate is deliberately given the lowest priority in this decoder's opportunistic
-            // dispatch. UNLIKE every protocol above, a single UDP datagram can carry more than one
-            // concatenated FF-HSE PDU back-to-back -- see ffhse.hpp's own "UDP framing" paragraph --
-            // so this is its own coalescing while-loop, not a single try_parse_ffhse call.
+            // dispatch.
+            //
+            // Registration-model migration: try_parse_ffhse + the same-datagram multi-PDU
+            // coalescing loop that used to live directly in this call site are now reached through
+            // FfhseUdpDecoder::decode -- FF-HSE is a zero-flat-field migrated protocol (like
+            // TwinCAT/HART-IP/etc.): out.result carries the whole FfhseResult, and
+            // output.cpp's write_ffhse_json_fields reads straight from it. See ffhse.hpp/ffhse.cpp.
             bool want_ffhse = options_.protocol_filter == ProtocolFilter::Auto ||
                                options_.protocol_filter == ProtocolFilter::FfHseOnly;
             if (want_ffhse) {
-                if (auto frame = try_parse_ffhse(udp.payload)) {
+                DecodeContext ctx;
+                ctx.packet_index = index;
+                ctx.protocol_id = "ffhse";
+                ctx.flow_states = &registry_flow_state_;
+                if (auto ffhse_result = ffhse_udp_decoder().decode(udp.payload, ctx)) {
+                    const FfhseResult& fr = ffhse_result->as<FfhseResult>();
                     out.protocol = "ffhse";
-                    out.summary = frame->summary;
-
-                    auto merge_ffhse = [&](const FfhseFrame& f, bool is_first_message) {
-                        for (const auto& n : f.notes) out.notes.push_back(n);
-                        if (!is_first_message) return;
-                        out.ffhse_version = f.header.version;
-                        out.ffhse_options = f.header.options;
-                        out.ffhse_protocol_name = f.header.protocol_name;
-                        out.ffhse_type_name = f.header.type_name;
-                        out.ffhse_confirmed = f.header.confirmed;
-                        out.ffhse_service_id = f.header.service_id;
-                        out.ffhse_fda_address = f.header.fda_address;
-                        out.ffhse_link_id = f.header.link_id;
-                        out.ffhse_message_length = f.header.message_length;
-                        out.ffhse_has_message_number = f.trailer.has_message_number;
-                        out.ffhse_message_number = f.trailer.message_number;
-                        out.ffhse_has_invoke_id = f.trailer.has_invoke_id;
-                        out.ffhse_invoke_id = f.trailer.invoke_id;
-                        out.ffhse_has_time_stamp = f.trailer.has_time_stamp;
-                        out.ffhse_time_stamp = f.trailer.time_stamp;
-                        out.ffhse_has_extended_control_field = f.trailer.has_extended_control_field;
-                        out.ffhse_extended_control_field = f.trailer.extended_control_field;
-                        out.ffhse_message_name = f.message_name;
-                        out.ffhse_recognized = f.recognized;
-                        out.ffhse_body_decoded = f.body_decoded;
-                        out.ffhse_values = f.values;
-                        out.ffhse_body_shown_as_hex = f.body_shown_as_hex;
-                        out.ffhse_body_hex = f.body_hex;
-                        out.ffhse_body_length = f.body_length;
-                    };
-                    merge_ffhse(*frame, /*is_first_message=*/true);
-
-                    const size_t kMaxFfhseMessagesPerDatagram = resource_limits().max_coalesced_messages.value_or(50);
-                    size_t offset = frame->wire_length;
-                    size_t message_count = 1;
-                    while (offset < udp.payload.size() && message_count < kMaxFfhseMessagesPerDatagram) {
-                        ByteSpan rest = udp.payload.from(offset);
-                        auto next = try_parse_ffhse(rest);
-                        if (!next) break;  // remaining bytes aren't another FF-HSE PDU -- stop, don't guess
-                        ++message_count;
-                        std::string note = "additional FF-HSE PDU " + std::to_string(message_count) +
-                                            " found in the same UDP datagram at byte offset " + std::to_string(offset) +
-                                            ": " + next->summary;
-                        out.notes.push_back(note);
-                        merge_ffhse(*next, /*is_first_message=*/false);
-                        offset += next->wire_length;
-                    }
-                    if (message_count >= kMaxFfhseMessagesPerDatagram) {
-                        out.notes.push_back("stopped after " + std::to_string(kMaxFfhseMessagesPerDatagram) +
-                                             " FF-HSE PDU(s) in this one UDP datagram, more may remain (safety cap)");
-                    }
+                    out.summary = fr.summary;
+                    for (const auto& n : fr.notes) out.notes.push_back(n);
+                    out.result = *ffhse_result;
 
                     auto is_ffhse_port = [&](uint16_t port) {
                         return port_in(port, FFHSE_PORT_ANNUNC, options_.extra_ffhse_ports) ||
@@ -3511,62 +3469,23 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
         // reassemble_tcp_payload above for why FF-HSE's own structural detection gate is
         // deliberately given the lowest priority in this opportunistic, port-independent dispatch
         // chain.
+        //
+        // Registration-model migration: try_parse_ffhse + the same-payload multi-PDU coalescing
+        // loop that used to live directly in this call site are now reached through
+        // FfhseTcpDecoder::decode -- FF-HSE is a zero-flat-field migrated protocol (like
+        // TwinCAT/HART-IP/etc.): out.result carries the whole FfhseResult, and output.cpp's
+        // write_ffhse_json_fields reads straight from it. See ffhse.hpp/ffhse.cpp.
         if (want_ffhse) {
-            if (auto frame = try_parse_ffhse(effective_payload)) {
+            DecodeContext ctx;
+            ctx.packet_index = index;
+            ctx.protocol_id = "ffhse";
+            ctx.flow_states = &registry_flow_state_;
+            if (auto ffhse_result = ffhse_tcp_decoder().decode(effective_payload, ctx)) {
+                const FfhseResult& fr = ffhse_result->as<FfhseResult>();
                 out.protocol = "ffhse";
-                out.summary = frame->summary;
-
-                auto merge_ffhse = [&](const FfhseFrame& f, bool is_first_message) {
-                    for (const auto& n : f.notes) out.notes.push_back(n);
-                    if (!is_first_message) return;
-                    out.ffhse_version = f.header.version;
-                    out.ffhse_options = f.header.options;
-                    out.ffhse_protocol_name = f.header.protocol_name;
-                    out.ffhse_type_name = f.header.type_name;
-                    out.ffhse_confirmed = f.header.confirmed;
-                    out.ffhse_service_id = f.header.service_id;
-                    out.ffhse_fda_address = f.header.fda_address;
-                    out.ffhse_link_id = f.header.link_id;
-                    out.ffhse_message_length = f.header.message_length;
-                    out.ffhse_has_message_number = f.trailer.has_message_number;
-                    out.ffhse_message_number = f.trailer.message_number;
-                    out.ffhse_has_invoke_id = f.trailer.has_invoke_id;
-                    out.ffhse_invoke_id = f.trailer.invoke_id;
-                    out.ffhse_has_time_stamp = f.trailer.has_time_stamp;
-                    out.ffhse_time_stamp = f.trailer.time_stamp;
-                    out.ffhse_has_extended_control_field = f.trailer.has_extended_control_field;
-                    out.ffhse_extended_control_field = f.trailer.extended_control_field;
-                    out.ffhse_message_name = f.message_name;
-                    out.ffhse_recognized = f.recognized;
-                    out.ffhse_body_decoded = f.body_decoded;
-                    out.ffhse_values = f.values;
-                    out.ffhse_body_shown_as_hex = f.body_shown_as_hex;
-                    out.ffhse_body_hex = f.body_hex;
-                    out.ffhse_body_length = f.body_length;
-                };
-                merge_ffhse(*frame, /*is_first_message=*/true);
-
-                // Like HART-IP/EtherNet/IP's own small messages, it's normal for a sender or the OS
-                // to coalesce several FF-HSE PDUs into one TCP segment before flushing.
-                const size_t kMaxFfhseMessagesPerPayload = resource_limits().max_coalesced_messages.value_or(50);
-                size_t offset = frame->wire_length;
-                size_t message_count = 1;
-                while (offset < effective_payload.size() && message_count < kMaxFfhseMessagesPerPayload) {
-                    ByteSpan rest = effective_payload.from(offset);
-                    auto next = try_parse_ffhse(rest);
-                    if (!next) break;  // remaining bytes aren't another FF-HSE PDU -- stop, don't guess
-                    ++message_count;
-                    std::string note = "additional FF-HSE PDU " + std::to_string(message_count) +
-                                        " found in the same TCP payload at byte offset " + std::to_string(offset) +
-                                        " (coalesced by the sender/OS): " + next->summary;
-                    out.notes.push_back(note);
-                    merge_ffhse(*next, /*is_first_message=*/false);
-                    offset += next->wire_length;
-                }
-                if (message_count >= kMaxFfhseMessagesPerPayload) {
-                    out.notes.push_back("stopped after " + std::to_string(kMaxFfhseMessagesPerPayload) +
-                                         " FF-HSE PDU(s) in this one TCP payload, more may remain (safety cap)");
-                }
+                out.summary = fr.summary;
+                for (const auto& n : fr.notes) out.notes.push_back(n);
+                out.result = *ffhse_result;
 
                 auto is_ffhse_port = [&](uint16_t port) {
                     return port_in(port, FFHSE_PORT_ANNUNC, options_.extra_ffhse_ports) ||
