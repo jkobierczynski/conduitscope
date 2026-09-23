@@ -203,6 +203,15 @@ std::optional<DceRpcMessage> try_parse_dcerpc(ByteSpan pdu);
 // parse_smb2_chain's own kMaxCompounded uses.
 std::vector<DceRpcMessage> parse_dcerpc_chain(ByteSpan payload);
 
+// Renders a 16-byte NDR-marshalled GUID (Data1 4 bytes LE, Data2 2 bytes LE, Data3 2 bytes LE,
+// Data4 8 bytes byte-order-preserved) as the standard dashed lowercase hex string, e.g.
+// "12345678-1234-abcd-ef00-01234567cffb" -- the same mixed-endian convention every Microsoft GUID
+// on the wire uses. This file's own bind/bind_ack context-element decode uses it internally;
+// exposed here (not dcerpc.cpp-local) once drsuapi.cpp needed it too, for DRSBind's own
+// puuidClientDsa field -- see this file's own SHARED NDR PRIMITIVES paragraph for the general
+// "shared once a second consumer needs it" convention.
+std::string guid_to_string(ByteSpan guid);
+
 // ---------------------------------------------------------------------------------------------
 // Shared NDR primitives -- see this file's own header comment. Every interface module past
 // Netlogon (samr.hpp/lsarpc.hpp/srvsvc.hpp/wkssvc.hpp/drsuapi.hpp) uses these exact copies.

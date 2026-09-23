@@ -121,6 +121,7 @@
 
 #include "conduitscope/byteio.hpp"
 #include "conduitscope/dcerpc.hpp"
+#include "conduitscope/drsuapi.hpp"
 #include "conduitscope/it_protocols.hpp"  // SMB_PORT_445/SMB_NETBIOS_SESSION_PORT_139, match_smb_magic
 #include "conduitscope/lsarpc.hpp"
 #include "conduitscope/netlogon.hpp"
@@ -256,6 +257,12 @@ struct SmbMessage {
     // bundled without a cross-interface note).
     std::vector<SrvsvcCall> srvsvc_calls;
     std::vector<WkssvcCall> wkssvc_calls;
+    // DRSUAPI-level decode, same convention -- phase 3's own single interface (see drsuapi.hpp's own
+    // header comment for why it lands alone, and its own EMPIRICALLY-DISCOVERED SCOPE CAVEAT for why
+    // this vector is essentially always empty in a realistic capture even when DRSUAPI traffic is
+    // present: real-world DRSUAPI overwhelmingly rides a dynamically-negotiated raw TCP connection,
+    // not the SMB named pipe this codebase tracks).
+    std::vector<DrsuapiCall> drsuapi_calls;
 
     // Correlation-derived -- filled by SmbTcpDecoder::decode, not try_parse_smb2_chain.
     bool correlated_request_seen = false;
@@ -358,14 +365,26 @@ struct WkssvcPipeState {
     uint16_t interface_context_id = 0;
 };
 
+// Per-FileId state for a tracked "drsuapi" named pipe -- same shape as SrvsvcPipeState/WkssvcPipeState
+// above, same "no sticky note flag needed" reasoning (drsuapi.hpp's own DRSGetNCChanges note also
+// fires on every occurrence). See drsuapi.hpp's own header comment for this interface's own
+// empirically-discovered transport scope caveat: this map, and everything downstream of it, only
+// ever sees DRSUAPI traffic that happens to also ride an SMB named pipe, which is not DRSUAPI's own
+// default real-world transport.
+struct DrsuapiPipeState {
+    std::unordered_map<uint32_t, PendingDceRpcCall> pending_calls;
+    bool bound_context_is_interface = false;
+    uint16_t interface_context_id = 0;
+};
+
 // Attempts to interpret `payload` -- which must start with the 4-byte Zero+StreamProtocolLength
 // prefix (see this file's own FRAMING paragraph) -- as one SMB frame. Returns std::nullopt (never
 // throws) if match_smb_magic doesn't recognize the 4 bytes following that prefix.
 //
 // `tracked_rpc_pipe_file_ids`, when non-null, is a read-only view of the calling SmbFlowState's own
 // tracked_rpc_pipe_file_ids set (below) -- the union of every FileId tracked in ANY of its per-
-// interface pipe-state maps (netlogon_pipes today; samr_pipes/lsarpc_pipes/srvsvc_pipes/
-// wkssvc_pipes/drsuapi_pipes as each interface's own phase adds it) -- consulted only to decide
+// interface pipe-state maps (netlogon_pipes/samr_pipes/lsarpc_pipes/srvsvc_pipes/wkssvc_pipes/
+// drsuapi_pipes) -- consulted only to decide
 // whether a WRITE/READ/IOCTL message's own FileId is worth copying dcerpc_raw_payload for at all
 // (see SmbMessage's own doc comment on that field); nothing here mutates it or interprets its
 // contents, nor does it need to know WHICH interface a given FileId belongs to -- that finer-
@@ -432,10 +451,10 @@ public:
     std::unordered_map<SmbFileId, LsarpcPipeState, SmbFileIdHash> lsarpc_pipes;
     std::unordered_map<SmbFileId, SrvsvcPipeState, SmbFileIdHash> srvsvc_pipes;
     std::unordered_map<SmbFileId, WkssvcPipeState, SmbFileIdHash> wkssvc_pipes;
+    std::unordered_map<SmbFileId, DrsuapiPipeState, SmbFileIdHash> drsuapi_pipes;
 
     // The union of every FileId tracked in netlogon_pipes/samr_pipes/lsarpc_pipes/srvsvc_pipes/
-    // wkssvc_pipes above (and, as each is added, every future per-interface pipe-state map this
-    // struct gains -- drsuapi_pipes) -- kept in lockstep by the CREATE-response/CLOSE handlers
+    // wkssvc_pipes/drsuapi_pipes above -- kept in lockstep by the CREATE-response/CLOSE handlers
     // (smb.cpp) with whichever per-interface map an insert/erase also touches. try_parse_smb
     // (smb.hpp) only ever needs membership, not which interface, to decide whether a WRITE/READ/
     // IOCTL message's payload is worth copying into dcerpc_raw_payload at all -- see

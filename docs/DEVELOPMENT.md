@@ -5694,6 +5694,119 @@ deferred future migration.
     `man/conduitscope.1`, and `README.md` updated in this same phase, not
     deferred.
 
+    **Update: DRSUAPI, phase 3 (alone -- a critical, empirically-discovered
+    scope caveat, not bundled).** New `include/conduitscope/drsuapi.hpp`/
+    `src/drsuapi.cpp`, called from a new `smb.cpp` function
+    (`decode_dcerpc_and_drsuapi`) that is Phase 0's `resolve_dcerpc_bind_
+    bookkeeping` template's fifth caller. DRSUAPI is the interface domain
+    controllers use to replicate directory data to each other, and
+    `DRSGetNCChanges` specifically is the wire-level signature of DCSync
+    (Mimikatz's own `lsadump::dcsync` and every tool built on the same
+    technique) -- pulling replicated secret material by impersonating a
+    domain controller.
+
+    **Before writing any code, the plan's own assumption that DRSUAPI would
+    plug into `smb.cpp`'s existing SMB-named-pipe infrastructure the same
+    way SAMR/LSARPC/SRVSVC/WKSSVC did was checked against real transport
+    behavior, and found wrong.** Two independent sources agree: [MS-DRSR]'s
+    own "RPC Transport" section states plainly that "this protocol uses the
+    following RPC protocol sequence: RPC over TCP... A client SHOULD
+    attempt to connect using the RPC-over-TCP protocol sequence" -- no
+    static named pipe is named anywhere in that section -- and every real
+    DCSync implementation examined (impacket's own `secretsdump.py` and
+    `ntlmrelayx`'s `dcsyncclient.py`) resolves DRSUAPI's endpoint via
+    `epm.hept_map(..., protocol='ncacn_ip_tcp')` (the RPC endpoint mapper
+    on TCP/135) and binds over a dynamically negotiated raw TCP port,
+    never touching SMB or a named pipe at all. This was surfaced to Jurgen
+    directly (three options: ship the SMB-named-pipe version caveated;
+    build a genuinely new port-independent raw-TCP DCE/RPC recognition
+    decoder now, pulling forward part of Phase 5's own TCP-framing
+    groundwork; or defer DRSUAPI into Phase 5 entirely) -- he chose to ship
+    the SMB-named-pipe version, caveated, matching the original plan's own
+    scope and Phase 0's plumbing. The consequence is stated plainly, not
+    buried: **this decoder only ever sees DRSUAPI traffic that happens to
+    also ride an SMB named pipe (MS-DRSR's own "a server MAY listen on
+    additional RPC protocol sequences" allowance) -- a real DC's own
+    default DCSync-relevant traffic, which predominantly uses the
+    RPC-over-TCP path instead, is NOT covered here.** This caveat is in
+    `drsuapi.hpp`'s own file header comment (its most prominent section),
+    in `docs/PROTOCOL_COVERAGE.md`'s new DRSUAPI section, in `man/
+    conduitscope.1`, and in the fixture generator's own doc comment --
+    deliberately repeated everywhere a reader might reasonably form an
+    impression of this decoder's real-world coverage.
+
+    OPNUM COVERAGE is deliberately the narrowest of any interface in this
+    codebase, reflecting the reduced scope: header-only `DRSBind(0)` (the
+    request decodes `puuidClientDsa`, the calling client's own
+    self-identifying GUID, when its `[unique]` pointer is non-NULL, and
+    stops there -- the `DRS_EXTENSIONS` capability-negotiation blob is not
+    chased on the request side; the response skips its own `ppextServer`
+    via a new `skip_drs_extensions` helper and decodes `phDrs` (the bound
+    context handle, hex, purely informational) + status) and `DRSUnbind(1)`
+    (both directions decode `phDrs` directly -- no pointer indirection at
+    all for this opnum, a genuine wire-shape difference from every other
+    handle in this batch). `DRSGetNCChanges(3)` -- the DCSync call itself
+    -- is structural-only (zero field decode) but fires an UNCONDITIONAL
+    curated note on every occurrence (not sticky): this codebase has no
+    notion anywhere of "is this host a domain controller" (confirmed:
+    `asset_inventory.hpp` tracks no AD role of any kind), so the note
+    states that honestly -- flags the call, notes it's also routine,
+    high-volume traffic between real domain controllers, and says this
+    decoder cannot independently confirm DC status either way. Confirmed
+    (and deliberately exercised in the new fixture) that the note still
+    fires for a SEALED `DRSGetNCChanges` call: the opnum lives in the
+    DCE/RPC request header, not the encrypted stub, so it remains visible
+    under RPC-layer sealing even though this codebase renders none of the
+    sealed content -- the same posture Kerberos's/LDAP's/SMB's own curated
+    notes already take on header-level facts that survive an otherwise
+    opaque body. `DRSCrackNames(12)` is structural-only with no note (a
+    real recon step, but not the secret-material-carrying call
+    `DRSGetNCChanges` is). Any opnum outside this four-entry table
+    (`DRSReplicaSync`/`Add`/`Del`/`Modify`, `DRSVerifyNames`,
+    `DRSGetNT4ChangeLog`, `DRSDomainControllerInfo`, `DRSGetMemberships`/
+    `2`, `DRSInterDomainMove`, `DRSAddSidHistory`, `DRSWriteSPN`,
+    `DRSRemoveDsServer`/`Domain`, `DRSExecuteKCC`, `DRSGetReplInfo` --
+    MS-DRSR's own full opnum set is considerably larger than the four this
+    file names) is reported numerically, never guessed at.
+
+    One shared-primitive move: `dcerpc.cpp`'s own `guid_to_string` (used
+    internally by its bind/bind_ack context-element decode since Phase 0)
+    moved from that file's anonymous namespace to namespace scope, and
+    `dcerpc.hpp` gained a declaration for it -- the exact "shared once a
+    second consumer needs it" move already applied to `ndr_align4`/
+    `read_ndr_string`/`read_ndr_unique_string`, needed here because
+    `drsuapi.cpp` renders `puuidClientDsa` with the identical GUID wire
+    format an interface UUID uses.
+
+    New fixture: `tools/make_sample_pcap.py`'s `build_drsuapi_sample()`
+    (`tests/sample_drsuapi.pcap`, 3 independent flows A-C -- narrower than
+    SRVSVC/WKSSVC's own four, since there's only one interface here), plus
+    one standalone stub builder (`drsuapi_bind_response_stub`) for the
+    `DRS_EXTENSIONS`-skip response shape. Flow A's own `DRSBind` response
+    carries a deliberately non-4-byte-aligned 3-byte `DRS_EXTENSIONS`
+    payload specifically to prove `skip_drs_extensions`' own trailing-pad
+    computation doesn't misalign the `phDrs`/status fields that follow it
+    (both decode correctly in the fixture's own actual output, not just in
+    theory); a second `DRSBind` call in the same flow uses a NULL
+    `puuidClientDsa` as the negative control (no `client_dsa_guid` field at
+    all); `DRSGetNCChanges` is called twice back-to-back specifically to
+    prove the curated note fires on every occurrence, not just the first.
+    15 new CMakeLists.txt tests cover every opnum's field decode (or
+    deliberate absence of it, with `FAIL_REGULAR_EXPRESSION` assertions
+    against the fixture's own deliberately distinctive/non-zero stub
+    bytes), the DCSync note firing twice (not sticky) plus a third time
+    under sealing, `DRSCrackNames`' own lack of a note, the sealed-call
+    fallback, the bind-interface-confirmation negative control, and
+    `--stats` opnum counts.
+
+    Verified against a fresh from-scratch build in both established
+    configs (default and `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF`, both
+    zero warnings; full suite 1487/1487 default, 1475/1475 nolive) plus
+    manual `--format json`/`--format text --verbose`/`--stats`/`info`
+    smoke tests against the new fixture. `docs/PROTOCOL_COVERAGE.md`'s new
+    DRSUAPI section, `man/conduitscope.1`, and `README.md` updated in this
+    same phase, not deferred.
+
 29. **MELSEC Communication Protocol (MC Protocol / SLMP), Mitsubishi
     Electric -- TCP port 5001, UDP port 5000.** Jurgen asked for this
     directly. **Done.** Mitsubishi's own PLC communication protocol --

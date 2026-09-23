@@ -2886,6 +2886,27 @@ void write_wkssvc_call_json_fields(std::ostream& out, const WkssvcCall& wc) {
     out << "            \"summary\": \"" << json_escape(wc.summary) << "\"\n";
 }
 
+// Renders one DrsuapiCall (drsuapi.hpp) as a JSON object's inner fields -- same conventions as
+// write_samr_call_json_fields above.
+void write_drsuapi_call_json_fields(std::ostream& out, const DrsuapiCall& dc) {
+    out << "            \"opnum\": \"" << json_escape(dc.opnum_name) << "\",\n";
+    out << "            \"call_id\": " << dc.call_id << ",\n";
+    out << "            \"is_response\": " << (dc.is_response ? "true" : "false") << ",\n";
+    if (dc.sealed) {
+        out << "            \"sealed\": true,\n";
+    }
+    if (dc.has_client_dsa_guid) {
+        out << "            \"client_dsa_guid\": \"" << json_escape(dc.client_dsa_guid) << "\",\n";
+    }
+    if (dc.has_handle) {
+        out << "            \"handle\": \"" << json_escape(dc.handle_hex) << "\",\n";
+    }
+    if (dc.has_response_fields && dc.has_status) {
+        out << "            \"status_name\": \"" << json_escape(dc.status_name) << "\",\n";
+    }
+    out << "            \"summary\": \"" << json_escape(dc.summary) << "\"\n";
+}
+
 // Renders one SmbMessage (smb.hpp) as a JSON object's inner fields, indented for use inside
 // write_smb_json_fields's own "smb_messages" array below -- one call per sub-message in a
 // (possibly compounded, see smb.hpp's own COMPOUNDING paragraph) SmbFrame. Every field not
@@ -3044,6 +3065,15 @@ void write_one_smb_message_json_fields(std::ostream& out, const SmbMessage& m) {
             out << "          {\n";
             write_wkssvc_call_json_fields(out, m.wkssvc_calls[i]);
             out << "          }" << (i + 1 < m.wkssvc_calls.size() ? "," : "") << "\n";
+        }
+        out << "        ],\n";
+    }
+    if (!m.drsuapi_calls.empty()) {
+        out << "        \"drsuapi_calls\": [\n";
+        for (size_t i = 0; i < m.drsuapi_calls.size(); ++i) {
+            out << "          {\n";
+            write_drsuapi_call_json_fields(out, m.drsuapi_calls[i]);
+            out << "          }" << (i + 1 < m.drsuapi_calls.size() ? "," : "") << "\n";
         }
         out << "        ],\n";
     }
@@ -3701,6 +3731,9 @@ void StatsWriter::write_packet(const DecodedPacket& p) {
             for (const WkssvcCall& wc : m.wkssvc_calls) {
                 if (!wc.is_response) wkssvc_opnum_counts_[wc.opnum_name]++;
             }
+            for (const DrsuapiCall& dc : m.drsuapi_calls) {
+                if (!dc.is_response) drsuapi_opnum_counts_[dc.opnum_name]++;
+            }
         }
     }
     if (p.protocol == "s7comm" && p.result) {
@@ -3959,6 +3992,12 @@ void StatsWriter::print_summary(std::ostream& out) const {
     if (!wkssvc_opnum_counts_.empty()) {
         out << "wkssvc opnum counts:\n";
         for (const auto& [name, count] : wkssvc_opnum_counts_) {
+            out << "  " << std::left << std::setw(40) << name << count << "\n";
+        }
+    }
+    if (!drsuapi_opnum_counts_.empty()) {
+        out << "drsuapi opnum counts:\n";
+        for (const auto& [name, count] : drsuapi_opnum_counts_) {
             out << "  " << std::left << std::setw(40) << name << count << "\n";
         }
     }

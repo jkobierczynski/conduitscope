@@ -7033,7 +7033,7 @@ SID that followed -- caught by decoding the fixture and observing
 file headers for the full writeup, including the complete empirically-
 derived NDR deferred-pointer-ordering rule.
 
-### SRVSVC + WKSSVC (MS-SRVS, MS-WKST; carried inside SMB2 WRITE/READ, same shape as Netlogon/SAMR/LSARPC) -- phase 2 of the same follow-on Windows RPC batch (SAMR/LSARPC done, SRVSVC/WKSSVC this section, DRSUAPI + WinRM/WMI remain future work)
+### SRVSVC + WKSSVC (MS-SRVS, MS-WKST; carried inside SMB2 WRITE/READ, same shape as Netlogon/SAMR/LSARPC) -- phase 2 of the same follow-on Windows RPC batch (SAMR/LSARPC done, SRVSVC/WKSSVC this section, DRSUAPI done (see below), WinRM/WMI remain future work)
 
 SRVSVC (Server Service Remote Protocol) and WKSSVC (Workstation Service
 Remote Protocol) are the interfaces `net view`/`net config workstation`-
@@ -7197,7 +7197,8 @@ equaling `"srvsvc"`/`"wkssvc"` respectively).
 
 #### DELIBERATELY NOT IMPLEMENTED in this pass
 
-DRSUAPI, WinRM, WMI (future phases of the same batch). SHARE_INFO/
+DRSUAPI (its own later phase, see below), WinRM, WMI (future phases of
+the same batch). SHARE_INFO/
 WKSTA_INFO/WKSTA_USER_INFO levels other than the ones named above (see
 Message/opnum coverage). SRVSVC's own three header-only opnums' RESPONSE
 side (their level-dependent per-entry info structs -- `CONNECTION_INFO_0/1`,
@@ -7250,6 +7251,213 @@ smoke-tested against the hand-built fixture, decoded and inspected in
 `CMakeLists.txt` `srvsvc_*`/`wkssvc_*` test family reading it was
 written. See `include/conduitscope/srvsvc.hpp`'s and
 `include/conduitscope/wkssvc.hpp`'s file headers for the full writeup.
+
+### DRSUAPI (MS-DRSR; carried inside SMB2 WRITE/READ, same shape as Netlogon/SAMR/LSARPC/SRVSVC/WKSSVC) -- phase 3 of the same follow-on Windows RPC batch, alone rather than bundled (SAMR/LSARPC/SRVSVC/WKSSVC done, DRSUAPI this section, WinRM/WMI remain future work)
+
+DRSUAPI (Directory Replication Service Remote Protocol) is the interface
+domain controllers use to replicate directory data to each other.
+`DRSGetNCChanges` specifically is the wire-level signature of DCSync
+(Mimikatz's own `lsadump::dcsync`, and every tool built on the same
+technique): pulling replicated secret material -- password hashes,
+Kerberos keys -- for arbitrary accounts by impersonating a domain
+controller, without ever touching LSASS memory on a real one. Same
+envelope-vs-interface split as every prior RPC phase:
+`include/conduitscope/drsuapi.hpp`/`src/drsuapi.cpp`, `smb.cpp` gaining
+one more dispatch function (`decode_dcerpc_and_drsuapi`) built on Phase
+0's shared `resolve_dcerpc_bind_bookkeeping` template.
+
+#### A critical, empirically-discovered scope caveat -- read this first
+
+Every interface before this one (Netlogon, SAMR, LSARPC, SRVSVC, WKSSVC)
+rides a well-known STATIC named pipe over the already-decoded SMB
+transport, so wiring each into `smb.cpp`'s existing pipe-tracking
+infrastructure was sufficient to see essentially all of that interface's
+real-world traffic. **DRSUAPI is different, and this was discovered
+during this phase's own planning, not assumed from the batch's original
+plan.** [MS-DRSR]'s own "RPC Transport" section states plainly: *"this
+protocol uses the following RPC protocol sequence: RPC over TCP... A
+client SHOULD attempt to connect using the RPC-over-TCP protocol
+sequence"* -- no static named pipe is named anywhere in that section.
+This was independently confirmed a second way: every real DCSync
+implementation examined (impacket's own `secretsdump.py` and
+`ntlmrelayx`'s `dcsyncclient.py`) resolves DRSUAPI's endpoint via
+`epm.hept_map(..., protocol='ncacn_ip_tcp')` (the RPC endpoint mapper on
+TCP/135) and binds directly over a DYNAMICALLY NEGOTIATED raw TCP port,
+never touching SMB or a named pipe at all. This codebase has no
+endpoint-mapper decode and no raw-TCP/dynamic-port DCE/RPC framing (that
+territory, if it's ever built, belongs alongside the still-unbuilt
+WMI/DCOM decoder, which faces the identical "dynamically negotiated data
+channel" problem). Jurgen was asked directly how to handle this
+discovery (ship the SMB-named-pipe version caveated; build genuinely new
+raw-TCP DCE/RPC recognition now; or defer DRSUAPI into the WMI/DCOM
+phase) and chose the first option, matching the original plan's own
+scope.
+
+**The consequence: this decoder only ever sees DRSUAPI traffic that
+happens to also ride an SMB named pipe (MS-DRSR's own "a server MAY
+listen on additional RPC protocol sequences" allowance) -- a real DC's
+own default DCSync-relevant traffic, which predominantly uses the
+RPC-over-TCP path instead, is NOT covered here.** This is stated plainly
+rather than silently, because the entire reason this phase exists is
+DCSync detection, and a reader of this codebase's own coverage claims
+deserves to know exactly how narrow that coverage actually is in a
+realistic capture. The fixture's own gate pipe name, `"drsuapi"`, is this
+codebase's own synthetic convention (matching every other interface in
+this batch gating on its own interface name as the pipe name) -- MS-DRSR
+itself names no well-known named pipe at all.
+
+#### Wire format
+
+Interface UUID, verified against [MS-DRSR] Appendix A's own IDL header
+and impacket's own `MSRPC_UUID_DRSUAPI` constant (both agree):
+`e3514235-4b06-11d1-ab04-00c04fc2dcd2`, **version 4.0** (not the 1.0 most
+other interfaces in this codebase negotiate -- SRVSVC's own 3.0 was the
+first departure from that norm). The generic DCE/RPC PDU envelope is
+identical to every prior interface's own -- nothing new there.
+
+Every byte-level structure was verified two ways: against [MS-DRSR]
+itself (opnum numbers, cross-checked against impacket's own `drsuapi.py`
+numeric `opnum = N` constants, both agree), and empirically, by installing
+impacket in the planning sandbox and marshalling real `DRSBind`/
+`DRSBindResponse`/`DRSUnbind`/`DRSUnbindResponse` objects, then
+hex-dumping the actual bytes -- including a `DRS_EXTENSIONS` payload with
+a deliberately non-4-byte-aligned 3-byte length, to confirm the trailing
+padding byte-for-byte. Two DRSUAPI-specific wire facts this pass
+confirmed: **`DRS_HANDLE` (the context handle both `DRSBind`'s own
+response and `DRSUnbind`'s own request/response carry) is NOT reached via
+a pointer at all**, unlike every other handle this batch of interfaces
+decodes -- it's an `[in, out]` context-handle parameter, marshalled as
+its own raw 20 bytes directly at the top of the stub (no referent to
+check); and **`DRS_EXTENSIONS` (the capability-negotiation blob `DRSBind`
+exchanges in both directions) is a conformant structure whose own
+`MaximumCount` (hoisted array bound) is followed by `cb` (the
+authoritative, self-describing byte count) then `cb` raw bytes then
+padding to the next 4-byte boundary** -- this codebase never renders
+`DRS_EXTENSIONS`' own capability bitflags, only skips past the blob (via
+a new `skip_drs_extensions` helper in `drsuapi.cpp`) to reach whatever
+field follows it (`DRSBind`'s own `phDrs`/`ErrorCode`).
+
+One shared-primitive move: `dcerpc.cpp`'s own `guid_to_string` (used
+internally by its bind/bind_ack context-element decode since Phase 0)
+moved from that file's anonymous namespace to namespace scope, with a new
+declaration in `dcerpc.hpp` -- the same "shared once a second consumer
+needs it" move already applied to `ndr_align4`/`read_ndr_string`/
+`read_ndr_unique_string`, needed here because `drsuapi.cpp` renders
+`DRSBind`'s own `puuidClientDsa` with the identical GUID wire format an
+interface UUID uses.
+
+#### Message/opnum coverage
+
+Deliberately the NARROWEST curated table of any interface in this
+codebase, reflecting this phase's own reduced scope. Header-level decode
+only: `DRSBind`(0) -- the request decodes `puuidClientDsa` (the calling
+client's own self-identifying GUID) when its `[unique]` pointer is
+non-NULL, and stops there (`pextClient`'s own `DRS_EXTENSIONS` blob is not
+chased on the request side); the response skips its own `ppextServer` (via
+`skip_drs_extensions`, see Wire format above) and decodes `phDrs` (the
+bound context handle, hex, purely informational, never tracked across
+calls) + the return status. `DRSUnbind`(1) -- both request and response
+decode `phDrs` directly (no pointer indirection, see Wire format above) +
+response status. Structural-only, opnum named, WITH an unconditional
+curated note firing on every occurrence (not sticky -- each call is its
+own meaningful event, the same posture SRVSVC's own `NetrShareAdd`/
+`NetrShareDel` notes already established): `DRSGetNCChanges`(3) -- the
+DCSync call itself; this codebase has no notion anywhere of "is this host
+a domain controller" (confirmed: `asset_inventory.hpp` tracks no AD role
+of any kind), so the note states that honestly rather than inventing a
+heuristic. Structural-only, opnum named, no note: `DRSCrackNames`(12) --
+also a real recon step, but not the secret-material-carrying call
+`DRSGetNCChanges` is. Any opnum outside this four-entry table
+(`DRSReplicaSync`/`Add`/`Del`/`Modify`, `DRSVerifyNames`,
+`DRSGetNT4ChangeLog`, `DRSDomainControllerInfo`, `DRSGetMemberships`/`2`,
+`DRSInterDomainMove`, `DRSAddSidHistory`, `DRSWriteSPN`,
+`DRSRemoveDsServer`/`Domain`, `DRSExecuteKCC`, `DRSGetReplInfo` --
+MS-DRSR's own full opnum set is considerably larger than the four this
+file names) is reported as `"opnum N"` -- this file's own scope caveat
+above already concedes this decoder's coverage is narrow; guessing at
+additional opnum names on top of that without independent verification
+would only compound the risk of a wrong claim.
+
+#### Curated attack/monitoring detection
+
+One note: **DRSGetNCChanges observed** -- fires on every occurrence
+(not sticky), stating this is the wire signature DCSync-style tooling
+uses to pull replicated directory data including secret material by
+impersonating a domain controller, that it's also routine high-volume
+traffic between real domain controllers during ordinary AD replication,
+and that this decoder cannot independently confirm whether the calling
+host is actually a domain controller. Confirmed (and deliberately
+exercised in the fixture) that this note STILL fires for a SEALED
+`DRSGetNCChanges` call: the opnum lives in the DCE/RPC request header, not
+the encrypted stub, so it remains visible under RPC-layer sealing even
+though this codebase renders none of the sealed content -- the same
+posture Kerberos's/LDAP's/SMB's own curated notes already take on
+header-level facts that survive an otherwise opaque body.
+
+#### State/correlation design
+
+`DrsuapiPipeState` (`smb.hpp`) is structurally identical to
+`SrvsvcPipeState`/`WkssvcPipeState` -- the same `call_id`-keyed
+`pending_calls` map and `bound_context_is_interface`/
+`interface_context_id` pair, no sticky note flag (the DCSync note isn't
+sticky either). `SmbFlowState` gained `drsuapi_pipes`
+(`unordered_map<SmbFileId, DrsuapiPipeState, SmbFileIdHash>`), populated
+at `CREATE` response exactly like every pipe map before it, gated on the
+`CREATE` request's own pipe name equaling `"drsuapi"` (this codebase's own
+synthetic gate name -- see the scope caveat above).
+
+#### DELIBERATELY NOT IMPLEMENTED in this pass
+
+Raw-TCP/dynamic-port DCE/RPC framing and the RPC endpoint-mapper decode
+that would be needed to actually follow DRSUAPI's own default transport
+(see the scope caveat above -- explicitly deferred, not silently
+dropped). WinRM, WMI (future phases of the same batch). `DRS_EXTENSIONS`'
+own capability-flag content (skipped, never rendered). Every DRSUAPI
+opnum outside `drsuapi.hpp`'s own curated OPNUM COVERAGE list (MS-DRSR
+defines considerably more than four). DCE/RPC PDU fragmentation
+reassembly (inherited scope limit from `dcerpc.hpp`). Decoding sealed
+stub data. DRSUAPI handle-level state tracking (same posture every prior
+interface in this batch already establishes for its own handles).
+
+#### JSON output fields
+
+`drsuapi_calls[]` (only on a message where at least one PDU was
+interpreted at DRSUAPI's own level), same `has_*`/non-empty-optional
+gating convention as every prior interface's own calls array: `opnum`/
+`call_id`/`is_response`/`sealed` (sealed fallback only)/`client_dsa_guid`
+(`DRSBind` request, when its own pointer was non-NULL)/`handle` (hex,
+`DRSBind` response and `DRSUnbind` both directions)/`status_name`/
+`summary`. `--stats` gains a `drsuapi opnum counts:` block, the same
+`std::map<std::string, size_t>` pattern every prior interface's own
+counts already established.
+
+#### Validation
+
+No public real-world DRSUAPI capture was incorporated in this pass (and,
+per the scope caveat above, a public capture of DRSUAPI-over-SMB-named-
+pipe specifically would be unusual even if one were sought -- real DRSUAPI
+captures predominantly show the RPC-over-TCP path this decoder doesn't
+follow); validated by construction against synthetic
+`tests/sample_drsuapi.pcap` (TCP, 3 independent flows A-C --
+`tools/make_sample_pcap.py`'s `build_drsuapi_sample()`), covering: a
+`DRSBind` with a non-NULL `puuidClientDsa` whose own response carries a
+deliberately non-4-byte-aligned 3-byte `DRS_EXTENSIONS` payload (proving
+`skip_drs_extensions`' own padding computation doesn't misalign the
+fields that follow it), a second `DRSBind` with a NULL `puuidClientDsa`
+(negative control), a `DRSUnbind` request/response pair, two separate
+`DRSGetNCChanges` request/response pairs back-to-back (proving the
+curated note fires on every occurrence, not just the first), and one
+`DRSCrackNames` pair with no note (flow A); a sealed `DRSGetNCChanges`
+request/response pair on an already-bound DRSUAPI context, exercising
+both the "sealed, N bytes, not decoded" fallback AND the note still
+firing under sealing (flow B); a bind offering Netlogon's own interface
+UUID on a `"drsuapi"`-named pipe, the bind-interface-confirmation negative
+control (flow C). Every byte offset and note-trigger condition was
+independently smoke-tested against the hand-built fixture, decoded and
+inspected in `--format text`, `--format json`, `--stats`, and `info`,
+BEFORE the `CMakeLists.txt` `drsuapi_*` test family reading it was
+written. See `include/conduitscope/drsuapi.hpp`'s own file header for the
+full writeup, including the scope caveat in its most prominent form.
 
 ### MELSEC / MC Protocol (SLMP, Mitsubishi Electric) -- TCP port 5001, UDP port 5000
 

@@ -9,6 +9,28 @@
 
 namespace conduitscope {
 
+// Renders a 16-byte NDR-marshalled GUID (Data1 4 bytes LE, Data2 2 bytes LE, Data3 2 bytes LE, Data4
+// 8 bytes byte-order-preserved) as the standard dashed lowercase hex string, e.g.
+// "12345678-1234-abcd-ef00-01234567cffb" -- the same mixed-endian convention every Microsoft GUID on
+// the wire uses, verified against the bind PDU bytes impacket's own NDR marshalling produced during
+// planning (see this file's own header comment). Exposed at namespace scope (not kept anonymous-
+// namespace-local, as it was before) once drsuapi.cpp needed it too, for DRSBind's own
+// puuidClientDsa field -- the exact "shared primitive once a second consumer needs it" move this
+// file's own header comment already documents for ndr_align4/read_ndr_string/read_ndr_unique_string.
+std::string guid_to_string(ByteSpan guid) {
+    std::ostringstream s;
+    s << std::hex << std::setfill('0');
+    uint32_t data1 = static_cast<uint32_t>(guid.at(0)) | (static_cast<uint32_t>(guid.at(1)) << 8) |
+                      (static_cast<uint32_t>(guid.at(2)) << 16) | (static_cast<uint32_t>(guid.at(3)) << 24);
+    uint16_t data2 = static_cast<uint16_t>(guid.at(4) | (guid.at(5) << 8));
+    uint16_t data3 = static_cast<uint16_t>(guid.at(6) | (guid.at(7) << 8));
+    s << std::setw(8) << data1 << "-" << std::setw(4) << data2 << "-" << std::setw(4) << data3 << "-";
+    for (size_t i = 8; i < 10; ++i) s << std::setw(2) << static_cast<unsigned>(guid.at(i));
+    s << "-";
+    for (size_t i = 10; i < 16; ++i) s << std::setw(2) << static_cast<unsigned>(guid.at(i));
+    return s.str();
+}
+
 namespace {
 
 // PTYPE table -- all 20 defined values, cross-checked against impacket's own rpcrt.py MSRPC_* constants
@@ -76,25 +98,6 @@ const char* auth_level_name(uint8_t level) {
         case 6: return "RPC_C_AUTHN_LEVEL_PKT_PRIVACY";
         default: return nullptr;
     }
-}
-
-// Renders a 16-byte NDR-marshalled GUID (Data1 4 bytes LE, Data2 2 bytes LE, Data3 2 bytes LE, Data4
-// 8 bytes byte-order-preserved) as the standard dashed lowercase hex string, e.g.
-// "12345678-1234-abcd-ef00-01234567cffb" -- the same mixed-endian convention every Microsoft GUID on
-// the wire uses, verified against the bind PDU bytes impacket's own NDR marshalling produced during
-// planning (see dcerpc.hpp's own file header comment).
-std::string guid_to_string(ByteSpan guid) {
-    std::ostringstream s;
-    s << std::hex << std::setfill('0');
-    uint32_t data1 = static_cast<uint32_t>(guid.at(0)) | (static_cast<uint32_t>(guid.at(1)) << 8) |
-                      (static_cast<uint32_t>(guid.at(2)) << 16) | (static_cast<uint32_t>(guid.at(3)) << 24);
-    uint16_t data2 = static_cast<uint16_t>(guid.at(4) | (guid.at(5) << 8));
-    uint16_t data3 = static_cast<uint16_t>(guid.at(6) | (guid.at(7) << 8));
-    s << std::setw(8) << data1 << "-" << std::setw(4) << data2 << "-" << std::setw(4) << data3 << "-";
-    for (size_t i = 8; i < 10; ++i) s << std::setw(2) << static_cast<unsigned>(guid.at(i));
-    s << "-";
-    for (size_t i = 10; i < 16; ++i) s << std::setw(2) << static_cast<unsigned>(guid.at(i));
-    return s.str();
 }
 
 constexpr const char* kNdr32TransferSyntaxUuid = "8a885d04-1ceb-11c9-9fe8-08002b104860";

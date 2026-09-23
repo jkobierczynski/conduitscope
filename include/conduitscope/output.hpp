@@ -256,6 +256,9 @@ private:
     // Same convention, phase 2's own two interfaces (srvsvc.hpp/wkssvc.hpp).
     std::map<std::string, size_t> srvsvc_opnum_counts_;
     std::map<std::string, size_t> wkssvc_opnum_counts_;
+    // Same convention, phase 3's own single interface (drsuapi.hpp) -- see that file's own header
+    // comment for why this map is essentially always empty in a realistic capture.
+    std::map<std::string, size_t> drsuapi_opnum_counts_;
     std::map<std::string, size_t> s7comm_function_counts_;
     std::map<std::string, size_t> dnp3_function_counts_;
     std::map<std::string, size_t> iec104_asdu_type_counts_;

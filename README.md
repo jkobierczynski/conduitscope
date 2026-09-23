@@ -44,7 +44,15 @@ notes), SRVSVC + WKSSVC (MS-SRVS, MS-WKST, likewise carried inside SMB2
 named-pipe I/O with no independent wire gate or CLI flag of their own,
 with level-1-scoped share-enumeration/workstation-identity/logged-on-user
 decode and curated share-added/deleted and domain-join/unjoin
-attack/monitoring notes),
+attack/monitoring notes), DRSUAPI (MS-DRSR, likewise carried inside SMB2
+named-pipe I/O with no independent wire gate or CLI flag of its own, with
+a curated DRSGetNCChanges/DCSync-signature attack/monitoring note that
+still fires under RPC-layer sealing -- **note:** real-world DRSUAPI
+traffic, including DCSync, predominantly rides a dynamically negotiated
+raw TCP connection via the RPC endpoint mapper rather than a named pipe,
+which this decoder does not follow; see `docs/PROTOCOL_COVERAGE.md`'s
+DRSUAPI section for the full scope caveat before relying on this for
+DCSync detection),
 IEEE Spanning Tree Protocol
 (STP/RSTP/MSTP), DeviceNet (CAN-bus CIP, via SocketCAN pcap captures), DNS,
 mDNS, LLMNR, and NetBIOS Name Service (NBT-NS), ICMP, RIP, IGMP, VRRP, HSRP,

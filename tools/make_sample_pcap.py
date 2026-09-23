@@ -9272,6 +9272,8 @@ LSARPC_INTERFACE_UUID = "12345778-1234-abcd-ef00-0123456789ab"    # lsarpc.hpp's
 SRVSVC_INTERFACE_UUID = "4b324fc8-1670-01d3-1278-5a47bf6ee188"    # srvsvc.hpp's own kSrvsvcInterfaceUuid
                                                                      # -- version 3.0, not 1.0
 WKSSVC_INTERFACE_UUID = "6bffd098-a112-3610-9833-46c3f87e345a"    # wkssvc.hpp's own kWkssvcInterfaceUuid
+DRSUAPI_INTERFACE_UUID = "e3514235-4b06-11d1-ab04-00c04fc2dcd2"   # drsuapi.hpp's own kDrsuapiInterfaceUuid
+                                                                     # -- version 4.0, not 1.0
 NDR32_TRANSFER_SYNTAX_UUID = "8a885d04-1ceb-11c9-9fe8-08002b104860"
 FSCTL_PIPE_TRANSCEIVE = 0x0011C017
 RPC_C_AUTHN_LEVEL_PKT_PRIVACY = 6
@@ -10279,6 +10281,246 @@ def build_srvsvc_wkssvc_sample():
     for i, pkt in enumerate(packets):
         data += pcap_record(pkt, 1_700_070_000 + i, i * 1000)
     (TESTS_DIR / "sample_srvsvc_wkssvc.pcap").write_bytes(data)
+
+
+def drsuapi_bind_response_stub(ext_bytes, handle: bytes, status: int = 0) -> bytes:
+    """DRSBind(0) response -- ppextServer (a DRS_EXTENSIONS blob the decoder deliberately skips
+    past, never renders -- see drsuapi.cpp's own skip_drs_extensions doc comment: referent(u32) +
+    [if nonzero: hoisted MaximumCount(u32) + cb(u32) + cb raw bytes + pad to 4]), phDrs (the bound
+    context handle, 20 raw bytes), ErrorCode. `ext_bytes` is None for a NULL ppextServer, or the raw
+    extension payload for a non-NULL one -- deliberately not required to be 4-byte-aligned, so a
+    caller can exercise the decoder's own trailing-pad skip with e.g. a 3-byte payload, the same
+    case empirically hex-dumped during planning (see drsuapi.hpp's own header comment)."""
+    b = NdrBuf()
+    if ext_bytes is None:
+        b.u32(0)
+    else:
+        b.u32(b._ref())
+        b.u32(len(ext_bytes))  # MaximumCount -- hoisted array bound, discarded by the decoder
+        b.u32(len(ext_bytes))  # cb -- authoritative, self-describing
+        b.raw(ext_bytes)
+        b._pad4()
+    assert len(handle) == 20
+    b.raw(handle)
+    b.u32(status)
+    return b.get()
+
+
+def build_drsuapi_sample():
+    """DRSUAPI (MS-DRSR), phase 3 of the SAMR/LSARPC/SRVSVC/WKSSVC/DRSUAPI batch, alone rather than
+    bundled -- see drsuapi.hpp's own header comment for the full design rationale, the OPNUM
+    COVERAGE table this fixture exercises, and -- most importantly -- the EMPIRICALLY-DISCOVERED
+    SCOPE CAVEAT this fixture's own gate name ("drsuapi", matching this batch's established
+    per-interface pipe-name convention) is deliberately synthetic for: real DRSUAPI traffic
+    predominantly rides a dynamically-negotiated raw TCP connection, not a named pipe, so this
+    fixture -- like the decoder it exercises -- only demonstrates the narrow "also exposed over a
+    named pipe" case, not real-world DCSync traffic as it actually appears on the wire. Same
+    transport-layer conventions as build_srvsvc_wkssvc_sample (TREE_CONNECT to "\\\\SERVER\\IPC$",
+    then CREATE of "\\PIPE\\drsuapi", WRITE+READ named-pipe transport throughout). Flows, each its
+    own TCP session:
+      A: bind (interface version 4.0, not 1.0) + DRSBind(0) with a non-NULL puuidClientDsa (full
+         field decode) + a second DRSBind(0) with a NULL puuidClientDsa (negative control -- no
+         client_dsa_guid field at all) -- the first call's own response carries a non-NULL, 3-byte
+         (deliberately non-4-byte-aligned) DRS_EXTENSIONS payload, proving skip_drs_extensions'
+         own padding logic doesn't misalign the phDrs/status fields that follow it; DRSUnbind(1)
+         request/response (handle decode both directions); two separate DRSGetNCChanges(3) request/
+         response pairs (structural-only, zero field decode of the deliberately non-zero/distinctive
+         stub bytes each side sends -- proving the DCSync curated note fires on EVERY occurrence, not
+         just the first, i.e. not sticky); one DRSCrackNames(12) request/response pair (structural-
+         only, no curated note at all).
+      B: a SEALED (auth_level=PKT_PRIVACY) DRSGetNCChanges request/response pair on an already-bound
+         DRSUAPI context -- the "sealed, N bytes, not decoded" fallback, ZERO field decode, but the
+         DCSync curated note STILL fires on the request side: the opnum itself lives in the DCE/RPC
+         request header, not the encrypted stub, so it remains visible under RPC-layer sealing even
+         though this codebase renders none of the sealed content -- the same posture Kerberos's/
+         LDAP's/SMB's own curated notes already take on header-level facts that survive an otherwise
+         opaque body.
+      C: a bind whose only offered context names Netlogon's OWN interface UUID (not DRSUAPI's) on a
+         "drsuapi"-named pipe -- the request that follows must stay structural (no drsuapi_calls at
+         all), the same defensive negative control every other interface in this batch's own
+         fixture already establishes.
+    Every byte offset and note-trigger condition here was independently smoke-tested against a
+    hand-built synthetic exchange, decoded and inspected in both --format text and --format json,
+    BEFORE this fixture (and the CMakeLists.txt tests reading it) were written -- the same
+    verification discipline every prior phase's own fixture was held to."""
+    packets = []
+    ident = [0xF100]
+    port = [55101]
+    file_id_counter = [1]
+    call_id_counter = [1]
+
+    def next_file_id() -> bytes:
+        file_id_counter[0] += 1
+        return struct.pack("<QQ", file_id_counter[0], 0xDADA0000 + file_id_counter[0])
+
+    def next_call_id() -> int:
+        call_id_counter[0] += 1
+        return call_id_counter[0]
+
+    def make_flow():
+        sport = port[0]
+        port[0] += 1
+        state = {"cseq": 81000, "sseq": 91000}
+
+        def add(from_client: bool, payload: bytes):
+            if from_client:
+                s_port, d_port = sport, 445
+                s_ip, d_ip = HMI_IP, PLC_IP
+                s_mac, d_mac = HMI_MAC, PLC_MAC
+                seq, ack = state["cseq"], state["sseq"]
+                state["cseq"] += len(payload)
+            else:
+                s_port, d_port = 445, sport
+                s_ip, d_ip = PLC_IP, HMI_IP
+                s_mac, d_mac = PLC_MAC, HMI_MAC
+                seq, ack = state["sseq"], state["cseq"]
+                state["sseq"] += len(payload)
+            tcp = tcp_header(s_port, d_port, seq, ack, TCP_PSH | TCP_ACK, len(payload)) + payload
+            ip = ipv4_header(s_ip, d_ip, 6, len(tcp), ident[0] & 0xFFFF) + tcp
+            ident[0] += 1
+            packets.append(eth_header(d_mac, s_mac, 0x0800) + ip)
+
+        return add
+
+    mid = [600]
+
+    def next_mid():
+        mid[0] += 1
+        return mid[0]
+
+    def open_pipe(fx, session_id, tree_id, pipe_name):
+        m_tc = next_mid()
+        fx(True, smb_with_prefix(smb2_message(0x03, False, smb2_tree_connect_req_body("\\\\SERVER\\IPC$"),
+                                               message_id=m_tc, session_id=session_id)))
+        fx(False, smb_with_prefix(smb2_message(
+            0x03, True, smb2_tree_connect_resp_body(SMB_SHARE_TYPE_PIPE), message_id=m_tc,
+            status=SMB_STATUS_SUCCESS, session_id=session_id, tree_id=tree_id)))
+
+        file_id = next_file_id()
+        m_cr = next_mid()
+        fx(True, smb_with_prefix(smb2_message(0x05, False, smb2_create_req_body("\\PIPE\\" + pipe_name),
+                                               message_id=m_cr, session_id=session_id, tree_id=tree_id)))
+        fx(False, smb_with_prefix(smb2_message(
+            0x05, True, smb2_create_resp_body(file_id), message_id=m_cr, status=SMB_STATUS_SUCCESS,
+            session_id=session_id, tree_id=tree_id)))
+        return file_id
+
+    def close_pipe(fx, session_id, tree_id, file_id):
+        m_cl = next_mid()
+        fx(True, smb_with_prefix(smb2_message(0x06, False, smb2_close_req_body(file_id),
+                                               message_id=m_cl, session_id=session_id, tree_id=tree_id)))
+        fx(False, smb_with_prefix(smb2_message(
+            0x06, True, smb2_close_resp_body(), message_id=m_cl, status=SMB_STATUS_SUCCESS,
+            session_id=session_id, tree_id=tree_id)))
+
+    pending_read_mid = [None]
+
+    def write_read(fx, session_id, tree_id, file_id, pdu_bytes: bytes):
+        m_w = next_mid()
+        fx(True, smb_with_prefix(smb2_message(0x09, False, smb2_write_req_body(file_id, pdu_bytes),
+                                               message_id=m_w, session_id=session_id, tree_id=tree_id)))
+        fx(False, smb_with_prefix(smb2_message(
+            0x09, True, smb2_write_resp_body(len(pdu_bytes)), message_id=m_w, status=SMB_STATUS_SUCCESS,
+            session_id=session_id, tree_id=tree_id)))
+        m_r = next_mid()
+        fx(True, smb_with_prefix(smb2_message(0x08, False, smb2_read_req_body(file_id),
+                                               message_id=m_r, session_id=session_id, tree_id=tree_id)))
+        pending_read_mid[0] = m_r
+
+    def read_response(fx, session_id, tree_id, pdu_bytes: bytes):
+        m_r = pending_read_mid[0]
+        assert m_r is not None, "read_response called without a preceding write_read"
+        fx(False, smb_with_prefix(smb2_message(
+            0x08, True, smb2_read_resp_body(pdu_bytes), message_id=m_r, status=SMB_STATUS_SUCCESS,
+            session_id=session_id, tree_id=tree_id)))
+        pending_read_mid[0] = None
+
+    def bind_and_ack(fx, session_id, tree_id, file_id, call_id, abstract_uuid, result=0,
+                      abstract_ver_major=1, abstract_ver_minor=0):
+        bind_pdu = dcerpc_pdu(11, call_id, dcerpc_bind_body(
+            [dcerpc_context_element(0, abstract_uuid, abstract_ver_major=abstract_ver_major,
+                                     abstract_ver_minor=abstract_ver_minor)]))
+        bind_ack_pdu = dcerpc_pdu(12, call_id, dcerpc_bind_ack_body([dcerpc_context_result(result)]))
+        write_read(fx, session_id, tree_id, file_id, bind_pdu)
+        read_response(fx, session_id, tree_id, bind_ack_pdu)
+
+    def call(fx, session_id, tree_id, file_id, opnum, req_stub, resp_stub, auth=None):
+        cid = next_call_id()
+        write_read(fx, session_id, tree_id, file_id,
+                   dcerpc_pdu(0, cid, dcerpc_request_body(0, opnum, req_stub), auth=auth))
+        read_response(fx, session_id, tree_id,
+                      dcerpc_pdu(2, cid, dcerpc_response_body(0, resp_stub), auth=auth))
+
+    # ---------------------------------------------------------------------------------------------
+    # Flow A: DRSBind (GUID present + NULL negative control), DRSUnbind, DRSGetNCChanges (x2, proving
+    # the curated note is not sticky), DRSCrackNames (no note).
+    # ---------------------------------------------------------------------------------------------
+    fa = make_flow()
+    sess_a, tree_a = 0xD000000000000001, 1
+    fid_a = open_pipe(fa, sess_a, tree_a, "drsuapi")
+    bind_and_ack(fa, sess_a, tree_a, fid_a, next_call_id(), DRSUAPI_INTERFACE_UUID,
+                 abstract_ver_major=4, abstract_ver_minor=0)
+
+    # DRSBind(0) -- non-NULL puuidClientDsa, and a response whose own DRS_EXTENSIONS payload is a
+    # deliberately non-4-byte-aligned 3 bytes (0x99 x3), proving skip_drs_extensions' own trailing
+    # pad computation doesn't misalign phDrs/ErrorCode.
+    client_guid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    b = NdrBuf(); b.u32(b._ref()); b.raw(uuid_to_wire(client_guid)); b.u32(0)  # pextClient NULL
+    resp = drsuapi_bind_response_stub(b"\x99\x99\x99", b"\x01" * 20, status=0)
+    call(fa, sess_a, tree_a, fid_a, 0, b.get(), resp)
+
+    # DRSBind(0) again -- NULL puuidClientDsa this time (negative control: no client_dsa_guid field
+    # at all in the decoded request).
+    b = NdrBuf(); b.u32(0); b.u32(0)
+    resp = drsuapi_bind_response_stub(None, b"\x02" * 20, status=0)
+    call(fa, sess_a, tree_a, fid_a, 0, b.get(), resp)
+
+    # DRSUnbind(1) -- handle decode both directions.
+    b = NdrBuf(); b.raw(b"\x01" * 20)
+    resp = NdrBuf(); resp.raw(b"\x00" * 20); resp.u32(0)
+    call(fa, sess_a, tree_a, fid_a, 1, b.get(), resp.get())
+
+    # DRSGetNCChanges(3) -- structural-only, ZERO field decode of the deliberately distinctive stub
+    # bytes either side sends, fired TWICE to prove the curated note is not sticky.
+    call(fa, sess_a, tree_a, fid_a, 3, b"\xFE" * 32, b"\xFD" * 64)
+    call(fa, sess_a, tree_a, fid_a, 3, b"\xFE" * 32, b"\xFD" * 64)
+
+    # DRSCrackNames(12) -- structural-only, no curated note at all.
+    call(fa, sess_a, tree_a, fid_a, 12, b"\xAA" * 16, b"\xBB" * 16)
+
+    close_pipe(fa, sess_a, tree_a, fid_a)
+
+    # ---------------------------------------------------------------------------------------------
+    # Flow B: a SEALED DRSGetNCChanges request/response pair on an already-bound DRSUAPI context --
+    # the "sealed, N bytes, not decoded" fallback, and (unlike flow A's own two DRSGetNCChanges
+    # calls) NO curated note, since this codebase never claims to have decoded a call it hasn't.
+    # ---------------------------------------------------------------------------------------------
+    fb = make_flow()
+    sess_b, tree_b = 0xD000000000000002, 1
+    fid_b = open_pipe(fb, sess_b, tree_b, "drsuapi")
+    bind_and_ack(fb, sess_b, tree_b, fid_b, next_call_id(), DRSUAPI_INTERFACE_UUID,
+                 abstract_ver_major=4, abstract_ver_minor=0)
+    call(fb, sess_b, tree_b, fid_b, 3, b"\x55" * 24, b"\x56" * 16,
+         auth=(16, 6, b"\x01\x02\x03\x04\x05\x06\x07\x08"))  # auth_type 16 (SSPI), auth_level 6 (PKT_PRIVACY)
+    close_pipe(fb, sess_b, tree_b, fid_b)
+
+    # ---------------------------------------------------------------------------------------------
+    # Flow C: a bind whose only offered context names Netlogon's OWN interface UUID (not DRSUAPI's)
+    # on a "drsuapi"-named pipe -- the request that follows must stay structural (no drsuapi_calls at
+    # all).
+    # ---------------------------------------------------------------------------------------------
+    fc = make_flow()
+    sess_c, tree_c = 0xD000000000000003, 1
+    fid_c = open_pipe(fc, sess_c, tree_c, "drsuapi")
+    bind_and_ack(fc, sess_c, tree_c, fid_c, next_call_id(), NETLOGON_INTERFACE_UUID)
+    b = NdrBuf(); b.u32(0); b.u32(0)
+    call(fc, sess_c, tree_c, fid_c, 0, b.get(), b"\x00" * 8)
+    close_pipe(fc, sess_c, tree_c, fid_c)
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_080_000 + i, i * 1000)
+    (TESTS_DIR / "sample_drsuapi.pcap").write_bytes(data)
 
 
 def build_netlogon_sample():
@@ -12936,6 +13178,7 @@ if __name__ == "__main__":
     build_netlogon_sample()
     build_samr_lsarpc_sample()
     build_srvsvc_wkssvc_sample()
+    build_drsuapi_sample()
     build_policy_engine_sample()
     build_summarize_unclassified_sample()
     build_inventory_sample()

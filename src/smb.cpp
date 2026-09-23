@@ -1077,6 +1077,63 @@ void decode_dcerpc_and_wkssvc(SmbMessage& m, WkssvcPipeState& pipe_state,
     }
 }
 
+// DRSUAPI's own bookkeeping -- same shape as decode_dcerpc_and_srvsvc/decode_dcerpc_and_wkssvc above.
+// See drsuapi.hpp's own header comment for this interface's empirically-discovered transport scope
+// caveat: this function only ever runs against DRSUAPI traffic that happens to also ride an SMB
+// named pipe, which is not DRSUAPI's own default real-world transport (that rides a dynamically
+// negotiated raw TCP connection this codebase does not decode).
+void decode_dcerpc_and_drsuapi(SmbMessage& m, DrsuapiPipeState& pipe_state,
+                                const std::vector<uint8_t>& raw_payload) {
+    if (raw_payload.empty()) return;
+    ByteSpan payload_span(raw_payload.data(), raw_payload.size());
+    m.dcerpc_messages = parse_dcerpc_chain(payload_span);
+
+    for (const DceRpcMessage& dm : m.dcerpc_messages) {
+        try {
+            if (resolve_dcerpc_bind_bookkeeping(dm, pipe_state, is_drsuapi_interface_uuid)) {
+                continue;
+            }
+            if (dm.has_request) {
+                if (pipe_state.bound_context_is_interface &&
+                    dm.request_context_id == pipe_state.interface_context_id) {
+                    ByteSpan stub = payload_span.subspan(dm.stub_offset, dm.stub_length);
+                    DrsuapiCall call = try_parse_drsuapi_request(dm.call_id, dm.opnum, dm.sealed, stub);
+                    pipe_state.pending_calls[dm.call_id] = PendingDceRpcCall{dm.opnum, 0};
+                    m.drsuapi_calls.push_back(std::move(call));
+                }
+            } else if (dm.has_response) {
+                auto it = pipe_state.pending_calls.find(dm.call_id);
+                if (it != pipe_state.pending_calls.end()) {
+                    uint16_t opnum = it->second.opnum;
+                    ByteSpan stub = payload_span.subspan(dm.stub_offset, dm.stub_length);
+                    DrsuapiCall call = try_parse_drsuapi_response(dm.call_id, opnum, dm.sealed, stub);
+                    m.drsuapi_calls.push_back(std::move(call));
+                    pipe_state.pending_calls.erase(it);
+                }
+            }
+        } catch (const ParseError&) {
+            // A malformed stub for this one PDU doesn't invalidate the rest of the chain.
+        }
+    }
+
+    // Curated note -- DRSGetNCChanges observed, the DCSync wire signature. Fires on every
+    // occurrence, not sticky, same posture as SRVSVC's/WKSSVC's own per-occurrence notes above.
+    // See drsuapi.hpp's own OPNUM COVERAGE note for why this codebase cannot independently confirm
+    // DC status either way.
+    for (const DrsuapiCall& call : m.drsuapi_calls) {
+        if (call.is_response) continue;
+        if (call.opnum == 3) {
+            m.notes.push_back(
+                "DRSGetNCChanges observed -- the wire signature DCSync-style tooling (e.g. Mimikatz's "
+                "lsadump::dcsync) uses to pull replicated directory data, including secret material, "
+                "by impersonating a domain controller; also routine, high-volume traffic between real "
+                "domain controllers during ordinary AD replication. This decoder cannot independently "
+                "confirm whether the calling host is actually a domain controller -- correlate "
+                "against known DC inventory before treating this as suspicious.");
+        }
+    }
+}
+
 // Dispatches a WRITE request / READ response / IOCTL request-or-response's own dcerpc_raw_payload
 // to whichever per-interface pipe-state map `file_id` is tracked in, if any -- one FileId is
 // tracked in at most one map by construction (the CREATE-response handler below inserts into
@@ -1111,6 +1168,11 @@ void dispatch_dcerpc_payload(SmbMessage& m, SmbFlowState& state, const SmbFileId
     auto wkit = state.wkssvc_pipes.find(file_id);
     if (wkit != state.wkssvc_pipes.end()) {
         decode_dcerpc_and_wkssvc(m, wkit->second, m.dcerpc_raw_payload);
+        return;
+    }
+    auto drit = state.drsuapi_pipes.find(file_id);
+    if (drit != state.drsuapi_pipes.end()) {
+        decode_dcerpc_and_drsuapi(m, drit->second, m.dcerpc_raw_payload);
         return;
     }
 }
@@ -1277,7 +1339,13 @@ std::optional<ProtocolResult> decode_with_correlation(ByteSpan payload, DecodeCo
                 break;
             }
 
-            case 0x05: {  // CREATE
+            case 0x05: {  // CREATE -- the "drsuapi" pipe-name match below (see drsuapi.hpp's own
+                // header comment) is this codebase's own synthetic gate name, matching this batch's
+                // established per-interface convention (netlogon/samr/lsarpc/srvsvc/wkssvc all gate
+                // on their own interface name as the pipe name); MS-DRSR itself names no well-known
+                // named pipe at all, since its own default transport is raw TCP, not a named pipe --
+                // this gate only ever matches a server that happens to also expose DRSUAPI over a
+                // pipe literally named "drsuapi".
                 if (!m.is_response && m.has_create_request) {
                     bool is_pipe = false;
                     auto pit = state.pipe_shares.find(m.tree_id);
@@ -1314,6 +1382,10 @@ std::optional<ProtocolResult> decode_with_correlation(ByteSpan payload, DecodeCo
                                    state.wkssvc_pipes.size() < kMaxTrackedPerSession) {
                             state.wkssvc_pipes[m.file_id] = WkssvcPipeState{};
                             state.tracked_rpc_pipe_file_ids.insert(m.file_id);
+                        } else if (it->second.create_name == "drsuapi" &&
+                                   state.drsuapi_pipes.size() < kMaxTrackedPerSession) {
+                            state.drsuapi_pipes[m.file_id] = DrsuapiPipeState{};
+                            state.tracked_rpc_pipe_file_ids.insert(m.file_id);
                         }
                         state.pending_requests.erase(it);
                     }
@@ -1328,6 +1400,7 @@ std::optional<ProtocolResult> decode_with_correlation(ByteSpan payload, DecodeCo
                     state.lsarpc_pipes.erase(m.file_id);
                     state.srvsvc_pipes.erase(m.file_id);
                     state.wkssvc_pipes.erase(m.file_id);
+                    state.drsuapi_pipes.erase(m.file_id);
                     state.tracked_rpc_pipe_file_ids.erase(m.file_id);
                 }
                 break;
