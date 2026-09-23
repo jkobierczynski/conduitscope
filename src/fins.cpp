@@ -48,6 +48,7 @@ const std::unordered_map<uint16_t, const char*>& command_table() {
 // codes (it shows only the full descriptive name for them); everything else's prefix is verbatim
 // from that table.
 struct FinsAreaInfo {
+    const char* prefix;
     bool is_bit;
 };
 
@@ -68,6 +69,7 @@ const std::unordered_map<uint8_t, FinsAreaInfo>& area_code_table() {
         // via Wireshark's own memory_area_code_prefix[] (full "E0_".."EC_" range on both sides).
         for (int bank = 0; bank <= 0x0C; ++bank) {
             std::string prefix = "E" + std::to_string(bank) + "_";
+            static std::vector<std::string> keep;  // own the strings for the lifetime of this map
             keep.push_back(prefix);
             t[static_cast<uint8_t>(0x20 + bank)] = {keep.back().c_str(), true};
             keep.push_back(prefix);
