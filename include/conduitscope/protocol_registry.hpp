@@ -90,8 +90,12 @@ const std::vector<const ProtocolDecoder*>& tcp_port_independent_registry();
 // that gate kind), the TCP-side mirror of udp_port_registry() below. This GateKind went
 // unpopulated until DoH needed it -- see tls_sni.hpp's DohDecoder. THIS VECTOR IS AUDIT-TRAIL
 // DATA ONLY, like every cascade below except EtherType (see this file's own header comment) --
-// decoder.cpp's own DoH call site calls doh_decoder() directly, since DoH is (so far) this gate's
-// only protocol. Not migrated: none -- DoH is this gate's only protocol and it is migrated.
+// decoder.cpp's own DoH call site calls doh_decoder() directly, since DoH was this gate's only
+// protocol until WinRM (see winrm.hpp's WinRmTcpDecoder -- Phase 4 of the Windows RPC/remote-
+// management batch, port-gated for the same "structural signal already checked opportunistically
+// elsewhere" reason DoH itself is), added right after it in real call-site order. decoder.cpp's own
+// WinRM call site likewise calls winrm_tcp_decoder() directly. Not migrated: none -- both of this
+// gate's protocols are migrated.
 const std::vector<const ProtocolDecoder*>& tcp_port_registry();
 
 // Migrated UDP-port-gated protocols, in the order their decoder.cpp call sites run. This GateKind

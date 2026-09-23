@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Generates the synthetic pcap fixtures under tests/.
 
-Pure standard library (struct only) -- deliberately has no dependency on
+Pure standard library (struct, base64) -- deliberately has no dependency on
 scapy/pymodbus/etc. so the test fixtures can be regenerated (or new ones
 added) without installing anything. This is a build-time/dev-time helper,
 not something the CMake build invokes automatically -- the generated files
@@ -13,6 +13,7 @@ Run it from the repository root:
 """
 import struct
 import pathlib
+import base64
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 TESTS_DIR = ROOT / "tests"
@@ -11214,6 +11215,7 @@ MDNS_PORT = 5353
 LLMNR_PORT = 5355
 NBNS_PORT = 137
 DOH_PORT = 443
+WINRM_PORT = 5985
 
 
 def dns_name(name: str) -> bytes:
@@ -13136,6 +13138,363 @@ def build_slow_protocols_sample():
     (TESTS_DIR / "sample_slow_protocols.pcap").write_bytes(data)
 
 
+def build_winrm_sample():
+    """WS-Management (WinRM) over plaintext HTTP, TCP port 5985 -- see winrm.hpp's own extensive
+    file header comment for the wire format this exercises (verified against pywinrm's own source
+    and Microsoft's MS-WSMV specification, including the empirically-corrected finding that
+    CommandLine's Command/Arguments text is plain XML, NOT base64+UTF-16LE as this codebase's own
+    original implementation plan assumed).
+
+    Covers, on one realistic single-TCP-stream shell session (Create -> Command -> Send -> Receive
+    -> Signal -> Delete, ShellId/CommandId correlated exactly as a real WinRS session would produce
+    them -- CommandId's own two different wire shapes, element text in the Command response vs. an
+    XML attribute in every later Send/Receive/Signal request, both exercised): (1)/(2) Create
+    request/response -- the response triggers the "remote shell opened" flagship note (the request
+    alone must NOT, since only a successful response actually proves a shell exists); (3)/(4)
+    Command request/response -- the request triggers "command executed" (redacted by default, per
+    DecodeContext::redact_secrets); (5)/(6) Send request/response (CommandId as an XML attribute,
+    the stdin stream content itself deliberately never decoded); (7)/(8) Receive request/response
+    (stdout/stderr streams plus a CommandState/Done, all deliberately never decoded either -- see
+    winrm.hpp's own DELIBERATELY NOT IMPLEMENTED list); (9)/(10) Signal request/response; (11)/(12)
+    Delete request/response, closing the shell.
+
+    Plus, each on its own distinct TCP flow: (13) a CIM/WQL Enumerate request whose ResourceURI
+    names a CIM class path -- triggers the CIM/WMI-query flagship note, carrying the literal WQL
+    text; (14) a PSRP (PowerShell Remoting) Create request -- triggers the PSRP scope-boundary
+    note; (15) a Command request authenticated with HTTP Basic instead of Negotiate -- triggers
+    BOTH the "command executed" and the "HTTP Basic auth over plaintext WinRM" notes together;
+    (16) a chunked-encoding negative case (Transfer-Encoding: chunked, no Content-Length, and
+    deliberately no body bytes at all in this packet) -- proves the documented "not reassembled"
+    limitation behaves as designed (header-only declared length, a dedicated note, no envelope
+    fields populated); (17) a SOAP Fault response (HTTP 500) -- triggers the SOAP Fault note with
+    its Reason/Text; (18) a 401 Unauthorized response carrying WWW-Authenticate: Negotiate and a
+    non-SOAP (text/html) body -- response-side auth-scheme coverage with no envelope at all, since
+    is_soap_xml is false; (19) the same Create request shape as (1)'s, but on a non-standard TCP
+    port (8585) -- in Auto mode WinRmTcpDecoder's own port gate correctly declines it (proven by
+    the ABSENCE of "[winrm]" -- what actually claims it in that mode is a genuine, pre-existing,
+    entirely unrelated collision: MQTT's own port-independent structural check reads this request's
+    leading "PO" bytes as a plausible PUBREC fixed header + remaining-length, the same way any
+    POST-starting TCP payload on a port none of this codebase's other port-gated decoders claim
+    first can; not a WinRM regression, and not this phase's collision to fix -- see winrm.hpp's own
+    "COLLISION SURVEY" section, which only scopes the *generic-HTTP* collision). --winrm-port 8585
+    widens Auto-mode detection so WinRmTcpDecoder claims it ahead of MQTT instead; --protocol winrm
+    claims it port-independently too, and additionally adds the "not a configured/standard WinRM
+    port" note (since the port still isn't 5985 nor in that particular invocation's widened set);
+    (20) a Command request split
+    across two TCP segments mid-header-block -- exercises WinRmTcpDecoder::tcp_declared_length's
+    own "ask for one more byte" reassembly technique via Decoder::reassemble_tcp_payload, the same
+    split/rejoin shape build_kerberos_sample already covers for Kerberos/TCP -- must decode
+    identically to a whole-message case."""
+    packets = []
+    ident = [0xF000]
+
+    def next_ident() -> int:
+        v = ident[0]
+        ident[0] += 1
+        return v
+
+    def soap_envelope(action: str, resource_uri: str = "", selector_set_xml: str = "",
+                       body_xml: str = "") -> bytes:
+        header_extra = ""
+        if resource_uri:
+            header_extra += f"<w:ResourceURI>{resource_uri}</w:ResourceURI>"
+        header_extra += selector_set_xml
+        xml = (
+            '<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" '
+            'xmlns:a="http://schemas.xmlsoap.org/ws/2004/08/addressing" '
+            'xmlns:w="http://schemas.dmtf.org/wbem/wsman/1/wsman.xsd" '
+            'xmlns:rsp="http://schemas.microsoft.com/wbem/wsman/1/windows/shell">'
+            "<s:Header>"
+            "<a:To>http://192.168.1.10:5985/wsman</a:To>"
+            "<a:ReplyTo><a:Address mustUnderstand=\"true\">"
+            "http://schemas.xmlsoap.org/ws/2004/08/addressing/role/anonymous</a:Address></a:ReplyTo>"
+            f'<a:Action mustUnderstand="true">{action}</a:Action>'
+            '<w:MaxEnvelopeSize mustUnderstand="true">512000</w:MaxEnvelopeSize>'
+            "<a:MessageID>uuid:11111111-2222-3333-4444-555555555555</a:MessageID>"
+            "<w:OperationTimeout>PT60S</w:OperationTimeout>"
+            f"{header_extra}"
+            "</s:Header>"
+            f"<s:Body>{body_xml}</s:Body>"
+            "</s:Envelope>"
+        )
+        return xml.encode("utf-8")
+
+    def selector_shell_id(shell_id: str) -> str:
+        return f'<w:SelectorSet><w:Selector Name="ShellId">{shell_id}</w:Selector></w:SelectorSet>'
+
+    def http_message(start_line: str, headers: list, body: bytes, include_content_length: bool = True) -> bytes:
+        lines = [start_line]
+        for k, v in headers:
+            lines.append(f"{k}: {v}")
+        if include_content_length:
+            lines.append(f"Content-Length: {len(body)}")
+        head = ("\r\n".join(lines) + "\r\n\r\n").encode("ascii")
+        return head + body
+
+    NEGOTIATE_TOKEN = base64.b64encode(b"NEGOTIATE-SPNEGO-TOKEN-PLACEHOLDER-" + b"\x00" * 24).decode()
+    BASIC_CREDS = base64.b64encode(b"Administrator:Sup3rSecretPassw0rd!").decode()
+
+    def winrm_request(target: str, action: str, resource_uri: str = "", selector_set_xml: str = "",
+                       body_xml: str = "", auth: str = None, extra_headers: list = None) -> bytes:
+        body = soap_envelope(action, resource_uri, selector_set_xml, body_xml)
+        headers = [
+            ("Content-Type", "application/soap+xml;charset=UTF-8"),
+            ("User-Agent", "Microsoft WinRM Client"),
+            ("Host", "192.168.1.10:5985"),
+            ("Connection", "Keep-Alive"),
+        ]
+        if auth:
+            headers.append(("Authorization", auth))
+        if extra_headers:
+            headers.extend(extra_headers)
+        return http_message(f"POST {target} HTTP/1.1", headers, body)
+
+    def winrm_response(status: int, reason: str, action: str = "", resource_uri: str = "",
+                        selector_set_xml: str = "", body_xml: str = "", extra_headers: list = None,
+                        is_soap: bool = True) -> bytes:
+        body = soap_envelope(action, resource_uri, selector_set_xml, body_xml) if is_soap else body_xml.encode("utf-8")
+        headers = [("Server", "Microsoft-HTTPAPI/2.0")]
+        headers.append(("Content-Type", "application/soap+xml;charset=UTF-8" if is_soap else "text/html"))
+        if extra_headers:
+            headers.extend(extra_headers)
+        return http_message(f"HTTP/1.1 {status} {reason}", headers, body)
+
+    def session(client_port: int, server_port: int = WINRM_PORT):
+        state = {"cseq": 5000, "sseq": 9000}
+
+        def request(payload: bytes):
+            tcp = tcp_header(client_port, server_port, state["cseq"], state["sseq"], TCP_PSH | TCP_ACK,
+                              len(payload)) + payload
+            ip = ipv4_header(HMI_IP, PLC_IP, 6, len(tcp), next_ident())
+            packets.append(eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip + tcp)
+            state["cseq"] += len(payload)
+
+        def response(payload: bytes):
+            tcp = tcp_header(server_port, client_port, state["sseq"], state["cseq"], TCP_PSH | TCP_ACK,
+                              len(payload)) + payload
+            ip = ipv4_header(PLC_IP, HMI_IP, 6, len(tcp), next_ident())
+            packets.append(eth_header(HMI_MAC, PLC_MAC, 0x0800) + ip + tcp)
+            state["sseq"] += len(payload)
+
+        return request, response
+
+    SHELL_CMD_RESOURCE_URI = "http://schemas.microsoft.com/wbem/wsman/1/windows/shell/cmd"
+    SHELL_ID = "AAAAAAAA-1111-2222-3333-444444444444"
+    COMMAND_ID = "7777AAAA-BBBB-CCCC-DDDD-888888888888"
+
+    # --- Main shell session: one real TCP stream, Create -> Command -> Send -> Receive -> Signal ->
+    #     Delete, exactly as a real WinRS/evil-winrm session produces it. ------------------------
+    main_req, main_resp = session(49500)
+
+    # 1) Create request.
+    main_req(winrm_request(
+        "/wsman", "http://schemas.xmlsoap.org/ws/2004/09/transfer/Create",
+        resource_uri=SHELL_CMD_RESOURCE_URI,
+        body_xml="<rsp:Shell><rsp:InputStreams>stdin</rsp:InputStreams>"
+                 "<rsp:OutputStreams>stdout stderr</rsp:OutputStreams></rsp:Shell>",
+        auth="Negotiate " + NEGOTIATE_TOKEN))
+
+    # 2) Create response -- triggers "remote shell opened" (ShellId ...).
+    main_resp(winrm_response(
+        200, "OK", action="http://schemas.xmlsoap.org/ws/2004/09/transfer/CreateResponse",
+        resource_uri=SHELL_CMD_RESOURCE_URI,
+        body_xml=(
+            "<rsp:ResourceCreated><a:Address>http://192.168.1.10:5985/wsman</a:Address>"
+            "<a:ReferenceParameters>"
+            f"<w:ResourceURI>{SHELL_CMD_RESOURCE_URI}</w:ResourceURI>"
+            f"{selector_shell_id(SHELL_ID)}"
+            "</a:ReferenceParameters></rsp:ResourceCreated>")))
+
+    # 3) Command request -- triggers "command executed" (redacted by default).
+    main_req(winrm_request(
+        "/wsman", "http://schemas.microsoft.com/wbem/wsman/1/windows/shell/Command",
+        resource_uri=SHELL_CMD_RESOURCE_URI, selector_set_xml=selector_shell_id(SHELL_ID),
+        body_xml="<rsp:CommandLine><rsp:Command>cmd.exe</rsp:Command>"
+                 "<rsp:Arguments>/c</rsp:Arguments><rsp:Arguments>whoami /all</rsp:Arguments>"
+                 "</rsp:CommandLine>",
+        auth="Negotiate " + NEGOTIATE_TOKEN))
+
+    # 4) Command response -- CommandId as element text (the RESPONSE-side wire shape).
+    main_resp(winrm_response(
+        200, "OK", action="http://schemas.microsoft.com/wbem/wsman/1/windows/shell/CommandResponse",
+        resource_uri=SHELL_CMD_RESOURCE_URI,
+        body_xml=f"<rsp:CommandResponse><rsp:CommandId>{COMMAND_ID}</rsp:CommandId></rsp:CommandResponse>"))
+
+    # 5) Send request -- CommandId as an XML ATTRIBUTE (the REQUEST-side wire shape), stdin stream
+    #    content never decoded.
+    main_req(winrm_request(
+        "/wsman", "http://schemas.microsoft.com/wbem/wsman/1/windows/shell/Send",
+        resource_uri=SHELL_CMD_RESOURCE_URI, selector_set_xml=selector_shell_id(SHELL_ID),
+        body_xml=f'<rsp:Send><rsp:Stream Name="stdin" CommandId="{COMMAND_ID}">aGVsbG8NCg==</rsp:Stream></rsp:Send>',
+        auth="Negotiate " + NEGOTIATE_TOKEN))
+
+    # 6) Send response -- minimal ack.
+    main_resp(winrm_response(
+        200, "OK", action="http://schemas.microsoft.com/wbem/wsman/1/windows/shell/SendResponse",
+        resource_uri=SHELL_CMD_RESOURCE_URI, body_xml="<rsp:SendResponse/>"))
+
+    # 7) Receive request.
+    main_req(winrm_request(
+        "/wsman", "http://schemas.microsoft.com/wbem/wsman/1/windows/shell/Receive",
+        resource_uri=SHELL_CMD_RESOURCE_URI, selector_set_xml=selector_shell_id(SHELL_ID),
+        body_xml=f'<rsp:Receive><rsp:DesiredStream CommandId="{COMMAND_ID}">stdout stderr</rsp:DesiredStream>'
+                 "</rsp:Receive>",
+        auth="Negotiate " + NEGOTIATE_TOKEN))
+
+    # 8) Receive response -- stdout/stderr streams (never decoded) plus a CommandState/Done with an
+    #    ExitCode; also proves "Command" never false-matches inside "CommandState" (see
+    #    find_start_tag's own exact-tag-boundary comment in winrm.cpp).
+    main_resp(winrm_response(
+        200, "OK", action="http://schemas.microsoft.com/wbem/wsman/1/windows/shell/ReceiveResponse",
+        resource_uri=SHELL_CMD_RESOURCE_URI,
+        body_xml=(
+            "<rsp:ReceiveResponse>"
+            f'<rsp:Stream Name="stdout" CommandId="{COMMAND_ID}">d2hvYW1pDQo=</rsp:Stream>'
+            f'<rsp:Stream Name="stderr" CommandId="{COMMAND_ID}" End="true"></rsp:Stream>'
+            f'<rsp:CommandState CommandId="{COMMAND_ID}" '
+            'State="http://schemas.microsoft.com/wbem/wsman/1/windows/shell/CommandState/Done">'
+            "<rsp:ExitCode>0</rsp:ExitCode></rsp:CommandState>"
+            "</rsp:ReceiveResponse>")))
+
+    # 9) Signal request (terminate) -- CommandId as an attribute directly on the Signal element.
+    main_req(winrm_request(
+        "/wsman", "http://schemas.microsoft.com/wbem/wsman/1/windows/shell/Signal",
+        resource_uri=SHELL_CMD_RESOURCE_URI, selector_set_xml=selector_shell_id(SHELL_ID),
+        body_xml=f'<rsp:Signal CommandId="{COMMAND_ID}">'
+                 "<rsp:Code>http://schemas.microsoft.com/wbem/wsman/1/windows/shell/signal/terminate</rsp:Code>"
+                 "</rsp:Signal>",
+        auth="Negotiate " + NEGOTIATE_TOKEN))
+
+    # 10) Signal response.
+    main_resp(winrm_response(
+        200, "OK", action="http://schemas.microsoft.com/wbem/wsman/1/windows/shell/SignalResponse",
+        resource_uri=SHELL_CMD_RESOURCE_URI, body_xml="<rsp:SignalResponse/>"))
+
+    # 11) Delete request -- closes the shell.
+    main_req(winrm_request(
+        "/wsman", "http://schemas.xmlsoap.org/ws/2004/09/transfer/Delete",
+        resource_uri=SHELL_CMD_RESOURCE_URI, selector_set_xml=selector_shell_id(SHELL_ID),
+        auth="Negotiate " + NEGOTIATE_TOKEN))
+
+    # 12) Delete response.
+    main_resp(winrm_response(
+        200, "OK", action="http://schemas.xmlsoap.org/ws/2004/09/transfer/DeleteResponse",
+        resource_uri=SHELL_CMD_RESOURCE_URI))
+
+    # 13) CIM/WQL Enumerate request -- ResourceURI names a CIM class path (is_cim_query) and a WQL
+    #     Filter carries the literal query text -- triggers the CIM/WMI-query flagship note.
+    cim_req, _cim_resp = session(49510)
+    cim_req(winrm_request(
+        "/wsman", "http://schemas.xmlsoap.org/ws/2004/09/enumeration/Enumerate",
+        resource_uri="http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/Win32_Process",
+        body_xml=(
+            '<n:Enumerate xmlns:n="http://schemas.xmlsoap.org/ws/2004/09/enumeration">'
+            '<w:Filter Dialect="http://schemas.microsoft.com/wbem/wsman/1/WQL">'
+            "select * from Win32_Process where Name='cmd.exe'</w:Filter></n:Enumerate>"),
+        auth="Negotiate " + NEGOTIATE_TOKEN))
+
+    # 14) PSRP (PowerShell Remoting) Create request -- ResourceURI names a PowerShell endpoint
+    #     (is_psrp) -- triggers the PSRP scope-boundary note; the nested PSRP fragment protocol
+    #     itself is deliberately never decoded (see winrm.hpp's own DELIBERATELY NOT IMPLEMENTED
+    #     list), so a short placeholder stands in for a real CreationXml blob.
+    psrp_req, _psrp_resp = session(49520)
+    psrp_req(winrm_request(
+        "/wsman", "http://schemas.xmlsoap.org/ws/2004/09/transfer/Create",
+        resource_uri="http://schemas.microsoft.com/powershell/Microsoft.PowerShell",
+        body_xml="<rsp:CreationXml>AAEAAAD/////AQAAAAAAAAAEAQAAAA==</rsp:CreationXml>",
+        auth="Negotiate " + NEGOTIATE_TOKEN))
+
+    # 15) Command request authenticated with HTTP Basic instead of Negotiate -- triggers BOTH
+    #     "command executed" (redacted) AND "HTTP Basic auth over plaintext WinRM" together.
+    basic_req, _basic_resp = session(49530)
+    basic_req(winrm_request(
+        "/wsman", "http://schemas.microsoft.com/wbem/wsman/1/windows/shell/Command",
+        resource_uri=SHELL_CMD_RESOURCE_URI, selector_set_xml=selector_shell_id("BASIC-AUTH-SHELL-0001"),
+        body_xml="<rsp:CommandLine><rsp:Command>powershell.exe</rsp:Command>"
+                 "<rsp:Arguments>-Command</rsp:Arguments><rsp:Arguments>Get-Process</rsp:Arguments>"
+                 "</rsp:CommandLine>",
+        auth="Basic " + BASIC_CREDS))
+
+    # 16) Chunked-encoding negative case -- Transfer-Encoding: chunked, no Content-Length, and
+    #     deliberately no body bytes at all in this packet (see this function's own docstring):
+    #     winrm_tcp_declared_length must return the header-block length alone, and try_parse_winrm_http
+    #     must never attempt to scan a body for this message.
+    chunked_req, _chunked_resp = session(49540)
+    chunked_body_headers = [
+        ("Content-Type", "application/soap+xml;charset=UTF-8"),
+        ("User-Agent", "Microsoft WinRM Client"),
+        ("Host", "192.168.1.10:5985"),
+        ("Transfer-Encoding", "chunked"),
+    ]
+    chunked_req(http_message("POST /wsman HTTP/1.1", chunked_body_headers, b"", include_content_length=False))
+
+    # 17) SOAP Fault response (HTTP 500) -- triggers the SOAP Fault note with its Reason/Text.
+    _fault_req, fault_resp = session(49550)
+    fault_resp(winrm_response(
+        500, "Internal Server Error",
+        action="http://schemas.xmlsoap.org/ws/2004/08/addressing/fault",
+        body_xml=(
+            "<s:Fault><s:Code><s:Value>s:Sender</s:Value>"
+            "<s:Subcode><s:Value>w:AccessDenied</s:Value></s:Subcode></s:Code>"
+            '<s:Reason><s:Text xml:lang="en-US">Access is denied.</s:Text></s:Reason></s:Fault>')))
+
+    # 18) 401 Unauthorized response, WWW-Authenticate: Negotiate, non-SOAP (text/html) body --
+    #     response-side auth-scheme coverage with no envelope at all (is_soap_xml is false, so the
+    #     body is never scanned).
+    _unauth_req, unauth_resp = session(49560)
+    unauth_resp(winrm_response(
+        401, "Unauthorized", is_soap=False, body_xml="<html><body>Unauthorized</body></html>",
+        extra_headers=[("WWW-Authenticate", "Negotiate")]))
+
+    # 19) The same Create request shape as (1)'s, but on a non-standard TCP port (8585) -- Auto mode
+    #     must NOT recognize this as WinRM. What DOES claim it in Auto mode is a pre-existing,
+    #     unrelated collision -- MQTT's own port-independent structural check reads "PO" (0x50 0x4F)
+    #     as a plausible PUBREC fixed-header byte + single-byte remaining-length; this is not a
+    #     WinRM regression and not the collision winrm.hpp's own header comment scopes (that one is
+    #     specifically against it_protocols.cpp's generic Tier-2 "http" fallback, which this packet
+    #     never even reaches). --winrm-port 8585 widens Auto-mode detection so WinRmTcpDecoder claims
+    #     it ahead of MQTT instead; --protocol winrm claims it port-independently too, and adds the
+    #     "not a configured/standard WinRM port" note (since the port still isn't 5985 nor in the
+    #     widened set for that particular CLI invocation).
+    nonstd_req, _nonstd_resp = session(49570, server_port=8585)
+    nonstd_req(winrm_request(
+        "/wsman", "http://schemas.xmlsoap.org/ws/2004/09/transfer/Create",
+        resource_uri=SHELL_CMD_RESOURCE_URI,
+        body_xml="<rsp:Shell><rsp:InputStreams>stdin</rsp:InputStreams>"
+                 "<rsp:OutputStreams>stdout stderr</rsp:OutputStreams></rsp:Shell>",
+        auth="Negotiate " + NEGOTIATE_TOKEN))
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_100_000 + i, i * 1000)
+    (TESTS_DIR / "sample_winrm.pcap").write_bytes(data)
+
+    # 20) Command request split across two TCP segments mid-header-block -- a SEPARATE fixture file
+    #     (mirrors build_kerberos_sample's own TCP-framing fixture split into its own file), since
+    #     it exercises Decoder::reassemble_tcp_payload rather than a single self-contained packet.
+    split_packets = []
+    split_body_xml = ("<rsp:CommandLine><rsp:Command>ipconfig</rsp:Command>"
+                       "<rsp:Arguments>/all</rsp:Arguments></rsp:CommandLine>")
+    split_full = winrm_request(
+        "/wsman", "http://schemas.microsoft.com/wbem/wsman/1/windows/shell/Command",
+        resource_uri=SHELL_CMD_RESOURCE_URI, selector_set_xml=selector_shell_id("SPLIT-TEST-SHELL-0002"),
+        body_xml=split_body_xml, auth="Negotiate " + NEGOTIATE_TOKEN)
+
+    def add_split_tcp(seq: int, ack: int, payload: bytes, ident_val: int):
+        tcp = tcp_header(49580, WINRM_PORT, seq, ack, TCP_PSH | TCP_ACK, len(payload)) + payload
+        ip = ipv4_header(HMI_IP, PLC_IP, 6, len(tcp), ident_val)
+        split_packets.append(eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip + tcp)
+
+    split_at = 60  # well inside the header block -- Authorization: Negotiate <token> alone exceeds it.
+    add_split_tcp(8000, 9000, split_full[:split_at], next_ident())
+    add_split_tcp(8000 + split_at, 9000, split_full[split_at:], next_ident())
+
+    split_data = pcap_global_header()
+    for i, pkt in enumerate(split_packets):
+        split_data += pcap_record(pkt, 1_700_101_000 + i, i * 1000)
+    (TESTS_DIR / "sample_winrm_tcp_split.pcap").write_bytes(split_data)
+
+
 if __name__ == "__main__":
     TESTS_DIR.mkdir(exist_ok=True)
     build_modbus_sample()
@@ -13209,4 +13568,5 @@ if __name__ == "__main__":
     build_lldp_sample()
     build_bgp_sample()
     build_slow_protocols_sample()
+    build_winrm_sample()
     print("wrote sample fixtures to", TESTS_DIR)

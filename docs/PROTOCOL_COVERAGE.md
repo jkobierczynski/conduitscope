@@ -7033,7 +7033,7 @@ SID that followed -- caught by decoding the fixture and observing
 file headers for the full writeup, including the complete empirically-
 derived NDR deferred-pointer-ordering rule.
 
-### SRVSVC + WKSSVC (MS-SRVS, MS-WKST; carried inside SMB2 WRITE/READ, same shape as Netlogon/SAMR/LSARPC) -- phase 2 of the same follow-on Windows RPC batch (SAMR/LSARPC done, SRVSVC/WKSSVC this section, DRSUAPI done (see below), WinRM/WMI remain future work)
+### SRVSVC + WKSSVC (MS-SRVS, MS-WKST; carried inside SMB2 WRITE/READ, same shape as Netlogon/SAMR/LSARPC) -- phase 2 of the same follow-on Windows RPC batch (SAMR/LSARPC done, SRVSVC/WKSSVC this section, DRSUAPI and WinRM done (see below), WMI remains future work)
 
 SRVSVC (Server Service Remote Protocol) and WKSSVC (Workstation Service
 Remote Protocol) are the interfaces `net view`/`net config workstation`-
@@ -7252,7 +7252,7 @@ smoke-tested against the hand-built fixture, decoded and inspected in
 written. See `include/conduitscope/srvsvc.hpp`'s and
 `include/conduitscope/wkssvc.hpp`'s file headers for the full writeup.
 
-### DRSUAPI (MS-DRSR; carried inside SMB2 WRITE/READ, same shape as Netlogon/SAMR/LSARPC/SRVSVC/WKSSVC) -- phase 3 of the same follow-on Windows RPC batch, alone rather than bundled (SAMR/LSARPC/SRVSVC/WKSSVC done, DRSUAPI this section, WinRM/WMI remain future work)
+### DRSUAPI (MS-DRSR; carried inside SMB2 WRITE/READ, same shape as Netlogon/SAMR/LSARPC/SRVSVC/WKSSVC) -- phase 3 of the same follow-on Windows RPC batch, alone rather than bundled (SAMR/LSARPC/SRVSVC/WKSSVC done, DRSUAPI this section, WinRM done (see below), WMI remains future work)
 
 DRSUAPI (Directory Replication Service Remote Protocol) is the interface
 domain controllers use to replicate directory data to each other.
@@ -7458,6 +7458,262 @@ inspected in `--format text`, `--format json`, `--stats`, and `info`,
 BEFORE the `CMakeLists.txt` `drsuapi_*` test family reading it was
 written. See `include/conduitscope/drsuapi.hpp`'s own file header for the
 full writeup, including the scope caveat in its most prominent form.
+
+### WinRM (WS-Management, MS-WSMV; TCP port 5985) -- phase 4 of the same follow-on Windows RPC batch (SAMR/LSARPC/SRVSVC/WKSSVC/DRSUAPI done, WinRM this section, WMI remains future work)
+
+WinRM is the plain SOAP-over-HTTP/1.1 transport `Invoke-Command`/`winrs`/
+`Enter-PSSession`, and most pentest tooling (evil-winrm's own
+plain-CommandLine mode, CrackMapExec's/NetExec's own WinRM module),
+actually use on the wire -- the same interactive-remote-shell/
+remote-management value the four RPC interfaces above cover, but for the
+transport that carries it in practice today. Unlike every interface in
+phases 1-3, this has NO DCE/RPC involvement at all: no `dcerpc.hpp`, no
+`smb.hpp` named pipe, no interface UUID. New, fully self-contained
+`include/conduitscope/winrm.hpp`/`src/winrm.cpp`. No HTTP parser existed
+anywhere in this codebase before this phase (`it_protocols.cpp`'s own
+`match_http` is, and remains, a request-line/status-line SNIFFER only,
+not a parser) -- this file adds a deliberately minimal one.
+
+#### A critical, empirically-corrected wire-format detail -- read this first
+
+**This batch's own original plan assumed the CommandLine's
+Command/Arguments text was base64+UTF-16LE encoded**, by analogy with
+NTLM's/SMB2's own UTF-16LE string fields already decoded elsewhere in
+this codebase. **That assumption is wrong**, discovered before any decode
+logic was written and verified two independent ways: pywinrm (the
+open-source Python WinRM client -- installed and read directly,
+`winrm/protocol.py`'s own `run_command`) places the command string as
+plain element text (`cmd_line["rsp:Command"] = {"#text": command}`, no
+encoding step at all); and Microsoft's own MS-WSMV specification (Windows
+Remote Management Protocol, Open Specifications) defines the CommandLine
+type's Command/Arguments fields as plain `xs:string` XML Schema elements,
+with no wire-level encoding beyond ordinary XML text-escaping. This
+decoder therefore XML-unescapes Command/Arguments directly -- no base64
+or UTF-16LE decode step exists anywhere in this file for that field.
+What genuinely IS base64-encoded, per the same spec section, is I/O
+STREAM data -- the Send/Receive operations' own `rsp:Stream` element
+content (stdin/stdout/stderr bytes, pre-base64 encoded in the shell's own
+console codepage, e.g. 437, NOT UTF-16LE either) -- but this decoder
+deliberately does not decode that content at all (see DELIBERATELY NOT
+IMPLEMENTED below). Unlike the DRSUAPI transport discovery in the prior
+phase, this correction didn't shrink or block the feature's scope, so
+work simply proceeded with the corrected understanding rather than
+pausing for a decision.
+
+#### Wire format
+
+Every WinRM exchange is one HTTP/1.1 request (almost always `POST /wsman
+HTTP/1.1`) answered by one HTTP/1.1 response, both carrying a SOAP 1.2
+envelope (`Content-Type: application/soap+xml`) as the body. The
+envelope header carries `a:Action` (a full URI naming the WS-Transfer/
+WS-Man operation) and `w:ResourceURI` (which remote-management resource
+the operation targets -- a classic WinRS cmd.exe shell, a CIM/WMI class
+path, or a PowerShell Remoting endpoint). Once a shell exists, every
+subsequent request addresses it via a `w:SelectorSet/w:Selector
+Name="ShellId"` header entry -- **CommandId travels in two genuinely
+different wire shapes depending on direction**: the Command RESPONSE
+returns it as an element's own text (`<rsp:CommandId>...</rsp:CommandId>`),
+but every later request that references it (Send/Receive/Signal) carries
+it as an XML ATTRIBUTE (`CommandId="..."`) on that request's own body
+element instead -- both handled by a try-element-then-try-attribute
+fallback in `try_parse_winrm_http`.
+
+The SOAP body is scanned with a handful of small, purpose-built helpers
+(`winrm.cpp`, anonymous namespace) -- NOT a real XML parser: no
+element-nesting awareness, no namespace-prefix resolution against
+declared `xmlns` bindings (every lookup matches an element/attribute by
+its LOCAL name only), no CDATA/comment handling -- the same "structural
+signature, not full grammar" bar this codebase's NTLMSSP token scan
+already accepts. A local-name match requires an exact tag-name boundary
+(the character immediately after the candidate name must be whitespace,
+`>`, or `/`) specifically so `"Command"` never accidentally matches
+inside `"CommandId"`/`"CommandLine"`/`"CommandState"`.
+
+`winrm_tcp_declared_length()` is a genuinely different shape from every
+other declared-length probe in this codebase's TCP reassembly cascade:
+Kerberos's 4-byte prefix, LDAP's/SMB's own early length fields, and every
+other protocol here can compute a message's total on-the-wire length
+from its FIRST few bytes alone -- HTTP cannot, since the header block's
+own length is only known once its terminating blank line (`\r\n\r\n`)
+has actually arrived, and a WinRM request's `Authorization: Negotiate
+<SPNEGO token>` header alone can run well past a single ~1460-byte TCP
+segment. So, once the structural gate (a plausible HTTP request-line or
+status-line -- `it_protocols.hpp`'s own `match_http`, moved out of
+`it_protocols.cpp`'s anonymous namespace specifically so this file could
+reuse it rather than duplicate it) is satisfied but the header terminator
+hasn't been seen yet, this function returns `candidate.size() + 1` -- a
+deliberate "ask for exactly one more byte" signal that makes
+`Decoder::reassemble_tcp_payload`'s own generic buffering loop wait for
+more data and re-probe, rather than the `std::nullopt` every other
+protocol here uses to mean "not a match at all". Bounded by that same
+reassembly loop's existing 16 MiB / 20000-segment safety cap. Once the
+header block IS found: `Transfer-Encoding: chunked` (parsed
+case-insensitively) returns the header block's own length only (the
+chunked body itself is never reassembled); `Content-Length: N` (also
+parsed case-insensitively) returns header length + N; neither present
+returns the header length alone (an empty-bodied exchange).
+
+#### Message coverage
+
+HTTP layer, every message: method+target (request) or status code+reason
+(response), Content-Type (and whether it's `application/soap+xml`),
+Content-Length/chunked framing, and the Authorization (request) or
+WWW-Authenticate (response) header's own auth SCHEME NAME ONLY
+(`"Negotiate"`/`"Basic"`/`"Kerberos"`/`"CredSSP"`) -- the token/credential
+bytes that follow the scheme name are never read into a field at all, so
+there is no redaction machinery to wire up for this one.
+
+SOAP/WS-Man layer, once a body was actually available to scan (never
+attempted for a chunked message): Action (full URI) and its own last
+path segment (`"Create"`/`"CreateResponse"`/`"Command"`/
+`"CommandResponse"`/`"Send"`/`"Receive"`/`"Signal"`/`"Delete"`/
+`"Enumerate"`/...); ResourceURI, and two curated classifications of it
+(`is_cim_query` when it names a CIM/WSCIM class path, `is_psrp` when it
+names a PowerShell Remoting endpoint); ShellId; CommandId (whichever of
+its two wire shapes is actually present); the CommandLine's own
+Command+Arguments, joined into one `command_line` string, XML-unescaped
+and **REDACTED BY DEFAULT** (`DecodeContext::redact_secrets` --
+`--no-redact` reveals the real value, the same opt-in MQTT's own CONNECT
+password and HSRP's/VRRP's own plaintext auth field already established;
+redaction happens BEFORE the summary/notes text is built, so no post-hoc
+scrubbing pass is needed); a WQL Filter string, when an Enumerate
+operation carries one (the literal query text -- a deliberate, narrow
+exception to "don't decode payload content" for exactly the same reason
+SNMP's own community string is: seeing the query itself is most of this
+feature's audit value); and a SOAP Fault's own Reason/Text, when a
+response is one.
+
+#### Curated attack/monitoring detection
+
+Remote shell opened -- fires on a Create RESPONSE that carries a ShellId
+(not the request, since only a successful response proves a shell
+actually exists). Command executed -- fires on a Command REQUEST that
+carries a CommandLine (the request is where the command text actually
+lives on the wire; the matching response only ever carries a CommandId);
+the command text in the note is subject to the same redaction as the
+field itself. CIM/WMI query riding WinRM transport -- fires when
+`is_cim_query` and a WQL Filter was found, naming the ResourceURI and the
+literal query text (free visibility into modern `Get-CimInstance` usage
+without touching DCOM, since it defaults to WSMan transport). PowerShell
+Remoting endpoint -- fires when `is_psrp`, stating the scope boundary
+below. HTTP Basic authentication over plaintext WinRM -- fires whenever
+`auth_scheme` is `"Basic"` (this decoder only ever sees plaintext port
+5985 traffic in the first place, so Basic auth observed here is BY
+DEFINITION happening in cleartext: base64 is encoding, not encryption,
+and the credential is trivially reversible to anyone who can see this
+traffic). WS-Man SOAP Fault -- fires whenever `has_fault`, naming the
+Reason/Text.
+
+#### State/correlation design
+
+None. Every field this file extracts is self-contained within its own
+HTTP message -- a ShellId/CommandId that a LATER message references is
+simply read again from that later message's own bytes, so this decoder
+never needs to remember one message's ShellId to make sense of the next.
+Unlike DRSUAPI's own bind-bookkeeping map, there is no `WinRmFlowState`
+of any kind.
+
+#### Collision fixed, not just avoided
+
+`it_protocols.cpp`'s own generic Tier-2 "http" recognition
+(`try_recognize_it_lateral_movement`'s own `match_http` check) already
+recognizes WinRM's own HTTP/1.1 framing name-only, port-independently --
+a genuine collision, confirmed by a pinning test
+(`winrm_command_not_misdetected_as_generic_http`) proving this traffic
+would decode as generic `"http"` without this decoder. Resolved by PORT,
+the same resolution this codebase already uses for its other
+structural-signature-vs-generic-fallback collisions (RDP-vs-COTP,
+FTP/LDAP-vs-MQTT): `WinRmTcpDecoder` is `GateKind::TcpPort` (port-gated
+in Auto mode, like DoH), wired into `decoder.cpp`'s TCP dispatch chain
+well ahead of Tier 2's own generic HTTP check, so a real WinRM exchange
+on port 5985 (or a configured `--winrm-port` extra port) is always
+claimed by this decoder first; ordinary HTTP traffic on any other port is
+entirely unaffected and still falls through to Tier 2's own generic
+`"http"` recognition exactly as before.
+
+A second, genuinely unrelated, pre-existing collision was found
+empirically while building this phase's own non-standard-port test
+fixture, and is documented rather than fixed (fixing it is out of this
+phase's own scope): MQTT's own port-independent structural check
+(attempted on every TCP port, not just 1883) reads a WinRM `POST`
+request's leading `"PO"` bytes (`0x50 0x4F`) as a plausible PUBREC
+fixed-header byte plus a single-byte remaining-length, claiming it on a
+non-standard port before generic HTTP ever gets a chance to. This is true
+of any POST-starting TCP payload on a port none of this codebase's other
+port-gated decoders claim first -- not specific to WinRM, and not the
+collision this decoder's own dispatch-order fix above addresses. See
+`tools/make_sample_pcap.py`'s `build_winrm_sample()` doc comment and the
+`winrm_nonstandard_port_*` CMakeLists.txt test pair for the full
+demonstration.
+
+#### DELIBERATELY NOT IMPLEMENTED in this pass
+
+I/O stream content itself (stdin bytes sent via Send, stdout/stderr bytes
+returned via Receive) -- genuinely base64-encoded per MS-WSMV, but
+reassembling it into anything coherent would require correlating
+potentially many Receive responses across a session, decoding an
+unspecified console codepage (not UTF-8/UTF-16), and the result is
+arbitrary command OUTPUT, not the command itself -- out of this pass's
+scope. This decoder only reports that a Send/Receive happened (with its
+CommandId), never the stream bytes. PowerShell Remoting (PSRP, MS-PSRP)
+-- `Invoke-Command`/`Enter-PSSession`/most modern `Get-CimInstance` usage
+rides an entirely different, deeply nested layered protocol on top of
+this same WS-Man transport, whose body carries its own base64-encoded,
+binary-framed PSRP fragments (which themselves further encode a
+.NET-remoting-shaped object stream, with script/command text inside as
+UTF-16LE -- genuinely the encoding this batch's original plan mistakenly
+attributed to plain CommandLine, see above). This decoder recognizes a
+PSRP-shaped ResourceURI (`is_psrp`) and says so explicitly, but does not
+attempt to decode a single byte of the nested PSRP protocol itself. WS-Man
+message-level encryption (`Content-Type: multipart/encrypted`, negotiated
+when the transport auth is NTLM/Kerberos/CredSSP without TLS) -- the
+outer HTTP layer (method/status/headers/auth scheme) is still reported,
+but `has_envelope` is simply false and no SOAP field is ever populated.
+Any TLS-wrapped session at all (port 5986) -- out of scope for the same
+reason RDP's/HTTPS's own post-handshake traffic is elsewhere in this
+codebase. WMI (a future phase of the same batch).
+
+#### JSON output fields
+
+`winrm_is_response`, then either `winrm_http_method`/`winrm_http_target`
+(request) or `winrm_http_status`/`winrm_http_status_text` (response);
+`winrm_content_type` (when present)/`winrm_chunked`/`winrm_content_length`
+(when present)/`winrm_auth_scheme` (when present); then, only when
+`has_envelope`: `winrm_action`/`winrm_action_name`/`winrm_resource_uri`
+(when non-empty)/`winrm_is_cim_query` (when true)/`winrm_is_psrp` (when
+true)/`winrm_shell_id` (when present)/`winrm_command_id` (when
+present)/`winrm_command_line` (when present, redacted by default)/
+`winrm_wql_filter` (when present)/`winrm_fault_reason` (when present).
+`--stats` gains a `winrm action counts:` block, keyed by
+`wsa_action_name`, requests only -- the same `std::map<std::string,
+size_t>` pattern every prior interface's own counts already established.
+
+#### Validation
+
+No public real-world WinRM capture was incorporated in this pass;
+validated by construction against synthetic `tests/sample_winrm.pcap`
+(TCP, 19 packets -- `tools/make_sample_pcap.py`'s `build_winrm_sample()`),
+covering a full Create->Command->Send->Receive->Signal->Delete shell
+session on one real TCP stream with ShellId/CommandId correlated exactly
+as a real WinRS session would produce them (both CommandId wire shapes
+exercised, and the `find_start_tag` exact-tag-boundary proof that
+`CommandState` never false-matches a `Command` element search), plus,
+each on its own distinct TCP flow: a CIM/WQL Enumerate request, a PSRP
+Create request, a Basic-auth Command request (both flagship notes firing
+together), a chunked-encoding negative case, a SOAP Fault response, a 401
+Unauthorized response (response-side auth-scheme coverage with no
+envelope at all), and the same Create request on a non-standard port
+(used by the `--winrm-port`/`--protocol winrm` CLI tests and the
+unrelated-MQTT-collision demonstration above). A second, separate fixture
+(`tests/sample_winrm_tcp_split.pcap`) covers the two-TCP-segment
+reassembly case, mirroring `build_kerberos_sample()`'s own split-fixture
+precedent. Every message type and note-trigger condition was
+independently smoke-tested against the hand-built fixtures, decoded and
+inspected in `--format text --verbose`, `--format json`, `--format json
+--no-redact`, and `--stats`, BEFORE the `CMakeLists.txt` `winrm_*` test
+family reading them was written. See `include/conduitscope/winrm.hpp`'s
+own file header for the full writeup, including the empirically-corrected
+wire-format finding in its most prominent form.
 
 ### MELSEC / MC Protocol (SLMP, Mitsubishi Electric) -- TCP port 5001, UDP port 5000
 

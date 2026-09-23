@@ -108,6 +108,7 @@ add_library(conduitscope_core STATIC
   src/srvsvc.cpp
   src/wkssvc.cpp
   src/drsuapi.cpp
+  src/winrm.cpp
   src/protocol_registry.cpp
   src/resource_limits.cpp
   src/decoder.cpp
@@ -10242,6 +10243,188 @@ add_test(NAME slow_protocols_subtype_name_json_structural
   COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_slow_protocols.pcap")
 set_tests_properties(slow_protocols_subtype_name_json_structural PROPERTIES
   PASS_REGULAR_EXPRESSION "\"slow_protocols_subtype_name\": \"LACP\".*\"slow_protocols_subtype_name\": \"Marker Protocol\".*\"slow_protocols_subtype_name\": \"802\\.3 OAM \\(EFM\\)\"")
+
+# ---------------------------------------------------------------------------------------------
+# WinRM (WS-Management), TCP port 5985 -- see winrm.hpp's own extensive file header comment for
+# the wire format. tests/sample_winrm.pcap (tools/make_sample_pcap.py's build_winrm_sample()) has
+# 19 packets: a full Create->Command->Send->Receive->Signal->Delete shell session on one real TCP
+# stream (#1-#12), then, each its own TCP flow: a CIM/WQL Enumerate (#13), a PSRP Create (#14), a
+# Basic-auth Command (#15), a chunked-encoding negative case (#16), a SOAP Fault response (#17), a
+# 401 Unauthorized response (#18), and the same Create request as #1 on a non-standard port 8585
+# (#19). tests/sample_winrm_tcp_split.pcap has a separate 2-packet fixture: the same Command
+# request shape as #3's, split mid-header-block across two TCP segments.
+
+add_test(NAME winrm_create_response_shell_opened_note
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_winrm.pcap" --format text --verbose)
+set_tests_properties(winrm_create_response_shell_opened_note PROPERTIES
+  PASS_REGULAR_EXPRESSION "#2  1\\.001000.*\\[winrm\\]  HTTP/1\\.1 200 OK -- WS-Man CreateResponse.*note: remote shell opened \\(ShellId AAAAAAAA-1111-2222-3333-444444444444\\)")
+
+# Negative control: the Create REQUEST (#1) must NOT carry the "remote shell opened" note (only a
+# successful response actually proves a shell exists) -- and, since the shell doesn't exist yet
+# when this request is sent, its JSON has no winrm_shell_id field at all.
+add_test(NAME winrm_create_request_no_premature_shell_opened_note
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_winrm.pcap" --format json)
+set_tests_properties(winrm_create_request_no_premature_shell_opened_note PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"winrm_action_name\": \"Create\",\n    \"winrm_resource_uri\": \"http://schemas\\.microsoft\\.com/wbem/wsman/1/windows/shell/cmd\",\n    \"notes\": \\[\\]"
+  FAIL_REGULAR_EXPRESSION "\"winrm_action_name\": \"Create\",\n    \"winrm_resource_uri\"[^}]*\"winrm_shell_id\"")
+
+# Command request (#3): "command executed" note fires, and both the note text and the
+# winrm_command_line field are redacted by default (DecodeContext::redact_secrets).
+add_test(NAME winrm_command_executed_redacted_by_default
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_winrm.pcap" --format json)
+set_tests_properties(winrm_command_executed_redacted_by_default PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"winrm_action_name\": \"Command\",.*\"winrm_shell_id\": \"AAAAAAAA-1111-2222-3333-444444444444\",\n    \"winrm_command_line\": \"\\[REDACTED\\]\",\n    \"notes\": \\[\"command executed: \\[REDACTED\\]\"\\]")
+
+# --no-redact reveals the real command text for the same packet.
+add_test(NAME winrm_command_line_visible_with_no_redact
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_winrm.pcap" --format json --no-redact)
+set_tests_properties(winrm_command_line_visible_with_no_redact PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"winrm_action_name\": \"Command\",.*\"winrm_command_line\": \"cmd\\.exe /c whoami /all\",\n    \"notes\": \\[\"command executed: cmd\\.exe /c whoami /all\"\\]")
+
+# Negative control: the Command RESPONSE (#4) must NOT carry "command executed" (the command text
+# only ever lives on the wire in the request; the response only ever carries a CommandId) -- and
+# its CommandId is extracted via the element-text wire shape (<rsp:CommandId>...</rsp:CommandId>).
+add_test(NAME winrm_command_response_command_id_element_text_shape_no_premature_note
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_winrm.pcap" --format json)
+set_tests_properties(winrm_command_response_command_id_element_text_shape_no_premature_note PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"winrm_action_name\": \"CommandResponse\",.*\"winrm_command_id\": \"7777AAAA-BBBB-CCCC-DDDD-888888888888\",\n    \"notes\": \\[\\]")
+
+# Send request (#5): CommandId extracted via the XML-ATTRIBUTE wire shape instead (the REQUEST-side
+# shape every later Send/Receive/Signal carries it in) -- a genuinely different shape from the
+# Command response's own element-text form above, both must resolve to the identical CommandId.
+add_test(NAME winrm_send_request_command_id_attribute_shape
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_winrm.pcap" --format json)
+set_tests_properties(winrm_send_request_command_id_attribute_shape PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"winrm_action_name\": \"Send\",.*\"winrm_shell_id\": \"AAAAAAAA-1111-2222-3333-444444444444\",\n    \"winrm_command_id\": \"7777AAAA-BBBB-CCCC-DDDD-888888888888\",\n    \"notes\": \\[\\]")
+
+# Receive response (#8): proves find_start_tag's own exact-tag-boundary check keeps "CommandState"
+# (and the CommandId/Stream attributes riding alongside it) from ever false-matching a "Command"
+# element search -- CommandId still resolves via the attribute-anywhere fallback, but no
+# winrm_command_line field is ever produced for this response (there is no Command element in a
+# ReceiveResponse body at all).
+add_test(NAME winrm_receive_response_command_state_not_misparsed_as_command
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_winrm.pcap" --format json)
+set_tests_properties(winrm_receive_response_command_state_not_misparsed_as_command PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"winrm_action_name\": \"ReceiveResponse\",.*\"winrm_command_id\": \"7777AAAA-BBBB-CCCC-DDDD-888888888888\",\n    \"notes\": \\[\\]")
+
+# Delete request/response (#11/#12) close the shell -- plain structural coverage, no notes.
+add_test(NAME winrm_delete_request_and_response_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_winrm.pcap" --format text)
+set_tests_properties(winrm_delete_request_and_response_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[winrm\\]  POST /wsman -- WS-Man Delete.*\\[winrm\\]  HTTP/1\\.1 200 OK -- WS-Man DeleteResponse")
+
+# CIM/WQL Enumerate (#13): is_cim_query (ResourceURI names a CIM class path) plus a WQL Filter
+# element together trigger the CIM/WMI-query flagship note, carrying the literal query text.
+add_test(NAME winrm_cim_query_wql_filter_note
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_winrm.pcap" --format json)
+set_tests_properties(winrm_cim_query_wql_filter_note PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"winrm_is_cim_query\": true,.*\"winrm_wql_filter\": \"select \\* from Win32_Process where Name='cmd\\.exe'\",\n    \"notes\": \\[\"CIM/WMI query riding WinRM transport \\(ResourceURI: http://schemas\\.dmtf\\.org/wbem/wscim/1/cim-schema/2/Win32_Process, WQL: select \\* from Win32_Process where Name='cmd\\.exe'\\)\"\\]")
+
+# PSRP (#14): ResourceURI names a PowerShell Remoting endpoint -- triggers the PSRP scope-boundary
+# note, stating the nested PSRP fragment protocol is never decoded.
+add_test(NAME winrm_psrp_endpoint_note
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_winrm.pcap" --format text --verbose)
+set_tests_properties(winrm_psrp_endpoint_note PROPERTIES
+  PASS_REGULAR_EXPRESSION "note: PowerShell Remoting \\(PSRP\\) endpoint \\(ResourceURI: http://schemas\\.microsoft\\.com/powershell/Microsoft\\.PowerShell\\) -- this decoder does not decode PSRP's own nested binary fragment protocol")
+
+# HTTP Basic auth over plaintext WinRM (#15): fires alongside "command executed" (redacted) on the
+# very same message -- both notes present together, proving they're independent checks.
+add_test(NAME winrm_basic_auth_and_command_executed_together
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_winrm.pcap" --format text --verbose)
+set_tests_properties(winrm_basic_auth_and_command_executed_together PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[winrm\\]  POST /wsman -- WS-Man Command \\(\\[REDACTED\\]\\).*note: command executed: \\[REDACTED\\].*note: HTTP Basic authentication observed over plaintext WinRM \\(TCP port 5985\\) -- the credential is base64-encoded, not encrypted, and trivially reversible")
+
+# Chunked-encoding negative case (#16): proves the documented "not reassembled" limitation behaves
+# as designed -- header-only declared length (winrm_content_length is entirely absent, since
+# has_content_length is never set for a chunked message), a dedicated note, and no envelope fields
+# at all (has_envelope requires a body scan that chunked messages never get).
+add_test(NAME winrm_chunked_body_not_reassembled
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_winrm.pcap" --format json)
+set_tests_properties(winrm_chunked_body_not_reassembled PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"summary\": \"POST /wsman \\(chunked body, not decoded\\)\",\n    \"winrm_is_response\": false,\n    \"winrm_http_method\": \"POST\",\n    \"winrm_http_target\": \"/wsman\",\n    \"winrm_content_type\": \"application/soap\\+xml;charset=UTF-8\",\n    \"winrm_chunked\": true,\n    \"notes\": \\[\n      \"Transfer-Encoding: chunked body -- this decoder does not reassemble or decode a chunked WS-Man body")
+
+# SOAP Fault response (#17): triggers the SOAP Fault note with its own Reason/Text.
+add_test(NAME winrm_soap_fault_note
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_winrm.pcap" --format json)
+set_tests_properties(winrm_soap_fault_note PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"winrm_http_status\": 500,\n    \"winrm_http_status_text\": \"Internal Server Error\",.*\"winrm_fault_reason\": \"Access is denied\\.\",\n    \"notes\": \\[\"WS-Man SOAP Fault: Access is denied\\.\"\\]")
+
+# 401 Unauthorized response (#18): response-side auth-scheme coverage (WWW-Authenticate) with NO
+# envelope at all -- the body is text/html, not application/soap+xml, so is_soap_xml is false and
+# the body is never scanned (no winrm_action/winrm_resource_uri/etc. fields at all).
+add_test(NAME winrm_401_response_auth_scheme_no_envelope
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_winrm.pcap" --format json)
+set_tests_properties(winrm_401_response_auth_scheme_no_envelope PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"winrm_http_status\": 401,\n    \"winrm_http_status_text\": \"Unauthorized\",\n    \"winrm_content_type\": \"text/html\",\n    \"winrm_chunked\": false,\n    \"winrm_content_length\": 38,\n    \"winrm_auth_scheme\": \"Negotiate\",\n    \"notes\": \\[\\]"
+  FAIL_REGULAR_EXPRESSION "\"winrm_http_status\": 401,[^}]*\"winrm_action\"")
+
+# Non-standard port (#19), default Auto mode: WinRmTcpDecoder's own port gate correctly declines
+# it -- proven by the absence of "[winrm]" for this specific flow. (What DOES claim it here is a
+# genuine, pre-existing, entirely unrelated collision -- MQTT's own port-independent structural
+# check reads this request's leading "PO" bytes as a plausible PUBREC fixed-header byte plus a
+# single-byte remaining-length; see build_winrm_sample()'s own docstring in tools/make_sample_pcap.py
+# for the full explanation. Not a WinRM regression, and not the collision winrm.hpp's own COLLISION
+# SURVEY section scopes -- that one is specifically against it_protocols.cpp's generic Tier-2
+# "http" fallback, which this packet never even reaches.)
+add_test(NAME winrm_nonstandard_port_not_recognized_in_auto_mode
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_winrm.pcap" --format text)
+set_tests_properties(winrm_nonstandard_port_not_recognized_in_auto_mode PROPERTIES
+  FAIL_REGULAR_EXPRESSION "192\\.168\\.1\\.50:49570 -> 192\\.168\\.1\\.10:8585  \\[winrm\\]")
+
+add_test(NAME winrm_nonstandard_port_claimed_by_unrelated_mqtt_collision_in_auto_mode
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_winrm.pcap" --format text)
+set_tests_properties(winrm_nonstandard_port_claimed_by_unrelated_mqtt_collision_in_auto_mode PROPERTIES
+  PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.50:49570 -> 192\\.168\\.1\\.10:8585  \\[mqtt\\]")
+
+# --winrm-port 8585 widens Auto-mode detection so WinRmTcpDecoder claims this flow ahead of MQTT
+# instead -- and, since the port is now in the configured/widened set, the "not a
+# configured/standard WinRM port" note must NOT fire.
+add_test(NAME winrm_port_widening_with_extra_port_flag
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_winrm.pcap" --format text --verbose --winrm-port 8585)
+set_tests_properties(winrm_port_widening_with_extra_port_flag PROPERTIES
+  PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.50:49570 -> 192\\.168\\.1\\.10:8585  \\[winrm\\]  POST /wsman -- WS-Man Create"
+  FAIL_REGULAR_EXPRESSION "not a configured/standard WinRM port")
+
+# --protocol winrm claims the same flow port-independently too, but here the port genuinely isn't
+# configured for this invocation, so the "not a configured/standard WinRM port" note DOES fire.
+add_test(NAME winrm_protocol_filter_forces_detection_port_independent_with_note
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_winrm.pcap" --format text --verbose --protocol winrm)
+set_tests_properties(winrm_protocol_filter_forces_detection_port_independent_with_note PROPERTIES
+  PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.50:49570 -> 192\\.168\\.1\\.10:8585  \\[winrm\\]  POST /wsman -- WS-Man Create.*note: seen on TCP port 49570->8585, which is not a configured/standard WinRM port \\(5985\\)")
+
+add_test(NAME winrm_protocol_filter_excludes_other_protocols
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --protocol winrm --format text)
+set_tests_properties(winrm_protocol_filter_excludes_other_protocols PROPERTIES
+  FAIL_REGULAR_EXPRESSION "\\[winrm\\]")
+
+# Collision-pinning proof (see winrm.hpp's own COLLISION SURVEY section): it_protocols.cpp's own
+# generic Tier-2 "http" recognition (try_recognize_it_lateral_movement's match_http check) would
+# otherwise claim every one of this fixture's port-5985 messages -- WinRmTcpDecoder is wired ahead
+# of it in decoder.cpp's TCP dispatch chain specifically so that never happens, the same
+# "prove the collision existed, then fix the dispatch order" method MELSEC-before-Modbus already
+# established (see melsec_tcp_request_not_misdetected_as_modbus below).
+add_test(NAME winrm_command_not_misdetected_as_generic_http
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_winrm.pcap" --format text)
+set_tests_properties(winrm_command_not_misdetected_as_generic_http PROPERTIES
+  FAIL_REGULAR_EXPRESSION "\\[http\\]")
+
+# --stats action-count aggregation (WinRmMessage::wsa_action_name, requests only -- see
+# winrm_action_counts_'s own comment in output.hpp): Command/Create each appear twice (main flow
+# plus the Basic-auth/PSRP flows), every other action once.
+add_test(NAME winrm_stats_action_counts
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_winrm.pcap" --format text --stats)
+set_tests_properties(winrm_stats_action_counts PROPERTIES
+  PASS_REGULAR_EXPRESSION "winrm action counts:\n *Command +2\n *Create +2\n *Delete +1\n *Enumerate +1\n *Receive +1\n *Send +1\n *Signal +1")
+
+# Two-TCP-segment reassembly: a Command request split mid-header-block, exercising
+# WinRmTcpDecoder::tcp_declared_length's own "ask for one more byte" technique via
+# Decoder::reassemble_tcp_payload -- the same split/rejoin shape kerberos_tcp_segment_split_reassembly
+# already covers for Kerberos/TCP. Must decode identically to a whole-message case (redacted
+# "command executed" note included).
+add_test(NAME winrm_tcp_segment_split_reassembly
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_winrm_tcp_split.pcap" --format text --verbose)
+set_tests_properties(winrm_tcp_segment_split_reassembly PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[tcp\\]  buffering a WinRM/HTTP message PDU/frame split across TCP segments 49580->5985: 60 of 61 declared byte\\(s\\) seen so far across 1 segment\\(s\\) on this flow, waiting for more.*\\[winrm\\]  POST /wsman -- WS-Man Command \\(\\[REDACTED\\]\\).*note: reassembled a WinRM/HTTP message PDU/frame from 1333 byte\\(s\\) spanning 2 TCP segments on this flow.*note: command executed: \\[REDACTED\\]")
 
 # -------------------------------------------------------------------------------------------
 # tshark-style CLI: -T fields/-e (field selection), -f/-c/-a (short aliases for --filter/

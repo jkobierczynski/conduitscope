@@ -165,6 +165,45 @@ std::optional<std::string> match_smb_magic(ByteSpan payload, size_t offset) {
     return std::string("SMB2/SMB3 Transform (encrypted) header, 0xFD\"SMB\" magic");
 }
 
+// RFC 9112's request-line/status-line shape. Returns a short description on a match; checks only
+// the first (at most) 256 bytes, since a real request-line/status-line is always short. Exposed in
+// it_protocols.hpp (moved out of this file's own anonymous namespace, the same move match_smb_magic
+// above already got) for winrm.hpp's own structural gate to reuse rather than duplicate -- WinRM
+// rides ordinary HTTP/1.1 request/status-line framing, and this is the exact same signal Tier 2's
+// own generic HTTP recognition (try_recognize_it_lateral_movement below) already checks. See
+// winrm.hpp's file header comment for the full collision writeup.
+std::optional<std::string> match_http(ByteSpan payload) {
+    static const std::vector<std::string> kVerbs = {"GET",  "POST", "PUT",     "DELETE", "HEAD",
+                                                       "OPTIONS", "PATCH", "CONNECT", "TRACE"};
+    size_t limit = std::min<size_t>(payload.size(), 256);
+    std::string prefix;
+    for (size_t i = 0; i < limit; ++i) prefix += static_cast<char>(payload.at(i));
+
+    for (const auto& verb : kVerbs) {
+        std::string needle = verb + " ";
+        if (prefix.size() < needle.size() || prefix.compare(0, needle.size(), needle) != 0) continue;
+        if (prefix.find(" HTTP/1.") != std::string::npos || prefix.find(" HTTP/2") != std::string::npos ||
+            prefix.find(" HTTP/0.9") != std::string::npos) {
+            return "HTTP request (" + verb + " ...)";
+        }
+    }
+    static const std::vector<std::string> kStatusPrefixes = {"HTTP/1.0 ", "HTTP/1.1 ", "HTTP/2 ",
+                                                                "HTTP/0.9 "};
+    for (const auto& sp : kStatusPrefixes) {
+        if (prefix.size() < sp.size() + 3 || prefix.compare(0, sp.size(), sp) != 0) continue;
+        bool digits = true;
+        for (size_t i = 0; i < 3; ++i) {
+            char c = prefix[sp.size() + i];
+            if (c < '0' || c > '9') { digits = false; break; }
+        }
+        if (digits) {
+            std::string code = prefix.substr(sp.size(), 3);
+            return "HTTP response (status " + code + ")";
+        }
+    }
+    return std::nullopt;
+}
+
 namespace {
 
 // RFC 4253 section 4.2's own version-exchange banner: "SSH-" + protoversion + "-" + a software
@@ -214,40 +253,6 @@ std::optional<std::string> match_ssh_banner(ByteSpan payload) {
     std::string line;
     for (size_t i = 0; i < line_end; ++i) line += static_cast<char>(payload.at(i));
     return line;
-}
-
-// RFC 9112's request-line/status-line shape. Returns a short description on a match; checks only
-// the first (at most) 256 bytes, since a real request-line/status-line is always short.
-std::optional<std::string> match_http(ByteSpan payload) {
-    static const std::vector<std::string> kVerbs = {"GET",  "POST", "PUT",     "DELETE", "HEAD",
-                                                       "OPTIONS", "PATCH", "CONNECT", "TRACE"};
-    size_t limit = std::min<size_t>(payload.size(), 256);
-    std::string prefix;
-    for (size_t i = 0; i < limit; ++i) prefix += static_cast<char>(payload.at(i));
-
-    for (const auto& verb : kVerbs) {
-        std::string needle = verb + " ";
-        if (prefix.size() < needle.size() || prefix.compare(0, needle.size(), needle) != 0) continue;
-        if (prefix.find(" HTTP/1.") != std::string::npos || prefix.find(" HTTP/2") != std::string::npos ||
-            prefix.find(" HTTP/0.9") != std::string::npos) {
-            return "HTTP request (" + verb + " ...)";
-        }
-    }
-    static const std::vector<std::string> kStatusPrefixes = {"HTTP/1.0 ", "HTTP/1.1 ", "HTTP/2 ",
-                                                                "HTTP/0.9 "};
-    for (const auto& sp : kStatusPrefixes) {
-        if (prefix.size() < sp.size() + 3 || prefix.compare(0, sp.size(), sp) != 0) continue;
-        bool digits = true;
-        for (size_t i = 0; i < 3; ++i) {
-            char c = prefix[sp.size() + i];
-            if (c < '0' || c > '9') { digits = false; break; }
-        }
-        if (digits) {
-            std::string code = prefix.substr(sp.size(), 3);
-            return "HTTP response (status " + code + ")";
-        }
-    }
-    return std::nullopt;
 }
 
 // IAC (0xFF) + WILL/WONT/DO/DONT (0xFB-0xFE) + one option byte, RFC 854 -- returns true on at

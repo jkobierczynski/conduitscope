@@ -62,6 +62,7 @@
 #include "conduitscope/tunnel_vpn.hpp"
 #include "conduitscope/twincat.hpp"
 #include "conduitscope/vrrp.hpp"
+#include "conduitscope/winrm.hpp"
 
 namespace conduitscope {
 
@@ -205,6 +206,12 @@ enum class ProtocolFilter {
                            // byte) -- so, like TwinCAT/BGP and unlike ARP/LLDP, it carries its
                            // result via DecodedPacket::result rather than a dedicated dual-written
                            // field block, given how deeply nested its OAM sub-message is.
+    WinRmOnly,             // only attempt WS-Management (WinRM, plaintext HTTP/SOAP, TCP/5985)
+                           // decoding -- see winrm.hpp. Phase 4 of the Windows RPC/remote-
+                           // management batch (SAMR/LSARPC -> SRVSVC/WKSSVC -> DRSUAPI -> WinRM ->
+                           // WMI); unlike the first three phases, WinRM has no DCE/RPC or SMB
+                           // involvement at all -- plain HTTP/1.1 + SOAP, GateKind::TcpPort
+                           // (port-gated in Auto mode, like DoH), the second protocol on that gate.
 };
 
 struct DecodeOptions {
@@ -275,6 +282,20 @@ struct DecodeOptions {
     std::vector<uint16_t> extra_llmnr_ports;    // UDP -- see LLMNR_PORT (5355)
     std::vector<uint16_t> extra_nbns_ports;     // UDP -- see NBNS_PORT (137)
     std::vector<uint16_t> extra_doh_ports;      // TCP -- see DOH_PORT (443)
+    std::vector<uint16_t> extra_winrm_ports;    // TCP -- see WINRM_PORT (5985). Joins the same
+                                                  // detection-gating group as extra_doh_ports above
+                                                  // (GateKind::TcpPort, port-gated even in Auto mode)
+                                                  // -- unlike DoH's own SNI-based structural check,
+                                                  // WinRM's underlying HTTP/1.1 request-line/
+                                                  // status-line signature (it_protocols.hpp's
+                                                  // match_http) is already used opportunistically,
+                                                  // port-independently, by Tier 2's own generic
+                                                  // "http" recognition elsewhere in this codebase --
+                                                  // trying it port-independently here too would just
+                                                  // race that existing check on every TCP port for no
+                                                  // benefit, so this stays port-gated deliberately,
+                                                  // not because the signal itself is weak. See
+                                                  // winrm.hpp's own file header comment.
     std::vector<uint16_t> extra_rip_ports;      // UDP -- see RIP_PORT (520); joins the same
                                                   // detection-gating group as DNS/mDNS/LLMNR/
                                                   // NBT-NS above, for the same reason: RIP's wire

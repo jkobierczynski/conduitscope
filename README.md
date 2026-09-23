@@ -52,7 +52,16 @@ traffic, including DCSync, predominantly rides a dynamically negotiated
 raw TCP connection via the RPC endpoint mapper rather than a named pipe,
 which this decoder does not follow; see `docs/PROTOCOL_COVERAGE.md`'s
 DRSUAPI section for the full scope caveat before relying on this for
-DCSync detection),
+DCSync detection), WinRM (WS-Management, MS-WSMV, TCP port 5985
+plaintext only -- a self-contained HTTP/1.1 + SOAP 1.2 decoder with no
+DCE/RPC involvement at all, decoding a shell session's own
+Create/Command/Send/Receive/Signal/Delete exchanges with curated
+remote-shell-opened, command-executed (redacted by default,
+`--no-redact` opt-in), CIM/WMI-query-over-WinRM, PowerShell-Remoting-
+endpoint, HTTP-Basic-auth-over-plaintext, and SOAP-Fault
+attack/monitoring notes -- **note:** the command line is plain XML text,
+not base64+UTF-16LE, an empirically-corrected finding documented in
+`docs/PROTOCOL_COVERAGE.md`'s WinRM section),
 IEEE Spanning Tree Protocol
 (STP/RSTP/MSTP), DeviceNet (CAN-bus CIP, via SocketCAN pcap captures), DNS,
 mDNS, LLMNR, and NetBIOS Name Service (NBT-NS), ICMP, RIP, IGMP, VRRP, HSRP,

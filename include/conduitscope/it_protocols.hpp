@@ -353,6 +353,17 @@ std::optional<ItLateralMovementMatch> try_recognize_it_lateral_movement(ByteSpan
 // logic is untouched, only which caller(s) reach it changed).
 std::optional<std::string> match_smb_magic(ByteSpan payload, size_t offset);
 
+// RFC 9112 request-line/status-line shape (`METHOD SP request-target SP "HTTP/"DIGIT"."DIGIT` or
+// `"HTTP/"DIGIT"."DIGIT SP 3DIGIT ...`). Returns a short human-readable description on a match, or
+// std::nullopt otherwise -- see this file's own Tier 2 header comment above for why this check is
+// strong enough to run port-independently. Exposed for winrm.hpp's own structural gate to reuse
+// (the same "shared envelope-check function, reused rather than duplicated" pattern
+// match_smb_magic/looks_like_ldap_ber above already established) -- see winrm.hpp's own file header
+// comment for the full collision survey against this file's own generic HTTP recognition
+// (try_recognize_it_lateral_movement below), which WinRM's own decoder is deliberately wired ahead
+// of in decoder.cpp.
+std::optional<std::string> match_http(ByteSpan payload);
+
 // Exposed narrowly for decoder.cpp's own reassemble_tcp_payload, to resolve a real collision found
 // while implementing this: an FTP reply-code line ("220 ...") or command-verb line ("USER ...")
 // begins with ASCII bytes that can coincidentally satisfy MQTT's own single-byte "control packet

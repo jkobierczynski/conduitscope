@@ -435,6 +435,8 @@ bool Decoder::reassemble_tcp_payload(const TcpSegment& tcp, const std::string& f
                       options_.protocol_filter == ProtocolFilter::FinsOnly;
     bool want_bgp = options_.protocol_filter == ProtocolFilter::Auto ||
                      options_.protocol_filter == ProtocolFilter::BgpOnly;
+    bool want_winrm = options_.protocol_filter == ProtocolFilter::Auto ||
+                       options_.protocol_filter == ProtocolFilter::WinRmOnly;
 
     // OPC UA is checked first of all: its own structural detection gate (the leading 3 bytes must
     // be one of exactly 7 fixed ASCII MessageType strings -- "HEL"/"ACK"/"ERR"/"RHE"/"OPN"/"CLO"/
@@ -594,6 +596,29 @@ bool Decoder::reassemble_tcp_payload(const TcpSegment& tcp, const std::string& f
         if (auto d = smb_tcp_decoder().tcp_declared_length(candidate)) {
             declared = d;
             which = "SMB message (MS-SMB2)";
+        }
+    }
+    // WinRM (WS-Management over plaintext HTTP), TCP port 5985 -- deliberately PORT-GATED here in
+    // Auto mode, unlike every structural-signature protocol above: WinRM's own framing signal is an
+    // ordinary HTTP/1.1 request-line/status-line (it_protocols.hpp's match_http), which this
+    // codebase's own Tier 2 "IT protocols an OT auditor flags" family already checks
+    // opportunistically on every TCP port for generic "http" -- trying it here too,
+    // port-independently, would just race that existing check for no benefit (see winrm.hpp's own
+    // "COLLISION SURVEY" section). Gating by port in Auto mode lets this decoder win that race
+    // specifically on WinRM's own port, while leaving every other port's HTTP traffic to Tier 2
+    // exactly as before; an explicit `--protocol winrm` still tries it port-independently, the same
+    // "gate only in Auto mode" exception DoH's own require_doh_port already establishes.
+    // winrm_tcp_declared_length's own return value can (unlike every declared-length probe above)
+    // legitimately exceed what's needed to recognize the message -- it can ask for one more byte at
+    // a time while the HTTP header block itself is still arriving -- see that function's own doc
+    // comment for why.
+    bool require_winrm_port = options_.protocol_filter == ProtocolFilter::Auto;
+    bool candidate_port_is_winrm = port_in(tcp.src_port, WINRM_PORT, options_.extra_winrm_ports) ||
+                                    port_in(tcp.dst_port, WINRM_PORT, options_.extra_winrm_ports);
+    if (!declared && want_winrm && (!require_winrm_port || candidate_port_is_winrm)) {
+        if (auto d = winrm_tcp_decoder().tcp_declared_length(candidate)) {
+            declared = d;
+            which = "WinRM/HTTP message";
         }
     }
     if (!declared && want_dnp3) {
@@ -2044,6 +2069,8 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                           options_.protocol_filter == ProtocolFilter::FinsOnly;
         bool want_bgp = options_.protocol_filter == ProtocolFilter::Auto ||
                          options_.protocol_filter == ProtocolFilter::BgpOnly;
+        bool want_winrm = options_.protocol_filter == ProtocolFilter::Auto ||
+                           options_.protocol_filter == ProtocolFilter::WinRmOnly;
 
         // Tried first of all -- see the matching, fuller comment in reassemble_tcp_payload above
         // for why OPC UA's own magic-string detection gate is strong enough, and non-colliding
@@ -2423,6 +2450,47 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                     out.notes.push_back("seen on TCP port " + std::to_string(tcp.src_port) + "->" +
                                          std::to_string(tcp.dst_port) +
                                          ", which is not a configured/standard SMB port (445/139)");
+                }
+                return out;
+            }
+        }
+
+        // Re-derived here (reassemble_tcp_payload above is a separate member function -- its own
+        // locals don't carry over). require_winrm_port mirrors DoH's own require_doh_port: gated by
+        // port only in Auto mode (so this decoder wins the race against Tier 2's own generic "http"
+        // recognition specifically on WinRM's own port, without silently swallowing ordinary HTTP
+        // traffic on every other port -- see winrm.hpp's own "COLLISION SURVEY" section); an
+        // explicit `--protocol winrm` still tries it port-independently.
+        bool require_winrm_port = options_.protocol_filter == ProtocolFilter::Auto;
+        bool candidate_port_is_winrm = port_in(tcp.src_port, WINRM_PORT, options_.extra_winrm_ports) ||
+                                        port_in(tcp.dst_port, WINRM_PORT, options_.extra_winrm_ports);
+        if (want_winrm && (!require_winrm_port || candidate_port_is_winrm)) {
+            // WS-Management (WinRM), TCP port 5985 -- Phase 4 of the Windows RPC/remote-management
+            // batch, and the first protocol in that batch with no DCE/RPC or SMB involvement at all
+            // (see winrm.hpp's file header comment). Same out.result-only shape Kerberos/LDAP/SMB
+            // established just above -- no winrm_* DecodedPacket fields exist, JsonWriter renders
+            // from out.result (output.cpp's write_winrm_json_fields), TextWriter/CsvWriter from
+            // out.summary/out.notes generically. WinRmTcpDecoder is stateless -- ctx is passed only
+            // because ProtocolDecoder::decode's signature requires one -- but DOES need
+            // redact_secrets wired through, unlike Kerberos/LDAP/SMB above, since it genuinely
+            // decodes a plaintext, potentially credential-bearing field (the CommandLine's own
+            // command_line, redacted by default -- see winrm.hpp).
+            DecodeContext ctx;
+            ctx.packet_index = index;
+            ctx.protocol_id = "winrm";
+            ctx.flow_states = &registry_flow_state_;
+            ctx.redact_secrets = options_.redact_secrets;
+            if (auto result = winrm_tcp_decoder().decode(effective_payload, ctx)) {
+                const WinRmMessage& wm = result->as<WinRmMessage>();
+                out.protocol = "winrm";
+                out.summary = wm.summary;
+                for (const auto& n : wm.notes) out.notes.push_back(n);
+                out.result = *result;
+
+                if (!candidate_port_is_winrm) {
+                    out.notes.push_back("seen on TCP port " + std::to_string(tcp.src_port) + "->" +
+                                         std::to_string(tcp.dst_port) +
+                                         ", which is not a configured/standard WinRM port (5985)");
                 }
                 return out;
             }

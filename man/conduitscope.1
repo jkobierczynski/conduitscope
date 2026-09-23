@@ -111,6 +111,21 @@ on this decoder for DCSync detection) traffic found inside those SMB2
 messages, with its curated DRSGetNCChanges/DCSync-signature
 attack-monitoring note (fires even under RPC-layer sealing, since the
 opnum itself is never encrypted),
+plus WinRM (WS-Management, MS-WSMV \-\- TCP port 5985, plaintext only; port
+5986/TLS out of scope \-\- a minimal HTTP/1.1 + SOAP 1.2 parser built from
+scratch for this protocol, genuinely different from every DCE/RPC
+interface above: no \fBsmb.hpp\fR named pipe, no interface UUID) traffic
+found on that port, decoding a shell session's own
+Create/Command/Send/Receive/Signal/Delete exchanges (ShellId/CommandId
+correlated across messages) \-\- see \fBdocs/PROTOCOL_COVERAGE.md\fR's
+WinRM section, and especially its own "critical, empirically-corrected
+wire-format detail" subsection (the command line is plain XML text, NOT
+base64+UTF-16LE as this codebase's own original implementation plan
+assumed), before relying on this decoder's own \fBwinrm_command_line\fR
+field, with its curated remote-shell-opened/command-executed (the command
+line redacted by default, \fB\-\-no\-redact\fR opt-in)/CIM-WMI-query-over-
+WinRM/PowerShell-Remoting-endpoint/HTTP-Basic-auth-over-plaintext/SOAP-
+Fault attack-monitoring notes,
 plus PROFINET RT (EtherType 0x8892, DCP device discovery/configuration and
 cyclic real-time IO), IEC 61850-8-1 GOOSE (EtherType 0x88B8, ASN.1
 BER-encoded GOOSE PDU), IEC 61850-9-2 Sampled Values (EtherType 0x88BA,
@@ -294,7 +309,7 @@ regardless of where it's being analyzed \-\- an extension beyond what
 tshark/tcpdump themselves offer. See \fBdocs/USER_GUIDE.md\fR's OUTPUT
 FORMATS "Timestamps" subsection.
 .TP
-.B \-\-protocol {auto,modbus,dnp3,iec104,s7comm,s7comm\-plus,mms,enip,twincat,melsec,fins,bgp,kerberos,ldap,smb,profinet,goose,sv,ethercat,stp,devicenet,bacnet,hartip,opcua,mqtt,ff\-hse,dns,mdns,llmnr,nbns,doh,rip,igmp,vrrp,hsrp,igrp,pim,eigrp,ospf,remote\-access,lateral\-movement,enterprise\-trust,eapol,wireless\-backhaul,pppoe,tunnel\-vpn,mpls,arp,lldp,slow\-protocols}
+.B \-\-protocol {auto,modbus,dnp3,iec104,s7comm,s7comm\-plus,mms,enip,twincat,melsec,fins,bgp,kerberos,ldap,smb,profinet,goose,sv,ethercat,stp,devicenet,bacnet,hartip,opcua,mqtt,ff\-hse,dns,mdns,llmnr,nbns,doh,rip,igmp,vrrp,hsrp,igrp,pim,eigrp,ospf,remote\-access,lateral\-movement,enterprise\-trust,eapol,wireless\-backhaul,pppoe,tunnel\-vpn,mpls,arp,lldp,slow\-protocols,winrm}
 Restrict decoding to one protocol. Default: auto (tries all fourteen TCP
 protocols, independent of port number, plus CIP I/O, BACnet/IP, HART-IP, and
 FF-HSE on every
@@ -408,6 +423,18 @@ opened against a pipe named \fBdrsuapi\fR (this codebase's own synthetic
 gate name; see the caveat above), so it too adds nothing to this
 collision survey -- see \fBdocs/PROTOCOL_COVERAGE.md\fR's DRSUAPI section
 for the full writeup, including its own transport scope caveat,
+WinRM (MS-WSMV) IS wire-gated (\fBGateKind::TcpPort\fR, port 5985, like
+DoH), and it_protocols.cpp's own generic Tier-2 "http" recognition
+already claims this same HTTP/1.1 framing name-only, port-independently
+\-\- a genuine collision, resolved by wiring WinRM's own decoder ahead of
+that generic check in decoder.cpp's dispatch chain (a pinning test proves
+it), the same resolution this collision survey's own RDP-vs-COTP and
+FTP/LDAP-vs-MQTT entries below already use; a second, unrelated,
+pre-existing collision (MQTT's own port-independent structural check
+false-matching a WinRM \fBPOST\fR request's own leading bytes on a
+non-standard port) was found and documented, not fixed, since it is not
+this decoder's own collision to fix \-\- see
+\fBdocs/PROTOCOL_COVERAGE.md\fR's WinRM section for the full writeup,
 S7comm\-Plus is tried on the same TPKT/COTP framing and TCP port 102 as
 S7comm and MMS, disambiguated by its own protocol id byte (0x72 vs S7comm's
 0x32, so no collision risk with either), and MMS is
@@ -581,6 +608,11 @@ default: 137). Repeatable. Also widens detection in \fBauto\fR mode.
 .B \-\-doh\-port \fIPORT\fR
 Same as \fB\-\-dns\-port\fR, for DNS-over-HTTPS detection (built\-in
 default: 443, TCP). Repeatable. Also widens detection in \fBauto\fR mode.
+.TP
+.B \-\-winrm\-port \fIPORT\fR
+Same as \fB\-\-dns\-port\fR, for WS-Management/WinRM (built\-in default:
+5985, TCP, plaintext only \-\- port 5986/TLS is out of scope). Repeatable.
+Also widens detection in \fBauto\fR mode.
 .TP
 .B \-\-rip\-port \fIPORT\fR
 Same as \fB\-\-dns\-port\fR, for RIP (built\-in default: 520). Repeatable.

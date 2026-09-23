@@ -749,6 +749,51 @@ void write_doh_json_fields(std::ostream& out, const DohDetection& d) {
     }
 }
 
+// The WinRM analog of write_doh_json_fields above -- reads straight from the WinRmMessage carried
+// by DecodedPacket::result. See winrm.hpp's own file header comment for what each field means;
+// winrm_command_line is already redacted (or not) by the time it reaches here -- DecodeContext::
+// redact_secrets was applied inside WinRmTcpDecoder::decode itself, the same "decode raw, redact
+// before returning" order MQTT's own CONNECT password and HSRP's/VRRP's own plaintext auth field
+// already establish.
+void write_winrm_json_fields(std::ostream& out, const WinRmMessage& w) {
+    out << "    \"winrm_is_response\": " << (w.is_response ? "true" : "false") << ",\n";
+    if (!w.is_response) {
+        out << "    \"winrm_http_method\": \"" << json_escape(w.http_method) << "\",\n";
+        out << "    \"winrm_http_target\": \"" << json_escape(w.http_target) << "\",\n";
+    } else {
+        out << "    \"winrm_http_status\": " << w.http_status << ",\n";
+        out << "    \"winrm_http_status_text\": \"" << json_escape(w.http_status_text) << "\",\n";
+    }
+    if (w.has_content_type) {
+        out << "    \"winrm_content_type\": \"" << json_escape(w.content_type) << "\",\n";
+    }
+    out << "    \"winrm_chunked\": " << (w.chunked ? "true" : "false") << ",\n";
+    if (w.has_content_length) {
+        out << "    \"winrm_content_length\": " << w.declared_content_length << ",\n";
+    }
+    if (w.has_auth_header) {
+        out << "    \"winrm_auth_scheme\": \"" << json_escape(w.auth_scheme) << "\",\n";
+    }
+    if (w.has_envelope) {
+        out << "    \"winrm_action\": \"" << json_escape(w.wsa_action) << "\",\n";
+        out << "    \"winrm_action_name\": \"" << json_escape(w.wsa_action_name) << "\",\n";
+        if (!w.resource_uri.empty()) {
+            out << "    \"winrm_resource_uri\": \"" << json_escape(w.resource_uri) << "\",\n";
+        }
+        if (w.is_cim_query) out << "    \"winrm_is_cim_query\": true,\n";
+        if (w.is_psrp) out << "    \"winrm_is_psrp\": true,\n";
+        if (w.has_shell_id) out << "    \"winrm_shell_id\": \"" << json_escape(w.shell_id) << "\",\n";
+        if (w.has_command_id) out << "    \"winrm_command_id\": \"" << json_escape(w.command_id) << "\",\n";
+        if (w.has_command_line) {
+            out << "    \"winrm_command_line\": \"" << json_escape(w.command_line) << "\",\n";
+        }
+        if (w.has_wql_filter) out << "    \"winrm_wql_filter\": \"" << json_escape(w.wql_filter) << "\",\n";
+        if (w.has_fault) {
+            out << "    \"winrm_fault_reason\": \"" << json_escape(w.fault_reason) << "\",\n";
+        }
+    }
+}
+
 // Renders one RipRoute as a single line -- see rip.hpp for what each of the three RTE shapes
 // (ordinary route, full-table-request marker, authentication entry) means. Reproduces
 // decoder.cpp's own former rip_route_summary exactly (that copy was retired along with the
@@ -3396,6 +3441,9 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
     if (p.protocol == "smb" && p.result) {
         write_smb_json_fields(out_, p.result->as<SmbFrame>());
     }
+    if (p.protocol == "winrm" && p.result) {
+        write_winrm_json_fields(out_, p.result->as<WinRmMessage>());
+    }
     out_ << "    \"notes\": [";
     for (size_t i = 0; i < p.notes.size(); ++i) {
         if (i != 0) out_ << ", ";
@@ -3856,6 +3904,12 @@ void StatsWriter::write_packet(const DecodedPacket& p) {
     if (p.protocol == "doh" && p.result) {
         doh_provider_counts_[p.result->as<DohDetection>().matched_provider]++;
     }
+    if (p.protocol == "winrm" && p.result) {
+        const WinRmMessage& wm = p.result->as<WinRmMessage>();
+        if (!wm.is_response && !wm.wsa_action_name.empty()) {
+            winrm_action_counts_[wm.wsa_action_name]++;
+        }
+    }
     if (p.protocol == "rip" && p.result) {
         rip_command_counts_[p.result->as<RipMessage>().command_name]++;
     }
@@ -4185,6 +4239,12 @@ void StatsWriter::print_summary(std::ostream& out) const {
     if (!doh_provider_counts_.empty()) {
         out << "doh matched providers:\n";
         for (const auto& [name, count] : doh_provider_counts_) {
+            out << "  " << std::left << std::setw(40) << name << count << "\n";
+        }
+    }
+    if (!winrm_action_counts_.empty()) {
+        out << "winrm action counts:\n";
+        for (const auto& [name, count] : winrm_action_counts_) {
             out << "  " << std::left << std::setw(40) << name << count << "\n";
         }
     }

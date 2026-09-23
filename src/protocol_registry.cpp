@@ -45,6 +45,7 @@
 #include "conduitscope/tls_sni.hpp"
 #include "conduitscope/twincat.hpp"
 #include "conduitscope/vrrp.hpp"
+#include "conduitscope/winrm.hpp"
 
 namespace conduitscope {
 
@@ -347,10 +348,12 @@ const std::vector<const ProtocolDecoder*>& tcp_port_independent_registry() {
 
 const std::vector<const ProtocolDecoder*>& tcp_port_registry() {
     static const std::vector<const ProtocolDecoder*> order = {
-        &doh_decoder(),  // This gate's only protocol -- decoder.cpp's own DoH call site calls it
-                          // directly (see protocol_registry.hpp's own doc comment on this vector
-                          // for why that call site doesn't iterate it the way EtherType's does).
-                          // tcp_port() returns DOH_PORT (443, tls_sni.hpp).
+        &doh_decoder(),  // decoder.cpp's own DoH call site calls it directly (see
+                          // protocol_registry.hpp's own doc comment on this vector for why that
+                          // call site doesn't iterate it the way EtherType's does). tcp_port()
+                          // returns DOH_PORT (443, tls_sni.hpp).
+        &winrm_tcp_decoder(),  // decoder.cpp's own WinRM call site likewise calls it directly.
+                                 // tcp_port() returns WINRM_PORT (5985, winrm.hpp).
     };
     return order;
 }
