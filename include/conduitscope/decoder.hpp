@@ -805,39 +805,23 @@ struct DecodedPacket {
     uint8_t eapol_key_descriptor_type = 0;
     std::string eapol_key_descriptor_type_name;
 
-    // Only set when protocol == "pppoe" -- see try_parse_pppoe in pppoe.hpp. Like EAPOL above,
-    // PPPoE rides raw Ethernet (EtherType 0x8863 Discovery / 0x8864 Session), not IP -- has_ethernet
-    // stays true, has_ip stays false. The five port-based Tier 4 protocols (CAPWAP/LWAPP/GTP-U) have
-    // no fields of their own here -- like every port-based Tier 1-3 protocol, they only ever set
+    // protocol == "pppoe" is a zero-flat-field migrated protocol (cheap batch) -- see
+    // DecodedPacket::result and pppoe.hpp's PppoeFrame. Like EAPOL above, PPPoE rides raw Ethernet
+    // (EtherType 0x8863 Discovery / 0x8864 Session), not IP -- has_ethernet stays true, has_ip
+    // stays false. The five port-based Tier 4 protocols (CAPWAP/LWAPP/GTP-U) have no fields of
+    // their own here -- like every port-based Tier 1-3 protocol, they only ever set
     // protocol/summary/notes, see decoder.cpp's own Tier 4 UDP dispatch.
-    uint8_t pppoe_version = 0;  // always 1
-    uint8_t pppoe_type = 0;     // always 1
-    uint8_t pppoe_code = 0;
-    std::string pppoe_code_name;  // "PADI"/"PADO"/"PADR"/"PADS"/"PADT"/"Session Data"
-    uint16_t pppoe_session_id = 0;
-    uint16_t pppoe_length = 0;    // PPPoE's own declared payload length
-    bool pppoe_is_session = false;  // true for EtherType 0x8864 (Session stage)
-    // Set only when pppoe_is_session && the payload carried at least PPP's own 2-byte Protocol field.
-    bool pppoe_has_ppp_protocol = false;
-    uint16_t pppoe_ppp_protocol = 0;
-    std::string pppoe_ppp_protocol_name;
 
-    // Only set when protocol == "mpls" -- see try_parse_mpls in mpls.hpp. Like EAPOL/PPPoE above,
-    // MPLS rides raw Ethernet (EtherType 0x8847 unicast / 0x8848 multicast), not IP -- has_ethernet
-    // stays true, has_ip stays false. The fourteen IP-protocol-number/port-based Tier 5 protocols
-    // (GRE/NVGRE/EoIP, ESP, AH, IP-in-IP, 6in4, L2TP, IKE, VXLAN, Geneve, WireGuard, OpenVPN,
-    // dtls-tunnel, STT) have no fields of their own here -- like every port-based Tier 1-4 protocol,
-    // they only ever set protocol/summary/notes, see decoder.cpp's own Tier 5 dispatch.
-    bool mpls_is_multicast = false;  // true for EtherType 0x8848
-    // One summary string per label entry (e.g. "label=100352 exp=0 ttl=254 s=false"), in stack
-    // order (top label first), capped at kMaxMplsLabelDepth entries -- see mpls.hpp.
-    std::vector<std::string> mpls_labels;
-    size_t mpls_label_count = 0;
-    uint32_t mpls_top_label = 0;
-    uint8_t mpls_top_exp = 0;
-    uint8_t mpls_top_ttl = 0;
-    bool mpls_stack_truncated = false;
-    bool mpls_stack_too_deep = false;
+    // protocol == "mpls" is a zero-flat-field migrated protocol (cheap batch) -- see
+    // DecodedPacket::result and mpls.hpp's MplsFrame (including MplsFrame::is_multicast, set by
+    // decoder.cpp's own populate_mpls from the matched EtherType, since try_parse_mpls itself has
+    // no way to know which of the two EtherTypes matched -- see that struct's own comment). Like
+    // EAPOL/PPPoE above, MPLS rides raw Ethernet (EtherType 0x8847 unicast / 0x8848 multicast),
+    // not IP -- has_ethernet stays true, has_ip stays false. The fourteen IP-protocol-number/
+    // port-based Tier 5 protocols (GRE/NVGRE/EoIP, ESP, AH, IP-in-IP, 6in4, L2TP, IKE, VXLAN,
+    // Geneve, WireGuard, OpenVPN, dtls-tunnel, STT) have no fields of their own here -- like every
+    // port-based Tier 1-4 protocol, they only ever set protocol/summary/notes, see decoder.cpp's
+    // own Tier 5 dispatch.
 
     // ARP (EtherType 0x0806, arp.hpp) -- Stage 2 new-protocol work, not a migration.
     uint16_t arp_htype = 0;
@@ -890,7 +874,8 @@ struct DecodedPacket {
     size_t lldp_tlv_count = 0;
     bool lldp_tlvs_truncated = false;
     // One rendered summary line per TLV seen, in wire order -- same "vector<string> summary per
-    // repeated element" convention as ethercat_datagrams/mpls_labels/sv_asdus.
+    // repeated element" convention as ethercat_datagrams/sv_asdus (MPLS's own former mpls_labels
+    // is gone now -- see DecodedPacket::result and mpls.hpp).
     std::vector<std::string> lldp_tlvs;
 
     // Only set when protocol == "stp" -- see try_parse_stp in stp.hpp. Unlike every EtherType-keyed
@@ -1250,15 +1235,9 @@ struct DecodedPacket {
     // protocol == "doh" is a zero-flat-field migrated protocol -- see DecodedPacket::result and
     // tls_sni.hpp's DohDecoder/DohDetection, and output.cpp's write_doh_json_fields for rendering.
 
-    // Only set when protocol == "rip" -- see try_parse_rip in rip.hpp.
-    uint8_t rip_version = 0;
-    std::string rip_command_name;
-    // One "route/entry" rendering per RipRoute, wire order -- e.g. "192.168.1.0/255.255.255.0 via
-    // 10.0.0.1 metric 2" for an ordinary route, "full table request" for the AFI-0 marker entry,
-    // or "authentication: Simple Password" / "authentication: Keyed MD5 (key id N)" for an auth
-    // entry. Capped at 50 entries, same convention as s7comm_item_tags above.
-    std::vector<std::string> rip_routes;
-    bool rip_routes_truncated = false;  // more than 50 route table entries were present
+    // protocol == "rip" is a zero-flat-field migrated protocol (cheap batch) -- see
+    // DecodedPacket::result and rip.hpp's RipMessage, and output.cpp's write_rip_json_fields
+    // (including rip_route_summary, the former decoder.cpp helper of the same name) for rendering.
 
     // Only set when protocol == "icmp" -- see try_parse_icmp in icmp.hpp.
     std::string icmp_type_name;
@@ -1285,27 +1264,16 @@ struct DecodedPacket {
     uint32_t icmp_receive_timestamp_ms = 0;
     uint32_t icmp_transmit_timestamp_ms = 0;
 
-    // Only set when protocol == "igmp" -- see try_parse_igmp in igmp.hpp.
-    int igmp_version = 0;
-    std::string igmp_type_name;
-    std::string igmp_group_address;  // Query/v1/v2 Report/Leave only; empty for a v3 Report
-    // One "type: multicast_address (N source(s))" entry per Group Record, wire order --
-    // v3 Report only. Capped at 50 entries.
-    std::vector<std::string> igmp_group_records;
-    bool igmp_group_records_truncated = false;  // more than 50 group records were declared
+    // protocol == "igmp" is a zero-flat-field migrated protocol (cheap batch) -- see
+    // DecodedPacket::result and igmp.hpp's IgmpMessage, and output.cpp's write_igmp_json_fields
+    // (including igmp_group_record_summary, the former decoder.cpp helper of the same name).
 
-    // Only set when protocol == "vrrp" -- see try_parse_vrrp in vrrp.hpp.
-    uint8_t vrrp_version = 0;
-    uint8_t vrrp_virtual_router_id = 0;
-    uint8_t vrrp_priority = 0;
-    std::vector<std::string> vrrp_ip_addresses;  // capped at 50 entries
-    bool vrrp_ip_addresses_truncated = false;    // more than 50 addresses were declared
-    // auth_type == 1 (Simple Text Password) only -- the literal cleartext value, or
-    // kRedactedSecretPlaceholder when --redact (on by default) is active -- see
-    // DecodeOptions::redact_secrets's own comment and VrrpDecoder::decode (vrrp.cpp). Empty for
-    // every other auth_type, including a declared-but-truncated Simple Text Password (see
-    // vrrp.cpp's own auth_type==1 handling).
-    std::string vrrp_auth_password;
+    // protocol == "vrrp" is a zero-flat-field migrated protocol (cheap batch) -- see
+    // DecodedPacket::result and vrrp.hpp's VrrpMessage (auth_simple_password, auth_type == 1 only,
+    // already redacted by VrrpDecoder::decode when --redact is active -- see
+    // DecodeOptions::redact_secrets's own comment), and output.cpp's write_vrrp_json_fields for
+    // rendering (deliberately no "vrrp_auth_password" JSON field -- no writer ever rendered the
+    // old flat field either).
 
     // Only set when protocol == "hsrp" -- see try_parse_hsrp in hsrp.hpp.
     uint8_t hsrp_version = 0;
@@ -1321,15 +1289,9 @@ struct DecodedPacket {
                                                 // entry per TLV, wire order. Capped at 50 entries.
     bool hsrp_tlvs_truncated = false;          // more than 50 TLVs were present
 
-    // Only set when protocol == "igrp" -- see try_parse_igrp in igrp.hpp.
-    uint8_t igrp_version = 0;
-    std::string igrp_opcode_name;  // "Response" or "Request"
-    uint16_t igrp_autonomous_system = 0;
-    // One "<Interior|System|Exterior> <address> delay=Xus bw=Ykbps hops=Z" entry per route (or
-    // "... unreachable" when the route's Delay field is all-ones), Interior first then System then
-    // Exterior, matching wire order. Capped at 50 entries total.
-    std::vector<std::string> igrp_routes;
-    bool igrp_routes_truncated = false;
+    // protocol == "igrp" is a zero-flat-field migrated protocol (cheap batch) -- see
+    // DecodedPacket::result and igrp.hpp's IgrpMessage, and output.cpp's write_igrp_json_fields
+    // (including igrp_route_summary, the former decoder.cpp helper of the same name).
 
     // Only set when protocol == "pim" -- see try_parse_pim in pim.hpp. Which of the fields below
     // are populated depends on pim_type_name; see pim.hpp's own PimMessage for exactly which

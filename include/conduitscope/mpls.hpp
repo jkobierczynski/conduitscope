@@ -78,6 +78,13 @@ struct MplsFrame {
     bool stack_too_deep = false;    // hit kMaxMplsLabelDepth without a Bottom-of-Stack label
     std::string summary;
     std::vector<std::string> notes;
+
+    // NOT set by try_parse_mpls (there is no Version/Type field in the label stack itself to read
+    // this from -- see that function's own comment). decoder.cpp's own EtherType cascade populate
+    // function sets this from whichever of ETHERTYPE_MPLS_UNICAST/ETHERTYPE_MPLS_MULTICAST
+    // actually matched, exactly as it did before this protocol's zero-flat-field migration -- see
+    // populate_mpls's own comment in decoder.cpp.
+    bool is_multicast = false;
 };
 
 // Attempts to interpret `eth_payload` (the bytes immediately after EtherType 0x8847/0x8848 -- or

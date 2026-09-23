@@ -127,39 +127,6 @@ void fill_nbns_fields(DecodedPacket& out, const NbnsMessage& msg) {
     for (const auto& rr : msg.additionals) out.nbns_records.push_back(rr.summary);
 }
 
-// Renders one RipRoute as a single line for DecodedPacket::rip_routes -- see rip.hpp for what
-// each of the three RTE shapes (ordinary route, full-table-request marker, authentication entry)
-// means.
-std::string rip_route_summary(const RipRoute& r) {
-    if (r.is_auth_entry) {
-        std::ostringstream s;
-        s << "authentication: " << r.auth_type_name;
-        if (r.auth_type == 3) {
-            s << " (key id " << static_cast<unsigned>(r.md5_key_id) << ")";
-        }
-        return s.str();
-    }
-    if (r.is_full_table_request) {
-        return "full table request";
-    }
-    std::ostringstream s;
-    s << r.address << "/" << r.subnet_mask << " via " << r.next_hop << " metric " << r.metric;
-    if (r.route_tag != 0) {
-        s << " tag " << r.route_tag;
-    }
-    return s.str();
-}
-
-// Flattens a parsed RipMessage (see rip.hpp) into DecodedPacket's rip_* fields.
-void fill_rip_fields(DecodedPacket& out, const RipMessage& msg) {
-    out.summary = msg.summary;
-    for (const auto& n : msg.notes) out.notes.push_back(n);
-    out.rip_version = msg.version;
-    out.rip_command_name = msg.command_name;
-    out.rip_routes_truncated = msg.routes_truncated;
-    for (const auto& r : msg.routes) out.rip_routes.push_back(rip_route_summary(r));
-}
-
 // Renders one IcmpRouterAddress as a single line for DecodedPacket::icmp_router_addresses.
 std::string icmp_router_address_summary(const IcmpRouterAddress& ra) {
     std::ostringstream s;
@@ -202,37 +169,6 @@ void fill_icmp_fields(DecodedPacket& out, const IcmpMessage& msg) {
     }
 }
 
-// Renders one IgmpGroupRecord as a single line for DecodedPacket::igmp_group_records.
-std::string igmp_group_record_summary(const IgmpGroupRecord& rec) {
-    std::ostringstream s;
-    s << rec.record_type_name << ": " << rec.multicast_address << " (" << rec.source_addresses.size()
-      << " source(s))";
-    return s.str();
-}
-
-// Flattens a parsed IgmpMessage (see igmp.hpp) into DecodedPacket's igmp_* fields.
-void fill_igmp_fields(DecodedPacket& out, const IgmpMessage& msg) {
-    out.summary = msg.summary;
-    for (const auto& n : msg.notes) out.notes.push_back(n);
-    out.igmp_version = msg.version;
-    out.igmp_type_name = msg.type_name;
-    out.igmp_group_address = msg.group_address;
-    out.igmp_group_records_truncated = msg.group_records_truncated;
-    for (const auto& rec : msg.group_records) out.igmp_group_records.push_back(igmp_group_record_summary(rec));
-}
-
-// Flattens a parsed VrrpMessage (see vrrp.hpp) into DecodedPacket's vrrp_* fields.
-void fill_vrrp_fields(DecodedPacket& out, const VrrpMessage& msg) {
-    out.summary = msg.summary;
-    for (const auto& n : msg.notes) out.notes.push_back(n);
-    out.vrrp_version = msg.version;
-    out.vrrp_virtual_router_id = msg.virtual_router_id;
-    out.vrrp_priority = msg.priority;
-    out.vrrp_ip_addresses = msg.ip_addresses;
-    out.vrrp_ip_addresses_truncated = msg.ip_addresses_truncated;
-    out.vrrp_auth_password = msg.auth_simple_password;  // already redacted by VrrpDecoder::decode, if active
-}
-
 // Flattens a parsed HsrpMessage (see hsrp.hpp) into DecodedPacket's hsrp_* fields.
 void fill_hsrp_fields(DecodedPacket& out, const HsrpMessage& msg) {
     out.summary = msg.summary;
@@ -247,31 +183,6 @@ void fill_hsrp_fields(DecodedPacket& out, const HsrpMessage& msg) {
         for (const auto& tlv : msg.tlvs) out.hsrp_tlv_types.push_back(tlv.type_name);
         out.hsrp_tlvs_truncated = msg.tlvs_truncated;
     }
-}
-
-// Renders one IgrpRoute as a single line for DecodedPacket::igrp_routes -- see igrp.hpp for why
-// route_kind changes how address was reconstructed.
-std::string igrp_route_summary(const IgrpRoute& r) {
-    std::ostringstream s;
-    s << r.route_kind << " " << r.address;
-    if (r.unreachable) {
-        s << " unreachable";
-    } else {
-        s << " delay=" << r.delay_microseconds << "us bw=" << r.bandwidth_kbps
-          << "kbps hops=" << static_cast<unsigned>(r.hop_count);
-    }
-    return s.str();
-}
-
-// Flattens a parsed IgrpMessage (see igrp.hpp) into DecodedPacket's igrp_* fields.
-void fill_igrp_fields(DecodedPacket& out, const IgrpMessage& msg) {
-    out.summary = msg.summary;
-    for (const auto& n : msg.notes) out.notes.push_back(n);
-    out.igrp_version = msg.version;
-    out.igrp_opcode_name = msg.opcode_name;
-    out.igrp_autonomous_system = msg.autonomous_system;
-    out.igrp_routes_truncated = msg.routes_truncated;
-    for (const auto& r : msg.routes) out.igrp_routes.push_back(igrp_route_summary(r));
 }
 
 // Renders one PimHelloOption as a single line for DecodedPacket::pim_hello_options.
@@ -605,50 +516,24 @@ void populate_pppoe(DecodedPacket& out, const ProtocolResult& result, uint16_t /
     const PppoeFrame& pp = result.as<PppoeFrame>();
     out.protocol = "pppoe";
     out.summary = pp.summary;
-    out.pppoe_version = pp.version;
-    out.pppoe_type = pp.type;
-    out.pppoe_code = pp.code;
-    out.pppoe_code_name = pp.code_name;
-    out.pppoe_session_id = pp.session_id;
-    out.pppoe_length = pp.length;
-    out.pppoe_is_session = pp.is_session;
-    out.pppoe_has_ppp_protocol = pp.has_ppp_protocol;
-    out.pppoe_ppp_protocol = pp.ppp_protocol;
-    out.pppoe_ppp_protocol_name = pp.ppp_protocol_name;
     for (const auto& n : pp.notes) out.notes.push_back(n);
+    out.result = result;
 }
 
 void populate_mpls(DecodedPacket& out, const ProtocolResult& result, uint16_t matched_ethertype) {
-    const MplsFrame& mp = result.as<MplsFrame>();
     // The one populate function that needs matched_ethertype -- mpls_unicast_decoder() and
     // mpls_multicast_decoder() share one id() ("mpls"), so is_multicast can't be read off the
-    // decoded MplsFrame itself; it's derived from which of the two EtherTypes actually matched,
-    // exactly as decoder.cpp's old if-chain used to compute it inline. See mpls.hpp.
-    bool is_multicast = (matched_ethertype == ETHERTYPE_MPLS_MULTICAST);
+    // decoded MplsFrame itself; it's derived here from which of the two EtherTypes actually
+    // matched, exactly as decoder.cpp's old if-chain used to compute it inline, and stashed onto a
+    // copy of the frame (MplsFrame::is_multicast, see mpls.hpp) so a zero-flat-field DecodedPacket
+    // ::result still carries it forward to output.cpp -- the one field in this whole migration that
+    // genuinely can't come from try_parse_mpls alone.
+    MplsFrame mp = result.as<MplsFrame>();
+    mp.is_multicast = (matched_ethertype == ETHERTYPE_MPLS_MULTICAST);
     out.protocol = "mpls";
     out.summary = mp.summary;
-    out.mpls_is_multicast = is_multicast;
-    out.mpls_stack_truncated = mp.stack_truncated;
-    out.mpls_stack_too_deep = mp.stack_too_deep;
-    out.mpls_label_count = mp.labels.size();
-    if (!mp.labels.empty()) {
-        const MplsLabelEntry& top = mp.labels.front();
-        out.mpls_top_label = top.label;
-        out.mpls_top_exp = top.exp;
-        out.mpls_top_ttl = top.ttl;
-    }
-    const size_t kMaxMplsLabelSummaries = resource_limits().max_decoded_objects.value_or(50);
-    for (const auto& entry : mp.labels) {
-        if (out.mpls_labels.size() >= kMaxMplsLabelSummaries) break;
-        std::ostringstream ls;
-        ls << "label=" << entry.label;
-        if (!entry.label_name.empty()) ls << " (" << entry.label_name << ")";
-        ls << " exp=" << static_cast<unsigned>(entry.exp)
-           << " ttl=" << static_cast<unsigned>(entry.ttl)
-           << " s=" << (entry.bottom_of_stack ? "true" : "false");
-        out.mpls_labels.push_back(ls.str());
-    }
     for (const auto& n : mp.notes) out.notes.push_back(n);
+    out.result = ProtocolResult::make<MplsFrame>("mpls", std::move(mp));
 }
 
 void populate_arp(DecodedPacket& out, const ProtocolResult& result, uint16_t /*matched_ethertype*/) {
@@ -1882,13 +1767,17 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                 if (!require_rip_port || port_match) {
                     // Registration-model migration (batch 4): try_parse_rip is now reached through
                     // RipDecoder::decode rather than called directly -- same function, same
-                    // semantics, see rip.hpp. The dual-write (fill_rip_fields) is unchanged.
+                    // semantics, see rip.hpp. Zero-flat-field migration (cheap batch): out.result
+                    // now carries the whole RipMessage, and output.cpp's write_rip_json_fields
+                    // reads straight from it.
                     DecodeContext ctx;
                     ctx.protocol_id = "rip";
                     if (auto result = rip_decoder().decode(udp.payload, ctx)) {
                         const RipMessage& msg = result->as<RipMessage>();
                         out.protocol = "rip";
-                        fill_rip_fields(out, msg);
+                        out.summary = msg.summary;
+                        for (const auto& n : msg.notes) out.notes.push_back(n);
+                        out.result = *result;
                         if (!port_match) {
                             out.notes.push_back("seen on UDP port " + std::to_string(udp.src_port) + "->" +
                                                  std::to_string(udp.dst_port) +
@@ -2229,12 +2118,16 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
             if (want_igmp) {
                 // Migration batch 5: try_parse_igmp is now reached through IgmpDecoder::decode
                 // rather than called directly -- same function, same semantics, see igmp.hpp.
-                // fill_igmp_fields is unchanged.
+                // Zero-flat-field migration (cheap batch): out.result now carries the whole
+                // IgmpMessage, and output.cpp's write_igmp_json_fields reads straight from it.
                 DecodeContext ctx;
                 ctx.protocol_id = "igmp";
                 if (auto result = igmp_decoder().decode(ip.payload, ctx)) {
+                    const IgmpMessage& msg = result->as<IgmpMessage>();
                     out.protocol = "igmp";
-                    fill_igmp_fields(out, result->as<IgmpMessage>());
+                    out.summary = msg.summary;
+                    for (const auto& n : msg.notes) out.notes.push_back(n);
+                    out.result = *result;
                     return out;
                 }
             }
@@ -2246,13 +2139,19 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
             if (want_vrrp) {
                 // Migration batch 5: try_parse_vrrp is now reached through VrrpDecoder::decode
                 // rather than called directly -- same function, same semantics, see vrrp.hpp.
-                // fill_vrrp_fields is unchanged.
+                // Zero-flat-field migration (cheap batch): out.result now carries the whole
+                // VrrpMessage (including auth_simple_password, already redacted by
+                // VrrpDecoder::decode when active) -- no output.cpp reader ever rendered it, so
+                // there is nothing further to preserve there.
                 DecodeContext ctx;
                 ctx.protocol_id = "vrrp";
                 ctx.redact_secrets = options_.redact_secrets;
                 if (auto result = vrrp_decoder().decode(ip.payload, ctx)) {
+                    const VrrpMessage& msg = result->as<VrrpMessage>();
                     out.protocol = "vrrp";
-                    fill_vrrp_fields(out, result->as<VrrpMessage>());
+                    out.summary = msg.summary;
+                    for (const auto& n : msg.notes) out.notes.push_back(n);
+                    out.result = *result;
                     return out;
                 }
             }
@@ -2268,13 +2167,18 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                 // (its classful Network field needs the packet's own IP source address to
                 // reconstruct the missing high octet -- see igrp.hpp's file header), so ctx.
                 // ip_src_addr (protocol_decoder.hpp) is populated here, unlike every other call
-                // site in this batch. fill_igrp_fields is unchanged.
+                // site in this batch. Zero-flat-field migration (cheap batch): out.result now
+                // carries the whole IgrpMessage, and output.cpp's write_igrp_json_fields reads
+                // straight from it.
                 DecodeContext ctx;
                 ctx.protocol_id = "igrp";
                 ctx.ip_src_addr = ip.src_addr;
                 if (auto result = igrp_decoder().decode(ip.payload, ctx)) {
+                    const IgrpMessage& msg = result->as<IgrpMessage>();
                     out.protocol = "igrp";
-                    fill_igrp_fields(out, result->as<IgrpMessage>());
+                    out.summary = msg.summary;
+                    for (const auto& n : msg.notes) out.notes.push_back(n);
+                    out.result = *result;
                     return out;
                 }
             }

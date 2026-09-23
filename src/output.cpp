@@ -747,6 +747,132 @@ void write_doh_json_fields(std::ostream& out, const DohDetection& d) {
     }
 }
 
+// Renders one RipRoute as a single line -- see rip.hpp for what each of the three RTE shapes
+// (ordinary route, full-table-request marker, authentication entry) means. Reproduces
+// decoder.cpp's own former rip_route_summary exactly (that copy was retired along with the
+// dual-write it only existed to feed -- see rip.hpp's own file header for why this rendering
+// belongs to output.cpp now, not decoder.cpp).
+std::string rip_route_summary(const RipRoute& r) {
+    if (r.is_auth_entry) {
+        std::ostringstream s;
+        s << "authentication: " << r.auth_type_name;
+        if (r.auth_type == 3) {
+            s << " (key id " << static_cast<unsigned>(r.md5_key_id) << ")";
+        }
+        return s.str();
+    }
+    if (r.is_full_table_request) {
+        return "full table request";
+    }
+    std::ostringstream s;
+    s << r.address << "/" << r.subnet_mask << " via " << r.next_hop << " metric " << r.metric;
+    if (r.route_tag != 0) {
+        s << " tag " << r.route_tag;
+    }
+    return s.str();
+}
+
+// The RIP analog of write_twincat_json_fields above -- same rationale (a plain free function, not
+// a ProtocolRenderer interface). Reads straight from the RipMessage carried by
+// DecodedPacket::result. Reproduces the prior dual-write's exact field set and shape.
+void write_rip_json_fields(std::ostream& out, const RipMessage& msg) {
+    out << "    \"rip_version\": " << static_cast<unsigned>(msg.version) << ",\n";
+    out << "    \"rip_command\": \"" << json_escape(msg.command_name) << "\",\n";
+    if (!msg.routes.empty()) {
+        out << "    \"rip_routes\": [";
+        for (size_t i = 0; i < msg.routes.size(); ++i) {
+            if (i != 0) out << ", ";
+            out << "\"" << json_escape(rip_route_summary(msg.routes[i])) << "\"";
+        }
+        out << "],\n";
+    }
+    out << "    \"rip_routes_truncated\": " << (msg.routes_truncated ? "true" : "false") << ",\n";
+}
+
+// Renders one IgmpGroupRecord as a single line -- reproduces decoder.cpp's own former
+// igmp_group_record_summary exactly, retired along with the dual-write it only existed to feed.
+std::string igmp_group_record_summary(const IgmpGroupRecord& rec) {
+    std::ostringstream s;
+    s << rec.record_type_name << ": " << rec.multicast_address << " (" << rec.source_addresses.size()
+      << " source(s))";
+    return s.str();
+}
+
+// The IGMP analog of write_twincat_json_fields above -- same rationale (a plain free function,
+// not a ProtocolRenderer interface). Reads straight from the IgmpMessage carried by
+// DecodedPacket::result. Reproduces the prior dual-write's exact field set and shape.
+void write_igmp_json_fields(std::ostream& out, const IgmpMessage& msg) {
+    out << "    \"igmp_version\": " << msg.version << ",\n";
+    out << "    \"igmp_type\": \"" << json_escape(msg.type_name) << "\",\n";
+    if (!msg.group_address.empty()) {
+        out << "    \"igmp_group_address\": \"" << json_escape(msg.group_address) << "\",\n";
+    }
+    if (!msg.group_records.empty()) {
+        out << "    \"igmp_group_records\": [";
+        for (size_t i = 0; i < msg.group_records.size(); ++i) {
+            if (i != 0) out << ", ";
+            out << "\"" << json_escape(igmp_group_record_summary(msg.group_records[i])) << "\"";
+        }
+        out << "],\n";
+    }
+    out << "    \"igmp_group_records_truncated\": " << (msg.group_records_truncated ? "true" : "false") << ",\n";
+}
+
+// The VRRP analog of write_twincat_json_fields above -- same rationale (a plain free function,
+// not a ProtocolRenderer interface). Reads straight from the VrrpMessage carried by
+// DecodedPacket::result. Reproduces the prior dual-write's exact field set and shape -- there is
+// deliberately no "vrrp_auth_password" field: no output.cpp reader ever rendered the old
+// vrrp_auth_password flat field either (auth_simple_password, already redacted by
+// VrrpDecoder::decode when active, is still present on the VrrpMessage itself for any future
+// reader, just not written to JSON today).
+void write_vrrp_json_fields(std::ostream& out, const VrrpMessage& msg) {
+    out << "    \"vrrp_version\": " << static_cast<unsigned>(msg.version) << ",\n";
+    out << "    \"vrrp_virtual_router_id\": " << static_cast<unsigned>(msg.virtual_router_id) << ",\n";
+    out << "    \"vrrp_priority\": " << static_cast<unsigned>(msg.priority) << ",\n";
+    if (!msg.ip_addresses.empty()) {
+        out << "    \"vrrp_ip_addresses\": [";
+        for (size_t i = 0; i < msg.ip_addresses.size(); ++i) {
+            if (i != 0) out << ", ";
+            out << "\"" << json_escape(msg.ip_addresses[i]) << "\"";
+        }
+        out << "],\n";
+    }
+    out << "    \"vrrp_ip_addresses_truncated\": " << (msg.ip_addresses_truncated ? "true" : "false") << ",\n";
+}
+
+// Renders one IgrpRoute as a single line -- see igrp.hpp for why route_kind changes how address
+// was reconstructed. Reproduces decoder.cpp's own former igrp_route_summary exactly, retired
+// along with the dual-write it only existed to feed.
+std::string igrp_route_summary(const IgrpRoute& r) {
+    std::ostringstream s;
+    s << r.route_kind << " " << r.address;
+    if (r.unreachable) {
+        s << " unreachable";
+    } else {
+        s << " delay=" << r.delay_microseconds << "us bw=" << r.bandwidth_kbps
+          << "kbps hops=" << static_cast<unsigned>(r.hop_count);
+    }
+    return s.str();
+}
+
+// The IGRP analog of write_twincat_json_fields above -- same rationale (a plain free function,
+// not a ProtocolRenderer interface). Reads straight from the IgrpMessage carried by
+// DecodedPacket::result. Reproduces the prior dual-write's exact field set and shape.
+void write_igrp_json_fields(std::ostream& out, const IgrpMessage& msg) {
+    out << "    \"igrp_version\": " << static_cast<unsigned>(msg.version) << ",\n";
+    out << "    \"igrp_opcode\": \"" << json_escape(msg.opcode_name) << "\",\n";
+    out << "    \"igrp_autonomous_system\": " << msg.autonomous_system << ",\n";
+    if (!msg.routes.empty()) {
+        out << "    \"igrp_routes\": [";
+        for (size_t i = 0; i < msg.routes.size(); ++i) {
+            if (i != 0) out << ", ";
+            out << "\"" << json_escape(igrp_route_summary(msg.routes[i])) << "\"";
+        }
+        out << "],\n";
+    }
+    out << "    \"igrp_routes_truncated\": " << (msg.routes_truncated ? "true" : "false") << ",\n";
+}
+
 // The Modbus analog of write_twincat_json_fields above -- same rationale (a plain free function,
 // not a ProtocolRenderer interface). Modbus's function name and exception flag are already folded
 // into DecodedPacket::protocol/summary (see decoder.cpp's Modbus call site) and need no JSON field
@@ -2398,18 +2524,8 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
     if (p.protocol == "doh" && p.result) {
         write_doh_json_fields(out_, p.result->as<DohDetection>());
     }
-    if (p.protocol == "rip") {
-        out_ << "    \"rip_version\": " << static_cast<unsigned>(p.rip_version) << ",\n";
-        out_ << "    \"rip_command\": \"" << json_escape(p.rip_command_name) << "\",\n";
-        if (!p.rip_routes.empty()) {
-            out_ << "    \"rip_routes\": [";
-            for (size_t i = 0; i < p.rip_routes.size(); ++i) {
-                if (i != 0) out_ << ", ";
-                out_ << "\"" << json_escape(p.rip_routes[i]) << "\"";
-            }
-            out_ << "],\n";
-        }
-        out_ << "    \"rip_routes_truncated\": " << (p.rip_routes_truncated ? "true" : "false") << ",\n";
+    if (p.protocol == "rip" && p.result) {
+        write_rip_json_fields(out_, p.result->as<RipMessage>());
     }
     if (p.protocol == "icmp") {
         out_ << "    \"icmp_type\": " << static_cast<unsigned>(p.icmp_type) << ",\n";
@@ -2455,35 +2571,11 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
             out_ << "    \"icmp_router_addresses_truncated\": " << (p.icmp_router_addresses_truncated ? "true" : "false") << ",\n";
         }
     }
-    if (p.protocol == "igmp") {
-        out_ << "    \"igmp_version\": " << p.igmp_version << ",\n";
-        out_ << "    \"igmp_type\": \"" << json_escape(p.igmp_type_name) << "\",\n";
-        if (!p.igmp_group_address.empty()) {
-            out_ << "    \"igmp_group_address\": \"" << json_escape(p.igmp_group_address) << "\",\n";
-        }
-        if (!p.igmp_group_records.empty()) {
-            out_ << "    \"igmp_group_records\": [";
-            for (size_t i = 0; i < p.igmp_group_records.size(); ++i) {
-                if (i != 0) out_ << ", ";
-                out_ << "\"" << json_escape(p.igmp_group_records[i]) << "\"";
-            }
-            out_ << "],\n";
-        }
-        out_ << "    \"igmp_group_records_truncated\": " << (p.igmp_group_records_truncated ? "true" : "false") << ",\n";
+    if (p.protocol == "igmp" && p.result) {
+        write_igmp_json_fields(out_, p.result->as<IgmpMessage>());
     }
-    if (p.protocol == "vrrp") {
-        out_ << "    \"vrrp_version\": " << static_cast<unsigned>(p.vrrp_version) << ",\n";
-        out_ << "    \"vrrp_virtual_router_id\": " << static_cast<unsigned>(p.vrrp_virtual_router_id) << ",\n";
-        out_ << "    \"vrrp_priority\": " << static_cast<unsigned>(p.vrrp_priority) << ",\n";
-        if (!p.vrrp_ip_addresses.empty()) {
-            out_ << "    \"vrrp_ip_addresses\": [";
-            for (size_t i = 0; i < p.vrrp_ip_addresses.size(); ++i) {
-                if (i != 0) out_ << ", ";
-                out_ << "\"" << json_escape(p.vrrp_ip_addresses[i]) << "\"";
-            }
-            out_ << "],\n";
-        }
-        out_ << "    \"vrrp_ip_addresses_truncated\": " << (p.vrrp_ip_addresses_truncated ? "true" : "false") << ",\n";
+    if (p.protocol == "vrrp" && p.result) {
+        write_vrrp_json_fields(out_, p.result->as<VrrpMessage>());
     }
     if (p.protocol == "hsrp") {
         out_ << "    \"hsrp_version\": " << static_cast<unsigned>(p.hsrp_version) << ",\n";
@@ -2503,19 +2595,8 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
             out_ << "    \"hsrp_tlvs_truncated\": " << (p.hsrp_tlvs_truncated ? "true" : "false") << ",\n";
         }
     }
-    if (p.protocol == "igrp") {
-        out_ << "    \"igrp_version\": " << static_cast<unsigned>(p.igrp_version) << ",\n";
-        out_ << "    \"igrp_opcode\": \"" << json_escape(p.igrp_opcode_name) << "\",\n";
-        out_ << "    \"igrp_autonomous_system\": " << p.igrp_autonomous_system << ",\n";
-        if (!p.igrp_routes.empty()) {
-            out_ << "    \"igrp_routes\": [";
-            for (size_t i = 0; i < p.igrp_routes.size(); ++i) {
-                if (i != 0) out_ << ", ";
-                out_ << "\"" << json_escape(p.igrp_routes[i]) << "\"";
-            }
-            out_ << "],\n";
-        }
-        out_ << "    \"igrp_routes_truncated\": " << (p.igrp_routes_truncated ? "true" : "false") << ",\n";
+    if (p.protocol == "igrp" && p.result) {
+        write_igrp_json_fields(out_, p.result->as<IgrpMessage>());
     }
     if (p.protocol == "pim") {
         out_ << "    \"pim_type\": \"" << json_escape(p.pim_type_name) << "\",\n";
@@ -3092,23 +3173,23 @@ void StatsWriter::write_packet(const DecodedPacket& p) {
     if (p.protocol == "doh" && p.result) {
         doh_provider_counts_[p.result->as<DohDetection>().matched_provider]++;
     }
-    if (p.protocol == "rip") {
-        rip_command_counts_[p.rip_command_name]++;
+    if (p.protocol == "rip" && p.result) {
+        rip_command_counts_[p.result->as<RipMessage>().command_name]++;
     }
     if (p.protocol == "icmp") {
         icmp_type_counts_[p.icmp_type_name]++;
     }
-    if (p.protocol == "igmp") {
-        igmp_type_counts_[p.igmp_type_name]++;
+    if (p.protocol == "igmp" && p.result) {
+        igmp_type_counts_[p.result->as<IgmpMessage>().type_name]++;
     }
-    if (p.protocol == "vrrp") {
-        vrrp_version_counts_["VRRPv" + std::to_string(p.vrrp_version)]++;
+    if (p.protocol == "vrrp" && p.result) {
+        vrrp_version_counts_["VRRPv" + std::to_string(p.result->as<VrrpMessage>().version)]++;
     }
     if (p.protocol == "hsrp") {
         hsrp_version_counts_["HSRPv" + std::to_string(p.hsrp_version)]++;
     }
-    if (p.protocol == "igrp") {
-        igrp_opcode_counts_[p.igrp_opcode_name]++;
+    if (p.protocol == "igrp" && p.result) {
+        igrp_opcode_counts_[p.result->as<IgrpMessage>().opcode_name]++;
     }
     if (p.protocol == "pim") {
         pim_type_counts_[p.pim_type_name]++;

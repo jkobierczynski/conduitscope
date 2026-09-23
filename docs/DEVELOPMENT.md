@@ -1161,6 +1161,82 @@ Discussed and adopted, in this order:
    not yet given the further zero-flat-field `output.cpp` treatment (still
    tracked above); and the 43 IT-tier name-only recognitions, permanently
    excluded per this item's own "Architectural scope note".
+
+   **Update: zero-flat-field `output.cpp` migration, "cheap batch" --
+   RIP, IGMP, VRRP, IGRP, MPLS, PPPoE.** Asked whether continuing this
+   refinement was worthwhile, a full census first established the real
+   scope: 31 protocols (not the looser "~27" estimated earlier) were still
+   on the interface-level `ProtocolDecoder` migration but still
+   dual-writing into `decoder.hpp`'s flat fields, 9 of them with extra
+   readers in `policy_engine.cpp`/`asset_inventory.cpp` beyond the usual
+   `decoder.cpp`/`output.cpp` pair. Sequenced cheapest-first, the same way
+   every earlier migration batch was: this batch is the 6 smallest with no
+   extra readers at all (RIP/IGMP/VRRP/IGRP/MPLS/PPPoE -- 1 to 3 flat
+   fields apiece, DNP3 initially miscounted into this group was moved out
+   once its own 3 extra readers were found).
+
+   RIP/IGMP/VRRP/IGRP (all `GateKind::IpProtocol`/`UdpPort`, explicit
+   `decoder.cpp` call sites) got the standard treatment: each call site's
+   `fill_x_fields(out, msg)` dual-write helper (and, for RIP/IGMP/IGRP,
+   the one-line-per-entry summary helper it called --
+   `rip_route_summary`/`igmp_group_record_summary`/`igrp_route_summary`)
+   was deleted from `decoder.cpp` and replaced with `out.result = *result;`
+   at the call site itself; new `write_rip_json_fields`/
+   `write_igmp_json_fields`/`write_vrrp_json_fields`/`write_igrp_json_fields`
+   in `output.cpp` reproduce the exact prior JSON shape, with their own
+   copies of the three summary helpers (moved, not shared -- they were
+   `decoder.cpp`-local and had no other caller). `StatsWriter`'s four
+   aggregate blocks now read through `p.result->as<X>()`. One genuine
+   dead field surfaced during this: `vrrp_auth_password` was dual-written
+   by `fill_vrrp_fields` but never once read by any writer -- confirmed by
+   grep before treating it as "needs a new write_vrrp_json_fields line"; it
+   stays out, since adding it now would be a behavior change, not a
+   faithful migration (`VrrpMessage::auth_simple_password`, already
+   redacted when active, is still on the result for any future reader).
+
+   MPLS and PPPoE (`GateKind::EtherType`, dispatched through
+   `ethertype_registry()`'s loop -- see this item's own "EtherType cascade
+   registry-driven dispatch" update above) needed the loop's own
+   `populate_mpls`/`populate_pppoe` functions rewritten to the
+   `populate_slow_protocols`/`populate_goose` shape (set
+   protocol/summary/notes, then `out.result = result;`) instead of their
+   old per-field dual-write. A second, separate thing surfaced here,
+   independent of this migration: neither protocol's flat fields were ever
+   read by any writer either -- `output.cpp` had no `mpls_*`/`pppoe_*` JSON
+   block at all, confirmed by grep before assuming otherwise (unlike
+   RIP/IGMP/VRRP/IGRP, ARP's own next-batch entry has the same gap, noted
+   there rather than fixed here). So these two needed no new
+   `write_x_json_fields` function at all -- JSON output for both is
+   unchanged (still only protocol/summary/notes) because there was nothing
+   to preserve. MPLS's own wrinkle (`MplsUnicastDecoder`/
+   `MplsMulticastDecoder` share one `id()`, so `is_multicast` can't be read
+   off the decoded `MplsFrame` alone -- see this item's own EtherType-loop
+   update above) is resolved by adding `MplsFrame::is_multicast`, set from
+   the matched EtherType inside `populate_mpls` itself (mirroring
+   `DeviceNetFrame::payload_truncated`'s own "field added to carry forward
+   something the raw parse can't know" precedent from the FF-HSE/DeviceNet
+   batch).
+
+   All six protocols' flat fields removed from `decoder.hpp`; confirmed
+   zero remaining readers anywhere (`decoder.cpp`, `output.cpp`,
+   `policy_engine.cpp`, `asset_inventory.cpp`, `fuzz/`) via the same
+   exhaustive grep sweep every prior dual-write removal has used.
+
+   Verified the same way as every prior migration: the full CTest suite
+   (1,416 tests) stayed 100% passing with zero changed
+   `PASS_REGULAR_EXPRESSION`/`FAIL_REGULAR_EXPRESSION` assertions anywhere,
+   a clean rebuild with zero warnings, and manual `--format json`/`--stats`
+   smoke tests against each protocol's own fixture (`sample_rip.pcap`,
+   `sample_igmp.pcap`, `sample_vrrp.pcap`, `sample_igrp.pcap`, MPLS's own
+   `sample_tunnel_vpn.pcap`, PPPoE's own `sample_wireless_backhaul.pcap`)
+   confirming field-for-field identical output to before this change.
+
+   Still explicitly out of scope, not silently dropped: the remaining 25
+   protocols on the interface-level migration but not yet zero-flat-field
+   -- the mid-size, no-extra-reader group (ARP, EAPOL, EtherCAT, HSRP,
+   ICMP, LLDP, NBT-NS, PIM, PROFINET, STP, SV, and the DNS family) next,
+   then the 9 with extra readers (BACnet, DNP3, EtherNet/IP, HART-IP,
+   IEC104, MMS, MQTT, OPC UA, S7comm) last.
 4. **Comment-density trim: acknowledged, not scheduled.** Real cost, no
    plan yet to act on it -- lower priority than the three items above.
 5. **No new protocols until 1-3 above are substantially underway,** per
