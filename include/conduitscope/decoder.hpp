@@ -18,6 +18,7 @@
 #include "conduitscope/byteio.hpp"
 #include "conduitscope/can_socketcan.hpp"
 #include "conduitscope/cclink_ie.hpp"
+#include "conduitscope/coap.hpp"
 #include "conduitscope/codesys.hpp"
 #include "conduitscope/cotp.hpp"
 #include "conduitscope/dcom.hpp"
@@ -254,6 +255,14 @@ enum class ProtocolFilter {
                            // CC-Link IE's own UDP path already uses) -- both tried opportunistically
                            // in Auto mode, joining CC-Link IE on both gates. See codesys.hpp's own
                            // DETECTION / DISPATCH paragraph.
+    CoapOnly,              // only attempt CoAP (Constrained Application Protocol, RFC 7252; UDP
+                           // port 5683) decoding -- see coap.hpp. A brand-new protocol built
+                           // entirely on the ProtocolDecoder interface from inception like
+                           // TwinCAT/MELSEC/FINS/BSAP/CC-Link IE/CODESYS. GateKind::UdpPort
+                           // (port-gated in Auto mode, joining BSAP/RIP/HSRP/DNS/mDNS/LLMNR/
+                           // NBT-NS on that gate -- CoAP's own shortest legal messages are too
+                           // short for a strong port-independent structural gate, see coap.hpp's
+                           // own DETECTION/DISPATCH paragraph for the reasoning).
 };
 
 struct DecodeOptions {
@@ -384,6 +393,11 @@ struct DecodeOptions {
                                                   // exclusive IP protocol number (2, 112, 9, 103,
                                                   // 88, and 89 respectively), which is a strong
                                                   // signal with no port concept.
+    std::vector<uint16_t> extra_coap_ports;     // UDP -- see COAP_UDP_PORT (5683); same
+                                                  // detection-gating group and reasoning as
+                                                  // extra_rip_ports/extra_hsrp_ports/
+                                                  // extra_bsap_ports above -- see coap.hpp's own
+                                                  // try_parse_coap comment.
     std::vector<uint16_t> extra_codesys_ports;  // TCP (11740/1217) AND UDP (1740-1743) -- one
                                                   // shared list covers both transports, the same
                                                   // "one list, two ports/port-sets, different

@@ -8026,6 +8026,78 @@ deferred future migration.
     itself (extending it to also walk the IPv6 branch) or as a new, IPv6-specific sibling module
     once ICMPv6/DHCPv6 have their own decoders to build curated notes on top of.
 
+46. **CoAP (Constrained Application Protocol, RFC 7252) -- UDP port 5683.** **Done.** Jurgen asked
+    "Add CoAP" -- a bare request naming an IETF standard, not a vendor protocol. CoAP is the IoT/
+    IIoT analogue of HTTP over UDP, the same category of reasoning that already put MQTT in this
+    tool's scope. New, fully self-contained module: `include/conduitscope/coap.hpp`/`src/coap.cpp`
+    -- see its own file header for the complete sourcing/scoping/wire-format writeup; this entry
+    summarizes it.
+
+    **Sourcing**: unlike this codebase's recent additions (BSAP, GE SRTP, CODESYS), which all
+    needed third-party reverse-engineering because no public vendor spec exists, CoAP is a single,
+    authoritative, freely available IETF standard -- RFC 7252 -- cross-checked against IANA's own
+    "Constrained RESTful Environments (CoRE) Parameters" registry for the Method/Response Code,
+    Option Number, and Content-Format tables. A meaningfully stronger sourcing position than
+    CC-Link IE's own (item 42, itself strong enough to decide scope in code rather than ask), so
+    the scope decisions below were likewise decided and documented in code rather than raised as
+    an AskUserQuestion -- no scoping questions were needed for this feature.
+
+    **Scope decided in code**: UDP only (CoAP-over-TCP/TLS/WebSockets, RFC 8323, uses an entirely
+    different length-prefixed framing and is out of scope); CoAPS/DTLS (port 5684) out of scope
+    past generic recognition (opaque ciphertext, the same limit already drawn for WinRM's TLS port
+    and DoH); every option/Code/Content-Format from the base RFC 7252 plus RFC 7641 (Observe) and
+    RFC 7959 (Block1/Block2/Size2) named and value-decoded, any other IANA-registered option
+    falling back to an honest structural "option NNN (raw hex)" rendering; the payload body itself
+    never decoded (Content-Format named, byte count only -- the same "declined, too generic, no
+    OT-specific structure" reasoning already applied to OPC Classic and to CC-Link IE's own raw
+    RWw/RWr byte counts); and no cross-packet session state at all (no Message-ID CON/ACK
+    matching, no Token-based request/response correlation across packets), an explicit, honestly
+    stated limitation matching BSAP's and HART-IP's own stateless posture.
+
+    **Wire format**: a fixed 4-byte header (Version must be exactly 1; Type CON/NON/ACK/RST; Token
+    Length 0-8, 9-15 rejected as a message format error; Code as 3-bit class/5-bit detail,
+    "c.dd"; 16-bit Message ID), a Token (TKL bytes, non-secret, hex), then Options using RFC
+    7252's own 0-12/13(+13)/14(+269) Delta/Length nibble-extension scheme, ending at end-of-message
+    or a Payload Marker (0xFF) byte followed by the raw payload. A malformed option (a reserved
+    nibble outside the Payload Marker, a declared length overrunning the message) stops the option
+    walk with a note without discarding the header/token/options already decoded -- the same
+    "decode what's decodable, note the anomaly" posture CODESYS/BACnet/GE-SRTP already use.
+
+    **Detection/dispatch gate strength**: `GateKind::UdpPort`, port 5683, deliberately NOT tried
+    opportunistically on every UDP port -- a conservative, self-determined judgment call. CoAP's
+    shortest legal message is a bare 4-byte header (an Empty-Code ping/keepalive/reset with no
+    token, options, or payload); this decoder's strongest structural checks on such a message
+    (Version==1, TKL<=8) narrow a random 4-byte UDP payload's false-positive chance only to
+    roughly 1-in-7 -- nowhere near the "astronomically unlikely by chance" bar CODESYS's and
+    CC-Link IE's own multi-field UDP gates document (items 42/44) -- so this decoder joins BSAP/
+    RIP/HSRP/DNS/mDNS/LLMNR/NBT-NS on the same port-gated line instead.
+
+    **Curated note**: CoRE Resource Discovery (RFC 6690) -- a GET to `.well-known/core` enumerates
+    a device's own hosted resources, the CoAP analogue of CC-Link IE's own node-search discovery
+    note (item 42).
+
+    16 new `coap_*` CTest tests: a GET request with a two-segment Uri-Path correctly joined; its
+    ACK 2.05 Content response with Content-Format named, plus a JSON field check; a `.well-known/
+    core` discovery request triggering its own note, and its link-format response; an Observe
+    register/notify pair; two malformed-message cases (a bare Payload Marker with no payload, and
+    a declared-length overrun), both falling back to a note rather than a fabricated decode; a
+    non-standard port correctly NOT attempted at all in Auto mode (proving the port gate itself,
+    not just an annotation) -- `--coap-port` widening detection to include it, and forced
+    `--protocol coap` attempting it (with the non-standard-port note) while still correctly
+    declining a Version-field negative control either way; a `--stats` message-type/code count
+    check; and `--protocol coap` excluding an unrelated fixture's own protocol. Full suite passed
+    with zero regressions in both the default and `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF`
+    configs, zero-warning clean rebuilds in both, on the very first build -- no post-hoc collision
+    fix required, unlike BSAP/GE-SRTP/CODESYS's own experience adding to this same UDP dispatch
+    area.
+
+    Explicitly out of scope, stated honestly in coap.hpp's own file header: CoAP-over-TCP/TLS/
+    WebSockets (RFC 8323); CoAPS/DTLS past generic recognition; any IANA-registered option outside
+    the base RFC 7252 + RFC 7641 + RFC 7959 set (structurally decoded, not value-interpreted); the
+    payload body itself; and cross-packet session state of any kind. As with every recent protocol
+    addition, `tests/sample_coap.pcap` is entirely synthetic -- no real CoAP capture was available
+    to validate against.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

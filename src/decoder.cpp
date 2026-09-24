@@ -1571,6 +1571,40 @@ DecodedPacket Decoder::decode_ip_payload(DecodedPacket out, uint8_t protocol, By
                 }
             }
 
+            // CoAP (Constrained Application Protocol, RFC 7252) -- a brand-new protocol,
+            // port-gated in Auto mode for the same class of reason BSAP just above is: its own
+            // shortest legal messages (a bare 4-byte header, no options, no payload) are too weak
+            // a structural signal to try against arbitrary UDP traffic on every port -- see
+            // coap.hpp's own DETECTION/DISPATCH paragraph. No known collision with any other
+            // decoder's own port has been found (5683 is not shared with anything else in this
+            // codebase), so unlike BSAP this block does not need to run early to win an ordering
+            // fight -- placed here purely for locality with BSAP's own port-gated check just
+            // above.
+            bool want_coap = options_.protocol_filter == ProtocolFilter::Auto ||
+                              options_.protocol_filter == ProtocolFilter::CoapOnly;
+            bool require_coap_port = options_.protocol_filter == ProtocolFilter::Auto;
+            if (want_coap) {
+                bool port_match = port_in(udp.src_port, COAP_UDP_PORT, options_.extra_coap_ports) ||
+                                   port_in(udp.dst_port, COAP_UDP_PORT, options_.extra_coap_ports);
+                if (!require_coap_port || port_match) {
+                    DecodeContext ctx;
+                    ctx.protocol_id = "coap";
+                    if (auto result = coap_udp_decoder().decode(udp.payload, ctx)) {
+                        const CoapFrame& frame = result->as<CoapFrame>();
+                        out.protocol = "coap";
+                        out.summary = frame.summary;
+                        for (const auto& n : frame.notes) out.notes.push_back(n);
+                        out.result = *result;
+                        if (!port_match) {
+                            out.notes.push_back("seen on UDP port " + std::to_string(udp.src_port) +
+                                                 "->" + std::to_string(udp.dst_port) +
+                                                 ", which is not a configured/standard CoAP port (5683)");
+                        }
+                        return out;
+                    }
+                }
+            }
+
             // Tried last among these UDP checks, port-independently -- see the matching comment in
             // reassemble_tcp_payload above for why HART-IP's own weaker structural detection gate
             // is deliberately given the lowest priority in this decoder's opportunistic dispatch.

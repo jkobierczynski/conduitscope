@@ -212,6 +212,15 @@ service deliberately structural\-only (component/command named, payload
 byte count only) by Jurgen's own explicit choice; CODESYS V2 is out of
 scope, no public wire\-format documentation found for it; see
 \fBdocs/PROTOCOL_COVERAGE.md\fR's CODESYS section for the full writeup,
+plus CoAP (Constrained Application Protocol, RFC 7252 \-\- a single
+authoritative IETF standard, unlike several of this tool's other recent
+additions, which needed third\-party reverse\-engineering \-\- UDP port
+5683), decoding the base RFC plus Observe (RFC 7641) and blockwise
+transfer (RFC 7959) in full, with any other IANA\-registered option
+structurally recognized but not value\-decoded; port\-gated in \fBauto\fR
+mode, unlike CODESYS/CC\-Link IE above, since CoAP's own shortest legal
+message is too weak a structural signal to try opportunistically; see
+\fBdocs/PROTOCOL_COVERAGE.md\fR's CoAP section for the full writeup,
 plus PROFINET RT (EtherType 0x8892, DCP device discovery/configuration and
 cyclic real-time IO), IEC 61850-8-1 GOOSE (EtherType 0x88B8, ASN.1
 BER-encoded GOOSE PDU), IEC 61850-9-2 Sampled Values (EtherType 0x88BA,
@@ -395,7 +404,7 @@ regardless of where it's being analyzed \-\- an extension beyond what
 tshark/tcpdump themselves offer. See \fBdocs/USER_GUIDE.md\fR's OUTPUT
 FORMATS "Timestamps" subsection.
 .TP
-.B \-\-protocol {auto,modbus,dnp3,iec104,s7comm,s7comm\-plus,mms,enip,twincat,melsec,fins,bgp,kerberos,ldap,smb,profinet,goose,sv,ethercat,stp,devicenet,bacnet,hartip,opcua,mqtt,ff\-hse,dns,mdns,llmnr,nbns,doh,rip,igmp,vrrp,hsrp,igrp,pim,eigrp,ospf,remote\-access,lateral\-movement,enterprise\-trust,eapol,wireless\-backhaul,pppoe,tunnel\-vpn,mpls,arp,lldp,slow\-protocols,winrm,dcom,ge\-srtp,bsap,cclink\-ie,codesys}
+.B \-\-protocol {auto,modbus,dnp3,iec104,s7comm,s7comm\-plus,mms,enip,twincat,melsec,fins,bgp,kerberos,ldap,smb,profinet,goose,sv,ethercat,stp,devicenet,bacnet,hartip,opcua,mqtt,ff\-hse,dns,mdns,llmnr,nbns,doh,rip,igmp,vrrp,hsrp,igrp,pim,eigrp,ospf,remote\-access,lateral\-movement,enterprise\-trust,eapol,wireless\-backhaul,pppoe,tunnel\-vpn,mpls,arp,lldp,slow\-protocols,winrm,dcom,ge\-srtp,bsap,cclink\-ie,codesys,coap}
 Restrict decoding to one protocol. Default: auto (tries all fourteen TCP
 protocols, independent of port number, plus CIP I/O, BACnet/IP, HART-IP, and
 FF-HSE on every
@@ -747,6 +756,16 @@ mode (its own magic\-number/length gates are what prevent false
 positives), the same posture as \fB\-\-cclink\-ie\-port\fR; this option only
 widens the ports annotated as expected rather than flagged as
 non\-standard.
+.TP
+.B \-\-coap\-port \fIPORT\fR
+Same as \fB\-\-dns\-port\fR, for CoAP (Constrained Application Protocol,
+RFC 7252; built\-in default: 5683, UDP; see
+\fBdocs/PROTOCOL_COVERAGE.md\fR's CoAP section). Repeatable. UNLIKE
+\fB\-\-codesys\-port\fR/\fB\-\-cclink\-ie\-port\fR above, this DOES gate
+detection \-\- CoAP is only tried on a configured/expected port in
+\fBauto\fR mode, the same posture as \fB\-\-bsap\-port\fR/\fB\-\-rip\-port\fR/
+\fB\-\-hsrp\-port\fR (its own shortest legal message is too weak a
+structural signal to try opportunistically on every UDP port).
 .TP
 .B \-\-flood\-threshold \fIN\fR
 Per\-destination packet count (summed across the whole capture, not a

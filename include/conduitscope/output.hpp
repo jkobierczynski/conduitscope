@@ -376,6 +376,11 @@ private:
     std::map<std::string, size_t> codesys_channel_command_counts_;  // keyed by channel command name
                                                                       // (or "0xNN" when unnamed)
     size_t codesys_auth_username_count_ = 0;
+    // CoAP (coap.hpp) -- message Type (CON/NON/ACK/RST) and Code ("GET"/"2.05 Content"/etc, or a
+    // raw "c.dd" for an unnamed Code) counts, the same "one map, keyed by rendered name" shape
+    // rip_command_counts_/icmp_type_counts_ already use.
+    std::map<std::string, size_t> coap_type_counts_;
+    std::map<std::string, size_t> coap_code_counts_;
     bool has_ts_ = false;
     double first_ts_ = 0.0, last_ts_ = 0.0;
 };

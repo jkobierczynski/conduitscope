@@ -1034,6 +1034,50 @@ void write_codesys_json_fields(std::ostream& out, const CodesysFrame& cf) {
     }
 }
 
+// The CoAP analog of write_codesys_json_fields above -- same rationale (a plain free function,
+// not a ProtocolRenderer interface).
+void write_coap_json_fields(std::ostream& out, const CoapFrame& cf) {
+    out << "    \"coap_type\": \"" << (cf.type_name ? cf.type_name : "?") << "\",\n";
+    if (cf.code_name) {
+        out << "    \"coap_code\": \"" << json_escape(*cf.code_name) << "\",\n";
+    }
+    out << "    \"coap_code_raw\": \"" << static_cast<int>(cf.code_class) << "."
+        << std::setfill('0') << std::setw(2) << static_cast<int>(cf.code_detail) << "\",\n";
+    out << std::setfill(' ');
+    out << "    \"coap_message_id\": " << cf.message_id << ",\n";
+    if (!cf.token_hex.empty()) {
+        out << "    \"coap_token\": \"" << json_escape(cf.token_hex) << "\",\n";
+    }
+    {
+        std::string joined_uri_path;
+        for (const auto& opt : cf.options) {
+            if (opt.number == 11 && opt.decoded_text) {
+                if (!joined_uri_path.empty()) joined_uri_path += "/";
+                joined_uri_path += *opt.decoded_text;
+            }
+        }
+        if (!joined_uri_path.empty()) {
+            out << "    \"coap_uri_path\": \"" << json_escape(joined_uri_path) << "\",\n";
+        }
+    }
+    if (cf.observe_value) {
+        out << "    \"coap_observe\": " << (cf.observe_register ? "\"register\"" : "\"notify\"")
+            << ",\n";
+    }
+    if (cf.content_format_id) {
+        if (cf.content_format_name) {
+            out << "    \"coap_content_format\": \"" << json_escape(*cf.content_format_name)
+                << "\",\n";
+        } else {
+            out << "    \"coap_content_format_id\": " << *cf.content_format_id << ",\n";
+        }
+    }
+    out << "    \"coap_option_count\": " << cf.options.size() << ",\n";
+    if (cf.payload_present) {
+        out << "    \"coap_payload_length\": " << cf.payload_length << ",\n";
+    }
+}
+
 // Renders one RipRoute as a single line -- see rip.hpp for what each of the three RTE shapes
 // (ordinary route, full-table-request marker, authentication entry) means. Reproduces
 // decoder.cpp's own former rip_route_summary exactly (that copy was retired along with the
@@ -3699,6 +3743,9 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
     if (p.protocol == "codesys" && p.result) {
         write_codesys_json_fields(out_, p.result->as<CodesysFrame>());
     }
+    if (p.protocol == "coap" && p.result) {
+        write_coap_json_fields(out_, p.result->as<CoapFrame>());
+    }
     out_ << "    \"notes\": [";
     for (size_t i = 0; i < p.notes.size(); ++i) {
         if (i != 0) out_ << ", ";
@@ -4230,6 +4277,20 @@ void StatsWriter::write_packet(const DecodedPacket& p) {
         }
         if (cf.has_auth_username) codesys_auth_username_count_++;
     }
+    if (p.protocol == "coap" && p.result) {
+        const CoapFrame& cf = p.result->as<CoapFrame>();
+        coap_type_counts_[cf.type_name ? cf.type_name : "?"]++;
+        std::string code_key;
+        if (cf.code_name) {
+            code_key = *cf.code_name;
+        } else {
+            std::ostringstream s;
+            s << static_cast<int>(cf.code_class) << "." << std::setfill('0') << std::setw(2)
+              << static_cast<int>(cf.code_detail);
+            code_key = s.str();
+        }
+        coap_code_counts_[code_key]++;
+    }
     if (p.protocol == "rip" && p.result) {
         rip_command_counts_[p.result->as<RipMessage>().command_name]++;
     }
@@ -4603,6 +4664,16 @@ void StatsWriter::print_summary(std::ostream& out) const {
         }
         out << "codesys login/auth exchanges with a decoded username: " << codesys_auth_username_count_
             << "\n";
+    }
+    if (!coap_type_counts_.empty()) {
+        out << "coap message types:\n";
+        for (const auto& [name, count] : coap_type_counts_) {
+            out << "  " << std::left << std::setw(40) << name << count << "\n";
+        }
+        out << "coap codes:\n";
+        for (const auto& [name, count] : coap_code_counts_) {
+            out << "  " << std::left << std::setw(40) << name << count << "\n";
+        }
     }
     if (!rip_command_counts_.empty()) {
         out << "rip commands:\n";

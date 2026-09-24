@@ -116,6 +116,7 @@ add_library(conduitscope_core STATIC
   src/bsap.cpp
   src/cclink_ie.cpp
   src/codesys.cpp
+  src/coap.cpp
   src/protocol_registry.cpp
   src/resource_limits.cpp
   src/decoder.cpp
@@ -11549,4 +11550,112 @@ set_tests_properties(codesys_protocol_filter_includes_only_codesys PROPERTIES
 add_test(NAME codesys_protocol_filter_excludes_other_protocols
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --protocol codesys --format text)
 set_tests_properties(codesys_protocol_filter_excludes_other_protocols PROPERTIES
+  FAIL_REGULAR_EXPRESSION "\\[modbus\\]")
+
+# coap.hpp/.cpp -- CoAP (Constrained Application Protocol, RFC 7252), UDP port 5683. See coap.hpp's
+# own file header for the full sourcing/scoping/wire-format writeup. sample_coap.pcap
+# (build_coap_sample, tools/make_sample_pcap.py) carries a CON GET request with a two-segment
+# Uri-Path, its ACK 2.05 Content response (application/json), a .well-known/core CoRE Resource
+# Discovery request/response (application/link-format), an Observe register/notify pair, two
+# malformed-message cases (a bare Payload Marker with no payload, and an option whose declared
+# length overruns the message), a non-standard-port variant, and a Version-field negative control.
+add_test(NAME coap_get_request_uri_path
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_coap.pcap" --format text -v)
+set_tests_properties(coap_get_request_uri_path PROPERTIES
+  PASS_REGULAR_EXPRESSION "#1  [^\n]*\\[coap\\]  CoAP CON GET Message-ID=4097 Token=abcd /sensors/temperature")
+
+add_test(NAME coap_ack_content_response_json
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_coap.pcap" --format text -v)
+set_tests_properties(coap_ack_content_response_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "#2  [^\n]*\\[coap\\]  CoAP ACK Content Message-ID=4097 Token=abcd Content-Format=application/json \\(10 byte\\(s\\) of payload\\)")
+
+add_test(NAME coap_json_fields_ack_content
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_coap.pcap" --format json)
+set_tests_properties(coap_json_fields_ack_content PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"coap_type\": \"ACK\",\n *\"coap_code\": \"Content\",\n *\"coap_code_raw\": \"2\\.05\",\n *\"coap_message_id\": 4097,\n *\"coap_token\": \"abcd\",\n *\"coap_content_format\": \"application/json\",\n *\"coap_option_count\": 1,\n *\"coap_payload_length\": 10,")
+
+add_test(NAME coap_well_known_core_discovery_note
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_coap.pcap" --format text -v)
+set_tests_properties(coap_well_known_core_discovery_note PROPERTIES
+  PASS_REGULAR_EXPRESSION "#3  [^\n]*\\[coap\\]  CoAP CON GET Message-ID=4098 Token=aa /\\.well-known/core[^\n]*\n *note: CoRE Resource Discovery \\(RFC 6690\\): GET \\.well-known/core enumerates this device's own hosted resources")
+
+add_test(NAME coap_ack_content_response_link_format
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_coap.pcap" --format text -v)
+set_tests_properties(coap_ack_content_response_link_format PROPERTIES
+  PASS_REGULAR_EXPRESSION "#4  [^\n]*\\[coap\\]  CoAP ACK Content Message-ID=4098 Token=aa Content-Format=application/link-format \\(53 byte\\(s\\) of payload\\)")
+
+add_test(NAME coap_observe_register
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_coap.pcap" --format text -v)
+set_tests_properties(coap_observe_register PROPERTIES
+  PASS_REGULAR_EXPRESSION "#5  [^\n]*\\[coap\\]  CoAP CON GET Message-ID=4099 Token=beef /sensors/temperature Observe=register")
+
+add_test(NAME coap_observe_notify
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_coap.pcap" --format text -v)
+set_tests_properties(coap_observe_notify PROPERTIES
+  PASS_REGULAR_EXPRESSION "#6  [^\n]*\\[coap\\]  CoAP NON Content Message-ID=4100 Token=beef Observe=notify Content-Format=application/json \\(10 byte\\(s\\) of payload\\)")
+
+# MALFORMED: a Payload Marker (0xFF) with no payload following -- a message format error per RFC
+# 7252 Section 3.1, not an empty payload. Still decodes the header (CON GET Message-ID=4101).
+add_test(NAME coap_malformed_payload_marker_no_payload
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_coap.pcap" --format text -v)
+set_tests_properties(coap_malformed_payload_marker_no_payload PROPERTIES
+  PASS_REGULAR_EXPRESSION "#7  [^\n]*\\[coap\\]  CoAP CON GET Message-ID=4101[^\n]*\n *note: Payload Marker \\(0xFF\\) present with no payload following -- a message format error per RFC 7252 Section 3\\.1, not an empty payload")
+
+# MALFORMED: an option's declared length (10) exceeds the bytes actually remaining -- stops the
+# option walk with a note rather than fabricating a decode past the overrun.
+add_test(NAME coap_malformed_option_length_overrun
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_coap.pcap" --format text -v)
+set_tests_properties(coap_malformed_option_length_overrun PROPERTIES
+  PASS_REGULAR_EXPRESSION "#8  [^\n]*\\[coap\\]  CoAP CON GET Message-ID=4102[^\n]*\n *note: malformed option: declared length \\(10 byte\\(s\\)\\) exceeds the bytes remaining in this message -- remaining bytes not walked as options")
+
+# GateKind::UdpPort -- CoAP is only attempted on a configured/expected port in Auto mode (unlike
+# CC-Link IE/CODESYS's own UdpPortIndependent posture), so packet 9's own non-standard port
+# (6683) is never even attempted in Auto mode -- falls through to generic [udp], not a note.
+add_test(NAME coap_non_standard_port_not_attempted_in_auto_mode
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_coap.pcap" --format text -v)
+set_tests_properties(coap_non_standard_port_not_attempted_in_auto_mode PROPERTIES
+  PASS_REGULAR_EXPRESSION "#9  [^\n]*\\[udp\\]  UDP payload of 25 byte\\(s\\) on port 52001->6683"
+  FAIL_REGULAR_EXPRESSION "#9[^\n]*\\[coap\\]")
+
+# --coap-port WIDENS which port(s) are actually attempted in Auto mode (unlike --bsap-port's own
+# sibling behavior of only widening the "expected" annotation -- CoAP's own gate is real port
+# gating, not opportunistic-with-an-annotation) -- packet 9 now decodes as coap, no "non-standard"
+# note since 6683 is now itself an expected port for this run.
+add_test(NAME coap_port_option_widens_auto_mode_detection
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_coap.pcap" --coap-port 6683 --format text -v)
+set_tests_properties(coap_port_option_widens_auto_mode_detection PROPERTIES
+  PASS_REGULAR_EXPRESSION "#9  [^\n]*\\[coap\\]  CoAP CON GET Message-ID=4103 Token=01 /sensors/temperature\n#10"
+  FAIL_REGULAR_EXPRESSION "not a configured/standard CoAP port")
+
+# Forced --protocol coap tries every port regardless (like every other explicit protocol filter in
+# this codebase) -- packet 9 decodes, WITH the non-standard-port note this time (6683 was not
+# added to the expected-port list for this run).
+add_test(NAME coap_forced_protocol_non_standard_port_note
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_coap.pcap" --protocol coap --format text -v)
+set_tests_properties(coap_forced_protocol_non_standard_port_note PROPERTIES
+  PASS_REGULAR_EXPRESSION "#9  [^\n]*\\[coap\\][^\n]*\n *note: seen on UDP port 52001->6683, which is not a configured/standard CoAP port \\(5683\\)")
+
+# NEGATIVE CONTROL: a UDP/5683 payload whose Version field is not 1 -- must fall through cleanly
+# to generic [udp], even under forced --protocol coap (proving the gate itself, not dispatch
+# order, is what protects against this).
+add_test(NAME coap_negative_control_falls_through
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_coap.pcap" --format text -v)
+set_tests_properties(coap_negative_control_falls_through PROPERTIES
+  PASS_REGULAR_EXPRESSION "#10  [^\n]*\\[udp\\]  UDP payload of 4 byte\\(s\\) on port 52002->5683"
+  FAIL_REGULAR_EXPRESSION "#10[^\n]*\\[coap\\]")
+
+add_test(NAME coap_forced_protocol_negative_control_still_falls_through
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_coap.pcap" --protocol coap --format text)
+set_tests_properties(coap_forced_protocol_negative_control_still_falls_through PROPERTIES
+  PASS_REGULAR_EXPRESSION "#10  [^\n]*\\[udp\\]  UDP payload of 4 byte\\(s\\) on port 52002->5683"
+  FAIL_REGULAR_EXPRESSION "#10[^\n]*\\[coap\\]")
+
+add_test(NAME coap_stats_message_type_and_code_counts
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_coap.pcap" --format text --stats)
+set_tests_properties(coap_stats_message_type_and_code_counts PROPERTIES
+  PASS_REGULAR_EXPRESSION "coap message types:\n *ACK  *2\n *CON  *5\n *NON  *1\ncoap codes:\n *Content  *3\n *GET  *5")
+
+add_test(NAME coap_protocol_filter_excludes_other_protocols
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --protocol coap --format text)
+set_tests_properties(coap_protocol_filter_excludes_other_protocols PROPERTIES
   FAIL_REGULAR_EXPRESSION "\\[modbus\\]")

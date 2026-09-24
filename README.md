@@ -121,6 +121,13 @@ password NEVER rendered) and every other service deliberately
 structural-only by Jurgen's own explicit choice; V2 out of scope, no
 public wire-format documentation found for it -- see
 `docs/PROTOCOL_COVERAGE.md`'s CODESYS section for the full writeup),
+CoAP (Constrained Application Protocol, RFC 7252, UDP port 5683 -- a
+single authoritative IETF standard, unlike this codebase's other recent
+additions, which all needed third-party reverse-engineering; the base
+RFC plus Observe (RFC 7641) and blockwise transfer (RFC 7959) fully
+decoded, port-gated in Auto mode since CoAP's own shortest legal message
+is too weak a structural signal to try opportunistically -- see
+`docs/PROTOCOL_COVERAGE.md`'s CoAP section for the full writeup),
 IEEE Spanning Tree Protocol
 (STP/RSTP/MSTP), DeviceNet (CAN-bus CIP, via SocketCAN pcap captures), DNS,
 mDNS, LLMNR, and NetBIOS Name Service (NBT-NS), ICMP, RIP, IGMP, VRRP, HSRP,
@@ -230,7 +237,7 @@ traffic match what the segmentation policy says it should" question.
 
 Groundwork / v0.2.4. Every protocol named above is implemented, decoding real
 wire-format fields (not just naming the protocol), and covered by the
-automated test suite -- 1635 tests as of this writing, run via `ctest` after
+automated test suite -- 1651 tests as of this writing, run via `ctest` after
 building (see Building below). Where a real capture was available (public
 ICS-lab collections, vendor-attributed samples, or a live device on real
 hardware), the decoder is validated against it, not just a synthetic

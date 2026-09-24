@@ -9742,3 +9742,114 @@ every prior protocol addition in this codebase has been held to -- and
 the full suite passed with zero regressions in both the default and
 `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF` configs. See
 `include/conduitscope/codesys.hpp`'s file header for the full writeup.
+
+### CoAP (Constrained Application Protocol, RFC 7252) -- UDP port 5683
+
+Jurgen asked "Add CoAP" -- a bare request naming an IETF standard rather
+than a vendor protocol. CoAP is the IoT/IIoT analogue of HTTP over UDP,
+increasingly seen alongside (or instead of) classic fieldbus protocols in
+newer IIoT and smart-building deployments, the same reasoning that put
+MQTT in this tool's scope.
+
+**Sourcing**: unlike this codebase's recent additions (BSAP, GE SRTP,
+CODESYS), which all needed third-party reverse-engineering because no
+public vendor spec exists, CoAP is a single, authoritative, freely
+available IETF standard -- RFC 7252 (June 2014) -- cross-checked against
+IANA's own "Constrained RESTful Environments (CoRE) Parameters" registry
+for the Method/Response Code, Option Number, and Content-Format tables. A
+meaningfully stronger sourcing position than CC-Link IE's own (itself
+already strong enough to decide scope in code rather than ask), so the
+scope decisions below were likewise decided and documented in code rather
+than raised as an AskUserQuestion.
+
+**Scope, decided in code**: UDP only -- CoAP-over-TCP/TLS/WebSockets
+(RFC 8323) uses an entirely different, length-prefixed framing with no
+fixed 4-byte header and is out of scope for this first pass. CoAPS
+(DTLS-secured CoAP, port 5684) is out of scope past generic recognition --
+its payload is opaque ciphertext, the same limit already drawn for
+WinRM's TLS port and DoH. Every option/Code/Content-Format defined by the
+base RFC 7252, plus RFC 7641 (Observe) and RFC 7959 (Block1/Block2/Size2),
+is named and value-decoded where its own Format is string/uint -- these
+two companion RFCs were folded in because their options are near-
+ubiquitous in real CoAP traffic (Observe-based subscribe/notify, blockwise
+transfer of larger payloads) and are themselves single-sourced stable
+IETF standards. Any other IANA-registered option (OSCORE, Hop-Limit,
+Q-Block1/2, EDHOC, Echo, No-Response, Request-Tag, and any future
+registration) falls back to an honest "option NNN (raw hex, N byte(s))"
+structural rendering -- the option's own number/length is always decoded
+correctly regardless of whether its value is interpreted. The payload
+body itself (after the 0xFF marker) is never decoded -- Content-Format is
+named and the byte length reported, but the body is a separate, generic
+serialization format (JSON/CBOR/link-format/etc.) with no CoAP-specific
+structure of its own, the same "declined, too generic" reasoning already
+applied to OPC Classic and to CC-Link IE's own raw RWw/RWr byte counts.
+
+**Wire format**: a fixed 4-byte header (Version -- must be exactly 1;
+Type -- CON/NON/ACK/RST; Token Length 0-8, values 9-15 reserved and
+rejected as a message format error; Code, split 3-bit class/5-bit detail
+and conventionally written "c.dd"; 16-bit Message ID), a Token (TKL
+bytes, a client-chosen non-secret correlation value, rendered as hex),
+then a sequence of Options each carrying a Delta (added to a running
+total to get the option's own number) and a Length, both using RFC
+7252's own 0-12/13(+13)/14(+269) nibble-extension scheme, terminated
+either by end-of-message or by the single byte 0xFF (the Payload Marker)
+followed by the raw payload. A malformed option (a reserved nibble value
+outside the Payload Marker, a declared length overrunning the remaining
+bytes) stops the option walk with a note but does not discard the
+header/token/options already decoded -- the same "decode what's
+decodable, note the anomaly" posture CODESYS/BACnet/GE-SRTP already use
+for their own malformed-input paths.
+
+**Detection/dispatch gate strength**: `GateKind::UdpPort`, port 5683,
+NOT tried opportunistically on every UDP port (unlike CC-Link IE/CODESYS's
+own UdpPortIndependent posture) -- a deliberate, conservative,
+self-determined judgment call. CoAP's shortest legal message is a bare
+4-byte header (an Empty Code 0.00 ping/keepalive/reset, no token, no
+options, no payload); this decoder's own strongest checks on such a
+message (Version==1, a 2-bit field; TKL<=8, a 4-bit field) narrow a
+random 4-byte UDP payload's false-positive chance only to roughly 1-in-7
+-- nowhere near the "astronomically unlikely by chance" bar CODESYS's and
+CC-Link IE's own multi-independently-constrained-field UDP gates
+document. BSAP/RIP/HSRP/DNS/mDNS/LLMNR/NBT-NS all already draw the same
+port-gated line for exactly this class of "the header alone is too weak
+a signal" reasoning.
+
+**Curated note**: CoRE Resource Discovery (RFC 6690) -- a GET to
+`.well-known/core` enumerates the resources a device itself hosts, the
+CoAP analogue of CC-Link IE's own "node search: passive asset-discovery
+broadcast" note.
+
+**Explicitly out of scope**: CoAP-over-TCP/TLS/WebSockets (RFC 8323);
+CoAPS/DTLS past generic recognition; any IANA-registered option outside
+the base RFC 7252 + RFC 7641 + RFC 7959 set (structurally decoded, not
+value-interpreted); the payload body itself (Content-Format named, byte
+count only); and cross-packet session state of any kind -- every message
+is decoded independently, with no Message-ID-based CON/ACK matching and
+no Token-based request/response correlation across packets, an explicit,
+honestly stated limitation rather than a silent gap, the same stateless
+posture BSAP's and HART-IP's own decoders already have.
+
+**Honestly stated validation gap**: `tests/sample_coap.pcap`
+(`build_coap_sample`) is entirely synthetic -- no real CoAP capture of any
+kind was available. If a real capture becomes available later, this note
+should be updated accordingly.
+
+Validated against `tests/sample_coap.pcap`: a CON GET request with a
+two-segment Uri-Path, decoded and joined correctly; its ACK 2.05 Content
+response with a named Content-Format; a `.well-known/core` discovery
+request triggering its own curated note, and its link-format response; an
+Observe register/notify pair; a malformed Payload-Marker-with-no-payload
+case and a malformed declared-length-overrun case, both falling back to a
+note rather than a fabricated decode; a non-standard port correctly NOT
+attempted at all in Auto mode (proving the port gate, not just an
+annotation), `--coap-port` widening detection to include it, and forced
+`--protocol coap` both attempting it (with the non-standard-port note)
+and still correctly declining the Version-field negative control. Every
+case was decoded and inspected in `--format text -v`, `--format json`,
+and `--stats` BEFORE the `CMakeLists.txt` `coap_*` test family reading it
+was written, the same verification discipline every prior protocol
+addition in this codebase has been held to -- and the full suite passed
+with zero regressions in both the default and
+`-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF` configs on the very first build,
+no post-hoc collision fix required. See `include/conduitscope/coap.hpp`'s
+file header for the full writeup.

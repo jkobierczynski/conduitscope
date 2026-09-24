@@ -6,6 +6,7 @@
 #include "conduitscope/bgp.hpp"
 #include "conduitscope/bsap.hpp"
 #include "conduitscope/cclink_ie.hpp"
+#include "conduitscope/coap.hpp"
 #include "conduitscope/codesys.hpp"
 #include "conduitscope/cotp.hpp"
 #include "conduitscope/dcom.hpp"
@@ -414,6 +415,14 @@ const std::vector<const ProtocolDecoder*>& udp_port_registry() {
                             // HSRP already are -- see bsap.hpp's own file header comment.
                             // decoder.cpp's own BSAP call site likewise sits right after its NBT-NS
                             // block.
+        &coap_udp_decoder(),  // CoAP (Constrained Application Protocol, RFC 7252) -- a brand-new
+                            // protocol, built entirely on the ProtocolDecoder interface from
+                            // inception like TwinCAT/MELSEC/FINS/BSAP/CC-Link IE/CODESYS. Joins
+                            // this gate right after BSAP, port-gated for the same "shortest legal
+                            // message is too weak a structural signal to try opportunistically"
+                            // reason BSAP/RIP/HSRP already are -- see coap.hpp's own DETECTION/
+                            // DISPATCH paragraph. decoder.cpp's own CoAP call site likewise sits
+                            // right after its BSAP block.
     };
     return order;
 }

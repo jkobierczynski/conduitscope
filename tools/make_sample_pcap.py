@@ -15095,6 +15095,128 @@ def build_codesys_sample():
     (TESTS_DIR / "sample_codesys.pcap").write_bytes(data)
 
 
+def coap_option(delta: int, value: bytes) -> bytes:
+    """One RFC 7252 Section 3.1 Option Delta/Length encoding, correctly extended (nibble 13/14)
+    for a delta or length past 12 -- see coap.hpp's own WIRE FORMAT comment for the +13/+269
+    scheme this mirrors exactly."""
+    def nibble_and_ext(v: int) -> bytes:
+        if v <= 12:
+            return bytes([v]), b""
+        if v <= 12 + 255:
+            return bytes([13]), bytes([v - 13])
+        return bytes([14]), struct.pack(">H", v - 269)
+
+    length = len(value)
+    d_nib, d_ext = nibble_and_ext(delta)
+    l_nib, l_ext = nibble_and_ext(length)
+    return bytes([(d_nib[0] << 4) | l_nib[0]]) + d_ext + l_ext + value
+
+
+def coap_message(mtype: int, code: int, msg_id: int, token: bytes,
+                  options: list, payload: bytes = b"") -> bytes:
+    """Builds one well-formed CoAP message (RFC 7252 Section 3). `options` is a list of
+    (option_number, value_bytes) pairs in strictly increasing option_number order -- the delta
+    between consecutive entries (and from 0 for the first) is computed here."""
+    b0 = (1 << 6) | ((mtype & 0x3) << 4) | (len(token) & 0xF)  # Ver is always 1.
+    out = bytes([b0, code]) + struct.pack(">H", msg_id) + token
+    prev = 0
+    for number, value in options:
+        out += coap_option(number - prev, value)
+        prev = number
+    if payload:
+        out += b"\xFF" + payload
+    return out
+
+
+def coap_code(cls: int, detail: int) -> int:
+    return (cls << 5) | detail
+
+
+def build_coap_sample():
+    """CoAP (Constrained Application Protocol, RFC 7252) -- UDP port 5683. See coap.hpp's own
+    file header for the full sourcing/scoping/wire-format writeup.
+
+    1) CON GET /sensors/temperature (Uri-Path as two options, one per path segment).
+    2) ACK 2.05 Content, matching Message ID, Content-Format=application/json, a JSON payload.
+    3) CON GET /.well-known/core -- CoRE Resource Discovery (RFC 6690), triggers its own note.
+    4) ACK 2.05 Content, Content-Format=application/link-format, a link-format payload.
+    5) CON GET /sensors/temperature with Observe=0 (register) and Accept=application/json.
+    6) NON 2.05 Content, Observe=5 (a later notification, RFC 7641), Content-Format=application/
+       json -- a fresh Message ID (Non-confirmable notifications are not ACKs of packet 5's own
+       CON, they are their own independent messages on the wire).
+    7) MALFORMED: a Payload Marker (0xFF) as the very last byte, with no payload following at all
+       -- a message format error per RFC 7252 Section 3.1, not an empty payload.
+    8) MALFORMED: an option whose declared length exceeds the bytes actually remaining in the
+       message.
+    9) The same GET as packet 1, but on a non-standard UDP port (6683, not 5683).
+    10) NEGATIVE CONTROL: a UDP/5683 payload whose Version bits are not 1 -- must fall through
+        cleanly to generic [udp]."""
+    packets = []
+
+    def send(payload: bytes, sport: int = 5683, dport: int = 5683, from_hmi: bool = True):
+        if from_hmi:
+            packets.append(udp_ip_eth_frame(payload, sport, dport, HMI_IP, PLC_IP, HMI_MAC, PLC_MAC))
+        else:
+            packets.append(udp_ip_eth_frame(payload, sport, dport, PLC_IP, HMI_IP, PLC_MAC, HMI_MAC))
+
+    # 1) CON GET /sensors/temperature.
+    send(coap_message(0, coap_code(0, 1), 0x1001, b"\xAB\xCD",
+                       [(11, b"sensors"), (11, b"temperature")]),
+         sport=52000, dport=5683)
+
+    # 2) ACK 2.05 Content, Content-Format=application/json (50), matching Message ID.
+    send(coap_message(2, coap_code(2, 5), 0x1001, b"\xAB\xCD",
+                       [(12, bytes([50]))], payload=b'{"c":21.5}'),
+         sport=5683, dport=52000, from_hmi=False)
+
+    # 3) CON GET /.well-known/core -- CoRE Resource Discovery.
+    send(coap_message(0, coap_code(0, 1), 0x1002, b"\xAA",
+                       [(11, b".well-known"), (11, b"core")]),
+         sport=52000, dport=5683)
+
+    # 4) ACK 2.05 Content, Content-Format=application/link-format (40).
+    send(coap_message(2, coap_code(2, 5), 0x1002, b"\xAA",
+                       [(12, bytes([40]))],
+                       payload=b'</sensors/temperature>;rt="temperature-c";if="sensor"'),
+         sport=5683, dport=52000, from_hmi=False)
+
+    # 5) CON GET /sensors/temperature with Observe=0 (register) and Accept=application/json (17).
+    send(coap_message(0, coap_code(0, 1), 0x1003, b"\xBE\xEF",
+                       [(6, b"\x00"), (11, b"sensors"), (11, b"temperature"), (17, bytes([50]))]),
+         sport=52000, dport=5683)
+
+    # 6) NON 2.05 Content, Observe=5 (a later notification), Content-Format=application/json.
+    send(coap_message(1, coap_code(2, 5), 0x1004, b"\xBE\xEF",
+                       [(6, b"\x05"), (12, bytes([50]))], payload=b'{"c":21.6}'),
+         sport=5683, dport=52000, from_hmi=False)
+
+    # 7) MALFORMED: Payload Marker with nothing following.
+    b0 = (1 << 6) | (0 << 4) | 0  # Ver=1, CON, TKL=0.
+    send(bytes([b0, coap_code(0, 1)]) + struct.pack(">H", 0x1005) + b"\xFF",
+         sport=52000, dport=5683)
+
+    # 8) MALFORMED: an option's declared length (10) exceeds the 2 bytes actually remaining.
+    b0 = (1 << 6) | (0 << 4) | 0
+    # Option Delta=11 (Uri-Path, small enough for the low nibble), Length=10 -- but only 2 bytes
+    # of value actually follow.
+    malformed_option = bytes([(11 << 4) | 10])
+    send(bytes([b0, coap_code(0, 1)]) + struct.pack(">H", 0x1006) + malformed_option + b"ab",
+         sport=52000, dport=5683)
+
+    # 9) Same GET as packet 1, on a non-standard UDP port (6683).
+    send(coap_message(0, coap_code(0, 1), 0x1007, b"\x01",
+                       [(11, b"sensors"), (11, b"temperature")]),
+         sport=52001, dport=6683)
+
+    # 10) NEGATIVE CONTROL: Version bits != 1.
+    send(b"\x00\x01\x10\x07", sport=52002, dport=5683)
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_260_000 + i, i * 1000)
+    (TESTS_DIR / "sample_coap.pcap").write_bytes(data)
+
+
 if __name__ == "__main__":
     TESTS_DIR.mkdir(exist_ok=True)
     build_modbus_sample()
@@ -15182,4 +15304,5 @@ if __name__ == "__main__":
     build_cclink_ie_sample()
     build_attack_detect_sample()
     build_codesys_sample()
+    build_coap_sample()
     print("wrote sample fixtures to", TESTS_DIR)
