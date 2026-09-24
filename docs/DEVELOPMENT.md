@@ -5314,50 +5314,122 @@ deferred future migration.
     updated `enterprise_trust_*` tests for the fixture-behavior change
     above -- full existing suite stays 100% passing, zero-warning build.
 
-24. **IPv6 support.** Not yet started -- flagged across several other
-    items and the User Guide's own limitations list as they were written
-    (`ipv4.hpp`'s own header comment, USER_GUIDE.md's "No IPv6" bullet,
-    and the VRRP-for-IPv6/HSRPv2-for-IPv6/PIM-IPv6/6in4-inner-address gaps
-    each call out separately), gathered here into one item rather than
-    left scattered. Today, `decoder.cpp` only ever parses an IPv4 outer
-    header: an IPv6 packet over Ethernet is named at the link layer
-    (`ETHERTYPE_IPV6`, `0x86DD` -- see `link_layer.hpp`) but its own
-    header is never opened, so it is reported as `non-ip`; over a raw-IP
-    link type there is no ethertype field to name it by at all, so it
-    falls through to `parse-error` instead. This means every upper-layer
-    decoder in this codebase -- including ones that dispatch purely on IP
-    protocol number or TCP/UDP port, with no IPv4-specific logic of their
-    own -- is currently unreachable over IPv6, not because each one was
-    individually scoped out, but because nothing ever hands them an IPv6
-    flow to begin with.
+24. **IPv6 support.** **Done -- first pass** (v0.2.4). Was flagged across
+    several other items and the User Guide's own limitations list as they
+    were written (`ipv4.hpp`'s own header comment, USER_GUIDE.md's "No
+    IPv6" bullet, and the VRRP-for-IPv6/HSRPv2-for-IPv6/PIM-IPv6/
+    6in4-inner-address gaps each called out separately). Before this,
+    `decoder.cpp` only ever parsed an IPv4 outer header: an IPv6 packet
+    over Ethernet was named at the link layer (`ETHERTYPE_IPV6`, `0x86DD`
+    -- see `link_layer.hpp`) but its own header was never opened, so it
+    was reported as `non-ip`; over a raw-IP link type there is no
+    ethertype field to name it by at all, so it fell through to
+    `parse-error` instead. This meant every upper-layer decoder in this
+    codebase -- including ones that dispatch purely on IP protocol number
+    or TCP/UDP port, with no IPv4-specific logic of their own -- was
+    unreachable over IPv6, not because each one was individually scoped
+    out, but because nothing ever handed them an IPv6 flow to begin with.
 
-    Scope for a first pass: a new `ipv6.hpp`/`ipv6.cpp`, mirroring
-    `ipv4.hpp`/`.cpp`'s own shape (fixed 40-byte base header; RFC 8200's
-    extension-header chain -- Hop-by-Hop/Routing/Fragment/Destination
-    Options/ESP/AH -- walked far enough to reach the real upper-layer
-    protocol, not fully decoded); a new `decoder.cpp` call site alongside
-    the existing IPv4 one; and a shared, canonical (RFC 5952
-    zero-run-compressed) IPv6 address-formatting helper, reused everywhere
-    an address currently only has IPv4 formatting -- `dns.cpp`'s own AAAA
-    handler already does a basic, non-canonical hex-colon rendering
-    (`case 28` in its RR-value decode function) that is a useful reference
-    point but not this shared helper. That one formatter is what unblocks
-    several already-documented gaps at once: VRRPv3/HSRPv2-for-IPv6
-    address-list rendering (`vrrp.hpp`/`hsrp.hpp`'s own "no IPv6 address
-    formatting anywhere in the codebase" notes), PIM's IPv6 Encoded
-    Address support (`pim.hpp`), and 6in4's inner src/dst extraction
-    (`tunnel_vpn.cpp`) -- none of those four need new wire-format logic,
-    only the formatter this item would add.
+    Landed as scoped: a new `ipv6.hpp`/`ipv6.cpp`, mirroring
+    `ipv4.hpp`/`.cpp`'s own shape -- fixed 40-byte base header parsed via
+    `Cursor`, then the RFC 8200 extension-header chain walked far enough
+    to reach the real upper-layer protocol (not fully decoded). Three
+    header-length conventions are walked: the generic 8-byte-unit format
+    shared by Hop-by-Hop(0)/Routing(43)/Destination-Options(60); AH(51)'s
+    own different RFC 4302 4-byte-unit format (walked past, since AH
+    doesn't encrypt); and Fragment(44)'s fixed 8 bytes (walked
+    structurally, not reassembled -- the same documented limitation
+    `ipv4.hpp` already has for IPv4 fragments). ESP(50) is deliberately
+    *never* walked past -- its payload is encrypted, so it simply becomes
+    the parse's own final `next_header`, falling through to the existing
+    GRE/ESP/AH/IPIP/6in4/L2TPv3 `tunnel_vpn.hpp` recognition with no new
+    code needed there at all. A `kMaxExtensionHeaders = 16` cap guards
+    against a pathological chain. `format_ipv6()` implements RFC 5952
+    canonical rendering (lowercase hex, no leading zeros, longest
+    all-zero run of 2+ groups compressed to `::`, leftmost run wins
+    ties, a lone zero group never compressed) -- hand-traced against RFC
+    5952's own worked example before implementation. Since
+    `DecodedPacket::src_ip`/`dst_ip` were already `std::string` rather
+    than a fixed-width integer, this one formatter plus the new
+    `decoder.cpp` call site was enough to make the entire downstream
+    pipeline -- TCP/UDP reassembly, every IP-protocol-number/TCP-port/
+    UDP-port-keyed decoder, output writers, resolver hostname lookups --
+    address-family-agnostic with zero changes of their own; no decoder
+    needed to be touched to start seeing IPv6 traffic.
 
-    Out of scope for a first pass, the same way the IPv4 side draws its
-    own lines today: 4in6/DS-Lite/MAP-E (IPv6-*outer* encapsulations,
-    which need the new `decoder.cpp` call site itself before they're even
-    reachable -- see docs/PROTOCOL_COVERAGE.md's Tier 5 section); wiring
-    IPv6 into `policy validate`'s own conduit/zone model, which should
-    follow the same "widen policy validate" work items 9/14/15/17 already
-    call for on the UDP side rather than duplicate it; and IPsec/ESP's own
-    encrypted payload (opaque regardless of IP version, the same limit ESP
-    already has over IPv4).
+    Dispatch is by version-sniffing rather than ethertype alone: both
+    `ETHERTYPE_IPV6` over Ethernet and a raw-IP link type (which has no
+    ethertype field at all) converge on peeking the IP version nibble
+    and calling `parse_ipv6()` or `parse_ipv4()` accordingly. The ~2000
+    lines of IP-protocol/TCP/UDP dispatch logic that used to live inline
+    in `Decoder::decode()` were mechanically extracted (no logic changes)
+    into a new private `Decoder::decode_ip_payload()`, taking the
+    IP-version-agnostic fields (protocol number, payload, ttl/hop-limit)
+    as parameters so both the IPv4 and IPv6 paths call the same cascade;
+    IGRP's own IPv4-only classful-routing source-address field is the one
+    place the extraction couldn't stay purely mechanical (it now takes an
+    explicit "0 for the IPv6 path" parameter, since there is no real IPv6
+    IGRP traffic). One latent bug was found and closed along the way,
+    before it could ever surface as a real one: `flow_key`/`session_key`
+    strings were built as `ip + ":" + port`, which becomes ambiguous once
+    `ip` can itself be a colon-heavy IPv6 address; fixed via a new
+    `format_flow_endpoint()` helper using `'#'` as the separator instead
+    (verified these keys are never rendered in output, only used as
+    internal map keys, so the change has zero visible-output impact).
+
+    That one formatter also unblocks several already-documented gaps at
+    once, though wiring each of them up is left for a future pass rather
+    than bundled into this one: VRRPv3/HSRPv2-for-IPv6 address-list
+    rendering (`vrrp.hpp`/`hsrp.hpp`'s own "no IPv6 address formatting
+    anywhere in the codebase" notes), PIM's IPv6 Encoded Address support
+    (`pim.hpp`), and 6in4's inner src/dst extraction (`tunnel_vpn.cpp`).
+
+    6 new `ipv6_*` CTest tests against two new fixtures
+    (`tests/sample_ipv6.pcap`, 5 packets, and `tests/sample_ipv6_raw_link
+    .pcapng`, a raw-IP-link-type capture with no ethertype at all):
+    Modbus-over-TCP with canonical zero-run-compressed addresses; TCP
+    session pairing working correctly across IPv6 addresses; a plain UDP
+    datagram between link-local addresses; an extension-header chain
+    (Hop-by-Hop + Destination-Options) walked to reach a Modbus payload,
+    using a non-compressed address to prove that rendering path too; ESP
+    confirmed *not* walked past, falling through to the existing
+    tunnel_vpn SPI recognition; and IPv6 over a raw-IP link type decoded
+    purely via version-sniffing. All 6 written against real,
+    manually-verified CLI output before the regex was committed, matching
+    this project's own established discipline. Full suite: 1539 -> 1545
+    tests (default config), 1527 -> 1533 (no-live-capture config),
+    zero-warning build in both. Manually smoke-tested (not via CTest)
+    against `--stats`, `inventory`, and `policy validate` as well:
+    `inventory` correctly lists IPv6 assets/communications and flags ESP
+    as a notable IT protocol; `policy validate` correctly reports IPv6
+    flows as unclassified, since zone/conduit matching doesn't understand
+    IPv6 yet (see below) -- neither subcommand crashes or misbehaves on
+    IPv6 traffic.
+
+    **Known, deliberately-untouched cosmetic gap**: `asset_inventory.cpp`'s
+    skip-reason wording ("no IPv4 layer") is now slightly stale, since an
+    IPv6 packet has `has_ip = true` too and can be skipped for other
+    reasons that message doesn't distinguish. Left as-is for this pass
+    rather than reworded, for the same risk-avoidance reason
+    `decoder.cpp`'s own `"(not IPv4)"` filtered-protocol fallback text was
+    also left untouched (10 existing tests pin that exact string) --
+    fixing wording throughout `asset_inventory.cpp`/`policy_engine.cpp`
+    for full IPv6 accuracy is real but separable work, not a functional
+    bug, and is better done together with the zone/conduit wiring below
+    than piecemeal here.
+
+    Out of scope for this first pass, the same way the IPv4 side draws
+    its own lines today: 4in6/DS-Lite/MAP-E (IPv6-*outer*
+    encapsulations -- see docs/PROTOCOL_COVERAGE.md's Tier 5 section);
+    fragment reassembly (structurally walked, not reassembled, matching
+    IPv4's own existing gap); jumbograms; Mobility/HIP/Shim6 extension
+    headers; a text-parsing `parse_ipv6_string`; ICMPv6 decoding beyond
+    name-only recognition; wiring IPv6 into `policy validate`'s own
+    conduit/zone model, which should follow the same "widen policy
+    validate" work items 9/14/15/17 already call for on the UDP side
+    rather than duplicate it; and IPsec/ESP's own encrypted payload
+    (opaque regardless of IP version, the same limit ESP already has over
+    IPv4).
 
 25. **VMware vSphere/ESXi link-layer frames (EtherType `0x8922`).** Not
     yet started. VMware's own registered EtherType, ridden by two related

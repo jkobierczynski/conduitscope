@@ -51,6 +51,7 @@ add_library(conduitscope_core STATIC
   src/pcap_writer.cpp
   src/link_layer.cpp
   src/ipv4.cpp
+  src/ipv6.cpp
   src/tcp.cpp
   src/udp.cpp
   src/modbus.cpp
@@ -10826,3 +10827,67 @@ add_test(NAME pcap_write_dash_w_produces_valid_pcap_header
   COMMAND bash -c "'$<TARGET_FILE:conduitscope>' decode --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_arp.pcap' -w '${CMAKE_CURRENT_BINARY_DIR}/dash_w_header_check.pcap' --output /dev/null && '$<TARGET_FILE:conduitscope>' info --read '${CMAKE_CURRENT_BINARY_DIR}/dash_w_header_check.pcap'")
 set_tests_properties(pcap_write_dash_w_produces_valid_pcap_header PROPERTIES
   PASS_REGULAR_EXPRESSION "pcap version: +2\\.4\nlink type: +Ethernet\nsnaplen: .*\npackets: +6")
+
+# ---------------------------------------------------------------------------------------------
+# IPv6 support (docs/DEVELOPMENT.md ROADMAP item 24) -- ipv6.hpp/ipv6.cpp's own base-header and
+# RFC 8200 extension-header-chain parsing, format_ipv6's RFC 5952 canonical rendering, and
+# decoder.cpp's shared version-sniffing dispatch (Decoder::decode_ip_payload, reached from either
+# the IPv4 or the IPv6 branch), all exercised through real Modbus/TCP and plain UDP traffic --
+# tests/sample_ipv6.pcap (tools/make_sample_pcap.py's build_ipv6_sample). Every regex below was
+# confirmed against the real CLI output first, not guessed at.
+
+# Packet 1: Modbus/TCP request over IPv6, no extension headers -- proves the whole upper-layer
+# cascade (TCP dispatch, port-based Modbus recognition) is reachable over IPv6 at all, and that
+# both addresses (each with one compressible zero run) render in RFC 5952 canonical form.
+add_test(NAME ipv6_modbus_over_tcp_decodes_with_canonical_zero_run_compression
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ipv6.pcap" --format text)
+set_tests_properties(ipv6_modbus_over_tcp_decodes_with_canonical_zero_run_compression PROPERTIES
+  PASS_REGULAR_EXPRESSION "#1  0\\.000000  2001:db8::50:51000 -> 2001:db8::10:502")
+
+# Packet 2: the response, paired to packet 1 via tcp_session_key/DecodeContext::session_key --
+# proves the '#' flow-key/session-key separator fix (decoder.cpp's format_flow_endpoint, added
+# alongside this same IPv6 work to remove a latent collision now that an IP address string can
+# itself contain colons) didn't break authoritative TCP-session+transaction-ID pairing, the one
+# existing feature that most directly depends on session_key uniqueness.
+add_test(NAME ipv6_modbus_tcp_session_pairing_works_across_ipv6_addresses
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ipv6.pcap" --format json)
+set_tests_properties(ipv6_modbus_tcp_session_pairing_works_across_ipv6_addresses PROPERTIES
+  PASS_REGULAR_EXPRESSION "authoritative pairing: response to transaction id 1")
+
+# Packet 3: a plain UDP datagram over IPv6 between two link-local addresses -- proves has_udp/
+# src_port/dst_port populate correctly off an IPv6 outer header.
+add_test(NAME ipv6_udp_datagram_decodes_with_link_local_addresses
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ipv6.pcap" --format text)
+set_tests_properties(ipv6_udp_datagram_decodes_with_link_local_addresses PROPERTIES
+  PASS_REGULAR_EXPRESSION "#3  2\\.002000  fe80::1:34567 -> fe80::2:44444")
+
+# Packet 4: the same Modbus request as packet 1, preceded by a chained Hop-by-Hop Options header
+# and a Destination Options header -- proves parse_ipv6's extension-header walk correctly reaches
+# the real upper-layer protocol AND the real payload past two extension headers (the request's own
+# "read 4 holding register" text, unique to this packet, only decodes correctly if the walk landed
+# exactly on the start of the TCP segment, not a few bytes short or long). Also exercises
+# NO_COMPRESSION_ADDR (no zero run at all) to prove format_ipv6 renders plain colon-separated
+# groups, with no "::", when there's nothing to compress.
+add_test(NAME ipv6_extension_header_chain_walked_to_reach_modbus_payload
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ipv6.pcap" --format text)
+set_tests_properties(ipv6_extension_header_chain_walked_to_reach_modbus_payload PROPERTIES
+  PASS_REGULAR_EXPRESSION "#4  3\\.003000  2001:db8:1:2:3:4:5:6:51001 -> 2001:db8::10:502.*read 4 holding register")
+
+# Packet 5: next_header == ESP directly off the base header, no extension headers at all -- proves
+# parse_ipv6 deliberately does NOT walk past ESP (its payload is encrypted, the same opaque-
+# regardless-of-IP-version limit ESP already has over IPv4): it must surface as a recognized-but-
+# undecoded ESP packet via decoder.cpp's existing GRE/ESP/AH/IPIP/6in4/L2TPv3 tunnel_vpn
+# recognition, now reachable over IPv6 with no new code of its own.
+add_test(NAME ipv6_esp_next_header_not_walked_past_reaches_tunnel_vpn_recognition
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ipv6.pcap" --format text)
+set_tests_properties(ipv6_esp_next_header_not_walked_past_reaches_tunnel_vpn_recognition PROPERTIES
+  PASS_REGULAR_EXPRESSION "#5  4\\.004000  2001:db8::50 -> 2001:db8::10.*SPI=0x12345678")
+
+# A raw-IP link type (no Ethernet framing, no ethertype field at all) carrying an IPv6 packet --
+# proves decoder.cpp's version-sniff (peeking the IP version nibble directly) works with no
+# ethertype hint to lean on at all, the scenario ROADMAP item 24 specifically calls out.
+# tests/sample_ipv6_raw_link.pcapng (build_ipv6_raw_link_sample).
+add_test(NAME ipv6_over_raw_ip_link_type_decodes_via_version_sniff
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ipv6_raw_link.pcapng" --format text)
+set_tests_properties(ipv6_over_raw_ip_link_type_decodes_via_version_sniff PROPERTIES
+  PASS_REGULAR_EXPRESSION "#1  0\\.000000  2001:db8::50:51000 -> 2001:db8::10:502")

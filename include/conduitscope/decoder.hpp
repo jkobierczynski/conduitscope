@@ -969,6 +969,17 @@ public:
     DecodedPacket decode(const PcapPacket& packet, uint32_t link_type, size_t index) const;
 
 private:
+    // IPv6 addition (docs/DEVELOPMENT.md ROADMAP item 24): the version-agnostic continuation of
+    // decode() above, holding every IP-protocol-number/TCP-port/UDP-port-keyed dispatch decision
+    // that never actually depended on which IP version the packet arrived as -- decode() calls this
+    // once it has parsed either an IPv4 or an IPv6 outer header, having already populated out.has_ip/
+    // src_ip/dst_ip/ip_protocol/ttl itself. See decoder.cpp's own comment right above this method's
+    // definition for the full rationale (why this exists as its own method rather than two near-
+    // duplicate ~2000-line cascades, one per IP version).
+    DecodedPacket decode_ip_payload(DecodedPacket out, uint8_t protocol, ByteSpan payload,
+                                     uint8_t ttl_or_hop_limit, size_t index, int ip_version,
+                                     uint32_t ipv4_src_addr_for_igrp) const;
+
     DecodeOptions options_;
 
     // See TcpFlowBuffer above. Keyed by "src_ip:src_port->dst_ip:dst_port" -- one entry per

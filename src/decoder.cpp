@@ -24,6 +24,7 @@
 #include "conduitscope/igmp.hpp"
 #include "conduitscope/igrp.hpp"
 #include "conduitscope/ipv4.hpp"
+#include "conduitscope/ipv6.hpp"
 #include "conduitscope/link_layer.hpp"
 #include "conduitscope/mms.hpp"
 #include "conduitscope/modbus.hpp"
@@ -70,6 +71,21 @@ std::string well_known_udp_port_name(uint16_t /*port*/) {
     return "";
 }
 
+// One endpoint's own "ip#port" text, shared by tcp_session_key and every inline flow_key/
+// session_key construction below. IPv6 addition: the separator between the IP text and the port
+// is '#', not ':' -- a canonical IPv6 address is itself full of colons (see format_ipv6, ipv6.hpp),
+// so "ip:port" is ambiguous the moment ip can be IPv6 (e.g. is "2001:db8::1:8080" address
+// "2001:db8::1" port 8080, or address "2001:db8::1:8" port 80?). These strings are internal map
+// keys only -- never rendered in any output format (see output.cpp, which never reads flow_key/
+// session_key) -- so changing the separator has no visible effect on any existing output; it only
+// removes a latent flow_key/session_key collision between two unrelated flows that this codebase's
+// IPv4-only history never had to consider. '#' can't appear in a dotted-quad, a canonical IPv6
+// address, or a decimal port number, so "ip#port" round-trips unambiguously for either address
+// family (not that anything here actually parses it back apart -- uniqueness is all this needs).
+std::string format_flow_endpoint(const std::string& ip, uint16_t port) {
+    return ip + "#" + std::to_string(port);
+}
+
 // Canonicalizes both directions of one TCP 4-tuple into a single, direction-independent session
 // key, so Decoder::modbus_pending_ and (via ctx.session_key) session-keyed registration-model
 // state like ModbusFlowState/MqttFlowState can track state per SESSION (a request and its
@@ -81,8 +97,8 @@ std::string well_known_udp_port_name(uint16_t /*port*/) {
 // "->"), even though the two happen to key different maps.
 std::string tcp_session_key(const std::string& ip_a, uint16_t port_a, const std::string& ip_b,
                              uint16_t port_b) {
-    std::string ea = ip_a + ":" + std::to_string(port_a);
-    std::string eb = ip_b + ":" + std::to_string(port_b);
+    std::string ea = format_flow_endpoint(ip_a, port_a);
+    std::string eb = format_flow_endpoint(ip_b, port_b);
     return (ea < eb) ? (ea + "<->" + eb) : (eb + "<->" + ea);
 }
 
@@ -881,7 +897,13 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
             out.has_vlan_tag = eth.has_vlan_tag;
             out.vlan_id = eth.vlan_id;
 
-            if (eth.ethertype != ETHERTYPE_IPV4) {
+            // IPv6 addition (docs/DEVELOPMENT.md ROADMAP item 24): ETHERTYPE_IPV6 joins
+            // ETHERTYPE_IPV4 here rather than getting its own branch -- both just hand
+            // eth.payload down to the shared version-sniffing parse_ipv4-or-parse_ipv6 dispatch
+            // right below this whole if/else (see its own comment), the same dispatch a raw-IP
+            // link type already has to do since it has no ethertype field to check at all. Every
+            // OTHER ethertype below is unchanged.
+            if (eth.ethertype != ETHERTYPE_IPV4 && eth.ethertype != ETHERTYPE_IPV6) {
                 // Registration-model dispatch (see protocol_registry.hpp's own file header):
                 // ethertype_registry() now DRIVES this cascade's dispatch order, rather than being
                 // audit-trail data kept in sync by hand -- looping over it in order and trying
@@ -1070,6 +1092,33 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
             return out;
         }
 
+        // Version-sniff (IPv6 addition, docs/DEVELOPMENT.md ROADMAP item 24): a raw-IP link type
+        // has no ethertype field to tell IPv4 and IPv6 apart with, and an Ethernet frame carrying
+        // ETHERTYPE_IPV6 lands here too (see this function's own EtherType branch above, which
+        // now lets ETHERTYPE_IPV6 through alongside ETHERTYPE_IPV4 rather than giving it a
+        // separate call site) -- both converge on checking the actual IP version nibble, the one
+        // signal that's always present regardless of how the packet arrived. Anything that's
+        // neither 4 nor 6 falls through to parse_ipv4 exactly as it always did before this
+        // addition, which throws ParseError for a version field that isn't 4 -- unchanged
+        // behavior for a non-IP/corrupt/truncated raw-IP-link payload.
+        if (!network_layer_payload.empty() && (network_layer_payload.at(0) >> 4) == 6) {
+            Ipv6Header ip6 = parse_ipv6(network_layer_payload);
+            out.has_ip = true;
+            out.src_ip = format_ipv6(ip6.src_addr);
+            out.dst_ip = format_ipv6(ip6.dst_addr);
+            out.ip_protocol = ip6.next_header;
+            out.ttl = ip6.hop_limit;
+            if (ip6.trailing_bytes_trimmed > 0) {
+                out.notes.push_back(std::to_string(ip6.trailing_bytes_trimmed) +
+                                     " trailing byte(s) after the IPv6 header's declared payload "
+                                     "length (and every extension header this parse walked past) "
+                                     "were trimmed (almost always Ethernet minimum-frame-size "
+                                     "padding, not real payload)");
+            }
+            return decode_ip_payload(std::move(out), ip6.next_header, ip6.payload, ip6.hop_limit, index,
+                                      /*ip_version=*/6, /*ipv4_src_addr_for_igrp=*/0);
+        }
+
         Ipv4Header ip = parse_ipv4(network_layer_payload);
         out.has_ip = true;
         out.src_ip = format_ipv4(ip.src_addr);
@@ -1082,11 +1131,48 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                                  "trimmed (almost always Ethernet minimum-frame-size padding, not real "
                                  "payload)");
         }
+        return decode_ip_payload(std::move(out), ip.protocol, ip.payload, ip.ttl, index, /*ip_version=*/4,
+                                  /*ipv4_src_addr_for_igrp=*/ip.src_addr);
 
-        if (ip.protocol == IPPROTO_UDP_VALUE) {
+    } catch (const ParseError& e) {
+        if (options_.strict) {
+            throw;
+        }
+        out.protocol = "parse-error";
+        out.summary = std::string("could not parse packet: ") + e.what();
+        return out;
+    }
+}
+
+// Version-agnostic continuation of Decoder::decode() above, extracted verbatim (mechanical rename
+// only -- ip.protocol/ip.payload/ip.ttl become the protocol/payload/ttl_or_hop_limit parameters
+// below, no logic changed) so both the IPv4 and IPv6 branches above can share every protocol-
+// number/TCP/UDP dispatch decision that never actually depended on which IP version got it here --
+// the ~44 IP-protocol-number/TCP-port/UDP-port-keyed decoders in this cascade (Modbus, DNP3,
+// S7comm, MQTT, EIGRP, ICMP's own protocol-number gate, ...) have no IPv4-specific logic of their
+// own; nothing ever handed them an IPv6 flow before this addition, not because each one was
+// individually scoped out (docs/DEVELOPMENT.md ROADMAP item 24's own wording). `out` is taken and
+// returned BY VALUE, the same "cheap enough to copy, DecodedPacket already is" posture
+// ProtocolResult's own file header comment documents -- every one of this cascade's own many
+// `return out;` exit points below is completely unchanged from before this extraction.
+//
+// ip_version (4 or 6) is used in exactly one place below (the "not TCP" fallback's own summary
+// text) -- everything else in this ~2000-line cascade genuinely never needed to know which IP
+// version it came from, which is the whole point of extracting it this way rather than
+// duplicating the cascade per version.
+DecodedPacket Decoder::decode_ip_payload(DecodedPacket out, uint8_t protocol, ByteSpan payload,
+                                          uint8_t ttl_or_hop_limit, size_t index, int ip_version,
+                                          uint32_t ipv4_src_addr_for_igrp) const {
+    (void)ttl_or_hop_limit;  // out.ttl is already populated by both callers before this is reached;
+                              // kept as a parameter for symmetry with protocol/payload and because a
+                              // future caller of this cascade may need it even though none in this
+                              // cascade's own body currently reads it back out (out.ttl already holds
+                              // it).
+    try {
+        if (protocol == IPPROTO_UDP_VALUE) {
             // Unlike TCP, a UDP datagram is already a complete, self-delimited unit, so none of
             // the TCP-segment reassembly machinery below applies here at all.
-            UdpDatagram udp = parse_udp(ip.payload);
+            UdpDatagram udp = parse_udp(payload);
             out.has_udp = true;
             out.src_port = udp.src_port;
             out.dst_port = udp.dst_port;
@@ -1189,8 +1275,8 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                 std::string udp_session =
                     tcp_session_key(out.src_ip, udp.src_port, out.dst_ip, udp.dst_port);
                 DecodeContext ctx;
-                ctx.flow_key = out.src_ip + ":" + std::to_string(udp.src_port) + "->" + out.dst_ip +
-                               ":" + std::to_string(udp.dst_port);
+                ctx.flow_key = format_flow_endpoint(out.src_ip, udp.src_port) + "->" +
+                               format_flow_endpoint(out.dst_ip, udp.dst_port);
                 ctx.session_key = udp_session;
                 ctx.packet_index = index;
                 ctx.protocol_id = "melsec";
@@ -1235,8 +1321,8 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                 std::string udp_session =
                     tcp_session_key(out.src_ip, udp.src_port, out.dst_ip, udp.dst_port);
                 DecodeContext ctx;
-                ctx.flow_key = out.src_ip + ":" + std::to_string(udp.src_port) + "->" + out.dst_ip +
-                               ":" + std::to_string(udp.dst_port);
+                ctx.flow_key = format_flow_endpoint(out.src_ip, udp.src_port) + "->" +
+                               format_flow_endpoint(out.dst_ip, udp.dst_port);
                 ctx.session_key = udp_session;
                 ctx.packet_index = index;
                 ctx.protocol_id = "fins";
@@ -1361,8 +1447,8 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                 std::string udp_session =
                     tcp_session_key(out.src_ip, udp.src_port, out.dst_ip, udp.dst_port);
                 DecodeContext ctx;
-                ctx.flow_key = out.src_ip + ":" + std::to_string(udp.src_port) + "->" + out.dst_ip +
-                               ":" + std::to_string(udp.dst_port);
+                ctx.flow_key = format_flow_endpoint(out.src_ip, udp.src_port) + "->" +
+                               format_flow_endpoint(out.dst_ip, udp.dst_port);
                 ctx.session_key = udp_session;
                 ctx.packet_index = index;
                 ctx.protocol_id = "kerberos";
@@ -1756,7 +1842,7 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
         // now reaches its try_parse_x through x_decoder().decode() instead of calling it directly,
         // at the exact same textual position it always occupied; nothing about detection order or
         // behavior changed. See protocol_registry.cpp's ip_protocol_registry().
-        if (ip.protocol == ICMP_IP_PROTOCOL) {
+        if (protocol == ICMP_IP_PROTOCOL) {
             bool want_icmp = options_.protocol_filter == ProtocolFilter::Auto ||
                               options_.protocol_filter == ProtocolFilter::IcmpOnly;
             if (want_icmp) {
@@ -1766,7 +1852,7 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                 // IcmpMessage, and output.cpp's write_icmp_json_fields reads straight from it.
                 DecodeContext ctx;
                 ctx.protocol_id = "icmp";
-                if (auto result = icmp_decoder().decode(ip.payload, ctx)) {
+                if (auto result = icmp_decoder().decode(payload, ctx)) {
                     const IcmpMessage& msg = result->as<IcmpMessage>();
                     out.protocol = "icmp";
                     out.summary = msg.summary;
@@ -1777,7 +1863,7 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
             }
         }
 
-        if (ip.protocol == IGMP_IP_PROTOCOL) {
+        if (protocol == IGMP_IP_PROTOCOL) {
             bool want_igmp = options_.protocol_filter == ProtocolFilter::Auto ||
                               options_.protocol_filter == ProtocolFilter::IgmpOnly;
             if (want_igmp) {
@@ -1787,7 +1873,7 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                 // IgmpMessage, and output.cpp's write_igmp_json_fields reads straight from it.
                 DecodeContext ctx;
                 ctx.protocol_id = "igmp";
-                if (auto result = igmp_decoder().decode(ip.payload, ctx)) {
+                if (auto result = igmp_decoder().decode(payload, ctx)) {
                     const IgmpMessage& msg = result->as<IgmpMessage>();
                     out.protocol = "igmp";
                     out.summary = msg.summary;
@@ -1798,7 +1884,7 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
             }
         }
 
-        if (ip.protocol == VRRP_IP_PROTOCOL) {
+        if (protocol == VRRP_IP_PROTOCOL) {
             bool want_vrrp = options_.protocol_filter == ProtocolFilter::Auto ||
                               options_.protocol_filter == ProtocolFilter::VrrpOnly;
             if (want_vrrp) {
@@ -1811,7 +1897,7 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                 DecodeContext ctx;
                 ctx.protocol_id = "vrrp";
                 ctx.redact_secrets = options_.redact_secrets;
-                if (auto result = vrrp_decoder().decode(ip.payload, ctx)) {
+                if (auto result = vrrp_decoder().decode(payload, ctx)) {
                     const VrrpMessage& msg = result->as<VrrpMessage>();
                     out.protocol = "vrrp";
                     out.summary = msg.summary;
@@ -1822,7 +1908,7 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
             }
         }
 
-        if (ip.protocol == IGRP_IP_PROTOCOL) {
+        if (protocol == IGRP_IP_PROTOCOL) {
             bool want_igrp = options_.protocol_filter == ProtocolFilter::Auto ||
                               options_.protocol_filter == ProtocolFilter::IgrpOnly;
             if (want_igrp) {
@@ -1835,10 +1921,18 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                 // site in this batch. Zero-flat-field migration (cheap batch): out.result now
                 // carries the whole IgrpMessage, and output.cpp's write_igrp_json_fields reads
                 // straight from it.
+                //
+                // IPv6 addition: ipv4_src_addr_for_igrp (this function's own parameter, below) is
+                // 0 whenever this call reached here via the IPv6 branch -- IGRP is a classful IPv4-
+                // only routing protocol with no IPv6 equivalent (superseded by EIGRP/OSPFv3/etc.,
+                // which already have their own decoders), so it has no real IPv6 traffic to ever
+                // reconstruct an address for; 0 here is the same "a real, if unlikely, address that
+                // nothing meaningful ever reads" default DecodeContext::ip_src_addr's own comment
+                // already documents for every other decoder in this cascade.
                 DecodeContext ctx;
                 ctx.protocol_id = "igrp";
-                ctx.ip_src_addr = ip.src_addr;
-                if (auto result = igrp_decoder().decode(ip.payload, ctx)) {
+                ctx.ip_src_addr = ipv4_src_addr_for_igrp;
+                if (auto result = igrp_decoder().decode(payload, ctx)) {
                     const IgrpMessage& msg = result->as<IgrpMessage>();
                     out.protocol = "igrp";
                     out.summary = msg.summary;
@@ -1849,7 +1943,7 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
             }
         }
 
-        if (ip.protocol == PIM_IP_PROTOCOL) {
+        if (protocol == PIM_IP_PROTOCOL) {
             bool want_pim = options_.protocol_filter == ProtocolFilter::Auto ||
                              options_.protocol_filter == ProtocolFilter::PimOnly;
             if (want_pim) {
@@ -1859,7 +1953,7 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                 // PimMessage, and output.cpp's write_pim_json_fields reads straight from it.
                 DecodeContext ctx;
                 ctx.protocol_id = "pim";
-                if (auto result = pim_decoder().decode(ip.payload, ctx)) {
+                if (auto result = pim_decoder().decode(payload, ctx)) {
                     const PimMessage& msg = result->as<PimMessage>();
                     out.protocol = "pim";
                     out.summary = msg.summary;
@@ -1870,7 +1964,7 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
             }
         }
 
-        if (ip.protocol == EIGRP_IP_PROTOCOL) {
+        if (protocol == EIGRP_IP_PROTOCOL) {
             bool want_eigrp = options_.protocol_filter == ProtocolFilter::Auto ||
                                options_.protocol_filter == ProtocolFilter::EigrpOnly;
             if (want_eigrp) {
@@ -1889,7 +1983,7 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                 // policy_engine.cpp/asset_inventory.cpp ever read an eigrp_* field).
                 DecodeContext ctx;
                 ctx.protocol_id = "eigrp";
-                if (auto result = eigrp_decoder().decode(ip.payload, ctx)) {
+                if (auto result = eigrp_decoder().decode(payload, ctx)) {
                     const EigrpMessage& msg = result->as<EigrpMessage>();
                     out.protocol = "eigrp";
                     out.summary = msg.summary;
@@ -1900,7 +1994,7 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
             }
         }
 
-        if (ip.protocol == OSPF_IP_PROTOCOL) {
+        if (protocol == OSPF_IP_PROTOCOL) {
             bool want_ospf = options_.protocol_filter == ProtocolFilter::Auto ||
                               options_.protocol_filter == ProtocolFilter::OspfOnly;
             if (want_ospf) {
@@ -1912,7 +2006,7 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                 // to reach that state (see protocol_registry.cpp's ip_protocol_registry()).
                 DecodeContext ctx;
                 ctx.protocol_id = "ospf";
-                if (auto result = ospf_decoder().decode(ip.payload, ctx)) {
+                if (auto result = ospf_decoder().decode(payload, ctx)) {
                     out.protocol = "ospf";
                     fill_ospf_fields(out, result->as<OspfMessage>());
                     return out;
@@ -1928,13 +2022,13 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
         // WireGuard/OpenVPN/dtls-tunnel/STT) is dispatched separately, in the UDP and TCP tail
         // regions below. MPLS, the fifteenth Tier 5 protocol, is dispatched separately still, in the
         // EtherType-keyed region above -- see mpls.hpp.
-        if (ip.protocol == GRE_IP_PROTOCOL || ip.protocol == ESP_IP_PROTOCOL ||
-            ip.protocol == AH_IP_PROTOCOL || ip.protocol == IPIP_IP_PROTOCOL ||
-            ip.protocol == IPV6_6IN4_IP_PROTOCOL || ip.protocol == L2TPV3_IP_PROTOCOL) {
+        if (protocol == GRE_IP_PROTOCOL || protocol == ESP_IP_PROTOCOL ||
+            protocol == AH_IP_PROTOCOL || protocol == IPIP_IP_PROTOCOL ||
+            protocol == IPV6_6IN4_IP_PROTOCOL || protocol == L2TPV3_IP_PROTOCOL) {
             bool want_tunnel_vpn = options_.protocol_filter == ProtocolFilter::Auto ||
                                     options_.protocol_filter == ProtocolFilter::TunnelVpnOnly;
             if (want_tunnel_vpn) {
-                if (auto m = try_recognize_tunnel_vpn_ip_proto(ip.payload, ip.protocol)) {
+                if (auto m = try_recognize_tunnel_vpn_ip_proto(payload, protocol)) {
                     out.protocol = m->protocol;
                     out.summary = m->summary;
                     for (const auto& n : m->notes) out.notes.push_back(n);
@@ -1943,18 +2037,27 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
             }
         }
 
-        if (ip.protocol != IPPROTO_TCP_VALUE) {
+        if (protocol != IPPROTO_TCP_VALUE) {
             out.protocol = "non-tcp";
             std::ostringstream s;
-            s << "IPv4 protocol number " << static_cast<unsigned>(ip.protocol);
-            std::string name = ip_protocol_name(ip.protocol);
+            // ip_version's one and only use in this whole ~2000-line cascade (see this function's
+            // own header comment) -- wording kept byte-identical to before this function existed
+            // for ip_version==4 (many existing CTest PASS_REGULAR_EXPRESSION entries pin this exact
+            // "IPv4 protocol number N" text), with an IPv6-specific wording added alongside it
+            // rather than generalized into one IP-version-agnostic phrase.
+            if (ip_version == 6) {
+                s << "IPv6 next-header protocol number " << static_cast<unsigned>(protocol);
+            } else {
+                s << "IPv4 protocol number " << static_cast<unsigned>(protocol);
+            }
+            std::string name = ip_protocol_name(protocol);
             if (!name.empty()) s << " (" << name << ")";
             s << " (not TCP)";
             out.summary = s.str();
             return out;
         }
 
-        TcpSegment tcp = parse_tcp(ip.payload);
+        TcpSegment tcp = parse_tcp(payload);
         out.has_tcp = true;
         out.src_port = tcp.src_port;
         out.dst_port = tcp.dst_port;
@@ -2097,8 +2200,8 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
         // reassembly (tcp_reassembly_) and, via DecodeContext::flow_key, registration-model
         // decoders' own directional-flow-keyed state (Dnp3ReassemblyState/CotpReassemblyState --
         // see reassemble_tcp_payload and dnp3.hpp/cotp.hpp).
-        std::string flow_key =
-            out.src_ip + ":" + std::to_string(tcp.src_port) + "->" + out.dst_ip + ":" + std::to_string(tcp.dst_port);
+        std::string flow_key = format_flow_endpoint(out.src_ip, tcp.src_port) + "->" +
+                                format_flow_endpoint(out.dst_ip, tcp.dst_port);
 
         // Bytes to actually run protocol detection against: tcp.payload as-is, unless this flow
         // has bytes buffered from an earlier packet (a PDU/frame split across TCP segments) that

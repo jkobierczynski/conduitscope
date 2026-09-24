@@ -14,6 +14,7 @@ Run it from the repository root:
 import struct
 import pathlib
 import base64
+import socket
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 TESTS_DIR = ROOT / "tests"
@@ -128,6 +129,41 @@ def ipv4_header(src: str, dst: str, protocol: int, payload_len: int, ident: int)
         ip_bytes(src),
         ip_bytes(dst),
     )
+
+
+ETHERTYPE_IPV6 = 0x86DD
+
+
+def ipv6_header(src: str, dst: str, next_header: int, payload_len: int) -> bytes:
+    """Fixed 40-byte IPv6 base header -- no extension headers (see ipv6_header_with_extensions
+    below for that). Mirrors ipv4_header's own shape/signature as closely as IPv6's different wire
+    format allows."""
+    version_tc_flowlabel = 0x6 << 28  # version=6, traffic class=0, flow label=0
+    return struct.pack(
+        "!IHBB16s16s",
+        version_tc_flowlabel,
+        payload_len,
+        next_header,
+        64,  # hop limit
+        socket.inet_pton(socket.AF_INET6, src),
+        socket.inet_pton(socket.AF_INET6, dst),
+    )
+
+
+def ipv6_extension_header(next_header: int, option_data: bytes) -> bytes:
+    """One generic RFC 8200 Hop-by-Hop/Routing/Destination-Options-shaped extension header:
+    Next Header(1) + Hdr Ext Len(1, in 8-byte units not counting the first 8 bytes) + option_data,
+    padded with zero bytes to the next 8-byte boundary (a real Hop-by-Hop/Destination-Options
+    header would pad with a real PadN option instead -- conduitscope's own parse_ipv6 doesn't
+    interpret option contents at all, only walks past the header by its declared length, so plain
+    zero padding round-trips through it identically and keeps this fixture builder simple)."""
+    body = option_data
+    # Header content after the 2 fixed bytes must be a multiple of 8 bytes (Hdr Ext Len is itself
+    # in 8-byte units); pad with zero bytes until (2 + len(body)) % 8 == 0.
+    while (2 + len(body)) % 8 != 0:
+        body += b"\x00"
+    hdr_ext_len = (2 + len(body)) // 8 - 1
+    return struct.pack("!BB", next_header, hdr_ext_len) + body
 
 
 def tcp_header(src_port: int, dst_port: int, seq: int, ack: int, flags: int, payload_len: int) -> bytes:
@@ -5265,6 +5301,116 @@ def build_resource_exhaustion_flow_state_sample():
     for i, pkt in enumerate(packets):
         data += pcap_record(pkt, 1_700_000_700 + i, i * 1000)
     (TESTS_DIR / "sample_resource_exhaustion_flow_state.pcap").write_bytes(data)
+
+
+def ipv6_packet(src: str, dst: str, upper_protocol: int, upper_payload: bytes, extensions: list = None) -> bytes:
+    """Builds a full IPv6 packet (base header + optional extension-header chain + upper-layer
+    payload). `extensions` is a list of (header_type_const, option_data_bytes) tuples, walked in
+    the order given; `upper_protocol` is the real upper-layer protocol carried after the last
+    extension header (or directly after the base header when `extensions` is empty/omitted)."""
+    extensions = extensions or []
+    ext_bytes = b""
+    next_header_for_base = upper_protocol
+    if extensions:
+        next_header_for_base = extensions[0][0]
+        for i, (_hdr_type, option_data) in enumerate(extensions):
+            following = extensions[i + 1][0] if i + 1 < len(extensions) else upper_protocol
+            ext_bytes += ipv6_extension_header(following, option_data)
+    payload_len = len(ext_bytes) + len(upper_payload)
+    return ipv6_header(src, dst, next_header_for_base, payload_len) + ext_bytes + upper_payload
+
+
+IPV6_HOP_BY_HOP, IPV6_ROUTING, IPV6_DESTINATION_OPTIONS, IPV6_ESP = 0, 43, 60, 50
+
+
+def build_ipv6_sample():
+    """Exercises IPv6 support end to end (docs/DEVELOPMENT.md ROADMAP item 24) -- decoder.cpp's
+    shared version-sniffing dispatch (Decoder::decode_ip_payload), parse_ipv6's own base-header and
+    extension-header-chain parsing, and format_ipv6's RFC 5952 canonical rendering, all exercised
+    through real Modbus/TCP traffic (the same protocol build_modbus_sample already uses over IPv4)
+    so this is an end-to-end proof, not just a header-parsing unit test.
+
+    Addresses are deliberately chosen for formatting variety: HMI6/PLC6 each have a zero run
+    RFC 5952 must compress; LINK_LOCAL_A is almost entirely zero-run (::1-shaped compression at a
+    different position); NO_COMPRESSION_ADDR has no zero run at all, proving format_ipv6 doesn't
+    over-compress when there's nothing to compress."""
+    packets = []
+
+    HMI6, PLC6 = "2001:db8::50", "2001:db8::10"
+    LINK_LOCAL_A, LINK_LOCAL_B = "fe80::1", "fe80::2"
+    NO_COMPRESSION_ADDR = "2001:db8:1:2:3:4:5:6"
+
+    # 1-2) Modbus request/response over IPv6+TCP, no extension headers -- the direct IPv6 mirror of
+    # build_modbus_sample's own first exchange, proving the whole upper-layer cascade (TCP dispatch,
+    # port-based Modbus recognition, request/response pairing) works completely unchanged when
+    # decode_ip_payload was reached via the IPv6 branch instead of the IPv4 one.
+    mb_req = struct.pack("!HHHBB HH", 1, 0, 6, 1, 3, 0, 10)
+    tcp_req = tcp_header(51000, 502, 1000, 2000, TCP_PSH | TCP_ACK, len(mb_req)) + mb_req
+    ip6_req = ipv6_packet(HMI6, PLC6, 6, tcp_req)
+    packets.append(eth_header(PLC_MAC, HMI_MAC, ETHERTYPE_IPV6) + ip6_req)
+
+    reg_data = b"".join(struct.pack("!H", v) for v in range(10))
+    mb_resp = struct.pack("!HHHBBB", 1, 0, 2 + 1 + len(reg_data), 1, 3, len(reg_data)) + reg_data
+    tcp_resp = tcp_header(502, 51000, 2000, 1000 + len(mb_req), TCP_PSH | TCP_ACK, len(mb_resp)) + mb_resp
+    ip6_resp = ipv6_packet(PLC6, HMI6, 6, tcp_resp)
+    packets.append(eth_header(HMI_MAC, PLC_MAC, ETHERTYPE_IPV6) + ip6_resp)
+
+    # 3) A UDP datagram over IPv6 between two link-local addresses (no recognized upper-layer
+    # protocol on this port -- the point is proving has_udp/src_port/dst_port populate correctly
+    # off an IPv6 outer header, the same way sample_modbus.pcap's own packets prove it for IPv4;
+    # which specific UDP protocol carries it is not what this packet is testing).
+    udp_payload = b"\xAA\xBB\xCC\xDD"
+    udp_seg = udp_header(34567, 44444, udp_payload) + udp_payload
+    ip6_udp = ipv6_packet(LINK_LOCAL_A, LINK_LOCAL_B, 17, udp_seg)
+    packets.append(eth_header(PLC_MAC, HMI_MAC, ETHERTYPE_IPV6) + ip6_udp)
+
+    # 4) The same Modbus request as packet 1, but preceded by a Hop-by-Hop Options header AND a
+    # Destination Options header -- proves parse_ipv6's extension-header walk correctly reaches the
+    # real upper-layer protocol (and the real payload) past two chained generic extension headers,
+    # not just the "no extension headers at all" case packets 1-2 already cover. Addresses with no
+    # zero run at all (NO_COMPRESSION_ADDR), to also prove format_ipv6 renders a fully-populated
+    # address with plain colons and no "::" when there's nothing to compress.
+    mb_req2 = struct.pack("!HHHBB HH", 2, 0, 6, 1, 3, 0, 4)
+    tcp_req2 = tcp_header(51001, 502, 3000, 4000, TCP_PSH | TCP_ACK, len(mb_req2)) + mb_req2
+    ip6_ext = ipv6_packet(
+        NO_COMPRESSION_ADDR, PLC6, 6, tcp_req2,
+        extensions=[(IPV6_HOP_BY_HOP, b"\x01\x02\x00\x00"), (IPV6_DESTINATION_OPTIONS, b"\x01\x02\x00\x00")],
+    )
+    packets.append(eth_header(PLC_MAC, HMI_MAC, ETHERTYPE_IPV6) + ip6_ext)
+
+    # 5) next_header == ESP directly off the base header (no extension headers at all) -- proves
+    # parse_ipv6 deliberately does NOT walk past ESP (its payload is encrypted, the same opaque-
+    # regardless-of-IP-version limit ESP already has over IPv4): this must surface as a recognized-
+    # but-undecoded ESP packet via decoder.cpp's existing GRE/ESP/AH/IPIP/6in4/L2TPv3 tunnel_vpn
+    # recognition (tunnel_vpn.hpp), completely unchanged code, now reachable over IPv6 too.
+    fake_esp_payload = struct.pack("!II", 0x12345678, 1) + b"\x00" * 8  # SPI + sequence + opaque ICV-ish bytes
+    ip6_esp = ipv6_packet(HMI6, PLC6, IPV6_ESP, fake_esp_payload)
+    packets.append(eth_header(PLC_MAC, HMI_MAC, ETHERTYPE_IPV6) + ip6_esp)
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_030_000 + i, i * 1000)
+    (TESTS_DIR / "sample_ipv6.pcap").write_bytes(data)
+
+
+def build_ipv6_raw_link_sample():
+    """A raw-IP link type (no Ethernet framing, no ethertype field at all) carrying an IPv6
+    packet -- proves decoder.cpp's version-sniff (peeking the IP version nibble directly, since a
+    raw-IP link has nothing else to tell IPv4 and IPv6 apart with) works with no ethertype hint to
+    lean on, the scenario docs/DEVELOPMENT.md ROADMAP item 24 specifically calls out ("over a
+    raw-IP link type there is no ethertype field to name it by at all"). pcapng (not classic pcap)
+    because that's what build_pcapng_multi_interface_sample already established as this codebase's
+    own way to declare a non-Ethernet link type for a fixture."""
+    mb_req = struct.pack("!HHHBB HH", 1, 0, 6, 1, 3, 0, 10)
+    tcp_req = tcp_header(51000, 502, 1000, 2000, TCP_PSH | TCP_ACK, len(mb_req)) + mb_req
+    raw_ip6_pkt = ipv6_packet("2001:db8::50", "2001:db8::10", 6, tcp_req)  # no Ethernet header at all
+
+    data = (
+        pcapng_shb()
+        + pcapng_idb(linktype=LINKTYPE_RAW, snaplen=65535)
+        + pcapng_epb(0, 1_700_030_500 * 1_000_000, raw_ip6_pkt)
+    )
+    (TESTS_DIR / "sample_ipv6_raw_link.pcapng").write_bytes(data)
 
 
 def build_padded_ack_sample():
@@ -13866,6 +14012,8 @@ if __name__ == "__main__":
     build_tcp_reassembly_sample()
     build_resource_exhaustion_active_flows_sample()
     build_resource_exhaustion_flow_state_sample()
+    build_ipv6_sample()
+    build_ipv6_raw_link_sample()
     build_padded_ack_sample()
     build_pcapng_malformed()
     build_pcapng_basic_sample()
