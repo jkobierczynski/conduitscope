@@ -47,6 +47,7 @@
 #include <unordered_map>
 
 #include "conduitscope/byteio.hpp"
+#include "conduitscope/resource_limits.hpp"
 
 namespace conduitscope {
 
@@ -201,6 +202,41 @@ struct DecodeContext {
         auto& per_key = (*flow_states)[protocol_id];
         auto it = per_key.find(key);
         if (it == per_key.end()) {
+            // Security fix (finding 1, docs/reviews/2026-09-chatgpt-security-review-patch160.md;
+            // see resource_limits.hpp's own comment on max_flow_state_entries): bound the TOTAL
+            // entry count across every protocol's own inner map combined, not just this one -- a
+            // capture with many distinct sessions/flows spread across any mix of registration-model
+            // decoders (SMB pipes, DCE/RPC interfaces, Kerberos, LDAP, WinRM, DCOM, Modbus/TwinCAT/
+            // MELSEC/MQTT, DNP3/COTP reassembly, ...) would otherwise grow *flow_states without
+            // limit, the same shape tcp_reassembly_ had (see Decoder::reassemble_tcp_payload's own
+            // fix). Checked only here, on the "about to create a NEW entry" path -- an existing
+            // key's lookup above never grows anything and never pays this cost. Unset (the default,
+            // resource_limits().max_flow_state_entries == nullopt) keeps this whole block's cost at
+            // zero, same "byte-identical to this feature's absence" posture every resource_limits()
+            // field has.
+            if (auto cap = resource_limits().max_flow_state_entries) {
+                size_t total = 0;
+                for (const auto& [id, inner] : *flow_states) total += inner.size();
+                if (total >= *cap) {
+                    // No per-entry recency tracking (see max_active_flows's own comment,
+                    // decoder.cpp, for the identical tradeoff and why it's an accepted one): this
+                    // evicts AN existing entry -- not necessarily the oldest or least-recently-used
+                    // one, and not necessarily from this SAME protocol's own inner map -- from
+                    // whichever protocol's bucket this outer map iterates first. The security
+                    // property this cap gives ("total flow-state entries never exceed the
+                    // configured ceiling") holds regardless of which entry gets picked; only the
+                    // quality-of-service question of which flow has to restart its own state from
+                    // scratch is affected by the choice, and every stateful decoder using this
+                    // interface already tolerates that (it's indistinguishable from that flow's
+                    // state simply never having existed yet).
+                    for (auto& [id, inner] : *flow_states) {
+                        if (!inner.empty()) {
+                            inner.erase(inner.begin());
+                            break;
+                        }
+                    }
+                }
+            }
             it = per_key.emplace(key, std::make_unique<T>()).first;
         }
         return static_cast<T&>(*it->second);

@@ -398,6 +398,12 @@ struct ResourceLimitCliVars {
     size_t max_recursion_depth = 0;
     size_t max_decoded_objects = 0;
     size_t max_coalesced_messages = 0;
+    // Added for docs/reviews/2026-09-chatgpt-security-review-patch160.md's finding 1 -- a
+    // different category from the five above (which bound the cost of any ONE flow/reassembly/
+    // message): these bound how many DISTINCT flows/sessions can be tracked at once. See
+    // resource_limits.hpp's own comments on max_active_flows/max_flow_state_entries.
+    size_t max_active_flows = 0;
+    size_t max_flow_state_entries = 0;
 };
 
 void add_resource_limit_options(CLI::App* cmd, ResourceLimitCliVars& vars) {
@@ -438,6 +444,22 @@ void add_resource_limit_options(CLI::App* cmd, ResourceLimitCliVars& vars) {
            "payload' cap at once: FF-HSE, HART-IP, MQTT, EtherNet/IP, and OPC UA (all default "
            "50). 0 = leave every site at its own default")
         ->capture_default_str();
+    cmd->add_option(
+           "--max-active-flows", vars.max_active_flows,
+           "Cap the number of distinct TCP flows the general cross-segment reassembly path "
+           "(decoder.cpp) tracks state for at once, regardless of how many distinct flows the "
+           "capture contains -- an existing flow's own state being updated never counts against "
+           "this. 0 (the default) leaves it unbounded; a flow that never needs reassembly at "
+           "all is never tracked in the first place either way (see docs/DEVELOPMENT.md's "
+           "security review write-up)")
+        ->capture_default_str();
+    cmd->add_option(
+           "--max-flow-state-entries", vars.max_flow_state_entries,
+           "Cap the TOTAL number of distinct sessions/flows tracked at once across every "
+           "protocol's own state (SMB pipes, DCE/RPC interfaces, Kerberos, LDAP, WinRM, DCOM, "
+           "Modbus/TwinCAT/MELSEC/MQTT, DNP3/COTP reassembly, and more), combined. 0 (the "
+           "default) leaves it unbounded")
+        ->capture_default_str();
 }
 
 ResourceLimits build_resource_limits(const ResourceLimitCliVars& vars) {
@@ -447,6 +469,8 @@ ResourceLimits build_resource_limits(const ResourceLimitCliVars& vars) {
     if (vars.max_recursion_depth != 0) limits.max_recursion_depth = vars.max_recursion_depth;
     if (vars.max_decoded_objects != 0) limits.max_decoded_objects = vars.max_decoded_objects;
     if (vars.max_coalesced_messages != 0) limits.max_coalesced_messages = vars.max_coalesced_messages;
+    if (vars.max_active_flows != 0) limits.max_active_flows = vars.max_active_flows;
+    if (vars.max_flow_state_entries != 0) limits.max_flow_state_entries = vars.max_flow_state_entries;
     return limits;
 }
 

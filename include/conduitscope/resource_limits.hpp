@@ -10,11 +10,15 @@
 // untrusted captures, or loosen them for a capture that legitimately needs more headroom, the
 // same "documented default, explicit override" posture --modbus-port and its siblings already
 // give port lists. Exposing all ~60 individually would add 60+ CLI options; this instead groups
-// them into five categories, one flag per category (see cli_main.cpp's five `--max-*` options),
-// each overriding every constant in that category uniformly. See docs/DEVELOPMENT.md's own item 7
+// them into categories, one flag per category (see cli_main.cpp's `--max-*` options), each
+// overriding every constant in that category uniformly. See docs/DEVELOPMENT.md's own item 7
 // "Update: implemented" entry for the full constant-by-constant mapping, including the handful
 // deliberately left compile-time (protocol-native field-width bounds and the pcap-file-format
-// plausibility checks, a different trust boundary from in-flight payload reassembly).
+// plausibility checks, a different trust boundary from in-flight payload reassembly). Two more
+// fields (max_active_flows/max_flow_state_entries) were added later, for a DIFFERENT category of
+// problem than the original five -- bounding the NUMBER of distinct flows/sessions tracked at
+// once, not the cost of any single one -- see each field's own comment below and
+// docs/reviews/2026-09-chatgpt-security-review-patch160.md's finding 1.
 //
 // WHY A GLOBAL ACCESSOR, NOT A PARAMETER THREADED THROUGH DecodeContext/ProtocolDecoder: many
 // in-scope constants live in places with no DecodeContext at all -- most of the "50-entry list
@@ -68,6 +72,35 @@ struct ResourceLimits {
     // Overrides every "N application-layer messages found coalesced in one TCP/UDP payload" cap
     // -- FF-HSE, HART-IP, MQTT, EtherNet/IP, and OPC UA, all already 50 by default -- uniformly.
     std::optional<size_t> max_coalesced_messages;
+
+    // Added in response to docs/reviews/2026-09-chatgpt-security-review-patch160.md's finding 1
+    // ("Unbounded lifetime of TCP/decoder flow state"): the five caps above all bound how much a
+    // SINGLE flow/reassembly/message can cost; nothing bounded how many DISTINCT flows/sessions
+    // the Decoder could accumulate state for at once, across the whole capture. A capture with
+    // many distinct src-ip:port->dst-ip:port tuples grew memory linearly in flow count with no
+    // ceiling -- see decoder.cpp's Decoder::reassemble_tcp_payload for the two-part fix (stop
+    // creating an entry for a flow that never needed one; cap what's left with this field).
+    //
+    // Bounds Decoder::tcp_reassembly_'s size -- the general cross-TCP-segment PDU/frame reassembly
+    // map every one of Modbus/TCP, IEC 104, EtherNet/IP, TPKT/S7comm/S7comm-Plus/MMS, HART-IP,
+    // OPC UA, MQTT, and FF-HSE shares. Checked only when a flow that doesn't already have an entry
+    // is about to get one; an existing flow's own entry being updated never counts against this.
+    // std::nullopt (the default) leaves the map genuinely unbounded in entry COUNT, same as every
+    // other field here when unset -- but see decoder.cpp's own comment: the "don't retain empty
+    // entries" half of the fix already applies unconditionally, cap configured or not.
+    std::optional<size_t> max_active_flows;
+
+    // Bounds the TOTAL entry count summed across every protocol's own map inside
+    // Decoder::registry_flow_state_ (protocol_decoder.hpp's DecodeContext::flow_state<T>()) --
+    // the same "many distinct flows/sessions" shape as max_active_flows above, but for the
+    // registration-model decoders' (SMB pipes, DCE/RPC interfaces, Kerberos, LDAP, WinRM, DCOM,
+    // Modbus/TwinCAT/MELSEC/MQTT sessions, DNP3/COTP reassembly, and every future protocol built
+    // on this interface) own per-session/per-flow state, which -- unlike tcp_reassembly_ -- has no
+    // natural "fully consumed, safe to drop" moment for most of these protocols (a Kerberos or
+    // LDAP session's own state is meant to persist for the connection's whole life), so this is a
+    // pure ceiling rather than a "don't create it in the first place" fix. std::nullopt (the
+    // default) leaves it unbounded, same as every other field here.
+    std::optional<size_t> max_flow_state_entries;
 };
 
 // Returns the currently active process-wide limits (default-constructed, i.e. every field

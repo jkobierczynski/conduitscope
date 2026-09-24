@@ -5192,6 +5192,81 @@ def build_tcp_reassembly_sample():
     (TESTS_DIR / "sample_tcp_reassembly.pcap").write_bytes(data)
 
 
+def build_resource_exhaustion_active_flows_sample():
+    """Exercises --max-active-flows (docs/reviews/2026-09-chatgpt-security-review-patch160.md's
+    finding 1, resource_limits.hpp's max_active_flows): two DISTINCT TCP flows (different HMI
+    source ports against the same PLC:502), each sending only the first half of a split Modbus
+    ADU -- so each, on its own, leaves Decoder::tcp_reassembly_ with one entry "waiting for
+    more". With the cap set low enough, the second flow's own still-incomplete segment forces
+    eviction of the first flow's entry to make room."""
+    packets = []
+
+    def add_segment(src_port, dst_port, seq, ack, payload, ident, from_plc):
+        tcp = tcp_header(src_port, dst_port, seq, ack, TCP_PSH | TCP_ACK, len(payload)) + payload
+        src_ip, dst_ip = (PLC_IP, HMI_IP) if from_plc else (HMI_IP, PLC_IP)
+        src_mac, dst_mac = (PLC_MAC, HMI_MAC) if from_plc else (HMI_MAC, PLC_MAC)
+        ip = ipv4_header(src_ip, dst_ip, 6, len(tcp), ident) + tcp
+        packets.append(eth_header(dst_mac, src_mac, 0x0800) + ip)
+
+    reg_data = b"".join(struct.pack("!H", v) for v in range(10))
+    split = 15
+
+    # Flow 1 (PLC:502 -> HMI:51700): first half only of a 29-byte Modbus response ADU -- left
+    # "waiting for more" in tcp_reassembly_, never completed in this fixture.
+    adu_1 = struct.pack("!HHHBBB", 0x1111, 0, 1 + 2 + len(reg_data), 1, 0x03, len(reg_data)) + reg_data
+    add_segment(502, 51700, 60000, 1, adu_1[:split], 0x8000, from_plc=True)
+
+    # Flow 2 (PLC:502 -> HMI:51701): a DIFFERENT flow (different HMI port), same shape -- its own
+    # first segment is the one that should trigger eviction of flow 1's entry under
+    # --max-active-flows 1.
+    adu_2 = struct.pack("!HHHBBB", 0x2222, 0, 1 + 2 + len(reg_data), 1, 0x03, len(reg_data)) + reg_data
+    add_segment(502, 51701, 70000, 1, adu_2[:split], 0x8001, from_plc=True)
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_000_600 + i, i * 1000)
+    (TESTS_DIR / "sample_resource_exhaustion_active_flows.pcap").write_bytes(data)
+
+
+def build_resource_exhaustion_flow_state_sample():
+    """Exercises --max-flow-state-entries (docs/reviews/2026-09-chatgpt-security-review-
+    patch160.md's finding 1, resource_limits.hpp's max_flow_state_entries): two DISTINCT Modbus
+    TCP SESSIONS (different HMI source ports against the same PLC:502), each opening with a
+    request that creates a ModbusFlowState entry in Decoder::registry_flow_state_. Session 2's
+    own request forces eviction of session 1's entry when the cap is set to 1; session 1's later
+    response (matching transaction id, same session) then finds no pending request at all --
+    modbus.cpp's own "no outstanding request found on this TCP session" note -- which is the
+    observable proof the eviction actually happened, not just that the cap was configured."""
+    packets = []
+
+    def add_segment(src_port, dst_port, seq, ack, payload, ident, from_plc):
+        tcp = tcp_header(src_port, dst_port, seq, ack, TCP_PSH | TCP_ACK, len(payload)) + payload
+        src_ip, dst_ip = (PLC_IP, HMI_IP) if from_plc else (HMI_IP, PLC_IP)
+        src_mac, dst_mac = (PLC_MAC, HMI_MAC) if from_plc else (HMI_MAC, PLC_MAC)
+        ip = ipv4_header(src_ip, dst_ip, 6, len(tcp), ident) + tcp
+        packets.append(eth_header(dst_mac, src_mac, 0x0800) + ip)
+
+    # Session 1 (HMI:53000 <-> PLC:502): request, transaction id 100, read 5 holding registers.
+    req_1 = struct.pack("!HHHBB HH", 100, 0, 6, 1, 0x03, 0, 5)
+    add_segment(53000, 502, 10000, 1, req_1, 0x9000, from_plc=False)
+
+    # Session 2 (HMI:53001 <-> PLC:502): a DIFFERENT session, own request -- forces eviction of
+    # session 1's ModbusFlowState under --max-flow-state-entries 1.
+    req_2 = struct.pack("!HHHBB HH", 200, 0, 6, 1, 0x03, 0, 5)
+    add_segment(53001, 502, 20000, 1, req_2, 0x9001, from_plc=False)
+
+    # Session 1's response to transaction id 100 -- with session 1's flow state evicted, this
+    # finds no matching pending request even though the real request is right above.
+    reg_data = b"".join(struct.pack("!H", v) for v in range(5))
+    resp_1 = struct.pack("!HHHBBB", 100, 0, 1 + 2 + len(reg_data), 1, 0x03, len(reg_data)) + reg_data
+    add_segment(502, 53000, 1, 10000 + len(req_1), resp_1, 0x9002, from_plc=True)
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_000_700 + i, i * 1000)
+    (TESTS_DIR / "sample_resource_exhaustion_flow_state.pcap").write_bytes(data)
+
+
 def build_padded_ack_sample():
     # A bare ACK: 0 bytes of real TCP payload. Real Ethernet links pad frames
     # shorter than 60 bytes with trailing zeros, so the *captured* frame is
@@ -13720,6 +13795,8 @@ if __name__ == "__main__":
     build_summarize_unclassified_sample()
     build_inventory_sample()
     build_tcp_reassembly_sample()
+    build_resource_exhaustion_active_flows_sample()
+    build_resource_exhaustion_flow_state_sample()
     build_padded_ack_sample()
     build_pcapng_malformed()
     build_pcapng_basic_sample()

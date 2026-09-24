@@ -9861,24 +9861,74 @@ add_test(NAME max_coalesced_messages_hartip_stops_at_one
 set_tests_properties(max_coalesced_messages_hartip_stops_at_one PROPERTIES
   PASS_REGULAR_EXPRESSION "192.168.1.50:52150 -> 192.168.1.10:5094 \\(hart-ip\\)  \\[hartip\\]  Request Keep Alive[^\n]*\n *note: stopped after 1 HART-IP message\\(s\\) in this one TCP payload, more may remain \\(safety cap\\)")
 
-# All five flags are registered identically on all three subcommands (unlike the --modbus-port-
+# All seven flags are registered identically on all three subcommands (unlike the --modbus-port-
 # style port-list flags, which remain decode-only) -- confirmed here via --help rather than only
 # by cli_main.cpp's own add_resource_limit_options call sites, so a future accidental removal
 # from one subcommand's wiring is actually caught by the test suite.
 add_test(NAME resource_limit_flags_present_in_decode_help
   COMMAND conduitscope decode --help)
 set_tests_properties(resource_limit_flags_present_in_decode_help PROPERTIES
-  PASS_REGULAR_EXPRESSION "--max-reassembly-bytes[^\n]*\n.*--max-reassembly-segments[^\n]*\n.*--max-recursion-depth[^\n]*\n.*--max-decoded-objects[^\n]*\n.*--max-coalesced-messages")
+  PASS_REGULAR_EXPRESSION "--max-reassembly-bytes[^\n]*\n.*--max-reassembly-segments[^\n]*\n.*--max-recursion-depth[^\n]*\n.*--max-decoded-objects[^\n]*\n.*--max-coalesced-messages[^\n]*\n.*--max-active-flows[^\n]*\n.*--max-flow-state-entries")
 
 add_test(NAME resource_limit_flags_present_in_policy_validate_help
   COMMAND conduitscope policy validate --help)
 set_tests_properties(resource_limit_flags_present_in_policy_validate_help PROPERTIES
-  PASS_REGULAR_EXPRESSION "--max-reassembly-bytes[^\n]*\n.*--max-reassembly-segments[^\n]*\n.*--max-recursion-depth[^\n]*\n.*--max-decoded-objects[^\n]*\n.*--max-coalesced-messages")
+  PASS_REGULAR_EXPRESSION "--max-reassembly-bytes[^\n]*\n.*--max-reassembly-segments[^\n]*\n.*--max-recursion-depth[^\n]*\n.*--max-decoded-objects[^\n]*\n.*--max-coalesced-messages[^\n]*\n.*--max-active-flows[^\n]*\n.*--max-flow-state-entries")
 
 add_test(NAME resource_limit_flags_present_in_inventory_help
   COMMAND conduitscope inventory --help)
 set_tests_properties(resource_limit_flags_present_in_inventory_help PROPERTIES
-  PASS_REGULAR_EXPRESSION "--max-reassembly-bytes[^\n]*\n.*--max-reassembly-segments[^\n]*\n.*--max-recursion-depth[^\n]*\n.*--max-decoded-objects[^\n]*\n.*--max-coalesced-messages")
+  PASS_REGULAR_EXPRESSION "--max-reassembly-bytes[^\n]*\n.*--max-reassembly-segments[^\n]*\n.*--max-recursion-depth[^\n]*\n.*--max-decoded-objects[^\n]*\n.*--max-coalesced-messages[^\n]*\n.*--max-active-flows[^\n]*\n.*--max-flow-state-entries")
+
+# ============================================================================================
+# --max-active-flows / --max-flow-state-entries (docs/reviews/2026-09-chatgpt-security-review-
+# patch160.md finding 1: "Unbounded lifetime of TCP/decoder flow state"). A different category
+# from the five flags above: those bound the COST of any one flow/reassembly/message; these two
+# bound the COUNT of distinct flows/sessions tracked at once, regardless of a capture's total
+# flow count. See resource_limits.hpp's own comments on both fields and
+# Decoder::reassemble_tcp_payload's/DecodeContext::flow_state<T>()'s (protocol_decoder.hpp) own
+# fix comments for the full rationale.
+# ============================================================================================
+
+# --max-active-flows: sample_resource_exhaustion_active_flows.pcap (tools/make_sample_pcap.py's
+# build_resource_exhaustion_active_flows_sample) has two DISTINCT TCP flows, each left "waiting
+# for more" mid-reassembly. Uncapped, both entries coexist in Decoder::tcp_reassembly_ with no
+# interaction; capped to 1, the second flow's own still-incomplete segment must evict the first
+# flow's entry to make room.
+add_test(NAME max_active_flows_evicts_other_flow_entry
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_resource_exhaustion_active_flows.pcap" --format text --max-active-flows 1 --verbose)
+set_tests_properties(max_active_flows_evicts_other_flow_entry PROPERTIES
+  PASS_REGULAR_EXPRESSION "#2[^\n]*51701[^\n]*waiting for more[^\n]*\n *note: active TCP flow-reassembly limit \\(1\\) reached -- evicted an existing in-progress reassembly on another flow to make room for this one \\(--max-active-flows\\)")
+
+# Unset (the default): both flows' entries coexist, no eviction note anywhere -- byte-identical
+# to this feature's absence, the same bar every other resource_limits() field is held to.
+add_test(NAME max_active_flows_unset_no_eviction
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_resource_exhaustion_active_flows.pcap" --format text --verbose)
+set_tests_properties(max_active_flows_unset_no_eviction PROPERTIES
+  PASS_REGULAR_EXPRESSION "waiting for more"
+  FAIL_REGULAR_EXPRESSION "active TCP flow-reassembly limit")
+
+# --max-flow-state-entries: sample_resource_exhaustion_flow_state.pcap (build_resource_
+# exhaustion_flow_state_sample) has two DISTINCT Modbus TCP sessions, each opening with a
+# request (creating a ModbusFlowState entry in Decoder::registry_flow_state_). Capped to 1,
+# session 2's own request must evict session 1's entry; session 1's later response (matching
+# transaction id, same session) then finds no pending request -- modbus.cpp's own "no
+# outstanding request found" note -- proving the eviction actually happened, not merely that the
+# flag was accepted. Contrast with modbus_authoritative_transaction_pairing-style tests
+# elsewhere in this file, which show the SAME response correctly paired when nothing evicted it.
+add_test(NAME max_flow_state_entries_evicts_other_session_state
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_resource_exhaustion_flow_state.pcap" --format text --max-flow-state-entries 1 --verbose)
+set_tests_properties(max_flow_state_entries_evicts_other_session_state PROPERTIES
+  PASS_REGULAR_EXPRESSION "note: no outstanding request found on this TCP session for transaction id 100"
+  FAIL_REGULAR_EXPRESSION "authoritative pairing")
+
+# Unset (the default): session 1's response still pairs authoritatively -- byte-identical to
+# this feature's absence.
+add_test(NAME max_flow_state_entries_unset_still_pairs
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_resource_exhaustion_flow_state.pcap" --format text --verbose)
+set_tests_properties(max_flow_state_entries_unset_still_pairs PROPERTIES
+  PASS_REGULAR_EXPRESSION "authoritative pairing: response to transaction id 100"
+  FAIL_REGULAR_EXPRESSION "no outstanding request found")
 
 # --------------------------------------------------------------------------
 # ARP (RFC 826, EtherType 0x0806, arp.hpp) -- Stage 2 new-protocol work, not a migration (see

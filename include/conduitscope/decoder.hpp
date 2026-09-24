@@ -971,10 +971,16 @@ public:
 private:
     DecodeOptions options_;
 
-    // See TcpFlowBuffer above. Keyed by "src_ip:src_port->dst_ip:dst_port" (one entry per
-    // directional TCP flow that has ever needed cross-segment PDU/frame reassembly). `mutable`
-    // because it is cross-packet state accumulated across decode() calls, not a function of the
-    // current packet alone -- see the NOTE ON STATEFULNESS above for why that is safe here.
+    // See TcpFlowBuffer above. Keyed by "src_ip:src_port->dst_ip:dst_port" -- one entry per
+    // directional TCP flow CURRENTLY in the middle of an incomplete cross-segment PDU/frame
+    // reassembly, no longer (see reassemble_tcp_payload's own header comment, and docs/reviews/
+    // 2026-09-chatgpt-security-review-patch160.md's finding 1) one entry per flow ever seen: a
+    // flow that never needs reassembly never gets an entry, and one that completes or is abandoned
+    // has its entry removed rather than left behind inactive. Bounded from growing past
+    // --max-active-flows (resource_limits.hpp's max_active_flows) regardless of how many distinct
+    // flows a capture contains. `mutable` because it is cross-packet state accumulated across
+    // decode() calls, not a function of the current packet alone -- see the NOTE ON STATEFULNESS
+    // above for why that is safe here.
     mutable std::unordered_map<std::string, TcpFlowBuffer> tcp_reassembly_;
 
     // registration-model decoder refactor (see protocol_decoder.hpp/protocol_registry.hpp): one

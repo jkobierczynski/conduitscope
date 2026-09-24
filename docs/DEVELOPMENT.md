@@ -1763,6 +1763,185 @@ header comment already, same as before this item -- this new README is a
 discoverability/procedure document, not a license-compliance gap-filler for
 a gap that didn't exist.
 
+A second follow-up review
+([docs/reviews/2026-09-chatgpt-security-review-patch160.md](reviews/2026-09-chatgpt-security-review-patch160.md)),
+conducted with actual GitHub access this time (a step up from the first
+follow-up above, which was done against GitHub's web UI without reading
+source) against the repository at 160 commits, raised seven findings --
+two rated High/Medium-High ("security-relevant"), five rated Medium. Every
+one of the seven was independently verified against the actual source
+(exact file/line, not just the review's own paraphrase) before being acted
+on or scheduled; none turned out to be a misread of code that no longer
+exists, unlike some of the first follow-up review's own "I'd want you to
+have X" list. Folded in here as items 10-16, at the same priority tier as
+6-9 above:
+
+10. **Done: unbounded lifetime of TCP/decoder flow state (the review's own
+    #1, rated High -- "resource exhaustion").** The five `--max-*` flags
+    item 7 above added all bound the COST of any one flow's own reassembly/
+    state; none of them bounded the NUMBER of distinct flows/sessions the
+    Decoder tracks state for at once. Confirmed exactly as the review
+    describes: `Decoder::reassemble_tcp_payload`
+    (`decoder.cpp`) used to start with `TcpFlowBuffer& fb =
+    tcp_reassembly_[flow_key];` -- an unconditional map insert on every
+    single TCP packet this function ever saw, whether or not that flow
+    ever needed cross-segment reassembly at all, with no `erase()`
+    anywhere in the file to ever remove one. A capture with millions of
+    distinct src-ip:port->dst-ip:port tuples, none of which ever split a
+    PDU across segments, still grew `tcp_reassembly_` by one entry per flow
+    forever. The exact same shape exists in `registry_flow_state_`
+    (`DecodeContext::flow_state<T>()`, `protocol_decoder.hpp`) -- the
+    generic per-migrated-protocol state map every registration-model
+    decoder (SMB pipes, DCE/RPC interfaces, Kerberos, LDAP, WinRM, DCOM,
+    Modbus/TwinCAT/MELSEC/MQTT sessions, DNP3/COTP reassembly) shares.
+
+    Fixed two ways, matching the review's own "P0" framing (a real fix, not
+    just a defense-in-depth cap) plus the cap it also asked for as a
+    backstop:
+
+    - **`tcp_reassembly_`: stopped creating an entry for a flow that never
+      needed one, and stopped leaving one behind once a reassembly
+      completes.** `reassemble_tcp_payload` now `extract()`s any existing
+      entry for this flow at the top (one hash lookup, no vector copy --
+      `TcpFlowBuffer`'s `bytes` member moves, never copies, through this
+      whole function now), operates on a purely local `TcpFlowBuffer` for
+      the rest of its logic, and only re-inserts at the two points that
+      actually need this flow's state to survive past this packet (still
+      incomplete, or an unchanged duplicate segment on an already-
+      in-progress reassembly) -- the ordinary "fully decoded this packet"
+      exit does NOT reinsert, which is the fix: no entry is ever created
+      for a flow that doesn't need one, and a completed/abandoned one is
+      removed rather than left behind inactive. This alone closes the
+      review's own literal attack scenario (any TCP flow, no protocol
+      match needed) entirely, since that's exactly the case that no longer
+      touches the map at all.
+    - **A hard global cap on top, as defense in depth**, since a flow that
+      DOES legitimately match some protocol's own declared-length gate on
+      every packet it sends (MQTT's gate in particular is fairly
+      permissive) can still reach the "must persist" path repeatedly, so
+      the fix above alone doesn't bound the map's size on its own against
+      that narrower attack. New `--max-active-flows`
+      (`resource_limits.hpp`'s `max_active_flows`) caps `tcp_reassembly_`'s
+      entry count; when a flow that doesn't already have an entry is about
+      to get one and the cap is reached, an existing entry is evicted
+      (`tcp_reassembly_.erase(tcp_reassembly_.begin())`) to make room, with
+      a note on the packet that triggered it (`"active TCP
+      flow-reassembly limit (N) reached -- evicted an existing in-progress
+      reassembly on another flow to make room for this one
+      (--max-active-flows)"`). New `--max-flow-state-entries`
+      (`max_flow_state_entries`) does the analogous thing for
+      `registry_flow_state_`, checked inside `DecodeContext::flow_state<T>()`
+      itself (the one place every registration-model decoder's state
+      passes through) -- total entry count summed across every protocol's
+      own inner map, evicting from whichever protocol's bucket iterates
+      first when a brand-new key would exceed the cap. Neither eviction is
+      true LRU (no per-entry recency tracking is kept, a deliberate
+      simplification -- see both fields' own comments in
+      `resource_limits.hpp` for why an arbitrary eviction already gives the
+      actual security property, "the map never grows past the configured
+      ceiling", just as well as LRU would): the flow that gets evicted
+      isn't necessarily the oldest or least active one, only that
+      restarting its own state from scratch is already a normal, harmless
+      occurrence elsewhere in this same codebase (every TCP sequence-gap
+      abandon does the identical thing to its own flow). Both flags
+      default to unset/unbounded, same "byte-identical to this feature's
+      absence" posture the five `--max-*` flags from item 7 already have.
+
+      Deliberately NOT implemented in this pass, and left as documented,
+      unscheduled follow-on work rather than silently out of scope: FIN/
+      RST-triggered proactive eviction and an idle-timeout eviction, both
+      of which the review also suggested. The hard global cap above
+      already provides the actual security bound (memory is provably
+      bounded regardless of capture content, cap configured or not, once
+      the "don't retain empty entries" fix is in) -- FIN/RST- and
+      idle-triggered eviction would improve normal-operation hygiene (a
+      well-behaved capture's flows would clean themselves up without ever
+      needing the cap to fire) but aren't required for the security
+      property itself, and touching every TCP-flow-closing path plus
+      picking a capture-clock-vs-wall-clock idle policy is real additional
+      surface risked against the existing reassembly test corpus for a
+      quality-of-service improvement, not a security one -- better scoped
+      as its own follow-up than bundled into this fix.
+
+    Verified: two new fixtures
+    (`tests/sample_resource_exhaustion_active_flows.pcap`,
+    `tests/sample_resource_exhaustion_flow_state.pcap` --
+    `tools/make_sample_pcap.py`'s `build_resource_exhaustion_active_flows_sample`/
+    `build_resource_exhaustion_flow_state_sample`), each with two distinct
+    flows/sessions and a cap of 1, directly demonstrating eviction: the
+    active-flows fixture shows the eviction note firing on the second
+    flow's own segment; the flow-state fixture shows a Modbus session's
+    response losing its authoritative transaction-ID pairing (falling back
+    to `"no outstanding request found on this TCP session"`) once its own
+    request's pending-state entry has been evicted by a second session's
+    request -- an observable behavior change proving eviction actually
+    happened, not just that the flag was accepted. Plus two matching
+    unset/default tests confirming byte-identical behavior to this
+    feature's absence. Full CTest suite: 1526 -> 1530 tests (default
+    config), 1514 -> 1518 (no-live-capture config), both 100% passing with
+    every existing `PASS_REGULAR_EXPRESSION` unchanged; zero-warning
+    rebuilds in both configs.
+
+11. **Next up: malicious pcapng `if_tsresol` can reach invalid
+    floating-to-integer conversion (the review's own #2, rated
+    Medium/High -- "parser robustness / UB").** Confirmed against the
+    actual source: `pcap_reader.cpp`'s `parse_if_tsresol_option` computes
+    `std::pow(2.0, v & 0x7F)` (binary resolution) or `std::pow(10.0, v)`
+    (decimal resolution, unmasked -- but `v` is already <= 127 here since
+    the high bit gates which branch runs) from an attacker-controlled
+    single byte, and `fill_pcapng_timestamp` then does
+    `static_cast<uint64_t>(units_per_second + 0.5)` with no range check --
+    converting an out-of-range double to `uint64_t` is undefined behavior
+    in C++, not just an inaccurate timestamp, and a declared exponent
+    anywhere past 63 (easily reachable; the field allows up to 127) is
+    already out of `uint64_t`'s range. Queued as the next item to fix.
+
+12. **Open: `ProtocolResult::as<T>()` is an unchecked type cast (the
+    review's own #3, rated Medium -- "type safety").** Confirmed:
+    `protocol_decoder.hpp`'s `as<T>()` is exactly the unchecked
+    `static_cast<const T*>(data.get())` the review describes, with the
+    file's own comment already acknowledging the contract by name
+    ("Caller's responsibility to pass the right T"). Not attacker-reachable
+    today (`protocol_id` isn't derived from packet bytes), but a real
+    landmine for a future migration that gets the association wrong. Not
+    yet scheduled.
+
+13. **Open: text output has no terminal-escape sanitizer (the review's own
+    #4, rated Medium -- "analyst workstation safety").** Confirmed:
+    `output.cpp`'s `TextWriter::write_packet` does `head << p.summary`
+    (and notes similarly) with no escaping at all, while `json_escape`/
+    `csv_escape` exist for the other two formats. Several decoders
+    (DNS names, MQTT ClientId/Topic/Username/UserProperty/Sparkplug
+    strings) put attacker-controlled bytes straight into `summary`/notes,
+    and `--color` already emits raw ANSI SGR sequences on top, so a
+    malicious capture's summary text could contain terminal control
+    sequences. Not yet scheduled.
+
+14. **Acknowledged, not scheduled: process-global `ResourceLimits` (the
+    review's own #5, rated Medium -- "library/thread safety").**
+    `resource_limits.hpp`'s own header comment already states this
+    tradeoff explicitly ("not designed for concurrently running multiple
+    differently-configured Decoders within one process") -- this was a
+    known, deliberate choice for the CLI's actual usage pattern (one
+    `Decoder` per process, always), not something that snuck in. Only
+    matters if conduitscope is ever used as an embedded library running
+    concurrent differently-configured decoders in one process, which
+    nothing today does.
+
+15. **Open, low urgency: CI supply-chain hardening incomplete (the
+    review's own #6, rated Medium -- "supply chain").** Confirmed:
+    `.github/workflows/`'s `actions/checkout@v4` etc. are mutable tags,
+    not pinned commit SHAs, and the Windows release pipeline's Npcap SDK
+    download has no independent SHA-256 verification of the fetched
+    archive (only the generated release artifact itself gets checksummed).
+    Straightforward to fix, not yet scheduled.
+
+16. **Open: fuzzing doesn't strongly target resource exhaustion (the
+    review's own #7, rated Medium -- "security testing").** The existing
+    harnesses (item 2 above) are crash/UB-oriented; none specifically
+    measures or bounds memory/CPU growth under adversarial input the way a
+    dedicated resource-exhaustion fuzzing target would. Not yet scheduled.
+
 
 ## PROTOCOL DETECTION
 

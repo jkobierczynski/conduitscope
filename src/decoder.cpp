@@ -299,7 +299,29 @@ const EthertypeCascadePopulate* ethertype_cascade_populate_for(std::string_view 
 
 bool Decoder::reassemble_tcp_payload(const TcpSegment& tcp, const std::string& flow_key, DecodedPacket& out,
                                       std::vector<uint8_t>& storage, ByteSpan& effective_payload) const {
-    TcpFlowBuffer& fb = tcp_reassembly_[flow_key];
+    // Security fix (finding 1, docs/reviews/2026-09-chatgpt-security-review-patch160.md): this
+    // used to be `TcpFlowBuffer& fb = tcp_reassembly_[flow_key];`, which unconditionally created a
+    // map entry for EVERY TCP flow this function was ever called on -- including the overwhelming
+    // majority that never need cross-segment reassembly at all. A capture with millions of
+    // distinct src-ip:port->dst-ip:port tuples, none of which ever split a PDU across segments,
+    // still grew tcp_reassembly_ by one entry per flow forever; nothing anywhere erased a
+    // never-needed entry once created. extract() takes ownership of any existing entry for this
+    // flow (one hash lookup, no vector copy) and removes it from the map; everything below
+    // operates on a purely local `fb` from here on. Only the two places that decide this flow's
+    // buffer must survive past this packet -- still incomplete, or an unchanged duplicate segment
+    // on an already-in-progress reassembly -- explicitly put it back with
+    // `tcp_reassembly_[flow_key] = std::move(fb)`. The ordinary "fully decoded this packet" exit
+    // at the bottom does NOT reinsert -- that omission IS the fix: no entry is ever created for a
+    // flow that didn't need one, and an entry that just finished is removed rather than left
+    // behind empty. `had_existing_entry` records whether this flow already had map state, so the
+    // global `--max-active-flows` cap below (defense in depth: even a flow that legitimately
+    // matches some protocol's declared-length gate on every packet, so this fix alone doesn't
+    // starve it, still can't grow the map past a configured ceiling) only ever fires on the one
+    // path that can actually grow tcp_reassembly_'s size -- reinserting an existing key, whether
+    // unchanged or updated, never changes how many entries the map holds.
+    auto node = tcp_reassembly_.extract(flow_key);
+    bool had_existing_entry = !node.empty();
+    TcpFlowBuffer fb = had_existing_entry ? std::move(node.mapped()) : TcpFlowBuffer{};
 
     ByteSpan candidate = tcp.payload;
     bool combined = false;
@@ -329,6 +351,12 @@ bool Decoder::reassemble_tcp_payload(const TcpSegment& tcp, const std::string& f
                                std::to_string(tcp.dst_port) + " (fully overlaps bytes already buffered for "
                                "an in-progress " + std::to_string(fb.bytes.size()) +
                                "-byte PDU/frame reassembly on this flow) -- ignored, still waiting for more";
+                // Restore the extracted state unchanged (see this function's own header comment) --
+                // this branch only ever runs when had_existing_entry is true (it's nested inside
+                // `if (fb.active)`, which a freshly default-constructed TcpFlowBuffer never is), so
+                // this never grows tcp_reassembly_'s size and never needs the --max-active-flows
+                // check below.
+                tcp_reassembly_[flow_key] = std::move(fb);
                 return false;
             }
             storage = fb.bytes;
@@ -776,11 +804,41 @@ bool Decoder::reassemble_tcp_payload(const TcpSegment& tcp, const std::string& f
           << " declared byte(s) seen so far across " << fb.segment_count
           << " segment(s) on this flow, waiting for more";
         out.summary = s.str();
+        // This is the only path that can actually grow tcp_reassembly_'s size (see this
+        // function's own header comment): had_existing_entry is false exactly when flow_key had
+        // no map entry before this call, so persisting it below adds a brand-new entry. Global
+        // cap, defense in depth on top of the "don't retain empty entries" fix above -- a flow
+        // that matches some protocol's own declared-length gate on every packet it sends can still
+        // legitimately reach this branch every time, so the fix alone doesn't bound the map on its
+        // own; this does. Unset (the default) skips the check entirely, same "byte-identical to
+        // this feature's absence" posture every other resource_limits() field already has. No
+        // per-entry recency tracking -- evicting tcp_reassembly_.begin() removes AN existing
+        // in-progress reassembly, not necessarily the oldest one, from whichever bucket the hash
+        // table iterates first. That's an accepted tradeoff: the security property this cap gives
+        // is "the map never grows past max_active_flows", which an arbitrary eviction guarantees
+        // exactly as well as LRU would; only the quality-of-service question of WHICH flow
+        // occasionally has to restart its own reassembly from scratch is affected, and that's
+        // already a normal, harmless occurrence elsewhere in this same function (every sequence-gap
+        // abandon above does the same thing to its own flow).
+        if (!had_existing_entry) {
+            if (auto cap = resource_limits().max_active_flows) {
+                if (tcp_reassembly_.size() >= *cap) {
+                    tcp_reassembly_.erase(tcp_reassembly_.begin());
+                    out.notes.push_back("active TCP flow-reassembly limit (" + std::to_string(*cap) +
+                                         ") reached -- evicted an existing in-progress reassembly on "
+                                         "another flow to make room for this one (--max-active-flows)");
+                }
+            }
+        }
+        tcp_reassembly_[flow_key] = std::move(fb);
         return false;
     }
 
     size_t completed_segment_count = fb.segment_count + (combined ? 1 : 0);
-    fb = TcpFlowBuffer{};
+    // Deliberately NOT reinserted into tcp_reassembly_ -- this flow's buffer is fully consumed (or,
+    // for the had_existing_entry==false case, was never created in the first place). See this
+    // function's own header comment: this omission is the "don't retain empty entries" half of the
+    // finding 1 fix.
     effective_payload = candidate;
     if (combined && declared) {
         out.notes.push_back("reassembled a " + which + " PDU/frame from " + std::to_string(candidate.size()) +

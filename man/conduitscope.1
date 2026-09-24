@@ -750,6 +750,24 @@ UDP payload" cap at once: FF-HSE, HART-IP, MQTT, EtherNet/IP, OPC UA,
 DNP3, and IEC 104 (all default 50). Default: 0 (leave every site at its
 own default).
 .TP
+.B \-\-max\-active\-flows \fIN\fR
+Cap the number of distinct TCP flows the general cross-segment reassembly
+path tracks state for at once, regardless of how many distinct flows the
+capture contains \-\- an existing flow's own state being updated never
+counts against this. Default: 0 (unbounded). A different category from
+the five flags above: those bound the cost of any ONE flow/reassembly/
+message; this bounds the COUNT of distinct flows tracked at once. See
+\fBdocs/DEVELOPMENT.md\fR's security review write-up (finding 1) for the
+full rationale.
+.TP
+.B \-\-max\-flow\-state\-entries \fIN\fR
+Cap the total number of distinct sessions/flows tracked at once across
+every protocol's own state (SMB pipes, DCE/RPC interfaces, Kerberos,
+LDAP, WinRM, DCOM, Modbus/TwinCAT/MELSEC/MQTT, DNP3/COTP reassembly, and
+more), combined. Default: 0 (unbounded). The same category of fix as
+\fB\-\-max\-active\-flows\fR, for the registration-model decoders' own
+per-session state instead of the general TCP reassembly path.
+.TP
 .B \-\-stats
 Print an aggregate summary instead of one line per packet. Ignores
 \fB\-\-format\fR.
