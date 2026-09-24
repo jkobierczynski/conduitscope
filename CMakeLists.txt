@@ -248,6 +248,21 @@ enable_testing()
 add_test(NAME crypto_primitives_self_test COMMAND crypto_selftest)
 
 # --------------------------------------------------------------------------------------------
+# Protocol result type safety self-test -- see tools/protocol_result_selftest.cpp's own file
+# header for the full rationale (finding 3, docs/reviews/2026-09-chatgpt-security-review-
+# patch160.md: ProtocolResult::as<T>() used to be an entirely unchecked static_cast, silent UB on
+# a protocol_id<->T mismatch). Same "always built, no opt-in flag" posture as crypto_selftest
+# above -- this needs no separate toolchain either, and the bug it guards against lives in this
+# codebase's own source (a future decoder migration getting an id()<->T association wrong), not in
+# anything a pcap fixture could exercise, so a dedicated small executable is the right shape here
+# too, not a CLI-driven CTest case.
+# --------------------------------------------------------------------------------------------
+add_executable(protocol_result_selftest tools/protocol_result_selftest.cpp)
+target_link_libraries(protocol_result_selftest PRIVATE conduitscope_core)
+
+add_test(NAME protocol_result_type_safety_self_test COMMAND protocol_result_selftest)
+
+# --------------------------------------------------------------------------------------------
 # Optional libFuzzer harnesses (fuzz/) -- see fuzz/README.md and docs/DEVELOPMENT.md's "External
 # code review and engineering priorities" section for which five parsers these target and why.
 # Off by default: libFuzzer is a Clang/compiler-rt feature (GCC cannot build -fsanitize=fuzzer),

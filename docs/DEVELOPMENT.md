@@ -1936,15 +1936,71 @@ have X" list. Folded in here as items 10-16, at the same priority tier as
     `PASS_REGULAR_EXPRESSION` unchanged; zero-warning rebuilds in both
     configs.
 
-12. **Open: `ProtocolResult::as<T>()` is an unchecked type cast (the
+12. **Done: `ProtocolResult::as<T>()` was an unchecked type cast (the
     review's own #3, rated Medium -- "type safety").** Confirmed:
-    `protocol_decoder.hpp`'s `as<T>()` is exactly the unchecked
+    `protocol_decoder.hpp`'s `as<T>()` was exactly the unchecked
     `static_cast<const T*>(data.get())` the review describes, with the
     file's own comment already acknowledging the contract by name
     ("Caller's responsibility to pass the right T"). Not attacker-reachable
-    today (`protocol_id` isn't derived from packet bytes), but a real
-    landmine for a future migration that gets the association wrong. Not
-    yet scheduled.
+    (`protocol_id` isn't derived from packet bytes -- both it and the T
+    requested at each `as<T>()` call site are chosen entirely by this
+    codebase's own source code), but a real landmine for a future
+    migration that gets the association wrong: a mismatch would silently
+    reinterpret one protocol's result struct as another's, undefined
+    behavior with no diagnostic anywhere near its actual cause.
+
+    Fixed by giving `ProtocolResult` a `std::type_index type_id` (RTTI is
+    already enabled throughout this codebase -- no `-fno-rtti` anywhere in
+    `CMakeLists.txt`), captured once by `make<T>()` from `typeid(T)`.
+    `as<T>()` now compares `type_id` against `typeid(T)` first and throws
+    a new `ProtocolResultTypeMismatch` (`std::logic_error`) naming the
+    result's own `protocol_id` and both the stored and requested type
+    names on a mismatch, instead of proceeding with the cast. `decode`,
+    `policy validate`, and `inventory` all gained a
+    `catch (const ProtocolResultTypeMismatch&)` alongside their existing
+    `ParseError`/`ResolverError`/`CaptureError` catches (matching that
+    existing style exactly), including `decode`'s own mid-stream catch
+    that closes a `--format json`/csv/fields writer cleanly before
+    reporting the error -- the same well-formed-output guarantee that
+    catch already gives a fatal `ParseError`. None of this should ever
+    actually fire from real use; it exists purely so a future mistake
+    fails loudly and immediately instead of corrupting memory silently.
+
+    The one real call site this check is actually protecting today:
+    EtherNet/IP is the sole protocol whose `id()` ("enip") is shared by
+    two decoders producing genuinely different C++ types -- `EnipResult`
+    (TCP explicit messaging) vs `CipIoFrame` (UDP CIP I/O) -- discriminated
+    at the call site by `DecodedPacket::has_tcp`/`has_udp` rather than by
+    `protocol_id` alone (see `output.cpp`'s
+    `write_enip_json_fields`/`write_enip_io_json_fields` comment). Every
+    other migrated protocol either has one type per `id()` or (MPLS) two
+    decoders sharing one already-identical type, so this is the one place
+    a future edit getting that discriminant wrong would have gone
+    unnoticed.
+
+    Verified: no pcap fixture can exercise this bug (every one of today's
+    ~44 real `as<T>()` call sites already passes the correct T -- the
+    mismatch this guards against lives in source code, not in anything a
+    capture file's bytes can influence), so instead of this review round's
+    usual pcap-fixture-plus-`PASS_REGULAR_EXPRESSION` pattern, a new
+    standalone self-test executable (`tools/protocol_result_selftest.cpp`,
+    modeled directly on the existing `crypto_selftest.cpp`) constructs the
+    mismatch directly with two fake result types: confirms the correct-T
+    happy path is completely unaffected, confirms a wrong-T access throws
+    `ProtocolResultTypeMismatch` naming the offending `protocol_id`, and
+    reproduces the real EnipResult/CipIoFrame shape (two fake types
+    sharing one `protocol_id`) to confirm each reads correctly as its own
+    real type while cross-casting either one to the other's type is caught
+    in both directions -- 8 checks, all passing. Also manually re-verified
+    both real EtherNet/IP fixtures end to end
+    (`tests/sample_enip.pcap`'s TCP explicit-messaging path and
+    `tests/sample_enip_cip_io.pcap`'s UDP CIP I/O path) to confirm the new
+    check doesn't disturb the one legitimate dual-type `protocol_id` in
+    this codebase. Full CTest suite: 1538 -> 1539 (default config), 1526
+    -> 1527 (no-live-capture config) -- the one new test being the self-
+    test's own CTest wrapper, `protocol_result_type_safety_self_test` --
+    both 100% passing with every existing `PASS_REGULAR_EXPRESSION`
+    unchanged; zero-warning rebuilds in both configs.
 
 13. **Done: text output had no terminal-escape sanitizer (the review's own
     #4, rated Medium -- "analyst workstation safety").** Confirmed:

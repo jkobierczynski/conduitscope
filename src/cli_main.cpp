@@ -768,6 +768,26 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
             }
             std::cerr << "error: " << e.what() << "\n";
             return 1;
+        } catch (const ProtocolResultTypeMismatch& e) {
+            // Same well-formed-output-on-fatal-error treatment as the ParseError catch immediately
+            // above, for the same reason -- see that catch's own comment. This one should never
+            // actually fire (see ProtocolResultTypeMismatch's own comment, protocol_decoder.hpp);
+            // it exists so that IF a future decoder migration ever gets a protocol_id<->T
+            // association wrong, the failure is this clean, immediate, reportable error instead of
+            // undefined behavior with no useful diagnostic.
+            if (stats) stats_writer.print_summary(*out);
+            else if (writer) writer->end();
+            if (color) {
+                out->flush();
+                if (writing_to_stdout) {
+                    write_raw_color_reset_to_stdout();
+                } else {
+                    *out << "\033[0m";
+                    out->flush();
+                }
+            }
+            std::cerr << "error: " << e.what() << "\n";
+            return 1;
         }
 
         if (stats) stats_writer.print_summary(*out);
@@ -823,6 +843,9 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
         std::cerr << "error: " << e.what() << "\n";
         return 1;
     } catch (const CaptureError& e) {
+        std::cerr << "error: " << e.what() << "\n";
+        return 1;
+    } catch (const ProtocolResultTypeMismatch& e) {
         std::cerr << "error: " << e.what() << "\n";
         return 1;
     }
@@ -968,6 +991,9 @@ int run_policy_validate(const std::string& input, const std::string& interface_n
     } catch (const CaptureError& e) {
         std::cerr << "error: " << e.what() << "\n";
         return 1;
+    } catch (const ProtocolResultTypeMismatch& e) {
+        std::cerr << "error: " << e.what() << "\n";
+        return 1;
     }
 }
 
@@ -1074,6 +1100,9 @@ int run_inventory(const std::string& input, const std::string& interface_name, c
         std::cerr << "error: " << e.what() << "\n";
         return 1;
     } catch (const CaptureError& e) {
+        std::cerr << "error: " << e.what() << "\n";
+        return 1;
+    } catch (const ProtocolResultTypeMismatch& e) {
         std::cerr << "error: " << e.what() << "\n";
         return 1;
     }

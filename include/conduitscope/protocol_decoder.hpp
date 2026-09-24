@@ -41,9 +41,12 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <type_traits>
+#include <typeindex>
+#include <typeinfo>
 #include <unordered_map>
 
 #include "conduitscope/byteio.hpp"
@@ -243,6 +246,24 @@ struct DecodeContext {
     }
 };
 
+// Thrown by ProtocolResult::as<T>() below when T doesn't match the concrete type a result was
+// actually constructed with (finding 3, docs/reviews/2026-09-chatgpt-security-review-patch160.md,
+// rated Medium -- "type safety": `as<T>()` used to be an entirely unchecked
+// `static_cast<const T*>(data.get())`, silent undefined behavior on a mismatch rather than a
+// diagnosable failure). Always a decoder-source-code bug -- protocol_id and the T requested at each
+// call site are both chosen by this codebase's own source, never derived from packet bytes -- so
+// this is not attacker-reachable through any capture file; it exists to turn a future migration
+// mistake (get the id()<->T association wrong when adding or refactoring a registration-model
+// decoder) into an immediate, clearly-worded failure instead of memory corruption that might not
+// surface until far away from its actual cause. See CMakeLists.txt's
+// protocol_result_type_safety_self_test / tools/protocol_result_selftest.cpp for the dedicated test
+// that exercises this directly (no real capture file can trigger it, so the usual pcap-fixture-plus-
+// CTest-regex discipline doesn't apply here -- this is the closest equivalent).
+class ProtocolResultTypeMismatch : public std::logic_error {
+public:
+    explicit ProtocolResultTypeMismatch(const std::string& what) : std::logic_error(what) {}
+};
+
 // Type-erased holder for a protocol's own result struct (ModbusFrame, EigrpMessage, GooseFrame,
 // TwinCatFrame, ...) -- deliberately NOT a std::variant of every migrated protocol's type, so
 // migrating one more protocol never means touching every other migrated protocol's own header to
@@ -256,16 +277,43 @@ struct ProtocolResult {
     std::string protocol_id;
     std::shared_ptr<const void> data;
 
+    // Security fix (finding 3, see ProtocolResultTypeMismatch's own comment above): the concrete
+    // C++ type `data` actually points to, captured once by make<T>() below. std::type_index (not a
+    // raw std::type_info*, which isn't guaranteed comparable/copyable/stably-ordered across
+    // translation units the way type_index is) -- cheap to store and compare, and RTTI is already
+    // enabled throughout this codebase (no -fno-rtti anywhere in CMakeLists.txt). Defaulted to
+    // typeid(void) so a ProtocolResult never sits in a not-yet-initialized state; every real
+    // instance immediately overwrites this via make<T>()'s own initializer.
+    std::type_index type_id = std::type_index(typeid(void));
+
     template <typename T>
     static ProtocolResult make(std::string id, T value) {
-        return ProtocolResult{std::move(id), std::make_shared<const T>(std::move(value))};
+        return ProtocolResult{std::move(id), std::make_shared<const T>(std::move(value)),
+                               std::type_index(typeid(T))};
     }
 
     // Caller's responsibility to pass the right T for this result's protocol_id -- exactly the
     // same contract DecodedPacket's own `protocol == "x"`-gated field access already has today,
-    // just centralized in one accessor instead of one `if` per read site.
+    // just centralized in one accessor instead of one `if` per read site. Checked, not blindly
+    // trusted (finding 3): a mismatch throws ProtocolResultTypeMismatch rather than silently
+    // reinterpreting one struct's bytes as another's. The one real user of this contract's sharp
+    // edge today is EtherNet/IP (see output.cpp's write_enip_json_fields/write_enip_io_json_fields
+    // comment) -- one protocol_id ("enip") legitimately backed by two different C++ types
+    // (EnipResult vs CipIoFrame) depending on which of two decoders produced it, discriminated at
+    // the call site by DecodedPacket::has_tcp/has_udp rather than by protocol_id alone; this check
+    // is exactly the safety net that scenario needs if a future edit ever gets that discriminant
+    // wrong.
     template <typename T>
     const T& as() const {
+        if (type_id != std::type_index(typeid(T))) {
+            throw ProtocolResultTypeMismatch(
+                "ProtocolResult::as<T>() called with a T that doesn't match the type this result "
+                "for protocol_id \"" +
+                protocol_id + "\" was actually constructed with (stored as " + type_id.name() +
+                ", requested as " + std::type_index(typeid(T)).name() +
+                ") -- this is a decoder bug, not something a capture file can trigger; please "
+                "report it, including the exact command that was run");
+        }
         return *static_cast<const T*>(data.get());
     }
 };
