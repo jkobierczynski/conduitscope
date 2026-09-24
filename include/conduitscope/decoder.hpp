@@ -16,6 +16,7 @@
 #include "conduitscope/bsap.hpp"
 #include "conduitscope/byteio.hpp"
 #include "conduitscope/can_socketcan.hpp"
+#include "conduitscope/cclink_ie.hpp"
 #include "conduitscope/cotp.hpp"
 #include "conduitscope/dcom.hpp"
 #include "conduitscope/devicenet.hpp"
@@ -234,6 +235,12 @@ enum class ProtocolFilter {
                            // ProtocolDecoder interface from inception like TwinCAT/MELSEC/FINS/GE
                            // SRTP. GateKind::UdpPort (port-gated in Auto mode, joining RIP/HSRP/
                            // DNS/mDNS/LLMNR/NBT-NS on that gate).
+    CclinkIeOnly,          // only attempt CC-Link IE Field Network Basic (CCIEFB cyclic data, UDP
+                           // port 61450; SLMP node search/set IP address, UDP port 61451) decoding
+                           // -- see cclink_ie.hpp. GateKind::UdpPortIndependent (tried
+                           // opportunistically on every UDP port in Auto mode, joining MELSEC's
+                           // own UDP path on that gate -- and deliberately dispatched BEFORE it,
+                           // see cclink_ie.hpp's own "DISPATCH ORDER" section).
 };
 
 struct DecodeOptions {
@@ -347,6 +354,14 @@ struct DecodeOptions {
                                                   // gating group and reasoning as extra_rip_ports
                                                   // above -- see hsrp.hpp's own try_parse_hsrp
                                                   // comment.
+    std::vector<uint16_t> extra_cclink_ie_ports;  // UDP -- see CCLINK_IE_CYCLIC_PORT (61450) /
+                                                  // CCLINK_IE_NODE_SEARCH_PORT (61451). UNLIKE
+                                                  // extra_bsap_ports just below, this does NOT gate
+                                                  // detection (CC-Link IE is UdpPortIndependent,
+                                                  // like MELSEC, tried on every UDP port in Auto
+                                                  // mode) -- only widens which port(s) count as
+                                                  // "expected" for the not-a-standard-port note.
+                                                  // See cclink_ie.hpp.
     std::vector<uint16_t> extra_bsap_ports;     // UDP -- see BSAP_PORT (1234); same detection-
                                                   // gating group and reasoning as extra_rip_ports/
                                                   // extra_hsrp_ports above -- see bsap.hpp's own

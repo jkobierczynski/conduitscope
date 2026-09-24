@@ -113,6 +113,7 @@ add_library(conduitscope_core STATIC
   src/dcom.cpp
   src/ge_srtp.cpp
   src/bsap.cpp
+  src/cclink_ie.cpp
   src/protocol_registry.cpp
   src/resource_limits.cpp
   src/decoder.cpp
@@ -11231,3 +11232,89 @@ add_test(NAME bsap_stats_framing_counts_and_nak_counter
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bsap.pcap" --format text --stats)
 set_tests_properties(bsap_stats_framing_counts_and_nak_counter PROPERTIES
   PASS_REGULAR_EXPRESSION "bsap serial-tunneled messages: 4\nbsap-ip-native messages: 1\nbsap link-layer NAKs observed: 1")
+
+# CC-Link IE Field Network Basic (CCIEFB) -- see cclink_ie.hpp's own file header for the full
+# sourcing/scoping/design writeup. These tests exercise both message families (cyclic data on UDP
+# 61450, SLMP node search/set-IP-address on UDP 61451) plus the critical MELSEC-coexistence design:
+# a genuine MELSEC command riding the same 3E framing must not be swallowed (packet #8 below), and
+# an orphan CC-Link IE response with no session-tracked request must fall through to MELSEC's own
+# generic response handling rather than being misattributed (packet #7 below).
+add_test(NAME cclink_ie_cyclic_request_recognized
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_cclink_ie.pcap" --format text -v)
+set_tests_properties(cclink_ie_cyclic_request_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "#1  [^\n]*\\[cclink-ie\\]  CC-Link IE Field Basic cyclic request: master=192.168.1.50 group=1 seq=1 parameterNo=7 1 occupied station\\(s\\), 76 byte\\(s\\) of cyclic I/O data")
+
+add_test(NAME cclink_ie_cyclic_response_matched_to_request
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_cclink_ie.pcap" --format text -v)
+set_tests_properties(cclink_ie_cyclic_response_matched_to_request PROPERTIES
+  PASS_REGULAR_EXPRESSION "#2  [^\n]*\\[cclink-ie\\]  CC-Link IE Field Basic cyclic response: slave=192.168.1.10 group=1 seq=1 end_code=success 1 occupied station\\(s\\), 72 byte\\(s\\) of cyclic I/O data[^\n]*\n *note: matched to the request seen in packet #1 on this session -- CC-Link IE responses carry no command field of their own on the wire")
+
+add_test(NAME cclink_ie_cyclic_request_json_fields
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_cclink_ie.pcap" --format json)
+set_tests_properties(cclink_ie_cyclic_request_json_fields PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"cclink_ie_kind\": \"cyclic-request\",\n *\"cclink_ie_master_id\": \"192.168.1.50\",\n *\"cclink_ie_group_no\": 1,\n *\"cclink_ie_frame_sequence_no\": 1,\n *\"cclink_ie_occupied_stations\": 1,\n *\"cclink_ie_cyclic_io_bytes\": 76,")
+
+add_test(NAME cclink_ie_node_search_request_and_response
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_cclink_ie.pcap" --format text -v)
+set_tests_properties(cclink_ie_node_search_request_and_response PROPERTIES
+  PASS_REGULAR_EXPRESSION "#3  [^\n]*\\[cclink-ie\\]  CC-Link IE / SLMP node search request: master=00:0c:29:11:22:33 \\(192.168.1.50\\)[^\n]*\n *note: node search: passive asset-discovery broadcast[^\n]*\n#4  [^\n]*\\[cclink-ie\\]  CC-Link IE / SLMP node search response: slave=00:0c:29:aa:bb:cc \\(192.168.1.10, netmask 255.255.255.0\\) vendor=0xa5 model=0x1234 equipment_ver=1")
+
+add_test(NAME cclink_ie_node_search_json_fields
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_cclink_ie.pcap" --format json)
+set_tests_properties(cclink_ie_node_search_json_fields PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"cclink_ie_kind\": \"node-search-response\",\n *\"cclink_ie_end_code\": 0,\n *\"cclink_ie_end_code_name\": \"success\",\n *\"cclink_ie_master_mac\": \"00:0c:29:11:22:33\",\n *\"cclink_ie_slave_mac\": \"00:0c:29:aa:bb:cc\",\n *\"cclink_ie_slave_ip\": \"192.168.1.10\",\n *\"cclink_ie_vendor_code\": 165,\n *\"cclink_ie_model_code\": 4660,")
+
+add_test(NAME cclink_ie_set_ip_address_request_and_response
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_cclink_ie.pcap" --format text -v)
+set_tests_properties(cclink_ie_set_ip_address_request_and_response PROPERTIES
+  PASS_REGULAR_EXPRESSION "#5  [^\n]*\\[cclink-ie\\]  CC-Link IE / SLMP set IP address request: master=00:0c:29:11:22:33 target slave=00:0c:29:aa:bb:cc new IP=192.168.1.11 new netmask=255.255.255.0[^\n]*\n *note: set IP address: remotely reassigns a slave's own network identity -- no credential of any kind is documented[^\n]*\n#6  [^\n]*\\[cclink-ie\\]  CC-Link IE / SLMP set IP address response: acknowledged to master=00:0c:29:11:22:33")
+
+# Orphan response, no session-tracked request (fresh 4-tuple) -- MUST fall through to MELSEC's own
+# generic response handling, not be claimed/misattributed as cclink-ie. This is the direct proof of
+# cclink_ie.hpp's own "RESPONSES CARRY NO COMMAND FIELD" design.
+add_test(NAME cclink_ie_orphan_response_falls_through_to_melsec
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_cclink_ie.pcap" --format text -v)
+set_tests_properties(cclink_ie_orphan_response_falls_through_to_melsec PROPERTIES
+  PASS_REGULAR_EXPRESSION "#7  [^\n]*\\[melsec\\]  MELSEC response: Normal completion[^\n]*\n *note: no outstanding request found on this session"
+  FAIL_REGULAR_EXPRESSION "#7  [^\n]*\\[cclink-ie\\]")
+
+# A genuine MELSEC command (Batch Read, command 0x0401) riding the exact same 3E framing and port
+# this decoder is tried on -- the direct zero-regression proof: 0x0401 is not one of this decoder's
+# own 3 known commands, so it must still decode [melsec], never [cclink-ie].
+add_test(NAME cclink_ie_genuine_melsec_command_not_swallowed
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_cclink_ie.pcap" --format text -v)
+set_tests_properties(cclink_ie_genuine_melsec_command_not_swallowed PROPERTIES
+  PASS_REGULAR_EXPRESSION "#8  [^\n]*\\[melsec\\]  Batch Read request: D100, 1 point\\(s\\), word units"
+  FAIL_REGULAR_EXPRESSION "#8  [^\n]*\\[cclink-ie\\]")
+
+# Same genuine MELSEC command, but with --protocol cclink-ie forced -- the sharpest proof of all:
+# this decoder's own gate rejects it outright (command 0x0401 doesn't match 0x0E70/0x0E30/0x0E31),
+# so forcing cclink-ie still correctly falls through to generic [udp], never fabricating a match.
+add_test(NAME cclink_ie_forced_protocol_still_rejects_genuine_melsec_command
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_cclink_ie.pcap" --protocol cclink-ie --format text)
+set_tests_properties(cclink_ie_forced_protocol_still_rejects_genuine_melsec_command PROPERTIES
+  PASS_REGULAR_EXPRESSION "#8  [^\n]*\\[udp\\]  UDP payload of 21 byte\\(s\\)"
+  FAIL_REGULAR_EXPRESSION "#8  [^\n]*\\[cclink-ie\\]")
+
+add_test(NAME cclink_ie_cyclic_response_non_success_end_code
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_cclink_ie.pcap" --format text -v)
+set_tests_properties(cclink_ie_cyclic_response_non_success_end_code PROPERTIES
+  PASS_REGULAR_EXPRESSION "#10  [^\n]*\\[cclink-ie\\]  CC-Link IE Field Basic cyclic response: slave=192.168.1.10 group=1 seq=2 end_code=CCIEFB: error in slave station[^\n]*\n *note: CCIEFB cyclic response reports a non-success end code[^\n]*\n *note: matched to the request seen in packet #9")
+
+add_test(NAME cclink_ie_non_standard_port_note
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_cclink_ie.pcap" --format text -v)
+set_tests_properties(cclink_ie_non_standard_port_note PROPERTIES
+  PASS_REGULAR_EXPRESSION "#11  [^\n]*\\[cclink-ie\\][^\n]*\n *note: seen on UDP port 55000->55001, which is not a configured/standard CC-Link IE port \\(61450 cyclic, 61451 node search/set IP address\\)")
+
+# NEGATIVE CONTROL: a 2-byte payload carrying only the 3E-frame request magic -- too short for
+# either this decoder's or MELSEC's own header, must fall through cleanly to generic [udp].
+add_test(NAME cclink_ie_gate_rejects_too_short_payload
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_cclink_ie.pcap" --format text -v)
+set_tests_properties(cclink_ie_gate_rejects_too_short_payload PROPERTIES
+  PASS_REGULAR_EXPRESSION "#13  [^\n]*\\[udp\\]  UDP payload of 2 byte\\(s\\)"
+  FAIL_REGULAR_EXPRESSION "#13[^\n]*\\[(cclink-ie|melsec)\\]")
+
+add_test(NAME cclink_ie_stats_message_kind_counts
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_cclink_ie.pcap" --format text --stats)
+set_tests_properties(cclink_ie_stats_message_kind_counts PROPERTIES
+  PASS_REGULAR_EXPRESSION "cclink-ie cyclic requests: 3\ncclink-ie cyclic responses: 3\ncclink-ie cyclic responses with non-success end code: 1\ncclink-ie node search messages: 2\ncclink-ie set IP address messages: 2")

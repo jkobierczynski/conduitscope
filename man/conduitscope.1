@@ -174,6 +174,20 @@ public source, including CISA's own reference open\-source Zeek parser
 against the existing HART\-IP and FF\-HSE decoders were found and fixed
 while building this decoder; see \fBdocs/PROTOCOL_COVERAGE.md\fR's BSAP
 section for the full writeup,
+plus CC\-Link IE Field Network Basic (CCIEFB, Mitsubishi Electric \-\- UDP
+ports 61450 cyclic data / 61451 SLMP node search and Set IP Address),
+decoding cyclic I/O data (master/slave station notification, RWw/RWr/RY/RX
+byte counts), SLMP node search (discovery/enumeration), and SLMP Set IP
+Address (flagged with its own security note \-\- it remotely reassigns a
+slave's IP address with no documented credential requirement in any
+source); the only CC\-Link IE family member implemented, since CC\-Link IE
+Control/Field/TSN require dedicated ASIC hardware with no public UDP/IP
+wire documentation. Rides the same SLMP 3E/4E outer framing as MELSEC;
+coexistence is handled by a request\-side command\-code gate plus
+session\-scoped response matching, designed in proactively (not a post\-hoc
+collision fix) and verified against a genuine MELSEC command and an
+orphan response in the test fixture; see
+\fBdocs/PROTOCOL_COVERAGE.md\fR's CC\-Link IE section for the full writeup,
 plus PROFINET RT (EtherType 0x8892, DCP device discovery/configuration and
 cyclic real-time IO), IEC 61850-8-1 GOOSE (EtherType 0x88B8, ASN.1
 BER-encoded GOOSE PDU), IEC 61850-9-2 Sampled Values (EtherType 0x88BA,
@@ -357,7 +371,7 @@ regardless of where it's being analyzed \-\- an extension beyond what
 tshark/tcpdump themselves offer. See \fBdocs/USER_GUIDE.md\fR's OUTPUT
 FORMATS "Timestamps" subsection.
 .TP
-.B \-\-protocol {auto,modbus,dnp3,iec104,s7comm,s7comm\-plus,mms,enip,twincat,melsec,fins,bgp,kerberos,ldap,smb,profinet,goose,sv,ethercat,stp,devicenet,bacnet,hartip,opcua,mqtt,ff\-hse,dns,mdns,llmnr,nbns,doh,rip,igmp,vrrp,hsrp,igrp,pim,eigrp,ospf,remote\-access,lateral\-movement,enterprise\-trust,eapol,wireless\-backhaul,pppoe,tunnel\-vpn,mpls,arp,lldp,slow\-protocols,winrm,dcom,ge\-srtp,bsap}
+.B \-\-protocol {auto,modbus,dnp3,iec104,s7comm,s7comm\-plus,mms,enip,twincat,melsec,fins,bgp,kerberos,ldap,smb,profinet,goose,sv,ethercat,stp,devicenet,bacnet,hartip,opcua,mqtt,ff\-hse,dns,mdns,llmnr,nbns,doh,rip,igmp,vrrp,hsrp,igrp,pim,eigrp,ospf,remote\-access,lateral\-movement,enterprise\-trust,eapol,wireless\-backhaul,pppoe,tunnel\-vpn,mpls,arp,lldp,slow\-protocols,winrm,dcom,ge\-srtp,bsap,cclink\-ie}
 Restrict decoding to one protocol. Default: auto (tries all fourteen TCP
 protocols, independent of port number, plus CIP I/O, BACnet/IP, HART-IP, and
 FF-HSE on every
@@ -688,6 +702,16 @@ Same as \fB\-\-dns\-port\fR, for BSAP (built\-in default: 1234, UDP \-\-
 structural link\-layer decode only, no RDB application\-layer semantics;
 see \fBdocs/PROTOCOL_COVERAGE.md\fR's BSAP section). Repeatable. Also
 widens detection in \fBauto\fR mode.
+.TP
+.B \-\-cclink\-ie\-port \fIPORT\fR
+Same as \fB\-\-dns\-port\fR, for CC\-Link IE Field Network Basic (built\-in
+defaults: 61450 cyclic data, 61451 SLMP node search/Set IP Address; see
+\fBdocs/PROTOCOL_COVERAGE.md\fR's CC\-Link IE section). Repeatable. Unlike
+\fB\-\-bsap\-port\fR, this does NOT gate detection \-\- CC\-Link IE is
+already tried opportunistically on every UDP port in \fBauto\fR mode (its
+own command\-code gate is what prevents false positives); this option only
+widens the ports annotated with a "non\-standard port" note when traffic
+is recognized on a port other than the two built\-in defaults.
 .TP
 .B \-\-rip\-port \fIPORT\fR
 Same as \fB\-\-dns\-port\fR, for RIP (built\-in default: 520). Repeatable.

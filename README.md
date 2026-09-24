@@ -91,6 +91,15 @@ available anywhere, including in the reference open-source Zeek parser --
 **note:** two real dispatch-ordering collision bugs against the existing
 HART-IP/FF-HSE decoders were found and fixed while building this decoder;
 see `docs/PROTOCOL_COVERAGE.md`'s BSAP section for the full writeup),
+CC-Link IE Field Network Basic (CCIEFB, Mitsubishi Electric, UDP ports
+61450/61451 -- cyclic I/O data, SLMP node search, and SLMP Set IP Address
+decoded; the only CC-Link IE family member implemented, since the others
+(Control/Field/TSN) require dedicated ASIC hardware with no public UDP/IP
+wire documentation; rides the same SLMP 3E/4E framing as MELSEC, with a
+proactively-designed collision-avoidance scheme (request-side command
+gate plus session-scoped response matching) verified against a genuine
+MELSEC command and an orphan response in the test fixture -- see
+`docs/PROTOCOL_COVERAGE.md`'s CC-Link IE section for the full writeup),
 IEEE Spanning Tree Protocol
 (STP/RSTP/MSTP), DeviceNet (CAN-bus CIP, via SocketCAN pcap captures), DNS,
 mDNS, LLMNR, and NetBIOS Name Service (NBT-NS), ICMP, RIP, IGMP, VRRP, HSRP,
@@ -200,7 +209,7 @@ traffic match what the segmentation policy says it should" question.
 
 Groundwork / v0.2.4. Every protocol named above is implemented, decoding real
 wire-format fields (not just naming the protocol), and covered by the
-automated test suite -- 1588 tests as of this writing, run via `ctest` after
+automated test suite -- 1601 tests as of this writing, run via `ctest` after
 building (see Building below). Where a real capture was available (public
 ICS-lab collections, vendor-attributed samples, or a live device on real
 hardware), the decoder is validated against it, not just a synthetic

@@ -9361,3 +9361,126 @@ decoding under `--protocol bsap`. Every case was decoded and inspected in
 verification discipline every prior protocol addition in this codebase has
 been held to. See `include/conduitscope/bsap.hpp`'s file header for the
 full writeup.
+
+### CC-Link IE Field Network Basic (CCIEFB), Mitsubishi Electric -- UDP ports 61450 (cyclic data), 61451 (SLMP node search / set IP address)
+
+Jurgen asked "Can you add CC-Link IE?" -- a bare request naming a family,
+not a single protocol. CC-Link IE has four members: CC-Link IE Control and
+CC-Link IE Field (both 1 Gbit/s, requiring dedicated CC-Link ASIC hardware)
+and CC-Link IE TSN (IEEE 802.1 TSN-based) have no public UDP/IP-level wire
+documentation and depend on hardware this project has no access to. **CC-
+Link IE Field Network Basic (CCIEFB)** is the one exception: 100 Mbit/s,
+explicitly designed to need no specialized hardware, running directly over
+standard UDP/IPv4 -- the only member this decoder implements.
+
+**Sourcing**: two independent sources, both strong -- Mitsubishi's own
+official reference manual, and rt-labs' open-source `c-link` stack (whose
+own source cites official CLPA standard document numbers). Both give full
+byte-level struct layouts (exact field names, sizes, offsets), a
+meaningfully stronger sourcing position than BSAP's own (see above), so
+this scope was decided and documented in code rather than raised as a
+scoping question to Jurgen.
+
+**Wire format**: CCIEFB rides SLMP (Seamless Message Protocol),
+Mitsubishi's shared messaging layer, reusing the exact same "3E frame"
+(`0x5000` request / `0xD000` response subheader) and "4E frame" (`0x5400` /
+`0xD400`, adds a 2-byte Serial No.) outer framing this codebase's
+pre-existing MELSEC decoder already parses for MC Protocol -- see the
+collision-avoidance section below.
+
+*Cyclic data* (command `0x0E70`, 3E frame, port 61450): request = a fixed
+67-byte header (`req_header` + `cyclic_header` + `master_station_notification`
++ `cyclic_data_header`) plus N x 76 bytes trailing (N x 4-byte slave IPs +
+N x 64-byte RWw + N x 8-byte RY -- three separate contiguous arrays, not
+interleaved per-station). Response = a fixed 59-byte header (`resp_header`
++ `cyclic_header` + `slave_station_notification` + `cyclic_data_header`)
+plus N x 72 bytes trailing (N x 64-byte RWr + N x 8-byte RX). The response
+carries no explicit occupied-station-count field, so N is derived
+arithmetically as `(payload_len - 59) / 72` and rejected if it does not
+divide evenly. Unlike generic SLMP, CCIEFB's own response header carries no
+End Code field -- End Code instead lives inside `cyclic_header` -- and there
+is no shorter "error" response shape; the full 59-byte fixed header is
+always present, with a curated note whenever End Code is non-zero.
+`master_station_notification`/`slave_station_notification` decode Local
+Unit Info (stopped/running/stopped-by-user; stopped/operating), Clock Info,
+Vendor/Model/Equipment-Version codes, and Slave Error Code. RWw/RWr/RY/RX
+are surfaced as raw byte counts, not interpreted as typed device values --
+this decoder does not know a station's device-memory mapping.
+
+*SLMP node search* (command `0x0E30`, 4E frame, port 61451): a structural
+discovery/enumeration request/response -- master+slave MAC (byte-reversed
+on the wire relative to conventional colon notation, confirmed via the
+reference stack's own `cl_util_copy_mac_reverse()`) and IP, vendor/model
+codes, netmask/gateway, on success.
+
+*SLMP Set IP Address* (command `0x0E31`, 4E frame, port 61451): genuinely
+attack-relevant on its own, not just as a discovery aid -- it remotely
+reassigns a slave's IP address, and no source found documents any
+credential requirement for it. Flagged with its own curated note whenever
+observed.
+
+IPv4 fields are wire-encoded reversed relative to this codebase's own
+`format_ipv4()` convention (wire byte 0 = last octet), confirmed against
+the reference stack's own comments and its own usage pattern for real IP
+headers -- handled with a dedicated `read_ipv4()` helper rather than
+assuming the generic formatter's usual byte order.
+
+**SLMP end-code table**: ~36 entries transcribed from the reference
+stack's own `cl_slmp_error_codes` enum -- generic SLMP errors,
+CANopen-prefixed errors (a shared numeric space with CC-Link's own CANopen
+object-access command), and five CCIEFB-specific codes (`0xCFE0` master
+duplication, `0xCFE1` wrong occupied-station count, `0xCFF0` slave error,
+`0xCFFF` slave disconnect). A generic error response (any command,
+non-zero End Code) reads only the header plus End Code, never guessing at
+a command-specific body an error response may not actually carry -- the
+same honest-fallback posture MELSEC and GE SRTP already use for their own
+Nack/error paths.
+
+**Coexistence with MELSEC, designed in proactively rather than found as a
+bug afterward** (contrast with BSAP's own and GE SRTP's own post-hoc
+dispatch-order fixes): MELSEC's own UDP decoder is tried opportunistically
+on every UDP port and shares this exact same SLMP 3E/4E outer framing; it
+does not reject unrecognized commands, decoding them instead as
+structurally-valid "unrecognized command" MELSEC frames. Since MELSEC's
+own command table never uses `0x0E70`/`0x0E30`/`0x0E31`, and CC-Link IE's
+own request-side gate requires an exact match on one of those three values
+(strictly more specific than MELSEC's own subheader-plus-declared-length
+cross-check), CC-Link IE's dispatch block runs before MELSEC's own,
+safely by construction for requests. Responses carry no command field at
+all, and a CCIEFB-success response header is byte-identical to a generic
+MELSEC 3E-response-success header -- so response safety instead comes from
+session-scoped state (one pending-request slot per session, mirroring
+MELSEC's own flow-state design): a response is claimed as CC-Link IE only
+when this decoder's own tracked pending request actually matches it;
+otherwise it falls through to MELSEC's own decoder, which handles it as an
+honest unattributed/orphan response exactly as it already does for its own
+orphans today -- a disclosed, non-regressive limitation, not a defect.
+
+**Explicitly out of scope**: CC-Link IE Control, CC-Link IE Field, and
+CC-Link IE TSN (no public UDP/IP-level wire documentation found for any of
+the three, and all require dedicated ASIC hardware this project has no
+access to); any application-layer semantics past what is named above (RWw
+/RWr/RY/RX are raw byte arrays, not typed device values); and, as ever,
+any CC-Link IE field this decoder does not name above.
+
+**Honestly stated validation gap**: `tests/sample_cclink_ie.pcap`
+(`build_cclink_ie_sample`) is entirely synthetic -- no real CC-Link IE
+Field Network Basic capture of any kind was available. If a real capture
+becomes available later, this note should be updated accordingly.
+
+Validated against `tests/sample_cclink_ie.pcap`: a cyclic request; a
+cyclic response matched to its request via session state; node search
+request/response; Set IP Address request/response (with its own security
+note); a cyclic response carrying a non-zero End Code (curated note); an
+orphan response correctly falling through to `[melsec]`; a genuine MELSEC
+Batch Read command correctly staying `[melsec]` both in Auto mode and
+under forced `--protocol cclink-ie` (proving the request-side gate, not
+dispatch order, is what protects MELSEC); a non-standard-port pair; and a
+too-short-payload negative control. Every case was decoded and inspected
+in `--format text -v`, `--format json`, and `--stats` BEFORE the
+`CMakeLists.txt` `cclink_ie_*` test family reading it was written, the
+same verification discipline every prior protocol addition in this
+codebase has been held to -- and, unlike BSAP/GE SRTP, the full suite
+passed with zero regressions on the very first build, no post-hoc
+collision fix required. See `include/conduitscope/cclink_ie.hpp`'s file
+header for the full writeup.

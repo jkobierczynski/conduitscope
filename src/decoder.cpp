@@ -1271,6 +1271,60 @@ DecodedPacket Decoder::decode_ip_payload(DecodedPacket out, uint8_t protocol, By
                 }
             }
 
+            // CC-Link IE Field Network Basic (CCIEFB cyclic data + SLMP node search/set-IP-address)
+            // over UDP -- a brand-new protocol, NOT part of migration batch 2, deliberately tried
+            // BEFORE MELSEC's own UDP block just below: CCIEFB/node-search/set-IP ride the exact
+            // same SLMP 3E/4E outer framing MELSEC's own decoder already parses, and MELSEC's own
+            // decoder treats any command code it doesn't recognize as a structurally-valid
+            // "unrecognized command" MELSEC frame rather than rejecting it outright -- so if MELSEC
+            // ran first, a real CCIEFB/node-search/set-IP REQUEST would be silently swallowed and
+            // mislabeled "melsec" (confirmed via this protocol's own required manual verification,
+            // not theoretically). This decoder's own request-side gate is strictly MORE specific
+            // than MELSEC's (exact command-code match 0x0E70/0x0E30/0x0E31, on top of the same
+            // subheader+declared-length cross-check MELSEC itself uses), and MELSEC's own command
+            // table never uses those three values, so this ordering is safe by construction: every
+            // genuine MELSEC command still reaches MELSEC's decoder untouched. See cclink_ie.hpp's
+            // own "DISPATCH ORDER" section for the full writeup, and its "RESPONSES CARRY NO
+            // COMMAND FIELD" section for why a *response* additionally needs this decoder's own
+            // session-scoped CclinkIeFlowState (mirroring MelsecFlowState) rather than just the
+            // request-side command-code gate: an orphan CC-Link IE response (no tracked request on
+            // this session) is deliberately NOT claimed here and falls through to MELSEC's own
+            // decoder instead, exactly like MELSEC already does for its own orphan responses.
+            bool want_cclink_ie = options_.protocol_filter == ProtocolFilter::Auto ||
+                                   options_.protocol_filter == ProtocolFilter::CclinkIeOnly;
+            if (want_cclink_ie) {
+                std::string udp_session =
+                    tcp_session_key(out.src_ip, udp.src_port, out.dst_ip, udp.dst_port);
+                DecodeContext ctx;
+                ctx.flow_key = format_flow_endpoint(out.src_ip, udp.src_port) + "->" +
+                               format_flow_endpoint(out.dst_ip, udp.dst_port);
+                ctx.session_key = udp_session;
+                ctx.packet_index = index;
+                ctx.protocol_id = "cclink-ie";
+                ctx.flow_states = &registry_flow_state_;
+                if (auto result = cclink_ie_decoder().decode(udp.payload, ctx)) {
+                    const CclinkIeFrame& cf = result->as<CclinkIeFrame>();
+                    out.protocol = "cclink-ie";
+                    out.summary = cf.summary;
+                    for (const auto& n : cf.notes) out.notes.push_back(n);
+                    out.result = *result;
+
+                    bool expected_port =
+                        port_in(udp.src_port, CCLINK_IE_CYCLIC_PORT, options_.extra_cclink_ie_ports) ||
+                        port_in(udp.dst_port, CCLINK_IE_CYCLIC_PORT, options_.extra_cclink_ie_ports) ||
+                        port_in(udp.src_port, CCLINK_IE_NODE_SEARCH_PORT, options_.extra_cclink_ie_ports) ||
+                        port_in(udp.dst_port, CCLINK_IE_NODE_SEARCH_PORT, options_.extra_cclink_ie_ports);
+                    if (!expected_port) {
+                        out.notes.push_back(
+                            "seen on UDP port " + std::to_string(udp.src_port) + "->" +
+                            std::to_string(udp.dst_port) +
+                            ", which is not a configured/standard CC-Link IE port (61450 cyclic, "
+                            "61451 node search/set IP address)");
+                    }
+                    return out;
+                }
+            }
+
             // MELSEC (MC Protocol/SLMP) over UDP, tried right after BACnet and CIP I/O -- see
             // melsec.hpp's file header comment for the wire format. Same session-scoped
             // request/command tracking (MelsecFlowState) as the TCP side, not authoritative

@@ -14450,6 +14450,223 @@ def build_bsap_sample():
     (TESTS_DIR / "sample_bsap.pcap").write_bytes(data)
 
 
+CCLINK_IE_CYCLIC_PORT = 61450
+CCLINK_IE_NODE_SEARCH_PORT = 61451
+
+
+def cclink_ip_le(ip: str) -> bytes:
+    """4-byte little-endian encoding of an IPv4 address for CC-Link IE's own wire fields -- see
+    cclink_ie.hpp's WIRE FORMAT section: the wire stores these 'Little endian', meaning the first
+    wire byte is the address's last octet."""
+    return bytes(reversed(socket.inet_aton(ip)))
+
+
+def cclink_mac_le(mac_colon: str) -> bytes:
+    """6-byte reversed MAC encoding -- see cclink_ie.hpp's own 'SLMP NODE SEARCH' section
+    (cl_util_copy_mac_reverse in the reference stack)."""
+    raw = bytes(int(x, 16) for x in mac_colon.split(":"))
+    return bytes(reversed(raw))
+
+
+def cclink_cyclic_request(master_ip: str, group_no: int, seq: int, occupied_stations: int,
+                           slave_ips: list, parameter_no: int = 1, timeout_value: int = 500,
+                           parallel_off_count: int = 3, cyclic_tx_state: int = 0x0001,
+                           master_local_unit_info: int = 0x0001, clock_info_ms: int = 0) -> bytes:
+    """CCIEFB cyclic request (command 0x0E70) -- see cclink_ie.hpp's 'CCIEFB CYCLIC' section for
+    the exact field-by-field layout this reproduces."""
+    cyclic_header = struct.pack("<HH", 1, 0x0000) + struct.pack("<H", 36) + bytes(14)
+    master_notif = struct.pack("<HH", master_local_unit_info, 0x0000) + struct.pack("<Q", clock_info_ms)
+    cyclic_data_header = (cclink_ip_le(master_ip) + bytes([group_no, 0x00]) +
+                           struct.pack("<HHHHHH", seq, timeout_value, parallel_off_count,
+                                       parameter_no, occupied_stations, cyclic_tx_state) +
+                           struct.pack("<H", 0x0000))
+    trailing = b""
+    for ip in slave_ips:
+        trailing += cclink_ip_le(ip)
+    for i in range(occupied_stations):
+        trailing += struct.pack("<32H", *[(i * 100 + j) & 0xFFFF for j in range(32)])  # RWw
+    for i in range(occupied_stations):
+        trailing += bytes([0x01 if i == 0 else 0x00] + [0x00] * 7)  # RY
+    tail = struct.pack("<H", 0x0000) + struct.pack("<HH", 0x0E70, 0x0000) + \
+        cyclic_header + master_notif + cyclic_data_header + trailing
+    dl = len(tail)
+    header = (struct.pack(">H", 0x5000) + bytes([0x00, 0xFF]) + struct.pack("<H", 0x03FF) +
+              bytes([0x00]) + struct.pack("<H", dl))
+    return header + tail
+
+
+def cclink_cyclic_response(slave_ip: str, group_no: int, seq: int, occupied_stations: int,
+                            end_code: int = 0x0000, vendor_code: int = 0x00A5,
+                            model_code: int = 0x00001234, equipment_ver: int = 1,
+                            slave_local_unit_info: int = 1, slave_err_code: int = 0,
+                            local_management_info: int = 0) -> bytes:
+    """CCIEFB cyclic response -- see cclink_ie.hpp's 'CCIEFB CYCLIC' section. The fixed 59-byte
+    header is always present (CCIEFB's own response shape carries no shorter error variant, unlike
+    generic SLMP's own rdErrMT-PDU -- see cclink_ie.hpp), even when end_code != 0."""
+    cyclic_header = struct.pack("<HH", 1, end_code) + struct.pack("<H", 40) + bytes(14)
+    slave_notif = (struct.pack("<HH", vendor_code, 0x0000) + struct.pack("<I", model_code) +
+                   struct.pack("<HH", equipment_ver, 0x0000) +
+                   struct.pack("<HH", slave_local_unit_info, slave_err_code) +
+                   struct.pack("<I", local_management_info))
+    cyclic_data_header = cclink_ip_le(slave_ip) + bytes([group_no, 0x00]) + struct.pack("<H", seq)
+    trailing = b""
+    if end_code == 0:
+        for i in range(occupied_stations):
+            trailing += struct.pack("<32H", *[(i * 50 + j) & 0xFFFF for j in range(32)])  # RWr
+        for i in range(occupied_stations):
+            trailing += bytes([0x01 if i == 0 else 0x00] + [0x00] * 7)  # RX
+    tail = struct.pack("<H", 0x0000) + cyclic_header + slave_notif + cyclic_data_header + trailing
+    dl = len(tail)
+    header = (struct.pack(">H", 0xD000) + bytes([0x00, 0xFF]) + struct.pack("<H", 0x03FF) +
+              bytes([0x00]) + struct.pack("<H", dl))
+    return header + tail
+
+
+def cclink_slmp_req_header(command: int, body: bytes, serial: int = 1) -> bytes:
+    tail = struct.pack("<H", 0x0000) + struct.pack("<HH", command, 0x0000) + body
+    length = len(tail)
+    header = (struct.pack(">H", 0x5400) + struct.pack("<H", serial) + struct.pack("<H", 0x0000) +
+              bytes([0x00, 0xFF]) + struct.pack("<H", 0x03FF) + bytes([0x00]) +
+              struct.pack("<H", length))
+    return header + tail
+
+
+def cclink_slmp_resp_header(end_code: int, body: bytes, serial: int = 1) -> bytes:
+    tail = struct.pack("<H", end_code) + body
+    length = len(tail)
+    header = (struct.pack(">H", 0xD400) + struct.pack("<H", serial) + struct.pack("<H", 0x0000) +
+              bytes([0x00, 0xFF]) + struct.pack("<H", 0x03FF) + bytes([0x00]) +
+              struct.pack("<H", length))
+    return header + tail
+
+
+def cclink_node_search_request(master_mac: str, master_ip: str, serial: int = 1) -> bytes:
+    body = cclink_mac_le(master_mac) + bytes([4]) + cclink_ip_le(master_ip)
+    return cclink_slmp_req_header(0x0E30, body, serial)
+
+
+def cclink_node_search_response(master_mac: str, master_ip: str, slave_mac: str, slave_ip: str,
+                                 slave_netmask: str, vendor_code: int, model_code: int,
+                                 equipment_ver: int, slave_status: int = 0,
+                                 serial: int = 1) -> bytes:
+    body = (cclink_mac_le(master_mac) + bytes([4]) + cclink_ip_le(master_ip) +
+            cclink_mac_le(slave_mac) + bytes([4]) + cclink_ip_le(slave_ip) +
+            cclink_ip_le(slave_netmask) + cclink_ip_le("255.255.255.255") + bytes([0]) +
+            struct.pack("<H", vendor_code) + struct.pack("<I", model_code) +
+            struct.pack("<H", equipment_ver) + bytes([4]) + cclink_ip_le("255.255.255.255") +
+            struct.pack("<H", 0xFFFF) + struct.pack("<H", slave_status) +
+            struct.pack("<H", CCLINK_IE_NODE_SEARCH_PORT) + bytes([0x01]))
+    return cclink_slmp_resp_header(0x0000, body, serial)
+
+
+def cclink_set_ip_request(master_mac: str, master_ip: str, slave_mac: str, new_ip: str,
+                           new_netmask: str, serial: int = 1) -> bytes:
+    body = (cclink_mac_le(master_mac) + bytes([4]) + cclink_ip_le(master_ip) +
+            cclink_mac_le(slave_mac) + bytes([4]) + cclink_ip_le(new_ip) +
+            cclink_ip_le(new_netmask) + cclink_ip_le("255.255.255.255") + bytes([0]) +
+            bytes([4]) + cclink_ip_le("255.255.255.255") + struct.pack("<H", 0xFFFF) +
+            bytes([0x01]))
+    return cclink_slmp_req_header(0x0E31, body, serial)
+
+
+def cclink_set_ip_response(master_mac: str, serial: int = 1) -> bytes:
+    return cclink_slmp_resp_header(0x0000, cclink_mac_le(master_mac), serial)
+
+
+def cclink_slmp_error_response(end_code: int, serial: int = 1) -> bytes:
+    return cclink_slmp_resp_header(end_code, b"", serial)
+
+
+def build_cclink_ie_sample():
+    """CC-Link IE Field Network Basic (CCIEFB) -- UDP port 61450 (cyclic data) / 61451 (SLMP node
+    search / set IP address). Jurgen asked "can you add CC-Link IE?" -- see cclink_ie.hpp's own
+    file header for the SCOPING DECISION (CCIEFB is the one CC-Link IE family member with public,
+    cross-sourced UDP/IP wire documentation; Control/Field/TSN all require dedicated ASIC hardware
+    and have none) and its SOURCING (Mitsubishi's own official reference manual + rt-labs'
+    open-source c-link stack, github.com/rtlabs-com/c-link).
+
+    Also exercises the critical MELSEC-coexistence design (see cclink_ie.hpp's 'DISPATCH ORDER'
+    and 'RESPONSES CARRY NO COMMAND FIELD' sections): a genuine MELSEC command riding the exact
+    same 3E framing must still decode as [melsec], and an orphan CC-Link IE response (no
+    session-tracked request) must fall through to MELSEC's own generic response handling rather
+    than being misattributed."""
+    packets = []
+
+    def add(payload: bytes, from_hmi: bool = True, sport: int = CCLINK_IE_CYCLIC_PORT,
+             dport: int = CCLINK_IE_CYCLIC_PORT):
+        if from_hmi:
+            packets.append(udp_ip_eth_frame(payload, sport, dport, HMI_IP, PLC_IP, HMI_MAC, PLC_MAC))
+        else:
+            packets.append(udp_ip_eth_frame(payload, sport, dport, PLC_IP, HMI_IP, PLC_MAC, HMI_MAC))
+
+    # 1) & 2) Cyclic request/response pair, one occupied station, success end code -- exercises
+    #    the full header field decode plus session-scoped request/response attribution.
+    add(cclink_cyclic_request(master_ip=HMI_IP, group_no=1, seq=1, occupied_stations=1,
+                               slave_ips=[PLC_IP], parameter_no=7))
+    add(cclink_cyclic_response(slave_ip=PLC_IP, group_no=1, seq=1, occupied_stations=1),
+        from_hmi=False)
+
+    # 3) & 4) Node search request/response -- passive asset-discovery recon.
+    add(cclink_node_search_request(master_mac="00:0c:29:11:22:33", master_ip=HMI_IP, serial=10),
+        sport=CCLINK_IE_NODE_SEARCH_PORT, dport=CCLINK_IE_NODE_SEARCH_PORT)
+    add(cclink_node_search_response(master_mac="00:0c:29:11:22:33", master_ip=HMI_IP,
+                                     slave_mac="00:0c:29:aa:bb:cc", slave_ip=PLC_IP,
+                                     slave_netmask="255.255.255.0", vendor_code=0x00A5,
+                                     model_code=0x00001234, equipment_ver=1, serial=10),
+        from_hmi=False, sport=CCLINK_IE_NODE_SEARCH_PORT, dport=CCLINK_IE_NODE_SEARCH_PORT)
+
+    # 5) & 6) Set IP address request/response -- the genuinely attack-relevant operation (remotely
+    #    reassigns a slave's own network identity, no credential documented anywhere).
+    add(cclink_set_ip_request(master_mac="00:0c:29:11:22:33", master_ip=HMI_IP,
+                               slave_mac="00:0c:29:aa:bb:cc", new_ip="192.168.1.11",
+                               new_netmask="255.255.255.0", serial=11),
+        sport=CCLINK_IE_NODE_SEARCH_PORT, dport=CCLINK_IE_NODE_SEARCH_PORT)
+    add(cclink_set_ip_response(master_mac="00:0c:29:11:22:33", serial=11), from_hmi=False,
+        sport=CCLINK_IE_NODE_SEARCH_PORT, dport=CCLINK_IE_NODE_SEARCH_PORT)
+
+    # 7) ORPHAN cyclic response -- no session-tracked request precedes it (a fresh 4-tuple, ports
+    #    reversed from every prior cyclic exchange above). Must NOT be claimed as cclink-ie; falls
+    #    through to MELSEC's own generic response handling instead -- see cclink_ie.hpp's
+    #    'RESPONSES CARRY NO COMMAND FIELD' section. The dedicated CTest for this packet asserts
+    #    [melsec] with a "no outstanding request" style note, and explicitly NOT [cclink-ie].
+    add(cclink_cyclic_response(slave_ip=PLC_IP, group_no=2, seq=99, occupied_stations=1),
+        from_hmi=False, sport=CCLINK_IE_CYCLIC_PORT + 1, dport=CCLINK_IE_CYCLIC_PORT + 1)
+
+    # 8) A genuine MELSEC command (Batch Read D100) riding the exact same 3E framing and port this
+    #    decoder is tried on -- proves zero regression: command 0x0401 is not one of this
+    #    decoder's own 3 known commands (0x0E70/0x0E30/0x0E31), so it must still decode [melsec].
+    add(melsec_request(command=0x0401, subcommand=0x0000,
+                        body=melsec_device("D", 100) + struct.pack("<H", 1)),
+        sport=CCLINK_IE_CYCLIC_PORT, dport=CCLINK_IE_CYCLIC_PORT)
+
+    # 9) & 10) A second cyclic request/response pair, this one reporting a non-success end code
+    #    (CCIEFB: slave error) -- exercises the error-path summary/note and confirms
+    #    session-scoped attribution still matches even when the response reports failure.
+    add(cclink_cyclic_request(master_ip=HMI_IP, group_no=1, seq=2, occupied_stations=1,
+                               slave_ips=[PLC_IP], parameter_no=7))
+    add(cclink_cyclic_response(slave_ip=PLC_IP, group_no=1, seq=2, occupied_stations=0,
+                                end_code=0xCFF0), from_hmi=False)
+
+    # 11) & 12) The same cyclic request/response exchange again, but on a non-standard port pair
+    #    (55000<->55001, not 61450/61451) -- proves the "not a configured/standard CC-Link IE
+    #    port" note; CC-Link IE is UdpPortIndependent (unlike BSAP's own UdpPort gating), so Auto
+    #    mode still claims it without needing --protocol cclink-ie.
+    add(cclink_cyclic_request(master_ip=HMI_IP, group_no=1, seq=3, occupied_stations=1,
+                               slave_ips=[PLC_IP], parameter_no=7), sport=55000, dport=55001)
+    add(cclink_cyclic_response(slave_ip=PLC_IP, group_no=1, seq=3, occupied_stations=1),
+        from_hmi=False, sport=55001, dport=55000)
+
+    # 13) NEGATIVE CONTROL: a 2-byte payload carrying only the 3E-frame request magic (0x5000),
+    #     too short for either this decoder's or MELSEC's own header to be read at all -- must
+    #     fall through cleanly to generic [udp], not be claimed by either decoder.
+    add(struct.pack(">H", 0x5000), sport=CCLINK_IE_CYCLIC_PORT + 2, dport=CCLINK_IE_CYCLIC_PORT + 2)
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_230_000 + i, i * 1000)
+    (TESTS_DIR / "sample_cclink_ie.pcap").write_bytes(data)
+
+
 if __name__ == "__main__":
     TESTS_DIR.mkdir(exist_ok=True)
     build_modbus_sample()
@@ -14534,4 +14751,5 @@ if __name__ == "__main__":
     build_iccp_sample()
     build_ge_srtp_sample()
     build_bsap_sample()
+    build_cclink_ie_sample()
     print("wrote sample fixtures to", TESTS_DIR)

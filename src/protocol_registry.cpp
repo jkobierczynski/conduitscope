@@ -5,6 +5,7 @@
 #include "conduitscope/bacnet.hpp"
 #include "conduitscope/bgp.hpp"
 #include "conduitscope/bsap.hpp"
+#include "conduitscope/cclink_ie.hpp"
 #include "conduitscope/cotp.hpp"
 #include "conduitscope/dcom.hpp"
 #include "conduitscope/devicenet.hpp"
@@ -428,6 +429,20 @@ const std::vector<const ProtocolDecoder*>& udp_port_independent_registry() {
                                 // Its own id() ("bacnet"), not shared with anything -- the second,
                                 // simpler UdpPortIndependent use in this batch, unlike its two
                                 // shared-id() neighbors.
+        &cclink_ie_decoder(),  // A brand-new protocol, NOT part of migration batch 2, deliberately
+                                // placed BEFORE MELSEC (added right below): CCIEFB cyclic data and
+                                // SLMP node search/set-IP-address ride the exact same SLMP 3E/4E
+                                // outer framing MELSEC's own UDP decoder already parses, and
+                                // MELSEC's own decoder treats any command it doesn't recognize as
+                                // a structurally-valid "unrecognized command" frame rather than
+                                // rejecting it -- so a real CCIEFB/node-search/set-IP request would
+                                // otherwise be silently swallowed and mislabeled "melsec". This
+                                // decoder's own request-side gate (exact command-code match, on
+                                // top of MELSEC's own subheader+length cross-check) is strictly
+                                // more specific, and MELSEC's own command table never uses
+                                // 0x0E70/0x0E30/0x0E31, so this ordering is safe by construction --
+                                // see cclink_ie.hpp's own "DISPATCH ORDER" section and
+                                // decoder.cpp's own CC-Link IE call site comment.
         &melsec_udp_decoder(),  // Added after BACnet/IP and CIP I/O, deliberately BEFORE HART-IP --
                                 // see decoder.cpp's MELSEC UDP call site comment for why: HART-IP's
                                 // own weak 3-condition UDP gate (MessageType/MessageID at payload

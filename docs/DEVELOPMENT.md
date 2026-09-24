@@ -7658,6 +7658,111 @@ deferred future migration.
     function/service-name fields promoted to something more systematic before a baseline engine
     could consume them uniformly.
 
+42. **CC-Link IE Field Network Basic (CCIEFB), Mitsubishi Electric -- UDP ports 61450 (cyclic
+    data) and 61451 (SLMP node search / set IP address).** **Done.** Jurgen asked "Can you add
+    CC-Link IE?" -- a bare request, so the first step was scoping which member of the CC-Link IE
+    family that actually means. "CC-Link IE" is a family of four: CC-Link IE Control and CC-Link
+    IE Field (both 1 Gbit/s, PLC-to-PLC or PLC-to-field-device, requiring dedicated CC-Link ASIC
+    hardware) and CC-Link IE TSN (IEEE 802.1 TSN-based) all have no public UDP/IP-level wire
+    documentation -- they depend on hardware this project has no access to and could not validate
+    against regardless. **CC-Link IE Field Network Basic** is the one exception: 100 Mbit/s,
+    explicitly designed to need no specialized hardware, running directly over standard UDP/IPv4.
+    Unlike BSAP (item 40), this was a genuinely strong sourcing situation, not a gap requiring a
+    scoping question to Jurgen: Mitsubishi's own official reference manual AND rt-labs' open-source
+    `c-link` stack (whose own source cites official CLPA standard document numbers) independently
+    give full byte-level struct layouts -- exact field names, sizes, and offsets, from real,
+    buildable open-source code -- so the CCIEFB-only scope was decided and documented in code
+    comments rather than asked about. New, fully self-contained module:
+    `include/conduitscope/cclink_ie.hpp`/`src/cclink_ie.cpp`, following the same standalone-
+    `ProtocolDecoder` pattern as GE SRTP/BSAP/MELSEC.
+
+    Wire format: CCIEFB rides SLMP (Seamless Message Protocol), Mitsubishi's shared messaging
+    layer, reusing the exact same "3E frame" (0x5000 request/0xD000 response subheader) and "4E
+    frame" (0x5400/0xD400, adds a 2-byte Serial No.) outer framing this codebase's pre-existing
+    MELSEC decoder already parses for MC Protocol -- see the collision-avoidance paragraph below.
+    Cyclic data (command 0x0E70, 3E frame, port 61450): request = fixed 67-byte header (req_header
+    + cyclic_header + master_station_notification + cyclic_data_header) plus N x 76 bytes trailing
+    (N x 4-byte slave IPs + N x 64-byte RWw + N x 8-byte RY, three separate contiguous arrays, not
+    interleaved); response = fixed 59-byte header plus N x 72 bytes trailing (N x 64-byte RWr + N x
+    8-byte RX) -- the response carries no explicit occupied-station-count field, so N is derived
+    arithmetically as `(payload_len - 59) / 72`, rejected if it doesn't divide evenly. Unlike
+    generic SLMP, CCIEFB's own response header carries no End Code field; End Code instead lives
+    inside `cyclic_header`, and there is no shorter "error" response shape -- the full 59-byte fixed
+    header is always present, with a curated note when End Code is non-zero (including the five
+    CCIEFB-specific codes: 0xCFE0 master duplication, 0xCFE1 wrong occupied-station count, 0xCFF0
+    slave error, 0xCFFF slave disconnect). SLMP node search (command 0x0E30, 4E frame, port 61451):
+    structural discovery/enumeration, master+slave MAC/IP/vendor/model on success. SLMP Set IP
+    Address (command 0x0E31, 4E frame, port 61451): genuinely attack-relevant on its own -- it
+    remotely reassigns a slave's IP address with no documented credential requirement anywhere in
+    the sourcing, and is flagged with its own curated note accordingly. IPv4 fields are wire-encoded
+    reversed relative to this codebase's own `format_ipv4()` convention (confirmed against the
+    reference stack's own comments and usage) and MAC fields are wire-encoded byte-reversed
+    relative to conventional colon notation (confirmed via the reference stack's own
+    `cl_util_copy_mac_reverse()`) -- both handled with dedicated read helpers rather than reusing
+    the generic IPv4/MAC formatters blindly. ~36-entry SLMP end-code table transcribed from the
+    reference stack's own enum, covering generic SLMP errors, CANopen-prefixed errors, and the five
+    CCIEFB-specific codes above; generic error responses (any command, non-zero End Code) read only
+    the header + End Code, never guessing at a command-specific body that error responses may not
+    actually carry -- the same honest-fallback posture MELSEC/GE SRTP already use for their own Nack
+    /error paths.
+
+    **Collision risk with MELSEC, designed in proactively this time rather than found as a bug
+    afterward** (contrast with BSAP's and GE SRTP's own post-hoc dispatch-order fixes, items 39-40
+    above): MELSEC's own UDP decoder (`GateKind::UdpPortIndependent`, tried on every UDP port in
+    Auto mode) shares this exact same SLMP 3E/4E outer framing and does not reject unrecognized
+    commands -- it decodes them as structurally-valid "unrecognized command" MELSEC frames. Since
+    MELSEC's own command table never uses 0x0E70/0x0E30/0x0E31, and CC-Link IE's own request-side
+    gate requires an exact match on one of those three values (strictly more specific than MELSEC's
+    own subheader-plus-declared-length cross-check), placing CC-Link IE's dispatch block before
+    MELSEC's own in both `decoder.cpp` and `protocol_registry.cpp`'s `udp_port_independent_registry`
+    is safe by construction for requests. Responses carry no command field at all, and a
+    CCIEFB-success response header is byte-identical to a generic MELSEC 3E-response-success header
+    -- so response safety instead comes from session-scoped state (`CclinkIeFlowState`, one
+    `std::optional` pending-request slot per session, mirroring `MelsecFlowState`'s own single-slot
+    design): a response is claimed as `[cclink-ie]` only when this decoder's own tracked pending
+    request actually matches, and otherwise falls through to MELSEC's own decoder, which handles it
+    as an honest unattributed/orphan response exactly as it already does for its own orphans today
+    -- a disclosed, non-regressive limitation, not a defect. Verified empirically, not just by
+    design review: the fixture includes a deliberate orphan-response packet (correctly falls through
+    to `[melsec]` with a "no outstanding request found" note) and a genuine MELSEC Batch Read
+    command (correctly stays `[melsec]` even under forced `--protocol cclink-ie`, proving the
+    request-side gate rejects it regardless of dispatch order).
+
+    A fixture-authoring bug (not a decoder defect) was found via this project's own mandatory
+    manual-CLI-verification-before-CTest-regex step: the regression-proof genuine-MELSEC packet's
+    Batch Read body was missing its trailing 2-byte point-count field, producing an honestly-flagged
+    "payload shorter than this command's expected shape" partial decode instead of a clean one. This
+    didn't invalidate the packet's collision-avoidance purpose (it still correctly showed `[melsec]`,
+    never `[cclink-ie]`), but was fixed for cleanliness by completing the body, regenerating the
+    fixture, and reverifying full clean decode.
+
+    13 new `cclink_ie_*` CTest tests: cyclic request recognition; cyclic response matched to its
+    request with the "matched to the request seen in packet #N" note, plus `--format json` field
+    checks; node search request/response with JSON field checks; Set IP Address request/response
+    including the security-relevant curated note; the orphan-response-falls-through-to-MELSEC
+    negative control (`FAIL_REGULAR_EXPRESSION` guarding against `[cclink-ie]` appearing); the
+    genuine-MELSEC-command-not-swallowed negative control, checked both in Auto mode and under
+    forced `--protocol cclink-ie` (proving the gate itself, not dispatch order, is what protects
+    MELSEC); the non-zero End Code curated note; the non-standard-port pair; a too-short-payload
+    negative control guarding against both `[cclink-ie]` and `[melsec]`; and a `--stats` check of
+    all five message-kind counters. Full suite: 1588 -> 1601 tests (default config), 1576 -> 1589
+    (no-live-capture config), zero-warning build in both, confirmed via clean full rebuild in the
+    no-live-capture config specifically -- and unlike BSAP/GE SRTP, the full suite passed with zero
+    regressions on the very first build after all wiring was in place, no post-hoc collision fix
+    required, confirming the proactive design held.
+
+    Honestly stated validation gap: the fixture (`tests/sample_cclink_ie.pcap`,
+    `build_cclink_ie_sample`) is entirely synthetic -- no real CC-Link IE Field Network Basic
+    capture of any kind was available. If a real capture becomes available later, this note should
+    be updated accordingly.
+
+    Explicitly out of scope: CC-Link IE Control, CC-Link IE Field, and CC-Link IE TSN (no public
+    UDP/IP-level wire documentation found for any of the three, and all require dedicated ASIC
+    hardware this project has no access to); any deeper application-layer semantics past what's
+    named above (e.g. RWw/RWr/RY/RX are surfaced as raw byte counts/arrays, not interpreted as
+    typed device values); real-pcap validation (see the gap above); and, as ever, any CC-Link IE
+    field this decoder does not name above.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

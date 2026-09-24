@@ -352,6 +352,13 @@ private:
     size_t bsap_serial_tunnel_count_ = 0;
     size_t bsap_ip_native_count_ = 0;
     size_t bsap_nak_count_ = 0;
+    // CC-Link IE's own breakdown (cclink_ie.hpp) -- one counter per message kind this decoder
+    // recognizes, plus how many cyclic responses reported a non-success end code.
+    size_t cclink_ie_cyclic_request_count_ = 0;
+    size_t cclink_ie_cyclic_response_count_ = 0;
+    size_t cclink_ie_cyclic_error_count_ = 0;
+    size_t cclink_ie_node_search_count_ = 0;
+    size_t cclink_ie_set_ip_address_count_ = 0;
     std::map<std::string, size_t> rip_command_counts_;   // keyed by rip_command_name
     std::map<std::string, size_t> icmp_type_counts_;     // keyed by icmp_type_name
     std::map<std::string, size_t> igmp_type_counts_;     // keyed by igmp_type_name

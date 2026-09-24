@@ -929,6 +929,60 @@ void write_bsap_json_fields(std::ostream& out, const BsapFrame& bf) {
     }
 }
 
+void write_cclink_ie_json_fields(std::ostream& out, const CclinkIeFrame& cf) {
+    const char* kind_name = "cyclic-request";
+    switch (cf.kind) {
+        case CclinkIeMessageKind::CyclicRequest: kind_name = "cyclic-request"; break;
+        case CclinkIeMessageKind::CyclicResponse: kind_name = "cyclic-response"; break;
+        case CclinkIeMessageKind::NodeSearchRequest: kind_name = "node-search-request"; break;
+        case CclinkIeMessageKind::NodeSearchResponse: kind_name = "node-search-response"; break;
+        case CclinkIeMessageKind::SetIpAddressRequest: kind_name = "set-ip-address-request"; break;
+        case CclinkIeMessageKind::SetIpAddressResponse: kind_name = "set-ip-address-response"; break;
+    }
+    out << "    \"cclink_ie_kind\": \"" << kind_name << "\",\n";
+    if (cf.kind == CclinkIeMessageKind::CyclicRequest) {
+        out << "    \"cclink_ie_master_id\": \"" << json_escape(cf.master_id) << "\",\n";
+        out << "    \"cclink_ie_group_no\": " << static_cast<unsigned>(cf.group_no) << ",\n";
+        out << "    \"cclink_ie_frame_sequence_no\": " << cf.frame_sequence_no << ",\n";
+        out << "    \"cclink_ie_occupied_stations\": " << cf.occupied_stations << ",\n";
+        out << "    \"cclink_ie_cyclic_io_bytes\": " << cf.cyclic_io_byte_count << ",\n";
+    } else if (cf.kind == CclinkIeMessageKind::CyclicResponse) {
+        out << "    \"cclink_ie_slave_id\": \"" << json_escape(cf.slave_id) << "\",\n";
+        out << "    \"cclink_ie_frame_sequence_no\": " << cf.frame_sequence_no << ",\n";
+        out << "    \"cclink_ie_end_code\": " << cf.end_code << ",\n";
+        if (cf.end_code_name) {
+            out << "    \"cclink_ie_end_code_name\": \"" << json_escape(*cf.end_code_name) << "\",\n";
+        }
+        if (cf.end_code == 0) {
+            out << "    \"cclink_ie_occupied_stations\": " << cf.occupied_stations << ",\n";
+            out << "    \"cclink_ie_cyclic_io_bytes\": " << cf.cyclic_io_byte_count << ",\n";
+        }
+    } else if (cf.kind == CclinkIeMessageKind::NodeSearchRequest ||
+               cf.kind == CclinkIeMessageKind::SetIpAddressRequest) {
+        out << "    \"cclink_ie_master_mac\": \"" << json_escape(cf.master_mac) << "\",\n";
+        out << "    \"cclink_ie_master_ip\": \"" << json_escape(cf.master_ip) << "\",\n";
+        if (cf.kind == CclinkIeMessageKind::SetIpAddressRequest) {
+            out << "    \"cclink_ie_slave_mac\": \"" << json_escape(cf.slave_mac) << "\",\n";
+            out << "    \"cclink_ie_slave_ip\": \"" << json_escape(cf.slave_ip) << "\",\n";
+            out << "    \"cclink_ie_slave_netmask\": \"" << json_escape(cf.slave_netmask) << "\",\n";
+        }
+    } else {  // node-search-response / set-ip-address-response
+        out << "    \"cclink_ie_end_code\": " << cf.end_code << ",\n";
+        if (cf.end_code_name) {
+            out << "    \"cclink_ie_end_code_name\": \"" << json_escape(*cf.end_code_name) << "\",\n";
+        }
+        if (cf.end_code == 0) {
+            out << "    \"cclink_ie_master_mac\": \"" << json_escape(cf.master_mac) << "\",\n";
+            if (cf.kind == CclinkIeMessageKind::NodeSearchResponse) {
+                out << "    \"cclink_ie_slave_mac\": \"" << json_escape(cf.slave_mac) << "\",\n";
+                out << "    \"cclink_ie_slave_ip\": \"" << json_escape(cf.slave_ip) << "\",\n";
+                out << "    \"cclink_ie_vendor_code\": " << cf.vendor_code << ",\n";
+                out << "    \"cclink_ie_model_code\": " << cf.model_code << ",\n";
+            }
+        }
+    }
+}
+
 // Renders one RipRoute as a single line -- see rip.hpp for what each of the three RTE shapes
 // (ordinary route, full-table-request marker, authentication entry) means. Reproduces
 // decoder.cpp's own former rip_route_summary exactly (that copy was retired along with the
@@ -3588,6 +3642,9 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
     if (p.protocol == "bsap" && p.result) {
         write_bsap_json_fields(out_, p.result->as<BsapFrame>());
     }
+    if (p.protocol == "cclink-ie" && p.result) {
+        write_cclink_ie_json_fields(out_, p.result->as<CclinkIeFrame>());
+    }
     out_ << "    \"notes\": [";
     for (size_t i = 0; i < p.notes.size(); ++i) {
         if (i != 0) out_ << ", ";
@@ -4084,6 +4141,26 @@ void StatsWriter::write_packet(const DecodedPacket& p) {
             bsap_ip_native_count_++;
         }
     }
+    if (p.protocol == "cclink-ie" && p.result) {
+        const CclinkIeFrame& cf = p.result->as<CclinkIeFrame>();
+        switch (cf.kind) {
+            case CclinkIeMessageKind::CyclicRequest:
+                cclink_ie_cyclic_request_count_++;
+                break;
+            case CclinkIeMessageKind::CyclicResponse:
+                cclink_ie_cyclic_response_count_++;
+                if (cf.end_code != 0) cclink_ie_cyclic_error_count_++;
+                break;
+            case CclinkIeMessageKind::NodeSearchRequest:
+            case CclinkIeMessageKind::NodeSearchResponse:
+                cclink_ie_node_search_count_++;
+                break;
+            case CclinkIeMessageKind::SetIpAddressRequest:
+            case CclinkIeMessageKind::SetIpAddressResponse:
+                cclink_ie_set_ip_address_count_++;
+                break;
+        }
+    }
     if (p.protocol == "rip" && p.result) {
         rip_command_counts_[p.result->as<RipMessage>().command_name]++;
     }
@@ -4440,6 +4517,15 @@ void StatsWriter::print_summary(std::ostream& out) const {
         out << "bsap serial-tunneled messages: " << bsap_serial_tunnel_count_ << "\n";
         out << "bsap-ip-native messages: " << bsap_ip_native_count_ << "\n";
         out << "bsap link-layer NAKs observed: " << bsap_nak_count_ << "\n";
+    }
+    if (cclink_ie_cyclic_request_count_ > 0 || cclink_ie_cyclic_response_count_ > 0 ||
+        cclink_ie_node_search_count_ > 0 || cclink_ie_set_ip_address_count_ > 0) {
+        out << "cclink-ie cyclic requests: " << cclink_ie_cyclic_request_count_ << "\n";
+        out << "cclink-ie cyclic responses: " << cclink_ie_cyclic_response_count_ << "\n";
+        out << "cclink-ie cyclic responses with non-success end code: "
+            << cclink_ie_cyclic_error_count_ << "\n";
+        out << "cclink-ie node search messages: " << cclink_ie_node_search_count_ << "\n";
+        out << "cclink-ie set IP address messages: " << cclink_ie_set_ip_address_count_ << "\n";
     }
     if (!rip_command_counts_.empty()) {
         out << "rip commands:\n";
