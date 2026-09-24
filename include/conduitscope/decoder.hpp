@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "conduitscope/arp.hpp"
+#include "conduitscope/attack_detect.hpp"
 #include "conduitscope/bacnet.hpp"
 #include "conduitscope/bgp.hpp"
 #include "conduitscope/bsap.hpp"
@@ -460,6 +461,14 @@ struct DecodeOptions {
     // own compile-time default, byte-identical to this feature's absence. Decoder's constructor
     // below installs this into the process-wide resource_limits() accessor.
     ResourceLimits limits;
+
+    // Attack-detection addition (see attack_detect.hpp's own file header for the full design):
+    // the per-destination packet count that trips a SYN/ACK/TCP/ICMP/UDP flood note. A
+    // deliberately small, documented-as-arbitrary default (attack_detect.hpp's
+    // DEFAULT_FLOOD_THRESHOLD) -- not sourced from any vendor's own default, which tend to be in
+    // the hundreds-to-1000-per-SECOND range and would rarely fire against a modest or synthetic
+    // capture. Overridable via decode's own --flood-threshold.
+    size_t flood_threshold = DEFAULT_FLOOD_THRESHOLD;
 };
 
 // How a TCP flow's client (initiator) vs. server side was determined -- shared by `decode`'s own
@@ -994,6 +1003,7 @@ public:
     // process -- see resource_limits.hpp's own comment on set_resource_limits.
     explicit Decoder(DecodeOptions options) : options_(std::move(options)) {
         set_resource_limits(options_.limits);
+        attack_state_.flood_threshold = options_.flood_threshold;
     }
 
     // May throw ParseError only when options.strict is true and an
@@ -1046,6 +1056,14 @@ private:
     // cotp.hpp/dnp3.hpp). Outer key is FlowStateMap's own protocol_id; `mutable` for the same
     // reason as tcp_reassembly_ above -- cross-packet state accumulated across decode() calls.
     mutable FlowStateMap registry_flow_state_;
+
+    // Attack-detection addition -- see attack_detect.hpp's own file header for the full design.
+    // Deliberately NOT reached through registry_flow_state_/DecodeContext::flow_state<T>() above:
+    // it needs to see every IPv4/TCP/UDP/ICMP packet regardless of which application-layer
+    // protocol eventually claims it, not one protocol id's own session/flow keying. `mutable` for
+    // the same reason as tcp_reassembly_/registry_flow_state_ above -- cross-packet state
+    // accumulated across decode() calls on this one Decoder instance.
+    mutable AttackDetectionState attack_state_;
 
     // MQTT's own per-session learned protocol version used to live here as a bespoke
     // mqtt_session_version_ map -- migration batch 2 (Stage 11) moved it into MqttFlowState,

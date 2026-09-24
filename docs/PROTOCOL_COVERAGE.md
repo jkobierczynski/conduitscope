@@ -9484,3 +9484,134 @@ codebase has been held to -- and, unlike BSAP/GE SRTP, the full suite
 passed with zero regressions on the very first build, no post-hoc
 collision fix required. See `include/conduitscope/cclink_ie.hpp`'s file
 header for the full writeup.
+
+### Attack Detection (classic network-layer DoS/reconnaissance signatures)
+
+Jurgen asked for detection of a specific named list, mid-turn while CC-Link
+IE was underway: LAND, Teardrop, Ping of Death, Smurf, Fraggle, ACK/SYN/
+ICMP/TCP/UDP Flood, ICMP Redirect, IP Source Routing ("icmproute"/
+"routeip" -- confirmed to be the same thing), WinNuke, plus "normal" as a
+label. Unlike every other entry in this document, this isn't one protocol
+decoder -- it's a cross-cutting analysis layer that inspects every IPv4/
+TCP/UDP/ICMP packet regardless of which application-layer protocol (if
+any) is also recognized on it. New, fully self-contained module:
+`include/conduitscope/attack_detect.hpp`/`src/attack_detect.cpp`.
+
+**Sourcing**: not a single RFC's or paper's own taxonomy -- cross-checked
+against H3C's "Attack detection and prevention configuration" guide and
+Juniper's Junos "Network DoS Attack"/"Attacker Evasion Techniques"
+documentation, which independently name LAND, Teardrop, Ping of Death,
+Smurf, Fraggle, WinNuke, ICMP Redirect, and IP Source Route Option as
+distinct signatures, and separately meter SYN/ACK/ICMP/UDP flood rates.
+"TCP Flood" is not a distinct named signature in either source -- built as
+a deliberate, documented catch-all (any TCP packet, any flags), not a
+sourced term. "normal" is not a detector -- it's simply the absence of
+every note this file can emit.
+
+**Structural signatures** (fire a note every time observed, no
+deduplication): **LAND** -- a TCP SYN with identical source and
+destination address:port. **WinNuke** -- URG set, a non-zero urgent
+pointer, a non-empty payload, on TCP port 139 (NetBIOS Session Service);
+`TcpSegment` gained an `urgent_pointer` field for this (tcp.hpp). **ICMP
+Redirect** -- type 5, reusing the existing ICMP decoder's own fields.
+**IP Source Routing** -- IP option kind `0x83` (Loose Source and Record
+Route) or `0x89` (Strict Source and Record Route) present in the header;
+`Ipv4Header` gained a raw `options` byte vector for this (ipv4.hpp).
+**Smurf** -- an ICMP Echo Request to a broadcast-looking destination.
+**Fraggle** -- a UDP datagram to port 7 (Echo) or 19 (Chargen) to a
+broadcast-looking destination -- the UDP counterpart to Smurf.
+Smurf/Fraggle's own "broadcast-looking" check is a heuristic, honestly
+documented as one: `255.255.255.255` is unambiguous, but a directed
+broadcast is only recognized via the common last-octet-255 convention --
+this codebase has no subnet mask for any address it sees, so this can
+both under- and over-detect. **Ping of Death** -- the last IP fragment of
+an ICMP datagram (protocol number 1) whose declared end position
+(`fragment_offset * 8 + payload length`) exceeds the 65535-byte maximum a
+valid IP datagram can ever declare; `Ipv4Header` gained
+`identification`/`flag_df`/`flag_mf`/`fragment_offset` fields for this
+(previously unparsed -- see ipv4.cpp's own former "fragment reassembly is
+a documented limitation" comment). The ICMP type isn't re-confirmed to be
+Echo Request fragment-by-fragment (that would need full cross-fragment
+reassembly this codebase doesn't otherwise do) -- any IP-protocol-1
+datagram reassembling past 65535 bytes is flagged. **Teardrop** -- two IP
+fragments of the same datagram (same source, destination, protocol,
+Identification) whose byte ranges overlap; tracked with a small bounded
+map holding only the single most recently seen fragment per datagram key,
+not full N-fragment reassembly consistency -- sufficient for the classic
+2-fragment overlap this attack is defined by.
+
+**Volumetric/flood signatures** (SYN, ACK, TCP-generic, ICMP, UDP): count
+packets of each kind per destination across the WHOLE FILE -- not a real
+packets-per-second rate, which would have been a genuinely new subsystem
+closer in scope to a new subcommand than a decode-time note. This
+tradeoff was Jurgen's own explicit choice, made when asked how to scope
+this given nothing in this codebase previously counted packets across
+many unrelated sessions toward one destination. A note fires exactly ONCE
+per (destination, category) the moment its counter first crosses
+`DEFAULT_FLOOD_THRESHOLD` (100 packets, `--flood-threshold` to override).
+ACK-flood counts bare ACKs only (ACK set, no SYN, no payload) -- not
+every ACK-bearing packet, which would include virtually all ordinary
+established-connection data traffic. TCP-flood counts every TCP packet
+regardless of flags (the broad catch-all, will typically also cross
+alongside a real SYN or ACK flood). ICMP-flood counts Echo Request only.
+A destination that looks like a broadcast address is excluded from flood
+counting entirely (`AttackDetectionState::flood_counters_for`) -- a flood
+targets one specific host by definition; a broadcast address's packet
+count instead reflects however many services on the segment legitimately
+use it.
+
+**100 was chosen empirically, not arbitrarily**: this codebase's own test
+fixtures legitimately pack many distinct request/response exchanges into
+one long-running session against two fixed dummy hosts (e.g.
+`sample_samr_lsarpc.pcap` sends 79 TCP packets total to one destination
+across several SMB pipes on one connection; `sample_hartip.pcap` sends 65
+UDP packets to one destination, mostly repeated polling from the same
+source port). An initial threshold of 20 broke three pre-existing,
+unrelated tests during this feature's own mandatory manual-verification
+pass (caught before any CTest regex was written) -- one root cause was a
+genuine correctness bug (the ACK-flood definition above, narrowed after
+the collision surfaced it), the other was BACnet's own routine broadcast
+traffic (fixed by the broadcast exclusion above, not just a higher
+number). 100 is the smallest round number clear of every fixture found by
+sweeping the whole `tests/sample_*.pcap` corpus, comfortably below a
+genuine flood's real scale (hundreds to thousands of packets) but with
+the honest caveat that a future, larger fixture could still collide --
+`--flood-threshold` is the escape valve.
+
+**Explicitly out of scope**: Teardrop's single-previous-fragment
+comparison (not full reassembly); Ping of Death's non-reconfirmation of
+ICMP type per fragment; Smurf/Fraggle's heuristic broadcast check; no TCP
+session-completion correlation anywhere; flood counters being a
+whole-file count rather than a real rate (a legitimately busy destination
+in a long capture can cross the threshold with nothing actually wrong,
+and a fast flood compressed into a short capture is exactly as likely to
+be flagged as a slow trickle of the same total spread across a long one);
+IPv6 (decoder.cpp's IPv6 branch never calls into this file); and, as
+ever, any signature this file does not name above.
+
+**Honestly stated validation gap**: `tests/sample_attack_detect.pcap`
+(`build_attack_detect_sample`) is entirely synthetic -- no real attack
+traffic of any kind informed or validated this feature. If real
+attack-traffic captures become available later, this note should be
+updated accordingly.
+
+Validated against `tests/sample_attack_detect.pcap`: one positive
+packet per structural signature, paired with a negative control proving
+ordinary traffic doesn't trip it wherever the false-positive risk is
+real; 6-packet runs per flood category, exercised with `--flood-threshold
+5` rather than sizing the real default (100) into the fixture; a negative
+control proving a flood targeting a broadcast destination is never
+flagged even at that same low threshold; a negative control proving
+fewer packets than the threshold never fires; and a negative control
+proving the real default threshold does not fire against this fixture's
+own 6-packet runs, confirming the lowered-threshold tests are actually
+exercising the counting logic. Every case was decoded and inspected in
+`--format text -v` and `--format json` BEFORE the `CMakeLists.txt`
+`attack_detect_*` test family reading it was written -- and, because this
+feature touches every IPv4/TCP/UDP/ICMP packet regardless of protocol
+(unlike any prior protocol addition, which only ever touched its own
+fixture), that same verification pass was also run against the FULL
+pre-existing test suite, which is what caught the two real false-positive
+collisions described above before they ever reached a delivered build.
+See `include/conduitscope/attack_detect.hpp`'s file header for the full
+writeup.

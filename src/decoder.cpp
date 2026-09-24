@@ -1147,6 +1147,11 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
         out.dst_ip = format_ipv4(ip.dst_addr);
         out.ip_protocol = ip.protocol;
         out.ttl = ip.ttl;
+        // Attack detection (see attack_detect.hpp): IP Source Routing, Ping of Death, and
+        // Teardrop are all IP-fragmentation/IP-option-level checks that don't need to wait for
+        // TCP/UDP/ICMP dispatch below -- run once here, right after the IPv4 header itself is
+        // parsed. IPv6 has no equivalent call site (see attack_detect.hpp's own file header).
+        attack_state_.observe_ipv4(ip, out.notes);
         if (ip.trailing_bytes_trimmed > 0) {
             out.notes.push_back(std::to_string(ip.trailing_bytes_trimmed) +
                                  " trailing byte(s) after the IP header's declared total length were "
@@ -1198,6 +1203,10 @@ DecodedPacket Decoder::decode_ip_payload(DecodedPacket out, uint8_t protocol, By
             out.has_udp = true;
             out.src_port = udp.src_port;
             out.dst_port = udp.dst_port;
+            // Attack detection (see attack_detect.hpp): Fraggle + UDP flood counter. Runs
+            // regardless of which application-layer protocol (if any) this datagram is
+            // subsequently recognized as -- out.notes is additive, never reset below.
+            attack_state_.observe_udp(udp, out.dst_ip, out.notes);
 
             // Tried first, port-independently, same rationale as EtherNet/IP explicit messaging's
             // own TCP dispatch below: try_parse_cip_io's structural check (an exact CPF item
@@ -1982,6 +1991,9 @@ DecodedPacket Decoder::decode_ip_payload(DecodedPacket out, uint8_t protocol, By
                     out.protocol = "icmp";
                     out.summary = msg.summary;
                     for (const auto& n : msg.notes) out.notes.push_back(n);
+                    // Attack detection (see attack_detect.hpp): Smurf, ICMP Redirect, and the
+                    // ICMP (Echo Request) flood counter.
+                    attack_state_.observe_icmp(msg, out.dst_ip, out.notes);
                     out.result = *result;
                     return out;
                 }
@@ -2187,6 +2199,11 @@ DecodedPacket Decoder::decode_ip_payload(DecodedPacket out, uint8_t protocol, By
         out.src_port = tcp.src_port;
         out.dst_port = tcp.dst_port;
         out.tcp_flags = format_tcp_flags(tcp.flags);
+        // Attack detection (see attack_detect.hpp): LAND, WinNuke, and the SYN/ACK/TCP flood
+        // counters. Deliberately BEFORE the empty-payload early return directly below -- LAND,
+        // SYN flood, and ACK flood are all classically bare (no-payload) segments, so running
+        // this after that return would miss most of what these signatures actually look like.
+        attack_state_.observe_tcp(tcp, out.src_ip, out.dst_ip, out.notes);
 
         if (tcp.payload.empty()) {
             out.protocol = "tcp";

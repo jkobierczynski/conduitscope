@@ -14667,6 +14667,241 @@ def build_cclink_ie_sample():
     (TESTS_DIR / "sample_cclink_ie.pcap").write_bytes(data)
 
 
+def ipv4_header_ex(src: str, dst: str, protocol: int, payload_len: int, ident: int,
+                    flags_and_offset: int = 0x4000, options: bytes = b"") -> bytes:
+    """Like ipv4_header, but with caller control over the Flags+Fragment-Offset field (default
+    0x4000 = DF set, offset 0, matching ipv4_header's own hardcoded value) and raw IP options
+    bytes -- needed for attack_detect.hpp's fragmentation-based (Teardrop/Ping of Death) and IP-
+    option-based (Source Routing) fixture packets, none of which ipv4_header's own fixed-shape
+    (DF-only, no-options) header can produce. `options` must already be padded by the caller to a
+    multiple of 4 bytes (ihl_words must be a whole number of 32-bit words) -- not padded
+    automatically here, so a caller building a malformed-on-purpose options block stays in full
+    control."""
+    def ip_bytes(addr):
+        return bytes(int(o) for o in addr.split("."))
+
+    ihl_words = 5 + len(options) // 4
+    assert len(options) % 4 == 0, "options must be padded to a multiple of 4 bytes"
+    total_length = ihl_words * 4 + payload_len
+    return struct.pack(
+        "!BBHHHBBH4s4s",
+        0x40 | ihl_words,
+        0,                # ToS
+        total_length,
+        ident,
+        flags_and_offset,
+        64,               # TTL
+        protocol,
+        0,                # checksum -- not validated by conduitscope; left as 0
+        ip_bytes(src),
+        ip_bytes(dst),
+    ) + options
+
+
+def tcp_header_ex(src_port: int, dst_port: int, seq: int, ack: int, flags: int, payload_len: int,
+                   urgent_pointer: int = 0) -> bytes:
+    """Like tcp_header, but with caller control over the Urgent Pointer field (hardcoded to 0 in
+    tcp_header) -- needed for attack_detect.hpp's WinNuke fixture packet (tcp.hpp's
+    TcpSegment::urgent_pointer, the field WinNuke detection reads)."""
+    return struct.pack(
+        "!HHIIBBHHH",
+        src_port, dst_port,
+        seq, ack,
+        0x50,             # data offset = 5 words, no options
+        flags,
+        8192,             # window
+        0,                # checksum -- not validated
+        urgent_pointer,
+    )
+
+
+def build_attack_detect_sample():
+    """attack_detect.hpp -- classic network-layer DoS/reconnaissance attack signatures Jurgen
+    asked for by name (LAND, Teardrop, Ping of Death, Smurf, Fraggle, ACK/SYN/ICMP/TCP/UDP Flood,
+    ICMP Redirect, IP Source Routing, WinNuke -- see attack_detect.hpp's own file header for the
+    full sourcing/scoping writeup, including why "TCP Flood" is a documented catch-all rather than
+    a sourced term, and "normal" is not a detector at all).
+
+    Every single-packet/fragment-pair structural signature gets one positive packet and, where the
+    false-positive risk is real enough to be worth demonstrating, one negative control proving
+    ordinary traffic doesn't trip it. The five flood counters are exercised with --flood-threshold
+    5 at the CTest command level (see CMakeLists.txt) rather than baking 100+ packets (the real
+    default) into this fixture -- keeps the file small while still exercising the real counting/
+    one-shot-note logic, and doubles as coverage for the --flood-threshold override itself.
+    Distinct destination addresses are used per flood category so their counters can't interfere
+    with each other or with the structural-signature packets above."""
+    packets = []
+
+    def add(pkt):
+        packets.append(pkt)
+
+    # 1) LAND: TCP SYN with identical source and destination address:port.
+    land_ip = "192.168.1.77"
+    tcp = tcp_header_ex(4444, 4444, 100, 0, TCP_SYN, 0)
+    ip = ipv4_header_ex(land_ip, land_ip, 6, len(tcp), 0xA001) + tcp
+    add(eth_header(PLC_MAC, PLC_MAC, 0x0800) + ip)
+
+    # 2) NEGATIVE CONTROL: an ordinary TCP SYN between two distinct hosts/ports -- must NOT be
+    #    flagged as LAND.
+    tcp = tcp_header_ex(51500, 8080, 100, 0, TCP_SYN, 0)
+    ip = ipv4_header_ex(HMI_IP, "192.168.1.200", 6, len(tcp), 0xA002) + tcp
+    add(eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip)
+
+    # 3) & 4) Teardrop: two IP fragments of the same datagram (same source/destination/protocol/
+    #    identification -- protocol 253, IANA "Use for experimentation and testing", chosen so
+    #    decoder.cpp's own dispatch cascade doesn't attempt any further transport-layer parse of
+    #    either fragment's raw bytes, keeping this pair's own notes free of unrelated noise) whose
+    #    byte ranges overlap: fragment 1 covers bytes [0, 16), fragment 2 (the last fragment, MF
+    #    clear) covers bytes [8, 24) -- bytes 8-15 are claimed by both.
+    frag_ident = 0xA010
+    frag1_payload = bytes(range(16))
+    ip = ipv4_header_ex(HMI_IP, PLC_IP, 253, len(frag1_payload), frag_ident,
+                         flags_and_offset=0x2000) + frag1_payload  # MF=1, offset=0
+    add(eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip)
+    frag2_payload = bytes(range(16, 32))
+    ip = ipv4_header_ex(HMI_IP, PLC_IP, 253, len(frag2_payload), frag_ident,
+                         flags_and_offset=0x0001) + frag2_payload  # MF=0, offset=1 (byte 8)
+    add(eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip)
+
+    # 5) & 6) NEGATIVE CONTROL: a legitimate, NON-overlapping fragment pair of a different
+    #    datagram (same protocol/addresses, different identification) -- fragment 1 covers
+    #    [0, 16), fragment 2 (last) covers [16, 32) -- back-to-back, no overlap. Must NOT be
+    #    flagged as Teardrop.
+    ok_ident = 0xA011
+    ok_frag1 = bytes(range(16))
+    ip = ipv4_header_ex(HMI_IP, PLC_IP, 253, len(ok_frag1), ok_ident, flags_and_offset=0x2000) + ok_frag1
+    add(eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip)
+    ok_frag2 = bytes(range(16, 32))
+    ip = ipv4_header_ex(HMI_IP, PLC_IP, 253, len(ok_frag2), ok_ident, flags_and_offset=0x0002) + ok_frag2  # offset=2 (byte 16)
+    add(eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip)
+
+    # 7) Ping of Death: a single ICMP fragment (MF clear, i.e. the LAST fragment of its datagram)
+    #    whose own declared end position (fragment_offset*8 + payload length) exceeds the
+    #    65535-byte maximum IP datagram size. fragment_offset=8189 (*8 = 65512 bytes) + a 30-byte
+    #    Echo Request body (type/code/checksum/id/seq + 22 bytes of data) = end 65542.
+    pod_body = struct.pack("!HH", 0xF001, 1) + bytes(22)
+    pod_icmp = icmp_message(8, 0, pod_body)
+    ip = ipv4_header_ex(HMI_IP, PLC_IP, ICMP_IP_PROTOCOL, len(pod_icmp), 0xA020,
+                         flags_and_offset=8189) + pod_icmp  # MF=0, offset=8189
+    add(eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip)
+
+    # 8) Smurf: ICMP Echo Request to a /24 directed-broadcast-looking address (last octet 255).
+    add(ip_eth_frame(icmp_message(8, 0, struct.pack("!HH", 0xF002, 1) + bytes(8)),
+                      ICMP_IP_PROTOCOL, HMI_IP, "192.168.1.255", HMI_MAC, PLC_MAC))
+
+    # 9) Smurf: ICMP Echo Request to the limited broadcast address (255.255.255.255) -- the
+    #    unambiguous case, distinct code path from #8's heuristic.
+    add(ip_eth_frame(icmp_message(8, 0, struct.pack("!HH", 0xF003, 1) + bytes(8)),
+                      ICMP_IP_PROTOCOL, HMI_IP, "255.255.255.255", HMI_MAC, PLC_MAC))
+
+    # 10) NEGATIVE CONTROL: an ordinary ICMP Echo Request to a plain unicast address -- must NOT
+    #     be flagged as Smurf.
+    add(ip_eth_frame(icmp_message(8, 0, struct.pack("!HH", 0xF004, 1) + bytes(8)),
+                      ICMP_IP_PROTOCOL, HMI_IP, "192.168.1.201", HMI_MAC, PLC_MAC))
+
+    # 11) Fraggle: UDP Echo (port 7) request to a broadcast-looking destination.
+    add(udp_ip_eth_frame(b"\x00" * 4, 51600, 7, HMI_IP, "192.168.1.255", HMI_MAC, PLC_MAC, ident=0xA030))
+
+    # 12) NEGATIVE CONTROL: UDP to port 7 (Echo), but an ordinary unicast destination -- must NOT
+    #     be flagged as Fraggle.
+    add(udp_ip_eth_frame(b"\x00" * 4, 51601, 7, HMI_IP, "192.168.1.202", HMI_MAC, PLC_MAC, ident=0xA031))
+
+    # 13) ICMP Redirect (type 5, code 1 -- Redirect Datagram for the Host).
+    embedded = icmp_embedded_datagram(HMI_IP, "192.168.1.203", 6, src_port=51700, dst_port=502)
+    add(ip_eth_frame(icmp_message(5, 1, ip_bytes4("192.168.1.1") + embedded),
+                      ICMP_IP_PROTOCOL, PLC_IP, HMI_IP, PLC_MAC, HMI_MAC))
+
+    # 14) IP Source Routing: a Loose Source and Record Route (LSRR, kind 0x83) option carrying one
+    #     hop address, padded with one No-Operation (0x01) byte to reach the required 4-byte
+    #     option-area multiple (2 option words -> ihl_words=7). Payload: an ordinary UDP datagram,
+    #     riding on top to show this is checked independently of the transport protocol.
+    lsrr = bytes([0x83, 0x07, 0x04]) + ip_bytes4("10.0.0.1") + bytes([0x01])
+    udp = udp_header(51700, 502, b"\x00\x01\x02\x03")
+    ip = ipv4_header_ex(HMI_IP, PLC_IP, 17, len(udp), 0xA040, options=lsrr) + udp
+    add(eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip)
+
+    # 15) NEGATIVE CONTROL: an ordinary IP packet with no options at all -- must NOT be flagged as
+    #     IP Source Routing.
+    udp = udp_header(51701, 502, b"\x00\x01\x02\x03")
+    ip = ipv4_header_ex(HMI_IP, PLC_IP, 17, len(udp), 0xA041) + udp
+    add(eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip)
+
+    # 16) WinNuke: Out-of-Band TCP data (URG set, non-zero urgent pointer, non-empty payload) on
+    #     NetBIOS Session Service port 139.
+    oob_data = b"\x00\x00"
+    tcp = tcp_header_ex(51800, 139, 500, 0, 0x18 | 0x20, len(oob_data), urgent_pointer=1) + oob_data  # PSH,ACK,URG
+    ip = ipv4_header_ex(HMI_IP, PLC_IP, 6, len(tcp), 0xA050) + tcp
+    add(eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip)
+
+    # 17) NEGATIVE CONTROL: URG set with a non-zero urgent pointer, but on an ordinary port (not
+    #     139) -- must NOT be flagged as WinNuke.
+    tcp = tcp_header_ex(51801, 8081, 500, 0, 0x18 | 0x20, len(oob_data), urgent_pointer=1) + oob_data
+    ip = ipv4_header_ex(HMI_IP, "192.168.1.204", 6, len(tcp), 0xA051) + tcp
+    add(eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip)
+
+    # 18-23) SYN flood: 6 bare SYN packets (from 6 different spoofed-looking source ports, the
+    #    realistic shape) to one destination -- run under --flood-threshold 5 in CTest, so the 5th
+    #    one crosses it and fires a note (once, not on the 6th too).
+    syn_flood_dst = "192.168.3.10"
+    for i in range(6):
+        tcp = tcp_header_ex(50000 + i, 502, 100, 0, TCP_SYN, 0)
+        ip = ipv4_header_ex(HMI_IP, syn_flood_dst, 6, len(tcp), 0xA100 + i) + tcp
+        add(eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip)
+
+    # 24-29) ACK flood: 6 bare (no-payload) ACK packets to a distinct destination.
+    ack_flood_dst = "192.168.3.11"
+    for i in range(6):
+        tcp = tcp_header_ex(50100 + i, 502, 200, 300, TCP_ACK, 0)
+        ip = ipv4_header_ex(HMI_IP, ack_flood_dst, 6, len(tcp), 0xA110 + i) + tcp
+        add(eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip)
+
+    # 30-35) TCP flood (the broad catch-all): 6 ordinary PSH,ACK data packets (i.e. NOT bare SYN or
+    #    bare ACK -- confirms the catch-all counts every TCP packet, not just the flag-specific
+    #    subsets) to a distinct destination.
+    tcp_flood_dst = "192.168.3.12"
+    for i in range(6):
+        body = b"\x01\x02"
+        tcp = tcp_header_ex(50200 + i, 502, 400, 500, TCP_PSH | TCP_ACK, len(body)) + body
+        ip = ipv4_header_ex(HMI_IP, tcp_flood_dst, 6, len(tcp), 0xA120 + i) + tcp
+        add(eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip)
+
+    # 36-41) ICMP flood: 6 Echo Request packets to a distinct, non-broadcast destination.
+    icmp_flood_dst = "192.168.3.13"
+    for i in range(6):
+        add(ip_eth_frame(icmp_message(8, 0, struct.pack("!HH", 0xF100 + i, 1) + bytes(8)),
+                          ICMP_IP_PROTOCOL, HMI_IP, icmp_flood_dst, HMI_MAC, PLC_MAC))
+
+    # 42-47) UDP flood: 6 datagrams (not port 7/19, so Fraggle doesn't also fire) to a distinct
+    #    destination.
+    udp_flood_dst = "192.168.3.14"
+    for i in range(6):
+        add(udp_ip_eth_frame(b"\x00\x00", 50300 + i, 9999, HMI_IP, udp_flood_dst, HMI_MAC, PLC_MAC,
+                              ident=0xA140 + i))
+
+    # 48-53) NEGATIVE CONTROL: 6 bare SYN packets to a BROADCAST-looking destination -- must NOT be
+    #    flagged as a SYN flood even under --flood-threshold 5 (a flood, by definition, targets one
+    #    specific host; broadcast reuse is the same "not a flood" shape sample_bacnet.pcap's own
+    #    routine broadcast traffic has -- see attack_detect.hpp's flood_counters_for comment).
+    broadcast_flood_dst = "192.168.3.255"
+    for i in range(6):
+        tcp = tcp_header_ex(50400 + i, 502, 100, 0, TCP_SYN, 0)
+        ip = ipv4_header_ex(HMI_IP, broadcast_flood_dst, 6, len(tcp), 0xA150 + i) + tcp
+        add(eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip)
+
+    # 54-56) NEGATIVE CONTROL: only 3 bare SYN packets (fewer than --flood-threshold 5) to a fresh
+    #    destination -- must NOT be flagged as a SYN flood.
+    below_threshold_dst = "192.168.3.15"
+    for i in range(3):
+        tcp = tcp_header_ex(50500 + i, 502, 100, 0, TCP_SYN, 0)
+        ip = ipv4_header_ex(HMI_IP, below_threshold_dst, 6, len(tcp), 0xA160 + i) + tcp
+        add(eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip)
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_240_000 + i, i * 1000)
+    (TESTS_DIR / "sample_attack_detect.pcap").write_bytes(data)
+
+
 if __name__ == "__main__":
     TESTS_DIR.mkdir(exist_ok=True)
     build_modbus_sample()
@@ -14752,4 +14987,5 @@ if __name__ == "__main__":
     build_ge_srtp_sample()
     build_bsap_sample()
     build_cclink_ie_sample()
+    build_attack_detect_sample()
     print("wrote sample fixtures to", TESTS_DIR)

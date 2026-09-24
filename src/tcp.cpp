@@ -23,7 +23,9 @@ TcpSegment parse_tcp(ByteSpan segment) {
     tcp.flags = c.u8();
     tcp.window = c.u16be();
     c.u16be();  // checksum -- not validated; we trust the capture
-    c.u16be();  // urgent pointer -- unused unless URG is set, which we don't currently act on
+    tcp.urgent_pointer = c.u16be();  // see TcpSegment::urgent_pointer's own comment (tcp.hpp) --
+                                       // now read regardless of URG, for attack_detect.hpp's
+                                       // WinNuke check
 
     size_t header_bytes = static_cast<size_t>(data_offset_words) * 4;
     if (header_bytes < c.position()) {

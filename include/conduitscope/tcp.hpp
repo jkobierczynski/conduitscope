@@ -32,6 +32,13 @@ struct TcpSegment {
     uint32_t ack = 0;
     uint8_t flags = 0;
     uint16_t window = 0;
+    // Urgent Pointer (RFC 793) -- always read off the wire regardless of whether TCP_FLAG_URG is
+    // set (the field is present in every TCP header, meaningful only when URG is set per RFC 793,
+    // but some crafted/attack traffic sets a non-zero value here without also setting URG, or
+    // vice versa; see attack_detect.hpp's WinNuke detector, the first real user of this field --
+    // the historical WinNuke exploit sent Out-Of-Band data with an urgent pointer Windows 95/NT's
+    // TCP/IP stack handled incorrectly).
+    uint16_t urgent_pointer = 0;
     ByteSpan payload;
 };
 

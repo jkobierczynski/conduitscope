@@ -500,6 +500,7 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
                 const std::vector<int>& ge_srtp_ports,
                 const std::vector<int>& bsap_ports,
                 const std::vector<int>& cclink_ie_ports,
+                size_t flood_threshold,
                 size_t max_packets,
                 const ResourceLimitCliVars& limit_vars,
                 bool stats, bool strict, bool quiet,
@@ -656,6 +657,7 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
     for (int p : ge_srtp_ports) options.extra_ge_srtp_ports.push_back(static_cast<uint16_t>(p));
     for (int p : bsap_ports) options.extra_bsap_ports.push_back(static_cast<uint16_t>(p));
     for (int p : cclink_ie_ports) options.extra_cclink_ie_ports.push_back(static_cast<uint16_t>(p));
+    if (flood_threshold > 0) options.flood_threshold = flood_threshold;
 
     try {
         // Built once per `decode` invocation, before opening the packet source, so a bad --hosts/
@@ -1188,6 +1190,9 @@ int main(int argc, char** argv) {
         decode_remote_access_ports, decode_lateral_movement_ports, decode_enterprise_trust_ports,
         decode_wireless_backhaul_ports, decode_tunnel_vpn_ports, decode_winrm_ports, decode_dcom_ports,
         decode_ge_srtp_ports, decode_bsap_ports, decode_cclink_ie_ports;
+    size_t decode_flood_threshold = 0;  // 0 means "not given" -- keeps DecodeOptions::flood_threshold's
+                                          // own compile-time default (attack_detect.hpp's
+                                          // DEFAULT_FLOOD_THRESHOLD); see run_decode's own use of this.
     size_t decode_max_packets = 0;
     ResourceLimitCliVars decode_limit_vars;
     bool decode_stats = false, decode_strict = false;
@@ -1397,6 +1402,13 @@ int main(int argc, char** argv) {
                             "MELSEC) -- it only widens which port(s) count as expected rather than "
                             "flagged as non-standard. Normally 61450 (cyclic) and 61451 (node "
                             "search/set IP address), see docs/PROTOCOL_COVERAGE.md");
+    decode_cmd->add_option("--flood-threshold", decode_flood_threshold,
+                            "Per-destination packet count that trips a SYN/ACK/TCP/ICMP/UDP flood "
+                            "note (see docs/PROTOCOL_COVERAGE.md's Attack Detection section) -- a "
+                            "WHOLE-CAPTURE count, not a per-second rate. Default: " +
+                                std::to_string(DEFAULT_FLOOD_THRESHOLD) +
+                                " (a deliberately small, documented-as-arbitrary illustrative "
+                                "value, not sourced from any vendor's own default)");
     decode_cmd->add_option(
         "--remote-access-port", decode_remote_access_ports,
         "Additional TCP or UDP port to treat as expected for the Tier 1 \"IT protocols an OT "
@@ -1801,6 +1813,7 @@ int main(int argc, char** argv) {
                            decode_wireless_backhaul_ports, decode_tunnel_vpn_ports,
                            decode_winrm_ports, decode_dcom_ports, decode_ge_srtp_ports,
                            decode_bsap_ports, decode_cclink_ie_ports,
+                           decode_flood_threshold,
                            decode_max_packets, decode_limit_vars, decode_stats, decode_strict,
                            quiet, no_color, force_color, decode_mac_vendor, decode_resolve, decode_hosts_file,
                            decode_service_names, decode_services_file, decode_show_vlan,

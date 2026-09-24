@@ -54,6 +54,7 @@ add_library(conduitscope_core STATIC
   src/ipv6.cpp
   src/tcp.cpp
   src/udp.cpp
+  src/attack_detect.cpp
   src/modbus.cpp
   src/dnp3.cpp
   src/iec104.cpp
@@ -11318,3 +11319,112 @@ add_test(NAME cclink_ie_stats_message_kind_counts
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_cclink_ie.pcap" --format text --stats)
 set_tests_properties(cclink_ie_stats_message_kind_counts PROPERTIES
   PASS_REGULAR_EXPRESSION "cclink-ie cyclic requests: 3\ncclink-ie cyclic responses: 3\ncclink-ie cyclic responses with non-success end code: 1\ncclink-ie node search messages: 2\ncclink-ie set IP address messages: 2")
+
+# attack_detect.hpp -- classic network-layer DoS/reconnaissance attack signatures (see its own
+# file header for the full sourcing/scoping writeup). sample_attack_detect.pcap (build_attack_detect_sample,
+# tools/make_sample_pcap.py) carries one positive + (where the false-positive risk is real) one
+# negative-control packet per single-packet/fragment-pair structural signature, plus 6-packet runs
+# per flood category exercised with --flood-threshold 5 (the real default, 100, is deliberately
+# NOT sized into this fixture -- see attack_detect.hpp's own DEFAULT_FLOOD_THRESHOLD comment for
+# why 100 was chosen empirically against this codebase's own largest existing single-destination
+# fixture, sample_samr_lsarpc.pcap's 79 packets).
+add_test(NAME attack_detect_land
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_attack_detect.pcap" --format text --verbose)
+set_tests_properties(attack_detect_land PROPERTIES
+  PASS_REGULAR_EXPRESSION "#1  [^\n]*\n *note: LAND attack: TCP SYN with identical source and destination \\(192\\.168\\.1\\.77:4444\\)"
+  FAIL_REGULAR_EXPRESSION "#2  [^\n]*\n *note: LAND")
+
+add_test(NAME attack_detect_teardrop
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_attack_detect.pcap" --format text --verbose)
+set_tests_properties(attack_detect_teardrop PROPERTIES
+  PASS_REGULAR_EXPRESSION "#4  [^\n]*\n *note: Teardrop: this IP fragment \\(bytes 8-24\\) overlaps the previous fragment of the same datagram \\(bytes 0-16\\)"
+  FAIL_REGULAR_EXPRESSION "#(3|5|6)  [^\n]*\n *note: Teardrop")
+
+add_test(NAME attack_detect_ping_of_death
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_attack_detect.pcap" --format text --verbose)
+set_tests_properties(attack_detect_ping_of_death PROPERTIES
+  PASS_REGULAR_EXPRESSION "#7  [^\n]*\n *note: Ping of Death: this fragmented ICMP datagram reassembles to 65542 bytes")
+
+add_test(NAME attack_detect_smurf
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_attack_detect.pcap" --format text --verbose)
+set_tests_properties(attack_detect_smurf PROPERTIES
+  PASS_REGULAR_EXPRESSION "#8  [^\n]*\n *note: Smurf attack: ICMP Echo Request to a broadcast-looking destination \\(192\\.168\\.1\\.255\\).*#9  [^\n]*\n *note: Smurf attack: ICMP Echo Request to a broadcast-looking destination \\(255\\.255\\.255\\.255\\)"
+  FAIL_REGULAR_EXPRESSION "#10  [^\n]*\n *note: Smurf")
+
+add_test(NAME attack_detect_fraggle
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_attack_detect.pcap" --format text --verbose)
+set_tests_properties(attack_detect_fraggle PROPERTIES
+  PASS_REGULAR_EXPRESSION "#11  [^\n]*\n *note: Fraggle attack: UDP Echo \\(port 7\\) request to a broadcast-looking destination \\(192\\.168\\.1\\.255\\)"
+  FAIL_REGULAR_EXPRESSION "#12  [^\n]*\n *note: Fraggle")
+
+add_test(NAME attack_detect_icmp_redirect
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_attack_detect.pcap" --format text --verbose)
+set_tests_properties(attack_detect_icmp_redirect PROPERTIES
+  PASS_REGULAR_EXPRESSION "#13  [^\n]*\n *note: ICMP Redirect observed \\(new gateway: 192\\.168\\.1\\.1\\)")
+
+add_test(NAME attack_detect_source_routing
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_attack_detect.pcap" --format text --verbose)
+set_tests_properties(attack_detect_source_routing PROPERTIES
+  PASS_REGULAR_EXPRESSION "#14  [^\n]*\n *note: IP Source Route option present \\(Loose or Strict Source and Record Route\\)"
+  FAIL_REGULAR_EXPRESSION "#15  [^\n]*\n *note: IP Source Route")
+
+add_test(NAME attack_detect_winnuke
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_attack_detect.pcap" --format text --verbose)
+set_tests_properties(attack_detect_winnuke PROPERTIES
+  PASS_REGULAR_EXPRESSION "#16  [^\n]*\n *note: WinNuke: Out-of-Band TCP data \\(URG set, urgent pointer 1\\) on NetBIOS Session Service port 139"
+  FAIL_REGULAR_EXPRESSION "#17  [^\n]*\n *note: WinNuke")
+
+add_test(NAME attack_detect_syn_flood
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_attack_detect.pcap" --format text --verbose --flood-threshold 5)
+set_tests_properties(attack_detect_syn_flood PROPERTIES
+  PASS_REGULAR_EXPRESSION "note: SYN flood suspected: 5 SYN \\(no ACK\\) packets to 192\\.168\\.3\\.10 seen in this capture \\(threshold: 5\\)")
+
+add_test(NAME attack_detect_ack_flood
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_attack_detect.pcap" --format text --verbose --flood-threshold 5)
+set_tests_properties(attack_detect_ack_flood PROPERTIES
+  PASS_REGULAR_EXPRESSION "note: ACK flood suspected: 5 ACK \\(no SYN\\) packets to 192\\.168\\.3\\.11 seen in this capture \\(threshold: 5\\)")
+
+add_test(NAME attack_detect_tcp_flood_catchall
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_attack_detect.pcap" --format text --verbose --flood-threshold 5)
+set_tests_properties(attack_detect_tcp_flood_catchall PROPERTIES
+  PASS_REGULAR_EXPRESSION "note: TCP flood suspected: 5 TCP packets \\(any flags\\) to 192\\.168\\.3\\.12 seen in this capture \\(threshold: 5 -- a broad catch-all bucket")
+
+add_test(NAME attack_detect_icmp_flood
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_attack_detect.pcap" --format text --verbose --flood-threshold 5)
+set_tests_properties(attack_detect_icmp_flood PROPERTIES
+  PASS_REGULAR_EXPRESSION "note: ICMP flood suspected: 5 Echo Request packets to 192\\.168\\.3\\.13 seen in this capture \\(threshold: 5\\)")
+
+add_test(NAME attack_detect_udp_flood
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_attack_detect.pcap" --format text --verbose --flood-threshold 5)
+set_tests_properties(attack_detect_udp_flood PROPERTIES
+  PASS_REGULAR_EXPRESSION "note: UDP flood suspected: 5 UDP datagrams to 192\\.168\\.3\\.14 seen in this capture \\(threshold: 5\\)")
+
+# NEGATIVE CONTROL: a flood targeting a broadcast-looking destination is never flagged, even at
+# the same low --flood-threshold 5 the positive flood tests above use -- see
+# attack_detect.hpp's flood_counters_for comment (a flood targets one specific host by
+# definition; broadcast reuse is the same shape sample_bacnet.pcap's own routine broadcast
+# traffic has, and colliding with it was a real regression this feature's own manual-
+# verification pass caught and fixed -- see docs/DEVELOPMENT.md).
+add_test(NAME attack_detect_flood_excludes_broadcast_destination
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_attack_detect.pcap" --format text --verbose --flood-threshold 5)
+set_tests_properties(attack_detect_flood_excludes_broadcast_destination PROPERTIES
+  FAIL_REGULAR_EXPRESSION "#(48|49|50|51|52|53)  [^\n]*\n *note:.*flood suspected")
+
+# NEGATIVE CONTROL: fewer packets than the configured threshold never fires a flood note.
+add_test(NAME attack_detect_flood_below_threshold
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_attack_detect.pcap" --format text --verbose --flood-threshold 5)
+set_tests_properties(attack_detect_flood_below_threshold PROPERTIES
+  FAIL_REGULAR_EXPRESSION "#(54|55|56)  [^\n]*\n *note:.*flood suspected")
+
+# NEGATIVE CONTROL: the REAL default threshold (100, no --flood-threshold override) never fires
+# against this fixture's own 6-packet-per-category flood runs -- proves --flood-threshold 5 above
+# is actually doing something, not just testing an already-guaranteed-to-fire condition.
+add_test(NAME attack_detect_flood_default_threshold_not_reached
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_attack_detect.pcap" --format text --verbose)
+set_tests_properties(attack_detect_flood_default_threshold_not_reached PROPERTIES
+  FAIL_REGULAR_EXPRESSION "flood suspected")
+
+add_test(NAME attack_detect_json_fields
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_attack_detect.pcap" --format json)
+set_tests_properties(attack_detect_json_fields PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"src_ip\": \"192\\.168\\.1\\.77\",\n *\"dst_ip\": \"192\\.168\\.1\\.77\",\n *\"src_port\": 4444,\n *\"dst_port\": 4444,.*\"notes\": \\[\"LAND attack: TCP SYN with identical source and destination \\(192\\.168\\.1\\.77:4444\\)")

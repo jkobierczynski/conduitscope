@@ -188,6 +188,19 @@ session\-scoped response matching, designed in proactively (not a post\-hoc
 collision fix) and verified against a genuine MELSEC command and an
 orphan response in the test fixture; see
 \fBdocs/PROTOCOL_COVERAGE.md\fR's CC\-Link IE section for the full writeup,
+plus a cross\-cutting attack\-detection layer applied to every decoded
+IPv4/TCP/UDP/ICMP packet regardless of which application protocol claims
+it \-\- LAND, WinNuke, ICMP Redirect, IP Source Routing (LSRR/SSRR), Smurf,
+Fraggle, Ping of Death, and Teardrop as curated structural signatures
+(sourced against H3C's and Juniper's own attack\-detection documentation),
+plus SYN flood, ACK flood, ICMP flood, UDP flood, and a generic TCP\-flood
+catch\-all, each a deliberately simple per\-destination whole\-capture packet
+count against \fB\-\-flood\-threshold\fR (default 100, a documented judgment
+call rather than a vendor\-sourced figure) \-\- \fBnote:\fR two real
+false\-positive collisions against the existing BACnet and
+HART\-IP/SAMR\-LSARPC fixtures were found and fixed while building this
+feature; see \fBdocs/PROTOCOL_COVERAGE.md\fR's Attack Detection section for
+the full writeup,
 plus PROFINET RT (EtherType 0x8892, DCP device discovery/configuration and
 cyclic real-time IO), IEC 61850-8-1 GOOSE (EtherType 0x88B8, ASN.1
 BER-encoded GOOSE PDU), IEC 61850-9-2 Sampled Values (EtherType 0x88BA,
@@ -712,6 +725,17 @@ already tried opportunistically on every UDP port in \fBauto\fR mode (its
 own command\-code gate is what prevents false positives); this option only
 widens the ports annotated with a "non\-standard port" note when traffic
 is recognized on a port other than the two built\-in defaults.
+.TP
+.B \-\-flood\-threshold \fIN\fR
+Per\-destination packet count (summed across the whole capture, not a
+real packets\-per\-second rate) at which the SYN\-flood, ACK\-flood,
+ICMP\-flood, UDP\-flood, and generic TCP\-flood catch\-all attack\-detection
+signatures each fire their own note, once per destination. Default: 100,
+an explicitly documented judgment call empirically set clear of this
+project's own busiest legitimate fixture, not a vendor\-sourced number;
+see \fBdocs/PROTOCOL_COVERAGE.md\fR's Attack Detection section. A
+broadcast\-looking destination address is never counted toward any flood
+threshold, since a flood by definition targets one specific host.
 .TP
 .B \-\-rip\-port \fIPORT\fR
 Same as \fB\-\-dns\-port\fR, for RIP (built\-in default: 520). Repeatable.

@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "conduitscope/byteio.hpp"
 
@@ -32,6 +33,27 @@ struct Ipv4Header {
     uint8_t ttl = 0;
     uint32_t src_addr = 0;      // host-order (i.e. already assembled MSB-first)
     uint32_t dst_addr = 0;
+
+    // Fragmentation fields (RFC 791 section 3.1) -- read but not acted on before
+    // attack_detect.hpp's addition (see this repo's own prior comment here: "fragment reassembly
+    // is a documented limitation", now narrowly addressed just enough for Teardrop/Ping-of-Death
+    // detection, still well short of a full reassembly engine -- see attack_detect.hpp's own file
+    // header for the honest scope statement on what this codebase does and does not do with
+    // these).
+    uint16_t identification = 0;    // Identification field -- correlates fragments of one datagram
+    bool flag_df = false;           // Don't Fragment
+    bool flag_mf = false;           // More Fragments (false on the last fragment of a fragmented
+                                       // datagram, and on a datagram that was never fragmented)
+    uint16_t fragment_offset = 0;   // in 8-byte units, exactly as encoded on the wire (13 bits) --
+                                       // multiply by 8 for a byte offset into the reassembled
+                                       // datagram
+
+    // Raw IP option bytes (kind+length+data, RFC 791 section 3.1), present only when ihl_words > 5
+    // -- empty otherwise. Not individually parsed/named here; see
+    // ipv4_has_source_route_option() (attack_detect.hpp's one caller so far) for the one option
+    // this codebase currently looks for.
+    std::vector<uint8_t> options;
+
     ByteSpan payload;           // clamped to total_length - header size; see trailing_bytes_trimmed
 
     // Bytes present in the captured frame after the end of this IPv4 datagram

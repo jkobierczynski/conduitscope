@@ -100,6 +100,18 @@ proactively-designed collision-avoidance scheme (request-side command
 gate plus session-scoped response matching) verified against a genuine
 MELSEC command and an orphan response in the test fixture -- see
 `docs/PROTOCOL_COVERAGE.md`'s CC-Link IE section for the full writeup),
+plus a cross-cutting attack-detection layer applied to every decoded
+IPv4/TCP/UDP/ICMP packet regardless of application protocol -- LAND,
+WinNuke, ICMP Redirect, IP Source Routing (LSRR/SSRR), Smurf, Fraggle,
+Ping of Death, and Teardrop as curated structural signatures (sourced
+against H3C's and Juniper's attack-detection documentation), plus SYN/ACK/
+ICMP/UDP flood and a generic TCP-flood catch-all as a deliberately simple
+per-destination whole-capture packet count against a `--flood-threshold`
+(default 100, a documented judgment call, not a vendor-sourced number) --
+**note:** two real false-positive collisions against the existing BACnet
+and HART-IP/SAMR-LSARPC fixtures were found and fixed while building this
+feature; see `docs/PROTOCOL_COVERAGE.md`'s Attack Detection section for
+the full writeup),
 IEEE Spanning Tree Protocol
 (STP/RSTP/MSTP), DeviceNet (CAN-bus CIP, via SocketCAN pcap captures), DNS,
 mDNS, LLMNR, and NetBIOS Name Service (NBT-NS), ICMP, RIP, IGMP, VRRP, HSRP,
@@ -209,7 +221,7 @@ traffic match what the segmentation policy says it should" question.
 
 Groundwork / v0.2.4. Every protocol named above is implemented, decoding real
 wire-format fields (not just naming the protocol), and covered by the
-automated test suite -- 1601 tests as of this writing, run via `ctest` after
+automated test suite -- 1618 tests as of this writing, run via `ctest` after
 building (see Building below). Where a real capture was available (public
 ICS-lab collections, vendor-attributed samples, or a live device on real
 hardware), the decoder is validated against it, not just a synthetic

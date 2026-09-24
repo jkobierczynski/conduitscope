@@ -23,8 +23,11 @@ Ipv4Header parse_ipv4(ByteSpan packet) {
 
     c.u8();  // ToS/DSCP, not needed for protocol decoding
     hdr.total_length = c.u16be();
-    c.u16be();  // identification
-    c.u16be();  // flags + fragment offset (fragment reassembly is a documented limitation)
+    hdr.identification = c.u16be();
+    uint16_t flags_and_offset = c.u16be();
+    hdr.flag_df = (flags_and_offset & 0x4000) != 0;  // bit 14
+    hdr.flag_mf = (flags_and_offset & 0x2000) != 0;  // bit 13
+    hdr.fragment_offset = static_cast<uint16_t>(flags_and_offset & 0x1FFF);  // low 13 bits
     hdr.ttl = c.u8();
     hdr.protocol = c.u8();
     c.u16be();  // header checksum -- not validated; we trust the capture
@@ -37,7 +40,10 @@ Ipv4Header parse_ipv4(ByteSpan packet) {
         throw ParseError("IPv4 header length is inconsistent with the fixed fields already read");
     }
     size_t options_len = header_bytes - c.position();
-    c.skip(options_len);  // skip IP options; we don't currently interpret any of them
+    // Copied out (not interpreted here) -- attack_detect.hpp's ipv4_has_source_route_option() is
+    // the one place that currently scans these; see Ipv4Header::options's own comment.
+    ByteSpan options_span = c.bytes(options_len);
+    hdr.options.assign(options_span.data(), options_span.data() + options_span.size());
 
     ByteSpan captured_after_header = c.rest();
     if (hdr.total_length >= header_bytes) {
