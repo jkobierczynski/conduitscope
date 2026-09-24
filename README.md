@@ -178,7 +178,7 @@ traffic match what the segmentation policy says it should" question.
 
 ## Status
 
-Groundwork / v0.2.3. Every protocol named above is implemented, decoding real
+Groundwork / v0.2.4. Every protocol named above is implemented, decoding real
 wire-format fields (not just naming the protocol), and covered by the
 automated test suite -- 1416 tests as of this writing, run via `ctest` after
 building (see Building below). Where a real capture was available (public
