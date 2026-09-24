@@ -112,6 +112,7 @@ add_library(conduitscope_core STATIC
   src/winrm.cpp
   src/dcom.cpp
   src/ge_srtp.cpp
+  src/bsap.cpp
   src/protocol_registry.cpp
   src/resource_limits.cpp
   src/decoder.cpp
@@ -11139,3 +11140,94 @@ add_test(NAME ge_srtp_stats_service_names_and_paired_response_count
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ge_srtp.pcap" --format text --stats)
 set_tests_properties(ge_srtp_stats_service_names_and_paired_response_count PROPERTIES
   PASS_REGULAR_EXPRESSION "ge srtp service request names:\n *Unknown service request code 0x99 *1\n *get controller type and id information *1\n *program store \\(upload from PLC\\) *1\n *read system memory *3\n *set PLC \\(run vs\\. stop\\) *1\n *write system memory *1\n *write task memory *1\nge srtp responses authoritatively paired \\(sequence number, not heuristic\\): 9")
+
+# BSAP (Bristol Standard Asynchronous/Synchronous Protocol, Bristol Babcock/Emerson RTU protocol)
+# recognition -- see bsap.hpp's own file header comment for the full sourcing writeup (including
+# why this decoder treats the "BSAAP" name Jurgen pointed at as a naming variant of BSAP), the
+# honestly-stated sourcing gap (no numeric RDB function-code table found anywhere, not even in the
+# reference open-source Zeek parser this project cross-checked the header layout against), and the
+# real dispatch-ordering collision (against both HART-IP's and FF-HSE's own fully opportunistic
+# UDP checks) found and fixed via this project's own mandatory manual-CLI-verification-before-
+# writing-any-CTest-regex discipline. tests/sample_bsap.pcap (build_bsap_sample,
+# tools/make_sample_pcap.py) is entirely synthetic -- the pcap Jurgen pointed at
+# (github.com/EmreEkin/ICS-Pcaps/tree/master/BSAAP) could not be browsed by this session's web
+# tools (GitHub's robots.txt blocks directory listings).
+
+# Serial-tunneled Local POLL -- structural recognition, decoded ADDR/SER/SEQ, and the one
+# confirmed numeric link-function-code table (Emerson's own official document).
+add_test(NAME bsap_serial_local_poll_recognized
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bsap.pcap" --format text -v)
+set_tests_properties(bsap_serial_local_poll_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "#1  [^\n]*\\[bsap\\]  BSAP serial-tunneled Local message: addr=5 ser=1 seq=100 dfun=POLL sfun=0x00")
+
+# Serial-tunneled Local ACK/DOWN-ACK response, carrying an opaque trailing RDB-shaped body this
+# decoder honestly does not further interpret -- confirmed via --format json that the trailing
+# byte count is decoded even though its content is not.
+add_test(NAME bsap_serial_local_ack_response_trailing_body_byte_count
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bsap.pcap" --format text -v)
+set_tests_properties(bsap_serial_local_ack_response_trailing_body_byte_count PROPERTIES
+  PASS_REGULAR_EXPRESSION "#2  [^\n]*\\[bsap\\]  BSAP serial-tunneled Local message: addr=5 ser=1 seq=100 dfun=ACK / DOWN-ACK sfun=0x00")
+add_test(NAME bsap_serial_local_ack_response_json_fields
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bsap.pcap" --format json)
+set_tests_properties(bsap_serial_local_ack_response_json_fields PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"bsap_dfun\": \"ACK / DOWN-ACK\",\n *\"bsap_trailing_data_bytes\": 7,")
+
+# Serial-tunneled Global message -- DADD/SADD/CTL decode, a different local address, and a
+# different DFUN/SFUN pairing (SFUN=ACK-NODATA).
+add_test(NAME bsap_serial_global_message_dadd_sadd_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bsap.pcap" --format text -v)
+set_tests_properties(bsap_serial_global_message_dadd_sadd_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "#3  [^\n]*\\[bsap\\]  BSAP serial-tunneled Global message: addr=10 ser=2 seq=101 dfun=POLL sfun=ACK-NODATA")
+add_test(NAME bsap_serial_global_message_json_fields
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bsap.pcap" --format json)
+set_tests_properties(bsap_serial_global_message_json_fields PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"bsap_dadd\": 5,\n *\"bsap_sadd\": 1,")
+
+# A Local message whose DFUN is NAK -- the one curated note this decoder adds (a directly
+# observable link-layer failure signal, not a guess -- see bsap.hpp's SECURITY CONTEXT section for
+# why this decoder does not add a note to every single frame the way GE SRTP's own per-operation
+# notes do).
+add_test(NAME bsap_serial_nak_curated_note
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bsap.pcap" --format text -v)
+set_tests_properties(bsap_serial_nak_curated_note PROPERTIES
+  PASS_REGULAR_EXPRESSION "#4  [^\n]*\\[bsap\\]  BSAP serial-tunneled Local message: addr=5 ser=3 seq=102 dfun=NAK sfun=0x00[^\n]*\n *note: NAK observed -- a negative acknowledgment at BSAP's own link layer")
+
+# BSAP-IP-native framing: leading_value/message_func recognized structurally, trailing body shown
+# as a byte count only (not descended into -- see bsap.hpp's BSAP-IP-NATIVE FRAMING section).
+add_test(NAME bsap_ip_native_structural_recognition
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bsap.pcap" --format text -v)
+set_tests_properties(bsap_ip_native_structural_recognition PROPERTIES
+  PASS_REGULAR_EXPRESSION "#5  [^\n]*\\[bsap\\]  BSAP-IP-native message: leading_value=8 message_func=0x1 \\(8 byte\\(s\\) of body, not further decoded -- see bsap\\.hpp\\)")
+
+# NEGATIVE CONTROL: a single byte -- too short even to read the 2-byte leading field this
+# decoder's own gate depends on entirely. Must fall through to a plain, unclassified "udp" result,
+# not "bsap" -- and, since BSAP now runs BEFORE HART-IP's/FF-HSE's own fully opportunistic checks
+# (see decoder.cpp's own BSAP call site comment for the real collision that ordering fixes), also
+# confirms this one-byte payload doesn't get misclassified as either of those either.
+add_test(NAME bsap_gate_rejects_too_short_payload_falls_through_cleanly
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bsap.pcap" --format text -v)
+set_tests_properties(bsap_gate_rejects_too_short_payload_falls_through_cleanly PROPERTIES
+  PASS_REGULAR_EXPRESSION "#6  [^\n]*\\[udp\\]  UDP payload of 1 byte\\(s\\) on port 1234->1234"
+  FAIL_REGULAR_EXPRESSION "#6[^\n]*\\[(bsap|hartip|ffhse)\\]")
+
+# Non-standard port (9999, not 1234) in Auto (port-gated) mode: BSAP's own GateKind::UdpPort means
+# it does NOT claim traffic on an unconfigured port here -- the packet stays generic "udp".
+add_test(NAME bsap_non_standard_port_not_claimed_in_auto_mode
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bsap.pcap" --format text -v)
+set_tests_properties(bsap_non_standard_port_not_claimed_in_auto_mode PROPERTIES
+  PASS_REGULAR_EXPRESSION "#7  [^\n]*\\[udp\\]  UDP payload of 9 byte\\(s\\) on port 53700->9999"
+  FAIL_REGULAR_EXPRESSION "#7[^\n]*\\[bsap\\]")
+
+# The same non-standard-port exchange DOES decode correctly when BSAP is explicitly forced via
+# --protocol bsap (which tries BSAP port-independently), including the "not a configured/standard
+# BSAP port" note on both directions.
+add_test(NAME bsap_forced_protocol_decodes_non_standard_port
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bsap.pcap" --protocol bsap --format text -v)
+set_tests_properties(bsap_forced_protocol_decodes_non_standard_port PROPERTIES
+  PASS_REGULAR_EXPRESSION "#7  [^\n]*\\[bsap\\]  BSAP serial-tunneled Local message: addr=5 ser=4 seq=103 dfun=POLL sfun=0x00[^\n]*\n *note: seen on UDP port 53700->9999, which is not a configured/standard BSAP port \\(1234\\)")
+
+# --stats aggregation: serial-tunneled vs. BSAP-IP-native message counts, and the NAK counter.
+add_test(NAME bsap_stats_framing_counts_and_nak_counter
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bsap.pcap" --format text --stats)
+set_tests_properties(bsap_stats_framing_counts_and_nak_counter PROPERTIES
+  PASS_REGULAR_EXPRESSION "bsap serial-tunneled messages: 4\nbsap-ip-native messages: 1\nbsap link-layer NAKs observed: 1")

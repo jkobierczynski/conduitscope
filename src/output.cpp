@@ -903,6 +903,32 @@ void write_ge_srtp_json_fields(std::ostream& out, const GeSrtpFrame& gf) {
     out << "    \"ge_srtp_matched_to_request\": " << (gf.matched_to_request ? "true" : "false") << ",\n";
 }
 
+void write_bsap_json_fields(std::ostream& out, const BsapFrame& bf) {
+    out << "    \"bsap_is_serial_tunnel\": " << (bf.is_serial_tunnel ? "true" : "false") << ",\n";
+    if (bf.is_serial_tunnel) {
+        out << "    \"bsap_is_global\": " << (bf.is_global ? "true" : "false") << ",\n";
+        out << "    \"bsap_local_address\": " << static_cast<unsigned>(bf.local_address) << ",\n";
+        out << "    \"bsap_ser\": " << static_cast<unsigned>(bf.ser) << ",\n";
+        out << "    \"bsap_seq\": " << bf.seq << ",\n";
+        if (bf.dfun_name) {
+            out << "    \"bsap_dfun\": \"" << json_escape(*bf.dfun_name) << "\",\n";
+        }
+        if (bf.sfun_name) {
+            out << "    \"bsap_sfun\": \"" << json_escape(*bf.sfun_name) << "\",\n";
+        }
+        if (bf.has_global_addressing) {
+            out << "    \"bsap_dadd\": " << bf.dadd << ",\n";
+            out << "    \"bsap_sadd\": " << bf.sadd << ",\n";
+        }
+    } else {
+        out << "    \"bsap_leading_value\": " << bf.leading_value << ",\n";
+        out << "    \"bsap_message_func\": " << bf.message_func << ",\n";
+    }
+    if (bf.has_trailing_data) {
+        out << "    \"bsap_trailing_data_bytes\": " << bf.trailing_data_byte_count << ",\n";
+    }
+}
+
 // Renders one RipRoute as a single line -- see rip.hpp for what each of the three RTE shapes
 // (ordinary route, full-table-request marker, authentication entry) means. Reproduces
 // decoder.cpp's own former rip_route_summary exactly (that copy was retired along with the
@@ -3559,6 +3585,9 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
     if (p.protocol == "ge-srtp" && p.result) {
         write_ge_srtp_json_fields(out_, p.result->as<GeSrtpFrame>());
     }
+    if (p.protocol == "bsap" && p.result) {
+        write_bsap_json_fields(out_, p.result->as<BsapFrame>());
+    }
     out_ << "    \"notes\": [";
     for (size_t i = 0; i < p.notes.size(); ++i) {
         if (i != 0) out_ << ", ";
@@ -4046,6 +4075,15 @@ void StatsWriter::write_packet(const DecodedPacket& p) {
         }
         if (gf.is_response && gf.matched_to_request) ge_srtp_paired_responses_++;
     }
+    if (p.protocol == "bsap" && p.result) {
+        const BsapFrame& bf = p.result->as<BsapFrame>();
+        if (bf.is_serial_tunnel) {
+            bsap_serial_tunnel_count_++;
+            if (bf.dfun_raw == 0x95 || bf.sfun_raw == 0x95) bsap_nak_count_++;
+        } else {
+            bsap_ip_native_count_++;
+        }
+    }
     if (p.protocol == "rip" && p.result) {
         rip_command_counts_[p.result->as<RipMessage>().command_name]++;
     }
@@ -4397,6 +4435,11 @@ void StatsWriter::print_summary(std::ostream& out) const {
         }
         out << "ge srtp responses authoritatively paired (sequence number, not heuristic): "
             << ge_srtp_paired_responses_ << "\n";
+    }
+    if (bsap_serial_tunnel_count_ > 0 || bsap_ip_native_count_ > 0) {
+        out << "bsap serial-tunneled messages: " << bsap_serial_tunnel_count_ << "\n";
+        out << "bsap-ip-native messages: " << bsap_ip_native_count_ << "\n";
+        out << "bsap link-layer NAKs observed: " << bsap_nak_count_ << "\n";
     }
     if (!rip_command_counts_.empty()) {
         out << "rip commands:\n";

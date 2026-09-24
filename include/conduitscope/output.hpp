@@ -344,6 +344,14 @@ private:
     // is a genuine wire-carried transaction ID) -- the same tier modbus_paired_responses_/
     // twincat_paired_responses_ above already established.
     size_t ge_srtp_paired_responses_ = 0;
+    // BSAP's own breakdown (bsap.hpp) -- how many messages used each of the two framings this
+    // decoder recognizes, and how many link-layer NAKs were observed (see bsap.hpp's own
+    // SECURITY CONTEXT section for why this decoder does not attempt a full per-operation
+    // breakdown the way ge_srtp_service_counts_ above does: BSAP's own RDB function codes have no
+    // confirmed numeric meaning in any source this project found).
+    size_t bsap_serial_tunnel_count_ = 0;
+    size_t bsap_ip_native_count_ = 0;
+    size_t bsap_nak_count_ = 0;
     std::map<std::string, size_t> rip_command_counts_;   // keyed by rip_command_name
     std::map<std::string, size_t> icmp_type_counts_;     // keyed by icmp_type_name
     std::map<std::string, size_t> igmp_type_counts_;     // keyed by igmp_type_name

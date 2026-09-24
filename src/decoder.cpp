@@ -1402,6 +1402,55 @@ DecodedPacket Decoder::decode_ip_payload(DecodedPacket out, uint8_t protocol, By
                 }
             }
 
+            // BSAP (Bristol Standard Asynchronous/Synchronous Protocol) -- a brand-new protocol,
+            // NOT part of migration batch 4, port-gated in Auto mode (see bsap.hpp's own file
+            // header comment for why: its own structural checks -- a 2-byte magic for the
+            // serial-tunneled shape, nothing stronger than a plausible header shape for the
+            // BSAP-IP-native one -- are too weak to try against arbitrary UDP traffic on every
+            // port). Tried HERE, BEFORE HART-IP's and FF-HSE's own fully opportunistic (tried on
+            // every UDP port) checks just below, for a REAL, EMPIRICALLY-FOUND reason, not a
+            // theoretical one -- this decoder was originally placed after NBT-NS instead (the same
+            // position RIP/HSRP/DNS/mDNS/LLMNR/NBT-NS's own port-gated checks already occupy), and
+            // manual CLI verification of this decoder's own test fixture caught it losing BOTH
+            // collisions: a BSAP serial-tunneled response (trailing bytes 01 00 2a 00 00 00 00)
+            // misclassified as an FF-HSE "FDA Open Session Rsp", and a different one misclassified
+            // as a truncated HART-IP "Request Session Close" -- both purely because HART-IP/FF-HSE
+            // are tried opportunistically on every port and ran first, before this decoder's own
+            // later, port-gated check ever got a chance, even though the payload was genuinely on
+            // BSAP's own port 1234 both times. The same "stronger/more-specific signal should win
+            // the collision" resolution QUIC's own early placement just above already uses -- once
+            // BSAP's own port (1234) actually matches, that exact-port-plus-structural-shape
+            // combination is a more specific signal than HART-IP's/FF-HSE's own fully
+            // port-independent opportunistic gates, so it is given priority by running first,
+            // rather than by carving out port exclusions on the HART-IP/FF-HSE side (which would
+            // only suppress the SYMPTOM on port 1234 specifically, not the underlying weaker-signal-
+            // runs-first ordering problem this decoder's own dispatch already solved once, for
+            // RIP/HSRP-vs-FF-HSE -- see that pair's own comment below).
+            bool want_bsap = options_.protocol_filter == ProtocolFilter::Auto ||
+                              options_.protocol_filter == ProtocolFilter::BsapOnly;
+            bool require_bsap_port = options_.protocol_filter == ProtocolFilter::Auto;
+            if (want_bsap) {
+                bool port_match = port_in(udp.src_port, BSAP_PORT, options_.extra_bsap_ports) ||
+                                   port_in(udp.dst_port, BSAP_PORT, options_.extra_bsap_ports);
+                if (!require_bsap_port || port_match) {
+                    DecodeContext ctx;
+                    ctx.protocol_id = "bsap";
+                    if (auto result = bsap_decoder().decode(udp.payload, ctx)) {
+                        const BsapFrame& frame = result->as<BsapFrame>();
+                        out.protocol = "bsap";
+                        out.summary = frame.summary;
+                        for (const auto& n : frame.notes) out.notes.push_back(n);
+                        out.result = *result;
+                        if (!port_match) {
+                            out.notes.push_back("seen on UDP port " + std::to_string(udp.src_port) + "->" +
+                                                 std::to_string(udp.dst_port) +
+                                                 ", which is not a configured/standard BSAP port (1234)");
+                        }
+                        return out;
+                    }
+                }
+            }
+
             // Tried last among these UDP checks, port-independently -- see the matching comment in
             // reassemble_tcp_payload above for why HART-IP's own weaker structural detection gate
             // is deliberately given the lowest priority in this decoder's opportunistic dispatch.

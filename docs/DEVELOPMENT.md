@@ -7518,6 +7518,146 @@ deferred future migration.
     auto-detected default (reachable via `--ge-srtp-port`/`--protocol ge-srtp` instead); and, as
     ever, any GE SRTP field this decoder does not name above.
 
+40. **BSAP (Bristol Standard Asynchronous/Synchronous Protocol), Bristol Babcock/Emerson Remote
+    Automation Solutions -- UDP port 1234.** **Done -- structural-only, by explicit agreement.**
+    Jurgen asked "Can you now do BSAAP?", pointing at
+    `github.com/EmreEkin/ICS-Pcaps/tree/master/BSAAP`. "BSAAP" does not match any known protocol
+    name; cross-referencing Wikipedia, Emerson's own official documentation, the CISA-published
+    open-source Zeek/binpac parser for the protocol, and Orange Cyberdefense's ICS protocol
+    catalog -- all four independently landing on UDP port 1234 -- established this is very likely
+    that repository's own naming variant/typo for **BSAP**, the RTU protocol Bristol Babcock (now
+    Emerson Remote Automation Solutions) uses for its 3330/3305/DPC/ControlWave RTU families. New,
+    fully self-contained module: `include/conduitscope/bsap.hpp`/`src/bsap.cpp`, following the same
+    standalone-`ProtocolDecoder` pattern as GE SRTP/MELSEC/FINS.
+
+    GitHub's own `robots.txt` blocks fetching a `/tree/` directory listing, so the actual pcap
+    Jurgen pointed at could not be retrieved. Combined with a confirmed, genuine sourcing gap --
+    no numeric RDB (Remote Database Access) function-code table exists in any public source,
+    including CISA's own reference Zeek parser, which itself only logs the raw undecoded byte --
+    this was surfaced to Jurgen directly via a scoping question rather than guessed at. He chose
+    "Proceed with structural-only decode" over attaching the pcap himself or holding off, which is
+    the scope everything below implements: link-layer framing and addressing decoded and named,
+    RDB/application-layer semantics deliberately left as raw hex on both transports.
+
+    Wire format: two distinct framings share UDP port 1234, disambiguated by the first two bytes
+    (little-endian uint16) -- `0x0210` means serial-tunneled (BSAP frames carried over an
+    Ethernet-to-serial gateway/tap); any other value means BSAP-IP-native, a separate, far more
+    thinly documented framing. Serial-tunneled: after the magic, an `ADDR` byte (bit `0x80` set =
+    Global-format message, clear = Local-format; low 7 bits = local device address); Local
+    messages carry a 6-byte header past `ADDR` (`SER`, `DFUN`, `SEQ` LE, `SFUN`, `NSB` raw) and
+    Global messages carry 11 bytes (`SER`, `DADD` LE, `SADD` LE, `CTL` raw, `DFUN`, `SEQ` LE,
+    `SFUN`, `NSB` raw) -- these exact byte counts were independently confirmed by both Emerson's
+    own document and the CISA Zeek parser's own binpac grammar, a genuine cross-source validation.
+    DFUN/SFUN decode against the one confirmed numeric table this protocol has (`0x85` POLL,
+    `0x86` ACK/DOWN-ACK, `0x87` ACK-NODATA, `0x8B` UP-ACK, `0x95` NAK -- any other value shown as
+    raw hex, never guessed at). BSAP-IP-native: only a 4-byte outer header is decoded (a leading
+    2-byte value, named `leading_value` rather than asserted a confident meaning, since CISA's own
+    grammar both logs it as `Num_Messages` and separately reuses it, minus 6, as the trailing
+    data field's declared length -- an apparent dual-use this decoder could not independently
+    confirm from a second source -- plus a 2-byte raw `Message_Func`); its own Request/Response/RDB
+    sub-structure past that header is not decoded at all, no confirmed discriminator field or RDB
+    numeric value having been found anywhere.
+
+    No session-scoped request/response pairing, unlike GE SRTP's own authoritative Sequence-Number
+    pairing -- SER/SEQ look plausibly reusable for correlation, but no source confirms a response
+    actually echoes a request's own value, and guessing would risk fabricating matches that are not
+    real. No authentication/integrity/confidentiality mechanism found in any source (consistent
+    with the protocol's age and its inclusion in Forescout's 2022 "OT:ICEFALL" insecure-by-design
+    research); deliberately not repeated as a per-frame note (would be noise, unlike GE SRTP's own
+    per-operation-tier notes) -- only a genuinely observed NAK earns a curated note.
+
+    Structural gate: `GateKind::UdpPort` (port-gated in Auto mode, matching RIP's/HSRP's own
+    precedent for protocols with no self-describing signal strong enough to try opportunistically
+    on every port) -- port 1234 is the hard-coded default, with `--bsap-port`/`--protocol bsap`
+    mirroring GE SRTP's own `--ge-srtp-port`/`--protocol ge-srtp` CLI shape.
+
+    Two real, reproducible dispatch-ordering collision bugs were found and fixed during this work
+    -- via this project's own mandatory before-writing-any-CTest-regex manual CLI verification
+    step, exactly the discipline that caught GE SRTP's own TPKT/COTP collisions (see item 39
+    above). `decoder.cpp`'s UDP dispatch chain has two categories of checks: fully opportunistic
+    ones tried on every UDP port regardless of match (HART-IP, FF-HSE, QUIC), and port-gated ones
+    tried only when the port matches (RIP, HSRP, DNS/mDNS/LLMNR/NBT-NS, and now BSAP). BSAP's
+    dispatch block was originally placed right after NBT-NS's own block, much later in the file
+    than FF-HSE's and HART-IP's own fully opportunistic checks -- so on the test fixture, a
+    serial-tunneled ACK/DOWN-ACK response was misclassified as an FF-HSE "FDA Open Session Rsp"
+    (FF-HSE's own weak gate winning the race), and a different BSAP packet was misclassified as a
+    truncated HART-IP "Request Session Close." This is the same collision class the codebase had
+    already documented once, for RIP/HSRP-vs-FF-HSE -- independently rediscovered here for
+    BSAP. Fixed by moving BSAP's entire dispatch block to run immediately before HART-IP's and
+    FF-HSE's own opportunistic checks, with an inline comment documenting the real, empirically-
+    found collision (not a theoretical one) and the "stronger/more-specific signal wins" reasoning
+    already established for QUIC's own early placement. Rebuilt and reverified: all BSAP packets
+    in the fixture now correctly show `[bsap]`.
+
+    A separate, non-decoder fixture-authoring issue was also found and fixed: the fixture's
+    intended negative control (a short, structurally-invalid 4-byte payload) was found via manual
+    CLI verification to parse successfully as a structurally-recognized BSAP-IP-native message
+    instead of being rejected, because that path's own gate is honestly weak by design -- any
+    4-or-more-byte payload not starting with the serial-tunnel magic parses as BSAP-IP-native, an
+    inherent, deliberately-honest limitation (documented in `bsap.hpp`'s own header comment, not
+    "fixed" by fabricating a stronger discriminator that no source confirms exists). The fixture's
+    negative control was changed to a single byte, which fails `try_parse_bsap`'s unconditional
+    minimum-length check regardless of framing.
+
+    11 new `bsap_*` CTest tests: serial-tunneled Local POLL recognition; a serial-tunneled Local
+    ACK/DOWN-ACK response with trailing-body byte count, plus `--format json` field checks; a
+    serial-tunneled Global message with DADD/SADD decoded, plus JSON field checks; the curated NAK
+    note; BSAP-IP-native structural recognition; the too-short-payload negative control (with an
+    explicit `FAIL_REGULAR_EXPRESSION` guarding against both collisions just fixed re-appearing);
+    the non-standard-port pair correctly staying generic `[udp]` in Auto mode and correctly
+    decoding under `--protocol bsap`; and a `--stats` check of the serial-tunneled/IP-native
+    framing counts and the NAK counter. Full suite: 1577 -> 1588 tests (default config), 1565 ->
+    1576 (no-live-capture config), zero-warning build in both, confirmed via clean full rebuild in
+    both configs.
+
+    Honestly stated validation gap: the fixture (`tests/sample_bsap.pcap`, `build_bsap_sample`) is
+    entirely synthetic -- the referenced pcap could not be retrieved (GitHub's `robots.txt` blocks
+    the directory listing), so no real BSAP capture of any kind informed this decoder. If a real
+    capture becomes available later, this note should be updated accordingly, and the RDB
+    function-code gap revisited.
+
+    Explicitly out of scope, per Jurgen's own explicit scope choice above: RDB (Remote Database
+    Access) function-code semantics on either transport (no numeric table found anywhere,
+    including in CISA's own reference parser); BSAP-IP-native's own Request/Response/RDB
+    sub-structure past its 4-byte outer header; session-scoped request/response pairing (SER/SEQ
+    are decoded but not correlated, for lack of a confirmed echo guarantee); and, as ever, any
+    BSAP field this decoder does not name above.
+
+41. **ICS communication-baseline analysis at the protocol-operation level.** Not yet started, no
+    committed timeline. Jurgen asked to add this as a target for the project. Recorded here as a
+    roadmap entry rather than designed/implemented yet, since the request was to log it as a
+    goal, not (yet) to scope or build it -- the notes below are orientation for whenever it's
+    picked up, not a committed design.
+
+    This codebase already has two related but distinct passive-analysis layers built on top of
+    `Decoder`'s own output, neither of which operates below the protocol/port level today:
+    `AssetInventoryEngine` (`asset_inventory.hpp`, the `inventory` subcommand) infers a first-draft
+    zone/conduit model from a capture -- one edge per distinct (client IP, server IP, protocol,
+    server port) tuple actually observed, across ten TCP-flow protocols plus BACnet/CIP-I/O over
+    UDP -- and `PolicyEngine` (`policy_engine.hpp`, the `policy validate` subcommand) checks
+    observed flows against a hand-written zone/conduit policy at that same granularity, with an
+    already-existing per-conduit `functions` allow-list restriction (see `FlowVerdict::Violation`'s
+    own doc comment) that comes closest to today's "operation-level" concept, but still keyed off
+    whatever coarse function/service-name label each protocol's own `DecodedPacket` fields already
+    expose, not a systematic per-operation baseline.
+
+    "Protocol-operation level" would mean baselining which specific operations -- not just which
+    protocols and ports -- are normally seen on each conduit: e.g. a Modbus conduit that normally
+    only sees function code 3 (Read Holding Registers) suddenly seeing function code 6 (Write
+    Single Register); a GE SRTP conduit's normal Service Request Code mix; which BSAP DFUN/SFUN
+    values, or which S7comm job functions, or which SAMR/LSARPC opnums (see item 28's own Windows
+    RPC batch), are actually exercised on a given flow versus merely decodable. The open design
+    questions, not yet resolved: what counts as "the operation" is inherently per-protocol (a
+    function code, a service request code, an opnum, a target address/register range, some
+    combination) and this codebase has ~50 protocol decoders with no unified operation-identifier
+    concept today; whether a baseline is built from a single capture (like `AssetInventoryEngine`'s
+    existing single-pass inference) or accumulated/persisted across multiple captures over time (a
+    genuinely new capability -- everything in this codebase today is stateless across separate
+    invocations); how deviations get reported (a new report type, or a `policy validate`-style
+    pass/fail extension); and which of the ~50 decoders would need their existing coarse
+    function/service-name fields promoted to something more systematic before a baseline engine
+    could consume them uniformly.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

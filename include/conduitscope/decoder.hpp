@@ -13,6 +13,7 @@
 #include "conduitscope/arp.hpp"
 #include "conduitscope/bacnet.hpp"
 #include "conduitscope/bgp.hpp"
+#include "conduitscope/bsap.hpp"
 #include "conduitscope/byteio.hpp"
 #include "conduitscope/can_socketcan.hpp"
 #include "conduitscope/cotp.hpp"
@@ -227,6 +228,12 @@ enum class ProtocolFilter {
                            // entirely on the ProtocolDecoder interface from inception like TwinCAT/
                            // MELSEC/FINS. GateKind::TcpPort (port-gated in Auto mode, joining DoH/
                            // WinRM/DCOM on that gate), the fourth protocol on it.
+    BsapOnly,              // only attempt BSAP (Bristol Standard Asynchronous/Synchronous
+                           // Protocol, Bristol Babcock/Emerson RTU protocol; UDP port 1234)
+                           // decoding -- see bsap.hpp. A brand-new protocol built entirely on the
+                           // ProtocolDecoder interface from inception like TwinCAT/MELSEC/FINS/GE
+                           // SRTP. GateKind::UdpPort (port-gated in Auto mode, joining RIP/HSRP/
+                           // DNS/mDNS/LLMNR/NBT-NS on that gate).
 };
 
 struct DecodeOptions {
@@ -339,12 +346,16 @@ struct DecodeOptions {
     std::vector<uint16_t> extra_hsrp_ports;     // UDP -- see HSRP_PORT (1985); same detection-
                                                   // gating group and reasoning as extra_rip_ports
                                                   // above -- see hsrp.hpp's own try_parse_hsrp
-                                                  // comment. IGMP, VRRP, IGRP, PIM, EIGRP, and
-                                                  // OSPF need no port list at all: all six are
-                                                  // dispatched purely by their own IANA-exclusive
-                                                  // IP protocol number (2, 112, 9, 103, 88, and 89
-                                                  // respectively), which is a strong signal with
-                                                  // no port concept.
+                                                  // comment.
+    std::vector<uint16_t> extra_bsap_ports;     // UDP -- see BSAP_PORT (1234); same detection-
+                                                  // gating group and reasoning as extra_rip_ports/
+                                                  // extra_hsrp_ports above -- see bsap.hpp's own
+                                                  // try_parse_bsap comment. IGMP, VRRP, IGRP, PIM,
+                                                  // EIGRP, and OSPF need no port list at all: all
+                                                  // six are dispatched purely by their own IANA-
+                                                  // exclusive IP protocol number (2, 112, 9, 103,
+                                                  // 88, and 89 respectively), which is a strong
+                                                  // signal with no port concept.
     // One shared list across all five Tier 1 "IT protocols an OT auditor flags" protocols (RDP/
     // VNC/TeamViewer/AnyDesk/Zoom -- see it_protocols.hpp), the same "one feature toggle" grouping
     // extra_ffhse_ports already established. Gates detection for RDP's COTP-based check and for

@@ -14355,6 +14355,101 @@ def build_ge_srtp_sample():
     (TESTS_DIR / "sample_ge_srtp.pcap").write_bytes(data)
 
 
+# --- BSAP (Bristol Standard Asynchronous/Synchronous Protocol) --------------------------
+
+BSAP_PORT = 1234
+
+
+def bsap_serial_local(ser: int, dfun: int, seq: int, sfun: int, nsb: int = 0x00,
+                       trailing: bytes = b"", local_address: int = 0x05) -> bytes:
+    """proto(0x0210, LE) + ADDR(bit 0x80 clear -> Local) + SER + DFUN + SEQ(LE) + SFUN + NSB +
+    trailing -- see bsap.hpp's SERIAL-TUNNELED FRAMING / Local header."""
+    return (struct.pack("<H", 0x0210) + bytes([local_address & 0x7F, ser, dfun]) +
+            struct.pack("<H", seq) + bytes([sfun, nsb]) + trailing)
+
+
+def bsap_serial_global(ser: int, dadd: int, sadd: int, ctl: int, dfun: int, seq: int, sfun: int,
+                        nsb: int = 0x00, trailing: bytes = b"", local_address: int = 0x05) -> bytes:
+    """Same as bsap_serial_local but ADDR's 0x80 bit set (-> Global) plus DADD/SADD/CTL -- see
+    bsap.hpp's SERIAL-TUNNELED FRAMING / Global header."""
+    return (struct.pack("<H", 0x0210) + bytes([0x80 | (local_address & 0x7F), ser]) +
+            struct.pack("<H", dadd) + struct.pack("<H", sadd) + bytes([ctl, dfun]) +
+            struct.pack("<H", seq) + bytes([sfun, nsb]) + trailing)
+
+
+def bsap_ip_native(leading_value: int, message_func: int, trailing: bytes = b"") -> bytes:
+    """proto/leading_value(LE, != 0x0210) + Message_Func(LE) + trailing -- see bsap.hpp's
+    BSAP-IP-NATIVE FRAMING."""
+    return struct.pack("<HH", leading_value, message_func) + trailing
+
+
+def build_bsap_sample():
+    """BSAP (Bristol Standard Asynchronous/Synchronous Protocol, Bristol Babcock/Emerson RTU
+    protocol) -- UDP port 1234. Jurgen pointed at github.com/EmreEkin/ICS-Pcaps/tree/master/BSAAP;
+    no protocol named "BSAAP" (double-A) was found anywhere in this research, so this decoder
+    treats it as that repo's own naming variant for BSAP -- see bsap.hpp's own file header for the
+    full sourcing writeup, including the honestly-stated gap (no numeric RDB function-code table
+    found in any public source, not even the reference open-source Zeek parser this project
+    cross-checked the header layout against) that keeps this fixture entirely synthetic; the
+    referenced GitHub folder's own pcap could not be browsed by this session's web tools (GitHub's
+    robots.txt blocks directory listings)."""
+    packets = []
+
+    def add(payload: bytes, from_hmi: bool = True, sport: int = BSAP_PORT,
+             dport: int = BSAP_PORT):
+        if from_hmi:
+            packets.append(udp_ip_eth_frame(payload, sport, dport, HMI_IP, PLC_IP, HMI_MAC, PLC_MAC))
+        else:
+            packets.append(udp_ip_eth_frame(payload, sport, dport, PLC_IP, HMI_IP, PLC_MAC, HMI_MAC))
+
+    # 1) Serial-tunneled Local POLL from the master (HMI) to the RTU (PLC) -- no trailing data,
+    #    the bare link-layer poll itself.
+    add(bsap_serial_local(ser=1, dfun=0x85, seq=100, sfun=0x00))
+
+    # 2) The RTU's own Local ACK/DOWN-ACK reply, carrying an opaque RDB-shaped body this decoder
+    #    honestly does not further interpret (see bsap.hpp's sourcing gap).
+    add(bsap_serial_local(ser=1, dfun=0x86, seq=100, sfun=0x00,
+                           trailing=bytes.fromhex("01002a00000000")), from_hmi=False)
+
+    # 3) Serial-tunneled Global message -- exercises DADD/SADD/CTL decode, a different local
+    #    address (0x0A), and a different DFUN/SFUN pairing (a source-function ACK-NODATA).
+    add(bsap_serial_global(ser=2, dadd=0x0005, sadd=0x0001, ctl=0x00, dfun=0x85, seq=101,
+                            sfun=0x87, local_address=0x0A))
+
+    # 4) A Local message whose DFUN is NAK (0x95) -- exercises the curated
+    #    "NAK observed" note and the --stats NAK counter.
+    add(bsap_serial_local(ser=3, dfun=0x95, seq=102, sfun=0x00), from_hmi=False)
+
+    # 5) BSAP-IP-native framing: leading_value=0x0008 (not the 0x0210 serial-tunnel magic),
+    #    message_func=0x0001, with a trailing body this decoder recognizes structurally but does
+    #    not descend into (see bsap.hpp's BSAP-IP-NATIVE FRAMING section on why).
+    add(bsap_ip_native(leading_value=0x0008, message_func=0x0001,
+                        trailing=bytes.fromhex("0102030405060708")))
+
+    # 6) NEGATIVE CONTROL: a single byte -- too short even to read the 2-byte leading field this
+    #    decoder's own gate depends on entirely (try_parse_bsap's own very first check). NOTE: a
+    #    4-byte-or-longer payload that doesn't start with the 0x0210 serial-tunnel magic is NOT a
+    #    useful negative control here -- the BSAP-IP-native shape's own gate is honestly weak (see
+    #    bsap.hpp's own file header: "no strong magic number of its own"), so it would actually
+    #    parse successfully as a structurally-recognized (if semantically meaningless)
+    #    BSAP-IP-native message rather than being rejected -- confirmed the hard way while building
+    #    this fixture, when an earlier 4-byte "negative control" here turned out to parse cleanly.
+    add(bytes([0x11]))
+
+    # 7) & 8) The same Local POLL/ACK exchange again, but on a non-standard port (53700 -> 9999,
+    #    not BSAP_PORT) -- proves the "seen on UDP port ..., which is not a configured/standard
+    #    BSAP port (1234)" note. Auto mode is port-gated for BSAP (see bsap.hpp's own file header),
+    #    so the dedicated CTest for this packet group runs with `--protocol bsap` to force it.
+    add(bsap_serial_local(ser=4, dfun=0x85, seq=103, sfun=0x00), sport=53700, dport=9999)
+    add(bsap_serial_local(ser=4, dfun=0x86, seq=103, sfun=0x00,
+                           trailing=bytes.fromhex("00")), from_hmi=False, sport=9999, dport=53700)
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_220_000 + i, i * 1000)
+    (TESTS_DIR / "sample_bsap.pcap").write_bytes(data)
+
+
 if __name__ == "__main__":
     TESTS_DIR.mkdir(exist_ok=True)
     build_modbus_sample()
@@ -14438,4 +14533,5 @@ if __name__ == "__main__":
     build_wmi_dcom_activation_sample()
     build_iccp_sample()
     build_ge_srtp_sample()
+    build_bsap_sample()
     print("wrote sample fixtures to", TESTS_DIR)

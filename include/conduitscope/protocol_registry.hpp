@@ -113,7 +113,10 @@ const std::vector<const ProtocolDecoder*>& tcp_port_registry();
 // batch 4 is this vector's first real user, and ProtocolDecoder::udp_port()'s first real use too
 // (added in that same batch). Fully populated in true call-site order: RIP, HSRP, DNS, mDNS,
 // LLMNR, NBT-NS. DNS/mDNS/LLMNR share one parser, try_parse_dns_message -- see DnsDecoder's own
-// comment in dns.hpp for why that's three classes, not one.
+// comment in dns.hpp for why that's three classes, not one. BSAP (Bristol Standard Asynchronous/
+// Synchronous Protocol, UDP port 1234) was added to this cascade afterward, NOT as part of
+// migration batch 4 -- like ARP/LLDP/BGP/GE SRTP in the cascades above, a brand-new protocol
+// built directly on ProtocolDecoder from inception (see bsap.hpp), appended after NBT-NS.
 const std::vector<const ProtocolDecoder*>& udp_port_registry();
 
 // Migration batch 2 addition: migrated UDP-port-INDEPENDENT protocols (GateKind::UdpPortIndependent

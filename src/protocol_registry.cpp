@@ -4,6 +4,7 @@
 #include "conduitscope/arp.hpp"
 #include "conduitscope/bacnet.hpp"
 #include "conduitscope/bgp.hpp"
+#include "conduitscope/bsap.hpp"
 #include "conduitscope/cotp.hpp"
 #include "conduitscope/dcom.hpp"
 #include "conduitscope/devicenet.hpp"
@@ -395,6 +396,14 @@ const std::vector<const ProtocolDecoder*>& udp_port_registry() {
                             // above -- see LlmnrDecoder's own comment in dns.hpp.
         &nbns_decoder(),   // Migration batch 4 -- sits exactly where the old `if (want_nbns)` block
                             // always did: last of this cascade, after LLMNR.
+        &bsap_decoder(),   // BSAP (Bristol Standard Asynchronous/Synchronous Protocol) -- a
+                            // brand-new protocol, NOT part of migration batch 4, built entirely on
+                            // the ProtocolDecoder interface from inception like TwinCAT/MELSEC/
+                            // FINS/GE SRTP. Joins this gate right after NBT-NS, port-gated for the
+                            // same "no magic-byte-strength structural gate of its own" reason RIP/
+                            // HSRP already are -- see bsap.hpp's own file header comment.
+                            // decoder.cpp's own BSAP call site likewise sits right after its NBT-NS
+                            // block.
     };
     return order;
 }
