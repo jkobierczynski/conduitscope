@@ -9615,3 +9615,130 @@ pre-existing test suite, which is what caught the two real false-positive
 collisions described above before they ever reached a delivered build.
 See `include/conduitscope/attack_detect.hpp`'s file header for the full
 writeup.
+
+### CODESYS V3 (3S-Smart/CODESYS GmbH's PLC runtime protocol) -- TCP ports 11740/1217 (Block Driver-framed), UDP ports 1740-1743 (unframed)
+
+Jurgen asked "Can you add CODESYS?" -- a bare request naming a PLC
+programming/runtime protocol used by dozens of PLC vendors under license
+(WAGO, Festo, Eaton, Berghof, and many more), not a single vendor's own
+proprietary format. Two AskUserQuestion scoping decisions were made before
+any code was written: **V3 only** -- CODESYS V2 (legacy, TCP port 1200)
+has only a port number and an Nmap discovery script publicly available, no
+wire-format documentation, unlike V3's two independent, corroborating
+sources; and **structural-only beyond CmpDevice's own Login/AUTH
+exchange** -- every other CODESYS service (CmpApp, CmpFileTransfer,
+CmpIecVarAccess, CmpUserMgr, etc.) is decoded structurally only
+(component/command named where confirmed, payload reported as a byte
+count only, never value-decoded), explicitly declined in favor of a
+"best-effort generic tag walk" alternative that was also offered.
+
+**Sourcing**: two independent, mutually corroborating sources (neither a
+vendor spec, since none is publicly available) -- a public Wireshark Lua
+dissector, `github.com/fridgebuyer/codesys3-dissector`, whose real working
+parse code gives byte-exact field offsets; and Kaspersky ICS-CERT's own
+published reverse-engineering research, "Security research: CODESYS
+Runtime, a PLC control framework" (Alexander Nochvay, parts 1-2), which
+independently names the same four-layer architecture, magic numbers,
+channel command IDs, and component names, plus the one specific worked
+example (the Login/AUTH tag layout) this decoder's payload scope relies
+on.
+
+**Wire format**, four layers, all multi-byte fields little-endian unless
+noted: **Block Driver** (TCP only, 8 bytes -- a fixed magic plus a Length
+field covering the entire message including these 8 header bytes, ceiling
+520 bytes per Kaspersky). **Datagram/Router** (6-byte fixed header --
+Magic (must be exactly `0xC5`), Hops and PacketParams shown raw since the
+two sources disagree on their bit-level semantics, ServiceId (one of
+"Address Service"/"Name Service"/"Channel Service"), MessageId shown raw,
+AddressLengths (must be exactly one of two valid combinations) -- plus 14
+bytes of sender/receiver addresses; a 6-byte address decodes as
+`ip:port`, confirmed against Kaspersky's own worked example, an 8-byte
+address's extra 2 bytes are unconfirmed and shown raw). **Channel** (only
+entered when ServiceId is Channel Service; 20 bytes -- named CommandId
+values GET_INFO/OPEN_CHANNEL/OPEN_CHANNEL response/CLOSE_CHANNEL/BLK/ACK/
+KEEPALIVE, Flags shown raw since the two sources disagree on where the
+request/response bit lives, plus ChannelId/BlkNum/AckNum/
+RemainingDataSize, Checksum shown raw -- CRC32 per Kaspersky but the
+polynomial is unconfirmed). **Services** (only attempted on a BLK command
+whose channel payload's first 20 bytes structurally validate -- ProtocolId
+must read back as exactly the unencrypted or the SecureProtocol/encrypted
+constant; 20-byte header -- ComponentId (CmpDevice/CmpApp/
+CmpFileTransfer/CmpIecVarAccess/CmpUserMgr/CmpTraceMgr/CmpMonitor2 named,
+others shown as a raw number), CommandId (deliberately renamed from the
+two sources' own colliding field names for "component" vs. "command"),
+SessionId, PayloadSize, AdditionalData shown raw). Only one
+(ComponentId,CommandId) pair is named: CmpDevice's Login (AUTH), confirmed
+by both sources independently.
+
+**Payload decode scope**: the payload is a flat tag-length-value sequence
+(both tag ID and length are 7-bit-per-byte, LSB-first, continuation-bit
+varints, confirmed directly from the dissector's own parse functions).
+This decoder walks the top-level tag sequence for every Services message
+but interprets tag *values* only for Login/AUTH: the username tag is
+rendered as text, the password tag is never rendered (presence/length
+only, matching this codebase's own NL_TRUST_PASSWORD/SAMR-style
+never-render-credential-bytes convention, regardless of Kaspersky calling
+it "encrypted"), and the session-ID tag is read as a 4-byte integer. A
+self-caught correctness fix, added proactively rather than requested: when
+ProtocolId indicates genuine SecureProtocol encryption, the AUTH tag-walk
+is skipped entirely (a note is added instead) since tag-walking ciphertext
+would misinterpret it as plausible-but-meaningless structure.
+
+**Structural validation, not state-tracked reassembly**: the Channel
+layer's BlkNum/AckNum/RemainingDataSize fields exist to span a larger
+transfer across multiple BLK frames, and this decoder does not track that
+reassembly (stateless -- every packet is decoded independently, no
+`DecoderFlowState`). Blindly re-parsing every BLK frame's channel payload
+as a fresh Services header would misdecode a continuation block; this is
+avoided by only accepting a Services header once ProtocolId reads back as
+one of its two valid values, otherwise falling through to a "channel
+payload present, not decoded as a fresh Services message" note rather
+than a wrong summary stated with false confidence.
+
+**Detection/dispatch gate strength**: TCP is tried opportunistically,
+gated by the Block Driver layer's exact 4-byte magic plus a Length
+cross-check, comparable in strength to TwinCAT's own AMS/TCP Data Length
+cross-check. UDP is also tried opportunistically, not port-gated -- three
+independently-constrained fields (exact Magic, ServiceId one of five
+values, AddressLengths exactly one of two values) make a random 6-byte
+prefix passing all three by chance astronomically unlikely, the same
+multi-field-confidence reasoning EtherNet/IP's own three independent
+checks already establish in this codebase.
+
+**Explicitly out of scope**: CODESYS V2 (no public wire-format
+documentation found); any payload decode past CmpDevice's own Login/AUTH
+exchange (a deliberate scoping decision, not a gap); multi-block transfer
+reassembly across BLK frames; the Channel layer's Flags-byte bit
+semantics and Checksum polynomial (both sources disagree or are silent);
+and, as ever, any CODESYS field this decoder does not name above.
+
+**Honestly stated validation gap**: `tests/sample_codesys.pcap`
+(`build_codesys_sample`) is entirely synthetic -- no real CODESYS V3
+capture of any kind was available. If a real capture becomes available
+later, this note should be updated accordingly.
+
+Validated against `tests/sample_codesys.pcap`: OPEN_CHANNEL request/
+response; a Login/AUTH request with the username decoded and the password
+never rendered (checked both in text and JSON output, including that the
+raw password bytes never leak into either); a Login/AUTH response with
+the new session ID decoded; a CmpApp command with a component name but an
+unrecognized command ID, decoded structurally only; a BLK frame whose
+channel payload does not structurally validate as a fresh Services header
+(simulating a multi-block continuation), falling back to the documented
+note; a non-standard TCP port note, and `--codesys-port` suppressing it; a
+TCP negative control falling through cleanly to generic `[tcp]`; a UDP
+Address Service datagram; a UDP Channel Service GET_INFO on a standard
+and a non-standard port; and a UDP negative control falling through
+cleanly to generic `[udp]` (this negative control's own payload was
+changed once, during this same verification pass, from arbitrary binary
+bytes to an ASCII string, after the binary bytes were found to
+accidentally collide with HART-IP's own unrelated port-independent UDP
+gate -- CODESYS itself correctly declined the bytes, but the fixture's
+own intent of a clean generic fall-through needed different bytes to
+demonstrate). Every case was decoded and inspected in `--format text -v`,
+`--format json`, and `--stats` BEFORE the `CMakeLists.txt` `codesys_*`
+test family reading it was written, the same verification discipline
+every prior protocol addition in this codebase has been held to -- and
+the full suite passed with zero regressions in both the default and
+`-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF` configs. See
+`include/conduitscope/codesys.hpp`'s file header for the full writeup.

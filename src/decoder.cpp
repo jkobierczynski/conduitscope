@@ -485,6 +485,8 @@ bool Decoder::reassemble_tcp_payload(const TcpSegment& tcp, const std::string& f
                       options_.protocol_filter == ProtocolFilter::DcomOnly;
     bool want_ge_srtp = options_.protocol_filter == ProtocolFilter::Auto ||
                          options_.protocol_filter == ProtocolFilter::GeSrtpOnly;
+    bool want_codesys = options_.protocol_filter == ProtocolFilter::Auto ||
+                         options_.protocol_filter == ProtocolFilter::CodesysOnly;
 
     // OPC UA is checked first of all: its own structural detection gate (the leading 3 bytes must
     // be one of exactly 7 fixed ASCII MessageType strings -- "HEL"/"ACK"/"ERR"/"RHE"/"OPN"/"CLO"/
@@ -809,6 +811,19 @@ bool Decoder::reassemble_tcp_payload(const TcpSegment& tcp, const std::string& f
         if (auto d = mqtt_decoder().tcp_declared_length(candidate)) {
             declared = d;
             which = "MQTT packet";
+        }
+    }
+    // CODESYS V3 (Block Driver-framed TCP), tried right after MQTT and before FF-HSE -- its own
+    // structural detection gate (a 4-byte exact magic, E8 17 01 00, plus a cross-checked Length
+    // field bounded to [8, 520]) is a strong, TwinCAT-AMS/TCP-strength two-independently-
+    // constrained-field check, so it is tried well ahead of FF-HSE's own genuinely weak single-byte
+    // gate -- see codesys.hpp's file header comment for the wire format and full collision
+    // reasoning (no specific byte-for-byte collision with any protocol above was found during this
+    // decoder's own scoping).
+    if (!declared && want_codesys) {
+        if (auto d = codesys_tcp_decoder().tcp_declared_length(candidate)) {
+            declared = d;
+            which = "CODESYS V3 (Block Driver/TCP)";
         }
     }
     // FF-HSE is tried LAST of all, even after MQTT -- its own structural detection gate is a
@@ -1329,6 +1344,48 @@ DecodedPacket Decoder::decode_ip_payload(DecodedPacket out, uint8_t protocol, By
                             std::to_string(udp.dst_port) +
                             ", which is not a configured/standard CC-Link IE port (61450 cyclic, "
                             "61451 node search/set IP address)");
+                    }
+                    return out;
+                }
+            }
+
+            // CODESYS V3 over UDP (ports 1740-1743, all four sharing identical Datagram/Router-
+            // layer framing -- no Block Driver header at all on this transport), tried right after
+            // CC-Link IE -- its own three-independently-constrained-field Datagram-layer header
+            // (exact Magic 0xC5, ServiceId one of five values, AddressLengths exactly 0x43/0x34) is
+            // a comparably strong opportunistic gate, and no byte-for-byte collision with CC-Link
+            // IE, MELSEC, FINS, BACnet, or any protocol tried below was found during this decoder's
+            // own scoping -- see codesys.hpp's file header comment for the wire format and full
+            // collision reasoning.
+            bool want_codesys_udp = options_.protocol_filter == ProtocolFilter::Auto ||
+                                     options_.protocol_filter == ProtocolFilter::CodesysOnly;
+            if (want_codesys_udp) {
+                DecodeContext ctx;
+                ctx.packet_index = index;
+                ctx.protocol_id = "codesys";
+                ctx.flow_states = &registry_flow_state_;
+                if (auto result = codesys_udp_decoder().decode(udp.payload, ctx)) {
+                    const CodesysFrame& cf = result->as<CodesysFrame>();
+                    out.protocol = "codesys";
+                    out.summary = cf.summary;
+                    for (const auto& n : cf.notes) out.notes.push_back(n);
+                    out.result = *result;
+
+                    bool expected_port =
+                        port_in(udp.src_port, CODESYS_UDP_PORT_0, options_.extra_codesys_ports) ||
+                        port_in(udp.dst_port, CODESYS_UDP_PORT_0, options_.extra_codesys_ports) ||
+                        port_in(udp.src_port, CODESYS_UDP_PORT_1, options_.extra_codesys_ports) ||
+                        port_in(udp.dst_port, CODESYS_UDP_PORT_1, options_.extra_codesys_ports) ||
+                        port_in(udp.src_port, CODESYS_UDP_PORT_2, options_.extra_codesys_ports) ||
+                        port_in(udp.dst_port, CODESYS_UDP_PORT_2, options_.extra_codesys_ports) ||
+                        port_in(udp.src_port, CODESYS_UDP_PORT_3, options_.extra_codesys_ports) ||
+                        port_in(udp.dst_port, CODESYS_UDP_PORT_3, options_.extra_codesys_ports);
+                    if (!expected_port) {
+                        out.notes.push_back(
+                            "seen on UDP port " + std::to_string(udp.src_port) + "->" +
+                            std::to_string(udp.dst_port) +
+                            ", which is not a configured/standard CODESYS UDP port "
+                            "(1740-1743)");
                     }
                     return out;
                 }
@@ -2400,6 +2457,8 @@ DecodedPacket Decoder::decode_ip_payload(DecodedPacket out, uint8_t protocol, By
                           options_.protocol_filter == ProtocolFilter::DcomOnly;
         bool want_ge_srtp = options_.protocol_filter == ProtocolFilter::Auto ||
                              options_.protocol_filter == ProtocolFilter::GeSrtpOnly;
+        bool want_codesys = options_.protocol_filter == ProtocolFilter::Auto ||
+                             options_.protocol_filter == ProtocolFilter::CodesysOnly;
 
         // Tried first of all -- see the matching, fuller comment in reassemble_tcp_payload above
         // for why OPC UA's own magic-string detection gate is strong enough, and non-colliding
@@ -3256,6 +3315,37 @@ DecodedPacket Decoder::decode_ip_payload(DecodedPacket out, uint8_t protocol, By
                     out.notes.push_back("seen on TCP port " + std::to_string(tcp.src_port) + "->" +
                                          std::to_string(tcp.dst_port) +
                                          ", which is not a configured/standard MQTT port (1883)");
+                }
+                return out;
+            }
+        }
+
+        // CODESYS V3 (Block Driver/TCP), tried right after MQTT and before FF-HSE -- see the
+        // matching, fuller comment in reassemble_tcp_payload above for the collision reasoning.
+        // Both TCP ports (11740 CmpChannelServer, 1217 CmpRouter gateway protocol) carry the
+        // identical wire format, so this one decoder recognizes either. See codesys.hpp/codesys.cpp.
+        if (want_codesys) {
+            DecodeContext ctx;
+            ctx.packet_index = index;
+            ctx.protocol_id = "codesys";
+            ctx.flow_states = &registry_flow_state_;
+            if (auto codesys_result = codesys_tcp_decoder().decode(effective_payload, ctx)) {
+                const CodesysFrame& cf = codesys_result->as<CodesysFrame>();
+                out.protocol = "codesys";
+                out.summary = cf.summary;
+                for (const auto& n : cf.notes) out.notes.push_back(n);
+                out.result = *codesys_result;
+
+                bool expected_port =
+                    port_in(tcp.src_port, CODESYS_TCP_PORT, options_.extra_codesys_ports) ||
+                    port_in(tcp.dst_port, CODESYS_TCP_PORT, options_.extra_codesys_ports) ||
+                    port_in(tcp.src_port, CODESYS_GATEWAY_TCP_PORT, options_.extra_codesys_ports) ||
+                    port_in(tcp.dst_port, CODESYS_GATEWAY_TCP_PORT, options_.extra_codesys_ports);
+                if (!expected_port) {
+                    out.notes.push_back("seen on TCP port " + std::to_string(tcp.src_port) + "->" +
+                                         std::to_string(tcp.dst_port) +
+                                         ", which is not a configured/standard CODESYS port "
+                                         "(11740, 1217)");
                 }
                 return out;
             }

@@ -18,6 +18,7 @@
 #include "conduitscope/byteio.hpp"
 #include "conduitscope/can_socketcan.hpp"
 #include "conduitscope/cclink_ie.hpp"
+#include "conduitscope/codesys.hpp"
 #include "conduitscope/cotp.hpp"
 #include "conduitscope/dcom.hpp"
 #include "conduitscope/devicenet.hpp"
@@ -242,6 +243,17 @@ enum class ProtocolFilter {
                            // opportunistically on every UDP port in Auto mode, joining MELSEC's
                            // own UDP path on that gate -- and deliberately dispatched BEFORE it,
                            // see cclink_ie.hpp's own "DISPATCH ORDER" section).
+    CodesysOnly,           // only attempt CODESYS V3 (3S-Smart/CODESYS GmbH's PLC runtime protocol,
+                           // ridden by dozens of vendors -- TCP ports 11740/1217, UDP ports
+                           // 1740-1743) decoding -- see codesys.hpp. A brand-new protocol built
+                           // entirely on the ProtocolDecoder interface from inception like TwinCAT/
+                           // MELSEC/FINS/BSAP/CC-Link IE. TCP side is GateKind::TcpPortIndependent
+                           // (a strong 4-byte Block Driver magic); UDP side is
+                           // GateKind::UdpPortIndependent (a three-independently-constrained-field
+                           // Datagram-layer header, the same multi-field-confidence reasoning
+                           // CC-Link IE's own UDP path already uses) -- both tried opportunistically
+                           // in Auto mode, joining CC-Link IE on both gates. See codesys.hpp's own
+                           // DETECTION / DISPATCH paragraph.
 };
 
 struct DecodeOptions {
@@ -372,6 +384,18 @@ struct DecodeOptions {
                                                   // exclusive IP protocol number (2, 112, 9, 103,
                                                   // 88, and 89 respectively), which is a strong
                                                   // signal with no port concept.
+    std::vector<uint16_t> extra_codesys_ports;  // TCP (11740/1217) AND UDP (1740-1743) -- one
+                                                  // shared list covers both transports, the same
+                                                  // "one list, two ports/port-sets, different
+                                                  // defaults" shape extra_melsec_ports/
+                                                  // extra_ffhse_ports already established. UNLIKE
+                                                  // extra_bsap_ports above, this does NOT gate
+                                                  // detection on either transport (CODESYS is
+                                                  // TcpPortIndependent/UdpPortIndependent, tried
+                                                  // opportunistically in Auto mode, joining CC-Link
+                                                  // IE's own posture) -- only widens which port(s)
+                                                  // count as "expected" for the not-a-standard-port
+                                                  // note. See codesys.hpp.
     // One shared list across all five Tier 1 "IT protocols an OT auditor flags" protocols (RDP/
     // VNC/TeamViewer/AnyDesk/Zoom -- see it_protocols.hpp), the same "one feature toggle" grouping
     // extra_ffhse_ports already established. Gates detection for RDP's COTP-based check and for

@@ -14902,6 +14902,199 @@ def build_attack_detect_sample():
     (TESTS_DIR / "sample_attack_detect.pcap").write_bytes(data)
 
 
+# --- CODESYS V3 (codesys.hpp) -----------------------------------------------------------------
+# See codesys.hpp's own file header comment for the full wire format and sourcing. Jurgen asked
+# "can you add CODESYS?" -- scoped with him beforehand via two AskUserQuestion prompts (V3 only,
+# not legacy V2; structural-only beyond CmpDevice's own Login/AUTH exchange).
+
+CODESYS_DATAGRAM_MAGIC = 0xC5
+
+
+def codesys_varint(v: int) -> bytes:
+    """The 7-bit-per-byte, LSB-first, continuation-bit(0x80) varint both a CODESYS tag ID and its
+    length use -- see codesys.hpp's own PAYLOAD DECODE SCOPE paragraph."""
+    out = bytearray()
+    while True:
+        b = v & 0x7F
+        v >>= 7
+        if v:
+            out.append(b | 0x80)
+        else:
+            out.append(b)
+            break
+    return bytes(out)
+
+
+def codesys_tag(tag_id: int, value: bytes) -> bytes:
+    return codesys_varint(tag_id) + codesys_varint(len(value)) + value
+
+
+def codesys_addr6(ip: str, port: int) -> bytes:
+    """A 6-byte Datagram-layer address: Port(2, big-endian) + IPv4(4, network-order) -- the one
+    shape this decoder actually decodes (see codesys.hpp's own DATAGRAM/ROUTER LAYER paragraph)."""
+    return struct.pack("!H", port) + bytes(int(o) for o in ip.split("."))
+
+
+def codesys_addr8(ip: str, port: int) -> bytes:
+    """An 8-byte Datagram-layer address: the same 6 bytes plus 2 more this decoder does not
+    interpret (shown as raw hex only) -- padded with an arbitrary, non-zero pair so the fixture
+    doesn't accidentally look like a truncated 6-byte address."""
+    return codesys_addr6(ip, port) + b"\xAB\xCD"
+
+
+def codesys_l3(service_id: int, sender: bytes, receiver: bytes, hops: int = 0,
+               packet_params: int = 0, message_id: int = 0, address_lengths: int = 0x43) -> bytes:
+    return struct.pack("<BBBBBB", CODESYS_DATAGRAM_MAGIC, hops, packet_params, service_id,
+                        message_id, address_lengths) + sender + receiver
+
+
+def codesys_channel(command_id: int, flags: int, channel_id: int, blk_num: int, ack_num: int,
+                     payload: bytes = b"", checksum: int = 0) -> bytes:
+    return struct.pack("<BBHIIII", command_id, flags, channel_id, blk_num, ack_num,
+                        len(payload), checksum) + payload
+
+
+def codesys_services(protocol_id: int, component_id: int, command_id: int, session_id: int,
+                      payload: bytes = b"", header_size: int = 20, additional_data: int = 0) -> bytes:
+    return struct.pack("<HHHHIII", protocol_id, header_size, component_id, command_id, session_id,
+                        len(payload), additional_data) + payload
+
+
+def codesys_block_driver(body: bytes) -> bytes:
+    return struct.pack("<II", 0x000117E8, 8 + len(body)) + body
+
+
+def build_codesys_sample():
+    """CODESYS V3 (3S-Smart/CODESYS GmbH's PLC runtime protocol) -- TCP ports 11740/1217 (Block
+    Driver-framed), UDP ports 1740-1743 (no Block Driver framing). See codesys.hpp's own file
+    header comment for the full four-layer wire format, sourcing (a public Wireshark dissector
+    plus Kaspersky ICS-CERT's own reverse-engineering research), and the two AskUserQuestion
+    scoping decisions (V3 only; structural-only beyond CmpDevice's own Login/AUTH exchange).
+
+    TCP session (HMI_IP:53000 <-> PLC_IP:11740), 8 messages:
+      1-2) OPEN_CHANNEL request/response -- channel-management, no Services layer at all.
+      3) Login/AUTH request (BLK, CmpDevice::Login) carrying tag 0x81 -> {0x10 username="engineer",
+         0x11 password (never rendered)}.
+      4) Login/AUTH response carrying top-level tag 0x21 (new session ID).
+      5) CmpApp (component known) with an unrecognized command ID -- structural-only: component
+         named, command shown as a raw number, payload byte count only, no tag-walk attempted.
+      6) A BLK frame whose channel payload does NOT structurally validate as a fresh Services
+         header (simulates a multi-block transfer's own continuation block) -- must fall back to
+         the "not decoded as a fresh Services message" note, not garbage field values.
+      7) The same OPEN_CHANNEL request shape again, but on a non-standard TCP port (22222, not
+         11740/1217) -- exercises the "not a configured/standard CODESYS port" note.
+    Then, on a fresh TCP session on port 11740 again: 8) a NEGATIVE CONTROL -- an ordinary TCP
+    payload that does NOT start with the Block Driver magic at all -- must fall through cleanly to
+    generic [tcp], not be misclaimed as codesys.
+
+    UDP (no Block Driver framing), 4 datagrams:
+      9) Address Service (ServiceId=1) -- Datagram/Router layer only, no Channel layer at all.
+      10) Channel Service GET_INFO (command ID 0xC2) on the standard port 1741.
+      11) The same GET_INFO shape again, but on a non-standard UDP port (7777, not 1740-1743).
+      12) NEGATIVE CONTROL -- a UDP/1740 payload whose first byte is NOT the 0xC5 Datagram magic --
+          must fall through cleanly to generic [udp]."""
+    packets = []
+
+    def add_tcp(payload: bytes, sport: int, dport: int, seq: int, ack: int, from_hmi: bool,
+                ident: int):
+        tcp = tcp_header(sport, dport, seq, ack, TCP_PSH | TCP_ACK, len(payload)) + payload
+        src_ip, dst_ip = (HMI_IP, PLC_IP) if from_hmi else (PLC_IP, HMI_IP)
+        src_mac, dst_mac = (HMI_MAC, PLC_MAC) if from_hmi else (PLC_MAC, HMI_MAC)
+        ip = ipv4_header(src_ip, dst_ip, 6, len(tcp), ident) + tcp
+        packets.append(eth_header(dst_mac, src_mac, 0x0800) + ip)
+
+    def add_udp(payload: bytes, sport: int, dport: int, from_hmi: bool = True):
+        if from_hmi:
+            packets.append(udp_ip_eth_frame(payload, sport, dport, HMI_IP, PLC_IP, HMI_MAC, PLC_MAC))
+        else:
+            packets.append(udp_ip_eth_frame(payload, sport, dport, PLC_IP, HMI_IP, PLC_MAC, HMI_MAC))
+
+    seq_c, seq_s = 1000, 9000
+    ident = 0x6000
+
+    def client(body: bytes, sport: int = 53000, dport: int = 11740):
+        nonlocal seq_c, ident
+        frame = codesys_block_driver(body)
+        add_tcp(frame, sport, dport, seq_c, seq_s, True, ident)
+        seq_c += len(frame)
+        ident += 1
+
+    def server(body: bytes, sport: int = 11740, dport: int = 53000):
+        nonlocal seq_s, ident
+        frame = codesys_block_driver(body)
+        add_tcp(frame, sport, dport, seq_s, seq_c, False, ident)
+        seq_s += len(frame)
+        ident += 1
+
+    # 1) & 2) OPEN_CHANNEL request/response -- no Services layer.
+    client(codesys_l3(0x40, codesys_addr6(HMI_IP, 53000), codesys_addr8(PLC_IP, 11740)) +
+           codesys_channel(0xC3, 0x81, channel_id=1, blk_num=0, ack_num=0))
+    server(codesys_l3(0x40, codesys_addr6(PLC_IP, 11740), codesys_addr8(HMI_IP, 53000)) +
+           codesys_channel(0x83, 0x01, channel_id=1, blk_num=0, ack_num=1))
+
+    # 3) Login/AUTH request -- username decoded, password never rendered.
+    auth_req_tags = codesys_tag(0x10, b"engineer") + codesys_tag(0x11, b"s3cr3t-pw!")
+    auth_req_payload = codesys_tag(0x81, auth_req_tags)
+    auth_req_services = codesys_services(0xCD55, component_id=1, command_id=2, session_id=0,
+                                          payload=auth_req_payload)
+    client(codesys_l3(0x40, codesys_addr6(HMI_IP, 53000), codesys_addr8(PLC_IP, 11740)) +
+           codesys_channel(0x01, 0x81, channel_id=1, blk_num=1, ack_num=1,
+                            payload=auth_req_services))
+
+    # 4) Login/AUTH response -- new session ID (tag 0x21).
+    auth_resp_payload = codesys_tag(0x21, struct.pack("<I", 0x4A3B2C1D))
+    auth_resp_services = codesys_services(0xCD55, component_id=1, command_id=2, session_id=0,
+                                           payload=auth_resp_payload)
+    server(codesys_l3(0x40, codesys_addr6(PLC_IP, 11740), codesys_addr8(HMI_IP, 53000)) +
+           codesys_channel(0x01, 0x01, channel_id=1, blk_num=2, ack_num=2,
+                            payload=auth_resp_services))
+
+    # 5) CmpApp, unrecognized command ID -- structural-only.
+    app_services = codesys_services(0xCD55, component_id=2, command_id=5, session_id=0x4A3B2C1D,
+                                     payload=b"\x01\x02\x03\x04")
+    client(codesys_l3(0x40, codesys_addr6(HMI_IP, 53000), codesys_addr8(PLC_IP, 11740)) +
+           codesys_channel(0x01, 0x81, channel_id=1, blk_num=3, ack_num=2, payload=app_services))
+
+    # 6) BLK frame whose channel payload does not validate as a fresh Services header (simulated
+    #    multi-block continuation).
+    server(codesys_l3(0x40, codesys_addr6(PLC_IP, 11740), codesys_addr8(HMI_IP, 53000)) +
+           codesys_channel(0x01, 0x01, channel_id=1, blk_num=4, ack_num=3,
+                            payload=b"\xDE\xAD\xBE\xEF" * 6))
+
+    # 7) OPEN_CHANNEL request again, on a non-standard TCP port (22222).
+    client(codesys_l3(0x40, codesys_addr6(HMI_IP, 53001), codesys_addr8(PLC_IP, 22222)) +
+           codesys_channel(0xC3, 0x81, channel_id=2, blk_num=0, ack_num=0),
+           sport=53001, dport=22222)
+
+    # 8) NEGATIVE CONTROL: an ordinary TCP payload with no Block Driver magic at all.
+    add_tcp(b"NOT-CODESYS-TRAFFIC-AT-ALL", 53002, 11740, 2000, 8000, True, ident)
+    ident += 1
+
+    # 9) UDP Address Service -- Datagram/Router layer only.
+    add_udp(codesys_l3(1, codesys_addr6(HMI_IP, 0), codesys_addr8(PLC_IP, 0)), 1740, 1740)
+
+    # 10) UDP Channel Service GET_INFO, standard port 1741.
+    add_udp(codesys_l3(0x40, codesys_addr6(HMI_IP, 1741), codesys_addr8(PLC_IP, 1741)) +
+            codesys_channel(0xC2, 0x80, channel_id=7, blk_num=0, ack_num=0), 1741, 1741)
+
+    # 11) The same GET_INFO shape, on a non-standard UDP port (7777).
+    add_udp(codesys_l3(0x40, codesys_addr6(HMI_IP, 7777), codesys_addr8(PLC_IP, 7777)) +
+            codesys_channel(0xC2, 0x80, channel_id=8, blk_num=0, ack_num=0), 7777, 7777)
+
+    # 12) NEGATIVE CONTROL: UDP/1740 payload not starting with the 0xC5 Datagram magic. Uses an
+    #     ASCII payload (matching packet 8's own TCP negative control style) rather than arbitrary
+    #     binary bytes, specifically to avoid an accidental structural collision with another
+    #     port-independent UDP decoder (e.g. HART-IP's own 8-byte header gate) -- this negative
+    #     control's whole point is a clean fall-through to generic [udp], not a coincidental
+    #     mis-claim by some *other* protocol's decoder.
+    add_udp(b"NOT-CODESYS-UDP-TRAFFIC-AT-ALL!", 1740, 1740)
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_250_000 + i, i * 1000)
+    (TESTS_DIR / "sample_codesys.pcap").write_bytes(data)
+
+
 if __name__ == "__main__":
     TESTS_DIR.mkdir(exist_ok=True)
     build_modbus_sample()
@@ -14988,4 +15181,5 @@ if __name__ == "__main__":
     build_bsap_sample()
     build_cclink_ie_sample()
     build_attack_detect_sample()
+    build_codesys_sample()
     print("wrote sample fixtures to", TESTS_DIR)

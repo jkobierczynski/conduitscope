@@ -368,6 +368,14 @@ private:
     std::map<std::string, size_t> pim_type_counts_;      // keyed by pim_type_name
     std::map<std::string, size_t> eigrp_opcode_counts_;  // keyed by eigrp_opcode_name
     std::map<std::string, size_t> ospf_type_counts_;     // keyed by ospf_type_name
+    // CODESYS's own breakdown (codesys.hpp) -- one counter per named channel command (GET_INFO/
+    // OPEN_CHANNEL/.../BLK/ACK/KEEPALIVE), plus how many Login/AUTH exchanges carried a decoded
+    // username. Deliberately no per-component/per-command breakdown beyond this -- see codesys.hpp's
+    // own SCOPING paragraph for why every component/command besides CmpDevice's own Login/AUTH is
+    // structural-only.
+    std::map<std::string, size_t> codesys_channel_command_counts_;  // keyed by channel command name
+                                                                      // (or "0xNN" when unnamed)
+    size_t codesys_auth_username_count_ = 0;
     bool has_ts_ = false;
     double first_ts_ = 0.0, last_ts_ = 0.0;
 };

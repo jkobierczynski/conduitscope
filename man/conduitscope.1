@@ -201,6 +201,17 @@ false\-positive collisions against the existing BACnet and
 HART\-IP/SAMR\-LSARPC fixtures were found and fixed while building this
 feature; see \fBdocs/PROTOCOL_COVERAGE.md\fR's Attack Detection section for
 the full writeup,
+plus CODESYS V3 (3S\-Smart/CODESYS GmbH's PLC runtime protocol, licensed
+to dozens of PLC vendors including WAGO, Festo, and Eaton \-\- TCP ports
+11740/1217 Block Driver\-framed, UDP ports 1740\-1743 unframed), decoding
+the full four\-layer wire format (Block Driver, Datagram/Router, Channel,
+Services) and CmpDevice's own Login/AUTH exchange in full (username
+rendered, password NEVER rendered, matching this tool's own
+never\-render\-credential\-bytes convention), with every other CODESYS
+service deliberately structural\-only (component/command named, payload
+byte count only) by Jurgen's own explicit choice; CODESYS V2 is out of
+scope, no public wire\-format documentation found for it; see
+\fBdocs/PROTOCOL_COVERAGE.md\fR's CODESYS section for the full writeup,
 plus PROFINET RT (EtherType 0x8892, DCP device discovery/configuration and
 cyclic real-time IO), IEC 61850-8-1 GOOSE (EtherType 0x88B8, ASN.1
 BER-encoded GOOSE PDU), IEC 61850-9-2 Sampled Values (EtherType 0x88BA,
@@ -384,7 +395,7 @@ regardless of where it's being analyzed \-\- an extension beyond what
 tshark/tcpdump themselves offer. See \fBdocs/USER_GUIDE.md\fR's OUTPUT
 FORMATS "Timestamps" subsection.
 .TP
-.B \-\-protocol {auto,modbus,dnp3,iec104,s7comm,s7comm\-plus,mms,enip,twincat,melsec,fins,bgp,kerberos,ldap,smb,profinet,goose,sv,ethercat,stp,devicenet,bacnet,hartip,opcua,mqtt,ff\-hse,dns,mdns,llmnr,nbns,doh,rip,igmp,vrrp,hsrp,igrp,pim,eigrp,ospf,remote\-access,lateral\-movement,enterprise\-trust,eapol,wireless\-backhaul,pppoe,tunnel\-vpn,mpls,arp,lldp,slow\-protocols,winrm,dcom,ge\-srtp,bsap,cclink\-ie}
+.B \-\-protocol {auto,modbus,dnp3,iec104,s7comm,s7comm\-plus,mms,enip,twincat,melsec,fins,bgp,kerberos,ldap,smb,profinet,goose,sv,ethercat,stp,devicenet,bacnet,hartip,opcua,mqtt,ff\-hse,dns,mdns,llmnr,nbns,doh,rip,igmp,vrrp,hsrp,igrp,pim,eigrp,ospf,remote\-access,lateral\-movement,enterprise\-trust,eapol,wireless\-backhaul,pppoe,tunnel\-vpn,mpls,arp,lldp,slow\-protocols,winrm,dcom,ge\-srtp,bsap,cclink\-ie,codesys}
 Restrict decoding to one protocol. Default: auto (tries all fourteen TCP
 protocols, independent of port number, plus CIP I/O, BACnet/IP, HART-IP, and
 FF-HSE on every
@@ -725,6 +736,17 @@ already tried opportunistically on every UDP port in \fBauto\fR mode (its
 own command\-code gate is what prevents false positives); this option only
 widens the ports annotated with a "non\-standard port" note when traffic
 is recognized on a port other than the two built\-in defaults.
+.TP
+.B \-\-codesys\-port \fIPORT\fR
+Same as \fB\-\-dns\-port\fR, for CODESYS V3 (built\-in defaults: 11740/1217
+TCP, Block Driver\-framed; 1740\-1743 UDP, unframed; see
+\fBdocs/PROTOCOL_COVERAGE.md\fR's CODESYS section). Repeatable. Unlike
+most \fB\-\-*\-port\fR options, this does NOT gate detection \-\- CODESYS is
+already tried opportunistically on every TCP and UDP port in \fBauto\fR
+mode (its own magic\-number/length gates are what prevent false
+positives), the same posture as \fB\-\-cclink\-ie\-port\fR; this option only
+widens the ports annotated as expected rather than flagged as
+non\-standard.
 .TP
 .B \-\-flood\-threshold \fIN\fR
 Per\-destination packet count (summed across the whole capture, not a

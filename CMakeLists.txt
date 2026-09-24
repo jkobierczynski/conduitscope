@@ -115,6 +115,7 @@ add_library(conduitscope_core STATIC
   src/ge_srtp.cpp
   src/bsap.cpp
   src/cclink_ie.cpp
+  src/codesys.cpp
   src/protocol_registry.cpp
   src/resource_limits.cpp
   src/decoder.cpp
@@ -11428,3 +11429,124 @@ add_test(NAME attack_detect_json_fields
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_attack_detect.pcap" --format json)
 set_tests_properties(attack_detect_json_fields PROPERTIES
   PASS_REGULAR_EXPRESSION "\"src_ip\": \"192\\.168\\.1\\.77\",\n *\"dst_ip\": \"192\\.168\\.1\\.77\",\n *\"src_port\": 4444,\n *\"dst_port\": 4444,.*\"notes\": \\[\"LAND attack: TCP SYN with identical source and destination \\(192\\.168\\.1\\.77:4444\\)")
+
+# codesys.hpp/.cpp -- CODESYS V3 (3S-Smart/CODESYS GmbH's PLC runtime protocol), added at Jurgen's
+# request. See codesys.hpp's own file header for the full sourcing (a public Wireshark dissector
+# plus Kaspersky ICS-CERT's own reverse-engineering research), scoping (decided via
+# AskUserQuestion: V3 only, structural-only beyond CmpDevice's own Login/AUTH exchange), and wire
+# format writeup. sample_codesys.pcap (build_codesys_sample, tools/make_sample_pcap.py) carries 8
+# TCP messages (OPEN_CHANNEL req/resp, Login/AUTH req/resp, a structural-only CmpApp command, a
+# non-validating BLK continuation-block fallback, a non-standard-port variant, and a negative
+# control) plus 4 UDP datagrams (Address Service, Channel Service GET_INFO on a standard and a
+# non-standard port, and a negative control).
+add_test(NAME codesys_tcp_open_channel_request_and_response
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_codesys.pcap" --format text -v)
+set_tests_properties(codesys_tcp_open_channel_request_and_response PROPERTIES
+  PASS_REGULAR_EXPRESSION "#1  [^\n]*\\[codesys\\]  CODESYS TCP Channel Service; channel OPEN_CHANNEL ch=1[^\n]*\n#2  [^\n]*\\[codesys\\]  CODESYS TCP Channel Service; channel OPEN_CHANNEL response ch=1")
+
+# Login/AUTH request: username decoded, password field NEVER rendered (presence/length only),
+# regardless of Kaspersky's own "encrypted" characterization -- mirrors this codebase's own
+# NL_TRUST_PASSWORD/SAMR-style never-render-credential-bytes convention. FAIL_REGULAR_EXPRESSION
+# checks the raw password bytes never leak into the text output in any form.
+add_test(NAME codesys_tcp_login_auth_username_decoded_password_never_rendered
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_codesys.pcap" --format text -v)
+set_tests_properties(codesys_tcp_login_auth_username_decoded_password_never_rendered PROPERTIES
+  PASS_REGULAR_EXPRESSION "#3  [^\n]*\\[codesys\\]  CODESYS TCP Channel Service; channel BLK ch=1; CmpDevice::Login \\(AUTH\\) session=0 user=\"engineer\"[^\n]*\n *note: Login/AUTH request carries a password field \\(10 byte\\(s\\)\\) -- never rendered by this decoder regardless of whether it is genuinely encrypted on the wire"
+  FAIL_REGULAR_EXPRESSION "s3cr3t")
+
+add_test(NAME codesys_tcp_login_auth_response_session_id
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_codesys.pcap" --format text -v)
+set_tests_properties(codesys_tcp_login_auth_response_session_id PROPERTIES
+  PASS_REGULAR_EXPRESSION "#4  [^\n]*\\[codesys\\]  CODESYS TCP Channel Service; channel BLK ch=1; CmpDevice::Login \\(AUTH\\) session=0 new_session=1245391901")
+
+add_test(NAME codesys_json_fields_auth_request
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_codesys.pcap" --format json)
+set_tests_properties(codesys_json_fields_auth_request PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"codesys_component\": \"CmpDevice\",\n *\"codesys_command\": \"Login \\(AUTH\\)\",\n *\"codesys_session_id\": 0,\n *\"codesys_encrypted\": false,\n *\"codesys_auth_username\": \"engineer\",\n *\"codesys_auth_password_present\": true,"
+  FAIL_REGULAR_EXPRESSION "s3cr3t|codesys_auth_password\"|codesys_auth_password_length")
+
+add_test(NAME codesys_json_fields_auth_response
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_codesys.pcap" --format json)
+set_tests_properties(codesys_json_fields_auth_response PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"codesys_component\": \"CmpDevice\",\n *\"codesys_command\": \"Login \\(AUTH\\)\",\n *\"codesys_session_id\": 0,\n *\"codesys_encrypted\": false,\n *\"codesys_auth_session_id\": 1245391901,")
+
+# CmpApp with an unrecognized command ID -- structural-only per the AskUserQuestion scoping
+# decision: component named, command shown as a raw number, payload never tag-walked.
+add_test(NAME codesys_tcp_cmpapp_structural_only
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_codesys.pcap" --format text -v)
+set_tests_properties(codesys_tcp_cmpapp_structural_only PROPERTIES
+  PASS_REGULAR_EXPRESSION "#5  [^\n]*\\[codesys\\]  CODESYS TCP Channel Service; channel BLK ch=1; CmpApp::0x0005 session=1245391901")
+
+# A BLK frame whose channel payload does NOT structurally validate as a fresh Services header
+# (simulates a multi-block transfer's own continuation block, which this stateless decoder does
+# not reassemble) -- must fall back to the documented note, never fabricate a Services decode.
+add_test(NAME codesys_tcp_invalid_services_header_fallback_note
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_codesys.pcap" --format text -v)
+set_tests_properties(codesys_tcp_invalid_services_header_fallback_note PROPERTIES
+  PASS_REGULAR_EXPRESSION "#6  [^\n]*\\[codesys\\]  CODESYS TCP Channel Service; channel BLK ch=1[^\n]*\n *note: channel payload \\(24 byte\\(s\\)\\) present but does not structurally validate as a fresh Services header")
+
+add_test(NAME codesys_tcp_non_standard_port_note
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_codesys.pcap" --format text -v)
+set_tests_properties(codesys_tcp_non_standard_port_note PROPERTIES
+  PASS_REGULAR_EXPRESSION "#7  [^\n]*\\[codesys\\][^\n]*\n *note: seen on TCP port 53001->22222, which is not a configured/standard CODESYS port \\(11740, 1217\\)")
+
+# --codesys-port widens the "expected port" annotation only -- it does NOT gate detection (CODESYS
+# is tried on every TCP port in Auto mode, like CC-Link IE on UDP). Same packet #7 as above, but
+# with 22222 declared expected: the note must disappear entirely.
+add_test(NAME codesys_tcp_port_option_suppresses_non_standard_note
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_codesys.pcap" --codesys-port 22222 --format text -v)
+set_tests_properties(codesys_tcp_port_option_suppresses_non_standard_note PROPERTIES
+  PASS_REGULAR_EXPRESSION "#7  [^\n]*\\[codesys\\]  CODESYS TCP Channel Service; channel OPEN_CHANNEL ch=2  \\(client [^\n]*\\)\n#8"
+  FAIL_REGULAR_EXPRESSION "not a configured/standard CODESYS port")
+
+# NEGATIVE CONTROL: an ordinary TCP payload with no Block Driver magic at all, on the standard
+# CODESYS TCP port -- must fall through cleanly to generic [tcp], never be misclaimed.
+add_test(NAME codesys_tcp_negative_control_falls_through
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_codesys.pcap" --format text -v)
+set_tests_properties(codesys_tcp_negative_control_falls_through PROPERTIES
+  PASS_REGULAR_EXPRESSION "#8  [^\n]*\\[tcp\\]  TCP payload of 26 byte\\(s\\) on port 53002->11740"
+  FAIL_REGULAR_EXPRESSION "#8[^\n]*\\[codesys\\]")
+
+add_test(NAME codesys_udp_address_service
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_codesys.pcap" --format text -v)
+set_tests_properties(codesys_udp_address_service PROPERTIES
+  PASS_REGULAR_EXPRESSION "#9  [^\n]*\\[codesys\\]  CODESYS UDP Address Service \\(Datagram/Router layer only -- no confirmed body format past this header, see codesys.hpp's own file header comment\\)")
+
+add_test(NAME codesys_udp_channel_get_info_standard_port
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_codesys.pcap" --format text -v)
+set_tests_properties(codesys_udp_channel_get_info_standard_port PROPERTIES
+  PASS_REGULAR_EXPRESSION "#10  [^\n]*\\[codesys\\]  CODESYS UDP Channel Service; channel GET_INFO ch=7"
+  FAIL_REGULAR_EXPRESSION "#10[^\n]*not a configured/standard")
+
+add_test(NAME codesys_udp_non_standard_port_note
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_codesys.pcap" --format text -v)
+set_tests_properties(codesys_udp_non_standard_port_note PROPERTIES
+  PASS_REGULAR_EXPRESSION "#11  [^\n]*\\[codesys\\]  CODESYS UDP Channel Service; channel GET_INFO ch=8[^\n]*\n *note: seen on UDP port 7777->7777, which is not a configured/standard CODESYS UDP port \\(1740-1743\\)")
+
+# NEGATIVE CONTROL: a UDP/1740 payload not starting with the 0xC5 Datagram magic -- must fall
+# through cleanly to generic [udp]. Uses an ASCII payload (rather than arbitrary binary bytes)
+# specifically because a prior version of this fixture's binary negative control accidentally
+# collided with HART-IP's own port-independent UDP gate (an unrelated protocol, also tried
+# opportunistically on every UDP port) -- proving CODESYS itself declined it (as designed) but
+# defeating the fixture's own intent of a clean generic fall-through, so the payload was changed.
+add_test(NAME codesys_udp_negative_control_falls_through
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_codesys.pcap" --format text -v)
+set_tests_properties(codesys_udp_negative_control_falls_through PROPERTIES
+  PASS_REGULAR_EXPRESSION "#12  [^\n]*\\[udp\\]  UDP payload of 31 byte\\(s\\) on port 1740->1740"
+  FAIL_REGULAR_EXPRESSION "#12[^\n]*\\[codesys\\]")
+
+add_test(NAME codesys_stats_channel_command_counts
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_codesys.pcap" --format text --stats)
+set_tests_properties(codesys_stats_channel_command_counts PROPERTIES
+  PASS_REGULAR_EXPRESSION "codesys channel command ids:\n *BLK  *4\n *GET_INFO  *2\n *OPEN_CHANNEL  *2\n *OPEN_CHANNEL response  *1\ncodesys login/auth exchanges with a decoded username: 1")
+
+add_test(NAME codesys_protocol_filter_includes_only_codesys
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_codesys.pcap" --protocol codesys --format text)
+set_tests_properties(codesys_protocol_filter_includes_only_codesys PROPERTIES
+  PASS_REGULAR_EXPRESSION "#1  [^\n]*\\[codesys\\]"
+  FAIL_REGULAR_EXPRESSION "\\[hartip\\]")
+
+add_test(NAME codesys_protocol_filter_excludes_other_protocols
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --protocol codesys --format text)
+set_tests_properties(codesys_protocol_filter_excludes_other_protocols PROPERTIES
+  FAIL_REGULAR_EXPRESSION "\\[modbus\\]")

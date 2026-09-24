@@ -6,6 +6,7 @@
 #include "conduitscope/bgp.hpp"
 #include "conduitscope/bsap.hpp"
 #include "conduitscope/cclink_ie.hpp"
+#include "conduitscope/codesys.hpp"
 #include "conduitscope/cotp.hpp"
 #include "conduitscope/dcom.hpp"
 #include "conduitscope/devicenet.hpp"
@@ -334,9 +335,17 @@ const std::vector<const ProtocolDecoder*>& tcp_port_independent_registry() {
                               // order. BGP's own structural gate (a 128-bit Marker that MUST be
                               // all-0xFF) is the strongest in this whole codebase, so it cannot
                               // collide with anything else in this cascade regardless of position.
+        &codesys_tcp_decoder(),  // A brand-new protocol, NOT part of any migration batch, added
+                              // right after BGP/FF-HSE landed -- decoder.cpp's own call site sits
+                              // right after MQTT, before FF-HSE (see that entry's own comment
+                              // below for why FF-HSE stays last regardless). CODESYS's own Block
+                              // Driver-layer gate (a 4-byte exact magic plus a cross-checked Length
+                              // field) is strong, TwinCAT-AMS/TCP-strength -- see codesys.hpp's own
+                              // file header comment for the full wire format and collision
+                              // reasoning.
         &ffhse_tcp_decoder(),  // Migrated after BGP -- decoder.cpp's own call site tries it LAST
-                              // of this whole cascade, after MQTT (see that entry's own comment
-                              // above), because FF-HSE's own structural detection gate (declared-
+                              // of this whole cascade, after MQTT and CODESYS (see that entry's own
+                              // comment above), because FF-HSE's own structural detection gate (declared-
                               // length framing plus a small enumerated PDU-type byte) is the
                               // weakest, most collision-prone gate of any protocol in this
                               // cascade -- see decoder.cpp's own FF-HSE TCP call site comment for
@@ -443,6 +452,16 @@ const std::vector<const ProtocolDecoder*>& udp_port_independent_registry() {
                                 // 0x0E70/0x0E30/0x0E31, so this ordering is safe by construction --
                                 // see cclink_ie.hpp's own "DISPATCH ORDER" section and
                                 // decoder.cpp's own CC-Link IE call site comment.
+        &codesys_udp_decoder(),  // A brand-new protocol, NOT part of migration batch 2, joining
+                                // this gate right after CC-Link IE. Its own Datagram-layer header
+                                // (exact Magic 0xC5, ServiceId one of five values, AddressLengths
+                                // exactly 0x43/0x34 -- three independently-constrained fields) is
+                                // strong enough to run unconditionally in Auto mode, and no
+                                // byte-for-byte collision with CC-Link IE, MELSEC, FINS, BACnet, or
+                                // any protocol below was found during this decoder's own scoping --
+                                // see codesys.hpp's own file header comment. Shares its "codesys"
+                                // id() with codesys_tcp_decoder() in tcp_port_independent_registry
+                                // above.
         &melsec_udp_decoder(),  // Added after BACnet/IP and CIP I/O, deliberately BEFORE HART-IP --
                                 // see decoder.cpp's MELSEC UDP call site comment for why: HART-IP's
                                 // own weak 3-condition UDP gate (MessageType/MessageID at payload

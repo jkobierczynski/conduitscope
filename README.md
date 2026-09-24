@@ -112,6 +112,15 @@ per-destination whole-capture packet count against a `--flood-threshold`
 and HART-IP/SAMR-LSARPC fixtures were found and fixed while building this
 feature; see `docs/PROTOCOL_COVERAGE.md`'s Attack Detection section for
 the full writeup),
+CODESYS V3 (3S-Smart/CODESYS GmbH's PLC runtime protocol, licensed to
+dozens of PLC vendors including WAGO, Festo, and Eaton -- TCP ports
+11740/1217, UDP ports 1740-1743 -- the full four-layer wire format
+decoded (Block Driver, Datagram/Router, Channel, Services), with
+CmpDevice's own Login/AUTH exchange fully decoded (username rendered,
+password NEVER rendered) and every other service deliberately
+structural-only by Jurgen's own explicit choice; V2 out of scope, no
+public wire-format documentation found for it -- see
+`docs/PROTOCOL_COVERAGE.md`'s CODESYS section for the full writeup),
 IEEE Spanning Tree Protocol
 (STP/RSTP/MSTP), DeviceNet (CAN-bus CIP, via SocketCAN pcap captures), DNS,
 mDNS, LLMNR, and NetBIOS Name Service (NBT-NS), ICMP, RIP, IGMP, VRRP, HSRP,
@@ -221,7 +230,7 @@ traffic match what the segmentation policy says it should" question.
 
 Groundwork / v0.2.4. Every protocol named above is implemented, decoding real
 wire-format fields (not just naming the protocol), and covered by the
-automated test suite -- 1618 tests as of this writing, run via `ctest` after
+automated test suite -- 1635 tests as of this writing, run via `ctest` after
 building (see Building below). Where a real capture was available (public
 ICS-lab collections, vendor-attributed samples, or a live device on real
 hardware), the decoder is validated against it, not just a synthetic

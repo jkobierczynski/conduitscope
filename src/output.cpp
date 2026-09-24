@@ -983,6 +983,57 @@ void write_cclink_ie_json_fields(std::ostream& out, const CclinkIeFrame& cf) {
     }
 }
 
+// The CODESYS analog of write_twincat_json_fields above -- same rationale (a plain free function,
+// not a ProtocolRenderer interface). Shared by both CodesysTcpDecoder and CodesysUdpDecoder (one
+// id(), "codesys" -- see codesys.hpp's own comment on why), so `cf.is_tcp` is what distinguishes
+// them here, the same discriminant enip's own EnipResult/CipIoFrame pair needs
+// DecodedPacket::has_tcp/has_udp for -- simpler here since both transports share the one
+// CodesysFrame type.
+void write_codesys_json_fields(std::ostream& out, const CodesysFrame& cf) {
+    out << "    \"codesys_transport\": \"" << (cf.is_tcp ? "tcp" : "udp") << "\",\n";
+    if (cf.datagram.service_name) {
+        out << "    \"codesys_datagram_service\": \"" << json_escape(*cf.datagram.service_name) << "\",\n";
+    }
+    if (cf.datagram.sender.decoded) {
+        out << "    \"codesys_sender\": \"" << json_escape(*cf.datagram.sender.decoded) << "\",\n";
+    }
+    if (cf.datagram.receiver.decoded) {
+        out << "    \"codesys_receiver\": \"" << json_escape(*cf.datagram.receiver.decoded) << "\",\n";
+    }
+    if (cf.has_channel) {
+        if (cf.channel.command_name) {
+            out << "    \"codesys_channel_command\": \"" << json_escape(*cf.channel.command_name) << "\",\n";
+        } else {
+            out << "    \"codesys_channel_command_id\": " << static_cast<unsigned>(cf.channel.command_id_raw)
+                << ",\n";
+        }
+        out << "    \"codesys_channel_id\": " << cf.channel.channel_id << ",\n";
+    }
+    if (cf.has_services) {
+        if (cf.services.component_name) {
+            out << "    \"codesys_component\": \"" << json_escape(*cf.services.component_name) << "\",\n";
+        } else {
+            out << "    \"codesys_component_id\": " << cf.services.component_id << ",\n";
+        }
+        if (cf.services.command_name) {
+            out << "    \"codesys_command\": \"" << json_escape(*cf.services.command_name) << "\",\n";
+        } else {
+            out << "    \"codesys_command_id\": " << cf.services.command_id << ",\n";
+        }
+        out << "    \"codesys_session_id\": " << cf.services.session_id << ",\n";
+        out << "    \"codesys_encrypted\": " << (cf.services.encrypted ? "true" : "false") << ",\n";
+    }
+    if (cf.has_auth_username) {
+        out << "    \"codesys_auth_username\": \"" << json_escape(cf.auth_username) << "\",\n";
+    }
+    if (cf.auth_password_present) {
+        out << "    \"codesys_auth_password_present\": true,\n";
+    }
+    if (cf.has_auth_session_id) {
+        out << "    \"codesys_auth_session_id\": " << cf.auth_session_id << ",\n";
+    }
+}
+
 // Renders one RipRoute as a single line -- see rip.hpp for what each of the three RTE shapes
 // (ordinary route, full-table-request marker, authentication entry) means. Reproduces
 // decoder.cpp's own former rip_route_summary exactly (that copy was retired along with the
@@ -3645,6 +3696,9 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
     if (p.protocol == "cclink-ie" && p.result) {
         write_cclink_ie_json_fields(out_, p.result->as<CclinkIeFrame>());
     }
+    if (p.protocol == "codesys" && p.result) {
+        write_codesys_json_fields(out_, p.result->as<CodesysFrame>());
+    }
     out_ << "    \"notes\": [";
     for (size_t i = 0; i < p.notes.size(); ++i) {
         if (i != 0) out_ << ", ";
@@ -4161,6 +4215,21 @@ void StatsWriter::write_packet(const DecodedPacket& p) {
                 break;
         }
     }
+    if (p.protocol == "codesys" && p.result) {
+        const CodesysFrame& cf = p.result->as<CodesysFrame>();
+        if (cf.has_channel) {
+            std::string key;
+            if (cf.channel.command_name) {
+                key = *cf.channel.command_name;
+            } else {
+                std::ostringstream s;
+                s << "0x" << std::hex << std::uppercase << static_cast<unsigned>(cf.channel.command_id_raw);
+                key = s.str();
+            }
+            codesys_channel_command_counts_[key]++;
+        }
+        if (cf.has_auth_username) codesys_auth_username_count_++;
+    }
     if (p.protocol == "rip" && p.result) {
         rip_command_counts_[p.result->as<RipMessage>().command_name]++;
     }
@@ -4526,6 +4595,14 @@ void StatsWriter::print_summary(std::ostream& out) const {
             << cclink_ie_cyclic_error_count_ << "\n";
         out << "cclink-ie node search messages: " << cclink_ie_node_search_count_ << "\n";
         out << "cclink-ie set IP address messages: " << cclink_ie_set_ip_address_count_ << "\n";
+    }
+    if (!codesys_channel_command_counts_.empty()) {
+        out << "codesys channel command ids:\n";
+        for (const auto& [name, count] : codesys_channel_command_counts_) {
+            out << "  " << std::left << std::setw(40) << name << count << "\n";
+        }
+        out << "codesys login/auth exchanges with a decoded username: " << codesys_auth_username_count_
+            << "\n";
     }
     if (!rip_command_counts_.empty()) {
         out << "rip commands:\n";

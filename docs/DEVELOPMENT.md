@@ -7883,6 +7883,149 @@ deferred future migration.
     synthetic fixture only, no real attack-traffic capture was used to build or validate any of
     this.
 
+44. **CODESYS V3 (3S-Smart/CODESYS GmbH's PLC runtime protocol) -- TCP ports 11740/1217
+    (Block Driver-framed), UDP ports 1740-1743 (unframed).** **Done.** Jurgen asked "Can you add
+    CODESYS?" -- a bare request naming a protocol licensed to dozens of PLC vendors (WAGO, Festo,
+    Eaton, Berghof, and many more), not a single vendor's own proprietary format. Two
+    AskUserQuestion scoping decisions were made before any code was written, the same discipline
+    used for BSAP's own naming resolution (item 40) and attack detection's own scoping questions
+    (item 43): **protocol version** -- CODESYS V2 (legacy, TCP port 1200) has only a port number
+    and an Nmap discovery script publicly available, no wire-format documentation, so it was
+    excluded; V3 has two independent, corroborating sources and was the only version built.
+    **Payload decode depth** -- structural-only beyond CmpDevice's own Login/AUTH exchange
+    (component/command named where confirmed, payload reported as a byte count only, never
+    value-decoded) was chosen over a "best-effort generic tag walk" of every service's payload,
+    which was also offered. New, fully self-contained module:
+    `include/conduitscope/codesys.hpp`/`src/codesys.cpp` -- see its own file header for the
+    complete sourcing/scoping/wire-format writeup; this entry summarizes it.
+
+    **Sourcing**: two independent, mutually corroborating sources, neither a vendor spec (none is
+    publicly available) -- a public Wireshark Lua dissector
+    (`github.com/fridgebuyer/codesys3-dissector`) whose real working parse code gives byte-exact
+    field offsets, and Kaspersky ICS-CERT's own published reverse-engineering research ("Security
+    research: CODESYS Runtime, a PLC control framework," Alexander Nochvay, parts 1-2), which
+    independently names the same four-layer architecture, magic numbers, channel command IDs, and
+    component names, plus the one specific worked example (the Login/AUTH tag layout) this
+    decoder's payload scope relies on.
+
+    **Four-layer wire format**: Block Driver (TCP only, 8-byte magic+length header) -> Datagram/
+    Router (6-byte fixed header, exact magic + ServiceId + AddressLengths validation, sender/
+    receiver addresses) -> Channel (only when ServiceId is Channel Service; named command IDs
+    including OPEN_CHANNEL/CLOSE_CHANNEL/BLK/ACK/KEEPALIVE) -> Services (only attempted on a BLK
+    command whose channel payload structurally validates a ProtocolId match; ComponentId/CommandId
+    naming, with only CmpDevice's Login/AUTH pair confirmed by both sources). Two fields are
+    deliberately shown raw rather than guessed where the sources disagree: the Datagram layer's
+    Hops/PacketParams bytes, and the Channel layer's Flags byte and Checksum polynomial -- the same
+    "show raw, don't guess" posture BSAP's own Node Status Byte already established in this
+    codebase.
+
+    **Payload decode scope**: a flat tag-length-value sequence (7-bit-per-byte, LSB-first,
+    continuation-bit varints for both tag ID and length, confirmed directly from the dissector's
+    own parse functions), walked at the top level for every Services message but value-interpreted
+    only for Login/AUTH -- username rendered as text, password NEVER rendered (presence/length
+    only, matching this codebase's own NL_TRUST_PASSWORD/SAMR-style never-render-credential-bytes
+    convention, item 25/26's own precedent, regardless of Kaspersky calling it "encrypted"), and
+    session ID read as an integer. A self-caught correctness fix, added proactively during
+    implementation rather than requested: when ProtocolId indicates genuine SecureProtocol
+    encryption, the AUTH tag-walk is skipped entirely (a note is added instead) since tag-walking
+    ciphertext would otherwise misinterpret it as plausible-but-meaningless structure.
+
+    **Structural validation instead of state-tracked reassembly**: the Channel layer's BlkNum/
+    AckNum/RemainingDataSize fields exist to span a larger transfer across multiple BLK frames, but
+    this decoder is fully stateless -- no `DecoderFlowState`, every packet decoded independently.
+    Blindly re-parsing every BLK frame's channel payload as a fresh Services header would misdecode
+    a continuation block of a larger transfer; avoided by only accepting a Services header once
+    ProtocolId reads back as one of its two valid values, otherwise falling through to an honest
+    "channel payload present, not decoded as a fresh Services message" note.
+
+    **Detection/dispatch gate strength**: TCP is tried opportunistically on every port, gated by
+    the Block Driver layer's exact magic plus a Length cross-check bounded to the documented 520-
+    byte ceiling -- comparable in strength to TwinCAT's own AMS/TCP Data Length cross-check (item
+    unspecified above, see its own section). UDP is also tried opportunistically, not port-gated
+    like BSAP -- three independently-constrained Datagram-layer fields make a random 6-byte prefix
+    passing all three by chance astronomically unlikely, the same multi-field-confidence reasoning
+    EtherNet/IP's own three independent checks already establish.
+
+    **Registration-model architecture, matching EtherNet/IP's own precedent**: `CodesysTcpDecoder`/
+    `CodesysUdpDecoder` share `id() == "codesys"` and a single `CodesysFrame` result struct (CODESYS's
+    L2/L3/L4/L7 decode logic is identical regardless of transport, only the entry point differs --
+    TCP strips 8 bytes of Block Driver framing first), following the registration-model
+    `ProtocolDecoder` interface every brand-new protocol since TwinCAT has used from inception,
+    rather than the legacy per-protocol dispatch chain.
+
+    **One fixture bug found and fixed during this feature's own mandatory before-writing-any-
+    CTest-regex manual verification step**: the UDP negative control (packet 12,
+    `tests/sample_codesys.pcap`) originally used 8 arbitrary binary bytes not starting with the
+    Datagram magic. CODESYS itself correctly declined it (proving the gate works), but the bytes
+    accidentally also happened to structurally validate as a complete, empty-body HART-IP Keep
+    Alive response -- HART-IP's own UDP decoder is likewise tried opportunistically on every port
+    (item unspecified above, see its own section) -- so the packet was claimed as `[hartip]`
+    instead of falling through to generic `[udp]` as the fixture's own docstring promised. Fixed by
+    switching the negative control to an ASCII payload (matching the TCP negative control's own
+    style), which cleanly avoids colliding with any other port-independent decoder. Not a CODESYS
+    decoder bug -- a fixture-design lesson: a "negative control" byte string needs to be checked
+    against every port-independent decoder in the codebase, not just the one under test.
+
+    17 new `codesys_*` CTest tests: OPEN_CHANNEL request/response; Login/AUTH request with the
+    username decoded and the password confirmed never rendered in either text or JSON output
+    (`FAIL_REGULAR_EXPRESSION` guarding the raw password bytes); Login/AUTH response with the
+    session ID decoded; JSON field checks for both directions of the AUTH exchange; a CmpApp
+    command decoded structurally only; the invalid-Services-header fallback note; a non-standard
+    TCP port note, and `--codesys-port` suppressing it; a TCP negative control falling through to
+    generic `[tcp]`; UDP Address Service; UDP Channel Service GET_INFO on a standard and a
+    non-standard port; the UDP negative control (see above) falling through to generic `[udp]`; a
+    `--stats` channel-command-id and AUTH-username-count check; and `--protocol codesys` both
+    including codesys traffic and excluding an unrelated fixture's own protocol. Full suite passed
+    with zero regressions in both the default and `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF`
+    configs, zero-warning clean rebuilds in both.
+
+    Explicitly out of scope, stated honestly in codesys.hpp's own file header: CODESYS V2 (no
+    public wire-format documentation found); any payload decode past CmpDevice's own Login/AUTH
+    exchange (a deliberate scoping decision, not a gap); multi-block transfer reassembly across BLK
+    frames; the Channel layer's Flags-byte bit semantics and Checksum polynomial (both sources
+    disagree or are silent); and, as ever, any CODESYS field this decoder does not name above. As
+    with every recent protocol addition, `tests/sample_codesys.pcap` is entirely synthetic -- no
+    real CODESYS V3 capture was available to validate against.
+
+45. **IPv6 attacks: SLAAC/rogue Router Advertisement and DHCPv6 (spoofing, exhaustion,
+    misconfiguration).** Not yet started, no committed timeline. Jurgen asked to add this as a
+    target for the project, mid-turn while CODESYS (item 44) was being delivered. Recorded here as
+    a roadmap entry rather than designed/implemented yet, the same posture as item 41's own
+    "logged as a goal, not yet scoped or built" entry.
+
+    The IPv4 side of this general idea already exists (item 43, `attack_detect.hpp`'s
+    cross-cutting DoS/reconnaissance layer -- LAND, WinNuke, ICMP Redirect, IP Source Routing,
+    Smurf, Fraggle, Ping of Death, Teardrop, plus SYN/ACK/ICMP/UDP/TCP-generic flood counters), but
+    that file's own header states outright that it does not run on IPv6 at all
+    (`decoder.cpp`'s IPv6 branch never calls into it) -- consistent with IPv6's own still-open
+    scope gaps (item 24). This new item is IPv6-specific rather than an extension of item 43's own
+    signature list, since SLAAC/RA and DHCPv6 have no IPv4 equivalent (IPv4 has no router/address
+    autoconfiguration advertisement mechanism analogous to Router Advertisement, and DHCP-vs-DHCPv6
+    are different enough on the wire to need their own decoder either way).
+
+    Two genuinely new decode surfaces would be needed, neither of which exists in this codebase
+    today: **ICMPv6** (IP protocol 58) is currently name-only -- recognized and labeled, but not
+    parsed at all (see `ipv4.cpp`'s protocol-number table and `docs/PROTOCOL_COVERAGE.md`'s Link/
+    IP-layer plumbing section) -- so Neighbor Discovery Protocol messages (Router Solicitation/
+    Advertisement, Neighbor Solicitation/Advertisement, Redirect -- RFC 4861) would need a decoder
+    built from nothing, distinct from this codebase's existing IPv4-only ICMP decoder
+    (`icmp.hpp`/`.cpp`, which already names RFC 1256's own IPv4 Router Advertisement but has no
+    ICMPv6 awareness); and **DHCPv6** (RFC 8415, UDP ports 546/547) has no decoder of any kind
+    today, unlike DHCP(v4), which this codebase already recognizes as part of the Tier 3
+    enterprise-trust-boundary family (`docs/PROTOCOL_COVERAGE.md`'s Tier 3 section).
+
+    Open design questions, not yet resolved: what "attack" actually means for each of these is
+    less structurally clear-cut than item 43's own IPv4 signatures -- a rogue RA is, on the wire,
+    indistinguishable from a legitimate router's own RA except by an out-of-band notion of which
+    link-local address SHOULD be advertising (this codebase has no asset-identity/trust concept
+    that could supply that today, the same class of limitation DRSUAPI's own DCSync note already
+    states honestly for "is this host a DC"); a DHCPv6 exhaustion attack needs the same kind of
+    whole-capture volumetric counting item 43's flood signatures already established (per-
+    requesting-client or per-link message-rate counting against a threshold, likely reusable
+    machinery rather than a new design); and whether this belongs inside `attack_detect.hpp`
+    itself (extending it to also walk the IPv6 branch) or as a new, IPv6-specific sibling module
+    once ICMPv6/DHCPv6 have their own decoders to build curated notes on top of.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols
