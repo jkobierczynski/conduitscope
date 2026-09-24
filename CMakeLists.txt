@@ -7245,6 +7245,50 @@ add_test(NAME pcapng_simple_packet_block_decodes
 set_tests_properties(pcapng_simple_packet_block_decodes PROPERTIES
   PASS_REGULAR_EXPRESSION "Read Holding Registers")
 
+# Finding 2, docs/reviews/2026-09-chatgpt-security-review-patch160.md: a malicious if_tsresol
+# byte could declare a units-per-second figure that doesn't fit in a uint64_t, making
+# fill_pcapng_timestamp's static_cast<uint64_t>(...) undefined behavior (pcap_reader.cpp). Fixed
+# by bounding the exponent before computing it (parse_if_tsresol_option) plus a defense-in-depth
+# clamp at the conversion site itself (fill_pcapng_timestamp). sample_pcapng_implausible_tsresol.pcapng
+# (tools/make_sample_pcap.py's build_pcapng_implausible_tsresol_sample) has three interfaces:
+# 0 (binary, exponent 127 -- far past the 63 boundary), 1 (decimal, exponent 100 -- far past the
+# 19 boundary), both of which must fall back to the same microsecond default this function
+# already uses for a malformed option; and 2 (binary, exponent 63 -- exactly the largest power of
+# two that still fits in a uint64_t), which must NOT fall back, proving the boundary itself isn't
+# off-by-one rejected. The whole point of this test is simply that decoding completes cleanly and
+# produces this exact, deterministic output instead of crashing or invoking UB -- a golden-output
+# test, the same bar every other exact-value test in this file is held to, confirmed against the
+# actual CLI before being written here (not guessed at). Packet 3's own oddly large negative
+# relative timestamp is a legitimate, defined consequence of interface 2's own genuinely absurd
+# (2^63 units/second) but in-bounds resolution -- not a defect this fix introduces or needs to
+# smooth over; only interfaces 0 and 1 (the ones actually being tested for the fallback) need to
+# look sane, and they do (a clean 1-microsecond delta between packets 1 and 2, exactly what
+# falling back to the 1e6 default on both produces).
+add_test(NAME pcapng_implausible_tsresol_falls_back_without_ub
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_pcapng_implausible_tsresol.pcapng" --format text --verbose)
+set_tests_properties(pcapng_implausible_tsresol_falls_back_without_ub PROPERTIES
+  PASS_REGULAR_EXPRESSION "#1  0.000000[^\n]*\n.*\n#2  0.000001[^\n]*\n.*\n.*\n#3  -1699999999.999816")
+
+add_test(NAME pcapng_implausible_tsresol_json_completes_all_three_packets
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_pcapng_implausible_tsresol.pcapng" --format json)
+set_tests_properties(pcapng_implausible_tsresol_json_completes_all_three_packets PROPERTIES
+  # Each packet's own index+timestamp pair (adjacent lines, confirmed against the real JSON
+  # output first) -- proves all three packets decoded cleanly: interfaces 0/1's implausible
+  # exponents both falling back to the same 1e6 default (hence identical whole-second epoch,
+  # 1-microsecond apart), interface 2's boundary case computing its own (legitimately odd, see
+  # the text-format test above) but still well-defined result. Three independent checks in one
+  # regex (rather than one long chain spanning all three packet objects) to avoid depending on
+  # every field in between, which is unrelated to what this test is actually confirming.
+  PASS_REGULAR_EXPRESSION "\"index\": 1,\n *\"timestamp\": 1700000000.000000,")
+add_test(NAME pcapng_implausible_tsresol_json_packet2_timestamp
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_pcapng_implausible_tsresol.pcapng" --format json)
+set_tests_properties(pcapng_implausible_tsresol_json_packet2_timestamp PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"index\": 2,\n *\"timestamp\": 1700000000.000001,")
+add_test(NAME pcapng_implausible_tsresol_json_packet3_timestamp
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_pcapng_implausible_tsresol.pcapng" --format json)
+set_tests_properties(pcapng_implausible_tsresol_json_packet3_timestamp PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"index\": 3,\n *\"timestamp\": 0.000184,")
+
 # ---------------------------------------------------------------------------------------------
 # Resolver (resolver.hpp/resolver.cpp): OUI (MAC vendor) resolution (off by default, --mac-vendor, to
 # keep output compact), hostname resolution (off by default, --resolve/--hosts, file-only --

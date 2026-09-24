@@ -1882,19 +1882,59 @@ have X" list. Folded in here as items 10-16, at the same priority tier as
     every existing `PASS_REGULAR_EXPRESSION` unchanged; zero-warning
     rebuilds in both configs.
 
-11. **Next up: malicious pcapng `if_tsresol` can reach invalid
+11. **Done: malicious pcapng `if_tsresol` can reach invalid
     floating-to-integer conversion (the review's own #2, rated
     Medium/High -- "parser robustness / UB").** Confirmed against the
-    actual source: `pcap_reader.cpp`'s `parse_if_tsresol_option` computes
+    actual source: `pcap_reader.cpp`'s `parse_if_tsresol_option` computed
     `std::pow(2.0, v & 0x7F)` (binary resolution) or `std::pow(10.0, v)`
     (decimal resolution, unmasked -- but `v` is already <= 127 here since
     the high bit gates which branch runs) from an attacker-controlled
-    single byte, and `fill_pcapng_timestamp` then does
+    single byte, and `fill_pcapng_timestamp` then did
     `static_cast<uint64_t>(units_per_second + 0.5)` with no range check --
     converting an out-of-range double to `uint64_t` is undefined behavior
     in C++, not just an inaccurate timestamp, and a declared exponent
     anywhere past 63 (easily reachable; the field allows up to 127) is
-    already out of `uint64_t`'s range. Queued as the next item to fix.
+    already out of `uint64_t`'s range.
+
+    Fixed at both ends, matching the review's own "at minimum, bound the
+    exponent" suggestion plus its "I'd prefer never converting
+    attacker-controlled floating-point values into integer sizes" ideal as
+    a second, defense-in-depth layer rather than a full redesign (a full
+    non-floating-point resolution representation, the review's own
+    "better" option, was judged more invasive than this bug needs --
+    `units_per_second` has exactly one real caller, and bounding both ends
+    of that one call already closes the UB completely): `parse_if_tsresol_option`
+    now rejects an exponent past the largest one that's actually
+    representable -- 63 for binary (2^64 already overflows `uint64_t`), 19
+    for decimal (10^20 already overflows `UINT64_MAX` ~= 1.8447e19) --
+    falling back to the same microsecond default this function already
+    uses for a malformed/truncated option, rather than inventing a third
+    outcome; real capture tools only ever declare 6 or 9, so anything
+    remotely near these ceilings was already implausible on its own terms.
+    `fill_pcapng_timestamp` itself also gained a direct clamp right before
+    its own cast (`!(units_per_second >= 1.0) || !(units_per_second <=
+    1.8e19)` -- the `!(x >= ...)` shape catches NaN too, since any
+    comparison against NaN is false either way), so the conversion is safe
+    regardless of what a future caller might pass, not only via today's one
+    real call site.
+
+    Verified: new fixture
+    (`tests/sample_pcapng_implausible_tsresol.pcapng` --
+    `tools/make_sample_pcap.py`'s `build_pcapng_implausible_tsresol_sample`)
+    with three interfaces -- exponent 127 binary and exponent 100 decimal
+    (both must fall back to the default; confirmed via two packets sharing
+    a clean 1-microsecond relative delta, exactly what falling back to the
+    same 1e6 default on both produces) and exponent 63 binary (exactly the
+    boundary; must NOT fall back, proving no off-by-one -- it computes its
+    own legitimately odd but well-defined result instead of the default,
+    confirmed against the real CLI before writing the regression tests, the
+    same discipline this project already holds itself to). 4 new tests (one
+    text-format, three JSON, one per packet's own index+timestamp pair
+    rather than one regex spanning all three packet objects). Full CTest
+    suite: 1530 -> 1534 (default config), 1518 -> 1522 (no-live-capture
+    config), both 100% passing with every existing
+    `PASS_REGULAR_EXPRESSION` unchanged; zero-warning rebuilds in both
+    configs.
 
 12. **Open: `ProtocolResult::as<T>()` is an unchecked type cast (the
     review's own #3, rated Medium -- "type safety").** Confirmed:

@@ -96,6 +96,22 @@ constexpr uint32_t kMaxPlausibleBlockBytes = 16u * 1024u * 1024u;
 // (falling back to the default) rather than treated as fatal -- the timestamp resolution
 // isn't essential to decoding, so a slightly-off options list shouldn't block reading
 // packets.
+//
+// Security fix (finding 2, docs/reviews/2026-09-chatgpt-security-review-patch160.md): the
+// exponent this option carries is a full byte (0-127 either way -- the high bit is spent
+// selecting binary-vs-decimal, not part of the exponent's own range), so an attacker-controlled
+// value can ask for a units-per-second figure far beyond what fits in a uint64_t --
+// std::pow(2.0, 127) or std::pow(10.0, 127) are both finite, representable doubles, but
+// fill_pcapng_timestamp's own static_cast<uint64_t>(units_per_second + 0.5) is undefined
+// behavior once that double is out of uint64_t's range, not merely an inaccurate timestamp.
+// Real capture tools only ever use 6 (microsecond) or 9 (nanosecond); anything remotely near
+// these ceilings is already implausible, so out-of-range values fall back to the same default
+// this function already uses for a malformed/truncated option, rather than inventing a third
+// outcome. 2^63 is the largest power of two that still fits in uint64_t (2^64 already
+// overflows); 10^19 is the largest power of ten (10^20 exceeds UINT64_MAX ~= 1.8447e19).
+constexpr uint8_t kMaxPlausibleBinaryTsresolExponent = 63;
+constexpr uint8_t kMaxPlausibleDecimalTsresolExponent = 19;
+
 double parse_if_tsresol_option(const std::vector<uint8_t>& body, size_t options_start, bool little_endian) {
     size_t pos = options_start;
     while (pos + 4 <= body.size()) {
@@ -107,8 +123,11 @@ double parse_if_tsresol_option(const std::vector<uint8_t>& body, size_t options_
         if (opt_code == 9 && opt_len >= 1) {
             uint8_t v = body[pos];
             if (v & 0x80) {
-                return std::pow(2.0, static_cast<double>(v & 0x7F));
+                uint8_t exponent = v & 0x7F;
+                if (exponent > kMaxPlausibleBinaryTsresolExponent) break;  // implausible -- keep default
+                return std::pow(2.0, static_cast<double>(exponent));
             }
+            if (v > kMaxPlausibleDecimalTsresolExponent) break;  // implausible -- keep default
             return std::pow(10.0, static_cast<double>(v));
         }
         pos += (static_cast<size_t>(opt_len) + 3) & ~static_cast<size_t>(3);  // options are 4-byte padded too
@@ -123,6 +142,15 @@ double parse_if_tsresol_option(const std::vector<uint8_t>& body, size_t options_
 // cases convert exactly with no floating point; any other declared resolution (rare -- seen
 // mostly from custom/embedded capture tools) is normalized to nanoseconds.
 void fill_pcapng_timestamp(PcapPacket& out, double units_per_second, uint64_t ts_raw) {
+    // Defense in depth on top of parse_if_tsresol_option's own bounds check above (its only
+    // real caller today) -- see that function's header comment for the full UB rationale. The
+    // `!(x >= ...)` shape (rather than `x < ...`) also catches NaN, which always compares false
+    // either way, so a NaN slipping in from some future caller falls back to the same default
+    // rather than reaching the cast below. 1.8e19 is comfortably inside UINT64_MAX
+    // (~1.8447e19) with margin for the "+ 0.5" rounding just below.
+    if (!(units_per_second >= 1.0) || !(units_per_second <= 1.8e19)) {
+        units_per_second = 1e6;
+    }
     uint64_t units = static_cast<uint64_t>(units_per_second + 0.5);
     if (units == 0) units = 1;
     uint64_t sec = ts_raw / units;

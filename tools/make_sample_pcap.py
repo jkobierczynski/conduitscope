@@ -5342,6 +5342,37 @@ def build_pcapng_nanosecond_sample():
     (TESTS_DIR / "sample_pcapng_nanosecond.pcapng").write_bytes(data)
 
 
+def build_pcapng_implausible_tsresol_sample():
+    """Exercises parse_if_tsresol_option's/fill_pcapng_timestamp's own bounds check
+    (docs/reviews/2026-09-chatgpt-security-review-patch160.md's finding 2, pcap_reader.cpp):
+    if_tsresol's low 7 bits are a full exponent (0-127) regardless of base, so a malicious value
+    can ask for a units-per-second figure that doesn't fit in a uint64_t -- converting a double
+    that large to uint64_t is undefined behavior, not just an inaccurate timestamp. Three
+    interfaces here, each a distinct raw if_tsresol byte, and one ordinary packet per interface
+    so a decode of this file completes normally either way (the fix falls back to the same
+    microsecond default this function already uses for a malformed/truncated option, it doesn't
+    reject the packet):
+      - interface 0: tsresol=0xFF -- binary (high bit set), exponent 127 -- far past the
+        exponent-63 boundary (2^64 already overflows uint64_t) -- must fall back to the default.
+      - interface 1: tsresol=100 -- decimal (high bit clear), exponent 100 -- far past the
+        exponent-19 boundary (10^20 already overflows uint64_t) -- must fall back to the default.
+      - interface 2: tsresol=0xBF -- binary, exponent 63 -- exactly the boundary, still safely
+        representable (2^63 fits) -- must NOT fall back; proves the boundary itself isn't
+        miscategorized as malformed by an off-by-one."""
+    mb_req = struct.pack("!HHHBB HH", 1, 0, 6, 1, 3, 0, 10)
+    tcp_req = tcp_header(51000, 502, 1000, 2000, TCP_PSH | TCP_ACK, len(mb_req)) + mb_req
+    ip_req = ipv4_header(HMI_IP, PLC_IP, 6, len(tcp_req), 0x1000) + tcp_req
+    eth_req = eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip_req
+
+    data = pcapng_shb()
+    data += pcapng_idb(tsresol=0xFF)  # interface 0: implausible binary exponent (127)
+    data += pcapng_idb(tsresol=100)  # interface 1: implausible decimal exponent (100)
+    data += pcapng_idb(tsresol=0xBF)  # interface 2: exactly the safe binary boundary (63)
+    for iface_id in range(3):
+        data += pcapng_epb(iface_id, 1_700_000_000_000_000 + iface_id, eth_req)
+    (TESTS_DIR / "sample_pcapng_implausible_tsresol.pcapng").write_bytes(data)
+
+
 def build_pcapng_multi_interface_sample():
     """Two Interface Description Blocks (interface 0: Ethernet; interface 1: raw IP, no
     link-layer header) each with one packet referencing it, to prove per-packet/
@@ -13801,6 +13832,7 @@ if __name__ == "__main__":
     build_pcapng_malformed()
     build_pcapng_basic_sample()
     build_pcapng_nanosecond_sample()
+    build_pcapng_implausible_tsresol_sample()
     build_pcapng_multi_interface_sample()
     build_pcapng_simple_packet_block_sample()
     build_dns_sample()
