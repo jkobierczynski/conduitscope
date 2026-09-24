@@ -8222,6 +8222,97 @@ deferred future migration.
     `tests/sample_zigbee.pcap`/`sample_zigbee_tap.pcap` are entirely synthetic -- no real Zigbee
     capture was available to validate against.
 
+48. **Cisco Discovery Protocol (CDP) -- SNAP-encapsulated over classic IEEE 802.3 LLC framing.**
+    **Done.** Jurgen asked for CDP decoding, sourced byte-exact from literal Wireshark dissector
+    source before any code was written (`epan/dissectors/packet-cdp.c` for the header/TLV/checksum
+    shape, `epan/dissectors/packet-cisco-oui.c` and Wireshark's own Cisco SNAP Protocol ID
+    registrations for the exact encapsulation values), not from memory -- matching the sourcing
+    discipline established for Zigbee (item 47) and CODESYS/CoAP before it. New, fully
+    self-contained module pair `include/conduitscope/cdp.hpp`/`src/cdp.cpp`; see the header's own
+    file header comment for the complete sourcing/scoping/wire-format writeup, summarized here.
+
+    **A real, pre-existing collision found and fixed, not just avoided**: before this item,
+    `decoder.cpp`'s Ethernet/LLC/SNAP dispatch labeled *every* SNAP frame carrying Cisco's OUI
+    (`00:00:0C`) as `"Cisco PVST+ (SNAP-encapsulated, not decoded)"`, regardless of the SNAP
+    Protocol ID -- meaning a real CDP frame (Cisco OUI, Protocol ID `0x2000`) was silently
+    mislabeled as PVST+ and never reached CDP's own decode path. Proven real, not hypothetical,
+    before any fix was written: a synthetic CDP-shaped SNAP frame was built and run through the
+    pre-fix binary, producing exactly the wrong `"Cisco PVST+..."` label. Fixed by making the
+    naming chain SNAP-Protocol-ID-aware in three ways, in order: Protocol ID `0x2000` (CDP's own,
+    confirmed from source) now attempts full CDP decode; Protocol ID `0x010B` (PVST+'s own,
+    confirmed separately) keeps the specific `"Cisco PVST+"` label; any *other* Cisco-OUI SNAP
+    Protocol ID now gets a new, honest, generic `"Cisco SNAP frame (OUI=00:00:0C, ProtocolID=0xNNNN,
+    not decoded)"` label instead of being silently folded into PVST+'s name. All three outcomes,
+    plus a non-Cisco-OUI negative control, are pinned by dedicated CTest entries
+    (`cdp_pinning_cdp_pid_decodes_as_cdp_not_pvst`, `cdp_pinning_pvstpp_pid_still_named_pvst`,
+    `cdp_other_cisco_snap_pid_named_generically`, `cdp_negative_control_non_cisco_oui_not_decoded`)
+    so this exact mislabeling cannot silently regress.
+
+    **Architecture**: follows STP's own precedent, not LLDP's, since CDP -- like STP -- has no
+    EtherType of its own. `CdpDecoder::ethertype()` stays `std::nullopt`; `gate_kind()` is still
+    `GateKind::EtherType` for `protocol_registry.hpp`'s own audit-trail purposes; the real
+    structural gate (SNAP OUI + exact SNAP Protocol ID) lives at `decoder.cpp`'s own call site,
+    right after STP's own block, not inside the class -- the identical "gate lives at the call
+    site, not in the class" shape `StpDecoder` already established. `cdp_decoder()` is appended to
+    `ethertype_registry()` immediately after `stp_decoder()`, for the identical reason STP itself
+    is listed there (the loop can never actually match it, since `ethertype()` is `nullopt`; it is
+    registry-membership for audit-trail completeness, not for dispatch). A zero-flat-field protocol
+    from inception: its fields live entirely in the `CdpFrame` carried by `DecodedPacket::result`,
+    never flattened onto `DecodedPacket` itself, rendered by `output.cpp`'s own
+    `write_cdp_json_fields`, with `--stats` aggregating device ID counts, platform counts, a
+    capability-bit histogram, and a native-VLAN histogram.
+
+    **Wire format**: a 4-byte header (Version/TTL-in-seconds/Checksum -- the checksum uses a
+    documented non-RFC-1071-compliant ones'-complement variant and is never validated here, since
+    it is not load-bearing for TLV walking, the same posture already taken for other
+    checksum-bearing protocols in this codebase); a flat sequence of TLVs, each a 2-byte Type
+    (big-endian), a 2-byte Length (big-endian, *including* its own 4-byte Type+Length header --
+    confirmed against a live worked example before coding, not assumed), and a value. Full,
+    named-field decode: Device ID, Port ID, Platform, Software Version, Capabilities (every one of
+    the 10 documented bits named individually, including the "IGMP capable" bit whose real-world
+    semantics are documented in `cdp.hpp` as genuinely ambiguous across Cisco's own documentation --
+    flagged there rather than guessed at), Native VLAN, Duplex, Addresses/Management Address
+    (NLPID `0xCC` per ISO/IEC TR 9577 rendered as a dotted-quad IPv4 -- deliberately the TLV decoded
+    richest, per this item's own scope steer -- anything else named by its NLPID/protocol-type and
+    shown as raw hex), VTP Management Domain, System Name, Power Consumption, and Power
+    Requested/Available's simple 4-byte shape (a longer, informally-documented multi-value
+    power-negotiation extension exists on real UPOE gear, but this item's own fetch tooling could
+    not pull a source-confirmed byte layout for it out of `packet-cdp.c`, so it is left
+    structural-only rather than guessed at -- flagged below as a judgment call). Structural-only
+    (TLV name + raw Length + raw hex value): IP Prefix/ODR, Protocol Hello, VoIP VLAN Reply/Query,
+    MTU, Trust Bitmap, Untrusted Port CoS, System Object ID, Location, External Port ID, Port
+    Unidirectional, EnergyWise, Spare PoE, any HP-proprietary (`0x1000`-`0x100D`) extension, and any
+    wholly unrecognized TLV type. TLV walking is tolerant: a length that would overrun the
+    remaining bytes stops the walk with a note (`tlvs_truncated`) rather than rejecting the whole
+    frame, mirroring LLDP's own identical posture; only a frame too short even for the fixed
+    4-byte header is declined outright (reported as CDP-too-short, not silently folded back into
+    the generic Cisco-SNAP label).
+
+    `tests/sample_cdp.pcap` (`build_cdp_sample`) carries a full-field CDPv2 announcement (Device
+    ID, Addresses with a real IPv4, Port ID, Capabilities with several bits set, Software Version,
+    Platform, Native VLAN, Duplex, VTP Management Domain, System Name, Management Address, Power
+    Consumption/Requested/Available -- all individually confirmed in both `--format text -v` and
+    `--format json` before a single CTest regex was written, this item's own process step 2), a
+    minimal CDPv1 frame (proving version handling), an HP-proprietary-range unknown TLV alongside
+    curated ones (proving the structural-only fallback doesn't disturb its neighbors), a frame too
+    short even for the header, a frame with an in-body TLV-length overrun (tolerant degradation),
+    the two pinning-collision fixtures described above, a third Cisco-OUI SNAP Protocol ID (VTP's
+    own, `0x2003`, proving the fix's naming is precise rather than a blanket exclusion), and a
+    non-Cisco-OUI negative control. 12 new `cdp_*` CTest tests were added. Full suite grew from
+    1677 to 1689 tests, zero regressions, zero-warning clean rebuilds in both the default and
+    `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF` configs.
+
+    Explicitly out of scope, stated honestly in `cdp.hpp`'s own file header comment: checksum
+    validation; the Power Requested/Power Available TLVs' own longer, unconfirmed multi-value
+    shape; any sub-structure of IP Prefix/ODR, Protocol Hello, EnergyWise, or an HP-proprietary
+    extension (named, not decoded further); OID-to-dotted translation for System Object ID (shown
+    as raw hex, the same posture LLDP's own Management Address OID already has). No dedicated ANSI
+    color was assigned to `"cdp"` in `output.cpp`'s `protocol_color()`, matching the established
+    precedent for every other recently-added protocol (BSAP, CC-Link IE, CODESYS, CoAP, Zigbee),
+    which likewise fall through to the default dim color. As with every recent protocol addition,
+    `tests/sample_cdp.pcap` is entirely synthetic -- no real CDP capture was available to validate
+    against.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

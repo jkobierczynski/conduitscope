@@ -6,6 +6,7 @@
 #include "conduitscope/bgp.hpp"
 #include "conduitscope/bsap.hpp"
 #include "conduitscope/cclink_ie.hpp"
+#include "conduitscope/cdp.hpp"
 #include "conduitscope/coap.hpp"
 #include "conduitscope/codesys.hpp"
 #include "conduitscope/cotp.hpp"
@@ -151,6 +152,20 @@ const std::vector<const ProtocolDecoder*>& ethertype_registry() {
                             // the ones the loop itself can reach); STP's own gating (LLC DSAP/SSAP/
                             // Control, the GARP destination-MAC carve-out) stays its own explicit
                             // block at decoder.cpp's call site, after the loop, exactly as before.
+        &cdp_decoder(),    // CDP (Cisco Discovery Protocol, cdp.hpp) -- a brand-new protocol, NOT
+                            // part of any migration batch, added right after STP for the identical
+                            // reason: no EtherType of its own at all (SNAP-Protocol-ID-keyed
+                            // instead, see cdp.hpp's own "SNAP PROTOCOL ID" header comment), so it
+                            // can never match this loop's ethertype() lookup either, regardless of
+                            // where it sits in this vector -- listed here, right after STP, purely
+                            // for this vector's own audit-trail completeness, mirroring decoder.cpp's
+                            // own real call-site order (CDP's own explicit block sits immediately
+                            // after STP's own block there too). CDP's own gating (SNAP OUI + exact
+                            // SNAP Protocol ID 0x2000, disambiguated from PVST+'s own 0x010B) stays
+                            // its own explicit block at decoder.cpp's call site, right after STP's,
+                            // exactly as STP's own gating does -- see that call site's own COLLISION
+                            // FIX comment for the pre-existing PVST+-mislabeling bug this addition
+                            // fixed.
     };
     return order;
 }

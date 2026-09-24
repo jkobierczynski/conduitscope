@@ -1560,6 +1560,80 @@ void write_stp_json_fields(std::ostream& out, const StpFrame& stp) {
     }
 }
 
+// One decoded NLPID+address entry (CdpAddress, cdp.hpp) rendered as a single JSON object -- shared
+// by write_cdp_json_fields's own "cdp_addresses"/"cdp_management_addresses" arrays below.
+void write_cdp_address_json_fields(std::ostream& out, const CdpAddress& a) {
+    out << "{\"protocol_type\": \"" << json_escape(a.protocol_type_name) << "\", \"protocol\": \""
+        << json_escape(a.protocol_name) << "\", \"is_ipv4\": " << (a.is_ipv4 ? "true" : "false")
+        << ", \"address\": \"" << json_escape(a.address_rendered) << "\"}";
+}
+
+// The CDP analog of write_stp_json_fields above -- see cdp.hpp's own CdpFrame/CdpAddress/CdpTlv.
+void write_cdp_json_fields(std::ostream& out, const CdpFrame& cdp) {
+    out << "    \"cdp_version\": " << static_cast<unsigned>(cdp.version) << ",\n";
+    out << "    \"cdp_ttl_seconds\": " << static_cast<unsigned>(cdp.ttl_seconds) << ",\n";
+    if (cdp.has_device_id) out << "    \"cdp_device_id\": \"" << json_escape(cdp.device_id) << "\",\n";
+    if (cdp.has_port_id) out << "    \"cdp_port_id\": \"" << json_escape(cdp.port_id) << "\",\n";
+    if (cdp.has_platform) out << "    \"cdp_platform\": \"" << json_escape(cdp.platform) << "\",\n";
+    if (cdp.has_software_version) {
+        out << "    \"cdp_software_version\": \"" << json_escape(cdp.software_version) << "\",\n";
+    }
+    if (cdp.has_capabilities) {
+        out << "    \"cdp_capabilities\": " << cdp.capabilities << ",\n";
+        out << "    \"cdp_capabilities_names\": [";
+        for (size_t i = 0; i < cdp.capabilities_names.size(); ++i) {
+            if (i != 0) out << ", ";
+            out << "\"" << json_escape(cdp.capabilities_names[i]) << "\"";
+        }
+        out << "],\n";
+    }
+    if (cdp.has_native_vlan) out << "    \"cdp_native_vlan\": " << cdp.native_vlan << ",\n";
+    if (cdp.has_duplex) {
+        out << "    \"cdp_duplex\": \"" << (cdp.duplex_full ? "Full" : "Half") << "\",\n";
+    }
+    if (cdp.has_vtp_management_domain) {
+        out << "    \"cdp_vtp_management_domain\": \"" << json_escape(cdp.vtp_management_domain)
+            << "\",\n";
+    }
+    if (cdp.has_system_name) out << "    \"cdp_system_name\": \"" << json_escape(cdp.system_name) << "\",\n";
+    if (cdp.has_power_consumption_mw) {
+        out << "    \"cdp_power_consumption_mw\": " << cdp.power_consumption_mw << ",\n";
+    }
+    if (cdp.has_power_requested_mw) out << "    \"cdp_power_requested_mw\": " << cdp.power_requested_mw << ",\n";
+    if (cdp.has_power_available_mw) out << "    \"cdp_power_available_mw\": " << cdp.power_available_mw << ",\n";
+    if (!cdp.addresses.empty()) {
+        out << "    \"cdp_addresses\": [";
+        for (size_t i = 0; i < cdp.addresses.size(); ++i) {
+            if (i != 0) out << ", ";
+            write_cdp_address_json_fields(out, cdp.addresses[i]);
+        }
+        out << "],\n";
+    }
+    if (!cdp.management_addresses.empty()) {
+        out << "    \"cdp_management_addresses\": [";
+        for (size_t i = 0; i < cdp.management_addresses.size(); ++i) {
+            if (i != 0) out << ", ";
+            write_cdp_address_json_fields(out, cdp.management_addresses[i]);
+        }
+        out << "],\n";
+    }
+    const size_t kMaxCdpTlvs = resource_limits().max_decoded_objects.value_or(50);
+    if (!cdp.tlvs.empty()) {
+        out << "    \"cdp_tlvs\": [";
+        for (size_t i = 0; i < cdp.tlvs.size() && i < kMaxCdpTlvs; ++i) {
+            const CdpTlv& t = cdp.tlvs[i];
+            if (i != 0) out << ", ";
+            out << "{\"type\": " << t.type << ", \"type_name\": \"" << json_escape(t.type_name)
+                << "\", \"length\": " << t.length;
+            if (!t.rendered.empty()) out << ", \"rendered\": \"" << json_escape(t.rendered) << "\"";
+            if (!t.raw_hex.empty()) out << ", \"raw_hex\": \"" << json_escape(t.raw_hex) << "\"";
+            out << "}";
+        }
+        out << "],\n";
+    }
+    out << "    \"cdp_tlvs_truncated\": " << (cdp.tlvs_truncated ? "true" : "false") << ",\n";
+}
+
 // Zero-flat-field migration (mid-size batch): the ICMP analog of write_goose_json_fields above.
 // icmp_router_address_summary was decoder.cpp-local (unlike stp_port_role_name above); moved here
 // since it's purely a rendering helper, same as rip_route_summary/igmp_group_record_summary/
@@ -3669,6 +3743,9 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
     if (p.protocol == "stp" && p.result) {
         write_stp_json_fields(out_, p.result->as<StpFrame>());
     }
+    if (p.protocol == "cdp" && p.result) {
+        write_cdp_json_fields(out_, p.result->as<CdpFrame>());
+    }
     if (p.protocol == "devicenet" && p.result) {
         write_devicenet_json_fields(out_, p.result->as<DeviceNetFrame>());
     }
@@ -4278,6 +4355,13 @@ void StatsWriter::write_packet(const DecodedPacket& p) {
         }
         if (stp.has_common_body && stp.flag_tc) stp_tc_count_++;
     }
+    if (p.protocol == "cdp" && p.result) {
+        const CdpFrame& cdp = p.result->as<CdpFrame>();
+        if (cdp.has_device_id) cdp_device_id_counts_[cdp.device_id]++;
+        if (cdp.has_platform) cdp_platform_counts_[cdp.platform]++;
+        for (const auto& name : cdp.capabilities_names) cdp_capability_counts_[name]++;
+        if (cdp.has_native_vlan) cdp_native_vlan_counts_[cdp.native_vlan]++;
+    }
     if (p.protocol == "devicenet" && p.result) {
         const DeviceNetFrame& dn = p.result->as<DeviceNetFrame>();
         devicenet_group_counts_[dn.group_name]++;
@@ -4645,6 +4729,30 @@ void StatsWriter::print_summary(std::ostream& out) const {
         out << "stp mst bpdus (full mst extension decoded): " << stp_mstp_count_ << "\n";
         out << "stp msti configuration messages (summed across every mst bpdu): " << stp_msti_total_ << "\n";
         out << "stp topology change flag set: " << stp_tc_count_ << "\n";
+    }
+    if (!cdp_device_id_counts_.empty()) {
+        out << "cdp device ids:\n";
+        for (const auto& [name, count] : cdp_device_id_counts_) {
+            out << "  " << std::left << std::setw(40) << name << count << "\n";
+        }
+    }
+    if (!cdp_platform_counts_.empty()) {
+        out << "cdp platforms:\n";
+        for (const auto& [name, count] : cdp_platform_counts_) {
+            out << "  " << std::left << std::setw(40) << name << count << "\n";
+        }
+    }
+    if (!cdp_capability_counts_.empty()) {
+        out << "cdp capabilities seen:\n";
+        for (const auto& [name, count] : cdp_capability_counts_) {
+            out << "  " << std::left << std::setw(40) << name << count << "\n";
+        }
+    }
+    if (!cdp_native_vlan_counts_.empty()) {
+        out << "cdp native vlans:\n";
+        for (const auto& [vlan, count] : cdp_native_vlan_counts_) {
+            out << "  " << std::left << std::setw(40) << vlan << count << "\n";
+        }
     }
     if (!devicenet_group_counts_.empty()) {
         out << "devicenet message groups:\n";

@@ -236,6 +236,16 @@ NWK/APS\-encrypted payload") rather than guessed at, with no decryption
 capability at all; ZCL (Zigbee Cluster Library) and Zigbee Green Power
 are explicitly out of scope; see \fBdocs/PROTOCOL_COVERAGE.md\fR's
 Zigbee section for the full writeup,
+plus CDP (Cisco Discovery Protocol, SNAP\-encapsulated over classic IEEE
+802.3 LLC framing, Cisco OUI 00:00:0C with SNAP Protocol ID 0x2000),
+decoding Device ID, Port ID, Platform, Software Version, Capabilities
+(every bit named), Native VLAN, Duplex, Addresses and Management Address
+(IPv4 rendered as a dotted quad, other protocol families named only),
+VTP Management Domain, System Name, and Power Consumption/Requested/
+Available, with every other TLV including HP\-proprietary extensions
+named structurally; also fixes a pre\-existing bug where every
+Cisco\-OUI SNAP frame, including CDP's own, was mislabeled as PVST+; see
+\fBdocs/PROTOCOL_COVERAGE.md\fR's CDP section for the full writeup,
 plus PROFINET RT (EtherType 0x8892, DCP device discovery/configuration and
 cyclic real-time IO), IEC 61850-8-1 GOOSE (EtherType 0x88B8, ASN.1
 BER-encoded GOOSE PDU), IEC 61850-9-2 Sampled Values (EtherType 0x88BA,
@@ -419,7 +429,7 @@ regardless of where it's being analyzed \-\- an extension beyond what
 tshark/tcpdump themselves offer. See \fBdocs/USER_GUIDE.md\fR's OUTPUT
 FORMATS "Timestamps" subsection.
 .TP
-.B \-\-protocol {auto,modbus,dnp3,iec104,s7comm,s7comm\-plus,mms,enip,twincat,melsec,fins,bgp,kerberos,ldap,smb,profinet,goose,sv,ethercat,stp,devicenet,bacnet,hartip,opcua,mqtt,ff\-hse,dns,mdns,llmnr,nbns,doh,rip,igmp,vrrp,hsrp,igrp,pim,eigrp,ospf,remote\-access,lateral\-movement,enterprise\-trust,eapol,wireless\-backhaul,pppoe,tunnel\-vpn,mpls,arp,lldp,slow\-protocols,winrm,dcom,ge\-srtp,bsap,cclink\-ie,codesys,coap,zigbee}
+.B \-\-protocol {auto,modbus,dnp3,iec104,s7comm,s7comm\-plus,mms,enip,twincat,melsec,fins,bgp,kerberos,ldap,smb,profinet,goose,sv,ethercat,stp,devicenet,bacnet,hartip,opcua,mqtt,ff\-hse,dns,mdns,llmnr,nbns,doh,rip,igmp,vrrp,hsrp,igrp,pim,eigrp,ospf,remote\-access,lateral\-movement,enterprise\-trust,eapol,wireless\-backhaul,pppoe,tunnel\-vpn,mpls,arp,lldp,slow\-protocols,winrm,dcom,ge\-srtp,bsap,cclink\-ie,codesys,coap,zigbee,cdp}
 Restrict decoding to one protocol. Default: auto (tries all fourteen TCP
 protocols, independent of port number, plus CIP I/O, BACnet/IP, HART-IP, and
 FF-HSE on every

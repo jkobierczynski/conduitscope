@@ -1687,6 +1687,54 @@ def snap_pvst_frame(body: bytes = b"", *, dst: bytes = None, src: bytes = None) 
     return llc_length_frame(0xAA, 0xAA, 0x03, snap, dst=dst, src=src)
 
 
+# --- CDP (Cisco Discovery Protocol) -- same LLC/SNAP envelope as PVST+ above, disambiguated purely
+# by SNAP Protocol ID -- see cdp.hpp's file header comment. -------------------------------------
+
+CDP_MULTICAST_MAC = mac("01:00:0c:cc:cc:cc")  # the well-known CDP/VTP/DTP/PAgP/UDLD multicast MAC
+CDP_SNAP_PID = 0x2000
+PVSTPP_SNAP_PID = 0x010B  # Cisco (R)PVST+'s own SNAP Protocol ID -- see snap_pvst_frame above
+
+
+def snap_cdp_frame(body: bytes, *, snap_pid: int = CDP_SNAP_PID, dst: bytes = None,
+                    src: bytes = None) -> bytes:
+    """A SNAP-encapsulated classic-802.3 frame under Cisco's OUI (00:00:0C), carrying `body` after a
+    SNAP Protocol ID of `snap_pid` (CDP's own 0x2000 by default -- see cdp.hpp's "SNAP PROTOCOL ID"
+    header comment). Overriding `snap_pid` (e.g. to PVSTPP_SNAP_PID) builds the pinning-collision
+    fixtures below: a frame that is byte-for-byte identical in every way EXCEPT its SNAP Protocol ID,
+    used to prove decoder.cpp's dispatch keys on that field precisely rather than on SNAP_OUI_CISCO
+    alone (the bug this release's own roadmap item fixed)."""
+    dst = dst if dst is not None else CDP_MULTICAST_MAC
+    src = src if src is not None else PLC_MAC
+    snap = bytes([0x00, 0x00, 0x0C]) + struct.pack("!H", snap_pid) + body
+    return llc_length_frame(0xAA, 0xAA, 0x03, snap, dst=dst, src=src)
+
+
+def cdp_tlv(type_: int, value: bytes) -> bytes:
+    """One CDP TLV: Type(2, BE) + Length(2, BE, INCLUDING this 4-byte header itself) + value -- see
+    cdp.hpp's own "TLV FORMAT" header comment."""
+    return struct.pack("!HH", type_, 4 + len(value)) + value
+
+
+def cdp_header(version: int, ttl: int, checksum: int = 0) -> bytes:
+    """The fixed 4-byte CDP header -- Version(1) + TTL(1) + Checksum(2, BE, never validated by this
+    decoder -- see cdp.hpp's own "CHECKSUM" header comment, so an arbitrary/zero value here is fine)."""
+    return struct.pack("!BBH", version, ttl, checksum)
+
+
+def cdp_address_entry(protocol_type: int, protocol_bytes: bytes, address: bytes) -> bytes:
+    """One entry of a CDP Addresses/Management-Address TLV's own repeated structure: Protocol
+    Type(1) + Protocol Length(1) + Protocol(variable) + Address Length(2, BE) + Address(variable) --
+    see cdp.hpp's own "ADDRESS TLV STRUCTURE" header comment."""
+    return (struct.pack("!BB", protocol_type, len(protocol_bytes)) + protocol_bytes +
+            struct.pack("!H", len(address)) + address)
+
+
+def cdp_addresses_value(entries: list) -> bytes:
+    """The Addresses/Management-Address TLV's own value: Number of Addresses(4, BE) + that many
+    cdp_address_entry()s."""
+    return struct.pack("!I", len(entries)) + b"".join(entries)
+
+
 CAN_EFF_FLAG = 0x80000000
 CAN_RTR_FLAG = 0x40000000
 CAN_ERR_FLAG = 0x20000000
@@ -13234,6 +13282,123 @@ def build_lldp_sample():
     (TESTS_DIR / "sample_lldp.pcap").write_bytes(data)
 
 
+def build_cdp_sample():
+    """Cisco Discovery Protocol (CDP) -- SNAP-encapsulated classic IEEE 802.3 LLC framing under
+    Cisco's own OUI (00:00:0C), SNAP Protocol ID 0x2000 -- see cdp.hpp's file header comment for the
+    exact wire format each packet below exercises (cross-checked against Wireshark's own
+    packet-cdp.c and packet-cisco-oui.c).
+
+    Covers: a full-field CDPv2 announcement (Device ID, Addresses with a real IPv4, Port ID,
+    Capabilities with several bits set, Software Version, Platform, Native VLAN, Duplex, VTP
+    Management Domain, System Name, Management Address, Power Consumption/Requested/Available); a
+    minimal CDPv1 frame (fewer TLVs, proving version handling); a frame with an unknown/vendor
+    (HP-proprietary-range) TLV type, proving the structural-only fallback; a malformed/truncated
+    frame too short even for the 4-byte CDP header (proving tolerant-degrade behavior;
+    try_parse_cdp declines the frame entirely, and decoder.cpp names it as CDP-but-truncated rather
+    than falling back to the generic Cisco-SNAP label, since the SNAP Protocol ID already confirms
+    this WAS meant to be CDP); a frame with a TLV that declares more bytes than remain (in-body
+    truncation, tolerant TLV-walk degradation, not a whole-frame decline); the pinning-collision
+    fixtures (a CDP-shaped SNAP frame -- SNAP Protocol ID 0x2000 -- and a non-CDP-PID Cisco SNAP
+    frame using PVST+'s own SNAP Protocol ID 0x010B, proving the two are no longer conflated); and a
+    negative control (a non-Cisco SNAP OUI, proving no false-positive)."""
+    packets = []
+
+    SWITCH_MGMT_IP = "192.168.1.1"
+    PLC_IP = "192.168.1.50"
+
+    # 1) Full-field CDPv2 announcement.
+    caps1 = (1 << 3) | (1 << 4)  # Switch | Host
+    addr1 = cdp_addresses_value([cdp_address_entry(1, bytes([0xCC]), ip4(PLC_IP))])
+    body1 = (
+        cdp_tlv(0x0001, b"switch-core-01.plant.local") +
+        cdp_tlv(0x0002, addr1) +
+        cdp_tlv(0x0003, b"GigabitEthernet0/1") +
+        cdp_tlv(0x0004, struct.pack("!I", caps1)) +
+        cdp_tlv(0x0005, b"Cisco IOS Software, C2960 Software, Version 15.2(2)E") +
+        cdp_tlv(0x0006, b"cisco WS-C2960-24TT-L") +
+        cdp_tlv(0x0009, b"PLANT-VTP-DOMAIN") +
+        cdp_tlv(0x000A, struct.pack("!H", 100)) +
+        cdp_tlv(0x000B, bytes([1])) +  # Full duplex
+        cdp_tlv(0x0010, struct.pack("!H", 7000)) +  # Power Consumption, mW
+        cdp_tlv(0x0014, b"switch-core-01") +
+        cdp_tlv(0x0016, cdp_addresses_value([cdp_address_entry(1, bytes([0xCC]), ip4(SWITCH_MGMT_IP))])) +
+        cdp_tlv(0x0019, struct.pack("!I", 15400)) +  # Power Requested, mW
+        cdp_tlv(0x001A, struct.pack("!I", 30800))    # Power Available, mW
+    )
+    packets.append(snap_cdp_frame(cdp_header(2, 180) + body1))
+
+    # 2) Minimal CDPv1 frame -- only Device ID/Port ID/Capabilities/Software Version/Platform
+    #    (CDPv1's own real-world TLV set; System Name/VTP Domain/Native VLAN/Duplex/power TLVs are
+    #    CDPv2-era additions this packet deliberately omits), proving version handling.
+    caps2 = 1  # Router
+    body2 = (
+        cdp_tlv(0x0001, b"router-edge-01") +
+        cdp_tlv(0x0003, b"Ethernet0/0") +
+        cdp_tlv(0x0004, struct.pack("!I", caps2)) +
+        cdp_tlv(0x0005, b"Cisco IOS Software, 2600 Software, Version 12.4(15)T") +
+        cdp_tlv(0x0006, b"cisco 2621XM")
+    )
+    packets.append(snap_cdp_frame(cdp_header(1, 180) + body2, src=HMI_MAC))
+
+    # 3) Unknown/vendor TLV type (an HP-proprietary-range type, 0x1005) alongside a couple of
+    #    curated TLVs -- proves the structural-only (name + raw hex) fallback, and that it doesn't
+    #    disturb decoding of the curated TLVs around it.
+    body3 = (
+        cdp_tlv(0x0001, b"hp-ap-guest-03") +
+        cdp_tlv(0x0003, b"wifi0") +
+        cdp_tlv(0x1005, bytes([0xDE, 0xAD, 0xBE, 0xEF])) +
+        cdp_tlv(0x0006, b"HP MSM430 Access Point")
+    )
+    packets.append(snap_cdp_frame(cdp_header(2, 180) + body3, src=mac("00:1a:1e:aa:bb:cc")))
+
+    # 4) Malformed/truncated: only 3 bytes present after the SNAP header -- too short even for the
+    #    fixed 4-byte Version/TTL/Checksum header. try_parse_cdp declines entirely (returns
+    #    std::nullopt); decoder.cpp reports this as CDP-but-truncated rather than falling back to
+    #    the generic Cisco-SNAP label, since the SNAP Protocol ID (0x2000) already confirms this WAS
+    #    meant to be CDP -- the same "throw/decline only when even the fixed minimum can't be read"
+    #    tolerance can_socketcan.hpp's/ieee802154.hpp's own parsers already use.
+    packets.append(snap_cdp_frame(b"\x02\xb4\x00"))
+
+    # 5) A TLV that declares more bytes than remain in the frame -- in-body truncation: the 4-byte
+    #    header and Device ID TLV decode fine, then a Platform TLV claims a 40-byte value but only 6
+    #    bytes actually follow -- tolerant TLV-walk degradation (cdp_tlvs_truncated set, a note
+    #    added), not a whole-frame decline, mirroring try_parse_lldp's own identical posture.
+    broken_tlv = struct.pack("!HH", 0x0006, 44) + b"abcdef"  # declares 40 value bytes, only 6 present
+    body5 = cdp_tlv(0x0001, b"truncated-switch") + broken_tlv
+    packets.append(snap_cdp_frame(cdp_header(2, 180) + body5))
+
+    # 6) Pinning-collision fixture A: a CDP-shaped SNAP frame (SNAP Protocol ID 0x2000, the default)
+    #    -- decodes as "cdp", NOT "Cisco PVST+ (SNAP-encapsulated, not decoded)". See
+    #    docs/DEVELOPMENT.md's roadmap item 48 for the pre-fix mislabeling this pins against
+    #    regressing back to.
+    body6 = cdp_tlv(0x0001, b"pinning-fixture-cdp") + cdp_tlv(0x0003, b"Gi0/2")
+    packets.append(snap_cdp_frame(cdp_header(2, 180) + body6))
+
+    # 7) Pinning-collision fixture B: byte-for-byte the same shape as fixture A above, EXCEPT its
+    #    SNAP Protocol ID is PVSTPP_SNAP_PID (0x010B, PVST+'s own genuine PID) instead of CDP's
+    #    0x2000 -- must still decode as "Cisco PVST+ (SNAP-encapsulated, not decoded)", confirming
+    #    the fix didn't overcorrect into calling every Cisco-OUI SNAP frame "cdp" either.
+    packets.append(snap_cdp_frame(cdp_header(2, 180) + body6, snap_pid=PVSTPP_SNAP_PID))
+
+    # 8) A THIRD Cisco-OUI SNAP Protocol ID that is neither CDP's (0x2000) nor PVST+'s (0x010B) --
+    #    VTP's own real SNAP Protocol ID (0x2003, CISCO_PID_VTP) -- must be named generically
+    #    ("Cisco SNAP frame (OUI=00:00:0C, ProtocolID=0x2003, not decoded)"), neither "cdp" nor the
+    #    now-precise "Cisco PVST+" label -- proving the fix's own else-if chain is exact, not just a
+    #    two-way CDP/PVST+ split.
+    packets.append(snap_cdp_frame(cdp_header(2, 180) + body6, snap_pid=0x2003))
+
+    # 9) Negative control: a non-Cisco SNAP OUI (00:00:5E, the well-known IANA OUI) under the exact
+    #    same SNAP Protocol ID value as CDP's own (0x2000) -- proves detection keys on SNAP_OUI_CISCO
+    #    too, not on the Protocol ID value alone; must NOT decode as "cdp".
+    snap_other_oui = bytes([0x00, 0x00, 0x5E]) + struct.pack("!H", 0x2000) + cdp_header(2, 180) + body6
+    packets.append(llc_length_frame(0xAA, 0xAA, 0x03, snap_other_oui))
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_080_000 + i, i * 1000)
+    (TESTS_DIR / "sample_cdp.pcap").write_bytes(data)
+
+
 # --- BGP-4 (RFC 4271) wire-format helpers -----------------------------------------------
 # See bgp.hpp's own file header comment for the exact wire format each of these mirrors.
 
@@ -15920,6 +16085,7 @@ if __name__ == "__main__":
     build_goose_deep_nesting_sample()
     build_arp_sample()
     build_lldp_sample()
+    build_cdp_sample()
     build_bgp_sample()
     build_slow_protocols_sample()
     build_winrm_sample()

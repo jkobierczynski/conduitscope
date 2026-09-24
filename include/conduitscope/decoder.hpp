@@ -18,6 +18,7 @@
 #include "conduitscope/byteio.hpp"
 #include "conduitscope/can_socketcan.hpp"
 #include "conduitscope/cclink_ie.hpp"
+#include "conduitscope/cdp.hpp"
 #include "conduitscope/coap.hpp"
 #include "conduitscope/codesys.hpp"
 #include "conduitscope/cotp.hpp"
@@ -270,6 +271,13 @@ enum class ProtocolFilter {
                            // NBT-NS on that gate -- CoAP's own shortest legal messages are too
                            // short for a strong port-independent structural gate, see coap.hpp's
                            // own DETECTION/DISPATCH paragraph for the reasoning).
+    CdpOnly,               // only attempt Cisco Discovery Protocol (CDP) decoding -- see cdp.hpp. A
+                           // brand-new protocol, built directly on ProtocolDecoder from inception
+                           // like ARP/LLDP/Slow Protocols, but NOT EtherType-keyed (no protocol in
+                           // this codebase before it was SNAP-Protocol-ID-keyed) -- the same "gate
+                           // lives at the call site, not in the class" shape STP already
+                           // established for its own non-EtherType-keyed dispatch, see stp.hpp/
+                           // StpDecoder and decoder.cpp's own SNAP call site.
 };
 
 struct DecodeOptions {
@@ -583,9 +591,14 @@ struct DecodedPacket {
     // try_parse_sv doesn't recognize, or an EtherCAT frame whose header Type field
     // try_parse_ethercat doesn't recognize, or a classic-802.3-LLC-framed frame (EthernetFrame::
     // is_llc_length -- see link_layer.hpp) whose LLC DSAP/SSAP isn't STP's 0x42/0x42 (reported as
-    // "IEEE 802.3 LLC frame, DSAP=0xNN SSAP=0xNN" -- a Cisco (R)PVST+ SNAP/OUI match, or a GARP
-    // destination-MAC match, gets its own more specific name in that same summary instead, see
-    // stp.hpp -- neither is decoded further) -- see link_layer.hpp's ethertype_name; EtherType
+    // "IEEE 802.3 LLC frame, DSAP=0xNN SSAP=0xNN" -- a Cisco (R)PVST+ SNAP/OUI+PID match, a Cisco-OUI
+    // SNAP frame whose PID is neither PVST+'s nor CDP's own (named generically by its raw SNAP
+    // Protocol ID -- see decoder.cpp's own SNAP call site comment for the collision this precise PID
+    // check fixes), or a GARP destination-MAC match, each get their own more specific name in that
+    // same summary instead, see stp.hpp -- none of the three is decoded further) -- see
+    // link_layer.hpp's ethertype_name; a Cisco-OUI SNAP frame whose PID IS CDP's own (0x2000) that
+    // try_parse_cdp recognizes is promoted to "cdp" instead -- see cdp.hpp's CdpFrame, reached via
+    // DecodedPacket::result; EtherType
     // 0x8892 traffic that try_parse_profinet DOES recognize is promoted to "profinet" instead --
     // see profinet_has_dcp/profinet_has_cyclic_data below; EtherType 0x88B8 traffic that
     // try_parse_goose DOES recognize is promoted to "goose" instead -- see GooseFrame (goose.hpp),
@@ -818,6 +831,14 @@ struct DecodedPacket {
     // comment for the length-vs-EtherType plumbing this required. StpFrame::port_id_raw is the one
     // field this migration dropped from ever being rendered -- confirmed, like the cheap batch's
     // own vrrp_auth_password finding, that no writer ever read the old flat stp_port_id_raw either.
+
+    // CDP (Cisco Discovery Protocol, cdp.hpp) is a zero-flat-field protocol, built directly on
+    // ProtocolDecoder from inception like LLDP/ARP above -- its fields live in the CdpFrame carried
+    // by DecodedPacket::result, not here -- see output.cpp's write_cdp_json_fields and cdp.hpp's own
+    // CdpFrame/CdpAddress/CdpTlv. Unlike LLDP/ARP (both EtherType-keyed), and like STP just below,
+    // CDP rides classic IEEE 802.3 LLC framing -- specifically SNAP-encapsulated under Cisco's own
+    // OUI (has_ethernet stays true, has_ip stays false, src_mac/dst_mac are the only addressing) --
+    // see cdp.hpp's own file header comment and decoder.cpp's own SNAP call site.
 
     // DeviceNet is a zero-flat-field migrated protocol (see ProtocolDecoder/ProtocolResult in
     // protocol_decoder.hpp): its fields live in the DeviceNetFrame carried by

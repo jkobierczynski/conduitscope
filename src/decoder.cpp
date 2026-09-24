@@ -8,6 +8,7 @@
 #include "conduitscope/bacnet.hpp"
 #include "conduitscope/byteio.hpp"
 #include "conduitscope/can_socketcan.hpp"
+#include "conduitscope/cdp.hpp"
 #include "conduitscope/cotp.hpp"
 #include "conduitscope/devicenet.hpp"
 #include "conduitscope/dnp3.hpp"
@@ -1018,15 +1019,81 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                         }
                     }
 
-                    // Not STP (or the GARP-destination-MAC / non-STP-DSAP fallback above) -- named
-                    // structurally where cheaply possible, never guessed at further.
+                    // CDP (Cisco Discovery Protocol) -- see cdp.hpp's file header comment. Unlike
+                    // STP just above (LLC-SAP-keyed: DSAP==SSAP==LLC_SAP_BPDU), CDP is SNAP-
+                    // Protocol-ID-keyed: it rides the exact same LLC/SNAP envelope (DSAP==SSAP==
+                    // LLC_SAP_SNAP under Cisco's OUI) that (R)PVST+ uses -- so it cannot collide
+                    // with the STP branch above (different DSAP/SSAP entirely), but it very much
+                    // COULD, and until this fix DID, collide with the generic "Cisco PVST+" naming
+                    // right below.
+                    //
+                    // COLLISION FIX (docs/DEVELOPMENT.md roadmap item 48): before this fix, the
+                    // "else if (eth.has_snap && eth.snap_oui == SNAP_OUI_CISCO)" branch below
+                    // unconditionally reported EVERY Cisco-OUI SNAP frame as "Cisco PVST+ (SNAP-
+                    // encapsulated, not decoded)", regardless of its actual SNAP Protocol ID -- so a
+                    // real CDP frame (SNAP Protocol ID 0x2000) was silently mislabeled as PVST+.
+                    // This was verified as a real, reproducible mislabeling (not a hypothetical)
+                    // before this fix landed: a synthetic CDP-shaped SNAP frame, decoded through the
+                    // pre-fix code, printed exactly "Cisco PVST+ (SNAP-encapsulated, not decoded)" --
+                    // see tools/make_sample_pcap.py's own pinning-fixture packets in
+                    // build_cdp_sample() and the cdp_pre_fix_pinning_* CTest entries below, which
+                    // keep that pre-fix behavior pinned against regression by asserting it against
+                    // deliberately-PVST+-PID (0x010B) traffic. Cisco's own SNAP Protocol ID registry
+                    // (Wireshark's packet-cisco-oui.c, `cisco_pid_vals[]` -- see cdp.hpp's own
+                    // "SNAP PROTOCOL ID" header comment) makes PVSTP+ (0x010B) and CDP (0x2000)
+                    // genuinely, cleanly distinct values, so this dispatch now checks the SNAP
+                    // Protocol ID itself: exactly SNAP_PID_CDP (0x2000) tries CDP decoding, below;
+                    // every OTHER Cisco-OUI SNAP Protocol ID falls through to the naming chain right
+                    // below, which itself now only claims the specific "Cisco PVST+" name for the
+                    // frame whose PID is actually SNAP_PID_PVSTPP (0x010B), and names every other
+                    // Cisco-OUI SNAP Protocol ID (VTP 0x2003, DTP 0x2004, PAgP 0x0104, UDLD 0x0111,
+                    // CGMP 0x2001, or anything else this codebase doesn't decode) with a generic,
+                    // honestly-scoped "Cisco SNAP frame (OUI=00:00:0C, ProtocolID=0xNNNN, not
+                    // decoded)" label instead of the now-precise "PVST+" one.
+                    bool want_cdp = options_.protocol_filter == ProtocolFilter::Auto ||
+                                     options_.protocol_filter == ProtocolFilter::CdpOnly;
+                    if (want_cdp && eth.has_snap && eth.snap_oui == SNAP_OUI_CISCO &&
+                        eth.snap_protocol_id == SNAP_PID_CDP) {
+                        DecodeContext ctx;
+                        ctx.protocol_id = "cdp";
+                        if (auto result = cdp_decoder().decode(eth.llc_payload, ctx)) {
+                            const CdpFrame& cdp = result->as<CdpFrame>();
+                            out.protocol = "cdp";
+                            out.summary = cdp.summary;
+                            for (const auto& n : cdp.notes) out.notes.push_back(n);
+                            out.result = *result;
+                            return out;
+                        }
+                        // try_parse_cdp only ever returns nullopt when fewer than 4 bytes are
+                        // present -- too short to even read the fixed Version/TTL/Checksum header
+                        // (see cdp.hpp) -- named explicitly as CDP-but-truncated rather than falling
+                        // through to the generic Cisco-SNAP naming below, since the SNAP Protocol ID
+                        // match already confirms this WAS meant to be CDP.
+                        out.protocol = "non-ip";
+                        out.summary = "Cisco Discovery Protocol (SNAP-encapsulated), too short to "
+                                      "decode (need at least 4 bytes for the Version/TTL/Checksum "
+                                      "header)";
+                        return out;
+                    }
+
+                    // Not STP, not CDP (or the GARP-destination-MAC / non-STP-DSAP fallback above)
+                    // -- named structurally where cheaply possible, never guessed at further.
                     out.protocol = "non-ip";
                     std::ostringstream s;
                     if (is_garp_dst && eth.llc_dsap == LLC_SAP_BPDU && eth.llc_ssap == LLC_SAP_BPDU) {
                         s << "GARP (GVRP/GMRP) -- shares STP's Bridge Group Address DSAP/SSAP "
                              "(0x42/0x42), disambiguated by destination MAC, not decoded";
-                    } else if (eth.has_snap && eth.snap_oui == SNAP_OUI_CISCO) {
+                    } else if (eth.has_snap && eth.snap_oui == SNAP_OUI_CISCO &&
+                               eth.snap_protocol_id == SNAP_PID_PVSTPP) {
                         s << "Cisco PVST+ (SNAP-encapsulated, not decoded)";
+                    } else if (eth.has_snap && eth.snap_oui == SNAP_OUI_CISCO) {
+                        // Any other Cisco-OUI SNAP Protocol ID (VTP/DTP/PAgP/UDLD/CGMP/etc, or CDP's
+                        // own 0x2000 when --protocol restricts detection to something other than cdp
+                        // -- see want_cdp above) -- see this branch's own COLLISION FIX comment above
+                        // for why this is no longer lumped into the "Cisco PVST+" name.
+                        s << "Cisco SNAP frame (OUI=00:00:0C, ProtocolID=0x" << std::hex
+                          << std::uppercase << std::setw(4) << std::setfill('0')
+                          << eth.snap_protocol_id << std::dec << std::setfill(' ') << ", not decoded)";
                     } else if (eth.has_snap) {
                         s << "IEEE 802.3 LLC/SNAP frame, DSAP=0x" << std::hex << std::uppercase
                           << static_cast<unsigned>(eth.llc_dsap) << " SSAP=0x"

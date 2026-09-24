@@ -135,6 +135,15 @@ whenever APS-layer security is not in use, NWK/APS-layer-encrypted
 payloads correctly reported as opaque rather than guessed at, no
 decryption capability and no ZCL by explicit scope decision -- see
 `docs/PROTOCOL_COVERAGE.md`'s Zigbee section for the full writeup),
+CDP (Cisco Discovery Protocol, SNAP-encapsulated over classic IEEE 802.3
+LLC framing, Cisco OUI `00:00:0C` with SNAP Protocol ID `0x2000` -- Device
+ID/Port ID/Platform/Software Version/Capabilities/Native VLAN/Duplex/
+Addresses/Management Address/VTP Management Domain/System Name/Power
+Consumption/Power Requested/Power Available fully decoded, every other
+TLV including HP-proprietary extensions named structurally; also fixes a
+real pre-existing bug where every Cisco-OUI SNAP frame, including CDP's
+own, was mislabeled as PVST+ -- see `docs/PROTOCOL_COVERAGE.md`'s CDP
+section for the full writeup),
 IEEE Spanning Tree Protocol
 (STP/RSTP/MSTP), DeviceNet (CAN-bus CIP, via SocketCAN pcap captures), DNS,
 mDNS, LLMNR, and NetBIOS Name Service (NBT-NS), ICMP, RIP, IGMP, VRRP, HSRP,
@@ -244,7 +253,7 @@ traffic match what the segmentation policy says it should" question.
 
 Groundwork / v0.2.4. Every protocol named above is implemented, decoding real
 wire-format fields (not just naming the protocol), and covered by the
-automated test suite -- 1677 tests as of this writing, run via `ctest` after
+automated test suite -- 1689 tests as of this writing, run via `ctest` after
 building (see Building below). Where a real capture was available (public
 ICS-lab collections, vendor-attributed samples, or a live device on real
 hardware), the decoder is validated against it, not just a synthetic

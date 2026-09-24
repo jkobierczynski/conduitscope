@@ -40,12 +40,14 @@ namespace conduitscope {
 // (likewise two EtherTypes, one id(), see mpls.hpp), ARP, LLDP, Slow Protocols, STP (no EtherType
 // of its own at all -- LLC-framed, see stp.hpp's own comment on its ProtocolDecoder wrapper; it
 // can never match the loop regardless of position, since its ethertype() is nullopt, so it's
-// listed last here purely to keep this vector's own order equal to decoder.cpp's real one). Every
-// protocol here except GOOSE (the pilot) migrated in migration batch 3, EXCEPT ARP/LLDP/Slow
-// Protocols, added to this cascade afterward, NOT as part of migration batch 3 or any other
-// migration -- each a brand-new protocol built directly on ProtocolDecoder from inception (see
-// arp.hpp/lldp.hpp/slow_protocols.hpp), the same "new addition, not a migration" posture
-// TwinCAT/MELSEC/FINS established for their own cascades.
+// listed last here purely to keep this vector's own order equal to decoder.cpp's real one, CDP
+// (cdp.hpp) right after it for the identical reason -- SNAP-Protocol-ID-keyed, not EtherType-keyed,
+// so it can never match this loop's ethertype() lookup either). Every protocol here except GOOSE
+// (the pilot) migrated in migration batch 3, EXCEPT ARP/LLDP/Slow Protocols/CDP, added to this
+// cascade afterward, NOT as part of migration batch 3 or any other migration -- each a brand-new
+// protocol built directly on ProtocolDecoder from inception (see arp.hpp/lldp.hpp/
+// slow_protocols.hpp/cdp.hpp), the same "new addition, not a migration" posture TwinCAT/MELSEC/FINS
+// established for their own cascades.
 const std::vector<const ProtocolDecoder*>& ethertype_registry();
 
 // Migrated IP-protocol-number-gated protocols, in the order their decoder.cpp call sites run. Fully

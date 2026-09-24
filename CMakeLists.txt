@@ -64,6 +64,7 @@ add_library(conduitscope_core STATIC
   src/sv.cpp
   src/ethercat.cpp
   src/stp.cpp
+  src/cdp.cpp
   src/can_socketcan.cpp
   src/devicenet.cpp
   src/ieee802154.cpp
@@ -10168,6 +10169,108 @@ add_test(NAME lldp_stats_counted
   COMMAND conduitscope decode --format text --stats --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_lldp.pcap")
 set_tests_properties(lldp_stats_counted PROPERTIES
   PASS_REGULAR_EXPRESSION "packets: +7[^\n]*\n.*protocols:\n *lldp +6\n *non-ip +1")
+
+# ---------------------------------------------------------------------------------------------
+# CDP (Cisco Discovery Protocol, cdp.hpp) -- roadmap item 48. Unlike ARP/LLDP above (both
+# EtherType-keyed), CDP has no EtherType at all: it rides classic IEEE 802.3 LLC framing, SNAP-
+# encapsulated under Cisco's own OUI (00:00:0C), keyed by its own SNAP Protocol ID (0x2000) -- the
+# exact same envelope Cisco (R)PVST+ uses (see stp.hpp), disambiguated purely by that Protocol ID.
+# This release also fixes a real, pre-existing collision this same envelope caused: EVERY Cisco-OUI
+# SNAP frame -- CDP's own included -- used to be unconditionally reported as "Cisco PVST+ (SNAP-
+# encapsulated, not decoded)" regardless of its actual SNAP Protocol ID. Verified as a real,
+# reproducible mislabeling before this fix landed (see decoder.cpp's own SNAP call site comment for
+# how); the cdp_pinning_* tests below keep that pre-fix behavior pinned against regression by
+# asserting it still occurs for genuinely-PVST+-PID (0x010B) traffic, and asserting it no longer
+# occurs for CDP's own PID (0x2000). tests/sample_cdp.pcap (tools/make_sample_pcap.py's own
+# build_cdp_sample) covers: a full-field CDPv2 announcement (Device ID, Addresses with a real IPv4,
+# Port ID, Capabilities, Software Version, Platform, Native VLAN, Duplex, VTP Management Domain,
+# System Name, Management Address, Power Consumption/Requested/Available); a minimal CDPv1 frame; an
+# HP-proprietary-range unknown TLV (structural-only fallback); a frame too short even for the 4-byte
+# header (CDP-but-truncated, not generic-SNAP); a frame with an in-body TLV-length overrun (tolerant
+# truncation, not a whole-frame decline); the two pinning-collision fixtures (CDP-shaped PID 0x2000,
+# and PVST+-shaped PID 0x010B); a third, unrelated Cisco-OUI SNAP Protocol ID (VTP's own 0x2003,
+# proving the fix's naming is precise, not just a two-way split); and a non-Cisco-OUI negative
+# control (proving no false-positive).
+# ---------------------------------------------------------------------------------------------
+add_test(NAME cdp_full_field_cdpv2_announcement_decoded
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_cdp.pcap")
+set_tests_properties(cdp_full_field_cdpv2_announcement_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[cdp\\]  CDP v2 device=\"switch-core-01.plant.local\" port=\"GigabitEthernet0/1\" platform=\"cisco WS-C2960-24TT-L\" addr=192.168.1.50")
+
+add_test(NAME cdp_full_field_json_fields
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_cdp.pcap")
+set_tests_properties(cdp_full_field_json_fields PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"cdp_version\": 2,\n *\"cdp_ttl_seconds\": 180,\n *\"cdp_device_id\": \"switch-core-01.plant.local\",\n *\"cdp_port_id\": \"GigabitEthernet0/1\",\n *\"cdp_platform\": \"cisco WS-C2960-24TT-L\",\n *\"cdp_software_version\": \"Cisco IOS Software, C2960 Software, Version 15.2\\(2\\)E\",\n *\"cdp_capabilities\": 24,\n *\"cdp_capabilities_names\": \\[\"Switch\", \"Host\"\\],\n *\"cdp_native_vlan\": 100,\n *\"cdp_duplex\": \"Full\",\n *\"cdp_vtp_management_domain\": \"PLANT-VTP-DOMAIN\",\n *\"cdp_system_name\": \"switch-core-01\",\n *\"cdp_power_consumption_mw\": 7000,\n *\"cdp_power_requested_mw\": 15400,\n *\"cdp_power_available_mw\": 30800,\n *\"cdp_addresses\": \\[\\{\"protocol_type\": \"NLPID\", \"protocol\": \"IP\", \"is_ipv4\": true, \"address\": \"192.168.1.50\"\\}\\],\n *\"cdp_management_addresses\": \\[\\{\"protocol_type\": \"NLPID\", \"protocol\": \"IP\", \"is_ipv4\": true, \"address\": \"192.168.1.1\"\\}\\]")
+
+add_test(NAME cdp_minimal_cdpv1_decoded
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_cdp.pcap")
+set_tests_properties(cdp_minimal_cdpv1_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[cdp\\]  CDP v1 device=\"router-edge-01\" port=\"Ethernet0/0\" platform=\"cisco 2621XM\"")
+
+add_test(NAME cdp_unknown_vendor_tlv_structural_fallback
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_cdp.pcap")
+set_tests_properties(cdp_unknown_vendor_tlv_structural_fallback PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"type\": 4101, \"type_name\": \"HP-proprietary extension\", \"length\": 8, \"raw_hex\": \"0xdeadbeef\"")
+
+# Too short even for the fixed 4-byte header -- try_parse_cdp declines entirely; decoder.cpp names
+# this as CDP-but-truncated (the SNAP Protocol ID already confirms it WAS meant to be CDP) rather
+# than the generic Cisco-SNAP fallback -- NOT "Cisco PVST+", NOT the generic "Cisco SNAP frame" text.
+add_test(NAME cdp_truncated_before_header_reported_as_cdp_not_pvst
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_cdp.pcap")
+set_tests_properties(cdp_truncated_before_header_reported_as_cdp_not_pvst PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[non-ip\\]  Cisco Discovery Protocol \\(SNAP-encapsulated\\), too short to decode \\(need at least 4 bytes for the Version/TTL/Checksum header\\)")
+
+add_test(NAME cdp_in_body_tlv_length_overrun_graceful_truncation
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_cdp.pcap" --verbose)
+set_tests_properties(cdp_in_body_tlv_length_overrun_graceful_truncation PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[cdp\\]  CDP v2 device=\"truncated-switch\"\n *note: a TLV at byte offset 24 declares a 40-byte value but only 6 byte\\(s\\) remain -- stopped decoding further TLVs")
+
+# Pinning-collision fixture A: a CDP-shaped SNAP frame (SNAP Protocol ID 0x2000) now decodes as
+# "cdp", NOT "Cisco PVST+ (SNAP-encapsulated, not decoded)" -- the mislabeling this release's own
+# roadmap item 48 fixed (see this section's own header comment above).
+add_test(NAME cdp_pinning_cdp_pid_decodes_as_cdp_not_pvst
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_cdp.pcap")
+set_tests_properties(cdp_pinning_cdp_pid_decodes_as_cdp_not_pvst PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[cdp\\]  CDP v2 device=\"pinning-fixture-cdp\" port=\"Gi0/2\"")
+
+# Pinning-collision fixture B: the byte-for-byte same frame, but with PVST+'s own genuine SNAP
+# Protocol ID (0x010B) instead of CDP's -- must still decode as "Cisco PVST+ (SNAP-encapsulated,
+# not decoded)", confirming the fix didn't overcorrect into calling every Cisco-OUI SNAP frame "cdp".
+add_test(NAME cdp_pinning_pvstpp_pid_still_named_pvst
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_cdp.pcap")
+set_tests_properties(cdp_pinning_pvstpp_pid_still_named_pvst PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[non-ip\\]  Cisco PVST\\+ \\(SNAP-encapsulated, not decoded\\)")
+
+# A third Cisco-OUI SNAP Protocol ID (VTP's own real PID, 0x2003) that is neither CDP's nor PVST+'s
+# -- must be named generically, proving this fix's own naming is precise (a real 3-way split), not
+# just a CDP-vs-everything-else binary.
+add_test(NAME cdp_other_cisco_snap_pid_named_generically
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_cdp.pcap")
+set_tests_properties(cdp_other_cisco_snap_pid_named_generically PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[non-ip\\]  Cisco SNAP frame \\(OUI=00:00:0C, ProtocolID=0x2003, not decoded\\)")
+
+# Negative control: a non-Cisco SNAP OUI (00:00:5E) under the exact same SNAP Protocol ID value CDP
+# uses (0x2000) -- must NOT decode as "cdp" (detection keys on SNAP_OUI_CISCO too, not the PID alone).
+add_test(NAME cdp_negative_control_non_cisco_oui_not_decoded
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_cdp.pcap")
+set_tests_properties(cdp_negative_control_non_cisco_oui_not_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "#9  .*\\[non-ip\\]  IEEE 802.3 LLC/SNAP frame, DSAP=0xAA SSAP=0xAA OUI=00:00:5E ProtocolID=0x2000")
+
+# --protocol cdp isolation: every CDP-PID SNAP frame in sample_cdp.pcap must still decode as cdp
+# (CdpOnly gates the same SNAP-OUI+PID structural check Auto mode uses here, no port to restrict);
+# every non-CDP frame (truncated CDP, PVST+, other Cisco SNAP PID, non-Cisco OUI) still falls
+# through to "[non-ip]" even under this filter, the same posture LldpOnly's own isolation test
+# already established.
+add_test(NAME cdp_protocol_filter_isolates_cdp_only
+  COMMAND conduitscope decode --format text --protocol cdp --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_cdp.pcap")
+set_tests_properties(cdp_protocol_filter_isolates_cdp_only PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[cdp\\].*\\[cdp\\].*\\[cdp\\].*\\[non-ip\\].*\\[cdp\\].*\\[cdp\\].*\\[non-ip\\].*\\[non-ip\\].*\\[non-ip\\]"
+  FAIL_REGULAR_EXPRESSION "\\[parse-error\\]")
+
+add_test(NAME cdp_stats_counted
+  COMMAND conduitscope decode --format text --stats --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_cdp.pcap")
+set_tests_properties(cdp_stats_counted PROPERTIES
+  PASS_REGULAR_EXPRESSION "packets: +9[^\n]*\n.*protocols:\n *cdp +5\n *non-ip +4.*cdp device ids:\n *hp-ap-guest-03 +1\n *pinning-fixture-cdp +1\n *router-edge-01 +1\n *switch-core-01.plant.local +1\n *truncated-switch +1.*cdp platforms:\n *HP MSM430 Access Point +1\n *cisco 2621XM +1\n *cisco WS-C2960-24TT-L +1.*cdp capabilities seen:\n *Host +1\n *Router +1\n *Switch +1.*cdp native vlans:\n *100 +1")
 
 # ---------------------------------------------------------------------------------------------
 # BGP-4 (RFC 4271, TCP port 179, bgp.hpp) -- the last piece of the three-stage plan that also

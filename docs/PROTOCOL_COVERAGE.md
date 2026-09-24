@@ -10029,3 +10029,145 @@ regressions in both the default and
 rebuilds in both. See `include/conduitscope/ieee802154.hpp`'s and
 `include/conduitscope/zigbee.hpp`'s own file headers for the full
 writeup.
+
+### Cisco Discovery Protocol (CDP) -- SNAP-encapsulated classic IEEE 802.3 LLC framing, Cisco OUI `00:00:0C`, SNAP Protocol ID `0x2000`
+
+CDP is Cisco's own proprietary Layer-2 neighbor-discovery protocol --
+device ID, port/interface, platform, software version, capabilities,
+VLAN/duplex/power negotiation -- broadcast unsolicited by essentially
+every Cisco switch/router/AP/phone on a segment, the same free, passive
+asset-inventory signal LLDP already gives this tool (see this document's
+own LLDP section above), but for Cisco-specific gear that may not speak
+LLDP at all, or that speaks both. Unlike every EtherType-keyed protocol in
+this codebase, and like STP (this document's own STP section above), CDP
+has no EtherType of its own -- it rides classic IEEE 802.3 LLC framing,
+SNAP-encapsulated under Cisco's own IEEE-assigned OUI (`00:00:0C`), the
+exact same envelope Cisco (R)PVST+ uses, disambiguated from PVST+ purely
+by the 2-byte SNAP Protocol ID field.
+
+**Sourcing**: verified directly against Wireshark's own dissector source
+during this feature's own research phase, the same "verified source
+before implementation" discipline Zigbee/CoAP/CODESYS above already used
+-- `epan/dissectors/packet-cdp.c` for the header layout, the documented
+checksum quirk, the TLV format, and the TLV type table, and
+`epan/dissectors/packet-cisco-oui.c` for the `cisco_pid_vals[]`
+SNAP-Protocol-ID-to-name table that is the actual dispatch key this
+feature's own collision fix (below) depends on. The Capabilities bitmask
+was cross-checked against two independent secondary sources (a
+Cisco-CDP-MIB-derived Perl module, `SNMP::Info::CDP`, and an independent
+CDP protocol writeup) since this feature's own fetch tooling could name
+every capability field Wireshark defines, and their wire order, but could
+not pull the dissector's own literal bitmask-constant lines out of its
+source directly -- both secondary sources agree with each other and with
+Wireshark's own field names/order. See `cdp.hpp`'s own file header
+comment for the full, literal writeup this section summarizes.
+
+**A real, pre-existing collision found and fixed, not just avoided**:
+before this feature, `decoder.cpp`'s SNAP dispatch unconditionally
+reported EVERY Cisco-OUI SNAP frame -- CDP's own included -- as `"Cisco
+PVST+ (SNAP-encapsulated, not decoded)"`, regardless of its actual SNAP
+Protocol ID, so a real CDP frame was silently mislabeled as PVST+. This
+was verified as real and reproducible, not a hypothetical, before any fix
+was written: a synthetic CDP-shaped SNAP frame (Cisco OUI, SNAP Protocol
+ID `0x2000`), decoded through the pre-fix code, printed exactly `"Cisco
+PVST+ (SNAP-encapsulated, not decoded)"`. Cisco's own SNAP Protocol ID
+registry (`cisco_pid_vals[]`) makes PVSTP+ (`0x010B`) and CDP (`0x2000`)
+genuinely, cleanly distinct values -- also confirmed distinct there, for
+completeness: VTP (`0x2003`), DTP (`0x2004`), CGMP (`0x2001`), PAgP
+(`0x0104`), UDLD (`0x0111`). The fix: `decoder.cpp`'s SNAP dispatch now
+checks the SNAP Protocol ID itself -- exactly `0x2000` tries CDP decoding;
+exactly `0x010B` (and only that value) keeps the specific "Cisco PVST+"
+name; every OTHER Cisco-OUI SNAP Protocol ID (VTP/DTP/PAgP/UDLD/CGMP/etc,
+none of which this codebase decodes) now gets a generic, honestly-scoped
+`"Cisco SNAP frame (OUI=00:00:0C, ProtocolID=0xNNNN, not decoded)"` label
+instead of being lumped into the now-precise "PVST+" one. The
+`cdp_pinning_*` CTest entries (`CMakeLists.txt`) keep this fix pinned
+against regression: one fixture pair that is byte-for-byte identical
+except its SNAP Protocol ID (CDP's `0x2000` vs. PVST+'s own `0x010B`)
+proves the two are no longer conflated in either direction, and a third
+fixture (VTP's own real PID, `0x2003`) proves the fix's own naming is a
+genuine three-way split, not just a CDP-vs-everything-else binary.
+
+**Wire format -- header (4 bytes)**: Version (1 byte -- 1 for CDPv1, 2
+for CDPv2; CDPv2 added System Name/VTP Management Domain/Native
+VLAN/Duplex/the power-negotiation family, none of which a real CDPv1
+sender emits) + TTL (1 byte, seconds) + Checksum (2 bytes, big-endian,
+**never validated by this decoder**: Cisco's own original checksum
+implementation has a documented, real-world RFC 1071 non-compliance --
+it assumes a big-endian platform when padding an odd-length payload for
+the ones'-complement sum, folding the last real octet into the high byte
+of the final 16-bit word instead of appending a zero PAD byte -- and,
+per this feature's own research question, TLV walking depends ONLY on
+each TLV's own declared Length field, never on checksum correctness, so
+skipping validation costs nothing structural).
+
+**Wire format -- TLVs**: Type (2 bytes, big-endian) + Length (2 bytes,
+big-endian, **including the 4-byte header itself** -- confirmed against
+a live Wireshark-rendered worked example, a Device ID TLV shown as
+"Length: 13" carrying a 9-character value) + (Length - 4) bytes of value.
+Full field decode: Device ID, Port ID, Platform, Software Version,
+Capabilities (a 32-bit bitmask, every bit named -- Router/Transparent
+Bridge/Source-Route Bridge/Switch/Host/IGMP capable/Repeater/VoIP
+Phone/Remotely-Managed Device/CVTA-Supports-STP-Dispute/Two-Port MAC
+Relay), Native VLAN, Duplex, Addresses and Management Address (both share
+an identical Number-of-Addresses + repeated NLPID-typed-address
+structure; this decoder renders an IPv4 address, NLPID `0xCC` per
+ISO/IEC TR 9577, as a dotted-quad -- deliberately the one CDP TLV decoded
+richest, per this feature's own explicit scope steer -- anything else
+named by its NLPID/protocol-type and shown as raw hex), VTP Management
+Domain, System Name, Power Consumption, and Power Requested/Available's
+simple 4-byte shape (a longer, informally-documented multi-value power-
+negotiation extension exists on real UPOE gear, but this feature's own
+fetch tooling could not pull a source-confirmed byte layout for it out of
+`packet-cdp.c`, so that longer shape is left structural-only rather than
+guessed at, matching STP's own precedent for an unconfirmed sub-format).
+Structural-only (TLV name + raw Length + raw hex value): IP Prefix/ODR,
+Protocol Hello, VoIP VLAN Reply/Query, MTU, Trust Bitmap, Untrusted Port
+CoS, System Object ID, Location, External Port ID, Port Unidirectional,
+EnergyWise, Spare PoE, any HP-proprietary (`0x1000`-`0x100D`) extension,
+and any wholly unrecognized TLV type.
+
+**Architecture**: `cdp.hpp`/`cdp.cpp` follow STP's own precedent, not
+LLDP's -- `CdpDecoder::ethertype()` stays `std::nullopt` (CDP has none)
+while `gate_kind()` is still `GateKind::EtherType` for
+`protocol_registry.hpp`'s own audit-trail purposes; the actual structural
+gate (SNAP OUI + exact SNAP Protocol ID) lives at `decoder.cpp`'s own
+call site, immediately after STP's own block, not inside the class -- the
+identical "gate lives at the call site, not in the class" shape
+`StpDecoder` already established for a non-EtherType-keyed protocol. A
+zero-flat-field protocol from inception (no `DecodedPacket` field growth
+at all): its fields live in the `CdpFrame` carried by
+`DecodedPacket::result`, rendered by `output.cpp`'s own
+`write_cdp_json_fields`, with `--stats` aggregating device ID counts,
+platform counts, a capability-bit histogram, and a native-VLAN histogram
+(the shape this feature's own brief suggested).
+
+**Explicitly out of scope for this release**: checksum validation (see
+above -- confirmed not load-bearing for TLV walking); the Power
+Requested/Power Available TLVs' own longer, unconfirmed multi-value
+shape; any sub-structure of IP Prefix/ODR, Protocol Hello, EnergyWise, or
+an HP-proprietary extension (named, not decoded further); OID-to-dotted
+translation for System Object ID (shown as raw hex, the same posture
+LLDP's own Management Address OID already has).
+
+Validated against `tests/sample_cdp.pcap`: a full-field CDPv2 announcement
+(Device ID, Addresses with a real IPv4, Port ID, Capabilities with
+several bits set, Software Version, Platform, Native VLAN, Duplex, VTP
+Management Domain, System Name, Management Address, Power
+Consumption/Requested/Available -- all individually confirmed in both
+`--format text -v` and `--format json` before any CTest regex was
+written), a minimal CDPv1 frame (proving version handling), an
+HP-proprietary-range unknown TLV alongside curated ones (proving the
+structural-only fallback doesn't disturb its neighbors), a frame too
+short even for the 4-byte header (proving the tolerant-decline boundary,
+and that it's named CDP-but-truncated rather than falling back to the
+generic Cisco-SNAP label), a frame with an in-body TLV-length overrun
+(tolerant TLV-walk degradation, not a whole-frame decline, mirroring
+LLDP's own identical posture), the two pinning-collision fixtures
+described above, a third Cisco-OUI SNAP Protocol ID (VTP's own, proving
+the fix's naming is precise), and a non-Cisco-OUI negative control
+(proving no false-positive). 12 new `cdp_*` CTest tests were added; the
+full suite grew from 1677 to 1689 tests, passing with zero regressions in
+both the default and `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF` configs,
+zero-warning clean rebuilds in both. See `include/conduitscope/cdp.hpp`'s
+own file header for the full writeup.

@@ -287,6 +287,19 @@ private:
     size_t stp_msti_total_ = 0;      // summed across every decoded MST BPDU, since one can carry
                                        // more than one MSTI Configuration Message
     size_t stp_tc_count_ = 0;        // Configuration/RST/MST BPDUs with the TC flag set
+    std::map<std::string, size_t> cdp_device_id_counts_;  // keyed by CdpFrame::device_id, only when
+                                                             // has_device_id
+    std::map<std::string, size_t> cdp_platform_counts_;   // keyed by CdpFrame::platform, only when
+                                                             // has_platform
+    std::map<std::string, size_t> cdp_capability_counts_; // one increment per named capability bit
+                                                             // seen (see cdp_render_capabilities),
+                                                             // across every decoded CDP frame -- a
+                                                             // device with several bits set
+                                                             // increments several entries
+    std::map<uint16_t, size_t> cdp_native_vlan_counts_;   // keyed by CdpFrame::native_vlan, only
+                                                             // when has_native_vlan -- a histogram,
+                                                             // per this task's own suggested stats
+                                                             // shape
     std::map<std::string, size_t> devicenet_group_counts_;   // "Group 1"/"Group 2"/"Group 3"/
                                                                 // "Group 4"/"Unclassified (0x07F0-0x07FF)"
     std::map<std::string, size_t> devicenet_message_type_counts_;
