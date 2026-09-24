@@ -36,6 +36,7 @@
 #include "conduitscope/hartip.hpp"
 #include "conduitscope/hsrp.hpp"
 #include "conduitscope/icmp.hpp"
+#include "conduitscope/ieee802154.hpp"
 #include "conduitscope/iec104.hpp"
 #include "conduitscope/igmp.hpp"
 #include "conduitscope/igrp.hpp"
@@ -70,6 +71,7 @@
 #include "conduitscope/twincat.hpp"
 #include "conduitscope/vrrp.hpp"
 #include "conduitscope/winrm.hpp"
+#include "conduitscope/zigbee.hpp"
 
 namespace conduitscope {
 
@@ -87,6 +89,11 @@ enum class ProtocolFilter {
     StpOnly,      // only attempt STP/RSTP/MSTP (classic IEEE 802.3 LLC BPDU) decoding
     DevicenetOnly, // only attempt DeviceNet (CAN-bus CIP) decoding -- meaningful only on a
                     // LINKTYPE_CAN_SOCKETCAN capture, see can_socketcan.hpp/devicenet.hpp
+    ZigbeeOnly,    // only attempt Zigbee (IEEE 802.15.4 MAC + NWK + APS + ZDP) decoding --
+                    // meaningful only on a LINKTYPE_IEEE802_15_4_WITHFCS or
+                    // LINKTYPE_IEEE802_15_4_TAP capture, see ieee802154.hpp/zigbee.hpp. The
+                    // second GateKind::LinkType protocol, joining DeviceNet on this filter
+                    // shape (its own link-type gate, not a port).
     BacnetOnly,   // only attempt BACnet/IP (BVLC/NPDU/APDU) decoding
     HartIpOnly,   // only attempt HART-IP (session control / tunneled Pass-Through) decoding
     OpcUaOnly,    // only attempt OPC UA (UA-TCP / Secure Conversation) decoding
@@ -598,7 +605,12 @@ struct DecodedPacket {
     // flat-field migrated protocol, see DecodedPacket::result and devicenet.hpp; an EFF/RTR/ERR-
     // flagged frame on that same link type is "non-ip"
     // (named structurally by which flag(s) are set, never decoded further -- not a valid DeviceNet
-    // frame shape at all)),
+    // frame shape at all)). Also "zigbee" (a LINKTYPE_IEEE802_15_4_WITHFCS/_TAP capture whose IEEE
+    // 802.15.4 MAC frame is a Data-type frame -- try_parse_zigbee always recognizes these, even
+    // ones whose NWK/APS/ZDP layers turn out to be inaccessible, e.g. NWK-layer security enabled --
+    // see zigbee.hpp/ieee802154.hpp; a zero-flat-field migrated protocol, see DecodedPacket::result)
+    // -- a non-Data-type MAC frame (Beacon/Ack/MAC-Command) on that same link type is "non-ip"
+    // instead (named structurally by its MAC Frame Type, never decoded further),
     // "unsupported-link", or "parse-error". Also "dns"/"mdns"/"llmnr" (a UDP payload on the
     // matching port -- 53/5353/5355 -- that try_parse_dns_message recognizes, see dns_* fields
     // below), "nbns" (NetBIOS Name Service/NBT-NS, UDP port 137, see nbns_* fields below), and

@@ -15217,6 +15217,632 @@ def build_coap_sample():
     (TESTS_DIR / "sample_coap.pcap").write_bytes(data)
 
 
+# --- Zigbee (IEEE 802.15.4 MAC + Zigbee NWK/APS/ZDP) -----------------------------------------
+#
+# Zigbee needs raw pcap records containing 802.15.4 MAC frames directly -- no Ethernet framing at
+# all, the same "wrap a protocol-agnostic link layer in its own pcap linktype, no Ethernet
+# involved" shape can_socketcan_frame()/build_devicenet_sample() already established for DeviceNet
+# (see that function's own docstring for the direct precedent this follows). Every helper below is
+# built directly from the byte-exact wire-format research ieee802154.hpp/zigbee.hpp's own file
+# header comments cite -- see those files rather than duplicating the sourcing citations here.
+#
+# All MAC frames below use IEEE 802.15.4-2006 (Frame Version 1, the realistic value real Zigbee
+# radios use), Short/Short addressing with PAN ID Compression set (so only a single Destination PAN
+# ID travels on the wire, no Source PAN ID -- the common real-world shape for a single-PAN mesh).
+# All NWK frames use ZigBee PRO (NWK Protocol Version 2), the realistic value for essentially all
+# modern Zigbee traffic -- see zigbee.hpp's own "2007+-only" scope note for why this fixture never
+# exercises the pre-2007 shapes this decoder deliberately doesn't implement.
+LINKTYPE_IEEE802_15_4_WITHFCS = 195
+LINKTYPE_IEEE802_15_4_TAP = 283
+
+ZB_PAN = 0x1234
+ZB_COORD_SHORT = 0x0000
+ZB_COORD_EUI = 0x00124B0001020304
+ZB_DEV1_SHORT = 0xA1B2
+ZB_DEV1_EUI = 0x00124B0001020305
+ZB_DEV2_SHORT = 0xC3D4
+ZB_DEV2_EUI = 0x00124B0001020306
+
+
+def ieee802154_fcf(frame_type: int, *, security: bool = False, frame_pending: bool = False,
+                    ack_request: bool = False, pan_id_compression: bool = False,
+                    seqno_suppression: bool = False, ie_present: bool = False,
+                    dst_addr_mode: int = 0, src_addr_mode: int = 0, frame_version: int = 1) -> int:
+    """The 2-byte, little-endian IEEE 802.15.4 Frame Control Field -- see ieee802154.hpp's own
+    file header comment (section 3.1) for every mask/bit this packs."""
+    fcf = frame_type & 0x07
+    if security: fcf |= 0x0008
+    if frame_pending: fcf |= 0x0010
+    if ack_request: fcf |= 0x0020
+    if pan_id_compression: fcf |= 0x0040
+    if seqno_suppression: fcf |= 0x0100
+    if ie_present: fcf |= 0x0200
+    fcf |= (dst_addr_mode & 0x3) << 10
+    fcf |= (frame_version & 0x3) << 12
+    fcf |= (src_addr_mode & 0x3) << 14
+    return fcf
+
+
+def ieee802154_aux_security_header(security_level: int, key_id_mode: int, frame_counter: int, *,
+                                    frame_counter_suppressed: bool = False, key_source: bytes = b"",
+                                    key_index=None) -> bytes:
+    """The IEEE 802.15.4 MAC-layer Auxiliary Security Header -- see ieee802154.hpp section 3.4.
+    A DIFFERENT byte layout from zigbee_security_header() below (the NWK/APS one)."""
+    control = (security_level & 0x07) | ((key_id_mode & 0x03) << 3)
+    if frame_counter_suppressed:
+        control |= 0x20
+    out = struct.pack("<B", control)
+    if not frame_counter_suppressed:
+        out += struct.pack("<I", frame_counter)
+    out += key_source
+    if key_index is not None:
+        out += struct.pack("<B", key_index)
+    return out
+
+
+def ieee802154_mac_frame(frame_type: int, *, seqno=0, dst_pan: bytes = None, dst_addr: bytes = None,
+                          src_pan: bytes = None, src_addr: bytes = None, aux_security: bytes = b"",
+                          payload: bytes = b"", security: bool = False, frame_pending: bool = False,
+                          ack_request: bool = False, pan_id_compression: bool = False,
+                          seqno_suppression: bool = False, frame_version: int = 1) -> bytes:
+    """Builds one raw 802.15.4 MAC frame (no FCS) -- FCF + conditional fields exactly per
+    ieee802154.hpp's own addressing-presence rules. `dst_addr`/`src_addr`/`dst_pan`/`src_pan` are
+    already-packed little-endian bytes (2 bytes for a short address/PAN, 8 for an extended
+    address) or None; presence on the wire is driven purely by what the CALLER passes here, so the
+    caller is responsible for matching them to the FCF flags also passed (pan_id_compression,
+    dst/src addr mode implied by dst_addr/src_addr's own length) -- this mirrors real hardware,
+    which doesn't validate its own frame shape either."""
+    def addr_mode_for(addr):
+        if addr is None:
+            return 0
+        return 2 if len(addr) == 2 else 3
+
+    fcf = ieee802154_fcf(frame_type, security=security, frame_pending=frame_pending,
+                          ack_request=ack_request, pan_id_compression=pan_id_compression,
+                          seqno_suppression=seqno_suppression, dst_addr_mode=addr_mode_for(dst_addr),
+                          src_addr_mode=addr_mode_for(src_addr), frame_version=frame_version)
+    out = struct.pack("<H", fcf)
+    if not seqno_suppression:
+        out += struct.pack("<B", seqno)
+    if dst_pan is not None:
+        out += dst_pan
+    if dst_addr is not None:
+        out += dst_addr
+    if src_pan is not None:
+        out += src_pan
+    if src_addr is not None:
+        out += src_addr
+    out += aux_security
+    out += payload
+    return out
+
+
+def ieee802154_withfcs_frame(mac_bytes: bytes, fcs: bytes = b"\xDE\xAD") -> bytes:
+    """One LINKTYPE_IEEE802_15_4_WITHFCS (195) pcap record: the raw MAC frame plus a trailing
+    2-byte FCS -- this decoder never validates it (see ieee802154.hpp section 1), so any 2 bytes
+    do; the value here is deliberately NOT a real CRC, to prove that."""
+    return mac_bytes + fcs
+
+
+def ieee802154_tap_frame(mac_bytes: bytes, *, fcs_type: int = 0, fcs: bytes = b"",
+                          extra_tlvs: bytes = b"", version: int = 0) -> bytes:
+    """One LINKTYPE_IEEE802_15_4_TAP (283) pcap record: the 4-byte fixed header, an FCS_TYPE TLV
+    (0x0000) declaring `fcs_type` (0=None, 1=16-bit CRC, 2=32-bit CRC), then the MAC frame followed
+    by however many trailing FCS bytes `fcs_type` implies (the caller passes those explicitly via
+    `fcs` -- 0 bytes for fcs_type=0, 2 for fcs_type=1, 4 for fcs_type=2) -- see ieee802154.hpp
+    section 2."""
+    fcs_type_tlv = struct.pack("<HHB", 0x0000, 1, fcs_type) + b"\x00\x00\x00"  # 1-byte value, padded to 4
+    tlvs = fcs_type_tlv + extra_tlvs
+    length = 4 + len(tlvs)
+    header = struct.pack("<BBH", version, 0, length)
+    return header + tlvs + mac_bytes + fcs
+
+
+def zigbee_nwk_fcf(frame_type: int, version: int, *, discover_route: int = 0, multicast: bool = False,
+                    security: bool = False, source_route: bool = False, ext_dst: bool = False,
+                    ext_src: bool = False, end_device_initiator: bool = False) -> int:
+    """The 2-byte, little-endian Zigbee NWK Frame Control Field -- see zigbee.hpp section 4.1."""
+    fcf = frame_type & 0x03
+    fcf |= (version & 0x0F) << 2
+    fcf |= (discover_route & 0x03) << 6
+    if multicast: fcf |= 0x0100
+    if security: fcf |= 0x0200
+    if source_route: fcf |= 0x0400
+    if ext_dst: fcf |= 0x0800
+    if ext_src: fcf |= 0x1000
+    if end_device_initiator: fcf |= 0x2000
+    return fcf
+
+
+def zigbee_security_header(security_level: int, key_id: int, frame_counter: int, *,
+                            extended_nonce: bool = False, ext_source=None, key_seqno=None) -> bytes:
+    """The Zigbee NWK/APS Auxiliary Security Header (dissect_zbee_secure -- shared by BOTH layers)
+    -- see zigbee.hpp section 4.9/5.9. A DIFFERENT byte layout from
+    ieee802154_aux_security_header() above (the MAC-layer one)."""
+    control = (security_level & 0x07) | ((key_id & 0x03) << 3)
+    if extended_nonce:
+        control |= 0x20
+    out = struct.pack("<B", control) + struct.pack("<I", frame_counter)
+    if extended_nonce:
+        out += struct.pack("<Q", ext_source if ext_source is not None else 0)
+    if key_id == 1:  # Network Key -- the only key_id value that carries a Key Sequence Number
+        out += struct.pack("<B", key_seqno if key_seqno is not None else 0)
+    return out
+
+
+def zigbee_nwk_frame(frame_type: int, version: int, dst: int, src: int, radius: int, seqno: int, *,
+                      discover_route: int = 0, multicast: bool = False, security: bool = False,
+                      source_route: bool = False, ext_dst_addr=None, ext_src_addr=None,
+                      mcast_control=None, relay_list=None, security_header: bytes = b"",
+                      payload: bytes = b"") -> bytes:
+    """Builds one Zigbee NWK frame -- FCF + conditional fields exactly per zigbee.hpp's own field-
+    presence rules (section 4.2-4.10)."""
+    ext_dst = ext_dst_addr is not None
+    ext_src = ext_src_addr is not None
+    fcf = zigbee_nwk_fcf(frame_type, version, discover_route=discover_route, multicast=multicast,
+                          security=security, source_route=source_route, ext_dst=ext_dst, ext_src=ext_src)
+    out = struct.pack("<H", fcf)
+    if frame_type == 3:  # Inter-PAN -- just the FCF, everything else is payload
+        return out + payload
+    out += struct.pack("<HHBB", dst, src, radius, seqno)
+    if ext_dst:
+        out += struct.pack("<Q", ext_dst_addr)
+    if ext_src:
+        out += struct.pack("<Q", ext_src_addr)
+    if multicast:
+        mode, nmr, mmr = mcast_control if mcast_control else (0, 0, 0)
+        out += struct.pack("<B", (mode & 0x3) | ((nmr & 0x7) << 2) | ((mmr & 0x7) << 5))
+    if source_route:
+        relays = relay_list or []
+        out += struct.pack("<BB", len(relays), 0)
+        for r in relays:
+            out += struct.pack("<H", r)
+    out += security_header
+    out += payload
+    return out
+
+
+def zigbee_aps_fcf(frame_type: int, delivery_mode: int, *, indirect_or_ack_format: bool = False,
+                    security: bool = False, ack_req: bool = False, ext_header: bool = False) -> int:
+    """The 1-byte Zigbee APS Frame Control Field -- see zigbee.hpp section 5.1."""
+    fcf = frame_type & 0x03
+    fcf |= (delivery_mode & 0x03) << 2
+    if indirect_or_ack_format: fcf |= 0x10
+    if security: fcf |= 0x20
+    if ack_req: fcf |= 0x40
+    if ext_header: fcf |= 0x80
+    return fcf
+
+
+def zigbee_aps_frame(frame_type: int, delivery_mode: int, *, dst_endpoint=None, group_address=None,
+                      cluster_id=None, profile_id=None, src_endpoint=None, counter=None,
+                      security: bool = False, ack_req: bool = False, security_header: bytes = b"",
+                      command_id=None, payload: bytes = b"") -> bytes:
+    """Builds one Zigbee APS frame -- FCF + conditional fields exactly per zigbee.hpp's own
+    field-presence rules (section 5.2-5.10), assuming ZigBee PRO (2007+) throughout (this fixture
+    never exercises pre-2007 field shapes -- see zigbee.hpp's own scope note)."""
+    fcf = zigbee_aps_fcf(frame_type, delivery_mode, security=security, ack_req=ack_req)
+    out = struct.pack("<B", fcf)
+    if frame_type != 1:  # Command frames skip ALL endpoint/cluster/profile fields unconditionally
+        if dst_endpoint is not None:
+            out += struct.pack("<B", dst_endpoint)
+        if delivery_mode == 3:  # Group
+            out += struct.pack("<H", group_address if group_address is not None else 0)
+        if cluster_id is not None:
+            out += struct.pack("<H", cluster_id)
+        if profile_id is not None:
+            out += struct.pack("<H", profile_id)
+        if src_endpoint is not None:
+            out += struct.pack("<B", src_endpoint)
+    if counter is not None:
+        out += struct.pack("<B", counter)
+    out += security_header
+    if command_id is not None:
+        out += struct.pack("<B", command_id)
+    out += payload
+    return out
+
+
+def zigbee_data_mac_frame(mac_seqno: int, dst_short: int, src_short: int, nwk_bytes: bytes, *,
+                           pan: int = ZB_PAN, ack_request: bool = True,
+                           mac_security_header: bytes = None) -> bytes:
+    """Wraps `nwk_bytes` (a full Zigbee NWK frame) in a realistic IEEE 802.15.4-2006 MAC Data
+    frame: Short/Short addressing, PAN ID Compression set (single Destination PAN ID on the wire),
+    the common real-world shape -- see this section's own module-level comment. When
+    `mac_security_header` is given, MAC-layer security is enabled too (FCF Security Enabled bit
+    set) -- exercised by exactly one fixture packet, to prove ieee802154.hpp/zigbee.hpp's own
+    documented "Zigbee never really does this" scope decision degrades correctly."""
+    return ieee802154_mac_frame(
+        1, seqno=mac_seqno, dst_pan=struct.pack("<H", pan), dst_addr=struct.pack("<H", dst_short),
+        src_addr=struct.pack("<H", src_short), ack_request=ack_request, pan_id_compression=True,
+        frame_version=1, security=mac_security_header is not None,
+        aux_security=mac_security_header if mac_security_header is not None else b"",
+        payload=nwk_bytes)
+
+
+# --- ZDP payload builders -- see zigbee.hpp section 6.2 for every shape below ------------------
+
+def zdp_hdr(seqno: int, body: bytes) -> bytes:
+    return struct.pack("<B", seqno) + body
+
+
+def zdp_nwk_or_ieee_addr_resp(status: int, *, ieee: int = 0, nwk: int = 0, assoc=None,
+                               start_index: int = 0) -> bytes:
+    out = struct.pack("<B", status)
+    if status == 0:
+        out += struct.pack("<Q", ieee) + struct.pack("<H", nwk)
+        if assoc is not None:
+            out += struct.pack("<BB", len(assoc), start_index)
+            for a in assoc:
+                out += struct.pack("<H", a)
+    return out
+
+
+def zdp_node_desc_resp(status: int, *, nwk: int = 0, logical_type: int = 1,
+                        complex_avail: bool = False, user_avail: bool = False, cap: int = 0x8E,
+                        manuf: int = 0x1234, maxbuf: int = 80, maxin: int = 128,
+                        servermask: int = 0x0000, maxout: int = 128, desccap: int = 0x00) -> bytes:
+    out = struct.pack("<B", status)
+    if status == 0:
+        flags = logical_type & 0x07
+        if complex_avail: flags |= 0x08
+        if user_avail: flags |= 0x10
+        out += struct.pack("<H", nwk) + struct.pack("<H", flags) + struct.pack("<B", cap)
+        out += struct.pack("<H", manuf) + struct.pack("<B", maxbuf) + struct.pack("<H", maxin)
+        out += struct.pack("<H", servermask) + struct.pack("<H", maxout) + struct.pack("<B", desccap)
+    return out
+
+
+def zdp_simple_desc_resp(status: int, *, nwk: int = 0, ep: int = 1, profile: int = 0x0104,
+                          device: int = 0x0100, devver: int = 1, in_clusters=None,
+                          out_clusters=None) -> bytes:
+    if status != 0:
+        return struct.pack("<B", status)
+    in_clusters = in_clusters or []
+    out_clusters = out_clusters or []
+    body = struct.pack("<B", ep) + struct.pack("<H", profile) + struct.pack("<H", device)
+    body += struct.pack("<B", devver) + struct.pack("<B", len(in_clusters))
+    for c in in_clusters:
+        body += struct.pack("<H", c)
+    body += struct.pack("<B", len(out_clusters))
+    for c in out_clusters:
+        body += struct.pack("<H", c)
+    return struct.pack("<B", status) + struct.pack("<H", nwk) + struct.pack("<B", len(body)) + body
+
+
+def zdp_active_ep_resp(status: int, *, nwk: int = 0, eps=None) -> bytes:
+    if status != 0:
+        return struct.pack("<B", status)
+    eps = eps or []
+    return struct.pack("<B", status) + struct.pack("<H", nwk) + struct.pack("<B", len(eps)) + bytes(eps)
+
+
+def zdp_match_desc_resp(status: int, *, nwk: int = 0, matches=None) -> bytes:
+    if status != 0:
+        return struct.pack("<B", status)
+    matches = matches or []
+    return (struct.pack("<B", status) + struct.pack("<H", nwk) + struct.pack("<B", len(matches)) +
+            bytes(matches))
+
+
+def zdp_bind_or_unbind_req(src_ieee: int, src_ep: int, cluster: int, dst_mode: int, *,
+                            dst_group=None, dst_ieee=None, dst_ep=None) -> bytes:
+    out = (struct.pack("<Q", src_ieee) + struct.pack("<B", src_ep) + struct.pack("<H", cluster) +
+           struct.pack("<B", dst_mode))
+    if dst_mode == 1:  # Group
+        out += struct.pack("<H", dst_group)
+    elif dst_mode == 3:  # Unicast
+        out += struct.pack("<Q", dst_ieee) + struct.pack("<B", dst_ep)
+    return out
+
+
+def zdp_neighbor_table_entry(ext_pan: int, ext_addr: int, nwk_addr: int, device_type: int,
+                              rx_on_idle: int, relationship: int, permit_joining: int, depth: int,
+                              lqi: int) -> bytes:
+    packed1 = (device_type & 0x03) | ((rx_on_idle & 0x03) << 2) | ((relationship & 0x07) << 4)
+    return (struct.pack("<Q", ext_pan) + struct.pack("<Q", ext_addr) + struct.pack("<H", nwk_addr) +
+            struct.pack("<B", packed1) + struct.pack("<B", permit_joining & 0x03) +
+            struct.pack("<B", depth) + struct.pack("<B", lqi))
+
+
+def zdp_mgmt_lqi_resp(status: int, *, total: int = 0, start_index: int = 0, entries=None) -> bytes:
+    if status != 0:
+        return struct.pack("<B", status)
+    entries = entries or []
+    out = struct.pack("<B", status) + struct.pack("<BBB", total, start_index, len(entries))
+    for e in entries:
+        out += e
+    return out
+
+
+def zdp_routing_table_entry(dest: int, status_byte: int, next_hop: int) -> bytes:
+    return struct.pack("<H", dest) + struct.pack("<B", status_byte) + struct.pack("<H", next_hop)
+
+
+def zdp_mgmt_rtg_resp(status: int, *, total: int = 0, start_index: int = 0, entries=None) -> bytes:
+    if status != 0:
+        return struct.pack("<B", status)
+    entries = entries or []
+    out = struct.pack("<B", status) + struct.pack("<BBB", total, start_index, len(entries))
+    for e in entries:
+        out += e
+    return out
+
+
+def build_zigbee_sample():
+    """Zigbee (IEEE 802.15.4 MAC + NWK + APS + ZDP), LINKTYPE_IEEE802_15_4_WITHFCS (195)-framed --
+    see ieee802154.hpp/zigbee.hpp for the full sourcing/scoping/wire-format writeup, and this
+    section's own module-level comment for the shared MAC/NWK addressing shape every packet below
+    uses. Every APS Data/Command frame below carries an APS Counter of 0 for simplicity (this
+    decoder doesn't correlate it against anything).
+
+    Packet numbers in comments match this function's own numbered comments 1-30.
+    """
+    packets = []
+    seq = [0]  # shared mutable MAC sequence-number counter, mirrors a real radio's own counter
+
+    def mac_seq():
+        seq[0] = (seq[0] + 1) & 0xFF
+        return seq[0]
+
+    def emit(dst_short, src_short, nwk_bytes, **kw):
+        packets.append(ieee802154_withfcs_frame(
+            zigbee_data_mac_frame(mac_seq(), dst_short, src_short, nwk_bytes, **kw)))
+
+    def nwk_data(dst, src, seqno, aps_bytes, *, radius=30):
+        return zigbee_nwk_frame(0, 2, dst, src, radius, seqno, payload=aps_bytes)
+
+    nwk_seq = [0]
+
+    def next_nwk_seq():
+        nwk_seq[0] = (nwk_seq[0] + 1) & 0xFF
+        return nwk_seq[0]
+
+    def aps_zdp(dst, src, zdp_seqno, cluster, zdp_body, *, aps_counter=0):
+        aps = zigbee_aps_frame(0, 0, dst_endpoint=0, cluster_id=cluster, profile_id=0x0000,
+                                src_endpoint=0, counter=aps_counter,
+                                payload=zdp_hdr(zdp_seqno, zdp_body))
+        return nwk_data(dst, src, next_nwk_seq(), aps)
+
+    # 1) NWK_addr request: Coordinator asks DEV1's short address by IEEE address.
+    emit(ZB_DEV1_SHORT, ZB_COORD_SHORT,
+         aps_zdp(ZB_DEV1_SHORT, ZB_COORD_SHORT, 1, 0x0000,
+                 struct.pack("<Q", ZB_DEV1_EUI) + struct.pack("<BB", 0, 0)))
+
+    # 2) NWK_addr response: DEV1 replies SUCCESS, no associated-device list.
+    emit(ZB_COORD_SHORT, ZB_DEV1_SHORT,
+         aps_zdp(ZB_COORD_SHORT, ZB_DEV1_SHORT, 1, 0x8000,
+                 zdp_nwk_or_ieee_addr_resp(0, ieee=ZB_DEV1_EUI, nwk=ZB_DEV1_SHORT)))
+
+    # 3) IEEE_addr request: Coordinator asks DEV1's IEEE address by short address.
+    emit(ZB_DEV1_SHORT, ZB_COORD_SHORT,
+         aps_zdp(ZB_DEV1_SHORT, ZB_COORD_SHORT, 2, 0x0001,
+                 struct.pack("<H", ZB_DEV1_SHORT) + struct.pack("<BB", 0, 0)))
+
+    # 4) IEEE_addr response: SUCCESS, with a 1-entry associated-device list.
+    emit(ZB_COORD_SHORT, ZB_DEV1_SHORT,
+         aps_zdp(ZB_COORD_SHORT, ZB_DEV1_SHORT, 2, 0x8001,
+                 zdp_nwk_or_ieee_addr_resp(0, ieee=ZB_DEV1_EUI, nwk=ZB_DEV1_SHORT,
+                                            assoc=[ZB_DEV2_SHORT], start_index=0)))
+
+    # 5) Node_Desc request.
+    emit(ZB_DEV1_SHORT, ZB_COORD_SHORT,
+         aps_zdp(ZB_DEV1_SHORT, ZB_COORD_SHORT, 3, 0x0002, struct.pack("<H", ZB_DEV1_SHORT)))
+
+    # 6) Node_Desc response: SUCCESS, Router (logical type 1).
+    emit(ZB_COORD_SHORT, ZB_DEV1_SHORT,
+         aps_zdp(ZB_COORD_SHORT, ZB_DEV1_SHORT, 3, 0x8002,
+                 zdp_node_desc_resp(0, nwk=ZB_DEV1_SHORT, logical_type=1, cap=0x8E)))
+
+    # 7) Simple_Desc request (Endpoint 1).
+    emit(ZB_DEV1_SHORT, ZB_COORD_SHORT,
+         aps_zdp(ZB_DEV1_SHORT, ZB_COORD_SHORT, 4, 0x0004,
+                 struct.pack("<H", ZB_DEV1_SHORT) + struct.pack("<B", 1)))
+
+    # 8) Simple_Desc response: SUCCESS, Home Automation profile, On/Off cluster (0x0006) in, none out.
+    emit(ZB_COORD_SHORT, ZB_DEV1_SHORT,
+         aps_zdp(ZB_COORD_SHORT, ZB_DEV1_SHORT, 4, 0x8004,
+                 zdp_simple_desc_resp(0, nwk=ZB_DEV1_SHORT, ep=1, profile=0x0104, device=0x0100,
+                                       devver=1, in_clusters=[0x0000, 0x0006], out_clusters=[])))
+
+    # 9) Active_EP request.
+    emit(ZB_DEV1_SHORT, ZB_COORD_SHORT,
+         aps_zdp(ZB_DEV1_SHORT, ZB_COORD_SHORT, 5, 0x0005, struct.pack("<H", ZB_DEV1_SHORT)))
+
+    # 10) Active_EP response: SUCCESS, endpoint 1 only.
+    emit(ZB_COORD_SHORT, ZB_DEV1_SHORT,
+         aps_zdp(ZB_COORD_SHORT, ZB_DEV1_SHORT, 5, 0x8005,
+                 zdp_active_ep_resp(0, nwk=ZB_DEV1_SHORT, eps=[1])))
+
+    # 11) Match_Desc request: looking for On/Off cluster (0x0006) servers on the HA profile.
+    emit(0xFFFD, ZB_COORD_SHORT,  # 0xFFFD == broadcast to all routers/coordinator (non-sleepy)
+         nwk_data(0xFFFD, ZB_COORD_SHORT, next_nwk_seq(),
+                  zigbee_aps_frame(0, 2, dst_endpoint=0xFF, cluster_id=0x0006, profile_id=0x0000,
+                                    src_endpoint=0, counter=0,
+                                    payload=zdp_hdr(6, struct.pack("<H", 0x0000) +
+                                                     struct.pack("<H", 0x0104) +
+                                                     struct.pack("<B", 1) + struct.pack("<H", 0x0006) +
+                                                     struct.pack("<B", 0)))))
+
+    # 12) Match_Desc response: DEV1's endpoint 1 matches.
+    emit(ZB_COORD_SHORT, ZB_DEV1_SHORT,
+         aps_zdp(ZB_COORD_SHORT, ZB_DEV1_SHORT, 6, 0x8006,
+                 zdp_match_desc_resp(0, nwk=ZB_DEV1_SHORT, matches=[1])))
+
+    # 13) Bind request: bind DEV1 endpoint 1's On/Off cluster (0x0006) to the Coordinator (unicast).
+    emit(ZB_DEV1_SHORT, ZB_COORD_SHORT,
+         aps_zdp(ZB_DEV1_SHORT, ZB_COORD_SHORT, 7, 0x0021,
+                 zdp_bind_or_unbind_req(ZB_DEV1_EUI, 1, 0x0006, 3, dst_ieee=ZB_COORD_EUI, dst_ep=1)))
+
+    # 14) Bind response: SUCCESS.
+    emit(ZB_COORD_SHORT, ZB_DEV1_SHORT,
+         aps_zdp(ZB_COORD_SHORT, ZB_DEV1_SHORT, 7, 0x8021, bytes([0])))
+
+    # 15) Unbind request: undo the same binding.
+    emit(ZB_DEV1_SHORT, ZB_COORD_SHORT,
+         aps_zdp(ZB_DEV1_SHORT, ZB_COORD_SHORT, 8, 0x0022,
+                 zdp_bind_or_unbind_req(ZB_DEV1_EUI, 1, 0x0006, 3, dst_ieee=ZB_COORD_EUI, dst_ep=1)))
+
+    # 16) Unbind response: SUCCESS.
+    emit(ZB_COORD_SHORT, ZB_DEV1_SHORT,
+         aps_zdp(ZB_COORD_SHORT, ZB_DEV1_SHORT, 8, 0x8022, bytes([0])))
+
+    # 17) Mgmt_Lqi request: StartIndex=0.
+    emit(ZB_DEV1_SHORT, ZB_COORD_SHORT,
+         aps_zdp(ZB_DEV1_SHORT, ZB_COORD_SHORT, 9, 0x0031, struct.pack("<B", 0)))
+
+    # 18) Mgmt_Lqi response: SUCCESS, 2 neighbor table entries.
+    entries = [
+        zdp_neighbor_table_entry(0x1122334455667788, ZB_COORD_EUI, ZB_COORD_SHORT, 0, 1, 1, 2, 1, 200),
+        zdp_neighbor_table_entry(0x1122334455667788, ZB_DEV2_EUI, ZB_DEV2_SHORT, 2, 0, 1, 2, 2, 180),
+    ]
+    emit(ZB_COORD_SHORT, ZB_DEV1_SHORT,
+         aps_zdp(ZB_COORD_SHORT, ZB_DEV1_SHORT, 9, 0x8031,
+                 zdp_mgmt_lqi_resp(0, total=2, start_index=0, entries=entries)))
+
+    # 19) Mgmt_Rtg request: StartIndex=0.
+    emit(ZB_DEV1_SHORT, ZB_COORD_SHORT,
+         aps_zdp(ZB_DEV1_SHORT, ZB_COORD_SHORT, 10, 0x0032, struct.pack("<B", 0)))
+
+    # 20) Mgmt_Rtg response: SUCCESS, 1 routing table entry.
+    emit(ZB_COORD_SHORT, ZB_DEV1_SHORT,
+         aps_zdp(ZB_COORD_SHORT, ZB_DEV1_SHORT, 10, 0x8032,
+                 zdp_mgmt_rtg_resp(0, total=1, start_index=0,
+                                    entries=[zdp_routing_table_entry(ZB_DEV2_SHORT, 0x00, ZB_DEV1_SHORT)])))
+
+    # 21) Mgmt_Leave request: remove DEV2, without rejoin.
+    emit(ZB_DEV2_SHORT, ZB_COORD_SHORT,
+         aps_zdp(ZB_DEV2_SHORT, ZB_COORD_SHORT, 11, 0x0034,
+                 struct.pack("<Q", ZB_DEV2_EUI) + struct.pack("<B", 0x80)))
+
+    # 22) Mgmt_Leave response: SUCCESS.
+    emit(ZB_COORD_SHORT, ZB_DEV2_SHORT,
+         aps_zdp(ZB_COORD_SHORT, ZB_DEV2_SHORT, 11, 0x8034, bytes([0])))
+
+    # 23) Device_annce: DEV2 (re)joining the network -- broadcast, no response.
+    emit(0xFFFD, ZB_DEV2_SHORT,
+         nwk_data(0xFFFD, ZB_DEV2_SHORT, next_nwk_seq(),
+                  zigbee_aps_frame(0, 2, dst_endpoint=0xFF, cluster_id=0x0013, profile_id=0x0000,
+                                    src_endpoint=0, counter=0,
+                                    payload=zdp_hdr(12, struct.pack("<H", ZB_DEV2_SHORT) +
+                                                     struct.pack("<Q", ZB_DEV2_EUI) +
+                                                     struct.pack("<B", 0x8E)))))
+
+    # 24) Mgmt_Permit_Joining request: duration=0xFF (INDEFINITE) -- the curated, security-relevant
+    #     "notable operation" case (see zigbee.hpp/zigbee.cpp's own Mgmt_Permit_Joining note, the
+    #     same pattern BSAP's/CC-Link IE's own Set IP Address notes established).
+    emit(0xFFFD, ZB_COORD_SHORT,
+         nwk_data(0xFFFD, ZB_COORD_SHORT, next_nwk_seq(),
+                  zigbee_aps_frame(0, 2, dst_endpoint=0xFF, cluster_id=0x0036, profile_id=0x0000,
+                                    src_endpoint=0, counter=0,
+                                    payload=zdp_hdr(13, struct.pack("<BB", 0xFF, 1)))))
+
+    # 25) Mgmt_Permit_Joining response: SUCCESS.
+    emit(ZB_DEV1_SHORT, ZB_COORD_SHORT,
+         aps_zdp(ZB_DEV1_SHORT, ZB_COORD_SHORT, 13, 0x8036, bytes([0])))
+
+    # 26) NWK-layer security ENABLED: proves the NWK header decodes fully (frame type, addressing,
+    #     routing) while APS/ZDP correctly report as "N bytes of NWK-encrypted payload" -- the aux
+    #     header's own Extended Nonce bit is set here too, exercising the Extended Source field.
+    nwk_sec_hdr = zigbee_security_header(5, 1, 0x00000042, extended_nonce=True,
+                                          ext_source=ZB_COORD_EUI, key_seqno=0)
+    fake_ciphertext_plus_mic = b"\x11" * 20 + b"\x22" * 4  # 20 bytes "ciphertext" + 4-byte MIC (level 5)
+    nwk_secured = zigbee_nwk_frame(0, 2, ZB_DEV1_SHORT, ZB_COORD_SHORT, 30, next_nwk_seq(),
+                                    security=True, security_header=nwk_sec_hdr,
+                                    payload=fake_ciphertext_plus_mic)
+    emit(ZB_DEV1_SHORT, ZB_COORD_SHORT, nwk_secured)
+
+    # 27) APS-layer security ENABLED, NWK-layer security NOT enabled: proves NWK decodes fully AND
+    #     the APS header (cluster/profile/endpoints) still decodes, while ZDP correctly reports as
+    #     "N bytes of APS-encrypted payload".
+    aps_sec_hdr = zigbee_security_header(5, 0, 0x00000099)  # Link Key, no Extended Nonce
+    aps_fake_ciphertext_plus_mic = b"\x33" * 12 + b"\x44" * 4
+    aps_secured = zigbee_aps_frame(0, 0, dst_endpoint=1, cluster_id=0x0006, profile_id=0x0104,
+                                    src_endpoint=1, counter=1, security=True,
+                                    security_header=aps_sec_hdr, payload=aps_fake_ciphertext_plus_mic)
+    emit(ZB_COORD_SHORT, ZB_DEV1_SHORT, nwk_data(ZB_COORD_SHORT, ZB_DEV1_SHORT, next_nwk_seq(), aps_secured))
+
+    # 28) Application-profile (ZCL) frame -- Profile ID 0x0104 (Home Automation), NOT the ZDP
+    #     profile (0x0000): proves the NWK+APS headers still decode (cluster/profile/endpoints) but
+    #     ZCL is correctly left out of scope (see zigbee.hpp's own ZCL scope note).
+    zcl_payload = bytes([0x01, 0x02, 0x01, 0x01])  # a plausible-looking ZCL header, not decoded
+    zcl_aps = zigbee_aps_frame(0, 0, dst_endpoint=1, cluster_id=0x0006, profile_id=0x0104,
+                                src_endpoint=1, counter=2, payload=zcl_payload)
+    emit(ZB_DEV1_SHORT, ZB_COORD_SHORT, nwk_data(ZB_DEV1_SHORT, ZB_COORD_SHORT, next_nwk_seq(), zcl_aps))
+
+    # 29) APS Command frame (Transport Key, 0x05) -- proves APS Command frames skip ALL endpoint/
+    #     cluster/profile fields (see zigbee.hpp section 5.2-5.8) and the command id decodes by name.
+    aps_cmd = zigbee_aps_frame(1, 0, counter=3, command_id=0x05, payload=b"\x00" * 18)
+    emit(ZB_DEV1_SHORT, ZB_COORD_SHORT, nwk_data(ZB_DEV1_SHORT, ZB_COORD_SHORT, next_nwk_seq(), aps_cmd))
+
+    # 30) NWK Command frame type (route request, not decoded -- see zigbee.hpp's own NWK-command
+    #     out-of-scope note): proves the NWK header decodes but APS is correctly not attempted.
+    nwk_cmd = zigbee_nwk_frame(1, 2, 0xFFFC, ZB_DEV1_SHORT, 30, next_nwk_seq(),
+                                discover_route=1, payload=b"\x01\x08\x00\x00\xD4\xC3")
+    emit(0xFFFC, ZB_DEV1_SHORT, nwk_cmd)
+
+    # 31) A non-Data MAC frame type (Ack) on this same link type -- proves decoder.cpp's own
+    #     "recognized IEEE 802.15.4 frame, not Zigbee-NWK-carrying" fallback (see decoder.cpp's own
+    #     LINKTYPE_IEEE802_15_4_* branch).
+    packets.append(ieee802154_withfcs_frame(
+        ieee802154_mac_frame(2, seqno=mac_seq(), frame_version=1)))
+
+    # 32) MALFORMED/TRUNCATED: fewer than the fixed 2-byte Frame Control Field itself is present --
+    #     must not crash; reported as a "parse-error" packet, proving the ParseError-vs-tolerant-
+    #     degrade boundary (see ieee802154.hpp's own "Truncation handling" paragraph).
+    packets.append(b"\x01")
+
+    data = pcap_global_header(linktype=LINKTYPE_IEEE802_15_4_WITHFCS)
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_720_100_000 + i, i * 1000)
+    (TESTS_DIR / "sample_zigbee.pcap").write_bytes(data)
+
+
+def build_zigbee_tap_sample():
+    """A small LINKTYPE_IEEE802_15_4_TAP (283)-framed companion to build_zigbee_sample() above,
+    proving the second in-scope capture format works too -- reuses the exact same NWK/APS/ZDP
+    builders, just wrapped in a TAP pseudo-header instead of a bare trailing FCS. Covers both TAP
+    FCS_TYPE variants (a pcap file has one global link type, so this needs its own separate file --
+    see ieee802154.hpp's own file header comment; a pcapng file COULD carry both link types across
+    two interfaces, as build_pcapng_multi_interface_sample() elsewhere in this module shows, but two
+    small classic-pcap files is simpler and equally good coverage here).
+
+    1) NWK_addr request, FCS_TYPE=1 (16-bit CRC present, 2 trailing fake-FCS bytes).
+    2) NWK_addr response, FCS_TYPE=0 (no FCS at all -- the TAP spec's own default).
+    3) Mgmt_Permit_Joining request (duration=0xFF), FCS_TYPE=2 (32-bit CRC, 4 trailing bytes).
+    """
+    packets = []
+
+    def tap_emit(dst_short, src_short, nwk_bytes, seqno, *, fcs_type):
+        mac = zigbee_data_mac_frame(seqno, dst_short, src_short, nwk_bytes)
+        fcs = {0: b"", 1: b"\xDE\xAD", 2: b"\xDE\xAD\xBE\xEF"}[fcs_type]
+        packets.append(ieee802154_tap_frame(mac, fcs_type=fcs_type, fcs=fcs))
+
+    aps1 = zigbee_aps_frame(0, 0, dst_endpoint=0, cluster_id=0x0000, profile_id=0x0000,
+                             src_endpoint=0, counter=0,
+                             payload=zdp_hdr(1, struct.pack("<Q", ZB_DEV1_EUI) + struct.pack("<BB", 0, 0)))
+    tap_emit(ZB_DEV1_SHORT, ZB_COORD_SHORT, zigbee_nwk_frame(0, 2, ZB_DEV1_SHORT, ZB_COORD_SHORT, 30, 1,
+                                                              payload=aps1), 1, fcs_type=1)
+
+    aps2 = zigbee_aps_frame(0, 0, dst_endpoint=0, cluster_id=0x8000, profile_id=0x0000,
+                             src_endpoint=0, counter=0,
+                             payload=zdp_hdr(1, zdp_nwk_or_ieee_addr_resp(0, ieee=ZB_DEV1_EUI,
+                                                                            nwk=ZB_DEV1_SHORT)))
+    tap_emit(ZB_COORD_SHORT, ZB_DEV1_SHORT, zigbee_nwk_frame(0, 2, ZB_COORD_SHORT, ZB_DEV1_SHORT, 30, 1,
+                                                              payload=aps2), 2, fcs_type=0)
+
+    aps3 = zigbee_aps_frame(0, 2, dst_endpoint=0xFF, cluster_id=0x0036, profile_id=0x0000,
+                             src_endpoint=0, counter=0,
+                             payload=zdp_hdr(2, struct.pack("<BB", 0xFF, 1)))
+    tap_emit(0xFFFD, ZB_COORD_SHORT, zigbee_nwk_frame(0, 2, 0xFFFD, ZB_COORD_SHORT, 30, 2,
+                                                        payload=aps3), 3, fcs_type=2)
+
+    data = pcap_global_header(linktype=LINKTYPE_IEEE802_15_4_TAP)
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_720_200_000 + i, i * 1000)
+    (TESTS_DIR / "sample_zigbee_tap.pcap").write_bytes(data)
+
+
 if __name__ == "__main__":
     TESTS_DIR.mkdir(exist_ok=True)
     build_modbus_sample()
@@ -15305,4 +15931,6 @@ if __name__ == "__main__":
     build_attack_detect_sample()
     build_codesys_sample()
     build_coap_sample()
+    build_zigbee_sample()
+    build_zigbee_tap_sample()
     print("wrote sample fixtures to", TESTS_DIR)

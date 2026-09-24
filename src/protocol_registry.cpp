@@ -11,6 +11,7 @@
 #include "conduitscope/cotp.hpp"
 #include "conduitscope/dcom.hpp"
 #include "conduitscope/devicenet.hpp"
+#include "conduitscope/zigbee.hpp"
 #include "conduitscope/dnp3.hpp"
 #include "conduitscope/dns.hpp"
 #include "conduitscope/eapol.hpp"
@@ -539,18 +540,27 @@ const std::vector<const ProtocolDecoder*>& cotp_payload_registry() {
 
 const std::vector<const ProtocolDecoder*>& link_type_registry() {
     static const std::vector<const ProtocolDecoder*> order = {
-        &devicenet_decoder(),  // This gate's only protocol -- decoder.cpp's own
-                                 // LINKTYPE_CAN_SOCKETCAN branch calls it directly (see
-                                 // protocol_registry.hpp's own doc comment on this vector for why
-                                 // that branch doesn't iterate this vector the way EtherType's
-                                 // does). link_type() returns LINKTYPE_CAN_SOCKETCAN (227, see
-                                 // pcap_reader.hpp) -- see devicenet.hpp's own class comment for
-                                 // the deliberate, documented exception to the "decode() never
-                                 // throws" contract this decoder takes (it re-parses the raw
-                                 // ByteSpan into a CanSocketcanFrame internally, which can throw
-                                 // ParseError on a malformed capture record, exactly mirroring
-                                 // what decoder.cpp's own call site did directly before this
-                                 // migration).
+        &devicenet_decoder(),  // decoder.cpp's own LINKTYPE_CAN_SOCKETCAN branch calls it
+                                 // directly (see protocol_registry.hpp's own doc comment on this
+                                 // vector for why that branch doesn't iterate this vector the way
+                                 // EtherType's does). link_type() returns LINKTYPE_CAN_SOCKETCAN
+                                 // (227, see pcap_reader.hpp) -- see devicenet.hpp's own class
+                                 // comment for the deliberate, documented exception to the
+                                 // "decode() never throws" contract this decoder takes (it
+                                 // re-parses the raw ByteSpan into a CanSocketcanFrame internally,
+                                 // which can throw ParseError on a malformed capture record,
+                                 // exactly mirroring what decoder.cpp's own call site did directly
+                                 // before this migration).
+        &zigbee_decoder(),  // This gate's second protocol -- decoder.cpp's own two
+                              // LINKTYPE_IEEE802_15_4_* branches do NOT call this directly (see
+                              // protocol_registry.hpp's own doc comment on this vector, and
+                              // zigbee.hpp's own ZigbeeDecoder class comment, for why: Zigbee needs
+                              // two link types, and ZigbeeDecoder::decode() can only assume one of
+                              // them). link_type() returns LINKTYPE_IEEE802_15_4_WITHFCS (195, see
+                              // pcap_reader.hpp) as its audit-trail-representative value only --
+                              // both LINKTYPE_IEEE802_15_4_WITHFCS and LINKTYPE_IEEE802_15_4_TAP
+                              // (283) are actually handled, via ieee802154.hpp's own two parse
+                              // entry points, see decoder.cpp.
     };
     return order;
 }

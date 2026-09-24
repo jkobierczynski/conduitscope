@@ -371,6 +371,8 @@ std::string link_type_name(uint32_t linktype) {
         case LINKTYPE_ETHERNET: return "Ethernet";
         case LINKTYPE_RAW: return "Raw IP (no link-layer header)";
         case LINKTYPE_CAN_SOCKETCAN: return "Linux SocketCAN (DeviceNet)";
+        case LINKTYPE_IEEE802_15_4_WITHFCS: return "IEEE 802.15.4 with FCS (Zigbee)";
+        case LINKTYPE_IEEE802_15_4_TAP: return "IEEE 802.15.4 TAP (Zigbee)";
         default: return "unsupported/unknown (" + std::to_string(linktype) + ")";
     }
 }
@@ -626,6 +628,7 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
                                : (protocol == "cclink-ie") ? ProtocolFilter::CclinkIeOnly
                                : (protocol == "codesys") ? ProtocolFilter::CodesysOnly
                                : (protocol == "coap")   ? ProtocolFilter::CoapOnly
+                               : (protocol == "zigbee") ? ProtocolFilter::ZigbeeOnly
                                                         : ProtocolFilter::Auto;
     for (int p : modbus_ports) options.extra_modbus_ports.push_back(static_cast<uint16_t>(p));
     for (int p : dnp3_ports) options.extra_dnp3_ports.push_back(static_cast<uint16_t>(p));
@@ -1278,7 +1281,7 @@ int main(int argc, char** argv) {
     decode_cmd
         ->add_option("--protocol", decode_protocol,
                       "Restrict decoding to one protocol instead of auto-detecting all of them")
-        ->transform(CLI::IsMember({"auto", "modbus", "dnp3", "s7comm", "mms", "iec104", "enip", "profinet", "goose", "sv", "ethercat", "stp", "devicenet", "bacnet", "hartip", "opcua", "mqtt", "s7comm-plus", "ff-hse", "dns", "mdns", "llmnr", "nbns", "doh", "rip", "icmp", "igmp", "vrrp", "hsrp", "igrp", "pim", "eigrp", "ospf", "remote-access", "lateral-movement", "enterprise-trust", "eapol", "wireless-backhaul", "pppoe", "tunnel-vpn", "mpls", "arp", "lldp", "twincat", "kerberos", "ldap", "smb", "melsec", "fins", "bgp", "slow-protocols", "winrm", "dcom", "ge-srtp", "bsap", "cclink-ie", "codesys", "coap"}))
+        ->transform(CLI::IsMember({"auto", "modbus", "dnp3", "s7comm", "mms", "iec104", "enip", "profinet", "goose", "sv", "ethercat", "stp", "devicenet", "bacnet", "hartip", "opcua", "mqtt", "s7comm-plus", "ff-hse", "dns", "mdns", "llmnr", "nbns", "doh", "rip", "icmp", "igmp", "vrrp", "hsrp", "igrp", "pim", "eigrp", "ospf", "remote-access", "lateral-movement", "enterprise-trust", "eapol", "wireless-backhaul", "pppoe", "tunnel-vpn", "mpls", "arp", "lldp", "twincat", "kerberos", "ldap", "smb", "melsec", "fins", "bgp", "slow-protocols", "winrm", "dcom", "ge-srtp", "bsap", "cclink-ie", "codesys", "coap", "zigbee"}))
         ->capture_default_str();
     decode_cmd->add_option("--modbus-port", decode_modbus_ports,
                             "Additional TCP port to treat as expected for Modbus (repeatable); "

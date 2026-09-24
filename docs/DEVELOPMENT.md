@@ -8098,6 +8098,130 @@ deferred future migration.
     addition, `tests/sample_coap.pcap` is entirely synthetic -- no real CoAP capture was available
     to validate against.
 
+47. **Zigbee (IEEE 802.15.4 MAC + Zigbee NWK + Zigbee APS + full ZDP) -- LINKTYPE_IEEE802_15_4_
+    WITHFCS (195) and LINKTYPE_IEEE802_15_4_TAP (283).** **Done.** Jurgen asked for "full Zigbee
+    protocol support," pointing at a pre-verified ~1000-line research report sourced from literal
+    Wireshark dissector C code citations (`epan/dissectors/packet-ieee802154.c`,
+    `packet-zbee-nwk.c`, `packet-zbee-aps.c`, `packet-zbee-zdp*.c`) and treated as authoritative,
+    already-verified sourcing -- no re-fetching of Wireshark source was needed. Two new,
+    fully self-contained module pairs: `include/conduitscope/ieee802154.hpp`/`src/ieee802154.cpp`
+    (link-layer MAC framing, protocol-agnostic, direct template `can_socketcan.hpp/.cpp`) and
+    `include/conduitscope/zigbee.hpp`/`src/zigbee.cpp` (NWK/APS/ZDP, direct template
+    `devicenet.hpp/.cpp`) -- see both headers' own file header comments for the complete
+    sourcing/scoping/wire-format writeup; this entry summarizes it.
+
+    **Scope confirmed with Jurgen up front**: capture formats limited to exactly
+    LINKTYPE_IEEE802_15_4_WITHFCS and LINKTYPE_IEEE802_15_4_TAP (LINUX=191, NONASK_PHY=215,
+    NOFCS=230 deliberately excluded from the `LinkType` enum entirely, not just left undecoded);
+    MAC header + NWK + APS decoded structurally always (these ride in the clear even when the
+    payload above them is encrypted); full ZDP decode whenever APS-layer security is not in use;
+    when APS security IS in use, the APS header still decodes but ZDP is reported as opaque "N
+    byte(s) of APS-encrypted payload"; when NWK-layer security is in use, the entire NWK payload
+    (all of APS included) is structurally invisible, reported as "N byte(s) of NWK-encrypted
+    payload"; no decryption capability at all, anywhere; no ZCL (Zigbee Cluster Library) --
+    explicitly out of scope, the same "too large and generic" boundary already drawn for OPC
+    Classic's and CC-Link IE's own scope; Zigbee Green Power out of scope for this pass, named but
+    not implemented in zigbee.hpp's own file header as a stated, deliberate boundary rather than
+    silently dropped.
+
+    **Wire format**: MAC layer -- Frame Control Field (Frame Type/Security Enabled/Frame
+    Pending/Ack Request/PAN ID Compression/Sequence Number Suppression [2015+]/IE Present
+    [2015+]/Dst-Src Addressing Mode/Frame Version), addressing fields present per the strict
+    2015+ Table 7-6 (14 rows) for Frame Version 2/3 and the simpler pre-2015 rules otherwise --
+    deliberately NOT applying Wireshark's own `ieee802154e_compatibility` preference override for
+    rows 9-11 of that table, a documented departure; a MAC-layer Auxiliary Security Header
+    (different shape from Zigbee's own NWK/APS aux header) when the Security Enabled bit is set,
+    though Zigbee itself essentially never uses MAC-layer security in practice; Header/Payload
+    Information Elements detected and skipped, never decoded. NWK layer -- FCF (frame type
+    Data/Command/Inter-PAN, protocol version, Discover Route, and five presence-controlling
+    flags), Dst/Src short address + Radius + Sequence Number (absent for Inter-PAN), conditional
+    Extended Dst/Src/Multicast Control/Source Route Subframe fields (2007+), and an Aux Security
+    Header sharing its exact byte layout with APS's own (gated by a dedicated Extended Nonce bit,
+    not by Key ID value -- a corrected assumption caught during implementation). APS layer -- FCF
+    (frame type Data/Command/Ack/Inter-PAN -- 0x03 is Inter-PAN, not Reserved, another corrected
+    assumption), a field-presence control flow keyed off Delivery Mode and NWK Protocol Version
+    that is genuinely intricate (Command frames skip all endpoint/cluster/profile fields
+    unconditionally; Broadcast delivery mode requires BOTH a Destination Endpoint and a Source
+    Endpoint byte on the wire, not just one -- a fixture bug caught and fixed during this item's
+    own manual-verification pass, see below); a 18-entry APS Command ID table (0x01-0x12,
+    including Verify Key/Confirm Key/Relay Message Up/Downstream, not just the more commonly
+    documented subset). ZDP -- a 1-byte Transaction Sequence Number plus a cluster-specific
+    payload for each of the 13 named clusters this decoder recognizes (NWK_addr, IEEE_addr,
+    Node_Desc, Simple_Desc, Active_EP, Match_Desc, Device_annce [broadcast, no response], Bind,
+    Unbind, Mgmt_Lqi, Mgmt_Rtg, Mgmt_Leave, Mgmt_Permit_Joining [which DOES have a response
+    cluster, 0x8036 -- a third corrected assumption]), plus the full ZDP status code table.
+
+    **Two-link-type architecture**: rather than one `ZigbeeDecoder::decode()` branching
+    internally on capture format, `ieee802154.hpp` exposes two small parse entry points
+    (`parse_ieee802154_withfcs`/`parse_ieee802154_tap`) that converge on one shared internal MAC
+    header parser and produce one common `Ieee802154Frame` struct; `decoder.cpp`'s two
+    `LINKTYPE_IEEE802_15_4_*` branches each call the matching entry point, then hand the result to
+    one shared `try_parse_zigbee(const Ieee802154Frame&)` in `zigbee.hpp`/`zigbee.cpp`. This
+    mirrors DeviceNet's own shape most closely of the established precedents. `ZigbeeDecoder`
+    still exists as a complete, registry-usable `ProtocolDecoder` (`gate_kind() ==
+    GateKind::LinkType`, matching `GateKind::LinkType`'s existing "direct-call, not a cascaded
+    loop" dispatch shape first established for DeviceNet/SocketCAN), but its own `link_type()` is
+    audit-trail-representative-only (documented as returning WITHFCS's value, 195) since
+    `decoder.cpp` calls the two parse entry points directly rather than looping the registry for
+    this link-kind, the same posture DeviceNet's own single-link-type entry already has.
+
+    **ZCL scope boundary falls out naturally from the wire format**: ZDP always rides APS Profile
+    ID 0x0000; any Data-type APS frame with a different Profile ID is therefore, structurally,
+    an application-profile/ZCL frame -- reported via the fully-decoded APS header (cluster,
+    profile, endpoints) with an honest "(application-profile/ZCL payload, not decoded)" note,
+    rather than an ad-hoc special case.
+
+    **Fixture bug caught during mandatory manual-verification (this item's own process step 3)**:
+    the first fixture draft omitted the APS Source Endpoint byte on Broadcast-delivery-mode ZDP
+    requests (Match_Desc, Device_annce, Mgmt_Permit_Joining), assuming only the Destination
+    Endpoint byte was required. Running the decoder against the fixture and reading the actual
+    output first -- before writing a single CTest regex, as this item's own process required --
+    surfaced a visible off-by-one (cluster/field values shifted by one byte) immediately; tracing
+    it back to `zigbee.cpp`'s own `parse_aps()` control flow (`kApsDeliveryBroadcast` sets both
+    `dst_present` and `src_endpoint_present`) showed the decoder was correct and the fixture was
+    wrong. Fixed in `tools/make_sample_pcap.py` (three call sites in the WITHFCS sample, one in
+    the TAP sample), re-verified, and only then were CTest regexes written against the corrected,
+    manually-confirmed output -- exactly the discipline this process step exists to enforce. Also
+    fixed in passing: a stray dead-code expression (`zdp_hdr.__wrapped__ if False else
+    bytes([0])`, an accidental leftover that happened to evaluate correctly but was confusing and
+    inconsistent with every other status-only ZDP response in the file) and a missing `link_type_
+    name()` case in `cli_main.cpp` (the `conduitscope info` subcommand printed "unsupported/
+    unknown (195)" for a perfectly-supported link type until this was added).
+
+    **Curated note**: Mgmt_Permit_Joining with an INDEFINITE (0xFF) duration -- the network stays
+    open to new device joins until this is explicitly disabled again, a common OT/IoT security
+    finding -- the same curated "notable operation" pattern BSAP's and CC-Link IE's own Set IP
+    Address notes established (items 41/42).
+
+    `tests/sample_zigbee.pcap` (WITHFCS-framed, `build_zigbee_sample`) carries 13 named ZDP
+    cluster request/response pairs (NWK_addr, IEEE_addr, Node_Desc, Simple_Desc, Active_EP,
+    Match_Desc, Bind, Unbind, Mgmt_Lqi with two neighbor-table entries, Mgmt_Rtg with one
+    routing-table entry, Mgmt_Leave, Mgmt_Permit_Joining), a broadcast Device_annce with no
+    response, an NWK-layer-security-enabled frame (Extended Nonce set, proving Extended Source
+    decodes), an APS-layer-security-enabled frame with NWK security NOT enabled, an
+    application-profile/ZCL frame (Profile ID 0x0104), an APS Command frame (Transport Key), an
+    NWK Command frame, a non-Data MAC frame type (Ack, proving the "recognized IEEE 802.15.4
+    frame, not Zigbee-NWK-carrying" decoder.cpp fallback), and a MALFORMED/truncated 1-byte frame
+    (below even the 2-byte Frame Control Field, proving the ParseError-vs-tolerant-degrade
+    boundary). `tests/sample_zigbee_tap.pcap` (`build_zigbee_tap_sample`) is a small
+    TAP-framed companion exercising all three TAP FCS_TYPE variants (16-bit CRC present, none --
+    the TAP spec's own default -- and 32-bit CRC) against the same NWK/APS/ZDP builders. 26 new
+    `zigbee_*` CTest tests, covering text (`-v`) output for the above, JSON field emission
+    (MAC/NWK layer fields, ZDP cluster fields, encrypted-payload-length fields), `--stats`
+    aggregation (NWK/APS frame-type counts, ZDP cluster counts, NWK/APS-encrypted frame counts),
+    `--protocol zigbee` inclusion and a forced-other-protocol exclusion (proving the MAC-layer
+    frame still degrades tolerantly to `[non-ip]` rather than vanishing), the TAP FCS_TYPE
+    coverage, and `conduitscope info`'s link-type name for both capture formats. Full suite grew
+    from 1651 to 1677 tests, zero regressions, zero-warning clean rebuilds in both the default and
+    `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF` configs.
+
+    Explicitly out of scope, stated honestly in both new headers' own file header comments:
+    LINKTYPE_IEEE802_15_4_LINUX/NONASK_PHY/NOFCS; Multipurpose/Reserved/Fragment/Extended MAC
+    frame types; the pre-2015 (2003) MAC security trailer shape; any actual decryption; ZCL; and
+    Zigbee Green Power (named, not implemented). As with every recent protocol addition,
+    `tests/sample_zigbee.pcap`/`sample_zigbee_tap.pcap` are entirely synthetic -- no real Zigbee
+    capture was available to validate against.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

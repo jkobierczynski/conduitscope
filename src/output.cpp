@@ -1078,6 +1078,133 @@ void write_coap_json_fields(std::ostream& out, const CoapFrame& cf) {
     }
 }
 
+namespace {
+std::string zigbee_hex16(uint16_t v) {
+    std::ostringstream s;
+    s << "0x" << std::hex << std::uppercase << std::setw(4) << std::setfill('0')
+      << static_cast<unsigned>(v);
+    return s.str();
+}
+std::string zigbee_eui64(uint64_t v) {
+    std::ostringstream s;
+    s << std::hex << std::uppercase << std::setfill('0');
+    for (int i = 7; i >= 0; --i) {
+        if (i != 7) s << ":";
+        s << std::setw(2) << ((v >> (i * 8)) & 0xFF);
+    }
+    return s.str();
+}
+}  // namespace
+
+// The Zigbee analog of write_devicenet_json_fields -- same rationale (a plain free function, not
+// a ProtocolRenderer interface). Reads straight from the ZigbeeFrame carried by
+// DecodedPacket::result, which itself embeds the full MAC-layer decode (Ieee802154Frame) -- see
+// zigbee.hpp. Fields are nested by which layer actually got decoded (mac always; nwk/aps/zdp only
+// as far as encryption/frame-type/scope allowed -- see zigbee.hpp's own scope notes), the same
+// "if (has_x) { ... }" convention write_devicenet_json_fields already established.
+void write_zigbee_json_fields(std::ostream& out, const ZigbeeFrame& zf) {
+    const Ieee802154Frame& mac = zf.mac;
+    out << "    \"zigbee_mac_frame_type\": \"" << ieee802154_frame_type_name(mac.frame_type) << "\",\n";
+    out << "    \"zigbee_mac_frame_version\": \"" << ieee802154_version_name(mac.frame_version) << "\",\n";
+    out << "    \"zigbee_mac_security_enabled\": " << (mac.security_enabled ? "true" : "false") << ",\n";
+    if (mac.has_seqno) out << "    \"zigbee_mac_seq\": " << static_cast<unsigned>(mac.seqno) << ",\n";
+    if (mac.has_dst_pan) out << "    \"zigbee_mac_dst_pan\": \"" << zigbee_hex16(mac.dst_pan) << "\",\n";
+    if (mac.has_dst_addr) {
+        out << "    \"zigbee_mac_dst_addr\": \""
+            << (mac.dst_addr_extended ? zigbee_eui64(mac.dst_addr_ext) : zigbee_hex16(mac.dst_addr_short))
+            << "\",\n";
+    }
+    if (mac.has_src_pan) out << "    \"zigbee_mac_src_pan\": \"" << zigbee_hex16(mac.src_pan) << "\",\n";
+    if (mac.has_src_addr) {
+        out << "    \"zigbee_mac_src_addr\": \""
+            << (mac.src_addr_extended ? zigbee_eui64(mac.src_addr_ext) : zigbee_hex16(mac.src_addr_short))
+            << "\",\n";
+    }
+    if (mac.malformed) out << "    \"zigbee_mac_malformed\": true,\n";
+
+    out << "    \"zigbee_nwk_present\": " << (zf.nwk_present ? "true" : "false") << ",\n";
+    if (zf.nwk_present) {
+        const ZigbeeNwkFrame& n = zf.nwk;
+        out << "    \"zigbee_nwk_frame_type\": \"" << zigbee_nwk_frame_type_name(n.frame_type) << "\",\n";
+        out << "    \"zigbee_nwk_version\": \"" << zigbee_nwk_version_name(n.version) << "\",\n";
+        out << "    \"zigbee_nwk_security\": " << (n.security ? "true" : "false") << ",\n";
+        if (!n.is_interpan) {
+            out << "    \"zigbee_nwk_dst\": \"" << zigbee_hex16(n.dst) << "\",\n";
+            out << "    \"zigbee_nwk_src\": \"" << zigbee_hex16(n.src) << "\",\n";
+            out << "    \"zigbee_nwk_radius\": " << static_cast<unsigned>(n.radius) << ",\n";
+            out << "    \"zigbee_nwk_seq\": " << static_cast<unsigned>(n.seqno) << ",\n";
+        }
+        if (n.has_ext_dst) out << "    \"zigbee_nwk_ext_dst\": \"" << zigbee_eui64(n.ext_dst_addr) << "\",\n";
+        if (n.has_ext_src) out << "    \"zigbee_nwk_ext_src\": \"" << zigbee_eui64(n.ext_src_addr) << "\",\n";
+        if (n.has_multicast_control) {
+            out << "    \"zigbee_nwk_multicast_mode\": " << static_cast<unsigned>(n.mcast_mode) << ",\n";
+        }
+        if (n.has_source_route) {
+            out << "    \"zigbee_nwk_relay_count\": " << static_cast<unsigned>(n.relay_count) << ",\n";
+        }
+        if (n.malformed) out << "    \"zigbee_nwk_malformed\": true,\n";
+    }
+    if (zf.nwk_payload_encrypted) {
+        out << "    \"zigbee_nwk_payload_encrypted\": true,\n";
+        out << "    \"zigbee_nwk_encrypted_payload_length\": " << zf.nwk_encrypted_payload_length
+            << ",\n";
+    }
+
+    out << "    \"zigbee_aps_present\": " << (zf.aps_present ? "true" : "false") << ",\n";
+    if (zf.aps_present) {
+        const ZigbeeApsFrame& a = zf.aps;
+        out << "    \"zigbee_aps_frame_type\": \"" << zigbee_aps_frame_type_name(a.frame_type) << "\",\n";
+        out << "    \"zigbee_aps_delivery_mode\": \"" << zigbee_aps_delivery_mode_name(a.delivery_mode)
+            << "\",\n";
+        out << "    \"zigbee_aps_security\": " << (a.security ? "true" : "false") << ",\n";
+        if (a.has_cluster_profile) {
+            out << "    \"zigbee_aps_cluster_id\": \"" << zigbee_hex16(a.cluster_id) << "\",\n";
+            out << "    \"zigbee_aps_profile_id\": \"" << zigbee_hex16(a.profile_id) << "\",\n";
+        }
+        if (a.has_dst_endpoint) {
+            out << "    \"zigbee_aps_dst_endpoint\": " << static_cast<unsigned>(a.dst_endpoint) << ",\n";
+        }
+        if (a.has_src_endpoint) {
+            out << "    \"zigbee_aps_src_endpoint\": " << static_cast<unsigned>(a.src_endpoint) << ",\n";
+        }
+        if (a.has_group_address) {
+            out << "    \"zigbee_aps_group_address\": \"" << zigbee_hex16(a.group_address) << "\",\n";
+        }
+        if (a.has_counter) {
+            out << "    \"zigbee_aps_counter\": " << static_cast<unsigned>(a.counter) << ",\n";
+        }
+        if (a.has_command_id) {
+            out << "    \"zigbee_aps_command\": \"" << json_escape(a.command_name) << "\",\n";
+        }
+        if (a.malformed) out << "    \"zigbee_aps_malformed\": true,\n";
+    }
+    if (zf.aps_payload_encrypted) {
+        out << "    \"zigbee_aps_payload_encrypted\": true,\n";
+        out << "    \"zigbee_aps_encrypted_payload_length\": " << zf.aps_encrypted_payload_length
+            << ",\n";
+    }
+
+    out << "    \"zigbee_zdp_present\": " << (zf.zdp_present ? "true" : "false") << ",\n";
+    if (zf.zdp_present) {
+        const ZigbeeZdpFrame& zdp = zf.zdp;
+        out << "    \"zigbee_zdp_seq\": " << static_cast<unsigned>(zdp.seqno) << ",\n";
+        out << "    \"zigbee_zdp_cluster\": \"" << zigbee_hex16(zdp.cluster) << "\",\n";
+        if (!zdp.cluster_name.empty()) {
+            out << "    \"zigbee_zdp_cluster_name\": \"" << json_escape(zdp.cluster_name) << "\",\n";
+        }
+        out << "    \"zigbee_zdp_is_response\": " << (zdp.is_response ? "true" : "false") << ",\n";
+        out << "    \"zigbee_zdp_recognized\": " << (zdp.recognized ? "true" : "false") << ",\n";
+        if (!zdp.fields.empty()) {
+            out << "    \"zigbee_zdp_fields\": [";
+            for (size_t i = 0; i < zdp.fields.size(); ++i) {
+                if (i) out << ", ";
+                out << "\"" << json_escape(zdp.fields[i]) << "\"";
+            }
+            out << "],\n";
+        }
+    }
+}
+
 // Renders one RipRoute as a single line -- see rip.hpp for what each of the three RTE shapes
 // (ordinary route, full-table-request marker, authentication entry) means. Reproduces
 // decoder.cpp's own former rip_route_summary exactly (that copy was retired along with the
@@ -3746,6 +3873,9 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
     if (p.protocol == "coap" && p.result) {
         write_coap_json_fields(out_, p.result->as<CoapFrame>());
     }
+    if (p.protocol == "zigbee" && p.result) {
+        write_zigbee_json_fields(out_, p.result->as<ZigbeeFrame>());
+    }
     out_ << "    \"notes\": [";
     for (size_t i = 0; i < p.notes.size(); ++i) {
         if (i != 0) out_ << ", ";
@@ -4291,6 +4421,16 @@ void StatsWriter::write_packet(const DecodedPacket& p) {
         }
         coap_code_counts_[code_key]++;
     }
+    if (p.protocol == "zigbee" && p.result) {
+        const ZigbeeFrame& zf = p.result->as<ZigbeeFrame>();
+        if (zf.nwk_present) zigbee_nwk_frame_type_counts_[zigbee_nwk_frame_type_name(zf.nwk.frame_type)]++;
+        if (zf.aps_present) zigbee_aps_frame_type_counts_[zigbee_aps_frame_type_name(zf.aps.frame_type)]++;
+        if (zf.zdp_present && !zf.zdp.cluster_name.empty()) {
+            zigbee_zdp_cluster_counts_[zf.zdp.cluster_name]++;
+        }
+        if (zf.nwk_payload_encrypted) zigbee_nwk_encrypted_count_++;
+        if (zf.aps_payload_encrypted) zigbee_aps_encrypted_count_++;
+    }
     if (p.protocol == "rip" && p.result) {
         rip_command_counts_[p.result->as<RipMessage>().command_name]++;
     }
@@ -4674,6 +4814,26 @@ void StatsWriter::print_summary(std::ostream& out) const {
         for (const auto& [name, count] : coap_code_counts_) {
             out << "  " << std::left << std::setw(40) << name << count << "\n";
         }
+    }
+    if (!zigbee_nwk_frame_type_counts_.empty() || !zigbee_aps_frame_type_counts_.empty() ||
+        !zigbee_zdp_cluster_counts_.empty() || zigbee_nwk_encrypted_count_ > 0 ||
+        zigbee_aps_encrypted_count_ > 0) {
+        out << "zigbee nwk frame types:\n";
+        for (const auto& [name, count] : zigbee_nwk_frame_type_counts_) {
+            out << "  " << std::left << std::setw(40) << name << count << "\n";
+        }
+        out << "zigbee aps frame types:\n";
+        for (const auto& [name, count] : zigbee_aps_frame_type_counts_) {
+            out << "  " << std::left << std::setw(40) << name << count << "\n";
+        }
+        if (!zigbee_zdp_cluster_counts_.empty()) {
+            out << "zigbee zdp clusters:\n";
+            for (const auto& [name, count] : zigbee_zdp_cluster_counts_) {
+                out << "  " << std::left << std::setw(40) << name << count << "\n";
+            }
+        }
+        out << "zigbee nwk-layer-encrypted frames: " << zigbee_nwk_encrypted_count_ << "\n";
+        out << "zigbee aps-layer-encrypted frames: " << zigbee_aps_encrypted_count_ << "\n";
     }
     if (!rip_command_counts_.empty()) {
         out << "rip commands:\n";

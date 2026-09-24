@@ -19,6 +19,7 @@
 #include "conduitscope/hartip.hpp"
 #include "conduitscope/hsrp.hpp"
 #include "conduitscope/icmp.hpp"
+#include "conduitscope/ieee802154.hpp"
 #include "conduitscope/opcua.hpp"
 #include "conduitscope/iec104.hpp"
 #include "conduitscope/igmp.hpp"
@@ -39,6 +40,7 @@
 #include "conduitscope/tcp.hpp"
 #include "conduitscope/udp.hpp"
 #include "conduitscope/vrrp.hpp"
+#include "conduitscope/zigbee.hpp"
 
 namespace conduitscope {
 
@@ -1121,11 +1123,65 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
             }
             out.summary = s.str();
             return out;
+        } else if (link_type == LINKTYPE_IEEE802_15_4_WITHFCS || link_type == LINKTYPE_IEEE802_15_4_TAP) {
+            // Zigbee (IEEE 802.15.4 MAC + NWK + APS + ZDP) -- see ieee802154.hpp/zigbee.hpp. A
+            // wholly separate link layer from Ethernet: has_ethernet and has_ip both stay false for
+            // every packet reached this way, the same posture the LINKTYPE_CAN_SOCKETCAN/DeviceNet
+            // branch above already established for this codebase's other non-Ethernet link type.
+            // This returns directly, never falling through to the IPv4/TCP/UDP parsing below.
+            //
+            // TWO LINK TYPES, ONE SHARED ZIGBEE PARSE: this branch is the one place that has to
+            // know which of the two in-scope capture formats produced `frame` -- see
+            // ieee802154.hpp's own file header comment for why that knowledge doesn't belong inside
+            // a single ProtocolDecoder::decode() call, and zigbee.hpp's own ZigbeeDecoder class
+            // comment for the full design rationale. Once parsed into one shared Ieee802154Frame,
+            // both link types converge on the exact same try_parse_zigbee(...) call below.
+            Ieee802154Frame mac = (link_type == LINKTYPE_IEEE802_15_4_WITHFCS)
+                                       ? parse_ieee802154_withfcs(frame)
+                                       : parse_ieee802154_tap(frame);
+
+            bool want_zigbee = options_.protocol_filter == ProtocolFilter::Auto ||
+                                options_.protocol_filter == ProtocolFilter::ZigbeeOnly;
+
+            if (want_zigbee) {
+                // try_parse_zigbee is called directly here (not through ZigbeeDecoder::decode(),
+                // which can only assume one capture format) -- see zigbee.hpp's own class comment.
+                // Zigbee is a zero-flat-field migrated protocol (like DeviceNet/TwinCAT): out.result
+                // carries the whole ZigbeeFrame (which itself embeds the full Ieee802154Frame MAC
+                // decode -- see zigbee.hpp), and output.cpp's write_zigbee_json_fields reads
+                // straight from it.
+                if (auto zf = try_parse_zigbee(mac)) {
+                    out.protocol = "zigbee";
+                    out.summary = zf->summary;
+                    for (const auto& n : zf->notes) out.notes.push_back(n);
+                    out.result = ProtocolResult::make<ZigbeeFrame>("zigbee", std::move(*zf));
+                    return out;
+                }
+            }
+
+            // Not a Zigbee-carrying frame (a Beacon/Ack/MAC-Command MAC frame type, or Zigbee
+            // decoding disabled by --protocol) -- named structurally by its MAC Frame Type, never
+            // decoded further, the same "recognized link/frame shape, not this protocol" fallback
+            // posture the CAN/DeviceNet branch above already established.
+            for (const auto& n : mac.notes) out.notes.push_back(n);
+            out.protocol = "non-ip";
+            std::ostringstream s;
+            s << "IEEE 802.15.4 " << ieee802154_frame_type_name(mac.frame_type) << " frame";
+            if (mac.has_seqno) s << ", seq=" << static_cast<unsigned>(mac.seqno);
+            if (mac.frame_type == 1 /* Data */ && !want_zigbee) {
+                s << " (not decoded -- Zigbee decoding disabled by --protocol)";
+            } else if (mac.frame_type == 1 /* Data */) {
+                s << " (not a valid Zigbee NWK frame shape)";
+            } else {
+                s << " (not decoded -- not a Zigbee NWK-carrying MAC frame type)";
+            }
+            out.summary = s.str();
+            return out;
         } else {
             out.protocol = "unsupported-link";
             out.summary = "capture link type " + std::to_string(link_type) +
                            " is not supported in this groundwork release (only Ethernet, raw IP, "
-                           "and SocketCAN are)";
+                           "SocketCAN, and IEEE 802.15.4 WITHFCS/TAP are)";
             return out;
         }
 

@@ -95,9 +95,18 @@ enum class GateKind {
     // `link_type`, see pcap_reader.hpp's LINKTYPE_* constants), not by anything inside the
     // packet's own bytes -- a genuinely different dispatch shape from every kind above, all four
     // of which assume an Ethernet/IP/TCP/UDP frame already exists to gate against. DeviceNet (CAN-
-    // bus CIP, see devicenet.hpp) is this kind's first and so far only user: it is reached only
-    // for LINKTYPE_CAN_SOCKETCAN captures, which have no MAC addresses, no IP layer, no ports at
-    // all -- see decoder.cpp's own LINKTYPE_CAN_SOCKETCAN branch.
+    // bus CIP, see devicenet.hpp) was this kind's first user: it is reached only for
+    // LINKTYPE_CAN_SOCKETCAN captures, which have no MAC addresses, no IP layer, no ports at all --
+    // see decoder.cpp's own LINKTYPE_CAN_SOCKETCAN branch. Zigbee (see zigbee.hpp) is this kind's
+    // SECOND protocol, and the first to need TWO link types at once (LINKTYPE_IEEE802_15_4_WITHFCS
+    // and LINKTYPE_IEEE802_15_4_TAP -- see ieee802154.hpp/zigbee.hpp's own file header comments for
+    // why, and for the dispatch shape chosen: decoder.cpp's own two link-type branches call
+    // ieee802154.hpp's two small parse entry points directly rather than routing either capture
+    // format through ZigbeeDecoder::decode() below, since gate_kind()==LinkType is a direct-call
+    // gate kind here anyway (decoder.cpp never loops over link_type_registry() the way it loops
+    // over e.g. ethertype_registry() -- see protocol_registry.hpp's own doc comment on that
+    // vector), so this doesn't create the dispatch-order ambiguity a generic multi-link-type
+    // ProtocolDecoder might otherwise raise.
     LinkType,
 };
 

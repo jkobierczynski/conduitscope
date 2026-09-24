@@ -66,6 +66,8 @@ add_library(conduitscope_core STATIC
   src/stp.cpp
   src/can_socketcan.cpp
   src/devicenet.cpp
+  src/ieee802154.cpp
+  src/zigbee.cpp
   src/bacnet.cpp
   src/hartip.cpp
   src/ffhse.cpp
@@ -11659,3 +11661,172 @@ add_test(NAME coap_protocol_filter_excludes_other_protocols
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --protocol coap --format text)
 set_tests_properties(coap_protocol_filter_excludes_other_protocols PROPERTIES
   FAIL_REGULAR_EXPRESSION "\\[modbus\\]")
+
+# ieee802154.hpp/.cpp + zigbee.hpp/.cpp -- IEEE 802.15.4 MAC framing (LINKTYPE_IEEE802_15_4_WITHFCS
+# 195 and LINKTYPE_IEEE802_15_4_TAP 283) plus Zigbee NWK/APS/full ZDP. See both headers' own file
+# header comments for the full sourcing/scoping/wire-format writeup. sample_zigbee.pcap
+# (build_zigbee_sample, tools/make_sample_pcap.py, WITHFCS-framed) carries 13 named ZDP
+# cluster request/response pairs, a broadcast Device_annce (no response), a curated
+# Mgmt_Permit_Joining INDEFINITE-duration security note, an NWK-layer-security-enabled frame, an
+# APS-layer-security-enabled frame (NWK security NOT enabled), an application-profile/ZCL frame
+# (Profile ID != 0x0000, correctly not decoded), an APS Command frame, an NWK Command frame, a
+# non-Data MAC frame type (Ack), and a MALFORMED/truncated (1-byte) frame. sample_zigbee_tap.pcap
+# (build_zigbee_tap_sample, TAP-framed) exercises all three TAP FCS_TYPE variants (16-bit/none/
+# 32-bit).
+add_test(NAME zigbee_nwk_addr_request_response
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_zigbee.pcap" --format text -v)
+set_tests_properties(zigbee_nwk_addr_request_response PROPERTIES
+  PASS_REGULAR_EXPRESSION "#1  [^\n]*\\[zigbee\\]  NWK_addr request: IEEEAddr=00:12:4B:00:01:02:03:05\n#2  [^\n]*\\[zigbee\\]  NWK_addr response: Status=SUCCESS IEEEAddr=00:12:4B:00:01:02:03:05 NWKAddr=0xA1B2")
+
+add_test(NAME zigbee_node_desc_response_frequency_band_note
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_zigbee.pcap" --format text -v)
+set_tests_properties(zigbee_node_desc_response_frequency_band_note PROPERTIES
+  PASS_REGULAR_EXPRESSION "#6  [^\n]*\\[zigbee\\]  Node_Desc response: Status=SUCCESS LogicalType=Router\n *note: Node Descriptor's frequency-band flag bits \\(868MHz/900MHz/2400MHz/EU-sub-GHz\\) are not individually decoded")
+
+add_test(NAME zigbee_simple_desc_response
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_zigbee.pcap" --format text -v)
+set_tests_properties(zigbee_simple_desc_response PROPERTIES
+  PASS_REGULAR_EXPRESSION "#8  [^\n]*\\[zigbee\\]  Simple_Desc response: Endpoint=1 ProfileID=0x0104 DeviceID=0x0100")
+
+# Broadcast (delivery mode 2) Match_Desc request -- also proves the APS Destination Endpoint AND
+# Source Endpoint fields are both correctly present on the wire for Broadcast delivery mode
+# (0xFF/0xFF in this fixture), not just Unicast.
+add_test(NAME zigbee_match_desc_broadcast_request
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_zigbee.pcap" --format text -v)
+set_tests_properties(zigbee_match_desc_broadcast_request PROPERTIES
+  PASS_REGULAR_EXPRESSION "#11  [^\n]*\\[zigbee\\]  Match_Desc request: NWKAddrOfInterest=0x0000 ProfileID=0x0104")
+
+add_test(NAME zigbee_bind_unbind_request_response
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_zigbee.pcap" --format text -v)
+set_tests_properties(zigbee_bind_unbind_request_response PROPERTIES
+  PASS_REGULAR_EXPRESSION "#13  [^\n]*\\[zigbee\\]  Bind request: SrcIEEE=00:12:4B:00:01:02:03:05 SrcEndpoint=1 ClusterID=0x0006\n#14  [^\n]*\\[zigbee\\]  Bind response: Status=SUCCESS\n#15  [^\n]*\\[zigbee\\]  Unbind request: SrcIEEE=00:12:4B:00:01:02:03:05 SrcEndpoint=1 ClusterID=0x0006\n#16  [^\n]*\\[zigbee\\]  Unbind response: Status=SUCCESS")
+
+add_test(NAME zigbee_mgmt_lqi_response_neighbor_table
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_zigbee.pcap" --format text -v)
+set_tests_properties(zigbee_mgmt_lqi_response_neighbor_table PROPERTIES
+  PASS_REGULAR_EXPRESSION "#18  [^\n]*\\[zigbee\\]  Mgmt_Lqi response: Status=SUCCESS NeighborTableEntries=2 EntryCount=2")
+
+add_test(NAME zigbee_mgmt_rtg_response_routing_table
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_zigbee.pcap" --format text -v)
+set_tests_properties(zigbee_mgmt_rtg_response_routing_table PROPERTIES
+  PASS_REGULAR_EXPRESSION "#20  [^\n]*\\[zigbee\\]  Mgmt_Rtg response: Status=SUCCESS RoutingTableEntries=1 EntryCount=1")
+
+# Device_annce -- broadcast, no response by design (see zigbee.hpp's own ZDP cluster table).
+add_test(NAME zigbee_device_annce_broadcast_no_response
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_zigbee.pcap" --format text -v)
+set_tests_properties(zigbee_device_annce_broadcast_no_response PROPERTIES
+  PASS_REGULAR_EXPRESSION "#23  [^\n]*\\[zigbee\\]  Device_annce \\(broadcast, no response\\): NWKAddr=0xC3D4 IEEEAddr=00:12:4B:00:01:02:03:06")
+
+# Curated, security-relevant "notable operation" note -- Mgmt_Permit_Joining with an INDEFINITE
+# (0xFF) duration, matching the pattern BSAP's/CC-Link IE's own Set IP Address notes established.
+add_test(NAME zigbee_mgmt_permit_joining_indefinite_duration_note
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_zigbee.pcap" --format text -v)
+set_tests_properties(zigbee_mgmt_permit_joining_indefinite_duration_note PROPERTIES
+  PASS_REGULAR_EXPRESSION "#24  [^\n]*\\[zigbee\\]  Mgmt_Permit_Joining request: PermitDuration=255 \\(INDEFINITE \\(until explicitly disabled\\)\\)\n *note: Mgmt_Permit_Joining requested for an INDEFINITE duration \\(0xFF\\) -- the network remains open to new device joins until this is explicitly disabled again")
+
+# NWK-layer security enabled: the NWK header (frame type/addressing/routing) decodes fully, but
+# APS/ZDP correctly report as opaque "N bytes of NWK-encrypted payload" -- no decryption attempted.
+add_test(NAME zigbee_nwk_layer_security_encrypted_payload
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_zigbee.pcap" --format text -v)
+set_tests_properties(zigbee_nwk_layer_security_encrypted_payload PROPERTIES
+  PASS_REGULAR_EXPRESSION "#26  [^\n]*\\[zigbee\\]  Zigbee NWK Data frame, NWK-layer security enabled \\(20 byte\\(s\\) of NWK-encrypted payload\\)")
+
+# APS-layer security enabled, NWK-layer security NOT enabled: NWK decodes fully AND the APS header
+# (cluster/profile/endpoints) still decodes, while ZDP correctly reports as opaque "N bytes of
+# APS-encrypted payload".
+add_test(NAME zigbee_aps_layer_security_encrypted_payload
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_zigbee.pcap" --format text -v)
+set_tests_properties(zigbee_aps_layer_security_encrypted_payload PROPERTIES
+  PASS_REGULAR_EXPRESSION "#27  [^\n]*\\[zigbee\\]  Zigbee APS Data frame, ClusterID=0x0006 ProfileID=0x0104, APS-layer security enabled \\(12 byte\\(s\\) of APS-encrypted payload\\)")
+
+# Application-profile (ZCL) frame -- Profile ID 0x0104, NOT the ZDP profile (0x0000): NWK+APS
+# headers still decode fully, but ZCL is correctly left out of scope (see zigbee.hpp's own ZCL
+# scope note).
+add_test(NAME zigbee_application_profile_zcl_not_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_zigbee.pcap" --format text -v)
+set_tests_properties(zigbee_application_profile_zcl_not_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "#28  [^\n]*\\[zigbee\\]  Zigbee APS Data frame, ClusterID=0x0006 ProfileID=0x0104 \\(application-profile/ZCL payload, not decoded\\)")
+
+# APS Command frame (Transport Key, 0x05) -- proves APS Command frames skip ALL endpoint/cluster/
+# profile fields and the command id decodes by name.
+add_test(NAME zigbee_aps_command_transport_key
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_zigbee.pcap" --format text -v)
+set_tests_properties(zigbee_aps_command_transport_key PROPERTIES
+  PASS_REGULAR_EXPRESSION "#29  [^\n]*\\[zigbee\\]  Zigbee APS Command frame: Transport Key")
+
+# NWK Command frame type -- proves the NWK header decodes but APS is correctly not attempted
+# (NWK Command payloads, e.g. route requests, are out of scope -- see zigbee.hpp's own note).
+add_test(NAME zigbee_nwk_command_frame_not_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_zigbee.pcap" --format text -v)
+set_tests_properties(zigbee_nwk_command_frame_not_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "#30  [^\n]*\\[zigbee\\]  Zigbee NWK Command frame \\(command payload not decoded\\)")
+
+# A non-Data MAC frame type (Ack) on this same link type -- proves decoder.cpp's own "recognized
+# IEEE 802.15.4 frame, not Zigbee-NWK-carrying" fallback.
+add_test(NAME zigbee_non_data_mac_frame_falls_through
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_zigbee.pcap" --format text -v)
+set_tests_properties(zigbee_non_data_mac_frame_falls_through PROPERTIES
+  PASS_REGULAR_EXPRESSION "#31  [^\n]*\\[non-ip\\]  IEEE 802\\.15\\.4 Ack frame, seq=31 \\(not decoded -- not a Zigbee NWK-carrying MAC frame type\\)")
+
+# MALFORMED/TRUNCATED: fewer than the fixed 2-byte Frame Control Field itself is present -- must
+# not crash; reported as a "parse-error" packet, proving the ParseError-vs-tolerant-degrade
+# boundary (see ieee802154.hpp's own "Truncation handling" paragraph).
+add_test(NAME zigbee_malformed_truncated_below_fcf_parse_error
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_zigbee.pcap" --format text -v)
+set_tests_properties(zigbee_malformed_truncated_below_fcf_parse_error PROPERTIES
+  PASS_REGULAR_EXPRESSION "#32  [^\n]*\\[parse-error\\]  could not parse packet: IEEE 802\\.15\\.4 MAC frame is shorter than the 2-byte Frame Control Field itself")
+
+add_test(NAME zigbee_json_fields_mac_and_nwk_layer
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_zigbee.pcap" --format json)
+set_tests_properties(zigbee_json_fields_mac_and_nwk_layer PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"zigbee_mac_frame_type\": \"Data\",\n *\"zigbee_mac_frame_version\": \"802\\.15\\.4-2006\",\n *\"zigbee_mac_security_enabled\": false,\n *\"zigbee_mac_seq\": 1,\n *\"zigbee_mac_dst_pan\": \"0x1234\",\n *\"zigbee_mac_dst_addr\": \"0xA1B2\",\n *\"zigbee_mac_src_addr\": \"0x0000\",\n *\"zigbee_nwk_present\": true,\n *\"zigbee_nwk_frame_type\": \"Data\",\n *\"zigbee_nwk_version\": \"2007 \\(ZigBee PRO\\)\",")
+
+add_test(NAME zigbee_json_fields_zdp_cluster_fields
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_zigbee.pcap" --format json)
+set_tests_properties(zigbee_json_fields_zdp_cluster_fields PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"zigbee_zdp_cluster_name\": \"NWK_addr\",\n *\"zigbee_zdp_is_response\": true,\n *\"zigbee_zdp_recognized\": true,\n *\"zigbee_zdp_fields\": \\[\"Status: SUCCESS\", \"IEEEAddr: 00:12:4B:00:01:02:03:05\", \"NWKAddr: 0xA1B2\"\\]")
+
+add_test(NAME zigbee_json_fields_encrypted_payload_length
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_zigbee.pcap" --format json)
+set_tests_properties(zigbee_json_fields_encrypted_payload_length PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"zigbee_nwk_security\": true,[^}]*\"zigbee_nwk_payload_encrypted\": true,\n *\"zigbee_nwk_encrypted_payload_length\": 20,")
+
+add_test(NAME zigbee_stats_nwk_aps_zdp_and_encrypted_counts
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_zigbee.pcap" --format text --stats)
+set_tests_properties(zigbee_stats_nwk_aps_zdp_and_encrypted_counts PROPERTIES
+  PASS_REGULAR_EXPRESSION "zigbee nwk frame types:\n *Data *29\n *NWK Command *1\nzigbee aps frame types:\n *Command *1\n *Data *27\nzigbee zdp clusters:\n *Active_EP *2\n.*zigbee nwk-layer-encrypted frames: 1\nzigbee aps-layer-encrypted frames: 1")
+
+add_test(NAME zigbee_protocol_filter_includes_only_zigbee
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_zigbee.pcap" --protocol zigbee --format text -v)
+set_tests_properties(zigbee_protocol_filter_includes_only_zigbee PROPERTIES
+  PASS_REGULAR_EXPRESSION "#1  [^\n]*\\[zigbee\\]  NWK_addr request")
+
+# Forced --protocol other-than-zigbee disables Zigbee/ZDP decoding entirely -- the MAC-layer frame
+# still degrades tolerantly to [non-ip] rather than vanishing or crashing.
+add_test(NAME zigbee_protocol_filter_excludes_when_other_protocol_forced
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_zigbee.pcap" --protocol modbus --format text)
+set_tests_properties(zigbee_protocol_filter_excludes_when_other_protocol_forced PROPERTIES
+  PASS_REGULAR_EXPRESSION "#1  [^\n]*\\[non-ip\\]  IEEE 802\\.15\\.4 Data frame, seq=1 \\(not decoded -- Zigbee decoding disabled by --protocol\\)"
+  FAIL_REGULAR_EXPRESSION "\\[zigbee\\]")
+
+add_test(NAME zigbee_protocol_filter_excludes_other_protocols
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --protocol zigbee --format text)
+set_tests_properties(zigbee_protocol_filter_excludes_other_protocols PROPERTIES
+  FAIL_REGULAR_EXPRESSION "\\[modbus\\]")
+
+# LINKTYPE_IEEE802_15_4_TAP (283) -- the second in-scope capture format, exercising all three TAP
+# FCS_TYPE variants (16-bit CRC present / none, the TAP spec's own default / 32-bit CRC).
+add_test(NAME zigbee_tap_link_type_fcs_type_variants
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_zigbee_tap.pcap" --format text -v)
+set_tests_properties(zigbee_tap_link_type_fcs_type_variants PROPERTIES
+  PASS_REGULAR_EXPRESSION "#1  [^\n]*\\[zigbee\\]  NWK_addr request: IEEEAddr=00:12:4B:00:01:02:03:05\n#2  [^\n]*\\[zigbee\\]  NWK_addr response: Status=SUCCESS IEEEAddr=00:12:4B:00:01:02:03:05 NWKAddr=0xA1B2\n#3  [^\n]*\\[zigbee\\]  Mgmt_Permit_Joining request: PermitDuration=255 \\(INDEFINITE \\(until explicitly disabled\\)\\)\n *note: Mgmt_Permit_Joining requested for an INDEFINITE duration \\(0xFF\\)")
+
+add_test(NAME zigbee_info_link_type_name_withfcs
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_zigbee.pcap")
+set_tests_properties(zigbee_info_link_type_name_withfcs PROPERTIES
+  PASS_REGULAR_EXPRESSION "link type:      IEEE 802\\.15\\.4 with FCS \\(Zigbee\\)")
+
+add_test(NAME zigbee_info_link_type_name_tap
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_zigbee_tap.pcap")
+set_tests_properties(zigbee_info_link_type_name_tap PROPERTIES
+  PASS_REGULAR_EXPRESSION "link type:      IEEE 802\\.15\\.4 TAP \\(Zigbee\\)")

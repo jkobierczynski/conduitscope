@@ -166,11 +166,19 @@ const std::vector<const ProtocolDecoder*>& cotp_payload_registry();
 // packet's own bytes -- a genuinely different dispatch shape from every other GateKind, all of
 // which key off EtherType/IP-protocol-number/TCP-or-UDP-port/COTP-payload). THIS VECTOR IS
 // AUDIT-TRAIL DATA ONLY like cotp_payload_registry() above -- decoder.cpp's own
-// LINKTYPE_CAN_SOCKETCAN branch does not iterate it, since DeviceNet is (so far) the only
-// protocol on this link type; the branch calls devicenet_decoder().decode() directly. Kept here
-// anyway so this gate group has the same audit trail every other one does, and so a second
-// LinkType-gated protocol (should one ever be added) has a documented, iterable home to land in.
-// Not migrated: none -- DeviceNet is this gate's only protocol and it is migrated.
+// LINKTYPE_CAN_SOCKETCAN branch does not iterate it, since DeviceNet is the only protocol on
+// THAT link type; the branch calls devicenet_decoder().decode() directly. Kept here anyway so
+// this gate group has the same audit trail every other one does, and so a second LinkType-gated
+// protocol has a documented, iterable home to land in -- which is exactly what happened: Zigbee
+// (zigbee.hpp) is this gate's second protocol, added specifically because it needs TWO pcap link
+// types at once (LINKTYPE_IEEE802_15_4_WITHFCS and LINKTYPE_IEEE802_15_4_TAP -- see
+// ieee802154.hpp/zigbee.hpp's own file header comments). decoder.cpp's own two
+// LINKTYPE_IEEE802_15_4_* branches likewise do not iterate this vector -- they call
+// ieee802154.hpp's own parse_ieee802154_withfcs/parse_ieee802154_tap entry points directly,
+// followed by try_parse_zigbee(...) directly (NOT ZigbeeDecoder::decode(), which can only assume
+// one of the two capture formats -- see zigbee.hpp's own ZigbeeDecoder class comment for why).
+// Not migrated: none -- DeviceNet and Zigbee are this gate's only two protocols and both are
+// migrated.
 const std::vector<const ProtocolDecoder*>& link_type_registry();
 
 }  // namespace conduitscope

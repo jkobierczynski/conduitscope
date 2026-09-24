@@ -381,6 +381,17 @@ private:
     // rip_command_counts_/icmp_type_counts_ already use.
     std::map<std::string, size_t> coap_type_counts_;
     std::map<std::string, size_t> coap_code_counts_;
+    // Zigbee (ieee802154.hpp/zigbee.hpp) -- counts by NWK frame type, APS frame type, and ZDP
+    // cluster name (only for a frame that reached that layer -- see ZigbeeFrame::nwk_present/
+    // aps_present/zdp_present), plus how many frames had NWK-layer or APS-layer security enabled
+    // (and were therefore reported opaque/encrypted at that layer, see zigbee.hpp's own scope
+    // notes) -- the same "one map per counted dimension, plus a couple of plain counters" shape
+    // devicenet_group_counts_/devicenet_fragmented_count_ already established just above.
+    std::map<std::string, size_t> zigbee_nwk_frame_type_counts_;
+    std::map<std::string, size_t> zigbee_aps_frame_type_counts_;
+    std::map<std::string, size_t> zigbee_zdp_cluster_counts_;
+    size_t zigbee_nwk_encrypted_count_ = 0;
+    size_t zigbee_aps_encrypted_count_ = 0;
     bool has_ts_ = false;
     double first_ts_ = 0.0, last_ts_ = 0.0;
 };

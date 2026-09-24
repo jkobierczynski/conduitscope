@@ -35,10 +35,21 @@ namespace conduitscope {
 // framing at all) -- see can_socketcan.hpp's own file header comment for the exact
 // 8-byte-header-plus-payload record shape, and devicenet.hpp for the one protocol this
 // codebase currently decodes on top of it (DeviceNet).
+//
+// LINKTYPE_IEEE802_15_4_WITHFCS (195) and LINKTYPE_IEEE802_15_4_TAP (283) are the two raw IEEE
+// 802.15.4 radio-capture framings this codebase supports (Zigbee's own MAC layer) -- see
+// ieee802154.hpp's own file header comment for the exact record shapes and why these two, and only
+// these two, of the five IEEE 802.15.4 LINKTYPE values tcpdump.org registers are in scope (LINUX=191,
+// NONASK_PHY=215, and NOFCS=230 are deliberately not added here -- an unrecognized link type already
+// falls through to this reader's own callers' "unsupported link type" per-packet handling, so nothing
+// else is needed for them). zigbee.hpp is the one protocol this codebase currently decodes on top of
+// either of these two.
 enum LinkType : uint32_t {
     LINKTYPE_ETHERNET = 1,
     LINKTYPE_RAW = 101,
+    LINKTYPE_IEEE802_15_4_WITHFCS = 195,
     LINKTYPE_CAN_SOCKETCAN = 227,
+    LINKTYPE_IEEE802_15_4_TAP = 283,
 };
 
 struct PcapFileInfo {

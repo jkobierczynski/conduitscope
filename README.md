@@ -128,6 +128,13 @@ RFC plus Observe (RFC 7641) and blockwise transfer (RFC 7959) fully
 decoded, port-gated in Auto mode since CoAP's own shortest legal message
 is too weak a structural signal to try opportunistically -- see
 `docs/PROTOCOL_COVERAGE.md`'s CoAP section for the full writeup),
+Zigbee (IEEE 802.15.4 MAC + Zigbee NWK + Zigbee APS + full ZDP, via
+LINKTYPE_IEEE802_15_4_WITHFCS/TAP pcap captures -- MAC/NWK/APS headers
+always decoded structurally, full ZDP across 13 named clusters decoded
+whenever APS-layer security is not in use, NWK/APS-layer-encrypted
+payloads correctly reported as opaque rather than guessed at, no
+decryption capability and no ZCL by explicit scope decision -- see
+`docs/PROTOCOL_COVERAGE.md`'s Zigbee section for the full writeup),
 IEEE Spanning Tree Protocol
 (STP/RSTP/MSTP), DeviceNet (CAN-bus CIP, via SocketCAN pcap captures), DNS,
 mDNS, LLMNR, and NetBIOS Name Service (NBT-NS), ICMP, RIP, IGMP, VRRP, HSRP,
@@ -237,7 +244,7 @@ traffic match what the segmentation policy says it should" question.
 
 Groundwork / v0.2.4. Every protocol named above is implemented, decoding real
 wire-format fields (not just naming the protocol), and covered by the
-automated test suite -- 1651 tests as of this writing, run via `ctest` after
+automated test suite -- 1677 tests as of this writing, run via `ctest` after
 building (see Building below). Where a real capture was available (public
 ICS-lab collections, vendor-attributed samples, or a live device on real
 hardware), the decoder is validated against it, not just a synthetic
