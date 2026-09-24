@@ -2676,29 +2676,44 @@ per-protocol port option -- it never gates detection. See PROTOCOL
 COVERAGE's FOUNDATION Fieldbus HSE section for exactly what's decoded once
 the gate matches.
 
-**DeviceNet** is detected completely differently from every protocol above:
-not by a structural gate applied to a TCP/UDP payload or an EtherType, but
-by the pcap capture's own declared link type. Before any Ethernet parsing is
-even attempted, `Decoder::decode` checks whether the capture's link type is
-`LINKTYPE_CAN_SOCKETCAN` (227); if it is, every packet is parsed as a
-SocketCAN capture record (`parse_socketcan_frame`, see
-`can_socketcan.hpp`) and handed to `try_parse_devicenet`, a wholly separate
-top-level branch that never calls `parse_ethernet` at all -- there is no
-ordering or collision question with any other protocol in this list, the
-same way there's none between two different EtherTypes, because DeviceNet
-isn't reached through the EtherType-keyed dispatch chain in the first
-place. Within that branch, the only rejection is structural and absolute: a
-CAN frame with its EFF (extended 29-bit ID), RTR (remote transmission
-request), or ERR (error frame) bit set is not a valid DeviceNet frame shape
-at all and is reported as `non-ip` (named by which flag is set), mirroring
-Wireshark's own `dissect_devicenet`'s literal first check. Every other
-standard-11-bit-ID CAN frame on this link type is accepted as `devicenet`
-and message-group-classified by its CAN ID -- see docs/PROTOCOL_COVERAGE.md's
-DeviceNet section for the full classification. `--protocol devicenet`
-restricts decoding to it the same way every other `--protocol` value does,
-but since the link-type check runs first regardless of `--protocol`, it has
-no effect at all on an ordinary Ethernet-linktype capture (nothing on such a
-capture is ever a SocketCAN record to begin with).
+**DeviceNet, CANopen, and SAE J1939** are detected completely differently
+from every protocol above: not by a structural gate applied to a TCP/UDP
+payload or an EtherType, but by the pcap capture's own declared link type.
+Before any Ethernet parsing is even attempted, `Decoder::decode` checks
+whether the capture's link type is `LINKTYPE_CAN_SOCKETCAN` (227); if it is,
+every packet is parsed as a SocketCAN capture record (`parse_socketcan_
+frame`, see `can_socketcan.hpp`) and handed to this branch, which never
+calls `parse_ethernet` at all -- there is no ordering or collision question
+with any protocol OUTSIDE this list, the same way there's none between two
+different EtherTypes, because none of these three is reached through the
+EtherType-keyed dispatch chain in the first place. WITHIN this list,
+though, there genuinely is an ordering/collision question, unlike every
+other gate in this codebase -- see docs/PROTOCOL_COVERAGE.md's own "THE
+DEVICENET-VS-CANOPEN DISPATCH COLLISION" section (under its CANopen
+heading) for the full analysis of why, and docs/DEVELOPMENT.md's own
+roadmap item 50 for a summary. In short: the branch first checks the EFF
+(extended 29-bit ID) flag -- if set, only J1939 is ever attempted (an
+EFF-flagged frame is never a valid DeviceNet or CANopen frame shape at
+all, mirroring both `dissect_devicenet`'s and `dissect_canopen`'s own
+literal first check, an EFF requirement `dissect_j1939`'s own first check
+mirrors in reverse); ERR-flagged frames are rejected outright regardless
+of EFF, the one rejection condition all three protocols share, while J1939
+uniquely tolerates RTR (DeviceNet/CANopen both reject it). For a
+non-EFF/non-ERR frame, `--protocol devicenet`/Auto try `try_parse_
+devicenet` (DeviceNet's own only rejection: RTR set); `--protocol canopen`
+-- and ONLY an explicit `--protocol canopen`, never Auto -- tries `try_
+parse_canopen` instead (CANopen's own only rejection: RTR set, the exact
+same condition DeviceNet's own rejection uses, since both mirror the same
+`dissect_devicenet`/`dissect_canopen` "reject EFF/RTR/ERR" first check).
+Every other standard-11-bit-ID, non-RTR CAN frame on this link type is
+accepted as `devicenet` (or, under `--protocol canopen`, `canopen`) and
+classified by its CAN ID -- see docs/PROTOCOL_COVERAGE.md's DeviceNet,
+CANopen, and SAE J1939 sections for the full per-protocol classification.
+`--protocol devicenet`/`canopen`/`j1939` each restrict decoding the same
+way every other `--protocol` value does, but since the link-type check
+runs first regardless of `--protocol`, none of the three has any effect at
+all on an ordinary Ethernet-linktype capture (nothing on such a capture is
+ever a SocketCAN record to begin with).
 
 **DNS, mDNS, LLMNR, NBT-NS (UDP), and DoH detection (TCP) are the only
 protocols in this codebase that are PORT-GATED in `--protocol auto`, not
@@ -8441,6 +8456,111 @@ deferred future migration.
     protocol addition, `tests/sample_ipmi.pcap` is entirely synthetic -- no real BMC/IPMI capture
     was available to validate against.
 
+50. **CANopen (CiA 301) / SAE J1939 -- both riding raw CAN bus frames over
+    `LINKTYPE_CAN_SOCKETCAN`, the same link type DeviceNet already uses (see
+    docs/PROTOCOL_COVERAGE.md's DeviceNet section).** **Done.**
+    This is exactly the item DeviceNet's own file header comment and this
+    doc's own former "Protocols not covered at all" CANopen entry both
+    anticipated -- `can_socketcan.hpp`/`.cpp`'s generic SocketCAN pcap/CAN-
+    frame-header parsing needed zero changes; only two new decoders
+    (`canopen.hpp`/`.cpp`, `j1939.hpp`/`.cpp`) were added on top of it,
+    following `devicenet.hpp`/`.cpp`'s own exact architectural template
+    (file-header sourcing rigor, `ProtocolDecoder` wrapper shape,
+    `GateKind::LinkType` gating, the documented "`decode()` can throw
+    `ParseError`" deviation). Sourced byte-exact from Wireshark's own
+    `epan/dissectors/packet-canopen.c` (COB-ID Function Code table; NMT/
+    Heartbeat/SYNC/TIME STAMP/EMCY/SDO field shapes) and `packet-j1939.c`
+    (29-bit ID structure, PDU1/PDU2 distinction, PGN reconstruction
+    formula) before any code was written, matching the sourcing discipline
+    established for every recent protocol addition; see
+    docs/PROTOCOL_COVERAGE.md's own new CANopen and SAE J1939 sections for
+    the complete field-level writeup, summarized here.
+
+    **The single most important design decision in this item: the
+    DeviceNet-vs-CANopen dispatch collision.** Both protocols classify
+    almost the entire 11-bit standard CAN ID space by their own scheme
+    (DeviceNet's four Group ranges; CANopen's 16 Function Code values), with
+    no self-describing tag anywhere in a raw CAN ID the way an EtherType/IP-
+    protocol-number/TCP-UDP-port gives every other shared-gate pair in this
+    codebase. COB-ID `0x000` is a real, not contrived, example: simultaneously
+    a valid CANopen NMT command AND a valid DeviceNet Group 1 "Other Group 1
+    Message" on the exact same bytes. Resolved, after genuinely comparing
+    both reference dissectors' own source rather than assuming an answer
+    going in, by excluding CANopen from `ProtocolFilter::Auto` entirely --
+    it is reachable only via an explicit `--protocol canopen`, while
+    DeviceNet's own existing Auto-mode behavior is left completely
+    unchanged. J1939, by contrast, needed no such carve-out and DOES join
+    Auto mode alongside DeviceNet: its 29-bit Extended (EFF) identifiers are
+    a hardware-enforced disjoint space from DeviceNet/CANopen's shared
+    standard-ID space (`dissect_devicenet`/`dissect_canopen` both reject any
+    EFF-flagged frame in their own first check; `dissect_j1939`'s own first
+    check is the mirror image, requiring EFF). See
+    docs/PROTOCOL_COVERAGE.md's own "THE DEVICENET-VS-CANOPEN DISPATCH
+    COLLISION" section for the full analysis, and `decoder.hpp`/`decoder.cpp`
+    for exactly where `ProtocolFilter::CanopenOnly`/`J1939Only` are wired in.
+
+    **A genuine sourcing gap, honestly documented rather than papered over**:
+    Wireshark's own `packet-j1939.c` is written for NMEA 2000/marine use and
+    implements NO per-PGN vehicle payload decoding at all (its own PGN name
+    table is marine-oriented, not SAE J1939-71 vehicle-oriented) -- so the
+    EEC1/ET1/CCVS/DM1 field layouts this decoder implements are domain-
+    knowledge derivations from SAE J1939-71/-73 rather than a Wireshark-
+    source port, flagged as exactly that in `j1939.hpp`'s own file header
+    and in docs/PROTOCOL_COVERAGE.md's own SAE J1939 section, the same
+    "decode confidently only where the wire format is unambiguous, note
+    anything inferred as inferred" posture RMCP/IPMI's own RAKP-handshake
+    sourcing gap (item 49) and CDP's own Power-TLV scope note (item 48)
+    already established. The DM1 SPN/FMI/OC/CM bit-packing -- explicitly the
+    single most error-prone part of J1939 -- was verified carefully rather
+    than assumed (SPN is 19 bits, packed non-contiguously across three
+    bytes) and is exercised end-to-end by a concrete worked-value CTest
+    (SPN 1569 and SPN `0x12345`, two DTCs packed in one CAN-FD-carried DM1
+    frame).
+
+    Also caught and fixed during this item's own development, before either
+    reached a fixture: CANopen's own SDO command-specifier byte's meaning is
+    direction-dependent (only `cs==0` is structurally uniform between a
+    request and a response; `cs` 1/2/3 each mean something different per
+    direction), first implemented incorrectly as direction-independent and
+    corrected by re-deriving line-by-line from `dissect_sdo`'s own separate
+    `ccs`/`scs` switch statements; and J1939's own CAN-FD payload decoding
+    was first implemented inconsistently with its own documented design
+    (skipping payload decode for any FD frame, DeviceNet/CANopen's own
+    posture, contradicting `j1939.hpp`'s own file header promise that
+    CAN-FD-carried multi-DTC DM1 frames WOULD be decoded), caught before it
+    broke the planned fixture and fixed to decode FD-frame payloads
+    normally, since J1939-22 legitimately rides CAN FD unlike DeviceNet/
+    CANopen (which both predate it).
+
+    `tests/sample_canopen_j1939.pcap` (`build_canopen_j1939_sample`, one
+    combined fixture for both protocols, matching this item's own explicitly
+    permitted "one combined CAN-family fixture" option) covers, for CANopen:
+    NMT (targeted and broadcast), Heartbeat in three states, SYNC with and
+    without the optional Counter byte, TIME STAMP, EMCY, PDO1 both
+    directions, every SDO transfer shape this decoder names (expedited
+    download/upload request+response, segment download/upload, Abort
+    Transfer, Block Upload request+response), LSS, an unrecognized Function
+    Code, truncated payload/header, and EFF/RTR/ERR negative controls --
+    and, critically, packet 1's deliberately dual-shaped COB-ID `0x000`
+    (valid as both a CANopen NMT command and a DeviceNet Group 1 message),
+    decoded all three documented ways by dedicated CTest entries (Auto
+    default prefers DeviceNet; explicit `--protocol devicenet` reaches
+    DeviceNet; only explicit `--protocol canopen` reaches CANopen) --
+    proving the dispatch policy actually behaves as documented, not just as
+    claimed in a comment. For J1939: EEC1 broadcast, ET1, CCVS, a PDU1
+    Request proving destination-address extraction, a CAN-FD-carried DM1
+    with two packed DTCs proving the SPN/FMI/OC/CM bit-unpacking, a
+    zero-DTC DM1 proving no phantom findings, an RTR-flagged frame proving
+    J1939's own unique RTR tolerance (unlike DeviceNet/CANopen, which both
+    reject RTR outright), an EFF+ERR negative control, an uncurated PGN, and
+    a truncated payload. 52 new `canopen_*`/`j1939_*` CTest tests were
+    added. Full suite grew from 1717 to 1769 tests, zero regressions,
+    zero-warning clean rebuilds in both the default and
+    `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF` configs. As with every recent
+    protocol addition, `tests/sample_canopen_j1939.pcap` is entirely
+    synthetic -- no real public CANopen or J1939/CAN-bus capture was found
+    during this item's own research.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols
@@ -8456,27 +8576,16 @@ with zero bytes of it decoded anywhere in this codebase.
   category as ControlNet (see docs/PROTOCOL_COVERAGE.md's DeviceNet section, "Why
   not ControlNet too"): not a scope choice, a hard capture-availability
   wall.
-- **CANopen.** The most plausible near-term candidate on this list.
-  DeviceNet already rides raw CAN frames captured via SocketCAN
-  (`LINKTYPE_CAN_SOCKETCAN`, see docs/PROTOCOL_COVERAGE.md's DeviceNet section) --
-  `can_socketcan.hpp`/`.cpp` decode the pcap record and CAN frame header
-  generically, and its own file header says outright that "any CAN
-  application protocol's frames (DeviceNet, CANopen, J1939, or raw CAN
-  traffic with no higher-layer protocol at all) would show up in a capture
-  this same way." CANopen would reuse that exact link-layer plumbing
-  unchanged; only a CANopen-specific message-group/object-dictionary
-  decoder (the equivalent of `devicenet.cpp`) would need to be written. It
-  just hasn't been built yet -- a real, reasonably scoped future roadmap
-  item, not an exclusion.
 - **Modbus RTU/ASCII (serial).** Not to be confused with Modbus/TCP, which
   this tool fully decodes (see docs/PROTOCOL_COVERAGE.md's Modbus/TCP section). The
   serial variants ride RS-232/RS-485 directly, with no equivalent of
-  DeviceNet's SocketCAN situation -- there is no established pcap
-  link-layer encoding for raw serial traffic this project could build
-  against, and this project hasn't investigated any serial-to-pcap capture
-  mechanism (a USB-serial sniffer's own vendor format, for instance) that
-  might produce one. Unlike CANopen, there is currently no link-layer
-  plumbing here to reuse at all.
+  DeviceNet/CANopen/J1939's own SocketCAN situation (see
+  docs/PROTOCOL_COVERAGE.md's DeviceNet, CANopen, and SAE J1939 sections) --
+  there is no established pcap link-layer encoding for raw serial traffic
+  this project could build against, and this project hasn't investigated
+  any serial-to-pcap capture mechanism (a USB-serial sniffer's own vendor
+  format, for instance) that might produce one. Unlike CANopen/J1939, there
+  is currently no link-layer plumbing here to reuse at all.
 - **PROFIBUS PA / HART's own 4-20mA analog signal.** Not a packet-capture
   question at all -- this is a physical/analog wire-level signal (current
   loop, or PROFIBUS PA's own bus-powered physical layer), with nothing that

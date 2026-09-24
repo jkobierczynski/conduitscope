@@ -17,6 +17,7 @@
 #include "conduitscope/bsap.hpp"
 #include "conduitscope/byteio.hpp"
 #include "conduitscope/can_socketcan.hpp"
+#include "conduitscope/canopen.hpp"
 #include "conduitscope/cclink_ie.hpp"
 #include "conduitscope/cdp.hpp"
 #include "conduitscope/coap.hpp"
@@ -42,6 +43,7 @@
 #include "conduitscope/igmp.hpp"
 #include "conduitscope/igrp.hpp"
 #include "conduitscope/it_protocols.hpp"
+#include "conduitscope/j1939.hpp"
 #include "conduitscope/kerberos.hpp"
 #include "conduitscope/ldap.hpp"
 #include "conduitscope/lldp.hpp"
@@ -91,6 +93,22 @@ enum class ProtocolFilter {
     StpOnly,      // only attempt STP/RSTP/MSTP (classic IEEE 802.3 LLC BPDU) decoding
     DevicenetOnly, // only attempt DeviceNet (CAN-bus CIP) decoding -- meaningful only on a
                     // LINKTYPE_CAN_SOCKETCAN capture, see can_socketcan.hpp/devicenet.hpp
+    CanopenOnly,   // only attempt CANopen (CiA 301) decoding -- meaningful only on a
+                    // LINKTYPE_CAN_SOCKETCAN capture, see can_socketcan.hpp/canopen.hpp.
+                    // DELIBERATELY NOT part of ProtocolFilter::Auto -- see canopen.hpp's own file
+                    // header comment for the full DeviceNet-vs-CANopen dispatch-collision analysis
+                    // this resolves: both protocols classify literally every standard 11-bit CAN ID
+                    // into some named category of their own, with no structural way to tell a
+                    // CANopen frame from a DeviceNet frame by bit shape alone, so an explicit
+                    // --protocol canopen is required rather than trying both opportunistically the
+                    // way most GateKind pairs in this codebase do.
+    J1939Only,     // only attempt SAE J1939 decoding -- meaningful only on a LINKTYPE_CAN_SOCKETCAN
+                    // capture, see can_socketcan.hpp/j1939.hpp. UNLIKE CanopenOnly above, J1939 IS
+                    // part of ProtocolFilter::Auto (see decoder.cpp's own LINKTYPE_CAN_SOCKETCAN
+                    // branch) -- its Extended (29-bit) CAN ID requirement is a hardware-enforced
+                    // disjoint gate from DeviceNet/CANopen's own standard-ID space, so there is no
+                    // collision to avoid the way there is with CANopen; see j1939.hpp's own file
+                    // header comment.
     ZigbeeOnly,    // only attempt Zigbee (IEEE 802.15.4 MAC + NWK + APS + ZDP) decoding --
                     // meaningful only on a LINKTYPE_IEEE802_15_4_WITHFCS or
                     // LINKTYPE_IEEE802_15_4_TAP capture, see ieee802154.hpp/zigbee.hpp. The
@@ -648,10 +666,17 @@ struct DecodedPacket {
     // recognizes is promoted to "stp" instead -- see stp_bpdu_type_name below; on a
     // LINKTYPE_CAN_SOCKETCAN capture, a CAN frame that try_parse_devicenet recognizes (i.e. not an
     // EFF/RTR/ERR-flagged frame, see can_socketcan.hpp/devicenet.hpp) is "devicenet" -- a zero-
-    // flat-field migrated protocol, see DecodedPacket::result and devicenet.hpp; an EFF/RTR/ERR-
-    // flagged frame on that same link type is "non-ip"
-    // (named structurally by which flag(s) are set, never decoded further -- not a valid DeviceNet
-    // frame shape at all)). Also "zigbee" (a LINKTYPE_IEEE802_15_4_WITHFCS/_TAP capture whose IEEE
+    // flat-field migrated protocol, see DecodedPacket::result and devicenet.hpp. Also "canopen" (a
+    // non-EFF/RTR/ERR-flagged frame on that same link type, decoded via try_parse_canopen, reached
+    // ONLY under an explicit --protocol canopen, never in Auto mode -- see canopen.hpp's own file
+    // header for the DeviceNet-vs-CANopen dispatch-collision analysis this resolves) and "j1939" (an
+    // EFF-flagged, non-ERR-flagged frame on that same link type, decoded via try_parse_j1939, tried
+    // in Auto mode alongside devicenet since its EFF requirement never collides with
+    // DeviceNet/CANopen's own standard-ID space -- see j1939.hpp). A frame on this link type that no
+    // enabled decoder recognizes (an EFF/RTR/ERR-flagged frame with J1939 decoding disabled, or a
+    // non-EFF/RTR/ERR-flagged frame with DeviceNet decoding disabled and CANopen not explicitly
+    // requested) is "non-ip" (named structurally by which flag(s) are set, never decoded further).
+    // Also "zigbee" (a LINKTYPE_IEEE802_15_4_WITHFCS/_TAP capture whose IEEE
     // 802.15.4 MAC frame is a Data-type frame -- try_parse_zigbee always recognizes these, even
     // ones whose NWK/APS/ZDP layers turn out to be inaccessible, e.g. NWK-layer security enabled --
     // see zigbee.hpp/ieee802154.hpp; a zero-flat-field migrated protocol, see DecodedPacket::result)

@@ -67,6 +67,8 @@ add_library(conduitscope_core STATIC
   src/cdp.cpp
   src/can_socketcan.cpp
   src/devicenet.cpp
+  src/canopen.cpp
+  src/j1939.cpp
   src/ieee802154.cpp
   src/zigbee.cpp
   src/bacnet.cpp
@@ -2230,11 +2232,23 @@ set_tests_properties(devicenet_unclassified_id_range_noted PROPERTIES
   PASS_REGULAR_EXPRESSION "#27  .*DeviceNet frame, unclassified CAN ID range: CAN ID=0x07F5\n *note: CAN ID 0x07F5 falls in the 0x07F0-0x07FF range")
 
 # 28-30) EFF/RTR/ERR frames -- NOT valid DeviceNet frame shapes, rejected exactly the way
-# Wireshark's own packet-devicenet.c rejects them (its very first check).
+# Wireshark's own packet-devicenet.c rejects them (its very first check). Packet 28's EFF-flagged
+# frame is now, since J1939 joined ProtocolFilter::Auto (see j1939.hpp/decoder.cpp's own
+# LINKTYPE_CAN_SOCKETCAN branch), a LEGITIMATE J1939 frame in Auto mode -- so devicenet_eff_frame_
+# rejected below pins --protocol devicenet explicitly, to keep testing DeviceNet's OWN EFF
+# rejection in isolation from J1939's own opportunistic Auto-mode claim on the exact same bytes;
+# devicenet_eff_frame_decodes_as_j1939_in_auto_mode right after it is the positive proof that Auto
+# mode's own new behavior for this frame is exactly what canopen.hpp/j1939.hpp's own dispatch
+# analysis says it should be.
 add_test(NAME devicenet_eff_frame_rejected
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_devicenet.pcap" --format text)
+  COMMAND conduitscope decode --protocol devicenet --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_devicenet.pcap" --format text)
 set_tests_properties(devicenet_eff_frame_rejected PROPERTIES
-  PASS_REGULAR_EXPRESSION "#28  .*\\[non-ip\\]  CAN frame, id=0x1ABCDEF \\[EFF -- extended 29-bit id\\] \\(not a valid DeviceNet frame shape\\)")
+  PASS_REGULAR_EXPRESSION "#28  .*\\[non-ip\\]  CAN frame, id=0x1ABCDEF \\[EFF -- extended 29-bit id\\] \\(not decoded -- J1939 decoding disabled by --protocol\\)")
+
+add_test(NAME devicenet_eff_frame_decodes_as_j1939_in_auto_mode
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_devicenet.pcap" --format text)
+set_tests_properties(devicenet_eff_frame_decodes_as_j1939_in_auto_mode PROPERTIES
+  PASS_REGULAR_EXPRESSION "#28  .*\\[j1939\\]  J1939 PGN 109312 Priority=0 SA=239 DA=205")
 
 add_test(NAME devicenet_rtr_frame_rejected
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_devicenet.pcap" --format text)
@@ -2301,6 +2315,333 @@ add_test(NAME devicenet_info_reports_message_types
   COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_devicenet.pcap")
 set_tests_properties(devicenet_info_reports_message_types PROPERTIES
   PASS_REGULAR_EXPRESSION "link type: +Linux SocketCAN \\(DeviceNet\\).*devicenet message groups:\n *Group 1 +7\n *Group 2 +6\n *Group 3 +9\n *Group 4 +6")
+
+# --------------------------------------------------------------------------
+# CANopen (CiA 301) and SAE J1939 over SocketCAN (synthetic, combined fixture,
+# tests/sample_canopen_j1939.pcap) -- LINKTYPE_CAN_SOCKETCAN 227, same link type as DeviceNet
+# above. See can_socketcan.hpp/canopen.hpp/j1939.hpp's own file header comments for the wire
+# formats and, above all, canopen.hpp's own "THE DEVICENET-VS-CANOPEN DISPATCH COLLISION" section
+# for why CANopen requires an explicit --protocol canopen and never joins ProtocolFilter::Auto,
+# while J1939 (a structurally disjoint, EFF-gated space) DOES join Auto right alongside DeviceNet.
+# Packet numbers below match build_canopen_j1939_sample()'s own numbered comments 1-36 in
+# tools/make_sample_pcap.py. All PASS_REGULAR_EXPRESSION text below was verified against this
+# decoder's own actual output (text/json/stats, all three of --protocol canopen/j1939/devicenet
+# and the plain Auto default) before being written here, per this task's own mandatory
+# manually-run-and-read-real-output-first requirement.
+
+# --------- THE DISPATCH-COLLISION PROOF (packet 1: COB-ID 0x0000, decodable 3 different ways) ----
+# Packet 1 is DELIBERATELY dual-shaped: a valid CANopen NMT "Start remote node" AND a valid
+# DeviceNet Group 1 "Other Group 1 Message" on the exact same bytes (see the fixture's own comment).
+
+# (a) Auto default (no --protocol): DeviceNet wins, exactly as canopen.hpp's own header comment
+# says it must -- CANopen is NOT part of Auto, so on a shared-ID-space frame like this one Auto
+# mode's own opportunistic DeviceNet attempt claims it first, silently, with no ambiguity warning
+# (matching how every other GateKind::LinkType collision in this codebase resolves: whichever
+# decoder is tried first in the Auto ordering wins, since there is no separate "ambiguous" state).
+add_test(NAME canopen_devicenet_collision_auto_mode_prefers_devicenet
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_canopen_j1939.pcap" --format text)
+set_tests_properties(canopen_devicenet_collision_auto_mode_prefers_devicenet PROPERTIES
+  PASS_REGULAR_EXPRESSION "#1  .*\\[devicenet\\]  DeviceNet Group 1 \\(Other Group 1 Message\\): SrcMAC=0 CAN ID=0x0000")
+
+# (b) --protocol devicenet: same DeviceNet decode, now explicit rather than incidental.
+add_test(NAME canopen_devicenet_collision_explicit_devicenet_filter
+  COMMAND conduitscope decode --protocol devicenet --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_canopen_j1939.pcap" --format text)
+set_tests_properties(canopen_devicenet_collision_explicit_devicenet_filter PROPERTIES
+  PASS_REGULAR_EXPRESSION "#1  .*\\[devicenet\\]  DeviceNet Group 1 \\(Other Group 1 Message\\): SrcMAC=0 CAN ID=0x0000")
+
+# (c) --protocol canopen: ONLY under this explicit filter does the exact same bytes decode as
+# CANopen instead -- the positive proof that the documented dispatch policy actually behaves the
+# way canopen.hpp/decoder.cpp's own comments say it does.
+add_test(NAME canopen_devicenet_collision_explicit_canopen_filter_reaches_canopen
+  COMMAND conduitscope decode --protocol canopen --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_canopen_j1939.pcap" --format text)
+set_tests_properties(canopen_devicenet_collision_explicit_canopen_filter_reaches_canopen PROPERTIES
+  PASS_REGULAR_EXPRESSION "#1  .*\\[canopen\\]  CANopen NMT \\(COB-ID=0x0000 FC=0x0000 Node=0\\): Start remote node \\[Node 5\\]")
+
+# --------------------------------------- CANopen: NMT ----------------------------------------
+add_test(NAME canopen_nmt_start_remote_node_targeted
+  COMMAND conduitscope decode --protocol canopen --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_canopen_j1939.pcap" --format text)
+set_tests_properties(canopen_nmt_start_remote_node_targeted PROPERTIES
+  PASS_REGULAR_EXPRESSION "#1  .*\\[canopen\\]  CANopen NMT \\(COB-ID=0x0000 FC=0x0000 Node=0\\): Start remote node \\[Node 5\\]")
+
+add_test(NAME canopen_nmt_enter_pre_operational_all
+  COMMAND conduitscope decode --protocol canopen --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_canopen_j1939.pcap" --format text)
+set_tests_properties(canopen_nmt_enter_pre_operational_all PROPERTIES
+  PASS_REGULAR_EXPRESSION "#2  .*\\[canopen\\]  CANopen NMT \\(COB-ID=0x0000 FC=0x0000 Node=0\\): Enter pre-operational state \\[All\\]")
+
+# ----------------------------- CANopen: Heartbeat / NMT Error Control -------------------------
+add_test(NAME canopen_heartbeat_operational_state
+  COMMAND conduitscope decode --protocol canopen --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_canopen_j1939.pcap" --format text)
+set_tests_properties(canopen_heartbeat_operational_state PROPERTIES
+  PASS_REGULAR_EXPRESSION "#3  .*\\[canopen\\]  CANopen NMT Error Control \\(COB-ID=0x0701 FC=0x000E Node=1\\): Operational")
+
+add_test(NAME canopen_heartbeat_bootup_state
+  COMMAND conduitscope decode --protocol canopen --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_canopen_j1939.pcap" --format text)
+set_tests_properties(canopen_heartbeat_bootup_state PROPERTIES
+  PASS_REGULAR_EXPRESSION "#4  .*\\[canopen\\]  CANopen NMT Error Control \\(COB-ID=0x0704 FC=0x000E Node=4\\): Boot-up")
+
+add_test(NAME canopen_heartbeat_pre_operational_state
+  COMMAND conduitscope decode --protocol canopen --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_canopen_j1939.pcap" --format text)
+set_tests_properties(canopen_heartbeat_pre_operational_state PROPERTIES
+  PASS_REGULAR_EXPRESSION "#5  .*\\[canopen\\]  CANopen NMT Error Control \\(COB-ID=0x0705 FC=0x000E Node=5\\): Pre-operational")
+
+# --------------------------------------- CANopen: SYNC / TIME ----------------------------------
+add_test(NAME canopen_sync_no_counter
+  COMMAND conduitscope decode --protocol canopen --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_canopen_j1939.pcap" --format text)
+set_tests_properties(canopen_sync_no_counter PROPERTIES
+  PASS_REGULAR_EXPRESSION "#6  .*\\[canopen\\]  CANopen SYNC \\(COB-ID=0x0080 FC=0x0001 Node=0\\)\n")
+
+add_test(NAME canopen_sync_with_counter
+  COMMAND conduitscope decode --protocol canopen --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_canopen_j1939.pcap" --format text)
+set_tests_properties(canopen_sync_with_counter PROPERTIES
+  PASS_REGULAR_EXPRESSION "#7  .*\\[canopen\\]  CANopen SYNC \\(COB-ID=0x0080 FC=0x0001 Node=0\\) \\[counter=42\\]")
+
+add_test(NAME canopen_time_stamp_decoded
+  COMMAND conduitscope decode --protocol canopen --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_canopen_j1939.pcap" --format text)
+set_tests_properties(canopen_time_stamp_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "#8  .*\\[canopen\\]  CANopen TIME STAMP \\(COB-ID=0x0100 FC=0x0002 Node=0\\) \\[days=100 \\(since 1984-01-01, epoch day 5113\\) ms=1234\\]")
+
+# --------------------------------------- CANopen: EMCY -----------------------------------------
+add_test(NAME canopen_emcy_error_code_and_register_decoded
+  COMMAND conduitscope decode --protocol canopen --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_canopen_j1939.pcap" --format text)
+set_tests_properties(canopen_emcy_error_code_and_register_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "#9  .*\\[canopen\\]  CANopen EMCY \\(COB-ID=0x0085 FC=0x0001 Node=5\\) \\[ErrCode=0x2310 \\(Current, CANopen device output side\\) ErrReg=0x0005\\]")
+
+add_test(NAME canopen_emcy_json_error_register_bits_present
+  COMMAND conduitscope decode --protocol canopen --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_canopen_j1939.pcap")
+set_tests_properties(canopen_emcy_json_error_register_bits_present PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"index\": 9,.*\"canopen_emcy_error_code\": \"0x2310\",.*\"canopen_emcy_error_register\": 5,.*\"canopen_emcy_error_register_bits\": \\[\"Generic error\", \"Voltage\"\\]")
+
+# --------------------------------------- CANopen: PDO -------------------------------------------
+add_test(NAME canopen_pdo1_tx_structural_only
+  COMMAND conduitscope decode --protocol canopen --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_canopen_j1939.pcap" --format text)
+set_tests_properties(canopen_pdo1_tx_structural_only PROPERTIES
+  PASS_REGULAR_EXPRESSION "#10  .*\\[canopen\\]  CANopen PDO1 \\(tx\\) \\(COB-ID=0x018A FC=0x0003 Node=10\\) data=8 byte\\(s\\) \\(structural only -- no Object Dictionary mapping, see canopen.hpp\\)")
+
+add_test(NAME canopen_pdo1_rx_structural_only
+  COMMAND conduitscope decode --protocol canopen --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_canopen_j1939.pcap" --format text)
+set_tests_properties(canopen_pdo1_rx_structural_only PROPERTIES
+  PASS_REGULAR_EXPRESSION "#11  .*\\[canopen\\]  CANopen PDO1 \\(rx\\) \\(COB-ID=0x020A FC=0x0004 Node=10\\) data=4 byte\\(s\\) \\(structural only -- no Object Dictionary mapping, see canopen.hpp\\)")
+
+# --------------------------------------- CANopen: SDO --------------------------------------------
+add_test(NAME canopen_sdo_initiate_download_request_decoded
+  COMMAND conduitscope decode --protocol canopen --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_canopen_j1939.pcap" --format text)
+set_tests_properties(canopen_sdo_initiate_download_request_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "#12  .*\\[canopen\\]  CANopen Default-SDO \\(rx\\) \\(COB-ID=0x0587 FC=0x000B Node=7\\): Initiate download request idx=0x1017 sub=0")
+
+add_test(NAME canopen_sdo_initiate_download_request_json_fields_present
+  COMMAND conduitscope decode --protocol canopen --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_canopen_j1939.pcap")
+set_tests_properties(canopen_sdo_initiate_download_request_json_fields_present PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"index\": 12,.*\"canopen_sdo_is_request\": true,.*\"canopen_sdo_cs\": 1,.*\"canopen_sdo_cs_name\": \"Initiate download request\",.*\"canopen_sdo_index\": \"0x1017\",.*\"canopen_sdo_sub_index\": 0,.*\"canopen_sdo_expedited\": true,.*\"canopen_sdo_data_hex\": \"e8030000\"")
+
+add_test(NAME canopen_sdo_initiate_download_response_decoded
+  COMMAND conduitscope decode --protocol canopen --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_canopen_j1939.pcap" --format text)
+set_tests_properties(canopen_sdo_initiate_download_response_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "#13  .*\\[canopen\\]  CANopen Default-SDO \\(tx\\) \\(COB-ID=0x0607 FC=0x000C Node=7\\): Initiate download response idx=0x1017 sub=0")
+
+add_test(NAME canopen_sdo_initiate_upload_request_decoded
+  COMMAND conduitscope decode --protocol canopen --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_canopen_j1939.pcap" --format text)
+set_tests_properties(canopen_sdo_initiate_upload_request_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "#14  .*\\[canopen\\]  CANopen Default-SDO \\(rx\\) \\(COB-ID=0x0588 FC=0x000B Node=8\\): Initiate upload request idx=0x1008 sub=0")
+
+add_test(NAME canopen_sdo_initiate_upload_response_decoded
+  COMMAND conduitscope decode --protocol canopen --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_canopen_j1939.pcap" --format text)
+set_tests_properties(canopen_sdo_initiate_upload_response_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "#15  .*\\[canopen\\]  CANopen Default-SDO \\(tx\\) \\(COB-ID=0x0608 FC=0x000C Node=8\\): Initiate upload response idx=0x1008 sub=0")
+
+add_test(NAME canopen_sdo_download_segment_request_decoded
+  COMMAND conduitscope decode --protocol canopen --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_canopen_j1939.pcap" --format text)
+set_tests_properties(canopen_sdo_download_segment_request_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "#16  .*\\[canopen\\]  CANopen Default-SDO \\(rx\\) \\(COB-ID=0x0589 FC=0x000B Node=9\\): Download segment request")
+
+add_test(NAME canopen_sdo_download_segment_request_json_fields_present
+  COMMAND conduitscope decode --protocol canopen --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_canopen_j1939.pcap")
+set_tests_properties(canopen_sdo_download_segment_request_json_fields_present PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"index\": 16,.*\"canopen_sdo_cs\": 0,.*\"canopen_sdo_cs_name\": \"Download segment request\",.*\"canopen_sdo_segment_toggle\": false,.*\"canopen_sdo_data_hex\": \"aabbccddeeff\"")
+
+add_test(NAME canopen_sdo_upload_segment_request_toggle_ack_decoded
+  COMMAND conduitscope decode --protocol canopen --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_canopen_j1939.pcap" --format text)
+set_tests_properties(canopen_sdo_upload_segment_request_toggle_ack_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "#17  .*\\[canopen\\]  CANopen Default-SDO \\(rx\\) \\(COB-ID=0x0589 FC=0x000B Node=9\\): Upload segment request")
+
+add_test(NAME canopen_sdo_abort_transfer_decoded
+  COMMAND conduitscope decode --protocol canopen --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_canopen_j1939.pcap" --format text)
+set_tests_properties(canopen_sdo_abort_transfer_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "#18  .*\\[canopen\\]  CANopen Default-SDO \\(rx\\) \\(COB-ID=0x058B FC=0x000B Node=11\\): Abort transfer idx=0x2000 sub=1 AbortCode=0x06020000 \\(Object does not exist in the object dictionary\\)")
+
+add_test(NAME canopen_sdo_block_upload_request_decoded
+  COMMAND conduitscope decode --protocol canopen --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_canopen_j1939.pcap" --format text)
+set_tests_properties(canopen_sdo_block_upload_request_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "#19  .*\\[canopen\\]  CANopen Default-SDO \\(rx\\) \\(COB-ID=0x058C FC=0x000B Node=12\\): Block upload idx=0x6000 sub=1 \\[Initiate upload/download request\\]")
+
+add_test(NAME canopen_sdo_block_upload_response_decoded
+  COMMAND conduitscope decode --protocol canopen --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_canopen_j1939.pcap" --format text)
+set_tests_properties(canopen_sdo_block_upload_response_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "#20  .*\\[canopen\\]  CANopen Default-SDO \\(tx\\) \\(COB-ID=0x060C FC=0x000C Node=12\\): Block upload idx=0x6000 sub=1 \\[Initiate upload/download response\\]")
+
+# --------------------------------------- CANopen: LSS / Unknown ---------------------------------
+add_test(NAME canopen_lss_recognized_structural_only
+  COMMAND conduitscope decode --protocol canopen --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_canopen_j1939.pcap" --format text)
+set_tests_properties(canopen_lss_recognized_structural_only PROPERTIES
+  PASS_REGULAR_EXPRESSION "#21  .*\\[canopen\\]  CANopen LSS \\(Master\\) \\(COB-ID=0x07E5 FC=0x000F Node=101\\) \\[LSS -- structural recognition only, not decoded\\]")
+
+add_test(NAME canopen_unknown_function_code_named
+  COMMAND conduitscope decode --protocol canopen --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_canopen_j1939.pcap" --format text)
+set_tests_properties(canopen_unknown_function_code_named PROPERTIES
+  PASS_REGULAR_EXPRESSION "#22  .*\\[canopen\\]  CANopen Unknown \\(COB-ID=0x068F FC=0x000D Node=15\\)")
+
+# --------------------------------------- CANopen: truncation / negative controls ----------------
+add_test(NAME canopen_truncated_payload_clamped_and_noted
+  COMMAND conduitscope decode --protocol canopen --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_canopen_j1939.pcap" --format text --verbose)
+set_tests_properties(canopen_truncated_payload_clamped_and_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "#23  .*\\[canopen\\]  CANopen SYNC \\(COB-ID=0x0080 FC=0x0001 Node=0\\) \\[counter=42\\]\n *note: Payload Length declares 4 byte\\(s\\) but only 1 byte\\(s\\) remain in the captured record")
+
+add_test(NAME canopen_truncated_header_does_not_crash
+  COMMAND conduitscope decode --protocol canopen --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_canopen_j1939.pcap" --format text)
+set_tests_properties(canopen_truncated_header_does_not_crash PROPERTIES
+  PASS_REGULAR_EXPRESSION "#24  .*\\[parse-error\\]  could not parse packet:")
+
+# ERR/RTR rejection: proves CANopen rejects both exactly the way DeviceNet does (its own reference
+# dissector's very first check), and that under --protocol canopen the fallback wording correctly
+# names BOTH protocols as rejecting the frame shape (distinguishing this from the --protocol
+# devicenet-only wording tested above in the DeviceNet section, which names DeviceNet alone).
+add_test(NAME canopen_err_frame_rejected
+  COMMAND conduitscope decode --protocol canopen --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_canopen_j1939.pcap" --format text)
+set_tests_properties(canopen_err_frame_rejected PROPERTIES
+  PASS_REGULAR_EXPRESSION "#25  .*\\[non-ip\\]  CAN frame, id=0x80 \\[ERR -- error frame\\] \\(not a valid DeviceNet/CANopen frame shape\\)")
+
+add_test(NAME canopen_rtr_frame_rejected
+  COMMAND conduitscope decode --protocol canopen --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_canopen_j1939.pcap" --format text)
+set_tests_properties(canopen_rtr_frame_rejected PROPERTIES
+  PASS_REGULAR_EXPRESSION "#26  .*\\[non-ip\\]  CAN frame, id=0x80 \\[RTR -- remote transmission request\\] \\(not a valid DeviceNet/CANopen frame shape\\)")
+
+# --------------------------------------- CANopen: --stats ---------------------------------------
+add_test(NAME canopen_stats_message_type_breakdown
+  COMMAND conduitscope decode --protocol canopen --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_canopen_j1939.pcap" --stats)
+set_tests_properties(canopen_stats_message_type_breakdown PROPERTIES
+  PASS_REGULAR_EXPRESSION "canopen function-code/message types:\n *Default-SDO \\(rx\\) +6\n *Default-SDO \\(tx\\) +3\n *EMCY +1\n *LSS \\(Master\\) +1\n *NMT +2\n *NMT Error Control +3\n *PDO1 \\(rx\\) +1\n *PDO1 \\(tx\\) +1\n *SYNC +3\n *TIME STAMP +1\n *Unknown +1")
+
+# ============================================= J1939 =============================================
+# All J1939 IDs are EFF (Extended, 29-bit) -- see j1939.hpp's own file header comment for why this
+# makes J1939 a structurally disjoint gate from DeviceNet/CANopen's shared standard-ID space, and
+# hence safe to include in ProtocolFilter::Auto (tested without --protocol below; the explicit
+# --protocol j1939/devicenet/canopen variations are tested separately where they add coverage).
+
+add_test(NAME j1939_eec1_broadcast_decoded_in_auto_mode
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_canopen_j1939.pcap" --format text)
+set_tests_properties(j1939_eec1_broadcast_decoded_in_auto_mode PROPERTIES
+  PASS_REGULAR_EXPRESSION "#27  .*\\[j1939\\]  J1939 PGN 61444 \\(EEC1\\) Priority=3 SA=0 \\(Engine #1\\) \\(broadcast\\) EngineSpeed=1500rpm ActualTorque=40%")
+
+add_test(NAME j1939_eec1_json_fields_present
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_canopen_j1939.pcap")
+set_tests_properties(j1939_eec1_json_fields_present PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"index\": 27,.*\"j1939_pgn\": 61444,.*\"j1939_pgn_name\": \"EEC1\",.*\"j1939_is_pdu1\": false,.*\"j1939_eec1_engine_speed_rpm\": 1500.000000,.*\"j1939_eec1_actual_percent_torque\": 40,.*\"j1939_eec1_driver_demand_percent_torque\": 50")
+
+add_test(NAME j1939_et1_decoded
+  COMMAND conduitscope decode --protocol j1939 --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_canopen_j1939.pcap" --format text)
+set_tests_properties(j1939_et1_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "#28  .*\\[j1939\\]  J1939 PGN 65262 \\(ET1\\) Priority=6 SA=0 \\(Engine #1\\) \\(broadcast\\) Coolant=85C Fuel=30C")
+
+add_test(NAME j1939_et1_json_oil_temp_present
+  COMMAND conduitscope decode --protocol j1939 --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_canopen_j1939.pcap")
+set_tests_properties(j1939_et1_json_oil_temp_present PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"index\": 28,.*\"j1939_et1_coolant_temp_c\": 85,.*\"j1939_et1_fuel_temp_c\": 30,.*\"j1939_et1_oil_temp_c\": 90.000000")
+
+add_test(NAME j1939_ccvs_decoded
+  COMMAND conduitscope decode --protocol j1939 --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_canopen_j1939.pcap" --format text)
+set_tests_properties(j1939_ccvs_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "#29  .*\\[j1939\\]  J1939 PGN 65265 \\(CCVS\\) Priority=6 SA=0 \\(Engine #1\\) \\(broadcast\\) VehicleSpeed=100.5km/h CruiseActive=On")
+
+# PDU1 Request: proves destination-address extraction (this task's own explicit ask).
+add_test(NAME j1939_pdu1_request_destination_address_extracted
+  COMMAND conduitscope decode --protocol j1939 --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_canopen_j1939.pcap" --format text)
+set_tests_properties(j1939_pdu1_request_destination_address_extracted PROPERTIES
+  PASS_REGULAR_EXPRESSION "#30  .*\\[j1939\\]  J1939 PGN 59904 \\(Request\\) Priority=6 SA=249 \\(Off Board Diagnostic-Service Tool #1\\) DA=0 TargetPGN=65262")
+
+add_test(NAME j1939_pdu1_request_json_is_pdu1_and_destination_address_present
+  COMMAND conduitscope decode --protocol j1939 --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_canopen_j1939.pcap")
+set_tests_properties(j1939_pdu1_request_json_is_pdu1_and_destination_address_present PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"index\": 30,.*\"j1939_is_pdu1\": true,.*\"j1939_destination_address\": 0,.*\"j1939_request_target_pgn\": 65262")
+
+# DM1 with 2 packed DTCs, carried in a CAN FD frame -- the SPN/FMI/OC/CM bit-unpacking proof.
+add_test(NAME j1939_dm1_two_dtcs_bit_unpacking_decoded
+  COMMAND conduitscope decode --protocol j1939 --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_canopen_j1939.pcap" --format text --verbose)
+set_tests_properties(j1939_dm1_two_dtcs_bit_unpacking_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "#31  .*\\[j1939\\]  J1939 PGN 65226 \\(DM1\\) Priority=6 SA=0 \\(Engine #1\\) \\(broadcast\\) MIL=On DTCs=2 \\[SPN=1569 FMI=4 OC=3\\] \\[SPN=74565 FMI=13 OC=127\\]\n *note: CAN FD frame \\(fd_flags 0x04 set\\) -- UNLIKE DeviceNet/CANopen")
+
+add_test(NAME j1939_dm1_two_dtcs_json_dtc_array_present
+  COMMAND conduitscope decode --protocol j1939 --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_canopen_j1939.pcap")
+set_tests_properties(j1939_dm1_two_dtcs_json_dtc_array_present PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"index\": 31,.*\"j1939_dm1_mil\": \"On\",.*\"j1939_dm1_dtc_count\": 2,.*\"j1939_dm1_dtcs\": \\[\\{\"spn\": 1569, \"fmi\": 4, \"occurrence_count\": 3, \"conversion_method\": false\\}, \\{\"spn\": 74565, \"fmi\": 13, \"occurrence_count\": 127, \"conversion_method\": true\\}\\],.*\"j1939_fd\": true")
+
+add_test(NAME j1939_dm1_zero_dtcs_no_phantom_findings
+  COMMAND conduitscope decode --protocol j1939 --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_canopen_j1939.pcap" --format text)
+set_tests_properties(j1939_dm1_zero_dtcs_no_phantom_findings PROPERTIES
+  PASS_REGULAR_EXPRESSION "#32  .*\\[j1939\\]  J1939 PGN 65226 \\(DM1\\) Priority=6 SA=3 \\(Transmission #1\\) \\(broadcast\\) MIL=Off")
+
+add_test(NAME j1939_dm1_zero_dtcs_json_no_dtcs_array
+  COMMAND conduitscope decode --protocol j1939 --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_canopen_j1939.pcap")
+set_tests_properties(j1939_dm1_zero_dtcs_json_no_dtcs_array PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"index\": 32,.*\"j1939_dm1_mil\": \"Off\",.*\"j1939_dm1_dtc_count\": 0,")
+set_tests_properties(j1939_dm1_zero_dtcs_json_no_dtcs_array PROPERTIES
+  FAIL_REGULAR_EXPRESSION "\"index\": 32,[^\n]*\"j1939_dm1_dtcs\"")
+
+# RTR tolerance: J1939 UNIQUELY tolerates an RTR-flagged frame (unlike DeviceNet/CANopen, which
+# both reject RTR outright) -- see j1939.hpp's own "ONE FURTHER DIFFERENCE" paragraph.
+add_test(NAME j1939_rtr_frame_tolerated_and_classified_by_id_alone
+  COMMAND conduitscope decode --protocol j1939 --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_canopen_j1939.pcap" --format text)
+set_tests_properties(j1939_rtr_frame_tolerated_and_classified_by_id_alone PROPERTIES
+  PASS_REGULAR_EXPRESSION "#33  .*\\[j1939\\]  J1939 PGN 61444 \\(EEC1\\) Priority=3 SA=0 \\(Engine #1\\) \\(broadcast\\) \\[RTR -- no payload\\]")
+
+# Negative control: EFF AND ERR both set -- ERR always wins, even though EFF is present.
+add_test(NAME j1939_eff_and_err_both_set_rejected
+  COMMAND conduitscope decode --protocol j1939 --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_canopen_j1939.pcap" --format text)
+set_tests_properties(j1939_eff_and_err_both_set_rejected PROPERTIES
+  PASS_REGULAR_EXPRESSION "#34  .*\\[non-ip\\]  CAN frame, id=0xCF00400 \\[EFF -- extended 29-bit id\\] \\[ERR -- error frame\\] \\(not a valid J1939 frame shape\\)")
+
+# Uncurated PGN: shown structurally by bare number, never treated as an error.
+add_test(NAME j1939_uncurated_pgn_shown_structurally
+  COMMAND conduitscope decode --protocol j1939 --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_canopen_j1939.pcap" --format text)
+set_tests_properties(j1939_uncurated_pgn_shown_structurally PROPERTIES
+  PASS_REGULAR_EXPRESSION "#35  .*\\[j1939\\]  J1939 PGN 65535 Priority=6 SA=1 \\(broadcast\\) data=4 byte\\(s\\) \\(structural only\\)")
+
+# Truncated payload: EEC1-shaped id but too few bytes actually captured -- clamped, and EEC1's own
+# decode gracefully declines rather than misreading past the end of the payload.
+add_test(NAME j1939_truncated_payload_eec1_declines_gracefully
+  COMMAND conduitscope decode --protocol j1939 --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_canopen_j1939.pcap" --format text --verbose)
+set_tests_properties(j1939_truncated_payload_eec1_declines_gracefully PROPERTIES
+  PASS_REGULAR_EXPRESSION "#36  .*\\[j1939\\]  J1939 PGN 61444 \\(EEC1\\) Priority=3 SA=0 \\(Engine #1\\) \\(broadcast\\)\n *note: Payload Length declares 8 byte\\(s\\) but only 3 byte\\(s\\) remain in the captured record.*\n *note: EEC1 message shorter than the 5 bytes needed")
+
+# --protocol canopen must NOT reach any J1939 frame (structurally disjoint on EFF, but still worth
+# a direct negative-control test since canopen.hpp's own dispatch analysis explicitly claims this).
+add_test(NAME j1939_frame_not_decoded_under_protocol_canopen_filter
+  COMMAND conduitscope decode --protocol canopen --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_canopen_j1939.pcap" --format text)
+set_tests_properties(j1939_frame_not_decoded_under_protocol_canopen_filter PROPERTIES
+  PASS_REGULAR_EXPRESSION "#27  .*\\[non-ip\\]  CAN frame, id=0xCF00400 \\[EFF -- extended 29-bit id\\] \\(not decoded -- J1939 decoding disabled by --protocol\\)")
+
+# --protocol devicenet must NOT reach any J1939 frame either (DeviceNet also categorically rejects
+# EFF, the same first check CANopen's own rejection shares -- see decoder.cpp's own EFF branch).
+add_test(NAME j1939_frame_not_decoded_under_protocol_devicenet_filter
+  COMMAND conduitscope decode --protocol devicenet --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_canopen_j1939.pcap" --format text)
+set_tests_properties(j1939_frame_not_decoded_under_protocol_devicenet_filter PROPERTIES
+  PASS_REGULAR_EXPRESSION "#27  .*\\[non-ip\\]  CAN frame, id=0xCF00400 \\[EFF -- extended 29-bit id\\] \\(not decoded -- J1939 decoding disabled by --protocol\\)")
+
+# --------------------------------------- J1939: --stats -----------------------------------------
+# CRITICALLY includes the "never buried" DM1 active-DTC headline count, matching the task's own
+# explicit ask (same treatment as IPMI's own Cipher-Suite-0 headline finding).
+add_test(NAME j1939_stats_pgn_counts_and_dm1_headline
+  COMMAND conduitscope decode --protocol j1939 --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_canopen_j1939.pcap" --stats)
+set_tests_properties(j1939_stats_pgn_counts_and_dm1_headline PROPERTIES
+  PASS_REGULAR_EXPRESSION "j1939 pgn counts:\n *59904 \\(Request\\) +1\n *61444 \\(EEC1\\) +3\n *65226 \\(DM1\\) +2\n *65262 \\(ET1\\) +1\n *65265 \\(CCVS\\) +1\n *65535 +1\n\\*\\*\\* J1939 DM1 active diagnostic trouble codes observed: 2 \\*\\*\\*")
+
+# Auto-mode combined stats: both devicenet AND j1939 breakdowns appear together (CANopen's own
+# breakdown does NOT, since it never joins Auto) -- the same collision-resolution policy visible
+# in --stats form, not just per-packet text.
+add_test(NAME canopen_j1939_auto_mode_stats_shows_devicenet_and_j1939_not_canopen
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_canopen_j1939.pcap" --stats)
+set_tests_properties(canopen_j1939_auto_mode_stats_shows_devicenet_and_j1939_not_canopen PROPERTIES
+  PASS_REGULAR_EXPRESSION "devicenet message groups:.*j1939 pgn counts:")
+set_tests_properties(canopen_j1939_auto_mode_stats_shows_devicenet_and_j1939_not_canopen PROPERTIES
+  FAIL_REGULAR_EXPRESSION "canopen function-code/message types:")
 
 # --------------------------------------------------------------------------
 # BACnet/IP (synthetic, tests/sample_bacnet.pcap): BVLC framing, NPDU network layer, APDU

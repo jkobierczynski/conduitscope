@@ -2229,6 +2229,212 @@ def build_devicenet_sample():
     (TESTS_DIR / "sample_devicenet.pcap").write_bytes(data)
 
 
+def build_canopen_j1939_sample():
+    """CANopen (CiA 301) and SAE J1939 over SocketCAN pcap framing (LINKTYPE_CAN_SOCKETCAN == 227)
+    -- see canopen.hpp/j1939.hpp's own file header comments for the exact wire formats each packet
+    below exercises (cross-checked against Wireshark's own epan/dissectors/packet-canopen.c and
+    packet-j1939.c for the ID/PGN structure; SAE J1939-71/-73 domain knowledge, cited in j1939.hpp,
+    for the EEC1/ET1/CCVS/DM1 payload field layouts no Wireshark source implements). One combined
+    fixture, matching this task's own "one combined CAN-family fixture file" option -- CANopen's own
+    standard (non-EFF) IDs and J1939's own extended (EFF) IDs coexist here without any isolation
+    problem, since decoder.cpp's own LINKTYPE_CAN_SOCKETCAN branch already dispatches purely on the
+    EFF flag; --protocol canopen/j1939 each cleanly ignore the other's own frames in this same file.
+    Entirely synthetic -- no real public CANopen/J1939 capture was found during this task's own
+    research (same honest gap devicenet.hpp's own Validation section already documents for
+    DeviceNet). Packet numbers in comments match this function's own numbered comments 1-36."""
+    packets = []
+
+    # ================================ CANopen (CiA 301) section ================================
+
+    # 1) NMT "Start remote node" targeting node 5 -- COB-ID 0x000 (Function Code 0, broadcast).
+    #    DELIBERATE DOUBLE DUTY: this exact CAN ID/payload is ALSO a perfectly valid DeviceNet Group 1
+    #    frame (id 0x000 <= 0x03FF, SrcMAC=id&0x3F=0, MsgID=id&0x3C0=0 -> "Other Group 1 Message",
+    #    the reference dissector's own generic fallback) -- see canopen.hpp's own file header comment's
+    #    dispatch-collision analysis and this fixture's own CTest entries (decoded 3 ways: as
+    #    DeviceNet under --protocol devicenet AND under the Auto default, as CANopen only under an
+    #    explicit --protocol canopen) for the negative-control proof that this codebase's own
+    #    DeviceNet-wins-Auto-mode policy actually behaves as documented.
+    packets.append(can_socketcan_frame(0x000, bytes([0x01, 0x05])))
+
+    # 2) NMT "Enter pre-operational state" targeting "All" (target node 0x00).
+    packets.append(can_socketcan_frame(0x000, bytes([0x80, 0x00])))
+
+    # 3) Heartbeat (NMT Error Control, FC=0xE), node 1 -> COB-ID 0x701, state Operational (0x05).
+    #    COB-ID 0x701 is ALSO squarely inside DeviceNet's own Group 3 range (0x600-0x7BF) --
+    #    canopen.hpp's own header comment uses this exact COB-ID as its own worked example.
+    packets.append(can_socketcan_frame(0x701, bytes([0x05])))
+
+    # 4) Heartbeat, node 4 -> COB-ID 0x704, state Boot-up (0x00).
+    packets.append(can_socketcan_frame(0x704, bytes([0x00])))
+
+    # 5) Heartbeat, node 5 -> COB-ID 0x705, state Pre-operational (0x7F) with the legacy Node
+    #    Guarding toggle bit (0x80) ALSO set -- proves the toggle bit is read independently of state.
+    packets.append(can_socketcan_frame(0x705, bytes([0x80 | 0x7F])))
+
+    # 6) SYNC (FC=1, node 0) -- no optional Counter byte.
+    packets.append(can_socketcan_frame(0x080, b""))
+
+    # 7) SYNC with the optional Counter byte present (42).
+    packets.append(can_socketcan_frame(0x080, bytes([42])))
+
+    # 8) TIME STAMP (FC=2, node 0) -- 4-byte LE milliseconds (1234) + 2-byte LE days (100).
+    packets.append(can_socketcan_frame(0x100, struct.pack("<IH", 1234, 100)))
+
+    # 9) EMCY (FC=1, node 5 -- non-broadcast) -- Error Code 0x2310 ("Current, CANopen device output
+    #    side", LE), Error Register 0x05 (Generic 0x01 | Voltage 0x04), 5 manufacturer-specific bytes.
+    packets.append(can_socketcan_frame(0x085,
+        struct.pack("<H", 0x2310) + bytes([0x05]) + bytes([0xDE, 0xAD, 0xBE, 0xEF, 0x00])))
+
+    # 10) PDO1 (tx), node 10 -> COB-ID 0x18A -- structural only, raw hex payload.
+    packets.append(can_socketcan_frame(0x18A, bytes(range(0x11, 0x19))))
+
+    # 11) PDO1 (rx), node 10 -> COB-ID 0x20A.
+    packets.append(can_socketcan_frame(0x20A, bytes([0xAA, 0xBB, 0xCC, 0xDD])))
+
+    # 12) SDO Initiate download request (ccs=1, the "full" e/s/n-carrying half), node 7 -> COB-ID
+    #     0x587 (FC=0xB, Default-SDO rx). e=1,s=1,n=0 -> byte0=0x23. Index 0x1017 ("Producer
+    #     heartbeat time"), sub-index 0, 4-byte expedited data (1000, LE).
+    packets.append(can_socketcan_frame(0x587,
+        bytes([0x23]) + struct.pack("<H", 0x1017) + bytes([0x00]) + struct.pack("<I", 1000)))
+
+    # 13) SDO Initiate download response (scs=3, the "ack-only" half), node 7 -> COB-ID 0x607
+    #     (FC=0xC, Default-SDO tx). Same index/sub-index, no data.
+    packets.append(can_socketcan_frame(0x607, bytes([0x60]) + struct.pack("<H", 0x1017) + bytes([0x00])))
+
+    # 14) SDO Initiate upload request (ccs=2, "ack-only" half), node 8 -> COB-ID 0x588. Index 0x1008
+    #     ("Manufacturer device name"), sub-index 0.
+    packets.append(can_socketcan_frame(0x588, bytes([0x40]) + struct.pack("<H", 0x1008) + bytes([0x00])))
+
+    # 15) SDO Initiate upload response (scs=2, "full" half carrying the value being read), node 8 ->
+    #     COB-ID 0x608. e=1,s=1,n=2 (2 unused trailing bytes -> 2 real data bytes) -> byte0=0x4B.
+    packets.append(can_socketcan_frame(0x608,
+        bytes([0x4B]) + struct.pack("<H", 0x1008) + bytes([0x00]) + bytes([0x41, 0x42])))
+
+    # 16) SDO Download segment request (ccs=0, the "full" segment half carrying data), node 9 ->
+    #     COB-ID 0x589. toggle=0, n=1 (1 unused trailing byte -> 6 real data bytes), c=1 ("no more
+    #     segments") -> byte0=0x03.
+    packets.append(can_socketcan_frame(0x589,
+        bytes([0x03, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF])))
+
+    # 17) SDO Upload segment request (ccs=3, "toggle-only ack" half), node 9 -> COB-ID 0x589 (same
+    #     session, later message). toggle=1 -> byte0=0x70, no data.
+    packets.append(can_socketcan_frame(0x589, bytes([0x70])))
+
+    # 18) SDO Abort Transfer (ccs=4), node 11 -> COB-ID 0x58B. Index 0x2000, sub-index 1, Abort Code
+    #     0x06020000 ("Object does not exist in the object dictionary", LE).
+    packets.append(can_socketcan_frame(0x58B,
+        bytes([0x80]) + struct.pack("<H", 0x2000) + bytes([0x01]) + struct.pack("<I", 0x06020000)))
+
+    # 19) SDO Block upload request (ccs=5, subcommand 0 -- "Initiate upload/download request", the
+    #     mux-carrying subcommand), node 12 -> COB-ID 0x58C. CRC support bit set (0x04) -> byte0=0xA4.
+    #     Index 0x6000 ("Standardized profile area 1st logical device"), sub-index 1.
+    packets.append(can_socketcan_frame(0x58C, bytes([0xA4]) + struct.pack("<H", 0x6000) + bytes([0x01])))
+
+    # 20) SDO Block upload response (scs=6, subcommand 0), node 12 -> COB-ID 0x60C. byte0=0xC0.
+    packets.append(can_socketcan_frame(0x60C, bytes([0xC0]) + struct.pack("<H", 0x6000) + bytes([0x01])))
+
+    # 21) LSS (Master), COB-ID 0x7E5 -- structural recognition only, not further decoded.
+    packets.append(can_socketcan_frame(0x7E5, bytes([0x04, 0, 0, 0, 0, 0, 0, 0])))
+
+    # 22) Unrecognized Function Code 0xD (node 15) -> COB-ID 0x68F -- "Unknown", the reference
+    #     dissector's own gap, not one invented here.
+    packets.append(can_socketcan_frame(0x68F, b""))
+
+    # 23) Truncated payload: SYNC-shaped COB-ID declaring Payload Length 4 but only 1 byte actually
+    #     captured -- exercises parse_socketcan_frame's own truncation-tolerant clamping.
+    packets.append(can_socketcan_frame(0x080, bytes([0x2A]), payload_length_override=4))
+
+    # 24) Truncated: fewer than the fixed 8-byte SocketCAN header itself is present -- parse-error.
+    packets.append(b"\x00\x00\x00\x85\x02")
+
+    # 25) Negative control: an ERR-flagged frame -- rejected by DeviceNet, CANopen, AND J1939 alike
+    #     (the one rejection condition all three protocols' own reference dissectors share).
+    packets.append(can_socketcan_frame(0x080, b"", err=True))
+
+    # 26) Negative control: an RTR-flagged, non-EFF frame -- rejected by DeviceNet and CANopen (both
+    #     reject RTR outright), proving CANopen's own rejection matches DeviceNet's exactly here even
+    #     though J1939 (see packet 33 below) uniquely tolerates RTR.
+    packets.append(can_socketcan_frame(0x080, b"", rtr=True))
+
+    # ================================== SAE J1939 section =======================================
+
+    def j1939_id(priority, pf, ps, sa, edp=0, dp=0):
+        return ((priority & 0x07) << 26) | ((edp & 1) << 25) | ((dp & 1) << 24) | \
+               ((pf & 0xFF) << 16) | ((ps & 0xFF) << 8) | (sa & 0xFF)
+
+    # 27) EEC1 (PGN 61444/0xF004, PDU2/broadcast -- PF=0xF0 >= 240), priority 3, SA=0 (Engine #1).
+    #     Driver's Demand Torque=+50% (byte=175), Actual Torque=+40% (byte=165), Engine Speed
+    #     1500.000 rpm (raw 12000, LE).
+    packets.append(can_socketcan_frame(
+        j1939_id(3, 0xF0, 0x04, 0x00),
+        bytes([0x00, 175, 165]) + struct.pack("<H", 12000) + bytes([0xFF, 0xFF, 0xFF]),
+        eff=True))
+
+    # 28) ET1 (PGN 65262/0xFEEE, PDU2 -- PF=0xFE), priority 6, SA=0. Coolant=85C (byte=125),
+    #     Fuel=30C (byte=70), Oil Temp=90C (raw 11616, LE).
+    packets.append(can_socketcan_frame(
+        j1939_id(6, 0xFE, 0xEE, 0x00),
+        bytes([125, 70]) + struct.pack("<H", 11616) + bytes([0xFF, 0xFF, 0xFF, 0xFF]),
+        eff=True))
+
+    # 29) CCVS (PGN 65265/0xFEF1, PDU2 -- PF=0xFE), priority 6, SA=0. Wheel-Based Vehicle Speed
+    #     100.5 km/h (raw 25728, LE), Cruise Control Active = On (2-bit value 1, bits 7-6 of byte 2).
+    packets.append(can_socketcan_frame(
+        j1939_id(6, 0xFE, 0xF1, 0x00),
+        struct.pack("<H", 25728) + bytes([0x40, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]),
+        eff=True))
+
+    # 30) Request (PGN 59904/0xEA00, PDU1/point-to-point -- PF=0xEA < 240), priority 6, destination
+    #     0x00 (Engine #1), source 249 (Off Board Diagnostic-Service Tool #1) -- proves
+    #     destination-address extraction (this task's own explicit ask). Requests PGN 65262 (ET1),
+    #     3-byte LE.
+    packets.append(can_socketcan_frame(
+        j1939_id(6, 0xEA, 0x00, 249),
+        struct.pack("<I", 65262)[:3],
+        eff=True))
+
+    # 31) DM1 (PGN 65226/0xFECA, PDU2 -- PF=0xFE), priority 6, SA=0, CARRIED IN A CAN FD FRAME (10-
+    #     byte payload -- exceeds classic CAN's 8-byte max, exactly the scenario j1939.hpp's own file
+    #     header comment names) with TWO packed DTCs, proving the SPN/FMI/OC/CM bit-unpacking:
+    #       lamp byte: MIL=On (2-bit 1, bits 7-6), AWL=On (2-bit 1, bits 3-2) -> 0x44; flash byte 0x00.
+    #       DTC1: SPN=1569 (0x621) -> low=0x21 mid=0x06 high3=0, FMI=4, CM=0, OC=3 -> [0x21,0x06,0x04,0x03]
+    #       DTC2: SPN=0x12345 -> low=0x45 mid=0x23 high3=1, FMI=13(0x0D), CM=1, OC=127(0x7F, "not
+    #         available") -> [0x45,0x23,0x2D,0xFF]
+    packets.append(can_socketcan_frame(
+        j1939_id(6, 0xFE, 0xCA, 0x00),
+        bytes([0x44, 0x00, 0x21, 0x06, 0x04, 0x03, 0x45, 0x23, 0x2D, 0xFF]),
+        eff=True, fd=True))
+
+    # 32) DM1, all lamps Off, zero DTCs (SA=3) -- the "nothing currently faulting" case, proving the
+    #     zero-DTC path doesn't fabricate a phantom finding.
+    packets.append(can_socketcan_frame(j1939_id(6, 0xFE, 0xCA, 0x03), bytes([0x00, 0x00]), eff=True))
+
+    # 33) RTR, EFF-flagged frame -- J1939 UNIQUELY tolerates this (see j1939.hpp's own file header
+    #     comment's "ONE FURTHER DIFFERENCE" paragraph); no payload, classified by ID alone.
+    packets.append(can_socketcan_frame(j1939_id(3, 0xF0, 0x04, 0x00), b"", eff=True, rtr=True))
+
+    # 34) Negative control: EFF AND ERR both set -- rejected even though EFF is present, proving ERR
+    #     always wins regardless of EFF (mirrors dissect_j1939's own `(can_info.id & CAN_ERR_FLAG)`
+    #     check, checked before/independent of the EFF requirement).
+    packets.append(can_socketcan_frame(j1939_id(3, 0xF0, 0x04, 0x00), b"", eff=True, err=True))
+
+    # 35) An uncurated PGN (PF=0xFF, PS=0xFF -> PGN 65535, not in this decoder's own curated table) --
+    #     shown structurally only, by bare PGN number, never treated as an error.
+    packets.append(can_socketcan_frame(j1939_id(6, 0xFF, 0xFF, 0x01),
+                                        bytes([0x01, 0x02, 0x03, 0x04]), eff=True))
+
+    # 36) Truncated payload: EEC1-shaped id declaring Payload Length 8 but only 3 bytes actually
+    #     captured -- exercises the truncation-tolerant clamp path for an EFF-flagged frame too, and
+    #     proves EEC1's own decode gracefully declines (fewer than 5 bytes) rather than misreading.
+    packets.append(can_socketcan_frame(j1939_id(3, 0xF0, 0x04, 0x00), bytes([0x00, 0xAF, 0xA5]),
+                                        eff=True, payload_length_override=8))
+
+    data = pcap_global_header(linktype=LINKTYPE_CAN_SOCKETCAN)
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_730_000_000 + i, i * 1000)
+    (TESTS_DIR / "sample_canopen_j1939.pcap").write_bytes(data)
+
+
 BACNET_PORT = 47808
 
 
@@ -16262,6 +16468,7 @@ if __name__ == "__main__":
     build_ethercat_sample()
     build_stp_sample()
     build_devicenet_sample()
+    build_canopen_j1939_sample()
     build_bacnet_sample()
     build_hartip_sample()
     build_opcua_sample()

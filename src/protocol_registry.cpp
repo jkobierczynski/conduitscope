@@ -5,6 +5,7 @@
 #include "conduitscope/bacnet.hpp"
 #include "conduitscope/bgp.hpp"
 #include "conduitscope/bsap.hpp"
+#include "conduitscope/canopen.hpp"
 #include "conduitscope/cclink_ie.hpp"
 #include "conduitscope/cdp.hpp"
 #include "conduitscope/coap.hpp"
@@ -29,6 +30,7 @@
 #include "conduitscope/iec104.hpp"
 #include "conduitscope/igmp.hpp"
 #include "conduitscope/igrp.hpp"
+#include "conduitscope/j1939.hpp"
 #include "conduitscope/kerberos.hpp"
 #include "conduitscope/ldap.hpp"
 #include "conduitscope/lldp.hpp"
@@ -598,6 +600,22 @@ const std::vector<const ProtocolDecoder*>& link_type_registry() {
                               // both LINKTYPE_IEEE802_15_4_WITHFCS and LINKTYPE_IEEE802_15_4_TAP
                               // (283) are actually handled, via ieee802154.hpp's own two parse
                               // entry points, see decoder.cpp.
+        &canopen_decoder(),  // This gate's third protocol, joining DeviceNet on the SAME
+                               // LINKTYPE_CAN_SOCKETCAN (227) link type -- decoder.cpp's own
+                               // LINKTYPE_CAN_SOCKETCAN branch calls it directly, same as
+                               // devicenet_decoder() above, NOT iterated generically. See
+                               // canopen.hpp's own file header comment for the full DeviceNet-vs-
+                               // CANopen dispatch-collision analysis and why, despite sharing
+                               // DeviceNet's exact link type, decoder.cpp's own call site only
+                               // reaches this decoder under an explicit --protocol canopen, never
+                               // in ProtocolFilter::Auto.
+        &j1939_decoder(),  // This gate's fourth protocol, also on LINKTYPE_CAN_SOCKETCAN --
+                             // decoder.cpp calls it directly too. UNLIKE canopen_decoder() above,
+                             // this one DOES join ProtocolFilter::Auto (see j1939.hpp's own file
+                             // header comment): its Extended (29-bit) CAN ID requirement is a
+                             // hardware-enforced disjoint gate from DeviceNet/CANopen's own
+                             // standard-ID space, so trying it opportunistically alongside
+                             // DeviceNet carries no collision risk.
     };
     return order;
 }

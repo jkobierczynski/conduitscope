@@ -185,8 +185,17 @@ const std::vector<const ProtocolDecoder*>& cotp_payload_registry();
 // ieee802154.hpp's own parse_ieee802154_withfcs/parse_ieee802154_tap entry points directly,
 // followed by try_parse_zigbee(...) directly (NOT ZigbeeDecoder::decode(), which can only assume
 // one of the two capture formats -- see zigbee.hpp's own ZigbeeDecoder class comment for why).
-// Not migrated: none -- DeviceNet and Zigbee are this gate's only two protocols and both are
-// migrated.
+// CANopen (canopen.hpp) and SAE J1939 (j1939.hpp) are this gate's third and fourth protocols, both
+// joining DeviceNet on the exact same LINKTYPE_CAN_SOCKETCAN (227) link type -- decoder.cpp's own
+// LINKTYPE_CAN_SOCKETCAN branch calls each of canopen_decoder()/j1939_decoder() directly too, same
+// as devicenet_decoder(). See canopen.hpp's own file header comment for the full DeviceNet-vs-
+// CANopen dispatch-collision analysis (why CANopen, unlike every other decoder on this vector, is
+// never tried opportunistically in ProtocolFilter::Auto) and j1939.hpp's own file header comment for
+// why J1939, despite sharing DeviceNet's link type, has no such collision to avoid (its Extended
+// 29-bit CAN ID requirement is a hardware-enforced disjoint gate).
+//
+// Not migrated: none -- DeviceNet, Zigbee, CANopen, and J1939 are this gate's only four protocols
+// and all four are migrated.
 const std::vector<const ProtocolDecoder*>& link_type_registry();
 
 }  // namespace conduitscope

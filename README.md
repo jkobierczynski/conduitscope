@@ -128,6 +128,8 @@ real-capture validation provenance.
 | CoAP | Constrained-device IIoT | UDP 5683 | RFC 7252 + Observe (RFC 7641) + blockwise transfer (RFC 7959) |
 | Zigbee | Wireless mesh (building/industrial sensors) | `LINKTYPE_IEEE802_15_4_WITHFCS`/`TAP` pcap captures | IEEE 802.15.4 MAC + Zigbee NWK + APS + full ZDP |
 | RMCP / ASF / IPMI | Server/BMC out-of-band management | UDP 623 | RMCP envelope, ASF Presence Ping/Pong, full IPMI 1.5/2.0 session + RAKP handshake decode, curated NetFn/Command table, Cipher Suite 0 auth-bypass detection |
+| CANopen (CiA 301) | CAN-bus fieldbus | SocketCAN pcap captures | NMT, Heartbeat, SYNC/TIME STAMP, EMCY, SDO (expedited/segmented/block), PDO named by COB-ID (`--protocol canopen` only -- see docs) |
+| SAE J1939 | Heavy-duty vehicle/engine CAN bus | SocketCAN pcap captures | 29-bit ID/PGN decode, EEC1/ET1/CCVS/Request full decode, DM1 active-DTC SPN/FMI/OC/CM decode |
 
 A cross-cutting **attack-detection** layer runs over every decoded
 IPv4/TCP/UDP/ICMP packet regardless of which protocol above matched: LAND,
@@ -179,7 +181,7 @@ tunneling) shows up on a segment that shouldn't carry it:
 
 Groundwork / v0.2.4. Every protocol named above is implemented, decoding real
 wire-format fields (not just naming the protocol), and covered by the
-automated test suite -- 1716 tests as of this writing, run via `ctest` after
+automated test suite -- 1769 tests as of this writing, run via `ctest` after
 building (see Building below). Where a real capture was available (public
 ICS-lab collections, vendor-attributed samples, or a live device on real
 hardware), the decoder is validated against it, not just a synthetic

@@ -3989,6 +3989,561 @@ Group 3 message with no payload and one missing its service byte, the
 unclassified `0x07F0`-`0x07FF` range, all three of EFF/RTR/ERR rejection,
 a CAN FD frame, and a truncated payload's clamp-and-note path.
 
+### CANopen (CiA 301, pcap link type `LINKTYPE_CAN_SOCKETCAN` == 227)
+
+CANopen is a CAN-bus application-layer protocol standardized by CiA (CAN in
+Automation) as CiA 301, widely used in industrial automation, medical
+devices, and building automation. It shares DeviceNet's own link type --
+see DeviceNet's "SocketCAN framing itself is protocol-agnostic" paragraph
+above, which explicitly named CANopen as an anticipated future addition to
+this same `LINKTYPE_CAN_SOCKETCAN` gate. Every message-type boundary,
+bitmask, and named value below is cross-checked directly against
+Wireshark's own `epan/dissectors/packet-canopen.c`.
+
+#### THE DEVICENET-VS-CANOPEN DISPATCH COLLISION
+
+This is the single most important design decision in this addition, and it
+does not exist for any other pair of protocols already in this codebase.
+Every other `GateKind::LinkType`/port/EtherType pair this codebase dispatches
+on carries some self-describing tag (an EtherType, an IP protocol number, a
+TCP/UDP port) that lets two protocols share a link type or transport without
+ambiguity. A raw CAN ID has none of that: it is 11 bits with no reserved
+"protocol id" sub-field at all, and both DeviceNet and CANopen build their
+own entire classification scheme directly out of that same 11-bit space --
+DeviceNet's four Group ranges (`id<=0x3FF`/`0x400-0x5FF`/`0x600-0x7BF`/
+`0x7C0-0x7EF`, plus an acknowledged unclassified tail) and CANopen's 16
+Function Code values (`(id>>7)&0xF`, all four bits meaningful) both cover
+essentially the ENTIRE standard-ID space, not just a reserved sub-range each.
+COB-ID `0x000` is a real example, not a contrived one: it is simultaneously
+a valid CANopen NMT command (Function Code 0, broadcast) AND a valid
+DeviceNet Group 1 "Other Group 1 Message" (`id<=0x3FF`, DeviceNet's own
+generic fallback) -- there is no bit pattern, payload shape, or structural
+signal that distinguishes the two. Reading both reference dissectors
+confirms this is not something either one bothers to disambiguate either:
+`dissect_devicenet` and `dissect_canopen` are each registered as heuristic
+dissectors within their own capture context, and Wireshark itself has no
+general mechanism for "try DeviceNet, then CANopen, on the same
+`LINKTYPE_CAN_SOCKETCAN` capture" -- a real capture is, in practice, assumed
+to carry one CAN application protocol, decided by the analyst opening it, not
+detected packet-by-packet.
+
+This codebase's own resolution, reached after that comparison (not assumed
+going in): **CANopen does not join `ProtocolFilter::Auto`.** DeviceNet
+keeps its existing Auto-mode membership unchanged (as the first CAN
+protocol added to this codebase, no other decoder was ever disambiguated
+against it, so nothing about DeviceNet's own behavior changes here). CANopen
+is reachable only via an explicit `--protocol canopen`. This means: on a
+capture Auto-decoded with no `--protocol` flag, every CANopen frame that
+also happens to fall in a DeviceNet Group range (in practice, almost every
+CANopen frame, since DeviceNet's own ranges cover nearly the whole ID space)
+is silently claimed by DeviceNet instead -- exactly the collision described
+above, resolved the same way every other Auto-mode ambiguity in this
+codebase resolves (whichever decoder is tried first wins, with no separate
+"ambiguous" state) rather than inventing new machinery. An operator who
+knows their capture is a CANopen bus, not a DeviceNet bus, passes
+`--protocol canopen` explicitly, the same way they already would for any
+other capture this tool might otherwise misclassify. See
+`decoder.hpp`'s `ProtocolFilter::CanopenOnly` and
+`decoder.cpp`'s own `LINKTYPE_CAN_SOCKETCAN` branch for exactly where this
+is implemented, and this project's own CTest suite (`canopen_devicenet_
+collision_*`) for the three-way proof (Auto prefers DeviceNet; `--protocol
+devicenet` reaches DeviceNet explicitly; only `--protocol canopen` reaches
+CANopen) on the exact same dual-shaped bytes.
+
+J1939, covered in its own section below, is NOT subject to this same
+problem, because its 29-bit Extended (EFF) identifiers are a hardware-level
+disjoint space from DeviceNet/CANopen's shared standard (non-EFF) 11-bit
+space -- see J1939's own section for why it safely DOES join Auto mode
+alongside DeviceNet.
+
+#### COB-ID structure
+
+Same 4-byte big-endian CAN-ID-and-flags header `can_socketcan.hpp` already
+parses for DeviceNet (see DeviceNet's own SocketCAN wire-format table
+above); CANopen decodes only standard (non-EFF) IDs, exactly like DeviceNet,
+and rejects EFF/RTR/ERR outright the same way DeviceNet does (`try_parse_
+canopen`'s own first check). CANopen's own 11-bit COB-ID (Communication
+Object Identifier) splits into:
+
+| Field | Bits | Extraction |
+|---|---|---|
+| Function Code | 10-7 | `(id >> 7) & 0xF` |
+| Node-ID | 6-0 | `id & 0x7F` |
+
+Function Code, all 16 values (the full table, ported from `packet-canopen.c`'s
+own `cob_id_func_vals`):
+
+| FC | Name | Node-ID meaning |
+|---|---|---|
+| 0x0 | NMT | Broadcast only (Node-ID field unused as a source/destination -- see NMT below) |
+| 0x1 | SYNC / EMCY | Node-ID 0 = SYNC (broadcast); Node-ID 1-127 = EMCY (per-node) |
+| 0x2 | TIME STAMP | Broadcast only |
+| 0x3 | PDO1 (tx) | Per-node |
+| 0x4 | PDO1 (rx) | Per-node |
+| 0x5 | PDO2 (tx) | Per-node |
+| 0x6 | PDO2 (rx) | Per-node |
+| 0x7 | PDO3 (tx) | Per-node |
+| 0x8 | PDO3 (rx) | Per-node |
+| 0x9 | PDO4 (tx) | Per-node |
+| 0xA | PDO4 (rx) | Per-node |
+| 0xB | Default-SDO (rx, i.e. a request TO the node) | Per-node |
+| 0xC | Default-SDO (tx, i.e. a response FROM the node) | Per-node |
+| 0xD | *(unused -- reference table has no entry here)* | -- |
+| 0xE | NMT Error Control (Heartbeat / legacy Node Guarding) | Per-node |
+| 0xF | LSS | Fixed COB-IDs 0x7E4 (slave)/0x7E5 (master) only -- see LSS below |
+
+Note FC 0x1's own split by Node-ID (0 vs. non-zero) mirrors the reference
+dissector's own `if (can_id.can_id == 0x080)` special case before falling
+through to its generic EMCY handling for any other FC-0x1 ID.
+
+#### NMT (Network Management)
+
+COB-ID 0x000 always, Node-ID field unused (every NMT message is sent BY the
+NMT master, addressed at a target node given inside the 2-byte payload, not
+by COB-ID). Byte 0 is the NMT command (`0x01` Start remote node, `0x02` Stop
+remote node, `0x80` Enter pre-operational state, `0x81` Reset node, `0x82`
+Reset communication -- the reference dissector's own `nmt_command_vals`);
+byte 1 is the target Node-ID, with `0x00` meaning "all nodes" (shown as
+`[All]` rather than `[Node 0]`, since Node-ID 0 is never a real device).
+
+#### Heartbeat / NMT Error Control
+
+FC 0xE, per-node COB-ID (e.g. `0x701` for Node 1 -- CiA 301's own canonical
+worked example, and this codebase's own fixture reuses that exact ID). A
+1-byte payload: bit `0x80` is the legacy Node Guarding toggle bit (read
+independently of state, not stripped before state lookup), bits `0x7F` are
+the NMT state (`0x00` Boot-up, `0x04` Stopped, `0x05` Operational, `0x7F`
+Pre-operational -- `packet-canopen.c`'s own `nmt_state_vals`).
+
+#### SYNC / TIME STAMP
+
+FC 0x1 with Node-ID 0 (COB-ID `0x080`) is SYNC: an optional 1-byte Counter
+field (present only when the payload is non-empty; absent entirely on a
+producer not configured to send one -- both are valid, and this decoder
+shows whichever shape it actually sees rather than assuming one). FC 0x2
+(COB-ID `0x100`) is TIME STAMP: a 6-byte payload, 4-byte little-endian
+milliseconds-since-midnight + 2-byte little-endian days-since-1984-01-01
+(CANopen's own epoch, per CiA 301's TIME_OF_DAY encoding) -- this decoder
+surfaces both the raw days count and, for readability, the epoch day number
+(`5113`, i.e. `days` interpreted against 1984-01-01) rather than performing
+a full calendar conversion, which the task's own scope call treats as
+unnecessary precision for a structural decoder.
+
+#### EMCY (Emergency)
+
+FC 0x1 with a non-zero Node-ID. An 8-byte payload: 2-byte little-endian
+Error Code (`0x1000`-`0xFFFF`, a curated subset of the reference
+dissector's own `emcy_error_code` value-string table decoded by name -- e.g.
+`0x2310` "Current, CANopen device output side"; an uncurated code is shown
+by bare hex value, never as an error), 1-byte Error Register (bitmask --
+`0x01` Generic, `0x02` Current, `0x04` Voltage, `0x08` Temperature, `0x10`
+Communication, `0x20` Device profile specific, `0x40` Reserved, `0x80`
+Manufacturer specific -- CiA 301's own Object 0x1001 bit layout, surfaced
+both as the raw byte and as a list of set bit names), and 5 bytes of
+manufacturer-specific data shown only as raw hex (no object-dictionary
+interpretation, matching CANopen's own PDO scope call below).
+
+#### PDO (Process Data Objects)
+
+FC 0x3-0xA (PDO1-4, tx and rx). Matching this project's own prior scope note
+for CANopen (confirmed during this task's own research, not merely assumed):
+PDO payload interpretation requires the receiving/transmitting node's own
+Object Dictionary PDO-mapping configuration (Objects 0x1400-0x15FF/
+0x1600-0x17FF for RPDOs, 0x1800-0x19FF/0x1A00-0x1BFF for TPDOs), which is
+never present in a capture itself -- there is no wire-visible signal for
+what a given PDO's bytes MEAN, only that a PDO occurred. This decoder names
+the PDO by COB-ID/Node-ID/direction and shows the raw payload as hex, with
+no attempt at object-dictionary interpretation -- the same "structural only"
+treatment DeviceNet's own Group 1 I/O data and CIP I/O's own assembly data
+already get elsewhere in this codebase.
+
+#### SDO (Service Data Objects)
+
+FC 0xB (rx, i.e. a request/command arriving at the node) and 0xC (tx, i.e.
+a response/indication leaving the node) -- CANopen's Default SDO server
+channel (per-node COB-IDs `0x600+NodeID`/`0x580+NodeID`; additional SDO
+channels beyond the default one exist in CiA 301 but are out of scope here,
+same posture as DeviceNet's own single Group 3 channel). Byte 0's top 3 bits
+are the Command Specifier (`cs`), whose MEANING is direction-dependent --
+this is the single trickiest part of CANopen's own SDO protocol, verified
+line-by-line against `dissect_sdo`'s own separate `ccs`/`scs` switch
+statements (a mistake caught and fixed during this task's own development,
+not merely a first guess): only `cs==0` (segment transfer, the "full" half
+carrying data) is structurally uniform across both directions. For every
+other `cs` value, request (`ccs`) and response (`scs`) mean genuinely
+different things:
+
+| `cs` | Request (`ccs`, FC 0xB) | Response (`scs`, FC 0xC) |
+|---|---|---|
+| 0 | Download segment request (full: e/n/c fields + data) | Upload segment response (full: e/n/c fields + data) |
+| 1 | Initiate download request (full: e/s/n fields + index/sub-index + data) | Download segment response (ack-only: toggle bit) |
+| 2 | Initiate upload request (ack-only: index/sub-index) | Initiate upload response (full: e/s/n fields + index/sub-index + data) |
+| 3 | Upload segment request (ack-only: toggle bit) | Initiate download response (ack-only: index/sub-index) |
+| 4 | Abort transfer (either direction) | Abort transfer (either direction) |
+| 5 | Block upload (subcommand byte determines shape) | Block download (subcommand byte determines shape) |
+| 6 | Block download (subcommand byte determines shape) | Block upload (subcommand byte determines shape) |
+
+For the "full" half of an initiate (`cs` 1 or 2, whichever direction carries
+it): bit `0x02` (`e`) is the expedited-transfer flag, bit `0x01` (`s`) is
+size-indicated, bits `0x0C` (`n`) are the count of UNUSED trailing bytes
+when expedited (data length = `4-n`) -- when not expedited, this is a
+segmented transfer instead and the 4 payload bytes carry the total size, not
+data. For the "full" half of a segment (`cs` 0, either direction): bit
+`0x10` is the alternating toggle bit, bits `0x0E` (`n`) are the count of
+unused trailing bytes (data length = `7-n`), bit `0x01` (`c`) marks "no more
+segments". Block transfer (`cs` 5 or 6): a subcommand byte immediately
+follows `cs` in the same byte-0 nibble structure (bits `0x03`); subcommand 0
+("Initiate upload/download request/response") is the only one that also
+carries an index/sub-index multiplexer, matching `dissect_sdo`'s own
+identical `if (sdo_subcommand == 0) sdo_mux = 1;` check repeated across all
+four block-transfer cases regardless of direction or `cs`. This decoder
+names the subcommand and shows remaining bytes as raw hex -- no granular
+CRC-support/block-size/ack-sequence/protocol-switch-threshold field decode,
+matching the task's own explicitly-permitted "at least named/structural"
+scope for block transfer. Abort Transfer (`cs` 4, symmetric in both
+directions): index/sub-index + a 4-byte little-endian Abort Code, decoded
+by name against a curated subset of `packet-canopen.c`'s own `sdo_abort_
+code` table (e.g. `0x06020000` "Object does not exist in the object
+dictionary").
+
+#### LSS (Layer Setting Services, CiA 305)
+
+Fixed COB-IDs only: `0x7E4` (slave) / `0x7E5` (master), both falling under
+Function Code 0xF. Recognized structurally by these two exact COB-IDs and
+named accordingly, but LSS's own configuration-command payload (node-ID/
+baud-rate assignment via serial-number/vendor-ID/product-code/revision
+matching) is not decoded -- a separate CiA specification (305, not 301) with
+its own significant scope, out of this release's boundary the same way
+ICCP/TASE.2 is named-but-not-decoded inside IEC 61850 MMS's own section, or
+Sparkplug B gets partial rather than full coverage inside MQTT's.
+
+#### Any other Function Code
+
+FC 0xD has no entry at all in the reference dissector's own function-code
+table; this decoder reports it as "Unknown" rather than inventing a
+meaning, the same "match the reference dissector's own gap, don't guess"
+posture DeviceNet's own unclassified `0x07F0`-`0x07FF` ID range gets above.
+
+#### CAN FD
+
+Same posture as DeviceNet: CANopen (CiA 301) predates CAN FD, `can_socketcan.
+hpp` still recognizes and surfaces the FD flag structurally, but this
+decoder does not attempt payload-derived decoding (NMT command, SDO
+command-specifier fields, EMCY error code, etc.) for an FD frame -- only the
+COB-ID-derived Function Code/Node-ID classification is shown, with a note.
+
+#### Out of scope for this release
+
+- **Extended (29-bit) IDs, RTR frames, error frames** -- not valid CANopen
+  at all, rejected outright (see above), the same rejection DeviceNet
+  applies for the same structural reason.
+- **PDO Object Dictionary mapping / payload interpretation** -- see PDO
+  above; requires out-of-band configuration never present in a capture.
+- **CAN FD frame payloads** -- recognized structurally, not semantically
+  decoded (see above).
+- **SDO block-transfer's own CRC/block-size/ack-sequence/protocol-switch-
+  threshold fields** -- named/structural only, matching the task's own
+  explicitly conservative scope call for this sub-case (see SDO above).
+- **LSS (CiA 305) configuration payloads** -- recognized by fixed COB-ID
+  only, its own command set not decoded (see LSS above).
+- **Full object-dictionary-aware SDO data interpretation** -- the raw
+  expedited/segmented data bytes are shown as hex; this decoder has no
+  model of what any given index/sub-index's data type or meaning is (the
+  same boundary EtherNet/IP's own CIP attribute values stop at without an
+  EDS file).
+
+#### Validation
+
+No real public CANopen/CAN-bus capture was found during this feature's
+research, the same honest gap already documented for DeviceNet's own
+Validation section above -- searched the same sources DeviceNet's search
+already covered, with no CANopen-specific capture turning up either. This
+decoder is therefore validated only against the synthetic combined
+`tests/sample_canopen_j1939.pcap` fixture (`build_canopen_j1939_sample` in
+`tools/make_sample_pcap.py`; 36 frames total, the first 26 of which are
+CANopen's own), hand-built and cross-checked against `packet-canopen.c`'s
+own source. The fixture exercises: NMT (Start remote node targeted, Enter
+pre-operational broadcast), Heartbeat in all three commonly-seen states
+(Boot-up/Operational/Pre-operational, the last with the legacy toggle bit
+also set), SYNC with and without the optional Counter byte, TIME STAMP,
+EMCY with a curated error code and multi-bit Error Register, PDO1 in both
+directions, every SDO transfer shape this decoder names (expedited download
+request+response, expedited upload request+response, segment download
+request, segment upload request/toggle-ack, Abort Transfer, Block Upload
+request+response), LSS (Master), an unrecognized Function Code, a truncated
+payload, a truncated (sub-8-byte) header, and EFF/RTR/ERR-rejection negative
+controls -- plus, critically, the DeviceNet-vs-CANopen dispatch-collision
+proof itself: packet 1's COB-ID `0x000` is deliberately dual-shaped (a valid
+NMT command AND a valid DeviceNet Group 1 message on the same bytes), and
+this project's own CTest suite decodes it all three documented ways (Auto
+default prefers DeviceNet; explicit `--protocol devicenet` reaches
+DeviceNet; only explicit `--protocol canopen` reaches CANopen) to prove the
+dispatch policy described above actually behaves as documented, not just as
+claimed in a comment.
+
+### SAE J1939 (pcap link type `LINKTYPE_CAN_SOCKETCAN` == 227)
+
+SAE J1939 is the CAN-bus application-layer protocol standard for heavy-duty
+vehicles (trucks, buses, off-highway/agricultural/construction equipment,
+marine engines) -- diagnostics, engine/transmission/vehicle telemetry, and
+fault reporting, all built on top of the same 29-bit Extended CAN identifier
+space NMEA 2000 (a marine data network standard) also reuses. It shares
+DeviceNet/CANopen's own `LINKTYPE_CAN_SOCKETCAN` link type -- see
+DeviceNet's own section above, whose file-header comment explicitly named
+J1939 (alongside CANopen) as an anticipated future addition to this same
+gate. The 29-bit ID structure, PDU1/PDU2 distinction, and PGN
+reconstruction formula below are cross-checked directly against
+Wireshark's own `epan/dissectors/packet-j1939.c`; that dissector is written
+for NMEA 2000/marine use, however, and implements NO per-PGN vehicle
+payload decoding at all (its own PGN name table is marine-oriented, not
+SAE J1939-71 vehicle-oriented) -- so unlike every other curated-payload
+protocol in this codebase, the EEC1/ET1/CCVS/DM1 field layouts documented
+below are domain-knowledge derivations from SAE J1939-71 ("Vehicle
+Application Layer") and J1939-73 ("Application Layer -- Diagnostics")
+rather than a port of Wireshark's own source, honestly flagged here exactly
+because that is a genuine difference from this codebase's usual sourcing
+standard.
+
+#### J1939 is the easy case: a structurally disjoint dispatch gate
+
+Unlike CANopen (see its own "THE DEVICENET-VS-CANOPEN DISPATCH COLLISION"
+section above), J1939 creates no dispatch ambiguity with DeviceNet or
+CANopen at all, and this is a HARDWARE-level fact, not a policy choice: CAN
+controllers physically tag every frame as either Standard (11-bit) or
+Extended (29-bit) via the EFF flag, and J1939 always uses Extended
+identifiers -- `dissect_devicenet` and `dissect_canopen` BOTH reject any
+EFF-flagged frame in their own very first check (see DeviceNet's own
+"DeviceNet frame validity" section above), while `dissect_j1939`'s own first
+check is the mirror image: it requires EFF to be set at all, rejecting
+anything without it. There is therefore no bit pattern any frame could ever
+have that would be ambiguous between J1939 and either of the other two --
+the ID spaces are disjoint by construction, not merely by convention. This
+is why, unlike CANopen, **J1939 DOES join `ProtocolFilter::Auto`** alongside
+DeviceNet -- see `decoder.hpp`'s `ProtocolFilter::J1939Only` and `decoder.
+cpp`'s own `LINKTYPE_CAN_SOCKETCAN` branch, which checks the EFF flag first
+and routes to J1939 before any DeviceNet/CANopen classification is even
+attempted.
+
+One further difference from DeviceNet/CANopen's shared posture: J1939
+tolerates an RTR-flagged frame rather than rejecting it outright (`dissect_
+j1939`'s own source carries the explicit comment "RTR frames don't have
+payload" immediately before it proceeds to classify one anyway by ID alone)
+-- an RTR J1939 frame is still named by its PGN, just with no payload-derived
+fields populated. ERR-flagged frames are still rejected unconditionally,
+independent of and checked before the EFF requirement, the one rejection
+condition all three CAN protocols in this codebase share.
+
+#### 29-bit Extended ID structure
+
+| Field | Bits | Extraction |
+|---|---|---|
+| Priority | 28-26 | `(id >> 26) & 0x07` |
+| Extended Data Page (EDP) | 25 | `(id >> 25) & 0x01` -- always 0 for classic J1939 (SAE-reserved for future use) |
+| Data Page (DP) | 24 | `(id >> 24) & 0x01` |
+| PDU Format (PF) | 23-16 | `(id >> 16) & 0xFF` |
+| PDU Specific (PS) | 15-8 | `(id >> 8) & 0xFF` |
+| Source Address (SA) | 7-0 | `id & 0xFF` |
+
+All five field masks are taken directly from `packet-j1939.c`'s own `hf_
+j1939_*` field definitions.
+
+#### PDU1 vs. PDU2, and PGN reconstruction
+
+PF (PDU Format) splits the ID into two shapes, exactly matching `dissect_
+j1939`'s own branch:
+
+- **PDU1** (`PF < 240`, i.e. `PF <= 0xEF`): point-to-point. PS (PDU
+  Specific) is the DESTINATION ADDRESS, not part of the PGN -- PGN
+  reconstruction forces this byte to zero. This is the shape a diagnostic
+  Request (PGN 59904/`0xEA00`) uses to target one specific node.
+- **PDU2** (`PF >= 240`, i.e. `PF >= 0xF0`): broadcast. PS becomes the Group
+  Extension, and IS part of the PGN. This is the shape most routine
+  broadcast telemetry (engine speed, coolant temperature, vehicle speed,
+  etc.) uses -- there is no single destination, every node on the bus can
+  read it.
+
+PGN (Parameter Group Number) reconstruction, exactly matching `dissect_
+j1939`'s own formula: `pgn = (EDP << 17) | (DP << 16) | (PF << 8) | PS`,
+with PS forced to 0 first when PDU1 (`PF < 240`). Since EDP is always 0 for
+classic J1939, this collapses in practice to `pgn = (DP << 16) | (PF << 8) |
+PS` (PDU2) or `pgn = (DP << 16) | (PF << 8)` (PDU1).
+
+#### Curated PGN table
+
+A curated subset of well-known PGNs is decoded by name (an uncurated PGN is
+shown by bare numeric value, never treated as an error -- the same
+"structural only for anything not curated" posture CANopen's own EMCY error
+code table and Abort Code table already establish above):
+
+| PGN | Hex | Name | PDU type |
+|---|---|---|---|
+| 59392 | 0xE800 | Acknowledgment | PDU1 |
+| 59904 | 0xEA00 | Request | PDU1 |
+| 60928 | 0xEE00 | Address Claimed | PDU2 |
+| 61443 | 0xF003 | EEC2 (Electronic Engine Controller 2) | PDU2 |
+| 61444 | 0xF004 | EEC1 (Electronic Engine Controller 1) | PDU2 |
+| 61445 | 0xF005 | ETC1 (Electronic Transmission Controller 1) | PDU2 |
+| 65226 | 0xFECA | DM1 (Active Diagnostic Trouble Codes) | PDU2 |
+| 65227 | 0xFECB | DM2 (Previously Active Diagnostic Trouble Codes) | PDU2 |
+| 65253 | 0xFEE5 | Engine Hours, Revolutions | PDU2 |
+| 65262 | 0xFEEE | ET1 (Engine Temperature 1) | PDU2 |
+| 65263 | 0xFEEF | EFL/P1 (Engine Fluid Level/Pressure 1) | PDU2 |
+| 65265 | 0xFEF1 | CCVS (Cruise Control/Vehicle Speed) | PDU2 |
+| 65266 | 0xFEF2 | LFE (Fuel Economy) | PDU2 |
+| 65276 | 0xFEFC | DD (Dash Display) | PDU2 |
+
+Full field-level decode is provided for EEC1, ET1, CCVS, Request, and DM1
+(below); every other curated PGN is named but its payload shown only as raw
+hex; an uncurated PGN is shown by bare number, also with a raw-hex payload.
+
+#### EEC1 (PGN 61444) -- full decode
+
+| Field | Byte(s) | Encoding |
+|---|---|---|
+| Driver's Demand Engine - Percent Torque | 1 | `raw - 125` (`%`, range -125 to +125) |
+| Actual Engine - Percent Torque | 2 | `raw - 125` (`%`, range -125 to +125) |
+| Engine Speed | 3-4 | little-endian, `raw * 0.125` (rpm) |
+
+Byte 0 (Engine Torque Mode) is not decoded (out of scope). A message
+shorter than 5 bytes (not enough to cover through Engine Speed) declines to
+decode rather than reading past the end of what was captured.
+
+#### ET1 (PGN 65262) -- full decode
+
+| Field | Byte(s) | Encoding |
+|---|---|---|
+| Engine Coolant Temperature | 0 | `raw - 40` (°C, range -40 to +210) |
+| Engine Fuel Temperature 1 | 1 | `raw - 40` (°C, range -40 to +210) |
+| Engine Oil Temperature 1 | 2-3 | little-endian, `raw * 0.03125 - 273` (°C) -- only decoded when present (some ET1 producers omit trailing bytes) |
+
+#### CCVS (PGN 65265) -- full decode
+
+| Field | Byte(s) | Encoding |
+|---|---|---|
+| Wheel-Based Vehicle Speed | 0-1 | little-endian, `raw / 256.0` (km/h) |
+| Cruise Control Active | 2, bits 7-6 | 2-bit status (`0`=Off, `1`=On, `2`=Reserved, `3`=Not Available -- J1939's own standard 2-bit-status convention, reused across many of its status fields) |
+
+#### Request (PGN 59904) -- full decode
+
+PDU1 (point-to-point): a 3-byte little-endian Target PGN, the PGN being
+requested from the destination node. Destination Address comes from the ID
+itself (PS field, see PDU1 above), not the payload -- this is this
+decoder's own proof case for destination-address extraction.
+
+#### DM1 (PGN 65226, Active Diagnostic Trouble Codes) -- full decode, including DTC bit-packing
+
+**This is the single most error-prone part of J1939**, and was verified
+carefully rather than assumed. Byte 0 packs four 2-bit lamp-status fields
+(the same Off/On/Reserved/Not-Available convention CCVS's own Cruise
+Control Active field uses): bits 7-6 MIL (Malfunction Indicator Lamp), bits
+5-4 RSL (Red Stop Lamp), bits 3-2 AWL (Amber Warning Lamp), bits 1-0 PL
+(Protect Lamp). Byte 1 is a legacy "Flash" byte (SPN-conversion-method-0
+era; recognized as present but not decoded further). Bytes 2 onward pack
+zero or more 4-byte DTC (Diagnostic Trouble Code) records, one record per 4
+bytes, until the payload is exhausted:
+
+| DTC field | Byte(s), 0-indexed within the 4-byte record | Bits | Notes |
+|---|---|---|---|
+| SPN (Suspect Parameter Number) | 0 | 7-0 | SPN bits 7-0 (low byte) |
+| SPN (cont.) | 1 | 7-0 | SPN bits 15-8 (mid byte) |
+| SPN (cont.) | 2 | 7-5 | SPN bits 18-16 (top 3 bits) -- SPN is 19 bits total, packed NON-CONTIGUOUSLY across these three bytes, the one detail most likely to be gotten wrong |
+| FMI (Failure Mode Identifier) | 2 | 4-0 | 5 bits, `0`-`31` |
+| CM (SPN Conversion Method) | 3 | 7 | 1 bit -- selects between two legacy SPN/FMI/OC packing conventions; this decoder always uses the layout above (Conversion Method 0/1 differ in OC's own bit width, not in SPN/FMI's), matching this fixture's own worked examples |
+| OC (Occurrence Count) | 3 | 6-0 | 7 bits, `0`-`127`; `127` conventionally means "not available" rather than "occurred 127 times" |
+
+This decoder's own fixture worked example (also this project's CTest suite):
+SPN 1569 (`0x621`) -> low byte `0x21`, mid byte `0x06`, top-3-bits `0` ->
+DTC bytes `[0x21, 0x06, 0x04, 0x03]` for FMI 4/CM 0/OC 3; SPN `0x12345`
+(74565 decimal) -> low byte `0x45`, mid byte `0x23`, top-3-bits `1` -> DTC
+bytes `[0x45, 0x23, 0x2D, 0xFF]` for FMI 13/CM 1/OC 127 ("not available").
+Zero DTCs (an all-zero lamp byte, no trailing DTC records) is a valid,
+common case -- "nothing currently faulting" -- and this decoder does not
+fabricate a phantom finding for it; the JSON output's own `j1939_dm1_dtcs`
+array is simply omitted (not an empty array) when there are none, and
+`output.cpp`'s own `--stats` DM1 headline count (below) only increments per
+actual DTC record decoded.
+
+#### CAN FD
+
+UNLIKE DeviceNet/CANopen (both of which predate CAN FD and never
+meaningfully use it), J1939-22 -- the CAN-FD-based revision of the J1939
+data-link layer -- legitimately carries J1939 application traffic over CAN
+FD frames, precisely because FD's larger payload (up to 64 bytes vs.
+classic CAN's 8) accommodates messages like DM1 with several packed DTCs
+without needing the older Transport Protocol (BAM/RTS-CTS) multi-frame
+fragmentation scheme. This decoder therefore continues to attempt its
+normal per-PGN payload decoding for an FD-flagged J1939 frame (unlike
+DeviceNet/CANopen's own posture of classification-only-no-payload-decode
+for FD), noting the FD flag structurally alongside the decoded fields
+rather than instead of them. This codebase's own fixture exercises exactly
+this scenario: the 2-DTC DM1 example above is carried in a 10-byte
+CAN-FD-flagged payload (exceeding classic CAN's 8-byte maximum), decoded in
+full.
+
+#### `--stats`: the DM1 active-DTC headline finding
+
+Matching this task's own explicit ask, and the same "never buried" treatment
+this codebase's own IPMI decoder already gives its Cipher Suite 0 finding:
+`--stats` surfaces a dedicated, impossible-to-miss headline line counting
+total DM1 active DTCs observed across the whole capture (`*** J1939 DM1
+active diagnostic trouble codes observed: N ***`), in addition to the
+ordinary per-PGN count breakdown every other curated PGN also gets.
+
+#### Out of scope for this release
+
+- **Non-EFF (standard 11-bit) IDs, error frames** -- not valid J1939 at all,
+  rejected outright (see above). Unlike DeviceNet/CANopen, RTR is
+  tolerated, not rejected (see above).
+- **Every curated PGN beyond EEC1/ET1/CCVS/Request/DM1** -- named, but
+  payload shown only as raw hex; **every uncurated PGN** -- shown by bare
+  number, also raw hex.
+- **Transport Protocol (BAM/RTS-CTS) multi-frame reassembly** for a
+  message spanning more than one classic-CAN (8-byte) frame -- not
+  attempted; each captured frame is decoded independently. (A CAN-FD-framed
+  DM1 with several DTCs, per the CAN FD section above, sidesteps this
+  entirely rather than needing it.)
+- **DM2 (Previously Active DTCs)** -- named in the curated PGN table (same
+  DTC bit-packing as DM1 would apply), but not given its own full field
+  decode this release; shown as raw hex like any other named-only PGN.
+- **NMEA 2000 marine-specific PGNs** -- `packet-j1939.c`'s own PGN table is
+  marine-oriented (this dissector's primary real-world use is boat
+  networks), but this decoder's own curated table above is deliberately
+  vehicle/heavy-duty-truck oriented (SAE J1939-71/-73) instead, matching
+  this task's own scope; marine-specific PGNs fall through to the
+  uncurated/raw-hex path.
+- **Address Claim procedure semantics** (PGN 60928) -- the PGN is named,
+  but the 8-byte NAME field's own sub-fields (Identity Number, Manufacturer
+  Code, Function, Vehicle System, Arbitrary Address Capable, etc.) are not
+  decoded.
+
+#### Validation
+
+No real public J1939/CAN-bus capture was found during this feature's
+research, the same honest gap already documented for DeviceNet's and
+CANopen's own Validation sections above. This decoder is validated against
+the same synthetic combined `tests/sample_canopen_j1939.pcap` fixture
+CANopen's own Validation section above describes (`build_canopen_j1939_
+sample` in `tools/make_sample_pcap.py`; packets 27-36 of 36 are J1939's
+own), hand-built and cross-checked against `packet-j1939.c`'s own source for
+ID/PGN structure plus SAE J1939-71/-73 domain knowledge for the
+EEC1/ET1/CCVS/DM1 payload layouts (see this section's own opening paragraph
+for why that combination, rather than a pure Wireshark-source port, was
+necessary here). The fixture exercises: EEC1 broadcast (Engine Speed +
+both torque fields), ET1 (Coolant/Fuel/Oil Temperature), CCVS (Vehicle
+Speed + Cruise Control Active), a PDU1 Request proving destination-address
+extraction, a DM1 with two packed DTCs carried in a CAN-FD frame proving
+the SPN/FMI/OC/CM bit-unpacking with concrete worked values, a zero-DTC DM1
+proving the "no phantom findings" path, an RTR-flagged frame proving
+J1939's own unique RTR tolerance, an EFF+ERR negative control proving ERR
+always wins even with EFF present, an uncurated PGN shown structurally, and
+a truncated-payload EEC1 frame proving the decoder declines gracefully
+rather than misreading past what was actually captured. This project's own
+CTest suite additionally proves, on this same fixture, that `--protocol
+canopen` and `--protocol devicenet` both correctly decline every J1939
+frame (`(not decoded -- J1939 decoding disabled by --protocol)`), and that
+plain Auto-mode decoding reaches J1939 with no flag at all -- the positive
+half of the "J1939 safely joins Auto" claim made above.
+
 ### DNS / mDNS / LLMNR / NetBIOS Name Service (NBT-NS) / DNS-over-HTTPS detection
 
 Five name-resolution protocols, covered together because four of them share

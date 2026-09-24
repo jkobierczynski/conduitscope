@@ -1132,20 +1132,67 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
         } else if (link_type == LINKTYPE_RAW) {
             network_layer_payload = frame;
         } else if (link_type == LINKTYPE_CAN_SOCKETCAN) {
-            // DeviceNet (CAN-bus CIP) -- see can_socketcan.hpp/devicenet.hpp. A wholly separate
-            // link layer from Ethernet: has_ethernet and has_ip both stay false for every packet
-            // reached this way (no MAC addresses, no IP layer at all -- see devicenet.hpp's own
-            // comment on DecodedPacket's devicenet_* fields). This returns directly, the same
-            // pattern the EtherType-keyed non-IPv4 branches above use, rather than falling through
-            // to the IPv4/TCP/UDP parsing below, which has nothing to do here.
+            // DeviceNet (CAN-bus CIP) / CANopen (CiA 301) / SAE J1939 -- see can_socketcan.hpp/
+            // devicenet.hpp/canopen.hpp/j1939.hpp. A wholly separate link layer from Ethernet:
+            // has_ethernet and has_ip both stay false for every packet reached this way (no MAC
+            // addresses, no IP layer at all). This returns directly, the same pattern the
+            // EtherType-keyed non-IPv4 branches above use, rather than falling through to the
+            // IPv4/TCP/UDP parsing below, which has nothing to do here.
             CanSocketcanFrame can = parse_socketcan_frame(frame);
             // NOTE: can.notes (e.g. a truncated-payload note) is NOT copied into out.notes here --
-            // try_parse_devicenet's own DeviceNetFrame::notes already forwards every CanSocketcanFrame
-            // note verbatim (see devicenet.cpp), and the fallback branch below (not-DeviceNet) adds
-            // them itself, so copying here too would duplicate every such note.
+            // each of try_parse_devicenet/try_parse_canopen/try_parse_j1939's own *Frame::notes
+            // already forwards every CanSocketcanFrame note verbatim, and the fallback branch below
+            // adds them itself, so copying here too would duplicate every such note.
 
             bool want_devicenet = options_.protocol_filter == ProtocolFilter::Auto ||
                                    options_.protocol_filter == ProtocolFilter::DevicenetOnly;
+            // CANopen deliberately does NOT join Auto mode -- see canopen.hpp's own file header
+            // comment (the "THE DEVICENET-VS-CANOPEN DISPATCH COLLISION" section) for the full,
+            // from-source analysis of why: both protocols classify literally the entire 11-bit
+            // standard CAN ID space into named categories of their own, with no bit shape either
+            // one's own reference dissector checks that the other would ever violate, so there is
+            // no reliable structural way to try both opportunistically without silently
+            // reclassifying a large fraction of every existing DeviceNet capture's own frames.
+            // An explicit --protocol canopen is required.
+            bool want_canopen = options_.protocol_filter == ProtocolFilter::CanopenOnly;
+            // J1939, by contrast, DOES join Auto mode alongside DeviceNet -- see j1939.hpp's own
+            // file header comment: its Extended (29-bit) CAN ID requirement is a genuine, hardware-
+            // enforced disjoint gate from DeviceNet/CANopen's own standard-ID space (both of which
+            // categorically reject any EFF-flagged frame outright, mirrored from each protocol's own
+            // reference dissector), so there is no collision here to avoid the way there is with
+            // CANopen above.
+            bool want_j1939 = options_.protocol_filter == ProtocolFilter::Auto ||
+                               options_.protocol_filter == ProtocolFilter::J1939Only;
+
+            if (can.eff) {
+                // Extended (29-bit) ID -- DeviceNet and CANopen both categorically reject this shape
+                // (see devicenet.hpp/canopen.hpp); only J1939 (SAE J1939) legitimately uses it, so
+                // this is the one sub-branch where DeviceNet/CANopen are never even attempted.
+                if (want_j1939) {
+                    DecodeContext ctx;
+                    ctx.packet_index = index;
+                    ctx.protocol_id = "j1939";
+                    if (auto result = j1939_decoder().decode(frame, ctx)) {
+                        const J1939Frame& jf = result->as<J1939Frame>();
+                        out.protocol = "j1939";
+                        out.summary = jf.summary;
+                        for (const auto& n : jf.notes) out.notes.push_back(n);
+                        out.result = *result;
+                        return out;
+                    }
+                }
+                for (const auto& n : can.notes) out.notes.push_back(n);
+                out.protocol = "non-ip";
+                std::ostringstream s;
+                s << "CAN frame, id=0x" << std::hex << std::uppercase << can.id << std::dec
+                  << " [EFF -- extended 29-bit id]";
+                if (can.err) s << " [ERR -- error frame]";
+                s << (can.err ? " (not a valid J1939 frame shape)"
+                               : " (not decoded -- J1939 decoding disabled by --protocol)");
+                out.summary = s.str();
+                return out;
+            }
+
             if (want_devicenet) {
                 // Registration-model migration: try_parse_devicenet is now reached through
                 // DeviceNetDecoder::decode -- the first GateKind::LinkType decoder (see
@@ -1174,19 +1221,44 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                 }
             }
 
-            // Not DeviceNet (EFF/RTR/ERR flag set -- see can_socketcan.hpp/devicenet.hpp) --
+            if (want_canopen) {
+                // Same "zero-flat-field migrated protocol" shape as DeviceNet just above, see
+                // canopen.hpp's own CanopenDecoder comment for the ParseError deviation.
+                DecodeContext ctx;
+                ctx.packet_index = index;
+                ctx.protocol_id = "canopen";
+                if (auto result = canopen_decoder().decode(frame, ctx)) {
+                    const CanopenFrame& cf = result->as<CanopenFrame>();
+                    out.protocol = "canopen";
+                    out.summary = cf.summary;
+                    for (const auto& n : cf.notes) out.notes.push_back(n);
+                    out.result = *result;
+                    return out;
+                }
+            }
+
+            // Not DeviceNet (RTR/ERR flag set -- see can_socketcan.hpp/devicenet.hpp), and either
+            // CANopen wasn't explicitly requested or (structurally impossible, since try_parse_canopen
+            // shares DeviceNet's own eff/rtr/err rejection exactly) didn't recognize it either --
             // named structurally, never decoded further.
             for (const auto& n : can.notes) out.notes.push_back(n);
             out.protocol = "non-ip";
             std::ostringstream s;
             s << "CAN frame, id=0x" << std::hex << std::uppercase << can.id << std::dec;
-            if (can.eff) s << " [EFF -- extended 29-bit id]";
             if (can.rtr) s << " [RTR -- remote transmission request]";
             if (can.err) s << " [ERR -- error frame]";
-            if (!can.eff && !can.rtr && !can.err) {
-                s << " (not decoded -- DeviceNet decoding disabled by --protocol)";
+            if (!can.rtr && !can.err) {
+                if (want_canopen) {
+                    s << " (not a valid CANopen frame shape)";
+                } else {
+                    s << " (not decoded -- DeviceNet decoding disabled by --protocol)";
+                }
             } else {
-                s << " (not a valid DeviceNet frame shape)";
+                if (want_canopen) {
+                    s << " (not a valid DeviceNet/CANopen frame shape)";
+                } else {
+                    s << " (not a valid DeviceNet frame shape)";
+                }
             }
             out.summary = s.str();
             return out;

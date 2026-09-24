@@ -391,6 +391,19 @@ const char* protocol_tag_color(const std::string& protocol) {
                                                         // mixed-protocol capture containing it is
                                                         // structurally impossible in the first place
                                                         // -- no collision risk to reason about either way
+    if (protocol == "canopen" || protocol == "j1939") return kBoldGreen;  // documented reuse of
+                                                        // devicenet's own hue, not a fresh one -- the
+                                                        // exact same "no realistic mixed-protocol
+                                                        // capture" reasoning applies (CANopen/J1939
+                                                        // are, like DeviceNet, exclusively CAN-bus
+                                                        // protocols with no Ethernet/IP path at all,
+                                                        // and CANopen/DeviceNet in particular can
+                                                        // never even coexist in the same capture by
+                                                        // this codebase's own dispatch policy -- see
+                                                        // canopen.hpp) -- the "[protocol]" tag text
+                                                        // itself disambiguates the three, the same
+                                                        // "shared color, name disambiguates" posture
+                                                        // dns/mdns/llmnr already established below
     if (protocol == "dns" || protocol == "mdns" || protocol == "llmnr") return kWhite;  // one shared
                                                         // color for all three -- they're the exact
                                                         // same wire format (see dns.hpp), not just a
@@ -769,6 +782,159 @@ void write_devicenet_json_fields(std::ostream& out, const DeviceNetFrame& dn) {
     out << "    \"devicenet_payload_truncated\": " << (dn.payload_truncated ? "true" : "false") << ",\n";
     out << "    \"devicenet_payload_length\": " << dn.payload.size() << ",\n";
     out << "    \"devicenet_payload_hex\": \"" << json_escape(to_hex(dn.payload, "")) << "\",\n";
+}
+
+// The CANopen analog of write_devicenet_json_fields above -- same rationale, reads straight from the
+// CanopenFrame carried by DecodedPacket::result. See canopen.hpp for every field's own citation.
+void write_canopen_json_fields(std::ostream& out, const CanopenFrame& cf) {
+    std::ostringstream cobid;
+    cobid << "0x" << std::hex << std::uppercase << std::setw(4) << std::setfill('0') << cf.cob_id;
+    out << "    \"canopen_cob_id\": \"" << cobid.str() << "\",\n";
+    out << "    \"canopen_function_code\": " << static_cast<unsigned>(cf.function_code) << ",\n";
+    out << "    \"canopen_node_id\": " << static_cast<unsigned>(cf.node_id) << ",\n";
+    out << "    \"canopen_message_type\": \"" << json_escape(cf.message_type_name) << "\",\n";
+    if (cf.has_nmt) {
+        out << "    \"canopen_nmt_command\": " << static_cast<unsigned>(cf.nmt_command_raw) << ",\n";
+        if (!cf.nmt_command_name.empty()) {
+            out << "    \"canopen_nmt_command_name\": \"" << json_escape(cf.nmt_command_name) << "\",\n";
+        }
+        if (cf.has_nmt_target) {
+            out << "    \"canopen_nmt_target_node\": " << static_cast<unsigned>(cf.nmt_target_node) << ",\n";
+        }
+    }
+    if (cf.has_heartbeat) {
+        out << "    \"canopen_heartbeat_state\": " << static_cast<unsigned>(cf.heartbeat_state_raw) << ",\n";
+        if (!cf.heartbeat_state_name.empty()) {
+            out << "    \"canopen_heartbeat_state_name\": \"" << json_escape(cf.heartbeat_state_name) << "\",\n";
+        }
+    }
+    if (cf.has_sync && cf.sync_has_counter) {
+        out << "    \"canopen_sync_counter\": " << static_cast<unsigned>(cf.sync_counter) << ",\n";
+    }
+    if (cf.has_time_stamp) {
+        out << "    \"canopen_time_stamp_ms\": " << cf.time_stamp_ms << ",\n";
+        out << "    \"canopen_time_stamp_days\": " << cf.time_stamp_days << ",\n";
+    }
+    if (cf.has_emcy) {
+        std::ostringstream ec;
+        ec << "0x" << std::hex << std::uppercase << std::setw(4) << std::setfill('0') << cf.emcy_error_code;
+        out << "    \"canopen_emcy_error_code\": \"" << ec.str() << "\",\n";
+        if (!cf.emcy_error_code_name.empty()) {
+            out << "    \"canopen_emcy_error_code_name\": \"" << json_escape(cf.emcy_error_code_name) << "\",\n";
+        }
+        out << "    \"canopen_emcy_error_register\": " << static_cast<unsigned>(cf.emcy_error_register) << ",\n";
+        if (!cf.emcy_error_register_bits.empty()) {
+            out << "    \"canopen_emcy_error_register_bits\": [";
+            for (size_t i = 0; i < cf.emcy_error_register_bits.size(); ++i) {
+                if (i != 0) out << ", ";
+                out << "\"" << json_escape(cf.emcy_error_register_bits[i]) << "\"";
+            }
+            out << "],\n";
+        }
+    }
+    if (cf.has_sdo) {
+        out << "    \"canopen_sdo_is_request\": " << (cf.sdo_is_request ? "true" : "false") << ",\n";
+        out << "    \"canopen_sdo_cs\": " << static_cast<unsigned>(cf.sdo_cs) << ",\n";
+        if (!cf.sdo_cs_name.empty()) {
+            out << "    \"canopen_sdo_cs_name\": \"" << json_escape(cf.sdo_cs_name) << "\",\n";
+        }
+        if (cf.sdo_has_index) {
+            std::ostringstream idx;
+            idx << "0x" << std::hex << std::uppercase << std::setw(4) << std::setfill('0') << cf.sdo_index;
+            out << "    \"canopen_sdo_index\": \"" << idx.str() << "\",\n";
+            out << "    \"canopen_sdo_sub_index\": " << static_cast<unsigned>(cf.sdo_sub_index) << ",\n";
+        }
+        if (cf.sdo_is_expedited_init) {
+            out << "    \"canopen_sdo_expedited\": " << (cf.sdo_expedited ? "true" : "false") << ",\n";
+        }
+        if (cf.sdo_is_segment) {
+            out << "    \"canopen_sdo_segment_toggle\": " << (cf.sdo_segment_toggle ? "true" : "false") << ",\n";
+        }
+        if (cf.sdo_is_block && !cf.sdo_block_subcommand_name.empty()) {
+            out << "    \"canopen_sdo_block_subcommand\": \"" << json_escape(cf.sdo_block_subcommand_name) << "\",\n";
+        }
+        if (cf.sdo_has_abort_code) {
+            std::ostringstream ac;
+            ac << "0x" << std::hex << std::uppercase << std::setw(8) << std::setfill('0') << cf.sdo_abort_code;
+            out << "    \"canopen_sdo_abort_code\": \"" << ac.str() << "\",\n";
+            if (!cf.sdo_abort_code_name.empty()) {
+                out << "    \"canopen_sdo_abort_code_name\": \"" << json_escape(cf.sdo_abort_code_name) << "\",\n";
+            }
+        }
+        if (cf.sdo_has_data) {
+            out << "    \"canopen_sdo_data_hex\": \"" << json_escape(to_hex(cf.sdo_data, "")) << "\",\n";
+        }
+    }
+    out << "    \"canopen_fd\": " << (cf.fd ? "true" : "false") << ",\n";
+    out << "    \"canopen_payload_truncated\": " << (cf.payload_truncated ? "true" : "false") << ",\n";
+    out << "    \"canopen_payload_length\": " << cf.payload.size() << ",\n";
+    out << "    \"canopen_payload_hex\": \"" << json_escape(to_hex(cf.payload, "")) << "\",\n";
+}
+
+// The J1939 analog of write_devicenet_json_fields above -- same rationale, reads straight from the
+// J1939Frame carried by DecodedPacket::result. See j1939.hpp for every field's own citation.
+void write_j1939_json_fields(std::ostream& out, const J1939Frame& jf) {
+    out << "    \"j1939_priority\": " << static_cast<unsigned>(jf.priority) << ",\n";
+    out << "    \"j1939_pgn\": " << jf.pgn << ",\n";
+    if (!jf.pgn_name.empty()) {
+        out << "    \"j1939_pgn_name\": \"" << json_escape(jf.pgn_name) << "\",\n";
+    }
+    out << "    \"j1939_source_address\": " << static_cast<unsigned>(jf.source_address) << ",\n";
+    if (!jf.source_address_name.empty()) {
+        out << "    \"j1939_source_address_name\": \"" << json_escape(jf.source_address_name) << "\",\n";
+    }
+    out << "    \"j1939_is_pdu1\": " << (jf.is_pdu1 ? "true" : "false") << ",\n";
+    if (jf.is_pdu1) {
+        out << "    \"j1939_destination_address\": " << static_cast<unsigned>(jf.destination_address) << ",\n";
+    }
+    out << "    \"j1939_is_rtr\": " << (jf.is_rtr ? "true" : "false") << ",\n";
+    if (jf.has_eec1) {
+        out << "    \"j1939_eec1_engine_speed_rpm\": " << jf.eec1_engine_speed_rpm << ",\n";
+        out << "    \"j1939_eec1_actual_percent_torque\": " << jf.eec1_actual_percent_torque << ",\n";
+        out << "    \"j1939_eec1_driver_demand_percent_torque\": " << jf.eec1_driver_demand_percent_torque << ",\n";
+    }
+    if (jf.has_et1) {
+        out << "    \"j1939_et1_coolant_temp_c\": " << jf.et1_coolant_temp_c << ",\n";
+        out << "    \"j1939_et1_fuel_temp_c\": " << jf.et1_fuel_temp_c << ",\n";
+        if (jf.et1_has_oil_temp) {
+            out << "    \"j1939_et1_oil_temp_c\": " << jf.et1_oil_temp_c << ",\n";
+        }
+    }
+    if (jf.has_ccvs) {
+        if (jf.ccvs_has_speed) {
+            out << "    \"j1939_ccvs_vehicle_speed_kmh\": " << jf.ccvs_vehicle_speed_kmh << ",\n";
+        }
+        if (jf.ccvs_has_cruise_active) {
+            out << "    \"j1939_ccvs_cruise_active\": \"" << json_escape(jf.ccvs_cruise_active_name) << "\",\n";
+        }
+    }
+    if (jf.has_request && jf.request_has_target_pgn) {
+        out << "    \"j1939_request_target_pgn\": " << jf.request_target_pgn << ",\n";
+    }
+    if (jf.has_dm1) {
+        if (jf.dm1_has_lamp_status) {
+            out << "    \"j1939_dm1_mil\": \"" << json_escape(jf.dm1_mil_name) << "\",\n";
+            out << "    \"j1939_dm1_rsl\": \"" << json_escape(jf.dm1_rsl_name) << "\",\n";
+            out << "    \"j1939_dm1_awl\": \"" << json_escape(jf.dm1_awl_name) << "\",\n";
+            out << "    \"j1939_dm1_pl\": \"" << json_escape(jf.dm1_pl_name) << "\",\n";
+        }
+        out << "    \"j1939_dm1_dtc_count\": " << jf.dm1_dtcs.size() << ",\n";
+        if (!jf.dm1_dtcs.empty()) {
+            out << "    \"j1939_dm1_dtcs\": [";
+            for (size_t i = 0; i < jf.dm1_dtcs.size(); ++i) {
+                if (i != 0) out << ", ";
+                const J1939Dtc& dtc = jf.dm1_dtcs[i];
+                out << "{\"spn\": " << dtc.spn << ", \"fmi\": " << static_cast<unsigned>(dtc.fmi)
+                    << ", \"occurrence_count\": " << static_cast<unsigned>(dtc.occurrence_count)
+                    << ", \"conversion_method\": " << (dtc.conversion_method ? "true" : "false") << "}";
+            }
+            out << "],\n";
+        }
+    }
+    out << "    \"j1939_fd\": " << (jf.fd ? "true" : "false") << ",\n";
+    out << "    \"j1939_payload_truncated\": " << (jf.payload_truncated ? "true" : "false") << ",\n";
+    out << "    \"j1939_payload_length\": " << jf.payload.size() << ",\n";
+    out << "    \"j1939_payload_hex\": \"" << json_escape(to_hex(jf.payload, "")) << "\",\n";
 }
 
 // The DoH analog of write_twincat_json_fields above -- same rationale (a plain free function, not
@@ -3843,6 +4009,12 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
     if (p.protocol == "devicenet" && p.result) {
         write_devicenet_json_fields(out_, p.result->as<DeviceNetFrame>());
     }
+    if (p.protocol == "canopen" && p.result) {
+        write_canopen_json_fields(out_, p.result->as<CanopenFrame>());
+    }
+    if (p.protocol == "j1939" && p.result) {
+        write_j1939_json_fields(out_, p.result->as<J1939Frame>());
+    }
     if (p.protocol == "bacnet" && p.result) {
         write_bacnet_json_fields(out_, p.result->as<BacnetFrame>());
     }
@@ -4472,6 +4644,16 @@ void StatsWriter::write_packet(const DecodedPacket& p) {
         if (dn.is_fragmented) devicenet_fragmented_count_++;
         if (dn.fd) devicenet_fd_count_++;
     }
+    if (p.protocol == "canopen" && p.result) {
+        canopen_message_type_counts_[p.result->as<CanopenFrame>().message_type_name]++;
+    }
+    if (p.protocol == "j1939" && p.result) {
+        const J1939Frame& jf = p.result->as<J1939Frame>();
+        std::string key = jf.pgn_name.empty() ? std::to_string(jf.pgn)
+                                                : (std::to_string(jf.pgn) + " (" + jf.pgn_name + ")");
+        j1939_pgn_counts_[key]++;
+        j1939_dm1_active_dtc_count_ += jf.dm1_dtcs.size();
+    }
     if (p.protocol == "bacnet" && p.result) {
         const BacnetFrame& bf = p.result->as<BacnetFrame>();
         bacnet_bvlc_function_counts_[bf.bvlc_function_name]++;
@@ -4898,6 +5080,29 @@ void StatsWriter::print_summary(std::ostream& out) const {
         }
         out << "devicenet fragmented group 3 messages: " << devicenet_fragmented_count_ << "\n";
         out << "devicenet can fd frames: " << devicenet_fd_count_ << "\n";
+    }
+    if (!canopen_message_type_counts_.empty()) {
+        out << "canopen function-code/message types:\n";
+        for (const auto& [name, count] : canopen_message_type_counts_) {
+            // Same guarded fallback as ipmi_netfn_command_counts_ above (see that block's own "Bug
+            // fix" comment) -- checked pre-emptively here even though no current CanopenFrame::
+            // message_type_name reaches 40 characters, since this is exactly the class of bug that
+            // comment warns a NEW protocol's own stats block should guard against rather than wait
+            // to rediscover.
+            out << "  " << std::left << std::setw(40) << name << (name.size() >= 40 ? " " : "")
+                << count << "\n";
+        }
+    }
+    if (!j1939_pgn_counts_.empty() || j1939_dm1_active_dtc_count_ > 0) {
+        out << "j1939 pgn counts:\n";
+        for (const auto& [name, count] : j1939_pgn_counts_) {
+            out << "  " << std::left << std::setw(40) << name << (name.size() >= 40 ? " " : "")
+                << count << "\n";
+        }
+        // Headline finding -- always printed on its own line, never buried, matching ipmi's own
+        // Cipher Suite 0 note (see that block above) and this file's own DM1 citation in j1939.hpp.
+        out << "*** J1939 DM1 active diagnostic trouble codes observed: "
+            << j1939_dm1_active_dtc_count_ << " ***\n";
     }
     if (!bacnet_bvlc_function_counts_.empty()) {
         out << "bacnet bvlc functions:\n";

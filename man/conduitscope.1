@@ -263,6 +263,28 @@ fields use; AES\-CBC\-128 payload decryption and any Redfish/vendor
 (iDRAC/iLO) REST extension are explicitly out of scope; see
 \fBdocs/PROTOCOL_COVERAGE.md\fR's RMCP / ASF / IPMI section for the full
 writeup,
+plus CANopen (CiA 301, via the same SocketCAN pcap captures DeviceNet uses)
+\-\- NMT, Heartbeat/NMT Error Control, SYNC, TIME STAMP, EMCY, SDO (expedited
+transfer full decode, segmented/block transfer named/structural), and PDO
+(named by COB-ID/Node-ID, raw hex payload, no object-dictionary mapping) \-\-
+reachable ONLY via an explicit \fB\-\-protocol canopen\fR, never in
+\fB\-\-protocol auto\fR, because CANopen and DeviceNet classify nearly the
+entire same 11\-bit standard CAN ID space by two different, colliding
+schemes with no way to tell them apart by bit shape alone; see
+\fBdocs/PROTOCOL_COVERAGE.md\fR's CANopen section (its own "DEVICENET\-VS\-
+CANOPEN DISPATCH COLLISION" discussion) for the full analysis,
+plus SAE J1939 (heavy\-duty vehicle/engine CAN bus, also via SocketCAN pcap
+captures, using Extended/29\-bit CAN IDs \-\- a structurally disjoint space
+from DeviceNet/CANopen's shared standard\-ID space, so J1939 DOES join
+\fB\-\-protocol auto\fR alongside DeviceNet) \-\- full 29\-bit ID/PGN
+decomposition (Priority/PDU Format/PDU Specific/Source Address, PDU1
+point\-to\-point vs. PDU2 broadcast), a curated PGN table with full field
+decode for EEC1 (Electronic Engine Controller 1), ET1 (Engine Temperature),
+CCVS (Cruise Control/Vehicle Speed), and DM1 (Active Diagnostic Trouble
+Codes, including its SPN/FMI/Occurrence\-Count/Conversion\-Method DTC
+bit\-unpacking, surfaced both inline and as its own headline count in
+\fB\-\-stats\fR); every other PGN named by number only; see
+\fBdocs/PROTOCOL_COVERAGE.md\fR's SAE J1939 section for the full writeup,
 plus PROFINET RT (EtherType 0x8892, DCP device discovery/configuration and
 cyclic real-time IO), IEC 61850-8-1 GOOSE (EtherType 0x88B8, ASN.1
 BER-encoded GOOSE PDU), IEC 61850-9-2 Sampled Values (EtherType 0x88BA,
@@ -446,7 +468,7 @@ regardless of where it's being analyzed \-\- an extension beyond what
 tshark/tcpdump themselves offer. See \fBdocs/USER_GUIDE.md\fR's OUTPUT
 FORMATS "Timestamps" subsection.
 .TP
-.B \-\-protocol {auto,modbus,dnp3,iec104,s7comm,s7comm\-plus,mms,enip,twincat,melsec,fins,bgp,kerberos,ldap,smb,profinet,goose,sv,ethercat,stp,devicenet,bacnet,hartip,opcua,mqtt,ff\-hse,dns,mdns,llmnr,nbns,doh,rip,igmp,vrrp,hsrp,igrp,pim,eigrp,ospf,remote\-access,lateral\-movement,enterprise\-trust,eapol,wireless\-backhaul,pppoe,tunnel\-vpn,mpls,arp,lldp,slow\-protocols,winrm,dcom,ge\-srtp,bsap,cclink\-ie,codesys,coap,zigbee,cdp,rmcp,asf,ipmi}
+.B \-\-protocol {auto,modbus,dnp3,iec104,s7comm,s7comm\-plus,mms,enip,twincat,melsec,fins,bgp,kerberos,ldap,smb,profinet,goose,sv,ethercat,stp,devicenet,canopen,j1939,bacnet,hartip,opcua,mqtt,ff\-hse,dns,mdns,llmnr,nbns,doh,rip,igmp,vrrp,hsrp,igrp,pim,eigrp,ospf,remote\-access,lateral\-movement,enterprise\-trust,eapol,wireless\-backhaul,pppoe,tunnel\-vpn,mpls,arp,lldp,slow\-protocols,winrm,dcom,ge\-srtp,bsap,cclink\-ie,codesys,coap,zigbee,cdp,rmcp,asf,ipmi}
 Restrict decoding to one protocol. Default: auto (tries all fourteen TCP
 protocols, independent of port number, plus CIP I/O, BACnet/IP, HART-IP, and
 FF-HSE on every
@@ -618,6 +640,18 @@ since it rides classic 802.3/LLC framing with no port at all.
 meaningful only against a \fILINKTYPE_CAN_SOCKETCAN\fR capture (gated on
 the capture's own pcap link type, checked before any protocol filter, so
 it has no effect on an ordinary Ethernet-linktype capture).
+\fBcanopen\fR is CANopen (CiA 301) \-\- same \fILINKTYPE_CAN_SOCKETCAN\fR
+gate as \fBdevicenet\fR, no port option, but UNLIKE \fBdevicenet\fR it is
+never attempted in \fB\-\-protocol auto\fR: CANopen and DeviceNet classify
+almost the entire same 11\-bit standard CAN ID space by two different,
+colliding schemes, so \fB\-\-protocol canopen\fR must be given explicitly
+to decode a capture as CANopen rather than DeviceNet \-\- see
+\fBdocs/PROTOCOL_COVERAGE.md\fR's CANopen section.
+\fBj1939\fR is SAE J1939 \-\- same \fILINKTYPE_CAN_SOCKETCAN\fR gate, no
+port option, and DOES join \fB\-\-protocol auto\fR alongside
+\fBdevicenet\fR (its Extended/29\-bit CAN IDs are a structurally disjoint
+space from DeviceNet/CANopen's own standard\-ID space, so there is no
+collision to avoid the way there is with \fBcanopen\fR).
 \fBbacnet\fR is BACnet/IP.
 \fBhartip\fR is HART-IP, tried on both TCP and UDP.
 \fBff\-hse\fR is FOUNDATION Fieldbus HSE (FDA/SM/FMS/LAN Redundancy), tried
@@ -1650,7 +1684,22 @@ the other CIP-family network, is out of reach of this or any pcap-based
 tool entirely (proprietary Manchester-coded coax physical layer, no
 Wireshark dissector, no pcap link type \-\- see that same section's "Why
 not ControlNet too" note), a structural limitation, not a tracked gap;
-non-IPv4
+CANopen (CiA 301) and SAE J1939 (both sharing DeviceNet's own
+\fILINKTYPE_CAN_SOCKETCAN\fR link type) are also now decoded \-\- CANopen's
+NMT/Heartbeat/SYNC/TIME STAMP/EMCY/SDO/PDO by COB-ID Function Code, reachable
+only via an explicit \fB\-\-protocol canopen\fR because it and DeviceNet
+classify almost the entire same 11-bit standard CAN ID space by two
+different, colliding schemes with no way to tell them apart by bit shape
+alone (see \fBdocs/PROTOCOL_COVERAGE.md\fR's CANopen section, its own
+"DEVICENET-VS-CANOPEN DISPATCH COLLISION" discussion); J1939's 29-bit
+Extended-ID/PGN decomposition with a curated PGN table (full decode for
+EEC1/ET1/CCVS/Request, DM1's own SPN/FMI/Occurrence-Count/Conversion-Method
+DTC bit-unpacking), which DOES join \fB\-\-protocol auto\fR alongside
+DeviceNet since its Extended-ID space is structurally disjoint from
+DeviceNet/CANopen's own standard-ID space \-\- no real public CANopen or
+J1939/CAN-bus capture could be found either, so both are validated only
+against the synthetic \fBtests/sample_canopen_j1939.pcap\fR fixture (see
+\fBdocs/PROTOCOL_COVERAGE.md\fR's CANopen and SAE J1939 sections); non-IPv4
 Ethernet frames and non-TCP
 IPv4 payloads (including UDP) are otherwise still just recognized and
 NAMED for a small OT-relevant set (ARP, LLDP, ICMP, and the rest) but not further decoded, and
@@ -1962,6 +2011,27 @@ Summarize a DeviceNet (CAN-bus) capture by message group and type:
 conduitscope decode \-r capture.pcap \-\-protocol devicenet \-f json \e
   | jq \-r '[.[] | select(.protocol == "devicenet") | "\e(.devicenet_group_name) / \e(.devicenet_message_type)"] |
            group_by(.) | map("\e(length)x \e(.[0])") | .[]'
+.EE
+.RE
+.PP
+Summarize a CANopen capture by message type (note the explicit
+\fB\-\-protocol canopen\fR \-\- required, since CANopen never joins
+\fB\-\-protocol auto\fR on a capture shared with DeviceNet):
+.RS
+.EX
+conduitscope decode \-r capture.pcap \-\-protocol canopen \-f json \e
+  | jq \-r '[.[] | select(.protocol == "canopen") | .canopen_message_type] |
+           group_by(.) | map("\e(length)x \e(.[0])") | .[]'
+.EE
+.RE
+.PP
+Pull every J1939 DM1 active DTC (SPN/FMI/Occurrence Count) seen in a
+capture:
+.RS
+.EX
+conduitscope decode \-r capture.pcap \-\-protocol j1939 \-f json \e
+  | jq \-r '.[] | select(.j1939_dm1_dtcs // [] | length > 0) |
+           .j1939_dm1_dtcs[] | "SPN=\e(.spn) FMI=\e(.fmi) OC=\e(.occurrence_count)"'
 .EE
 .RE
 .PP

@@ -305,6 +305,17 @@ private:
     std::map<std::string, size_t> devicenet_message_type_counts_;
     size_t devicenet_fragmented_count_ = 0;  // Group 3 messages with the Fragmentation flag set
     size_t devicenet_fd_count_ = 0;          // CAN FD frames -- see devicenet.hpp's scope note
+    // CANopen's own breakdown (canopen.hpp) -- function-code/message-type counts, the task's own
+    // requested shape, keyed by CanopenFrame::message_type_name ("NMT"/"SYNC"/"TIME STAMP"/"EMCY"/
+    // "PDO1 (tx)"/.../"Default-SDO (rx)"/"NMT Error Control"/"LSS (Master)"/"LSS (Slave)"/"Unknown").
+    std::map<std::string, size_t> canopen_message_type_counts_;
+    // SAE J1939's own breakdown (j1939.hpp) -- PGN counts, the task's own requested shape, keyed by
+    // "<PGN> (<name>)" or a bare "<PGN>" when uncurated. j1939_dm1_active_dtc_count_ is this
+    // decoder's own headline finding (a summed count of every individual DTC across every decoded
+    // DM1 message) -- printed on its own, clearly-labeled line in --stats output, matching this
+    // codebase's own "never buried" posture already established for ipmi_cipher_suite_zero_count_.
+    std::map<std::string, size_t> j1939_pgn_counts_;
+    size_t j1939_dm1_active_dtc_count_ = 0;
     std::map<std::string, size_t> bacnet_bvlc_function_counts_;
     std::map<std::string, size_t> bacnet_service_counts_;  // keyed by APDU service-choice name,
                                                               // only when bacnet_has_apdu
