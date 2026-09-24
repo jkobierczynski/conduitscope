@@ -142,6 +142,7 @@ real-capture validation provenance.
 | SAE J1939 | Heavy-duty vehicle/engine CAN bus | SocketCAN pcap captures | 29-bit ID/PGN decode, EEC1/ET1/CCVS/Request full decode, DM1 active-DTC SPN/FMI/OC/CM decode |
 | AMQP 0-9-1 | Message broker (RabbitMQ-native) | TCP 5672 | Connection/Channel/Exchange/Queue/Basic/Tx method families, content header/body, PLAIN credential exchange detection |
 | AMQP 1.0 | Message broker (OASIS-standard) | TCP 5672 | open/begin/attach/flow/transfer/disposition/detach/end/close performatives, SASL negotiation, message-section walk, SASL PLAIN credential exchange detection |
+| DICOM | Hospital imaging (PACS/modalities/workstations) | TCP 104/11112 | A-ASSOCIATE-RQ/AC/RJ, A-ABORT, A-RELEASE, P-DATA-TF/DIMSE Command+Data Set decode, User Identity Negotiation + curated PHI tag redaction, no-identity-negotiation headline finding |
 
 A cross-cutting **attack-detection** layer runs over every decoded
 IPv4/TCP/UDP/ICMP packet regardless of which protocol above matched: LAND,

@@ -126,6 +126,7 @@ add_library(conduitscope_core STATIC
   src/amqp_common.cpp
   src/amqp091.cpp
   src/amqp10.cpp
+  src/dicom.cpp
   src/protocol_registry.cpp
   src/resource_limits.cpp
   src/decoder.cpp
@@ -12881,3 +12882,182 @@ add_test(NAME amqp_port_option_parses
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_amqp091.pcap" --amqp-port 5673 --format text)
 set_tests_properties(amqp_port_option_parses PROPERTIES
   PASS_REGULAR_EXPRESSION "\\[amqp091\\]")
+
+# --- DICOM (dicom.hpp) ---------------------------------------------------------------------------
+# tests/sample_dicom.pcap (build_dicom_sample, tools/make_sample_pcap.py) is entirely synthetic,
+# built directly against this feature's own byte-exact sourcing pass (PS3.7/PS3.8/PS3.5/PS3.15 and
+# Wireshark's packet-dcm.c dissector -- see dicom.hpp's own SOURCING notes). It covers seven
+# associations across seven distinct TCP sessions on ports 61000-61006, checked against BOTH
+# standard DICOM ports (11112 for most, 104 for the sixth) plus one non-standard port (9999, for the
+# seventh) to prove Auto-mode's port gating.
+
+# Full A-ASSOCIATE-RQ/AC handshake, three Presentation Contexts (Verification/C-ECHO, CT Storage
+# offering two transfer syntaxes, Study Root Q/R-FIND), each accepted in the AC with its own
+# negotiated transfer syntax -- proves the fixed-field layout, Application Context, and nested
+# Abstract/Transfer Syntax sub-item parsing for both the RQ and AC forms.
+add_test(NAME dicom_associate_rq_recognized
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dicom.pcap" --format text -v)
+set_tests_properties(dicom_associate_rq_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "#1  [^\n]*\\[dicom\\]  A-ASSOCIATE-RQ \\(called=\"PACS_AE\", calling=\"CT_MODALITY1\"\\)")
+
+add_test(NAME dicom_associate_rq_json_presentation_contexts_and_transfer_syntax_offer
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dicom.pcap" --format json)
+set_tests_properties(dicom_associate_rq_json_presentation_contexts_and_transfer_syntax_offer PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"dicom_application_context_uid\": \"1\\.2\\.840\\.10008\\.3\\.1\\.1\\.1\",\n *\"dicom_presentation_contexts\": \\[\\{\"id\": 1, \"abstract_syntax\": \"Verification SOP Class\", \"transfer_syntaxes\": \\[\"Implicit VR Little Endian\"\\]\\}, \\{\"id\": 3, \"abstract_syntax\": \"CT Image Storage\", \"transfer_syntaxes\": \\[\"Implicit VR Little Endian\", \"Explicit VR Little Endian\"\\]\\}, \\{\"id\": 5, \"abstract_syntax\": \"Study Root Query/Retrieve Information Model - FIND\", \"transfer_syntaxes\": \\[\"Implicit VR Little Endian\"\\]\\}\\]")
+
+add_test(NAME dicom_associate_ac_json_accepted_transfer_syntax_per_context
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dicom.pcap" --format json)
+set_tests_properties(dicom_associate_ac_json_accepted_transfer_syntax_per_context PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"dicom_presentation_contexts\": \\[\\{\"id\": 1, \"result\": \"Acceptance\", \"transfer_syntax\": \"Implicit VR Little Endian\"\\}, \\{\"id\": 3, \"result\": \"Acceptance\", \"transfer_syntax\": \"Explicit VR Little Endian\"\\}, \\{\"id\": 5, \"result\": \"Acceptance\", \"transfer_syntax\": \"Implicit VR Little Endian\"\\}\\]")
+
+# Headline finding: User Identity Negotiation type=2 (username+passcode) is a real cleartext
+# credential exchange -- AND the redaction proof: the literal passcode ("S3cr3tDicomPass!42") must
+# never appear in this format's own output, only the username and the field's own byte-length.
+add_test(NAME dicom_user_identity_cleartext_finding_and_redaction
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dicom.pcap" --format text -v)
+set_tests_properties(dicom_user_identity_cleartext_finding_and_redaction PROPERTIES
+  PASS_REGULAR_EXPRESSION "#1  [^\n]*\\[dicom\\]  A-ASSOCIATE-RQ \\(called=\"PACS_AE\", calling=\"CT_MODALITY1\"\\)[^\n]*\n *note: cleartext credential exchange: User Identity Negotiation type=2 \\(username\\+passcode\\) carries the passcode in the clear on the wire \\(username: \"scada_svc\"\\)"
+  FAIL_REGULAR_EXPRESSION "S3cr3tDicomPass!42")
+
+add_test(NAME dicom_user_identity_json_redaction_proof
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dicom.pcap" --format json)
+set_tests_properties(dicom_user_identity_json_redaction_proof PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"dicom_user_identity_type\": \"username\\+passcode\",\n *\"dicom_user_identity_primary\": \"scada_svc\",\n *\"dicom_user_identity_primary_length\": 9,\n *\"dicom_user_identity_secondary\": \"\\[REDACTED\\]\",\n *\"dicom_user_identity_secondary_length\": 18"
+  FAIL_REGULAR_EXPRESSION "S3cr3tDicomPass!42")
+
+# C-ECHO-RQ/RSP (Verification SOP Class, no Data Set) -- the DIMSE Command Set decode path with no
+# accompanying data.
+add_test(NAME dicom_c_echo_rq_rsp
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dicom.pcap" --format text -v)
+set_tests_properties(dicom_c_echo_rq_rsp PROPERTIES
+  PASS_REGULAR_EXPRESSION "#3  [^\n]*P-DATA-TF: 1 PDV\\(s\\)[^\n]*\n *note: DIMSE Command: C-ECHO-RQ \\(message-id=1, affected-sop-class=Verification SOP Class\\)[^\n]*\n#4  [^\n]*P-DATA-TF: 1 PDV\\(s\\)[^\n]*\n *note: DIMSE Command: C-ECHO-RSP \\(message-id-being-responded-to=1, affected-sop-class=Verification SOP Class, status=Success \\(Success\\)\\)")
+
+# C-STORE-RQ carrying a curated Data Set with PHI tags -- both the redaction proof (Patient's Name,
+# Patient ID, Patient's Birth Date -- literal test values must never appear) AND the extraction proof
+# (non-PHI curated tags -- Study/Series/SOP UIDs, Modality, Manufacturer, etc. -- DO still appear, so
+# the fixture is asset-inventory-usable, not merely redacted into uselessness).
+add_test(NAME dicom_c_store_phi_redaction_and_non_phi_extraction
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dicom.pcap" --format text -v)
+set_tests_properties(dicom_c_store_phi_redaction_and_non_phi_extraction PROPERTIES
+  PASS_REGULAR_EXPRESSION "#5  [^\n]*P-DATA-TF: 2 PDV\\(s\\)[^\n]*\n *note: DIMSE Command: C-STORE-RQ \\(message-id=2, affected-sop-class=CT Image Storage, affected-sop-instance=1\\.2\\.999\\.1\\.100\\.1\\)[^\n]*\n *note: Data Set: 15 curated element\\(s\\): Patient's Name=\\[REDACTED\\] \\(8 byte\\(s\\)\\), Patient ID=\\[REDACTED\\] \\(10 byte\\(s\\)\\), Patient's Birth Date=\\[REDACTED\\] \\(8 byte\\(s\\)\\), Patient's Sex=M, Study Instance UID=1\\.2\\.999\\.1\\.100, Series Instance UID=1\\.2\\.999\\.1\\.100\\.1, SOP Instance UID=1\\.2\\.999\\.1\\.100\\.1, Accession Number=ACC001, Modality=CT, Institution Name=General Hospital, Station Name=CT01, Manufacturer=Acme Medical, Manufacturer's Model Name=Acme CT 9000, Study Date=20240101, Study Description=Chest CT"
+  FAIL_REGULAR_EXPRESSION "Doe.John|Doe\\^John|MRN-778899|19800101")
+
+add_test(NAME dicom_c_store_json_fields_and_redaction_proof
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dicom.pcap" --format json)
+set_tests_properties(dicom_c_store_json_fields_and_redaction_proof PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"dicom_command_field\": \"C-STORE-RQ\",\n *\"dicom_message_id\": 2,\n *\"dicom_affected_sop_class_uid\": \"1\\.2\\.840\\.10008\\.5\\.1\\.4\\.1\\.1\\.2\",\n *\"dicom_affected_sop_instance_uid\": \"1\\.2\\.999\\.1\\.100\\.1\",\n *\"dicom_data_set_elements\": \\[\\{\"name\": \"Patient's Name\", \"value\": \"\\[REDACTED\\] \\(8 byte\\(s\\)\\)\"\\}, \\{\"name\": \"Patient ID\", \"value\": \"\\[REDACTED\\] \\(10 byte\\(s\\)\\)\"\\}, \\{\"name\": \"Patient's Birth Date\", \"value\": \"\\[REDACTED\\] \\(8 byte\\(s\\)\\)\"\\}"
+  FAIL_REGULAR_EXPRESSION "Doe.John|Doe\\^John|MRN-778899|19800101")
+
+# C-STORE-RSP with Success status -- the response side of the C-STORE-RQ above.
+add_test(NAME dicom_c_store_rsp_status
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dicom.pcap" --format text -v)
+set_tests_properties(dicom_c_store_rsp_status PROPERTIES
+  PASS_REGULAR_EXPRESSION "#6  [^\n]*P-DATA-TF: 1 PDV\\(s\\)[^\n]*\n *note: DIMSE Command: C-STORE-RSP \\(message-id-being-responded-to=2, affected-sop-class=CT Image Storage, affected-sop-instance=1\\.2\\.999\\.1\\.100\\.1, status=Success \\(Success\\)\\)")
+
+# C-FIND-RQ/RSP with a Pending status (query still in progress) followed by a final Success status --
+# proves the DicomStatusClass::Pending curated status lookup, not just Success/Failure.
+add_test(NAME dicom_c_find_rq_pending_and_final_success
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dicom.pcap" --format text -v)
+set_tests_properties(dicom_c_find_rq_pending_and_final_success PROPERTIES
+  PASS_REGULAR_EXPRESSION "#7  [^\n]*P-DATA-TF: 2 PDV\\(s\\)[^\n]*\n *note: DIMSE Command: C-FIND-RQ \\(message-id=3, affected-sop-class=Study Root Query/Retrieve Information Model - FIND\\)[^\n]*\n *note: Data Set: 1 curated element\\(s\\): Modality=CT[^\n]*\n#8  [^\n]*P-DATA-TF: 2 PDV\\(s\\)[^\n]*\n *note: DIMSE Command: C-FIND-RSP \\(message-id-being-responded-to=3, affected-sop-class=Study Root Query/Retrieve Information Model - FIND, status=Pending \\(Pending\\)\\)[^\n]*\n *note: Data Set: 1 curated element\\(s\\): Modality=CT[^\n]*\n#9  [^\n]*P-DATA-TF: 1 PDV\\(s\\)[^\n]*\n *note: DIMSE Command: C-FIND-RSP \\(message-id-being-responded-to=3, affected-sop-class=Study Root Query/Retrieve Information Model - FIND, status=Success \\(Success\\)\\)")
+
+# A Data Set fragmented across TWO separate P-DATA-TF PDUs' PDVs -- proves DicomDimseReassemblyState
+# (DirectionalFlow-keyed cross-PDU reassembly) AND its own redaction proof (a second, distinct
+# patient-id test value, "MRN-FRAG-SPLIT", spliced across the fragment boundary, must never appear
+# whole OR split in the output).
+add_test(NAME dicom_data_set_fragmented_across_two_pdus_reassembled
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dicom.pcap" --format text -v)
+set_tests_properties(dicom_data_set_fragmented_across_two_pdus_reassembled PROPERTIES
+  PASS_REGULAR_EXPRESSION "#11  [^\n]*P-DATA-TF: 1 PDV\\(s\\)[^\n]*\n *note: DIMSE Data Set reassembled from 32 byte\\(s\\) across 2 PDV fragment\\(s\\)[^\n]*\n *note: Data Set: 2 curated element\\(s\\): Patient ID=\\[REDACTED\\] \\(14 byte\\(s\\)\\), Modality=MR"
+  FAIL_REGULAR_EXPRESSION "MRN-FRAG-SPLIT")
+
+# A-RELEASE-RQ/RP (graceful association teardown, name-only PDUs).
+add_test(NAME dicom_release_rq_rp
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dicom.pcap" --format text -v)
+set_tests_properties(dicom_release_rq_rp PROPERTIES
+  PASS_REGULAR_EXPRESSION "#13  [^\n]*\\[dicom\\]  A-RELEASE-RQ  [^\n]*\n#14  [^\n]*\\[dicom\\]  A-RELEASE-RP")
+
+# Headline finding non-false-positive proof: association #1 (packet #1, above) carries a User
+# Identity Negotiation item and must NOT show the "no identity" note; association #2 (packet #15)
+# carries NO User Identity item at all and MUST show it. Both are asserted together so a decoder bug
+# that fired the note unconditionally (a false positive on every association) would fail this test.
+add_test(NAME dicom_no_identity_negotiation_headline_non_false_positive
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dicom.pcap" --format text -v)
+set_tests_properties(dicom_no_identity_negotiation_headline_non_false_positive PROPERTIES
+  PASS_REGULAR_EXPRESSION "#15  [^\n]*\\[dicom\\]  A-ASSOCIATE-RQ \\(called=\"PACS_AE\", calling=\"MR_MODALITY2\"\\)[^\n]*\n *note: no User Identity Negotiation item -- this association relies on AE-title alone \\(unauthenticated trust\\)"
+  FAIL_REGULAR_EXPRESSION "#1  [^\n]*A-ASSOCIATE-RQ[^\n]*\n *note: no User Identity Negotiation item")
+
+# A-ASSOCIATE-RJ (result=Rejected-permanent, source=DICOM-UL-service-user,
+# reason=calling-AE-title-not-recognized) -- reason 3 in PS3.8 Table 9-21.
+add_test(NAME dicom_associate_rj_reason
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dicom.pcap" --format text -v)
+set_tests_properties(dicom_associate_rj_reason PROPERTIES
+  PASS_REGULAR_EXPRESSION "#20  [^\n]*\\[dicom\\]  A-ASSOCIATE-RJ \\(result=Rejected-permanent, source=DICOM-UL-service-user, reason=calling-AE-title-not-recognized\\)")
+
+# A-ABORT (source=DICOM-UL-service-user, i.e. a locally-initiated abort).
+add_test(NAME dicom_abort
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dicom.pcap" --format text -v)
+set_tests_properties(dicom_abort PROPERTIES
+  PASS_REGULAR_EXPRESSION "#23  [^\n]*\\[dicom\\]  A-ABORT \\(source=DICOM-UL-service-user\\)")
+
+# A mid-stream P-DATA-TF with NO captured A-ASSOCIATE-RQ/AC on this TCP session -- the stateful-
+# association requirement's honest-decline proof: content cannot be decoded (no negotiated transfer
+# syntax to decode against), and the decoder says so rather than guessing.
+add_test(NAME dicom_p_data_tf_without_captured_association_honestly_declines
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dicom.pcap" --format text -v)
+set_tests_properties(dicom_p_data_tf_without_captured_association_honestly_declines PROPERTIES
+  PASS_REGULAR_EXPRESSION "#24  [^\n]*P-DATA-TF: 1 PDV\\(s\\)[^\n]*\n *note: P-DATA-TF observed, 1 PDV\\(s\\), association context not captured on this session -- cannot decode content")
+
+# Standard port 104 (IANA-assigned) auto-detected in the SAME Auto-mode run as port 11112 (the
+# common/default port used by every other association in this fixture) -- proves BOTH standard ports
+# are checked automatically, with no --dicom-port needed.
+add_test(NAME dicom_standard_port_104_auto_detected
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dicom.pcap" --format text -v)
+set_tests_properties(dicom_standard_port_104_auto_detected PROPERTIES
+  PASS_REGULAR_EXPRESSION "#25  [^\n]*192\\.168\\.1\\.50:61005 -> 192\\.168\\.1\\.10:104  \\[dicom\\]  A-ASSOCIATE-RQ")
+
+# Non-standard port (61006 -> 9999, not 104/11112): NOT claimed in Auto mode (port-gated) -- falls
+# through to whichever other opportunistic decoder's gate happens to accept the bytes instead (out of
+# this feature's scope which one) -- but decodes correctly, including the "not a configured/standard
+# DICOM port" note, when --protocol dicom is forced.
+add_test(NAME dicom_non_standard_port_not_claimed_in_auto_mode
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dicom.pcap" --format text -v)
+set_tests_properties(dicom_non_standard_port_not_claimed_in_auto_mode PROPERTIES
+  FAIL_REGULAR_EXPRESSION "#28[^\n]*\\[dicom\\]|#29[^\n]*\\[dicom\\]")
+add_test(NAME dicom_non_standard_port_forced_via_protocol_filter
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dicom.pcap" --protocol dicom --format text -v)
+set_tests_properties(dicom_non_standard_port_forced_via_protocol_filter PROPERTIES
+  PASS_REGULAR_EXPRESSION "#28  [^\n]*\\[dicom\\]  A-ASSOCIATE-RQ \\(called=\"PACS_AE\", calling=\"PORTABLE7\"\\)[^\n]*\n *note: no User Identity Negotiation item -- this association relies on AE-title alone \\(unauthenticated trust\\)[^\n]*\n *note: seen on TCP port 61006->9999, which is not a configured/standard DICOM port \\(104/11112\\)")
+
+# --stats aggregation: per-PDU-type counts, both curated headline findings (no-identity-negotiation
+# AND cleartext-passcode), command field counts, presentation context result counts, accepted
+# transfer syntax compressed/plain split, RJ reason counts, and abort source counts -- plus the
+# redaction proof once more, since --stats renders its own summary text independently of --format.
+add_test(NAME dicom_stats_pdu_type_counts_and_curated_findings
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dicom.pcap" --format text --stats)
+set_tests_properties(dicom_stats_pdu_type_counts_and_curated_findings PROPERTIES
+  PASS_REGULAR_EXPRESSION "dicom pdu type counts:\n *A-ABORT *1[^\n]*\n *A-ASSOCIATE-AC *4[^\n]*\n *A-ASSOCIATE-RJ *1[^\n]*\n *A-ASSOCIATE-RQ *5[^\n]*\n *A-RELEASE-RP *2[^\n]*\n *A-RELEASE-RQ *2[^\n]*\n *P-DATA-TF *12[^\\*]*\\*\\*\\* DICOM associations with no identity negotiation \\(AE-title-only, unauthenticated trust\\) observed: 4 \\*\\*\\*\ndicom user identity negotiations with cleartext passcode \\(type=2\\) observed: 1"
+  FAIL_REGULAR_EXPRESSION "S3cr3tDicomPass!42|Doe.John|Doe\\^John|MRN-778899|MRN-FRAG-SPLIT|19800101")
+
+add_test(NAME dicom_stats_command_field_and_transfer_syntax_and_rj_abort_counts
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dicom.pcap" --format text --stats)
+set_tests_properties(dicom_stats_command_field_and_transfer_syntax_and_rj_abort_counts PROPERTIES
+  PASS_REGULAR_EXPRESSION "dicom command field counts:\n *C-ECHO-RQ *2[^\n]*\n *C-ECHO-RSP *1[^\n]*\n *C-FIND-RQ *1[^\n]*\n *C-FIND-RSP *2[^\n]*\n *C-STORE-RQ *2[^\n]*\n *C-STORE-RSP *2\ndicom presentation context result counts:\n *Acceptance *6\ndicom accepted transfer syntaxes: 6 plain, 0 compressed\ndicom A-ASSOCIATE-RJ reason counts:\n *calling-AE-title-not-recognized *1\ndicom A-ABORT source counts:\n *DICOM-UL-service-user *1")
+
+# `--protocol dicom` also acts as a filter, excluding every other decoded protocol -- the same
+# filter-exclusion proof amqp091_protocol_filter_excludes_other_protocols/twincat's own analog
+# already establish. sample_dicom.pcap's own packets #28/#29 (non-standard-port association, above)
+# are the ones a Modbus false-positive would otherwise claim (see the collision this feature's own
+# decoder.cpp dispatch-ordering comment documents).
+add_test(NAME dicom_protocol_filter_excludes_other_protocols
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dicom.pcap" --protocol dicom --format text)
+set_tests_properties(dicom_protocol_filter_excludes_other_protocols PROPERTIES
+  FAIL_REGULAR_EXPRESSION "\\[modbus\\]")
+
+# `--dicom-port` CLI option parses and threads through extra_dicom_ports into Auto mode: with the
+# option, port 9999 (packets #28/#29, otherwise not claimed in Auto mode -- see
+# dicom_non_standard_port_not_claimed_in_auto_mode above) IS now claimed as dicom.
+add_test(NAME dicom_port_option_extends_auto_mode_detection
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dicom.pcap" --dicom-port 9999 --format text)
+set_tests_properties(dicom_port_option_extends_auto_mode_detection PROPERTIES
+  PASS_REGULAR_EXPRESSION "#28  [^\n]*\\[dicom\\]  A-ASSOCIATE-RQ \\(called=\"PACS_AE\", calling=\"PORTABLE7\"\\)[^\n]*\n#29  [^\n]*\\[dicom\\]  A-ASSOCIATE-AC \\(called=\"PACS_AE\", calling=\"PORTABLE7\"\\)")

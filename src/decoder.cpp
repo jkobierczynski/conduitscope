@@ -494,6 +494,8 @@ bool Decoder::reassemble_tcp_payload(const TcpSegment& tcp, const std::string& f
                          options_.protocol_filter == ProtocolFilter::Amqp091Only;
     bool want_amqp10 = options_.protocol_filter == ProtocolFilter::Auto ||
                         options_.protocol_filter == ProtocolFilter::Amqp10Only;
+    bool want_dicom = options_.protocol_filter == ProtocolFilter::Auto ||
+                       options_.protocol_filter == ProtocolFilter::DicomOnly;
 
     // OPC UA is checked first of all: its own structural detection gate (the leading 3 bytes must
     // be one of exactly 7 fixed ASCII MessageType strings -- "HEL"/"ACK"/"ERR"/"RHE"/"OPN"/"CLO"/
@@ -592,6 +594,38 @@ bool Decoder::reassemble_tcp_payload(const TcpSegment& tcp, const std::string& f
         if (auto d = fins_tcp_decoder().tcp_declared_length(candidate)) {
             declared = d;
             which = "FINS/TCP (Omron)";
+        }
+    }
+    // DICOM (dicom.hpp), TCP ports 104/11112 -- tried BEFORE Modbus here, deliberately, for a
+    // real, near-universal structural collision this task's own fixture testing surfaced: a
+    // DICOM PDU's 6-byte common header is PDU-type(1) reserved(1,==0x00) PDU-length(4,BE), and
+    // every real DICOM PDU's own length fits in 16 bits (any single PDU well under 65536 bytes),
+    // so bytes[2:4] (the TOP 16 bits of that 4-byte length field) are ALWAYS 0x0000 -- which is
+    // EXACTLY the byte range Modbus/TCP's own MBAP header reads as `protocol_id` (its primary,
+    // and only mandatory, gate). Unlike AMQP 0-9-1's own narrow, single-fixed-8-byte-frame
+    // collision with Modbus (documented, not reordered, in amqp091.hpp's own KNOWN COLLISION
+    // note), this collision is NOT narrow -- it would claim virtually every DICOM PDU in Auto mode
+    // if Modbus (opportunistic, port-independent) ran first, since DICOM's own gate is port-gated
+    // and Modbus's own decode() never checks the port at all. So, UNLIKE every other GateKind::
+    // TcpPort protocol in this codebase (WinRM/DCOM/GE SRTP/AMQP all sit well after Modbus in this
+    // cascade, since none of them collide with it this pervasively), DICOM's own port-gated check
+    // is positioned HERE, immediately before Modbus's, so a packet on a configured DICOM port gets
+    // a chance to be recognized as DICOM before Modbus's own port-independent gate ever sees it --
+    // this changes nothing for any existing Modbus capture (DICOM's own check only ever fires on
+    // ports 104/11112/--dicom-port, none of which any pre-existing Modbus fixture uses). An
+    // explicit `--protocol dicom` still tries it port-independently, same as every other
+    // GateKind::TcpPort protocol; `--protocol modbus` is of course unaffected (want_dicom is false
+    // under that filter, so this block is skipped entirely and Modbus's own check runs exactly as
+    // it always has).
+    bool require_dicom_port = options_.protocol_filter == ProtocolFilter::Auto;
+    bool candidate_port_is_dicom = port_in(tcp.src_port, DICOM_PORT, options_.extra_dicom_ports) ||
+                                    port_in(tcp.dst_port, DICOM_PORT, options_.extra_dicom_ports) ||
+                                    port_in(tcp.src_port, DICOM_PORT_ALT, options_.extra_dicom_ports) ||
+                                    port_in(tcp.dst_port, DICOM_PORT_ALT, options_.extra_dicom_ports);
+    if (!declared && want_dicom && (!require_dicom_port || candidate_port_is_dicom)) {
+        if (auto d = dicom_tcp_decoder().tcp_declared_length(candidate)) {
+            declared = d;
+            which = "DICOM PDU";
         }
     }
     if (!declared && want_modbus) {
@@ -2814,6 +2848,8 @@ DecodedPacket Decoder::decode_ip_payload(DecodedPacket out, uint8_t protocol, By
                              options_.protocol_filter == ProtocolFilter::Amqp091Only;
         bool want_amqp10 = options_.protocol_filter == ProtocolFilter::Auto ||
                             options_.protocol_filter == ProtocolFilter::Amqp10Only;
+        bool want_dicom = options_.protocol_filter == ProtocolFilter::Auto ||
+                           options_.protocol_filter == ProtocolFilter::DicomOnly;
 
         // Tried first of all -- see the matching, fuller comment in reassemble_tcp_payload above
         // for why OPC UA's own magic-string detection gate is strong enough, and non-colliding
@@ -2982,6 +3018,43 @@ DecodedPacket Decoder::decode_ip_payload(DecodedPacket out, uint8_t protocol, By
                     out.notes.push_back("seen on TCP port " + std::to_string(tcp.src_port) + "->" +
                                          std::to_string(tcp.dst_port) +
                                          ", which is not a configured/standard FINS port (9600)");
+                }
+                return out;
+            }
+        }
+
+        // DICOM, tried BEFORE Modbus here -- see the matching, fuller comment at this same
+        // ordering's declared-length-cascade counterpart above (reassemble_tcp_payload) for why:
+        // a DICOM PDU's length field's own top 16 bits are always 0x0000 for any real PDU, which
+        // is exactly the byte range Modbus/TCP's own MBAP header reads as `protocol_id` -- a real,
+        // near-universal collision, not a narrow edge case, so DICOM's own port-gated check runs
+        // here rather than after Modbus (unlike AMQP/WinRM/DCOM/GE SRTP, none of which collide
+        // this pervasively). Only ever fires on a configured DICOM port in Auto mode, so this
+        // changes nothing for any existing Modbus fixture.
+        bool require_dicom_port = options_.protocol_filter == ProtocolFilter::Auto;
+        bool candidate_port_is_dicom = port_in(tcp.src_port, DICOM_PORT, options_.extra_dicom_ports) ||
+                                        port_in(tcp.dst_port, DICOM_PORT, options_.extra_dicom_ports) ||
+                                        port_in(tcp.src_port, DICOM_PORT_ALT, options_.extra_dicom_ports) ||
+                                        port_in(tcp.dst_port, DICOM_PORT_ALT, options_.extra_dicom_ports);
+        if (want_dicom && (!require_dicom_port || candidate_port_is_dicom)) {
+            DecodeContext ctx;
+            ctx.session_key = tcp_session_key(out.src_ip, tcp.src_port, out.dst_ip, tcp.dst_port);
+            ctx.flow_key = flow_key;
+            ctx.packet_index = index;
+            ctx.protocol_id = "dicom";
+            ctx.flow_states = &registry_flow_state_;
+            ctx.redact_secrets = options_.redact_secrets;
+            if (auto result = dicom_tcp_decoder().decode(effective_payload, ctx)) {
+                const DicomResult& dr = result->as<DicomResult>();
+                out.protocol = "dicom";
+                out.summary = dr.summary;
+                for (const auto& n : dr.notes) out.notes.push_back(n);
+                out.result = *result;
+
+                if (!candidate_port_is_dicom) {
+                    out.notes.push_back("seen on TCP port " + std::to_string(tcp.src_port) + "->" +
+                                         std::to_string(tcp.dst_port) +
+                                         ", which is not a configured/standard DICOM port (104/11112)");
                 }
                 return out;
             }

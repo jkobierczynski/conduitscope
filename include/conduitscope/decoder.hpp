@@ -28,6 +28,7 @@
 #include "conduitscope/cotp.hpp"
 #include "conduitscope/dcom.hpp"
 #include "conduitscope/devicenet.hpp"
+#include "conduitscope/dicom.hpp"
 #include "conduitscope/dnp3.hpp"
 #include "conduitscope/dns.hpp"
 #include "conduitscope/eapol.hpp"
@@ -335,6 +336,14 @@ enum class ProtocolFilter {
                            // shared protocol name and default port) decoding -- see amqp10.hpp.
                            // GateKind::TcpPort, same default port and detection posture as
                            // Amqp091Only above.
+    DicomOnly,             // only attempt DICOM (Digital Imaging and Communications in Medicine,
+                           // NEMA/ACR PS3.x) Upper Layer decoding -- see dicom.hpp. GateKind::
+                           // TcpPort, port-gated in Auto mode like Amqp091Only/GeSrtpOnly/DcomOnly/
+                           // WinRmOnly above, but UNLIKE every one of those, checks TWO default
+                           // ports at once in Auto mode (104 and 11112, see DICOM_PORT/
+                           // DICOM_PORT_ALT) -- mirroring the LDAP_PORT/LDAP_GC_PORT precedent
+                           // (extra_ldap_ports below), not the "one port number, both transports"
+                           // shape extra_hartip_ports/extra_kerberos_ports have.
 };
 
 struct DecodeOptions {
@@ -388,6 +397,11 @@ struct DecodeOptions {
                                                   // CLI flag), BGP follows the ordinary Modbus-style
                                                   // pattern: a well-known, always-negotiated port,
                                                   // so a --bgp-port flag makes sense from the start.
+    std::vector<uint16_t> extra_dicom_ports;    // TCP only -- see DICOM_PORT/DICOM_PORT_ALT
+                                                  // (104/11112, dicom.hpp) -- widens beyond BOTH of
+                                                  // those two default ports, neither of which is
+                                                  // "the" default the other merely widens (see
+                                                  // dicom.hpp's own DETECTION/DISPATCH section).
     std::vector<uint16_t> extra_opcua_ports;    // TCP only -- see OPCUA_PORT (4840)
     std::vector<uint16_t> extra_mqtt_ports;     // TCP only -- see MQTT_PORT (1883)
     std::vector<uint16_t> extra_ffhse_ports;    // TCP AND UDP -- see FFHSE_PORT_ANNUNC/_FMS/_SM/_LAN

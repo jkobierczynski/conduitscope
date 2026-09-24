@@ -11256,3 +11256,243 @@ default config and from 1772 to 1814 in the
 regressions in both, zero-warning clean rebuilds in both. See
 `include/conduitscope/amqp091.hpp` and `include/conduitscope/amqp10.hpp`'s
 own file headers for the full writeup.
+
+### DICOM (Digital Imaging and Communications in Medicine, NEMA PS3.1-PS3.20) -- TCP ports 104/11112
+
+DICOM is the wire protocol nearly every piece of hospital imaging
+equipment speaks: PACS (Picture Archiving and Communication System)
+servers, CT/MR/CR/US/mammography modalities, and review workstations all
+associate over it. This was added because NIS2 (the EU's revised
+critical-infrastructure directive) explicitly brings healthcare into its
+regulated sectors, and a hospital's imaging network is exactly the
+OT-adjacent estate a security engineer doing network visibility/asset
+inventory work now has to account for.
+
+**Deliberately not a medical-imaging developer's tool.** No pixel data
+is decoded or reconstructed, and there is no attempt at a full DICOM
+data dictionary. This decoder covers the upper-layer association/PDU
+protocol (PS3.8) in full, plus a small, curated set of DIMSE Command Set
+(PS3.7) fields and Data Set tags useful for two things a security
+engineer actually needs: asset inventory ("what AE titles, SOP classes,
+and modalities are talking on this wire, over what transfer syntax") and
+a quick security read ("is there a real credential exchange happening,
+or is the trust model AE-title-only").
+
+#### Wire format
+
+**A-ASSOCIATE-RQ/AC** (PDU types 0x01/0x02): the fixed-field header
+(protocol version, reserved bytes, Called/Calling AE Title, a 32-byte
+reserved block), followed by variable items -- exactly one Application
+Context item, one or more Presentation Context items (RQ form: an
+Abstract Syntax sub-item plus one or more offered Transfer Syntax
+sub-items; AC form: a result byte plus exactly one accepted Transfer
+Syntax sub-item, or none at all if the context was rejected), and one
+User Information item containing its own nested sub-items (Maximum
+Length Received, Implementation Class UID, Implementation Version Name,
+Asynchronous Operations Window, SCP/SCU Role Selection, User Identity
+Negotiation, User Identity Negotiation Reply). Every AE title and UID
+field is fixed-width, space- or NUL-padded, and trimmed on read.
+
+**User Identity Negotiation** (sub-item 0x58): four identity types --
+1 (username only), 2 (username+passcode), 3 (Kerberos ticket), 4 (SAML
+assertion) -- each carrying a primary field (surfaced in the clear:
+the username, or a ticket/assertion length) and, for type 2 only, a
+secondary passcode field. Type 2 is this feature's own headline
+security finding: DICOM's association-level "authentication" is
+frequently nothing more than this passcode sent in the clear over an
+unencrypted TCP connection, no TLS anywhere in the base protocol.
+
+**P-DATA-TF** (PDU type 0x04): one or more Presentation Data Values
+(PDVs), each tagged with a Presentation Context ID and a
+message-control-header byte whose two low bits carry the two facts that
+matter here -- bit 0 (Command vs Data) and bit 1 (last fragment for this
+message or not). **The one binding rule this decoder treats as
+non-optional**: a Command-flagged PDV is ALWAYS encoded Implicit VR
+Little Endian, regardless of whatever transfer syntax was negotiated for
+that Presentation Context; only a Data-flagged PDV uses the negotiated
+transfer syntax. Getting this backwards silently corrupts every Command
+Set decode.
+
+**DIMSE Command Set / Data Set elements**: standard DICOM data-element
+encoding, both Implicit VR (tag + 4-byte length, VR looked up rather than
+read) and Explicit VR (tag + 2-byte VR + either a 2-byte length for most
+VRs, or a 2-byte reserved field followed by a 4-byte length for the
+long-form VR set: OB/OD/OF/OL/OW/SQ/UC/UR/UT/UN). Undefined-length
+elements (length `0xFFFFFFFF`, used by Sequences and some Pixel Data
+transfer syntaxes) are walked via their Item (FFFE,E000)/Item Delimitation
+(FFFE,E00D)/Sequence Delimitation (FFFE,E0DD) framing as a flat,
+non-recursive walk; a genuinely nested undefined-length structure this
+walk cannot honestly resolve is reported as such rather than guessed at.
+Pixel Data (7FE0,0010) is always skipped as opaque -- this decoder never
+attempts to interpret image data.
+
+**A-ASSOCIATE-RJ** (0x03): result/source/reason byte triple (PS3.8 Table
+9-21), e.g. `reason=calling-AE-title-not-recognized`. **A-ABORT** (0x07):
+source/reason byte pair. **A-RELEASE-RQ/RP** (0x05/0x06): no
+content beyond the PDU header -- graceful teardown.
+
+#### Statefulness
+
+Two independent layers, each a `DecoderFlowState` subclass:
+
+- **`DicomAssociationState`** (Session-keyed): built from the
+  A-ASSOCIATE-RQ (each Presentation Context's offered Abstract Syntax)
+  and A-ASSOCIATE-AC (which contexts were accepted, and with what
+  transfer syntax) seen on that TCP session. A later P-DATA-TF's PDVs
+  are decoded against the transfer syntax this state recorded for their
+  Presentation Context ID. A P-DATA-TF on a session whose association
+  was never captured (mid-stream-start capture, or the association rode
+  a different, uncaptured TCP session) honestly declines to decode
+  content -- reported as "association context not captured on this
+  session -- cannot decode content" -- rather than guessing at a
+  transfer syntax. This is a real, expected limitation for a live-tap
+  deployment that starts capturing mid-session, not a bug.
+
+- **`DicomDimseReassemblyState`** (DirectionalFlow-keyed): a DIMSE
+  Command Set or Data Set can span multiple P-DATA-TF PDUs' PDVs (each
+  PDV is capped by the negotiated Maximum Length). Command-flagged and
+  Data-flagged fragments are buffered independently, per direction,
+  until the last-fragment bit is seen, then decoded as one logical unit.
+  Buffering is capped by the same shared `ResourceLimits`
+  (`max_reassembly_bytes`/`max_reassembly_segments`) every other
+  cross-packet reassembly in this codebase already uses, abandoning with
+  a note rather than growing unbounded on a hostile or malformed stream.
+
+#### Security relevance
+
+**No identity negotiation is the common case, not the exception.**
+Absent a User Identity Negotiation item, a DICOM association's entire
+"authentication" is the Calling AE Title -- a value the SCU sends itself,
+unauthenticated, in the clear, and trivially spoofed. This decoder's
+`--stats` headline (`*** DICOM associations with no identity negotiation
+(AE-title-only, unauthenticated trust) observed: N ***`) exists because,
+on most real hospital imaging networks, N is most or all of them.
+
+**User Identity Negotiation type 2's passcode is itself a cleartext
+credential** the moment it is used -- surfaced as its own `--stats`
+line (`dicom user identity negotiations with cleartext passcode (type=2)
+observed: N`) and redacted on the wire exactly like any other credential
+this codebase decodes (see Redaction, below).
+
+**A-ASSOCIATE-RJ's reason code and repeated rejections from one peer**
+are a lightweight AE-title-enumeration/probing signal -- the same
+"decline-with-a-reason-code is itself information" posture this
+document's LDAP/Kerberos/SMB2 sections already take toward bind/auth
+failures.
+
+#### Redaction
+
+Reuses `kRedactedSecretPlaceholder`/`redact_secret_occurrences` from
+`protocol_decoder.hpp`, the exact convention every other credential- or
+PHI-bearing protocol in this codebase uses, for:
+
+- User Identity Negotiation's secondary field: the type=2 passcode, the
+  type=3 Kerberos ticket, and the type=4 SAML assertion -- only the
+  redaction placeholder and the field's own byte length are surfaced,
+  never the raw bytes.
+- Three curated Data Set tags carrying direct patient-identifying
+  information (PHI): **Patient's Name** (0010,0010), **Patient ID**
+  (0010,0020), **Patient's Birth Date** (0010,0030). A healthcare
+  network-visibility tool treats PHI with the same seriousness this
+  codebase already gives operational-technology credentials -- these are
+  redacted unconditionally, the same way, with no separate opt-out.
+
+**Deliberately NOT redacted**: twelve further curated tags -- Study
+Instance UID, Series Instance UID, SOP Instance UID, Accession Number,
+Modality, Institution Name, Station Name, Manufacturer, Manufacturer's
+Model Name, Study Date, Study Description, and Patient's Sex. These are
+the actual payload an asset-inventory/network-visibility use case exists
+to surface (what kind of equipment, from what vendor, at what site, is
+talking on this wire); redacting them would make the tool useless for
+its stated purpose. **UIDs are themselves a correlation key**, not
+merely metadata: a Study/Series/SOP Instance UID observed on the wire is
+exactly the kind of value a security engineer correlates against a PACS
+audit log or asset database, so treating it as sensitive-and-hidden
+would actively work against the investigative use case this feature was
+built for.
+
+#### Detection / dispatch
+
+`GateKind::TcpPort`, with BOTH `DICOM_PORT` (104, the IANA-assigned
+well-known port) and `DICOM_PORT_ALT` (11112, the de facto default
+nearly every real PACS/modality/workstation actually configures)
+checked automatically in Auto mode -- no CLI flag required, following
+this document's own LDAP precedent (`LDAP_PORT`/`LDAP_GC_PORT`, two
+standard ports for one protocol, both always checked) rather than a
+single-port gate. `--dicom-port` widens Auto-mode detection with further
+non-standard ports, the same `extra_*_ports` convention every other
+port-gated decoder in this codebase uses. `--protocol dicom` forces
+decoding on any port.
+
+**One real, near-universal Auto-mode collision, found and fixed by
+reordering** (a materially different situation from AMQP 0-9-1's own
+HEARTBEAT-frame collision above, which is narrow enough -- one fixed
+8-byte frame shape -- to leave documented rather than fixed): every real
+DICOM PDU's 4-byte big-endian PDU-length field is always less than
+65536 (no real association or DIMSE message remotely approaches 4 GiB),
+so its top 16 bits are always `0x0000` -- exactly the byte range
+Modbus/TCP's MBAP header reads as `protocol_id`, and Modbus's own only
+mandatory gate is `protocol_id == 0`. Because Modbus is
+`GateKind::TcpPortIndependent` (tried opportunistically on every TCP
+port, with no port gate of its own) and `decoder.cpp`'s dispatch
+cascades originally tried Modbus before DICOM, Modbus was silently
+claiming nearly every DICOM PDU on a genuine DICOM port -- caught only
+by this project's own mandatory manual-CLI-verification step, not by
+static reasoning. Because the collision is near-universal (not a narrow
+edge case), it was fixed rather than documented around: both of DICOM's
+`decoder.cpp` call sites now run immediately before their respective
+Modbus call sites, each with an inline comment explaining the collision.
+This reordering is safe because DICOM only fires on a configured DICOM
+port (104/11112, or `--dicom-port`) in Auto mode, or under an explicit
+`--protocol dicom` filter, so no pre-existing Modbus fixture or port is
+affected.
+
+#### Explicitly out of scope
+
+Pixel Data content/image reconstruction; the full DICOM data dictionary
+(only the curated tag set above is extracted -- everything else in a
+Data Set is counted but not individually surfaced); DICOMweb
+(HTTP/REST-based, an entirely different transport this section does not
+touch); TLS-wrapped DICOM (out of scope beyond the generic TLS
+recognition this codebase already has); Q/R MOVE's second, separate
+C-STORE sub-association; and Storage Commitment/MPPS/other extended
+DIMSE service classes beyond the curated Command Field table.
+
+#### Validation
+
+Validated against `tests/sample_dicom.pcap`, built by
+`tools/make_sample_pcap.py`'s `build_dicom_sample()`: seven associations
+across seven distinct TCP sessions. A full A-ASSOCIATE-RQ/AC handshake
+with three Presentation Contexts (Verification/C-ECHO, CT Storage
+offering two transfer syntaxes, Study Root Q/R-FIND) and per-context
+transfer syntax negotiation; a User Identity Negotiation type=2
+(username+passcode) item carrying a real (test-only) cleartext passcode
+-- both the username-extraction proof and the passcode-redaction proof
+(the literal passcode string must never appear in any output format); a
+C-ECHO-RQ/RSP pair (no Data Set); a C-STORE-RQ/RSP carrying a full
+curated Data Set with real (test-only) PHI values, proving redaction and
+non-PHI extraction side by side; a C-FIND-RQ/RSP exchange with a Pending
+status followed by a final Success; a Data Set deliberately fragmented
+across two separate P-DATA-TF PDUs' PDVs, proving
+`DicomDimseReassemblyState`'s cross-PDU reassembly with a second,
+distinct PHI test value spliced across the fragment boundary; a second
+association with no User Identity item at all (the headline finding's
+own non-false-positive proof); a third association immediately
+A-ASSOCIATE-RJ'd (reason=calling-AE-title-not-recognized); a fourth
+association A-ABORT'd mid-session; a mid-stream P-DATA-TF with no
+captured association on its own TCP session (the honest-decline proof);
+a sixth association on port 104 instead of 11112 (the dual-standard-port
+proof); and a seventh association on a non-standard port (9999), not
+claimed in Auto mode but decoding correctly under `--protocol dicom` or
+`--dicom-port 9999`. Every decode path was run manually (`--format text
+-v`, `--format json`, `--stats`, `--protocol dicom`) and its real output
+read -- including explicitly grepping decoded output for every literal
+PHI/credential test string across all three output formats and
+confirming zero occurrences, while confirming Study/Series UIDs,
+Modality, and Manufacturer still appear -- before any CTest regex was
+written, the same discipline this document's every other recent section
+describes. 23 new `dicom_*` CTest tests were added; the full suite grew
+from 1826 to 1849 in the default config and from 1814 to 1837 in the
+`-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF` config, passing with zero
+regressions in both, zero-warning clean rebuilds in both. See
+`include/conduitscope/dicom.hpp`'s own file header for the full writeup.

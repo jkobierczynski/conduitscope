@@ -8687,6 +8687,136 @@ deferred future migration.
     -- no real public AMQP 0-9-1 or AMQP 1.0 pcap capture was found during
     this item's own research.
 
+52. **DICOM (Digital Imaging and Communications in Medicine, NEMA
+    PS3.1-PS3.20) upper-layer protocol -- TCP ports 104/11112.** **Done.**
+    Jurgen asked for this because NIS2 (the EU's revised critical-
+    infrastructure directive) explicitly folds healthcare into its
+    regulated sectors, and a hospital's imaging network (PACS, modalities
+    -- CT/MR/CR/US scanners, review workstations) is exactly the kind of
+    OT-adjacent estate a security engineer doing network visibility/asset
+    inventory work now has to account for. This is deliberately NOT a
+    medical-imaging developer's tool: no pixel data is decoded, no image
+    reconstruction, no full DIMSE/DICOM data dictionary -- only the
+    upper-layer association/PDU protocol (PS3.8) plus a small, curated
+    set of DIMSE Command Set and Data Set tags (PS3.7) useful for
+    inventory ("what AE titles, SOP classes, and modalities are on this
+    wire") and security review ("is there a real credential exchange, is
+    the trust model AE-title-only").
+
+    `DicomDecoder`/`dicom.hpp`/`dicom.cpp`, `GateKind::TcpPort`, both
+    DICOM_PORT (104, IANA-assigned) and DICOM_PORT_ALT (11112, the
+    de facto default nearly every real PACS/modality actually uses)
+    checked automatically in Auto mode with no CLI flag required --
+    following LDAP's own dual-port precedent (`LDAP_PORT`/`LDAP_GC_PORT`)
+    rather than a single-port gate; `--dicom-port` widens detection with
+    further ports, the same `extra_*_ports` convention every other
+    port-gated decoder in this codebase already uses.
+
+    Two independent layers of per-TCP-session state, both
+    `DecoderFlowState` subclasses: `DicomAssociationState`
+    (Session-keyed) tracks the negotiated Application Context, each
+    Presentation Context's Abstract Syntax/accepted Transfer Syntax, and
+    the AE titles from the A-ASSOCIATE-RQ/AC pair, so a P-DATA-TF's PDVs
+    can be decoded against the RIGHT transfer syntax later in the same
+    session; `DicomDimseReassemblyState` (DirectionalFlow-keyed) buffers
+    Command-flagged and Data-flagged PDV fragments independently across
+    multiple P-DATA-TF PDUs until the last-fragment bit is set, honoring
+    the one binding rule PS3.8 makes non-optional here: a Command Set PDV
+    is ALWAYS Implicit VR Little Endian regardless of whatever transfer
+    syntax was negotiated for that Presentation Context, while a Data Set
+    PDV uses the negotiated syntax. A P-DATA-TF arriving on a session
+    whose A-ASSOCIATE-RQ/AC was never captured honestly declines to
+    decode its content (no transfer syntax to decode against) rather than
+    guessing -- reported plainly as "association context not captured on
+    this session -- cannot decode content", the same honesty posture
+    COTP's own mid-stream-capture handling already established.
+
+    Curated PHI redaction: Patient's Name, Patient ID, and Patient's
+    Birth Date reuse `kRedactedSecretPlaceholder`/
+    `redact_secret_occurrences` from `protocol_decoder.hpp` exactly as
+    every other credential-bearing protocol in this codebase does, right
+    alongside User Identity Negotiation's own passcode/Kerberos-ticket/
+    SAML-assertion field (type 2/3/4) -- the SAME mechanism, a healthcare
+    inventory tool's PHI fields are treated with the same seriousness as
+    a SCADA credential. Twelve further curated tags (Study/Series/SOP
+    Instance UID, Accession Number, Modality, Institution Name, Station
+    Name, Manufacturer, Manufacturer's Model Name, Study Date, Study
+    Description, Patient's Sex) are deliberately NOT redacted: they are
+    the asset-inventory/correlation-key payload this feature exists to
+    surface, and redacting them would make the fixture -- and the tool --
+    useless for its actual purpose. The headline `--stats` finding is
+    `*** DICOM associations with no identity negotiation (AE-title-only,
+    unauthenticated trust) observed: N ***`, alongside a User Identity
+    Negotiation type=2 cleartext-passcode count, DIMSE command field
+    counts, Presentation Context result counts, accepted transfer syntax
+    compressed/plain split, A-ASSOCIATE-RJ reason counts, and A-ABORT
+    source counts.
+
+    **One real, near-universal Auto-mode collision found and fixed by
+    reordering** (unlike item 51's AMQP HEARTBEAT collision, deliberately
+    left undocumented-but-unfixed because it is narrow -- one fixed
+    8-byte frame shape): every real DICOM PDU's 4-byte big-endian
+    PDU-length field is always < 65536 (no real association/message
+    remotely approaches 4 GiB), so its top 16 bits are always `0x0000` --
+    exactly the byte range Modbus/TCP's MBAP header reads as
+    `protocol_id`, and Modbus's ONLY mandatory gate is `protocol_id ==
+    0`. Since Modbus is `GateKind::TcpPortIndependent` (tried
+    opportunistically on every TCP port, no port gate) and its call sites
+    in `decoder.cpp` ran earlier than DICOM's own, Modbus was silently
+    claiming nearly every DICOM PDU on a DICOM port before DICOM's own
+    (correctly-matching) port-gated check ever ran -- caught only by this
+    project's own mandatory before-writing-any-CTest-regex manual CLI
+    verification step, not by any static reasoning. Fixed, not
+    documented-around, because the collision is near-universal rather
+    than a narrow edge case: both of DICOM's `decoder.cpp` call sites
+    (the TCP-reassembly declared-length cascade and the main `decode()`
+    dispatch cascade) were moved to run immediately before their
+    respective Modbus call sites, each with an inline comment explaining
+    why. The reorder is safe because DICOM only fires on configured
+    DICOM ports (104/11112, or `--dicom-port`) in Auto mode, or under an
+    explicit `--protocol dicom`/`--protocol modbus` filter, so no
+    existing Modbus fixture or port is affected.
+
+    `tests/sample_dicom.pcap` (`build_dicom_sample()`) covers seven
+    associations across seven TCP sessions: a full A-ASSOCIATE-RQ/AC
+    handshake with three Presentation Contexts (Verification/C-ECHO, CT
+    Storage offering two transfer syntaxes, Study Root Q/R-FIND) and
+    per-context transfer syntax negotiation; a User Identity Negotiation
+    type=2 (username+passcode) carrying a real (test-only) cleartext
+    passcode -- both the extraction proof (username) and the redaction
+    proof (the literal passcode string must never appear in ANY output
+    format); a C-ECHO-RQ/RSP pair (no Data Set); a C-STORE-RQ/RSP
+    carrying a full curated Data Set with real (test-only) PHI values,
+    proving redaction AND non-PHI extraction together; a C-FIND-RQ/RSP
+    exchange with a Pending status followed by a final Success; a Data
+    Set fragmented across TWO separate P-DATA-TF PDUs' PDVs, proving
+    `DicomDimseReassemblyState`'s cross-PDU reassembly with its own,
+    second distinct PHI test value spliced across the fragment boundary;
+    a second association with NO User Identity item at all (the headline
+    finding's own non-false-positive proof, checked together with the
+    first association in one test); a third association immediately
+    A-ASSOCIATE-RJ'd (reason=calling-AE-title-not-recognized); a fourth
+    association A-ABORT'd mid-session; a mid-stream P-DATA-TF with no
+    captured association on its own TCP session (the honest-decline
+    proof); a sixth association on port 104 instead of 11112 (the
+    dual-standard-port proof); and a seventh association on a
+    non-standard port (9999), NOT claimed in Auto mode but decoding
+    correctly under `--protocol dicom` or `--dicom-port 9999`. Every
+    decode path was run manually (`--format text -v`, `--format json`,
+    `--stats`, `--protocol dicom`) and its real output read -- including
+    explicitly grepping decoded output for every literal PHI/credential
+    test string across all three output formats and confirming zero
+    occurrences, while confirming Study/Series UIDs, Modality, and
+    Manufacturer still appear -- before any CTest regex was written. 23
+    new `dicom_*` CTest tests were added. Full suite grew from 1826 to
+    1849 tests in the default config and from 1814 to 1837 in the
+    `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF` config, zero regressions,
+    zero-warning clean rebuilds in both. As with every recent protocol
+    addition, the fixture is entirely synthetic -- no real DICOM pcap
+    capture was available during this item's own research; the PS3.7/
+    PS3.8/PS3.5/PS3.15 standard text and Wireshark's own `packet-dcm.c`
+    dissector were this item's sourcing pass instead.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

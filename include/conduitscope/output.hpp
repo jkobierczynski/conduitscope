@@ -441,6 +441,19 @@ private:
     //     reply-code >= 400 for 0-9-1, any non-empty error-condition for 1.0.
     //   - 0-9-1 Basic.Publish with immediate=true (old-broker/probing signal, see amqp091.cpp).
     //   - 1.0 SASL negotiation failure (sasl-outcome code != 0).
+    // DICOM (dicom.hpp) -- see write_packet's own "dicom" block and print_summary's own DICOM
+    // section (output.cpp) for what each counter means; dicom_no_identity_count_ is this decoder's
+    // own headline finding, the direct analog of ipmi_cipher_suite_zero_count_/
+    // amqp091_cleartext_credentials_count_ above.
+    std::map<std::string, size_t> dicom_pdu_type_counts_;
+    std::map<std::string, size_t> dicom_command_field_counts_;
+    std::map<std::string, size_t> dicom_pc_result_counts_;
+    std::map<std::string, size_t> dicom_rj_reason_counts_;
+    std::map<std::string, size_t> dicom_abort_source_counts_;
+    size_t dicom_no_identity_count_ = 0;
+    size_t dicom_cleartext_identity_count_ = 0;
+    size_t dicom_compressed_ts_count_ = 0;
+    size_t dicom_plain_ts_count_ = 0;
     std::map<std::string, size_t> amqp091_method_counts_;
     std::map<std::string, size_t> amqp10_performative_counts_;
     size_t amqp091_cleartext_credentials_count_ = 0;

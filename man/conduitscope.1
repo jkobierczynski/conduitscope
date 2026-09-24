@@ -489,7 +489,7 @@ regardless of where it's being analyzed \-\- an extension beyond what
 tshark/tcpdump themselves offer. See \fBdocs/USER_GUIDE.md\fR's OUTPUT
 FORMATS "Timestamps" subsection.
 .TP
-.B \-\-protocol {auto,modbus,dnp3,iec104,s7comm,s7comm\-plus,mms,enip,twincat,melsec,fins,bgp,kerberos,ldap,smb,profinet,goose,sv,ethercat,stp,devicenet,canopen,j1939,bacnet,hartip,opcua,mqtt,ff\-hse,dns,mdns,llmnr,nbns,doh,rip,igmp,vrrp,hsrp,igrp,pim,eigrp,ospf,remote\-access,lateral\-movement,enterprise\-trust,eapol,wireless\-backhaul,pppoe,tunnel\-vpn,mpls,arp,lldp,slow\-protocols,winrm,dcom,ge\-srtp,bsap,cclink\-ie,codesys,coap,zigbee,cdp,rmcp,asf,ipmi,amqp091,amqp10}
+.B \-\-protocol {auto,modbus,dnp3,iec104,s7comm,s7comm\-plus,mms,enip,twincat,melsec,fins,bgp,kerberos,ldap,smb,profinet,goose,sv,ethercat,stp,devicenet,canopen,j1939,bacnet,hartip,opcua,mqtt,ff\-hse,dns,mdns,llmnr,nbns,doh,rip,igmp,vrrp,hsrp,igrp,pim,eigrp,ospf,remote\-access,lateral\-movement,enterprise\-trust,eapol,wireless\-backhaul,pppoe,tunnel\-vpn,mpls,arp,lldp,slow\-protocols,winrm,dcom,ge\-srtp,bsap,cclink\-ie,codesys,coap,zigbee,cdp,rmcp,asf,ipmi,amqp091,amqp10,dicom}
 Restrict decoding to one protocol. Default: auto (tries all fourteen TCP
 protocols, independent of port number, plus CIP I/O, BACnet/IP, HART-IP, and
 FF-HSE on every
@@ -729,6 +729,31 @@ credential redaction both versions share and a documented, honestly
 non\-"fixed" collision between a 0\-9\-1 HEARTBEAT frame's fixed 8\-byte
 wire shape and Modbus's own weak declared-length guard in \fBauto\fR mode
 only (an explicit \fB\-\-protocol amqp091\fR is unaffected).
+\fBdicom\fR (DICOM upper-layer protocol, NEMA PS3.8 \-\- hospital imaging:
+PACS/modalities/workstations, TCP port 104 AND TCP port 11112, BOTH
+checked automatically in \fBauto\fR mode, the same dual-standard-port
+posture \fB\-\-ldap\-port\fR/\fBLDAP_GC_PORT\fR already established, not
+HART-IP's same-port-both-transports shape) decodes A-ASSOCIATE-RQ/AC
+(Presentation Context/Transfer Syntax negotiation, User Identity
+Negotiation), A-ASSOCIATE-RJ, A-ABORT, A-RELEASE-RQ/RP, and P-DATA-TF
+(DIMSE Command Set \-\- always Implicit VR Little Endian regardless of
+the negotiated transfer syntax \-\- and Data Set, decoded per-session
+against whichever transfer syntax that session's own A-ASSOCIATE-RQ/AC
+negotiated; a P-DATA-TF whose association was never captured on the same
+TCP session honestly declines to decode its content). A small, curated
+Data Set tag set is extracted (Study/Series/SOP Instance UID, Modality,
+Manufacturer, etc.) for asset inventory, with three PHI tags (Patient's
+Name/ID/Birth Date) and the User Identity Negotiation passcode/ticket/
+assertion field redacted via the same
+\fBkRedactedSecretPlaceholder\fR mechanism every other credential in this
+tool uses. The headline \fB\-\-stats\fR finding is associations with no
+User Identity Negotiation at all (AE-title-only, unauthenticated trust).
+\fB\-\-dicom\-port\fR widens \fBauto\fR-mode detection to further ports.
+See \fBdocs/PROTOCOL_COVERAGE.md\fR's DICOM section for the full
+field-by-field writeup, including a documented, actually-"fixed" (not
+left as a collision) reordering of DICOM ahead of Modbus in \fBauto\fR
+mode's dispatch cascades, needed because a real DICOM PDU's length field
+always reads as Modbus's own \fBprotocol_id == 0\fR tell.
 \fBigmp\fR (IP protocol 2), \fBvrrp\fR (IP protocol 112), \fBigrp\fR (IP
 protocol 9), \fBpim\fR (IP protocol 103), \fBeigrp\fR (IP protocol 88), and
 \fBospf\fR (IP protocol 89) need no port gate or option at all \-\- all six
@@ -930,6 +955,12 @@ across both \fB\-\-protocol\fR values (\fBamqp091\fR/\fBamqp10\fR) \-\-
 the same reasoning \fB\-\-rmcp\-port\fR above already established, since
 both AMQP versions always share the exact same default TCP port by
 convention despite being wire\-incompatible with each other.
+.TP
+.B \-\-dicom\-port \fIPORT\fR
+Same as \fB\-\-dns\-port\fR, for DICOM (built\-in defaults: 104 and 11112,
+TCP, BOTH checked automatically in \fBauto\fR mode \-\- see
+\fBdocs/PROTOCOL_COVERAGE.md\fR's DICOM section). Repeatable. Also widens
+detection in \fBauto\fR mode to further, non\-standard ports.
 .TP
 .B \-\-remote\-access\-port \fIPORT\fR
 Additional TCP or UDP port to treat as expected for the Tier 1 "IT

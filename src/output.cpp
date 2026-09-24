@@ -1247,6 +1247,145 @@ void write_amqp10_json_fields(std::ostream& out, const Amqp10Result& r) {
     }
 }
 
+// DICOM (dicom.hpp) -- reads straight from the DicomResult carried by DecodedPacket::result. Only
+// the primary (`first`) PDU's own fields are surfaced as structured JSON; any further PDU coalesced
+// into the same TCP payload is already folded into the packet's own top-level `notes` array (see
+// dicom.hpp's own DicomResult comment), matching write_amqp091_json_fields's own scope above.
+void write_dicom_json_fields(std::ostream& out, const DicomResult& r) {
+    const DicomFrame& f = r.first;
+    out << "    \"dicom_pdu_type\": \"" << json_escape(f.pdu_type_name) << "\",\n";
+    if (f.truncated) {
+        out << "    \"dicom_truncated\": true,\n";
+    }
+    if (f.associate) {
+        const DicomAssociateRqAc& a = *f.associate;
+        out << "    \"dicom_association_role\": \"" << (a.is_request ? "request" : "accept")
+            << "\",\n";
+        out << "    \"dicom_called_ae_title\": \"" << json_escape(a.called_ae_title) << "\",\n";
+        out << "    \"dicom_calling_ae_title\": \"" << json_escape(a.calling_ae_title) << "\",\n";
+        if (a.application_context_uid) {
+            out << "    \"dicom_application_context_uid\": \""
+                << json_escape(*a.application_context_uid) << "\",\n";
+        }
+        out << "    \"dicom_presentation_contexts\": [";
+        if (a.is_request) {
+            for (size_t i = 0; i < a.presentation_contexts_rq.size(); ++i) {
+                const DicomPresentationContextRq& pc = a.presentation_contexts_rq[i];
+                if (i) out << ", ";
+                out << "{\"id\": " << static_cast<unsigned>(pc.id);
+                if (pc.abstract_syntax) {
+                    out << ", \"abstract_syntax\": \"" << json_escape(pc.abstract_syntax->name)
+                        << "\"";
+                }
+                out << ", \"transfer_syntaxes\": [";
+                for (size_t j = 0; j < pc.transfer_syntaxes.size(); ++j) {
+                    if (j) out << ", ";
+                    out << "\"" << json_escape(pc.transfer_syntaxes[j].name) << "\"";
+                }
+                out << "]}";
+            }
+        } else {
+            for (size_t i = 0; i < a.presentation_contexts_ac.size(); ++i) {
+                const DicomPresentationContextAc& pc = a.presentation_contexts_ac[i];
+                if (i) out << ", ";
+                out << "{\"id\": " << static_cast<unsigned>(pc.id) << ", \"result\": \""
+                    << json_escape(pc.result_name) << "\"";
+                if (pc.transfer_syntax) {
+                    out << ", \"transfer_syntax\": \"" << json_escape(pc.transfer_syntax->name)
+                        << "\"";
+                }
+                out << "}";
+            }
+        }
+        out << "],\n";
+        if (a.is_request) {
+            out << "    \"dicom_has_user_identity\": " << (a.has_user_identity ? "true" : "false")
+                << ",\n";
+            if (a.user_information.user_identity) {
+                const DicomUserIdentity& ui = *a.user_information.user_identity;
+                out << "    \"dicom_user_identity_type\": \"" << json_escape(ui.type_name)
+                    << "\",\n";
+                if (!ui.primary_field.empty()) {
+                    out << "    \"dicom_user_identity_primary\": \""
+                        << json_escape(ui.primary_field) << "\",\n";
+                }
+                out << "    \"dicom_user_identity_primary_length\": " << ui.primary_field_length
+                    << ",\n";
+                if (ui.secondary_present) {
+                    out << "    \"dicom_user_identity_secondary\": \"" << kRedactedSecretPlaceholder
+                        << "\",\n";
+                    out << "    \"dicom_user_identity_secondary_length\": "
+                        << ui.secondary_field_length << ",\n";
+                }
+            }
+        }
+        if (a.user_information.implementation_class_uid) {
+            out << "    \"dicom_implementation_class_uid\": \""
+                << json_escape(*a.user_information.implementation_class_uid) << "\",\n";
+        }
+        if (a.user_information.implementation_version_name) {
+            out << "    \"dicom_implementation_version_name\": \""
+                << json_escape(*a.user_information.implementation_version_name) << "\",\n";
+        }
+        if (a.user_information.max_length_received) {
+            out << "    \"dicom_max_length_received\": " << *a.user_information.max_length_received
+                << ",\n";
+        }
+    } else if (f.reject) {
+        const DicomAssociateRj& rj = *f.reject;
+        out << "    \"dicom_rj_result\": \"" << json_escape(rj.result_name) << "\",\n";
+        out << "    \"dicom_rj_source\": \"" << json_escape(rj.source_name) << "\",\n";
+        out << "    \"dicom_rj_reason\": \"" << json_escape(rj.reason_name) << "\",\n";
+    } else if (f.abort) {
+        const DicomAbort& ab = *f.abort;
+        out << "    \"dicom_abort_source\": \"" << json_escape(ab.source_name) << "\",\n";
+        if (!ab.reason_name.empty()) {
+            out << "    \"dicom_abort_reason\": \"" << json_escape(ab.reason_name) << "\",\n";
+        }
+    } else if (f.p_data) {
+        const DicomPDataTf& pdt = *f.p_data;
+        out << "    \"dicom_pdv_count\": " << pdt.pdvs.size() << ",\n";
+        out << "    \"dicom_association_captured\": " << (pdt.association_captured ? "true" : "false")
+            << ",\n";
+        if (pdt.command_set) {
+            const DicomCommandSet& cs = *pdt.command_set;
+            if (!cs.command_field_name.empty()) {
+                out << "    \"dicom_command_field\": \"" << json_escape(cs.command_field_name)
+                    << "\",\n";
+            }
+            if (cs.message_id) out << "    \"dicom_message_id\": " << *cs.message_id << ",\n";
+            if (cs.message_id_being_responded_to) {
+                out << "    \"dicom_message_id_being_responded_to\": "
+                    << *cs.message_id_being_responded_to << ",\n";
+            }
+            if (cs.status_raw) {
+                out << "    \"dicom_status\": \""
+                    << json_escape(cs.status_name.empty() ? std::to_string(*cs.status_raw)
+                                                            : cs.status_name)
+                    << "\",\n";
+            }
+            if (cs.affected_sop_class_uid) {
+                out << "    \"dicom_affected_sop_class_uid\": \""
+                    << json_escape(*cs.affected_sop_class_uid) << "\",\n";
+            }
+            if (cs.affected_sop_instance_uid) {
+                out << "    \"dicom_affected_sop_instance_uid\": \""
+                    << json_escape(*cs.affected_sop_instance_uid) << "\",\n";
+            }
+        }
+        if (pdt.data_set) {
+            out << "    \"dicom_data_set_elements\": [";
+            for (size_t i = 0; i < pdt.data_set->elements.size(); ++i) {
+                const DicomDataElement& e = pdt.data_set->elements[i];
+                if (i) out << ", ";
+                out << "{\"name\": \"" << json_escape(e.tag_name) << "\", \"value\": \""
+                    << json_escape(e.rendered) << "\"}";
+            }
+            out << "],\n";
+        }
+    }
+}
+
 void write_bsap_json_fields(std::ostream& out, const BsapFrame& bf) {
     out << "    \"bsap_is_serial_tunnel\": " << (bf.is_serial_tunnel ? "true" : "false") << ",\n";
     if (bf.is_serial_tunnel) {
@@ -4424,6 +4563,9 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
     if (p.protocol == "amqp10" && p.result) {
         write_amqp10_json_fields(out_, p.result->as<Amqp10Result>());
     }
+    if (p.protocol == "dicom" && p.result) {
+        write_dicom_json_fields(out_, p.result->as<DicomResult>());
+    }
     out_ << "    \"notes\": [";
     for (size_t i = 0; i < p.notes.size(); ++i) {
         if (i != 0) out_ << ", ";
@@ -5047,6 +5189,47 @@ void StatsWriter::write_packet(const DecodedPacket& p) {
             if (perf.sasl_outcome_code && *perf.sasl_outcome_code != 0) amqp10_sasl_failure_count_++;
         }
     }
+    if (p.protocol == "dicom" && p.result) {
+        const DicomFrame& f = p.result->as<DicomResult>().first;
+        dicom_pdu_type_counts_[f.pdu_type_name]++;
+        if (f.associate) {
+            const DicomAssociateRqAc& a = *f.associate;
+            if (a.is_request) {
+                if (!a.has_user_identity) dicom_no_identity_count_++;
+                if (a.user_information.user_identity &&
+                    a.user_information.user_identity->type_raw == 2) {
+                    dicom_cleartext_identity_count_++;
+                }
+            } else {
+                for (const auto& pcac : a.presentation_contexts_ac) {
+                    dicom_pc_result_counts_[pcac.result_name]++;
+                    if (pcac.accepted && pcac.transfer_syntax) {
+                        if (pcac.transfer_syntax->compressed) {
+                            dicom_compressed_ts_count_++;
+                        } else {
+                            dicom_plain_ts_count_++;
+                        }
+                    }
+                }
+            }
+        }
+        if (f.reject) {
+            dicom_rj_reason_counts_[f.reject->reason_name]++;
+        }
+        if (f.abort) {
+            dicom_abort_source_counts_[f.abort->source_name]++;
+        }
+        if (f.p_data && f.p_data->command_set && f.p_data->command_set->command_field_raw) {
+            std::string name = f.p_data->command_set->command_field_name;
+            if (name.empty()) {
+                std::ostringstream s;
+                s << "0x" << std::hex << std::uppercase
+                  << *f.p_data->command_set->command_field_raw;
+                name = s.str();
+            }
+            dicom_command_field_counts_[name]++;
+        }
+    }
     if (p.protocol == "zigbee" && p.result) {
         const ZigbeeFrame& zf = p.result->as<ZigbeeFrame>();
         if (zf.nwk_present) zigbee_nwk_frame_type_counts_[zigbee_nwk_frame_type_name(zf.nwk.frame_type)]++;
@@ -5631,6 +5814,50 @@ void StatsWriter::print_summary(std::ostream& out) const {
         }
         if (amqp10_sasl_failure_count_ > 0) {
             out << "amqp 1.0 SASL negotiation failures: " << amqp10_sasl_failure_count_ << "\n";
+        }
+    }
+    if (!dicom_pdu_type_counts_.empty()) {
+        out << "dicom pdu type counts:\n";
+        for (const auto& [name, count] : dicom_pdu_type_counts_) {
+            out << "  " << std::left << std::setw(40) << name << count << "\n";
+        }
+        // Headline finding -- always printed on its own line, never buried, matching this
+        // decoder's own SECURITY note (dicom.hpp) and this codebase's own IPMI Cipher Suite 0/
+        // AMQP cleartext-credentials precedent above.
+        out << "*** DICOM associations with no identity negotiation (AE-title-only, unauthenticated "
+               "trust) observed: "
+            << dicom_no_identity_count_ << " ***\n";
+        if (dicom_cleartext_identity_count_ > 0) {
+            out << "dicom user identity negotiations with cleartext passcode (type=2) observed: "
+                << dicom_cleartext_identity_count_ << "\n";
+        }
+        if (!dicom_command_field_counts_.empty()) {
+            out << "dicom command field counts:\n";
+            for (const auto& [name, count] : dicom_command_field_counts_) {
+                out << "  " << std::left << std::setw(40) << name << count << "\n";
+            }
+        }
+        if (!dicom_pc_result_counts_.empty()) {
+            out << "dicom presentation context result counts:\n";
+            for (const auto& [name, count] : dicom_pc_result_counts_) {
+                out << "  " << std::left << std::setw(40) << name << count << "\n";
+            }
+        }
+        if (dicom_compressed_ts_count_ > 0 || dicom_plain_ts_count_ > 0) {
+            out << "dicom accepted transfer syntaxes: " << dicom_plain_ts_count_ << " plain, "
+                << dicom_compressed_ts_count_ << " compressed\n";
+        }
+        if (!dicom_rj_reason_counts_.empty()) {
+            out << "dicom A-ASSOCIATE-RJ reason counts:\n";
+            for (const auto& [name, count] : dicom_rj_reason_counts_) {
+                out << "  " << std::left << std::setw(40) << name << count << "\n";
+            }
+        }
+        if (!dicom_abort_source_counts_.empty()) {
+            out << "dicom A-ABORT source counts:\n";
+            for (const auto& [name, count] : dicom_abort_source_counts_) {
+                out << "  " << std::left << std::setw(40) << name << count << "\n";
+            }
         }
     }
 }

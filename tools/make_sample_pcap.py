@@ -17078,6 +17078,372 @@ def build_amqp10_sample():
     (TESTS_DIR / "sample_amqp10.pcap").write_bytes(data)
 
 
+# --- DICOM ------------------------------------------------------------------------------------
+# Upper Layer protocol (PS3.8) plus a curated slice of DIMSE (PS3.7) -- see dicom.hpp's own file
+# header comment for the full sourcing/scope writeup this fixture is built directly against.
+
+DICOM_PORT = 104
+DICOM_PORT_ALT = 11112
+
+DICOM_APP_CONTEXT_UID = "1.2.840.10008.3.1.1.1"
+TS_IMPLICIT_VR_LE = "1.2.840.10008.1.2"
+TS_EXPLICIT_VR_LE = "1.2.840.10008.1.2.1"
+SOP_VERIFICATION = "1.2.840.10008.1.1"
+SOP_CT_STORAGE = "1.2.840.10008.5.1.4.1.1.2"
+SOP_STUDY_ROOT_FIND = "1.2.840.10008.5.1.4.1.2.2.1"
+
+
+def dicom_ae(name: str) -> bytes:
+    b = name.encode("ascii")[:16]
+    return b + b" " * (16 - len(b))
+
+
+def dicom_uid_pad(uid: str) -> bytes:
+    b = uid.encode("ascii")
+    return b if len(b) % 2 == 0 else b + b"\x00"
+
+
+def dicom_item(item_type: int, value: bytes) -> bytes:
+    return struct.pack(">BBH", item_type, 0, len(value)) + value
+
+
+def dicom_pdu(pdu_type: int, body: bytes) -> bytes:
+    return struct.pack(">BBI", pdu_type, 0, len(body)) + body
+
+
+def dicom_pc_rq(pc_id: int, abstract_uid: str, transfer_syntax_uids) -> bytes:
+    value = struct.pack(">BBBB", pc_id, 0, 0, 0) + dicom_item(0x30, dicom_uid_pad(abstract_uid))
+    for ts in transfer_syntax_uids:
+        value += dicom_item(0x40, dicom_uid_pad(ts))
+    return dicom_item(0x20, value)
+
+
+def dicom_pc_ac(pc_id: int, result: int, transfer_syntax_uid=None) -> bytes:
+    value = struct.pack(">BBBB", pc_id, 0, result, 0)
+    if transfer_syntax_uid is not None:
+        value += dicom_item(0x40, dicom_uid_pad(transfer_syntax_uid))
+    return dicom_item(0x21, value)
+
+
+def dicom_ui_max_length(n: int) -> bytes:
+    return dicom_item(0x51, struct.pack(">I", n))
+
+
+def dicom_ui_impl_class(uid: str) -> bytes:
+    return dicom_item(0x52, dicom_uid_pad(uid))
+
+
+def dicom_ui_impl_version(name: str) -> bytes:
+    b = name.encode("ascii")
+    if len(b) % 2:
+        b += b" "
+    return dicom_item(0x55, b)
+
+
+def dicom_ui_identity(id_type: int, primary: bytes, secondary: bytes = None,
+                       positive_response: int = 1) -> bytes:
+    body = struct.pack(">BBH", id_type, positive_response, len(primary)) + primary
+    if id_type == 2:
+        secondary = secondary or b""
+        body += struct.pack(">H", len(secondary)) + secondary
+    return dicom_item(0x58, body)
+
+
+def dicom_ui_identity_reply(resp: bytes = b"") -> bytes:
+    return dicom_item(0x59, struct.pack(">H", len(resp)) + resp)
+
+
+def dicom_associate(is_rq: bool, called: str, calling: str, items: bytes) -> bytes:
+    fixed = struct.pack(">HH", 1, 0) + dicom_ae(called) + dicom_ae(calling) + b"\x00" * 32
+    body = fixed + dicom_item(0x10, dicom_uid_pad(DICOM_APP_CONTEXT_UID)) + items
+    return dicom_pdu(0x01 if is_rq else 0x02, body)
+
+
+def dicom_associate_rj(result: int, source: int, reason: int) -> bytes:
+    return dicom_pdu(0x03, struct.pack(">BBBB", 0, result, source, reason))
+
+
+def dicom_abort(source: int, reason: int = 0) -> bytes:
+    return dicom_pdu(0x07, struct.pack(">BBBB", 0, 0, source, reason))
+
+
+def dicom_release_rq() -> bytes:
+    return dicom_pdu(0x05, b"\x00\x00\x00\x00")
+
+
+def dicom_release_rp() -> bytes:
+    return dicom_pdu(0x06, b"\x00\x00\x00\x00")
+
+
+def dicom_pdv(pc_id: int, data: bytes, is_command: bool, is_last: bool) -> bytes:
+    mch = (1 if is_command else 0) | (2 if is_last else 0)
+    value = struct.pack(">BB", pc_id, mch) + data
+    return struct.pack(">I", len(value)) + value
+
+
+def dicom_pdata(pdvs) -> bytes:
+    return dicom_pdu(0x04, b"".join(pdvs))
+
+
+def dicom_cmd_elem(group: int, element: int, value: bytes) -> bytes:
+    return struct.pack("<HHI", group, element, len(value)) + value
+
+
+def dicom_cmd_us(group: int, element: int, v: int) -> bytes:
+    return dicom_cmd_elem(group, element, struct.pack("<H", v))
+
+
+def dicom_cmd_ui(group: int, element: int, uid: str) -> bytes:
+    return dicom_cmd_elem(group, element, dicom_uid_pad(uid))
+
+
+def dicom_pad_even(b: bytes, pad: bytes = b" ") -> bytes:
+    return b if len(b) % 2 == 0 else b + pad
+
+
+def dicom_elem_evr(group: int, element: int, vr: str, value: bytes) -> bytes:
+    """Explicit VR Little Endian, short form -- every curated data-set tag this fixture uses is a
+    short-form VR (PN/LO/DA/CS/SH/UI), see dicom.hpp's own WIRE FORMAT section."""
+    pad = b"\x00" if vr == "UI" else b" "
+    v = dicom_pad_even(value, pad)
+    return struct.pack("<HH", group, element) + vr.encode("ascii") + struct.pack("<H", len(v)) + v
+
+
+def build_dicom_sample():
+    """Covers: a full A-ASSOCIATE-RQ/AC handshake with multiple Presentation Contexts (Verification/
+    C-ECHO plus CT Storage plus Study Root Q/R-FIND) and Transfer Syntax negotiation, a User Identity
+    Negotiation item (type=2, username+passcode) on one association proving BOTH extraction (the
+    username) AND redaction (the passcode -- literal test string "S3cr3tDicomPass!42" must never
+    appear in any output format) and its own headline-finding non-firing, a SECOND association with
+    NO identity item at all (the headline finding's own positive proof, and a non-false-positive
+    proof against the first association), a C-ECHO-RQ/RSP exchange (no data set), a C-STORE-RQ
+    carrying a Data Set with the three curated PHI tags (Patient's Name/ID/Birth Date -- redacted by
+    default, literal test values "Doe^John"/"MRN-778899" must never appear either) alongside every
+    non-redacted curated tag (Study/Series Instance UID, SOP Instance UID, Accession Number,
+    Modality, Institution Name, Station Name, Manufacturer, Manufacturer's Model Name, Study Date,
+    Study Description -- all of which DO appear, proving selective not blanket redaction) and its
+    own C-STORE-RSP, a C-FIND-RQ/RSP pair with Pending status, a Data Set fragmented across TWO
+    separate P-DATA-TF PDUs (proving DIMSE-level reassembly works across PDUs, not just across PDVs
+    in one PDU), A-RELEASE-RQ/RP, a THIRD association ending in A-ASSOCIATE-RJ (reason=3, calling-AE-
+    title-not-recognized), a FOURTH association ending in A-ABORT (source=0), a FIFTH, entirely
+    separate TCP session whose first captured packet is already a P-DATA-TF with no A-ASSOCIATE-RQ/
+    AC ever seen on it (the honest "cannot decode content" fallback proof), a SIXTH association on
+    port 104 (the IANA-registered port, proving Auto mode checks it automatically, not just 11112),
+    and a SEVENTH association on a non-standard port (9999 -- proves Auto mode declines it while
+    --protocol dicom/--dicom-port still decode it correctly)."""
+    packets = []
+    ident_box = [0xD000]
+
+    def session(port_a, port_b=DICOM_PORT_ALT):
+        return amqp_tcp_session(packets, ident_box, HMI_MAC, HMI_IP, PLC_MAC, PLC_IP, port_a, port_b)
+
+    # === Association 1: full handshake, identity type=2, C-ECHO, C-STORE w/ PHI, C-FIND, ==========
+    # === fragmented Data Set across PDUs, RELEASE. ==================================================
+    client, server, _ = session(61000)
+
+    user_info_rq = (
+        dicom_ui_max_length(16384) +
+        dicom_ui_impl_class("1.2.276.0.7230010.3.0.3.6.4") +
+        dicom_ui_impl_version("CONDUITSCOPE_TEST_SCU_1") +
+        dicom_ui_identity(2, b"scada_svc", b"S3cr3tDicomPass!42")
+    )
+    items_rq = (
+        dicom_pc_rq(1, SOP_VERIFICATION, [TS_IMPLICIT_VR_LE]) +
+        dicom_pc_rq(3, SOP_CT_STORAGE, [TS_IMPLICIT_VR_LE, TS_EXPLICIT_VR_LE]) +
+        dicom_pc_rq(5, SOP_STUDY_ROOT_FIND, [TS_IMPLICIT_VR_LE]) +
+        dicom_item(0x50, user_info_rq)
+    )
+    client(dicom_associate(True, "PACS_AE", "CT_MODALITY1", items_rq))
+
+    user_info_ac = (
+        dicom_ui_max_length(16384) +
+        dicom_ui_impl_class("1.2.276.0.7230010.3.0.3.6.9") +
+        dicom_ui_impl_version("ORTHANC_TEST") +
+        dicom_ui_identity_reply(b"")
+    )
+    items_ac = (
+        dicom_pc_ac(1, 0, TS_IMPLICIT_VR_LE) +
+        dicom_pc_ac(3, 0, TS_EXPLICIT_VR_LE) +
+        dicom_pc_ac(5, 0, TS_IMPLICIT_VR_LE) +
+        dicom_item(0x50, user_info_ac)
+    )
+    server(dicom_associate(False, "PACS_AE", "CT_MODALITY1", items_ac))
+
+    # C-ECHO-RQ / C-ECHO-RSP on pc_id=1 (Implicit VR LE, Command-flagged bytes always ILE regardless).
+    echo_rq = (
+        dicom_cmd_us(0x0000, 0x0100, 0x0030) +
+        dicom_cmd_us(0x0000, 0x0110, 1) +
+        dicom_cmd_ui(0x0000, 0x0002, SOP_VERIFICATION) +
+        dicom_cmd_us(0x0000, 0x0800, 0x0101)
+    )
+    client(dicom_pdata([dicom_pdv(1, echo_rq, True, True)]))
+    echo_rsp = (
+        dicom_cmd_us(0x0000, 0x0100, 0x8030) +
+        dicom_cmd_us(0x0000, 0x0120, 1) +
+        dicom_cmd_ui(0x0000, 0x0002, SOP_VERIFICATION) +
+        dicom_cmd_us(0x0000, 0x0900, 0x0000) +
+        dicom_cmd_us(0x0000, 0x0800, 0x0101)
+    )
+    server(dicom_pdata([dicom_pdv(1, echo_rsp, True, True)]))
+
+    # C-STORE-RQ on pc_id=3 (Explicit VR LE negotiated for this context) -- Command PDV + Data PDV
+    # coalesced into ONE P-DATA-TF PDU, both last-fragment (the common single-PDU case).
+    store_rq_cmd = (
+        dicom_cmd_us(0x0000, 0x0100, 0x0001) +
+        dicom_cmd_us(0x0000, 0x0110, 2) +
+        dicom_cmd_ui(0x0000, 0x0002, SOP_CT_STORAGE) +
+        dicom_cmd_ui(0x0000, 0x1000, "1.2.999.1.100.1") +
+        dicom_cmd_us(0x0000, 0x0800, 0x0001)  # != 0x0101 -- a Data Set follows
+    )
+    store_dataset = (
+        dicom_elem_evr(0x0010, 0x0010, "PN", b"Doe^John") +
+        dicom_elem_evr(0x0010, 0x0020, "LO", b"MRN-778899") +
+        dicom_elem_evr(0x0010, 0x0030, "DA", b"19800101") +
+        dicom_elem_evr(0x0010, 0x0040, "CS", b"M") +
+        dicom_elem_evr(0x0020, 0x000D, "UI", dicom_uid_pad("1.2.999.1.100")) +
+        dicom_elem_evr(0x0020, 0x000E, "UI", dicom_uid_pad("1.2.999.1.100.1")) +
+        dicom_elem_evr(0x0008, 0x0018, "UI", dicom_uid_pad("1.2.999.1.100.1")) +
+        dicom_elem_evr(0x0008, 0x0050, "SH", b"ACC001") +
+        dicom_elem_evr(0x0008, 0x0060, "CS", b"CT") +
+        dicom_elem_evr(0x0008, 0x0080, "LO", b"General Hospital") +
+        dicom_elem_evr(0x0008, 0x1010, "SH", b"CT01") +
+        dicom_elem_evr(0x0008, 0x0070, "LO", b"Acme Medical") +
+        dicom_elem_evr(0x0008, 0x1090, "LO", b"Acme CT 9000") +
+        dicom_elem_evr(0x0008, 0x0020, "DA", b"20240101") +
+        dicom_elem_evr(0x0008, 0x1030, "LO", b"Chest CT")
+    )
+    client(dicom_pdata([dicom_pdv(3, store_rq_cmd, True, True),
+                         dicom_pdv(3, store_dataset, False, True)]))
+
+    store_rsp = (
+        dicom_cmd_us(0x0000, 0x0100, 0x8001) +
+        dicom_cmd_us(0x0000, 0x0120, 2) +
+        dicom_cmd_ui(0x0000, 0x0002, SOP_CT_STORAGE) +
+        dicom_cmd_ui(0x0000, 0x1000, "1.2.999.1.100.1") +
+        dicom_cmd_us(0x0000, 0x0900, 0x0000) +
+        dicom_cmd_us(0x0000, 0x0800, 0x0101)
+    )
+    server(dicom_pdata([dicom_pdv(3, store_rsp, True, True)]))
+
+    # C-FIND-RQ / C-FIND-RSP (Pending) on pc_id=5 (Implicit VR LE).
+    find_rq_cmd = (
+        dicom_cmd_us(0x0000, 0x0100, 0x0020) +
+        dicom_cmd_us(0x0000, 0x0110, 3) +
+        dicom_cmd_ui(0x0000, 0x0002, SOP_STUDY_ROOT_FIND) +
+        dicom_cmd_us(0x0000, 0x0800, 0x0001)
+    )
+    find_rq_data = dicom_cmd_elem(0x0008, 0x0060, dicom_pad_even(b"CT"))  # Implicit VR: any tag
+    client(dicom_pdata([dicom_pdv(5, find_rq_cmd, True, True),
+                         dicom_pdv(5, find_rq_data, False, True)]))
+    find_rsp_pending = (
+        dicom_cmd_us(0x0000, 0x0100, 0x8020) +
+        dicom_cmd_us(0x0000, 0x0120, 3) +
+        dicom_cmd_ui(0x0000, 0x0002, SOP_STUDY_ROOT_FIND) +
+        dicom_cmd_us(0x0000, 0x0900, 0xFF00) +
+        dicom_cmd_us(0x0000, 0x0800, 0x0001)
+    )
+    find_rsp_data = dicom_cmd_elem(0x0008, 0x0060, dicom_pad_even(b"CT"))
+    server(dicom_pdata([dicom_pdv(5, find_rsp_pending, True, True),
+                         dicom_pdv(5, find_rsp_data, False, True)]))
+    find_rsp_final = (
+        dicom_cmd_us(0x0000, 0x0100, 0x8020) +
+        dicom_cmd_us(0x0000, 0x0120, 3) +
+        dicom_cmd_ui(0x0000, 0x0002, SOP_STUDY_ROOT_FIND) +
+        dicom_cmd_us(0x0000, 0x0900, 0x0000) +
+        dicom_cmd_us(0x0000, 0x0800, 0x0101)
+    )
+    server(dicom_pdata([dicom_pdv(5, find_rsp_final, True, True)]))
+
+    # A Data Set fragmented across TWO SEPARATE P-DATA-TF PDUs -- proves DIMSE-level reassembly
+    # works cross-PDU, not just cross-PDV-within-one-PDU (the C-STORE above already covered that).
+    frag_cmd = (
+        dicom_cmd_us(0x0000, 0x0100, 0x0001) +
+        dicom_cmd_us(0x0000, 0x0110, 4) +
+        dicom_cmd_ui(0x0000, 0x0002, SOP_CT_STORAGE) +
+        dicom_cmd_ui(0x0000, 0x1000, "1.2.999.1.100.2") +
+        dicom_cmd_us(0x0000, 0x0800, 0x0001)
+    )
+    frag_dataset = (
+        dicom_elem_evr(0x0010, 0x0020, "LO", b"MRN-FRAG-SPLIT") +
+        dicom_elem_evr(0x0008, 0x0060, "CS", b"MR")
+    )
+    split_at = len(frag_dataset) // 2
+    client(dicom_pdata([dicom_pdv(3, frag_cmd, True, True),
+                         dicom_pdv(3, frag_dataset[:split_at], False, False)]))
+    client(dicom_pdata([dicom_pdv(3, frag_dataset[split_at:], False, True)]))
+    frag_rsp = (
+        dicom_cmd_us(0x0000, 0x0100, 0x8001) +
+        dicom_cmd_us(0x0000, 0x0120, 4) +
+        dicom_cmd_ui(0x0000, 0x0002, SOP_CT_STORAGE) +
+        dicom_cmd_ui(0x0000, 0x1000, "1.2.999.1.100.2") +
+        dicom_cmd_us(0x0000, 0x0900, 0x0000) +
+        dicom_cmd_us(0x0000, 0x0800, 0x0101)
+    )
+    server(dicom_pdata([dicom_pdv(3, frag_rsp, True, True)]))
+
+    client(dicom_release_rq())
+    server(dicom_release_rp())
+
+    # === Association 2: NO User Identity Negotiation item at all -- the headline finding's own ====
+    # === positive proof, and (combined with Association 1 above) a non-false-positive proof. ======
+    client2, server2, _ = session(61001)
+    items_rq2 = (
+        dicom_pc_rq(1, SOP_VERIFICATION, [TS_IMPLICIT_VR_LE]) +
+        dicom_item(0x50, dicom_ui_max_length(16384) + dicom_ui_impl_class("1.2.276.0.7230010.3.0.3.6.4"))
+    )
+    client2(dicom_associate(True, "PACS_AE", "MR_MODALITY2", items_rq2))
+    items_ac2 = dicom_pc_ac(1, 0, TS_IMPLICIT_VR_LE) + dicom_item(0x50, dicom_ui_max_length(16384))
+    server2(dicom_associate(False, "PACS_AE", "MR_MODALITY2", items_ac2))
+    client2(dicom_release_rq())
+    server2(dicom_release_rp())
+
+    # === Association 3: A-ASSOCIATE-RJ, reason=3 (calling-AE-title-not-recognized). ================
+    client3, server3, _ = session(61002)
+    items_rq3 = dicom_pc_rq(1, SOP_VERIFICATION, [TS_IMPLICIT_VR_LE]) + dicom_item(0x50, dicom_ui_max_length(16384))
+    client3(dicom_associate(True, "PACS_AE", "UNKNOWN_AE", items_rq3))
+    server3(dicom_associate_rj(1, 1, 3))
+
+    # === Association 4: A-ABORT (source=0, DICOM-UL-service-user). =================================
+    client4, server4, _ = session(61003)
+    items_rq4 = dicom_pc_rq(1, SOP_VERIFICATION, [TS_IMPLICIT_VR_LE]) + dicom_item(0x50, dicom_ui_max_length(16384))
+    client4(dicom_associate(True, "PACS_AE", "US_MODALITY4", items_rq4))
+    items_ac4 = dicom_pc_ac(1, 0, TS_IMPLICIT_VR_LE) + dicom_item(0x50, dicom_ui_max_length(16384))
+    server4(dicom_associate(False, "PACS_AE", "US_MODALITY4", items_ac4))
+    client4(dicom_abort(0))
+
+    # === Association 5: mid-stream P-DATA-TF, NO A-ASSOCIATE-RQ/AC ever captured on this session -- ==
+    # === the honest "cannot decode content" fallback proof. ========================================
+    client5, server5, _ = session(61004)
+    stray_cmd = dicom_cmd_us(0x0000, 0x0100, 0x0030) + dicom_cmd_us(0x0000, 0x0110, 9)
+    client5(dicom_pdata([dicom_pdv(1, stray_cmd, True, True)]))
+
+    # === Association 6: port 104 (the IANA-registered port) -- proves Auto mode checks it ==========
+    # === automatically, without any --dicom-port flag, same as port 11112 above. ===================
+    client6, server6, _ = session(61005, DICOM_PORT)
+    items_rq6 = dicom_pc_rq(1, SOP_VERIFICATION, [TS_IMPLICIT_VR_LE]) + dicom_item(0x50, dicom_ui_max_length(16384))
+    client6(dicom_associate(True, "PACS_AE", "CR_MODALITY6", items_rq6))
+    items_ac6 = dicom_pc_ac(1, 0, TS_IMPLICIT_VR_LE) + dicom_item(0x50, dicom_ui_max_length(16384))
+    server6(dicom_associate(False, "PACS_AE", "CR_MODALITY6", items_ac6))
+    echo_rq6 = (
+        dicom_cmd_us(0x0000, 0x0100, 0x0030) + dicom_cmd_us(0x0000, 0x0110, 1) +
+        dicom_cmd_ui(0x0000, 0x0002, SOP_VERIFICATION) + dicom_cmd_us(0x0000, 0x0800, 0x0101)
+    )
+    client6(dicom_pdata([dicom_pdv(1, echo_rq6, True, True)]))
+
+    # === Association 7: non-standard port (61006 -> 9999) -- NOT claimed in Auto mode (dual-port- ===
+    # === gated), but decodes correctly under --protocol dicom / --dicom-port 9999. =================
+    client7, server7, _ = session(61006, 9999)
+    items_rq7 = dicom_pc_rq(1, SOP_VERIFICATION, [TS_IMPLICIT_VR_LE]) + dicom_item(0x50, dicom_ui_max_length(16384))
+    client7(dicom_associate(True, "PACS_AE", "PORTABLE7", items_rq7))
+    items_ac7 = dicom_pc_ac(1, 0, TS_IMPLICIT_VR_LE) + dicom_item(0x50, dicom_ui_max_length(16384))
+    server7(dicom_associate(False, "PACS_AE", "PORTABLE7", items_ac7))
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_500_000 + i, i * 1000)
+    (TESTS_DIR / "sample_dicom.pcap").write_bytes(data)
+
+
 if __name__ == "__main__":
     TESTS_DIR.mkdir(exist_ok=True)
     build_modbus_sample()
@@ -17175,4 +17541,5 @@ if __name__ == "__main__":
     build_baseline_two_conduit_sample()
     build_amqp091_sample()
     build_amqp10_sample()
+    build_dicom_sample()
     print("wrote sample fixtures to", TESTS_DIR)
