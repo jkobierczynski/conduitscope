@@ -10891,3 +10891,77 @@ add_test(NAME ipv6_over_raw_ip_link_type_decodes_via_version_sniff
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ipv6_raw_link.pcapng" --format text)
 set_tests_properties(ipv6_over_raw_ip_link_type_decodes_via_version_sniff PROPERTIES
   PASS_REGULAR_EXPRESSION "#1  0\\.000000  2001:db8::50:51000 -> 2001:db8::10:502")
+
+# ICCP/TASE.2 (IEC 60870-6-802) recognition -- see mms.hpp's own "ICCP/TASE.2 recognition" section
+# and mms.cpp's apply_iccp_recognition for the full design/sourcing. tests/sample_iccp.pcap
+# (build_iccp_sample).
+
+# Domain-scope reserved name (Bilateral_Table_ID) read -- the general recognition note fires on
+# the REQUEST frame (invokeID=1), which is the one that actually carries the object name.
+add_test(NAME iccp_bilateral_table_id_read_flags_recognition_note
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_iccp.pcap" --format text -v)
+set_tests_properties(iccp_bilateral_table_id_read_flags_recognition_note PROPERTIES
+  PASS_REGULAR_EXPRESSION "#5[^\n]*read invokeID=1[^\n]*\n *note: ICCP/TASE\\.2 well-known object 'Bilateral_Table_ID' observed")
+
+# VCC-scope (vmd-specific) reserved name (TASE2_Version) read, whose own Data value is a
+# two-element structure -- also confirms via --format json that the structure decode itself is
+# correct ("{2000, 8}"), not just that the recognition note fired.
+add_test(NAME iccp_tase2_version_structure_decoded_and_flagged
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_iccp.pcap" --format text -v)
+set_tests_properties(iccp_tase2_version_structure_decoded_and_flagged PROPERTIES
+  PASS_REGULAR_EXPRESSION "#7[^\n]*read invokeID=2[^\n]*\n *note: ICCP/TASE\\.2 well-known object 'TASE2_Version' observed")
+add_test(NAME iccp_tase2_version_structure_decoded_json
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_iccp.pcap" --format json)
+set_tests_properties(iccp_tase2_version_structure_decoded_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"result\\[0\\]=\\{2000, 8\\}\"")
+
+# VCC-scope BIT STRING (Supported_Features) read.
+add_test(NAME iccp_supported_features_bitstring_flags_recognition_note
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_iccp.pcap" --format text -v)
+set_tests_properties(iccp_supported_features_bitstring_flags_recognition_note PROPERTIES
+  PASS_REGULAR_EXPRESSION "#9[^\n]*read invokeID=3[^\n]*\n *note: ICCP/TASE\\.2 well-known object 'Supported_Features' observed")
+
+# Device control: a WRITE to a reserved "_SBO"-suffixed variable earns the higher-value
+# device-control note (not just the general recognition one).
+add_test(NAME iccp_device_control_write_sbo_suffix_flagged
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_iccp.pcap" --format text -v)
+set_tests_properties(iccp_device_control_write_sbo_suffix_flagged PROPERTIES
+  PASS_REGULAR_EXPRESSION "#11[^\n]*write invokeID=4[^\n]*\n *note: ICCP/TASE\\.2 device control: write targets 'ICCP_BLOCK1/Breaker52_SBO'")
+
+# Device control: a WRITE to a reserved "_TAG"-suffixed variable (operator hold/blocking tag).
+add_test(NAME iccp_device_control_write_tag_suffix_flagged
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_iccp.pcap" --format text -v)
+set_tests_properties(iccp_device_control_write_tag_suffix_flagged PROPERTIES
+  PASS_REGULAR_EXPRESSION "#13[^\n]*write invokeID=5[^\n]*\n *note: ICCP/TASE\\.2 device control: write targets 'ICCP_BLOCK1/Breaker52_TAG'")
+
+# NEGATIVE CONTROL: merely READING a differently-named "_SBO"-suffixed variable (invokeID=6) must
+# NOT produce the device-control note -- only an actual write is a control action. (A regression
+# here would mean the suffix check fires on any occurrence of the name, not just a write to it.)
+add_test(NAME iccp_read_of_sbo_suffixed_variable_not_flagged_as_control
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_iccp.pcap" --format text -v)
+set_tests_properties(iccp_read_of_sbo_suffixed_variable_not_flagged_as_control PROPERTIES
+  PASS_REGULAR_EXPRESSION "#15[^\n]*read invokeID=6"
+  FAIL_REGULAR_EXPRESSION "#15[^\n]*\n *note:")
+
+# GetNameList response enumerating several reserved names as bare vmd-scope identifiers -- proves
+# recognition also fires from a GetNameList response, not just Read/Write.
+add_test(NAME iccp_getnamelist_response_enumerating_reserved_names_flagged
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_iccp.pcap" --format text -v)
+set_tests_properties(iccp_getnamelist_response_enumerating_reserved_names_flagged PROPERTIES
+  PASS_REGULAR_EXPRESSION "#18[^\n]*getNameList invokeID=7[^\n]*\n *note: ICCP/TASE\\.2 well-known object 'Bilateral_Table_ID' observed")
+
+# InformationReport -- a DSTransferSet's own periodic/exception report carrying the
+# Transfer_Set_Name/Transfer_Set_Time_Stamp/DSConditions_Detected trio.
+add_test(NAME iccp_information_report_transfer_set_trio_flagged
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_iccp.pcap" --format text -v)
+set_tests_properties(iccp_information_report_transfer_set_trio_flagged PROPERTIES
+  PASS_REGULAR_EXPRESSION "#19[^\n]*informationReport[^\n]*\n *note: ICCP/TASE\\.2 well-known object 'Transfer_Set_Name' observed")
+
+# SECOND NEGATIVE CONTROL: an ordinary IEC 61850-shaped Read in the SAME session (domain/item
+# names carrying none of TASE.2's own reserved vocabulary) must NOT be flagged as ICCP merely
+# because it rode the same association as the frames above.
+add_test(NAME iccp_ordinary_iec61850_traffic_in_same_session_not_flagged
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_iccp.pcap" --format text -v)
+set_tests_properties(iccp_ordinary_iec61850_traffic_in_same_session_not_flagged PROPERTIES
+  PASS_REGULAR_EXPRESSION "#20[^\n]*read invokeID=8"
+  FAIL_REGULAR_EXPRESSION "#20[^\n]*\n *note:")

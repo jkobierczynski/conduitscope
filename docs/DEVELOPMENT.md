@@ -7305,6 +7305,93 @@ deferred future migration.
 
     Full suite: 1414 -> 1416 tests, zero-warning rebuild.
 
+38. **ICCP/TASE.2 (IEC 60870-6-802) recognition.** **Done -- first pass** (v0.2.4, right after
+    IPv6 in item 24 above). Jurgen asked to add ICCP/TASE.2, previously listed under "Protocols
+    not covered at all" below as "a plausible future candidate... new work built on existing
+    groundwork, not an extension of the existing MMS decoder." Research (see this item's own
+    sourcing below) found that assumption wrong in a way that substantially shrank the actual
+    scope: TASE.2 is NOT a distinct wire protocol from this decoder's own point of view. Per IEC
+    60870-6's own architecture, it rides the exact same COTP/Session/Presentation/ACSE/MMS stack
+    `mms.hpp`/`mms.cpp` already decode in full (see item 22's neighbor, the original MMS work),
+    reuses the identical 14 MMSpdu CHOICE alternatives, and -- per every source this research
+    found -- does not appear to negotiate a distinct ACSE application-context-name OID from
+    ordinary MMS. What TASE.2 actually adds on top of generic MMS is a standardized
+    reserved-object-naming profile: a small set of spec-defined VCC-scope and domain-scope
+    variable names (`Bilateral_Table_ID`, `TASE2_Version`, `Supported_Features`,
+    `Transfer_Set_Name`, `Transfer_Set_Time_Stamp`, `DSConditions_Detected`,
+    `Event_Code_Detected`, `Next_DSTransfer_Set`, and the `_SBO`/`_TAG` reserved suffixes) every
+    conformant stack reads/writes to identify itself, negotiate its Bilateral Table, and manage
+    Data Set Transfer Sets -- ordinary MMS Read/Write/GetNameList/InformationReport traffic,
+    already fully and correctly decoded by everything in `mms.cpp`, carrying object names this
+    decoder's own generic ObjectName renderer already surfaces verbatim.
+
+    This means the actual addition is a thin, zero-new-wire-format-risk layer: a new
+    "ICCP/TASE.2 recognition" section in `mms.cpp` (`apply_iccp_recognition`, called from
+    `try_parse_mms`'s own return points) that pattern-matches already-decoded `MmsFrame::values`
+    strings against the reserved-name vocabulary above and, when matched, adds a curated
+    `MmsFrame::notes` entry -- a pure post-decode signature match, the same "structural signature,
+    not full grammar" posture this codebase already applies to NTLMSSP's own scan and WinRM's SOAP
+    tag-local-name extraction (item 28's own WinRM update). No new `ProtocolDecoder`, no new
+    `GateKind`, no new `--protocol` value, no change to how these frames are labeled or counted --
+    exactly the same "free extra visibility riding an existing decoder's own already-correct
+    output" posture item 28's own WinRM update already established for a CIM/WMI query riding
+    WinRM transport. Two curated note tiers: a general "well-known object observed" note for any
+    of the 8 reserved names above appearing anywhere in a frame's decoded values (Read/Write
+    requests, GetNameList responses, InformationReport variable lists all funnel through the same
+    check), and a higher-value "device control" note specifically for a WRITE (not a mere read or
+    enumeration) targeting a variable whose own itemId ends in the reserved `_SBO` (Select-Before-
+    Operate handle) or `_TAG` (operator hold/blocking tag) suffix -- verified via an explicit
+    negative-case test that merely reading a similarly-suffixed variable does NOT produce the
+    control note, only an actual write does.
+
+    Sourcing for the reserved-name vocabulary (cross-checked against two independent sources, the
+    same two-source bar `mms.hpp`'s own header comment already applies elsewhere): MZ Automation's
+    own published libtase2 protocol library developer guide (a commercial TASE.2 stack's own
+    documentation), and the independent open-source FreeTase2 Python client
+    (github.com/aklira/FreeTase2), whose own source confirms it is built directly on this
+    project's own already-used libiec61850 MMS API -- itself further, if indirect, confirmation
+    that TASE.2 rides plain MMS with no protocol extension of its own. Both sources independently
+    agree on every reserved name used.
+
+    Honestly stated validation gap, this project's own established disclosure norm for a
+    first-pass addition (see item 23's/33's own "no real-world capture corpus" notes): unlike most
+    other protocols in this codebase, there is no public, independently buildable, full TASE.2
+    client/server stack this research could actually run to generate genuine TASE.2 wire traffic
+    to validate against -- FreeTase2 itself is an early-stage wrapper around libiec61850's own MMS
+    API, not a standalone implementation, and its own source has unresolved bugs noted inline.
+    This decoder's own fixture (`tests/sample_iccp.pcap`, `build_iccp_sample`) is therefore
+    synthetic MMS traffic, built with this project's own already-validated MMS PDU encoder,
+    carrying the cross-checked reserved object names -- validated by construction against that
+    vocabulary, not against a real ICCP capture or an independently generated one. If a real
+    ICCP/TASE.2 capture or a genuinely independent open-source stack becomes available later, this
+    note should be updated accordingly, the same way this project has handled every other protocol
+    where independent traffic was eventually found after an earlier empty search.
+
+    10 new `iccp_*` CTest tests: the domain-scope (`Bilateral_Table_ID`) and VCC-scope
+    (`TASE2_Version`, whose own Data value is a two-element structure -- also confirmed correct via
+    `--format json`; `Supported_Features`, a BIT STRING) reserved-name reads each flagging the
+    general recognition note; a write to an `_SBO`-suffixed and a `_TAG`-suffixed variable each
+    flagging the device-control note; the explicit negative control proving a mere READ of an
+    `_SBO`-suffixed variable does NOT flag device control; a GetNameList response enumerating
+    reserved names as bare identifiers; an InformationReport carrying the
+    `Transfer_Set_Name`/`Transfer_Set_Time_Stamp`/`DSConditions_Detected` trio; and a second
+    negative control proving an ordinary IEC 61850-shaped Read in the SAME session (no reserved
+    vocabulary in its own domain/item names) is NOT flagged as ICCP merely for riding the same
+    association. Full suite: 1545 -> 1555 tests (default config), 1533 -> 1543 (no-live-capture
+    config), zero-warning build in both. Manually smoke-tested (not via CTest) against `inventory`
+    and `policy validate` as well -- neither crashes or misbehaves on this fixture; both correctly
+    fold the traffic under the existing `mms`/`s7comm` (COTP) protocol labels, since this addition
+    deliberately does not introduce a distinct `--protocol iccp` value (see design above).
+
+    Out of scope for this first pass: any deeper TASE.2 object-model decode beyond the reserved
+    system-variable-name recognition above (this decoder does not, for instance, structurally
+    parse a Bilateral Table's own contents, a Data Set's own membership, or a DSTransferSet's own
+    configuration parameters -- it only recognizes that traffic touching their well-known names is
+    occurring); a distinct `--protocol iccp`/`--stats` bucket (deliberately folded into the
+    existing `mms` label, see design above); and, as ever, IEC 60870-6-802's own object-model
+    semantics beyond what this reserved-name vocabulary and this decoder's own already-generic MMS
+    Data-value decode already surface.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols
@@ -7347,14 +7434,6 @@ with zero bytes of it decoded anywhere in this codebase.
   could ever appear in a pcap file. Distinct from HART-IP (the IP-routable
   gateway encapsulation of HART), which this tool fully decodes -- see
   docs/PROTOCOL_COVERAGE.md's HART-IP section.
-- **ICCP/TASE.2 (IEC 60870-6, substation-to-control-center).** A plausible
-  future candidate, not a trivial one: this project already decodes MMS in
-  full (see docs/PROTOCOL_COVERAGE.md's IEC 61850 MMS section), and TASE.2 is built
-  on top of MMS's own Session/Presentation/ACSE/MMS stack, but with its own
-  distinct object model (bilateral tables, ICCP-specific object classes)
-  that shares transport DNA with MMS, not application-layer semantics.
-  Decoding it would be new work built on existing groundwork, not an
-  extension of the existing MMS decoder.
 - **OPC Classic (DA/HDA/AE, COM/DCOM-based).** Distinct from OPC UA, which
   this tool fully decodes (see docs/PROTOCOL_COVERAGE.md's OPC UA Binary section).
   OPC Classic's wire protocol is COM/DCOM -- MSRPC, a large, generic

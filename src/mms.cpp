@@ -4,6 +4,7 @@
 #include "conduitscope/resource_limits.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cstring>
 #include <ctime>
 #include <iomanip>
@@ -1785,6 +1786,133 @@ void finish_from_presentation(ByteSpan presentation_bytes, MmsFrame& frame) {
 
 }  // namespace
 
+// ==============================================================================================
+// ICCP/TASE.2 (IEC 60870-6-802) recognition -- see docs/DEVELOPMENT.md's own writeup for the
+// full sourcing/scope discussion; this is a summary of the same reasoning.
+//
+// TASE.2 is NOT a distinct wire protocol from this decoder's own point of view: per IEC 60870-6's
+// own architecture (and confirmed independently below), it rides the exact same COTP/Session/
+// Presentation/ACSE/MMS stack this file already decodes in full, reuses the SAME 14 MMSpdu CHOICE
+// alternatives, and -- per this decoder's own research -- does not appear to negotiate a distinct
+// ACSE application-context-name OID from ordinary MMS (every independent source and reference
+// implementation this decoder's own research found associates over the plain MMS application
+// context). What TASE.2 actually adds is a STANDARDIZED OBJECT-NAMING PROFILE on top of generic
+// MMS: a small set of reserved, spec-defined VCC-scope and domain-scope variable names every
+// conformant TASE.2 stack reads/writes to identify itself, negotiate its Bilateral Table, and
+// manage Data Set Transfer Sets -- ordinary MMS Read/Write/GetNameList/DefineNamedVariableList
+// traffic, already fully and correctly decoded by everything above in this file, using object
+// names this decoder's own generic ObjectName renderer already surfaces verbatim.
+//
+// This means there is no new wire-format parsing risk here at all: this is a pure post-decode
+// SIGNATURE match over MmsFrame::values (already-decoded ObjectName strings, exactly the same
+// "structural signature, not full grammar" posture this codebase already applies to NTLMSSP's own
+// scan and WinRM's SOAP tag-local-name extraction -- see winrm.hpp), not a new protocol decoder,
+// not a new GateKind, not a new `--protocol` value. A frame whose already-decoded object names
+// include one of TASE.2's own reserved names is flagged with a curated note; nothing else about
+// how this frame is decoded, labeled, or counted changes -- exactly the same "free extra
+// visibility riding an existing decoder's own already-correct output" posture this codebase's own
+// WinRM decoder already takes for a CIM/WMI query riding WinRM transport.
+//
+// Sourcing for the reserved-name vocabulary below (cross-checked against two independent
+// sources, the same two-source bar this file's own header comment already applies elsewhere):
+// MZ Automation's own published libtase2 protocol library developer guide (a commercial TASE.2
+// stack's own documentation, naming "Bilateral_Table_ID"/"Supported_Features" as VCC-scope
+// objects and the "_SBO"/"_TAG" suffixes as protocol-reserved), and the independent open-source
+// FreeTase2 Python client (github.com/aklira/FreeTase2, built directly on this project's own
+// already-used libiec61850 MMS stack), whose own source additionally confirms "TASE2_Version"
+// (a VCC-scope two-element major/minor structure) and the domain-scope
+// "Transfer_Set_Name"/"Transfer_Set_Time_Stamp"/"DSConditions_Detected"/"Next_DSTransfer_Set"
+// trio/quartet a DSTransferSet's own system variables use. Both sources independently agree on
+// every name below; neither is treated as authoritative alone.
+//
+// Honestly stated validation gap (this codebase's own established disclosure norm for a
+// first-pass addition -- see e.g. LDAP/BGP's own "no real-world capture corpus" notes): unlike
+// most other protocols in this codebase, there is no public, independently buildable, full
+// TASE.2 client/server stack this decoder's own research could actually run to generate genuine
+// TASE.2 wire traffic to validate against (FreeTase2 itself is an early-stage wrapper around
+// libiec61850's own MMS API, not a standalone ASN.1 implementation, and its own source has
+// unresolved bugs noted inline). This decoder's own fixture is therefore synthetic MMS traffic,
+// built with this project's own already-validated MMS PDU encoder, carrying the reserved object
+// names sourced above -- validated by construction against that cross-checked vocabulary, not
+// against a real ICCP capture or an independently generated one. If a real ICCP/TASE.2 capture or
+// a genuinely independent open-source stack becomes available later, this note (and
+// tests/real_captures/mms/ATTRIBUTION.md) should be updated accordingly, the same way this
+// project has handled every other protocol where independent traffic was eventually found after
+// an earlier empty search.
+namespace {
+
+// Whole-token substring match: `name` must appear in `haystack` bounded on both sides by a
+// non-identifier character (or string start/end) so a reserved name can't accidentally match as
+// part of some longer, unrelated identifier that merely contains it as a substring.
+bool contains_reserved_token(const std::string& haystack, const std::string& name) {
+    size_t pos = 0;
+    while ((pos = haystack.find(name, pos)) != std::string::npos) {
+        bool left_ok = (pos == 0) || !(std::isalnum(static_cast<unsigned char>(haystack[pos - 1])) ||
+                                        haystack[pos - 1] == '_');
+        size_t end = pos + name.size();
+        bool right_ok = (end >= haystack.size()) ||
+                        !(std::isalnum(static_cast<unsigned char>(haystack[end])) || haystack[end] == '_');
+        if (left_ok && right_ok) return true;
+        pos += 1;
+    }
+    return false;
+}
+
+// TASE.2's own reserved VCC-scope and domain-scope system-variable names -- see this section's
+// own header comment above for the two-source sourcing behind every entry.
+constexpr const char* kIccpReservedNames[] = {
+    "Bilateral_Table_ID", "TASE2_Version",       "Supported_Features",   "Transfer_Set_Name",
+    "Transfer_Set_Time_Stamp", "DSConditions_Detected", "Event_Code_Detected", "Next_DSTransfer_Set",
+};
+
+// A write whose own itemId ends in one of these reserved suffixes is TASE.2's own
+// Select-Before-Operate handle or tag-control variable (see this section's own header comment) --
+// a genuine device-control action, not merely a name that happens to be enumerated.
+bool has_reserved_control_suffix(const std::string& object_name) {
+    size_t item_start = object_name.find_last_of('/');
+    std::string item = (item_start == std::string::npos) ? object_name : object_name.substr(item_start + 1);
+    auto ends_with = [&item](const char* suffix) {
+        size_t n = std::strlen(suffix);
+        return item.size() >= n && item.compare(item.size() - n, n, suffix) == 0;
+    };
+    return ends_with("_SBO") || ends_with("_TAG");
+}
+
+void apply_iccp_recognition(MmsFrame& frame) {
+    if (frame.values.empty()) return;
+    std::string haystack;
+    for (const auto& v : frame.values) {
+        haystack += v;
+        haystack += '\n';
+    }
+    for (const char* name : kIccpReservedNames) {
+        if (contains_reserved_token(haystack, name)) {
+            frame.notes.push_back(
+                std::string("ICCP/TASE.2 well-known object '") + name +
+                "' observed -- this MMS traffic is very likely IEC 60870-6 ICCP/TASE.2, not IEC "
+                "61850 (see mms.hpp's own ICCP/TASE.2 recognition section for the reserved-name "
+                "vocabulary this is matched against)");
+            break;  // one flagging note per frame is enough; the specific name is named above
+        }
+    }
+    // Device control: only on an actual write (the request that DOES the writing, not a mere
+    // enumeration elsewhere) targeting a reserved-suffix variable.
+    if (frame.service_recognized && frame.service_name == "write" && !frame.is_response) {
+        for (const auto& v : frame.values) {
+            size_t eq = v.find('=');
+            if (eq == std::string::npos || v.compare(0, eq, "variable") != 0) continue;
+            std::string object_name = v.substr(eq + 1);
+            if (has_reserved_control_suffix(object_name)) {
+                frame.notes.push_back("ICCP/TASE.2 device control: write targets '" + object_name +
+                                       "' (Select-Before-Operate / tag-setting reserved suffix)");
+                break;
+            }
+        }
+    }
+}
+
+}  // namespace
+
 std::optional<MmsFrame> try_parse_mms(ByteSpan cotp_user_data) {
     if (cotp_user_data.empty()) return std::nullopt;
 
@@ -1794,6 +1922,7 @@ std::optional<MmsFrame> try_parse_mms(ByteSpan cotp_user_data) {
         frame.is_bare = true;
         decode_mms_pdu(top, frame);
         frame.summary = mms_summary(frame);
+        apply_iccp_recognition(frame);
         return frame;
     }
 
@@ -1802,6 +1931,7 @@ std::optional<MmsFrame> try_parse_mms(ByteSpan cotp_user_data) {
         MmsFrame frame;
         frame.session_pdu_name = "(no Session layer)";
         finish_from_presentation(cotp_user_data, frame);
+        apply_iccp_recognition(frame);
         return frame;
     }
 
@@ -1855,6 +1985,7 @@ std::optional<MmsFrame> try_parse_mms(ByteSpan cotp_user_data) {
     }
 
     finish_from_presentation(presentation_bytes, frame);
+    apply_iccp_recognition(frame);
     return frame;
 }
 

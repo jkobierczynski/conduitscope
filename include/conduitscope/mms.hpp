@@ -323,6 +323,19 @@
 // Validation: see this file's own real-capture search record in tests/real_captures/mms/
 // ATTRIBUTION.md for the current state of that search, including both genuine real-world
 // captures and this decoder's own independent-stack-generated validation traffic.
+//
+// ---------------------------------------------------------------------------------------------
+// ICCP/TASE.2 (IEC 60870-6-802) recognition: TASE.2 rides this exact same COTP/Session/
+// Presentation/ACSE/MMS stack and the same 14 MMSpdu alternatives -- it is not a distinct wire
+// protocol, only a standardized reserved-object-naming profile on top of generic MMS. mms.cpp's
+// own "ICCP/TASE.2 recognition" section (right before try_parse_mms) matches already-decoded
+// MmsFrame::values against that reserved-name vocabulary and adds a curated MmsFrame::notes entry
+// when found -- a pure post-decode signature match, the same "structural signature, not full
+// grammar" posture this codebase already applies to NTLMSSP's own scan and WinRM's SOAP
+// tag-local-name extraction (see winrm.hpp). See that section's own header comment for the full
+// sourcing (cross-checked against two independent sources) and this first pass's honestly-stated
+// validation gap (no independently buildable full TASE.2 stack was available to generate real
+// wire traffic against -- see that comment for detail).
 #pragma once
 
 #include <cstdint>

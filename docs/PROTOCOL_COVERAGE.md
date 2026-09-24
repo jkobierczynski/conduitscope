@@ -1064,6 +1064,56 @@ tshark's own MMS dissector for ground truth is also what surfaced the
 the complete writeup of both real bugs this validation pass found. See
 `include/conduitscope/mms.hpp`'s file header for the full writeup.
 
+#### ICCP/TASE.2 (IEC 60870-6-802) recognition
+
+TASE.2 rides this exact same COTP/Session/Presentation/ACSE/MMS stack and
+the same 14 MMSpdu alternatives -- it is not a distinct wire protocol from
+this decoder's own point of view, only a standardized reserved-object-
+naming profile on top of generic MMS (see this decoder's own
+`apply_iccp_recognition`, right above `try_parse_mms` in `mms.cpp`, and
+`docs/DEVELOPMENT.md`'s item 38 for the full design and sourcing
+discussion). Traffic already decodes correctly as ordinary `mms` --
+Read/Write/GetNameList/InformationReport, exactly as documented above --
+with no change to protocol labeling, `--stats` bucketing, or `--protocol`
+filtering. What this adds is a curated-note layer: when a frame's own
+already-decoded object names include one of TASE.2's own reserved
+VCC-scope/domain-scope system variables (`Bilateral_Table_ID`,
+`TASE2_Version`, `Supported_Features`, `Transfer_Set_Name`,
+`Transfer_Set_Time_Stamp`, `DSConditions_Detected`, `Event_Code_Detected`,
+`Next_DSTransfer_Set`), a note flags the association as very likely
+ICCP/TASE.2 rather than IEC 61850; a WRITE specifically targeting a
+variable whose own itemId ends in the reserved `_SBO` (Select-Before-
+Operate) or `_TAG` (operator hold/blocking tag) suffix earns a distinct,
+higher-value device-control note -- a mere read of a similarly-suffixed
+name does not (verified via an explicit negative-case test).
+
+Reserved-name sourcing (cross-checked against two independent sources):
+MZ Automation's own published libtase2 protocol library developer guide,
+and the independent open-source FreeTase2 Python client
+([`aklira/FreeTase2`](https://github.com/aklira/FreeTase2)), whose own
+source confirms it is built directly on this project's own
+already-validated libiec61850 MMS API -- further, if indirect,
+confirmation that TASE.2 rides plain MMS with no protocol extension of
+its own. Both sources independently agree on every reserved name used.
+
+**Validation gap, honestly stated**: unlike most other protocols in this
+codebase, no public, independently buildable, full TASE.2 client/server
+stack was available to generate genuine TASE.2 wire traffic to validate
+against -- FreeTase2 itself is an early-stage wrapper around libiec61850's
+own MMS API, not a standalone implementation. This fixture
+(`tests/sample_iccp.pcap`, `build_iccp_sample`) is therefore synthetic
+MMS traffic carrying the cross-checked reserved object names, validated
+by construction against that vocabulary, not against a real ICCP capture
+or an independently generated one.
+
+Deliberately out of scope for this first pass: any deeper TASE.2
+object-model decode beyond the reserved-name recognition above (a
+Bilateral Table's own contents, a Data Set's own membership, or a
+DSTransferSet's own configuration parameters are not structurally
+parsed -- only that traffic touching their well-known names is
+occurring); and a distinct `--protocol iccp`/`--stats` bucket (this
+traffic stays labeled and counted as `mms`).
+
 ### MQTT (v3.1/v3.1.1/v5.0, conventionally TCP port 1883) and Sparkplug B
 
 MQTT is a general-purpose IIoT/pub-sub transport, not an OT-specific protocol on its own, but it's

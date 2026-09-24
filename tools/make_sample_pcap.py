@@ -4879,6 +4879,161 @@ def build_mms_sample():
     (TESTS_DIR / "sample_mms.pcap").write_bytes(data)
 
 
+def build_iccp_sample():
+    """ICCP/TASE.2 (IEC 60870-6-802) recognition -- see mms.hpp's own "ICCP/TASE.2 recognition"
+    section and mms.cpp's own header comment right above apply_iccp_recognition for the full
+    design and sourcing. TASE.2 rides the exact same COTP/Session/Presentation/ACSE/MMS stack and
+    the same 14 MMSpdu alternatives build_mms_sample() above already exercises in full -- this
+    fixture reuses the identical association-establishment shape (Session CONNECT/ACCEPT, ACSE
+    AARQ/AARE over the same generic MMS application context, MMS initiate-Request/ResponsePDU) and
+    then carries ordinary Read/Write/GetNameList/InformationReport traffic whose ObjectNames are
+    TASE.2's own reserved VCC-scope/domain-scope system-variable names (cross-checked against two
+    independent sources -- see mms.cpp's own comment) rather than IEC 61850's own LN/DO/DA
+    convention. Covers: a domain-scope reserved name (Bilateral_Table_ID) read; a VCC-scope
+    reserved name (TASE2_Version) read, whose own Data value is a two-element structure -- proving
+    vmd-specific ObjectName rendering and this decoder's own recursive Data-structure decode
+    combine correctly with the recognition note; a VCC-scope BIT STRING (Supported_Features) read;
+    a device-control write to a reserved "_SBO"-suffixed variable and a second to a "_TAG"-suffixed
+    one, each producing this decoder's own higher-value device-control note; an explicit NEGATIVE
+    control proving that merely READING a similarly "_SBO"-suffixed variable (as opposed to
+    WRITING it) does NOT produce the device-control note -- only an actual write is a control
+    action; a GetNameList response enumerating several of these reserved names as bare
+    vmd-scope identifiers; an InformationReport (a DSTransferSet's own periodic/exception report)
+    carrying the Transfer_Set_Name/Transfer_Set_Time_Stamp/DSConditions_Detected trio; and a final
+    SECOND negative control -- an ordinary IEC 61850-shaped Read (domain/item names carrying none
+    of TASE.2's own reserved vocabulary) in the SAME session, proving this decoder does not flag
+    plain IEC 61850 MMS traffic as ICCP merely because it rode the same association."""
+    ENG_IP, PLC_PORT = HMI_IP, 102
+    packets = []
+    ident = [0x7100]
+
+    ENG_PORT = 51000
+    client_seq = [10000]
+    server_seq = [20000]
+
+    def add(from_client: bool, tpkt_bytes: bytes):
+        ident[0] += 1
+        if from_client:
+            src_ip, dst_ip, src_mac, dst_mac = ENG_IP, PLC_IP, HMI_MAC, PLC_MAC
+            src_port, dst_port = ENG_PORT, PLC_PORT
+            seq, ack = client_seq[0], server_seq[0]
+            client_seq[0] += len(tpkt_bytes)
+        else:
+            src_ip, dst_ip, src_mac, dst_mac = PLC_IP, ENG_IP, PLC_MAC, HMI_MAC
+            src_port, dst_port = PLC_PORT, ENG_PORT
+            seq, ack = server_seq[0], client_seq[0]
+            server_seq[0] += len(tpkt_bytes)
+        tcp = tcp_header(src_port, dst_port, seq, ack, TCP_PSH | TCP_ACK, len(tpkt_bytes)) + tpkt_bytes
+        ip = ipv4_header(src_ip, dst_ip, 6, len(tcp), ident[0]) + tcp
+        packets.append(eth_header(dst_mac, src_mac, 0x0800) + ip)
+
+    def dt(bytes_) -> bytes:
+        return tpkt_frame(COTP_DT_HEADER, bytes_)
+
+    def ongoing(mms_pdu_bytes: bytes) -> bytes:
+        return session_ongoing_prefix(2) + presentation_bare_fully_encoded(3, mms_pdu_bytes)
+
+    # 1) & 2) COTP Connection Request/Confirm.
+    cr = cotp_connection_pdu(0xE0, 0x0000, 0x0010, bytes([0x01, 0x00]), bytes([0x03, 0x02]))
+    add(True, tpkt_frame(cr))
+    cc = cotp_connection_pdu(0xD0, 0x0010, 0x6010, bytes([0x01, 0x00]), bytes([0x03, 0x02]))
+    add(False, tpkt_frame(cc))
+
+    # 3) & 4) Session CONNECT/ACCEPT, ACSE AARQ/AARE, MMS initiate-Request/ResponsePDU -- the
+    #    SAME generic MMS association shape build_mms_sample() uses (see this function's own
+    #    header comment: TASE.2 does not appear to negotiate a distinct application context).
+    initiate_req = initiate_pdu(False, local_detail=1400, max_calling=5, max_called=5, nesting=4,
+                                 version=1, parameter_cbb_bits=[0, 1, 2, 3],
+                                 services_supported_bits=[0, 1, 2, 4, 5, 6])
+    aarq = acse_aarq(initiate_req)
+    cp = presentation_association([(1, ACSE_APPLICATION_CONTEXT_OID), (3, "1.0.9506.2.3")], 1, aarq)
+    add(True, dt(session_connect(cp)))
+
+    initiate_resp = initiate_pdu(True, local_detail=1400, max_calling=5, max_called=5, nesting=4,
+                                  version=1, parameter_cbb_bits=[0, 1, 2, 3],
+                                  services_supported_bits=[0, 1, 2, 4, 5, 6])
+    aare = acse_aare(0, initiate_resp)
+    cpa = presentation_association([(1, ACSE_APPLICATION_CONTEXT_OID), (3, "1.0.9506.2.3")], 1, aare)
+    add(False, dt(session_accept(cpa)))
+
+    # 5) & 6) Read -- Bilateral_Table_ID, a domain-scope reserved TASE.2 system variable.
+    blt_var = list_of_variable([var_spec_name(object_name_domain("ICCP_BLOCK1", "Bilateral_Table_ID"))])
+    add(True, dt(ongoing(confirmed_request_pdu(1, read_request(True, blt_var)))))
+    add(False, dt(ongoing(confirmed_response_pdu(
+        1, read_response([access_result_success(data_visible_string("SUBSTATION_A-CTRL_CTR_1"))])))))
+
+    # 7) & 8) Read -- TASE2_Version, a VCC-scope (vmd-specific) reserved variable whose own Data
+    #    value is a two-element structure (major, minor) -- exercises this decoder's own recursive
+    #    Data-structure decode together with the recognition note in the same frame.
+    ver_var = list_of_variable([var_spec_name(object_name_vmd("TASE2_Version"))])
+    add(True, dt(ongoing(confirmed_request_pdu(2, read_request(True, ver_var)))))
+    add(False, dt(ongoing(confirmed_response_pdu(
+        2, read_response([access_result_success(
+            data_structure(data_unsigned(2000) + data_unsigned(8)))])))))
+
+    # 9) & 10) Read -- Supported_Features, a VCC-scope BIT STRING (one bit per TASE.2 conformance
+    #    block; bits 0/1/4 set here, i.e. blocks 1/2/5).
+    feat_var = list_of_variable([var_spec_name(object_name_vmd("Supported_Features"))])
+    add(True, dt(ongoing(confirmed_request_pdu(3, read_request(True, feat_var)))))
+    add(False, dt(ongoing(confirmed_response_pdu(
+        3, read_response([access_result_success(data_bitstring(4, bytes([0xC8])))])))))  # bits 0,1,4 of 12
+
+    # 11) & 12) Write -- device control: Select-Before-Operate handle for a breaker, the reserved
+    #     "_SBO" suffix (see mms.cpp's own has_reserved_control_suffix). This is an actual WRITE,
+    #     so it earns the higher-value device-control note, not just the general recognition one.
+    sbo_var = list_of_variable([var_spec_name(object_name_domain("ICCP_BLOCK1", "Breaker52_SBO"))])
+    add(True, dt(ongoing(confirmed_request_pdu(4, write_request(sbo_var, [data_bool(True)])))))
+    add(False, dt(ongoing(confirmed_response_pdu(4, write_response([write_result_success()])))))
+
+    # 13) & 14) Write -- device control: the reserved "_TAG" suffix (operator hold/blocking tag).
+    tag_var = list_of_variable([var_spec_name(object_name_domain("ICCP_BLOCK1", "Breaker52_TAG"))])
+    add(True, dt(ongoing(confirmed_request_pdu(5, write_request(tag_var, [data_int(1)])))))
+    add(False, dt(ongoing(confirmed_response_pdu(5, write_response([write_result_success()])))))
+
+    # 15) & 16) NEGATIVE CONTROL -- reading (not writing) a different "_SBO"-suffixed variable must
+    #     NOT produce the device-control note: only an actual write is a control action.
+    sbo_read_var = list_of_variable([var_spec_name(object_name_domain("ICCP_BLOCK1", "Breaker99_SBO"))])
+    add(True, dt(ongoing(confirmed_request_pdu(6, read_request(True, sbo_read_var)))))
+    add(False, dt(ongoing(confirmed_response_pdu(
+        6, read_response([access_result_success(data_int(0))])))))
+
+    # 17) & 18) GetNameList -- VCC scope, enumerating several reserved names as bare identifiers
+    #     alongside one unrelated one, proving detection also fires from a GetNameList response.
+    add(True, dt(ongoing(confirmed_request_pdu(7, getnamelist_request("vmd")))))
+    add(False, dt(ongoing(confirmed_response_pdu(
+        7, getnamelist_response(
+            ["Bilateral_Table_ID", "Supported_Features", "TASE2_Version", "SomeOtherName"],
+            more_follows=False)))))
+
+    # 19) InformationReport -- a DSTransferSet's own periodic/exception report, carrying the
+    #     Transfer_Set_Name/Transfer_Set_Time_Stamp/DSConditions_Detected trio FreeTase2's own
+    #     (commented-out reference) source builds a variable list from -- see mms.cpp's own
+    #     recognition-section sourcing comment.
+    report_var = list_of_variable([
+        var_spec_name(object_name_domain("ICCP_BLOCK1", "Transfer_Set_Name")),
+        var_spec_name(object_name_domain("ICCP_BLOCK1", "Transfer_Set_Time_Stamp")),
+        var_spec_name(object_name_domain("ICCP_BLOCK1", "DSConditions_Detected")),
+    ])
+    add(False, dt(ongoing(unconfirmed_pdu(information_report(
+        report_var,
+        [access_result_success(data_visible_string("DSTransferSet1")),
+         access_result_success(data_utc_time(1_700_000_000, 0, 0x0A)),
+         access_result_success(data_bitstring(5, bytes([0x08])))])))))
+
+    # 20) & 21) SECOND NEGATIVE CONTROL -- an ordinary IEC 61850-shaped Read, in the SAME session,
+    #     whose domain/item names carry none of TASE.2's own reserved vocabulary: must NOT be
+    #     flagged as ICCP merely because it rode the same association as the frames above.
+    plain_var = list_of_variable([var_spec_name(object_name_domain("IED1Device", "GGIO1$ST$Ind1$stVal"))])
+    add(True, dt(ongoing(confirmed_request_pdu(8, read_request(True, plain_var)))))
+    add(False, dt(ongoing(confirmed_response_pdu(
+        8, read_response([access_result_success(data_bool(True))])))))
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_100_000 + i, i * 1000)
+    (TESTS_DIR / "sample_iccp.pcap").write_bytes(data)
+
+
 def build_policy_engine_sample():
     """Exercises PolicyEngine's client/server (initiator) determination and its cross-protocol
     "cotp counts as s7comm" folding (see policy_engine.cpp) -- none of which the other sample
@@ -14043,4 +14198,5 @@ if __name__ == "__main__":
     build_slow_protocols_sample()
     build_winrm_sample()
     build_wmi_dcom_activation_sample()
+    build_iccp_sample()
     print("wrote sample fixtures to", TESTS_DIR)

@@ -1540,6 +1540,17 @@ against a real independent stack (\fBmz-automation/libiec61850\fR),
 \fBtests/real_captures/mms/ATTRIBUTION.md\fR for the full detail, including
 two genuine structural-detection-gate bugs this validation pass caught and
 fixed);
+ICCP/TASE.2 (IEC 60870-6-802) traffic \-\- which rides this exact same MMS
+stack rather than a distinct wire protocol \-\- is recognized by its own
+reserved system-variable-name vocabulary (\fBBilateral_Table_ID\fR,
+\fBTASE2_Version\fR, \fBSupported_Features\fR, and others) and flagged with
+a curated note, including a distinct higher-value note for a write to a
+Select-Before-Operate (\fB_SBO\fR) or tag (\fB_TAG\fR) device-control
+variable, but stays labeled and counted as \fBmms\fR rather than a
+separate protocol \-\- see \fBdocs/PROTOCOL_COVERAGE.md\fR's ICCP/TASE.2
+subsection for the full design, sourcing, and this first pass's own
+honestly-stated validation gap (no independently buildable TASE.2 stack
+was available to generate real wire traffic against);
 live capture is an optional,
 build-time-detected feature (see LIVE CAPTURE) whose Windows/Npcap path has
 not yet been run on a real Windows machine, validated on Linux so far only

@@ -180,7 +180,7 @@ traffic match what the segmentation policy says it should" question.
 
 Groundwork / v0.2.4. Every protocol named above is implemented, decoding real
 wire-format fields (not just naming the protocol), and covered by the
-automated test suite -- 1539 tests as of this writing, run via `ctest` after
+automated test suite -- 1555 tests as of this writing, run via `ctest` after
 building (see Building below). Where a real capture was available (public
 ICS-lab collections, vendor-attributed samples, or a live device on real
 hardware), the decoder is validated against it, not just a synthetic
