@@ -490,6 +490,10 @@ bool Decoder::reassemble_tcp_payload(const TcpSegment& tcp, const std::string& f
                          options_.protocol_filter == ProtocolFilter::GeSrtpOnly;
     bool want_codesys = options_.protocol_filter == ProtocolFilter::Auto ||
                          options_.protocol_filter == ProtocolFilter::CodesysOnly;
+    bool want_amqp091 = options_.protocol_filter == ProtocolFilter::Auto ||
+                         options_.protocol_filter == ProtocolFilter::Amqp091Only;
+    bool want_amqp10 = options_.protocol_filter == ProtocolFilter::Auto ||
+                        options_.protocol_filter == ProtocolFilter::Amqp10Only;
 
     // OPC UA is checked first of all: its own structural detection gate (the leading 3 bytes must
     // be one of exactly 7 fixed ASCII MessageType strings -- "HEL"/"ACK"/"ERR"/"RHE"/"OPN"/"CLO"/
@@ -712,6 +716,36 @@ bool Decoder::reassemble_tcp_payload(const TcpSegment& tcp, const std::string& f
         if (auto d = ge_srtp_tcp_decoder().tcp_declared_length(candidate)) {
             declared = d;
             which = "GE SRTP message";
+        }
+    }
+    // AMQP (0-9-1 and 1.0), TCP port 5672 -- deliberately PORT-GATED here in Auto mode, the same
+    // posture WinRM/DCOM/GE SRTP just above already establish for this gate kind: neither AMQP
+    // version's own structural gate is a strong self-describing magic constant checked on every
+    // TCP payload (the 8-byte "AMQP" preamble IS such a magic constant, but it only ever appears
+    // once, on the very first bytes of a connection -- every subsequent frame in the same session
+    // has no such marker, see amqp_common.hpp's own header comment), so gating by port in Auto
+    // mode avoids false-positiving on ordinary binary traffic elsewhere. An explicit
+    // `--protocol amqp091`/`--protocol amqp10` still tries the matching decoder port-
+    // independently, the same exception every other GateKind::TcpPort protocol here already has.
+    // Both decoders share one port-gate list (options_.extra_amqp_ports) since both versions ride
+    // the same default port by convention -- see extra_amqp_ports's own doc comment in
+    // decoder.hpp. amqp091_tcp_declared_length/amqp10_tcp_declared_length each independently
+    // require the full 8-byte preamble to recognize a NEW connection's very first message (no
+    // partial-preamble buffering, since a 4-7 byte prefix of "AMQP\x00..." cannot yet be told
+    // apart from a 4-7 byte prefix of an entirely unrelated protocol) -- see amqp091.hpp/amqp10.hpp.
+    bool require_amqp_port = options_.protocol_filter == ProtocolFilter::Auto;
+    bool candidate_port_is_amqp = port_in(tcp.src_port, AMQP_PORT, options_.extra_amqp_ports) ||
+                                   port_in(tcp.dst_port, AMQP_PORT, options_.extra_amqp_ports);
+    if (!declared && want_amqp091 && (!require_amqp_port || candidate_port_is_amqp)) {
+        if (auto d = amqp091_tcp_decoder().tcp_declared_length(candidate)) {
+            declared = d;
+            which = "AMQP 0-9-1 frame";
+        }
+    }
+    if (!declared && want_amqp10 && (!require_amqp_port || candidate_port_is_amqp)) {
+        if (auto d = amqp10_tcp_decoder().tcp_declared_length(candidate)) {
+            declared = d;
+            which = "AMQP 1.0 frame";
         }
     }
     if (!declared && want_dnp3) {
@@ -2776,6 +2810,10 @@ DecodedPacket Decoder::decode_ip_payload(DecodedPacket out, uint8_t protocol, By
                              options_.protocol_filter == ProtocolFilter::GeSrtpOnly;
         bool want_codesys = options_.protocol_filter == ProtocolFilter::Auto ||
                              options_.protocol_filter == ProtocolFilter::CodesysOnly;
+        bool want_amqp091 = options_.protocol_filter == ProtocolFilter::Auto ||
+                             options_.protocol_filter == ProtocolFilter::Amqp091Only;
+        bool want_amqp10 = options_.protocol_filter == ProtocolFilter::Auto ||
+                            options_.protocol_filter == ProtocolFilter::Amqp10Only;
 
         // Tried first of all -- see the matching, fuller comment in reassemble_tcp_payload above
         // for why OPC UA's own magic-string detection gate is strong enough, and non-colliding
@@ -3281,6 +3319,72 @@ DecodedPacket Decoder::decode_ip_payload(DecodedPacket out, uint8_t protocol, By
                                          ", which is not a configured/standard GE SRTP port (18245)");
                 }
                 return out;
+            }
+        }
+
+        // Re-derived here (reassemble_tcp_payload above is a separate member function -- its own
+        // locals don't carry over). require_amqp_port mirrors require_ge_srtp_port immediately
+        // above: gated by port only in Auto mode; an explicit `--protocol amqp091`/
+        // `--protocol amqp10` still tries the matching decoder port-independently. Both AMQP
+        // decoders share this one port-gate check (and options_.extra_amqp_ports), see that
+        // field's own doc comment in decoder.hpp.
+        bool require_amqp_port = options_.protocol_filter == ProtocolFilter::Auto;
+        bool candidate_port_is_amqp = port_in(tcp.src_port, AMQP_PORT, options_.extra_amqp_ports) ||
+                                       port_in(tcp.dst_port, AMQP_PORT, options_.extra_amqp_ports);
+        if ((want_amqp091 || want_amqp10) && (!require_amqp_port || candidate_port_is_amqp)) {
+            // AMQP 0-9-1 and AMQP 1.0 -- two genuinely wire-INCOMPATIBLE protocols that happen to
+            // share TCP port 5672 by convention (see amqp_common.hpp's own file header comment for
+            // the full detection-posture rationale). Both decoders are tried against the SAME
+            // session, sharing ONE per-session AmqpFlowState bucket keyed by the fixed string
+            // "amqp" (deliberately NOT each decoder's own id(), the one exception to this
+            // codebase's usual ctx.protocol_id-equals-id() convention -- see amqp_common.hpp's own
+            // STATEFULNESS section) so that sticky per-session version detection (established once,
+            // from the connection's own 8-byte preamble, the only fully reliable way to tell the
+            // two apart) survives across both decoders' own calls. A session whose preamble this
+            // codebase never captured declines to classify as AMQP at all in Auto mode -- see
+            // amqp_common.hpp's DETECTION POSTURE section for why that scope boundary is
+            // deliberate and honestly documented, not a bug. Same out.result-only shape WinRM/
+            // DCOM/GE SRTP established -- out.result carries an Amqp091Result or Amqp10Result,
+            // JsonWriter renders from it (output.cpp's write_amqp091_json_fields/
+            // write_amqp10_json_fields), TextWriter/CsvWriter from out.summary/out.notes
+            // generically.
+            std::string amqp_session = tcp_session_key(out.src_ip, tcp.src_port, out.dst_ip, tcp.dst_port);
+            DecodeContext ctx;
+            ctx.session_key = amqp_session;
+            ctx.packet_index = index;
+            ctx.protocol_id = "amqp";  // shared bucket -- see the comment above.
+            ctx.flow_states = &registry_flow_state_;
+            if (want_amqp091) {
+                if (auto result = amqp091_tcp_decoder().decode(effective_payload, ctx)) {
+                    const Amqp091Result& ar = result->as<Amqp091Result>();
+                    out.protocol = "amqp091";
+                    out.summary = ar.summary;
+                    for (const auto& n : ar.notes) out.notes.push_back(n);
+                    out.result = *result;
+
+                    if (!candidate_port_is_amqp) {
+                        out.notes.push_back("seen on TCP port " + std::to_string(tcp.src_port) + "->" +
+                                             std::to_string(tcp.dst_port) +
+                                             ", which is not a configured/standard AMQP port (5672)");
+                    }
+                    return out;
+                }
+            }
+            if (want_amqp10) {
+                if (auto result = amqp10_tcp_decoder().decode(effective_payload, ctx)) {
+                    const Amqp10Result& ar = result->as<Amqp10Result>();
+                    out.protocol = "amqp10";
+                    out.summary = ar.summary;
+                    for (const auto& n : ar.notes) out.notes.push_back(n);
+                    out.result = *result;
+
+                    if (!candidate_port_is_amqp) {
+                        out.notes.push_back("seen on TCP port " + std::to_string(tcp.src_port) + "->" +
+                                             std::to_string(tcp.dst_port) +
+                                             ", which is not a configured/standard AMQP port (5672)");
+                    }
+                    return out;
+                }
             }
         }
 

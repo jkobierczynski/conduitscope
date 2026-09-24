@@ -16531,6 +16531,553 @@ def build_baseline_two_conduit_sample():
     (TESTS_DIR / "sample_baseline_two_conduit.pcap").write_bytes(data)
 
 
+# --- AMQP 0-9-1 / AMQP 1.0 -----------------------------------------------------------------
+# Two wire-INCOMPATIBLE protocols sharing TCP port 5672 by convention -- see amqp_common.hpp's own
+# file header comment for the full detection-posture rationale this fixture exercises: sticky
+# per-session version detection from the connection's own 8-byte preamble, and a deliberate
+# decline-to-classify scope boundary for a session whose preamble this codebase never captured.
+
+AMQP_PORT = 5672
+
+AMQP091_PREAMBLE = b"AMQP" + bytes([0x00, 0x00, 0x09, 0x01])
+AMQP091_PREAMBLE_HISTORICAL = b"AMQP" + bytes([0x01, 0x01, 0x00, 0x09])
+AMQP10_PREAMBLE_AMQP = b"AMQP" + bytes([0x00, 0x01, 0x00, 0x00])
+AMQP10_PREAMBLE_SASL = b"AMQP" + bytes([0x03, 0x01, 0x00, 0x00])
+
+
+def amqp091_shortstr(s: str) -> bytes:
+    b = s.encode()
+    return bytes([len(b)]) + b
+
+
+def amqp091_longstr(b) -> bytes:
+    if isinstance(b, str):
+        b = b.encode()
+    return struct.pack(">I", len(b)) + b
+
+
+def amqp091_table(entries=()) -> bytes:
+    """entries: list of (name: str, tag: bytes(1), value_bytes: bytes) -- see amqp091.hpp's own
+    field-table type-tag table (industry-practice tags, not the written spec's own)."""
+    body = b""
+    for name, tag, value in entries:
+        nb = name.encode()
+        body += bytes([len(nb)]) + nb + tag + value
+    return struct.pack(">I", len(body)) + body
+
+
+def amqp091_frame(frame_type: int, channel: int, payload: bytes) -> bytes:
+    return (bytes([frame_type]) + struct.pack(">H", channel) + struct.pack(">I", len(payload)) +
+            payload + bytes([0xCE]))
+
+
+def amqp091_method(class_id: int, method_id: int, args: bytes, channel: int = 0) -> bytes:
+    return amqp091_frame(1, channel, struct.pack(">HH", class_id, method_id) + args)
+
+
+def amqp091_content_header(class_id: int, body_size: int, properties=(), channel: int = 0) -> bytes:
+    """properties: list of (flag_bit: int, encoded_value_bytes: bytes), already given in declared
+    descending-bit order -- see amqp091.hpp's own Basic class property list."""
+    flags = 0
+    prop_body = b""
+    for bit, value in properties:
+        flags |= bit
+        prop_body += value
+    payload = struct.pack(">HHQH", class_id, 0, body_size, flags) + prop_body
+    return amqp091_frame(2, channel, payload)
+
+
+def amqp091_content_body(data: bytes, channel: int = 0) -> bytes:
+    return amqp091_frame(3, channel, data)
+
+
+AMQP091_HEARTBEAT = amqp091_frame(8, 0, b"")
+
+# AMQP 0-9-1 class ids (see amqp091.hpp's own WIRE FORMAT section).
+C091_CONN, C091_CHAN, C091_EXCH, C091_QUEUE, C091_BASIC, C091_TX = 10, 20, 40, 50, 60, 90
+
+
+def amqp_tcp_session(packets, ident_box, mac_a, ip_a, mac_b, ip_b, port_a, port_b=AMQP_PORT):
+    """One bidirectional TCP session's worth of AMQP traffic -- the same session()-closure shape
+    build_ge_srtp_sample's own session() already establishes, generalized for both directions to
+    split and for either endpoint to initiate. `a` plays the client (ephemeral port_a), `b` plays
+    the server/broker (port_b, normally AMQP_PORT)."""
+    state = {"aseq": 5000, "bseq": 9000}
+
+    def next_ident():
+        v = ident_box[0]
+        ident_box[0] += 1
+        return v
+
+    def a_to_b(payload: bytes):
+        tcp = tcp_header(port_a, port_b, state["aseq"], state["bseq"], TCP_PSH | TCP_ACK,
+                          len(payload)) + payload
+        ip = ipv4_header(ip_a, ip_b, 6, len(tcp), next_ident())
+        packets.append(eth_header(mac_b, mac_a, 0x0800) + ip + tcp)
+        state["aseq"] += len(payload)
+
+    def b_to_a(payload: bytes):
+        tcp = tcp_header(port_b, port_a, state["bseq"], state["aseq"], TCP_PSH | TCP_ACK,
+                          len(payload)) + payload
+        ip = ipv4_header(ip_b, ip_a, 6, len(tcp), next_ident())
+        packets.append(eth_header(mac_a, mac_b, 0x0800) + ip + tcp)
+        state["bseq"] += len(payload)
+
+    def a_to_b_split(payload: bytes, split_at: int):
+        first, rest = payload[:split_at], payload[split_at:]
+        for chunk in (first, rest):
+            tcp = tcp_header(port_a, port_b, state["aseq"], state["bseq"], TCP_PSH | TCP_ACK,
+                              len(chunk)) + chunk
+            ip = ipv4_header(ip_a, ip_b, 6, len(tcp), next_ident())
+            packets.append(eth_header(mac_b, mac_a, 0x0800) + ip + tcp)
+            state["aseq"] += len(chunk)
+
+    return a_to_b, b_to_a, a_to_b_split
+
+
+def build_amqp091_sample():
+    """Covers: the 8-byte connection preamble (primary pattern) establishing sticky per-session
+    version detection, Connection.Start/Start-Ok (with a PLAIN cleartext-credential exchange --
+    this feature's own headline finding, and the redaction proof: the literal password is asserted
+    to never appear in any output format) /Tune/Tune-Ok/Open/Open-Ok/Close(reply-code 530, >= 400)/
+    Close-Ok, Channel.Open/Open-Ok, Exchange.Declare/Declare-Ok, Queue.Declare/Declare-Ok/Bind,
+    Queue.Bind-Ok as an UNDECODED-method proof (a confirmed method ID whose own argument layout
+    this decoder deliberately leaves undecoded, see amqp091.hpp's own SCOPE section), Basic.Qos/
+    Consume/Consume-Ok/Publish(immediate=true, its own curated finding)/Deliver/Get/Get-Ok, a
+    Content-Header frame as its own packet's primary frame (full Basic property-list decode) and a
+    Content-Body frame likewise, Basic.Ack+Basic.Reject COALESCED into one TCP payload (proves the
+    MQTT-style coalescing loop), Basic.Nack, a HEARTBEAT frame, Tx.Select/Select-Ok, Basic.Cancel as
+    a second undecoded-method proof, a connection split across two TCP segments for one frame
+    (exercises Amqp091Decoder::tcp_declared_length via Decoder::reassemble_tcp_payload), the
+    historical 0-9 preamble variant (still classified as 0-9-1), a mid-stream negative control (no
+    preamble ever captured on that session -- must decline to classify at all in Auto mode, see
+    amqp_common.hpp's own DETECTION POSTURE section), and one exchange on a non-standard port (the
+    "not a configured/standard AMQP port" note, --protocol amqp091 only -- Auto mode is port-gated
+    and would never attempt this one)."""
+    packets = []
+    ident_box = [0xB000]
+
+    client, server, client_split = amqp_tcp_session(packets, ident_box, HMI_MAC, HMI_IP, PLC_MAC, PLC_IP, 54000)
+
+    # 1) Connection preamble (primary 0-9-1 pattern) -- sent alone, matching every real client.
+    client(AMQP091_PREAMBLE)
+
+    # 2) Connection.Start
+    server(amqp091_method(C091_CONN, 10,
+                           bytes([0, 9]) + amqp091_table() + amqp091_longstr("PLAIN AMQPLAIN") +
+                           amqp091_longstr("en_US")))
+
+    # 3) Connection.Start-Ok -- PLAIN mechanism, a real cleartext username+password on the wire.
+    #    This is the headline finding (--stats) AND the redaction proof: the literal password
+    #    "S3cr3tPLC!99" must never appear in ANY output format (text/json/stats), only the
+    #    username and the redacted-placeholder + byte-length.
+    plain_response = b"\x00" + b"scada_svc" + b"\x00" + b"S3cr3tPLC!99"
+    client(amqp091_method(C091_CONN, 11,
+                           amqp091_table() + amqp091_shortstr("PLAIN") +
+                           amqp091_longstr(plain_response) + amqp091_shortstr("en_US")))
+
+    # 4) & 5) Tune / Tune-Ok
+    server(amqp091_method(C091_CONN, 30, struct.pack(">HIH", 2047, 131072, 60)))
+    client(amqp091_method(C091_CONN, 31, struct.pack(">HIH", 2047, 131072, 60)))
+
+    # 6) & 7) Open / Open-Ok
+    client(amqp091_method(C091_CONN, 40, amqp091_shortstr("/") + amqp091_shortstr("") + bytes([0x00])))
+    server(amqp091_method(C091_CONN, 41, amqp091_shortstr("")))
+
+    # 8) & 9) Channel.Open / Open-Ok
+    client(amqp091_method(C091_CHAN, 10, amqp091_shortstr(""), channel=1))
+    server(amqp091_method(C091_CHAN, 11, amqp091_longstr(""), channel=1))
+
+    # 10) & 11) Exchange.Declare (durable topic exchange) / Declare-Ok
+    client(amqp091_method(C091_EXCH, 10,
+                           struct.pack(">H", 0) + amqp091_shortstr("amq.topic") +
+                           amqp091_shortstr("topic") + bytes([0x02]) + amqp091_table(), channel=1))
+    server(amqp091_method(C091_EXCH, 11, b"", channel=1))
+
+    # 12) & 13) Queue.Declare (durable) / Declare-Ok
+    client(amqp091_method(C091_QUEUE, 10,
+                           struct.pack(">H", 0) + amqp091_shortstr("telemetry.q") +
+                           bytes([0x02]) + amqp091_table(), channel=1))
+    server(amqp091_method(C091_QUEUE, 11,
+                           amqp091_shortstr("telemetry.q") + struct.pack(">II", 0, 0), channel=1))
+
+    # 14) Queue.Bind
+    client(amqp091_method(C091_QUEUE, 20,
+                           struct.pack(">H", 0) + amqp091_shortstr("telemetry.q") +
+                           amqp091_shortstr("amq.topic") + amqp091_shortstr("plc.#") +
+                           bytes([0x00]) + amqp091_table(), channel=1))
+    # 15) Queue.Bind-Ok (method id 21) -- a confirmed method ID whose own argument layout this
+    #     decoder deliberately leaves undecoded (see amqp091.hpp's own SCOPE section) -- zero-
+    #     length body still proves arguments_decoded=false, undecoded_argument_bytes=0.
+    server(amqp091_method(C091_QUEUE, 21, b"", channel=1))
+
+    # 16) Basic.Qos
+    client(amqp091_method(C091_BASIC, 10, struct.pack(">IH", 0, 10) + bytes([0x00]), channel=1))
+    # 17) & 18) Basic.Consume / Consume-Ok
+    client(amqp091_method(C091_BASIC, 20,
+                           struct.pack(">H", 0) + amqp091_shortstr("telemetry.q") +
+                           amqp091_shortstr("ctag-1") + bytes([0x00]) + amqp091_table(), channel=1))
+    server(amqp091_method(C091_BASIC, 21, amqp091_shortstr("ctag-1"), channel=1))
+
+    # 19) Basic.Publish, immediate=true -- its own curated finding (old-broker/probing signal).
+    client(amqp091_method(C091_BASIC, 40,
+                           struct.pack(">H", 0) + amqp091_shortstr("amq.topic") +
+                           amqp091_shortstr("plc.telemetry") + bytes([0x02]), channel=1))
+
+    # 20) Content-Header, as its own packet's PRIMARY frame -- full Basic property-list decode
+    #     (content-type, delivery-mode=2/persistent, message-id, timestamp).
+    body = b'{"tag":"%R40","value":1234}'
+    client(amqp091_content_header(C091_BASIC, len(body), properties=[
+        (0x8000, amqp091_shortstr("application/json")),
+        (0x1000, bytes([2])),
+        (0x0080, amqp091_shortstr("msg-001")),
+        (0x0040, struct.pack(">Q", 1700000000)),
+    ], channel=1))
+    # 21) Content-Body, as its own packet's PRIMARY frame.
+    client(amqp091_content_body(body, channel=1))
+
+    # 22) Basic.Deliver
+    server(amqp091_method(C091_BASIC, 60,
+                           amqp091_shortstr("ctag-1") + struct.pack(">Q", 1) + bytes([0x00]) +
+                           amqp091_shortstr("amq.topic") + amqp091_shortstr("plc.telemetry"),
+                           channel=1))
+    # 23) & 24) Basic.Get / Get-Ok
+    client(amqp091_method(C091_BASIC, 70,
+                           struct.pack(">H", 0) + amqp091_shortstr("telemetry.q") + bytes([0x00]),
+                           channel=1))
+    server(amqp091_method(C091_BASIC, 71,
+                           struct.pack(">Q", 2) + bytes([0x00]) + amqp091_shortstr("amq.topic") +
+                           amqp091_shortstr("plc.telemetry") + struct.pack(">I", 0), channel=1))
+
+    # 25) Basic.Ack + Basic.Reject COALESCED into ONE TCP payload -- proves the coalescing loop.
+    ack = amqp091_method(C091_BASIC, 80, struct.pack(">Q", 1) + bytes([0x00]), channel=1)
+    reject = amqp091_method(C091_BASIC, 90, struct.pack(">Q", 2) + bytes([0x01]), channel=1)
+    client(ack + reject)
+
+    # 26) Basic.Nack (RabbitMQ extension)
+    client(amqp091_method(C091_BASIC, 120, struct.pack(">Q", 3) + bytes([0x03]), channel=1))
+
+    # 27) HEARTBEAT frame (type 8, empty payload).
+    client(AMQP091_HEARTBEAT)
+
+    # 28) & 29) Tx.Select / Select-Ok -- confirmed zero-argument.
+    client(amqp091_method(C091_TX, 10, b"", channel=1))
+    server(amqp091_method(C091_TX, 11, b"", channel=1))
+
+    # 30) Basic.Cancel (method id 30) -- a SECOND undecoded-method proof (different class-section
+    #     boundary than Queue.Bind-Ok above).
+    client(amqp091_method(C091_BASIC, 30, amqp091_shortstr("ctag-1") + bytes([0x00]), channel=1))
+
+    # 31) & 32) Connection.Close, reply-code 530 (NOT_ALLOWED, >= 400 -- its own curated finding) /
+    #     Close-Ok.
+    client(amqp091_method(C091_CONN, 50,
+                           struct.pack(">H", 530) +
+                           amqp091_shortstr("NOT_ALLOWED - PLAIN login refused") +
+                           struct.pack(">HH", 10, 11)))
+    server(amqp091_method(C091_CONN, 51, b""))
+
+    # 33) & 34) A second session: preamble, then one Connection.Open method frame split across TWO
+    #     TCP segments -- exercises Amqp091Decoder::tcp_declared_length via
+    #     Decoder::reassemble_tcp_payload, the same split/rejoin shape build_melsec_sample's/
+    #     build_ge_srtp_sample's own split packet groups already cover for their own protocols.
+    client2, server2, client2_split = amqp_tcp_session(packets, ident_box, HMI_MAC, HMI_IP, PLC_MAC, PLC_IP, 54001)
+    client2(AMQP091_PREAMBLE)
+    split_method = amqp091_method(C091_CONN, 40,
+                                   amqp091_shortstr("/") + amqp091_shortstr("") + bytes([0x00]))
+    # split_at=8 (not some smaller value): the first 7 bytes of this frame's own header
+    # (type=1/channel=0/size=8) coincide byte-for-byte with a plausible Modbus/TCP MBAP prefix
+    # (transaction_id=0x0100, protocol_id=0x0000) -- Modbus's OWN declared-length probe runs
+    # earlier in decoder.cpp's reassembly cascade than AMQP's, and unlike its full try_parse_
+    # modbus_tcp, that probe only rejects the "function-code-0 reserved" case once >= 8 bytes are
+    # available (see modbus_tcp_declared_length's own comment) -- an 8-byte first segment lands
+    # exactly on this frame's own class-id high byte (0x00), which IS byte 8 here, giving Modbus's
+    # probe the same reserved-function-code-0 signal its full parser already uses to decline, so it
+    # correctly falls through to AMQP's own declared-length probe instead of misfiring.
+    client2_split(split_method, split_at=8)
+
+    # 35) & 36) A third session using the HISTORICAL 0-9 preamble variant (AMQP\x01\x01\x00\x09) --
+    #     still classified as 0-9-1 (see amqp_common.hpp's own preamble-pattern table).
+    client3, server3, _ = amqp_tcp_session(packets, ident_box, HMI_MAC, HMI_IP, PLC_MAC, PLC_IP, 54002)
+    client3(AMQP091_PREAMBLE_HISTORICAL)
+    server3(amqp091_method(C091_CONN, 10,
+                            bytes([0, 9]) + amqp091_table() + amqp091_longstr("PLAIN") +
+                            amqp091_longstr("en_US")))
+
+    # 37) Negative control: a FOURTH session whose preamble this codebase never captured (the very
+    #     first packet on this session is already an ordinary-shaped Connection.Tune-Ok frame) --
+    #     must DECLINE to classify as amqp091 at all in Auto mode (see amqp_common.hpp's own
+    #     DETECTION POSTURE section) rather than guess from the frame's own byte shape alone.
+    client4, server4, _ = amqp_tcp_session(packets, ident_box, HMI_MAC, HMI_IP, PLC_MAC, PLC_IP, 54003)
+    # channel=99 (not the real protocol's own channel 0) specifically so this frame's own byte 2
+    # (message-id, in HART-IP's own unrelated, opportunistic TcpPortIndependent gate) is > 3 and
+    # that gate declines it too -- otherwise this synthetic frame's byte 0-2 shape would coincide
+    # with a channel-0-shaped, message-type=0/message-id=0 HART-IP "Request/Session Initiate"
+    # opportunistic match, which would obscure this test's actual point (AMQP's own decline, not
+    # some unrelated protocol's own opportunistic gate).
+    client4(amqp091_method(C091_CONN, 31, struct.pack(">HIH", 2047, 131072, 60), channel=99))
+
+    # 38) & 39) Non-standard port (54004 -> 9999, not AMQP_PORT) -- proves the "seen on TCP port
+    #     ..., which is not a configured/standard AMQP port (5672)" note. Auto mode is port-gated
+    #     for AMQP (see decoder.cpp's own AMQP call site) and would never attempt this exchange at
+    #     all, so the dedicated CTest for this packet group runs with `--protocol amqp091`.
+    client5, server5, _ = amqp_tcp_session(packets, ident_box, HMI_MAC, HMI_IP, PLC_MAC, PLC_IP, 54004, 9999)
+    client5(AMQP091_PREAMBLE)
+    server5(amqp091_method(C091_CONN, 10,
+                            bytes([0, 9]) + amqp091_table() + amqp091_longstr("PLAIN") +
+                            amqp091_longstr("en_US")))
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_300_000 + i, i * 1000)
+    (TESTS_DIR / "sample_amqp091.pcap").write_bytes(data)
+
+
+# --- AMQP 1.0 --------------------------------------------------------------------------------
+# Wire-incompatible with 0-9-1 above despite sharing a default port -- see amqp10.hpp's own WIRE
+# FORMAT section for the generic self-describing primitive type system this fixture exercises.
+
+
+def amqp10_null() -> bytes:
+    return b"\x40"
+
+
+def amqp10_bool(v: bool) -> bytes:
+    return b"\x41" if v else b"\x42"
+
+
+def amqp10_ubyte(v: int) -> bytes:
+    return b"\x50" + bytes([v])
+
+
+def amqp10_ushort(v: int) -> bytes:
+    return b"\x60" + struct.pack(">H", v)
+
+
+def amqp10_uint(v: int) -> bytes:
+    return b"\x70" + struct.pack(">I", v)
+
+
+def amqp10_ulong(v: int) -> bytes:
+    return b"\x80" + struct.pack(">Q", v)
+
+
+def amqp10_str8(s: str) -> bytes:
+    b = s.encode()
+    return b"\xa1" + bytes([len(b)]) + b
+
+
+def amqp10_sym8(s: str) -> bytes:
+    b = s.encode()
+    return b"\xa3" + bytes([len(b)]) + b
+
+
+def amqp10_bin8(b: bytes) -> bytes:
+    return b"\xa0" + bytes([len(b)]) + b
+
+
+def amqp10_list0() -> bytes:
+    return b"\x45"
+
+
+def amqp10_list8(elements) -> bytes:
+    """elements: list of already fully-encoded (constructor-prefixed) value bytes."""
+    body = b"".join(elements)
+    inner = bytes([len(elements)]) + body
+    return b"\xc0" + bytes([len(inner)]) + inner
+
+
+def amqp10_map8(pairs) -> bytes:
+    """pairs: list of (key_bytes, value_bytes), each already fully-encoded."""
+    body = b"".join(k + v for k, v in pairs)
+    inner = bytes([len(pairs) * 2]) + body
+    return b"\xc1" + bytes([len(inner)]) + inner
+
+
+def amqp10_array8_sym(strings) -> bytes:
+    """A symbol array -- every element shares ONE constructor (0xa3, sym8) read once, per
+    elements bytes WITHOUT their own per-element constructor -- see amqp10.hpp's own TYPE SYSTEM
+    "array shares one constructor" gotcha."""
+    body = b"".join(bytes([len(s.encode())]) + s.encode() for s in strings)
+    inner = bytes([len(strings)]) + bytes([0xa3]) + body
+    return b"\xe0" + bytes([len(inner)]) + inner
+
+
+def amqp10_described(code: int, list_bytes: bytes) -> bytes:
+    return b"\x00\x53" + bytes([code]) + list_bytes
+
+
+def amqp10_frame(frame_type: int, channel: int, body: bytes) -> bytes:
+    """doff is always 2 (8-byte header, no extended header) for every frame this fixture builds."""
+    size = 8 + len(body)
+    return struct.pack(">IBBH", size, 2, frame_type, channel) + body
+
+
+def amqp10_empty_frame(channel: int = 0) -> bytes:
+    return struct.pack(">IBBH", 8, 2, 0, channel)
+
+
+# AMQP 1.0 performative codes (see amqp10.hpp's own amqp10_performative_name/
+# amqp10_sasl_performative_name).
+P10_OPEN, P10_BEGIN, P10_ATTACH, P10_FLOW, P10_TRANSFER = 0x10, 0x11, 0x12, 0x13, 0x14
+P10_DISPOSITION, P10_DETACH, P10_END, P10_CLOSE = 0x15, 0x16, 0x17, 0x18
+P10_SASL_MECHANISMS, P10_SASL_INIT, P10_SASL_OUTCOME = 0x40, 0x41, 0x44
+SEC_SOURCE, SEC_TARGET, SEC_ERROR = 0x28, 0x29, 0x1d
+SEC_REJECTED = 0x25
+MSG_HEADER, MSG_PROPERTIES, MSG_APP_PROPERTIES, MSG_DATA = 0x70, 0x73, 0x74, 0x75
+
+
+def amqp10_error(condition: str, description: str) -> bytes:
+    """A described `error` (0x1d) wrapping [condition(symbol), description(string)] -- see
+    amqp10.hpp's own extract_error/WIRE FORMAT section."""
+    return amqp10_described(SEC_ERROR, amqp10_list8([amqp10_sym8(condition), amqp10_str8(description)]))
+
+
+def build_amqp10_sample():
+    """Covers: the 8-byte connection preamble (AMQP-transport-layer pattern) establishing sticky
+    per-session version detection, the SASL layer (its own preamble pattern, sasl-mechanisms/sasl-
+    init with a PLAIN cleartext-credential exchange -- this feature's own headline finding and
+    redaction proof -- /sasl-outcome success, PLUS a second, separate SASL exchange proving a
+    negotiation FAILURE outcome), open/begin/attach (with source/target address extraction)/flow/
+    transfer (with a full message-section walk: header/properties/application-properties/data, and
+    curated property-field extraction), disposition (a `rejected` delivery-state, proving delivery-
+    state/error extraction), detach/end/close (detach and close each carrying a real error
+    condition -- their own curated finding; end carrying none, the clean-shutdown case), an EMPTY
+    frame (keepalive), a connection split across two TCP segments for one frame (exercises
+    Amqp10Decoder::tcp_declared_length via Decoder::reassemble_tcp_payload), a mid-stream negative
+    control (no preamble ever captured on that session -- must decline to classify at all in Auto
+    mode), and one exchange on a non-standard port (--protocol amqp10 only)."""
+    packets = []
+    ident_box = [0xC000]
+
+    client, server, client_split = amqp_tcp_session(packets, ident_box, HMI_MAC, HMI_IP, PLC_MAC, PLC_IP, 55000)
+
+    # 1) Connection preamble -- AMQP transport-layer pattern (0x00 0x01 0x00 0x00).
+    client(AMQP10_PREAMBLE_AMQP)
+
+    # 2) open (client's own connection-establishment performative).
+    open_list = amqp10_list8([amqp10_str8("scada-hmi-01"), amqp10_str8("broker.plant.local"),
+                               amqp10_uint(131072)])
+    client(amqp10_frame(0, 0, amqp10_described(P10_OPEN, open_list)))
+    # 3) open (broker's own response).
+    open_resp_list = amqp10_list8([amqp10_str8("broker-01")])
+    server(amqp10_frame(0, 0, amqp10_described(P10_OPEN, open_resp_list)))
+
+    # 4) begin -- remote-channel omitted (null placeholder), next-outgoing-id/incoming-window/
+    #    outgoing-window present.
+    begin_list = amqp10_list8([amqp10_null(), amqp10_uint(0), amqp10_uint(2147483647), amqp10_uint(0)])
+    client(amqp10_frame(0, 1, amqp10_described(P10_BEGIN, begin_list)))
+    server(amqp10_frame(0, 1, amqp10_described(P10_BEGIN, begin_list)))
+
+    # 5) attach -- a sending link ("plc.telemetry" publisher), source omitted (empty string
+    #    address), target = the real destination address. Proves source_address/target_address
+    #    extraction (extract_described_list_field).
+    source = amqp10_described(SEC_SOURCE, amqp10_list8([amqp10_str8("")]))
+    target = amqp10_described(SEC_TARGET, amqp10_list8([amqp10_str8("telemetry.queue")]))
+    attach_list = amqp10_list8([amqp10_str8("link-1"), amqp10_uint(0), amqp10_bool(False),
+                                 amqp10_null(), amqp10_null(), source, target])
+    client(amqp10_frame(0, 1, amqp10_described(P10_ATTACH, attach_list)))
+    server(amqp10_frame(0, 1, amqp10_described(P10_ATTACH, attach_list)))
+
+    # 6) flow -- handle at its own fixed position (index 4), everything before it a null
+    #    placeholder.
+    flow_list = amqp10_list8([amqp10_null(), amqp10_null(), amqp10_null(), amqp10_null(), amqp10_uint(0)])
+    server(amqp10_frame(0, 1, amqp10_described(P10_FLOW, flow_list)))
+
+    # 7) transfer, handle=0/delivery-id=1, followed by a FULL message-section walk: header,
+    #    properties (message-id/to/subject/correlation-id/content-type all curated-field-
+    #    extracted), application-properties (a 2-entry map), and a data section.
+    transfer_list = amqp10_list8([amqp10_uint(0), amqp10_uint(1)])
+    header_section = amqp10_described(
+        MSG_HEADER, amqp10_list8([amqp10_bool(True), amqp10_ubyte(4), amqp10_uint(60000)]))
+    properties_section = amqp10_described(MSG_PROPERTIES, amqp10_list8([
+        amqp10_str8("msg-001"), amqp10_null(), amqp10_str8("plc.telemetry"),
+        amqp10_str8("sensor-reading"), amqp10_null(), amqp10_str8("corr-abc"),
+        amqp10_sym8("application/json"),
+    ]))
+    app_props_section = amqp10_described(MSG_APP_PROPERTIES, amqp10_map8([
+        (amqp10_sym8("unit"), amqp10_str8("celsius")),
+        (amqp10_sym8("plc-tag"), amqp10_str8("%R40")),
+    ]))
+    data_payload = b'{"temp": 42.5}'
+    data_section = amqp10_described(MSG_DATA, amqp10_bin8(data_payload))
+    transfer_body = (amqp10_described(P10_TRANSFER, transfer_list) + header_section +
+                      properties_section + app_props_section + data_section)
+    client(amqp10_frame(0, 1, transfer_body))
+
+    # 8) disposition -- a `rejected` delivery-state carrying a real error condition, proving
+    #    delivery-state/error extraction (extract_error via disposition's own state field).
+    rejected_state = amqp10_described(SEC_REJECTED, amqp10_list8([
+        amqp10_error("amqp:precondition-failed", "queue full")]))
+    disposition_list = amqp10_list8([amqp10_bool(True), amqp10_uint(1), amqp10_null(),
+                                      amqp10_bool(True), rejected_state])
+    server(amqp10_frame(0, 1, amqp10_described(P10_DISPOSITION, disposition_list)))
+
+    # 9) detach -- WITH a real error condition (its own curated finding).
+    detach_list = amqp10_list8([amqp10_uint(0), amqp10_bool(True),
+                                 amqp10_error("amqp:resource-deleted", "queue removed by admin")])
+    server(amqp10_frame(0, 1, amqp10_described(P10_DETACH, detach_list)))
+
+    # 10) end -- WITHOUT an error (list0, the clean-shutdown case).
+    client(amqp10_frame(0, 1, amqp10_described(P10_END, amqp10_list0())))
+
+    # 11) EMPTY frame (keepalive) -- proves is_empty.
+    client(amqp10_empty_frame(0))
+
+    # 12) close -- WITH a real error condition (broker forcibly closing the connection -- its own
+    #     curated finding).
+    close_list = amqp10_list8([amqp10_error("amqp:connection:forced", "too many connections")])
+    server(amqp10_frame(0, 0, amqp10_described(P10_CLOSE, close_list)))
+
+    # 13)-19) A SECOND session, entirely on the SASL layer (its own preamble pattern): sasl-
+    #     mechanisms, sasl-init (PLAIN, a real cleartext username+password -- the redaction proof:
+    #     the literal password "Op3nPLC$99" must never appear in ANY output format), sasl-outcome
+    #     (success, code=0).
+    client2, server2, _ = amqp_tcp_session(packets, ident_box, HMI_MAC, HMI_IP, PLC_MAC, PLC_IP, 55001)
+    client2(AMQP10_PREAMBLE_SASL)
+    mechanisms_list = amqp10_list8([amqp10_array8_sym(["PLAIN", "ANONYMOUS"])])
+    server2(amqp10_frame(1, 0, amqp10_described(P10_SASL_MECHANISMS, mechanisms_list)))
+    sasl_response = b"\x00" + b"hmi_client" + b"\x00" + b"Op3nPLC$99"
+    sasl_init_list = amqp10_list8([amqp10_sym8("PLAIN"), amqp10_bin8(sasl_response),
+                                    amqp10_str8("broker.plant.local")])
+    client2(amqp10_frame(1, 0, amqp10_described(P10_SASL_INIT, sasl_init_list)))
+    sasl_outcome_ok = amqp10_list8([amqp10_ubyte(0)])
+    server2(amqp10_frame(1, 0, amqp10_described(P10_SASL_OUTCOME, sasl_outcome_ok)))
+
+    # 20)-22) A THIRD session proving a SASL negotiation FAILURE (code=1, "auth") -- its own
+    #     curated finding.
+    client3, server3, _ = amqp_tcp_session(packets, ident_box, HMI_MAC, HMI_IP, PLC_MAC, PLC_IP, 55002)
+    client3(AMQP10_PREAMBLE_SASL)
+    sasl_init_bad = amqp10_list8([amqp10_sym8("PLAIN"), amqp10_bin8(b"\x00baduser\x00badpass")])
+    client3(amqp10_frame(1, 0, amqp10_described(P10_SASL_INIT, sasl_init_bad)))
+    sasl_outcome_fail = amqp10_list8([amqp10_ubyte(1)])
+    server3(amqp10_frame(1, 0, amqp10_described(P10_SASL_OUTCOME, sasl_outcome_fail)))
+
+    # 23) & 24) A FOURTH session: preamble, then one `open` frame split across TWO TCP segments --
+    #     exercises Amqp10Decoder::tcp_declared_length via Decoder::reassemble_tcp_payload.
+    client4, server4, client4_split = amqp_tcp_session(packets, ident_box, HMI_MAC, HMI_IP, PLC_MAC, PLC_IP, 55003)
+    client4(AMQP10_PREAMBLE_AMQP)
+    split_open = amqp10_frame(0, 0, amqp10_described(P10_OPEN, open_list))
+    client4_split(split_open, split_at=6)
+
+    # 25) Negative control: a FIFTH session whose preamble this codebase never captured (the very
+    #     first packet already an ordinary-shaped `end` frame) -- must DECLINE to classify as
+    #     amqp10 at all in Auto mode (see amqp_common.hpp's own DETECTION POSTURE section).
+    client5, server5, _ = amqp_tcp_session(packets, ident_box, HMI_MAC, HMI_IP, PLC_MAC, PLC_IP, 55004)
+    client5(amqp10_frame(0, 1, amqp10_described(P10_END, amqp10_list0())))
+
+    # 26) & 27) Non-standard port (55005 -> 9999, not AMQP_PORT) -- proves the "not a configured/
+    #     standard AMQP port" note; Auto mode is port-gated so the dedicated CTest for this packet
+    #     group runs with `--protocol amqp10`.
+    client6, server6, _ = amqp_tcp_session(packets, ident_box, HMI_MAC, HMI_IP, PLC_MAC, PLC_IP, 55005, 9999)
+    client6(AMQP10_PREAMBLE_AMQP)
+    server6(amqp10_frame(0, 0, amqp10_described(P10_OPEN, open_resp_list)))
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_400_000 + i, i * 1000)
+    (TESTS_DIR / "sample_amqp10.pcap").write_bytes(data)
+
+
 if __name__ == "__main__":
     TESTS_DIR.mkdir(exist_ok=True)
     build_modbus_sample()
@@ -16626,4 +17173,6 @@ if __name__ == "__main__":
     build_zigbee_tap_sample()
     build_baseline_modbus_mutated_sample()
     build_baseline_two_conduit_sample()
+    build_amqp091_sample()
+    build_amqp10_sample()
     print("wrote sample fixtures to", TESTS_DIR)

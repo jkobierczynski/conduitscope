@@ -8574,6 +8574,119 @@ deferred future migration.
     synthetic -- no real public CANopen or J1939/CAN-bus capture was found
     during this item's own research.
 
+51. **AMQP 0-9-1 and AMQP 1.0 -- two genuinely separate, wire-incompatible
+    protocols that happen to share TCP port 5672.** **Done.**
+    RabbitMQ's own native wire protocol is AMQP 0-9-1 (an extension of the
+    abandoned AMQP 0-9 standard); AMQP 1.0 is the later, unrelated
+    OASIS-standardized wire format (ActiveMQ Artemis, Azure Service Bus,
+    Qpid, and others). A 0-9-1 peer and a 1.0 peer cannot talk to each
+    other at all, so this is decoded as two entirely separate
+    `ProtocolDecoder`s (`Amqp091Decoder`/`amqp091.hpp`/`amqp091.cpp`,
+    `Amqp10Decoder`/`amqp10.hpp`/`amqp10.cpp`), following
+    RMCP/ASF/IPMI's own precedent (item 49 -- multiple `--protocol` values
+    sharing one port, never one decoder class) rather than one decoder
+    with an internal version branch.
+
+    Per-TCP-session version detection is sticky, keyed off each session's
+    own 8-byte connection preamble (`amqp_common.hpp`/`amqp_common.cpp`,
+    `try_parse_amqp_preamble()`), and the two decoders deliberately share
+    ONE per-session flow-state bucket (`AmqpFlowState`) via a shared
+    `ctx.protocol_id = "amqp"` string rather than each decoder's own
+    `id()` -- the one deliberate exception in this codebase to the usual
+    `ctx.protocol_id == id()` convention, needed so whichever decoder sees
+    a session's preamble first claims that session for its lifetime and
+    the other correctly declines every subsequent frame on it. A session
+    whose preamble was never captured (mid-stream-start capture)
+    deliberately declines to classify as AMQP at all, in Auto mode AND
+    under an explicit `--protocol amqp091`/`--protocol amqp10` filter --
+    a documented scope boundary, not a bug, made possible because
+    `tcp_declared_length()` (used during TCP reassembly, with no
+    `DecodeContext`/session-state access) only recognizes the preamble or
+    a self-describing frame shape, while the actual "have we seen this
+    session's version yet" decision lives in each decoder's `decode()`,
+    which does have session access.
+
+    0-9-1: Connection/Channel/Exchange/Queue/Basic/Tx method families,
+    content HEADER (property-flags-driven property list) and BODY frames.
+    1.0: `open`/`begin`/`attach`/`flow`/`transfer`/`disposition`/`detach`/
+    `end`/`close` performatives (described-type fast path), SASL
+    negotiation, and a `transfer`'s own message-section walk
+    (header/properties/application-properties/data). Both versions'
+    PLAIN/SASL PLAIN credential exchange reuses
+    `kRedactedSecretPlaceholder`/`redact_secret_occurrences` from
+    `protocol_decoder.hpp` exactly as IPMI's Auth Code and Netlogon's
+    `NL_TRUST_PASSWORD` already do (item 49's and an earlier item's own
+    precedent) -- raw credential bytes are never stored past their own
+    length, only mechanism, byte length, and (for PLAIN) the extracted
+    username are surfaced, and this is the headline curated finding in
+    `--stats` for both versions (`*** AMQP 0-9-1/1.0 cleartext credential
+    exchanges ... observed: N ***`), alongside a Basic.Publish
+    immediate=true / reply-code>=400 close count for 0-9-1 and a
+    detach/end/close error-condition / SASL-failure count for 1.0.
+
+    `GateKind::TcpPort`, port-gated in Auto mode on port 5672 (both
+    versions' IANA-registered default); `--amqp-port` widens detection,
+    ONE shared option across both decoders, the same reasoning
+    `--rmcp-port` (item 49) already established since both AMQP versions
+    always share the exact same default port by convention despite being
+    wire-incompatible with each other.
+
+    **One honestly-documented Auto-mode collision found and NOT "fixed"
+    by reordering**, via this project's own mandatory
+    before-writing-any-CTest-regex manual CLI verification step: a 0-9-1
+    HEARTBEAT frame's entire wire representation is a fixed 8-byte
+    pattern (`08 00 00 00 00 00 00 CE`) with no variable content at all;
+    read as a Modbus/TCP MBAP header, it satisfies Modbus's own
+    `protocol-id == 0` tell and sets the exception bit on an
+    otherwise-plausible function code, and since `decoder.cpp` tries
+    Modbus well before AMQP in both its TCP-reassembly declared-length
+    cascade and its main `decode()` dispatch cascade (a long-established
+    ordering this item deliberately does not disturb, to avoid any risk
+    of regressing Modbus's own extensive existing test suite), such a
+    frame arriving in Auto mode on a shared/overlapping port can be
+    claimed by Modbus's own `decode()` first. An explicit `--protocol
+    amqp091` is unaffected (Modbus's own `decode()` is never tried at all
+    under that filter). Documented in `amqp091.hpp`'s own file header and
+    reproduced live in `tests/sample_amqp091.pcap` rather than left as a
+    hypothetical. Two further, narrower collisions were found and fixed
+    in the fixture itself (not papered over in test assertions) during
+    the same manual-verification step: a TCP-split test's first segment
+    coincidentally satisfying Modbus's own weaker (`< 8` byte) declared-
+    length guard, and a mid-stream negative-control frame's channel-0
+    bytes coincidentally satisfying HART-IP's own opportunistic
+    port-independent gate (tried on every TCP port regardless of match)
+    -- both root-caused at the byte level and fixed by adjusting the
+    fixture's own split point/channel number, each documented in-line in
+    `tools/make_sample_pcap.py`.
+
+    `tests/sample_amqp091.pcap`/`tests/sample_amqp10.pcap`
+    (`build_amqp091_sample()`/`build_amqp10_sample()`) cover, for 0-9-1: a
+    full connection handshake including a PLAIN Start-Ok carrying a real
+    (test-only) cleartext credential, Tune/Open, Channel/Exchange/Queue
+    setup, Basic.Qos/Consume/Publish (immediate=true) plus content
+    HEADER/BODY, Basic.Deliver/Get/Get-Ok/Ack, two methods coalesced into
+    one TCP payload, a Connection.Close with reply-code 530, a frame split
+    across two TCP segments, a second preamble variant, a mid-stream
+    no-preamble session, and a non-standard-port pair. For 1.0:
+    open/begin/attach/flow/transfer with a full message-section walk,
+    disposition (rejected), detach/close each with a real error condition
+    (end deliberately without one, as a negative control), an empty frame
+    (keepalive), a full SASL negotiation carrying a real cleartext
+    credential, a second SASL negotiation ending in failure, a
+    TCP-segment-split frame, and the same mid-stream/non-standard-port
+    controls as 0-9-1. Every decode path was run manually (`--format text
+    -v`, `--format json`, `--stats`, both new `--protocol` values) and its
+    real output read -- including explicitly grepping decoded output for
+    the literal test credential strings and confirming they never appear
+    in any output format -- before any CTest regex was written. 42 new
+    `amqp091_*`/`amqp10_*`/`amqp_port_option_parses` CTest tests were
+    added. Full suite grew from 1784 to 1826 tests in the default config
+    and from 1772 to 1814 in the `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF`
+    config, zero regressions, zero-warning clean rebuilds in both. As with
+    every recent protocol addition, both fixtures are entirely synthetic
+    -- no real public AMQP 0-9-1 or AMQP 1.0 pcap capture was found during
+    this item's own research.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

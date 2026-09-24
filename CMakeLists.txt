@@ -123,6 +123,9 @@ add_library(conduitscope_core STATIC
   src/cclink_ie.cpp
   src/codesys.cpp
   src/coap.cpp
+  src/amqp_common.cpp
+  src/amqp091.cpp
+  src/amqp10.cpp
   src/protocol_registry.cpp
   src/resource_limits.cpp
   src/decoder.cpp
@@ -12596,3 +12599,285 @@ add_test(NAME baseline_learn_creates_a_new_baseline_file
   COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_fresh_create.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_fresh_create.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap' && cat '${CMAKE_CURRENT_BINARY_DIR}/baseline_fresh_create.json'")
 set_tests_properties(baseline_learn_creates_a_new_baseline_file PROPERTIES
   PASS_REGULAR_EXPRESSION "\"schema_version\": 1,\n *\"conduits\": \\[\n *\\{\n *\"client_ip\": \"192\\.168\\.1\\.50\"")
+
+# AMQP 0-9-1 and AMQP 1.0 (amqp091.hpp/amqp10.hpp, amqp_common.hpp) -- two wire-INCOMPATIBLE
+# protocols that share TCP port 5672 by convention. tests/sample_amqp091.pcap and
+# tests/sample_amqp10.pcap (build_amqp091_sample/build_amqp10_sample, tools/make_sample_pcap.py)
+# are entirely synthetic, built directly against this feature's own byte-exact sourcing pass (see
+# amqp091.hpp's/amqp10.hpp's own SOURCING notes) -- no real-capture corpus for either protocol was
+# available to this session. See amqp_common.hpp's own file header comment for the shared 8-byte
+# preamble detection posture (sticky per-session, decline-to-classify when never captured) these
+# two fixtures both exercise.
+
+# --- AMQP 0-9-1 -------------------------------------------------------------------------------
+
+add_test(NAME amqp091_preamble_and_connection_start_recognized
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_amqp091.pcap" --format text -v)
+set_tests_properties(amqp091_preamble_and_connection_start_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "#1  [^\n]*\\[amqp091\\]  AMQP connection preamble: version 0-9-1[^\n]*\n#2  [^\n]*\\[amqp091\\]  AMQP 0-9-1 METHOD \\(channel 0\\): Connection\\.Start \\(server-supported mechanisms: PLAIN AMQPLAIN\\)")
+
+# Headline finding: a PLAIN Connection.Start-Ok is a real cleartext credential exchange -- AND the
+# redaction proof: the literal password ("S3cr3tPLC!99") must never appear in this format's own
+# output, only the username and the frame's own byte-length.
+add_test(NAME amqp091_start_ok_plain_cleartext_credential_finding
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_amqp091.pcap" --format text -v)
+set_tests_properties(amqp091_start_ok_plain_cleartext_credential_finding PROPERTIES
+  PASS_REGULAR_EXPRESSION "#3  [^\n]*\\[amqp091\\]  AMQP 0-9-1 METHOD \\(channel 0\\): Connection\\.Start-Ok \\(mechanism=PLAIN\\)[^\n]*\n *note: cleartext credential exchange: SASL mechanism \"PLAIN\" carries the password in the clear on this connection \\(username: \"scada_svc\"\\)"
+  FAIL_REGULAR_EXPRESSION "S3cr3tPLC!99")
+
+add_test(NAME amqp091_start_ok_json_redaction_proof
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_amqp091.pcap" --format json)
+set_tests_properties(amqp091_start_ok_json_redaction_proof PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"amqp091_sasl_mechanism\": \"PLAIN\",\n *\"amqp091_sasl_response_length\": 23,\n *\"amqp091_sasl_username\": \"scada_svc\",\n *\"amqp091_cleartext_credentials\": true"
+  FAIL_REGULAR_EXPRESSION "S3cr3tPLC!99")
+
+add_test(NAME amqp091_start_ok_response_field_shows_placeholder_not_raw_bytes
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_amqp091.pcap" --format json)
+set_tests_properties(amqp091_start_ok_response_field_shows_placeholder_not_raw_bytes PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"name\": \"response\", \"rendered\": \"\\[REDACTED\\] \\(23 byte\\(s\\)\\)\""
+  FAIL_REGULAR_EXPRESSION "S3cr3tPLC!99")
+
+add_test(NAME amqp091_tune_tune_ok_and_open_open_ok
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_amqp091.pcap" --format text -v)
+set_tests_properties(amqp091_tune_tune_ok_and_open_open_ok PROPERTIES
+  PASS_REGULAR_EXPRESSION "#4  [^\n]*Connection\\.Tune \\(channel-max=2047, frame-max=131072, heartbeat=60\\)[^\n]*\n#5  [^\n]*Connection\\.Tune-Ok \\(channel-max=2047, frame-max=131072, heartbeat=60\\)[^\n]*\n#6  [^\n]*Connection\\.Open \\(virtual-host=\"/\"\\)[^\n]*\n#7  [^\n]*Connection\\.Open-Ok")
+
+add_test(NAME amqp091_channel_exchange_queue_declare_and_bind
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_amqp091.pcap" --format text -v)
+set_tests_properties(amqp091_channel_exchange_queue_declare_and_bind PROPERTIES
+  PASS_REGULAR_EXPRESSION "#8  [^\n]*Channel\\.Open  [^\n]*\n#9  [^\n]*Channel\\.Open-Ok[^\n]*\n#10  [^\n]*Exchange\\.Declare \\(exchange=\"amq\\.topic\", type=topic\\)[^\n]*\n#11  [^\n]*Exchange\\.Declare-Ok[^\n]*\n#12  [^\n]*Queue\\.Declare \\(queue=\"telemetry\\.q\"\\)[^\n]*\n#13  [^\n]*Queue\\.Declare-Ok \\(queue=\"telemetry\\.q\", message-count=0\\)[^\n]*\n#14  [^\n]*Queue\\.Bind \\(queue=\"telemetry\\.q\", exchange=\"amq\\.topic\", routing-key=\"plc\\.#\"\\)")
+
+# Queue.Bind-Ok (method id 21) -- a confirmed method ID whose own argument layout this decoder
+# deliberately leaves undecoded (see amqp091.hpp's own SCOPE section): the class/method NAME still
+# decodes correctly, but arguments are honestly reported as undecoded rather than guessed at.
+add_test(NAME amqp091_undecoded_method_queue_bind_ok
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_amqp091.pcap" --format text -v)
+set_tests_properties(amqp091_undecoded_method_queue_bind_ok PROPERTIES
+  PASS_REGULAR_EXPRESSION "#15  [^\n]*Queue\\.Bind-Ok \\(arguments not decoded -- layout not confirmed by this decoder's sourcing pass, 0 byte\\(s\\)\\)")
+
+# A SECOND undecoded-method proof, in a different class (Basic.Cancel, method id 30).
+add_test(NAME amqp091_undecoded_method_basic_cancel
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_amqp091.pcap" --format text -v)
+set_tests_properties(amqp091_undecoded_method_basic_cancel PROPERTIES
+  PASS_REGULAR_EXPRESSION "#30  [^\n]*Basic\\.Cancel \\(arguments not decoded -- layout not confirmed by this decoder's sourcing pass, 8 byte\\(s\\)\\)")
+
+# Headline finding: Basic.Publish with immediate=true.
+add_test(NAME amqp091_basic_publish_immediate_finding
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_amqp091.pcap" --format text -v)
+set_tests_properties(amqp091_basic_publish_immediate_finding PROPERTIES
+  PASS_REGULAR_EXPRESSION "#19  [^\n]*Basic\\.Publish \\(exchange=\"amq\\.topic\", routing-key=\"plc\\.telemetry\"\\)[^\n]*\n *note: Basic\\.Publish with immediate=true -- RabbitMQ >= 3\\.0 rejects this")
+
+# Content-Header (full Basic property-list decode) and Content-Body, each its own packet's PRIMARY
+# frame.
+add_test(NAME amqp091_content_header_property_list_json_fields
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_amqp091.pcap" --format json)
+set_tests_properties(amqp091_content_header_property_list_json_fields PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"amqp091_content_header_class\": \"Basic\",\n *\"amqp091_content_body_size\": 27,\n *\"amqp091_properties\": \\[\\{\"name\": \"content-type\", \"rendered\": \"application/json\"\\}, \\{\"name\": \"delivery-mode\", \"rendered\": \"2 \\(persistent\\)\"\\}")
+add_test(NAME amqp091_content_body_byte_count
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_amqp091.pcap" --format text -v)
+set_tests_properties(amqp091_content_body_byte_count PROPERTIES
+  PASS_REGULAR_EXPRESSION "#21  [^\n]*AMQP 0-9-1 BODY \\(channel 1\\): 27 byte\\(s\\)")
+
+# Basic.Ack + Basic.Reject COALESCED into ONE TCP payload -- proves the coalescing loop
+# (MqttDecoder::decode's own pattern, reused here).
+add_test(NAME amqp091_coalesced_frames_in_one_tcp_payload
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_amqp091.pcap" --format text -v)
+set_tests_properties(amqp091_coalesced_frames_in_one_tcp_payload PROPERTIES
+  PASS_REGULAR_EXPRESSION "#25  [^\n]*Basic\\.Ack \\(delivery-tag=1\\)[^\n]*\n *note: additional AMQP 0-9-1 frame 2 found in the same TCP payload at byte offset 21 \\(coalesced by the sender/OS\\): AMQP 0-9-1 METHOD \\(channel 1\\): Basic\\.Reject \\(delivery-tag=2\\)")
+
+# Headline finding: Connection.Close with reply-code >= 400.
+add_test(NAME amqp091_close_reply_code_finding
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_amqp091.pcap" --format text -v)
+set_tests_properties(amqp091_close_reply_code_finding PROPERTIES
+  PASS_REGULAR_EXPRESSION "#31  [^\n]*Connection\\.Close \\(reply-code=530, reply-text=\"NOT_ALLOWED - PLAIN login refused\"\\)[^\n]*\n *note: closed with reply-code 530 \\(>= 400, a client-error-class close\\)")
+
+# HEARTBEAT frame -- decodes correctly when AMQP 0-9-1 is explicitly forced (see amqp091.hpp's own
+# KNOWN COLLISION note for why this specific, fixed 8-byte frame shape is not asserted in Auto mode:
+# Modbus's own weak protocol-id==0 tell, tried earlier in decoder.cpp's dispatch cascade, can claim
+# this exact byte pattern first -- a narrow, honestly-documented ambiguity unique to this one frame
+# shape, not a general 0-9-1-vs-Modbus collision).
+add_test(NAME amqp091_heartbeat_frame_decodes_when_protocol_forced
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_amqp091.pcap" --protocol amqp091 --format text -v)
+set_tests_properties(amqp091_heartbeat_frame_decodes_when_protocol_forced PROPERTIES
+  PASS_REGULAR_EXPRESSION "#27  [^\n]*\\[amqp091\\]  AMQP 0-9-1 HEARTBEAT")
+
+# Tx.Select/Select-Ok (confirmed zero-argument).
+add_test(NAME amqp091_tx_select_zero_argument_methods
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_amqp091.pcap" --format text -v)
+set_tests_properties(amqp091_tx_select_zero_argument_methods PROPERTIES
+  PASS_REGULAR_EXPRESSION "#28  [^\n]*Tx\\.Select  [^\n]*\n#29  [^\n]*Tx\\.Select-Ok")
+
+# A connection split across two TCP segments for one frame -- exercises
+# Amqp091Decoder::tcp_declared_length via Decoder::reassemble_tcp_payload.
+add_test(NAME amqp091_tcp_segment_split_declared_length
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_amqp091.pcap" --format text -v)
+set_tests_properties(amqp091_tcp_segment_split_declared_length PROPERTIES
+  PASS_REGULAR_EXPRESSION "#34  [^\n]*buffering a AMQP 0-9-1 frame PDU/frame split across TCP segments 54001->5672: 8 of 16 declared byte\\(s\\) seen so far across 1 segment\\(s\\) on this flow, waiting for more")
+add_test(NAME amqp091_reassembled_from_two_tcp_segments
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_amqp091.pcap" --format text -v)
+set_tests_properties(amqp091_reassembled_from_two_tcp_segments PROPERTIES
+  PASS_REGULAR_EXPRESSION "#35  [^\n]*\\[amqp091\\]  AMQP 0-9-1 METHOD \\(channel 0\\): Connection\\.Open \\(virtual-host=\"/\"\\)[^\n]*\n *note: reassembled a AMQP 0-9-1 frame PDU/frame from 16 byte\\(s\\) spanning 2 TCP segments on this flow")
+
+# The historical 0-9 preamble variant (AMQP\x01\x01\x00\x09) -- still classified as 0-9-1.
+add_test(NAME amqp091_historical_preamble_variant_classified_as_091
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_amqp091.pcap" --format text -v)
+set_tests_properties(amqp091_historical_preamble_variant_classified_as_091 PROPERTIES
+  PASS_REGULAR_EXPRESSION "#36  [^\n]*\\[amqp091\\]  AMQP connection preamble: version 0-9 \\(historical variant, treated as 0-9-1\\)")
+
+# Negative control: a session whose preamble this codebase never captured must DECLINE to classify
+# as amqp091 at all -- in Auto mode AND under an explicit --protocol amqp091 (see amqp_common.hpp's
+# own DETECTION POSTURE section for why this scope boundary is deliberate).
+add_test(NAME amqp091_mid_stream_no_preamble_declines_in_auto_mode
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_amqp091.pcap" --format text -v)
+set_tests_properties(amqp091_mid_stream_no_preamble_declines_in_auto_mode PROPERTIES
+  PASS_REGULAR_EXPRESSION "#38  [^\n]*\\[tcp\\]  TCP payload of 20 byte\\(s\\) on port 54003->5672"
+  FAIL_REGULAR_EXPRESSION "#38[^\n]*\\[amqp091\\]")
+add_test(NAME amqp091_mid_stream_no_preamble_declines_even_when_forced
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_amqp091.pcap" --protocol amqp091 --format text -v)
+set_tests_properties(amqp091_mid_stream_no_preamble_declines_even_when_forced PROPERTIES
+  FAIL_REGULAR_EXPRESSION "#38[^\n]*\\[amqp091\\]")
+
+# Non-standard port (54004 -> 9999, not AMQP_PORT): NOT claimed in Auto mode (port-gated) --
+# whichever OTHER opportunistic decoder's own gate happens to accept these bytes instead is not
+# this feature's concern, only that amqp091 itself declines -- but decodes correctly, including the
+# "not a configured/standard AMQP port" note, when --protocol amqp091 is forced.
+add_test(NAME amqp091_non_standard_port_not_claimed_in_auto_mode
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_amqp091.pcap" --format text -v)
+set_tests_properties(amqp091_non_standard_port_not_claimed_in_auto_mode PROPERTIES
+  FAIL_REGULAR_EXPRESSION "#39[^\n]*\\[amqp091\\]|#40[^\n]*\\[amqp091\\]")
+add_test(NAME amqp091_non_standard_port_forced_via_protocol_filter
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_amqp091.pcap" --protocol amqp091 --format text -v)
+set_tests_properties(amqp091_non_standard_port_forced_via_protocol_filter PROPERTIES
+  PASS_REGULAR_EXPRESSION "#39  [^\n]*\\[amqp091\\]  AMQP connection preamble: version 0-9-1[^\n]*\n *note: seen on TCP port 54004->9999, which is not a configured/standard AMQP port \\(5672\\)[^\n]*\n#40  [^\n]*\\[amqp091\\]  AMQP 0-9-1 METHOD \\(channel 0\\): Connection\\.Start \\(server-supported mechanisms: PLAIN\\)[^\n]*\n *note: seen on TCP port 9999->54004, which is not a configured/standard AMQP port \\(5672\\)")
+
+# --stats aggregation: per-method counts and all three curated headline findings.
+add_test(NAME amqp091_stats_method_counts_and_curated_findings
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_amqp091.pcap" --format text --stats)
+set_tests_properties(amqp091_stats_method_counts_and_curated_findings PROPERTIES
+  PASS_REGULAR_EXPRESSION "amqp 0-9-1 class\\.method counts:\n *Basic\\.Ack *1[^\n]*\n[^\n]*Basic\\.Cancel *1[^\\*]*\\*\\*\\* AMQP 0-9-1 cleartext credential exchanges \\(PLAIN/AMQPLAIN\\) observed: 1 \\*\\*\\*\namqp 0-9-1 connection/channel closes with reply-code >= 400: 1\namqp 0-9-1 Basic\\.Publish with immediate=true: 1"
+  FAIL_REGULAR_EXPRESSION "S3cr3tPLC!99")
+
+# `--protocol amqp091` also acts as a filter, excluding every other decoded protocol -- the same
+# filter-exclusion proof twincat_protocol_filter_excludes_other_protocols/ge_srtp's own analog
+# already establish. sample_amqp091.pcap's own packet #27 (see amqp091.hpp's own KNOWN COLLISION
+# note) is the one Modbus result this filter must ALSO exclude.
+add_test(NAME amqp091_protocol_filter_excludes_other_protocols
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_amqp091.pcap" --protocol amqp091 --format text)
+set_tests_properties(amqp091_protocol_filter_excludes_other_protocols PROPERTIES
+  FAIL_REGULAR_EXPRESSION "\\[modbus\\]|\\[hartip\\]")
+
+# --- AMQP 1.0 ----------------------------------------------------------------------------------
+
+add_test(NAME amqp10_preamble_and_open_open_ok_recognized
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_amqp10.pcap" --format text -v)
+set_tests_properties(amqp10_preamble_and_open_open_ok_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "#1  [^\n]*\\[amqp10\\]  AMQP connection preamble: version 1\\.0 \\(AMQP transport layer\\)[^\n]*\n#2  [^\n]*\\[amqp10\\]  AMQP open \\(container-id=\"scada-hmi-01\", hostname=\"broker\\.plant\\.local\"\\), channel 0[^\n]*\n#3  [^\n]*\\[amqp10\\]  AMQP open \\(container-id=\"broker-01\"\\), channel 0")
+
+add_test(NAME amqp10_begin_and_attach_source_target_extraction
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_amqp10.pcap" --format text -v)
+set_tests_properties(amqp10_begin_and_attach_source_target_extraction PROPERTIES
+  PASS_REGULAR_EXPRESSION "#4  [^\n]*AMQP begin, channel 1[^\n]*\n#5  [^\n]*AMQP begin, channel 1[^\n]*\n#6  [^\n]*AMQP attach \\(name=\"link-1\", role=sender, source=\"\", target=\"telemetry\\.queue\"\\), channel 1")
+
+add_test(NAME amqp10_flow_handle_extraction
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_amqp10.pcap" --format text -v)
+set_tests_properties(amqp10_flow_handle_extraction PROPERTIES
+  PASS_REGULAR_EXPRESSION "#8  [^\n]*AMQP flow \\(handle=0\\), channel 1")
+
+# transfer with a FULL message-section walk (header/properties/application-properties/data) and
+# curated property-field extraction -- JSON fields.
+add_test(NAME amqp10_transfer_message_section_walk_json_fields
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_amqp10.pcap" --format json)
+set_tests_properties(amqp10_transfer_message_section_walk_json_fields PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"amqp10_message_sections\": \\[\\{\"name\": \"header\", \"rendered\": \"durable=true, priority=4, ttl=60000[^\"]*\"\\}, \\{\"name\": \"properties\"[^}]*\\}, \\{\"name\": \"application-properties\", \"rendered\": \"2 entrie\\(s\\)\"\\}, \\{\"name\": \"data\", \"rendered\": \"14 byte\\(s\\)\"\\}\\],\n *\"amqp10_message_id\": \"msg-001\",\n *\"amqp10_correlation_id\": \"corr-abc\",\n *\"amqp10_message_to\": \"plc\\.telemetry\",\n *\"amqp10_subject\": \"sensor-reading\",\n *\"amqp10_content_type\": \"application/json\",\n *\"amqp10_application_properties\": \\[\\{\"name\": \"unit\", \"rendered\": \"celsius\"")
+
+# disposition -- a `rejected` delivery-state carrying a real error condition (proves delivery-
+# state/error extraction).
+add_test(NAME amqp10_disposition_rejected_delivery_state
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_amqp10.pcap" --format text -v)
+set_tests_properties(amqp10_disposition_rejected_delivery_state PROPERTIES
+  PASS_REGULAR_EXPRESSION "#10  [^\n]*AMQP disposition \\(first=1\\), channel 1")
+
+# detach and close each carrying a real error condition -- their own curated finding.
+add_test(NAME amqp10_detach_and_close_error_condition_findings
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_amqp10.pcap" --format text -v)
+set_tests_properties(amqp10_detach_and_close_error_condition_findings PROPERTIES
+  PASS_REGULAR_EXPRESSION "#11  [^\n]*AMQP detach \\(handle=0, error=amqp:resource-deleted\\), channel 1[^\n]*\n *note: detach error condition: amqp:resource-deleted \\(queue removed by admin\\)[^\n]*\n#12  [^\n]*AMQP end, channel 1[^\n]*\n#13  [^\n]*AMQP empty frame \\(keepalive\\), channel 0[^\n]*\n#14  [^\n]*AMQP close \\(error=amqp:connection:forced\\), channel 0[^\n]*\n *note: close error condition: amqp:connection:forced \\(too many connections\\)")
+
+# SASL layer -- sasl-mechanisms, sasl-init (PLAIN, its own cleartext-credential headline finding
+# AND redaction proof: the literal password "Op3nPLC\$99" must never appear), sasl-outcome success.
+add_test(NAME amqp10_sasl_preamble_mechanisms_and_init_cleartext_finding
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_amqp10.pcap" --format text -v)
+set_tests_properties(amqp10_sasl_preamble_mechanisms_and_init_cleartext_finding PROPERTIES
+  PASS_REGULAR_EXPRESSION "#15  [^\n]*AMQP connection preamble: version 1\\.0 \\(SASL layer negotiation\\)[^\n]*\n#16  [^\n]*SASL sasl-mechanisms \\(mechanisms=\\[PLAIN, ANONYMOUS\\]\\), channel 0[^\n]*\n#17  [^\n]*SASL sasl-init \\(mechanism=PLAIN\\), channel 0[^\n]*\n *note: cleartext credential exchange: SASL mechanism \"PLAIN\" carries the password in the clear on this connection \\(username: \"hmi_client\"\\)[^\n]*\n#18  [^\n]*SASL sasl-outcome \\(code=ok\\), channel 0"
+  FAIL_REGULAR_EXPRESSION "Op3nPLC\\$99")
+
+add_test(NAME amqp10_sasl_init_json_redaction_proof
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_amqp10.pcap" --format json)
+set_tests_properties(amqp10_sasl_init_json_redaction_proof PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"amqp10_fields\": \\[\\{\"name\": \"mechanism\", \"rendered\": \"PLAIN\"\\}, \\{\"name\": \"initial-response\", \"rendered\": \"\\[REDACTED\\] \\(22 byte\\(s\\)\\)\"\\}, \\{\"name\": \"hostname\", \"rendered\": \"broker\\.plant\\.local\"\\}\\],\n *\"amqp10_hostname\": \"broker\\.plant\\.local\",\n *\"amqp10_sasl_mechanism\": \"PLAIN\",\n *\"amqp10_sasl_response_length\": 22,\n *\"amqp10_sasl_username\": \"hmi_client\",\n *\"amqp10_cleartext_credentials\": true"
+  FAIL_REGULAR_EXPRESSION "Op3nPLC\\$99")
+
+# A SASL negotiation FAILURE outcome (code=1, "auth") -- its own curated finding.
+add_test(NAME amqp10_sasl_negotiation_failure_finding
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_amqp10.pcap" --format text -v)
+set_tests_properties(amqp10_sasl_negotiation_failure_finding PROPERTIES
+  PASS_REGULAR_EXPRESSION "#21  [^\n]*SASL sasl-outcome \\(code=auth\\), channel 0[^\n]*\n *note: SASL negotiation failed \\(code=1\\) -- possible credential-probing when seen repeatedly from one peer")
+
+# A connection split across two TCP segments for one frame -- exercises
+# Amqp10Decoder::tcp_declared_length via Decoder::reassemble_tcp_payload.
+add_test(NAME amqp10_tcp_segment_split_declared_length
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_amqp10.pcap" --format text -v)
+set_tests_properties(amqp10_tcp_segment_split_declared_length PROPERTIES
+  PASS_REGULAR_EXPRESSION "#23  [^\n]*buffering a AMQP 1\\.0 frame PDU/frame split across TCP segments 55003->5672: 6 of 53 declared byte\\(s\\) seen so far across 1 segment\\(s\\) on this flow, waiting for more")
+add_test(NAME amqp10_reassembled_from_two_tcp_segments
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_amqp10.pcap" --format text -v)
+set_tests_properties(amqp10_reassembled_from_two_tcp_segments PROPERTIES
+  PASS_REGULAR_EXPRESSION "#24  [^\n]*\\[amqp10\\]  AMQP open \\(container-id=\"scada-hmi-01\", hostname=\"broker\\.plant\\.local\"\\), channel 0[^\n]*\n *note: reassembled a AMQP 1\\.0 frame PDU/frame from 53 byte\\(s\\) spanning 2 TCP segments on this flow")
+
+# Negative control: a session whose preamble this codebase never captured must DECLINE to classify
+# as amqp10 at all -- in Auto mode AND under an explicit --protocol amqp10.
+add_test(NAME amqp10_mid_stream_no_preamble_declines_in_auto_mode
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_amqp10.pcap" --format text -v)
+set_tests_properties(amqp10_mid_stream_no_preamble_declines_in_auto_mode PROPERTIES
+  PASS_REGULAR_EXPRESSION "#25  [^\n]*\\[tcp\\]  TCP payload of 12 byte\\(s\\) on port 55004->5672"
+  FAIL_REGULAR_EXPRESSION "#25[^\n]*\\[amqp10\\]")
+add_test(NAME amqp10_mid_stream_no_preamble_declines_even_when_forced
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_amqp10.pcap" --protocol amqp10 --format text -v)
+set_tests_properties(amqp10_mid_stream_no_preamble_declines_even_when_forced PROPERTIES
+  FAIL_REGULAR_EXPRESSION "#25[^\n]*\\[amqp10\\]")
+
+# Non-standard port (55005 -> 9999, not AMQP_PORT): NOT claimed in Auto mode (port-gated), but
+# decodes correctly -- including the "not a configured/standard AMQP port" note on BOTH directions
+# -- when --protocol amqp10 is forced.
+add_test(NAME amqp10_non_standard_port_not_claimed_in_auto_mode
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_amqp10.pcap" --format text -v)
+set_tests_properties(amqp10_non_standard_port_not_claimed_in_auto_mode PROPERTIES
+  FAIL_REGULAR_EXPRESSION "#26[^\n]*\\[amqp10\\]|#27[^\n]*\\[amqp10\\]")
+add_test(NAME amqp10_non_standard_port_forced_via_protocol_filter
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_amqp10.pcap" --protocol amqp10 --format text -v)
+set_tests_properties(amqp10_non_standard_port_forced_via_protocol_filter PROPERTIES
+  PASS_REGULAR_EXPRESSION "#26  [^\n]*\\[amqp10\\]  AMQP connection preamble: version 1\\.0 \\(AMQP transport layer\\)[^\n]*\n *note: seen on TCP port 55005->9999, which is not a configured/standard AMQP port \\(5672\\)[^\n]*\n#27  [^\n]*\\[amqp10\\]  AMQP open \\(container-id=\"broker-01\"\\), channel 0[^\n]*\n *note: seen on TCP port 9999->55005, which is not a configured/standard AMQP port \\(5672\\)")
+
+# --stats aggregation: per-performative counts and all three curated headline findings.
+add_test(NAME amqp10_stats_performative_counts_and_curated_findings
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_amqp10.pcap" --format text --stats)
+set_tests_properties(amqp10_stats_performative_counts_and_curated_findings PROPERTIES
+  PASS_REGULAR_EXPRESSION "amqp 1\\.0 performative counts:\n *attach *2[^\\*]*\\*\\*\\* AMQP 1\\.0 cleartext credential exchanges \\(SASL PLAIN\\) observed: 2 \\*\\*\\*\namqp 1\\.0 detach/end/close frames carrying an error condition: 2\namqp 1\\.0 SASL negotiation failures: 1"
+  FAIL_REGULAR_EXPRESSION "Op3nPLC\\$99")
+
+# `--protocol amqp10` filter-exclusion proof -- run against sample_amqp091.pcap (genuinely
+# 0-9-1-shaped traffic throughout) and assert NO packet is ever claimed as amqp091: 1.0's own
+# preamble pattern never matches 0-9-1's, so this exercises the filter honestly excluding the
+# sibling wire-incompatible protocol, not merely an empty/trivial fixture.
+add_test(NAME amqp10_protocol_filter_excludes_amqp091
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_amqp091.pcap" --protocol amqp10 --format text)
+set_tests_properties(amqp10_protocol_filter_excludes_amqp091 PROPERTIES
+  FAIL_REGULAR_EXPRESSION "\\[amqp091\\]")
+
+# Both AMQP decoders share one --amqp-port option (see decoder.hpp's own extra_amqp_ports doc
+# comment) -- proves the CLI option parses and threads through without error (a no-op here since
+# both fixtures already use standard port 5672 throughout).
+add_test(NAME amqp_port_option_parses
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_amqp091.pcap" --amqp-port 5673 --format text)
+set_tests_properties(amqp_port_option_parses PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[amqp091\\]")

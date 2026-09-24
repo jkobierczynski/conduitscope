@@ -11033,3 +11033,226 @@ passing with zero regressions in both the default and
 rebuilds in both. See `include/conduitscope/rmcp.hpp`'s own file header
 for the full writeup, including the byte-exact confidence tier for every
 field sourced outside Wireshark's own dissector code.
+
+### AMQP 0-9-1 and AMQP 1.0 (Advanced Message Queuing Protocol) -- TCP port 5672
+
+Two genuinely separate, wire-INCOMPATIBLE protocols that happen to share
+the same default TCP port (5672; 5671 for TLS, out of scope beyond the
+generic TLS recognition this codebase already has). RabbitMQ's own native
+protocol is 0-9-1 (an extension of the abandoned AMQP 0-9 standard);
+1.0 is the later, unrelated OASIS-standardized wire format used by
+ActiveMQ Artemis, Azure Service Bus, and Qpid, among others. They do not
+interoperate on the wire at all -- a 0-9-1 peer and a 1.0 peer cannot
+talk to each other -- so this codebase decodes them as two entirely
+separate `ProtocolDecoder`s (`Amqp091Decoder` id `"amqp091"`,
+`Amqp10Decoder` id `"amqp10"`, `amqp091.hpp`/`amqp091.cpp` and
+`amqp10.hpp`/`amqp10.cpp`), not one decoder with an internal version
+branch, matching this document's own RMCP/ASF/IPMI precedent of several
+`--protocol` filter values sharing one port but never one decoder class.
+
+**Per-session version detection**: both protocols open with an 8-byte
+preamble unique to each (0-9-1: `"AMQP"` followed by `0 0 9 1`; 1.0:
+`"AMQP"` followed by a protocol-id byte -- `0` for the plain AMQP
+transport layer, `3` for SASL layer negotiation -- then `1 0 0`). The two
+decoders deliberately share ONE per-TCP-session flow-state bucket
+(`AmqpFlowState`, `amqp_common.hpp`/`amqp_common.cpp`) keyed by a shared
+`ctx.protocol_id = "amqp"` string rather than each decoder's own `id()`
+-- the one deliberate exception in this codebase to the usual
+`ctx.protocol_id == id()` convention, needed so that whichever decoder
+sees a session's preamble first "claims" that session for the rest of its
+lifetime, and the other decoder correctly declines every subsequent frame
+on it. **A session whose preamble was never captured (mid-stream-start
+capture) deliberately declines to classify as AMQP at all** -- a
+documented scope boundary, not a bug: `tcp_declared_length()` (used
+during TCP reassembly) has no `DecodeContext`/session-state access, so it
+can only recognize the preamble itself or a frame whose own header shape
+is self-describing enough to bound a length; the actual "have we seen
+this session's version yet" decision lives in each decoder's `decode()`,
+which does have session access, and returns no result (falls through to
+generic `[tcp]`) when the session's `AmqpFlowState::version` was never
+set. This holds in Auto mode AND under an explicit `--protocol
+amqp091`/`--protocol amqp10` filter -- forcing the protocol filter does
+not fabricate a version for a session that never proved one.
+
+**Structural detection gate**: `GateKind::TcpPort`, port-gated in Auto
+mode on port 5672 (the IANA-registered default for both). `--amqp-port`
+adds additional ports, shared across both decoders (matching GE SRTP's
+own `--ge-srtp-port` single-shared-list precedent, since both AMQP
+versions always share the exact same port by convention, the same
+reasoning RMCP/ASF/IPMI's shared `--rmcp-port` already uses above).
+`--protocol amqp091`/`--protocol amqp10` isolate one version specifically
+and, like every other explicit `--protocol` filter in this codebase, try
+that decoder port-independently.
+
+#### AMQP 0-9-1
+
+Fully decoded: the Connection.Start/Start-Ok/Tune/Tune-Ok/Open/Open-Ok/
+Close/Close-Ok method family; Channel.Open/Open-Ok; Exchange.Declare/
+Declare-Ok; Queue.Declare/Declare-Ok/Bind; Basic.Qos/Consume/Consume-Ok/
+Publish/Deliver/Get/Get-Ok/Ack/Reject/Nack; Tx.Select/Select-Ok; and the
+content HEADER (class, body size, property-flags-driven property list --
+`content-type`, `content-encoding`, `delivery-mode` rendered as
+`"2 (persistent)"`/`"1 (non-persistent)"`, `priority`, `correlation-id`,
+`reply-to`, `expiration`, `message-id`, `timestamp`, `type`, `user-id`,
+`app-id`) and BODY frames (byte count only, payload itself never stored
+or rendered). Recognized by name but shown as
+`"arguments not decoded -- layout not confirmed by this decoder's
+sourcing pass"` rather than fully decoded: Queue.Bind-Ok, Basic.Cancel,
+and every other class/method this decoder's own sourcing pass did not
+confirm a field-table layout for -- named via the standard class-id/
+method-id numeric table (a genuinely stable, publicly specified part of
+the protocol), never guessed at past that point.
+
+**Redaction**: Connection.Start-Ok's `response` field (the SASL initial
+response, which for the PLAIN mechanism is `\0<username>\0<password>` in
+the clear on the wire) reuses `kRedactedSecretPlaceholder`/
+`redact_secret_occurrences` from `protocol_decoder.hpp` exactly as
+IPMI's Auth Code and Netlogon's `NL_TRUST_PASSWORD` already do -- the raw
+response bytes are never stored past their own length, only the
+mechanism name, byte length, and (for PLAIN specifically, since its
+structure is simple and stable enough to parse safely) the extracted
+username are surfaced, both in `--format text` and `--format json`. This
+is the headline curated finding: a per-frame note reading `cleartext
+credential exchange: SASL mechanism "PLAIN" carries the password in the
+clear on this connection (username: "...")`, and a `--stats` headline
+count, `*** AMQP 0-9-1 cleartext credential exchanges (PLAIN/AMQPLAIN)
+observed: N ***`.
+
+Other curated findings: a Basic.Publish with `immediate=true` (RabbitMQ
+>= 3.0 rejects this outright; seeing it set suggests an old broker/client
+or active probing), and a Connection.Close/Channel.Close with a
+reply-code >= 400 (a client-error-class close, possibly a credential-
+probing or access-control rejection). `--stats` aggregates class.method
+counts alongside both headline counts.
+
+**Known collision, documented rather than "fixed" by reordering**: a
+0-9-1 HEARTBEAT frame's entire wire representation is a fixed 8-byte
+pattern (`08 00 00 00 00 00 00 CE`) with no variable content at all.
+Read as a Modbus/TCP MBAP header, this satisfies Modbus's own
+`protocol-id == 0` tell and sets the exception bit on an otherwise-
+plausible function code -- and since `decoder.cpp` tries Modbus well
+before AMQP in both its TCP-reassembly declared-length cascade and its
+main `decode()` dispatch cascade (a long-established ordering this
+feature deliberately does not disturb, to avoid any risk of regressing
+Modbus's own extensive existing test suite), a HEARTBEAT frame arriving
+in Auto mode on a shared/overlapping port can be claimed by Modbus's own
+`decode()` first, rendered as an `"Unknown (0x4e): malformed exception
+frame"` result, rather than reaching this decoder at all. An explicit
+`--protocol amqp091` still decodes it correctly (Modbus's own `decode()`
+is never tried at all under that filter). This is a narrow, honestly-
+documented Auto-mode ambiguity affecting only this one fixed-byte frame
+shape, not a general 0-9-1-vs-Modbus collision -- every other 0-9-1 frame
+this decoder handles carries a nonzero class-id/method-id or content in
+its own payload, which Modbus's own function-code-0 guard already
+reliably declines. See `include/conduitscope/amqp091.hpp`'s file header
+for the full byte-level writeup, and packet #27 of
+`tests/sample_amqp091.pcap` (visible under `--format text -v`) for a
+live, honestly-reproduced example rather than a hypothetical one.
+
+**Explicitly out of scope**: full field-table decode of every method's
+undocumented-layout arguments (Queue.Bind-Ok, Basic.Cancel, and similar,
+named but not decoded, as above); AMQPLAIN's own field-table-encoded
+credential layout (recognized as a mechanism name only -- its
+`LOGIN`/`PASSWORD` field-table entries are not walked, since 0-9-1
+deployments overwhelmingly negotiate PLAIN in practice); frame-level
+compression or any vendor-specific extension class.
+
+#### AMQP 1.0
+
+Fully decoded: the `open`/`begin`/`attach`/`flow`/`transfer`/
+`disposition`/`detach`/`end`/`close` performative family (described-type
+fast path, `0x00 0x53 <code> <list>`), each rendered with its most
+security/operations-relevant fields (open: container-id, hostname;
+attach: name, role, source/target address; flow: handle; transfer:
+handle; disposition: first delivery number and, for a `rejected` outcome,
+its own error condition; detach/end/close: handle and, when present, an
+`error` condition rendered as `condition (description)`); the SASL layer
+(`sasl-mechanisms`, `sasl-init`, `sasl-outcome`) at the connection's
+pre-AMQP-layer negotiation stage; and a `transfer`'s own message-section
+walk (`header`, `properties` -- `message-id`, `correlation-id`, `to`,
+`subject`, `content-type` -- `application-properties` as an entry count,
+`data` as a byte count), surfaced as both a per-frame summary and
+structured JSON fields (`amqp10_message_sections`, `amqp10_message_id`,
+`amqp10_correlation_id`, `amqp10_message_to`, `amqp10_subject`,
+`amqp10_content_type`, `amqp10_application_properties`).
+
+**Redaction**: `sasl-init`'s `initial-response` field (the SASL PLAIN
+initial response, `\0<username>\0<password>` in the clear on the wire,
+same construction as 0-9-1's own) reuses the same
+`kRedactedSecretPlaceholder`/`redact_secret_occurrences` helper, and the
+same `amqp_extract_plain_username()` shared with the 0-9-1 decoder --
+only the mechanism, byte length, and (for PLAIN) extracted username are
+surfaced, raw bytes never stored past their own length. Headline curated
+finding: `*** AMQP 1.0 cleartext credential exchanges (SASL PLAIN)
+observed: N ***`, plus a per-frame note matching 0-9-1's own wording.
+
+Other curated findings: a `detach`/`end`/`close` performative carrying a
+non-empty error condition (a link/session/connection-level error --
+deliberately distinct from a `disposition`'s own `rejected` delivery-
+state, which is a per-delivery outcome, not counted in this headline);
+and a `sasl-outcome` with a non-zero code (a SASL negotiation failure,
+possibly credential probing when seen repeatedly from one peer).
+`--stats` aggregates performative counts alongside all three headline
+counts.
+
+**Wire-format notes worth stating plainly**: the frame header's `SIZE`
+field counts the WHOLE frame (header included, unlike 0-9-1's own
+size field, which counts only the payload after the 7-byte header); the
+frame body is DOFF-word-aligned, so `DOFF` (data offset, in 4-byte
+words) must be honored before parsing the performative, not just the
+fixed 8-byte header; and the list8/list32/map8/map32/array8/array32
+encodings all size themselves as "byte count after the size field
+itself," with array specifically sharing one element constructor read
+once for the whole array rather than once per element -- both easy to
+get off-by-one on, and both exercised directly by this decoder's own
+test fixture (a `properties` list and an `application-properties` map in
+the same `transfer` frame).
+
+**Explicitly out of scope**: message-format-specific body decoding
+beyond a byte count (`amqp-sequence`/`amqp-value` sections are
+recognized as present but not decoded field-by-field); the `footer`
+section; link-credit/flow-control state tracking across frames;
+transaction (`declare`/`discharge`) performatives; and any
+vendor-specific extension type code.
+
+#### Validation
+
+Validated against `tests/sample_amqp091.pcap` and `tests/sample_amqp10.pcap`,
+built by `tools/make_sample_pcap.py`'s `build_amqp091_sample()`/
+`build_amqp10_sample()`: for 0-9-1, a full connection handshake including
+a PLAIN Start-Ok carrying a real (test-only) cleartext credential,
+Tune/Open, a Channel.Open/Exchange.Declare/Queue.Declare/Queue.Bind
+sequence, Basic.Qos/Consume/Publish (with `immediate=true`) plus its
+content HEADER and BODY frames, Basic.Deliver/Get/Get-Ok/Ack, two methods
+coalesced into a single TCP payload, a Connection.Close with reply-code
+530, a frame deliberately split across two TCP segments (reassembled
+correctly), a second preamble variant, a mid-stream session with no
+captured preamble (proving the decline-to-classify scope boundary in both
+Auto mode and under `--protocol amqp091`), and a non-standard-port pair
+(proving Auto mode stays generic while `--protocol amqp091`/
+`--amqp-port` both still decode it). For 1.0: `open`/`begin`/`attach`/
+`flow`/`transfer` with a full message-section walk, `disposition`
+(rejected outcome), `detach`/`close` each with a real error condition
+(`end` deliberately without one, as a negative control for the headline
+error count), an empty frame (keepalive), a full SASL negotiation
+(mechanisms/init/outcome) carrying a real cleartext credential, a second
+SASL negotiation ending in failure (`sasl-outcome` code=auth), a frame
+split across two TCP segments, and the same mid-stream-no-preamble and
+non-standard-port negative/positive controls as 0-9-1. Every decode path
+was run manually (`--format text -v`, `--format json`, `--stats`, and
+both new `--protocol` values) and its real output read -- including
+explicitly grepping decoded output for the literal test credential
+strings and confirming they never appear in any output format -- before
+any CTest regex was written, the same discipline this document's every
+other recent section describes. Two genuine fixture-design collisions
+with pre-existing weak protocol gates (Modbus's own weak declared-length
+guard on a 6-byte partial segment; HART-IP's own opportunistic
+port-independent gate on a channel-0 negative-control frame) were found
+this same way and fixed in the fixture, not papered over in the test
+assertions. 42 new `amqp091_*`/`amqp10_*`/`amqp_port_option_parses`
+CTest tests were added; the full suite grew from 1784 to 1826 in the
+default config and from 1772 to 1814 in the
+`-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF` config, passing with zero
+regressions in both, zero-warning clean rebuilds in both. See
+`include/conduitscope/amqp091.hpp` and `include/conduitscope/amqp10.hpp`'s
+own file headers for the full writeup.

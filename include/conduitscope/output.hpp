@@ -429,6 +429,26 @@ private:
     std::map<std::string, size_t> asf_message_type_counts_;
     std::map<std::string, size_t> ipmi_netfn_command_counts_;
     size_t ipmi_cipher_suite_zero_count_ = 0;
+    // AMQP 0-9-1/1.0 (amqp091.hpp/amqp10.hpp) -- method/performative counts (keyed by "Class.Method"
+    // for 0-9-1, by performative name for 1.0, the same "one map, keyed by rendered name" shape
+    // rip_command_counts_/coap_type_counts_ already use), plus this feature's own curated security
+    // findings, each printed on its own clearly-labeled headline line in --stats output, never
+    // folded into a generic map, the same "never buried" posture ipmi_cipher_suite_zero_count_
+    // already establishes -- see amqp091.hpp's/amqp10.hpp's own SECURITY sections:
+    //   - cleartext credential exchange (PLAIN/AMQPLAIN for 0-9-1, PLAIN for 1.0's SASL layer) --
+    //     this feature's own headline finding, the AMQP analog of Cipher Suite 0/Zerologon/DCSync.
+    //   - a 0-9-1 Connection/Channel.Close (or 1.0 detach/end/close) carrying an error --
+    //     reply-code >= 400 for 0-9-1, any non-empty error-condition for 1.0.
+    //   - 0-9-1 Basic.Publish with immediate=true (old-broker/probing signal, see amqp091.cpp).
+    //   - 1.0 SASL negotiation failure (sasl-outcome code != 0).
+    std::map<std::string, size_t> amqp091_method_counts_;
+    std::map<std::string, size_t> amqp10_performative_counts_;
+    size_t amqp091_cleartext_credentials_count_ = 0;
+    size_t amqp091_error_close_count_ = 0;
+    size_t amqp091_publish_immediate_count_ = 0;
+    size_t amqp10_cleartext_credentials_count_ = 0;
+    size_t amqp10_error_count_ = 0;
+    size_t amqp10_sasl_failure_count_ = 0;
     bool has_ts_ = false;
     double first_ts_ = 0.0, last_ts_ = 0.0;
 };

@@ -10,6 +10,9 @@
 #include <unordered_map>
 #include <vector>
 
+#include "conduitscope/amqp_common.hpp"
+#include "conduitscope/amqp091.hpp"
+#include "conduitscope/amqp10.hpp"
 #include "conduitscope/arp.hpp"
 #include "conduitscope/attack_detect.hpp"
 #include "conduitscope/bacnet.hpp"
@@ -317,6 +320,21 @@ enum class ProtocolFilter {
                            // when THIS filter value is the one selected (see rmcp.hpp's own
                            // DETECTION/DISPATCH section for why those two classes never reach this
                            // generic decoder in the first place, regardless of --protocol filter).
+    Amqp091Only,           // only attempt AMQP 0-9-1 (Advanced Message Queuing Protocol, the
+                           // RabbitMQ-era wire version -- 7-byte frame header/frame-end=0xCE
+                           // framing, class/method model) decoding -- see amqp091.hpp.
+                           // GateKind::TcpPort, default port 5672 (see AMQP_PORT in
+                           // amqp_common.hpp). Wire-incompatible with Amqp10Only below despite
+                           // sharing the same default port and an "AMQP" name -- see
+                           // amqp_common.hpp's own header comment for the shared 8-byte preamble
+                           // that is the only fully reliable way to distinguish the two, and for
+                           // why version detection is sticky per TCP session rather than
+                           // re-evaluated per frame.
+    Amqp10Only,            // only attempt AMQP 1.0 (the OASIS-standardized, ISO/IEC 19464 wire
+                           // version -- unrelated framing/type system from 0-9-1 above despite the
+                           // shared protocol name and default port) decoding -- see amqp10.hpp.
+                           // GateKind::TcpPort, same default port and detection posture as
+                           // Amqp091Only above.
 };
 
 struct DecodeOptions {
@@ -464,6 +482,16 @@ struct DecodeOptions {
                                                   // LLMNR's own three genuinely-different default
                                                   // ports, each of which needs its own list. See
                                                   // rmcp.hpp.
+    std::vector<uint16_t> extra_amqp_ports;     // TCP -- see AMQP_PORT (5672); one shared list
+                                                  // across BOTH AMQP decoders (0-9-1 and 1.0, see
+                                                  // amqp091.hpp/amqp10.hpp), the same "one list per
+                                                  // wire-shared port" shape extra_rmcp_ports above
+                                                  // already established, since both versions always
+                                                  // ride the same default port by convention despite
+                                                  // being wire-incompatible protocols -- see
+                                                  // amqp_common.hpp. GateKind::TcpPort, port-gated in
+                                                  // Auto mode (joins DoH/WinRM/DCOM/GE SRTP's own
+                                                  // gating group, not the UDP one above).
     std::vector<uint16_t> extra_codesys_ports;  // TCP (11740/1217) AND UDP (1740-1743) -- one
                                                   // shared list covers both transports, the same
                                                   // "one list, two ports/port-sets, different

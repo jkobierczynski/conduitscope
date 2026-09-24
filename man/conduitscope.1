@@ -489,7 +489,7 @@ regardless of where it's being analyzed \-\- an extension beyond what
 tshark/tcpdump themselves offer. See \fBdocs/USER_GUIDE.md\fR's OUTPUT
 FORMATS "Timestamps" subsection.
 .TP
-.B \-\-protocol {auto,modbus,dnp3,iec104,s7comm,s7comm\-plus,mms,enip,twincat,melsec,fins,bgp,kerberos,ldap,smb,profinet,goose,sv,ethercat,stp,devicenet,canopen,j1939,bacnet,hartip,opcua,mqtt,ff\-hse,dns,mdns,llmnr,nbns,doh,rip,igmp,vrrp,hsrp,igrp,pim,eigrp,ospf,remote\-access,lateral\-movement,enterprise\-trust,eapol,wireless\-backhaul,pppoe,tunnel\-vpn,mpls,arp,lldp,slow\-protocols,winrm,dcom,ge\-srtp,bsap,cclink\-ie,codesys,coap,zigbee,cdp,rmcp,asf,ipmi}
+.B \-\-protocol {auto,modbus,dnp3,iec104,s7comm,s7comm\-plus,mms,enip,twincat,melsec,fins,bgp,kerberos,ldap,smb,profinet,goose,sv,ethercat,stp,devicenet,canopen,j1939,bacnet,hartip,opcua,mqtt,ff\-hse,dns,mdns,llmnr,nbns,doh,rip,igmp,vrrp,hsrp,igrp,pim,eigrp,ospf,remote\-access,lateral\-movement,enterprise\-trust,eapol,wireless\-backhaul,pppoe,tunnel\-vpn,mpls,arp,lldp,slow\-protocols,winrm,dcom,ge\-srtp,bsap,cclink\-ie,codesys,coap,zigbee,cdp,rmcp,asf,ipmi,amqp091,amqp10}
 Restrict decoding to one protocol. Default: auto (tries all fourteen TCP
 protocols, independent of port number, plus CIP I/O, BACnet/IP, HART-IP, and
 FF-HSE on every
@@ -710,6 +710,25 @@ option, all three of \fBrmcp\fR/\fBasf\fR/\fBipmi\fR share ONE port list,
 \fB\-\-rmcp\-port\fR, since ASF and IPMI are just two Class values inside
 the identical RMCP envelope and always share the same port by
 construction \-\- see \fB\-\-rmcp\-port\fR below.
+\fBamqp091\fR/\fBamqp10\fR (TCP port 5672) are two genuinely separate,
+wire\-incompatible protocols \-\- RabbitMQ's native AMQP 0\-9\-1 and the
+later OASIS\-standardized AMQP 1.0 \-\- that happen to share the same
+default port and are gated the same way \fB\-\-protocol\fR values
+sharing a port always are in this tool: port\-gated in \fBauto\fR mode,
+tried port\-independently under an explicit \fB\-\-protocol amqp091\fR or
+\fB\-\-protocol amqp10\fR. Per\-TCP\-session version detection is sticky,
+keyed off each session's own 8\-byte connection preamble; a session whose
+preamble was never captured (a mid\-stream\-start capture) deliberately
+declines to classify as either AMQP version, in \fBauto\fR mode and under
+an explicit \fB\-\-protocol\fR filter alike \-\- a documented scope
+boundary, not a bug. Both share ONE port list, \fB\-\-amqp\-port\fR, the
+same reasoning \fB\-\-rmcp\-port\fR above already established for
+RMCP/ASF/IPMI. See \fBdocs/PROTOCOL_COVERAGE.md\fR's AMQP section for the
+full field-by-field writeup, including the PLAIN/SASL PLAIN cleartext
+credential redaction both versions share and a documented, honestly
+non\-"fixed" collision between a 0\-9\-1 HEARTBEAT frame's fixed 8\-byte
+wire shape and Modbus's own weak declared-length guard in \fBauto\fR mode
+only (an explicit \fB\-\-protocol amqp091\fR is unaffected).
 \fBigmp\fR (IP protocol 2), \fBvrrp\fR (IP protocol 112), \fBigrp\fR (IP
 protocol 9), \fBpim\fR (IP protocol 103), \fBeigrp\fR (IP protocol 88), and
 \fBospf\fR (IP protocol 89) need no port gate or option at all \-\- all six
@@ -902,6 +921,15 @@ across all three \fB\-\-protocol\fR values (\fBrmcp\fR/\fBasf\fR/\fBipmi\fR)
 \-\- unlike \fB\-\-dns\-port\fR/\fB\-\-mdns\-port\fR/\fB\-\-llmnr\-port\fR's
 three genuinely different default ports, RMCP/ASF/IPMI always share the
 exact same UDP port by wire\-format construction.
+.TP
+.B \-\-amqp\-port \fIPORT\fR
+Same as \fB\-\-dns\-port\fR, for AMQP 0\-9\-1 and AMQP 1.0 (built\-in
+default: 5672, TCP; see \fBdocs/PROTOCOL_COVERAGE.md\fR's AMQP section).
+Repeatable. Also widens detection in \fBauto\fR mode. ONE shared option
+across both \fB\-\-protocol\fR values (\fBamqp091\fR/\fBamqp10\fR) \-\-
+the same reasoning \fB\-\-rmcp\-port\fR above already established, since
+both AMQP versions always share the exact same default TCP port by
+convention despite being wire\-incompatible with each other.
 .TP
 .B \-\-remote\-access\-port \fIPORT\fR
 Additional TCP or UDP port to treat as expected for the Tier 1 "IT

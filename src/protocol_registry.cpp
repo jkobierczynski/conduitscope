@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "conduitscope/protocol_registry.hpp"
 
+#include "conduitscope/amqp091.hpp"
+#include "conduitscope/amqp10.hpp"
 #include "conduitscope/arp.hpp"
 #include "conduitscope/bacnet.hpp"
 #include "conduitscope/bgp.hpp"
@@ -398,6 +400,17 @@ const std::vector<const ProtocolDecoder*>& tcp_port_registry() {
                                    // comment's "STRUCTURAL DETECTION GATE" section. Not migrated:
                                    // none -- GE SRTP is this gate's fourth and (so far) last
                                    // protocol and it is migrated.
+        &amqp091_tcp_decoder(),  // AMQP 0-9-1 -- decoder.cpp's own AMQP call site likewise calls
+                                   // it directly (alongside amqp10_tcp_decoder() immediately
+                                   // below, both against the same shared "amqp" flow-state
+                                   // bucket). tcp_port() returns AMQP_PORT (5672,
+                                   // amqp_common.hpp). Port-gated in Auto mode for the same "no
+                                   // magic-byte-strength-on-every-frame structural gate" reason
+                                   // WinRM/DCOM/GE SRTP already are -- see amqp_common.hpp's own
+                                   // file header comment.
+        &amqp10_tcp_decoder(),  // AMQP 1.0 -- wire-incompatible with AMQP 0-9-1 immediately above
+                                  // despite sharing a name and default port; see amqp_common.hpp.
+                                  // tcp_port() also returns AMQP_PORT (5672).
     };
     return order;
 }

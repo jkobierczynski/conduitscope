@@ -1069,6 +1069,184 @@ void write_ge_srtp_json_fields(std::ostream& out, const GeSrtpFrame& gf) {
     out << "    \"ge_srtp_matched_to_request\": " << (gf.matched_to_request ? "true" : "false") << ",\n";
 }
 
+// Shared helper for both AMQP writers below: one JSON array of {"name":..., "rendered":...}
+// objects (Amqp091Value/Amqp10Field alike -- both are the same "name + human-readable rendering"
+// shape, see amqp091.hpp's own Amqp091Value comment for why a generic list is used instead of one
+// hand-written struct per method/performative). `name` is omitted from the object when empty (an
+// unnamed positional value, e.g. a method argument or array element).
+template <typename ValueList>
+void write_amqp_value_array(std::ostream& out, const char* key, const ValueList& values) {
+    if (values.empty()) return;
+    out << "    \"" << key << "\": [";
+    for (size_t i = 0; i < values.size(); ++i) {
+        if (i != 0) out << ", ";
+        out << "{";
+        if (!values[i].name.empty()) {
+            out << "\"name\": \"" << json_escape(values[i].name) << "\", ";
+        }
+        out << "\"rendered\": \"" << json_escape(values[i].rendered) << "\"}";
+    }
+    out << "],\n";
+}
+
+// The AMQP 0-9-1 analog of write_ge_srtp_json_fields above -- reads straight from the
+// Amqp091Result carried by DecodedPacket::result. Only the primary (`first`) frame's own fields
+// are surfaced as structured JSON; any further frames coalesced into the same TCP payload are
+// already folded into the packet's own top-level `notes` array (see amqp091.hpp's own
+// Amqp091Result comment) and are not duplicated here.
+void write_amqp091_json_fields(std::ostream& out, const Amqp091Result& r) {
+    const Amqp091Frame& f = r.first;
+    out << "    \"amqp091_frame_type\": \"" << (f.type_name ? f.type_name : "unknown") << "\",\n";
+    out << "    \"amqp091_channel\": " << f.channel << ",\n";
+    if (f.truncated) {
+        out << "    \"amqp091_truncated\": true,\n";
+    }
+    if (f.method) {
+        const Amqp091Method& m = *f.method;
+        out << "    \"amqp091_class\": \"" << json_escape(m.class_name ? m.class_name : "unknown")
+            << "\",\n";
+        out << "    \"amqp091_method\": \""
+            << json_escape(m.method_name ? m.method_name : "unknown") << "\",\n";
+        out << "    \"amqp091_arguments_decoded\": " << (m.arguments_decoded ? "true" : "false")
+            << ",\n";
+        if (!m.arguments_decoded) {
+            out << "    \"amqp091_undecoded_argument_bytes\": " << m.undecoded_argument_bytes
+                << ",\n";
+        }
+        write_amqp_value_array(out, "amqp091_fields", m.fields);
+        if (m.is_start_ok) {
+            if (m.sasl_mechanism) {
+                out << "    \"amqp091_sasl_mechanism\": \"" << json_escape(*m.sasl_mechanism)
+                    << "\",\n";
+            }
+            if (m.sasl_response_length) {
+                out << "    \"amqp091_sasl_response_length\": " << *m.sasl_response_length
+                    << ",\n";
+            }
+            if (m.sasl_username) {
+                out << "    \"amqp091_sasl_username\": \"" << json_escape(*m.sasl_username)
+                    << "\",\n";
+            }
+            out << "    \"amqp091_cleartext_credentials\": "
+                << (m.cleartext_credentials ? "true" : "false") << ",\n";
+        }
+        if (m.is_close) {
+            if (m.reply_code) {
+                out << "    \"amqp091_reply_code\": " << *m.reply_code << ",\n";
+            }
+            if (m.reply_text) {
+                out << "    \"amqp091_reply_text\": \"" << json_escape(*m.reply_text) << "\",\n";
+            }
+        }
+        if (m.is_basic_publish) {
+            out << "    \"amqp091_publish_immediate\": " << (m.publish_immediate ? "true" : "false")
+                << ",\n";
+        }
+    } else if (f.content_header) {
+        const Amqp091ContentHeader& ch = *f.content_header;
+        out << "    \"amqp091_content_header_class\": \""
+            << json_escape(amqp091_class_name(ch.class_id)) << "\",\n";
+        out << "    \"amqp091_content_body_size\": " << ch.body_size << ",\n";
+        write_amqp_value_array(out, "amqp091_properties", ch.properties);
+    } else if (f.body_bytes) {
+        out << "    \"amqp091_body_bytes\": " << *f.body_bytes << ",\n";
+    }
+}
+
+// The AMQP 1.0 analog of write_amqp091_json_fields above -- reads straight from the Amqp10Result
+// carried by DecodedPacket::result. Same "only the primary frame" scope as 0-9-1's own writer.
+void write_amqp10_json_fields(std::ostream& out, const Amqp10Result& r) {
+    const Amqp10Frame& f = r.first;
+    out << "    \"amqp10_frame_type\": \"" << (f.frame_type_name ? f.frame_type_name : "unknown")
+        << "\",\n";
+    out << "    \"amqp10_channel\": " << f.channel << ",\n";
+    if (f.is_empty) {
+        out << "    \"amqp10_is_empty\": true,\n";
+    }
+    if (f.truncated) {
+        out << "    \"amqp10_truncated\": true,\n";
+    }
+    if (f.performative) {
+        const Amqp10Performative& p = *f.performative;
+        out << "    \"amqp10_performative\": \"" << json_escape(p.name ? p.name : "unknown")
+            << "\",\n";
+        write_amqp_value_array(out, "amqp10_fields", p.fields);
+        if (p.container_id) {
+            out << "    \"amqp10_container_id\": \"" << json_escape(*p.container_id) << "\",\n";
+        }
+        if (p.hostname) {
+            out << "    \"amqp10_hostname\": \"" << json_escape(*p.hostname) << "\",\n";
+        }
+        if (p.handle) {
+            out << "    \"amqp10_handle\": " << *p.handle << ",\n";
+        }
+        if (p.role) {
+            out << "    \"amqp10_role\": \"" << (*p.role ? "receiver" : "sender") << "\",\n";
+        }
+        if (p.link_name) {
+            out << "    \"amqp10_link_name\": \"" << json_escape(*p.link_name) << "\",\n";
+        }
+        if (p.source_address) {
+            out << "    \"amqp10_source_address\": \"" << json_escape(*p.source_address)
+                << "\",\n";
+        }
+        if (p.target_address) {
+            out << "    \"amqp10_target_address\": \"" << json_escape(*p.target_address)
+                << "\",\n";
+        }
+        if (p.delivery_id) {
+            out << "    \"amqp10_delivery_id\": " << *p.delivery_id << ",\n";
+        }
+        if (p.settled) {
+            out << "    \"amqp10_settled\": " << (*p.settled ? "true" : "false") << ",\n";
+        }
+        if (p.error_condition) {
+            out << "    \"amqp10_error_condition\": \"" << json_escape(*p.error_condition)
+                << "\",\n";
+        }
+        if (p.error_description) {
+            out << "    \"amqp10_error_description\": \"" << json_escape(*p.error_description)
+                << "\",\n";
+        }
+        write_amqp_value_array(out, "amqp10_message_sections", p.message_sections);
+        if (p.message_id) {
+            out << "    \"amqp10_message_id\": \"" << json_escape(*p.message_id) << "\",\n";
+        }
+        if (p.correlation_id) {
+            out << "    \"amqp10_correlation_id\": \"" << json_escape(*p.correlation_id)
+                << "\",\n";
+        }
+        if (p.message_to) {
+            out << "    \"amqp10_message_to\": \"" << json_escape(*p.message_to) << "\",\n";
+        }
+        if (p.subject) {
+            out << "    \"amqp10_subject\": \"" << json_escape(*p.subject) << "\",\n";
+        }
+        if (p.content_type) {
+            out << "    \"amqp10_content_type\": \"" << json_escape(*p.content_type) << "\",\n";
+        }
+        write_amqp_value_array(out, "amqp10_application_properties", p.application_properties);
+        if (p.sasl_mechanism) {
+            out << "    \"amqp10_sasl_mechanism\": \"" << json_escape(*p.sasl_mechanism)
+                << "\",\n";
+        }
+        if (p.sasl_response_length) {
+            out << "    \"amqp10_sasl_response_length\": " << *p.sasl_response_length << ",\n";
+        }
+        if (p.sasl_username) {
+            out << "    \"amqp10_sasl_username\": \"" << json_escape(*p.sasl_username) << "\",\n";
+        }
+        if (p.is_sasl) {
+            out << "    \"amqp10_cleartext_credentials\": "
+                << (p.cleartext_credentials ? "true" : "false") << ",\n";
+        }
+        if (p.sasl_outcome_code) {
+            out << "    \"amqp10_sasl_outcome_code\": " << static_cast<unsigned>(*p.sasl_outcome_code)
+                << ",\n";
+        }
+    }
+}
+
 void write_bsap_json_fields(std::ostream& out, const BsapFrame& bf) {
     out << "    \"bsap_is_serial_tunnel\": " << (bf.is_serial_tunnel ? "true" : "false") << ",\n";
     if (bf.is_serial_tunnel) {
@@ -4240,6 +4418,12 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
     if (p.protocol == "zigbee" && p.result) {
         write_zigbee_json_fields(out_, p.result->as<ZigbeeFrame>());
     }
+    if (p.protocol == "amqp091" && p.result) {
+        write_amqp091_json_fields(out_, p.result->as<Amqp091Result>());
+    }
+    if (p.protocol == "amqp10" && p.result) {
+        write_amqp10_json_fields(out_, p.result->as<Amqp10Result>());
+    }
     out_ << "    \"notes\": [";
     for (size_t i = 0; i < p.notes.size(); ++i) {
         if (i != 0) out_ << ", ";
@@ -4832,6 +5016,37 @@ void StatsWriter::write_packet(const DecodedPacket& p) {
         }
         if (ifr.cipher_suite_zero) ipmi_cipher_suite_zero_count_++;
     }
+    if (p.protocol == "amqp091" && p.result) {
+        const Amqp091Frame& f = p.result->as<Amqp091Result>().first;
+        if (f.method) {
+            const Amqp091Method& m = *f.method;
+            std::string key = std::string(m.class_name ? m.class_name : "?") + "." +
+                               (m.method_name ? m.method_name : "?");
+            amqp091_method_counts_[key]++;
+            if (m.is_start_ok && m.cleartext_credentials) amqp091_cleartext_credentials_count_++;
+            if (m.is_close && m.reply_code && *m.reply_code >= 400) amqp091_error_close_count_++;
+            if (m.is_basic_publish && m.publish_immediate) amqp091_publish_immediate_count_++;
+        }
+    }
+    if (p.protocol == "amqp10" && p.result) {
+        const Amqp10Frame& f = p.result->as<Amqp10Result>().first;
+        if (f.performative) {
+            const Amqp10Performative& perf = *f.performative;
+            std::string perf_name = perf.name ? perf.name : "?";
+            amqp10_performative_counts_[perf_name]++;
+            if (perf.cleartext_credentials) amqp10_cleartext_credentials_count_++;
+            // Restricted to detach/end/close specifically (matching this counter's own --stats
+            // label) even though disposition's own `rejected` delivery-state can ALSO populate
+            // error_condition (see amqp10.cpp's own disposition handling) -- that's a per-delivery
+            // outcome, not a link/session/connection-level error, so it's deliberately not counted
+            // here.
+            if (perf.error_condition &&
+                (perf_name == "detach" || perf_name == "end" || perf_name == "close")) {
+                amqp10_error_count_++;
+            }
+            if (perf.sasl_outcome_code && *perf.sasl_outcome_code != 0) amqp10_sasl_failure_count_++;
+        }
+    }
     if (p.protocol == "zigbee" && p.result) {
         const ZigbeeFrame& zf = p.result->as<ZigbeeFrame>();
         if (zf.nwk_present) zigbee_nwk_frame_type_counts_[zigbee_nwk_frame_type_name(zf.nwk.frame_type)]++;
@@ -5379,6 +5594,43 @@ void StatsWriter::print_summary(std::ostream& out) const {
         out << "ospf types:\n";
         for (const auto& [name, count] : ospf_type_counts_) {
             out << "  " << std::left << std::setw(40) << name << count << "\n";
+        }
+    }
+    if (!amqp091_method_counts_.empty() || amqp091_cleartext_credentials_count_ > 0 ||
+        amqp091_error_close_count_ > 0 || amqp091_publish_immediate_count_ > 0) {
+        out << "amqp 0-9-1 class.method counts:\n";
+        for (const auto& [name, count] : amqp091_method_counts_) {
+            out << "  " << std::left << std::setw(40) << name << count << "\n";
+        }
+        // Headline finding -- always printed on its own line, never buried, matching this
+        // decoder's own SECURITY note (amqp091.hpp) and this codebase's own IPMI Cipher Suite 0
+        // precedent above.
+        out << "*** AMQP 0-9-1 cleartext credential exchanges (PLAIN/AMQPLAIN) observed: "
+            << amqp091_cleartext_credentials_count_ << " ***\n";
+        if (amqp091_error_close_count_ > 0) {
+            out << "amqp 0-9-1 connection/channel closes with reply-code >= 400: "
+                << amqp091_error_close_count_ << "\n";
+        }
+        if (amqp091_publish_immediate_count_ > 0) {
+            out << "amqp 0-9-1 Basic.Publish with immediate=true: "
+                << amqp091_publish_immediate_count_ << "\n";
+        }
+    }
+    if (!amqp10_performative_counts_.empty() || amqp10_cleartext_credentials_count_ > 0 ||
+        amqp10_error_count_ > 0 || amqp10_sasl_failure_count_ > 0) {
+        out << "amqp 1.0 performative counts:\n";
+        for (const auto& [name, count] : amqp10_performative_counts_) {
+            out << "  " << std::left << std::setw(40) << name << count << "\n";
+        }
+        // Headline finding -- same "never buried" posture as AMQP 0-9-1's own line above.
+        out << "*** AMQP 1.0 cleartext credential exchanges (SASL PLAIN) observed: "
+            << amqp10_cleartext_credentials_count_ << " ***\n";
+        if (amqp10_error_count_ > 0) {
+            out << "amqp 1.0 detach/end/close frames carrying an error condition: "
+                << amqp10_error_count_ << "\n";
+        }
+        if (amqp10_sasl_failure_count_ > 0) {
+            out << "amqp 1.0 SASL negotiation failures: " << amqp10_sasl_failure_count_ << "\n";
         }
     }
 }

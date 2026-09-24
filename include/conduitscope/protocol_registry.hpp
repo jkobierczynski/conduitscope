@@ -105,8 +105,14 @@ const std::vector<const ProtocolDecoder*>& tcp_port_independent_registry();
 // this gate right after DCOM, port-gated for the same "no magic-byte-strength structural gate"
 // reason WinRM/DCOM already are -- see ge_srtp.hpp's own file header comment's "STRUCTURAL
 // DETECTION GATE" section; decoder.cpp's own GE SRTP call site likewise calls
-// ge_srtp_tcp_decoder() directly. Not migrated: none -- all four of this gate's protocols are
-// migrated.
+// ge_srtp_tcp_decoder() directly. AMQP 0-9-1 and AMQP 1.0 (amqp091.hpp's Amqp091Decoder and
+// amqp10.hpp's Amqp10Decoder) join this gate right after GE SRTP, both port-gated for the same
+// "no magic-byte-strength structural gate on every frame" reason WinRM/DCOM/GE SRTP already are
+// (only the connection's very first message carries a self-describing 8-byte preamble; see
+// amqp_common.hpp's own file header comment) -- decoder.cpp's own single combined AMQP call site
+// calls both amqp091_tcp_decoder() and amqp10_tcp_decoder() directly, against one shared
+// per-session flow-state bucket (see amqp_common.hpp's STATEFULNESS section). Not migrated:
+// none -- all six of this gate's protocols are migrated.
 const std::vector<const ProtocolDecoder*>& tcp_port_registry();
 
 // Migrated UDP-port-gated protocols, in the order their decoder.cpp call sites run. This GateKind
