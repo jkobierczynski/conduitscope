@@ -111,6 +111,7 @@ add_library(conduitscope_core STATIC
   src/drsuapi.cpp
   src/winrm.cpp
   src/dcom.cpp
+  src/ge_srtp.cpp
   src/protocol_registry.cpp
   src/resource_limits.cpp
   src/decoder.cpp
@@ -10965,3 +10966,176 @@ add_test(NAME iccp_ordinary_iec61850_traffic_in_same_session_not_flagged
 set_tests_properties(iccp_ordinary_iec61850_traffic_in_same_session_not_flagged PROPERTIES
   PASS_REGULAR_EXPRESSION "#20[^\n]*read invokeID=8"
   FAIL_REGULAR_EXPRESSION "#20[^\n]*\n *note:")
+
+# GE SRTP (Service Request Transport Protocol), GE Fanuc/GE Intelligent Platforms PLC families
+# (90-30/90-70/RX3i/RX7i) -- see ge_srtp.hpp's own extensive header comment for the four-source
+# sourcing, the full wire format, and (notably) the writeup of two real protocol-collision bugs
+# against the existing TPKT/COTP decoder found and fixed while building this decoder.
+# tests/sample_ge_srtp.pcap (build_ge_srtp_sample, tools/make_sample_pcap.py). Packet #2 (INIT_ACK)
+# reuses real captured bytes from automayt/ICS-pcap's GE-SRTP/Notes.txt; every other packet is
+# synthetic (no real public GE SRTP pcap capture is known to exist).
+
+# INIT handshake: an all-zero 56-byte packet recognized purely structurally.
+add_test(NAME ge_srtp_init_handshake_recognized
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ge_srtp.pcap" --format text -v)
+set_tests_properties(ge_srtp_init_handshake_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "#1  [^\n]*\\[ge-srtp\\]  GE SRTP INIT \\(connection handshake, 56 all-zero bytes\\)")
+
+# INIT_ACK using the real captured bytes from automayt/ICS-pcap's Notes.txt -- its own body past
+# the common header is honestly left undecoded (no source independently verifies its layout),
+# never guessed at.
+add_test(NAME ge_srtp_init_ack_real_capture_body_honestly_undecoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ge_srtp.pcap" --format text -v)
+set_tests_properties(ge_srtp_init_ack_real_capture_body_honestly_undecoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "#2  [^\n]*INIT_ACK / Unrecognized message type 0x00 \\(not otherwise decoded\\)")
+
+# SHORT request: read system memory, decoded target (%R40, word-addressed) and the curated
+# security note (DFRWS 2017's "no authentication by default" field finding).
+add_test(NAME ge_srtp_short_read_request_target_and_security_note
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ge_srtp.pcap" --format text -v)
+set_tests_properties(ge_srtp_short_read_request_target_and_security_note PROPERTIES
+  PASS_REGULAR_EXPRESSION "#3  [^\n]*SHORT request: read system memory %R40 \\(1 word\\(s\\)\\)[^\n]*\n *note: arbitrary PLC memory read, commonly with no protocol-level authentication at all \\(DFRWS 2017 field finding on real GE Fanuc Series 90-30 deployments -- see ge_srtp\\.hpp\\)")
+add_test(NAME ge_srtp_short_read_request_json_fields
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ge_srtp.pcap" --format json)
+set_tests_properties(ge_srtp_short_read_request_json_fields PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"ge_srtp_service_request\": \"read system memory\",\n *\"ge_srtp_target\": \"%R40\",\n *\"ge_srtp_target_count\": 1,")
+
+# SHORT_ACK response -- proves AUTHORITATIVE session-scoped request/response pairing by GE SRTP's
+# own wire-carried Sequence Number (bytes 2-3), unlike MELSEC's/FINS's weaker single-slot
+# heuristic pairing.
+add_test(NAME ge_srtp_short_ack_response_authoritatively_paired_by_sequence_number
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ge_srtp.pcap" --format text -v)
+set_tests_properties(ge_srtp_short_ack_response_authoritatively_paired_by_sequence_number PROPERTIES
+  PASS_REGULAR_EXPRESSION "#4  [^\n]*SHORT_ACK response: No error[^\n]*\n *note: matched to the read system memory request seen in packet #3 on this session \\(authoritatively paired by GE SRTP's own Sequence Number, bytes 2-3\\)")
+add_test(NAME ge_srtp_short_ack_response_json_fields
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ge_srtp.pcap" --format json)
+set_tests_properties(ge_srtp_short_ack_response_json_fields PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"ge_srtp_status\": \"No error\",\n *\"ge_srtp_return_data\": \"d20400000000\",\n *\"ge_srtp_control_program_state\": \"logged in to a program task\",\n *\"ge_srtp_matched_to_request\": true,")
+
+# SHORT request: write system memory -- the write-side security note.
+add_test(NAME ge_srtp_write_system_memory_security_note
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ge_srtp.pcap" --format text -v)
+set_tests_properties(ge_srtp_write_system_memory_security_note PROPERTIES
+  PASS_REGULAR_EXPRESSION "#5  [^\n]*SHORT request: write system memory %R39 \\(1 word\\(s\\)\\)[^\n]*\n *note: arbitrary PLC memory write, commonly with no protocol-level authentication at all")
+
+# Bit-addressed segment selector (%Q, discrete output) -- proves the selector table distinguishes
+# bit-addressed areas (%I/%Q/%M/%T/%SA/%SB/%SC/%S/%G) from word-only areas (%AI/%AQ/%R) and
+# renders target_text with the correct 1-based address.
+add_test(NAME ge_srtp_bit_addressed_selector_target_text
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ge_srtp.pcap" --format text -v)
+set_tests_properties(ge_srtp_bit_addressed_selector_target_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "#7  [^\n]*SHORT request: read system memory %Q497 \\(16 bit\\(s\\)\\)")
+
+# Get controller type/id -- reconnaissance-flavored security note (PLC hardware/firmware
+# fingerprinting available to any network-reachable client).
+add_test(NAME ge_srtp_controller_type_recon_note
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ge_srtp.pcap" --format text -v)
+set_tests_properties(ge_srtp_controller_type_recon_note PROPERTIES
+  PASS_REGULAR_EXPRESSION "#9  [^\n]*SHORT request: get controller type and id information[^\n]*\n *note: get controller type and id information: unauthenticated reconnaissance -- reveals PLC hardware/firmware family to any network-reachable client")
+
+# Set PLC run/stop -- rejected with SHORT_ERR (Nack), decoded status code and matched-request
+# pairing surviving across a rejected call.
+add_test(NAME ge_srtp_run_stop_control_rejected_with_short_err_nack
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ge_srtp.pcap" --format text -v)
+set_tests_properties(ge_srtp_run_stop_control_rejected_with_short_err_nack PROPERTIES
+  PASS_REGULAR_EXPRESSION "#12  [^\n]*SHORT_ERR response \\(Nack\\): insufficient privilege level \\(status minor 0x00\\)[^\n]*\n *note: request rejected \\(SHORT_ERR / Nack Mailbox message\\)\n *note: matched to the set PLC \\(run vs\\. stop\\) request seen in packet #11 on this session")
+
+# Program store (upload FROM the PLC) -- reconnaissance-flavored security note (control-logic
+# program disclosure).
+add_test(NAME ge_srtp_program_store_upload_recon_note
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ge_srtp.pcap" --format text -v)
+set_tests_properties(ge_srtp_program_store_upload_recon_note PROPERTIES
+  PASS_REGULAR_EXPRESSION "#13  [^\n]*SHORT request: program store \\(upload from PLC\\)[^\n]*\n *note: program store \\(upload FROM the PLC\\): unauthenticated reconnaissance risk")
+
+# Unrecognized service request code -- structural-only fallback, never-guess numeric naming, and
+# (NEGATIVE CONTROL) no curated security note fires for a code this decoder doesn't recognize.
+add_test(NAME ge_srtp_unrecognized_service_request_code_structural_only
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ge_srtp.pcap" --format text -v)
+set_tests_properties(ge_srtp_unrecognized_service_request_code_structural_only PROPERTIES
+  PASS_REGULAR_EXPRESSION "#15  [^\n]*SHORT request: Unknown service request code 0x99"
+  FAIL_REGULAR_EXPRESSION "#15[^\n]*\n *note:")
+
+# EXTENDED request: write task memory, multi-word target and trailing bulk payload byte count.
+add_test(NAME ge_srtp_extended_request_write_task_memory
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ge_srtp.pcap" --format text -v)
+set_tests_properties(ge_srtp_extended_request_write_task_memory PROPERTIES
+  PASS_REGULAR_EXPRESSION "#17  [^\n]*EXTENDED request: write task memory %R1000 \\(10 word\\(s\\)\\)")
+
+# EXTENDED_ACK response -- THE COLLISION-FIX REGRESSION TEST. Before the fix, GE SRTP's own
+# declared-length function returned nullopt for EXTENDED_ACK (its body layout past the common
+# header is not independently verified by any source, so no length was claimed), which let
+# TPKT/COTP's weaker structural gate opportunistically claim this packet instead (GE SRTP's own
+# Packet Type 3 supplies TPKT's magic version byte 0x03 by coincidence) and corrupt every
+# subsequent server->client packet on the flow into a bogus ongoing TPKT reassembly. This packet
+# must show [ge-srtp] with its honestly-undecoded body, NOT [tcp] buffering a TPKT/COTP PDU.
+add_test(NAME ge_srtp_extended_ack_undecoded_body_and_tpkt_collision_fix
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ge_srtp.pcap" --format text -v)
+set_tests_properties(ge_srtp_extended_ack_undecoded_body_and_tpkt_collision_fix PROPERTIES
+  PASS_REGULAR_EXPRESSION "#18  [^\n]*\\[ge-srtp\\]  EXTENDED_ACK response \\(14 byte\\(s\\) from byte 42 onward, layout not independently verified -- see ge_srtp\\.hpp\\)[^\n]*\n *note: matched to the write task memory request seen in packet #17"
+  FAIL_REGULAR_EXPRESSION "#18[^\n]*TPKT")
+
+# UNKNOWN (Packet Type 8) -- structural recognition of a packet type this decoder cannot further
+# classify, honestly undecoded rather than guessed at.
+add_test(NAME ge_srtp_unknown_packet_type_structural_recognition
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ge_srtp.pcap" --format text -v)
+set_tests_properties(ge_srtp_unknown_packet_type_structural_recognition PROPERTIES
+  PASS_REGULAR_EXPRESSION "#19  [^\n]*UNKNOWN / Unrecognized message type 0xAB \\(not otherwise decoded\\)")
+
+# NEGATIVE CONTROL: an orphan response (sequence number with no matching prior request on this
+# session) must show the "no outstanding request" note and must NOT be shown as matched to any
+# service request.
+add_test(NAME ge_srtp_orphan_response_no_outstanding_request_note
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ge_srtp.pcap" --format text -v)
+set_tests_properties(ge_srtp_orphan_response_no_outstanding_request_note PROPERTIES
+  PASS_REGULAR_EXPRESSION "#20  [^\n]*SHORT_ACK response: No error[^\n]*\n *note: no outstanding request with this sequence number found on this session -- this response's own service request is unknown"
+  FAIL_REGULAR_EXPRESSION "#20[^\n]*\n *note: matched to")
+
+# NEGATIVE CONTROL: a payload whose Packet Type (256) is not one of GE SRTP's own recognized
+# values {0,1,2,3,8} must be REJECTED by GE SRTP's own gate and must NOT be misclassified as any
+# other opportunistic protocol either (this exact payload's leading byte, chosen deliberately,
+# would otherwise satisfy MQTT's own intentionally weak single-byte gate).
+add_test(NAME ge_srtp_gate_rejects_invalid_packet_type_and_falls_through_cleanly
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ge_srtp.pcap" --format text -v)
+set_tests_properties(ge_srtp_gate_rejects_invalid_packet_type_and_falls_through_cleanly PROPERTIES
+  PASS_REGULAR_EXPRESSION "#21  [^\n]*\\[tcp\\]  TCP payload of 56 byte\\(s\\) on port 53600->18245"
+  FAIL_REGULAR_EXPRESSION "#21[^\n]*\\[(ge-srtp|mqtt)\\]")
+
+# THE OTHER COLLISION-FIX REGRESSION TEST: a SHORT request's response split across two TCP
+# segments, first segment only 20 of 56 bytes. Before the two-phase declared-length fix, GE
+# SRTP's own function required the full 56 bytes before it could read Message Type (byte 31) and
+# determine shape, so on this short first segment it returned nullopt unconditionally --
+# letting TPKT/COTP's weaker gate win the race and misclassify the buffering state. Must show
+# "buffering a GE SRTP message PDU/frame", not "buffering a TPKT/COTP PDU/frame".
+add_test(NAME ge_srtp_short_first_segment_reassembly_two_phase_declaration_fix
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ge_srtp.pcap" --format text -v)
+set_tests_properties(ge_srtp_short_first_segment_reassembly_two_phase_declaration_fix PROPERTIES
+  PASS_REGULAR_EXPRESSION "#23  [^\n]*buffering a GE SRTP message PDU/frame split across TCP segments 18245->53600: 20 of 56 declared byte\\(s\\) seen so far across 1 segment\\(s\\) on this flow, waiting for more"
+  FAIL_REGULAR_EXPRESSION "#23[^\n]*TPKT")
+add_test(NAME ge_srtp_reassembled_from_two_tcp_segments
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ge_srtp.pcap" --format text -v)
+set_tests_properties(ge_srtp_reassembled_from_two_tcp_segments PROPERTIES
+  PASS_REGULAR_EXPRESSION "#24  [^\n]*\\[ge-srtp\\]  SHORT_ACK response: No error[^\n]*\n *note: reassembled a GE SRTP message PDU/frame from 56 byte\\(s\\) spanning 2 TCP segments on this flow\n *note: matched to the read system memory request seen in packet #22")
+
+# Non-standard port (9999, not 18245) in Auto (port-gated) mode: GE SRTP's own GateKind::TcpPort
+# means it does NOT claim traffic on an unconfigured port here -- the packet stays generic [tcp]
+# (and, since GE SRTP declines, TPKT/COTP's own weaker gate opportunistically claims the second
+# half of the exchange, exactly as it would for any other protocol not listening on this port).
+add_test(NAME ge_srtp_non_standard_port_not_claimed_in_auto_mode
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ge_srtp.pcap" --format text -v)
+set_tests_properties(ge_srtp_non_standard_port_not_claimed_in_auto_mode PROPERTIES
+  PASS_REGULAR_EXPRESSION "#25  [^\n]*\\[tcp\\]  TCP payload of 56 byte\\(s\\) on port 53601->9999"
+  FAIL_REGULAR_EXPRESSION "#25[^\n]*\\[ge-srtp\\]")
+
+# The same non-standard-port exchange DOES decode correctly when GE SRTP is explicitly forced
+# via --protocol ge-srtp (which tries GE SRTP port-independently), including the "not a
+# configured/standard GE SRTP port" note and authoritative pairing still working.
+add_test(NAME ge_srtp_forced_protocol_decodes_non_standard_port
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ge_srtp.pcap" --protocol ge-srtp --format text -v)
+set_tests_properties(ge_srtp_forced_protocol_decodes_non_standard_port PROPERTIES
+  PASS_REGULAR_EXPRESSION "#25  [^\n]*\\[ge-srtp\\]  SHORT request: read system memory %R1 \\(1 word\\(s\\)\\)[^\n]*\n *note: arbitrary PLC memory read[^\n]*\n *note: seen on TCP port 53601->9999, which is not a configured/standard GE SRTP port \\(18245\\)")
+
+# --stats aggregation: per-service-name request counts and the authoritative-pairing count.
+add_test(NAME ge_srtp_stats_service_names_and_paired_response_count
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ge_srtp.pcap" --format text --stats)
+set_tests_properties(ge_srtp_stats_service_names_and_paired_response_count PROPERTIES
+  PASS_REGULAR_EXPRESSION "ge srtp service request names:\n *Unknown service request code 0x99 *1\n *get controller type and id information *1\n *program store \\(upload from PLC\\) *1\n *read system memory *3\n *set PLC \\(run vs\\. stop\\) *1\n *write system memory *1\n *write task memory *1\nge srtp responses authoritatively paired \\(sequence number, not heuristic\\): 9")

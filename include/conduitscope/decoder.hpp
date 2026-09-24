@@ -26,6 +26,7 @@
 #include "conduitscope/ethercat.hpp"
 #include "conduitscope/ffhse.hpp"
 #include "conduitscope/fins.hpp"
+#include "conduitscope/ge_srtp.hpp"
 #include "conduitscope/goose.hpp"
 #include "conduitscope/hartip.hpp"
 #include "conduitscope/hsrp.hpp"
@@ -219,6 +220,13 @@ enum class ProtocolFilter {
                            // (GateKind::TcpPort, port-gated in Auto mode, the third protocol on that
                            // gate, joining DoH/WinRM) -- NOT SMB-wrapped, unlike every earlier
                            // interface in this batch; see dcom.hpp's own TRANSPORT section.
+    GeSrtpOnly,            // only attempt GE SRTP (Service Request Transport Protocol, GE Fanuc/GE
+                           // Intelligent Platforms PLC protocol; TCP port 18245) decoding -- see
+                           // ge_srtp.hpp. A brand-new protocol (not part of the Windows RPC/remote-
+                           // management batch above, despite landing right after it), built
+                           // entirely on the ProtocolDecoder interface from inception like TwinCAT/
+                           // MELSEC/FINS. GateKind::TcpPort (port-gated in Auto mode, joining DoH/
+                           // WinRM/DCOM on that gate), the fourth protocol on it.
 };
 
 struct DecodeOptions {
@@ -313,6 +321,15 @@ struct DecodeOptions {
                                                   // Auto mode rather than tried opportunistically on
                                                   // every TCP payload. See dcom.hpp's own file
                                                   // header comment.
+    std::vector<uint16_t> extra_ge_srtp_ports;  // TCP -- see GE_SRTP_PORT (18245). Joins the same
+                                                  // detection-gating group as extra_doh_ports/
+                                                  // extra_winrm_ports/extra_dcom_ports above
+                                                  // (GateKind::TcpPort, port-gated even in Auto
+                                                  // mode) -- GE SRTP's own structural gate (a small
+                                                  // enumerated Packet Type plus Message Type, no
+                                                  // magic-constant field at all) is weaker still, so
+                                                  // this stays port-gated in Auto mode too. See
+                                                  // ge_srtp.hpp's own file header comment.
     std::vector<uint16_t> extra_rip_ports;      // UDP -- see RIP_PORT (520); joins the same
                                                   // detection-gating group as DNS/mDNS/LLMNR/
                                                   // NBT-NS above, for the same reason: RIP's wire

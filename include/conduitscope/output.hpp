@@ -335,6 +335,15 @@ private:
                                                          // every earlier interface in this batch) can
                                                          // have more than one interface bound per
                                                          // session -- see dcom.hpp's own STATE section
+    // GE SRTP's own service-request-name breakdown (ge_srtp.hpp), read from DecodedPacket::result
+    // the same way melsec_command_counts_ above is. Keyed by GeSrtpFrame::service_request_name --
+    // requests only (a response's own name is only known once matched, see below).
+    std::map<std::string, size_t> ge_srtp_service_counts_;
+    // Session-scoped matches (see ge_srtp.hpp/ge_srtp.cpp) -- UNLIKE melsec_matched_responses_/
+    // fins_matched_responses_ above, this IS authoritative pairing (GE SRTP's own Sequence Number
+    // is a genuine wire-carried transaction ID) -- the same tier modbus_paired_responses_/
+    // twincat_paired_responses_ above already established.
+    size_t ge_srtp_paired_responses_ = 0;
     std::map<std::string, size_t> rip_command_counts_;   // keyed by rip_command_name
     std::map<std::string, size_t> icmp_type_counts_;     // keyed by icmp_type_name
     std::map<std::string, size_t> igmp_type_counts_;     // keyed by igmp_type_name

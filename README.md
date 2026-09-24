@@ -71,6 +71,17 @@ the dynamically negotiated data-channel port those calls resolve is not
 followed -- **note:** the plan's own recollected `IObjectExporter`
 interface UUID was wrong; see `docs/PROTOCOL_COVERAGE.md`'s DCOM section
 for the empirically-corrected value and the full scope writeup),
+GE SRTP (Service Request Transport Protocol, GE Fanuc/GE Intelligent
+Platforms, TCP port 18245 -- programming/monitoring/control for the
+90-30/90-70/RX3i/RX7i PLC families, with authoritative session-scoped
+request/response pairing by GE SRTP's own wire-carried Sequence Number
+and curated unauthenticated-memory-read/write, unauthenticated-
+controller-recon, program-store/load, and run/stop-control
+attack/monitoring notes sourced from the DFRWS 2017 forensics paper's own
+field-deployment findings -- **note:** two real protocol-collision bugs
+against the existing TPKT/COTP decoder were found and fixed while
+building this decoder; see `docs/PROTOCOL_COVERAGE.md`'s GE SRTP section
+for the writeup),
 IEEE Spanning Tree Protocol
 (STP/RSTP/MSTP), DeviceNet (CAN-bus CIP, via SocketCAN pcap captures), DNS,
 mDNS, LLMNR, and NetBIOS Name Service (NBT-NS), ICMP, RIP, IGMP, VRRP, HSRP,
@@ -180,7 +191,7 @@ traffic match what the segmentation policy says it should" question.
 
 Groundwork / v0.2.4. Every protocol named above is implemented, decoding real
 wire-format fields (not just naming the protocol), and covered by the
-automated test suite -- 1555 tests as of this writing, run via `ctest` after
+automated test suite -- 1577 tests as of this writing, run via `ctest` after
 building (see Building below). Where a real capture was available (public
 ICS-lab collections, vendor-attributed samples, or a live device on real
 hardware), the decoder is validated against it, not just a synthetic

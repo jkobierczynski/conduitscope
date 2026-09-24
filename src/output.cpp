@@ -867,6 +867,42 @@ void write_dcom_json_fields(std::ostream& out, const DcomMessage& m) {
     }
 }
 
+// The GE SRTP analog of write_melsec_json_fields above -- reads straight from the GeSrtpFrame
+// carried by DecodedPacket::result. See ge_srtp.hpp's own file header comment for what each field
+// means.
+void write_ge_srtp_json_fields(std::ostream& out, const GeSrtpFrame& gf) {
+    out << "    \"ge_srtp_packet_type\": \"" << json_escape(gf.packet_type_name) << "\",\n";
+    out << "    \"ge_srtp_message_type\": \"" << json_escape(gf.message_type_name) << "\",\n";
+    out << "    \"ge_srtp_is_response\": " << (gf.is_response ? "true" : "false") << ",\n";
+    out << "    \"ge_srtp_sequence_number\": " << gf.sequence_number << ",\n";
+    if (gf.has_service_request) {
+        out << "    \"ge_srtp_service_request\": \"" << json_escape(gf.service_request_name) << "\",\n";
+    }
+    if (gf.has_target) {
+        out << "    \"ge_srtp_target\": \"" << json_escape(gf.target.target_text) << "\",\n";
+        out << "    \"ge_srtp_target_count\": " << gf.target.target_count << ",\n";
+    }
+    if (!gf.inline_payload_hex.empty()) {
+        out << "    \"ge_srtp_inline_payload\": \"" << json_escape(gf.inline_payload_hex) << "\",\n";
+    }
+    if (gf.has_extended_trailing_payload) {
+        out << "    \"ge_srtp_extended_trailing_payload_bytes\": "
+            << gf.extended_trailing_payload_byte_count << ",\n";
+    }
+    if (gf.has_status) {
+        out << "    \"ge_srtp_status\": \"" << json_escape(gf.status_code_name) << "\",\n";
+        out << "    \"ge_srtp_return_data\": \"" << json_escape(gf.return_data_hex) << "\",\n";
+    }
+    if (gf.has_control_program_number) {
+        out << "    \"ge_srtp_control_program_state\": \""
+            << json_escape(gf.control_program_state) << "\",\n";
+    }
+    if (gf.has_undecoded_body) {
+        out << "    \"ge_srtp_undecoded_body_bytes\": " << gf.undecoded_body_byte_count << ",\n";
+    }
+    out << "    \"ge_srtp_matched_to_request\": " << (gf.matched_to_request ? "true" : "false") << ",\n";
+}
+
 // Renders one RipRoute as a single line -- see rip.hpp for what each of the three RTE shapes
 // (ordinary route, full-table-request marker, authentication entry) means. Reproduces
 // decoder.cpp's own former rip_route_summary exactly (that copy was retired along with the
@@ -3520,6 +3556,9 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
     if (p.protocol == "dcom" && p.result) {
         write_dcom_json_fields(out_, p.result->as<DcomMessage>());
     }
+    if (p.protocol == "ge-srtp" && p.result) {
+        write_ge_srtp_json_fields(out_, p.result->as<GeSrtpFrame>());
+    }
     out_ << "    \"notes\": [";
     for (size_t i = 0; i < p.notes.size(); ++i) {
         if (i != 0) out_ << ", ";
@@ -4000,6 +4039,13 @@ void StatsWriter::write_packet(const DecodedPacket& p) {
             if (!dc.is_response) dcom_call_counts_[dc.interface_name + " " + dc.opnum_name]++;
         }
     }
+    if (p.protocol == "ge-srtp" && p.result) {
+        const GeSrtpFrame& gf = p.result->as<GeSrtpFrame>();
+        if (!gf.is_response && gf.has_service_request) {
+            ge_srtp_service_counts_[gf.service_request_name]++;
+        }
+        if (gf.is_response && gf.matched_to_request) ge_srtp_paired_responses_++;
+    }
     if (p.protocol == "rip" && p.result) {
         rip_command_counts_[p.result->as<RipMessage>().command_name]++;
     }
@@ -4343,6 +4389,14 @@ void StatsWriter::print_summary(std::ostream& out) const {
         for (const auto& [name, count] : dcom_call_counts_) {
             out << "  " << std::left << std::setw(40) << name << count << "\n";
         }
+    }
+    if (!ge_srtp_service_counts_.empty()) {
+        out << "ge srtp service request names:\n";
+        for (const auto& [name, count] : ge_srtp_service_counts_) {
+            out << "  " << std::left << std::setw(40) << name << count << "\n";
+        }
+        out << "ge srtp responses authoritatively paired (sequence number, not heuristic): "
+            << ge_srtp_paired_responses_ << "\n";
     }
     if (!rip_command_counts_.empty()) {
         out << "rip commands:\n";

@@ -14117,6 +14117,244 @@ def build_wmi_dcom_activation_sample():
     (TESTS_DIR / "sample_wmi_dcom_activation_tcp_split.pcap").write_bytes(split_data)
 
 
+# ---------------------------------------------------------------------------------------------
+# GE SRTP (Service Request Transport Protocol), TCP port 18245 -- see ge_srtp.hpp's file header
+# comment for the full wire format, sourcing, and structural detection gate.
+
+GE_SRTP_PORT = 18245
+
+# The real captured INIT_ACK response bytes from automayt/ICS-pcap's own GE-SRTP/Notes.txt (see
+# ge_srtp.hpp's file header comment's "SOURCING" section, source 4) -- 56 bytes, all zero except
+# byte 0 (Packet Type low byte, == 1) and byte 8 (0x0f, unexplained by any source, deliberately NOT
+# decoded by this project -- see ge_srtp.hpp's "EXPLICITLY OUT OF SCOPE" section).
+GE_SRTP_REAL_INIT_ACK = bytes([0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0f] + [0x00] * 47)
+assert len(GE_SRTP_REAL_INIT_ACK) == 56
+
+
+def ge_srtp_header(packet_type: int, seq: int, msg_type: int, mailbox_src: int = 0,
+                    mailbox_dst: int = 0x00000E10, packet_num: int = 1, total_packet_num: int = 1) -> bytes:
+    """The 42-byte common header shared by every non-INIT GE SRTP message -- see ge_srtp.hpp's file
+    header comment's "WIRE FORMAT" section for every field's meaning."""
+    h = struct.pack("<H", packet_type)          # 0-1 Packet Type
+    h += struct.pack("<H", seq)                  # 2-3 Sequence Number
+    h += struct.pack("<H", 0)                     # 4-5 Text Length
+    h += b"\x00" * 20                              # 6-25 reserved/unknown
+    h += bytes([0, 0, 0, 0])                       # 26-29 time (s/m/h) + reserved
+    h += struct.pack("<B", seq & 0xFF)             # 30 Msg Seq # (low byte of Sequence Number)
+    h += struct.pack("<B", msg_type)               # 31 Message Type
+    h += struct.pack("<I", mailbox_src)            # 32-35 Mailbox Source
+    h += struct.pack("<I", mailbox_dst)            # 36-39 Mailbox Destination
+    h += bytes([packet_num, total_packet_num])     # 40-41
+    assert len(h) == 42
+    return h
+
+
+def ge_srtp_short_request(seq: int, service_code: int, selector: int, index: int, count: int,
+                           inline_payload: bytes = b"") -> bytes:
+    """SHORT request (Message Type 0xc0), 56 bytes total."""
+    h = ge_srtp_header(2, seq, 0xC0)  # Packet Type 2 == REQ
+    body = bytes([service_code, selector]) + struct.pack("<HH", index, count)
+    body += inline_payload.ljust(6, b"\x00")[:6]
+    body += b"\x00\x00"  # bytes 54-55, trailing, not independently verified
+    msg = h + body
+    assert len(msg) == 56
+    return msg
+
+
+def ge_srtp_short_response(seq: int, status: int = 0, status_minor: int = 0, return_data: bytes = b"",
+                            control_program_number: int = 0x00, privilege_level: int = 0,
+                            sweep_time_us: int = 0, plc_status_word: int = 0, is_error: bool = False) -> bytes:
+    """SHORT_ACK (0xd4) or SHORT_ERR (0xd1) response, 56 bytes total."""
+    h = ge_srtp_header(3, seq, 0xD1 if is_error else 0xD4)  # Packet Type 3 == REQ_ACK
+    body = bytes([status, status_minor]) + return_data.ljust(6, b"\x00")[:6]
+    body += bytes([control_program_number, privilege_level])
+    body += struct.pack("<HH", sweep_time_us, plc_status_word)
+    msg = h + body
+    assert len(msg) == 56
+    return msg
+
+
+def ge_srtp_extended_request(seq: int, service_code: int, selector: int, index: int, count: int,
+                              trailing: bytes = b"") -> bytes:
+    """EXTENDED request (Message Type 0x80) -- 56-byte fixed header plus whatever trailing bulk
+    payload the caller supplies (rides past byte 56, see ge_srtp.hpp's own "BODY, EXTENDED REQUEST"
+    section)."""
+    h = ge_srtp_header(2, seq, 0x80)
+    body = b"\x00" * 6                              # bytes 42-47, unknown
+    body += bytes([1, 1])                            # bytes 48-49, Packet#/Total Packet# repeated
+    body += bytes([service_code, selector]) + struct.pack("<HH", index, count)  # bytes 50-55
+    msg = h + body + trailing
+    assert len(msg) == 56 + len(trailing)
+    return msg
+
+
+def ge_srtp_extended_ack(seq: int, undecoded_body: bytes = b"") -> bytes:
+    """EXTENDED_ACK (Message Type 0x94) -- this decoder deliberately does not interpret anything
+    past byte 42 for this shape (see ge_srtp.hpp's own "BODY, EXTENDED_ACK" section), so this
+    fixture helper just pads/truncates whatever bytes the caller supplies to the 14 bytes (42-55)
+    that keep the message a plausible, fixed 56 bytes."""
+    h = ge_srtp_header(3, seq, 0x94)
+    msg = h + undecoded_body.ljust(14, b"\x00")[:14]
+    assert len(msg) == 56
+    return msg
+
+
+def build_ge_srtp_sample():
+    """Covers: the real captured INIT/INIT_ACK handshake (INIT_ACK bytes taken verbatim from
+    automayt/ICS-pcap's own GE-SRTP/Notes.txt, see ge_srtp.hpp's file header comment), a SHORT read
+    (%R40, word) and SHORT write (%R39, the DFRWS 2017 paper's own worked "write 57 to %R39"
+    example) both triggering their own memory-access security notes, a SHORT bit-mode read (%Q497,
+    16 bits -- the DFRWS paper's own other worked example), a controller-type-and-id request
+    (unauthenticated-reconnaissance note), a PLC run/stop request answered with a SHORT_ERR
+    (insufficient-privilege-level) rejection, a program-store (upload) request (unauthenticated-
+    reconnaissance-risk note), an unrecognized service request code (numeric-only fallback, proven
+    both on the request AND once matched on its own response), an EXTENDED write with trailing bulk
+    payload plus its own EXTENDED_ACK response (proving the deliberately-undecoded-body path), a
+    structurally-recognized UNKNOWN (Packet Type 8) message, an orphan response with no matching
+    request on this session (negative control), a pure gate-rejection negative control (an invalid
+    Packet Type on GE SRTP's own port), a SHORT request/response pair split across two TCP segments
+    (exercising GeSrtpTcpDecoder::tcp_declared_length via Decoder::reassemble_tcp_payload), and one
+    exchange on a non-standard port (the "not a configured/standard GE SRTP port" note, --protocol
+    ge-srtp only -- Auto mode is port-gated and would never attempt this one)."""
+    packets = []
+    ident = [0xF400]
+
+    def next_ident() -> int:
+        v = ident[0]
+        ident[0] += 1
+        return v
+
+    def session(client_port: int, server_port: int = GE_SRTP_PORT):
+        state = {"cseq": 4000, "sseq": 8000}
+
+        def client(payload: bytes):
+            tcp = tcp_header(client_port, server_port, state["cseq"], state["sseq"], TCP_PSH | TCP_ACK,
+                              len(payload)) + payload
+            ip = ipv4_header(HMI_IP, PLC_IP, 6, len(tcp), next_ident())
+            packets.append(eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip + tcp)
+            state["cseq"] += len(payload)
+
+        def server(payload: bytes):
+            tcp = tcp_header(server_port, client_port, state["sseq"], state["cseq"], TCP_PSH | TCP_ACK,
+                              len(payload)) + payload
+            ip = ipv4_header(PLC_IP, HMI_IP, 6, len(tcp), next_ident())
+            packets.append(eth_header(HMI_MAC, PLC_MAC, 0x0800) + ip + tcp)
+            state["sseq"] += len(payload)
+
+        def server_split(payload: bytes, split_at: int):
+            """Sends `payload` as two separate TCP segments (first `split_at` bytes, then the
+            rest) -- exercises Decoder::reassemble_tcp_payload the same way build_melsec_sample's
+            own split-response packet group does."""
+            first, rest = payload[:split_at], payload[split_at:]
+            for chunk in (first, rest):
+                tcp = tcp_header(server_port, client_port, state["sseq"], state["cseq"],
+                                  TCP_PSH | TCP_ACK, len(chunk)) + chunk
+                ip = ipv4_header(PLC_IP, HMI_IP, 6, len(tcp), next_ident())
+                packets.append(eth_header(HMI_MAC, PLC_MAC, 0x0800) + ip + tcp)
+                state["sseq"] += len(chunk)
+
+        return client, server, server_split
+
+    client, server, server_split = session(53600)
+
+    # 1) & 2) INIT / INIT_ACK connection handshake -- INIT_ACK is the real captured bytes above.
+    client(bytes(56))
+    server(GE_SRTP_REAL_INIT_ACK)
+
+    # 3) & 4) SHORT read, %R40 (word): service 0x04 (read system memory), selector 0x08 (%R, word),
+    #    index 39 (0-based "address - 1"), count 1. Response return_data = 1234 (LE int16).
+    client(ge_srtp_short_request(1, 0x04, 0x08, 39, 1))
+    server(ge_srtp_short_response(1, return_data=struct.pack("<h", 1234), control_program_number=0x00,
+                                   privilege_level=1, sweep_time_us=1500, plc_status_word=0x0004))
+
+    # 5) & 6) SHORT write, %R39 (the DFRWS 2017 paper's own worked example: writing 57dec to %R39,
+    #    index 38): service 0x07 (write system memory), selector 0x08, inline payload = 57 (LE
+    #    int16). Triggers the "arbitrary PLC memory write" security note.
+    client(ge_srtp_short_request(2, 0x07, 0x08, 38, 1, inline_payload=struct.pack("<h", 57)))
+    server(ge_srtp_short_response(2))
+
+    # 7) & 8) SHORT read, %Q497-%Q512 (bit mode -- the DFRWS paper's own other worked example):
+    #    service 0x04, selector 0x48 (%Q, bit), index 496 (address 497 - 1), count 16 bits.
+    client(ge_srtp_short_request(3, 0x04, 0x48, 496, 16))
+    server(ge_srtp_short_response(3, return_data=bytes([0xAB, 0xCD])))
+
+    # 9) & 10) Get controller type and id information (service 0x43) -- unauthenticated-
+    #     reconnaissance note.
+    client(ge_srtp_short_request(4, 0x43, 0x00, 0, 0))
+    server(ge_srtp_short_response(4, return_data=b"90-30\x00"))
+
+    # 11) & 12) Set PLC (run vs. stop) (service 0x23) -- triggers the "no protocol-level
+    #     authentication" security note -- answered with a SHORT_ERR (0xd1) rejection, status major
+    #     0x02 ("insufficient privilege level").
+    client(ge_srtp_short_request(5, 0x23, 0x00, 0, 0, inline_payload=bytes([1, 0, 0, 0, 0, 0])))
+    server(ge_srtp_short_response(5, status=0x02, is_error=True))
+
+    # 13) & 14) Program store (upload from PLC, service 0x3f) -- unauthenticated-reconnaissance-risk
+    #     note (reveals the PLC's own control-logic program).
+    client(ge_srtp_short_request(6, 0x3F, 0x00, 0, 0))
+    server(ge_srtp_short_response(6))
+
+    # 15) & 16) An unrecognized service request code (0x99, never assigned by any of this decoder's
+    #     sources) -- proves the "Unknown service request code 0x99" fallback naming, both on the
+    #     request itself AND once matched on its own response (which carries no service request
+    #     code of its own on the wire -- see ge_srtp.hpp's "SESSION-SCOPED REQUEST/RESPONSE
+    #     PAIRING" section).
+    client(ge_srtp_short_request(7, 0x99, 0x08, 0, 1))
+    server(ge_srtp_short_response(7))
+
+    # 17) & 18) EXTENDED write (service 0x08, write task memory -- %R1000, 10 words, index 999),
+    #     with 20 bytes of trailing bulk payload past the fixed 56-byte header -- proves
+    #     has_extended_trailing_payload. Answered with EXTENDED_ACK -- proves the deliberately
+    #     undecoded-body path (has_undecoded_body), since no source establishes EXTENDED_ACK's own
+    #     body layout (see ge_srtp.hpp's "BODY, EXTENDED_ACK" section).
+    extended_trailing = struct.pack("<10h", *range(100, 110))
+    client(ge_srtp_extended_request(8, 0x08, 0x08, 999, 10, trailing=extended_trailing))
+    server(ge_srtp_extended_ack(8, undecoded_body=bytes([0x00, 0x00])))
+
+    # 19) A structurally-recognized UNKNOWN packet (Packet Type 8 -- named exactly that by the Lua
+    #     dissector's own svc_type_str) -- Packet Type 8 does not validate Message Type against the
+    #     5 known SHORT/EXTENDED values (see ge_srtp.hpp's own "STRUCTURAL DETECTION GATE" section),
+    #     so an arbitrary Message Type byte (0xAB here) is accepted and the body is reported as an
+    #     honest, undecoded hex blob rather than guessed at.
+    unknown_pkt = ge_srtp_header(8, 42, 0xAB) + bytes(range(14))
+    client(unknown_pkt)
+
+    # 20) Orphan response negative control -- a SHORT_ACK carrying a Sequence Number (999) never
+    #     seen as a request on this session. Proves the "no outstanding request... found" note and
+    #     that has_service_request stays false rather than guessed at.
+    server(ge_srtp_short_response(999))
+
+    # 21) Pure gate rejection negative control -- Packet Type 256 (0x0100, not one of {0,1,2,3,8}),
+    #     on GE SRTP's own port. Must NOT be recognized as ge-srtp at all. Byte 0 is deliberately
+    #     0x00 (not a plausible MQTT control byte -- packet type nibble 0 is reserved/invalid in
+    #     MQTT) and byte 1 (0x01) doesn't match TPKT's own version==3 check either, so this falls
+    #     all the way through to a plain, unclassified "tcp" result rather than colliding with
+    #     another protocol's own opportunistic gate.
+    client(struct.pack("<H", 256) + bytes(54))
+
+    # 22) & 23) SHORT read/response (%R1, index 0) split across TWO TCP segments -- exercises
+    #     GeSrtpTcpDecoder::tcp_declared_length via Decoder::reassemble_tcp_payload, the same
+    #     split/rejoin shape build_melsec_sample/build_twincat_sample already cover for their own
+    #     protocols.
+    client(ge_srtp_short_request(9, 0x04, 0x08, 0, 1))
+    server_split(ge_srtp_short_response(9, return_data=struct.pack("<h", 7)), split_at=20)
+
+    # 24) & 25) The same SHORT read/response exchange again, but on a non-standard port (53601 ->
+    #     9999, not GE_SRTP_PORT) -- proves the "seen on TCP port ..., which is not a configured/
+    #     standard GE SRTP port (18245)" note. Auto mode is port-gated for GE SRTP (see
+    #     ge_srtp.hpp's own "STRUCTURAL DETECTION GATE" section) and would never attempt this
+    #     exchange at all, so the dedicated CTest for this packet group runs with
+    #     `--protocol ge-srtp` to force it.
+    client2, server2, _ = session(53601, server_port=9999)
+    client2(ge_srtp_short_request(10, 0x04, 0x08, 0, 1))
+    server2(ge_srtp_short_response(10, return_data=struct.pack("<h", 99)))
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_210_000 + i, i * 1000)
+    (TESTS_DIR / "sample_ge_srtp.pcap").write_bytes(data)
+
+
 if __name__ == "__main__":
     TESTS_DIR.mkdir(exist_ok=True)
     build_modbus_sample()
@@ -14199,4 +14437,5 @@ if __name__ == "__main__":
     build_winrm_sample()
     build_wmi_dcom_activation_sample()
     build_iccp_sample()
+    build_ge_srtp_sample()
     print("wrote sample fixtures to", TESTS_DIR)

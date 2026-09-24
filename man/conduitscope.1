@@ -139,6 +139,27 @@ port, with its curated DCOM-activation-observed note (naming interface and
 opnum) and its explicit \fBResolveOxid\fR/\fBResolveOxid2\fR scope-boundary
 note (the dynamically negotiated data-channel port those calls resolve is
 NOT followed),
+plus GE SRTP (Service Request Transport Protocol, GE Fanuc/GE Intelligent
+Platforms \-\- TCP port 18245, a proprietary programming/monitoring/control
+protocol for the 90\-30/90\-70/RX3i/RX7i PLC families, named
+\fBge\-srtp\fR/\fBGeSrtp*\fR throughout this codebase, deliberately never
+bare "srtp", to avoid confusion with the unrelated IETF Secure Real\-time
+Transport Protocol) traffic found on that port, wire\-gated
+(\fBGateKind::TcpPort\fR) with authoritative session\-scoped
+request/response pairing by GE SRTP's own wire\-carried Sequence Number
+(a materially stronger guarantee than MELSEC's/FINS's own
+single\-outstanding\-slot heuristic pairing), and curated
+unauthenticated\-memory\-read/write, unauthenticated\-controller\-type\-
+reconnaissance, program\-store/program\-load, run/stop\-control, and
+fault\-table\-access attack\-monitoring notes sourced from the DFRWS 2017
+forensics paper's own field\-deployment finding that real GE Fanuc Series
+90\-30 installations commonly run this protocol with no protocol\-level
+authentication at all \-\- \fBnote:\fR two real, reproducible protocol\-
+collision bugs against the existing TPKT/COTP decoder were found and
+fixed while building this decoder (GE SRTP's own Packet Type value for
+every response happens to supply TPKT's own magic version byte by
+coincidence); see \fBdocs/PROTOCOL_COVERAGE.md\fR's GE SRTP section for
+the full writeup, including the "TWO\-PHASE DECLARATION" fix,
 plus PROFINET RT (EtherType 0x8892, DCP device discovery/configuration and
 cyclic real-time IO), IEC 61850-8-1 GOOSE (EtherType 0x88B8, ASN.1
 BER-encoded GOOSE PDU), IEC 61850-9-2 Sampled Values (EtherType 0x88BA,
@@ -322,7 +343,7 @@ regardless of where it's being analyzed \-\- an extension beyond what
 tshark/tcpdump themselves offer. See \fBdocs/USER_GUIDE.md\fR's OUTPUT
 FORMATS "Timestamps" subsection.
 .TP
-.B \-\-protocol {auto,modbus,dnp3,iec104,s7comm,s7comm\-plus,mms,enip,twincat,melsec,fins,bgp,kerberos,ldap,smb,profinet,goose,sv,ethercat,stp,devicenet,bacnet,hartip,opcua,mqtt,ff\-hse,dns,mdns,llmnr,nbns,doh,rip,igmp,vrrp,hsrp,igrp,pim,eigrp,ospf,remote\-access,lateral\-movement,enterprise\-trust,eapol,wireless\-backhaul,pppoe,tunnel\-vpn,mpls,arp,lldp,slow\-protocols,winrm,dcom}
+.B \-\-protocol {auto,modbus,dnp3,iec104,s7comm,s7comm\-plus,mms,enip,twincat,melsec,fins,bgp,kerberos,ldap,smb,profinet,goose,sv,ethercat,stp,devicenet,bacnet,hartip,opcua,mqtt,ff\-hse,dns,mdns,llmnr,nbns,doh,rip,igmp,vrrp,hsrp,igrp,pim,eigrp,ospf,remote\-access,lateral\-movement,enterprise\-trust,eapol,wireless\-backhaul,pppoe,tunnel\-vpn,mpls,arp,lldp,slow\-protocols,winrm,dcom,ge\-srtp}
 Restrict decoding to one protocol. Default: auto (tries all fourteen TCP
 protocols, independent of port number, plus CIP I/O, BACnet/IP, HART-IP, and
 FF-HSE on every
@@ -640,6 +661,13 @@ Same as \fB\-\-dns\-port\fR, for DCOM activation (built\-in default: 135,
 TCP \-\- structural activation/OXID-resolution recognition only, see
 \fBdocs/PROTOCOL_COVERAGE.md\fR's DCOM section). Repeatable. Also widens
 detection in \fBauto\fR mode.
+.TP
+.B \-\-ge\-srtp\-port \fIPORT\fR
+Same as \fB\-\-dns\-port\fR, for GE SRTP (built\-in default: 18245, TCP \-\-
+the secondary port 18246 documented by GE is NOT auto\-detected and must be
+named here, or reached via \fB\-\-protocol ge\-srtp\fR, which tries GE SRTP
+port\-independently; see \fBdocs/PROTOCOL_COVERAGE.md\fR's GE SRTP
+section). Repeatable. Also widens detection in \fBauto\fR mode.
 .TP
 .B \-\-rip\-port \fIPORT\fR
 Same as \fB\-\-dns\-port\fR, for RIP (built\-in default: 520). Repeatable.

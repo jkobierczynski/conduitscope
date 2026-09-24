@@ -15,6 +15,7 @@
 #include "conduitscope/ethercat.hpp"
 #include "conduitscope/ffhse.hpp"
 #include "conduitscope/fins.hpp"
+#include "conduitscope/ge_srtp.hpp"
 #include "conduitscope/goose.hpp"
 #include "conduitscope/hartip.hpp"
 #include "conduitscope/hsrp.hpp"
@@ -357,6 +358,15 @@ const std::vector<const ProtocolDecoder*>& tcp_port_registry() {
                                  // tcp_port() returns WINRM_PORT (5985, winrm.hpp).
         &dcom_tcp_decoder(),  // decoder.cpp's own DCOM call site likewise calls it directly.
                                 // tcp_port() returns DCOM_PORT (135, dcom.hpp).
+        &ge_srtp_tcp_decoder(),  // GE SRTP (GE Fanuc/GE Intelligent Platforms PLC protocol),
+                                   // joining this gate right after DCOM -- decoder.cpp's own GE
+                                   // SRTP call site likewise calls it directly. tcp_port() returns
+                                   // GE_SRTP_PORT (18245, ge_srtp.hpp). Port-gated in Auto mode for
+                                   // the same "no magic-byte-strength structural gate" reason
+                                   // WinRM/DCOM already are -- see ge_srtp.hpp's own file header
+                                   // comment's "STRUCTURAL DETECTION GATE" section. Not migrated:
+                                   // none -- GE SRTP is this gate's fourth and (so far) last
+                                   // protocol and it is migrated.
     };
     return order;
 }

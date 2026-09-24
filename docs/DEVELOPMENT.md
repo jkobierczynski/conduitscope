@@ -7392,6 +7392,132 @@ deferred future migration.
     semantics beyond what this reserved-name vocabulary and this decoder's own already-generic MMS
     Data-value decode already surface.
 
+39. **GE SRTP (Service Request Transport Protocol), GE Fanuc/GE Intelligent Platforms -- TCP port
+    18245.** **Done** (right after ICCP/TASE.2 in item 38 above). Jurgen asked to add GE SRTP.
+    GE SRTP is the proprietary application-layer protocol GE Fanuc/GE Intelligent Platforms PLCs
+    (the 90-30, 90-70, RX3i, and RX7i families) use for programming, monitoring, and control --
+    unrelated to the IETF's Secure Real-time Transport Protocol (RFC 3711, media transport); this
+    codebase names everything `ge-srtp`/`GeSrtp*`/`ge_srtp.hpp` throughout, never bare "srtp", to
+    avoid that collision (confirmed via search that no real-SRTP support exists anywhere in this
+    codebase). New, fully self-contained module: `include/conduitscope/ge_srtp.hpp`/`src/ge_srtp.cpp`
+    -- no dependency on any existing decoder, following the same standalone-`ProtocolDecoder`
+    pattern as MELSEC/FINS/TwinCAT rather than riding an existing stack the way ICCP rides MMS.
+
+    Sourcing (four independent sources, cross-checked): the Palatis/packet-ge-srtp Wireshark Lua
+    dissector; the TheMadHatt3r/ge-ethernet-SRTP Python client; the DFRWS 2017 academic paper
+    (Denton et al., "Leveraging the SRTP protocol for over-the-network memory acquisition of a GE
+    Fanuc Series 90-30"), whose field-deployment security findings are cited directly in this
+    decoder's own curated notes; and automayt/ICS-pcap's `GE-SRTP/Notes.txt`, found mid-task while
+    answering an unrelated question Jurgen asked about a different repository -- it supplied real
+    captured INIT_ACK bytes (reused verbatim in this decoder's own test fixture) and confirmed a
+    secondary port, 18246, alongside the primary 18245. No real, public GE SRTP pcap capture is
+    known to exist beyond that one INIT_ACK sample.
+
+    Wire format: a fixed 56-byte header on every message (Packet Type, Sequence Number -- a
+    genuine wire-carried transaction ID, unlike MELSEC's/FINS's own weaker single-outstanding-slot
+    heuristic -- Text Length, 20 reserved/unknown bytes, a time field, Message Type, Mailbox
+    Source/Dest, and packet fragment numbers), followed by a body whose shape depends on Message
+    Type: SHORT request/response (Service Request Code, Segment Selector, Target Index/Count, a
+    6-byte inline payload, or a Status/Return-Data/Control-Program/Privilege-Level/Sweep-
+    Time/PLC-Status response), EXTENDED request (adds a trailing bulk payload with no declared
+    length in the header -- genuinely out of scope for reassembly beyond noting its byte count),
+    and EXTENDED_ACK (whose own body past the common header is NOT independently verified by any
+    of the four sources -- deliberately decoded as an honest undecoded hex blob rather than
+    guessed at, the same posture item 38's own MMS Data-value fallback and every other
+    never-guess-numeric-fallback precedent in this codebase already applies). 20 Service Request
+    Codes decoded (memory read/write across `%I/%Q/%M/%T/%SA/%SB/%SC/%S/%G/%AI/%AQ/%R`, programmer
+    logon, privilege change, run/stop control, fault table access, program store/load, controller
+    type query, and more), each rendering a `target_text` such as `%R40` or `%Q497` from the
+    Segment Selector + Target Index (0-based on the wire, rendered 1-based).
+
+    Session-scoped AUTHORITATIVE request/response pairing via `GeSrtpFlowState` (an
+    `unordered_map<sequence_number, pending request>`), matching Modbus's/TwinCAT's own "real
+    transaction ID" tier rather than MELSEC's/FINS's single-slot heuristic -- verified via an
+    explicit orphan-response negative control (a response whose sequence number matches no
+    outstanding request correctly shows "no outstanding request... found," never a fabricated
+    match).
+
+    Curated security notes, all sourced from the DFRWS 2017 paper's own field-deployment finding
+    that real GE Fanuc Series 90-30 installations commonly run GE SRTP with no protocol-level
+    authentication at all: arbitrary PLC memory read/write, unauthenticated controller-type
+    reconnaissance, program store (upload FROM the PLC, disclosing control logic) and program load
+    (download TO the PLC), run/stop control, and fault-table access. Programmer logon's own payload
+    is deliberately not decoded at all, since its byte layout is unverified by any source and it is
+    credential-adjacent.
+
+    Structural gate: `GateKind::TcpPort` (port-gated in Auto mode, mirroring WinRM's/DCOM's own
+    gating from item 28/the Windows RPC batch) -- port 18245 is the hard-coded default; the
+    secondary port 18246 is documented but not auto-detected, reachable via the new
+    `--ge-srtp-port` CLI option (mirroring `--dcom-port`) or via `--protocol ge-srtp`, which tries
+    GE SRTP port-independently.
+
+    Two real, reproducible protocol-collision bugs against the existing TPKT/COTP decoder were
+    found and fixed during this work -- worth documenting prominently, per this project's own
+    "post-delivery fix" transparency precedent (see MELSEC's own file header for the prior
+    example of this norm). Both stemmed from GE SRTP's own declared-length function
+    (`ge_srtp_declared_length`) being too conservative in ways that ceded a flow to TPKT/COTP's
+    weaker opportunistic structural gate (byte0==3/version, byte1==0/reserved) inside
+    `decoder.cpp`'s shared TCP declared-length cascade, since GE SRTP's own Packet Type value 3
+    (every response's REQ_ACK) happens to supply TPKT's exact magic version byte by coincidence
+    when read as the first two bytes. (1) EXTENDED_ACK originally returned `nullopt` (its body
+    layout being unverified, no length could honestly be claimed), letting TPKT/COTP win the race
+    and corrupt every subsequent server-to-client packet on that flow into a bogus ongoing TPKT
+    reassembly buffer -- fixed by having EXTENDED_ACK claim the ordinary fixed 56-byte header
+    length like every other shape (only the EXTENDED *request*, which has no declared trailing
+    length, still returns `nullopt`). (2) A short first TCP segment (fewer than 32 bytes, not yet
+    enough to read Message Type at byte 31 and determine the message's true shape) also originally
+    returned `nullopt` unconditionally, again losing the race on segment 1 of a legitimately
+    split message -- fixed with a two-phase design: Packet Type alone (bytes 0-1) speculatively
+    claims the flow for GE SRTP's own reassembly bookkeeping immediately, with the stronger
+    Message-Type-based validation still running (and still able to change the answer) once the
+    full header has accumulated. Both bugs were caught via this project's own mandatory
+    before-writing-any-CTest-regex manual CLI verification step, not via automated testing (no
+    test existed yet to catch them) -- and both now have dedicated regression tests
+    (`ge_srtp_extended_ack_undecoded_body_and_tpkt_collision_fix`,
+    `ge_srtp_short_first_segment_reassembly_two_phase_declaration_fix`) asserting the correct
+    `[ge-srtp]` labeling and the absence of any `TPKT` text on the affected packets. See
+    `ge_srtp.hpp`'s own header comment for the full writeup, including the "TWO-PHASE DECLARATION"
+    design section.
+
+    A separate, non-decoder fixture-authoring issue was also found and fixed: the fixture's
+    original pure-gate-rejection negative control (an invalid Packet Type, correctly rejected by
+    GE SRTP's own gate) happened to land on a byte value that also satisfies MQTT's own
+    intentionally weak single-leading-byte gate, so the generic fallback decode was misclassified
+    as an MQTT PUBLISH rather than falling through cleanly -- not a GE SRTP defect, but corrected
+    in the fixture (and asserted against via
+    `ge_srtp_gate_rejects_invalid_packet_type_and_falls_through_cleanly`'s own negative check for
+    both `ge-srtp` and `mqtt`) so the test suite's intent stays legible.
+
+    22 new `ge_srtp_*` CTest tests: INIT/INIT_ACK handshake recognition (INIT_ACK using the real
+    captured automayt/ICS-pcap bytes); SHORT read/write requests with decoded target and security
+    note, plus `--format json` field checks; authoritative sequence-number-based response pairing,
+    also checked via JSON; a bit-addressed selector (`%Q497`) proving the selector table
+    distinguishes bit- from word-addressed memory areas; the controller-type reconnaissance note;
+    a SHORT_ERR/Nack rejection (insufficient privilege) with pairing surviving the rejection;
+    the program-store reconnaissance note; an unrecognized Service Request Code falling back to
+    structural-only decode with NO security note (negative control); an EXTENDED request/response
+    pair (the first collision-fix regression test, above); an UNKNOWN (Packet Type 8) packet;
+    an orphan response negative control; the MQTT-collision-avoiding gate-rejection negative
+    control; the split-TCP-segment reassembly pair (the second collision-fix regression test,
+    above); the non-standard-port pair correctly staying generic `[tcp]` in Auto mode and correctly
+    decoding under `--protocol ge-srtp`; and a `--stats` check of the per-service-request-name
+    counts and the authoritative-pairing count. Full suite: 1555 -> 1577 tests (default config),
+    1543 -> 1565 (no-live-capture config), zero-warning build in both, confirmed via clean full
+    rebuild (not incremental) in the no-live-capture config specifically.
+
+    Honestly stated validation gap, this project's own established disclosure norm (see item 38's
+    own note directly above): the fixture (`tests/sample_ge_srtp.pcap`, `build_ge_srtp_sample`) is
+    synthetic except for the one real INIT_ACK sample reused from automayt/ICS-pcap's Notes.txt --
+    no complete real GE SRTP pcap capture is known to exist publicly. If one becomes available
+    later, this note should be updated accordingly.
+
+    Explicitly out of scope: EXTENDED request's own trailing bulk payload (no declared length on
+    the wire, so only its byte count is surfaced, never reassembled past the header); EXTENDED_ACK's
+    own body past the common header, INIT_ACK's own body, and UNKNOWN message types' own bodies
+    (all honestly rendered as undecoded hex, never guessed at); the secondary port 18246 as an
+    auto-detected default (reachable via `--ge-srtp-port`/`--protocol ge-srtp` instead); and, as
+    ever, any GE SRTP field this decoder does not name above.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

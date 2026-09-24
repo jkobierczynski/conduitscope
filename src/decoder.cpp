@@ -483,6 +483,8 @@ bool Decoder::reassemble_tcp_payload(const TcpSegment& tcp, const std::string& f
                        options_.protocol_filter == ProtocolFilter::WinRmOnly;
     bool want_dcom = options_.protocol_filter == ProtocolFilter::Auto ||
                       options_.protocol_filter == ProtocolFilter::DcomOnly;
+    bool want_ge_srtp = options_.protocol_filter == ProtocolFilter::Auto ||
+                         options_.protocol_filter == ProtocolFilter::GeSrtpOnly;
 
     // OPC UA is checked first of all: its own structural detection gate (the leading 3 bytes must
     // be one of exactly 7 fixed ASCII MessageType strings -- "HEL"/"ACK"/"ERR"/"RHE"/"OPN"/"CLO"/
@@ -685,6 +687,26 @@ bool Decoder::reassemble_tcp_payload(const TcpSegment& tcp, const std::string& f
         if (auto d = dcom_tcp_decoder().tcp_declared_length(candidate)) {
             declared = d;
             which = "DCOM/DCE-RPC message";
+        }
+    }
+    // GE SRTP, TCP port 18245 -- deliberately PORT-GATED here in Auto mode, the same posture
+    // WinRM/DCOM just above already establish for this gate kind: GE SRTP's own structural gate (a
+    // small enumerated Packet Type plus Message Type, no magic-constant field at all -- see
+    // ge_srtp.hpp's own "STRUCTURAL DETECTION GATE" section) is weaker than SMB's own magic-byte
+    // check, so gating by port in Auto mode avoids opportunistically false-positiving on ordinary
+    // binary traffic elsewhere. An explicit `--protocol ge-srtp` still tries it port-independently,
+    // the same exception every other GateKind::TcpPort protocol here already has.
+    // ge_srtp_declared_length only ever declares a fixed 56 for the SHORT-family/INIT-family
+    // shapes -- EXTENDED/EXTENDED_ACK messages return std::nullopt here (no reliable trailing-
+    // length field on the wire, see ge_srtp.hpp's own "DECLARED LENGTH" section), so this decoder
+    // simply doesn't participate in cross-segment reassembly for that one shape.
+    bool require_ge_srtp_port = options_.protocol_filter == ProtocolFilter::Auto;
+    bool candidate_port_is_ge_srtp = port_in(tcp.src_port, GE_SRTP_PORT, options_.extra_ge_srtp_ports) ||
+                                      port_in(tcp.dst_port, GE_SRTP_PORT, options_.extra_ge_srtp_ports);
+    if (!declared && want_ge_srtp && (!require_ge_srtp_port || candidate_port_is_ge_srtp)) {
+        if (auto d = ge_srtp_tcp_decoder().tcp_declared_length(candidate)) {
+            declared = d;
+            which = "GE SRTP message";
         }
     }
     if (!declared && want_dnp3) {
@@ -2256,6 +2278,8 @@ DecodedPacket Decoder::decode_ip_payload(DecodedPacket out, uint8_t protocol, By
                            options_.protocol_filter == ProtocolFilter::WinRmOnly;
         bool want_dcom = options_.protocol_filter == ProtocolFilter::Auto ||
                           options_.protocol_filter == ProtocolFilter::DcomOnly;
+        bool want_ge_srtp = options_.protocol_filter == ProtocolFilter::Auto ||
+                             options_.protocol_filter == ProtocolFilter::GeSrtpOnly;
 
         // Tried first of all -- see the matching, fuller comment in reassemble_tcp_payload above
         // for why OPC UA's own magic-string detection gate is strong enough, and non-colliding
@@ -2716,6 +2740,49 @@ DecodedPacket Decoder::decode_ip_payload(DecodedPacket out, uint8_t protocol, By
                     out.notes.push_back("seen on TCP port " + std::to_string(tcp.src_port) + "->" +
                                          std::to_string(tcp.dst_port) +
                                          ", which is not a configured/standard DCOM port (135)");
+                }
+                return out;
+            }
+        }
+
+        // Re-derived here (reassemble_tcp_payload above is a separate member function -- its own
+        // locals don't carry over). require_ge_srtp_port mirrors require_dcom_port immediately
+        // above: gated by port only in Auto mode (GE SRTP's own structural gate has no magic-
+        // constant field at all -- see ge_srtp.hpp's own "STRUCTURAL DETECTION GATE" section); an
+        // explicit `--protocol ge-srtp` still tries it port-independently.
+        bool require_ge_srtp_port = options_.protocol_filter == ProtocolFilter::Auto;
+        bool candidate_port_is_ge_srtp = port_in(tcp.src_port, GE_SRTP_PORT, options_.extra_ge_srtp_ports) ||
+                                          port_in(tcp.dst_port, GE_SRTP_PORT, options_.extra_ge_srtp_ports);
+        if (want_ge_srtp && (!require_ge_srtp_port || candidate_port_is_ge_srtp)) {
+            // GE SRTP (Service Request Transport Protocol), TCP port 18245 -- a brand-new protocol
+            // (see ge_srtp.hpp's own file header comment), not part of the Windows RPC/remote-
+            // management batch WinRM/DCOM above belong to, despite landing right after them in this
+            // same GateKind::TcpPort cascade. Same out.result-only shape WinRM/DCOM/MELSEC/FINS
+            // established -- no ge_srtp_* DecodedPacket fields exist, JsonWriter renders from
+            // out.result (output.cpp's write_ge_srtp_json_fields), TextWriter/CsvWriter from
+            // out.summary/out.notes generically. UNLIKE WinRM (stateless) and MELSEC/FINS (no real
+            // transaction ID, single-outstanding-slot heuristic), GeSrtpTcpDecoder's own session
+            // state (GeSrtpFlowState) pairs request/response AUTHORITATIVELY by GE SRTP's own
+            // Sequence Number field -- the same real-transaction-ID tier Modbus's/TwinCAT's own
+            // pairing already established, see ge_srtp.hpp's own file header comment.
+            std::string ge_srtp_session =
+                tcp_session_key(out.src_ip, tcp.src_port, out.dst_ip, tcp.dst_port);
+            DecodeContext ctx;
+            ctx.session_key = ge_srtp_session;
+            ctx.packet_index = index;
+            ctx.protocol_id = "ge-srtp";
+            ctx.flow_states = &registry_flow_state_;
+            if (auto result = ge_srtp_tcp_decoder().decode(effective_payload, ctx)) {
+                const GeSrtpFrame& gf = result->as<GeSrtpFrame>();
+                out.protocol = "ge-srtp";
+                out.summary = gf.summary;
+                for (const auto& n : gf.notes) out.notes.push_back(n);
+                out.result = *result;
+
+                if (!candidate_port_is_ge_srtp) {
+                    out.notes.push_back("seen on TCP port " + std::to_string(tcp.src_port) + "->" +
+                                         std::to_string(tcp.dst_port) +
+                                         ", which is not a configured/standard GE SRTP port (18245)");
                 }
                 return out;
             }

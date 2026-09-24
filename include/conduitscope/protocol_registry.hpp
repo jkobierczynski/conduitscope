@@ -97,8 +97,14 @@ const std::vector<const ProtocolDecoder*>& tcp_port_independent_registry();
 // WinRM call site likewise calls winrm_tcp_decoder() directly. DCOM (dcom.hpp's DcomTcpDecoder --
 // Phase 5, the last, of that same batch) joins this gate right after WinRM, port-gated for the
 // "weak structural signal" reason dcom.hpp's own COLLISION SURVEY section states; decoder.cpp's own
-// DCOM call site likewise calls dcom_tcp_decoder() directly. Not migrated: none -- all three of
-// this gate's protocols are migrated.
+// DCOM call site likewise calls dcom_tcp_decoder() directly. GE SRTP (ge_srtp.hpp's
+// GeSrtpTcpDecoder -- a brand-new protocol, NOT part of the Windows RPC/remote-management batch,
+// built entirely on the ProtocolDecoder interface from inception like TwinCAT/MELSEC/FINS) joins
+// this gate right after DCOM, port-gated for the same "no magic-byte-strength structural gate"
+// reason WinRM/DCOM already are -- see ge_srtp.hpp's own file header comment's "STRUCTURAL
+// DETECTION GATE" section; decoder.cpp's own GE SRTP call site likewise calls
+// ge_srtp_tcp_decoder() directly. Not migrated: none -- all four of this gate's protocols are
+// migrated.
 const std::vector<const ProtocolDecoder*>& tcp_port_registry();
 
 // Migrated UDP-port-gated protocols, in the order their decoder.cpp call sites run. This GateKind
