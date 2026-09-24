@@ -1078,6 +1078,100 @@ void write_coap_json_fields(std::ostream& out, const CoapFrame& cf) {
     }
 }
 
+// The RMCP analog of write_coap_json_fields above -- the generic RMCP fallback (an ACK, any
+// Class, or a Normal OEM-class message). See rmcp.hpp.
+void write_rmcp_json_fields(std::ostream& out, const RmcpFrame& rf) {
+    out << "    \"rmcp_is_ack\": " << (rf.header.is_ack ? "true" : "false") << ",\n";
+    out << "    \"rmcp_class\": \"" << (rf.header.class_name ? rf.header.class_name : "?")
+        << "\",\n";
+    if (!rf.body.empty()) {
+        out << "    \"rmcp_oem_body_length\": " << rf.body.size() << ",\n";
+    }
+}
+
+// The ASF analog -- see rmcp.hpp.
+void write_asf_json_fields(std::ostream& out, const AsfFrame& af) {
+    out << "    \"asf_message_type\": \""
+        << (af.message_type_name ? af.message_type_name : "unknown") << "\",\n";
+    out << "    \"asf_message_tag\": " << static_cast<int>(af.message_tag) << ",\n";
+    if (af.presence_pong) {
+        out << "    \"asf_pong_oem_iana\": " << af.presence_pong->oem_iana << ",\n";
+        out << "    \"asf_pong_asf_version\": "
+            << static_cast<int>(af.presence_pong->asf_version) << ",\n";
+        out << "    \"asf_pong_security_extensions_supported\": "
+            << (af.presence_pong->security_extensions_supported ? "true" : "false") << ",\n";
+    }
+    out << "    \"asf_body_length\": " << af.raw_body.size() << ",\n";
+}
+
+// The IPMI analog -- covers whichever ONE of IpmiFrame's own optional sub-messages is set (see
+// rmcp.hpp's own IpmiFrame comment for why exactly one, never more than one, is ever set). The
+// Cipher Suite 0 finding (ipmi_cipher_suite_zero) is always emitted when true, regardless of which
+// sub-message carried it, so a JSON consumer filtering on that one field alone finds every
+// occurrence without also needing to know which payload type carried it.
+void write_ipmi_json_fields(std::ostream& out, const IpmiFrame& ifr) {
+    const IpmiSessionHeader& sh = ifr.session;
+    out << "    \"ipmi_version\": \"" << (sh.is_v2 ? "2.0" : "1.5") << "\",\n";
+    out << "    \"ipmi_auth_type\": \"" << (sh.auth_type_name ? sh.auth_type_name : "unknown")
+        << "\",\n";
+    if (sh.is_v2) {
+        out << "    \"ipmi_payload_type\": \""
+            << (sh.payload_type_name ? sh.payload_type_name : "unknown") << "\",\n";
+        out << "    \"ipmi_payload_encrypted\": " << (sh.payload_encrypted ? "true" : "false")
+            << ",\n";
+        out << "    \"ipmi_payload_authenticated\": "
+            << (sh.payload_authenticated ? "true" : "false") << ",\n";
+    }
+    if (sh.auth_code_present) {
+        out << "    \"ipmi_auth_code_present\": true,\n";
+        out << "    \"ipmi_auth_code_length\": " << sh.auth_code_length << ",\n";
+    }
+    if (ifr.message) {
+        const IpmiMessage& m = *ifr.message;
+        out << "    \"ipmi_direction\": \"" << (m.is_response ? "response" : "request")
+            << "\",\n";
+        out << "    \"ipmi_netfn\": \""
+            << (m.netfn_name ? m.netfn_name : "unknown") << "\",\n";
+        out << "    \"ipmi_command\": \""
+            << json_escape(m.command_name ? *m.command_name : "unknown") << "\",\n";
+        if (m.completion_code) {
+            out << "    \"ipmi_completion_code\": \""
+                << json_escape(m.completion_code_name ? *m.completion_code_name : "unknown")
+                << "\",\n";
+        }
+        out << "    \"ipmi_checksum_valid\": "
+            << ((m.checksum1_valid && m.checksum2_valid) ? "true" : "false") << ",\n";
+    } else if (ifr.open_session_request) {
+        const auto& r = *ifr.open_session_request;
+        out << "    \"ipmi_rakp_stage\": \"open_session_request\",\n";
+        out << "    \"ipmi_auth_algorithm\": \""
+            << (r.auth_algorithm_name ? *r.auth_algorithm_name : "unknown") << "\",\n";
+    } else if (ifr.open_session_response) {
+        const auto& r = *ifr.open_session_response;
+        out << "    \"ipmi_rakp_stage\": \"open_session_response\",\n";
+        out << "    \"ipmi_rmcpplus_status\": \""
+            << (r.status_code_name ? json_escape(*r.status_code_name) : "unknown") << "\",\n";
+        if (r.algorithms_present) {
+            out << "    \"ipmi_auth_algorithm\": \""
+                << (r.auth_algorithm_name ? *r.auth_algorithm_name : "unknown") << "\",\n";
+        }
+    } else if (ifr.rakp1) {
+        out << "    \"ipmi_rakp_stage\": \"rakp1\",\n";
+        if (!ifr.rakp1->user_name.empty()) {
+            out << "    \"ipmi_rakp_user_name\": \"" << json_escape(ifr.rakp1->user_name)
+                << "\",\n";
+        }
+    } else if (ifr.rakp2) {
+        out << "    \"ipmi_rakp_stage\": \"rakp2\",\n";
+    } else if (ifr.rakp3) {
+        out << "    \"ipmi_rakp_stage\": \"rakp3\",\n";
+    } else if (ifr.rakp4) {
+        out << "    \"ipmi_rakp_stage\": \"rakp4\",\n";
+    }
+    out << "    \"ipmi_cipher_suite_zero\": " << (ifr.cipher_suite_zero ? "true" : "false")
+        << ",\n";
+}
+
 namespace {
 std::string zigbee_hex16(uint16_t v) {
     std::ostringstream s;
@@ -3950,6 +4044,15 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
     if (p.protocol == "coap" && p.result) {
         write_coap_json_fields(out_, p.result->as<CoapFrame>());
     }
+    if (p.protocol == "rmcp" && p.result) {
+        write_rmcp_json_fields(out_, p.result->as<RmcpFrame>());
+    }
+    if (p.protocol == "asf" && p.result) {
+        write_asf_json_fields(out_, p.result->as<AsfFrame>());
+    }
+    if (p.protocol == "ipmi" && p.result) {
+        write_ipmi_json_fields(out_, p.result->as<IpmiFrame>());
+    }
     if (p.protocol == "zigbee" && p.result) {
         write_zigbee_json_fields(out_, p.result->as<ZigbeeFrame>());
     }
@@ -4505,6 +4608,36 @@ void StatsWriter::write_packet(const DecodedPacket& p) {
         }
         coap_code_counts_[code_key]++;
     }
+    if (p.protocol == "rmcp" && p.result) {
+        const RmcpFrame& rf = p.result->as<RmcpFrame>();
+        rmcp_class_counts_[rf.header.is_ack ? std::string("ACK")
+                                             : std::string(rf.header.class_name
+                                                                ? rf.header.class_name
+                                                                : "?")]++;
+    }
+    if (p.protocol == "asf" && p.result) {
+        const AsfFrame& af = p.result->as<AsfFrame>();
+        rmcp_class_counts_["ASF"]++;
+        asf_message_type_counts_[af.message_type_name ? af.message_type_name : "unknown"]++;
+    }
+    if (p.protocol == "ipmi" && p.result) {
+        const IpmiFrame& ifr = p.result->as<IpmiFrame>();
+        rmcp_class_counts_["IPMI"]++;
+        if (ifr.message) {
+            const IpmiMessage& m = *ifr.message;
+            std::string netfn_part = m.netfn_name ? m.netfn_name : "unknown NetFn";
+            std::string cmd_part;
+            if (m.command_name) {
+                cmd_part = *m.command_name;
+            } else {
+                std::ostringstream s;
+                s << "0x" << std::hex << std::uppercase << static_cast<unsigned>(m.command_raw);
+                cmd_part = s.str();
+            }
+            ipmi_netfn_command_counts_[netfn_part + " / " + cmd_part]++;
+        }
+        if (ifr.cipher_suite_zero) ipmi_cipher_suite_zero_count_++;
+    }
     if (p.protocol == "zigbee" && p.result) {
         const ZigbeeFrame& zf = p.result->as<ZigbeeFrame>();
         if (zf.nwk_present) zigbee_nwk_frame_type_counts_[zigbee_nwk_frame_type_name(zf.nwk.frame_type)]++;
@@ -4922,6 +5055,40 @@ void StatsWriter::print_summary(std::ostream& out) const {
         for (const auto& [name, count] : coap_code_counts_) {
             out << "  " << std::left << std::setw(40) << name << count << "\n";
         }
+    }
+    if (!rmcp_class_counts_.empty() || !asf_message_type_counts_.empty() ||
+        !ipmi_netfn_command_counts_.empty() || ipmi_cipher_suite_zero_count_ > 0) {
+        out << "rmcp class-of-message counts:\n";
+        for (const auto& [name, count] : rmcp_class_counts_) {
+            out << "  " << std::left << std::setw(40) << name << count << "\n";
+        }
+        if (!asf_message_type_counts_.empty()) {
+            out << "asf message types:\n";
+            for (const auto& [name, count] : asf_message_type_counts_) {
+                out << "  " << std::left << std::setw(40) << name << count << "\n";
+            }
+        }
+        if (!ipmi_netfn_command_counts_.empty()) {
+            out << "ipmi netfn/command counts:\n";
+            for (const auto& [name, count] : ipmi_netfn_command_counts_) {
+                // Bug fix: an IPMI "NetFn / Command" name (e.g. "Application / Get Channel
+                // Authentication Capabilities", 54 chars) can exceed this column's 40-char width --
+                // unlike every other protocol's own name set printed with this same setw(40)
+                // pattern, none of which happen to have a name that long. std::setw(40) pads only up
+                // TO that width; once name.size() >= 40 it adds no padding at all, so the count digit
+                // ran directly into the text with no separating space (e.g.
+                // "...Capabilities2"). Only add the explicit single-space fallback when the name
+                // itself already reached/exceeded the field width, so every existing shorter-name
+                // row here (and every other protocol's own setw(40) stats block) keeps its byte-
+                // identical existing output.
+                out << "  " << std::left << std::setw(40) << name << (name.size() >= 40 ? " " : "")
+                    << count << "\n";
+            }
+        }
+        // Headline finding -- always printed on its own line, never buried, matching this
+        // decoder's own SECURITY note (rmcp.hpp).
+        out << "*** IPMI Cipher Suite 0 (RAKP-none authentication bypass) observations: "
+            << ipmi_cipher_suite_zero_count_ << " ***\n";
     }
     if (!zigbee_nwk_frame_type_counts_.empty() || !zigbee_aps_frame_type_counts_.empty() ||
         !zigbee_zdp_cluster_counts_.empty() || zigbee_nwk_encrypted_count_ > 0 ||

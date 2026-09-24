@@ -8313,6 +8313,134 @@ deferred future migration.
     `tests/sample_cdp.pcap` is entirely synthetic -- no real CDP capture was available to validate
     against.
 
+49. **RMCP (Remote Management Control Protocol, DMTF/Intel) / ASF (Alert Standard Format, DMTF) /
+    IPMI (Intelligent Platform Management Interface, Intel/HP/NEC/Dell) -- server/BMC out-of-band
+    management, UDP port 623.** **Done.** Explicitly scoped by the user to IPMI+RMCP+ASF only
+    (Redfish and vendor-specific lights-out extensions like iDRAC/iLO are out of scope -- named,
+    not implemented, in `rmcp.hpp`'s own file header). Sourced byte-exact from literal Wireshark
+    dissector source before any code was written, matching the sourcing discipline established for
+    CDP (item 48)/Zigbee (item 47)/CODESYS/CoAP before it: `epan/dissectors/packet-rmcp.c` (RMCP's
+    own framing, fully dissected by Wireshark), `packet-asf.c` (ASF's own message-type table, fully
+    confirmed; Presence Ping/Pong's own field-level shape is not), `packet-ipmi-session.c` (the
+    IPMI session wrapper, both v1.5 and v2.0/RMCP+, fully dissected byte-for-byte), and
+    `packet-ipmi.c`/`packet-ipmi-app.c`/`packet-ipmi-chassis.c`/`packet-ipmi-storage.c`/
+    `packet-ipmi-transport.c` (the classic IPMI message shape and the curated NetFn/Command name
+    tables). New, fully self-contained module pair `include/conduitscope/rmcp.hpp`/`src/rmcp.cpp`
+    -- one file pair for all three protocols, since RMCP IS the shared framing ASF/IPMI ride
+    inside (the same "one family, one file pair" convention this doc's own "RIP / IGMP / VRRP /
+    HSRP" section already established for a multi-protocol family); see that header's own file
+    header comment for the complete sourcing/scoping/wire-format writeup, summarized here.
+
+    **A genuine, honestly-documented sourcing gap, not papered over**: Wireshark's own
+    `packet-ipmi-session.c` explicitly declines to dissect IPMI 2.0/RMCP+'s own Open Session
+    Request/Response and RAKP Messages 1-4 -- its own source comment reads verbatim "We cannot
+    parse them yet, thus just output as data." This is exactly the single most load-bearing piece
+    of this whole item (the RAKP handshake is where the Cipher Suite 0 finding lives), so it could
+    not simply be skipped. Sourced instead from the IPMI v2.0 specification directly (the same
+    authoritative-freely-available-standard sourcing tier CoAP's own RFC 7252 used, item 46),
+    cross-checked where possible against two small, stale fragments that DO survive in
+    `packet-asf.c` (its own Open Session dissection functions and its own Authentication/Integrity
+    Algorithm value_string tables, which happen to confirm the RMCP+ Status Code table's first 8
+    entries and the `0x01` algorithm values byte-for-byte) plus ipmitool's own widely-mirrored
+    `lanplus/rmcp+.h` constants (for the Open Session block's own Payload Type byte ordering,
+    Authentication=`0x00`/Integrity=`0x01`/Confidentiality=`0x02`, since neither Wireshark's own
+    source nor a fetchable copy of the spec text itself gave this pass' own tooling a byte-exact
+    citation for it). ASF's Presence Pong is a smaller instance of the identical gap:
+    `packet-asf.c`'s own `dissect_asf()` only field-decodes Open Session Request/Response (its own
+    "TODO: Add the rest as captures become available to test" comment), so Presence Pong's own
+    16-byte body (OEM IANA, ASF version, Security Extensions bit) is sourced from the ASF
+    specification (DSP0136) directly. Every one of these judgment calls is documented, with its
+    exact confirmation tier, in `rmcp.hpp`'s own SOURCING/ALGORITHM VALUES sections -- "decode
+    confidently only where the wire format is unambiguous, note anything inferred as inferred," the
+    same honest posture CDP's own Power-TLV scope note (item 48) and CoAP's own option-format
+    fallback (item 46) already established.
+
+    **The headline finding: Cipher Suite 0 (RAKP-none authentication bypass)**, matching this
+    codebase's established "one curated headline security finding per protocol" pattern (Zerologon
+    for Netlogon, DCSync for DRSUAPI, cleartext credentials for LDAP/CONNECT). IPMI 2.0's "Cipher
+    Suite 0" is the algorithm combination Authentication=RAKP-none + Integrity=None +
+    Confidentiality=None; when a BMC's own Open Session Response ACCEPTS an Authentication
+    Algorithm of `0x00` (RAKP-none), RAKP's own key-exchange authentication check never happens for
+    the rest of that session at all -- the widely-documented CVE-2013-4786-class authentication
+    bypass (many real BMC implementations ship with Cipher Suite 0 enabled by default; any
+    password, including a nonexistent one, authenticates). Recognized directly from the
+    Authentication Algorithm byte inside either the Open Session Request's own block (a console
+    PROPOSING it -- flagged, but not yet exploitable on its own) or, far more significantly, the
+    Open Session Response's own block (a BMC ACCEPTING it -- the actual exploitable condition,
+    flagged with a stronger, distinctly-worded note). `IpmiFrame::cipher_suite_zero` is set either
+    way; `--stats` prints it on its own clearly-labeled `***`-bracketed line
+    (`*** IPMI Cipher Suite 0 (RAKP-none authentication bypass) observations: N ***`), deliberately
+    never folded into a generic map, so it can never be missed by a reader scanning `--stats`
+    output. A genuinely useful, non-trivial use of `DecodeContext::flow_state<T>()`
+    (`IpmiFlowState`, keyed by UDP session): once a session's own Open Session exchange has been
+    seen proposing/accepting Cipher Suite 0, every LATER RAKP Message 1-4 in that SAME session --
+    which carries no algorithm field of its own to re-check -- is still annotated with the same
+    finding, the way a human reading the whole session in order would connect the two.
+
+    **A deliberate, documented "keep it stateless" call for the OTHER stateful opportunity this
+    item considered**: classic IPMI request/response pairing (matching a response's own
+    rqSeq/NetFn back to a specific earlier request), the way Modbus's Transaction ID or TwinCAT's
+    Invoke ID already are in this codebase. NOT built -- IPMI's own rqSeq/NetFn/Command fields are
+    already present directly on every message (unlike Modbus's opaque Transaction ID), so a human
+    or downstream tool reading this decoder's own per-packet output can already correlate a request
+    with its response without this decoder doing it for them; Cipher Suite 0's own
+    negotiate-once-reference-later shape (above) is a genuinely different case that a single packet
+    literally cannot recover on its own, which is why only THAT got the stateful treatment. Decided
+    and documented in `rmcp.hpp`'s own STATEFULNESS section rather than raised as a question, the
+    same "decide and document" posture CDP's own non-ambiguous scope calls (item 48) already used.
+
+    **Scope, one `--protocol` value per protocol, not one shared value**: `AsfOnly`, `IpmiOnly`, and
+    `RmcpOnly` (the generic ACK/OEM-class fallback) are three separate `ProtocolFilter` values, not
+    one -- the same "one shared wire format, several distinguishable `--protocol` values" precedent
+    DNS/mDNS/LLMNR already established in this codebase, since ASF and IPMI are meaningfully
+    distinct protocols an analyst would want to filter on independently even though both ride
+    inside RMCP's own shared 4-byte framing. A single shared `--rmcp-port`/`extra_rmcp_ports` CLI
+    option and `DecodeOptions` field cover all three, unlike DNS/mDNS/LLMNR's own three separate
+    port lists -- a deliberate difference, since RMCP/ASF/IPMI always ride the exact same UDP port
+    by wire-format construction (RMCP IS the framing the other two ride inside), while DNS/mDNS/
+    LLMNR genuinely have three different default ports. Full field decode for the RMCP header (all
+    three Class values), ASF Presence Ping/Pong (Pong's own OEM IANA/ASF-version/Security-
+    Extensions-bit fields), the IPMI session header (both v1.5 and v2.0/RMCP+, including
+    recognizing-but-not-decrypting the Confidentiality-flagged payload and recognizing-but-not-
+    verifying the Integrity trailer), the classic IPMI request/response message shape (with
+    checksum verification), and the full RAKP handshake (Open Session Request/Response, RAKP
+    Messages 1-4). A curated NetFn/Command name table (Application: Get Device ID, Cold/Warm Reset,
+    Get Self Test Results, Get Channel Authentication Capabilities, Get Session Challenge/Info,
+    Close Session, Get Channel Cipher Suites; Chassis: Get Chassis Status, Chassis Control, Chassis
+    Reset/Identify, Set/Get System Boot Options, Get POH Counter; Storage: SEL-focused (Get/Add/
+    Delete/Clear SEL, Reserve SEL, Get SDR); Transport: LAN Configuration Parameters, SOL
+    Activating/Configuration) -- the same "curated depth, not exhaustive" posture this codebase's
+    LLDP/CDP TLV tables already established; any other NetFn/Command falls back to an honest
+    numeric rendering. Two curated command-specific notes, matching CDP's own "decode the field
+    that matters most, richest" steer: Get Channel Authentication Capabilities (both directions)
+    and Chassis Control (with its own security-relevant "remote power-control command" note). The
+    IPMI 1.5 Auth Code field (Auth Type MD2/MD5/PASSWORD/OEM) is NEVER rendered, only its presence
+    and fixed 16-byte length noted -- the same posture CODESYS's own Login password and LDAP's own
+    bind password already established, done here by never even reading the bytes into the decoded
+    struct in the first place (CODESYS's own precedent) rather than the redact-on-render approach
+    HSRP/VRRP use for their own cleartext fields.
+
+    `tests/sample_ipmi.pcap` (`build_ipmi_sample`) carries an ASF Presence Ping/Pong exchange (full
+    Pong field decode), an IPMI 1.5 sessionless Get Channel Authentication Capabilities request/
+    response (the standard first step of an IPMI LAN session, both directions individually
+    confirmed in `--format text -v` and `--format json` before a single CTest regex was written,
+    this item's own process step 2), a complete IPMI 2.0/RMCP+ Open Session Request/Response + full
+    RAKP Message 1-4 handshake with a NORMAL cipher suite (RAKP-HMAC-SHA1/HMAC-SHA1-96/
+    AES-CBC-128), a SEPARATE handshake on its own UDP session using Cipher Suite 0 (proving both
+    the direct finding AND the sticky per-session note on a later RAKP message that carries no
+    algorithm field of its own), an authenticated IPMI 1.5 session message with a non-empty 16-byte
+    Auth Code (proving it is never rendered anywhere, checked directly against the plaintext value
+    in a dedicated CTest), a Chassis Control (power down) command, a Get SEL Info command
+    exercising the curated Storage table, a frame too short even for the fixed 4-byte RMCP header,
+    a UDP/623 negative control that is not RMCP-shaped at all (deliberately crafted to also avoid
+    HART-IP's own opportunistic UDP gate, once a real accidental collision with it was found and
+    fixed during this item's own manual verification pass), a non-standard-port variant, and an
+    RMCP ACK (the generic `RmcpOnly` fallback). 27 new `asf_*`/`ipmi_*`/`rmcp_*` CTest tests were
+    added. Full suite grew from 1689 to 1716 tests, zero regressions, zero-warning clean rebuilds
+    in both the default and `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF` configs. As with every recent
+    protocol addition, `tests/sample_ipmi.pcap` is entirely synthetic -- no real BMC/IPMI capture
+    was available to validate against.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

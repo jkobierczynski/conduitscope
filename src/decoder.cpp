@@ -1728,6 +1728,94 @@ DecodedPacket Decoder::decode_ip_payload(DecodedPacket out, uint8_t protocol, By
                 }
             }
 
+            // RMCP (Remote Management Control Protocol) / ASF (Alert Standard Format) / IPMI
+            // (Intelligent Platform Management Interface) -- a brand-new protocol family, all
+            // three sharing UDP port 623 by wire-format construction (RMCP IS the shared 4-byte
+            // framing both ASF and IPMI ride inside -- see rmcp.hpp's own file header comment for
+            // the full sourcing/scoping writeup). Port-gated in Auto mode for the same class of
+            // reason CoAP/BSAP/RIP/HSRP just above already are: RMCP's own header, while stronger
+            // than CoAP's own shortest-message gate (see rmcp.hpp's own DETECTION/DISPATCH
+            // paragraph for the honest strength comparison), still has no magic-string/checksum-
+            // spanning-the-whole-header property to lean on for a fully opportunistic,
+            // port-independent try. Placed here, right after CoAP, purely for locality (both are
+            // recent UDP-port-gated additions); no collision with anything else in this codebase
+            // was found (623 is not shared with any other decoder's own port). Three
+            // ProtocolDecoder instances share this one port-gated block, tried most-specific-
+            // first: AsfUdpDecoder and IpmiUdpDecoder each parse the RMCP header themselves and
+            // only produce a result when the Class byte matches their own protocol (they are
+            // mutually exclusive by construction, so their relative order can never create a
+            // collision between the two); RmcpUdpDecoder is the generic fallback (an RMCP ACK, any
+            // Class, or a Normal message with Class==OEM), tried last so its two siblings get
+            // first refusal.
+            bool want_asf = options_.protocol_filter == ProtocolFilter::Auto ||
+                             options_.protocol_filter == ProtocolFilter::AsfOnly;
+            bool want_ipmi = options_.protocol_filter == ProtocolFilter::Auto ||
+                              options_.protocol_filter == ProtocolFilter::IpmiOnly;
+            bool want_rmcp = options_.protocol_filter == ProtocolFilter::Auto ||
+                              options_.protocol_filter == ProtocolFilter::RmcpOnly;
+            bool require_rmcp_port = options_.protocol_filter == ProtocolFilter::Auto;
+            bool rmcp_port_match = port_in(udp.src_port, RMCP_UDP_PORT, options_.extra_rmcp_ports) ||
+                                    port_in(udp.dst_port, RMCP_UDP_PORT, options_.extra_rmcp_ports);
+            if ((want_asf || want_ipmi || want_rmcp) && (!require_rmcp_port || rmcp_port_match)) {
+                if (want_asf) {
+                    DecodeContext ctx;
+                    ctx.protocol_id = "asf";
+                    if (auto result = asf_udp_decoder().decode(udp.payload, ctx)) {
+                        const AsfFrame& frame = result->as<AsfFrame>();
+                        out.protocol = "asf";
+                        out.summary = frame.summary;
+                        for (const auto& n : frame.notes) out.notes.push_back(n);
+                        out.result = *result;
+                        if (!rmcp_port_match) {
+                            out.notes.push_back("seen on UDP port " + std::to_string(udp.src_port) +
+                                                 "->" + std::to_string(udp.dst_port) +
+                                                 ", which is not a configured/standard RMCP/ASF/IPMI "
+                                                 "port (623)");
+                        }
+                        return out;
+                    }
+                }
+                if (want_ipmi) {
+                    DecodeContext ctx;
+                    ctx.protocol_id = "ipmi";
+                    ctx.flow_states = &registry_flow_state_;
+                    ctx.session_key = tcp_session_key(out.src_ip, udp.src_port, out.dst_ip,
+                                                       udp.dst_port);
+                    if (auto result = ipmi_udp_decoder().decode(udp.payload, ctx)) {
+                        const IpmiFrame& frame = result->as<IpmiFrame>();
+                        out.protocol = "ipmi";
+                        out.summary = frame.summary;
+                        for (const auto& n : frame.notes) out.notes.push_back(n);
+                        out.result = *result;
+                        if (!rmcp_port_match) {
+                            out.notes.push_back("seen on UDP port " + std::to_string(udp.src_port) +
+                                                 "->" + std::to_string(udp.dst_port) +
+                                                 ", which is not a configured/standard RMCP/ASF/IPMI "
+                                                 "port (623)");
+                        }
+                        return out;
+                    }
+                }
+                if (want_rmcp) {
+                    DecodeContext ctx;
+                    ctx.protocol_id = "rmcp";
+                    if (auto result = rmcp_udp_decoder().decode(udp.payload, ctx)) {
+                        const RmcpFrame& frame = result->as<RmcpFrame>();
+                        out.protocol = "rmcp";
+                        out.summary = frame.summary;
+                        for (const auto& n : frame.notes) out.notes.push_back(n);
+                        out.result = *result;
+                        if (!rmcp_port_match) {
+                            out.notes.push_back("seen on UDP port " + std::to_string(udp.src_port) +
+                                                 "->" + std::to_string(udp.dst_port) +
+                                                 ", which is not a configured/standard RMCP/ASF/IPMI "
+                                                 "port (623)");
+                        }
+                        return out;
+                    }
+                }
+            }
+
             // Tried last among these UDP checks, port-independently -- see the matching comment in
             // reassemble_tcp_payload above for why HART-IP's own weaker structural detection gate
             // is deliberately given the lowest priority in this decoder's opportunistic dispatch.

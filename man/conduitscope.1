@@ -246,6 +246,23 @@ Available, with every other TLV including HP\-proprietary extensions
 named structurally; also fixes a pre\-existing bug where every
 Cisco\-OUI SNAP frame, including CDP's own, was mislabeled as PVST+; see
 \fBdocs/PROTOCOL_COVERAGE.md\fR's CDP section for the full writeup,
+plus RMCP/ASF/IPMI (server/BMC out\-of\-band management, DMTF/Intel/HP/
+NEC/Dell, UDP port 623 \-\- RMCP is the shared envelope, ASF and IPMI are
+two of the payload classes it carries), decoding the RMCP header, ASF
+Presence Ping/Pong in full (every other ASF type named only), IPMI's
+1.5 and 2.0/RMCP+ session headers, the classic IPMI request/response
+message shape with a curated NetFn/Command table (Get Device ID, Chassis
+Control, Get Channel Authentication Capabilities, SEL/SOL commands among
+them), and IPMI 2.0's full four\-message RAKP handshake plus Open Session
+Request/Response \-\- with a curated finding for Cipher Suite 0
+("RAKP\-none", the CVE\-2013\-4786\-class IPMI authentication\-bypass
+cipher suite), surfaced both inline and as its own headline count in
+\fB\-\-stats\fR; an Auth Code/password field is never rendered, only its
+presence and length noted, the same posture CODESYS's own credential
+fields use; AES\-CBC\-128 payload decryption and any Redfish/vendor
+(iDRAC/iLO) REST extension are explicitly out of scope; see
+\fBdocs/PROTOCOL_COVERAGE.md\fR's RMCP / ASF / IPMI section for the full
+writeup,
 plus PROFINET RT (EtherType 0x8892, DCP device discovery/configuration and
 cyclic real-time IO), IEC 61850-8-1 GOOSE (EtherType 0x88B8, ASN.1
 BER-encoded GOOSE PDU), IEC 61850-9-2 Sampled Values (EtherType 0x88BA,
@@ -429,7 +446,7 @@ regardless of where it's being analyzed \-\- an extension beyond what
 tshark/tcpdump themselves offer. See \fBdocs/USER_GUIDE.md\fR's OUTPUT
 FORMATS "Timestamps" subsection.
 .TP
-.B \-\-protocol {auto,modbus,dnp3,iec104,s7comm,s7comm\-plus,mms,enip,twincat,melsec,fins,bgp,kerberos,ldap,smb,profinet,goose,sv,ethercat,stp,devicenet,bacnet,hartip,opcua,mqtt,ff\-hse,dns,mdns,llmnr,nbns,doh,rip,igmp,vrrp,hsrp,igrp,pim,eigrp,ospf,remote\-access,lateral\-movement,enterprise\-trust,eapol,wireless\-backhaul,pppoe,tunnel\-vpn,mpls,arp,lldp,slow\-protocols,winrm,dcom,ge\-srtp,bsap,cclink\-ie,codesys,coap,zigbee,cdp}
+.B \-\-protocol {auto,modbus,dnp3,iec104,s7comm,s7comm\-plus,mms,enip,twincat,melsec,fins,bgp,kerberos,ldap,smb,profinet,goose,sv,ethercat,stp,devicenet,bacnet,hartip,opcua,mqtt,ff\-hse,dns,mdns,llmnr,nbns,doh,rip,igmp,vrrp,hsrp,igrp,pim,eigrp,ospf,remote\-access,lateral\-movement,enterprise\-trust,eapol,wireless\-backhaul,pppoe,tunnel\-vpn,mpls,arp,lldp,slow\-protocols,winrm,dcom,ge\-srtp,bsap,cclink\-ie,codesys,coap,zigbee,cdp,rmcp,asf,ipmi}
 Restrict decoding to one protocol. Default: auto (tries all fourteen TCP
 protocols, independent of port number, plus CIP I/O, BACnet/IP, HART-IP, and
 FF-HSE on every
@@ -628,6 +645,16 @@ BEFORE FF-HSE's own opportunistic check rather than after it: a synthetic
 HSRPv1 message was found, while building this feature, to satisfy FF-HSE's
 own weaker structural gate and get misdetected as truncated FF-HSE traffic
 in the other order.
+\fBrmcp\fR/\fBasf\fR/\fBipmi\fR (UDP port 623) join the same port\-gated
+group too, the same posture \fB\-\-coap\-port\fR already established \-\-
+RMCP's own 4\-byte header (a fixed Version/Reserved byte pair plus a small
+Class enum) is too weak a signal to try against every UDP payload
+opportunistically. Unlike \fBrip\fR/\fBhsrp\fR/\fBdns\fR/\fBmdns\fR/
+\fBllmnr\fR/\fBnbns\fR, which each have their own separate \fB\-\-*\-port\fR
+option, all three of \fBrmcp\fR/\fBasf\fR/\fBipmi\fR share ONE port list,
+\fB\-\-rmcp\-port\fR, since ASF and IPMI are just two Class values inside
+the identical RMCP envelope and always share the same port by
+construction \-\- see \fB\-\-rmcp\-port\fR below.
 \fBigmp\fR (IP protocol 2), \fBvrrp\fR (IP protocol 112), \fBigrp\fR (IP
 protocol 9), \fBpim\fR (IP protocol 103), \fBeigrp\fR (IP protocol 88), and
 \fBospf\fR (IP protocol 89) need no port gate or option at all \-\- all six
@@ -811,6 +838,15 @@ Also widens detection in \fBauto\fR mode.
 Same as \fB\-\-dns\-port\fR, for HSRP (built\-in default: 1985). Repeatable.
 Also widens detection in \fBauto\fR mode. IGMP and VRRP need no port option
 at all \-\- both are dispatched purely by IP protocol number.
+.TP
+.B \-\-rmcp\-port \fIPORT\fR
+Same as \fB\-\-dns\-port\fR, for RMCP/ASF/IPMI (built\-in default: 623,
+UDP; see \fBdocs/PROTOCOL_COVERAGE.md\fR's RMCP / ASF / IPMI section).
+Repeatable. Also widens detection in \fBauto\fR mode. ONE shared option
+across all three \fB\-\-protocol\fR values (\fBrmcp\fR/\fBasf\fR/\fBipmi\fR)
+\-\- unlike \fB\-\-dns\-port\fR/\fB\-\-mdns\-port\fR/\fB\-\-llmnr\-port\fR's
+three genuinely different default ports, RMCP/ASF/IPMI always share the
+exact same UDP port by wire\-format construction.
 .TP
 .B \-\-remote\-access\-port \fIPORT\fR
 Additional TCP or UDP port to treat as expected for the Tier 1 "IT

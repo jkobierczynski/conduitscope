@@ -82,6 +82,7 @@ add_library(conduitscope_core STATIC
   src/nbns.cpp
   src/tls_sni.cpp
   src/rip.cpp
+  src/rmcp.cpp
   src/icmp.cpp
   src/igmp.cpp
   src/vrrp.cpp
@@ -11763,6 +11764,186 @@ set_tests_properties(coap_stats_message_type_and_code_counts PROPERTIES
 add_test(NAME coap_protocol_filter_excludes_other_protocols
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --protocol coap --format text)
 set_tests_properties(coap_protocol_filter_excludes_other_protocols PROPERTIES
+  FAIL_REGULAR_EXPRESSION "\\[modbus\\]")
+
+# rmcp.hpp/.cpp -- RMCP (Remote Management Control Protocol) / ASF (Alert Standard Format) / IPMI
+# (Intelligent Platform Management Interface), all sharing UDP port 623. See rmcp.hpp's own file
+# header for the full sourcing/scoping/wire-format writeup. sample_ipmi.pcap (build_ipmi_sample,
+# tools/make_sample_pcap.py) carries an ASF Presence Ping/Pong exchange, an IPMI 1.5 sessionless
+# Get Channel Authentication Capabilities request/response, a full IPMI 2.0/RMCP+ Open
+# Session+RAKP 1-4 handshake with a normal cipher suite, a SEPARATE handshake using Cipher Suite 0
+# (RAKP-none), an authenticated IPMI 1.5 message with a non-empty Auth Code, a Chassis Control
+# (power down) command, a Get SEL Info command, a too-short frame, a non-RMCP-shaped negative
+# control, a non-standard-port variant, and an RMCP ACK.
+
+add_test(NAME asf_presence_ping
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ipmi.pcap" --format text -v)
+set_tests_properties(asf_presence_ping PROPERTIES
+  PASS_REGULAR_EXPRESSION "#1  [^\n]*\\[asf\\]  ASF Presence Ping tag=0")
+
+add_test(NAME asf_presence_pong_full_fields
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ipmi.pcap" --format text -v)
+set_tests_properties(asf_presence_pong_full_fields PROPERTIES
+  PASS_REGULAR_EXPRESSION "#2  [^\n]*\\[asf\\]  ASF Presence Pong tag=0 OEM-IANA=4542 ASF-ver=1 sec-ext=yes")
+
+add_test(NAME asf_presence_pong_json_fields
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ipmi.pcap" --format json)
+set_tests_properties(asf_presence_pong_json_fields PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"asf_message_type\": \"Presence Pong\",\n *\"asf_message_tag\": 0,\n *\"asf_pong_oem_iana\": 4542,\n *\"asf_pong_asf_version\": 1,\n *\"asf_pong_security_extensions_supported\": true,\n *\"asf_body_length\": 16,")
+
+add_test(NAME ipmi_get_channel_auth_capabilities_request
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ipmi.pcap" --format text -v)
+set_tests_properties(ipmi_get_channel_auth_capabilities_request PROPERTIES
+  PASS_REGULAR_EXPRESSION "#3  [^\n]*\\[ipmi\\]  IPMI1\\.5 Request NetFn=Application Cmd=Get Channel Authentication Capabilities[^\n]*\n *note: Get Channel Authentication Capabilities request: channel=14, requested privilege=Administrator")
+
+add_test(NAME ipmi_get_channel_auth_capabilities_response
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ipmi.pcap" --format text -v)
+set_tests_properties(ipmi_get_channel_auth_capabilities_response PROPERTIES
+  PASS_REGULAR_EXPRESSION "#4  [^\n]*\\[ipmi\\]  IPMI1\\.5 Response NetFn=Application Cmd=Get Channel Authentication Capabilities CC=Command Completed Normally[^\n]*\n *note: Get Channel Authentication Capabilities response: supported auth types = NONE, MD2, MD5, PASSWORD")
+
+add_test(NAME ipmi_open_session_request_normal_cipher_suite
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ipmi.pcap" --format text -v)
+set_tests_properties(ipmi_open_session_request_normal_cipher_suite PROPERTIES
+  PASS_REGULAR_EXPRESSION "#5  [^\n]*\\[ipmi\\]  IPMI2\\.0/RMCP\\+ Open Session Request tag=1 priv=Administrator auth=RAKP-HMAC-SHA1"
+  FAIL_REGULAR_EXPRESSION "#5[^\n]*CIPHER SUITE")
+
+add_test(NAME ipmi_open_session_response_normal_cipher_suite
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ipmi.pcap" --format text -v)
+set_tests_properties(ipmi_open_session_response_normal_cipher_suite PROPERTIES
+  PASS_REGULAR_EXPRESSION "#6  [^\n]*\\[ipmi\\]  IPMI2\\.0/RMCP\\+ Open Session Response tag=1 status=No errors auth=RAKP-HMAC-SHA1"
+  FAIL_REGULAR_EXPRESSION "#6[^\n]*CIPHER SUITE")
+
+add_test(NAME ipmi_rakp1_user_name
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ipmi.pcap" --format text -v)
+set_tests_properties(ipmi_rakp1_user_name PROPERTIES
+  PASS_REGULAR_EXPRESSION "#7  [^\n]*\\[ipmi\\]  IPMI2\\.0/RMCP\\+ RAKP Message 1 tag=1 user=admin")
+
+add_test(NAME ipmi_rakp2_json_fields
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ipmi.pcap" --format json)
+set_tests_properties(ipmi_rakp2_json_fields PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"ipmi_payload_type\": \"RAKP Message 2\",[^\n]*\n *\"ipmi_payload_encrypted\": false,\n *\"ipmi_payload_authenticated\": false,\n *\"ipmi_rakp_stage\": \"rakp2\",\n *\"ipmi_cipher_suite_zero\": false,")
+
+add_test(NAME ipmi_rakp3_and_rakp4
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ipmi.pcap" --format text -v)
+set_tests_properties(ipmi_rakp3_and_rakp4 PROPERTIES
+  PASS_REGULAR_EXPRESSION "#9  [^\n]*\\[ipmi\\]  IPMI2\\.0/RMCP\\+ RAKP Message 3 tag=1 status=No errors\n#10  [^\n]*\\[ipmi\\]  IPMI2\\.0/RMCP\\+ RAKP Message 4 tag=1 status=No errors")
+
+# SECURITY: this Open Session Request PROPOSES Cipher Suite 0.
+add_test(NAME ipmi_cipher_suite_zero_open_session_request
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ipmi.pcap" --format text -v)
+set_tests_properties(ipmi_cipher_suite_zero_open_session_request PROPERTIES
+  PASS_REGULAR_EXPRESSION "#11  [^\n]*\\[ipmi\\]  IPMI2\\.0/RMCP\\+ Open Session Request tag=2 priv=Administrator auth=RAKP-none \\[CIPHER SUITE 0 PROPOSED\\][^\n]*\n *note: SECURITY: this Open Session Request PROPOSES Cipher Suite 0 \\(Authentication Algorithm = RAKP-none\\)")
+
+# SECURITY (headline finding): the BMC's own Open Session Response ACCEPTS Cipher Suite 0 -- the
+# actual exploitable authentication-bypass condition (CVE-2013-4786-class).
+add_test(NAME ipmi_cipher_suite_zero_open_session_response_accepted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ipmi.pcap" --format text -v)
+set_tests_properties(ipmi_cipher_suite_zero_open_session_response_accepted PROPERTIES
+  PASS_REGULAR_EXPRESSION "#12  [^\n]*\\[ipmi\\]  IPMI2\\.0/RMCP\\+ Open Session Response tag=2 status=No errors auth=RAKP-none \\[CIPHER SUITE 0 ACCEPTED\\][^\n]*\n *note: SECURITY: this Open Session Response ACCEPTS Cipher Suite 0 \\(Authentication Algorithm = RAKP-none, status = No errors\\) -- RAKP's own key-exchange authentication check will never happen for the rest of this session; ANY password, including a nonexistent one, will complete this handshake")
+
+# The sticky per-session note: RAKP Message 1 carries no algorithm field of its own, but this
+# session's own earlier Open Session exchange already proposed/accepted Cipher Suite 0 -- see
+# rmcp.hpp's own STATEFULNESS section (IpmiFlowState).
+add_test(NAME ipmi_cipher_suite_zero_sticky_note_on_rakp1
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ipmi.pcap" --format text -v)
+set_tests_properties(ipmi_cipher_suite_zero_sticky_note_on_rakp1 PROPERTIES
+  PASS_REGULAR_EXPRESSION "#13  [^\n]*\\[ipmi\\]  IPMI2\\.0/RMCP\\+ RAKP Message 1 tag=2 user=\\(anonymous\\)[^\n]*\n *note: this session's own earlier Open Session exchange proposed/accepted Cipher Suite 0")
+
+# Auth Code (IPMI 1.5, AuthType=PASSWORD): presence/length noted, the literal 16-byte value never
+# rendered anywhere (checked separately below via a FAIL_REGULAR_EXPRESSION on the plaintext).
+add_test(NAME ipmi_auth_code_present_not_rendered
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ipmi.pcap" --format text -v)
+set_tests_properties(ipmi_auth_code_present_not_rendered PROPERTIES
+  PASS_REGULAR_EXPRESSION "#14  [^\n]*\\[ipmi\\]  IPMI1\\.5 Request NetFn=Application Cmd=Get Device ID[^\n]*\n *note: Authentication Code present \\(16 byte\\(s\\)\\) -- never rendered, only presence/length noted")
+
+add_test(NAME ipmi_auth_code_value_never_appears_anywhere
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ipmi.pcap" --format json)
+set_tests_properties(ipmi_auth_code_value_never_appears_anywhere PROPERTIES
+  FAIL_REGULAR_EXPRESSION "SuperSecretPass1")
+
+# SECURITY: Chassis Control, a remote power-control command.
+add_test(NAME ipmi_chassis_control_power_down_security_note
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ipmi.pcap" --format text -v)
+set_tests_properties(ipmi_chassis_control_power_down_security_note PROPERTIES
+  PASS_REGULAR_EXPRESSION "#15  [^\n]*\\[ipmi\\]  IPMI2\\.0/RMCP\\+ Request NetFn=Chassis Cmd=Chassis Control[^\n]*\n *note: Chassis Control: Power down -- a remote power-control command \\(security-relevant")
+
+add_test(NAME ipmi_get_sel_info_curated_command
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ipmi.pcap" --format text -v)
+set_tests_properties(ipmi_get_sel_info_curated_command PROPERTIES
+  PASS_REGULAR_EXPRESSION "#16  [^\n]*\\[ipmi\\]  IPMI1\\.5 Request NetFn=Storage Cmd=Get SEL Info")
+
+# MALFORMED: too short even for the fixed 4-byte RMCP header -- tolerant-degrade, falls through to
+# generic [udp] rather than crashing or fabricating a decode.
+add_test(NAME ipmi_malformed_too_short_for_rmcp_header
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ipmi.pcap" --format text -v)
+set_tests_properties(ipmi_malformed_too_short_for_rmcp_header PROPERTIES
+  PASS_REGULAR_EXPRESSION "#17  [^\n]*\\[udp\\]  UDP payload of 3 byte\\(s\\) on port 52500->623"
+  FAIL_REGULAR_EXPRESSION "#17[^\n]*\\[(rmcp|asf|ipmi)\\]")
+
+# NEGATIVE CONTROL: UDP/623 bytes that are not RMCP-shaped at all (Version/Reserved don't match) --
+# proves no false positive despite being on the standard port, and no accidental collision with
+# HART-IP's own opportunistic UDP gate (see the fixture's own comment).
+add_test(NAME ipmi_negative_control_falls_through
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ipmi.pcap" --format text -v)
+set_tests_properties(ipmi_negative_control_falls_through PROPERTIES
+  PASS_REGULAR_EXPRESSION "#18  [^\n]*\\[udp\\]  UDP payload of 12 byte\\(s\\) on port 52600->623"
+  FAIL_REGULAR_EXPRESSION "#18[^\n]*\\[(rmcp|asf|ipmi|hartip)\\]")
+
+# GateKind::UdpPort -- RMCP/ASF/IPMI are only attempted on a configured/expected port in Auto mode,
+# so packet 19's own non-standard port (6623) is never even attempted -- falls through to generic
+# [udp].
+add_test(NAME asf_non_standard_port_not_attempted_in_auto_mode
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ipmi.pcap" --format text -v)
+set_tests_properties(asf_non_standard_port_not_attempted_in_auto_mode PROPERTIES
+  PASS_REGULAR_EXPRESSION "#19  [^\n]*\\[udp\\]  UDP payload of 12 byte\\(s\\) on port 52700->6623"
+  FAIL_REGULAR_EXPRESSION "#19[^\n]*\\[asf\\]")
+
+# --rmcp-port WIDENS which port(s) are actually attempted in Auto mode (real port gating, like
+# --coap-port -- not merely widening the "expected" annotation).
+add_test(NAME rmcp_port_option_widens_auto_mode_detection
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ipmi.pcap" --rmcp-port 6623 --format text -v)
+set_tests_properties(rmcp_port_option_widens_auto_mode_detection PROPERTIES
+  PASS_REGULAR_EXPRESSION "#19  [^\n]*\\[asf\\]  ASF Presence Ping tag=0"
+  FAIL_REGULAR_EXPRESSION "not a configured/standard RMCP")
+
+# Forced --protocol asf tries every port regardless, WITH the non-standard-port note.
+add_test(NAME asf_forced_protocol_non_standard_port_note
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ipmi.pcap" --protocol asf --format text -v)
+set_tests_properties(asf_forced_protocol_non_standard_port_note PROPERTIES
+  PASS_REGULAR_EXPRESSION "#19  [^\n]*\\[asf\\][^\n]*\n *note: seen on UDP port 52700->6623, which is not a configured/standard RMCP/ASF/IPMI port \\(623\\)")
+
+# The generic RmcpUdpDecoder fallback -- an RMCP ACK, any Class (never claimed by AsfOnly/IpmiOnly,
+# which are mutually exclusive with it by RMCP Class value -- see rmcp.hpp's own DETECTION/
+# DISPATCH section).
+add_test(NAME rmcp_ack_generic_fallback
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ipmi.pcap" --format text -v)
+set_tests_properties(rmcp_ack_generic_fallback PROPERTIES
+  PASS_REGULAR_EXPRESSION "#20  [^\n]*\\[rmcp\\]  RMCP ACK, Class: IPMI")
+
+add_test(NAME rmcp_ack_protocol_filter_isolates_generic_decoder
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ipmi.pcap" --protocol rmcp --format text)
+set_tests_properties(rmcp_ack_protocol_filter_isolates_generic_decoder PROPERTIES
+  PASS_REGULAR_EXPRESSION "#20  [^\n]*\\[rmcp\\]  RMCP ACK, Class: IPMI"
+  FAIL_REGULAR_EXPRESSION "\\[(asf|ipmi)\\]")
+
+add_test(NAME ipmi_stats_netfn_command_and_cipher_suite_zero_headline
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ipmi.pcap" --format text --stats)
+set_tests_properties(ipmi_stats_netfn_command_and_cipher_suite_zero_headline PROPERTIES
+  # Bug fix: "Application / Get Channel Authentication Capabilities" is 54 characters -- longer
+  # than this column's 40-char std::setw field -- so the count used to run directly into the name
+  # with no separating space ("...Capabilities2"). Pinned here to require the corrected single-
+  # space separator (see output.cpp's own comment at this stats block) so this can't silently
+  # regress back to the unspaced form.
+  PASS_REGULAR_EXPRESSION "rmcp class-of-message counts:\n *ACK  *1\n *ASF  *2\n *IPMI  *14\nasf message types:\n *Presence Ping  *1\n *Presence Pong  *1\nipmi netfn/command counts:\n *Application / Get Channel Authentication Capabilities  *2\n *Application / Get Device ID  *1\n *Chassis / Chassis Control  *1\n *Storage / Get SEL Info  *1\n\\*\\*\\* IPMI Cipher Suite 0 \\(RAKP-none authentication bypass\\) observations: 3 \\*\\*\\*")
+
+add_test(NAME ipmi_protocol_filter_excludes_other_protocols
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --protocol ipmi --format text)
+set_tests_properties(ipmi_protocol_filter_excludes_other_protocols PROPERTIES
+  FAIL_REGULAR_EXPRESSION "\\[modbus\\]")
+
+add_test(NAME asf_protocol_filter_excludes_other_protocols
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --protocol asf --format text)
+set_tests_properties(asf_protocol_filter_excludes_other_protocols PROPERTIES
   FAIL_REGULAR_EXPRESSION "\\[modbus\\]")
 
 # ieee802154.hpp/.cpp + zigbee.hpp/.cpp -- IEEE 802.15.4 MAC framing (LINKTYPE_IEEE802_15_4_WITHFCS

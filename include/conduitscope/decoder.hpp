@@ -61,6 +61,7 @@
 #include "conduitscope/quic.hpp"
 #include "conduitscope/resource_limits.hpp"
 #include "conduitscope/rip.hpp"
+#include "conduitscope/rmcp.hpp"
 #include "conduitscope/s7commplus.hpp"
 #include "conduitscope/slow_protocols.hpp"
 #include "conduitscope/smb.hpp"
@@ -278,6 +279,26 @@ enum class ProtocolFilter {
                            // lives at the call site, not in the class" shape STP already
                            // established for its own non-EtherType-keyed dispatch, see stp.hpp/
                            // StpDecoder and decoder.cpp's own SNAP call site.
+    AsfOnly,               // only attempt ASF (Alert Standard Format, DMTF DSP0136 -- Presence
+                           // Ping/Pong and a handful of other OOB-management alerting message
+                           // types; UDP port 623) decoding -- see rmcp.hpp. GateKind::UdpPort
+                           // (port-gated in Auto mode, joining BSAP/CoAP/RIP/HSRP/DNS/mDNS/LLMNR/
+                           // NBT-NS on that gate). Distinguished from RmcpOnly/IpmiOnly below the
+                           // same way DNS/mDNS/LLMNR share one wire format but get distinguishable
+                           // --protocol values -- ASF/IPMI are meaningfully distinct protocols an
+                           // analyst would want to filter on independently even though both ride
+                           // inside RMCP's own shared 4-byte framing.
+    IpmiOnly,              // only attempt IPMI (Intelligent Platform Management Interface --
+                           // Intel/HP/NEC/Dell BMC management, both IPMI 1.5 and IPMI 2.0/RMCP+
+                           // including the RAKP handshake; UDP port 623) decoding -- see
+                           // rmcp.hpp. GateKind::UdpPort, same gate group as AsfOnly above.
+    RmcpOnly,              // only attempt the generic RMCP fallback -- an RMCP ACK (any Class) or
+                           // a Normal message with Class==OEM (vendor-specific, not further
+                           // decoded) -- see rmcp.hpp. A Normal message with Class==ASF or
+                           // Class==IPMI is always claimed by AsfOnly/IpmiOnly above instead, even
+                           // when THIS filter value is the one selected (see rmcp.hpp's own
+                           // DETECTION/DISPATCH section for why those two classes never reach this
+                           // generic decoder in the first place, regardless of --protocol filter).
 };
 
 struct DecodeOptions {
@@ -413,6 +434,18 @@ struct DecodeOptions {
                                                   // extra_rip_ports/extra_hsrp_ports/
                                                   // extra_bsap_ports above -- see coap.hpp's own
                                                   // try_parse_coap comment.
+    std::vector<uint16_t> extra_rmcp_ports;     // UDP -- see RMCP_UDP_PORT (623); same detection-
+                                                  // gating group and reasoning as extra_coap_ports/
+                                                  // extra_bsap_ports above, shared by all THREE of
+                                                  // this codebase's RMCP-family decoders (RMCP/ASF/
+                                                  // IPMI) rather than one list per --protocol
+                                                  // value -- a deliberate judgment call, since all
+                                                  // three always ride the exact same UDP port by
+                                                  // wire-format construction (RMCP IS the framing
+                                                  // ASF/IPMI ride inside), unlike e.g. DNS/mDNS/
+                                                  // LLMNR's own three genuinely-different default
+                                                  // ports, each of which needs its own list. See
+                                                  // rmcp.hpp.
     std::vector<uint16_t> extra_codesys_ports;  // TCP (11740/1217) AND UDP (1740-1743) -- one
                                                   // shared list covers both transports, the same
                                                   // "one list, two ports/port-sets, different

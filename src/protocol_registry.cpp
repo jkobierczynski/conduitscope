@@ -44,6 +44,7 @@
 #include "conduitscope/pppoe.hpp"
 #include "conduitscope/profinet.hpp"
 #include "conduitscope/rip.hpp"
+#include "conduitscope/rmcp.hpp"
 #include "conduitscope/s7comm.hpp"
 #include "conduitscope/s7commplus.hpp"
 #include "conduitscope/slow_protocols.hpp"
@@ -439,6 +440,27 @@ const std::vector<const ProtocolDecoder*>& udp_port_registry() {
                             // reason BSAP/RIP/HSRP already are -- see coap.hpp's own DETECTION/
                             // DISPATCH paragraph. decoder.cpp's own CoAP call site likewise sits
                             // right after its BSAP block.
+        &asf_udp_decoder(),   // ASF (Alert Standard Format, DMTF) -- a brand-new protocol family
+                            // (RMCP/ASF/IPMI, see rmcp.hpp), built entirely on the
+                            // ProtocolDecoder interface from inception like CoAP just above.
+                            // Joins this gate right after CoAP, port-gated for the same "no
+                            // magic-byte-strength structural gate" class of reason CoAP/BSAP/RIP/
+                            // HSRP already are -- see rmcp.hpp's own DETECTION/DISPATCH
+                            // paragraph. Tried BEFORE ipmi_udp_decoder()/rmcp_udp_decoder()
+                            // immediately below purely for locality (all three share one RMCP-
+                            // header parse and one UDP port, 623, and are mutually exclusive by
+                            // Class value -- see rmcp.hpp -- so their relative order here cannot
+                            // create a collision).
+        &ipmi_udp_decoder(),  // IPMI (Intelligent Platform Management Interface) -- the second
+                            // decoder in the RMCP/ASF/IPMI family, joining this gate right after
+                            // ASF. Same UDP port (623) and gate reasoning as asf_udp_decoder()
+                            // above.
+        &rmcp_udp_decoder(),  // RMCP (Remote Management Control Protocol) itself -- the generic
+                            // fallback of the RMCP/ASF/IPMI family (an RMCP ACK, any Class, or a
+                            // Normal message with Class==OEM; Class==ASF/IPMI are always claimed
+                            // by asf_udp_decoder()/ipmi_udp_decoder() above instead -- see
+                            // rmcp.hpp's own DETECTION/DISPATCH paragraph). Tried LAST of this
+                            // trio so its two more-specific siblings get first refusal.
     };
     return order;
 }

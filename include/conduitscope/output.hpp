@@ -405,6 +405,19 @@ private:
     std::map<std::string, size_t> zigbee_zdp_cluster_counts_;
     size_t zigbee_nwk_encrypted_count_ = 0;
     size_t zigbee_aps_encrypted_count_ = 0;
+    // RMCP/ASF/IPMI (rmcp.hpp) -- RMCP Class-of-Message counts (synthesized from which of the
+    // three decoders/protocol ids claimed a packet, plus rmcp's own header.is_ack/class_name for
+    // the generic ACK/OEM cases -- see rmcp.hpp's own DETECTION/DISPATCH for why this is a
+    // complete partition), ASF Message Type counts, and IPMI NetFn/Command counts (keyed by
+    // "<NetFn name> / <Command name>", falling back to raw hex for either half when unnamed, the
+    // same "curated name or raw hex" fallback rip_command_counts_/icmp_type_counts_ already use).
+    // ipmi_cipher_suite_zero_count_ is this decoder's own headline security finding (see rmcp.hpp's
+    // own SECURITY note) and is printed on its own, clearly-labeled line in --stats output, never
+    // folded into a generic map, so it can never be missed by a reader scanning for it.
+    std::map<std::string, size_t> rmcp_class_counts_;
+    std::map<std::string, size_t> asf_message_type_counts_;
+    std::map<std::string, size_t> ipmi_netfn_command_counts_;
+    size_t ipmi_cipher_suite_zero_count_ = 0;
     bool has_ts_ = false;
     double first_ts_ = 0.0, last_ts_ = 0.0;
 };

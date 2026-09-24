@@ -118,7 +118,13 @@ const std::vector<const ProtocolDecoder*>& tcp_port_registry();
 // comment in dns.hpp for why that's three classes, not one. BSAP (Bristol Standard Asynchronous/
 // Synchronous Protocol, UDP port 1234) was added to this cascade afterward, NOT as part of
 // migration batch 4 -- like ARP/LLDP/BGP/GE SRTP in the cascades above, a brand-new protocol
-// built directly on ProtocolDecoder from inception (see bsap.hpp), appended after NBT-NS.
+// built directly on ProtocolDecoder from inception (see bsap.hpp), appended after NBT-NS. CoAP
+// (coap.hpp) joins right after BSAP for the identical reason. RMCP/ASF/IPMI (rmcp.hpp -- three
+// ProtocolDecoder instances, asf_udp_decoder()/ipmi_udp_decoder()/rmcp_udp_decoder(), all sharing
+// UDP port 623 since RMCP IS the framing ASF/IPMI ride inside) join right after CoAP, in that
+// most-specific-first order (see rmcp.hpp's own DETECTION/DISPATCH paragraph for why order among
+// the three matters not at all for correctness -- they are mutually exclusive by RMCP Class
+// value -- but ASF/IPMI are still tried before the generic RMCP fallback purely for clarity).
 const std::vector<const ProtocolDecoder*>& udp_port_registry();
 
 // Migration batch 2 addition: migrated UDP-port-INDEPENDENT protocols (GateKind::UdpPortIndependent

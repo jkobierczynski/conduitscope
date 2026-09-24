@@ -504,6 +504,7 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
                 const std::vector<int>& cclink_ie_ports,
                 const std::vector<int>& codesys_ports,
                 const std::vector<int>& coap_ports,
+                const std::vector<int>& rmcp_ports,
                 size_t flood_threshold,
                 size_t max_packets,
                 const ResourceLimitCliVars& limit_vars,
@@ -630,6 +631,9 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
                                : (protocol == "coap")   ? ProtocolFilter::CoapOnly
                                : (protocol == "zigbee") ? ProtocolFilter::ZigbeeOnly
                                : (protocol == "cdp")    ? ProtocolFilter::CdpOnly
+                               : (protocol == "asf")    ? ProtocolFilter::AsfOnly
+                               : (protocol == "ipmi")   ? ProtocolFilter::IpmiOnly
+                               : (protocol == "rmcp")   ? ProtocolFilter::RmcpOnly
                                                         : ProtocolFilter::Auto;
     for (int p : modbus_ports) options.extra_modbus_ports.push_back(static_cast<uint16_t>(p));
     for (int p : dnp3_ports) options.extra_dnp3_ports.push_back(static_cast<uint16_t>(p));
@@ -667,6 +671,7 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
     for (int p : cclink_ie_ports) options.extra_cclink_ie_ports.push_back(static_cast<uint16_t>(p));
     for (int p : codesys_ports) options.extra_codesys_ports.push_back(static_cast<uint16_t>(p));
     for (int p : coap_ports) options.extra_coap_ports.push_back(static_cast<uint16_t>(p));
+    for (int p : rmcp_ports) options.extra_rmcp_ports.push_back(static_cast<uint16_t>(p));
     if (flood_threshold > 0) options.flood_threshold = flood_threshold;
 
     try {
@@ -1200,7 +1205,7 @@ int main(int argc, char** argv) {
         decode_remote_access_ports, decode_lateral_movement_ports, decode_enterprise_trust_ports,
         decode_wireless_backhaul_ports, decode_tunnel_vpn_ports, decode_winrm_ports, decode_dcom_ports,
         decode_ge_srtp_ports, decode_bsap_ports, decode_cclink_ie_ports, decode_codesys_ports,
-        decode_coap_ports;
+        decode_coap_ports, decode_rmcp_ports;
     size_t decode_flood_threshold = 0;  // 0 means "not given" -- keeps DecodeOptions::flood_threshold's
                                           // own compile-time default (attack_detect.hpp's
                                           // DEFAULT_FLOOD_THRESHOLD); see run_decode's own use of this.
@@ -1282,7 +1287,7 @@ int main(int argc, char** argv) {
     decode_cmd
         ->add_option("--protocol", decode_protocol,
                       "Restrict decoding to one protocol instead of auto-detecting all of them")
-        ->transform(CLI::IsMember({"auto", "modbus", "dnp3", "s7comm", "mms", "iec104", "enip", "profinet", "goose", "sv", "ethercat", "stp", "devicenet", "bacnet", "hartip", "opcua", "mqtt", "s7comm-plus", "ff-hse", "dns", "mdns", "llmnr", "nbns", "doh", "rip", "icmp", "igmp", "vrrp", "hsrp", "igrp", "pim", "eigrp", "ospf", "remote-access", "lateral-movement", "enterprise-trust", "eapol", "wireless-backhaul", "pppoe", "tunnel-vpn", "mpls", "arp", "lldp", "twincat", "kerberos", "ldap", "smb", "melsec", "fins", "bgp", "slow-protocols", "winrm", "dcom", "ge-srtp", "bsap", "cclink-ie", "codesys", "coap", "zigbee", "cdp"}))
+        ->transform(CLI::IsMember({"auto", "modbus", "dnp3", "s7comm", "mms", "iec104", "enip", "profinet", "goose", "sv", "ethercat", "stp", "devicenet", "bacnet", "hartip", "opcua", "mqtt", "s7comm-plus", "ff-hse", "dns", "mdns", "llmnr", "nbns", "doh", "rip", "icmp", "igmp", "vrrp", "hsrp", "igrp", "pim", "eigrp", "ospf", "remote-access", "lateral-movement", "enterprise-trust", "eapol", "wireless-backhaul", "pppoe", "tunnel-vpn", "mpls", "arp", "lldp", "twincat", "kerberos", "ldap", "smb", "melsec", "fins", "bgp", "slow-protocols", "winrm", "dcom", "ge-srtp", "bsap", "cclink-ie", "codesys", "coap", "zigbee", "cdp", "asf", "ipmi", "rmcp"}))
         ->capture_default_str();
     decode_cmd->add_option("--modbus-port", decode_modbus_ports,
                             "Additional TCP port to treat as expected for Modbus (repeatable); "
@@ -1428,6 +1433,15 @@ int main(int argc, char** argv) {
                             "like BSAP/RIP/HSRP/DNS -- its own shortest legal messages are too "
                             "weak a structural signal to try on every UDP port). Normally 5683, "
                             "see docs/PROTOCOL_COVERAGE.md");
+    decode_cmd->add_option("--rmcp-port", decode_rmcp_ports,
+                            "Additional UDP port to treat as expected for RMCP/ASF/IPMI (Remote "
+                            "Management Control Protocol / Alert Standard Format / Intelligent "
+                            "Platform Management Interface -- BMC/OOB server management; one "
+                            "shared list, since all three always ride the same UDP port by "
+                            "wire-format construction) (repeatable); UNLIKE most --x-port options "
+                            "this DOES gate detection (like BSAP/CoAP/RIP/HSRP -- no magic-byte-"
+                            "strength structural gate). Normally 623, see docs/"
+                            "PROTOCOL_COVERAGE.md");
     decode_cmd->add_option("--flood-threshold", decode_flood_threshold,
                             "Per-destination packet count that trips a SYN/ACK/TCP/ICMP/UDP flood "
                             "note (see docs/PROTOCOL_COVERAGE.md's Attack Detection section) -- a "
@@ -1840,6 +1854,7 @@ int main(int argc, char** argv) {
                            decode_winrm_ports, decode_dcom_ports, decode_ge_srtp_ports,
                            decode_bsap_ports, decode_cclink_ie_ports, decode_codesys_ports,
                            decode_coap_ports,
+                           decode_rmcp_ports,
                            decode_flood_threshold,
                            decode_max_packets, decode_limit_vars, decode_stats, decode_strict,
                            quiet, no_color, force_color, decode_mac_vendor, decode_resolve, decode_hosts_file,

@@ -15382,6 +15382,239 @@ def build_coap_sample():
     (TESTS_DIR / "sample_coap.pcap").write_bytes(data)
 
 
+# --- RMCP / ASF / IPMI (BMC out-of-band management -- DMTF/Intel, UDP port 623) --------------
+#
+# See rmcp.hpp's own file header for the full sourcing/scoping/wire-format writeup. All three ride
+# RMCP's own shared 4-byte framing (Version=0x06, Reserved=0xFF, Sequence, Type/Class).
+
+RMCP_PORT = 623
+RMCP_CLASS_ASF = 0x06
+RMCP_CLASS_IPMI = 0x07
+
+
+def rmcp_header(seq: int, rmcp_class: int, ack: bool = False) -> bytes:
+    b3 = (0x80 if ack else 0x00) | (rmcp_class & 0x1F)
+    return bytes([0x06, 0xFF, seq & 0xFF, b3])
+
+
+def asf_message(msg_type: int, tag: int, body: bytes = b"") -> bytes:
+    return struct.pack(">IBBBB", 4542, msg_type, tag, 0, len(body)) + body
+
+
+def asf_presence_pong_body(oem_iana: int = 4542, oem_defined: bytes = b"\x00\x00\x00\x00",
+                            asf_version: int = 1, security_extensions: bool = False) -> bytes:
+    entities = 0x80 | (asf_version & 0x0F)
+    interactions = 0x80 if security_extensions else 0x00
+    return struct.pack(">I", oem_iana) + oem_defined + bytes([entities, interactions]) + b"\x00" * 6
+
+
+def ipmi_msg(rs_addr: int, netfn: int, rs_lun: int, rq_addr: int, rq_seq: int, rq_lun: int,
+             cmd: int, data: bytes = b"") -> bytes:
+    """The classic IPMI request/response message -- see rmcp.hpp's own WIRE FORMAT section.
+    `data` already includes a leading Completion Code byte for a response (netfn odd)."""
+    b1 = ((netfn & 0x3F) << 2) | (rs_lun & 0x3)
+    cks1 = (-(rs_addr + b1)) & 0xFF
+    b4 = ((rq_seq & 0x3F) << 2) | (rq_lun & 0x3)
+    rest = bytes([rq_addr, b4, cmd]) + data
+    cks2 = (-sum(rest)) & 0xFF
+    return bytes([rs_addr, b1, cks1]) + rest + bytes([cks2])
+
+
+def ipmi15_session(auth_type: int, seq: int, session_id: int, msg: bytes,
+                    auth_code: bytes = None) -> bytes:
+    out = bytes([auth_type]) + struct.pack("<I", seq) + struct.pack("<I", session_id)
+    if auth_type != 0x00:
+        code = auth_code if auth_code is not None else b"\x00" * 16
+        assert len(code) == 16
+        out += code
+    out += bytes([len(msg)]) + msg
+    return out
+
+
+def ipmi20_session(payload_type: int, session_id: int, seq: int, msg: bytes,
+                    encrypted: bool = False, authenticated: bool = False) -> bytes:
+    pt_byte = (0x80 if encrypted else 0) | (0x40 if authenticated else 0) | (payload_type & 0x3F)
+    return (bytes([0x06, pt_byte]) + struct.pack("<I", session_id) + struct.pack("<I", seq) +
+            struct.pack("<H", len(msg)) + msg)
+
+
+def open_session_request(tag: int, priv: int, console_session_id: int, auth_alg: int,
+                          integrity_alg: int, conf_alg: int) -> bytes:
+    body = bytes([tag, priv & 0x0F, 0, 0]) + struct.pack("<I", console_session_id)
+    body += bytes([0x00, 0, 0, 0x08, auth_alg, 0, 0, 0])
+    body += bytes([0x01, 0, 0, 0x08, integrity_alg, 0, 0, 0])
+    body += bytes([0x02, 0, 0, 0x08, conf_alg, 0, 0, 0])
+    return body
+
+
+def open_session_response(tag: int, status: int, max_priv: int, console_session_id: int,
+                           managed_session_id: int, auth_alg: int = 0, integrity_alg: int = 0,
+                           conf_alg: int = 0) -> bytes:
+    body = (bytes([tag, status, max_priv & 0x0F, 0]) + struct.pack("<I", console_session_id) +
+            struct.pack("<I", managed_session_id))
+    if status == 0:
+        body += bytes([0x00, 0, 0, 0x08, auth_alg, 0, 0, 0])
+        body += bytes([0x01, 0, 0, 0x08, integrity_alg, 0, 0, 0])
+        body += bytes([0x02, 0, 0, 0x08, conf_alg, 0, 0, 0])
+    return body
+
+
+def rakp1(tag: int, managed_session_id: int, console_random: bytes, priv: int, name_only: bool,
+          user_name: bytes) -> bytes:
+    priv_byte = (priv & 0x0F) | (0x10 if name_only else 0x00)
+    return (bytes([tag, 0, 0, 0]) + struct.pack("<I", managed_session_id) + console_random +
+            bytes([priv_byte, 0, 0, len(user_name)]) + user_name)
+
+
+def rakp2(tag: int, status: int, console_session_id: int, managed_random: bytes,
+          managed_guid: bytes, auth_code: bytes = b"") -> bytes:
+    return (bytes([tag, status, 0, 0]) + struct.pack("<I", console_session_id) + managed_random +
+            managed_guid + auth_code)
+
+
+def rakp3(tag: int, status: int, managed_session_id: int, auth_code: bytes = b"") -> bytes:
+    return bytes([tag, status, 0, 0]) + struct.pack("<I", managed_session_id) + auth_code
+
+
+def rakp4(tag: int, status: int, console_session_id: int, icv: bytes = b"") -> bytes:
+    return bytes([tag, status, 0, 0]) + struct.pack("<I", console_session_id) + icv
+
+
+def build_ipmi_sample():
+    """RMCP (rmcp.hpp) / ASF / IPMI 1.5 / IPMI 2.0 RMCP+ (RAKP), all sharing UDP port 623.
+
+    1) ASF Presence Ping (console -> BMC).
+    2) ASF Presence Pong (BMC -> console), full field decode (OEM IANA, ASF version, security
+       extensions bit).
+    3) IPMI 1.5 sessionless Get Channel Authentication Capabilities REQUEST -- the standard first
+       step of an IPMI LAN session.
+    4) ...its RESPONSE (supported auth types, IPMI 2.0 extended capabilities bit).
+    5-10) IPMI 2.0/RMCP+ Open Session Request/Response + full RAKP Message 1-4 handshake, a NORMAL
+       cipher suite (Authentication=RAKP-HMAC-SHA1, Integrity=HMAC-SHA1-96,
+       Confidentiality=AES-CBC-128 -- Cipher Suite 3), on its own UDP session (source port 52100).
+    11-13) A SEPARATE handshake (source port 52200) using Cipher Suite 0 (Authentication=
+       RAKP-none) -- Open Session Request (proposes it), Open Session Response (ACCEPTS it, the
+       actual exploitable condition), and RAKP Message 1 (proving the sticky per-session note
+       fires on a later message that carries no algorithm field of its own).
+    14) An authenticated IPMI 1.5 session-based message (AuthType=PASSWORD) with a non-empty
+       16-byte Auth Code -- proving it is never rendered, only its presence/length noted.
+    15) Chassis Control: Power down -- the security-relevant remote-power-control command, riding
+       IPMI 2.0's own classic-message payload type on session A (source port 52100).
+    16) Get SEL Info request (Storage NetFn) -- exercising the curated NetFn/Command table.
+    17) MALFORMED: a frame too short even for the fixed 4-byte RMCP header.
+    18) NEGATIVE CONTROL: a UDP/623 packet that is not RMCP-shaped at all.
+    19) The same ASF Presence Ping as packet 1, on a non-standard UDP port (6623, not 623).
+    20) RMCP ACK (Class=IPMI) -- exercises the generic RmcpUdpDecoder fallback (--protocol
+        rmcp)."""
+    packets = []
+
+    def send(payload: bytes, sport: int, dport: int = RMCP_PORT, from_hmi: bool = True):
+        if from_hmi:
+            packets.append(udp_ip_eth_frame(payload, sport, dport, HMI_IP, PLC_IP, HMI_MAC, PLC_MAC))
+        else:
+            packets.append(udp_ip_eth_frame(payload, sport, dport, PLC_IP, HMI_IP, PLC_MAC, HMI_MAC))
+
+    # 1) ASF Presence Ping.
+    send(rmcp_header(1, RMCP_CLASS_ASF) + asf_message(0x80, 0x00), sport=52000)
+
+    # 2) ASF Presence Pong.
+    pong_body = asf_presence_pong_body(oem_iana=4542, asf_version=1, security_extensions=True)
+    send(rmcp_header(1, RMCP_CLASS_ASF) + asf_message(0x40, 0x00, pong_body),
+         sport=RMCP_PORT, dport=52000, from_hmi=False)
+
+    # 3) IPMI 1.5 sessionless Get Channel Authentication Capabilities REQUEST.
+    req38 = ipmi_msg(0x20, 0x06, 0, 0x81, 1, 0, 0x38, bytes([0x0E, 0x04]))  # channel=E(current), priv=Administrator
+    send(rmcp_header(2, RMCP_CLASS_IPMI) + ipmi15_session(0x00, 0, 0, req38), sport=52100)
+
+    # 4) ...its RESPONSE.
+    rsp38 = ipmi_msg(0x81, 0x07, 0, 0x20, 1, 0, 0x38,
+                      bytes([0x00, 0x01, 0x17, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00]))
+    send(rmcp_header(2, RMCP_CLASS_IPMI) + ipmi15_session(0x00, 0, 0, rsp38),
+         sport=RMCP_PORT, dport=52100, from_hmi=False)
+
+    # 5) Open Session Request -- Cipher Suite 3 (SHA1/SHA1-96/AES-CBC-128).
+    osr = open_session_request(0x01, 0x04, 0x11111111, 0x01, 0x01, 0x01)
+    send(rmcp_header(3, RMCP_CLASS_IPMI) + ipmi20_session(0x10, 0, 0, osr), sport=52100)
+
+    # 6) Open Session Response -- accepts Cipher Suite 3.
+    osp = open_session_response(0x01, 0x00, 0x04, 0x11111111, 0x22222222, 0x01, 0x01, 0x01)
+    send(rmcp_header(3, RMCP_CLASS_IPMI) + ipmi20_session(0x11, 0, 0, osp),
+         sport=RMCP_PORT, dport=52100, from_hmi=False)
+
+    # 7) RAKP Message 1.
+    console_random = bytes(range(16))
+    r1 = rakp1(0x01, 0x22222222, console_random, 0x04, False, b"admin")
+    send(rmcp_header(4, RMCP_CLASS_IPMI) + ipmi20_session(0x12, 0, 0, r1), sport=52100)
+
+    # 8) RAKP Message 2.
+    managed_random = bytes(range(16, 32))
+    managed_guid = bytes(range(32, 48))
+    r2 = rakp2(0x01, 0x00, 0x11111111, managed_random, managed_guid, auth_code=b"\xAA" * 20)
+    send(rmcp_header(4, RMCP_CLASS_IPMI) + ipmi20_session(0x13, 0, 0, r2),
+         sport=RMCP_PORT, dport=52100, from_hmi=False)
+
+    # 9) RAKP Message 3.
+    r3 = rakp3(0x01, 0x00, 0x22222222, auth_code=b"\xBB" * 20)
+    send(rmcp_header(5, RMCP_CLASS_IPMI) + ipmi20_session(0x14, 0, 0, r3), sport=52100)
+
+    # 10) RAKP Message 4.
+    r4 = rakp4(0x01, 0x00, 0x11111111, icv=b"\xCC" * 12)
+    send(rmcp_header(5, RMCP_CLASS_IPMI) + ipmi20_session(0x15, 0, 0, r4),
+         sport=RMCP_PORT, dport=52100, from_hmi=False)
+
+    # 11) SEPARATE handshake, own UDP session (source port 52200) -- Open Session Request
+    # PROPOSING Cipher Suite 0 (Authentication=RAKP-none).
+    osr0 = open_session_request(0x02, 0x04, 0x33333333, 0x00, 0x00, 0x00)
+    send(rmcp_header(1, RMCP_CLASS_IPMI) + ipmi20_session(0x10, 0, 0, osr0), sport=52200)
+
+    # 12) Open Session Response ACCEPTING Cipher Suite 0 -- the actual exploitable condition.
+    osp0 = open_session_response(0x02, 0x00, 0x04, 0x33333333, 0x44444444, 0x00, 0x00, 0x00)
+    send(rmcp_header(1, RMCP_CLASS_IPMI) + ipmi20_session(0x11, 0, 0, osp0),
+         sport=RMCP_PORT, dport=52200, from_hmi=False)
+
+    # 13) RAKP Message 1 on the SAME (Cipher-Suite-0) session -- proves the sticky per-session
+    # note fires even though this message carries no algorithm field of its own.
+    r1_0 = rakp1(0x02, 0x44444444, bytes(range(48, 64)), 0x04, True, b"")
+    send(rmcp_header(2, RMCP_CLASS_IPMI) + ipmi20_session(0x12, 0, 0, r1_0), sport=52200)
+
+    # 14) Authenticated IPMI 1.5 session message (AuthType=PASSWORD), non-empty 16-byte Auth
+    # Code -- never rendered, only presence/length noted.
+    dev_id_req = ipmi_msg(0x20, 0x06, 0, 0x81, 2, 0, 0x01)  # Get Device ID.
+    send(rmcp_header(6, RMCP_CLASS_IPMI) +
+         ipmi15_session(0x04, 5, 0xAABBCCDD, dev_id_req, auth_code=b"SuperSecretPass1"),
+         sport=52300)
+
+    # 15) Chassis Control: Power down -- security-relevant remote-power-control command, on
+    # session A's own established session ID (0x22222222), IPMI 2.0 classic-message payload type.
+    cc_req = ipmi_msg(0x20, 0x00, 0, 0x81, 3, 0, 0x02, bytes([0x00]))  # Power down.
+    send(rmcp_header(6, RMCP_CLASS_IPMI) + ipmi20_session(0x00, 0x22222222, 2, cc_req),
+         sport=52100)
+
+    # 16) Get SEL Info request -- curated Storage NetFn/Command table.
+    sel_req = ipmi_msg(0x20, 0x0A, 0, 0x81, 4, 0, 0x40)
+    send(rmcp_header(7, RMCP_CLASS_IPMI) + ipmi15_session(0x00, 0, 0, sel_req), sport=52400)
+
+    # 17) MALFORMED: too short even for the fixed 4-byte RMCP header.
+    send(b"\x06\xff\x00", sport=52500)
+
+    # 18) NEGATIVE CONTROL: UDP/623, not RMCP-shaped at all (Version/Reserved don't match) --
+    # bytes[1]/[2] are deliberately outside HART-IP's own small-enumerated-value gate (see
+    # hartip.hpp) so this doesn't accidentally collide with that decoder's own opportunistic,
+    # port-independent check.
+    send(b"\x01\x99\x99\x04\x05\x06\x07\x08\x09\x0A\x0B\x0C", sport=52600)
+
+    # 19) Same ASF Presence Ping as packet 1, on a non-standard UDP port (6623).
+    send(rmcp_header(9, RMCP_CLASS_ASF) + asf_message(0x80, 0x00), sport=52700, dport=6623)
+
+    # 20) RMCP ACK (generic RmcpUdpDecoder fallback -- proves --protocol rmcp works).
+    send(rmcp_header(9, RMCP_CLASS_IPMI, ack=True), sport=52000)
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_270_000 + i, i * 1000)
+    (TESTS_DIR / "sample_ipmi.pcap").write_bytes(data)
+
+
 # --- Zigbee (IEEE 802.15.4 MAC + Zigbee NWK/APS/ZDP) -----------------------------------------
 #
 # Zigbee needs raw pcap records containing 802.15.4 MAC frames directly -- no Ethernet framing at
@@ -16097,6 +16330,7 @@ if __name__ == "__main__":
     build_attack_detect_sample()
     build_codesys_sample()
     build_coap_sample()
+    build_ipmi_sample()
     build_zigbee_sample()
     build_zigbee_tap_sample()
     print("wrote sample fixtures to", TESTS_DIR)
