@@ -61,6 +61,7 @@
 #include "conduitscope/ospf.hpp"
 #include "conduitscope/pcap_reader.hpp"
 #include "conduitscope/pim.hpp"
+#include "conduitscope/powerlink.hpp"
 #include "conduitscope/pppoe.hpp"
 #include "conduitscope/profinet.hpp"
 #include "conduitscope/protocol_decoder.hpp"
@@ -344,6 +345,15 @@ enum class ProtocolFilter {
                            // DICOM_PORT_ALT) -- mirroring the LDAP_PORT/LDAP_GC_PORT precedent
                            // (extra_ldap_ports below), not the "one port number, both transports"
                            // shape extra_hartip_ports/extra_kerberos_ports have.
+    PowerlinkOnly,         // only attempt Ethernet POWERLINK (EPSG, EtherType 0x88AB) decoding --
+                           // see powerlink.hpp. Shared by TWO decoders/gates with the same
+                           // "powerlink" id() -- powerlink_decoder() (GateKind::EtherType, the
+                           // cyclic real-time raw-Ethernet path) and powerlink_sdo_udp_decoder()
+                           // (GateKind::UdpPort, the SDO-over-UDP secondary path, port 3819) -- the
+                           // same "one filter value, two gates sharing one id()" pattern HartIpOnly
+                           // already established (hartip.hpp), not the EnipOnly-style "TCP and UDP
+                           // decoders both named enip" split either -- one ProtocolFilter value
+                           // covers both of this protocol's gates.
 };
 
 struct DecodeOptions {
@@ -484,6 +494,14 @@ struct DecodeOptions {
                                                   // extra_rip_ports/extra_hsrp_ports/
                                                   // extra_bsap_ports above -- see coap.hpp's own
                                                   // try_parse_coap comment.
+    std::vector<uint16_t> extra_powerlink_sdo_ports;  // UDP -- see POWERLINK_SDO_UDP_PORT (3819,
+                                                  // powerlink.hpp); same detection-gating group and
+                                                  // reasoning as extra_rip_ports/extra_hsrp_ports/
+                                                  // extra_bsap_ports/extra_coap_ports above -- this
+                                                  // widens which UDP port(s) count as "expected" for
+                                                  // POWERLINK's secondary SDO-over-UDP gate only; the
+                                                  // primary EtherType 0x88AB cyclic-realtime gate
+                                                  // (powerlink_decoder()) has no port concept at all.
     std::vector<uint16_t> extra_rmcp_ports;     // UDP -- see RMCP_UDP_PORT (623); same detection-
                                                   // gating group and reasoning as extra_coap_ports/
                                                   // extra_bsap_ports above, shared by all THREE of

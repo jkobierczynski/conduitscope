@@ -68,6 +68,7 @@ add_library(conduitscope_core STATIC
   src/can_socketcan.cpp
   src/devicenet.cpp
   src/canopen.cpp
+  src/powerlink.cpp
   src/j1939.cpp
   src/ieee802154.cpp
   src/zigbee.cpp
@@ -1745,6 +1746,172 @@ add_test(NAME ethercat_stats_counted
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ethercat.pcap" --stats)
 set_tests_properties(ethercat_stats_counted PROPERTIES
   PASS_REGULAR_EXPRESSION "ethercat frame types:\n *ADS +1\n *EtherCAT command +21\n *Mailbox +1\n *NV +1\n *RAW-IO +1\nethercat datagrams \\(summed across every frame\\): 223")
+
+# --------------------------------------------------------------------------
+# Ethernet POWERLINK (synthetic, tests/sample_powerlink.pcap and tests/sample_powerlink_rogue_mn.pcap):
+# EtherType 0x88AB (raw Ethernet, cyclic real-time SoC/PReq/PRes/SoA/ASnd/AMNI/AInv) plus a
+# secondary SDO-over-UDP gate (port 3819) -- see powerlink.hpp's file header comment for the full
+# sourcing/scoping writeup (Wireshark's own epan/dissectors/packet-epl.c) and
+# tools/make_sample_pcap.py's build_powerlink_sample/build_powerlink_rogue_mn_sample for the exact
+# byte layout each assertion below is checking. Like PROFINET RT/GOOSE/SV/EtherCAT, POWERLINK's
+# cyclic path rides directly on raw Ethernet -- there is no IP/TCP/UDP layer at all for it.
+# --------------------------------------------------------------------------
+add_test(NAME powerlink_soc_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_powerlink.pcap" --format text)
+set_tests_properties(powerlink_soc_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[powerlink\\]  POWERLINK SoC \\[MC=1 PS=0\\]")
+
+add_test(NAME powerlink_preq_pres_pair_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_powerlink.pcap" --format text)
+set_tests_properties(powerlink_preq_pres_pair_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "POWERLINK PReq dst=1 \\[4B\\][^\n]*\n.*POWERLINK PRes src=1 NMT_CS_OPERATIONAL \\[4B\\]")
+
+add_test(NAME powerlink_soa_and_ident_response_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_powerlink.pcap" --format text)
+set_tests_properties(powerlink_soa_and_ident_response_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "POWERLINK SoA \\(IdentRequest\\)->1[^\n]*\n.*POWERLINK ASnd \\(IdentResponse\\) dst=240 src=1")
+
+add_test(NAME powerlink_ident_response_fields_in_json
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_powerlink.pcap")
+set_tests_properties(powerlink_ident_response_fields_in_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"powerlink_ident_vendor_id\": 2457,\n *\"powerlink_ident_product_code\": 4660,\n *\"powerlink_ident_revision_number\": 65537,\n *\"powerlink_ident_serial_number\": 43981,[^\n]*\n *\"powerlink_ident_ip_address\": \"192.168.1.10\",\n *\"powerlink_ident_host_name\": \"cn1-drive\"")
+
+# ASnd/NMTCommand -- an NMTResetNode (disruptive) targeting CN1 (NodeID 1), which an earlier PRes
+# in this same capture (packet #3) reported NMT_CS_OPERATIONAL.
+add_test(NAME powerlink_nmt_command_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_powerlink.pcap" --format text)
+set_tests_properties(powerlink_nmt_command_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "POWERLINK ASnd \\(NMTCommand\\) dst=1 src=240")
+
+add_test(NAME powerlink_nmt_request_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_powerlink.pcap" --format text)
+set_tests_properties(powerlink_nmt_request_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "POWERLINK ASnd \\(NMTRequest\\) dst=240 src=1")
+
+add_test(NAME powerlink_sdo_write_by_index_request_and_response_in_json
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_powerlink.pcap")
+set_tests_properties(powerlink_sdo_write_by_index_request_and_response_in_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"powerlink_sdo_command_id_name\": \"WriteByIndex\",\n *\"powerlink_sdo_index\": \"0x2000\",\n *\"powerlink_sdo_sub_index\": 1,\n *\"powerlink_sdo_data_hex\": \"2a000000\"")
+
+add_test(NAME powerlink_sdo_read_by_index_request_and_response_in_json
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_powerlink.pcap")
+set_tests_properties(powerlink_sdo_read_by_index_request_and_response_in_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"powerlink_sdo_command_id_name\": \"ReadByIndex\",\n *\"powerlink_sdo_index\": \"0x1018\",\n *\"powerlink_sdo_sub_index\": 1,\n *\"powerlink_sdo_data_hex\": \"99090000\"")
+
+# SDO Abort, carrying a real CANopen/POWERLINK CiA 301 SDO Abort Code (0x06010002) -- reused
+# byte-for-byte from canopen.cpp's own shared canopen_sdo_abort_code_name table, see
+# powerlink.hpp's file header comment's Abort Transfer section.
+add_test(NAME powerlink_sdo_abort_uses_shared_canopen_abort_code_table
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_powerlink.pcap")
+set_tests_properties(powerlink_sdo_abort_uses_shared_canopen_abort_code_table PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"powerlink_sdo_abort_code\": \"0x06010002\",\n *\"powerlink_sdo_abort_code_name\": \"Attempt to write a read only object\"")
+
+add_test(NAME powerlink_amni_named_only
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_powerlink.pcap" --format text)
+set_tests_properties(powerlink_amni_named_only PROPERTIES
+  PASS_REGULAR_EXPRESSION "POWERLINK AMNI \\(every field reserved per the reference dissector\\)")
+
+add_test(NAME powerlink_ainv_shares_asnd_service_body_decode
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_powerlink.pcap" --format text)
+set_tests_properties(powerlink_ainv_shares_asnd_service_body_decode PROPERTIES
+  PASS_REGULAR_EXPRESSION "POWERLINK AInv \\(IdentResponse\\) dst=1 src=240")
+
+# MessageType 0x02 -- the explicit reserved/unknown gap this decoder never assigns a name to.
+add_test(NAME powerlink_message_type_0x02_unrecognized
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_powerlink.pcap" --format text)
+set_tests_properties(powerlink_message_type_0x02_unrecognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "POWERLINK unrecognized message type 0x02 \\(unrecognized\\)")
+
+# Standalone SDO-over-UDP (port 3819) -- the SAME frame shape as the raw-Ethernet ASnd/SDO path,
+# reached through the identical try_parse_powerlink entry point (see powerlink.hpp's file header
+# comment's "UDP:3819 SDO variant" architecture note).
+add_test(NAME powerlink_sdo_over_udp_standard_port_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_powerlink.pcap" --format text)
+set_tests_properties(powerlink_sdo_over_udp_standard_port_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "192.168.1.50:3819 -> 192.168.1.10:3819 +\\[powerlink\\]  POWERLINK ASnd \\(SDO\\) dst=1 src=240")
+
+# A frame too short for even the 3-byte common header must not crash -- falls back to the generic
+# "non-ip" ethertype-name-only report.
+add_test(NAME powerlink_truncated_header_falls_back_to_non_ip
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_powerlink.pcap" --format text)
+set_tests_properties(powerlink_truncated_header_falls_back_to_non_ip PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[non-ip\\]  Ethernet frame with ethertype 0x88ab \\(not IPv4\\)")
+
+add_test(NAME powerlink_message_type_counts_in_stats
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_powerlink.pcap" --stats)
+set_tests_properties(powerlink_message_type_counts_in_stats PROPERTIES
+  PASS_REGULAR_EXPRESSION "powerlink message types:\n *AInv +1\n *AMNI +1\n *ASnd +12\n *PReq +1\n *PRes +1\n *SoA +1\n *SoC +1\n *unrecognized +1")
+
+# Curated finding (1): a disruptive NMTCommand targeting a node this capture separately observed
+# Operational earlier (packet #6, targeting CN1) -- POSITIVE control. Packet #7 (the identical
+# command targeting CN2, never observed Operational) is this same finding's NEGATIVE control,
+# asserted here by the count staying exactly 1, not 2.
+add_test(NAME powerlink_stats_anomalous_nmt_command_against_operational_node
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_powerlink.pcap" --stats)
+set_tests_properties(powerlink_stats_anomalous_nmt_command_against_operational_node PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\*\\*\\* POWERLINK disruptive NMTCommand targeting a node observed Operational earlier in this capture: 1 \\*\\*\\*")
+
+# Curated finding (3): SDO WriteByIndex operations observed -- 4 total across this capture
+# (packets #9/#10/#13/#19: request, response, abort, and the standalone UDP:3819 request).
+add_test(NAME powerlink_stats_sdo_write_by_index_count
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_powerlink.pcap" --stats)
+set_tests_properties(powerlink_stats_sdo_write_by_index_count PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\*\\*\\* POWERLINK SDO WriteByIndex operations observed: 4 \\*\\*\\*")
+
+# Curated finding (4): a Controlled Node (NodeID 1, i.e. CN1) sourcing an ASnd/NMTCommand
+# (NMTStopNode, packet #14) -- only the Managing Node should ever do so. Packet #8 (CN1 sourcing
+# the ordinary, non-anomalous NMTRequest instead) is this finding's own implicit negative control
+# -- confirmed via powerlink_nmt_request_decoded above, and by this count staying exactly 1.
+add_test(NAME powerlink_stats_cn_sourced_nmt_command
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_powerlink.pcap" --stats)
+set_tests_properties(powerlink_stats_cn_sourced_nmt_command PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\*\\*\\* POWERLINK NMTCommand sourced by a Controlled Node \\(only the Managing Node should issue NMTCommand\\): 1 \\*\\*\\*")
+
+# Curated finding (2): rogue-MN / MN-identity tracking. sample_powerlink.pcap itself (above) is
+# this finding's own NEGATIVE control -- exactly one (MAC, NodeID) identity ever sources
+# SoC/PReq/SoA there, so the finding must NOT appear in any of the --stats tests above (none of
+# their PASS_REGULAR_EXPRESSION patterns match "rogue Managing Node", and CTest does not check for
+# text that isn't asserted, so this is instead confirmed positively below on the dedicated
+# rogue-MN fixture, which never mixes in this main fixture's own single legitimate identity).
+add_test(NAME powerlink_stats_rogue_mn_positive_control
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_powerlink_rogue_mn.pcap" --stats)
+set_tests_properties(powerlink_stats_rogue_mn_positive_control PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\*\\*\\* POWERLINK rogue Managing Node suspected -- 2 distinct \\(MAC, NodeID\\) identities observed sourcing SoC/PReq/SoA \\(MN-only message types\\): 00:0c:29:11:22:33 \\(NodeID 240\\); 00:0c:29:ba:ad:00 \\(NodeID 240\\) \\*\\*\\*")
+
+add_test(NAME powerlink_stats_rogue_mn_negative_control_single_identity_silent
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_powerlink.pcap" --stats)
+set_tests_properties(powerlink_stats_rogue_mn_negative_control_single_identity_silent PROPERTIES
+  FAIL_REGULAR_EXPRESSION "rogue Managing Node")
+
+add_test(NAME powerlink_protocol_filter_excludes_other_protocols
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --protocol powerlink --format text)
+set_tests_properties(powerlink_protocol_filter_excludes_other_protocols PROPERTIES
+  FAIL_REGULAR_EXPRESSION "\\[modbus\\]")
+
+add_test(NAME protocol_filter_powerlink_only
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_powerlink.pcap" --protocol powerlink --format text)
+set_tests_properties(protocol_filter_powerlink_only PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[powerlink\\]  POWERLINK SoC")
+
+# --powerlink-sdo-port -- widens (and, with an explicit --protocol powerlink, un-gates) detection
+# of the SDO-over-UDP secondary path beyond its own default port (3819), mirroring --bsap-port/
+# --coap-port's own "DOES gate detection" posture. sample_powerlink.pcap's own standard-port UDP
+# packet (#19 above) already covers the ordinary case; packet #21 (53700->9999, not the standard
+# 3819) is not reached at all in Auto mode (require_powerlink_sdo_port), so this forces
+# --protocol powerlink to exercise the non-standard-port note.
+add_test(NAME powerlink_sdo_udp_non_standard_port_noted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_powerlink.pcap" --protocol powerlink --format text --verbose)
+set_tests_properties(powerlink_sdo_udp_non_standard_port_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "192.168.1.50:53700 -> 192.168.1.10:9999[^\n]*\\[powerlink\\]  POWERLINK ASnd \\(SDO\\)[^\n]*\n *note: seen on UDP port 53700->9999, which is not a configured/standard POWERLINK SDO-over-UDP port \\(3819\\)")
+
+# With an explicit --powerlink-sdo-port matching packet #21's own non-standard port, Auto mode's
+# port gate widens to admit it too (no --protocol override needed) and the "not a
+# configured/standard port" note must NOT appear, since 53700 is now itself "configured/expected".
+add_test(NAME powerlink_sdo_udp_extra_port_widens_detection
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_powerlink.pcap" --powerlink-sdo-port 53700 --format text --verbose)
+set_tests_properties(powerlink_sdo_udp_extra_port_widens_detection PROPERTIES
+  PASS_REGULAR_EXPRESSION "192.168.1.50:53700 -> 192.168.1.10:9999[^\n]*\\[powerlink\\]  POWERLINK ASnd \\(SDO\\)"
+  FAIL_REGULAR_EXPRESSION "not a configured/standard POWERLINK")
 
 # --------------------------------------------------------------------------
 # Real-world EtherCAT captures -- see tests/real_captures/ethercat/ATTRIBUTION.md for provenance

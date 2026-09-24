@@ -266,8 +266,13 @@ std::string sdo_server_subcommand_name(uint8_t sub) {
     }
 }
 
-// sdo_abort_code -- every value the reference source defines.
-std::string sdo_abort_code_name(uint32_t code) {
+}  // namespace
+
+// sdo_abort_code -- every value the reference source defines. Exposed (see canopen.hpp's own
+// comment on this declaration) so powerlink.cpp can share it rather than duplicating the table --
+// POWERLINK's own SDO Abort Code space is numerically identical to CANopen's, confirmed
+// value-by-value against packet-epl.c's own sdo_cmd_abort_code[] during that decoder's research.
+std::string canopen_sdo_abort_code_name(uint32_t code) {
     switch (code) {
         case 0x05030000: return "Toggle bit not alternated";
         case 0x05040000: return "SDO protocol timed out";
@@ -303,6 +308,8 @@ std::string sdo_abort_code_name(uint32_t code) {
         default: return "";
     }
 }
+
+namespace {
 
 // Decodes the SDO command byte (byte 0 of the payload) and everything that follows it, for either
 // direction -- `is_request` selects sdo_ccs/sdo_client_subcommand vs. sdo_scs/sdo_server_subcommand,
@@ -425,7 +432,7 @@ void decode_sdo(CanopenFrame& f, bool is_request) {
                                 (static_cast<uint32_t>(f.payload.at(offset + 1)) << 8) |
                                 (static_cast<uint32_t>(f.payload.at(offset + 2)) << 16) |
                                 (static_cast<uint32_t>(f.payload.at(offset + 3)) << 24);
-            f.sdo_abort_code_name = sdo_abort_code_name(f.sdo_abort_code);
+            f.sdo_abort_code_name = canopen_sdo_abort_code_name(f.sdo_abort_code);
         } else {
             f.notes.push_back("SDO Abort Transfer message but fewer than 4 bytes remain for the "
                                "Abort Code -- not decoded");

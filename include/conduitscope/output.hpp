@@ -6,6 +6,7 @@
 
 #include <map>
 #include <ostream>
+#include <set>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -454,6 +455,25 @@ private:
     size_t dicom_cleartext_identity_count_ = 0;
     size_t dicom_compressed_ts_count_ = 0;
     size_t dicom_plain_ts_count_ = 0;
+    // Ethernet POWERLINK (powerlink.hpp) -- see write_packet's own "powerlink" block and
+    // print_summary's own POWERLINK section (output.cpp) for what each counter means.
+    // powerlink_message_type_counts_ is the task's own requested breakdown shape (keyed by
+    // PowerlinkFrame::message_type_name -- "SoC"/"PReq"/"PRes"/"SoA"/"ASnd"/"AMNI"/"AInv"/
+    // "unrecognized"). The four curated findings (see powerlink.hpp's file header comment's
+    // CURATED FINDINGS section) are: (1) powerlink_anomalous_nmt_command_count_, a disruptive
+    // NMTCommand targeting a NodeID separately observed Operational earlier in the same capture --
+    // powerlink_operational_node_ids_ is the supporting single-forward-pass state, not itself
+    // printed; (2) powerlink_mn_identities_, distinct (source MAC, source NodeID) identities
+    // observed sourcing an MN-only message type (SoC/PReq/SoA) -- printed only when its own size()
+    // exceeds 1 (rogue-MN signature); (3) powerlink_sdo_write_by_index_count_, SDO WriteByIndex
+    // operations observed; (4) powerlink_cn_sourced_nmtcommand_count_, a Controlled Node (NodeID
+    // 1-239) sourcing an ASnd/NMTCommand -- only the Managing Node should ever do so.
+    std::map<std::string, size_t> powerlink_message_type_counts_;
+    std::set<uint8_t> powerlink_operational_node_ids_;
+    size_t powerlink_anomalous_nmt_command_count_ = 0;
+    std::set<std::string> powerlink_mn_identities_;
+    size_t powerlink_sdo_write_by_index_count_ = 0;
+    size_t powerlink_cn_sourced_nmtcommand_count_ = 0;
     std::map<std::string, size_t> amqp091_method_counts_;
     std::map<std::string, size_t> amqp10_performative_counts_;
     size_t amqp091_cleartext_credentials_count_ = 0;

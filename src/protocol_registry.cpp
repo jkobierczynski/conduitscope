@@ -45,6 +45,7 @@
 #include "conduitscope/opcua.hpp"
 #include "conduitscope/ospf.hpp"
 #include "conduitscope/pim.hpp"
+#include "conduitscope/powerlink.hpp"
 #include "conduitscope/pppoe.hpp"
 #include "conduitscope/profinet.hpp"
 #include "conduitscope/rip.hpp"
@@ -92,6 +93,18 @@ const std::vector<const ProtocolDecoder*>& ethertype_registry() {
                             // collision possible with any other EtherType-keyed protocol,
                             // migrated or not (see ethercat.hpp's file header comment's
                             // "structural detection gate" paragraph).
+        &powerlink_decoder(),  // Ethernet POWERLINK (EPSG) -- a brand-new protocol, built entirely
+                            // on the ProtocolDecoder interface from inception, joining this gate
+                            // right after EtherCAT (its nearest architectural sibling: both are
+                            // raw-Ethernet, EtherType-gated, real-time-Ethernet motion-control
+                            // protocols with no IP layer at all -- see powerlink.hpp's own file
+                            // header comment). EtherType 0x88AB is exclusive to POWERLINK, no
+                            // collision possible with any other EtherType-keyed protocol in this
+                            // vector (confirmed by grep before this decoder was added). Shares its
+                            // "powerlink" id() with powerlink_sdo_udp_decoder() in
+                            // udp_port_registry() below -- see PowerlinkDecoder's own comment in
+                            // powerlink.hpp for why that's safe (same pattern as enip/hartip's
+                            // two-gate sharing).
         &eapol_decoder(),  // Migration batch 3 -- sits exactly where the old `if (want_eapol)`
                             // block always did: after PROFINET RT/GOOSE/SV/EtherCAT (all migrated
                             // above, in this same batch), before PPPoE/MPLS/STP (still legacy). No
@@ -476,6 +489,14 @@ const std::vector<const ProtocolDecoder*>& udp_port_registry() {
                             // by asf_udp_decoder()/ipmi_udp_decoder() above instead -- see
                             // rmcp.hpp's own DETECTION/DISPATCH paragraph). Tried LAST of this
                             // trio so its two more-specific siblings get first refusal.
+        &powerlink_sdo_udp_decoder(),  // POWERLINK's SDO-over-UDP secondary gate (UDP port 3819,
+                            // EPSG DS301) -- reuses the identical Sequence+Command Layer parser
+                            // the raw-Ethernet ASnd/SDO path uses (see powerlink.hpp/.cpp, and
+                            // powerlink_decoder() above in ethertype_registry()). Joins this gate
+                            // last, port-gated like BSAP/RIP/HSRP/CoAP above (no magic-byte-
+                            // strength structural gate of its own -- an SDO Sequence Layer header
+                            // is just a few small integer fields). decoder.cpp's own POWERLINK-SDO
+                            // call site likewise sits right after its RMCP/ASF/IPMI block.
     };
     return order;
 }

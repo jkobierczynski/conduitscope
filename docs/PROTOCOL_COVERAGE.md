@@ -11496,3 +11496,213 @@ from 1826 to 1849 in the default config and from 1814 to 1837 in the
 `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF` config, passing with zero
 regressions in both, zero-warning clean rebuilds in both. See
 `include/conduitscope/dicom.hpp`'s own file header for the full writeup.
+
+### Ethernet POWERLINK (EtherType `0x88AB`, + SDO-over-UDP on UDP port 3819)
+
+Ethernet POWERLINK (EPL, EPSG -- Ethernet POWERLINK Standardization
+Group -- DS301 Communication Profile Specification) is "CANopen over
+Ethernet": a real-time Ethernet motion-control protocol in the same
+general category as PROFINET RT and EtherCAT, both of which this tool
+already decodes (see those sections above). Its cyclic real-time traffic
+rides directly on raw Ethernet, like PROFINET RT/EtherCAT/GOOSE/SV --
+there is no IPv4/UDP/TCP layer at all for that path. Its SDO (Service
+Data Object) Sequence Layer + Command Layer reuses CANopen's (CiA 301)
+numeric SDO Abort Code space verbatim, and, like this codebase's own
+CANopen decoder, POWERLINK's Object Dictionary values (SDO Data,
+PReq/PRes process data) are shown only as raw hex -- there is no XDD/EDS
+device-profile machinery here to interpret them, the same scope decision
+the CANopen section above documents for its own PDO/SDO data.
+
+**Sourcing.** Every byte offset, bit mask, and named enum value was
+cross-checked directly against Wireshark's own
+`epan/dissectors/packet-epl.c` (fetched in full during this decoder's own
+research), not from the EPSG DS301 PDF spec directly (not reachable from
+this environment) -- the same "Wireshark dissector as primary source"
+posture this codebase already used for BSAP and, partially, EtherCAT.
+Because the actual dissector source was read line-by-line for every field
+this decoder covers, confidence is HIGH relative to this codebase's usual
+"Wireshark source assumed but not independently re-derived" caveat -- but
+it is still one source, not cross-checked against a second independent
+implementation or a real capture (no real POWERLINK pcap was available
+during this work), so the fixture in `tests/sample_powerlink.pcap` is
+entirely synthetic.
+
+**Common header.** Every frame: MessageType(1) + Destination NodeID(1) +
+Source NodeID(1). MessageType values (`mtyp_vals` in the reference
+source): SoC=0x01, PReq=0x03, PRes=0x04, SoA=0x05, ASnd=0x06,
+AMNI=0x07 (ActiveManagingNodeIndication -- every field reserved per the
+reference source, named only), AInv=0x0D (Asynchronous Invite). 0x02 has
+no entry in the reference source's own table at all -- this decoder never
+assigns it a name, the same "never guess an unnamed message type" posture
+every enumerated-byte field here follows. MessageType carries NO reserved
+top bit in the reference dissector -- the whole byte is the value, not
+`byte0 & 0x7F` as an earlier draft of this task assumed before the source
+was read. Node ID conventions: 0 = dynamically assigned, 240 (0xF0) = the
+Managing Node (MN), 253 = Diagnostic Device, 254 = "to legacy Ethernet
+Router", 255 (0xFF) = broadcast; 1-239 is a Controlled Node (CN).
+
+**SoC/PReq/PRes/SoA** (the cyclic real-time frames): SoC carries
+NetTime/RelativeTime (shown as raw hex, not reconstructed into a
+synthesized timestamp); PReq/PRes carry an opaque process-data Payload
+(never value-decoded, the same posture this codebase's other raw-Ethernet
+cyclic-IO protocols already establish); SoA (MN only) carries a
+RequestedServiceID inviting a CN to respond (IdentRequest/StatusRequest/
+NMTRequestInvite/SyncRequest/UnspecifiedInvite/Manufacturer Specific --
+confirmed a DIFFERENT numeric space from ASnd's own ServiceID below,
+despite some overlapping small integers).
+
+**ASnd** carries one of five named services (ServiceID
+1-5): **IdentResponse** (158 bytes, every field decoded -- EPL version,
+FeatureFlags as one raw 32-bit value, MTU/PollInSize/PollOutSize,
+ResponseTime, DeviceType/VendorID/ProductCode/RevisionNumber/
+SerialNumber, IPAddress/SubnetMask/DefaultGateway -- the one place in
+this whole frame shape that is big-endian on the wire, unlike every other
+multi-byte field here -- HostName); **StatusResponse** (NMT state, an
+Error-Register-shaped StaticErrorBitfield mapped onto CANopen's own bit
+names for readability, and a bounded ErrorCodeList, capped by
+`--max-decoded-objects`); **NMTRequest** (RequestedCommandID +
+RequestedCommandTarget, confirmed as a real field named
+"NMTRequestedCommandTarget" in the reference source); **NMTCommand** (one
+of 29 named Command IDs -- the frame's own common-header Destination
+NodeID IS the command's target, there is no separate target field inside
+the NMTCommand payload itself, unlike NMTRequest); and **SDO** (see
+below). **AInv** (MessageType 0x0D) wraps an SoA-shaped header around the
+exact same ASnd service body, decoded through one shared function rather
+than a duplicate.
+
+**NMT state machine.** CN and MN share the same 10 wire values; the four
+generic/reset states (Off/Initialising/ResetApplication/
+ResetCommunication) share one name either way, while the six
+role-specific states each get their own prefix -- `NMT_CS_` for a
+Controlled Node (PreOperational1/PreOperational2/ReadyToOperate/
+Operational/Stopped/BasicEthernet) and `NMT_MS_` for the Managing Node's
+same six states. The reference source has NO wire value at all for a
+"ResetConfiguration" *state* -- only a *command* of that name exists (the
+CiA 301 NMT state machine treats "reset configuration" as an action, not
+a state a node ever reports itself as being in).
+
+**SDO Sequence Layer + Command Layer.** One shared decode function
+(`decode_sdo` in `powerlink.cpp`), used identically by ASnd/SDO, AInv's
+embedded SDO body, AND the standalone SDO-over-UDP path below -- no
+duplicated logic. Sequence Layer (4 bytes): ReceiveSequenceNumber/
+ReceiveCon + SendSequenceNumber/SendCon. Command Layer (8-byte header,
+POWERLINK-specific CommandID values, NOT the same numeric space as
+CANopen's own 3-bit ccs/scs field): WriteByIndex=0x01, ReadByIndex=0x02,
+WriteAllByIndex=0x03, ReadAllByIndex=0x04, WriteByName=0x05,
+ReadByName=0x06, FileWrite=0x20, FileRead=0x21,
+WriteMultipleParameterByIndex=0x31, ReadMultipleParameterByIndex=0x32,
+MaximumSegmentSize=0x70, LinkNameToIndex=0x71. WriteByIndex/ReadByIndex
+are decoded in full, including a genuine, source-confirmed asymmetry:
+WriteByIndex pads its SubIndex to 2 bytes (one reserved byte follows),
+ReadByIndex does not. Every other CommandID is named only (raw hex data).
+Abort Transfer carries a 4-byte little-endian Abort Code whose numeric
+space is CONFIRMED identical to CANopen's own (CiA 301) -- this decoder
+calls `canopen_sdo_abort_code_name` (exposed from `canopen.cpp`
+specifically for this reuse -- see that file's own comment) rather than
+maintaining a second, duplicate copy of the same table.
+
+**SDO-over-UDP (port 3819).** The reference dissector's own UDP entry
+point calls the EXACT SAME core dissection function the raw-Ethernet path
+uses -- a UDP:3819 POWERLINK frame is NOT a bare Sequence+Command-Layer-
+only payload, it is the same MessageType+Destination+Source+body shape
+this decoder already handles end to end. `try_parse_powerlink` is
+therefore reused UNCHANGED for both gates (`PowerlinkDecoder`, EtherType
+0x88AB, and `PowerlinkSdoUdpDecoder`, UDP port 3819) with zero duplicated
+decode logic between them. `--powerlink-sdo-port` widens (and, under an
+explicit `--protocol powerlink`, un-gates) detection of this secondary
+path beyond its own default port, mirroring `--bsap-port`/`--coap-port`'s
+own "DOES gate detection" posture.
+
+#### Curated `--stats` findings
+
+1. **Disruptive NMTCommand against an Operational node** -- an NMTCommand
+   (NMTResetNode/NMTStopNode/NMTResetCommunication/NMTResetConfiguration/
+   NMTSwReset and their `_Ex` variants) targeting a NodeID this decoder
+   separately observed reporting an Operational NMT state (PRes/
+   StatusResponse/SoA) earlier in the same capture -- a plausible
+   disruption signature (an Operational node being knocked out of
+   service). Tracked as a single forward pass over packets in capture
+   order.
+2. **Rogue-MN / MN-identity tracking** -- (source MAC, source NodeID)
+   pairs observed sourcing SoC/PReq/SoA (MN-only message types -- a CN
+   never sends any of these three), flagged when more than one distinct
+   identity is seen on one capture.
+3. **SDO WriteByIndex operations observed** -- a straightforward count,
+   designed fresh for this decoder (CANopen's own decoder does not
+   currently have a dedicated SDO-write `--stats` counter of its own to
+   mirror).
+4. **CN-sourced NMTCommand** -- a Controlled Node (NodeID strictly
+   between 0 and 240) sourcing an ASnd/NMTCommand is anomalous; only the
+   Managing Node should ever issue one.
+
+#### Explicitly out of scope
+
+Object Dictionary interpretation of Payload/SDO Data content (opaque raw
+hex only, the same posture the CANopen section above establishes for its
+own PDO/SDO data); cross-frame SDO segmented-transfer reassembly (Segment/
+Transfer Complete continuation frames are decoded as opaque continuation
+data, not stitched back into the larger value being transferred); SoA's
+own SyncRequest sub-fields beyond naming the RequestedServiceID (30
+further cross-redundancy timing configuration bytes); NMTDNA's own
+27-byte Dynamic Node Allocation structure beyond recognizing it and
+showing it as raw hex; WriteMultipleParameterByIndex's own
+multiple-abort-code response walking (named, count of remaining bytes
+shown, not walked entry by entry); FeatureFlags' own 23 individually
+named bits (shown as one raw 32-bit value); IdentResponse's
+DeviceType-to-profile-name lookup (the reference source cross-references
+a small device-profile table -- Generic I/O/Drive/HMI/Measuring/PLC/
+Encoder -- this decoder shows the raw DeviceType value only, the same
+"no XDD/EDS enrichment" scope decision already applied elsewhere). No
+redaction machinery is needed or used for POWERLINK -- unlike DICOM/AMQP/
+DCOM, nothing in this frame shape carries a credential or PHI-shaped
+secret.
+
+#### Validation
+
+Validated against `tests/sample_powerlink.pcap` (built by
+`tools/make_sample_pcap.py`'s `build_powerlink_sample()`): SoC; a
+PReq/PRes pair (with the PRes reporting `NMT_CS_OPERATIONAL`, feeding
+finding (1)'s tracking state); SoA + ASnd/IdentResponse (every one of its
+158 bytes populated with a distinguishable value); ASnd/NMTCommand
+(NMTResetNode) targeting the now-Operational CN1 (finding (1)'s positive
+control) and, separately, targeting CN2, which was never observed
+Operational (finding (1)'s negative control, confirmed by the finding's
+own count staying at exactly 1); ASnd/NMTRequest (a CN's own, non-
+anomalous way of asking the MN for a state change); ASnd/SDO
+WriteByIndex request+response and ReadByIndex request+response
+(Expedited, confirming the WriteByIndex-vs-ReadByIndex SubIndex-padding
+asymmetry); an ASnd/SDO WriteByIndex Abort carrying a real CANopen/
+POWERLINK Abort Code (0x06010002, "Attempt to write a read only object"),
+proving the shared `canopen_sdo_abort_code_name` table reuse; ASnd/
+NMTCommand sourced by a CN (finding (4)'s positive control, distinct from
+the CN's own legitimate NMTRequest above); ASnd/StatusResponse with error
+register bits and one ErrorCodeList entry; AMNI (named only); AInv
+wrapping an embedded IdentResponse (proving the shared ASnd-service-body
+decode path); MessageType 0x02 (the explicit unnamed-gap negative
+control); a standalone SDO-over-UDP request on the standard port (3819)
+and a second one on a non-standard port pair (53700/9999, decoded only
+under `--protocol powerlink` or `--powerlink-sdo-port`); and a frame too
+short for even the 3-byte common header (falls back to the generic
+"non-ip" report, not a crash). The rogue-MN finding (2) is validated
+separately, in its own small dedicated fixture,
+`tests/sample_powerlink_rogue_mn.pcap` -- deliberately kept out of the
+main fixture so that file remains finding (2)'s own clean negative
+control (exactly one legitimate (MAC, NodeID) identity throughout).
+Every decode path was run manually (`--format text -v`, `--format json`,
+`--stats`, `--protocol powerlink`) and its real output read -- confirming
+every curated finding fires on its positive control and stays silent on
+its negative control -- before any CTest regex was written, the same
+discipline this document's every other recent section describes. While
+building this fixture, a real off-by-one bug was found and fixed in the
+decoder itself: the SoA guard checked for 7 remaining bytes but the SoA
+body actually consumes 8 (NMTStatus + reserved + Flags + reserved +
+RequestedServiceID + RequestedServiceTarget + EPLVersion +
+RedundancyFlags) -- an exactly-7-byte SoA would have thrown and dropped
+the whole frame; fixed to check for 8, matching the field table this
+section documents above. 24 new `powerlink_*`/`protocol_filter_powerlink_only`
+CTest tests were added; the full suite grew from 1849 to 1873 in the
+default config and from 1837 to 1861 in the
+`-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF` config, passing with zero
+regressions in both, zero-warning clean rebuilds in both. See
+`include/conduitscope/powerlink.hpp`'s own file header for the full
+field-by-field writeup.

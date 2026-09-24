@@ -2068,6 +2068,155 @@ void write_ethercat_json_fields(std::ostream& out, const EthercatFrame& ec) {
     }
 }
 
+// Ethernet POWERLINK (powerlink.hpp) -- see that file's own PowerlinkFrame struct for the full
+// field-by-field citation. Every message-type-specific block below is guarded by its own has_*
+// flag, mirroring EtherCAT's/PROFINET's own zero-flat-field JSON writer shape.
+void write_powerlink_json_fields(std::ostream& out, const PowerlinkFrame& pl) {
+    out << "    \"powerlink_message_type\": " << static_cast<unsigned>(pl.message_type_raw) << ",\n";
+    out << "    \"powerlink_message_type_name\": \"" << json_escape(pl.message_type_name) << "\",\n";
+    out << "    \"powerlink_message_type_recognized\": " << (pl.message_type_recognized ? "true" : "false") << ",\n";
+    out << "    \"powerlink_dst_node_id\": " << static_cast<unsigned>(pl.dst_node_id) << ",\n";
+    out << "    \"powerlink_src_node_id\": " << static_cast<unsigned>(pl.src_node_id) << ",\n";
+
+    if (pl.has_soc) {
+        out << "    \"powerlink_soc_mc\": " << (pl.soc_mc ? "true" : "false") << ",\n";
+        out << "    \"powerlink_soc_ps\": " << (pl.soc_ps ? "true" : "false") << ",\n";
+        out << "    \"powerlink_soc_an_global\": " << (pl.soc_an_global ? "true" : "false") << ",\n";
+        out << "    \"powerlink_soc_net_time_hex\": \"" << json_escape(pl.soc_net_time_hex) << "\",\n";
+        out << "    \"powerlink_soc_relative_time_hex\": \"" << json_escape(pl.soc_relative_time_hex) << "\",\n";
+    }
+    if (pl.has_preq) {
+        out << "    \"powerlink_preq_ms\": " << (pl.preq_ms ? "true" : "false") << ",\n";
+        out << "    \"powerlink_preq_ea\": " << (pl.preq_ea ? "true" : "false") << ",\n";
+        out << "    \"powerlink_preq_rd\": " << (pl.preq_rd ? "true" : "false") << ",\n";
+        out << "    \"powerlink_preq_size\": " << pl.preq_size << ",\n";
+        out << "    \"powerlink_preq_payload_hex\": \"" << json_escape(to_hex(pl.preq_payload, "")) << "\",\n";
+        if (pl.preq_payload_truncated) out << "    \"powerlink_preq_payload_truncated\": true,\n";
+    }
+    if (pl.has_pres) {
+        out << "    \"powerlink_pres_nmt_status\": " << static_cast<unsigned>(pl.pres_nmt_status_raw) << ",\n";
+        if (!pl.pres_nmt_status_name.empty()) {
+            out << "    \"powerlink_pres_nmt_status_name\": \"" << json_escape(pl.pres_nmt_status_name) << "\",\n";
+        }
+        out << "    \"powerlink_pres_ms\": " << (pl.pres_ms ? "true" : "false") << ",\n";
+        out << "    \"powerlink_pres_en\": " << (pl.pres_en ? "true" : "false") << ",\n";
+        out << "    \"powerlink_pres_rd\": " << (pl.pres_rd ? "true" : "false") << ",\n";
+        out << "    \"powerlink_pres_size\": " << pl.pres_size << ",\n";
+        out << "    \"powerlink_pres_payload_hex\": \"" << json_escape(to_hex(pl.pres_payload, "")) << "\",\n";
+        if (pl.pres_payload_truncated) out << "    \"powerlink_pres_payload_truncated\": true,\n";
+    }
+    if (pl.has_soa) {
+        out << "    \"powerlink_soa_nmt_status\": " << static_cast<unsigned>(pl.soa_nmt_status_raw) << ",\n";
+        if (!pl.soa_nmt_status_name.empty()) {
+            out << "    \"powerlink_soa_nmt_status_name\": \"" << json_escape(pl.soa_nmt_status_name) << "\",\n";
+        }
+        out << "    \"powerlink_soa_requested_service_id\": " << static_cast<unsigned>(pl.soa_requested_service_id_raw) << ",\n";
+        if (!pl.soa_requested_service_id_name.empty()) {
+            out << "    \"powerlink_soa_requested_service_id_name\": \""
+                << json_escape(pl.soa_requested_service_id_name) << "\",\n";
+        }
+        out << "    \"powerlink_soa_requested_service_target\": "
+            << static_cast<unsigned>(pl.soa_requested_service_target) << ",\n";
+        out << "    \"powerlink_soa_mn_redundancy\": " << (pl.soa_mn_redundancy ? "true" : "false") << ",\n";
+        out << "    \"powerlink_soa_cable_redundancy\": " << (pl.soa_cable_redundancy ? "true" : "false") << ",\n";
+        out << "    \"powerlink_soa_ring_redundancy\": " << (pl.soa_ring_redundancy ? "true" : "false") << ",\n";
+    }
+    if (pl.has_asnd || pl.has_ainv) {
+        out << "    \"powerlink_asnd_service_id\": " << static_cast<unsigned>(pl.asnd_service_id_raw) << ",\n";
+        if (!pl.asnd_service_id_name.empty()) {
+            out << "    \"powerlink_asnd_service_id_name\": \"" << json_escape(pl.asnd_service_id_name) << "\",\n";
+        }
+    }
+    if (pl.has_ident_response) {
+        const PowerlinkIdentResponse& r = pl.ident_response;
+        out << "    \"powerlink_ident_nmt_status\": " << static_cast<unsigned>(r.nmt_status_raw) << ",\n";
+        if (!r.nmt_status_name.empty()) {
+            out << "    \"powerlink_ident_nmt_status_name\": \"" << json_escape(r.nmt_status_name) << "\",\n";
+        }
+        out << "    \"powerlink_ident_device_type\": " << r.device_type << ",\n";
+        out << "    \"powerlink_ident_vendor_id\": " << r.vendor_id << ",\n";
+        out << "    \"powerlink_ident_product_code\": " << r.product_code << ",\n";
+        out << "    \"powerlink_ident_revision_number\": " << r.revision_number << ",\n";
+        out << "    \"powerlink_ident_serial_number\": " << r.serial_number << ",\n";
+        out << "    \"powerlink_ident_ip_address\": \"" << json_escape(r.ip_address) << "\",\n";
+        out << "    \"powerlink_ident_host_name\": \"" << json_escape(r.host_name) << "\",\n";
+    }
+    if (pl.has_status_response) {
+        const PowerlinkStatusResponse& r = pl.status_response;
+        out << "    \"powerlink_status_nmt_status\": " << static_cast<unsigned>(r.nmt_status_raw) << ",\n";
+        if (!r.nmt_status_name.empty()) {
+            out << "    \"powerlink_status_nmt_status_name\": \"" << json_escape(r.nmt_status_name) << "\",\n";
+        }
+        out << "    \"powerlink_status_error_register\": " << static_cast<unsigned>(r.error_register_raw) << ",\n";
+        if (!r.error_register_bits.empty()) {
+            out << "    \"powerlink_status_error_register_bits\": [";
+            for (size_t i = 0; i < r.error_register_bits.size(); ++i) {
+                if (i != 0) out << ", ";
+                out << "\"" << json_escape(r.error_register_bits[i]) << "\"";
+            }
+            out << "],\n";
+        }
+        out << "    \"powerlink_status_error_entry_count\": " << r.error_entries.size() << ",\n";
+        if (r.error_entries_truncated) out << "    \"powerlink_status_error_entries_truncated\": true,\n";
+    }
+    if (pl.has_nmt_request) {
+        const PowerlinkNmtRequest& r = pl.nmt_request;
+        out << "    \"powerlink_nmtreq_requested_command_id\": " << static_cast<unsigned>(r.requested_command_id_raw) << ",\n";
+        if (!r.requested_command_id_name.empty()) {
+            out << "    \"powerlink_nmtreq_requested_command_id_name\": \""
+                << json_escape(r.requested_command_id_name) << "\",\n";
+        }
+        out << "    \"powerlink_nmtreq_requested_command_target\": "
+            << static_cast<unsigned>(r.requested_command_target) << ",\n";
+    }
+    if (pl.has_nmt_command) {
+        const PowerlinkNmtCommand& r = pl.nmt_command;
+        out << "    \"powerlink_nmtcmd_command_id\": " << static_cast<unsigned>(r.command_id_raw) << ",\n";
+        if (!r.command_id_name.empty()) {
+            out << "    \"powerlink_nmtcmd_command_id_name\": \"" << json_escape(r.command_id_name) << "\",\n";
+        }
+        if (r.has_host_name) out << "    \"powerlink_nmtcmd_host_name\": \"" << json_escape(r.host_name) << "\",\n";
+        if (r.has_flush_arp_target) {
+            out << "    \"powerlink_nmtcmd_flush_arp_target\": " << static_cast<unsigned>(r.flush_arp_target) << ",\n";
+        }
+        if (r.has_reset_node_reason) out << "    \"powerlink_nmtcmd_reset_node_reason\": " << r.reset_node_reason << ",\n";
+    }
+    if (pl.has_sdo) {
+        const PowerlinkSdo& s = pl.sdo;
+        out << "    \"powerlink_sdo_seq_receive_con\": " << static_cast<unsigned>(s.seq_receive_con) << ",\n";
+        out << "    \"powerlink_sdo_seq_send_con\": " << static_cast<unsigned>(s.seq_send_con) << ",\n";
+        if (s.has_command) {
+            out << "    \"powerlink_sdo_transaction_id\": " << static_cast<unsigned>(s.transaction_id) << ",\n";
+            out << "    \"powerlink_sdo_is_response\": " << (s.is_response ? "true" : "false") << ",\n";
+            out << "    \"powerlink_sdo_is_abort\": " << (s.is_abort ? "true" : "false") << ",\n";
+            if (!s.segmentation_name.empty()) {
+                out << "    \"powerlink_sdo_segmentation\": \"" << json_escape(s.segmentation_name) << "\",\n";
+            }
+            out << "    \"powerlink_sdo_command_id\": " << static_cast<unsigned>(s.command_id_raw) << ",\n";
+            if (!s.command_id_name.empty()) {
+                out << "    \"powerlink_sdo_command_id_name\": \"" << json_escape(s.command_id_name) << "\",\n";
+            }
+            if (s.has_index) {
+                std::ostringstream idx;
+                idx << "0x" << std::hex << std::uppercase << std::setw(4) << std::setfill('0') << s.index;
+                out << "    \"powerlink_sdo_index\": \"" << idx.str() << "\",\n";
+                out << "    \"powerlink_sdo_sub_index\": " << static_cast<unsigned>(s.sub_index) << ",\n";
+            }
+            if (s.has_abort_code) {
+                std::ostringstream ac;
+                ac << "0x" << std::hex << std::uppercase << std::setw(8) << std::setfill('0') << s.abort_code;
+                out << "    \"powerlink_sdo_abort_code\": \"" << ac.str() << "\",\n";
+                if (!s.abort_code_name.empty()) {
+                    out << "    \"powerlink_sdo_abort_code_name\": \"" << json_escape(s.abort_code_name) << "\",\n";
+                }
+            }
+            if (s.has_data) {
+                out << "    \"powerlink_sdo_data_hex\": \"" << json_escape(to_hex(s.data, "")) << "\",\n";
+            }
+        }
+    }
+}
+
 // Zero-flat-field migration (mid-size batch): the STP analog of write_goose_json_fields above.
 // stp_port_role_name/stp_render_msti_summary are stp.hpp's own free functions (already public,
 // unlike icmp_router_address_summary/pim_*_summary below which were decoder.cpp-local and had to
@@ -4329,6 +4478,9 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
     if (p.protocol == "ethercat" && p.result) {
         write_ethercat_json_fields(out_, p.result->as<EthercatFrame>());
     }
+    if (p.protocol == "powerlink" && p.result) {
+        write_powerlink_json_fields(out_, p.result->as<PowerlinkFrame>());
+    }
     if (p.protocol == "stp" && p.result) {
         write_stp_json_fields(out_, p.result->as<StpFrame>());
     }
@@ -5230,6 +5382,53 @@ void StatsWriter::write_packet(const DecodedPacket& p) {
             dicom_command_field_counts_[name]++;
         }
     }
+    if (p.protocol == "powerlink" && p.result) {
+        const PowerlinkFrame& f = p.result->as<PowerlinkFrame>();
+        powerlink_message_type_counts_[f.message_type_name]++;
+
+        // Curated finding (1): an NMTCommand targeting a NodeID this decoder has separately
+        // observed reporting an Operational NMT state (PRes/StatusResponse/SoA, whichever came
+        // first on this capture) -- see powerlink.hpp's file header comment's CURATED FINDINGS
+        // section, item (1). Tracked as a single forward pass over packets in capture order:
+        // powerlink_operational_node_ids_ only ever grows, so this only fires against a node
+        // observed Operational STRICTLY BEFORE the disruptive NMTCommand that targets it, matching
+        // that comment's own "an earlier PRes/StatusResponse/SoA" wording.
+        if (f.has_pres && nmt_state_is_operational(f.pres_nmt_status_name)) {
+            powerlink_operational_node_ids_.insert(f.src_node_id);
+        }
+        if (f.has_status_response && nmt_state_is_operational(f.status_response.nmt_status_name)) {
+            powerlink_operational_node_ids_.insert(f.src_node_id);
+        }
+        if (f.has_soa && nmt_state_is_operational(f.soa_nmt_status_name)) {
+            powerlink_operational_node_ids_.insert(f.src_node_id);
+        }
+        if (f.has_nmt_command && nmt_command_is_disruptive(f.nmt_command.command_id_name) &&
+            powerlink_operational_node_ids_.count(f.dst_node_id) != 0) {
+            powerlink_anomalous_nmt_command_count_++;
+        }
+
+        // Curated finding (2): rogue-MN / MN-identity tracking -- (source MAC, source NodeID)
+        // pairs observed sourcing SoC/PReq/SoA (MN-only message types per the POWERLINK spec, see
+        // powerlink.hpp's file header comment) -- flagged in print_summary when more than one
+        // distinct identity is seen on one capture.
+        if (f.has_soc || f.has_preq || f.has_soa) {
+            powerlink_mn_identities_.insert(p.src_mac + " (NodeID " + std::to_string(f.src_node_id) + ")");
+        }
+
+        // Curated finding (3): SDO WriteByIndex operations observed -- the direct POWERLINK analog
+        // of this codebase's own SDO-write findings elsewhere (see powerlink.hpp's file header
+        // comment's CURATED FINDINGS section, item (3)).
+        if (f.has_sdo && f.sdo.command_id_name == "WriteByIndex") {
+            powerlink_sdo_write_by_index_count_++;
+        }
+
+        // Curated finding (4): a CN (NodeID strictly between 0 and 240, i.e. neither dynamically-
+        // assigned/reserved nor the Managing Node) sourcing an ASnd/NMTCommand -- only the MN
+        // should ever issue NMTCommand, per POWERLINK's own NMT state machine.
+        if (f.has_asnd && f.asnd_service_id_raw == 4 && f.src_node_id > 0 && f.src_node_id < 240) {
+            powerlink_cn_sourced_nmtcommand_count_++;
+        }
+    }
     if (p.protocol == "zigbee" && p.result) {
         const ZigbeeFrame& zf = p.result->as<ZigbeeFrame>();
         if (zf.nwk_present) zigbee_nwk_frame_type_counts_[zigbee_nwk_frame_type_name(zf.nwk.frame_type)]++;
@@ -5441,6 +5640,40 @@ void StatsWriter::print_summary(std::ostream& out) const {
             out << "  " << std::left << std::setw(40) << name << count << "\n";
         }
         out << "ethercat datagrams (summed across every frame): " << ethercat_datagram_total_ << "\n";
+    }
+    if (!powerlink_message_type_counts_.empty()) {
+        out << "powerlink message types:\n";
+        for (const auto& [name, count] : powerlink_message_type_counts_) {
+            out << "  " << std::left << std::setw(40) << name << count << "\n";
+        }
+        // Four curated findings (see powerlink.hpp's file header comment's CURATED FINDINGS
+        // section) -- always printed on their own line when nonzero/triggered, never buried,
+        // matching this file's own ipmi_cipher_suite_zero_count_/j1939_dm1_active_dtc_count_
+        // posture.
+        if (powerlink_anomalous_nmt_command_count_ > 0) {
+            out << "*** POWERLINK disruptive NMTCommand targeting a node observed Operational earlier "
+                   "in this capture: " << powerlink_anomalous_nmt_command_count_ << " ***\n";
+        }
+        if (powerlink_mn_identities_.size() > 1) {
+            out << "*** POWERLINK rogue Managing Node suspected -- " << powerlink_mn_identities_.size()
+                << " distinct (MAC, NodeID) identities observed sourcing SoC/PReq/SoA (MN-only message "
+                   "types): ";
+            bool first = true;
+            for (const auto& identity : powerlink_mn_identities_) {
+                if (!first) out << "; ";
+                out << identity;
+                first = false;
+            }
+            out << " ***\n";
+        }
+        if (powerlink_sdo_write_by_index_count_ > 0) {
+            out << "*** POWERLINK SDO WriteByIndex operations observed: "
+                << powerlink_sdo_write_by_index_count_ << " ***\n";
+        }
+        if (powerlink_cn_sourced_nmtcommand_count_ > 0) {
+            out << "*** POWERLINK NMTCommand sourced by a Controlled Node (only the Managing Node "
+                   "should issue NMTCommand): " << powerlink_cn_sourced_nmtcommand_count_ << " ***\n";
+        }
     }
     if (!stp_bpdu_type_counts_.empty()) {
         out << "stp bpdu types:\n";

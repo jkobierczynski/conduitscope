@@ -204,6 +204,7 @@ bool ethertype_cascade_filter_allows(ProtocolFilter filter, std::string_view id)
     if (id == "arp") return filter == ProtocolFilter::ArpOnly;
     if (id == "lldp") return filter == ProtocolFilter::LldpOnly;
     if (id == "slow-protocols") return filter == ProtocolFilter::SlowProtocolsOnly;
+    if (id == "powerlink") return filter == ProtocolFilter::PowerlinkOnly;
     return false;
 }
 
@@ -236,6 +237,14 @@ void populate_ethercat(DecodedPacket& out, const ProtocolResult& result, uint16_
     out.protocol = "ethercat";
     out.summary = ec.summary;
     for (const auto& n : ec.notes) out.notes.push_back(n);
+    out.result = result;
+}
+
+void populate_powerlink(DecodedPacket& out, const ProtocolResult& result, uint16_t /*matched_ethertype*/) {
+    const PowerlinkFrame& pl = result.as<PowerlinkFrame>();
+    out.protocol = "powerlink";
+    out.summary = pl.summary;
+    for (const auto& n : pl.notes) out.notes.push_back(n);
     out.result = result;
 }
 
@@ -303,6 +312,7 @@ const EthertypeCascadePopulate* ethertype_cascade_populate_for(std::string_view 
         {"goose", &populate_goose},
         {"sv", &populate_sv},
         {"ethercat", &populate_ethercat},
+        {"powerlink", &populate_powerlink},
         {"eapol", &populate_eapol},
         {"pppoe", &populate_pppoe},
         {"mpls", &populate_mpls},
@@ -1950,6 +1960,44 @@ DecodedPacket Decoder::decode_ip_payload(DecodedPacket out, uint8_t protocol, By
                                                  "->" + std::to_string(udp.dst_port) +
                                                  ", which is not a configured/standard RMCP/ASF/IPMI "
                                                  "port (623)");
+                        }
+                        return out;
+                    }
+                }
+            }
+
+            // POWERLINK's SDO-over-UDP secondary gate (UDP port 3819, EPSG DS301) -- see
+            // powerlink.hpp's own "UDP:3819 SDO variant" architecture note for why this reuses
+            // try_parse_powerlink UNCHANGED (via powerlink_sdo_udp_decoder()) rather than a
+            // separate/stripped-down parser. Port-gated in Auto mode for the same class of reason
+            // CoAP/BSAP/RIP/HSRP/RMCP above already are: an SDO Sequence Layer header is just a few
+            // small integer fields, too weak a structural signal to try against arbitrary UDP
+            // traffic on every port. Placed here, right after RMCP/ASF/IPMI, purely for locality
+            // (both are UDP-port-gated additions); no collision with anything else in this codebase
+            // was found (3819 is not shared with any other decoder's own port, confirmed by grep
+            // before this decoder was added).
+            bool want_powerlink_sdo = options_.protocol_filter == ProtocolFilter::Auto ||
+                                       options_.protocol_filter == ProtocolFilter::PowerlinkOnly;
+            bool require_powerlink_sdo_port = options_.protocol_filter == ProtocolFilter::Auto;
+            if (want_powerlink_sdo) {
+                bool port_match = port_in(udp.src_port, POWERLINK_SDO_UDP_PORT,
+                                           options_.extra_powerlink_sdo_ports) ||
+                                   port_in(udp.dst_port, POWERLINK_SDO_UDP_PORT,
+                                           options_.extra_powerlink_sdo_ports);
+                if (!require_powerlink_sdo_port || port_match) {
+                    DecodeContext ctx;
+                    ctx.protocol_id = "powerlink";
+                    if (auto result = powerlink_sdo_udp_decoder().decode(udp.payload, ctx)) {
+                        const PowerlinkFrame& frame = result->as<PowerlinkFrame>();
+                        out.protocol = "powerlink";
+                        out.summary = frame.summary;
+                        for (const auto& n : frame.notes) out.notes.push_back(n);
+                        out.result = *result;
+                        if (!port_match) {
+                            out.notes.push_back("seen on UDP port " + std::to_string(udp.src_port) +
+                                                 "->" + std::to_string(udp.dst_port) +
+                                                 ", which is not a configured/standard POWERLINK "
+                                                 "SDO-over-UDP port (3819)");
                         }
                         return out;
                     }

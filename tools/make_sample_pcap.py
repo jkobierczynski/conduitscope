@@ -14821,6 +14821,401 @@ def build_bsap_sample():
     (TESTS_DIR / "sample_bsap.pcap").write_bytes(data)
 
 
+POWERLINK_ETHERTYPE = 0x88AB
+POWERLINK_SDO_UDP_PORT = 3819
+POWERLINK_MN_NODE_ID = 240   # EPL_MN_NODEID -- see powerlink.hpp
+POWERLINK_BROADCAST_NODE_ID = 255
+
+# A second, distinct MAC used only by the dedicated rogue-MN fixture below -- see
+# build_powerlink_rogue_mn_sample(). Deliberately not one of HMI_MAC/PLC_MAC (which stand in for
+# the legitimate MN/CN throughout every other POWERLINK fixture packet).
+POWERLINK_ROGUE_MAC = mac("00:0c:29:ba:ad:00")
+
+
+def epl_frame(mtyp: int, dst_node: int, src_node: int, body: bytes = b"", *,
+              dst_mac: bytes = None, src_mac: bytes = None) -> bytes:
+    """One raw-Ethernet POWERLINK frame: EtherType 0x88AB, the 3-byte common header (MessageType +
+    Destination NodeID + Source NodeID -- see powerlink.hpp's file header comment), then `body`
+    (whatever the message type's own shape requires -- already pre-built by the message-type-
+    specific helpers below). Defaults dst_mac/src_mac to PLC_MAC/HMI_MAC, this file's usual
+    stand-ins -- callers needing the opposite direction (a CN replying to the MN, e.g. PRes/
+    ASnd) pass them explicitly."""
+    dst_mac = dst_mac if dst_mac is not None else PLC_MAC
+    src_mac = src_mac if src_mac is not None else HMI_MAC
+    payload = struct.pack("BBB", mtyp, dst_node, src_node) + body
+    return eth_header(dst_mac, src_mac, POWERLINK_ETHERTYPE) + payload
+
+
+def epl_soc_body(*, mc: bool = False, ps: bool = False, an_global: bool = False,
+                  net_time: bytes = None, relative_time: bytes = None) -> bytes:
+    """SoC body (19 bytes): 1 reserved + Flags(1) + 1 reserved + NetTime(8) + RelativeTime(8) --
+    see powerlink.hpp's file header comment's SoC section / powerlink.cpp's kMtypSoc case (the
+    19-byte guard that section's decode is gated on)."""
+    flags = (0x80 if mc else 0) | (0x40 if ps else 0) | (0x08 if an_global else 0)
+    net_time = net_time if net_time is not None else bytes(8)
+    relative_time = relative_time if relative_time is not None else bytes(8)
+    assert len(net_time) == 8 and len(relative_time) == 8
+    return b"\x00" + struct.pack("B", flags) + b"\x00" + net_time + relative_time
+
+
+def epl_preq_body(*, ms: bool = False, ea: bool = False, rd: bool = False, fls: bool = False,
+                   sls: bool = False, pdo_version: int = 0, payload: bytes = b"") -> bytes:
+    """PReq body header (7 bytes) + Payload -- see powerlink.hpp's file header comment's PReq
+    section / powerlink.cpp's kMtypPreq case (the 7-byte guard)."""
+    flags = (0x20 if ms else 0) | (0x04 if ea else 0) | (0x01 if rd else 0)
+    flags2 = (0x80 if fls else 0) | (0x40 if sls else 0)
+    return (struct.pack("B", 0) + struct.pack("B", flags) + struct.pack("B", flags2) +
+            struct.pack("B", pdo_version) + b"\x00" + struct.pack("<H", len(payload)) + payload)
+
+
+def epl_pres_body(*, nmt_status: int, ms: bool = False, en: bool = False, rd: bool = False,
+                   fls: bool = False, sls: bool = False, pr: int = 0, rs: int = 0,
+                   pdo_version: int = 0, payload: bytes = b"") -> bytes:
+    """PRes body header (7 bytes) + Payload -- see powerlink.hpp's file header comment's PRes
+    section / powerlink.cpp's kMtypPres case (the 7-byte guard)."""
+    flags = (0x20 if ms else 0) | (0x10 if en else 0) | (0x01 if rd else 0)
+    flags2 = ((0x80 if fls else 0) | (0x40 if sls else 0) | ((pr & 0x07) << 3) | (rs & 0x07))
+    return (struct.pack("B", nmt_status) + struct.pack("B", flags) + struct.pack("B", flags2) +
+            struct.pack("B", pdo_version) + b"\x00" + struct.pack("<H", len(payload)) + payload)
+
+
+def epl_soa_body(*, nmt_status: int, ea: bool = False, er: bool = False, an_global: bool = False,
+                  an_local: bool = False, requested_service_id: int = 0,
+                  requested_service_target: int = 0, epl_version: int = 0x20,
+                  mn_redundancy: bool = False, cable_redundancy: bool = False,
+                  ring_redundancy: bool = False, ring_closed: bool = True) -> bytes:
+    """SoA body (8 bytes): NMTStatus(1) + reserved(1) + Flags(1) + reserved(1) +
+    RequestedServiceID(1) + RequestedServiceTarget(1) + EPLVersion(1) + RedundancyFlags(1) -- see
+    powerlink.hpp's file header comment's SoA section / powerlink.cpp's kMtypSoa case (the 8-byte
+    guard -- fixed from an off-by-one 7-byte guard found while building this very fixture, see
+    powerlink.cpp's own decode_sdo-adjacent SoA comment)."""
+    flags = (0x08 if an_global else 0) | (0x10 if an_local else 0) | (0x04 if ea else 0) | (0x02 if er else 0)
+    redundancy = ((0x01 if mn_redundancy else 0) | (0x02 if cable_redundancy else 0) |
+                  (0x04 if ring_redundancy else 0) | (0x00 if ring_closed else 0x08))
+    return (struct.pack("B", nmt_status) + b"\x00" + struct.pack("B", flags) + b"\x00" +
+            struct.pack("B", requested_service_id) + struct.pack("B", requested_service_target) +
+            struct.pack("B", epl_version) + struct.pack("B", redundancy))
+
+
+def epl_sdo_bytes(*, recv_seq: int = 0, recv_con: int = 2, send_seq: int = 0, send_con: int = 2,
+                   transaction_id: int = 1, is_response: bool = False, is_abort: bool = False,
+                   segmentation: int = 0, command_id: int = 0x01, data_size: int = None,
+                   index: int = None, sub_index: int = 0, abort_code: int = None,
+                   data: bytes = b"") -> bytes:
+    """Shared SDO Sequence Layer(4 bytes) + Command Layer(8-byte header, then whatever the
+    CommandID/segmentation/Abort combination requires) -- byte-for-byte mirrors powerlink.cpp's own
+    decode_sdo, the ONE place that decode logic lives (see powerlink.hpp's file header comment's
+    "UDP:3819 SDO variant" architecture note for why this same builder is reused below for both the
+    raw-Ethernet ASnd/SDO packets and the standalone UDP:3819 packet). `index`/`sub_index` only
+    apply when `command_id` is WriteByIndex(0x01)/ReadByIndex(0x02) and `segmentation` is
+    Expedited(0)/Initiate(1) -- passing `index` for any other combination is simply ignored, the
+    same "no Index/SubIndex on a Segment/Transfer Complete continuation frame" shape decode_sdo
+    itself enforces. `data_size` (the Initiate-only 4-byte total-transfer-size field) defaults to
+    len(data) when segmentation==1 and command_id is WriteByIndex/ReadByIndex."""
+    seq_b0 = ((recv_seq & 0x3F) << 2) | (recv_con & 0x03)
+    seq_b1 = ((send_seq & 0x3F) << 2) | (send_con & 0x03)
+    body = struct.pack("BB", seq_b0, seq_b1) + b"\x00\x00"  # 2 reserved bytes
+
+    is_write_or_read = command_id in (0x01, 0x02)
+    segment_size = len(data)
+    flags = ((0x80 if is_response else 0) | (0x40 if is_abort else 0) | ((segmentation & 0x03) << 4))
+    body += (b"\x00" + struct.pack("B", transaction_id) + struct.pack("B", flags) +
+             struct.pack("B", command_id) + struct.pack("<H", segment_size) + b"\x00\x00")
+
+    if is_abort:
+        body += struct.pack("<I", abort_code if abort_code is not None else 0)
+        return body
+
+    if is_write_or_read and segmentation == 1:  # Initiate
+        body += struct.pack("<I", data_size if data_size is not None else len(data))
+
+    if is_write_or_read and segmentation in (0, 1) and index is not None:
+        body += struct.pack("<H", index) + struct.pack("B", sub_index)
+        if command_id == 0x01:  # WriteByIndex pads SubIndex to 2 bytes -- see decode_sdo's own
+            body += b"\x00"     # comment on this asymmetry with ReadByIndex.
+
+    body += data
+    return body
+
+
+def epl_ident_response_bytes(*, nmt_status: int = 0xFD, en: bool = False, ec: bool = False,
+                              fls: bool = False, sls: bool = False, pr: int = 0, rs: int = 0,
+                              epl_version: int = 0x20, feature_flags: int = 0, mtu: int = 1500,
+                              poll_in_size: int = 0, poll_out_size: int = 0,
+                              response_time_us: int = 0, device_type: int = 0,
+                              device_type_info: int = 0, vendor_id: int = 0, product_code: int = 0,
+                              revision_number: int = 0, serial_number: int = 0,
+                              ip: str = "192.168.1.10", subnet: str = "255.255.255.0",
+                              gateway: str = "192.168.1.1", host_name: str = "plc-01") -> bytes:
+    """IdentResponse's own 158-byte body -- byte-for-byte mirrors powerlink.cpp's own
+    decode_ident_response (see powerlink.hpp's file header comment's IdentResponse section for the
+    full field-by-field citation, including the IPAddress/SubnetMask/DefaultGateway big-endian
+    asymmetry every other multi-byte field here does NOT share)."""
+    def ip_be(addr: str) -> bytes:
+        return bytes(int(o) for o in addr.split("."))
+
+    enec = (0x10 if en else 0) | (0x08 if ec else 0)
+    flsm = (0x80 if fls else 0) | (0x40 if sls else 0) | ((pr & 0x07) << 3) | (rs & 0x07)
+    b = struct.pack("BB", enec, flsm)
+    b += struct.pack("B", nmt_status) + b"\x00"
+    b += struct.pack("B", epl_version) + b"\x00"
+    b += struct.pack("<I", feature_flags)
+    b += struct.pack("<H", mtu) + struct.pack("<H", poll_in_size) + struct.pack("<H", poll_out_size)
+    b += struct.pack("<I", response_time_us) + b"\x00\x00"
+    b += struct.pack("<H", device_type) + struct.pack("<H", device_type_info)
+    b += struct.pack("<I", vendor_id) + struct.pack("<I", product_code)
+    b += struct.pack("<I", revision_number) + struct.pack("<I", serial_number)
+    b += bytes(8)  # VendorSpecificExtension1
+    b += struct.pack("<I", 0) + struct.pack("<I", 0)  # VerifyConfigurationDate/Time
+    b += struct.pack("<I", 0) + struct.pack("<I", 0)  # ApplicationSwDate/Time
+    b += ip_be(ip) + ip_be(subnet) + ip_be(gateway)
+    hn = host_name.encode("ascii")[:32]
+    b += hn + bytes(32 - len(hn))
+    b += bytes(48)  # VendorSpecificExtension2
+    assert len(b) == 158, len(b)
+    return b
+
+
+def epl_nmt_command_body(command_id: int, data: bytes = b"") -> bytes:
+    """NMTCommand body: NMTCommandID(1) + 1 reserved + command-specific data -- see
+    powerlink.hpp's file header comment's NMTCommand section. This decoder reads the command's own
+    TARGET off the frame's own common-header Destination NodeID, not a field inside this body."""
+    return struct.pack("B", command_id) + b"\x00" + data
+
+
+def epl_nmt_request_body(requested_command_id: int, requested_command_target: int,
+                          data: bytes = b"") -> bytes:
+    """NMTRequest body: RequestedCommandID(1) + RequestedCommandTarget(1) + RequestedCommandData --
+    see powerlink.hpp's file header comment's NMTRequest section."""
+    return struct.pack("BB", requested_command_id, requested_command_target) + data
+
+
+def build_powerlink_sample():
+    """Ethernet POWERLINK (EtherType 0x88AB) -- see powerlink.hpp's file header comment for the
+    full sourcing writeup (Wireshark's own epan/dissectors/packet-epl.c, fetched and read in full
+    during this decoder's own research; no real POWERLINK pcap capture was available, so this
+    fixture is entirely synthetic, cross-checked field-by-field against that dissector source
+    rather than against a real-world capture). Node IDs: 240 (POWERLINK_MN_NODE_ID) is the one
+    Managing Node throughout this file (sourced from HMI_MAC, this codebase's usual stand-in for
+    the "engineering/master" side); 1 and 2 are two Controlled Nodes (sourced from PLC_MAC and a
+    second synthetic CN MAC respectively). The dedicated rogue-MN scenario lives in its own,
+    separate, much smaller fixture -- see build_powerlink_rogue_mn_sample() immediately below --
+    specifically so THIS file's own --stats run is a clean negative control for that finding (only
+    one (MAC, NodeID) identity ever sources SoC/PReq/SoA here)."""
+    packets = []
+    cn2_mac = mac("00:0c:29:cc:cc:02")
+
+    # 1) SoC (Start of Cyclic) -- the MN's own cyclic-start broadcast. MC bit set (Multiplexed
+    #    Cycle Completed), arbitrary-but-plausible NetTime/RelativeTime.
+    packets.append(epl_frame(
+        0x01, POWERLINK_BROADCAST_NODE_ID, POWERLINK_MN_NODE_ID,
+        epl_soc_body(mc=True, net_time=struct.pack("<II", 1732000000, 123456),
+                     relative_time=struct.pack("<II", 0, 500000)),
+        dst_mac=bytes.fromhex("ffffffffffff"), src_mac=HMI_MAC))
+
+    # 2) PReq (Poll Request, MN->CN1) -- 4 bytes of opaque cyclic process-data payload.
+    packets.append(epl_frame(
+        0x03, 1, POWERLINK_MN_NODE_ID,
+        epl_preq_body(rd=True, fls=True, payload=b"\xDE\xAD\xBE\xEF"),
+        dst_mac=PLC_MAC, src_mac=HMI_MAC))
+
+    # 3) PRes (Poll Response, CN1->MN) -- CN1 reports NMT_CS_OPERATIONAL, feeding curated finding
+    #    (1)'s "observed Operational earlier in this capture" state for packet #6 below.
+    packets.append(epl_frame(
+        0x04, POWERLINK_BROADCAST_NODE_ID, 1,
+        epl_pres_body(nmt_status=0xFD, rd=True, fls=True, payload=b"\xCA\xFE\xBA\xBE"),
+        dst_mac=bytes.fromhex("ffffffffffff"), src_mac=PLC_MAC))
+
+    # 4) SoA (Start of Asynchronous, MN only) -- the MN (also reporting NMT_MS_OPERATIONAL, via the
+    #    shared nmt_state_name(is_mn=true) naming) inviting CN1 to send an IdentRequest.
+    packets.append(epl_frame(
+        0x05, 1, POWERLINK_MN_NODE_ID,
+        epl_soa_body(nmt_status=0xFD, requested_service_id=1, requested_service_target=1),
+        dst_mac=PLC_MAC, src_mac=HMI_MAC))
+
+    # 5) ASnd/IdentResponse (CN1->MN) -- the full 158-byte body, every field populated with a
+    #    plausible, distinguishable value (see epl_ident_response_bytes's own field list).
+    packets.append(epl_frame(
+        0x06, POWERLINK_MN_NODE_ID, 1,
+        struct.pack("B", 1) + epl_ident_response_bytes(
+            nmt_status=0x1D, device_type=0x00F5, vendor_id=0x00000999, product_code=0x00001234,
+            revision_number=0x00010001, serial_number=0x0000ABCD, host_name="cn1-drive"),
+        dst_mac=HMI_MAC, src_mac=PLC_MAC))
+
+    # 6) ASnd/NMTCommand (POSITIVE control for curated finding (1)): NMTResetNode (disruptive)
+    #    targeting CN1 (NodeID 1), which packet #3 above already reported NMT_CS_OPERATIONAL --
+    #    this is exactly the "knocked an Operational node out of service" signature.
+    packets.append(epl_frame(
+        0x06, 1, POWERLINK_MN_NODE_ID,
+        struct.pack("B", 4) + epl_nmt_command_body(0x28),  # NMTResetNode
+        dst_mac=PLC_MAC, src_mac=HMI_MAC))
+
+    # 7) ASnd/NMTCommand (NEGATIVE control for curated finding (1)): the same disruptive
+    #    NMTResetNode command, but targeting CN2 (NodeID 2), which this capture never observed
+    #    reporting an Operational NMT state -- must NOT add to the finding's count.
+    packets.append(epl_frame(
+        0x06, 2, POWERLINK_MN_NODE_ID,
+        struct.pack("B", 4) + epl_nmt_command_body(0x28),  # NMTResetNode
+        dst_mac=cn2_mac, src_mac=HMI_MAC))
+
+    # 8) ASnd/NMTRequest (CN1->MN) -- a Controlled Node politely ASKING the MN to issue a command
+    #    on its behalf (NMTStartNode), the normal/expected way a CN participates in NMT state
+    #    changes -- NOT itself anomalous (contrast with packet #14 below).
+    packets.append(epl_frame(
+        0x06, POWERLINK_MN_NODE_ID, 1,
+        struct.pack("B", 3) + epl_nmt_request_body(0x21, 1),  # NMTStartNode, target=self
+        dst_mac=HMI_MAC, src_mac=PLC_MAC))
+
+    # 9) ASnd/SDO WriteByIndex request, Expedited (MN->CN1) -- curated finding (3). Index 0x2000
+    #    SubIndex 0x01, 4 bytes of opaque Object Dictionary data (never value-decoded, see
+    #    powerlink.hpp's own Object Dictionary scope note).
+    packets.append(epl_frame(
+        0x06, 1, POWERLINK_MN_NODE_ID,
+        struct.pack("B", 5) + epl_sdo_bytes(
+            transaction_id=1, segmentation=0, command_id=0x01, index=0x2000, sub_index=0x01,
+            data=struct.pack("<I", 42)),
+        dst_mac=PLC_MAC, src_mac=HMI_MAC))
+
+    # 10) The matching WriteByIndex confirmation response (CN1->MN) -- Expedited, Response bit set,
+    #     no Data of its own (an ordinary write confirmation).
+    packets.append(epl_frame(
+        0x06, POWERLINK_MN_NODE_ID, 1,
+        struct.pack("B", 5) + epl_sdo_bytes(
+            transaction_id=1, is_response=True, segmentation=0, command_id=0x01,
+            index=0x2000, sub_index=0x01),
+        dst_mac=HMI_MAC, src_mac=PLC_MAC))
+
+    # 11) ASnd/SDO ReadByIndex request, Expedited (MN->CN1) -- Index 0x1018 SubIndex 0x01 (a
+    #     plausible CiA 301 Identity Object read), no Data on the request itself.
+    packets.append(epl_frame(
+        0x06, 1, POWERLINK_MN_NODE_ID,
+        struct.pack("B", 5) + epl_sdo_bytes(
+            transaction_id=2, segmentation=0, command_id=0x02, index=0x1018, sub_index=0x01),
+        dst_mac=PLC_MAC, src_mac=HMI_MAC))
+
+    # 12) The matching ReadByIndex success response (CN1->MN) -- 4 bytes of opaque data returned.
+    #     NOTE ReadByIndex does NOT pad SubIndex to 2 bytes the way WriteByIndex does -- see
+    #     epl_sdo_bytes's own comment on this asymmetry.
+    packets.append(epl_frame(
+        0x06, POWERLINK_MN_NODE_ID, 1,
+        struct.pack("B", 5) + epl_sdo_bytes(
+            transaction_id=2, is_response=True, segmentation=0, command_id=0x02,
+            index=0x1018, sub_index=0x01, data=struct.pack("<I", 0x00000999)),
+        dst_mac=HMI_MAC, src_mac=PLC_MAC))
+
+    # 13) ASnd/SDO WriteByIndex Abort (CN1->MN) -- a real CANopen/POWERLINK CiA 301 SDO Abort Code
+    #     (0x06010002, "Attempt to write a read only object"), reused byte-for-byte from
+    #     canopen.cpp's own shared canopen_sdo_abort_code_name table (see powerlink.hpp's file
+    #     header comment's Abort Transfer section).
+    packets.append(epl_frame(
+        0x06, POWERLINK_MN_NODE_ID, 1,
+        struct.pack("B", 5) + epl_sdo_bytes(
+            transaction_id=3, is_response=True, is_abort=True, command_id=0x01,
+            abort_code=0x06010002),
+        dst_mac=HMI_MAC, src_mac=PLC_MAC))
+
+    # 14) ASnd/NMTCommand sourced by a Controlled Node (curated finding (4), POSITIVE control) --
+    #     CN1 (NodeID 1) issuing NMTStopNode, which only the MN should ever do.
+    packets.append(epl_frame(
+        0x06, 2, 1,
+        struct.pack("B", 4) + epl_nmt_command_body(0x22),  # NMTStopNode
+        dst_mac=cn2_mac, src_mac=PLC_MAC))
+
+    # 15) ASnd/StatusResponse (CN2->MN) -- error register bits set (Generic error + Communication
+    #     error), one ErrorCodeList entry, and NMT_CS_PRE_OPERATIONAL_2 (deliberately NOT
+    #     Operational, so this packet does not feed curated finding (1)'s tracking state).
+    error_entry = struct.pack("<HH", 0x0001, 0x8130) + bytes(8) + bytes(8)  # EntryType/ErrorCode/TimeStamp/AddInfo
+    status_body = (struct.pack("B", 0x00) + struct.pack("B", 0x00) + struct.pack("B", 0x5D) +
+                   bytes(3) + struct.pack("B", 0x11) + bytes(1) + bytes(6) + error_entry)
+    packets.append(epl_frame(
+        0x06, POWERLINK_MN_NODE_ID, 2,
+        struct.pack("B", 2) + status_body,
+        dst_mac=HMI_MAC, src_mac=cn2_mac))
+
+    # 16) AMNI (ActiveManagingNodeIndication) -- every field reserved per the reference dissector,
+    #     named only.
+    packets.append(epl_frame(0x07, POWERLINK_BROADCAST_NODE_ID, POWERLINK_MN_NODE_ID,
+                              bytes(4), dst_mac=bytes.fromhex("ffffffffffff"), src_mac=HMI_MAC))
+
+    # 17) AInv (Asynchronous Invite, MessageType 0x0D) -- an SoA-shaped header wrapping an embedded
+    #     ASnd-style IdentResponse body, exercising the shared decode_asnd_service_body path.
+    packets.append(epl_frame(
+        0x0D, 1, POWERLINK_MN_NODE_ID,
+        struct.pack("B", 0xFD) + b"\x00" + struct.pack("B", 0x00) +
+        struct.pack("B", 1) + epl_ident_response_bytes(nmt_status=0xFD, host_name="cn1-via-ainv"),
+        dst_mac=PLC_MAC, src_mac=HMI_MAC))
+
+    # 18) MessageType 0x02 -- the explicit reserved/unknown gap this decoder deliberately never
+    #     assigns a name to (see powerlink.hpp's file header comment's MessageType section).
+    packets.append(epl_frame(0x02, 1, POWERLINK_MN_NODE_ID, bytes(4),
+                              dst_mac=PLC_MAC, src_mac=HMI_MAC))
+
+    # 19) Standalone SDO-over-UDP (port 3819) -- a WriteByIndex request, the SAME frame shape (and
+    #     the SAME epl_sdo_bytes builder) packet #9 above uses, just wrapped in UDP/IP instead of
+    #     raw Ethernet -- see powerlink.hpp's file header comment's "UDP:3819 SDO variant"
+    #     architecture note.
+    udp_sdo_payload = (struct.pack("BBB", 0x06, 1, POWERLINK_MN_NODE_ID) + struct.pack("B", 5) +
+                        epl_sdo_bytes(transaction_id=4, segmentation=0, command_id=0x01,
+                                      index=0x2010, sub_index=0x00, data=struct.pack("<I", 7)))
+    packets.append(udp_ip_eth_frame(udp_sdo_payload, POWERLINK_SDO_UDP_PORT, POWERLINK_SDO_UDP_PORT,
+                                     HMI_IP, PLC_IP, HMI_MAC, PLC_MAC))
+
+    # 20) NEGATIVE CONTROL: too short even for the 3-byte common header -- must not crash, falls
+    #     back to the generic "non-ip" ethertype-name-only report.
+    packets.append(eth_header(PLC_MAC, HMI_MAC, POWERLINK_ETHERTYPE) + bytes([0x01, 0x02]))
+
+    # 21) The same standalone SDO-over-UDP request as packet #19, but on a non-standard UDP port
+    #     pair (53700 -> 9999, not 3819) -- proves the "seen on UDP port ..., which is not a
+    #     configured/standard POWERLINK SDO-over-UDP port (3819)" note. Auto mode is port-gated for
+    #     this secondary path (see powerlink.hpp's own file header comment), so the dedicated CTest
+    #     for this packet runs with `--protocol powerlink` to force it, the same BSAP/CoAP-style
+    #     precedent build_bsap_sample's own non-standard-port packets already establish.
+    udp_sdo_nonstd_payload = (struct.pack("BBB", 0x06, 1, POWERLINK_MN_NODE_ID) + struct.pack("B", 5) +
+                               epl_sdo_bytes(transaction_id=5, segmentation=0, command_id=0x01,
+                                             index=0x2020, sub_index=0x00, data=struct.pack("<I", 9)))
+    packets.append(udp_ip_eth_frame(udp_sdo_nonstd_payload, 53700, 9999, HMI_IP, PLC_IP, HMI_MAC, PLC_MAC))
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_300_000 + i, i * 1000)
+    (TESTS_DIR / "sample_powerlink.pcap").write_bytes(data)
+
+
+def build_powerlink_rogue_mn_sample():
+    """A small, dedicated fixture isolating curated finding (2) (rogue-MN / MN-identity tracking)
+    as a clean POSITIVE control -- see build_powerlink_sample's own file header comment for why
+    this lives separately: that larger fixture is this finding's own negative control (exactly one
+    (MAC, NodeID) identity ever sources SoC/PReq/SoA there), so mixing a second identity into it
+    would leave no clean "finding does not fire" run to test against."""
+    packets = []
+
+    # The legitimate MN (HMI_MAC, NodeID 240) sourcing an SoC, exactly like build_powerlink_sample's
+    # own packet #1.
+    packets.append(epl_frame(
+        0x01, POWERLINK_BROADCAST_NODE_ID, POWERLINK_MN_NODE_ID,
+        epl_soc_body(mc=True), dst_mac=bytes.fromhex("ffffffffffff"), src_mac=HMI_MAC))
+
+    # A SECOND, distinct MAC also claiming to be the MN (NodeID 240) -- sourcing a PReq. Same
+    # NodeID, different MAC: a rogue/duplicate MN, the exact signature curated finding (2) looks
+    # for (source MAC, source NodeID) pairs, not NodeID alone).
+    packets.append(epl_frame(
+        0x03, 1, POWERLINK_MN_NODE_ID,
+        epl_preq_body(rd=True, payload=b"\x00\x00\x00\x00"),
+        dst_mac=PLC_MAC, src_mac=POWERLINK_ROGUE_MAC))
+
+    # And a third SoA, from the rogue MAC again -- reinforces that this is a persistent rogue
+    # presence, not a single stray frame.
+    packets.append(epl_frame(
+        0x05, 1, POWERLINK_MN_NODE_ID,
+        epl_soa_body(nmt_status=0xFD, requested_service_id=2, requested_service_target=1),
+        dst_mac=PLC_MAC, src_mac=POWERLINK_ROGUE_MAC))
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_310_000 + i, i * 1000)
+    (TESTS_DIR / "sample_powerlink_rogue_mn.pcap").write_bytes(data)
+
+
 CCLINK_IE_CYCLIC_PORT = 61450
 CCLINK_IE_NODE_SEARCH_PORT = 61451
 
@@ -17530,6 +17925,8 @@ if __name__ == "__main__":
     build_iccp_sample()
     build_ge_srtp_sample()
     build_bsap_sample()
+    build_powerlink_sample()
+    build_powerlink_rogue_mn_sample()
     build_cclink_ie_sample()
     build_attack_detect_sample()
     build_codesys_sample()

@@ -8817,6 +8817,137 @@ deferred future migration.
     PS3.8/PS3.5/PS3.15 standard text and Wireshark's own `packet-dcm.c`
     dissector were this item's sourcing pass instead.
 
+53. **Ethernet POWERLINK (EPSG DS301) -- EtherType `0x88AB`, + SDO-over-UDP
+    on UDP port 3819.** **Done -- first pass (v0.2.5).** "CANopen over
+    Ethernet": a real-time Ethernet motion-control protocol in the same
+    general category as PROFINET RT and EtherCAT, both of which this tool
+    already decoded (see docs/PROTOCOL_COVERAGE.md's PROFINET RT and
+    EtherCAT sections) -- previously listed together with SERCOS III in
+    this document's own "Protocols not covered at all" section; SERCOS
+    III remains there, POWERLINK is now removed from that list.
+
+    `PowerlinkDecoder`/`powerlink.hpp`/`powerlink.cpp`, `GateKind::
+    EtherType` (0x88AB) for the cyclic real-time path, mirroring
+    `profinet.hpp`/`ethercat.hpp`'s own template exactly (raw Ethernet,
+    no IP layer at all); `PowerlinkSdoUdpDecoder`, `GateKind::UdpPort`
+    (3819), for the secondary out-of-band SDO path, sharing the same
+    `id()=="powerlink"` two-gate pattern `HartIpOnly` already established
+    -- one `ProtocolFilter::PowerlinkOnly` value covers both.
+    `--powerlink-sdo-port` widens (and, under an explicit `--protocol
+    powerlink`, un-gates) the UDP path's own port gate, the same
+    `extra_*_ports`/`--bsap-port` convention this codebase already uses.
+
+    Decodes the common MessageType/Destination/Source header; SoC/PReq/
+    PRes/SoA cyclic frames; ASnd's five named services (IdentResponse --
+    every one of its 158 bytes, StatusResponse, NMTRequest, NMTCommand --
+    29 named Command IDs, SDO); AInv (Asynchronous Invite), which wraps
+    the identical ASnd service body through one shared decode function
+    rather than a duplicate. The full CN/MN-prefixed NMT state machine
+    (`NMT_CS_`/`NMT_MS_`) is decoded, including the source-confirmed
+    absence of any wire-level "ResetConfiguration" *state* (only the
+    *command* exists). The SDO Sequence Layer + Command Layer is decoded
+    by ONE shared function (`decode_sdo`), reused identically by the raw-
+    Ethernet ASnd/SDO path, AInv's own embedded SDO body, AND the
+    standalone SDO-over-UDP path -- the reference dissector's own UDP
+    entry point calls the exact same core dissection function the raw-
+    Ethernet path uses, so this is genuinely the same frame shape, not a
+    stripped-down parser, satisfying this item's own "do not duplicate
+    that logic" requirement with zero duplicated code. WriteByIndex/
+    ReadByIndex are decoded in full, including a genuine, source-
+    confirmed asymmetry (WriteByIndex pads SubIndex to 2 bytes, ReadByIndex
+    does not); every other CommandID is named only. The SDO Abort Code
+    numeric space is CONFIRMED identical to CANopen's own (CiA 301) --
+    `canopen_sdo_abort_code_name` was extracted from `canopen.cpp`'s own
+    previously-anonymous-namespace-local function into a shared, public
+    free function (declared in `canopen.hpp`) specifically for this reuse,
+    a small, low-risk, behavior-preserving refactor rather than a second
+    copy of the same ~40-entry table. Object Dictionary values (SDO Data,
+    PReq/PRes process data) are shown as raw hex only -- no XDD/EDS
+    device-profile machinery, the identical scope decision
+    docs/PROTOCOL_COVERAGE.md's CANopen section already documents. No
+    redaction machinery is needed or used here.
+
+    Four curated `--stats` findings: (1) a disruptive NMTCommand
+    (NMTResetNode/NMTStopNode/NMTResetCommunication/
+    NMTResetConfiguration/NMTSwReset and their `_Ex` variants) targeting a
+    NodeID separately observed reporting an Operational NMT state earlier
+    in the same capture (tracked as a single forward pass over packets in
+    capture order); (2) rogue-MN / MN-identity tracking -- more than one
+    distinct (source MAC, source NodeID) pair sourcing an MN-only message
+    type (SoC/PReq/SoA); (3) SDO WriteByIndex operations observed; (4) a
+    Controlled Node (not the Managing Node) sourcing an ASnd/NMTCommand.
+
+    **Sourcing.** Wireshark's own `epan/dissectors/packet-epl.c` was
+    fetched in full and read line-by-line during this item's own research
+    (outbound HTTPS access to raw.githubusercontent.com was available in
+    this environment, unlike for item 52's DICOM work) -- every byte
+    offset, bit mask, and named enum value below is cross-checked directly
+    against that source, not reconstructed from the EPSG DS301 PDF (not
+    reachable from this environment either). This resolved several
+    genuine uncertainties this item's own original brief had flagged:
+    MessageType carries NO reserved top bit (the whole byte is the value,
+    not `byte0 & 0x7F`); AInv is CONFIRMED at MessageType 0x0D; SoA's
+    RequestedServiceID and ASnd's ServiceID are CONFIRMED DIFFERENT
+    numeric spaces, not shared; SDO CommandID WriteByIndex=0x01/
+    ReadByIndex=0x02 (POWERLINK-specific values, not borrowed from
+    CANopen's own differently-shaped command-specifier field);
+    NMTRequestedCommandTarget IS a real field; NMTCommand has NO separate
+    target field of its own (the frame's own common-header Destination
+    NodeID is the target). **One real bug was found and fixed** while
+    building the fixture, not merely documented around: the SoA decode
+    path's own length guard checked for 7 remaining bytes, but the SoA
+    body it then unconditionally reads actually consumes 8 (NMTStatus +
+    reserved + Flags + reserved + RequestedServiceID +
+    RequestedServiceTarget + EPLVersion + RedundancyFlags) -- an
+    exactly-7-byte SoA would have thrown inside the shared bounds-checked
+    reader and dropped the WHOLE frame (caught by the outer `try`/`catch`
+    in `try_parse_powerlink`) rather than falling back gracefully with a
+    note, the one inconsistency this item's own field-by-field
+    transcription introduced; fixed by correcting the guard to 8,
+    confirmed via a clean rebuild afterward. Deliberate scope cuts, named/
+    structural only, not exhaustively value-decoded: FeatureFlags' own 23
+    individually named bits (one raw 32-bit value); NMTDNA's own 27-byte
+    Dynamic Node Allocation structure (raw hex); SoA SyncRequest's own 30
+    extended cross-redundancy timing bytes; StatusResponse's ErrorCodeList
+    entry-type sub-bits; WriteMultipleParameterByIndex's own multi-abort-
+    code response (count only, not walked entry by entry);
+    IdentResponse's DeviceType-to-profile-name lookup. No real POWERLINK
+    pcap capture was available during this item's research (same
+    "Wireshark source as primary, no real capture" posture item 52's own
+    DICOM work and, partially, EtherCAT already established), so
+    `tests/sample_powerlink.pcap` and `tests/sample_powerlink_rogue_mn.pcap`
+    (`build_powerlink_sample()`/`build_powerlink_rogue_mn_sample()`) are
+    entirely synthetic, byte-for-byte constructed against the same
+    dissector source this decoder itself was built from, covering: SoC;
+    PReq/PRes; SoA + ASnd/IdentResponse; ASnd/NMTCommand targeting an
+    Operational node (positive control) and a non-Operational one
+    (negative control, count stays at 1); ASnd/NMTRequest (a CN's own
+    legitimate, non-anomalous way to request a state change, contrasted
+    with the CN-sourced-NMTCommand finding's own positive control);
+    ASnd/SDO WriteByIndex + ReadByIndex request/response pairs; an
+    ASnd/SDO Abort with a real CANopen/POWERLINK Abort Code
+    (0x06010002); ASnd/StatusResponse; AMNI; AInv (proving the shared
+    ASnd-service-body decode path); MessageType 0x02 (the explicit
+    unnamed-gap negative control); a standalone SDO-over-UDP request on
+    the standard port and a second on a non-standard port pair (decoded
+    only under `--protocol powerlink`/`--powerlink-sdo-port`); a
+    too-short-for-even-the-common-header negative control; and, in the
+    separate rogue-MN fixture, two distinct (MAC, NodeID) identities
+    sourcing SoC/PReq/SoA (the main fixture is this finding's own clean
+    negative control, with exactly one legitimate identity throughout).
+    Every decode path was run manually (`--format text -v`, `--format
+    json`, `--stats`, `--protocol powerlink`) and its real output read --
+    confirming every curated finding fires on its positive control and
+    stays silent on its negative control -- before any CTest regex was
+    written. 24 new `powerlink_*`/`protocol_filter_powerlink_only` CTest
+    tests were added. Full suite grew from 1849 to 1873 tests in the
+    default config and from 1837 to 1861 in the
+    `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF` config, zero regressions,
+    zero-warning clean rebuilds in both. No EtherType/UDP-port collision
+    with any existing decoder was found (0x88AB and UDP 3819 both
+    confirmed clean by grep before this decoder was added), so no
+    dispatch-cascade reordering was needed.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols
@@ -8854,11 +8985,11 @@ with zero bytes of it decoded anywhere in this codebase.
   Windows RPC mechanism with no OT-specific structure of its own -- making
   this a substantially larger and less OT-focused undertaking than anything
   else on this list. Likely low priority for that reason.
-- **Ethernet POWERLINK (EtherType `0x88AB`) and SERCOS III.** Real-time
-  Ethernet motion-control protocols in the same general category as
-  PROFINET RT and EtherCAT, both of which this tool already decodes (see
-  docs/PROTOCOL_COVERAGE.md's PROFINET RT and EtherCAT sections). No structural
-  obstacle here -- these simply haven't been reached yet.
+- **SERCOS III.** A real-time Ethernet motion-control protocol in the same
+  general category as PROFINET RT and EtherCAT, both of which this tool
+  already decodes (see docs/PROTOCOL_COVERAGE.md's PROFINET RT and EtherCAT
+  sections) -- and, as of the entry below, Ethernet POWERLINK too. No
+  structural obstacle here -- it simply hasn't been reached yet.
 - **WirelessHART.** The RF mesh variant of HART, not the IP-based one --
   distinct from HART-IP (see docs/PROTOCOL_COVERAGE.md's HART-IP section), which
   this tool fully decodes. Like PROFIBUS DP, this is not capturable via a

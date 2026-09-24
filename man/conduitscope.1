@@ -489,7 +489,7 @@ regardless of where it's being analyzed \-\- an extension beyond what
 tshark/tcpdump themselves offer. See \fBdocs/USER_GUIDE.md\fR's OUTPUT
 FORMATS "Timestamps" subsection.
 .TP
-.B \-\-protocol {auto,modbus,dnp3,iec104,s7comm,s7comm\-plus,mms,enip,twincat,melsec,fins,bgp,kerberos,ldap,smb,profinet,goose,sv,ethercat,stp,devicenet,canopen,j1939,bacnet,hartip,opcua,mqtt,ff\-hse,dns,mdns,llmnr,nbns,doh,rip,igmp,vrrp,hsrp,igrp,pim,eigrp,ospf,remote\-access,lateral\-movement,enterprise\-trust,eapol,wireless\-backhaul,pppoe,tunnel\-vpn,mpls,arp,lldp,slow\-protocols,winrm,dcom,ge\-srtp,bsap,cclink\-ie,codesys,coap,zigbee,cdp,rmcp,asf,ipmi,amqp091,amqp10,dicom}
+.B \-\-protocol {auto,modbus,dnp3,iec104,s7comm,s7comm\-plus,mms,enip,twincat,melsec,fins,bgp,kerberos,ldap,smb,profinet,goose,sv,ethercat,stp,devicenet,canopen,j1939,bacnet,hartip,opcua,mqtt,ff\-hse,dns,mdns,llmnr,nbns,doh,rip,igmp,vrrp,hsrp,igrp,pim,eigrp,ospf,remote\-access,lateral\-movement,enterprise\-trust,eapol,wireless\-backhaul,pppoe,tunnel\-vpn,mpls,arp,lldp,slow\-protocols,winrm,dcom,ge\-srtp,bsap,cclink\-ie,codesys,coap,zigbee,cdp,rmcp,asf,ipmi,amqp091,amqp10,dicom,powerlink}
 Restrict decoding to one protocol. Default: auto (tries all fourteen TCP
 protocols, independent of port number, plus CIP I/O, BACnet/IP, HART-IP, and
 FF-HSE on every
@@ -754,6 +754,32 @@ field-by-field writeup, including a documented, actually-"fixed" (not
 left as a collision) reordering of DICOM ahead of Modbus in \fBauto\fR
 mode's dispatch cascades, needed because a real DICOM PDU's length field
 always reads as Modbus's own \fBprotocol_id == 0\fR tell.
+\fBpowerlink\fR (Ethernet POWERLINK, EPSG DS301 \-\- "CANopen over
+Ethernet" real-time motion-control traffic, EtherType 0x88AB, raw
+Ethernet, no IP layer at all \-\- the same class of protocol
+\fBprofinet\fR/\fBethercat\fR already cover) decodes the cyclic
+SoC/PReq/PRes/SoA frames, and ASnd's five named services
+(IdentResponse/StatusResponse/NMTRequest/NMTCommand/SDO), plus AInv
+(Asynchronous Invite, which wraps the same ASnd service body). A
+secondary SDO-over-UDP gate (UDP port 3819) shares the identical
+Sequence Layer/Command Layer decode with the raw-Ethernet ASnd/SDO
+path \-\- no duplicated logic between the two. The SDO Abort Code
+numeric space is confirmed identical to CANopen's own (CiA 301) and
+reuses \fBcanopen\fR's own abort-code name table rather than
+duplicating it; Object Dictionary values (SDO Data, PReq/PRes process
+data) are shown as raw hex only, the same "no XDD/EDS device-profile
+machinery" scope decision \fBcanopen\fR already documents for its own
+PDO/SDO data. Curated \fB\-\-stats\fR findings: a disruptive NMTCommand
+(reset/stop and their _Ex variants) targeting a node this capture
+separately observed reporting an Operational NMT state; rogue-MN /
+MN-identity tracking (more than one distinct (MAC, NodeID) pair
+sourcing an MN-only message type \-\- SoC/PReq/SoA); SDO WriteByIndex
+operations observed; and a Controlled Node (not the Managing Node)
+sourcing an ASnd/NMTCommand. \fB\-\-powerlink\-sdo\-port\fR widens (and,
+under an explicit \fB\-\-protocol powerlink\fR, un-gates) detection of
+the SDO-over-UDP path beyond its own default port. See
+\fBdocs/PROTOCOL_COVERAGE.md\fR's Ethernet POWERLINK section for the
+full field-by-field writeup and sourcing notes.
 \fBigmp\fR (IP protocol 2), \fBvrrp\fR (IP protocol 112), \fBigrp\fR (IP
 protocol 9), \fBpim\fR (IP protocol 103), \fBeigrp\fR (IP protocol 88), and
 \fBospf\fR (IP protocol 89) need no port gate or option at all \-\- all six
@@ -961,6 +987,14 @@ Same as \fB\-\-dns\-port\fR, for DICOM (built\-in defaults: 104 and 11112,
 TCP, BOTH checked automatically in \fBauto\fR mode \-\- see
 \fBdocs/PROTOCOL_COVERAGE.md\fR's DICOM section). Repeatable. Also widens
 detection in \fBauto\fR mode to further, non\-standard ports.
+.TP
+.B \-\-powerlink\-sdo\-port \fIPORT\fR
+Same as \fB\-\-dns\-port\fR, for Ethernet POWERLINK's SDO-over-UDP
+secondary gate (built\-in default: 3819, UDP \-\- see
+\fBdocs/PROTOCOL_COVERAGE.md\fR's Ethernet POWERLINK section). Repeatable.
+Also widens detection in \fBauto\fR mode. The primary cyclic real-time
+path (EtherType 0x88AB, raw Ethernet) has no port concept at all and is
+unaffected by this option.
 .TP
 .B \-\-remote\-access\-port \fIPORT\fR
 Additional TCP or UDP port to treat as expected for the Tier 1 "IT

@@ -248,6 +248,15 @@
 
 namespace conduitscope {
 
+// SDO Abort Code name table (CiA 301's own 32-bit numeric space) -- exposed here, rather than kept
+// as a canopen.cpp-local anonymous-namespace function, specifically so powerlink.hpp/powerlink.cpp
+// can share it: POWERLINK's own SDO Command Layer reuses this exact numeric space verbatim (see
+// powerlink.hpp's own file header comment's "Abort Transfer" section for the value-by-value
+// cross-check that established this). Returns "" for a code neither table defines -- the caller
+// renders that as raw hex only, never guessed at, the same convention every other named-table
+// lookup in this codebase follows.
+std::string canopen_sdo_abort_code_name(uint32_t code);
+
 // One decoded CANopen frame -- see this file's header comment for the full Function Code table and
 // every documented scope decision.
 struct CanopenFrame {
