@@ -4,198 +4,40 @@
   <img src="assets/logo.jpg" alt="conduitscope logo: an amber warning-sign triangle with a shark whose eyes fire laser beams" width="220">
 </p>
 
-`conduitscope` decodes Modbus/TCP, DNP3, IEC 60870-5-104, S7comm/COTP (Siemens S7 PLC
-protocol) and S7comm-Plus (Siemens TIA Portal / S7-1200/1500's newer protocol),
-EtherNet/IP (CIP explicit and implicit messaging), PROFINET RT (DCP device
-discovery/configuration and cyclic real-time I/O data), IEC 61850-8-1 GOOSE,
-IEC 61850-9-2 Sampled Values, EtherCAT, BACnet/IP, HART-IP, OPC UA Binary
-(UA-TCP/Secure Conversation), IEC 61850 MMS (Manufacturing Message Specification,
-ISO 9506), MQTT (v3.1/v3.1.1/v5.0, including Sparkplug B), FOUNDATION
-Fieldbus HSE (FDA/SM/FMS/LAN Redundancy), Beckhoff TwinCAT/ADS (over
-AMS/TCP), MELSEC Communication Protocol (MC Protocol / SLMP, Mitsubishi
-Electric, TCP port 5001 and UDP port 5000, with curated
-unauthenticated-CPU-control, cleartext-password-field, and
-arbitrary-memory-access attack/monitoring notes -- the cleartext Remote
-Password field's own value is never rendered, only its length),
-FINS (Factory Interface Network Service, Omron, TCP port 9600 and
-UDP port 9600, with curated unauthenticated-CPU-control,
-arbitrary-memory-access, credential-free access-right-seizure, and
-forced-I/O-override attack/monitoring notes),
-Kerberos (RFC 4120, with curated AS-REP-Roasting and
-Kerberoasting attack/monitoring notes -- the first of a planned Windows
-Active Directory protocol suite), LDAP (RFC 4511, with curated
-anonymous-bind, cleartext-credential, AD-reconnaissance,
-AS-REP-Roasting-target-discovery, and delegation-discovery
-attack/monitoring notes -- the second protocol of that same suite), SMB2/NTLM
-(MS-SMB2/MS-NLMP, with curated SMB1-present, signing-not-required,
-NTLM-in-use, anonymous-or-guest-session, administrative-share-access, and
-repeated-logon-failure attack/monitoring notes -- the third protocol of
-that same suite), Netlogon/DCE-RPC (MS-NRPC/MS-RPCE, carried inside SMB2
-named-pipe I/O with no independent wire gate or CLI flag of its own, with
-curated secure-channel-established, all-zero-challenge-or-credential (the
-CVE-2020-1472 "Zerologon" wire signature), legacy-authentication-method,
-machine-account-naming-mismatch, and password-reset attack/monitoring
-notes -- the fourth protocol of that same suite), SAMR + LSARPC
-(MS-SAMR, MS-LSAD/MS-LSAT, likewise carried inside SMB2 named-pipe I/O
-with no independent wire gate or CLI flag of their own, with curated
-account/group-enumeration, SID/name-translation-or-enumeration,
-cross-interface, and null/guest-session-escalation attack/monitoring
-notes), SRVSVC + WKSSVC (MS-SRVS, MS-WKST, likewise carried inside SMB2
-named-pipe I/O with no independent wire gate or CLI flag of their own,
-with level-1-scoped share-enumeration/workstation-identity/logged-on-user
-decode and curated share-added/deleted and domain-join/unjoin
-attack/monitoring notes), DRSUAPI (MS-DRSR, likewise carried inside SMB2
-named-pipe I/O with no independent wire gate or CLI flag of its own, with
-a curated DRSGetNCChanges/DCSync-signature attack/monitoring note that
-still fires under RPC-layer sealing -- **note:** real-world DRSUAPI
-traffic, including DCSync, predominantly rides a dynamically negotiated
-raw TCP connection via the RPC endpoint mapper rather than a named pipe,
-which this decoder does not follow; see `docs/PROTOCOL_COVERAGE.md`'s
-DRSUAPI section for the full scope caveat before relying on this for
-DCSync detection), WinRM (WS-Management, MS-WSMV, TCP port 5985
-plaintext only -- a self-contained HTTP/1.1 + SOAP 1.2 decoder with no
-DCE/RPC involvement at all, decoding a shell session's own
-Create/Command/Send/Receive/Signal/Delete exchanges with curated
-remote-shell-opened, command-executed (redacted by default,
-`--no-redact` opt-in), CIM/WMI-query-over-WinRM, PowerShell-Remoting-
-endpoint, HTTP-Basic-auth-over-plaintext, and SOAP-Fault
-attack/monitoring notes -- **note:** the command line is plain XML text,
-not base64+UTF-16LE, an empirically-corrected finding documented in
-`docs/PROTOCOL_COVERAGE.md`'s WinRM section), DCOM activation (MS-DCOM,
-raw DCE/RPC directly over TCP port 135, not SMB-wrapped -- structural
-activation/OXID-resolution recognition only: `IObjectExporter`/
-`IRemoteSCMActivator`/`IActivation` named by interface and opnum, no
-request/response body field decoded, with a curated DCOM-activation note
-and an explicit `ResolveOxid`/`ResolveOxid2` scope-boundary note stating
-the dynamically negotiated data-channel port those calls resolve is not
-followed -- **note:** the plan's own recollected `IObjectExporter`
-interface UUID was wrong; see `docs/PROTOCOL_COVERAGE.md`'s DCOM section
-for the empirically-corrected value and the full scope writeup),
-GE SRTP (Service Request Transport Protocol, GE Fanuc/GE Intelligent
-Platforms, TCP port 18245 -- programming/monitoring/control for the
-90-30/90-70/RX3i/RX7i PLC families, with authoritative session-scoped
-request/response pairing by GE SRTP's own wire-carried Sequence Number
-and curated unauthenticated-memory-read/write, unauthenticated-
-controller-recon, program-store/load, and run/stop-control
-attack/monitoring notes sourced from the DFRWS 2017 forensics paper's own
-field-deployment findings -- **note:** two real protocol-collision bugs
-against the existing TPKT/COTP decoder were found and fixed while
-building this decoder; see `docs/PROTOCOL_COVERAGE.md`'s GE SRTP section
-for the writeup),
-BSAP (Bristol Standard Asynchronous/Synchronous Protocol, Bristol
-Babcock/Emerson Remote Automation Solutions, UDP port 1234 -- link-layer
-framing/addressing decoded for both the serial-tunneled and BSAP-IP-native
-transports, deliberately structural-only by Jurgen's own explicit choice
-after a confirmed sourcing gap left no numeric RDB function-code table
-available anywhere, including in the reference open-source Zeek parser --
-**note:** two real dispatch-ordering collision bugs against the existing
-HART-IP/FF-HSE decoders were found and fixed while building this decoder;
-see `docs/PROTOCOL_COVERAGE.md`'s BSAP section for the full writeup),
-CC-Link IE Field Network Basic (CCIEFB, Mitsubishi Electric, UDP ports
-61450/61451 -- cyclic I/O data, SLMP node search, and SLMP Set IP Address
-decoded; the only CC-Link IE family member implemented, since the others
-(Control/Field/TSN) require dedicated ASIC hardware with no public UDP/IP
-wire documentation; rides the same SLMP 3E/4E framing as MELSEC, with a
-proactively-designed collision-avoidance scheme (request-side command
-gate plus session-scoped response matching) verified against a genuine
-MELSEC command and an orphan response in the test fixture -- see
-`docs/PROTOCOL_COVERAGE.md`'s CC-Link IE section for the full writeup),
-plus a cross-cutting attack-detection layer applied to every decoded
-IPv4/TCP/UDP/ICMP packet regardless of application protocol -- LAND,
-WinNuke, ICMP Redirect, IP Source Routing (LSRR/SSRR), Smurf, Fraggle,
-Ping of Death, and Teardrop as curated structural signatures (sourced
-against H3C's and Juniper's attack-detection documentation), plus SYN/ACK/
-ICMP/UDP flood and a generic TCP-flood catch-all as a deliberately simple
-per-destination whole-capture packet count against a `--flood-threshold`
-(default 100, a documented judgment call, not a vendor-sourced number) --
-**note:** two real false-positive collisions against the existing BACnet
-and HART-IP/SAMR-LSARPC fixtures were found and fixed while building this
-feature; see `docs/PROTOCOL_COVERAGE.md`'s Attack Detection section for
-the full writeup),
-CODESYS V3 (3S-Smart/CODESYS GmbH's PLC runtime protocol, licensed to
-dozens of PLC vendors including WAGO, Festo, and Eaton -- TCP ports
-11740/1217, UDP ports 1740-1743 -- the full four-layer wire format
-decoded (Block Driver, Datagram/Router, Channel, Services), with
-CmpDevice's own Login/AUTH exchange fully decoded (username rendered,
-password NEVER rendered) and every other service deliberately
-structural-only by Jurgen's own explicit choice; V2 out of scope, no
-public wire-format documentation found for it -- see
-`docs/PROTOCOL_COVERAGE.md`'s CODESYS section for the full writeup),
-CoAP (Constrained Application Protocol, RFC 7252, UDP port 5683 -- a
-single authoritative IETF standard, unlike this codebase's other recent
-additions, which all needed third-party reverse-engineering; the base
-RFC plus Observe (RFC 7641) and blockwise transfer (RFC 7959) fully
-decoded, port-gated in Auto mode since CoAP's own shortest legal message
-is too weak a structural signal to try opportunistically -- see
-`docs/PROTOCOL_COVERAGE.md`'s CoAP section for the full writeup),
-Zigbee (IEEE 802.15.4 MAC + Zigbee NWK + Zigbee APS + full ZDP, via
-LINKTYPE_IEEE802_15_4_WITHFCS/TAP pcap captures -- MAC/NWK/APS headers
-always decoded structurally, full ZDP across 13 named clusters decoded
-whenever APS-layer security is not in use, NWK/APS-layer-encrypted
-payloads correctly reported as opaque rather than guessed at, no
-decryption capability and no ZCL by explicit scope decision -- see
-`docs/PROTOCOL_COVERAGE.md`'s Zigbee section for the full writeup),
-CDP (Cisco Discovery Protocol, SNAP-encapsulated over classic IEEE 802.3
-LLC framing, Cisco OUI `00:00:0C` with SNAP Protocol ID `0x2000` -- Device
-ID/Port ID/Platform/Software Version/Capabilities/Native VLAN/Duplex/
-Addresses/Management Address/VTP Management Domain/System Name/Power
-Consumption/Power Requested/Power Available fully decoded, every other
-TLV including HP-proprietary extensions named structurally; also fixes a
-real pre-existing bug where every Cisco-OUI SNAP frame, including CDP's
-own, was mislabeled as PVST+ -- see `docs/PROTOCOL_COVERAGE.md`'s CDP
-section for the full writeup),
-IEEE Spanning Tree Protocol
-(STP/RSTP/MSTP), DeviceNet (CAN-bus CIP, via SocketCAN pcap captures), DNS,
-mDNS, LLMNR, and NetBIOS Name Service (NBT-NS), ICMP, RIP, IGMP, VRRP, HSRP,
-IGRP, PIM, EIGRP, OSPFv2, ARP (RFC 826, with curated gratuitous-ARP/
-ARP-Probe/ARP-Announcement notes), LLDP (IEEE 802.1AB, Link Layer
-Discovery Protocol, with curated System Capabilities/Management Address
-rendering and a TTL=0 "shutting down" note), BGP-4 (RFC 4271, TCP port
-179, with declared-length TCP reassembly, a KEEPALIVE-coalescing loop, and
-curated OPEN/UPDATE/NOTIFICATION rendering including RFC 8203 shutdown
-communication text), and IEEE 802.3 Slow Protocols (LACP/Marker/OAM,
-EtherType 0x8809, Subtype-multiplexed into Link Aggregation Control
-Protocol with curated Out-of-Sync/Defaulted notes, the Marker Protocol,
-and 802.3 OAM/EFM with a curated Dying Gasp note),
-plus detects DNS-over-HTTPS
-(DoH) via TLS SNI matching, and recognizes (by name only, not full decode)
-RDP, VNC, TeamViewer, AnyDesk, and Zoom -- the "interactive remote control"
-tier of the IT protocols an OT auditor flags -- plus SSH, HTTP, HTTPS,
-SNMPv1/v2c, Telnet, FTP, and TFTP (SMB has since been promoted to a full
-decoder, see above), the "lateral-movement and
-credential-harvesting" tier of the same family, plus NTP, DHCP,
-LDAPS, RADIUS, TACACS+, and IEEE 802.1X/EAPOL, the "does the OT side
-blindly trust enterprise IT" tier of the same family, plus CAPWAP
-control/data, LWAPP control/data, GTP-U, and PPPoE, the "wireless
-access-point control/data planes and cellular backhaul" tier of the same
-family, plus GRE (and its NVGRE/Mikrotik EoIP sub-cases), IPsec ESP/AH,
-IP-in-IP, 6in4, L2TP/L2TPv3, IKE, VXLAN, Geneve, WireGuard, OpenVPN, a
-generic DTLS-tunnel structural check, STT, and MPLS, the "generic
-tunnel/VPN encapsulation" tier of the same family,
-traffic from offline
-pcap/pcapng captures, and checks it
-against a zone/conduit segmentation policy. It's an OT/ICS conduit-auditing tool: `decode`/`info` give you reliable
-protocol decoding and a stats view, and `policy validate` maps that decoded traffic
-against an IEC 62443-style zone/conduit model (for NIS2-flavored compliance work) --
-you write a policy file naming your zones (IP/CIDR ranges) and the conduits allowed
-between them, and get back a compliant/non-compliant report naming every flow that
-wasn't explicitly permitted. A third command, `inventory`, runs the opposite
-direction: point it at a capture with no policy file at all, and it infers a
-first-draft zone/conduit model from what it actually sees (Modbus, DNP3, S7comm,
-EtherNet/IP, and BACnet/IP talkers) -- an asset list, a communication matrix, a
-Mermaid/Graphviz diagram, and a `policy`-format YAML file directly loadable by
-`policy validate`, closing the loop from passive discovery to active enforcement.
-See [docs/USER_GUIDE.md](docs/USER_GUIDE.md)'s POLICY FILE FORMAT section for the schema
-and its `inventory` subsection for a worked example.
+## What this is for
 
-Offline capture files are still the primary, always-available way in: no libpcap
-on Linux, no Npcap SDK on Windows, no elevated privileges needed to build or run --
-just a C++17 compiler and CMake. Capture traffic with whatever's already on your
-system (`tcpdump -w capture.pcap ...`, Wireshark/`dumpcap`'s default pcapng output),
-then decode it here -- both classic pcap and pcapng are read transparently,
-auto-detected from the file itself.
+`conduitscope` is an OT/ICS conduit-auditing tool built around offline pcap/pcapng
+captures (live capture is available too, see below, but offline is the primary,
+always-available path in). It does three things:
 
-Live capture (`-i/--interface`) is also available now, as the one deliberate
+- **`decode` / `info`** -- reliable, honestly-labeled protocol decoding (real
+  wire-format fields, not just protocol names) and a stats view, across
+  dozens of ICS/OT protocols plus everything needed to notice when
+  non-OT/IT/enterprise traffic shows up where it shouldn't.
+- **`policy validate`** -- maps decoded traffic against an IEC 62443-style
+  zone/conduit segmentation model (for NIS2-flavored compliance work). You
+  write a policy file naming your zones (IP/CIDR or VLAN ranges) and the
+  conduits allowed between them, and get back a compliant/non-compliant
+  report naming every flow that wasn't explicitly permitted.
+- **`inventory`** -- runs the opposite direction: point it at a capture with
+  no policy file at all, and it infers a first-draft zone/conduit model from
+  what it actually sees (Modbus, DNP3, S7comm, EtherNet/IP, and BACnet/IP
+  talkers) -- an asset list, a communication matrix, a Mermaid/Graphviz
+  diagram, and a `policy`-format YAML file directly loadable by
+  `policy validate`, closing the loop from passive discovery to active
+  enforcement.
+
+See [docs/USER_GUIDE.md](docs/USER_GUIDE.md)'s POLICY FILE FORMAT section for
+the schema and its `inventory` subsection for a worked example.
+
+Offline capture files are the primary, always-available way in: no libpcap on
+Linux, no Npcap SDK on Windows, no elevated privileges needed to build or run
+-- just a C++17 compiler and CMake. Capture traffic with whatever's already on
+your system (`tcpdump -w capture.pcap ...`, Wireshark/`dumpcap`'s default
+pcapng output), then decode it here -- both classic pcap and pcapng are read
+transparently, auto-detected from the file itself.
+
+Live capture (`-i/--interface`) is also available, as the one deliberate
 exception to that zero-dependency design: it's an *optional*, build-time-detected
 dependency on libpcap (Linux) / the Npcap SDK (Windows) -- if CMake finds it, `-i`
 and `conduitscope interfaces` work; if it doesn't, the build is exactly as
@@ -206,7 +48,7 @@ section.
 ## Why not just use tshark?
 
 Fair question -- tshark wins on raw protocol-decoding breadth (thousands of
-dissectors vs. conduitscope's twelve-plus-CIP-I/O) and is usually still the
+dissectors vs. conduitscope's several dozen) and is usually still the
 better first reach for general packet analysis. conduitscope isn't trying to
 replace it; it does one thing tshark fundamentally doesn't:
 
@@ -224,12 +66,13 @@ replace it; it does one thing tshark fundamentally doesn't:
   S7comm's experimental symbolic addressing) is explicitly noted as such in
   the output, not silently presented as fact -- important when the output
   might get cited in an audit report.
-- **Small enough to actually read.** A few thousand lines of C++17, zero
-  required dependencies for offline analysis (no libpcap needed unless you
-  want live capture -- see below). You can read every decoder end to end and
-  know exactly what it does and doesn't claim, which matters more than usual
-  when pointing a tool at security-sensitive OT captures -- Wireshark/
-  tshark's dissector surface is enormous and has a long CVE history.
+- **Small enough to actually read.** A few tens of thousands of lines of
+  C++17, zero required dependencies for offline analysis (no libpcap needed
+  unless you want live capture -- see below). You can read every decoder end
+  to end and know exactly what it does and doesn't claim, which matters more
+  than usual when pointing a tool at security-sensitive OT captures --
+  Wireshark/tshark's dissector surface is enormous and has a long CVE
+  history.
 - **JSON output shaped for the audit pipeline**, not just for rendering in a
   GUI: authoritative Modbus request/response pairing, EtherNet/IP CIP I/O
   connection tracking, IEC 104 cause-of-transmission, and so on, designed to
@@ -248,6 +91,88 @@ replace it; it does one thing tshark fundamentally doesn't:
 In short: tshark for exploring an unfamiliar capture or decoding something
 obscure; conduitscope for the specific, repeatable "does this OT network's
 traffic match what the segmentation policy says it should" question.
+
+## Supported ICS/OT protocols
+
+Every protocol below has real wire-format fields decoded, not just its name
+recognized -- see [docs/PROTOCOL_COVERAGE.md](docs/PROTOCOL_COVERAGE.md) for
+exactly what each one surfaces, its structural detection gate, and its
+real-capture validation provenance.
+
+| Protocol | Domain | Transport | What's decoded |
+|---|---|---|---|
+| Modbus/TCP | Supervisory/PLC | TCP 502 | Read/write coil & register requests/responses, authoritative transaction pairing, exception codes |
+| DNP3 | Supervisory/RTU | TCP/UDP 20000 | Application-layer objects/variations, fragment reassembly, unsolicited responses |
+| IEC 60870-5-104 | Supervisory/SCADA | TCP 2404 | ASDUs, cause of transmission, information objects |
+| S7comm / COTP | Siemens PLC | TCP 102 | Read/write var, block up/downloads (TPKT/COTP transport) |
+| S7comm-Plus | Siemens PLC (TIA Portal, S7-1200/1500) | TCP 102 | Newer Siemens protocol, shares TPKT/COTP transport with S7comm |
+| IEC 61850 MMS | Substation automation | TCP 102 | Manufacturing Message Specification (ISO 9506); ICCP/TASE.2 also recognized |
+| EtherNet/IP | Rockwell/ODVA CIP | TCP 44818 (explicit), UDP 2222 (I/O) | CIP explicit messaging + CIP I/O implicit messaging |
+| PROFINET RT | Siemens/PI fieldbus | EtherType `0x8892` | DCP device discovery/configuration + cyclic real-time I/O |
+| IEC 61850-8-1 GOOSE | Substation automation | EtherType `0x88B8` | Generic Object Oriented Substation Event PDUs |
+| IEC 61850-9-2 Sampled Values | Substation automation | EtherType `0x88BA` | Sampled measurement values |
+| EtherCAT | Industrial fieldbus | EtherType `0x88A4` | Frame header + datagram fields |
+| BACnet/IP | Building automation | UDP 47808 (`0xBAC0`) | ASHRAE 135 Annex J -- BVLC/NPDU/APDU, service value decode |
+| HART-IP | Process instrumentation | UDP/TCP 5094 | IEC 62591/HCF_SPEC-151, Pass-Through classic HART commands |
+| OPC UA Binary | Manufacturing interop | TCP 4840 | UA-TCP transport / OPC UA Secure Conversation |
+| FOUNDATION Fieldbus HSE | Process instrumentation | TCP+UDP 1089-1091, 3622 | FDA/SM/FMS/LAN Redundancy |
+| MQTT + Sparkplug B | IIoT | TCP 1883 (conventional) | v3.1/v3.1.1/v5.0, plus Sparkplug B (hand-rolled Protobuf reader) |
+| DeviceNet | CAN-bus fieldbus | SocketCAN pcap captures | CIP over CAN, message-group classification |
+| TwinCAT/ADS | Beckhoff automation | TCP 48898 (`0xBF02`) | AMS/TCP |
+| MELSEC / MC Protocol (SLMP) | Mitsubishi Electric PLC | TCP 5001, UDP 5000 | 13 commands, byte-for-byte verified |
+| FINS | Omron PLC | TCP/UDP 9600 | 17 commands |
+| GE SRTP | GE Fanuc/GE Intelligent Platforms PLC | TCP 18245 | 90-30/90-70/RX3i/RX7i programming/monitoring/control |
+| BSAP | Bristol Babcock/Emerson RTU | UDP 1234 | Link-layer framing/addressing, serial-tunneled and BSAP-IP-native |
+| CC-Link IE Field Network Basic (CCIEFB) | Mitsubishi Electric fieldbus | UDP 61450/61451 | Cyclic I/O, SLMP node search, SLMP Set IP Address |
+| CODESYS V3 | 3S-Smart/CODESYS PLC runtime | TCP 11740/1217, UDP 1740-1743 | Block Driver/Datagram/Channel/Services, Login/AUTH (password never rendered) |
+| CoAP | Constrained-device IIoT | UDP 5683 | RFC 7252 + Observe (RFC 7641) + blockwise transfer (RFC 7959) |
+| Zigbee | Wireless mesh (building/industrial sensors) | `LINKTYPE_IEEE802_15_4_WITHFCS`/`TAP` pcap captures | IEEE 802.15.4 MAC + Zigbee NWK + APS + full ZDP |
+
+A cross-cutting **attack-detection** layer runs over every decoded
+IPv4/TCP/UDP/ICMP packet regardless of which protocol above matched: LAND,
+WinNuke, ICMP Redirect, IP Source Routing (LSRR/SSRR), Smurf, Fraggle, Ping
+of Death, and Teardrop as curated structural signatures, plus SYN/ACK/
+ICMP/UDP flood and a generic TCP-flood catch-all against a `--flood-threshold`.
+See [docs/PROTOCOL_COVERAGE.md](docs/PROTOCOL_COVERAGE.md)'s Attack Detection
+section.
+
+## Further supported protocols
+
+conduitscope also recognizes -- and in most cases fully decodes -- protocols
+outside the core ICS/OT set above, either because OT networks increasingly
+touch Windows Active Directory and enterprise IT, or because an auditor
+needs to know when non-OT traffic (remote access, lateral movement,
+tunneling) shows up on a segment that shouldn't carry it:
+
+- **Windows Active Directory suite** (fully decoded, most carried inside SMB2
+  named-pipe I/O with no independent wire gate of their own): Kerberos
+  (RFC 4120), LDAP (RFC 4511), SMB2/NTLM (MS-SMB2/MS-NLMP), Netlogon/DCE-RPC
+  (MS-NRPC/MS-RPCE), SAMR (MS-SAMR), LSARPC (MS-LSAD/MS-LSAT), SRVSVC
+  (MS-SRVS), WKSSVC (MS-WKST), DRSUAPI (MS-DRSR), WinRM (WS-Management,
+  MS-WSMV, TCP 5985), and DCOM activation (MS-DCOM, TCP 135, structural
+  recognition only). Each carries curated attack/monitoring notes (e.g.
+  AS-REP-Roasting, Kerberoasting, Zerologon's wire signature, DCSync,
+  anonymous/guest sessions, SMB signing-not-required).
+- **Network infrastructure / routing / link layer**: Spanning Tree Protocol
+  (STP/RSTP/MSTP), ARP (RFC 826, with gratuitous-ARP/ARP-Probe/
+  ARP-Announcement notes), LLDP (IEEE 802.1AB), CDP (Cisco Discovery
+  Protocol), BGP-4 (RFC 4271), IEEE 802.3 Slow Protocols (LACP/Marker/OAM),
+  RIP, IGMP, VRRP, HSRP, IGRP, PIM, EIGRP, OSPFv2, and ICMP (RFC 792 plus
+  RFC 1191/1256 extensions).
+- **Name resolution**: DNS, mDNS, LLMNR, NetBIOS Name Service (NBT-NS), and
+  DNS-over-HTTPS (DoH) detection via TLS SNI matching.
+- **IT protocol recognition** (named only, by risk tier -- not full field
+  decode, except where noted above):
+  - *Remote access* -- RDP, VNC, TeamViewer, AnyDesk, Zoom
+  - *Lateral movement / credential harvesting* -- SSH, HTTP, HTTPS,
+    SNMPv1/v2c, Telnet, FTP, TFTP, QUIC (SMB has since been promoted to a
+    full decoder, see the AD suite above)
+  - *Enterprise trust boundary* -- NTP, DHCP, LDAPS, RADIUS, TACACS+, IEEE
+    802.1X/EAPOL
+  - *Wireless/cellular backhaul* -- CAPWAP, LWAPP, GTP-U, PPPoE
+  - *Tunnel/VPN encapsulation* -- GRE (+ NVGRE/Mikrotik EoIP), IPsec ESP/AH,
+    IP-in-IP, 6in4, L2TP/L2TPv3, IKE, VXLAN, Geneve, WireGuard, OpenVPN, a
+    generic DTLS-tunnel structural check, STT, and MPLS
 
 ## Status
 
@@ -429,4 +354,4 @@ build/conduitscope policy validate -i eth0 --policy tests/policies/compliant.yam
 
 ## License
 
-Apache-2.0 -- see [LICENSE](LICENSE).
+Apache License 2.0 -- see [LICENSE](LICENSE).
