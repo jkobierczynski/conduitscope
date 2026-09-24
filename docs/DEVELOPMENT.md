@@ -7638,11 +7638,18 @@ deferred future migration.
     are decoded but not correlated, for lack of a confirmed echo guarantee); and, as ever, any
     BSAP field this decoder does not name above.
 
-41. **ICS communication-baseline analysis at the protocol-operation level.** Not yet started, no
-    committed timeline. Jurgen asked to add this as a target for the project. Recorded here as a
-    roadmap entry rather than designed/implemented yet, since the request was to log it as a
-    goal, not (yet) to scope or build it -- the notes below are orientation for whenever it's
-    picked up, not a committed design.
+41. **ICS communication-baseline analysis at the protocol-operation level.** **Done -- first pass
+    (v0.2.5)**, scoped to S7comm and Modbus exactly as the design called for: `BaselineEngine`
+    (`baseline.hpp`/`baseline.cpp`), the `baseline learn`/`baseline check` subcommand pair, and
+    Modbus's own prerequisite (`ModbusFrame::is_request`/`start_address`/`quantity`, populated
+    from the same already-computed locals `decode_read_family`/`decode_write_multiple` had all
+    along -- `decode_write_single` deliberately left alone, its request/response wire shapes being
+    genuinely ambiguous) are all in place. Jurgen asked to add this as a target for the project, then, after
+    confirming the general feasibility (S7comm's own `S7Item`/`S7DataItem` already decode
+    MB/MW/DB-style addressing at the field level today -- this was checked directly against
+    `s7comm.hpp` before answering, not assumed), asked for a real design, scoped to start with
+    S7comm and Modbus. That design now lives in full at `docs/design/baseline-engine.md` -- this
+    entry is a pointer and summary, not the design itself.
 
     This codebase already has two related but distinct passive-analysis layers built on top of
     `Decoder`'s own output, neither of which operates below the protocol/port level today:
@@ -7656,22 +7663,28 @@ deferred future migration.
     whatever coarse function/service-name label each protocol's own `DecodedPacket` fields already
     expose, not a systematic per-operation baseline.
 
-    "Protocol-operation level" would mean baselining which specific operations -- not just which
+    "Protocol-operation level" means baselining which specific operations -- not just which
     protocols and ports -- are normally seen on each conduit: e.g. a Modbus conduit that normally
     only sees function code 3 (Read Holding Registers) suddenly seeing function code 6 (Write
-    Single Register); a GE SRTP conduit's normal Service Request Code mix; which BSAP DFUN/SFUN
-    values, or which S7comm job functions, or which SAMR/LSARPC opnums (see item 28's own Windows
-    RPC batch), are actually exercised on a given flow versus merely decodable. The open design
-    questions, not yet resolved: what counts as "the operation" is inherently per-protocol (a
-    function code, a service request code, an opnum, a target address/register range, some
-    combination) and this codebase has ~50 protocol decoders with no unified operation-identifier
-    concept today; whether a baseline is built from a single capture (like `AssetInventoryEngine`'s
-    existing single-pass inference) or accumulated/persisted across multiple captures over time (a
-    genuinely new capability -- everything in this codebase today is stateless across separate
-    invocations); how deviations get reported (a new report type, or a `policy validate`-style
-    pass/fail extension); and which of the ~50 decoders would need their existing coarse
-    function/service-name fields promoted to something more systematic before a baseline engine
-    could consume them uniformly.
+    Single Register); an S7comm conduit that has only ever read MB0-MB50 suddenly writing MW9999.
+    The design (`docs/design/baseline-engine.md`) resolves item 41's own previously-open questions
+    for this first, S7comm+Modbus-scoped pass specifically: "the operation" is a per-protocol
+    opaque string key plus an optional target address/register range (an `Operation` struct, with
+    one `extract_operations()` function per protocol -- S7comm's fields are ready today;
+    Modbus needs a small prerequisite change, since its address/quantity are currently only
+    rendered into `ModbusFrame::summary` text, not exposed as their own struct fields); a baseline
+    is accumulated/persisted across multiple captures over time in a versioned JSON file (a new
+    `baseline learn`/`baseline check` subcommand pair, explicitly separate commands rather than an
+    auto-detected training mode, so the operator always says which one they mean); deviations are
+    reported as one of three verdicts (`NewConduit`/`NewOperation`/`NewTargetRange`) via a
+    `policy validate`-style text/JSON report. Explicitly out of scope for this first pass: zone-
+    level baselines (IP-pair granularity only for now), statistical/confidence thresholds (exact
+    set/interval membership only), and any protocol beyond S7comm/Modbus -- see the design doc's
+    own "Explicitly out of scope" section, including the named (not yet solved) baseline-poisoning
+    caveat for `learn`. Extending to DNP3/EtherNet/IP/BACnet/OPC UA/SAMR/LSARPC/BSAP/GE SRTP/etc.
+    later is additive (each needs only its own `extract_operations()`), per the design's own
+    per-protocol data-readiness survey; CODESYS's `CmpIecVarAccess` is the one confirmed real gap
+    (structural-only today, no value decode) that would need new decode work first.
 
 42. **CC-Link IE Field Network Basic (CCIEFB), Mitsubishi Electric -- UDP ports 61450 (cyclic
     data) and 61451 (SLMP node search / set IP address).** **Done.** Jurgen asked "Can you add

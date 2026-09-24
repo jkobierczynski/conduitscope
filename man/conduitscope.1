@@ -402,6 +402,27 @@ and infers conduits from the matrix. Can render a Mermaid or Graphviz
 \fBOPTIONS (inventory)\fR below and \fBdocs/USER_GUIDE.md\fR's \fBinventory\fR
 section for a worked example.
 .TP
+.B baseline learn \fB\-\-baseline\-file\fR \fIFILE\fR \fIFILE\fR [\fIFILE\fR ...] [\fIOPTIONS\fR]
+Protocol\-operation\-level communication baseline, Modbus and S7comm only:
+decodes each given capture and, for every conduit (client IP, server IP,
+protocol, server port), accumulates which operations (Modbus function code
+plus address range; S7comm Read/Write Var item by memory area, DB number,
+and address range) were observed, merging into \fB\-\-baseline\-file\fR (read
+first if it already exists, always written back at the end \-\- cumulative
+across as many \fBlearn\fR runs and captures as you feed it over time).
+Never prints a compliant/anomaly verdict \-\- that is what \fBbaseline
+check\fR is for. See \fBOPTIONS (baseline learn)\fR below and
+\fBdocs/design/baseline-engine.md\fR for the full data model.
+.TP
+.B baseline check \fB\-\-baseline\-file\fR \fIFILE\fR \fIFILE\fR [\fIOPTIONS\fR]
+Checks a single capture against a baseline previously built with
+\fBbaseline learn\fR (never writes the baseline file). Reports one finding
+per conduit/operation that the baseline never saw: a brand\-new conduit, a
+known conduit doing an operation never learned for it, or a known operation
+addressing outside every address range learned for it. Prints a
+compliant/anomaly report, text or JSON (\fB\-T/\-\-format\fR); see
+\fBOPTIONS (baseline check)\fR and \fBEXIT STATUS\fR below.
+.TP
 .B version
 Print version and build information, including whether this build has live
 capture support.
@@ -1275,6 +1296,59 @@ default.
 .B \-\-services \fIFILE\fR
 Unix /etc/services-style file to supplement/override the built-in
 port\->service-name table. Must exist.
+.SH OPTIONS (baseline learn)
+.TP
+.B \-\-baseline\-file \fIFILE\fR
+Baseline JSON file to read (merging in, if it already exists) and always
+write back at the end. Required. Unlike \fBbaseline check\fR's own
+\fB\-\-baseline\-file\fR, this path is \fBnot\fR required to already exist --
+a missing file is treated as an empty baseline and created.
+.TP
+.I captures
+One or more pcap/pcapng capture files to learn from, in order (classic pcap
+or pcapng, auto-detected). Required, positional (no \fB\-r\fR/\fB\-i\fR --
+\fBbaseline learn\fR is file-only, no live-capture support). Only ever learn
+from captures already trusted to be clean: this absorbs whatever a capture
+contains with no judgment at all, so a malicious operation in a "learned"
+capture becomes baselined as normal.
+.TP
+.B \-\-strict
+Abort on the first malformed packet instead of warning and continuing.
+.TP
+.B \-\-max\-reassembly\-bytes \fIN\fR ", " \-\-max\-reassembly\-segments \fIN\fR ", " \-\-max\-recursion\-depth \fIN\fR ", " \-\-max\-decoded\-objects \fIN\fR ", " \-\-max\-coalesced\-messages \fIN\fR
+Same five resource-exhaustion-limit overrides as \fBdecode\fR's own flags of
+the same name above; apply identically here since this command decodes the
+same traffic. Each defaults to 0 (leave every site at its own compile-time
+default).
+.SH OPTIONS (baseline check)
+.TP
+.B \-\-baseline\-file \fIFILE\fR
+Baseline JSON file to check against (read-only, never written). Required
+and must already exist -- unlike \fBbaseline learn\fR's own
+\fB\-\-baseline\-file\fR.
+.TP
+.I capture
+The single pcap/pcapng capture file to check (classic pcap or pcapng,
+auto-detected). Required, positional (no \fB\-r\fR/\fB\-i\fR --
+\fBbaseline check\fR is file-only, no live-capture support, and takes
+exactly one capture, unlike \fBbaseline learn\fR's own \fIcaptures\fR).
+.TP
+.BR \-o ", " \-\-output " " \fIFILE\fR
+Write the report here instead of stdout. Caution: a single-dash typo of a
+double-dash long option name glues onto this flag's own short form instead
+of erroring -- always use the double dash for a long option name.
+.TP
+.BR \-T ", " \-\-format " " {text,json}
+Report format. Default: text.
+.TP
+.B \-\-strict
+Abort on the first malformed packet instead of warning and continuing.
+.TP
+.B \-\-max\-reassembly\-bytes \fIN\fR ", " \-\-max\-reassembly\-segments \fIN\fR ", " \-\-max\-recursion\-depth \fIN\fR ", " \-\-max\-decoded\-objects \fIN\fR ", " \-\-max\-coalesced\-messages \fIN\fR
+Same five resource-exhaustion-limit overrides as \fBdecode\fR's own flags of
+the same name above; apply identically here since this command decodes the
+same traffic. Each defaults to 0 (leave every site at its own compile-time
+default).
 .SH LIVE CAPTURE
 \fB\-i/\-\-interface\fR and \fBinterfaces\fR require this build to have been
 compiled with libpcap (Linux) or the Npcap SDK (Windows) found by CMake --
@@ -1405,11 +1479,17 @@ has, or not at all, rather than the intended hue.
 Success. For \fBpolicy validate\fR: the capture is COMPLIANT. For
 \fBinventory\fR: a report was produced \-\- it has no compliance concept, so
 this is returned on any successful run, even one that observed zero assets.
+For \fBbaseline learn\fR: the baseline file was successfully updated \-\-
+\fBlearn\fR never has a compliance concept either, and never returns
+anything else on success. For \fBbaseline check\fR: the capture is CLEAN
+(zero findings against the baseline).
 .TP
 .B 1
 Fatal error (bad arguments, unreadable/unrecognized input file, a
 \fB\-\-strict\fR parse failure, or, for \fBpolicy validate\fR, a policy file
-that couldn't be opened or failed validation).
+that couldn't be opened or failed validation; for \fBbaseline learn\fR/
+\fBbaseline check\fR, a baseline file that exists but fails to parse as
+valid baseline JSON).
 .TP
 .B 2
 Currently unused. Reserved rather than reused: an earlier release used this
@@ -1420,6 +1500,13 @@ for \fBpolicy validate\fR while it was still a documented stub.
 capture is NON-COMPLIANT (at least one violation and/or unclassified flow),
 OR \fB\-\-strict\-it\-protocols\fR was given and the report's "notable
 protocols" finding is non\-empty. Never returned by \fBinventory\fR.
+.TP
+.B 4
+\fBbaseline check\fR only: the capture and baseline file were both valid,
+but at least one finding was reported (a new conduit, a new operation on a
+known conduit, or an address range outside the baseline for a known
+operation). Never returned by \fBbaseline learn\fR, which never emits a
+verdict at all.
 .SH LIMITATIONS
 A handful of rare/obsolete pcapng block types (the pre-2000s "Packet Block",
 Interface Statistics Blocks, Name Resolution Blocks, Decryption Secrets
@@ -2059,6 +2146,15 @@ discover, then enforce:
 .EX
 conduitscope inventory \-r capture.pcap \-\-diagram zones.mmd \-\-policy\-out inferred.yaml
 conduitscope policy validate \-r capture.pcap \-\-policy inferred.yaml
+.EE
+.RE
+.PP
+Learn a Modbus/S7comm communication baseline from known\-good captures, then
+check a later capture against it:
+.RS
+.EX
+conduitscope baseline learn \-\-baseline\-file baseline.json good1.pcap good2.pcap
+conduitscope baseline check \-\-baseline\-file baseline.json today.pcap
 .EE
 .RE
 .PP

@@ -83,6 +83,12 @@ void decode_read_family(ModbusFrame& frame, ByteSpan data, const char* unit_noun
         frame.summary = out.str();
         frame.notes.push_back("classified as a request because the PDU is exactly 4 bytes "
                                "(address+quantity); this is a heuristic, not stream tracking");
+        // Baseline-engine prerequisite (see ModbusFrame::is_request's own comment, modbus.hpp):
+        // the same address/quantity just rendered into `summary` above, also exposed as their own
+        // structured fields.
+        frame.is_request = true;
+        frame.start_address = address;
+        frame.quantity = quantity;
         return;
     }
     if (!data.empty() && static_cast<size_t>(data.at(0)) + 1 == data.size()) {
@@ -93,6 +99,10 @@ void decode_read_family(ModbusFrame& frame, ByteSpan data, const char* unit_noun
         frame.summary = out.str();
         frame.notes.push_back("classified as a response because the PDU starts with a byte-count "
                                "that matches its remaining length; this is a heuristic, not stream tracking");
+        // A read response carries no address at all on the wire (just a length-prefixed data
+        // blob) -- is_request stays false, start_address/quantity stay unset (see
+        // ModbusFrame::is_request's own comment, modbus.hpp).
+        frame.is_request = false;
         return;
     }
     frame.summary = "unrecognized payload shape for " + frame.function_name;
@@ -100,6 +110,11 @@ void decode_read_family(ModbusFrame& frame, ByteSpan data, const char* unit_noun
                            "showing raw PDU bytes instead: " + to_hex(data));
 }
 
+// Deliberately does NOT populate frame.is_request/start_address/quantity: request and response
+// share the identical 4-byte wire shape (see the summary text below), so unlike
+// decode_read_family/decode_write_multiple above, there is no shape-based signal here to decide
+// which side this frame is -- see ModbusFrame::is_request's own comment (modbus.hpp) for the full
+// reasoning and why this is a deliberate scope boundary, not an oversight.
 void decode_write_single(ModbusFrame& frame, ByteSpan data) {
     if (data.size() != 4) {
         frame.summary = "malformed " + frame.function_name + " (expected 4 bytes, got " +
@@ -123,6 +138,14 @@ void decode_write_multiple(ModbusFrame& frame, ByteSpan data, const char* unit_n
         std::ostringstream out;
         out << "response: wrote " << quantity << " " << unit_noun << " starting at address " << address;
         frame.summary = out.str();
+        // A write-multiple response ECHOES address+quantity back on the wire (real Modbus wire
+        // behavior -- see ModbusFrame::is_request's own comment, modbus.hpp) -- populated here even
+        // though is_request stays false, so a caller that only wants confirmed values (rather than
+        // extracting a baseline operation, which deliberately reads only is_request==true frames)
+        // still has them.
+        frame.is_request = false;
+        frame.start_address = address;
+        frame.quantity = quantity;
         return;
     }
     if (data.size() >= 5) {
@@ -141,6 +164,9 @@ void decode_write_multiple(ModbusFrame& frame, ByteSpan data, const char* unit_n
         } else {
             frame.notes.push_back("values = " + to_hex(c.rest()));
         }
+        frame.is_request = true;
+        frame.start_address = address;
+        frame.quantity = quantity;
         return;
     }
     frame.summary = "unrecognized payload shape for " + frame.function_name;

@@ -16447,6 +16447,90 @@ def build_zigbee_tap_sample():
     (TESTS_DIR / "sample_zigbee_tap.pcap").write_bytes(data)
 
 
+# ---------------------------------------------------------------------------------------------
+# `baseline learn`/`baseline check` (baseline.hpp/baseline.cpp) -- deliberately mutated fixtures
+# for the anomaly-detection side of the testing plan (docs/design/baseline-engine.md's own
+# "Testing plan" section). The "known-good" round trip itself reuses tests/sample_modbus.pcap and
+# tests/sample_s7comm.pcap directly (see CMakeLists.txt's baseline_learn_* / baseline_check_*
+# entries) -- these two fixtures exist only for the cases those two unmodified captures can't
+# exercise: a genuinely new function code, a genuinely new address range, and a genuinely new
+# conduit, each in isolation from the others so a CTest regex can assert "exactly these findings,
+# not more, not fewer" the way the design doc's testing plan asks for.
+# ---------------------------------------------------------------------------------------------
+
+def build_baseline_modbus_mutated_sample():
+    """Same conduit tests/sample_modbus.pcap's own baseline already knows (HMI_IP -> PLC_IP,
+    Modbus/502), exercising three operations on it:
+      1) Read Holding Registers, address 0, quantity 10 -- byte-for-byte the SAME operation/range
+         sample_modbus.pcap's own packet 1 already taught the baseline, so `baseline check` must
+         call this KnownOperation (0 findings).
+      2) Write Multiple Registers, address 5, quantity 2 -- a function code sample_modbus.pcap
+         never exercises at all, so `baseline check` must call this NewOperation.
+      3) Read Holding Registers again, but address 200, quantity 5 -- the SAME operation_key as
+         (1), but a range ([200, 205)) nowhere near the baseline's only known range ([0, 10)), so
+         `baseline check` must call this NewTargetRange, not NewOperation (the operation_key
+         itself IS already known).
+    Exactly one NewOperation + one NewTargetRange finding, and nothing else -- see
+    baseline_check_mutated_finds_new_operation_and_new_target_range (CMakeLists.txt)."""
+    packets = []
+
+    def add_request(src_port, seq, ack, pdu, ident):
+        tcp = tcp_header(src_port, 502, seq, ack, TCP_PSH | TCP_ACK, len(pdu)) + pdu
+        ip = ipv4_header(HMI_IP, PLC_IP, 6, len(tcp), ident) + tcp
+        packets.append(eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip)
+
+    # 1) Read Holding Registers, address 0, quantity 10 -- KNOWN (matches sample_modbus.pcap
+    #    exactly).
+    mb1 = struct.pack("!HHHBB HH", 10, 0, 6, 1, 3, 0, 10)
+    add_request(51100, 1000, 2000, mb1, 0x9000)
+
+    # 2) Write Multiple Registers, address 5, quantity 2, 2 register values -- NEW function code.
+    wm_data = struct.pack("!HH", 0x1111, 0x2222)
+    wm_pdu = struct.pack("!HHB", 5, 2, len(wm_data)) + wm_data
+    mb2 = struct.pack("!HHHBB", 11, 0, 2 + len(wm_pdu), 1, 0x10) + wm_pdu
+    add_request(51100, 1100, 2000, mb2, 0x9001)
+
+    # 3) Read Holding Registers, address 200, quantity 5 -- KNOWN operation_key, NEW range.
+    mb3 = struct.pack("!HHHBB HH", 12, 0, 6, 1, 3, 200, 5)
+    add_request(51100, 1200, 2000, mb3, 0x9002)
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_010_000 + i, i * 1000)
+    (TESTS_DIR / "sample_baseline_modbus_mutated.pcap").write_bytes(data)
+
+
+def build_baseline_two_conduit_sample():
+    """Two DISTINCT Modbus conduits in one capture, proving `baseline check`'s per-conduit
+    isolation (docs/design/baseline-engine.md's testing plan: "a finding on one conduit never
+    appears attributed to another conduit"):
+      - HMI_IP -> PLC_IP (the SAME conduit tests/sample_modbus.pcap's own baseline already knows):
+        Read Holding Registers, address 0, quantity 10 -- byte-for-byte the known operation/range,
+        so this conduit contributes ZERO findings.
+      - OTHER_IP (192.168.1.77, never seen by the baseline at all) -> PLC_IP: the SAME Read
+        Holding Registers/address 0/quantity 10 operation -- but from a client the baseline has
+        never seen talk to PLC_IP at all, so this is a brand-new CONDUIT, and must be reported as
+        NewConduit, not silently folded into the known conduit's own clean result just because the
+        operation itself looks identical."""
+    OTHER_IP = "192.168.1.77"
+    OTHER_MAC = mac("00:0c:29:dd:ee:ff")
+    packets = []
+
+    def add_request(client_ip, client_mac, src_port, seq, ack, pdu, ident):
+        tcp = tcp_header(src_port, 502, seq, ack, TCP_PSH | TCP_ACK, len(pdu)) + pdu
+        ip = ipv4_header(client_ip, PLC_IP, 6, len(tcp), ident) + tcp
+        packets.append(eth_header(PLC_MAC, client_mac, 0x0800) + ip)
+
+    mb = struct.pack("!HHHBB HH", 20, 0, 6, 1, 3, 0, 10)
+    add_request(HMI_IP, HMI_MAC, 51200, 1000, 2000, mb, 0xA000)
+    add_request(OTHER_IP, OTHER_MAC, 51300, 1000, 2000, mb, 0xA100)
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_011_000 + i, i * 1000)
+    (TESTS_DIR / "sample_baseline_two_conduit.pcap").write_bytes(data)
+
+
 if __name__ == "__main__":
     TESTS_DIR.mkdir(exist_ok=True)
     build_modbus_sample()
@@ -16540,4 +16624,6 @@ if __name__ == "__main__":
     build_ipmi_sample()
     build_zigbee_sample()
     build_zigbee_tap_sample()
+    build_baseline_modbus_mutated_sample()
+    build_baseline_two_conduit_sample()
     print("wrote sample fixtures to", TESTS_DIR)

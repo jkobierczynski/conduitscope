@@ -40,6 +40,21 @@ the capture, layered on top of the always-on payload-shape heuristic -- see
 docs/DEVELOPMENT.md's PROTOCOL DETECTION for exactly how, and docs/USER_GUIDE.md's LIMITATIONS for what it doesn't
 cover.
 
+For the read family (0x01-0x04) and Write Multiple Coils/Registers (0x0F/0x10),
+`ModbusFrame` also exposes structured `is_request`/`start_address`/`quantity`
+fields (`modbus_is_request`/`modbus_start_address`/`modbus_quantity` in JSON
+output, the latter two omitted -- never emitted as `null` -- when not
+applicable to that packet), rather than only rendering address/quantity into
+the free-text `summary`. Write Single Coil/Register (0x05/0x06) is
+deliberately excluded: its request and response share a byte-identical wire
+shape, so `is_request` cannot be determined from the payload alone without
+session-level request/response pairing, and this addition is scoped to fields
+derivable from the same already-computed per-function-code locals as before.
+These fields are what `conduitscope baseline learn`/`baseline check` use to
+baseline Modbus operations at the function-code-plus-address-range level --
+see `docs/design/baseline-engine.md` and this document's own S7comm section
+below for the S7comm side of the same feature.
+
 ### DNP3
 
 Detected reliably (via the 0x05 0x64 start bytes) and its data-link-layer
@@ -305,6 +320,22 @@ item addresses. This is rendered in familiar Step 7 notation -- `DB10.DBW100`
 values (Write Var requests) themselves. A request can batch many items in one
 PDU (real PLCs commonly do); the summary line shows the first few and the
 full list is always in the decoded packet's notes.
+
+This same item-level addressing (area, DB number, byte address, transport
+size) is what `conduitscope baseline learn`/`baseline check` key S7comm
+operations on -- one operation per (function name, area, DB number where
+applicable), with a byte-address range baselined per operation where the
+item's transport size gives an unambiguous byte width. BIT-transport-size
+items (single-bit addressing) are deliberately excluded from range
+baselining: mixing bit-granularity and byte-granularity addresses under the
+same operation key would corrupt the range math, so those items are still
+counted toward `packet_count` but never contribute a `has_target_range`
+baseline. Counter (`C`) and Timer (`T`) area items use their raw item number
+as the range unit (there is no byte address to speak of for those areas).
+`0xB2` symbolic-addressing items (see below) carry no S7ANY byte address at
+all and so never contribute a baselined range either. See
+`docs/design/baseline-engine.md` for the full reasoning and the equivalent
+Modbus side of this feature, documented above under Modbus/TCP.
 
 **`0xB2`, S7-1200/1500 "symbolic" addressing**, also gets a tag -- confirmed
 to be the addressing syntax you're actually most likely to see in real

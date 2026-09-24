@@ -139,6 +139,7 @@ add_library(conduitscope_core STATIC
   src/quic.cpp
   src/policy_engine.cpp
   src/asset_inventory.cpp
+  src/baseline.cpp
   src/flow_direction.cpp
   src/live_capture.cpp
   src/bpf_filter.cpp
@@ -4947,6 +4948,48 @@ add_test(NAME modbus_pairing_orphan_response_noted
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --format text --verbose)
 set_tests_properties(modbus_pairing_orphan_response_noted PROPERTIES
   PASS_REGULAR_EXPRESSION "no outstanding request found on this TCP session for transaction id 2")
+
+# --------------------------------------------------------------------------
+# ModbusFrame::is_request/start_address/quantity (modbus.hpp/modbus.cpp) -- the baseline-engine
+# Phase 1 prerequisite (docs/design/baseline-engine.md): the same address/quantity already rendered
+# into `summary` text, now also exposed as their own structured fields. Purely additive -- every
+# existing modbus_* test above still passes byte-for-byte unmodified; these four are the dedicated
+# "one CTest entry per struct field addition" checks this project's own convention calls for.
+# --------------------------------------------------------------------------
+
+add_test(NAME modbus_json_includes_start_address_and_quantity_for_read_request
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --format json)
+set_tests_properties(modbus_json_includes_start_address_and_quantity_for_read_request PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"modbus_is_request\": true,\n *\"modbus_start_address\": 0,\n *\"modbus_quantity\": 10,")
+
+# A read RESPONSE carries no address at all on the wire -- start_address/quantity must be omitted
+# entirely (never emitted as null, this project's own JSON convention), and is_request must be false.
+add_test(NAME modbus_json_read_response_has_no_start_address_or_quantity
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --format json)
+set_tests_properties(modbus_json_read_response_has_no_start_address_or_quantity PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"summary\": \"Read Holding Registers: response:[^\"]*\",\n *\"modbus_paired_request_index\": 1,\n *\"modbus_is_request\": false,\n *\"notes\""
+  FAIL_REGULAR_EXPRESSION "\"modbus_paired_request_index\": 1,\n *\"modbus_is_request\": false,\n *\"modbus_start_address\"")
+
+# A write-multiple REQUEST and its RESPONSE both carry address+quantity (the response echoes it
+# back, real Modbus wire behavior) -- is_request distinguishes which side is which even though both
+# populate the same two fields. sample_modbus_pairing.pcap's packet 5/6 (second read-family
+# request/response pair) doesn't cover write-multiple, so this uses a purpose-built check against
+# sample_baseline_modbus_mutated.pcap's own Write Multiple Registers request instead (packet #2 --
+# see build_baseline_modbus_mutated_sample's own comment, tools/make_sample_pcap.py).
+add_test(NAME modbus_json_write_multiple_request_has_start_address_and_quantity
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_baseline_modbus_mutated.pcap" --format json)
+set_tests_properties(modbus_json_write_multiple_request_has_start_address_and_quantity PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"summary\": \"Write Multiple Registers: request: write 2 register\\(s\\) starting at address 5[^\"]*\",\n *\"modbus_is_request\": true,\n *\"modbus_start_address\": 5,\n *\"modbus_quantity\": 2,")
+
+# Write Single Coil/Register is deliberately left out of this addition entirely (see
+# ModbusFrame::is_request's own comment, modbus.hpp): request and response share the identical wire
+# shape, so is_request stays false and start_address/quantity stay unset on BOTH sides -- not a
+# regression, a documented scope boundary.
+add_test(NAME modbus_json_write_single_has_no_is_request_address_or_quantity
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus_pairing.pcap" --format json)
+set_tests_properties(modbus_json_write_single_has_no_is_request_address_or_quantity PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"summary\": \"Write Single Register: address=10[^\"]*\",\n *\"modbus_is_request\": false,\n *\"notes\""
+  FAIL_REGULAR_EXPRESSION "\"summary\": \"Write Single Register: address=10[^\"]*\",\n *\"modbus_is_request\": false,\n *\"modbus_start_address\"")
 
 add_test(NAME info_modbus_sample
   COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap")
@@ -12455,3 +12498,101 @@ add_test(NAME zigbee_info_link_type_name_tap
   COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_zigbee_tap.pcap")
 set_tests_properties(zigbee_info_link_type_name_tap PROPERTIES
   PASS_REGULAR_EXPRESSION "link type:      IEEE 802\\.15\\.4 TAP \\(Zigbee\\)")
+
+
+# ---------------------------------------------------------------------------------------------
+# `baseline learn`/`baseline check` (baseline.hpp/baseline.cpp, roadmap item 41 -- see
+# docs/design/baseline-engine.md). Reuses tests/sample_modbus.pcap/tests/sample_s7comm.pcap as the
+# "known-good" baseline seed (per the design doc's own testing plan), plus the two deliberately
+# mutated fixtures above (tools/make_sample_pcap.py's build_baseline_modbus_mutated_sample/
+# build_baseline_two_conduit_sample) for the anomaly-detection cases those two unmodified captures
+# can't exercise on their own. Every baseline file here is written under CMAKE_CURRENT_BINARY_DIR
+# (never tests/, which is source-controlled), one distinct filename per test so parallel `ctest -j`
+# runs never race on the same file.
+# ---------------------------------------------------------------------------------------------
+
+add_test(NAME baseline_learn_produces_expected_json
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_learn_expected.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_learn_expected.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm.pcap' && cat '${CMAKE_CURRENT_BINARY_DIR}/baseline_learn_expected.json'")
+set_tests_properties(baseline_learn_produces_expected_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"protocol\": \"modbus\",\n *\"server_port\": 502,\n *\"packet_count\": 1,.*\"operation_key\": \"Read Holding Registers\",\n *\"packet_count\": 1,\n *\"has_target_range\": true,\n *\"observed_ranges\": \\[\\[0, 10\\]\\].*\"protocol\": \"s7comm\",\n *\"server_port\": 102,\n *\"packet_count\": 2,.*\"operation_key\": \"Read Var/Data Block \\(DB\\)/DB10\",\n *\"packet_count\": 1,\n *\"has_target_range\": true,\n *\"observed_ranges\": \\[\\[100, 110\\]\\].*\"operation_key\": \"Write Var/Merkers/Flags \\(M\\)\",\n *\"packet_count\": 1,\n *\"has_target_range\": false,\n *\"observed_ranges\": \\[\\]")
+
+# `learn` never emits a pass/fail verdict -- see baseline.hpp's own file header comment. Its own
+# diagnostic summary line ("learned from N capture(s)...") is the only thing printed to stderr;
+# nothing that looks like a compliance/anomaly verdict.
+add_test(NAME baseline_learn_never_prints_a_verdict
+  COMMAND conduitscope baseline learn --baseline-file "${CMAKE_CURRENT_BINARY_DIR}/baseline_learn_no_verdict.json" "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap")
+set_tests_properties(baseline_learn_never_prints_a_verdict PROPERTIES
+  PASS_REGULAR_EXPRESSION "learned from 1 capture\\(s\\)"
+  FAIL_REGULAR_EXPRESSION "Result:|ANOMAL|CLEAN")
+
+# `check` against an UNMODIFIED copy of the same fixture(s) the baseline was learned from ->
+# exactly zero findings.
+add_test(NAME baseline_check_unmodified_fixture_zero_findings
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_check_clean.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_check_clean.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm.pcap' && '$<TARGET_FILE:conduitscope>' baseline check --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_check_clean.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm.pcap'")
+set_tests_properties(baseline_check_unmodified_fixture_zero_findings PROPERTIES
+  PASS_REGULAR_EXPRESSION "Result: CLEAN\n\n1 conduit\\(s\\) observed, 2 distinct operation\\(s\\) observed, 2 matched the baseline, 0 did not\n\nFINDINGS \\(0\\):\n *\\(none\\)")
+
+add_test(NAME baseline_check_unmodified_fixture_zero_findings_json
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_check_clean_json.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_check_clean_json.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap' && '$<TARGET_FILE:conduitscope>' baseline check --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_check_clean_json.json' --format json '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap'")
+set_tests_properties(baseline_check_unmodified_fixture_zero_findings_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"compliant\": true,\n *\"conduits_observed\": 1,\n *\"operations_observed\": 1,\n *\"known_operation_count\": 1,\n *\"findings\": \\[\n *\\]")
+
+# `check` against the deliberately mutated fixture -> exactly one NewOperation finding (Write
+# Multiple Registers, a function code never learned) and exactly one NewTargetRange finding (Read
+# Holding Registers at address 200, far outside the learned [0, 10) range) -- not both folded into
+# one, not neither, not a spurious NewConduit (same conduit the baseline already knows).
+add_test(NAME baseline_check_mutated_finds_new_operation_and_new_target_range
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_check_mutated.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_check_mutated.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap' && '$<TARGET_FILE:conduitscope>' baseline check --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_check_mutated.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_baseline_modbus_mutated.pcap'")
+set_tests_properties(baseline_check_mutated_finds_new_operation_and_new_target_range PROPERTIES
+  PASS_REGULAR_EXPRESSION "Result: ANOMALIES FOUND \\(2 finding\\(s\\)\\).*FINDINGS \\(2\\):\n *\\[1\\] new-target-range .*operation=\"Read Holding Registers\".*observed range: \\[200, 205\\).*baseline ranges: \\[0, 10\\).*\\[2\\] new-operation .*operation=\"Write Multiple Registers\""
+  FAIL_REGULAR_EXPRESSION "new-conduit")
+
+add_test(NAME baseline_check_mutated_json_verdicts
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_check_mutated_json.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_check_mutated_json.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap' && '$<TARGET_FILE:conduitscope>' baseline check --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_check_mutated_json.json' --format json '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_baseline_modbus_mutated.pcap'")
+set_tests_properties(baseline_check_mutated_json_verdicts PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"verdict\": \"new-target-range\",\n *\"client_ip\": \"192\\.168\\.1\\.50\",\n *\"server_ip\": \"192\\.168\\.1\\.10\",\n *\"protocol\": \"modbus\",\n *\"server_port\": 502,\n *\"operation_key\": \"Read Holding Registers\",\n *\"observed_start\": 200,\n *\"observed_end\": 205,\n *\"baseline_ranges\": \\[\\[0, 10\\]\\].*\"verdict\": \"new-operation\".*\"operation_key\": \"Write Multiple Registers\"")
+
+# `learn` run TWICE (two separate captures) merges into one cumulative baseline rather than the
+# second run clobbering the first -- the first run's [0, 10) range must still be present alongside
+# the second run's own new operation/range afterward.
+add_test(NAME baseline_learn_twice_merges_ranges_rather_than_clobbering
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_learn_twice.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_learn_twice.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_learn_twice.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_baseline_modbus_mutated.pcap' && cat '${CMAKE_CURRENT_BINARY_DIR}/baseline_learn_twice.json'")
+set_tests_properties(baseline_learn_twice_merges_ranges_rather_than_clobbering PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"first_seen_capture\": \".*sample_modbus\\.pcap\",\n *\"last_seen_capture\": \".*sample_baseline_modbus_mutated\\.pcap\".*\"operation_key\": \"Read Holding Registers\",\n *\"packet_count\": 3,\n *\"has_target_range\": true,\n *\"observed_ranges\": \\[\\[0, 10\\], \\[200, 205\\]\\].*\"operation_key\": \"Write Multiple Registers\"")
+
+# A `learn`ed baseline that only ever saw the mutated fixture's own operations means a SUBSEQUENT
+# check against it (unmodified) is clean -- confirms the merge above didn't lose the mutated
+# fixture's own address ranges either.
+add_test(NAME baseline_learn_twice_then_check_clean
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_learn_twice_check.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_learn_twice_check.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_learn_twice_check.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_baseline_modbus_mutated.pcap' && '$<TARGET_FILE:conduitscope>' baseline check --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_learn_twice_check.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_baseline_modbus_mutated.pcap'")
+set_tests_properties(baseline_learn_twice_then_check_clean PROPERTIES
+  PASS_REGULAR_EXPRESSION "Result: CLEAN")
+
+# Two-conduit isolation: a finding on the NEW conduit (192.168.1.77 -> PLC, never learned) must
+# never be attributed to the KNOWN conduit (192.168.1.50 -> PLC, exact match already learned) --
+# exactly one finding (NewConduit), and the known conduit's own identical operation counts as a
+# clean match, not a second finding.
+add_test(NAME baseline_check_two_conduit_isolation
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_two_conduit.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_two_conduit.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap' && '$<TARGET_FILE:conduitscope>' baseline check --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_two_conduit.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_baseline_two_conduit.pcap'")
+set_tests_properties(baseline_check_two_conduit_isolation PROPERTIES
+  PASS_REGULAR_EXPRESSION "2 conduit\\(s\\) observed, 2 distinct operation\\(s\\) observed, 1 matched the baseline, 1 did not\n\nFINDINGS \\(1\\):\n *\\[1\\] new-conduit  192\\.168\\.1\\.77 -> 192\\.168\\.1\\.10:502  modbus  operation=\"Read Holding Registers\""
+  FAIL_REGULAR_EXPRESSION "192\\.168\\.1\\.50[^\\n]*new-conduit|new-operation|new-target-range")
+
+# `baseline check` against a nonexistent/never-learned-from baseline file: --baseline-file is
+# ->check(CLI::ExistingFile)'d at the CLI layer (unlike `learn`'s own --baseline-file, which must
+# accept a not-yet-existing path -- see baseline_learn_cmd's own option definition, cli_main.cpp),
+# so this is a CLI11 argument-validation error, not a BaselineStoreError.
+add_test(NAME baseline_check_missing_baseline_file_is_an_error
+  COMMAND conduitscope baseline check --baseline-file "${CMAKE_CURRENT_BINARY_DIR}/does_not_exist_baseline.json" "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap")
+set_tests_properties(baseline_check_missing_baseline_file_is_an_error PROPERTIES
+  PASS_REGULAR_EXPRESSION "does_not_exist_baseline\\.json")
+
+# `learn` against a not-yet-existing baseline file path is NOT an error -- it's exactly how a
+# baseline gets created in the first place (see load_baseline_store's own comment, baseline.hpp).
+# Removes any leftover file from a previous run of this same test in this same build directory
+# first, so the assertion is about THIS run creating the file, not about it merely still existing
+# from last time.
+add_test(NAME baseline_learn_creates_a_new_baseline_file
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_fresh_create.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_fresh_create.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap' && cat '${CMAKE_CURRENT_BINARY_DIR}/baseline_fresh_create.json'")
+set_tests_properties(baseline_learn_creates_a_new_baseline_file PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"schema_version\": 1,\n *\"conduits\": \\[\n *\\{\n *\"client_ip\": \"192\\.168\\.1\\.50\"")

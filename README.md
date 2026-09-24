@@ -8,7 +8,7 @@
 
 `conduitscope` is an OT/ICS conduit-auditing tool built around offline pcap/pcapng
 captures (live capture is available too, see below, but offline is the primary,
-always-available path in). It does three things:
+always-available path in). It does four things:
 
 - **`decode` / `info`** -- reliable, honestly-labeled protocol decoding (real
   wire-format fields, not just protocol names) and a stats view, across
@@ -26,6 +26,16 @@ always-available path in). It does three things:
   diagram, and a `policy`-format YAML file directly loadable by
   `policy validate`, closing the loop from passive discovery to active
   enforcement.
+- **`baseline learn` / `baseline check`** -- goes one level deeper than
+  `policy validate`'s conduit/port granularity: `baseline learn` builds up a
+  per-conduit record of which specific protocol *operations* (Modbus
+  function codes and address ranges, S7comm Read/Write Var items by memory
+  area and address range) are normally seen, across as many captures as you
+  feed it over time; `baseline check` then flags anything a later capture
+  does that the learned baseline never saw -- a new conduit, a function code
+  never learned, or an address range outside what was learned for an
+  otherwise-known operation. Currently scoped to Modbus and S7comm; see
+  [docs/design/baseline-engine.md](docs/design/baseline-engine.md).
 
 See [docs/USER_GUIDE.md](docs/USER_GUIDE.md)'s POLICY FILE FORMAT section for
 the schema and its `inventory` subsection for a worked example.
@@ -181,7 +191,7 @@ tunneling) shows up on a segment that shouldn't carry it:
 
 Groundwork / v0.2.5. Every protocol named above is implemented, decoding real
 wire-format fields (not just naming the protocol), and covered by the
-automated test suite -- 1769 tests as of this writing, run via `ctest` after
+automated test suite -- 1784 tests as of this writing, run via `ctest` after
 building (see Building below). Where a real capture was available (public
 ICS-lab collections, vendor-attributed samples, or a live device on real
 hardware), the decoder is validated against it, not just a synthetic
@@ -197,7 +207,10 @@ written IEC 62443-style zone/conduit policy, IPv4-zone and VLAN-zone
 conduits both), `inventory` (infers a first-draft zone/conduit model from a
 capture with no policy file at all, including a Mermaid/Graphviz diagram
 and a policy file directly loadable by `policy validate` -- closing the
-loop from passive discovery to active enforcement), plus `interfaces` and
+loop from passive discovery to active enforcement), `baseline learn`/
+`baseline check` (accumulates a per-conduit, per-operation Modbus/S7comm
+communication baseline across captures over time, then flags anything a
+later capture does that the baseline never saw), plus `interfaces` and
 `version`, with full `--help` at every level. See
 [docs/USER_GUIDE.md](docs/USER_GUIDE.md) for command syntax, the policy
 file schema, output formats, exit codes, current limitations, and worked
@@ -334,6 +347,12 @@ build/conduitscope policy validate -r tests/sample_vlan_zones.pcap --policy test
 # the generated policy straight back into `policy validate`: discover, then enforce.
 build/conduitscope inventory -r tests/sample_inventory.pcap --diagram zones.mmd --policy-out inferred.yaml
 build/conduitscope policy validate -r tests/sample_inventory.pcap --policy inferred.yaml
+
+# Learn a Modbus/S7comm communication baseline from known-good traffic, then check a later
+# capture against it -- flags new conduits, new function codes/operations, and address ranges
+# outside what was learned (exit code 4 on any finding; see docs/design/baseline-engine.md):
+build/conduitscope baseline learn --baseline-file baseline.json tests/sample_modbus.pcap tests/sample_s7comm.pcap
+build/conduitscope baseline check --baseline-file baseline.json tests/sample_modbus.pcap
 ```
 
 To decode traffic you've actually captured, e.g. from a Modbus simulator such as

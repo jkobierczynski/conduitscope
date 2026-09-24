@@ -37,6 +37,7 @@
 #endif
 
 #include "conduitscope/asset_inventory.hpp"
+#include "conduitscope/baseline.hpp"
 #include "conduitscope/bpf_filter.hpp"
 #include "conduitscope/byteio.hpp"
 #include "conduitscope/decoder.hpp"
@@ -1136,6 +1137,147 @@ int run_inventory(const std::string& input, const std::string& interface_name, c
     }
 }
 
+// Exit code specific to `baseline check` (see man/conduitscope.1's EXIT STATUS and
+// docs/USER_GUIDE.md): 0 = clean (every operation this capture exercised was already covered by
+// the baseline), 1 = fatal error (bad arguments, an unreadable/malformed baseline or capture file),
+// 4 = the capture and baseline file were both valid, but BaselineCheckReport::compliant() is false
+// (at least one finding). Not 3 (kExitPolicyNonCompliant, `policy validate`'s own "ran fine, found
+// problems" code) -- a caller scripting against both subcommands' exit codes needs to be able to
+// tell which one flagged something without also parsing output, so each gets its own value rather
+// than reusing kExitPolicyNonCompliant's meaning across two unrelated commands.
+constexpr int kExitBaselineAnomaly = 4;
+
+// `baseline learn` -- reads `baseline_file` if it already exists (merges; see
+// load_baseline_store's own comment for why a missing file isn't an error here specifically),
+// absorbs every packet's operations from every pcap in `inputs` in order, and always writes the
+// result back to `baseline_file`. Never produces a pass/fail verdict -- see baseline.hpp's own file
+// header comment for why `learn`/`check` are deliberately separate commands. Offline pcap/pcapng
+// files only (no `-i` live-capture equivalent): a baseline is meant to be built from captures
+// already reviewed and trusted to be clean (see the design doc's own baseline-poisoning caveat),
+// which a live interface can't offer the same "already looked at this" assurance for.
+int run_baseline_learn(const std::vector<std::string>& inputs, const std::string& baseline_file, bool strict,
+                        bool quiet, const ResourceLimitCliVars& limit_vars, std::ostream& diag) {
+    try {
+        BaselineStore store = load_baseline_store(baseline_file);
+
+        DecodeOptions options;
+        options.strict = strict;
+        options.limits = build_resource_limits(limit_vars);
+
+        size_t total_conduits_touched = 0;
+        for (const std::string& input : inputs) {
+            PcapReader reader(input);
+            Decoder decoder(options);
+            BaselineEngine engine;
+
+            PcapPacket pkt;
+            size_t index = 0, warnings = 0;
+            while (reader.next(pkt)) {
+                ++index;
+                DecodedPacket dp = decoder.decode(pkt, reader.info().linktype, index);
+                if (dp.protocol == "parse-error") {
+                    ++warnings;
+                    if (!quiet) diag << "warning: " << input << ": packet " << index << ": " << dp.summary << "\n";
+                }
+                engine.observe(dp);
+            }
+            std::vector<ConduitBaseline> observed = engine.finish();
+            total_conduits_touched += observed.size();
+            merge_baseline_observations(store, observed, input);
+
+            if (warnings > 0 && !quiet) {
+                diag << warnings
+                     << " packet(s) in '" << input
+                     << "' had parse warnings (shown above); rerun with --strict to stop at the "
+                        "first one, or -q to silence this message\n";
+            }
+        }
+
+        save_baseline_store(baseline_file, store);
+
+        if (!quiet) {
+            diag << "learned from " << inputs.size() << " capture(s), touching " << total_conduits_touched
+                 << " conduit observation(s); baseline file '" << baseline_file << "' now has "
+                 << store.conduits.size() << " conduit(s)\n";
+        }
+        return 0;
+    } catch (const BaselineStoreError& e) {
+        std::cerr << "error: " << e.what() << "\n";
+        return 1;
+    } catch (const ParseError& e) {
+        std::cerr << "error: " << e.what() << "\n";
+        return 1;
+    } catch (const ProtocolResultTypeMismatch& e) {
+        std::cerr << "error: " << e.what() << "\n";
+        return 1;
+    }
+}
+
+// `baseline check` -- reads `baseline_file` (must already exist -- enforced by CLI11's
+// ->check(CLI::ExistingFile) on the option, see main() below) and compares `input`'s own observed
+// operations against it, never writing the file back. See kExitBaselineAnomaly's own comment for
+// the exit-code contract.
+int run_baseline_check(const std::string& input, const std::string& baseline_file, const std::string& output,
+                        const std::string& format, bool strict, bool quiet, const ResourceLimitCliVars& limit_vars,
+                        std::ostream& diag) {
+    std::ofstream file_out;
+    std::ostream* out = &std::cout;
+    if (!output.empty()) {
+        file_out.open(output, std::ios::binary);
+        if (!file_out) {
+            std::cerr << "error: cannot open output file '" << output << "'\n";
+            return 1;
+        }
+        out = &file_out;
+    }
+
+    try {
+        BaselineStore store = load_baseline_store(baseline_file);
+
+        DecodeOptions options;
+        options.strict = strict;
+        options.limits = build_resource_limits(limit_vars);
+        PcapReader reader(input);
+        Decoder decoder(options);
+        BaselineEngine engine;
+
+        PcapPacket pkt;
+        size_t index = 0, warnings = 0;
+        while (reader.next(pkt)) {
+            ++index;
+            DecodedPacket dp = decoder.decode(pkt, reader.info().linktype, index);
+            if (dp.protocol == "parse-error") {
+                ++warnings;
+                if (!quiet) diag << "warning: packet " << index << ": " << dp.summary << "\n";
+            }
+            engine.observe(dp);
+        }
+
+        BaselineCheckReport report = check_baseline(store, engine.finish(), input);
+        if (format == "json") {
+            write_baseline_check_report_json(*out, report);
+        } else {
+            write_baseline_check_report_text(*out, report);
+        }
+
+        if (warnings > 0 && !quiet) {
+            diag << warnings
+                 << " packet(s) had parse warnings (shown above); rerun with --strict to stop at "
+                    "the first one, or -q to silence this message\n";
+        }
+        return report.compliant() ? 0 : kExitBaselineAnomaly;
+    } catch (const BaselineStoreError& e) {
+        std::cerr << "error: " << e.what() << "\n";
+        return 1;
+    } catch (const ParseError& e) {
+        std::cerr << "error: " << e.what() << "\n";
+        return 1;
+    } catch (const ProtocolResultTypeMismatch& e) {
+        std::cerr << "error: " << e.what() << "\n";
+        return 1;
+    }
+}
+
 int run_interfaces(std::ostream& out) {
     try {
         std::vector<InterfaceInfo> interfaces = list_interfaces();
@@ -1801,6 +1943,71 @@ int main(int argc, char** argv) {
                       "port->service-name table")
         ->check(CLI::ExistingFile);
 
+    // --- baseline learn / baseline check ---------------------------------------
+    // ICS communication-baseline analysis at the protocol-operation level (roadmap item 41,
+    // docs/DEVELOPMENT.md; full design and rationale at docs/design/baseline-engine.md). Mirrors
+    // `policy`'s own group-plus-sub-subcommand shape (`policy_cmd`/`policy_validate_cmd` above),
+    // just with two sub-subcommands instead of one -- see baseline.hpp's own file header for why
+    // `learn`/`check` are deliberately separate commands rather than one auto-detected mode.
+    auto* baseline_cmd = app.add_subcommand(
+        "baseline", "ICS communication-baseline analysis at the protocol-operation level "
+                     "(S7comm and Modbus, Phase 1) -- learn what operations/address ranges are "
+                     "normally seen on a conduit, then check a capture against that baseline");
+
+    auto* baseline_learn_cmd = baseline_cmd->add_subcommand(
+        "learn", "Absorb every capture's own S7comm/Modbus operations into a baseline file, "
+                  "creating it if it doesn't exist yet. Never flags anything as anomalous -- "
+                  "running this against N captures over N days is how a real baseline is built. "
+                  "Only ever learn from captures already trusted to be clean: this absorbs "
+                  "whatever a capture contains with no judgment at all, so a malicious operation "
+                  "in a 'learned' capture becomes baselined as normal");
+    std::string baseline_learn_file;
+    std::vector<std::string> baseline_learn_inputs;
+    bool baseline_learn_strict = false;
+    ResourceLimitCliVars baseline_learn_limit_vars;
+    baseline_learn_cmd
+        ->add_option("--baseline-file", baseline_learn_file,
+                      "Baseline JSON file to read (if it exists) and write back. Required")
+        ->required();
+    baseline_learn_cmd
+        ->add_option("captures", baseline_learn_inputs,
+                      "One or more pcap/pcapng capture files to learn from, in order (classic "
+                      "pcap or pcapng, auto-detected)")
+        ->required()
+        ->check(CLI::ExistingFile);
+    baseline_learn_cmd->add_flag("--strict", baseline_learn_strict,
+                                  "Abort on the first malformed packet instead of warning and continuing");
+    add_resource_limit_options(baseline_learn_cmd, baseline_learn_limit_vars);
+
+    auto* baseline_check_cmd = baseline_cmd->add_subcommand(
+        "check", "Compare one capture's own S7comm/Modbus operations against an existing baseline "
+                  "file (read-only -- never writes it) and report every operation the baseline "
+                  "doesn't already cover. Non-zero exit code on any finding -- see EXIT STATUS -- "
+                  "for CI/cron use");
+    std::string baseline_check_file, baseline_check_input, baseline_check_output;
+    std::string baseline_check_format = "text";
+    bool baseline_check_strict = false;
+    ResourceLimitCliVars baseline_check_limit_vars;
+    baseline_check_cmd
+        ->add_option("--baseline-file", baseline_check_file, "Baseline JSON file to check against. Required")
+        ->required()
+        ->check(CLI::ExistingFile);
+    baseline_check_cmd
+        ->add_option("capture", baseline_check_input,
+                      "The pcap/pcapng capture file to check (classic pcap or pcapng, auto-detected)")
+        ->required()
+        ->check(CLI::ExistingFile);
+    baseline_check_cmd->add_option(
+        "-o,--output", baseline_check_output,
+        "Write the report here instead of stdout. Caution: a single-dash long-option typo "
+        "glues onto this flag -- always use the double dash for a long option name");
+    baseline_check_cmd->add_option("-T,--format", baseline_check_format, "Report format: text or json")
+        ->transform(CLI::IsMember({"text", "json"}))
+        ->capture_default_str();
+    baseline_check_cmd->add_flag("--strict", baseline_check_strict,
+                                  "Abort on the first malformed packet instead of warning and continuing");
+    add_resource_limit_options(baseline_check_cmd, baseline_check_limit_vars);
+
     // --- version ------------------------------------------------------------
     app.add_subcommand("version", "Print version and build information");
 
@@ -1891,6 +2098,19 @@ int main(int argc, char** argv) {
                               inventory_limit_vars,
                               inventory_mac_vendor, inventory_resolve, inventory_hosts_file, inventory_service_names,
                               inventory_services_file, *diag);
+    }
+    if (baseline_learn_cmd->parsed()) {
+        return run_baseline_learn(baseline_learn_inputs, baseline_learn_file, baseline_learn_strict, quiet,
+                                   baseline_learn_limit_vars, *diag);
+    }
+    if (baseline_check_cmd->parsed()) {
+        return run_baseline_check(baseline_check_input, baseline_check_file, baseline_check_output,
+                                   baseline_check_format, baseline_check_strict, quiet, baseline_check_limit_vars,
+                                   *diag);
+    }
+    if (baseline_cmd->parsed()) {
+        std::cerr << "error: 'baseline' needs a subcommand ('learn' or 'check')\n";
+        return 1;
     }
     std::cout << "conduitscope " << version_string() << "\n";
     return 0;

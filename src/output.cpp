@@ -2148,6 +2148,18 @@ void write_modbus_json_fields(std::ostream& out, const ModbusFrame& mb) {
     if (mb.paired_response) {
         out << "    \"modbus_paired_request_index\": " << mb.paired_request_index << ",\n";
     }
+    // Baseline-engine prerequisite (see ModbusFrame::is_request's own comment, modbus.hpp): always
+    // emitted (unlike start_address/quantity below, which are omitted rather than null when this
+    // function/side has no address concept -- this project's own "omit, never null" JSON
+    // convention, see e.g. write_inventory_report_json's own header comment) since every decoded
+    // Modbus frame has a definite request/response side, even when that side carries no address.
+    out << "    \"modbus_is_request\": " << (mb.is_request ? "true" : "false") << ",\n";
+    if (mb.start_address) {
+        out << "    \"modbus_start_address\": " << *mb.start_address << ",\n";
+    }
+    if (mb.quantity) {
+        out << "    \"modbus_quantity\": " << *mb.quantity << ",\n";
+    }
 }
 
 // The EIGRP analog of write_twincat_json_fields above -- same rationale (a plain free function, not

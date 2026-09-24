@@ -50,6 +50,53 @@ struct ModbusFrame {
     std::vector<std::string> notes;  // extra detail lines (warnings, heuristics used, etc.)
     ByteSpan raw_pdu_data;         // the PDU bytes after the function code, for hex fallback/JSON
 
+    // Baseline-engine prerequisite (docs/design/baseline-engine.md's Phase 1, "Modbus -- the
+    // operation (function code) is ready; the target (address/quantity) is not"): the read family
+    // (Read Coils/Discrete Inputs/Holding/Input Registers, decode_read_family in modbus.cpp) and
+    // the write-multiple family (Write Multiple Coils/Registers, decode_write_multiple) already
+    // compute a local `address`/`quantity` pair purely to render modbus.cpp's own free-text
+    // `summary` string -- these three fields expose that SAME already-computed data as its own
+    // structured fields instead, so a caller (BaselineEngine::extract_operations, see
+    // baseline.hpp) never has to regex `summary`. No new parsing: these are assigned from the
+    // exact same local variables `summary`'s own <<-chain already uses, right before those
+    // variables go out of scope.
+    //
+    // is_request: which side of the request/response pair this frame is, per real Modbus/TCP wire
+    // behavior (see decode_read_family/decode_write_multiple in modbus.cpp for exactly which shape
+    // maps to which):
+    //   - a READ request carries address+quantity (a bare 4-byte PDU); a read RESPONSE is just a
+    //     length-prefixed data blob with no address at all -- start_address/quantity stay
+    //     std::nullopt on that side, there is nothing on the wire to populate them from.
+    //   - a WRITE (multiple) request carries address+quantity+byte-count+data; a write RESPONSE
+    //     also ECHOES address+quantity back (this is real Modbus wire behavior, already true in
+    //     decode_write_multiple's own pre-existing "response: wrote N ... starting at address ..."
+    //     summary text) -- so start_address/quantity ARE populated on both sides for the
+    //     write-multiple family, even though is_request is only true on the request side.
+    //   - Write Single Coil/Write Single Register (decode_write_single) are DELIBERATELY left out
+    //     of this: their request and response share the IDENTICAL 4-byte wire shape per spec (see
+    //     decode_write_single's own summary text, "request and response share this exact shape"),
+    //     so unlike the read/write-multiple families above, modbus.cpp has no shape-based signal at
+    //     all to decide is_request from here -- authoritatively resolving it would need this
+    //     frame's own transaction-ID pairing (paired_response, computed afterward by
+    //     ModbusDecoder::decode), which is out of scope for this additive, no-new-parsing change.
+    //     is_request/start_address/quantity all stay at their defaults (false/nullopt) for a
+    //     Write Single Coil/Register frame -- a deliberate, documented scope boundary, not a bug:
+    //     BaselineEngine::extract_operations (baseline.hpp) only ever trusts is_request == true, so
+    //     this simply means Write Single Coil/Register never contributes a baseline operation in
+    //     Phase 1, rather than guessing at a direction this data alone can't confirm.
+    //   - an exception response, or a payload whose shape decode_read_family/decode_write_multiple
+    //     don't recognize as either a request or a response, also leaves is_request at its default
+    //     (false) -- exactly matching decode_read_family/decode_write_multiple's own "unrecognized
+    //     payload shape" fallback, which sets neither start_address nor quantity either.
+    bool is_request = false;
+    // The read/write target's starting register or coil address, and how many of them --
+    // std::nullopt when this frame's function code has no address concept at all (an exception
+    // response, Diagnostics, Report Server ID, ...) or its payload didn't match a recognized
+    // request/response shape. See is_request's own comment above for exactly which side of which
+    // function family populates these.
+    std::optional<uint16_t> start_address;
+    std::optional<uint16_t> quantity;
+
     // Only set by ModbusDecoder::decode (registration-model pilot, Stage 2 -- see
     // protocol_decoder.hpp) once it has run the same authoritative MBAP-transaction-ID pairing
     // decoder.cpp's own (now removed) Decoder::pair_modbus_transaction used to perform directly.
