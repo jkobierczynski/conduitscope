@@ -42,6 +42,44 @@ std::string csv_escape(const std::string& s) {
     return out;
 }
 
+// Security fix (finding 4, docs/reviews/2026-09-chatgpt-security-review-patch160.md: "Terminal
+// escape/control-sequence injection in text output"). Sanitizes packet-derived text before it
+// reaches a real terminal -- TextWriter's own summary/note lines, and FieldsWriter's tab-
+// separated field values (see both call sites' own comments for why each needs this). Never
+// applied to JsonWriter/CsvWriter output -- those already have their own complete, different
+// serialization rules (json_escape/csv_escape above), and running this on top would be both
+// redundant and wrong (it would mangle JSON's own `\uXXXX` escapes as ordinary printable text).
+//
+// Summary/note text is built directly from wire bytes for several protocols today (DNS names,
+// MQTT ClientId/Topic/Username/UserProperty/Sparkplug strings, and more -- see mqtt.cpp/dns.cpp),
+// and used to reach the terminal completely unescaped. A malicious capture's summary/note text
+// could contain ESC (0x1B) and drive a real ANSI/VT100 escape sequence on the analyst's own
+// terminal -- this tool's own --color already legitimately emits real ANSI SGR sequences (see
+// kReset/kBoldRed/etc. below), so escape sequences reaching the terminal aren't a boundary this
+// tool avoids crossing itself, only one attacker-controlled bytes must stay on the wrong side
+// of -- or embed a raw newline to forge what looks like a second, fabricated packet line in the
+// one-line-per-packet view.
+//
+// Every C0 control byte (0x00-0x1F) and DEL (0x7F) is rendered as \xNN; everything else passes
+// through unchanged. Deliberately a pure byte-range filter, not a UTF-8 decoder: valid UTF-8
+// multi-byte sequences use only bytes >= 0x80, which this never touches, so "preserves printable
+// UTF-8" falls out of the byte range alone rather than needing actual UTF-8-aware decoding -- the
+// same reasoning to_hex/write_hex_ascii_dump below already lean on for not needing charset
+// awareness. Already-invalid UTF-8 (also possible from arbitrary wire bytes) passes through
+// unchanged too -- decoding validity isn't this function's job, only keeping control bytes out of
+// the terminal is.
+std::string terminal_escape(const std::string& s) {
+    std::ostringstream out;
+    for (unsigned char c : s) {
+        if (c <= 0x1F || c == 0x7F) {
+            out << "\\x" << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(c) << std::dec;
+        } else {
+            out << static_cast<char>(c);
+        }
+    }
+    return out.str();
+}
+
 void write_hex_ascii_dump(std::ostream& out, ByteSpan data) {
     const size_t n = data.size();
     for (size_t offset = 0; offset < n; offset += 16) {
@@ -482,7 +520,10 @@ void TextWriter::write_packet(const DecodedPacket& p) {
     if (color_) head << kReset;
     head << "  ";
     if (color_ && severe) head << kBoldRed;
-    head << p.summary;
+    // terminal_escape (finding 4) -- p.summary is built directly from wire bytes for several
+    // protocols (DNS names, MQTT strings, ...) and, unlike JsonWriter/CsvWriter, this writer puts
+    // it straight on the terminal with nothing else in between.
+    head << terminal_escape(p.summary);
     if (color_ && severe) head << kReset;
     // How this TCP flow's client (initiator) side was determined -- see DirectionSource's own
     // comment (decoder.hpp) and docs/MANUAL.md's ROADMAP item 19. Folded into the head line itself
@@ -520,7 +561,7 @@ void TextWriter::write_packet(const DecodedPacket& p) {
         for (const auto& note : p.notes) {
             out_ << "        ";
             if (color_) out_ << kDim;
-            out_ << "note: " << note;
+            out_ << "note: " << terminal_escape(note);  // finding 4 -- same rationale as p.summary above
             if (color_) out_ << kReset;
             out_ << "\n";
         }
@@ -3724,10 +3765,19 @@ void FieldsWriter::write_packet(const DecodedPacket& packet) {
     one_shot.write_packet(packet);
     std::map<std::string, std::string> values = parse_flat_json_object(capture.str());
 
+    // terminal_escape (finding 4, docs/reviews/2026-09-chatgpt-security-review-patch160.md): this
+    // is text-mode output too (a real terminal, same as TextWriter), and json_unescape_inner above
+    // deliberately restores literal \n/\t/\r bytes from JSON's own \n/\t/\r escapes (see its own
+    // comment) -- without this, a packet-derived field containing one of those could inject a raw
+    // tab into a supposedly tab-separated row (corrupting the column structure a downstream script
+    // might trust) or a raw newline to forge what looks like an extra row. \uXXXX escapes (ESC
+    // included) are already left untouched as literal text by json_unescape_inner, so this is
+    // narrower defense in depth on top of that, not the primary fix for the ANSI-escape case --
+    // TextWriter's own two call sites above are.
     for (size_t i = 0; i < fields_.size(); ++i) {
         if (i != 0) out_ << "\t";
         auto it = values.find(fields_[i]);
-        out_ << (it != values.end() ? it->second : "");
+        out_ << (it != values.end() ? terminal_escape(it->second) : "");
     }
     out_ << "\n";
 }

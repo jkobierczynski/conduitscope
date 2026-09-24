@@ -1946,16 +1946,65 @@ have X" list. Folded in here as items 10-16, at the same priority tier as
     landmine for a future migration that gets the association wrong. Not
     yet scheduled.
 
-13. **Open: text output has no terminal-escape sanitizer (the review's own
+13. **Done: text output had no terminal-escape sanitizer (the review's own
     #4, rated Medium -- "analyst workstation safety").** Confirmed:
-    `output.cpp`'s `TextWriter::write_packet` does `head << p.summary`
+    `output.cpp`'s `TextWriter::write_packet` did `head << p.summary`
     (and notes similarly) with no escaping at all, while `json_escape`/
     `csv_escape` exist for the other two formats. Several decoders
     (DNS names, MQTT ClientId/Topic/Username/UserProperty/Sparkplug
     strings) put attacker-controlled bytes straight into `summary`/notes,
-    and `--color` already emits raw ANSI SGR sequences on top, so a
-    malicious capture's summary text could contain terminal control
-    sequences. Not yet scheduled.
+    and `--color` already emits raw ANSI SGR sequences on top -- so an
+    attacker's capture file could embed ESC (0x1B) sequences to manipulate
+    the analyst's real terminal (fake colored "alert" text, cursor
+    movement, title-bar tricks, and worse depending on the terminal
+    emulator), or embed raw newlines to forge fake extra packet lines that
+    were never actually captured.
+
+    Fixed with a single new `terminal_escape()` function in `output.cpp`
+    (declared in `output.hpp`): a pure byte-range filter that renders
+    every C0 control byte (0x00-0x1F) and DEL (0x7F) as a literal `\xNN`
+    escape and passes every other byte through completely unchanged --
+    including UTF-8 continuation bytes (>= 0x80), which makes it
+    transparently UTF-8-safe by construction without needing to actually
+    decode UTF-8. Deliberately scoped to TEXT-mode output only
+    (`TextWriter`'s summary and notes lines, `FieldsWriter`'s field
+    values) and never applied to `JsonWriter`/`CsvWriter`, which already
+    have their own complete, different serialization rules -- matching
+    the review's own explicit guidance not to sanitize JSON/CSV this way
+    (`json_escape` already renders a raw ESC byte as `\u001b`, which is
+    inert text in any JSON consumer; CSV's existing quoting rules are
+    left exactly as they were).
+
+    While implementing this I found a second, related gap the review
+    didn't call out: `FieldsWriter::write_packet` (`-T fields`) builds its
+    flat text output by round-tripping each field through a one-shot JSON
+    encode/decode (`json_escape` then `json_unescape_inner`).
+    `json_unescape_inner` deliberately restores `\n`/`\t`/`\r` back to raw
+    bytes but leaves `\uXXXX` escapes (including ESC's `\u001b`) as
+    literal text -- so `-T fields` output was already accidentally safe
+    against the ESC-specific ANSI-injection attack, but not against a
+    restored raw newline forging an extra output row. `terminal_escape()`
+    is applied to `FieldsWriter`'s field values too, closing that gap the
+    same way.
+
+    Verified: new fixture (`tests/sample_terminal_escape_injection.pcap`
+    -- `tools/make_sample_pcap.py`'s
+    `build_terminal_escape_injection_sample`) with two MQTT PUBLISH
+    packets whose topics carry a raw-ESC ANSI-injection attempt
+    (`evil\x1b[31mFAKE-ALERT\x1b[0m`) and a raw-newline forgery attempt
+    (`evil\nfake-injected-line`) respectively. Real CLI output was
+    captured and manually inspected (`cat -A`, `--format json`, `-T
+    fields -e summary`, `--format csv`) across all four output formats
+    before any regression-test regex was written, confirming: `--format
+    text` renders both attempts as inert literal `\xNN` text; `-T fields
+    -e summary` does the same (closing the `FieldsWriter` gap above);
+    `--format json` is completely unaffected, still using `json_escape`'s
+    own pre-existing `\u001b` control-character escaping; `--format csv`
+    is also completely unaffected, per the review's own explicit scope
+    guidance. 4 new tests. Full CTest suite: 1534 -> 1538 (default
+    config), 1522 -> 1526 (no-live-capture config), both 100% passing
+    with every existing `PASS_REGULAR_EXPRESSION` unchanged; zero-warning
+    rebuilds in both configs.
 
 14. **Acknowledged, not scheduled: process-global `ResourceLimits` (the
     review's own #5, rated Medium -- "library/thread safety").**

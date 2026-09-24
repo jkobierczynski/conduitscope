@@ -7290,6 +7290,47 @@ set_tests_properties(pcapng_implausible_tsresol_json_packet3_timestamp PROPERTIE
   PASS_REGULAR_EXPRESSION "\"index\": 3,\n *\"timestamp\": 0.000184,")
 
 # ---------------------------------------------------------------------------------------------
+# terminal_escape (output.cpp, finding 4, docs/reviews/2026-09-chatgpt-security-review-patch160.md):
+# packet-derived text (here, an MQTT PUBLISH topic straight off the wire) can carry raw C0 control
+# bytes, including ESC (0x1B). TextWriter/FieldsWriter used to write such text straight to the
+# real terminal -- an attacker-controlled capture could therefore emit real ANSI escape sequences
+# (manipulating the analyst's terminal, e.g. faking colored alert text) or raw newlines (forging
+# fake extra packet lines). terminal_escape() renders every C0/DEL byte as a literal "\xNN" escape
+# instead, in TEXT-mode output only -- JSON/CSV keep their own existing, different, complete
+# escaping rules untouched (json_escape already renders ESC as \u001b; CSV is deliberately left
+# as-is per the review's own guidance). The fixture's two packets carry a raw ESC-based ANSI
+# injection attempt and a raw-newline forgery attempt respectively; both are confirmed against the
+# actual CLI output below, not guessed at.
+add_test(NAME terminal_escape_ansi_injection_sanitized_in_text_output
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_terminal_escape_injection.pcap" --format text)
+set_tests_properties(terminal_escape_ansi_injection_sanitized_in_text_output PROPERTIES
+  PASS_REGULAR_EXPRESSION "PUBLISH topic=\"evil\\\\x1b\\[31mFAKE-ALERT\\\\x1b\\[0m\" qos=0")
+
+add_test(NAME terminal_escape_newline_injection_sanitized_in_text_output
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_terminal_escape_injection.pcap" --format text)
+set_tests_properties(terminal_escape_newline_injection_sanitized_in_text_output PROPERTIES
+  PASS_REGULAR_EXPRESSION "PUBLISH topic=\"evil\\\\x0afake-injected-line\" qos=0")
+
+# FieldsWriter (-T fields) has its own, separate route to the terminal: it round-trips each field
+# through a one-shot JSON encode/decode (json_escape then json_unescape_inner) to build the flat
+# text representation. json_unescape_inner deliberately restores \n/\t/\r to raw bytes (but leaves
+# \uXXXX, including ESC's \u001b, as literal text) -- so FieldsWriter was already safe against the
+# ESC-specific attack above, but not against a restored raw newline forging an extra output line.
+# This confirms terminal_escape() closes that second, independent gap too.
+add_test(NAME terminal_escape_newline_injection_sanitized_in_fields_output
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_terminal_escape_injection.pcap" -T fields -e summary)
+set_tests_properties(terminal_escape_newline_injection_sanitized_in_fields_output PROPERTIES
+  PASS_REGULAR_EXPRESSION "PUBLISH topic=\"evil\\\\x0afake-injected-line\" qos=0")
+
+# JSON output must be unaffected by terminal_escape (it is never applied to JsonWriter): the raw
+# ESC byte still comes through json_escape's own existing \u001b control-character escaping,
+# exactly as before this fix.
+add_test(NAME terminal_escape_json_output_unaffected_still_uses_u001b
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_terminal_escape_injection.pcap" --format json)
+set_tests_properties(terminal_escape_json_output_unaffected_still_uses_u001b PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"summary\": \"PUBLISH topic=\\\\\"evil\\\\u001b\\[31mFAKE-ALERT\\\\u001b\\[0m\\\\\" qos=0")
+
+# ---------------------------------------------------------------------------------------------
 # Resolver (resolver.hpp/resolver.cpp): OUI (MAC vendor) resolution (off by default, --mac-vendor, to
 # keep output compact), hostname resolution (off by default, --resolve/--hosts, file-only --
 # never live DNS), and service name resolution (on by default, --nn/--services) -- see

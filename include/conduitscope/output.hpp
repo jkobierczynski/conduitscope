@@ -351,6 +351,12 @@ private:
 std::string json_escape(const std::string& s);
 std::string csv_escape(const std::string& s);
 
+// Sanitizes packet-derived text for TEXT-MODE output only (TextWriter/FieldsWriter) -- never
+// JSON/CSV, which have their own complete serialization rules already. See output.cpp's own
+// definition for the full rationale (finding 4,
+// docs/reviews/2026-09-chatgpt-security-review-patch160.md).
+std::string terminal_escape(const std::string& s);
+
 // `decode -x/--hex` -- a tcpdump/tshark-style hex+ASCII dump of one packet's raw captured bytes:
 // 16 bytes per line, a 4-hex-digit byte offset, each byte as two hex digits (an extra gap after
 // the 8th byte, the same "two visually separated halves" layout every classic hex dump uses), then

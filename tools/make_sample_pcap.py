@@ -6949,6 +6949,43 @@ def build_mqtt_sample():
     (TESTS_DIR / "sample_mqtt.pcap").write_bytes(data)
 
 
+def build_terminal_escape_injection_sample():
+    """Exercises terminal_escape() (docs/reviews/2026-09-chatgpt-security-review-patch160.md's
+    finding 4, output.cpp): two MQTT PUBLISH packets whose Topic string -- taken verbatim from
+    wire bytes into MqttMessage::topic and straight into the decoded summary, see mqtt.cpp's
+    build_summary -- carries bytes that would be dangerous if written straight to a real
+    terminal. Packet 1's topic embeds an actual ESC (0x1B) byte driving a fake ANSI SGR sequence
+    (the same escape family --color legitimately uses); packet 2's topic embeds a raw newline,
+    which could otherwise forge what looks like a second, fabricated packet line in the
+    one-line-per-packet text view. Both must render as literal \\xNN text in TextWriter/
+    FieldsWriter output, never as raw control bytes."""
+    packets = []
+
+    def make_flow(sport, dport=1883, src_ip=HMI_IP, dst_ip=PLC_IP, src_mac=HMI_MAC, dst_mac=PLC_MAC):
+        state = {"seq": 40000, "ack": 500}
+
+        def add(payload: bytes):
+            tcp = tcp_header(sport, dport, state["seq"], state["ack"], TCP_PSH | TCP_ACK, len(payload)) + payload
+            ip = ipv4_header(src_ip, dst_ip, 6, len(tcp), state["seq"] & 0xFFFF) + tcp
+            state["seq"] += len(payload)
+            packets.append(eth_header(dst_mac, src_mac, 0x0800) + ip)
+
+        return add
+
+    a = make_flow(58000)
+    escape_topic = "evil\x1b[31mFAKE-ALERT\x1b[0m"
+    a(mqtt_packet(3, 0x00, mqtt_str(escape_topic) + b"payload"))  # PUBLISH qos0
+
+    b = make_flow(58001)
+    newline_topic = "evil\nfake-injected-line"
+    b(mqtt_packet(3, 0x00, mqtt_str(newline_topic) + b"payload"))  # PUBLISH qos0
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_030_000 + i, i * 1000)
+    (TESTS_DIR / "sample_terminal_escape_injection.pcap").write_bytes(data)
+
+
 FFHSE_PORT_ANNUNC = 1089
 FFHSE_PORT_FMS = 1090
 FFHSE_PORT_SM = 1091
@@ -13811,6 +13848,7 @@ if __name__ == "__main__":
     build_s7commplus_sample()
     build_mms_sample()
     build_mqtt_sample()
+    build_terminal_escape_injection_sample()
     build_ffhse_sample()
     build_twincat_sample()
     build_melsec_sample()
