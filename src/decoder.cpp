@@ -18,6 +18,7 @@
 #include "conduitscope/ffhse.hpp"
 #include "conduitscope/goose.hpp"
 #include "conduitscope/hartip.hpp"
+#include "conduitscope/homeplug_av.hpp"
 #include "conduitscope/hsrp.hpp"
 #include "conduitscope/icmp.hpp"
 #include "conduitscope/ieee802154.hpp"
@@ -205,6 +206,7 @@ bool ethertype_cascade_filter_allows(ProtocolFilter filter, std::string_view id)
     if (id == "lldp") return filter == ProtocolFilter::LldpOnly;
     if (id == "slow-protocols") return filter == ProtocolFilter::SlowProtocolsOnly;
     if (id == "powerlink") return filter == ProtocolFilter::PowerlinkOnly;
+    if (id == "homeplug-av") return filter == ProtocolFilter::HomeplugAvOnly;
     return false;
 }
 
@@ -304,6 +306,14 @@ void populate_slow_protocols(DecodedPacket& out, const ProtocolResult& result, u
     out.result = result;
 }
 
+void populate_homeplug_av(DecodedPacket& out, const ProtocolResult& result, uint16_t /*matched_ethertype*/) {
+    const HomePlugAvFrame& hp = result.as<HomePlugAvFrame>();
+    out.protocol = "homeplug-av";
+    out.summary = hp.summary;
+    for (const auto& n : hp.notes) out.notes.push_back(n);
+    out.result = result;
+}
+
 using EthertypeCascadePopulate = void (*)(DecodedPacket&, const ProtocolResult&, uint16_t);
 
 const EthertypeCascadePopulate* ethertype_cascade_populate_for(std::string_view id) {
@@ -319,6 +329,7 @@ const EthertypeCascadePopulate* ethertype_cascade_populate_for(std::string_view 
         {"arp", &populate_arp},
         {"lldp", &populate_lldp},
         {"slow-protocols", &populate_slow_protocols},
+        {"homeplug-av", &populate_homeplug_av},
     };
     auto it = kPopulate.find(id);
     return it != kPopulate.end() ? &it->second : nullptr;
@@ -1064,6 +1075,13 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
 
                     DecodeContext ctx;
                     ctx.protocol_id = std::string(decoder->id());
+                    // Set unconditionally for every decoder in this cascade, harmless for the ones
+                    // that never read it (DecodeContext::redact_secrets's own default, true, is
+                    // already what every one of them gets otherwise) -- HomePlug AV's own
+                    // CM_SET_KEY.REQ nw_key field (homeplug_av.hpp) is this cascade's one real
+                    // reader, the same "only the real user populates it" posture VRRP/HSRP/OPC UA/
+                    // MQTT's own call sites already established elsewhere in this file.
+                    ctx.redact_secrets = options_.redact_secrets;
                     auto result = decoder->decode(eth.payload, ctx);
                     if (!result) continue;
 

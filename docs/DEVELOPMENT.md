@@ -5516,7 +5516,8 @@ deferred future migration.
     technically decodable.
 
 26. **HomePlug AV / HomePlug AV2 powerline networking, including devolo's
-    "dLAN" product line (EtherType `0x88E1`).** Not yet started. devolo's
+    "dLAN" product line (EtherType `0x88E1`).** **Done -- first pass.**
+    devolo's
     "dLAN" branding is not a separate protocol -- devolo is one of the
     founding HomePlug Powerline Alliance members, and its dLAN adapters
     (the 200/500/650/1200-series, including the AVmini/AVsmart+ models)
@@ -5524,54 +5525,138 @@ deferred future migration.
     "dLAN Cockpit" configuration software, and third-party tools like
     `faifa` and `dlanlist`/`dlanpasswd`, talk to them using the standard
     HomePlug AV management protocol, not a devolo-specific one. Confirmed
-    from the HomePlug AV Wireshark dissector's own source
-    (`packet-homeplug-av.c` and the newer standalone `homeplug-av.lua`,
-    both in the public `wireshark`/`serock` GitHub repos) rather than a
-    secondhand description of it. The wire format is a fixed 5-byte MME
+    from the HomePlug AV Wireshark dissector's own source -- both the
+    mainline `packet-homeplug-av.c` and the independent standalone
+    `homeplug-av.lua`, both fetched and read directly during this item's
+    own research, not a secondhand description of either. The MME
     (Management Message Entry) header immediately after the Ethernet
-    header, no IP layer involved:
+    header (no IP layer involved) turned out to have a genuine wrinkle
+    this item's own original scoping note above got wrong: it is NOT
+    always a fixed 5 bytes. MMV==0x00 (AV 1.0) combined with a
+    Manufacturer-Specific or Vendor-Specific MMTYPE category gets a
+    short, 3-byte header with NO FMI/FMSN at all, immediately followed by
+    a 3-byte OUI; every other MMV/category combination gets the full
+    5-byte header, and for MMV>=0x01 (AV 1.1/AV2) Manufacturer-/Vendor-
+    Specific messages specifically, an ADDITIONAL 3-byte OUI follows
+    that 5-byte header too. See `include/conduitscope/homeplug_av.hpp`'s
+    own file header comment for the byte-exact layout of both shapes,
+    confirmed against the dissector source, not assumed.
 
-    ```text
-    offset 0       MMV      1 byte   Management Message Version
-    offset 1-2     MMTYPE   2 bytes  little-endian; top 3 bits classify the
-                                     message group, bottom 2 bits the
-                                     request/confirm/indication/response kind
-    offset 3       FMI      1 byte   NF_MI (fragment count, high nibble) +
-                                     FN_MI (this fragment's number, low nibble)
-    offset 4       FMSN     1 byte   fragmentation message sequence number
-    offset 5+      --                MME payload, type-specific
-    ```
+    Structurally this is the same shape as item 25's VMware frames and
+    EAPOL/PROFINET RT/EtherCAT/GOOSE -- link-layer-only, no IP header,
+    dispatched directly off ethertype -- but with a weaker gate, exactly
+    as this item's own original scoping note anticipated: unlike VMware's
+    4-byte fixed magic number, HomePlug AV's own header has no magic
+    constant at all, only a version byte and a two-bit-encoded
+    message-kind field, both fully populated across their whole value
+    range (no "reserved, never legitimately seen" values to reject on).
+    `homeplug_av.hpp`'s own file header comment states this plainly
+    rather than implying a stronger signature than actually exists --
+    the confidence that a `0x88E1` frame really is HomePlug AV rests
+    almost entirely on the EtherType itself (IANA/IEEE-exclusive, no
+    collision risk with any other protocol this tool decodes), the same
+    posture EtherCAT/EAPOL's own "structural detection gate" paragraphs
+    already established.
 
-    Structurally this is the same shape as item 25's VMware frames --
-    link-layer-only, no IP header, dispatched directly off ethertype in
-    `decoder.cpp` alongside EAPOL/PROFINET RT/EtherCAT/GOOSE -- but with a
-    weaker gate: unlike VMware's 4-byte fixed magic number, HomePlug AV's
-    own header has no magic constant, only a version byte and a
-    two-bit-encoded message-kind field, closer to the "port/ethertype
-    plus one plausibility check" tier NTP/DHCP-style name-only recognition
-    already uses elsewhere in this codebase than to a strong multi-field
-    structural signature -- worth being honest about that weaker
-    confidence in whatever text this decoder eventually reports, the same
-    way the L2TPv3 port-only fallback and STT's port-only recognition
-    already are elsewhere in this document.
+    **Scope actually built.** `HomePlugAvDecoder`/`homeplug_av.hpp`/
+    `homeplug_av.cpp`, `GateKind::EtherType` (0x88E1), following
+    `eapol.hpp`'s own template (link-layer-only, `out.result`-only, no
+    flat `DecodedPacket` fields). MMV named for 1.0/1.1/2.0; an
+    unrecognized MMV still attempts the standard 5-byte-header parse
+    (matching the reference dissector's own `mmv ? 5 : 3` fallback) but
+    is flagged with its own note rather than being silently mislabeled as
+    one of the three known versions. MMTYPE's Kind (Request/Confirm/
+    Indication/Response) and Category (STA-CC/Proxy Coordinator/CC-CC/
+    STA-STA/Manufacturer Specific/Vendor Specific/Reserved/Unknown)
+    bitfields are always decoded; the full 16-bit MMTYPE value is then
+    looked up in a curated, DELIBERATELY NON-EXHAUSTIVE name table
+    (discovery, bridging, encryption/key-management, network/link
+    stats, and CCo election/management -- ~35 named values) -- the
+    dissector's own `mmtype_names` table has 100+ entries, many
+    chipset-vendor-specific (e.g. a separate `mmtype_qualcomm` extension
+    table this pass does not attempt to enumerate, exactly the caveat
+    this item's own original scoping note flagged); any MMTYPE outside
+    the curated table gets a generic `MMTYPE 0xNNNN (kind=..., category=
+    ...)` fallback name rather than a decode failure.
 
-    First-pass scope, if picked up: name the ethertype and, from MMTYPE,
-    the general message classification (discovery/bridging-info/
-    encryption-key-set/network-stats and so on -- HomePlug AV's own MMTYPE
-    space is large and partly vendor-specific, e.g. distinct Qualcomm/
-    Atheros/Broadcom-chipset extensions the dissector sources above
-    already split into a separate `mmtype_qualcomm` field table -- full
-    enumeration of that space would need its own verification pass, not
-    assumed from this scoping note alone); MME payload fields
-    structural-only until an authoritative field-by-field source is
-    confirmed. Worth asking, like item 25, whether this is genuinely
-    audit-relevant before building a curated note on top of bare
-    recognition: powerline networking is consumer/SOHO-grade equipment,
-    a plausible (if unusual) sighting on an OT network's office/IT segment
-    but with none of vSphere's "virtualization infrastructure underneath
-    the SCADA/HMI stack" framing -- the honest case here is narrower,
-    closer to "what is this consumer-grade gear doing on this network"
-    than a security-relevant protocol behavior in its own right.
+    Bounded payload decode -- three fixed-stride message bodies get a
+    full field decode this pass: `CC_DISCOVER_LIST.CNF` (the station MAC
+    list and network ID list -- the highest-value field this decoder
+    extracts, the actual roster of devices seen on the powerline
+    segment), `CM_SET_KEY.REQ` (the 38-byte key-exchange payload), and
+    `CM_BRG_INFO.CNF` (the bridge/station list). Everything else is
+    classified by MMTYPE name only, payload reported by length plus a
+    short capped hex preview -- the dissector's own complexity past this
+    set rises sharply into tone-maps/TLV bodies/100+-byte vendor
+    structures, explicitly out of scope here, the same "not every message
+    type needs the same depth" discipline other recently-closed items
+    (e.g. item 27's own AP-REQ/AP-REP-vs-everything-else split) already
+    apply. When Category is Manufacturer-/Vendor-Specific, the 3-byte OUI
+    is decoded and named against a small local table (two confirmed
+    values: `0x00B052` "Qualcomm Atheros", also covering the historical
+    Intellon lineage that chipset family descends from, and `0x0080E1`
+    "ST/IoTecha") -- deliberately its own small table, not a reuse of the
+    generic MAC-vendor OUI lookup (`oui_table.gen.hpp`), since this is a
+    protocol-specific enumeration with a different value space entirely.
+    `CM_SET_KEY.REQ`'s own 16-byte `nw_key` field -- the actual key
+    material -- is redacted by `DecodeContext::redact_secrets`/
+    `kRedactedSecretPlaceholder` by default, `--no-redact` reveals it,
+    the same split VRRP's own cleartext Simple Text Password already
+    established (`key_type`/`peks` stay unredacted -- metadata about the
+    exchange, not the secret itself).
+
+    **The curated note, and its own honest framing.** Jurgen was asked
+    directly whether this item should stay bare structural recognition
+    only, matching this item's own original "worth asking... before
+    building a curated note on top of bare recognition" scoping caveat,
+    or add a curated security note on top -- he chose to add one. It
+    fires on EVERY recognized HomePlug AV/dLAN frame, not only a
+    key-exchange message: presence on the segment is itself the finding
+    (a potential unmanaged bridge extending network reach through
+    building wiring, often outside IT's own inventory, plus HomePlug AV's
+    own well-known history of weak default enrollment secrets, plus,
+    for devolo's gear specifically, a separately-documented history
+    (EuroSec 2019, "Security Analysis of Devolo HomePlug Devices") of
+    weak web/telnet management-plane authentication on the same physical
+    devices). That note states PLAINLY, in its own text, that neither of
+    those two management-plane weaknesses is visible in this wire
+    protocol itself -- this is a hardware-class-presence note, not an
+    attack signature, and it says so rather than implying more than a
+    passive capture can actually show. A second, more specific note fires
+    additionally when a `CM_SET_KEY.REQ` carrying `key_type` DAK or NMK
+    is decoded, naming the key type and pointing at the redaction
+    behavior above. No deduplication, matching this codebase's general
+    curated-note posture (fires on every occurrence, like BSAP's own NAK
+    note or SMB's own DCSync note).
+
+    **Verification.** `tests/sample_homeplug_av.pcap`
+    (`build_homeplug_av_sample()`, entirely synthetic -- no real HomePlug
+    AV capture was available, field-accurate against the two dissector
+    sources rather than copied from a real capture, the same posture
+    Fox/POWERLINK's own fixtures already established) covers, one packet
+    each: a `CC_DISCOVER_LIST.CNF` with 2 station records + 1 network
+    record; a `CM_SET_KEY.REQ` with `key_type`=NMK; a `CM_BRG_INFO.CNF`
+    with bridging active and 2 station MACs; an unclassified MMTYPE
+    (proving the generic fallback name); MMV==0x00 + Vendor-Specific with
+    OUI `0x00B052` (the short-header, no-FMI/FMSN edge case); MMV==0x01 +
+    Manufacturer-Specific with OUI `0x0080E1` (the 5-byte-header-plus-
+    extra-OUI edge case); and an unrecognized MMV (0x03, proving the
+    "unrecognized version" note rather than a mislabel). Every decode
+    path was run manually (`--format text -v`, `--format json`,
+    `--no-redact`, `--stats`) and its real output read field-by-field --
+    including both header-size edge cases' exact OUI/payload offsets --
+    before any CTest regex was written; the redaction behavior was
+    checked both ways (default run shows `[REDACTED]`, `--no-redact`
+    shows the real 16 key bytes). 14 new `homeplug_av_*` CTest tests were
+    added. Full suite grew from 1953 to 1967 tests in the default config
+    and from 1941 to 1955 in the `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF`
+    config, zero regressions, zero new compiler warnings in either. No
+    EtherType collision with any existing decoder was found (`0x88E1`
+    confirmed clean by grep both before and after this decoder was
+    added), so no dispatch-cascade reordering was needed --
+    `homeplug_av_decoder()` was simply appended to `ethertype_registry()`
+    right after CDP, the same "brand-new protocol, appended after the
+    batch" posture ARP/LLDP/Slow Protocols/CDP already established there.
 
 27. **SMB2/NTLM (MS-SMB2, MS-NLMP) -- phase 3 of the 4-part Windows Active
     Directory suite, with curated attack/monitoring detection.** The

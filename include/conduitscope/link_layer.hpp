@@ -87,6 +87,11 @@ constexpr uint16_t ETHERTYPE_POWERLINK = 0x88AB;  // Ethernet POWERLINK (EPSG), 
                                                     // -- see powerlink.hpp
 constexpr uint16_t ETHERTYPE_SLOW_PROTOCOLS = 0x8809;  // IEEE 802.3 "Slow Protocols" (LACP/Marker/
                                                         // OAM) -- raw Ethernet, no IP -- see slow_protocols.hpp
+constexpr uint16_t ETHERTYPE_HOMEPLUG_AV = 0x88E1;  // HomePlug AV/AV2 powerline networking
+                                                     // (including devolo's dLAN product line, a
+                                                     // standard HomePlug AV/AV2 device on the wire,
+                                                     // not a separate protocol), raw Ethernet, no
+                                                     // IP -- see homeplug_av.hpp
 
 // Returns a short human-readable name for a handful of EtherTypes worth calling out by name
 // (see the constants above), or an empty string for anything else -- used when reporting a

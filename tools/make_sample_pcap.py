@@ -18705,6 +18705,98 @@ def build_ipv6_attack_rogue_dhcpv6_server_sample():
     (TESTS_DIR / "sample_ipv6_attack_rogue_dhcpv6_server.pcap").write_bytes(data)
 
 
+def build_homeplug_av_sample():
+    """HomePlug AV/AV2 powerline networking (EtherType 0x88E1) -- see homeplug_av.hpp's file header
+    comment for the full sourcing writeup (Wireshark's own packet-homeplug-av.c and homeplug-av.lua,
+    both fetched and read in full during this decoder's own research; no real HomePlug AV pcap
+    capture was available, so this fixture is entirely synthetic, cross-checked field-by-field
+    against those dissector sources). Two synthetic powerline-adapter MACs, deliberately given the
+    00:B0:52 (Qualcomm Atheros) OUI prefix -- a real HomePlug AV chipset vendor, matching this
+    decoder's own curated OUI table below.
+
+    Covers, one packet each: (1) CC_DISCOVER_LIST.CNF with 2 station records + 1 network record
+    (the station MAC list is the highest-value field this decoder extracts); (2) CM_SET_KEY.REQ
+    with key_type=NMK (0x01), proving the --redact/--no-redact split on nw_key; (3) CM_BRG_INFO.CNF
+    with bridging active and 2 station MACs; (4) a generic/unclassified MMTYPE (0x6050, not in the
+    curated name table), proving the graceful fallback name; (5) MMV=0x00 + Vendor-Specific
+    category (0x05) with OUI 0x00B052 -- the 3-byte-header-no-FMI/FMSN edge case; (6) MMV=0x01 +
+    Manufacturer-Specific category (0x04) with OUI 0x0080E1 (ST/IoTecha) -- the 5-byte-header-PLUS-
+    extra-OUI edge case; (7) an unrecognized MMV (0x03), proving the "unrecognized version" note
+    rather than a mislabel."""
+    packets = []
+    HP1_MAC = mac("00:b0:52:aa:bb:01")
+    HP2_MAC = mac("00:b0:52:aa:bb:02")
+    BROADCAST_MAC = mac("ff:ff:ff:ff:ff:ff")
+    ETHERTYPE_HOMEPLUG_AV = 0x88E1
+
+    def add(dst_mac: bytes, src_mac: bytes, body: bytes):
+        packets.append(eth_header(dst_mac, src_mac, ETHERTYPE_HOMEPLUG_AV) + body)
+
+    def mme_header(mmv: int, mmtype: int, nf_mi: int = 0, fn_mi: int = 0, fmsn: int = 0) -> bytes:
+        """The full 5-byte MME header (MMV + MMTYPE(LE) + FMI + FMSN) -- the common case, used by
+        every packet below except (5), which needs the short 3-byte header instead."""
+        fmi = ((nf_mi & 0x0F) << 4) | (fn_mi & 0x0F)
+        return struct.pack("<BHBB", mmv, mmtype, fmi, fmsn)
+
+    # 1) CC_DISCOVER_LIST.CNF (0x0015) -- 2 station records, 1 network record.
+    station1 = HP1_MAC + struct.pack("BBBBBB", 1, 1, 0x10, 0x07, 0x64, 0x20)
+    station2 = HP2_MAC + struct.pack("BBBBBB", 2, 1, 0x10, 0x03, 0x50, 0x18)
+    network1 = (bytes.fromhex("00112233445566") +
+                struct.pack("<BBBBH", 0x11, 0x01, 0x08, 0x01, 0x1234))
+    discover_payload = (struct.pack("B", 2) + station1 + station2 +
+                          struct.pack("B", 1) + network1)
+    add(BROADCAST_MAC, HP1_MAC, mme_header(0x00, 0x0015, fmsn=1) + discover_payload)
+
+    # 2) CM_SET_KEY.REQ (0x6008), key_type=NMK (0x01) -- the 38-byte key-exchange payload.
+    setkey_payload = (
+        struct.pack("B", 0x01) +                       # key_type = NMK
+        struct.pack("<II", 0x11223344, 0x55667788) +    # my_nonce, your_nonce
+        struct.pack("B", 0x01) +                        # pid
+        struct.pack("<H", 0x0002) +                     # prn
+        struct.pack("B", 0x03) +                        # pmn
+        struct.pack("B", 0x01) +                        # cco_cap
+        bytes.fromhex("00112233445566") +               # nid (7 bytes)
+        struct.pack("B", 0x01) +                        # peks
+        bytes(range(0x10, 0x20))                        # nw_key (16 bytes, 0x10..0x1F)
+    )
+    assert len(setkey_payload) == 38
+    add(HP2_MAC, HP1_MAC, mme_header(0x00, 0x6008, fmsn=2) + setkey_payload)
+
+    # 3) CM_BRG_INFO.CNF (0x6021) -- bridging active, bridge_tei=5, 2 station MACs.
+    brg_payload = (struct.pack("BBB", 0x01, 0x05, 0x02) +
+                    mac("aa:bb:cc:dd:ee:11") + mac("aa:bb:cc:dd:ee:12"))
+    add(HP1_MAC, HP2_MAC, mme_header(0x00, 0x6021, fmsn=3) + brg_payload)
+
+    # 4) Generic/unclassified MMTYPE (0x6050 -- kind=Request, category=STA - STA, not in the
+    #    curated name table) -- proves the graceful "MMTYPE 0xNNNN (kind=..., category=...)"
+    #    fallback name rather than a decode failure.
+    add(HP2_MAC, HP1_MAC, mme_header(0x00, 0x6050, fmsn=4) + bytes.fromhex("aabbccdd"))
+
+    # 5) MMV=0x00 + Vendor-Specific category (0x05), mmtype=0xA000 (category bits 101 at bit 13,
+    #    kind=Request) -- the short, 3-byte, no-FMI/FMSN header, OUI at offset 3-5 (0x00B052,
+    #    "Qualcomm Atheros"), payload at offset 6. The trickiest edge case in this whole wire
+    #    format -- gets its own dedicated packet.
+    add(HP1_MAC, HP2_MAC,
+        struct.pack("<BH", 0x00, 0xA000) + bytes.fromhex("00b052") + bytes.fromhex("01020304"))
+
+    # 6) MMV=0x01 + Manufacturer-Specific category (0x04), mmtype=0x8001 (category bits 100 at bit
+    #    13, kind=Confirm) -- the full 5-byte header PLUS an additional 3-byte OUI at offset 5-7
+    #    (0x0080E1, "ST/IoTecha"), payload at offset 8.
+    add(HP2_MAC, HP1_MAC,
+        mme_header(0x01, 0x8001, nf_mi=1, fn_mi=0, fmsn=7) + bytes.fromhex("0080e1") +
+        bytes.fromhex("998877"))
+
+    # 7) Unrecognized MMV (0x03) -- CC_DISCOVER_LIST.REQ's own mmtype (0x0014, non-vendor/mfg
+    #    category, so still the full 5-byte header), proving this degrades to an "unrecognized
+    #    version" note rather than being silently mislabeled 1.0/1.1/2.0.
+    add(BROADCAST_MAC, HP1_MAC, mme_header(0x03, 0x0014, fmsn=8))
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_800_000 + i, i * 1000)
+    (TESTS_DIR / "sample_homeplug_av.pcap").write_bytes(data)
+
+
 if __name__ == "__main__":
     TESTS_DIR.mkdir(exist_ok=True)
     build_modbus_sample()
@@ -18816,4 +18908,5 @@ if __name__ == "__main__":
     build_ipv6_attack_na_spoof_sample()
     build_ipv6_attack_dhcpv6_exhaustion_sample()
     build_ipv6_attack_rogue_dhcpv6_server_sample()
+    build_homeplug_av_sample()
     print("wrote sample fixtures to", TESTS_DIR)

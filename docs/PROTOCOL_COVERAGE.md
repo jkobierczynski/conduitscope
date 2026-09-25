@@ -12141,3 +12141,170 @@ suite grew from 1913 to 1924 in the default config and from 1901 to
 1912 in the `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF` config, passing
 with zero regressions in both, zero-warning clean rebuilds in both. See
 `include/conduitscope/fox.hpp`'s own file header for the full writeup.
+
+### HomePlug AV / HomePlug AV2 powerline networking (EtherType `0x88E1`)
+
+HomePlug AV/AV2 is the powerline-networking standard consumer/SOHO
+"Ethernet over the electrical wiring" adapters use -- devolo's "dLAN"
+product line is NOT a separate protocol: devolo is a founding HomePlug
+Powerline Alliance member, and its dLAN adapters (200/500/650/1200-series,
+AVmini/AVsmart+) are standard HomePlug AV/AV2 devices on the wire.
+Consumer/SOHO-grade equipment, not itself OT/ICS equipment -- but a
+plausible sighting on an OT network's office/IT segment, and its mere
+presence carries a documented security history worth flagging (see
+Security relevance, below).
+
+**Sourcing.** Every byte offset, bit mask, and named MMTYPE value below is
+cross-checked directly against the Wireshark HomePlug AV dissector
+source -- both the mainline `packet-homeplug-av.c` and the independent
+standalone `homeplug-av.lua`, both fetched and read directly, not a
+secondhand description of either. Confidence in the MME header shape
+(including its MMV/category-dependent size, below) and the MMTYPE
+Kind/Category bit masks is HIGH. The curated MMTYPE name table is a
+SMALL, DELIBERATELY NON-EXHAUSTIVE subset -- the dissector's own table has
+100+ entries, many chipset-vendor-specific (e.g. a separate
+`mmtype_qualcomm` extension table this decoder does not attempt to
+enumerate).
+
+#### Wire format
+
+The MME (Management Message Entry) header, immediately after the Ethernet
+header (or after a single already-unwrapped 802.1Q VLAN tag), no IP layer
+involved:
+
+```
+offset 0       MMV      1 byte   Management Message Version
+offset 1-2     MMTYPE   2 bytes  little-endian
+offset 3       FMI      1 byte   high nibble = NF_MI (fragment count),
+                                 low nibble = FN_MI (this fragment's index)
+offset 4       FMSN     1 byte   Fragmentation Message Sequence Number
+offset 5+      --                MME payload, type-specific
+```
+
+**Header-size edge case** (the one genuinely surprising wrinkle in this
+wire format): MMV==0x00 (AV 1.0) combined with a Manufacturer-Specific or
+Vendor-Specific MMTYPE category gets a SHORT, 3-byte header (MMV+MMTYPE
+only, no FMI/FMSN at all), immediately followed by a 3-byte OUI at offset
+3-5, payload at offset 6. Every other MMV/category combination gets the
+full 5-byte header above; for MMV>=0x01 (AV1.1/AV2) Manufacturer-/
+Vendor-Specific messages specifically, an ADDITIONAL 3-byte OUI follows
+that 5-byte header too, at offset 5-7, payload at offset 8. MMV values
+0x00/0x01/0x02 are named "1.0"/"1.1"/"2.0" (AV2); any other value is
+flagged as an unrecognized version in its own note (rather than being
+silently mislabeled) while still attempting the standard 5-byte-header
+parse, matching the reference dissector's own `mmv ? 5 : 3` fallback.
+
+**MMTYPE**: Kind (mask `0x0003`) is always one of Request/Confirm/
+Indication/Response. Category (mask `0xE000`, shift 13) is always one of
+"STA - Central Coordinator"/"Proxy Coordinator"/"Central Coordinator -
+Central Coordinator"/"STA - STA"/"Manufacturer Specific"/"Vendor
+Specific"/"Reserved"/"Unknown". The full 16-bit MMTYPE value is then
+looked up in a curated table (discovery, bridging, encryption/key
+management, network/link stats, CCo election/management -- ~35 named
+values); anything not in that table renders as a generic `MMTYPE 0xNNNN
+(kind=..., category=...)` fallback rather than a decode failure.
+
+**Vendor/manufacturer OUI**: when Category is Manufacturer-Specific or
+Vendor-Specific, the 3-byte OUI (at whichever offset the header-size rule
+above lands on) is decoded and, for two confirmed values, named:
+`0x00B052` "Qualcomm Atheros" (also covers the historical Intellon
+lineage this chipset family descends from) and `0x0080E1` "ST/IoTecha" --
+any other OUI is still shown as raw hex, just unnamed. This is its own
+small local table, not the generic MAC-vendor OUI lookup this codebase
+uses elsewhere (`oui_table.gen.hpp`) -- a different value space entirely.
+The vendor-specific payload past the OUI is never decoded, only the
+vendor is named.
+
+**Bounded payload decode** -- three fixed-stride message bodies get a full
+field decode this pass:
+
+- **`CC_DISCOVER_LIST.CNF` (0x0015)**: `num_stas` (1 byte) followed by
+  that many 12-byte station records (MAC address, TEI, and several
+  packed/not-further-decoded fields), then `num_networks` (1 byte)
+  followed by that many 13-byte network records (7-byte Network ID plus
+  several packed/not-further-decoded fields). The station MAC list is the
+  highest-value field this decoder extracts -- the actual roster of
+  devices seen on the powerline segment.
+- **`CM_SET_KEY.REQ` (0x6008)**: the fixed 38-byte key-exchange payload --
+  `key_type` (DAK/NMK/NEK/TEK/Hash Key/Nonce-only), nonces, PID/PRN/PMN,
+  CCo capability, Network ID, PEKS, and the 16-byte `nw_key` field itself
+  (see Redaction, below).
+- **`CM_BRG_INFO.CNF` (0x6021)**: a bridging flag and, when set, the
+  bridge's own TEI plus a list of bridged station MAC addresses.
+
+Everything else is classified by MMTYPE name only; its payload is
+reported by length plus a short capped hex preview, never field-decoded --
+the dissector's own complexity past this set rises sharply into
+tone-maps/TLV bodies/100+-byte vendor structures, explicitly out of scope
+for this first pass.
+
+#### Redaction
+
+`CM_SET_KEY.REQ`'s own `nw_key` field carries the actual HomePlug AV key
+material (a DAK/NMK/NEK/TEK/Hash Key depending on `key_type`) and is
+masked with `[REDACTED]` by default -- `--no-redact` reveals the real
+bytes, the same split VRRP's own cleartext Simple Text Password already
+established in this codebase. `key_type` and `peks` (metadata about the
+exchange, not the secret itself) are always rendered unredacted.
+
+#### Security relevance
+
+Consumer/SOHO-grade powerline networking equipment observed on an OT
+network segment is worth a curated finding even without a key-exchange
+message in view -- bare presence is itself the fact worth noting: (1) a
+potential unmanaged bridge extending network reach through building
+wiring, often outside IT's own inventory; (2) HomePlug AV historically
+ships with a well-known default/weak enrollment secret (the
+"HomePlugAV" passphrase, or a Device Access Key sometimes derived from
+the device's own MAC address rather than a genuinely random secret) that
+is frequently left unchanged in the field, making passive MAC-address
+harvesting off the powerline segment a plausible path toward network-key
+recovery; devolo's own gear additionally has a documented history
+(EuroSec 2019, "Security Analysis of Devolo HomePlug Devices") of
+unauthenticated/weakly-authenticated web and telnet management
+interfaces on the same physical devices. **This decoder's curated note
+states plainly that neither of those two management-plane weaknesses is
+visible in this wire protocol itself** -- it is a hardware-class-presence
+note, not an attack signature, and fires on every recognized HomePlug
+AV/dLAN frame (no deduplication). A second, more specific note fires
+additionally when a `CM_SET_KEY.REQ` carrying `key_type` DAK or NMK is
+decoded, naming the key type and pointing at the redaction behavior
+above.
+
+#### Explicitly out of scope
+
+The ~65+ remaining MMTYPE values the reference dissector names (this
+decoder's curated table covers ~35) beyond the three payload shapes
+listed above; every chipset-vendor-specific MMTYPE extension (e.g.
+Qualcomm/Atheros/Broadcom's own private message spaces); any OUI beyond
+the two confirmed values; the vendor-specific payload past a decoded OUI;
+fragment reassembly across FMI/NF_MI-declared multi-fragment messages
+(FMI/FMSN are decoded and reported, but this decoder does not reassemble
+a fragmented MME across multiple frames).
+
+#### Validation
+
+Validated against `tests/sample_homeplug_av.pcap`, built by
+`tools/make_sample_pcap.py`'s `build_homeplug_av_sample()`. This fixture
+is **entirely synthetic** -- no real HomePlug AV capture was available,
+so it is field-accurate against the two dissector sources rather than
+copied from a real capture, the same posture `sample_fox.pcap`/
+`sample_powerlink.pcap` already established for their own protocols. It
+covers, one packet each: a `CC_DISCOVER_LIST.CNF` with 2 station records
+and 1 network record; a `CM_SET_KEY.REQ` with `key_type`=NMK; a
+`CM_BRG_INFO.CNF` with bridging active and 2 station MACs; an
+unclassified MMTYPE (proving the generic fallback name); MMV==0x00 +
+Vendor-Specific with OUI `0x00B052` (the short-header, no-FMI/FMSN edge
+case); MMV==0x01 + Manufacturer-Specific with OUI `0x0080E1` (the
+5-byte-header-plus-extra-OUI edge case); and an unrecognized MMV (0x03,
+proving the "unrecognized version" note). Every decode path was run
+manually (`--format text -v`, `--format json`, `--no-redact`, `--stats`,
+`--protocol homeplug-av`) and its real output read field-by-field --
+including both header-size edge cases' exact OUI/payload offsets --
+before any CTest regex was written; the redaction behavior was checked
+both ways. 14 new `homeplug_av_*` CTest tests were added; the full suite
+grew from 1953 to 1967 in the default config and from 1941 to 1955 in the
+`-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF` config, passing with zero
+regressions in both, zero-warning clean rebuilds in both. See
+`include/conduitscope/homeplug_av.hpp`'s own file header for the full
+writeup.

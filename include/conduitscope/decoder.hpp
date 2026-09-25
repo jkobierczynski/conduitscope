@@ -42,6 +42,7 @@
 #include "conduitscope/ge_srtp.hpp"
 #include "conduitscope/goose.hpp"
 #include "conduitscope/hartip.hpp"
+#include "conduitscope/homeplug_av.hpp"
 #include "conduitscope/hsrp.hpp"
 #include "conduitscope/icmp.hpp"
 #include "conduitscope/icmpv6.hpp"
@@ -379,6 +380,12 @@ enum class ProtocolFilter {
                            // established above, not the "one list, two ports, different transports"
                            // shape most other extra_*_ports fields have. Roadmap item 45's second
                            // half.
+    HomeplugAvOnly,        // only attempt HomePlug AV/AV2 powerline networking decoding (including
+                           // devolo's dLAN product line, a standard HomePlug AV/AV2 device on the
+                           // wire, not a separate protocol) -- see homeplug_av.hpp. GateKind::
+                           // EtherType (0x88E1), the same "no port, no IP layer" posture ARP/LLDP/
+                           // EAPOL/PPPoE/MPLS already established for their own dedicated filter
+                           // values. Roadmap item 26.
 };
 
 struct DecodeOptions {

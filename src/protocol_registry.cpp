@@ -28,6 +28,7 @@
 #include "conduitscope/ge_srtp.hpp"
 #include "conduitscope/goose.hpp"
 #include "conduitscope/hartip.hpp"
+#include "conduitscope/homeplug_av.hpp"
 #include "conduitscope/hsrp.hpp"
 #include "conduitscope/icmp.hpp"
 #include "conduitscope/iec104.hpp"
@@ -185,6 +186,14 @@ const std::vector<const ProtocolDecoder*>& ethertype_registry() {
                             // exactly as STP's own gating does -- see that call site's own COLLISION
                             // FIX comment for the pre-existing PVST+-mislabeling bug this addition
                             // fixed.
+        &homeplug_av_decoder(),  // HomePlug AV/AV2 powerline networking (homeplug_av.hpp,
+                            // docs/DEVELOPMENT.md ROADMAP item 26) -- a brand-new protocol, NOT
+                            // part of any migration batch, added right after CDP for the identical
+                            // "appended after the batch, not reasoned about relative to the
+                            // others" posture ARP/LLDP/Slow Protocols/CDP already established
+                            // above -- see this vector's own doc comment in protocol_registry.hpp.
+                            // EtherType 0x88E1 is exclusive to it, no collision risk with anything
+                            // else in this vector.
     };
     return order;
 }

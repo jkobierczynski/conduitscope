@@ -2280,6 +2280,99 @@ void write_powerlink_json_fields(std::ostream& out, const PowerlinkFrame& pl) {
     }
 }
 
+// HomePlug AV/AV2 (homeplug_av.hpp) -- see that file's own HomePlugAvFrame struct for the full
+// field-by-field citation. At most one of the discover-list/set-key/brg-info blocks below is ever
+// populated per frame (HomePlugAvFrame's own mutual-exclusivity comment); an unmatched/opaque
+// payload instead gets the capped hex-preview block at the end.
+void write_homeplug_av_json_fields(std::ostream& out, const HomePlugAvFrame& hp) {
+    out << "    \"homeplug_av_mmv\": " << static_cast<unsigned>(hp.mmv) << ",\n";
+    out << "    \"homeplug_av_mmv_name\": \"" << json_escape(hp.mmv_name) << "\",\n";
+    out << "    \"homeplug_av_mmv_recognized\": " << (hp.mmv_recognized ? "true" : "false") << ",\n";
+    out << "    \"homeplug_av_mmtype\": " << hp.mmtype << ",\n";
+    out << "    \"homeplug_av_mmtype_name\": \"" << json_escape(hp.mmtype_name) << "\",\n";
+    out << "    \"homeplug_av_mmtype_recognized\": " << (hp.mmtype_recognized ? "true" : "false") << ",\n";
+    out << "    \"homeplug_av_mmtype_kind\": \"" << json_escape(hp.mmtype_kind_name) << "\",\n";
+    out << "    \"homeplug_av_mmtype_category\": \"" << json_escape(hp.mmtype_category_name) << "\",\n";
+    out << "    \"homeplug_av_header_size\": " << hp.header_size << ",\n";
+    out << "    \"homeplug_av_has_fmi_fmsn\": " << (hp.has_fmi_fmsn ? "true" : "false") << ",\n";
+    if (hp.has_fmi_fmsn) {
+        out << "    \"homeplug_av_nf_mi\": " << static_cast<unsigned>(hp.nf_mi) << ",\n";
+        out << "    \"homeplug_av_fn_mi\": " << static_cast<unsigned>(hp.fn_mi) << ",\n";
+        out << "    \"homeplug_av_fmsn\": " << static_cast<unsigned>(hp.fmsn) << ",\n";
+    }
+    out << "    \"homeplug_av_has_oui\": " << (hp.has_oui ? "true" : "false") << ",\n";
+    if (hp.has_oui) {
+        out << "    \"homeplug_av_oui\": \"" << json_escape(hp.oui_hex) << "\",\n";
+        if (!hp.oui_vendor_name.empty()) {
+            out << "    \"homeplug_av_oui_vendor\": \"" << json_escape(hp.oui_vendor_name) << "\",\n";
+        }
+    }
+    out << "    \"homeplug_av_payload_length\": " << hp.payload_length << ",\n";
+
+    if (hp.has_discover_list_cnf) {
+        const HomePlugAvDiscoverListCnf& dl = hp.discover_list_cnf;
+        out << "    \"homeplug_av_discover_num_stas_declared\": "
+            << static_cast<unsigned>(dl.num_stas_declared) << ",\n";
+        out << "    \"homeplug_av_discover_stations_truncated\": "
+            << (dl.stations_truncated ? "true" : "false") << ",\n";
+        out << "    \"homeplug_av_discover_stations\": [";
+        for (size_t i = 0; i < dl.stations.size(); ++i) {
+            if (i != 0) out << ", ";
+            out << "{\"mac\": \"" << json_escape(format_mac(dl.stations[i].mac)) << "\", \"tei\": "
+                << static_cast<unsigned>(dl.stations[i].tei) << "}";
+        }
+        out << "],\n";
+        out << "    \"homeplug_av_discover_num_networks_declared\": "
+            << static_cast<unsigned>(dl.num_networks_declared) << ",\n";
+        out << "    \"homeplug_av_discover_networks_truncated\": "
+            << (dl.networks_truncated ? "true" : "false") << ",\n";
+        out << "    \"homeplug_av_discover_networks\": [";
+        for (size_t i = 0; i < dl.networks.size(); ++i) {
+            if (i != 0) out << ", ";
+            out << "{\"nid\": \"" << json_escape(to_hex(ByteSpan(dl.networks[i].nid.data(), 7), ""))
+                << "\", \"beacon_offset\": " << dl.networks[i].beacon_offset << "}";
+        }
+        out << "],\n";
+    }
+
+    if (hp.has_set_key_req) {
+        const HomePlugAvSetKeyReq& sk = hp.set_key_req;
+        out << "    \"homeplug_av_setkey_key_type\": " << static_cast<unsigned>(sk.key_type_raw) << ",\n";
+        out << "    \"homeplug_av_setkey_key_type_name\": \"" << json_escape(sk.key_type_name) << "\",\n";
+        out << "    \"homeplug_av_setkey_peks\": " << static_cast<unsigned>(sk.peks) << ",\n";
+        out << "    \"homeplug_av_setkey_pid\": " << static_cast<unsigned>(sk.pid) << ",\n";
+        out << "    \"homeplug_av_setkey_nid\": \"" << json_escape(to_hex(ByteSpan(sk.nid.data(), 7), ""))
+            << "\",\n";
+        out << "    \"homeplug_av_setkey_nw_key\": \"" << json_escape(sk.nw_key_hex) << "\",\n";
+        out << "    \"homeplug_av_setkey_nw_key_redacted\": " << (sk.nw_key_redacted ? "true" : "false") << ",\n";
+    }
+
+    if (hp.has_brg_info_cnf) {
+        const HomePlugAvBrgInfoCnf& bi = hp.brg_info_cnf;
+        out << "    \"homeplug_av_brg_is_bridging\": " << (bi.is_bridging ? "true" : "false") << ",\n";
+        if (bi.is_bridging) {
+            out << "    \"homeplug_av_brg_tei\": " << static_cast<unsigned>(bi.bridge_tei) << ",\n";
+            out << "    \"homeplug_av_brg_num_stas_declared\": "
+                << static_cast<unsigned>(bi.num_stas_declared) << ",\n";
+            out << "    \"homeplug_av_brg_stations_truncated\": "
+                << (bi.stations_truncated ? "true" : "false") << ",\n";
+            out << "    \"homeplug_av_brg_station_macs\": [";
+            for (size_t i = 0; i < bi.station_macs.size(); ++i) {
+                if (i != 0) out << ", ";
+                out << "\"" << json_escape(format_mac(bi.station_macs[i])) << "\"";
+            }
+            out << "],\n";
+        }
+    }
+
+    if (!hp.opaque_payload_hex_preview.empty()) {
+        out << "    \"homeplug_av_opaque_payload_hex_preview\": \""
+            << json_escape(hp.opaque_payload_hex_preview) << "\",\n";
+        out << "    \"homeplug_av_opaque_payload_preview_truncated\": "
+            << (hp.opaque_payload_preview_truncated ? "true" : "false") << ",\n";
+    }
+}
+
 // Zero-flat-field migration (mid-size batch): the STP analog of write_goose_json_fields above.
 // stp_port_role_name/stp_render_msti_summary are stp.hpp's own free functions (already public,
 // unlike icmp_router_address_summary/pim_*_summary below which were decoder.cpp-local and had to
@@ -4728,6 +4821,9 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
     }
     if (p.protocol == "powerlink" && p.result) {
         write_powerlink_json_fields(out_, p.result->as<PowerlinkFrame>());
+    }
+    if (p.protocol == "homeplug-av" && p.result) {
+        write_homeplug_av_json_fields(out_, p.result->as<HomePlugAvFrame>());
     }
     if (p.protocol == "stp" && p.result) {
         write_stp_json_fields(out_, p.result->as<StpFrame>());

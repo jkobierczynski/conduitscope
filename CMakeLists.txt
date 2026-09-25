@@ -132,6 +132,7 @@ add_library(conduitscope_core STATIC
   src/amqp10.cpp
   src/dicom.cpp
   src/fox.cpp
+  src/homeplug_av.cpp
   src/protocol_registry.cpp
   src/resource_limits.cpp
   src/decoder.cpp
@@ -13942,3 +13943,97 @@ add_test(NAME dhcpv6_port_option_parses_and_threads_through
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dhcpv6.pcap" --dhcpv6-port 9999 --format text)
 set_tests_properties(dhcpv6_port_option_parses_and_threads_through PROPERTIES
   PASS_REGULAR_EXPRESSION "\\[dhcpv6\\]")
+
+# ------------------------------------------------------------------------------------------------
+# HomePlug AV / HomePlug AV2 powerline networking (homeplug_av.hpp, EtherType 0x88E1,
+# docs/DEVELOPMENT.md ROADMAP item 26) -- covers devolo's dLAN product line, a standard HomePlug
+# AV/AV2 device on the wire, not a separate protocol. See tools/make_sample_pcap.py's
+# build_homeplug_av_sample() for the exact byte layout each assertion below is checking against.
+
+add_test(NAME homeplug_av_discover_list_cnf_station_and_network_decoded
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_homeplug_av.pcap")
+set_tests_properties(homeplug_av_discover_list_cnf_station_and_network_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[homeplug-av\\]  HomePlug AV v1\\.0 CC_DISCOVER_LIST\\.CNF \\(Confirm\\): 2 station\\(s\\), 1 network\\(s\\)")
+
+# The station MAC list is this decoder's own highest-value field -- proves both station records'
+# MAC addresses (not just a count) are actually decoded, plus the one network record's NID.
+add_test(NAME homeplug_av_discover_list_cnf_station_macs_and_nid_json
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_homeplug_av.pcap")
+set_tests_properties(homeplug_av_discover_list_cnf_station_macs_and_nid_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"homeplug_av_discover_stations\": \\[\\{\"mac\": \"00:b0:52:aa:bb:01\", \"tei\": 1\\}, \\{\"mac\": \"00:b0:52:aa:bb:02\", \"tei\": 2\\}\\],.*\"homeplug_av_discover_networks\": \\[\\{\"nid\": \"00112233445566\", \"beacon_offset\": 4660\\}\\]")
+
+add_test(NAME homeplug_av_set_key_req_nmk_summary_decoded
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_homeplug_av.pcap")
+set_tests_properties(homeplug_av_set_key_req_nmk_summary_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[homeplug-av\\]  HomePlug AV v1\\.0 CM_SET_KEY\\.REQ \\(Request\\): key_type=NMK")
+
+# nw_key redacted by default -- key_type/peks stay unredacted (metadata about the exchange, not
+# the secret itself).
+add_test(NAME homeplug_av_set_key_req_nw_key_redacted_by_default
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_homeplug_av.pcap")
+set_tests_properties(homeplug_av_set_key_req_nw_key_redacted_by_default PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"homeplug_av_setkey_key_type_name\": \"NMK\",.*\"homeplug_av_setkey_peks\": 1,.*\"homeplug_av_setkey_nw_key\": \"\\[REDACTED\\]\",\n *\"homeplug_av_setkey_nw_key_redacted\": true")
+
+# --no-redact recovers the literal cleartext key bytes -- see DecodeOptions::redact_secrets's own
+# comment (decoder.hpp) and decode's own --redact/--no-redact CLI flag (cli_main.cpp).
+add_test(NAME homeplug_av_set_key_req_nw_key_cleartext_with_no_redact
+  COMMAND conduitscope decode --format json --no-redact --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_homeplug_av.pcap")
+set_tests_properties(homeplug_av_set_key_req_nw_key_cleartext_with_no_redact PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"homeplug_av_setkey_nw_key\": \"101112131415161718191a1b1c1d1e1f\",\n *\"homeplug_av_setkey_nw_key_redacted\": false")
+
+# The second, more specific curated note -- only for a DAK/NMK key exchange, in addition to the
+# general presence note every recognized frame gets.
+add_test(NAME homeplug_av_set_key_req_key_exchange_note
+  COMMAND conduitscope decode --format text --verbose --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_homeplug_av.pcap")
+set_tests_properties(homeplug_av_set_key_req_key_exchange_note PROPERTIES
+  PASS_REGULAR_EXPRESSION "note: HomePlug AV network key exchange observed \\(key_type=NMK\\) -- see this codebase's own general redaction posture")
+
+add_test(NAME homeplug_av_brg_info_cnf_bridging_and_station_macs_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_homeplug_av.pcap")
+set_tests_properties(homeplug_av_brg_info_cnf_bridging_and_station_macs_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"homeplug_av_brg_is_bridging\": true,\n *\"homeplug_av_brg_tei\": 5,.*\"homeplug_av_brg_station_macs\": \\[\"aa:bb:cc:dd:ee:11\", \"aa:bb:cc:dd:ee:12\"\\]")
+
+# An MMTYPE outside the curated name table degrades to a generic "MMTYPE 0xNNNN (kind=...,
+# category=...)" fallback rather than a decode failure.
+add_test(NAME homeplug_av_unclassified_mmtype_generic_fallback_name
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_homeplug_av.pcap")
+set_tests_properties(homeplug_av_unclassified_mmtype_generic_fallback_name PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[homeplug-av\\]  HomePlug AV v1\\.0 MMTYPE 0x6050 \\(kind=Request, category=STA - STA\\)")
+
+# MMV==0x00 + Vendor-Specific category: the short, 3-byte, no-FMI/FMSN header -- OUI at offset 3-5,
+# payload at offset 6. The trickiest edge case in this wire format; checked field-by-field.
+add_test(NAME homeplug_av_short_header_vendor_specific_oui_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_homeplug_av.pcap")
+set_tests_properties(homeplug_av_short_header_vendor_specific_oui_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"homeplug_av_header_size\": 6,\n *\"homeplug_av_has_fmi_fmsn\": false,\n *\"homeplug_av_has_oui\": true,\n *\"homeplug_av_oui\": \"00b052\",\n *\"homeplug_av_oui_vendor\": \"Qualcomm Atheros\",\n *\"homeplug_av_payload_length\": 4,")
+
+# MMV==0x01 + Manufacturer-Specific category: the full 5-byte header PLUS an additional 3-byte OUI
+# at offset 5-7, payload at offset 8. The other tricky edge case.
+add_test(NAME homeplug_av_five_byte_header_plus_extra_oui_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_homeplug_av.pcap")
+set_tests_properties(homeplug_av_five_byte_header_plus_extra_oui_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"homeplug_av_header_size\": 8,\n *\"homeplug_av_has_fmi_fmsn\": true,.*\"homeplug_av_has_oui\": true,\n *\"homeplug_av_oui\": \"0080e1\",\n *\"homeplug_av_oui_vendor\": \"ST/IoTecha\",\n *\"homeplug_av_payload_length\": 3,")
+
+# An unrecognized MMV (0x03) degrades to an "unrecognized version" note rather than being silently
+# mislabeled 1.0/1.1/2.0.
+add_test(NAME homeplug_av_unrecognized_mmv_note_not_mislabeled
+  COMMAND conduitscope decode --format text --verbose --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_homeplug_av.pcap")
+set_tests_properties(homeplug_av_unrecognized_mmv_note_not_mislabeled PROPERTIES
+  PASS_REGULAR_EXPRESSION "HomePlug AV 0x03 \\(unrecognized version\\) CC_DISCOVER_LIST\\.REQ.*\n.*note: MMV 0x03 is not one of the three recognized HomePlug AV versions")
+
+# The general curated "hardware class present" note fires on every recognized frame -- not only
+# the key-exchange message (Jurgen's own choice, see docs/DEVELOPMENT.md ROADMAP item 26).
+add_test(NAME homeplug_av_presence_note_fires_on_every_frame
+  COMMAND conduitscope decode --format text --verbose --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_homeplug_av.pcap")
+set_tests_properties(homeplug_av_presence_note_fires_on_every_frame PROPERTIES
+  PASS_REGULAR_EXPRESSION "note: Consumer/SOHO-grade powerline networking equipment.*note: Consumer/SOHO-grade powerline networking equipment.*note: Consumer/SOHO-grade powerline networking equipment.*note: Consumer/SOHO-grade powerline networking equipment.*note: Consumer/SOHO-grade powerline networking equipment.*note: Consumer/SOHO-grade powerline networking equipment.*note: Consumer/SOHO-grade powerline networking equipment")
+
+add_test(NAME homeplug_av_protocol_filter_excludes_other_protocols
+  COMMAND conduitscope decode --format text --protocol homeplug-av --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_homeplug_av.pcap")
+set_tests_properties(homeplug_av_protocol_filter_excludes_other_protocols PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[homeplug-av\\].*\\[homeplug-av\\].*\\[homeplug-av\\].*\\[homeplug-av\\].*\\[homeplug-av\\].*\\[homeplug-av\\].*\\[homeplug-av\\]")
+
+add_test(NAME homeplug_av_stats_protocol_count
+  COMMAND conduitscope decode --stats --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_homeplug_av.pcap")
+set_tests_properties(homeplug_av_stats_protocol_count PROPERTIES
+  PASS_REGULAR_EXPRESSION "homeplug-av +7")

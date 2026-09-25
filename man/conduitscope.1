@@ -503,7 +503,7 @@ regardless of where it's being analyzed \-\- an extension beyond what
 tshark/tcpdump themselves offer. See \fBdocs/USER_GUIDE.md\fR's OUTPUT
 FORMATS "Timestamps" subsection.
 .TP
-.B \-\-protocol {auto,modbus,dnp3,iec104,s7comm,s7comm\-plus,mms,enip,twincat,melsec,fins,bgp,kerberos,ldap,smb,profinet,goose,sv,ethercat,stp,devicenet,canopen,j1939,bacnet,hartip,opcua,mqtt,ff\-hse,dns,mdns,llmnr,nbns,doh,rip,igmp,vrrp,hsrp,igrp,pim,eigrp,ospf,remote\-access,lateral\-movement,enterprise\-trust,eapol,wireless\-backhaul,pppoe,tunnel\-vpn,mpls,arp,lldp,slow\-protocols,winrm,dcom,ge\-srtp,bsap,cclink\-ie,codesys,coap,zigbee,cdp,rmcp,asf,ipmi,amqp091,amqp10,dicom,powerlink,fox,icmpv6,dhcpv6}
+.B \-\-protocol {auto,modbus,dnp3,iec104,s7comm,s7comm\-plus,mms,enip,twincat,melsec,fins,bgp,kerberos,ldap,smb,profinet,goose,sv,ethercat,stp,devicenet,canopen,j1939,bacnet,hartip,opcua,mqtt,ff\-hse,dns,mdns,llmnr,nbns,doh,rip,igmp,vrrp,hsrp,igrp,pim,eigrp,ospf,remote\-access,lateral\-movement,enterprise\-trust,eapol,wireless\-backhaul,pppoe,tunnel\-vpn,mpls,arp,lldp,slow\-protocols,winrm,dcom,ge\-srtp,bsap,cclink\-ie,codesys,coap,zigbee,cdp,rmcp,asf,ipmi,amqp091,amqp10,dicom,powerlink,fox,icmpv6,dhcpv6,homeplug\-av}
 Restrict decoding to one protocol. Default: auto (tries all fourteen TCP
 protocols, independent of port number, plus CIP I/O, BACnet/IP, HART-IP, and
 FF-HSE on every
@@ -817,6 +817,29 @@ authentication mechanism (\fBn4digest\fR/SCRAM\-SHA, confirmed to exist
 by name only) is decoded or guessed at. \fB\-\-fox\-port\fR widens
 \fBauto\fR-mode detection to further ports. See
 \fBdocs/PROTOCOL_COVERAGE.md\fR's Fox section for the full writeup.
+\fBhomeplug\-av\fR (HomePlug AV/AV2 consumer/SOHO powerline networking,
+EtherType \fB0x88E1\fR \-\- also covers devolo's "dLAN" product line, a
+standard HomePlug AV/AV2 device on the wire, not a separate protocol).
+The MME header is 3 bytes (no FMI/FMSN) for MMV=0x00
+Manufacturer\-/Vendor\-Specific messages, 5 bytes otherwise, plus an
+additional 3\-byte OUI for any Manufacturer\-/Vendor\-Specific message
+(named for two confirmed OUIs, Qualcomm Atheros and ST/IoTecha).
+MMTYPE's Kind/Category bitfields are always decoded; a curated,
+deliberately non\-exhaustive name table covers roughly 35 MMTYPE values
+(discovery, bridging, key management, network/link stats, CCo
+election) \-\- anything else falls back to a generic name rather than
+failing. \fBCC_DISCOVER_LIST.CNF\fR's station MAC/network ID lists,
+\fBCM_SET_KEY.REQ\fR's key\-exchange fields (its own 16\-byte
+\fBnw_key\fR redacted by default, \fB\-\-no\-redact\fR to reveal it), and
+\fBCM_BRG_INFO.CNF\fR's bridge/station list are fully field\-decoded;
+every other message is named only. A curated note fires on every
+recognized frame (consumer/SOHO powerline gear's own documented
+security history \-\- default/weak enrollment secrets, and for devolo's
+gear specifically, weak web/telnet management interfaces neither
+visible in this wire protocol itself), plus a second note naming the
+key type on a DAK/NMK key exchange. See
+\fBdocs/PROTOCOL_COVERAGE.md\fR's HomePlug AV section for the full
+writeup.
 \fBigmp\fR (IP protocol 2), \fBvrrp\fR (IP protocol 112), \fBigrp\fR (IP
 protocol 9), \fBpim\fR (IP protocol 103), \fBeigrp\fR (IP protocol 88), and
 \fBospf\fR (IP protocol 89) need no port gate or option at all \-\- all six

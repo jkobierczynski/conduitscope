@@ -147,6 +147,7 @@ real-capture validation provenance.
 | Tridium Niagara Fox | Building-automation-system (BAS) stations | TCP 1911 (cleartext), + TCP 4911 (FOXS/TLS, detection only) | Line-oriented header+tuple grammar decode (generic `key=type:value`, incl. nested messages), curated `fox hello` identity fields, unauthenticated-hello-exchange headline finding, hostAddress-vs-peer-IP mismatch finding -- see docs for confidence tiers (single/double-source, reverse-engineered protocol) |
 | ICMPv6 / NDP | IPv6 control plane (Neighbor Discovery, SLAAC) | IP protocol 58 | RFC 4443 base header, RFC 4861 Router/Neighbor Solicitation/Advertisement + Redirect, RFC 4862 SLAAC prefix detection, NDP option walk (link-layer address, Prefix Information, MTU, RDNSS, Route Information), pseudo-header checksum verification |
 | DHCPv6 | IPv6 stateful address/prefix assignment | UDP 546/547 | RFC 8415 all 13 message types, RELAY-FORW/REPL header, IA_NA/IA_TA/IA_PD + IA Address/IA Prefix, Status Code, all 4 DUID formats (LLT/EN/LL/UUID, RFC 6355) |
+| HomePlug AV / AV2 (incl. devolo dLAN) | Consumer/SOHO powerline networking | EtherType `0x88E1` | MME header incl. MMV/header-size edge cases, curated MMTYPE table, CC_DISCOVER_LIST.CNF station/network lists, CM_SET_KEY.REQ (redacted key material), CM_BRG_INFO.CNF, curated hardware-class-presence + key-exchange notes |
 
 A cross-cutting **attack-detection** layer runs over every decoded
 IPv4/TCP/UDP/ICMP packet regardless of which protocol above matched: LAND,
@@ -207,7 +208,7 @@ tunneling) shows up on a segment that shouldn't carry it:
 
 Groundwork / v0.2.5. Every protocol named above is implemented, decoding real
 wire-format fields (not just naming the protocol), and covered by the
-automated test suite -- 1952 tests as of this writing, run via `ctest` after
+automated test suite -- 1967 tests as of this writing, run via `ctest` after
 building (see Building below). Where a real capture was available (public
 ICS-lab collections, vendor-attributed samples, or a live device on real
 hardware), the decoder is validated against it, not just a synthetic

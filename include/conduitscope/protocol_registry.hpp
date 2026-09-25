@@ -47,7 +47,8 @@ namespace conduitscope {
 // cascade afterward, NOT as part of migration batch 3 or any other migration -- each a brand-new
 // protocol built directly on ProtocolDecoder from inception (see arp.hpp/lldp.hpp/
 // slow_protocols.hpp/cdp.hpp), the same "new addition, not a migration" posture TwinCAT/MELSEC/FINS
-// established for their own cascades.
+// established for their own cascades. HomePlug AV (homeplug_av.hpp, ROADMAP item 26) joins this
+// cascade right after CDP, the identical "brand-new protocol, appended after the batch" posture.
 const std::vector<const ProtocolDecoder*>& ethertype_registry();
 
 // Migrated IP-protocol-number-gated protocols, in the order their decoder.cpp call sites run. Fully
