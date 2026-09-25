@@ -361,6 +361,126 @@ if(CONDUITSCOPE_ENABLE_FUZZING)
   add_conduitscope_fuzzer(iec104)
   add_conduitscope_fuzzer(enip)
   add_conduitscope_fuzzer(s7comm_plus)
+  # Third wave: eight more dedicated harnesses -- five GateKind::TcpPort decoders parsed
+  # directly off a raw TCP payload on a specific port (dcom/dicom/fox/ge_srtp/winrm), the two
+  # AMQP wire formats sharing one TCP port and one connection-preamble parser (amqp091/
+  # amqp10 -- each harness also drives amqp_common.hpp own try_parse_amqp_preamble directly,
+  # since neither frame-level entry point reaches it on its own; see fuzz_amqp091.cpp own file
+  # header for the full amqp_common decision, and why no separate fuzz_amqp_common target was
+  # added), and the DNS-over-HTTPS TLS-SNI detector (tls_sni). See each fuzz_*.cpp own file
+  # header for the exact entry point(s) and reasoning.
+  add_conduitscope_fuzzer(dcom)
+  add_conduitscope_fuzzer(dicom)
+  add_conduitscope_fuzzer(fox)
+  add_conduitscope_fuzzer(ge_srtp)
+  add_conduitscope_fuzzer(winrm)
+  add_conduitscope_fuzzer(amqp091)
+  add_conduitscope_fuzzer(amqp10)
+  add_conduitscope_fuzzer(tls_sni)
+  # Fourth wave: the eight GateKind::IpProtocol decoders dispatched directly off the IP payload
+  # by protocol number, no TCP/UDP header involved. See each fuzz_*.cpp own file header for the
+  # exact entry point and, for icmpv6/igrp, the extra context (pseudo-header addresses / source
+  # IP) each one needs beyond a bare ByteSpan.
+  add_conduitscope_fuzzer(icmp)
+  add_conduitscope_fuzzer(icmpv6)
+  add_conduitscope_fuzzer(igmp)
+  add_conduitscope_fuzzer(igrp)
+  add_conduitscope_fuzzer(ospf)
+  add_conduitscope_fuzzer(pim)
+  add_conduitscope_fuzzer(vrrp)
+  add_conduitscope_fuzzer(eigrp)
+  # Fifth wave: eleven more UDP/EtherType-gated decoders. bsap/coap/dhcpv6/dns/hsrp/nbns/rip/rmcp
+  # are single-UDP-payload entry points; cclink_ie exposes four narrow (parser, expected-kind)
+  # combinations fuzzed unconditionally in one harness; powerlink is dual-gated (EtherType 0x88AB
+  # and UDP port 3819) but funnels through one shared try_parse_powerlink entry point, so its
+  # corpus (not its call count) is what carries the dual coverage; quic loops several
+  # representative (src_port, dst_port, extra_ports) combinations against try_recognize_quic
+  # since QUIC has no single fixed port. See each fuzz_*.cpp own file header for details.
+  add_conduitscope_fuzzer(bsap)
+  add_conduitscope_fuzzer(cclink_ie)
+  add_conduitscope_fuzzer(coap)
+  add_conduitscope_fuzzer(dhcpv6)
+  add_conduitscope_fuzzer(dns)
+  add_conduitscope_fuzzer(hsrp)
+  add_conduitscope_fuzzer(nbns)
+  add_conduitscope_fuzzer(powerlink)
+  add_conduitscope_fuzzer(quic)
+  add_conduitscope_fuzzer(rip)
+  add_conduitscope_fuzzer(rmcp)
+  # Sixth wave: thirteen GateKind::TcpPortIndependent decoders (including modbus itself, which --
+  # somewhat surprisingly -- was never in the original five-target plan despite being one of the
+  # most foundational protocols in this codebase) plus six dual TCP+UDP protocol modules
+  # (codesys/ffhse/fins/hartip/kerberos/melsec -- see each fuzz_*.cpp own file header for whether
+  # that module's TCP and UDP sides converge on one shared parse function or are genuinely
+  # distinct entry points) and mms, which rides the same TPKT/COTP framing s7comm does and is
+  # built exactly like fuzz_cotp_s7comm.cpp's own two-stage shape.
+  add_conduitscope_fuzzer(bgp)
+  add_conduitscope_fuzzer(ldap)
+  add_conduitscope_fuzzer(modbus)
+  add_conduitscope_fuzzer(opcua)
+  add_conduitscope_fuzzer(smb)
+  add_conduitscope_fuzzer(twincat)
+  add_conduitscope_fuzzer(codesys)
+  add_conduitscope_fuzzer(ffhse)
+  add_conduitscope_fuzzer(fins)
+  add_conduitscope_fuzzer(hartip)
+  add_conduitscope_fuzzer(kerberos)
+  add_conduitscope_fuzzer(melsec)
+  add_conduitscope_fuzzer(mms)
+  # Seventh wave: the thirteen remaining GateKind::EtherType decoders (the fourth wave covered
+  # GateKind::IpProtocol; this covers the rest of the raw-EtherType-gated set). cdp and stp are
+  # not dispatched off a plain EtherType at all -- both ride 802.2 LLC/SNIC framing (CDP: DSAP=
+  # SSAP=0xAA, OUI 00:00:0C, PID 0x2000; STP: DSAP=SSAP=0x42, Control=0x03) on top of an Ethernet
+  # frame with a length field instead of an EtherType, so their harnesses fuzz the LLC-stripped
+  # payload the same way an EtherType-gated one fuzzes the EtherType payload. slow_protocols is a
+  # single try_parse_slow_protocols entry point that internally dispatches LACP/Marker/OAM by its
+  # own Subtype byte, not three separate entries. pppoe's entry point takes a second bool
+  # parameter (is_session_ethertype, for PPPoE Discovery vs. Session) looped over both values. See
+  # each fuzz_*.cpp own file header for the exact entry point and sample-fixture source.
+  add_conduitscope_fuzzer(arp)
+  add_conduitscope_fuzzer(cdp)
+  add_conduitscope_fuzzer(eapol)
+  add_conduitscope_fuzzer(ethercat)
+  add_conduitscope_fuzzer(goose)
+  add_conduitscope_fuzzer(homeplug_av)
+  add_conduitscope_fuzzer(lldp)
+  add_conduitscope_fuzzer(mpls)
+  add_conduitscope_fuzzer(pppoe)
+  add_conduitscope_fuzzer(profinet)
+  add_conduitscope_fuzzer(slow_protocols)
+  add_conduitscope_fuzzer(stp)
+  add_conduitscope_fuzzer(sv)
+  # Eighth wave: the six GateKind::LinkType decoders -- non-Ethernet captures (SocketCAN,
+  # IEEE 802.15.4) where the captured frame itself, not an EtherType/IP-protocol/TCP-or-UDP
+  # payload, is what a try_parse_X(ByteSpan) expects. devicenet and canopen are, like j1939 and
+  # zigbee, two-stage entry points (try_parse_X(const CanSocketcanFrame&), confirmed directly
+  # against src/devicenet.cpp and src/canopen.cpp) built on top of a parsed CAN frame rather than
+  # raw bytes -- each harness parses the fuzzer input as a SocketCAN frame first via
+  # try_parse_can_socketcan, exactly as decoder.cpp itself does, before handing it to the
+  # second-stage parser.
+  add_conduitscope_fuzzer(can_socketcan)
+  add_conduitscope_fuzzer(canopen)
+  add_conduitscope_fuzzer(devicenet)
+  add_conduitscope_fuzzer(ieee802154)
+  add_conduitscope_fuzzer(j1939)
+  add_conduitscope_fuzzer(zigbee)
+  # Ninth wave: the Windows Active Directory / DCE-RPC suite -- the generic connection-oriented
+  # DCE/RPC PDU reader (dcerpc) plus the five named-pipe-riding interfaces built on top of it
+  # (netlogon/samr/lsarpc/srvsvc/wkssvc share smb.hpp's pipe dispatch; drsuapi likewise) and the
+  # NTLMSSP authentication-blob scanner (ntlm), which is reached from several different transports
+  # rather than one gated entry point. Seed corpora for the five RPC interfaces were extracted by
+  # "dogfooding" this project's own already-correct decode path (try_parse_smb ->
+  # parse_dcerpc_chain -> per-interface classification by UUID) against real captured SMB2
+  # traffic, rather than hand-slicing NDR-encoded bytes, to guarantee every seed is a genuine,
+  # boundary-correct stub payload. See each fuzz_*.cpp own file header for its exact entry point.
+  add_conduitscope_fuzzer(dcerpc)
+  add_conduitscope_fuzzer(ntlm)
+  add_conduitscope_fuzzer(netlogon)
+  add_conduitscope_fuzzer(samr)
+  add_conduitscope_fuzzer(lsarpc)
+  add_conduitscope_fuzzer(srvsvc)
+  add_conduitscope_fuzzer(wkssvc)
+  add_conduitscope_fuzzer(drsuapi)
 endif()
 
 add_test(NAME decode_modbus_sample

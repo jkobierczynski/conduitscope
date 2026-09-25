@@ -9470,6 +9470,128 @@ deferred future migration.
     -- see `hartip.hpp`'s own updated "Structural detection gate"
     section for the full, current picture of all three.
 
+56. **Fuzzing hardening: a dedicated libFuzzer harness for every protocol
+    decoder in the codebase.** **Done.** Jurgen asked whether all the new
+    decoders that had landed over the course of this project's protocol
+    additions had gotten fuzzers, and the honest answer was no: only 17
+    (`pcap_reader`/`packet_decode`/`dnp3`/`cotp_s7comm`/`mqtt`, the second
+    wave of four, and the third wave of eight) had a dedicated harness out
+    of 76 real parsing entry points in the codebase -- meaning 59 decoders,
+    including foundational ones (Modbus itself was never in the original
+    priority list) and the entire Windows Active Directory/DCE-RPC suite,
+    were reachable ONLY through `fuzz_packet_decode`'s own full-pipeline
+    dispatch, several protocol-specific "hand-rolled length/state-machine"
+    layers deep and reached in far fewer iterations per unit of fuzzing
+    time than a direct harness gives them. Asked to scope this (highest-
+    risk-first vs. today's-new-protocols-only vs. everything), Jurgen chose
+    everything, in one systematic batch.
+
+    The remaining 59 decoders were organized into six more waves by
+    `GateKind` (see `protocol_decoder.hpp`), matching the existing harnesses'
+    own wave numbering: the eight `GateKind::IpProtocol` decoders (ICMP,
+    ICMPv6, IGMP, IGRP, OSPF, PIM, VRRP, EIGRP); eleven more UDP/EtherType-
+    gated decoders (BSAP, CC-Link IE, CoAP, DHCPv6, DNS/mDNS/LLMNR, HSRP,
+    NBNS, POWERLINK, QUIC, RIP, RMCP); thirteen `GateKind::TcpPortIndependent`
+    decoders including Modbus itself plus six dual TCP+UDP modules and MMS
+    (BGP, LDAP, Modbus, OPC UA, SMB, TwinCAT, CODESYS, FF-HSE, FINS,
+    HART-IP, Kerberos, MELSEC, MMS); the thirteen remaining
+    `GateKind::EtherType` decoders (ARP, CDP, EAPOL, EtherCAT, GOOSE,
+    HomePlug AV, LLDP, MPLS, PPPoE, PROFINET, Slow Protocols, STP, Sampled
+    Values -- two of which, CDP and STP, don't ride a plain EtherType at
+    all but 802.2 LLC/SNAP framing, requiring LLC-aware seed extraction
+    rather than the usual EtherType-filtered kind); the six
+    `GateKind::LinkType` decoders for non-Ethernet captures (CAN/SocketCAN
+    framing itself, CANopen, DeviceNet, IEEE 802.15.4, J1939, Zigbee); and
+    the Windows Active Directory/DCE-RPC suite (the shared, interface-
+    agnostic DCE/RPC envelope, NTLM, and the five named-pipe RPC interfaces
+    riding on top of it -- Netlogon, SAMR, LSARPC, SRVSVC, WKSSVC, DRSUAPI).
+    Every harness follows the established house pattern exactly: an SPDX
+    header, a file-header comment stating what's fuzzed and what's
+    explicitly out of scope, a bare `LLVMFuzzerTestOneInput` calling the
+    protocol's real `try_parse_*` entry point(s) directly (never assumed --
+    each one was cross-checked against its own header and against
+    `decoder.cpp`'s/`smb.cpp`'s real call site), wrapped in
+    `try { ... } catch (const conduitscope::ParseError&) {}` so ASan/UBSan
+    still see genuine memory-safety bugs, and a real seed corpus extracted
+    from this project's own `tests/sample_*.pcap`/`tests/real_captures/`
+    fixtures -- never hand-fabricated bytes. A new tool,
+    `tools/extract_fuzz_corpus.py`, was written to do this extraction
+    systematically (classic pcap + pcapng, four link-layer strip modes --
+    `l4`/`l3`/`l2`/`raw` -- matching each decoder's own `GateKind`), and was
+    also used to backfill real seed corpora for the *original* nine
+    harnesses, eight of which turned out to have an empty
+    `fuzz/corpus/<name>/` directory on disk despite `fuzz/README.md`
+    describing real campaign corpora for all of them -- meaning only
+    `fuzz_packet_decode_corpus_regression` was actually registering as a
+    CTest entry (`ctest -N -R "^fuzz_"` showed `Total Tests: 1`, not 9)
+    before this was caught and fixed.
+
+    Two entry points needed something beyond a bare `ByteSpan` to reach
+    their full parsing surface, handled the same "loop over a small set of
+    representative values against the same input" way `fuzz_mqtt.cpp`'s own
+    `session_version_hint` loop already does in this codebase:
+    `try_parse_pppoe` takes an `is_session_ethertype` bool (both values
+    exercised); `try_parse_devicenet`/`try_parse_canopen`/`try_parse_j1939`
+    take an already-parsed `CanSocketcanFrame`, not raw bytes, so each of
+    those three harnesses is two-stage (`parse_socketcan_frame` first, then
+    the protocol parser on the result) -- devicenet and canopen turned out
+    to share this two-stage shape with j1939/zigbee, confirmed directly
+    against `src/devicenet.cpp`/`src/canopen.cpp` rather than assumed from
+    the original scoping. Netlogon/SAMR/LSARPC/SRVSVC/WKSSVC/DRSUAPI each
+    loop their own harness over EVERY opnum their own `*_opnum_name_raw`
+    table names, both request and response, and both `sealed` values --
+    reaching that many more distinct opnum-specific code paths per fuzzer
+    input than a typical single-entry-point harness here, and their five
+    seed corpora were extracted by "dogfooding" this project's own already-
+    correct decode path (`try_parse_smb` -> `parse_dcerpc_chain` -> per-
+    interface classification by UUID) against real captured SMB2 traffic,
+    rather than risk hand-slicing NDR-encoded stub bytes incorrectly.
+
+    Building all 67 new-or-backfilled harnesses in parallel subagents hit
+    one real infrastructure problem worth recording: this repository's git
+    history is nearly empty relative to its actual working tree (~400 files
+    of real work were never committed, predating this project's current
+    development discipline), so every worktree-isolated subagent checked
+    out a broken, near-empty tree instead of the real one. Three of the
+    seven parallel batches (the EtherType, LinkType, and Windows AD/RPC
+    waves, 27 harnesses) failed outright for this reason and had to be
+    redispatched without isolation -- working directly in the main tree,
+    restricted by instruction to only create new files and verify via
+    direct `clang++` compilation against a prebuilt `libconduitscope_core.a`
+    rather than touch any shared file -- which succeeded cleanly for all
+    three.
+
+    **No functional bugs were found by any of the 76 harnesses** -- every
+    decoder, including the newly-covered Windows AD/RPC suite and the
+    non-Ethernet CAN-bus/802.15.4 decoders, handled adversarial input
+    correctly across both the 10-second CTest corpus-regression check every
+    harness now has and standalone 30-second bursts (millions of
+    executions each) run against a representative sample spanning all six
+    new waves. This is a genuinely different outcome from the original
+    nine-harness effort, which found three real bugs (the
+    `reassemble_tcp_payload` unbounded-buffering gap, an `INT32_MIN`-
+    negation UB, and `bacnet.cpp`'s signed-left-shift UB -- all already
+    fixed, see the "Fuzzing campaign log" above) -- an honest result, not a
+    sign this pass was less thorough: those three bugs lived in older,
+    less-scrutinized code, whereas most of the newly-harnessed decoders are
+    comparatively recent and had already been through this project's own
+    "confirm the collision existed" and pinning-test discipline during
+    their original development.
+
+    Verification: `CMakeLists.txt` grew from 9 to 76
+    `add_conduitscope_fuzzer(...)` registrations; a full clean rebuild under
+    `-DCONDUITSCOPE_ENABLE_FUZZING=ON` (Clang, `-fsanitize=address,undefined`
+    on `conduitscope_core` itself, `-fsanitize=fuzzer,address,undefined` per
+    harness) produced all 76 executables with the same 4 pre-existing,
+    unrelated unused-variable warnings this codebase already had
+    (`pcap_reader.cpp`/`canopen.cpp`/`zigbee.cpp`/`ldap.cpp`) and zero new
+    ones; `ctest -R "^fuzz_"` passed all 76 `fuzz_*_corpus_regression`
+    tests; the full default (non-sanitizer) Release build and its complete
+    CTest suite passed the exact same 1968/1968 as the pre-batch baseline,
+    zero regressions. `fuzz/README.md`'s harness table and intro paragraph
+    were updated to describe all 76 harnesses; `fuzz/corpus/` now holds a
+    real, extracted (never fabricated) seed corpus for every one of them.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols
