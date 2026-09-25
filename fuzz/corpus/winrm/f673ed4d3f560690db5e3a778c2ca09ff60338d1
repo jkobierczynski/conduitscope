@@ -1,0 +1,5 @@
+POST wman HTTP/2.1
+Content-Type: application/soap+xmliv
+Authorization:Basic 
+
+s40<:Action >/Command<:Command><s:Fault>><l

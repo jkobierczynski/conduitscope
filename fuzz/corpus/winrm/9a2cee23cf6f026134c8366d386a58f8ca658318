@@ -1,0 +1,4 @@
+POST HTTP/1.
+Content-Type:application/soap+xml
+
+<Filter>s//CÿÿÿÿÿÿÿTypes
