@@ -89,7 +89,22 @@ Amqp10Value read_amqp10_array(Cursor& c, size_t depth, int size_width) {
 
     Amqp10Value v;
     v.is_array = true;
-    for (uint32_t i = 0; i < count; ++i) {
+    // `count` is fully attacker-controlled (up to UINT32_MAX) and, UNLIKE read_amqp10_list_or_map
+    // just above, cannot be relied on to self-limit via ac.at_end(): every list/map element reads
+    // its OWN constructor byte first, so lc.at_end() is guaranteed to fire within region.size()
+    // iterations regardless of what `count` claims -- but an array's elements all share ONE
+    // constructor read ONCE above, and several AMQP 1.0 primitive constructors (null=0x40,
+    // true=0x41, false=0x42, uint0=0x43, ulong0=0x44, list0=0x45, ...) are zero-width: nothing
+    // read after the constructor. If `elem_ctor` names one of those, read_amqp10_value_body
+    // consumes zero bytes from `ac` per call, so ac.at_end() never becomes true and this loop was
+    // previously driven by `count` alone -- a real crash libFuzzer's fuzz_amqp10 harness found (a
+    // few hundred bytes of input declaring a huge count drove std::vector<Amqp10Value>::push_back
+    // to an out-of-memory abort). Capped here the same way ~15 other decoders in this codebase
+    // already cap an attacker-declared element/entry count (see resource_limits.hpp's own
+    // max_decoded_objects doc comment for the full list) -- this bounds memory to a constant
+    // regardless of the declared count OR the element type's own width.
+    const size_t kMaxArrayElements = resource_limits().max_decoded_objects.value_or(50);
+    for (uint32_t i = 0; i < count && v.elements.size() < kMaxArrayElements; ++i) {
         if (ac.at_end()) break;
         v.elements.push_back(read_amqp10_value_body(ac, elem_ctor, depth + 1));
     }

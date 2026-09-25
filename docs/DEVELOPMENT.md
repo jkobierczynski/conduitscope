@@ -9684,6 +9684,71 @@ deferred future migration.
     pass after the fix, with a full clean rebuild of `conduitscope_core`
     and all 76 fuzz targets showing zero new warnings.
 
+58. **Fix: `fuzz_amqp10` found a real crash -- an out-of-memory abort from
+    unbounded array-element growth in `read_amqp10_array`.** **Fixed.** A
+    second real payoff from item 56's fuzzing hardening batch, reported
+    right alongside item 57's Fox crash: `fuzz_amqp10` found an OOM abort
+    (libFuzzer's own detector, `malloc(2684354560)` -- 2.5GB), reproduced
+    directly against the harness and confirmed to also reach
+    `conduitscope decode` on an equivalent hand-built capture, i.e. this
+    was reachable from real traffic, not just from the harness's own
+    entry point.
+
+    Root cause: AMQP 1.0's `array` wire encoding (`array8`/`array32`) is a
+    genuine format optimization over `list`/`map` -- every element shares
+    ONE constructor byte, read once, rather than each element carrying its
+    own. `read_amqp10_array` (`src/amqp10.cpp`) reads that one shared
+    `elem_ctor` and then loops `count` times (an attacker-controlled
+    `uint32_t`, up to `UINT32_MAX`) calling `read_amqp10_value_body`
+    directly for each element. The sibling function
+    `read_amqp10_list_or_map`, just above it in the same file, is naturally
+    safe from the same attacker-controlled `count`: every list/map element
+    reads its OWN constructor byte via `read_amqp10_value`, so its cursor's
+    `at_end()` is guaranteed to fire within the declared region's byte size
+    regardless of what `count` claims. Arrays have no such guarantee: several
+    AMQP 1.0 primitive constructors are zero-width on the wire (`null`=0x40,
+    `true`=0x41, `false`=0x42, `uint0`=0x43, `ulong0`=0x44, `list0`=0x45) --
+    if `elem_ctor` names one of these, `read_amqp10_value_body` consumes
+    zero bytes per call, the array's cursor never reaches `at_end()`, and
+    the loop was previously driven by the declared `count` alone. A few
+    hundred bytes declaring a `count` near `UINT32_MAX` with a `null`
+    element constructor drove `std::vector<Amqp10Value>::push_back` to grow
+    without bound until the process aborted on an out-of-memory allocation.
+
+    Fixed by capping the loop with `resource_limits().max_decoded_objects`,
+    the same convention already used by ~15 other decoders in this codebase
+    (`pim.cpp`, `ospf.cpp`, `rip.cpp`, `bgp.cpp`, `iec104.cpp`,
+    `icmpv6.cpp`, `modbus.cpp`, `enip.cpp`, `lsarpc.cpp`, `samr.cpp`,
+    `dhcpv6.cpp`, `codesys.cpp`, and others) to bound exactly this
+    "attacker-declared count field drives a loop" shape -- not previously
+    applied anywhere in `amqp10.cpp`. The loop now also still breaks on
+    `ac.at_end()` for well-formed arrays whose elements are not zero-width,
+    so no behavior changed for any legitimate array payload; only a
+    declared count that would grow the vector past the shared cap (default
+    50, same default every other decoder using this knob gets) is now
+    truncated rather than driving unbounded allocation.
+
+    Verification: the exact fuzzer-minimized crash bytes now execute
+    cleanly through the harness (confirmed directly with
+    `-rss_limit_mb=1024`, and via a fresh 60-second standalone burst
+    against `fuzz_amqp10`'s full corpus -- ~1.6M executions, zero crashes)
+    and are kept as a permanent regression seed
+    (`fuzz/corpus/amqp10/seed_regression_array_huge_count_zero_width_crash.bin`,
+    alongside a clean hand-built equivalent,
+    `seed_regression_array_huge_count_zero_width_clean.bin`); a new
+    synthetic session (packets #28-#29) in `build_amqp10_sample()`
+    (`tools/make_sample_pcap.py`, via the new
+    `amqp10_array32_null_huge_count` helper) reproduces the same shape at
+    the `conduitscope decode` CLI level and is pinned by a new CTest entry,
+    `amqp10_array_huge_count_zero_width_element_does_not_crash`, asserting
+    the frame decodes cleanly as `[amqp10] AMQP transfer (handle=?),
+    channel 1` rather than crashing the process. Full default suite:
+    1970/1970 (one new test, zero regressions elsewhere -- confirmed by
+    diffing against the exact same 1969/1969 baseline item 57 already
+    established); all 76 `fuzz_*_corpus_regression` CTest entries still
+    pass after the fix, with a full clean rebuild of `conduitscope_core`
+    and all 76 fuzz targets showing zero new warnings.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

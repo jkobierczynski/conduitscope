@@ -17469,6 +17469,20 @@ def amqp10_array8_sym(strings) -> bytes:
     return b"\xe0" + bytes([len(inner)]) + inner
 
 
+def amqp10_array32_null_huge_count(count: int) -> bytes:
+    """array32 (0xf0) with a declared element count of `count` and a shared constructor of
+    null (0x40) -- a ZERO-WIDTH primitive, so no element bytes follow at all (0 bytes remain in
+    the array's own region after the 4-byte count + 1-byte constructor). Regression case for a
+    real crash libFuzzer's fuzz_amqp10 harness found: read_amqp10_array's own element loop relied
+    on the region running out of bytes (Cursor::at_end()) to stop, which works for every OTHER
+    AMQP 1.0 array element type (each consumes at least its own encoded bytes) but never fires
+    for a zero-width one -- so `count` alone drove the loop, up to std::vector<Amqp10Value>'s own
+    out-of-memory point for a `count` this large, from well under 200 bytes of actual input. See
+    amqp10.cpp's own kMaxArrayElements comment for the fix."""
+    inner = struct.pack(">I", count) + b"\x40"
+    return b"\xf0" + struct.pack(">I", len(inner)) + inner
+
+
 def amqp10_described(code: int, list_bytes: bytes) -> bytes:
     return b"\x00\x53" + bytes([code]) + list_bytes
 
@@ -17512,7 +17526,10 @@ def build_amqp10_sample():
     frame (keepalive), a connection split across two TCP segments for one frame (exercises
     Amqp10Decoder::tcp_declared_length via Decoder::reassemble_tcp_payload), a mid-stream negative
     control (no preamble ever captured on that session -- must decline to classify at all in Auto
-    mode), and one exchange on a non-standard port (--protocol amqp10 only)."""
+    mode), one exchange on a non-standard port (--protocol amqp10 only), and a regression case (a
+    huge-declared-count array with a zero-width shared element type -- a real crash a longer
+    libFuzzer run found after this fixture's own original build, see amqp10.cpp's own
+    kMaxArrayElements comment)."""
     packets = []
     ident_box = [0xC000]
 
@@ -17638,6 +17655,20 @@ def build_amqp10_sample():
     client6, server6, _ = amqp_tcp_session(packets, ident_box, HMI_MAC, HMI_IP, PLC_MAC, PLC_IP, 55005, 9999)
     client6(AMQP10_PREAMBLE_AMQP)
     server6(amqp10_frame(0, 0, amqp10_described(P10_OPEN, open_resp_list)))
+
+    # 28) & 29) regression: a SEVENTH session whose one frame's performative-list position is,
+    #     instead of an ordinary list, a bare array (0xf0) declaring a huge element count with a
+    #     zero-width (null) shared constructor -- a real crash libFuzzer's fuzz_amqp10 harness
+    #     found (see amqp10_array32_null_huge_count's own docstring and amqp10.cpp's
+    #     kMaxArrayElements comment). This decoder is permissive about value SHAPE at any given
+    #     position (it decodes whatever constructor is actually present rather than enforcing
+    #     "this position must be a list"), which is exactly how the real fuzzer input reached this
+    #     code path too -- reusing P10_TRANSFER's own code here mirrors that.
+    client7, _server7, _ = amqp_tcp_session(packets, ident_box, HMI_MAC, HMI_IP, PLC_MAC, PLC_IP, 55006)
+    client7(AMQP10_PREAMBLE_AMQP)
+    malformed_array_frame = amqp10_frame(
+        0, 1, b"\x00\x53" + bytes([P10_TRANSFER]) + amqp10_array32_null_huge_count(0xFFFFFFFF))
+    client7(malformed_array_frame)
 
     data = pcap_global_header()
     for i, pkt in enumerate(packets):

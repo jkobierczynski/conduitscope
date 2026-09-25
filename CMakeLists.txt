@@ -13588,6 +13588,17 @@ add_test(NAME amqp10_non_standard_port_forced_via_protocol_filter
 set_tests_properties(amqp10_non_standard_port_forced_via_protocol_filter PROPERTIES
   PASS_REGULAR_EXPRESSION "#26  [^\n]*\\[amqp10\\]  AMQP connection preamble: version 1\\.0 \\(AMQP transport layer\\)[^\n]*\n *note: seen on TCP port 55005->9999, which is not a configured/standard AMQP port \\(5672\\)[^\n]*\n#27  [^\n]*\\[amqp10\\]  AMQP open \\(container-id=\"broker-01\"\\), channel 0[^\n]*\n *note: seen on TCP port 9999->55005, which is not a configured/standard AMQP port \\(5672\\)")
 
+# Regression: an array (0xf0) whose shared element constructor is a zero-width AMQP 1.0
+# primitive (null=0x40) previously drove read_amqp10_array's element loop with the
+# attacker-declared `count` alone (each iteration consumed zero bytes from the array's byte
+# region), causing unbounded std::vector<Amqp10Value> growth and an out-of-memory abort -- a
+# real crash libFuzzer's fuzz_amqp10 harness found. A count of 0xFFFFFFFF must now decode as a
+# bounded, capped array with no crash.
+add_test(NAME amqp10_array_huge_count_zero_width_element_does_not_crash
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_amqp10.pcap" --format text -v)
+set_tests_properties(amqp10_array_huge_count_zero_width_element_does_not_crash PROPERTIES
+  PASS_REGULAR_EXPRESSION "#29  [^\n]*\\[amqp10\\]  AMQP transfer \\(handle=\\?\\), channel 1")
+
 # --stats aggregation: per-performative counts and all three curated headline findings.
 add_test(NAME amqp10_stats_performative_counts_and_curated_findings
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_amqp10.pcap" --format text --stats)
