@@ -3499,7 +3499,9 @@ def build_s7comm_1200sym_sample():
     area with sequential LID values that decode to M2.0 through M2.4: a strong
     internal-consistency signal for the reconstructed byte layout (real PLC programs
     commonly batch-read a run of related status bits like this), even though the
-    layout remains unverified against authoritative documentation -- see s7comm.cpp."""
+    layout remains unverified against authoritative documentation -- see s7comm.cpp.
+    Plus two synthetic decode-fallback edge cases and two more synthetic DB-area items --
+    see their own comments below."""
     ENG_IP, ENG_PORT = HMI_IP, 49156
 
     real_items_hex = [
@@ -3517,7 +3519,21 @@ def build_s7comm_1200sym_sample():
         "b2ff0000ffffea2db0d940000010",              # unrecognized area1 (0xffff)
         "b2ff00000052ea2db0d94000001012345678",       # 8 bytes after CRC instead of 4
     ]
-    all_items_hex = real_items_hex + synthetic_edge_cases_hex
+    # Two more synthetic items exercising the DB-area (area1=0x8A0E) shape -- reserved1(2) +
+    # area1(2)=8a0e + db_number(2) + crc(4) + lid_flags(1) + lid_raw(3), 14 bytes total, same
+    # as every other item here. Deliberately two DIFFERENT db_number values (5 and 10) on
+    # purpose: baseline.cpp's extract_s7comm_operations must fold db_number into the
+    # operation_key for a 0xB2 DB item exactly the way it already does for a classic S7ANY one
+    # (s7_area_has_db_number), since item.area itself is never set for a 0xB2 item (see
+    # S7Item::area's own comment) and can't be relied on for that the way it is for S7ANY --
+    # if db_number were dropped from the key, these two items' single-point bit ranges would
+    # wrongly merge into one "Data Block (DB)/bit-symbolic" row instead of staying the two
+    # separate DB5/DB10 rows they actually are.
+    db_area_items_hex = [
+        "b2ff008a0e000511223344400000" "3a",  # -> DB5.DBX7.2
+        "b2ff008a0e000a55667788400000" "a5",  # -> DB10.DBX20.5
+    ]
+    all_items_hex = real_items_hex + synthetic_edge_cases_hex + db_area_items_hex
     items = b"".join(bytes([0x12, len(bytes.fromhex(h))]) + bytes.fromhex(h) for h in all_items_hex)
     read_param = bytes([0x04, len(all_items_hex)]) + items
     read_req = s7_header(0x01, 50, len(read_param), 0) + read_param

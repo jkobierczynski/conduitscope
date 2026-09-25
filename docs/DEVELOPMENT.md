@@ -7773,6 +7773,37 @@ deferred future migration.
     /`observed_ranges: [[0, 1]]` -- exactly the behavior change this follow-up exists to make -- with
     every other S7comm operation in that same test (byte/word/dword) rendering identically to before.
 
+    **Same follow-up, smaller addendum: the 0xB2 (TIA1200SYM) sub-case.** Jurgen then ran `learn`
+    against a real capture (`4SICS-GeekLounge-151021.pcap`) and got 36 Merker-write packets back
+    with no range at all, not even `/bit` -- root-caused to `extract_s7comm_operations` checking
+    `item.is_experimental` *before* `transport_size == 0x01`, and that branch doing nothing, since
+    `item.count` is always unset for a 0xB2 item (`try_decode_tia1200_sym` never sets it). Fixed the
+    same way as Part 1 above, one level further: a successfully-decoded 0xB2 item now gets a
+    single-point `[bit_address, bit_address + 1)` observation (the only thing actually knowable,
+    with no `count` to build a real span from) under its own `/bit-symbolic`-suffixed key -- kept
+    distinct from classic BIT items' `/bit` key on purpose, since a 0xB2 reconstruction is
+    best-effort (`S7Item::is_experimental`'s own comment) and must never silently backstop a verdict
+    alongside confirmed data. Surfaced two real, non-obvious gaps along the way rather than papering
+    over them: `item.area` is never set for a 0xB2 item (confirmed by reading
+    `try_decode_tia1200_sym` end to end), so the existing `s7_area_letter_for_code(item.area)`
+    lookup silently returns `""` for one -- fixed with a second lookup keyed off `item.area_name`
+    instead (`s7_area_letter_for_tia1200sym_item`, an exact match against the same six fixed
+    strings `s7_area_name` already produces for S7ANY, not string-scraping); and the same missing
+    `item.area` meant a DB-area 0xB2 item's `db_number` was never folded into the base
+    operation_key either, which would have silently merged two different DBs' 0xB2 ranges into one
+    row -- fixed alongside the existing `s7_area_has_db_number` check. Zero changes needed to
+    `--symbolic-addresses`'s own rendering (`s7_range_notation` already treats the unit tag as
+    opaque, verified directly, not assumed) or to any other engine code. Full design at
+    `docs/design/baseline-engine.md`'s own "Follow-up" section, Part 3. 6 new CTest entries against
+    `tests/sample_s7comm_1200sym.pcap` (extended with two synthetic DB-area items proving the
+    db_number fix, alongside its five real Merker items and two pre-existing synthetic
+    decode-fallback edge cases): a `learn` spot-check, a clean unmodified-fixture round-trip, text
+    and JSON `--symbolic-addresses` rendering, the flag-off-by-default case, and a mixed-conduit
+    proof that classic-BIT (`/bit`) and 0xB2-symbolic (`/bit-symbolic`) writes to the same nominal
+    area (and DB) produce separate rows, never merged. Full suite: 1900 -> 1906 tests (default
+    config), 1888 -> 1894 (no-live-capture config), zero-warning build in both, confirmed via clean
+    full rebuild in both configs; no version bump (stays v0.2.5).
+
     Still not done, unchanged from Phase 1's own scoping: zone-level baselines, statistical/
     confidence thresholds (see the design doc's own "Explicitly out of scope" section), and
     CODESYS's `CmpIecVarAccess` (still the one confirmed real decode gap, structural-only today).

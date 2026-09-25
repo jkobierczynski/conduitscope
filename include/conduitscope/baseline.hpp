@@ -56,26 +56,32 @@ struct Operation {
     std::string protocol;              // "s7comm" | "modbus" (Phase 1)
     std::string client_ip, server_ip;
     uint16_t server_port = 0;
-    std::string operation_key;         // S7: "<function_name>/<area_name>[/DB<n>][/bit]" -- the
-                                        // trailing "/bit" is appended only for a BIT-transport-size
-                                        // item (see extract_s7comm_operations' own comment for why a
-                                        // bit-addressed item gets its own distinct operation_key
-                                        // rather than sharing one with byte-addressed accesses to the
-                                        // same area+DB).
+    std::string operation_key;         // S7: "<function_name>/<area_name>[/DB<n>][/bit|/bit-symbolic]"
+                                        // -- the trailing "/bit" is appended only for a classic S7ANY
+                                        // BIT-transport-size item; "/bit-symbolic" only for a
+                                        // successfully-decoded 0xB2 (TIA1200SYM) item (see
+                                        // extract_s7comm_operations' own comment for why each gets its
+                                        // own distinct operation_key rather than sharing one with
+                                        // byte-addressed accesses to the same area+DB, or with each
+                                        // other -- a confirmed classic-BIT range and a best-effort
+                                        // single-point 0xB2 reconstruction must never back the same
+                                        // NewTargetRange verdict).
                                         // Modbus: "<function_name>" alone (Phase 1: one address
                                         // space per function, see the design doc)
-    // false for: Modbus (always, until a future phase widens the range model), an S7 item using the
-    // experimental 0xB2 (symbolic) addressing (which carries no transport_size/count at all), an S7
-    // item with an unrecognized transport size or a zero element count, or a Modbus operation whose
-    // function code has no address concept (diagnostics, exception responses, ...). A BIT-transport-
-    // size S7 item DOES get a range now (bit_address units, under its own "/bit"-suffixed
-    // operation_key -- see extract_s7comm_operations' own comment for why bit- and byte-unit ranges
-    // are never compared/merged despite superficially sharing "the same" function+area).
+    // false for: Modbus (always, until a future phase widens the range model), an S7 item with an
+    // unrecognized transport size or a zero element count, or a Modbus operation whose function code
+    // has no address concept (diagnostics, exception responses, ...). A BIT-transport-size S7 item
+    // DOES get a range (bit_address units, under its own "/bit"-suffixed operation_key), and so does a
+    // successfully-decoded 0xB2 item (a single-point [bit_address, bit_address+1) range -- item.count
+    // is never available for one, so this is "an access was observed starting here," not a confirmed
+    // span -- under its own "/bit-symbolic"-suffixed key) -- see extract_s7comm_operations' own
+    // comment for why bit-, byte-, and bit-symbolic-unit ranges are never compared/merged despite
+    // superficially sharing "the same" function+area.
     bool has_target_range = false;
     // Half-open [range_start, range_end). S7: byte_address units within this item's own area+DB (or,
-    // for the Counter/Timer areas, counter/timer-number units; or, for a "/bit"-suffixed
-    // operation_key, bit_address units -- see extract_s7comm_operations' own comment for all three).
-    // Modbus: register/coil address units within the function's own address space.
+    // for the Counter/Timer areas, counter/timer-number units; or, for a "/bit"- or "/bit-symbolic"-
+    // suffixed operation_key, bit_address units -- see extract_s7comm_operations' own comment for all
+    // four). Modbus: register/coil address units within the function's own address space.
     uint32_t range_start = 0, range_end = 0;
 
     // S7comm only (left at their defaults -- "", 0, "" -- for every other protocol, and for an

@@ -481,3 +481,67 @@ CLI: `baseline check --symbolic-addresses` (default off). Adds `observed_range_s
 lines (text) alongside the existing raw numeric fields, for `NewTargetRange` findings with
 `protocol == "s7comm"` only -- every other protocol's/verdict's rendering is completely unaffected,
 flag on or off.
+
+**Part 3 (same follow-up, found from Jurgen's own real capture): 0xB2 (TIA1200SYM) items were
+still excluded, for a different reason than Part 1's BIT items were.** After Part 1 shipped,
+Jurgen ran `learn` against a real capture (`4SICS-GeekLounge-151021.pcap`, the well-known public
+4SICS/netresec ICS-lab dataset) and got 36 Merker-write packets back as `{"operation_key": "Write
+Var/Merkers/Flags (M)", "has_target_range": false, "observed_ranges": []}` -- no `/bit` suffix at
+all, meaning these packets never even reached Part 1's own bit-tracking branch. Root cause,
+confirmed directly against the decode side rather than guessed at: `extract_s7comm_operations`
+checks `item.is_experimental` (true for a successfully-decoded 0xB2 item) *before* it checks
+`transport_size == 0x01`, and the `is_experimental` branch did nothing at all -- `item.count` is
+unconditionally unset (0) for every 0xB2 item, since `try_decode_tia1200_sym` (s7comm.cpp) never
+sets it (0xB2's wire format has no count field the way S7ANY's does -- see `S7Item::count`'s own
+comment). This project's own `tests/sample_s7comm_1200sym.pcap` fixture is itself built from real
+item bytes pulled out of a 4SICS GeekLounge capture during that decoder's own development (see
+`build_s7comm_1200sym_sample`'s own docstring, `tools/make_sample_pcap.py`) -- strong evidence
+Jurgen's own capture is exercising this exact addressing mode.
+
+Unlike a classic BIT item, a 0xB2 item genuinely has no `count` to build a real `[start, end)` span
+from -- there is no way to know from the current decode how many bytes/bits beyond the starting
+LID address a given 0xB2 access actually touches, and inventing one would be exactly the kind of
+guess this project's `is_experimental` marking exists to warn readers away from
+(`S7Item::is_experimental`'s own comment: unverified against real DB-area traffic, no confirmed
+support for more than one LID entry per item). What *is* known is exactly where the access
+*starts*: `item.bit_address`, the same `byte_address*8 + bit_offset` LID reconstruction a classic
+BIT item's own `bit_address` already is. So a successfully-decoded 0xB2 item now gets a
+**single-point** `[bit_address, bit_address + 1)` observation -- "an access was seen starting
+here," not "this many bits were touched from here" -- under yet another distinct operation_key
+suffix, `/bit-symbolic` (not `/bit`): a confirmed classic-BIT range (real `item.count`) and a
+best-effort 0xB2 single-point reconstruction must never share a key, or an unconfirmed
+reconstruction could silently backstop a `NewTargetRange` verdict that should only ever rest on
+confirmed data. Multiple single-point observations for the same key still coalesce the normal way
+(`OperationBaseline::observed_ranges` is a merged, sorted interval set by design) -- five items
+addressing five adjacent bits (M2.0-M2.4, as in the real capture behind
+`sample_s7comm_1200sym.pcap`) legitimately merge into one `[16, 21)` row, the same as five adjacent
+single-bit classic accesses would.
+
+One more real gap surfaced while wiring this up, not papered over: `s7_area_letter_for_code(item.
+area)` -- the same lookup every other branch in `extract_s7comm_operations` already uses --
+can't be reused for a 0xB2 item. `item.area` is left at its struct default (0) for a 0xB2 item
+(`S7Item::area`'s own comment: "its own area codes are a different, non-overlapping byte value
+space ... this field intentionally doesn't try to unify them"), confirmed by reading
+`try_decode_tia1200_sym` end to end -- it never touches `item.area`. Calling
+`s7_area_letter_for_code(0)` would silently return `""` (empty area letter) for every symbolic
+finding, breaking `--symbolic-addresses` rendering for exactly the data this follow-up exists to
+add. Fixed with a second, 0xB2-specific lookup (`s7_area_letter_for_tia1200sym_item`,
+`baseline.cpp`) keyed off `item.area_name` instead, which `try_decode_tia1200_sym` DOES set
+reliably -- using the exact same literal strings (`"Merkers/Flags (M)"`, `"Data Block (DB)"`, ...)
+`s7_area_name` uses for the equivalent S7ANY area. This is an exact match against a small, closed,
+six-string vocabulary this codebase itself produces, not the free-text/number-scraping anti-pattern
+this design rejects elsewhere -- there's no number hiding in `area_name` to parse wrong, only which
+of six fixed labels it is. A related, smaller gap in the same family: `item.area` also being unset
+meant a DB-area 0xB2 item's own `db_number` was never folded into the base operation_key the way a
+classic DB/DI item's already is (`s7_area_has_db_number(item.area)` is always false for a 0xB2
+item) -- left as-is, two 0xB2 items addressing different DBs would have collided onto one
+`.../Data Block (DB)/bit-symbolic` key, merging their single-point ranges together. Fixed the same
+way: a DB-area 0xB2 item's `db_number` (which `try_decode_tia1200_sym` *does* set) is folded into
+the key whenever `item.is_experimental && item.area_name == "Data Block (DB)"`, alongside the
+existing `s7_area_has_db_number(item.area)` check for classic items.
+
+No changes were needed anywhere else: `merge_baseline_observations`, `check_baseline`, the verdict
+model, the JSON schema, and `--symbolic-addresses`'s own rendering machinery (`s7_range_notation`)
+all already treat `operation_key`/`s7_range_unit` as opaque strings, so reusing the existing `"bit"`
+unit tag for a `/bit-symbolic` observation renders it in identical `Mx.y`/`DBn.DBXx.y` notation with
+zero code changes there -- verified directly against a learned+checked baseline, not assumed.

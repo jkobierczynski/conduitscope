@@ -87,6 +87,39 @@ bool s7_area_has_db_number(uint8_t area) { return area == 0x84 || area == 0x85; 
 // ("for counter/timer areas, this is the counter/timer number instead").
 bool s7_area_is_counter_or_timer(uint8_t area) { return area == 0x1C || area == 0x1D; }
 
+// Step7 area letter for a successfully-decoded 0xB2 (S7-1200/1500 "symbolic" TIA1200SYM) item --
+// the 0xB2 equivalent of s7_area_letter_for_code, needed because that function can't be reused
+// here. Confirmed by reading try_decode_tia1200_sym (s7comm.cpp) end to end: it never touches
+// S7Item::area at all, so a 0xB2 item's `area` field sits at its struct default (0) exactly as
+// S7Item::area's own comment documents ("Left at 0 for a 0xB2 item -- its own area codes are a
+// different, non-overlapping byte value space ... so this field intentionally doesn't try to unify
+// them; area_name is set correctly for both cases and is what to display/compare instead") --
+// calling s7_area_letter_for_code(item.area) on a 0xB2 item would silently pass 0, which isn't any
+// recognized S7ANY code, and get back "" (empty area letter) for every single symbolic finding.
+// This is a real gap in what's available for a 0xB2 item, not something to paper over by reusing
+// the wrong lookup.
+//
+// So this looks up the letter from item.area_name instead, which try_decode_tia1200_sym DOES set
+// reliably for every area it recognizes -- and does so using the exact same literal strings
+// s7_area_name uses for the equivalent S7ANY area (compare try_decode_tia1200_sym's own
+// "Merkers/Flags (M)"/"Inputs (I)"/.../"Data Block (DB)" case labels against s7_area_name's switch,
+// s7comm.cpp). That makes this an exact lookup against a small, closed, codebase-controlled
+// vocabulary of six known strings -- not the free-text/number-scraping anti-pattern this design
+// rejects elsewhere (see extract_modbus_operations' own header comment): there's no number hiding
+// in area_name to parse wrong, just one of six fixed labels to match verbatim. Returns "" for any
+// area_name this table doesn't recognize (defensive only -- try_decode_tia1200_sym has no other
+// area_name values today), the same "empty means unrecognized, caller leaves has_target_range
+// false" contract s7_area_letter_for_code's own empty-string case already establishes.
+std::string s7_area_letter_for_tia1200sym_item(const S7Item& item) {
+    if (item.area_name == "Inputs (I)") return "I";
+    if (item.area_name == "Outputs (Q)") return "Q";
+    if (item.area_name == "Merkers/Flags (M)") return "M";
+    if (item.area_name == "Counters (C)") return "C";
+    if (item.area_name == "Timers (T)") return "T";
+    if (item.area_name == "Data Block (DB)") return "DB";
+    return "";
+}
+
 // S7comm: one Operation per S7Item in a Read Var/Write Var Job's item list (a single Job can carry
 // several items at different addresses; each is its own operation for baselining purposes, all
 // sharing the same conduit -- see baseline.hpp's own header comment). Deliberately reads ONLY the
@@ -132,6 +165,24 @@ bool s7_area_is_counter_or_timer(uint8_t area) { return area == 0x1C || area == 
 // element" way the Counter/Timer branch below already does (range_end = bit_address + count) rather
 // than assuming 1 and silently dropping anything else -- correct either way, and count == 1 (the
 // overwhelmingly common case) degenerates to exactly the single-bit range one would expect.
+//
+// Follow-up (same release): 0xB2 (S7-1200/1500 "symbolic" TIA1200SYM) items. Jurgen's own real
+// 4SICS capture (4SICS-GeekLounge-151021.pcap) showed 36 Merker-write packets landing as
+// {"operation_key": "Write Var/Merkers/Flags (M)", "has_target_range": false, "observed_ranges":
+// []} -- no "/bit" suffix AT ALL, because item.is_experimental was checked BEFORE
+// transport_size == 0x01 below, and the is_experimental branch did nothing (item.count is always
+// 0 for a 0xB2 item -- try_decode_tia1200_sym never sets it, see S7Item's own comment -- so there
+// was never a count to gate a range on). Root-caused directly against try_decode_tia1200_sym
+// (s7comm.cpp), not guessed at: this project's own tests/sample_s7comm_1200sym.pcap fixture is
+// itself built from real item bytes pulled out of a 4SICS GeekLounge capture during that
+// decoder's own development (see build_s7comm_1200sym_sample's own docstring,
+// tools/make_sample_pcap.py) -- strong evidence Jurgen's capture is exercising this exact
+// addressing mode. Fixed by giving a 0xB2 item its own single-point range under its own
+// "/bit-symbolic"-suffixed key (see the is_experimental branch below for the full reasoning) --
+// deliberately NOT the same "/bit" key the classic BIT branch uses, since a 0xB2 item's range is a
+// best-effort single starting address, not a confirmed item.count-derived span the way a classic
+// BIT item's now is; mixing the two under one key would let an unconfirmed reconstruction quietly
+// backstop a verdict that should only ever rest on confirmed data.
 std::vector<Operation> extract_s7comm_operations(const DecodedPacket& dp) {
     std::vector<Operation> ops;
     if (!dp.result) return ops;
@@ -141,13 +192,32 @@ std::vector<Operation> extract_s7comm_operations(const DecodedPacket& dp) {
     for (const S7Item& item : sr.items) {
         Operation op;
         op.protocol = "s7comm";
+        // A 0xB2 (TIA1200SYM) item leaves item.area at 0 (see S7Item::area's own comment and
+        // s7_area_letter_for_tia1200sym_item's own comment above), so s7_area_has_db_number(item.area)
+        // -- which keys off the numeric area byte -- is always false for one, even for a DB-area 0xB2
+        // item that DOES have a meaningful db_number (try_decode_tia1200_sym sets item.db_number
+        // itself for its AREA1_DB branch, s7comm.cpp). Without this, two 0xB2 items addressing
+        // different DBs (DB5, DB10) would collide onto the identical base key "<function>/Data Block
+        // (DB)" and, one level down, the identical "/bit-symbolic" key below -- silently merging two
+        // different DBs' single-point ranges together, exactly the kind of cross-identity mixing this
+        // whole feature (and its bit/byte-unit precedent) exists to avoid. So a DB-area 0xB2 item's
+        // db_number is folded into the key here too, the same way a classic DB/DI item's already is.
+        bool db_number_in_key =
+            s7_area_has_db_number(item.area) || (item.is_experimental && item.area_name == "Data Block (DB)");
         std::ostringstream key;
         key << sr.function_name << "/" << item.area_name;
-        if (s7_area_has_db_number(item.area)) {
+        if (db_number_in_key) {
             key << "/DB" << item.db_number;
         }
         op.operation_key = key.str();
-        std::string area_letter = s7_area_letter_for_code(item.area);
+        // s7_area_letter_for_code(item.area) is only meaningful for a classic S7ANY item -- for a
+        // 0xB2 item it would be handed item.area's struct-default 0 (never set by the experimental
+        // decode) and silently return "" (see s7_area_letter_for_tia1200sym_item's own comment for
+        // why this is a real gap this function must not paper over). Route to the right lookup here,
+        // once, so every branch below reads a correct area_letter regardless of which decode path
+        // produced this item.
+        std::string area_letter =
+            item.is_experimental ? s7_area_letter_for_tia1200sym_item(item) : s7_area_letter_for_code(item.area);
 
         if (s7_area_is_counter_or_timer(item.area)) {
             // byte_address IS the counter/timer number here (see s7_area_is_counter_or_timer's own
@@ -162,9 +232,44 @@ std::vector<Operation> extract_s7comm_operations(const DecodedPacket& dp) {
                 op.s7_range_unit = "counter_or_timer";
             }
         } else if (item.is_experimental) {
-            // 0xB2 (S7-1200/1500 symbolic addressing) items carry no transport_size/count at all
-            // (see S7Item's own comment) -- nothing to build a byte range from; has_target_range
-            // stays false.
+            // 0xB2 (S7-1200/1500 symbolic addressing): item.count is always unset (S7Item's own
+            // comment -- try_decode_tia1200_sym never touches it), so the true extent of the access is
+            // unknowable; there is no "N consecutive bits/bytes" to report the way every other branch
+            // here can. What IS known is exactly where the access STARTS: item.bit_address, computed
+            // the identical byte_address*8+bit_offset way the classic BIT branch's own bit_address is
+            // (try_decode_tia1200_sym sets it from the same LID reconstruction s7ANY's own bit-
+            // addressable areas use). So this tracks a single-point [bit_address, bit_address+1) "we
+            // saw an access starting here" observation, under a key distinct from the classic-BIT
+            // branch below ("/bit-symbolic", not "/bit") -- this is a best-effort reconstruction (see
+            // S7Item::is_experimental's own doc comment: unverified against real DB-area traffic, no
+            // confirmed support for more than one LID entry per item), not a confirmed decode the way
+            // a classic S7ANY BIT item's real item.count-derived range is, so it must never silently
+            // back a NewTargetRange verdict alongside fully-confirmed data under the same key -- and
+            // it must never be mistaken for "the whole access was proven to be exactly 1 bit wide"
+            // either, only "an access was observed starting here."
+            //
+            // Reused uniformly across every area a 0xB2 item can address (including Counters/Timers):
+            // try_decode_tia1200_sym itself doesn't special-case C/T's LID the way the classic
+            // S7ANY decode's own counter/timer branch above does (see that function's own area2
+            // switch -- byte_addr/bit_off is computed identically for every area2 code, itself an
+            // inherited, already-documented uncertainty of the experimental decode, not a new one
+            // introduced here), so there is no separate "real" counter/timer number to report for a
+            // 0xB2 C/T item any more than there's a real byte/bit count -- the single starting
+            // bit_address is all that's actually known for ANY 0xB2 item, regardless of area.
+            op.operation_key = key.str() + "/bit-symbolic";
+            op.has_target_range = true;
+            op.range_start = item.bit_address;
+            op.range_end = item.bit_address + 1;
+            op.s7_area_letter = area_letter;
+            op.s7_db_number = item.db_number;  // 0 (meaningless, same convention as every other
+                                                // non-DB/DI branch) unless this is a DB-area 0xB2
+                                                // item, where try_decode_tia1200_sym itself sets it.
+            op.s7_range_unit = "bit";  // same unit tag the classic BIT branch uses -- s7_range_notation
+                                        // (s7comm.cpp) only cares about the unit string and the raw
+                                        // start/end numbers, never about which branch produced them, so
+                                        // it renders this identically to a classic single-bit range
+                                        // (verified directly, not assumed -- see this follow-up's own
+                                        // CTest coverage).
         } else if (item.transport_size == 0x01) {
             // BIT -- see this function's own header comment above: its own distinct, "/bit"-suffixed
             // operation_key, range tracked in bit_address units.

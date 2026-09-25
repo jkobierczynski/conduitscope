@@ -4767,6 +4767,15 @@ add_test(NAME s7comm_1200sym_multi_lid_falls_back
 set_tests_properties(s7comm_1200sym_multi_lid_falls_back PROPERTIES
   PASS_REGULAR_EXPRESSION "item 6 is a 1200SYM \\(0xB2\\) item with 8 byte\\(s\\) left after its CRC")
 
+# Two synthetic DB-area 0xB2 items (item 7, item 8), added alongside the baseline-engine's own
+# "/bit-symbolic" follow-up (see extract_s7comm_operations, baseline.cpp) specifically to prove a
+# DB-area 0xB2 item's db_number decodes correctly -- item.area itself is never set for a 0xB2 item
+# (S7Item::area's own comment), so this is the one DB-area shape this fixture exercises.
+add_test(NAME s7comm_1200sym_db_area_items_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_1200sym.pcap" --format text --verbose)
+set_tests_properties(s7comm_1200sym_db_area_items_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "item 7: DB5\\.DBX7\\.2 \\[EXPERIMENTAL.*item 8: DB10\\.DBX20\\.5 \\[EXPERIMENTAL")
+
 add_test(NAME s7comm_item_tags_in_json
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm.pcap" --format json)
 set_tests_properties(s7comm_item_tags_in_json PROPERTIES
@@ -12841,6 +12850,72 @@ add_test(NAME baseline_check_symbolic_addresses_no_effect_on_modbus
 set_tests_properties(baseline_check_symbolic_addresses_no_effect_on_modbus PROPERTIES
   PASS_REGULAR_EXPRESSION "Result: ANOMALIES FOUND \\(2 finding\\(s\\)\\).*\\[1\\] new-target-range .*operation=\"Read Holding Registers\".*observed range: \\[200, 205\\).*baseline ranges: \\[0, 10\\).*\\[2\\] new-operation .*operation=\"Write Multiple Registers\""
   FAIL_REGULAR_EXPRESSION "\\(symbolic\\)")
+
+# ---------------------------------------------------------------------------------------------
+# Smaller follow-up (same release, docs/design/baseline-engine.md's "Follow-up" section, 0xB2/
+# TIA1200SYM sub-case): Jurgen's own real 4SICS capture (4SICS-GeekLounge-151021.pcap) showed 36
+# Merker-write packets landing with NO range at all, not even a "/bit" one -- the is_experimental
+# (0xB2) branch in extract_s7comm_operations (baseline.cpp) did nothing, since item.count is always
+# unset for a 0xB2 item. Fixed by tracking a single-point [bit_address, bit_address+1) observation
+# under a new "/bit-symbolic"-suffixed operation_key -- distinct from the classic-BIT "/bit" key,
+# since a 0xB2 item's range is a best-effort reconstruction (S7Item::is_experimental), never a
+# item.count-confirmed span. tests/sample_s7comm_1200sym.pcap now also carries two synthetic
+# DB-area 0xB2 items (DB5, DB10) proving db_number is correctly folded into this key too (item.area
+# itself is never set for a 0xB2 item, so it can't be relied on for that the way a classic DB item's
+# key already is -- see extract_s7comm_operations' own comment).
+# ---------------------------------------------------------------------------------------------
+
+# `learn` spot-check: the five real Merker items (M2.0-M2.4, bit addresses 16-20) coalesce into ONE
+# merged "Read Var/Merkers/Flags (M)/bit-symbolic" row spanning [16, 21) -- observed_ranges is a
+# merged/coalesced set of intervals by design (OperationBaseline's own comment), not a per-packet
+# list, so five adjacent single-bit observations legitimately merge into one contiguous span here,
+# same as they would for a classic "/bit" item reading a run of adjacent bits. The two DB-area items
+# (DB5, DB10) get their own separate rows, proving they don't collide onto one "Data Block (DB)/
+# bit-symbolic" key despite sharing an area_name. The two synthetic decode-fallback edge cases
+# (unrecognized area1, multi-LID) still correctly produce ONLY key-only, has_target_range:false
+# entries ("Read Var/" and "Read Var/Merkers/Flags (M)" with no bit-symbolic suffix at all) -- proof
+# this follow-up didn't change what those already-failing decodes contribute.
+add_test(NAME baseline_learn_s7comm_1200sym_bit_symbolic
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_1200sym_learn.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_1200sym_learn.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_1200sym.pcap' && cat '${CMAKE_CURRENT_BINARY_DIR}/baseline_1200sym_learn.json'")
+set_tests_properties(baseline_learn_s7comm_1200sym_bit_symbolic PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"operation_key\": \"Read Var/Merkers/Flags \\(M\\)/bit-symbolic\",\n *\"packet_count\": 5,\n *\"has_target_range\": true,\n *\"observed_ranges\": \\[\\[16, 21\\]\\].*\"operation_key\": \"Read Var/\",\n *\"packet_count\": 1,\n *\"has_target_range\": false,\n *\"observed_ranges\": \\[\\].*\"operation_key\": \"Read Var/Merkers/Flags \\(M\\)\",\n *\"packet_count\": 1,\n *\"has_target_range\": false,\n *\"observed_ranges\": \\[\\].*\"operation_key\": \"Read Var/Data Block \\(DB\\)/DB5/bit-symbolic\",\n *\"packet_count\": 1,\n *\"has_target_range\": true,\n *\"observed_ranges\": \\[\\[58, 59\\]\\].*\"operation_key\": \"Read Var/Data Block \\(DB\\)/DB10/bit-symbolic\",\n *\"packet_count\": 1,\n *\"has_target_range\": true,\n *\"observed_ranges\": \\[\\[165, 166\\]\\]"
+  FAIL_REGULAR_EXPRESSION "s7_area_letter|s7_db_number|s7_range_unit")
+
+add_test(NAME baseline_check_s7comm_1200sym_unmodified_zero_findings
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_1200sym_clean.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_1200sym_clean.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_1200sym.pcap' && '$<TARGET_FILE:conduitscope>' baseline check --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_1200sym_clean.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_1200sym.pcap'")
+set_tests_properties(baseline_check_s7comm_1200sym_unmodified_zero_findings PROPERTIES
+  PASS_REGULAR_EXPRESSION "Result: CLEAN\n\n1 conduit\\(s\\) observed, 5 distinct operation\\(s\\) observed, 5 matched the baseline, 0 did not\n\nFINDINGS \\(0\\):\n *\\(none\\)")
+
+# `--symbolic-addresses` renders the 0xB2 single-point ranges in the same Mx.y/DBn.DBXx.y notation
+# as a classic bit range -- proof s7_range_notation (s7comm.cpp, unchanged by this follow-up)
+# already handles a "/bit-symbolic" observation correctly with zero code changes, since it only
+# ever looks at the unit string ("bit") and the raw numbers, never at operation_key. Shrinks the
+# already-learned Merkers range ([16, 21) -> [16, 19)) and the DB5 range ([58, 59) -> [50, 51), an
+# unrelated bit) with sed, then checks the SAME unmodified fixture.
+add_test(NAME baseline_check_s7comm_1200sym_symbolic_addresses_text
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_1200sym_shrunk.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_1200sym_shrunk.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_1200sym.pcap' && sed -i 's/\\[\\[16, 21\\]\\]/[[16, 19]]/;s/\\[\\[58, 59\\]\\]/[[50, 51]]/' '${CMAKE_CURRENT_BINARY_DIR}/baseline_1200sym_shrunk.json' && '$<TARGET_FILE:conduitscope>' baseline check --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_1200sym_shrunk.json' --symbolic-addresses '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_1200sym.pcap'")
+set_tests_properties(baseline_check_s7comm_1200sym_symbolic_addresses_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[1\\] new-target-range .*operation=\"Read Var/Merkers/Flags \\(M\\)/bit-symbolic\".*observed range: \\[16, 21\\).*observed range \\(symbolic\\): M2\\.0-M2\\.4.*baseline ranges: \\[16, 19\\).*baseline ranges \\(symbolic\\): M2\\.0-M2\\.2.*\\[2\\] new-target-range .*operation=\"Read Var/Data Block \\(DB\\)/DB5/bit-symbolic\".*observed range: \\[58, 59\\).*observed range \\(symbolic\\): DB5\\.DBX7\\.2.*baseline ranges: \\[50, 51\\).*baseline ranges \\(symbolic\\): DB5\\.DBX6\\.2")
+
+# Off by default -- same shrunk baseline/capture pair, no flag, no "(symbolic)" lines at all.
+add_test(NAME baseline_check_s7comm_1200sym_symbolic_addresses_off_by_default
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_1200sym_shrunk2.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_1200sym_shrunk2.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_1200sym.pcap' && sed -i 's/\\[\\[16, 21\\]\\]/[[16, 19]]/' '${CMAKE_CURRENT_BINARY_DIR}/baseline_1200sym_shrunk2.json' && '$<TARGET_FILE:conduitscope>' baseline check --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_1200sym_shrunk2.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_1200sym.pcap'")
+set_tests_properties(baseline_check_s7comm_1200sym_symbolic_addresses_off_by_default PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[1\\] new-target-range .*operation=\"Read Var/Merkers/Flags \\(M\\)/bit-symbolic\".*observed range: \\[16, 21\\).*baseline ranges: \\[16, 19\\)"
+  FAIL_REGULAR_EXPRESSION "\\(symbolic\\)")
+
+# Mixed-conduit proof (task item 6 of this follow-up's own verification bar): a conduit that sees
+# classic byte reads, classic BIT writes ("/bit"), AND 0xB2 symbolic reads ("/bit-symbolic") to the
+# SAME nominal area (Merkers, and DB5) produces THREE separate OperationBaseline rows per area, not
+# two or one -- learns from sample_baseline_s7comm_symbolic.pcap (classic byte+bit) and
+# sample_s7comm_1200sym.pcap (0xB2 symbolic) into the SAME baseline file: both fixtures share the
+# same conduit identity (192.168.1.50 -> 192.168.1.10:102), confirmed directly ("now has 1
+# conduit(s)" in learn's own stderr summary, not 2), so this is a genuine same-conduit merge, not
+# two isolated conduits that merely look similar in the report.
+add_test(NAME baseline_learn_mixed_bit_and_bit_symbolic_stay_separate
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_mixed_bit.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_mixed_bit.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_baseline_s7comm_symbolic.pcap' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_1200sym.pcap' && cat '${CMAKE_CURRENT_BINARY_DIR}/baseline_mixed_bit.json'")
+set_tests_properties(baseline_learn_mixed_bit_and_bit_symbolic_stay_separate PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"conduits\": \\[\n *\\{\n *\"client_ip\": \"192\\.168\\.1\\.50\".*\"operation_key\": \"Read Var/Merkers/Flags \\(M\\)\",\n *\"packet_count\": 2,\n *\"has_target_range\": true,\n *\"observed_ranges\": \\[\\[20, 25\\]\\].*\"operation_key\": \"Read Var/Data Block \\(DB\\)/DB5\",\n *\"packet_count\": 1,\n *\"has_target_range\": true,\n *\"observed_ranges\": \\[\\[10, 11\\]\\].*\"operation_key\": \"Write Var/Merkers/Flags \\(M\\)/bit\",\n *\"packet_count\": 1,\n *\"has_target_range\": true,\n *\"observed_ranges\": \\[\\[99, 100\\]\\].*\"operation_key\": \"Write Var/Data Block \\(DB\\)/DB5/bit\",\n *\"packet_count\": 1,\n *\"has_target_range\": true,\n *\"observed_ranges\": \\[\\[83, 84\\]\\].*\"operation_key\": \"Read Var/Merkers/Flags \\(M\\)/bit-symbolic\",\n *\"packet_count\": 5,\n *\"has_target_range\": true,\n *\"observed_ranges\": \\[\\[16, 21\\]\\].*\"operation_key\": \"Read Var/Data Block \\(DB\\)/DB5/bit-symbolic\",\n *\"packet_count\": 1,\n *\"has_target_range\": true,\n *\"observed_ranges\": \\[\\[58, 59\\]\\]")
 
 # ---------------------------------------------------------------------------------------------
 # Phase 2 (roadmap item 41, docs/design/baseline-engine.md): baseline coverage for the six
