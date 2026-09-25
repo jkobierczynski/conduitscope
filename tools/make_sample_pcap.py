@@ -16942,6 +16942,79 @@ def build_baseline_two_conduit_sample():
     (TESTS_DIR / "sample_baseline_two_conduit.pcap").write_bytes(data)
 
 
+# `baseline check --policy`'s own zone-awareness follow-up (roadmap item 41's second deferred
+# question, docs/design/baseline-engine.md's own "Follow-up" section) -- three small, single-packet
+# fixtures sharing one second workstation IP (192.168.1.77, the same OTHER_IP
+# build_baseline_two_conduit_sample already uses) and one policy file
+# (tests/policies/baseline_zone.yaml, whose own "engineering_ws_zone" declares BOTH HMI_IP
+# (192.168.1.50, what a baseline is actually learned from in these tests -- tests/sample_modbus.pcap)
+# and this second workstation as one zone) to exercise the design's own "does a new IP in an
+# already-trusted zone count as NewConduit or not" question end to end:
+#   - sample_baseline_zone_new_host.pcap: the second workstation, doing the EXACT SAME operation
+#     HMI_IP's own learned baseline already knows (Read Holding Registers, address 0, quantity 10)
+#     -> with --policy, this is the "new-conduit-known-zone" positive case; without --policy, it's
+#     plain "new-conduit" (same fixture, same baseline, only the flag differs) -- proving the flag
+#     actually gates the behavior, not just happens to coincide with it.
+#   - sample_baseline_zone_unknown_host.pcap: a THIRD IP (192.168.1.99 -- deliberately close to,
+#     but distinct from, both engineering_ws_zone's own two IPs and plc_zone's PLC_IP) that isn't
+#     covered by ANY zone tests/policies/baseline_zone.yaml declares, doing the same known
+#     operation -- must stay plain "new-conduit" even with --policy given, since the client itself
+#     resolves to no declared zone at all.
+#   - sample_baseline_zone_new_operation.pcap: the second workstation again, but doing Write
+#     Multiple Registers (address 5, quantity 2) -- a function code NOBODY in the zone has ever
+#     been baselined doing (the learned baseline, from sample_modbus.pcap alone, only ever taught
+#     Read Holding Registers). Proves the conservative core of this whole feature: a known zone
+#     never vouches for an operation nobody in it has actually done -- this must stay full
+#     "new-conduit" even with --policy given, not "new-conduit-known-zone".
+ZONE_HOST2_IP = "192.168.1.77"
+ZONE_HOST2_MAC = mac("00:0c:29:dd:ee:ff")
+ZONE_OUTSIDE_IP = "192.168.1.99"
+ZONE_OUTSIDE_MAC = mac("00:0c:29:ff:11:22")
+
+
+def build_baseline_zone_new_host_sample():
+    """Second workstation (ZONE_HOST2_IP) -> PLC_IP: Read Holding Registers, address 0, quantity
+    10 -- byte-for-byte the SAME operation/range tests/sample_modbus.pcap's own baseline already
+    teaches for HMI_IP. See this file's own "baseline check --policy" header comment above."""
+    mb = struct.pack("!HHHBB HH", 30, 0, 6, 1, 3, 0, 10)
+    tcp = tcp_header(51400, 502, 1000, 2000, TCP_PSH | TCP_ACK, len(mb)) + mb
+    ip = ipv4_header(ZONE_HOST2_IP, PLC_IP, 6, len(tcp), 0xB000) + tcp
+    pkt = eth_header(PLC_MAC, ZONE_HOST2_MAC, 0x0800) + ip
+
+    data = pcap_global_header() + pcap_record(pkt, 1_700_012_000, 0)
+    (TESTS_DIR / "sample_baseline_zone_new_host.pcap").write_bytes(data)
+
+
+def build_baseline_zone_unknown_host_sample():
+    """A third IP (ZONE_OUTSIDE_IP), NOT covered by tests/policies/baseline_zone.yaml's own
+    engineering_ws_zone (or any other declared zone), doing the SAME known operation as
+    sample_baseline_zone_new_host.pcap. See this file's own "baseline check --policy" header
+    comment above."""
+    mb = struct.pack("!HHHBB HH", 31, 0, 6, 1, 3, 0, 10)
+    tcp = tcp_header(51500, 502, 1000, 2000, TCP_PSH | TCP_ACK, len(mb)) + mb
+    ip = ipv4_header(ZONE_OUTSIDE_IP, PLC_IP, 6, len(tcp), 0xB100) + tcp
+    pkt = eth_header(PLC_MAC, ZONE_OUTSIDE_MAC, 0x0800) + ip
+
+    data = pcap_global_header() + pcap_record(pkt, 1_700_013_000, 0)
+    (TESTS_DIR / "sample_baseline_zone_unknown_host.pcap").write_bytes(data)
+
+
+def build_baseline_zone_new_operation_sample():
+    """Second workstation (ZONE_HOST2_IP) -> PLC_IP: Write Multiple Registers, address 5, quantity
+    2 -- a function code NEVER learned by ANY conduit in the baseline these tests learn (only Read
+    Holding Registers, from tests/sample_modbus.pcap). See this file's own "baseline check
+    --policy" header comment above -- this is the "known zone, unprecedented operation" case."""
+    wm_data = struct.pack("!HH", 0x1111, 0x2222)
+    wm_pdu = struct.pack("!HHB", 5, 2, len(wm_data)) + wm_data
+    mb = struct.pack("!HHHBB", 32, 0, 2 + len(wm_pdu), 1, 0x10) + wm_pdu
+    tcp = tcp_header(51600, 502, 1000, 2000, TCP_PSH | TCP_ACK, len(mb)) + mb
+    ip = ipv4_header(ZONE_HOST2_IP, PLC_IP, 6, len(tcp), 0xB200) + tcp
+    pkt = eth_header(PLC_MAC, ZONE_HOST2_MAC, 0x0800) + ip
+
+    data = pcap_global_header() + pcap_record(pkt, 1_700_014_000, 0)
+    (TESTS_DIR / "sample_baseline_zone_new_operation.pcap").write_bytes(data)
+
+
 def build_baseline_s7comm_symbolic_sample():
     """One conduit (HMI_IP -> PLC_IP, S7comm/102) exercising S7's own BIT-transport-size range
     tracking (extract_s7comm_operations' own "/bit"-suffixed operation_key) AND `baseline check
@@ -18013,6 +18086,9 @@ if __name__ == "__main__":
     build_zigbee_tap_sample()
     build_baseline_modbus_mutated_sample()
     build_baseline_two_conduit_sample()
+    build_baseline_zone_new_host_sample()
+    build_baseline_zone_unknown_host_sample()
+    build_baseline_zone_new_operation_sample()
     build_baseline_s7comm_symbolic_sample()
     build_amqp091_sample()
     build_amqp10_sample()

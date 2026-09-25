@@ -428,7 +428,12 @@ Checks a single capture against a baseline previously built with
 \fBbaseline learn\fR (never writes the baseline file). Reports one finding
 per conduit/operation that the baseline never saw: a brand\-new conduit, a
 known conduit doing an operation never learned for it, or a known operation
-addressing outside every address range learned for it. Prints a
+addressing outside every address range learned for it. With
+\fB\-\-policy\fR (a zone/conduit policy file, same format
+\fBpolicy validate\fR uses), a brand\-new conduit whose client IP shares a
+declared zone with another client already baselined doing this exact
+operation is instead reported as the lower\-severity
+\fBnew\-conduit\-known\-zone\fR \-\- see \fB\-\-policy\fR below. Prints a
 compliant/anomaly report, text or JSON (\fB\-T/\-\-format\fR); see
 \fBOPTIONS (baseline check)\fR and \fBEXIT STATUS\fR below.
 .TP
@@ -1454,6 +1459,31 @@ byte/word/bit notation (e.g. \(lqMB10\-MB19\(rq, \(lqM10.3\(rq,
 off \-\- output is unchanged unless this is passed. Every other protocol's
 findings are completely unaffected, on or off.
 .TP
+.B \-\-policy \fIFILE\fR
+Zone/conduit policy file \-\- same format and same option name as
+\fBpolicy validate\fR's own \fB\-\-policy\fR (see \fBdocs/MANUAL.md\fR's
+POLICY FILE FORMAT section); reuses that same parser, not a second one.
+Optional; omitted by default, and omitting it leaves \fBbaseline learn\fR
+and every \fBbaseline check\fR run completely unchanged \-\- zones are
+resolved fresh from the policy file at check time only, never persisted
+into the baseline file itself, so a \fBlearn\fR run never needs to change
+and swapping in an updated policy file later needs no re\-\fBlearn\fR.
+When given: a conduit with NO exact baseline match, whose client IP
+resolves to a declared zone, is reported as \fBnew\-conduit\-known\-zone\fR
+instead of plain \fBnew\-conduit\fR \fBonly when\fR at least one OTHER
+client IP already baselined against the same server/protocol/port ALSO
+resolves to that same zone and already has this EXACT operation baselined
+(range\-covered too, for an operation with a target range). A known zone
+with no precedent for that specific operation stays full
+\fBnew\-conduit\fR even with \fB\-\-policy\fR given \-\- a zone never
+vouches for an operation nobody in it has actually done. Only ever applies
+to a conduit with no exact baseline match at all;
+\fBNewOperation\fR/\fBNewTargetRange\fR/\fBKnownOperation\fR on an
+already\-known conduit are unaffected by this flag. A
+\fBnew\-conduit\-known\-zone\fR finding is exit\-code\-visible the same way
+every other non\-\fBKnownOperation\fR verdict already is \-\- see EXIT
+STATUS.
+.TP
 .B \-\-max\-reassembly\-bytes \fIN\fR ", " \-\-max\-reassembly\-segments \fIN\fR ", " \-\-max\-recursion\-depth \fIN\fR ", " \-\-max\-decoded\-objects \fIN\fR ", " \-\-max\-coalesced\-messages \fIN\fR
 Same five resource-exhaustion-limit overrides as \fBdecode\fR's own flags of
 the same name above; apply identically here since this command decodes the
@@ -1599,7 +1629,9 @@ Fatal error (bad arguments, unreadable/unrecognized input file, a
 \fB\-\-strict\fR parse failure, or, for \fBpolicy validate\fR, a policy file
 that couldn't be opened or failed validation; for \fBbaseline learn\fR/
 \fBbaseline check\fR, a baseline file that exists but fails to parse as
-valid baseline JSON).
+valid baseline JSON; for \fBbaseline check \-\-policy\fR, a policy file
+that couldn't be opened or failed validation, same as \fBpolicy
+validate\fR's own \fB\-\-policy\fR).
 .TP
 .B 2
 Currently unused. Reserved rather than reused: an earlier release used this
@@ -1613,10 +1645,11 @@ protocols" finding is non\-empty. Never returned by \fBinventory\fR.
 .TP
 .B 4
 \fBbaseline check\fR only: the capture and baseline file were both valid,
-but at least one finding was reported (a new conduit, a new operation on a
-known conduit, or an address range outside the baseline for a known
-operation). Never returned by \fBbaseline learn\fR, which never emits a
-verdict at all.
+but at least one finding was reported (a new conduit, a new conduit backed
+only by another host's precedent in the same \fB\-\-policy\fR zone
+(\fBnew\-conduit\-known\-zone\fR), a new operation on a known conduit, or
+an address range outside the baseline for a known operation). Never
+returned by \fBbaseline learn\fR, which never emits a verdict at all.
 .SH LIMITATIONS
 A handful of rare/obsolete pcapng block types (the pre-2000s "Packet Block",
 Interface Statistics Blocks, Name Resolution Blocks, Decryption Secrets
@@ -2266,6 +2299,15 @@ a later capture against it:
 .EX
 conduitscope baseline learn \-\-baseline\-file baseline.json good1.pcap good2.pcap
 conduitscope baseline check \-\-baseline\-file baseline.json today.pcap
+.EE
+.RE
+.PP
+Same check, but also softening a brand\-new conduit to
+\fBnew\-conduit\-known\-zone\fR when another host in the same declared
+zone (\fBpolicy.yaml\fR) is already baselined doing that exact operation:
+.RS
+.EX
+conduitscope baseline check \-\-baseline\-file baseline.json \-\-policy policy.yaml today.pcap
 .EE
 .RE
 .PP

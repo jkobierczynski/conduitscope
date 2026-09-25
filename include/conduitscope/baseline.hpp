@@ -42,6 +42,13 @@
 
 namespace conduitscope {
 
+// Forward declaration only -- check_baseline()'s own optional `policy` parameter (see its comment
+// below) needs nothing more than a pointer to this type; the full definition (policy.hpp) is
+// pulled in only by baseline.cpp, not by every translation unit that includes this header, the
+// same "don't drag in a whole subsystem for one pointer parameter" discipline this codebase
+// already applies elsewhere (e.g. decoder.hpp's own forward-declared friend types).
+struct Policy;
+
 // One S7comm or Modbus operation extracted from a single decoded packet -- see
 // extract_operations()'s own comment below for exactly how `operation_key`/`has_target_range`/
 // `range_start`/`range_end` are computed per protocol. `protocol`/`client_ip`/`server_ip`/
@@ -224,10 +231,16 @@ void save_baseline_store(const std::string& path, const BaselineStore& store);
 void merge_baseline_observations(BaselineStore& store, const std::vector<ConduitBaseline>& observed,
                                   const std::string& capture_filename);
 
-// One of the three ways a checked capture's operation can diverge from an existing baseline, plus
+// One of the four ways a checked capture's operation can diverge from an existing baseline, plus
 // the "everything matched" case (KnownOperation) -- see check_baseline's own comment for exactly
-// when each fires.
-enum class BaselineVerdict { KnownOperation, NewConduit, NewOperation, NewTargetRange };
+// when each fires. NewConduitKnownZone sits in severity between KnownOperation and NewConduit
+// (declared in that order on purpose): it is still new inventory worth a human's attention (it
+// affects BaselineCheckReport::compliant()/the exit code exactly like NewConduit/NewOperation/
+// NewTargetRange do -- see kExitBaselineAnomaly's own comment, cli_main.cpp), just a lower-severity
+// flavor of NewConduit, backed by another host in the same declared zone already doing the exact
+// same thing. Added by the `--policy` follow-up, docs/design/baseline-engine.md's own "Follow-up"
+// section (zone-level baselines, previously the design doc's own "Explicitly out of scope" item).
+enum class BaselineVerdict { KnownOperation, NewConduitKnownZone, NewConduit, NewOperation, NewTargetRange };
 
 // Renders a BaselineVerdict as the exact lowercase-with-hyphens string this codebase's own
 // DirectionSource/FlowVerdict rendering convention uses elsewhere (direction_source_name,
@@ -252,6 +265,15 @@ struct BaselineFinding {
     uint32_t observed_start = 0, observed_end = 0;
     std::vector<std::pair<uint32_t, uint32_t>> baseline_ranges;
     size_t packet_count = 0;  // how many packets in THIS capture hit this finding
+
+    // Set only for NewConduitKnownZone (empty/"" otherwise): the declared zone `client_ip`
+    // resolved to via `--policy`, and every OTHER client_ip already in the baseline that (a) also
+    // resolves to this same zone, (b) talks to the same (server_ip, protocol, server_port) shape,
+    // and (c) already has this operation_key baselined (fully covering this capture's own observed
+    // ranges too, when has_target_range is true) -- see check_baseline's own comment for the exact
+    // rule. At least one entry whenever this is set; never empty for a NewConduitKnownZone finding.
+    std::string zone_name;
+    std::vector<std::string> zone_vouching_client_ips;
 
     // Copied from the checked capture's own (freshly-extracted) Operation/OperationBaseline entry
     // -- see Operation::s7_area_letter's own comment (above) for why these are sourced from the
@@ -289,14 +311,35 @@ struct BaselineCheckReport {
 };
 
 // Compares `observed` (one capture's own BaselineEngine::finish() output) against `baseline` and
-// produces the findings/summary counts described above. Per-(conduit, operation_key) verdict:
-//   - the conduit (client_ip, server_ip, protocol, server_port) isn't in `baseline` at all ->
-//     NewConduit, one finding per operation_key this capture observed on that unseen conduit (the
-//     conduit itself is what's new; operation_key is still carried on each finding so the report
-//     says WHICH operation(s) the new conduit was seen doing, per the design doc's own "NewConduit
-//     subsumes 'a new client talked to this server'" framing).
+// produces the findings/summary counts described above. `policy` is the `baseline check --policy`
+// follow-up's own optional zone-awareness hook (see docs/design/baseline-engine.md's own
+// "Follow-up" section -- the design doc's own "Explicitly out of scope" item this resolves):
+// nullptr (the default, and every pre-existing caller) reproduces the exact original behavior
+// below, byte for byte -- zero behavior change without it. Per-(conduit, operation_key) verdict:
+//   - the conduit (client_ip, server_ip, protocol, server_port) isn't in `baseline` at all, AND
+//     EITHER `policy` is nullptr, OR `policy->zone_for(client_ip)` returns nullptr (the client
+//     isn't in any declared zone), OR it returns a zone but no OTHER conduit in `baseline` sharing
+//     this conduit's (server_ip, protocol, server_port) has a client_ip that ALSO resolves to that
+//     zone and already has this operation_key baselined (with, for a range-bearing operation, its
+//     own observed_ranges fully covering every sub-range this capture observed for it) -> NewConduit,
+//     one finding per operation_key this capture observed on that unseen conduit (the conduit
+//     itself is what's new; operation_key is still carried on each finding so the report says WHICH
+//     operation(s) the new conduit was seen doing, per the design doc's own "NewConduit subsumes 'a
+//     new client talked to this server'" framing).
+//   - the conduit isn't in `baseline`, but `policy` IS given, `client_ip` resolves to a declared
+//     zone, AND at least one other client_ip already baselined against this same (server_ip,
+//     protocol, server_port) shape also resolves to that same zone and already has this exact
+//     operation_key (range-covered too, when applicable) -> NewConduitKnownZone instead of plain
+//     NewConduit: a deliberately conservative "zone vouches for this SPECIFIC operation, because
+//     someone else in it has actually done it" call, never "the zone is known, so anything from it
+//     is fine" -- a known zone with no precedent for this particular operation_key still gets full
+//     NewConduit, per operation_key independently (one operation_key on a brand-new conduit can be
+//     NewConduitKnownZone while another, on that SAME conduit, stays full NewConduit, if only the
+//     first one has a zone-mate precedent).
 //   - the conduit is known, but this operation_key was never recorded on it -> NewOperation (the
-//     FC03-baseline/FC16-never-seen example from the design doc).
+//     FC03-baseline/FC16-never-seen example from the design doc). Unaffected by `policy` -- zone
+//     awareness only ever applies to the "conduit not in baseline at all" case above, never to an
+//     already-known conduit missing just this one operation.
 //   - the conduit and operation_key are both known, has_target_range is true, and at least one of
 //     this capture's own observed sub-ranges for that operation_key isn't fully contained in one
 //     of the baseline's own observed_ranges -> NewTargetRange, observed_start/end set to the union
@@ -308,7 +351,7 @@ struct BaselineCheckReport {
 //     tallied into known_operation_count, no BaselineFinding constructed (see
 //     BaselineCheckReport::findings' own comment for why).
 BaselineCheckReport check_baseline(const BaselineStore& baseline, const std::vector<ConduitBaseline>& observed,
-                                    const std::string& capture_path);
+                                    const std::string& capture_path, const Policy* policy = nullptr);
 
 class BaselineEngine {
 public:

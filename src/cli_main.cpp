@@ -15,6 +15,7 @@
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -1227,9 +1228,21 @@ int run_baseline_learn(const std::vector<std::string>& inputs, const std::string
 // ->check(CLI::ExistingFile) on the option, see main() below) and compares `input`'s own observed
 // operations against it, never writing the file back. See kExitBaselineAnomaly's own comment for
 // the exit-code contract.
+//
+// `policy_path` (`--policy`, optional): the zone-awareness follow-up (docs/design/baseline-engine.md's
+// own "Follow-up" section) that resolves the design doc's originally-deferred "does a new IP in an
+// already-trusted zone count as NewConduit or not" question. Empty (the default) reproduces the
+// exact pre-existing behavior, byte for byte -- `check_baseline` itself defaults its own `policy`
+// parameter to nullptr, and this function only ever parses/passes a Policy when `policy_path` is
+// non-empty, so a caller who never passes `--policy` never touches this code path at all. Reuses
+// `policy validate`'s own `parse_policy_file`/`Policy`/`PolicyError` machinery exactly -- no new
+// file format, no second policy parser. `baseline learn` is entirely untouched by this: zones are
+// resolved fresh at `check` time only, never persisted into the baseline file, so a baseline
+// learned before a policy existed (or before it changed) needs no re-`learn`.
 int run_baseline_check(const std::string& input, const std::string& baseline_file, const std::string& output,
-                        const std::string& format, bool strict, bool symbolic_addresses, bool quiet,
-                        const ResourceLimitCliVars& limit_vars, std::ostream& diag) {
+                        const std::string& format, bool strict, bool symbolic_addresses,
+                        const std::string& policy_path, bool quiet, const ResourceLimitCliVars& limit_vars,
+                        std::ostream& diag) {
     std::ofstream file_out;
     std::ostream* out = &std::cout;
     if (!output.empty()) {
@@ -1243,6 +1256,13 @@ int run_baseline_check(const std::string& input, const std::string& baseline_fil
 
     try {
         BaselineStore store = load_baseline_store(baseline_file);
+
+        // Only parsed when given -- see this function's own doc comment above for why an absent
+        // --policy must never even construct a Policy, let alone reach check_baseline with one.
+        std::optional<Policy> policy;
+        if (!policy_path.empty()) {
+            policy = parse_policy_file(policy_path);
+        }
 
         DecodeOptions options;
         options.strict = strict;
@@ -1263,7 +1283,7 @@ int run_baseline_check(const std::string& input, const std::string& baseline_fil
             engine.observe(dp);
         }
 
-        BaselineCheckReport report = check_baseline(store, engine.finish(), input);
+        BaselineCheckReport report = check_baseline(store, engine.finish(), input, policy ? &*policy : nullptr);
         if (format == "json") {
             write_baseline_check_report_json(*out, report, symbolic_addresses);
         } else {
@@ -1277,6 +1297,9 @@ int run_baseline_check(const std::string& input, const std::string& baseline_fil
         }
         return report.compliant() ? 0 : kExitBaselineAnomaly;
     } catch (const BaselineStoreError& e) {
+        std::cerr << "error: " << e.what() << "\n";
+        return 1;
+    } catch (const PolicyError& e) {
         std::cerr << "error: " << e.what() << "\n";
         return 1;
     } catch (const ParseError& e) {
@@ -2023,7 +2046,7 @@ int main(int argc, char** argv) {
                   "file (read-only -- never writes it) and report every operation the baseline "
                   "doesn't already cover. Non-zero exit code on any finding -- see EXIT STATUS -- "
                   "for CI/cron use");
-    std::string baseline_check_file, baseline_check_input, baseline_check_output;
+    std::string baseline_check_file, baseline_check_input, baseline_check_output, baseline_check_policy_file;
     std::string baseline_check_format = "text";
     bool baseline_check_strict = false;
     bool baseline_check_symbolic_addresses = false;
@@ -2052,6 +2075,21 @@ int main(int argc, char** argv) {
         "alongside the existing raw numeric range_start/range_end fields, for NewTargetRange "
         "findings. Default off -- output is unchanged unless this is passed. No effect on any "
         "other protocol's findings");
+    baseline_check_cmd
+        ->add_option("--policy", baseline_check_policy_file,
+                      "Zone/conduit policy file (same format and option name as 'policy validate --policy' "
+                      "-- see docs/MANUAL.md's POLICY FILE FORMAT section). Optional; omitted by default. "
+                      "When given, a conduit with NO exact baseline match whose client IP resolves to a "
+                      "declared zone, where at least one OTHER client IP already baselined against the same "
+                      "server/protocol/port and ALSO in that zone already has this exact operation baselined "
+                      "(range-covered too, when the operation has one), is reported as new-conduit-known-zone "
+                      "instead of plain new-conduit -- a known zone never vouches for an operation nobody in "
+                      "it has actually done, so this stays new-conduit whenever there is no such precedent, "
+                      "even with --policy given. Leaves 'baseline learn' and every 'baseline check' run "
+                      "without this flag completely unchanged -- zones are resolved fresh from the policy "
+                      "file at check time only, never persisted into the baseline file itself, so swapping "
+                      "in an updated policy later needs no re-learn")
+        ->check(CLI::ExistingFile);
     add_resource_limit_options(baseline_check_cmd, baseline_check_limit_vars);
 
     // --- version ------------------------------------------------------------
@@ -2155,7 +2193,7 @@ int main(int argc, char** argv) {
     if (baseline_check_cmd->parsed()) {
         return run_baseline_check(baseline_check_input, baseline_check_file, baseline_check_output,
                                    baseline_check_format, baseline_check_strict, baseline_check_symbolic_addresses,
-                                   quiet, baseline_check_limit_vars,
+                                   baseline_check_policy_file, quiet, baseline_check_limit_vars,
                                    *diag);
     }
     if (baseline_cmd->parsed()) {

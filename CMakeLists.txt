@@ -12766,6 +12766,82 @@ set_tests_properties(baseline_check_two_conduit_isolation PROPERTIES
   PASS_REGULAR_EXPRESSION "2 conduit\\(s\\) observed, 2 distinct operation\\(s\\) observed, 1 matched the baseline, 1 did not\n\nFINDINGS \\(1\\):\n *\\[1\\] new-conduit  192\\.168\\.1\\.77 -> 192\\.168\\.1\\.10:502  modbus  operation=\"Read Holding Registers\""
   FAIL_REGULAR_EXPRESSION "192\\.168\\.1\\.50[^\\n]*new-conduit|new-operation|new-target-range")
 
+# ---------------------------------------------------------------------------------------------
+# `baseline check --policy` -- zone-awareness follow-up (roadmap item 41's second deferred
+# question, docs/design/baseline-engine.md's own "Follow-up" section: "does a new IP in an
+# already-trusted zone count as NewConduit or not?"). Every test below independently `rm -f`s and
+# re-`learn`s its own baseline file from tests/sample_modbus.pcap (HMI_IP=192.168.1.50 doing Read
+# Holding Registers only -- the same fixture/one-liner-chaining convention every other
+# baseline_check_* test above already uses), then `check`s against
+# tests/policies/baseline_zone.yaml, whose "engineering_ws_zone" declares HMI_IP plus a second,
+# never-learned workstation, 192.168.1.77.
+# ---------------------------------------------------------------------------------------------
+set(BASELINE_ZONE_POLICY "${CMAKE_CURRENT_SOURCE_DIR}/tests/policies/baseline_zone.yaml")
+
+# Positive case: a SECOND, previously-unseen client (192.168.1.77) in the SAME declared zone as
+# the learned host (HMI_IP), doing the EXACT SAME operation (Read Holding Registers, address 0,
+# quantity 10) -- with --policy, this must be new-conduit-known-zone, naming both the zone and
+# the vouching client IP (192.168.1.50), not plain new-conduit.
+add_test(NAME baseline_check_zone_known_zone_new_host_text
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_zone_new_host_text.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_zone_new_host_text.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap' && '$<TARGET_FILE:conduitscope>' baseline check --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_zone_new_host_text.json' --policy '${BASELINE_ZONE_POLICY}' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_baseline_zone_new_host.pcap'")
+set_tests_properties(baseline_check_zone_known_zone_new_host_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[1\\] new-conduit-known-zone  192\\.168\\.1\\.77 -> 192\\.168\\.1\\.10:502  modbus  operation=\"Read Holding Registers\"  \\(1 packet\\(s\\)\\)\n *zone: engineering_ws_zone\n *already known in this zone: 192\\.168\\.1\\.50")
+
+add_test(NAME baseline_check_zone_known_zone_new_host_json
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_zone_new_host_json.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_zone_new_host_json.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap' && '$<TARGET_FILE:conduitscope>' baseline check --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_zone_new_host_json.json' --policy '${BASELINE_ZONE_POLICY}' --format json '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_baseline_zone_new_host.pcap'")
+set_tests_properties(baseline_check_zone_known_zone_new_host_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"verdict\": \"new-conduit-known-zone\",\n *\"client_ip\": \"192\\.168\\.1\\.77\",\n *\"server_ip\": \"192\\.168\\.1\\.10\",\n *\"protocol\": \"modbus\",\n *\"server_port\": 502,\n *\"operation_key\": \"Read Holding Registers\",\n *\"zone\": \"engineering_ws_zone\",\n *\"zone_known_client_ips\": \\[\"192\\.168\\.1\\.50\"\\]")
+
+# Negative control, same capture/baseline, --policy simply omitted: must be plain new-conduit,
+# proving the flag itself (not some incidental property of the fixture) gates the behavior --
+# exit code 4 (kExitBaselineAnomaly) either way, since a plain new-conduit finding is still
+# non-compliant on its own.
+add_test(NAME baseline_check_zone_flag_absent_is_plain_new_conduit
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_zone_flag_absent.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_zone_flag_absent.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap' && '$<TARGET_FILE:conduitscope>' baseline check --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_zone_flag_absent.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_baseline_zone_new_host.pcap'")
+set_tests_properties(baseline_check_zone_flag_absent_is_plain_new_conduit PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[1\\] new-conduit  192\\.168\\.1\\.77 -> 192\\.168\\.1\\.10:502  modbus  operation=\"Read Holding Registers\""
+  FAIL_REGULAR_EXPRESSION "new-conduit-known-zone|\n *zone:")
+
+# A client IP that --policy's own zones don't cover AT ALL (192.168.1.99, in neither
+# engineering_ws_zone nor plc_zone) must stay plain new-conduit even with --policy given --
+# zone_for() returning nullptr is exactly the "not in any declared zone" case.
+add_test(NAME baseline_check_zone_client_not_in_any_zone_stays_new_conduit
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_zone_unknown_host.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_zone_unknown_host.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap' && '$<TARGET_FILE:conduitscope>' baseline check --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_zone_unknown_host.json' --policy '${BASELINE_ZONE_POLICY}' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_baseline_zone_unknown_host.pcap'")
+set_tests_properties(baseline_check_zone_client_not_in_any_zone_stays_new_conduit PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[1\\] new-conduit  192\\.168\\.1\\.99 -> 192\\.168\\.1\\.10:502  modbus  operation=\"Read Holding Registers\""
+  FAIL_REGULAR_EXPRESSION "new-conduit-known-zone|\n *zone:")
+
+# The conservative core of this whole feature: the second workstation IS in the same declared
+# zone as the learned host, but doing Write Multiple Registers -- a function code NOBODY in the
+# zone (not even HMI_IP) has ever been baselined doing (the learned baseline only ever taught
+# Read Holding Registers). A known zone never vouches for an operation nobody in it has actually
+# done -- this must stay full new-conduit even with --policy given.
+add_test(NAME baseline_check_zone_known_zone_unprecedented_operation_stays_new_conduit
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_zone_new_operation.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_zone_new_operation.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap' && '$<TARGET_FILE:conduitscope>' baseline check --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_zone_new_operation.json' --policy '${BASELINE_ZONE_POLICY}' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_baseline_zone_new_operation.pcap'")
+set_tests_properties(baseline_check_zone_known_zone_unprecedented_operation_stays_new_conduit PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[1\\] new-conduit  192\\.168\\.1\\.77 -> 192\\.168\\.1\\.10:502  modbus  operation=\"Write Multiple Registers\""
+  FAIL_REGULAR_EXPRESSION "new-conduit-known-zone|\n *zone:")
+
+# `baseline check` against sample_modbus.pcap's own already-known conduit/operation, --policy
+# given: an EXACT baseline match must stay KnownOperation regardless of --policy -- zone
+# awareness only ever applies to the "no exact conduit match" case, never overrides an
+# already-known conduit. Zero findings, exit 0.
+add_test(NAME baseline_check_zone_known_conduit_unaffected_by_policy
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_zone_known_conduit.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_zone_known_conduit.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap' && '$<TARGET_FILE:conduitscope>' baseline check --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_zone_known_conduit.json' --policy '${BASELINE_ZONE_POLICY}' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap'")
+set_tests_properties(baseline_check_zone_known_conduit_unaffected_by_policy PROPERTIES
+  PASS_REGULAR_EXPRESSION "Result: CLEAN\n\n1 conduit\\(s\\) observed, 1 distinct operation\\(s\\) observed, 1 matched the baseline, 0 did not\n\nFINDINGS \\(0\\):\n *\\(none\\)")
+
+# `baseline check --policy` with a policy file that exists but fails to parse (reusing the exact
+# same PolicyError `policy validate --policy` already surfaces): caught by run_baseline_check's
+# own PolicyError handler, exit code 1, not the baseline-anomaly exit code 4 -- a policy-file
+# problem is a fatal setup error, not an anomaly finding. (A --policy path that doesn't exist at
+# all is instead caught earlier, at the CLI layer, by ->check(CLI::ExistingFile) on the option
+# itself -- see baseline_check_cmd's own --policy definition, cli_main.cpp.)
+add_test(NAME baseline_check_zone_malformed_policy_file_is_a_fatal_error
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_zone_malformed_policy.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_zone_malformed_policy.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap' && '$<TARGET_FILE:conduitscope>' baseline check --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_zone_malformed_policy.json' --policy '${CMAKE_CURRENT_SOURCE_DIR}/tests/policies/bad_missing_zones.yaml' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap'")
+set_tests_properties(baseline_check_zone_malformed_policy_file_is_a_fatal_error PROPERTIES
+  PASS_REGULAR_EXPRESSION "error:.*bad_missing_zones\\.yaml")
+
 # `baseline check` against a nonexistent/never-learned-from baseline file: --baseline-file is
 # ->check(CLI::ExistingFile)'d at the CLI layer (unlike `learn`'s own --baseline-file, which must
 # accept a not-yet-existing path -- see baseline_learn_cmd's own option definition, cli_main.cpp),

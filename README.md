@@ -219,7 +219,13 @@ tracking, DNP3/MELSEC/FINS also get full range-tracking for their own
 batch/block-style reads and writes, and EtherNet/IP/BACnet/OPC UA are
 tracked key-only, where each protocol's own real addressing has no linear
 range to track -- see [docs/design/baseline-engine.md](docs/design/baseline-engine.md)
-for exactly which is which and why), plus `interfaces` and
+for exactly which is which and why; `baseline check --policy` optionally
+reuses a `policy validate`-style zone/conduit file to soften a brand-new
+conduit to the lower-severity `new-conduit-known-zone` when another host
+in the same declared zone is already baselined doing that exact
+operation -- a known zone never vouches for an operation nobody in it has
+actually done, and omitting the flag leaves every `baseline check` run
+exactly as before), plus `interfaces` and
 `version`, with full `--help` at every level. See
 [docs/USER_GUIDE.md](docs/USER_GUIDE.md) for command syntax, the policy
 file schema, output formats, exit codes, current limitations, and worked

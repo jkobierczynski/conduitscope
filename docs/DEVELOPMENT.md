@@ -7639,8 +7639,9 @@ deferred future migration.
     BSAP field this decoder does not name above.
 
 41. **ICS communication-baseline analysis at the protocol-operation level.** **Phase 1 done, v0.2.5
-    (S7comm/Modbus); Phase 2 done, v0.2.5 (EtherNet/IP, DNP3, BACnet, OPC UA, MELSEC, FINS) --
-    zone-level rollup, statistical/confidence thresholds, and CODESYS are still not done, see
+    (S7comm/Modbus); Phase 2 done, v0.2.5 (EtherNet/IP, DNP3, BACnet, OPC UA, MELSEC, FINS);
+    zone-level rollup done 2026-09-25, still v0.2.5 (`baseline check --policy` /
+    `NewConduitKnownZone`) -- statistical/confidence thresholds and CODESYS are still not done, see
     below.** Phase 1 first, scoped to S7comm and Modbus exactly as the design called for: `BaselineEngine`
     (`baseline.hpp`/`baseline.cpp`), the `baseline learn`/`baseline check` subcommand pair, and
     Modbus's own prerequisite (`ModbusFrame::is_request`/`start_address`/`quantity`, populated
@@ -7804,9 +7805,60 @@ deferred future migration.
     config), 1888 -> 1894 (no-live-capture config), zero-warning build in both, confirmed via clean
     full rebuild in both configs; no version bump (stays v0.2.5).
 
-    Still not done, unchanged from Phase 1's own scoping: zone-level baselines, statistical/
-    confidence thresholds (see the design doc's own "Explicitly out of scope" section), and
-    CODESYS's `CmpIecVarAccess` (still the one confirmed real decode gap, structural-only today).
+    **Follow-up (2026-09-25, still v0.2.5): `baseline check --policy` / `NewConduitKnownZone` --
+    resolves the "zone-level baselines" item below, one of the two originally-deferred questions
+    this item's own scoping section named from the start.** Jurgen had asked what this design had
+    explicitly deferred; this closes the first of the two (statistical/confidence thresholds
+    remains open, unchanged -- see below). The design doc's own "Explicitly out of scope" section
+    had already framed the open question precisely: "does a new IP in an already-trusted zone
+    count as `NewConduit` or not?" The answer implemented: sometimes, and only with actual
+    precedent for that SPECIFIC operation within the zone, never just because the zone itself is
+    trusted -- a deliberately conservative reading, chosen so a known zone can never silently
+    backstop an operation nobody in it has actually done. A brand-new conduit (no exact baseline
+    match) whose client IP resolves, via `Policy::zone_for` (`--policy`, reusing `policy
+    validate`'s own `Policy`/`parse_policy_file`/`zone_for` machinery exactly -- no new file
+    format), to a declared zone is downgraded from full `NewConduit` to a new, lower-severity
+    verdict, `BaselineVerdict::NewConduitKnownZone` (`"new-conduit-known-zone"`), only when
+    another client IP already baselined against the same server/protocol/port ALSO resolves to
+    that zone AND already has this exact `operation_key` baselined (range-covered too, reusing
+    `NewTargetRange`'s own `range_fully_covered` containment check against the OTHER conduit's own
+    baseline, not reimplemented). No precedent for that specific operation -> stays full
+    `NewConduit`, even though the zone itself is known -- confirmed directly by CTest
+    (`baseline_check_zone_known_zone_unprecedented_operation_stays_new_conduit`), not assumed.
+    Scope boundary: only ever applies to a conduit with no exact baseline match at all --
+    `NewOperation`/`NewTargetRange`/`KnownOperation` on an already-known conduit are completely
+    untouched. `baseline learn` is entirely untouched too: zones are resolved fresh from the
+    policy file at `check` time only, never persisted into the baseline file's own JSON schema
+    (`BaselineStore`/`ConduitBaseline`/`OperationBaseline` all byte-for-byte unchanged), so
+    swapping in an updated policy later needs no re-`learn`. `check_baseline()` gained one new,
+    defaulted parameter (`const Policy* policy = nullptr`) -- every pre-existing caller (and every
+    pre-existing CTest entry) never passes it, so this is zero behavior change without `--policy`,
+    verified directly (a matching pair of CTest entries runs the identical scenario with and
+    without the flag and pins the different outcomes). The new verdict sits between
+    `KnownOperation` and `NewConduit` in the enum's own declared order, reflecting its severity,
+    and is exit-code-visible the same way `NewOperation`/`NewTargetRange` already are -- a report
+    containing only `NewConduitKnownZone` findings still returns the non-zero
+    `kExitBaselineAnomaly` exit code, confirmed by checking `$?` after a real run, not just by
+    reading the code. Report rendering (text and JSON) adds the zone name and every vouching
+    client IP (not just one example) to a `NewConduitKnownZone` finding, omitted entirely for
+    every other verdict. New fixtures: `tests/policies/baseline_zone.yaml` (a zone with two IPs --
+    the synthetic fixtures' own HMI_IP, what a baseline is actually learned from, plus a second,
+    never-learned workstation) and three new single-packet pcaps
+    (`build_baseline_zone_*_sample`, `tools/make_sample_pcap.py`) covering the positive case, a
+    client outside any declared zone, and the known-zone-but-unprecedented-operation case. Seven
+    new `baseline_check_zone_*` CTest entries, each self-contained (its own `rm -f`/`learn`/`check`
+    one-liner, matching every other `baseline_check_*` test's own convention, no shared
+    setup-test). Full suite: 1906 -> 1913 tests (default config), 1894 -> 1901 (no-live-capture
+    config), zero-warning build in both, confirmed via clean full rebuild in both configs; every
+    pre-existing `baseline_*` CTest entry still passes with its exact original
+    `PASS_REGULAR_EXPRESSION` pin, confirming zero regression. No version bump (stays v0.2.5). Full
+    design and rationale at `docs/design/baseline-engine.md`'s own "Follow-up (2026-09-25)"
+    section.
+
+    Still not done: statistical/confidence thresholds (see the design doc's own "Explicitly out of
+    scope" section -- the one item of the two Phase 1 originally deferred that remains genuinely
+    open) and CODESYS's `CmpIecVarAccess` (still the one confirmed real decode gap, structural-only
+    today). Zone-level baselines, formerly listed here too, is resolved as of the follow-up above.
 
 42. **CC-Link IE Field Network Basic (CCIEFB), Mitsubishi Electric -- UDP ports 61450 (cyclic
     data) and 61451 (SLMP node search / set IP address).** **Done.** Jurgen asked "Can you add

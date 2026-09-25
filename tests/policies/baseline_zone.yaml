@@ -1,0 +1,25 @@
+# Zone/conduit policy for `baseline check --policy`'s own zone-awareness follow-up (roadmap item
+# 41's second-deferred question, docs/design/baseline-engine.md's own "Follow-up" section --
+# "does a new IP in an already-trusted zone count as NewConduit or not?"). Declares a zone
+# containing exactly two engineering-workstation IPs: the synthetic fixtures' own HMI_IP
+# (192.168.1.50, tools/make_sample_pcap.py) -- what `baseline learn` actually trains a baseline
+# from -- and a SECOND workstation, 192.168.1.77, that never appears in any learned baseline at
+# all but shares this zone with HMI_IP. `baseline_check_zone_*` CTest entries (CMakeLists.txt)
+# check captures from 192.168.1.77 (and, for the "not in any zone" case, a third IP outside both
+# zones entirely) against a baseline learned only from HMI_IP, with and without --policy.
+zones:
+  engineering_ws_zone:
+    description: "Engineering workstations: HMI_IP (what baseline learn trains on) plus a second workstation baseline learn has never seen"
+    networks:
+      - 192.168.1.50/32
+      - 192.168.1.77/32
+  plc_zone:
+    description: "PLC (synthetic fixtures' PLC_IP)"
+    networks: [192.168.1.10/32]
+
+conduits:
+  - name: "Engineering workstations poll PLC via Modbus"
+    from: engineering_ws_zone
+    to: plc_zone
+    protocols: [modbus]
+    ports: [502]

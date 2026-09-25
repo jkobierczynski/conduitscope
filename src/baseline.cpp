@@ -13,9 +13,11 @@
 #include "conduitscope/dnp3.hpp"
 #include "conduitscope/enip.hpp"
 #include "conduitscope/fins.hpp"
+#include "conduitscope/ipv4.hpp"
 #include "conduitscope/melsec.hpp"
 #include "conduitscope/modbus.hpp"
 #include "conduitscope/opcua.hpp"
+#include "conduitscope/policy.hpp"
 #include "conduitscope/s7comm.hpp"
 
 namespace conduitscope {
@@ -1001,6 +1003,7 @@ void merge_baseline_observations(BaselineStore& store, const std::vector<Conduit
 const char* baseline_verdict_name(BaselineVerdict verdict) {
     switch (verdict) {
         case BaselineVerdict::KnownOperation: return "known-operation";
+        case BaselineVerdict::NewConduitKnownZone: return "new-conduit-known-zone";
         case BaselineVerdict::NewConduit: return "new-conduit";
         case BaselineVerdict::NewOperation: return "new-operation";
         case BaselineVerdict::NewTargetRange: return "new-target-range";
@@ -1008,8 +1011,57 @@ const char* baseline_verdict_name(BaselineVerdict verdict) {
     return "known-operation";
 }
 
+namespace {
+
+// Zone precedent search for a conduit with NO exact baseline match (check_baseline's own
+// NewConduit branch, below) -- see BaselineVerdict::NewConduitKnownZone's own comment (baseline.hpp)
+// for the full rule this implements. Returns every client_ip already in `baseline` that:
+//   - is NOT `exclude_client_ip` (the checked conduit's own, unseen, client),
+//   - talks to the SAME (server_ip, protocol, server_port) shape the checked conduit does,
+//   - resolves, via `policy.zone_for`, to the SAME zone the checked conduit's own client_ip
+//     resolved to (`client_zone` -- callers only reach this after confirming that resolution
+//     themselves, so it's always a real zone here, never nullptr), and
+//   - already has `operation_key` in ITS OWN baseline entry, and -- only when `has_target_range` is
+//     true -- whose own observed_ranges for that operation_key FULLY cover every one of THIS
+//     capture's own `observed_ranges` (reuses range_fully_covered, the exact same per-sub-range
+//     containment check check_baseline's own NewTargetRange branch already uses, just evaluated
+//     against a DIFFERENT conduit's baseline entry than the one being checked).
+// A zone known to the policy never vouches for an operation nobody in it has actually done -- an
+// empty result here is exactly that case, and check_baseline keeps the verdict at full NewConduit
+// when it happens, per operation_key (a zone-mate precedent for one operation_key on a brand-new
+// conduit never backstops a DIFFERENT operation_key on that same conduit).
+std::vector<std::string> find_zone_vouching_client_ips(
+        const BaselineStore& baseline, const Policy& policy, const Zone& client_zone,
+        const std::string& exclude_client_ip, const std::string& server_ip, const std::string& protocol,
+        uint16_t server_port, const std::string& operation_key, bool has_target_range,
+        const std::vector<std::pair<uint32_t, uint32_t>>& observed_ranges) {
+    std::vector<std::string> vouching;
+    for (const ConduitBaseline& c : baseline.conduits) {
+        if (c.client_ip == exclude_client_ip) continue;
+        if (c.server_ip != server_ip || c.protocol != protocol || c.server_port != server_port) continue;
+        std::optional<uint32_t> cip = parse_ipv4_string(c.client_ip);
+        if (!cip || policy.zone_for(*cip) != &client_zone) continue;
+        const OperationBaseline* op = find_operation_const(c, operation_key);
+        if (!op) continue;
+        if (has_target_range) {
+            bool fully_covered = true;
+            for (const auto& r : observed_ranges) {
+                if (!range_fully_covered(op->observed_ranges, r.first, r.second)) {
+                    fully_covered = false;
+                    break;
+                }
+            }
+            if (!fully_covered) continue;
+        }
+        vouching.push_back(c.client_ip);
+    }
+    return vouching;
+}
+
+}  // namespace
+
 BaselineCheckReport check_baseline(const BaselineStore& baseline, const std::vector<ConduitBaseline>& observed,
-                                    const std::string& capture_path) {
+                                    const std::string& capture_path, const Policy* policy) {
     BaselineCheckReport report;
     report.capture_path = capture_path;
     report.conduits_observed = observed.size();
@@ -1018,12 +1070,25 @@ BaselineCheckReport check_baseline(const BaselineStore& baseline, const std::vec
         const ConduitBaseline* base_conduit = find_conduit_const(
             baseline, obs_conduit.client_ip, obs_conduit.server_ip, obs_conduit.protocol, obs_conduit.server_port);
 
+        // Resolved once per conduit, not per operation_key (it doesn't depend on operation_key) --
+        // only ever attempted when it could matter: no exact conduit match, and `--policy` was
+        // actually given. Left null when `policy` is null (zero behavior change without the flag,
+        // verified directly -- see this file's own CTest coverage) or when `client_ip` isn't in any
+        // declared zone; either way every operation_key on this conduit falls back to plain
+        // NewConduit below, exactly the pre-`--policy` behavior.
+        const Zone* client_zone = nullptr;
+        if (!base_conduit && policy) {
+            std::optional<uint32_t> client_ip_u32 = parse_ipv4_string(obs_conduit.client_ip);
+            client_zone = client_ip_u32 ? policy->zone_for(*client_ip_u32) : nullptr;
+        }
+
         for (const OperationBaseline& obs_op : obs_conduit.operations) {
             ++report.operations_observed;
             const OperationBaseline* base_op =
                 base_conduit ? find_operation_const(*base_conduit, obs_op.operation_key) : nullptr;
 
             BaselineVerdict verdict;
+            std::vector<std::string> zone_vouching_client_ips;  // set only when verdict becomes NewConduitKnownZone
             // For NewTargetRange specifically, track only the sub-range(s) of THIS capture's own
             // observed_ranges that the baseline does NOT already cover -- not the outer bounds of
             // every observed sub-range (covered or not). A single operation_key can legitimately
@@ -1039,6 +1104,20 @@ BaselineCheckReport check_baseline(const BaselineStore& baseline, const std::vec
             uint32_t uncovered_start = 0, uncovered_end = 0;
             if (!base_conduit) {
                 verdict = BaselineVerdict::NewConduit;
+                // Zone precedent, per operation_key -- see BaselineVerdict::NewConduitKnownZone's
+                // own comment (baseline.hpp) and find_zone_vouching_client_ips' own comment (above)
+                // for the full rule. A known zone with no precedent for THIS SPECIFIC operation_key
+                // still gets full NewConduit -- the search below is genuinely allowed to come back
+                // empty, and does, deliberately, whenever nobody else in the zone has done this yet.
+                if (client_zone) {
+                    zone_vouching_client_ips = find_zone_vouching_client_ips(
+                        baseline, *policy, *client_zone, obs_conduit.client_ip, obs_conduit.server_ip,
+                        obs_conduit.protocol, obs_conduit.server_port, obs_op.operation_key,
+                        obs_op.has_target_range, obs_op.observed_ranges);
+                    if (!zone_vouching_client_ips.empty()) {
+                        verdict = BaselineVerdict::NewConduitKnownZone;
+                    }
+                }
             } else if (!base_op) {
                 verdict = BaselineVerdict::NewOperation;
             } else if (obs_op.has_target_range) {
@@ -1085,6 +1164,9 @@ BaselineCheckReport check_baseline(const BaselineStore& baseline, const std::vec
                 // baseline_ranges gives the reader what the baseline already had, for context, so
                 // they can see how far outside it this capture went.
                 finding.baseline_ranges = base_op->observed_ranges;
+            } else if (verdict == BaselineVerdict::NewConduitKnownZone) {
+                finding.zone_name = client_zone->name;
+                finding.zone_vouching_client_ips = std::move(zone_vouching_client_ips);
             }
             report.findings.push_back(std::move(finding));
         }
@@ -1482,6 +1564,20 @@ std::string ranges_text(const std::vector<std::pair<uint32_t, uint32_t>>& ranges
     return out.str();
 }
 
+// Same "(none)"-vs-comma-joined shape as ranges_text above, for a NewConduitKnownZone finding's own
+// zone_vouching_client_ips -- "(none)" should never actually render here in practice
+// (find_zone_vouching_client_ips only ever produces this verdict when it found at least one), but
+// this still renders something honest rather than an empty line if that invariant were ever broken.
+std::string client_ips_text(const std::vector<std::string>& client_ips) {
+    std::ostringstream out;
+    for (size_t i = 0; i < client_ips.size(); ++i) {
+        if (i) out << ", ";
+        out << client_ips[i];
+    }
+    if (client_ips.empty()) out << "(none)";
+    return out.str();
+}
+
 // True only for an S7comm finding whose s7_range_unit was actually populated -- i.e. an area code
 // extract_s7comm_operations recognized (s7_area_letter_for_code returned non-empty). An S7comm
 // finding CAN reach here with s7_range_unit empty (has_target_range false, e.g. a NewOperation on an
@@ -1531,6 +1627,10 @@ void write_baseline_check_report_text(std::ostream& out, const BaselineCheckRepo
         out << "  [" << (i + 1) << "] " << baseline_verdict_name(f.verdict) << "  " << f.client_ip << " -> "
             << f.server_ip << ":" << f.server_port << "  " << f.protocol << "  operation=\"" << f.operation_key
             << "\"  (" << f.packet_count << " packet(s))\n";
+        if (f.verdict == BaselineVerdict::NewConduitKnownZone) {
+            out << "      zone: " << f.zone_name << "\n";
+            out << "      already known in this zone: " << client_ips_text(f.zone_vouching_client_ips) << "\n";
+        }
         if (f.verdict == BaselineVerdict::NewTargetRange) {
             out << "      observed range: [" << f.observed_start << ", " << f.observed_end << ")\n";
             if (symbolic_addresses && has_s7_symbolic_notation(f)) {
@@ -1565,6 +1665,15 @@ void write_baseline_check_report_json(std::ostream& out, const BaselineCheckRepo
         out << "      \"protocol\": \"" << json_escape(f.protocol) << "\",\n";
         out << "      \"server_port\": " << f.server_port << ",\n";
         out << "      \"operation_key\": \"" << json_escape(f.operation_key) << "\",\n";
+        if (f.verdict == BaselineVerdict::NewConduitKnownZone) {
+            out << "      \"zone\": \"" << json_escape(f.zone_name) << "\",\n";
+            out << "      \"zone_known_client_ips\": [";
+            for (size_t k = 0; k < f.zone_vouching_client_ips.size(); ++k) {
+                if (k) out << ", ";
+                out << "\"" << json_escape(f.zone_vouching_client_ips[k]) << "\"";
+            }
+            out << "],\n";
+        }
         if (f.verdict == BaselineVerdict::NewTargetRange) {
             out << "      \"observed_start\": " << f.observed_start << ",\n";
             out << "      \"observed_end\": " << f.observed_end << ",\n";

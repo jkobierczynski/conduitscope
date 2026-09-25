@@ -2,7 +2,9 @@
 
 Status: **Phase 1 (S7comm + Modbus) and Phase 2 (EtherNet/IP, DNP3, BACnet, OPC UA, MELSEC, FINS)
 implemented, v0.2.5; a small follow-up (S7comm bit-level range tracking + `baseline check
---symbolic-addresses`) also implemented, v0.2.5, same release.** Written at Jurgen's request to
+--symbolic-addresses`) also implemented, v0.2.5, same release; a second follow-up
+(`baseline check --policy` / `NewConduitKnownZone`, resolving this design's own originally-deferred
+zone-level-baseline question) implemented 2026-09-25, still v0.2.5.** Written at Jurgen's request to
 scope roadmap item 41 (`docs/DEVELOPMENT.md`) into something buildable, starting with S7comm and
 Modbus. `BaselineEngine` (`include/conduitscope/baseline.hpp`, `src/baseline.cpp`) and the
 `baseline learn`/`baseline check` subcommand pair now exist and are covered by CTest, exactly as
@@ -13,8 +15,12 @@ it fine, and confirmed protocol breadth (not zone-level rollup, not statistical 
 direction -- see "Per-protocol data readiness" below for what was actually found for each of the
 six, and "Phased build plan" at the bottom for what remains out of scope even now (zone-level
 rollup, statistical thresholds, and CODESYS's `CmpIecVarAccess`, unchanged from the original draft).
-The follow-up is documented in its own section near the bottom of this file, "Follow-up (v0.2.5,
-same release): S7comm bit-level range tracking + `--symbolic-addresses`".
+The S7comm follow-up is documented in its own section near the bottom of this file, "Follow-up
+(v0.2.5, same release): S7comm bit-level range tracking + `--symbolic-addresses`"; the zone-level
+follow-up is documented right after it, "Follow-up (2026-09-25): `baseline check --policy` /
+`NewConduitKnownZone`" -- this one resolves the "zone-level rollup" item this paragraph's own
+"still out of scope" note above otherwise still names; statistical/confidence thresholds remain
+the one genuinely still-open item from the original draft.
 
 ## The pitch, restated
 
@@ -300,13 +306,23 @@ of the baseline's own `observed_ranges` for that operation -- e.g. MW100 read on
 baseline only ever saw MW0-MW50. `check`'s text/JSON report lists findings grouped by conduit,
 same shape as `write_policy_report_text`/`_json`, with a summary count per verdict.
 
+(This snapshot is Phase 1's own original four-verdict model, kept as written above for historical
+accuracy. The 2026-09-25 follow-up near the bottom of this file adds a fifth verdict,
+`NewConduitKnownZone`, sitting in severity between `KnownOperation` and `NewConduit` -- see that
+section for the full design; every other verdict/field here is unchanged by it.)
+
 ## Explicitly out of scope for Phase 1
 
 - **Zone-level baselines.** Everything above is per-IP-pair. Rolling this up to "this baseline
   applies to any host in the Engineering zone" would reuse `Policy::zone_for` the same way
   `PolicyEngine` does, but that's a real design question of its own (does a new IP in an already-
   trusted zone count as `NewConduit` or not?) and doesn't need to be answered before S7/Modbus at
-  IP granularity ships.
+  IP granularity ships. **Since resolved (narrowly, deliberately conservatively) by the 2026-09-25
+  follow-up below:** a new IP in an already-trusted zone gets its OWN new verdict tier,
+  `NewConduitKnownZone`, but ONLY when another host already in that same zone has already been
+  baselined doing this EXACT operation -- a known zone never, by itself, vouches for an operation
+  nobody in it has actually done. See "Follow-up (2026-09-25): `baseline check --policy` /
+  `NewConduitKnownZone`" near the bottom of this file for the full design and rationale.
 - **Statistical/confidence thresholds.** No "flag only if this deviates from a 30-day rolling
   average," no minimum-sample-size gate before `check` starts flagging. Phase 1's model is exact
   set/interval membership: seen before (in the baseline file) or not. This is deliberately the
@@ -545,3 +561,150 @@ model, the JSON schema, and `--symbolic-addresses`'s own rendering machinery (`s
 all already treat `operation_key`/`s7_range_unit` as opaque strings, so reusing the existing `"bit"`
 unit tag for a `/bit-symbolic` observation renders it in identical `Mx.y`/`DBn.DBXx.y` notation with
 zero code changes there -- verified directly against a learned+checked baseline, not assumed.
+
+## Follow-up (2026-09-25): `baseline check --policy` / `NewConduitKnownZone`
+
+This resolves the exact open question this design doc's own "Explicitly out of scope for Phase 1"
+section named for "Zone-level baselines" from the start: "does a new IP in an already-trusted zone
+count as `NewConduit` or not?" Jurgen had asked earlier what this design had explicitly deferred;
+this is the first of the two deferred items (zone-level baselines and statistical/confidence
+thresholds) to get resolved. Statistical/confidence thresholds remain untouched and out of scope --
+this follow-up does not touch that question at all.
+
+**The answer, as implemented: sometimes, and only when there is actual precedent for the SPECIFIC
+operation within that zone -- never just because the zone itself is trusted.** A zone vouching for
+"any conduit from any host in it" would be a real behavior change with real consequences (a
+compromised or misconfigured host in a trusted zone doing something no one else in that zone has
+ever done would go unreported, or under-reported, exactly the kind of silent-suppression this
+project's own review discipline exists to avoid). So the implemented rule is narrower and more
+conservative: a brand-new conduit (no exact client_ip/server_ip/protocol/server_port match in the
+baseline at all) whose client IP resolves, via `Policy::zone_for` (reusing `policy validate`'s own
+`Policy`/`parse_policy_file`/`zone_for` machinery exactly -- no new file format, no second policy
+parser), to a declared zone, is downgraded from full `NewConduit` to a new, less-severe verdict,
+`NewConduitKnownZone`, ONLY when at least one OTHER client IP already baselined against that SAME
+(server_ip, protocol, server_port) shape ALSO resolves to that same zone AND already has this EXACT
+`operation_key` baselined -- and, for an operation with `has_target_range` true, whose own baseline
+ranges for that `operation_key` already fully cover every sub-range this capture is observing right
+now (the exact same containment check `NewTargetRange` already uses,
+`range_fully_covered`/`baseline.cpp`, just evaluated against a DIFFERENT conduit's own baseline
+entry than the one being checked -- reused, not reimplemented). A known zone with no precedent for
+THIS SPECIFIC operation still gets full `NewConduit` -- this is deliberate and exercised directly by
+CTest (`baseline_check_zone_known_zone_unprecedented_operation_stays_new_conduit`, below): the
+second workstation in the fixtures below is genuinely in the same declared zone as the learned host,
+but the operation it's doing (Write Multiple Registers) was never baselined by ANYONE in that zone,
+so it stays full `NewConduit`, not `NewConduitKnownZone`. The verdict is decided per operation_key
+independently, too -- one operation_key on a brand-new conduit can be `NewConduitKnownZone` while a
+DIFFERENT operation_key on that SAME conduit stays full `NewConduit`, if only the first one has a
+zone-mate precedent.
+
+**Scope boundary: this only ever applies to the "no exact conduit match at all" case.** An
+already-known conduit (exact client/server/protocol/port match) is completely unaffected by
+`--policy` -- its `NewOperation`/`NewTargetRange`/`KnownOperation` logic is byte-for-byte unchanged.
+Zone awareness never overrides or reinterprets an already-known conduit; it only ever softens the
+verdict for a conduit the baseline has never seen at all.
+
+**`baseline learn` is completely untouched.** Zones are resolved fresh, from the policy file, at
+`check` time only -- never persisted into the baseline file, never touching
+`BaselineStore`/`ConduitBaseline`/`OperationBaseline`'s own JSON schema (all byte-for-byte
+unchanged, same "operation_key stays opaque, no unrelated schema needs to move" discipline every
+earlier phase/follow-up of this feature has kept). This means swapping in an updated (or
+newly-written) policy file later needs no re-`learn` -- exactly the same "the baseline file is the
+durable state, the policy file is read fresh each time" split `policy validate` itself already has
+between its own `-r`/`-i` traffic and its `--policy` file.
+
+**CLI: `baseline check --policy <path>`**, reusing `policy validate`'s own `--policy` option name,
+`CLI::ExistingFile` validation, and underlying `parse_policy_file`/`Policy`/`PolicyError` machinery
+exactly (`cli_main.cpp`'s `baseline_check_cmd`). Optional; omitted by default. **Zero behavior
+change without it, verified directly, not assumed:** `check_baseline()` (`baseline.hpp`/`.cpp`)
+gained one new, defaulted parameter, `const Policy* policy = nullptr`; every pre-existing call site
+(and every one of the ~1906 pre-existing CTest entries) never passes it, so `check_baseline`'s own
+zone-resolution code path (`policy->zone_for(...)`) is never even reached unless a caller actually
+supplies a `Policy`. `run_baseline_check` (`cli_main.cpp`) only ever constructs a `Policy` (via
+`parse_policy_file`, inside a `std::optional<Policy>`) when `--policy`'s own string is non-empty --
+an absent `--policy` never even calls `parse_policy_file`, let alone reaches
+`check_baseline`/`find_zone_vouching_client_ips` with a real policy. A policy file that fails to
+parse (reusing the exact same `PolicyError` `policy validate --policy` already surfaces) is caught
+the same way `run_policy_validate` already catches it: a fatal setup error, exit code 1
+(`kExitBaselineAnomaly`, 4, is reserved for "the capture and baseline file were both valid, but
+findings exist" -- a bad policy file is not that).
+
+**New verdict tier: `BaselineVerdict::NewConduitKnownZone`**, rendered `"new-conduit-known-zone"`
+(`baseline_verdict_name`, matching the existing lowercase-hyphenated convention every other verdict
+already uses). Placed in the enum between `KnownOperation` and `NewConduit`
+(`enum class BaselineVerdict { KnownOperation, NewConduitKnownZone, NewConduit, NewOperation,
+NewTargetRange };`) to reflect where it sits in severity: still worth a human's attention (it is
+still new inventory -- a host the baseline has genuinely never seen before, talking to this server),
+just a lower-severity flavor of `NewConduit`, backed by another host in the same declared zone
+already doing the exact same thing. It is exit-code-visible the same way every other non-
+`KnownOperation` verdict already is: `BaselineCheckReport::compliant()` is `findings.empty()`,
+unchanged, and a `NewConduitKnownZone` finding is a real `BaselineFinding` in that vector like any
+other non-`KnownOperation` verdict, so a report containing only `NewConduitKnownZone` findings still
+returns `kExitBaselineAnomaly` (4) from `run_baseline_check` -- confirmed directly by checking `$?`
+after a real run (see the manual-verification transcript in this feature's own commit/PR notes),
+not just by reading the code. This matches the same reasoning this design doc's own task brief gave
+for `NewOperation`/`NewTargetRange`: a lower-severity finding is still a finding worth surfacing,
+never silently downgraded to "compliant."
+
+**Report rendering (text and JSON).** A `NewConduitKnownZone` finding shows everything a plain
+`NewConduit` finding already shows (client_ip/server_ip/protocol/server_port/operation_key/
+packet_count), plus two new fields: the zone name the client IP resolved to, and every OTHER client
+IP already known to have this exact operation baselined in that same zone (not just one example --
+`find_zone_vouching_client_ips`, `baseline.cpp`, collects every match, and the report lists all of
+them; in every fixture below there happens to be exactly one, since each fixture's baseline was
+learned from a single host, but the code does not assume that). Text:
+```
+  [1] new-conduit-known-zone  192.168.1.77 -> 192.168.1.10:502  modbus  operation="Read Holding Registers"  (1 packet(s))
+      zone: engineering_ws_zone
+      already known in this zone: 192.168.1.50
+```
+JSON adds `"zone"` and `"zone_known_client_ips"` (an array, even when it has exactly one entry)
+alongside the existing fields, omitted entirely (not merely empty/null) for every other verdict --
+the same "omit what doesn't apply" convention `NewTargetRange`'s own `observed_start`/
+`baseline_ranges` fields already follow.
+
+**Fixtures and tests.** `tests/policies/baseline_zone.yaml` (new; format template taken directly
+from the existing `tests/policies/compliant.yaml`, read before writing this one rather than
+guessed): declares `engineering_ws_zone` with TWO `/32` CIDR entries -- the synthetic fixtures' own
+`HMI_IP` (192.168.1.50, `tools/make_sample_pcap.py`, what `baseline learn` actually trains a
+baseline from in every test below) and a second workstation IP, 192.168.1.77, that no baseline in
+these tests ever learns from at all -- plus `plc_zone` for `PLC_IP` (192.168.1.10). Three new,
+single-packet pcap fixtures (`build_baseline_zone_*_sample`, `tools/make_sample_pcap.py`, called
+right after `build_baseline_two_conduit_sample`, whose own `OTHER_IP` constant this follow-up's
+`ZONE_HOST2_IP` reuses the same value of, 192.168.1.77, for continuity):
+- `sample_baseline_zone_new_host.pcap`: the second workstation doing the EXACT SAME operation
+  (Read Holding Registers, address 0, quantity 10) `tests/sample_modbus.pcap` already teaches
+  the baseline for HMI_IP -- the positive case.
+- `sample_baseline_zone_unknown_host.pcap`: a THIRD IP, 192.168.1.99, covered by NEITHER declared
+  zone at all, doing the same known operation -- must stay plain `new-conduit` even with `--policy`
+  given, since `zone_for` itself returns `nullptr` for it.
+- `sample_baseline_zone_new_operation.pcap`: the second workstation again, but doing Write Multiple
+  Registers -- a function code nobody (not even HMI_IP) has ever been baselined doing -- proving the
+  conservative core of this whole feature.
+
+Seven new `baseline_check_zone_*` CTest entries (`CMakeLists.txt`), each independently
+`rm -f`s-and-re-`learn`s its own baseline file from `tests/sample_modbus.pcap`, matching every
+other `baseline_check_*` test's own established one-liner-chaining convention (no shared
+setup-test/`DEPENDS`, to stay consistent with how every other baseline CTest entry in this file
+is written): the positive case in both text and JSON, the identical scenario with `--policy`
+omitted (proving the flag itself gates the behavior, not some incidental property of the fixture),
+the zone-not-covering-this-client case, the known-zone-but-unprecedented-operation case, an
+already-known conduit proving `--policy` never overrides `KnownOperation`, and a malformed-policy-
+file fatal-error case. Full suite: 1906 -> 1913 tests (default config), 1894 -> 1901 (no-live-
+capture config), zero-warning build in both, confirmed via clean full rebuild in both configs
+(`cmake --build . --target clean` then a full `-j` rebuild, output grepped for "warning"/"error"
+case-insensitively, zero matches either config); every pre-existing `baseline_*` CTest entry
+(Phase 1, Phase 2, both S7comm follow-up parts) still passes with its exact original
+`PASS_REGULAR_EXPRESSION` pin, confirming zero regression to any prior baseline behavior.
+
+**A judgment call worth naming explicitly (nothing in the task brief was silently guessed at
+without saying so here):** the task brief left "showing all of them if there could be many is
+fine too -- your call on the exact format" for the vouching-client-IP report field. The
+implementation collects and renders EVERY matching zone-mate client IP, not just one representative
+example, on the reasoning that an OT security engineer reviewing this finding benefits from seeing
+the full precedent (e.g. "three other engineering workstations already do this" reads as
+meaningfully more reassuring than "at least one other workstation does this," and the reverse -- a
+report that silently truncated to one example when there were actually several -- would be exactly
+the kind of soft information-hiding this project's own review discipline avoids elsewhere). No
+truncation/cap was added, matching this feature's own realistic scale (a real zone's own client
+count is not expected to be large enough for this to become an unreadable wall of IPs the way, say,
+an unbounded packet-level dump could be).
