@@ -506,6 +506,8 @@ bool Decoder::reassemble_tcp_payload(const TcpSegment& tcp, const std::string& f
                         options_.protocol_filter == ProtocolFilter::Amqp10Only;
     bool want_dicom = options_.protocol_filter == ProtocolFilter::Auto ||
                        options_.protocol_filter == ProtocolFilter::DicomOnly;
+    bool want_fox = options_.protocol_filter == ProtocolFilter::Auto ||
+                     options_.protocol_filter == ProtocolFilter::FoxOnly;
 
     // OPC UA is checked first of all: its own structural detection gate (the leading 3 bytes must
     // be one of exactly 7 fixed ASCII MessageType strings -- "HEL"/"ACK"/"ERR"/"RHE"/"OPN"/"CLO"/
@@ -790,6 +792,25 @@ bool Decoder::reassemble_tcp_payload(const TcpSegment& tcp, const std::string& f
         if (auto d = amqp10_tcp_decoder().tcp_declared_length(candidate)) {
             declared = d;
             which = "AMQP 1.0 frame";
+        }
+    }
+    // Tridium Niagara Fox (fox.hpp), TCP port 1911 -- deliberately PORT-GATED here in Auto mode,
+    // the same posture GE SRTP/AMQP above already establish for this gate kind: Fox's own
+    // structural gate (the literal 4-byte "fox " ASCII prefix, checked by
+    // FoxDecoder::tcp_declared_length before any terminator-scanning/buffering is attempted at
+    // all) is real but not magic-constant-strength on its own, so it's tried opportunistically
+    // only on its own configured port in Auto mode -- see fox.hpp's own DETECTION/DISPATCH
+    // section. No byte-for-byte collision with any protocol above was found during this
+    // decoder's own scoping (an ASCII "fox " prefix cannot satisfy Modbus/TCP's own
+    // protocol-id==0 check, IEC104's 0x68 start byte, DNP3's 0x0564 sync bytes, or any other
+    // fixed-binary-magic gate in this cascade).
+    bool require_fox_port = options_.protocol_filter == ProtocolFilter::Auto;
+    bool candidate_port_is_fox = port_in(tcp.src_port, FOX_PORT, options_.extra_fox_ports) ||
+                                  port_in(tcp.dst_port, FOX_PORT, options_.extra_fox_ports);
+    if (!declared && want_fox && (!require_fox_port || candidate_port_is_fox)) {
+        if (auto d = fox_tcp_decoder().tcp_declared_length(candidate)) {
+            declared = d;
+            which = "Fox frame";
         }
     }
     if (!declared && want_dnp3) {
@@ -2766,7 +2787,15 @@ DecodedPacket Decoder::decode_ip_payload(DecodedPacket out, uint8_t protocol, By
                                             options_.protocol_filter == ProtocolFilter::LateralMovementOnly;
         bool want_enterprise_trust_early = options_.protocol_filter == ProtocolFilter::Auto ||
                                             options_.protocol_filter == ProtocolFilter::EnterpriseTrustOnly;
-        if (want_lateral_movement_early || want_enterprise_trust_early) {
+        // Fox-over-TLS ("FOXS", TCP port 4911) is layered into this SAME ClientHello call site --
+        // see fox.hpp's own "PORT 4911 / FOXS" section. A small, low-risk addition mirroring the
+        // LDAPS paragraph immediately below it: detection-only (FOXS's own payload is as opaque
+        // to a passive capture as HTTPS/LDAPS-over-TLS already are), no attempt to decode the Fox
+        // frames themselves -- the real, cleartext Fox decoder (FoxDecoder, gated to TCP port
+        // 1911) never runs against this port at all.
+        bool want_fox_early = options_.protocol_filter == ProtocolFilter::Auto ||
+                               options_.protocol_filter == ProtocolFilter::FoxOnly;
+        if (want_lateral_movement_early || want_enterprise_trust_early || want_fox_early) {
             if (auto hello = try_parse_tls_client_hello(tcp.payload)) {
                 bool alpn_confirms_http =
                     std::find(hello->alpn_protocols.begin(), hello->alpn_protocols.end(), "http/1.1") !=
@@ -2781,6 +2810,28 @@ DecodedPacket Decoder::decode_ip_payload(DecodedPacket out, uint8_t protocol, By
                                          port_in(tcp.dst_port, LDAPS_PORT, options_.extra_enterprise_trust_ports) ||
                                          port_in(tcp.src_port, LDAPS_GC_PORT, options_.extra_enterprise_trust_ports) ||
                                          port_in(tcp.dst_port, LDAPS_GC_PORT, options_.extra_enterprise_trust_ports);
+                // No --extra-fox-tls-port widening -- see fox.hpp's own FOX_TLS_PORT comment for
+                // why this stays a single, fixed port rather than growing its own extra-ports list.
+                bool require_fox_tls_port = options_.protocol_filter == ProtocolFilter::Auto;
+                bool foxs_port_match = port_in(tcp.src_port, FOX_TLS_PORT, {}) ||
+                                        port_in(tcp.dst_port, FOX_TLS_PORT, {});
+
+                if (want_fox_early && !alpn_confirms_http &&
+                    (!require_fox_tls_port || foxs_port_match) &&
+                    !(want_lateral_movement_early && https_port_match) &&
+                    !(want_enterprise_trust_early && ldaps_port_match)) {
+                    out.protocol = "foxs";
+                    std::ostringstream s;
+                    s << "FOXS/TLS ClientHello (Tridium Niagara Fox over TLS, port 4911)";
+                    if (!hello->sni.empty()) s << " (SNI: " << hello->sni << ")";
+                    out.summary = s.str();
+                    out.notes.push_back("TLS ClientHello on a standard/configured FOXS port (4911), "
+                                         "and ALPN did not confirm HTTP -- most likely Fox-over-TLS, "
+                                         "but this decoder cannot see inside it (TLS-encrypted); any "
+                                         "other TLS-wrapped protocol sharing this port would look "
+                                         "identical at this layer");
+                    return out;
+                }
 
                 if (want_enterprise_trust_early && !alpn_confirms_http && ldaps_port_match &&
                     !(want_lateral_movement_early && https_port_match)) {
@@ -2898,6 +2949,8 @@ DecodedPacket Decoder::decode_ip_payload(DecodedPacket out, uint8_t protocol, By
                             options_.protocol_filter == ProtocolFilter::Amqp10Only;
         bool want_dicom = options_.protocol_filter == ProtocolFilter::Auto ||
                            options_.protocol_filter == ProtocolFilter::DicomOnly;
+        bool want_fox = options_.protocol_filter == ProtocolFilter::Auto ||
+                         options_.protocol_filter == ProtocolFilter::FoxOnly;
 
         // Tried first of all -- see the matching, fuller comment in reassemble_tcp_payload above
         // for why OPC UA's own magic-string detection gate is strong enough, and non-colliding
@@ -3506,6 +3559,56 @@ DecodedPacket Decoder::decode_ip_payload(DecodedPacket out, uint8_t protocol, By
                     }
                     return out;
                 }
+            }
+        }
+
+        // Tridium Niagara Fox (building-automation-system station protocol, fox.hpp), TCP port
+        // 1911 -- deliberately PORT-GATED here in Auto mode, the same posture GE SRTP/AMQP above
+        // already establish for this gate kind (see the matching, fuller comment in
+        // reassemble_tcp_payload above for why Fox's own "fox " ASCII prefix gate earns this
+        // treatment rather than opportunistic port-independent trial). Purely stateless (see
+        // fox.hpp's own STATEFULNESS section) -- ctx is passed only because
+        // ProtocolDecoder::decode's signature requires one. Same out.result-only shape GE SRTP/
+        // AMQP/DICOM established -- out.result carries the whole FoxResult, JsonWriter renders
+        // from it (output.cpp's write_fox_json_fields), TextWriter/CsvWriter from out.summary/
+        // out.notes generically.
+        bool require_fox_port = options_.protocol_filter == ProtocolFilter::Auto;
+        bool candidate_port_is_fox = port_in(tcp.src_port, FOX_PORT, options_.extra_fox_ports) ||
+                                      port_in(tcp.dst_port, FOX_PORT, options_.extra_fox_ports);
+        if (want_fox && (!require_fox_port || candidate_port_is_fox)) {
+            DecodeContext ctx;
+            ctx.packet_index = index;
+            ctx.protocol_id = "fox";
+            ctx.flow_states = &registry_flow_state_;
+            if (auto result = fox_tcp_decoder().decode(effective_payload, ctx)) {
+                const FoxResult& fr = result->as<FoxResult>();
+                out.protocol = "fox";
+                out.summary = fr.summary;
+                for (const auto& n : fr.notes) out.notes.push_back(n);
+                out.result = *result;
+
+                if (!candidate_port_is_fox) {
+                    out.notes.push_back("seen on TCP port " + std::to_string(tcp.src_port) + "->" +
+                                         std::to_string(tcp.dst_port) +
+                                         ", which is not a configured/standard Fox port (1911)");
+                }
+                // Secondary curated finding (see fox.hpp's own SECURITY section): a hello frame's
+                // own hostAddress field describes the address the SENDER believes is its own --
+                // when it differs from the actual TCP source IP address this packet was captured
+                // carrying, that's a mild internal-topology-leakage signal (NAT/multi-homing/stale
+                // config). Computed here, not inside fox.cpp, because only this call site has
+                // out.src_ip in scope -- see fox.hpp's own comment on why FoxResult/FoxFrame
+                // deliberately carry no notion of the carrying packet's own IP addresses.
+                if (fr.first.is_hello && fr.first.hello && fr.first.hello->host_address &&
+                    !fr.first.hello->host_address->empty() &&
+                    *fr.first.hello->host_address != out.src_ip) {
+                    out.notes.push_back(
+                        "hostAddress field (\"" + *fr.first.hello->host_address +
+                        "\") differs from the actual TCP source IP address observed for this "
+                        "packet (" + out.src_ip +
+                        ") -- possible NAT/multi-homing or internal-topology leakage signal");
+                }
+                return out;
             }
         }
 

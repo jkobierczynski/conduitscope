@@ -24,6 +24,7 @@
 #include "conduitscope/ethercat.hpp"
 #include "conduitscope/ffhse.hpp"
 #include "conduitscope/fins.hpp"
+#include "conduitscope/fox.hpp"
 #include "conduitscope/ge_srtp.hpp"
 #include "conduitscope/goose.hpp"
 #include "conduitscope/hartip.hpp"
@@ -424,6 +425,9 @@ const std::vector<const ProtocolDecoder*>& tcp_port_registry() {
         &amqp10_tcp_decoder(),  // AMQP 1.0 -- wire-incompatible with AMQP 0-9-1 immediately above
                                   // despite sharing a name and default port; see amqp_common.hpp.
                                   // tcp_port() also returns AMQP_PORT (5672).
+        &fox_tcp_decoder(),  // Tridium Niagara Fox (building-automation-system station protocol)
+                               // -- decoder.cpp's own Fox call site likewise calls it directly.
+                               // tcp_port() returns FOX_PORT (1911, fox.hpp).
     };
     return order;
 }

@@ -11712,3 +11712,221 @@ default config and from 1837 to 1861 in the
 regressions in both, zero-warning clean rebuilds in both. See
 `include/conduitscope/powerlink.hpp`'s own file header for the full
 field-by-field writeup.
+
+### Tridium Niagara Fox -- TCP port 1911 (cleartext), TCP port 4911 (FOXS, TLS-wrapped, detection only)
+
+Fox is Tridium's (a Honeywell subsidiary) native station-to-station/
+workbench-to-station protocol for Niagara, one of the most widely
+deployed building-automation-system (BAS) supervisory platforms --
+HVAC, lighting, access control, energy metering -- across commercial
+real estate, government, and critical-infrastructure-adjacent
+facilities. This decoder exists for one documented, exploited weakness:
+CISA/ICS-CERT advisory ICSA-12-228-01A (2012) and an accompanying FBI
+industry warning both center on an unauthenticated system-information-
+disclosure weakness in the `fox hello` exchange (see Security relevance,
+below), a weakness the publicly available `fox-info.nse` (Digital Bond
+Redpoint) tool actively exploits today.
+
+**Sourcing and confidence, read before trusting any specific byte
+offset.** Fox's wire format has never been publicly published by
+Tridium/Honeywell -- there is no vendor specification to cross-check
+against. This decoder's knowledge is condensed from byte-exact analysis
+of two third-party sources, both fetched and read in full for this
+feature: `fox-info.nse` itself (the tool that exploits the `fox hello`
+weakness against real stations in the wild) and a third-party Wireshark
+Lua dissector (MartinoTommasini/foxdissector). This document, and
+`include/conduitscope/fox.hpp`'s own file header, mark confidence
+per-claim rather than smoothing everything into one blanket "supported"
+label:
+
+- **HIGH confidence, cross-checked by both sources**: the outer framing
+  (line-oriented ASCII text, terminated by the literal `};;\n`
+  sequence, no binary length field anywhere) and the `fox hello`
+  exchange's own real-traffic, unauthenticated-disclosure behavior.
+- **MEDIUM confidence, single dissector source only, NOT independently
+  cross-checked against a second implementation**: the header line's
+  exact field grammar (frame-type char/seq/reply/channel/command) and
+  the tuple value grammar (the eight type-tag encodings: `s`/`i`/`f`/
+  `t`/`z`/`b`/`o`/`m`).
+- **Unconfirmed, this decoder's own best-effort reading, explicitly
+  flagged in the rendered output itself**: the `t` (time) type's
+  interpretation as a duration-vs-timestamp (see Explicitly out of
+  scope, below), and the `b`/`o` (blob/object) types' assumption of no
+  delimiter between the decimal size field and the raw bytes that
+  follow it.
+
+#### Wire format
+
+Fox is line-oriented ASCII text, a genuine departure from every other
+decoder in this codebase (Modbus/S7comm/DNP3/IEC104/EtherNet-IP/... all
+use an explicit binary length field somewhere in their own outer
+framing). A PDU (frame) looks like:
+
+```
+fox <frame-type:1-char> <seq:signed-int> <reply:signed-int> <channel:token> <command:token>\n
+{\n
+<zero or more tuple lines, each "key=type:value\n">
+};;\n
+```
+
+The terminator is the literal 4-byte sequence `};;\n`. Reassembly scans
+the accumulating buffer for the 5-byte sequence `\n};;\n`, the same
+strategy the reference Wireshark dissector uses -- this is a documented,
+inherent limitation of the wire format itself, not a bug: a string-typed
+(`s:`) tuple value whose own content happens to contain the literal
+bytes `};;\n` would cause a false early terminator match. Neither
+reference source this decoder was built from offers a way around this
+without a full value-aware parse ahead of the framing probe, so this
+decoder doesn't attempt one either.
+
+**Header line** (MEDIUM confidence): frame type (`a` Asynchronous, `s`
+Synchronous, `k` Keep-alive, `r` Reply, `e` Error, `n` F_NULL; anything
+else renders as `Unknown (0xNN char)`), a signed sequence number, a
+signed reply number (`-1` means "originates an exchange"; any other
+value correlates back to the sequence number it answers -- this decoder
+decodes and shows both numbers but never uses them to drive a lookup, no
+cross-packet pairing is needed), and channel/command tokens.
+
+**Tuple grammar** (MEDIUM confidence): `key=type:value\n`, zero or more,
+before the outer terminator. Every documented type tag is decoded
+generically: `s` (string), `i` (int), `f` (float), `t` (time, hex
+digits interpreted as a millisecond count -- rendered as a best-effort,
+explicitly-flagged-unconfirmed duration or timestamp, see above), `z`
+(bool, `t`/`f`), `b` (blob, `<decimal-size>[<raw-bytes>]` -- only the
+byte count is ever rendered, never the raw bytes, the same posture
+DICOM's own Pixel Data handling already establishes), `o` (object,
+`<type-token> <decimal-size>[<raw-bytes>]` -- likewise, only the
+type-token and byte count are rendered), and `m` (a recursive nested
+`{\n <tuples> }\n` message, bounded by the same
+`--max-recursion-depth` this codebase's AMQP/LDAP/S7comm-Plus decoders
+already share, default 16). An unrecognized type tag, or the recursion
+cap, honestly stops tuple extraction for the rest of that one frame (a
+`stopped_reason` note, the same shape DICOM's own undefined-length
+data-set handling already establishes) rather than guessing at
+unknown framing.
+
+**Only `fox`/`hello` gets curated, first-class field extraction.** Every
+other channel/command pair -- and, per this decoder's own sourcing,
+`crypto`/`keystore.getCertificates` appears in the reference dissector's
+source only as an unverified illustrative comment, never confirmed real
+traffic, so it is NOT hardcoded here -- falls through to the fully
+generic tuple decode above, the same "decode the structure, don't invent
+semantics for content that isn't confirmed" posture this document's own
+CANopen/POWERLINK Object Dictionary sections already take.
+
+#### Security relevance
+
+**The `fox hello` exchange is this decoder's entire reason for
+existing** (HIGH confidence, real traffic, FBI/CISA-documented, actively
+exploited by `fox-info.nse` today). A client sends
+`fox a <seq> -1 fox hello` describing its OWN identity (`fox.version`,
+`id`, `hostName`, `hostAddress`, `app.name`, `app.version`, `vm.name`,
+`vm.version`, `os.name`, `os.version`, `lang`, `timeZone`, `hostId`,
+`vmUuid`, `brandId`). **A real Niagara station answers ANY syntactically
+valid hello frame from ANY unauthenticated TCP peer with a full dump of
+the SAME field set describing ITSELF** -- no session, no login, no
+credential check precedes this. Because no authentication mechanism is
+decoded by this pass at all (see Explicitly out of scope, below), every
+hello exchange this decoder observes IS, by construction,
+unauthenticated -- the simplest reliable signal for this decoder's own
+`--stats` headline:
+
+```
+*** Fox hello exchanges observed (unauthenticated system-identity disclosure) N ***
+```
+
+**Secondary finding**: a hello frame's own `hostAddress` field describes
+the address the sender believes is its own -- when it differs from the
+actual TCP source IP address the packet was captured carrying, that's a
+mild internal-topology-leakage signal (NAT, multi-homing, or a stale/
+misconfigured `hostAddress`). Computed at `decoder.cpp`'s own Fox call
+site and in `output.cpp`'s own stats-counting pass (both already have
+the carrying packet's own IP addresses in scope; `fox.cpp`/`fox.hpp`
+deliberately do not, to keep the protocol decoder itself free of
+packet-envelope concerns) rather than inside `fox.cpp` itself.
+
+#### Redaction
+
+**None applied.** No credential material is confirmed to appear
+anywhere in the `fox hello` exchange -- every field involved is
+identity/environment metadata (version strings, hostnames, OS/JVM
+info), not a secret -- so `kRedactedSecretPlaceholder`/
+`redact_secret_occurrences` are deliberately never invoked for any hello
+field, unlike this codebase's HSRP/VRRP/DICOM/AMQP credential handling.
+
+#### Detection / dispatch
+
+`GateKind::TcpPort`, port-gated in Auto mode to TCP port 1911 -- the
+same posture this document's WinRM/DCOM/GE SRTP/AMQP/DICOM sections
+already establish for this gate kind: the literal 4-byte `fox ` ASCII
+prefix is a real but not magic-constant-strength structural gate, so
+it's tried opportunistically only on its own configured port in Auto
+mode. `--fox-port` widens Auto-mode detection with further ports, the
+same `extra_*_ports` convention every other port-gated decoder in this
+codebase uses. `--protocol fox` forces decoding on any port. No
+byte-for-byte collision with any other decoder in this cascade was found
+during scoping (an ASCII `fox ` prefix cannot satisfy Modbus/TCP's own
+`protocol_id == 0` check, IEC104's `0x68` start byte, DNP3's `0x0564`
+sync bytes, or any other fixed-binary-magic gate in this codebase).
+
+**Port 4911 (FOXS, Fox-over-TLS)**: a small, low-risk addition to this
+codebase's existing generic TLS-ClientHello recognition call site --
+the same one that already labels port 443 `"https"` and ports 636/3269
+`"ldaps"` -- extended to also recognize port 4911 and label it
+`"foxs"` (`FOXS/TLS ClientHello`). This is detection only: FOXS's own
+payload is TLS-encrypted, exactly as opaque to a passive capture as
+HTTPS/LDAPS-over-TLS already are elsewhere in this codebase, and the
+real, cleartext Fox decoder never runs against this port at all -- the
+same honest-scoping posture this codebase already takes for other
+TLS-wrapped-but-undecoded ports (e.g. WinRM's own port 5986).
+
+#### Explicitly out of scope
+
+Every channel/command beyond `fox`/`hello` stays fully generic (see
+Wire format, above) -- no semantic interpretation is invented for
+content this decoder's own sourcing couldn't confirm. The `t` (time)
+type's exact epoch/semantic (elapsed-since-boot? Unix-epoch-ish? some
+Niagara-internal value?) could not be sourced from either reference
+material used here; this decoder's duration-vs-timestamp rendering is
+its own best-effort guess, explicitly flagged as UNCONFIRMED in the
+rendered text itself rather than presented as fact. A separate Fox
+authentication mechanism (`n4digest`/SCRAM-SHA) is confirmed to EXIST BY
+NAME in this decoder's own research material, but its wire-level frame
+format could not be sourced from either reference used here -- this
+decoder does not attempt to decode or guess at an auth frame's
+structure; no channel/command that looked credential-related was
+observed during this feature's own fixture/testing work, so this
+remains a documented, un-implemented gap rather than a guess. The
+`b`/`o` (blob/object) types' decimal-size-then-raw-bytes framing is read
+with no delimiter assumed between the two, this decoder's own
+best-effort reading of the documented shape (flagged in
+`fox.hpp`'s own comments), not a confirmed wire detail.
+
+#### Validation
+
+Validated against `tests/sample_fox.pcap`, built by
+`tools/make_sample_pcap.py`'s `build_fox_sample()`. This fixture is
+**entirely synthetic** -- this feature's own research pass could source
+the field-name/grammar shape of real Fox traffic (see Sourcing and
+confidence, above) but not a literal byte-exact capture to reproduce
+verbatim, the same "entirely synthetic" posture `sample_dicom.pcap`'s
+own header comment already takes for its own protocol. It covers a
+`fox hello` request/reply pair (the headline unauthenticated-identity-
+disclosure finding, firing on both directions); a generic non-hello
+frame exercising every documented tuple type tag, including a recursive
+nested `m` message; a frame deliberately split across two TCP segments
+(proving `FoxDecoder::tcp_declared_length`'s terminator-scan reassembly,
+not just the common single-segment case); a second hello pair whose
+reply's own `hostAddress` deliberately differs from the observed TCP
+peer IP (the secondary finding); a non-standard-port hello pair (port
+9999, not claimed in Auto mode but decoding correctly under
+`--protocol fox` or `--fox-port 9999`); and a FOXS (port 4911)
+ClientHello-only packet (detection only). Every decode path was run
+manually (`--format text -v`, `--format json`, `--stats`, `--protocol
+fox`, `--fox-port`) and its real output read before any CTest regex was
+written, the same discipline this document's every other recent section
+describes. 11 new `fox_*`/`foxs_*` CTest tests were added; the full
+suite grew from 1913 to 1924 in the default config and from 1901 to
+1912 in the `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF` config, passing
+with zero regressions in both, zero-warning clean rebuilds in both. See
+`include/conduitscope/fox.hpp`'s own file header for the full writeup.

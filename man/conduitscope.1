@@ -503,7 +503,7 @@ regardless of where it's being analyzed \-\- an extension beyond what
 tshark/tcpdump themselves offer. See \fBdocs/USER_GUIDE.md\fR's OUTPUT
 FORMATS "Timestamps" subsection.
 .TP
-.B \-\-protocol {auto,modbus,dnp3,iec104,s7comm,s7comm\-plus,mms,enip,twincat,melsec,fins,bgp,kerberos,ldap,smb,profinet,goose,sv,ethercat,stp,devicenet,canopen,j1939,bacnet,hartip,opcua,mqtt,ff\-hse,dns,mdns,llmnr,nbns,doh,rip,igmp,vrrp,hsrp,igrp,pim,eigrp,ospf,remote\-access,lateral\-movement,enterprise\-trust,eapol,wireless\-backhaul,pppoe,tunnel\-vpn,mpls,arp,lldp,slow\-protocols,winrm,dcom,ge\-srtp,bsap,cclink\-ie,codesys,coap,zigbee,cdp,rmcp,asf,ipmi,amqp091,amqp10,dicom,powerlink}
+.B \-\-protocol {auto,modbus,dnp3,iec104,s7comm,s7comm\-plus,mms,enip,twincat,melsec,fins,bgp,kerberos,ldap,smb,profinet,goose,sv,ethercat,stp,devicenet,canopen,j1939,bacnet,hartip,opcua,mqtt,ff\-hse,dns,mdns,llmnr,nbns,doh,rip,igmp,vrrp,hsrp,igrp,pim,eigrp,ospf,remote\-access,lateral\-movement,enterprise\-trust,eapol,wireless\-backhaul,pppoe,tunnel\-vpn,mpls,arp,lldp,slow\-protocols,winrm,dcom,ge\-srtp,bsap,cclink\-ie,codesys,coap,zigbee,cdp,rmcp,asf,ipmi,amqp091,amqp10,dicom,powerlink,fox}
 Restrict decoding to one protocol. Default: auto (tries all fourteen TCP
 protocols, independent of port number, plus CIP I/O, BACnet/IP, HART-IP, and
 FF-HSE on every
@@ -794,6 +794,29 @@ under an explicit \fB\-\-protocol powerlink\fR, un-gates) detection of
 the SDO-over-UDP path beyond its own default port. See
 \fBdocs/PROTOCOL_COVERAGE.md\fR's Ethernet POWERLINK section for the
 full field-by-field writeup and sourcing notes.
+\fBfox\fR (Tridium Niagara Fox, a building-automation-system
+station protocol \-\- TCP port 1911, cleartext; TCP port 4911, "FOXS"
+Fox\-over\-TLS, is detection\-only, labeled via the same generic
+TLS\-ClientHello recognition \fBhttps\fR/\fBldaps\fR already share, not a
+decode target). Fox's wire format is reverse\-engineered, single\-to\-
+double\-source material (fox\-info.nse and a third\-party Wireshark
+dissector), never a vendor specification \-\- see
+\fBdocs/PROTOCOL_COVERAGE.md\fR's Fox section for the full per\-claim
+confidence breakdown. Decodes the line\-oriented header+tuple grammar
+generically (every \fBkey=type:value\fR tuple, including nested \fBm\fR
+messages) for every channel/command; the \fBfox\fR/\fBhello\fR
+channel/command pair alone gets curated, first\-class field extraction
+(fox.version/hostName/hostAddress/app/vm/os/etc.). The headline
+\fB\-\-stats\fR finding is unauthenticated hello exchanges observed \-\-
+a real Niagara station answers ANY syntactically valid hello frame from
+ANY unauthenticated TCP peer with a full dump of its own system identity
+(CISA ICSA\-12\-228\-01A / FBI PIN, actively exploited by
+\fBfox\-info.nse\fR); a secondary finding flags a hello reply whose own
+\fBhostAddress\fR differs from the observed TCP peer IP. No
+authentication mechanism (\fBn4digest\fR/SCRAM\-SHA, confirmed to exist
+by name only) is decoded or guessed at. \fB\-\-fox\-port\fR widens
+\fBauto\fR-mode detection to further ports. See
+\fBdocs/PROTOCOL_COVERAGE.md\fR's Fox section for the full writeup.
 \fBigmp\fR (IP protocol 2), \fBvrrp\fR (IP protocol 112), \fBigrp\fR (IP
 protocol 9), \fBpim\fR (IP protocol 103), \fBeigrp\fR (IP protocol 88), and
 \fBospf\fR (IP protocol 89) need no port gate or option at all \-\- all six
@@ -1009,6 +1032,13 @@ secondary gate (built\-in default: 3819, UDP \-\- see
 Also widens detection in \fBauto\fR mode. The primary cyclic real-time
 path (EtherType 0x88AB, raw Ethernet) has no port concept at all and is
 unaffected by this option.
+.TP
+.B \-\-fox\-port \fIPORT\fR
+Same as \fB\-\-dns\-port\fR, for Tridium Niagara Fox (built\-in default:
+1911, TCP \-\- see \fBdocs/PROTOCOL_COVERAGE.md\fR's Fox section).
+Repeatable. Also widens detection in \fBauto\fR mode. Does NOT widen the
+separate, small port\-4911 FOXS/TLS\-ClientHello detection, which has no
+option of its own.
 .TP
 .B \-\-remote\-access\-port \fIPORT\fR
 Additional TCP or UDP port to treat as expected for the Tier 1 "IT

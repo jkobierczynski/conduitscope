@@ -128,6 +128,7 @@ add_library(conduitscope_core STATIC
   src/amqp091.cpp
   src/amqp10.cpp
   src/dicom.cpp
+  src/fox.cpp
   src/protocol_registry.cpp
   src/resource_limits.cpp
   src/decoder.cpp
@@ -13621,3 +13622,101 @@ add_test(NAME dicom_port_option_extends_auto_mode_detection
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dicom.pcap" --dicom-port 9999 --format text)
 set_tests_properties(dicom_port_option_extends_auto_mode_detection PROPERTIES
   PASS_REGULAR_EXPRESSION "#28  [^\n]*\\[dicom\\]  A-ASSOCIATE-RQ \\(called=\"PACS_AE\", calling=\"PORTABLE7\"\\)[^\n]*\n#29  [^\n]*\\[dicom\\]  A-ASSOCIATE-AC \\(called=\"PACS_AE\", calling=\"PORTABLE7\"\\)")
+
+# --- Tridium Niagara Fox (fox.hpp) ----------------------------------------------------------------
+# tests/sample_fox.pcap (build_fox_sample, tools/make_sample_pcap.py) is ENTIRELY SYNTHETIC -- this
+# feature's own research pass (fox-info.nse / MartinoTommasini's third-party Wireshark dissector)
+# could source the field-name/grammar SHAPE of real Fox traffic, but not a literal byte-exact
+# capture to reproduce verbatim (see fox.hpp's own SOURCING section for the full confidence-tier
+# breakdown). Covers a `fox hello` request/reply pair (packets #1/#2, the headline unauthenticated-
+# identity-disclosure finding), a generic non-hello frame exercising every documented tuple type tag
+# (packet #3), a frame split across two TCP segments (packets #4/#5, proving
+# FoxDecoder::tcp_declared_length's terminator-scan reassembly), a second hello pair whose reply's
+# own hostAddress deliberately differs from the observed TCP peer IP (packets #6/#7, the secondary
+# finding), a non-standard-port hello pair (packets #8/#9, port 9999 -- proves Auto-mode's port
+# gating and --protocol fox/--fox-port), and a FOXS (Fox-over-TLS, port 4911) ClientHello-only
+# packet (#10, detection only).
+
+# The fox hello request itself -- proves the header-line grammar (frame type/seq/reply/channel/
+# command) and the curated FoxHelloFields extraction, plus the headline unauthenticated-exchange
+# note firing on the REQUEST side too (not just the reply).
+add_test(NAME fox_hello_request_recognized_and_curated_fields
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_fox.pcap" --format text -v)
+set_tests_properties(fox_hello_request_recognized_and_curated_fields PROPERTIES
+  PASS_REGULAR_EXPRESSION "#1  [^\n]*\\[fox\\]  Fox hello request: hostName=\"ENGINEER-LAPTOP\", hostAddress=\"192\\.168\\.1\\.50\", id=\"1\", app\\.name=\"Workbench\", app\\.version=\"4\\.10\\.0\\.16\", os\\.name=\"Windows 10\"[^\n]*\n *note: unauthenticated Fox hello exchange")
+
+# The fox hello reply -- the station answering with its OWN identity, unauthenticated -- plus the
+# JSON structured-field proof (every curated FoxHelloFields member, not just a generic tuple dump).
+add_test(NAME fox_hello_reply_json_curated_fields
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_fox.pcap" --format json)
+set_tests_properties(fox_hello_reply_json_curated_fields PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"fox_is_hello\": true,\n *\"fox_hello_fox_version\": \"1\\.0\",\n *\"fox_hello_id\": \"1\",\n *\"fox_hello_host_name\": \"NIAGARA-STATION-A\",\n *\"fox_hello_host_address\": \"192\\.168\\.1\\.10\",\n *\"fox_hello_app_name\": \"Station\",\n *\"fox_hello_app_version\": \"4\\.10\\.0\\.16\",\n *\"fox_hello_vm_name\": \"Java HotSpot\\(TM\\) Embedded Client VM\",\n *\"fox_hello_vm_version\": \"1\\.8\\.0_202\",\n *\"fox_hello_os_name\": \"QNX\",\n *\"fox_hello_os_version\": \"6\\.5\\.0\",\n *\"fox_hello_lang\": \"en\",\n *\"fox_hello_time_zone\": \"America/New_York\",\n *\"fox_hello_host_id\": \"Niagara-JACE8000-0042\",\n *\"fox_hello_vm_uuid\": \"b2c3d4e5-1111-2222-3333-445566778899\",\n *\"fox_hello_brand_id\": \"tridium\"")
+
+# The generic (non-hello) frame -- proves the fully generic key=type:value tuple grammar decodes
+# every documented type tag (s/i/f/t/z/b/o/m, including a recursive nested 'm' message) correctly,
+# independent of any hello-specific field handling.
+add_test(NAME fox_generic_frame_all_tuple_types_json
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_fox.pcap" --format json)
+set_tests_properties(fox_generic_frame_all_tuple_types_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"fox_channel\": \"test\",\n *\"fox_command\": \"echo\",\n *\"fox_is_hello\": false,\n *\"fox_tuples\": \\[\\{\"key\": \"greeting\", \"type\": \"string\", \"value\": \"hello world\"\\}, \\{\"key\": \"count\", \"type\": \"int\", \"value\": \"42\"\\}, \\{\"key\": \"ratio\", \"type\": \"float\", \"value\": \"3\\.14\"\\}, \\{\"key\": \"lastBoot\", \"type\": \"time\", \"value\": \"0xbc614e[^\"]*\"\\}, \\{\"key\": \"enabled\", \"type\": \"bool\", \"value\": \"true\"\\}, \\{\"key\": \"payload\", \"type\": \"blob\", \"value\": \"5 byte\\(s\\) \\(blob\\)\"\\}, \\{\"key\": \"cert\", \"type\": \"object\", \"value\": \"type=\\\\\"javax\\.security\\.cert\\.X509Certificate\\\\\", 3 byte\\(s\\) \\(object\\)\"\\}, \\{\"key\": \"nestedGroup\", \"type\": \"message\", \"nested\": \\[\\{\"key\": \"subKey\", \"type\": \"string\", \"value\": \"nested value\"\\}, \\{\"key\": \"subCount\", \"type\": \"int\", \"value\": \"3\"\\}\\]\\}\\]")
+
+# A Fox frame split across two TCP segments -- packet #4 must show the buffering-in-progress note
+# (never a premature/garbled decode), and packet #5 must show the completed, reassembled frame with
+# its own "reassembled ... spanning 2 TCP segments" note -- proving
+# FoxDecoder::tcp_declared_length's terminator-scan reassembly works, not just the single-segment
+# common case.
+add_test(NAME fox_split_across_two_tcp_segments_reassembled
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_fox.pcap" --format text -v)
+set_tests_properties(fox_split_across_two_tcp_segments_reassembled PROPERTIES
+  PASS_REGULAR_EXPRESSION "#4  [^\n]*\\[tcp\\]  buffering a Fox frame PDU/frame split across TCP segments[^\n]*\n#5  [^\n]*\\[fox\\]  Fox Keep-alive frame, fox/keepAlive \\(seq=9, reply=-1\\): 1 tuple\\(s\\)[^\n]*\n *note: reassembled a Fox frame PDU/frame from 77 byte\\(s\\) spanning 2 TCP segments on this flow")
+
+# Secondary finding: a hello reply whose own hostAddress ("10.99.99.99") differs from the actual
+# observed TCP source IP ("192.168.1.10") -- the internal-topology-leakage note.
+add_test(NAME fox_hostaddress_peer_ip_mismatch_note
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_fox.pcap" --format text -v)
+set_tests_properties(fox_hostaddress_peer_ip_mismatch_note PROPERTIES
+  PASS_REGULAR_EXPRESSION "#7  [^\n]*\\[fox\\]  Fox hello reply: hostName=\"NIAGARA-STATION-B\", hostAddress=\"10\\.99\\.99\\.99\"[^\n]*\n[^\n]*\n *note: hostAddress field \\(\"10\\.99\\.99\\.99\"\\) differs from the actual TCP source IP address observed for this packet \\(192\\.168\\.1\\.10\\)")
+
+# Non-standard port (61104 -> 9999, not 1911): NOT claimed in Auto mode (port-gated) -- falls
+# through to the generic "tcp" label -- but decodes correctly, including the "not a configured/
+# standard Fox port" note, when --protocol fox is forced.
+add_test(NAME fox_non_standard_port_not_claimed_in_auto_mode
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_fox.pcap" --format text -v)
+set_tests_properties(fox_non_standard_port_not_claimed_in_auto_mode PROPERTIES
+  FAIL_REGULAR_EXPRESSION "#8[^\n]*\\[fox\\]|#9[^\n]*\\[fox\\]")
+add_test(NAME fox_non_standard_port_forced_via_protocol_filter
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_fox.pcap" --protocol fox --format text -v)
+set_tests_properties(fox_non_standard_port_forced_via_protocol_filter PROPERTIES
+  PASS_REGULAR_EXPRESSION "#8  [^\n]*\\[fox\\]  Fox hello request[^\n]*\n[^\n]*\n *note: seen on TCP port 61104->9999, which is not a configured/standard Fox port \\(1911\\)")
+
+# `--fox-port` CLI option parses and threads through extra_fox_ports into Auto mode: with the
+# option, port 9999 (packets #8/#9, otherwise not claimed in Auto mode -- see
+# fox_non_standard_port_not_claimed_in_auto_mode above) IS now claimed as fox.
+add_test(NAME fox_port_option_extends_auto_mode_detection
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_fox.pcap" --fox-port 9999 --format text)
+set_tests_properties(fox_port_option_extends_auto_mode_detection PROPERTIES
+  PASS_REGULAR_EXPRESSION "#8  [^\n]*\\[fox\\]  Fox hello request[^\n]*\n#9  [^\n]*\\[fox\\]  Fox hello reply")
+
+# `--protocol fox` also acts as a filter, excluding every other decoded protocol -- the same
+# filter-exclusion proof dicom_protocol_filter_excludes_other_protocols above already establishes.
+add_test(NAME fox_protocol_filter_excludes_other_protocols
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_fox.pcap" --protocol fox --format text)
+set_tests_properties(fox_protocol_filter_excludes_other_protocols PROPERTIES
+  FAIL_REGULAR_EXPRESSION "\\[modbus\\]")
+
+# FOXS (Fox-over-TLS, port 4911) -- decoder.cpp's own generic TLS-ClientHello recognition call site
+# (the same one that already labels port 443 "https" and 636/3269 "ldaps") labels it "foxs",
+# detection only -- this decoder never sees inside the TLS-encrypted payload.
+add_test(NAME foxs_tls_clienthello_port_4911_detected
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_fox.pcap" --format text -v)
+set_tests_properties(foxs_tls_clienthello_port_4911_detected PROPERTIES
+  PASS_REGULAR_EXPRESSION "#10  [^\n]*\\[foxs\\]  FOXS/TLS ClientHello \\(Tridium Niagara Fox over TLS, port 4911\\)")
+
+# --stats aggregation: frame type counts, the headline unauthenticated-hello-exchange finding (4:
+# both request+reply on BOTH standard-port hello sessions, packets #1/#2 and #6/#7 -- the
+# non-standard-port session #8/#9 is NOT counted here since Auto mode never claims it as fox at all,
+# proving this isn't a blind total-packet count), and the secondary hostAddress-mismatch finding (1).
+add_test(NAME fox_stats_frame_type_counts_and_curated_findings
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_fox.pcap" --format text --stats)
+set_tests_properties(fox_stats_frame_type_counts_and_curated_findings PROPERTIES
+  PASS_REGULAR_EXPRESSION "fox frame type counts:\n *Asynchronous *3[^\n]*\n *Keep-alive *1[^\n]*\n *Reply *2[^\\*]*\\*\\*\\* Fox hello exchanges observed \\(unauthenticated system-identity disclosure\\) 4 \\*\\*\\*\nfox hello exchanges with hostAddress differing from the observed TCP peer IP \\(internal-topology leakage signal\\) observed: 1")

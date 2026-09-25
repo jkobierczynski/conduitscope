@@ -17989,6 +17989,153 @@ def build_dicom_sample():
     (TESTS_DIR / "sample_dicom.pcap").write_bytes(data)
 
 
+# --- Tridium Niagara Fox (fox.hpp) -----------------------------------------------------------
+# Line-oriented ASCII text, terminated by the literal "};;\n" sequence -- see fox.hpp's own
+# FRAMING/SOURCING sections. This fixture is ENTIRELY SYNTHETIC: this feature's own research pass
+# (condensed from fox-info.nse and the MartinoTommasini/foxdissector third-party sources) could
+# source the field-name/grammar SHAPE of a real `fox hello` exchange, but not a literal byte-exact
+# capture to reproduce verbatim here -- the same "entirely synthetic" posture sample_dicom.pcap's
+# own header comment already takes for its own protocol, honestly carried over rather than
+# implying this fixture is a captured trace.
+FOX_PORT = 1911
+
+
+def fox_header(frame_type: str, seq: int, reply: int, channel: str, command: str) -> bytes:
+    return f"fox {frame_type} {seq} {reply} {channel} {command}\n".encode("ascii")
+
+
+def fox_tuple(key: str, type_tag: str, value: str) -> bytes:
+    return f"{key}={type_tag}:{value}\n".encode("ascii")
+
+
+def fox_tuple_bool(key: str, value: bool) -> bytes:
+    return f"{key}=z:{'t' if value else 'f'}\n".encode("ascii")
+
+
+def fox_tuple_blob(key: str, data: bytes) -> bytes:
+    return f"{key}=b:{len(data)}".encode("ascii") + data + b"\n"
+
+
+def fox_tuple_object(key: str, type_token: str, data: bytes) -> bytes:
+    return f"{key}=o:{type_token} {len(data)}".encode("ascii") + data + b"\n"
+
+
+def fox_tuple_message(key: str, inner_tuples: bytes) -> bytes:
+    return f"{key}=m:".encode("ascii") + b"{\n" + inner_tuples + b"}\n"
+
+
+def fox_frame(header: bytes, tuples: bytes) -> bytes:
+    return header + b"{\n" + tuples + b"};;\n"
+
+
+def build_fox_sample():
+    """Covers: a `fox hello` request/reply pair (the station answering ANY unauthenticated peer
+    with its own system identity -- the headline --stats finding), a generic non-hello frame
+    exercising every documented tuple type tag (s/i/f/t/z/b/o/m, including a nested 'm' message)
+    via the generic decode path (proving that path works independent of the hello-specific
+    fields), a frame split across two TCP segments (proving tcp_declared_length's terminator-scan
+    reassembly works), and a second hello reply whose own hostAddress field deliberately differs
+    from the actual observed TCP source IP (the secondary, hostAddress-vs-peer-IP internal-
+    topology-leakage finding)."""
+    packets = []
+    ident_box = [0xF000]
+
+    def session(port_a, port_b=FOX_PORT):
+        return amqp_tcp_session(packets, ident_box, HMI_MAC, HMI_IP, PLC_MAC, PLC_IP, port_a, port_b)
+
+    # === 1) fox hello request/reply -- the headline finding. ===================================
+    client, server, _ = session(61100)
+    hello_rq_tuples = (
+        fox_tuple("fox.version", "s", "1.0") +
+        fox_tuple("id", "s", "1") +
+        fox_tuple("hostName", "s", "ENGINEER-LAPTOP") +
+        fox_tuple("hostAddress", "s", HMI_IP) +
+        fox_tuple("app.name", "s", "Workbench") +
+        fox_tuple("app.version", "s", "4.10.0.16") +
+        fox_tuple("vm.name", "s", "Java HotSpot(TM) 64-Bit Server VM") +
+        fox_tuple("vm.version", "s", "1.8.0_202") +
+        fox_tuple("os.name", "s", "Windows 10") +
+        fox_tuple("os.version", "s", "10.0") +
+        fox_tuple("lang", "s", "en") +
+        fox_tuple("timeZone", "s", "America/New_York") +
+        fox_tuple("hostId", "s", "Win-1234567890AB") +
+        fox_tuple("vmUuid", "s", "a1b2c3d4-0000-1111-2222-334455667788") +
+        fox_tuple("brandId", "s", "niagara")
+    )
+    client(fox_frame(fox_header("a", 1, -1, "fox", "hello"), hello_rq_tuples))
+
+    hello_ac_tuples = (
+        fox_tuple("fox.version", "s", "1.0") +
+        fox_tuple("id", "s", "1") +
+        fox_tuple("hostName", "s", "NIAGARA-STATION-A") +
+        fox_tuple("hostAddress", "s", PLC_IP) +
+        fox_tuple("app.name", "s", "Station") +
+        fox_tuple("app.version", "s", "4.10.0.16") +
+        fox_tuple("vm.name", "s", "Java HotSpot(TM) Embedded Client VM") +
+        fox_tuple("vm.version", "s", "1.8.0_202") +
+        fox_tuple("os.name", "s", "QNX") +
+        fox_tuple("os.version", "s", "6.5.0") +
+        fox_tuple("lang", "s", "en") +
+        fox_tuple("timeZone", "s", "America/New_York") +
+        fox_tuple("hostId", "s", "Niagara-JACE8000-0042") +
+        fox_tuple("vmUuid", "s", "b2c3d4e5-1111-2222-3333-445566778899") +
+        fox_tuple("brandId", "s", "tridium")
+    )
+    server(fox_frame(fox_header("r", 100, 1, "fox", "hello"), hello_ac_tuples))
+
+    # === 2) generic non-hello frame exercising every documented tuple type tag. ================
+    client2, _server2, _ = session(61101)
+    nested = fox_tuple("subKey", "s", "nested value") + fox_tuple("subCount", "i", "3")
+    generic_tuples = (
+        fox_tuple("greeting", "s", "hello world") +
+        fox_tuple("count", "i", "42") +
+        fox_tuple("ratio", "f", "3.14") +
+        fox_tuple("lastBoot", "t", "bc614e") +
+        fox_tuple_bool("enabled", True) +
+        fox_tuple_blob("payload", b"\x01\x02\x03\x04\x05") +
+        fox_tuple_object("cert", "javax.security.cert.X509Certificate", b"\xAA\xBB\xCC") +
+        fox_tuple_message("nestedGroup", nested)
+    )
+    client2(fox_frame(fox_header("a", 5, -1, "test", "echo"), generic_tuples))
+
+    # === 3) a fox frame split across two TCP segments. =========================================
+    _client3, _server3, split3 = session(61102)
+    split_tuples = fox_tuple("note", "s", "this frame arrives in two TCP segments")
+    split_frame = fox_frame(fox_header("k", 9, -1, "fox", "keepAlive"), split_tuples)
+    split3(split_frame, len(split_frame) // 2)
+
+    # === 4) hostAddress-vs-peer-IP mismatch: a hello reply whose own hostAddress differs from the
+    #    actual observed TCP source IP (a NAT/multi-homed/stale-config station). ==================
+    client4, server4, _ = session(61103)
+    client4(fox_frame(fox_header("a", 1, -1, "fox", "hello"), hello_rq_tuples))
+    mismatch_tuples = (
+        fox_tuple("fox.version", "s", "1.0") +
+        fox_tuple("id", "s", "1") +
+        fox_tuple("hostName", "s", "NIAGARA-STATION-B") +
+        fox_tuple("hostAddress", "s", "10.99.99.99") +  # deliberately NOT the observed peer IP
+        fox_tuple("app.name", "s", "Station") +
+        fox_tuple("app.version", "s", "4.10.0.16")
+    )
+    server4(fox_frame(fox_header("r", 100, 1, "fox", "hello"), mismatch_tuples))
+
+    # === 5) non-standard port (9999, not 1911) -- proves Auto mode declines it while
+    #    --protocol fox/--fox-port still decode it correctly. ===================================
+    client5, server5, _ = session(61104, port_b=9999)
+    client5(fox_frame(fox_header("a", 1, -1, "fox", "hello"), hello_rq_tuples))
+    server5(fox_frame(fox_header("r", 100, 1, "fox", "hello"), hello_ac_tuples))
+
+    # === 6) FOXS (Fox-over-TLS, port 4911) -- a TLS ClientHello only, proving decoder.cpp's own
+    #    generic TLS-ClientHello recognition call site labels it "foxs" (detection only -- this
+    #    decoder cannot and does not see inside the TLS-encrypted Fox traffic itself). ============
+    client6, _server6, _ = session(61105, port_b=4911)
+    client6(tls_client_hello())
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_600_000 + i, i * 1000)
+    (TESTS_DIR / "sample_fox.pcap").write_bytes(data)
+
+
 if __name__ == "__main__":
     TESTS_DIR.mkdir(exist_ok=True)
     build_modbus_sample()
@@ -18093,4 +18240,5 @@ if __name__ == "__main__":
     build_amqp091_sample()
     build_amqp10_sample()
     build_dicom_sample()
+    build_fox_sample()
     print("wrote sample fixtures to", TESTS_DIR)

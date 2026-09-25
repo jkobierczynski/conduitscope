@@ -1386,6 +1386,69 @@ void write_dicom_json_fields(std::ostream& out, const DicomResult& r) {
     }
 }
 
+// Fox (fox.hpp) -- reads straight from the FoxResult carried by DecodedPacket::result. Only the
+// primary (`first`) frame's own fields are surfaced as structured JSON; any further frame
+// coalesced into the same TCP payload is already folded into the packet's own top-level `notes`
+// array (see fox.hpp's own FoxResult comment), matching write_dicom_json_fields's own scope above.
+// Generic tuples are always rendered (every frame has them, hello or not); the curated hello
+// fields are rendered ADDITIONALLY, only when the frame is a `fox hello` exchange -- see fox.hpp's
+// own SECURITY section for why that one channel/command pair gets first-class field names while
+// everything else stays generic.
+void write_fox_tuples_json(std::ostream& out, const std::vector<FoxTuple>& tuples) {
+    out << "[";
+    for (size_t i = 0; i < tuples.size(); ++i) {
+        const FoxTuple& t = tuples[i];
+        if (i) out << ", ";
+        out << "{\"key\": \"" << json_escape(t.key) << "\", \"type\": \"" << json_escape(t.type_name)
+            << "\"";
+        if (t.type_raw == 'm') {
+            out << ", \"nested\": ";
+            write_fox_tuples_json(out, t.nested);
+        } else {
+            out << ", \"value\": \"" << json_escape(t.rendered) << "\"";
+        }
+        out << "}";
+    }
+    out << "]";
+}
+
+void write_fox_json_fields(std::ostream& out, const FoxResult& r) {
+    const FoxFrame& f = r.first;
+    out << "    \"fox_frame_type\": \"" << json_escape(f.frame_type_name) << "\",\n";
+    out << "    \"fox_seq\": " << f.seq << ",\n";
+    out << "    \"fox_reply\": " << f.reply << ",\n";
+    out << "    \"fox_channel\": \"" << json_escape(f.channel) << "\",\n";
+    out << "    \"fox_command\": \"" << json_escape(f.command) << "\",\n";
+    out << "    \"fox_is_hello\": " << (f.is_hello ? "true" : "false") << ",\n";
+    if (f.is_hello && f.hello) {
+        const FoxHelloFields& h = *f.hello;
+        auto field = [&](const char* name, const std::optional<std::string>& v) {
+            if (v) out << "    \"fox_hello_" << name << "\": \"" << json_escape(*v) << "\",\n";
+        };
+        field("fox_version", h.fox_version);
+        field("id", h.id);
+        field("host_name", h.host_name);
+        field("host_address", h.host_address);
+        field("app_name", h.app_name);
+        field("app_version", h.app_version);
+        field("vm_name", h.vm_name);
+        field("vm_version", h.vm_version);
+        field("os_name", h.os_name);
+        field("os_version", h.os_version);
+        field("lang", h.lang);
+        field("time_zone", h.time_zone);
+        field("host_id", h.host_id);
+        field("vm_uuid", h.vm_uuid);
+        field("brand_id", h.brand_id);
+    }
+    out << "    \"fox_tuples\": ";
+    write_fox_tuples_json(out, f.tuples);
+    out << ",\n";
+    if (f.stopped_reason) {
+        out << "    \"fox_stopped_reason\": \"" << json_escape(*f.stopped_reason) << "\",\n";
+    }
+}
+
 void write_bsap_json_fields(std::ostream& out, const BsapFrame& bf) {
     out << "    \"bsap_is_serial_tunnel\": " << (bf.is_serial_tunnel ? "true" : "false") << ",\n";
     if (bf.is_serial_tunnel) {
@@ -4718,6 +4781,9 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
     if (p.protocol == "dicom" && p.result) {
         write_dicom_json_fields(out_, p.result->as<DicomResult>());
     }
+    if (p.protocol == "fox" && p.result) {
+        write_fox_json_fields(out_, p.result->as<FoxResult>());
+    }
     out_ << "    \"notes\": [";
     for (size_t i = 0; i < p.notes.size(); ++i) {
         if (i != 0) out_ << ", ";
@@ -5380,6 +5446,25 @@ void StatsWriter::write_packet(const DecodedPacket& p) {
                 name = s.str();
             }
             dicom_command_field_counts_[name]++;
+        }
+    }
+    if (p.protocol == "fox" && p.result) {
+        const FoxFrame& f = p.result->as<FoxResult>().first;
+        fox_frame_type_counts_[f.frame_type_name]++;
+        if (f.is_hello) {
+            // Headline finding -- see fox.hpp's own SECURITY section: every hello exchange this
+            // decoder observes IS, by construction, unauthenticated (no auth mechanism is decoded
+            // by this pass at all), so this single counter is the whole finding.
+            fox_hello_exchange_count_++;
+            // Secondary finding (see fox.hpp's own SECURITY section and decoder.cpp's own Fox call
+            // site, which computes the identical comparison for the matching per-packet note) --
+            // computed here from DecodedPacket-level information (p.src_ip), not inside fox.cpp
+            // itself, the same "only the call site/output layer has packet-level context" posture
+            // dicom_no_identity_count_ above already establishes for its own counters.
+            if (f.hello && f.hello->host_address && !f.hello->host_address->empty() &&
+                *f.hello->host_address != p.src_ip) {
+                fox_host_address_mismatch_count_++;
+            }
         }
     }
     if (p.protocol == "powerlink" && p.result) {
@@ -6091,6 +6176,22 @@ void StatsWriter::print_summary(std::ostream& out) const {
             for (const auto& [name, count] : dicom_abort_source_counts_) {
                 out << "  " << std::left << std::setw(40) << name << count << "\n";
             }
+        }
+    }
+    if (!fox_frame_type_counts_.empty()) {
+        out << "fox frame type counts:\n";
+        for (const auto& [name, count] : fox_frame_type_counts_) {
+            out << "  " << std::left << std::setw(40) << name << count << "\n";
+        }
+        // Headline finding -- always printed on its own line, never buried, matching this
+        // decoder's own SECURITY note (fox.hpp) and this codebase's own IPMI Cipher Suite 0/DICOM
+        // no-identity-negotiation precedent above.
+        out << "*** Fox hello exchanges observed (unauthenticated system-identity disclosure) "
+            << fox_hello_exchange_count_ << " ***\n";
+        if (fox_host_address_mismatch_count_ > 0) {
+            out << "fox hello exchanges with hostAddress differing from the observed TCP peer IP "
+                   "(internal-topology leakage signal) observed: "
+                << fox_host_address_mismatch_count_ << "\n";
         }
     }
 }

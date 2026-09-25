@@ -9122,6 +9122,133 @@ deferred future migration.
     confirmed clean by grep before this decoder was added), so no
     dispatch-cascade reordering was needed.
 
+54. **Tridium Niagara Fox -- TCP port 1911 (cleartext), + TCP port 4911
+    (FOXS, TLS-wrapped) detection only.** **Done -- first pass.** The
+    proprietary station-to-station/client-to-station protocol underlying
+    Niagara Framework building-automation-system (BAS) deployments --
+    widely used across HVAC, access control, lighting, and other
+    building-management supervisory systems, and a recurring
+    real-world OT/ICS security concern in its own right: a real Niagara
+    station answers ANY unauthenticated `fox hello` frame with a full
+    identity dump (host name, host address, app/VM/OS versions, brand
+    ID, and more) before any authentication step occurs, which this
+    item's own curated `--stats` finding is built specifically to
+    surface.
+
+    `FoxDecoder`/`fox.hpp`/`fox.cpp`, `GateKind::TcpPort` (1911),
+    mirroring `dicom.hpp`/`dicom.cpp`'s own template (`tcp_declared_
+    length`-based cross-segment reassembly, port-gated in Auto mode,
+    `out.result`-only shape, no flat `DecodedPacket` fields) rather than
+    `DohDecoder`'s simpler single-segment template, since Fox genuinely
+    needs cross-segment reassembly and DoH's design explicitly does not
+    support that. `--fox-port`/`extra_fox_ports` widens (and, under an
+    explicit `--protocol fox`, un-gates) the port gate, the same
+    `extra_*_ports`/`--dicom-port` convention this codebase already
+    uses; `ProtocolFilter::FoxOnly` covers both the real TCP/1911 decoder
+    and the small TLS/4911 (FOXS) detection widening described below.
+
+    Decodes the line-oriented ASCII framing (terminated by literal
+    `};;\n`, reassembled by scanning for `\n};;\n` across segments, with
+    the documented inherent limitation that an `s:` string value
+    containing that exact 5-byte sequence causes false early
+    termination -- an accepted limitation of the reference dissector's
+    own strategy, not something this decoder can improve on without a
+    length-prefixed framing the wire format simply doesn't have); the
+    `fox <type> <seq> <reply> <channel> <command>` header line (frame
+    types a/s/k/r/e/n, named, with an honest "Unknown (0xNN char)"
+    fallback for anything else); and the generic `key=type:value` tuple
+    grammar for all eight documented type tags (s/i/f/t/z/b/o/m),
+    including recursive `m` (nested message) tuples down to the shared
+    `max_recursion_depth` resource limit, rendered generically for every
+    channel/command pair. Only the `fox`/`hello` channel/command pair --
+    the one confirmed-real pair sourced from actual traffic -- gets
+    curated, named first-class fields (fox.version, id, hostName,
+    hostAddress, app.name/version, vm.name/version, os.name/version,
+    lang, timeZone, hostId, vmUuid, brandId); every other channel/command
+    combination (including the illustrative-only, NOT independently
+    confirmed `crypto`/`keystore.getCertificates` pair some public
+    research mentions) is deliberately left fully generic rather than
+    guessed at. The separate `n4digest`/SCRAM-SHA authentication
+    mechanism referenced by public research is named only, nowhere
+    near decoded -- its wire format was not sourced with any confidence,
+    and no credential-related channel/command was actually observed
+    during this item's own testing (only a synthetic, explicitly-
+    non-authentic `test`/`echo` example exercises the generic tuple
+    path). No redaction is applied to any Fox field: hello's identity
+    fields are not secrets, and no credential material was decoded at
+    all for this first pass.
+
+    Two curated `--stats` findings: (1) headline -- a count of `fox
+    hello` exchanges observed, phrased `*** Fox hello exchanges observed
+    (unauthenticated system-identity disclosure) N ***`, since a real
+    station's willingness to answer this frame pre-authentication is
+    itself the security-relevant fact; (2) secondary -- a count of hello
+    replies whose own `hostAddress` field differs from the actual
+    observed TCP peer IP (an internal-topology/NAT leakage signal),
+    computed independently in `output.cpp`'s stats pass (mirroring how
+    `dicom_no_identity_count_` is computed there rather than inside
+    `dicom.cpp`), since `ProtocolResult` is immutable and `fox.cpp` has
+    no access to packet-level IP addressing.
+
+    A small, low-risk addition was also made to the existing generic
+    TLS-ClientHello recognition (the same code path that already labels
+    plain HTTPS and LDAPS by port): TCP port 4911 (FOXS, Fox wrapped in
+    TLS) is now labeled `foxs`/"FOXS/TLS ClientHello (Tridium Niagara
+    Fox over TLS, port 4911)" the same way, with no attempt to decode
+    anything past the ClientHello -- following the exact existing
+    LDAPS-block pattern in `decoder.cpp`, placed immediately before it
+    in the same widened `if` guard.
+
+    **Sourcing.** This item's own research had access to two third-party
+    sources -- `fox-info.nse` (an Nmap NSE probe script for the Fox
+    protocol) and the MartinoTommasini/foxdissector third-party
+    Wireshark dissector -- NEITHER of which is a vendor specification;
+    no official Tridium/Niagara protocol document was reachable from
+    this environment. Framing (the `};;\n` terminator and the
+    reassembly-by-scanning strategy) and the `fox hello` exchange's own
+    real-traffic behavior (an unauthenticated identity dump) are treated
+    as HIGH confidence -- corroborated behavior, not a single unchecked
+    claim. The header-line grammar and the tuple-value grammar are
+    treated as MEDIUM confidence -- sourced from the dissector alone,
+    internally consistent, but not independently cross-checked against a
+    second source. The `t` (time) type's exact semantics (this decoder
+    renders a best-effort, explicitly-labeled-"UNCONFIRMED" hex-
+    milliseconds interpretation) and the assumption that `b`/`o` (blob/
+    object) values carry a byte-count-then-raw-bytes framing are
+    explicitly flagged as unconfirmed in both `fox.hpp`'s own header
+    comment and docs/PROTOCOL_COVERAGE.md, rather than smoothed into
+    false certainty. No real Niagara Fox pcap capture was available
+    during this item's research, so `tests/sample_fox.pcap`
+    (`build_fox_sample()`) is entirely synthetic -- field-name-accurate
+    against the sourced grammar, but its exact byte contents (including
+    a `fox hello` request payload the original task brief referenced by
+    an exact byte count that could not actually be reproduced verbatim
+    from available context) were constructed fresh, not copied from a
+    real capture, the same "entirely synthetic" posture
+    `tests/sample_dicom.pcap` already established for item 52. The
+    fixture covers: a `fox hello` request/reply pair on the standard
+    port; a generic non-hello frame exercising all eight tuple type
+    tags including a nested `m` message; a frame deliberately split
+    across two TCP segments, proving reassembly; a second hello pair
+    whose reply's `hostAddress` deliberately differs from the real TCP
+    peer IP, proving the secondary finding; a hello pair on a
+    non-standard port, proving Auto-mode port gating and `--fox-port`/
+    `--protocol fox` widening; and a bare TLS ClientHello on port 4911,
+    proving FOXS detection. Every decode path was run manually
+    (`--format text -v`, `--format json`, `--stats`) and its real output
+    read -- confirming the headline finding fires the expected count and
+    the secondary finding fires exactly once on its one positive control
+    -- before any CTest regex was written. No real pre-existing bug was
+    found in the codebase during this item's own work; the implementation
+    built and passed cleanly on its first attempt throughout. 11 new
+    `fox_*`/`foxs_*` CTest tests were added. Full suite grew from 1913 to
+    1924 tests in the default config and from 1901 to 1912 in the
+    `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF` config, zero regressions,
+    zero-warning clean rebuilds in both. No TCP-port collision with any
+    existing decoder was found (1911 and 4911 both confirmed clean by
+    grep both before and after this decoder was added), so no
+    dispatch-cascade reordering was needed.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

@@ -509,6 +509,7 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
                 const std::vector<int>& rmcp_ports,
                 const std::vector<int>& amqp_ports,
                 const std::vector<int>& dicom_ports,
+                const std::vector<int>& fox_ports,
                 const std::vector<int>& powerlink_sdo_ports,
                 size_t flood_threshold,
                 size_t max_packets,
@@ -645,6 +646,7 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
                                : (protocol == "amqp10") ? ProtocolFilter::Amqp10Only
                                : (protocol == "dicom")  ? ProtocolFilter::DicomOnly
                                : (protocol == "powerlink") ? ProtocolFilter::PowerlinkOnly
+                               : (protocol == "fox")    ? ProtocolFilter::FoxOnly
                                                         : ProtocolFilter::Auto;
     for (int p : modbus_ports) options.extra_modbus_ports.push_back(static_cast<uint16_t>(p));
     for (int p : dnp3_ports) options.extra_dnp3_ports.push_back(static_cast<uint16_t>(p));
@@ -685,6 +687,7 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
     for (int p : rmcp_ports) options.extra_rmcp_ports.push_back(static_cast<uint16_t>(p));
     for (int p : amqp_ports) options.extra_amqp_ports.push_back(static_cast<uint16_t>(p));
     for (int p : dicom_ports) options.extra_dicom_ports.push_back(static_cast<uint16_t>(p));
+    for (int p : fox_ports) options.extra_fox_ports.push_back(static_cast<uint16_t>(p));
     for (int p : powerlink_sdo_ports) options.extra_powerlink_sdo_ports.push_back(static_cast<uint16_t>(p));
     if (flood_threshold > 0) options.flood_threshold = flood_threshold;
 
@@ -1383,6 +1386,7 @@ int main(int argc, char** argv) {
         decode_wireless_backhaul_ports, decode_tunnel_vpn_ports, decode_winrm_ports, decode_dcom_ports,
         decode_ge_srtp_ports, decode_bsap_ports, decode_cclink_ie_ports, decode_codesys_ports,
         decode_coap_ports, decode_rmcp_ports, decode_amqp_ports, decode_dicom_ports,
+        decode_fox_ports,
         decode_powerlink_sdo_ports;
     size_t decode_flood_threshold = 0;  // 0 means "not given" -- keeps DecodeOptions::flood_threshold's
                                           // own compile-time default (attack_detect.hpp's
@@ -1465,7 +1469,7 @@ int main(int argc, char** argv) {
     decode_cmd
         ->add_option("--protocol", decode_protocol,
                       "Restrict decoding to one protocol instead of auto-detecting all of them")
-        ->transform(CLI::IsMember({"auto", "modbus", "dnp3", "s7comm", "mms", "iec104", "enip", "profinet", "goose", "sv", "ethercat", "stp", "devicenet", "canopen", "j1939", "bacnet", "hartip", "opcua", "mqtt", "s7comm-plus", "ff-hse", "dns", "mdns", "llmnr", "nbns", "doh", "rip", "icmp", "igmp", "vrrp", "hsrp", "igrp", "pim", "eigrp", "ospf", "remote-access", "lateral-movement", "enterprise-trust", "eapol", "wireless-backhaul", "pppoe", "tunnel-vpn", "mpls", "arp", "lldp", "twincat", "kerberos", "ldap", "smb", "melsec", "fins", "bgp", "slow-protocols", "winrm", "dcom", "ge-srtp", "bsap", "cclink-ie", "codesys", "coap", "zigbee", "cdp", "asf", "ipmi", "rmcp", "amqp091", "amqp10", "dicom", "powerlink"}))
+        ->transform(CLI::IsMember({"auto", "modbus", "dnp3", "s7comm", "mms", "iec104", "enip", "profinet", "goose", "sv", "ethercat", "stp", "devicenet", "canopen", "j1939", "bacnet", "hartip", "opcua", "mqtt", "s7comm-plus", "ff-hse", "dns", "mdns", "llmnr", "nbns", "doh", "rip", "icmp", "igmp", "vrrp", "hsrp", "igrp", "pim", "eigrp", "ospf", "remote-access", "lateral-movement", "enterprise-trust", "eapol", "wireless-backhaul", "pppoe", "tunnel-vpn", "mpls", "arp", "lldp", "twincat", "kerberos", "ldap", "smb", "melsec", "fins", "bgp", "slow-protocols", "winrm", "dcom", "ge-srtp", "bsap", "cclink-ie", "codesys", "coap", "zigbee", "cdp", "asf", "ipmi", "rmcp", "amqp091", "amqp10", "dicom", "powerlink", "fox"}))
         ->capture_default_str();
     decode_cmd->add_option("--modbus-port", decode_modbus_ports,
                             "Additional TCP port to treat as expected for Modbus (repeatable); "
@@ -1639,6 +1643,13 @@ int main(int argc, char** argv) {
                             "(the de facto real-world default for modern PACS/dcm4che/Orthanc/most "
                             "vendor software); neither is \"the\" default the other merely widens. "
                             "See docs/PROTOCOL_COVERAGE.md");
+    decode_cmd->add_option("--fox-port", decode_fox_ports,
+                            "Additional TCP port to treat as expected for Tridium Niagara Fox "
+                            "(building-automation-system station protocol -- see the unauthenticated "
+                            "'fox hello' system-identity-disclosure finding, CISA ICSA-12-228-01A) "
+                            "(repeatable); in Auto mode this DOES gate detection (like WinRM/DCOM/"
+                            "GE SRTP/AMQP/DICOM -- no magic-byte-strength structural gate). "
+                            "Normally 1911, see docs/PROTOCOL_COVERAGE.md");
     decode_cmd->add_option("--powerlink-sdo-port", decode_powerlink_sdo_ports,
                             "Additional UDP port to treat as expected for Ethernet POWERLINK's "
                             "SDO-over-UDP secondary gate (EPSG DS301 non-cyclic/out-of-band SDO "
@@ -2150,6 +2161,7 @@ int main(int argc, char** argv) {
                            decode_rmcp_ports,
                            decode_amqp_ports,
                            decode_dicom_ports,
+                           decode_fox_ports,
                            decode_powerlink_sdo_ports,
                            decode_flood_threshold,
                            decode_max_packets, decode_limit_vars, decode_stats, decode_strict,

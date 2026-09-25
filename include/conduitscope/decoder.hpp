@@ -37,6 +37,7 @@
 #include "conduitscope/ethercat.hpp"
 #include "conduitscope/ffhse.hpp"
 #include "conduitscope/fins.hpp"
+#include "conduitscope/fox.hpp"
 #include "conduitscope/ge_srtp.hpp"
 #include "conduitscope/goose.hpp"
 #include "conduitscope/hartip.hpp"
@@ -354,6 +355,14 @@ enum class ProtocolFilter {
                            // already established (hartip.hpp), not the EnipOnly-style "TCP and UDP
                            // decoders both named enip" split either -- one ProtocolFilter value
                            // covers both of this protocol's gates.
+    FoxOnly,               // only attempt Tridium Niagara Fox (building-automation-system station
+                           // protocol) decoding -- see fox.hpp. GateKind::TcpPort, port-gated in
+                           // Auto mode like Dicom/WinRm/Dcom/GeSrtp above (TCP port 1911). ALSO
+                           // widens decoder.cpp's own generic TLS-ClientHello recognition call site
+                           // to try port 4911 (FOXS, Fox-over-TLS) port-independently, the same
+                           // "explicit --protocol X tries its own gate port-independently too"
+                           // exception every other GateKind::TcpPort protocol already has -- see
+                           // fox.hpp's own "PORT 4911 / FOXS" section.
 };
 
 struct DecodeOptions {
@@ -412,6 +421,12 @@ struct DecodeOptions {
                                                   // those two default ports, neither of which is
                                                   // "the" default the other merely widens (see
                                                   // dicom.hpp's own DETECTION/DISPATCH section).
+    std::vector<uint16_t> extra_fox_ports;      // TCP only -- see FOX_PORT (1911, fox.hpp). Does
+                                                  // NOT widen the separate, small port-4911 FOXS/
+                                                  // TLS-ClientHello detection (fox.hpp's
+                                                  // FOX_TLS_PORT) -- that has no CLI widening of
+                                                  // its own, the same "small addition, not a new
+                                                  // fully-general feature" scope fox.hpp keeps.
     std::vector<uint16_t> extra_opcua_ports;    // TCP only -- see OPCUA_PORT (4840)
     std::vector<uint16_t> extra_mqtt_ports;     // TCP only -- see MQTT_PORT (1883)
     std::vector<uint16_t> extra_ffhse_ports;    // TCP AND UDP -- see FFHSE_PORT_ANNUNC/_FMS/_SM/_LAN

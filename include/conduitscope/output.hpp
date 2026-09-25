@@ -455,6 +455,16 @@ private:
     size_t dicom_cleartext_identity_count_ = 0;
     size_t dicom_compressed_ts_count_ = 0;
     size_t dicom_plain_ts_count_ = 0;
+    // Tridium Niagara Fox (fox.hpp) -- see write_packet's own "fox" block and print_summary's own
+    // Fox section (output.cpp) for what each counter means. fox_hello_exchange_count_ is this
+    // decoder's own headline finding (the direct analog of dicom_no_identity_count_/
+    // ipmi_cipher_suite_zero_count_ above -- every hello exchange this decoder sees IS, by
+    // construction, unauthenticated system-identity disclosure, see fox.hpp's own SECURITY
+    // section); fox_host_address_mismatch_count_ is the secondary, hostAddress-vs-peer-IP
+    // internal-topology-leakage finding.
+    std::map<std::string, size_t> fox_frame_type_counts_;
+    size_t fox_hello_exchange_count_ = 0;
+    size_t fox_host_address_mismatch_count_ = 0;
     // Ethernet POWERLINK (powerlink.hpp) -- see write_packet's own "powerlink" block and
     // print_summary's own POWERLINK section (output.cpp) for what each counter means.
     // powerlink_message_type_counts_ is the task's own requested breakdown shape (keyed by

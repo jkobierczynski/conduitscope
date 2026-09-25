@@ -111,8 +111,12 @@ const std::vector<const ProtocolDecoder*>& tcp_port_independent_registry();
 // (only the connection's very first message carries a self-describing 8-byte preamble; see
 // amqp_common.hpp's own file header comment) -- decoder.cpp's own single combined AMQP call site
 // calls both amqp091_tcp_decoder() and amqp10_tcp_decoder() directly, against one shared
-// per-session flow-state bucket (see amqp_common.hpp's STATEFULNESS section). Not migrated:
-// none -- all six of this gate's protocols are migrated.
+// per-session flow-state bucket (see amqp_common.hpp's STATEFULNESS section). Tridium Niagara Fox
+// (fox.hpp's FoxDecoder) joins this gate right after AMQP 1.0, port-gated for the same "real but
+// not magic-constant-strength structural gate" reason GE SRTP/AMQP already are -- see fox.hpp's
+// own DETECTION/DISPATCH section; decoder.cpp's own Fox call site likewise calls
+// fox_tcp_decoder() directly. Not migrated:
+// none -- all seven of this gate's protocols are migrated.
 const std::vector<const ProtocolDecoder*>& tcp_port_registry();
 
 // Migrated UDP-port-gated protocols, in the order their decoder.cpp call sites run. This GateKind
