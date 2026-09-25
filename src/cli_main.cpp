@@ -1228,8 +1228,8 @@ int run_baseline_learn(const std::vector<std::string>& inputs, const std::string
 // operations against it, never writing the file back. See kExitBaselineAnomaly's own comment for
 // the exit-code contract.
 int run_baseline_check(const std::string& input, const std::string& baseline_file, const std::string& output,
-                        const std::string& format, bool strict, bool quiet, const ResourceLimitCliVars& limit_vars,
-                        std::ostream& diag) {
+                        const std::string& format, bool strict, bool symbolic_addresses, bool quiet,
+                        const ResourceLimitCliVars& limit_vars, std::ostream& diag) {
     std::ofstream file_out;
     std::ostream* out = &std::cout;
     if (!output.empty()) {
@@ -1265,9 +1265,9 @@ int run_baseline_check(const std::string& input, const std::string& baseline_fil
 
         BaselineCheckReport report = check_baseline(store, engine.finish(), input);
         if (format == "json") {
-            write_baseline_check_report_json(*out, report);
+            write_baseline_check_report_json(*out, report, symbolic_addresses);
         } else {
-            write_baseline_check_report_text(*out, report);
+            write_baseline_check_report_text(*out, report, symbolic_addresses);
         }
 
         if (warnings > 0 && !quiet) {
@@ -2026,6 +2026,7 @@ int main(int argc, char** argv) {
     std::string baseline_check_file, baseline_check_input, baseline_check_output;
     std::string baseline_check_format = "text";
     bool baseline_check_strict = false;
+    bool baseline_check_symbolic_addresses = false;
     ResourceLimitCliVars baseline_check_limit_vars;
     baseline_check_cmd
         ->add_option("--baseline-file", baseline_check_file, "Baseline JSON file to check against. Required")
@@ -2045,6 +2046,12 @@ int main(int argc, char** argv) {
         ->capture_default_str();
     baseline_check_cmd->add_flag("--strict", baseline_check_strict,
                                   "Abort on the first malformed packet instead of warning and continuing");
+    baseline_check_cmd->add_flag(
+        "--symbolic-addresses", baseline_check_symbolic_addresses,
+        "Also render S7comm ranges in Step7 byte/word/bit notation (e.g. \"MB10-MB19\", \"M10.3\") "
+        "alongside the existing raw numeric range_start/range_end fields, for NewTargetRange "
+        "findings. Default off -- output is unchanged unless this is passed. No effect on any "
+        "other protocol's findings");
     add_resource_limit_options(baseline_check_cmd, baseline_check_limit_vars);
 
     // --- version ------------------------------------------------------------
@@ -2147,7 +2154,8 @@ int main(int argc, char** argv) {
     }
     if (baseline_check_cmd->parsed()) {
         return run_baseline_check(baseline_check_input, baseline_check_file, baseline_check_output,
-                                   baseline_check_format, baseline_check_strict, quiet, baseline_check_limit_vars,
+                                   baseline_check_format, baseline_check_strict, baseline_check_symbolic_addresses,
+                                   quiet, baseline_check_limit_vars,
                                    *diag);
     }
     if (baseline_cmd->parsed()) {

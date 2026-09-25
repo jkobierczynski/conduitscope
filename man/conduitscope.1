@@ -1446,6 +1446,14 @@ Report format. Default: text.
 .B \-\-strict
 Abort on the first malformed packet instead of warning and continuing.
 .TP
+.B \-\-symbolic\-addresses
+S7comm only: also render a \fBNewTargetRange\fR finding's ranges in Step7
+byte/word/bit notation (e.g. \(lqMB10\-MB19\(rq, \(lqM10.3\(rq,
+\(lqDB5.DBX10.3\(rq) alongside the existing raw numeric
+\fBrange_start\fR/\fBrange_end\fR fields, instead of replacing them. Default
+off \-\- output is unchanged unless this is passed. Every other protocol's
+findings are completely unaffected, on or off.
+.TP
 .B \-\-max\-reassembly\-bytes \fIN\fR ", " \-\-max\-reassembly\-segments \fIN\fR ", " \-\-max\-recursion\-depth \fIN\fR ", " \-\-max\-decoded\-objects \fIN\fR ", " \-\-max\-coalesced\-messages \fIN\fR
 Same five resource-exhaustion-limit overrides as \fBdecode\fR's own flags of
 the same name above; apply identically here since this command decodes the

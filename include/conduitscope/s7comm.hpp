@@ -254,6 +254,41 @@ std::string s7comm_rosctr_name(uint8_t rosctr);
 std::string s7comm_function_name(uint8_t function_code);
 std::string s7comm_return_code_name(uint8_t return_code);
 
+// Returns the Step7 area-letter for an S7ANY area code (e.g. "M" for 0x83 Merkers, "DB" for 0x84
+// Data Block, "C"/"T" for the Counter/Timer areas), or an empty string for an area code this
+// decoder doesn't recognize. This is the same letter table s7comm.cpp's own (file-local) s7_area_name
+// already computes as an out-parameter for its own area_name/tag building -- extracted into this
+// small shared function (mirroring the canopen_sdo_abort_code_name sharing precedent: pulled out of
+// an anonymous-namespace-local function into a small public one, canopen.hpp/canopen.cpp) so
+// baseline.cpp's own S7comm operation extraction can get JUST the letter (needed to populate
+// Operation::s7_area_letter, baseline.hpp) without a second copy of this table.
+std::string s7_area_letter_for_code(uint8_t area);
+
+// Renders a RANGE (not a single address, unlike s7comm.cpp's own file-local s7_build_tag) in Step7
+// notation, reusing the identical area-letter/DB-number/suffix conventions s7_build_tag uses for one
+// S7Item -- shared so baseline.cpp's `--symbolic-addresses` rendering (write_baseline_check_report_
+// text/_json, baseline.cpp) never has to regex a number back out of a rendered operation_key string
+// (this codebase's own established anti-pattern, see baseline.cpp's file header comment on Modbus's
+// pre-Phase-1 address/quantity gap).
+//
+// `area_letter` is s7_area_letter_for_code's own output (or "DI" for the Instance Data Block, which
+// renders identically to "DB"); `db_number` is meaningful only when area_letter is "DB"/"DI".
+// `unit` selects which of three address-unit conventions [start, end) (half-open) is expressed in:
+//   - "byte": byte_address units -- MB-always notation (a byte range is exactly expressible in MB
+//     terms regardless of whether the underlying accesses were BYTE/WORD/DWORD reads, the common
+//     denominator this design deliberately picks over guessing at WORD/DWORD alignment). Renders
+//     "MB10" (single byte, DB10-DB19 differ by 1) or "MB10-MB19" (a span); DB-area byte ranges render
+//     "DB5.DBB10"/"DB5.DBB10-DB5.DBB19".
+//   - "bit": bit_address units (byte_address*8 + bit_offset, see S7Item::bit_address's own comment)
+//     -- each endpoint is converted back to byte.bit form. Renders "M10.3" (single bit) or
+//     "M10.3-M12.5" (a span); DB-area bit ranges render "DB5.DBX10.3"/"DB5.DBX10.3-DB5.DBX12.5".
+//   - "counter_or_timer": the Counter/Timer areas' own raw item-number units (no byte/bit split, no
+//     data-size suffix at all -- mirrors s7_build_tag's own counter/timer branch). Renders "T5" or
+//     "T5-T9".
+// Returns "" when area_letter or unit is empty, or when end <= start (nothing to render).
+std::string s7_range_notation(const std::string& area_letter, uint16_t db_number, const std::string& unit,
+                               uint32_t start, uint32_t end);
+
 // Returns every canonical S7comm function name this decoder can produce for a KNOWN function code
 // (every entry in s7comm.cpp's function-code table, the same table s7comm_function_name(uint8_t)
 // itself looks up) -- excluding the dynamic "Unknown (0xNN)" fallback used for a function code

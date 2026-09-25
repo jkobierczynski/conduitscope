@@ -1,17 +1,20 @@
 # ICS communication-baseline analysis at the protocol-operation level -- design draft
 
 Status: **Phase 1 (S7comm + Modbus) and Phase 2 (EtherNet/IP, DNP3, BACnet, OPC UA, MELSEC, FINS)
-implemented, v0.2.5.** Written at Jurgen's request to scope roadmap item 41 (`docs/DEVELOPMENT.md`)
-into something buildable, starting with S7comm and Modbus. `BaselineEngine`
-(`include/conduitscope/baseline.hpp`, `src/baseline.cpp`) and the `baseline learn`/`baseline check`
-subcommand pair now exist and are covered by CTest, exactly as scoped below. Phase 2 extended
-protocol breadth to the six protocols named above -- Jurgen said `learn`/`check` "felt short" for
-determining traffic based on host and tech stack, since a host running any of those six was
-invisible to the baseline even though `inventory`/`policy` already see it fine, and confirmed
-protocol breadth (not zone-level rollup, not statistical thresholds) as the direction -- see
-"Per-protocol data readiness" below for what was actually found for each of the six, and "Phased
-build plan" at the bottom for what remains out of scope even now (zone-level rollup, statistical
-thresholds, and CODESYS's `CmpIecVarAccess`, unchanged from the original draft).
+implemented, v0.2.5; a small follow-up (S7comm bit-level range tracking + `baseline check
+--symbolic-addresses`) also implemented, v0.2.5, same release.** Written at Jurgen's request to
+scope roadmap item 41 (`docs/DEVELOPMENT.md`) into something buildable, starting with S7comm and
+Modbus. `BaselineEngine` (`include/conduitscope/baseline.hpp`, `src/baseline.cpp`) and the
+`baseline learn`/`baseline check` subcommand pair now exist and are covered by CTest, exactly as
+scoped below. Phase 2 extended protocol breadth to the six protocols named above -- Jurgen said
+`learn`/`check` "felt short" for determining traffic based on host and tech stack, since a host
+running any of those six was invisible to the baseline even though `inventory`/`policy` already see
+it fine, and confirmed protocol breadth (not zone-level rollup, not statistical thresholds) as the
+direction -- see "Per-protocol data readiness" below for what was actually found for each of the
+six, and "Phased build plan" at the bottom for what remains out of scope even now (zone-level
+rollup, statistical thresholds, and CODESYS's `CmpIecVarAccess`, unchanged from the original draft).
+The follow-up is documented in its own section near the bottom of this file, "Follow-up (v0.2.5,
+same release): S7comm bit-level range tracking + `--symbolic-addresses`".
 
 ## The pitch, restated
 
@@ -106,8 +109,10 @@ honestly-scoped findings, not failures:
 - **MELSEC -- full range-tracking for Batch Read/Write, confirmed exactly as predicted.**
   `MelsecDeviceSpec::device_code`/`device_number` plus `MelsecFrame::point_count` (`melsec.hpp`)
   give a single device + a real count, architecturally identical to S7's own
-  `byte_address`+`count` shape -- and, unlike S7's own BIT-transport-size exclusion, no unit-
-  mismatch caveat is needed: a bit-type `device_number` is already a flat, one-per-bit address
+  `byte_address`+`count` shape -- and, unlike S7's own BIT-transport-size unit split (as it stood at
+  Phase 2 time -- see the "Follow-up" section near the bottom of this file for how S7 later tracked
+  bit-unit ranges too, under their own distinct operation_key, without needing this MELSEC caveat at
+  all), no unit-mismatch caveat is needed here: a bit-type `device_number` is already a flat, one-per-bit address
   space on its own `device_code` (the wire's "two bit values packed per byte" is purely how
   response VALUE bytes are packed, not how the address itself is encoded). `operation_key` is
   `"<command_name>/0x<device_code>"`. Random Read/Write's own non-contiguous device list has no
@@ -118,9 +123,13 @@ honestly-scoped findings, not failures:
   `FinsMemoryItem::area_code`/`address` plus `FinsFrame::point_count` (`fins.hpp`) give the same
   device+count shape as MELSEC -- EXCEPT for bit-addressed items (`FinsMemoryItem::is_bit`):
   FINS's own `address` field only advances once every 16 bits (`bit_address` rolls 0-15 within one
-  `address` first), so `address` alone under-counts a bit-granularity range's true span -- the
-  exact same unit-mismatch problem S7's own BIT-transport-size items have, and excluded from
-  range-tracking the identical way (key-only instead). `operation_key` is
+  `address` first), so `address` alone under-counts a bit-granularity range's true span -- the same
+  bit-vs-byte unit-mismatch problem that motivated S7's own original BIT-transport-size exclusion
+  (as it stood at Phase 2 time -- see the "Follow-up" section near the bottom of this file), except
+  FINS's own version can't be fixed the same "give it a distinct operation_key" way S7's later was:
+  the wire's `address` field itself under-counts, not merely "the wrong unit for the existing range
+  vector," so there is no usable per-bit address to key a range on at all here. Excluded from
+  range-tracking (key-only instead). `operation_key` is
   `"<command_name>/0x<area_code>"`. Memory Area Fill has no explicit item-count field on the wire
   at all (so no range, even for a single, otherwise-clean address); Multiple Memory Area Read
   addresses a non-contiguous list (same reasoning as MELSEC's Random Read) and is key-only, one
@@ -392,3 +401,83 @@ record.
 Not started for later phases: zone-level baselines and statistical/confidence thresholds -- see
 "Explicitly out of scope" above, unchanged. CODESYS's `CmpIecVarAccess` remains the one confirmed
 real decode gap among protocols surveyed for this feature (structural-only today, no value decode).
+
+## Follow-up (v0.2.5, same release): S7comm bit-level range tracking + `--symbolic-addresses`
+
+Jurgen asked why a learned baseline entry could show up like this, with no range at all:
+```json
+{"operation_key": "Write Var/Merkers/Flags (M)", "packet_count": 100,
+ "has_target_range": false, "observed_ranges": []}
+```
+The answer was exactly Phase 1's own documented BIT-transport-size exclusion (see
+`extract_s7comm_operations`'s header comment, as it stood before this follow-up): a BIT item's
+natural address unit is bits (`S7Item::bit_address`, already computed on the decode side), not
+bytes, and mixing bit-granularity numbers into the same `observed_ranges` vector as byte-granularity
+ones would corrupt the interval-containment math this whole feature depends on. Jurgen confirmed two
+follow-ups: (1) track BIT items' ranges for real instead of excluding them, and (2) an opt-in way to
+render a range in Step7 byte/word/bit notation ("MB", "MW", "M10.3") rather than bare numbers.
+
+**Part 1: bit-level range tracking, via a distinct operation_key, not a widened range model.** The
+core constraint carried over unchanged from Phase 1: bit-unit and byte-unit ranges must never be
+compared, merged, or unioned against each other, even for "the same" function+area. Rather than
+widen `Operation`/`OperationBaseline`'s single `[range_start, range_end)` pair to somehow hold two
+incompatible units at once (which is exactly the corruption to avoid), a BIT-transport-size S7 item
+now gets the SAME base operation_key every other item in its area+DB would get, with a trailing
+`/bit` appended (a separator no legitimate `area_name` or `DB<n>` suffix can ever produce, so it
+never collides) -- and `has_target_range`/`range_start`/`range_end` are populated in `bit_address`
+units under THAT key. This needed zero changes to `merge_baseline_observations`, `check_baseline`,
+the verdict model, or the JSON schema -- exactly Phase 2's own "operation_key is deliberately opaque
+to the engine" precedent (see "Core data model" above), just applied one level down (splitting one
+protocol's own operation into two sub-operations by addressing granularity, not by function or area).
+A conduit that both reads MB bytes and writes M#.# bits from/to the same area now correctly produces
+TWO `OperationBaseline` rows, not one with mixed-unit ranges -- confirmed directly against a learned
+baseline JSON file exercising exactly this (Merkers byte-read + Merkers bit-write on one conduit),
+see `tests/sample_baseline_s7comm_symbolic.pcap`.
+
+`item.count`'s real BIT-item semantics were verified against the decode path (`s7comm.cpp`'s
+`parse_s7_item`), not assumed: the wire's "number of elements" field is read identically for every
+transport size, with no BIT-specific special-casing. Every BIT item this project's own fixture
+generator and every real capture seen so far uses `count == 1` (Step7/TIA Portal/snap7 all address
+one bit per item; S7ANY has no "N consecutive bits in one item" idiom the way byte-oriented areas
+have "N consecutive words"). Nothing on the wire actually forbids `count > 1`, though, so the range
+math treats it the same "one unit per element" way the existing Counter/Timer branch already does
+(`range_end = bit_address + count`) rather than silently assuming 1 -- correct either way, and the
+overwhelmingly common `count == 1` case degenerates to exactly the single-bit range expected.
+
+**Part 2: `baseline check --symbolic-addresses`, S7comm only, default off.** Reuses
+`s7comm.cpp`'s existing `s7_build_tag` notation conventions rather than duplicating them: its
+area-letter table was extracted into a small shared `s7_area_letter_for_code(uint8_t)` function
+(`s7comm.hpp`/`s7comm.cpp`), the same "pull a file-local helper out into a small shared public one"
+shape the POWERLINK work already established for `canopen_sdo_abort_code_name`. A new shared
+`s7_range_notation(area_letter, db_number, unit, start, end)` function (also `s7comm.hpp`/`s7comm.cpp`)
+renders a RANGE (not a single address, unlike `s7_build_tag`) in the same notation: `unit` is
+`"byte"` (MB-always -- a byte range is exactly expressible in MB terms regardless of whether the
+underlying accesses were BYTE/WORD/DWORD reads, satisfying Jurgen's own "summarize in bytes like MB,
+MW" phrasing without guessing at WORD/DWORD alignment), `"bit"` (converts each endpoint back to
+byte.bit form), or `"counter_or_timer"` (no data-size suffix at all, mirroring `s7_build_tag`'s own
+Counter/Timer branch). A single-unit range (start/end differ by exactly 1) renders as one address,
+not a degenerate "X-X" span.
+
+Of the two structured-vs-string-parsing approaches this follow-up considered, the chosen shape is a
+hybrid: `Operation` (the per-packet extraction struct) DOES gain three new structured fields
+(`s7_area_letter`, `s7_db_number`, `s7_range_unit`), populated once in `extract_s7comm_operations`
+alongside `operation_key` itself -- structured fields, not regexing a rendered string back apart,
+matching this codebase's own established discipline (the same one that motivated Modbus's Phase 1
+`start_address`/`quantity` prerequisite and DNP3's Phase 2 `dnp3_objects` one). But these three
+fields are deliberately **not** added to the persisted `BaselineStore`/`OperationBaseline` JSON
+schema: `write_baseline_store_json`/`parse_baseline_store_json` are untouched, so `learn`'s own
+output for every existing S7comm byte/word/dword operation is byte-for-byte unchanged by this
+follow-up. This works because `--symbolic-addresses` rendering only ever needs these fields off the
+CHECKED capture's own freshly-extracted "observed" `Operation`/`OperationBaseline` (always available
+live, every `check` run) -- never off the loaded baseline file on disk, since `operation_key` already
+determines area+DB+unit deterministically for S7comm, so the observed side's own fields are enough to
+render notation for the baseline's own ranges too (`BaselineFinding` carries the same three fields,
+copied from the observed side in `check_baseline`, and used only when `symbolic_addresses` is true
+and `protocol == "s7comm"`). No version bump, no schema migration question, and zero risk to every
+other protocol's rendering or to any already-written baseline file.
+
+CLI: `baseline check --symbolic-addresses` (default off). Adds `observed_range_symbolic`/
+`baseline_ranges_symbolic` fields (JSON) or `observed range (symbolic)`/`baseline ranges (symbolic)`
+lines (text) alongside the existing raw numeric fields, for `NewTargetRange` findings with
+`protocol == "s7comm"` only -- every other protocol's/verdict's rendering is completely unaffected,
+flag on or off.

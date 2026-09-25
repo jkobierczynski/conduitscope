@@ -326,16 +326,22 @@ size) is what `conduitscope baseline learn`/`baseline check` key S7comm
 operations on -- one operation per (function name, area, DB number where
 applicable), with a byte-address range baselined per operation where the
 item's transport size gives an unambiguous byte width. BIT-transport-size
-items (single-bit addressing) are deliberately excluded from range
-baselining: mixing bit-granularity and byte-granularity addresses under the
-same operation key would corrupt the range math, so those items are still
-counted toward `packet_count` but never contribute a `has_target_range`
-baseline. Counter (`C`) and Timer (`T`) area items use their raw item number
-as the range unit (there is no byte address to speak of for those areas).
-`0xB2` symbolic-addressing items (see below) carry no S7ANY byte address at
-all and so never contribute a baselined range either. See
-`docs/design/baseline-engine.md` for the full reasoning and the equivalent
-Modbus side of this feature, documented above under Modbus/TCP.
+items (single-bit addressing) get their own range baseline too, in
+bit-address units, under a distinct, `/bit`-suffixed operation key (e.g.
+`Write Var/Merkers/Flags (M)/bit`) -- mixing bit-granularity and
+byte-granularity addresses under the SAME operation key would corrupt the
+range math, so a bit-addressed item never shares one with a byte-addressed
+item in the same area/DB; it gets a sibling operation instead, tracked
+separately. `baseline check --symbolic-addresses` renders these (and every
+other S7comm range) in Step7 byte/word/bit notation (`MB10-MB19`, `M10.3`,
+`DB5.DBX10.3`) alongside the existing raw numeric fields. Counter (`C`) and
+Timer (`T`) area items use their raw item number as the range unit (there is
+no byte address to speak of for those areas). `0xB2` symbolic-addressing
+items (see below) carry no S7ANY byte address at all and so never contribute
+a baselined range either. See `docs/design/baseline-engine.md` for the full
+reasoning (including its own "Follow-up" section for the bit-level
+tracking/`--symbolic-addresses` history) and the equivalent Modbus side of
+this feature, documented above under Modbus/TCP.
 
 **`0xB2`, S7-1200/1500 "symbolic" addressing**, also gets a tag -- confirmed
 to be the addressing syntax you're actually most likely to see in real

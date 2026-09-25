@@ -111,19 +111,85 @@ std::string hex32(uint32_t v) {
     return out.str();
 }
 
-std::string s7_area_name(uint8_t area, std::string& letter) {
+}  // namespace
+
+// Public (not anonymous-namespace-local) so baseline.cpp's own S7comm operation extraction can call
+// it -- see this function's own comment, s7comm.hpp.
+std::string s7_area_letter_for_code(uint8_t area) {
     switch (area) {
-        case 0x81: letter = "I"; return "Inputs (I)";
-        case 0x82: letter = "Q"; return "Outputs (Q)";
-        case 0x83: letter = "M"; return "Merkers/Flags (M)";
-        case 0x84: letter = "DB"; return "Data Block (DB)";
-        case 0x85: letter = "DI"; return "Instance Data Block (DI)";
-        case 0x86: letter = "L"; return "Local Data (L)";
-        case 0x87: letter = "V"; return "Previous Local Data (V)";
-        case 0x1C: letter = "C"; return "Counters (C)";
-        case 0x1D: letter = "T"; return "Timers (T)";
+        case 0x81: return "I";
+        case 0x82: return "Q";
+        case 0x83: return "M";
+        case 0x84: return "DB";
+        case 0x85: return "DI";
+        case 0x86: return "L";
+        case 0x87: return "V";
+        case 0x1C: return "C";
+        case 0x1D: return "T";
+        default: return "";
+    }
+}
+
+// See this function's own comment, s7comm.hpp, for the full contract.
+std::string s7_range_notation(const std::string& area_letter, uint16_t db_number, const std::string& unit,
+                               uint32_t start, uint32_t end) {
+    if (area_letter.empty() || unit.empty() || end <= start) return "";
+    bool is_db_area = (area_letter == "DB" || area_letter == "DI");
+    bool single = (end - start == 1);
+
+    if (unit == "counter_or_timer") {
+        // No byte/bit split, no data-size suffix at all -- mirrors s7_build_tag's own
+        // counter/timer branch above.
+        auto point = [&](uint32_t n) { return area_letter + std::to_string(n); };
+        return single ? point(start) : point(start) + "-" + point(end - 1);
+    }
+
+    if (unit == "bit") {
+        // Each endpoint is a raw bit_address (byte_address*8 + bit_offset) -- convert back to
+        // byte.bit form, same "DBX"/plain-area-letter split as s7_build_tag's own BIT branch.
+        auto point = [&](uint32_t bit_addr) {
+            uint32_t byte_addr = bit_addr / 8;
+            unsigned bit_off = static_cast<unsigned>(bit_addr % 8);
+            std::ostringstream s;
+            if (is_db_area) {
+                s << "DB" << db_number << ".DBX" << byte_addr << "." << bit_off;
+            } else {
+                s << area_letter << byte_addr << "." << bit_off;
+            }
+            return s.str();
+        };
+        return single ? point(start) : point(start) + "-" + point(end - 1);
+    }
+
+    // unit == "byte": MB-always notation -- see this function's own comment, s7comm.hpp, for why
+    // this is the deliberate common denominator rather than guessing at WORD/DWORD alignment.
+    auto point = [&](uint32_t byte_addr) {
+        std::ostringstream s;
+        if (is_db_area) {
+            s << "DB" << db_number << ".DBB" << byte_addr;
+        } else {
+            s << area_letter << "B" << byte_addr;
+        }
+        return s.str();
+    };
+    return single ? point(start) : point(start) + "-" + point(end - 1);
+}
+
+namespace {
+
+std::string s7_area_name(uint8_t area, std::string& letter) {
+    letter = s7_area_letter_for_code(area);
+    switch (area) {
+        case 0x81: return "Inputs (I)";
+        case 0x82: return "Outputs (Q)";
+        case 0x83: return "Merkers/Flags (M)";
+        case 0x84: return "Data Block (DB)";
+        case 0x85: return "Instance Data Block (DI)";
+        case 0x86: return "Local Data (L)";
+        case 0x87: return "Previous Local Data (V)";
+        case 0x1C: return "Counters (C)";
+        case 0x1D: return "Timers (T)";
         default: {
-            letter.clear();
             std::ostringstream out;
             out << "Unknown area (0x" << std::hex << static_cast<unsigned>(area) << ")";
             return out.str();

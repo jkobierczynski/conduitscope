@@ -12684,8 +12684,16 @@ set_tests_properties(zigbee_info_link_type_name_tap PROPERTIES
 
 add_test(NAME baseline_learn_produces_expected_json
   COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_learn_expected.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_learn_expected.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm.pcap' && cat '${CMAKE_CURRENT_BINARY_DIR}/baseline_learn_expected.json'")
+# "Write Var/Merkers/Flags (M)/bit" is the exact scenario Jurgen originally reported (a Merker
+# bit-write showing up with has_target_range: false and no range at all) -- see extract_s7comm_
+# operations' own comment for why a BIT-transport-size item now gets its own "/bit"-suffixed
+# operation_key with a real bit_address-unit range ([0, 1) here: a single write to M0.0), instead of
+# being excluded from range tracking the way it was before this feature. The store's own JSON schema
+# is otherwise byte-for-byte unchanged (no s7_area_letter/s7_db_number/s7_range_unit fields --
+# deliberately not persisted, see OperationBaseline's own comment, baseline.hpp), confirmed here by
+# "Read Var/Data Block (DB)/DB10"'s own entry rendering identically to before this feature.
 set_tests_properties(baseline_learn_produces_expected_json PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"protocol\": \"modbus\",\n *\"server_port\": 502,\n *\"packet_count\": 1,.*\"operation_key\": \"Read Holding Registers\",\n *\"packet_count\": 1,\n *\"has_target_range\": true,\n *\"observed_ranges\": \\[\\[0, 10\\]\\].*\"protocol\": \"s7comm\",\n *\"server_port\": 102,\n *\"packet_count\": 2,.*\"operation_key\": \"Read Var/Data Block \\(DB\\)/DB10\",\n *\"packet_count\": 1,\n *\"has_target_range\": true,\n *\"observed_ranges\": \\[\\[100, 110\\]\\].*\"operation_key\": \"Write Var/Merkers/Flags \\(M\\)\",\n *\"packet_count\": 1,\n *\"has_target_range\": false,\n *\"observed_ranges\": \\[\\]")
+  PASS_REGULAR_EXPRESSION "\"protocol\": \"modbus\",\n *\"server_port\": 502,\n *\"packet_count\": 1,.*\"operation_key\": \"Read Holding Registers\",\n *\"packet_count\": 1,\n *\"has_target_range\": true,\n *\"observed_ranges\": \\[\\[0, 10\\]\\].*\"protocol\": \"s7comm\",\n *\"server_port\": 102,\n *\"packet_count\": 2,.*\"operation_key\": \"Read Var/Data Block \\(DB\\)/DB10\",\n *\"packet_count\": 1,\n *\"has_target_range\": true,\n *\"observed_ranges\": \\[\\[100, 110\\]\\].*\"operation_key\": \"Write Var/Merkers/Flags \\(M\\)/bit\",\n *\"packet_count\": 1,\n *\"has_target_range\": true,\n *\"observed_ranges\": \\[\\[0, 1\\]\\]")
 
 # `learn` never emits a pass/fail verdict -- see baseline.hpp's own file header comment. Its own
 # diagnostic summary line ("learned from N capture(s)...") is the only thing printed to stderr;
@@ -12767,6 +12775,72 @@ add_test(NAME baseline_learn_creates_a_new_baseline_file
   COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_fresh_create.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_fresh_create.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap' && cat '${CMAKE_CURRENT_BINARY_DIR}/baseline_fresh_create.json'")
 set_tests_properties(baseline_learn_creates_a_new_baseline_file PROPERTIES
   PASS_REGULAR_EXPRESSION "\"schema_version\": 1,\n *\"conduits\": \\[\n *\\{\n *\"client_ip\": \"192\\.168\\.1\\.50\"")
+
+# ---------------------------------------------------------------------------------------------
+# S7comm bit-level range tracking + `baseline check --symbolic-addresses` (small follow-up to
+# Phase 1/Phase 2 above, docs/design/baseline-engine.md's own "Follow-up" section): a BIT-transport-
+# size S7 item now gets a real bit_address-unit range under its own "/bit"-suffixed operation_key
+# (extract_s7comm_operations, baseline.cpp) instead of being excluded from range tracking, and
+# `baseline check`'s new opt-in --symbolic-addresses flag renders Step7 byte/bit notation
+# (s7_range_notation, s7comm.hpp/.cpp) alongside the existing raw numeric fields for S7comm
+# NewTargetRange findings. tests/sample_baseline_s7comm_symbolic.pcap (build_baseline_s7comm_
+# symbolic_sample, tools/make_sample_pcap.py) exercises both a byte-unit AND a bit-unit range on the
+# SAME area (Merkers) on one conduit, plus one of each in a DB area, specifically to prove the
+# mixed-access/never-merged property below.
+# ---------------------------------------------------------------------------------------------
+
+# `learn` spot-check: mixed byte + bit access to the SAME area (Merkers) produces TWO separate
+# OperationBaseline rows ("Read Var/Merkers/Flags (M)" byte-unit, "Write Var/Merkers/Flags (M)/bit"
+# bit-unit) -- never one row with byte-unit and bit-unit numbers merged into the same
+# observed_ranges vector. Also pins the DB-area byte/bit siblings ("Read Var/Data Block (DB)/DB5",
+# "Write Var/Data Block (DB)/DB5/bit") and confirms the store's own JSON schema carries no
+# s7_area_letter/s7_db_number/s7_range_unit fields (deliberately not persisted -- see
+# OperationBaseline's own comment, baseline.hpp).
+add_test(NAME baseline_learn_s7comm_bit_and_byte_are_separate_operations
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_s7comm_symbolic_learn.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_s7comm_symbolic_learn.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_baseline_s7comm_symbolic.pcap' && cat '${CMAKE_CURRENT_BINARY_DIR}/baseline_s7comm_symbolic_learn.json'")
+set_tests_properties(baseline_learn_s7comm_bit_and_byte_are_separate_operations PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"operation_key\": \"Read Var/Merkers/Flags \\(M\\)\",\n *\"packet_count\": 1,\n *\"has_target_range\": true,\n *\"observed_ranges\": \\[\\[20, 25\\]\\].*\"operation_key\": \"Read Var/Data Block \\(DB\\)/DB5\",\n *\"packet_count\": 1,\n *\"has_target_range\": true,\n *\"observed_ranges\": \\[\\[10, 11\\]\\].*\"operation_key\": \"Write Var/Merkers/Flags \\(M\\)/bit\",\n *\"packet_count\": 1,\n *\"has_target_range\": true,\n *\"observed_ranges\": \\[\\[99, 100\\]\\].*\"operation_key\": \"Write Var/Data Block \\(DB\\)/DB5/bit\",\n *\"packet_count\": 1,\n *\"has_target_range\": true,\n *\"observed_ranges\": \\[\\[83, 84\\]\\]"
+  FAIL_REGULAR_EXPRESSION "s7_area_letter|s7_db_number|s7_range_unit")
+
+add_test(NAME baseline_check_s7comm_symbolic_unmodified_zero_findings
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_s7comm_symbolic_clean.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_s7comm_symbolic_clean.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_baseline_s7comm_symbolic.pcap' && '$<TARGET_FILE:conduitscope>' baseline check --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_s7comm_symbolic_clean.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_baseline_s7comm_symbolic.pcap'")
+set_tests_properties(baseline_check_s7comm_symbolic_unmodified_zero_findings PROPERTIES
+  PASS_REGULAR_EXPRESSION "Result: CLEAN\n\n1 conduit\\(s\\) observed, 4 distinct operation\\(s\\) observed, 4 matched the baseline, 0 did not\n\nFINDINGS \\(0\\):\n *\\(none\\)")
+
+# `--symbolic-addresses` is OFF by default -- the exact same capture/baseline pair, without the
+# flag, must show only the existing raw numeric fields, never the "(symbolic)"-suffixed lines.
+add_test(NAME baseline_check_s7comm_symbolic_flag_off_by_default
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_s7comm_symbolic_shrunk1.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_s7comm_symbolic_shrunk1.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_baseline_s7comm_symbolic.pcap' && sed -i 's/\\[\\[20, 25\\]\\]/[[20, 23]]/' '${CMAKE_CURRENT_BINARY_DIR}/baseline_s7comm_symbolic_shrunk1.json' && '$<TARGET_FILE:conduitscope>' baseline check --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_s7comm_symbolic_shrunk1.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_baseline_s7comm_symbolic.pcap'")
+set_tests_properties(baseline_check_s7comm_symbolic_flag_off_by_default PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[1\\] new-target-range .*operation=\"Read Var/Merkers/Flags \\(M\\)\".*observed range: \\[20, 25\\).*baseline ranges: \\[20, 23\\)"
+  FAIL_REGULAR_EXPRESSION "\\(symbolic\\)")
+
+# `--symbolic-addresses` ON: shrinks the already-learned Merkers BYTE range ([20, 25) -> [20, 23))
+# and the DB5 BIT range ([83, 84) -> [50, 51), an unrelated bit so the capture's own real bit is
+# genuinely uncovered) with sed, then checks the SAME, unmodified fixture -- both a byte-unit and a
+# bit-unit NewTargetRange finding, each with its raw numeric range AND its Step7-notation rendering:
+# "MB20-MB24"/"MB20-MB22" (byte, non-DB, a multi-byte span) and "DB5.DBX10.3"/"DB5.DBX6.2" (bit,
+# DB-area, single-bit each) -- these exact tags were cross-checked by hand against decode's own
+# s7_build_tag output for the same addresses (sample_baseline_s7comm_symbolic.pcap's own packets
+# decode to items tagged "MB20"/"DB5.DBB10"/"M12.3"/"DB5.DBX10.3").
+add_test(NAME baseline_check_s7comm_symbolic_addresses_text
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_s7comm_symbolic_shrunk2.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_s7comm_symbolic_shrunk2.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_baseline_s7comm_symbolic.pcap' && sed -i 's/\\[\\[20, 25\\]\\]/[[20, 23]]/;s/\\[\\[83, 84\\]\\]/[[50, 51]]/' '${CMAKE_CURRENT_BINARY_DIR}/baseline_s7comm_symbolic_shrunk2.json' && '$<TARGET_FILE:conduitscope>' baseline check --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_s7comm_symbolic_shrunk2.json' --symbolic-addresses '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_baseline_s7comm_symbolic.pcap'")
+set_tests_properties(baseline_check_s7comm_symbolic_addresses_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[1\\] new-target-range .*operation=\"Read Var/Merkers/Flags \\(M\\)\".*observed range: \\[20, 25\\).*observed range \\(symbolic\\): MB20-MB24.*baseline ranges: \\[20, 23\\).*baseline ranges \\(symbolic\\): MB20-MB22.*\\[2\\] new-target-range .*operation=\"Write Var/Data Block \\(DB\\)/DB5/bit\".*observed range: \\[83, 84\\).*observed range \\(symbolic\\): DB5\\.DBX10\\.3.*baseline ranges: \\[50, 51\\).*baseline ranges \\(symbolic\\): DB5\\.DBX6\\.2")
+
+add_test(NAME baseline_check_s7comm_symbolic_addresses_json
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_s7comm_symbolic_shrunk3.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_s7comm_symbolic_shrunk3.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_baseline_s7comm_symbolic.pcap' && sed -i 's/\\[\\[20, 25\\]\\]/[[20, 23]]/;s/\\[\\[83, 84\\]\\]/[[50, 51]]/' '${CMAKE_CURRENT_BINARY_DIR}/baseline_s7comm_symbolic_shrunk3.json' && '$<TARGET_FILE:conduitscope>' baseline check --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_s7comm_symbolic_shrunk3.json' --symbolic-addresses --format json '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_baseline_s7comm_symbolic.pcap'")
+set_tests_properties(baseline_check_s7comm_symbolic_addresses_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"operation_key\": \"Read Var/Merkers/Flags \\(M\\)\",\n *\"observed_start\": 20,\n *\"observed_end\": 25,\n *\"observed_range_symbolic\": \"MB20-MB24\",\n *\"baseline_ranges\": \\[\\[20, 23\\]\\],\n *\"baseline_ranges_symbolic\": \\[\"MB20-MB22\"\\].*\"operation_key\": \"Write Var/Data Block \\(DB\\)/DB5/bit\",\n *\"observed_start\": 83,\n *\"observed_end\": 84,\n *\"observed_range_symbolic\": \"DB5\\.DBX10\\.3\",\n *\"baseline_ranges\": \\[\\[50, 51\\]\\],\n *\"baseline_ranges_symbolic\": \\[\"DB5\\.DBX6\\.2\"\\]")
+
+# --symbolic-addresses has NO effect on a non-S7comm protocol's own findings -- proves the flag is
+# scoped to s7comm exactly as designed, reusing the Modbus mutated-fixture NewTargetRange/
+# NewOperation findings already exercised above.
+add_test(NAME baseline_check_symbolic_addresses_no_effect_on_modbus
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_check_mutated_symbolic_noop.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_check_mutated_symbolic_noop.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap' && '$<TARGET_FILE:conduitscope>' baseline check --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_check_mutated_symbolic_noop.json' --symbolic-addresses '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_baseline_modbus_mutated.pcap'")
+set_tests_properties(baseline_check_symbolic_addresses_no_effect_on_modbus PROPERTIES
+  PASS_REGULAR_EXPRESSION "Result: ANOMALIES FOUND \\(2 finding\\(s\\)\\).*\\[1\\] new-target-range .*operation=\"Read Holding Registers\".*observed range: \\[200, 205\\).*baseline ranges: \\[0, 10\\).*\\[2\\] new-operation .*operation=\"Write Multiple Registers\""
+  FAIL_REGULAR_EXPRESSION "\\(symbolic\\)")
 
 # ---------------------------------------------------------------------------------------------
 # Phase 2 (roadmap item 41, docs/design/baseline-engine.md): baseline coverage for the six

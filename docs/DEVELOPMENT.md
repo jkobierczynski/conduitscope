@@ -7727,6 +7727,52 @@ deferred future migration.
     and still pass with their exact original `PASS_REGULAR_EXPRESSION` pins, confirming zero
     regression to Phase 1's own behavior.
 
+    **Small follow-up (v0.2.5, same release): S7comm bit-level range tracking + `baseline check
+    --symbolic-addresses`.** Jurgen asked why a learned entry like `"operation_key": "Write Var/
+    Merkers/Flags (M)", "has_target_range": false, "observed_ranges": []` showed up with no range at
+    all -- the answer was Phase 1's own documented BIT-transport-size exclusion (bit-unit and
+    byte-unit ranges can't share one `observed_ranges` vector without corrupting the interval math),
+    and he confirmed two follow-ups: track bit-addressed S7 writes/reads for real, and an opt-in way
+    to render a range in Step7 byte/word/bit notation ("MB", "MW") instead of bare numbers. Full
+    design and rationale now live in `docs/design/baseline-engine.md`'s own "Follow-up" section --
+    summary: a BIT-transport-size item now gets the SAME base operation_key every other item in its
+    area+DB would, with a `/bit` suffix appended, and a real `bit_address`-unit range under THAT key
+    (`extract_s7comm_operations`, `baseline.cpp`) -- zero changes needed to
+    `merge_baseline_observations`/`check_baseline`/the verdict model/the JSON schema, since
+    operation_key was already opaque to the engine (Phase 2's own precedent, one level down: splitting
+    one protocol's operation by addressing granularity, not by function/area). A conduit that both
+    byte-reads and bit-writes the same area now correctly produces two separate `OperationBaseline`
+    rows, never one with mixed-unit ranges -- confirmed directly against a learned baseline JSON
+    file. `item.count`'s real BIT-item semantics were verified against the decode path
+    (`s7comm.cpp`'s `parse_s7_item`) rather than assumed: read identically to every other transport
+    size, with real traffic/this project's own fixtures always using `count == 1`, though the range
+    math handles `count > 1` correctly too (nothing on the wire forbids it). The new `baseline check
+    --symbolic-addresses` flag (default off) reuses `s7comm.cpp`'s existing `s7_build_tag` notation
+    rather than duplicating it: its area-letter table was extracted into a small shared
+    `s7_area_letter_for_code` function (`s7comm.hpp`/`s7comm.cpp`, the same "pull a file-local helper
+    into a small shared public one" shape the POWERLINK work already set with
+    `canopen_sdo_abort_code_name`), and a new shared `s7_range_notation` function renders a RANGE
+    (not just a single address) in the same MB/MW/`M10.3`/`DB5.DBX10.3` notation. `Operation` gains
+    three new structured fields (`s7_area_letter`/`s7_db_number`/`s7_range_unit`) populated once
+    alongside `operation_key` itself -- but these are deliberately NOT added to the persisted
+    `BaselineStore`/`OperationBaseline` JSON schema (no version bump, and every existing S7comm
+    byte/word/dword operation's own `learn`/`check` output stays byte-for-byte unchanged), since
+    `--symbolic-addresses` rendering only ever needs them off the checked capture's own
+    freshly-extracted "observed" side, never off a loaded baseline file. 6 new `baseline_*` CTest
+    entries against a new, dedicated fixture (`tests/sample_baseline_s7comm_symbolic.pcap`,
+    `build_baseline_s7comm_symbolic_sample`, `tools/make_sample_pcap.py` -- deliberately not grafted
+    onto the widely-reused `tests/sample_s7comm.pcap`, to avoid disturbing the many decode/policy
+    CTest entries already pinned against it) covering: mixed byte+bit access to the same area
+    producing two separate rows, a clean `check` round-trip, the flag being off by default, both text
+    and JSON rendering with a shrunk-baseline `NewTargetRange` proof (byte-unit AND bit-unit, DB-area
+    AND non-DB-area), and a proof the flag has zero effect on a non-S7comm protocol's own findings.
+    Full suite: 1894 -> 1900 tests (default config), 1882 -> 1888 (no-live-capture config),
+    zero-warning build in both, confirmed via clean full rebuild in both configs; the only
+    pre-existing `baseline_*` CTest entry whose expectation changed is `baseline_learn_produces_
+    expected_json` itself, updated to expect the Merkers bit-write's own new `has_target_range: true`
+    /`observed_ranges: [[0, 1]]` -- exactly the behavior change this follow-up exists to make -- with
+    every other S7comm operation in that same test (byte/word/dword) rendering identically to before.
+
     Still not done, unchanged from Phase 1's own scoping: zone-level baselines, statistical/
     confidence thresholds (see the design doc's own "Explicitly out of scope" section), and
     CODESYS's `CmpIecVarAccess` (still the one confirmed real decode gap, structural-only today).

@@ -16926,6 +16926,67 @@ def build_baseline_two_conduit_sample():
     (TESTS_DIR / "sample_baseline_two_conduit.pcap").write_bytes(data)
 
 
+def build_baseline_s7comm_symbolic_sample():
+    """One conduit (HMI_IP -> PLC_IP, S7comm/102) exercising S7's own BIT-transport-size range
+    tracking (extract_s7comm_operations' own "/bit"-suffixed operation_key) AND `baseline check
+    --symbolic-addresses`'s Step7-notation rendering, in one capture:
+      1) Read Var -- Job request with two items: a 5-byte BYTE-transport read of Merkers
+         (byte_address 20, count 5 -> range [20, 25), notation "MB20-MB24") and a single-byte
+         BYTE-transport read of DB5 (byte_address 10, count 1 -> range [10, 11), notation
+         "DB5.DBB10").
+      2) Write Var -- Job request with two items: a single-BIT write to Merkers (byte_address 12,
+         bit_offset 3 -> bit_address 99, range [99, 100), notation "M12.3") and a single-BIT write
+         to DB5 (byte_address 10, bit_offset 3 -> bit_address 83, range [83, 84), notation
+         "DB5.DBX10.3").
+    Packet 1's own Merkers BYTE read and packet 2's own Merkers BIT write are deliberately the SAME
+    area (Merkers) on the SAME conduit -- this is the "mixed-access" proof this feature's own
+    testing plan calls for: `baseline learn` must produce TWO separate OperationBaseline rows
+    ("Read Var/Merkers/Flags (M)" and "Write Var/Merkers/Flags (M)/bit"), never one row with
+    byte-unit and bit-unit numbers merged into the same observed_ranges vector. No Ack_Data
+    responses are included -- extract_s7comm_operations is request-side only (see its own comment),
+    so a response contributes nothing to `baseline learn`/`check` either way."""
+    ENG_IP, ENG_PORT = HMI_IP, 49300
+
+    def s7any_item(transport_size, count, db_number, area, byte_address, bit_offset=0):
+        addr = (byte_address << 3) | bit_offset
+        return (bytes([0x12, 0x0A, 0x10, transport_size]) +
+                struct.pack("!HHB", count, db_number, area) +
+                bytes([(addr >> 16) & 0xFF, (addr >> 8) & 0xFF, addr & 0xFF]))
+
+    AREA_MERKER, AREA_DB = 0x83, 0x84
+    TS_BYTE, TS_BIT = 0x02, 0x01
+
+    # 1) Read Var: MB20-MB24 (Merkers) + DB5.DBB10.
+    read_items = (s7any_item(TS_BYTE, 5, 0, AREA_MERKER, 20) +
+                  s7any_item(TS_BYTE, 1, 5, AREA_DB, 10))
+    read_param = bytes([0x04, 0x02]) + read_items
+    read_req = s7_header(0x01, 1, len(read_param), 0) + read_param
+    cotp_read_req = tpkt_frame(COTP_DT_HEADER, read_req)
+    tcp1 = tcp_header(ENG_PORT, 102, 1000, 2000, TCP_PSH | TCP_ACK, len(cotp_read_req)) + cotp_read_req
+    ip1 = ipv4_header(ENG_IP, PLC_IP, 6, len(tcp1), 0x3200) + tcp1
+    packets = [eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip1]
+
+    # 2) Write Var: M12.3 (Merkers, bit_address 99) + DB5.DBX10.3 (bit_address 83). Each item's
+    #    value tail is reserved(0)+transport(BIT=0x03)+length=1 bit+data(1 byte); the first item is
+    #    padded one byte to an even boundary since another item follows (see parse_s7_value_tail's
+    #    own comment, s7comm.cpp) -- the second, last item needs none.
+    write_items = (s7any_item(TS_BIT, 1, 0, AREA_MERKER, 12, bit_offset=3) +
+                   s7any_item(TS_BIT, 1, 5, AREA_DB, 10, bit_offset=3))
+    write_param = bytes([0x05, 0x02]) + write_items
+    write_data = (bytes([0x00, 0x03, 0x00, 0x01, 0x01]) + bytes([0x00]) +
+                  bytes([0x00, 0x03, 0x00, 0x01, 0x01]))
+    write_req = s7_header(0x01, 2, len(write_param), len(write_data)) + write_param + write_data
+    cotp_write_req = tpkt_frame(COTP_DT_HEADER, write_req)
+    tcp2 = tcp_header(ENG_PORT, 102, 1100, 2000, TCP_PSH | TCP_ACK, len(cotp_write_req)) + cotp_write_req
+    ip2 = ipv4_header(ENG_IP, PLC_IP, 6, len(tcp2), 0x3201) + tcp2
+    packets.append(eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip2)
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_012_000 + i, i * 1000)
+    (TESTS_DIR / "sample_baseline_s7comm_symbolic.pcap").write_bytes(data)
+
+
 # --- AMQP 0-9-1 / AMQP 1.0 -----------------------------------------------------------------
 # Two wire-INCOMPATIBLE protocols sharing TCP port 5672 by convention -- see amqp_common.hpp's own
 # file header comment for the full detection-posture rationale this fixture exercises: sticky
@@ -17936,6 +17997,7 @@ if __name__ == "__main__":
     build_zigbee_tap_sample()
     build_baseline_modbus_mutated_sample()
     build_baseline_two_conduit_sample()
+    build_baseline_s7comm_symbolic_sample()
     build_amqp091_sample()
     build_amqp10_sample()
     build_dicom_sample()

@@ -56,21 +56,45 @@ struct Operation {
     std::string protocol;              // "s7comm" | "modbus" (Phase 1)
     std::string client_ip, server_ip;
     uint16_t server_port = 0;
-    std::string operation_key;         // S7: "<function_name>/<area_name>[/DB<n>]"
+    std::string operation_key;         // S7: "<function_name>/<area_name>[/DB<n>][/bit]" -- the
+                                        // trailing "/bit" is appended only for a BIT-transport-size
+                                        // item (see extract_s7comm_operations' own comment for why a
+                                        // bit-addressed item gets its own distinct operation_key
+                                        // rather than sharing one with byte-addressed accesses to the
+                                        // same area+DB).
                                         // Modbus: "<function_name>" alone (Phase 1: one address
                                         // space per function, see the design doc)
-    // false for: Modbus (always, until a future phase widens the range model), an S7 item whose
-    // transport size is BIT (see extract_s7comm_operations' own comment for why bit-addressed
-    // items are deliberately excluded from range tracking rather than mixed into the same
-    // byte-granularity unit), an S7 item using the experimental 0xB2 (symbolic) addressing (which
-    // carries no transport_size/count at all), an S7 item with an unrecognized transport size, or
-    // a Modbus operation whose function code has no address concept (diagnostics, exception
-    // responses, ...).
+    // false for: Modbus (always, until a future phase widens the range model), an S7 item using the
+    // experimental 0xB2 (symbolic) addressing (which carries no transport_size/count at all), an S7
+    // item with an unrecognized transport size or a zero element count, or a Modbus operation whose
+    // function code has no address concept (diagnostics, exception responses, ...). A BIT-transport-
+    // size S7 item DOES get a range now (bit_address units, under its own "/bit"-suffixed
+    // operation_key -- see extract_s7comm_operations' own comment for why bit- and byte-unit ranges
+    // are never compared/merged despite superficially sharing "the same" function+area).
     bool has_target_range = false;
-    // Half-open [range_start, range_end). S7: byte_address units within this item's own area+DB
-    // (or, for the Counter/Timer areas, counter/timer-number units -- see extract_s7comm_operations'
-    // own comment). Modbus: register/coil address units within the function's own address space.
+    // Half-open [range_start, range_end). S7: byte_address units within this item's own area+DB (or,
+    // for the Counter/Timer areas, counter/timer-number units; or, for a "/bit"-suffixed
+    // operation_key, bit_address units -- see extract_s7comm_operations' own comment for all three).
+    // Modbus: register/coil address units within the function's own address space.
     uint32_t range_start = 0, range_end = 0;
+
+    // S7comm only (left at their defaults -- "", 0, "" -- for every other protocol, and for an
+    // S7comm operation with has_target_range false): the raw pieces s7_range_notation (s7comm.hpp)
+    // needs to render range_start/range_end in Step7 notation, carried as structured fields rather
+    // than parsed back out of operation_key (this codebase's own established "structured field, not
+    // string-scraping" discipline -- see extract_modbus_operations' own header comment and this
+    // file's Phase 2 section on the EtherNet/IP byte_offset gap this deliberately avoids
+    // reintroducing). Populated once, alongside operation_key itself, in extract_s7comm_operations.
+    //
+    // Deliberately NOT part of the persisted BaselineStore/OperationBaseline JSON schema (see
+    // OperationBaseline's own comment on this) -- only Operation (this struct) and the in-memory
+    // BaselineFinding a `check` run builds ever carry them; `--symbolic-addresses` rendering always
+    // has a freshly-extracted "observed" Operation on hand (the capture being checked), never needs
+    // to read these back out of a possibly-years-old baseline file on disk.
+    std::string s7_area_letter;   // e.g. "M", "I", "Q", "DB", "DI", "L", "V", "C", "T"
+    uint16_t s7_db_number = 0;    // meaningful only when s7_area_letter is "DB" or "DI"
+    std::string s7_range_unit;    // "byte" | "bit" | "counter_or_timer" -- see s7_range_notation's
+                                   // own comment (s7comm.hpp) for why all three need telling apart
 };
 
 // Extracts every Operation this single decoded packet contributes, or an empty vector when
@@ -101,6 +125,20 @@ struct OperationBaseline {
     // per operation in practice (real PLC programs read/write a small, stable set of ranges), so no
     // interval tree is needed at this scale.
     std::vector<std::pair<uint32_t, uint32_t>> observed_ranges;
+
+    // Mirrors Operation::s7_area_letter/s7_db_number/s7_range_unit's own comment (this struct's dual
+    // per-capture/persisted-store role, above, means these are meaningful only in the per-capture
+    // role -- BaselineEngine::finish()'s own output -- where they're copied straight from the
+    // Operation that produced this entry). write_baseline_store_json/parse_baseline_store_json
+    // deliberately do NOT serialize these three: a baseline file loaded back off disk always leaves
+    // them at their defaults, which is fine, since check_baseline only ever reads them off the
+    // freshly-extracted "observed" side (the capture being checked), never off a loaded baseline --
+    // see Operation's own comment for why. Leaving the persisted schema untouched also means every
+    // existing S7comm byte/word/dword operation's own `learn`/`check` JSON output is byte-for-byte
+    // unchanged by this (this file's own review discipline: don't touch what doesn't need touching).
+    std::string s7_area_letter;
+    uint16_t s7_db_number = 0;
+    std::string s7_range_unit;
 };
 
 // One conduit's baseline: every distinct operation_key ever observed on this (client_ip, server_ip,
@@ -208,6 +246,14 @@ struct BaselineFinding {
     uint32_t observed_start = 0, observed_end = 0;
     std::vector<std::pair<uint32_t, uint32_t>> baseline_ranges;
     size_t packet_count = 0;  // how many packets in THIS capture hit this finding
+
+    // Copied from the checked capture's own (freshly-extracted) Operation/OperationBaseline entry
+    // -- see Operation::s7_area_letter's own comment (above) for why these are sourced from the
+    // "observed" side rather than the loaded baseline file. Empty/0/"" for every non-S7comm finding.
+    // Used only by write_baseline_check_report_text/_json's own `symbolic_addresses` rendering.
+    std::string s7_area_letter;
+    uint16_t s7_db_number = 0;
+    std::string s7_range_unit;
 };
 
 // `check`'s full result for one capture against one baseline: every anomaly found
@@ -288,6 +334,13 @@ private:
         bool has_target_range = false;
         std::vector<std::pair<uint32_t, uint32_t>> observed_ranges;
         size_t packet_count = 0;
+        // Mirrors Operation::s7_area_letter/s7_db_number/s7_range_unit -- see that struct's own
+        // comment above. Copied straight from the first Operation that contributes this
+        // operation_key (stable across every subsequent packet for the same key, since operation_key
+        // itself already encodes area+DB+unit for S7comm).
+        std::string s7_area_letter;
+        uint16_t s7_db_number = 0;
+        std::string s7_range_unit;
     };
     struct ConduitState {
         std::string client_ip, server_ip, protocol;
@@ -311,10 +364,21 @@ private:
 // summary count per verdict, mirroring write_policy_report_text/write_inventory_report_text's own
 // conventions (this project's standing "each engine's report reads like every other engine's
 // report" posture).
-void write_baseline_check_report_text(std::ostream& out, const BaselineCheckReport& report);
+//
+// `symbolic_addresses` (default off, the `baseline check --symbolic-addresses` CLI flag): when true,
+// also renders a Step7-notation line (s7_range_notation, s7comm.hpp) alongside a NewTargetRange
+// finding's existing raw numeric observed/baseline ranges, for `protocol == "s7comm"` findings only
+// -- every other protocol's rendering is completely unaffected, on or off. Off by default so
+// existing output/tests are unaffected unless a caller opts in.
+void write_baseline_check_report_text(std::ostream& out, const BaselineCheckReport& report,
+                                       bool symbolic_addresses = false);
 
 // Renders `report` as JSON to `out`, for scripting/automation -- omits a field entirely (never
 // `null`) when it doesn't apply, exactly like write_policy_report_json/write_inventory_report_json.
-void write_baseline_check_report_json(std::ostream& out, const BaselineCheckReport& report);
+// `symbolic_addresses`: see write_baseline_check_report_text's own comment above -- adds
+// "observed_range_symbolic"/"baseline_ranges_symbolic" fields alongside the existing numeric ones,
+// s7comm NewTargetRange findings only, omitted entirely (not merely empty) when off or inapplicable.
+void write_baseline_check_report_json(std::ostream& out, const BaselineCheckReport& report,
+                                       bool symbolic_addresses = false);
 
 }  // namespace conduitscope

@@ -104,15 +104,34 @@ bool s7_area_is_counter_or_timer(uint8_t area) { return area == 0x1C || area == 
 // can't simply be an unmodified S7CommFrame).
 //
 // Range unit decision (transport_size BIT): a BIT-addressed item's natural address unit is BITS
-// (bit_address), not bytes -- mixing bit-granularity and byte-granularity ranges under the same
-// operation_key's observed_ranges would corrupt the interval math (a "bit 3" observation and a
-// "byte 3" observation are not comparable numbers at all). Rather than give BIT items their own
-// separate unit space (which would need transport_size baked into operation_key just for this one
-// case, complicating every other area/transport-size combination that DOESN'T have this problem),
-// this baseline folds BIT items into has_target_range = false: the operation itself (e.g. "Write
-// Var/Merkers/Flags (M)") is still recorded and still participates in NewOperation detection --
-// only its specific bit address is never range-checked. Documented explicitly here, per this
-// file's own review instructions, rather than silently choosing one unit and hoping it's obvious.
+// (bit_address = byte_address*8 + bit_offset, already computed on the decode side -- see
+// S7Item::bit_address's own comment, s7comm.hpp), not bytes -- mixing bit-granularity and byte-
+// granularity ranges under the same operation_key's observed_ranges would corrupt the interval math
+// (a "bit 3" observation and a "byte 3" observation are not comparable numbers at all; a range
+// [0,8) could mean "bits 0-7" or "bytes 0-7" with no way to tell which after the fact). Rather than
+// try to widen the existing byte-unit ranges to somehow also hold bit-unit ones (which is exactly
+// the corruption this must avoid), a BIT item gets its OWN operation_key -- the same base
+// "<function_name>/<area_name>[/DB<n>]" key every other item in this same area/DB would get, with a
+// trailing "/bit" appended (a separator no legitimate area_name or "DB<n>" suffix can ever produce,
+// so it can never collide) -- and has_target_range/range_start/range_end are populated in
+// bit_address units under THAT key. This is exactly Phase 2's own DNP3-precedent for "what counts as
+// 'the operation' is inherently per-protocol" (see this file's own Phase 2 header comment): the
+// engine (merge_baseline_observations/check_baseline/the JSON schema/the verdict model) never
+// interprets operation_key at all, so giving bit- and byte-unit accesses to the same area distinct
+// keys costs nothing there -- a conduit that both reads MB bytes and writes M#.# bits to Merkers
+// simply shows up as two OperationBaseline rows instead of one, which is the correct, honest
+// representation (two genuinely different addressing granularities), not a bug to merge away.
+//
+// item.count for a BIT item: verified against the real decode path (s7comm.cpp's parse_s7_item),
+// not assumed -- the wire's "number of elements" field is read identically for every transport size,
+// including BIT, with no special-casing. In practice, every BIT item this codebase's own fixture
+// generator (tools/make_sample_pcap.py's s7any_item) and every real capture this project has seen
+// produces count == 1 (Step7/TIA Portal/snap7 all address one bit per item; S7ANY has no
+// "N consecutive bits in one item" idiom the way byte-oriented areas have "N consecutive words").
+// Nothing on the wire actually prohibits count > 1 though, so this treats it the same "one unit per
+// element" way the Counter/Timer branch below already does (range_end = bit_address + count) rather
+// than assuming 1 and silently dropping anything else -- correct either way, and count == 1 (the
+// overwhelmingly common case) degenerates to exactly the single-bit range one would expect.
 std::vector<Operation> extract_s7comm_operations(const DecodedPacket& dp) {
     std::vector<Operation> ops;
     if (!dp.result) return ops;
@@ -128,6 +147,7 @@ std::vector<Operation> extract_s7comm_operations(const DecodedPacket& dp) {
             key << "/DB" << item.db_number;
         }
         op.operation_key = key.str();
+        std::string area_letter = s7_area_letter_for_code(item.area);
 
         if (s7_area_is_counter_or_timer(item.area)) {
             // byte_address IS the counter/timer number here (see s7_area_is_counter_or_timer's own
@@ -138,18 +158,32 @@ std::vector<Operation> extract_s7comm_operations(const DecodedPacket& dp) {
                 op.has_target_range = true;
                 op.range_start = item.byte_address;
                 op.range_end = item.byte_address + static_cast<uint32_t>(item.count);
+                op.s7_area_letter = area_letter;
+                op.s7_range_unit = "counter_or_timer";
             }
         } else if (item.is_experimental) {
             // 0xB2 (S7-1200/1500 symbolic addressing) items carry no transport_size/count at all
             // (see S7Item's own comment) -- nothing to build a byte range from; has_target_range
             // stays false.
         } else if (item.transport_size == 0x01) {
-            // BIT -- see this function's own header comment above for why this is deliberately
-            // excluded from range tracking rather than given a mismatched unit.
+            // BIT -- see this function's own header comment above: its own distinct, "/bit"-suffixed
+            // operation_key, range tracked in bit_address units.
+            op.operation_key = key.str() + "/bit";
+            if (item.count > 0) {
+                op.has_target_range = true;
+                op.range_start = item.bit_address;
+                op.range_end = item.bit_address + static_cast<uint32_t>(item.count);
+                op.s7_area_letter = area_letter;
+                op.s7_db_number = item.db_number;
+                op.s7_range_unit = "bit";
+            }
         } else if (auto width = s7_transport_size_byte_width(item.transport_size); width && item.count > 0) {
             op.has_target_range = true;
             op.range_start = item.byte_address;
             op.range_end = item.byte_address + static_cast<uint32_t>(item.count) * (*width);
+            op.s7_area_letter = area_letter;
+            op.s7_db_number = item.db_number;
+            op.s7_range_unit = "byte";
         }
         // Any other case (an unrecognized transport size the byte-width table above doesn't know,
         // or count == 0) leaves has_target_range at its default false -- the operation is still
@@ -733,6 +767,11 @@ void BaselineEngine::observe(const DecodedPacket& dp) {
             os.has_target_range = true;
             merge_range_into(os.observed_ranges, {op.range_start, op.range_end});
         }
+        if (!op.s7_range_unit.empty()) {
+            os.s7_area_letter = op.s7_area_letter;
+            os.s7_db_number = op.s7_db_number;
+            os.s7_range_unit = op.s7_range_unit;
+        }
     }
 }
 
@@ -754,6 +793,9 @@ std::vector<ConduitBaseline> BaselineEngine::finish() const {
             ob.packet_count = os.packet_count;
             ob.has_target_range = os.has_target_range;
             ob.observed_ranges = os.observed_ranges;
+            ob.s7_area_letter = os.s7_area_letter;
+            ob.s7_db_number = os.s7_db_number;
+            ob.s7_range_unit = os.s7_range_unit;
             cb.operations.push_back(std::move(ob));
         }
         result.push_back(std::move(cb));
@@ -831,7 +873,9 @@ void merge_baseline_observations(BaselineStore& store, const std::vector<Conduit
         for (const OperationBaseline& obs_op : obs_conduit.operations) {
             OperationBaseline* op = find_operation(*conduit, obs_op.operation_key);
             if (!op) {
-                conduit->operations.push_back(OperationBaseline{obs_op.operation_key, 0, false, {}});
+                OperationBaseline fresh_op;
+                fresh_op.operation_key = obs_op.operation_key;
+                conduit->operations.push_back(std::move(fresh_op));
                 op = &conduit->operations.back();
             }
             op->packet_count += obs_op.packet_count;
@@ -923,6 +967,13 @@ BaselineCheckReport check_baseline(const BaselineStore& baseline, const std::vec
             finding.server_port = obs_conduit.server_port;
             finding.operation_key = obs_op.operation_key;
             finding.packet_count = obs_op.packet_count;
+            // Sourced from obs_op (the checked capture's own freshly-extracted operation), never
+            // from base_op/the loaded baseline file -- see Operation::s7_area_letter's own comment
+            // (baseline.hpp) for why. Harmless no-op for every non-S7comm finding (obs_op.
+            // s7_range_unit stays "" there, and only s7comm findings are ever rendered with it).
+            finding.s7_area_letter = obs_op.s7_area_letter;
+            finding.s7_db_number = obs_op.s7_db_number;
+            finding.s7_range_unit = obs_op.s7_range_unit;
             if (verdict == BaselineVerdict::NewTargetRange) {
                 finding.observed_start = uncovered_start;
                 finding.observed_end = uncovered_end;
@@ -1326,9 +1377,33 @@ std::string ranges_text(const std::vector<std::pair<uint32_t, uint32_t>>& ranges
     return out.str();
 }
 
+// True only for an S7comm finding whose s7_range_unit was actually populated -- i.e. an area code
+// extract_s7comm_operations recognized (s7_area_letter_for_code returned non-empty). An S7comm
+// finding CAN reach here with s7_range_unit empty (has_target_range false, e.g. a NewOperation on an
+// operation_key with no range concept at all -- PLC Stop, Setup Communication, ...), and this must
+// silently render nothing extra for that case, not an empty/garbled notation string.
+bool has_s7_symbolic_notation(const BaselineFinding& f) {
+    return f.protocol == "s7comm" && !f.s7_range_unit.empty();
+}
+
+// Same "(none)"-vs-comma-joined shape as ranges_text above, but rendering each sub-range through
+// s7_range_notation (s7comm.hpp) instead of raw numbers -- --symbolic-addresses' own baseline_ranges
+// rendering.
+std::string ranges_text_symbolic(const BaselineFinding& f) {
+    std::ostringstream out;
+    for (size_t i = 0; i < f.baseline_ranges.size(); ++i) {
+        if (i) out << ", ";
+        out << s7_range_notation(f.s7_area_letter, f.s7_db_number, f.s7_range_unit, f.baseline_ranges[i].first,
+                                  f.baseline_ranges[i].second);
+    }
+    if (f.baseline_ranges.empty()) out << "(none)";
+    return out.str();
+}
+
 }  // namespace
 
-void write_baseline_check_report_text(std::ostream& out, const BaselineCheckReport& report) {
+void write_baseline_check_report_text(std::ostream& out, const BaselineCheckReport& report,
+                                       bool symbolic_addresses) {
     out << "ICS communication-baseline check\n";
     out << "  capture: " << report.capture_path << "\n\n";
 
@@ -1353,12 +1428,22 @@ void write_baseline_check_report_text(std::ostream& out, const BaselineCheckRepo
             << "\"  (" << f.packet_count << " packet(s))\n";
         if (f.verdict == BaselineVerdict::NewTargetRange) {
             out << "      observed range: [" << f.observed_start << ", " << f.observed_end << ")\n";
+            if (symbolic_addresses && has_s7_symbolic_notation(f)) {
+                out << "      observed range (symbolic): "
+                    << s7_range_notation(f.s7_area_letter, f.s7_db_number, f.s7_range_unit, f.observed_start,
+                                          f.observed_end)
+                    << "\n";
+            }
             out << "      baseline ranges: " << ranges_text(f.baseline_ranges) << "\n";
+            if (symbolic_addresses && has_s7_symbolic_notation(f)) {
+                out << "      baseline ranges (symbolic): " << ranges_text_symbolic(f) << "\n";
+            }
         }
     }
 }
 
-void write_baseline_check_report_json(std::ostream& out, const BaselineCheckReport& report) {
+void write_baseline_check_report_json(std::ostream& out, const BaselineCheckReport& report,
+                                       bool symbolic_addresses) {
     out << "{\n";
     out << "  \"capture\": \"" << json_escape(report.capture_path) << "\",\n";
     out << "  \"compliant\": " << (report.compliant() ? "true" : "false") << ",\n";
@@ -1378,12 +1463,29 @@ void write_baseline_check_report_json(std::ostream& out, const BaselineCheckRepo
         if (f.verdict == BaselineVerdict::NewTargetRange) {
             out << "      \"observed_start\": " << f.observed_start << ",\n";
             out << "      \"observed_end\": " << f.observed_end << ",\n";
+            if (symbolic_addresses && has_s7_symbolic_notation(f)) {
+                out << "      \"observed_range_symbolic\": \""
+                    << json_escape(s7_range_notation(f.s7_area_letter, f.s7_db_number, f.s7_range_unit,
+                                                       f.observed_start, f.observed_end))
+                    << "\",\n";
+            }
             out << "      \"baseline_ranges\": [";
             for (size_t k = 0; k < f.baseline_ranges.size(); ++k) {
                 if (k) out << ", ";
                 out << "[" << f.baseline_ranges[k].first << ", " << f.baseline_ranges[k].second << "]";
             }
             out << "],\n";
+            if (symbolic_addresses && has_s7_symbolic_notation(f)) {
+                out << "      \"baseline_ranges_symbolic\": [";
+                for (size_t k = 0; k < f.baseline_ranges.size(); ++k) {
+                    if (k) out << ", ";
+                    out << "\""
+                        << json_escape(s7_range_notation(f.s7_area_letter, f.s7_db_number, f.s7_range_unit,
+                                                           f.baseline_ranges[k].first, f.baseline_ranges[k].second))
+                        << "\"";
+                }
+                out << "],\n";
+            }
         }
         out << "      \"packet_count\": " << f.packet_count << "\n";
         out << "    }" << (i + 1 < report.findings.size() ? "," : "") << "\n";
