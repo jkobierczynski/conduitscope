@@ -52,6 +52,54 @@ std::optional<float> read_float32(ByteSpan span, size_t offset) {
 
 bool is_valid_message_type(uint8_t t) { return t == 0 || t == 1 || t == 2 || t == 3 || t == 15; }
 
+// Real, SYSTEMATIC (not coincidental) collision found against a user's own live capture: a TLS/
+// SSL record header's ContentType(1 byte: 0x14 ChangeCipherSpec / 0x15 Alert / 0x16 Handshake /
+// 0x17 ApplicationData / 0x18 Heartbeat, RFC 8446 section 5.1 plus RFC 6520) is followed by a
+// ProtocolVersion field whose major byte is ALWAYS 0x03 for every SSLv3/TLS1.0-1.3 record ever
+// deployed (TLS 1.3 keeps the legacy 0x0303 "record version" for middlebox compatibility even
+// though the real negotiated version lives elsewhere) and whose minor byte is always one of
+// 0x00 (SSLv3), 0x01 (TLS 1.0), 0x02 (TLS 1.1), or 0x03 (TLS 1.2, and TLS 1.3's own legacy
+// record-version byte) -- i.e. essentially every TLS record on the wire has payload[1]==0x03 and
+// payload[2] in {0,1,2,3}. HART-IP's own structural gate below checks payload[1] against
+// is_valid_message_type (which accepts 3) and payload[2] against <=3 -- so EVERY TLS record,
+// including the ordinary encrypted Application Data records that make up the overwhelming bulk
+// of any HTTPS/TLS session (not just the cleartext ClientHello), satisfies HART-IP's gate. Unlike
+// the FINS/MELSEC collisions this codebase already documents (single request-shape overlaps,
+// fixed by dispatch ordering), this one is airtight and dispatch order can't fix it -- there is no
+// HART-IP traffic shape a TLS record header couldn't also produce. Confirmed the hard way: a
+// real capture showed HART-IP's own TCP reassembly buffering indefinitely ("832 of 50656
+// declared byte(s)...") against ordinary HTTPS traffic to two unrelated destinations, both on
+// port 443 -- MsgLength (payload bytes 6-7) landing on ordinary ciphertext bytes produces a
+// plausible-looking-but-wrong declared length essentially every time (only msg_length<8, about
+// 0.01% of byte pairs, is rejected), so the false match was never resolving on its own.
+//
+// Fix: recognize the TLS/SSL record-header shape structurally and refuse the HART-IP gate
+// outright when it's present, the same "a known, systematic collision gets excluded outright,
+// not merely deprioritized" posture hartip_udp_excluded_port already established for the RFC
+// 3948 IKE NAT-T / RFC 7348 VXLAN case on UDP -- except this one is a content check, not a port
+// check, since TLS runs on far more than just port 443 (LDAPS/636, DoH, IMAPS, SMTPS, and any
+// other TLS-wrapped service this codebase or a future one might add). Only the record header
+// itself is checked (ContentType + major version byte); a record whose ContentType byte doesn't
+// match is presumably a genuine HART-IP message (or something else entirely) and is left alone --
+// this check is deliberately narrow rather than a general "looks encrypted" heuristic, to avoid
+// trading a false positive for a false negative on real HART-IP traffic. DTLS (TLS-over-UDP) is
+// NOT covered here -- its version field is encoded as a one's-complement of the DTLS version
+// (0xFEFF/0xFEFD/...), which does not collide with HART-IP's own byte[1] check the way real TLS's
+// 0x03 major version does, so no evidence of the same systematic collision exists on the UDP
+// side; applied here anyway for defense-in-depth and because it costs nothing on genuine HART-IP
+// traffic (whose own Version byte at offset 0, not checked here, is unconstrained but whose
+// MessageType/MessageID bytes would have to coincidentally look like a TLS ContentType+major-
+// version pair, the same order of unlikelihood the pre-fix gate already accepted for everything
+// else).
+bool looks_like_tls_record_header(ByteSpan payload) {
+    if (payload.size() < 3) return false;
+    uint8_t content_type = payload.at(0);
+    bool plausible_content_type =
+        content_type == 0x14 || content_type == 0x15 || content_type == 0x16 ||
+        content_type == 0x17 || content_type == 0x18;
+    return plausible_content_type && payload.at(1) == 0x03;
+}
+
 std::string message_type_name(uint8_t t) {
     switch (t) {
         case 0: return "Request";
@@ -1111,6 +1159,7 @@ std::string frame_summary(const HartIpFrame& frame) {
 
 std::optional<size_t> hartip_declared_length(ByteSpan payload) {
     if (payload.size() < 8) return std::nullopt;
+    if (looks_like_tls_record_header(payload)) return std::nullopt;
     uint8_t message_type = payload.at(1);
     uint8_t message_id = payload.at(2);
     if (!is_valid_message_type(message_type) || message_id > 3) return std::nullopt;
@@ -1120,6 +1169,7 @@ std::optional<size_t> hartip_declared_length(ByteSpan payload) {
 
 std::optional<HartIpFrame> try_parse_hartip(ByteSpan payload) {
     if (payload.size() < 8) return std::nullopt;
+    if (looks_like_tls_record_header(payload)) return std::nullopt;
     try {
         uint8_t message_type = payload.at(1);
         uint8_t message_id = payload.at(2);

@@ -110,21 +110,31 @@ traffic on the same flow all decodes correctly as `hartip`, matching the documen
 limitation exactly -- only Session Initiate's own MessageID=0/Status=0 header produces the
 collision.)
 
-### New finding: the weak declared-length gate also produces a false positive on unrelated traffic (frame #70)
+### FIXED: the weak declared-length gate used to also false-positive on unrelated TLS traffic (frame #70)
 
 One frame of the capture's incidental, unrelated background TCP traffic -- a TLS connection to
-port 443 (frame #70), not involving the HART-IP devices at all -- gets reported as `buffering a
-HART-IP message PDU/frame split across TCP segments`, with an implausibly large declared length
-(54734 bytes) that will never be satisfied. This is the same class of weak-structural-gate false
-positive `hartip.hpp`'s "Structural detection gate" paragraph already characterizes honestly
-(MessageType/MessageID each matching one of a handful of small values, checked before any
-content-specific validation) -- this capture is the first real-world confirmation that the gate is
-loose enough to also produce spurious matches against ordinary, unrelated TCP payloads, not only
-against the one specific Modbus/TCP collision already documented above. This false positive is
-harmless in the sense this decoder still ultimately reports it under `[tcp]` (the buffering state
-simply never resolves, since no more matching bytes arrive), but it is additional, real
-confirmation -- beyond the Modbus collision -- that this decoder's own honest self-assessment of
-its HART-IP detection gate's weakness is not overstated.
+port 443 (frame #70), not involving the HART-IP devices at all -- used to be reported as
+`buffering a HART-IP message PDU/frame split across TCP segments`, with an implausibly large
+declared length (54734 bytes) that would never be satisfied. Unlike the Modbus/TCP collision
+above (an occasional, single-shape overlap resolved by leaving it as a documented, accepted
+limitation), this one turned out to be a **systematic** collision once properly diagnosed: every
+TLS/SSL record's own ProtocolVersion field has a major byte that is ALWAYS `0x03` (a valid HART-IP
+MessageType) and a minor byte that is ALWAYS 0-3 (a valid HART-IP MessageID) for every deployed
+SSLv3-through-TLS-1.3 record -- not a coincidental match, a guaranteed one for the entire TLS
+family. This capture's own frame #70 was this project's first real-world evidence of it; a second,
+independent real capture reported directly by a user later showed the same false positive against
+ordinary HTTPS traffic to two unrelated destinations, both stuck buffering indefinitely (e.g.
+"832 of 50656 declared byte(s)..."), which is what prompted root-causing and fixing it rather than
+continuing to document it as accepted.
+
+Fixed via `hartip.cpp`'s `looks_like_tls_record_header` -- a structural pre-check (TLS
+ContentType byte + the 0x03 major-version byte) that refuses HART-IP's gate outright when present,
+the same "a known, systematic collision is excluded outright, not merely deprioritized" posture
+`hartip_udp_excluded_port` already established for the RFC 3948 IKE NAT-T / RFC 7348 VXLAN case on
+UDP. Frame #70 in this capture now decodes correctly as `[https]` instead. See
+`hartip_tls_record_not_misdetected_as_hartip` (`tools/make_sample_pcap.py`'s
+`sample_hartip.pcap`, packet #68) for the synthetic regression test, and
+`real_hartip_tls_weak_gate_false_positive_fixed` for this real capture's own pinned confirmation.
 
 A second frame of this same background traffic -- an SMB connection to port 445 (frame #115) --
 used to be a second instance of this identical false positive (HART-IP's own weak gate matching it

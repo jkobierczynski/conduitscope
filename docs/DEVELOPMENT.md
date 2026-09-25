@@ -9396,6 +9396,80 @@ deferred future migration.
     grep both before and after this decoder was added), so no
     dispatch-cascade reordering was needed.
 
+55. **Fix: HART-IP's own weak TCP detection gate systematically
+    misclassified ordinary TLS/HTTPS traffic.** **Fixed.** Not a new
+    protocol -- a real, user-reported false positive against a live
+    capture: ordinary HTTPS sessions on port 443 (to two unrelated
+    destinations) were getting claimed by HART-IP's own opportunistic
+    TCP reassembly and left "buffering a HART-IP message PDU/frame split
+    across TCP segments... waiting for more" indefinitely, since a real
+    TLS record's bytes almost never satisfy HART-IP's own MsgLength
+    field as an actual byte count. This codebase already had one real-
+    world confirmation of the SAME false positive, from an earlier real
+    capture (`tests/real_captures/hartip/ATTRIBUTION.md`'s own "weak
+    declared-length gate also produces a false positive on unrelated
+    traffic" finding) -- but it had been left as an accepted, documented
+    limitation, the same posture as the two other known HART-IP
+    collisions (the Session-Initiate-vs-Modbus/TCP collision, and its
+    mirror-image malformed-Modbus-vs-HART-IP collision), both of which
+    are genuinely occasional, single-shape overlaps.
+
+    This one is different, and root-causing it (rather than filing it
+    as a third accepted limitation) was the point of this fix: a TLS/SSL
+    record header's own ProtocolVersion field has a major byte that is
+    ALWAYS `0x03` and a minor byte that is ALWAYS one of `0x00`-`0x03`,
+    for every SSLv3-through-TLS-1.3 record ever deployed on the wire
+    (TLS 1.3 keeps the legacy `0x0303` record-version value for
+    middlebox compatibility even though the real negotiated version
+    lives elsewhere) -- and HART-IP's own gate happens to accept exactly
+    that same byte range for its MessageType (offset 1) and MessageID
+    (offset 2) fields. This is a SYSTEMATIC collision, not a coincidental
+    one: every TLS record, including the ordinary encrypted Application
+    Data records that make up the overwhelming bulk of any HTTPS
+    session (not just a cleartext ClientHello), satisfies it. Dispatch-
+    ordering -- the fix already used for the FINS/MELSEC collisions
+    elsewhere in this codebase -- can't help here, since there's no
+    HART-IP wire shape a TLS record header couldn't equally well
+    produce.
+
+    Fixed with a structural content check instead: `hartip.cpp`'s new
+    `looks_like_tls_record_header` recognizes the TLS/SSL record-header
+    shape (a ContentType byte in `{0x14..0x18}` followed by the `0x03`
+    major-version byte) and refuses HART-IP's gate outright when
+    present -- both for TCP reassembly (`hartip_declared_length`) and
+    the direct per-datagram parse (`try_parse_hartip`, also reached
+    opportunistically on UDP, for defense-in-depth even though the
+    specific reported bug was TCP-only) -- mirroring the "exclude a
+    known, systematic collision outright rather than merely
+    deprioritize it" posture `hartip_udp_excluded_port` already
+    established for the RFC 3948 IKE NAT-Traversal / RFC 7348 VXLAN
+    case on UDP. This is a content check, not a port-number carve-out,
+    since TLS runs on far more than just 443 (LDAPS, DoH, IMAPS, SMTPS,
+    and any future TLS-wrapped protocol this codebase adds).
+
+    Verification: `tests/real_captures/hartip/hart_ip.pcapng`'s own
+    frame #70 (the original real-world confirmation) now correctly
+    decodes as `[https]` instead of buffering forever --
+    `real_hartip_tls_weak_gate_false_positive_fixed` pins this, and
+    `real_hartip_stats_summary`/`inventory_hartip_recognized_tcp_only_
+    udp_skipped` were updated for the resulting count shifts (`tcp`
+    61 not 62, a new `https` +1 line; `65` skipped not `64`). A new
+    synthetic regression packet (`tools/make_sample_pcap.py`'s
+    `sample_hartip.pcap`, packet #68, deliberately on a non-443 port
+    pair to prove the exclusion is content-based, not port-based) is
+    pinned by `hartip_tls_record_not_misdetected_as_hartip`; existing
+    packet-count-dependent tests (`hartip_stats_counted`) were updated
+    for the one new packet. Full suite: 1953/1953 (default) and
+    1941/1941 (`-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF`) before this
+    fix -- 1968/1968 and 1956/1956 after (three new tests plus the one
+    repurposed pinning test), zero regressions, zero-warning clean
+    rebuilds in both configs, confirmed via a fresh clean-room rebuild
+    of the final delivered zip. The two other known HART-IP collisions
+    (Modbus/TCP Session-Initiate, and its malformed-Modbus mirror) are
+    unaffected by this fix and remain accepted, documented limitations
+    -- see `hartip.hpp`'s own updated "Structural detection gate"
+    section for the full, current picture of all three.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

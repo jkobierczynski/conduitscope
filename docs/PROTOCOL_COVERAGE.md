@@ -2751,10 +2751,12 @@ decodes (two genuine IEEE-754 NaN PV Loop Current values, a packed-ASCII
 message field that decodes to literal ASCII-table-order text). It also
 independently reproduces, on real field traffic, the TCP Session-Initiate-
 vs-Modbus/TCP collision docs/DEVELOPMENT.md's PROTOCOL DETECTION above documents as an accepted
-limitation, plus a second, previously-undocumented false-positive pattern
-where the same weak declared-length gate also matches unrelated background
-TCP traffic -- see that ATTRIBUTION.md's own two dedicated sections for
-both. It is narrow, though: only 9 of the ~20 value-decoded commands appear
+limitation, plus a second false-positive pattern this capture first surfaced -- the same weak
+declared-length gate also matching unrelated background TLS traffic on port 443 -- which, unlike
+the Modbus collision, was root-caused and FIXED (docs/DEVELOPMENT.md item 55): every TLS/SSL
+record's own ProtocolVersion field systematically, not coincidentally, satisfies HART-IP's gate,
+so `hartip.cpp`'s `looks_like_tls_record_header` now excludes it outright; see that ATTRIBUTION.md's
+own two dedicated sections for both. It is narrow, though: only 9 of the ~20 value-decoded commands appear
 (0, 1, 2, 3, 9, 12, 13, 20, 48), every response is Success with no
 comm-error or non-zero command-specific code, Error/NAK and the BACK frame
 type never appear, and no malformed/truncated/wrong-length input appears

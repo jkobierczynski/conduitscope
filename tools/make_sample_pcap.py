@@ -7096,6 +7096,25 @@ def build_hartip_sample():
     add_tcp(True, hartip_message(0, 2, b"", txn=200) + hartip_message(0, 2, b"", txn=201),
             sport=52150, dport=HARTIP_PORT)
 
+    # 68) FIXED COLLISION, regression-pinned -- a TLS/SSL record header (ContentType=0x17
+    #     Application Data, ProtocolVersion=0x0303 "TLS 1.2/legacy") systematically satisfies
+    #     HART-IP's own weak declared-length gate: EVERY real TLS record's ProtocolVersion major
+    #     byte is 0x03 (a valid HART-IP MessageType) and minor byte is 0-3 (a valid HART-IP
+    #     MessageID) -- not an occasional coincidence like the Modbus collision above, but a
+    #     guaranteed one for the entire TLS/SSL family (SSLv3 through TLS 1.3's own legacy record-
+    #     version field). Found against a real user capture, where ordinary HTTPS/TLS sessions on
+    #     port 443 got stuck in HART-IP's own TCP reassembly "buffering, waiting for more" loop
+    #     forever, never resolving (see hartip.cpp's own looks_like_tls_record_header and
+    #     hartip.hpp's updated header comment). Deliberately placed on a non-443, non-HART-IP port
+    #     (55055) to prove this exclusion is content-based, not a port-number carve-out -- TLS runs
+    #     on far more than just 443. `hartip_declared_length`/`try_parse_hartip` must both refuse
+    #     this outright; some other, generic fallback (plain "tcp", or a future protocol-specific
+    #     recognizer keyed to this port) is fine, "buffering a HART-IP message" is not.
+    fake_tls_application_data_record = (
+        bytes([0x17, 0x03, 0x03]) + struct.pack("!H", 256) + bytes(range(256))
+    )
+    add_tcp(True, fake_tls_application_data_record, sport=55055, dport=55056)
+
     data = pcap_global_header()
     for i, pkt in enumerate(packets):
         data += pcap_record(pkt, 1_700_006_000 + i, i * 1000)

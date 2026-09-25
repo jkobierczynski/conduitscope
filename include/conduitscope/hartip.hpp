@@ -114,6 +114,31 @@
 // and deliberately not attempted here given this project's own history (immediately above) of a
 // similar quick fix in this same collision family measurably regressing its own test corpus.
 //
+// FIXED (was a third KNOWN, ACCEPTED, DOCUMENTED LIMITATION) -- unlike the two collisions above,
+// this one was NOT left as accepted: a TLS/SSL record header's own ProtocolVersion field has a
+// major byte that is ALWAYS 0x03 (a valid HART-IP MessageType) and a minor byte that is ALWAYS
+// 0-3 (a valid HART-IP MessageID) for every deployed SSLv3-through-TLS-1.3 record -- not an
+// occasional coincidence the way the two collisions above are, but a SYSTEMATIC one covering the
+// entire TLS family, including the ordinary encrypted Application Data records that make up the
+// overwhelming bulk of any HTTPS session, not just a cleartext ClientHello. First seen against a
+// real capture (tests/real_captures/hartip/ATTRIBUTION.md) as a single incidental background TLS
+// connection; a user later reported it directly against a live capture of their own, where
+// ordinary HTTPS traffic on port 443 to two unrelated destinations both got stuck in HART-IP's own
+// TCP reassembly "buffering, waiting for more" loop indefinitely -- which is what prompted actually
+// fixing it rather than continuing to document it as accepted. Dispatch-ordering (the fix for the
+// FINS/MELSEC collisions elsewhere in this codebase) can't help here -- there is no HART-IP shape a
+// TLS record header couldn't also produce -- so the fix is a structural content check instead:
+// hartip.cpp's looks_like_tls_record_header recognizes the TLS/SSL record-header shape (a
+// ContentType byte in {0x14..0x18} followed by the 0x03 major-version byte) and refuses HART-IP's
+// gate outright when present, both for TCP reassembly (hartip_declared_length) and for the direct
+// per-datagram parse (try_parse_hartip, also reached opportunistically on UDP) -- the same "a
+// known, systematic collision is excluded outright, not merely deprioritized" posture
+// hartip_udp_excluded_port already established for the RFC 3948 IKE NAT-T / RFC 7348 VXLAN case.
+// This is a content check, not a port check, since TLS runs on far more than just 443 (LDAPS,
+// DoH, IMAPS, SMTPS, ...). See tools/make_sample_pcap.py's sample_hartip.pcap packet #68
+// (hartip_tls_record_not_misdetected_as_hartip in CMakeLists.txt) for the synthetic regression
+// test, deliberately placed on a non-443 port pair to prove the exclusion isn't port-based.
+//
 // ---------------------------------------------------------------------------------------------
 // Session Initiate (MessageID 0) body -- ASHRAE... no, FieldComm Group's own HART-IP spec, cross-
 // checked against packet-hartip.c's dissect_session_init -- exactly 5 bytes, ONE shape used for
@@ -461,14 +486,21 @@ struct HartIpFrame {
 // Returns this message's own declared total length (MsgLength, offset 6-7, big-endian) when the
 // first 8 bytes structurally look like a HART-IP header (see try_parse_hartip's "structural
 // detection gate"), for TCP stream reassembly purposes -- mirrors enip_declared_length. Returns
-// std::nullopt when there aren't even 8 bytes, or the two-byte MessageType/MessageID check fails.
+// std::nullopt when there aren't even 8 bytes, when the payload's first bytes structurally look
+// like a TLS/SSL record header (see hartip.cpp's looks_like_tls_record_header, a real collision
+// found against a user's own live capture -- every TLS record's ProtocolVersion field
+// systematically satisfies HART-IP's own MessageType/MessageID gate, not a rare coincidence, so
+// it's excluded outright rather than merely deprioritized), or the two-byte MessageType/MessageID
+// check fails.
 std::optional<size_t> hartip_declared_length(ByteSpan payload);
 
 // Attempts to interpret `payload` (TCP or UDP application-layer bytes) as one HART-IP message.
-// Returns std::nullopt (never throws) when there aren't even 8 bytes for the header, when
-// MessageType isn't one of the 5 values {0,1,2,3,15}, when MessageID isn't one of the 4 values
-// {0,1,2,3}, or when MsgLength is implausibly small (< 8) -- see this file's header comment's
-// "structural detection gate" paragraph.
+// Returns std::nullopt (never throws) when there aren't even 8 bytes for the header, when the
+// payload structurally looks like a TLS/SSL record header (see hartip_declared_length's own
+// comment and hartip.cpp's looks_like_tls_record_header), when MessageType isn't one of the 5
+// values {0,1,2,3,15}, when MessageID isn't one of the 4 values {0,1,2,3}, or when MsgLength is
+// implausibly small (< 8) -- see this file's header comment's "structural detection gate"
+// paragraph.
 std::optional<HartIpFrame> try_parse_hartip(ByteSpan payload);
 
 // Migration batch 2 (HART-IP, Stage 9): true when `port` is one of the two UDP ports whose own

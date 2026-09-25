@@ -3527,7 +3527,25 @@ set_tests_properties(hartip_tcp_coalesced_keep_alive_decoded PROPERTIES
 add_test(NAME hartip_stats_counted
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap" --stats)
 set_tests_properties(hartip_stats_counted PROPERTIES
-  PASS_REGULAR_EXPRESSION "packets: +67[^\n]*\n[^\n]*\nprotocols:\n *hartip +62\n *tcp +3\n *udp +2.*\nhartip message types:\n *Error +3\n *NAK +1\n *Request +17\n *Response +41\nhartip pass-through commands:\n")
+  # tcp is 4, not 3: packet #68's own fabricated TLS Application Data record (see
+  # hartip_tls_record_not_misdetected_as_hartip below) correctly falls through to the generic
+  # "tcp" fallback instead of being claimed by HART-IP's own weak declared-length gate.
+  PASS_REGULAR_EXPRESSION "packets: +68[^\n]*\n[^\n]*\nprotocols:\n *hartip +62\n *tcp +4\n *udp +2.*\nhartip message types:\n *Error +3\n *NAK +1\n *Request +17\n *Response +41\nhartip pass-through commands:\n")
+
+# Regression test for a real, systematic (not occasional) collision found against a user's own
+# live capture -- see hartip.cpp's own looks_like_tls_record_header and hartip.hpp's updated
+# header comment. Every TLS/SSL record's own ProtocolVersion field (major byte always 0x03, minor
+# byte always 0-3) satisfies HART-IP's weak MessageType/MessageID gate, so EVERY TLS record --
+# not just an occasional coincidental one, unlike the Modbus/TCP collision below -- used to get
+# claimed by HART-IP's own TCP reassembly and left "buffering, waiting for more" forever, since a
+# real TLS record's own Length field almost never matches what HART-IP interprets as its
+# MsgLength. Packet #68 is deliberately on a non-443, non-HART-IP port pair (55055/55056) to prove
+# this is a content-based exclusion, not a port carve-out.
+add_test(NAME hartip_tls_record_not_misdetected_as_hartip
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap" --format text)
+set_tests_properties(hartip_tls_record_not_misdetected_as_hartip PROPERTIES
+  PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.50:55055 -> 192\\.168\\.1\\.10:55056  \\[tcp\\]  TCP payload of 261 byte\\(s\\) on port 55055->55056"
+  FAIL_REGULAR_EXPRESSION "\\[hartip\\][^\n]*\n *note: [^\n]*55055|buffering a HART-IP message PDU/frame split across TCP segments 55055->55056")
 
 # --------------------------------------------------------------------------
 # Real-world HART-IP capture -- see tests/real_captures/hartip/ATTRIBUTION.md for provenance: a
@@ -3549,15 +3567,21 @@ set_tests_properties(real_hartip_stats_summary PROPERTIES
   # Unreachable -- previously shown only as an opaque "non-tcp" count before try_parse_icmp
   # existed (see icmp.hpp/icmp.cpp); now decoded and broken out as its own "icmp" protocol line
   # plus an "icmp types:" breakdown, confirmed against this real capture.
-  # tcp is 62, not 63: one of this capture's background TCP connections (port 445) is genuine SMB1
+  # tcp is 61, not 63: one of this capture's background TCP connections (port 445) is genuine SMB1
   # traffic, now correctly recognized and decoded as "smb" by smb.hpp -- see
-  # real_hartip_smb_traffic_now_correctly_decoded below and ATTRIBUTION.md's own updated note.
+  # real_hartip_smb_traffic_now_correctly_decoded below and ATTRIBUTION.md's own updated note; a
+  # second background connection (port 443) is genuine HTTPS/TLS, now correctly recognized and
+  # decoded as "https" instead of getting stuck in HART-IP's own weak-gate false-positive
+  # reassembly loop forever -- see real_hartip_tls_weak_gate_false_positive_fixed below (the TLS
+  # record header's own ProtocolVersion field systematically, not coincidentally, satisfies HART-
+  # IP's declared-length gate, since every TLS record's major version byte is 0x03 and minor byte
+  # is 0-3 -- hartip.cpp's own looks_like_tls_record_header now excludes it outright).
   # arp is 4, not "non-ip" 4: this capture's four non-IPv4 Ethernet frames are genuine ARP traffic
   # (OPER a recognized opcode) -- previously shown only as an opaque "non-ip" count before
   # try_parse_arp existed (see arp.hpp/arp.cpp), now decoded and broken out as its own "arp"
   # protocol line, the same "real feature, real capture, count moves from the generic fallback to
   # the new specific protocol" pattern the icmp/smb notes above already document.
-  PASS_REGULAR_EXPRESSION "packets: +116[^\n]*\n[^\n]*\nprotocols:\n *arp +4\n *hartip +46\n *icmp +1\n *modbus +2\n *smb +1\n *tcp +62\n.*hartip message types:\n *Request +23\n *Response +23\nhartip pass-through commands:\n.*icmp types:\n *Destination Unreachable +1")
+  PASS_REGULAR_EXPRESSION "packets: +116[^\n]*\n[^\n]*\nprotocols:\n *arp +4\n *hartip +46\n *https +1\n *icmp +1\n *modbus +2\n *smb +1\n *tcp +61\n.*hartip message types:\n *Request +23\n *Response +23\nhartip pass-through commands:\n.*icmp types:\n *Destination Unreachable +1")
 
 add_test(NAME real_hartip_command_coverage_json
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/hartip/hart_ip.pcapng" --stats)
@@ -3606,17 +3630,30 @@ add_test(NAME real_hartip_modbus_collision_confirmed_on_real_traffic
 set_tests_properties(real_hartip_modbus_collision_confirmed_on_real_traffic PROPERTIES
   PASS_REGULAR_EXPRESSION "192.168.0.101:49559 -> 192.168.0.10:5094 \\(hart-ip\\)  \\[modbus\\]  Unknown \\(0xd\\): Unknown \\(0xd\\)[^\n]*\n.*192.168.0.10:5094 \\(hart-ip\\) -> 192.168.0.101:49559  \\[modbus\\]  Unknown \\(0xd\\): Unknown \\(0xd\\)")
 
-# New (see ATTRIBUTION.md): the weak declared-length gate also false-positives against unrelated
-# background TCP traffic having nothing to do with HART-IP (a TLS connection elsewhere in this same
-# capture) -- real-world confirmation, beyond the Modbus collision above, that hartip.hpp's own
-# "structural detection gate is genuinely weak" paragraph is not overstated. This capture's OTHER
-# background connection (port 445) used to be a second instance of this same false positive too --
-# see real_hartip_smb_traffic_now_correctly_decoded below for why that one is now resolved instead
-# (smb.hpp's own decoder is tried earlier in decoder.cpp's cascade and correctly claims it).
-add_test(NAME real_hartip_weak_gate_false_positive_on_unrelated_tcp_traffic
+# FIXED (see ATTRIBUTION.md, and hartip.cpp's own looks_like_tls_record_header): the weak
+# declared-length gate used to false-positive against unrelated background TCP traffic having
+# nothing to do with HART-IP (a TLS connection elsewhere in this same real capture, port 443) --
+# real-world confirmation, beyond the Modbus collision above, that hartip.hpp's own "structural
+# detection gate is genuinely weak" paragraph was not overstated. This one, unlike the Modbus
+# collision above (a real but occasional single-shape overlap, still accepted as a known
+# limitation), turned out to be a SYSTEMATIC collision -- every TLS record's own ProtocolVersion
+# field (major byte always 0x03, minor byte always 0-3 for every deployed SSLv3/TLS1.0-1.3
+# record) satisfies HART-IP's own MessageType/MessageID gate essentially every time, not
+# occasionally -- confirmed independently against a second real capture reported directly by a
+# user (ordinary HTTPS traffic to two unrelated destinations both buffering indefinitely,
+# "832 of 50656 declared byte(s)..."), which is what prompted the fix. Reported this capture's own
+# port-443 connection used to get stuck in HART-IP's reassembly loop the exact same way; now
+# correctly recognized and decoded as "https" instead (a genuinely reachable steady state, not
+# just "buffering, waiting for more" forever). This capture's OTHER background connection (port
+# 445) used to be a second instance of this same false positive too -- see
+# real_hartip_smb_traffic_now_correctly_decoded below for why that one was already resolved a
+# different way (smb.hpp's own decoder is tried earlier in decoder.cpp's cascade and correctly
+# claims it, dispatch-ordering rather than a structural exclusion).
+add_test(NAME real_hartip_tls_weak_gate_false_positive_fixed
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/hartip/hart_ip.pcapng" --format text)
-set_tests_properties(real_hartip_weak_gate_false_positive_on_unrelated_tcp_traffic PROPERTIES
-  PASS_REGULAR_EXPRESSION "50322->443: 27 of 54734 declared byte\\(s\\) seen so far")
+set_tests_properties(real_hartip_tls_weak_gate_false_positive_fixed PROPERTIES
+  PASS_REGULAR_EXPRESSION "192\\.168\\.0\\.100:50322 -> 74\\.125\\.159\\.99:443 \\(https\\)  \\[https\\]  HTTPS/TLS"
+  FAIL_REGULAR_EXPRESSION "50322->443: [0-9]+ of [0-9]+ declared byte\\(s\\) seen so far")
 
 # AD suite phase 3 (smb.hpp): this same capture's port-445 background connection -- previously ALSO
 # a HART-IP weak-gate false positive (see above) -- is genuine SMB1 (CIFS) traffic, and is now
@@ -9108,7 +9145,10 @@ set_tests_properties(inventory_iec104_policy_out_round_trips_compliant PROPERTIE
 add_test(NAME inventory_hartip_recognized_tcp_only_udp_skipped
   COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap")
 set_tests_properties(inventory_hartip_recognized_tcp_only_udp_skipped PROPERTIES
-  PASS_REGULAR_EXPRESSION "2 asset\\(s\\) observed, 67 total packet\\(s\\) in capture, 64 skipped.*192\\.168\\.1\\.10 .*\\[server\\]  hartip  \\(3 packet\\(s\\)\\)")
+  # 68 total / 65 skipped, not 67/64: packet #68's own fabricated TLS Application Data record (see
+  # hartip_tls_record_not_misdetected_as_hartip) is correctly skipped as "not one of the ten
+  # recognized protocols" now that it's no longer misclassified as hartip.
+  PASS_REGULAR_EXPRESSION "2 asset\\(s\\) observed, 68 total packet\\(s\\) in capture, 65 skipped.*192\\.168\\.1\\.10 .*\\[server\\]  hartip  \\(3 packet\\(s\\)\\)")
 
 add_test(NAME inventory_opcua_recognized
   COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_opcua.pcap")
