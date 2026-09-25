@@ -1,0 +1,18 @@
+fox r 100 1 fox hello
+{
+fox.version=s:1.0
+id=s:1
+hostName=s:NIAGARA-STATION-A
+hostAddress=s:192.168.1.10
+app.name=s:Station
+app.version=s:4.10.0.16
+vm.name=s:Java HotSpot(TM) Embedded Client VM
+vm.version=s:1.8.0_202
+os.name=s:QNX
+os.version=s:6.5.0
+lang=s:en
+timeZone=s:America/New_York
+hostId=s:Niagara-JACE8000-0042
+vmUuid=s:b2c3d4e5-1111-2222-3333-445566778899
+brandId=s:tridium
+};;

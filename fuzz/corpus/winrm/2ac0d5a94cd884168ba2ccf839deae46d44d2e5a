@@ -1,0 +1,5 @@
+POST /wsman HTTP/1.1
+Content-Type: application/soap+xml;charset=UTF-7
+User-Agent: ——————————————-Length:/wmi/ 1060
+
+<s:Envelope xmlns:s="http://www.w3.on="http://schemas.xmlsoap.org/2w0/s04/09/enumeration"><w:Filter Dialect="http://scHemas.microsoft.com/wbem/wsman/1/WQL">select * from Win32_Process wh</n:Enumerate></s:Body></s:Envelope>

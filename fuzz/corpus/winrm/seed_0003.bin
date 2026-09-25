@@ -1,0 +1,9 @@
+POST /wsman HTTP/1.1
+Content-Type: application/soap+xml;charset=UTF-8
+User-Agent: Microsoft WinRM Client
+Host: 192.168.1.10:5985
+Connection: Keep-Alive
+Authorization: Negotiate TkVHT1RJQVRFLVNQTkVHTy1UT0tFTi1QTEFDRUhPTERFUi0AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+Content-Length: 1099
+
+<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:a="http://schemas.xmlsoap.org/ws/2004/08/addressing" xmlns:w="http://schemas.dmtf.org/wbem/wsman/1/wsman.xsd" xmlns:rsp="http://schemas.microsoft.com/wbem/wsman/1/windows/shell"><s:Header><a:To>http://192.168.1.10:5985/wsman</a:To><a:ReplyTo><a:Address mustUnderstand="true">http://schemas.xmlsoap.org/ws/2004/08/addressing/role/anonymous</a:Address></a:ReplyTo><a:Action mustUnderstand="true">http://schemas.microsoft.com/wbem/wsman/1/windows/shell/Command</a:Action><w:MaxEnvelopeSize mustUnderstand="true">512000</w:MaxEnvelopeSize><a:MessageID>uuid:11111111-2222-3333-4444-555555555555</a:MessageID><w:OperationTimeout>PT60S</w:OperationTimeout><w:ResourceURI>http://schemas.microsoft.com/wbem/wsman/1/windows/shell/cmd</w:ResourceURI><w:SelectorSet><w:Selector Name="ShellId">AAAAAAAA-1111-2222-3333-444444444444</w:Selector></w:SelectorSet></s:Header><s:Body><rsp:CommandLine><rsp:Command>cmd.exe</rsp:Command><rsp:Arguments>/c</rsp:Arguments><rsp:Arguments>whoami /all</rsp:Arguments></rsp:CommandLine></s:Body></s:Envelope>

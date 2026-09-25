@@ -1,0 +1,6 @@
+HTTP/1.1 200 OK
+Server: Microsoft-HTTPAPI/2.0
+Content-Type: application/soap+xml;charset=UTF-8
+Content-Length: 846
+
+<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:a="http://schemas.xmlsoap.org/ws/2004/08/addressing" xmlns:w="http://schemas.dmtf.org/wbem/wsman/1/wsman.xsd" xmlns:rsp="http://schemas.microsoft.com/wbem/wsman/1/windows/shell"><s:Header><a:To>http://192.168.1.10:5985/wsman</a:To><a:ReplyTo><a:Address mustUnderstand="true">http://schemas.xmlsoap.org/ws/2004/08/addressing/role/anonymous</a:Address></a:ReplyTo><a:Action mustUnderstand="true">http://schemas.xmlsoap.org/ws/2004/09/transfer/DeleteResponse</a:Action><w:MaxEnvelopeSize mustUnderstand="true">512000</w:MaxEnvelopeSize><a:MessageID>uuid:11111111-2222-3333-4444-555555555555</a:MessageID><w:OperationTimeout>PT60S</w:OperationTimeout><w:ResourceURI>http://schemas.microsoft.com/wbem/wsman/1/windows/shell/cmd</w:ResourceURI></s:Header><s:Body></s:Body></s:Envelope>

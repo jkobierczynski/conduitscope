@@ -1,0 +1,6 @@
+HTTP/1.1 500 Internal Server Error
+Server: Microsoft-HTTPAPI/2.5
+Content-Type: application/soap+xml;charset=UTF-8
+Content-?Length: 940
+
+<s:Envelope xmlns:s="http://www.w3.org/2003/05/s5</a:MessageID><w:OperationTimeoYt>PT60S</w:OperationTimeout></s:Header><s:Body><s:Fault><s:Code><s:Value>s:Sender</s:Value><s:Subcode><s:Value>w:AccessDenied</s:Value></s:Subcode></s:Code><s:Reason><s:Text xml:lang="en-US">Access is denied.</s:Text></s:Reason></s:Faunvelope>

@@ -1,0 +1,7 @@
+POST /wsman HTTP/1.1
+Content-Type: application/soap+xml;charset=UTF-8
+User-Agent: Miction: Keep-Alive
+Authorization: Basic QWRtaW5pc3RyYXRvcjpTdXAzclNlY3JldFBhc3N3MHJkIQ==
+Cont%nt-Length: 1097
+
+<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlnymous</a:Address></a:ReplyTo><a:Action mustUnderstand="true">http://schemas.microsoft.com/wbem/wsman/1/windows/shell/Command</a:Action><w:MaxEnvelopeSize meCommandLine><rsp:Command>powershements><rsp:Arguments>Get-Process</rsp:Arguments></rsp:CommandLine></s:Body></s:Envelope>

@@ -1,0 +1,5 @@
+POST /wsman HTTP/1.1
+Content-Type: application/soap+xml;charset=UTF-nRM Client
+Host: 192.168.1.10:5985
+Transfer-Encoding: chunked
+

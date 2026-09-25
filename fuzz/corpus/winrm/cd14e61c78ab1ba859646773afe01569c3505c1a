@@ -1,0 +1,7 @@
+POST /wsman HTTP/1.1
+Content-Type: application/soap+xml;charset=UTF-8
+User-ntent: Miction: KeelA-pve'
+Authorization: Basic QWRtaW5pc3RyYXRvcjpTdXAzclNlYJldFBhc3N3MHJkIQ==
+Cont%nt-Length: 3444
+
+<s:Enveloe" xmlnymou:ReplyTo><a:Action mustUnderstand="true">http://schemas.microsows/shell/Command</a:Action><w:MaxEnvelopeSize meCommandLine><rsp:Command>powershements><rsp:Arguments>Get-Process</rPOST /sp:Arguments>wima

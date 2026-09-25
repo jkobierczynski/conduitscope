@@ -1,0 +1,6 @@
+POST /wsman HTTP/1.1
+Content-Type: application/soap+xml;char
+User-ntent: Miction: vpA-e'
+Authorization: Basic QWRl-L 3444
+
+<s:Eu:RTo><a:Action mustUnderstand="true">h!tsows/shell/Command</a:Ac>tnoi<÷:Msp:Command>powersh>Get-:Arguments>wima

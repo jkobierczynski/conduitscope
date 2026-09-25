@@ -1,0 +1,6 @@
+HTTP/1.1 200 OK
+Server: Microsoft-HTTPAPI/2.0
+Content-Type: application/soap+xml;charset=UTF-8
+Content-Length: 966
+
+<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:a="http://schemas.xmlsoap.org/ws/2004/08/addressing" xmlns:w="http://schemas.dmtf.org/wbem/wsman:11111111-2222-3333-4444-555555555555</a:ymous</a:Address></a:ReplyTo><a:Action mustUnderstand="true">http://schemas.microsoft.com/wbem/wsman/1/w/wsman/1/windows/shell/cmd</w:ResourceURI></s:Header><s:Body><rsp:CommandResponse><rsp:CommandId>7777AAAA-BBBB-CCCC-DDDD-888888888888</rsp:CommandId></rsp:CommandResponse></s:Body></s:Envelope>

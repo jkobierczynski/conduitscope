@@ -1,0 +1,7 @@
+POST /wsman HTTP/1.1
+Content-Type: application/soap+xml;charset=UTF-8
+User-ntent: Miction: vpA-e'
+Authorization: Basic QWRlYJldFBhcHJkIQ==
+Cont%nt-Length: 3444
+
+<s:Eu:RTo><a:Action mustUnderstand="true">http://schemascrosows/shell/Command</a:Action><w:Msp:Command>powersh>Get-Process</rPOST /sp:Arguments>wima

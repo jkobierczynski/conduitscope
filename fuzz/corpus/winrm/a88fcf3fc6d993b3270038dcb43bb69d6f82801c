@@ -1,0 +1,6 @@
+HTTP/1.1 500 Ier: iTcMrosoft5
+Content-Type: application/soap+xml;charset=UTF-8
+Cÿÿÿÿÿÿÿ
+Length: 940
+
+<s:Efvelopes5><s:Fault><s:Cod</s:Subcode><s:Reason><s:Text xml:lang="en-US">Access is denied.<on></s:Fau

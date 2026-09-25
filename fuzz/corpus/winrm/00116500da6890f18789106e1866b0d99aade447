@@ -1,0 +1,5 @@
+POST /wsman HTTP/1.1
+Content-Type: application/soap+xml;charent: Miction: vpA-e'
+Authorization: Basic Q4
+
+<s:Eu:RTo><a:Action mrsan>h!tsll/Command</a:Ac>tnoi<÷:Msp:Command>powershments>wima

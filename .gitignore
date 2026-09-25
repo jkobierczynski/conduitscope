@@ -22,9 +22,6 @@ __pycache__/
 # tracked project content; everything below is disposable output from
 # actually running them and doesn't belong in source control or in a
 # delivered copy of the tool -- see docs/DEVELOPMENT.md ROADMAP item 2.
-fuzz-*.log
-fuzz/corpus/
-fuzz/artifacts/
 crash-*
 leak-*
 timeout-*

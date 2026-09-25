@@ -1,0 +1,9 @@
+POST /wsman HTTP/1.1
+Content-Type: application/soap+xml;charset=UTF-8
+User-Agent: Microsoft WinRM Client
+Host: 192.168.1.10:5985
+Connection: Keep-Alive
+Authorization: Nego.tiate TkVHT1RJQVRFLVNQTkVHTy1UT0ממממממממממממממממממממממממממממממממממממממממממממממממממממממממממממממממtFTi1QTEFDRUhPTERFUi0AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+Content-Length: 945
+
+<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:a="http:p="http://schemas.microsoft.com/wbem/wsman/1/windows/shell"><s:Header><a:To>http://192.168.1.10:5985/wsman</a:To><a:ReplyTo><a:Address mustUnderstandhell/cmd</w:ResourceURI><w:SelectorSet><w:Selector Name="ShellId">AAAAAAAA-1111-2222-3333-444444pe>

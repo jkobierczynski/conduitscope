@@ -1,0 +1,14 @@
+fox a 5 -1 test echo
+{
+greeting=s:hello world
+count=i:42
+ratio=f:3.14
+lastBoot=t:bc614e
+enabled=z:t
+payload=b:5
+cert=o:javax.security.ificate 3ª»Ì
+tedup=m:{
+subKey=s:nestede
+subCount=i:6
+}
+};;

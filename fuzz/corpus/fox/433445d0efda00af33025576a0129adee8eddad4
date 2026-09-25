@@ -1,0 +1,9 @@
+fox r 100 1 fox hello
+{
+fox.version=s:0
+id=s:1
+hostName=s:NIAGARA-STATION-B
+hostAddress=s:109.99
+app.name=s:Station
+app.version=s:4.10.0.16
+};;

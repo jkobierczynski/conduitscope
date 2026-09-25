@@ -1,0 +1,5 @@
+GET mn HTTP/1.1
+Content-Type: application/soap+xmlive
+Authorization: Basic 
+
+0<Action>s/sl/Command<:Command>py><s:Fault>l

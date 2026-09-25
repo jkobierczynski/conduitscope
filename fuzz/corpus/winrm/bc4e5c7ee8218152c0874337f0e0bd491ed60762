@@ -1,0 +1,5 @@
+POST /wsman HTTP/1.1
+Content-Type: application/soap+xmle'
+Authorization: Basic 4
+
+<s:Eu:Action mran>h!t/Command</aAcnoi<÷:Msp:Command>powershents>wima

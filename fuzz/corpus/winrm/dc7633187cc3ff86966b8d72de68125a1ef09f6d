@@ -1,0 +1,7 @@
+POST /wsman HTTP/1.1
+Content-Type: application/soap+xml;charset=UTF-8
+User-Agent: Miction: KeelA-pvei
+Authorization: Basic QWRtaW5pc3RyYXRvcjpTdXAzclNlYJldFBhc3N3MHJkIQ==
+Cont%nt-Length: 3444
+
+<s:Enveloe" xmlnymou:ReplyTo><a:Action mustUnderstand="true">http://schemas.microsofom/wbem/wsman/1/windows/shell/Command</a:Action><w:MaxEnvelopeSize meCommandLine><rsp:Command>powershements><rsp:Arguments>Get-Process</rsp:Arguments></zspCm:moandLine></s:Body></s:Envelope>

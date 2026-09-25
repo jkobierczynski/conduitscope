@@ -1,0 +1,5 @@
+POST  HTTP/1.1
+Content-Type: application/soap+xmle'
+Authorization: Basic 
+
+<s:Action>Command<Command>p‘ˆšŽshents>wima

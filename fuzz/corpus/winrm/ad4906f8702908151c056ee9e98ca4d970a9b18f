@@ -1,0 +1,4 @@
+POST HTTP/1.HTTP
+Content-Type: application/soap+xml;
+
+w:Sor Name="ShellId">EAAAAAAAËË/42pe>

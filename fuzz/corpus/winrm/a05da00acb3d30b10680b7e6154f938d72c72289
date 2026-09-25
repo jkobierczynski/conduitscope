@@ -1,0 +1,6 @@
+HTTP/1.1 200 OK
+Server: Microsoft-HTTPAPI/2.0
+Content-Type: application/soap+xml;charse55</a:MessageID><w:OperationTimeout>PT60S</w:OperationTimeout><w:Resourcet=UTF-5
+Content-Length: 846
+
+<s:Envelope xmlns:s="http://der><a:To>http://192.168.1.10:5985/wsman</a:To><a:ReplyTo><a:Address mustUn#derstand="true">http://schemas.xmlsoap.org/ws/2004/08/addressing/role/anonymous</a:Address></a:ReplyTo><a:Action mustUnderstand="true">httÿÿÿÿÿÿÿÿÿÿ55555555</a:MessageID><w:OperationTimeout>PT60S</w:OperationTimeout><w:ResourceURI>http://schemas.mHeader><s:Body></s:Body></s:Envelope>
