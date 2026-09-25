@@ -2489,6 +2489,191 @@ void write_icmp_json_fields(std::ostream& out, const IcmpMessage& msg) {
     }
 }
 
+// Roadmap item 45 addition -- the ICMPv6 analog of write_icmp_json_fields above, including the
+// NDP option list (icmpv6.hpp).
+void write_ndp_option_json(std::ostream& out, const NdpOption& opt) {
+    out << "{\"type\": " << static_cast<unsigned>(opt.type) << ", \"type_name\": \""
+        << json_escape(opt.type_name) << "\", \"byte_length\": " << opt.byte_length;
+    if (opt.link_layer_address) {
+        out << ", \"link_layer_address\": \""
+            << json_escape(to_hex(ByteSpan(opt.link_layer_address->address.data(),
+                                            opt.link_layer_address->address.size())))
+            << "\"";
+    }
+    if (opt.prefix_information) {
+        const auto& pi = *opt.prefix_information;
+        out << ", \"prefix\": \"" << json_escape(pi.prefix) << "\", \"prefix_length\": "
+            << static_cast<unsigned>(pi.prefix_length) << ", \"on_link\": "
+            << (pi.on_link ? "true" : "false") << ", \"autonomous\": "
+            << (pi.autonomous ? "true" : "false") << ", \"valid_lifetime_sec\": "
+            << pi.valid_lifetime_sec << ", \"preferred_lifetime_sec\": " << pi.preferred_lifetime_sec;
+    }
+    if (opt.mtu) {
+        out << ", \"mtu\": " << opt.mtu->mtu;
+    }
+    if (opt.rdnss) {
+        out << ", \"rdnss_lifetime_sec\": " << opt.rdnss->lifetime_sec << ", \"rdnss_addresses\": [";
+        for (size_t i = 0; i < opt.rdnss->addresses.size(); ++i) {
+            if (i != 0) out << ", ";
+            out << "\"" << json_escape(opt.rdnss->addresses[i]) << "\"";
+        }
+        out << "]";
+    }
+    if (opt.route_information) {
+        const auto& ri = *opt.route_information;
+        out << ", \"route_prefix\": \"" << json_escape(ri.prefix) << "\", \"route_prefix_length\": "
+            << static_cast<unsigned>(ri.prefix_length) << ", \"route_preference\": \""
+            << json_escape(ri.preference_name) << "\", \"route_lifetime_sec\": " << ri.route_lifetime_sec;
+    }
+    out << "}";
+}
+
+void write_icmpv6_json_fields(std::ostream& out, const Icmpv6Message& msg) {
+    out << "    \"icmpv6_type\": " << static_cast<unsigned>(msg.type) << ",\n";
+    out << "    \"icmpv6_code\": " << static_cast<unsigned>(msg.code) << ",\n";
+    out << "    \"icmpv6_type_name\": \"" << json_escape(msg.type_name) << "\",\n";
+    if (!msg.code_name.empty()) {
+        out << "    \"icmpv6_code_name\": \"" << json_escape(msg.code_name) << "\",\n";
+    }
+    out << "    \"icmpv6_checksum_valid\": " << (msg.checksum_valid ? "true" : "false") << ",\n";
+    if (msg.type == 128 || msg.type == 129) {  // Echo Request/Reply
+        out << "    \"icmpv6_echo_identifier\": " << msg.echo_identifier << ",\n";
+        out << "    \"icmpv6_echo_sequence\": " << msg.echo_sequence << ",\n";
+    }
+    if (msg.type == 2) {  // Packet Too Big
+        out << "    \"icmpv6_packet_too_big_mtu\": " << msg.packet_too_big_mtu << ",\n";
+    }
+    if (msg.type == 4) {  // Parameter Problem
+        out << "    \"icmpv6_parameter_problem_pointer\": " << msg.parameter_problem_pointer << ",\n";
+    }
+    if (msg.type == 134) {  // Router Advertisement
+        out << "    \"icmpv6_ra_cur_hop_limit\": " << static_cast<unsigned>(msg.ra_cur_hop_limit) << ",\n";
+        out << "    \"icmpv6_ra_managed_flag\": " << (msg.ra_managed_flag ? "true" : "false") << ",\n";
+        out << "    \"icmpv6_ra_other_flag\": " << (msg.ra_other_flag ? "true" : "false") << ",\n";
+        out << "    \"icmpv6_ra_router_lifetime_sec\": " << msg.ra_router_lifetime_sec << ",\n";
+        out << "    \"icmpv6_ra_reachable_time_ms\": " << msg.ra_reachable_time_ms << ",\n";
+        out << "    \"icmpv6_ra_retrans_timer_ms\": " << msg.ra_retrans_timer_ms << ",\n";
+    }
+    if (!msg.target_address.empty()) {  // NS/NA/Redirect
+        out << "    \"icmpv6_target_address\": \"" << json_escape(msg.target_address) << "\",\n";
+    }
+    if (msg.type == 136) {  // Neighbor Advertisement
+        out << "    \"icmpv6_na_router_flag\": " << (msg.na_router_flag ? "true" : "false") << ",\n";
+        out << "    \"icmpv6_na_solicited_flag\": " << (msg.na_solicited_flag ? "true" : "false") << ",\n";
+        out << "    \"icmpv6_na_override_flag\": " << (msg.na_override_flag ? "true" : "false") << ",\n";
+    }
+    if (!msg.redirect_destination_address.empty()) {
+        out << "    \"icmpv6_redirect_destination_address\": \""
+            << json_escape(msg.redirect_destination_address) << "\",\n";
+    }
+    if (!msg.options.empty()) {
+        out << "    \"icmpv6_options\": [";
+        for (size_t i = 0; i < msg.options.size(); ++i) {
+            if (i != 0) out << ", ";
+            write_ndp_option_json(out, msg.options[i]);
+        }
+        out << "],\n";
+    }
+    out << "    \"icmpv6_options_truncated\": " << (msg.options_truncated ? "true" : "false") << ",\n";
+}
+
+// Roadmap item 45 addition -- the DHCPv6 analog of write_icmp_json_fields above. Options are
+// genuinely recursive (IA_NA/IA_TA/IA_PD/IA Address/IA Prefix all nest further options), so
+// write_dhcpv6_option_json/write_dhcpv6_option_list_json call each other -- see dhcpv6.hpp's own
+// file header for why.
+void write_dhcpv6_option_list_json(std::ostream& out, const std::vector<Dhcpv6Option>& opts);
+
+void write_dhcpv6_option_json(std::ostream& out, const Dhcpv6Option& opt) {
+    out << "{\"code\": " << opt.code << ", \"code_name\": \"" << json_escape(opt.code_name)
+        << "\", \"data_length\": " << opt.data_length;
+    if (opt.duid) {
+        out << ", \"duid\": \"" << json_escape(opt.duid->display) << "\", \"duid_type\": "
+            << opt.duid->duid_type << ", \"duid_type_name\": \"" << json_escape(opt.duid->type_name)
+            << "\"";
+    }
+    if (opt.ia_na) {
+        out << ", \"ia_na\": {\"iaid\": " << opt.ia_na->iaid << ", \"t1_sec\": " << opt.ia_na->t1_sec
+            << ", \"t2_sec\": " << opt.ia_na->t2_sec << ", \"options\": ";
+        write_dhcpv6_option_list_json(out, opt.ia_na->options);
+        out << "}";
+    }
+    if (opt.ia_ta) {
+        out << ", \"ia_ta\": {\"iaid\": " << opt.ia_ta->iaid << ", \"options\": ";
+        write_dhcpv6_option_list_json(out, opt.ia_ta->options);
+        out << "}";
+    }
+    if (opt.ia_pd) {
+        out << ", \"ia_pd\": {\"iaid\": " << opt.ia_pd->iaid << ", \"t1_sec\": " << opt.ia_pd->t1_sec
+            << ", \"t2_sec\": " << opt.ia_pd->t2_sec << ", \"options\": ";
+        write_dhcpv6_option_list_json(out, opt.ia_pd->options);
+        out << "}";
+    }
+    if (opt.ia_address) {
+        out << ", \"ia_address\": {\"address\": \"" << json_escape(opt.ia_address->address)
+            << "\", \"preferred_lifetime_sec\": " << opt.ia_address->preferred_lifetime_sec
+            << ", \"valid_lifetime_sec\": " << opt.ia_address->valid_lifetime_sec << ", \"options\": ";
+        write_dhcpv6_option_list_json(out, opt.ia_address->options);
+        out << "}";
+    }
+    if (opt.ia_prefix) {
+        out << ", \"ia_prefix\": {\"prefix\": \"" << json_escape(opt.ia_prefix->prefix)
+            << "\", \"prefix_length\": " << static_cast<unsigned>(opt.ia_prefix->prefix_length)
+            << ", \"preferred_lifetime_sec\": " << opt.ia_prefix->preferred_lifetime_sec
+            << ", \"valid_lifetime_sec\": " << opt.ia_prefix->valid_lifetime_sec << ", \"options\": ";
+        write_dhcpv6_option_list_json(out, opt.ia_prefix->options);
+        out << "}";
+    }
+    if (!opt.oro_codes.empty()) {
+        out << ", \"oro_codes\": [";
+        for (size_t i = 0; i < opt.oro_codes.size(); ++i) {
+            if (i != 0) out << ", ";
+            out << opt.oro_codes[i];
+        }
+        out << "]";
+    }
+    if (opt.elapsed_time_centiseconds) {
+        out << ", \"elapsed_time_centiseconds\": " << *opt.elapsed_time_centiseconds;
+    }
+    if (opt.status_code) {
+        out << ", \"status_code\": " << opt.status_code->status_code << ", \"status_name\": \""
+            << json_escape(opt.status_code->status_name) << "\", \"status_message\": \""
+            << json_escape(opt.status_code->status_message) << "\"";
+    }
+    if (opt.is_rapid_commit) out << ", \"rapid_commit\": true";
+    if (opt.is_relay_message) out << ", \"relay_message_present\": true";
+    out << "}";
+}
+
+void write_dhcpv6_option_list_json(std::ostream& out, const std::vector<Dhcpv6Option>& opts) {
+    out << "[";
+    for (size_t i = 0; i < opts.size(); ++i) {
+        if (i != 0) out << ", ";
+        write_dhcpv6_option_json(out, opts[i]);
+    }
+    out << "]";
+}
+
+void write_dhcpv6_json_fields(std::ostream& out, const Dhcpv6Message& msg) {
+    out << "    \"dhcpv6_msg_type\": " << static_cast<unsigned>(msg.msg_type) << ",\n";
+    out << "    \"dhcpv6_msg_type_name\": \"" << json_escape(msg.msg_type_name) << "\",\n";
+    out << "    \"dhcpv6_is_relay\": " << (msg.is_relay ? "true" : "false") << ",\n";
+    if (msg.is_relay) {
+        out << "    \"dhcpv6_hop_count\": " << static_cast<unsigned>(msg.hop_count) << ",\n";
+        out << "    \"dhcpv6_link_address\": \"" << json_escape(msg.link_address) << "\",\n";
+        out << "    \"dhcpv6_peer_address\": \"" << json_escape(msg.peer_address) << "\",\n";
+    } else {
+        std::ostringstream xid;
+        xid << "0x" << std::hex << msg.transaction_id;
+        out << "    \"dhcpv6_transaction_id\": \"" << xid.str() << "\",\n";
+    }
+    if (!msg.options.empty()) {
+        out << "    \"dhcpv6_options\": ";
+        write_dhcpv6_option_list_json(out, msg.options);
+        out << ",\n";
+    }
+    out << "    \"dhcpv6_options_truncated\": " << (msg.options_truncated ? "true" : "false") << ",\n";
+}
+
 // Zero-flat-field migration (mid-size batch): the HSRP analog of write_goose_json_fields above.
 void write_hsrp_json_fields(std::ostream& out, const HsrpMessage& msg) {
     out << "    \"hsrp_version\": " << static_cast<unsigned>(msg.version) << ",\n";
@@ -4644,6 +4829,12 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
     if (p.protocol == "icmp" && p.result) {
         write_icmp_json_fields(out_, p.result->as<IcmpMessage>());
     }
+    if (p.protocol == "icmpv6" && p.result) {
+        write_icmpv6_json_fields(out_, p.result->as<Icmpv6Message>());
+    }
+    if (p.protocol == "dhcpv6" && p.result) {
+        write_dhcpv6_json_fields(out_, p.result->as<Dhcpv6Message>());
+    }
     if (p.protocol == "igmp" && p.result) {
         write_igmp_json_fields(out_, p.result->as<IgmpMessage>());
     }
@@ -5530,6 +5721,12 @@ void StatsWriter::write_packet(const DecodedPacket& p) {
     if (p.protocol == "icmp" && p.result) {
         icmp_type_counts_[p.result->as<IcmpMessage>().type_name]++;
     }
+    if (p.protocol == "icmpv6" && p.result) {
+        icmpv6_type_counts_[p.result->as<Icmpv6Message>().type_name]++;
+    }
+    if (p.protocol == "dhcpv6" && p.result) {
+        dhcpv6_msg_type_counts_[p.result->as<Dhcpv6Message>().msg_type_name]++;
+    }
     if (p.protocol == "igmp" && p.result) {
         igmp_type_counts_[p.result->as<IgmpMessage>().type_name]++;
     }
@@ -6052,6 +6249,18 @@ void StatsWriter::print_summary(std::ostream& out) const {
     if (!icmp_type_counts_.empty()) {
         out << "icmp types:\n";
         for (const auto& [name, count] : icmp_type_counts_) {
+            out << "  " << std::left << std::setw(40) << name << count << "\n";
+        }
+    }
+    if (!icmpv6_type_counts_.empty()) {
+        out << "icmpv6 types:\n";
+        for (const auto& [name, count] : icmpv6_type_counts_) {
+            out << "  " << std::left << std::setw(40) << name << count << "\n";
+        }
+    }
+    if (!dhcpv6_msg_type_counts_.empty()) {
+        out << "dhcpv6 message types:\n";
+        for (const auto& [name, count] : dhcpv6_msg_type_counts_) {
             out << "  " << std::left << std::setw(40) << name << count << "\n";
         }
     }

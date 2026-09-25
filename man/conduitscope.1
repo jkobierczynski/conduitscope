@@ -503,7 +503,7 @@ regardless of where it's being analyzed \-\- an extension beyond what
 tshark/tcpdump themselves offer. See \fBdocs/USER_GUIDE.md\fR's OUTPUT
 FORMATS "Timestamps" subsection.
 .TP
-.B \-\-protocol {auto,modbus,dnp3,iec104,s7comm,s7comm\-plus,mms,enip,twincat,melsec,fins,bgp,kerberos,ldap,smb,profinet,goose,sv,ethercat,stp,devicenet,canopen,j1939,bacnet,hartip,opcua,mqtt,ff\-hse,dns,mdns,llmnr,nbns,doh,rip,igmp,vrrp,hsrp,igrp,pim,eigrp,ospf,remote\-access,lateral\-movement,enterprise\-trust,eapol,wireless\-backhaul,pppoe,tunnel\-vpn,mpls,arp,lldp,slow\-protocols,winrm,dcom,ge\-srtp,bsap,cclink\-ie,codesys,coap,zigbee,cdp,rmcp,asf,ipmi,amqp091,amqp10,dicom,powerlink,fox}
+.B \-\-protocol {auto,modbus,dnp3,iec104,s7comm,s7comm\-plus,mms,enip,twincat,melsec,fins,bgp,kerberos,ldap,smb,profinet,goose,sv,ethercat,stp,devicenet,canopen,j1939,bacnet,hartip,opcua,mqtt,ff\-hse,dns,mdns,llmnr,nbns,doh,rip,igmp,vrrp,hsrp,igrp,pim,eigrp,ospf,remote\-access,lateral\-movement,enterprise\-trust,eapol,wireless\-backhaul,pppoe,tunnel\-vpn,mpls,arp,lldp,slow\-protocols,winrm,dcom,ge\-srtp,bsap,cclink\-ie,codesys,coap,zigbee,cdp,rmcp,asf,ipmi,amqp091,amqp10,dicom,powerlink,fox,icmpv6,dhcpv6}
 Restrict decoding to one protocol. Default: auto (tries all fourteen TCP
 protocols, independent of port number, plus CIP I/O, BACnet/IP, HART-IP, and
 FF-HSE on every
@@ -990,7 +990,13 @@ an explicitly documented judgment call empirically set clear of this
 project's own busiest legitimate fixture, not a vendor\-sourced number;
 see \fBdocs/PROTOCOL_COVERAGE.md\fR's Attack Detection section. A
 broadcast\-looking destination address is never counted toward any flood
-threshold, since a flood by definition targets one specific host.
+threshold, since a flood by definition targets one specific host. Also
+governs the IPv6\-side volumetric counters in
+\fBdocs/PROTOCOL_COVERAGE.md\fR's IPv6 Attack Detection section \-\- the
+Router Advertisement flood counter (a whole\-link count, not
+per\-destination) and the DHCPv6 exhaustion counter (a count of DISTINCT
+Client DUIDs, not raw packet count) \-\- one shared, overridable threshold
+rather than a second IPv6\-specific concept.
 .TP
 .B \-\-rip\-port \fIPORT\fR
 Same as \fB\-\-dns\-port\fR, for RIP (built\-in default: 520). Repeatable.
@@ -1039,6 +1045,15 @@ Same as \fB\-\-dns\-port\fR, for Tridium Niagara Fox (built\-in default:
 Repeatable. Also widens detection in \fBauto\fR mode. Does NOT widen the
 separate, small port\-4911 FOXS/TLS\-ClientHello detection, which has no
 option of its own.
+.TP
+.B \-\-dhcpv6\-port \fIPORT\fR
+Same as \fB\-\-dns\-port\fR, for DHCPv6 (built\-in defaults: 546 and 547,
+UDP, BOTH checked automatically in \fBauto\fR mode \-\- see
+\fBdocs/PROTOCOL_COVERAGE.md\fR's DHCPv6 section). Repeatable. UNLIKE most
+\fB\-\-*\-port\fR options in this list, this one genuinely gates detection
+in \fBauto\fR mode \-\- DHCPv6 has no magic\-byte\-strength structural
+signature of its own to fall back on, the same posture \fB\-\-dns\-port\fR
+already carries \-\- also widens detection to further, non\-standard ports.
 .TP
 .B \-\-remote\-access\-port \fIPORT\fR
 Additional TCP or UDP port to treat as expected for the Tier 1 "IT

@@ -145,14 +145,24 @@ real-capture validation provenance.
 | DICOM | Hospital imaging (PACS/modalities/workstations) | TCP 104/11112 | A-ASSOCIATE-RQ/AC/RJ, A-ABORT, A-RELEASE, P-DATA-TF/DIMSE Command+Data Set decode, User Identity Negotiation + curated PHI tag redaction, no-identity-negotiation headline finding |
 | Ethernet POWERLINK | Real-time Ethernet motion control (EPSG) | EtherType `0x88AB`, + UDP 3819 (SDO) | SoC/PReq/PRes/SoA cyclic frames, ASnd IdentResponse/StatusResponse/NMTRequest/NMTCommand/SDO + AInv, NMT state machine, SDO Sequence/Command Layer (shared CANopen abort-code table), curated disruptive-NMTCommand/rogue-MN/SDO-write/CN-sourced-NMTCommand findings |
 | Tridium Niagara Fox | Building-automation-system (BAS) stations | TCP 1911 (cleartext), + TCP 4911 (FOXS/TLS, detection only) | Line-oriented header+tuple grammar decode (generic `key=type:value`, incl. nested messages), curated `fox hello` identity fields, unauthenticated-hello-exchange headline finding, hostAddress-vs-peer-IP mismatch finding -- see docs for confidence tiers (single/double-source, reverse-engineered protocol) |
+| ICMPv6 / NDP | IPv6 control plane (Neighbor Discovery, SLAAC) | IP protocol 58 | RFC 4443 base header, RFC 4861 Router/Neighbor Solicitation/Advertisement + Redirect, RFC 4862 SLAAC prefix detection, NDP option walk (link-layer address, Prefix Information, MTU, RDNSS, Route Information), pseudo-header checksum verification |
+| DHCPv6 | IPv6 stateful address/prefix assignment | UDP 546/547 | RFC 8415 all 13 message types, RELAY-FORW/REPL header, IA_NA/IA_TA/IA_PD + IA Address/IA Prefix, Status Code, all 4 DUID formats (LLT/EN/LL/UUID, RFC 6355) |
 
 A cross-cutting **attack-detection** layer runs over every decoded
 IPv4/TCP/UDP/ICMP packet regardless of which protocol above matched: LAND,
 WinNuke, ICMP Redirect, IP Source Routing (LSRR/SSRR), Smurf, Fraggle, Ping
 of Death, and Teardrop as curated structural signatures, plus SYN/ACK/
 ICMP/UDP flood and a generic TCP-flood catch-all against a `--flood-threshold`.
-See [docs/PROTOCOL_COVERAGE.md](docs/PROTOCOL_COVERAGE.md)'s Attack Detection
-section.
+A separate, IPv6-specific sibling layer runs over every decoded ICMPv6/NDP
+and DHCPv6 packet: RA flood, RA collision (conflicting default-router
+information from distinct router identities), NA/target-address spoofing,
+DHCPv6 exhaustion (distinct-Client-DUID count), and rogue DHCPv6 server
+(distinct-Server-DUID count) -- sharing the same `--flood-threshold` rather
+than a second threshold concept, and framed as "worth investigating" rather
+than "attacker detected" throughout, since passive observation alone cannot
+distinguish a rogue router/server from a legitimate redundant one (RFC
+6104). See [docs/PROTOCOL_COVERAGE.md](docs/PROTOCOL_COVERAGE.md)'s Attack
+Detection and IPv6 Attack Detection sections.
 
 ## Further supported protocols
 
@@ -176,7 +186,8 @@ tunneling) shows up on a segment that shouldn't carry it:
   ARP-Announcement notes), LLDP (IEEE 802.1AB), CDP (Cisco Discovery
   Protocol), BGP-4 (RFC 4271), IEEE 802.3 Slow Protocols (LACP/Marker/OAM),
   RIP, IGMP, VRRP, HSRP, IGRP, PIM, EIGRP, OSPFv2, and ICMP (RFC 792 plus
-  RFC 1191/1256 extensions).
+  RFC 1191/1256 extensions). ICMPv6/NDP and DHCPv6 are fully decoded, not
+  just named -- see the core table above.
 - **Name resolution**: DNS, mDNS, LLMNR, NetBIOS Name Service (NBT-NS), and
   DNS-over-HTTPS (DoH) detection via TLS SNI matching.
 - **IT protocol recognition** (named only, by risk tier -- not full field
@@ -196,7 +207,7 @@ tunneling) shows up on a segment that shouldn't carry it:
 
 Groundwork / v0.2.5. Every protocol named above is implemented, decoding real
 wire-format fields (not just naming the protocol), and covered by the
-automated test suite -- 1784 tests as of this writing, run via `ctest` after
+automated test suite -- 1952 tests as of this writing, run via `ctest` after
 building (see Building below). Where a real capture was available (public
 ICS-lab collections, vendor-attributed samples, or a live device on real
 hardware), the decoder is validated against it, not just a synthetic

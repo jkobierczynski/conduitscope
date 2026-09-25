@@ -87,6 +87,9 @@ add_library(conduitscope_core STATIC
   src/rip.cpp
   src/rmcp.cpp
   src/icmp.cpp
+  src/icmpv6.cpp
+  src/dhcpv6.cpp
+  src/ipv6_attack_detect.cpp
   src/igmp.cpp
   src/vrrp.cpp
   src/hsrp.cpp
@@ -812,10 +815,14 @@ add_test(NAME link_layer_unrecognized_ethertype_stays_unnamed
 set_tests_properties(link_layer_unrecognized_ethertype_stays_unnamed PROPERTIES
   PASS_REGULAR_EXPRESSION "\\[non-ip\\]  Ethernet frame with ethertype 0x9999 \\(not IPv4\\)")
 
-add_test(NAME ip_layer_icmpv6_protocol_number_named
+# Roadmap item 45 superseded ICMPv6 (protocol 58) as this fixture's own "recognized-but-not-
+# decoded" example -- icmpv6.hpp/icmpv6.cpp now genuinely decode it (see sample_icmpv6_ndp.pcap's
+# own tests). SCTP (132) replaces it here; the fixture's own comment in make_sample_pcap.py records
+# the history.
+add_test(NAME ip_layer_sctp_protocol_number_named
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_link_transport_layers.pcap" --format text)
-set_tests_properties(ip_layer_icmpv6_protocol_number_named PROPERTIES
-  PASS_REGULAR_EXPRESSION "\\[non-tcp\\]  IPv4 protocol number 58 \\(ICMPv6\\) \\(not TCP\\)")
+set_tests_properties(ip_layer_sctp_protocol_number_named PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[non-tcp\\]  IPv4 protocol number 132 \\(SCTP\\) \\(not TCP\\)")
 
 # Arbitrary, too-short bytes on EtherNet/IP's own CIP I/O port (2222) must NOT be misdetected as
 # CIP I/O -- try_parse_cip_io's structural gate (see its header comment in enip.hpp) correctly
@@ -13720,3 +13727,218 @@ add_test(NAME fox_stats_frame_type_counts_and_curated_findings
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_fox.pcap" --format text --stats)
 set_tests_properties(fox_stats_frame_type_counts_and_curated_findings PROPERTIES
   PASS_REGULAR_EXPRESSION "fox frame type counts:\n *Asynchronous *3[^\n]*\n *Keep-alive *1[^\n]*\n *Reply *2[^\\*]*\\*\\*\\* Fox hello exchanges observed \\(unauthenticated system-identity disclosure\\) 4 \\*\\*\\*\nfox hello exchanges with hostAddress differing from the observed TCP peer IP \\(internal-topology leakage signal\\) observed: 1")
+
+# --- ICMPv6/NDP (icmpv6.hpp) and DHCPv6 (dhcpv6.hpp) -- roadmap item 45 --------------------------
+# tests/sample_icmpv6_ndp.pcap (build_icmpv6_ndp_sample, tools/make_sample_pcap.py) covers RFC
+# 4443/4861/4862/8106/4191: RS+SLLA (#1), RA with Prefix Information (A-flag/SLAAC), MTU, RDNSS and
+# RIO options (#2), NS (#3), solicited NA with TLLA (#4), Redirect (#5), an Echo Request/Reply pair
+# with a real pseudo-header checksum (#6/#7), a name-only error type (Destination Unreachable, #8),
+# a deliberately checksum-mismatched Echo Request (#9), an unknown NDP option type that must be
+# skipped gracefully rather than misparsed (#10), and a malformed Length==0 NDP option that must stop
+# the option walk rather than hang or misparse (#11).
+
+add_test(NAME icmpv6_router_solicitation_and_advertisement_ndp_options
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_icmpv6_ndp.pcap" --format text -v)
+set_tests_properties(icmpv6_router_solicitation_and_advertisement_ndp_options PROPERTIES
+  PASS_REGULAR_EXPRESSION "#1  [^\n]*\\[icmpv6\\]  ICMPv6 Router Solicitation, 1 option\\(s\\)[^\n]*\n#2  [^\n]*\\[icmpv6\\]  ICMPv6 Router Advertisement, lifetime=1800s, 5 option\\(s\\) \\(SLAAC prefix 2001:db8:cafe::/64 offered\\)")
+
+# JSON: every RA option decoded (SLLA, Prefix Information with A-flag/on-link/lifetimes, MTU, RDNSS
+# addresses, Route Information with its preference name) -- not just the summary line.
+add_test(NAME icmpv6_ra_json_prefix_mtu_rdnss_rio_options
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_icmpv6_ndp.pcap" --format json)
+set_tests_properties(icmpv6_ra_json_prefix_mtu_rdnss_rio_options PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"icmpv6_ra_managed_flag\": false,\n *\"icmpv6_ra_other_flag\": false,\n *\"icmpv6_ra_router_lifetime_sec\": 1800,\n *\"icmpv6_ra_reachable_time_ms\": 30000,\n *\"icmpv6_ra_retrans_timer_ms\": 1000,\n *\"icmpv6_options\": \\[\\{[^]]*\"type_name\": \"Prefix Information\"[^}]*\"prefix\": \"2001:db8:cafe::\", \"prefix_length\": 64, \"on_link\": true, \"autonomous\": true, \"valid_lifetime_sec\": 86400, \"preferred_lifetime_sec\": 14400\\}, \\{\"type\": 5, \"type_name\": \"MTU\", \"byte_length\": 8, \"mtu\": 1500\\}, \\{\"type\": 25, \"type_name\": \"Recursive DNS Server\"[^}]*\"rdnss_addresses\": \\[\"2001:db8:cafe::53\"\\]\\}, \\{\"type\": 24, \"type_name\": \"Route Information\", \"byte_length\": 24, \"route_prefix\": \"2001:db8:f00d::\", \"route_prefix_length\": 48, \"route_preference\": \"High\"")
+
+add_test(NAME icmpv6_neighbor_solicitation_and_advertisement
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_icmpv6_ndp.pcap" --format text -v)
+set_tests_properties(icmpv6_neighbor_solicitation_and_advertisement PROPERTIES
+  PASS_REGULAR_EXPRESSION "#3  [^\n]*\\[icmpv6\\]  ICMPv6 Neighbor Solicitation, target=fe80::1, 1 option\\(s\\)[^\n]*\n#4  [^\n]*\\[icmpv6\\]  ICMPv6 Neighbor Advertisement, target=fe80::1 R S, 1 option\\(s\\)")
+
+add_test(NAME icmpv6_redirect_and_echo_request_reply_pair
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_icmpv6_ndp.pcap" --format text -v)
+set_tests_properties(icmpv6_redirect_and_echo_request_reply_pair PROPERTIES
+  PASS_REGULAR_EXPRESSION "#5  [^\n]*\\[icmpv6\\]  ICMPv6 Redirect, target=fe80::1, destination=2001:db8::99, 0 option\\(s\\)[^\n]*\n#6  [^\n]*\\[icmpv6\\]  ICMPv6 Echo Request, id=4660 seq=1, 12 byte\\(s\\) of data[^\n]*\n#7  [^\n]*\\[icmpv6\\]  ICMPv6 Echo Reply, id=4660 seq=1, 12 byte\\(s\\) of data")
+
+# A name-only error type (Destination Unreachable, code 4 "Port unreachable") -- proves Tier 1
+# type/code naming without the fuller structured decode that Echo/NDP types get.
+add_test(NAME icmpv6_destination_unreachable_code_named
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_icmpv6_ndp.pcap" --format text -v)
+set_tests_properties(icmpv6_destination_unreachable_code_named PROPERTIES
+  PASS_REGULAR_EXPRESSION "#8  [^\n]*\\[icmpv6\\]  ICMPv6 Destination Unreachable \\(Port unreachable\\)")
+
+# Checksum validation: packet #9 declares checksum 0xdead against a real pseudo-header -- must be
+# flagged invalid with a note, while every other (real-checksum) packet in this fixture validates.
+add_test(NAME icmpv6_checksum_mismatch_flagged
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_icmpv6_ndp.pcap" --format text -v)
+set_tests_properties(icmpv6_checksum_mismatch_flagged PROPERTIES
+  PASS_REGULAR_EXPRESSION "#9  [^\n]*\\[icmpv6\\]  ICMPv6 Echo Request, id=4660 seq=2[^\n]*\n *note: ICMPv6 checksum mismatch \\(packet declares 0xdead\\)")
+add_test(NAME icmpv6_checksum_valid_json_field
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_icmpv6_ndp.pcap" --format json)
+set_tests_properties(icmpv6_checksum_valid_json_field PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"icmpv6_checksum_valid\": false")
+
+# NDP option graceful degradation: an unknown option type (99) is named generically and skipped
+# without breaking the rest of the option walk; a malformed Length==0 option stops the walk with an
+# explanatory note rather than hanging or misparsing subsequent bytes as more options.
+add_test(NAME icmpv6_ndp_unknown_option_type_skipped_gracefully
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_icmpv6_ndp.pcap" --format json)
+set_tests_properties(icmpv6_ndp_unknown_option_type_skipped_gracefully PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"type\": 99, \"type_name\": \"NDP option type 99\"")
+add_test(NAME icmpv6_ndp_malformed_zero_length_option_stops_walk
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_icmpv6_ndp.pcap" --format text -v)
+set_tests_properties(icmpv6_ndp_malformed_zero_length_option_stops_walk PROPERTIES
+  PASS_REGULAR_EXPRESSION "#11  [^\n]*\\[icmpv6\\]  ICMPv6 Router Solicitation, 1 option\\(s\\)[^\n]*\n *note: an NDP option declared Length == 0, which RFC 4861 forbids")
+
+# --protocol icmpv6 filters out everything else; --protocol dhcpv6 on an ICMPv6-only capture claims
+# nothing (falls through to the generic "not TCP" label) -- the same filter-exclusion discipline
+# fox_protocol_filter_excludes_other_protocols above establishes, checked both directions here since
+# ICMPv6 and DHCPv6 are siblings introduced together.
+add_test(NAME icmpv6_protocol_filter_excludes_other_protocols
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_icmpv6_ndp.pcap" --protocol dhcpv6 --format text)
+set_tests_properties(icmpv6_protocol_filter_excludes_other_protocols PROPERTIES
+  FAIL_REGULAR_EXPRESSION "\\[icmpv6\\]|\\[dhcpv6\\]")
+
+# --stats: icmpv6 type counts.
+add_test(NAME icmpv6_stats_type_counts
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_icmpv6_ndp.pcap" --format text --stats)
+set_tests_properties(icmpv6_stats_type_counts PROPERTIES
+  PASS_REGULAR_EXPRESSION "icmpv6 types:\n *Destination Unreachable *1[^\n]*\n *Echo Reply *1[^\n]*\n *Echo Request *2[^\n]*\n *Neighbor Advertisement *1[^\n]*\n *Neighbor Solicitation *1[^\n]*\n *Redirect *1[^\n]*\n *Router Advertisement *1[^\n]*\n *Router Solicitation *3")
+
+# tests/sample_dhcpv6.pcap (build_dhcpv6_sample) covers RFC 8415: SOLICIT with DUID-LLT/ORO/Elapsed
+# Time/Rapid Commit (#1), ADVERTISE with DUID-LL server + IA_NA/IA Address/Status Code Success (#2),
+# a REQUEST/REPLY pair (#3/#4), a REPLY with a non-success Status Code (NoAddrsAvail, #5), a REPLY
+# exercising DUID-EN (client) + DUID-UUID (server) + IA_PD/IA Prefix (#6, which also happens to be
+# this fixture's own second distinct Server DUID -- see the rogue-server note it triggers below), and
+# a RELAY-FORW wrapping an inner SOLICIT (#7, inner message deliberately not decoded).
+
+add_test(NAME dhcpv6_solicit_and_advertise
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dhcpv6.pcap" --format text -v)
+set_tests_properties(dhcpv6_solicit_and_advertise PROPERTIES
+  PASS_REGULAR_EXPRESSION "#1  [^\n]*\\[dhcpv6\\]  DHCPv6 SOLICIT, xid=0xaa0001, client=DUID-LLT \\(hw-type=1, time=700000000s since 2000-01-01, lladdr=001122335501\\), Rapid Commit, 4 option\\(s\\)[^\n]*\n#2  [^\n]*\\[dhcpv6\\]  DHCPv6 ADVERTISE, xid=0xaa0001, client=DUID-LLT \\(hw-type=1, time=700000000s since 2000-01-01, lladdr=001122335501\\), server=DUID-LL \\(hw-type=1, lladdr=001122335502\\), 3 option\\(s\\)")
+
+add_test(NAME dhcpv6_request_reply_pair
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dhcpv6.pcap" --format text -v)
+set_tests_properties(dhcpv6_request_reply_pair PROPERTIES
+  PASS_REGULAR_EXPRESSION "#3  [^\n]*\\[dhcpv6\\]  DHCPv6 REQUEST, xid=0xaa0002[^\n]*\n#4  [^\n]*\\[dhcpv6\\]  DHCPv6 REPLY, xid=0xaa0002")
+
+# JSON: IA_NA nested IA Address + Status Code Success, proving the full recursive option-in-option
+# decode (not just the header/summary line).
+add_test(NAME dhcpv6_advertise_json_ia_na_nested_options
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dhcpv6.pcap" --format json)
+set_tests_properties(dhcpv6_advertise_json_ia_na_nested_options PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"code\": 3, \"code_name\": \"IA_NA\", \"data_length\": 53, \"ia_na\": \\{\"iaid\": 2863267841, \"t1_sec\": 1800, \"t2_sec\": 2880, \"options\": \\[\\{\"code\": 5, \"code_name\": \"IA Address\", \"data_length\": 24, \"ia_address\": \\{\"address\": \"2001:db8:1::100\", \"preferred_lifetime_sec\": 3600, \"valid_lifetime_sec\": 7200[^}]*\\}\\}, \\{\"code\": 13, \"code_name\": \"Status Code\", \"data_length\": 9, \"status_code\": 0, \"status_name\": \"Success\"")
+
+# A non-success Status Code (NoAddrsAvail) -- proves this isn't hardcoded to Success.
+add_test(NAME dhcpv6_reply_status_code_noaddrsavail
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dhcpv6.pcap" --format json)
+set_tests_properties(dhcpv6_reply_status_code_noaddrsavail PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"status_code\": 2, \"status_name\": \"NoAddrsAvail\"")
+
+# DUID-EN (client) and DUID-UUID (server) plus IA_PD/IA Prefix -- proves all four DUID formats and
+# the prefix-delegation option pair are decoded, not just DUID-LLT/DUID-LL and IA_NA/IA Address.
+add_test(NAME dhcpv6_duid_en_and_uuid_with_ia_pd_prefix
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dhcpv6.pcap" --format text -v)
+set_tests_properties(dhcpv6_duid_en_and_uuid_with_ia_pd_prefix PROPERTIES
+  PASS_REGULAR_EXPRESSION "#6  [^\n]*\\[dhcpv6\\]  DHCPv6 REPLY, xid=0xaa0004, client=DUID-EN \\(enterprise=32473, identifier=4 byte\\(s\\)\\), server=DUID-UUID \\(01234567-89ab-cdef-0123-456789abcdef\\), 3 option\\(s\\)")
+add_test(NAME dhcpv6_ia_pd_ia_prefix_json
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dhcpv6.pcap" --format json)
+set_tests_properties(dhcpv6_ia_pd_ia_prefix_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"code_name\": \"IA_PD\", \"data_length\": 41, \"ia_pd\": \\{[^}]*\"options\": \\[\\{\"code\": 26, \"code_name\": \"IA Prefix\", \"data_length\": 25, \"ia_prefix\": \\{\"prefix\": \"2001:db8:beef::\", \"prefix_length\": 56, \"preferred_lifetime_sec\": 3600, \"valid_lifetime_sec\": 7200")
+
+# RELAY-FORW wrapping an inner SOLICIT -- the relay header shape (hop-count/link-address/peer-
+# address) is decoded, but this decoder deliberately does not recurse into the Relay Message option's
+# inner DHCPv6 message (out of scope, documented in dhcpv6.hpp).
+add_test(NAME dhcpv6_relay_forw_header_inner_message_not_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dhcpv6.pcap" --format text -v)
+set_tests_properties(dhcpv6_relay_forw_header_inner_message_not_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "#7  [^\n]*\\[dhcpv6\\]  DHCPv6 RELAY-FORW, hop-count=0, link-address=2001:db8:1::, peer-address=fe80::60 \\(Relay Message option present, inner message not decoded\\), 1 option\\(s\\)")
+
+# --protocol dhcpv6 filters out everything else on a DHCPv6-only capture.
+add_test(NAME dhcpv6_protocol_filter_excludes_other_protocols
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dhcpv6.pcap" --protocol icmpv6 --format text)
+set_tests_properties(dhcpv6_protocol_filter_excludes_other_protocols PROPERTIES
+  FAIL_REGULAR_EXPRESSION "\\[dhcpv6\\]")
+
+# --stats: dhcpv6 message type counts.
+add_test(NAME dhcpv6_stats_msg_type_counts
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dhcpv6.pcap" --format text --stats)
+set_tests_properties(dhcpv6_stats_msg_type_counts PROPERTIES
+  PASS_REGULAR_EXPRESSION "dhcpv6 message types:\n *ADVERTISE *1[^\n]*\n *RELAY-FORW *1[^\n]*\n *REPLY *3[^\n]*\n *REQUEST *1[^\n]*\n *SOLICIT *1")
+
+# --- IPv6 attack-detection sibling (ipv6_attack_detect.hpp) -- roadmap item 45 -------------------
+# Each fixture below pairs a positive case with a negative/control case in the SAME capture, so a
+# false positive on ordinary traffic is caught the same way a missed detection would be.
+
+# tests/sample_ipv6_attack_ra_collision.pcap: packets #1/#2 are the SAME router repeating an
+# IDENTICAL RA (negative control -- must NOT flag a collision); packet #3 is a second router
+# advertising conflicting default-router information (positive case).
+add_test(NAME ipv6_attack_ra_collision_negative_control_consistent_router
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ipv6_attack_ra_collision.pcap" --format text -v)
+set_tests_properties(ipv6_attack_ra_collision_negative_control_consistent_router PROPERTIES
+  PASS_REGULAR_EXPRESSION "#1  [^\n]*\\[icmpv6\\]  ICMPv6 Router Advertisement[^\n]*\n#2  [^\n]*\\[icmpv6\\]  ICMPv6 Router Advertisement"
+  FAIL_REGULAR_EXPRESSION "#1[^\n]*\n *note: multiple Router Advertisement identities|#2[^\n]*\n *note: multiple Router Advertisement identities")
+add_test(NAME ipv6_attack_ra_collision_positive_conflicting_router
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ipv6_attack_ra_collision.pcap" --format text -v)
+set_tests_properties(ipv6_attack_ra_collision_positive_conflicting_router PROPERTIES
+  PASS_REGULAR_EXPRESSION "#3  [^\n]*\\[icmpv6\\]  ICMPv6 Router Advertisement[^\n]*\n *note: multiple Router Advertisement identities observed advertising conflicting default-router information[^\n]*worth investigating[^\n]*RFC 6104")
+
+# tests/sample_ipv6_attack_na_spoof.pcap: two distinct link-layer addresses both send NA for the
+# same target address -- the IPv6 analogue of ARP spoofing.
+add_test(NAME ipv6_attack_na_spoof_distinct_link_layer_addresses
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ipv6_attack_na_spoof.pcap" --format text -v)
+set_tests_properties(ipv6_attack_na_spoof_distinct_link_layer_addresses PROPERTIES
+  PASS_REGULAR_EXPRESSION "#1  [^\n]*\\[icmpv6\\]  ICMPv6 Neighbor Advertisement[^\n]*\n#2  [^\n]*\\[icmpv6\\]  ICMPv6 Neighbor Advertisement[^\n]*\n *note: Neighbor Advertisement spoofing suspected: 2 distinct link-layer addresses observed claiming the same target address \\(2001:db8::99\\)"
+  FAIL_REGULAR_EXPRESSION "#1[^\n]*\n *note:")
+
+# tests/sample_ipv6_attack_dhcpv6_exhaustion.pcap, run with a small --flood-threshold 5 so the
+# fixture doesn't need thousands of packets: packets #1/#2 are ONE client legitimately retrying
+# (byte-identical DUID -- same MAC AND same DUID Time value, only the transaction ID differs, the
+# same shape a real SOLICIT retransmit has on the wire -- negative control, must NOT count as 2
+# distinct identities), packets #3-#7 are 5 further DISTINCT client DUIDs -- 6 distinct DUIDs
+# total, crossing a --flood-threshold of 5 on packet #6 (see the fixture's own comment in
+# make_sample_pcap.py for the exact count breakdown).
+add_test(NAME ipv6_attack_dhcpv6_exhaustion_negative_control_single_retry
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ipv6_attack_dhcpv6_exhaustion.pcap" --flood-threshold 5 --format text -v)
+set_tests_properties(ipv6_attack_dhcpv6_exhaustion_negative_control_single_retry PROPERTIES
+  PASS_REGULAR_EXPRESSION "#1  [^\n]*\\[dhcpv6\\]  DHCPv6 SOLICIT[^\n]*\n#2  [^\n]*\\[dhcpv6\\]  DHCPv6 SOLICIT"
+  FAIL_REGULAR_EXPRESSION "#1[^\n]*\n *note: DHCPv6 exhaustion|#2[^\n]*\n *note: DHCPv6 exhaustion")
+# A genuinely dedup-SENSITIVE negative control: --flood-threshold 2 is low enough that if the two
+# retry packets were (wrongly) counted as 2 distinct DUIDs instead of 1, this would false-positive
+# on packet #2 -- unlike the --flood-threshold 5 test above, which stays silent on packets #1/#2
+# whether or not deduplication actually works (5 is never reached that early either way), so it
+# alone can't catch a broken dedup. This test can, and does: the note must stay silent through
+# packet #2 and only start firing once the FIRST distinct-from-the-retry client (packet #3) pushes
+# the count to 2.
+add_test(NAME ipv6_attack_dhcpv6_exhaustion_negative_control_dedup_sensitive
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ipv6_attack_dhcpv6_exhaustion.pcap" --flood-threshold 2 --format text -v)
+set_tests_properties(ipv6_attack_dhcpv6_exhaustion_negative_control_dedup_sensitive PROPERTIES
+  PASS_REGULAR_EXPRESSION "#3  [^\n]*\n *note: DHCPv6 exhaustion suspected: 2 DISTINCT Client DUIDs"
+  FAIL_REGULAR_EXPRESSION "#1[^\n]*\n *note: DHCPv6 exhaustion|#2[^\n]*\n *note: DHCPv6 exhaustion")
+add_test(NAME ipv6_attack_dhcpv6_exhaustion_positive_distinct_duids
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ipv6_attack_dhcpv6_exhaustion.pcap" --flood-threshold 5 --format text -v)
+set_tests_properties(ipv6_attack_dhcpv6_exhaustion_positive_distinct_duids PROPERTIES
+  PASS_REGULAR_EXPRESSION "#6  [^\n]*\n *note: DHCPv6 exhaustion suspected: 5 DISTINCT Client DUIDs observed sending SOLICIT/REQUEST in this capture \\(threshold: 5\\)[^\n]*flood_dhcpc6[^\n]*counted by distinct identity, not raw packet count, so one legitimate client retrying does not trip this")
+# At the DEFAULT threshold (100), this fixture's 6 distinct DUIDs must NOT trip exhaustion at all --
+# proves --flood-threshold genuinely governs this counter rather than a hardcoded small constant.
+add_test(NAME ipv6_attack_dhcpv6_exhaustion_default_threshold_not_tripped
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ipv6_attack_dhcpv6_exhaustion.pcap" --format text -v)
+set_tests_properties(ipv6_attack_dhcpv6_exhaustion_default_threshold_not_tripped PROPERTIES
+  FAIL_REGULAR_EXPRESSION "note: DHCPv6 exhaustion suspected")
+
+# tests/sample_ipv6_attack_rogue_dhcpv6_server.pcap: two distinct Server DUIDs both answer with
+# REPLY -- the multi-server note (also independently exercised as a side effect within
+# sample_dhcpv6.pcap's own packet #6, see dhcpv6_duid_en_and_uuid_with_ia_pd_prefix above).
+add_test(NAME ipv6_attack_rogue_dhcpv6_server_distinct_server_duids
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ipv6_attack_rogue_dhcpv6_server.pcap" --format text -v)
+set_tests_properties(ipv6_attack_rogue_dhcpv6_server_distinct_server_duids PROPERTIES
+  PASS_REGULAR_EXPRESSION "#1  [^\n]*\\[dhcpv6\\]  DHCPv6 REPLY[^\n]*\n#2  [^\n]*\\[dhcpv6\\]  DHCPv6 REPLY[^\n]*\n *note: multiple DHCPv6 server identities observed \\(2 distinct Server DUIDs answering ADVERTISE/REPLY in this capture\\)[^\n]*worth investigating[^\n]*fake_dhcps6[^\n]*T1557\\.003"
+  FAIL_REGULAR_EXPRESSION "#1[^\n]*\n *note:")
+
+# --dhcpv6-port CLI option widens Auto-mode port detection the same way --fox-port does; the
+# RELAY-FORW packet in sample_dhcpv6.pcap already proves the standard 546/547 ports work in Auto
+# mode without any extra flag, so this specifically proves the --dhcpv6-port plumbing itself parses
+# and threads through (a non-standard-port smoke test, not a full second fixture).
+add_test(NAME dhcpv6_port_option_parses_and_threads_through
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dhcpv6.pcap" --dhcpv6-port 9999 --format text)
+set_tests_properties(dhcpv6_port_option_parses_and_threads_through PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[dhcpv6\\]")

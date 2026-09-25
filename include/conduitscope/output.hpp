@@ -386,6 +386,13 @@ private:
     size_t cclink_ie_set_ip_address_count_ = 0;
     std::map<std::string, size_t> rip_command_counts_;   // keyed by rip_command_name
     std::map<std::string, size_t> icmp_type_counts_;     // keyed by icmp_type_name
+    // Roadmap item 45 (icmpv6.hpp/dhcpv6.hpp) -- the same "one map, keyed by rendered name" shape
+    // icmp_type_counts_/rip_command_counts_ already use. The curated RA-collision/RA-flood/NS-NA-
+    // spoofing/DHCPv6-exhaustion/rogue-server findings themselves (ipv6_attack_detect.hpp) are NOT
+    // separately counted here -- they live only as per-packet notes, the same posture ICMP
+    // Redirect's own note already has (no dedicated ICMP-Redirect counter either).
+    std::map<std::string, size_t> icmpv6_type_counts_;     // keyed by icmpv6_type_name
+    std::map<std::string, size_t> dhcpv6_msg_type_counts_; // keyed by dhcpv6_msg_type_name
     std::map<std::string, size_t> igmp_type_counts_;     // keyed by igmp_type_name
     std::map<std::string, size_t> vrrp_version_counts_;  // "VRRPv2"/"VRRPv3"
     std::map<std::string, size_t> hsrp_version_counts_;  // "HSRPv1"/"HSRPv2"

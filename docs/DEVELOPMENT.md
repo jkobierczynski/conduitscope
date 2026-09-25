@@ -8190,43 +8190,105 @@ deferred future migration.
     real CODESYS V3 capture was available to validate against.
 
 45. **IPv6 attacks: SLAAC/rogue Router Advertisement and DHCPv6 (spoofing, exhaustion,
-    misconfiguration).** Not yet started, no committed timeline. Jurgen asked to add this as a
-    target for the project, mid-turn while CODESYS (item 44) was being delivered. Recorded here as
-    a roadmap entry rather than designed/implemented yet, the same posture as item 41's own
-    "logged as a goal, not yet scoped or built" entry.
+    misconfiguration).** **Done -- first pass.** Jurgen asked to add this as a target for the
+    project, mid-turn while CODESYS (item 44) was being delivered; this entry replaces the earlier
+    "logged as a goal, not yet scoped or built" writeup with the actual implementation. Three new,
+    fully self-contained modules -- see each one's own file header for the complete sourcing/
+    scoping/wire-format writeup; this entry summarizes them.
 
-    The IPv4 side of this general idea already exists (item 43, `attack_detect.hpp`'s
-    cross-cutting DoS/reconnaissance layer -- LAND, WinNuke, ICMP Redirect, IP Source Routing,
-    Smurf, Fraggle, Ping of Death, Teardrop, plus SYN/ACK/ICMP/UDP/TCP-generic flood counters), but
-    that file's own header states outright that it does not run on IPv6 at all
-    (`decoder.cpp`'s IPv6 branch never calls into it) -- consistent with IPv6's own still-open
-    scope gaps (item 24). This new item is IPv6-specific rather than an extension of item 43's own
-    signature list, since SLAAC/RA and DHCPv6 have no IPv4 equivalent (IPv4 has no router/address
-    autoconfiguration advertisement mechanism analogous to Router Advertisement, and DHCP-vs-DHCPv6
-    are different enough on the wire to need their own decoder either way).
+    The IPv4 side of this general idea already exists (item 43, `attack_detect.hpp`'s cross-cutting
+    DoS/reconnaissance layer), but that file's own header states outright that it does not run on
+    IPv6 at all (`decoder.cpp`'s IPv6 branch never calls into it), and it was deliberately left
+    untouched here -- this item is IPv6-specific rather than an extension of item 43's own signature
+    list, since SLAAC/RA and DHCPv6 have no IPv4 equivalent. `ipv6_attack_detect.hpp`/`.cpp` is a
+    new, IPv6-specific sibling to `attack_detect.hpp`, owned directly by `Decoder` alongside (not
+    instead of) `attack_state_`, and it reuses `DEFAULT_FLOOD_THRESHOLD`/`DecodeOptions::
+    flood_threshold`/`--flood-threshold` rather than inventing a second threshold concept -- the
+    same "one shared, overridable threshold" posture item 43 already established.
 
-    Two genuinely new decode surfaces would be needed, neither of which exists in this codebase
-    today: **ICMPv6** (IP protocol 58) is currently name-only -- recognized and labeled, but not
-    parsed at all (see `ipv4.cpp`'s protocol-number table and `docs/PROTOCOL_COVERAGE.md`'s Link/
-    IP-layer plumbing section) -- so Neighbor Discovery Protocol messages (Router Solicitation/
-    Advertisement, Neighbor Solicitation/Advertisement, Redirect -- RFC 4861) would need a decoder
-    built from nothing, distinct from this codebase's existing IPv4-only ICMP decoder
-    (`icmp.hpp`/`.cpp`, which already names RFC 1256's own IPv4 Router Advertisement but has no
-    ICMPv6 awareness); and **DHCPv6** (RFC 8415, UDP ports 546/547) has no decoder of any kind
-    today, unlike DHCP(v4), which this codebase already recognizes as part of the Tier 3
-    enterprise-trust-boundary family (`docs/PROTOCOL_COVERAGE.md`'s Tier 3 section).
+    **Two genuinely new decode surfaces, neither of which existed in this codebase before this
+    item**: `icmpv6.hpp`/`icmpv6.cpp` (`GateKind::IpProtocol`, protocol 58, `ProtocolFilter::
+    Icmpv6Only`/`--protocol icmpv6`) decodes RFC 4443's base header plus RFC 4861 Neighbor Discovery
+    (Router/Neighbor Solicitation/Advertisement, Redirect, with the generic NDP option TLV walk),
+    RFC 4862's SLAAC A-flag on Prefix Information, and, at lower confidence
+    ([SECONDARY-SOURCE], flagged as such in the header comment), RFC 8106 RDNSS and RFC 4191 Route
+    Information options; Echo Request/Reply and name-only Tier 2 error types round it out. The
+    pseudo-header checksum (RFC 8200 Section 8.1) needs the outer IPv6 source/destination addresses,
+    which `DecodeContext` did not carry before this item -- added as `ipv6_src_addr`/`ipv6_dst_addr`,
+    populated only by `decoder.cpp`'s IPv6 branch, mirroring the existing narrow-interface precedent
+    `ip_src_addr` already set for IGRP. `dhcpv6.hpp`/`dhcpv6.cpp` (`GateKind::UdpPort`, ports 546/
+    547, `ProtocolFilter::Dhcpv6Only`/`--protocol dhcpv6`, `--dhcpv6-port`/`extra_dhcpv6_ports`)
+    decodes RFC 8415's 13 message types, the client/server vs. RELAY-FORW/REPL header shapes, the
+    generic option TLV walk (Client/Server Identifier, ORO, Elapsed Time, Status Code, Rapid
+    Commit, IA_NA/IA_TA/IA_PD and their nested IA Address/IA Prefix options), and all four RFC 8415/
+    6355 DUID formats (LLT/EN/LL/UUID).
 
-    Open design questions, not yet resolved: what "attack" actually means for each of these is
-    less structurally clear-cut than item 43's own IPv4 signatures -- a rogue RA is, on the wire,
-    indistinguishable from a legitimate router's own RA except by an out-of-band notion of which
-    link-local address SHOULD be advertising (this codebase has no asset-identity/trust concept
-    that could supply that today, the same class of limitation DRSUAPI's own DCSync note already
-    states honestly for "is this host a DC"); a DHCPv6 exhaustion attack needs the same kind of
-    whole-capture volumetric counting item 43's flood signatures already established (per-
-    requesting-client or per-link message-rate counting against a threshold, likely reusable
-    machinery rather than a new design); and whether this belongs inside `attack_detect.hpp`
-    itself (extending it to also walk the IPv6 branch) or as a new, IPv6-specific sibling module
-    once ICMPv6/DHCPv6 have their own decoders to build curated notes on top of.
+    **Honesty about what the attack-detection notes can and cannot determine**, the same posture
+    DRSUAPI's own DCSync note already established for "is this host a DC": `ipv6_attack_detect.hpp`'s
+    own file header cites RFC 6104 directly -- passive observation alone cannot distinguish a rogue
+    router/server from a legitimate redundant one, so every note uses "worth investigating"/
+    "observed co-occurrence" framing, never "attacker detected," and explicitly says a legitimate
+    high-availability pair or router failover can produce the same structural shape. Five signatures,
+    each grounded in a real tool (thc-ipv6's `fake_router6`/`flood_router6`/`parasite6`/
+    `fake_advertise6`/`dos-new-ip6`/`flood_dhcpc6`/`fake_dhcps6`, MITRE ATT&CK T1557.003): RA flood
+    (whole-link count against `--flood-threshold`), RA collision (two+ router identities advertising
+    conflicting default-router lifetime/M-flag/O-flag/prefixes -- keyed so a single router repeating
+    an identical RA never trips it), NA/target-address spoofing (2+ distinct link-layer addresses
+    claiming the same target address), DHCPv6 exhaustion (distinct-Client-DUID count against
+    `--flood-threshold`, not raw packet count, so one legitimate client retrying does not trip it),
+    and rogue DHCPv6 server (2+ distinct Server DUIDs answering ADVERTISE/REPLY). All whole-capture
+    counting, no per-second rate/timestamp modeling -- the same simplification item 43's own flood
+    counters already use. RELAY-FORW/REPL messages are excluded from DHCPv6 signature counting
+    entirely (this decoder does not recurse into the relayed inner message, so a relay's own
+    Client/Server Identifier fields are never populated to begin with).
+
+    **A real dispatch-order collision found and fixed at the fixture level, not by reordering
+    dispatch**: DHCPv6's wire layout puts the transaction ID's high two bytes where HART-IP's own
+    opportunistic `GateKind::UdpPortIndependent` gate (tried on every UDP port, ahead of DHCPv6's
+    port-gated dispatch in the cascade) checks MessageType/MessageID -- small sequential test
+    transaction IDs (0x000001, 0x000002, ...) fell inside that gate's byte-value set purely by
+    chance, so every synthetic DHCPv6 test packet was being claimed as `[hartip]` first. Reordering
+    dispatch was considered and rejected (this codebase's own documented CODESYS/HART-IP TCP lesson
+    states that reordering HART-IP's dispatch position "was tried while scoping this feature and
+    measurably regressed this project's own Modbus/S7comm test corpus"; DNS sits in the same
+    position after HART-IP today and tolerates the same theoretical risk). Fixed instead by OR-ing
+    every synthetic transaction ID with a fixed high byte (0xAA) that structurally cannot fall
+    inside HART-IP's MessageType set -- the same "a negative control needs checking against every
+    port-independent decoder in the codebase" lesson item 44's own CODESYS/HART-IP UDP fixture fix
+    already established, applied here to a positive-case fixture instead.
+
+    A second, smaller fixture collision: `tests/sample_link_transport_layers.pcap`'s own
+    "recognized-but-not-decoded IP protocol number" example packet used ICMPv6 (protocol 58) --
+    which this item's own new decoder now genuinely decodes, so that packet stopped exercising the
+    fallback path it was meant to test. Switched to SCTP (protocol 132, confirmed to have no
+    decoder anywhere in this codebase) instead, with the Python fixture's own comment recording the
+    full ICMP-v4 -> ICMPv6 -> SCTP history; the CTest name/regex updated to match
+    (`ip_layer_sctp_protocol_number_named`).
+
+    28 new CTest tests across six new synthetic fixtures (`tests/sample_icmpv6_ndp.pcap`,
+    `tests/sample_dhcpv6.pcap`, `tests/sample_ipv6_attack_ra_collision.pcap`, `tests/
+    sample_ipv6_attack_na_spoof.pcap`, `tests/sample_ipv6_attack_dhcpv6_exhaustion.pcap`, `tests/
+    sample_ipv6_attack_rogue_dhcpv6_server.pcap`): NDP message/option decode including a
+    deliberately checksum-mismatched packet (correctly flagged invalid) and two graceful-degradation
+    cases (an unrecognized NDP option type named and skipped, and a malformed Length==0 option that
+    stops the option walk with an explanatory note instead of hanging or misparsing); the full
+    DHCPv6 message-type/DUID-format/IA-option matrix including a RELAY-FORW header (inner message
+    correctly left undecoded) and a non-success Status Code; and, for every attack-detection
+    signature except the whole-link RA-flood counter, both a positive case AND a negative/control
+    case in the same capture -- explicitly including the two cases called out as mandatory to check
+    by hand rather than just trust the regex: a single router repeating an identical RA does NOT
+    produce a collision note, and one client legitimately retrying its SOLICIT does NOT count as a
+    second distinct DHCPv6 exhaustion identity. Full suite passed with zero regressions in both the
+    default and `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF` configs (1952/1952 and 1940/1940
+    respectively), zero-warning clean rebuilds in both.
+
+    Explicitly out of scope, stated honestly in both new decoders' own file headers: SEND (RFC
+    3971) or any cryptographic RA authentication; recursing into a DHCPv6 RELAY-FORW/REPL message's
+    own relayed inner message; any real per-second rate limiting (whole-capture counting only, the
+    same limitation item 43's own flood counters already carry); and, as ever, any field these
+    decoders do not name above. As with every recent protocol addition, all six new `.pcap` fixtures
+    are entirely synthetic -- no real IPv6/DHCPv6 attack-tool capture was available to validate
+    against.
 
 46. **CoAP (Constrained Application Protocol, RFC 7252) -- UDP port 5683.** **Done.** Jurgen asked
     "Add CoAP" -- a bare request naming an IETF standard, not a vendor protocol. CoAP is the IoT/

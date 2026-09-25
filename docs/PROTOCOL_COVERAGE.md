@@ -4829,6 +4829,214 @@ MITM/DoS primitives, more consequential on a flat OT network than a
 segmented, ICMP-filtered IT one. A verified-invalid checksum on a Redirect
 or Destination Unreachable message is itself worth flagging in an audit.
 
+### ICMPv6 / NDP (RFC 4443/4861/4862/8106/4191), IP protocol 58
+
+Roadmap item 45. Rides directly on IPv6 (next-header 58), IPv6's mandatory
+control-plane protocol -- there is no IPv6 equivalent of "just don't run
+ICMP." New, fully self-contained module: `include/conduitscope/icmpv6.hpp`/
+`src/icmpv6.cpp`, `GateKind::IpProtocol`, `ProtocolFilter::Icmpv6Only`/
+`--protocol icmpv6`, distinct from and not sharing any code with the
+IPv4-only ICMP decoder above.
+
+Every message starts with the same 4-byte fixed header --
+Type(1)+Code(1)+Checksum(2) -- decoded and named for every type this
+decoder recognizes. Full (Tier 1) field decoding:
+
+- **Echo Request/Reply** (`128`/`129`) -- Identifier, Sequence Number, and
+  the length of whatever data follows, same shape as ICMPv4's own Echo.
+- **Router Solicitation** (`133`) and **Router Advertisement** (`134`, RFC
+  4861) -- RA decodes Current Hop Limit, the Managed/Other Configuration
+  flags, Router Lifetime, Reachable Time, and Retrans Timer, plus the full
+  NDP option walk below; a Prefix Information option with the Autonomous
+  flag set is called out in the summary line as "SLAAC prefix offered"
+  (RFC 4862).
+- **Neighbor Solicitation** (`135`) and **Neighbor Advertisement** (`136`)
+  -- both decode the Target Address; NA also decodes the Router/Solicited/
+  Override flags.
+- **Redirect** (`137`) -- Target Address and Redirected Destination
+  Address.
+
+Every other type (Destination Unreachable `1`, Packet Too Big `2`, Time
+Exceeded `3`, Parameter Problem `4`, and any unrecognized value) is named
+-- Tier 2 -- with all IANA-registered codes for Destination Unreachable/
+Time Exceeded/Parameter Problem also named, but not decoded further; unlike
+ICMPv4, embedded-original-datagram summarization is out of scope here
+(stated in icmpv6.hpp's own header) -- reusing the IPv6 parser against a
+quoted region duplicates real complexity (extension header walking) for a
+lower-value diagnostic than ICMPv4's simpler case.
+
+**NDP options**: a generic Type(1)+Length-in-8-octet-units(1)+data TLV walk,
+capped at this codebase's usual `max_decoded_objects` limit with a
+truncation note. Decoded: Source/Target Link-Layer Address (types 1/2,
+raw link-layer bytes -- length and interpretation vary by underlying link
+type, shown as hex rather than assumed to be a 6-byte MAC); Prefix
+Information (type 3, RFC 4861/4862 -- prefix, prefix length, On-Link/
+Autonomous flags, valid/preferred lifetimes); MTU (type 5); Recursive DNS
+Server (type 25, RFC 8106, **[SECONDARY-SOURCE]** -- RDNSS was standardized
+after RFC 4861 itself and this decoder's byte layout is corroborated by
+the RFC text but not cross-checked against a second independent
+implementation the way Tier 1 NDP types are) and Route Information (type
+24, RFC 4191, also **[SECONDARY-SOURCE]**, including the 2-bit route
+preference field named High/Medium/Low/Reserved per RFC 4191's own
+encoding). An unrecognized option type is named generically (`NDP option
+type N`) and skipped -- the length field alone is enough to walk past it
+without knowing its contents. A **malformed option (Length == 0)**, which
+RFC 4861 forbids (every real option is at least 8 bytes), stops the option
+walk immediately with an explanatory note rather than looping forever on a
+length field that can never advance the walk -- the same "never hang on
+attacker-controlled length fields" discipline this codebase applies
+throughout.
+
+**Checksum: verified, not just surfaced**, same posture as ICMPv4's own
+Checksum. Unlike ICMPv4, the RFC 4443 checksum is computed over a
+pseudo-header (RFC 8200 Section 8.1: 16-byte source + 16-byte destination
++ upper-layer length + zero-padding + next-header) that needs the OUTER
+IPv6 addresses, not just the ICMPv6 message bytes themselves -- `DecodeContext`
+gained `ipv6_src_addr`/`ipv6_dst_addr` fields for this, populated only by
+`decoder.cpp`'s IPv6 branch (mirroring the existing `ip_src_addr`
+narrow-interface precedent IGRP already established), so a mismatch is
+reported (`icmpv6_checksum_valid: false`, plus a note) with the same
+"truncated capture, crafted/corrupted packet, or addresses weren't
+available to validate against" honesty ICMPv4's own note already uses.
+
+**Security context**: ICMPv6/NDP has no authentication by default (SEND,
+RFC 3971, is out of scope -- not attempted, see icmpv6.hpp's own header).
+A rogue Router Advertisement or a spoofed Neighbor Advertisement is, on
+the wire, structurally indistinguishable from a legitimate one -- see the
+IPv6 Attack Detection section below for what this codebase does and does
+not claim to determine about that.
+
+### DHCPv6 (RFC 8415, RFC 6355 DUID-UUID), UDP ports 546/547
+
+Roadmap item 45, alongside ICMPv6/NDP above -- the two most commonly
+paired surfaces for IPv6 SLAAC/DHCPv6-based network attacks. New, fully
+self-contained module: `include/conduitscope/dhcpv6.hpp`/
+`src/dhcpv6.cpp`, `GateKind::UdpPort` (client port 546, server port 547),
+`ProtocolFilter::Dhcpv6Only`/`--protocol dhcpv6`, `--dhcpv6-port`/
+`extra_dhcpv6_ports` (widens, and under an explicit `--protocol dhcpv6`
+un-gates, port detection the same way `--dicom-port`/`--fox-port` do --
+DHCPv6 has no magic-byte-strength structural gate of its own, so unlike
+most `--x-port` options this one genuinely does gate detection, the same
+BSAP/CoAP/RIP/HSRP/DNS-style port-gated posture already documented
+elsewhere in this section). Distinct from, and sharing no code with, this
+codebase's existing DHCP(v4) recognition (Tier 3 enterprise-trust-boundary
+section below) -- the two protocols' wire formats diverge enough (DHCPv6's
+own message-type-keyed header shape, its 2-byte-code/2-byte-length option
+TLV with no padding, and its DUID-based identity model in place of DHCPv4's
+chaddr) that no code was shared between them.
+
+**Two header shapes**, dispatched on the first (message type) byte: a
+client/server message (message type + 3-byte transaction ID) covers all of
+SOLICIT/ADVERTISE/REQUEST/CONFIRM/RENEW/REBIND/REPLY/RELEASE/DECLINE/
+RECONFIGURE/INFORMATION-REQUEST (RFC 8415's 13 named types, all named); a
+relay message (RELAY-FORW/RELAY-REPL, message types 12/13) instead carries
+hop-count + 16-byte link-address + 16-byte peer-address. **Relay messages
+are deliberately not recursed into** -- a RELAY-FORW/REPL's own Relay
+Message option (code 9) is decoded only as "present, inner message not
+decoded," stated as out of scope in dhcpv6.hpp's own header; this also
+means a relayed client/server exchange's own Client/Server Identifier
+options never populate the relay packet's own summary or feed the IPv6
+Attack Detection signatures below (deliberately -- decoding through a relay
+correctly would need this decoder to re-enter its own option walk on a
+nested message, out of scope for this first pass).
+
+**Options decoded** (generic Code(2)+Length(2)+exact-length-data TLV walk,
+same truncation-cap convention as ICMPv6's NDP options above): Client/
+Server Identifier (codes 1/2, both carrying a DUID, decoded below); IA_NA/
+IA_TA/IA_PD (codes 3/4/25, each with IAID and, for IA_NA/IA_PD, T1/T2
+renewal timers, plus their own nested option list); IA Address (code 5,
+inside IA_NA/IA_TA -- address, preferred/valid lifetimes); IA Prefix (code
+26, inside IA_PD -- prefix, prefix length, preferred/valid lifetimes;
+**[SECONDARY-SOURCE]** on the exact byte layout, corroborated by RFC 8415
+text but not cross-checked against a second independent implementation);
+Option Request (code 6, the list of requested option codes); Elapsed Time
+(code 8); Status Code (code 13, all RFC 8415-defined codes named --
+Success, NoAddrsAvail, NoBinding, NotOnLink, UseMulticast, NoPrefixAvail --
+plus the option's own free-text status message); Rapid Commit (code 14,
+presence-only flag); Relay Message (code 9, presence-only, see above).
+
+**Four DUID formats** (RFC 8415 Section 11, plus RFC 6355 for the fourth):
+DUID-LLT (hardware type + time-since-2000-01-01 + link-layer address),
+DUID-EN (enterprise number + opaque vendor-defined identifier, shown as a
+byte count rather than assumed to be text), DUID-LL (hardware type + link-
+layer address, no time component), and DUID-UUID (RFC 6355, a fixed
+18-byte type+UUID, rendered in standard 8-4-4-4-12 hex-with-hyphens form).
+A DUID's raw bytes are also kept internally as a comparable/hashable key --
+used by the IPv6 Attack Detection signatures below to count DISTINCT
+client/server identities rather than raw packet volume.
+
+### IPv6 Attack Detection (SLAAC/rogue Router Advertisement and DHCPv6 spoofing/exhaustion/misconfiguration)
+
+Roadmap item 45's third module, alongside ICMPv6/NDP and DHCPv6 above:
+`include/conduitscope/ipv6_attack_detect.hpp`/`src/ipv6_attack_detect.cpp`.
+A new, IPv6-specific sibling to the IPv4-only Attack Detection module
+below -- not an extension of it, and that module's own header still states
+outright that `decoder.cpp`'s IPv6 branch never calls into it. Owned
+directly by `Decoder` (`ipv6_attack_state_`, alongside, not instead of,
+`attack_state_`), reusing `DEFAULT_FLOOD_THRESHOLD`/`DecodeOptions::
+flood_threshold`/`--flood-threshold` rather than introducing a second
+threshold concept -- one shared, overridable threshold governs both the
+IPv4 and IPv6 volumetric counters.
+
+**Honesty about what this can and cannot determine**, stated explicitly in
+this module's own header, citing RFC 6104 directly: passive observation
+alone cannot distinguish a rogue router or DHCPv6 server from a legitimate
+redundant one (a router failover pair, or a real high-availability DHCPv6
+server pair, can produce the exact same structural shape as an attack).
+Every note this module emits uses "worth investigating"/"observed
+co-occurrence" framing -- never "attacker detected" -- and says so
+explicitly in the note text itself, the same honesty DRSUAPI's own DCSync
+note already established for "is this host a domain controller." All
+counting is whole-capture, not a real per-second rate -- the same
+documented tradeoff the IPv4 Attack Detection module's own flood counters
+already carry.
+
+**Five signatures**, each grounded in a real published attack tool
+(thc-ipv6's `fake_router6`, `flood_router6`, `parasite6`,
+`fake_advertise6`, `dos-new-ip6`, `flood_dhcpc6`, and `fake_dhcps6`; MITRE
+ATT&CK T1557.003 for DHCP spoofing generally):
+
+- **RA flood** -- a whole-link count of Router Advertisement messages
+  against `--flood-threshold`, fires once. The IPv6 analogue of
+  `flood_router6`.
+- **RA collision** -- two or more distinct RA identities (keyed by source
+  address, or source address plus Source Link-Layer Address option when
+  present) observed advertising conflicting default-router information
+  (differing Router Lifetime, Managed/Other flags, or advertised prefix
+  set) within the same capture; a Router Lifetime of 0 (a router
+  withdrawing itself) is excluded from the comparison so a router
+  gracefully leaving service is never flagged against its own prior
+  advertisement. A single router repeating an IDENTICAL RA never trips
+  this -- verified explicitly with a dedicated negative-control fixture
+  (`tests/sample_ipv6_attack_ra_collision.pcap`). Fires once per capture.
+  The structural shape of `fake_router6`/RFC 6104's own rogue-RA problem
+  statement.
+- **NA/target-address spoofing** -- two or more distinct link-layer
+  addresses observed sending a Neighbor Advertisement for the same Target
+  Address; fires once per target address. The IPv6 analogue of ARP
+  spoofing -- the structural shape of `parasite6`/`fake_advertise6`, or
+  the DAD-DoS tool `dos-new-ip6`.
+- **DHCPv6 exhaustion** -- a count of DISTINCT Client DUIDs (not raw
+  packet count) observed sending SOLICIT/REQUEST within the capture,
+  against `--flood-threshold`; one legitimate client retrying its own
+  SOLICIT with the same DUID never counts as a second identity -- verified
+  explicitly with a dedicated negative-control fixture (`tests/
+  sample_ipv6_attack_dhcpv6_exhaustion.pcap`, checked at both the default
+  threshold and a small `--flood-threshold` override sized to the
+  fixture). The structural shape of `flood_dhcpc6`'s address-pool
+  starvation via many spoofed client identities.
+- **Rogue DHCPv6 server** -- two or more distinct Server DUIDs observed
+  answering ADVERTISE/REPLY within the capture; fires once per capture.
+  The structural shape of `fake_dhcps6`, and MITRE ATT&CK T1557.003's own
+  detection analytic for DHCP spoofing generally (multiple competing
+  offers from non-authorized servers).
+
+Messages arriving inside a DHCPv6 RELAY-FORW/RELAY-REPL are excluded from
+both DHCPv6 signatures entirely, consistent with this decoder not
+recursing into the relayed inner message (see the DHCPv6 section above) --
+a relay packet's own top-level fields never carry a Client/Server
+Identifier to key on.
+
 ### RIP / IGMP / VRRP / HSRP
 
 Four IT routing/redundancy protocols, added alongside this project's OT/ICS
@@ -6079,18 +6287,21 @@ protocol number registry (not reverse-engineered from a single capture):
   failure within a recognized one) still falls through to `non-ip`, named as
   IEEE 802.3 Slow Protocols the same as before this decoder existed.
 - **IPv4 protocol numbers** (`ipv4.hpp`'s `ip_protocol_name`): IPv6-in-IPv4,
-  GRE, ESP, AH, ICMPv6, SCTP are named but not decoded further (`tests/
+  GRE, ESP, AH, SCTP are named but not decoded further (`tests/
   sample_link_transport_layers.pcap`'s own "recognized-but-not-decoded"
-  example packet uses ICMPv6, protocol 58, for exactly this reason -- see
-  below). ICMP (protocol 1), IGMP, VRRP, IGRP, PIM, EIGRP, and OSPF
-  (protocol numbers 1, 2, 112, 9, 103, 88, and 89) get their own dedicated
-  handling instead of just a name -- see PROTOCOL COVERAGE's "ICMP", "RIP /
-  IGMP / VRRP / HSRP", and "IGRP / PIM / EIGRP / OSPF" sections -- as do TCP
-  and UDP (below and elsewhere in this document). ICMP was originally in
-  this named-but-undecoded group too; full ICMP decoding was added later
-  (see the dedicated ICMP section above), at which point the fixture
-  example here switched to ICMPv6, the nearest still-undecoded analogue, so
-  this "named but not decoded" case keeps being exercised at all.
+  example packet uses SCTP, protocol 132, for exactly this reason -- see
+  below). ICMP (protocol 1), IGMP, VRRP, IGRP, PIM, EIGRP, OSPF, and ICMPv6
+  (protocol numbers 1, 2, 112, 9, 103, 88, 89, and 58) get their own
+  dedicated handling instead of just a name -- see PROTOCOL COVERAGE's
+  "ICMP", "RIP / IGMP / VRRP / HSRP", "IGRP / PIM / EIGRP / OSPF", and
+  "ICMPv6 / NDP" sections -- as do TCP and UDP (below and elsewhere in this
+  document). ICMP and, later, ICMPv6 were both originally in this
+  named-but-undecoded group; full ICMP decoding was added first (see the
+  dedicated ICMP section above), at which point the fixture example here
+  switched to ICMPv6 as the nearest still-undecoded analogue, and full
+  ICMPv6/NDP decoding (roadmap item 45) was added after that, at which
+  point the fixture example switched again, to SCTP, so this "named but not
+  decoded" case keeps being exercised at all.
 - **UDP** (`udp.hpp`, protocol `udp`): the 8-byte UDP header itself
   (source/destination port, declared length, clamped to what was actually
   captured the same way `parse_ipv4` already clamps to IPv4's own

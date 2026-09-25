@@ -1447,7 +1447,8 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                                      "padding, not real payload)");
             }
             return decode_ip_payload(std::move(out), ip6.next_header, ip6.payload, ip6.hop_limit, index,
-                                      /*ip_version=*/6, /*ipv4_src_addr_for_igrp=*/0);
+                                      /*ip_version=*/6, /*ipv4_src_addr_for_igrp=*/0,
+                                      /*ipv6_src_addr=*/ip6.src_addr, /*ipv6_dst_addr=*/ip6.dst_addr);
         }
 
         Ipv4Header ip = parse_ipv4(network_layer_payload);
@@ -1498,7 +1499,8 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
 // duplicating the cascade per version.
 DecodedPacket Decoder::decode_ip_payload(DecodedPacket out, uint8_t protocol, ByteSpan payload,
                                           uint8_t ttl_or_hop_limit, size_t index, int ip_version,
-                                          uint32_t ipv4_src_addr_for_igrp) const {
+                                          uint32_t ipv4_src_addr_for_igrp,
+                                          Ipv6Address ipv6_src_addr, Ipv6Address ipv6_dst_addr) const {
     (void)ttl_or_hop_limit;  // out.ttl is already populated by both callers before this is reached;
                               // kept as a parameter for symmetry with protocol/payload and because a
                               // future caller of this cascade may need it even though none in this
@@ -2357,6 +2359,47 @@ DecodedPacket Decoder::decode_ip_payload(DecodedPacket out, uint8_t protocol, By
                 }
             }
 
+            // Roadmap item 45 addition: DHCPv6 -- UNLIKE every other UDP check above except DNS/
+            // mDNS/LLMNR/NBT-NS just above, this is port-GATED in Auto mode, not tried
+            // opportunistically port-independent: try_parse_dhcpv6 accepts almost any payload with
+            // a plausible msg-type byte (see dhcpv6.hpp's own file header on why it leans on the
+            // port gate to actually keep it from mis-firing), the same posture DNS/mDNS/LLMNR/
+            // NBT-NS already have. UNLIKE those four, DHCPv6 checks EITHER of its own two default
+            // ports (546 client, 547 server) at once, the same "two default ports, neither is
+            // merely widening the other" shape DICOM_PORT/DICOM_PORT_ALT already established.
+            bool want_dhcpv6 = options_.protocol_filter == ProtocolFilter::Auto ||
+                                options_.protocol_filter == ProtocolFilter::Dhcpv6Only;
+            bool require_dhcpv6_port = options_.protocol_filter == ProtocolFilter::Auto;
+            if (want_dhcpv6) {
+                bool port_match =
+                    port_in(udp.src_port, DHCPV6_CLIENT_PORT, options_.extra_dhcpv6_ports) ||
+                    port_in(udp.dst_port, DHCPV6_CLIENT_PORT, options_.extra_dhcpv6_ports) ||
+                    port_in(udp.src_port, DHCPV6_SERVER_PORT, options_.extra_dhcpv6_ports) ||
+                    port_in(udp.dst_port, DHCPV6_SERVER_PORT, options_.extra_dhcpv6_ports);
+                if (!require_dhcpv6_port || port_match) {
+                    DecodeContext ctx;
+                    ctx.protocol_id = "dhcpv6";
+                    if (auto result = dhcpv6_decoder().decode(udp.payload, ctx)) {
+                        const Dhcpv6Message& msg = result->as<Dhcpv6Message>();
+                        out.protocol = "dhcpv6";
+                        out.summary = msg.summary;
+                        for (const auto& n : msg.notes) out.notes.push_back(n);
+                        // IPv6 attack detection (see ipv6_attack_detect.hpp): DHCPv6 exhaustion
+                        // (distinct Client DUIDs) and rogue/multiple-server detection (distinct
+                        // Server DUIDs).
+                        ipv6_attack_state_.observe_dhcpv6(msg, out.notes);
+                        out.result = *result;
+                        if (!port_match) {
+                            out.notes.push_back("seen on UDP port " + std::to_string(udp.src_port) +
+                                                 "->" + std::to_string(udp.dst_port) +
+                                                 ", which is not a configured/standard DHCPv6 port "
+                                                 "(546 client / 547 server)");
+                        }
+                        return out;
+                    }
+                }
+            }
+
             // Tier 1 "IT protocols an OT auditor flags" recognition -- see it_protocols.hpp and the
             // matching comment on the TCP side of this dispatch (reassemble_tcp_payload's own tail)
             // for why this is tried last. Only TeamViewer, AnyDesk, and Zoom are reachable here in
@@ -2505,6 +2548,34 @@ DecodedPacket Decoder::decode_ip_payload(DecodedPacket out, uint8_t protocol, By
                     // Attack detection (see attack_detect.hpp): Smurf, ICMP Redirect, and the
                     // ICMP (Echo Request) flood counter.
                     attack_state_.observe_icmp(msg, out.dst_ip, out.notes);
+                    out.result = *result;
+                    return out;
+                }
+            }
+        }
+
+        // Roadmap item 45 addition: ICMPv6 (IP protocol 58, IANA-exclusive -- a real IPv4 packet
+        // never declares it, so no IPv4/IPv6 guard is needed here, the same posture ICMP(v4)'s own
+        // block above has for protocol 1). Reached in practice only through this function's own
+        // IPv6 caller (decode()'s own IPv6 branch), which is the only call site that ever populates
+        // ipv6_src_addr/ipv6_dst_addr with real addresses -- see icmpv6.hpp's own CHECKSUM section.
+        if (protocol == ICMPV6_IP_PROTOCOL) {
+            bool want_icmpv6 = options_.protocol_filter == ProtocolFilter::Auto ||
+                                options_.protocol_filter == ProtocolFilter::Icmpv6Only;
+            if (want_icmpv6) {
+                DecodeContext ctx;
+                ctx.protocol_id = "icmpv6";
+                ctx.ipv6_src_addr = ipv6_src_addr;
+                ctx.ipv6_dst_addr = ipv6_dst_addr;
+                if (auto result = icmpv6_decoder().decode(payload, ctx)) {
+                    const Icmpv6Message& msg = result->as<Icmpv6Message>();
+                    out.protocol = "icmpv6";
+                    out.summary = msg.summary;
+                    for (const auto& n : msg.notes) out.notes.push_back(n);
+                    // IPv6 attack detection (see ipv6_attack_detect.hpp): RA identity collision, RA
+                    // flood, and NS/NA spoofing -- the IPv6 sibling of attack_state_.observe_icmp
+                    // above, NOT a call into attack_detect.hpp itself (which stays IPv4-only).
+                    ipv6_attack_state_.observe_icmpv6(msg, out.src_ip, out.notes);
                     out.result = *result;
                     return out;
                 }

@@ -28,6 +28,7 @@
 #include "conduitscope/cotp.hpp"
 #include "conduitscope/dcom.hpp"
 #include "conduitscope/devicenet.hpp"
+#include "conduitscope/dhcpv6.hpp"
 #include "conduitscope/dicom.hpp"
 #include "conduitscope/dnp3.hpp"
 #include "conduitscope/dns.hpp"
@@ -43,10 +44,12 @@
 #include "conduitscope/hartip.hpp"
 #include "conduitscope/hsrp.hpp"
 #include "conduitscope/icmp.hpp"
+#include "conduitscope/icmpv6.hpp"
 #include "conduitscope/ieee802154.hpp"
 #include "conduitscope/iec104.hpp"
 #include "conduitscope/igmp.hpp"
 #include "conduitscope/igrp.hpp"
+#include "conduitscope/ipv6_attack_detect.hpp"
 #include "conduitscope/it_protocols.hpp"
 #include "conduitscope/j1939.hpp"
 #include "conduitscope/kerberos.hpp"
@@ -363,6 +366,19 @@ enum class ProtocolFilter {
                            // "explicit --protocol X tries its own gate port-independently too"
                            // exception every other GateKind::TcpPort protocol already has -- see
                            // fox.hpp's own "PORT 4911 / FOXS" section.
+    Icmpv6Only,            // only attempt ICMPv6 (including Neighbor Discovery Protocol) decoding
+                           // -- see icmpv6.hpp. GateKind::IpProtocol (IP protocol number 58,
+                           // IANA-exclusive to ICMPv6), the IPv6 sibling of IcmpOnly above --
+                           // reached only through decoder.cpp's IPv6 branch in practice, though the
+                           // dispatch itself needs no IPv4/IPv6 guard (a real IPv4 packet never
+                           // declares protocol 58). Roadmap item 45's first half.
+    Dhcpv6Only,            // only attempt DHCPv6 decoding -- see dhcpv6.hpp. GateKind::UdpPort,
+                           // port-gated in Auto mode on EITHER of its own two default ports (546
+                           // client, 547 server -- see DHCPV6_CLIENT_PORT/DHCPV6_SERVER_PORT), the
+                           // same "checks TWO default ports automatically" shape DicomOnly already
+                           // established above, not the "one list, two ports, different transports"
+                           // shape most other extra_*_ports fields have. Roadmap item 45's second
+                           // half.
 };
 
 struct DecodeOptions {
@@ -613,6 +629,14 @@ struct DecodeOptions {
     // mode, the same "structural signature overrides the port gate" treatment VNC/SMB/SSH/HTTP/DHCP
     // already have -- see tunnel_vpn.hpp's own header comment for why.
     std::vector<uint16_t> extra_tunnel_vpn_ports;
+    // Roadmap item 45 addition: UNLIKE most extra_*_ports lists above, this one DOES gate
+    // detection in Auto mode, joining extra_dns_ports/extra_mdns_ports/etc.'s own group -- DHCPv6
+    // has no self-describing wire-format signal strong enough to try port-independently (see
+    // dhcpv6.hpp's own try_parse_dhcpv6 comment). Widens EITHER of DHCPv6's own two default ports
+    // (546 client, 547 server -- DHCPV6_CLIENT_PORT/DHCPV6_SERVER_PORT), the same "one list, two
+    // ports" shape extra_dicom_ports already has for DICOM_PORT/DICOM_PORT_ALT, not the
+    // "one shared port across two transports" shape extra_hartip_ports/extra_kerberos_ports have.
+    std::vector<uint16_t> extra_dhcpv6_ports;
     // If true, a parse failure at the Ethernet/IPv4/TCP layer is rethrown to
     // the caller instead of being recorded as a per-packet "parse-error"
     // result. Off by default so one malformed packet doesn't abort decoding
@@ -1208,6 +1232,7 @@ public:
     explicit Decoder(DecodeOptions options) : options_(std::move(options)) {
         set_resource_limits(options_.limits);
         attack_state_.flood_threshold = options_.flood_threshold;
+        ipv6_attack_state_.flood_threshold = options_.flood_threshold;
     }
 
     // May throw ParseError only when options.strict is true and an
@@ -1233,9 +1258,17 @@ private:
     // src_ip/dst_ip/ip_protocol/ttl itself. See decoder.cpp's own comment right above this method's
     // definition for the full rationale (why this exists as its own method rather than two near-
     // duplicate ~2000-line cascades, one per IP version).
+    // Roadmap item 45 addition: ipv6_src_addr/ipv6_dst_addr are threaded through the same way
+    // ipv4_src_addr_for_igrp already was for IGRP's own one-off need (see that parameter's own
+    // comment) -- ICMPv6's checksum (icmpv6.hpp) needs the OUTER IPv6 packet's own addresses, which
+    // this cascade otherwise never touches. Left at their default (an all-zero Ipv6Address) by the
+    // IPv4 call site, which has no real IPv6 addresses to give; only the IPv6 call site in
+    // decode() populates them from the ip6 header it already parsed.
     DecodedPacket decode_ip_payload(DecodedPacket out, uint8_t protocol, ByteSpan payload,
                                      uint8_t ttl_or_hop_limit, size_t index, int ip_version,
-                                     uint32_t ipv4_src_addr_for_igrp) const;
+                                     uint32_t ipv4_src_addr_for_igrp,
+                                     Ipv6Address ipv6_src_addr = Ipv6Address{},
+                                     Ipv6Address ipv6_dst_addr = Ipv6Address{}) const;
 
     DecodeOptions options_;
 
@@ -1268,6 +1301,13 @@ private:
     // the same reason as tcp_reassembly_/registry_flow_state_ above -- cross-packet state
     // accumulated across decode() calls on this one Decoder instance.
     mutable AttackDetectionState attack_state_;
+
+    // Roadmap item 45 addition: the IPv6-specific sibling of attack_state_ above -- see
+    // ipv6_attack_detect.hpp's own file header for why this is a separate class/member rather than
+    // an extension of AttackDetectionState (attack_detect.hpp stays IPv4-only, unmodified). Same
+    // "not reached through registry_flow_state_, needs to see every ICMPv6/DHCPv6 packet regardless
+    // of session" reasoning, and the same `mutable`-for-cross-packet-state posture.
+    mutable Ipv6AttackDetectionState ipv6_attack_state_;
 
     // MQTT's own per-session learned protocol version used to live here as a bespoke
     // mqtt_session_version_ map -- migration batch 2 (Stage 11) moved it into MqttFlowState,

@@ -916,13 +916,16 @@ def build_link_and_transport_layer_sample():
     add_eth(0x9999, bytes([0xCC] * 10))            # unrecognized ethertype -- must stay unnamed
 
     # A non-TCP, non-UDP IPv4 payload that this tool names but still does not further decode --
-    # ICMPv6 (IP protocol 58), arbitrary content, named via ip_protocol_name. IP protocol 1
-    # (plain ICMP) used to be the example here, but try_parse_icmp now genuinely decodes it (see
-    # icmp.hpp/icmp.cpp and tests/sample_icmp.pcap for that dedicated coverage) -- ICMPv6 keeps
-    # this packet actually exercising the "recognized-but-not-decoded" fallback path it's meant
-    # to test, rather than silently starting to test something else.
-    icmpv6 = bytes([0x80, 0x00, 0x00, 0x00]) + bytes([0x01, 0x02, 0x03, 0x04])
-    add_ip(58, icmpv6)
+    # SCTP (IP protocol 132), arbitrary content, named via ip_protocol_name. IP protocol 1 (plain
+    # ICMP) used to be the example here, then ICMPv6 (58) after try_parse_icmp started genuinely
+    # decoding protocol 1 -- roadmap item 45 (icmpv6.hpp/icmpv6.cpp) now genuinely decodes protocol
+    # 58 too (see tests/sample_icmpv6_ndp.pcap for that dedicated coverage), so SCTP keeps this
+    # packet actually exercising the "recognized-but-not-decoded" fallback path it's meant to test,
+    # rather than silently starting to test something else -- the same "prove the improvement,
+    # don't just add new tests" discipline this project used when MELSEC was wired ahead of
+    # Modbus's own fallback (docs/DEVELOPMENT.md).
+    sctp = bytes([0x80, 0x00, 0x00, 0x00]) + bytes([0x01, 0x02, 0x03, 0x04])
+    add_ip(132, sctp)
 
     # UDP on EtherNet/IP's own CIP I/O port (2222) -- but only 4 bytes of arbitrary content, far
     # too short to be a genuine Sequenced Address Item (see enip.hpp), so try_parse_cip_io
@@ -18136,6 +18139,572 @@ def build_fox_sample():
     (TESTS_DIR / "sample_fox.pcap").write_bytes(data)
 
 
+# --- ICMPv6 / Neighbor Discovery Protocol (icmpv6.hpp) + DHCPv6 (dhcpv6.hpp) +
+#     ipv6_attack_detect.hpp -- roadmap item 45 ------------------------------------------------
+# Wire-format helpers below mirror icmp_message()/rfc1071_checksum()'s own conventions (see those
+# functions' own docstrings) -- "compute the real value by default, allow an override for a
+# deliberate-mismatch test case" for the checksum, and a small typed builder per message/option
+# shape for readability, the same style ipv6_packet()/ipv6_extension_header() already established
+# for IPv6 itself.
+
+def icmpv6_pseudo_checksum(src_ip: str, dst_ip: str, message: bytes) -> int:
+    """RFC 4443 2.3's own pseudo-header checksum -- mirrors icmpv6.cpp's own
+    verify_icmpv6_checksum byte-for-byte. Pseudo-header: source(16) + destination(16) +
+    upper-layer packet length(4, BE) + zero(3) + next header(1)=58, followed by `message` itself
+    (checksum field included, the value being solved for)."""
+    pseudo = (socket.inet_pton(socket.AF_INET6, src_ip) + socket.inet_pton(socket.AF_INET6, dst_ip) +
+              struct.pack("!I", len(message)) + b"\x00\x00\x00" + bytes([58]))
+    return rfc1071_checksum(pseudo + message)
+
+
+def icmpv6_message(icmpv6_type: int, code: int, body: bytes, src_ip: str, dst_ip: str,
+                    checksum_override: int = None) -> bytes:
+    """Type(1) + Code(1) + Checksum(2) + `body` -- see icmpv6.hpp's own CHECKSUM section. UNLIKE
+    ICMPv4's own icmp_message() above, the checksum needs the OUTER IPv6 packet's own src_ip/
+    dst_ip. Checksum defaults to the real, correctly computed value so a freshly generated packet
+    decodes with icmpv6_checksum_valid=true; pass an explicit int to deliberately produce a
+    mismatch."""
+    if checksum_override is not None:
+        return struct.pack("!BBH", icmpv6_type, code, checksum_override) + body
+    message_no_checksum = struct.pack("!BBH", icmpv6_type, code, 0) + body
+    checksum = icmpv6_pseudo_checksum(src_ip, dst_ip, message_no_checksum)
+    return struct.pack("!BBH", icmpv6_type, code, checksum) + body
+
+
+def ndp_option(opt_type: int, data: bytes) -> bytes:
+    """Type(1) + Length(1, UNIT = 8 OCTETS) + data, zero-padded up to the next 8-byte boundary --
+    RFC 4861 4.6's own generic NDP option TLV (see icmpv6.hpp's own file header). Every *_option
+    helper below builds its own `data` and calls this."""
+    total = 2 + len(data)
+    pad = (-total) % 8
+    padded = data + b"\x00" * pad
+    length_units = (2 + len(padded)) // 8
+    return struct.pack("!BB", opt_type, length_units) + padded
+
+
+def ndp_raw_malformed_option(opt_type: int) -> bytes:
+    """A deliberately malformed option: Type(1) + Length(1)=0 -- RFC 4861 4.6 forbids this (a real
+    option is always at least 8 bytes); used to prove icmpv6.cpp's decode_ndp_options stops the
+    walk instead of looping forever."""
+    return struct.pack("!BB", opt_type, 0)
+
+
+def ndp_source_link_layer_option(mac_bytes: bytes) -> bytes:
+    return ndp_option(1, mac_bytes)
+
+
+def ndp_target_link_layer_option(mac_bytes: bytes) -> bytes:
+    return ndp_option(2, mac_bytes)
+
+
+def ndp_prefix_information_option(prefix: str, prefix_length: int, on_link: bool, autonomous: bool,
+                                   valid_lifetime: int, preferred_lifetime: int) -> bytes:
+    flags = (0x80 if on_link else 0) | (0x40 if autonomous else 0)
+    data = (struct.pack("!BB", prefix_length, flags) +
+            struct.pack("!II", valid_lifetime, preferred_lifetime) +
+            b"\x00\x00\x00\x00" +
+            socket.inet_pton(socket.AF_INET6, prefix))
+    return ndp_option(3, data)  # always Length=4 (32 bytes) by construction, per RFC 4861 4.6.2
+
+
+def ndp_mtu_option(mtu: int) -> bytes:
+    return ndp_option(5, b"\x00\x00" + struct.pack("!I", mtu))
+
+
+def ndp_rdnss_option(lifetime: int, addresses: list) -> bytes:
+    data = b"\x00\x00" + struct.pack("!I", lifetime)
+    for addr in addresses:
+        data += socket.inet_pton(socket.AF_INET6, addr)
+    return ndp_option(25, data)
+
+
+def ndp_route_information_option(prefix: str, prefix_length: int, preference: int,
+                                  route_lifetime: int, prefix_bytes: int = 16) -> bytes:
+    rsvd_prf = (preference & 0x03) << 3
+    data = struct.pack("!BB", prefix_length, rsvd_prf) + struct.pack("!I", route_lifetime)
+    full = socket.inet_pton(socket.AF_INET6, prefix)
+    data += full[:prefix_bytes]
+    return ndp_option(24, data)
+
+
+def icmpv6_router_solicitation(options: bytes = b"") -> bytes:
+    return b"\x00\x00\x00\x00" + options
+
+
+def icmpv6_router_advertisement(cur_hop_limit: int, managed: bool, other: bool, router_lifetime: int,
+                                 reachable_time_ms: int, retrans_timer_ms: int,
+                                 options: bytes = b"") -> bytes:
+    flags = (0x80 if managed else 0) | (0x40 if other else 0)
+    return (struct.pack("!BBH", cur_hop_limit, flags, router_lifetime) +
+            struct.pack("!II", reachable_time_ms, retrans_timer_ms) + options)
+
+
+def icmpv6_neighbor_solicitation(target: str, options: bytes = b"") -> bytes:
+    return b"\x00\x00\x00\x00" + socket.inet_pton(socket.AF_INET6, target) + options
+
+
+def icmpv6_neighbor_advertisement(target: str, router: bool = False, solicited: bool = False,
+                                   override: bool = False, options: bytes = b"") -> bytes:
+    flags = ((0x80000000 if router else 0) | (0x40000000 if solicited else 0) |
+             (0x20000000 if override else 0))
+    return struct.pack("!I", flags) + socket.inet_pton(socket.AF_INET6, target) + options
+
+
+def icmpv6_redirect(target: str, destination: str, options: bytes = b"") -> bytes:
+    return (b"\x00\x00\x00\x00" + socket.inet_pton(socket.AF_INET6, target) +
+            socket.inet_pton(socket.AF_INET6, destination) + options)
+
+
+def icmpv6_echo(identifier: int, sequence: int, data: bytes = b"") -> bytes:
+    return struct.pack("!HH", identifier, sequence) + data
+
+
+ICMPV6_DEST_UNREACHABLE = 1
+ICMPV6_ECHO_REQUEST = 128
+ICMPV6_ECHO_REPLY = 129
+ICMPV6_ROUTER_SOLICITATION = 133
+ICMPV6_ROUTER_ADVERTISEMENT = 134
+ICMPV6_NEIGHBOR_SOLICITATION = 135
+ICMPV6_NEIGHBOR_ADVERTISEMENT = 136
+ICMPV6_REDIRECT = 137
+
+
+def build_icmpv6_ndp_sample():
+    """ICMPv6/NDP coverage (icmpv6.hpp/icmpv6.cpp) -- roadmap item 45's first half. All addresses
+    are link-local (fe80::/10), the realistic scope for Neighbor Discovery traffic. ROUTER_MAC/
+    ROUTER_LL is the "router"; HOST_MAC/HOST_LL is an ordinary host."""
+    ROUTER_MAC = mac("00:11:22:33:44:01")
+    HOST_MAC = mac("00:11:22:33:44:02")
+    ROUTER_LL = "fe80::1"
+    HOST_LL = "fe80::50"
+    ALL_ROUTERS = "ff02::2"
+    ALL_NODES = "ff02::1"
+
+    packets = []
+
+    def add(src_mac, dst_mac, src_ip, dst_ip, icmpv6_type, code, body, checksum_override=None):
+        msg = icmpv6_message(icmpv6_type, code, body, src_ip, dst_ip, checksum_override)
+        packets.append(eth_header(dst_mac, src_mac, ETHERTYPE_IPV6) + ipv6_packet(src_ip, dst_ip, 58, msg))
+
+    # 1) Router Solicitation, host -> all-routers multicast, one Source Link-Layer Address option.
+    add(HOST_MAC, ROUTER_MAC, HOST_LL, ALL_ROUTERS, ICMPV6_ROUTER_SOLICITATION, 0,
+        icmpv6_router_solicitation(ndp_source_link_layer_option(HOST_MAC)))
+
+    # 2) Router Advertisement, router -> all-nodes multicast: Prefix Information with the A
+    #    (autonomous/SLAAC) flag set, MTU, Source Link-Layer Address, plus RDNSS and Route
+    #    Information for their own dedicated coverage (lower-confidence field layouts, see
+    #    icmpv6.hpp's own [SECONDARY-SOURCE] notes).
+    ra_options = (
+        ndp_source_link_layer_option(ROUTER_MAC) +
+        ndp_prefix_information_option("2001:db8:cafe::", 64, on_link=True, autonomous=True,
+                                       valid_lifetime=86400, preferred_lifetime=14400) +
+        ndp_mtu_option(1500) +
+        ndp_rdnss_option(600, ["2001:db8:cafe::53"]) +
+        ndp_route_information_option("2001:db8:f00d::", 48, preference=1, route_lifetime=3600)
+    )
+    add(ROUTER_MAC, HOST_MAC, ROUTER_LL, ALL_NODES, ICMPV6_ROUTER_ADVERTISEMENT, 0,
+        icmpv6_router_advertisement(64, managed=False, other=False, router_lifetime=1800,
+                                     reachable_time_ms=30000, retrans_timer_ms=1000, options=ra_options))
+
+    # 3) Neighbor Solicitation, host -> router (unicast, for simplicity -- the solicited-node
+    #    multicast address a real stack would use doesn't change what this decoder reads).
+    add(HOST_MAC, ROUTER_MAC, HOST_LL, ROUTER_LL, ICMPV6_NEIGHBOR_SOLICITATION, 0,
+        icmpv6_neighbor_solicitation(ROUTER_LL, ndp_source_link_layer_option(HOST_MAC)))
+
+    # 4) Neighbor Advertisement, router -> host: solicited, with a Target Link-Layer Address
+    #    option (RFC 4861 4.4's own SHOULD-include for a solicited unicast reply).
+    add(ROUTER_MAC, HOST_MAC, ROUTER_LL, HOST_LL, ICMPV6_NEIGHBOR_ADVERTISEMENT, 0,
+        icmpv6_neighbor_advertisement(ROUTER_LL, router=True, solicited=True, override=False,
+                                       options=ndp_target_link_layer_option(ROUTER_MAC)))
+
+    # 5) Redirect, router -> host: retarget the host's next-hop for some destination to a
+    #    different on-link router.
+    add(ROUTER_MAC, HOST_MAC, ROUTER_LL, HOST_LL, ICMPV6_REDIRECT, 0,
+        icmpv6_redirect(ROUTER_LL, "2001:db8::99"))
+
+    # 6-7) Echo Request/Reply pair, correctly checksummed.
+    add(HOST_MAC, ROUTER_MAC, HOST_LL, ROUTER_LL, ICMPV6_ECHO_REQUEST, 0,
+        icmpv6_echo(0x1234, 1, b"ping-payload"))
+    add(ROUTER_MAC, HOST_MAC, ROUTER_LL, HOST_LL, ICMPV6_ECHO_REPLY, 0,
+        icmpv6_echo(0x1234, 1, b"ping-payload"))
+
+    # 8) A name-only (Tier 2) type -- Destination Unreachable, code 4 (Port unreachable).
+    add(ROUTER_MAC, HOST_MAC, ROUTER_LL, HOST_LL, ICMPV6_DEST_UNREACHABLE, 4, b"\x00\x00\x00\x00")
+
+    # 9) Deliberately mismatched checksum -- an Echo Request with an explicit wrong checksum value,
+    #    proving icmpv6_checksum_valid comes back false rather than silently validating anyway.
+    add(HOST_MAC, ROUTER_MAC, HOST_LL, ROUTER_LL, ICMPV6_ECHO_REQUEST, 0,
+        icmpv6_echo(0x1234, 2, b"bad-checksum"), checksum_override=0xDEAD)
+
+    # 10) An unknown NDP option type (99) inside an otherwise-valid Router Solicitation -- proves
+    #     decode_ndp_options names it ("NDP option type 99") and walks past it by its own Length
+    #     field rather than failing the whole message.
+    add(HOST_MAC, ROUTER_MAC, HOST_LL, ALL_ROUTERS, ICMPV6_ROUTER_SOLICITATION, 0,
+        icmpv6_router_solicitation(ndp_option(99, b"\xAA\xAA\xAA\xAA\xAA\xAA")))
+
+    # 11) A malformed option (Length == 0) preceded by one valid option -- proves the valid option
+    #     decodes normally and the walk then stops cleanly (options_malformed=true) instead of
+    #     looping forever on a length field that can never advance.
+    add(HOST_MAC, ROUTER_MAC, HOST_LL, ALL_ROUTERS, ICMPV6_ROUTER_SOLICITATION, 0,
+        icmpv6_router_solicitation(ndp_source_link_layer_option(HOST_MAC) +
+                                    ndp_raw_malformed_option(7)))
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_700_000 + i, i * 1000)
+    (TESTS_DIR / "sample_icmpv6_ndp.pcap").write_bytes(data)
+
+
+DHCPV6_CLIENT_PORT = 546
+DHCPV6_SERVER_PORT = 547
+
+
+def dhcpv6_option(code: int, data: bytes) -> bytes:
+    """option-code(2) + option-len(2) + option-data -- RFC 8415 21.1's own generic option TLV, an
+    EXACT byte length with no padding, unlike NDP's own Length-in-8-byte-units shape above."""
+    return struct.pack("!HH", code, len(data)) + data
+
+
+def dhcpv6_duid_llt(hardware_type: int, time_val: int, link_layer_address: bytes) -> bytes:
+    return struct.pack("!HHI", 1, hardware_type, time_val) + link_layer_address
+
+
+def dhcpv6_duid_en(enterprise_number: int, identifier: bytes) -> bytes:
+    return struct.pack("!HI", 2, enterprise_number) + identifier
+
+
+def dhcpv6_duid_ll(hardware_type: int, link_layer_address: bytes) -> bytes:
+    return struct.pack("!HH", 3, hardware_type) + link_layer_address
+
+
+def dhcpv6_duid_uuid(uuid_bytes: bytes) -> bytes:
+    assert len(uuid_bytes) == 16
+    return struct.pack("!H", 4) + uuid_bytes
+
+
+def dhcpv6_client_id(duid: bytes) -> bytes:
+    return dhcpv6_option(1, duid)
+
+
+def dhcpv6_server_id(duid: bytes) -> bytes:
+    return dhcpv6_option(2, duid)
+
+
+def dhcpv6_ia_address(address: str, preferred: int, valid: int, options: bytes = b"") -> bytes:
+    data = socket.inet_pton(socket.AF_INET6, address) + struct.pack("!II", preferred, valid) + options
+    return dhcpv6_option(5, data)
+
+
+def dhcpv6_ia_na(iaid: int, t1: int, t2: int, options: bytes = b"") -> bytes:
+    return dhcpv6_option(3, struct.pack("!III", iaid, t1, t2) + options)
+
+
+def dhcpv6_ia_ta(iaid: int, options: bytes = b"") -> bytes:
+    return dhcpv6_option(4, struct.pack("!I", iaid) + options)
+
+
+def dhcpv6_ia_pd(iaid: int, t1: int, t2: int, options: bytes = b"") -> bytes:
+    return dhcpv6_option(25, struct.pack("!III", iaid, t1, t2) + options)
+
+
+def dhcpv6_ia_prefix(prefix: str, prefix_length: int, preferred: int, valid: int,
+                      options: bytes = b"") -> bytes:
+    data = (struct.pack("!II", preferred, valid) + struct.pack("!B", prefix_length) +
+            socket.inet_pton(socket.AF_INET6, prefix) + options)
+    return dhcpv6_option(26, data)
+
+
+def dhcpv6_oro(codes: list) -> bytes:
+    return dhcpv6_option(6, b"".join(struct.pack("!H", c) for c in codes))
+
+
+def dhcpv6_elapsed_time(centiseconds: int) -> bytes:
+    return dhcpv6_option(8, struct.pack("!H", centiseconds))
+
+
+def dhcpv6_status_code(code: int, message: str = "") -> bytes:
+    return dhcpv6_option(13, struct.pack("!H", code) + message.encode("utf-8"))
+
+
+def dhcpv6_rapid_commit() -> bytes:
+    return dhcpv6_option(14, b"")
+
+
+def dhcpv6_relay_message(inner: bytes) -> bytes:
+    return dhcpv6_option(9, inner)
+
+
+DHCPV6_SOLICIT, DHCPV6_ADVERTISE, DHCPV6_REQUEST, DHCPV6_REPLY = 1, 2, 3, 7
+DHCPV6_RELAY_FORW, DHCPV6_RELAY_REPL = 12, 13
+
+
+def dhcpv6_message(msg_type: int, transaction_id: int, options: bytes = b"") -> bytes:
+    hi = (transaction_id >> 16) & 0xFF
+    mid = (transaction_id >> 8) & 0xFF
+    lo = transaction_id & 0xFF
+    return struct.pack("!B", msg_type) + bytes([hi, mid, lo]) + options
+
+
+def dhcpv6_relay_header(msg_type: int, hop_count: int, link_address: str, peer_address: str,
+                         options: bytes = b"") -> bytes:
+    return (struct.pack("!BB", msg_type, hop_count) +
+            socket.inet_pton(socket.AF_INET6, link_address) +
+            socket.inet_pton(socket.AF_INET6, peer_address) + options)
+
+
+# HART-IP's own opportunistic UDP structural gate (hartip.hpp) accepts MessageType (byte
+# offset 1) in {0,1,2,3,15} AND MessageID (byte offset 2) in {0,1,2,3} -- and DHCPv6's own
+# wire layout puts the transaction-id's own high byte at that same offset 1. Every
+# transaction id below is OR'd with SAFE_XID_BASE (a high byte outside that 5-value set) so
+# these entirely-unrelated fixtures never coincidentally satisfy HART-IP's own gate and get
+# misclassified as hartip instead of dhcpv6 -- the same "a negative control needs checking
+# against every port-independent decoder" lesson docs/DEVELOPMENT.md already records for
+# CODESYS's own fixture history.
+SAFE_XID_BASE = 0xAA0000
+
+
+def build_dhcpv6_sample():
+    """DHCPv6 coverage (dhcpv6.hpp/dhcpv6.cpp) -- roadmap item 45's second half. One client/server
+    pair of link-local addresses; every packet is a standalone UDP/IPv6 datagram (DHCPv6 itself is
+    stateless from this decoder's own point of view -- no cross-packet pairing is attempted)."""
+    CLIENT_MAC = mac("00:11:22:33:55:01")
+    SERVER_MAC = mac("00:11:22:33:55:02")
+    CLIENT_LL = "fe80::60"
+    SERVER_LL = "fe80::2"
+    ALL_DHCP_SERVERS = "ff02::1:2"
+
+    CLIENT_DUID = dhcpv6_duid_llt(1, 700000000, CLIENT_MAC)  # DUID-LLT
+    SERVER_DUID = dhcpv6_duid_ll(1, SERVER_MAC)              # DUID-LL
+    EN_DUID = dhcpv6_duid_en(32473, b"\x01\x02\x03\x04")     # DUID-EN (32473 = IANA "Private
+                                                               # Enterprise" example range)
+    UUID_DUID = dhcpv6_duid_uuid(bytes.fromhex("0123456789abcdef0123456789abcdef"))
+
+    packets = []
+
+    def add(src_mac, dst_mac, src_ip, dst_ip, src_port, dst_port, payload):
+        udp = udp_header(src_port, dst_port, payload) + payload
+        packets.append(eth_header(dst_mac, src_mac, ETHERTYPE_IPV6) +
+                        ipv6_packet(src_ip, dst_ip, 17, udp))
+
+    # 1) SOLICIT: Client ID (DUID-LLT), ORO, Elapsed Time, Rapid Commit.
+    solicit_opts = (dhcpv6_client_id(CLIENT_DUID) + dhcpv6_oro([23, 24]) +
+                     dhcpv6_elapsed_time(0) + dhcpv6_rapid_commit())
+    add(CLIENT_MAC, SERVER_MAC, CLIENT_LL, ALL_DHCP_SERVERS, DHCPV6_CLIENT_PORT, DHCPV6_SERVER_PORT,
+        dhcpv6_message(DHCPV6_SOLICIT, SAFE_XID_BASE | 0x000001, solicit_opts))
+
+    # 2) ADVERTISE: Server ID (DUID-LL), Client ID echoed back, IA_NA containing an IA Address and
+    #    a Status Code Success.
+    ia_na_opts = dhcpv6_ia_address("2001:db8:1::100", 3600, 7200) + dhcpv6_status_code(0, "Success")
+    advertise_opts = (dhcpv6_client_id(CLIENT_DUID) + dhcpv6_server_id(SERVER_DUID) +
+                       dhcpv6_ia_na(0xAAAA0001, 1800, 2880, ia_na_opts))
+    add(SERVER_MAC, CLIENT_MAC, SERVER_LL, CLIENT_LL, DHCPV6_SERVER_PORT, DHCPV6_CLIENT_PORT,
+        dhcpv6_message(DHCPV6_ADVERTISE, SAFE_XID_BASE | 0x000001, advertise_opts))
+
+    # 3) REQUEST / 4) REPLY pair -- the same IA_NA/address accepted.
+    request_opts = (dhcpv6_client_id(CLIENT_DUID) + dhcpv6_server_id(SERVER_DUID) +
+                     dhcpv6_ia_na(0xAAAA0001, 1800, 2880,
+                                  dhcpv6_ia_address("2001:db8:1::100", 3600, 7200)))
+    add(CLIENT_MAC, SERVER_MAC, CLIENT_LL, ALL_DHCP_SERVERS, DHCPV6_CLIENT_PORT, DHCPV6_SERVER_PORT,
+        dhcpv6_message(DHCPV6_REQUEST, SAFE_XID_BASE | 0x000002, request_opts))
+    reply_opts = (dhcpv6_client_id(CLIENT_DUID) + dhcpv6_server_id(SERVER_DUID) +
+                  dhcpv6_ia_na(0xAAAA0001, 1800, 2880, ia_na_opts))
+    add(SERVER_MAC, CLIENT_MAC, SERVER_LL, CLIENT_LL, DHCPV6_SERVER_PORT, DHCPV6_CLIENT_PORT,
+        dhcpv6_message(DHCPV6_REPLY, SAFE_XID_BASE | 0x000002, reply_opts))
+
+    # 5) A non-success Status Code -- REQUEST answered with NoAddrsAvail (code 2) inside its own
+    #    IA_NA (address-pool exhaustion, the ordinary/non-attack way this status shows up).
+    noaddrs_opts = (dhcpv6_client_id(CLIENT_DUID) + dhcpv6_server_id(SERVER_DUID) +
+                     dhcpv6_ia_na(0xAAAA0002, 0, 0,
+                                  dhcpv6_status_code(2, "no addresses available for this subnet")))
+    add(SERVER_MAC, CLIENT_MAC, SERVER_LL, CLIENT_LL, DHCPV6_SERVER_PORT, DHCPV6_CLIENT_PORT,
+        dhcpv6_message(DHCPV6_REPLY, SAFE_XID_BASE | 0x000003, noaddrs_opts))
+
+    # 6) IA_PD with a nested IA Prefix -- prefix delegation, a distinct option family from IA_NA/
+    #    IA Address. Also exercises the DUID-EN and DUID-UUID code paths (as Client/Server ID
+    #    values respectively, even though a real deployment would rarely mix DUID types like this
+    #    -- purely to exercise both code paths in one fixture).
+    iapd_opts = dhcpv6_ia_prefix("2001:db8:beef::", 56, 3600, 7200)
+    pd_reply_opts = (dhcpv6_client_id(EN_DUID) + dhcpv6_server_id(UUID_DUID) +
+                      dhcpv6_ia_pd(0xBBBB0001, 1800, 2880, iapd_opts))
+    add(SERVER_MAC, CLIENT_MAC, SERVER_LL, CLIENT_LL, DHCPV6_SERVER_PORT, DHCPV6_CLIENT_PORT,
+        dhcpv6_message(DHCPV6_REPLY, SAFE_XID_BASE | 0x000004, pd_reply_opts))
+
+    # 7) RELAY-FORW wrapping an inner SOLICIT -- proves the relay header (hop-count/link-address/
+    #    peer-address) decodes, the Relay Message option is recognized structurally, and the inner
+    #    message is deliberately NOT decoded through (see dhcpv6.hpp's own OUT OF SCOPE section).
+    inner_solicit = dhcpv6_message(DHCPV6_SOLICIT, SAFE_XID_BASE | 0x000005,
+                                    dhcpv6_client_id(CLIENT_DUID) + dhcpv6_rapid_commit())
+    relay_opts = dhcpv6_relay_message(inner_solicit)
+    RELAY_MAC = mac("00:11:22:33:55:03")
+    relay_forw = dhcpv6_relay_header(DHCPV6_RELAY_FORW, 0, "2001:db8:1::", CLIENT_LL, relay_opts)
+    add(RELAY_MAC, SERVER_MAC, "2001:db8:1::1", SERVER_LL, DHCPV6_SERVER_PORT, DHCPV6_SERVER_PORT,
+        relay_forw)
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_710_000 + i, i * 1000)
+    (TESTS_DIR / "sample_dhcpv6.pcap").write_bytes(data)
+
+
+def build_ipv6_attack_ra_collision_sample():
+    """ipv6_attack_detect.hpp's own RA-identity-collision signature -- see its file header. Two
+    packets from ROUTER_A repeating an IDENTICAL RA (the negative control: must NOT trigger the
+    note -- a repeated RA from one consistent source is completely normal), then one packet from a
+    second, distinct identity (ROUTER_B: different source IPv6 AND different Source Link-Layer
+    Address MAC) advertising a conflicting Router Lifetime and Prefix -- must trigger the note."""
+    ROUTER_A_MAC = mac("00:aa:aa:aa:aa:01")
+    ROUTER_B_MAC = mac("00:bb:bb:bb:bb:02")
+    HOST_MAC = mac("00:cc:cc:cc:cc:03")
+    ROUTER_A_LL = "fe80::a1"
+    ROUTER_B_LL = "fe80::b1"
+    HOST_LL = "fe80::50"
+    ALL_NODES = "ff02::1"
+
+    packets = []
+
+    def add_ra(src_mac, src_ip, router_lifetime, prefix):
+        options = (ndp_source_link_layer_option(src_mac) +
+                   ndp_prefix_information_option(prefix, 64, on_link=True, autonomous=True,
+                                                  valid_lifetime=86400, preferred_lifetime=14400))
+        body = icmpv6_router_advertisement(64, managed=False, other=False,
+                                            router_lifetime=router_lifetime, reachable_time_ms=0,
+                                            retrans_timer_ms=0, options=options)
+        msg = icmpv6_message(ICMPV6_ROUTER_ADVERTISEMENT, 0, body, src_ip, ALL_NODES)
+        packets.append(eth_header(HOST_MAC, src_mac, ETHERTYPE_IPV6) +
+                        ipv6_packet(src_ip, ALL_NODES, 58, msg))
+
+    # 1-2) ROUTER_A repeats the SAME RA twice -- negative control, must not collide with itself.
+    add_ra(ROUTER_A_MAC, ROUTER_A_LL, 1800, "2001:db8:aaaa::")
+    add_ra(ROUTER_A_MAC, ROUTER_A_LL, 1800, "2001:db8:aaaa::")
+
+    # 3) ROUTER_B: a distinct identity (different source IP AND MAC) advertising a DIFFERENT
+    #    prefix with a different Router Lifetime -- a structural conflict with ROUTER_A.
+    add_ra(ROUTER_B_MAC, ROUTER_B_LL, 300, "2001:db8:bbbb::")
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_720_000 + i, i * 1000)
+    (TESTS_DIR / "sample_ipv6_attack_ra_collision.pcap").write_bytes(data)
+
+
+def build_ipv6_attack_na_spoof_sample():
+    """ipv6_attack_detect.hpp's own NS/NA-spoofing signature -- two distinct link-layer addresses
+    both sending a Neighbor Advertisement claiming the SAME Target Address (2001:db8::99), the IPv6
+    analogue of ARP spoofing."""
+    LEGIT_MAC = mac("00:dd:dd:dd:dd:01")
+    ATTACKER_MAC = mac("00:ee:ee:ee:ee:02")
+    HOST_MAC = mac("00:ff:ff:ff:ff:03")
+    LEGIT_LL = "fe80::d1"
+    ATTACKER_LL = "fe80::e1"
+    HOST_LL = "fe80::50"
+    TARGET = "2001:db8::99"
+
+    packets = []
+
+    def add_na(src_mac, src_ip, claimed_mac):
+        body = icmpv6_neighbor_advertisement(TARGET, router=False, solicited=False, override=True,
+                                              options=ndp_target_link_layer_option(claimed_mac))
+        msg = icmpv6_message(ICMPV6_NEIGHBOR_ADVERTISEMENT, 0, body, src_ip, HOST_LL)
+        packets.append(eth_header(HOST_MAC, src_mac, ETHERTYPE_IPV6) +
+                        ipv6_packet(src_ip, HOST_LL, 58, msg))
+
+    add_na(LEGIT_MAC, LEGIT_LL, LEGIT_MAC)
+    add_na(ATTACKER_MAC, ATTACKER_LL, ATTACKER_MAC)
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_730_000 + i, i * 1000)
+    (TESTS_DIR / "sample_ipv6_attack_na_spoof.pcap").write_bytes(data)
+
+
+def build_ipv6_attack_dhcpv6_exhaustion_sample():
+    """ipv6_attack_detect.hpp's own DHCPv6-exhaustion signature -- enough distinct-Client-DUID
+    SOLICIT messages to cross a small, explicitly-overridden --flood-threshold (5, via the CTest
+    command line itself), plus a negative control: one legitimate client retrying with a
+    byte-identical DUID (same MAC AND same DUID Time value -- only the transaction ID differs,
+    exactly like a real SOLICIT retransmit) that must NOT be counted as two distinct identities.
+    Packets #1/#2 are that one retrying client (1 distinct DUID); packets #3-#7 are 5 further
+    distinct clients (5 more distinct DUIDs) -- 6 distinct DUIDs total, crossing a
+    --flood-threshold of 5 on packet #6."""
+    SERVER_MAC = mac("00:11:11:11:11:01")
+    SERVER_LL = "fe80::2"
+    ALL_DHCP_SERVERS = "ff02::1:2"
+
+    packets = []
+
+    # A DUID-LLT's Time field is part of its own identity -- it is chosen ONCE per real client
+    # (RFC 8415 section 11.2: "the time value is initialized... when the DUID is generated" and
+    # then reused for the lifetime of that DUID), never regenerated per message. The retry case
+    # below deliberately reuses one fixed time value across both retry packets so the two SOLICITs
+    # carry the byte-identical DUID a real retransmit would -- only the transaction ID (an
+    # independent per-message field) differs between the two, exactly as a real client retry looks
+    # on the wire. `xid` is threaded through ONLY for the outer client-side link-local address and
+    # the DHCPv6 transaction ID, never into the DUID's own Time field, precisely so this fixture
+    # can't accidentally manufacture a distinct-looking DUID for what's supposed to be one client.
+    def add_solicit(client_mac, xid, duid_time):
+        duid = dhcpv6_duid_llt(1, duid_time, client_mac)
+        opts = dhcpv6_client_id(duid) + dhcpv6_elapsed_time(0)
+        client_ll = "fe80::" + format(0x9000 + xid, "x")
+        udp_payload = dhcpv6_message(DHCPV6_SOLICIT, SAFE_XID_BASE | xid, opts)
+        udp = udp_header(DHCPV6_CLIENT_PORT, DHCPV6_SERVER_PORT, udp_payload) + udp_payload
+        packets.append(eth_header(SERVER_MAC, client_mac, ETHERTYPE_IPV6) +
+                        ipv6_packet(client_ll, ALL_DHCP_SERVERS, 17, udp))
+
+    # 1) One legitimate client retrying (byte-identical DUID -- same MAC AND same DUID Time value --
+    #    twice, only the transaction ID differs, exactly like a real SOLICIT retransmit) -- negative
+    #    control, must count as ONE distinct DUID, not two.
+    retry_mac = mac("00:22:22:22:22:01")
+    add_solicit(retry_mac, 1, 700000000)
+    add_solicit(retry_mac, 2, 700000000)
+
+    # 2-6) Five MORE distinct clients (distinct MAC -> distinct DUID each, each with its own DUID
+    #    Time value too) -- with the retrying client above (1 distinct identity), this reaches 6
+    #    distinct DUIDs total, crossing a --flood-threshold of 5 on the 6th packet (packet #6).
+    for i in range(5):
+        distinct_mac = mac("00:33:33:33:33:%02x" % (i + 1))
+        add_solicit(distinct_mac, 100 + i, 700000100 + i)
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_740_000 + i, i * 1000)
+    (TESTS_DIR / "sample_ipv6_attack_dhcpv6_exhaustion.pcap").write_bytes(data)
+
+
+def build_ipv6_attack_rogue_dhcpv6_server_sample():
+    """ipv6_attack_detect.hpp's own rogue/multiple-DHCPv6-server signature -- two distinct Server
+    DUIDs each answering a client's REQUEST with a REPLY."""
+    CLIENT_MAC = mac("00:44:44:44:44:01")
+    SERVER_A_MAC = mac("00:55:55:55:55:01")
+    SERVER_B_MAC = mac("00:66:66:66:66:02")
+    CLIENT_LL = "fe80::60"
+    SERVER_A_LL = "fe80::2"
+    SERVER_B_LL = "fe80::3"
+
+    CLIENT_DUID = dhcpv6_duid_llt(1, 700000000, CLIENT_MAC)
+    SERVER_A_DUID = dhcpv6_duid_ll(1, SERVER_A_MAC)
+    SERVER_B_DUID = dhcpv6_duid_ll(1, SERVER_B_MAC)
+
+    packets = []
+
+    def add_reply(server_mac, server_ip, server_duid, xid):
+        ia_opts = dhcpv6_ia_address("2001:db8:9::100", 3600, 7200)
+        opts = (dhcpv6_client_id(CLIENT_DUID) + dhcpv6_server_id(server_duid) +
+                dhcpv6_ia_na(0xCCCC0001, 1800, 2880, ia_opts))
+        payload = dhcpv6_message(DHCPV6_REPLY, SAFE_XID_BASE | xid, opts)
+        udp = udp_header(DHCPV6_SERVER_PORT, DHCPV6_CLIENT_PORT, payload) + payload
+        packets.append(eth_header(CLIENT_MAC, server_mac, ETHERTYPE_IPV6) +
+                        ipv6_packet(server_ip, CLIENT_LL, 17, udp))
+
+    # Two distinct, competing servers both answering the SAME client's request.
+    add_reply(SERVER_A_MAC, SERVER_A_LL, SERVER_A_DUID, 1)
+    add_reply(SERVER_B_MAC, SERVER_B_LL, SERVER_B_DUID, 1)
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_750_000 + i, i * 1000)
+    (TESTS_DIR / "sample_ipv6_attack_rogue_dhcpv6_server.pcap").write_bytes(data)
+
+
 if __name__ == "__main__":
     TESTS_DIR.mkdir(exist_ok=True)
     build_modbus_sample()
@@ -18241,4 +18810,10 @@ if __name__ == "__main__":
     build_amqp10_sample()
     build_dicom_sample()
     build_fox_sample()
+    build_icmpv6_ndp_sample()
+    build_dhcpv6_sample()
+    build_ipv6_attack_ra_collision_sample()
+    build_ipv6_attack_na_spoof_sample()
+    build_ipv6_attack_dhcpv6_exhaustion_sample()
+    build_ipv6_attack_rogue_dhcpv6_server_sample()
     print("wrote sample fixtures to", TESTS_DIR)

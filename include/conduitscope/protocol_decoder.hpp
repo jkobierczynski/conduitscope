@@ -50,6 +50,7 @@
 #include <unordered_map>
 
 #include "conduitscope/byteio.hpp"
+#include "conduitscope/ipv6.hpp"
 #include "conduitscope/resource_limits.hpp"
 
 namespace conduitscope {
@@ -185,6 +186,21 @@ struct DecodeContext {
     // decoder.cpp's IGRP call site ever sets it. Same category of small, narrowly-scoped interface
     // extension as FlowStateKeying/udp_port() were for their own one-time needs.
     uint32_t ip_src_addr = 0;
+
+    // IPv6 addition (docs/DEVELOPMENT.md ROADMAP item 45): the packet's own OUTER IPv6 source and
+    // destination addresses, in wire byte order -- ICMPv6's own decoder (icmpv6.hpp) is the only
+    // user, for RFC 4443's own checksum pseudo-header, which -- unlike every other checksum this
+    // codebase validates -- depends on the carrying IP packet's addresses, not just the message
+    // bytes themselves. The same narrow, single-purpose-extension shape ip_src_addr above already
+    // established for IGRP: left at their default (an all-zero address, a real but exceedingly
+    // unlikely value -- ::, the unspecified address) for every other decoder, populated only by
+    // decoder.cpp's own IPv6-branch call site right before Icmpv6Decoder::decode is invoked (it has
+    // no equivalent IPv4 call site -- ICMPv6's IP protocol number 58 is IANA-exclusive and never
+    // legitimately arrives via the IPv4 branch, see icmpv6.hpp's own file header). An all-zero
+    // default here means a checksum computed against it will simply fail to validate rather than
+    // crash -- see icmpv6.hpp's own CHECKSUM section for that degrade-gracefully posture.
+    Ipv6Address ipv6_src_addr{};
+    Ipv6Address ipv6_dst_addr{};
 
     // Whether this decode() call should mask a cleartext secret (a plaintext authentication field,
     // a password) with a fixed placeholder rather than including its literal value -- see
