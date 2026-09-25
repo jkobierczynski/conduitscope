@@ -116,7 +116,7 @@ jobs:
     # The "folded into the same CI matrix" half of docs/DEVELOPMENT.md's ROADMAP item 6: an
     # ASan/UBSan-instrumented build of conduitscope_core (and therefore the conduitscope CLI binary
     # itself, which links it -- see CMakeLists.txt's CONDUITSCOPE_ENABLE_FUZZING block for why),
-    # running the SAME full CTest suite build-and-test does, plus the 9 fuzz_*_corpus_regression
+    # running the SAME full CTest suite build-and-test does, plus all 76 fuzz_*_corpus_regression
     # tests CMakeLists.txt also registers in this configuration -- each a short (10s), bounded
     # libFuzzer run over that harness's own committed seed corpus, not a real fuzzing campaign (see
     # scheduled-fuzz below for that). This runs on every push/PR specifically because CI without
@@ -474,19 +474,98 @@ jobs:
       cancel-in-progress: false
     strategy:
       fail-fast: false
+      # GitHub's default per-workflow-run concurrent-job cap (20 on standard GitHub-hosted
+      # runners) applies to this matrix same as any other -- not raised or lowered here -- so 76
+      # legs run in ceil(76/20) = 4 waves rather than 76x sequentially, roughly 40 minutes of
+      # wall time total for a 10-minute-per-harness campaign. Free for a public repository
+      # (unlimited GitHub-hosted Actions minutes), so this isn't trading budget for coverage.
       matrix:
-        # The full set of harnesses under fuzz/ -- see docs/DEVELOPMENT.md's "Fuzzing campaign log"
-        # table for what each one covers and its dedicated-campaign history so far.
+        # The full set of harnesses under fuzz/ -- kept in sync with CMakeLists.txt's own
+        # add_conduitscope_fuzzer(...) registrations (76 as of the fuzzing-hardening batch, item
+        # 56 in docs/DEVELOPMENT.md) -- see docs/DEVELOPMENT.md's "Fuzzing campaign log" table for
+        # what each one covers and its dedicated-campaign history so far. This list grew from the
+        # original 9 (pcap_reader through s7comm_plus) only after items 57/58 found real crashes
+        # in fox and amqp10 -- two harnesses that were registered for the push/PR sanitizers job's
+        # short corpus-regression check but NOT for this longer nightly campaign, so a matrix drift
+        # like that is worth treating as a standing risk: add a new harness here in the SAME change
+        # that adds it to CMakeLists.txt, not as a follow-up.
         harness:
-          - pcap_reader
-          - packet_decode
-          - dnp3
-          - cotp_s7comm
-          - mqtt
+          - amqp091
+          - amqp10
+          - arp
           - bacnet
-          - iec104
+          - bgp
+          - bsap
+          - can_socketcan
+          - canopen
+          - cclink_ie
+          - cdp
+          - coap
+          - codesys
+          - cotp_s7comm
+          - dcerpc
+          - dcom
+          - devicenet
+          - dhcpv6
+          - dicom
+          - dnp3
+          - dns
+          - drsuapi
+          - eapol
+          - eigrp
           - enip
+          - ethercat
+          - ffhse
+          - fins
+          - fox
+          - ge_srtp
+          - goose
+          - hartip
+          - homeplug_av
+          - hsrp
+          - icmp
+          - icmpv6
+          - iec104
+          - ieee802154
+          - igmp
+          - igrp
+          - j1939
+          - kerberos
+          - ldap
+          - lldp
+          - lsarpc
+          - melsec
+          - mms
+          - modbus
+          - mpls
+          - mqtt
+          - nbns
+          - netlogon
+          - ntlm
+          - opcua
+          - ospf
+          - packet_decode
+          - pcap_reader
+          - pim
+          - powerlink
+          - pppoe
+          - profinet
+          - quic
+          - rip
+          - rmcp
           - s7comm_plus
+          - samr
+          - slow_protocols
+          - smb
+          - srvsvc
+          - stp
+          - sv
+          - tls_sni
+          - twincat
+          - vrrp
+          - winrm
+          - wkssvc
+          - zigbee
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -506,12 +585,13 @@ jobs:
       - name: Build fuzz_${{ matrix.harness }}
         run: cmake --build build -j"$(nproc)" --target "fuzz_${{ matrix.harness }}"
 
-      # 10 minutes, single worker, per harness (9 harnesses run in parallel matrix legs, not 9x
-      # sequentially): proportionate to a nightly CI-hosted campaign without either starving other
-      # GitHub Actions usage on this repository or ballooning this job's own wall-clock time. Not a
-      # substitute for the longer, multi-worker, by-hand campaigns docs/DEVELOPMENT.md's own
-      # "Fuzzing campaign log" table records -- this is a regular, automated floor under those, not
-      # a replacement for them.
+      # 10 minutes, single worker, per harness (76 harnesses run in parallel matrix legs, capped
+      # at GitHub's default 20-concurrent-job limit -- see the matrix's own comment above -- not
+      # 76x sequentially): proportionate to a nightly CI-hosted campaign without either starving
+      # other GitHub Actions usage on this repository or ballooning this job's own wall-clock
+      # time. Not a substitute for the longer, multi-worker, by-hand campaigns
+      # docs/DEVELOPMENT.md's own "Fuzzing campaign log" table records -- this is a regular,
+      # automated floor under those, not a replacement for them.
       - name: Run a 10-minute campaign against this harness's own corpus
         working-directory: build
         run: |
