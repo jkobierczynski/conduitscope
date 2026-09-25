@@ -1232,6 +1232,14 @@ std::optional<ProtocolResult> Dnp3Decoder::decode(ByteSpan payload, DecodeContex
             const auto& oh = app.objects[i];
             result.dnp3_object_headers.push_back("g" + std::to_string(oh.group) + "v" +
                                                   std::to_string(oh.variation) + " (" + oh.group_name + ")");
+            Dnp3ObjectRange range;
+            range.group = oh.group;
+            range.variation = oh.variation;
+            range.group_name = oh.group_name;
+            range.has_range = oh.has_range && oh.decoded;
+            range.range_start = oh.range_start;
+            range.range_stop = oh.range_stop;
+            result.dnp3_objects.push_back(std::move(range));
         }
         for (const auto& oh : app.objects) {
             if (result.dnp3_point_values.size() >= kMaxPointValues) break;

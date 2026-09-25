@@ -9,7 +9,13 @@
 #include <ostream>
 #include <sstream>
 
+#include "conduitscope/bacnet.hpp"
+#include "conduitscope/dnp3.hpp"
+#include "conduitscope/enip.hpp"
+#include "conduitscope/fins.hpp"
+#include "conduitscope/melsec.hpp"
 #include "conduitscope/modbus.hpp"
+#include "conduitscope/opcua.hpp"
 #include "conduitscope/s7comm.hpp"
 
 namespace conduitscope {
@@ -154,11 +160,388 @@ std::vector<Operation> extract_s7comm_operations(const DecodedPacket& dp) {
     return ops;
 }
 
+// --------------------------------------------------------------------------------------------
+// Phase 2 (roadmap item 41, docs/design/baseline-engine.md): the six protocols beyond S7comm/
+// Modbus. Per protocol, whether it gets full range-tracking (has_target_range=true, contributing
+// to NewTargetRange detection) or key-only tracking (operation_key distinguishes the operation, no
+// range) was decided by reading each protocol's own real struct fields -- not assumed from the
+// design doc's own earlier speculative notes -- and is documented at each function below. Two
+// protocols needed a small additive prerequisite before extraction was even possible, the same
+// "structured field, not a string to scrape" precedent ModbusFrame::start_address/quantity already
+// set in Phase 1:
+//   - DNP3: Dnp3Result (the type actually reachable from DecodedPacket::result) only carried
+//     ALREADY-RENDERED display strings for its object headers ("g1v2 (Binary Input)") -- the real
+//     group/variation/range_start/range_stop numbers Dnp3ObjectHeader itself computes never reached
+//     DecodedPacket at all. Fixed by adding Dnp3Result::dnp3_objects (dnp3.hpp/dnp3.cpp), a small,
+//     purely additive structured mirror of that same display list.
+//   - EtherNet/IP: CipMessage has NO equivalent gap for its class/instance/attribute addressing
+//     (CipPath already carries those as real fields) -- but Read_Tag_Fragmented/Write_Tag_
+//     Fragmented's own byte_offset IS exactly this same problem, and was NOT fixed the same way
+//     (see extract_enip_operations' own comment for why: it's genuinely out of scope for this pass,
+//     not merely deferred).
+// --------------------------------------------------------------------------------------------
+
+// EtherNet/IP (CIP): operation_key is the CIP service name, plus class/instance/attribute when the
+// request path addresses by class/instance/attribute (CipPath::is_symbolic == false) -- mirrors S7's
+// own "fold a bounded, meaningful addressing dimension into the key" precedent for DB number: a real
+// conduit talks to a small, stable set of CIP object classes/instances/attributes, not a new one
+// per packet, so this doesn't explode operation_key cardinality the way putting a raw per-call
+// address would. A Rockwell Logix5000 NAMED-TAG request (is_symbolic == true -- Read_Tag/Write_Tag/
+// Read_Tag_Fragmented/Write_Tag_Fragmented/Read_Modify_Write_Tag) carries no class/instance/
+// attribute at all (see CipPath's own comment) and the tag NAME itself is deliberately never folded
+// into the key either -- that would make every distinct tag name its own operation_key, the same
+// over-granular trap this file's own header comment warns against (see extract_modbus_operations'
+// "one address space per function" framing) -- so a symbolic request's key is the bare service name.
+//
+// has_target_range is ALWAYS false here -- this is a genuine, honestly-scoped gap, not an oversight:
+// CIP's only linear byte-offset addressing (Read_Tag_Fragmented/Write_Tag_Fragmented's own
+// byte_offset, used to read/write a tag element-by-element across several requests) is computed by
+// enip.cpp's decode_cip_request_data/decode_write_tag_request and rendered straight into
+// CipMessage::values as free text ("element_count=10 byte_offset=1234") -- it never reaches a
+// structured field on CipMessage/CipPath the way S7Item::byte_address or ModbusFrame::start_address
+// do. Regexing a number back out of that values string would be exactly the "don't scrape a summary
+// for numbers" anti-pattern the design doc rejected for Modbus before ModbusFrame::start_address/
+// quantity existed (see this file's own header comment) -- so this pass does not attempt it. A
+// genuine fix mirrors that same precedent: add a structured byte_offset/element_count field to
+// CipMessage, a small, self-contained follow-up to enip.hpp/enip.cpp this baseline engine does not
+// make on its own initiative. Get_Attribute_Single/Set_Attribute_Single addressing by class/
+// instance/attribute was never a linear range to begin with (per this feature's own design doc), so
+// that half of the gap is a correct scoping decision, not a missing field.
+std::vector<Operation> extract_enip_operations(const DecodedPacket& dp) {
+    std::vector<Operation> ops;
+    // EnipResult is EtherNet/IP explicit messaging's own result type (enip.hpp) -- CIP I/O (UDP port
+    // 2222, CipIoFrame) shares the "enip" protocol_id but carries no addressable operation at all
+    // (raw assembly data only, see enip.hpp's own CipIoFrame comment), so this must be checked BEFORE
+    // ever calling dp.result->as<EnipResult>(): calling that accessor on a CipIoFrame-backed result
+    // throws ProtocolResultTypeMismatch rather than reinterpreting one struct as the other.
+    if (!dp.result || !dp.has_tcp) return ops;
+    const EnipResult& er = dp.result->as<EnipResult>();
+    const CipMessage& cip = er.first.cip;
+    // Request-side only (mirrors S7/Modbus's own convention): a response echoes the same service
+    // name back (with the reply bit set) but never carries a request path of its own to key on.
+    if (!er.first.has_cip || cip.is_response || !cip.decoded || cip.service_name.empty()) return ops;
+
+    Operation op;
+    op.protocol = "enip";
+    std::ostringstream key;
+    key << cip.service_name;
+    if (!cip.path.is_symbolic) {
+        if (cip.path.class_id) {
+            key << "/Class0x" << std::hex << std::uppercase << *cip.path.class_id << std::dec << std::nouppercase;
+        }
+        if (cip.path.instance_id) key << "/Instance" << *cip.path.instance_id;
+        if (cip.path.attribute_id) key << "/Attr" << *cip.path.attribute_id;
+    }
+    op.operation_key = key.str();
+    // has_target_range stays false -- see this function's own header comment.
+    ops.push_back(std::move(op));
+    return ops;
+}
+
+// DNP3: operation_key is "<function_name>/<group_name>/v<variation>" -- function code, group, and
+// variation, per the design doc's own minimum. Deliberately NOT request-side only, unlike every
+// other protocol in this file -- a genuine, documented divergence, not an oversight:
+//   - DNP3's function_name itself already tells request and response apart (Read/Write/Select/
+//     Operate/Direct Operate/... on the request side; Response/Unsolicited Response/Authentication
+//     Response on the response side), so it's already baked into operation_key the same way S7/
+//     Modbus's own request-only filtering exists to AVOID conflating the two -- there is no
+//     operation_key collision risk between a request and its own paired response the way Modbus's
+//     write-echo problem has, because they never share a key to begin with.
+//   - Unlike Modbus's write echo (where the response redundantly repeats the SAME address the
+//     request already gave), a DNP3 Read response's own object headers are NOT an echo of the
+//     request's addressing: a real-world Read request very often uses an "all points"/Class-0-poll
+//     qualifier with no start-stop range at all (has_range false, nothing to extract), and the
+//     RESPONSE is the only place the outstation's own actual reported point range appears. Skipping
+//     the response side, the way S7/Modbus do, would leave DNP3 Read range-tracking nearly inert for
+//     exactly the traffic pattern (Class 0 polling) that's most common in real deployments.
+//   - For control operations (Select/Operate/Direct Operate), the request DOES carry the real
+//     target -- but CROB/analog-output objects normally use an INDEX-PREFIXED qualifier, not a
+//     start-stop range (has_range false there too), so has_target_range naturally stays false for
+//     those regardless of which side is read; nothing here forces a range where the wire format
+//     doesn't offer one.
+// has_target_range/range_start/range_end come directly from Dnp3ObjectRange (dnp3.hpp/dnp3.cpp's
+// own additive structured field -- see this file's own "Phase 2" header comment above for why that
+// was needed at all): true only when the object header both used a start-stop range qualifier AND
+// was itself fully decoded, range_stop is inclusive on the wire so range_end = range_stop + 1.
+std::vector<Operation> extract_dnp3_operations(const DecodedPacket& dp) {
+    std::vector<Operation> ops;
+    if (!dp.result) return ops;
+    const Dnp3Result& dr = dp.result->as<Dnp3Result>();
+    if (!dr.dnp3_has_function || dr.dnp3_function_name.empty() || dr.dnp3_objects.empty()) return ops;
+
+    for (const Dnp3ObjectRange& obj : dr.dnp3_objects) {
+        Operation op;
+        op.protocol = "dnp3";
+        std::ostringstream key;
+        key << dr.dnp3_function_name << "/" << obj.group_name << "/v" << static_cast<unsigned>(obj.variation);
+        op.operation_key = key.str();
+        if (obj.has_range && obj.range_stop >= obj.range_start) {
+            op.has_target_range = true;
+            op.range_start = obj.range_start;
+            op.range_end = obj.range_stop + 1;  // inclusive on the wire -> half-open for Operation
+        }
+        ops.push_back(std::move(op));
+    }
+    return ops;
+}
+
+// BACnet: operation_key is "<service>/<object-type>/<property-name>" for readProperty/writeProperty
+// (this decoder's own kBacnetConfirmedServiceChoice spelling -- camelCase, not the PascalCase ASHRAE
+// clause-20 service names -- verified against the real decode; these are this decoder's only two
+// address-bearing "first pass" services, per bacnet.hpp -- every other
+// confirmed/unconfirmed service is named-only, with no object/property to key on, and is skipped
+// here rather than recorded under a bare service name: Who-Is/I-Am/Who-Has/I-Have are device-
+// discovery broadcasts, not per-object operations against a specific conduit's memory, and don't fit
+// this engine's "operation against a target" model at all). Confirmed-Request side only (pdu_type
+// 0): the matching Complex-Ack repeats the identical "object="/"property=" pair (see bacnet.cpp's
+// decode_read_property_ack), so reading both sides would double-count the same operation_key twice
+// per exchange -- the same reasoning S7/Modbus/EtherNet/IP already apply.
+//
+// has_target_range is ALWAYS false -- confirmed, not merely assumed, against the real decode: a
+// BACnet object instance number is an opaque identifier (ASHRAE 135's own 22-bit instance space),
+// not a linear "read this many consecutive addresses" operation the way an S7 byte_address+count or
+// a DNP3 point-index start-stop is. object-type/property-name are parsed out of BacnetApdu::values'
+// own "object="/"property=" entries (decode_object_property_reference, bacnet.cpp) rather than a
+// new structured field: unlike DNP3's numeric range math (where a parsing mistake would corrupt
+// interval union/containment checks and could produce a wrong anomaly verdict), these two strings
+// only ever feed operation_key's TEXT -- a parsing miss here means a cosmetically wrong/missing key
+// component, never a wrong range boundary, so the stakes don't justify a new BacnetApdu field the
+// way DNP3's genuinely did. The "object="/"property=" prefixes are a fixed, single-code-path
+// "key=value" token shape (not a prose summary sentence), unlike the free-text Modbus `summary`
+// string this design doc's own precedent warns against scraping.
+std::vector<Operation> extract_bacnet_operations(const DecodedPacket& dp) {
+    std::vector<Operation> ops;
+    if (!dp.result) return ops;
+    const BacnetFrame& bf = dp.result->as<BacnetFrame>();
+    if (!bf.has_npdu || !bf.npdu.has_apdu) return ops;
+    const BacnetApdu& apdu = bf.npdu.apdu;
+    if (apdu.pdu_type != 0 || !apdu.has_service_choice) return ops;  // Confirmed-Request only
+    // Service names are this decoder's own kBacnetConfirmedServiceChoice spelling (bacnet_tables.inc
+    // -- camelCase, e.g. "readProperty"/"writeProperty", NOT the PascalCase ASHRAE clause-20 service
+    // names this comment's own earlier draft assumed) -- verified against the real decode rather
+    // than guessed, per this file's own review discipline.
+    if (apdu.service_choice_name != "readProperty" && apdu.service_choice_name != "writeProperty") return ops;
+
+    std::string object_type, property_name;
+    for (const std::string& v : apdu.values) {
+        if (v.rfind("object=", 0) == 0) {
+            std::string rest = v.substr(7);
+            size_t comma = rest.find(',');
+            object_type = (comma == std::string::npos) ? rest : rest.substr(0, comma);
+        } else if (v.rfind("property=", 0) == 0) {
+            property_name = v.substr(9);
+        }
+    }
+
+    Operation op;
+    op.protocol = "bacnet";
+    std::ostringstream key;
+    key << apdu.service_choice_name;
+    if (!object_type.empty()) key << "/" << object_type;
+    if (!property_name.empty()) key << "/" << property_name;
+    op.operation_key = key.str();
+    // has_target_range stays false -- see this function's own header comment.
+    ops.push_back(std::move(op));
+    return ops;
+}
+
+// OPC UA: operation_key is the recognized service name alone (e.g. "ReadRequest", "WriteRequest",
+// "CallRequest", "CreateSessionRequest", "BrowseRequest", ...) -- every Tier 1 AND Tier 2 recognized
+// service (opcua.hpp) is recorded, not just Read/Write/Call, the same "the operation itself is still
+// worth recording even without a range" posture S7 already takes for a BIT-transport-size item.
+// Request side only (OpcUaServiceHeader::is_response false): a response carries only a StatusCode,
+// never a NodeId to key or range on.
+//
+// has_target_range is ALWAYS false -- an honest call, not a forced fit (per the design doc's own
+// framing): Read/Write/Call's own NodeId list is decoded by opcua.cpp's decode_read_request_params/
+// decode_write_request_params/decode_call_request_params straight into OpcUaMessage::values as
+// display strings ("nodes-to-read[0]=ns=2;i=1001 attribute=Value") -- there is no structured NodeId
+// field on OpcUaMessage this file could read a numeric identifier back out of without parsing a
+// rendered string (the same anti-pattern rejected elsewhere in this file). Even a successfully
+// parsed NUMERIC NodeId identifier still wouldn't be a genuine [start,end) range the way a register
+// block is: a single Read/Write targets one specific NodeId, not a COUNT of consecutive addresses,
+// and a request can address several UNRELATED NodeIds in one call (an array, not a contiguous span)
+// -- there's no natural "range" to build even with the number in hand, only, at best, a single-point
+// interval per NodeId, which this pass does not attempt given the NodeId itself isn't reliably
+// numeric in the first place (OPC UA NodeIds are legally String/Guid/ByteString identifiers too, per
+// opcua.hpp's own "Primitive encoding" section).
+std::vector<Operation> extract_opcua_operations(const DecodedPacket& dp) {
+    std::vector<Operation> ops;
+    if (!dp.result) return ops;
+    const OpcUaResult& our = dp.result->as<OpcUaResult>();
+    const OpcUaMessage& msg = our.first;
+    if (!msg.service_recognized || msg.service_name.empty()) return ops;
+    if (msg.has_header && msg.header.is_response) return ops;
+
+    Operation op;
+    op.protocol = "opcua";
+    op.operation_key = msg.service_name;
+    // has_target_range stays false -- see this function's own header comment.
+    ops.push_back(std::move(op));
+    return ops;
+}
+
+// MELSEC (MC Protocol/SLMP): the device-code hex value, rendered "0x<NN>", stands in for
+// operation_key's addressing dimension (mirrors S7's DB number / EtherNet/IP's class/instance) --
+// MelsecDeviceSpec::device_text (e.g. "D1000") is deliberately NOT used for this: its own trailing
+// device NUMBER varies per call/per device, and for hex-notated device types (X/Y/B/W/...) that
+// number's own digits can include a-f, which would make stripping "the numeric suffix" back off
+// device_text unreliable -- device_code is the raw, unambiguous wire value this decoder already
+// computed, with no string-parsing needed at all.
+//
+// Full range-tracking for Batch Read (0x0401)/Batch Write (0x1401) -- confirmed against the real
+// decode, exactly the design doc's own prediction: a single MelsecDeviceSpec (device_code +
+// device_number) plus a real point_count is architecturally identical to S7's own byte_address+count
+// shape, no unit-mismatch caveat needed (unlike S7's own BIT-transport-size exclusion): MELSEC's bit-
+// type device_number is ALREADY a flat, one-per-bit address space on its own device_code (the "two
+// bit values packed per byte" melsec.hpp describes is purely how the wire VALUE bytes are packed for
+// a response, not how the ADDRESS is encoded -- unlike S7's own byte_address<<3|bit_offset hybrid),
+// so no unit exclusion is needed here for bit-type Batch Read/Write.
+//
+// Every other command is key-only: Random Read (0x0403)/Random Write (0x1402) address an arbitrary,
+// non-contiguous device LIST in one call (no genuine linear range at all -- the design doc only
+// names Batch Read/Write as the full-range candidate), so each DISTINCT device_code seen in that
+// list becomes its own key-only Operation (folding duplicates, not one per individual device_number
+// -- the same "don't explode the key on a per-call address" reasoning this file's own header comment
+// already applies to Modbus/S7). Remote RUN/STOP/PAUSE/LATCH-CLEAR/RESET, Read CPU Type, Remote
+// Password UNLOCK/LOCK, and Echo/Loopback Test carry no device addressing at all -- recorded under
+// the bare command name.
+//
+// Request side only (!mf.is_response): a MELSEC response frame carries no command field of its own
+// on the wire (melsec.hpp's own "RESPONSE DECODING NEEDS SESSION CONTEXT" paragraph) and, even once
+// session-matched, never re-carries the request's own device list -- only decoded VALUES -- so there
+// is nothing address-bearing to extract from a response in the first place.
+namespace {
+std::string melsec_device_code_key(uint16_t code) {
+    std::ostringstream s;
+    s << "0x" << std::hex << std::uppercase << code << std::dec << std::nouppercase;
+    return s.str();
+}
+}  // namespace
+
+std::vector<Operation> extract_melsec_operations(const DecodedPacket& dp) {
+    std::vector<Operation> ops;
+    if (!dp.result) return ops;
+    const MelsecFrame& mf = dp.result->as<MelsecFrame>();
+    if (mf.is_response || !mf.has_command || !mf.command_recognized || mf.command_name.empty()) return ops;
+
+    bool is_batch = (mf.command == 0x0401 || mf.command == 0x1401);  // Batch Read / Batch Write
+    if (is_batch && mf.devices.size() == 1 && mf.has_point_count && mf.point_count > 0) {
+        const MelsecDeviceSpec& d = mf.devices[0];
+        Operation op;
+        op.protocol = "melsec";
+        op.operation_key = mf.command_name + "/" + melsec_device_code_key(d.device_code);
+        op.has_target_range = true;
+        op.range_start = d.device_number;
+        op.range_end = d.device_number + static_cast<uint32_t>(mf.point_count);
+        ops.push_back(std::move(op));
+        return ops;
+    }
+
+    if (!mf.devices.empty()) {
+        std::vector<uint16_t> seen_codes;
+        for (const MelsecDeviceSpec& d : mf.devices) {
+            if (std::find(seen_codes.begin(), seen_codes.end(), d.device_code) != seen_codes.end()) continue;
+            seen_codes.push_back(d.device_code);
+            Operation op;
+            op.protocol = "melsec";
+            op.operation_key = mf.command_name + "/" + melsec_device_code_key(d.device_code);
+            ops.push_back(std::move(op));
+        }
+        return ops;
+    }
+
+    Operation op;
+    op.protocol = "melsec";
+    op.operation_key = mf.command_name;
+    ops.push_back(std::move(op));
+    return ops;
+}
+
+// FINS (Omron): the same device-code (here, memory area code) shape as MELSEC, rendered "0x<NN>".
+// Full range-tracking for Memory Area Read (0x0101)/Memory Area Write (0x0102) -- confirmed against
+// the real decode, the design doc's own prediction: a single FinsMemoryItem (area_code + address)
+// plus a real point_count is architecturally identical to MELSEC's/S7's own shape -- UNLESS the item
+// is bit-addressed (FinsMemoryItem::is_bit): a bit-type Memory Area Read/Write's own `address` field
+// only advances once every 16 bits (bit_address rolls 0-15 within one `address` first, per fins.hpp's
+// own wire layout), so `address` alone under-counts a bit-granularity range's true span the same unit-
+// mismatch problem S7 already excludes its own BIT-transport-size items from range-tracking for --
+// this pass applies the identical exclusion here rather than mis-model it, folding bit-type reads/
+// writes into the key-only path below instead.
+//
+// Every other command is key-only: Memory Area Fill (0x0103) has no explicit item-count field on the
+// wire at all (fins.hpp's own "COMMANDS DECODED" paragraph -- just one address + a fill pattern, no
+// "how many"), so there's no count to build a range from even though addressing is otherwise
+// single-item; Multiple Memory Area Read (0x0104) addresses an arbitrary, non-contiguous item LIST
+// (same reasoning as MELSEC's own Random Read) -- each distinct area_code seen becomes its own
+// key-only Operation, folding duplicates; every other command (Run/Stop, Controller Data/Status
+// Read, Cycle Time Read, Clock Read/Write, LOOP-BACK Test, Access Right Acquire/Forced Acquire/
+// Release, Error Clear, Forced Set/Reset(-Cancel)) carries no memory-area addressing at all --
+// recorded under the bare command name (Forced Set/Reset's own force_entries list, a DIFFERENT
+// repeating shape than `devices`, is not extracted here either, for the same "no genuine linear
+// range" reasoning -- see fins.hpp's own FinsForceEntry comment).
+//
+// Request side only (!ff.is_response), and FINS/TCP envelope-only messages (the Node Address Data
+// Send handshake / Frame Send Error Notification / Connection Confirmation -- ff.is_tcp_envelope_only)
+// are excluded outright: they carry no inner FINS command/response frame at all (fins.hpp's own
+// comment), so command/command_name/devices are all meaningless for one.
+std::vector<Operation> extract_fins_operations(const DecodedPacket& dp) {
+    std::vector<Operation> ops;
+    if (!dp.result) return ops;
+    const FinsFrame& ff = dp.result->as<FinsFrame>();
+    if (ff.is_response || ff.is_tcp_envelope_only || !ff.command_recognized || ff.command_name.empty()) return ops;
+
+    bool is_single_area_rw = (ff.command == 0x0101 || ff.command == 0x0102);  // Memory Area Read/Write
+    if (is_single_area_rw && ff.devices.size() == 1 && ff.has_point_count && ff.point_count > 0 &&
+        !ff.devices[0].is_bit) {
+        const FinsMemoryItem& d = ff.devices[0];
+        Operation op;
+        op.protocol = "fins";
+        std::ostringstream key;
+        key << ff.command_name << "/0x" << std::hex << std::uppercase << static_cast<unsigned>(d.area_code)
+            << std::dec << std::nouppercase;
+        op.operation_key = key.str();
+        op.has_target_range = true;
+        op.range_start = d.address;
+        op.range_end = static_cast<uint32_t>(d.address) + static_cast<uint32_t>(ff.point_count);
+        ops.push_back(std::move(op));
+        return ops;
+    }
+
+    if (!ff.devices.empty()) {
+        std::vector<uint8_t> seen_codes;
+        for (const FinsMemoryItem& d : ff.devices) {
+            if (std::find(seen_codes.begin(), seen_codes.end(), d.area_code) != seen_codes.end()) continue;
+            seen_codes.push_back(d.area_code);
+            Operation op;
+            op.protocol = "fins";
+            std::ostringstream key;
+            key << ff.command_name << "/0x" << std::hex << std::uppercase << static_cast<unsigned>(d.area_code)
+                << std::dec << std::nouppercase;
+            op.operation_key = key.str();
+            ops.push_back(std::move(op));
+        }
+        return ops;
+    }
+
+    Operation op;
+    op.protocol = "fins";
+    op.operation_key = ff.command_name;
+    ops.push_back(std::move(op));
+    return ops;
+}
+
 }  // namespace
 
 std::vector<Operation> extract_operations(const DecodedPacket& packet) {
     if (packet.protocol == "modbus") return extract_modbus_operations(packet);
     if (packet.protocol == "s7comm") return extract_s7comm_operations(packet);
+    if (packet.protocol == "enip") return extract_enip_operations(packet);
+    if (packet.protocol == "dnp3") return extract_dnp3_operations(packet);
+    if (packet.protocol == "bacnet") return extract_bacnet_operations(packet);
+    if (packet.protocol == "opcua") return extract_opcua_operations(packet);
+    if (packet.protocol == "melsec") return extract_melsec_operations(packet);
+    if (packet.protocol == "fins") return extract_fins_operations(packet);
     return {};
 }
 
@@ -219,10 +602,16 @@ std::string conduit_key(const std::string& protocol, const std::string& client_i
     return protocol + "|" + client_ip + "->" + server_ip + ":" + std::to_string(server_port);
 }
 
-// Just this feature's two in-scope ports -- Modbus/TCP and COTP (S7comm's own transport) -- the
-// narrowed version of PolicyEngine::observe's/AssetInventoryEngine::observe's own is_known_service_
-// port, restricted to the two protocols this engine ever extracts operations from.
-bool is_known_baseline_port(uint16_t port) { return port == MODBUS_TCP_PORT || port == COTP_TCP_PORT; }
+// This feature's own known ports -- Modbus/TCP, COTP (S7comm's own transport), and, as of Phase 2
+// (roadmap item 41), the six protocols added there -- the narrowed version of PolicyEngine::
+// observe's/AssetInventoryEngine::observe's own is_known_service_port, restricted to the protocols
+// this engine ever extracts operations from. FINS_TCP_PORT/FINS_UDP_PORT are numerically identical
+// (9600, see fins.hpp) -- listed both for clarity, not because it matters which one C++ compares.
+bool is_known_baseline_port(uint16_t port) {
+    return port == MODBUS_TCP_PORT || port == COTP_TCP_PORT || port == ENIP_TCP_PORT || port == DNP3_TCP_PORT ||
+           port == OPCUA_PORT || port == MELSEC_TCP_PORT || port == MELSEC_UDP_PORT || port == FINS_TCP_PORT ||
+           port == FINS_UDP_PORT || port == BACNET_UDP_PORT;
+}
 
 bool src_is_client_by_port(uint16_t src_port, uint16_t dst_port) {
     bool src_known = is_known_baseline_port(src_port);
@@ -232,49 +621,91 @@ bool src_is_client_by_port(uint16_t src_port, uint16_t dst_port) {
     return src_port > dst_port;
 }
 
+// True for every protocol this engine ever extracts operations from -- S7comm/Modbus (Phase 1) plus
+// the six added in Phase 2 (roadmap item 41, docs/design/baseline-engine.md).
+bool is_baseline_protocol(const std::string& protocol) {
+    return protocol == "modbus" || protocol == "s7comm" || protocol == "enip" || protocol == "dnp3" ||
+           protocol == "bacnet" || protocol == "opcua" || protocol == "melsec" || protocol == "fins";
+}
+
 }  // namespace
 
 void BaselineEngine::observe(const DecodedPacket& dp) {
-    if (!dp.has_ip || !dp.has_tcp) return;
-    if (dp.protocol != "modbus" && dp.protocol != "s7comm") return;
+    if (!dp.has_ip || (!dp.has_tcp && !dp.has_udp)) return;
+    if (!is_baseline_protocol(dp.protocol)) return;
 
     std::vector<Operation> ops = extract_operations(dp);
     if (ops.empty()) return;
 
-    // Client/server direction: SYN/SYN-ACK first, known-port fallback otherwise -- see this
-    // method's own doc comment (baseline.hpp) for why this mirrors PolicyEngine::observe/
-    // AssetInventoryEngine::observe rather than sharing code with either.
-    std::string skey = tcp_session_key(dp.src_ip, dp.src_port, dp.dst_ip, dp.dst_port);
-    bool is_syn = dp.tcp_flags == "SYN";
-    bool is_syn_ack = dp.tcp_flags.rfind("SYN,ACK", 0) == 0;
+    std::string client_ip, server_ip;
+    uint16_t server_port = 0;
 
-    auto sit = tcp_sessions_.find(skey);
-    if (sit == tcp_sessions_.end()) {
-        TcpSessionState st;
+    if (dp.has_tcp) {
+        // Client/server direction: SYN/SYN-ACK first, known-port fallback otherwise -- see this
+        // method's own doc comment (baseline.hpp) for why this mirrors PolicyEngine::observe/
+        // AssetInventoryEngine::observe rather than sharing code with either.
+        std::string skey = tcp_session_key(dp.src_ip, dp.src_port, dp.dst_ip, dp.dst_port);
+        bool is_syn = dp.tcp_flags == "SYN";
+        bool is_syn_ack = dp.tcp_flags.rfind("SYN,ACK", 0) == 0;
+
+        auto sit = tcp_sessions_.find(skey);
+        if (sit == tcp_sessions_.end()) {
+            TcpSessionState st;
+            bool src_is_client;
+            if (is_syn) {
+                src_is_client = true;
+                st.initiator_known = true;
+            } else if (is_syn_ack) {
+                src_is_client = false;
+                st.initiator_known = true;
+            } else {
+                src_is_client = src_is_client_by_port(dp.src_port, dp.dst_port);
+            }
+            st.client_ip = src_is_client ? dp.src_ip : dp.dst_ip;
+            st.server_ip = src_is_client ? dp.dst_ip : dp.src_ip;
+            st.server_port = src_is_client ? dp.dst_port : dp.src_port;
+            sit = tcp_sessions_.emplace(skey, std::move(st)).first;
+        } else if (!sit->second.initiator_known && (is_syn || is_syn_ack)) {
+            bool src_is_client = is_syn;
+            sit->second.client_ip = src_is_client ? dp.src_ip : dp.dst_ip;
+            sit->second.server_ip = src_is_client ? dp.dst_ip : dp.src_ip;
+            sit->second.server_port = src_is_client ? dp.dst_port : dp.src_port;
+            sit->second.initiator_known = true;
+        }
+        client_ip = sit->second.client_ip;
+        server_ip = sit->second.server_ip;
+        server_port = sit->second.server_port;
+    } else {
+        // UDP (BACnet -- the only one of the eight protocols with no TCP form at all -- plus FINS/
+        // MELSEC, which can run over either transport): no session, no handshake, so there is no
+        // SYN to key direction off. BACnet's own APDU carries a genuine content-based signal
+        // instead (a Confirmed-Request/Unconfirmed-Request PDU type is unambiguously the client
+        // side) -- mirrors AssetInventoryEngine::observe's own identical BACnet-UDP handling
+        // (asset_inventory.cpp) rather than inventing a second convention for the same decision.
+        // Every other UDP packet here falls back to the same known-port heuristic the TCP side
+        // above uses when it never saw a SYN/SYN-ACK either.
+        //
+        // Deliberately does NOT reuse AssetInventoryEngine::observe's own broadcast/multicast
+        // filter (looks_like_broadcast_or_multicast, asset_inventory.cpp): a real Confirmed-Request
+        // readProperty/writeProperty is unicast in practice (bacnet.hpp's own "Original-Unicast-NPDU
+        // is by far the most common" note), so this scoping difference has no real-world effect on
+        // the only two BACnet operations this file ever extracts -- and excluding it here keeps this
+        // engine's UDP conduit tracking a plain mirror of its own TCP tracking (record whatever
+        // client/server pair the wire shows), the same "engine only ever compares what's on the
+        // wire, never applies a second judgment call the way inventory's zone-aware asset model
+        // does" posture this file's own header comment already takes for conduit identity.
         bool src_is_client;
-        if (is_syn) {
-            src_is_client = true;
-            st.initiator_known = true;
-        } else if (is_syn_ack) {
-            src_is_client = false;
-            st.initiator_known = true;
+        const BacnetFrame* bf = (dp.protocol == "bacnet" && dp.result) ? &dp.result->as<BacnetFrame>() : nullptr;
+        if (bf && bf->has_npdu && bf->npdu.has_apdu && !bf->npdu.apdu.pdu_type_name.empty()) {
+            const std::string& apdu_type = bf->npdu.apdu.pdu_type_name;
+            src_is_client = apdu_type == "Confirmed-Request" || apdu_type == "Unconfirmed-Request";
         } else {
             src_is_client = src_is_client_by_port(dp.src_port, dp.dst_port);
         }
-        st.client_ip = src_is_client ? dp.src_ip : dp.dst_ip;
-        st.server_ip = src_is_client ? dp.dst_ip : dp.src_ip;
-        st.server_port = src_is_client ? dp.dst_port : dp.src_port;
-        sit = tcp_sessions_.emplace(skey, std::move(st)).first;
-    } else if (!sit->second.initiator_known && (is_syn || is_syn_ack)) {
-        bool src_is_client = is_syn;
-        sit->second.client_ip = src_is_client ? dp.src_ip : dp.dst_ip;
-        sit->second.server_ip = src_is_client ? dp.dst_ip : dp.src_ip;
-        sit->second.server_port = src_is_client ? dp.dst_port : dp.src_port;
-        sit->second.initiator_known = true;
+        client_ip = src_is_client ? dp.src_ip : dp.dst_ip;
+        server_ip = src_is_client ? dp.dst_ip : dp.src_ip;
+        server_port = src_is_client ? dp.dst_port : dp.src_port;
     }
-    const std::string& client_ip = sit->second.client_ip;
-    const std::string& server_ip = sit->second.server_ip;
-    uint16_t server_port = sit->second.server_port;
 
     std::string ckey = conduit_key(dp.protocol, client_ip, server_ip, server_port);
     auto cit = conduits_.find(ckey);

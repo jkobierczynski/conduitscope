@@ -12768,6 +12768,174 @@ add_test(NAME baseline_learn_creates_a_new_baseline_file
 set_tests_properties(baseline_learn_creates_a_new_baseline_file PROPERTIES
   PASS_REGULAR_EXPRESSION "\"schema_version\": 1,\n *\"conduits\": \\[\n *\\{\n *\"client_ip\": \"192\\.168\\.1\\.50\"")
 
+# ---------------------------------------------------------------------------------------------
+# Phase 2 (roadmap item 41, docs/design/baseline-engine.md): baseline coverage for the six
+# protocols beyond S7comm/Modbus -- EtherNet/IP, DNP3, BACnet, OPC UA, MELSEC, FINS. Reuses each
+# protocol's own existing sample pcap (no new fixtures created -- every one of the six already had
+# enough real operation diversity to exercise this). Three tests per protocol, mirroring the
+# Modbus/S7comm tests above:
+#   - a `learn` spot-check that at least one full operation entry (key, has_target_range, and its
+#     observed_ranges when range-tracked) comes out exactly as extract_<protocol>_operations
+#     (baseline.cpp) is expected to produce;
+#   - `check` against an UNMODIFIED copy of the same fixture -> CLEAN, proving the full learn/check
+#     round-trip is stable for real per-protocol operation_key/range data, not just the synthetic
+#     Modbus/S7comm cases above;
+#   - `check` against a baseline that was NEVER learned from this conduit at all (a hand-written
+#     empty store, `{"schema_version": 1, "conduits": []}` -- baseline files are plain, reviewable
+#     JSON by design, see the design doc's own "Baseline state and persistence" section, so writing
+#     one inline here is not a departure from how this file is meant to be handled) -> every
+#     operation this capture observed becomes its own new-conduit finding, proving extraction feeds
+#     correctly into check_baseline's own verdict machinery (already exhaustively tested against
+#     Modbus/S7comm above -- this is per-protocol proof the SAME shared code path receives usable
+#     operation_key/range data from each of the six, not a second copy of check_baseline's own
+#     logic tests).
+# For the three full-range-tracking protocols (DNP3, MELSEC, FINS) a fourth test additionally
+# proves NewTargetRange fires correctly: `learn` normally, then shrink ONE already-learned range by
+# a single unit with `sed` (baseline files are meant to be hand-edited/reviewed, per the design
+# doc), then `check` the ORIGINAL, unmodified fixture against that shrunk baseline -- the capture's
+# own real range no longer fits inside the (now smaller) baseline range, so NewTargetRange must
+# fire with the exact observed/baseline bounds this test pins. EtherNet/IP, BACnet, and OPC UA have
+# no range-tracking to exercise this way at all (see baseline.cpp's own per-protocol comments for
+# why each is key-only), so they only get the three tests above.
+# ---------------------------------------------------------------------------------------------
+
+# --- EtherNet/IP (CIP) -- key-only: see extract_enip_operations' own comment (baseline.cpp) -----
+
+add_test(NAME baseline_learn_enip_produces_expected_operations
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_enip_learn.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_enip_learn.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enip.pcap' && cat '${CMAKE_CURRENT_BINARY_DIR}/baseline_enip_learn.json'")
+set_tests_properties(baseline_learn_enip_produces_expected_operations PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"protocol\": \"enip\",\n *\"server_port\": 44818,.*\"operation_key\": \"Read_Tag\",\n *\"packet_count\": 1,\n *\"has_target_range\": false,\n *\"observed_ranges\": \\[\\].*\"operation_key\": \"Write_Tag\",\n *\"packet_count\": 1,\n *\"has_target_range\": false,\n *\"observed_ranges\": \\[\\]")
+
+add_test(NAME baseline_check_enip_unmodified_zero_findings
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_enip_clean.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_enip_clean.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enip.pcap' && '$<TARGET_FILE:conduitscope>' baseline check --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_enip_clean.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enip.pcap'")
+set_tests_properties(baseline_check_enip_unmodified_zero_findings PROPERTIES
+  PASS_REGULAR_EXPRESSION "Result: CLEAN\n\n1 conduit\\(s\\) observed, 2 distinct operation\\(s\\) observed, 2 matched the baseline, 0 did not\n\nFINDINGS \\(0\\):\n *\\(none\\)")
+
+add_test(NAME baseline_check_enip_empty_baseline_finds_new_conduit
+  COMMAND bash -c "printf '{\"schema_version\": 1, \"conduits\": []}' > '${CMAKE_CURRENT_BINARY_DIR}/baseline_enip_empty.json' && '$<TARGET_FILE:conduitscope>' baseline check --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_enip_empty.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enip.pcap'")
+set_tests_properties(baseline_check_enip_empty_baseline_finds_new_conduit PROPERTIES
+  PASS_REGULAR_EXPRESSION "Result: ANOMALIES FOUND \\(2 finding\\(s\\)\\).*\\[1\\] new-conduit  192\\.168\\.1\\.50 -> 192\\.168\\.1\\.10:44818  enip  operation=\"Read_Tag\".*\\[2\\] new-conduit  192\\.168\\.1\\.50 -> 192\\.168\\.1\\.10:44818  enip  operation=\"Write_Tag\""
+  FAIL_REGULAR_EXPRESSION "new-operation|new-target-range")
+
+# --- DNP3 -- full range-tracking: see extract_dnp3_operations' own comment (baseline.cpp) --------
+
+add_test(NAME baseline_learn_dnp3_produces_expected_operations
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_dnp3_learn.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_dnp3_learn.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap' && cat '${CMAKE_CURRENT_BINARY_DIR}/baseline_dnp3_learn.json'")
+set_tests_properties(baseline_learn_dnp3_produces_expected_operations PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"protocol\": \"dnp3\",\n *\"server_port\": 20000,.*\"operation_key\": \"Response/Binary Input/v2\",\n *\"packet_count\": 2,\n *\"has_target_range\": true,\n *\"observed_ranges\": \\[\\[0, 3\\]\\].*\"operation_key\": \"Response/Analog Input/v1\",\n *\"packet_count\": 2,\n *\"has_target_range\": true,\n *\"observed_ranges\": \\[\\[0, 1\\]\\].*\"operation_key\": \"Read/Binary Input/v2\",\n *\"packet_count\": 1,\n *\"has_target_range\": false,\n *\"observed_ranges\": \\[\\]")
+
+add_test(NAME baseline_check_dnp3_unmodified_zero_findings
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_dnp3_clean.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_dnp3_clean.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap' && '$<TARGET_FILE:conduitscope>' baseline check --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_dnp3_clean.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap'")
+set_tests_properties(baseline_check_dnp3_unmodified_zero_findings PROPERTIES
+  PASS_REGULAR_EXPRESSION "Result: CLEAN\n\n1 conduit\\(s\\) observed, 6 distinct operation\\(s\\) observed, 6 matched the baseline, 0 did not\n\nFINDINGS \\(0\\):\n *\\(none\\)")
+
+add_test(NAME baseline_check_dnp3_empty_baseline_finds_new_conduit
+  COMMAND bash -c "printf '{\"schema_version\": 1, \"conduits\": []}' > '${CMAKE_CURRENT_BINARY_DIR}/baseline_dnp3_empty.json' && '$<TARGET_FILE:conduitscope>' baseline check --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_dnp3_empty.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap'")
+set_tests_properties(baseline_check_dnp3_empty_baseline_finds_new_conduit PROPERTIES
+  PASS_REGULAR_EXPRESSION "Result: ANOMALIES FOUND \\(6 finding\\(s\\)\\)"
+  FAIL_REGULAR_EXPRESSION "new-operation|new-target-range")
+
+# Shrinks the already-learned [0, 3) range for "Response/Binary Input/v2" down to [0, 2) with sed,
+# then checks the SAME, unmodified fixture against that shrunk baseline -- the capture's own real
+# range no longer fits, so this must produce exactly one NewTargetRange finding with the capture's
+# real bounds ([0, 3)) and the (now shrunk) baseline's own bounds ([0, 2)) for context.
+add_test(NAME baseline_check_dnp3_shrunk_range_finds_new_target_range
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_dnp3_shrunk.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_dnp3_shrunk.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap' && sed -i 's/\\[\\[0, 3\\]\\]/[[0, 2]]/' '${CMAKE_CURRENT_BINARY_DIR}/baseline_dnp3_shrunk.json' && '$<TARGET_FILE:conduitscope>' baseline check --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_dnp3_shrunk.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap'")
+set_tests_properties(baseline_check_dnp3_shrunk_range_finds_new_target_range PROPERTIES
+  PASS_REGULAR_EXPRESSION "Result: ANOMALIES FOUND \\(1 finding\\(s\\)\\).*\\[1\\] new-target-range  192\\.168\\.1\\.50 -> 192\\.168\\.1\\.10:20000  dnp3  operation=\"Response/Binary Input/v2\".*observed range: \\[0, 3\\).*baseline ranges: \\[0, 2\\)"
+  FAIL_REGULAR_EXPRESSION "new-conduit|new-operation")
+
+# --- BACnet -- key-only: see extract_bacnet_operations' own comment (baseline.cpp) ---------------
+
+add_test(NAME baseline_learn_bacnet_produces_expected_operations
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_bacnet_learn.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_bacnet_learn.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap' && cat '${CMAKE_CURRENT_BINARY_DIR}/baseline_bacnet_learn.json'")
+set_tests_properties(baseline_learn_bacnet_produces_expected_operations PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"protocol\": \"bacnet\",\n *\"server_port\": 47808,.*\"operation_key\": \"readProperty/analog-input/present-value\",\n *\"packet_count\": 1,\n *\"has_target_range\": false,\n *\"observed_ranges\": \\[\\].*\"operation_key\": \"writeProperty/binary-output/present-value\",\n *\"packet_count\": 2,\n *\"has_target_range\": false,\n *\"observed_ranges\": \\[\\]")
+
+add_test(NAME baseline_check_bacnet_unmodified_zero_findings
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_bacnet_clean.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_bacnet_clean.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap' && '$<TARGET_FILE:conduitscope>' baseline check --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_bacnet_clean.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap'")
+set_tests_properties(baseline_check_bacnet_unmodified_zero_findings PROPERTIES
+  PASS_REGULAR_EXPRESSION "Result: CLEAN\n\n1 conduit\\(s\\) observed, 2 distinct operation\\(s\\) observed, 2 matched the baseline, 0 did not\n\nFINDINGS \\(0\\):\n *\\(none\\)")
+
+add_test(NAME baseline_check_bacnet_empty_baseline_finds_new_conduit
+  COMMAND bash -c "printf '{\"schema_version\": 1, \"conduits\": []}' > '${CMAKE_CURRENT_BINARY_DIR}/baseline_bacnet_empty.json' && '$<TARGET_FILE:conduitscope>' baseline check --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_bacnet_empty.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap'")
+set_tests_properties(baseline_check_bacnet_empty_baseline_finds_new_conduit PROPERTIES
+  PASS_REGULAR_EXPRESSION "Result: ANOMALIES FOUND \\(2 finding\\(s\\)\\).*\\[1\\] new-conduit  192\\.168\\.1\\.10 -> 192\\.168\\.1\\.255:47808  bacnet  operation=\"readProperty/analog-input/present-value\".*\\[2\\] new-conduit  192\\.168\\.1\\.10 -> 192\\.168\\.1\\.255:47808  bacnet  operation=\"writeProperty/binary-output/present-value\""
+  FAIL_REGULAR_EXPRESSION "new-operation|new-target-range")
+
+# --- OPC UA -- key-only: see extract_opcua_operations' own comment (baseline.cpp) ----------------
+
+add_test(NAME baseline_learn_opcua_produces_expected_operations
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_opcua_learn.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_opcua_learn.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_opcua.pcap' && cat '${CMAKE_CURRENT_BINARY_DIR}/baseline_opcua_learn.json'")
+set_tests_properties(baseline_learn_opcua_produces_expected_operations PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"protocol\": \"opcua\",\n *\"server_port\": 4840,.*\"operation_key\": \"ReadRequest\",\n *\"packet_count\": 1,\n *\"has_target_range\": false,\n *\"observed_ranges\": \\[\\].*\"operation_key\": \"WriteRequest\",\n *\"packet_count\": 2,\n *\"has_target_range\": false,\n *\"observed_ranges\": \\[\\].*\"operation_key\": \"CallRequest\",\n *\"packet_count\": 1,\n *\"has_target_range\": false,\n *\"observed_ranges\": \\[\\]")
+
+add_test(NAME baseline_check_opcua_unmodified_zero_findings
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_opcua_clean.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_opcua_clean.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_opcua.pcap' && '$<TARGET_FILE:conduitscope>' baseline check --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_opcua_clean.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_opcua.pcap'")
+set_tests_properties(baseline_check_opcua_unmodified_zero_findings PROPERTIES
+  PASS_REGULAR_EXPRESSION "Result: CLEAN\n\n1 conduit\\(s\\) observed, 10 distinct operation\\(s\\) observed, 10 matched the baseline, 0 did not\n\nFINDINGS \\(0\\):\n *\\(none\\)")
+
+add_test(NAME baseline_check_opcua_empty_baseline_finds_new_conduit
+  COMMAND bash -c "printf '{\"schema_version\": 1, \"conduits\": []}' > '${CMAKE_CURRENT_BINARY_DIR}/baseline_opcua_empty.json' && '$<TARGET_FILE:conduitscope>' baseline check --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_opcua_empty.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_opcua.pcap'")
+set_tests_properties(baseline_check_opcua_empty_baseline_finds_new_conduit PROPERTIES
+  PASS_REGULAR_EXPRESSION "Result: ANOMALIES FOUND \\(10 finding\\(s\\)\\).*\\[6\\] new-conduit  192\\.168\\.1\\.50 -> 192\\.168\\.1\\.10:4840  opcua  operation=\"ReadRequest\".*\\[7\\] new-conduit  192\\.168\\.1\\.50 -> 192\\.168\\.1\\.10:4840  opcua  operation=\"WriteRequest\""
+  FAIL_REGULAR_EXPRESSION "new-operation|new-target-range")
+
+# --- MELSEC (MC Protocol/SLMP) -- full range-tracking for Batch Read/Write, key-only otherwise:
+# see extract_melsec_operations' own comment (baseline.cpp) -------------------------------------
+
+add_test(NAME baseline_learn_melsec_produces_expected_operations
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_melsec_learn.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_melsec_learn.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_melsec.pcap' && cat '${CMAKE_CURRENT_BINARY_DIR}/baseline_melsec_learn.json'")
+set_tests_properties(baseline_learn_melsec_produces_expected_operations PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"protocol\": \"melsec\",\n *\"server_port\": 5001,.*\"operation_key\": \"Batch Read/0x90\",\n *\"packet_count\": 1,\n *\"has_target_range\": true,\n *\"observed_ranges\": \\[\\[100, 105\\]\\].*\"operation_key\": \"Random Read/0xA8\",\n *\"packet_count\": 1,\n *\"has_target_range\": false,\n *\"observed_ranges\": \\[\\]")
+
+add_test(NAME baseline_check_melsec_unmodified_zero_findings
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_melsec_clean.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_melsec_clean.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_melsec.pcap' && '$<TARGET_FILE:conduitscope>' baseline check --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_melsec_clean.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_melsec.pcap'")
+set_tests_properties(baseline_check_melsec_unmodified_zero_findings PROPERTIES
+  PASS_REGULAR_EXPRESSION "Result: CLEAN\n\n3 conduit\\(s\\) observed, 14 distinct operation\\(s\\) observed, 14 matched the baseline, 0 did not\n\nFINDINGS \\(0\\):\n *\\(none\\)")
+
+add_test(NAME baseline_check_melsec_empty_baseline_finds_new_conduit
+  COMMAND bash -c "printf '{\"schema_version\": 1, \"conduits\": []}' > '${CMAKE_CURRENT_BINARY_DIR}/baseline_melsec_empty.json' && '$<TARGET_FILE:conduitscope>' baseline check --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_melsec_empty.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_melsec.pcap'")
+set_tests_properties(baseline_check_melsec_empty_baseline_finds_new_conduit PROPERTIES
+  PASS_REGULAR_EXPRESSION "Result: ANOMALIES FOUND \\(14 finding\\(s\\)\\)"
+  FAIL_REGULAR_EXPRESSION "new-operation|new-target-range")
+
+# Shrinks Batch Read/0x90's already-learned [100, 105) range down to [100, 103) with sed, then
+# checks the SAME, unmodified fixture -- the capture's own real range no longer fits.
+add_test(NAME baseline_check_melsec_shrunk_range_finds_new_target_range
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_melsec_shrunk.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_melsec_shrunk.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_melsec.pcap' && sed -i 's/\\[\\[100, 105\\]\\]/[[100, 103]]/' '${CMAKE_CURRENT_BINARY_DIR}/baseline_melsec_shrunk.json' && '$<TARGET_FILE:conduitscope>' baseline check --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_melsec_shrunk.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_melsec.pcap'")
+set_tests_properties(baseline_check_melsec_shrunk_range_finds_new_target_range PROPERTIES
+  PASS_REGULAR_EXPRESSION "Result: ANOMALIES FOUND \\(1 finding\\(s\\)\\).*\\[1\\] new-target-range  192\\.168\\.1\\.50 -> 192\\.168\\.1\\.10:5001  melsec  operation=\"Batch Read/0x90\".*observed range: \\[100, 105\\).*baseline ranges: \\[100, 103\\)"
+  FAIL_REGULAR_EXPRESSION "new-conduit|new-operation")
+
+# --- FINS (Omron) -- full range-tracking for Memory Area Read/Write, key-only otherwise: see
+# extract_fins_operations' own comment (baseline.cpp) -------------------------------------------
+
+add_test(NAME baseline_learn_fins_produces_expected_operations
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_fins_learn.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_fins_learn.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_fins.pcap' && cat '${CMAKE_CURRENT_BINARY_DIR}/baseline_fins_learn.json'")
+set_tests_properties(baseline_learn_fins_produces_expected_operations PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"protocol\": \"fins\",\n *\"server_port\": 9600,.*\"operation_key\": \"Memory Area Read/0x82\",\n *\"packet_count\": 2,\n *\"has_target_range\": true,\n *\"observed_ranges\": \\[\\[1000, 1003\\], \\[5000, 5001\\]\\].*\"operation_key\": \"Memory Area Read/0x30\",\n *\"packet_count\": 1,\n *\"has_target_range\": false,\n *\"observed_ranges\": \\[\\]")
+
+add_test(NAME baseline_check_fins_unmodified_zero_findings
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_fins_clean.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_fins_clean.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_fins.pcap' && '$<TARGET_FILE:conduitscope>' baseline check --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_fins_clean.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_fins.pcap'")
+set_tests_properties(baseline_check_fins_unmodified_zero_findings PROPERTIES
+  PASS_REGULAR_EXPRESSION "Result: CLEAN\n\n3 conduit\\(s\\) observed, 22 distinct operation\\(s\\) observed, 22 matched the baseline, 0 did not\n\nFINDINGS \\(0\\):\n *\\(none\\)")
+
+add_test(NAME baseline_check_fins_empty_baseline_finds_new_conduit
+  COMMAND bash -c "printf '{\"schema_version\": 1, \"conduits\": []}' > '${CMAKE_CURRENT_BINARY_DIR}/baseline_fins_empty.json' && '$<TARGET_FILE:conduitscope>' baseline check --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_fins_empty.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_fins.pcap'")
+set_tests_properties(baseline_check_fins_empty_baseline_finds_new_conduit PROPERTIES
+  PASS_REGULAR_EXPRESSION "Result: ANOMALIES FOUND \\(22 finding\\(s\\)\\)"
+  FAIL_REGULAR_EXPRESSION "new-operation|new-target-range")
+
+# Drops Memory Area Read/0x82's own [5000, 5001) sub-range from the already-learned baseline with
+# sed (leaving only [1000, 1003)), then checks the SAME, unmodified fixture -- the capture still
+# touches [5000, 5001), which the shrunk baseline no longer covers at all.
+add_test(NAME baseline_check_fins_shrunk_range_finds_new_target_range
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_fins_shrunk.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_fins_shrunk.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_fins.pcap' && sed -i 's/\\[\\[1000, 1003\\], \\[5000, 5001\\]\\]/[[1000, 1003]]/' '${CMAKE_CURRENT_BINARY_DIR}/baseline_fins_shrunk.json' && '$<TARGET_FILE:conduitscope>' baseline check --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_fins_shrunk.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_fins.pcap'")
+set_tests_properties(baseline_check_fins_shrunk_range_finds_new_target_range PROPERTIES
+  PASS_REGULAR_EXPRESSION "Result: ANOMALIES FOUND \\(1 finding\\(s\\)\\).*\\[1\\] new-target-range  192\\.168\\.1\\.50 -> 192\\.168\\.1\\.10:9600  fins  operation=\"Memory Area Read/0x82\".*observed range: \\[5000, 5001\\).*baseline ranges: \\[1000, 1003\\)"
+  FAIL_REGULAR_EXPRESSION "new-conduit|new-operation")
+
 # AMQP 0-9-1 and AMQP 1.0 (amqp091.hpp/amqp10.hpp, amqp_common.hpp) -- two wire-INCOMPATIBLE
 # protocols that share TCP port 5672 by convention. tests/sample_amqp091.pcap and
 # tests/sample_amqp10.pcap (build_amqp091_sample/build_amqp10_sample, tools/make_sample_pcap.py)

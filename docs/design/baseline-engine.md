@@ -1,12 +1,17 @@
 # ICS communication-baseline analysis at the protocol-operation level -- design draft
 
-Status: **Phase 1 (S7comm + Modbus) implemented, v0.2.5.** Written at Jurgen's request to scope
-roadmap item 41 (`docs/DEVELOPMENT.md`) into something buildable, starting with S7comm and
-Modbus. `BaselineEngine` (`include/conduitscope/baseline.hpp`, `src/baseline.cpp`) and the
-`baseline learn`/`baseline check` subcommand pair now exist and are covered by CTest, exactly as
-scoped below -- see "Phased build plan" at the bottom for what remains for later phases (zone-
-level rollup, statistical thresholds, and protocols beyond S7comm/Modbus are all still out of
-scope, unchanged from the original draft).
+Status: **Phase 1 (S7comm + Modbus) and Phase 2 (EtherNet/IP, DNP3, BACnet, OPC UA, MELSEC, FINS)
+implemented, v0.2.5.** Written at Jurgen's request to scope roadmap item 41 (`docs/DEVELOPMENT.md`)
+into something buildable, starting with S7comm and Modbus. `BaselineEngine`
+(`include/conduitscope/baseline.hpp`, `src/baseline.cpp`) and the `baseline learn`/`baseline check`
+subcommand pair now exist and are covered by CTest, exactly as scoped below. Phase 2 extended
+protocol breadth to the six protocols named above -- Jurgen said `learn`/`check` "felt short" for
+determining traffic based on host and tech stack, since a host running any of those six was
+invisible to the baseline even though `inventory`/`policy` already see it fine, and confirmed
+protocol breadth (not zone-level rollup, not statistical thresholds) as the direction -- see
+"Per-protocol data readiness" below for what was actually found for each of the six, and "Phased
+build plan" at the bottom for what remains out of scope even now (zone-level rollup, statistical
+thresholds, and CODESYS's `CmpIecVarAccess`, unchanged from the original draft).
 
 ## The pitch, restated
 
@@ -70,25 +75,118 @@ self-contained change to `modbus.hpp`/`modbus.cpp` and a natural first step of P
 baseline engine itself can consume Modbus target ranges -- function-code-only baselining for
 Modbus could ship without it, target-range baselining can't.
 
-(For context, since the earlier research this design builds on already checked: MELSEC's
-`device_code`, FINS's `FinsMemoryItem`, EtherNet/IP's `CipPath`, DNP3's `Dnp3ObjectHeader`/
-`Dnp3PointValue`, BACnet's ReadProperty/WriteProperty decode, and OPC UA's Tier-1 Read/Write/Call
-are all already structured the way S7 is -- each would need the same "extract the existing
-fields into an Operation" work S7 does, not new decode work, whenever they're taken up. CODESYS's
-`CmpIecVarAccess` is the one confirmed real gap -- its live-variable read/write is structural-only
-today, named but not value-decoded, so it can't feed a register-level baseline until that's built.
-None of that is in scope for this design; it's recorded here only so the "which architectures
-could follow S7/Modbus, and in what order" question has a real answer when it comes up.)
+**Phase 2 (v0.2.5, same release) -- what was ACTUALLY found for each of the six, checked directly
+against the real decoder code, replacing the speculative notes above.** The original research this
+design built on predicted all six would be "already structured the way S7 is." That held for three
+of them; the other three needed either a small additive prerequisite (the same shape Modbus's own
+Phase 1 prerequisite took) or turned out to have no genuine linear range at all -- both real,
+honestly-scoped findings, not failures:
+
+- **DNP3 -- full range-tracking, but needed its own small prerequisite first.**
+  `Dnp3ObjectHeader` (`dnp3.hpp`) does carry real `group`/`variation`/`has_range`/`range_start`/
+  `range_stop` fields, exactly as predicted -- but `Dnp3Result` (`dnp3.hpp`), the type actually
+  reachable from `DecodedPacket::result` (the same one `extract_operations()` reads, see this
+  file's own "Core data model" section below), only carried those headers as ALREADY-RENDERED
+  display strings (`"g1v2 (Binary Input)"`) -- the real numbers never reached `DecodedPacket` at
+  all. Fixed the same way Modbus's own Phase 1 gap was: a new, purely additive
+  `Dnp3Result::dnp3_objects` field (`dnp3.hpp`/`dnp3.cpp`), a structured mirror of that same list.
+  `operation_key` is `"<function_name>/<group_name>/v<variation>"`. One deliberate divergence from
+  every other protocol here: extraction is NOT request-side only. DNP3's own `function_name`
+  already tells request and response apart (`Read`/`Write`/`Direct Operate`/... vs. `Response`/
+  `Unsolicited Response`), so there is no operation_key collision risk the way Modbus's write-echo
+  problem has -- and, unlike Modbus, a DNP3 Read response's own object headers are NOT an echo of
+  the request (a real Read request very often polls with an "all points"/Class-0 qualifier and no
+  range at all; the RESPONSE is where the outstation's actual reported range appears), so
+  restricting to requests would leave range-tracking nearly inert for the single most common DNP3
+  traffic pattern. See `extract_dnp3_operations`'s own comment (`baseline.cpp`) for the full
+  reasoning, including why control operations (Select/Operate/Direct Operate) naturally stay
+  key-only when their own CROB/analog-output objects use an index-prefixed qualifier rather than a
+  start-stop range (has_range simply comes back false there, nothing is forced).
+
+- **MELSEC -- full range-tracking for Batch Read/Write, confirmed exactly as predicted.**
+  `MelsecDeviceSpec::device_code`/`device_number` plus `MelsecFrame::point_count` (`melsec.hpp`)
+  give a single device + a real count, architecturally identical to S7's own
+  `byte_address`+`count` shape -- and, unlike S7's own BIT-transport-size exclusion, no unit-
+  mismatch caveat is needed: a bit-type `device_number` is already a flat, one-per-bit address
+  space on its own `device_code` (the wire's "two bit values packed per byte" is purely how
+  response VALUE bytes are packed, not how the address itself is encoded). `operation_key` is
+  `"<command_name>/0x<device_code>"`. Random Read/Write's own non-contiguous device list has no
+  genuine linear range (the design's own prediction was specifically about Batch Read/Write) and
+  is recorded key-only instead, one Operation per distinct `device_code` seen.
+
+- **FINS -- full range-tracking for Memory Area Read/Write, with one real unit-mismatch caveat.**
+  `FinsMemoryItem::area_code`/`address` plus `FinsFrame::point_count` (`fins.hpp`) give the same
+  device+count shape as MELSEC -- EXCEPT for bit-addressed items (`FinsMemoryItem::is_bit`):
+  FINS's own `address` field only advances once every 16 bits (`bit_address` rolls 0-15 within one
+  `address` first), so `address` alone under-counts a bit-granularity range's true span -- the
+  exact same unit-mismatch problem S7's own BIT-transport-size items have, and excluded from
+  range-tracking the identical way (key-only instead). `operation_key` is
+  `"<command_name>/0x<area_code>"`. Memory Area Fill has no explicit item-count field on the wire
+  at all (so no range, even for a single, otherwise-clean address); Multiple Memory Area Read
+  addresses a non-contiguous list (same reasoning as MELSEC's Random Read) and is key-only, one
+  Operation per distinct `area_code`.
+
+- **EtherNet/IP (CIP) -- key-only, a genuine and honestly-scoped gap, not a forced fit.**
+  `CipPath` (`enip.hpp`) does carry real `class_id`/`instance_id`/`attribute_id` fields (folded
+  into `operation_key` alongside the CIP service name, the same "bounded addressing dimension in
+  the key" precedent S7's own DB-number inclusion sets), confirming that half of the original
+  prediction. But CIP's only genuinely LINEAR addressing -- Read_Tag_Fragmented/
+  Write_Tag_Fragmented's own `byte_offset`, used to read/write a tag element-by-element -- is
+  computed by `enip.cpp`'s `decode_cip_request_data`/`decode_write_tag_request` and rendered
+  straight into `CipMessage::values` as free text (`"element_count=10 byte_offset=1234"`), never a
+  structured field the way `S7Item::byte_address` or `ModbusFrame::start_address` are. This is
+  EXACTLY Modbus's own pre-Phase-1 problem (address/quantity rendered into `summary` text only) --
+  but unlike Modbus, this design does not fix it here: `has_target_range` stays false for every
+  EtherNet/IP operation in this pass. A genuine follow-up exists (add a structured
+  `byte_offset`/`element_count` field to `CipMessage`, the same small, self-contained shape
+  Modbus's own prerequisite took), just not taken up in this phase.
+
+- **BACnet -- key-only, confirmed (not assumed) to have no linear range at all.** ReadProperty/
+  WriteProperty's own object-instance + property-identifier (`bacnet.cpp`'s
+  `decode_object_property_reference`) are BACnet's only two address-bearing "first pass" services
+  -- but a BACnet object instance number is an opaque identifier (ASHRAE 135's own 22-bit instance
+  space), never a "read this many consecutive addresses" operation the way an S7 byte range or a
+  DNP3 point-index start-stop is, exactly as this design doc originally guessed. `operation_key` is
+  `"<service>/<object-type>/<property-name>"`, parsed out of `BacnetApdu::values`' own
+  `"object="`/`"property="` entries (a fixed, single-code-path "key=value" token, not a prose
+  summary sentence -- a materially different, lower-stakes case than the free-text-scraping
+  anti-pattern this design doc rejects for Modbus, since a parsing miss here only costs a
+  cosmetically wrong key component, never a wrong range boundary the way DNP3's own numeric fields
+  would).
+
+- **OPC UA -- key-only, an honest call given genuinely ambiguous NodeId semantics.** Read/Write/
+  Call's own NodeId list (`opcua.cpp`'s `decode_read_request_params`/`decode_write_request_params`/
+  `decode_call_request_params`) is, like EtherNet/IP's byte_offset, rendered straight into
+  `OpcUaMessage::values` as display strings, with no structured NodeId field to read a numeric
+  identifier back out of. But even a successfully parsed NUMERIC NodeId wouldn't be a genuine
+  `[start,end)` range the way a register block is: a single Read/Write targets ONE NodeId, not a
+  count of consecutive addresses, and OPC UA NodeIds are legally String/Guid/ByteString
+  identifiers too (not always numeric at all) -- so this design doesn't force a single-point-range
+  model onto something that isn't really one. Every Tier 1 AND Tier 2 recognized service (not just
+  Read/Write/Call) is still recorded key-only, `operation_key` = the service name alone.
+
+CODESYS's `CmpIecVarAccess` remains the one confirmed real gap among the protocols surveyed for
+this feature -- its live-variable read/write is structural-only today, named but not value-decoded,
+so it can't feed a register-level baseline until that's built. Not in scope for either phase; it's
+recorded here only so the "which architecture could follow next" question has a real answer when
+it comes up.
 
 ## Core data model
 
 ```
 struct Operation {
-    std::string protocol;           // "s7comm" | "modbus" (Phase 1)
+    std::string protocol;           // "s7comm" | "modbus" (Phase 1); "enip" | "dnp3" | "bacnet" |
+                                     // "opcua" | "melsec" | "fins" (Phase 2) -- each spelled exactly
+                                     // as that protocol's own ProtocolDecoder::id() returns it
     std::string client_ip, server_ip;
     uint16_t server_port = 0;
     std::string operation_key;      // S7: "<rosctr>/<function_name>/<area_name>[/DB<n>]"
                                      // Modbus: "<function_name>"
+                                     // EtherNet/IP: "<service>[/Class0x<n>][/Instance<n>][/Attr<n>]"
+                                     // DNP3: "<function_name>/<group_name>/v<variation>"
+                                     // BACnet: "<service>/<object-type>/<property-name>"
+                                     // OPC UA: "<service_name>" alone
+                                     // MELSEC/FINS: "<command_name>/0x<device_or_area_code>"
     bool has_target_range = false;  // false for Modbus until the prerequisite lands, and for
                                      // any S7 job with no item list (e.g. a plain PLC-stop request)
     uint32_t range_start = 0, range_end = 0;   // half-open [start, end); S7: byte_address units
@@ -213,9 +311,14 @@ same shape as `write_policy_report_text`/`_json`, with a summary count per verdi
   it's a documented operational caveat for whoever runs this: `learn` only from captures already
   trusted to be clean, the same way any baselining tool in this space has to be seeded carefully.
   Worth a prominent callout in the eventual `--help` text and docs, not just here.
-- **Protocols beyond S7comm and Modbus.** Per Jurgen's own scoping ("starting including S7 and
-  Modbus"). The `extract_operations()` per-protocol seam above is specifically shaped so adding
-  DNP3/EtherNet/IP/BACnet/OPC UA later is additive, not a rework.
+- **Protocols beyond S7comm and Modbus.** Per Jurgen's own original scoping ("starting including S7
+  and Modbus"). **Since resolved by Phase 2 (v0.2.5, same release):** EtherNet/IP, DNP3, BACnet,
+  OPC UA, MELSEC, and FINS were added exactly the additive way this bullet predicted -- one new
+  `extract_<protocol>_operations()` function each, dispatched from the same `extract_operations()`
+  seam, with zero changes to `merge_baseline_observations()`/`check_baseline()`/the JSON schema/the
+  verdict model. See "Per-protocol data readiness" above for what was actually found for each of
+  the six. Zone-level rollup and statistical/confidence thresholds (the other two bullets above)
+  remain unresolved -- Jurgen's own Phase 2 request was specifically protocol breadth, not those.
 
 ## Testing plan (once this is built)
 
@@ -257,5 +360,35 @@ those, so keeping it next to `BaselineEngine` (which already owns `Operation`/`B
 `policy_engine.cpp` and `asset_inventory.cpp` each own their own report writers rather than
 routing through `output.cpp`.
 
-Not started for later phases: zone-level baselines, statistical/confidence thresholds, and any
-protocol beyond S7comm/Modbus -- see "Explicitly out of scope" above, unchanged.
+**Phase 2 (EtherNet/IP, DNP3, BACnet, OPC UA, MELSEC, FINS) is done, v0.2.5, same release.** Same
+shape as Phase 1's own step 2: one `extract_<protocol>_operations()` function per protocol added to
+`baseline.cpp`, dispatched from the same `extract_operations()` seam, with zero changes to
+`merge_baseline_observations()`/`check_baseline()`/the JSON schema/the verdict model (`Operation`,
+`ConduitBaseline`, `BaselineStore`, `BaselineFinding`, `BaselineVerdict` are all byte-for-byte
+unchanged in shape). Two differences from a pure "just add six functions" read of step 2:
+- **DNP3 needed its own small prerequisite first**, the same shape as step 1's Modbus prerequisite:
+  `Dnp3Result::dnp3_objects` (`dnp3.hpp`/`dnp3.cpp`), a purely additive structured field -- see
+  "Per-protocol data readiness" above for why.
+- **`BaselineEngine::observe` (step 2's own `.cpp` file) needed widening to track UDP conduits**,
+  not just TCP: BACnet has no TCP form at all, and FINS/MELSEC can run over either transport. This
+  is the one place Phase 2 touched code inside `BaselineEngine` itself (not just
+  `extract_operations()`'s own dispatch) -- direction determination for UDP mirrors
+  `AssetInventoryEngine::observe`'s own established pattern (BACnet's Confirmed-Request/
+  Unconfirmed-Request APDU type as content-based signal, known-port heuristic fallback otherwise)
+  rather than inventing a second convention for the same decision.
+
+Step 5 (fixtures/CTest/docs) for Phase 2: no new fixtures -- every one of the six protocols' own
+existing sample pcaps (`tests/sample_enip.pcap`, `sample_dnp3.pcap`, `sample_bacnet.pcap`,
+`sample_opcua.pcap`, `sample_melsec.pcap`, `sample_fins.pcap`) already had enough real operation
+diversity to exercise `learn`/`check` directly. 21 new `baseline_*` CTest entries (3 per protocol,
+plus a 4th for the three range-tracking protocols) -- see `CMakeLists.txt`'s own "Phase 2" comment
+block for the full test-shape rationale, including why `NewTargetRange` verification uses a
+`sed`-shrunk already-learned baseline file rather than a second mutated pcap fixture (baseline
+files are meant to be hand-edited/reviewed, per this design's own "Baseline state and persistence"
+section above). `DEVELOPMENT.md` roadmap item 41, `README.md`, and `man/conduitscope.1` all updated
+in the same pass -- see item 41's own Phase 2 entry for the full test-count/rebuild verification
+record.
+
+Not started for later phases: zone-level baselines and statistical/confidence thresholds -- see
+"Explicitly out of scope" above, unchanged. CODESYS's `CmpIecVarAccess` remains the one confirmed
+real decode gap among protocols surveyed for this feature (structural-only today, no value decode).

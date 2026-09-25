@@ -403,16 +403,25 @@ and infers conduits from the matrix. Can render a Mermaid or Graphviz
 section for a worked example.
 .TP
 .B baseline learn \fB\-\-baseline\-file\fR \fIFILE\fR \fIFILE\fR [\fIFILE\fR ...] [\fIOPTIONS\fR]
-Protocol\-operation\-level communication baseline, Modbus and S7comm only:
-decodes each given capture and, for every conduit (client IP, server IP,
-protocol, server port), accumulates which operations (Modbus function code
-plus address range; S7comm Read/Write Var item by memory area, DB number,
-and address range) were observed, merging into \fB\-\-baseline\-file\fR (read
-first if it already exists, always written back at the end \-\- cumulative
-across as many \fBlearn\fR runs and captures as you feed it over time).
-Never prints a compliant/anomaly verdict \-\- that is what \fBbaseline
-check\fR is for. See \fBOPTIONS (baseline learn)\fR below and
-\fBdocs/design/baseline-engine.md\fR for the full data model.
+Protocol\-operation\-level communication baseline, covering S7comm, Modbus,
+EtherNet/IP, DNP3, BACnet, OPC UA, MELSEC, and FINS: decodes each given
+capture and, for every conduit (client IP, server IP, protocol, server
+port), accumulates which operations were observed \-\- Modbus function code,
+S7comm Read/Write Var item (memory area, DB number), DNP3 object header
+(function code, group, variation), MELSEC/FINS batch read/write (device
+code/memory area code), each with its own address range; EtherNet/IP CIP
+service (plus class/instance/attribute when addressed that way), BACnet
+readProperty/writeProperty (object type, property), and OPC UA service name
+are tracked by operation only, with no address range (each protocol's own
+real addressing has no linear range to track \-\- see
+\fBdocs/design/baseline-engine.md\fR's own \(lqPer\-protocol data
+readiness\(rq section for exactly which protocol gets range\-tracking and
+why) \-\- merging into \fB\-\-baseline\-file\fR (read first if it already
+exists, always written back at the end \-\- cumulative across as many
+\fBlearn\fR runs and captures as you feed it over time). Never prints a
+compliant/anomaly verdict \-\- that is what \fBbaseline check\fR is for. See
+\fBOPTIONS (baseline learn)\fR below and \fBdocs/design/baseline-engine.md\fR
+for the full data model.
 .TP
 .B baseline check \fB\-\-baseline\-file\fR \fIFILE\fR \fIFILE\fR [\fIOPTIONS\fR]
 Checks a single capture against a baseline previously built with
@@ -2242,8 +2251,9 @@ conduitscope policy validate \-r capture.pcap \-\-policy inferred.yaml
 .EE
 .RE
 .PP
-Learn a Modbus/S7comm communication baseline from known\-good captures, then
-check a later capture against it:
+Learn a communication baseline (S7comm, Modbus, EtherNet/IP, DNP3, BACnet,
+OPC UA, MELSEC, and FINS all covered) from known\-good captures, then check
+a later capture against it:
 .RS
 .EX
 conduitscope baseline learn \-\-baseline\-file baseline.json good1.pcap good2.pcap

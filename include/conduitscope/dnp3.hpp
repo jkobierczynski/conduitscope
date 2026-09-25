@@ -324,6 +324,28 @@ public:
 // convention DecodedPacket::dnp3_link_crc_valid's own comment documents), the object-header/point-
 // value lists are the same cumulative-across-every-frame-in-the-payload lists the legacy call site
 // built, capped at 50 entries each exactly as before.
+// One object header's numeric group/variation/range data, the structured twin of the display
+// string dnp3_object_headers above already renders ("g1v2 (Binary Input)") -- added for the
+// baseline engine (roadmap item 41 phase 2, docs/design/baseline-engine.md), which needs the real
+// numbers back, not a string to parse them out of again (see baseline.cpp's extract_dnp3_operations
+// for why: reliably regexing a rendered display string is exactly the anti-pattern this codebase
+// already rejected for Modbus, see ModbusFrame::start_address/quantity's own comment). Mirrors
+// Dnp3ObjectHeader's own group/variation/has_range/range_start/range_stop fields exactly, one entry
+// per header in the same order/cap as dnp3_object_headers (see Dnp3Decoder::decode).
+struct Dnp3ObjectRange {
+    uint8_t group = 0;
+    uint8_t variation = 0;
+    std::string group_name;
+    // True only when this header both used a start-stop range qualifier (Dnp3ObjectHeader::
+    // has_range) AND was itself fully decoded (Dnp3ObjectHeader::decoded) -- an object header whose
+    // own shape wasn't understood well enough to skip correctly (see Dnp3ObjectHeader::decoded's own
+    // comment) has no trustworthy range_start/range_stop, so this stays false for it even if
+    // has_range looked set before parsing bailed.
+    bool has_range = false;
+    uint32_t range_start = 0;
+    uint32_t range_stop = 0;  // inclusive, per Dnp3ObjectHeader's own convention
+};
+
 struct Dnp3Result {
     std::string summary;
     std::vector<std::string> notes;
@@ -332,6 +354,7 @@ struct Dnp3Result {
     std::string dnp3_function_name;
     std::vector<std::string> dnp3_object_headers;
     std::vector<std::string> dnp3_point_values;
+    std::vector<Dnp3ObjectRange> dnp3_objects;  // see Dnp3ObjectRange's own comment above
 
     bool link_crc_valid = false;
     bool header_crc_valid = false;

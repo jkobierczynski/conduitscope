@@ -7638,8 +7638,10 @@ deferred future migration.
     are decoded but not correlated, for lack of a confirmed echo guarantee); and, as ever, any
     BSAP field this decoder does not name above.
 
-41. **ICS communication-baseline analysis at the protocol-operation level.** **Done -- first pass
-    (v0.2.5)**, scoped to S7comm and Modbus exactly as the design called for: `BaselineEngine`
+41. **ICS communication-baseline analysis at the protocol-operation level.** **Phase 1 done, v0.2.5
+    (S7comm/Modbus); Phase 2 done, v0.2.5 (EtherNet/IP, DNP3, BACnet, OPC UA, MELSEC, FINS) --
+    zone-level rollup, statistical/confidence thresholds, and CODESYS are still not done, see
+    below.** Phase 1 first, scoped to S7comm and Modbus exactly as the design called for: `BaselineEngine`
     (`baseline.hpp`/`baseline.cpp`), the `baseline learn`/`baseline check` subcommand pair, and
     Modbus's own prerequisite (`ModbusFrame::is_request`/`start_address`/`quantity`, populated
     from the same already-computed locals `decode_read_family`/`decode_write_multiple` had all
@@ -7685,6 +7687,49 @@ deferred future migration.
     later is additive (each needs only its own `extract_operations()`), per the design's own
     per-protocol data-readiness survey; CODESYS's `CmpIecVarAccess` is the one confirmed real gap
     (structural-only today, no value decode) that would need new decode work first.
+
+    **Phase 2 (v0.2.5, same release): EtherNet/IP, DNP3, BACnet, OPC UA, MELSEC, FINS.** Jurgen
+    said `baseline learn`/`check` "felt short" for host/tech-stack-based traffic determination --
+    diagnosed as exactly the gap this item's own Phase 1 scoping note predicted (a host running any
+    of these six protocols was invisible to `learn`/`check`, even though `inventory`/`policy` see it
+    fine) -- and confirmed extending protocol breadth, not touching zone-level rollup or statistical
+    thresholds, both still explicitly out of scope. `extract_enip_operations`/`extract_dnp3_
+    operations`/`extract_bacnet_operations`/`extract_opcua_operations`/`extract_melsec_operations`/
+    `extract_fins_operations` (`baseline.cpp`) were added alongside `extract_s7comm_operations`/
+    `extract_modbus_operations`, dispatched from the same `extract_operations()` seam Phase 1's own
+    design already shaped for this; `BaselineEngine::observe` was widened to also track UDP conduits
+    (BACnet has no TCP form at all, and FINS/MELSEC can run over either transport), using the same
+    SYN/SYN-ACK-first-then-known-port convention for TCP and, for UDP, BACnet's own Confirmed-
+    Request/Unconfirmed-Request APDU type as a content-based direction signal (mirroring
+    `AssetInventoryEngine::observe`'s own identical handling) with a port-heuristic fallback for
+    FINS/MELSEC. The design doc's own "Per-protocol data readiness" section now records what was
+    ACTUALLY found for each of the six (verified against the real decoder code, not assumed from
+    this item's own earlier speculative notes) -- summary: DNP3, MELSEC, and FINS got genuine full
+    range-tracking (`has_target_range=true`); EtherNet/IP, BACnet, and OPC UA are key-only, each for
+    its own documented reason (EtherNet/IP's Read/Write-Tag-Fragmented byte offset is real but only
+    ever rendered into free text, never a struct field, the same gap Modbus's own address/quantity
+    had before its Phase 1 prerequisite -- not fixed here, a real follow-up; BACnet object-instance/
+    property and OPC UA NodeIds are not linear ranges at all, confirmed rather than assumed). DNP3
+    needed its own small additive prerequisite first, the same shape as Modbus's Phase 1 one:
+    `Dnp3Result` (the type actually reachable from `DecodedPacket::result`) only carried already-
+    rendered display strings for its object headers, not the real group/variation/range numbers
+    `Dnp3ObjectHeader` itself computes -- fixed by adding `Dnp3Result::dnp3_objects`
+    (`dnp3.hpp`/`dnp3.cpp`), a small, purely additive structured mirror of that same list. 21 new
+    `baseline_*` CTest tests (3 per protocol -- `learn` spot-checking a real operation/range, `check`
+    against an unmodified copy of the fixture proving CLEAN, `check` against a hand-written empty
+    baseline proving every operation becomes its own `new-conduit` finding -- plus a 4th test for
+    DNP3/MELSEC/FINS specifically, `sed`-shrinking one already-learned range and re-checking the
+    unmodified fixture to prove `new-target-range` fires with the right bounds), all against each
+    protocol's own existing sample pcap -- no new fixtures needed, every one of the six already had
+    enough operation diversity to exercise this. Full suite: 1873 -> 1894 tests (default config),
+    1861 -> 1882 (no-live-capture config), zero-warning build in both, confirmed via clean full
+    rebuild in both configs; the original 11 S7comm/Modbus `baseline_*` CTest entries are unchanged
+    and still pass with their exact original `PASS_REGULAR_EXPRESSION` pins, confirming zero
+    regression to Phase 1's own behavior.
+
+    Still not done, unchanged from Phase 1's own scoping: zone-level baselines, statistical/
+    confidence thresholds (see the design doc's own "Explicitly out of scope" section), and
+    CODESYS's `CmpIecVarAccess` (still the one confirmed real decode gap, structural-only today).
 
 42. **CC-Link IE Field Network Basic (CCIEFB), Mitsubishi Electric -- UDP ports 61450 (cyclic
     data) and 61451 (SLMP node search / set IP address).** **Done.** Jurgen asked "Can you add

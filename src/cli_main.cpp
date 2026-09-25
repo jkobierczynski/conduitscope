@@ -1989,11 +1989,12 @@ int main(int argc, char** argv) {
     // `learn`/`check` are deliberately separate commands rather than one auto-detected mode.
     auto* baseline_cmd = app.add_subcommand(
         "baseline", "ICS communication-baseline analysis at the protocol-operation level "
-                     "(S7comm and Modbus, Phase 1) -- learn what operations/address ranges are "
-                     "normally seen on a conduit, then check a capture against that baseline");
+                     "(S7comm, Modbus, EtherNet/IP, DNP3, BACnet, OPC UA, MELSEC, FINS) -- learn "
+                     "what operations/address ranges are normally seen on a conduit, then check a "
+                     "capture against that baseline");
 
     auto* baseline_learn_cmd = baseline_cmd->add_subcommand(
-        "learn", "Absorb every capture's own S7comm/Modbus operations into a baseline file, "
+        "learn", "Absorb every capture's own operations into a baseline file, "
                   "creating it if it doesn't exist yet. Never flags anything as anomalous -- "
                   "running this against N captures over N days is how a real baseline is built. "
                   "Only ever learn from captures already trusted to be clean: this absorbs "
@@ -2018,7 +2019,7 @@ int main(int argc, char** argv) {
     add_resource_limit_options(baseline_learn_cmd, baseline_learn_limit_vars);
 
     auto* baseline_check_cmd = baseline_cmd->add_subcommand(
-        "check", "Compare one capture's own S7comm/Modbus operations against an existing baseline "
+        "check", "Compare one capture's own operations against an existing baseline "
                   "file (read-only -- never writes it) and report every operation the baseline "
                   "doesn't already cover. Non-zero exit code on any finding -- see EXIT STATUS -- "
                   "for CI/cron use");

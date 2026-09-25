@@ -212,9 +212,14 @@ conduits both), `inventory` (infers a first-draft zone/conduit model from a
 capture with no policy file at all, including a Mermaid/Graphviz diagram
 and a policy file directly loadable by `policy validate` -- closing the
 loop from passive discovery to active enforcement), `baseline learn`/
-`baseline check` (accumulates a per-conduit, per-operation Modbus/S7comm
-communication baseline across captures over time, then flags anything a
-later capture does that the baseline never saw), plus `interfaces` and
+`baseline check` (accumulates a per-conduit, per-operation communication
+baseline across captures over time, then flags anything a later capture
+does that the baseline never saw -- S7comm and Modbus get full target-range
+tracking, DNP3/MELSEC/FINS also get full range-tracking for their own
+batch/block-style reads and writes, and EtherNet/IP/BACnet/OPC UA are
+tracked key-only, where each protocol's own real addressing has no linear
+range to track -- see [docs/design/baseline-engine.md](docs/design/baseline-engine.md)
+for exactly which is which and why), plus `interfaces` and
 `version`, with full `--help` at every level. See
 [docs/USER_GUIDE.md](docs/USER_GUIDE.md) for command syntax, the policy
 file schema, output formats, exit codes, current limitations, and worked
@@ -352,9 +357,11 @@ build/conduitscope policy validate -r tests/sample_vlan_zones.pcap --policy test
 build/conduitscope inventory -r tests/sample_inventory.pcap --diagram zones.mmd --policy-out inferred.yaml
 build/conduitscope policy validate -r tests/sample_inventory.pcap --policy inferred.yaml
 
-# Learn a Modbus/S7comm communication baseline from known-good traffic, then check a later
-# capture against it -- flags new conduits, new function codes/operations, and address ranges
-# outside what was learned (exit code 4 on any finding; see docs/design/baseline-engine.md):
+# Learn a communication baseline (S7comm, Modbus, EtherNet/IP, DNP3, BACnet, OPC UA, MELSEC, and
+# FINS all covered) from known-good traffic, then check a later capture against it -- flags new
+# conduits, new function codes/operations, and (where that protocol's own addressing supports it)
+# address ranges outside what was learned (exit code 4 on any finding; see
+# docs/design/baseline-engine.md):
 build/conduitscope baseline learn --baseline-file baseline.json tests/sample_modbus.pcap tests/sample_s7comm.pcap
 build/conduitscope baseline check --baseline-file baseline.json tests/sample_modbus.pcap
 ```
