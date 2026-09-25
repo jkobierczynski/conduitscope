@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 cmake_minimum_required(VERSION 3.16)
-project(conduitscope VERSION 0.2.5 LANGUAGES CXX)
+project(conduitscope VERSION 0.2.6 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -14,7 +14,7 @@ endif()
 # is meaningless for a multi-config generator (Visual Studio, Xcode: CMAKE_CONFIGURATION_TYPES is
 # set instead, and the actual configuration is picked at BUILD time via --config, not here at
 # configure time), so it's always empty in that case -- confirmed on a real Windows/MSVC build,
-# which without this fallback reports "conduitscope 0.2.5  [MSVC ..., Windows,  build, ...]" (note
+# which without this fallback reports "conduitscope 0.2.6  [MSVC ..., Windows,  build, ...]" (note
 # the double space where an empty CMAKE_BUILD_TYPE left a hole). "multi-config" is honest about why
 # no single value is available here, rather than guessing a config that may not be the one actually
 # built.
