@@ -18038,6 +18038,16 @@ def fox_tuple_blob(key: str, data: bytes) -> bytes:
     return f"{key}=b:{len(data)}".encode("ascii") + data + b"\n"
 
 
+def fox_tuple_blob_raw_size(key: str, size_literal: str) -> bytes:
+    """Like fox_tuple_blob, but writes `size_literal` verbatim instead of a real len(data) --
+    for deliberately malformed 'b' tuple size fields (see the oversized-digit-run regression
+    case in build_fox_sample: a digit run libFuzzer found that std::stoull cannot represent,
+    e.g. 34 digits, which overflows unsigned long long and previously crashed the whole process
+    via an uncaught std::out_of_range -- fox.cpp's parse_fox_tuples now catches that and reports
+    the frame as malformed instead, exactly like any other structurally invalid Fox frame)."""
+    return f"{key}=b:{size_literal}\n".encode("ascii")
+
+
 def fox_tuple_object(key: str, type_token: str, data: bytes) -> bytes:
     return f"{key}=o:{type_token} {len(data)}".encode("ascii") + data + b"\n"
 
@@ -18056,9 +18066,11 @@ def build_fox_sample():
     exercising every documented tuple type tag (s/i/f/t/z/b/o/m, including a nested 'm' message)
     via the generic decode path (proving that path works independent of the hello-specific
     fields), a frame split across two TCP segments (proving tcp_declared_length's terminator-scan
-    reassembly works), and a second hello reply whose own hostAddress field deliberately differs
+    reassembly works), a second hello reply whose own hostAddress field deliberately differs
     from the actual observed TCP source IP (the secondary, hostAddress-vs-peer-IP internal-
-    topology-leakage finding)."""
+    topology-leakage finding), and a 'b' (blob) tuple with an unrepresentable (34-digit) size
+    field -- a real crash libFuzzer's fuzz_fox harness found (uncaught std::out_of_range from
+    std::stoull), now handled as an ordinary malformed frame instead."""
     packets = []
     ident_box = [0xF000]
 
@@ -18151,6 +18163,18 @@ def build_fox_sample():
     #    decoder cannot and does not see inside the TLS-encrypted Fox traffic itself). ============
     client6, _server6, _ = session(61105, port_b=4911)
     client6(tls_client_hello())
+
+    # === 7) regression: a 'b' (blob) tuple whose size field is a digit run std::stoull cannot
+    #    represent (34 digits -- far past unsigned long long's ~20-digit ceiling). libFuzzer's
+    #    fuzz_fox harness found this: the uncaught std::out_of_range std::stoull throws crashed
+    #    the whole process (fox.cpp's own 'o' (object) tuple size field had the identical
+    #    unguarded std::stoull, fixed the same way even though the fuzzer happened to find 'b'
+    #    first). Now caught and re-thrown as a ParseError, exactly like every other structurally
+    #    malformed Fox frame -- so this frame is correctly NOT claimed as fox (falls through to
+    #    the generic "TCP payload" summary) instead of taking the whole process down with it. ===
+    client7, _server7, _ = session(61106)
+    malformed_tuples = fox_tuple_blob_raw_size("payload", "99999999999999999999999999999999")
+    client7(fox_frame(fox_header("a", 5, -1, "test", "echo"), malformed_tuples))
 
     data = pcap_global_header()
     for i, pkt in enumerate(packets):

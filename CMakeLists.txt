@@ -13889,6 +13889,21 @@ add_test(NAME fox_stats_frame_type_counts_and_curated_findings
 set_tests_properties(fox_stats_frame_type_counts_and_curated_findings PROPERTIES
   PASS_REGULAR_EXPRESSION "fox frame type counts:\n *Asynchronous *3[^\n]*\n *Keep-alive *1[^\n]*\n *Reply *2[^\\*]*\\*\\*\\* Fox hello exchanges observed \\(unauthenticated system-identity disclosure\\) 4 \\*\\*\\*\nfox hello exchanges with hostAddress differing from the observed TCP peer IP \\(internal-topology leakage signal\\) observed: 1")
 
+# Regression (packet #11): a 'b' (blob) tuple with a 34-digit size field -- more digits than
+# std::stoull's unsigned-long-long range can hold. libFuzzer's fuzz_fox harness found this as a
+# real crash: the uncaught std::out_of_range std::stoull throws took the whole process down via
+# std::terminate/abort, not just a ParseError this decoder already knows how to report. Fixed by
+# catching it in parse_fox_tuples and re-throwing as a ParseError, exactly like the existing
+# seq/reply guard two lines below in parse_one_fox_frame ("Fox frame: malformed seq/reply
+# number") already does for the identical failure mode on a different field -- so this pins the
+# CORRECT post-fix behavior: the frame is silently NOT claimed as fox (try_parse_fox_pdu's own
+# catch(ParseError) returns std::nullopt) and falls through to the generic TCP summary, the same
+# as any other structurally malformed Fox frame, instead of crashing.
+add_test(NAME fox_oversized_blob_size_field_does_not_crash
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_fox.pcap" --format text)
+set_tests_properties(fox_oversized_blob_size_field_does_not_crash PROPERTIES
+  PASS_REGULAR_EXPRESSION "#11  [^\n]*\\[tcp\\]  TCP payload of 70 byte\\(s\\) on port 61106->1911")
+
 # --- ICMPv6/NDP (icmpv6.hpp) and DHCPv6 (dhcpv6.hpp) -- roadmap item 45 --------------------------
 # tests/sample_icmpv6_ndp.pcap (build_icmpv6_ndp_sample, tools/make_sample_pcap.py) covers RFC
 # 4443/4861/4862/8106/4191: RS+SLLA (#1), RA with Prefix Information (A-flag/SLAAC), MTU, RDNSS and

@@ -243,7 +243,17 @@ bool parse_fox_tuples(FoxReader& r, std::vector<FoxTuple>& out_tuples, size_t de
                 // decimal size and the raw bytes that follow it.
                 std::string size_digits = r.read_while([](uint8_t c) { return is_ascii_digit(c); });
                 if (size_digits.empty()) throw ParseError("Fox frame: malformed 'b' tuple size");
-                size_t size = static_cast<size_t>(std::stoull(size_digits));
+                size_t size;
+                try {
+                    size = static_cast<size_t>(std::stoull(size_digits));
+                } catch (const std::exception&) {
+                    // A digit run std::stoull can't represent (e.g. more digits than fit in an
+                    // unsigned long long) throws std::out_of_range, not a ParseError -- caught and
+                    // re-thrown as one here, mirroring parse_one_fox_frame's own seq/reply guard
+                    // just below, so this frame is reported as malformed exactly like any other
+                    // structurally invalid Fox frame rather than crashing the process outright.
+                    throw ParseError("Fox frame: malformed 'b' tuple size (unrepresentable number)");
+                }
                 r.read_n(size);  // raw bytes -- never rendered, only their count (see fox.hpp).
                 if (r.next() != '\n') throw ParseError("Fox frame: malformed 'b' tuple trailer");
                 tuple.rendered = std::to_string(size) + " byte(s) (blob)";
@@ -254,7 +264,14 @@ bool parse_fox_tuples(FoxReader& r, std::vector<FoxTuple>& out_tuples, size_t de
                 std::string type_token = r.read_until(' ');
                 std::string size_digits = r.read_while([](uint8_t c) { return is_ascii_digit(c); });
                 if (size_digits.empty()) throw ParseError("Fox frame: malformed 'o' tuple size");
-                size_t size = static_cast<size_t>(std::stoull(size_digits));
+                size_t size;
+                try {
+                    size = static_cast<size_t>(std::stoull(size_digits));
+                } catch (const std::exception&) {
+                    // Same unrepresentable-digit-run guard as the 'b' (blob) case just above --
+                    // see its own comment for why this is caught and re-thrown as a ParseError.
+                    throw ParseError("Fox frame: malformed 'o' tuple size (unrepresentable number)");
+                }
                 r.read_n(size);  // raw bytes -- never rendered, only their count (see fox.hpp).
                 if (r.next() != '\n') throw ParseError("Fox frame: malformed 'o' tuple trailer");
                 tuple.rendered = "type=\"" + type_token + "\", " + std::to_string(size) + " byte(s) (object)";

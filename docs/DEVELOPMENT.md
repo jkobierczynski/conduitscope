@@ -9561,22 +9561,45 @@ deferred future migration.
     rather than touch any shared file -- which succeeded cleanly for all
     three.
 
-    **No functional bugs were found by any of the 76 harnesses** -- every
-    decoder, including the newly-covered Windows AD/RPC suite and the
-    non-Ethernet CAN-bus/802.15.4 decoders, handled adversarial input
-    correctly across both the 10-second CTest corpus-regression check every
+    **Correction (see item 57 below): this was NOT bug-free after all.**
+    At the time this batch landed, none of the 76 harnesses' own 10-second
+    CTest corpus-regression checks nor a standalone 30-second-burst sample
+    spanning all six new waves had turned up a crash, and the paragraph
+    below originally said so. That sample happened not to include
+    `fuzz_fox` (one of the pre-existing "third wave" harnesses, not one of
+    this batch's own 59 new ones) at a long-enough run length -- a longer,
+    user-run session against it found a real crash within about 30 minutes.
+    The corrected, honest picture: this batch's own new 59 harnesses found
+    no bugs in their sample bursts, but "no functional bugs were found by
+    any of the 76 harnesses" was too strong a claim to make from a handful
+    of 30-second samples -- a crash reachable only past ~2.7M executions
+    (as this one was) will not reliably show up in a 30-second burst. Item
+    57 has the full writeup and fix; the general lesson (kept here rather
+    than only in item 57, since it corrects a claim made in THIS item) is
+    that this project's own "ran a burst, found nothing" language should be
+    scoped to what was actually run, not generalized to "no bugs exist."
+
+    The original text below is kept, struck through in spirit but not
+    literally deleted, since it was an honest report of what had been run
+    at the time -- just not, it turned out, long enough:
+
+    Original claim: no functional bugs were found by any of the 76
+    harnesses across the 10-second CTest corpus-regression check every
     harness now has and standalone 30-second bursts (millions of
     executions each) run against a representative sample spanning all six
-    new waves. This is a genuinely different outcome from the original
-    nine-harness effort, which found three real bugs (the
+    new waves. This was framed as a genuinely different outcome from the
+    original nine-harness effort, which found three real bugs (the
     `reassemble_tcp_payload` unbounded-buffering gap, an `INT32_MIN`-
     negation UB, and `bacnet.cpp`'s signed-left-shift UB -- all already
-    fixed, see the "Fuzzing campaign log" above) -- an honest result, not a
-    sign this pass was less thorough: those three bugs lived in older,
-    less-scrutinized code, whereas most of the newly-harnessed decoders are
-    comparatively recent and had already been through this project's own
-    "confirm the collision existed" and pinning-test discipline during
-    their original development.
+    fixed, see the "Fuzzing campaign log" above) -- reasoned (also too
+    confidently, per the correction above) to be because those three bugs
+    lived in older, less-scrutinized code, whereas most of the newly-
+    harnessed decoders are comparatively recent and had already been
+    through this project's own "confirm the collision existed" and
+    pinning-test discipline during their original development. `fox.cpp`
+    is a counterexample to that reasoning: it is itself one of the
+    comparatively recent, already-scrutinized decoders, and still had a
+    real bug waiting for a long enough fuzzing run to find it.
 
     Verification: `CMakeLists.txt` grew from 9 to 76
     `add_conduitscope_fuzzer(...)` registrations; a full clean rebuild under
@@ -9591,6 +9614,75 @@ deferred future migration.
     zero regressions. `fuzz/README.md`'s harness table and intro paragraph
     were updated to describe all 76 harnesses; `fuzz/corpus/` now holds a
     real, extracted (never fabricated) seed corpus for every one of them.
+
+57. **Fix: `fuzz_fox` found a real crash -- an uncaught `std::out_of_range`
+    from `std::stoull` on an oversized 'b'/'o' tuple size field.** **Fixed.**
+    The first real payoff from item 56's fuzzing hardening batch: after
+    delivery, running `fuzz_fox` longer than the 30-second sample burst
+    used during that batch (about 2.7M executions in, roughly 30 minutes)
+    turned up a genuine crash, not a fuzzer-harness artifact -- reproduced
+    directly against the harness with ASan/UBSan and confirmed to also
+    crash `conduitscope decode` itself against an equivalent hand-built
+    capture, i.e. this was reachable from real traffic, not just from the
+    harness's own bare-`ByteSpan` entry point.
+
+    Root cause: Fox's 'b' (blob) and 'o' (object) tuple types both carry an
+    ASCII decimal size field with no declared width (`fox.hpp`'s own KNOWN,
+    UNCONFIRMED ASSUMPTION note already flags the "no delimiter before the
+    raw bytes" part of this shape, but not this part) -- `parse_fox_tuples`
+    (`src/fox.cpp`) read that field into a digit-only string with no length
+    cap, then called `std::stoull` on it directly. A digit run with more
+    digits than fit in an `unsigned long long` (roughly 20 digits; the
+    fuzzer's minimized reproducer had 32) makes `std::stoull` throw
+    `std::out_of_range` -- and unlike every other malformed-input case in
+    this function, that exception is a raw `std::exception`, not a
+    `ParseError`, so it was never caught anywhere: not by this function, not
+    by `try_parse_fox_pdu`'s own `catch (const ParseError&)`, not by
+    `decoder.cpp`, not even by the fuzz harness's own
+    `catch (const conduitscope::ParseError&)` -- it propagated all the way
+    up and took the whole process down via `std::terminate`/`abort`. The
+    irony: `parse_one_fox_frame`, two lines below `parse_fox_tuples` in the
+    same file, already guards its own `std::stoll` calls (for the frame
+    header's seq/reply fields) with exactly the right
+    `try { ... } catch (const std::exception&) { throw ParseError(...); }`
+    pattern -- this was a real inconsistency within one file, not a gap in
+    the codebase's general awareness of the failure mode.
+
+    Fixed by applying that exact, already-established pattern to both the
+    'b' and 'o' size-field `std::stoull` calls (the fuzzer's minimized input
+    only exercised 'b', but 'o' has the byte-for-byte identical unguarded
+    call two cases later and was fixed alongside it rather than left for a
+    second report) -- an unrepresentable digit run is now reported as
+    `ParseError("Fox frame: malformed '<b|o>' tuple size (unrepresentable
+    number)")`, caught by `try_parse_fox_pdu`'s existing `catch`, and the
+    frame is silently not claimed as fox (falls through to the generic "TCP
+    payload" summary), the same graceful-decline behavior every other
+    structurally malformed Fox frame in this codebase already gets. No
+    behavior changed for any well-formed frame; `read_n`'s own
+    `ByteSpan::subspan` bounds check was already safe for a valid-but-huge
+    `size_t` (throws `ParseError`, not a raw exception) once the digit
+    string itself parses, so no further guarding was needed past the
+    `stoull` call itself.
+
+    Verification: the exact fuzzer-minimized crash bytes now execute
+    cleanly through the harness (confirmed directly, and via a fresh
+    60-second standalone burst against `fuzz_fox`'s full corpus -- ~965K
+    executions, zero crashes) and are kept as a permanent regression seed
+    (`fuzz/corpus/fox/seed_regression_oversized_blob_size_crash.bin`,
+    alongside a clean hand-built equivalent,
+    `seed_regression_oversized_blob_size_clean.bin`); a new synthetic
+    packet #7 in `build_fox_sample()` (`tools/make_sample_pcap.py`, via the
+    new `fox_tuple_blob_raw_size` helper) reproduces the same shape at the
+    `conduitscope decode` CLI level and is pinned by a new CTest entry,
+    `fox_oversized_blob_size_field_does_not_crash`, asserting the frame is
+    reported as a plain `[tcp]` payload rather than `[fox]` (proving it was
+    declined, not silently misdecoded) and, implicitly, that the process
+    exits cleanly rather than crashing. Full default suite:
+    1969/1969 (one new test, zero regressions elsewhere -- confirmed by
+    diffing against the exact same 1968/1968 baseline item 56 already
+    established); all 76 `fuzz_*_corpus_regression` CTest entries still
+    pass after the fix, with a full clean rebuild of `conduitscope_core`
+    and all 76 fuzz targets showing zero new warnings.
 
 ### Protocols not covered at all
 
