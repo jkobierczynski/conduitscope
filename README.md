@@ -137,7 +137,6 @@ real-capture validation provenance.
 | CODESYS V3 | 3S-Smart/CODESYS PLC runtime | TCP 11740/1217, UDP 1740-1743 | Block Driver/Datagram/Channel/Services, Login/AUTH (password never rendered) |
 | CoAP | Constrained-device IIoT | UDP 5683 | RFC 7252 + Observe (RFC 7641) + blockwise transfer (RFC 7959) |
 | Zigbee | Wireless mesh (building/industrial sensors) | `LINKTYPE_IEEE802_15_4_WITHFCS`/`TAP` pcap captures | IEEE 802.15.4 MAC + Zigbee NWK + APS + full ZDP |
-| RMCP / ASF / IPMI | Server/BMC out-of-band management | UDP 623 | RMCP envelope, ASF Presence Ping/Pong, full IPMI 1.5/2.0 session + RAKP handshake decode, curated NetFn/Command table, Cipher Suite 0 auth-bypass detection |
 | CANopen (CiA 301) | CAN-bus fieldbus | SocketCAN pcap captures | NMT, Heartbeat, SYNC/TIME STAMP, EMCY, SDO (expedited/segmented/block), PDO named by COB-ID (`--protocol canopen` only -- see docs) |
 | SAE J1939 | Heavy-duty vehicle/engine CAN bus | SocketCAN pcap captures | 29-bit ID/PGN decode, EEC1/ET1/CCVS/Request full decode, DM1 active-DTC SPN/FMI/OC/CM decode |
 | AMQP 0-9-1 | Message broker (RabbitMQ-native) | TCP 5672 | Connection/Channel/Exchange/Queue/Basic/Tx method families, content header/body, PLAIN credential exchange detection |
@@ -145,8 +144,6 @@ real-capture validation provenance.
 | DICOM | Hospital imaging (PACS/modalities/workstations) | TCP 104/11112 | A-ASSOCIATE-RQ/AC/RJ, A-ABORT, A-RELEASE, P-DATA-TF/DIMSE Command+Data Set decode, User Identity Negotiation + curated PHI tag redaction, no-identity-negotiation headline finding |
 | Ethernet POWERLINK | Real-time Ethernet motion control (EPSG) | EtherType `0x88AB`, + UDP 3819 (SDO) | SoC/PReq/PRes/SoA cyclic frames, ASnd IdentResponse/StatusResponse/NMTRequest/NMTCommand/SDO + AInv, NMT state machine, SDO Sequence/Command Layer (shared CANopen abort-code table), curated disruptive-NMTCommand/rogue-MN/SDO-write/CN-sourced-NMTCommand findings |
 | Tridium Niagara Fox | Building-automation-system (BAS) stations | TCP 1911 (cleartext), + TCP 4911 (FOXS/TLS, detection only) | Line-oriented header+tuple grammar decode (generic `key=type:value`, incl. nested messages), curated `fox hello` identity fields, unauthenticated-hello-exchange headline finding, hostAddress-vs-peer-IP mismatch finding -- see docs for confidence tiers (single/double-source, reverse-engineered protocol) |
-| ICMPv6 / NDP | IPv6 control plane (Neighbor Discovery, SLAAC) | IP protocol 58 | RFC 4443 base header, RFC 4861 Router/Neighbor Solicitation/Advertisement + Redirect, RFC 4862 SLAAC prefix detection, NDP option walk (link-layer address, Prefix Information, MTU, RDNSS, Route Information), pseudo-header checksum verification |
-| DHCPv6 | IPv6 stateful address/prefix assignment | UDP 546/547 | RFC 8415 all 13 message types, RELAY-FORW/REPL header, IA_NA/IA_TA/IA_PD + IA Address/IA Prefix, Status Code, all 4 DUID formats (LLT/EN/LL/UUID, RFC 6355) |
 | HomePlug AV / AV2 (incl. devolo dLAN) | Consumer/SOHO powerline networking | EtherType `0x88E1` | MME header incl. MMV/header-size edge cases, curated MMTYPE table, CC_DISCOVER_LIST.CNF station/network lists, CM_SET_KEY.REQ (redacted key material), CM_BRG_INFO.CNF, curated hardware-class-presence + key-exchange notes |
 
 A cross-cutting **attack-detection** layer runs over every decoded
@@ -187,13 +184,23 @@ tunneling) shows up on a segment that shouldn't carry it:
   ARP-Announcement notes), LLDP (IEEE 802.1AB), CDP (Cisco Discovery
   Protocol), BGP-4 (RFC 4271), IEEE 802.3 Slow Protocols (LACP/Marker/OAM),
   RIP, IGMP, VRRP, HSRP, IGRP, PIM, EIGRP, OSPFv2, and ICMP (RFC 792 plus
-  RFC 1191/1256 extensions). ICMPv6/NDP and DHCPv6 are fully decoded, not
-  just named -- see the core table above.
+  RFC 1191/1256 extensions). Two IPv6 control-plane protocols here are fully
+  decoded, not just named: **ICMPv6 / NDP** (IP protocol 58 -- RFC 4443 base
+  header, RFC 4861 Router/Neighbor Solicitation/Advertisement + Redirect,
+  RFC 4862 SLAAC prefix detection, NDP option walk [link-layer address,
+  Prefix Information, MTU, RDNSS, Route Information], pseudo-header checksum
+  verification) and **DHCPv6** (UDP 546/547 -- RFC 8415 all 13 message
+  types, RELAY-FORW/REPL header, IA_NA/IA_TA/IA_PD + IA Address/IA Prefix,
+  Status Code, all 4 DUID formats [LLT/EN/LL/UUID, RFC 6355]).
 - **Name resolution**: DNS, mDNS, LLMNR, NetBIOS Name Service (NBT-NS), and
   DNS-over-HTTPS (DoH) detection via TLS SNI matching.
 - **IT protocol recognition** (named only, by risk tier -- not full field
   decode, except where noted above):
-  - *Remote access* -- RDP, VNC, TeamViewer, AnyDesk, Zoom
+  - *Remote access* -- RDP, VNC, TeamViewer, AnyDesk, Zoom, and **RMCP / ASF
+    / IPMI** (UDP 623, Server/BMC out-of-band management -- fully decoded,
+    not just named: RMCP envelope, ASF Presence Ping/Pong, full IPMI
+    1.5/2.0 session + RAKP handshake decode, curated NetFn/Command table,
+    Cipher Suite 0 auth-bypass detection)
   - *Lateral movement / credential harvesting* -- SSH, HTTP, HTTPS,
     SNMPv1/v2c, Telnet, FTP, TFTP, QUIC (SMB has since been promoted to a
     full decoder, see the AD suite above)
