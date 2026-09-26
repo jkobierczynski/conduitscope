@@ -38,6 +38,14 @@
 // notes. A dedicated check against the library API directly, exactly like checks 1-4 above, is the
 // only way to exercise it.
 //
+// Check 7 (finding 2, docs/reviews/2026-09-chatgpt-security-review-patch209.md, item 65,
+// docs/DEVELOPMENT.md: "an ordinary invocation is still fully unbounded") reuses the same two
+// fixtures again, this time with BOTH fields left genuinely untouched (no override at all, not
+// even an explicit 0) -- proving kDefaultMaxActiveFlows/kDefaultMaxFlowStateEntries are real,
+// finite ceilings applied by .value_or() at each enforcement site even when nothing configures
+// either field, while still being generous enough that these two small, legitimate fixtures never
+// come close to tripping either one.
+//
 // Prints one PASS/FAIL line per check to stdout and exits 0 only if every check passed, same
 // contract as protocol_result_selftest/crypto_selftest; wired into CMakeLists.txt's own
 // "ResourceLimits scoping self-test" section as its own CTest case, unconditionally (like those
@@ -370,6 +378,70 @@ int main(int argc, char** argv) {
                    "past the configured zero cap (the registry-side correctness bug this fix also "
                    "closes) -- session 1's response still pairs authoritatively instead of being "
                    "evicted, the same behavior an unset cap already has",
+                   saw_authoritative && !saw_no_outstanding);
+    }
+
+    // 7. Finding 2 (item 65, docs/DEVELOPMENT.md): pin the actual default values first (a
+    // regression here means someone changed the compiled-in ceiling without updating this test,
+    // docs/DEVELOPMENT.md's own writeup, or cli_main.cpp's help text to match), then confirm they
+    // are what a genuinely unset Decoder actually applies -- not std::nullopt read back (checks 5
+    // still cover that; a *_options.limits.max_active_flows left untouched here never becomes 0 or
+    // any other stored value, it just stays default-constructed nullopt the whole time), but the
+    // real, finite ceiling .value_or() substitutes at each enforcement site.
+    {
+        check_bool("kDefaultMaxActiveFlows matches the value documented in resource_limits.hpp/"
+                   "cli_main.cpp's help text/docs/DEVELOPMENT.md's item 65 writeup",
+                   kDefaultMaxActiveFlows == 100000);
+        check_bool("kDefaultMaxFlowStateEntries matches the value documented in resource_limits."
+                   "hpp/cli_main.cpp's help text/docs/DEVELOPMENT.md's item 65 writeup",
+                   kDefaultMaxFlowStateEntries == 250000);
+
+        DecodeOptions unset_active_flows_options;  // no override at all -- genuinely nullopt
+        Decoder unset_active_flows_decoder(unset_active_flows_options);
+
+        PcapReader unset_active_flows_reader(active_flows_pcap_path);
+        PcapPacket p;
+        uint32_t lt = unset_active_flows_reader.info().linktype;
+        bool saw_waiting = false;
+        bool saw_eviction_note = false;
+        for (size_t index = 1; unset_active_flows_reader.next(p); ++index) {
+            DecodedPacket out = unset_active_flows_decoder.decode(p, lt, index);
+            if (out.summary.find("waiting for more") != std::string::npos) saw_waiting = true;
+            for (const auto& n : out.notes) {
+                if (n.find("active TCP flow-reassembly limit") != std::string::npos) {
+                    saw_eviction_note = true;
+                }
+            }
+        }
+        check_bool("Decoder with max_active_flows left genuinely unset (no override at all) still "
+                   "applies a real default ceiling, not unbounded -- and that default (100,000) is "
+                   "generous enough that this fixture's two flows both coexist with no eviction",
+                   saw_waiting && !saw_eviction_note);
+
+        DecodeOptions unset_flow_state_options;  // no override at all -- genuinely nullopt
+        Decoder unset_flow_state_decoder(unset_flow_state_options);
+
+        PcapReader unset_flow_state_reader(flow_state_pcap_path);
+        uint32_t lt2 = unset_flow_state_reader.info().linktype;
+        bool saw_authoritative = false;
+        bool saw_no_outstanding = false;
+        for (size_t index = 1; unset_flow_state_reader.next(p); ++index) {
+            DecodedPacket out = unset_flow_state_decoder.decode(p, lt2, index);
+            for (const auto& n : out.notes) {
+                if (n.find("authoritative pairing: response to transaction id 100") !=
+                    std::string::npos) {
+                    saw_authoritative = true;
+                }
+                if (n.find("no outstanding request found on this TCP session for transaction id "
+                            "100") != std::string::npos) {
+                    saw_no_outstanding = true;
+                }
+            }
+        }
+        check_bool("Decoder with max_flow_state_entries left genuinely unset (no override at all) "
+                   "still applies a real default ceiling, not unbounded -- and that default "
+                   "(250,000) is generous enough that this fixture's two sessions both coexist "
+                   "with no eviction",
                    saw_authoritative && !saw_no_outstanding);
     }
 

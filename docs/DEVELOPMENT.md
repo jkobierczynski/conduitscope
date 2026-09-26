@@ -10296,7 +10296,50 @@ deferred future migration.
     default) -- worth calling out explicitly as still-open technical
     debt distinct from item 61's fix, and grouped with item 64 above
     since both are "no ceiling unless the operator remembers to ask
-    for one." **Not yet fixed.** See the priority list below.
+    for one." **Fixed.** `resource_limits.hpp` now declares two named
+    constants, `kDefaultMaxActiveFlows = 100000` and
+    `kDefaultMaxFlowStateEntries = 250000`, applied at each field's own
+    single enforcement site via `.value_or(...)` -- `decoder.cpp`'s
+    `Decoder::reassemble_tcp_payload` (`resource_limits().
+    max_active_flows.value_or(kDefaultMaxActiveFlows)`) and
+    `protocol_decoder.hpp`'s `DecodeContext::flow_state<T>()`
+    (`resource_limits().max_flow_state_entries.value_or(
+    kDefaultMaxFlowStateEntries)`) -- exactly the same "site applies
+    its own default when unset" pattern the original five
+    `resource_limits()` fields already used (`max_reassembly_bytes`'s
+    16 MiB, `max_reassembly_segments`'s 20,000, ...); the only thing
+    that changed is that these two fields finally follow that pattern
+    too, instead of skipping the cap check entirely when unset. `0` and
+    "left unset" both resolve to the same default now -- neither means
+    literally unbounded any more (item 66's zero-normalization fix is
+    unaffected and still needed: it stops a literal `0` from ever
+    reaching either enforcement site as a raw value, which now matters
+    for a different reason -- consistency with "unset", not avoiding
+    UB, since UB was already impossible for a stored `nullopt` either
+    way). `cli_main.cpp`'s help text for both flags now reads "0 (the
+    default) applies the built-in default of 100,000/250,000",
+    matching the "0 = leave every site at its own default" phrasing
+    the other five flags already use, so all seven fields in
+    `ResourceLimitCliVars` now share one consistent sentinel
+    convention. The two default values were sized generously (100,000
+    active flows; 250,000 total flow-state entries) so that no
+    legitimate deployment -- many thousands of devices, many
+    concurrent sessions -- should ever observe an eviction caused by
+    the default alone; only a capture engineered to hold many more
+    distinct flows/sessions than that should ever reach it. Verified
+    via a new check 7 in `resource_limits_selftest.cpp`: pins the two
+    named constants' actual values, then replays both existing
+    resource-exhaustion fixtures through a `Decoder` with the fields
+    left genuinely untouched (no override at all, not even an explicit
+    `0`), confirming the new default is a real, finite ceiling that
+    this fixture's two flows/sessions never come close to tripping.
+    Full CTest suite unaffected (no existing test's fixture approaches
+    100,000/250,000 entries), zero-warning rebuild in both configs.
+    **Scope note:** item 64 (baseline engine has no size bound of any
+    kind) is a structurally different subsystem (`BaselineEngine`, not
+    TCP reassembly/registry flow state) and remains a separate,
+    still-open piece of this same P1 priority-list entry -- not
+    addressed by this fix.
 
 66. **`--max-active-flows 0`/a zero-valued `max_flow_state_entries`
     can erase from an empty map
@@ -10525,8 +10568,10 @@ reasoning stated inline):
   are the most exploitable items here: a crafted capture with many
   distinct conduits/sessions/flows can grow process memory without
   bound today, using nothing more exotic than ordinary-looking protocol
-  traffic repeated across many source/destination pairs. **Not yet
-  fixed.**
+  traffic repeated across many source/destination pairs. **Item 65 is
+  fixed** (see item 65 above for the two new default-ceiling constants
+  and their verification). **Item 64 (baseline engine) is not yet
+  fixed** -- a structurally different subsystem, still open.
 - **P2 -- hardening, worth doing but not urgent:** item 68 (baseline
   file-size ceiling -- a local, operator-supplied trust boundary, not
   remotely reachable). **Not yet fixed.**
@@ -10538,8 +10583,10 @@ reasoning stated inline):
   scan) that can be picked up opportunistically rather than scheduled
   as its own priority item. **Not yet fixed** (and not urgent).
 
-Item 66 (P0) is implemented; items 64/65/68/67 have not been -- ping
-when you want the next one (P1 is next in line) done as its own patch.
+Item 66 (P0) and item 65 (P1, the flow/flow-state default-ceiling half)
+are implemented; items 64 (P1, baseline engine bounds), 68 (P2), and 67
+(tidy-up) have not been -- ping when you want the next one done as its
+own patch.
 
 ### Protocols not covered at all
 

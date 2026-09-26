@@ -986,14 +986,19 @@ bool Decoder::reassemble_tcp_payload(const TcpSegment& tcp, const std::string& f
         // occasionally has to restart its own reassembly from scratch is affected, and that's
         // already a normal, harmless occurrence elsewhere in this same function (every sequence-gap
         // abandon above does the same thing to its own flow).
+        //
+        // .value_or(kDefaultMaxActiveFlows), not "if (auto cap = ...)": unset no longer means
+        // unbounded (docs/reviews/2026-09-chatgpt-security-review-patch209.md's finding 2, item 65,
+        // docs/DEVELOPMENT.md) -- an ordinary invocation that never passes --max-active-flows still
+        // gets a real ceiling, the same way max_reassembly_bytes/max_reassembly_segments above
+        // already apply their own site-specific default when unset.
         if (!had_existing_entry) {
-            if (auto cap = resource_limits().max_active_flows) {
-                if (tcp_reassembly_.size() >= *cap) {
-                    tcp_reassembly_.erase(tcp_reassembly_.begin());
-                    out.notes.push_back("active TCP flow-reassembly limit (" + std::to_string(*cap) +
-                                         ") reached -- evicted an existing in-progress reassembly on "
-                                         "another flow to make room for this one (--max-active-flows)");
-                }
+            const size_t cap = resource_limits().max_active_flows.value_or(kDefaultMaxActiveFlows);
+            if (tcp_reassembly_.size() >= cap) {
+                tcp_reassembly_.erase(tcp_reassembly_.begin());
+                out.notes.push_back("active TCP flow-reassembly limit (" + std::to_string(cap) +
+                                     ") reached -- evicted an existing in-progress reassembly on "
+                                     "another flow to make room for this one (--max-active-flows)");
             }
         }
         tcp_reassembly_[flow_key] = std::move(fb);

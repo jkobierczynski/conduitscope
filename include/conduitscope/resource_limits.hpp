@@ -104,20 +104,25 @@ struct ResourceLimits {
     // map every one of Modbus/TCP, IEC 104, EtherNet/IP, TPKT/S7comm/S7comm-Plus/MMS, HART-IP,
     // OPC UA, MQTT, and FF-HSE shares. Checked only when a flow that doesn't already have an entry
     // is about to get one; an existing flow's own entry being updated never counts against this.
-    // std::nullopt (the default) leaves the map genuinely unbounded in entry COUNT, same as every
-    // other field here when unset -- but see decoder.cpp's own comment: the "don't retain empty
-    // entries" half of the fix already applies unconditionally, cap configured or not.
+    // std::nullopt (the default) does NOT mean unbounded -- see kDefaultMaxActiveFlows below and
+    // docs/reviews/2026-09-chatgpt-security-review-patch209.md's finding 2 (item 65,
+    // docs/DEVELOPMENT.md): an ordinary invocation that never configures this at all still gets a
+    // real ceiling, applied via `.value_or(kDefaultMaxActiveFlows)` at the one enforcement site
+    // (decoder.cpp), the same way every one of the five original resource_limits() fields already
+    // applies its own site-specific default when unset. The "don't retain empty entries" half of
+    // the underlying fix applies unconditionally regardless, cap configured or not (see decoder.
+    // cpp's own comment).
     //
-    // A value of exactly 0 is normalized to std::nullopt (no cap) by set_resource_limits() before
-    // it is ever stored -- see that function's own comment (resource_limits.cpp) for why: both
-    // this field and max_flow_state_entries below are enforced by evicting an EXISTING entry to
-    // make room for a new one, which is meaningless -- and, for this field's own enforcement in
-    // Decoder::reassemble_tcp_payload, was undefined behavior (erasing tcp_reassembly_.begin()
-    // from an already-empty map) -- when literally zero entries may ever exist (docs/reviews/
-    // 2026-09-chatgpt-security-review-patch209.md, finding 3). This mirrors, and now extends to
-    // every caller of this struct (not just the CLI), cli_main.cpp's own pre-existing convention
-    // of treating a `--max-active-flows 0` argument as "flag not passed." A caller that genuinely
-    // wants as close to zero active flows as possible should pass 1, not 0.
+    // A value of exactly 0 is normalized to std::nullopt by set_resource_limits() before it is
+    // ever stored -- see that function's own comment (resource_limits.cpp) for why: this field and
+    // max_flow_state_entries below are enforced by evicting an EXISTING entry to make room for a
+    // new one, which is meaningless -- and, for this field's own enforcement in Decoder::
+    // reassemble_tcp_payload, was undefined behavior (erasing tcp_reassembly_.begin() from an
+    // already-empty map) -- when literally zero entries may ever exist (docs/reviews/2026-09-
+    // chatgpt-security-review-patch209.md, finding 3). Since std::nullopt now maps to
+    // kDefaultMaxActiveFlows rather than to "no cap", passing 0 (or leaving this unset) both
+    // resolve to that same real, finite ceiling -- neither one means literally unbounded any more.
+    // A caller that genuinely wants as close to zero active flows as possible should pass 1.
     std::optional<size_t> max_active_flows;
 
     // Bounds the TOTAL entry count summed across every protocol's own map inside
@@ -129,16 +134,35 @@ struct ResourceLimits {
     // natural "fully consumed, safe to drop" moment for most of these protocols (a Kerberos or
     // LDAP session's own state is meant to persist for the connection's whole life), so this is a
     // pure ceiling rather than a "don't create it in the first place" fix. std::nullopt (the
-    // default) leaves it unbounded, same as every other field here.
+    // default) does NOT mean unbounded here either -- see kDefaultMaxFlowStateEntries below, the
+    // same finding-2/item-65 fix as max_active_flows above, applied via
+    // `.value_or(kDefaultMaxFlowStateEntries)` at protocol_decoder.hpp's own enforcement site.
     //
     // Same 0-means-nullopt normalization as max_active_flows above, and for the identical reason:
     // DecodeContext::flow_state<T>()'s own enforcement (protocol_decoder.hpp) has no undefined
     // behavior at cap==0 (its eviction loop is guarded by `if (!inner.empty())` per bucket), but
     // it silently inserted a new entry past a configured zero cap anyway -- a real correctness bug
     // fixed the same way as max_active_flows's UB, by never letting either enforcement path
-    // observe a cap of exactly 0 in the first place (finding 3, same review as above).
+    // observe a cap of exactly 0 in the first place (finding 3, same review as above). As with
+    // max_active_flows, 0 and "left unset" now both resolve to kDefaultMaxFlowStateEntries rather
+    // than to unbounded.
     std::optional<size_t> max_flow_state_entries;
 };
+
+// Compiled-in defaults applied via .value_or() at max_active_flows's/max_flow_state_entries's own
+// enforcement sites (decoder.cpp's Decoder::reassemble_tcp_payload; protocol_decoder.hpp's
+// DecodeContext::flow_state<T>()) whenever the corresponding field above is std::nullopt -- i.e.
+// whenever nothing (CLI flag, or a direct ResourceLimits{} from library/API use) ever configured
+// it explicitly. Fixes docs/reviews/2026-09-chatgpt-security-review-patch209.md's finding 2 (item
+// 65, docs/DEVELOPMENT.md): before this, unset meant genuinely unbounded, so an ordinary
+// invocation that never passed --max-active-flows/--max-flow-state-entries had no ceiling at all.
+// Sized generously enough that no legitimate deployment (many thousands of devices, many
+// concurrent sessions) should ever observe an eviction caused by the default alone -- only a
+// capture engineered to hold many more distinct flows/sessions than that should ever reach it.
+// Both are plain runtime ceilings, not stored per-entry costs -- see max_active_flows's own
+// comment above for how its actual worst-case memory interacts with --max-reassembly-bytes.
+inline constexpr size_t kDefaultMaxActiveFlows = 100000;
+inline constexpr size_t kDefaultMaxFlowStateEntries = 250000;
 
 // Returns the currently active limits for THIS THREAD (default-constructed, i.e. every field
 // std::nullopt, until set_resource_limits has been called at least once on this thread). Callable

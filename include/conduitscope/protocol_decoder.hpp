@@ -238,14 +238,17 @@ struct DecodeContext {
             // MELSEC/MQTT, DNP3/COTP reassembly, ...) would otherwise grow *flow_states without
             // limit, the same shape tcp_reassembly_ had (see Decoder::reassemble_tcp_payload's own
             // fix). Checked only here, on the "about to create a NEW entry" path -- an existing
-            // key's lookup above never grows anything and never pays this cost. Unset (the default,
-            // resource_limits().max_flow_state_entries == nullopt) keeps this whole block's cost at
-            // zero, same "byte-identical to this feature's absence" posture every resource_limits()
-            // field has.
-            if (auto cap = resource_limits().max_flow_state_entries) {
+            // key's lookup above never grows anything and never pays this cost. Unset no longer
+            // means unbounded (docs/reviews/2026-09-chatgpt-security-review-patch209.md's finding
+            // 2, item 65, docs/DEVELOPMENT.md) -- .value_or(kDefaultMaxFlowStateEntries) applies a
+            // real default ceiling for an ordinary invocation that never passes
+            // --max-flow-state-entries, the same posture max_active_flows's own enforcement
+            // (decoder.cpp) now has.
+            {
+                const size_t cap = resource_limits().max_flow_state_entries.value_or(kDefaultMaxFlowStateEntries);
                 size_t total = 0;
                 for (const auto& [id, inner] : *flow_states) total += inner.size();
-                if (total >= *cap) {
+                if (total >= cap) {
                     // No per-entry recency tracking (see max_active_flows's own comment,
                     // decoder.cpp, for the identical tradeoff and why it's an accepted one): this
                     // evicts AN existing entry -- not necessarily the oldest or least-recently-used
