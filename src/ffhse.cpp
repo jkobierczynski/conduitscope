@@ -1499,6 +1499,29 @@ std::optional<ProtocolResult> FfhseTcpDecoder::decode(ByteSpan payload, DecodeCo
 std::optional<ProtocolResult> FfhseUdpDecoder::decode(ByteSpan payload, DecodeContext& /*ctx*/) const {
     auto frame = try_parse_ffhse(payload);
     if (!frame) return std::nullopt;
+    // Matches the reference dissector's own dissect_ff_udp() exactly: "/* Make sure the length
+    // field is valid */ if ((length > tvb_reported_length_remaining(tvb, offset)) || ...) break;"
+    // -- a UDP datagram is delivered whole; unlike TCP (see ffhse_declared_length/
+    // tcp_declared_length, which legitimately drives this codebase's own stream-reassembly "wait
+    // for more" buffering before decode() is even called), there is no reassembly at this layer,
+    // so a PDU whose own declared Message Length exceeds the bytes actually present in THIS
+    // datagram can never really be "still arriving" the way a TCP PDU legitimately can -- it's
+    // structurally implausible on its face, not a truncated-but-real message. try_parse_ffhse
+    // itself still accepts it (with a "declares more than available" note, for the TCP call site
+    // above, where that note DOES describe a real, if unusual, state), so this decoder-specific
+    // check is what actually declines it here, exactly as the reference dissector's own `break`
+    // does.
+    //
+    // Real bug found via a user-submitted capture: a real-time UDP flow's essentially-random
+    // bytes (an incrementing per-packet counter byte landing squarely on ffhse's own Service
+    // field, hence the false "FMS unconfirmed service 83/84/85/..." sequence, one higher every
+    // packet) matched this decoder's weak header gate, with a Message Length (20748) two orders
+    // of magnitude past every one of dozens of actual datagram sizes (47-291 bytes) -- previously
+    // "explained" as truncated instead of rejected. Same false-positive class
+    // kMaxPlausibleMessageLength was added for (see its own comment above), just caught via
+    // message-length-vs-actual-payload-size rather than an absolute ceiling: 20748 is comfortably
+    // under the 16 MiB ceiling, so that check alone didn't catch this one.
+    if (frame->header.message_length > payload.size()) return std::nullopt;
 
     FfhseResult result;
     result.summary = frame->summary;
@@ -1516,6 +1539,7 @@ std::optional<ProtocolResult> FfhseUdpDecoder::decode(ByteSpan payload, DecodeCo
         ByteSpan rest = payload.from(offset);
         auto next = try_parse_ffhse(rest);
         if (!next) break;  // remaining bytes aren't another FF-HSE PDU -- stop, don't guess
+        if (next->header.message_length > rest.size()) break;  // same reasoning, mid-datagram
         ++message_count;
         std::string note = "additional FF-HSE PDU " + std::to_string(message_count) +
                             " found in the same UDP datagram at byte offset " + std::to_string(offset) +

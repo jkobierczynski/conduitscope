@@ -9749,6 +9749,104 @@ deferred future migration.
     pass after the fix, with a full clean rebuild of `conduitscope_core`
     and all 76 fuzz targets showing zero new warnings.
 
+59. **Fix: `FfhseUdpDecoder`'s own weak structural gate systematically
+    misclassified an unrelated real-time UDP flow as FF-HSE.** **Fixed.**
+    Not a fuzzer finding this time -- a real, user-submitted capture where
+    most packets on one UDP flow were miscategorized as `ffhse`. The
+    capture showed an unmistakable tell: every misdetected packet named a
+    service id that climbed by exactly 1 from the previous one (`FMS
+    unconfirmed service 83`, `84`, `85`, ... `103`, unbroken across 21
+    consecutive packets), with a Message Length that was IDENTICAL
+    (`20748`) on every single one, despite the actual UDP datagrams all
+    being under 300 bytes. That combination -- a per-packet incrementing
+    counter landing squarely on this decoder's own Service byte, and a
+    constant value at the Message Length offset that bears no relation to
+    any real datagram's size -- is the signature of unrelated traffic
+    coincidentally satisfying FF-HSE's own weak header gate (`ffhse.hpp`'s
+    own "Structural detection gate" paragraph already calls this out as
+    this codebase's weakest gate), not real FF-HSE traffic that happens to
+    be truncated.
+
+    Root cause, confirmed directly against the reference source: this
+    decoder's own `try_parse_ffhse` (`src/ffhse.cpp`) accepts a PDU whose
+    own declared Message Length exceeds the bytes actually available,
+    appending a "declares more than available -- truncated" note rather
+    than declining -- correct for the TCP call site, where
+    `ffhse_declared_length` legitimately drives this codebase's own
+    stream-reassembly "buffer until enough bytes arrive" behavior before
+    `decode()` is even invoked, but wrong for UDP: a UDP datagram is
+    delivered whole, with no reassembly at this layer, so a PDU claiming
+    to be bigger than the one datagram it arrived in can never really be
+    "still arriving". The reference dissector, `packet-ff.c`'s own
+    `dissect_ff_udp()`, already gets this right: `/* Make sure the length
+    field is valid */ if ((length > tvb_reported_length_remaining(tvb,
+    offset)) || (length < FDA_MSG_HDR_LENGTH)) break;` -- it simply
+    declines to dissect a PDU whose own length overruns the datagram,
+    rather than accepting it as truncated. `ffhse.hpp`'s own "UDP framing"
+    paragraph already documented this AS the intended behavior ("stops...
+    the moment a sub-PDU's own declared length is implausible... or
+    doesn't fit in the bytes remaining in the datagram") -- the
+    implementation simply never enforced the second half of that sentence.
+
+    Fixed in `FfhseUdpDecoder::decode` (not the shared `try_parse_ffhse`,
+    which stays exactly as-is for the TCP call site, and not
+    `FfhseTcpDecoder::decode`, where "declares more than available" is a
+    normal mid-reassembly state, not an error): a parsed frame whose
+    `header.message_length` exceeds `payload.size()` is now declined
+    outright (`return std::nullopt`), with the identical check applied to
+    every subsequent PDU inside the same datagram's own coalescing loop.
+    This is the same false-positive class `kMaxPlausibleMessageLength` was
+    added for (an earlier real capture, a UDP/443 QUIC/TLS response also
+    matching this weak gate) -- just caught via message-length-vs-actual-
+    payload-size rather than an absolute ceiling, since this capture's own
+    Message Length (20748) was comfortably under the existing 16 MiB
+    ceiling and so passed that check untouched.
+
+    This also uncovered a pre-existing test that had baked in the WRONG
+    (pre-fix, non-reference-matching) behavior:
+    `ffhse_malformed_truncated_body_falls_back_to_raw_hex` asserted that a
+    UDP packet declaring a 64-byte Message Length with only 32 bytes
+    present was still recognized as ffhse, truncated-and-noted. Per the
+    reference dissector, that packet should ALSO be declined -- so this
+    test was corrected in place (repurposed, matching item 55's own
+    precedent for a test built on the pre-fix behavior) as
+    `ffhse_udp_message_length_exceeding_datagram_not_misdetected`,
+    asserting the same packet now falls through to the generic `udp`
+    protocol.
+
+    Verification: the user's own uploaded capture -- 44 packets, the
+    large majority previously misclassified as `ffhse` -- now decodes
+    with zero `ffhse` packets; every one correctly falls through to the
+    generic `udp` protocol. A new synthetic packet (#65 in
+    `build_ffhse_sample()`, `tools/make_sample_pcap.py`) reproduces the
+    same shape (an unrecognized FMS unconfirmed service id, Message
+    Length 20748 against a ~32-byte datagram -- 20748 reused verbatim
+    from the real capture, since it's an arbitrary field from unrelated
+    traffic, not anything sensitive about the capture's owner) and is
+    pinned by the corrected test above.
+    `inventory_ffhse_recognized_tcp_only_udp_skipped` was updated for the
+    resulting packet-count shift (70 total, 66 skipped, not 69/65). The
+    real capture is NOT committed to this repository (unlike this
+    project's other `tests/real_captures/` fixtures, which are all
+    sourced from public datasets -- this one is a user's own home-network
+    traffic, kept out of the public repo as a matter of course rather
+    than an explicit request). `fuzz_ffhse.cpp`'s own header comment was
+    corrected too: it previously claimed FfhseUdpDecoder::decode and
+    FfhseTcpDecoder::decode were identical beyond the coalescing loop,
+    which this fix makes no longer true -- now explains the one
+    remaining divergence and why it's covered at the CTest/decode()
+    layer rather than by this harness (the check itself is a plain
+    arithmetic comparison with no new bounds-computation surface, the
+    same reasoning fuzz_enip.cpp's own header comment already applies to
+    its own coalescing loop). Full default suite: 1970/1970 (net zero new
+    tests -- one repurposed, one added elsewhere is unrelated -- zero
+    regressions); all 76 `fuzz_*_corpus_regression` CTest entries still
+    pass after the fix, with a full clean rebuild of `conduitscope_core`
+    and all 76 fuzz targets showing zero new warnings; a fresh 60-second
+    standalone burst against `fuzz_ffhse` (which does not itself exercise
+    this fix, per the harness comment above) confirms no new crashes,
+    ~2.5M executions.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

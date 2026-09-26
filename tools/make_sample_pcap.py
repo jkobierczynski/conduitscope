@@ -7810,10 +7810,12 @@ def build_ffhse_sample():
     Report family; Abort; Tier-2 FMS Event Notification and Get OD; LAN Redundancy Get/Put Info,
     Get Statistics, and Diagnostic (with its 4 parallel interface-status lists); unrecognized
     service ids on every sub-protocol/confirmed-flag combination; a concatenated multi-PDU-per-
-    UDP-datagram case; an unexpected-port case; a malformed/truncated case; an implausible-Message-
-    Length false-positive regression (see kMaxPlausibleMessageLength in ffhse.cpp); and, over TCP,
-    a genuine request/response round trip, a TCP-segment-split PDU, and two PDUs coalesced into one
-    TCP segment."""
+    UDP-datagram case; an unexpected-port case; a UDP Message-Length-exceeds-the-datagram false-
+    positive regression (matches the reference dissector's own dissect_ff_udp() length check, see
+    FfhseUdpDecoder::decode in ffhse.cpp); an implausible-Message-Length false-positive regression
+    (see kMaxPlausibleMessageLength in ffhse.cpp) for a Message Length that's implausible even
+    before comparing it to any one datagram; and, over TCP, a genuine request/response round trip,
+    a TCP-segment-split PDU, and two PDUs coalesced into one TCP segment."""
     packets = []
 
     def add(payload: bytes, dport: int, sport: int = 52200, from_client: bool = True):
@@ -8050,6 +8052,21 @@ def build_ffhse_sample():
     #     ffhse.cpp. Same port pairing (server:443 -> client) as that real capture.
     add(ffhse_pdu(FFHSE_SM, FFHSE_REQ, 3, True, bytes(range(40, 60)),
                   msg_length_override=4237566479), dport=443, sport=58201, from_client=False)
+
+    # 65) Second false-positive regression, a genuinely different shape from #64 above: Message
+    #     Length is comfortably UNDER the 16 MiB kMaxPlausibleMessageLength ceiling (so #64's own
+    #     fix alone doesn't catch it) but still far exceeds the actual UDP datagram -- must ALSO be
+    #     rejected outright, matching the reference dissector's own dissect_ff_udp(): "if ((length
+    #     > tvb_reported_length_remaining(tvb, offset)) || ...) break;". Mirrors a real false
+    #     positive found via a user-submitted capture: a real-time UDP flow's own per-packet
+    #     incrementing counter byte happened to land on ffhse's Service field (hence a service id
+    #     that climbed by exactly 1 every packet -- "FMS unconfirmed service 83", "84", "85", ...),
+    #     with a CONSTANT Message Length of 20748 despite the actual datagrams all being under 300
+    #     bytes -- 20748 itself is not privacy-sensitive (an arbitrary field from unrelated traffic,
+    #     not derived from anything about the capture's owner), so it's reused verbatim here rather
+    #     than picking an arbitrary replacement value.
+    add(ffhse_pdu(FFHSE_FMS, FFHSE_REQ, 83, False, bytes(range(20)),
+                  msg_length_override=20748), dport=62759, sport=19324)
 
     # --- FF-HSE over TCP: the same 4 ports serve both transports -- see ffhse.hpp. ---
     client_seq = [5000]

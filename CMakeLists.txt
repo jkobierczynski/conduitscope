@@ -5533,13 +5533,24 @@ add_test(NAME ffhse_udp_multi_pdu_coalescing
 set_tests_properties(ffhse_udp_multi_pdu_coalescing PROPERTIES
   PASS_REGULAR_EXPRESSION "\"ffhse_message_name\": \"FDA Idle Req\",.*additional FF-HSE PDU 2 found in the same UDP datagram at byte offset 12: FDA Idle Rsp")
 
-# Malformed/truncated: Message Length claims a full 52-byte FDA Open Session Req body, but only
-# 20 bytes of it are actually present -- exercises both the "declares more than available" note
-# and require_min's own fallback to raw hex, never a crash or a silently wrong decode.
-add_test(NAME ffhse_malformed_truncated_body_falls_back_to_raw_hex
+# Fix: Message Length claims a full 52-byte FDA Open Session Req body, but only 20 bytes of it are
+# actually present in this UDP datagram (declared 64 total, only 32 available). Originally this
+# decoder "explained" that as a truncated-but-recognized FF-HSE message (note + raw-hex fallback,
+# still claiming the packet as ffhse) -- repurposed as a regression pin after a user-submitted real
+# capture showed the same shape (a Message Length grossly exceeding the actual datagram) was
+# actually a systematic false positive from unrelated UDP traffic, not a real truncated FF-HSE
+# message. Root-caused against the reference dissector: packet-ff.c's own dissect_ff_udp() already
+# does exactly this check -- "/* Make sure the length field is valid */ if ((length >
+# tvb_reported_length_remaining(tvb, offset)) || ...) break;" -- and simply declines to dissect a
+# PDU whose own declared length exceeds what's actually in the datagram, rather than accepting it
+# as truncated. A UDP datagram is delivered whole; there is no reassembly at this layer the way
+# there legitimately is for TCP (see ffhse_declared_length), so this can never really be "still
+# arriving". FfhseUdpDecoder::decode now matches the reference exactly and declines outright, so
+# this packet correctly falls through to the generic "udp" protocol instead.
+add_test(NAME ffhse_udp_message_length_exceeding_datagram_not_misdetected
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ffhse.pcap" --format json)
-set_tests_properties(ffhse_malformed_truncated_body_falls_back_to_raw_hex PROPERTIES
-  PASS_REGULAR_EXPRESSION "FF-HSE message declares Message Length 64 but only 32 byte\\(s\\) are available -- truncated.*FF-HSE body\\+trailer \\(52 byte\\(s\\), from Message Length/Options\\) exceeds the 20 byte\\(s\\) actually available in this PDU -- truncated by 32 byte\\(s\\).*FDA Open Session Req body is 20 byte\\(s\\), expected at least 52 -- not decoded, shown as raw hex")
+set_tests_properties(ffhse_udp_message_length_exceeding_datagram_not_misdetected PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"index\": 62,.*\"src_port\": 52200,\n *\"dst_port\": 1089,\n *\"tcp_flags\": null,\n *\"protocol\": \"udp\",\n *\"summary\": \"UDP payload of 32 byte\\(s\\) on port 52200->1089\"")
 
 # Unexpected port: an otherwise perfectly valid SM Identify Req on a port that is none of the 4
 # configured FF-HSE ports -- still decodes, but with the "not a configured/standard FF-HSE port"
@@ -9289,12 +9300,14 @@ add_test(NAME inventory_mqtt_recognized
 set_tests_properties(inventory_mqtt_recognized PROPERTIES
   PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.10 .*\\[client\\+server\\]  mqtt.*192\\.168\\.1\\.50 -> 192\\.168\\.1\\.10:1883 \\(mqtt\\)  mqtt")
 
-# FF-HSE, like HART-IP above, rides over both TCP and UDP in this fixture (68 total packets, only 4
-# of them TCP-carried ffhse) -- same TCP-only carve-out, same reasoning, proven the same way.
+# FF-HSE, like HART-IP above, rides over both TCP and UDP in this fixture (70 total packets, only 4
+# of them TCP-carried ffhse) -- same TCP-only carve-out, same reasoning, proven the same way. 70/66
+# (not 69/65) since the FfhseUdpDecoder fix added a new packet (#65, a UDP Message-Length-exceeds-
+# the-datagram regression) that's correctly skipped, not claimed as ffhse.
 add_test(NAME inventory_ffhse_recognized_tcp_only_udp_skipped
   COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ffhse.pcap")
 set_tests_properties(inventory_ffhse_recognized_tcp_only_udp_skipped PROPERTIES
-  PASS_REGULAR_EXPRESSION "2 asset\\(s\\) observed, 69 total packet\\(s\\) in capture, 65 skipped.*192\\.168\\.1\\.10 .*\\[server\\]  ffhse  \\(4 packet\\(s\\)\\)")
+  PASS_REGULAR_EXPRESSION "2 asset\\(s\\) observed, 70 total packet\\(s\\) in capture, 66 skipped.*192\\.168\\.1\\.10 .*\\[server\\]  ffhse  \\(4 packet\\(s\\)\\)")
 
 # ---------------------------------------------------------------------------------------------
 # Tier 1 "IT protocols an OT auditor flags" recognition (it_protocols.hpp/cpp) -- RDP, VNC,
