@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "conduitscope/mms.hpp"
 
+#include "conduitscope/portable_time.hpp"
+
 #include "conduitscope/resource_limits.hpp"
 
 #include <algorithm>
@@ -32,12 +34,12 @@ float bits_to_float(uint32_t bits) {
 // seconds: since 1970-01-01T00:00:00Z -- see mms.hpp's "UtcTime encoding" section.
 std::string format_utc_time(uint32_t seconds, uint32_t fraction24, uint8_t flags) {
     std::time_t tt = static_cast<std::time_t>(seconds);
-    std::tm* tm_utc = std::gmtime(&tt);
+    std::tm tm_utc{};
     std::ostringstream s;
-    if (tm_utc) {
+    if (portable_gmtime(tt, tm_utc)) {
         // fraction24 is a 24-bit fixed-point fraction of a second; render to milliseconds.
         int ms = static_cast<int>((static_cast<uint64_t>(fraction24) * 1000) / (1u << 24));
-        s << std::put_time(tm_utc, "%Y-%m-%dT%H:%M:%S") << '.' << std::setfill('0') << std::setw(3) << ms
+        s << std::put_time(&tm_utc, "%Y-%m-%dT%H:%M:%S") << '.' << std::setfill('0') << std::setw(3) << ms
           << 'Z';
     } else {
         s << seconds << "s (out of range for calendar display)";

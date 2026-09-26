@@ -22,7 +22,8 @@ namespace {
 
 std::string to_lower(const std::string& s) {
     std::string out = s;
-    std::transform(out.begin(), out.end(), out.begin(), [](unsigned char c) { return std::tolower(c); });
+    std::transform(out.begin(), out.end(), out.begin(),
+                   [](unsigned char c) -> char { return static_cast<char>(std::tolower(c)); });
     return out;
 }
 

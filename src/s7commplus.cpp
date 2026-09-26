@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "conduitscope/s7commplus.hpp"
 
+#include "conduitscope/portable_time.hpp"
+
 #include <cmath>
 #include <cstring>
 #include <ctime>
@@ -280,10 +282,10 @@ std::string format_s7plus_timestamp(uint64_t ns_since_epoch) {
     uint64_t ms = rest % 1000;
     rest /= 1000;
     std::time_t tt = static_cast<std::time_t>(rest);
-    std::tm* tm_utc = std::gmtime(&tt);
+    std::tm tm_utc{};
     std::ostringstream s;
-    if (tm_utc) {
-        s << std::put_time(tm_utc, "%Y-%m-%dT%H:%M:%S") << '.' << std::setfill('0') << std::setw(3) << ms
+    if (portable_gmtime(tt, tm_utc)) {
+        s << std::put_time(&tm_utc, "%Y-%m-%dT%H:%M:%S") << '.' << std::setfill('0') << std::setw(3) << ms
           << '.' << std::setw(3) << us << '.' << std::setw(3) << ns << 'Z';
     } else {
         s << ns_since_epoch << "ns (out of range for calendar display)";

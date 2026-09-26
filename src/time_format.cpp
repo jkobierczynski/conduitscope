@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "conduitscope/time_format.hpp"
 
+#include "conduitscope/portable_time.hpp"
+
 #include <cctype>
 #include <cmath>
 #include <cstdio>
@@ -87,14 +89,15 @@ std::string format_calendar(double ts, const TimeOffset& offset, const char* pat
         tt += 1;
     }
 
-    std::tm* tmv = nullptr;
+    std::tm tmv{};
+    bool ok;
     if (offset.use_local_tz) {
-        tmv = std::localtime(&tt);
+        ok = portable_localtime(tt, tmv);
     } else {
         std::time_t shifted = tt + offset.offset_seconds;
-        tmv = std::gmtime(&shifted);
+        ok = portable_gmtime(shifted, tmv);
     }
-    if (!tmv) {
+    if (!ok) {
         // Same graceful "never fabricate a date" fallback format_millis_epoch (mqtt.hpp/mqtt.cpp)
         // already uses elsewhere in this codebase, for a `ts` too far in the past/future for
         // std::gmtime/std::localtime's platform-defined struct tm to represent.
@@ -102,7 +105,7 @@ std::string format_calendar(double ts, const TimeOffset& offset, const char* pat
     }
 
     std::ostringstream s;
-    s << std::put_time(tmv, pattern) << '.' << std::setfill('0') << std::setw(6) << micros
+    s << std::put_time(&tmv, pattern) << '.' << std::setfill('0') << std::setw(6) << micros
       << offset_suffix(offset);
     return s.str();
 }

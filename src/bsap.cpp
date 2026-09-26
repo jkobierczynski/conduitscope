@@ -12,11 +12,11 @@ constexpr uint16_t kSerialTunnelMagic = 0x0210;
 
 const std::unordered_map<uint8_t, std::string>& link_function_table() {
     static const std::unordered_map<uint8_t, std::string> table = {
-        {0x85, "POLL"},
-        {0x86, "ACK / DOWN-ACK"},
-        {0x87, "ACK-NODATA"},
-        {0x8B, "UP-ACK"},
-        {0x95, "NAK"},
+        {uint8_t{0x85}, "POLL"},
+        {uint8_t{0x86}, "ACK / DOWN-ACK"},
+        {uint8_t{0x87}, "ACK-NODATA"},
+        {uint8_t{0x8B}, "UP-ACK"},
+        {uint8_t{0x95}, "NAK"},
     };
     return table;
 }

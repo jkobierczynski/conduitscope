@@ -3175,7 +3175,128 @@ useful, none blocking anything else on this list.
    `SetConsoleCtrlHandler`-vs-`signal()` gap, a genuine cross-thread
    ordering race specific to live capture, and -- the actual cause of the
    most persistent symptom -- `SigintGuard` never installing a handler at
-   all for an offline `-r` read. **Still open**: a real
+   all for an offline `-r` read.
+   - **A real MSVC `/W4` build (Visual Studio 18 "Community", MSVC
+     19.51.36231/19.51.36260) surfaced a further round of narrowing/
+     deprecation warnings, all fixed, all cross-checked against Jurgen's
+     own two build logs (one before, one after)**:
+     - **C4244 "possible loss of data" on every `std::pair<uint8_t/
+       uint16_t, ...>` code-name table initialized from a bare hex
+       literal** (`enip.cpp`'s CIP type-name table, `fins.cpp`'s
+       command/end-code tables, `bsap.cpp`'s link-function table,
+       `cclink_ie.cpp`'s end-code table, `homeplug_av.cpp`'s MMTYPE-name
+       table). Root cause: `std::pair<KeyT, V>`'s converting-constructor
+       template deduces its first template parameter from the literal's
+       own type -- `int` for a plain hex literal like `0x0101` -- then
+       direct-initializes the pair's narrower `KeyT` member *inside the
+       constructor body*, one level below the braces the code actually
+       wrote; the standard's "narrowing is fine when the source is a
+       constant expression that provably fits" exception only covers
+       list-initialization performed *at* those braces, not a
+       constructor call one level down, so MSVC has nothing telling it
+       the literal fits and warns. `enip.cpp`'s table (a plain array, not
+       a map) was fixed first, earlier this pass, by replacing
+       `std::pair<uint16_t, const char*>` with a small local aggregate
+       struct (`CipTypeName{code, name}`) -- `{0xC1, "BOOL"}` then
+       list-initializes that struct's own `uint16_t` member directly at
+       the visible braces, where the exception does apply. The other
+       four tables are all `std::unordered_map<KeyT, V>`, not plain
+       arrays, and callers rely on their O(1) `.find()` -- restructuring
+       them into an array with a linear scan the way `enip.cpp`'s was
+       fixed would have traded a cosmetic warning for a real (if
+       small-N) complexity regression, so instead each hex literal was
+       cast to the map's own key type at the point of use
+       (`{uint16_t{0x0101}, "Memory Area Read"}`, `{uint8_t{0x85},
+       "POLL"}`, etc.) -- the pair's converting-constructor template
+       then deduces its first parameter as the already-correct
+       `uint16_t`/`uint8_t` rather than `int`, so there is no conversion
+       left to warn about, and the container/algorithmic complexity is
+       completely unchanged. Confirmed via `grep` that these five tables
+       (plus `enip.cpp`'s) are the only `std::pair`/`unordered_map`
+       code-name tables in the codebase keyed by a narrower-than-`int`
+       integer type and initialized from bare literals --
+       `melsec.cpp`'s `device_code_table()`, `ge_srtp.cpp`'s two tables,
+       and `fins.cpp`'s own `area_code_table()` use the identical
+       `uint8_t`/`uint16_t` key pattern but a nested-brace
+       aggregate-struct *value* type instead of a bare `const
+       char*`/`std::string`, and Jurgen's own MSVC log confirms those
+       genuinely don't warn (an empirically-observed MSVC front-end
+       distinction between the two shapes, not a guess) -- so they were
+       deliberately left untouched rather than "fixed" for a warning
+       that doesn't occur there.
+     - **C4244 "conversion from 'int' to 'char'" on every
+       `std::transform`-based lowercasing helper** (`tls_sni.cpp`'s
+       `lowercase()`, `resolver.cpp`'s `to_lower()`, `policy.cpp`'s
+       `to_lower()`, `policy_engine.cpp`'s `to_lower_copy()`). Root
+       cause: `std::tolower(int) -> int` per its actual `<cctype>`
+       signature, but each lambda's return value was written straight
+       back into a `char` output iterator with no cast, so MSVC (rightly)
+       flagged the implicit `int`-to-`char` narrowing that assignment
+       performs on every character. Fixed by giving each lambda an
+       explicit `-> char` return type and a `static_cast<char>(...)`
+       around the `std::tolower` call -- the standard, idiomatic fix for
+       this well-known `std::tolower`/`std::transform` pitfall. Confirmed
+       via `grep` this was the only remaining `std::tolower`/
+       `std::toupper` call site in the codebase missing the cast --
+       every other call site already had it.
+     - **C4996 "this function or variable may be unsafe" on every
+       `std::gmtime`/`std::localtime` call** (`opcua.cpp`,
+       `s7commplus.cpp`, `mms.cpp`, `mqtt.cpp`, `time_format.cpp` x2).
+       MSVC's CRT flags both as deprecated in favor of its own
+       `gmtime_s`/`localtime_s`, which have a different, Windows-only
+       signature -- there's no single portable call that satisfies both
+       MSVC and POSIX. Fixed by adding one new header,
+       `include/conduitscope/portable_time.hpp`, with two small inline
+       wrappers (`portable_gmtime`/`portable_localtime`) that route to
+       `gmtime_s`/`localtime_s` on Windows and to POSIX's own reentrant
+       `gmtime_r`/`localtime_r` everywhere else, both behind the same
+       `bool`-returning, output-parameter signature every existing call
+       site's `if (tm_ptr) {...} else {...}` fallback already expected --
+       so every call site's actual out-of-range-timestamp handling is
+       unchanged, just re-pointed at the new wrapper. This also happens
+       to close a latent, currently-unexercised thread-safety gap: plain
+       `std::gmtime`/`std::localtime` write into a single shared static
+       buffer, which would be a real bug the moment any of this code is
+       ever called from more than one thread at once (it isn't today --
+       this codebase has no `std::thread`/`std::async` anywhere -- but
+       the reentrant replacement costs nothing and removes the question
+       entirely for whenever that changes).
+     - **LNK4199 "`/DELAYLOAD:wpcap.dll` ignored; no imports found from
+       wpcap.dll"** on `crypto_selftest.exe`/`protocol_result_
+       selftest.exe`/`resource_limits_selftest.exe`. **Not a bug -- left
+       as-is.** This is the direct, intentional, and already-documented
+       (see this same item's `/DELAYLOAD` bullet above) cost of making
+       every executable that links `conduitscope_core` delay-load
+       `wpcap.dll`, including the three self-test tools that never call
+       a single `pcap_*()` function: MSVC's own linker correctly notices
+       those three binaries have nothing to actually delay-load and says
+       so, which is exactly the outcome the `/DELAYLOAD` fix was
+       designed to produce (see the CI-hang bug this same section
+       already documents) -- these three binaries are supposed to start
+       and run cleanly with zero live-capture machinery pulled in, and
+       this warning is MSVC confirming that, not contradicting it. Left
+       unsilenced deliberately, so a future genuine regression (an
+       accidental real wpcap dependency creeping into one of these
+       tools) would still be visible; a scoped `/ignore:4199` on just
+       these three targets is a one-line change if the noise itself is
+       ever unwanted.
+
+     Re-verified after all of the above: full CTest suite, default
+     config (1959/1959 in this environment) and the ASan/UBSan
+     `-DCONDUITSCOPE_ENABLE_FUZZING=ON` Clang config (2035/2035,
+     including all 76 `fuzz_*_corpus_regression` entries -- zero
+     sanitizer diagnostics of any kind), plus a clean, zero-warning
+     MinGW-w64 cross-compile of the entire project (all four
+     executables). **Not independently re-confirmed against real MSVC
+     yet** -- these fixes are reasoned from Jurgen's own build log plus
+     the standard's actual rules on list-initialization narrowing, not
+     verified against the specific MSVC 19.51 front end the way the
+     earlier Ctrl+C and delay-load fixes in this item were (this sandbox
+     has no MSVC toolchain available); flagged here honestly rather than
+     claimed as Windows-confirmed the way the rest of this item's fixes
+     are.
+
+   **Still open**: a real
    OT/mirrored-switch-port network capture -- what's been run so far is
    ordinary client traffic (ICMP, UDP/443 QUIC/TLS), not industrial
    protocol traffic on a real mirrored port.

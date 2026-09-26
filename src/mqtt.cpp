@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "conduitscope/mqtt.hpp"
 
+#include "conduitscope/portable_time.hpp"
+
 #include "conduitscope/resource_limits.hpp"
 
 #include <algorithm>
@@ -1181,12 +1183,12 @@ std::string build_summary(const MqttMessage& msg) {
 // trailer format as well (see mqtt.hpp's comment on this declaration).
 std::string format_millis_epoch(uint64_t millis) {
     std::time_t tt = static_cast<std::time_t>(millis / 1000);
-    std::tm* tm_utc = std::gmtime(&tt);
-    if (!tm_utc) {
+    std::tm tm_utc{};
+    if (!portable_gmtime(tt, tm_utc)) {
         return std::to_string(millis) + " (raw epoch millisecond value -- out of range for calendar display)";
     }
     std::ostringstream s;
-    s << std::put_time(tm_utc, "%Y-%m-%dT%H:%M:%S") << '.' << std::setfill('0') << std::setw(3)
+    s << std::put_time(&tm_utc, "%Y-%m-%dT%H:%M:%S") << '.' << std::setfill('0') << std::setw(3)
       << (millis % 1000) << 'Z';
     return s.str();
 }

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "conduitscope/opcua.hpp"
 
+#include "conduitscope/portable_time.hpp"
+
 #include "conduitscope/resource_limits.hpp"
 
 #include <algorithm>
@@ -72,12 +74,12 @@ std::string format_opcua_datetime(int64_t ticks) {
     int64_t unix_seconds = ticks / kTicksPerSecond - kEpochDiffSeconds;
     int ms = static_cast<int>((ticks % kTicksPerSecond) / 10000);
     std::time_t tt = static_cast<std::time_t>(unix_seconds);
-    std::tm* tm_utc = std::gmtime(&tt);
-    if (!tm_utc) {
+    std::tm tm_utc{};
+    if (!portable_gmtime(tt, tm_utc)) {
         return std::to_string(ticks) + " (raw FILETIME ticks -- out of range for calendar display)";
     }
     std::ostringstream s;
-    s << std::put_time(tm_utc, "%Y-%m-%dT%H:%M:%S") << '.' << std::setfill('0') << std::setw(3) << ms
+    s << std::put_time(&tm_utc, "%Y-%m-%dT%H:%M:%S") << '.' << std::setfill('0') << std::setw(3) << ms
       << 'Z';
     return s.str();
 }
