@@ -1,0 +1,6 @@
+POST HTTP/2
+Content-Type:application/soap+xml
+Authorization:Basic
+
+<Action>Command<Command><Fault>
+<Arguments>u

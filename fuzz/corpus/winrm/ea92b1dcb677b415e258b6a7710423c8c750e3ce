@@ -1,0 +1,8 @@
+POST HTTP/2C
+Content-Type:application/soap+xml
+
+<Arguments><Command
+
+<Arguments>C<Arguments><Arguments>
+<Arguments><Arguments>
+<Arguments>3<Arguments><Arguments>

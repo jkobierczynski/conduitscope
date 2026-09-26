@@ -1,0 +1,4 @@
+POST HTTP/2
+Content-Type:application/soap+xml
+
+<Arguments>e<Command><Arguments>
