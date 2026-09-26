@@ -7,6 +7,19 @@ name: CI
 # review and engineering priorities" section (ROADMAP items 2 and 6) for the reasoning and the
 # adopted order (CI first, sanitizers/fuzzing next -- this workflow -- the decoder
 # registration-model refactor after that).
+#
+# Every `uses:` line below is pinned to an immutable commit SHA, not a mutable tag like `@v4`
+# (docs/DEVELOPMENT.md ROADMAP item 15, docs/reviews/2026-09-chatgpt-security-review-patch160.md
+# finding 6: a mutable tag can be repointed at a different commit after the fact -- by the
+# publisher, or by an attacker who compromises their account -- silently changing what every
+# workflow run using that tag actually executes, with no corresponding change visible in THIS
+# repository's own history). The `# vX.Y.Z` trailing comment on each is the human-readable version
+# that SHA corresponds to, confirmed via `git ls-remote --tags https://github.com/<owner>/<repo>.git`
+# against the real upstream repository (the actual commit a tag points at, not a third party's
+# claim about it) -- NOT evidence GitHub Actions itself checks, just so the next person bumping one
+# of these has the same paper trail. To bump one: `git ls-remote --tags
+# https://github.com/actions/<name>.git | grep 'refs/tags/vX'`, confirm the new version's release
+# notes look legitimate, then update both the SHA and its trailing comment together.
 
 on:
   push:
@@ -47,6 +60,25 @@ env:
   # break the next tagged release's Windows leg. 1.16 is confirmed working (this project's own
   # first real Windows/MSVC build, with live capture enabled, was done against it).
   NPCAP_SDK_VERSION: "1.16"
+  # SHA-256 of npcap-sdk-${NPCAP_SDK_VERSION}.zip, verified by the release-windows job's own
+  # "Verify Npcap SDK checksum" step below before anything is extracted or built against it
+  # (docs/DEVELOPMENT.md ROADMAP item 15, docs/reviews/2026-09-chatgpt-security-review-
+  # patch160.md finding 6: the download previously had no verification against anything at all --
+  # whatever bytes npcap.com served for that URL were extracted and built into the shipped
+  # release binary unconditionally). npcap.com doesn't itself publish a signed checksum file for
+  # the SDK to verify against (unlike, say, a Linux distro's package repository), so this is
+  # necessarily TOFU (trust-on-first-use): this value was pinned from a hash computed directly
+  # against the downloaded archive the one time this SDK version was adopted, and every later CI
+  # run must reproduce the IDENTICAL hash from a fresh download or the job now fails loudly
+  # instead of silently building against whatever bytes were actually served that day -- catching
+  # a compromised npcap.com/CDN, a MITM'd download, or a same-version file silently swapped
+  # upstream, none of which the previous no-verification download could ever have caught. Bump
+  # this alongside NPCAP_SDK_VERSION -- never on its own, and never routinely -- by downloading
+  # the new version's zip from a trusted machine/network and running `sha256sum` (or PowerShell's
+  # `Get-FileHash -Algorithm SHA256`) against it directly; do not source the expected hash from
+  # any third party, including an AI assistant's own report of it, since this value's entire
+  # purpose is catching exactly that class of untrustworthy-intermediary substitution.
+  NPCAP_SDK_SHA256: "f0a8be7778ee3ae1b99bbbecb27a3ff0f6c111a4093f1c78c5c5a099607184db"
 
 jobs:
   build-and-test:
@@ -69,7 +101,7 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       # libpcap-dev is the only external dependency this project has (CLI11
       # is vendored under third_party/, and the YAML policy-file parser is
@@ -129,7 +161,7 @@ jobs:
     if: github.event_name != 'schedule'
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       # libclang-rt-dev is the metapackage that tracks whatever compiler-rt build matches this
       # runner image's default `clang`/`clang++` (avoids hardcoding a versioned package name like
@@ -225,7 +257,7 @@ jobs:
         shell: pwsh
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Derive version from tag
         id: version
@@ -234,11 +266,34 @@ jobs:
           "tag=$tag" >> $env:GITHUB_OUTPUT
           "version=$($tag.TrimStart('v'))" >> $env:GITHUB_OUTPUT
 
-      - name: Download and extract the Npcap SDK
+      # Split into download / verify / extract as three distinct steps (rather than one combined
+      # step, as before this fix) specifically so a checksum mismatch fails clearly at "Verify
+      # Npcap SDK checksum" in the Actions log, never silently inside a step whose name still says
+      # "Download and extract" -- see NPCAP_SDK_SHA256's own comment in this workflow's env: block
+      # for the full rationale (docs/reviews/2026-09-chatgpt-security-review-patch160.md, finding
+      # 6).
+      - name: Download the Npcap SDK
         run: |
           $ErrorActionPreference = "Stop"
           $url = "https://npcap.com/dist/npcap-sdk-${env:NPCAP_SDK_VERSION}.zip"
           Invoke-WebRequest -Uri $url -OutFile npcap-sdk.zip
+
+      - name: Verify Npcap SDK checksum
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ($env:NPCAP_SDK_SHA256 -like "PENDING*") {
+            throw "NPCAP_SDK_SHA256 in this workflow's env: block is still the unfilled placeholder -- see that variable's own comment for how to compute and pin the real value before this job can verify (and therefore run) at all."
+          }
+          $actual = (Get-FileHash npcap-sdk.zip -Algorithm SHA256).Hash.ToLower()
+          $expected = $env:NPCAP_SDK_SHA256.ToLower()
+          if ($actual -ne $expected) {
+            throw "Npcap SDK download does not match the pinned NPCAP_SDK_SHA256 -- refusing to extract or build against it. Expected $expected, got $actual. This means either npcap.com served different bytes than what NPCAP_SDK_SHA256 was pinned against (a version bump that forgot to update this value) or the download was tampered with in transit -- do not simply update the pin to match without first confirming which of those it actually is."
+          }
+          Write-Host "Npcap SDK checksum verified: $actual"
+
+      - name: Extract the Npcap SDK
+        run: |
+          $ErrorActionPreference = "Stop"
           Expand-Archive -Path npcap-sdk.zip -DestinationPath npcap-sdk
           "NPCAP_SDK_DIR=$(Resolve-Path npcap-sdk)" >> $env:GITHUB_ENV
 
@@ -305,7 +360,7 @@ jobs:
       # this tag -- same reasoning as the existing linux-release/windows-release split avoiding
       # two independent `gh release create` calls racing each other.
       - name: Upload packaged binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: windows-release-binary
           path: |
@@ -339,7 +394,7 @@ jobs:
       actions: read
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install libpcap
         run: |
@@ -388,7 +443,7 @@ jobs:
           echo "checksum=${name}.tar.gz.sha256" >> "$GITHUB_OUTPUT"
 
       - name: Download Windows binary
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: windows-release-binary
           path: windows-release-binary
@@ -431,7 +486,7 @@ jobs:
     if: github.event_name != 'schedule'
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Configure (live capture explicitly disabled)
         run: >
@@ -568,7 +623,7 @@ jobs:
           - zigbee
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install libpcap and the Clang sanitizer/fuzzer runtime
         run: |
@@ -604,7 +659,7 @@ jobs:
       # re-found by re-running the campaign locally.
       - name: Upload crash reproducer, if any
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: fuzz-${{ matrix.harness }}-crash
           path: build/crash-*

@@ -2073,13 +2073,61 @@ have X" list. Folded in here as items 10-16, at the same priority tier as
     concurrent differently-configured decoders in one process, which
     nothing today does.
 
-15. **Open, low urgency: CI supply-chain hardening incomplete (the
-    review's own #6, rated Medium -- "supply chain").** Confirmed:
-    `.github/workflows/`'s `actions/checkout@v4` etc. are mutable tags,
-    not pinned commit SHAs, and the Windows release pipeline's Npcap SDK
-    download has no independent SHA-256 verification of the fetched
-    archive (only the generated release artifact itself gets checksummed).
-    Straightforward to fix, not yet scheduled.
+15. **CI supply-chain hardening incomplete (the review's own #6, rated
+    Medium -- "supply chain").** **Mostly fixed; one manual step left.**
+    Two separate issues, addressed differently:
+
+    - **Mutable action tags.** All nine `uses: actions/checkout@v4` /
+      `actions/upload-artifact@v4` / `actions/download-artifact@v4` lines
+      in `.github/workflows/ci.yml` now pin an immutable commit SHA, each
+      with a trailing `# vX.Y.Z` comment for readability (e.g.
+      `actions/checkout@11d5960a326750d5838078e36cf38b85af677262 #
+      v4.4.0`). Every SHA was confirmed against the real upstream
+      repository via `git ls-remote --tags
+      https://github.com/actions/<name>.git` -- not sourced from a
+      third-party page or an AI summary of one, since that's exactly the
+      class of untrustworthy intermediary this fix exists to defend
+      against (see below). The workflow's own top comment documents the
+      bump procedure for whoever updates one of these later.
+    - **Unverified Npcap SDK download.** `release-windows`'s single
+      "Download and extract the Npcap SDK" step is now three: Download,
+      "Verify Npcap SDK checksum" (computes the downloaded zip's SHA-256
+      and compares it against a new `NPCAP_SDK_SHA256` env var, throwing
+      before anything is extracted or built if they don't match), then
+      Extract. npcap.com doesn't itself publish a signed checksum to
+      verify against, so this is necessarily TOFU (trust-on-first-use):
+      pin a hash once, and every later run must reproduce it or fail
+      loudly -- catching a compromised CDN, a MITM'd download, or a
+      same-version file silently swapped upstream, none of which the
+      previous no-verification download could ever have caught.
+
+      **The one thing left:** `NPCAP_SDK_SHA256` is currently the literal
+      placeholder `"PENDING-SEE-NPCAP_SDK_SHA256-COMMENT-ABOVE"`, which
+      the verify step explicitly detects and fails on with a clear error
+      naming the fix -- deliberately fails closed rather than shipping a
+      check that silently verifies nothing. This is the one piece of
+      this fix that couldn't be completed end-to-end in this
+      environment: computing the real value requires actually
+      downloading `npcap-sdk-1.16.zip` and hashing it, and this session's
+      sandbox has no network access to `npcap.com` at all (confirmed:
+      `curl` to it is blocked by the sandbox's own egress policy, a 403
+      at the proxy). Deliberately NOT worked around by sourcing a hash
+      from a third party's page or an AI summary of one instead --
+      that's the same untrustworthy-intermediary problem this whole fix
+      exists to close, and this session found a real, live example of
+      exactly that risk while researching the action-pinning SHAs above
+      (a random fork's dependabot-style PR whose "bumped" SHA for this
+      same `download-artifact` action didn't correspond to any real
+      release, flagged by that repo's own bot review as matching a known
+      2025 supply-chain-attack pattern -- a good reminder of why this
+      value has to come from a first-hand hash computation, not a
+      relayed claim about one). Fix: from a trusted machine/network run
+      `curl -sSL https://npcap.com/dist/npcap-sdk-1.16.zip | sha256sum`
+      (or PowerShell's `(Get-FileHash npcap-sdk-1.16.zip -Algorithm
+      SHA256).Hash`) and paste the result into `NPCAP_SDK_SHA256` in
+      `ci.yml`'s `env:` block, replacing the placeholder -- a one-line
+      change, and the release-windows job will keep failing with a clear
+      message until it's made.
 
 16. **Open: fuzzing doesn't strongly target resource exhaustion (the
     review's own #7, rated Medium -- "security testing").** The existing
