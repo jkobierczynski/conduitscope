@@ -10077,6 +10077,259 @@ deferred future migration.
     (2046 plus the one new self-test) -- zero regressions elsewhere in
     either config, including all 76 `fuzz_*_corpus_regression` entries.
 
+62. **Idea, not yet scheduled: a Wireshark/`tshark`-style `-d` flag to
+    force a specific decoder onto traffic that wouldn't otherwise be
+    recognized as it.** `tshark`'s own `-d
+    tcp.port==8888,http` overrides its normal
+    port/heuristic-based dissector selection for exactly the traffic
+    matching that filter, so a protocol running on a nonstandard port (a
+    vendor HTTP management UI moved off 80/8080 to 8888, say) still gets
+    decoded as what it actually is instead of falling through to
+    whatever the port-based/structural gate would otherwise pick. This
+    project's own detection is already largely port-independent
+    (`--protocol auto` tries every TCP-capable protocol's own structural
+    gate regardless of port -- see the PROTOCOL DETECTION section above),
+    which covers most of what `-d` is FOR in Wireshark, but not all of
+    it: a protocol whose structural gate is genuinely ambiguous with
+    another's on the SAME nonstandard port (this document's own
+    IEC-104-vs-Modbus and MELSEC-vs-Modbus collision write-ups are
+    exactly this shape) has no way to be told "no, decode this one as
+    protocol X" short of `--protocol X` forcing X for the ENTIRE capture
+    -- there's no equivalent of Wireshark's own filter-scoped override
+    that applies only to one port/conversation while leaving every other
+    packet on its normal auto-detected path. Needs its own scoping design
+    (a full BPF-style filter expression the way Wireshark's own `-d`
+    argument takes, or a narrower `tcp.port==N,protocol` shorthand
+    specifically) before implementation -- not yet scoped in detail, just
+    logged as a real gap relative to Wireshark's own `-d` flag.
+
+63. **Possible discrepancy: patch-209 review claims the Npcap SDK
+    download now has a pinned SHA-256, but this documentation's own
+    tree still shows the unfilled placeholder
+    (`docs/reviews/2026-09-chatgpt-security-review-patch209.md`, "1.
+    What has changed since patch 160" table).** **Needs Jurgen's
+    confirmation -- not asserted as a review error.** Item 15 above
+    documents exactly why: computing the real hash requires a normal
+    network route to `npcap.com`, which this sandbox's own egress
+    policy blocks (confirmed by a direct `curl` test returning a proxy
+    403), so `ci.yml`'s `NPCAP_SDK_SHA256` was shipped as the literal,
+    self-detecting placeholder `"PENDING-SEE-NPCAP_SDK_SHA256-COMMENT-
+    ABOVE"` rather than a fabricated value. As of this write-up that
+    placeholder is still exactly what's in this tree's `ci.yml` (line
+    81) -- unchanged since it was written. Two explanations are
+    equally possible and this sandbox can't distinguish them: either
+    the review is simply wrong (plausible -- it audited GitHub's copy
+    of the repository, and reviews in this series have occasionally
+    over-stated a status before, see item 66 below), or Jurgen already
+    computed and pinned the real hash on his own machine and pushed it
+    to GitHub after this sandbox's copy was last synced, in which case
+    this sandbox's own tree is simply stale on this one file and
+    nothing is actually wrong. Action: Jurgen should check his own
+    `ci.yml`'s `NPCAP_SDK_SHA256` value directly; if it's still the
+    placeholder, the manual step described in item 15 is still
+    outstanding.
+
+64. **Baseline engine retains attacker-controlled state with no size
+    bound at all
+    (`docs/reviews/2026-09-chatgpt-security-review-patch209.md`,
+    finding 1).** **Confirmed accurate.** `BaselineEngine` (`baseline.hpp`)
+    keeps three top-level accumulating containers --
+    `conduits_` (`unordered_map<std::string, ConduitState>`),
+    `conduit_order_` (`vector<std::string>`, first-seen order), and
+    `tcp_sessions_` (`unordered_map<std::string, TcpSessionState>`,
+    keyed by canonical 4-tuple) -- and each `ConduitState` nests its
+    own `operations` map and `operation_order` vector, with each
+    `OperationState` in turn nesting an `observed_ranges` vector.
+    `BaselineEngine::observe()` (`baseline.cpp`) inserts into all of
+    these unconditionally, for every distinct conduit/operation/range
+    combination a capture exercises, across exactly the 8 protocols
+    `is_baseline_protocol()` recognizes (modbus, s7comm, enip, dnp3,
+    bacnet, opcua, melsec, fins) -- confirmed by reading `observe()`
+    and `is_baseline_protocol()` directly: there is no counter, no
+    cap, and no eviction logic anywhere in this file, unlike
+    `tcp_reassembly_`/`FlowStateMap`'s own `max_active_flows`/
+    `max_flow_state_entries` machinery. The review's framing is
+    exactly right: this is a genuinely different attack surface from
+    TCP reassembly, unprotected by either existing cap, and
+    specifically relevant to `baseline learn`/`baseline check`, which
+    are designed to process an entire capture and retain a running
+    summary of it. **Not yet fixed.** See the priority list below.
+
+65. **The new `--max-active-flows`/`--max-flow-state-entries` caps are
+    opt-in, so an ordinary invocation is still fully unbounded
+    (`docs/reviews/2026-09-chatgpt-security-review-patch209.md`,
+    finding 2).** **Confirmed accurate.** `cli_main.cpp`'s
+    `ResourceLimitCliVars` defaults both fields to `0`, and
+    `build_resource_limits()` only installs a real limit when the CLI
+    value is nonzero (`if (vars.max_active_flows != 0) limits.max_active_flows
+    = vars.max_active_flows;`, and identically for
+    `max_flow_state_entries`) -- so `resource_limits().max_active_flows`
+    and `.max_flow_state_entries` are both `std::nullopt` unless the
+    operator explicitly passes a nonzero value, and both the
+    `tcp_reassembly_` cap in `decoder.cpp` and the registry
+    `FlowStateMap` cap in `protocol_decoder.hpp` are written to be a
+    complete no-op when their guarding `if (auto cap = ...)` is empty.
+    This is a real, if narrower, restatement of the same finding
+    patch-160 raised (item 61 above fixed the *sharing* of limits
+    across `Decoder` instances, not whether any limit is set by
+    default) -- worth calling out explicitly as still-open technical
+    debt distinct from item 61's fix, and grouped with item 64 above
+    since both are "no ceiling unless the operator remembers to ask
+    for one." **Not yet fixed.** See the priority list below.
+
+66. **`--max-active-flows 0`/a zero-valued `max_flow_state_entries`
+    can erase from an empty map
+    (`docs/reviews/2026-09-chatgpt-security-review-patch209.md`,
+    finding 3).** **Confirmed accurate for `decoder.cpp`; confirmed a
+    related but distinct issue for `protocol_decoder.hpp`.**
+    `Decoder::reassemble_tcp_payload()`'s eviction check
+    (`decoder.cpp`, around the `--max-active-flows` handling) reads:
+    ```cpp
+    if (auto cap = resource_limits().max_active_flows) {
+        if (tcp_reassembly_.size() >= *cap) {
+            tcp_reassembly_.erase(tcp_reassembly_.begin());
+            ...
+        }
+    }
+    ```
+    When `*cap == 0` and `tcp_reassembly_` is empty (the very first
+    packet needing reassembly, with a zero cap explicitly configured),
+    `0 >= 0` is true and `tcp_reassembly_.erase(tcp_reassembly_.begin())`
+    runs against an empty map -- `begin() == end()` there, and erasing
+    `end()` is undefined behavior per the C++ standard. Verified this
+    is real UB, not just a logic bug: nothing upstream of this check
+    guards against an empty map when the cap is exactly zero. The
+    registry-side `FlowStateMap` cap (`protocol_decoder.hpp`, the same
+    code discussed in item 65 and the subject of the correction in
+    item 67 below) has a related but different bug at the same
+    boundary: its eviction loop is guarded by `if (!inner.empty())`
+    per bucket, so it never touches `.erase(.begin())` on an empty
+    map and has no UB -- but with the cap at zero and the map empty,
+    the eviction loop still correctly does nothing, and the code then
+    falls through to `it = per_key.emplace(key, std::make_unique<T>()).first;`
+    unconditionally, inserting a new entry anyway. That's a
+    correctness bug (a configured zero cap is silently violated by
+    exactly one entry) rather than UB. Both confirmed by direct
+    reading of the two code paths side by side. **Important caveat
+    the review itself also makes and this write-up confirms
+    independently:** `cli_main.cpp`'s `build_resource_limits()` (see
+    item 65) treats a CLI value of `0` as "leave unset," so neither
+    bug is reachable through the `conduitscope` CLI as shipped --
+    only a library/API consumer that constructs a `ResourceLimits`
+    directly with an explicit `max_active_flows = 0` (bypassing the
+    CLI's own 0-means-unset convention) can hit this. Real bug,
+    correctly scoped by the review as "not CLI-reachable but
+    API-reachable." **Not yet fixed.** This is the highest-priority
+    item in the list below, since it's the one entry in this review
+    that's genuine undefined behavior rather than a hardening gap.
+
+67. **Registry flow-state cap enforcement recomputes the total on
+    every insert -- reviewed as "quadratic work," but the actual cost
+    is O(1) amortized per insert, not O(N)
+    (`docs/reviews/2026-09-chatgpt-security-review-patch209.md`,
+    finding 4).** **The underlying code is accurately quoted, but the
+    complexity claim is incorrect and this write-up corrects it rather
+    than folding it in as stated.** The flagged loop
+    (`protocol_decoder.hpp`):
+    ```cpp
+    size_t total = 0;
+    for (const auto& [id, inner] : *flow_states) total += inner.size();
+    ```
+    iterates the OUTER map only -- one entry per distinct protocol_id
+    that has ever registered flow state (SMB, DCE/RPC interfaces,
+    Kerberos, LDAP, WinRM, Modbus, DNP3, ... a small, bounded set
+    fixed by how many stateful decoders this codebase has, not by
+    capture content) -- and calls `.size()` once per bucket, which is
+    O(1) *by the C++ standard's own complexity guarantee* for
+    `std::unordered_map::size()` (a maintained element count, not a
+    walk of the container). So each call to this block costs
+    O(number of distinct protocol_ids with any flow state at all),
+    a small constant in practice (bounded by how many stateful
+    protocol decoders exist in the codebase, currently well under 30),
+    regardless of how many total flow-state entries `N` exist across
+    all of them. The review's own math -- "N distinct state entries,
+    inserting them one at a time requires approximately
+    N(N-1)/2 map-entry visits" -- would only hold if `.size()` itself
+    cost O(bucket size), which it does not for `std::unordered_map`
+    (unlike, say, `std::list::size()` pre-C++11). Verified this isn't
+    a subtle version-specific quirk: `size()` being O(1) has been a
+    hard requirement of the `UnorderedAssociativeContainer` named
+    requirement since `std::unordered_map` was standardized in C++11,
+    and this codebase targets C++17. **Net assessment: this is real
+    code exactly as quoted, doing genuinely repeated, avoidable work
+    proportional to the number of distinct stateful protocols on every
+    insert past the cap -- worth the suggested one-time fix (a
+    centrally maintained running counter, incremented on insert and
+    decremented on eviction, replacing the per-insert bucket scan) as
+    a cheap tidy-up -- but it is not quadratic, not a CPU-exhaustion
+    vulnerability, and not something that scales with attacker-
+    controlled flow count the way the review's severity label ("Medium
+    -- CPU exhaustion") implies.** Downgraded accordingly in the
+    priority list below: optional low-value tidy-up, not a resource-
+    exhaustion fix.
+
+68. **Baseline store loading has no ceiling on input file size
+    (`docs/reviews/2026-09-chatgpt-security-review-patch209.md`,
+    finding 5).** **Confirmed accurate.** `load_baseline_store()`
+    (`baseline.cpp`) does:
+    ```cpp
+    std::ostringstream buf;
+    buf << in.rdbuf();
+    return parse_baseline_store_json(buf.str());
+    ```
+    reading the entire file into memory with no size check beforehand,
+    and `parse_baseline_store_json()` then builds nested
+    strings/vectors/maps from the full parsed content with no count
+    ceiling either -- confirmed by reading both functions directly.
+    Correctly scoped by the review as a different trust boundary than
+    the packet parsers (a baseline file is a local file the operator
+    explicitly points the tool at with `--baseline-file`, not
+    attacker-reachable over the wire the way a pcap is), which is why
+    this is P2 rather than P0/P1 -- but a corrupted, truncated, or
+    maliciously substituted baseline file (plausible in exactly the
+    kind of environment this tool is meant to be used in: shared
+    OT/ICS tooling, baseline files passed around a team or checked
+    into a shared repo) can still exhaust memory before
+    `parse_baseline_store_json()` has any chance to reject its
+    structure. **Not yet fixed.** See the priority list below.
+
+**Priority list for items 64-68 above** (independently assessed against
+actual source, not a restatement of the review's own P0-P3 labels --
+severities above and below sometimes diverge from the review's, with the
+reasoning stated inline):
+
+- **P0 -- fix next:** item 66 (`--max-active-flows`/`max_flow_state_entries`
+  zero-cap UB and the related registry-cap correctness bug). This is the
+  one item in this batch that's genuine undefined behavior rather than
+  a hardening gap, even though it's only reachable via direct library/API
+  use today, not the CLI -- UB is UB regardless of how hard it currently
+  is to trigger, and the fix is small and self-contained (define zero
+  consistently at the boundary, add zero/one/max regression tests).
+- **P1 -- before this tool is pointed at untrusted-scale captures or
+  baseline files:** item 64 (baseline engine has zero size bounds of any
+  kind) and item 65 (global flow/flow-state limits are unbounded unless
+  the operator remembers to opt in). These two share the same root
+  cause -- a cap mechanism exists but nothing is on by default -- and
+  are the most exploitable items here: a crafted capture with many
+  distinct conduits/sessions/flows can grow process memory without
+  bound today, using nothing more exotic than ordinary-looking protocol
+  traffic repeated across many source/destination pairs.
+- **P2 -- hardening, worth doing but not urgent:** item 68 (baseline
+  file-size ceiling -- a local, operator-supplied trust boundary, not
+  remotely reachable).
+- **Not prioritized as a resource-exhaustion fix, optional tidy-up
+  only:** item 67 (registry flow-state counting). The review's own
+  complexity analysis doesn't hold once `std::unordered_map::size()`'s
+  guaranteed O(1) cost is accounted for, so this is a cheap, low-risk
+  code-quality improvement (a running counter instead of a per-insert
+  scan) that can be picked up opportunistically -- e.g. alongside item
+  66's fix, since both touch the same function -- rather than scheduled
+  as its own priority item.
+
+None of items 64-68 have been implemented yet -- this is the
+documentation-and-triage pass the review itself asked for; the code
+changes are a follow-up once Jurgen confirms which of them to take on.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols
