@@ -82,9 +82,18 @@ std::vector<BerTlv> ber_children(ByteSpan buf) {
 
 int64_t ber_integer(ByteSpan content) {
     if (content.empty()) return 0;
-    int64_t v = (content.at(0) & 0x80) ? -1 : 0;
+    // Accumulate in uint64_t, not int64_t: left-shifting a negative signed value is undefined
+    // behavior (C++17; C++20 defines it, but this codebase doesn't rely on that), and the sign-
+    // extension fill below sets exactly that up on the very first shift for any negative-valued
+    // BER INTEGER (an ordinary, unremarkable encoding, not a contrived edge case). Shifting an
+    // unsigned value is always well-defined (modulo 2^64 wraparound) regardless of bit pattern,
+    // and produces the identical bit pattern a two's-complement signed shift would have on every
+    // real target anyway -- so this changes definedness, not behavior. The final cast to int64_t
+    // is implementation-defined but universally two's-complement in practice, and standardized
+    // outright as of C++20.
+    uint64_t v = (content.at(0) & 0x80) ? ~uint64_t{0} : 0;
     for (size_t i = 0; i < content.size(); ++i) v = (v << 8) | content.at(i);
-    return v;
+    return static_cast<int64_t>(v);
 }
 
 std::string ber_octet_string(ByteSpan content) {

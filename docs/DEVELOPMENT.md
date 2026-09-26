@@ -9847,6 +9847,102 @@ deferred future migration.
     this fix, per the harness comment above) confirms no new crashes,
     ~2.5M executions.
 
+60. **Two independent full-suite fuzzing passes (all 76 harnesses each)
+    confirm items 57-59's fixes hold under sustained fuzzing, and surface
+    three new, real `UndefinedBehaviorSanitizer` findings.** **Fixed.** Two
+    separate campaigns ran the entire harness set to
+    completion, not just the usual 60-second per-harness spot check: this
+    session's own sandbox-hosted run (76/76 harnesses, ~540-570s each,
+    two-wide, one full pass, ~2.93 billion executions total) and, sent
+    separately, the user's own local run on their own machine ("round3" --
+    implying two earlier rounds this project's history predates this doc
+    entry) using 6 continuously-busy worker processes, one full
+    round-robin pass over all 76 harnesses at ~1800s each,
+    ~12.29 billion executions total across the 75 harnesses that ran to
+    completion.
+
+    `fuzz_fox` crashed in the user's local run -- but not a new bug: their
+    local build simply didn't yet have item 57's fix compiled in.
+    Confirmed by replaying their exact minimized crash bytes
+    (`crash-64ff9c833614c75168e56f6a319f8de7ac7ee211`, a `pay=b:` tuple
+    whose declared size is a 34-digit run of `1`s, overflowing
+    `std::stoull`) directly against this session's already-patched build:
+    clean exit, no crash. No action needed beyond applying the existing
+    `fox-fuzz-fix.patch` to that build.
+
+    Both campaigns' raw logs -- independently -- surfaced the identical
+    three findings, none of them a process abort or a libFuzzer-detected
+    crash: `UndefinedBehaviorSanitizer` flags a left shift of a negative
+    (or, after enough shifting, out-of-`int64_t`-range) signed value in
+    `ber_integer()`, a small BER INTEGER-decoding helper duplicated
+    verbatim across three files -- `src/kerberos.cpp:86`, `src/ldap.cpp:86`,
+    and `src/mms.cpp:138`:
+    ```cpp
+    int64_t ber_integer(ByteSpan content) {
+        if (content.empty()) return 0;
+        int64_t v = (content.at(0) & 0x80) ? -1 : 0;
+        for (size_t i = 0; i < content.size(); ++i) v = (v << 8) | content.at(i);
+        return v;
+    }
+    ```
+    Root cause: the leading byte's high bit set (an ordinary, unremarkable
+    condition -- any negative-valued BER INTEGER, not a contrived edge
+    case) sets `v` to `-1` for sign extension, and the very next loop
+    iteration computes `v << 8` while `v` is still negative. Left-shifting
+    a negative signed integer is undefined behavior under C++17 (the
+    standard this project targets; C++20 redefines it as well-defined
+    two's-complement doubling, which this project doesn't rely on). On
+    every real compiler/platform this "happens to work" and produces the
+    intended sign-extended result -- exactly why it went unnoticed until an
+    UBSan-instrumented build caught it, and even then only because UBSan's
+    default posture is RECOVERABLE (print a diagnostic, keep running,
+    rather than `-fno-sanitize-recover`/abort): neither campaign's
+    crash-only accounting (a process abort or a libFuzzer crash-artifact
+    file) would ever have surfaced this on its own. It was found only by
+    additionally grepping each campaign's full raw log text for `runtime
+    error:` rather than trusting exit status/crash-artifact counts alone --
+    a real gap in how this session's own resumable campaign driver
+    (`fuzz_campaign/run_campaign.sh`) tracked "clean": its own earlier
+    progress reports ("zero crashes", "all clean") were accurate about
+    process aborts specifically, but blind to this whole class of
+    recoverable UBSan diagnostic the entire time, confirmed retroactively
+    present in this session's own `fuzz_campaign/raw_logs/fuzz_kerberos.log`,
+    `fuzz_ldap.log`, and `fuzz_mms.log` -- the identical finding, same three
+    files and lines, that the user's independent local run also found.
+    `mms.cpp` has the fix pattern sitting right next to the bug in the same
+    file: its `ber_unsigned` (line 144, three lines below `ber_integer`)
+    accumulates in `uint64_t` throughout, where left-shifting is always
+    well-defined regardless of bit pattern -- `ber_integer` need only do
+    the same and cast to `int64_t` at the end (implementation-defined but
+    universally two's-complement on every real target, and standardized
+    outright in C++20) to get the identical numeric result without the UB.
+
+    Fixed identically in all three files: `ber_integer` now accumulates in
+    `uint64_t` (matching `ber_unsigned`'s own convention right next to it
+    in `mms.cpp`) and casts to `int64_t` only at the very end, producing
+    the identical bit pattern -- and therefore the identical decoded
+    value -- a two's-complement signed shift would have on every real
+    target, without the undefined behavior:
+    ```cpp
+    int64_t ber_integer(ByteSpan content) {
+        if (content.empty()) return 0;
+        uint64_t v = (content.at(0) & 0x80) ? ~uint64_t{0} : 0;
+        for (size_t i = 0; i < content.size(); ++i) v = (v << 8) | content.at(i);
+        return static_cast<int64_t>(v);
+    }
+    ```
+    Verification: rebuilt both the default and `-DCONDUITSCOPE_ENABLE_FUZZING=ON`
+    configs clean, zero new warnings. `fuzz_kerberos`/`fuzz_ldap`/`fuzz_mms`
+    each re-run against their existing seed corpus (the same corpus that
+    reliably triggered the diagnostic before, on essentially the first
+    input) now produce zero `runtime error:`/ASan/libFuzzer diagnostics.
+    Full CTest suite under the sanitizer-enabled build -- which links
+    every existing test, including the CLI binary itself and all 76
+    `fuzz_*_corpus_regression` entries, against the now-instrumented
+    `conduitscope_core` -- passes 2046/2046 (zero regressions elsewhere,
+    confirming no decoded value anywhere in the existing fixture set
+    changed as a result of the accumulator's type change).
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols
