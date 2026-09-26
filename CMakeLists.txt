@@ -12934,7 +12934,11 @@ set_tests_properties(baseline_check_unmodified_fixture_zero_findings PROPERTIES
 add_test(NAME baseline_check_unmodified_fixture_zero_findings_json
   COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_check_clean_json.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_check_clean_json.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap' && '$<TARGET_FILE:conduitscope>' baseline check --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_check_clean_json.json' --format json '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap'")
 set_tests_properties(baseline_check_unmodified_fixture_zero_findings_json PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"compliant\": true,\n *\"conduits_observed\": 1,\n *\"operations_observed\": 1,\n *\"known_operation_count\": 1,\n *\"findings\": \\[\n *\\]")
+  # Item 64 fix: check_baseline's own JSON now always includes observation_truncated/
+  # truncation_reasons right after "compliant" (see BaselineCheckReport::observation_truncated's
+  # own comment, baseline.hpp) -- this small, un-truncated fixture never hits any of
+  # BaselineEngine's four ceilings, so both stay at their "nothing was truncated" defaults.
+  PASS_REGULAR_EXPRESSION "\"compliant\": true,\n *\"observation_truncated\": false,\n *\"truncation_reasons\": \\[\\],\n *\"conduits_observed\": 1,\n *\"operations_observed\": 1,\n *\"known_operation_count\": 1,\n *\"findings\": \\[\n *\\]")
 
 # `check` against the deliberately mutated fixture -> exactly one NewOperation finding (Write
 # Multiple Registers, a function code never learned) and exactly one NewTargetRange finding (Read
@@ -13104,6 +13108,54 @@ add_test(NAME baseline_max_file_bytes_default_does_not_reject_a_normal_file
   COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_max_bytes_default.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_max_bytes_default.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap' && '$<TARGET_FILE:conduitscope>' baseline check --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_max_bytes_default.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap'")
 set_tests_properties(baseline_max_file_bytes_default_does_not_reject_a_normal_file PROPERTIES
   PASS_REGULAR_EXPRESSION "Result: CLEAN")
+
+# ---------------------------------------------------------------------------------------------
+# Item 64 (docs/DEVELOPMENT.md, docs/reviews/2026-09-chatgpt-security-review-patch209.md finding 1):
+# BaselineEngine's own four internal growth ceilings (tracked TCP sessions, conduits, operations
+# per conduit, ranges per operation) -- each --max-baseline-* flag actually engages its own cap,
+# `baseline check` never exits 0/kExitBaselineAnomaly while the observation is truncated (always
+# kExitBaselineIncomplete=5 instead, checked here via the "; echo EXITCODE=$?" idiom -- neither
+# WILL_FAIL nor a bare nonzero-exit check can distinguish 5 from 1/4, and combining WILL_FAIL with
+# PASS_REGULAR_EXPRESSION on the same test inverts the regex's own contribution to pass/fail in
+# this codebase, see notable_protocols_strict_it_protocols_flips_exit_code's own comment above --
+# so this appends a harmless trailing `echo`, making the test's own exit code always 0 and letting
+# PASS_REGULAR_EXPRESSION alone decide, exactly like every other baseline_max_file_bytes_* test
+# above), `baseline learn` still merges what it could observe but says so on stderr rather than
+# silently writing an incomplete baseline, and the compiled defaults (50,000/20,000/5,000/1,000)
+# never trip on any of this codebase's own small fixtures.
+#
+# tests/sample_baseline_two_conduit.pcap (used by baseline_check_two_conduit_isolation above) has
+# exactly 2 distinct conduits -- --max-baseline-conduits 1 forces the second one to be refused.
+add_test(NAME baseline_engine_limits_conduit_cap_marks_check_incomplete
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_engine_limits_conduit.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_engine_limits_conduit.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap' >/dev/null && '$<TARGET_FILE:conduitscope>' baseline check --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_engine_limits_conduit.json' --max-baseline-conduits 1 '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_baseline_two_conduit.pcap'; echo EXITCODE=$?")
+set_tests_properties(baseline_engine_limits_conduit_cap_marks_check_incomplete PROPERTIES
+  PASS_REGULAR_EXPRESSION "OBSERVATION INCOMPLETE.*conduit limit \\(1\\) reached.*--max-baseline-conduits.*EXITCODE=5")
+
+# Same scenario, --format json: observation_truncated/truncation_reasons both populated, compliant
+# still reads true (no findings -- the whole point is that a caller must check BOTH fields, not
+# "compliant" alone, per observation_truncated's own comment, baseline.hpp).
+add_test(NAME baseline_engine_limits_conduit_cap_json_fields
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_engine_limits_conduit_json.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_engine_limits_conduit_json.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap' >/dev/null && '$<TARGET_FILE:conduitscope>' baseline check --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_engine_limits_conduit_json.json' --format json --max-baseline-conduits 1 '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_baseline_two_conduit.pcap'; echo EXITCODE=$?")
+set_tests_properties(baseline_engine_limits_conduit_cap_json_fields PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"compliant\": true,\n *\"observation_truncated\": true,\n *\"truncation_reasons\": \\[\"conduit limit \\(1\\) reached.*EXITCODE=5")
+
+# tests/sample_baseline_modbus_mutated.pcap (used by the *_mutated_* tests above) has 2 distinct
+# operation_keys on its one conduit ("Read Holding Registers", "Write Multiple Registers") --
+# --max-baseline-operations-per-conduit 1 forces the second one to be refused. `learn` still
+# writes a (partial) baseline rather than erroring out, but must say INCOMPLETE on stderr.
+add_test(NAME baseline_engine_limits_operations_cap_marks_learn_incomplete
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_engine_limits_ops.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_engine_limits_ops.json' --max-baseline-operations-per-conduit 1 '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_baseline_modbus_mutated.pcap'; echo EXITCODE=$?")
+set_tests_properties(baseline_engine_limits_operations_cap_marks_learn_incomplete PROPERTIES
+  PASS_REGULAR_EXPRESSION "warning: baseline observation of '.*' is INCOMPLETE.*operations-per-conduit limit \\(1\\) reached.*--max-baseline-operations-per-conduit.*EXITCODE=0")
+
+# The compiled defaults (50,000/20,000/5,000/1,000) must never trip on this codebase's own small
+# fixtures -- mirrors baseline_max_file_bytes_default_does_not_reject_a_normal_file's own role for
+# item 68's ceiling. Reuses sample_baseline_two_conduit.pcap (2 conduits, still far under 20,000).
+add_test(NAME baseline_engine_limits_defaults_do_not_trip_on_a_normal_capture
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_engine_limits_defaults.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_engine_limits_defaults.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_baseline_two_conduit.pcap'; echo EXITCODE=$?")
+set_tests_properties(baseline_engine_limits_defaults_do_not_trip_on_a_normal_capture PROPERTIES
+  PASS_REGULAR_EXPRESSION "EXITCODE=0"
+  FAIL_REGULAR_EXPRESSION "INCOMPLETE")
 
 # ---------------------------------------------------------------------------------------------
 # S7comm bit-level range tracking + `baseline check --symbolic-addresses` (small follow-up to

@@ -323,7 +323,26 @@ struct BaselineCheckReport {
     // layer's exit-code decision, see run_baseline_check in cli_main.cpp), named identically for
     // the same reason FlowVerdict/BaselineVerdict share a naming convention: so a reader who
     // already knows one of this codebase's report structs recognizes the other's shape immediately.
+    //
+    // Deliberately NOT redefined to also check observation_truncated below: compliant() still
+    // answers exactly "did this capture's own OBSERVED operations match the baseline", nothing
+    // more -- see observation_truncated's own comment for why incompleteness is a separate signal
+    // that the CLI layer (never this struct) turns into its own dedicated exit code.
     bool compliant() const { return findings.empty(); }
+
+    // Item 64 fix (docs/reviews/2026-09-chatgpt-security-review-patch209.md, finding 1): set from
+    // the BaselineEngine that produced this report's own `observed` input (run_baseline_check,
+    // cli_main.cpp) whenever that engine's own truncated()/truncation_reasons() fired -- i.e. this
+    // capture's own observation hit one of BaselineEngine's four growth ceilings and is therefore
+    // only a PARTIAL view of what the capture actually contained. A truncated observation can only
+    // ever produce false NEGATIVES here (an operation that exists in the capture but never made it
+    // into `observed` at all can't generate a finding, so compliant() can come back true when the
+    // untruncated capture would not have), never false positives -- so per the review's own explicit
+    // instruction ("do not silently produce a clean compliance result from truncated
+    // observations"), the CLI layer must never report a plain CLEAN result while this is true; see
+    // kExitBaselineIncomplete's own comment (cli_main.cpp).
+    bool observation_truncated = false;
+    std::vector<std::string> truncation_reasons;
 };
 
 // Compares `observed` (one capture's own BaselineEngine::finish() output) against `baseline` and
@@ -369,8 +388,57 @@ struct BaselineCheckReport {
 BaselineCheckReport check_baseline(const BaselineStore& baseline, const std::vector<ConduitBaseline>& observed,
                                     const std::string& capture_path, const Policy* policy = nullptr);
 
+// Compiled-in defaults for BaselineEngine's own four per-capture growth ceilings below. Fixes
+// docs/reviews/2026-09-chatgpt-security-review-patch209.md's finding 1 (item 64,
+// docs/DEVELOPMENT.md): before this, BaselineEngine::observe() grew tcp_sessions_, conduits_/
+// conduit_order_, each ConduitState::operations/operation_order, and each OperationState::
+// observed_ranges with no counter, no cap, and no eviction logic anywhere -- a single adversarial
+// or malformed capture (`baseline learn` or `baseline check`, both build one BaselineEngine per
+// input) could grow all four without limit.
+//
+// Unlike tcp_reassembly_/FlowStateMap's own max_active_flows/max_flow_state_entries caps (items
+// 65/66) -- ephemeral performance caches where evicting an existing entry to make room for a new
+// one is harmless, since the evicted entry carries no output value on its own -- a baseline's
+// tracked conduits/operations/ranges ARE the output: evicting one to make room for another would
+// let a real, already-learned conduit or operation silently vanish from a learned baseline, or let
+// `baseline check` silently fail to flag a legitimate new conduit as new because eviction happened
+// to make room for something else first. So every cap here works the opposite way from items
+// 65/66's: "refuse to grow further" (an already-tracked entry is NEVER evicted to make room for a
+// new one), and hitting any of the four ceilings marks the whole capture's observation
+// BaselineEngine::truncated() -- surfaced by `baseline learn` as a diagnostic warning (cli_main.cpp)
+// and by `baseline check` as a dedicated, never-silently-clean exit code (kExitBaselineIncomplete,
+// cli_main.cpp) -- exactly matching the review's own explicit instruction (finding 1): "When a
+// limit is reached, report that the baseline is incomplete. Do not silently produce a clean
+// compliance result from truncated observations."
+//
+// Sized generously: these bound ONE capture's worth of in-memory state (a fresh BaselineEngine is
+// constructed per input file, both in `learn` and `check`), not a whole baseline file's cumulative
+// history, so even a large multi-site OT capture with many thousands of distinct hosts should stay
+// far below every one of these -- only a capture engineered (or corrupted) to contain far more
+// distinct sessions/conduits/operations/ranges than any real OT network has should ever hit one.
+inline constexpr size_t kDefaultMaxBaselineTrackedTcpSessions = 50000;
+inline constexpr size_t kDefaultMaxBaselineConduits = 20000;
+inline constexpr size_t kDefaultMaxBaselineOperationsPerConduit = 5000;
+inline constexpr size_t kDefaultMaxBaselineRangesPerOperation = 1000;
+
+// CLI-facing bundle of the four ceilings above -- one struct (rather than four loose constructor
+// parameters) mirrors ResourceLimits' own role for the decode-time budgets (resource_limits.hpp):
+// a single object threaded from CLI parsing (cli_main.cpp, --max-baseline-tcp-sessions/
+// --max-baseline-conduits/--max-baseline-operations-per-conduit/--max-baseline-ranges-per-operation)
+// down to BaselineEngine's constructor, with "0 on the CLI means apply the compiled default"
+// already resolved by the CLI layer before it gets here -- the library itself only ever sees a
+// real ceiling, never a sentinel.
+struct BaselineEngineLimits {
+    size_t max_tracked_tcp_sessions = kDefaultMaxBaselineTrackedTcpSessions;
+    size_t max_conduits = kDefaultMaxBaselineConduits;
+    size_t max_operations_per_conduit = kDefaultMaxBaselineOperationsPerConduit;
+    size_t max_ranges_per_operation = kDefaultMaxBaselineRangesPerOperation;
+};
+
 class BaselineEngine {
 public:
+    explicit BaselineEngine(BaselineEngineLimits limits = BaselineEngineLimits{}) : limits_(limits) {}
+
     // Folds one already-decoded packet into this engine's per-conduit, per-operation state for
     // THIS capture. Call once per packet, in capture order (same discipline as
     // PolicyEngine::observe/AssetInventoryEngine::observe). A non-TCP packet, or one whose protocol
@@ -386,6 +454,10 @@ public:
     // just this feature's two known ports (MODBUS_TCP_PORT, COTP_TCP_PORT -- S7comm's own port,
     // since a "cotp"-only session with no S7comm payload never reaches extract_operations() anyway,
     // see extract_s7comm_operations' own comment).
+    //
+    // Once any of `limits_`'s four ceilings is reached, further growth of that specific container
+    // is refused (see BaselineEngineLimits' own comment above for why refusal, never eviction) and
+    // truncated_ is set -- see truncated()/truncation_reasons() below.
     void observe(const DecodedPacket& packet);
 
     // Produces this ONE capture's own observed conduits/operations, one ConduitBaseline per
@@ -393,6 +465,19 @@ public:
     // as both the persisted-store shape and this per-capture output shape). Safe to call more than
     // once; does not reset state.
     std::vector<ConduitBaseline> finish() const;
+
+    // True once at least one of this capture's four growth ceilings (BaselineEngineLimits) blocked
+    // further growth at least once. This ONLY ever means "something new was refused" -- an already-
+    // tracked TCP session/conduit/operation/range is never evicted once recorded, so finish()'s own
+    // output is always a true (if possibly partial) subset of what this capture actually contained,
+    // never a corrupted mix. Callers (cli_main.cpp) must surface this rather than let it pass
+    // silently -- see this class's own header comment above for why.
+    bool truncated() const { return truncated_; }
+
+    // One human-readable line per DISTINCT ceiling that was hit (never one line per refused
+    // entry -- see mark_truncated's own comment in baseline.cpp for the dedup rule), each naming
+    // the CLI flag that raises it. Empty iff truncated() is false.
+    const std::vector<std::string>& truncation_reasons() const { return truncation_reasons_; }
 
 private:
     struct OperationState {
@@ -419,6 +504,16 @@ private:
         uint16_t server_port = 0;
         bool initiator_known = false;
     };
+
+    // Appends `reason` to truncation_reasons_ (and sets truncated_) the first time it's seen;
+    // a no-op on every later call with the same text, so a capture that keeps exceeding, say, the
+    // ranges-per-operation ceiling on many different operations still produces exactly one line for
+    // that ceiling, not one per operation/packet.
+    void mark_truncated(const std::string& reason);
+
+    BaselineEngineLimits limits_;
+    bool truncated_ = false;
+    std::vector<std::string> truncation_reasons_;
 
     std::unordered_map<std::string, ConduitState> conduits_;
     std::vector<std::string> conduit_order_;  // conduit keys, first-seen order

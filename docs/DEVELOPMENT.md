@@ -10274,7 +10274,150 @@ deferred future migration.
     TCP reassembly, unprotected by either existing cap, and
     specifically relevant to `baseline learn`/`baseline check`, which
     are designed to process an entire capture and retain a running
-    summary of it. **Not yet fixed.** See the priority list below.
+    summary of it. **Fixed.**
+
+    The review's own recommendation table (finding 1) names exactly
+    four limits -- maximum tracked TCP sessions, maximum conduits,
+    maximum operations per conduit, maximum ranges per operation --
+    plus a critical behavioral requirement: "When a limit is reached,
+    report that the baseline is incomplete. Do not silently produce a
+    clean compliance result from truncated observations." That rules
+    out reusing items 65/66's own eviction strategy: `tcp_reassembly_`/
+    the registry `FlowStateMap` are ephemeral performance caches where
+    losing an entry is harmless, but a baseline's tracked conduits/
+    operations/ranges ARE the tool's actual output -- evicting one to
+    make room for another would let a real, already-learned conduit or
+    operation silently vanish, or let `baseline check` silently miss
+    flagging a legitimate new conduit as new. So the fix instead works
+    the opposite way: refuse further growth, never evict what's
+    already tracked, and surface incompleteness rather than letting it
+    pass silently.
+
+    `baseline.hpp` adds four named default constants --
+    `kDefaultMaxBaselineTrackedTcpSessions = 50000`,
+    `kDefaultMaxBaselineConduits = 20000`,
+    `kDefaultMaxBaselineOperationsPerConduit = 5000`,
+    `kDefaultMaxBaselineRangesPerOperation = 1000` -- bundled into a
+    new `BaselineEngineLimits` struct (mirrors `ResourceLimits`' own
+    role: one object threaded from CLI parsing down to the engine,
+    "0 on the CLI means apply the compiled default" already resolved
+    before it reaches the constructor). `BaselineEngine` gains a
+    constructor taking `BaselineEngineLimits` (defaulted, so every
+    existing `BaselineEngine engine;` call site still compiles
+    unchanged unless it wants to override), plus `bool truncated()
+    const` and `const std::vector<std::string>& truncation_reasons()
+    const` accessors backed by a new private `mark_truncated(reason)`
+    helper that dedups by exact reason text -- a capture that keeps
+    exceeding one ceiling across many conduits/operations still
+    produces exactly one line for that ceiling, not one per packet.
+
+    `BaselineEngine::observe()` (`baseline.cpp`) gets a cap check at
+    each of the four growth points, each "refuse, don't evict":
+    - **TCP sessions:** once `tcp_sessions_.size() >=
+      limits_.max_tracked_tcp_sessions` and this is a session the
+      engine hasn't seen, it isn't recorded; that one packet's own
+      client/server direction falls back to the same known-port
+      heuristic already used when a session's initiator is genuinely
+      unknown, and the capture is marked truncated.
+    - **Conduits:** once `conduits_.size() >= limits_.max_conduits`
+      and this packet's conduit is new, the packet is dropped for
+      baseline purposes entirely (there's no partial home for its
+      operations without a `ConduitState` to hold them) and the
+      capture is marked truncated.
+    - **Operations per conduit:** once a conduit's own
+      `operations.size() >= limits_.max_operations_per_conduit` and
+      this packet's `operation_key` is new to that conduit, just that
+      operation is skipped (the conduit and everything already
+      recorded on it are untouched) and the capture is marked
+      truncated.
+    - **Ranges per operation:** once an operation's own
+      `observed_ranges.size() >= limits_.max_ranges_per_operation`,
+      the new range is tried on a throwaway copy first -- if it only
+      extends/coalesces an existing entry (`merge_range_into`'s own
+      coalescing means the entry count doesn't grow), it's applied for
+      real with no truncation at all; only a genuinely new, disjoint
+      range past the ceiling is refused and marked truncated. This
+      keeps the common case (a PLC legitimately scanning a slightly
+      wider window of memory it already talks to) working even once
+      the ceiling is nominally "reached."
+
+    Incompleteness is then threaded through to both CLI commands.
+    `BaselineCheckReport` (`baseline.hpp`) gains `observation_truncated`
+    and `truncation_reasons` fields, populated in `run_baseline_check`
+    (`cli_main.cpp`) straight from the same `BaselineEngine` that
+    produced the report's own `observed` input. Both report writers
+    (`write_baseline_check_report_text`/`_json`, `baseline.cpp`) now
+    render a prominent "OBSERVATION INCOMPLETE" banner (text) or
+    `observation_truncated`/`truncation_reasons` fields (JSON) whenever
+    it's set -- printed even when `compliant()` is true, since a
+    truncated observation can only ever produce false negatives (an
+    operation the engine never got to record can't generate a
+    finding), never false positives. Most importantly, a new exit code
+    `kExitBaselineIncomplete = 5` (the next unclaimed value after
+    `kExitPolicyNonCompliant`'s 3 and `kExitBaselineAnomaly`'s 4) takes
+    priority over both 0 and 4 in `run_baseline_check`: `baseline
+    check` now NEVER exits 0 while the observation was truncated, no
+    matter what `report.compliant()` says -- directly satisfying the
+    review's own "do not silently produce a clean compliance result
+    from truncated observations" instruction. `baseline learn` has no
+    equivalent exit-code contract to begin with (it never produces a
+    pass/fail verdict), so it instead prints a clearly-labeled
+    "is INCOMPLETE" warning to `diag` (unlike an ordinary parse
+    warning, this is never suppressed by `-q`/`--quiet`, since it
+    affects the correctness of the baseline file being written, not
+    just diagnostic noise) and still merges whatever it did manage to
+    observe -- consistent with `learn`'s existing "best effort
+    absorption, warn but don't abort" posture for parse errors.
+
+    Each of the four ceilings is also independently overridable, via
+    four new CLI flags registered only on `baseline learn`/`baseline
+    check` (not folded into the shared `ResourceLimitCliVars`/
+    `add_resource_limit_options()` used by `decode`/`policy validate`/
+    `inventory`/both baseline subcommands, same reasoning as item 68's
+    `--max-baseline-file-bytes`: this bounds `BaselineEngine`'s own
+    per-capture state, a different kind of limit from the decode-time
+    budgets that struct covers): `--max-baseline-tcp-sessions`,
+    `--max-baseline-conduits`, `--max-baseline-operations-per-conduit`,
+    `--max-baseline-ranges-per-operation`, all following the same "0 =
+    leave every site at its own default" convention as every other
+    `--max-*` flag in this file, resolved via a new
+    `resolve_baseline_engine_limits()` helper.
+
+    The four defaults were sized generously: they bound ONE capture's
+    worth of in-memory state (a fresh `BaselineEngine` is constructed
+    per input file, both in `learn` and `check`), not a whole baseline
+    file's cumulative history, so even a large multi-site OT capture
+    with many thousands of distinct hosts should stay far below every
+    one of them -- only a capture engineered (or corrupted) to contain
+    far more distinct sessions/conduits/operations/ranges than any real
+    OT network has should ever hit one.
+
+    Four new CTest cases in `CMakeLists.txt`
+    (`baseline_engine_limits_conduit_cap_marks_check_incomplete`,
+    `_conduit_cap_json_fields`, `_operations_cap_marks_learn_incomplete`,
+    `_defaults_do_not_trip_on_a_normal_capture`) confirm: a deliberately
+    tiny `--max-baseline-conduits 1` against `tests/
+    sample_baseline_two_conduit.pcap` (2 real conduits) marks `baseline
+    check` incomplete in both text and JSON output and returns exit
+    code 5 specifically (checked via an `; echo EXITCODE=$?` trailer,
+    since combining `WILL_FAIL` with `PASS_REGULAR_EXPRESSION` on one
+    test inverts the regex's own contribution to pass/fail in this
+    codebase -- same technique item 68's own tests already established,
+    just extended to assert a *specific* exit code value rather than
+    only "nonzero"); a deliberately tiny
+    `--max-baseline-operations-per-conduit 1` against `tests/
+    sample_baseline_modbus_mutated.pcap` (2 real operation keys on one
+    conduit) makes `baseline learn` print the INCOMPLETE warning while
+    still exiting 0; and the compiled defaults never trip on any
+    existing fixture. One pre-existing test,
+    `baseline_check_unmodified_fixture_zero_findings_json`, had its
+    exact-JSON-adjacency regex updated to account for the two new
+    fields now always present in `baseline check --format json`'s
+    output (`observation_truncated`/`truncation_reasons`, both at their
+    "nothing truncated" defaults for that small, un-truncated fixture).
+    Full CTest suite green (1978/1978 default build, 2054/2054 ASan/
+    UBSan build, zero sanitizer hits), zero-warning rebuild in both
+    configs plus a clean MinGW-w64 cross-compile.
 
 65. **The new `--max-active-flows`/`--max-flow-state-entries` caps are
     opt-in, so an ordinary invocation is still fully unbounded
@@ -10622,8 +10765,11 @@ reasoning stated inline):
   bound today, using nothing more exotic than ordinary-looking protocol
   traffic repeated across many source/destination pairs. **Item 65 is
   fixed** (see item 65 above for the two new default-ceiling constants
-  and their verification). **Item 64 (baseline engine) is not yet
-  fixed** -- a structurally different subsystem, still open.
+  and their verification). **Item 64 is also fixed** (see item 64 above
+  for `BaselineEngine`'s own four new growth ceilings, the "refuse
+  rather than evict" strategy, the `kExitBaselineIncomplete` exit-code
+  contract, and their verification) -- both halves of this P1 entry are
+  now closed.
 - **P2 -- hardening, worth doing but not urgent:** item 68 (baseline
   file-size ceiling -- a local, operator-supplied trust boundary, not
   remotely reachable). **Fixed** (see item 68 above for the new
@@ -10638,9 +10784,9 @@ reasoning stated inline):
   as its own priority item. **Not yet fixed** (and not urgent).
 
 Item 66 (P0), item 65 (P1, the flow/flow-state default-ceiling half),
-and item 68 (P2) are implemented; item 64 (P1, baseline engine bounds)
-and item 67 (tidy-up) have not been -- ping when you want the next one
-done as its own patch.
+item 64 (P1, baseline engine bounds), and item 68 (P2) are all
+implemented; only item 67 (tidy-up) has not been -- ping when you want
+it done as its own patch.
 
 ### Protocols not covered at all
 

@@ -771,6 +771,15 @@ bool is_baseline_protocol(const std::string& protocol) {
 
 }  // namespace
 
+void BaselineEngine::mark_truncated(const std::string& reason) {
+    truncated_ = true;
+    for (const std::string& existing : truncation_reasons_) {
+        if (existing == reason) return;  // already recorded this exact ceiling -- see this
+                                          // method's own comment in baseline.hpp for why
+    }
+    truncation_reasons_.push_back(reason);
+}
+
 void BaselineEngine::observe(const DecodedPacket& dp) {
     if (!dp.has_ip || (!dp.has_tcp && !dp.has_udp)) return;
     if (!is_baseline_protocol(dp.protocol)) return;
@@ -790,32 +799,48 @@ void BaselineEngine::observe(const DecodedPacket& dp) {
         bool is_syn_ack = dp.tcp_flags.rfind("SYN,ACK", 0) == 0;
 
         auto sit = tcp_sessions_.find(skey);
-        if (sit == tcp_sessions_.end()) {
-            TcpSessionState st;
-            bool src_is_client;
-            if (is_syn) {
-                src_is_client = true;
-                st.initiator_known = true;
-            } else if (is_syn_ack) {
-                src_is_client = false;
-                st.initiator_known = true;
-            } else {
-                src_is_client = src_is_client_by_port(dp.src_port, dp.dst_port);
+        if (sit == tcp_sessions_.end() && tcp_sessions_.size() >= limits_.max_tracked_tcp_sessions) {
+            // Item 64 fix: refuse to track a brand-new session past the ceiling (never evict an
+            // already-tracked one -- see BaselineEngineLimits' own comment for why) and fall back,
+            // for THIS packet only, to the same known-port heuristic used when a session's
+            // initiator is genuinely unknown. This can misattribute client/server for a session
+            // this engine never gets to track individually, which is exactly why it marks the
+            // whole capture truncated rather than staying silent about it.
+            mark_truncated("tracked TCP session limit (" + std::to_string(limits_.max_tracked_tcp_sessions) +
+                            ") reached -- further new sessions are not tracked individually and fall back to "
+                            "the known-port heuristic for client/server direction (--max-baseline-tcp-sessions)");
+            bool src_is_client = src_is_client_by_port(dp.src_port, dp.dst_port);
+            client_ip = src_is_client ? dp.src_ip : dp.dst_ip;
+            server_ip = src_is_client ? dp.dst_ip : dp.src_ip;
+            server_port = src_is_client ? dp.dst_port : dp.src_port;
+        } else {
+            if (sit == tcp_sessions_.end()) {
+                TcpSessionState st;
+                bool src_is_client;
+                if (is_syn) {
+                    src_is_client = true;
+                    st.initiator_known = true;
+                } else if (is_syn_ack) {
+                    src_is_client = false;
+                    st.initiator_known = true;
+                } else {
+                    src_is_client = src_is_client_by_port(dp.src_port, dp.dst_port);
+                }
+                st.client_ip = src_is_client ? dp.src_ip : dp.dst_ip;
+                st.server_ip = src_is_client ? dp.dst_ip : dp.src_ip;
+                st.server_port = src_is_client ? dp.dst_port : dp.src_port;
+                sit = tcp_sessions_.emplace(skey, std::move(st)).first;
+            } else if (!sit->second.initiator_known && (is_syn || is_syn_ack)) {
+                bool src_is_client = is_syn;
+                sit->second.client_ip = src_is_client ? dp.src_ip : dp.dst_ip;
+                sit->second.server_ip = src_is_client ? dp.dst_ip : dp.src_ip;
+                sit->second.server_port = src_is_client ? dp.dst_port : dp.src_port;
+                sit->second.initiator_known = true;
             }
-            st.client_ip = src_is_client ? dp.src_ip : dp.dst_ip;
-            st.server_ip = src_is_client ? dp.dst_ip : dp.src_ip;
-            st.server_port = src_is_client ? dp.dst_port : dp.src_port;
-            sit = tcp_sessions_.emplace(skey, std::move(st)).first;
-        } else if (!sit->second.initiator_known && (is_syn || is_syn_ack)) {
-            bool src_is_client = is_syn;
-            sit->second.client_ip = src_is_client ? dp.src_ip : dp.dst_ip;
-            sit->second.server_ip = src_is_client ? dp.dst_ip : dp.src_ip;
-            sit->second.server_port = src_is_client ? dp.dst_port : dp.src_port;
-            sit->second.initiator_known = true;
+            client_ip = sit->second.client_ip;
+            server_ip = sit->second.server_ip;
+            server_port = sit->second.server_port;
         }
-        client_ip = sit->second.client_ip;
-        server_ip = sit->second.server_ip;
-        server_port = sit->second.server_port;
     } else {
         // UDP (BACnet -- the only one of the eight protocols with no TCP form at all -- plus FINS/
         // MELSEC, which can run over either transport): no session, no handshake, so there is no
@@ -851,6 +876,17 @@ void BaselineEngine::observe(const DecodedPacket& dp) {
     std::string ckey = conduit_key(dp.protocol, client_ip, server_ip, server_port);
     auto cit = conduits_.find(ckey);
     if (cit == conduits_.end()) {
+        if (conduits_.size() >= limits_.max_conduits) {
+            // Item 64 fix: this packet belongs to a conduit this engine has never seen and has no
+            // room left to record -- refuse it entirely (there is no partial home for its
+            // operations without a ConduitState to hold them) rather than evict an existing
+            // conduit to make room. Every packet on this same unseen conduit hits this same branch
+            // again, but mark_truncated only records the ceiling once.
+            mark_truncated("conduit limit (" + std::to_string(limits_.max_conduits) +
+                            ") reached -- further new conduits observed in this capture are not recorded "
+                            "(--max-baseline-conduits)");
+            return;
+        }
         ConduitState cs;
         cs.client_ip = client_ip;
         cs.server_ip = server_ip;
@@ -865,6 +901,17 @@ void BaselineEngine::observe(const DecodedPacket& dp) {
     for (const Operation& op : ops) {
         auto oit = cs.operations.find(op.operation_key);
         if (oit == cs.operations.end()) {
+            if (cs.operations.size() >= limits_.max_operations_per_conduit) {
+                // Item 64 fix: this conduit is already tracked, but has no room left for a NEW
+                // operation_key -- skip just this operation (the conduit and every operation
+                // already recorded on it stay exactly as they were) rather than evict one to make
+                // room for another.
+                mark_truncated("operations-per-conduit limit (" +
+                                std::to_string(limits_.max_operations_per_conduit) +
+                                ") reached on at least one conduit -- further new operation(s) on that "
+                                "conduit are not recorded (--max-baseline-operations-per-conduit)");
+                continue;
+            }
             cs.operation_order.push_back(op.operation_key);
             oit = cs.operations.emplace(op.operation_key, OperationState{}).first;
         }
@@ -872,7 +919,28 @@ void BaselineEngine::observe(const DecodedPacket& dp) {
         ++os.packet_count;
         if (op.has_target_range) {
             os.has_target_range = true;
-            merge_range_into(os.observed_ranges, {op.range_start, op.range_end});
+            if (os.observed_ranges.size() < limits_.max_ranges_per_operation) {
+                merge_range_into(os.observed_ranges, {op.range_start, op.range_end});
+            } else {
+                // Item 64 fix: already at the ranges-per-operation ceiling. Try the merge on a
+                // throwaway copy first -- if the new range only extends/coalesces with a range
+                // this operation already has (merge_range_into's own coalescing means the entry
+                // count doesn't grow), apply it for real; only refuse when it would actually add a
+                // brand-new, disjoint entry past the ceiling. This keeps the common case (a
+                // legitimate PLC scanning a slightly wider window of the same, already-observed
+                // memory area) working even once the ceiling is nominally "reached".
+                std::vector<std::pair<uint32_t, uint32_t>> trial = os.observed_ranges;
+                merge_range_into(trial, {op.range_start, op.range_end});
+                if (trial.size() <= os.observed_ranges.size()) {
+                    os.observed_ranges = std::move(trial);
+                } else {
+                    mark_truncated("ranges-per-operation limit (" +
+                                    std::to_string(limits_.max_ranges_per_operation) +
+                                    ") reached on at least one operation -- further new, disjoint target "
+                                    "range(s) for that operation are not recorded "
+                                    "(--max-baseline-ranges-per-operation)");
+                }
+            }
         }
         if (!op.s7_range_unit.empty()) {
             os.s7_area_letter = op.s7_area_letter;
@@ -1632,6 +1700,21 @@ void write_baseline_check_report_text(std::ostream& out, const BaselineCheckRepo
     }
     out << "\n\n";
 
+    // Item 64 fix: printed even when compliant() is true -- a CLEAN result here is only ever a
+    // partial view (see BaselineCheckReport::observation_truncated's own comment, baseline.hpp),
+    // and the CLI layer already refuses to let this exit 0 (kExitBaselineIncomplete, cli_main.cpp),
+    // so the text report must not read as an unqualified all-clear either.
+    if (report.observation_truncated) {
+        out << "*** OBSERVATION INCOMPLETE -- this capture hit at least one of BaselineEngine's "
+               "internal limits, so the result above reflects only PART of what the capture "
+               "actually contains. Any \"CLEAN\"/compliant result is NOT trustworthy until this is "
+               "resolved (raise the relevant --max-baseline-* limit and re-run). ***\n";
+        for (const std::string& reason : report.truncation_reasons) {
+            out << "  - " << reason << "\n";
+        }
+        out << "\n";
+    }
+
     out << report.conduits_observed << " conduit(s) observed, " << report.operations_observed
         << " distinct operation(s) observed, " << report.known_operation_count
         << " matched the baseline, " << report.findings.size() << " did not\n\n";
@@ -1670,6 +1753,17 @@ void write_baseline_check_report_json(std::ostream& out, const BaselineCheckRepo
     out << "{\n";
     out << "  \"capture\": \"" << json_escape(report.capture_path) << "\",\n";
     out << "  \"compliant\": " << (report.compliant() ? "true" : "false") << ",\n";
+    // Item 64 fix: see BaselineCheckReport::observation_truncated's own comment (baseline.hpp) --
+    // "compliant": true alongside "observation_truncated": true means the capture only PARTLY
+    // matched the baseline because BaselineEngine couldn't fully observe it, not that it was
+    // confirmed clean; a caller parsing this JSON must check both fields, not "compliant" alone.
+    out << "  \"observation_truncated\": " << (report.observation_truncated ? "true" : "false") << ",\n";
+    out << "  \"truncation_reasons\": [";
+    for (size_t i = 0; i < report.truncation_reasons.size(); ++i) {
+        if (i) out << ", ";
+        out << "\"" << json_escape(report.truncation_reasons[i]) << "\"";
+    }
+    out << "],\n";
     out << "  \"conduits_observed\": " << report.conduits_observed << ",\n";
     out << "  \"operations_observed\": " << report.operations_observed << ",\n";
     out << "  \"known_operation_count\": " << report.known_operation_count << ",\n";

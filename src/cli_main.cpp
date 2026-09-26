@@ -478,6 +478,61 @@ ResourceLimits build_resource_limits(const ResourceLimitCliVars& vars) {
     return limits;
 }
 
+// Item 64 fix (docs/reviews/2026-09-chatgpt-security-review-patch209.md, finding 1): the four
+// BaselineEngine growth ceilings' own CLI options, registered only on 'baseline learn'/'baseline
+// check' (not folded into add_resource_limit_options/ResourceLimitCliVars above) -- same reasoning
+// as --max-baseline-file-bytes' own (baseline.hpp's kDefaultMaxBaselineFileBytes comment): these
+// bound BaselineEngine's own per-capture state, a conceptually distinct kind of limit from the
+// decode-time budgets add_resource_limit_options covers, which every one of 'decode'/'policy
+// validate'/'inventory'/both baseline subcommands shares. Same "0 = leave every site at its own
+// default" convention as every other --max-* flag in this file.
+void add_baseline_engine_limit_options(CLI::App* cmd, size_t& max_tcp_sessions, size_t& max_conduits,
+                                         size_t& max_operations_per_conduit, size_t& max_ranges_per_operation) {
+    cmd->add_option(
+           "--max-baseline-tcp-sessions", max_tcp_sessions,
+           "Cap the number of distinct TCP sessions BaselineEngine tracks per capture for "
+           "client/server direction inference (default 50,000). 0 = leave it at its own default; "
+           "past this, further new sessions fall back to the known-port heuristic instead of "
+           "SYN/SYN-ACK tracking and the baseline is marked incomplete (see docs/DEVELOPMENT.md's "
+           "security review write-up)")
+        ->capture_default_str();
+    cmd->add_option(
+           "--max-baseline-conduits", max_conduits,
+           "Cap the number of distinct conduits (client, server, protocol, port) BaselineEngine "
+           "records per capture (default 20,000). 0 = leave it at its own default; past this, "
+           "further new conduits observed in the capture are not recorded and the baseline is "
+           "marked incomplete")
+        ->capture_default_str();
+    cmd->add_option(
+           "--max-baseline-operations-per-conduit", max_operations_per_conduit,
+           "Cap the number of distinct operation keys BaselineEngine records per conduit (default "
+           "5,000). 0 = leave it at its own default; past this, further new operations on that "
+           "conduit are not recorded and the baseline is marked incomplete")
+        ->capture_default_str();
+    cmd->add_option(
+           "--max-baseline-ranges-per-operation", max_ranges_per_operation,
+           "Cap the number of distinct (coalesced) target-address ranges BaselineEngine records "
+           "per operation (default 1,000). 0 = leave it at its own default; past this, further "
+           "new, disjoint ranges for that operation are not recorded and the baseline is marked "
+           "incomplete")
+        ->capture_default_str();
+}
+
+// Resolves the four raw CLI values (0 = unset) into a real BaselineEngineLimits, applying the
+// compiled defaults exactly where the CLI parsing layer applies every other 0-sentinel default in
+// this file -- BaselineEngine's own constructor always receives a fully-resolved struct, never a
+// sentinel.
+BaselineEngineLimits resolve_baseline_engine_limits(size_t max_tcp_sessions, size_t max_conduits,
+                                                      size_t max_operations_per_conduit,
+                                                      size_t max_ranges_per_operation) {
+    BaselineEngineLimits limits;
+    if (max_tcp_sessions != 0) limits.max_tracked_tcp_sessions = max_tcp_sessions;
+    if (max_conduits != 0) limits.max_conduits = max_conduits;
+    if (max_operations_per_conduit != 0) limits.max_operations_per_conduit = max_operations_per_conduit;
+    if (max_ranges_per_operation != 0) limits.max_ranges_per_operation = max_ranges_per_operation;
+    return limits;
+}
+
 int run_decode(const std::string& input, const std::string& interface_name, const std::string& filter,
                 int duration_seconds, int snaplen, bool promiscuous, const std::string& output,
                 const std::string& format, const std::string& protocol, const std::vector<int>& modbus_ports,
@@ -1166,6 +1221,19 @@ int run_inventory(const std::string& input, const std::string& interface_name, c
 // than reusing kExitPolicyNonCompliant's meaning across two unrelated commands.
 constexpr int kExitBaselineAnomaly = 4;
 
+// Item 64 fix (docs/reviews/2026-09-chatgpt-security-review-patch209.md, finding 1): a fifth,
+// still-unclaimed exit code for `baseline check` specifically -- returned whenever
+// BaselineCheckReport::observation_truncated is true, i.e. this run's own BaselineEngine hit at
+// least one of its four internal growth ceilings and therefore only PARTLY observed the capture.
+// Takes priority over both 0 and kExitBaselineAnomaly: a truncated observation can only ever
+// produce false negatives (see observation_truncated's own comment, baseline.hpp), so a plain 0
+// here would be exactly the "silently produce a clean compliance result from truncated
+// observations" outcome the review explicitly calls out as unacceptable, and an ordinary
+// kExitBaselineAnomaly wouldn't tell a caller that the findings it DID get are also incomplete.
+// A caller scripting against this exit code should treat 5 as "re-run with a higher
+// --max-baseline-* limit and try again" -- not as "clean" and not as an ordinary anomaly.
+constexpr int kExitBaselineIncomplete = 5;
+
 // `baseline learn` -- reads `baseline_file` if it already exists (merges; see
 // load_baseline_store's own comment for why a missing file isn't an error here specifically),
 // absorbs every packet's operations from every pcap in `inputs` in order, and always writes the
@@ -1176,7 +1244,7 @@ constexpr int kExitBaselineAnomaly = 4;
 // which a live interface can't offer the same "already looked at this" assurance for.
 int run_baseline_learn(const std::vector<std::string>& inputs, const std::string& baseline_file, bool strict,
                         bool quiet, const ResourceLimitCliVars& limit_vars, size_t max_baseline_file_bytes,
-                        std::ostream& diag) {
+                        const BaselineEngineLimits& engine_limits, std::ostream& diag) {
     try {
         BaselineStore store = load_baseline_store(baseline_file, max_baseline_file_bytes);
 
@@ -1188,7 +1256,7 @@ int run_baseline_learn(const std::vector<std::string>& inputs, const std::string
         for (const std::string& input : inputs) {
             PcapReader reader(input);
             Decoder decoder(options);
-            BaselineEngine engine;
+            BaselineEngine engine(engine_limits);
 
             PcapPacket pkt;
             size_t index = 0, warnings = 0;
@@ -1210,6 +1278,20 @@ int run_baseline_learn(const std::vector<std::string>& inputs, const std::string
                      << " packet(s) in '" << input
                      << "' had parse warnings (shown above); rerun with --strict to stop at the "
                         "first one, or -q to silence this message\n";
+            }
+            // Item 64 fix: `learn` still absorbs whatever this engine DID manage to observe (same
+            // best-effort posture as the parse-warnings handling right above -- a merge from a
+            // partial observation is still strictly better than none), but must say so plainly
+            // rather than silently baking an incomplete observation into the baseline file. Always
+            // printed, even under -q/--quiet -- unlike an ordinary parse warning, this affects the
+            // CORRECTNESS of the baseline file being written, not just diagnostic noise.
+            if (engine.truncated()) {
+                diag << "warning: baseline observation of '" << input
+                     << "' is INCOMPLETE -- the merged baseline may be missing some of this "
+                        "capture's own conduits/operations/ranges:\n";
+                for (const std::string& reason : engine.truncation_reasons()) {
+                    diag << "  - " << reason << "\n";
+                }
             }
         }
 
@@ -1251,7 +1333,8 @@ int run_baseline_learn(const std::vector<std::string>& inputs, const std::string
 int run_baseline_check(const std::string& input, const std::string& baseline_file, const std::string& output,
                         const std::string& format, bool strict, bool symbolic_addresses,
                         const std::string& policy_path, bool quiet, const ResourceLimitCliVars& limit_vars,
-                        size_t max_baseline_file_bytes, std::ostream& diag) {
+                        size_t max_baseline_file_bytes, const BaselineEngineLimits& engine_limits,
+                        std::ostream& diag) {
     std::ofstream file_out;
     std::ostream* out = &std::cout;
     if (!output.empty()) {
@@ -1278,7 +1361,7 @@ int run_baseline_check(const std::string& input, const std::string& baseline_fil
         options.limits = build_resource_limits(limit_vars);
         PcapReader reader(input);
         Decoder decoder(options);
-        BaselineEngine engine;
+        BaselineEngine engine(engine_limits);
 
         PcapPacket pkt;
         size_t index = 0, warnings = 0;
@@ -1293,6 +1376,11 @@ int run_baseline_check(const std::string& input, const std::string& baseline_fil
         }
 
         BaselineCheckReport report = check_baseline(store, engine.finish(), input, policy ? &*policy : nullptr);
+        // Item 64 fix: attached from the SAME engine that produced `report`'s own `observed` input,
+        // never recomputed -- see BaselineCheckReport::observation_truncated's own comment
+        // (baseline.hpp) and kExitBaselineIncomplete's own comment below for what this changes.
+        report.observation_truncated = engine.truncated();
+        report.truncation_reasons = engine.truncation_reasons();
         if (format == "json") {
             write_baseline_check_report_json(*out, report, symbolic_addresses);
         } else {
@@ -1304,6 +1392,10 @@ int run_baseline_check(const std::string& input, const std::string& baseline_fil
                  << " packet(s) had parse warnings (shown above); rerun with --strict to stop at "
                     "the first one, or -q to silence this message\n";
         }
+        // Item 64 fix: observation_truncated takes priority over compliant()'s own ternary --
+        // see kExitBaselineIncomplete's own comment for why a truncated observation must never
+        // exit 0, even when report.compliant() (no findings) would otherwise say CLEAN.
+        if (report.observation_truncated) return kExitBaselineIncomplete;
         return report.compliant() ? 0 : kExitBaselineAnomaly;
     } catch (const BaselineStoreError& e) {
         std::cerr << "error: " << e.what() << "\n";
@@ -2057,6 +2149,8 @@ int main(int argc, char** argv) {
     bool baseline_learn_strict = false;
     ResourceLimitCliVars baseline_learn_limit_vars;
     size_t baseline_learn_max_file_bytes = 0;
+    size_t baseline_learn_max_tcp_sessions = 0, baseline_learn_max_conduits = 0,
+           baseline_learn_max_operations_per_conduit = 0, baseline_learn_max_ranges_per_operation = 0;
     baseline_learn_cmd
         ->add_option("--baseline-file", baseline_learn_file,
                       "Baseline JSON file to read (if it exists) and write back. Required")
@@ -2068,6 +2162,9 @@ int main(int argc, char** argv) {
                       "genuinely being legitimate is essentially always a sign something else is "
                       "wrong (see docs/DEVELOPMENT.md's security review write-up)")
         ->capture_default_str();
+    add_baseline_engine_limit_options(baseline_learn_cmd, baseline_learn_max_tcp_sessions,
+                                        baseline_learn_max_conduits, baseline_learn_max_operations_per_conduit,
+                                        baseline_learn_max_ranges_per_operation);
     baseline_learn_cmd
         ->add_option("captures", baseline_learn_inputs,
                       "One or more pcap/pcapng capture files to learn from, in order (classic "
@@ -2089,6 +2186,8 @@ int main(int argc, char** argv) {
     bool baseline_check_symbolic_addresses = false;
     ResourceLimitCliVars baseline_check_limit_vars;
     size_t baseline_check_max_file_bytes = 0;
+    size_t baseline_check_max_tcp_sessions = 0, baseline_check_max_conduits = 0,
+           baseline_check_max_operations_per_conduit = 0, baseline_check_max_ranges_per_operation = 0;
     baseline_check_cmd
         ->add_option("--baseline-file", baseline_check_file, "Baseline JSON file to check against. Required")
         ->required()
@@ -2100,6 +2199,9 @@ int main(int argc, char** argv) {
                       "genuinely being legitimate is essentially always a sign something else is "
                       "wrong (see docs/DEVELOPMENT.md's security review write-up)")
         ->capture_default_str();
+    add_baseline_engine_limit_options(baseline_check_cmd, baseline_check_max_tcp_sessions,
+                                        baseline_check_max_conduits, baseline_check_max_operations_per_conduit,
+                                        baseline_check_max_ranges_per_operation);
     baseline_check_cmd
         ->add_option("capture", baseline_check_input,
                       "The pcap/pcapng capture file to check (classic pcap or pcapng, auto-detected)")
@@ -2238,6 +2340,10 @@ int main(int argc, char** argv) {
                                    baseline_learn_limit_vars,
                                    baseline_learn_max_file_bytes != 0 ? baseline_learn_max_file_bytes
                                                                       : kDefaultMaxBaselineFileBytes,
+                                   resolve_baseline_engine_limits(baseline_learn_max_tcp_sessions,
+                                                                    baseline_learn_max_conduits,
+                                                                    baseline_learn_max_operations_per_conduit,
+                                                                    baseline_learn_max_ranges_per_operation),
                                    *diag);
     }
     if (baseline_check_cmd->parsed()) {
@@ -2246,6 +2352,10 @@ int main(int argc, char** argv) {
                                    baseline_check_policy_file, quiet, baseline_check_limit_vars,
                                    baseline_check_max_file_bytes != 0 ? baseline_check_max_file_bytes
                                                                       : kDefaultMaxBaselineFileBytes,
+                                   resolve_baseline_engine_limits(baseline_check_max_tcp_sessions,
+                                                                    baseline_check_max_conduits,
+                                                                    baseline_check_max_operations_per_conduit,
+                                                                    baseline_check_max_ranges_per_operation),
                                    *diag);
     }
     if (baseline_cmd->parsed()) {
