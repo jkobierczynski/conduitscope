@@ -287,6 +287,27 @@ target_link_libraries(protocol_result_selftest PRIVATE conduitscope_core)
 add_test(NAME protocol_result_type_safety_self_test COMMAND protocol_result_selftest)
 
 # --------------------------------------------------------------------------------------------
+# ResourceLimits scoping self-test -- see tools/resource_limits_selftest.cpp's own file header for
+# the full rationale (finding 5, docs/reviews/2026-09-chatgpt-security-review-patch160.md:
+# ResourceLimits used to be plain process-global mutable state -- two differently-configured
+# Decoder instances, interleaved on one thread or run concurrently on separate threads, would
+# race over the same global configuration). Same "always built, no opt-in flag" posture as
+# crypto_selftest/protocol_result_selftest above -- the scenario this guards against (multiple
+# Decoder instances sharing one process) can never be constructed by any CLI invocation (the CLI
+# itself only ever builds one Decoder per process), so no CLI-driven CTest case could exercise it
+# either; a dedicated small executable is the only way.
+# --------------------------------------------------------------------------------------------
+add_executable(resource_limits_selftest tools/resource_limits_selftest.cpp)
+# The only target in this build that uses std::thread directly (check 4's genuine cross-thread
+# concurrency test) -- find_package(Threads) is scoped to just this one target's link line rather
+# than added globally, since nothing else here needs it.
+find_package(Threads REQUIRED)
+target_link_libraries(resource_limits_selftest PRIVATE conduitscope_core Threads::Threads)
+
+add_test(NAME resource_limits_scoping_self_test
+  COMMAND resource_limits_selftest "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap")
+
+# --------------------------------------------------------------------------------------------
 # Optional libFuzzer harnesses (fuzz/) -- see fuzz/README.md and docs/DEVELOPMENT.md's "External
 # code review and engineering priorities" section for which five parsers these target and why.
 # Off by default: libFuzzer is a Clang/compiler-rt feature (GCC cannot build -fsanitize=fuzzer),

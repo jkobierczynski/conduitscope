@@ -1027,6 +1027,16 @@ bool Decoder::reassemble_tcp_payload(const TcpSegment& tcp, const std::string& f
 // and the same DecodeContext::flow_state<T>(FlowStateKeying::DirectionalFlow) extension.
 
 DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size_t index) const {
+    // Re-assert THIS Decoder instance's own resource limits for the duration of this one call,
+    // restoring whatever was active before on return (including via an exception unwinding
+    // through this function) -- see resource_limits.hpp's ScopedResourceLimits and its header
+    // comment. This is what actually makes two differently-configured Decoder instances safe,
+    // whether interleaved on one thread or run concurrently on separate threads (docs/reviews/
+    // 2026-09-chatgpt-security-review-patch160.md, finding 5) -- the constructor's own
+    // set_resource_limits call (decoder.hpp) only covers a constructed-but-not-yet-decoding
+    // Decoder; every actual decode() call goes through this guard instead.
+    ScopedResourceLimits scoped_limits(options_.limits);
+
     DecodedPacket out;
     out.index = index;
     out.timestamp = static_cast<double>(packet.ts_sec) +

@@ -665,11 +665,13 @@ struct DecodeOptions {
     // just carries this field's default (true) unused, the same "only the few call sites that need
     // it ever populate it" precedent DecodeContext::ip_src_addr already set for IGRP.
     bool redact_secrets = true;
-    // Process-wide overrides for the resource-exhaustion/DoS-protection constants scattered
-    // across decoder.cpp and the individual protocol files -- see resource_limits.hpp for the
-    // full rationale. Default-constructed (every field std::nullopt) means every site keeps its
-    // own compile-time default, byte-identical to this feature's absence. Decoder's constructor
-    // below installs this into the process-wide resource_limits() accessor.
+    // Overrides for the resource-exhaustion/DoS-protection constants scattered across
+    // decoder.cpp and the individual protocol files -- see resource_limits.hpp for the full
+    // rationale. Default-constructed (every field std::nullopt) means every site keeps its own
+    // compile-time default, byte-identical to this feature's absence. Decoder's constructor below
+    // installs this into the calling thread's resource_limits() accessor, and decode() itself
+    // re-installs it via a ScopedResourceLimits guard for the duration of each call -- see both
+    // comments below and resource_limits.hpp's own header comment.
     ResourceLimits limits;
 
     // Attack-detection addition (see attack_detect.hpp's own file header for the full design):
@@ -1230,12 +1232,14 @@ struct TcpFlowBuffer {
 
 class Decoder {
 public:
-    // Installs options.limits into the process-wide resource_limits() accessor before storing
+    // Installs options.limits into the calling thread's resource_limits() accessor before storing
     // options_, so every in-scope constant site (many with no DecodeContext/options access at
-    // all -- see resource_limits.hpp) sees the configured overrides from the very first
-    // decode() call. Safe under this codebase's actual usage pattern: every real entry point
-    // (the three CLI subcommands, every fuzz harness) constructs exactly one Decoder per
-    // process -- see resource_limits.hpp's own comment on set_resource_limits.
+    // all -- see resource_limits.hpp) sees the configured overrides even before the first
+    // decode() call on this thread. decode() itself (decoder.cpp) re-asserts options_.limits via a
+    // ScopedResourceLimits guard at the top of its own body, for the duration of that call only,
+    // which is what actually makes two differently-configured Decoder instances -- interleaved on
+    // one thread or run concurrently on separate threads -- safe: see resource_limits.hpp's header
+    // comment and docs/reviews/2026-09-chatgpt-security-review-patch160.md's finding 5.
     explicit Decoder(DecodeOptions options) : options_(std::move(options)) {
         set_resource_limits(options_.limits);
         attack_state_.flood_threshold = options_.flood_threshold;

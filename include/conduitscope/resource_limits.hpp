@@ -31,6 +31,25 @@
 // packets), a ResourceLimits value is process-run CONFIGURATION -- parsed once from CLI arguments,
 // then read-only for the rest of the process's life -- so a plain, explicitly-named "set once,
 // read anywhere" accessor is the right shape for it, not per-call parameter threading.
+//
+// THREAD-LOCAL, AND SCOPED PER decode() CALL (docs/reviews/2026-09-chatgpt-security-review-
+// patch160.md, finding 5): the accessor below is backed by a `thread_local`, not a plain process-
+// wide `static`, and Decoder::decode() (decoder.hpp/decoder.cpp) wraps its own body in a
+// ScopedResourceLimits guard that re-asserts THIS Decoder instance's own options_.limits into that
+// thread-local storage for the call's duration, restoring whatever was active before on return
+// (including on an exception, via RAII) -- see ScopedResourceLimits below. This closes both
+// failure modes the review's finding names: two differently-configured Decoder instances used on
+// the same thread (its literal `Decoder paranoid_decoder(options_a); Decoder
+// normal_decoder(options_b);` example -- each decode() call now sees only its own instance's
+// limits, regardless of construction or interleaving order) and genuinely concurrent decoding on
+// separate threads (thread_local gives each thread its own storage, so one thread's
+// set_resource_limits/decode() call can never be seen by, or race with, another thread's). The
+// Decoder constructor still calls set_resource_limits(options_.limits) too, for backward
+// compatibility with anything that reads resource_limits() outside of a decode() call on the
+// constructing thread (none of this codebase's own call sites do, but this keeps the accessor's
+// documented "set once, read anywhere" contract intact for a constructed-but-not-yet-decoding
+// Decoder) -- decode()'s own guard is what actually matters for correctness under either failure
+// mode above.
 #pragma once
 
 #include <cstddef>
@@ -103,18 +122,44 @@ struct ResourceLimits {
     std::optional<size_t> max_flow_state_entries;
 };
 
-// Returns the currently active process-wide limits (default-constructed, i.e. every field
-// std::nullopt, until set_resource_limits has been called at least once). Callable from
-// anywhere -- every in-scope constant site reads this directly rather than receiving it as a
-// parameter; see this file's header comment for why.
+// Returns the currently active limits for THIS THREAD (default-constructed, i.e. every field
+// std::nullopt, until set_resource_limits has been called at least once on this thread). Callable
+// from anywhere -- every in-scope constant site reads this directly rather than receiving it as a
+// parameter; see this file's header comment for why. Backed by thread_local storage (see this
+// file's header comment) -- a value set on one thread is never visible to another.
 const ResourceLimits& resource_limits();
 
-// Sets the process-wide active limits, replacing whatever was set before. Called once by
-// Decoder's constructor (decoder.hpp) from the DecodeOptions it was built with -- see that
-// constructor's own comment for why that's the right, single place to call this from. Safe under
-// this codebase's actual usage pattern (every real entry point -- the three CLI subcommands,
-// every fuzz harness -- constructs exactly one Decoder per process); not designed for
-// concurrently running multiple differently-configured Decoders within one process.
+// Sets the active limits for THIS THREAD, replacing whatever was set before on it. Called once by
+// Decoder's constructor (decoder.hpp) from the DecodeOptions it was built with, and again, per
+// call, by ScopedResourceLimits below (what Decoder::decode() actually relies on for correctness
+// -- see this file's header comment). Most callers should use ScopedResourceLimits rather than
+// calling this directly, so the previous value is always restored.
 void set_resource_limits(const ResourceLimits& limits);
+
+// RAII guard: saves the calling thread's currently active resource_limits(), installs `limits` in
+// their place for the guard's lifetime, and restores the saved value on destruction (including via
+// an exception unwinding through it) -- ordinary scope-guard semantics, nothing decoder-specific.
+// Decoder::decode() (decoder.hpp/decoder.cpp) constructs one of these at the very top of its body
+// with its own options_.limits, which is what actually makes two differently-configured Decoder
+// instances -- interleaved on one thread, or run concurrently on separate threads -- each see only
+// their own limits during their own decode() call; see this file's header comment for the full
+// rationale (docs/reviews/2026-09-chatgpt-security-review-patch160.md, finding 5). Nestable, like
+// any save/restore guard: an inner guard's destructor restores the outer guard's value, not the
+// pre-outer-guard value, the same as a stack.
+class ScopedResourceLimits {
+public:
+    explicit ScopedResourceLimits(const ResourceLimits& limits) : previous_(resource_limits()) {
+        set_resource_limits(limits);
+    }
+    ~ScopedResourceLimits() { set_resource_limits(previous_); }
+
+    ScopedResourceLimits(const ScopedResourceLimits&) = delete;
+    ScopedResourceLimits& operator=(const ScopedResourceLimits&) = delete;
+    ScopedResourceLimits(ScopedResourceLimits&&) = delete;
+    ScopedResourceLimits& operator=(ScopedResourceLimits&&) = delete;
+
+private:
+    ResourceLimits previous_;
+};
 
 }  // namespace conduitscope

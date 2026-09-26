@@ -9943,6 +9943,92 @@ deferred future migration.
     confirming no decoded value anywhere in the existing fixture set
     changed as a result of the accumulator's type change).
 
+61. **`ResourceLimits` is process-global mutable state
+    (`docs/reviews/2026-09-chatgpt-security-review-patch160.md`, finding
+    5).** **Fixed.** The review's own words: the CLI-configurable
+    resource-limit overrides (`resource_limits.hpp`) lived in a plain
+    process-wide `static ResourceLimits limits;`, set once by `Decoder`'s
+    constructor from its `DecodeOptions`. "That's acceptable for the CLI
+    ... it's less good for the core library. A future application could
+    quite reasonably do: `Decoder paranoid_decoder(options_a); Decoder
+    normal_decoder(options_b);` ... [t]hen the decoders race over the same
+    global configuration" -- and the same is true, worse, if two
+    `Decoder`s are used concurrently from separate threads. The review
+    marked this technical debt rather than an immediate vulnerability,
+    since this codebase's own real entry points (the three CLI
+    subcommands, every fuzz harness) each construct exactly one `Decoder`
+    per process -- but it's a real landmine for any future embedder of
+    `conduitscope_core` as a library, which is exactly the audience the
+    review is written for.
+
+    Fixed with two changes, neither touching any of the ~90 existing
+    `resource_limits()` call sites across the decoder files:
+
+    - `resource_limits.cpp`'s function-local `static ResourceLimits
+      limits;` becomes `static thread_local ResourceLimits limits;` --
+      each thread now gets its own independent storage, so one thread's
+      `set_resource_limits()`/`resource_limits()` calls can never be seen
+      by, or race with, another thread's. This alone fixes genuine
+      cross-thread concurrency, but not same-thread interleaving of two
+      differently-configured `Decoder` instances (the review's own
+      literal example above) -- both instances would still share one
+      thread's thread-local storage.
+    - A new RAII guard, `ScopedResourceLimits` (`resource_limits.hpp`):
+      saves the calling thread's currently active `resource_limits()`,
+      installs a new value, and restores the saved value on destruction
+      (including via an exception unwinding through it) -- ordinary
+      save/restore scope-guard semantics. `Decoder::decode()`
+      (`decoder.cpp`) now constructs one of these at the very top of its
+      own body, with its own `options_.limits`, so every single
+      `decode()` call re-asserts THAT instance's own limits for the
+      call's duration only, regardless of what any other `Decoder`
+      instance -- constructed before or after, on this thread or another
+      -- left in thread-local storage. This is what actually closes the
+      review's example: `paranoid_decoder.decode(...)` and
+      `normal_decoder.decode(...)` each see only their own configured
+      limits, in any construction or interleaving order, on one thread or
+      many. The constructor's own `set_resource_limits(options_.limits)`
+      call stays, for backward compatibility with anything that reads
+      `resource_limits()` on the constructing thread outside of a
+      `decode()` call (nothing in this codebase does, but it keeps the
+      accessor's "set once, read anywhere" contract intact for a
+      constructed-but-not-yet-decoding `Decoder`); `decode()`'s own guard
+      is what actually matters for correctness under either failure mode
+      the review names.
+
+    New regression test: `tools/resource_limits_selftest.cpp`, wired into
+    `CMakeLists.txt` as its own always-built CTest case
+    (`resource_limits_scoping_self_test`), the same "small standalone
+    executable, no opt-in flag" posture as `crypto_selftest`/
+    `protocol_result_selftest` -- necessary here because the scenario
+    being guarded against (multiple `Decoder` instances sharing one
+    process) can never be constructed by any `conduitscope` CLI
+    invocation at all, so no CLI-driven CTest case could exercise it
+    either. Reuses `tests/sample_dnp3.pcap`'s packet #3 (the same DNP3
+    Response frame the existing `max_decoded_objects_dnp3_truncates_headers_and_points`
+    CLI test already relies on -- two object headers, point values capped
+    cumulatively across both: 4 total at the unset/default cap, 1 when
+    `max_decoded_objects` is overridden to 1) as a real fixture whose
+    truncate-vs-don't-truncate difference proves which `Decoder`'s own
+    limit was actually in effect during its own `decode()` call. Twelve
+    checks: the review's own example reproduced directly (two `Decoder`s,
+    interleaved `decode()` calls, each seeing only its own limit,
+    regardless of interleaving order); the same with construction order
+    reversed (proving it isn't just "last constructor wins" in a
+    different disguise); `ScopedResourceLimits` restoring the value that
+    was actually active before its own call, not some other decoder's;
+    and genuine cross-thread concurrency (two real `std::thread`s, 2,000
+    interleaved `decode()` calls each on differently-configured
+    `Decoder` instances, asserting every single call saw only its own
+    thread's own limit).
+
+    Verification: rebuilt both the default and
+    `-DCONDUITSCOPE_ENABLE_FUZZING=ON` configs clean, zero new warnings.
+    All twelve new checks pass. Full CTest suite: default build 1971/1971
+    (1970 plus the one new self-test), sanitizer-enabled build 2047/2047
+    (2046 plus the one new self-test) -- zero regressions elsewhere in
+    either config, including all 76 `fuzz_*_corpus_regression` entries.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols
