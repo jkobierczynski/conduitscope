@@ -1175,9 +1175,10 @@ constexpr int kExitBaselineAnomaly = 4;
 // already reviewed and trusted to be clean (see the design doc's own baseline-poisoning caveat),
 // which a live interface can't offer the same "already looked at this" assurance for.
 int run_baseline_learn(const std::vector<std::string>& inputs, const std::string& baseline_file, bool strict,
-                        bool quiet, const ResourceLimitCliVars& limit_vars, std::ostream& diag) {
+                        bool quiet, const ResourceLimitCliVars& limit_vars, size_t max_baseline_file_bytes,
+                        std::ostream& diag) {
     try {
-        BaselineStore store = load_baseline_store(baseline_file);
+        BaselineStore store = load_baseline_store(baseline_file, max_baseline_file_bytes);
 
         DecodeOptions options;
         options.strict = strict;
@@ -1250,7 +1251,7 @@ int run_baseline_learn(const std::vector<std::string>& inputs, const std::string
 int run_baseline_check(const std::string& input, const std::string& baseline_file, const std::string& output,
                         const std::string& format, bool strict, bool symbolic_addresses,
                         const std::string& policy_path, bool quiet, const ResourceLimitCliVars& limit_vars,
-                        std::ostream& diag) {
+                        size_t max_baseline_file_bytes, std::ostream& diag) {
     std::ofstream file_out;
     std::ostream* out = &std::cout;
     if (!output.empty()) {
@@ -1263,7 +1264,7 @@ int run_baseline_check(const std::string& input, const std::string& baseline_fil
     }
 
     try {
-        BaselineStore store = load_baseline_store(baseline_file);
+        BaselineStore store = load_baseline_store(baseline_file, max_baseline_file_bytes);
 
         // Only parsed when given -- see this function's own doc comment above for why an absent
         // --policy must never even construct a Policy, let alone reach check_baseline with one.
@@ -2055,10 +2056,18 @@ int main(int argc, char** argv) {
     std::vector<std::string> baseline_learn_inputs;
     bool baseline_learn_strict = false;
     ResourceLimitCliVars baseline_learn_limit_vars;
+    size_t baseline_learn_max_file_bytes = 0;
     baseline_learn_cmd
         ->add_option("--baseline-file", baseline_learn_file,
                       "Baseline JSON file to read (if it exists) and write back. Required")
         ->required();
+    baseline_learn_cmd
+        ->add_option("--max-baseline-file-bytes", baseline_learn_max_file_bytes,
+                      "Cap how large --baseline-file may be before it's read into memory (default "
+                      "256 MiB). 0 = leave it at its own default; a baseline file this large "
+                      "genuinely being legitimate is essentially always a sign something else is "
+                      "wrong (see docs/DEVELOPMENT.md's security review write-up)")
+        ->capture_default_str();
     baseline_learn_cmd
         ->add_option("captures", baseline_learn_inputs,
                       "One or more pcap/pcapng capture files to learn from, in order (classic "
@@ -2079,10 +2088,18 @@ int main(int argc, char** argv) {
     bool baseline_check_strict = false;
     bool baseline_check_symbolic_addresses = false;
     ResourceLimitCliVars baseline_check_limit_vars;
+    size_t baseline_check_max_file_bytes = 0;
     baseline_check_cmd
         ->add_option("--baseline-file", baseline_check_file, "Baseline JSON file to check against. Required")
         ->required()
         ->check(CLI::ExistingFile);
+    baseline_check_cmd
+        ->add_option("--max-baseline-file-bytes", baseline_check_max_file_bytes,
+                      "Cap how large --baseline-file may be before it's read into memory (default "
+                      "256 MiB). 0 = leave it at its own default; a baseline file this large "
+                      "genuinely being legitimate is essentially always a sign something else is "
+                      "wrong (see docs/DEVELOPMENT.md's security review write-up)")
+        ->capture_default_str();
     baseline_check_cmd
         ->add_option("capture", baseline_check_input,
                       "The pcap/pcapng capture file to check (classic pcap or pcapng, auto-detected)")
@@ -2218,12 +2235,17 @@ int main(int argc, char** argv) {
     }
     if (baseline_learn_cmd->parsed()) {
         return run_baseline_learn(baseline_learn_inputs, baseline_learn_file, baseline_learn_strict, quiet,
-                                   baseline_learn_limit_vars, *diag);
+                                   baseline_learn_limit_vars,
+                                   baseline_learn_max_file_bytes != 0 ? baseline_learn_max_file_bytes
+                                                                      : kDefaultMaxBaselineFileBytes,
+                                   *diag);
     }
     if (baseline_check_cmd->parsed()) {
         return run_baseline_check(baseline_check_input, baseline_check_file, baseline_check_output,
                                    baseline_check_format, baseline_check_strict, baseline_check_symbolic_addresses,
                                    baseline_check_policy_file, quiet, baseline_check_limit_vars,
+                                   baseline_check_max_file_bytes != 0 ? baseline_check_max_file_bytes
+                                                                      : kDefaultMaxBaselineFileBytes,
                                    *diag);
     }
     if (baseline_cmd->parsed()) {

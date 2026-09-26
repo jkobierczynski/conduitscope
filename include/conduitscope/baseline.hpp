@@ -206,14 +206,30 @@ void write_baseline_store_json(std::ostream& out, const BaselineStore& store);
 // policy YAML file yaml_mini.hpp parses).
 BaselineStore parse_baseline_store_json(const std::string& text);
 
+// Compiled-in default for load_baseline_store's own max_file_bytes parameter below. Fixes
+// docs/reviews/2026-09-chatgpt-security-review-patch209.md's finding 5 (item 68,
+// docs/DEVELOPMENT.md): before this, load_baseline_store read an arbitrarily large file
+// completely into memory -- `std::ostringstream buf; buf << in.rdbuf();` -- with no ceiling at
+// all, before parse_baseline_store_json() ever had a chance to reject its structure. A baseline
+// file is a local trust boundary, not wire-reachable the way a pcap is (the operator explicitly
+// points the tool at it with --baseline-file), so this is P2/hardening rather than P0/P1 -- but a
+// corrupted, truncated, or maliciously substituted baseline file (plausible exactly where this
+// tool is meant to be used: baseline files passed around a team or checked into a shared repo) can
+// still exhaust memory before any parsing/validation happens. Sized generously enough that no
+// legitimate baseline file -- even a large, multi-year, multi-thousand-conduit one -- should ever
+// approach it; only a file engineered or corrupted to be far larger should ever hit it.
+inline constexpr size_t kDefaultMaxBaselineFileBytes = 256u * 1024u * 1024u;  // 256 MiB
+
 // Reads and parses the baseline file at `path`. Returns a fresh, empty BaselineStore
 // (schema_version 1, no conduits) when `path` does not exist yet -- `learn`'s own "reads the file
 // if present, merges, always writes it back" contract (see this file's own header comment) needs a
 // first-run starting point that isn't an error. Throws BaselineStoreError if `path` exists but
-// can't be opened, or its content doesn't parse (see parse_baseline_store_json), and
-// BaselineStoreError as well (not a separate error type) if the file declares a schema_version this
-// build doesn't understand (only 1 exists today).
-BaselineStore load_baseline_store(const std::string& path);
+// can't be opened, its size exceeds `max_file_bytes` (checked BEFORE the file is read into memory
+// -- see kDefaultMaxBaselineFileBytes above), or its content doesn't parse (see
+// parse_baseline_store_json), and BaselineStoreError as well (not a separate error type) if the
+// file declares a schema_version this build doesn't understand (only 1 exists today).
+BaselineStore load_baseline_store(const std::string& path,
+                                   size_t max_file_bytes = kDefaultMaxBaselineFileBytes);
 
 // Writes `store` to `path` as JSON (write_baseline_store_json). Throws BaselineStoreError if the
 // file can't be opened for writing.

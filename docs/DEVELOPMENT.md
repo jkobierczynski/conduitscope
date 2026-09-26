@@ -10546,7 +10546,59 @@ deferred future migration.
     OT/ICS tooling, baseline files passed around a team or checked
     into a shared repo) can still exhaust memory before
     `parse_baseline_store_json()` has any chance to reject its
-    structure. **Not yet fixed.** See the priority list below.
+    structure. **Fixed.** `load_baseline_store()` (`baseline.cpp`) now
+    checks the file's size (`seekg(0, end)`/`tellg()` on the already-
+    open `ifstream` -- no `<filesystem>` dependency needed for one call
+    site) and throws `BaselineStoreError` if it exceeds a ceiling,
+    BEFORE the `std::ostringstream buf; buf << in.rdbuf();` read that
+    used to happen unconditionally:
+    ```cpp
+    in.seekg(0, std::ios::end);
+    std::streamoff size = in.tellg();
+    if (size < 0) {
+        throw BaselineStoreError("baseline file '" + path + "': read error (could not determine size)");
+    }
+    if (static_cast<size_t>(size) > max_file_bytes) {
+        throw BaselineStoreError("baseline file '" + path + "': " + std::to_string(size) +
+                                  " byte(s) exceeds the " + std::to_string(max_file_bytes) +
+                                  " byte limit (--max-baseline-file-bytes to override)");
+    }
+    in.seekg(0, std::ios::beg);
+    ```
+    The ceiling is `kDefaultMaxBaselineFileBytes` (`baseline.hpp`, 256
+    MiB) unless overridden -- `load_baseline_store()` gained a second,
+    defaulted parameter (`max_file_bytes = kDefaultMaxBaselineFileBytes`),
+    and both `baseline learn`/`baseline check` gained their own new
+    `--max-baseline-file-bytes` CLI option (registered only on those
+    two subcommands, not the shared `ResourceLimitCliVars`/
+    `add_resource_limit_options` struct the five packet-decode-time
+    budgets use -- a baseline file's on-disk size is a conceptually
+    different kind of limit from "cost of any one flow/reassembly/
+    message" or "how many distinct flows/sessions," so it gets its own
+    dedicated flag rather than being bundled in), following the same
+    "0 = leave it at its own default" sentinel convention every other
+    `--max-*` flag already uses. A truncated/corrupted file that's
+    already past the ceiling is rejected outright rather than read and
+    then failed by `parse_baseline_store_json()`'s own schema checks --
+    there is no partial-success case worth preserving, since a cut-off
+    JSON document never balances its own braces/brackets anyway.
+    256 MiB was sized generously enough that no legitimate baseline
+    file -- even a large, multi-year, multi-thousand-conduit one --
+    should ever approach it; only a file engineered or corrupted to be
+    far larger than that should ever hit it. Verified via three new
+    CTest cases (`baseline_max_file_bytes_learn_rejects_oversized_file`,
+    `baseline_max_file_bytes_check_rejects_oversized_file`,
+    `baseline_max_file_bytes_default_does_not_reject_a_normal_file`):
+    a real 256 MiB+ fixture isn't practical to check into this repo, so
+    these prove the enforcement path itself with a deliberately tiny
+    1-byte override against a normal small baseline file (guaranteed
+    smaller than any real content, so this tests the size-ceiling check
+    firing correctly rather than some coincidental fixture-size
+    boundary), plus confirm the actual 256 MiB default doesn't reject
+    that same ordinary file. Full CTest suite unaffected otherwise
+    (1962/1962 default, 2038/2038 sanitizer-enabled -- both up by
+    exactly 3, the new tests, zero regressions elsewhere), zero-warning
+    rebuild in both configs plus a clean MinGW-w64 cross-compile.
 
 **Priority list for items 64-68 above** (independently assessed against
 actual source, not a restatement of the review's own P0-P3 labels --
@@ -10574,7 +10626,9 @@ reasoning stated inline):
   fixed** -- a structurally different subsystem, still open.
 - **P2 -- hardening, worth doing but not urgent:** item 68 (baseline
   file-size ceiling -- a local, operator-supplied trust boundary, not
-  remotely reachable). **Not yet fixed.**
+  remotely reachable). **Fixed** (see item 68 above for the new
+  `--max-baseline-file-bytes`/`kDefaultMaxBaselineFileBytes` ceiling
+  and its verification).
 - **Not prioritized as a resource-exhaustion fix, optional tidy-up
   only:** item 67 (registry flow-state counting). The review's own
   complexity analysis doesn't hold once `std::unordered_map::size()`'s
@@ -10583,10 +10637,10 @@ reasoning stated inline):
   scan) that can be picked up opportunistically rather than scheduled
   as its own priority item. **Not yet fixed** (and not urgent).
 
-Item 66 (P0) and item 65 (P1, the flow/flow-state default-ceiling half)
-are implemented; items 64 (P1, baseline engine bounds), 68 (P2), and 67
-(tidy-up) have not been -- ping when you want the next one done as its
-own patch.
+Item 66 (P0), item 65 (P1, the flow/flow-state default-ceiling half),
+and item 68 (P2) are implemented; item 64 (P1, baseline engine bounds)
+and item 67 (tidy-up) have not been -- ping when you want the next one
+done as its own patch.
 
 ### Protocols not covered at all
 

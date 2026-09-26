@@ -13072,6 +13072,39 @@ add_test(NAME baseline_learn_creates_a_new_baseline_file
 set_tests_properties(baseline_learn_creates_a_new_baseline_file PROPERTIES
   PASS_REGULAR_EXPRESSION "\"schema_version\": 1,\n *\"conduits\": \\[\n *\\{\n *\"client_ip\": \"192\\.168\\.1\\.50\"")
 
+# Item 68 (docs/DEVELOPMENT.md; finding 5, docs/reviews/2026-09-chatgpt-security-review-
+# patch209.md): load_baseline_store now rejects a baseline file larger than --max-baseline-
+# file-bytes BEFORE reading it into memory, rather than reading an arbitrarily large file
+# unconditionally. A real 256 MiB+ fixture isn't practical to check into this repo, so this proves
+# the enforcement path itself by learning a normal, small baseline file first, then pointing
+# `learn`/`check` at it with a deliberately tiny override (1 byte) -- guaranteed to be smaller than
+# any real baseline file's content, so this only tests the size-ceiling check firing correctly, not
+# some coincidental fixture-size boundary. Each test below is fully self-contained (its own
+# freshly (re-)learned baseline file, own filename) rather than depending on another test's file --
+# this codebase has no CTest DEPENDS precedent anywhere else, and ctest -j runs tests in parallel by
+# default, so sharing one file across separate add_test entries would be a real race. No
+# WILL_FAIL on any of these: PASS_REGULAR_EXPRESSION alone already determines pass/fail regardless
+# of exit code (see notable_protocols_strict_it_protocols_flips_exit_code's own comment above for
+# why combining the two would invert the assertion), matching baseline_check_missing_baseline_
+# file_is_an_error's own precedent for a deliberately-failing baseline command.
+add_test(NAME baseline_max_file_bytes_learn_rejects_oversized_file
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_max_bytes_learn.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_max_bytes_learn.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_max_bytes_learn.json' --max-baseline-file-bytes 1 '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap'")
+set_tests_properties(baseline_max_file_bytes_learn_rejects_oversized_file PROPERTIES
+  PASS_REGULAR_EXPRESSION "baseline file '.*baseline_max_bytes_learn\\.json': [0-9]+ byte\\(s\\) exceeds the 1 byte limit \\(--max-baseline-file-bytes to override\\)")
+
+add_test(NAME baseline_max_file_bytes_check_rejects_oversized_file
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_max_bytes_check.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_max_bytes_check.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap' && '$<TARGET_FILE:conduitscope>' baseline check --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_max_bytes_check.json' --max-baseline-file-bytes 1 '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap'")
+set_tests_properties(baseline_max_file_bytes_check_rejects_oversized_file PROPERTIES
+  PASS_REGULAR_EXPRESSION "baseline file '.*baseline_max_bytes_check\\.json': [0-9]+ byte\\(s\\) exceeds the 1 byte limit \\(--max-baseline-file-bytes to override\\)")
+
+# The default (no --max-baseline-file-bytes at all) must NOT reject that same small, legitimate
+# file -- proves kDefaultMaxBaselineFileBytes (256 MiB) is generous enough for ordinary use, not
+# just that the override mechanism works.
+add_test(NAME baseline_max_file_bytes_default_does_not_reject_a_normal_file
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_max_bytes_default.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_max_bytes_default.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap' && '$<TARGET_FILE:conduitscope>' baseline check --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_max_bytes_default.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap'")
+set_tests_properties(baseline_max_file_bytes_default_does_not_reject_a_normal_file PROPERTIES
+  PASS_REGULAR_EXPRESSION "Result: CLEAN")
+
 # ---------------------------------------------------------------------------------------------
 # S7comm bit-level range tracking + `baseline check --symbolic-addresses` (small follow-up to
 # Phase 1/Phase 2 above, docs/design/baseline-engine.md's own "Follow-up" section): a BIT-transport-

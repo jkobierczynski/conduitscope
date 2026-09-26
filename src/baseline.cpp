@@ -1521,13 +1521,31 @@ BaselineStore parse_baseline_store_json(const std::string& text) {
 // load/save -- file I/O around the (de)serialization above.
 // --------------------------------------------------------------------------------------------
 
-BaselineStore load_baseline_store(const std::string& path) {
+BaselineStore load_baseline_store(const std::string& path, size_t max_file_bytes) {
     std::ifstream in(path, std::ios::binary);
     if (!in) {
         // "reads the file if present" -- a missing file is a fresh, empty baseline, not an error
         // (see this function's own comment, baseline.hpp).
         return BaselineStore{};
     }
+    // Size ceiling BEFORE reading anything into memory (finding 5, docs/reviews/2026-09-chatgpt-
+    // security-review-patch209.md; item 68, docs/DEVELOPMENT.md) -- seek-to-end/tellg rather than
+    // std::filesystem::file_size since `in` is already open and this codebase has no other
+    // <filesystem> dependency to introduce for one call site. A size this large is rejected
+    // outright rather than truncated-and-parsed: a truncated baseline file would fail
+    // parse_baseline_store_json's own schema checks anyway (a cut-off JSON document never
+    // balances its braces/brackets), so there is no partial-success case worth preserving here.
+    in.seekg(0, std::ios::end);
+    std::streamoff size = in.tellg();
+    if (size < 0) {
+        throw BaselineStoreError("baseline file '" + path + "': read error (could not determine size)");
+    }
+    if (static_cast<size_t>(size) > max_file_bytes) {
+        throw BaselineStoreError("baseline file '" + path + "': " + std::to_string(size) +
+                                  " byte(s) exceeds the " + std::to_string(max_file_bytes) +
+                                  " byte limit (--max-baseline-file-bytes to override)");
+    }
+    in.seekg(0, std::ios::beg);
     std::ostringstream buf;
     buf << in.rdbuf();
     if (!in.good() && !in.eof()) {
