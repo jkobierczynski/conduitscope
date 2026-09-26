@@ -221,7 +221,32 @@ std::string cip_type_display_name(uint16_t type_code) {
     if (cip_type_is_structured(type_code)) {
         return "Structured Data Type (" + hex4(type_code) + ")";
     }
-    static const std::pair<uint16_t, const char*> kNames[] = {
+    // A plain {code, name} aggregate, not std::pair<uint16_t, const char*> -- MSVC's real /W4
+    // build (Jurgen's own report, not reproducible in this Linux sandbox) flags every entry
+    // below with C4244 ("conversion from 'int' to 'uint16_t', possible loss of data") when this
+    // was a std::pair array: each `{0xC1, "BOOL"}` calls std::pair's converting constructor
+    // template with _Other1 deduced as plain `int` (every one of these hex literals is an int
+    // literal, since none of them needs more than 8 bits and C++ never infers a narrower integer
+    // type from a literal's value), and that constructor direct-initializes its uint16_t `first`
+    // member from an `int&&` INSIDE the constructor body -- not through the braces the caller
+    // wrote. The braced-init narrowing-conversion exception (a constant expression that
+    // demonstrably fits the target type is exempt from the usual narrowing diagnostic) only
+    // applies to list-initialization actually performed at the braces the compiler sees; a
+    // constructor call one level down, even a compiler-generated converting one, doesn't count,
+    // so MSVC has no way to know every one of these literals fits in 16 bits and warns on all of
+    // them. A local aggregate struct sidesteps this entirely: {0xC1, "BOOL"} then
+    // list-initializes CipTypeName's own uint16_t member directly, at the braces the compiler can
+    // see, so the constant-fits exception applies and there is nothing to warn about. (This is
+    // the only static array in the whole codebase keyed by anything narrower than uint32_t and
+    // initialized from hex literals this way -- confirmed by grepping the rest of the source tree
+    // for the same std::pair<uint8_t|uint16_t, ...> shape -- so this is the only site that needs
+    // it; the many similar-looking uint32_t-keyed tables elsewhere, e.g. bacnet.cpp's, don't hit
+    // this because int -> uint32_t is same-width and isn't the kind of conversion C4244 flags.)
+    struct CipTypeName {
+        uint16_t code;
+        const char* name;
+    };
+    static const CipTypeName kNames[] = {
         {0xC1, "BOOL"},         {0xC2, "SINT"},   {0xC3, "INT"},          {0xC4, "DINT"},
         {0xC5, "LINT"},         {0xC6, "USINT"},  {0xC7, "UINT"},         {0xC8, "UDINT"},
         {0xC9, "ULINT"},        {0xCA, "REAL"},   {0xCB, "LREAL"},        {0xCC, "STIME"},
@@ -232,7 +257,7 @@ std::string cip_type_display_name(uint16_t type_code) {
         {0xDD, "ENGUNIT"},      {0xDE, "STRINGI"},
     };
     for (const auto& kv : kNames) {
-        if (kv.first == type_code) return kv.second;
+        if (kv.code == type_code) return kv.name;
     }
     return "Unknown (" + hex4(type_code) + ")";
 }

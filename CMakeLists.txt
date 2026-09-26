@@ -288,14 +288,19 @@ add_test(NAME protocol_result_type_safety_self_test COMMAND protocol_result_self
 
 # --------------------------------------------------------------------------------------------
 # ResourceLimits scoping self-test -- see tools/resource_limits_selftest.cpp's own file header for
-# the full rationale (finding 5, docs/reviews/2026-09-chatgpt-security-review-patch160.md:
-# ResourceLimits used to be plain process-global mutable state -- two differently-configured
-# Decoder instances, interleaved on one thread or run concurrently on separate threads, would
-# race over the same global configuration). Same "always built, no opt-in flag" posture as
-# crypto_selftest/protocol_result_selftest above -- the scenario this guards against (multiple
-# Decoder instances sharing one process) can never be constructed by any CLI invocation (the CLI
-# itself only ever builds one Decoder per process), so no CLI-driven CTest case could exercise it
-# either; a dedicated small executable is the only way.
+# the full rationale (checks 1-4: finding 5, docs/reviews/2026-09-chatgpt-security-review-
+# patch160.md: ResourceLimits used to be plain process-global mutable state -- two differently-
+# configured Decoder instances, interleaved on one thread or run concurrently on separate threads,
+# would race over the same global configuration. checks 5-6: finding 3, docs/reviews/2026-09-
+# chatgpt-security-review-patch209.md: max_active_flows=0/max_flow_state_entries=0 is now
+# normalized to "no cap" by set_resource_limits, rather than the old undefined behavior/cap-
+# violating-by-one-entry each caused). Same "always built, no opt-in flag" posture as
+# crypto_selftest/protocol_result_selftest above -- the scenarios these guard against can never be
+# constructed through the `conduitscope` CLI itself (it only ever builds one Decoder per process,
+# and its own build_resource_limits already maps a `--max-active-flows 0`/`--max-flow-state-
+# entries 0` argument to "flag not passed" before a ResourceLimits value is ever built), so no
+# CLI-driven CTest case could exercise either; a dedicated small executable against the library API
+# directly is the only way.
 # --------------------------------------------------------------------------------------------
 add_executable(resource_limits_selftest tools/resource_limits_selftest.cpp)
 # The only target in this build that uses std::thread directly (check 4's genuine cross-thread
@@ -305,7 +310,10 @@ find_package(Threads REQUIRED)
 target_link_libraries(resource_limits_selftest PRIVATE conduitscope_core Threads::Threads)
 
 add_test(NAME resource_limits_scoping_self_test
-  COMMAND resource_limits_selftest "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap")
+  COMMAND resource_limits_selftest
+          "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap"
+          "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_resource_exhaustion_active_flows.pcap"
+          "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_resource_exhaustion_flow_state.pcap")
 
 # --------------------------------------------------------------------------------------------
 # Optional libFuzzer harnesses (fuzz/) -- see fuzz/README.md and docs/DEVELOPMENT.md's "External

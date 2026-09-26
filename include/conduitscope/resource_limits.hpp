@@ -107,6 +107,17 @@ struct ResourceLimits {
     // std::nullopt (the default) leaves the map genuinely unbounded in entry COUNT, same as every
     // other field here when unset -- but see decoder.cpp's own comment: the "don't retain empty
     // entries" half of the fix already applies unconditionally, cap configured or not.
+    //
+    // A value of exactly 0 is normalized to std::nullopt (no cap) by set_resource_limits() before
+    // it is ever stored -- see that function's own comment (resource_limits.cpp) for why: both
+    // this field and max_flow_state_entries below are enforced by evicting an EXISTING entry to
+    // make room for a new one, which is meaningless -- and, for this field's own enforcement in
+    // Decoder::reassemble_tcp_payload, was undefined behavior (erasing tcp_reassembly_.begin()
+    // from an already-empty map) -- when literally zero entries may ever exist (docs/reviews/
+    // 2026-09-chatgpt-security-review-patch209.md, finding 3). This mirrors, and now extends to
+    // every caller of this struct (not just the CLI), cli_main.cpp's own pre-existing convention
+    // of treating a `--max-active-flows 0` argument as "flag not passed." A caller that genuinely
+    // wants as close to zero active flows as possible should pass 1, not 0.
     std::optional<size_t> max_active_flows;
 
     // Bounds the TOTAL entry count summed across every protocol's own map inside
@@ -119,6 +130,13 @@ struct ResourceLimits {
     // LDAP session's own state is meant to persist for the connection's whole life), so this is a
     // pure ceiling rather than a "don't create it in the first place" fix. std::nullopt (the
     // default) leaves it unbounded, same as every other field here.
+    //
+    // Same 0-means-nullopt normalization as max_active_flows above, and for the identical reason:
+    // DecodeContext::flow_state<T>()'s own enforcement (protocol_decoder.hpp) has no undefined
+    // behavior at cap==0 (its eviction loop is guarded by `if (!inner.empty())` per bucket), but
+    // it silently inserted a new entry past a configured zero cap anyway -- a real correctness bug
+    // fixed the same way as max_active_flows's UB, by never letting either enforcement path
+    // observe a cap of exactly 0 in the first place (finding 3, same review as above).
     std::optional<size_t> max_flow_state_entries;
 };
 

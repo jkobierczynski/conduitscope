@@ -10219,9 +10219,100 @@ deferred future migration.
     directly with an explicit `max_active_flows = 0` (bypassing the
     CLI's own 0-means-unset convention) can hit this. Real bug,
     correctly scoped by the review as "not CLI-reachable but
-    API-reachable." **Not yet fixed.** This is the highest-priority
-    item in the list below, since it's the one entry in this review
-    that's genuine undefined behavior rather than a hardening gap.
+    API-reachable." **Fixed.** This was the highest-priority item in
+    this batch, since it's the one entry in this review that's genuine
+    undefined behavior rather than a hardening gap.
+
+    Fixed centrally, at `set_resource_limits()` (`resource_limits.cpp`)
+    -- the single function every path that ever populates the
+    thread-local `ResourceLimits` actually goes through (`Decoder`'s
+    constructor, `ScopedResourceLimits`'s constructor/destructor, and
+    any direct library/API caller) -- rather than patching
+    `decoder.cpp`'s and `protocol_decoder.hpp`'s two enforcement sites
+    separately:
+    ```cpp
+    void set_resource_limits(const ResourceLimits& limits) {
+        ResourceLimits normalized = limits;
+        if (normalized.max_active_flows && *normalized.max_active_flows == 0) {
+            normalized.max_active_flows.reset();
+        }
+        if (normalized.max_flow_state_entries && *normalized.max_flow_state_entries == 0) {
+            normalized.max_flow_state_entries.reset();
+        }
+        mutable_resource_limits() = normalized;
+    }
+    ```
+    A configured `max_active_flows`/`max_flow_state_entries` of exactly
+    `0` is now normalized to `std::nullopt` (no cap) the moment it's
+    set, so `resource_limits().max_active_flows`/
+    `.max_flow_state_entries` can never report a literal `0` to
+    either enforcement site -- `decoder.cpp`'s `if (auto cap =
+    resource_limits().max_active_flows)` and `protocol_decoder.hpp`'s
+    equivalent for `max_flow_state_entries` simply never enter their
+    own `if` block at all when the configured value was `0`, which
+    closes both the UB (nothing ever calls `.erase(.begin())` on an
+    empty map on this path) and the registry-side correctness bug
+    (nothing ever inserts "past" a zero cap, because there's no longer
+    a cap to violate) without touching either enforcement site's own
+    code. This is exactly the review's own suggested fix ("Zero means
+    unlimited: preserve the existing CLI convention, but never pass a
+    zero-valued optional cap into the enforcement code"), now applied
+    library-wide rather than only at the CLI boundary --
+    `cli_main.cpp`'s own `build_resource_limits()` already treated a
+    `--max-active-flows 0` argument this way; this makes it the same
+    guarantee for every caller of `ResourceLimits`, not only the CLI.
+    Every other `ResourceLimits` field (the five "cap a single COST"
+    fields, none of which share this "evict to enforce a COUNT"
+    shape) is left completely untouched by this normalization --
+    `resource_limits.hpp`'s own comments on both fields now document
+    the 0-means-nullopt convention directly, so a future reader
+    doesn't have to rediscover it from `resource_limits.cpp`.
+
+    New regression coverage: `tools/resource_limits_selftest.cpp`
+    (the same standalone CTest executable item 61 above added, for
+    the identical reason -- this scenario can't be constructed through
+    the `conduitscope` CLI at all, since `build_resource_limits()`
+    already maps a CLI value of `0` to "flag not passed" before a
+    `ResourceLimits` is ever built, so no CLI-driven CTest case could
+    exercise either the old bug or this fix) gained two more checks.
+    The first confirms the normalization directly against
+    `resource_limits()`: an explicit `max_active_flows =
+    0`/`max_flow_state_entries = 0` reads back as `std::nullopt`,
+    while an explicit `= 1` is left alone (proving the normalization
+    is specific to exactly `0`, not an off-by-one that would also
+    clobber a real small cap). The second replays the same two
+    fixtures the existing CLI-driven `max_active_flows_evicts_other_
+    flow_entry`/`max_flow_state_entries_evicts_other_session_state`
+    tests already use (`tests/sample_resource_exhaustion_active_
+    flows.pcap`'s two distinct in-progress TCP reassemblies;
+    `tests/sample_resource_exhaustion_flow_state.pcap`'s two distinct
+    Modbus sessions), this time through a `Decoder` configured with an
+    explicit `max_active_flows = 0`/`max_flow_state_entries = 0` via
+    the library API directly (never reachable through the CLI) --
+    proving both that decoding no longer crashes (the actual
+    regression target: this is what would have hit the erase-from-an-
+    empty-map UB before the fix, especially meaningful under the
+    sanitizer-enabled build, which would otherwise report it directly)
+    and that the normalized zero cap behaves exactly like an unset
+    cap (both flows'/sessions' state coexist, with no eviction note
+    and no "no outstanding request found" mispairing).
+
+    Verification: rebuilt both the default and
+    `-DCONDUITSCOPE_ENABLE_FUZZING=ON` configs clean, zero new
+    warnings. All 18 checks in `resource_limits_selftest` pass in both
+    configs, including under ASan/UBSan (no sanitizer diagnostic of
+    any kind, confirming the erase-from-an-empty-map UB is genuinely
+    gone, not merely un-triggered by these particular inputs). Full
+    CTest suite: default build 1971/1971, sanitizer-enabled build
+    2047/2047 -- unchanged from item 61's own figures, since this adds
+    checks to an existing always-built self-test rather than new
+    top-level CTest cases -- zero regressions elsewhere in either
+    config, including all 76 `fuzz_*_corpus_regression` entries and
+    the pre-existing `max_active_flows_evicts_other_flow_entry`/
+    `max_flow_state_entries_evicts_other_session_state`/`*_unset_*`
+    CLI-driven tests (confirming the nonzero-cap and unset-cap
+    behaviors this fix must not disturb are both still exactly as
+    they were).
 
 67. **Registry flow-state cap enforcement recomputes the total on
     every insert -- reviewed as "quadratic work," but the actual cost
@@ -10298,13 +10389,13 @@ actual source, not a restatement of the review's own P0-P3 labels --
 severities above and below sometimes diverge from the review's, with the
 reasoning stated inline):
 
-- **P0 -- fix next:** item 66 (`--max-active-flows`/`max_flow_state_entries`
-  zero-cap UB and the related registry-cap correctness bug). This is the
-  one item in this batch that's genuine undefined behavior rather than
-  a hardening gap, even though it's only reachable via direct library/API
-  use today, not the CLI -- UB is UB regardless of how hard it currently
-  is to trigger, and the fix is small and self-contained (define zero
-  consistently at the boundary, add zero/one/max regression tests).
+- **P0 -- Fixed.** Item 66 (`--max-active-flows`/`max_flow_state_entries`
+  zero-cap UB and the related registry-cap correctness bug). This was
+  the one item in this batch that was genuine undefined behavior rather
+  than a hardening gap, even though it was only reachable via direct
+  library/API use, not the CLI -- UB is UB regardless of how hard it is
+  to trigger. See item 66 above for the fix (normalized centrally in
+  `set_resource_limits()`) and its regression coverage.
 - **P1 -- before this tool is pointed at untrusted-scale captures or
   baseline files:** item 64 (baseline engine has zero size bounds of any
   kind) and item 65 (global flow/flow-state limits are unbounded unless
@@ -10313,22 +10404,21 @@ reasoning stated inline):
   are the most exploitable items here: a crafted capture with many
   distinct conduits/sessions/flows can grow process memory without
   bound today, using nothing more exotic than ordinary-looking protocol
-  traffic repeated across many source/destination pairs.
+  traffic repeated across many source/destination pairs. **Not yet
+  fixed.**
 - **P2 -- hardening, worth doing but not urgent:** item 68 (baseline
   file-size ceiling -- a local, operator-supplied trust boundary, not
-  remotely reachable).
+  remotely reachable). **Not yet fixed.**
 - **Not prioritized as a resource-exhaustion fix, optional tidy-up
   only:** item 67 (registry flow-state counting). The review's own
   complexity analysis doesn't hold once `std::unordered_map::size()`'s
   guaranteed O(1) cost is accounted for, so this is a cheap, low-risk
   code-quality improvement (a running counter instead of a per-insert
-  scan) that can be picked up opportunistically -- e.g. alongside item
-  66's fix, since both touch the same function -- rather than scheduled
-  as its own priority item.
+  scan) that can be picked up opportunistically rather than scheduled
+  as its own priority item. **Not yet fixed** (and not urgent).
 
-None of items 64-68 have been implemented yet -- this is the
-documentation-and-triage pass the review itself asked for; the code
-changes are a follow-up once Jurgen confirms which of them to take on.
+Item 66 (P0) is implemented; items 64/65/68/67 have not been -- ping
+when you want the next one (P1 is next in line) done as its own patch.
 
 ### Protocols not covered at all
 

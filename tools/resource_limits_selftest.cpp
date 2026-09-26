@@ -25,6 +25,19 @@
 // check below uses to prove which Decoder's own configured limit was actually in effect during
 // its own decode() call.
 //
+// Checks 5-6 below (finding 3, docs/reviews/2026-09-chatgpt-security-review-patch209.md,
+// "--max-active-flows 0 can cause invalid iterator erasure") reuse two more fixtures CMakeLists.txt's
+// own CLI-driven max_active_flows_evicts_other_flow_entry/max_flow_state_entries_evicts_other_
+// session_state tests already rely on: tests/sample_resource_exhaustion_active_flows.pcap (two
+// distinct TCP flows, each left "waiting for more" mid-reassembly) and tests/sample_resource_
+// exhaustion_flow_state.pcap (two distinct Modbus TCP sessions, each opening with a request). Those
+// two CLI tests only ever exercise a NONZERO cap (1) -- cli_main.cpp's own build_resource_limits
+// treats a `--max-active-flows 0`/`--max-flow-state-entries 0` CLI argument as "flag not passed",
+// so the CLI can never construct the ResourceLimits{max_active_flows = 0} scenario finding 3 is
+// about at all, the same "only a direct library/API caller can reach this" gap the review itself
+// notes. A dedicated check against the library API directly, exactly like checks 1-4 above, is the
+// only way to exercise it.
+//
 // Prints one PASS/FAIL line per check to stdout and exits 0 only if every check passed, same
 // contract as protocol_result_selftest/crypto_selftest; wired into CMakeLists.txt's own
 // "ResourceLimits scoping self-test" section as its own CTest case, unconditionally (like those
@@ -70,10 +83,16 @@ long dnp3_point_value_count(const conduitscope::Decoder& decoder,
 int main(int argc, char** argv) {
     using namespace conduitscope;
 
-    if (argc != 2) {
-        std::fprintf(stderr, "usage: %s <path to tests/sample_dnp3.pcap>\n", argv[0]);
+    if (argc != 4) {
+        std::fprintf(stderr,
+                      "usage: %s <path to tests/sample_dnp3.pcap> "
+                      "<path to tests/sample_resource_exhaustion_active_flows.pcap> "
+                      "<path to tests/sample_resource_exhaustion_flow_state.pcap>\n",
+                      argv[0]);
         return 1;
     }
+    const char* active_flows_pcap_path = argv[2];
+    const char* flow_state_pcap_path = argv[3];
 
     // Load the fixture once and keep only packet #3 -- the DNP3 Response frame with multiple
     // object headers/point values described above (the fixture's other packets are link-layer-
@@ -245,6 +264,113 @@ int main(int argc, char** argv) {
         check_bool("concurrent thread with unset limits saw the correct full count on every one "
                    "of 2000 decode() calls, never affected by the other thread",
                    normal_wrong.load() == 0);
+    }
+
+    // 5. Finding 3 (docs/reviews/2026-09-chatgpt-security-review-patch209.md): set_resource_limits
+    // normalizes a literal max_active_flows=0/max_flow_state_entries=0 to std::nullopt (no cap) --
+    // see resource_limits.cpp's own comment for why this is the fix, rather than trying to give a
+    // literal zero cap real "evict to make room" semantics. Checked directly against
+    // resource_limits() after set_resource_limits(), independent of any decode() call, so a
+    // regression here is caught even if some future change to Decoder/DecodeContext stopped
+    // routing through set_resource_limits for some other reason.
+    {
+        ResourceLimits baseline;  // reset thread-local state to a known "everything unset" value
+        set_resource_limits(baseline);
+
+        ResourceLimits zero_active_flows;
+        zero_active_flows.max_active_flows = 0;
+        set_resource_limits(zero_active_flows);
+        check_bool("set_resource_limits normalizes an explicit max_active_flows=0 to no cap "
+                   "(std::nullopt) rather than storing a literal zero",
+                   !resource_limits().max_active_flows.has_value());
+
+        set_resource_limits(baseline);
+
+        ResourceLimits zero_flow_state_entries;
+        zero_flow_state_entries.max_flow_state_entries = 0;
+        set_resource_limits(zero_flow_state_entries);
+        check_bool("set_resource_limits normalizes an explicit max_flow_state_entries=0 to no cap "
+                   "(std::nullopt) rather than storing a literal zero",
+                   !resource_limits().max_flow_state_entries.has_value());
+
+        // A nonzero value is never touched by the normalization -- confirms the fix is specific to
+        // exactly 0, not an off-by-one that also clobbers legitimate small caps like 1.
+        ResourceLimits one_of_each;
+        one_of_each.max_active_flows = 1;
+        one_of_each.max_flow_state_entries = 1;
+        set_resource_limits(one_of_each);
+        check_bool("set_resource_limits leaves a real max_active_flows=1 cap alone (normalization "
+                   "is specific to exactly 0)",
+                   resource_limits().max_active_flows == 1);
+        check_bool("set_resource_limits leaves a real max_flow_state_entries=1 cap alone "
+                   "(normalization is specific to exactly 0)",
+                   resource_limits().max_flow_state_entries == 1);
+
+        set_resource_limits(baseline);  // leave thread-local state clean for the checks below
+    }
+
+    // 6. Finding 3's actual regression target: before this fix, a Decoder configured with
+    // max_active_flows=0 hit undefined behavior (Decoder::reassemble_tcp_payload erasing
+    // tcp_reassembly_.begin() from an already-empty map) on literally the first packet that needed
+    // TCP reassembly, and one configured with max_flow_state_entries=0 silently inserted a
+    // registry flow-state entry past its own configured zero cap. Replaying the same two fixtures
+    // CMakeLists.txt's own CLI-driven eviction tests use (with a cap of 1, where eviction is
+    // supposed to happen) proves both that this no longer crashes -- especially meaningful under
+    // the sanitizer-enabled build, which would otherwise report the erase-from-empty-map UB
+    // directly -- and that the normalization from check 5 gives a configured 0 the same "unlimited"
+    // behavior as leaving the cap unset entirely, not some other, half-enforced in-between state.
+    {
+        DecodeOptions active_flows_options;
+        active_flows_options.limits.max_active_flows = 0;
+        Decoder active_flows_decoder(active_flows_options);
+
+        PcapReader active_flows_reader(active_flows_pcap_path);
+        PcapPacket p;
+        uint32_t lt = active_flows_reader.info().linktype;
+        bool saw_waiting = false;
+        bool saw_eviction_note = false;
+        for (size_t index = 1; active_flows_reader.next(p); ++index) {
+            DecodedPacket out = active_flows_decoder.decode(p, lt, index);
+            if (out.summary.find("waiting for more") != std::string::npos) saw_waiting = true;
+            for (const auto& n : out.notes) {
+                if (n.find("active TCP flow-reassembly limit") != std::string::npos) {
+                    saw_eviction_note = true;
+                }
+            }
+        }
+        check_bool("Decoder configured with max_active_flows=0 decodes the two-distinct-flow "
+                   "resource-exhaustion fixture without crashing (the erase-from-an-empty-map UB "
+                   "this fix closes) and both flows' reassembly states coexist with no eviction, "
+                   "the same behavior an unset cap already has",
+                   saw_waiting && !saw_eviction_note);
+
+        DecodeOptions flow_state_options;
+        flow_state_options.limits.max_flow_state_entries = 0;
+        Decoder flow_state_decoder(flow_state_options);
+
+        PcapReader flow_state_reader(flow_state_pcap_path);
+        uint32_t lt2 = flow_state_reader.info().linktype;
+        bool saw_authoritative = false;
+        bool saw_no_outstanding = false;
+        for (size_t index = 1; flow_state_reader.next(p); ++index) {
+            DecodedPacket out = flow_state_decoder.decode(p, lt2, index);
+            for (const auto& n : out.notes) {
+                if (n.find("authoritative pairing: response to transaction id 100") !=
+                    std::string::npos) {
+                    saw_authoritative = true;
+                }
+                if (n.find("no outstanding request found on this TCP session for transaction id "
+                            "100") != std::string::npos) {
+                    saw_no_outstanding = true;
+                }
+            }
+        }
+        check_bool("Decoder configured with max_flow_state_entries=0 decodes the "
+                   "two-distinct-session resource-exhaustion fixture without silently inserting "
+                   "past the configured zero cap (the registry-side correctness bug this fix also "
+                   "closes) -- session 1's response still pairs authoritatively instead of being "
+                   "evicted, the same behavior an unset cap already has",
+                   saw_authoritative && !saw_no_outstanding);
     }
 
     std::printf("\n%d check(s) failed\n", g_failures);
