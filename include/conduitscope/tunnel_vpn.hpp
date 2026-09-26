@@ -248,9 +248,15 @@ struct TunnelVpnUdpMatch {
 // all. `extra_ports` extends every one of this file's own default ports EXCEPT dtls-tunnel, which is
 // checked port-independently regardless (see this file's own header comment) -- one shared list
 // across all eight, the same "one feature toggle" grouping Tiers 1-4 already established.
+// `decode_as_hint` (default "", meaning "no override"): the `-d`/`DecodeAsRule` forced protocol name
+// for this exact packet's (transport, port) pair -- see it_protocols.hpp's
+// try_recognize_it_remote_access's own comment for the full contract (decoder.hpp's DecodeOptions::
+// decode_as, decoder.cpp's decode_as_forced). Consulted only as a last resort, after every existing
+// structural/port check above has already failed to match.
 std::optional<TunnelVpnUdpMatch> try_recognize_tunnel_vpn_udp(ByteSpan payload, uint16_t src_port,
                                                                  uint16_t dst_port,
-                                                                 const std::vector<uint16_t>& extra_ports);
+                                                                 const std::vector<uint16_t>& extra_ports,
+                                                                 const std::string& decode_as_hint = "");
 
 constexpr uint16_t STT_PORT = 7878;  // TCP -- STT's own documented default port
 
@@ -264,8 +270,11 @@ struct TunnelVpnTcpMatch {
 // file's two TCP-side tunnel/VPN protocols. `extra_ports` is the SAME list try_recognize_tunnel_vpn_
 // udp takes (OPENVPN_PORT's own value, 1194, is shared verbatim between the TCP and UDP forms) --
 // not a separate TCP-only list, since this is still one feature toggle covering one ROADMAP tier.
+// `decode_as_hint`: see try_recognize_tunnel_vpn_udp's own comment above -- identical contract,
+// scoped to this function's own two names instead.
 std::optional<TunnelVpnTcpMatch> try_recognize_tunnel_vpn_tcp(ByteSpan payload, uint16_t src_port,
                                                                  uint16_t dst_port,
-                                                                 const std::vector<uint16_t>& extra_ports);
+                                                                 const std::vector<uint16_t>& extra_ports,
+                                                                 const std::string& decode_as_hint = "");
 
 }  // namespace conduitscope

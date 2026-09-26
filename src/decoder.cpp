@@ -62,6 +62,32 @@ bool port_in(uint16_t port, uint16_t default_port, const std::vector<uint16_t>& 
     return std::find(extra.begin(), extra.end(), port) != extra.end();
 }
 
+// `-d`/DecodeAsRule last-resort forcing -- see decoder.hpp's own comment on DecodeAsRule and
+// DecodeOptions::decode_as for the full design (Wireshark/tshark-style `-d`, deliberately scoped
+// to "port-gated protocols only"). Returns the forced protocol name when `rules` contains an entry
+// naming transport `is_tcp` and either `src_port` or `dst_port`, AND that entry's name is one this
+// call site's own tier actually recognizes (`candidate_names`) -- the second check is what keeps a
+// rule written for one tier's protocol name from ever being consulted at a different tier's call
+// site: each of the 9 call sites below passes only its own tier's name vocabulary as
+// `candidate_names`, so e.g. a rule forcing "ssh" on some port is never seen by the remote-access
+// tier's call, even though both tiers are TCP-port-gated. Every caller only USES the returned hint
+// to widen its own `want_X` gate and as the last-resort argument threaded into its
+// try_recognize_it_X/try_recognize_tunnel_vpn_X call -- it is never allowed to suppress or reorder
+// any of that function's own, stronger structural/port checks (see it_protocols.hpp/tunnel_vpn.hpp's
+// own comments on the `decode_as_hint` parameter for where in each function this is consulted).
+std::optional<std::string> decode_as_forced(const std::vector<DecodeAsRule>& rules, bool is_tcp,
+                                             uint16_t src_port, uint16_t dst_port,
+                                             std::initializer_list<const char*> candidate_names) {
+    for (const auto& rule : rules) {
+        if (rule.is_tcp != is_tcp) continue;
+        if (rule.port != src_port && rule.port != dst_port) continue;
+        for (const char* candidate : candidate_names) {
+            if (rule.name == candidate) return rule.name;
+        }
+    }
+    return std::nullopt;
+}
+
 // A UDP port worth calling out by name in a "udp" packet's summary, for a port this groundwork
 // release still doesn't decode the payload of -- an informational note only, in the same spirit
 // as the "not a configured/standard <protocol> port" notes the TCP-based protocols already get.
@@ -2442,10 +2468,14 @@ DecodedPacket Decoder::decode_ip_payload(DecodedPacket out, uint8_t protocol, By
             // three protocols is identical regardless of transport.
             bool want_remote_access_udp = options_.protocol_filter == ProtocolFilter::Auto ||
                                            options_.protocol_filter == ProtocolFilter::RemoteAccessOnly;
-            if (want_remote_access_udp) {
+            auto remote_access_hint_udp = decode_as_forced(
+                options_.decode_as, /*is_tcp=*/false, udp.src_port, udp.dst_port,
+                {"rdp", "vnc", "teamviewer", "anydesk", "zoom"});
+            if (want_remote_access_udp || remote_access_hint_udp) {
                 if (auto m = try_recognize_it_remote_access(udp.payload, udp.src_port, udp.dst_port,
                                                               /*is_tcp=*/false,
-                                                              options_.extra_remote_access_ports)) {
+                                                              options_.extra_remote_access_ports,
+                                                              remote_access_hint_udp.value_or(""))) {
                     out.protocol = m->protocol;
                     out.summary = m->summary;
                     for (const auto& n : m->notes) out.notes.push_back(n);
@@ -2461,10 +2491,14 @@ DecodedPacket Decoder::decode_ip_payload(DecodedPacket out, uint8_t protocol, By
             // is handled separately, well above (before HART-IP's own dispatch): see the comment
             // there for why it needed to move, and `want_lateral_movement_udp` (declared there,
             // still in scope here) is reused as-is for SNMP/TFTP below.
-            if (want_lateral_movement_udp) {
+            auto lateral_movement_hint_udp = decode_as_forced(
+                options_.decode_as, /*is_tcp=*/false, udp.src_port, udp.dst_port,
+                {"ssh", "http", "https", "snmp", "telnet", "ftp", "tftp"});
+            if (want_lateral_movement_udp || lateral_movement_hint_udp) {
                 if (auto m = try_recognize_it_lateral_movement(udp.payload, udp.src_port, udp.dst_port,
                                                                  /*is_tcp=*/false,
-                                                                 options_.extra_lateral_movement_ports)) {
+                                                                 options_.extra_lateral_movement_ports,
+                                                                 lateral_movement_hint_udp.value_or(""))) {
                     out.protocol = m->protocol;
                     out.summary = m->summary;
                     for (const auto& n : m->notes) out.notes.push_back(n);
@@ -2480,10 +2514,14 @@ DecodedPacket Decoder::decode_ip_payload(DecodedPacket out, uint8_t protocol, By
             // dispatched separately, in the EtherType-keyed region above -- see eapol.hpp.
             bool want_enterprise_trust_udp = options_.protocol_filter == ProtocolFilter::Auto ||
                                               options_.protocol_filter == ProtocolFilter::EnterpriseTrustOnly;
-            if (want_enterprise_trust_udp) {
+            auto enterprise_trust_hint_udp = decode_as_forced(
+                options_.decode_as, /*is_tcp=*/false, udp.src_port, udp.dst_port,
+                {"ntp", "dhcp", "ldaps", "radius", "tacacs-plus"});
+            if (want_enterprise_trust_udp || enterprise_trust_hint_udp) {
                 if (auto m = try_recognize_it_enterprise_trust(udp.payload, udp.src_port, udp.dst_port,
                                                                   /*is_tcp=*/false,
-                                                                  options_.extra_enterprise_trust_ports)) {
+                                                                  options_.extra_enterprise_trust_ports,
+                                                                  enterprise_trust_hint_udp.value_or(""))) {
                     out.protocol = m->protocol;
                     out.summary = m->summary;
                     for (const auto& n : m->notes) out.notes.push_back(n);
@@ -2499,9 +2537,13 @@ DecodedPacket Decoder::decode_ip_payload(DecodedPacket out, uint8_t protocol, By
             // dispatched separately, in the EtherType-keyed region above -- see pppoe.hpp.
             bool want_wireless_backhaul_udp = options_.protocol_filter == ProtocolFilter::Auto ||
                                                options_.protocol_filter == ProtocolFilter::WirelessBackhaulOnly;
-            if (want_wireless_backhaul_udp) {
+            auto wireless_backhaul_hint_udp = decode_as_forced(
+                options_.decode_as, /*is_tcp=*/false, udp.src_port, udp.dst_port,
+                {"capwap-control", "capwap-data", "lwapp-control", "lwapp-data", "gtp-u"});
+            if (want_wireless_backhaul_udp || wireless_backhaul_hint_udp) {
                 if (auto m = try_recognize_it_wireless_backhaul(udp.payload, udp.src_port, udp.dst_port,
-                                                                  options_.extra_wireless_backhaul_ports)) {
+                                                                  options_.extra_wireless_backhaul_ports,
+                                                                  wireless_backhaul_hint_udp.value_or(""))) {
                     out.protocol = m->protocol;
                     out.summary = m->summary;
                     for (const auto& n : m->notes) out.notes.push_back(n);
@@ -2519,9 +2561,13 @@ DecodedPacket Decoder::decode_ip_payload(DecodedPacket out, uint8_t protocol, By
             // separately still, in the regions noted at their own call sites.
             bool want_tunnel_vpn_udp = options_.protocol_filter == ProtocolFilter::Auto ||
                                         options_.protocol_filter == ProtocolFilter::TunnelVpnOnly;
-            if (want_tunnel_vpn_udp) {
+            auto tunnel_vpn_hint_udp = decode_as_forced(
+                options_.decode_as, /*is_tcp=*/false, udp.src_port, udp.dst_port,
+                {"ike", "l2tp", "vxlan", "geneve", "wireguard", "openvpn", "dtls-tunnel"});
+            if (want_tunnel_vpn_udp || tunnel_vpn_hint_udp) {
                 if (auto m = try_recognize_tunnel_vpn_udp(udp.payload, udp.src_port, udp.dst_port,
-                                                             options_.extra_tunnel_vpn_ports)) {
+                                                             options_.extra_tunnel_vpn_ports,
+                                                             tunnel_vpn_hint_udp.value_or(""))) {
                     out.protocol = m->protocol;
                     out.summary = m->summary;
                     for (const auto& n : m->notes) out.notes.push_back(n);
@@ -4148,9 +4194,13 @@ DecodedPacket Decoder::decode_ip_payload(DecodedPacket out, uint8_t protocol, By
         // so this ordering is a belt-and-suspenders precaution, not a fix for an actual conflict.
         bool want_remote_access = options_.protocol_filter == ProtocolFilter::Auto ||
                                    options_.protocol_filter == ProtocolFilter::RemoteAccessOnly;
-        if (want_remote_access) {
+        auto remote_access_hint = decode_as_forced(options_.decode_as, /*is_tcp=*/true, tcp.src_port,
+                                                     tcp.dst_port,
+                                                     {"rdp", "vnc", "teamviewer", "anydesk", "zoom"});
+        if (want_remote_access || remote_access_hint) {
             if (auto m = try_recognize_it_remote_access(effective_payload, tcp.src_port, tcp.dst_port,
-                                                          /*is_tcp=*/true, options_.extra_remote_access_ports)) {
+                                                          /*is_tcp=*/true, options_.extra_remote_access_ports,
+                                                          remote_access_hint.value_or(""))) {
                 out.protocol = m->protocol;
                 out.summary = m->summary;
                 for (const auto& n : m->notes) out.notes.push_back(n);
@@ -4167,9 +4217,13 @@ DecodedPacket Decoder::decode_ip_payload(DecodedPacket out, uint8_t protocol, By
         // exactly like every other Tier 2 protocol's own weak fallback.
         bool want_lateral_movement = options_.protocol_filter == ProtocolFilter::Auto ||
                                       options_.protocol_filter == ProtocolFilter::LateralMovementOnly;
-        if (want_lateral_movement) {
+        auto lateral_movement_hint = decode_as_forced(
+            options_.decode_as, /*is_tcp=*/true, tcp.src_port, tcp.dst_port,
+            {"ssh", "http", "https", "snmp", "telnet", "ftp", "tftp"});
+        if (want_lateral_movement || lateral_movement_hint) {
             if (auto m = try_recognize_it_lateral_movement(effective_payload, tcp.src_port, tcp.dst_port,
-                                                             /*is_tcp=*/true, options_.extra_lateral_movement_ports)) {
+                                                             /*is_tcp=*/true, options_.extra_lateral_movement_ports,
+                                                             lateral_movement_hint.value_or(""))) {
                 out.protocol = m->protocol;
                 out.summary = m->summary;
                 for (const auto& n : m->notes) out.notes.push_back(n);
@@ -4185,9 +4239,13 @@ DecodedPacket Decoder::decode_ip_payload(DecodedPacket out, uint8_t protocol, By
         // exactly like every other Tier 3 protocol's own weak fallback.
         bool want_enterprise_trust = options_.protocol_filter == ProtocolFilter::Auto ||
                                       options_.protocol_filter == ProtocolFilter::EnterpriseTrustOnly;
-        if (want_enterprise_trust) {
+        auto enterprise_trust_hint = decode_as_forced(
+            options_.decode_as, /*is_tcp=*/true, tcp.src_port, tcp.dst_port,
+            {"ntp", "dhcp", "ldaps", "radius", "tacacs-plus"});
+        if (want_enterprise_trust || enterprise_trust_hint) {
             if (auto m = try_recognize_it_enterprise_trust(effective_payload, tcp.src_port, tcp.dst_port,
-                                                              /*is_tcp=*/true, options_.extra_enterprise_trust_ports)) {
+                                                              /*is_tcp=*/true, options_.extra_enterprise_trust_ports,
+                                                              enterprise_trust_hint.value_or(""))) {
                 out.protocol = m->protocol;
                 out.summary = m->summary;
                 for (const auto& n : m->notes) out.notes.push_back(n);
@@ -4202,9 +4260,12 @@ DecodedPacket Decoder::decode_ip_payload(DecodedPacket out, uint8_t protocol, By
         // sites' own comments).
         bool want_tunnel_vpn = options_.protocol_filter == ProtocolFilter::Auto ||
                                 options_.protocol_filter == ProtocolFilter::TunnelVpnOnly;
-        if (want_tunnel_vpn) {
+        auto tunnel_vpn_hint = decode_as_forced(options_.decode_as, /*is_tcp=*/true, tcp.src_port,
+                                                  tcp.dst_port, {"stt", "openvpn"});
+        if (want_tunnel_vpn || tunnel_vpn_hint) {
             if (auto m = try_recognize_tunnel_vpn_tcp(effective_payload, tcp.src_port, tcp.dst_port,
-                                                         options_.extra_tunnel_vpn_ports)) {
+                                                         options_.extra_tunnel_vpn_ports,
+                                                         tunnel_vpn_hint.value_or(""))) {
                 out.protocol = m->protocol;
                 out.summary = m->summary;
                 for (const auto& n : m->notes) out.notes.push_back(n);

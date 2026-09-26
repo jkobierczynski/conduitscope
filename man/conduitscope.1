@@ -1135,6 +1135,42 @@ The generic dtls\-tunnel check is never port\-gated and is unaffected by
 this option. MPLS needs no port option either \-\- it has no port, being
 EtherType\-keyed (0x8847/0x8848) like EAPOL/PPPoE.
 .TP
+.BR \-d ", " \-\-decode\-as " " \fI<tcp|udp>.port==PORT,NAME\fR
+Force a specific decoder onto traffic on a given port that wouldn't
+otherwise be recognized as it \-\- mirrors Wireshark/tshark's own
+\fB\-d\fR, restricted here to this one selector shape. Repeatable.
+UNLIKE every \fB\-\-x\-port\fR option above, which only annotates an
+already\-detected protocol's port as expected/unexpected, \fB\-d\fR
+genuinely widens WHAT gets detected on that port \-\- but only as a LAST
+RESORT: it is consulted after every one of this decoder's own stronger
+structural/port checks has already failed to match anything, so it can
+never override an already\-correct match (a real VNC RFB banner, say,
+still wins over a \fB\-d\fR rule naming a different protocol on that same
+port). Deliberately scoped to port\-gated protocols only \-\- see
+\fBdocs/DEVELOPMENT.md\fR's ROADMAP item 69 for the full design and why
+the roughly forty opportunistic ICS protocols (Modbus, DNP3, S7comm, and
+similar, already tried on every port by structural signature) and the
+tunnel\-vpn tier's IP\-protocol\-number\-gated names (gre, nvgre, eoip,
+esp, ah, ip\-in\-ip, 6in4) are out of scope. Supported \fINAME\fR values:
+every name that already has its own dedicated \fB\-\-x\-port\fR option
+above (dns, mdns, llmnr, nbns, doh, rip, hsrp, winrm, dcom, ge\-srtp,
+bsap, coap, rmcp, amqp, dicom, fox, powerlink\-sdo, dhcpv6 \-\- each
+restricted to that name's own real transport), plus the individual
+protocol names inside the five "IT protocols an OT auditor flags" tiers
+that \fB\-\-remote\-access\-port\fR/\fB\-\-lateral\-movement\-port\fR/
+\fB\-\-enterprise\-trust\-port\fR/\fB\-\-wireless\-backhaul\-port\fR/
+\fB\-\-tunnel\-vpn\-port\fR can otherwise only widen as a whole tier: rdp,
+vnc, teamviewer, anydesk, zoom (tcp or udp); ssh, http, https, telnet,
+ftp (tcp only); snmp, tftp (udp only); ntp, dhcp, radius (udp only);
+ldaps, tacacs\-plus (tcp only); capwap\-control, capwap\-data,
+lwapp\-control, lwapp\-data, gtp\-u (udp only); ike, l2tp, vxlan, geneve,
+wireguard, dtls\-tunnel (udp only); openvpn (tcp or udp); stt (tcp only).
+Example: \fB\-d tcp.port==8443,ldaps\fR reports port 8443/TCP traffic as
+LDAPS even though it isn't one of LDAPS's own configured ports, without
+disturbing detection on any other port. A malformed rule, an
+unrecognized name, or a name/transport mismatch is reported as a CLI
+error (nonzero exit) rather than silently ignored.
+.TP
 .BR \-c ", " \-\-max\-packets " " \fIN\fR
 Stop after decoding this many packets. Default: 0 (unlimited). With
 \fB\-i\fR, also bounds a live capture. \fB\-c\fR mirrors tshark's own

@@ -287,9 +287,19 @@ struct ItRemoteAccessMatch {
 // (the same "additional configured ports" convention every other protocol in decoder.hpp's
 // DecodeOptions already uses) -- one shared list across all five, since this is one feature toggle
 // covering one ROADMAP tier, not five independent ones.
+// `decode_as_hint` (default "", meaning "no override"): the `-d`/`DecodeAsRule` forced protocol name
+// for this exact packet's (transport, port) pair, already resolved by the caller (decoder.cpp's own
+// decode_as_forced helper) to one of this function's own five names ("" if no `-d` rule matches, or
+// if a matching rule names a DIFFERENT tier's protocol entirely -- decode_as_forced never hands a
+// foreign name to a function that wouldn't recognize it). Consulted ONLY as a last resort, after
+// every existing structural/port check above has already failed to match anything -- see
+// DecodeOptions::decode_as's own comment (decoder.hpp) for why a `-d` rule never overrides a
+// stronger, already-correct match (VNC's own RFB banner, for instance, still wins over a `-d` rule
+// naming a different Tier 1 protocol on that same port).
 std::optional<ItRemoteAccessMatch> try_recognize_it_remote_access(ByteSpan payload, uint16_t src_port,
                                                                     uint16_t dst_port, bool is_tcp,
-                                                                    const std::vector<uint16_t>& extra_ports);
+                                                                    const std::vector<uint16_t>& extra_ports,
+                                                                    const std::string& decode_as_hint = "");
 
 // ---------------------------------------------------------------------------------------------
 // Tier 2 -- see this file's own header comment above for the full per-protocol confidence writeup.
@@ -340,9 +350,12 @@ struct ItLateralMovementMatch {
 // try_recognize_it_remote_access. `extra_ports` extends every one of this file's own default ports,
 // one shared list across all seven -- the same "one feature toggle" grouping Tier 1's own
 // try_recognize_it_remote_access already established, not seven independent option lists.
+// `decode_as_hint`: see try_recognize_it_remote_access's own comment above -- identical contract,
+// scoped to this function's own seven names instead.
 std::optional<ItLateralMovementMatch> try_recognize_it_lateral_movement(ByteSpan payload, uint16_t src_port,
                                                                           uint16_t dst_port, bool is_tcp,
-                                                                          const std::vector<uint16_t>& extra_ports);
+                                                                          const std::vector<uint16_t>& extra_ports,
+                                                                          const std::string& decode_as_hint = "");
 
 // Matches the 4-byte SMB magic (0xFF/0xFE/0xFD + "SMB") at `offset` within `payload`. Returns a
 // human-readable label naming which SMB generation/framing it is, or std::nullopt if it doesn't
@@ -415,9 +428,12 @@ struct ItEnterpriseTrustMatch {
 // selects which half of this function even attempts a match. `extra_ports` extends every one of this
 // file's own default ports, one shared list across all five -- the same "one feature toggle" grouping
 // Tiers 1-2 already established, not five independent option lists.
+// `decode_as_hint`: see try_recognize_it_remote_access's own comment above -- identical contract,
+// scoped to this function's own five names instead.
 std::optional<ItEnterpriseTrustMatch> try_recognize_it_enterprise_trust(ByteSpan payload, uint16_t src_port,
                                                                           uint16_t dst_port, bool is_tcp,
-                                                                          const std::vector<uint16_t>& extra_ports);
+                                                                          const std::vector<uint16_t>& extra_ports,
+                                                                          const std::string& decode_as_hint = "");
 
 // Exposed for two callers now (both narrow, both structural-gate-only uses of this file's own LDAP
 // BER envelope check, kept here rather than duplicated a third time -- see this file's own header
@@ -460,8 +476,11 @@ struct ItWirelessBackhaulMatch {
 // which only ever reaches this function from the UDP dispatch path. `extra_ports` extends every one
 // of this file's own default ports, one shared list across all five -- the same "one feature toggle"
 // grouping Tiers 1-3 already established, not five independent option lists.
+// `decode_as_hint`: see try_recognize_it_remote_access's own comment above -- identical contract,
+// scoped to this function's own five names instead.
 std::optional<ItWirelessBackhaulMatch> try_recognize_it_wireless_backhaul(ByteSpan payload, uint16_t src_port,
                                                                             uint16_t dst_port,
-                                                                            const std::vector<uint16_t>& extra_ports);
+                                                                            const std::vector<uint16_t>& extra_ports,
+                                                                            const std::string& decode_as_hint = "");
 
 }  // namespace conduitscope

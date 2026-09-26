@@ -57,7 +57,8 @@ std::optional<std::string> match_rfb_banner(ByteSpan payload) {
 
 std::optional<ItRemoteAccessMatch> try_recognize_it_remote_access(ByteSpan payload, uint16_t src_port,
                                                                     uint16_t dst_port, bool is_tcp,
-                                                                    const std::vector<uint16_t>& extra_ports) {
+                                                                    const std::vector<uint16_t>& extra_ports,
+                                                                    const std::string& decode_as_hint) {
     // VNC's RFB banner -- checked FIRST and port-independently, since it's this whole file's one
     // genuinely strong, cleartext structural signature (see file header comment): a real VNC server
     // running on a nonstandard port is still confidently identified, not missed.
@@ -139,6 +140,20 @@ std::optional<ItRemoteAccessMatch> try_recognize_it_remote_access(ByteSpan paylo
                  "own wire protocol is encrypted from its first byte, so no stronger structural "
                  "signature exists to check";
         }
+        m.summary = s.str();
+        return m;
+    }
+
+    // `-d`/`DecodeAsRule` last resort -- see it_protocols.hpp's own comment on this parameter.
+    // decode_as_hint is only ever "" or one of this function's own five names (decoder.cpp's
+    // decode_as_forced already filtered it), so a plain equality chain is all this needs.
+    if (!decode_as_hint.empty()) {
+        ItRemoteAccessMatch m;
+        m.protocol = decode_as_hint;
+        std::ostringstream s;
+        s << decode_as_hint << " -- forced via -d (" << (is_tcp ? "TCP" : "UDP") << " port "
+          << src_port << "->" << dst_port
+          << " matched none of this tier's own structural/port checks on its own)";
         m.summary = s.str();
         return m;
     }
@@ -644,7 +659,8 @@ bool looks_like_ldap_ber(ByteSpan payload) { return match_ldap_ber(payload).has_
 
 std::optional<ItEnterpriseTrustMatch> try_recognize_it_enterprise_trust(ByteSpan payload, uint16_t src_port,
                                                                           uint16_t dst_port, bool is_tcp,
-                                                                          const std::vector<uint16_t>& extra_ports) {
+                                                                          const std::vector<uint16_t>& extra_ports,
+                                                                          const std::string& decode_as_hint) {
     if (!is_tcp) {
         // 1. NTP -- gated to port 123 (see file header comment for why, unlike DHCP's magic cookie
         // below).
@@ -743,12 +759,25 @@ std::optional<ItEnterpriseTrustMatch> try_recognize_it_enterprise_trust(ByteSpan
         }
     }
 
+    // `-d`/`DecodeAsRule` last resort -- see it_protocols.hpp's own comment on this parameter.
+    if (!decode_as_hint.empty()) {
+        ItEnterpriseTrustMatch m;
+        m.protocol = decode_as_hint;
+        std::ostringstream s;
+        s << decode_as_hint << " -- forced via -d (" << (is_tcp ? "TCP" : "UDP") << " port "
+          << src_port << "->" << dst_port
+          << " matched none of this tier's own structural/port checks on its own)";
+        m.summary = s.str();
+        return m;
+    }
+
     return std::nullopt;
 }
 
 std::optional<ItLateralMovementMatch> try_recognize_it_lateral_movement(ByteSpan payload, uint16_t src_port,
                                                                           uint16_t dst_port, bool is_tcp,
-                                                                          const std::vector<uint16_t>& extra_ports) {
+                                                                          const std::vector<uint16_t>& extra_ports,
+                                                                          const std::string& decode_as_hint) {
     if (is_tcp) {
         // SMB's own two branches (direct-hosting magic at offset 0; NetBIOS-Session-Service-wrapped
         // at offset 4, gated to port 139) used to live here -- removed now that SMB has its own
@@ -865,6 +894,18 @@ std::optional<ItLateralMovementMatch> try_recognize_it_lateral_movement(ByteSpan
             }
             return m;
         }
+    }
+
+    // `-d`/`DecodeAsRule` last resort -- see it_protocols.hpp's own comment on this parameter.
+    if (!decode_as_hint.empty()) {
+        ItLateralMovementMatch m;
+        m.protocol = decode_as_hint;
+        std::ostringstream s;
+        s << decode_as_hint << " -- forced via -d (" << (is_tcp ? "TCP" : "UDP") << " port "
+          << src_port << "->" << dst_port
+          << " matched none of this tier's own structural/port checks on its own)";
+        m.summary = s.str();
+        return m;
     }
 
     return std::nullopt;
@@ -1005,7 +1046,8 @@ std::optional<GtpMatch> match_gtp_u(ByteSpan payload) {
 
 std::optional<ItWirelessBackhaulMatch> try_recognize_it_wireless_backhaul(ByteSpan payload, uint16_t src_port,
                                                                             uint16_t dst_port,
-                                                                            const std::vector<uint16_t>& extra_ports) {
+                                                                            const std::vector<uint16_t>& extra_ports,
+                                                                            const std::string& decode_as_hint) {
     // 1. CAPWAP control -- gated to port 5246 (see file header comment: a modest but genuine
     // structural signature).
     if (port_in(src_port, CAPWAP_CONTROL_PORT, extra_ports) || port_in(dst_port, CAPWAP_CONTROL_PORT, extra_ports)) {
@@ -1093,6 +1135,15 @@ std::optional<ItWirelessBackhaulMatch> try_recognize_it_wireless_backhaul(ByteSp
                          ") -- port match only, not a plausible Version/PT/Message-Type header in "
                          "this packet";
         }
+        return m;
+    }
+
+    // `-d`/`DecodeAsRule` last resort -- see it_protocols.hpp's own comment on this parameter.
+    if (!decode_as_hint.empty()) {
+        ItWirelessBackhaulMatch m;
+        m.protocol = decode_as_hint;
+        m.summary = decode_as_hint + " -- forced via -d (UDP port " + std::to_string(src_port) + "->" +
+                     std::to_string(dst_port) + " matched none of this tier's own structural/port checks on its own)";
         return m;
     }
 

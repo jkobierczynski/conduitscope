@@ -388,8 +388,47 @@ enum class ProtocolFilter {
                            // values. Roadmap item 26.
 };
 
+// Wireshark/tshark-style `-d` ("Decode As") override: one specific TCP or UDP port forced onto one
+// specific NAME-ONLY recognition (see decoder.cpp's own call sites for the exact `try_recognize_it_*`/
+// `try_recognize_tunnel_vpn_*` function each name belongs to) -- CLI syntax `-d
+// <tcp|udp>.port==<port>,<name>` (cli_main.cpp's own parser). Deliberately scoped to ONLY the
+// protocols that are genuinely invisible on a non-default port today: the five shared "IT protocols
+// an OT auditor flags" tiers' own individual members (it_protocols.hpp/tunnel_vpn.hpp), each of
+// which today can only be widened as a WHOLE TIER (extra_remote_access_ports and friends above widen
+// ALL FIVE Tier 1 names at once, so a port forced for "teamviewer" would ALSO become eligible for
+// "rdp"'s own, earlier-checked port test) -- `-d` is what lets an operator say port 9999 specifically
+// means teamviewer, not just "somewhere in Tier 1". Every genuinely opportunistic ICS protocol
+// (Modbus, DNP3, S7comm, IEC104, EtherNet/IP, OPC UA, MQTT, BACnet/IP, HART-IP, FF-HSE, MELSEC,
+// FINS, ...) is already tried on every port by structural signature regardless, so a wrong port is
+// essentially never why one of those goes unrecognized -- `-d` intentionally does NOT cover them
+// (see docs/DEVELOPMENT.md's `-d` entry for the full scoping rationale from the design conversation
+// that settled this). ALSO explicitly out of scope for the same reason `-d`'s own CLI help text
+// gives: the seven Tier 5 tunnel/VPN protocols keyed by IP protocol NUMBER rather than port at all
+// (GRE/NVGRE/EoIP/ESP/AH/IP-in-IP/6in4 -- see tunnel_vpn.hpp's own try_recognize_tunnel_vpn_ip_proto)
+// -- `-d`'s selector syntax here only ever names a TCP or UDP port, so there is no way to target
+// those with it; a hypothetical future `ip.proto==<n>,<name>` selector, mirroring tshark's own real
+// syntax for exactly this case, is a documented, not-yet-built follow-on.
+struct DecodeAsRule {
+    bool is_tcp = true;   // true: the CLI's `tcp.port==` selector; false: `udp.port==`
+    uint16_t port = 0;
+    std::string name;    // one of the fixed per-tier name vocabularies below -- validated at CLI
+                           // parse time (cli_main.cpp), never at decode time; decoder.cpp's own
+                           // lookup (decode_as_forced, decoder.cpp) trusts every entry here is
+                           // already both well-formed and a name that call site's own tier actually
+                           // recognizes.
+};
+
 struct DecodeOptions {
     ProtocolFilter protocol_filter = ProtocolFilter::Auto;
+    // Item -- new roadmap addition: Wireshark/tshark-style `-d`/`--decode-as` overrides -- see
+    // DecodeAsRule's own comment above for exactly what this does and does not cover. Empty (the
+    // default) reproduces every pre-existing behavior byte for byte; a non-empty vector only ever
+    // WIDENS a name's own detection (adds a forced match at a specific port), it never suppresses or
+    // reorders any of this file's own existing structural checks, which still run and win first
+    // wherever they already do today (e.g. VNC's RFB banner still overrides a `-d` rule that names a
+    // different Tier 1 protocol on that same port, since the banner check runs before this file's
+    // own hint lookup at every one of decoder.cpp's `-d`-aware call sites).
+    std::vector<DecodeAsRule> decode_as;
     // Additional ports to treat as "expected" for each protocol, beyond the
     // IANA-registered defaults (502 for Modbus, 20000 for DNP3, 2404 for
     // IEC 104, 44818 for EtherNet/IP explicit messaging, 2222 for EtherNet/IP

@@ -10788,6 +10788,121 @@ item 64 (P1, baseline engine bounds), and item 68 (P2) are all
 implemented; only item 67 (tidy-up) has not been -- ping when you want
 it done as its own patch.
 
+69. **`-d`/`--decode-as`: force a specific decoder onto traffic that
+    wouldn't otherwise be recognized as it, Wireshark/tshark-style.**
+    Jurgen's own request, not part of the ChatGPT security review batch
+    above (items 64-68). This codebase dispatches roughly 72
+    individually-selectable protocols (`ProtocolFilter`'s own `XOnly`
+    values, decoder.hpp), so a genuine `-d`/`--decode-as` covering all of
+    them at once -- including the ~40 opportunistic ICS protocols
+    (Modbus/DNP3/S7comm/etc., already tried on every port by structural
+    signature, so forcing them onto a specific port is meaningless) --
+    would have been a much larger, murkier undertaking than the feature
+    request implied. Scoped down with Jurgen via AskUserQuestion to
+    **"port-gated protocols only"** (his own choice, over "everything,
+    including the opportunistic ICS protocols" and a free-text narrower
+    option): the ~18 protocols that already have dedicated, genuinely-
+    gating `--X-port` CLI flags (dns/mdns/llmnr/nbns/doh/rip/hsrp/winrm/
+    dcom/ge-srtp/bsap/coap/rmcp/amqp/dicom/fox/powerlink-sdo/dhcpv6), plus
+    the ~30 individual protocol names packed into the 5 shared "IT
+    protocols an OT auditor flags" tiers from item 18 (remote-access/
+    lateral-movement/enterprise-trust/wireless-backhaul/tunnel-vpn's own
+    UDP/TCP-port-gated names) -- which today can only be widened as a
+    WHOLE TIER via each tier's shared `extra_X_ports` list, with no way to
+    force a specific name within a tier onto a specific port (whichever
+    name's own check happens to come first in that tier's if/else chain
+    wins). Explicitly OUT OF SCOPE, and said so rather than silently
+    omitted: the opportunistic ICS protocols, and the tunnel-vpn tier's
+    IP-protocol-number-gated names (gre/nvgre/eoip/esp/ah/ip-in-ip/6in4 --
+    a `tcp.port==`/`udp.port==` selector can't express those; a future
+    `ip.proto==` selector is the natural follow-on).
+
+    CLI syntax is a deliberate SUBSET of tshark's own much larger `-d`
+    selector grammar -- only `<tcp|udp>.port==<port>,<name>`, repeatable
+    (`-d,--decode-as` on `decode_cmd` only, matching `--protocol`'s own
+    scope). Two resolution mechanisms sit behind that one syntax, both in
+    `cli_main.cpp`'s new `parse_decode_as_rules()`:
+
+    - **Group A** (the 18 names above): resolving a rule is nothing more
+      than pushing its port into that protocol's OWN existing
+      `decode_X_ports` CLI-local vector -- zero `decoder.cpp` changes,
+      byte-for-byte identical effect to having passed `--dns-port <port>`
+      directly (verified by `decode_as_group_a_rule_has_identical_effect_
+      to_its_dedicated_port_option`, below).
+    - **Group B/C** (the ~30 tier-member names): each of `it_protocols.hpp`'s
+      four tier functions and `tunnel_vpn.hpp`'s two tier functions
+      (`try_recognize_it_remote_access`/`_lateral_movement`/
+      `_enterprise_trust`/`_wireless_backhaul`, `try_recognize_tunnel_vpn_udp`/
+      `_tcp`) gained a new trailing `decode_as_hint` parameter (default
+      `""`, so every existing call site not touched by this feature is
+      unaffected), consulted ONLY as that tier's own LAST RESORT --
+      appended right before each function's final `return std::nullopt;`,
+      after every one of that tier's existing structural/port checks has
+      already failed to match anything. A new `DecodeAsRule{is_tcp, port,
+      name}` struct (`decoder.hpp`) and `DecodeOptions::decode_as` vector
+      carry the parsed rules through; a new `decode_as_forced()` helper
+      (`decoder.cpp`'s own anonymous namespace, next to `port_in()`) scans
+      that vector for a rule matching the current transport and either
+      port, restricted to the caller's own tier vocabulary (so a rule
+      naming `ssh` is never even considered at the enterprise-trust call
+      site) -- all 9 call sites (5 in the UDP dispatch path, 4 in the TCP
+      path) widen their existing `want_X` gate with `|| decode_as_forced(...)
+      .has_value()` and thread the resolved hint through.
+
+    Critically, this means `-d` only ever WIDENS detection, exactly like
+    every `--x-port` option already does -- it can never override an
+    already-correct, stronger structural match. VNC's own RFB banner, or a
+    real SSH version-exchange banner, still wins over a `-d` rule naming a
+    different protocol on that same port, because the hint is consulted
+    only after every stronger check in that tier has already failed
+    (verified by `decode_as_never_overrides_a_stronger_structural_match`).
+
+    `parse_decode_as_rules()` validates each rule at CLI-parse time,
+    before `run_decode` opens any packet source: malformed selector syntax
+    (missing `tcp.port==`/`udp.port==` prefix, missing `,<name>`, a
+    non-numeric or out-of-range port), an unrecognized protocol name, and
+    -- the check with no automatic answer, since neither Group A's nor
+    Group B/C's own transport is uniform (dns/doh/winrm/etc. are each
+    fixed one way; ssh/http/telnet/ftp are TCP-only, snmp/tftp UDP-only,
+    ntp/dhcp/radius UDP-only, ldaps/tacacs-plus TCP-only, openvpn valid
+    both ways, and so on) -- a transport/name mismatch (`udp.port==636,
+    ldaps`, say). Each produces a clear "error: -d/--decode-as '...': ..."
+    message and a nonzero exit, rather than silently building a rule no
+    call site will ever match.
+
+    New fixture `tests/sample_decode_as.pcap`
+    (`tools/make_sample_pcap.py`'s `build_decode_as_sample()`): a garbage
+    UDP payload on an unclaimed port (Group A equivalence proof), two
+    identical garbage TCP payloads on two DIFFERENT unclaimed ports
+    (enterprise-trust's `ldaps`/`tacacs-plus` siblings -- the genuinely new
+    capability), and a real SSH banner on a third unclaimed port (the
+    priority proof). 12 new CTest cases:
+    `decode_as_absent_reproduces_prior_behavior`,
+    `decode_as_group_a_name_matches_its_own_dedicated_port_option`,
+    `decode_as_group_a_rule_has_identical_effect_to_its_dedicated_port_option`,
+    `decode_as_group_bc_distinguishes_sibling_name_one_of_two`,
+    `decode_as_group_bc_distinguishes_sibling_name_two_of_two`,
+    `decode_as_both_siblings_together_stay_independently_distinguished`,
+    `decode_as_never_overrides_a_stronger_structural_match`,
+    `decode_as_rejects_malformed_selector_syntax`,
+    `decode_as_rejects_unrecognized_protocol_name`,
+    `decode_as_rejects_transport_name_mismatch_group_a`,
+    `decode_as_rejects_transport_name_mismatch_group_bc`,
+    `decode_as_rejects_out_of_range_port`. The five error-path tests
+    assert both a specific exit code and a specific message on one
+    invocation, so (same established idiom as the `baseline_engine_limits_*`
+    tests above -- `WILL_FAIL` alongside `PASS_REGULAR_EXPRESSION` on one
+    CTest test inverts the regex's own contribution to pass/fail in this
+    codebase's CTest setup) each wraps the invocation in
+    `bash -c "...; echo EXITCODE=$?"`, letting `PASS_REGULAR_EXPRESSION`
+    alone decide by checking for the echoed exit code text rather than
+    using `WILL_FAIL`. Full CTest suite: 1990/1990 (default build),
+    1978/1978 (`-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF`, 12 fewer --
+    live-capture-only tests correctly absent, not a regression), 1990/1990
+    plus all 76 `fuzz_*_corpus_regression` cases (ASan/UBSan build) --
+    zero regressions elsewhere in any configuration. Zero-warning rebuilds
+    in all three configs plus a clean MinGW-w64 cross-compile.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

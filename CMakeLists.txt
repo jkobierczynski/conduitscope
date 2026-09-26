@@ -14350,3 +14350,83 @@ add_test(NAME homeplug_av_stats_protocol_count
   COMMAND conduitscope decode --stats --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_homeplug_av.pcap")
 set_tests_properties(homeplug_av_stats_protocol_count PROPERTIES
   PASS_REGULAR_EXPRESSION "homeplug-av +7")
+
+# --------------------------------------------------------------------------------------------
+# `-d`/`--decode-as` (Wireshark/tshark-style "force a decoder onto traffic that wouldn't
+# otherwise be recognized as it") -- see decoder.hpp's DecodeAsRule/DecodeOptions::decode_as
+# comment, cli_main.cpp's parse_decode_as_rules, and tools/make_sample_pcap.py's
+# build_decode_as_sample for the full design and fixture writeup. Deliberately scoped to
+# PORT-GATED protocols only (see those same comments for why the opportunistic ICS protocols and
+# the tunnel-vpn tier's IP-protocol-number-gated names are out of scope).
+
+add_test(NAME decode_as_absent_reproduces_prior_behavior
+  COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_decode_as.pcap")
+set_tests_properties(decode_as_absent_reproduces_prior_behavior PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[udp\\]  UDP payload of 12 byte\\(s\\) on port 33001->55901.*\\[tcp\\]  TCP payload of 16 byte\\(s\\) on port 33002->55902.*\\[tcp\\]  TCP payload of 16 byte\\(s\\) on port 33003->55903.*\\[ssh\\]  SSH version-exchange banner \"SSH-2.0-OpenSSH_9.6\""
+  FAIL_REGULAR_EXPRESSION "\\[dns\\]|\\[ldaps\\]|\\[tacacs-plus\\]")
+
+add_test(NAME decode_as_group_a_name_matches_its_own_dedicated_port_option
+  COMMAND conduitscope decode --format text --dns-port 55901 --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_decode_as.pcap")
+set_tests_properties(decode_as_group_a_name_matches_its_own_dedicated_port_option PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[dns\\]  DNS query id=0x0000 Query, 0 question\\(s\\), 0 answer\\(s\\), 0 authority\\(-ies\\), 0 additional\\(s\\)")
+
+add_test(NAME decode_as_group_a_rule_has_identical_effect_to_its_dedicated_port_option
+  COMMAND conduitscope decode --format text -d udp.port==55901,dns --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_decode_as.pcap")
+set_tests_properties(decode_as_group_a_rule_has_identical_effect_to_its_dedicated_port_option PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[dns\\]  DNS query id=0x0000 Query, 0 question\\(s\\), 0 answer\\(s\\), 0 authority\\(-ies\\), 0 additional\\(s\\)")
+
+add_test(NAME decode_as_group_bc_distinguishes_sibling_name_one_of_two
+  COMMAND conduitscope decode --format text -d tcp.port==55902,ldaps --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_decode_as.pcap")
+set_tests_properties(decode_as_group_bc_distinguishes_sibling_name_one_of_two PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[ldaps\\]  ldaps -- forced via -d \\(TCP port 33002->55902 matched none of this tier's own structural/port checks on its own\\)"
+  FAIL_REGULAR_EXPRESSION "\\[tacacs-plus\\]")
+
+add_test(NAME decode_as_group_bc_distinguishes_sibling_name_two_of_two
+  COMMAND conduitscope decode --format text -d tcp.port==55903,tacacs-plus --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_decode_as.pcap")
+set_tests_properties(decode_as_group_bc_distinguishes_sibling_name_two_of_two PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[tacacs-plus\\]  tacacs-plus -- forced via -d \\(TCP port 33003->55903 matched none of this tier's own structural/port checks on its own\\)"
+  FAIL_REGULAR_EXPRESSION "\\[ldaps\\]")
+
+add_test(NAME decode_as_both_siblings_together_stay_independently_distinguished
+  COMMAND conduitscope decode --format text -d tcp.port==55902,ldaps -d tcp.port==55903,tacacs-plus --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_decode_as.pcap")
+set_tests_properties(decode_as_both_siblings_together_stay_independently_distinguished PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[ldaps\\].*\\[tacacs-plus\\]")
+
+add_test(NAME decode_as_never_overrides_a_stronger_structural_match
+  COMMAND conduitscope decode --format text -d tcp.port==55904,ldaps --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_decode_as.pcap")
+set_tests_properties(decode_as_never_overrides_a_stronger_structural_match PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[ssh\\]  SSH version-exchange banner \"SSH-2.0-OpenSSH_9.6\""
+  FAIL_REGULAR_EXPRESSION "\\[ldaps\\]")
+
+# Each of the five error-path tests below asserts BOTH a specific exit code (1) AND a specific
+# error message on the same invocation. WILL_FAIL alongside PASS_REGULAR_EXPRESSION on one test
+# inverts the regex's contribution to pass/fail in this codebase's CTest setup (see
+# notable_protocols_strict_it_protocols_flips_exit_code's own comment above), so -- same
+# established idiom as the baseline_engine_limits_*_marks_*_incomplete tests -- these wrap the
+# invocation in `bash -c "...; echo EXITCODE=$?"`, keeping the wrapper's OWN exit code 0 (so
+# PASS_REGULAR_EXPRESSION alone decides pass/fail) while asserting the real exit code via the
+# echoed value.
+add_test(NAME decode_as_rejects_malformed_selector_syntax
+  COMMAND bash -c "'$<TARGET_FILE:conduitscope>' decode --format text -d bogus --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_decode_as.pcap'; echo EXITCODE=$?")
+set_tests_properties(decode_as_rejects_malformed_selector_syntax PROPERTIES
+  PASS_REGULAR_EXPRESSION "error: -d/--decode-as 'bogus' must start with 'tcp\\.port==' or 'udp\\.port=='.*EXITCODE=1")
+
+add_test(NAME decode_as_rejects_unrecognized_protocol_name
+  COMMAND bash -c "'$<TARGET_FILE:conduitscope>' decode --format text -d 'tcp.port==55902,modbus' --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_decode_as.pcap'; echo EXITCODE=$?")
+set_tests_properties(decode_as_rejects_unrecognized_protocol_name PROPERTIES
+  PASS_REGULAR_EXPRESSION "error: -d/--decode-as 'tcp\\.port==55902,modbus': unrecognized protocol name 'modbus'.*EXITCODE=1")
+
+add_test(NAME decode_as_rejects_transport_name_mismatch_group_a
+  COMMAND bash -c "'$<TARGET_FILE:conduitscope>' decode --format text -d 'tcp.port==55901,dns' --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_decode_as.pcap'; echo EXITCODE=$?")
+set_tests_properties(decode_as_rejects_transport_name_mismatch_group_a PROPERTIES
+  PASS_REGULAR_EXPRESSION "error: -d/--decode-as 'tcp\\.port==55901,dns': 'dns' is a UDP-only protocol, not TCP.*EXITCODE=1")
+
+add_test(NAME decode_as_rejects_transport_name_mismatch_group_bc
+  COMMAND bash -c "'$<TARGET_FILE:conduitscope>' decode --format text -d 'udp.port==55902,ldaps' --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_decode_as.pcap'; echo EXITCODE=$?")
+set_tests_properties(decode_as_rejects_transport_name_mismatch_group_bc PROPERTIES
+  PASS_REGULAR_EXPRESSION "error: -d/--decode-as 'udp\\.port==55902,ldaps': 'ldaps' \\(tier \"enterprise-trust\"\\) is TCP-only, not UDP.*EXITCODE=1")
+
+add_test(NAME decode_as_rejects_out_of_range_port
+  COMMAND bash -c "'$<TARGET_FILE:conduitscope>' decode --format text -d 'tcp.port==99999,ldaps' --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_decode_as.pcap'; echo EXITCODE=$?")
+set_tests_properties(decode_as_rejects_out_of_range_port PROPERTIES
+  PASS_REGULAR_EXPRESSION "error: -d/--decode-as 'tcp\\.port==99999,ldaps' has an invalid port '99999'.*EXITCODE=1")

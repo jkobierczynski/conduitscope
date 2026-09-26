@@ -533,6 +533,182 @@ BaselineEngineLimits resolve_baseline_engine_limits(size_t max_tcp_sessions, siz
     return limits;
 }
 
+// -------------------------------------------------------------------------------------------
+// `-d`/`--decode-as` (Wireshark/tshark-style "force a decoder onto traffic that wouldn't
+// otherwise be recognized as it") -- see decoder.hpp's own comment on DecodeAsRule/
+// DecodeOptions::decode_as for the full design and its deliberate scope: PORT-GATED protocols
+// only, not the ~40 opportunistic ICS protocols (already tried on every port by structural
+// signature -- forcing them onto a port is meaningless) and not the tunnel-vpn tier's
+// IP-protocol-number-gated names (gre/nvgre/eoip/esp/ah/ip-in-ip/6in4 -- a
+// `tcp.port==`/`udp.port==` selector can't express those; a future `ip.proto==` selector is the
+// natural follow-on, not silently supported here).
+//
+// Two different resolution mechanisms sit behind the identical `<tcp|udp>.port==<port>,<name>`
+// CLI syntax (a deliberate SUBSET of tshark's own much larger `-d` selector grammar --
+// `ether.type==`/`tcp.port==`/`udp.port==`/etc. -- only the latter two are supported here):
+//
+//   - "Group A" names already have their own dedicated --X-port option and CLI-local port
+//     vector (e.g. --dns-port / decode_dns_ports) that this decoder consults directly -- see
+//     decoder.cpp's own per-protocol dispatch. Resolving a Group A `-d` rule is nothing more
+//     than pushing its port into that SAME vector: zero decoder.cpp changes, and identical
+//     effect to having passed --dns-port <port> directly.
+//   - "Group B/C" names are the ~30 protocol names packed into 5 shared "IT protocol" tiers
+//     (remote-access/lateral-movement/enterprise-trust/wireless-backhaul/tunnel-vpn), where
+//     today only the WHOLE TIER can be widened via one shared extra_X_ports list -- there is no
+//     existing mechanism to force one SPECIFIC name within a tier onto a port (whichever name's
+//     own check happens to come first in that tier's if/else chain wins). These resolve into a
+//     DecodeAsRule appended to `*out_group_bc_rules`, which the caller threads into
+//     DecodeOptions::decode_as -- consulted only as each tier's own LAST RESORT, after every
+//     existing structural/port check in that tier has already failed to match anything (see
+//     it_protocols.hpp/tunnel_vpn.hpp's own `decode_as_hint` parameter comments) -- so a `-d`
+//     rule never overrides a stronger, already-correct match.
+struct DecodeAsGroupATarget {
+    const char* name;
+    bool is_tcp;               // the ONE transport this name's own decoder actually gates on
+    std::vector<int>* ports;   // the CLI-local vector this name's own --X-port option fills
+};
+
+// Every Group B/C name this release supports: which tier it belongs to (for error messages
+// only -- DecodeAsRule itself doesn't carry a tier), and which transport(s) that name's own code
+// actually reaches (see it_protocols.cpp/tunnel_vpn.cpp) -- so a transport/name mismatch (e.g.
+// `udp.port==636,ldaps` -- LDAPS is TCP-only) is caught HERE, at parse time, with a clear error,
+// rather than silently building a DecodeAsRule no call site will ever match.
+struct DecodeAsGroupBName {
+    const char* name;
+    const char* tier;
+    bool valid_tcp;
+    bool valid_udp;
+};
+
+// Parses and validates every `-d`/`--decode-as` rule given on the CLI. On success, returns true
+// having (1) pushed each Group A rule's port into its own --X-port CLI vector, via `group_a` --
+// the exact targets this build offers, one entry per Group A name -- and (2) appended one
+// DecodeAsRule to `*out_group_bc_rules` per Group B/C rule. On any malformed rule, unrecognized
+// name, or transport/name mismatch, prints a clear "error: -d/--decode-as ..." message to
+// std::cerr and returns false -- rules earlier in the list may already have been applied, the
+// same "process in order, fail fast" posture the rest of this file's CLI validation uses (e.g.
+// --time-format/--time-offset in run_decode below).
+bool parse_decode_as_rules(const std::vector<std::string>& raw,
+                            const std::vector<DecodeAsGroupATarget>& group_a,
+                            std::vector<DecodeAsRule>* out_group_bc_rules) {
+    static const std::vector<DecodeAsGroupBName> kGroupBNames = {
+        {"rdp", "remote-access", true, true},
+        {"vnc", "remote-access", true, true},
+        {"teamviewer", "remote-access", true, true},
+        {"anydesk", "remote-access", true, true},
+        {"zoom", "remote-access", true, true},
+        {"ssh", "lateral-movement", true, false},
+        {"http", "lateral-movement", true, false},
+        {"https", "lateral-movement", true, false},
+        {"telnet", "lateral-movement", true, false},
+        {"ftp", "lateral-movement", true, false},
+        {"snmp", "lateral-movement", false, true},
+        {"tftp", "lateral-movement", false, true},
+        {"ntp", "enterprise-trust", false, true},
+        {"dhcp", "enterprise-trust", false, true},
+        {"radius", "enterprise-trust", false, true},
+        {"ldaps", "enterprise-trust", true, false},
+        {"tacacs-plus", "enterprise-trust", true, false},
+        {"capwap-control", "wireless-backhaul", false, true},
+        {"capwap-data", "wireless-backhaul", false, true},
+        {"lwapp-control", "wireless-backhaul", false, true},
+        {"lwapp-data", "wireless-backhaul", false, true},
+        {"gtp-u", "wireless-backhaul", false, true},
+        {"ike", "tunnel-vpn", false, true},
+        {"l2tp", "tunnel-vpn", false, true},
+        {"vxlan", "tunnel-vpn", false, true},
+        {"geneve", "tunnel-vpn", false, true},
+        {"wireguard", "tunnel-vpn", false, true},
+        {"openvpn", "tunnel-vpn", true, true},
+        {"dtls-tunnel", "tunnel-vpn", false, true},
+        {"stt", "tunnel-vpn", true, false},
+    };
+
+    for (const std::string& rule_text : raw) {
+        bool is_tcp;
+        if (rule_text.rfind("tcp.port==", 0) == 0) {
+            is_tcp = true;
+        } else if (rule_text.rfind("udp.port==", 0) == 0) {
+            is_tcp = false;
+        } else {
+            std::cerr << "error: -d/--decode-as '" << rule_text
+                       << "' must start with 'tcp.port==' or 'udp.port==' (e.g. "
+                          "-d tcp.port==8443,ldaps)\n";
+            return false;
+        }
+        // "tcp.port==" and "udp.port==" are both exactly 10 characters -- either prefix's length
+        // works here.
+        std::string rest = rule_text.substr(std::string("tcp.port==").size());
+        size_t comma = rest.find(',');
+        if (comma == std::string::npos) {
+            std::cerr << "error: -d/--decode-as '" << rule_text
+                       << "' is missing the ',<name>' part (e.g. -d tcp.port==8443,ldaps)\n";
+            return false;
+        }
+        std::string port_text = rest.substr(0, comma);
+        std::string name = rest.substr(comma + 1);
+        if (name.empty()) {
+            std::cerr << "error: -d/--decode-as '" << rule_text << "' has an empty protocol name\n";
+            return false;
+        }
+        int port_value = -1;
+        try {
+            size_t consumed = 0;
+            port_value = std::stoi(port_text, &consumed);
+            if (consumed != port_text.size()) port_value = -1;
+        } catch (...) {
+            port_value = -1;
+        }
+        if (port_value < 1 || port_value > 65535) {
+            std::cerr << "error: -d/--decode-as '" << rule_text << "' has an invalid port '"
+                       << port_text << "' (expected an integer 1-65535)\n";
+            return false;
+        }
+        uint16_t port = static_cast<uint16_t>(port_value);
+
+        bool resolved = false;
+        for (const auto& target : group_a) {
+            if (name == target.name) {
+                if (target.is_tcp != is_tcp) {
+                    std::cerr << "error: -d/--decode-as '" << rule_text << "': '" << name << "' is a "
+                               << (target.is_tcp ? "TCP" : "UDP") << "-only protocol, not "
+                               << (is_tcp ? "TCP" : "UDP") << "\n";
+                    return false;
+                }
+                target.ports->push_back(port);
+                resolved = true;
+                break;
+            }
+        }
+        if (resolved) continue;
+
+        bool found_group_b = false;
+        for (const auto& gb : kGroupBNames) {
+            if (name == gb.name) {
+                found_group_b = true;
+                bool ok = is_tcp ? gb.valid_tcp : gb.valid_udp;
+                if (!ok) {
+                    std::cerr << "error: -d/--decode-as '" << rule_text << "': '" << name << "' (tier \""
+                               << gb.tier << "\") is " << (gb.valid_tcp ? "TCP" : "UDP")
+                               << "-only, not " << (is_tcp ? "TCP" : "UDP") << "\n";
+                    return false;
+                }
+                out_group_bc_rules->push_back(DecodeAsRule{is_tcp, port, name});
+                break;
+            }
+        }
+        if (found_group_b) continue;
+
+        std::cerr << "error: -d/--decode-as '" << rule_text << "': unrecognized protocol name '" << name
+                   << "' -- see 'conduitscope decode --help's -d/--decode-as entry for the full list "
+                      "of supported names (port-gated protocols only; the opportunistic ICS "
+                      "protocols and the tunnel-vpn tier's IP-protocol-number-gated names are out "
+                      "of scope for -d in this release)\n";
+        return false;
+    }
+    return true;
+}
+
 int run_decode(const std::string& input, const std::string& interface_name, const std::string& filter,
                 int duration_seconds, int snaplen, bool promiscuous, const std::string& output,
                 const std::string& format, const std::string& protocol, const std::vector<int>& modbus_ports,
@@ -567,6 +743,7 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
                 const std::vector<int>& fox_ports,
                 const std::vector<int>& powerlink_sdo_ports,
                 const std::vector<int>& dhcpv6_ports,
+                const std::vector<DecodeAsRule>& decode_as_rules,
                 size_t flood_threshold,
                 size_t max_packets,
                 const ResourceLimitCliVars& limit_vars,
@@ -749,6 +926,7 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
     for (int p : fox_ports) options.extra_fox_ports.push_back(static_cast<uint16_t>(p));
     for (int p : powerlink_sdo_ports) options.extra_powerlink_sdo_ports.push_back(static_cast<uint16_t>(p));
     for (int p : dhcpv6_ports) options.extra_dhcpv6_ports.push_back(static_cast<uint16_t>(p));
+    options.decode_as = decode_as_rules;
     if (flood_threshold > 0) options.flood_threshold = flood_threshold;
 
     try {
@@ -1487,6 +1665,8 @@ int main(int argc, char** argv) {
         decode_fox_ports,
         decode_powerlink_sdo_ports,
         decode_dhcpv6_ports;
+    std::vector<std::string> decode_as_raw;  // raw -d/--decode-as rule strings, parsed after CLI11
+                                               // itself finishes parsing -- see parse_decode_as_rules
     size_t decode_flood_threshold = 0;  // 0 means "not given" -- keeps DecodeOptions::flood_threshold's
                                           // own compile-time default (attack_detect.hpp's
                                           // DEFAULT_FLOOD_THRESHOLD); see run_decode's own use of this.
@@ -1763,6 +1943,30 @@ int main(int argc, char** argv) {
                             "RIP/HSRP/DNS -- no magic-byte-strength structural gate). Applies to "
                             "BOTH of DHCPv6's own default ports at once (546 client, 547 server), "
                             "see docs/PROTOCOL_COVERAGE.md");
+    decode_cmd->add_option(
+        "-d,--decode-as", decode_as_raw,
+        "Force a specific decoder onto traffic on a given port that wouldn't otherwise be "
+        "recognized as it -- mirrors Wireshark/tshark's own -d, restricted here to a subset of "
+        "its selector syntax: '<tcp|udp>.port==<port>,<name>' (repeatable). Only ever WIDENS "
+        "detection, exactly like every --x-port option above -- a `-d` rule is consulted as a "
+        "LAST RESORT on the named port, after every one of this decoder's own stronger "
+        "structural/port checks has already failed to match anything, so it never overrides an "
+        "already-correct match (e.g. VNC's own RFB banner still wins over a -d rule naming a "
+        "different protocol on that same port). Deliberately scoped to PORT-GATED protocols "
+        "only: the ~40 opportunistic ICS protocols (Modbus/DNP3/S7comm/etc.) are already tried "
+        "on every port by structural signature, so forcing them is meaningless, and the "
+        "tunnel-vpn tier's IP-protocol-number-gated names (gre/nvgre/eoip/esp/ah/ip-in-ip/6in4) "
+        "aren't expressible by a tcp.port==/udp.port== selector -- neither is supported by -d in "
+        "this release. Supported names: rdp, vnc, teamviewer, anydesk, zoom (tcp or udp); ssh, "
+        "http, https, telnet, ftp (tcp only); snmp, tftp (udp only); ntp, dhcp, radius (udp "
+        "only); ldaps, tacacs-plus (tcp only); capwap-control, capwap-data, lwapp-control, "
+        "lwapp-data, gtp-u (udp only); ike, l2tp, vxlan, geneve, wireguard, dtls-tunnel (udp "
+        "only); openvpn (tcp or udp); stt (tcp only); and every name that already has its own "
+        "dedicated --x-port option above (dns, mdns, llmnr, nbns, doh, rip, hsrp, winrm, dcom, "
+        "ge-srtp, bsap, coap, rmcp, amqp, dicom, fox, powerlink-sdo, dhcpv6 -- each restricted to "
+        "that name's own real transport, e.g. dns/udp, doh/tcp). Example: "
+        "-d tcp.port==8443,ldaps forces port 8443/TCP to be reported as LDAPS even though it "
+        "isn't one of LDAPS's own configured ports");
     decode_cmd->add_option("--flood-threshold", decode_flood_threshold,
                             "Per-destination packet count that trips a SYN/ACK/TCP/ICMP/UDP flood "
                             "note (see docs/PROTOCOL_COVERAGE.md's Attack Detection section) -- a "
@@ -2279,6 +2483,38 @@ int main(int argc, char** argv) {
         // --oui implies --ether: without it there'd be no eth line to attach a vendor name to.
         // --ether alone (no --oui) shows the MAC pair with no vendor annotation.
         decode_show_mac = decode_show_mac || decode_mac_vendor;
+
+        // -d/--decode-as: resolve every raw rule now, before run_decode -- Group A rules widen
+        // the same CLI-local --x-port vectors run_decode is about to convert into
+        // DecodeOptions::extra_X_ports below (so this MUST run before that conversion happens,
+        // i.e. before run_decode is called at all, not inside it); Group B/C rules become the
+        // DecodeAsRule list passed straight through into DecodeOptions::decode_as. See
+        // parse_decode_as_rules's own comment above for the full design.
+        std::vector<DecodeAsGroupATarget> decode_as_group_a = {
+            {"dns", false, &decode_dns_ports},
+            {"mdns", false, &decode_mdns_ports},
+            {"llmnr", false, &decode_llmnr_ports},
+            {"nbns", false, &decode_nbns_ports},
+            {"doh", true, &decode_doh_ports},
+            {"rip", false, &decode_rip_ports},
+            {"hsrp", false, &decode_hsrp_ports},
+            {"winrm", true, &decode_winrm_ports},
+            {"dcom", true, &decode_dcom_ports},
+            {"ge-srtp", true, &decode_ge_srtp_ports},
+            {"bsap", false, &decode_bsap_ports},
+            {"coap", false, &decode_coap_ports},
+            {"rmcp", false, &decode_rmcp_ports},
+            {"amqp", true, &decode_amqp_ports},
+            {"dicom", true, &decode_dicom_ports},
+            {"fox", true, &decode_fox_ports},
+            {"powerlink-sdo", false, &decode_powerlink_sdo_ports},
+            {"dhcpv6", false, &decode_dhcpv6_ports},
+        };
+        std::vector<DecodeAsRule> decode_as_rules;
+        if (!parse_decode_as_rules(decode_as_raw, decode_as_group_a, &decode_as_rules)) {
+            return 1;
+        }
+
         return run_decode(decode_input, decode_interface, decode_filter, decode_duration, decode_snaplen,
                            decode_promiscuous, decode_output, decode_format, decode_protocol,
                            decode_modbus_ports, decode_dnp3_ports, decode_s7comm_ports, decode_iec104_ports,
@@ -2300,6 +2536,7 @@ int main(int argc, char** argv) {
                            decode_fox_ports,
                            decode_powerlink_sdo_ports,
                            decode_dhcpv6_ports,
+                           decode_as_rules,
                            decode_flood_threshold,
                            decode_max_packets, decode_limit_vars, decode_stats, decode_strict,
                            quiet, no_color, force_color, decode_mac_vendor, decode_resolve, decode_hosts_file,

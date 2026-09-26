@@ -449,7 +449,8 @@ std::optional<TunnelVpnIpProtoMatch> try_recognize_tunnel_vpn_ip_proto(ByteSpan 
 
 std::optional<TunnelVpnUdpMatch> try_recognize_tunnel_vpn_udp(ByteSpan payload, uint16_t src_port,
                                                                  uint16_t dst_port,
-                                                                 const std::vector<uint16_t>& extra_ports) {
+                                                                 const std::vector<uint16_t>& extra_ports,
+                                                                 const std::string& decode_as_hint) {
     if (port_matches(src_port, dst_port, IKE_PORT, extra_ports)) {
         if (auto m = try_recognize_ike(payload, /*natt=*/false)) return m;
     }
@@ -478,12 +479,21 @@ std::optional<TunnelVpnUdpMatch> try_recognize_tunnel_vpn_udp(ByteSpan payload, 
     }
     // Tried port-independently, LAST -- see tunnel_vpn.hpp's own header comment.
     if (auto m = try_recognize_dtls_tunnel(payload)) return m;
+    // `-d`/`DecodeAsRule` last resort -- see tunnel_vpn.hpp's own comment on this parameter.
+    if (!decode_as_hint.empty()) {
+        TunnelVpnUdpMatch m;
+        m.protocol = decode_as_hint;
+        m.summary = decode_as_hint + " -- forced via -d (UDP port " + std::to_string(src_port) + "->" +
+                     std::to_string(dst_port) + " matched none of this function's own structural/port checks on its own)";
+        return m;
+    }
     return std::nullopt;
 }
 
 std::optional<TunnelVpnTcpMatch> try_recognize_tunnel_vpn_tcp(ByteSpan payload, uint16_t src_port,
                                                                  uint16_t dst_port,
-                                                                 const std::vector<uint16_t>& extra_ports) {
+                                                                 const std::vector<uint16_t>& extra_ports,
+                                                                 const std::string& decode_as_hint) {
     if (port_matches(src_port, dst_port, OPENVPN_PORT, extra_ports)) {
         // OpenVPN-over-TCP prepends a 2-byte big-endian length ahead of the identical opcode-byte
         // framing the UDP form uses.
@@ -509,6 +519,14 @@ std::optional<TunnelVpnTcpMatch> try_recognize_tunnel_vpn_tcp(ByteSpan payload, 
         m.summary = "STT (Stateless Transport Tunneling) on TCP port 7878 -- recognized by port "
                     "number alone, no authoritative public wire-format specification to check a "
                     "structural signature against (see tunnel_vpn.hpp's own header comment)";
+        return m;
+    }
+    // `-d`/`DecodeAsRule` last resort -- see tunnel_vpn.hpp's own comment on this parameter.
+    if (!decode_as_hint.empty()) {
+        TunnelVpnTcpMatch m;
+        m.protocol = decode_as_hint;
+        m.summary = decode_as_hint + " -- forced via -d (TCP port " + std::to_string(src_port) + "->" +
+                     std::to_string(dst_port) + " matched none of this function's own structural/port checks on its own)";
         return m;
     }
     return std::nullopt;

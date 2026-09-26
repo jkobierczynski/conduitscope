@@ -18888,6 +18888,60 @@ def build_homeplug_av_sample():
     (TESTS_DIR / "sample_homeplug_av.pcap").write_bytes(data)
 
 
+def build_decode_as_sample():
+    """`-d`/`--decode-as` (Wireshark/tshark-style "force a decoder onto traffic that wouldn't
+    otherwise be recognized as it") -- see decoder.hpp's DecodeAsRule/DecodeOptions::decode_as
+    comment and cli_main.cpp's parse_decode_as_rules for the full design. Every packet below rides
+    a port none of its own tier's structural/port checks recognize, so with no -d given at all
+    every one of them falls through to the generic "tcp"/"udp" summary -- the whole point is to
+    then force each onto a specific name via -d and confirm it (and ONLY it) gets recognized.
+
+    Covers, one packet each: (1) a Group A name (dns, UDP) on an unclaimed UDP port -- proves a
+    -d rule for a Group A name has the identical effect as that protocol's own --X-port option
+    (both push into the same CLI-local port vector); (2)/(3) two Group B/C names from the SAME
+    shared tier (enterprise-trust's ldaps and tacacs-plus) on two DIFFERENT unclaimed TCP ports --
+    the genuinely new capability this feature adds, since today only the whole tier can be widened
+    via --enterprise-trust-port, with no way to pick which one specific name a forced port means;
+    (4) a real SSH version-exchange banner on an unclaimed TCP port, to prove a -d rule for a
+    DIFFERENT name on that same port is never consulted -- SSH's own stronger structural match
+    always wins, -d is a last resort only."""
+    packets = []
+
+    # 1) Group A: garbage payload (not a real DNS query) on UDP port 55901, which nothing in this
+    #    codebase claims by default -- with no -d, falls through to generic "udp"; -d
+    #    udp.port==55901,dns must report it exactly as "dns" would via --dns-port 55901.
+    packets.append(udp_ip_eth_frame(bytes(12), 33001, 55901, HMI_IP, PLC_IP, HMI_MAC, PLC_MAC))
+
+    # 2) Group B/C, enterprise-trust tier, first sibling: garbage payload on TCP port 55902 --
+    #    -d tcp.port==55902,ldaps must report "ldaps", never "tacacs-plus" (packet 3's own name).
+    tcp_garbage = bytes(16)
+    packets.append(eth_header(PLC_MAC, HMI_MAC, 0x0800) +
+                    ipv4_header(HMI_IP, PLC_IP, 6, len(tcp_garbage) + 20, 0x9100) +
+                    tcp_header(33002, 55902, 1, 0, TCP_PSH | TCP_ACK, len(tcp_garbage)) + tcp_garbage)
+
+    # 3) Group B/C, enterprise-trust tier, second sibling, same tier, DIFFERENT port: identical
+    #    garbage payload on TCP port 55903 -- -d tcp.port==55903,tacacs-plus must report
+    #    "tacacs-plus", proving the two sibling names are independently distinguishable rather than
+    #    both collapsing to whichever name's own check happens to run first.
+    packets.append(eth_header(PLC_MAC, HMI_MAC, 0x0800) +
+                    ipv4_header(HMI_IP, PLC_IP, 6, len(tcp_garbage) + 20, 0x9101) +
+                    tcp_header(33003, 55903, 1, 0, TCP_PSH | TCP_ACK, len(tcp_garbage)) + tcp_garbage)
+
+    # 4) Priority proof: a REAL SSH version-exchange banner on TCP port 55904 (also otherwise
+    #    unclaimed) -- with -d tcp.port==55904,ldaps given, this must STILL report "ssh", proving a
+    #    -d rule is consulted only as a last resort and never overrides an already-correct,
+    #    stronger structural match.
+    ssh_banner = b"SSH-2.0-OpenSSH_9.6\r\n"
+    packets.append(eth_header(PLC_MAC, HMI_MAC, 0x0800) +
+                    ipv4_header(HMI_IP, PLC_IP, 6, len(ssh_banner) + 20, 0x9102) +
+                    tcp_header(33004, 55904, 1, 0, TCP_PSH | TCP_ACK, len(ssh_banner)) + ssh_banner)
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_900_000 + i, i * 1000)
+    (TESTS_DIR / "sample_decode_as.pcap").write_bytes(data)
+
+
 if __name__ == "__main__":
     TESTS_DIR.mkdir(exist_ok=True)
     build_modbus_sample()
@@ -19000,4 +19054,5 @@ if __name__ == "__main__":
     build_ipv6_attack_dhcpv6_exhaustion_sample()
     build_ipv6_attack_rogue_dhcpv6_server_sample()
     build_homeplug_av_sample()
+    build_decode_as_sample()
     print("wrote sample fixtures to", TESTS_DIR)
