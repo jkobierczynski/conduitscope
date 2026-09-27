@@ -10903,6 +10903,122 @@ it done as its own patch.
     zero regressions elsewhere in any configuration. Zero-warning rebuilds
     in all three configs plus a clean MinGW-w64 cross-compile.
 
+70. **Policy engine: match how plants are zoned -- Grok gap #1, first
+    increment (prerequisite refactor + Phase 1 + Phase 2 of a 6-phase
+    plan).** An external AI reviewer ("Grok") gave Jurgen a ten-item
+    improvement list; he asked to work through it in order, starting with
+    item 1 verbatim: bring UDP/raw-Ethernet/non-IP conduits into pass/fail
+    evaluation instead of `skipped_non_tcp`, add VLAN/QinQ/MAC/hostname/
+    Purdue-level zones instead of only IPv4 CIDR, add operation-level
+    read/write direction, model multi-homed assets and jump hosts as
+    first-class objects, and add iDMZ/IT-OT-crossing as a stricter-by-
+    default conduit type. This is a large item, planned up front as a full
+    6-phase design (Plan Mode, four `AskUserQuestion` decisions from
+    Jurgen, written up and approved before any code) and delivered in
+    checkpointed increments rather than one giant patch; this entry covers
+    the first increment: the prerequisite `Zone`/`Conduit` "kind" refactor,
+    Phase 1 (cheap independent wins), and Phase 2 (hostname zones). Phases
+    3-6 (BACnet/IP and CIP I/O UDP flow evaluation, operation-level
+    read/write function classification, source-MAC restriction on VLAN
+    conduits, and multi-homed-asset/jump-host modeling) are approved and
+    scoped but **not yet started** -- no code, fixtures, tests, or docs for
+    them exist yet.
+
+    **Prerequisite refactor.** `Zone::is_vlan_zone` (a bool, sufficient for
+    exactly two addressing kinds) became `Zone::kind`, a new
+    `enum class ZoneKind { Cidr, Vlan, Hostname }`, with `Conduit::
+    is_vlan_conduit` similarly becoming `Conduit::kind` (a conduit's kind is
+    still fully determined by its zones' shared kind -- mixed-kind conduits
+    are still rejected, now a 3-way check). Every call site that branched on
+    the old bool was mechanically updated to compare against
+    `ZoneKind::Vlan`. Zero behavioral change, verified by running the full
+    pre-existing CTest suite before and after the refactor (1990/1990 both
+    times, ignoring this item's own new tests).
+
+    **Phase 1 -- cheap, independent wins.**
+    - *IPv6 flow misclassification fix*: a TCP-over-IPv6 flow used to fall
+      into `FlowVerdict::Unclassified` with the same generic "no declared
+      zone contains" reason text as an ordinary unmatched IPv4 flow --
+      silently indistinguishable from a real zoning gap. `PolicyEngine::
+      finish()` now recognizes an IPv6-formatted address (a `:` in the
+      string) when the IPv4 parse fails and emits a distinct reason ("...is
+      an IPv6 address; policy zoning does not support IPv6 yet"). The
+      verdict itself is unchanged -- this is a reason-string clarification,
+      not a new outcome, so `verdict_name()`, the `*_count()` helpers, and
+      both report writers needed no changes.
+    - *Purdue-level zone labels*: an optional `purdue_level:` string on a
+      zone, purely informational, never read by matching logic. Shown
+      inline on zone names in the text report (`hmi_zone (Level 3) ->
+      plc_zone (Level 1)`) and as `client_zone_purdue_level`/
+      `server_zone_purdue_level` (flows) / `vlan_zone_purdue_level`
+      (Ethernet flows) in JSON, each omitted entirely when unset.
+    - *iDMZ / IT-OT crossing conduit type*: an optional `type: idmz` on a
+      conduit (the only recognized value so far). Since an unlisted zone
+      pair is already deny-by-default, "stricter" here is a validation
+      tightening rather than a runtime default change: an `idmz`-tagged
+      conduit may not combine `protocols: [any]` with an empty/omitted
+      `functions` list -- an IT/OT boundary must name what it permits
+      explicitly. Every `idmz`-tagged conduit gets its own "IT-OT CROSSING
+      CONDUITS" section in both report formats (text section; `idmz_
+      conduits[]` JSON array, `{name, exercised}` per conduit), appended as
+      the new true-last JSON field after `notable_protocols`.
+
+    Both Phase 1 features are fully inert for any policy that never sets
+    `purdue_level:` or `type: idmz` -- verified byte-identical output on
+    every pre-existing fixture.
+
+    **Phase 2 -- hostname zones.** `Zone::kind` gains `ZoneKind::Hostname`;
+    a zone declares `hostnames: [...]`, mutually exclusive with `networks:`/
+    `vlans:` (a zone naming more than one of the three is now a load-time
+    error). A hostname zone behaves like a CIDR zone, not a VLAN zone -- a
+    hostname is just an alternate way to name an IP endpoint, so `ports`/
+    `bidirectional`/`functions` all stay meaningful, matched through the
+    same TCP-flow path, never the Ethernet path. Matching is a fallback:
+    `PolicyEngine::finish()` tries the existing CIDR `zone_for(ip)` lookup
+    first, and only on a miss, only when `policy.has_hostname_zone()`,
+    tries resolving the IP to a hostname and looking that up -- requiring
+    `finish()`'s signature to gain a `const Resolver&` parameter (previously
+    the resolver was only ever handed to the report writers, at render
+    time, well after verdicts were computed). Reproducibility -- the
+    concern that actually matters for a compliance verdict -- comes for
+    free: `Resolver::hostname()` already returns a value only when
+    `--resolve`/`--hosts FILE` were both given, is file-only, and never
+    performs live DNS (`resolver.hpp`'s own header comment calls this a
+    "considered decision, not open for reconsideration"), so hostname zones
+    needed no new CLI flag or file format. `run_policy_validate` gained one
+    load-time check: a policy declaring a hostname zone but not given both
+    `--resolve` and `--hosts` now fails fast with a clear fatal error
+    instead of silently matching nothing.
+
+    **Testing and docs.** 15 new CTest cases (`policy_purdue_level_*`,
+    `policy_idmz_conduit_*`/`policy_no_idmz_conduit_*`/`policy_error_idmz_*`,
+    `policy_ipv6_flow_gets_ipv6_specific_reason`, `policy_hostname_zone_*`,
+    `policy_error_zone_hostname_and_networks`, `policy_error_hostname_
+    overlap`, `policy_error_conduit_mixed_hostname_and_cidr`), each with new
+    `tests/policies/*.yaml` good/bad fixtures, reusing the existing
+    `tests/hosts_sample.txt` and `tests/sample_ipv6.pcap` fixtures rather
+    than inventing new ones. 4 pre-existing `PASS_REGULAR_EXPRESSION`
+    values needed updating for wording that's now accurate for a 3-way (not
+    2-way) zone-kind model -- an intentional message change, not a
+    regression. Full CTest suite: 2005/2005 (default build), 2081/2081
+    (ASan/UBSan build, including all 76 `fuzz_*_corpus_regression` cases) --
+    zero regressions elsewhere. Zero-warning rebuilds across the default,
+    `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF`, and MinGW-w64 cross-compile
+    configs. `docs/USER_GUIDE.md`'s POLICY FILE FORMAT and JSON report
+    schema sections cover every field and behavior above; `man/
+    conduitscope.1` needed no changes (no new CLI surface -- hostname-zone
+    gating reuses the pre-existing `--resolve`/`--hosts` flags).
+
+    Phases 3-6 -- BACnet/IP + CIP I/O UDP flow evaluation (opt-in per
+    conduit by protocol name), operation-level read/write function
+    classification (all five function-table protocols), source-MAC
+    restriction on VLAN conduits (GOOSE/SV/PROFINET-RT/EtherCAT publisher
+    restriction via `from_macs:`), and multi-homed assets/jump hosts as a
+    new optional `assets:` section -- remain approved and scoped in the
+    original plan but not yet implemented. QinQ zones remain explicitly
+    deferred pending the decoder-layer double-tag unwrap tracked under item
+    15's continuation, not part of this item.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

@@ -1,0 +1,13 @@
+# Two hostname zones sharing a hostname -- each hostname must belong to at most one zone (the
+# same "each address/VLAN/hostname belongs to at most one zone" rule as CIDR/VLAN overlap).
+zones:
+  zone_a:
+    hostnames: [plc-01]
+  zone_b:
+    hostnames: [plc-01]
+
+conduits:
+  - name: "c1"
+    from: zone_a
+    to: zone_b
+    protocols: [modbus]

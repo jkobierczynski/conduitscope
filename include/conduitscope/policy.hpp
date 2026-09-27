@@ -10,13 +10,14 @@
 // Policy parsed here; this file only parses and validates the policy
 // document itself, independent of any capture.
 //
-// A zone is built from ONE of two addressing schemes, mutually exclusive
-// per zone (ROADMAP item 15):
+// A zone is built from ONE of three addressing schemes, mutually exclusive
+// per zone (ROADMAP item 15, extended by the "match how plants are zoned"
+// work -- see docs/DEVELOPMENT.md):
 //   - IPv4 CIDR blocks (`networks:`) -- the original, TCP-flow-oriented
 //     model, matched against a flow's client/server IP by PolicyEngine.
 //   - VLAN membership (`vlans:`) -- for the four protocols with no IP layer
 //     at all (PROFINET RT, GOOSE, Sampled Values, EtherCAT -- see
-//     docs/MANUAL.md's POLICY FILE FORMAT "Addressing scope" section for why
+//     docs/USER_GUIDE.md's POLICY FILE FORMAT "Addressing scope" section for why
 //     a CIDR zone doesn't apply to them). A VLAN zone answers a genuinely
 //     different question than an IP zone does: not "is this flow allowed
 //     from zone A to zone B" (there is no router in the picture -- none of
@@ -36,6 +37,23 @@
 //     protocol with no TCP/UDP layer at all (ports, functions) or no
 //     client/server session concept (bidirectional). See
 //     PolicyEngine::observe's own comment for how this is evaluated.
+//   - Hostnames (`hostnames:`) -- an alternate way to name an IP endpoint, not
+//     a fourth kind of traffic: a hostname-zone conduit behaves exactly like
+//     a CIDR-zone conduit (ports/bidirectional/functions all meaningful,
+//     matched through the same TCP/UDP FlowReport path) and is evaluated
+//     ONLY once a CIDR-zone lookup for that flow's endpoint misses (see
+//     PolicyEngine::finish). Matching requires a Resolver whose hostname
+//     source is a pinned, operator-supplied `--hosts FILE` (never live DNS --
+//     see resolver.hpp's own file header for why): `policy validate` fails
+//     fast, before evaluating anything, if a policy declares a hostname
+//     zone but `--resolve`/`--hosts` were not both given, rather than
+//     silently matching nothing. This keeps a compliance verdict
+//     reproducible run-to-run, which a live DNS lookup could never be.
+//
+// `Zone::kind`/`Conduit::kind` (see below) is the explicit discriminator for
+// which of the three a given zone/conduit is -- never inferred from which
+// vector happens to be non-empty -- so every place that needs to branch on
+// zone kind (Conduit validation, PolicyEngine's dispatch) says so plainly.
 //
 // The file format is YAML-*compatible* but deliberately not general YAML --
 // see yaml_mini.hpp for exactly which subset is parsed, and why a purpose-
@@ -87,17 +105,32 @@ std::optional<CidrBlock> parse_cidr(const std::string& text);
 constexpr int kMinVlanId = 1;
 constexpr int kMaxVlanId = 4094;
 
+// Which of the three mutually-exclusive addressing schemes a Zone/Conduit uses -- see this file's
+// own header comment for what each means. A bool sufficed while there were only two (Cidr/Vlan);
+// this became a proper enum once Hostname was added, so every 2-way branch on the old
+// `is_vlan_zone`/`is_vlan_conduit` bool became a 3-way branch on `kind` instead (mechanical,
+// zero-behavior-change refactor -- see docs/DEVELOPMENT.md).
+enum class ZoneKind { Cidr, Vlan, Hostname };
+
 struct Zone {
     std::string name;
     std::string description;  // optional; empty if not given
-    // Exactly one of `networks`/`vlans` is ever non-empty for a given zone -- parse_policy_text
-    // rejects a zone declaring both or neither. `is_vlan_zone` is the explicit discriminator
-    // (rather than callers inferring it from which vector is non-empty) so every place that needs
-    // to branch on zone kind (Conduit validation, PolicyEngine's IP-vs-VLAN dispatch) says so
-    // plainly. See this file's own header comment for why a zone is one or the other, never both.
-    bool is_vlan_zone = false;
+    // Exactly one of `networks`/`vlans`/`hostnames` is ever non-empty for a given zone --
+    // parse_policy_text rejects a zone declaring more than one or none. `kind` is the explicit
+    // discriminator (rather than callers inferring it from which vector is non-empty) so every
+    // place that needs to branch on zone kind (Conduit validation, PolicyEngine's dispatch) says so
+    // plainly. See this file's own header comment for why a zone is exactly one of the three.
+    ZoneKind kind = ZoneKind::Cidr;
     std::vector<CidrBlock> networks;
     std::vector<uint16_t> vlans;
+    std::vector<std::string> hostnames;  // ZoneKind::Hostname only -- lowercase not enforced (matched
+                                          // case-sensitively against the Resolver's hosts-file entries,
+                                          // which themselves preserve the file's own casing)
+    // Optional, purely informational Purdue Enterprise Reference Architecture level label (e.g. "0",
+    // "1", "2", "3", "3.5", "4") -- never read by any matching logic in PolicyEngine, just carried
+    // through to reports so an auditor sees each zone's declared level alongside its name. Empty
+    // (the default) when the policy file's zone doesn't set `purdue_level:`.
+    std::string purdue_level;
     int line = 0;  // policy-file line the zone was declared on, for PolicyEngine reports
 };
 
@@ -124,8 +157,8 @@ struct Zone {
 // section. The four newest names (profinet/goose/sv/ethercat -- ROADMAP item
 // 15) are a DIFFERENT kind of protocol entirely: they ride raw Ethernet with
 // no IP layer at all, so they can only ever appear in a conduit whose
-// `from_zones`/`to_zones` are ALL VLAN zones (Zone::is_vlan_zone), never
-// mixed with a CIDR zone, and never alongside any of the TCP-only protocol
+// `from_zones`/`to_zones` are ALL VLAN zones (Zone::kind == ZoneKind::Vlan), never
+// mixed with a CIDR or hostname zone, and never alongside any of the TCP-only protocol
 // names above (parse_policy_text rejects both combinations) -- see
 // policy.hpp's own header comment and Zone's comment for the full VLAN-zone
 // model. `ports` is the set of TCP ports this conduit
@@ -161,12 +194,27 @@ struct Conduit {
     std::vector<std::string> protocols;
     std::vector<uint16_t> ports;
     bool bidirectional = false;
-    // True when every zone in from_zones/to_zones is a VLAN zone (Zone::is_vlan_zone) -- set once,
-    // at parse time, by parse_policy_text's own zone-kind-consistency check, rather than
+    // The kind shared by every zone in from_zones/to_zones (ZoneKind::Vlan/Cidr/Hostname) -- set
+    // once, at parse time, by parse_policy_text's own zone-kind-consistency check, rather than
     // PolicyEngine re-deriving it by looking up each zone name every time a flow is matched against
-    // this conduit. false means every zone is a CIDR zone instead -- parse_policy_text rejects a
-    // conduit that mixes the two kinds, so this is a genuine either/or, never ambiguous.
-    bool is_vlan_conduit = false;
+    // this conduit. parse_policy_text rejects a conduit that mixes kinds, so this is a genuine
+    // either/or/or, never ambiguous. A Hostname-zone conduit is matched exactly like a Cidr-zone
+    // conduit (see policy.hpp's own header comment) -- `kind` still distinguishes them because
+    // Cidr/Hostname zone lookups themselves are different (Policy::zone_for vs.
+    // Policy::zone_for_hostname), even though the surrounding conduit-matching logic in
+    // PolicyEngine::finish is shared between the two.
+    ZoneKind kind = ZoneKind::Cidr;
+
+    // Optional conduit classification, from an optional `type:` key. Only one recognized value
+    // today, "idmz" (case-insensitive; stored lowercased) -- marks a conduit as an IT-OT/iDMZ
+    // crossing. Purely additive: empty (the default -- no `type:` given) behaves exactly as before
+    // this field existed. An "idmz"-tagged conduit gets ONE extra validation rule (see
+    // parse_policy_text: 'protocols: [any]' combined with an empty 'functions' list is rejected,
+    // forcing an explicit protocol list at a declared IT/OT boundary) and its own "IT-OT CROSSING
+    // CONDUITS" report section (see write_policy_report_text/_json) -- never a different runtime
+    // default-deny posture, since an unmatched zone pair is already a Violation regardless of this
+    // field (see PolicyEngine::finish).
+    std::string conduit_type;
 
     // Optional allow-list of function/service names this conduit permits WITHIN its single
     // protocol -- e.g. only "Read Holding Registers" on an otherwise-permitted Modbus conduit, not
@@ -213,6 +261,19 @@ struct Policy {
     // otherwise-COMPLIANT capture NON-COMPLIANT just because it happens to also contain some
     // PROFINET RT/GOOSE/SV/EtherCAT traffic the policy's author never intended to address at all.
     bool has_vlan_zone() const;
+
+    // Same idea again for a hostname zone: returns the zone whose `hostnames` list contains
+    // `hostname` (exact, case-sensitive match against the Resolver-supplied name), or nullptr if no
+    // declared hostname zone does. parse_policy_text rejects any policy where two hostname zones
+    // share a hostname. Never called with an empty string -- see PolicyEngine::finish's own
+    // comment for when a hostname lookup even happens.
+    const Zone* zone_for_hostname(const std::string& hostname) const;
+
+    // True if at least one declared zone is a hostname zone -- mirrors has_vlan_zone's own
+    // backward-compatibility purpose: PolicyEngine only ever attempts a hostname lookup (which
+    // requires --resolve/--hosts, see policy.hpp's own header comment) when this is true, so a
+    // policy with no hostname zone is entirely unaffected by whether those flags were given.
+    bool has_hostname_zone() const;
 };
 
 struct PolicyError : std::runtime_error {
@@ -225,17 +286,20 @@ struct PolicyError : std::runtime_error {
 // known, else "<source_name>: <message>". Throws PolicyError on:
 //   - a YAML-subset syntax problem (propagated from yaml_mini::YamlError)
 //   - a missing top-level 'zones' or 'conduits' key, or either being empty
-//   - a zone with neither 'networks' nor 'vlans', or a zone declaring BOTH --
-//     each zone is exactly one kind (see this file's own header comment)
+//   - a zone declaring none of 'networks'/'vlans'/'hostnames', or more than
+//     one of them -- each zone is exactly one kind (see this file's own
+//     header comment)
 //   - a zone's 'networks' containing a value that isn't a valid CIDR/address
 //   - a zone's 'vlans' containing a value that isn't an integer in
 //     [kMinVlanId, kMaxVlanId] ([1, 4094] -- VID 0 and 4095 are reserved,
 //     see kMinVlanId/kMaxVlanId's own comment)
-//   - two CIDR zones whose networks overlap (see cidr_overlaps), or two VLAN
-//     zones sharing a VLAN ID -- the same "each address/VLAN belongs to at
-//     most one zone" rule, checked separately per zone kind (a CIDR zone and
-//     a VLAN zone can never overlap with each other, having no addressing
-//     scheme in common)
+//   - a zone's 'hostnames' containing an empty value
+//   - two zones of the SAME kind overlapping/duplicating: two CIDR zones
+//     whose networks overlap (see cidr_overlaps), two VLAN zones sharing a
+//     VLAN ID, or two hostname zones sharing a hostname -- the same "each
+//     address/VLAN/hostname belongs to at most one zone" rule, checked
+//     separately per zone kind (zones of different kinds can never overlap
+//     with each other, having no addressing scheme in common)
 //   - a zone literally named "unclassified" -- that name is reserved for
 //     traffic PolicyEngine finds matches no declared zone; declaring it
 //     explicitly would make that reporting ambiguous
@@ -244,15 +308,19 @@ struct PolicyError : std::runtime_error {
 //     contains a zone name that isn't declared in 'zones' (each entry of a
 //     list 'from'/'to' is checked, not just the first)
 //   - a conduit's 'from'/'to' list being empty (e.g. 'from: []')
-//   - a conduit's 'from'/'to' zones mixing CIDR zones and VLAN zones -- every
+//   - a conduit's 'from'/'to' zones mixing zones of different kinds -- every
 //     zone a conduit references, on either side, must be the same kind
 //   - a conduit's protocol not in {modbus, dnp3, s7comm, iec104, enip, bacnet, hartip, opcua, mms,
 //     mqtt, ffhse, profinet, goose, sv, ethercat, any}
-//   - a CIDR-zone conduit naming 'profinet'/'goose'/'sv'/'ethercat' (they have no IP layer and can
-//     never appear on an IP-zone conduit), or a VLAN-zone conduit naming any of the eleven
-//     TCP-only protocol names above (they have no VLAN-only wire presence a VLAN-zone conduit
-//     could ever match) -- 'any' is accepted on either kind, scoped to whichever protocols that
-//     zone kind can actually match
+//   - a CIDR- or hostname-zone conduit naming 'profinet'/'goose'/'sv'/'ethercat' (they have no IP
+//     layer and can never appear on anything but a VLAN-zone conduit), or a VLAN-zone conduit
+//     naming any of the eleven TCP-only protocol names above (they have no VLAN-only wire presence
+//     a VLAN-zone conduit could ever match) -- 'any' is accepted on any kind, scoped to whichever
+//     protocols that zone kind can actually match
+//   - a conduit whose 'type' isn't 'idmz' (the only recognized value so far), or an 'idmz'-typed
+//     conduit whose 'protocols' resolves to 'any' while 'functions' is empty/omitted -- an "any
+//     protocol, no functions restriction" conduit at a declared IT-OT/iDMZ boundary is rejected,
+//     forcing the policy author to be explicit about exactly what may cross it
 //   - a VLAN-zone conduit's 'from' and 'to' naming a different set of zones -- see policy.hpp's
 //     Conduit::from_zones/to_zones comment for why a VLAN-zone conduit models "permitted on this
 //     zone," not a directional flow between two zones

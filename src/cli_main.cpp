@@ -1205,6 +1205,20 @@ int run_policy_validate(const std::string& input, const std::string& interface_n
             for (const auto& note : resolver_notes) diag << "note: " << note << "\n";
         }
 
+        // A hostname zone (policy.hpp's ZoneKind::Hostname) can only ever be matched against a
+        // pinned, operator-supplied hosts file -- never live DNS (see resolver.hpp's own file
+        // header for why, and policy.hpp's own header comment for the reproducibility this buys a
+        // compliance verdict). Fail fast, before opening the packet source, rather than silently
+        // matching nothing against every hostname zone for the whole run.
+        if (policy.has_hostname_zone() && !(resolve_hostnames && !hosts_path.empty())) {
+            std::cerr << "error: " << policy_path
+                      << " declares one or more hostname zones, but --resolve/--hosts were not both "
+                         "given -- hostname-zone matching requires a pinned hosts file (see "
+                         "docs/USER_GUIDE.md's POLICY FILE FORMAT section); it is never resolved via "
+                         "live DNS\n";
+            return 1;
+        }
+
         DecodeOptions options;
         options.strict = strict;
         options.limits = build_resource_limits(limit_vars);
@@ -1235,7 +1249,7 @@ int run_policy_validate(const std::string& input, const std::string& interface_n
         // interface (input is empty in that case, having been mutually exclusive with -i), not a
         // file path.
         std::string capture_label = interface_name.empty() ? input : "live:" + interface_name;
-        PolicyReport report = engine.finish();
+        PolicyReport report = engine.finish(resolver);
         if (format == "json") {
             write_policy_report_json(*out, report, policy, capture_label, policy_path, resolver);
         } else {

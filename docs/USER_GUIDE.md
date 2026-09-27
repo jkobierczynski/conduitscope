@@ -746,6 +746,7 @@ Two required top-level keys:
 zones:
   <zone name>:
     description: "<optional free text>"
+    purdue_level: "<optional free text, e.g. \"1\", \"3.5\">"  # optional; informational only, see below
     networks:                               # an IPv4 zone --
       - <IPv4 address or CIDR block>        # for modbus/dnp3/s7comm/iec104/enip/
       - <...>                               # bacnet/hartip/opcua/mms/mqtt/ffhse
@@ -756,38 +757,128 @@ zones:
                                              # for profinet/goose/sv/ethercat
   <zone name>:
     vlan: <VLAN ID>                         # singular alias, for a one-VLAN zone
+  <zone name>:
+    hostnames: [<hostname>, <...>]          # a hostname zone instead -- matched like an IPv4
+                                             # zone, but by a pinned --hosts file, see below
+  <zone name>:
+    hostname: <hostname>                    # singular alias, for a one-hostname zone
 
 conduits:
   - name: "<conduit name>"
     description: "<optional free text>"
+    type: idmz                              # optional; marks an IT-OT/iDMZ boundary crossing,
+                                             # see "iDMZ / IT-OT crossing conduits" below
     from: <zone name or [zone name, ...]>
     to: <zone name or [zone name, ...]>     # VLAN-zone conduit: must be the exact
                                              # same zone(s) as 'from' -- see "Conduits" below
     protocols: [<modbus | dnp3 | s7comm | iec104 | enip | bacnet | hartip | opcua | mms | mqtt | ffhse | profinet | goose | sv | ethercat | any>, <...>]
-    ports: [<port>, <...>]                  # omit entirely to mean "any port"; IPv4-zone conduits only
-    bidirectional: <true | false>           # default: false; IPv4-zone conduits only
-    functions: [<function/service name>, <...>]  # optional; see "Function-level restrictions" below; IPv4-zone conduits only
+    ports: [<port>, <...>]                  # omit entirely to mean "any port"; IPv4/hostname-zone conduits only
+    bidirectional: <true | false>           # default: false; IPv4/hostname-zone conduits only
+    functions: [<function/service name>, <...>]  # optional; see "Function-level restrictions" below; IPv4/hostname-zone conduits only
 ```
 
-**Zones.** Each zone name maps to EITHER one or more IPv4 CIDR blocks
-(`10.10.10.0/24`) or bare addresses (`10.10.10.5`, treated as `/32`), under
-`networks`, OR one or more VLAN IDs (`1`-`4094`), under `vlans` (singular
-alias `vlan`, for a one-VLAN zone) -- never both on the same zone, and never
-neither. Which kind a zone is drives which protocols a conduit referencing it
-can name (see "Conduits" below): `networks` zones classify
+**Zones.** Each zone name maps to EXACTLY ONE of: one or more IPv4 CIDR
+blocks (`10.10.10.0/24`) or bare addresses (`10.10.10.5`, treated as `/32`),
+under `networks`; one or more VLAN IDs (`1`-`4094`), under `vlans` (singular
+alias `vlan`, for a one-VLAN zone); or one or more hostnames, under
+`hostnames` (singular alias `hostname`, for a one-hostname zone) -- never
+more than one of the three on the same zone, and never none of them. Which
+kind a zone is drives which protocols a conduit referencing it can name (see
+"Conduits" below): `networks` and `hostnames` zones both classify
 modbus/dnp3/s7comm/iec104/enip/bacnet/hartip/opcua/mms/mqtt/ffhse traffic by
-IPv4 address, the way this file always has; `vlans` zones classify
-profinet/goose/sv/ethercat traffic -- the four protocols with no IP layer at
-all -- by which VLAN the frame was tagged with instead (docs/DEVELOPMENT.md's ROADMAP item 15; see
-"Addressing scope" below for the full rationale). At least one zone is
-required. **No two zones of the same kind may claim the same address or
-VLAN** -- `policy validate` needs to say definitively which single zone a
-packet belongs to, so overlap within a kind is rejected at load time, not
-silently resolved by declaration order (an IPv4 zone and a VLAN zone can
-never overlap with each other, having no addressing scheme in common, so
-only same-kind pairs are checked). An address or VLAN matching no declared
-zone is reported as the reserved zone name `unclassified` (which you
-therefore can't declare yourself -- see "Validation errors" below).
+IPv4 address (a `hostnames` zone just identifies that address by a name
+instead of a CIDR block -- see "Hostname zones" below for exactly how);
+`vlans` zones classify profinet/goose/sv/ethercat traffic -- the four
+protocols with no IP layer at all -- by which VLAN the frame was tagged with
+instead (docs/DEVELOPMENT.md's ROADMAP item 15; see "Addressing scope" below
+for the full rationale). At least one zone is required. **No two zones of
+the same kind may claim the same address, VLAN, or hostname** --
+`policy validate` needs to say definitively which single zone a packet
+belongs to, so overlap within a kind is rejected at load time, not silently
+resolved by declaration order (zones of different kinds can never overlap
+with each other, having no addressing scheme in common, so only same-kind
+pairs are checked). An address or VLAN matching no declared zone is reported
+as the reserved zone name `unclassified` (which you therefore can't declare
+yourself -- see "Validation errors" below).
+
+A zone may also carry an optional `purdue_level` (e.g. `"1"`, `"2"`,
+`"3.5"`) -- a free-text label recording that zone's declared Purdue
+Enterprise Reference Architecture level. It's purely informational: never
+read by any matching logic, just carried through to both the text and JSON
+reports (as `client_zone_purdue_level`/`server_zone_purdue_level` on each
+flow, `vlan_zone_purdue_level` on each Ethernet flow -- omitted entirely
+when unset, and absent from the text report's `zones: ... -> ...` line the
+same way) so an auditor sees each zone's declared level alongside its name
+without cross-referencing the policy file by hand.
+
+### Hostname zones
+
+A `hostnames` zone identifies an IPv4 endpoint by name instead of by CIDR
+block, but is matched through the exact same TCP-flow path a `networks` zone
+is -- `ports`, `bidirectional`, and `functions` all apply to it exactly as
+they do to an IPv4-zone conduit (see "Conduits" above); it is NOT the VLAN
+model. A flow's client/server IP is looked up against `networks` zones
+first; only on a miss, and only when the policy declares at least one
+hostname zone, is a hostname lookup attempted at all -- a policy using only
+`networks`/`vlans` zones is completely unaffected by this feature.
+
+That hostname lookup is **never live DNS** -- it reuses the exact same
+`--resolve`/`--hosts FILE` mechanism `decode` and `policy validate`'s own
+report annotations already use (see "Name resolution (`--resolve`, `--hosts`,
+`--nn`, `--services`)" below and `resolver.hpp`'s own file header), which is
+file-only by deliberate, permanent design: a live DNS lookup would touch the
+network while auditing traffic that was very often captured specifically
+because the network shouldn't be touched carelessly, and would make a
+compliance verdict non-reproducible run to run as DNS records change. A
+policy declaring a hostname zone therefore REQUIRES both `--resolve` and
+`--hosts FILE` to be given -- `policy validate` fails fast, before reading
+any packets, if either is missing:
+
+```
+error: policy.yaml declares one or more hostname zones, but --resolve/--hosts were not both
+given -- hostname-zone matching requires a pinned hosts file (see docs/USER_GUIDE.md's POLICY
+FILE FORMAT section); it is never resolved via live DNS
+```
+
+An IP with no entry in the `--hosts` file simply doesn't match any hostname
+zone (the same "a miss adds nothing" posture the rest of this file's
+Resolver-derived annotations already have) -- it isn't an error, and the
+flow falls through to `unclassified` exactly as an address outside every
+`networks` zone would.
+
+### iDMZ / IT-OT crossing conduits
+
+An optional `type: idmz` on a conduit marks it as a declared IT-OT or
+industrial DMZ boundary crossing. This doesn't change the underlying
+deny-by-default behavior (an unmatched zone pair is already a `Violation`
+regardless of `type`) -- instead, it holds THAT conduit to one extra,
+stricter validation rule: an `idmz`-typed conduit cannot combine
+`protocols: [any]` with an empty/omitted `functions` list, forcing the
+policy author to name exactly which protocol(s) (and, where a known
+function table exists, functions) may cross it, rather than leaving it a
+blanket allow:
+
+```
+error: policy.yaml:N: conduit '<name>': an 'idmz'-typed conduit cannot use 'protocols: [any]'
+with no 'functions' restriction -- a declared IT-OT/iDMZ crossing must name exactly which
+protocol(s) (and, where supported, functions) it permits
+```
+
+Every `idmz`-typed conduit is also called out together in its own report
+section, regardless of allowed/violation/unclassified status, so an auditor
+doesn't have to hunt through the general conduit list to find every declared
+IT/OT boundary crossing:
+
+```
+IT-OT CROSSING CONDUITS (1):
+  Conduits declared 'type: idmz' -- IT/OT or iDMZ boundary crossings, held to a stricter
+  validation bar (no unrestricted 'protocols: any' with no 'functions' restriction).
+  - HMI polls PLC via Modbus (iDMZ crossing): exercised by this capture
+```
+
+`type` is the only per-conduit classification recognized so far; `idmz` is
+the only recognized value. A policy that never sets `type` is completely
+unaffected -- no extra validation rule, no report section printed at all.
 
 **Conduits.** Each conduit permits one or more protocols, on one or more
 ports (or any port, if `ports` is omitted), from a set of one or more zones
@@ -1399,10 +1490,12 @@ and appear on every report regardless of whether any conduit actually uses
 
 ### Notable IT protocols (docs/DEVELOPMENT.md's ROADMAP item 18)
 
-**`notable_protocols[]`** -- appended last, after every other field (the
-same "no established JSON-shape test anchored on an earlier field needs to
-change" convention `direction_source`'s own addition above followed) --
-always present, one entry per distinct (protocol, client/server or MAC
+**`notable_protocols[]`** -- appended after every field that existed when
+it was added (the same "no established JSON-shape test anchored on an
+earlier field needs to change" convention `direction_source`'s own addition
+above followed; `idmz_conduits[]`, documented further below, is the true
+last field today) -- always present, one entry per distinct (protocol,
+client/server or MAC
 pair, port) combination of one of the 43 "IT protocols an OT auditor
 flags" (RDP/VNC/TeamViewer/AnyDesk/Zoom; SMB/SSH/HTTP/HTTPS/SNMP/Telnet/
 FTP/TFTP/QUIC; NTP/DHCP/LDAP/LDAPS/RADIUS/TACACS+/EAPOL; CAPWAP control+data/
@@ -1468,16 +1561,74 @@ protocols to draw a confirmed direction from -- every entry there is the
 same port-heuristic guess) -- see the `inventory` section's own "Notable IT
 protocols" subsection below.
 
+### Purdue-level labels, `conduit_type`, and IT-OT crossing conduits
+
+**`conduits[]`**'s per-conduit entries now also carry `conduit_type` (`null`
+when the policy didn't set `type:` on that conduit, `"idmz"` otherwise --
+see "iDMZ / IT-OT crossing conduits" above), appended after `functions`.
+
+**`client_zone_purdue_level`/`server_zone_purdue_level`** (per flow,
+appended after `direction_source`) and **`vlan_zone_purdue_level`** (per
+Ethernet flow, appended after `reason`) carry that flow's matched zone's
+declared `purdue_level` (see "Zones" above) -- OMITTED ENTIRELY, never
+`null`, when the matched zone didn't set one, the same "annotation, a miss
+adds nothing" convention every Resolver-derived field in this schema
+already follows.
+
+**`idmz_conduits[]`** -- now the last field in this report (appended after
+`notable_protocols`, which was the prior last field), always present, empty
+when the policy declares no `idmz`-typed conduit. One entry per such
+conduit, in declaration order:
+
+```json
+{
+  "name": "HMI polls PLC via Modbus (iDMZ crossing)",
+  "exercised": true
+}
+```
+
+`exercised` is `true` when that conduit matched at least one flow/Ethernet
+flow (i.e. it does NOT appear in `unexercised_conduits`), `false` otherwise
+-- see "iDMZ / IT-OT crossing conduits" above for the text-report
+equivalent.
+
+### Hostname zones and the IPv6-flow reason string
+
+A hostname-zone conduit's flows appear in `flows[]` exactly like any other
+IPv4-zone conduit's -- see "Hostname zones" above for the addressing model
+and the `--resolve`/`--hosts` requirement.
+
+An endpoint address that's IPv6-formatted (this decoder recognizes IPv6 on
+the wire -- docs/DEVELOPMENT.md's ROADMAP item 24 -- but `policy validate`'s
+zone matching is IPv4-only throughout, see "Addressing scope" below) gets
+its own, distinguishable `reason` text instead of the generic "no declared
+zone contains" wording used for an ordinary unmatched IPv4 address:
+
+```json
+"reason": "2001:db8::50 is an IPv6 address; policy zoning does not support IPv6 yet"
+```
+
+`verdict` stays `"unclassified"` either way -- this is a clarification of
+`reason`'s text, not a new verdict.
+
 ### Addressing scope: what a zone can (and can't yet) be built from
 
-Every zone in this file is a set of IPv4 CIDR blocks, full stop -- see
-"Zones" above and `policy.hpp`'s own `CidrBlock`, a plain 32-bit
-host-order integer plus prefix length. There is no IPv6 anywhere in this
-tool (see `ipv4.hpp`'s own scope note), and no other layer-3 addressing
-scheme of any kind. This section is an honest accounting of what that
-means for the protocols `decode` recognizes but a zone can't classify by,
-and for the protocols a conduit can't yet name at all -- worth reading
-before assuming a conduit covers more than it actually does.
+A zone's underlying address matching is still IPv4-only throughout -- see
+"Zones" above and `policy.hpp`'s own `CidrBlock`, a plain 32-bit host-order
+integer plus prefix length. A `hostnames` zone (see "Hostname zones" above)
+just names an IPv4 address by a pinned hosts-file entry instead of writing
+the CIDR block directly; it doesn't add IPv6 support. There is no IPv6
+zone-matching anywhere in this tool (see `ipv4.hpp`'s own scope note) --
+`decode` itself DOES recognize IPv6 on the wire (docs/DEVELOPMENT.md's
+ROADMAP item 24), but a TCP flow between two IPv6 endpoints reaches
+`policy validate` only to be reported `unclassified`, with a `reason` that
+says plainly it's an unsupported address family (see "Hostname zones and
+the IPv6-flow reason string" above) rather than being silently
+indistinguishable from an ordinary unmatched IPv4 address. This section is
+an honest accounting of what all this means for the protocols `decode`
+recognizes but a zone can't classify by, and for the protocols a conduit
+can't yet name at all -- worth reading before assuming a conduit covers
+more than it actually does.
 
 **The `protocols` enum names twelve values** (docs/DEVELOPMENT.md's ROADMAP item 14, done):
 `modbus`, `dnp3`, `s7comm`, `iec104`, `enip`, `bacnet`, `hartip`, `opcua`,

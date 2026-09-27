@@ -415,7 +415,7 @@ void PolicyEngine::observe(const DecodedPacket& dp) {
     }
 }
 
-PolicyReport PolicyEngine::finish() const {
+PolicyReport PolicyEngine::finish(const Resolver& resolver) const {
     PolicyReport report;
     report.total_packets = total_packets_;
     report.skipped_non_tcp = skipped_non_tcp_;
@@ -442,17 +442,47 @@ PolicyReport PolicyEngine::finish() const {
         auto server_ip_u32 = parse_ipv4_string(fs.server_ip);
         const Zone* cz = client_ip_u32 ? policy_.zone_for(*client_ip_u32) : nullptr;
         const Zone* sz = server_ip_u32 ? policy_.zone_for(*server_ip_u32) : nullptr;
+        // Hostname-zone fallback: only attempted once a CIDR-zone lookup above missed, and only
+        // when the policy declares at least one hostname zone at all (see Policy::has_hostname_zone's
+        // own comment) -- a policy with no hostname zone is completely unaffected, the same
+        // backward-compatibility posture any_vlan_zone_ already established for VLAN zones. A
+        // hostname zone behaves like a CIDR zone for matching purposes (see policy.hpp's own header
+        // comment), so it fills in cz/sz exactly the same way, just from a different lookup.
+        if (!cz && client_ip_u32 && policy_.has_hostname_zone()) {
+            if (auto host = resolver.hostname(fs.client_ip)) cz = policy_.zone_for_hostname(*host);
+        }
+        if (!sz && server_ip_u32 && policy_.has_hostname_zone()) {
+            if (auto host = resolver.hostname(fs.server_ip)) sz = policy_.zone_for_hostname(*host);
+        }
         fr.client_zone = cz ? cz->name : "unclassified";
         fr.server_zone = sz ? sz->name : "unclassified";
+        fr.client_zone_purdue_level = cz ? cz->purdue_level : std::string();
+        fr.server_zone_purdue_level = sz ? sz->purdue_level : std::string();
 
         if (!cz || !sz) {
             fr.verdict = FlowVerdict::Unclassified;
-            std::ostringstream reason;
-            reason << "no declared zone contains ";
-            if (!cz && !sz) reason << fr.client_ip << " or " << fr.server_ip;
-            else if (!cz) reason << fr.client_ip;
-            else reason << fr.server_ip;
-            fr.reason = reason.str();
+            // An IPv6-formatted address (format_ipv6's colon-separated form -- this codebase's
+            // zone/CIDR matching is IPv4-only throughout, see policy.hpp's parse_cidr) gets its own,
+            // honest reason instead of the generic "no declared zone contains" text, which would
+            // otherwise be indistinguishable from an ordinary unclassified IPv4 address -- see
+            // docs/USER_GUIDE.md's LIMITATIONS section.
+            auto describe_unmatched = [](const std::string& ip) {
+                if (ip.find(':') != std::string::npos) {
+                    return ip + " is an IPv6 address; policy zoning does not support IPv6 yet";
+                }
+                return std::string("no declared zone contains ") + ip;
+            };
+            if (!cz && !sz) {
+                if (fr.client_ip.find(':') != std::string::npos || fr.server_ip.find(':') != std::string::npos) {
+                    fr.reason = describe_unmatched(fr.client_ip) + "; " + describe_unmatched(fr.server_ip);
+                } else {
+                    fr.reason = "no declared zone contains " + fr.client_ip + " or " + fr.server_ip;
+                }
+            } else if (!cz) {
+                fr.reason = describe_unmatched(fr.client_ip);
+            } else {
+                fr.reason = describe_unmatched(fr.server_ip);
+            }
         } else if (fs.protocols.empty()) {
             fr.verdict = FlowVerdict::Unclassified;
             fr.reason = "no recognized OT protocol traffic was found on this flow (" +
@@ -543,6 +573,7 @@ PolicyReport PolicyEngine::finish() const {
 
         const Zone* vz = es.has_vlan_tag ? policy_.zone_for_vlan(es.vlan_id) : nullptr;
         er.vlan_zone = vz ? vz->name : "unclassified";
+        er.vlan_zone_purdue_level = vz ? vz->purdue_level : std::string();
 
         if (!vz) {
             er.verdict = FlowVerdict::Unclassified;
@@ -552,7 +583,7 @@ PolicyReport PolicyEngine::finish() const {
         } else {
             const Conduit* matched = nullptr;
             for (const auto& c : policy_.conduits) {
-                if (!c.is_vlan_conduit) continue;
+                if (c.kind != ZoneKind::Vlan) continue;
                 if (!zone_list_contains(c.from_zones, er.vlan_zone)) continue;
                 bool protocols_ok = std::find(c.protocols.begin(), c.protocols.end(), er.protocol) != c.protocols.end() ||
                                      std::find(c.protocols.begin(), c.protocols.end(), "any") != c.protocols.end();
@@ -694,7 +725,11 @@ void write_unclassified_flow_group_summarized_text(std::ostream& out, const std:
         if (auto s = resolver.service_name(f.server_port, "tcp")) out << " (" << *s << ")";
         if (!f.protocols.empty()) out << "  (" << protocol_list_text(f.protocols) << ")";
         out << "  -- " << g.flow_count << " flow(s), " << g.packet_total << " packet(s) total\n";
-        out << "      zones: " << f.client_zone << " -> " << f.server_zone << "\n";
+        out << "      zones: " << f.client_zone;
+        if (!f.client_zone_purdue_level.empty()) out << " (Level " << f.client_zone_purdue_level << ")";
+        out << " -> " << f.server_zone;
+        if (!f.server_zone_purdue_level.empty()) out << " (Level " << f.server_zone_purdue_level << ")";
+        out << "\n";
         if (f.has_mac) {
             out << "      mac: " << f.client_mac;
             if (auto v = resolver.oui_vendor(f.client_mac)) out << " (" << *v << ")";
@@ -736,7 +771,10 @@ void write_flow_group_text(std::ostream& out, const std::vector<const FlowReport
         if (auto s = resolver.service_name(f.server_port, "tcp")) out << " (" << *s << ")";
         if (!f.protocols.empty()) out << "  (" << protocol_list_text(f.protocols) << ", " << f.packet_count << " packet(s))";
         else out << "  (" << f.packet_count << " packet(s), no recognized protocol)";
-        out << "\n      zones: " << f.client_zone << " -> " << f.server_zone;
+        out << "\n      zones: " << f.client_zone;
+        if (!f.client_zone_purdue_level.empty()) out << " (Level " << f.client_zone_purdue_level << ")";
+        out << " -> " << f.server_zone;
+        if (!f.server_zone_purdue_level.empty()) out << " (Level " << f.server_zone_purdue_level << ")";
         if (f.verdict == FlowVerdict::Allowed) {
             out << ", matched conduit \"" << f.matched_conduit << "\"";
         }
@@ -778,6 +816,7 @@ void write_ethernet_flow_group_text(std::ostream& out, const std::vector<const E
         out << "  (" << f.protocol << ", " << f.packet_count << " packet(s))";
         out << "\n      vlan: " << (f.has_vlan_tag ? std::to_string(f.vlan_id) : std::string("(untagged)"))
             << ", zone: " << f.vlan_zone;
+        if (!f.vlan_zone_purdue_level.empty()) out << " (Level " << f.vlan_zone_purdue_level << ")";
         if (f.verdict == FlowVerdict::Allowed) {
             out << ", matched conduit \"" << f.matched_conduit << "\"";
         }
@@ -843,7 +882,9 @@ void write_unclassified_ethernet_flow_group_summarized_text(std::ostream& out,
         if (auto v = resolver.oui_vendor(f.mac_b)) out << " (" << *v << ")";
         out << "  (" << f.protocol << ")  -- " << g.flow_count << " flow(s), " << g.packet_total << " packet(s) total\n";
         out << "      vlan: " << (f.has_vlan_tag ? std::to_string(f.vlan_id) : std::string("(untagged)"))
-            << ", zone: " << f.vlan_zone << "\n";
+            << ", zone: " << f.vlan_zone;
+        if (!f.vlan_zone_purdue_level.empty()) out << " (Level " << f.vlan_zone_purdue_level << ")";
+        out << "\n";
         if (!f.reason.empty()) {
             out << "      " << f.reason << "\n";
         }
@@ -883,6 +924,34 @@ void write_notable_protocols_text(std::ostream& out, const PolicyReport& report,
         }
         out << "  (" << f.packet_count << " packet(s))\n";
     }
+}
+
+// Renders the "IT-OT CROSSING CONDUITS" callout -- every conduit tagged `type: idmz` (see
+// Conduit::conduit_type's own comment), regardless of allowed/violation/unclassified status,
+// listed together so an auditor's eye goes straight there instead of hunting through the general
+// conduit list. "exercised"/"unexercised" reuses report.unexercised_conduits (a conduit not in
+// that list was matched by at least one Allowed flow/L2 flow) rather than tracking separate state
+// -- this is purely a filtered view over data PolicyEngine::finish already computed. Prints
+// nothing at all (not even a header) when the policy declares no idmz-typed conduit, so a policy
+// that never uses this feature renders byte-for-byte identically to before it existed.
+void write_idmz_conduits_text(std::ostream& out, const PolicyReport& report, const Policy& policy) {
+    std::vector<const Conduit*> idmz_conduits;
+    for (const auto& c : policy.conduits) {
+        if (c.conduit_type == "idmz") idmz_conduits.push_back(&c);
+    }
+    if (idmz_conduits.empty()) return;
+
+    out << "IT-OT CROSSING CONDUITS (" << idmz_conduits.size() << "):\n";
+    out << "  Conduits declared 'type: idmz' -- IT/OT or iDMZ boundary crossings, held to a "
+           "stricter\n  validation bar (no unrestricted 'protocols: any' with no 'functions' "
+           "restriction).\n";
+    for (const auto* c : idmz_conduits) {
+        bool exercised = std::find(report.unexercised_conduits.begin(), report.unexercised_conduits.end(),
+                                    c->name) == report.unexercised_conduits.end();
+        out << "  - " << c->name << ": " << (exercised ? "exercised by this capture" : "not exercised by this capture")
+            << "\n";
+    }
+    out << "\n";
 }
 
 }  // namespace
@@ -978,6 +1047,8 @@ void write_policy_report_text(std::ostream& out, const PolicyReport& report, con
     }
     out << "\n";
 
+    write_idmz_conduits_text(out, report, policy);
+
     write_notable_protocols_text(out, report, resolver);
 }
 
@@ -1012,7 +1083,7 @@ void write_policy_report_json(std::ostream& out, const PolicyReport& report, con
         }
         out << "],\n";
         out << "      \"bidirectional\": " << (c.bidirectional ? "true" : "false") << ",\n";
-        out << "      \"is_vlan_conduit\": " << (c.is_vlan_conduit ? "true" : "false") << ",\n";
+        out << "      \"is_vlan_conduit\": " << (c.kind == ZoneKind::Vlan ? "true" : "false") << ",\n";
         out << "      \"protocols\": [";
         for (size_t j = 0; j < c.protocols.size(); ++j) {
             if (j) out << ", ";
@@ -1024,7 +1095,12 @@ void write_policy_report_json(std::ostream& out, const PolicyReport& report, con
             if (j) out << ", ";
             out << "\"" << json_escape(c.functions[j]) << "\"";
         }
-        out << "]\n";
+        out << "],\n";
+        // Appended last within this object -- see this function's own "appended last" convention
+        // for the top-level schema, applied here too. null (not omitted) when the conduit doesn't
+        // declare 'type:', since this is a fixed, always-present per-conduit summary field, not an
+        // annotation that can be legitimately absent the way a Resolver lookup miss is.
+        out << "      \"conduit_type\": " << (c.conduit_type.empty() ? "null" : ("\"" + json_escape(c.conduit_type) + "\"")) << "\n";
         out << "    }" << (i + 1 < policy.conduits.size() ? "," : "") << "\n";
     }
     out << "  ],\n";
@@ -1091,7 +1167,18 @@ void write_policy_report_json(std::ostream& out, const PolicyReport& report, con
         // DirectionSource's own comment (decoder.hpp) and docs/MANUAL.md's ROADMAP item 19. Appended
         // last, after every pre-existing field, so no established JSON-shape test anchored on an
         // earlier field's position in this object needs to change.
-        out << "      \"direction_source\": \"" << direction_source_name(f.direction_source) << "\"\n";
+        out << "      \"direction_source\": \"" << direction_source_name(f.direction_source) << "\"";
+        // Purdue-level labels (Zone::purdue_level) -- appended after direction_source, which was
+        // the prior last field in this object; omitted entirely (not emitted as null) when the
+        // matched zone didn't declare one, same "annotation, miss adds nothing" convention as the
+        // Resolver-derived fields above.
+        if (!f.client_zone_purdue_level.empty()) {
+            out << ",\n      \"client_zone_purdue_level\": \"" << json_escape(f.client_zone_purdue_level) << "\"";
+        }
+        if (!f.server_zone_purdue_level.empty()) {
+            out << ",\n      \"server_zone_purdue_level\": \"" << json_escape(f.server_zone_purdue_level) << "\"";
+        }
+        out << "\n";
         out << "    }" << (i + 1 < report.flows.size() ? "," : "") << "\n";
     }
     out << "  ],\n";
@@ -1121,7 +1208,13 @@ void write_policy_report_json(std::ostream& out, const PolicyReport& report, con
         out << "      \"packet_count\": " << f.packet_count << ",\n";
         out << "      \"verdict\": \"" << verdict_name(f.verdict) << "\",\n";
         out << "      \"matched_conduit\": " << (f.matched_conduit.empty() ? "null" : ("\"" + json_escape(f.matched_conduit) + "\"")) << ",\n";
-        out << "      \"reason\": " << (f.reason.empty() ? "null" : ("\"" + json_escape(f.reason) + "\"")) << "\n";
+        out << "      \"reason\": " << (f.reason.empty() ? "null" : ("\"" + json_escape(f.reason) + "\""));
+        // Appended after 'reason' (the prior last field in this object), same omit-on-miss
+        // convention as client_zone_purdue_level/server_zone_purdue_level above.
+        if (!f.vlan_zone_purdue_level.empty()) {
+            out << ",\n      \"vlan_zone_purdue_level\": \"" << json_escape(f.vlan_zone_purdue_level) << "\"";
+        }
+        out << "\n";
         out << "    }" << (i + 1 < report.ethernet_flows.size() ? "," : "") << "\n";
     }
     out << "  ],\n";
@@ -1174,6 +1267,27 @@ void write_policy_report_json(std::ostream& out, const PolicyReport& report, con
         out << "      \"direction_known\": " << (f.direction_known ? "true" : "false") << ",\n";
         out << "      \"packet_count\": " << f.packet_count << "\n";
         out << "    }" << (i + 1 < report.notable_protocols.size() ? "," : "") << "\n";
+    }
+    out << "  ],\n";
+
+    // "IT-OT CROSSING CONDUITS" -- see write_idmz_conduits_text's own comment (this function's text
+    // counterpart) for what this is and how "exercised" is derived. Appended last, after every
+    // pre-existing field (notable_protocols was the prior last field) -- always present as an array,
+    // empty when the policy declares no idmz-typed conduit, so a policy that never uses this
+    // feature gets one more (empty) field, same posture ethernet_flows took when it was new.
+    std::vector<const Conduit*> idmz_conduits;
+    for (const auto& c : policy.conduits) {
+        if (c.conduit_type == "idmz") idmz_conduits.push_back(&c);
+    }
+    out << "  \"idmz_conduits\": [\n";
+    for (size_t i = 0; i < idmz_conduits.size(); ++i) {
+        const Conduit* c = idmz_conduits[i];
+        bool exercised = std::find(report.unexercised_conduits.begin(), report.unexercised_conduits.end(),
+                                    c->name) == report.unexercised_conduits.end();
+        out << "    {\n";
+        out << "      \"name\": \"" << json_escape(c->name) << "\",\n";
+        out << "      \"exercised\": " << (exercised ? "true" : "false") << "\n";
+        out << "    }" << (i + 1 < idmz_conduits.size() ? "," : "") << "\n";
     }
     out << "  ]\n";
     out << "}\n";

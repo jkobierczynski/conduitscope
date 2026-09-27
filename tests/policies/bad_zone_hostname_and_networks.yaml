@@ -1,0 +1,14 @@
+# A zone declaring both 'hostnames' and 'networks' -- a zone is exactly one kind (see
+# docs/USER_GUIDE.md's POLICY FILE FORMAT section).
+zones:
+  confused_zone:
+    networks: [192.168.1.10/32]
+    hostnames: [plc-01]
+  other_zone:
+    networks: [192.168.1.50/32]
+
+conduits:
+  - name: "c1"
+    from: other_zone
+    to: confused_zone
+    protocols: [modbus]

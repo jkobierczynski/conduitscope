@@ -56,6 +56,11 @@ struct FlowReport {
     std::string client_ip, server_ip;
     uint16_t server_port = 0;
     std::string client_zone, server_zone;  // "unclassified" when Policy::zone_for found nothing
+    // Purdue Enterprise Reference Architecture level of client_zone/server_zone, exactly as the
+    // policy file's own Zone::purdue_level for that zone (see policy.hpp) -- empty when the matched
+    // zone didn't declare one, or when the endpoint is "unclassified" (no zone at all). Purely
+    // informational, carried through for reporting only -- never read by any matching logic.
+    std::string client_zone_purdue_level, server_zone_purdue_level;
     std::vector<std::string> protocols;    // distinct app protocols observed: "modbus"/"dnp3"/"s7comm"/
                                             // "iec104"/"enip"/"hartip"/"opcua"/"mms"/"mqtt"/"ffhse"
                                             // (never "bacnet" -- see PolicyEngine::observe)
@@ -113,6 +118,9 @@ struct EthernetFlowReport {
     uint16_t vlan_id = 0;         // meaningful only when has_vlan_tag
     std::string vlan_zone;        // "unclassified" when has_vlan_tag is false, or no declared VLAN
                                    // zone contains vlan_id
+    // Same idea as FlowReport::client_zone_purdue_level -- vlan_zone's own Zone::purdue_level, or
+    // empty when unset/unclassified.
+    std::string vlan_zone_purdue_level;
     size_t packet_count = 0;
     FlowVerdict verdict = FlowVerdict::Unclassified;
     std::string matched_conduit;  // set (non-empty) only when verdict == Allowed
@@ -170,7 +178,8 @@ struct NotableProtocolFinding {
 struct PolicyReport {
     std::vector<FlowReport> flows;  // one per observed TCP flow, in first-seen order
     // One per observed raw-Ethernet L2 flow (PROFINET RT/GOOSE/SV/EtherCAT), in first-seen order --
-    // only ever non-empty when the policy declares at least one VLAN zone (Zone::is_vlan_zone);
+    // only ever non-empty when the policy declares at least one VLAN zone (Zone::kind ==
+    // ZoneKind::Vlan);
     // otherwise this traffic stays folded into skipped_non_tcp below, exactly as it was before
     // VLAN zones existed (ROADMAP item 15) -- see PolicyEngine::observe's own comment for why.
     std::vector<EthernetFlowReport> ethernet_flows;
@@ -281,7 +290,18 @@ public:
 
     // Produces the final report from everything observed so far. Safe to call more than once (e.g.
     // to print a summary and then a detailed report from the same run); does not reset state.
-    PolicyReport finish() const;
+    //
+    // `resolver`: only ever consulted when the policy declares at least one hostname zone
+    // (Policy::has_hostname_zone) -- a CIDR-zone lookup for a flow's endpoint is always tried
+    // first, and the hostname lookup (resolver.hostname(ip)) is attempted only on a miss (see
+    // policy.hpp's own header comment for why a hostname zone is matched this way, and
+    // resolver.hpp's own file header for why this lookup is file-only, pinned by --hosts, and
+    // never live DNS -- the reproducibility a compliance verdict needs). A policy with no hostname
+    // zone never calls into `resolver` from here at all, so passing a default-constructed-
+    // equivalent Resolver is always safe and behaves exactly as before this parameter existed. This
+    // is a different Resolver USE than write_policy_report_text/_json's own (report *annotation*,
+    // after verdicts are already final) -- the same Resolver instance is meant to be passed to both.
+    PolicyReport finish(const Resolver& resolver) const;
 
 private:
     struct FlowState {

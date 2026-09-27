@@ -376,15 +376,21 @@ Values/EtherCAT "Ethernet flows" keyed by protocol and MAC pair (for
 VLAN-zone conduits), and checks each against the
 zones/conduits declared in the policy file (a restricted, dependency-free
 YAML subset -- see \fBdocs/USER_GUIDE.md\fR's POLICY FILE FORMAT section). A
-zone is either a set of IPv4 CIDR blocks or a set of VLAN IDs
-(\fBvlans:\fR), never both; a conduit may optionally narrow itself to
+zone is a set of IPv4 CIDR blocks, a set of VLAN IDs (\fBvlans:\fR), or a
+set of hostnames (\fBhostnames:\fR, matched only via a pinned
+\fB\-\-resolve\fR/\fB\-\-hosts\fR snapshot, never live DNS) -- exactly one of
+the three, never mixed on one zone or one conduit; a conduit may
+optionally narrow itself to
 specific named functions/services
 within its one protocol via \fBfunctions:\fR (e.g. Modbus reads but not
-writes, IPv4-zone conduits only) -- matched, flow-wide and strict-all, against the exact
+writes, IPv4- or hostname-zone conduits only) -- matched, flow-wide and strict-all, against the exact
 function/service name strings that protocol's decoder emits; see
 \fBdocs/USER_GUIDE.md\fR's "Function-level restrictions" subsection for the
 schema, the one-protocol-only rule, and the EtherNet/IP ambiguous-name
-limitation. Prints a compliant/non-compliant report; see \fBOPTIONS (policy
+limitation. A zone may also carry an informational \fBpurdue_level:\fR
+label, and a conduit an informational \fBtype: idmz\fR marker (which adds
+one stricter validation rule -- see \fBdocs/USER_GUIDE.md\fR); neither
+changes matching. Prints a compliant/non-compliant report; see \fBOPTIONS (policy
 validate)\fR and \fBEXIT STATUS\fR below.
 .TP
 .B inventory (\fB\-r\fR \fIFILE\fR | \fB\-i\fR \fIINTERFACE\fR) [\fIOPTIONS\fR]
@@ -2045,6 +2051,10 @@ too: it infers CIP I/O/BACnet-IP conduits from observed UDP traffic and
 feeding that file back into \fBpolicy validate\fR always reports them as
 "never exercised," regardless of how much matching UDP traffic the capture
 has; a zone can instead be declared as a set of
+hostnames (\fBhostnames:\fR), matched like an ordinary IPv4-CIDR zone but
+requiring both \fB\-\-resolve\fR and \fB\-\-hosts\fR (a policy that
+declares a hostname zone without both fails fast rather than silently
+matching nothing), or as a set of
 VLAN IDs (\fBvlans:\fR) rather than IPv4 CIDR blocks, and a conduit
 referencing only VLAN zones IS evaluated against PROFINET RT/GOOSE/Sampled
 Values/EtherCAT traffic (the four protocols with no IP layer at all),

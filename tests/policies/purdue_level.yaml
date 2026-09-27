@@ -1,0 +1,20 @@
+# Exercises Zone::purdue_level (docs/USER_GUIDE.md's POLICY FILE FORMAT section) -- purely
+# informational Purdue Enterprise Reference Architecture level labels, carried through to reports
+# but never read by any matching logic. Otherwise identical to compliant.yaml.
+zones:
+  hmi_zone:
+    description: "HMI / engineering workstation (synthetic fixtures' HMI_IP)"
+    purdue_level: "3"
+    networks:
+      - 192.168.1.50/32
+  plc_zone:
+    description: "PLC (synthetic fixtures' PLC_IP)"
+    purdue_level: "1"
+    networks: [192.168.1.10/32]
+
+conduits:
+  - name: "HMI polls PLC via Modbus"
+    from: hmi_zone
+    to: plc_zone
+    protocols: [modbus]
+    ports: [502]

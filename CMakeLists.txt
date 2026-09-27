@@ -8953,12 +8953,12 @@ set_tests_properties(policy_error_unknown_protocol_lists_full_widened_set PROPER
 add_test(NAME policy_error_vlan_zone_both_networks_and_vlans
   COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_zone_both_networks_and_vlans.yaml")
 set_tests_properties(policy_error_vlan_zone_both_networks_and_vlans PROPERTIES
-  PASS_REGULAR_EXPRESSION "zone 'confused_zone' declares both 'networks' and 'vlans' -- a zone is either an IPv4 zone or a VLAN zone, not both")
+  PASS_REGULAR_EXPRESSION "zone 'confused_zone' declares more than one of 'networks'/'vlans'/'hostnames' -- a zone is exactly one kind")
 
 add_test(NAME policy_error_vlan_zone_neither_networks_nor_vlans
   COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_zone_neither_networks_nor_vlans.yaml")
 set_tests_properties(policy_error_vlan_zone_neither_networks_nor_vlans PROPERTIES
-  PASS_REGULAR_EXPRESSION "zone 'empty_zone' has no 'networks' or 'vlans' key")
+  PASS_REGULAR_EXPRESSION "zone 'empty_zone' has no 'networks', 'vlans', or 'hostnames' key")
 
 add_test(NAME policy_error_vlan_id_out_of_range
   COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_vlan_id_out_of_range.yaml")
@@ -8973,7 +8973,7 @@ set_tests_properties(policy_error_vlan_overlap PROPERTIES
 add_test(NAME policy_error_conduit_mixed_zone_kinds
   COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_conduit_mixed_zone_kinds.yaml")
 set_tests_properties(policy_error_conduit_mixed_zone_kinds PROPERTIES
-  PASS_REGULAR_EXPRESSION "conduit 'c1' mixes IPv4 zones and VLAN zones in its 'from'/'to' -- every zone a conduit references must be the same kind")
+  PASS_REGULAR_EXPRESSION "conduit 'c1' mixes zones of different kinds \\(CIDR/VLAN/hostname\\) in its 'from'/'to' -- every zone a conduit references must be the same kind")
 
 add_test(NAME policy_error_conduit_tcp_protocol_on_vlan_zone
   COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_conduit_tcp_protocol_on_vlan_zone.yaml")
@@ -8983,7 +8983,7 @@ set_tests_properties(policy_error_conduit_tcp_protocol_on_vlan_zone PROPERTIES
 add_test(NAME policy_error_conduit_vlan_protocol_on_ip_zone
   COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_conduit_vlan_protocol_on_ip_zone.yaml")
 set_tests_properties(policy_error_conduit_vlan_protocol_on_ip_zone PROPERTIES
-  PASS_REGULAR_EXPRESSION "conduit 'c1': protocol 'goose' has no IP layer at all, so it can never appear on an IPv4-zone conduit -- declare a VLAN zone instead")
+  PASS_REGULAR_EXPRESSION "conduit 'c1': protocol 'goose' has no IP layer at all, so it can never appear on a CIDR- or hostname-zone conduit -- declare a VLAN zone instead")
 
 add_test(NAME policy_error_vlan_conduit_from_to_mismatch
   COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_vlan_conduit_from_to_mismatch.yaml")
@@ -9023,6 +9023,86 @@ add_test(NAME policy_vlan_zone_json_format
   COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_vlan_zones.pcap" --policy "${POLICY_DIR}/vlan_zone_mixed_results.yaml" --format json)
 set_tests_properties(policy_vlan_zone_json_format PROPERTIES
   PASS_REGULAR_EXPRESSION "\"is_vlan_conduit\": true.*\"ethernet_flows\": \\[.*\"has_vlan_tag\": true,\n *\"vlan_id\": 100,\n *\"vlan_zone\": \"ot_vlan\".*\"has_vlan_tag\": false,\n *\"vlan_id\": null,\n *\"vlan_zone\": \"unclassified\"")
+
+# ---------------------------------------------------------------------------------------------
+# "Match how plants are zoned" (Grok gap #1, docs/DEVELOPMENT.md) -- Purdue-level zone labels,
+# 'idmz'-typed conduits, hostname zones, and the IPv6-flow reason-string fix. See
+# tests/policies/purdue_level.yaml, idmz_conduit.yaml, hostname_zone.yaml and their bad_* siblings.
+
+add_test(NAME policy_purdue_level_shown_in_text
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/purdue_level.yaml")
+set_tests_properties(policy_purdue_level_shown_in_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "zones: hmi_zone \\(Level 3\\) -> plc_zone \\(Level 1\\), matched conduit")
+
+add_test(NAME policy_purdue_level_shown_in_json
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/purdue_level.yaml" --format json)
+set_tests_properties(policy_purdue_level_shown_in_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"direction_source\": \"port-heuristic\",\n *\"client_zone_purdue_level\": \"3\",\n *\"server_zone_purdue_level\": \"1\"")
+
+add_test(NAME policy_purdue_level_omitted_when_unset_json
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/compliant.yaml" --format json)
+set_tests_properties(policy_purdue_level_omitted_when_unset_json PROPERTIES
+  FAIL_REGULAR_EXPRESSION "purdue_level")
+
+add_test(NAME policy_idmz_conduit_exercised_reported
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/idmz_conduit.yaml")
+set_tests_properties(policy_idmz_conduit_exercised_reported PROPERTIES
+  PASS_REGULAR_EXPRESSION "IT-OT CROSSING CONDUITS \\(1\\):.*HMI polls PLC via Modbus \\(iDMZ crossing\\): exercised by this capture")
+
+add_test(NAME policy_idmz_conduit_unexercised_reported
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --policy "${POLICY_DIR}/idmz_conduit.yaml")
+set_tests_properties(policy_idmz_conduit_unexercised_reported PROPERTIES
+  PASS_REGULAR_EXPRESSION "IT-OT CROSSING CONDUITS \\(1\\):.*HMI polls PLC via Modbus \\(iDMZ crossing\\): not exercised by this capture")
+
+add_test(NAME policy_idmz_conduit_json_fields
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/idmz_conduit.yaml" --format json)
+set_tests_properties(policy_idmz_conduit_json_fields PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"conduit_type\": \"idmz\".*\"idmz_conduits\": \\[\n *\\{\n *\"name\": \"HMI polls PLC via Modbus \\(iDMZ crossing\\)\",\n *\"exercised\": true")
+
+add_test(NAME policy_no_idmz_conduit_empty_json_array
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/compliant.yaml" --format json)
+set_tests_properties(policy_no_idmz_conduit_empty_json_array PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"conduit_type\": null.*\"idmz_conduits\": \\[\n *\\]")
+
+add_test(NAME policy_error_idmz_any_no_functions
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_idmz_any_no_functions.yaml")
+set_tests_properties(policy_error_idmz_any_no_functions PROPERTIES
+  PASS_REGULAR_EXPRESSION "an 'idmz'-typed conduit cannot use 'protocols: \\[any\\]' with no 'functions' restriction")
+
+add_test(NAME policy_error_idmz_unknown_type
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_idmz_unknown_type.yaml")
+set_tests_properties(policy_error_idmz_unknown_type PROPERTIES
+  PASS_REGULAR_EXPRESSION "unknown conduit type 'dmz' \\(the only recognized value so far is 'idmz'\\)")
+
+add_test(NAME policy_ipv6_flow_gets_ipv6_specific_reason
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ipv6.pcap" --policy "${POLICY_DIR}/compliant.yaml")
+set_tests_properties(policy_ipv6_flow_gets_ipv6_specific_reason PROPERTIES
+  PASS_REGULAR_EXPRESSION "2001:db8::50 is an IPv6 address; policy zoning does not support IPv6 yet; 2001:db8::10 is an IPv6 address; policy zoning does not support IPv6 yet")
+
+add_test(NAME policy_hostname_zone_without_hosts_file_fails_fast
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/hostname_zone.yaml")
+set_tests_properties(policy_hostname_zone_without_hosts_file_fails_fast PROPERTIES
+  PASS_REGULAR_EXPRESSION "declares one or more hostname zones, but --resolve/--hosts were not both given")
+
+add_test(NAME policy_hostname_zone_with_hosts_file_compliant
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/hostname_zone.yaml" --resolve --hosts "${CMAKE_CURRENT_SOURCE_DIR}/tests/hosts_sample.txt")
+set_tests_properties(policy_hostname_zone_with_hosts_file_compliant PROPERTIES
+  PASS_REGULAR_EXPRESSION "Result: COMPLIANT.*zones: hmi_zone -> plc_zone, matched conduit")
+
+add_test(NAME policy_error_zone_hostname_and_networks
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_zone_hostname_and_networks.yaml")
+set_tests_properties(policy_error_zone_hostname_and_networks PROPERTIES
+  PASS_REGULAR_EXPRESSION "zone 'confused_zone' declares more than one of 'networks'/'vlans'/'hostnames'")
+
+add_test(NAME policy_error_hostname_overlap
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_hostname_overlap.yaml")
+set_tests_properties(policy_error_hostname_overlap PROPERTIES
+  PASS_REGULAR_EXPRESSION "zone 'zone_a' and zone 'zone_b' both claim hostname 'plc-01'")
+
+add_test(NAME policy_error_conduit_mixed_hostname_and_cidr
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_conduit_mixed_hostname_and_cidr.yaml")
+set_tests_properties(policy_error_conduit_mixed_hostname_and_cidr PROPERTIES
+  PASS_REGULAR_EXPRESSION "conduit 'c1' mixes zones of different kinds \\(CIDR/VLAN/hostname\\) in its 'from'/'to'")
 
 # ---------------------------------------------------------------------------------------------
 # Resolver, wired into `policy validate`'s report too (write_policy_report_text/
