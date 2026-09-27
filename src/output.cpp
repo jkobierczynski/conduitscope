@@ -3362,6 +3362,29 @@ void write_bacnet_json_fields(std::ostream& out, const BacnetFrame& bf) {
                 }
                 out << "],\n";
             }
+            // Device object identity correlation -- see bacnet.hpp's own paragraph. Named fields
+            // (not just the flattened bacnet_values entries above) so a JSON consumer can read
+            // vendor/model/firmware/serial directly, matching every other identity-bearing
+            // protocol's own JSON fields (e.g. s7comm_szl_order_number/enip identity_* fields).
+            out << "    \"bacnet_has_device_identity\": " << (apdu.has_device_identity ? "true" : "false")
+                << ",\n";
+            if (apdu.has_device_identity) {
+                if (!apdu.device_vendor_name.empty())
+                    out << "    \"bacnet_device_vendor_name\": \"" << json_escape(apdu.device_vendor_name)
+                        << "\",\n";
+                if (!apdu.device_model_name.empty())
+                    out << "    \"bacnet_device_model_name\": \"" << json_escape(apdu.device_model_name)
+                        << "\",\n";
+                if (!apdu.device_firmware_revision.empty())
+                    out << "    \"bacnet_device_firmware_revision\": \""
+                        << json_escape(apdu.device_firmware_revision) << "\",\n";
+                if (!apdu.device_application_software_version.empty())
+                    out << "    \"bacnet_device_application_software_version\": \""
+                        << json_escape(apdu.device_application_software_version) << "\",\n";
+                if (!apdu.device_serial_number.empty())
+                    out << "    \"bacnet_device_serial_number\": \"" << json_escape(apdu.device_serial_number)
+                        << "\",\n";
+            }
         }
     }
 }

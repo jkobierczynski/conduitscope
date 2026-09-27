@@ -498,6 +498,25 @@ void AssetInventoryEngine::observe(const DecodedPacket& dp) {
             update_identity(dp.src_ip, /*vendor=*/"", product, /*firmware_revision=*/"",
                              szl.szl_serial_number, /*security_posture=*/"", szl.szl_plant_identification);
         }
+    } else if (protocol == "bacnet" && dp.result && dp.result->as<BacnetFrame>().has_npdu &&
+               dp.result->as<BacnetFrame>().npdu.has_apdu &&
+               dp.result->as<BacnetFrame>().npdu.apdu.has_device_identity) {
+        // A ReadProperty/ReadPropertyMultiple Complex-ACK carrying one or more Device-object
+        // identity properties (see bacnet.hpp's "Device object identity correlation" paragraph) is
+        // sent BY the device being queried, same "identity describes whoever actually sent this
+        // packet" reasoning as ENIP/OPC UA/S7comm above. `firmware_revision` prefers the real
+        // Firmware-Revision property, falling back to Application-Software-Version only when
+        // Firmware-Revision itself wasn't read in this exchange (they are genuinely different
+        // properties -- the device's own onboard firmware vs. the specific application/config
+        // loaded onto it -- but InventoryAsset has one firmware_revision field, not two, matching
+        // this codebase's existing "fold the secondary fact into the closest existing field rather
+        // than inventing a narrow new one" posture, e.g. S7comm's own product fallback chain just
+        // above).
+        const BacnetApdu& apdu = dp.result->as<BacnetFrame>().npdu.apdu;
+        std::string firmware = !apdu.device_firmware_revision.empty() ? apdu.device_firmware_revision
+                                                                       : apdu.device_application_software_version;
+        update_identity(dp.src_ip, apdu.device_vendor_name, apdu.device_model_name, firmware,
+                         apdu.device_serial_number);
     }
 
     if (client_is_bcast || server_is_bcast) return;

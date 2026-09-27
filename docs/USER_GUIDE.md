@@ -452,22 +452,29 @@ last-seen timestamps (from the pcap's own per-packet capture time -- the
 min/max across every packet this IP appeared in). Where a protocol's own
 identity-bearing message was actually observed, an asset also carries
 passively-inferred **vendor**/**product**/**firmware revision**/**serial
-number** fields, plus an OPC UA-specific **security posture** note (Grok
-gap #2's "turn inventory into a real OT asset record" ask) -- currently
-wired for **EtherNet/IP** and **OPC UA**. EtherNet/IP's comes from a
-decoded CIP Identity `ListIdentity` response (`vendor` is a raw numeric CIP
-Vendor ID, e.g. `Vendor ID 1`, since this project has no CIP Vendor ID ->
-name table -- ODVA's registry runs to several thousand entries, and a full
-lookup table is out of scope for this pass; see LIMITATIONS). OPC UA's
-comes from a decoded `GetEndpointsResponse`'s first endpoint: `vendor`/
-`product` both get that endpoint's own ApplicationUri (OPC UA has no
-separate vendor/model field), `firmware revision`/`serial number` stay
-empty, and the security posture note records that endpoint's own
-SecurityMode/SecurityPolicyUri, flagged `SECURITY FINDING:` when it accepts
-no security at all. Every other protocol here (S7comm, BACnet/IP, DNP3,
-...) leaves these fields empty for now -- populating them (S7comm SZL,
-BACnet ReadPropertyMultiple, DNP3 Device Attributes) is tracked as
-follow-on work in docs/DEVELOPMENT.md's ROADMAP. First-seen/last-seen, by
+number** fields, plus an OPC UA-specific **security posture** note and an
+S7comm-specific **plant identification** field (Grok gap #2's "turn
+inventory into a real OT asset record" ask) -- currently wired for
+**EtherNet/IP**, **OPC UA**, **S7comm**, and **BACnet/IP**. EtherNet/IP's
+comes from a decoded CIP Identity `ListIdentity` response (`vendor` is a
+raw numeric CIP Vendor ID, e.g. `Vendor ID 1`, since this project has no
+CIP Vendor ID -> name table -- ODVA's registry runs to several thousand
+entries, and a full lookup table is out of scope for this pass; see
+LIMITATIONS). OPC UA's comes from a decoded `GetEndpointsResponse`'s first
+endpoint: `vendor`/`product` both get that endpoint's own ApplicationUri
+(OPC UA has no separate vendor/model field), `firmware revision`/`serial
+number` stay empty, and the security posture note records that endpoint's
+own SecurityMode/SecurityPolicyUri, flagged `SECURITY FINDING:` when it
+accepts no security at all. S7comm's comes from a Read SZL (System Status
+List) exchange's SZL-ID `0x0011`/`0x001c` records, plant identification
+kept as its own field rather than folded into `vendor`/`product` (see
+below). BACnet's comes from a ReadProperty or ReadPropertyMultiple ACK's
+Device object Vendor-Name/Model-Name/Firmware-Revision/
+Application-Software-Version/Serial-Number properties (see below). Every
+other protocol here (DNP3, Modbus, IEC 104, HART-IP, MMS, MQTT, FF-HSE,
+S7comm-Plus) leaves these fields empty for now -- populating DNP3's (via
+its own Device Attributes, group/variation 0) is tracked as follow-on work
+in docs/DEVELOPMENT.md's ROADMAP. First-seen/last-seen, by
 contrast, are populated for every asset and edge regardless of protocol. Every distinct `(protocol, client, server, server port)`
 tuple becomes one **edge** (also carrying its own first-seen/last-seen) --
 deliberately coarser than `policy validate`'s own per-TCP-session
@@ -626,6 +633,38 @@ SZL-ID `0x001c`'s eleven documented sub-records (copyright string, MMC
 serial number, PROFINET I&M data, OEM data, location ID, and any
 unrecognized sub-index) are deliberately not decoded into named fields --
 see LIMITATIONS.
+
+BACnet identity is promoted from a ReadProperty or ReadPropertyMultiple
+ACK's Device object properties (`bacnet.hpp`/`docs/PROTOCOL_COVERAGE.md`'s
+own BACnet section covers the decode itself): Vendor-Name -> `vendor`,
+Model-Name -> `product`, Firmware-Revision -> `firmware_revision`
+(falling back to Application-Software-Version only when Firmware-Revision
+itself wasn't read in that exchange -- they are genuinely different
+properties, but this asset record has one `firmware_revision` field, not
+two), and Serial-Number -> `serial_number`:
+
+```sh
+$ conduitscope inventory -r tests/sample_bacnet.pcap
+...
+ASSETS (3):
+  ...
+  192.168.1.21  00:0c:29:aa:bb:21  [server]  bacnet  (2 packet(s))
+      first seen: 2023-11-14 23:37:31.051000Z  last seen: 2023-11-14 23:37:32.052000Z
+      identity:  vendor=Acme Controls  product="Widget 9000"  firmware=3.2.1  serial=SN-00012345
+...
+```
+
+`decode --format json` also gains standalone `bacnet_device_*` fields
+(`bacnet_has_device_identity`, and, when true, whichever of
+`bacnet_device_vendor_name`/`_model_name`/`_firmware_revision`/
+`_application_software_version`/`_serial_number` the ACK actually
+carried), independent of `inventory`'s own wiring, same pattern as OPC
+UA's/S7comm's own identity fields above. Only ReadPropertyMultiple's
+five well-known identity properties on a Device object are recognized
+this way -- a general property, or the same properties read off a
+non-Device object, are decoded into `bacnet_values` like any other
+ReadProperty(Multiple) result but never promoted to identity; see
+LIMITATIONS.
 
 #### Closing the loop
 
@@ -4129,15 +4168,24 @@ These are current, not aspirational -- each has a corresponding docs/DEVELOPMENT
   register semantics are all out of scope entirely.
 - **BACnet/IP's service value-decoding is a deliberate first-pass subset,
   and its real-capture validation is narrow.** Only Who-Is/I-Am/Who-Has/
-  I-Have/ReadProperty (request+ACK)/WriteProperty (request)/generic-Error
-  are value-decoded; every other confirmed/unconfirmed service
-  (ReadPropertyMultiple/WritePropertyMultiple/SubscribeCOV/and the rest of
-  the 50 service-choice table entries) is named only, its data shown as raw
-  hex -- see docs/PROTOCOL_COVERAGE.md's BACnet/IP section for the full rationale.
-  A PropertyValue that is constructed (an array/list, or a
-  service-specific structured value) rather than a single primitive is
-  likewise shown as raw hex with a note, never guessed at. Segmented APDUs
-  are decoded only at the header level (sequence-number/
+  I-Have/ReadProperty (request+ACK)/ReadPropertyMultiple (request+ACK)/
+  WriteProperty (request)/generic-Error are value-decoded; every other
+  confirmed/unconfirmed service (WritePropertyMultiple/SubscribeCOV/and the
+  rest of the 50 service-choice table entries) is named only, its
+  data shown as raw hex -- see docs/PROTOCOL_COVERAGE.md's BACnet/IP
+  section for the full rationale, including why WritePropertyMultiple
+  specifically stays out of scope even though ReadPropertyMultiple is now
+  decoded (a third, different repeated-record shape, not just the same
+  list-of-objects framing ReadPropertyMultiple already covers). A
+  PropertyValue that is constructed (an array/list, or a service-specific
+  structured value) rather than a single primitive is likewise shown as raw
+  hex with a note, never guessed at, in both ReadProperty and
+  ReadPropertyMultiple. The Device object identity correlation (see
+  above) recognizes only five specific well-known properties on a Device
+  object -- any other property, or the same properties read off a
+  non-Device object, decodes normally into `bacnet_values` but is never
+  promoted to `vendor`/`product`/`firmware_revision`/`serial_number`.
+  Segmented APDUs are decoded only at the header level (sequence-number/
   proposed-window-size); the segment's own service data is never
   value-decoded, since this decoder does no cross-packet APDU reassembly
   (the same posture General TCP stream reassembly's own scope note takes
@@ -4147,7 +4195,8 @@ These are current, not aspirational -- each has a corresponding docs/DEVELOPMENT
   Original-Unicast-NPDU, plain (no DEST/SRC/Network-Layer-Message) NPDU,
   Confirmed-Request/Complex-ACK ReadProperty traffic against one property
   shape (a scalar Unsigned value) on one object type (trend-log) -- device
-  discovery, WriteProperty, every non-Unsigned PropertyValue type, every
+  discovery, WriteProperty, ReadPropertyMultiple, every non-Unsigned
+  PropertyValue type, every
   BVLC function besides Original-Unicast-NPDU, NPDU routing fields, and
   segmentation are all validated only against the hand-built
   `tests/sample_bacnet.pcap`, cross-checked against `packet-bvlc.c`/

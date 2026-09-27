@@ -657,10 +657,17 @@ std::vector<std::string> decode_i_have(ByteSpan span) {
 }
 
 // Shared by ReadProperty-Request/-ACK and WriteProperty-Request: context[0] ObjectIdentifier +
-// context[1] PropertyIdentifier + optional context[2] PropertyArrayIndex.
-void decode_object_property_reference(ByteSpan span, size_t& offset, std::vector<std::string>& values) {
+// context[1] PropertyIdentifier + optional context[2] PropertyArrayIndex. `out_object_rendered`/
+// `out_property_id`, when non-null, additionally receive the object's rendered "type,instance"
+// string and the property's raw numeric identifier -- used by decode_read_property_ack's Device-
+// object identity correlation (see bacnet.hpp's own paragraph), which needs those raw values
+// alongside (not instead of) the rendered `values` entries every caller already gets.
+void decode_object_property_reference(ByteSpan span, size_t& offset, std::vector<std::string>& values,
+                                       std::string* out_object_rendered = nullptr,
+                                       uint32_t* out_property_id = nullptr) {
     if (auto obj = try_context_primitive(span, offset, 0, 12)) {
         values.push_back("object=" + obj->rendered);
+        if (out_object_rendered) *out_object_rendered = obj->rendered;
     }
     if (auto prop = try_context_primitive(span, offset, 1, 9)) {
         uint64_t v = 0;
@@ -669,18 +676,66 @@ void decode_object_property_reference(ByteSpan span, size_t& offset, std::vector
         } catch (...) {
         }
         values.push_back("property=" + property_identifier_name(static_cast<uint32_t>(v)));
+        if (out_property_id) *out_property_id = static_cast<uint32_t>(v);
     }
     if (auto idx = try_context_primitive(span, offset, 2, 2)) {
         values.push_back("property-array-index=" + idx->rendered);
     }
 }
 
+// Recognizes a Device-object ObjectIdentifier's rendering ("device,<instance>" -- see
+// object_type_name/kBacnetObjectType entry 8) -- used by the Device object identity correlation
+// below.
+bool is_device_object(const std::string& object_rendered) {
+    return object_rendered.rfind("device,", 0) == 0;
+}
+
+// Promotes a well-known Device-object identity property's decoded value onto BacnetApdu's own
+// device_* fields -- see bacnet.hpp's "Device object identity correlation" paragraph. A no-op
+// unless `is_device` is true, `v.ok`, and `v.type_name` is "Character String" (a numeric or
+// otherwise-typed value for one of these properties would be non-conformant wire data, not a
+// case this decoder tries to coerce), and `prop_id` is one of the five recognized properties.
+void maybe_promote_device_identity(BacnetApdu& apdu, bool is_device, uint32_t prop_id, const PrimitiveValue& v) {
+    if (!is_device || !v.ok || v.type_name != "Character String") return;
+    switch (prop_id) {
+        case 121:  // Vendor-Name
+            apdu.device_vendor_name = v.rendered;
+            apdu.has_device_identity = true;
+            break;
+        case 70:  // Model-Name
+            apdu.device_model_name = v.rendered;
+            apdu.has_device_identity = true;
+            break;
+        case 44:  // Firmware-Revision
+            apdu.device_firmware_revision = v.rendered;
+            apdu.has_device_identity = true;
+            break;
+        case 12:  // Application-Software-Version
+            apdu.device_application_software_version = v.rendered;
+            apdu.has_device_identity = true;
+            break;
+        case 372:  // Serial-Number
+            apdu.device_serial_number = v.rendered;
+            apdu.has_device_identity = true;
+            break;
+        default:
+            break;
+    }
+}
+
 // A context[N]-wrapped PropertyValue (opening tag N ... one application-tagged primitive ...
-// closing tag N) -- see bacnet.hpp's "Property value decode" paragraph. Appends "value=..." (or
+// closing tag N) -- see bacnet.hpp's "Property value decode" paragraph. Appends "<label>=..." (or
 // a "not decoded" note) to `values` and advances `offset` past the whole wrapped region.
-// `notes` collects an explanatory note when the wrapped content isn't a single primitive.
+// `notes` collects an explanatory note when the wrapped content isn't a single primitive. `label`
+// defaults to "value" (every pre-existing caller's own key, unchanged) -- ReadPropertyMultiple
+// ACK's own per-property decode (decode_read_property_multiple_ack) passes an indexed label
+// instead, matching its own "read-access-result[i]-property[j]-..." naming (see bacnet.hpp).
+// `out_value`, when non-null, additionally receives the decoded PrimitiveValue itself (not just
+// its rendered string) on success -- used for the Device object identity correlation, which needs
+// to gate on `type_name == "Character String"` before promoting a value onto a device_* field.
 void decode_property_value(ByteSpan span, size_t& offset, uint8_t context_tag, std::vector<std::string>& values,
-                            std::vector<std::string>& notes) {
+                            std::vector<std::string>& notes, const std::string& label = "value",
+                            PrimitiveValue* out_value = nullptr) {
     auto open = decode_tag_header(span, offset);
     if (!open || !open->context_specific || !open->opening || open->tag_number != context_tag) return;
     size_t inner = offset + open->header_length;
@@ -694,14 +749,20 @@ void decode_property_value(ByteSpan span, size_t& offset, uint8_t context_tag, s
             size_t after_value = value_offset + v.consumed;
             auto close = decode_tag_header(span, after_value);
             if (close && close->context_specific && close->closing && close->tag_number == context_tag) {
-                values.push_back("value=(" + v.type_name + ") " + v.rendered);
+                values.push_back(label + "=(" + v.type_name + ") " + v.rendered);
                 offset = after_value + close->header_length;
+                if (out_value) *out_value = v;
                 return;
             }
         }
     }
     // Not a single primitive (an array/list, or a service-specific structured value) -- named
-    // only, see bacnet.hpp's "Property value decode" paragraph.
+    // only, see bacnet.hpp's "Property value decode" paragraph. Note text deliberately does NOT
+    // include `label` -- this exact string is asserted on by
+    // bacnet_read_property_ack_constructed_value_not_decoded in CMakeLists.txt for this function's
+    // original (label="value") caller, and there is no reader-facing benefit to distinguishing
+    // "value: ..." from "read-access-result[0]-property[0]-value: ..." in a free-text note when
+    // the `values` entries immediately above it already carry that same indexed key.
     if (auto end = skip_constructed(span, inner)) {
         notes.push_back("property value is constructed (an array/list or service-specific structured "
                          "value), not a single primitive -- not value-decoded in this first-pass release");
@@ -716,12 +777,169 @@ std::vector<std::string> decode_read_property_request(ByteSpan span) {
     return values;
 }
 
-std::vector<std::string> decode_read_property_ack(ByteSpan span, std::vector<std::string>& notes) {
+// Takes `apdu` directly (rather than just returning `values`, unlike decode_read_property_request
+// above) so it can also populate the Device object identity correlation fields -- see
+// bacnet.hpp's own paragraph -- alongside `apdu.values`, mirroring decode_generic_error's own
+// `BacnetApdu&`-taking shape just below for the same reason (fields beyond `values` need setting).
+void decode_read_property_ack(ByteSpan span, BacnetApdu& apdu, std::vector<std::string>& notes) {
+    size_t offset = 0;
+    std::string object_rendered;
+    uint32_t property_id = 0;
+    decode_object_property_reference(span, offset, apdu.values, &object_rendered, &property_id);
+    PrimitiveValue value;
+    decode_property_value(span, offset, 3, apdu.values, notes, "value", &value);
+    maybe_promote_device_identity(apdu, is_device_object(object_rendered), property_id, value);
+}
+
+// ReadPropertyMultiple-Request (confirmed 14): listOfReadAccessSpecs, a sequence of one or more
+// ReadAccessSpecification -- see bacnet.hpp's own paragraph for the full ASN.1 shape and citation.
+// Each spec's object gets "read-access-spec[i]-object=..."; each of ITS property references gets
+// "read-access-spec[i]-property[j]=..." (+ optional "...-array-index=..."). Stops (with a note)
+// at the first structural mismatch rather than guessing -- matching this decoder's other
+// truncation-tolerant loops (e.g. fReadAccessSpecification's own "nothing happened, exit loop"
+// posture, which this mirrors).
+std::vector<std::string> decode_read_property_multiple_request(ByteSpan span, std::vector<std::string>& notes) {
     std::vector<std::string> values;
     size_t offset = 0;
-    decode_object_property_reference(span, offset, values);
-    decode_property_value(span, offset, 3, values, notes);
+    int obj_index = 0;
+    while (offset < span.size()) {
+        auto obj = try_context_primitive(span, offset, 0, 12);
+        if (!obj) break;  // not another ReadAccessSpecification -- end of the list (or malformed;
+                           // either way there is nothing more this decoder can confidently read)
+        std::string oprefix = "read-access-spec[" + std::to_string(obj_index) + "]";
+        values.push_back(oprefix + "-object=" + obj->rendered);
+
+        auto open = decode_tag_header(span, offset);
+        if (!open || !open->context_specific || !open->opening || open->tag_number != 1) {
+            notes.push_back("ReadPropertyMultiple request: expected listOfPropertyReferences (context "
+                             "tag 1, opening) after " +
+                             oprefix + "-object -- stopping here, remaining data not decoded");
+            break;
+        }
+        offset += open->header_length;
+
+        int prop_index = 0;
+        while (true) {
+            auto close = decode_tag_header(span, offset);
+            if (close && close->context_specific && close->closing && close->tag_number == 1) {
+                offset += close->header_length;
+                break;
+            }
+            auto prop = try_context_primitive(span, offset, 0, 9);
+            if (!prop) {
+                notes.push_back("ReadPropertyMultiple request: malformed or truncated "
+                                 "listOfPropertyReferences for " +
+                                 oprefix + " -- stopping here, remaining data not decoded");
+                return values;
+            }
+            uint64_t prop_id = 0;
+            try {
+                prop_id = std::stoull(prop->rendered);
+            } catch (...) {
+            }
+            std::string pprefix = oprefix + "-property[" + std::to_string(prop_index) + "]";
+            values.push_back(pprefix + "=" + property_identifier_name(static_cast<uint32_t>(prop_id)));
+            if (auto idx = try_context_primitive(span, offset, 1, 2)) {
+                values.push_back(pprefix + "-array-index=" + idx->rendered);
+            }
+            ++prop_index;
+        }
+        ++obj_index;
+    }
     return values;
+}
+
+// ReadPropertyMultiple-ACK (confirmed 14's Complex-Ack): listOfReadAccessResults, a sequence of
+// one or more ReadAccessResult -- see bacnet.hpp's own paragraph for the full ASN.1 shape,
+// citation, and the note about packet-bacapp.c's own fReadAccessResult C function apparently not
+// handling propertyValue[4]'s opening tag (this decoder implements directly against the
+// authoritative ASN.1 structure comment instead). Takes `apdu` directly, same reason as
+// decode_read_property_ack above: the Device object identity correlation needs to set fields
+// beyond `values`.
+void decode_read_property_multiple_ack(ByteSpan span, BacnetApdu& apdu, std::vector<std::string>& notes) {
+    size_t offset = 0;
+    int obj_index = 0;
+    while (offset < span.size()) {
+        auto obj = try_context_primitive(span, offset, 0, 12);
+        if (!obj) break;
+        bool object_is_device = is_device_object(obj->rendered);
+        std::string oprefix = "read-access-result[" + std::to_string(obj_index) + "]";
+        apdu.values.push_back(oprefix + "-object=" + obj->rendered);
+
+        auto open = decode_tag_header(span, offset);
+        if (!open || !open->context_specific || !open->opening || open->tag_number != 1) {
+            notes.push_back("ReadPropertyMultiple ACK: expected listOfResults (context tag 1, opening) "
+                             "after " +
+                             oprefix + "-object -- stopping here, remaining data not decoded");
+            break;
+        }
+        offset += open->header_length;
+
+        int prop_index = 0;
+        while (true) {
+            auto close = decode_tag_header(span, offset);
+            if (close && close->context_specific && close->closing && close->tag_number == 1) {
+                offset += close->header_length;
+                break;
+            }
+            auto prop = try_context_primitive(span, offset, 2, 9);
+            if (!prop) {
+                notes.push_back("ReadPropertyMultiple ACK: malformed or truncated listOfResults for " +
+                                 oprefix + " -- stopping here, remaining data not decoded");
+                return;
+            }
+            uint32_t prop_id = 0;
+            try {
+                prop_id = static_cast<uint32_t>(std::stoull(prop->rendered));
+            } catch (...) {
+            }
+            std::string pprefix = oprefix + "-property[" + std::to_string(prop_index) + "]";
+            apdu.values.push_back(pprefix + "=" + property_identifier_name(prop_id));
+            if (auto idx = try_context_primitive(span, offset, 3, 2)) {
+                apdu.values.push_back(pprefix + "-array-index=" + idx->rendered);
+            }
+
+            auto vh = decode_tag_header(span, offset);
+            if (vh && vh->context_specific && vh->opening && vh->tag_number == 4) {
+                // propertyValue[4] -- same single-primitive-or-named-only decode as ReadProperty
+                // ACK's own context-tag[3] PropertyValue, reused directly.
+                PrimitiveValue value;
+                decode_property_value(span, offset, 4, apdu.values, notes, pprefix + "-value", &value);
+                maybe_promote_device_identity(apdu, object_is_device, prop_id, value);
+            } else if (vh && vh->context_specific && vh->opening && vh->tag_number == 5) {
+                // propertyAccessError[5] -- generic errorClass+errorCode, same shape as the
+                // PDU-type-5 Error decode (decode_generic_error) but inline here since this one is
+                // wrapped in its own context tag rather than being the whole service-ACK body.
+                size_t err_offset = offset + vh->header_length;
+                auto cls = try_application_primitive(span, err_offset);
+                auto code = cls ? try_application_primitive(span, err_offset) : std::nullopt;
+                auto err_close = decode_tag_header(span, err_offset);
+                if (cls && cls->type_name == "Enumerated" && code && code->type_name == "Enumerated" &&
+                    err_close && err_close->context_specific && err_close->closing && err_close->tag_number == 5) {
+                    uint32_t err_class = 0, err_code = 0;
+                    try {
+                        err_class = static_cast<uint32_t>(std::stoull(cls->rendered));
+                        err_code = static_cast<uint32_t>(std::stoull(code->rendered));
+                    } catch (...) {
+                    }
+                    apdu.values.push_back(pprefix + "-error=" + lookup(kErrorClassNames, err_class) + "/" +
+                                           error_code_name(err_code));
+                    offset = err_offset + err_close->header_length;
+                } else {
+                    notes.push_back("ReadPropertyMultiple ACK: malformed propertyAccessError for " +
+                                     pprefix + " -- stopping here, remaining data not decoded");
+                    return;
+                }
+            } else {
+                notes.push_back("ReadPropertyMultiple ACK: expected propertyValue (context tag 4) or "
+                                 "propertyAccessError (context tag 5) after " +
+                                 pprefix + " -- stopping here, remaining data not decoded");
+                return;
+            }
+            ++prop_index;
+        }
+        ++obj_index;
+    }
 }
 
 std::vector<std::string> decode_write_property_request(ByteSpan span, std::vector<std::string>& notes) {
@@ -783,12 +1001,14 @@ void decode_service_data(BacnetApdu& apdu, ByteSpan data, std::vector<std::strin
     } else if (!is_ack && apdu.is_confirmed_service) {
         switch (apdu.service_choice) {
             case 12: apdu.values = decode_read_property_request(data); decoded = true; break;
+            case 14: apdu.values = decode_read_property_multiple_request(data, notes); decoded = true; break;
             case 15: apdu.values = decode_write_property_request(data, notes); decoded = true; break;
             default: break;
         }
     } else if (is_ack) {
         switch (apdu.service_choice) {
-            case 12: apdu.values = decode_read_property_ack(data, notes); decoded = true; break;
+            case 12: decode_read_property_ack(data, apdu, notes); decoded = true; break;
+            case 14: decode_read_property_multiple_ack(data, apdu, notes); decoded = true; break;
             default: break;
         }
     }
@@ -818,6 +1038,22 @@ std::string apdu_summary(const BacnetApdu& apdu) {
         s << " [" << apdu.values.front();
         if (apdu.values.size() > 1) s << " +" << (apdu.values.size() - 1) << " more";
         s << "]";
+    }
+    if (apdu.has_device_identity) {
+        s << " device-identity(";
+        bool first = true;
+        auto field = [&](const char* label, const std::string& v) {
+            if (v.empty()) return;
+            if (!first) s << " ";
+            s << label << "=" << v;
+            first = false;
+        };
+        field("vendor", apdu.device_vendor_name);
+        field("model", apdu.device_model_name);
+        field("firmware", apdu.device_firmware_revision);
+        field("app-sw-version", apdu.device_application_software_version);
+        field("serial", apdu.device_serial_number);
+        s << ")";
     }
     return s.str();
 }

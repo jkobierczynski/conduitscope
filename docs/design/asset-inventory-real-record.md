@@ -1,10 +1,10 @@
 # Asset inventory: a real OT asset record -- design document
 
-Status: **Phases 0-3 (last-seen/identity scaffolding, EtherNet/IP CIP Identity wiring, S7comm-Plus
-dispatch, OPC UA identity promotion, S7comm SZL decode + wiring) implemented and shipped.** Phases
-4-10 (BACnet ReadPropertyMultiple decode, DNP3 Device Attributes decode, role classification,
-tag/point/DB touch summarization, CSV/CMDB export, STIX/TAXII-lite export, firewall-ACL-draft export)
-are scoped below but not yet started. Written in response to
+Status: **Phases 0-4 (last-seen/identity scaffolding, EtherNet/IP CIP Identity wiring, S7comm-Plus
+dispatch, OPC UA identity promotion, S7comm SZL decode + wiring, BACnet ReadPropertyMultiple decode +
+Device-object identity correlation) implemented and shipped.** Phases 5-10 (DNP3 Device Attributes
+decode, role classification, tag/point/DB touch summarization, CSV/CMDB export, STIX/TAXII-lite
+export, firewall-ACL-draft export) are scoped below but not yet started. Written in response to
 [Grok's ten-point ICS/OT improvement review](../reviews/2026-09-grok-ics-ot-improvement-areas.md)
 (item 2) -- see [docs/reviews/2026-09-grok-response.md](../reviews/2026-09-grok-response.md) for the
 fact-check of that review against the repository, and `docs/DEVELOPMENT.md`'s ROADMAP items 75-76,
@@ -208,16 +208,99 @@ Attributes, role classification, tag/point/DB touch summarization, and CSV/CMDB,
 firewall-ACL-draft export -- unchanged from Phase 2's own list, minus S7comm SZL, which this phase
 completed.
 
-## Phase 4 -- BACnet ReadPropertyMultiple decode + Device-object identity correlation
+## Phase 4 -- BACnet ReadPropertyMultiple decode + Device-object identity correlation (shipped)
 
-Decode ReadPropertyMultiple request/ACK (ASHRAE 135 clause 15.7). New correlation logic: when a
+**Correction to this plan's own original assumption, caught before implementing.** The paragraph
+below (left in place, struck through in spirit, for the historical record) assumed BACnet has no
+standard Serial-Number property on the Device object. Direct primary-source verification -- ASHRAE
+135's own `BACnetPropertyIdentifier` enumeration (transcribed in this codebase's own
+`kBacnetPropertyIdentifier`, cross-checked against Wireshark's `packet-bacapp.c`) already carries
+`serial-number` (372), and OPC UA for BACnet's own published mapping of the base standard's Device
+object property table (Table 10 of that companion specification -- a direct, machine-checkable
+transcription of ASHRAE 135's own Device object clause, fetched via `WebSearch`/`WebFetch` rather
+than assumed) lists `Serial_Number` as a **mandatory** Device object property, not a
+vendor-proprietary extension -- found this wrong. This was flagged to Jurgen as a correction to the
+plan (documented in full in `bacnet.hpp`'s own "Device object identity correlation" paragraph)
+before any decode code was written; Serial-Number is decoded and promoted on the same footing as
+Vendor-Name/Model-Name/Firmware-Revision, not dropped.
+
+~~Decode ReadPropertyMultiple request/ACK (ASHRAE 135 clause 15.7). New correlation logic: when a
 `ReadProperty`/`ReadPropertyMultiple` ACK's ObjectIdentifier is a Device object (object-type 8) and
 PropertyIdentifier is one of Vendor-Name(121)/Model-Name(70)/Firmware-Revision(44)/
 Application-Software-Version(12), recognize it and promote the CharacterString value onto named
 fields -- check ASHRAE 135's Device object property table directly before assuming a
 Serial-Number property exists (it doesn't, as a standard property); if none does, drop
 serial-number from BACnet's own field set rather than inventing a vendor-proprietary one. Wire into
-`InventoryAsset` alongside the existing I-Am-derived Vendor-ID.
+`InventoryAsset` alongside the existing I-Am-derived Vendor-ID.~~ -- what actually shipped: both
+ReadPropertyMultiple-Request (`listOfReadAccessSpecs`, a sequence of `ReadAccessSpecification` --
+per-object `ObjectIdentifier` + a list of `PropertyIdentifier`/optional `PropertyArrayIndex`) and
+ReadPropertyMultiple-ACK (`listOfReadAccessResults`, a sequence of `ReadAccessResult` -- per-object
+`ObjectIdentifier` + a list of `PropertyIdentifier`/optional `PropertyArrayIndex`/either a decoded
+`PropertyValue` primitive or a `propertyAccessError`), byte layout sourced directly from
+`packet-bacapp.c`'s own ASN.1 structure comments for `ReadAccessSpecification`/`ReadAccessResult`
+(the authoritative source -- not that same file's `fReadAccessResult` C function, whose switch
+statement has no explicit case for the `propertyArrayIndex[3]`/`propertyValue[4]` *opening* tag, an
+apparent gap/quirk in that specific Wireshark revision this decoder does not reproduce; see
+`bacnet.hpp`'s own note). Rendered as indexed `"read-access-spec[i]-object=..."`/
+`"read-access-spec[i]-property[j]=..."` (request) and `"read-access-result[i]-object=..."`/
+`"read-access-result[i]-property[j]=..."`/`"...-property[j]-value=..."`/`"...-property[j]-error=..."`
+(ACK) entries in `BacnetApdu::values`, the one first-pass service whose `values` carry an explicit
+index (mirroring HART-IP's own `"device-variable[i]-..."` precedent) since, unlike every other
+first-pass service here, ReadPropertyMultiple can legitimately carry more than one object and more
+than one property per object in a single message. Device object identity correlation: when a
+`ReadProperty` or `ReadPropertyMultiple` ACK's `ObjectIdentifier` is a Device object (object-type 8)
+and `PropertyIdentifier` is one of Vendor-Name(121)/Model-Name(70)/Firmware-Revision(44)/
+Application-Software-Version(12)/Serial-Number(372), decoded as a Character-String, the value is
+promoted onto new `BacnetApdu` fields (`has_device_identity` +
+`device_vendor_name`/`device_model_name`/`device_firmware_revision`/
+`device_application_software_version`/`device_serial_number`) -- additive, nothing renamed or
+removed, same "widen the existing result struct" convention Phase 1-3 already established. Wired
+into `InventoryAsset`: `device_vendor_name` -> `vendor`, `device_model_name` -> `product`,
+`device_firmware_revision` -> `firmware_revision` (falling back to
+`device_application_software_version` only when Firmware-Revision itself wasn't read in that
+exchange -- they are genuinely different properties, but `InventoryAsset` has one
+`firmware_revision` field, not two, matching S7comm's own product-fallback-chain precedent from
+Phase 3), `device_serial_number` -> `serial_number` -- bound to `dp.src_ip` (the ACK's sender, i.e.
+the device actually being queried), mirroring the ENIP/OPC UA/S7comm identity-binding precedent
+exactly. Also surfaced directly on `decode --format json`'s own BACnet output
+(`bacnet_has_device_identity`/`bacnet_device_vendor_name`/`bacnet_device_model_name`/
+`bacnet_device_firmware_revision`/`bacnet_device_application_software_version`/
+`bacnet_device_serial_number` in `write_bacnet_json_fields`, `src/output.cpp`) and in `decode`'s own
+one-line text summary (a trailing `device-identity(vendor=... model=... ...)` segment), independent
+of `inventory`'s own wiring -- same "both inventory wiring AND standalone decode fields" pattern
+Phase 2/3 established.
+
+**Testing.** 8 new packets appended to `tests/sample_bacnet.pcap` (`build_bacnet_sample` in
+`tools/make_sample_pcap.py`, using new `bacnet_read_access_spec`/`bacnet_read_access_result`/
+`bacnet_read_access_result_value`/`bacnet_read_access_result_error` helpers): a full five-property
+identity request/ACK round-trip (given explicit unicast addressing, unlike most of this fixture's
+broadcast-destination packets, so the same exchange also doubles as the inventory-wiring fixture);
+a multi-object ACK confirming identity correlation is scoped per-object (a Device object's
+Vendor-Name promotes, a sibling analog-input's present-value in the same ACK does not); a
+`propertyAccessError` inside a `listOfResults`; a constructed (array-shaped) PropertyValue that is
+correctly named-only/not-decoded and correctly never promoted; a two-`ReadAccessSpecification`
+request; and malformed/truncated request and ACK cases (each stops with a note, no crash). 14 new
+CTest cases (`decode` text/JSON for every scenario above, `inventory` text/JSON confirming the
+`InventoryAsset` wiring) plus one updated (`bacnet_stats_counted`'s packet/protocol counts) -- all
+verified against the real binary's own output, never hand-written expected text. Fuzz corpus for
+`fuzz/corpus/bacnet/` regenerated from the updated fixture via `tools/extract_fuzz_corpus.py`
+(l4/udp, no port filter -- BACnet/IP's own `GateKind::UdpPortIndependent`), adding 61 fresh seeds
+alongside the corpus's existing libFuzzer-discovered (hash-named) entries; a ~45-second/1.87M-
+execution standalone libFuzzer run plus the `fuzz_bacnet_corpus_regression` CTest case, both clean
+under ASan/UBSan (zero crashes, zero sanitizer findings). Full CTest suite: 2070/2070 (default GCC
+build, up from Phase 3's 2060); ASan/UBSan 2070/2070 (non-fuzz-labeled) plus the BACnet fuzz
+corpus-regression target clean; no-live-capture 2058/2058; plus a clean-room extract-rebuild-test,
+all re-verified before delivery; MinGW-w64 cross-compile confirmed to still compile and link
+cleanly (same standing no-Wine-here limitation as every prior phase).
+
+**Not yet done, tracked for a following increment**: DNP3 Device Attributes decode, role
+classification, tag/point/DB touch summarization, and CSV/CMDB, STIX/TAXII-lite, and
+firewall-ACL-draft export -- unchanged from Phase 3's own list, minus BACnet ReadPropertyMultiple,
+which this phase completed. WritePropertyMultiple remains explicitly out of scope even though
+ReadPropertyMultiple is now decoded -- see `bacnet.hpp`'s own "Explicitly out of scope" paragraph
+for why sharing ReadPropertyMultiple-Request's object-list framing wasn't reason enough to add a
+third repeated-record shape (WritePropertyMultiple's own PropertyValue-per-property, plus optional
+Priority) to this first pass.
 
 ## Phase 5 -- DNP3 Device Attributes (group 0) decode + wiring
 
@@ -305,7 +388,9 @@ message types) all updated in the same phase as the code, per this project's sta
 - `include/conduitscope/s7comm.hpp` / `src/s7comm.cpp` -- Phase 3's new SZL decode (shipped);
   `src/decoder.cpp`'s `S7CommResult` construction site and `src/output.cpp`'s
   `write_s7comm_json_fields` also gained the same fields.
-- `include/conduitscope/bacnet.hpp` / `src/bacnet.cpp` -- Phase 4's new ReadPropertyMultiple decode.
+- `include/conduitscope/bacnet.hpp` / `src/bacnet.cpp` -- Phase 4's new ReadPropertyMultiple decode
+  and Device object identity correlation (shipped); `src/asset_inventory.cpp`'s `observe()` and
+  `src/output.cpp`'s `write_bacnet_json_fields` also gained the corresponding wiring/fields.
 - `include/conduitscope/dnp3.hpp` / `src/dnp3.cpp` -- Phase 5's new Device Attributes decode.
 - `src/cli_main.cpp` -- Phase 8's `--format csv` CLI plumbing for `inventory`.
 - `tools/make_sample_pcap.py`, `tools/extract_fuzz_corpus.py`, `CMakeLists.txt`, `fuzz/fuzz_*.cpp`.

@@ -184,19 +184,73 @@
 //   - WriteProperty request (confirmed 15):  same context-tag[0]/[1]/[2] as ReadProperty request,
 //     then context-tag[3] PropertyValue (same opening/closing-tag-wrapped single-primitive
 //     decode), then optional context-tag[4] Priority (unsigned, 1-16).
+//   - ReadPropertyMultiple request (confirmed 14):  listOfReadAccessSpecs, a sequence of one or
+//     more ReadAccessSpecification (ASHRAE 135 clause 15.7 / packet-bacapp.c's
+//     fReadAccessSpecification): each is context-tag[0] ObjectIdentifier + a context-tag[1]
+//     opening/closing-tag-wrapped listOfPropertyReferences -- an UNWRAPPED, repeated run of
+//     context-tag[0] PropertyIdentifier + optional context-tag[1] PropertyArrayIndex pairs (note
+//     these two inner tag numbers are only unique WITHIN the [1]-wrapped list, not globally --
+//     packet-bacapp.c's own fPropertyReference reuses tag numbers 0/1 inside every nested
+//     structure, matching ASN.1's own per-SEQUENCE tag numbering). Rendered flattened as
+//     "read-access-spec[i]-object=...", "read-access-spec[i]-property[j]=...", and
+//     "read-access-spec[i]-property[j]-array-index=..." entries in `values` (see
+//     decode_read_property_multiple_request in bacnet.cpp) -- there is no natural place for a
+//     single "object=..." key to repeat across specs the way this decoder's other services'
+//     `values` entries stay unindexed, so this is the one first-pass service whose `values`
+//     entries carry an explicit index, mirroring hartip.hpp's own "device-variable[i]-..."
+//     precedent for HART-IP's own repeated-record fields.
+//   - ReadPropertyMultiple ACK (confirmed 14's Complex-Ack):  listOfReadAccessResults, a sequence
+//     of one or more ReadAccessResult (same clause, packet-bacapp.c's fReadAccessResult): each is
+//     context-tag[0] ObjectIdentifier + a context-tag[1] opening/closing-tag-wrapped listOfResults
+//     -- an unwrapped, repeated run of context-tag[2] PropertyIdentifier + optional context-tag[3]
+//     PropertyArrayIndex + EITHER a context-tag[4] opening/closing-tag-wrapped PropertyValue (one
+//     application-tagged primitive, same "first pass" single-scalar decode as ReadProperty ACK's
+//     own context-tag[3] PropertyValue -- an array/list/structured value is named only, not
+//     value-decoded) OR a context-tag[5] opening/closing-tag-wrapped propertyAccessError (generic
+//     errorClass+errorCode, same shape as the PDU-type-5 Error decode above). NOTE: this decoder
+//     implements directly against ReadAccessResult's own ASN.1 structure comment in
+//     packet-bacapp.c (the authoritative source) rather than against that same file's
+//     fReadAccessResult C function, whose switch statement has no explicit case for tag_no 3 or
+//     the propertyValue[4] OPENING tag (it only handles that tag's CLOSING half, as a special case
+//     alongside tag 5's) -- an apparent gap/quirk in that specific Wireshark revision, not a
+//     property this decoder reproduces.
 //   - Error (any confirmed service's error response):  generic errorClass+errorCode only, per the
 //     PDU-type table above.
-// Every OTHER confirmed or unconfirmed service (ReadPropertyMultiple/WritePropertyMultiple/
-// SubscribeCOV/AtomicReadFile/DeviceCommunicationControl/ReinitializeDevice/ConfirmedEventNotifi
-// cation/UnconfirmedCOVNotification/... -- the large majority of the two tables) is named via the
+// Every OTHER confirmed or unconfirmed service (WritePropertyMultiple/SubscribeCOV/AtomicReadFile/
+// DeviceCommunicationControl/ReinitializeDevice/ConfirmedEventNotification/
+// UnconfirmedCOVNotification/... -- the large majority of the two tables) is named via the
 // service-choice table, but its data is shown only as raw hex + byte length, not value-decoded.
 // This "first pass" set was chosen because Who-Is/I-Am/Who-Has/I-Have are collectively the single
 // most security-relevant BACnet traffic pattern for passive OT monitoring (unauthenticated device
 // and object discovery, the BACnet analog of an ARP sweep or a Modbus/S7comm "what devices exist
-// here" probe), and ReadProperty/WriteProperty are the most common property-access pattern
-// (ReadPropertyMultiple, deliberately NOT decoded here, is more efficient and increasingly common
-// in modern deployments but has a materially more complex nested-list wire shape -- named only,
-// like every other out-of-scope service, rather than half-decoded).
+// here" probe), and ReadProperty/ReadPropertyMultiple/WriteProperty are the most common property-
+// access patterns -- ReadPropertyMultiple in particular is the more efficient, increasingly common
+// modern-deployment equivalent of a run of individual ReadProperty calls, and its nested-list wire
+// shape, while more complex than every other first-pass service, is still a bounded, fully-
+// specified structure (unlike, say, a COV notification's service-specific structured value), so it
+// is decoded rather than left as the one out-of-scope gap that earlier revisions of this file
+// called out.
+//
+// Device object identity correlation: when a ReadProperty or ReadPropertyMultiple ACK's
+// ObjectIdentifier is a Device object (object-type 8) and the PropertyIdentifier is one of the
+// five well-known Device-object identity properties -- Vendor-Name(121), Model-Name(70),
+// Firmware-Revision(44), Application-Software-Version(12), Serial-Number(372) -- and the decoded
+// PropertyValue is a Character-String, this decoder promotes that value onto BacnetApdu's own
+// device_vendor_name/device_model_name/device_firmware_revision/
+// device_application_software_version/device_serial_number fields (has_device_identity=true),
+// the BACnet analog of EtherNet/IP's CIP Identity / S7comm's SZL 0x001C Component Identification
+// promotion. This is a specific, well-known five-property pattern match, not general RPM
+// value tracking -- the same narrow-recognition posture PolicyEngine's own function
+// classification already uses elsewhere in this codebase. Serial-Number(372) deserves a note: an
+// earlier draft of this plan assumed BACnet had no standard Serial-Number property on the Device
+// object at all; that assumption was WRONG and is corrected here after direct primary-source
+// verification -- ASHRAE 135's own BACnetPropertyIdentifier enumeration has carried
+// "serial-number" (372) since the addendum that introduced the Who-Am-I/You-Are device-
+// identification services, and OPC UA for BACnet's own published mapping of ASHRAE 135's Device
+// object property table (Table 10 of that companion specification, a direct machine-checkable
+// transcription of the base standard's own Device object clause) lists Serial_Number as a
+// MANDATORY Device object property, not merely a vendor-proprietary extension -- so it is decoded
+// here on the same footing as Vendor-Name/Model-Name/Firmware-Revision, not omitted.
 //
 // Property value decode ("first pass"): a PropertyValue's single application-tagged primitive is
 // decoded for application tag numbers 0-12 (cross-checked against packet-bacapp.c's
@@ -230,9 +284,12 @@
 // Explicitly out of scope: BACnet/SC (Secure Connect, WebSocket-based, an entirely different
 // transport under a different BVLC Type byte -- 0x82, not 0x81); Secure-BVLL (BVLC function
 // 0x0C)'s encrypted payload; every network-layer message's own data (named only, see above);
-// every APDU service outside the "first pass" list (named only); ReadPropertyMultiple/
-// WritePropertyMultiple's nested list-of-results structure specifically (the most notable
-// omission from real-world traffic -- see above); cross-packet APDU segmentation reassembly;
+// every APDU service outside the "first pass" list (named only) -- WritePropertyMultiple in
+// particular is NOT decoded even though ReadPropertyMultiple now is (see above): it shares
+// ReadPropertyMultiple-Request's per-object ObjectIdentifier framing but each property entry is
+// followed by its own PropertyValue (and optional Priority), a third repeated-record shape this
+// first pass does not add just because a sibling service's list-of-objects shape now is; cross-
+// packet APDU segmentation reassembly;
 // MS/TP, ARCNET, LonTalk, or BACnet/SC MAC address formats appearing inside DADR/SADR (only their
 // raw bytes are shown -- this decoder only ever sees BACnet/IP's own Ethernet/IPv4 framing, so a
 // non-6-byte DADR/SADR here would only ever appear on NPDU traffic forwarded from a non-IP BACnet
@@ -246,7 +303,8 @@
 // Request/Complex-ACK ReadProperty request/response pairs against trend-log objects, with
 // Unsigned-typed PropertyValue decode, all byte-for-byte correct with zero crashes or unexpected
 // fallbacks -- but it is narrow: everything else described above (Who-Is/I-Am/Who-Has/I-Have,
-// WriteProperty, Simple-ACK/Error/Reject/Abort/Segment-ACK, every BVLC function besides Original-
+// WriteProperty, ReadPropertyMultiple (request and ACK) and its Device object identity
+// correlation, Simple-ACK/Error/Reject/Abort/Segment-ACK, every BVLC function besides Original-
 // Unicast-NPDU, NPDU DEST/SRC/Network-Layer-Message, every PropertyValue type besides Unsigned,
 // and segmentation) is validated only against the hand-built tests/sample_bacnet.pcap fixture
 // (tools/make_sample_pcap.py's build_bacnet_sample) cross-checked against Wireshark's dissector
@@ -318,6 +376,18 @@ struct BacnetApdu {
     // "value=(Real) 72.500000". Empty when this PDU's service is outside the first-pass set, or
     // when segmented (see header comment's segmentation paragraph).
     std::vector<std::string> values;
+
+    // Device object identity correlation -- see header comment's own paragraph. Set only on a
+    // ReadProperty/ReadPropertyMultiple Complex-ACK whose ObjectIdentifier is a Device object
+    // (object-type 8) and whose PropertyIdentifier was one of the five well-known identity
+    // properties, decoded as a Character-String. Each field stays empty unless that specific
+    // property was actually seen -- never guessed, never defaulted from another field.
+    bool has_device_identity = false;
+    std::string device_vendor_name;                      // Vendor-Name (121)
+    std::string device_model_name;                        // Model-Name (70)
+    std::string device_firmware_revision;                  // Firmware-Revision (44)
+    std::string device_application_software_version;       // Application-Software-Version (12)
+    std::string device_serial_number;                      // Serial-Number (372)
 
     bool data_shown_as_hex = false;  // true when values is empty but there IS trailing data
     std::string data_hex;

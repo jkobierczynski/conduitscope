@@ -2479,12 +2479,56 @@ group/variation table, S7comm's classic-syntax-only addressing):
   ReadProperty request, then context-tag[3] PropertyValue (same
   opening/closing-tag-wrapped single-primitive decode), then optional
   context-tag[4] Priority (unsigned, 1-16).
+- **ReadPropertyMultiple request** (confirmed 14): `listOfReadAccessSpecs`,
+  a sequence of one or more `ReadAccessSpecification` -- each is
+  context-tag[0] ObjectIdentifier + a context-tag[1] opening/closing-tag-
+  wrapped `listOfPropertyReferences` (an unwrapped, repeated run of
+  context-tag[0] PropertyIdentifier + optional context-tag[1]
+  PropertyArrayIndex pairs -- these two inner tag numbers are only unique
+  WITHIN the wrapped list, not globally, matching ASN.1's own
+  per-SEQUENCE tag numbering). Rendered as indexed
+  `"read-access-spec[i]-object=..."`/`"read-access-spec[i]-property[j]=..."`
+  entries.
+- **ReadPropertyMultiple ACK** (confirmed 14's Complex-Ack):
+  `listOfReadAccessResults`, a sequence of one or more `ReadAccessResult`
+  -- each is context-tag[0] ObjectIdentifier + a context-tag[1]
+  opening/closing-tag-wrapped `listOfResults` (an unwrapped, repeated run
+  of context-tag[2] PropertyIdentifier + optional context-tag[3]
+  PropertyArrayIndex + EITHER a context-tag[4] opening/closing-tag-wrapped
+  PropertyValue -- one application-tagged primitive, same single-scalar
+  decode as ReadProperty ACK's own context-tag[3] PropertyValue -- OR a
+  context-tag[5] opening/closing-tag-wrapped propertyAccessError (generic
+  errorClass+errorCode)). Implemented directly against
+  `ReadAccessResult`'s own ASN.1 structure comment in `packet-bacapp.c`
+  rather than that file's `fReadAccessResult` C function, whose switch
+  statement has no explicit case for the propertyArrayIndex[3]/
+  propertyValue[4] *opening* tag -- an apparent gap/quirk in that specific
+  Wireshark revision this decoder does not reproduce.
 - **Error** (any confirmed service's error response): generic
   errorClass+errorCode only, per the PDU-type table above.
 
-Every OTHER confirmed or unconfirmed service (ReadPropertyMultiple/
-WritePropertyMultiple/SubscribeCOV/AtomicReadFile/
-DeviceCommunicationControl/ReinitializeDevice/
+**Device object identity correlation**: when a ReadProperty or
+ReadPropertyMultiple ACK's ObjectIdentifier is a Device object
+(object-type 8) and the PropertyIdentifier is one of five well-known
+identity properties -- Vendor-Name(121), Model-Name(70),
+Firmware-Revision(44), Application-Software-Version(12),
+Serial-Number(372) -- and the decoded PropertyValue is a
+Character-String, the value is promoted onto named `device_*` fields
+(`has_device_identity` + `device_vendor_name`/`device_model_name`/
+`device_firmware_revision`/`device_application_software_version`/
+`device_serial_number`), the BACnet analog of EtherNet/IP's CIP Identity /
+S7comm's SZL 0x001C promotion. Serial-Number(372) is included on the same
+footing as the other four: an earlier draft of this project's own
+asset-inventory design assumed BACnet had no standard Serial-Number
+property on the Device object, which direct primary-source verification
+found wrong -- ASHRAE 135's own `BACnetPropertyIdentifier` enumeration has
+carried `serial-number` (372) since the addendum that introduced the
+Who-Am-I/You-Are device-identification services, and OPC UA for BACnet's
+own published Device object property table lists `Serial_Number` as
+**mandatory**, not vendor-proprietary.
+
+Every OTHER confirmed or unconfirmed service (WritePropertyMultiple/
+SubscribeCOV/AtomicReadFile/DeviceCommunicationControl/ReinitializeDevice/
 ConfirmedEventNotification/UnconfirmedCOVNotification/... -- the large
 majority of the two tables) is named via the service-choice table, but its
 data is shown only as raw hex + byte length, not value-decoded. This
@@ -2492,11 +2536,18 @@ data is shown only as raw hex + byte length, not value-decoded. This
 collectively the single most security-relevant BACnet traffic pattern for
 passive OT monitoring (unauthenticated device and object discovery, the
 BACnet analog of an ARP sweep or a Modbus/S7comm "what devices exist here"
-probe), and ReadProperty/WriteProperty are the most common property-access
-pattern (ReadPropertyMultiple, deliberately NOT decoded here, is more
-efficient and increasingly common in modern deployments but has a
-materially more complex nested-list wire shape -- named only, like every
-other out-of-scope service, rather than half-decoded).
+probe), and ReadProperty/ReadPropertyMultiple/WriteProperty are the most
+common property-access patterns -- ReadPropertyMultiple in particular is
+the more efficient, increasingly common modern-deployment equivalent of a
+run of individual ReadProperty calls, and its nested-list wire shape,
+while more complex than every other first-pass service, is still a
+bounded, fully-specified structure, so it is decoded rather than left as
+an out-of-scope gap. WritePropertyMultiple remains explicitly out of
+scope even though ReadPropertyMultiple is now decoded: it shares
+ReadPropertyMultiple-Request's per-object ObjectIdentifier framing but
+each property entry is followed by its own PropertyValue (and optional
+Priority), a third repeated-record shape this first pass does not add
+just because a sibling service's list-of-objects shape now is.
 
 **Property value decode**: a PropertyValue's single application-tagged
 primitive is decoded for application tag numbers 0-12: Null, Boolean,
@@ -2530,12 +2581,10 @@ ASHRAE-reserved range) is rendered `"unknown(N)"` or
 different WebSocket-based transport under BVLC Type `0x82`, not `0x81`);
 Secure-BVLL's encrypted payload; every Network Layer Message's own data
 (named only); every APDU service outside the "first pass" list (named
-only); ReadPropertyMultiple/WritePropertyMultiple's nested
-list-of-results structure specifically (the most notable omission from
-real-world traffic); cross-packet APDU segmentation reassembly; MS/TP,
-ARCNET, LonTalk, or BACnet/SC MAC address formats appearing inside
-DADR/SADR (only their raw bytes are shown -- this decoder only ever sees
-BACnet/IP's own Ethernet/IPv4 framing).
+only) -- WritePropertyMultiple in particular, see above; cross-packet APDU
+segmentation reassembly; MS/TP, ARCNET, LonTalk, or BACnet/SC MAC address
+formats appearing inside DADR/SADR (only their raw bytes are shown -- this
+decoder only ever sees BACnet/IP's own Ethernet/IPv4 framing).
 
 #### Validation
 
@@ -2547,10 +2596,12 @@ Network-Layer-Message) NPDU, and 27 Confirmed-Request/Complex-ACK
 ReadProperty request/response pairs against trend-log objects, with
 Unsigned-typed PropertyValue decode, all byte-for-byte correct with zero
 crashes or unexpected fallbacks -- but it is narrow: everything else
-described above (Who-Is/I-Am/Who-Has/I-Have, WriteProperty, Simple-ACK/
-Error/Reject/Abort/Segment-ACK, every BVLC function besides
-Original-Unicast-NPDU, NPDU DEST/SRC/Network-Layer-Message, every
-PropertyValue type besides Unsigned, and segmentation) is validated only
+described above (Who-Is/I-Am/Who-Has/I-Have, WriteProperty,
+ReadPropertyMultiple (request and ACK) and its Device object identity
+correlation, Simple-ACK/Error/Reject/Abort/Segment-ACK, every BVLC
+function besides Original-Unicast-NPDU, NPDU DEST/SRC/Network-Layer-
+Message, every PropertyValue type besides Unsigned, and segmentation) is
+validated only
 against the hand-built `tests/sample_bacnet.pcap` fixture (see
 `tools/make_sample_pcap.py`'s `build_bacnet_sample`), cross-checked against
 Wireshark's dissector source rather than an independent real capture --

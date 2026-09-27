@@ -3247,14 +3247,92 @@ add_test(NAME bacnet_npdu_with_no_apdu_bytes_noted
 set_tests_properties(bacnet_npdu_with_no_apdu_bytes_noted PROPERTIES
   PASS_REGULAR_EXPRESSION "NPDU \\(no APDU\\)\n *note: no APDU bytes present after the NPDU header")
 
-# 52) APDU PDU type not one of the 8 the spec defines -- BVLC/NPDU decode fine, only the APDU
+# 52-59) ReadPropertyMultiple (Phase 4, asset-inventory-real-record.md) -- see bacnet.hpp's own
+# paragraph for the full listOfReadAccessSpecs/listOfReadAccessResults wire shape and citation.
+
+# 52) ReadPropertyMultiple request -- one object, all five well-known Device identity properties.
+add_test(NAME bacnet_read_property_multiple_request_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap")
+set_tests_properties(bacnet_read_property_multiple_request_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"bacnet_service_name\": \"readPropertyMultiple\".*\"bacnet_invoke_id\": 40.*\"bacnet_values\": \\[\"read-access-spec\\[0\\]-object=device,1234\", \"read-access-spec\\[0\\]-property\\[0\\]=vendor-name\", \"read-access-spec\\[0\\]-property\\[1\\]=model-name\", \"read-access-spec\\[0\\]-property\\[2\\]=firmware-revision\", \"read-access-spec\\[0\\]-property\\[3\\]=application-software-version\", \"read-access-spec\\[0\\]-property\\[4\\]=serial-number\"\\]")
+
+# 53) ReadPropertyMultiple ACK answering #52 -- all five identity properties decoded as
+# CharacterString values, and all five promoted onto the new bacnet_device_* JSON fields (Device
+# object identity correlation -- see bacnet.hpp's own paragraph).
+add_test(NAME bacnet_read_property_multiple_ack_all_identity_fields_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap")
+set_tests_properties(bacnet_read_property_multiple_ack_all_identity_fields_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"bacnet_invoke_id\": 40,\n *\"bacnet_segmented\": false,\n *\"bacnet_values\": \\[\"read-access-result\\[0\\]-object=device,1234\", \"read-access-result\\[0\\]-property\\[0\\]=vendor-name\", \"read-access-result\\[0\\]-property\\[0\\]-value=\\(Character String\\) Acme Controls\", \"read-access-result\\[0\\]-property\\[1\\]=model-name\", \"read-access-result\\[0\\]-property\\[1\\]-value=\\(Character String\\) Widget 9000\", \"read-access-result\\[0\\]-property\\[2\\]=firmware-revision\", \"read-access-result\\[0\\]-property\\[2\\]-value=\\(Character String\\) 3.2.1\", \"read-access-result\\[0\\]-property\\[3\\]=application-software-version\", \"read-access-result\\[0\\]-property\\[3\\]-value=\\(Character String\\) App 1.0.0\", \"read-access-result\\[0\\]-property\\[4\\]=serial-number\", \"read-access-result\\[0\\]-property\\[4\\]-value=\\(Character String\\) SN-00012345\"\\],\n *\"bacnet_has_device_identity\": true,\n *\"bacnet_device_vendor_name\": \"Acme Controls\",\n *\"bacnet_device_model_name\": \"Widget 9000\",\n *\"bacnet_device_firmware_revision\": \"3.2.1\",\n *\"bacnet_device_application_software_version\": \"App 1.0.0\",\n *\"bacnet_device_serial_number\": \"SN-00012345\"")
+
+# 54) Multiple ReadAccessResults in one ACK: only the Device object's property (Vendor-Name)
+# contributes to identity correlation -- the second object (an analog-input, not a Device) is
+# fully decoded (present-value=72.5) but must NOT affect device identity, confirming correlation
+# is scoped per-object.
+add_test(NAME bacnet_read_property_multiple_ack_multi_object_identity_scoped_to_device
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap")
+set_tests_properties(bacnet_read_property_multiple_ack_multi_object_identity_scoped_to_device PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"bacnet_invoke_id\": 41.*\"bacnet_values\": \\[\"read-access-result\\[0\\]-object=device,1234\", \"read-access-result\\[0\\]-property\\[0\\]=vendor-name\", \"read-access-result\\[0\\]-property\\[0\\]-value=\\(Character String\\) Acme Controls\", \"read-access-result\\[1\\]-object=analog-input,3\", \"read-access-result\\[1\\]-property\\[0\\]=present-value\", \"read-access-result\\[1\\]-property\\[0\\]-value=\\(Real\\) 72.500000\"\\],\n *\"bacnet_has_device_identity\": true,\n *\"bacnet_device_vendor_name\": \"Acme Controls\",\n *\"notes\"")
+
+# 55) propertyAccessError[5] inside a listOfResults -- decoded as "...-error=errorClass/errorCode",
+# never mistaken for a value, and (not being a CharacterString value) never promoted to identity.
+add_test(NAME bacnet_read_property_multiple_ack_property_access_error_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap")
+set_tests_properties(bacnet_read_property_multiple_ack_property_access_error_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"bacnet_invoke_id\": 42.*\"bacnet_values\": \\[\"read-access-result\\[0\\]-object=device,1234\", \"read-access-result\\[0\\]-property\\[0\\]=vendor-name\", \"read-access-result\\[0\\]-property\\[0\\]-error=property/unknown-property\"\\],\n *\"bacnet_has_device_identity\": false")
+
+# 56) A CONSTRUCTED (array-shaped) propertyValue[4] for Vendor-Name on a Device object -- not a
+# single primitive, so not value-decoded (named only, with a note) -- and, being neither a
+# successfully-decoded value nor a CharacterString, correctly never promoted to identity even
+# though the object/property would otherwise match.
+add_test(NAME bacnet_read_property_multiple_ack_constructed_value_not_promoted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap" --format text --verbose)
+set_tests_properties(bacnet_read_property_multiple_ack_constructed_value_not_promoted PROPERTIES
+  PASS_REGULAR_EXPRESSION "invoke-id=43 readPropertyMultiple \\[read-access-result\\[0\\]-object=device,1234 \\+1 more\\]\n *note: property value is constructed \\(an array/list or service-specific structured value\\), not a single primitive -- not value-decoded in this first-pass release")
+
+# 57) ReadPropertyMultiple request with TWO ReadAccessSpecifications -- confirms the
+# "read-access-spec[i]-..." indexing keeps each object's own property references distinct.
+add_test(NAME bacnet_read_property_multiple_request_two_specs_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap")
+set_tests_properties(bacnet_read_property_multiple_request_two_specs_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"bacnet_invoke_id\": 44.*\"bacnet_values\": \\[\"read-access-spec\\[0\\]-object=device,1234\", \"read-access-spec\\[0\\]-property\\[0\\]=vendor-name\", \"read-access-spec\\[0\\]-property\\[1\\]=model-name\", \"read-access-spec\\[1\\]-object=analog-input,3\", \"read-access-spec\\[1\\]-property\\[0\\]=present-value\"\\]")
+
+# 58) Malformed ReadPropertyMultiple request (object identifier not followed by an opening
+# listOfPropertyReferences tag) -- must not crash, stops with a note.
+add_test(NAME bacnet_read_property_multiple_request_malformed_noted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap" --format text --verbose)
+set_tests_properties(bacnet_read_property_multiple_request_malformed_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "invoke-id=45 readPropertyMultiple \\[read-access-spec\\[0\\]-object=device,1234\\]\n *note: ReadPropertyMultiple request: expected listOfPropertyReferences \\(context tag 1, opening\\) after read-access-spec\\[0\\]-object -- stopping here, remaining data not decoded")
+
+# 59) Truncated ReadPropertyMultiple ACK (cut off after a bare propertyIdentifier, before its
+# value/error and the closing tag) -- must not crash, stops with a note.
+add_test(NAME bacnet_read_property_multiple_ack_truncated_noted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap" --format text --verbose)
+set_tests_properties(bacnet_read_property_multiple_ack_truncated_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "invoke-id=46 readPropertyMultiple \\[read-access-result\\[0\\]-object=device,1234 \\+1 more\\]\n *note: ReadPropertyMultiple ACK: expected propertyValue \\(context tag 4\\) or propertyAccessError \\(context tag 5\\) after read-access-result\\[0\\]-property\\[0\\] -- stopping here, remaining data not decoded")
+
+# AssetInventoryEngine wiring for packets 52-53's own unicast (192.168.1.20 -> 192.168.1.21)
+# ReadPropertyMultiple exchange: all five Device-object identity properties -> vendor/product/
+# firmware_revision/serial_number on the InventoryAsset for 192.168.1.21 (the device that actually
+# sent the Complex-ACK) -- mirrors s7comm_szl_inventory_identity_wired_text/_in_json's own pattern
+# for S7comm's SZL identity wiring.
+add_test(NAME bacnet_read_property_multiple_inventory_identity_wired_text
+  COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap" --format text)
+set_tests_properties(bacnet_read_property_multiple_inventory_identity_wired_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.21 .*\\[server\\]  bacnet.*identity: +vendor=Acme Controls +product=\"Widget 9000\" +firmware=3\\.2\\.1 +serial=SN-00012345")
+
+add_test(NAME bacnet_read_property_multiple_inventory_identity_wired_json
+  COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap" --format json)
+set_tests_properties(bacnet_read_property_multiple_inventory_identity_wired_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"ip\": \"192\\.168\\.1\\.21\",.*\"vendor\": \"Acme Controls\",\n *\"product\": \"Widget 9000\",\n *\"firmware_revision\": \"3\\.2\\.1\",\n *\"serial_number\": \"SN-00012345\"")
+
+# 60) APDU PDU type not one of the 8 the spec defines -- BVLC/NPDU decode fine, only the APDU
 # itself is left unrecognized.
 add_test(NAME bacnet_apdu_type_not_recognized_noted
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap" --format text --verbose)
 set_tests_properties(bacnet_apdu_type_not_recognized_noted PROPERTIES
   PASS_REGULAR_EXPRESSION "NPDU \\(APDU type not recognized\\)\n *note: APDU type 15 is not one of the 8 the spec defines \\(0-7\\)")
 
-# 53) Ordinary UDP traffic on an unrelated port -- must not be misdetected regardless of port (the
+# 61) Ordinary UDP traffic on an unrelated port -- must not be misdetected regardless of port (the
 # structural gate is Type+Function, not port).
 add_test(NAME bacnet_unrelated_udp_traffic_not_misdetected
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap" --format text)
@@ -3264,7 +3342,7 @@ set_tests_properties(bacnet_unrelated_udp_traffic_not_misdetected PROPERTIES
 add_test(NAME bacnet_stats_counted
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap" --stats)
 set_tests_properties(bacnet_stats_counted PROPERTIES
-  PASS_REGULAR_EXPRESSION "packets: +53[^\n]*\n[^\n]*\nprotocols:\n *bacnet +49\n *udp +4\nbacnet bvlc functions:\n *BVLC-Result +1\n.*bacnet apdu services:\n *i-Am +2\n")
+  PASS_REGULAR_EXPRESSION "packets: +61[^\n]*\n[^\n]*\nprotocols:\n *bacnet +57\n *udp +4\nbacnet bvlc functions:\n *BVLC-Result +1\n.*bacnet apdu services:\n *i-Am +2\n.*readPropertyMultiple +10\n")
 
 # --------------------------------------------------------------------------
 # Real-world BACnet/IP capture -- see tests/real_captures/bacnet/ATTRIBUTION.md for provenance: a

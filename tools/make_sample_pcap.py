@@ -2533,6 +2533,48 @@ def bacnet_object_property_reference(obj_type: int, instance: int, prop_id: int,
     return out
 
 
+def bacnet_read_access_spec(obj_type: int, instance: int, prop_ids) -> bytes:
+    """One ReadAccessSpecification for a ReadPropertyMultiple-Request's own listOfReadAccessSpecs
+    (ASHRAE 135 clause 15.7 -- see bacnet.hpp's own paragraph): context[0] ObjectIdentifier +
+    context[1]-wrapped listOfPropertyReferences, an UNWRAPPED, repeated run of context[0]
+    PropertyIdentifier (no context[1] PropertyArrayIndex in this fixture's own use -- every
+    caller here reads whole properties, not array elements)."""
+    body = bacnet_context_tag(0, bacnet_object_id(obj_type, instance))
+    body += bacnet_open(1)
+    for prop_id in prop_ids:
+        body += bacnet_context_tag(0, bacnet_unsigned(prop_id))
+    body += bacnet_close(1)
+    return body
+
+
+def bacnet_read_access_result(obj_type: int, instance: int, results: bytes) -> bytes:
+    """One ReadAccessResult for a ReadPropertyMultiple-ACK's own listOfReadAccessResults (same
+    clause) -- context[0] ObjectIdentifier + context[1]-wrapped listOfResults, whose own content is
+    `results` (one or more bacnet_read_access_result_value/_error calls, concatenated)."""
+    return bacnet_context_tag(0, bacnet_object_id(obj_type, instance)) + bacnet_open(1) + results + bacnet_close(1)
+
+
+def bacnet_read_access_result_value(prop_id: int, app_tagged_value: bytes, array_index=None) -> bytes:
+    """One successful property result inside a listOfResults: context[2] PropertyIdentifier +
+    optional context[3] PropertyArrayIndex + context[4]-wrapped PropertyValue (`app_tagged_value`,
+    already tag-encoded -- e.g. bacnet_app_tag(7, bacnet_char_string(...)))."""
+    body = bacnet_context_tag(2, bacnet_unsigned(prop_id))
+    if array_index is not None:
+        body += bacnet_context_tag(3, bacnet_unsigned(array_index))
+    body += bacnet_open(4) + app_tagged_value + bacnet_close(4)
+    return body
+
+
+def bacnet_read_access_result_error(prop_id: int, error_class: int, error_code: int) -> bytes:
+    """One erroring property result inside a listOfResults: context[2] PropertyIdentifier +
+    context[5]-wrapped propertyAccessError (generic errorClass+errorCode, both application-tagged
+    Enumerated -- same shape as apdu_error's own error body)."""
+    body = bacnet_context_tag(2, bacnet_unsigned(prop_id))
+    body += (bacnet_open(5) + bacnet_app_tag(9, bacnet_unsigned(error_class)) +
+             bacnet_app_tag(9, bacnet_unsigned(error_code)) + bacnet_close(5))
+    return body
+
+
 def bvlc_message(function: int, body: bytes) -> bytes:
     total = 4 + len(body)
     return struct.pack("!BBH", 0x81, function, total) + body
@@ -2764,9 +2806,10 @@ def build_bacnet_sample():
     # 26) A segmented Confirmed-Request (SEG bit set) -- this decoder decodes the sequence-
     #     number/proposed-window-size header fields but deliberately does NOT value-decode the
     #     segment's own service data (no cross-packet reassembly) -- shown as raw hex with an
-    #     explanatory note. service_choice 14 = readPropertyMultiple, a service this decoder
-    #     doesn't value-decode even when unsegmented, doubling as an "outside the first-pass set"
-    #     example too.
+    #     explanatory note, regardless of which service it is (the segmentation check happens
+    #     before service dispatch) -- service_choice 14 = readPropertyMultiple here only to show
+    #     that even a service this decoder DOES value-decode when unsegmented (see below) still
+    #     falls back to raw hex once segmented.
     add(bvlc_message(0x0A, npdu_header() +
                       apdu_confirmed_request(14, bytes([0xAA, 0xBB, 0xCC, 0xDD]), invoke_id=30,
                                               segmented=True, seq=1, window=8)))
@@ -2883,12 +2926,97 @@ def build_bacnet_sample():
     # 51) NPDU truncated right after Version/Control (no APDU bytes at all present).
     add(bvlc_message(0x0A, bytes([0x01, 0x00])))
 
-    # 52) An APDU PDU type this decoder doesn't recognize (top nibble 15, not one of the 8 the
+    # 52) ReadPropertyMultiple request -- one ReadAccessSpecification, Device object (instance
+    #     1234), reading all five well-known identity properties: Vendor-Name(121), Model-Name(70),
+    #     Firmware-Revision(44), Application-Software-Version(12), Serial-Number(372) -- see
+    #     bacnet.hpp's own paragraph for the full listOfReadAccessSpecs/listOfPropertyReferences
+    #     wire shape and citation. Given explicit UNICAST addressing (unlike most of this fixture's
+    #     other packets, which use the default broadcast destination) so this exchange ALSO doubles
+    #     as the inventory-wiring fixture (see bacnet_read_property_multiple_ack_inventory_identity_
+    #     fields_json/_text in CMakeLists.txt) -- a broadcast destination would be filtered out of
+    #     asset/edge creation (see looks_like_broadcast_or_multicast's own comment in
+    #     asset_inventory.cpp), which would prevent update_identity from having anywhere to write.
+    rpm_identity_props = [121, 70, 44, 12, 372]
+    RPM_CLIENT_IP, RPM_DEVICE_IP = "192.168.1.20", "192.168.1.21"
+    RPM_CLIENT_MAC, RPM_DEVICE_MAC = mac("00:0c:29:aa:bb:20"), mac("00:0c:29:aa:bb:21")
+    add(bvlc_message(0x0A, npdu_header() +
+                      apdu_confirmed_request(14, bacnet_read_access_spec(8, 1234, rpm_identity_props),
+                                              invoke_id=40)),
+        src=RPM_CLIENT_MAC, dst=RPM_DEVICE_MAC, src_ip=RPM_CLIENT_IP, dst_ip=RPM_DEVICE_IP)
+
+    # 53) ReadPropertyMultiple ACK answering #52 -- one ReadAccessResult, all five identity
+    #     properties present as CharacterString values -- this decoder's Device object identity
+    #     correlation (see bacnet.hpp) promotes all five onto BacnetApdu's own device_* fields, and
+    #     from there (asset_inventory.cpp) onto the InventoryAsset that owns 192.168.1.21 (the
+    #     device that actually sent this ACK).
+    rpm_identity_results = (
+        bacnet_read_access_result_value(121, bacnet_app_tag(7, bacnet_char_string("Acme Controls"))) +
+        bacnet_read_access_result_value(70, bacnet_app_tag(7, bacnet_char_string("Widget 9000"))) +
+        bacnet_read_access_result_value(44, bacnet_app_tag(7, bacnet_char_string("3.2.1"))) +
+        bacnet_read_access_result_value(12, bacnet_app_tag(7, bacnet_char_string("App 1.0.0"))) +
+        bacnet_read_access_result_value(372, bacnet_app_tag(7, bacnet_char_string("SN-00012345")))
+    )
+    add(bvlc_message(0x0A, npdu_header() +
+                      apdu_complex_ack(14, bacnet_read_access_result(8, 1234, rpm_identity_results),
+                                       invoke_id=40)),
+        src=RPM_DEVICE_MAC, dst=RPM_CLIENT_MAC, src_ip=RPM_DEVICE_IP, dst_ip=RPM_CLIENT_IP)
+
+    # 54) ReadPropertyMultiple ACK, MULTIPLE ReadAccessResults in one message: the first object is
+    #     a Device (Vendor-Name only, so identity correlation fires with just that one field set),
+    #     the second is an analog-input's present-value (NOT a Device object, so it must NOT affect
+    #     identity correlation even though it's decoded in the same ACK) -- confirms correlation is
+    #     scoped per-object, not "any identity-shaped property anywhere in this ACK."
+    rpm_multi = (bacnet_read_access_result(8, 1234,
+                     bacnet_read_access_result_value(121, bacnet_app_tag(7, bacnet_char_string("Acme Controls")))) +
+                 bacnet_read_access_result(0, 3,
+                     bacnet_read_access_result_value(85, bacnet_app_tag(4, struct.pack("!f", 72.5)))))
+    add(bvlc_message(0x0A, npdu_header() + apdu_complex_ack(14, rpm_multi, invoke_id=41)))
+
+    # 55) ReadPropertyMultiple ACK with a propertyAccessError[5] for one property (Vendor-Name
+    #     wasn't readable on this object) -- decoded as "...-error=errorClass/errorCode", not
+    #     mistaken for a successful value, and (being an error, not a CharacterString value) never
+    #     promoted to identity.
+    rpm_error = bacnet_read_access_result(8, 1234, bacnet_read_access_result_error(121, 2, 32))
+    add(bvlc_message(0x0A, npdu_header() + apdu_complex_ack(14, rpm_error, invoke_id=42)))
+
+    # 56) ReadPropertyMultiple ACK whose Vendor-Name PropertyValue is CONSTRUCTED (an array/list,
+    #     same shape as item 15's plain-ReadProperty analog) -- not a single primitive, so not
+    #     value-decoded (named only, with a note) -- and, since it's therefore never a
+    #     CharacterString PrimitiveValue, correctly never promoted to identity either, even though
+    #     property 121 (Vendor-Name) and the object (Device) would otherwise match.
+    rpm_constructed_value = (bacnet_open(4) + bacnet_app_tag(2, bacnet_unsigned(1)) +
+                              bacnet_app_tag(2, bacnet_unsigned(2)) + bacnet_close(4))
+    rpm_constructed = bacnet_read_access_result(
+        8, 1234, bacnet_context_tag(2, bacnet_unsigned(121)) + rpm_constructed_value)
+    add(bvlc_message(0x0A, npdu_header() + apdu_complex_ack(14, rpm_constructed, invoke_id=43)))
+
+    # 57) ReadPropertyMultiple request with TWO ReadAccessSpecifications (a scanning tool reading
+    #     several objects in one request) -- confirms the "read-access-spec[i]-..." indexing keeps
+    #     each object's own property references distinct.
+    rpm_req_multi = (bacnet_read_access_spec(8, 1234, [121, 70]) +
+                      bacnet_read_access_spec(0, 3, [85]))
+    add(bvlc_message(0x0A, npdu_header() + apdu_confirmed_request(14, rpm_req_multi, invoke_id=44)))
+
+    # 58) ReadPropertyMultiple request, malformed: an object identifier followed by a context tag
+    #     that is NOT an opening tag 1 (listOfPropertyReferences) -- must not crash, stops with a
+    #     note, whatever was decoded so far (the object) is kept.
+    add(bvlc_message(0x0A, npdu_header() +
+                      apdu_confirmed_request(14, bacnet_context_tag(0, bacnet_object_id(8, 1234)) +
+                                              bacnet_context_tag(9, bacnet_unsigned(1)), invoke_id=45)))
+
+    # 59) ReadPropertyMultiple ACK, truncated: an object + opening tag 1 + one propertyIdentifier,
+    #     then nothing else (cut off before the property's value/error and the closing tag) -- must
+    #     not crash, stops with a note.
+    rpm_truncated = (bacnet_context_tag(0, bacnet_object_id(8, 1234)) + bacnet_open(1) +
+                      bacnet_context_tag(2, bacnet_unsigned(121)))
+    add(bvlc_message(0x0A, npdu_header() + apdu_complex_ack(14, rpm_truncated, invoke_id=46)))
+
+    # 60) An APDU PDU type this decoder doesn't recognize (top nibble 15, not one of the 8 the
     #     spec defines 0-7) -- the BVLC/NPDU layers still decode fine; only the APDU itself is
     #     left unrecognized, with a note.
     add(bvlc_message(0x0A, npdu_header() + bytes([0xF0])))
 
-    # 53) Not BACnet/IP at all -- ordinary UDP traffic on an unrelated port with a payload that
+    # 61) Not BACnet/IP at all -- ordinary UDP traffic on an unrelated port with a payload that
     #     happens to start with 0x81 -- must not be misdetected regardless of port (the structural
     #     gate is Type+Function, not port -- see bacnet.hpp).
     add_unrelated = bacnet_frame(sport=51000, dport=51001,
