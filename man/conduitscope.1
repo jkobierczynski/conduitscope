@@ -2042,15 +2042,15 @@ against the synthetic \fBtests/sample_canopen_j1939.pcap\fR fixture (see
 \fBdocs/PROTOCOL_COVERAGE.md\fR's CANopen and SAE J1939 sections); non-IPv4
 Ethernet frames and non-TCP
 IPv4 payloads (including UDP) are otherwise still just recognized and
-NAMED for a small OT-relevant set (ARP, LLDP, ICMP, and the rest) but not further decoded, and
-\fBpolicy validate\fR does not yet evaluate any UDP traffic (CIP I/O,
-BACnet/IP, HART-IP's own UDP traffic, and FF-HSE's own UDP traffic
-included) against a conduit \-\- this carries through to \fBinventory\fR
-too: it infers CIP I/O/BACnet-IP conduits from observed UDP traffic and
-\fB\-\-policy\-out\fR's generated policy file loads them without error, but
-feeding that file back into \fBpolicy validate\fR always reports them as
-"never exercised," regardless of how much matching UDP traffic the capture
-has; a zone can instead be declared as a set of
+NAMED for a small OT-relevant set (ARP, LLDP, ICMP, and the rest) but not further decoded.
+\fBpolicy validate\fR can evaluate two of these UDP protocols against a
+conduit \-\- CIP I/O (EtherNet/IP's UDP/2222 implicit messaging) and
+BACnet/IP \-\- but only once a policy opts in, by naming \fBbacnet\fR,
+\fBenip\fR, or \fBany\fR in any conduit's \fBprotocols\fR; that single
+conduit turns UDP flow evaluation on for the entire policy, not just
+itself. HART-IP's own UDP traffic and FF-HSE's own UDP traffic have no
+such opt-in yet and are still never evaluated against any conduit. A
+zone can instead be declared as a set of
 hostnames (\fBhostnames:\fR), matched like an ordinary IPv4-CIDR zone but
 requiring both \fB\-\-resolve\fR and \fB\-\-hosts\fR (a policy that
 declares a hostname zone without both fails fast rather than silently

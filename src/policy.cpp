@@ -226,6 +226,15 @@ bool Policy::has_hostname_zone() const {
     return std::any_of(zones.begin(), zones.end(), [](const Zone& z) { return z.kind == ZoneKind::Hostname; });
 }
 
+bool Policy::has_udp_eligible_conduit() const {
+    return std::any_of(conduits.begin(), conduits.end(), [](const Conduit& c) {
+        if (c.kind == ZoneKind::Vlan) return false;
+        return std::find(c.protocols.begin(), c.protocols.end(), "bacnet") != c.protocols.end() ||
+               std::find(c.protocols.begin(), c.protocols.end(), "enip") != c.protocols.end() ||
+               std::find(c.protocols.begin(), c.protocols.end(), "any") != c.protocols.end();
+    });
+}
+
 Policy parse_policy_text(const std::string& text, const std::string& source_name) {
     using yaml_mini::NodeType;
 

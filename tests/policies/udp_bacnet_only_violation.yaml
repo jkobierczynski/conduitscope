@@ -1,0 +1,17 @@
+# Names only "bacnet" (not "enip") -- still opts every CIDR/hostname-zone conduit's UDP flow
+# evaluation IN globally (Policy::has_udp_eligible_conduit is a single policy-wide gate, not a
+# per-protocol one -- see docs/design/policy-engine-zoning.md's Phase 3), so the CIP I/O traffic in
+# tests/sample_policy_udp_bacnet_cip_io.pcap is now evaluated too, but no conduit here permits
+# "enip" for this zone pair -- expect the BACnet flow Allowed and the CIP I/O flow a Violation,
+# overall NON-COMPLIANT.
+zones:
+  hmi_zone:
+    networks: [192.168.1.50/32]
+  plc_zone:
+    networks: [192.168.1.10/32]
+
+conduits:
+  - name: "HMI reads PLC via BACnet/IP only"
+    from: hmi_zone
+    to: plc_zone
+    protocols: [bacnet]

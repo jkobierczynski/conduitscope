@@ -3305,6 +3305,69 @@ def build_policy_functions_enip_sample():
     (TESTS_DIR / "sample_policy_functions_enip.pcap").write_bytes(data)
 
 
+def build_policy_udp_bacnet_cip_io_sample():
+    """Minimal fixture for policy validate's UDP/IP flow evaluation of BACnet/IP and CIP I/O
+    (docs/design/policy-engine-zoning.md's Phase 3): unlike sample_bacnet.pcap (all broadcast
+    traffic, one shared source, no real client/server pair to zone-classify) and
+    sample_enip_cip_io.pcap (a single connection, no accompanying explicit-messaging/zone story),
+    this fixture gives PolicyEngine's UdpFlowState/UdpFlowReport path something concrete to
+    aggregate and match: one genuine unicast BACnet request/ACK exchange between two zoneable IPs,
+    and a separate CIP I/O cyclic-data exchange between the same two IPs on a different port.
+
+      - BACnet/IP (UDP/47808): a ReadProperty Confirmed-Request from HMI_IP to PLC_IP, and PLC_IP's
+        Complex-ACK reply -- both packets carry a decoded APDU, so PolicyEngine::observe's
+        content-based direction (Confirmed-Request => source is client; Complex-ACK => destination
+        is client) applies to both, exercising DirectionSource::Content end to end without ever
+        touching the UDP-port-heuristic fallback.
+      - CIP I/O (UDP/2222): two cyclic I/O datagrams on one connection (PLC_IP -> HMI_IP, same
+        shape build_enip_cip_io_sample already uses), exercising the UDP-port-heuristic fallback
+        (CIP I/O has no request/response concept at all -- see PolicyEngine::observe's own
+        comment) and confirming CIP I/O never contributes to UdpFlowReport::observed_functions
+        (no per-message operation concept -- see UdpFlowReport's own comment)."""
+    packets = []
+
+    def add_bacnet(src_ip: str, dst_ip: str, bvlc: bytes, ts_offset: int):
+        udp = udp_header(BACNET_PORT, BACNET_PORT, bvlc)
+        ip = ipv4_header(src_ip, dst_ip, 17, len(udp), 0x7100 + ts_offset) + udp
+        src_mac = HMI_MAC if src_ip == HMI_IP else PLC_MAC
+        dst_mac = PLC_MAC if src_ip == HMI_IP else HMI_MAC
+        packets.append(eth_header(dst_mac, src_mac, 0x0800) + ip)
+
+    # 1) ReadProperty Confirmed-Request: present-value (85) of analog-input,3 -- HMI (client) to PLC
+    #    (server), decided by content (Confirmed-Request), not port.
+    add_bacnet(HMI_IP, PLC_IP,
+               bvlc_message(0x0A, npdu_header() +
+                            apdu_confirmed_request(12, bacnet_object_property_reference(0, 3, 85), invoke_id=20)),
+               0)
+
+    # 2) Complex-ACK reply: Real value 72.5 -- PLC (server) to HMI (client), decided by content
+    #    (Complex-ACK is not one of the two Request PDU types), NOT by port (both packets use
+    #    UDP/47808 on both ends, so the port heuristic alone couldn't distinguish these two packets'
+    #    direction -- this is the one flow in this codebase's fixtures where getting the content-
+    #    based decision wrong would be silently indistinguishable from the port-heuristic default).
+    add_bacnet(PLC_IP, HMI_IP,
+               bvlc_message(0x0A, npdu_header() +
+                            apdu_complex_ack(12, bacnet_object_property_reference(0, 3, 85) +
+                                             bacnet_property_value(4, struct.pack("!f", 72.5)), invoke_id=20)),
+               1)
+
+    def add_cip_io(payload: bytes, ts_offset: int):
+        udp = udp_header(ENIP_IO_PORT, ENIP_IO_PORT, payload)
+        ip = ipv4_header(PLC_IP, HMI_IP, 17, len(udp), 0x7200 + ts_offset) + udp
+        packets.append(eth_header(HMI_MAC, PLC_MAC, 0x0800) + ip)
+
+    # 3)/4) Two cyclic CIP I/O updates on one connection, same shape build_enip_cip_io_sample uses,
+    #    just between the same HMI_IP/PLC_IP pair the BACnet exchange above uses (so one policy file
+    #    with one zone pair can cover both protocols).
+    add_cip_io(cip_io_datagram(0xABCD1234, 1, io_data=bytes([0xDE, 0xAD, 0xBE, 0xEF])), 2)
+    add_cip_io(cip_io_datagram(0xABCD1234, 2, io_data=bytes([0x01, 0x02, 0x03, 0x04])), 3)
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_021_000 + i, i * 1000)
+    (TESTS_DIR / "sample_policy_udp_bacnet_cip_io.pcap").write_bytes(data)
+
+
 def tpkt_frame(cotp_header: bytes, user_data: bytes = b"") -> bytes:
     """Wraps a COTP header in its length-indicator byte and the 4-byte TPKT
     header, then appends `user_data` (e.g. an S7comm payload) AFTER the
@@ -18957,6 +19020,7 @@ if __name__ == "__main__":
     build_enip_nop_precedence_sample()
     build_enip_cip_io_sample()
     build_policy_functions_enip_sample()
+    build_policy_udp_bacnet_cip_io_sample()
     build_profinet_sample()
     build_goose_sample()
     build_sv_sample()

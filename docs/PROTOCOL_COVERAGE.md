@@ -6327,12 +6327,19 @@ as a bare hex ethertype or decimal protocol number, exactly as before --
 nothing is guessed at for an EtherType/protocol/port this tool doesn't
 recognize.
 
-`policy validate` does not yet evaluate any of this traffic against a
-conduit: it's still counted only in `PolicyReport::skipped_non_tcp`, exactly
-as an unrecognized non-TCP packet was counted before this plumbing existed
-(see `PolicyEngine::observe`'s doc comment). Opening the policy engine up to
-non-TCP/non-IP conduits is real follow-on work, not part of this pass -- see
-docs/DEVELOPMENT.md's ROADMAP.
+`policy validate` still doesn't evaluate most of this traffic against a
+conduit by default: it's counted only in `PolicyReport::skipped_non_tcp`,
+exactly as an unrecognized non-TCP packet was counted before this
+plumbing existed (see `PolicyEngine::observe`'s doc comment). Three
+exceptions exist today, both added after this plumbing shipped (see
+docs/design/policy-engine-zoning.md): PROFINET RT/GOOSE/Sampled Values/
+EtherCAT can be matched against a VLAN-zone conduit (docs/DEVELOPMENT.md's
+ROADMAP item 15), and CIP I/O/BACnet/IP can be matched against a
+CIDR/hostname-zone conduit once a policy opts UDP flow evaluation in by
+naming `bacnet`/`enip`/`any` (see docs/USER_GUIDE.md's "UDP flow
+evaluation (BACnet/IP, CIP I/O)" section) -- everything else named above
+(plain UDP, ARP, LLDP, ICMP, and the rest) is still policy-invisible,
+`skipped_non_tcp` regardless of how well it's decoded.
 
 Validated by construction (`tests/sample_link_transport_layers.pcap`, see
 `tools/make_sample_pcap.py`'s `build_link_and_transport_layer_sample`) and,

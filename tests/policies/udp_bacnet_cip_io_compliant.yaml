@@ -1,0 +1,18 @@
+# Opts in to BACnet/IP + CIP I/O UDP flow evaluation (docs/design/policy-engine-zoning.md's
+# Phase 3) by naming both "bacnet" and "enip" on one conduit -- matches every packet in
+# tests/sample_policy_udp_bacnet_cip_io.pcap, so `policy validate` against it reports COMPLIANT
+# with both a BACnet and a CIP I/O UdpFlowReport allowed.
+zones:
+  hmi_zone:
+    description: "HMI / engineering workstation (synthetic fixtures' HMI_IP)"
+    networks:
+      - 192.168.1.50/32
+  plc_zone:
+    description: "PLC (synthetic fixtures' PLC_IP)"
+    networks: [192.168.1.10/32]
+
+conduits:
+  - name: "HMI reads PLC via BACnet/IP and CIP I/O"
+    from: hmi_zone
+    to: plc_zone
+    protocols: [bacnet, enip]

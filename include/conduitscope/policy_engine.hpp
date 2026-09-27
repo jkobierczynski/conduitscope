@@ -127,6 +127,57 @@ struct EthernetFlowReport {
     std::string reason;           // set (non-empty) when verdict != Allowed: why, for the report
 };
 
+// One observed UDP-based IP flow -- BACnet/IP or CIP I/O traffic between one (client IP, server IP,
+// server port) tuple, aggregated the same way FlowReport aggregates a TCP 4-tuple, but WITHOUT a
+// TCP handshake to lean on for client/server direction (see PolicyEngine::observe's own comment for
+// exactly how direction is decided per protocol instead). Matched against the SAME CIDR/hostname-
+// zone conduits ordinary TCP flows use (see PolicyEngine::finish) -- BACnet/IP and CIP I/O are
+// ordinary IP-addressed protocols, just UDP-transported ones, so no new zone kind was needed for
+// them (unlike PROFINET RT/GOOSE/SV/EtherCAT, which ride raw Ethernet with no IP layer at all and
+// are matched against a VLAN zone instead -- see EthernetFlowReport). Only ever populated once the
+// policy opts in by naming "bacnet"/"enip"/"any" on a CIDR- or hostname-zone conduit (see
+// Policy::has_udp_eligible_conduit and PolicyEngine::observe's own comment for the full "opt-in per
+// conduit" gating rationale) -- a policy that never does stays byte-for-byte unaffected by this
+// feature's existence, and this traffic stays folded into PolicyReport::skipped_non_tcp exactly as
+// it was before this feature existed.
+struct UdpFlowReport {
+    std::string client_ip, server_ip;
+    uint16_t server_port = 0;
+    std::string protocol;  // "bacnet" or "enip" (CIP I/O) -- never both; see PolicyEngine::observe
+    std::string client_zone, server_zone;  // "unclassified" when Policy::zone_for/zone_for_hostname
+                                            // found nothing -- see FlowReport::client_zone's own
+                                            // comment, matched identically here
+    // Same idea as FlowReport::client_zone_purdue_level -- the matched zone's own Zone::purdue_level,
+    // or empty when unset/unclassified.
+    std::string client_zone_purdue_level, server_zone_purdue_level;
+    // Distinct, non-empty function/service names observed on this flow, sorted -- BACnet's own
+    // service_choice_name (see BacnetApdu::service_choice_name, bacnet.hpp) when present, populated
+    // purely for reporting/scripting use (no conduit can restrict BACnet traffic by 'functions' --
+    // BACnet has no known-function table, see policy.cpp's protocol_has_known_function_table).
+    // ALWAYS EMPTY for CIP I/O ("enip" here with server_port == ENIP_IO_UDP_PORT's own traffic
+    // shape) -- cyclic producer/consumer I/O has no per-message operation concept at all, so there
+    // is nothing to populate; see docs/design/policy-engine-zoning.md's Phase 3 "known limitation"
+    // note for what this means for a 'functions'-restricted "enip" conduit that also matches CIP I/O
+    // traffic (its restriction simply can't apply to CIP I/O, since there's nothing to check it
+    // against -- such a flow is Allowed/Violation purely on protocol+port+zone, same as an
+    // unrestricted conduit would produce).
+    std::vector<std::string> observed_functions;
+    size_t packet_count = 0;
+    FlowVerdict verdict = FlowVerdict::Unclassified;
+    std::string matched_conduit;  // set (non-empty) only when verdict == Allowed
+    std::string reason;           // set (non-empty) when verdict != Allowed: why, for the report
+
+    // Handshake never occurs here (there is no TCP handshake on a UDP flow) -- Content for a BACnet
+    // flow whose direction was decided from a Confirmed-/Unconfirmed-Request or ACK/Error/Reject/
+    // Abort APDU (see PolicyEngine::observe's own comment), PortHeuristic otherwise (no APDU seen
+    // yet, or CIP I/O, which has no request/response concept to decide direction from at all).
+    DirectionSource direction_source = DirectionSource::PortHeuristic;
+
+    // Same idea as FlowReport::has_mac/client_mac/server_mac -- mirrored here verbatim.
+    bool has_mac = false;
+    std::string client_mac, server_mac;
+};
+
 // One aggregated observation of a Tier 1-5 "IT protocol an OT auditor flags" (ROADMAP item 18;
 // notable_it_protocols.hpp names the exact 43 protocol values and their tier) -- recorded
 // independent of, and never affecting, this flow/L2-flow's own Allowed/Violation/Unclassified
@@ -183,17 +234,28 @@ struct PolicyReport {
     // otherwise this traffic stays folded into skipped_non_tcp below, exactly as it was before
     // VLAN zones existed (ROADMAP item 15) -- see PolicyEngine::observe's own comment for why.
     std::vector<EthernetFlowReport> ethernet_flows;
+    // One per observed UDP-based IP flow (BACnet/IP and/or CIP I/O), in first-seen order -- only
+    // ever non-empty when the policy declares at least one CIDR- or hostname-zone conduit naming
+    // 'bacnet'/'enip'/'any' in its 'protocols' (see Policy::has_udp_eligible_conduit and
+    // PolicyEngine::observe's own comment for the full "opt-in per conduit" gating rationale);
+    // otherwise this traffic stays folded into skipped_non_tcp below, exactly as before this
+    // feature existed. Matched against the SAME CIDR/hostname-zone conduits ordinary TCP flows use
+    // (never a VLAN-zone conduit -- these are IP-addressed protocols, not raw Ethernet), through the
+    // identical ports/bidirectional/protocol matching logic `flows` above uses -- see
+    // UdpFlowReport's own comment.
+    std::vector<UdpFlowReport> udp_flows;
     // Conduits declared in the policy that no observed flow ever matched -- informational only
     // (doesn't affect compliant()); useful for pruning a policy file or noticing a conduit that
-    // was supposed to be exercised by this capture but wasn't. Spans both `flows` and
-    // `ethernet_flows` -- a VLAN-zone conduit no L2 flow ever matched appears here exactly like an
-    // IP-zone conduit no TCP flow ever matched.
+    // was supposed to be exercised by this capture but wasn't. Spans `flows`, `ethernet_flows`, AND
+    // `udp_flows` -- a VLAN-zone conduit no L2 flow ever matched appears here exactly like an
+    // IP-zone conduit no TCP or UDP flow ever matched.
     std::vector<std::string> unexercised_conduits;
     size_t skipped_non_tcp = 0;  // packets with has_ip==false or has_tcp==false (including UDP),
                                   // and NOT one of PROFINET RT/GOOSE/SV/EtherCAT (see ethernet_flows
-                                  // above) -- or one of those four but the policy declares no VLAN
-                                  // zone at all: not part of any evaluated flow -- see
-                                  // PolicyEngine::observe
+                                  // above) or an opted-in BACnet/IP/CIP-I/O packet (see udp_flows
+                                  // above) -- or one of those but the policy doesn't opt in (no VLAN
+                                  // zone at all for the former, no eligible conduit for the latter):
+                                  // not part of any evaluated flow -- see PolicyEngine::observe
     size_t total_packets = 0;
 
     // "IT protocols an OT auditor flags" (ROADMAP item 18), one entry per distinct (protocol,
@@ -212,13 +274,13 @@ struct PolicyReport {
     // "always flag, independent of compliance" design choice for this item.
     std::vector<NotableProtocolFinding> notable_protocols;
 
-    // Every count below spans both `flows` and `ethernet_flows` -- an L2 flow's verdict counts
-    // exactly like a TCP flow's for compliance purposes; there is no separate "ethernet compliant"
-    // notion, one capture is either COMPLIANT or it isn't.
+    // Every count below spans `flows`, `ethernet_flows`, AND `udp_flows` -- an L2 flow's or a UDP
+    // flow's verdict counts exactly like a TCP flow's for compliance purposes; there is no separate
+    // "ethernet compliant" or "UDP compliant" notion, one capture is either COMPLIANT or it isn't.
     size_t allowed_count() const;
     size_t violation_count() const;
     size_t unclassified_count() const;
-    // True only when every observed flow (TCP or L2) was explicitly Allowed -- any Violation OR any
+    // True only when every observed flow (TCP, L2, or UDP) was explicitly Allowed -- any Violation OR any
     // Unclassified flow makes this false, since "traffic between addresses this policy doesn't
     // even classify" is itself a finding worth surfacing in an audit, not something to pass
     // silently. See cli_main.cpp for how this maps to `policy validate`'s exit code.
@@ -228,7 +290,8 @@ struct PolicyReport {
 class PolicyEngine {
 public:
     explicit PolicyEngine(const Policy& policy)
-        : policy_(policy), any_vlan_zone_(policy.has_vlan_zone()) {}
+        : policy_(policy), any_vlan_zone_(policy.has_vlan_zone()),
+          any_udp_ip_eligible_conduit_(policy.has_udp_eligible_conduit()) {}
 
     // Folds one already-decoded packet into this engine's per-flow state. Call once per packet, in
     // capture order (same discipline as Decoder::decode).
@@ -245,12 +308,35 @@ public:
     // concept (no SYN, no session; see EthernetFlowReport's own comment) -- and classified by
     // whether its VLAN tag (if any) falls in a declared VLAN zone, not by IP.
     //
-    // Every other packet with has_ip==false or has_tcp==false (non-IP, non-TCP -- including UDP,
-    // which `decode` now recognizes and reports on but this engine does not yet evaluate against
-    // any conduit, see docs/MANUAL.md's ROADMAP -- or a parse-error packet) isn't part of any TCP
+    // A packet with protocol == "bacnet" or "enip" and has_udp (BACnet/IP or CIP I/O) is folded into
+    // a UDP flow (PolicyReport::udp_flows) instead, but ONLY when the policy opts in by naming
+    // "bacnet"/"enip"/"any" on at least one CIDR- or hostname-zone conduit
+    // (`any_udp_ip_eligible_conduit_`, cached from Policy::has_udp_eligible_conduit at construction)
+    // -- when it doesn't, this traffic is left in PolicyReport::skipped_non_tcp exactly as it was
+    // before this feature existed, so a policy file written before it existed can never have its
+    // compliance verdict change just because a capture happens to also contain some BACnet/IP or CIP
+    // I/O traffic that policy's author never wrote a conduit to address (see policy.hpp's
+    // Policy::has_udp_eligible_conduit comment -- the same backward-compatibility posture
+    // any_vlan_zone_ already established for VLAN zones above). A UDP flow is keyed by (protocol,
+    // client IP, server IP, server port) -- there is no TCP handshake to lean on for direction, so
+    // BACnet reuses its own APDU request/response semantics when a decoded APDU is present
+    // (Confirmed-Request/Unconfirmed-Request -> source is client; every other decoded PDU type --
+    // Simple-ACK/Complex-ACK/Segment-ACK/Error/Reject/Abort -- -> destination is client; the same
+    // logic AssetInventoryEngine already uses for this same protocol, asset_inventory.cpp), falling
+    // back to a UDP-known-service-port heuristic (BACNET_UDP_PORT/ENIP_IO_UDP_PORT) when no APDU is
+    // present yet; CIP I/O has no request/response concept at all (cyclic producer/consumer traffic)
+    // and is always decided by the port heuristic. See UdpFlowReport's own comment for the full
+    // matching model (same CIDR/hostname zones and ports/bidirectional/protocol logic ordinary TCP
+    // flows use) and DirectionSource::Content's own comment (decoder.hpp) for why BACnet's case
+    // counts as "Content", not "PortHeuristic", when an APDU is present.
+    //
+    // Every other packet with has_ip==false or has_tcp==false (non-IP, non-TCP -- including UDP not
+    // covered by the paragraph above, which `decode` recognizes and reports on but this engine still
+    // does not evaluate against any conduit -- or a parse-error packet) isn't part of any TCP or UDP
     // flow either and is only counted toward PolicyReport::skipped_non_tcp -- this tool only ever
-    // checks TCP-based OT protocols (plus, now, VLAN-zoned raw-Ethernet OT protocols) against a
-    // policy's conduits, so there's nothing further to evaluate for them yet.
+    // checks TCP-based OT protocols (plus, now, VLAN-zoned raw-Ethernet OT protocols, and opted-in
+    // BACnet/IP/CIP-I/O UDP traffic) against a policy's conduits, so there's nothing further to
+    // evaluate for them yet.
     //
     // Independent of all of the above: a packet whose protocol is one of notable_it_protocols.hpp's
     // 43 "IT protocols an OT auditor flags" (ROADMAP item 18) is ALSO recorded into
@@ -325,6 +411,35 @@ private:
         std::string client_mac, server_mac;
     };
 
+    // Aggregated state for one UDP flow (BACnet/IP or CIP I/O) -- see UdpFlowReport's own comment.
+    // Keyed (in udp_flows_) by protocol plus the SAME canonical, order-independent (ip:port,
+    // ip:port) pairing session_key() already computes for a TCP flow -- reused here even though this
+    // traffic has no session/handshake concept, purely so packets seen from either direction between
+    // the same two endpoints fold into one UdpFlowState rather than fragmenting into two directed
+    // ones (see PolicyEngine::observe's own UDP-flow branch for exactly how client_ip/server_ip
+    // themselves are decided per packet, independent of this key).
+    struct UdpFlowState {
+        std::string protocol;  // "bacnet" or "enip" -- fixed at first-insert, one flow key is only
+                                 // ever created by one protocol's own packets (see observe())
+        std::string client_ip, server_ip;
+        uint16_t server_port = 0;
+        // Distinct, non-empty function/service names observed on this flow so far -- see
+        // UdpFlowReport::observed_functions' own comment (BACnet's service_choice_name only; always
+        // empty for CIP I/O).
+        std::unordered_set<std::string> functions;
+        // See UdpFlowReport::direction_source's own comment -- mirrored here verbatim. Starts at
+        // PortHeuristic and is upgraded to Content the first time a packet on this flow carries a
+        // decoded BACnet APDU (see observe()'s own upgrade logic, mirroring FlowState's own
+        // SYN/SYN-ACK upgrade rule at this coarser, no-handshake granularity) -- never downgraded
+        // back once upgraded.
+        DirectionSource direction_source = DirectionSource::PortHeuristic;
+        size_t packet_count = 0;
+        // See FlowReport::has_mac/client_mac/server_mac's own comment -- mirrored here verbatim,
+        // set/refreshed exactly where client_ip/server_ip are.
+        bool has_mac = false;
+        std::string client_mac, server_mac;
+    };
+
     // Aggregated state for one L2 flow (protocol + canonical MAC pair) -- see EthernetFlowReport's
     // own comment for why this has neither a port nor a client/server distinction.
     struct EthernetFlowState {
@@ -365,8 +480,14 @@ private:
 
     const Policy& policy_;
     bool any_vlan_zone_;  // cached Policy::has_vlan_zone() -- see observe()'s own comment
+    bool any_udp_ip_eligible_conduit_;  // cached Policy::has_udp_eligible_conduit() -- see
+                                          // observe()'s own comment
     std::unordered_map<std::string, FlowState> flows_;  // keyed by canonical session key
     std::vector<std::string> flow_order_;                // session keys, first-seen order
+    std::unordered_map<std::string, UdpFlowState> udp_flows_;  // keyed by protocol + canonical
+                                                                 // session key -- see UdpFlowState's
+                                                                 // own comment
+    std::vector<std::string> udp_flow_order_;  // udp_flows_ keys, first-seen order
     std::unordered_map<std::string, EthernetFlowState> ethernet_flows_;  // keyed by canonical L2 flow key
     std::vector<std::string> ethernet_flow_order_;                        // L2 flow keys, first-seen order
     std::unordered_map<std::string, NotableProtocolState> notable_protocols_;  // keyed by observe()'s

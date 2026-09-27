@@ -1,0 +1,26 @@
+# Documents a deliberate, non-obvious behavior of Phase 3 (docs/design/policy-engine-zoning.md):
+# a conduit naming "enip" with a 'functions:' allow-list validates against CIP explicit-messaging
+# service names (TCP), but CIP I/O (the UDP/2222 cyclic producer/consumer traffic this same conduit
+# also now matches, once opted in) has no per-message operation concept at all, so
+# UdpFlowReport::observed_functions is always empty for it -- a functions-restricted conduit simply
+# never finds anything disallowed and the CIP I/O flow is Allowed regardless of what the restriction
+# names. This is intentional, documented behavior (UdpFlowReport::observed_functions' own comment,
+# policy_engine.hpp), not a bug: this fixture pins it so it can't silently regress into something
+# else (e.g. a functions-restricted conduit accidentally rejecting CIP I/O outright) without a test
+# noticing. The BACnet flow in the same capture is covered by a second, unrestricted conduit.
+zones:
+  hmi_zone:
+    networks: [192.168.1.50/32]
+  plc_zone:
+    networks: [192.168.1.10/32]
+
+conduits:
+  - name: "bacnet unrestricted"
+    from: hmi_zone
+    to: plc_zone
+    protocols: [bacnet]
+  - name: "cip io via enip, functions restricted to a TCP-only service name"
+    from: hmi_zone
+    to: plc_zone
+    protocols: [enip]
+    functions: [Read_Tag]

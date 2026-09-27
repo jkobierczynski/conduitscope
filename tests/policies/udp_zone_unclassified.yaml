@@ -1,0 +1,17 @@
+# Opts UDP flow evaluation in (a conduit names "bacnet"), but the capture's server IP
+# (192.168.1.10, the synthetic fixtures' PLC_IP) is not covered by any declared zone here --
+# "other_zone" is a disjoint /24 that doesn't contain it. Both the BACnet and CIP I/O flows in
+# tests/sample_policy_udp_bacnet_cip_io.pcap should therefore come back Unclassified (not
+# Violation), exercising UDP's zone_unclassified_reason path and --summarize-unclassified
+# grouping (docs/design/policy-engine-zoning.md's Phase 3).
+zones:
+  hmi_zone:
+    networks: [192.168.1.50/32]
+  other_zone:
+    networks: [10.0.0.0/24]
+
+conduits:
+  - name: "irrelevant to the zone match itself -- only its 'bacnet' protocol name matters, to opt UDP evaluation in"
+    from: hmi_zone
+    to: other_zone
+    protocols: [bacnet]

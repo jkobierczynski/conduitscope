@@ -2135,6 +2135,41 @@ have X" list. Folded in here as items 10-16, at the same priority tier as
     measures or bounds memory/CPU growth under adversarial input the way a
     dedicated resource-exhaustion fuzzing target would. Not yet scheduled.
 
+### External review: Grok's ten improvement areas
+
+In September 2026, Jurgen had a different external AI reviewer (Grok, not ChatGPT) assess where
+conduitscope should improve to make headway into ICS/OT security specifically -- a product-strategy
+review rather than a code-quality one, framed around closing the gap with commercial platforms
+(Claroty/Dragos/Nozomi/Malcolm). The full, unedited review is kept at
+[docs/reviews/2026-09-grok-ics-ot-improvement-areas.md](reviews/2026-09-grok-ics-ot-improvement-areas.md);
+the fact-check against the actual repository -- what already existed and was stale by review time,
+what's a confirmed real gap, and what needs its own follow-up check before being scheduled -- is at
+[docs/reviews/2026-09-grok-response.md](reviews/2026-09-grok-response.md). Jurgen chose to work
+through its ten points in order, starting with items 1-3, one at a time:
+
+- **Item 1 (make the policy engine match how plants are zoned) is underway.** See
+  [docs/design/policy-engine-zoning.md](design/policy-engine-zoning.md) for the full phased design
+  and current status. As of this entry: the `Zone`/`Conduit` kind-enum prerequisite refactor, Phase
+  1 (IPv6-flow reason-string honesty, Purdue-level zone labels, `type: idmz` conduits), Phase 2
+  (hostname zones), and Phase 3 (BACnet/IP + CIP I/O UDP flow evaluation) are implemented and
+  shipped (items 70-71 below); Phases 4-6 (operation-level read/write direction, MAC-source
+  restriction on VLAN conduits, multi-homed assets/jump hosts) are approved and scoped but not yet
+  started.
+- **Items 2 (turn inventory into a real OT asset record) and 3 (baseline process behavior beyond
+  ports)** are next in Jurgen's own ordering, after item 1. Both are partially stale as written --
+  see the response document for exactly which of Grok's own bullet points under each are already
+  implemented (e.g. `inventory` already recognizes MMS/OPC UA/MQTT/BACnet, and the baseline engine
+  already covers EtherNet/IP and DNP3 at the operation level) versus genuinely still open (vendor/
+  firmware/serial extraction, IEC 104 IOA-range and OPC UA NodeId baselining, S7 block-download as
+  its own severity class).
+- **Items 4-10** (OT-IR-recognizable detection and ATT&CK-for-ICS mapping, continuous SPAN/TAP
+  sensor mode, decode depth on process-critical protocols, a 62443/NIS2 evidence pack, Zeek/CEF/
+  syslog integration, parser trustworthiness, and product packaging) are not yet scheduled. The
+  response document notes that item 9 (parser trustworthiness: ASan/UBSan in CI, fuzzing on the
+  high-value parsers) is already substantially standing practice, not an open item, and that item 5
+  (continuous sensor mode) is worth a deliberate scope conversation before committing to it, since
+  it pulls toward an always-on sensor product rather than an assessment/audit CLI.
+
 
 ## PROTOCOL DETECTION
 
@@ -11009,8 +11044,8 @@ it done as its own patch.
     conduitscope.1` needed no changes (no new CLI surface -- hostname-zone
     gating reuses the pre-existing `--resolve`/`--hosts` flags).
 
-    Phases 3-6 -- BACnet/IP + CIP I/O UDP flow evaluation (opt-in per
-    conduit by protocol name), operation-level read/write function
+    Phase 3 (BACnet/IP + CIP I/O UDP flow evaluation) shipped next -- see
+    item 71 below. Phases 4-6 -- operation-level read/write function
     classification (all five function-table protocols), source-MAC
     restriction on VLAN conduits (GOOSE/SV/PROFINET-RT/EtherCAT publisher
     restriction via `from_macs:`), and multi-homed assets/jump hosts as a
@@ -11018,6 +11053,95 @@ it done as its own patch.
     original plan but not yet implemented. QinQ zones remain explicitly
     deferred pending the decoder-layer double-tag unwrap tracked under item
     15's continuation, not part of this item.
+
+71. **Policy engine: match how plants are zoned -- Grok gap #1, second
+    increment (Phase 3: BACnet/IP + CIP I/O UDP flow evaluation).**
+    Continues item 70 above. Until now `policy validate` only ever
+    evaluated TCP flows against a CIDR/hostname-zone conduit; BACnet/IP and
+    CIP I/O (EtherNet/IP's UDP/2222 implicit messaging) are both
+    structurally UDP, so a `bacnet` or `enip`-covering-CIP-I/O conduit
+    parsed and validated fine but could never actually be exercised by real
+    traffic. This phase closes that gap, opt-in, following the same "fully
+    inert unless a policy actually declares it" rule as `any_vlan_zone_`
+    and hostname zones before it.
+
+    **Gating.** A new `Policy::has_udp_eligible_conduit()`, cached once at
+    `PolicyEngine` construction (`any_udp_ip_eligible_conduit_`, mirroring
+    `any_vlan_zone_`), is `true` when at least one non-VLAN conduit names
+    `bacnet`, `enip`, or `any` in its `protocols`. Per Jurgen's explicit
+    decision during planning, this gate is policy-wide, not per-protocol:
+    naming only `bacnet` on one conduit turns UDP flow evaluation on for
+    CIP I/O too, policy-wide -- proven intentional, not a bug, by a
+    dedicated fixture (`tests/policies/udp_bacnet_only_violation.yaml`)
+    where a bacnet-only conduit still correctly flags an unpermitted CIP
+    I/O flow as a `Violation` rather than silently skipping it. A policy
+    that never names any of the three stays byte-for-byte behaviorally
+    identical to before this phase existed (verified: the full pre-existing
+    CTest suite, unchanged count, plus a dedicated backward-compatibility
+    fixture reusing `tests/policies/compliant.yaml` against the new UDP
+    sample capture).
+
+    **Matching.** A new `UdpFlowState`/`UdpFlowReport` pair (mirroring
+    `FlowState`/`FlowReport`), keyed by protocol + the same
+    transport-agnostic `session_key()` helper TCP flows already use (so a
+    later direction upgrade can't fragment the flow), matched against the
+    *existing* CIDR/hostname-zone conduits -- no new zone kind needed, since
+    both protocols are ordinary IP traffic; `ports`/`bidirectional` stay
+    fully meaningful. Direction has no TCP handshake to lean on: BACnet/IP
+    reuses `asset_inventory.cpp`'s own Confirmed-/Unconfirmed-Request-vs-
+    response APDU logic (`DirectionSource::Content`), falling back to a new
+    UDP-specific port heuristic (`udp_src_is_client_by_port`, deliberately
+    kept separate from the pre-existing TCP-only heuristic) when no APDU is
+    present; CIP I/O has no request/response concept at all, so it's always
+    port-heuristic-only.
+
+    **A documented quirk, not a bug.** `UdpFlowReport::observed_functions`
+    is always empty for CIP I/O (it has no per-message operation concept),
+    so a `functions:`-restricted `enip` conduit can never find anything to
+    reject against CIP I/O traffic -- such a conduit's CIP I/O flows are
+    always Allowed/Violation purely on protocol+port+zone, regardless of
+    what the restriction names. Pinned by a dedicated fixture
+    (`tests/policies/udp_cip_io_functions_quirk.yaml`) rather than treated
+    as a defect to work around, matching this project's "measure honesty
+    over silent surprise" convention elsewhere.
+
+    **Reporting.** New `PolicyReport::udp_flows` vector; a new "UDP flows
+    evaluated" text section (VIOLATIONS/UNCLASSIFIED/ALLOWED subgroups,
+    full `--summarize-unclassified` support) mirroring the existing
+    Ethernet-flow section; a new `udp_flows[]` JSON array, the new true-last
+    top-level field (after `idmz_conduits`). `allowed_count()`/
+    `violation_count()`/`unclassified_count()`/`compliant()` and
+    `unexercised_conduits` all fold `udp_flows` in alongside `flows` and
+    `ethernet_flows`. A previously-duplicated "no declared zone contains"
+    reason-string block in `finish()`'s TCP-flow loop was refactored into
+    two shared free functions (`describe_unmatched_endpoint`,
+    `zone_unclassified_reason`) so the new UDP-flow loop doesn't duplicate
+    it a third time -- verified byte-identical text/JSON output for every
+    pre-existing fixture across the whole CTest suite before and after.
+
+    **Testing and docs.** New `tests/sample_policy_udp_bacnet_cip_io.pcap`
+    (one genuine BACnet Confirmed-Request/Complex-ACK exchange plus one CIP
+    I/O cyclic exchange, same HMI/PLC IP pair, same port both directions so
+    only content-based direction -- not the port heuristic -- can
+    distinguish the BACnet reply). 7 new CTest cases covering the
+    two-protocol-compliant case, the bacnet-only-still-gates-CIP-I/O-in
+    violation case, the functions-restriction quirk, the gating-off
+    backward-compatibility case, the true-last JSON field shape, and the
+    unclassified/`--summarize-unclassified` path. Full CTest suite: 2012/2012
+    (default build), 2088/2088 (ASan/UBSan build, including all 76
+    `fuzz_*_corpus_regression` cases), 2000/2000
+    (`-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF` build) -- zero regressions
+    elsewhere. Zero-warning rebuilds across the default, ASan/UBSan,
+    no-live-capture, and MinGW-w64 cross-compile configs, plus a clean-room
+    extract-rebuild-test before delivery. `docs/USER_GUIDE.md` gained a new
+    "UDP flow evaluation (BACnet/IP, CIP I/O)" POLICY FILE FORMAT
+    subsection and a `udp_flows[]` JSON report schema entry, and every
+    stale "`policy validate` does not yet evaluate any UDP traffic" claim
+    across USER_GUIDE.md, PROTOCOL_COVERAGE.md, and `man/conduitscope.1`
+    was corrected to describe the new opt-in behavior precisely (including
+    the policy-wide-not-per-protocol gating nuance and the CIP-I/O
+    functions quirk). No new CLI flags were needed -- the opt-in lives
+    entirely in the policy file's existing `protocols:` field.
 
 ### Protocols not covered at all
 

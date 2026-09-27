@@ -7,6 +7,7 @@
 #include <ostream>
 #include <sstream>
 
+#include "conduitscope/bacnet.hpp"
 #include "conduitscope/cotp.hpp"
 #include "conduitscope/dnp3.hpp"
 #include "conduitscope/enip.hpp"
@@ -58,6 +59,24 @@ bool src_is_client_by_port(uint16_t src_port, uint16_t dst_port) {
     return src_port > dst_port;                 // neither/both known: lower port number is the server
 }
 
+// UDP counterpart to is_known_service_port/src_is_client_by_port above, for the two UDP-based IP
+// protocols PolicyEngine::observe's own UDP-flow branch can evaluate (BACnet/IP, CIP I/O) -- used
+// only as the direction fallback when no authoritative content-based answer is available (BACnet
+// with no decoded APDU yet, or CIP I/O, which has no content-based answer at all). Deliberately a
+// separate small function rather than widening is_known_service_port itself: that function's own
+// five ports are all TCP, and mixing a UDP port into the same "known service port" set an ordinary
+// TCP flow's own direction guess consults would be a correctness bug waiting to happen (a TCP flow
+// coincidentally using port 47808 or 2222 would suddenly be treated as a known OT service port).
+bool is_known_udp_service_port(uint16_t port) { return port == BACNET_UDP_PORT || port == ENIP_IO_UDP_PORT; }
+
+bool udp_src_is_client_by_port(uint16_t src_port, uint16_t dst_port) {
+    bool src_known = is_known_udp_service_port(src_port);
+    bool dst_known = is_known_udp_service_port(dst_port);
+    if (dst_known && !src_known) return true;
+    if (src_known && !dst_known) return false;
+    return src_port > dst_port;
+}
+
 std::string protocol_list_text(const std::vector<std::string>& protocols) {
     std::string out;
     for (size_t i = 0; i < protocols.size(); ++i) {
@@ -92,6 +111,33 @@ std::string join_comma(const std::vector<std::string>& items) {
         out += items[i];
     }
     return out;
+}
+
+// An IPv6-formatted address (format_ipv6's colon-separated form -- this codebase's zone/CIDR
+// matching is IPv4-only throughout, see policy.hpp's parse_cidr) gets its own, honest reason instead
+// of the generic "no declared zone contains" text, which would otherwise be indistinguishable from
+// an ordinary unclassified IPv4 address -- see docs/USER_GUIDE.md's LIMITATIONS section. Shared by
+// the TCP-flow and UDP-flow loops in finish() below, both of which hit exactly this same "at least
+// one endpoint matched no declared zone" case and want identical reason text.
+std::string describe_unmatched_endpoint(const std::string& ip) {
+    if (ip.find(':') != std::string::npos) {
+        return ip + " is an IPv6 address; policy zoning does not support IPv6 yet";
+    }
+    return "no declared zone contains " + ip;
+}
+
+// Builds the FlowReport::reason/UdpFlowReport::reason text for the "at least one endpoint didn't
+// match any declared zone" case -- `cz`/`sz` are whether the client/server endpoint's zone lookup
+// found anything. See describe_unmatched_endpoint's own comment for the IPv6-specific branch.
+std::string zone_unclassified_reason(const std::string& client_ip, const std::string& server_ip, bool cz, bool sz) {
+    if (!cz && !sz) {
+        if (client_ip.find(':') != std::string::npos || server_ip.find(':') != std::string::npos) {
+            return describe_unmatched_endpoint(client_ip) + "; " + describe_unmatched_endpoint(server_ip);
+        }
+        return "no declared zone contains " + client_ip + " or " + server_ip;
+    }
+    if (!cz) return describe_unmatched_endpoint(client_ip);
+    return describe_unmatched_endpoint(server_ip);
 }
 
 std::string verdict_name(FlowVerdict v) {
@@ -199,6 +245,83 @@ void PolicyEngine::observe(const DecodedPacket& dp) {
             it = ethernet_flows_.emplace(key, std::move(es)).first;
         }
         ++it->second.packet_count;
+        return;
+    }
+
+    if (dp.has_udp && any_udp_ip_eligible_conduit_ && (dp.protocol == "bacnet" || dp.protocol == "enip")) {
+        // See this function's own doc comment (policy_engine.hpp) for why this branch only exists
+        // once the policy has opted in by naming "bacnet"/"enip"/"any" on a CIDR- or hostname-zone
+        // conduit -- backward compatibility for every policy file written before this feature
+        // existed. Keyed by the same canonical, order-independent session_key() a TCP flow uses (see
+        // UdpFlowState's own comment for why), prefixed with the protocol so a BACnet flow and a CIP
+        // I/O flow between coincidentally-overlapping endpoints never collide.
+        std::string key = dp.protocol + ":" + session_key(dp.src_ip, dp.src_port, dp.dst_ip, dp.dst_port);
+
+        // Direction: BACnet decides authoritatively from its own decoded APDU type when one is
+        // present (Confirmed-Request/Unconfirmed-Request -> source is client; every other decoded
+        // PDU type -- Simple-ACK/Complex-ACK/Segment-ACK/Error/Reject/Abort -- -> destination is
+        // client), exactly mirroring AssetInventoryEngine's own BACnet direction logic
+        // (asset_inventory.cpp) since both tools face the identical "no session, no handshake"
+        // problem for this protocol. CIP I/O has no request/response concept at all (cyclic
+        // producer/consumer traffic) -- always the UDP port-heuristic fallback.
+        bool direction_known = false;
+        bool src_is_client = false;
+        if (dp.protocol == "bacnet" && dp.result) {
+            const BacnetFrame& bf = dp.result->as<BacnetFrame>();
+            if (bf.has_npdu && bf.npdu.has_apdu && !bf.npdu.apdu.pdu_type_name.empty()) {
+                direction_known = true;
+                src_is_client = bf.npdu.apdu.pdu_type_name == "Confirmed-Request" ||
+                                 bf.npdu.apdu.pdu_type_name == "Unconfirmed-Request";
+            }
+        }
+        if (!direction_known) {
+            src_is_client = udp_src_is_client_by_port(dp.src_port, dp.dst_port);
+        }
+
+        auto it = udp_flows_.find(key);
+        if (it == udp_flows_.end()) {
+            UdpFlowState st;
+            st.protocol = dp.protocol;
+            st.client_ip = src_is_client ? dp.src_ip : dp.dst_ip;
+            st.server_ip = src_is_client ? dp.dst_ip : dp.src_ip;
+            st.server_port = src_is_client ? dp.dst_port : dp.src_port;
+            st.direction_source = direction_known ? DirectionSource::Content : DirectionSource::PortHeuristic;
+            if (dp.has_ethernet) {
+                st.has_mac = true;
+                st.client_mac = src_is_client ? dp.src_mac : dp.dst_mac;
+                st.server_mac = src_is_client ? dp.dst_mac : dp.src_mac;
+            }
+            udp_flow_order_.push_back(key);
+            it = udp_flows_.emplace(key, std::move(st)).first;
+        } else if (direction_known && it->second.direction_source != DirectionSource::Content) {
+            // A later packet on this flow carried an authoritative BACnet APDU an earlier one
+            // didn't -- upgrade from the port-heuristic guess, mirroring FlowState's own SYN/SYN-ACK
+            // upgrade rule above at this coarser, no-handshake granularity.
+            it->second.client_ip = src_is_client ? dp.src_ip : dp.dst_ip;
+            it->second.server_ip = src_is_client ? dp.dst_ip : dp.src_ip;
+            it->second.server_port = src_is_client ? dp.dst_port : dp.src_port;
+            if (dp.has_ethernet) {
+                it->second.has_mac = true;
+                it->second.client_mac = src_is_client ? dp.src_mac : dp.dst_mac;
+                it->second.server_mac = src_is_client ? dp.dst_mac : dp.src_mac;
+            }
+            it->second.direction_source = DirectionSource::Content;
+        }
+
+        UdpFlowState& st = it->second;
+        ++st.packet_count;
+
+        if (dp.protocol == "bacnet" && dp.result) {
+            const BacnetFrame& bf = dp.result->as<BacnetFrame>();
+            if (bf.has_npdu && bf.npdu.has_apdu && !bf.npdu.apdu.service_choice_name.empty()) {
+                st.functions.insert(bf.npdu.apdu.service_choice_name);
+            }
+        }
+        // CIP I/O ("enip" with dp.has_udp) has no function/service-name concept at all -- st.functions
+        // stays empty for it, same as any protocol with nothing to report here (see
+        // UdpFlowReport::observed_functions' own comment for what this means for a conduit's
+        // 'functions' restriction).
+
         return;
     }
 
@@ -461,28 +584,7 @@ PolicyReport PolicyEngine::finish(const Resolver& resolver) const {
 
         if (!cz || !sz) {
             fr.verdict = FlowVerdict::Unclassified;
-            // An IPv6-formatted address (format_ipv6's colon-separated form -- this codebase's
-            // zone/CIDR matching is IPv4-only throughout, see policy.hpp's parse_cidr) gets its own,
-            // honest reason instead of the generic "no declared zone contains" text, which would
-            // otherwise be indistinguishable from an ordinary unclassified IPv4 address -- see
-            // docs/USER_GUIDE.md's LIMITATIONS section.
-            auto describe_unmatched = [](const std::string& ip) {
-                if (ip.find(':') != std::string::npos) {
-                    return ip + " is an IPv6 address; policy zoning does not support IPv6 yet";
-                }
-                return std::string("no declared zone contains ") + ip;
-            };
-            if (!cz && !sz) {
-                if (fr.client_ip.find(':') != std::string::npos || fr.server_ip.find(':') != std::string::npos) {
-                    fr.reason = describe_unmatched(fr.client_ip) + "; " + describe_unmatched(fr.server_ip);
-                } else {
-                    fr.reason = "no declared zone contains " + fr.client_ip + " or " + fr.server_ip;
-                }
-            } else if (!cz) {
-                fr.reason = describe_unmatched(fr.client_ip);
-            } else {
-                fr.reason = describe_unmatched(fr.server_ip);
-            }
+            fr.reason = zone_unclassified_reason(fr.client_ip, fr.server_ip, cz != nullptr, sz != nullptr);
         } else if (fs.protocols.empty()) {
             fr.verdict = FlowVerdict::Unclassified;
             fr.reason = "no recognized OT protocol traffic was found on this flow (" +
@@ -603,6 +705,112 @@ PolicyReport PolicyEngine::finish(const Resolver& resolver) const {
         report.ethernet_flows.push_back(std::move(er));
     }
 
+    for (const auto& key : udp_flow_order_) {
+        const UdpFlowState& st = udp_flows_.at(key);
+        UdpFlowReport ur;
+        ur.protocol = st.protocol;
+        ur.client_ip = st.client_ip;
+        ur.server_ip = st.server_ip;
+        ur.server_port = st.server_port;
+        ur.packet_count = st.packet_count;
+        ur.observed_functions.assign(st.functions.begin(), st.functions.end());
+        std::sort(ur.observed_functions.begin(), ur.observed_functions.end());
+        ur.has_mac = st.has_mac;
+        ur.client_mac = st.client_mac;
+        ur.server_mac = st.server_mac;
+        ur.direction_source = st.direction_source;
+
+        auto client_ip_u32 = parse_ipv4_string(st.client_ip);
+        auto server_ip_u32 = parse_ipv4_string(st.server_ip);
+        const Zone* cz = client_ip_u32 ? policy_.zone_for(*client_ip_u32) : nullptr;
+        const Zone* sz = server_ip_u32 ? policy_.zone_for(*server_ip_u32) : nullptr;
+        // Same CIDR-then-hostname fallback the TCP-flow loop above uses -- see its own comment.
+        if (!cz && client_ip_u32 && policy_.has_hostname_zone()) {
+            if (auto host = resolver.hostname(st.client_ip)) cz = policy_.zone_for_hostname(*host);
+        }
+        if (!sz && server_ip_u32 && policy_.has_hostname_zone()) {
+            if (auto host = resolver.hostname(st.server_ip)) sz = policy_.zone_for_hostname(*host);
+        }
+        ur.client_zone = cz ? cz->name : "unclassified";
+        ur.server_zone = sz ? sz->name : "unclassified";
+        ur.client_zone_purdue_level = cz ? cz->purdue_level : std::string();
+        ur.server_zone_purdue_level = sz ? sz->purdue_level : std::string();
+
+        if (!cz || !sz) {
+            ur.verdict = FlowVerdict::Unclassified;
+            ur.reason = zone_unclassified_reason(ur.client_ip, ur.server_ip, cz != nullptr, sz != nullptr);
+        } else {
+            const Conduit* matched = nullptr;
+            bool zone_pair_has_any_conduit = false;
+            for (const auto& c : policy_.conduits) {
+                if (c.kind == ZoneKind::Vlan) continue;  // BACnet/CIP I/O are IP-addressed --
+                                                           // never matched against a VLAN-zone conduit
+                bool forward = zone_list_contains(c.from_zones, ur.client_zone) &&
+                               zone_list_contains(c.to_zones, ur.server_zone);
+                bool reverse = c.bidirectional && zone_list_contains(c.to_zones, ur.client_zone) &&
+                               zone_list_contains(c.from_zones, ur.server_zone);
+                if (!forward && !reverse) continue;
+                zone_pair_has_any_conduit = true;
+
+                if (!c.ports.empty() &&
+                    std::find(c.ports.begin(), c.ports.end(), ur.server_port) == c.ports.end()) {
+                    continue;
+                }
+                bool protocol_ok = std::find(c.protocols.begin(), c.protocols.end(), ur.protocol) != c.protocols.end() ||
+                                    std::find(c.protocols.begin(), c.protocols.end(), "any") != c.protocols.end();
+                if (!protocol_ok) continue;
+
+                matched = &c;
+                break;
+            }
+            if (matched) {
+                // Same functions-restriction logic the TCP-flow loop above uses -- see its own
+                // comment. For CIP I/O, ur.observed_functions is always empty (see
+                // UdpFlowReport::observed_functions' own comment), so a functions-restricted conduit
+                // simply never finds anything disallowed and this always falls through to Allowed --
+                // documented there and in docs/design/policy-engine-zoning.md's Phase 3 section, not
+                // a silent surprise.
+                std::vector<std::string> disallowed;
+                if (!matched->functions.empty()) {
+                    for (const auto& fn : ur.observed_functions) {
+                        bool ok = std::any_of(matched->functions.begin(), matched->functions.end(),
+                                               [&](const std::string& allowed) { return equal_ci(fn, allowed); });
+                        if (!ok) disallowed.push_back(fn);
+                    }
+                }
+                if (!disallowed.empty()) {
+                    ur.verdict = FlowVerdict::Violation;
+                    std::ostringstream reason;
+                    reason << (disallowed.size() > 1 ? "functions " : "function ");
+                    for (size_t i = 0; i < disallowed.size(); ++i) {
+                        if (i) reason << ", ";
+                        reason << "'" << disallowed[i] << "'";
+                    }
+                    reason << " observed; conduit '" << matched->name << "' permits only: "
+                           << join_comma(matched->functions);
+                    ur.reason = reason.str();
+                } else {
+                    ur.verdict = FlowVerdict::Allowed;
+                    ur.matched_conduit = matched->name;
+                    exercised_conduits.insert(matched->name);
+                }
+            } else {
+                ur.verdict = FlowVerdict::Violation;
+                std::ostringstream reason;
+                if (!zone_pair_has_any_conduit) {
+                    reason << "no conduit permits any traffic from zone '" << ur.client_zone << "' to zone '"
+                           << ur.server_zone << "'";
+                } else {
+                    reason << "a conduit exists between zone '" << ur.client_zone << "' and zone '"
+                           << ur.server_zone << "', but none permits " << ur.protocol << " traffic on port "
+                           << ur.server_port;
+                }
+                ur.reason = reason.str();
+            }
+        }
+        report.udp_flows.push_back(std::move(ur));
+    }
+
     for (const auto& c : policy_.conduits) {
         if (!exercised_conduits.count(c.name)) report.unexercised_conduits.push_back(c.name);
     }
@@ -632,19 +840,25 @@ size_t PolicyReport::allowed_count() const {
     return static_cast<size_t>(
                std::count_if(flows.begin(), flows.end(), [](const FlowReport& f) { return f.verdict == FlowVerdict::Allowed; })) +
            static_cast<size_t>(std::count_if(ethernet_flows.begin(), ethernet_flows.end(),
-                                              [](const EthernetFlowReport& f) { return f.verdict == FlowVerdict::Allowed; }));
+                                              [](const EthernetFlowReport& f) { return f.verdict == FlowVerdict::Allowed; })) +
+           static_cast<size_t>(std::count_if(udp_flows.begin(), udp_flows.end(),
+                                              [](const UdpFlowReport& f) { return f.verdict == FlowVerdict::Allowed; }));
 }
 size_t PolicyReport::violation_count() const {
     return static_cast<size_t>(std::count_if(flows.begin(), flows.end(),
                                               [](const FlowReport& f) { return f.verdict == FlowVerdict::Violation; })) +
            static_cast<size_t>(std::count_if(ethernet_flows.begin(), ethernet_flows.end(),
-                                              [](const EthernetFlowReport& f) { return f.verdict == FlowVerdict::Violation; }));
+                                              [](const EthernetFlowReport& f) { return f.verdict == FlowVerdict::Violation; })) +
+           static_cast<size_t>(std::count_if(udp_flows.begin(), udp_flows.end(),
+                                              [](const UdpFlowReport& f) { return f.verdict == FlowVerdict::Violation; }));
 }
 size_t PolicyReport::unclassified_count() const {
     return static_cast<size_t>(std::count_if(
                flows.begin(), flows.end(), [](const FlowReport& f) { return f.verdict == FlowVerdict::Unclassified; })) +
            static_cast<size_t>(std::count_if(ethernet_flows.begin(), ethernet_flows.end(),
-                                              [](const EthernetFlowReport& f) { return f.verdict == FlowVerdict::Unclassified; }));
+                                              [](const EthernetFlowReport& f) { return f.verdict == FlowVerdict::Unclassified; })) +
+           static_cast<size_t>(std::count_if(udp_flows.begin(), udp_flows.end(),
+                                              [](const UdpFlowReport& f) { return f.verdict == FlowVerdict::Unclassified; }));
 }
 
 namespace {
@@ -891,6 +1105,118 @@ void write_unclassified_ethernet_flow_group_summarized_text(std::ostream& out,
     }
 }
 
+// UDP-flow analog of write_flow_group_text -- see that function's own comment for the shared
+// structure. Server port is always UDP here (PolicyEngine only ever aggregates has_udp packets into
+// UdpFlowReport), so "udp" is hardcoded, unlike write_flow_group_text's own "tcp".
+void write_udp_flow_group_text(std::ostream& out, const std::vector<const UdpFlowReport*>& group, const char* label,
+                                const Resolver& resolver) {
+    out << label << " (" << group.size() << "):\n";
+    if (group.empty()) {
+        out << "  (none)\n";
+        return;
+    }
+    for (size_t i = 0; i < group.size(); ++i) {
+        const UdpFlowReport& f = *group[i];
+        out << "  [" << (i + 1) << "] " << f.client_ip;
+        if (auto h = resolver.hostname(f.client_ip)) out << " (" << *h << ")";
+        out << " -> " << f.server_ip;
+        if (auto h = resolver.hostname(f.server_ip)) out << " (" << *h << ")";
+        out << ":" << f.server_port;
+        if (auto s = resolver.service_name(f.server_port, "udp")) out << " (" << *s << ")";
+        out << "  (" << f.protocol << ", " << f.packet_count << " packet(s))";
+        out << "\n      zones: " << f.client_zone;
+        if (!f.client_zone_purdue_level.empty()) out << " (Level " << f.client_zone_purdue_level << ")";
+        out << " -> " << f.server_zone;
+        if (!f.server_zone_purdue_level.empty()) out << " (Level " << f.server_zone_purdue_level << ")";
+        if (f.verdict == FlowVerdict::Allowed) {
+            out << ", matched conduit \"" << f.matched_conduit << "\"";
+        }
+        out << "\n      direction: " << direction_source_name(f.direction_source) << "\n";
+        if (f.has_mac) {
+            out << "      mac: " << f.client_mac;
+            if (auto v = resolver.oui_vendor(f.client_mac)) out << " (" << *v << ")";
+            out << " -> " << f.server_mac;
+            if (auto v = resolver.oui_vendor(f.server_mac)) out << " (" << *v << ")";
+            out << "\n";
+        }
+        if (!f.reason.empty()) {
+            out << "      " << f.reason << "\n";
+        }
+    }
+}
+
+// UDP-flow analog of UnclassifiedFlowGroup/summarize_unclassified_flows -- one collapsed group of
+// UNCLASSIFIED UdpFlowReport entries sharing the same (client_ip, server_ip, server_port, protocol,
+// client_zone, server_zone, MAC pair). UdpFlowReport::reason is always safe to reuse verbatim once
+// grouped (unlike the TCP-flow case): every UDP flow this engine creates has a known protocol, so
+// there is no "no recognized OT protocol traffic" reason equivalent embedding a per-flow packet
+// count here -- the only Unclassified reason a UDP flow can have is the zone one, from
+// zone_unclassified_reason, which never embeds a count.
+struct UnclassifiedUdpFlowGroup {
+    const UdpFlowReport* first = nullptr;
+    size_t flow_count = 0;
+    size_t packet_total = 0;
+};
+
+std::vector<UnclassifiedUdpFlowGroup> summarize_unclassified_udp_flows(const std::vector<const UdpFlowReport*>& group) {
+    std::vector<UnclassifiedUdpFlowGroup> result;
+    std::unordered_map<std::string, size_t> index_of_key;
+    result.reserve(group.size());
+    for (const UdpFlowReport* f : group) {
+        std::string key = f->client_ip + ":" + f->server_ip + ":" + std::to_string(f->server_port) + ":" +
+                           f->protocol + ":" + f->client_zone + ":" + f->server_zone + ":" +
+                           (f->has_mac ? f->client_mac + ">" + f->server_mac : std::string());
+        auto it = index_of_key.find(key);
+        if (it == index_of_key.end()) {
+            index_of_key.emplace(key, result.size());
+            result.push_back(UnclassifiedUdpFlowGroup{f, 1, f->packet_count});
+        } else {
+            UnclassifiedUdpFlowGroup& g = result[it->second];
+            ++g.flow_count;
+            g.packet_total += f->packet_count;
+        }
+    }
+    return result;
+}
+
+void write_unclassified_udp_flow_group_summarized_text(std::ostream& out, const std::vector<const UdpFlowReport*>& group,
+                                                         const Resolver& resolver) {
+    std::vector<UnclassifiedUdpFlowGroup> groups = summarize_unclassified_udp_flows(group);
+    out << "UDP UNCLASSIFIED TRAFFIC (" << group.size() << " flow(s), summarized into " << groups.size()
+        << " distinct pattern(s) -- rerun without --summarize-unclassified, or with --format json, "
+           "for the full per-flow listing):\n";
+    if (groups.empty()) {
+        out << "  (none)\n";
+        return;
+    }
+    for (size_t i = 0; i < groups.size(); ++i) {
+        const UnclassifiedUdpFlowGroup& g = groups[i];
+        const UdpFlowReport& f = *g.first;
+        out << "  [" << (i + 1) << "] " << f.client_ip;
+        if (auto h = resolver.hostname(f.client_ip)) out << " (" << *h << ")";
+        out << " -> " << f.server_ip;
+        if (auto h = resolver.hostname(f.server_ip)) out << " (" << *h << ")";
+        out << ":" << f.server_port;
+        if (auto s = resolver.service_name(f.server_port, "udp")) out << " (" << *s << ")";
+        out << "  (" << f.protocol << ")  -- " << g.flow_count << " flow(s), " << g.packet_total << " packet(s) total\n";
+        out << "      zones: " << f.client_zone;
+        if (!f.client_zone_purdue_level.empty()) out << " (Level " << f.client_zone_purdue_level << ")";
+        out << " -> " << f.server_zone;
+        if (!f.server_zone_purdue_level.empty()) out << " (Level " << f.server_zone_purdue_level << ")";
+        out << "\n";
+        if (f.has_mac) {
+            out << "      mac: " << f.client_mac;
+            if (auto v = resolver.oui_vendor(f.client_mac)) out << " (" << *v << ")";
+            out << " -> " << f.server_mac;
+            if (auto v = resolver.oui_vendor(f.server_mac)) out << " (" << *v << ")";
+            out << "\n";
+        }
+        if (!f.reason.empty()) {
+            out << "      " << f.reason << "\n";
+        }
+    }
+}
+
 // Renders PolicyReport::notable_protocols -- see that field's own comment for why this is always
 // printed (never grouped by, or gated on, Allowed/Violation/Unclassified the way write_flow_group_
 // text's three groups are) and NotableProtocolFinding's own comment for exactly what each field
@@ -1034,6 +1360,43 @@ void write_policy_report_text(std::ostream& out, const PolicyReport& report, con
         }
         out << "\n";
         write_ethernet_flow_group_text(out, eth_allowed_list, "ETHERNET ALLOWED", resolver);
+        out << "\n";
+    }
+
+    // Only printed at all once the policy opts in by naming "bacnet"/"enip"/"any" on a CIDR- or
+    // hostname-zone conduit (see PolicyEngine::observe's own comment) -- a report from a policy that
+    // never does renders byte-for-byte identically to before this feature existed.
+    if (!report.udp_flows.empty()) {
+        size_t udp_allowed = static_cast<size_t>(std::count_if(
+            report.udp_flows.begin(), report.udp_flows.end(),
+            [](const UdpFlowReport& f) { return f.verdict == FlowVerdict::Allowed; }));
+        size_t udp_violation = static_cast<size_t>(std::count_if(
+            report.udp_flows.begin(), report.udp_flows.end(),
+            [](const UdpFlowReport& f) { return f.verdict == FlowVerdict::Violation; }));
+        size_t udp_unclassified = static_cast<size_t>(std::count_if(
+            report.udp_flows.begin(), report.udp_flows.end(),
+            [](const UdpFlowReport& f) { return f.verdict == FlowVerdict::Unclassified; }));
+        out << "UDP flows evaluated: " << report.udp_flows.size() << " (" << udp_allowed << " allowed, "
+            << udp_violation << " violation(s), " << udp_unclassified << " unclassified)\n";
+        out << "  BACnet/IP and/or CIP I/O traffic, classified by CIDR/hostname zone -- see "
+               "docs/USER_GUIDE.md's POLICY FILE FORMAT section\n\n";
+
+        std::vector<const UdpFlowReport*> udp_violations, udp_unclassified_list, udp_allowed_list;
+        for (const auto& f : report.udp_flows) {
+            if (f.verdict == FlowVerdict::Violation) udp_violations.push_back(&f);
+            else if (f.verdict == FlowVerdict::Unclassified) udp_unclassified_list.push_back(&f);
+            else udp_allowed_list.push_back(&f);
+        }
+
+        write_udp_flow_group_text(out, udp_violations, "UDP VIOLATIONS", resolver);
+        out << "\n";
+        if (summarize_unclassified) {
+            write_unclassified_udp_flow_group_summarized_text(out, udp_unclassified_list, resolver);
+        } else {
+            write_udp_flow_group_text(out, udp_unclassified_list, "UDP UNCLASSIFIED TRAFFIC", resolver);
+        }
+        out << "\n";
+        write_udp_flow_group_text(out, udp_allowed_list, "UDP ALLOWED", resolver);
         out << "\n";
     }
 
@@ -1271,8 +1634,7 @@ void write_policy_report_json(std::ostream& out, const PolicyReport& report, con
     out << "  ],\n";
 
     // "IT-OT CROSSING CONDUITS" -- see write_idmz_conduits_text's own comment (this function's text
-    // counterpart) for what this is and how "exercised" is derived. Appended last, after every
-    // pre-existing field (notable_protocols was the prior last field) -- always present as an array,
+    // counterpart) for what this is and how "exercised" is derived. Always present as an array,
     // empty when the policy declares no idmz-typed conduit, so a policy that never uses this
     // feature gets one more (empty) field, same posture ethernet_flows took when it was new.
     std::vector<const Conduit*> idmz_conduits;
@@ -1288,6 +1650,65 @@ void write_policy_report_json(std::ostream& out, const PolicyReport& report, con
         out << "      \"name\": \"" << json_escape(c->name) << "\",\n";
         out << "      \"exercised\": " << (exercised ? "true" : "false") << "\n";
         out << "    }" << (i + 1 < idmz_conduits.size() ? "," : "") << "\n";
+    }
+    out << "  ],\n";
+
+    // BACnet/IP and/or CIP I/O flows -- see UdpFlowReport's own comment. Appended last, after every
+    // pre-existing field (idmz_conduits was the prior last field) -- always present as an array,
+    // empty when the policy never opts in (see Policy::has_udp_eligible_conduit), so a policy that
+    // never uses this feature gets one more (empty) field, same posture idmz_conduits/ethernet_flows
+    // took when each was new.
+    out << "  \"udp_flows\": [\n";
+    for (size_t i = 0; i < report.udp_flows.size(); ++i) {
+        const UdpFlowReport& f = report.udp_flows[i];
+        out << "    {\n";
+        out << "      \"protocol\": \"" << json_escape(f.protocol) << "\",\n";
+        out << "      \"client_ip\": \"" << json_escape(f.client_ip) << "\",\n";
+        out << "      \"server_ip\": \"" << json_escape(f.server_ip) << "\",\n";
+        out << "      \"server_port\": " << f.server_port << ",\n";
+        // Same annotation/omission conventions write_policy_report_json's own 'flows' array uses --
+        // see that block's comment.
+        out << "      \"client_mac\": " << (f.has_mac ? ("\"" + json_escape(f.client_mac) + "\"") : "null") << ",\n";
+        out << "      \"server_mac\": " << (f.has_mac ? ("\"" + json_escape(f.server_mac) + "\"") : "null") << ",\n";
+        if (f.has_mac) {
+            if (auto v = resolver.oui_vendor(f.client_mac)) {
+                out << "      \"client_mac_vendor\": \"" << json_escape(*v) << "\",\n";
+            }
+            if (auto v = resolver.oui_vendor(f.server_mac)) {
+                out << "      \"server_mac_vendor\": \"" << json_escape(*v) << "\",\n";
+            }
+        }
+        if (auto h = resolver.hostname(f.client_ip)) {
+            out << "      \"client_hostname\": \"" << json_escape(*h) << "\",\n";
+        }
+        if (auto h = resolver.hostname(f.server_ip)) {
+            out << "      \"server_hostname\": \"" << json_escape(*h) << "\",\n";
+        }
+        // server_port is always UDP here -- see write_udp_flow_group_text's own comment above.
+        if (auto s = resolver.service_name(f.server_port, "udp")) {
+            out << "      \"server_port_service\": \"" << json_escape(*s) << "\",\n";
+        }
+        out << "      \"client_zone\": \"" << json_escape(f.client_zone) << "\",\n";
+        out << "      \"server_zone\": \"" << json_escape(f.server_zone) << "\",\n";
+        out << "      \"observed_functions\": [";
+        for (size_t j = 0; j < f.observed_functions.size(); ++j) {
+            if (j) out << ", ";
+            out << "\"" << json_escape(f.observed_functions[j]) << "\"";
+        }
+        out << "],\n";
+        out << "      \"packet_count\": " << f.packet_count << ",\n";
+        out << "      \"verdict\": \"" << verdict_name(f.verdict) << "\",\n";
+        out << "      \"matched_conduit\": " << (f.matched_conduit.empty() ? "null" : ("\"" + json_escape(f.matched_conduit) + "\"")) << ",\n";
+        out << "      \"reason\": " << (f.reason.empty() ? "null" : ("\"" + json_escape(f.reason) + "\"")) << ",\n";
+        out << "      \"direction_source\": \"" << direction_source_name(f.direction_source) << "\"";
+        if (!f.client_zone_purdue_level.empty()) {
+            out << ",\n      \"client_zone_purdue_level\": \"" << json_escape(f.client_zone_purdue_level) << "\"";
+        }
+        if (!f.server_zone_purdue_level.empty()) {
+            out << ",\n      \"server_zone_purdue_level\": \"" << json_escape(f.server_zone_purdue_level) << "\"";
+        }
+        out << "\n";
+        out << "    }" << (i + 1 < report.udp_flows.size() ? "," : "") << "\n";
     }
     out << "  ]\n";
     out << "}\n";

@@ -500,10 +500,13 @@ its own JSON report schema section above), with one addition: `content`
 appears here too, for the BACnet edge -- BACnet's client and server both
 conventionally listen on the same UDP port, so its direction is decided by
 APDU type (request vs. response) instead of a port guess, unlike every
-other edge above (`policy validate` never evaluates BACnet at all -- UDP-only,
-see LIMITATIONS -- so `content` never appears in *its* report). See
-docs/DEVELOPMENT.md's ROADMAP item 19 for the full three-tier design
-record and the industry precedent researched before adding this field.
+other edge above. `policy validate` can now reuse this same content-based
+direction for BACnet/IP (and applies the analogous port-heuristic-only
+direction to CIP I/O) when a conduit opts UDP flow evaluation in by naming
+`bacnet`/`enip`/`any` -- see "UDP flow evaluation (BACnet/IP, CIP I/O)"
+below. See docs/DEVELOPMENT.md's ROADMAP item 19 for the full three-tier
+design record and the industry precedent researched before adding this
+field.
 
 #### Closing the loop
 
@@ -923,18 +926,16 @@ that never carries a full S7comm message (e.g. only a connection
 request/confirm was captured) still counts as `s7comm` traffic for matching
 purposes -- see docs/PROTOCOL_COVERAGE.md's S7comm/COTP section for why a "cotp"-
 tagged packet and an "s7comm"-tagged one are the same conduit on the wire.
-`enip` here only ever means EtherNet/IP explicit messaging (TCP 44818):
-conduits are TCP-only (see LIMITATIONS), so there is currently no way to
-write a conduit matching CIP I/O (implicit messaging, UDP 2222) traffic,
-even though `decode` now decodes it -- see docs/DEVELOPMENT.md's ROADMAP. `bacnet` is the one
-name among the newly-widened six that can never actually match real
-traffic today for the same TCP-only reason: this decoder only ever
-recognizes BACnet/IP over UDP (see decoder.cpp), so a `bacnet` conduit
-parses and validates fine but is never exercised by `policy validate` --
-see "Addressing scope" below. The other five newly-widened names
-(`hartip`, `opcua`, `mms`, `mqtt`, `ffhse`) DO match real TCP traffic --
-`hartip` specifically only its TCP form, since HART-IP also has a UDP
-form this engine doesn't evaluate (see "Addressing scope" below), and
+`enip` here means EtherNet/IP explicit messaging (TCP 44818) for TCP flow
+matching, but naming `enip` (or `any`) on a CIDR/hostname-zone conduit ALSO
+opts that conduit's zone pair into evaluating CIP I/O (implicit messaging,
+UDP 2222) traffic -- see "UDP flow evaluation (BACnet/IP, CIP I/O)" below,
+which covers both this and `bacnet`'s analogous UDP behavior; `bacnet` only
+ever matches over UDP (this decoder only recognizes BACnet/IP over UDP --
+see decoder.cpp), never TCP. The other four newly-widened names (`hartip`,
+`opcua`, `mms`, `mqtt`, `ffhse`) only match TCP traffic -- `hartip`
+specifically only its TCP form, since HART-IP also has a UDP form this
+engine doesn't evaluate at all yet (see "Addressing scope" below), and
 `mms` and `s7comm` share the same TCP port (102) but are still matched as
 two entirely separate conduit protocols, one per flow's own actually-
 decoded `protocol` tag, never conflated the way "cotp" folds into
@@ -976,6 +977,58 @@ singular alias is also accepted for a conduit that only lists one protocol
 field (`networks`, `protocols`, `ports`, `from`, `to`) also accepts a single
 bare value in place of a one-element list, for readability on a short
 policy file.
+
+### UDP flow evaluation (BACnet/IP, CIP I/O)
+
+`policy validate` normally only evaluates TCP flows against a CIDR/
+hostname-zone conduit (see "Conduits" above and LIMITATIONS) -- BACnet/IP
+and CIP I/O (EtherNet/IP's UDP/2222 implicit messaging) are the two
+exceptions, and only once a policy opts in: naming `bacnet`, `enip`, or
+`any` in ANY conduit's `protocols` turns on UDP flow evaluation for the
+ENTIRE policy, not just that one conduit. Concretely, a policy with two
+conduits -- one naming only `bacnet`, the other only `modbus` -- still
+evaluates CIP I/O traffic once loaded, because `bacnet` alone is enough to
+flip on evaluation for BOTH UDP protocols; if no conduit in the entire
+policy permits the observed CIP I/O flow's zone pair/port, that flow is
+correctly reported a `Violation`, not silently skipped. This is a
+deliberate design choice, not an oversight -- see
+`tests/policies/udp_bacnet_only_violation.yaml` for a pinned regression
+fixture proving it. A policy that never names `bacnet`/`enip`/`any` on any
+conduit is completely unaffected: this traffic is still counted only in
+`skipped_non_tcp`, exactly as before this feature existed.
+
+Once opted in, a BACnet/IP or CIP I/O flow is matched against the exact
+same CIDR/hostname zones a TCP flow would be (never a VLAN zone -- see
+"VLAN-zone conduits" above), with `ports`/`bidirectional` fully meaningful
+the same way. `functions` is the one exception, and it behaves
+differently per protocol: BACnet/IP has genuine per-message service names
+(`observed_functions` is populated from each decoded APDU's service, e.g.
+`readProperty`), so a `functions:`-restricted conduit works as expected.
+CIP I/O has no per-message operation concept at all -- it's cyclic
+producer/consumer data, not a request/response exchange -- so
+`observed_functions` is always empty for it, and a `functions:`-restricted
+`enip` conduit can never find anything to reject: the CIP I/O flow is
+Allowed/Violation purely on protocol+port+zone, regardless of what the
+restriction names. This is intentional, documented behavior (see
+`tests/policies/udp_cip_io_functions_quirk.yaml`), not a bug to work
+around.
+
+Client/server direction has no TCP handshake to lean on, so each protocol
+uses its own best-available signal: BACnet/IP reuses the same
+Confirmed-/Unconfirmed-Request-vs-response APDU logic `inventory` already
+uses for its own BACnet edges (see "Passive OT asset discovery" above) --
+`direction_source: "content"` -- falling back to a port-number heuristic
+when no APDU is present; CIP I/O has no request/response concept at all,
+so it's always port-heuristic-only (`direction_source: "port-heuristic"`).
+Both carry the same honestly-low-confidence caveat as every other
+port-heuristic direction call in this tool (see "Direction/initiator
+determination" in LIMITATIONS).
+
+Matched flows appear in their own "UDP flows evaluated" report section
+(text) / `udp_flows[]` array (JSON), structured like `flows[]`/
+`ethernet_flows[]` -- see "JSON report schema" below for the exact field
+list, and `--summarize-unclassified` groups UDP-flow unclassified entries
+the same way it already groups TCP/Ethernet ones.
 
 **Worked example.** `tests/policies/multi_from_zones.yaml` declares three
 zones (`corp_zone`, `hmi_zone`, `plc_zone`) and one conduit whose `from` is
@@ -1407,11 +1460,12 @@ ROADMAP item 19) -- which tier decided `client_ip`/`server_ip` above:
 -- authoritative) or `"port-heuristic"` (no handshake was captured, so a
 known-service-port/lower-port-number guess was used instead, which CAN be
 wrong -- see LIMITATIONS' own discussion of exactly when). Never
-`"content"` here -- that tier only applies to BACnet, which `policy
-validate` never evaluates at all (UDP-only, see "Addressing scope" below).
-`ethernet_flows[]` has no `direction_source` of its own: those protocols
-have no client/server concept to begin with (see its own comment just
-below).
+`"content"` here -- that tier only applies to BACnet, and `flows[]` is
+TCP-only (BACnet/IP is UDP). `"content"` DOES appear in `udp_flows[]`'s own
+`direction_source`, described in "UDP flow evaluation (BACnet/IP, CIP I/O)"
+below. `ethernet_flows[]` has no `direction_source` of its own: those
+protocols have no client/server concept to begin with (see its own comment
+just below).
 
 **Resolver annotations** (`--mac-vendor`/`--resolve`/`--hosts`/`--nn`/
 `--services` -- see the option table above and OUTPUT FORMATS' "Name
@@ -1493,7 +1547,7 @@ and appear on every report regardless of whether any conduit actually uses
 **`notable_protocols[]`** -- appended after every field that existed when
 it was added (the same "no established JSON-shape test anchored on an
 earlier field needs to change" convention `direction_source`'s own addition
-above followed; `idmz_conduits[]`, documented further below, is the true
+above followed; `udp_flows[]`, documented further below, is the true
 last field today) -- always present, one entry per distinct (protocol,
 client/server or MAC
 pair, port) combination of one of the 43 "IT protocols an OT auditor
@@ -1575,10 +1629,10 @@ declared `purdue_level` (see "Zones" above) -- OMITTED ENTIRELY, never
 adds nothing" convention every Resolver-derived field in this schema
 already follows.
 
-**`idmz_conduits[]`** -- now the last field in this report (appended after
-`notable_protocols`, which was the prior last field), always present, empty
-when the policy declares no `idmz`-typed conduit. One entry per such
-conduit, in declaration order:
+**`idmz_conduits[]`** -- appended after `notable_protocols`, which was the
+prior last field (`udp_flows[]`, documented next, is the true last field
+today), always present, empty when the policy declares no `idmz`-typed
+conduit. One entry per such conduit, in declaration order:
 
 ```json
 {
@@ -1591,6 +1645,46 @@ conduit, in declaration order:
 flow (i.e. it does NOT appear in `unexercised_conduits`), `false` otherwise
 -- see "iDMZ / IT-OT crossing conduits" above for the text-report
 equivalent.
+
+**`udp_flows[]`** (docs/design/policy-engine-zoning.md's Phase 3) -- the
+true last field in this report today, always present, empty when the
+policy never opted UDP flow evaluation in (see "UDP flow evaluation
+(BACnet/IP, CIP I/O)" above). One entry per BACnet/IP or CIP I/O UDP flow:
+
+```json
+{
+  "protocol": "bacnet",
+  "client_ip": "192.168.1.50",
+  "server_ip": "192.168.1.10",
+  "server_port": 47808,
+  "client_mac": "00:0c:29:11:22:33",
+  "server_mac": "00:0c:29:aa:bb:cc",
+  "server_port_service": "bacnet",
+  "client_zone": "hmi_zone",
+  "server_zone": "plc_zone",
+  "observed_functions": ["readProperty"],
+  "packet_count": 2,
+  "verdict": "allowed",
+  "matched_conduit": "HMI reads PLC via BACnet/IP and CIP I/O",
+  "reason": null,
+  "direction_source": "content"
+}
+```
+
+Same field meanings as `flows[]` above (`verdict`/`matched_conduit`/
+`reason`/`observed_functions`/`direction_source`; `client_mac`/`server_mac`
+are the same base-value addition, `null` only for a non-Ethernet-linktype
+capture), plus `client_hostname`/`server_hostname` and
+`client_mac_vendor`/`server_mac_vendor` when the relevant resolver flags
+are given, and `client_zone_purdue_level`/`server_zone_purdue_level`
+(omitted when unset) -- exactly like `flows[]`. `direction_source` is
+`"content"` for a BACnet/IP flow whose direction was decided from a
+decoded APDU's request/response type, or `"port-heuristic"` for either
+protocol when it wasn't (CIP I/O is always `"port-heuristic"`, having no
+request/response concept at all -- see "UDP flow evaluation (BACnet/IP,
+CIP I/O)" above). `allowed_count`/`violation_count`/`unclassified_count`
+at the top level fold in `udp_flows[]` too, alongside `flows[]` and
+`ethernet_flows[]`; so does `unexercised_conduits`.
 
 ### Hostname zones and the IPv6-flow reason string
 
@@ -1645,31 +1739,30 @@ dispatch (`PolicyEngine::observe`) genuinely recognizes each of them, not
 just the policy-file parser -- see the "Widened `protocols` enum" tests
 in `CMakeLists.txt` and `tests/policies/widened_protocols.yaml` for
 end-to-end confirmation against each protocol's own real sample capture.
-One asterisk survives this widening, addressed in the very next
-paragraph: `bacnet` parses and validates like any other protocol name,
-but BACnet/IP itself can never actually match a flow, for a reason that
-has nothing to do with the enum.
+One asterisk survived this widening for a while, since fixed: `bacnet` used
+to parse and validate like any other protocol name, but BACnet/IP itself
+could never actually match a flow, since a conduit was TCP-flow-only and
+BACnet/IP is UDP. docs/design/policy-engine-zoning.md's Phase 3 closed that
+gap -- see the next paragraph and "UDP flow evaluation (BACnet/IP, CIP
+I/O)" above.
 
-**`policy validate` only ever evaluates TCP flows** (see "`policy
-validate`" above and LIMITATIONS) -- so even where a protocol's UDP
-traffic is fully decoded by `decode` (BACnet/IP, HART-IP, CIP I/O, FF-HSE),
-none of it reaches the policy engine at all. This is independent of the
-`protocols`-enum widening just described: naming a protocol in
-`protocols` only lets a conduit be MATCHED by that protocol's TCP traffic,
-it doesn't make UDP traffic suddenly visible to the engine. Concretely,
-of the six newly-named protocols: `hartip`, `opcua`, `mms`, `mqtt`, and
-`ffhse` all carry genuine TCP traffic this decoder recognizes, so naming
-them now does real work (`hartip` specifically only matches its own TCP
-form -- HART-IP's UDP form, like BACnet/IP's, still never reaches the
-engine). `bacnet` is the one exception with no TCP form to fall back on
-at all: this decoder only ever recognizes BACnet/IP over UDP (see
-`decoder.cpp`), so `protocol: bacnet` is accepted at policy-load time,
-appears in `unexercised_conduits` like any conduit real traffic never
-happened to exercise, but can never move out of that list -- there is no
-capture this engine could be given that would make it match. Fixing that
-needs `policy validate` to evaluate UDP flows at all, a separate,
-not-yet-scoped piece of future work this item deliberately didn't take on
-(see docs/DEVELOPMENT.md's ROADMAP).
+**`policy validate` evaluates TCP flows against a CIDR/hostname-zone
+conduit unconditionally, and BACnet/IP + CIP I/O UDP flows too once a
+policy opts in** (see "UDP flow evaluation (BACnet/IP, CIP I/O)" above) --
+every other protocol's UDP traffic (HART-IP's UDP form, FF-HSE) still
+never reaches the policy engine at all; naming it in `protocols` only lets
+a conduit be matched by that protocol's TCP traffic. Concretely, of the
+six protocols item 14 widened `protocols` to include: `hartip`, `opcua`,
+`mms`, `mqtt`, and `ffhse` all carry genuine TCP traffic this decoder
+recognizes, so naming them does real work over TCP (`hartip` specifically
+only matches its own TCP form -- its UDP form still never reaches the
+engine). `bacnet` has no TCP form to fall back on at all: this decoder
+only ever recognizes BACnet/IP over UDP (see `decoder.cpp`), so
+`protocol: bacnet` only ever matches UDP traffic, and only once UDP flow
+evaluation is opted into as described above -- a `bacnet` conduit in a
+policy that never opts in still parses and validates fine, and still
+appears in `unexercised_conduits` (or, once opted in via another conduit
+in the same policy, in `udp_flows[]`'s own accounting instead).
 
 **For the four protocols with no IP layer at all** -- PROFINET RT, IEC
 61850-8-1 GOOSE, IEC 61850-9-2 Sampled Values, and EtherCAT (see PROTOCOL
@@ -1716,9 +1809,10 @@ this tool does with it today:**
   count, for routing across MS/TP-to-IP internetworks -- and it's fully
   decoded and exposed (`bacnet_npdu_dnet`/`bacnet_npdu_snet`/
   `bacnet_npdu_hop_count`), the closest thing this tool has to a working
-  non-IP network-layer address. Not consulted by the zone engine (and
-  moot for `policy validate` today regardless, since BACnet/IP is UDP --
-  see above). Separately, I-Am's own device Object Identifier (the actual
+  non-IP network-layer address. Not consulted by the zone engine -- BACnet/IP
+  UDP flow evaluation (see "UDP flow evaluation (BACnet/IP, CIP I/O)" above)
+  classifies purely by IPv4 src/dst against a CIDR/hostname zone, the same
+  as every other protocol here, never by DNET/SNET. Separately, I-Am's own device Object Identifier (the actual
   "which device is this" answer) is decoded into `bacnet_values` as a
   `device-object=...` string -- readable, but not a structured field a
   policy could reference.
@@ -3488,19 +3582,19 @@ These are current, not aspirational -- each has a corresponding docs/DEVELOPMENT
   (EtherType `0x88A4`), and BACnet/IP (UDP port 47808/0xBAC0), all of which
   are now decoded, not just named -- see docs/PROTOCOL_COVERAGE.md's EtherNet/IP,
   PROFINET RT, GOOSE, Sampled Values, EtherCAT, and BACnet/IP sections.
-  `policy validate` does not yet evaluate ANY UDP traffic against a conduit,
-  decoded or not (it only ever looks at TCP flows -- this applies equally to
-  CIP I/O and BACnet/IP) -- see that section and docs/DEVELOPMENT.md's ROADMAP. This carries
-  straight through to `inventory`: it can infer a CIP I/O or BACnet/IP
-  conduit from observed UDP traffic just fine (see COMMANDS' `inventory`
-  section), and `--policy-out`'s generated policy file loads that conduit
-  without error, but feeding it back into `policy validate` will always
-  report that conduit as "never exercised," no matter how much matching UDP
-  traffic the capture actually has -- not a bug in either command, just this
-  same limitation viewed from the discovery side. PROFINET RT,
-  GOOSE, Sampled Values, and EtherCAT are different: all four ride raw
-  Ethernet with no IP/TCP/UDP layer at all, so there is no IP-based conduit
-  rule that could ever match any of them, but docs/DEVELOPMENT.md's ROADMAP item 15 added a
+  `policy validate` can now evaluate CIP I/O and BACnet/IP UDP traffic
+  against a conduit, but only once a policy opts in -- see POLICY FILE
+  FORMAT's "UDP flow evaluation (BACnet/IP, CIP I/O)" section below for the
+  opt-in mechanism, the direction-determination caveat (content-based for
+  BACnet, port-heuristic-only for CIP I/O), and a documented quirk (a
+  `functions:`-restricted `enip` conduit can't meaningfully restrict CIP I/O,
+  since it has no per-message operation concept). A policy that never names
+  `bacnet`/UDP-eligible `enip`/`any` on any conduit is completely unaffected:
+  this traffic is still counted only in `skipped_non_tcp`, exactly as
+  before this feature existed. PROFINET RT, GOOSE, Sampled Values, and
+  EtherCAT are different: all four ride raw Ethernet with no IP/TCP/UDP
+  layer at all, so there is no IP-based conduit rule that could ever match
+  any of them; docs/DEVELOPMENT.md's ROADMAP item 15 added a
   VLAN-membership-based conduit/zone model specifically for this case -- see
   POLICY FILE FORMAT's "Addressing scope" section and the VLAN-zone
   LIMITATIONS entries below for exactly what it does and doesn't cover.
@@ -4005,14 +4099,23 @@ These are current, not aspirational -- each has a corresponding docs/DEVELOPMENT
   tool's interactive/bounded use case, but means `--duration`/Ctrl+C
   responsiveness is bounded by that poll interval (200ms), not instant.
 - **QinQ (stacked 802.1Q) VLAN tags are not unwrapped**, only a single tag.
-- **`policy validate`'s zones are IPv4 CIDR-only** (matching every other
-  IPv4-only limitation in this document) and its conduits are TCP-only --
-  unlike `decode`, which now also decodes three UDP-based protocols (CIP
-  I/O, BACnet/IP, and HART-IP's own UDP traffic, see docs/PROTOCOL_COVERAGE.md). A
-  policy can't reference a UDP service, a MAC address, or a hostname, and
-  non-TCP/non-IP packets -- including CIP I/O, BACnet/IP, and HART-IP-over-
-  UDP traffic -- are counted (`skipped_non_tcp` in the JSON report) but
-  never evaluated against any conduit.
+- **`policy validate`'s zones are IPv4-addressed only** -- a zone matches
+  an IPv4 CIDR (`networks:`), a VLAN ID (`vlans:`), or a hostname
+  (`hostnames:`, resolved only from a pinned `--hosts` file, never live
+  DNS), but never an IPv6 address or an arbitrary MAC address outside a
+  VLAN conduit's own Ethernet-flow matching. Most conduits are still
+  TCP-only: `ports`/`bidirectional`/`functions` only apply to CIDR/hostname
+  conduits matched against TCP flows. Two protocols are the exception --
+  BACnet/IP and CIP I/O (EtherNet/IP's UDP/2222 implicit messaging) can be
+  matched against CIDR/hostname-zone conduits too, but only once a conduit
+  opts in by naming `bacnet`/`enip`/`any` in its `protocols:` (see "UDP flow
+  evaluation (BACnet/IP, CIP I/O)" below) -- until then, this traffic (and
+  HART-IP-over-UDP, which has no opt-in mechanism at all yet) is counted
+  (`skipped_non_tcp` in the JSON report) but never evaluated against any
+  conduit. PROFINET RT, GOOSE, Sampled Values, and EtherCAT never carry a
+  UDP/IP layer at all, so they're matched via the separate VLAN-zone/
+  Ethernet-flow mechanism instead (see "Addressing scope" above), not this
+  IPv4-based one.
 - **`policy validate`'s client/server (initiator) determination falls back
   to a port-number heuristic when no SYN/SYN-ACK is captured for a flow**
   (e.g. a capture that starts mid-session): whichever endpoint's port is one

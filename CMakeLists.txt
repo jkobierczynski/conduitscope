@@ -9105,6 +9105,60 @@ set_tests_properties(policy_error_conduit_mixed_hostname_and_cidr PROPERTIES
   PASS_REGULAR_EXPRESSION "conduit 'c1' mixes zones of different kinds \\(CIDR/VLAN/hostname\\) in its 'from'/'to'")
 
 # ---------------------------------------------------------------------------------------------
+# Phase 3 of "match how plants are zoned" (docs/design/policy-engine-zoning.md) -- BACnet/IP + CIP
+# I/O UDP flow evaluation, opt-in per conduit by protocol name ("bacnet"/"enip"/"any"). See
+# tests/sample_policy_udp_bacnet_cip_io.pcap (one BACnet Confirmed-Request/Complex-ACK exchange
+# plus one CIP I/O cyclic exchange, same HMI_IP<->PLC_IP pair) and tests/policies/udp_*.yaml.
+
+add_test(NAME policy_udp_bacnet_cip_io_compliant_text
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_policy_udp_bacnet_cip_io.pcap" --policy "${POLICY_DIR}/udp_bacnet_cip_io_compliant.yaml")
+set_tests_properties(policy_udp_bacnet_cip_io_compliant_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "Result: COMPLIANT.*UDP flows evaluated: 2 \\(2 allowed, 0 violation\\(s\\), 0 unclassified\\).*UDP ALLOWED \\(2\\):.*192\\.168\\.1\\.50 -> 192\\.168\\.1\\.10:47808 \\(bacnet\\).*matched conduit \"HMI reads PLC via BACnet/IP and CIP I/O\".*direction: content.*192\\.168\\.1\\.50 -> 192\\.168\\.1\\.10:2222 \\(enip-io\\).*matched conduit \"HMI reads PLC via BACnet/IP and CIP I/O\".*direction: port-heuristic")
+
+add_test(NAME policy_udp_bacnet_cip_io_compliant_json
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_policy_udp_bacnet_cip_io.pcap" --policy "${POLICY_DIR}/udp_bacnet_cip_io_compliant.yaml" --format json)
+set_tests_properties(policy_udp_bacnet_cip_io_compliant_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"idmz_conduits\": \\[\n *\\],\n *\"udp_flows\": \\[\n *\\{\n *\"protocol\": \"bacnet\",\n *\"client_ip\": \"192.168.1.50\",\n *\"server_ip\": \"192.168.1.10\",\n *\"server_port\": 47808,.*\"observed_functions\": \\[\"readProperty\"\\],\n *\"packet_count\": 2,\n *\"verdict\": \"allowed\",\n *\"matched_conduit\": \"HMI reads PLC via BACnet/IP and CIP I/O\",\n *\"reason\": null,\n *\"direction_source\": \"content\"\n *\\},\n *\\{\n *\"protocol\": \"enip\",.*\"server_port\": 2222,.*\"verdict\": \"allowed\",.*\"direction_source\": \"port-heuristic\"\n *\\}\n *\\]\n\\}")
+
+# udp_bacnet_only_violation.yaml names only "bacnet" -- proves gating is policy-wide, not
+# per-protocol (Policy::has_udp_eligible_conduit()): CIP I/O is still evaluated (and violates,
+# since no conduit here permits "enip") purely because *some* conduit named a UDP-eligible
+# protocol, not because that conduit covers CIP I/O itself.
+add_test(NAME policy_udp_bacnet_only_conduit_cip_io_violation
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_policy_udp_bacnet_cip_io.pcap" --policy "${POLICY_DIR}/udp_bacnet_only_violation.yaml")
+set_tests_properties(policy_udp_bacnet_only_conduit_cip_io_violation PROPERTIES
+  PASS_REGULAR_EXPRESSION "Result: NON-COMPLIANT \\(1 violation\\(s\\), 0 unclassified flow\\(s\\)\\).*UDP flows evaluated: 2 \\(1 allowed, 1 violation\\(s\\), 0 unclassified\\).*UDP VIOLATIONS \\(1\\):.*192\\.168\\.1\\.50 -> 192\\.168\\.1\\.10:2222 \\(enip-io\\).*a conduit exists between zone 'hmi_zone' and zone 'plc_zone', but none permits enip traffic on port 2222.*UDP ALLOWED \\(1\\):.*192\\.168\\.1\\.50 -> 192\\.168\\.1\\.10:47808 \\(bacnet\\).*matched conduit \"HMI reads PLC via BACnet/IP only\"")
+
+# udp_cip_io_functions_quirk.yaml pins the documented quirk that a 'functions:'-restricted enip
+# conduit cannot meaningfully restrict CIP I/O (UdpFlowReport::observed_functions is always empty
+# for it) -- both flows are still Allowed even though the enip conduit's functions list
+# ("Read_Tag") names a TCP-only CIP explicit-messaging service the CIP I/O flow never carries.
+add_test(NAME policy_udp_cip_io_functions_quirk_allowed
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_policy_udp_bacnet_cip_io.pcap" --policy "${POLICY_DIR}/udp_cip_io_functions_quirk.yaml")
+set_tests_properties(policy_udp_cip_io_functions_quirk_allowed PROPERTIES
+  PASS_REGULAR_EXPRESSION "Result: COMPLIANT.*UDP flows evaluated: 2 \\(2 allowed, 0 violation\\(s\\), 0 unclassified\\).*matched conduit \"bacnet unrestricted\".*matched conduit \"cip io via enip, functions restricted to a TCP-only service name\"")
+
+# compliant.yaml names neither "bacnet" nor "enip" (nor "any") on any conduit, so
+# Policy::has_udp_eligible_conduit() is false and this BACnet+CIP-I/O capture is skipped exactly
+# as it always was pre-Phase-3 -- proves the "fully inert unless a policy actually declares it"
+# backward-compatibility rule this feature follows (docs/design/policy-engine-zoning.md).
+add_test(NAME policy_udp_gating_off_backward_compat
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_policy_udp_bacnet_cip_io.pcap" --policy "${POLICY_DIR}/compliant.yaml")
+set_tests_properties(policy_udp_gating_off_backward_compat PROPERTIES
+  PASS_REGULAR_EXPRESSION "Result: COMPLIANT.*4 total packet\\(s\\) in capture, 4 skipped \\(non-TCP/non-IP\\)"
+  FAIL_REGULAR_EXPRESSION "UDP flows evaluated")
+
+add_test(NAME policy_udp_zone_unclassified_text
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_policy_udp_bacnet_cip_io.pcap" --policy "${POLICY_DIR}/udp_zone_unclassified.yaml")
+set_tests_properties(policy_udp_zone_unclassified_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "Result: NON-COMPLIANT \\(0 violation\\(s\\), 2 unclassified flow\\(s\\)\\).*UDP flows evaluated: 2 \\(0 allowed, 0 violation\\(s\\), 2 unclassified\\).*UDP UNCLASSIFIED TRAFFIC \\(2\\):.*zones: hmi_zone -> unclassified.*no declared zone contains 192\\.168\\.1\\.10.*zones: hmi_zone -> unclassified.*no declared zone contains 192\\.168\\.1\\.10")
+
+add_test(NAME policy_udp_zone_unclassified_summarized
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_policy_udp_bacnet_cip_io.pcap" --policy "${POLICY_DIR}/udp_zone_unclassified.yaml" --summarize-unclassified)
+set_tests_properties(policy_udp_zone_unclassified_summarized PROPERTIES
+  PASS_REGULAR_EXPRESSION "UDP UNCLASSIFIED TRAFFIC \\(2 flow\\(s\\), summarized into 2 distinct pattern\\(s\\) -- rerun without --summarize-unclassified, or with --format json, for the full per-flow listing\\):.*-- 1 flow\\(s\\), 2 packet\\(s\\) total.*-- 1 flow\\(s\\), 2 packet\\(s\\) total")
+
+# ---------------------------------------------------------------------------------------------
 # Resolver, wired into `policy validate`'s report too (write_policy_report_text/
 # write_policy_report_json in policy_engine.cpp) -- the same OUI/hostname/service-name
 # annotations exercised earlier (see this file's own "Resolver" section, above the resolver_*

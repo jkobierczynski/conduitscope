@@ -274,6 +274,19 @@ struct Policy {
     // requires --resolve/--hosts, see policy.hpp's own header comment) when this is true, so a
     // policy with no hostname zone is entirely unaffected by whether those flags were given.
     bool has_hostname_zone() const;
+
+    // True if at least one CIDR- or hostname-zone conduit (never a VLAN-zone conduit -- see below)
+    // names "bacnet", "enip", or "any" in its `protocols:` -- the opt-in gate for evaluating
+    // BACnet/IP and CIP I/O traffic (both UDP, both IP-addressed) against a conduit at all, instead
+    // of leaving them in PolicyReport::skipped_non_tcp exactly as before this feature existed (see
+    // PolicyEngine::observe's own comment, and docs/design/policy-engine-zoning.md's Phase 3). This
+    // mirrors has_vlan_zone/has_hostname_zone's own "cached once, at PolicyEngine construction"
+    // backward-compatibility posture: a policy that never names these protocols on a CIDR/hostname
+    // conduit is byte-for-byte unaffected by this feature's existence. A VLAN-zone conduit naming
+    // "enip" or "any" doesn't count here -- it can only ever mean PROFINET RT/GOOSE/SV/EtherCAT (see
+    // parse_policy_text's own protocol-vs-zone-kind validation), never BACnet/IP or CIP I/O, both of
+    // which are ordinary IP traffic that could never reach a VLAN-zone conduit's matching logic.
+    bool has_udp_eligible_conduit() const;
 };
 
 struct PolicyError : std::runtime_error {
