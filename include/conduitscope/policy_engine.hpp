@@ -112,8 +112,17 @@ struct FlowReport {
 struct EthernetFlowReport {
     std::string protocol;         // "profinet"/"goose"/"sv"/"ethercat"
     std::string mac_a, mac_b;     // canonical order (mac_a < mac_b) -- no "source"/"destination"
-                                   // distinction is tracked, since neither MAC decides zone
-                                   // membership here (see vlan_zone below)
+                                   // distinction is tracked for zone-membership purposes, since
+                                   // neither MAC decides VLAN zone membership (see vlan_zone below)
+    // The actual transmitting MAC, fixed from the FIRST packet that created this flow's aggregated
+    // state (never re-derived per packet) -- unlike a bidirectional TCP session, these are
+    // one-directional cyclic publish streams (GOOSE/SV/PROFINET-RT/EtherCAT all work this way), so
+    // "the" source is stable and unambiguous for the whole flow, not something that needs a
+    // handshake to pin down the way FlowReport::client_ip/server_ip does. Purely additive --
+    // doesn't change what mac_a/mac_b already mean (the canonicalized, order-independent pair used
+    // for the flow's identity/key); this is the field Conduit::from_macs (Phase 5, see
+    // docs/design/policy-engine-zoning.md) is actually checked against in PolicyEngine::finish.
+    std::string src_mac;
     bool has_vlan_tag = false;
     uint16_t vlan_id = 0;         // meaningful only when has_vlan_tag
     std::string vlan_zone;        // "unclassified" when has_vlan_tag is false, or no declared VLAN
@@ -445,6 +454,10 @@ private:
     struct EthernetFlowState {
         std::string protocol;
         std::string mac_a, mac_b;
+        // Fixed from the first packet that creates this entry, never updated afterward -- see
+        // EthernetFlowReport::src_mac's own comment for why a one-directional cyclic publish
+        // stream has one stable, unambiguous source unlike a bidirectional TCP session.
+        std::string src_mac;
         bool has_vlan_tag = false;
         uint16_t vlan_id = 0;
         size_t packet_count = 0;

@@ -173,6 +173,40 @@ std::string nearest_function_name(const std::string& given, const std::vector<st
     return "";
 }
 
+// Validates and canonicalizes a policy file's 'from_macs'/'from_mac' entry into the same
+// lowercase, colon-separated form format_mac() (link_layer.cpp) emits for
+// DecodedPacket::src_mac/dst_mac -- so PolicyEngine::finish's later comparison against
+// EthernetFlowReport::src_mac is a plain string equality check, never case-insensitive. Mirrors
+// parse_cidr's own posture toward malformed input: deliberately strict (exactly six
+// two-hex-digit octets separated by colons) rather than a general "accept any reasonable MAC
+// spelling" parser, since this IS user-typed input (unlike resolver.cpp's own private
+// parse_format_mac, which only ever sees this codebase's own decoder-produced strings).
+std::optional<std::string> parse_mac_address(const std::string& text) {
+    if (text.size() != 17) return std::nullopt;
+    std::string out;
+    out.reserve(17);
+    for (size_t i = 0; i < 6; ++i) {
+        size_t pos = i * 3;
+        if (i != 0) {
+            if (text[pos - 1] != ':') return std::nullopt;
+            out += ':';
+        }
+        auto hex_digit = [](char c) -> int {
+            if (c >= '0' && c <= '9') return c - '0';
+            if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+            if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+            return -1;
+        };
+        int h = hex_digit(text[pos]);
+        int l = hex_digit(text[pos + 1]);
+        if (h < 0 || l < 0) return std::nullopt;
+        static const char kHexChars[] = "0123456789abcdef";
+        out += kHexChars[h];
+        out += kHexChars[l];
+    }
+    return out;
+}
+
 }  // namespace
 
 bool cidr_contains(const CidrBlock& block, uint32_t ip) {
@@ -698,6 +732,31 @@ Policy parse_policy_text(const std::string& text, const std::string& source_name
                 }
             }
         }  // absent/empty 'functions'/'function' means "no restriction" -- c.functions stays empty
+
+        if (!is_vlan_conduit && (item.find("from_macs") || item.find("from_mac"))) {
+            fail(source_name, item.line,
+                 "conduit '" + c.name +
+                     "': 'from_macs'/'from_mac' has no meaning on a CIDR- or hostname-zone conduit "
+                     "-- source-MAC restriction only applies to a VLAN-zone conduit, which has no "
+                     "client/server IP pair to restrict by the way a CIDR-/hostname-zone conduit "
+                     "already can (see docs/USER_GUIDE.md's POLICY FILE FORMAT section)");
+        }
+
+        if (const yaml_mini::Node* macs = item.find("from_macs") ? item.find("from_macs") : item.find("from_mac")) {
+            for (const auto& m : as_scalar_list(*macs, source_name, "conduit '" + c.name + "'s 'from_macs'")) {
+                auto parsed = parse_mac_address(m.text);
+                if (!parsed) {
+                    fail(source_name, m.line,
+                         "conduit '" + c.name + "': '" + m.text +
+                             "' is not a valid MAC address (expected six colon-separated hex "
+                             "octets, e.g. '00:0c:29:11:22:33')");
+                }
+                if (std::find(c.from_macs.begin(), c.from_macs.end(), *parsed) == c.from_macs.end()) {
+                    c.from_macs.push_back(*parsed);
+                }
+            }
+        }  // absent/empty 'from_macs'/'from_mac' means "unrestricted" -- c.from_macs stays empty,
+           // see policy_engine.cpp
 
         if (const auto* type_node = item.find("type")) {
             if (type_node->type != NodeType::Scalar) {

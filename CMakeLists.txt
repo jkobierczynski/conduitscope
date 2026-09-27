@@ -9088,6 +9088,37 @@ set_tests_properties(policy_vlan_zone_json_format PROPERTIES
   PASS_REGULAR_EXPRESSION "\"is_vlan_conduit\": true.*\"ethernet_flows\": \\[.*\"has_vlan_tag\": true,\n *\"vlan_id\": 100,\n *\"vlan_zone\": \"ot_vlan\".*\"has_vlan_tag\": false,\n *\"vlan_id\": null,\n *\"vlan_zone\": \"unclassified\"")
 
 # ---------------------------------------------------------------------------------------------
+# 'from_macs'/'from_mac' source-MAC allow-list on a VLAN-zone conduit (Phase 5 of the
+# policy-engine zoning work, see docs/design/policy-engine-zoning.md). Fixtures:
+# tests/policies/vlan_from_mac*.yaml and bad_conduit_from_macs_*.yaml.
+# ---------------------------------------------------------------------------------------------
+
+add_test(NAME policy_vlan_from_macs_allowed_when_source_matches
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_vlan_zones.pcap" --policy "${POLICY_DIR}/vlan_from_macs_allowed.yaml")
+set_tests_properties(policy_vlan_from_macs_allowed_when_source_matches PROPERTIES
+  PASS_REGULAR_EXPRESSION "Ethernet flows evaluated: 6 \\(4 allowed, 0 violation\\(s\\), 2 unclassified\\).*matched conduit \"OT protocols permitted on ot_vlan, from the real relay only\"")
+
+add_test(NAME policy_vlan_from_macs_violation_when_source_differs
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_vlan_zones.pcap" --policy "${POLICY_DIR}/vlan_from_macs_violation.yaml")
+set_tests_properties(policy_vlan_from_macs_violation_when_source_differs PROPERTIES
+  PASS_REGULAR_EXPRESSION "Ethernet flows evaluated: 6 \\(0 allowed, 4 violation\\(s\\), 2 unclassified\\).*source MAC '00:0c:29:11:22:33' observed; conduit 'OT protocols permitted on ot_vlan, from the wrong relay' permits only: 00:0c:29:aa:bb:cc")
+
+add_test(NAME policy_vlan_from_mac_singular_alias_and_dedup_json
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_vlan_zones.pcap" --policy "${POLICY_DIR}/vlan_from_mac_singular_alias_and_dedup.yaml" --format json)
+set_tests_properties(policy_vlan_from_mac_singular_alias_and_dedup_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"from_macs\": \\[\"00:0c:29:11:22:33\", \"00:0c:29:aa:bb:cc\"\\]")
+
+add_test(NAME policy_error_from_macs_on_ip_zone_rejected
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_conduit_from_macs_on_ip_zone.yaml")
+set_tests_properties(policy_error_from_macs_on_ip_zone_rejected PROPERTIES
+  PASS_REGULAR_EXPRESSION "conduit 'c1': 'from_macs'/'from_mac' has no meaning on a CIDR- or hostname-zone conduit")
+
+add_test(NAME policy_error_from_macs_invalid_format_rejected
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_conduit_from_macs_invalid_format.yaml")
+set_tests_properties(policy_error_from_macs_invalid_format_rejected PROPERTIES
+  PASS_REGULAR_EXPRESSION "conduit 'c1': 'not-a-mac-address' is not a valid MAC address \\(expected six colon-separated hex octets, e\\.g\\. '00:0c:29:11:22:33'\\)")
+
+# ---------------------------------------------------------------------------------------------
 # "Match how plants are zoned" (Grok gap #1, docs/DEVELOPMENT.md) -- Purdue-level zone labels,
 # 'idmz'-typed conduits, hostname zones, and the IPv6-flow reason-string fix. See
 # tests/policies/purdue_level.yaml, idmz_conduit.yaml, hostname_zone.yaml and their bad_* siblings.

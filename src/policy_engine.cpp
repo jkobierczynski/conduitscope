@@ -239,6 +239,7 @@ void PolicyEngine::observe(const DecodedPacket& dp) {
             es.protocol = dp.protocol;
             es.mac_a = (dp.src_mac < dp.dst_mac) ? dp.src_mac : dp.dst_mac;
             es.mac_b = (dp.src_mac < dp.dst_mac) ? dp.dst_mac : dp.src_mac;
+            es.src_mac = dp.src_mac;  // fixed here, at first-insert -- never updated by a later packet
             es.has_vlan_tag = dp.has_vlan_tag;
             es.vlan_id = dp.vlan_id;
             ethernet_flow_order_.push_back(key);
@@ -669,6 +670,7 @@ PolicyReport PolicyEngine::finish(const Resolver& resolver) const {
         er.protocol = es.protocol;
         er.mac_a = es.mac_a;
         er.mac_b = es.mac_b;
+        er.src_mac = es.src_mac;
         er.has_vlan_tag = es.has_vlan_tag;
         er.vlan_id = es.vlan_id;
         er.packet_count = es.packet_count;
@@ -694,9 +696,27 @@ PolicyReport PolicyEngine::finish(const Resolver& resolver) const {
                 break;
             }
             if (matched) {
-                er.verdict = FlowVerdict::Allowed;
-                er.matched_conduit = matched->name;
-                exercised_conduits.insert(matched->name);
+                // A matched conduit's own 'from_macs' allow-list (Phase 5, see policy.hpp's
+                // Conduit::from_macs comment) is a further restriction on top of the
+                // protocol/VLAN-zone match already found above: only a source MAC in that list may
+                // publish, mirroring the same "matched, then a further allow-list check can still
+                // turn it into a Violation" shape the TCP-flow 'functions' restriction above uses.
+                // An empty 'from_macs' (the common case) means no restriction at all, exactly the
+                // behavior before this field existed.
+                bool mac_ok = matched->from_macs.empty() ||
+                              std::find(matched->from_macs.begin(), matched->from_macs.end(), er.src_mac) !=
+                                  matched->from_macs.end();
+                if (!mac_ok) {
+                    er.verdict = FlowVerdict::Violation;
+                    std::ostringstream reason;
+                    reason << "source MAC '" << er.src_mac << "' observed; conduit '" << matched->name
+                           << "' permits only: " << join_comma(matched->from_macs);
+                    er.reason = reason.str();
+                } else {
+                    er.verdict = FlowVerdict::Allowed;
+                    er.matched_conduit = matched->name;
+                    exercised_conduits.insert(matched->name);
+                }
             } else {
                 er.verdict = FlowVerdict::Violation;
                 er.reason = "no conduit permits " + er.protocol + " traffic on VLAN zone '" + er.vlan_zone + "'";
@@ -1034,6 +1054,8 @@ void write_ethernet_flow_group_text(std::ostream& out, const std::vector<const E
         if (f.verdict == FlowVerdict::Allowed) {
             out << ", matched conduit \"" << f.matched_conduit << "\"";
         }
+        out << "\n      source: " << f.src_mac;
+        if (auto v = resolver.oui_vendor(f.src_mac)) out << " (" << *v << ")";
         out << "\n";
         if (!f.reason.empty()) {
             out << "      " << f.reason << "\n";
@@ -1459,11 +1481,16 @@ void write_policy_report_json(std::ostream& out, const PolicyReport& report, con
             out << "\"" << json_escape(c.functions[j]) << "\"";
         }
         out << "],\n";
-        // Appended last within this object -- see this function's own "appended last" convention
-        // for the top-level schema, applied here too. null (not omitted) when the conduit doesn't
-        // declare 'type:', since this is a fixed, always-present per-conduit summary field, not an
-        // annotation that can be legitimately absent the way a Resolver lookup miss is.
-        out << "      \"conduit_type\": " << (c.conduit_type.empty() ? "null" : ("\"" + json_escape(c.conduit_type) + "\"")) << "\n";
+        out << "      \"conduit_type\": " << (c.conduit_type.empty() ? "null" : ("\"" + json_escape(c.conduit_type) + "\"")) << ",\n";
+        // The new true-last field within this object (Phase 5, see policy.hpp's Conduit::from_macs
+        // comment) -- empty array (not null) when unrestricted, the same convention 'functions'
+        // above already uses for its own empty case.
+        out << "      \"from_macs\": [";
+        for (size_t j = 0; j < c.from_macs.size(); ++j) {
+            if (j) out << ", ";
+            out << "\"" << json_escape(c.from_macs[j]) << "\"";
+        }
+        out << "]\n";
         out << "    }" << (i + 1 < policy.conduits.size() ? "," : "") << "\n";
     }
     out << "  ],\n";
@@ -1576,6 +1603,14 @@ void write_policy_report_json(std::ostream& out, const PolicyReport& report, con
         // convention as client_zone_purdue_level/server_zone_purdue_level above.
         if (!f.vlan_zone_purdue_level.empty()) {
             out << ",\n      \"vlan_zone_purdue_level\": \"" << json_escape(f.vlan_zone_purdue_level) << "\"";
+        }
+        // The new true-last field (Phase 5, see policy.hpp's Conduit::from_macs comment) -- the
+        // actual transmitting MAC this flow was first observed from, what Conduit::from_macs is
+        // checked against; always present (never omitted), unlike the purdue-level field above,
+        // since every Ethernet flow has a source MAC by construction.
+        out << ",\n      \"src_mac\": \"" << json_escape(f.src_mac) << "\"";
+        if (auto v = resolver.oui_vendor(f.src_mac)) {
+            out << ",\n      \"src_mac_vendor\": \"" << json_escape(*v) << "\"";
         }
         out << "\n";
         out << "    }" << (i + 1 < report.ethernet_flows.size() ? "," : "") << "\n";

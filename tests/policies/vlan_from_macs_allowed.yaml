@@ -1,0 +1,20 @@
+# Exercises the 'from_macs' source-MAC allow-list (Phase 5 of the policy-engine zoning work, see
+# docs/design/policy-engine-zoning.md) on a VLAN-zone conduit. Same ot_vlan zone/conduit shape as
+# vlan_zone_single_segment.yaml, restricted to the one source MAC that actually publishes VLAN-100
+# traffic in tests/sample_vlan_zones.pcap (00:0c:29:11:22:33 -- see
+# build_vlan_zones_sample's own comment in tools/make_sample_pcap.py). Since the observed source
+# matches the allow-list, this must report the same "4 allowed, 0 violation(s), 2 unclassified"
+# shape vlan_zone_single_segment.yaml itself produces -- from_macs restricting to the ACTUAL
+# observed source changes nothing. Compare against vlan_from_macs_violation.yaml, which restricts
+# to a MAC that never publishes.
+zones:
+  ot_vlan:
+    description: "OT segment -- PROFINET RT/GOOSE/SV/EtherCAT, tagged VLAN 100"
+    vlans: [100]
+
+conduits:
+  - name: "OT protocols permitted on ot_vlan, from the real relay only"
+    from: ot_vlan
+    to: ot_vlan
+    protocol: any
+    from_macs: [00:0c:29:11:22:33]

@@ -778,6 +778,7 @@ conduits:
     ports: [<port>, <...>]                  # omit entirely to mean "any port"; IPv4/hostname-zone conduits only
     bidirectional: <true | false>           # default: false; IPv4/hostname-zone conduits only
     functions: [<function/service name | read | write>, <...>]  # optional; see "Function-level restrictions" below; IPv4/hostname-zone conduits only
+    from_macs: [<MAC address>, <...>]       # optional; see "from_macs" below; VLAN-zone conduits only
 ```
 
 **Zones.** Each zone name maps to EXACTLY ONE of: one or more IPv4 CIDR
@@ -977,6 +978,52 @@ singular alias is also accepted for a conduit that only lists one protocol
 field (`networks`, `protocols`, `ports`, `from`, `to`) also accepts a single
 bare value in place of a one-element list, for readability on a short
 policy file.
+
+**`from_macs`: restricting WHO may publish on a VLAN-zone conduit.** A
+VLAN-zone conduit gains one field in exchange for the three it can't use --
+an optional `from_macs` (singular alias `from_mac`, for a one-MAC conduit,
+the same convention every other scalar-or-list conduit field already uses):
+an allow-list of source MAC addresses permitted to publish this conduit's
+protocol(s) on the VLAN. Omitted or empty (the default) means unrestricted,
+exactly the behavior before this field existed -- any source may publish.
+This is the mechanism that actually restricts *who* may publish GOOSE/
+Sampled Values/PROFINET-RT/EtherCAT traffic on a VLAN (e.g. "only the real
+protection relay, not some other device sharing the same VLAN, may source
+GOOSE frames") -- not a publisher/subscriber pairing, since these are
+multicast destinations with no real "subscriber address" to restrict
+against; PROFINET RT/GOOSE/SV/EtherCAT are all one-directional cyclic
+publish streams, so unlike a bidirectional TCP session there's exactly one
+stable, unambiguous "the source" per flow to check. `from_macs` is
+meaningless (and rejected at load time) on a CIDR-/hostname-zone conduit,
+which already has a client/server IP pair to restrict by instead (via
+`from`/`to` and `ports`).
+
+Each entry must be exactly six colon-separated hex octets (e.g.
+`00:0c:29:11:22:33`) -- hex digits are case-insensitive on input, but every
+entry is canonicalized to lowercase for storage/display, the same
+normalize-on-parse convention `functions` already uses for decoder-native
+casing. A `from_macs` restriction is a further check on top of an
+otherwise-matching conduit, not a replacement for the protocol/VLAN-zone
+match: a flow that matches on protocol and VLAN zone but whose observed
+source isn't in the allow-list is a `Violation` naming the observed source
+and the conduit's permitted list, e.g.:
+
+```
+source MAC '00:0c:29:11:22:33' observed; conduit 'OT protocols permitted on ot_vlan, from the wrong relay' permits only: 00:0c:29:aa:bb:cc
+```
+
+**Worked example.** `tests/sample_vlan_zones.pcap` carries four protocols
+(profinet/goose/sv/ethercat) all tagged VLAN 100, all sourced from the same
+MAC, `00:0c:29:11:22:33`. Against
+`tests/policies/vlan_from_macs_allowed.yaml` (restricted to that exact
+source), all four remain Allowed -- restricting to the MAC that's actually
+observed changes nothing. Against
+`tests/policies/vlan_from_macs_violation.yaml` (restricted to
+`00:0c:29:aa:bb:cc`, the destination MAC, which never sources anything in
+this capture), all four instead report the Violation shown above. See
+`EthernetFlowReport::src_mac` (surfaced in both the text report's `source:`
+line and the JSON report's `src_mac` field, described below) for how the
+observed source is determined and reported.
 
 ### UDP flow evaluation (BACnet/IP, CIP I/O)
 
@@ -1464,6 +1511,13 @@ error (see EXIT STATUS):
 - a VLAN-zone conduit giving `ports`, `bidirectional: true`, or
   `functions`/`function` -- none of these three has a meaning on a
   VLAN-zone conduit (docs/DEVELOPMENT.md's ROADMAP item 15 -- see "Conduits" above)
+- a CIDR- or hostname-zone conduit giving `from_macs`/`from_mac` -- source-MAC
+  restriction only has a meaning on a VLAN-zone conduit, which has no
+  client/server IP pair to restrict by the way a CIDR-/hostname-zone conduit
+  already can (see "Conduits" above)
+- a conduit's `from_macs`/`from_mac` entry that isn't a valid MAC address
+  (exactly six colon-separated hex octets, e.g. `00:0c:29:11:22:33`; hex
+  digits are case-insensitive on input, canonicalized to lowercase on output)
 - a conduit port outside `[1, 65535]`
 - a conduit's `bidirectional` value that isn't a recognizable boolean
   (`true`/`false`/`yes`/`no`)
@@ -1595,6 +1649,11 @@ disabled lookup (OUI/`--nn` left at their off-by-default posture, or `--resolve`
 zone this conduit references is a VLAN zone, `false` when every zone is an
 IPv4 zone (a conduit can never mix the two -- see "Conduits" above).
 
+**`from_macs`** (per conduit, Phase 5, see "Conduits" above) -- the source-MAC allow-list, as an
+array of lowercase, colon-separated MAC strings; empty array (never omitted or `null`) when the
+conduit doesn't restrict by source MAC, the same convention `functions` above already uses for its
+own empty case.
+
 **`ethernet_flows[]`** (docs/DEVELOPMENT.md's ROADMAP item 15) -- always present, empty on a
 policy that declares no VLAN zones (see "Addressing scope" below), one
 entry per "L2 flow": PROFINET RT/GOOSE/Sampled Values/EtherCAT traffic
@@ -1614,7 +1673,8 @@ these protocols have neither):
   "packet_count": 1,
   "verdict": "allowed",
   "matched_conduit": "OT protocols permitted on ot_vlan",
-  "reason": null
+  "reason": null,
+  "src_mac": "00:0c:29:11:22:33"
 }
 ```
 
@@ -1631,6 +1691,16 @@ distinguishes the two ("no declared VLAN zone contains VLAN N" vs. "frame
 carries no 802.1Q VLAN tag at all"). `allowed_count`/`violation_count`/
 `unclassified_count` at the top level are the combined totals across both
 `flows[]` and `ethernet_flows[]`.
+
+**`src_mac`** (Phase 5, see "Conduits" above) -- the true-last field in this object, always
+present (never omitted): the actual transmitting MAC this flow was first observed from, fixed from
+the first packet (never re-derived per packet, since these are one-directional cyclic publish
+streams with exactly one stable source, unlike `mac_a`/`mac_b`'s order-independent identity pair
+above). This is what a matched conduit's own `from_macs` allow-list is checked against; a
+`from_macs`-restricted conduit whose match fails on source turns an otherwise-Allowed verdict into
+a `Violation` naming the observed `src_mac` and the conduit's permitted list. `src_mac_vendor`
+follows immediately after it under the same `--mac-vendor` gating as `mac_a_vendor`/`mac_b_vendor`
+above (omitted entirely on a lookup miss or when `--mac-vendor` wasn't given).
 
 Two fields are additive since function-level restrictions were introduced
 and appear on every report regardless of whether any conduit actually uses

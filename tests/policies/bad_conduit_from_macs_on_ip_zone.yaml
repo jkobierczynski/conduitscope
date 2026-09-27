@@ -1,0 +1,15 @@
+# Regression fixture: 'from_macs' given on a CIDR-zone conduit (Phase 5, see
+# docs/design/policy-engine-zoning.md) -- source-MAC restriction only has a meaning on a VLAN-zone
+# conduit; a CIDR-/hostname-zone conduit already has a client/server IP pair to restrict by
+# instead (see policy.hpp's Conduit::from_macs comment).
+zones:
+  hmi_zone:
+    networks: [192.168.1.50/32]
+  plc_zone:
+    networks: [192.168.1.10/32]
+conduits:
+  - name: c1
+    from: hmi_zone
+    to: plc_zone
+    protocol: modbus
+    from_macs: [00:0c:29:11:22:33]

@@ -1,0 +1,21 @@
+# Exercises the 'from_macs' source-MAC allow-list (Phase 5, see
+# docs/design/policy-engine-zoning.md) with a MAC that never actually publishes -- the OTHER end of
+# the wire, 00:0c:29:aa:bb:cc (VLAN-100 traffic's destination, per
+# tests/sample_vlan_zones.pcap, never its source -- see build_vlan_zones_sample's own comment in
+# tools/make_sample_pcap.py), not the real publisher 00:0c:29:11:22:33. Since the observed source
+# is never in the allow-list, all four VLAN-100 flows (profinet/goose/sv/ethercat) must report a
+# Violation naming the observed source MAC and the conduit's permitted list, instead of the
+# Allowed verdict vlan_zone_single_segment.yaml's identical zone/protocol match alone would produce
+# -- from_macs is a further restriction on top of an otherwise-matching conduit, not a replacement
+# for it.
+zones:
+  ot_vlan:
+    description: "OT segment -- PROFINET RT/GOOSE/SV/EtherCAT, tagged VLAN 100"
+    vlans: [100]
+
+conduits:
+  - name: "OT protocols permitted on ot_vlan, from the wrong relay"
+    from: ot_vlan
+    to: ot_vlan
+    protocol: any
+    from_macs: [00:0c:29:aa:bb:cc]

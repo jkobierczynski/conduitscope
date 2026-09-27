@@ -35,8 +35,13 @@
 //     between two zones. `ports`, `bidirectional`, and `functions` are all
 //     rejected on a VLAN-zone conduit -- none of them has a meaning for a
 //     protocol with no TCP/UDP layer at all (ports, functions) or no
-//     client/server session concept (bidirectional). See
-//     PolicyEngine::observe's own comment for how this is evaluated.
+//     client/server session concept (bidirectional). A VLAN-zone conduit
+//     gains its own optional field in exchange, `from_macs:` (Phase 5, see
+//     docs/design/policy-engine-zoning.md) -- an allow-list of source MAC
+//     addresses permitted to publish this conduit's protocol(s) on the
+//     VLAN, meaningless (and rejected) on a CIDR-/hostname-zone conduit,
+//     which already has a client/server IP pair to restrict by instead.
+//     See PolicyEngine::observe's own comment for how this is evaluated.
 //   - Hostnames (`hostnames:`) -- an alternate way to name an IP endpoint, not
 //     a fourth kind of traffic: a hostname-zone conduit behaves exactly like
 //     a CIDR-zone conduit (ports/bidirectional/functions all meaningful,
@@ -252,6 +257,27 @@ struct Conduit {
     // a Response answered a read or a write) -- see functions_group_write_dnp3_with_response.yaml.
     std::vector<std::string> functions;
 
+    // Optional allow-list of source MAC addresses this VLAN-zone conduit permits publishing --
+    // from an optional `from_macs:` key (singular alias `from_mac:`, for a one-MAC conduit,
+    // mirroring every other scalar-or-list conduit field). Empty (the default -- omitted, or
+    // 'from_macs'/'from_mac' not given) means unrestricted, exactly the behavior before this field
+    // existed: any source may publish. Only ever non-empty on a VLAN-zone conduit
+    // (`kind == ZoneKind::Vlan`) -- parse_policy_text rejects it on a CIDR-/hostname-zone conduit,
+    // since those already have a client/server IP pair to restrict by (via `from_zones`/`to_zones`
+    // and `ports`) and no single stable "the source" for a bidirectional TCP session the way a
+    // one-directional cyclic publish stream has one. This is the mechanism that actually restricts
+    // WHO may publish GOOSE/Sampled Values/PROFINET-RT/EtherCAT traffic on a VLAN (e.g. "only the
+    // real protection relay, not some other device on the same VLAN, may source GOOSE frames") --
+    // not a publisher/subscriber pairing, since a multicast destination has no real "subscriber
+    // address" to restrict against; see docs/design/policy-engine-zoning.md's Phase 5. Each entry
+    // is stored canonicalized to the same lowercase, colon-separated form
+    // `format_mac()` (link_layer.cpp) emits for `DecodedPacket::src_mac` (e.g. "00:0c:29:11:22:33"),
+    // regardless of how the policy file capitalized it -- parse_policy_text rejects anything that
+    // isn't exactly six colon-separated hex octets. See `EthernetFlowReport::src_mac` (
+    // policy_engine.hpp) for how the observed source is determined, and `PolicyEngine::finish` for
+    // exactly how it's checked against this list.
+    std::vector<std::string> from_macs;
+
     int line = 0;
 };
 
@@ -360,6 +386,13 @@ struct PolicyError : std::runtime_error {
 //   - a VLAN-zone conduit giving 'ports', 'bidirectional: true', or 'functions'/'function' at all
 //     -- none of them has a meaning for a protocol with no TCP/UDP layer (ports, functions) or no
 //     client/server session (bidirectional); see policy.hpp's Conduit comment
+//   - a CIDR- or hostname-zone conduit giving 'from_macs'/'from_mac' at all -- source-MAC
+//     restriction only has a meaning on a VLAN-zone conduit (Phase 5, see policy.hpp's
+//     Conduit::from_macs comment); a CIDR-/hostname-zone conduit already has a client/server IP
+//     pair to restrict by instead
+//   - a conduit's 'from_macs'/'from_mac' entry that isn't a valid MAC address (exactly six
+//     colon-separated hex octets, e.g. '00:0c:29:11:22:33'; hex digits case-insensitive on input,
+//     canonicalized to lowercase in Conduit::from_macs)
 //   - a conduit's port outside [1, 65535]
 //   - a conduit's 'bidirectional' value that isn't a recognizable boolean
 //   - a conduit's 'functions'/'function' given while 'protocols'/'protocol' resolves to anything

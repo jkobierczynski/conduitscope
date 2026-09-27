@@ -211,20 +211,47 @@ full per-protocol classification tables, two new validation-error entries), `doc
 (ROADMAP item 72), and `include/conduitscope/policy.hpp` (`Conduit::functions` and
 `parse_policy_text` doc comments) all updated in the same increment.
 
-## Phase 5 -- MAC-source restriction on VLAN conduits (GOOSE/SV/etc.)
+## Phase 5 -- MAC-source restriction on VLAN conduits (GOOSE/SV/etc.) -- IMPLEMENTED
 
-- Add optional `from_macs:` (single-or-list, same parsing helper every other scalar-or-list conduit
-  field already uses) to a VLAN-zone conduit only. Empty/omitted (default): unrestricted, identical
-  to today.
-- `EthernetFlowState`/`EthernetFlowReport` gain `src_mac` (the actual transmitting MAC, first-seen
-  -- these are one-directional cyclic publish streams, so "the" source is stable and unambiguous,
-  unlike a bidirectional TCP session) alongside the existing canonicalized, order-independent
-  `mac_a`/`mac_b` pair -- purely additive.
-- `finish()`'s Ethernet-flow matching: when a matched conduit has a non-empty `from_macs`,
-  additionally requires `src_mac` to be in that list, else `Violation` naming the observed vs.
-  permitted source MAC(s). This is the mechanism that actually matches multicast GOOSE/SV/
-  PROFINET-RT/EtherCAT traffic ("only these sources may publish"), not a publisher/subscriber
-  pairing (there is no real subscriber address to restrict against on a multicast destination).
+- Added optional `from_macs:` (singular alias `from_mac:`, parsed by the same `as_scalar_list`
+  helper every other scalar-or-list conduit field already uses) to `Conduit`, valid ONLY on a
+  VLAN-zone conduit (`parse_policy_text` rejects it outright on a CIDR-/hostname-zone conduit,
+  which already has a client/server IP pair to restrict by instead). Empty/omitted (the default):
+  unrestricted, identical to before this field existed. Each entry is validated by a new
+  `parse_mac_address` helper (policy.cpp, alongside `parse_cidr`) -- exactly six colon-separated
+  hex octets, hex digits case-insensitive on input, canonicalized to lowercase on output (the same
+  form `format_mac()` emits for `DecodedPacket::src_mac`) -- and deduplicated the same
+  `add_function_once`-style guard `functions` already established.
+- `EthernetFlowState`/`EthernetFlowReport` gained `src_mac` (the actual transmitting MAC, fixed at
+  first-insert from the first packet that creates the flow's aggregated state, never re-derived per
+  packet -- these are one-directional cyclic publish streams, so "the" source is stable and
+  unambiguous for the whole flow, unlike a bidirectional TCP session) alongside the existing
+  canonicalized, order-independent `mac_a`/`mac_b` pair -- purely additive, doesn't change what
+  `mac_a`/`mac_b` already mean.
+- `finish()`'s Ethernet-flow matching: once a conduit matches on protocol/VLAN-zone (the
+  pre-existing logic, unchanged), a non-empty `from_macs` is now a further check -- mirroring the
+  exact "matched, then a further allow-list check can still turn it into a Violation" shape the
+  TCP-flow `functions` restriction already uses -- requiring `src_mac` to be in that list, else
+  `Violation` naming the observed source and the conduit's permitted list (`"source MAC '...'
+  observed; conduit '...' permits only: ..."`). This is the mechanism that actually matches
+  multicast GOOSE/SV/PROFINET-RT/EtherCAT traffic ("only these sources may publish"), not a
+  publisher/subscriber pairing (there is no real subscriber address to restrict against on a
+  multicast destination).
+- **Reporting**: `src_mac` (and, under `--mac-vendor`, `src_mac_vendor`) appended as the new
+  true-last field on `EthernetFlowReport`'s JSON shape, and rendered as a new `source: <mac>` line
+  in the text report's per-flow entry (`write_ethernet_flow_group_text`), both alongside the
+  existing `mac_a`/`mac_b` fields rather than replacing them. `from_macs` appended as the new
+  true-last field on each conduit's own JSON summary object (empty array, not null, when
+  unrestricted -- the same convention `functions` already established there).
+
+**Verification bar met for Phase 5**: 2028/2028 (default GCC build, 5 new tests, zero regression
+against the prior 2023), covering the compliant case (restricted to the actual observed source),
+the violation case (restricted to a MAC that never publishes), the singular-alias/case-insensitive/
+dedup parse-level JSON shape, and both new validation-error paths (`from_macs` on a non-VLAN
+conduit; a malformed MAC string). `docs/USER_GUIDE.md` (new "`from_macs`: restricting WHO may
+publish on a VLAN-zone conduit" subsection, two new "Validation errors" entries, JSON report schema
+entries for `from_macs`/`src_mac`/`src_mac_vendor`) and `docs/DEVELOPMENT.md` (ROADMAP item 73)
+updated in the same increment.
 
 ## Phase 6 -- Multi-homed assets and jump hosts as first-class objects
 

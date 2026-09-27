@@ -1,0 +1,15 @@
+# Parse-level test (JSON shape only) confirming: the singular alias 'from_mac:' (mirroring every
+# other scalar-or-list conduit field's own singular alias -- 'protocol'/'vlan'/'hostname'/etc.),
+# case-insensitive hex input canonicalized to lowercase on output, and the dedup guard (a
+# differently-cased repeat of the same MAC collapses to one entry). Expected parsed 'from_macs'
+# JSON array: exactly two entries, both lowercase, in first-seen order -- not three, since the
+# uppercase repeat of the first MAC is a duplicate once canonicalized.
+zones:
+  ot_vlan:
+    vlans: [100]
+conduits:
+  - name: "vlan conduit with singular from_mac alias"
+    from: ot_vlan
+    to: ot_vlan
+    protocol: any
+    from_mac: [00:0C:29:11:22:33, 00:0c:29:11:22:33, 00:0C:29:AA:BB:CC]

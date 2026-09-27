@@ -11045,15 +11045,14 @@ it done as its own patch.
     gating reuses the pre-existing `--resolve`/`--hosts` flags).
 
     Phase 3 (BACnet/IP + CIP I/O UDP flow evaluation) shipped next -- see
-    item 71 below, and Phase 4 (operation-level read/write function
+    item 71 below, Phase 4 (operation-level read/write function
     classification, all five function-table protocols) after that -- see
-    item 72 below. Phases 5-6 -- source-MAC restriction on VLAN conduits
-    (GOOSE/SV/PROFINET-RT/EtherCAT publisher restriction via `from_macs:`)
-    and multi-homed assets/jump hosts as a new optional `assets:` section --
-    remain approved and scoped in the original plan but not yet
-    implemented. QinQ zones remain explicitly deferred pending the
-    decoder-layer double-tag unwrap tracked under item 15's continuation,
-    not part of this item.
+    item 72 below, and Phase 5 (source-MAC restriction on VLAN conduits via
+    `from_macs:`) after that -- see item 73 below. Phase 6 -- multi-homed
+    assets/jump hosts as a new optional `assets:` section -- remains
+    approved and scoped in the original plan but not yet implemented. QinQ
+    zones remain explicitly deferred pending the decoder-layer double-tag
+    unwrap tracked under item 15's continuation, not part of this item.
 
 71. **Policy engine: match how plants are zoned -- Grok gap #1, second
     increment (Phase 3: BACnet/IP + CIP I/O UDP flow evaluation).**
@@ -11248,6 +11247,96 @@ it done as its own patch.
     (source-MAC restriction on VLAN conduits, multi-homed assets/jump
     hosts) remain approved and scoped in the original plan but not yet
     implemented.
+
+73. **Policy engine: match how plants are zoned -- Grok gap #1, fourth
+    increment (Phase 5: MAC-source restriction on VLAN conduits).**
+    Continues items 70-72 above. Until now a VLAN-zone conduit's `from`/`to`
+    could restrict WHICH VLAN a protocol was permitted on, but not WHO on
+    that VLAN was allowed to send it -- any device sourcing GOOSE/Sampled
+    Values/PROFINET-RT/EtherCAT traffic on a permitted VLAN was
+    indistinguishable from the real, authorized publisher (e.g. a
+    protection relay). This phase closes that gap with a source-MAC
+    allow-list, the mechanism that actually matches how this multicast,
+    publisher/no-subscriber-address traffic behaves on the wire (not a
+    publisher/subscriber pairing, since there is no real subscriber address
+    on a multicast destination to restrict against).
+
+    **Schema and parsing.** `Conduit` gained an optional `from_macs`
+    (singular alias `from_mac`, parsed by the same `as_scalar_list` helper
+    every other scalar-or-list conduit field already uses), valid ONLY on a
+    VLAN-zone conduit -- `parse_policy_text` rejects it outright on a
+    CIDR-/hostname-zone conduit, which already has a client/server IP pair
+    to restrict by (via `from`/`to` and `ports`) and no single stable "the
+    source" the way a one-directional cyclic publish stream has one for a
+    bidirectional TCP session. A new `parse_mac_address` helper (policy.cpp,
+    alongside `parse_cidr`, deliberately strict rather than a general
+    "accept any reasonable MAC spelling" parser, mirroring `parse_cidr`'s
+    own posture toward malformed input) validates each entry as exactly six
+    colon-separated hex octets, canonicalizing hex digits to lowercase on
+    output regardless of input case, so `PolicyEngine::finish`'s later
+    comparison is a plain string equality check. Entries are deduplicated
+    the same way `functions`' own `add_function_once` guard works. Empty or
+    omitted (the default): unrestricted, identical to before this field
+    existed.
+
+    **Matching.** `EthernetFlowState`/`EthernetFlowReport` gained `src_mac`
+    -- the actual transmitting MAC, fixed at first-insert from the first
+    packet that creates the flow's aggregated state and never re-derived
+    per packet, since PROFINET RT/GOOSE/SV/EtherCAT are all one-directional
+    cyclic publish streams with exactly one stable, unambiguous source per
+    flow (unlike a bidirectional TCP session's client/server pair, which
+    needs a handshake to pin down) -- purely additive alongside the
+    existing canonicalized, order-independent `mac_a`/`mac_b` identity
+    pair, which keeps meaning exactly what it meant before. `finish()`'s
+    Ethernet-flow matching gained one further check, applied only once a
+    conduit already matches on protocol/VLAN-zone (the pre-existing logic,
+    unchanged): a non-empty `from_macs` requires the flow's `src_mac` to be
+    in that list, mirroring the exact "matched, then a further allow-list
+    check can still turn it into a Violation" shape the TCP-flow
+    `functions` restriction (item 71 above, and originally the whole-flow
+    strict-all function check) already established, rather than a new
+    matching primitive. A source outside the allow-list turns what would
+    otherwise be an Allowed verdict into a `Violation` naming the observed
+    source MAC and the conduit's permitted list (`"source MAC '...'
+    observed; conduit '...' permits only: ..."`).
+
+    **Reporting.** `src_mac` (and, under `--mac-vendor`, `src_mac_vendor`)
+    appended as the new true-last field on `EthernetFlowReport`'s JSON
+    shape -- after the pre-existing `vlan_zone_purdue_level` field, the
+    same append-only convention every earlier addition to this schema
+    already followed -- and rendered as a new `source: <mac>` line in the
+    text report's per-flow entry, alongside (never replacing) the existing
+    `mac_a`/`mac_b` header line. Each conduit's own JSON summary object
+    (the `conduits[]` array) gained `from_macs` as its new true-last field,
+    an empty array (not `null`) when unrestricted, the same convention
+    `functions` already established there for its own empty case.
+
+    **Testing and docs.** 5 new CTest cases against the existing
+    `tests/sample_vlan_zones.pcap` (all four VLAN-100 flows share one real
+    source MAC, `00:0c:29:11:22:33`, confirmed via `decode` before writing
+    fixtures): the compliant case (`from_macs` restricted to that real
+    source -- unchanged from the unrestricted result), the violation case
+    (restricted to the destination MAC instead, which never sources
+    anything in this capture -- all four flows flip from Allowed to
+    Violation), a parse-level JSON-shape test covering the singular
+    `from_mac` alias, case-insensitive input, and the dedup guard together,
+    and both new validation-error paths (`from_macs` given on a non-VLAN
+    conduit; a malformed MAC string). Full CTest suite: 2028/2028 (default
+    GCC build, zero regressions against the prior 2023); ASan/UBSan,
+    no-live-capture, and MinGW-w64-cross-compile configs, plus a
+    clean-room extract-rebuild-test, all re-verified before delivery.
+    `docs/USER_GUIDE.md` gained a new "`from_macs`: restricting WHO may
+    publish on a VLAN-zone conduit" subsection (under "Conduits"), two new
+    "Validation errors" entries, and JSON report schema entries for
+    `from_macs`/`src_mac`/`src_mac_vendor`; `include/conduitscope/
+    policy.hpp` (`Conduit::from_macs`, and the VLAN-zone-conduit and
+    validation-errors header comments) and `include/conduitscope/
+    policy_engine.hpp` (`EthernetFlowState::src_mac`/
+    `EthernetFlowReport::src_mac`) doc comments updated to match. No new
+    CLI flags were needed -- the allow-list lives entirely in the policy
+    file's existing `from_macs:` field. Phase 6 (multi-homed assets/jump
+    hosts as a new optional `assets:` section) remains approved and scoped
+    in the original plan but not yet implemented.
 
 ### Protocols not covered at all
 
