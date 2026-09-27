@@ -11681,10 +11681,11 @@ it done as its own patch.
     Jurgen's request was specifically about the `decode` text output's own
     line coloring.
 
-78. **NOT YET STARTED -- `decode`: a `--range`-style option to select
-    which packets get decoded by packet number, not just "the first N"
-    (`-c,--max-packets` already covers that case).** Jurgen's own request,
-    recorded here for a future increment; researched against primary
+78. **IMPLEMENTED -- see item 85 below.** `decode`: a `--range`-style
+    option to select which packets get decoded by packet number, not just
+    "the first N" (`-c,--max-packets` already covers that case).
+    Jurgen's own request, recorded here for a future increment; researched
+    against primary
     sources (Wireshark's own `tshark`/`editcap` man pages) before writing
     this, per this project's own discipline of citing real behavior rather
     than assuming it. Confirmed directly: `tshark` itself has NO built-in
@@ -12473,6 +12474,101 @@ it done as its own patch.
     fuzz harness/corpus work needed: this is a stream-position/state-
     tracking fix in the pcapng reader's own already-fuzzed block-parsing
     logic, not a new byte-parsing path of its own.
+
+85. **`decode --range`: select packets by their real file position, not
+    just "the first N."** Implements item 78 above -- Jurgen's own direct
+    request ("Can you add the --range option for selecting packets of a
+    recorded capture?"), following straight from that item's own research
+    (`editcap`'s selection syntax is the real prior art; neither `tshark`
+    nor `tcpdump` has an equivalent). Item 78 left three design questions
+    open; both of Jurgen's answers (asked via a clarifying question before
+    writing any code) matched this project's own existing precedent
+    rather than introducing a new convention: (1) packet numbers are the
+    packet's REAL position in the file, matching `PacketSource::next()`'s
+    own established "preserve real file position, don't renumber among
+    filter matches" convention (its own code comment already explains why
+    -- cross-referencing against Wireshark stays easy) -- so `--range 10`
+    combined with `-f/--filter` means "the file's 10th packet, if it also
+    matches the filter," never "the 10th packet that matches the filter";
+    (2) `-c/--max-packets` caps the number of packets taken FROM the
+    `--range` selection, matching `-c`'s own existing semantics of
+    counting whatever `source.next()` already returns (i.e. already
+    post-filter, so post-range is the same kind of composition, not a new
+    one). The third open question (where the parser lives) was resolved
+    as a small shared helper, matching the file's own suggestion.
+
+    **New `include/conduitscope/packet_range.hpp` / `src/packet_range.cpp`**
+    (mirroring `time_format.hpp`/`.cpp`'s existing shape and doc-comment
+    style for a small, self-contained parsing module): `PacketRangeSpec`
+    (a `vector<pair<size_t,size_t>>` of inclusive `[start,end]` intervals,
+    kept in the order written and not merged/deduplicated -- `contains()`
+    gives the same answer either way) and `parse_packet_range(text)`,
+    which parses a comma-separated list of individual 1-based packet
+    numbers and/or `start-end` pairs, rejecting an empty string, an empty
+    token (leading/trailing/doubled comma), a non-numeric token, packet
+    number 0 (numbering is 1-based, matching Wireshark/`editcap`), and an
+    `end < start` pair -- returning `std::nullopt` for all of these so the
+    CLI layer can report one clear, specific error rather than silently
+    treating a typo as "select nothing" or "select everything."
+
+    **`src/cli_main.cpp` wiring:** `PacketSource` gains
+    `set_range_filter()`/`range_filter_` (mirroring the existing
+    `set_file_filter()`/`file_filter_` shape exactly); `next()` checks
+    `range_filter_->contains(file_position_)` immediately after
+    incrementing `file_position_` and before the existing `file_filter_`
+    check, so a `--range` miss is skipped the same way a BPF-filter miss
+    already is, with no change to `file_position_`'s own real-file-position
+    semantics. A new `--range` option on `decode` only (long-form only --
+    every short letter `decode` uses is already taken, confirmed in item
+    78's own research), registered right after `-c,--max-packets`, mutually
+    excluded from `-i,--interface` via `->excludes()` in both directions
+    (a still-arriving live capture has no finished, numbered packet list
+    to select #N from) -- checked and rejected at CLI-parse time, before
+    `run_decode` ever opens a packet source. `run_decode` parses and
+    validates a non-empty `--range` value up front (same "fail fast on bad
+    setup" spot as the existing `--time-offset`/`--time-format` checks),
+    reporting a CLI error and a nonzero exit on anything
+    `parse_packet_range` rejects, then wires the parsed spec onto the
+    already-open `PacketSource` via `set_range_filter()`. Scoped to
+    `decode` only for now, matching item 78's own note that `policy
+    validate`/`inventory` sharing the same mechanism is a possible future
+    increment, not this one -- `open_packet_source` itself stays unaware
+    of `--range`, same as it stays unaware of anything else `decode`-
+    specific.
+
+    **Testing.** Manually verified end to end against `tests/sample_arp.pcap`
+    (6 packets) and `tests/sample_bacnet.pcap` (61 packets) before writing
+    any CTest regex, this project's own standing discipline: individual
+    numbers and ranges select exactly the right packets, keeping their
+    real `#<n>` labels (not renumbered); `--range` combined with `-c` caps
+    the selection itself (confirmed `--range 10-30 -c 3` yields packets
+    10-12, not some other pairing); `--range` combined with `-f` is a true
+    intersection (confirmed a `udp` filter against `sample_arp.pcap`, an
+    all-ARP capture, selects nothing regardless of `--range`); `-i`
+    rejects `--range` at CLI-parse time with CLI11's own "excludes"
+    message; malformed values (`"5,,10"`, `"0-5"`, `"10-5"`, non-numeric
+    text) are all rejected with the specific `error: invalid --range
+    value '...'` message before any packet source opens. One thing
+    confirmed to be pre-existing behavior, not a `--range`-specific
+    quirk: `--time-format`'s default `relative` timestamp is "elapsed
+    since the first packet IN THIS DECODE" (already worded that way,
+    docs/USER_GUIDE.md's OUTPUT FORMATS section), i.e. the first packet
+    actually returned by `source.next()` -- so a `--range` (or `-c`, or
+    `-f`) that skips a capture's true first packet re-bases relative time
+    from whatever packet the selection does start at, exactly as `-c`/`-f`
+    already did before `--range` existed; not a new inconsistency `--range`
+    introduces. Seven new CTest cases added covering all of the above:
+    `decode_dash_dash_range_selects_specific_packets_by_real_file_position`,
+    `decode_dash_dash_range_combines_with_dash_c_capping_the_selection`,
+    `decode_dash_dash_range_combines_with_dash_f_filter_as_intersection`,
+    `decode_dash_dash_range_excludes_dash_i_live_capture`,
+    `decode_dash_dash_range_rejects_malformed_value`,
+    `decode_dash_dash_range_rejects_packet_number_zero`,
+    `decode_dash_dash_range_rejects_end_before_start`. Full CTest suite:
+    2115/2115 (default GCC build, up from item 84's 2108 -- 7 new tests,
+    net +7); documented across `docs/USER_GUIDE.md` (a new `--range` row
+    in `decode`'s own option table plus two new EXAMPLES entries) and this
+    ROADMAP entry.
 
 ### Protocols not covered at all
 

@@ -677,9 +677,9 @@ Policy parse_policy_text(const std::string& text, const std::string& source_name
                              "without 'functions' for now");
                 }
                 std::vector<std::string> known = known_function_names_for(proto);
-                auto add_function_once = [&](const std::string& name) {
-                    if (std::find(c.functions.begin(), c.functions.end(), name) == c.functions.end()) {
-                        c.functions.push_back(name);
+                auto add_function_once = [&](const std::string& fn_name) {
+                    if (std::find(c.functions.begin(), c.functions.end(), fn_name) == c.functions.end()) {
+                        c.functions.push_back(fn_name);
                     }
                 };
                 for (const auto& f : func_list) {
@@ -711,7 +711,7 @@ Policy parse_policy_text(const std::string& text, const std::string& source_name
                                      "of " + (is_read ? "read-only" : "write-only") +
                                      ", so it's rejected rather than silently doing that");
                         }
-                        for (const auto& name : group) add_function_once(name);
+                        for (const auto& group_name : group) add_function_once(group_name);
                         continue;
                     }
                     const std::string* canonical = nullptr;

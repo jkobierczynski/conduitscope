@@ -45,6 +45,7 @@
 #include "conduitscope/flow_direction.hpp"
 #include "conduitscope/live_capture.hpp"
 #include "conduitscope/output.hpp"
+#include "conduitscope/packet_range.hpp"
 #include "conduitscope/pcap_reader.hpp"
 #include "conduitscope/pcap_writer.hpp"
 #include "conduitscope/policy.hpp"
@@ -95,6 +96,14 @@ public:
     // here even if this were called for one (and open_packet_source never does).
     void set_file_filter(std::unique_ptr<BpfFilter> filter) { file_filter_ = std::move(filter); }
 
+    // `decode`'s own `--range` (packet_range.hpp) -- only ever set for an offline PcapReader
+    // source, same as set_file_filter above, and for the same reason: there is no live-capture
+    // equivalent of "select packet #N" (the CLI layer excludes --range from -i entirely, so this
+    // is never called for a live source in practice either). Takes the spec by value/move rather
+    // than a pointer, unlike set_file_filter's unique_ptr<BpfFilter> -- PacketRangeSpec has no
+    // virtual interface to own polymorphically, it's just data.
+    void set_range_filter(PacketRangeSpec range) { range_filter_ = std::move(range); }
+
     // For a filtered offline source, skips non-matching packets transparently -- callers see
     // exactly the same "false at EOF" contract either way, they just see fewer packets in
     // between. reader_->info().linktype is re-read fresh per packet (not cached once before the
@@ -114,11 +123,17 @@ public:
     // the old "count what was actually received" numbering (`live_position_`) -- and rightly so:
     // libpcap's own pcap_setfilter() already discards non-matching packets before this process
     // ever sees them, so there is no "original position" to preserve even in principle, the same
-    // reason Wireshark's own capture-filter (-f) numbering renumbers too.
+    // reason Wireshark's own capture-filter (-f) numbering renumbers too. --range's own packet
+    // numbers are checked against this exact same `file_position_`, matching packet_range.hpp's
+    // own documented "real file position, not renumbered among matches" contract -- and checked
+    // BEFORE file_filter_, so a packet excluded by --range never even reaches BPF matching (pure
+    // ordering choice, not an observable difference either way: both must pass for next() to
+    // return true regardless of which is checked first).
     bool next(PcapPacket& out) {
         if (reader_) {
             while (reader_->next(out)) {
                 ++file_position_;
+                if (range_filter_ && !range_filter_->contains(file_position_)) continue;
                 if (!file_filter_ || file_filter_->matches(out, reader_->info().linktype)) {
                     index_ = file_position_;
                     return true;
@@ -146,6 +161,7 @@ private:
     size_t index_ = 0;
     std::unique_ptr<LiveCapture> capture_;
     std::unique_ptr<BpfFilter> file_filter_;
+    std::optional<PacketRangeSpec> range_filter_;
 };
 
 std::atomic<LiveCapture*> g_active_capture{nullptr};
@@ -746,6 +762,7 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
                 const std::vector<DecodeAsRule>& decode_as_rules,
                 size_t flood_threshold,
                 size_t max_packets,
+                const std::string& range_text,
                 const ResourceLimitCliVars& limit_vars,
                 bool stats, bool strict, bool quiet,
                 bool no_color, bool force_color,
@@ -792,6 +809,24 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
         std::cerr << "error: invalid --time-offset value '" << time_offset
                    << "' (expected 'utc', 'local', or a fixed offset like '+02:00'/'-0530')\n";
         return 1;
+    }
+
+    // --range (packet_range.hpp) -- an empty range_text means the option wasn't given at all
+    // (parsed_range stays std::nullopt, and PacketSource::next() below skips nothing extra), not
+    // "select nothing"; a non-empty string that fails to parse is reported here, same "fail fast
+    // on bad setup" posture as the two time-format checks just above, before opening the packet
+    // source. -i already excludes --range at the CLI-option level (see main() below), so
+    // range_text is never non-empty when interface_name is -- no need to check that combination
+    // again here.
+    std::optional<PacketRangeSpec> parsed_range;
+    if (!range_text.empty()) {
+        parsed_range = parse_packet_range(range_text);
+        if (!parsed_range) {
+            std::cerr << "error: invalid --range value '" << range_text
+                       << "' (expected comma-separated 1-based packet numbers and/or inclusive "
+                          "start-end ranges, e.g. '5,10-20,30-40')\n";
+            return 1;
+        }
     }
 
     // -T fields (mirrors tshark's own -T fields/-e) needs at least one -e/--field to have
@@ -946,6 +981,10 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
 
         PacketSource source = open_packet_source(input, interface_name, snaplen, promiscuous, filter,
                                                    duration_seconds, max_packets);
+        // --range is `decode`-only for now (see packet_range.hpp's own file header comment) --
+        // open_packet_source itself stays unaware of it, same as it stays unaware of anything
+        // else that's decode-specific, since it's also shared by `policy validate`/`inventory`.
+        if (parsed_range) source.set_range_filter(std::move(*parsed_range));
         // `color` here (not a literal false) is what makes handle_sigint restore the terminal's
         // default colors on Ctrl+C -- see SigintGuard's own comment.
         SigintGuard sigint_guard(source.live_ptr(), color);
@@ -1685,6 +1724,7 @@ int main(int argc, char** argv) {
                                           // own compile-time default (attack_detect.hpp's
                                           // DEFAULT_FLOOD_THRESHOLD); see run_decode's own use of this.
     size_t decode_max_packets = 0;
+    std::string decode_range;  // empty means "not given" -- see packet_range.hpp
     ResourceLimitCliVars decode_limit_vars;
     bool decode_stats = false, decode_strict = false;
     bool decode_mac_vendor = false, decode_resolve = false, decode_service_names = true;
@@ -2037,6 +2077,16 @@ int main(int argc, char** argv) {
                             "Stop after decoding this many packets (0 = unlimited) -- mirrors "
                             "tshark's own -c")
         ->capture_default_str();
+    auto* decode_range_opt = decode_cmd->add_option(
+        "--range", decode_range,
+        "Select packets by their real position in the capture file: a comma-separated list of "
+        "1-based packet numbers and/or inclusive start-end ranges, e.g. '5,10-20,30-40' -- same "
+        "syntax and numbering as Wireshark's editcap (and this tool's own '#<n>' packet index in "
+        "decode's text output); -r only. Combines with -f/--filter (both must match) and with "
+        "-c/--max-packets (which caps the number of packets taken from the selection, same as it "
+        "always has)");
+    decode_range_opt->excludes(decode_interface_opt);
+    decode_interface_opt->excludes(decode_range_opt);
     add_resource_limit_options(decode_cmd, decode_limit_vars);
     decode_cmd->add_flag("--stats", decode_stats,
                           "Print an aggregate summary (protocol/function-code histogram) instead of "
@@ -2552,7 +2602,7 @@ int main(int argc, char** argv) {
                            decode_dhcpv6_ports,
                            decode_as_rules,
                            decode_flood_threshold,
-                           decode_max_packets, decode_limit_vars, decode_stats, decode_strict,
+                           decode_max_packets, decode_range, decode_limit_vars, decode_stats, decode_strict,
                            quiet, no_color, force_color, decode_mac_vendor, decode_resolve, decode_hosts_file,
                            decode_service_names, decode_services_file, decode_show_vlan,
                            decode_time_format, decode_time_offset, *diag, decode_show_direction,

@@ -138,6 +138,7 @@ add_library(conduitscope_core STATIC
   src/decoder.cpp
   src/resolver.cpp
   src/time_format.cpp
+  src/packet_range.cpp
   src/output.cpp
   src/yaml_mini.cpp
   src/policy.cpp
@@ -12436,6 +12437,73 @@ add_test(NAME dash_a_alias_parses_cleanly_on_offline_read
 set_tests_properties(dash_a_alias_parses_cleanly_on_offline_read PROPERTIES
   PASS_REGULAR_EXPRESSION "#1 .*#6 "
   FAIL_REGULAR_EXPRESSION "error:")
+
+# --range (packet_range.hpp/.cpp; ROADMAP item 78) selects packets by their real 1-based position
+# in the capture file -- a comma-separated list of individual packet numbers and/or inclusive
+# start-end ranges, editcap's own syntax. sample_arp.pcap has exactly 6 packets (#1-#6); "2,4-5"
+# must select #2, #4, #5 and nothing else, and the numbering must be the packet's REAL file
+# position, not a position renumbered among whatever else matched -- proven by the surviving
+# packets keeping their original "#2"/"#4"/"#5" labels rather than being relabeled "#1"/"#2"/"#3".
+add_test(NAME decode_dash_dash_range_selects_specific_packets_by_real_file_position
+  COMMAND conduitscope decode --range "2,4-5" --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_arp.pcap")
+set_tests_properties(decode_dash_dash_range_selects_specific_packets_by_real_file_position PROPERTIES
+  PASS_REGULAR_EXPRESSION "^#2 .*\n#4 .*\n#5 "
+  FAIL_REGULAR_EXPRESSION "#1 |#3 |#6 ")
+
+# -c/--max-packets combines with --range by capping the number of packets taken FROM the range
+# selection, same "whatever source.next() already returns" semantics -c has always had (it doesn't
+# know or care whether a range/filter narrowed things first) -- confirmed with Jurgen as the
+# intended behavior rather than -c counting independently of --range. "3-6" with -c 2 must yield
+# exactly #3 and #4 (the first two packets IN the range), not #3 and #6 or some other pairing.
+add_test(NAME decode_dash_dash_range_combines_with_dash_c_capping_the_selection
+  COMMAND conduitscope decode --range "3-6" -c 2 --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_arp.pcap")
+set_tests_properties(decode_dash_dash_range_combines_with_dash_c_capping_the_selection PROPERTIES
+  PASS_REGULAR_EXPRESSION "^#3 .*\n#4 "
+  FAIL_REGULAR_EXPRESSION "#1 |#2 |#5 |#6 ")
+
+# --range combines with -f/--filter as an intersection -- both must match, neither alone is
+# sufficient. sample_arp.pcap's #1-#6 are all ARP (no UDP payload at all -- see the -f/-c/-a
+# section header comment above), so a "udp" BPF filter combined with any --range must select
+# nothing, proving --range doesn't silently bypass -f (or vice versa). Guarded by
+# CONDUITSCOPE_HAVE_PCAP, same as every other -f/--filter test in this file (up in the big guarded
+# block below) -- BPF *compilation* itself needs libpcap even for an offline (-r) read, not just
+# live capture, so this test would otherwise fail to even parse its own filter on a build with no
+# libpcap/Npcap support at all (e.g. this project's own build_nolive config).
+if(CONDUITSCOPE_HAVE_PCAP)
+add_test(NAME decode_dash_dash_range_combines_with_dash_f_filter_as_intersection
+  COMMAND conduitscope decode --range "1-6" -f "udp" --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_arp.pcap")
+set_tests_properties(decode_dash_dash_range_combines_with_dash_f_filter_as_intersection PROPERTIES
+  PASS_REGULAR_EXPRESSION "^$")
+endif()
+
+# --range presupposes a finished, numbered file to select packet #N from -- it doesn't make sense
+# against a still-arriving live capture (-i), so the two are mutually exclusive at the CLI-option
+# level itself (->excludes(), packet_range.hpp's own file header explains why), same mechanism and
+# same error shape as the pre-existing --color/--no-color mutual exclusion test just above.
+add_test(NAME decode_dash_dash_range_excludes_dash_i_live_capture
+  COMMAND conduitscope decode --range "1-5" -i lo)
+set_tests_properties(decode_dash_dash_range_excludes_dash_i_live_capture PROPERTIES
+  PASS_REGULAR_EXPRESSION "excludes")
+
+# A malformed --range value is reported as a clear, specific error before the packet source even
+# opens (run_decode's own fail-fast-on-bad-setup posture, same as an invalid --time-offset) --
+# never silently treated as "select nothing" or "select everything". Covers three distinct
+# rejection reasons parse_packet_range() documents: a doubled/empty comma-separated token, packet
+# number 0 (numbering is 1-based), and a "start-end" pair with end < start.
+add_test(NAME decode_dash_dash_range_rejects_malformed_value
+  COMMAND conduitscope decode --range "5,,10" --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_arp.pcap")
+set_tests_properties(decode_dash_dash_range_rejects_malformed_value PROPERTIES
+  PASS_REGULAR_EXPRESSION "error: invalid --range value '5,,10'")
+
+add_test(NAME decode_dash_dash_range_rejects_packet_number_zero
+  COMMAND conduitscope decode --range "0-5" --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_arp.pcap")
+set_tests_properties(decode_dash_dash_range_rejects_packet_number_zero PROPERTIES
+  PASS_REGULAR_EXPRESSION "error: invalid --range value '0-5'")
+
+add_test(NAME decode_dash_dash_range_rejects_end_before_start
+  COMMAND conduitscope decode --range "10-5" --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_arp.pcap")
+set_tests_properties(decode_dash_dash_range_rejects_end_before_start PROPERTIES
+  PASS_REGULAR_EXPRESSION "error: invalid --range value '10-5'")
 
 # -x prints a hex+ASCII dump of each packet's raw bytes below its normal decode line -- offset/
 # hex/ASCII columns, 16 bytes per line, matching write_hex_ascii_dump's own layout (output.cpp).
